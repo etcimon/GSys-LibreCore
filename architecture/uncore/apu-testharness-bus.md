@@ -57,9 +57,11 @@ without growing `ariane_soc::NB_PERIPHERALS`.
 - Default testharness `NB_MST = NB_PERIPHERALS`. `+define+G6LC_APU` adds
   idx 10/11/12 and instantiates `g6lc_apu_th_load` (xbar + fwram + DRAM hole
   + hart-1 boot). Testharness only stitches xbar masters. The DMA AXI master
-  is exported from the compositor and tied idle (`DmaReadEn=0` on
-  `ApuHarness`; testharness `dma_rsp_i='0`). FPGA/Altera `NrSlaves` is
-  unchanged. A legal DMA window sits in DRAM lo/hi, never firmware RAM.
+  is exported from the compositor onto xbar `slave[2]` through
+  `g6lc_apu_tdma` under `+define+G6LC_APU` (Enable=1 so AI still
+  forwards; `ApuHarness.DmaReadEn=0` keeps the APU side idle).
+  FPGA/Altera `NrSlaves` stays 3. A legal DMA window sits in DRAM
+  lo/hi, never firmware RAM.
 - `ApuHarness` needs two physical cores and `NrHarts=1`. Control is tagged
   as firmware hart 1 (bring-up). Cluster `PerCoreBoot` is generic; the load
   box supplies per-core PCs. Physical display stays disabled.

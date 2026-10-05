@@ -12,6 +12,63 @@ is the queue, not the design.
 | Host / verify | [`AGENTS-build-platform.md`](AGENTS-build-platform.md) · [`AGENTS-build.md`](AGENTS-build.md) · [`build-platform/AGENTS.md`](build-platform/AGENTS.md) | CLI, residual soaks, probe→verify |
 | Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
 
+## APU stock-runtime reference consolidation (2026-10-01)
+
+Priors: `architecture/uncore/apu-graphics.md`, `corev_apu/apu/AGENTS-impl-interplays.md`
+§15, `g6lc_qemu/linux-dist/ubuntu/README.md`, plan `plan-5ddc97674e5bf9b0.md`.
+
+- [x] Register and explicitly initialize pinned, lazy UE 5.8.3 / Resolute / Noble
+  source references. All gitlinks match; child trees clean; ordinary update skips
+  all three. No Epic Setup, kernel installation, RTL change, commit or push.
+- [x] Separate the custom 6.6 ISA-overlay scaffold from stock Ubuntu acceptance;
+  record source-only UE/kernel requirements and six APU working-tree identities.
+- [ ] Finish per-family historical source/log/oracle inventory. The six-boundary
+  review is not complete log reconciliation or current-topology requalification.
+- [ ] Prove/reject a stock-client hardware backend with no custom runtime. Current
+  MMIO exposes no host-visible aperture in `APU_IMPL_FEATURES`; fixed-scene fetch does
+  not retain programs; testharness DMA joins slave[2] under `G6LC_APU` with
+  `ApuHarness.DmaReadEn=0`. Do not enable FeatureVirgl/Venus to bypass these.
+- [ ] Qualify independent stock Ubuntu 26.04.1 and 24.04 manifests and an unchanged
+  packaged UE SM5 workload; G0/WSI/SM6/CS2/RISC-V CPU support remain separate gates.
+- [ ] **Consolidate the Venus frontend into generated engines** (2026-10-03,
+  `architecture/uncore/apu-vulkan-engine.md`). Review: ≈120 one-command recognizer
+  leaves, `g6lc_apu_bru` 14.6 k lines / ~246 k cells rendering nothing, 564 `*En`
+  fields, three cloned doorbell stacks, no command recording, ~66 min remote synth
+  per four-command fold. Increment 2: lazy `specs/venus-protocol` pin
+  (`9fa07f3cf781`, vk.xml 1.4.334) validated against Mesa 26.0.8 vendored headers;
+  `gen_vn_tables.py` → `g6lc_apu_vn_pkg.sv` + golden vectors; `g6lc_apu_vndec`
+  table decoder; `g6lc_apu_objtab` `tc_sram` object table. Catalog leaves become
+  frozen diagnostic / vector sources; `bru/qbn/qtb` untouched by this lane.
+  **Done 2026-10-03 (uncommitted):** pin validated (only the `70991d4` aliasing cast
+  differs); 120 commands generated; Mesa C differential 480/480 ×2 seeds; remote
+  `tb_g6lc_apu_vndec` 2421/161,074, `tb_g6lc_apu_objtab` 8/2,222; Enable=0 0 cells;
+  vndec 27,108 cells / 2,383 ff (ROM in logic), objtab 1,902 control ff + 2 retained
+  memories; 0 lint. Not in `g6lc_apu_sys`; `FeatureVirgl` illegal. Committed
+  `b2a79ec39`. **Increment 3 (2026-10-04):** `vnrep` reply builder, generated
+  `APU_VN_ACT` classes, `cmdrec` (tc_sram record arena), `cmdexec` (submit FIFO,
+  `{gen,slot}` re-resolution, PIN/UNPIN, work port, fences), `vnfront` sequencer;
+  Mesa C reply-decode differential 248/248 + session 64/64; remote `tb_g6lc_apu_vnfront`
+  104 commands / 1,395 checks with five negative arms; `Enable=0` 0 cells everywhere.
+  Work port is TB-acked — no graphics executed. Committed `0eb05f8a3`. **3b
+  (2026-10-04):** `vgctl` (virtio-gpu capset/ctx/blob/map/submit), `vnpump` (Venus rings,
+  reply stream, ExecuteCommandStreams, seqnos), `vgtop`; generated capset; Mesa
+  differentials 524/524 + 29/29; remote `tb_g6lc_apu_vgtop` 28 / 2,129 with a Mesa-shaped
+  init and ring session. Guest memory/aperture are TB models. Committed `293bdce94`.
+  **4a (2026-10-04):** `shmod` commit scanner, `shwave` 8-lane × vec4 straight-line
+  engine on FPnew, `shcore`; 15 stock glslang compute shaders → 75 vectors; two hard
+  gates (bit-exact vs `spirv_model.py`; ≤ 2 ULP floats / exact ints vs lavapipe, observed
+  max 1 ULP); remote `shmod` 38 / 384,389, `shwave` 75 / 13,457, `shcore` 7 / 1,974;
+  `Enable=0` 0 cells. Standalone; no graphics. **4b (2026-10-05):** §7c control
+  flow/barriers/matrix — `shwave` per-wave reconvergence stack (`CfDepth=8`), `cont_mask`
+  loop parking, `OpPhi` via `prev_blk`, `OpControlBarrier` workgroup rendezvous,
+  round-robin wave scheduler at instruction granularity, matrix ops as lane
+  micro-sequences (MatHelper deferred to 4c); `spirv_model.py` independent-lane
+  semantics; 12 new stock glslang shaders → 135 total shwave vectors, both gates,
+  remote `shmod` 62 / 830,163, `shwave` 135 / 19,133 (ulp1=26 ulp2=0 maxulp=1),
+  `shcore` 9 / 18,533; two 4b compute sessions through `vgtop` (`loopfor_1`,
+  `barrier_reduce_1`, Gate 1 + Gate 2 clean); small synth screens green, default
+  geometry skipped. Then the aperture/sys attach.
+
 ## AI execution-contract continuation (2026-09-28)
 
 The approved operator-first AI program begins with host and RTL contract correctness.
@@ -452,7 +509,145 @@ prerequisite for this work under the existing dual license. No licensing policy 
   adopted** (boot timed out; branchy 3,603,094 met the bound exactly
   but cannot rescue it; mixed r32 boot not run). Ring 16 stays.
   Next: fire on `cnt==MAX && killable` without head class, absolute
-  counter, `[smt-drain]` gate-field diagnostics — plan T10f.
+  counter, `[smt-drain]` gate-field diagnostics — plan T10f. **Done in
+  T10g/N1d (next row).**
+- [x] **Ring-32 wedge root-caused and repaired; drain bound made
+  construction-grade (T10g, N1d, 2026-09-30/10-01)** — three
+  independent defects, each with its own leaf + mutation: (1) the MMU's
+  PTW-error branch is a broadcast (`lsu_exception_ptw_o` new), and the
+  load unit's unconditional SEND_TAG kill dropped a live DTLB-hit load
+  on a foreign walk fault → `phys_pending` masked the commit head for
+  the rest of the boot; own faults still kill + write back exactly as
+  upstream (the first N1d cut that dropped the kill for every live load
+  was rejected — it would have lost a live load's own page fault);
+  (2) younger CSRs took both `csr_buffer` credits ahead of an older
+  unissued CSR → IQ-age order among CSRs (`older_csr_iq`); (3) a load
+  parked in WAIT_PAGE_OFFSET behind a speculative store blocked the
+  head load's PA publication in the same LSU → speculative stall
+  released while the head is `phys_pending` (`COH_OOO` only; LSQ
+  replays true aliases, scenario 36). Bound: head class read from the
+  scoreboard entry (not the masked commit valid), absolute
+  `16·SmtDrainForceCycles` counter immune to commit streams, one force
+  pulse per drain (re-fire livelock found by the new `abs` proof);
+  `force_abs` PMU/observer. HEAD lint regressions from the AI pass fixed
+  on the way (dispatch/cluster decl order, `g6lc_ai_enq_arb` flists,
+  lint-top pins). Local: lint 0e on int2_l3/smt2/smt2_ooo_int/
+  cv64a6_imafdc_sv39; all leaves + mutations green; sby prove/cover/abs/
+  abs_cover PASS, noforce ×2 FAIL. Remote: gates 29w/43w, 29w/2w,
+  10w/31w, defaults equal to T10f; all leaves + mutations green; FP
+  suite 11+11 qualified, `mc_fp_smt` matched; FO4 `sparse_ooo_issue`
+  24.0 / `sparse_issue_lsu` 32.0; smt2 / smt2_ooo_int / int2 anchors
+  byte-identical; **ring-32 int2_l3 24M boot PASS 18,338,328 with
+  `force=0`** (root-cause fixes alone close T10f; the bound never
+  armed); ring-16 re-baselined 18,297,379 (−2; CSR age order is not
+  inert on CSR bursts). Ring 32 still not adopted (+0.22 % vs anchor,
+  kernels 2× pending M3b). Details plan T10g. FP-OoO follow-ups still open:
+  `g6lc64_ooo_server` qualification (COH_FILTERED/4-core/4-issue program),
+  `ai-chain14` FP suite rerun on the clean tree; store_unit `ex_i`
+  provenance audit (unreachable today, recorded).
+- [x] **OoO FP-2 — FP under mixed residency (2026-10-01, plan T11).** Audit
+  found one defect: the FPU took `frm`/`fprec` from the *active* hart while
+  the issuing op could be the co-resident peer (`fpu_wrap` latches DYN `rm`
+  at issue). Fixed with a hart-tagged select in `ex_stage` (`FPU_HART_CTX`,
+  folds away on drained/single-hart packages; FO4 `sparse_ex` 31.5 → 31.5).
+  `mc_fp_mixed` directed (RTZ/RUP, fflags, FS-Off trap isolation) PASS,
+  `G6LC_MUT_FPU_ACTIVE_FRM` caught, FP suite + mixed strict boot on the FP
+  variant of `g6lc64_smt2_ooo_int` pass, int2_l3 ring-16 byte-identical.
+  **Guard lifted**: `G6LC_OOO_FP_QUALIFY` leg and `gen_err_ooo_fp_mh`
+  removed. T5 core-level owner-mutation bar closed as structural (S2 leaf +
+  `g6lc_ooo_fp_owner` proof are the bar). No production package carries
+  mixed FP yet — adopting an FP `smt2_ooo_int` variant is a separate call.
+- [x] **OoO FP-3 — `g6lc64_ooo_server` first look (2026-10-02, plan T12).**
+  The target had not elaborated since `252c698e8` (N1 `[smt-stall]` probe
+  referenced `gen_cache_wt` on an HPDCACHE package) — fixed via
+  `gen_wt_stall_probe`. Its 8-hart boot then tripped `ooo_switch_drained`
+  at the first non-cooperative switch: the HPDCACHE write buffer registers a
+  granted store one cycle after the grant, so `no_st_pending` had a
+  one-cycle hole; covered in `cva6_hpdcache_wrapper` (`st_skid_q`), and
+  `drain_ready_i` now carries the full contract (`ooo_drained` =
+  ROB/IQ/LSQ empty). 8-hart OpenSBI reaches `tohost=0` at the 6 M cap with
+  0 drain aborts and 0 witness hits; int2_l3 ring-16 byte-identical. Still
+  **opt-in/unqualified** — owed: core-level server synthesis, 8-hart
+  `mc_fp_smt`/FP variant, `COH_FILTERED` program, a Linux-class boot on a
+  faster host (the model runs ≈1 k cycles/s; the 200 M I4dp cap is days).
+- [x] **RVFI `instr` capture per issue port (2026-10-02, plan T12 addendum).**
+  The encoding/RVC flag now ride in id_stage's `issue_struct_t` and reach
+  the probe issue-aligned; the 2-slot RVFI shuffle is gone. int2_l3 RVFI
+  byte-identical; server FP s1/s4 `retirementsMatch=true`. `mc_fp_smt`
+  gained `-DMC_FP_SMT_NHARTS=8` (server: pass 7,062 cy, all cores retired);
+  its int2_l3 anchor is **3,831** (was 3,777; FP-3 `ooo_drained` conjunct).
+  Slang CASQ index errors clamped. `ai-chain14` rerun clean-tree 34/36
+  (two pre-existing `cause=2` trap-loops: `mini_ai_dual_issue`,
+  `ai_illegal_when_off` — AI program).
+- [x] **`g6lc64_ooo_server` synthesis smoke has a working policy (T15).**
+  `verify.synthPassesByTarget` → server runs `proc; opt_clean; stat;
+  check -latchonly -assert`: 286,763 cells, `$dlatch`/`$sr` 0, 2,934 s.
+  `opt -fast` is asymptotic (OPT_MERGE) and the full `check -assert` is
+  OOM-killed at 118 GB on the 125 GB builder (bit-level loop TopoSort).
+- [ ] **Server full `check -assert` (loop/driver check) owed on a larger
+  host** (>128 GB) or via a per-block budget; uncore tops already pass
+  `run_cluster_synth_review.py`. Verilator `__Vilp` recipe:
+  `verif/regress/remote/patch_vilp.sh`.
+- [x] **T17 fixed (2026-10-04): fence.i switch-storm fetch livelock.** The
+  first 24 M server boot after T16 froze all eight harts right after
+  OpenSBI's `fence.i`: starve switches killed every in-flight I$ miss and
+  `g6lc_icache` discarded killed refills. It now installs the line unless an
+  I$ flush is pending. `mc_icache_switch_storm` 8-hart arm is the witness;
+  anchors re-baselined (int2_l3 18,357,056 / smt2 12,391,556 /
+  smt2_ooo_int 10,472,823); probes + FP suite retirement-exact and faster.
+  8 M / 24 M server boots `ooocoh-t17-i4dp-*` left on the builder — harvest.
+- [x] **T16 fixed (2026-10-03): HPDCACHE MSHR set count was non-power-of-two
+  (24 load-buffer entries → 12 sets, 4 index bits) — one line in four
+  allocated a non-existent set and refills misrouted.** `mshrSets` rounded
+  to a power of two + `gen_err_mshr_geometry`. l2wr/l3scan/slres pass;
+  COH4 sweep retirement-exact. **The FP-3e "8-hart boot success at 6 M" was
+  a hung boot masked by the cap** (boot hart trapped at 54 k from a
+  corrupted load); on the fixed model the boot hart runs the whole 6 M;
+  24 M run `ooocoh-t16fix-i4dp-24M` left on the builder — harvest it.
+- [x] **`g6lc64_ooo_server`: 4th consumed L1-missing load never retires
+  (T15 finding, fixed in T16).** `mc_l2_write_read`, `mc_l3_stride_scan`,
+  `mc_shared_line_resident` hang (exit 126, no exception) at the fourth
+  consecutive consumed L1-missing load (`0x801000c0` after
+  `0x80100000/40/80`; slres `0x800a0bc0`), reproducible at 800 k and 6 M
+  cycles; dead-load walks pass; same tests pass on int2_l3 (WT). Bisect
+  axes: `HPDCACHE_WT`, `NrLoadBufEntries 24`/`DcacheIdWidth 5`,
+  `HwPrefetchEn`, `NrIssuePorts 4`. Plan T15; logs
+  `remote-runs/ooocoh-coh4-{l2wr,slres}/output/diag800k`, `…l3scan/output/long-pos`.
+- [x] **First `COH_FILTERED` directed evidence on the server (T15):**
+  cross-core `mc_shared_line_coherence` PEER 2/4/6 + `mc_cbo_ewt` + CAS
+  handoff pass with negatives detected. Four of the mc tests have no peer
+  knob and only exercise the SMT sibling on this model.
+- [x] **AI `ai_illegal_when_off` / `mini_ai_dual_issue` trap-loops** were a
+  test-side `mtvec` alignment bug (`trap_vec` after a 2-byte `c.j`); fixed
+  with `.balign 4` — both SUCCESS. `ai-chain14` 36/36 modulo this fix.
+- [ ] **I4dp 200 M "server green" is stale.** The `g6lc64_ooo_server`
+  harness `tohost=0` at the 200 M cap (row below, ≈line 10277) predates
+  `252c698e8`; the model could not be built between then and FP-3. Current
+  evidence is the 6 M-cycle boot in plan T12; re-establish the 200 M run on
+  a faster host or FPGA before citing it.
+- [x] **T13 (2026-10-02): mixed-residency restart PC fixed** — the PC bank
+  now banks the switch-out frontier under `SmtDrainedHandoff=0` (retirements
+  of an inactive hart no longer move it), the frontier is instruction-
+  granular (`gen_switch_tail`), and fetch response ownership is token +
+  requester hart + window. s11 retirement-exact (18,444), mutation
+  `G6LC_MUT_PCBANK_RETIRE_MIXED` detected, frozen set + FP 22/22, mixed
+  strict boot cycle-exact 10,459,588, drained anchors byte-identical.
+  Plan T13. The row below is the finding it closes.
+- [x] **`smt2_ooo_int` stage-11 integer probe fails (pre-existing).**
+  `ooo_fp_ooo.S` STAGE=11 (fence / LCG branch / wrong-path `divu` / 64 adds;
+  the integer twin of stage 10 built to partition a fetch-side
+  committer-window loss) returns `tohost=11` at 22,020 cycles on the
+  production mixed profile `g6lc64_smt2_ooo_int` — identically on the
+  pre-N1d baseline `3ef1a0789` and on HEAD, so neither N1d nor FP-2 — while
+  it passes on `g6lc64_ooo_int2_l3` (drained). **Mechanism located
+  2026-10-02 (plan T12 addendum):** the same ELF passes on a
+  `SmtDrainedHandoff:1` overlay and on single-hart `g6lc64_ooo`; on the
+  mixed path RTL **re-retires** an already-retired 16-byte fetch parcel
+  (`remu @0x80000258` + six `c.addi`) ≈95 times — the restart frontier
+  names a parcel that was delivered. Root cause/fix = plan T13. This is a
+  correctness defect on the production mixed profile (double execution of
+  retired instructions), masked on OpenSBI by its instruction mix.
+  Logs `remote-runs/ooocoh-rvfi-smt2int-*`, `ooocoh-fp2-s11-*`.
 - [ ] Re-cut the legacy `L2TB_MODE=equiv` reference from the current flop engine: the pinned
   pre-RR blob predates the self-invalidation retention/kill repairs, so the lane fails with 531
   unproven cells at 512 B/4-way; it stays red (a whitelist was rejected) until re-cut.
@@ -6676,6 +6871,2972 @@ separates bring-up mechanisms, actual guarantees and deployment blockers.
   errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
   cells**; Enable=1 **317 cells / 123 flip-flops**. The CVA6
   cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The linear sample pair is written as fragment color at
+  `64'h88050000`. `(0,0)` is the clamp texel `32'hA5000000`.
+  `(1,0)` is the half blend `32'hD2008000`. A 64-high scissor or a
+  clear-colored sample writes nothing. The image is not kept. TEX
+  is not the compiler opcode. This is not Mesa `glReadPixels`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `AcwEn` stays 0.
+  Remote 2026-09-30, shared with the readback and the first byte:
+  `tb_g6lc_apu_vgpu_acw` **25 cases / 109 checks / 125 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **21 ports / no
+  cells**; Enable=1 **773 cells / 137 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Those two words are read back. Swapped lanes or a
+  clear-colored lane stop the read. A second store keeps the
+  first. `AcrEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_acw`, errors=0. Fixture synth, no latches:
+  Enable=0 **21 ports / no cells**; Enable=1 **1,093 cells / 137
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(1,0)` is the sample red `8'h00`. A first byte of
+  the clear red `8'h0D`, of blue `8'h1A`, or of `8'hFF` records
+  nothing. A second store keeps the first. `AcxEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_acw`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **538 cells
+  / 155 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] The 64 by 64 ceiling samples are copied into the color
+  window at `64'h88060000`. Source is `64'h88040000`. Beat 0 is
+  the linear sample pair. A clear-colored lane stops the copy.
+  The image is not kept. TEX is not the compiler opcode. This is
+  not Mesa `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `CswEn` stays 0. Remote 2026-09-30, shared with the
+  readback and the first byte: `tb_g6lc_apu_vgpu_csw` **24 cases /
+  105 checks / 2172 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **30 ports / no cells**; Enable=1 **1,805
+  cells / 412 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] Beat 0 of that color window is read back. Swapped lanes or a
+  clear-colored lane stop the read. A second store keeps the
+  first. `CsrEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_csw`, errors=0. Fixture synth, no latches:
+  Enable=0 **21 ports / no cells**; Enable=1 **1,114 cells / 137
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(1,0)` in that window is the sample red `8'h00`.
+  A first byte of the clear red `8'h0D`, of blue `8'h1A`, or of
+  `8'hFF` records nothing. A second store keeps the first.
+  `CsxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_csw`,
+  errors=0. Fixture synth, no latches: Enable=0 **10 ports / no
+  cells**; Enable=1 **482 cells / 123 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The color window is a 64 by 64 rectangle at `64'h88060000`,
+  stride 256, format B8G8R8X8, 16384 bytes. A 640 by 480 request
+  records nothing. The image is not kept. TEX is not the compiler
+  opcode. This is not Mesa `glReadPixels`. `g6lc_apu_vgpu_avail`
+  still rejects `NEXT`. `CrdEn` stays 0. Remote 2026-09-30, shared
+  with the lane and the first byte: `tb_g6lc_apu_vgpu_crd` **22
+  cases / 90 checks / 104 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **12 ports / no cells**; Enable=1 **608 cells
+  / 70 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] `(1,0)` in that rectangle is the half blend `32'hD2008000`.
+  `(0,0)` or the next row records nothing. A clear-colored lane
+  stops the read. A second store keeps the first. `CrlEn` stays
+  0. Same remote run `tb_g6lc_apu_vgpu_crd`, errors=0. Fixture
+  synth, no latches: Enable=0 **22 ports / no cells**; Enable=1
+  **1,019 cells / 134 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] Byte 0 of that `(1,0)` is the sample red `8'h00`. A first
+  byte of the clear red `8'h0D`, of blue `8'h1A`, or of `8'hFF`
+  records nothing. A second store keeps the first. `CrxEn` stays
+  0. Same remote run `tb_g6lc_apu_vgpu_crd`, errors=0. Fixture
+  synth, no latches: Enable=0 **11 ports / no cells**; Enable=1
+  **470 cells / 123 flip-flops**. The CVA6 cookie was not re-run.
+  The TEX opcode still returns `-26`.
+- [x] Byte offset in the sample rectangle is `y * 256 + x * 4`.
+  `(1,0)` is byte 4 at `64'h88060000`. `(63,63)` is byte 16380 at
+  `64'h88063FE0`. x or y of 64 records nothing. The image is not
+  kept. TEX is not the compiler opcode. This is not Mesa
+  `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `CofEn` stays 0. Remote 2026-09-30, shared with the origin and
+  the first byte: `tb_g6lc_apu_vgpu_cof` **21 cases / 89 checks /
+  103 clocks**, errors=0. Fixture synth, no latches: Enable=0
+  **12 ports / no cells**; Enable=1 **395 cells / 20 flip-flops**.
+  The CVA6 cookie was not re-run. The TEX opcode still returns
+  `-26`.
+- [x] `(0,0)` in that rectangle is the clamp texel `32'hA5000000`.
+  `(1,0)` or the next row records nothing. A clear-colored lane
+  stops the read. A second store keeps the first. `CorEn` stays
+  0. Same remote run `tb_g6lc_apu_vgpu_cof`, errors=0. Fixture
+  synth, no latches: Enable=0 **22 ports / no cells**; Enable=1
+  **973 cells / 106 flip-flops**. The CVA6 cookie was not re-run.
+  The TEX opcode still returns `-26`.
+- [x] Byte 0 of that `(0,0)` is the sample red `8'h00`. The word
+  is the clamp texel, not the `(1,0)` blend. A first byte of the
+  clear red `8'h0D`, of blue `8'h1A`, or of `8'hFF` records
+  nothing. A second store keeps the first. `CoxEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_cof`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **492 cells
+  / 75 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] The 64 by 64 sample rectangle is copied into a guest buffer
+  at `64'h88070000`. The command is `TRANSFER_FROM_HOST_3D`
+  (`0x0206`) of resource 4. Source is `64'h88060000`. Beat 0 is
+  the linear sample pair. A clear-colored lane stops the copy.
+  The image is not kept. TEX is not the compiler opcode. This is
+  not Mesa `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `RpwEn` stays 0. Remote 2026-09-30, shared with the
+  readback and the first byte: `tb_g6lc_apu_vgpu_rpw` **24 cases /
+  105 checks / 2172 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **30 ports / no cells**; Enable=1 **1,821
+  cells / 412 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] Beat 0 of that guest buffer is read back. Swapped lanes or a
+  clear-colored lane stop the read. A second store keeps the
+  first. `RprEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_rpw`, errors=0. Fixture synth, no latches:
+  Enable=0 **21 ports / no cells**; Enable=1 **1,119 cells / 137
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(1,0)` in that guest buffer is the sample red
+  `8'h00`. A first byte of the clear red `8'h0D`, of blue
+  `8'h1A`, or of `8'hFF` records nothing. A second store keeps
+  the first. `RpxEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_rpw`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **482 cells / 123
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The guest buffer is a 64 by 64 rectangle at `64'h88070000`,
+  stride 256, format B8G8R8X8, 16384 bytes. The command is
+  `TRANSFER_FROM_HOST_3D`. A 640 by 480 request records nothing.
+  The image is not kept. TEX is not the compiler opcode. This is
+  not Mesa `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `GrdEn` stays 0. Remote 2026-09-30, shared with the
+  lane and the first byte: `tb_g6lc_apu_vgpu_grd` **23 cases / 93
+  checks / 108 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **710 cells / 102
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] `(1,0)` in that guest rectangle is the half blend
+  `32'hD2008000`. `(0,0)` or the next row records nothing. A
+  clear-colored lane stops the read. A second store keeps the
+  first. `GrlEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_grd`, errors=0. Fixture synth, no latches:
+  Enable=0 **22 ports / no cells**; Enable=1 **1,054 cells / 134
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of that `(1,0)` is the sample red `8'h00`. A first
+  byte of the clear red `8'h0D`, of blue `8'h1A`, or of `8'hFF`
+  records nothing. A second store keeps the first. `GrxEn` stays
+  0. Same remote run `tb_g6lc_apu_vgpu_grd`, errors=0. Fixture
+  synth, no latches: Enable=0 **11 ports / no cells**; Enable=1
+  **505 cells / 123 flip-flops**. The CVA6 cookie was not re-run.
+  The TEX opcode still returns `-26`.
+- [x] Byte offset in the guest rectangle is `y * 256 + x * 4`.
+  `(1,0)` is byte 4 at `64'h88070000`. `(63,63)` is byte 16380 at
+  `64'h88073FE0`. x or y of 64 records nothing. The image is not
+  kept. TEX is not the compiler opcode. This is not Mesa
+  `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `RofEn` stays 0. Remote 2026-09-30, shared with the origin and
+  the first byte: `tb_g6lc_apu_vgpu_rof` **21 cases / 89 checks /
+  103 clocks**, errors=0. Fixture synth, no latches: Enable=0
+  **12 ports / no cells**; Enable=1 **429 cells / 20 flip-flops**.
+  The CVA6 cookie was not re-run. The TEX opcode still returns
+  `-26`.
+- [x] `(0,0)` in that guest rectangle is the clamp texel
+  `32'hA5000000`. `(1,0)` or the next row records nothing. A
+  clear-colored lane stops the read. A second store keeps the
+  first. `RorEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_rof`, errors=0. Fixture synth, no latches:
+  Enable=0 **22 ports / no cells**; Enable=1 **1,008 cells / 106
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of that `(0,0)` is the sample red `8'h00`. The word
+  is the clamp texel, not the `(1,0)` blend. A first byte of the
+  clear red `8'h0D`, of blue `8'h1A`, or of `8'hFF` records
+  nothing. A second store keeps the first. `RoxEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_rof`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **529 cells
+  / 75 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] The `TRANSFER_FROM_HOST_3D` box is `(0,0,64,64)` of resource
+  4 at 640 by 480. A 640 by 480 box records nothing. A 64 by 64
+  resource records nothing. A shifted origin records nothing. The
+  image is not kept. TEX is not the compiler opcode. This is not
+  Mesa `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `TfbEn` stays 0. Remote 2026-09-30, shared with the command and
+  the packed stride: `tb_g6lc_apu_vgpu_tfb` **20 cases / 79 checks
+  / 117 clocks**, errors=0. Fixture synth, no latches: Enable=0
+  **18 ports / no cells**; Enable=1 **658 cells / 6 flip-flops**.
+  The CVA6 cookie was not re-run. The TEX opcode still returns
+  `-26`.
+- [x] That command is three guest beats at `64'h88080000`. Beat 0
+  is the header and the box origin. Beat 1 is the 64 by 64 size
+  and resource 4. Beat 2 is packed stride 256. A 640-wide box,
+  resource 1, or a failed beat stops the read. A second store
+  keeps the first. This is not `g6lc_apu_vgpu_rdb`. `TfrEn` stays
+  0. Same remote run `tb_g6lc_apu_vgpu_tfb`, errors=0. Fixture
+  synth, no latches: Enable=0 **20 ports / no cells**; Enable=1
+  **1,368 cells / 331 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] Packed stride of that box is 256. The 640-wide resource row
+  is 2560 and records nothing. A second store keeps the first.
+  `TfxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_tfb`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **513 cells / 101 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `RESOURCE_ATTACH_BACKING` of the 64 by 64 readpixels buffer
+  at `64'h88070000`. Length is 16384. A 1,228,800-byte attach
+  records nothing. This is not `g6lc_apu_vgpu_back`. The image is
+  not kept. TEX is not the compiler opcode. This is not Mesa
+  `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `RabEn` stays 0. Remote 2026-09-30, shared with the command and
+  the crop length: `tb_g6lc_apu_vgpu_rab` **19 cases / 76 checks /
+  107 clocks**, errors=0. Fixture synth, no latches: Enable=0
+  **14 ports / no cells**; Enable=1 **551 cells / 6 flip-flops**.
+  The CVA6 cookie was not re-run. The TEX opcode still returns
+  `-26`.
+- [x] That command is two guest beats at `64'h88090000`. Beat 0 is
+  the header, resource 4, and one entry. Beat 1 is address
+  `64'h88070000` and length 16384. A 1,228,800-byte length,
+  resource 1, or a failed beat stops the read. A second store
+  keeps the first. This is not `g6lc_apu_vgpu_back`. `RarEn` stays
+  0. Same remote run `tb_g6lc_apu_vgpu_rab`, errors=0. Fixture
+  synth, no latches: Enable=0 **20 ports / no cells**; Enable=1
+  **1,358 cells / 331 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] Length of that backing is 16384. The 640 by 480 backing is
+  1,228,800 and records nothing. A second store keeps the first.
+  `RaxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_rab`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **517 cells / 133 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The 24-byte virtio `OK_NODATA` of the 64 by 64
+  `TRANSFER_FROM_HOST_3D` is at `64'h880A0000`. The fence is 2.
+  The scene fence `64'h1122334455667788` is a different word.
+  This is not `g6lc_apu_vgpu_gcw`. The image is not kept. TEX is
+  not the compiler opcode. This is not Mesa `glReadPixels`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `RfwEn` stays 0.
+  Remote 2026-09-30, shared with the echo and the fence:
+  `tb_g6lc_apu_vgpu_rfw` **15 cases / 68 checks / 88 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **20 ports / no
+  cells**; Enable=1 **447 cells / 9 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] That response is read back. A missing fence bit or the scene
+  fence records nothing. A second store keeps the first. This is
+  not `g6lc_apu_vgpu_gcr`. `RfrEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_rfw`, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **1,506 cells / 330
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Fence 2 of that transfer. The scene fence records nothing.
+  A second store keeps the first. `RfxEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_rfw`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **649 cells / 133
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] The used element of the 64 by 64 `TRANSFER_FROM_HOST_3D` is
+  at `64'h880B0000` and `used.idx` 2 is at `64'h880B0008`.
+  Descriptor id is 1. The scene element at `64'h8800E400` and
+  index 1 are different words. This is not `g6lc_apu_vgpu_gcw`.
+  The image is not kept. TEX is not the compiler opcode. This is
+  not Mesa `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `TuwEn` stays 0. Remote 2026-09-30, shared with the echo
+  and the index: `tb_g6lc_apu_vgpu_tuw` **16 cases / 72 checks /
+  105 clocks**, errors=0. Fixture synth, no latches: Enable=0
+  **19 ports / no cells**; Enable=1 **475 cells / 11 flip-flops**.
+  The CVA6 cookie was not re-run. The TEX opcode still returns
+  `-26`.
+- [x] That used element and index are read back. Descriptor 0 or
+  index 1 records nothing. A second store keeps the first. This
+  is not `g6lc_apu_vgpu_gcr`. `TurEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_tuw`, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **909 cells / 171
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] `used.idx` of that transfer is 2. The scene index 1 records
+  nothing. A second store keeps the first. `TuxEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_tuw`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **307 cells
+  / 53 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] The used-buffer interrupt reason `32'h1` of the 64 by 64
+  transfer is at `64'h880C0000`. The pin rises after `used.idx` 2
+  and falls on ack. A cancel before the beat writes nothing. This
+  is not `g6lc_apu_vgpu_viw` and not PLIC source 9. The image is
+  not kept. TEX is not the compiler opcode. This is not Mesa
+  `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `TiwEn` stays 0. Remote 2026-09-30, shared with the echo and the
+  keep: `tb_g6lc_apu_vgpu_tiw` **15 cases / 70 checks / 86
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **22
+  ports / no cells**; Enable=1 **349 cells / 8 flip-flops**. The
+  CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That reason is read back. A zero word or the scene status
+  address `64'h8800E500` records nothing. A second store keeps
+  the first. This is not `g6lc_apu_vgpu_vir`. `TirEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_tiw`, errors=0. Fixture synth,
+  no latches: Enable=0 **20 ports / no cells**; Enable=1 **617
+  cells / 88 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] Reason `32'h1` at `64'h880C0000` with `used.idx` 2. The
+  scene status word records nothing. A second store keeps the
+  first. `TixEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_tiw`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **401 cells / 117 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The guest ack of that interrupt is at `64'h880C0010`. The
+  low word must be `32'h1`. Remain 0 is then written over
+  `64'h880C0000`. A config ack `32'h2` or a zero ack writes
+  nothing. A cancel before the read writes nothing. The scene ack
+  at `64'h8800E510` records nothing. This is not
+  `g6lc_apu_vgpu_vaw` and not PLIC source 9. The image is not
+  kept. TEX is not the compiler opcode. This is not Mesa
+  `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `TawEn` stays 0. Remote 2026-09-30, shared with the echo and the
+  keep: `tb_g6lc_apu_vgpu_taw` **23 cases / 101 checks / 130
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **29
+  ports / no cells**; Enable=1 **489 cells / 7 flip-flops**. The
+  CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That ack and the cleared status are read back. The scene ack
+  records nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_var`. `TarEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_taw`, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **834 cells / 155
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Ack `32'h1` and remain 0 with `used.idx` 2. The scene ack
+  and index 1 record nothing. A second store keeps the first.
+  `TaxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_taw`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **567 cells / 85 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] The guest descriptor chain of the 64 by 64 transfer is at
+  `64'h880D0000`. Attach is `64'h88090000` with `NEXT` to the
+  transfer at `64'h88080000`. The 24-byte `WRITE` is at
+  `64'h880A0000`. Avail index 2 at `64'h880D0100` names
+  descriptor 0. `INDIRECT`, a broken link, and the scene index
+  record nothing. This is not `g6lc_apu_vgpu_avail` and not
+  `g6lc_apu_vgpu_nxc`. The image is not kept. TEX is not the
+  compiler opcode. This is not Mesa `glReadPixels`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `TxcEn` stays 0.
+  Remote 2026-09-30, shared with the keep and the check:
+  `tb_g6lc_apu_vgpu_txc` **23 cases / 98 checks / 144 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **21 ports / no
+  cells**; Enable=1 **2045 cells / 523 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That chain is kept. The scene table at `64'h8800E100`
+  records nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_nxk`. `TxkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_txc`, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **848 cells / 261
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Avail index 2 with attach at `64'h88090000`. The scene
+  index 1 records nothing. A second store keeps the first.
+  `TxxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_txc`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **471 cells / 101 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] TEX of sampler view 5 on resource 1. `(0,0)` is the clamp
+  texel `32'hA5000000`. `(1,0)` is the half blend `32'hD2008000`.
+  `refused` is 0. The clear word records nothing. This is later
+  than `g6lc_apu_vgpu_den`. The compiler TEX opcode still returns
+  `-26`. This is not `g6lc_apu_tgsi_compile`. The sample was read
+  from the backing. The image is not kept. This is not Mesa
+  `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `FtxEn` stays 0. Remote 2026-09-30, shared with the keep and the
+  check: `tb_g6lc_apu_vgpu_ftx` **19 cases / 79 checks / 83
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **10
+  ports / no cells**; Enable=1 **523 cells / 133 flip-flops**. The
+  CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That TEX result is kept. `refused` stays 0. The clear word
+  records nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_den`. `FtrEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_ftx`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **531 cells / 133
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] `refused` 0 and origin `32'hA5000000`, not the clear word.
+  A refused sample records nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_dnr`. `FtkEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_ftx`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **406 cells
+  / 69 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Beat 0 of the 64 by 64 scene window at `64'h88020000` is the
+  TEX pair. `(0,0)` is `32'hA5000000`. `(1,0)` is `32'hD2008000`.
+  The other 511 beats are not stored. A 64-high scissor records
+  nothing. This is later than `g6lc_apu_vgpu_gpw`. This is not
+  `g6lc_apu_vgpu_acw`. The compiler TEX opcode still returns
+  `-26`. The image is not kept. This is not Mesa `glReadPixels`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `OcwEn` stays 0.
+  Remote 2026-09-30, shared with the echo and the keep:
+  `tb_g6lc_apu_vgpu_ocw` **23 cases / 103 checks / 120 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **558 cells / 137 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That beat is read back. Both words are the TEX pair, not
+  the clear color. The fragment-color beat at `64'h88050000`
+  records nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_acr`. `OcrEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_ocw`, errors=0. Fixture synth, no latches:
+  Enable=0 **21 ports / no cells**; Enable=1 **1121 cells / 137
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(0,0)` is sample red `8'h00`. The word is not
+  the clear color. A clear red, a blue, or a high first byte
+  records nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_acx`. `OcxEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_ocw`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **548 cells / 155
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Beat 0 of the guest readback at `64'h88030000` is the TEX
+  pair. `(0,0)` is `32'hA5000000`. `(1,0)` is `32'hD2008000`. The
+  other 511 beats are not stored. A 64-high scissor records
+  nothing. This is later than `g6lc_apu_vgpu_gbw`. This is not
+  `g6lc_apu_vgpu_ocw`. The compiler TEX opcode still returns
+  `-26`. The image is not kept. This is not Mesa `glReadPixels`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `PbwEn` stays 0.
+  Remote 2026-09-30, shared with the echo and the keep:
+  `tb_g6lc_apu_vgpu_pbw` **23 cases / 103 checks / 120 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **595 cells / 137 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That readback beat is read. Both words are the TEX pair,
+  not the clear color. The scene window at `64'h88020000` is a
+  different address. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_ocr`. `PbrEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_pbw`, errors=0. Fixture synth, no latches:
+  Enable=0 **21 ports / no cells**; Enable=1 **1117 cells / 137
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(0,0)` in the guest readback is sample red
+  `8'h00`. The word is not the clear color. A clear red, a blue,
+  or a high first byte records nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_ocx`. `PbxEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_pbw`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **546 cells
+  / 155 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] A posted walker accepts `NEXT` for the 64 by 64 transfer
+  chain. Avail index 2 names descriptor 0. Device index starts at
+  1. The scene chain at avail index 1 records nothing. This is
+  not `g6lc_apu_vgpu_avail` and not `g6lc_apu_vgpu_chn`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. This does not read
+  guest memory. The compiler TEX opcode still returns `-26`. The
+  image is not kept. This is not Mesa `glReadPixels`. `TnwEn`
+  stays 0. Remote 2026-09-30, shared with the keep and the check:
+  `tb_g6lc_apu_vgpu_tnw` **29 cases / 105 checks / 123 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **12 ports / no
+  cells**; Enable=1 **1406 cells / 634 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That walked chain is kept. Avail index 2. The scene index 1
+  records nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_chn`. `TnkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_tnw`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **580 cells / 245
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Avail index 2 with `NEXT` accepted. The scene index 1 and
+  the scene table at `64'h8800E100` record nothing. A second
+  store keeps the first. This is not `g6lc_apu_vgpu_avail`.
+  `TnxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_tnw`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **312 cells / 101 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Guest QueueNotify of control queue 0 is at `64'h880D0200`.
+  The word is `32'd0`. The cursor queue records nothing. A
+  cancel before the beat writes nothing. This is later than
+  `g6lc_apu_vgpu_tnx`. This is not `g6lc_apu_virtio_mmio`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `QntEn` stays 0. Remote 2026-09-30,
+  shared with the echo and the keep: `tb_g6lc_apu_vgpu_qnt`
+  **17 cases / 77 checks / 93 clocks**, errors=0. Fixture synth,
+  no latches: Enable=0 **19 ports / no cells**; Enable=1 **310
+  cells / 9 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] That notify word is read. The low word is control queue 0.
+  The cursor queue and the avail ring at `64'h880D0100` record
+  nothing. A second store keeps the first. This is not
+  `g6lc_apu_virtio_mmio`. `QnrEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qnt`, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **473 cells / 73
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Control queue 0 after avail index 2. The cursor queue and
+  the scene index 1 record nothing. A second store keeps the
+  first. This is not `g6lc_apu_virtio_mmio`. `QnxEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_qnt`, errors=0. Fixture
+  synth, no latches: Enable=0 **11 ports / no cells**; Enable=1
+  **293 cells / 53 flip-flops**. The CVA6 cookie was not re-run.
+  The TEX opcode still returns `-26`.
+- [x] Guest `virtq_avail.idx` after that QueueNotify is 2 at
+  `64'h880D0100`. The scene ring at `64'h8800E200` and index 1
+  record nothing. This is later than `g6lc_apu_vgpu_qnx`. This
+  is not `g6lc_apu_vgpu_avail` and not `g6lc_apu_vgpu_txc`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `QavEn` stays 0. Remote 2026-09-30,
+  shared with the keep and the check: `tb_g6lc_apu_vgpu_qav`
+  **17 cases / 74 checks / 87 clocks**, errors=0. Fixture synth,
+  no latches: Enable=0 **19 ports / no cells**; Enable=1 **357
+  cells / 41 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] That avail index is kept. Index 2. The scene ring and
+  index 1 record nothing. A second store keeps the first. This
+  is not `g6lc_apu_vgpu_txc`. `QakEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qav`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **271 cells / 85
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Avail index 2 at `64'h880D0100`. The scene index 1 and the
+  scene ring record nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_avail`. `QaxEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_qav`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **249 cells
+  / 21 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Guest `virtq_avail.ring[0]` after that index names
+  descriptor 0 at `64'h880D0104`. The scene ring at
+  `64'h8800E204` and a nonzero id record nothing. This is later
+  than `g6lc_apu_vgpu_qax`. This is not `g6lc_apu_vgpu_avail`
+  and not `g6lc_apu_vgpu_txc`. `g6lc_apu_vgpu_avail` still
+  rejects `NEXT`. The compiler TEX opcode still returns `-26`.
+  The image is not kept. This is not Mesa `glReadPixels`.
+  `QrgEn` stays 0. Remote 2026-09-30, shared with the keep and
+  the check: `tb_g6lc_apu_vgpu_qrg` **16 cases / 70 checks / 83
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **19
+  ports / no cells**; Enable=1 **342 cells / 41 flip-flops**.
+  The CVA6 cookie was not re-run. The TEX opcode still returns
+  `-26`.
+- [x] That ring name is kept. Descriptor 0. The scene ring and a
+  nonzero id record nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_txc`. `QrkEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_qrg`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **247 cells
+  / 85 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Ring[0] names descriptor 0 at `64'h880D0104`. The scene
+  ring and a nonzero id record nothing. A second store keeps
+  the first. This is not `g6lc_apu_vgpu_avail`. `QrxEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_qrg`, errors=0. Fixture
+  synth, no latches: Enable=0 **11 ports / no cells**; Enable=1
+  **224 cells / 21 flip-flops**. The CVA6 cookie was not re-run.
+  The TEX opcode still returns `-26`.
+- [x] Guest `virtq_desc` 0 after that ring name is the attach at
+  `64'h88090000`, length 64, `NEXT` to 1. The scene table at
+  `64'h8800E100`, `INDIRECT`, and a jump record nothing. This is
+  later than `g6lc_apu_vgpu_qrx`. This is not
+  `g6lc_apu_vgpu_avail` and not `g6lc_apu_vgpu_txc`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `QhdEn` stays 0. Remote 2026-09-30,
+  shared with the keep and the check: `tb_g6lc_apu_vgpu_qhd`
+  **17 cases / 74 checks / 90 clocks**, errors=0. Fixture synth,
+  no latches: Enable=0 **19 ports / no cells**; Enable=1 **671
+  cells / 233 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] That attach descriptor is kept. Address `64'h88090000`,
+  length 64, `NEXT` to 1. The scene table and a jump record
+  nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_txc`. `QhkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qhd`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **309 cells / 117
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Descriptor 0 is the attach at `64'h88090000` with `NEXT`
+  to 1. The scene table and a jump record nothing. A second
+  store keeps the first. This is not `g6lc_apu_vgpu_avail`.
+  `QhxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_qhd`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **438 cells / 85 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Guest `virtq_desc` 1 after that `NEXT` is the transfer at
+  `64'h88080000`, length 96, `NEXT` to 2. The attach descriptor,
+  the scene table, `INDIRECT`, and `WRITE` record nothing. This
+  is later than `g6lc_apu_vgpu_qhx`. This is not
+  `g6lc_apu_vgpu_avail` and not `g6lc_apu_vgpu_txc`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `QfdEn` stays 0. Remote 2026-09-30,
+  shared with the keep and the check: `tb_g6lc_apu_vgpu_qfd`
+  **17 cases / 74 checks / 90 clocks**, errors=0. Fixture synth,
+  no latches: Enable=0 **19 ports / no cells**; Enable=1 **763
+  cells / 233 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] That transfer descriptor is kept. Address `64'h88080000`,
+  length 96, `NEXT` to 2. The attach descriptor and a jump
+  record nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_txc`. `QfkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qfd`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **298 cells / 117
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Descriptor 1 is the transfer at `64'h88080000` with `NEXT`
+  to 2. The attach descriptor and a jump record nothing. A
+  second store keeps the first. This is not
+  `g6lc_apu_vgpu_avail`. `QfxEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qfd`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **428 cells / 85
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Guest `virtq_desc` 2 after that `NEXT` is the `WRITE` of
+  the 24-byte response at `64'h880A0000`. The transfer
+  descriptor, the scene table, `NEXT`, and `INDIRECT` record
+  nothing. This is later than `g6lc_apu_vgpu_qfx`. This is not
+  `g6lc_apu_vgpu_avail` and not `g6lc_apu_vgpu_txc`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `QwdEn` stays 0. Remote 2026-09-30,
+  shared with the keep and the check: `tb_g6lc_apu_vgpu_qwd`
+  **17 cases / 74 checks / 90 clocks**, errors=0. Fixture synth,
+  no latches: Enable=0 **19 ports / no cells**; Enable=1 **739
+  cells / 201 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] That `WRITE` descriptor is kept. Address `64'h880A0000`,
+  length 24. The transfer descriptor and `NEXT` record nothing.
+  A second store keeps the first. This is not
+  `g6lc_apu_vgpu_txc`. `QwkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qwd`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **263 cells / 101
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Descriptor 2 is the `WRITE` of the 24-byte response at
+  `64'h880A0000`. The transfer descriptor and `NEXT` record
+  nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_avail`. `QwxEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qwd`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **420 cells / 69
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Guest `OK_NODATA` after that named `WRITE` is at
+  `64'h880A0000` with fence 2. The scene response at
+  `64'h8800A800` records nothing. This is later than
+  `g6lc_apu_vgpu_qwx`. This is not `g6lc_apu_vgpu_rfw`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `QokEn` stays 0. Remote 2026-09-30,
+  shared with the echo and the keep: `tb_g6lc_apu_vgpu_qok`
+  **17 cases / 76 checks / 96 clocks**, errors=0. Fixture synth,
+  no latches: Enable=0 **18 ports / no cells**; Enable=1 **307
+  cells / 9 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] That response is read. Fence 2. The scene fence and a
+  missing fence bit record nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_rfr`. `QolEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_qok`, errors=0. Fixture synth, no
+  latches: Enable=0 **20 ports / no cells**; Enable=1 **1437
+  cells / 265 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] Fence 2 `OK_NODATA` at `64'h880A0000`. The scene fence and
+  the scene response record nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_rfx`. `QoxEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_qok`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **687 cells
+  / 101 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Guest used element after that `OK_NODATA` is id 1 at
+  `64'h880B0000` and `used.idx` 2 at `64'h880B0008`. The scene
+  id 0 and index 1 record nothing. This is later than
+  `g6lc_apu_vgpu_qox`. This is not `g6lc_apu_vgpu_tuw`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `QuwEn` stays 0. Remote 2026-09-30,
+  shared with the echo and the keep: `tb_g6lc_apu_vgpu_quw`
+  **18 cases / 80 checks / 113 clocks**, errors=0. Fixture synth,
+  no latches: Enable=0 **18 ports / no cells**; Enable=1 **383
+  cells / 11 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] That used element and index are read. Descriptor 0 or
+  index 1 records nothing. A second store keeps the first. This
+  is not `g6lc_apu_vgpu_tur`. `QulEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_quw`, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **909 cells / 171
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] `used.idx` 2 and id 1. The scene index 1 and id 0 record
+  nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_tux`. `QuxEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_quw`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **374 cells / 53
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Guest used-buffer interrupt after `used.idx` 2 is reason
+  `32'h1` at `64'h880C0000`. The pin rises after that index and
+  falls on ack. A cancel before the beat writes nothing. This is
+  later than `g6lc_apu_vgpu_qux`. This is not `g6lc_apu_vgpu_tiw`,
+  not `g6lc_apu_vgpu_viw`, and not PLIC source 9. The image is not
+  kept. TEX is not the compiler opcode. This is not Mesa
+  `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `QiwEn` stays 0. Remote 2026-09-30, shared with the echo and the
+  keep: `tb_g6lc_apu_vgpu_qiw` **15 cases / 70 checks / 86
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **22
+  ports / no cells**; Enable=1 **349 cells / 8 flip-flops**. The
+  CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That reason is read back. A zero word or the scene status
+  address `64'h8800E500` records nothing. A second store keeps
+  the first. This is not `g6lc_apu_vgpu_tir`. `QirEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_qiw`, errors=0. Fixture synth,
+  no latches: Enable=0 **20 ports / no cells**; Enable=1 **617
+  cells / 88 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] Reason `32'h1` at `64'h880C0000` with `used.idx` 2 after the
+  guest used ring. The scene status word records nothing. A
+  second store keeps the first. This is not `g6lc_apu_vgpu_tix`.
+  `QixEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_qiw`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **401 cells / 117 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Guest ack of that interrupt is at `64'h880C0010`. The low
+  word must be `32'h1`. Remain 0 is then written over
+  `64'h880C0000`. A config ack `32'h2` or a zero ack writes
+  nothing. A cancel before the read writes nothing. The scene ack
+  at `64'h8800E510` records nothing. This is later than
+  `g6lc_apu_vgpu_qix`. This is not `g6lc_apu_vgpu_taw`, not
+  `g6lc_apu_vgpu_vaw`, and not PLIC source 9. The image is not
+  kept. TEX is not the compiler opcode. This is not Mesa
+  `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `QawEn` stays 0. Remote 2026-09-30, shared with the echo and the
+  keep: `tb_g6lc_apu_vgpu_qaw` **23 cases / 101 checks / 130
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **29
+  ports / no cells**; Enable=1 **489 cells / 7 flip-flops**. The
+  CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That ack and the cleared status are read back. The scene ack
+  records nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_tar`. `QarEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qaw`, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **834 cells / 155
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Ack `32'h1` and remain 0 with `used.idx` 2 after the guest
+  used ring. The scene ack and index 1 record nothing. A second
+  store keeps the first. This is not `g6lc_apu_vgpu_tax`.
+  `QayEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_qaw`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **567 cells / 85 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Scene `virtq_avail.idx` after the guest-rung transfer ack is
+  1 at `64'h8800E200`. The transfer ring at `64'h880D0100` and
+  index 2 record nothing. This is later than `g6lc_apu_vgpu_qay`.
+  This is not `g6lc_apu_vgpu_qav` and not `g6lc_apu_vgpu_avail`.
+  The image is not kept. TEX is not the compiler opcode. This is
+  not Mesa `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. `QsvEn` stays 0. Remote 2026-09-30, shared with the keep
+  and the check: `tb_g6lc_apu_vgpu_qsv` **17 cases / 74 checks /
+  87 clocks**, errors=0. Fixture synth, no latches: Enable=0 **20
+  ports / no cells**; Enable=1 **442 cells / 41 flip-flops**. The
+  CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That scene index is kept. The transfer ring records nothing.
+  A second store keeps the first. This is not `g6lc_apu_vgpu_qak`.
+  `QskEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_qsv`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **290 cells / 85 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] Scene avail index 1 at `64'h8800E200`. The transfer index 2
+  records nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_qax`. `QsxEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qsv`, errors=0. Fixture synth, no latches:
+  Enable=0 **12 ports / no cells**; Enable=1 **268 cells / 21
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Scene `virtq_avail.ring[0]` after avail index 1 names
+  descriptor 0 at `64'h8800E204`. The transfer ring at
+  `64'h880D0104` and a nonzero id record nothing. This is later
+  than `g6lc_apu_vgpu_qsx`. This is not `g6lc_apu_vgpu_qrg` and
+  not `g6lc_apu_vgpu_avail`. The image is not kept. TEX is not the
+  compiler opcode. This is not Mesa `glReadPixels`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `QsrEn` stays 0.
+  Remote 2026-09-30, shared with the keep and the check:
+  `tb_g6lc_apu_vgpu_qsr` **16 cases / 70 checks / 83 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **341 cells / 41 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] That scene ring name is kept. The transfer ring records
+  nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_qrk`. `QslEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qsr`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **247 cells / 85
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Descriptor 0 at `64'h8800E204`. The transfer ring records
+  nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_qrx`. `QsyEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qsr`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **224 cells / 21
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Scene `virtq_desc` 0 after ring[0] names it is the 32-byte
+  header at `64'h8800A000` with `NEXT` to 1. The transfer table at
+  `64'h880D0000`, `INDIRECT`, and a jump record nothing. This is
+  later than `g6lc_apu_vgpu_qsy`. This is not `g6lc_apu_vgpu_qhd`
+  and not `g6lc_apu_vgpu_avail`. The image is not kept. TEX is not
+  the compiler opcode. This is not Mesa `glReadPixels`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `QsdEn` stays 0.
+  Remote 2026-09-30, shared with the keep and the check:
+  `tb_g6lc_apu_vgpu_qsd` **17 cases / 74 checks / 90 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **670 cells / 233 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That scene header descriptor is kept. The transfer table
+  records nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_qhk`. `QseEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qsd`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **306 cells / 117
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Header at `64'h8800A000` with `NEXT` to 1. The transfer
+  table records nothing. A second store keeps the first. This is
+  not `g6lc_apu_vgpu_qhx`. `QsfEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qsd`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **434 cells / 85
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Scene `virtq_desc` 1 after `NEXT` from desc 0 is the
+  960-byte execbuffer at `64'h8800B000` with `NEXT` to 2. The
+  header descriptor, the transfer table, `INDIRECT`, and `WRITE`
+  record nothing. This is later than `g6lc_apu_vgpu_qsf`. This is
+  not `g6lc_apu_vgpu_qfd` and not `g6lc_apu_vgpu_avail`. The image
+  is not kept. TEX is not the compiler opcode. This is not Mesa
+  `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `QedEn` stays 0. Remote 2026-09-30, shared with the keep and the
+  check: `tb_g6lc_apu_vgpu_qed` **17 cases / 74 checks / 90
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **19
+  ports / no cells**; Enable=1 **791 cells / 233 flip-flops**. The
+  CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That scene execbuffer descriptor is kept. The header
+  descriptor records nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_qfk`. `QekEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_qed`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **306 cells / 117
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Execbuffer at `64'h8800B000` with `NEXT` to 2. The header
+  descriptor records nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_qfx`. `QexEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_qed`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **431 cells / 85
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Scene `virtq_desc` 2 after `NEXT` from desc 1 is the `WRITE`
+  of the 24-byte response at `64'h8800A800`. The execbuffer
+  descriptor, the transfer table, `NEXT`, and `INDIRECT` record
+  nothing. This is later than `g6lc_apu_vgpu_qex`. This is not
+  `g6lc_apu_vgpu_qwd` and not `g6lc_apu_vgpu_avail`. The image is
+  not kept. TEX is not the compiler opcode. This is not Mesa
+  `glReadPixels`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  `QrsEn` stays 0. Remote 2026-09-30, shared with the keep and the
+  check: `tb_g6lc_apu_vgpu_qrs` **17 cases / 74 checks / 90
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **19
+  ports / no cells**; Enable=1 **761 cells / 201 flip-flops**. The
+  CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That scene `WRITE` descriptor is kept. The execbuffer
+  descriptor records nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_qwk`. `QrtEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_qrs`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **279 cells / 101
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] `WRITE` of the 24-byte scene response at `64'h8800A800`. The
+  execbuffer descriptor records nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_qwx`. `QruEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_qrs`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **431 cells
+  / 69 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Scene `OK_NODATA` after that named `WRITE` is at
+  `64'h8800A800` with the scene fence. The transfer response at
+  `64'h880A0000` and fence 2 record nothing. This is later than
+  `g6lc_apu_vgpu_qru`. This is not `g6lc_apu_vgpu_qok` and not
+  `g6lc_apu_vgpu_gcw`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `QsoEn` stays 0.
+  Remote 2026-09-30, shared with the echo and the keep:
+  `tb_g6lc_apu_vgpu_qso` **17 cases / 76 checks / 96 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **18 ports / no
+  cells**; Enable=1 **312 cells / 9 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] That scene response is read. Scene fence. Fence 2 and a
+  missing fence bit record nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_qol`. `QspEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_qso`, errors=0. Fixture synth, no
+  latches: Enable=0 **20 ports / no cells**; Enable=1 **1438
+  cells / 265 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] Scene fence `OK_NODATA` at `64'h8800A800`. Fence 2 and the
+  transfer response record nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_qox`. `QsqEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_qso`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **688 cells
+  / 101 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Scene used element after that `OK_NODATA` is id 0 at
+  `64'h8800E400` and `used.idx` 1 at `64'h8800E480`. The transfer
+  id 1 and index 2 record nothing. This is later than
+  `g6lc_apu_vgpu_qsq`. This is not `g6lc_apu_vgpu_quw` and not
+  `g6lc_apu_vgpu_gcw`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `QsuEn` stays 0.
+  Remote 2026-09-30, shared with the echo and the keep:
+  `tb_g6lc_apu_vgpu_qsu` **18 cases / 80 checks / 113 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **18 ports / no
+  cells**; Enable=1 **383 cells / 11 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That scene used element is read. Id 1 or index 2 records
+  nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_qul`. `QstEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qsu`, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **936 cells / 171
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] `used.idx` 1 and id 0. The transfer index 2 and id 1 record
+  nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_qux`. `QszEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qsu`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **398 cells / 53
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Scene used-buffer interrupt after that index is reason
+  `32'h1` at `64'h8800E500`. The transfer status at
+  `64'h880C0000` records nothing. This is later than
+  `g6lc_apu_vgpu_qsz`. This is not `g6lc_apu_vgpu_qiw` and not
+  `g6lc_apu_vgpu_viw`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `QsiEn` stays 0.
+  Remote 2026-09-30, shared with the echo and the keep:
+  `tb_g6lc_apu_vgpu_qsi` **15 cases / 70 checks / 86 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **22 ports / no
+  cells**; Enable=1 **349 cells / 8 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] That scene interrupt reason is read. A zero reason records
+  nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_qir`. `QsnEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_qsi`, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **617 cells / 88
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Reason `32'h1` with `used.idx` 1 at `64'h8800E500`. Index 2
+  and the transfer status record nothing. A second store keeps
+  the first. This is not `g6lc_apu_vgpu_qix`. `QsmEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_qsi`, errors=0. Fixture
+  synth, no latches: Enable=0 **11 ports / no cells**; Enable=1
+  **401 cells / 117 flip-flops**. The CVA6 cookie was not re-run.
+  The TEX opcode still returns `-26`.
+- [x] Scene guest ack of that interrupt is `32'h1` at
+  `64'h8800E510`. Remain 0 is then written over `64'h8800E500`.
+  The transfer ack at `64'h880C0010` records nothing. This is
+  later than `g6lc_apu_vgpu_qsm`. This is not `g6lc_apu_vgpu_qaw`
+  and not `g6lc_apu_vgpu_vaw`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `QgaEn` stays 0.
+  Remote 2026-09-30, shared with the echo and the keep:
+  `tb_g6lc_apu_vgpu_qga` **23 cases / 101 checks / 130 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **29 ports / no
+  cells**; Enable=1 **489 cells / 7 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] That scene ack and remain are read. A second store keeps
+  the first. This is not `g6lc_apu_vgpu_qar`. `QgkEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_qga`, errors=0. Fixture
+  synth, no latches: Enable=0 **20 ports / no cells**; Enable=1
+  **837 cells / 155 flip-flops**. The CVA6 cookie was not re-run.
+  The TEX opcode still returns `-26`.
+- [x] Ack `32'h1` and remain 0 with `used.idx` 1. Index 2 and the
+  transfer ack record nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_qay`. `QgxEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_qga`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **570 cells / 85
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Posted `NEXT` walker of the scene submit chain. Avail index
+  1 names descriptor 0. The transfer chain at avail index 2
+  records nothing. This is later than `g6lc_apu_vgpu_qgx`. This
+  is not `g6lc_apu_vgpu_tnw`, not `g6lc_apu_vgpu_chn`, and not
+  `g6lc_apu_vgpu_avail`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. This does not read guest memory. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `SnwEn` stays 0. Remote 2026-09-30, shared
+  with the keep and the check: `tb_g6lc_apu_vgpu_snw` **29 cases
+  / 105 checks / 123 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **12 ports / no cells**; Enable=1 **1,305
+  cells / 633 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] That walked scene chain is kept. Avail index 1. The
+  transfer index 2 records nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_tnk`. `SnkEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_snw`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **579 cells
+  / 245 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Avail index 1 with `NEXT` accepted. Index 2 and the
+  transfer table record nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_tnx`. `SnxEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_snw`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **309 cells / 101
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Scene QueueNotify of control queue 0 at `64'h8800E220` after
+  that walker. The cursor queue and the transfer doorbell at
+  `64'h880D0200` record nothing. This is later than
+  `g6lc_apu_vgpu_snx`. This is not `g6lc_apu_vgpu_qnt` and not
+  `g6lc_apu_virtio_mmio`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `SntEn` stays 0.
+  Remote 2026-09-30, shared with the echo and the keep:
+  `tb_g6lc_apu_vgpu_snt` **17 cases / 77 checks / 93 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **313 cells / 9 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] That scene notify word is read. Control queue 0. The cursor
+  queue records nothing. A second store keeps the first. This is
+  not `g6lc_apu_vgpu_qnr`. `SnrEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_snt`, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **492 cells / 73
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Control queue 0 after avail index 1. Index 2 and the cursor
+  queue record nothing. A second store keeps the first. This is
+  not `g6lc_apu_vgpu_qnx`. `SnyEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_snt`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **294 cells / 53
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Scene `virtq_avail.idx` after that QueueNotify is 1 at
+  `64'h8800E200`. The transfer ring at `64'h880D0100` and index 2
+  record nothing. This is later than `g6lc_apu_vgpu_sny`. This
+  is not `g6lc_apu_vgpu_qav`, not `g6lc_apu_vgpu_qsv`, and not
+  `g6lc_apu_vgpu_avail`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `SavEn` stays 0.
+  Remote 2026-09-30, shared with the keep and the check:
+  `tb_g6lc_apu_vgpu_sav` **17 cases / 74 checks / 87 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **357 cells / 41 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] That scene avail index is kept. Index 1. The transfer ring
+  and index 2 record nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_qak`. `SakEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_sav`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **271 cells
+  / 85 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Avail index 1 at `64'h8800E200` after that notify. Index 2
+  and the transfer ring record nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_qax`. `SaxEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_sav`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **249 cells
+  / 21 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Scene `virtq_avail.ring[0]` after that index names
+  descriptor 0 at `64'h8800E204`. The transfer ring at
+  `64'h880D0104` and a nonzero id record nothing. This is later
+  than `g6lc_apu_vgpu_sax`. This is not `g6lc_apu_vgpu_qrg`, not
+  `g6lc_apu_vgpu_qsr`, and not `g6lc_apu_vgpu_avail`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `SrgEn` stays 0. Remote 2026-09-30, shared
+  with the keep and the check: `tb_g6lc_apu_vgpu_srg` **16 cases
+  / 70 checks / 83 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **19 ports / no cells**; Enable=1 **341 cells / 41
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] That scene ring name is kept. Descriptor 0. The transfer
+  ring and a nonzero id record nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_qrk`. `SrkEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_srg`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **247 cells
+  / 85 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Descriptor 0 at `64'h8800E204` after that notify. The
+  transfer ring and a nonzero id record nothing. A second store
+  keeps the first. This is not `g6lc_apu_vgpu_qrx`. `SrxEn` stays
+  0. Same remote run `tb_g6lc_apu_vgpu_srg`, errors=0. Fixture
+  synth, no latches: Enable=0 **11 ports / no cells**; Enable=1
+  **224 cells / 21 flip-flops**. The CVA6 cookie was not re-run.
+  The TEX opcode still returns `-26`.
+- [x] Scene `virtq_desc` 0 after that ring name is the header at
+  `64'h8800A000`, length 32, `NEXT` to 1. The transfer table at
+  `64'h880D0000`, `INDIRECT`, and a jump record nothing. This is
+  later than `g6lc_apu_vgpu_srx`. This is not `g6lc_apu_vgpu_qhd`,
+  not `g6lc_apu_vgpu_qsd`, and not `g6lc_apu_vgpu_avail`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `ShdEn` stays 0. Remote 2026-09-30, shared
+  with the keep and the check: `tb_g6lc_apu_vgpu_shd` **17 cases
+  / 74 checks / 90 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **19 ports / no cells**; Enable=1 **670 cells / 233
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] That scene header descriptor is kept. Header at
+  `64'h8800A000`, length 32, `NEXT` to 1. The transfer table and
+  a jump record nothing. A second store keeps the first. This is
+  not `g6lc_apu_vgpu_qhk`. `ShkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_shd`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **306 cells / 117
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Header at `64'h8800A000` with `NEXT` to 1. The transfer
+  table and a jump record nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_qhx`. `ShxEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_shd`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **434 cells
+  / 85 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Scene `virtq_desc` 1 after that `NEXT` is the execbuffer at
+  `64'h8800B000`, length 960, `NEXT` to 2. The header descriptor,
+  the transfer table, `INDIRECT`, and `WRITE` record nothing.
+  This is later than `g6lc_apu_vgpu_shx`. This is not
+  `g6lc_apu_vgpu_qfd`, not `g6lc_apu_vgpu_qed`, and not
+  `g6lc_apu_vgpu_avail`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `SfdEn` stays 0.
+  Remote 2026-09-30, shared with the keep and the check:
+  `tb_g6lc_apu_vgpu_sfd` **17 cases / 74 checks / 90 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **770 cells / 233 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That scene execbuffer descriptor is kept. Execbuffer at
+  `64'h8800B000`, length 960, `NEXT` to 2. The header descriptor
+  and a jump record nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_qfk`. `SfkEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_sfd`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **306 cells
+  / 117 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Execbuffer at `64'h8800B000` with `NEXT` to 2. The header
+  descriptor and a jump record nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_qfx`. `SfxEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_sfd`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **431 cells
+  / 85 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Scene `virtq_desc` 2 after that `NEXT` is the `WRITE` of
+  the 24-byte response at `64'h8800A800`. The execbuffer
+  descriptor, the transfer table, `NEXT`, and `INDIRECT` record
+  nothing. This is later than `g6lc_apu_vgpu_sfx`. This is not
+  `g6lc_apu_vgpu_qwd`, not `g6lc_apu_vgpu_qrs`, and not
+  `g6lc_apu_vgpu_avail`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `SwdEn` stays 0.
+  Remote 2026-09-30, shared with the keep and the check:
+  `tb_g6lc_apu_vgpu_swd` **17 cases / 74 checks / 90 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **751 cells / 201 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That scene `WRITE` descriptor is kept. Response at
+  `64'h8800A800`, length 24. The execbuffer descriptor and
+  `NEXT` record nothing. A second store keeps the first. This is
+  not `g6lc_apu_vgpu_qwk`. `SwkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_swd`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **272 cells / 101
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] `WRITE` of the 24-byte response at `64'h8800A800`. The
+  execbuffer descriptor and `NEXT` record nothing. A second
+  store keeps the first. This is not `g6lc_apu_vgpu_qwx`.
+  `SwxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_swd`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **424 cells / 69 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Scene `OK_NODATA` after that named `WRITE` at
+  `64'h8800A800`. The fence is the scene fence, not fence 2. The
+  transfer response records nothing. This is later than
+  `g6lc_apu_vgpu_swx`. This is not `g6lc_apu_vgpu_qok`, not
+  `g6lc_apu_vgpu_qso`, and not `g6lc_apu_vgpu_gcw`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `SokEn` stays 0. Remote 2026-09-30, shared
+  with the keep and the check: `tb_g6lc_apu_vgpu_sok` **17 cases
+  / 76 checks / 96 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **18 ports / no cells**; Enable=1 **312 cells / 9
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] That scene `OK_NODATA` is read. The fence is the scene
+  fence, not fence 2. A missing fence bit records nothing. A
+  second store keeps the first. This is not `g6lc_apu_vgpu_qol`.
+  `SolEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_sok`,
+  errors=0. Fixture synth, no latches: Enable=0 **20 ports / no
+  cells**; Enable=1 **1,438 cells / 265 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Scene fence `OK_NODATA` at `64'h8800A800`. Fence 2 and a
+  missing fence bit record nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_qox`. `SoxEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_sok`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **688 cells
+  / 101 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Scene used element after that `OK_NODATA` is id 0 at
+  `64'h8800E400` and `used.idx` 1 at `64'h8800E480`. The transfer
+  id 1 / index 2 records nothing. This is later than
+  `g6lc_apu_vgpu_sox`. This is not `g6lc_apu_vgpu_quw`, not
+  `g6lc_apu_vgpu_qsu`, and not `g6lc_apu_vgpu_gcw`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `SlwEn` stays 0. Remote 2026-09-30, shared
+  with the keep and the check: `tb_g6lc_apu_vgpu_slw` **18 cases
+  / 80 checks / 113 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **18 ports / no cells**; Enable=1 **383 cells
+  / 11 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] That scene used element and index are read. Descriptor 1
+  or index 2 records nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_qul`. `SllEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_slw`, errors=0. Fixture synth, no
+  latches: Enable=0 **20 ports / no cells**; Enable=1 **936 cells
+  / 171 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] `used.idx` 1 after that scene `OK_NODATA`. The transfer
+  index 2 and descriptor id 1 record nothing. A second store
+  keeps the first. This is not `g6lc_apu_vgpu_qux`. `SlxEn` stays
+  0. Same remote run `tb_g6lc_apu_vgpu_slw`, errors=0. Fixture
+  synth, no latches: Enable=0 **11 ports / no cells**; Enable=1
+  **398 cells / 53 flip-flops**. The CVA6 cookie was not re-run.
+  The TEX opcode still returns `-26`.
+- [x] Scene used-buffer interrupt after that used ring after
+  QueueNotify is reason `32'h1` at `64'h8800E500`. The transfer
+  status at `64'h880C0000` records nothing. This is later than
+  `g6lc_apu_vgpu_slx`. This is not `g6lc_apu_vgpu_qsi`, not
+  `g6lc_apu_vgpu_qiw`, and not `g6lc_apu_vgpu_viw`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `SiwEn` stays 0. Remote 2026-09-30, shared
+  with the echo and the keep: `tb_g6lc_apu_vgpu_siw` **15 cases
+  / 70 checks / 86 clocks**, errors=0. Fixture synth, no
+  latches: Enable=0 **22 ports / no cells**; Enable=1 **349 cells
+  / 8 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] That scene interrupt reason is read after QueueNotify. A
+  zero reason records nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_qsn`. `SirEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_siw`, errors=0. Fixture synth, no
+  latches: Enable=0 **20 ports / no cells**; Enable=1 **617 cells
+  / 88 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Reason `32'h1` with `used.idx` 1 at `64'h8800E500` after
+  QueueNotify. Index 2 and the transfer status record nothing.
+  A second store keeps the first. This is not
+  `g6lc_apu_vgpu_qsm`. `SixEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_siw`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **401 cells / 117
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Scene guest ack of that interrupt after QueueNotify is
+  `32'h1` at `64'h8800E510`. Remain 0 is then written over
+  `64'h8800E500`. The transfer ack at `64'h880C0010` records
+  nothing. This is later than `g6lc_apu_vgpu_six`. This is not
+  `g6lc_apu_vgpu_qga`, not `g6lc_apu_vgpu_qaw`, and not
+  `g6lc_apu_vgpu_vaw`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `SgaEn` stays 0.
+  Remote 2026-09-30, shared with the echo and the keep:
+  `tb_g6lc_apu_vgpu_sga` **23 cases / 101 checks / 130 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **29 ports / no
+  cells**; Enable=1 **489 cells / 7 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] That scene ack and remain are read after QueueNotify. A
+  second store keeps the first. This is not `g6lc_apu_vgpu_qgk`.
+  `SgkEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_sga`,
+  errors=0. Fixture synth, no latches: Enable=0 **20 ports / no
+  cells**; Enable=1 **837 cells / 155 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Ack `32'h1` and remain 0 with `used.idx` 1 after
+  QueueNotify. Index 2 and the transfer ack record nothing. A
+  second store keeps the first. This is not `g6lc_apu_vgpu_qgx`.
+  `SgxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_sga`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **570 cells / 85 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Posted `NEXT` walker of the 64 by 64 transfer chain after
+  that scene guest ack. Avail index 2. Device index starts at 1.
+  The scene chain at avail index 1 records nothing. This is
+  later than `g6lc_apu_vgpu_sgx`. This is not `g6lc_apu_vgpu_tnw`
+  and not `g6lc_apu_vgpu_snw`. `g6lc_apu_vgpu_avail` still
+  rejects `NEXT`. This does not read guest memory. The compiler
+  TEX opcode still returns `-26`. The image is not kept. This is
+  not Mesa `glReadPixels`. `RnwEn` stays 0. Remote 2026-10-01,
+  shared with the keep and the check: `tb_g6lc_apu_vgpu_rnw`
+  **29 cases / 105 checks / 123 clocks**, errors=0. Fixture
+  synth, no latches: Enable=0 **12 ports / no cells**; Enable=1
+  **1,368 cells / 634 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] That walked transfer chain is kept. Avail index 2. The
+  scene index 1 records nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_tnk`. `RnkEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_rnw`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **598 cells
+  / 245 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Avail index 2 with `NEXT` accepted after scene guest ack.
+  Index 1 and the scene table record nothing. A second store
+  keeps the first. This is not `g6lc_apu_vgpu_tnx`. `RnxEn`
+  stays 0. Same remote run `tb_g6lc_apu_vgpu_rnw`, errors=0.
+  Fixture synth, no latches: Enable=0 **11 ports / no cells**;
+  Enable=1 **312 cells / 101 flip-flops**. The CVA6 cookie was
+  not re-run. The TEX opcode still returns `-26`.
+- [x] QueueNotify of control queue 0 at `64'h880D0200` after that
+  walker. The cursor queue and the scene doorbell at
+  `64'h8800E220` record nothing. This is later than
+  `g6lc_apu_vgpu_rnx`. This is not `g6lc_apu_vgpu_qnt` and not
+  `g6lc_apu_vgpu_snt`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `RntEn` stays 0.
+  Remote 2026-10-01, shared with the echo and the keep:
+  `tb_g6lc_apu_vgpu_rnt` **17 cases / 77 checks / 93 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **334 cells / 9 flip-flops**. The CVA6 cookie
+  was not re-run. The TEX opcode still returns `-26`.
+- [x] That notify word is read. Control queue 0. The cursor
+  queue and the scene doorbell record nothing. A second store
+  keeps the first. This is not `g6lc_apu_vgpu_qnr`. `RnrEn`
+  stays 0. Same remote run `tb_g6lc_apu_vgpu_rnt`, errors=0.
+  Fixture synth, no latches: Enable=0 **20 ports / no cells**;
+  Enable=1 **518 cells / 73 flip-flops**. The CVA6 cookie was
+  not re-run. The TEX opcode still returns `-26`.
+- [x] Control queue 0 after avail index 2 after scene guest ack.
+  The cursor queue and scene index 1 record nothing. A second
+  store keeps the first. This is not `g6lc_apu_vgpu_qnx`.
+  `RnyEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_rnt`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **293 cells / 53 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `virtq_avail.idx` 2 at `64'h880D0100` after that
+  QueueNotify after scene guest ack. The scene ring at
+  `64'h8800E200` and index 1 record nothing. This is later than
+  `g6lc_apu_vgpu_rny`. This is not `g6lc_apu_vgpu_qav` and not
+  `g6lc_apu_vgpu_sav`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `RavEn` stays 0.
+  Remote 2026-10-01, shared with the keep and the check:
+  `tb_g6lc_apu_vgpu_rav` **17 cases / 74 checks / 87 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **357 cells / 41 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That avail index is kept. Index 1 and the scene ring
+  record nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_qak`. `RakEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_rav`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **271 cells / 85
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Avail index 2 at `64'h880D0100` after scene guest ack.
+  Index 1 records nothing. A second store keeps the first. This
+  is not `g6lc_apu_vgpu_qax`. `RayEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_rav`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **249 cells / 21
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] `virtq_avail.ring[0]` at `64'h880D0104` after that index
+  after scene guest ack names descriptor 0. The scene ring at
+  `64'h8800E204` and a nonzero id record nothing. This is later
+  than `g6lc_apu_vgpu_ray`. This is not `g6lc_apu_vgpu_qrg` and
+  not `g6lc_apu_vgpu_srg`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `RrgEn` stays 0.
+  Remote 2026-10-01, shared with the keep and the check:
+  `tb_g6lc_apu_vgpu_rrg` **16 cases / 70 checks / 83 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **342 cells / 41 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That ring name is kept. A nonzero id and the scene ring
+  record nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_qrk`. `RrkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_rrg`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **247 cells / 85
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Descriptor 0 at `64'h880D0104` after scene guest ack. A
+  nonzero id records nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_qrx`. `RrxEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_rrg`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **224 cells
+  / 21 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] `virtq_desc` 0 at `64'h880D0000` after that ring name after
+  scene guest ack is the attach at `64'h88090000`, length 64,
+  `NEXT` to 1. The scene table, `INDIRECT`, and a jump record
+  nothing. This is later than `g6lc_apu_vgpu_rrx`. This is not
+  `g6lc_apu_vgpu_qhd` and not `g6lc_apu_vgpu_shd`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `RhdEn` stays 0. Remote 2026-10-01,
+  shared with the keep and the check: `tb_g6lc_apu_vgpu_rhd`
+  **17 cases / 74 checks / 90 clocks**, errors=0. Fixture synth,
+  no latches: Enable=0 **19 ports / no cells**; Enable=1 **671
+  cells / 233 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] That attach descriptor is kept. The scene table and a jump
+  record nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_qhk`. `RhkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_rhd`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **309 cells / 117
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Attach at `64'h88090000` with `NEXT` to 1 after scene
+  guest ack. The scene table and a jump record nothing. A
+  second store keeps the first. This is not `g6lc_apu_vgpu_qhx`.
+  `RhxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_rhd`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **438 cells / 85 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `virtq_desc` 1 at `64'h880D0010` after that `NEXT` after
+  scene guest ack is the transfer at `64'h88080000`, length 96,
+  `NEXT` to 2. The attach descriptor, the scene table,
+  `INDIRECT`, and `WRITE` record nothing. This is later than
+  `g6lc_apu_vgpu_rhx`. This is not `g6lc_apu_vgpu_qfd` and not
+  `g6lc_apu_vgpu_sfd`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `RfdEn` stays 0.
+  Remote 2026-10-01, shared with the keep and the check:
+  `tb_g6lc_apu_vgpu_rfd` **17 cases / 74 checks / 90 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **763 cells / 233 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That transfer descriptor is kept. The attach descriptor
+  and a jump record nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_qfk`. `RfkEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_rfd`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **298 cells
+  / 117 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Transfer at `64'h88080000` with `NEXT` to 2 after scene
+  guest ack. The attach descriptor and a jump record nothing. A
+  second store keeps the first. This is not `g6lc_apu_vgpu_qfx`.
+  `RfyEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_rfd`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **428 cells / 85 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `virtq_desc` 2 at `64'h880D0020` after that `NEXT` after
+  scene guest ack is the `WRITE` of the 24-byte response at
+  `64'h880A0000`. The transfer descriptor, the scene table,
+  `NEXT`, and `INDIRECT` record nothing. This is later than
+  `g6lc_apu_vgpu_rfy`. This is not `g6lc_apu_vgpu_qwd` and not
+  `g6lc_apu_vgpu_swd`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `RwdEn` stays 0.
+  Remote 2026-10-01, shared with the keep and the check:
+  `tb_g6lc_apu_vgpu_rwd` **17 cases / 74 checks / 90 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **739 cells / 201 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That `WRITE` descriptor is kept. The transfer descriptor
+  and `NEXT` record nothing. A second store keeps the first.
+  This is not `g6lc_apu_vgpu_qwk`. `RwkEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_rwd`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **263 cells
+  / 101 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] `WRITE` of the 24-byte response at `64'h880A0000` after
+  scene guest ack. The transfer descriptor and `NEXT` record
+  nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_qwx`. `RwxEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_rwd`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **420 cells / 69
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Guest `OK_NODATA` at `64'h880A0000` after that named
+  `WRITE` after scene guest ack. The fence is 2. The scene
+  response and the descriptor table record nothing. This is
+  later than `g6lc_apu_vgpu_rwx`. This is not
+  `g6lc_apu_vgpu_qok` and not `g6lc_apu_vgpu_sok`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `RokEn` stays 0. Remote 2026-10-01,
+  shared with the echo and the keep: `tb_g6lc_apu_vgpu_rok`
+  **17 cases / 76 checks / 96 clocks**, errors=0. Fixture synth,
+  no latches: Enable=0 **18 ports / no cells**; Enable=1 **307
+  cells / 9 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] That `OK_NODATA` is kept. Fence 2. The scene fence and a
+  missing fence bit record nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_qol`. `RolEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_rok`, errors=0. Fixture synth, no
+  latches: Enable=0 **20 ports / no cells**; Enable=1 **1437 cells
+  / 265 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Fence 2 `OK_NODATA` at `64'h880A0000` after scene guest
+  ack. The scene fence and the scene response record nothing. A
+  second store keeps the first. This is not `g6lc_apu_vgpu_qox`
+  and not `g6lc_apu_vgpu_rox`. `RoyEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_rok`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **687 cells / 101
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Guest used element after that `OK_NODATA` after scene
+  guest ack is id 1 at `64'h880B0000` and `used.idx` 2 at
+  `64'h880B0008`. The scene id 0 and index 1 record nothing.
+  This is later than `g6lc_apu_vgpu_roy`. This is not
+  `g6lc_apu_vgpu_quw` and not `g6lc_apu_vgpu_slw`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `RuwEn` stays 0. Remote 2026-10-01,
+  shared with the echo and the keep: `tb_g6lc_apu_vgpu_ruw`
+  **18 cases / 80 checks / 113 clocks**, errors=0. Fixture synth,
+  no latches: Enable=0 **18 ports / no cells**; Enable=1 **383
+  cells / 11 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] That used element is kept. Descriptor 0 or index 1
+  records nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_qul`. `RulEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_ruw`, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **909 cells / 171
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] `used.idx` 2 and id 1 after scene guest ack. The scene
+  index 1 and id 0 record nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_qux`. `RuxEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_ruw`, errors=0. Fixture synth, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **374 cells
+  / 53 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Guest used-buffer interrupt after that index after scene
+  guest ack is reason `32'h1` at `64'h880C0000`. The scene
+  status word records nothing. This is later than
+  `g6lc_apu_vgpu_rux`. This is not `g6lc_apu_vgpu_qiw` and not
+  `g6lc_apu_vgpu_siw`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `RiwEn` stays 0.
+  Remote 2026-10-01, shared with the echo and the keep:
+  `tb_g6lc_apu_vgpu_riw` **15 cases / 70 checks / 86 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **22 ports / no
+  cells**; Enable=1 **349 cells / 8 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That interrupt reason is kept. A zero word or the scene
+  status address records nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_qir`. `RirEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_riw`, errors=0. Fixture synth, no
+  latches: Enable=0 **20 ports / no cells**; Enable=1 **617 cells
+  / 88 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Reason `32'h1` at `64'h880C0000` with `used.idx` 2 after
+  scene guest ack. The scene status word records nothing. A
+  second store keeps the first. This is not `g6lc_apu_vgpu_qix`.
+  `RixEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_riw`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **401 cells / 117 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Guest ack of that used-buffer interrupt after scene guest
+  ack is `32'h1` at `64'h880C0010`. Remain 0 over
+  `64'h880C0000`. The scene ack records nothing. This is later
+  than `g6lc_apu_vgpu_rix`. This is not `g6lc_apu_vgpu_qaw` and
+  not `g6lc_apu_vgpu_sga`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `RgaEn` stays 0.
+  Remote 2026-10-01, shared with the echo and the keep:
+  `tb_g6lc_apu_vgpu_rga` **23 cases / 101 checks / 130 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **29 ports / no
+  cells**; Enable=1 **489 cells / 7 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That ack and remain are kept. The scene ack records
+  nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_qar`. `RgkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_rga`, errors=0. Fixture synth, no latches:
+  Enable=0 **20 ports / no cells**; Enable=1 **834 cells / 155
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Ack `32'h1` and remain 0 with `used.idx` 2 after scene
+  guest ack. The scene ack and index 1 record nothing. A second
+  store keeps the first. This is not `g6lc_apu_vgpu_qay`.
+  `RgxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_rga`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **567 cells / 85 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] TEX of sampler view 5 after the guest ack of the transfer
+  chain after scene guest ack. `(0,0)` is the clamp texel
+  `32'hA5000000`. `(1,0)` is the half blend `32'hD2008000`.
+  `refused` is 0. `used.idx` is 2. The clear word, a refused
+  sample, and the scene used index record nothing. This is later
+  than `g6lc_apu_vgpu_ftk` and later than `g6lc_apu_vgpu_rgx`.
+  This is not `g6lc_apu_vgpu_ftx`. `g6lc_apu_vgpu_avail` still
+  rejects `NEXT`. The compiler TEX opcode still returns `-26`.
+  The image is not kept. This is not Mesa `glReadPixels`.
+  `GtxEn` stays 0. Remote 2026-10-01, shared with the keep and
+  the check: `tb_g6lc_apu_vgpu_gtx` **18 cases / 75 checks / 79
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **10
+  ports / no cells**; Enable=1 **415 cells / 85 flip-flops**. The
+  CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That TEX result is kept. `refused` stays 0. `used.idx`
+  stays 2. The clear word and a refused sample record nothing. A
+  second store keeps the first. This is not `g6lc_apu_vgpu_ftr`.
+  `GtrEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_gtx`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **393 cells / 85 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] `refused` 0 and origin `32'hA5000000` with `used.idx` 2
+  after that guest ack. A refused sample or the scene index
+  records nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_ftk`. `GtkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_gtx`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **347 cells / 53
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] TEX pair in beat 0 of the guest `TRANSFER_FROM_HOST_3D`
+  buffer at `64'h88070000` after the guest ack of the transfer
+  chain after scene guest ack. Lane 0 is `(0,0)`, the clamp
+  texel. Lane 1 is `(1,0)`, the half blend. The other 511 beats
+  are not stored. The scene window and the fragment-color beat
+  record nothing. This is later than `g6lc_apu_vgpu_gtk`. This
+  is not `g6lc_apu_vgpu_ocw` and not `g6lc_apu_vgpu_pbw`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `HcwEn` stays 0. Remote 2026-10-01,
+  shared with the echo and the keep: `tb_g6lc_apu_vgpu_hcw`
+  **23 cases / 103 checks / 120 clocks**, errors=0. Fixture
+  synth, no latches: Enable=0 **19 ports / no cells**; Enable=1
+  **594 cells / 137 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] That guest-buffer beat is kept. Both words are the TEX
+  pair. The scene window and the fragment-color beat record
+  nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_ocr`. `HcrEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_hcw`, errors=0. Fixture synth, no latches:
+  Enable=0 **21 ports / no cells**; Enable=1 **1132 cells / 137
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of `(0,0)` in that guest buffer is sample red
+  `8'h00`. The word is not the clear color. A clear red, a blue,
+  or a high first byte records nothing. A second store keeps the
+  first. This is not `g6lc_apu_vgpu_ocx`. `HcxEn` stays 0. Same
+  remote run `tb_g6lc_apu_vgpu_hcw`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **547 cells
+  / 155 flip-flops**. The CVA6 cookie was not re-run. The TEX
+  opcode still returns `-26`.
+- [x] Covered TEX sample after that guest transfer beat.
+  `(0,0)` is the clamp texel `32'hA5000000` at byte 0. `(1,0)`
+  is the half blend `32'hD2008000` at byte 4. `refused` is 0.
+  Any other coordinate records nothing. This is later than
+  `g6lc_apu_vgpu_hcx`. This is not `g6lc_apu_vgpu_hld` and not
+  `g6lc_apu_cover`. `g6lc_apu_vgpu_avail` still rejects `NEXT`.
+  The compiler TEX opcode still returns `-26`. The image is not
+  kept. This is not Mesa `glReadPixels`. `WldEn` stays 0. Remote
+  2026-10-01, shared with the keep and the check:
+  `tb_g6lc_apu_vgpu_wld` **17 cases / 71 checks / 75 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **418 cells / 39 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That covered sample is kept. `refused` stays 0. The clear
+  word records nothing. A second store keeps the first. This is
+  not `g6lc_apu_vgpu_hld`. `WlrEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_wld`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **291 cells / 65
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] `refused` 0 and the held word is the clamp texel or the
+  half blend, not the clear word. A refused sample records
+  nothing. A second store keeps the first. This is not
+  `g6lc_apu_vgpu_dnr`. `WlkEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_wld`, errors=0. Fixture synth, no latches:
+  Enable=0 **11 ports / no cells**; Enable=1 **349 cells / 51
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Four channels of that covered TEX sample. Byte 0 is red.
+  The clamp texel `32'hA5000000` is the bytes 00 00 00 A5. The
+  half blend `32'hD2008000` is the bytes 00 80 00 D2. The clear
+  channels record nothing. This is later than `g6lc_apu_vgpu_wlk`.
+  This is not `g6lc_apu_vgpu_byr`. `g6lc_apu_vgpu_avail` still
+  rejects `NEXT`. The compiler TEX opcode still returns `-26`.
+  The image is not kept. This is not Mesa `glReadPixels`.
+  `CyrEn` stays 0. Remote 2026-10-01, shared with the keep and
+  the check: `tb_g6lc_apu_vgpu_cyr` **15 cases / 63 checks / 67
+  clocks**, errors=0. Fixture synth, no latches: Enable=0 **9
+  ports / no cells**; Enable=1 **189 cells / 51 flip-flops**. The
+  CVA6 cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Those four channels are kept. A second store keeps the
+  first. The clear channels record nothing. This is not
+  `g6lc_apu_vgpu_byk`. `CykEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_cyr`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **313 cells / 83
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] Byte 0 of the held TEX sample is red `8'h00`. A first byte
+  of the clear red `8'h0D` or of `8'hFF` records nothing. A
+  second store keeps the first. This is not `g6lc_apu_vgpu_byx`.
+  `CyxEn` stays 0. Same remote run `tb_g6lc_apu_vgpu_cyr`,
+  errors=0. Fixture synth, no latches: Enable=0 **11 ports / no
+  cells**; Enable=1 **242 cells / 53 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] Guest-rung walk of the scene `NEXT` chain after QueueNotify
+  of control queue 0. Avail index 1 names descriptor 0. The walk
+  consumes device index 1. The transfer table, `INDIRECT`, a
+  broken link, and a jumped index record nothing. This is later
+  than `g6lc_apu_vgpu_sny`. This is not `g6lc_apu_vgpu_avail` and
+  not `g6lc_apu_vgpu_nxc`. `g6lc_apu_vgpu_avail` still rejects
+  `NEXT`. The compiler TEX opcode still returns `-26`. The image
+  is not kept. This is not Mesa `glReadPixels`. `GnwEn` stays 0.
+  Remote 2026-10-01, shared with the keep and the check:
+  `tb_g6lc_apu_vgpu_gnw` **26 cases / 107 checks / 155 clocks**,
+  errors=0. Fixture synth, no latches: Enable=0 **19 ports / no
+  cells**; Enable=1 **1557 cells / 396 flip-flops**. The CVA6
+  cookie was not re-run. The TEX opcode still returns `-26`.
+- [x] That guest-rung chain is kept. Avail index 1, consumed
+  device index 1, the execbuffer, and the response. A second
+  store keeps the first. The transfer table records nothing.
+  This is not `g6lc_apu_vgpu_nxk`. `GnkEn` stays 0. Same remote
+  run `tb_g6lc_apu_vgpu_gnw`, errors=0. Fixture synth, no
+  latches: Enable=0 **10 ports / no cells**; Enable=1 **498
+  cells / 181 flip-flops**. The CVA6 cookie was not re-run. The
+  TEX opcode still returns `-26`.
+- [x] Avail index 1 with consumed device index 1 and the
+  execbuffer. Transfer avail index 2 records nothing. A second
+  store keeps the first. This is not `g6lc_apu_vgpu_avail`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `GnxEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_gnw`, errors=0. Fixture
+  synth, no latches: Enable=0 **11 ports / no cells**; Enable=1
+  **481 cells / 101 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] Fetch the scene header and the 960-byte execbuffer after
+  that guest-rung walk consumed device index 1. The first command
+  word is the surface `CREATE_OBJECT`. Transfer dest and an
+  unconsumed device index record nothing. This is later than
+  `g6lc_apu_vgpu_gnx`. This is not `g6lc_apu_vgpu_fet`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. The compiler TEX
+  opcode still returns `-26`. The image is not kept. This is not
+  Mesa `glReadPixels`. `GefEn` stays 0. Remote 2026-10-01, shared
+  with the keep and the check: `tb_g6lc_apu_vgpu_gef` **20 cases /
+  81 checks / 161 clocks**, errors=0. Fixture synth, no latches:
+  Enable=0 **19 ports / no cells**; Enable=1 **779 cells / 81
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] That submit type and first command word are kept. A second
+  store keeps the first. Transfer dest records nothing. This is
+  not `g6lc_apu_vgpu_fek`. `GekEn` stays 0. Same remote run
+  `tb_g6lc_apu_vgpu_gef`, errors=0. Fixture synth, no latches:
+  Enable=0 **10 ports / no cells**; Enable=1 **295 cells / 70
+  flip-flops**. The CVA6 cookie was not re-run. The TEX opcode
+  still returns `-26`.
+- [x] First command word is the surface `CREATE_OBJECT` after
+  consumed device index 1. Transfer dest records nothing. A
+  second store keeps the first. This is not `g6lc_apu_vgpu_fet`.
+  `g6lc_apu_vgpu_avail` still rejects `NEXT`. `GexEn` stays 0.
+  Same remote run `tb_g6lc_apu_vgpu_gef`, errors=0. Fixture
+  synth, no latches: Enable=0 **11 ports / no cells**; Enable=1
+  **274 cells / 38 flip-flops**. The CVA6 cookie was not
+  re-run. The TEX opcode still returns `-26`.
+- [x] P0/A0 source-only zero-custom-runtime feasibility review (2026-10-01):
+  stock virtio-gpu (Resolute `Ubuntu-7.0.0-27.27` / Noble `Ubuntu-6.8.0-90.91`)
+  plus Mesa Venus docs and UE 5.8.3 SM5 profile. Preferred route remains
+  hardware Venus (guest ICD stock; device replaces virglrenderer `vkr`).
+  Not a selected/proven architecture. SPIR-V execution or hardware lowering
+  is the main risk. Firmware/compiler backends fail the strict endpoint if
+  they remain at runtime. Native vendor-ISA match is a comparison exit, not
+  a spoof. Next: bounded SPIR-V-subset prototype (immutable store, data
+  mutation, ApuOff negative, synth/storage estimate). No RTL in this review.
+  Package pin is Launchpad resolute mesa 26.0.x metadata, not an installed
+  image. See `architecture/uncore/apu-graphics.md` snapshot and
+  `corev_apu/apu/AGENTS-impl-interplays.md` §15.
+- [x] P0 bounded SPIR-V-subset prototype (2026-10-01): `g6lc_apu_spirv` /
+  `SpirvEn` after `GexEn`, default 0. Immutable 128-word store, GLCompute
+  `OpIAdd`/`OpIMul` over two StorageBuffer inputs, IRQ on complete. Same
+  committed module mutates 2+3=5 then 4+5=9; second store after commit
+  faults; reset then 4×5=20. Enable=0 quiet. Not in `g6lc_apu_sys`.
+  `FeatureVirgl` stays illegal. Diagnostic TB client on the bytes+IRQ test
+  transport; product still requires stock Mesa Venus ICD. Remote
+  `tb_g6lc_apu_spirv` 8 cases / 15 checks / 348 cycles, errors=0.
+  `SPIRV_SYNTH=1`, no latches: Enable=0 **16 ports / no cells**; Enable=1
+  **35938 cells / 5365 flip-flops**. `Flist.apu_spirv` is private. Next:
+  reusable NEXT/DMA, SHM+blob+CONTEXT_INIT, hardware Venus CS.
+- [x] P0 reusable NEXT chain walker (2026-10-01): `g6lc_apu_chain` /
+  `ChainEn` after `SpirvEn`, default 0. Programmed virtq_desc table
+  base and head; bounded NEXT; INDIRECT/loop/OOB/overlong/misaligned
+  fault with no stray read. Relocated base and head index 2 mutate
+  the walked windows. `g6lc_apu_vgpu_avail` still rejects NEXT and
+  was not edited. Not in `g6lc_apu_sys`. `FeatureVirgl` stays illegal.
+  Remote `tb_g6lc_apu_chain` 9 cases / 27 checks / 73 cycles, errors=0.
+  `CHAIN_SYNTH=1`, no latches: Enable=0 **19 ports / no cells**; Enable=1
+  **1917 cells / 503 flip-flops**. `Flist.apu_chain` is private. Next:
+  DMA join of this walker, SHM+blob+CONTEXT_INIT, hardware Venus CS.
+- [x] P0 ChainDma join (2026-10-01): `g6lc_apu_cdma` / `CdmaEn` after
+  `ChainEn`, default 0. Instantiates NextChain and checked DmaRead.
+  Descriptor fetches are 16-byte mapping-window reads on 64-bit AXI.
+  Relocated base and head 2 still mutate the windows. INDIRECT is one
+  AR; OOB and invalid mapping issue no AR. `g6lc_apu_vgpu_avail` still
+  rejects NEXT and was not edited. Not in `g6lc_apu_sys`. `FeatureVirgl`
+  stays illegal. Remote `tb_g6lc_apu_cdma` 7 cases / 20 checks / 153
+  cycles, errors=0. `CDMA_SYNTH=1`, no latches: Enable=0 **14 ports /
+  no cells**; Enable=1 **8471 cells / 1150 flip-flops**. `Flist.apu_cdma`
+  is private. Next: SHM+blob+CONTEXT_INIT, hardware Venus CS.
+- [x] P0 HOST_VISIBLE SHM + blob/CONTEXT_INIT (2026-10-01): `ShmEn`
+  on virtio-mmio returns SHM id 1 at `64'h82000000` / 1 MiB; other ids
+  stay all-ones. `g6lc_apu_hvis` / `HvisEn` records HOST3D MAPABLE blob
+  map into that window and CTX_CREATE `context_init` Venus (4). Virgl
+  capset 1 faults. `RESOURCE_BLOB` and `CONTEXT_INIT` stay outside
+  `APU_IMPL_FEATURES`. `FeatureVirgl` stays illegal. Not a new child of
+  `g6lc_apu_sys`. Remote `tb_g6lc_apu_hvis` 7 cases / 18 checks / 51
+  cycles, errors=0. `HVIS_SYNTH=1`, no latches: Enable=0 **9 ports /
+  no cells**; Enable=1 **1386 cells / 197 flip-flops**. P1
+  `tb_g6lc_apu_virtio_mmio` 4240 checks / 636 cycles still PASS
+  (absent SHM). Next: hardware Venus CS.
+- [x] P0 hardware Venus CS prototype (2026-10-01): `g6lc_apu_vncs` /
+  `VncsEn` after `HvisEn`, default 0. HOST_VISIBLE ring
+  CREATE_MODULE loads SPIR-V into SpirvSubset; DISPATCH runs it and
+  writes the result back into the ring. Same module mutates 2+3=5
+  then 4+5=9. Unknown opcode faults. Diagnostic ring, not Mesa
+  `vn_protocol`. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`.
+  Remote `tb_g6lc_apu_vncs` 4 cases / 10 checks / 341 cycles, errors=0.
+  `VNCS_SYNTH=1`, no latches: Enable=0 **13 ports / no cells**; Enable=1
+  **74601 cells / 9601 flip-flops**. `Flist.apu_vncs` is private.
+  Next: stock vn_ring encoding, Venus capset wire, testharness DMA
+  fabric join.
+- [x] P0 Venus capset wire (2026-10-01): `g6lc_apu_vcap` / `VcapEn`
+  after `VncsEn`, default 0. GET_CAPSET_INFO/GET_CAPSET for Venus id 4
+  returns `virgl_renderer_capset_venus` (160 bytes / 40 words). Virgl
+  id 1 faults. `NumCapsets` stays 0. `RESOURCE_BLOB` and
+  `CONTEXT_INIT` stay outside `APU_IMPL_FEATURES`. `FeatureVirgl`
+  stays illegal. Not in `g6lc_apu_sys`. Remote `tb_g6lc_apu_vcap`
+  5 cases / 56 checks / 28 cycles, errors=0. `VCAP_SYNTH=1`, no
+  latches: Enable=0 **11 ports / no cells**; Enable=1 **222 cells /
+  4 flip-flops**. `Flist.apu_vcap` is private. Next: stock vn_ring
+  encoding, testharness DMA fabric join.
+- [x] P0 stock vn_ring layout walker (2026-10-01): `g6lc_apu_vnring` /
+  `VnringEn` after `VcapEn`, default 0. Mesa `vn_ring_get_layout`
+  offsets: head 0, tail 64, status 128, buffer 192, size 256.
+  head/tail are byte seqnos; consume updates tail and idle status.
+  Wrap, empty, unaligned, and oversize are covered. This is stock
+  ring geometry, not Mesa `vn_protocol` vk* encode. `FeatureVirgl`
+  stays illegal. Not in `g6lc_apu_sys`. Remote `tb_g6lc_apu_vnring`
+  6 cases / 13 checks / 59 cycles, errors=0. `VNRING_SYNTH=1`, no
+  latches: Enable=0 **12 ports / no cells**; Enable=1 **13443 cells /
+  4228 flip-flops**. `Flist.apu_vnring` is private. Next: testharness
+  DMA fabric join, Mesa vn_protocol vk* encode.
+- [x] P0 testharness DMA fabric join (2026-10-01): `g6lc_apu_tdma` /
+  `TdmaEn` after `VnringEn`, default 0. 2:1 AXI join, APU port A wins
+  over AI port B. Under `+define+G6LC_APU` and no island port, testharness
+  instantiates the join with Enable=1 onto `slave[2]` (`NrSlaves` stays 3)
+  so compositor `dma_req_o` is no longer tied off. `ApuHarness.DmaReadEn=0`
+  keeps the APU side idle; join Enable=1 still forwards AI. Island-port
+  builds give APU `slave[2]` alone (widths differ). Not in `g6lc_apu_sys`.
+  `FeatureVirgl` stays illegal. Remote `tb_g6lc_apu_tdma` 4 cases / 10
+  checks / 18 cycles, errors=0. `TDMA_SYNTH=1`, no latches: Enable=0
+  **8 ports / no cells**; Enable=1 **321 cells / 4 flip-flops**.
+  `Flist.apu_tdma` is private; `Flist.apu_soc` compiles the join for
+  `G6LC_APU`. Next: Mesa vn_protocol vk* encode, then G0/A5.
+- [x] P0 Mesa vn_protocol vkCreateShaderModule CS (2026-10-01):
+  `g6lc_apu_vnenc` / `VnencEn` after `TdmaEn`, default 0. Decodes stock
+  Mesa encode: command type 59, flags, LP64 device handle, pointer
+  presence, `VkShaderModuleCreateInfo` sType 16, pCode array_size,
+  module id. `VK_COMMAND_GENERATE_REPLY_BIT_EXT` writes type +
+  `VK_SUCCESS` + handle. vkCreateInstance, null info, and empty pCode
+  fault. This is the ICD CS, not `vncs` CREATE_MODULE. `FeatureVirgl`
+  stays illegal. Not in `g6lc_apu_sys`. Remote `tb_g6lc_apu_vnenc`
+  6 cases / 13 checks / 302 cycles, errors=0. `VNENC_SYNTH=1`, no
+  latches: Enable=0 **12 ports / no cells**; Enable=1 **36136 cells /
+  6437 flip-flops** (192-word CS, max 128 pCode words). `Flist.apu_vnenc`
+  is private. Next: G0/A5 stock-client pixels.
+- [x] P0 VenusPath vn_ring→vnenc→SpirvSubset (2026-10-01): `g6lc_apu_vnp`
+  / `VnpEn` after `VnencEn`, default 0. Mesa `vn_ring_layout` with
+  buffer_size 512 at byte 192 holds a `vkCreateShaderModule` CS; decode
+  loads pCode into SpirvSubset. Same committed module mutates 2+3=5 then
+  4+5=9. Empty ring is quiet; vkCreateInstance and unaligned head fault.
+  `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`. Remote
+  `tb_g6lc_apu_vnp` 6 cases / 11 checks / 768 cycles, errors=0.
+  `VNP_SYNTH=1`, no latches: Enable=0 **16 ports / no cells**; Enable=1
+  **100179 cells / 20112 flip-flops**. `Flist.apu_vnp` is private. Next:
+  G0/A5 stock-client pixels.
+- [x] P0 AvailNext virtq_avail→NextChain (2026-10-01): `g6lc_apu_avn` /
+  `AvnEn` after `VnpEn`, default 0. Reads `virtq_avail.idx` and
+  `ring[device_idx]`, then NextChain follows NEXT. Empty when idx equals
+  the device index; 16-bit wrap and two-index batching; INDIRECT and
+  unaligned avail base fault. `g6lc_apu_vgpu_avail` still faults NEXT
+  and was not edited. `FeatureVirgl` stays illegal. Not in
+  `g6lc_apu_sys`. Remote `tb_g6lc_apu_avn` 7 cases / 13 checks / 97
+  cycles, errors=0. `AVN_SYNTH=1`, no latches: Enable=0 **19 ports /
+  no cells**; Enable=1 **3521 cells / 988 flip-flops**. `Flist.apu_avn`
+  is private. Next: granted capset / DISPLAY.md identity.
+- [x] P0 AvailUsed virtq_used publication (2026-10-01): `g6lc_apu_avu` /
+  `AvuEn` after `AvnEn`, default 0. Instantiates AvailNext. On consume,
+  writes `virtq_used_elem` then `used.idx`. EMPTY writes nothing.
+  16-bit used-index wrap; INDIRECT issues no used store.
+  `g6lc_apu_vgpu_avail` still faults NEXT and was not edited.
+  `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`. Remote
+  `tb_g6lc_apu_avu` 5 cases / 9 checks / 82 cycles, errors=0.
+  `AVU_SYNTH=1`, no latches: Enable=0 **27 ports / no cells**; Enable=1
+  **4754 cells / 1438 flip-flops**. `Flist.apu_avu` is private. Next:
+  granted capset / DISPLAY.md identity.
+- [x] P0 UsedIrq virtio used-buffer ISR (2026-10-01): `g6lc_apu_uir` /
+  `UirEn` after `AvuEn`, default 0. Instantiates AvailUsed. After
+  `used.idx` publication, ISR bit 0 (`VIRTIO_MMIO_INT_VRING`) and
+  `irq_o` rise. Guest ack of bit 0 lowers the pin. EMPTY and INDIRECT
+  raise no IRQ. `g6lc_apu_vgpu_avail` still faults NEXT and was not
+  edited. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`. Remote
+  `tb_g6lc_apu_uir` 4 cases / 9 checks / 63 cycles, errors=0.
+  `UIR_SYNTH=1`, no latches: Enable=0 **31 ports / no cells**; Enable=1
+  **3947 cells / 1141 flip-flops**. `Flist.apu_uir` is private. Next:
+  granted capset / DISPLAY.md identity.
+- [x] P0 CmdSnap immutable first-payload window (2026-10-01):
+  `g6lc_apu_cms` / `CmsEn` after `UirEn`, default 0. Instantiates
+  AvailNext. After a NEXT walk, reads the first payload window (≤32
+  bytes) into an 8-word store. Guest mutation of that address does not
+  change the snapshot. A second snapshot faults until reset. EMPTY
+  stores nothing. `g6lc_apu_vgpu_avail` still faults NEXT and was not
+  edited. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`. Remote
+  `tb_g6lc_apu_cms` 4 cases / 10 checks / 45 cycles, errors=0.
+  `CMS_SYNTH=1`, no latches: Enable=0 **21 ports / no cells**; Enable=1
+  **4227 cells / 1201 flip-flops**. `Flist.apu_cms` is private. Next:
+  granted capset / DISPLAY.md identity.
+- [x] P0 PayResp WRITE-window response (2026-10-01): `g6lc_apu_prs` /
+  `PrsEn` after `CmsEn`, default 0. Instantiates AvailNext. After a
+  NEXT walk whose last descriptor is WRITE, stores a programmed ≤32-byte
+  response at `last_addr` (TB uses `VGPU_RESP_OK_NODATA`, not scene
+  pixels). EMPTY writes nothing. Length mismatch faults.
+  `g6lc_apu_vgpu_avail` still faults NEXT and was not edited.
+  `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`. Remote
+  `tb_g6lc_apu_prs` 4 cases / 8 checks / 71 cycles, errors=0.
+  `PRS_SYNTH=1`, no latches: Enable=0 **31 ports / no cells**; Enable=1
+  **3833 cells / 1234 flip-flops**. `Flist.apu_prs` is private. Next:
+  granted capset / DISPLAY.md identity.
+- [x] P0 QueueDone response→used.idx→ISR (2026-10-01): `g6lc_apu_qdn` /
+  `QdnEn` after `PrsEn`, default 0. One AvailNext walk, then WRITE
+  response, `virtq_used_elem`, `used.idx`, and virtio used-buffer ISR.
+  EMPTY writes nothing. `g6lc_apu_vgpu_avail` still faults NEXT and was
+  not edited. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`.
+  Remote `tb_g6lc_apu_qdn` 3 cases / 8 checks / 52 cycles, errors=0.
+  `QDN_SYNTH=1`, no latches: Enable=0 **35 ports / no cells**; Enable=1
+  **5140 cells / 1453 flip-flops**. `Flist.apu_qdn` is private. Next:
+  granted capset / DISPLAY.md identity.
+- [x] P0 GrantCapset Venus GET_CAPSET on the queue (2026-10-01):
+  `g6lc_apu_gcs` / `GcsEn` after `QdnEn`, default 0. AvailNext walk,
+  snapshot GET_CAPSET_INFO / GET_CAPSET, grant Venus id 4 through
+  VenusCapset, WRITE the capset response, then `virtq_used_elem`,
+  `used.idx`, and virtio used-buffer ISR. Virgl id 1 faults. EMPTY
+  writes nothing. `NumCapsets` stays 0; this is not advertised
+  virtio GET_CAPSET. `g6lc_apu_vgpu_avail` still faults NEXT and was
+  not edited. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`.
+  Remote `tb_g6lc_apu_gcs` 5 cases / 12 checks / 116 cycles, errors=0.
+  `GCS_SYNTH=1`, no latches: Enable=0 **31 ports / no cells**; Enable=1
+  **9379 cells / 1813 flip-flops**. `Flist.apu_gcs` is private. Next:
+  DISPLAY.md identity / stock vkCmdDispatch encode.
+- [x] P0 Mesa vn_protocol vkCmdDispatch CS (2026-10-01):
+  `g6lc_apu_vnd` / `VndEn` after `GcsEn`, default 0. Decodes stock
+  Mesa encode: command type 110, flags, LP64 command-buffer handle,
+  groupCountX/Y/Z. `VK_COMMAND_GENERATE_REPLY_BIT_EXT` writes the
+  command type. vkCreateShaderModule, vkCreateInstance, a null
+  command buffer, and vkCmdDispatchIndirect fault. This is the ICD
+  CS, not `vncs` DISPATCH. `FeatureVirgl` stays illegal. Not in
+  `g6lc_apu_sys`. Remote `tb_g6lc_apu_vnd` 7 cases / 12 checks / 145
+  cycles, errors=0. `VND_SYNTH=1`, no latches: Enable=0 **12 ports /
+  no cells**; Enable=1 **1729 cells / 741 flip-flops**. `Flist.apu_vnd`
+  is private. Next: DISPLAY.md identity.
+- [x] P0 generational handle table (2026-10-01): `g6lc_apu_gnh` /
+  `GnhEn` after `VndEn`, default 0. Eight-slot context/resource/
+  module/cmdbuf table. Alloc publishes `{gen, slot}`. Lookup/pin/
+  unpin/retire require a live matching generation. Retire is refused
+  while pinned. Duplicate live `(kind, object_id)` and a full table
+  fault. Stale generation after retire-and-realloc faults.
+  `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`. Remote
+  `tb_g6lc_apu_gnh` 6 cases / 25 checks / 122 cycles, errors=0.
+  `GNH_SYNTH=1`, no latches: Enable=0 **9 ports / no cells**; Enable=1
+  **3737 cells / 565 flip-flops**. `Flist.apu_gnh` is private. Next:
+  DISPLAY.md identity.
+- [x] P0 HandleDispatch published cmdbuf on vkCmdDispatch (2026-10-01):
+  `g6lc_apu_hdp` / `HdpEn` after `GnhEn`, default 0. Instantiates
+  GenHandle and VenusDispatch. Alloc of a CMDBUF handle, then
+  `vkCmdDispatch` whose `commandBuffer[31:0]` looks up that live
+  handle. Stale generation, a MODULE handle, an unknown handle, and
+  vkCreateInstance fault. `FeatureVirgl` stays illegal. Not in
+  `g6lc_apu_sys`. Remote `tb_g6lc_apu_hdp` 6 cases / 11 checks / 146
+  cycles, errors=0. `HDP_SYNTH=1`, no latches: Enable=0 **13 ports /
+  no cells**; Enable=1 **5979 cells / 1491 flip-flops**. `Flist.apu_hdp`
+  is private. Next: DISPLAY.md identity.
+- [x] P0 HandlePath MODULE publish and CMDBUF dispatch (2026-10-01):
+  `g6lc_apu_hph` / `HphEn` after `HdpEn`, default 0. Instantiates
+  VenusEncode, GenHandle, and VenusDispatch. `vkCreateShaderModule`
+  allocates a MODULE handle from `module_id[31:0]`. `vkCmdDispatch`
+  looks up a live CMDBUF. Duplicate live module ids, a MODULE used as
+  a command buffer, and vkCreateInstance fault. `FeatureVirgl` stays
+  illegal. Not in `g6lc_apu_sys`. Remote `tb_g6lc_apu_hph` 6 cases /
+  11 checks / 207 cycles, errors=0. `HPH_SYNTH=1`, no latches:
+  Enable=0 **13 ports / no cells**; Enable=1 **41062 cells / 7481
+  flip-flops**. `Flist.apu_hph` is private. Next: DISPLAY.md identity.
+- [x] P0 HandleRun SpirvSubset kick on published handles (2026-10-01):
+  `g6lc_apu_hrn` / `HrnEn` after `HphEn`, default 0. Instantiates
+  VenusEncode, GenHandle, VenusDispatch, and SpirvSubset. Create
+  commits SPIR-V under a MODULE handle. Dispatch looks up a live
+  CMDBUF and kicks `2+3=5` then `4+5=9`. Dispatch before create, a
+  MODULE used as a command buffer, and vkCreateInstance fault.
+  `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`. Remote
+  `tb_g6lc_apu_hrn` 6 cases / 11 checks / 720 cycles, errors=0.
+  `HRN_SYNTH=1`, no latches: Enable=0 **17 ports / no cells**;
+  Enable=1 **77619 cells / 13025 flip-flops**. `Flist.apu_hrn` is
+  private. Next: DISPLAY.md identity.
+- [x] P0 RunDone result WRITE then used.idx then ISR (2026-10-01):
+  `g6lc_apu_rdn` / `RdnEn` after `HrnEn`, default 0. Instantiates
+  HandleRun. Dispatch writes the SPIR-V result (4 bytes),
+  `virtq_used_elem`, `used.idx`, and virtio used-buffer ISR.
+  Create writes nothing. Dispatch before create writes nothing.
+  `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`. Remote
+  `tb_g6lc_apu_rdn` 4 cases / 10 checks / 403 cycles, errors=0.
+  `RDN_SYNTH=1`, no latches: Enable=0 **27 ports / no cells**;
+  Enable=1 **77606 cells / 13138 flip-flops**. `Flist.apu_rdn` is
+  private. Next: DISPLAY.md identity.
+- [x] P0 QueueRun AvailNext CS into RunDone (2026-10-01):
+  `g6lc_apu_qrn` / `QrnEn` after `RdnEn`, default 0. Instantiates
+  AvailNext and RunDone. Walks the virtqueue, DMA-reads the first
+  payload into the CS, then CREATE or DISPATCH. DISPATCH writes the
+  SPIR-V result, `used.idx`, and ISR. CREATE writes nothing. EMPTY
+  fetches nothing. `g6lc_apu_vgpu_avail` still faults NEXT and was
+  not edited. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`.
+  Remote `tb_g6lc_apu_qrn` 3 cases / 9 checks / 315 cycles, errors=0.
+  `QRN_SYNTH=1`, no latches: Enable=0 **33 ports / no cells**;
+  Enable=1 **84956 cells / 15231 flip-flops**. `Flist.apu_qrn` is
+  private. Next: DISPLAY.md identity.
+- [x] P0 QueueCmd GrantCapset or QueueRun (2026-10-01):
+  `g6lc_apu_qcm` / `QcmEn` after `QrnEn`, default 0. Instantiates
+  GrantCapset and QueueRun. `capset=1` walks GET_CAPSET/INFO through
+  Venus; `capset=0` walks CREATE/DISPATCH through RunDone. Virgl id 1
+  faults. EMPTY fetches nothing. `NumCapsets` stays 0. This is not
+  advertised GET_CAPSET. `g6lc_apu_vgpu_avail` still faults NEXT and
+  was not edited. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`.
+  Remote `tb_g6lc_apu_qcm` 6 cases / 16 checks / 436 cycles, errors=0.
+  `QCM_SYNTH=1`, no latches: Enable=0 **33 ports / no cells**;
+  Enable=1 **95709 cells / 17523 flip-flops**. `Flist.apu_qcm` is
+  private. Next: advertised capset / DISPLAY.md identity.
+- [x] P0 QueueType AvailNext type word (2026-10-01):
+  `g6lc_apu_qty` / `QtyEn` after `QcmEn`, default 0. Instantiates
+  AvailNext and QueueCmd. Peeks the first command word:
+  GET_CAPSET/INFO selects GrantCapset; CREATE/DISPATCH selects
+  QueueRun. `gnh_only` skips the peek. EMPTY fetches nothing. Child
+  QueueCmd walks the same avail again. `NumCapsets` stays 0. This is
+  not advertised GET_CAPSET. `g6lc_apu_vgpu_avail` still faults NEXT
+  and was not edited. `FeatureVirgl` stays illegal. Not in
+  `g6lc_apu_sys`. Remote `tb_g6lc_apu_qty` 6 cases / 16 checks / 516
+  cycles, errors=0. `QTY_SYNTH=1`, no latches: Enable=0 **33 ports /
+  no cells**; Enable=1 **100577 cells / 19138 flip-flops**.
+  `Flist.apu_qty` is private. Next: advertised capset / DISPLAY.md
+  identity.
+- [x] P0 VenusCtrl private config and QueueNotify (2026-10-01):
+  `g6lc_apu_vct` / `VctEn` after `QtyEn`, default 0. Instantiates
+  VenusCapset and QueueType. Private `num_capsets` reads as 1 and
+  GET_CAPSET_INFO index 0 is Venus id 4. QueueNotify of control
+  queue 0 fires QueueType. Cursor queue 1 faults. `ApuCfg.NumCapsets`
+  stays 0. This is not virtio_mmio advertisement.
+  `g6lc_apu_vgpu_avail` still faults NEXT and was not edited.
+  `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`. Remote
+  `tb_g6lc_apu_vct` 9 cases / 22 checks / 566 cycles, errors=0.
+  `VCT_SYNTH=1`, no latches: Enable=0 **33 ports / no cells**;
+  Enable=1 **101726 cells / 19670 flip-flops**. `Flist.apu_vct` is
+  private. Next: DISPLAY.md identity.
+- [x] P0 QueuePump drain until EMPTY (2026-10-01):
+  `g6lc_apu_qpu` / `QpuEn` after `VctEn`, default 0. Instantiates
+  VenusCtrl. QueueNotify of control queue 0 fires VenusCtrl until
+  AvailNext is EMPTY. Two pending GET_CAPSET_INFO descriptors
+  publish twice. CFG and INFO pass through once. `gnh_only` fires
+  once. Cursor queue 1 faults. `ApuCfg.NumCapsets` stays 0.
+  `g6lc_apu_vgpu_avail` still faults NEXT and was not edited.
+  `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`. Remote
+  `tb_g6lc_apu_qpu` 10 cases / 24 checks / 735 cycles, errors=0.
+  `QPU_SYNTH=1`, no latches: Enable=0 **33 ports / no cells**;
+  Enable=1 **103215 cells / 20298 flip-flops**. `Flist.apu_qpu` is
+  private. Next: DISPLAY.md identity.
+- [x] P0 NotifyTake consume notify_pending (2026-10-01):
+  `g6lc_apu_ntk` / `NtkEn` after `QpuEn`, default 0. Instantiates
+  QueuePump. `arm` latches control-queue bases. virtio-mmio
+  `notify_pending[0]` drains that queue and pulses
+  `notify_clear[0]`. A doorbell before `arm` faults and still
+  clears. Cursor `notify_pending[1]` faults. `ApuCfg.NumCapsets`
+  stays 0. `g6lc_apu_virtio_mmio` was not edited. `FeatureVirgl`
+  stays illegal. Not in `g6lc_apu_sys`. Remote `tb_g6lc_apu_ntk` 6
+  cases / 12 checks / 160 cycles, errors=0. `NTK_SYNTH=1`, no
+  latches: Enable=0 **35 ports / no cells**; Enable=1 **105435 cells
+  / 21314 flip-flops**. `Flist.apu_ntk` is private. Next: DISPLAY.md
+  identity.
+- [x] P0 VqTake vq_state arms NotifyTake (2026-10-01):
+  `g6lc_apu_vqt` / `VqtEn` after `NtkEn`, default 0. Instantiates
+  NotifyTake. virtio `vq_state[0]` arms the control queue on
+  `notify_pending[0]`. A doorbell with `ready=0` faults and still
+  clears. Cursor `notify_pending[1]` faults. `ApuCfg.NumCapsets`
+  stays 0. `g6lc_apu_virtio_mmio` was not edited. `FeatureVirgl`
+  stays illegal. Not in `g6lc_apu_sys`. Remote `tb_g6lc_apu_vqt` 6
+  cases / 11 checks / 163 cycles, errors=0. `VQT_SYNTH=1`, no
+  latches: Enable=0 **37 ports / no cells**; Enable=1 **108797 cells
+  / 22150 flip-flops**. `Flist.apu_vqt` is private. Next: DISPLAY.md
+  identity.
+- [x] P0 VqAxi guest beats on 64-bit AXI (2026-10-01):
+  `g6lc_apu_vax` / `VaxEn` after `VqtEn`, default 0. Instantiates
+  VqTake. 4-byte windows use SIZE=2; longer windows use SIZE=3
+  INCR. The converter is its own AXI master (`DmaReadEn` stays 0).
+  `ApuCfg.NumCapsets` stays 0. `g6lc_apu_virtio_mmio` was not
+  edited. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`. Not
+  wired onto testharness `slave[2]`. Remote `tb_g6lc_apu_vax` 6
+  cases / 11 checks / 287 cycles, errors=0. `VAX_SYNTH=1`, no
+  latches: Enable=0 **21 ports / no cells**; Enable=1 **111519 cells
+  / 22766 flip-flops**. `Flist.apu_vax` is private. Next: DISPLAY.md
+  identity.
+- [x] P0 VenusAlloc vkAllocateCommandBuffers ALLOC CMDBUF (2026-10-01):
+  `g6lc_apu_vac` / `VacEn` after `VaxEn`, default 0. Instantiates
+  GenHandle. Mesa command type 88, sType 40, count 1, PRIMARY, then
+  ALLOC CMDBUF. GENERATE_REPLY writes the published handle.
+  `ApuCfg.NumCapsets` stays 0. `FeatureVirgl` stays illegal. Not in
+  `g6lc_apu_sys`. Remote `tb_g6lc_apu_vac` 12 cases / 18 checks /
+  1016 cycles, errors=0. `VAC_SYNTH=1`, no latches: Enable=0 **12
+  ports / no cells**; Enable=1 **4931 cells / 1569 flip-flops**.
+  `Flist.apu_vac` is private. Next: DISPLAY.md identity.
+- [x] P0 HandleAlloc ALLOC then dispatch LOOKUP (2026-10-01):
+  `g6lc_apu_hal` / `HalEn` after `VacEn`, default 0. Instantiates
+  GenHandle and VenusDispatch on one table.
+  `vkAllocateCommandBuffers` ALLOCs CMDBUF; `vkCmdDispatch` looks
+  that handle up. `ApuCfg.NumCapsets` stays 0. `FeatureVirgl` stays
+  illegal. Not in `g6lc_apu_sys`. Remote `tb_g6lc_apu_hal` 8 cases /
+  15 checks / 479 cycles, errors=0. `HAL_SYNTH=1`, no latches:
+  Enable=0 **13 ports / no cells**; Enable=1 **9178 cells / 2262
+  flip-flops**. `Flist.apu_hal` is private. Next: DISPLAY.md
+  identity.
+- [x] P0 AllocRun ALLOC then CREATE then DISPATCH (2026-10-01):
+  `g6lc_apu_aru` / `AruEn` after `HalEn`, default 0. Instantiates
+  VenusEncode, GenHandle, VenusDispatch, and SpirvSubset on one
+  table. `vkAllocateCommandBuffers` ALLOCs CMDBUF; CREATE commits
+  SPIR-V; DISPATCH kicks 2+3=5 then 4+5=9. `ApuCfg.NumCapsets`
+  stays 0. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`.
+  Remote `tb_g6lc_apu_aru` 7 cases / 13 checks / 914 cycles,
+  errors=0. `ARU_SYNTH=1`, no latches: Enable=0 **17 ports / no
+  cells**; Enable=1 **81337 cells / 13796 flip-flops**.
+  `Flist.apu_aru` is private. Next: DISPLAY.md identity.
+- [x] P0 QueueAlloc AvailNext into AllocRun (2026-10-01):
+  `g6lc_apu_qal` / `QalEn` after `AruEn`, default 0. Instantiates
+  AvailNext and AllocRun. Guest CS ALLOC/CREATE/DISPATCH; DISPATCH
+  writes result, `used.idx`, and ISR. ALLOC and CREATE write nothing.
+  `ApuCfg.NumCapsets` stays 0. `FeatureVirgl` stays illegal. Not in
+  `g6lc_apu_sys`. Remote `tb_g6lc_apu_qal` 4 cases / 11 checks / 377
+  cycles, errors=0. `QAL_SYNTH=1`, no latches: Enable=0 **33 ports /
+  no cells**; Enable=1 **86349 cells / 15155 flip-flops**.
+  `Flist.apu_qal` is private. Next: DISPLAY.md identity.
+- [x] P0 QueueTypeAlloc type word selects GrantCapset or QueueAlloc (2026-10-01):
+  `g6lc_apu_qta` / `QtaEn` after `QalEn`, default 0. Instantiates
+  AvailNext, GrantCapset, and QueueAlloc. GET_CAPSET/INFO select
+  Venus; ALLOC/CREATE/DISPATCH select QueueAlloc. `ApuCfg.NumCapsets`
+  stays 0. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`.
+  Remote `tb_g6lc_apu_qta` 6 cases / 16 checks / 547 cycles,
+  errors=0. `QTA_SYNTH=1`, no latches: Enable=0 **33 ports / no
+  cells**; Enable=1 **100760 cells / 18263 flip-flops**.
+  `Flist.apu_qta` is private. Next: DISPLAY.md identity.
+- [x] P0 VenusCtrlAlloc private CFG and QueueNotify into QueueTypeAlloc (2026-10-01):
+  `g6lc_apu_vca` / `VcaEn` after `QtaEn`, default 0. Instantiates
+  VenusCapset and QueueTypeAlloc. Private `num_capsets` reads as 1.
+  QueueNotify of queue 0 fires QueueTypeAlloc. `ApuCfg.NumCapsets`
+  stays 0. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`.
+  Remote `tb_g6lc_apu_vca` 9 cases / 22 checks / 597 cycles,
+  errors=0. `VCA_SYNTH=1`, no latches: Enable=0 **33 ports / no
+  cells**; Enable=1 **101912 cells / 18796 flip-flops**.
+  `Flist.apu_vca` is private. Next: DISPLAY.md identity.
+- [x] P0 QueuePumpAlloc drain until EMPTY (2026-10-01):
+  `g6lc_apu_qpa` / `QpaEn` after `VcaEn`, default 0. Instantiates
+  VenusCtrlAlloc. QueueNotify of control queue 0 drains until
+  AvailNext is EMPTY. Type 88 ALLOC rides the same drain as
+  GET_CAPSET. QueueTypeAlloc holds `capset_q` across Idle except
+  `gnh_only` so a pump EMPTY peek keeps the GrantCapset ISR.
+  `ApuCfg.NumCapsets` stays 0. `FeatureVirgl` stays illegal. Not in
+  `g6lc_apu_sys`. Remote `tb_g6lc_apu_qpa` 10 cases / 24 checks /
+  770 cycles, errors=0. `QPA_SYNTH=1`, no latches: Enable=0 **33
+  ports / no cells**; Enable=1 **103410 cells / 19425 flip-flops**.
+  `Flist.apu_qpa` is private. Next: DISPLAY.md identity.
+- [x] P0 NotifyTakeAlloc consume notify_pending into QueuePumpAlloc (2026-10-01):
+  `g6lc_apu_nta` / `NtaEn` after `QpaEn`, default 0. Instantiates
+  QueuePumpAlloc. `arm` latches control-queue bases. virtio-mmio
+  `notify_pending[0]` drains that ALLOC pump. Type 88 ALLOC rides
+  the doorbell. `ApuCfg.NumCapsets` stays 0. `FeatureVirgl` stays
+  illegal. Not in `g6lc_apu_sys`. Remote `tb_g6lc_apu_nta` 7 cases
+  / 13 checks / 241 cycles, errors=0. `NTA_SYNTH=1`, no latches:
+  Enable=0 **35 ports / no cells**; Enable=1 **105632 cells /
+  20442 flip-flops**. `Flist.apu_nta` is private. Next: DISPLAY.md
+  identity.
+- [x] P0 VqTakeAlloc vq_state arms NotifyTakeAlloc (2026-10-01):
+  `g6lc_apu_vqa` / `VqaEn` after `NtaEn`, default 0. Instantiates
+  NotifyTakeAlloc. virtio `vq_state[0]` arms on `notify_pending[0]`.
+  Ports are `vq0_i`/`vq1_i`. Type 88 ALLOC rides the doorbell.
+  `ApuCfg.NumCapsets` stays 0. `FeatureVirgl` stays illegal. Not in
+  `g6lc_apu_sys`. Remote `tb_g6lc_apu_vqa` 7 cases / 12 checks /
+  243 cycles, errors=0. `VQA_SYNTH=1`, no latches: Enable=0 **37
+  ports / no cells**; Enable=1 **108997 cells / 21279 flip-flops**.
+  `Flist.apu_vqa` is private. Next: DISPLAY.md identity.
+- [x] P0 VqAxiAlloc guest beats on 64-bit AXI (2026-10-01):
+  `g6lc_apu_vaa` / `VaaEn` after `VqaEn`, default 0. Instantiates
+  VqTakeAlloc. Guest beats on 64-bit AXI (SIZE=2 for 4B, SIZE=3 INCR
+  for longer). Type 88 ALLOC rides the doorbell. `ApuCfg.NumCapsets`
+  stays 0. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`.
+  Remote `tb_g6lc_apu_vaa` 7 cases / 12 checks / 426 cycles,
+  errors=0. `VAA_SYNTH=1`, no latches: Enable=0 **21 ports / no
+  cells**; Enable=1 **111719 cells / 21895 flip-flops**.
+  `Flist.apu_vaa` is private. Next: DISPLAY.md identity.
+- [x] P0 VenusBegin Mesa vn_protocol vkBeginCommandBuffer (2026-10-01):
+  `g6lc_apu_vbg` / `VbgEn` after `VaaEn`, default 0. Decodes Mesa
+  `vn_protocol` `vkBeginCommandBuffer` (type 90, sType 42, PRIMARY
+  null inheritance). GENERATE_REPLY writes type + VK_SUCCESS.
+  `ApuCfg.NumCapsets` stays 0. `FeatureVirgl` stays illegal. Not in
+  `g6lc_apu_sys`. Remote `tb_g6lc_apu_vbg` 11 cases / 17 checks /
+  350 cycles, errors=0. `VBG_SYNTH=1`, no latches: Enable=0 **12
+  ports / no cells**; Enable=1 **1947 cells / 708 flip-flops**.
+  `Flist.apu_vbg` is private. Next: DISPLAY.md identity.
+- [x] P0 BeginAlloc ALLOC CMDBUF then BEGIN LOOKUP (2026-10-01):
+  `g6lc_apu_bal` / `BalEn` after `VbgEn`, default 0. Instantiates
+  one GenHandle plus VenusBegin. `vkAllocateCommandBuffers` ALLOCs
+  CMDBUF; `vkBeginCommandBuffer` LOOKUPs that published handle.
+  `ApuCfg.NumCapsets` stays 0. `FeatureVirgl` stays illegal. Not in
+  `g6lc_apu_sys`. Remote `tb_g6lc_apu_bal` 8 cases / 17 checks /
+  554 cycles, errors=0. `BAL_SYNTH=1`, no latches: Enable=0 **13
+  ports / no cells**; Enable=1 **9018 cells / 2134 flip-flops**.
+  `Flist.apu_bal` is private. Next: DISPLAY.md identity.
+- [x] P0 BeginRun ALLOC BEGIN CREATE DISPATCH (2026-10-01):
+  `g6lc_apu_bru` / `BruEn` after `BalEn`, default 0. Instantiates
+  VenusEncode, GenHandle, VenusBegin, VenusDispatch, and
+  SpirvSubset. `vkAllocateCommandBuffers` ALLOCs CMDBUF;
+  `vkBeginCommandBuffer` LOOKUPs that handle;
+  `vkCreateShaderModule` commits SPIR-V; `vkCmdDispatch` LOOKUPs
+  the begun CMDBUF and kicks 2+3=5 then 4+5=9. `ApuCfg.NumCapsets`
+  stays 0. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`.
+  Remote `tb_g6lc_apu_bru` 10 cases / 22 checks / 1110 cycles,
+  errors=0. `BRU_SYNTH=1`, no latches: Enable=0 **17 ports / no
+  cells**; Enable=1 **83920 cells / 14508 flip-flops**.
+  `Flist.apu_bru` is private. Next: DISPLAY.md identity.
+- [x] P0 QueueBegin AvailNext into BeginRun (2026-10-01):
+  `g6lc_apu_qbn` / `QbnEn` after `BruEn`, default 0. Instantiates
+  AvailNext plus BeginRun. Guest CS type 88 ALLOC, 90 BEGIN, 59
+  CREATE, 110 DISPATCH. DISPATCH writes result, used.idx, and ISR.
+  ALLOC, BEGIN, and CREATE write nothing. `ApuCfg.NumCapsets`
+  stays 0. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`.
+  Remote `tb_g6lc_apu_qbn` 6 cases / 16 checks / 551 cycles,
+  errors=0. `QBN_SYNTH=1`, no latches: Enable=0 **33 ports / no
+  cells**; Enable=1 **87586 cells / 15611 flip-flops**.
+  `Flist.apu_qbn` is private. Next: DISPLAY.md identity.
+- [x] P0 QueueTypeBegin type word mux (2026-10-01):
+  `g6lc_apu_qtb` / `QtbEn` after `QbnEn`, default 0. Instantiates
+  AvailNext, GrantCapset, and QueueBegin. GET_CAPSET/INFO select
+  Venus; type 88 ALLOC, 90 BEGIN, 59 CREATE, 110 DISPATCH select
+  QueueBegin. Idle holds `capset_q` except `gnh_only`.
+  `ApuCfg.NumCapsets` stays 0. `FeatureVirgl` stays illegal. Not in
+  `g6lc_apu_sys`. Remote `tb_g6lc_apu_qtb` 6 cases / 18 checks /
+  602 cycles, errors=0. `QTB_SYNTH=1`, no latches: Enable=0 **33
+  ports / no cells**; Enable=1 **102006 cells / 18720 flip-flops**.
+  `Flist.apu_qtb` is private. Next: DISPLAY.md identity.
+- [x] P0 VenusCtrlBegin private CFG and QueueNotify (2026-10-01):
+  `g6lc_apu_vcb` / `VcbEn` after `QtbEn`, default 0. Instantiates
+  VenusCapset plus QueueTypeBegin. Private `num_capsets` reads as
+  1. QueueNotify of queue 0 fires QueueTypeBegin so type 90 BEGIN
+  rides GET_CAPSET. Cursor queue 1 faults. `ApuCfg.NumCapsets`
+  stays 0. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`.
+  Remote `tb_g6lc_apu_vcb` 9 cases / 23 checks / 654 cycles,
+  errors=0. `VCB_SYNTH=1`, no latches: Enable=0 **33 ports / no
+  cells**; Enable=1 **103161 cells / 19254 flip-flops**.
+  `Flist.apu_vcb` is private. Next: DISPLAY.md identity.
+- [x] P0 QueuePumpBegin drain until EMPTY (2026-10-01):
+  `g6lc_apu_qpb` / `QpbEn` after `VcbEn`, default 0. Instantiates
+  VenusCtrlBegin. QueueNotify of queue 0 drains AvailNext until
+  EMPTY so type 90 BEGIN rides GET_CAPSET. CFG and INFO fire once.
+  `ApuCfg.NumCapsets` stays 0. `FeatureVirgl` stays illegal. Not in
+  `g6lc_apu_sys`. Remote `tb_g6lc_apu_qpb` 10 cases / 25 checks /
+  837 cycles, errors=0. `QPB_SYNTH=1`, no latches: Enable=0 **33
+  ports / no cells**; Enable=1 **104658 cells / 19884 flip-flops**.
+  `Flist.apu_qpb` is private. Next: DISPLAY.md identity.
+- [x] P0 NotifyTakeBegin doorbell into QueuePumpBegin (2026-10-01):
+  `g6lc_apu_ntb` / `NtbEn` after `QpbEn`, default 0. Instantiates
+  QueuePumpBegin. `arm` latches bases; `notify_pending[0]` drains
+  the pump; type 88 ALLOC and type 90 BEGIN ride the doorbell.
+  Cursor `notify_pending[1]` faults. `ApuCfg.NumCapsets` stays 0.
+  `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`. Remote
+  `tb_g6lc_apu_ntb` 7 cases / 14 checks / 317 cycles, errors=0.
+  `NTB_SYNTH=1`, no latches: Enable=0 **35 ports / no cells**;
+  Enable=1 **106882 cells / 20902 flip-flops**. `Flist.apu_ntb`
+  is private. Next: DISPLAY.md identity.
+- [x] P0 VqTakeBegin vq_state arm (2026-10-01):
+  `g6lc_apu_vqb` / `VqbEn` after `NtbEn`, default 0. Instantiates
+  NotifyTakeBegin. virtio `vq_state[0]` arms on `notify_pending[0]`.
+  Ports are `vq0_i`/`vq1_i`. Type 88 ALLOC and type 90 BEGIN ride
+  the doorbell. A doorbell with `ready=0` faults and still clears.
+  `ApuCfg.NumCapsets` stays 0. `FeatureVirgl` stays illegal. Not in
+  `g6lc_apu_sys`. Remote `tb_g6lc_apu_vqb` 7 cases / 13 checks /
+  318 cycles, errors=0. `VQB_SYNTH=1`, no latches: Enable=0 **37
+  ports / no cells**; Enable=1 **110250 cells / 21740 flip-flops**.
+  `Flist.apu_vqb` is private. Next: DISPLAY.md identity.
+- [x] P0 VqAxiBegin guest beats on 64-bit AXI (2026-10-01):
+  `g6lc_apu_vab` / `VabEn` after `VqbEn`, default 0. Instantiates
+  VqTakeBegin. 4-byte windows use SIZE=2; longer windows use
+  SIZE=3 INCR. Type 88 ALLOC and type 90 BEGIN ride the doorbell.
+  Converter does not use `dma_read`. `ApuCfg.NumCapsets` stays 0.
+  `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`. Remote
+  `tb_g6lc_apu_vab` 7 cases / 13 checks / 553 cycles, errors=0.
+  `VAB_SYNTH=1`, no latches: Enable=0 **21 ports / no cells**;
+  Enable=1 **112972 cells / 22356 flip-flops**. `Flist.apu_vab`
+  is private. Next: DISPLAY.md identity.
+- [x] P0 VenusEnd Mesa vn_protocol vkEndCommandBuffer (2026-10-01):
+  `g6lc_apu_ven` / `VenEn` after `VabEn`, default 0. Decodes Mesa
+  `vn_protocol` `vkEndCommandBuffer` (type 91, LP64 handle).
+  GENERATE_REPLY writes type + `VK_SUCCESS` at word 4. Begin,
+  allocate, create-module, instance, dispatch, null handle, and
+  high-half handle fault. `ApuCfg.NumCapsets` stays 0.
+  `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`. Remote
+  `tb_g6lc_apu_ven` 10 cases / 16 checks / 165 cycles, errors=0.
+  `VEN_SYNTH=1`, no latches: Enable=0 **12 ports / no cells**;
+  Enable=1 **1590 cells / 644 flip-flops**. `Flist.apu_ven` is
+  private. Next: DISPLAY.md identity.
+- [x] P0 EndAlloc ALLOC then BEGIN LOOKUP then END LOOKUP (2026-10-01):
+  `g6lc_apu_eal` / `EalEn` after `VenEn`, default 0. Instantiates
+  GenHandle, VenusBegin, and VenusEnd. `vkAllocateCommandBuffers`
+  ALLOCs CMDBUF; `vkBeginCommandBuffer` LOOKUPs that handle;
+  `vkEndCommandBuffer` LOOKUPs the begun handle. Record field is
+  `end_cmd`. End before allocate or begin, MODULE-as-cmdbuf, a
+  second end, and `vkCreateInstance` fault. `ApuCfg.NumCapsets`
+  stays 0. `FeatureVirgl` stays illegal. Not in `g6lc_apu_sys`.
+  Remote `tb_g6lc_apu_eal` 10 cases / 22 checks / 778 cycles,
+  errors=0. `EAL_SYNTH=1`, no latches: Enable=0 **13 ports / no
+  cells**; Enable=1 **10853 cells / 2749 flip-flops**.
+  `Flist.apu_eal` is private. Next: DISPLAY.md identity.
+- [x] P0 type 91 END on BeginRun/QueueBegin/QueueTypeBegin (2026-10-01):
+  Folded `vkEndCommandBuffer` into `g6lc_apu_bru` / `g6lc_apu_qbn` /
+  `g6lc_apu_qtb` so type 91 rides the existing BEGIN type mux and
+  doorbell stack. No new grant bit. END LOOKUP of the begun handle;
+  END before begin, a second end, and dispatch after end fault.
+  ALLOC/BEGIN/CREATE/END write nothing on the used ring. Remote
+  `tb_g6lc_apu_bru` 11 cases / 27 checks / 1275 cycles, errors=0.
+  `BRU_SYNTH=1`, no latches: Enable=0 **17 ports / no cells**;
+  Enable=1 **85788 cells / 15090 flip-flops**. Remote
+  `tb_g6lc_apu_qbn` 7 cases / 18 checks / 613 cycles, errors=0.
+  Enable=0 **33 ports / no cells**; Enable=1 **88324 cells / 15809
+  flip-flops**. Remote `tb_g6lc_apu_qtb` 6 cases / 19 checks / 647
+  cycles, errors=0. Enable=0 **33 ports / no cells**; Enable=1
+  **102730 cells / 18916 flip-flops**. `FeatureVirgl` stays illegal.
+  `ApuCfg.NumCapsets` stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md
+  identity.
+- [x] P0 type 18 vkQueueSubmit on VenusSubmit/BeginRun/QueueBegin (2026-10-01):
+  `g6lc_apu_vqs` / `VqsEn` after `EalEn` decodes Mesa `vn_protocol`
+  `vkQueueSubmit` (type 18, one SUBMIT_INFO sType 4, one command
+  buffer, null fence). Folded into `g6lc_apu_bru` / `g6lc_apu_qbn`
+  so type 18 rides QueueTypeBegin. SUBMIT LOOKUPs the ended handle;
+  submit before end faults. GENERATE_REPLY writes type + VK_SUCCESS
+  at word 25. Remote `tb_g6lc_apu_vqs` 9 cases / 15 checks / 992
+  cycles, errors=0. Enable=0 **12 ports / no cells**; Enable=1
+  **3534 cells / 1252 flip-flops**. Remote `tb_g6lc_apu_bru` 12/30/1649,
+  Enable=1 **89579 / 16218**. Remote `tb_g6lc_apu_qbn` 7/19/669,
+  Enable=1 **90631 / 16713**. Remote `tb_g6lc_apu_qtb` 6/20/719,
+  Enable=1 **105026 / 19818**. `FeatureVirgl` stays illegal.
+  `ApuCfg.NumCapsets` stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md
+  identity.
+- [x] P0 SUBMIT/WAIT used-ring publication and vkQueueWaitIdle (2026-10-01):
+  QueueBegin publishes used.idx and ISR for type 18 SUBMIT and type 19
+  WAIT (VK_SUCCESS in the WRITE window). `g6lc_apu_vwi` / `VwiEn`
+  decodes `vkQueueWaitIdle`. Folded into BeginRun: WAIT requires a
+  prior SUBMIT. Remote `tb_g6lc_apu_vwi` 6/12/89, Enable=1 **1588 /
+  644**. Remote `tb_g6lc_apu_bru` 12/32/1679, Enable=1 **90120 /
+  16353**. Remote `tb_g6lc_apu_qbn` 7/20/712, Enable=1 **91120 /
+  16848**. Remote `tb_g6lc_apu_qtb` 6/21/778, Enable=1 **105508 /
+  19953**. `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 QueueBegin WRITE publication for CREATE/ALLOC/BEGIN/END (2026-10-01):
+  A WRITE last descriptor publishes handle (CREATE/ALLOC) or
+  VK_SUCCESS (BEGIN/END) then used.idx and ISR. DISPATCH/SUBMIT/WAIT
+  still require WRITE. Remote `tb_g6lc_apu_qbn` 7/19/744, Enable=1
+  **91162 / 16849**. Remote `tb_g6lc_apu_qtb` 6/20/810, Enable=1
+  **105537 / 19951**. `FeatureVirgl` stays illegal. `NumCapsets`
+  stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 type 17 vkGetDeviceQueue on VenusGetQueue/BeginRun/QueueBegin (2026-10-01):
+  `g6lc_apu_vgq` / `VgqEn` after `VwiEn` decodes Mesa `vn_protocol`
+  `vkGetDeviceQueue` (type 17, family 0, index 0). Folded into
+  `g6lc_apu_bru` / `g6lc_apu_qbn` so type 17 rides QueueTypeBegin.
+  BeginRun ALLOCs `APU_GNH_QUEUE` from the non-zero device id
+  (GenHandle refuses object_id 0). GENERATE_REPLY writes type then
+  the published QUEUE handle at words 6–7. SUBMIT and WAIT require
+  that published queue. Remote `tb_g6lc_apu_vgq` 7/13/134, Enable=1
+  **1781 / 708**. Remote `tb_g6lc_apu_bru` 12/34/1702, Enable=1
+  **91383 / 16724**. Remote `tb_g6lc_apu_qbn` 7/20/783, Enable=1
+  **92131 / 17187**. Remote `tb_g6lc_apu_qtb` 6/21/865, Enable=1
+  **106507 / 20290**. `FeatureVirgl` stays illegal. `NumCapsets`
+  stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 type 11 vkCreateDevice on VenusCreateDevice/BeginRun/QueueBegin (2026-10-01):
+  `g6lc_apu_vcd` / `VcdEn` after `VgqEn` decodes Mesa `vn_protocol`
+  `vkCreateDevice` (type 11, sType 3 DEVICE_CREATE_INFO, one queue
+  family 0 count 1 priority 1.0). Folded into `g6lc_apu_bru` /
+  `g6lc_apu_qbn` so type 11 rides QueueTypeBegin. BeginRun ALLOCs
+  `APU_GNH_DEVICE` from the physical-device id. GetDeviceQueue
+  LOOKUPs that published DEVICE handle then ALLOCs QUEUE. GENERATE_REPLY
+  writes type + VK_SUCCESS then the DEVICE handle at words 32–37.
+  Remote `tb_g6lc_apu_vcd` 7/13/926, Enable=1 **4215 / 1412**. Remote
+  `tb_g6lc_apu_bru` 12/37/1880, Enable=1 **94216 / 17819**. Remote
+  `tb_g6lc_apu_qbn` 7/21/856, Enable=1 **94691 / 18248**. Remote
+  `tb_g6lc_apu_qtb` 6/22/954, Enable=1 **109065 / 21351**.
+  `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 type 0 vkCreateInstance on VenusCreateInstance/BeginRun/QueueBegin (2026-10-02):
+  `g6lc_apu_vci` / `VciEn` after `VcdEn` decodes Mesa `vn_protocol`
+  `vkCreateInstance` (type 0, sType 1 INSTANCE_CREATE_INFO, no
+  application info, no layers/extensions). Folded into
+  `g6lc_apu_bru` / `g6lc_apu_qbn` so type 0 rides QueueTypeBegin.
+  BeginRun ALLOCs `APU_GNH_INSTANCE` from the info pointer.
+  CreateDevice requires that prior instance. GENERATE_REPLY writes
+  type + VK_SUCCESS then the INSTANCE handle at words 40–45.
+  Remote `tb_g6lc_apu_vci` 7/13/566, Enable=1 **2646 / 900**. Remote
+  `tb_g6lc_apu_bru` 12/40/2126, Enable=1 **95993 / 18467**. Remote
+  `tb_g6lc_apu_qbn` 7/22/911, Enable=1 **96146 / 18870**. Remote
+  `tb_g6lc_apu_qtb` 6/23/1025, Enable=1 **110523 / 21973**.
+  `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 type 2 vkEnumeratePhysicalDevices on VenusEnumeratePhys/BeginRun/QueueBegin (2026-10-02):
+  `g6lc_apu_vep` / `VepEn` after `VciEn` decodes Mesa `vn_protocol`
+  `vkEnumeratePhysicalDevices` (type 2, count 1). Folded into
+  `g6lc_apu_bru` / `g6lc_apu_qbn` so type 2 rides QueueTypeBegin.
+  BeginRun LOOKUPs the published INSTANCE then ALLOCs `APU_GNH_PHYS`.
+  CreateDevice LOOKUPs that PHYS then ALLOCs DEVICE. GENERATE_REPLY
+  writes type + VK_SUCCESS then the PHYS handle at words 48–53.
+  Remote `tb_g6lc_apu_vep` 7/13/388, Enable=1 **1814 / 644**. Remote
+  `tb_g6lc_apu_bru` 12/43/2260, Enable=1 **97347 / 18889**. Remote
+  `tb_g6lc_apu_qbn` 7/23/961, Enable=1 **97260 / 19250**. Remote
+  `tb_g6lc_apu_qtb` 6/24/1091, Enable=1 **111643 / 22353**.
+  `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 type 7 vkGetPhysicalDeviceQueueFamilyProperties on VenusQueueFamily/BeginRun/QueueBegin (2026-10-02):
+  `g6lc_apu_vqf` / `VqfEn` after `VepEn` decodes Mesa `vn_protocol`
+  `vkGetPhysicalDeviceQueueFamilyProperties` (type 7, count 1).
+  Folded into `g6lc_apu_bru` / `g6lc_apu_qbn` so type 7 rides
+  QueueTypeBegin. BeginRun LOOKUPs the published PHYS (no new
+  GenHandle kind). CreateDevice requires that query. GENERATE_REPLY
+  writes type then family count and GRAPHICS|COMPUTE flags at words
+  56–61. Remote `tb_g6lc_apu_vqf` 7/13/388, Enable=1 **1816 / 644**.
+  Remote `tb_g6lc_apu_bru` 12/46/2474, Enable=1 **98572 / 19281**.
+  Remote `tb_g6lc_apu_qbn` 7/24/1007, Enable=1 **98362 / 19640**.
+  Remote `tb_g6lc_apu_qtb` 6/25/1153, Enable=1 **112740 / 22743**.
+  `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 type 3 vkGetPhysicalDeviceFeatures and type 6
+  vkGetPhysicalDeviceProperties on VenusPhysFeatures/VenusPhysProps/BeginRun/QueueBegin
+  (2026-10-02): `g6lc_apu_vpf` / `VpfEn` after `VqfEn` decodes Mesa
+  `vn_protocol` `vkGetPhysicalDeviceFeatures` (type 3).
+  `g6lc_apu_vpp` / `VppEn` decodes `vkGetPhysicalDeviceProperties`
+  (type 6). Folded into `g6lc_apu_bru` / `g6lc_apu_qbn` so types 3
+  and 6 ride QueueTypeBegin. BeginRun LOOKUPs PHYS (no new
+  GenHandle kind). CreateDevice requires features, properties, and
+  the queue-family query. Compact GENERATE_REPLY publishes
+  fragmentStoresAndAtomics at words 64–69 and Vulkan 1.1
+  apiVersion plus maxBoundDescriptorSets=4 at words 72–77.
+  Remote `tb_g6lc_apu_vpf` 7/13/326, Enable=1 **1651 / 644**.
+  Remote `tb_g6lc_apu_vpp` 7/13/326, Enable=1 **1651 / 644**.
+  Remote `tb_g6lc_apu_bru` 12/50/2585, Enable=1 **100366 / 19746**.
+  Remote `tb_g6lc_apu_qbn` 7/26/1085, Enable=1 **99929 / 20101**.
+  Remote `tb_g6lc_apu_qtb` 6/27/1263, Enable=1 **114291 / 23204**.
+  `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 type 8 vkGetPhysicalDeviceMemoryProperties on VenusPhysMemory/BeginRun/QueueBegin (2026-10-02):
+  `g6lc_apu_vmp` / `VmpEn` after `VppEn` decodes Mesa `vn_protocol`
+  `vkGetPhysicalDeviceMemoryProperties` (type 8). Folded into
+  `g6lc_apu_bru` / `g6lc_apu_qbn` so type 8 rides QueueTypeBegin.
+  BeginRun LOOKUPs PHYS (no new GenHandle kind). CreateDevice
+  requires features, properties, memory properties, and the
+  queue-family query. Compact GENERATE_REPLY publishes type count 2,
+  DEVICE_LOCAL, HOST_VISIBLE|HOST_COHERENT, and heap count 1 at
+  words 80–85. Remote `tb_g6lc_apu_vmp` 7/13/326, Enable=1 **1650 / 644**.
+  Remote `tb_g6lc_apu_bru` 12/52/2641, Enable=1 **101258 / 19978**.
+  Remote `tb_g6lc_apu_qbn` 7/27/1124, Enable=1 **100695 / 20331**.
+  Remote `tb_g6lc_apu_qtb` 6/28/1318, Enable=1 **115051 / 23434**.
+  `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 type 21 vkAllocateMemory on VenusAllocMemory/BeginRun/QueueBegin (2026-10-02):
+  `g6lc_apu_vam` / `VamEn` after `VmpEn` decodes Mesa `vn_protocol`
+  `vkAllocateMemory` (type 21, sType 5 MEMORY_ALLOCATE_INFO, type
+  index 0 or 1). Folded into `g6lc_apu_bru` / `g6lc_apu_qbn` so type
+  21 rides QueueTypeBegin. BeginRun LOOKUPs DEVICE then ALLOCs
+  `APU_GNH_MEMORY` from pMemory[31:0]. Requires the memory-properties
+  query. GENERATE_REPLY writes type + VK_SUCCESS then the MEMORY
+  handle at words 88–93. Bru op widened to 5 bits; GenHandle kind
+  widened to 4 bits (`APU_GNH_MEMORY=8`). Remote `tb_g6lc_apu_vam`
+  8/14/631, Enable=1 **2791 / 964**. Remote `tb_g6lc_apu_bru`
+  12/54/2734, Enable=1 **103295 / 20603**. Remote `tb_g6lc_apu_qbn`
+  7/28/1177, Enable=1 **103651 / 20987**. Remote `tb_g6lc_apu_qtb`
+  6/29/1387, Enable=1 **118011 / 24091**. `FeatureVirgl` stays
+  illegal. `NumCapsets` stays 0. Not in `g6lc_apu_sys`. Next:
+  DISPLAY.md identity.
+- [x] P0 type 50 vkCreateBuffer on VenusCreateBuffer/BeginRun/QueueBegin (2026-10-02):
+  `g6lc_apu_vxb` / `VxbEn` after `VamEn` decodes Mesa `vn_protocol`
+  `vkCreateBuffer` (type 50, sType 12 BUFFER_CREATE_INFO, usage
+  STORAGE_BUFFER). Folded into `g6lc_apu_bru` / `g6lc_apu_qbn` so
+  type 50 rides QueueTypeBegin. BeginRun LOOKUPs DEVICE then ALLOCs
+  `APU_GNH_BUFFER` from pBuffer[31:0]. GENERATE_REPLY writes type +
+  VK_SUCCESS then the BUFFER handle at words 96–101. Bru op
+  `APU_BRU_BUFFER=17`. GenHandle kind `APU_GNH_BUFFER=9`. Remote
+  `tb_g6lc_apu_vxb` 8/14/815, Enable=1 **3339 / 1220**. Remote
+  `tb_g6lc_apu_bru` 12/57/2968, Enable=1 **105440 / 21378**. Remote
+  `tb_g6lc_apu_qbn` 7/29/1237, Enable=1 **105555 / 21728**. Remote
+  `tb_g6lc_apu_qtb` 6/30/1463, Enable=1 **119905 / 24832**.
+  `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 type 28 vkBindBufferMemory on VenusBindBuffer/BeginRun/QueueBegin (2026-10-02):
+  `g6lc_apu_vbb` / `VbbEn` after `VxbEn` decodes Mesa `vn_protocol`
+  `vkBindBufferMemory` (type 28, offset 0). Folded into `g6lc_apu_bru` /
+  `g6lc_apu_qbn` so type 28 rides QueueTypeBegin. BeginRun LOOKUPs
+  BUFFER then LOOKUPs MEMORY. No new GenHandle slot. GENERATE_REPLY
+  writes type + VK_SUCCESS at words 104–109. Bru op `APU_BRU_BIND=18`.
+  Remote `tb_g6lc_apu_vbb` 8/14/435, Enable=1 **2039 / 772**. Remote
+  `tb_g6lc_apu_bru` 12/60/3094, Enable=1 **107269 / 21802**. Remote
+  `tb_g6lc_apu_qbn` 7/30/1284, Enable=1 **107114 / 22118**. Remote
+  `tb_g6lc_apu_qtb` 6/31/1526, Enable=1 **121481 / 25222**.
+  `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 type 23 vkMapMemory on VenusMapMemory/BeginRun/QueueBegin (2026-10-02):
+  `g6lc_apu_vmm` / `VmmEn` after `VbbEn` decodes Mesa `vn_protocol`
+  `vkMapMemory` (type 23, offset 0, map flags 0). Folded into
+  `g6lc_apu_bru` / `g6lc_apu_qbn` so type 23 rides QueueTypeBegin.
+  BeginRun LOOKUPs MEMORY. No new GenHandle slot. GENERATE_REPLY
+  writes type + VK_SUCCESS then `APU_SHM_BASE` at words 112–117.
+  Bru op `APU_BRU_MAP=19`. Remote `tb_g6lc_apu_vmm` 9/15/548,
+  Enable=1 **2137 / 772**. Remote `tb_g6lc_apu_bru` 12/63/3230,
+  Enable=1 **108868 / 22289**. Remote `tb_g6lc_apu_qbn` 7/31/1332,
+  Enable=1 **108595 / 22603**. Remote `tb_g6lc_apu_qtb` 6/32/1590,
+  Enable=1 **122959 / 25707**. `FeatureVirgl` stays illegal.
+  `NumCapsets` stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md
+  identity.
+- [x] P0 type 24 vkUnmapMemory on VenusUnmapMemory/BeginRun/QueueBegin (2026-10-02):
+  `g6lc_apu_vum` / `VumEn` after `VmmEn` decodes Mesa `vn_protocol`
+  `vkUnmapMemory` (type 24, void). Folded into `g6lc_apu_bru` /
+  `g6lc_apu_qbn`. BeginRun requires a prior map, LOOKUPs MEMORY, then
+  clears map_ok. GENERATE_REPLY writes type at words 120–125. Bru op
+  `APU_BRU_UNMAP=20`. Remote `tb_g6lc_apu_vum` 6/12/268, Enable=1
+  **1715 / 708**. Remote `tb_g6lc_apu_bru` 12/67/3386, Enable=1
+  **109729 / 22521**. Remote `tb_g6lc_apu_qbn` 7/32/1371, Enable=1
+  **109358 / 22833**. Remote `tb_g6lc_apu_qtb` 6/33/1645, Enable=1
+  **123711 / 25937**. `FeatureVirgl` stays illegal. `NumCapsets`
+  stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 type 30 vkGetBufferMemoryRequirements and type 25
+  vkFlushMappedMemoryRanges on VenusBufReq/VenusFlushMap/BeginRun/QueueBegin
+  (2026-10-02): `g6lc_apu_vbm` / `VbmEn` after `VumEn` decodes Mesa
+  `vn_protocol` `vkGetBufferMemoryRequirements` (type 30, void). BeginRun
+  LOOKUPs BUFFER. Compact GENERATE_REPLY publishes size 4096, alignment
+  256, memoryTypeBits 3 at words 128–133. Bru op `APU_BRU_BUFREQ=21`.
+  `g6lc_apu_vfm` / `VfmEn` decodes `vkFlushMappedMemoryRanges` (type 25,
+  sType 6, count 1, offset 0). BeginRun requires a prior map, LOOKUPs
+  MEMORY. Bru op `APU_BRU_FLUSH=22`. Remote `tb_g6lc_apu_vbm` 7/13/349,
+  Enable=1 **1781 / 708**. Remote `tb_g6lc_apu_vfm` 8/14/633, Enable=1
+  **2674 / 964**. Remote `tb_g6lc_apu_bru` 12/73/3681, Enable=1
+  **112366 / 23367**. Remote `tb_g6lc_apu_qbn` 7/34/1463, Enable=1
+  **111759 / 23675**. Remote `tb_g6lc_apu_qtb` 6/35/1769, Enable=1
+  **126105 / 26779**. `FeatureVirgl` stays illegal. `NumCapsets` stays
+  0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 type 26 vkInvalidateMappedMemoryRanges and type 27
+  vkGetDeviceMemoryCommitment on VenusInvalidateMap/VenusMemCommit/BeginRun/QueueBegin
+  (2026-10-02): `g6lc_apu_vim` / `VimEn` after `VfmEn` decodes Mesa
+  `vn_protocol` `vkInvalidateMappedMemoryRanges` (type 26, sType 6,
+  count 1, offset 0). BeginRun requires a prior map, LOOKUPs MEMORY.
+  GENERATE_REPLY writes type + VK_SUCCESS at words 144–149. Bru op
+  `APU_BRU_INVAL=23`. `g6lc_apu_vmc` / `VmcEn` decodes
+  `vkGetDeviceMemoryCommitment` (type 27, void). BeginRun LOOKUPs
+  MEMORY. Compact GENERATE_REPLY publishes committed size 4096 at
+  words 152–157. Bru op `APU_BRU_MEMC=24`. Remote `tb_g6lc_apu_vim`
+  8/14/633, Enable=1 **2674 / 964**. Remote `tb_g6lc_apu_vmc` 7/13/349,
+  Enable=1 **1781 / 708**. Remote `tb_g6lc_apu_bru` 12/79/3975, Enable=1
+  **114939 / 24213**. Remote `tb_g6lc_apu_qbn` 7/36/1555, Enable=1
+  **114119 / 24517**. Remote `tb_g6lc_apu_qtb` 6/37/1893, Enable=1
+  **128455 / 27621**. `FeatureVirgl` stays illegal. `NumCapsets` stays
+  0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 72/68/66 vkCreateDescriptorSetLayout, vkCreatePipelineLayout,
+  vkCreateComputePipelines on VenusDescLayout/VenusPipeLayout/VenusComputePipe
+  (2026-10-02): GenHandle widened to 16 slots, handle
+  `{gen[31:16], 12'd0, slot[3:0]}`. Kinds `APU_GNH_DSLAYOUT=10`,
+  `PLAYOUT=11`, `PIPELINE=12`. `g6lc_apu_vdl` / `VdlEn` type 72 sType 32
+  one STORAGE_BUFFER compute binding; LOOKUP DEVICE then ALLOC DSLAYOUT;
+  `APU_BRU_DSLAYOUT=25`. `g6lc_apu_vpl` / `VplEn` type 68 sType 30 requires
+  dsl_ok; LOOKUP DEVICE then ALLOC PLAYOUT; `APU_BRU_PLAYOUT=26`.
+  `g6lc_apu_vcp` / `VcpEn` type 66 sType 29 requires pl_ok and a loaded
+  MODULE; LOOKUP DEVICE then ALLOC PIPELINE; `APU_BRU_CPIPE=27`. Remote
+  `tb_g6lc_apu_gnh` 6/33/162, Enable=1 **6131 / 1071**. Remote
+  `tb_g6lc_apu_vdl` 7/13/564, Enable=1 **2745 / 964**. Remote
+  `tb_g6lc_apu_vpl` 7/13/552, Enable=1 **2837 / 1028**. Remote
+  `tb_g6lc_apu_vcp` 7/13/698, Enable=1 **3595 / 1348**. Remote
+  `tb_g6lc_apu_bru` 12/88/4581, Enable=1 **123309 / 26805**. Remote
+  `tb_g6lc_apu_qbn` 7/39/1728, Enable=1 **121894 / 27031**. Remote
+  `tb_g6lc_apu_qtb` 6/40/2114, Enable=1 **136230 / 30135**. `FeatureVirgl`
+  stays illegal. `NumCapsets` stays 0. Not in `g6lc_apu_sys`. Next:
+  DISPLAY.md identity.
+- [x] P0 types 77/79/93/103 vkAllocateDescriptorSets, vkUpdateDescriptorSets,
+  vkCmdBindPipeline, vkCmdBindDescriptorSets on
+  VenusDescAlloc/VenusUpdateDesc/VenusBindPipe/VenusBindDesc
+  (2026-10-02): `g6lc_apu_vda` / `VdaEn` type 77 sType 34 one layout,
+  dummy pool `64'hB7`; LOOKUP DEVICE then ALLOC DESCSET kind 13;
+  `APU_BRU_DESCSET=28`. `g6lc_apu_vud` / `VudEn` type 79 sType 35
+  STORAGE_BUFFER write; LOOKUP DESCSET then LOOKUP BUFFER; no ALLOC;
+  `APU_BRU_UPDATE=29`. `g6lc_apu_vbp` / `VbpEn` type 93 compute bind
+  point; LOOKUP PIPELINE after BEGIN; `APU_BRU_BINDPIPE=30`.
+  `g6lc_apu_vbd` / `VbdEn` type 103; LOOKUP DESCSET after BEGIN;
+  `APU_BRU_BINDDESC=31`. 5-bit bru op is full. DISPATCH requires
+  pipe_bound and desc_bound. bru FSM widened to 7 bits. Remote
+  `tb_g6lc_apu_vda` 7/13/542, Enable=1 **2803 / 1028**. Remote
+  `tb_g6lc_apu_vud` 7/11/682, Enable=1 **3437 / 1284**. Remote
+  `tb_g6lc_apu_vbp` 7/11/336, Enable=1 **1817 / 708**. Remote
+  `tb_g6lc_apu_vbd` 7/11/492, Enable=1 **2676 / 1028**. Remote
+  `tb_g6lc_apu_bru` 12/97/4947, Enable=1 **130462 / 28982**. Remote
+  `tb_g6lc_apu_qbn` 7/44/1956, Enable=1 **128099 / 29076**. Remote
+  `tb_g6lc_apu_qtb` 6/44/2377, Enable=1 **142415 / 32180**. `FeatureVirgl`
+  stays illegal. `NumCapsets` stays 0. Not in `g6lc_apu_sys`. Next:
+  DISPLAY.md identity.
+- [x] P0 types 74/54/29/31 vkCreateDescriptorPool, vkCreateImage,
+  vkBindImageMemory, vkGetImageMemoryRequirements on
+  VenusDescPool/VenusCreateImage/VenusBindImage/VenusImageReq
+  (2026-10-02): bru op widened to 6 bits. `g6lc_apu_vpo` / `VpoEn`
+  type 74 sType 33 one STORAGE_BUFFER size; LOOKUP DEVICE then ALLOC
+  POOL kind 14; `APU_BRU_POOL=32`. AllocateDescriptorSets LOOKUPs that
+  POOL. `g6lc_apu_vxi` / `VxiEn` type 54 sType 14 64x64 2D STORAGE
+  linear R8G8B8A8; LOOKUP DEVICE then ALLOC IMAGE kind 15;
+  `APU_BRU_IMAGE=33`. `g6lc_apu_vmi` / `VmiEn` type 31 LOOKUP IMAGE,
+  publishes size 16384; `APU_BRU_IMGREQ=35`. `g6lc_apu_vbi` / `VbiEn`
+  type 29 offset 0; LOOKUP IMAGE then LOOKUP MEMORY;
+  `APU_BRU_BINDIMG=34`. Remote `tb_g6lc_apu_vpo` 7/12/588, Enable=1
+  **2811 / 964**. Remote `tb_g6lc_apu_vxi` 7/12/792, Enable=1
+  **3616 / 1220**. Remote `tb_g6lc_apu_vbi` 7/12/374, Enable=1
+  **2040 / 772**. Remote `tb_g6lc_apu_vmi` 7/12/350, Enable=1
+  **1847 / 708**. Remote `tb_g6lc_apu_bru` 12/105/5308, Enable=1
+  **138433 / 31541**. Remote `tb_g6lc_apu_qbn` 7/48/2175, Enable=1
+  **135281 / 31536**. Remote `tb_g6lc_apu_qtb` 6/48/2660, Enable=1
+  **149588 / 34640**. `FeatureVirgl` stays illegal. `NumCapsets`
+  stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 57/70/82/65 vkCreateImageView, vkCreateSampler,
+  vkCreateRenderPass, vkCreateGraphicsPipelines on
+  VenusImageView/VenusSampler/VenusRenderPass/VenusGraphicsPipe
+  (2026-10-02): GenHandle widened to 32 slots and 5-bit kinds
+  (`APU_GNH_VIEW=16`, `SAMPLER=17`, `RPASS=18`). Published handle is
+  `{gen[31:16], 11'd0, slot[4:0]}`. `g6lc_apu_vxv` / `VxvEn` type 57
+  sType 15 2D COLOR R8G8B8A8 identity swizzle; LOOKUP IMAGE then ALLOC
+  VIEW; `APU_BRU_VIEW=36`. `g6lc_apu_vsm` / `VsmEn` type 70 sType 31
+  linear repeat; LOOKUP DEVICE then ALLOC SAMPLER; `APU_BRU_SAMPLER=37`.
+  `g6lc_apu_vrp` / `VrpEn` type 82 sType 38 one color attachment;
+  LOOKUP DEVICE then ALLOC RPASS; `APU_BRU_RPASS=38`. `g6lc_apu_vgp` /
+  `VgpEn` type 65 sType 28 one VERTEX stage; requires rp_ok, pl_ok, and
+  loaded MODULE; LOOKUP DEVICE then ALLOC PIPELINE (guest `BD`);
+  `APU_BRU_GPIPE=39`. Four GENERATE_REPLY windows share CS mux slot 31
+  at `APU_BRU_TAIL_REPLY=248`. Remote `tb_g6lc_apu_vxv` 7/12/766,
+  Enable=1 **3674 / 1284**. Remote `tb_g6lc_apu_vsm` 7/12/588, Enable=1
+  **2813 / 964**. Remote `tb_g6lc_apu_vrp` 7/12/588, Enable=1
+  **2814 / 964**. Remote `tb_g6lc_apu_vgp` 7/12/730, Enable=1
+  **3820 / 1412**. Remote `tb_g6lc_apu_gnh` 6/49/242, Enable=1
+  **10853 / 2080**. Remote `tb_g6lc_apu_bru` 12/113/5766, Enable=1
+  **151823 / 35785**. Remote `tb_g6lc_apu_qbn` 7/52/2424, Enable=1
+  **148203 / 35740**. Remote `tb_g6lc_apu_qtb` 6/52/2973, Enable=1
+  **162505 / 38845**. `FeatureVirgl` stays illegal. `NumCapsets`
+  stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 80/133/106/135 vkCreateFramebuffer, vkCmdBeginRenderPass,
+  vkCmdDraw, vkCmdEndRenderPass on
+  VenusFramebuffer/VenusRenderBegin/VenusDraw/VenusRenderEnd
+  (2026-10-02): `g6lc_apu_vfb` / `VfbEn` type 80 sType 37 one color
+  view 64x64; LOOKUP DEVICE then ALLOC FBUF kind 19; `APU_BRU_FBUF=40`.
+  `g6lc_apu_vrb` / `VrbEn` type 133 sType 43 64x64 INLINE; requires
+  begun CMDBUF, fbuf_ok, rp_ok; LOOKUP CMDBUF; `APU_BRU_BEGINRP=41`.
+  `g6lc_apu_vdw` / `VdwEn` type 106 three vertices; requires begun,
+  in_rp, pipe_bound; LOOKUP CMDBUF; `APU_BRU_DRAW=42`. `g6lc_apu_vre` /
+  `VreEn` type 135; requires in_rp; LOOKUP CMDBUF; `APU_BRU_ENDRP=43`.
+  GENERATE_REPLY shares CS mux slot 31. Remote `tb_g6lc_apu_vfb`
+  7/12/610, Enable=1 **3131 / 1092**. Remote `tb_g6lc_apu_vrb` 7/12/574,
+  Enable=1 **2907 / 1028**. Remote `tb_g6lc_apu_vdw` 7/12/350, Enable=1
+  **1788 / 676**. Remote `tb_g6lc_apu_vre` 7/12/302, Enable=1
+  **1589 / 644**. Remote `tb_g6lc_apu_bru` 12/121/6076, Enable=1
+  **157887 / 37701**. Remote `tb_g6lc_apu_qbn` 7/56/2619, Enable=1
+  **153897 / 37654**. Remote `tb_g6lc_apu_qtb` 6/56/3232, Enable=1
+  **168159 / 40759**. `FeatureVirgl` stays illegal. `NumCapsets`
+  stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 105/104/107 vkCmdBindVertexBuffers, vkCmdBindIndexBuffer,
+  vkCmdDrawIndexed on VenusBindVtx/VenusBindIdx/VenusDrawIdx
+  (2026-10-02): `g6lc_apu_vvb` / `VvbEn` type 105 one binding offset 0;
+  requires begun CMDBUF; LOOKUP CMDBUF then LOOKUP BUFFER;
+  `APU_BRU_BINDVTX=44`. `g6lc_apu_vib` / `VibEn` type 104 UINT16 offset 0;
+  requires begun CMDBUF; LOOKUP CMDBUF then LOOKUP BUFFER;
+  `APU_BRU_BINDIDX=45`. `g6lc_apu_vdi` / `VdiEn` type 107 three indices;
+  requires begun, in_rp, pipe_bound, vtx_bound, idx_bound; LOOKUP
+  CMDBUF; `APU_BRU_DRAWIDX=46`. GENERATE_REPLY shares CS mux slot 31.
+  No new GenHandle kind. Remote `tb_g6lc_apu_vvb` 7/12/372, Enable=1
+  **1914 / 708**. Remote `tb_g6lc_apu_vib` 7/12/360, Enable=1
+  **1879 / 708**. Remote `tb_g6lc_apu_vdi` 7/12/362, Enable=1
+  **1822 / 676**. Remote `tb_g6lc_apu_bru` 12/127/6263, Enable=1
+  **162247 / 38811**. Remote `tb_g6lc_apu_qbn` 7/59/2756, Enable=1
+  **157967 / 38764**. Remote `tb_g6lc_apu_qtb` 6/59/3417, Enable=1
+  **172279 / 41869**. `FeatureVirgl` stays illegal. `NumCapsets`
+  stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 94/95/126/134 vkCmdSetViewport, vkCmdSetScissor,
+  vkCmdPipelineBarrier, vkCmdNextSubpass on
+  VenusSetViewport/VenusSetScissor/VenusBarrier/VenusNextSubpass
+  (2026-10-02): `g6lc_apu_vvp` / `VvpEn` type 94 one 64x64 viewport;
+  requires begun CMDBUF; LOOKUP CMDBUF; `APU_BRU_SETVP=47`.
+  `g6lc_apu_vsi` / `VsiEn` type 95 one 64x64 scissor; requires begun
+  CMDBUF; LOOKUP CMDBUF; `APU_BRU_SETSC=48`. `g6lc_apu_vpb` / `VpbEn`
+  type 126 TOP_OF_PIPE zero barriers; requires begun CMDBUF; LOOKUP
+  CMDBUF; `APU_BRU_BARRIER=49`. `g6lc_apu_vns` / `VnsEn` type 134
+  INLINE; decoder accepts; BeginRun FAULTS because the compact render
+  pass has one subpass; `APU_BRU_NEXTSP=50`. GENERATE_REPLY shares CS
+  mux slot 31. Remote `tb_g6lc_apu_vvp` 7/12/422, Enable=1
+  **1932 / 676**. Remote `tb_g6lc_apu_vsi` 7/12/398, Enable=1
+  **1856 / 676**. Remote `tb_g6lc_apu_vpb` 7/12/374, Enable=1
+  **1855 / 676**. Remote `tb_g6lc_apu_vns` 7/12/314, Enable=1
+  **1685 / 676**. Remote `tb_g6lc_apu_bru` 12/134/6510, Enable=1
+  **166333 / 39953**. Remote `tb_g6lc_apu_qbn` 7/62/2897, Enable=1
+  **161887 / 39905**. Remote `tb_g6lc_apu_qtb` 6/62/3606, Enable=1
+  **176143 / 43010**. `FeatureVirgl` stays illegal. `NumCapsets`
+  stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 81/58/71/83 vkDestroyFramebuffer, vkDestroyImageView,
+  vkDestroySampler, vkDestroyRenderPass on
+  VenusDestroyFbuf/VenusDestroyView/VenusDestroySampler/VenusDestroyRpass
+  (2026-10-02): `g6lc_apu_vdf` / `VdfEn` type 81; LOOKUP FBUF then
+  `APU_GNH_RETIRE`; clears `fbuf_ok`; `APU_BRU_DFB=51`.
+  `g6lc_apu_vdx` / `VdxEn` type 58; LOOKUP VIEW then RETIRE;
+  `APU_BRU_DVW=52`. `g6lc_apu_vdk` / `VdkEn` type 71; LOOKUP SAMPLER
+  then RETIRE; `APU_BRU_DSM=53`. `g6lc_apu_vdr` / `VdrEn` type 83;
+  LOOKUP RPASS then RETIRE; clears `rp_ok`; `APU_BRU_DRP=54`.
+  GENERATE_REPLY shares CS mux slot 31. Happy-path after wait idle:
+  destroy fbuf then view then sampler then rpass. Remote
+  `tb_g6lc_apu_vdf` 7/12/350, Enable=1 **1846 / 708**. Remote
+  `tb_g6lc_apu_vdx` 7/12/350, Enable=1 **1847 / 708**. Remote
+  `tb_g6lc_apu_vdk` 7/12/350, Enable=1 **1847 / 708**. Remote
+  `tb_g6lc_apu_vdr` 7/12/350, Enable=1 **1847 / 708**. Remote
+  `tb_g6lc_apu_bru` 12/142/6750, Enable=1 **171596 / 41133**. Remote
+  `tb_g6lc_apu_qbn` 7/66/3069, Enable=1 **166740 / 41085**. Remote
+  `tb_g6lc_apu_qtb` 6/66/3842, Enable=1 **180889 / 44190**.
+  `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 51/55/22/60 vkDestroyBuffer, vkDestroyImage, vkFreeMemory,
+  vkDestroyShaderModule on
+  VenusDestroyBuf/VenusDestroyImg/VenusFreeMemory/VenusDestroyModule
+  (2026-10-02): `g6lc_apu_vdb` / `VdbEn` type 51; LOOKUP BUFFER then
+  `APU_GNH_RETIRE`; `APU_BRU_DBF=55`. `g6lc_apu_vdg` / `VdgEn` type 55;
+  LOOKUP IMAGE then RETIRE; `APU_BRU_DIM=56`. `g6lc_apu_vfe` / `VfeEn`
+  type 22; LOOKUP MEMORY then RETIRE; `APU_BRU_FME=57`. `g6lc_apu_vdm`
+  / `VdmEn` type 60; LOOKUP MODULE then RETIRE; clears `loaded_q`;
+  `APU_BRU_DMD=58`. GENERATE_REPLY shares CS mux slot 31. Happy-path
+  after destroy rpass: destroy buffer then image, free memory, destroy
+  module. Remote `tb_g6lc_apu_vdb` 7/12/350, Enable=1 **1847 / 708**.
+  Remote `tb_g6lc_apu_vdg` 7/12/350, Enable=1 **1848 / 708**. Remote
+  `tb_g6lc_apu_vfe` 7/12/350, Enable=1 **1846 / 708**. Remote
+  `tb_g6lc_apu_vdm` 7/12/350, Enable=1 **1847 / 708**. Remote
+  `tb_g6lc_apu_bru` 12/150/6990, Enable=1 **176668 / 42313**. Remote
+  `tb_g6lc_apu_qbn` 7/70/3241, Enable=1 **171423 / 42265**. Remote
+  `tb_g6lc_apu_qtb` 6/70/4078, Enable=1 **185703 / 45370**.
+  `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 67/69/73/75 vkDestroyPipeline, vkDestroyPipelineLayout,
+  vkDestroyDescriptorSetLayout, vkDestroyDescriptorPool on
+  VenusDestroyPipe/VenusDestroyPlayout/VenusDestroyDsl/VenusDestroyPool
+  (2026-10-02): `g6lc_apu_vdp` / `VdpEn` type 67; LOOKUP PIPELINE then
+  RETIRE; clears `pipe_bound`; `APU_BRU_DPL=59`. Happy path retires
+  graphics then compute pipeline. `g6lc_apu_vdy` / `VdyEn` type 69;
+  LOOKUP PLAYOUT then RETIRE; clears `pl_ok`; `APU_BRU_DYO=60`.
+  `g6lc_apu_vdt` / `VdtEn` type 73; LOOKUP DSLAYOUT then RETIRE;
+  clears `dsl_ok`; `APU_BRU_DDS=61`. `g6lc_apu_vdq` / `VdqEn` type 75;
+  LOOKUP POOL then RETIRE; clears `pool_ok`; `APU_BRU_DPO=62`. bru FSM
+  state enum is 8 bits. GENERATE_REPLY shares CS mux slot 31. Remote
+  `tb_g6lc_apu_vdp` 7/12/350, Enable=1 **1846 / 708**. Remote
+  `tb_g6lc_apu_vdy` 7/12/350, Enable=1 **1846 / 708**. Remote
+  `tb_g6lc_apu_vdt` 7/12/350, Enable=1 **1846 / 708**. Remote
+  `tb_g6lc_apu_vdq` 7/12/350, Enable=1 **1847 / 708**. Remote
+  `tb_g6lc_apu_bru` 12/160/7290, Enable=1 **182170 / 43494**. Remote
+  `tb_g6lc_apu_qbn` 7/75/3456, Enable=1 **176533 / 43446**. Remote
+  `tb_g6lc_apu_qtb` 6/75/4373, Enable=1 **190801 / 46551**.
+  `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 78/92/89/12 vkFreeDescriptorSets, vkResetCommandBuffer,
+  vkFreeCommandBuffers, vkDestroyDevice on
+  VenusFreeDescset/VenusResetCmdbuf/VenusFreeCmdbuf/VenusDestroyDevice
+  (2026-10-02): `g6lc_apu_vfs` / `VfsEn` type 78; LOOKUP DESCSET then
+  RETIRE; clears `dset_ok`; compact CS count 1, pool is not LOOKed up
+  (`DestroyDescriptorPool` already RETIREd POOL); `APU_BRU_FDS=63`.
+  `g6lc_apu_vrc` / `VrcEn` type 92; LOOKUP CMDBUF, no RETIRE; clears
+  begun/ended/in_rp/bind flags; reset flags 0; `APU_BRU_RCB=64`.
+  `g6lc_apu_vfc` / `VfcEn` type 89; LOOKUP CMDBUF then RETIRE; compact
+  CS count 1, vac pool `64'hA1` is not LOOKed up; `APU_BRU_FCB=65`.
+  `g6lc_apu_vdd` / `VddEn` type 12; CS is (device, allocator);
+  packed `obj` copies device; LOOKUP DEVICE then RETIRE;
+  `APU_BRU_DDV=66`. `apu_bru_op_e` is 7 bits. GENERATE_REPLY shares
+  CS mux slot 31. Happy path after destroy pool: free leftover
+  DESCSET, reset then free CMDBUF, destroy DEVICE. QUEUE/PHYS/INSTANCE
+  stay live. Remote `tb_g6lc_apu_vfs` 7/12/372, Enable=1 **2043 / 772**.
+  Remote `tb_g6lc_apu_vrc` 7/12/314, Enable=1 **1622 / 644**. Remote
+  `tb_g6lc_apu_vfc` 7/12/372, Enable=1 **2043 / 772**. Remote
+  `tb_g6lc_apu_vdd` 7/12/328, Enable=1 **1652 / 644**. Remote
+  `tb_g6lc_apu_bru` 12/168/7526, Enable=1 **187400 / 44641**. Remote
+  `tb_g6lc_apu_qbn` 7/79/3634, Enable=1 **181070 / 44594**. Remote
+  `tb_g6lc_apu_qtb` 6/79/4615, Enable=1 **195644 / 47699**.
+  `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 87/86/1 vkResetCommandPool, vkDestroyCommandPool,
+  vkDestroyInstance on
+  VenusResetCmdPool/VenusDestroyCmdPool/VenusDestroyInstance
+  (2026-10-02): `g6lc_apu_vpc` / `VpcEn` type 87; LOOKUP DEVICE, no
+  RETIRE; compact CS reset flags 0, vac pool `64'hA1` is not LOOKed
+  up (no command-pool kind); `APU_BRU_RCP=67`. `g6lc_apu_vdc` /
+  `VdcEn` type 86; LOOKUP DEVICE, no RETIRE; null allocator;
+  `APU_BRU_DCP=68`. `g6lc_apu_vdn` / `VdnEn` type 1; CS is (instance,
+  allocator); packed `obj` copies instance; LOOKUP INSTANCE then
+  RETIRE; clears `instanced_q`; `APU_BRU_DIN=69`. GENERATE_REPLY
+  shares CS mux slot 31. Happy path after free CMDBUF: reset then
+  destroy command pool, destroy DEVICE, destroy INSTANCE. QUEUE and
+  PHYS stay live. Remote `tb_g6lc_apu_vpc` 7/12/336, Enable=1
+  **1816 / 708**. Remote `tb_g6lc_apu_vdc` 7/12/350, Enable=1
+  **1847 / 708**. Remote `tb_g6lc_apu_vdn` 7/12/328, Enable=1
+  **1651 / 644**. Remote `tb_g6lc_apu_bru` 12/174/7696, Enable=1
+  **190714 / 45429**. Remote `tb_g6lc_apu_qbn` 7/82/3759, Enable=1
+  **184654 / 45382**. Remote `tb_g6lc_apu_qtb` 6/82/4788, Enable=1
+  **198899 / 48487**. `FeatureVirgl` stays illegal. `NumCapsets`
+  stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 4/5/14/76 vkGetPhysicalDeviceFormatProperties,
+  vkGetPhysicalDeviceImageFormatProperties,
+  vkEnumerateDeviceExtensionProperties, vkResetDescriptorPool on
+  VenusFormatProps/VenusImageFormat/VenusDeviceExt/VenusResetDescPool
+  (2026-10-02): `g6lc_apu_vgf` / `VgfEn` type 4; LOOKUP PHYS; compact
+  format 37 FEATURES `32'h00006083`; `APU_BRU_GFP=70`. `g6lc_apu_vip`
+  / `VipEn` type 5; LOOKUP PHYS; compact 64×64 STORAGE linear;
+  `APU_BRU_IFP=71`. `g6lc_apu_vxe` / `VxeEn` type 14; LOOKUP PHYS;
+  compact count 0; `APU_BRU_DEX=72`. `g6lc_apu_vrd` / `VrdEn` type
+  76; LOOKUP POOL, no RETIRE; extra `!pool_ok`; clears `desc_bound`
+  (FreeDescriptorSets still RETIREs leftover DESCSET);
+  `APU_BRU_RDP=73`. GENERATE_REPLY shares CS mux slot 31; `tail_q` is
+  8 words. Happy path: reset descriptor pool before destroy pool;
+  format / image-format / device-extension queries after
+  DestroyInstance. Remote `tb_g6lc_apu_vgf` 7/12/340, Enable=1
+  **1750 / 676**. Remote `tb_g6lc_apu_vip` 7/12/388, Enable=1
+  **1885 / 676**. Remote `tb_g6lc_apu_vxe` 7/12/366, Enable=1
+  **1750 / 644**. Remote `tb_g6lc_apu_vrd` 7/12/336, Enable=1
+  **1814 / 708**. Remote `tb_g6lc_apu_bru` 12/182/7933, Enable=1
+  **197332 / 46674**. Remote `tb_g6lc_apu_qbn` 7/86/3930, Enable=1
+  **189307 / 46622**. Remote `tb_g6lc_apu_qtb` 6/86/5023, Enable=1
+  **203540 / 49727**. `FeatureVirgl` stays illegal. `NumCapsets`
+  stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 13/20/56/84 vkEnumerateInstanceExtensionProperties,
+  vkDeviceWaitIdle, vkGetImageSubresourceLayout,
+  vkGetRenderAreaGranularity on
+  VenusInstanceExt/VenusDeviceWait/VenusSubresourceLayout/VenusRenderGranularity
+  (2026-10-02): `g6lc_apu_vie` / `VieEn` type 13; compact count 0; no
+  GenHandle LOOKUP; `APU_BRU_IEX=74`. `g6lc_apu_vwl` / `VwlEn` type
+  20; LOOKUP DEVICE; extra `!submitted_q`; `APU_BRU_DWI=75`.
+  `g6lc_apu_vsl` / `VslEn` type 56; LOOKUP IMAGE; compact rowPitch
+  256 / size 16384; `APU_BRU_ISL=76`. `g6lc_apu_vrg` / `VrgEn` type
+  84; LOOKUP RPASS; extra `!rp_ok`; compact 1×1; `APU_BRU_RAG=77`.
+  GENERATE_REPLY shares CS mux slot 31. Happy path after
+  QueueWaitIdle. Remote `tb_g6lc_apu_vie` 7/12/344, Enable=1
+  **1557 / 580**. Remote `tb_g6lc_apu_vwl` 7/12/300, Enable=1
+  **1587 / 644**. Remote `tb_g6lc_apu_vsl` 7/12/388, Enable=1
+  **1945 / 708**. Remote `tb_g6lc_apu_vrg` 7/12/350, Enable=1
+  **1845 / 708**. Remote `tb_g6lc_apu_bru` 12/190/8159, Enable=1
+  **202335 / 47759**. Remote `tb_g6lc_apu_qbn` 7/90/4092, Enable=1
+  **193193 / 47702**. Remote `tb_g6lc_apu_qtb` 6/90/5249, Enable=1
+  **207417 / 50807**. `FeatureVirgl` stays illegal. `NumCapsets`
+  stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 96/97/98/99 vkCmdSetLineWidth, vkCmdSetDepthBias,
+  vkCmdSetBlendConstants, vkCmdSetDepthBounds on
+  VenusSetLineWidth/VenusSetDepthBias/VenusSetBlendConst/VenusSetDepthBounds
+  (2026-10-02): `g6lc_apu_vlw` / `VlwEn` type 96; LOOKUP CMDBUF;
+  extra `!begun`; compact width 1.0; `APU_BRU_SLW=78`. `g6lc_apu_vzb`
+  / `VzbEn` type 97; LOOKUP CMDBUF; extra `!begun`; compact factors
+  0; `APU_BRU_SDB=79`. `g6lc_apu_vbc` / `VbcEn` type 98; LOOKUP
+  CMDBUF; extra `!begun`; compact zeros; `APU_BRU_SBC=80`.
+  `g6lc_apu_vbo` / `VboEn` type 99; LOOKUP CMDBUF; extra `!begun`;
+  compact min 0 max 1.0; `APU_BRU_SBB=81`. GENERATE_REPLY shares CS
+  mux slot 31. Happy path after PipelineBarrier. Remote
+  `tb_g6lc_apu_vlw` 7/12/312, Enable=1 **1627 / 644**. Remote
+  `tb_g6lc_apu_vzb` 7/12/336, Enable=1 **1687 / 644**. Remote
+  `tb_g6lc_apu_vbc` 7/12/348, Enable=1 **1720 / 644**. Remote
+  `tb_g6lc_apu_vbo` 7/12/324, Enable=1 **1662 / 644**. Remote
+  `tb_g6lc_apu_bru` 12/198/8379, Enable=1 **206593 / 48743**. Remote
+  `tb_g6lc_apu_qbn` 7/94/4250, Enable=1 **197258 / 48686**. Remote
+  `tb_g6lc_apu_qtb` 6/94/5471, Enable=1 **211415 / 51791**.
+  `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 100/101/102 vkCmdSetStencilCompareMask,
+  vkCmdSetStencilWriteMask, vkCmdSetStencilReference on
+  VenusSetStencilCompare/VenusSetStencilWrite/VenusSetStencilRef
+  (2026-10-02): `g6lc_apu_vcm` / `VcmEn` type 100; LOOKUP CMDBUF;
+  extra `!begun`; compact FRONT_AND_BACK mask all-ones;
+  `APU_BRU_SCM=82`. `g6lc_apu_vwm` / `VwmEn` type 101; LOOKUP CMDBUF;
+  extra `!begun`; compact FRONT_AND_BACK mask all-ones;
+  `APU_BRU_SWM=83`. `g6lc_apu_vrf` / `VrfEn` type 102; LOOKUP CMDBUF;
+  extra `!begun`; compact FRONT_AND_BACK ref 0; `APU_BRU_SRF=84`.
+  GENERATE_REPLY shares CS mux slot 31. Happy path after
+  SetDepthBounds. Remote `tb_g6lc_apu_vcm` 7/12/324, Enable=1
+  **1688 / 644**. Remote `tb_g6lc_apu_vwm` 7/12/324, Enable=1
+  **1689 / 644**. Remote `tb_g6lc_apu_vrf` 7/12/324, Enable=1
+  **1657 / 644**. Remote `tb_g6lc_apu_bru` 12/204/8541, Enable=1
+  **210272 / 49433**. Remote `tb_g6lc_apu_qbn` 7/97/4367, Enable=1
+  **200541 / 49376**. Remote `tb_g6lc_apu_qtb` 6/97/5636, Enable=1
+  **214746 / 52481**. `FeatureVirgl` stays illegal. `NumCapsets`
+  stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 112/113/114/115 vkCmdCopyBuffer, vkCmdCopyImage,
+  vkCmdBlitImage, vkCmdCopyBufferToImage on
+  VenusCopyBuffer/VenusCopyImage/VenusBlitImage/VenusCopyBufToImg
+  (2026-10-02): `g6lc_apu_vcc` / `VccEn` type 112; LOOKUP CMDBUF then
+  BUFFER src then BUFFER dst; extra `!begun` / `in_rp`; compact
+  srcOff 0, dstOff 2048, size 2048; `APU_BRU_CCB=85`.
+  `g6lc_apu_vcy` / `VcyEn` type 113; LOOKUP CMDBUF then IMAGE src/dst;
+  extra `!begun` / `in_rp`; compact TRANSFER layouts, 32x64 half-window;
+  `APU_BRU_CCI=86`. `g6lc_apu_vbl` / `VblEn` type 114; LOOKUP CMDBUF
+  then IMAGE src/dst; extra `!begun` / `in_rp`; compact NEAREST 32x64
+  blit; `APU_BRU_BLI=87`. `g6lc_apu_vbt` / `VbtEn` type 115; LOOKUP
+  CMDBUF then BUFFER src then IMAGE dst; extra `!begun` / `in_rp`;
+  compact 32x32 (4096 bytes); `APU_BRU_CBI=88`. GENERATE_REPLY shares
+  CS mux slot 31. Happy path after SetStencilReference, before
+  BeginRenderPass. Remote `tb_g6lc_apu_vcc` 8/13/505, Enable=1
+  **2205 / 772**. Remote `tb_g6lc_apu_vcy` 8/13/785, Enable=1
+  **3714 / 1284**. Remote `tb_g6lc_apu_vbl` 8/13/839, Enable=1
+  **3849 / 1284**. Remote `tb_g6lc_apu_vbt` 8/13/727, Enable=1
+  **3577 / 1284**. Remote `tb_g6lc_apu_bru` 12/212/8965, Enable=1
+  **221661 / 53011**. Remote `tb_g6lc_apu_qbn` 7/101/4647, Enable=1
+  **211543 / 52954**. Remote `tb_g6lc_apu_qtb` 6/101/5980, Enable=1
+  **225736 / 56059**. `FeatureVirgl` stays illegal. `NumCapsets`
+  stays 0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 116/117/118/119 vkCmdCopyImageToBuffer, vkCmdUpdateBuffer,
+  vkCmdFillBuffer, vkCmdClearColorImage on
+  VenusCopyImgToBuf/VenusUpdateBuffer/VenusFillBuffer/VenusClearColor
+  (2026-10-02): `g6lc_apu_vic` / `VicEn` type 116; LOOKUP CMDBUF then
+  IMAGE src then BUFFER dst; extra `!begun` / `in_rp`; compact 32x32
+  (4096 bytes); `APU_BRU_CIB=89`. `g6lc_apu_vub` / `VubEn` type 117;
+  LOOKUP CMDBUF then BUFFER; extra `!begun` / `in_rp`; compact offset 0
+  size 4 data 0; `APU_BRU_UBF=90`. `g6lc_apu_vfl` / `VflEn` type 118;
+  LOOKUP CMDBUF then BUFFER; extra `!begun` / `in_rp`; compact size
+  4096 data 0; `APU_BRU_FIL=91`. `g6lc_apu_vcl` / `VclEn` type 119;
+  LOOKUP CMDBUF then IMAGE; extra `!begun` / `in_rp`; compact
+  TRANSFER_DST zeros; `APU_BRU_CCL=92`. GENERATE_REPLY shares CS mux
+  slot 31. Happy path after CopyBufferToImage, before BeginRenderPass.
+  Remote `tb_g6lc_apu_vic` 8/13/727, Enable=1 **3575 / 1284**. Remote
+  `tb_g6lc_apu_vub` 8/13/421, Enable=1 **1947 / 708**. Remote
+  `tb_g6lc_apu_vfl` 8/13/419, Enable=1 **1947 / 708**. Remote
+  `tb_g6lc_apu_vcl` 8/13/671, Enable=1 **3219 / 1220**. Remote
+  `tb_g6lc_apu_bru` 12/220/9295, Enable=1 **229564 / 55339**. Remote
+  `tb_g6lc_apu_qbn` 7/105/4891, Enable=1 **219092 / 55282**. Remote
+  `tb_g6lc_apu_qtb` 6/105/6288, Enable=1 **233273 / 58387**.
+  `FeatureVirgl` stays illegal. `NumCapsets` stays 0. Not in
+  `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 108/109/120/121 vkCmdDrawIndirect, vkCmdDrawIndexedIndirect,
+  vkCmdClearDepthStencilImage, vkCmdClearAttachments on
+  VenusDrawIndirect/VenusDrawIdxIndirect/VenusClearDepth/VenusClearAttach
+  (2026-10-02): `g6lc_apu_vio` / `VioEn` type 108; LOOKUP CMDBUF then
+  BUFFER; extra `begun` / `in_rp` / `pipe_bound`; compact drawCount 1
+  stride 16; `APU_BRU_DRI=93`; CS prefix `APU_DRI_*` (DestroyInstance
+  keeps `APU_DIN_*`). `g6lc_apu_vix` / `VixEn` type 109; LOOKUP CMDBUF
+  then BUFFER; extra also `vtx_bound` / `idx_bound`; compact stride 20;
+  `APU_BRU_DXI=94`. `g6lc_apu_vds` / `VdsEn` type 120; LOOKUP CMDBUF
+  then IMAGE; extra `!begun` / `in_rp`; compact depth 1.0 ASPECT_DEPTH;
+  `APU_BRU_CDS=95`. `g6lc_apu_vat` / `VatEn` type 121; LOOKUP CMDBUF;
+  extra `begun` / `in_rp`; compact one COLOR 64x64; `APU_BRU_CAT=96`.
+  GENERATE_REPLY shares CS mux slot 31. Happy path: ClearDepth before
+  BeginRenderPass; DrawIndirect/IndexedIndirect/ClearAttachments after
+  DrawIndexed. Remote `tb_g6lc_apu_vio` 8/13/405, Enable=1
+  **1915 / 708**. Remote `tb_g6lc_apu_vix` 8/13/405, Enable=1
+  **1917 / 708**. Remote `tb_g6lc_apu_vds` 8/13/685, Enable=1
+  **3158 / 1220**. Remote `tb_g6lc_apu_vat` 8/13/659, Enable=1
+  **3123 / 1156**. Remote `tb_g6lc_apu_bru` 12/228/9609, Enable=1
+  **236775 / 57283**. Remote `tb_g6lc_apu_qbn` 7/109/5093, Enable=1
+  **225995 / 57226**. Remote `tb_g6lc_apu_qtb` 6/109/6554, Enable=1
+  **240164 / 60331**. `FeatureVirgl` stays illegal. `NumCapsets` stays
+  0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 111/122 vkCmdDispatchIndirect, vkCmdResolveImage on
+  VenusDispatchIndirect/VenusResolveImage (2026-10-02): `g6lc_apu_vin`
+  / `VinEn` type 111; LOOKUP CMDBUF then BUFFER; extra `begun` /
+  `!in_rp` / `pipe_bound` / `desc_bound` / `loaded`; compact offset 0;
+  `APU_BRU_DSI=97`. Does not Kick the compute add. VenusDispatch (vnd)
+  still faults type 111. `g6lc_apu_vrs` / `VrsEn` type 122; LOOKUP
+  CMDBUF then IMAGE src/dst; extra `!begun` / `in_rp`; compact
+  TRANSFER 32x32 half-window; `APU_BRU_RSI=98`. GENERATE_REPLY shares
+  CS mux slot 31. Happy path: Resolve before BeginRenderPass;
+  DispatchIndirect after Dispatch. Remote `tb_g6lc_apu_vin` 8/13/379,
+  Enable=1 **1849 / 708**. Remote `tb_g6lc_apu_vrs` 8/13/783, Enable=1
+  **3715 / 1284**. Remote `tb_g6lc_apu_bru` 12/232/9795, Enable=1
+  **241039 / 58607**. Remote `tb_g6lc_apu_qbn` 7/111/5211, Enable=1
+  **230082 / 58550**. Remote `tb_g6lc_apu_qtb` 6/111/6704, Enable=1
+  **244245 / 61655**. `FeatureVirgl` stays illegal. `NumCapsets` stays
+  0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
+- [x] P0 types 36/37/38/39 vkDestroyFence, vkResetFences,
+  vkGetFenceStatus, vkWaitForFences on
+  VenusDestroyFence/VenusResetFences/VenusGetFenceStatus/VenusWaitForFences
+  (2026-10-02): LOOKUP DEVICE; no FENCE kind; CreateFence=35 skipped.
+  `g6lc_apu_vgs` / `VgsEn` type 38; compact VK_SUCCESS; `APU_BRU_GFS=99`.
+  `g6lc_apu_vwf` / `VwfEn` type 39; extra `submitted_q`; compact count 1
+  waitAll timeout 0; `APU_BRU_WFE=100`. `g6lc_apu_vfr` / `VfrEn` type
+  37; compact count 1; `APU_BRU_RFE=101`. `g6lc_apu_vfn` / `VfnEn`
+  type 36; no RETIRE; `APU_BRU_DFE=102`. GENERATE_REPLY shares CS mux
+  slot 31. Happy path after DeviceWaitIdle. Remote `tb_g6lc_apu_vgs`
+  8/13/377, Enable=1 **1781 / 708**. Remote `tb_g6lc_apu_vwf` 8/13/405,
+  Enable=1 **1915 / 708**. Remote `tb_g6lc_apu_vfr` 8/13/391, Enable=1
+  **1815 / 708**. Remote `tb_g6lc_apu_vfn` 8/13/379, Enable=1
+  **1845 / 708**. Remote `tb_g6lc_apu_bru` 12/240/10017, Enable=1
+  **246341 / 59751**. Remote `tb_g6lc_apu_qbn` 7/115/5376, Enable=1
+  **234882 / 59694**. Remote `tb_g6lc_apu_qtb` 6/115/6933, Enable=1
+  **249033 / 62799**. `FeatureVirgl` stays illegal. `NumCapsets` stays
+  0. Not in `g6lc_apu_sys`. Next: DISPLAY.md identity.
 - [ ] A1: immutable command/program storage beyond the held snapshot, and no
   stale program data left readable across reset. Slot publication and the
   idle lease pin are already in.
@@ -6811,6 +9972,52 @@ separates bring-up mechanisms, actual guarantees and deployment blockers.
   byte 192 and `(55,0)` is byte 220, both in `64'h880300C0`.
   `(63,63)` is byte 16380, lane 7 of
   `64'h88033FE0`, and byte 0 there is red. Each of those lanes is the same red byte first.
+  The linear sample pair is written as fragment color at
+  `64'h88050000`. `(0,0)` is the clamp texel `32'hA5000000`.
+  `(1,0)` is the half blend `32'hD2008000`. Byte 0 of that
+  neighbor is `8'h00`, not the clear red.
+  Those 512 ceiling sample beats are copied to `64'h88060000`.
+  Beat 0 of that window is the same pair.
+  That window is a 64 by 64 rectangle. `(1,0)` in it is the half
+  blend `32'hD2008000`.
+  Byte offset is `y * 256 + x * 4`. `(0,0)` in it is the clamp
+  texel `32'hA5000000`.
+  That rectangle is copied to `64'h88070000` as
+  `TRANSFER_FROM_HOST_3D` of resource 4.
+  That guest buffer is a 64 by 64 rectangle. `(1,0)` in it is the
+  half blend `32'hD2008000`.
+  Offset in that guest rectangle is `y * 256 + x * 4`. `(1,0)` is
+  byte 4. `(0,0)` is the clamp texel `32'hA5000000`. `(63,63)` is
+  byte 16380 at `64'h88073FE0`.
+  The `TRANSFER_FROM_HOST_3D` box is `(0,0,64,64)` of resource 4
+  at 640 by 480. Packed stride is 256. The command is three beats
+  at `64'h88080000`.
+  `RESOURCE_ATTACH_BACKING` of that buffer is length 16384 at
+  `64'h88070000`. The command is two beats at `64'h88090000`.
+  The 24-byte virtio `OK_NODATA` of that transfer is at
+  `64'h880A0000` with fence 2.
+  The used element is at `64'h880B0000` with id 1 and `used.idx` 2
+  at `64'h880B0008`.
+  The used-buffer interrupt reason `32'h1` is at `64'h880C0000`.
+  The guest ack of that interrupt is at `64'h880C0010`. Remain 0
+  is then written over `64'h880C0000`.
+  The guest descriptor chain of that transfer is at `64'h880D0000`.
+  Avail index 2 at `64'h880D0100` names descriptor 0.
+  TEX of sampler view 5 at `(0,0)` is `32'hA5000000` and at `(1,0)`
+  is `32'hD2008000`. `refused` is 0. The compiler opcode still
+  returns `-26`.
+  Beat 0 of the scene window at `64'h88020000` is that pair.
+  Beat 0 of the guest readback at `64'h88030000` is that pair.
+  A posted walker accepts `NEXT` for that transfer chain at avail
+  index 2.
+  Guest used-buffer interrupt after `used.idx` 2 is reason `32'h1`
+  at `64'h880C0000`.
+  Guest ack of that interrupt is `32'h1` at `64'h880C0010`.
+  Scene `virtq_avail.idx` after that ack is 1 at `64'h8800E200`.
+  Scene `virtq_avail.ring[0]` names descriptor 0 at `64'h8800E204`.
+  Scene `virtq_desc` 0 is the 32-byte header at `64'h8800A000` with `NEXT` to 1.
+  Scene `virtq_desc` 1 is the 960-byte execbuffer at `64'h8800B000` with `NEXT` to 2.
+  Scene `virtq_desc` 2 is the `WRITE` of the 24-byte response at `64'h8800A800`.
   No blend is applied. No depth test is run. No triangle is walked.
   The shader is not run. No vertices are fetched. No texture is bound.
   `g6lc_apu_vgpu_avail` still rejects `NEXT`. The image is not kept

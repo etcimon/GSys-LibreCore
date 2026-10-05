@@ -24,6 +24,10 @@ attach), and `architecture/uncore/*` (per-domain RTL outlines). Where it conflic
 - `corev_apu/fpga/src/ariane-ethernet/`, `apb_uart`, `apb_timer`, `gpio`, `rv_plic`, `riscv-dbg`,
   `axi2apb`, `axi_slice`, … — the existing uncore peripherals (submodules) on the AXI/APB fabric.
 - `corev_apu/altera/`, `corev_apu/tb/`, `corev_apu/bootrom/` — Altera flow, testbenches, boot + DTS.
+- `corev_apu/apu/` — default-off LibreCore graphics uncore (`Flist.apu_soc`). Module handoffs
+  with PascalCase leaf names: [`corev_apu/apu/AGENTS-impl-interplays.md`](corev_apu/apu/AGENTS-impl-interplays.md).
+  Lane map: `architecture/uncore/apu-graphics.md`. Private `g6lc_apu_vgpu_*` leaves stay out of
+  `g6lc_apu_sys` until that box is meant to instantiate them.
 
 The desktop-class additions (DDR4, PCIe, NIC, SATA/SD, HDMI) sit **beside** these on the same fabric,
 fetched by the `build-platform` `vendor` command and outlined in `architecture/uncore/`.
