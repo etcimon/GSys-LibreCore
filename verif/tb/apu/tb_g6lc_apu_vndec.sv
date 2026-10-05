@@ -28,6 +28,7 @@ module tb_g6lc_apu_vndec;
   logic [15:0] cs_base = '0, cs_len = '0;
   logic cs_re; logic [15:0] cs_addr;
   logic [31:0] cs_rdata = '0;
+  logic cs_rv = 0;
   apu_vn_op_t op, off_op;
   logic pay_valid; logic [31:0] pay_data;
   logic off_busy, off_done, off_re, off_pv; logic [15:0] off_addr;
@@ -42,19 +43,29 @@ module tb_g6lc_apu_vndec;
   g6lc_apu_vndec #(.Enable(1'b1)) i_on (
     .clk_i(clk), .rst_ni(rst_ni),
     .start_i(start), .cs_base_i(cs_base), .cs_len_i(cs_len),
-    .cs_re_o(cs_re), .cs_addr_o(cs_addr), .cs_rdata_i(cs_rdata),
+    .cs_re_o(cs_re), .cs_addr_o(cs_addr),
+    .cs_ready_i(1'b1), .cs_rvalid_i(cs_rv), .cs_rdata_i(cs_rdata),
+    .cs_err_i(1'b0),
     .busy_o(busy), .done_o(done), .op_o(op),
     .pay_valid_o(pay_valid), .pay_data_o(pay_data));
   g6lc_apu_vndec_fixture #(.Enable(1'b0)) i_off (
     .clk_i(clk), .rst_ni(rst_ni),
     .start_i(start), .cs_base_i(cs_base), .cs_len_i(cs_len),
-    .cs_re_o(off_re), .cs_addr_o(off_addr), .cs_rdata_i(cs_rdata),
+    .cs_re_o(off_re), .cs_addr_o(off_addr),
+    .cs_ready_i(1'b1), .cs_rvalid_i(1'b0), .cs_rdata_i('0),
+    .cs_err_i(1'b0),
     .busy_o(off_busy), .done_o(off_done), .op_o(off_op),
     .pay_valid_o(off_pv), .pay_data_o(off_pd));
 
   always #5 clk = ~clk;
   always @(posedge clk) cycles++;
-  always @(posedge clk) if (cs_re) cs_rdata <= cs[cs_addr];
+  // handshake CS model: accept every request, respond one cycle later
+  always @(posedge clk or negedge rst_ni)
+    if (!rst_ni) begin cs_rv <= 1'b0; cs_rdata <= '0; end
+    else begin
+      cs_rv <= 1'b0;
+      if (cs_re) begin cs_rv <= 1'b1; cs_rdata <= cs[cs_addr]; end
+    end
   always @(posedge clk) if (pay_valid) begin
     if (pay_i > PAY_MAX + 63) $fatal(1, "payload overrun in TB");
     pay_buf[pay_i] <= pay_data;

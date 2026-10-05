@@ -73,13 +73,17 @@ module g6lc_apu_shcore
   output logic         busy_o,
   output logic         done_o,
   output apu_sh_done_t done_pl_o,
-  // guest memory word port (64-bit)
+  // guest memory word port (64-bit, handshake: request held until
+  // mem_ready_i, one mem_rvalid_i per request, mem_err_i = zero data)
   output logic         mem_re_o,
   output logic         mem_we_o,
   output logic [63:0]  mem_addr_o,
   output logic [63:0]  mem_wdata_o,
   output logic [7:0]   mem_wstrb_o,
-  input  logic [63:0]  mem_rdata_i
+  input  logic         mem_ready_i,
+  input  logic         mem_rvalid_i,
+  input  logic [63:0]  mem_rdata_i,
+  input  logic         mem_err_i
 );
   if (!Enable) begin : gen_off
     assign c_busy_o = 1'b0;    assign c_done_o = 1'b0;
@@ -98,7 +102,8 @@ module g6lc_apu_shcore
                     (|retire_slot_i) | sm_req_i | (|sm_req_pl_i) |
                     work_i | (|work_ctype_i) |
                     (|work_imm_i) | (|disp_slot_i) | (|binds_i) |
-                    (|push_n_i) | (|push_i) | (|mem_rdata_i);
+                    (|push_n_i) | (|push_i) | (|mem_rdata_i) |
+                    mem_ready_i | mem_rvalid_i | mem_err_i;
   end else begin : gen_on
     typedef enum logic [0:0] { C_IDLE, C_SENT } cast_e;
     cast_e cast_q;
@@ -290,7 +295,8 @@ module g6lc_apu_shcore
       .phi_id_o(phi_id), .phi_data_i(phi_data),
       .entry_data_i(entry_data),
       .mem_re_o, .mem_we_o, .mem_addr_o, .mem_wdata_o,
-      .mem_wstrb_o, .mem_rdata_i
+      .mem_wstrb_o, .mem_ready_i, .mem_rvalid_i, .mem_rdata_i,
+      .mem_err_i
     );
   end
 endmodule
@@ -347,7 +353,10 @@ module g6lc_apu_shcore_fixture
   output logic [63:0]  mem_addr_o,
   output logic [63:0]  mem_wdata_o,
   output logic [7:0]   mem_wstrb_o,
-  input  logic [63:0]  mem_rdata_i
+  input  logic         mem_ready_i,
+  input  logic         mem_rvalid_i,
+  input  logic [63:0]  mem_rdata_i,
+  input  logic         mem_err_i
 );
   g6lc_apu_shcore #(.Enable(Enable), .ShaderLanes(ShaderLanes),
       .ShaderVec(ShaderVec), .ShaderRegs(ShaderRegs),

@@ -38,6 +38,7 @@ if ! "$VERILATOR" --binary --timing --assert -Wall \
   -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY \
   "${VLTS[@]}" \
   -f "$ROOT/corev_apu/apu/Flist.apu_vgtop" \
+  "$ROOT/verif/tb/apu/tb_apu_mp_mem.sv" \
   "$ROOT/verif/tb/apu/tb_g6lc_apu_vgtop.sv" \
   --top-module tb_g6lc_apu_vgtop \
   -Mdir "$OUT/sim" -o tb_g6lc_apu_vgtop \
@@ -47,58 +48,79 @@ if ! "$VERILATOR" --binary --timing --assert -Wall \
   exit 1
 fi
 echo "VERILATOR BUILD OK"
-set +e
-(cd "$ROOT/verif/tb/apu" && stdbuf -o0 -e0 "$OUT/sim/tb_g6lc_apu_vgtop") \
-  > "$OUT/sim.log" 2>&1
-rc=$?
-set -e
-echo "SIM rc=$rc"
-cat "$OUT/sim.log"
-if ! grep -q '^PASS tb_g6lc_apu_vgtop ' "$OUT/sim.log"; then
-  echo "SIM FAILED"
-  exit 1
-fi
-if [ "$rc" -ne 0 ]; then
-  echo "SIM rc=$rc despite PASS"
-  exit 1
-fi
-# §7b/5a-ii compute arm: all 15 sh_vectors at seed 1 + math450 2-3 +
-# the 8 negative sessions.  VGTOP_NOCOMPUTE=1 skips the arm.
-if [ "${VGTOP_NOCOMPUTE:-0}" != 1 ]; then
-  : > "$OUT/compute.log"
-  cfail=0
-  for v in \
-    ue_cpos_arrlen_1 ue_cpos_bufcopy_1 ue_cpos_bufscale_1 \
-    ue_cpos_builtin_gid_1 ue_cpos_builtin_lid_1 \
-    ue_cpos_builtin_lindex_1 ue_cpos_compare_1 \
-    ue_cpos_composite_1 ue_cpos_intmix_1 ue_cpos_localsize32_1 \
-    ue_cpos_localsize64_1 ue_cpos_math450_1 ue_cpos_math450_2 \
-    ue_cpos_math450_3 ue_cpos_oob_1 ue_cpos_pushscale_1 \
-    ue_cpos_vec4arith_1 \
-    ue_cpos_loopfor_1 ue_cpos_barrier_reduce_1 \
-    ue_cpos_loopfor_opt_1 ue_cpos_barrier_reduce_opt_1 \
-    ue_cneg_badmod_1 ue_cneg_modgone_1 ue_cneg_lostbuf_1 \
-    ue_cneg_spec_1 ue_cneg_baddesc_1 ue_cneg_nopipe_1 \
-    ue_cneg_pgfull_1 ue_cneg_badmem_1 ue_cneg_bindoob_1 \
-    ue_cneg_descoob_1; do
+
+# §6c-i mp gate: step 1 is the zero-jitter reference (lat 1, ready
+# 100% — the old 1-cycle-port shape); step 2 randomizes request-grant
+# and response latency (+mp_lat_min=1 +mp_lat_max=20
+# +mp_ready_pct=60) and must produce identical result words.  Both
+# steps run the transport session plus the 31-session compute arm.
+# VGTOP_STEP=1|2 runs a single step; VGTOP_NOCOMPUTE=1 skips the arm.
+SESSIONS="ue_cpos_arrlen_1 ue_cpos_bufcopy_1 ue_cpos_bufscale_1 \
+ue_cpos_builtin_gid_1 ue_cpos_builtin_lid_1 \
+ue_cpos_builtin_lindex_1 ue_cpos_compare_1 \
+ue_cpos_composite_1 ue_cpos_intmix_1 ue_cpos_localsize32_1 \
+ue_cpos_localsize64_1 ue_cpos_math450_1 ue_cpos_math450_2 \
+ue_cpos_math450_3 ue_cpos_oob_1 ue_cpos_pushscale_1 \
+ue_cpos_vec4arith_1 \
+ue_cpos_loopfor_1 ue_cpos_barrier_reduce_1 \
+ue_cpos_loopfor_opt_1 ue_cpos_barrier_reduce_opt_1 \
+ue_cneg_badmod_1 ue_cneg_modgone_1 ue_cneg_lostbuf_1 \
+ue_cneg_spec_1 ue_cneg_baddesc_1 ue_cneg_nopipe_1 \
+ue_cneg_pgfull_1 ue_cneg_badmem_1 ue_cneg_bindoob_1 \
+ue_cneg_descoob_1"
+
+run_step() {
+  local step="$1"; shift
+  local mpa=("$@")
+  echo "=== GATE STEP $step (${mpa[*]:-lat=1 ready=100%}) ==="
+  set +e
+  (cd "$ROOT/verif/tb/apu" && \
+   stdbuf -o0 -e0 "$OUT/sim/tb_g6lc_apu_vgtop" "${mpa[@]}") \
+    > "$OUT/sim-step$step.log" 2>&1
+  rc=$?
+  set -e
+  echo "SIM step$step rc=$rc"
+  cat "$OUT/sim-step$step.log"
+  if ! grep -q '^PASS tb_g6lc_apu_vgtop ' "$OUT/sim-step$step.log"; then
+    echo "SIM FAILED (step $step)"
+    exit 1
+  fi
+  if [ "$rc" -ne 0 ]; then
+    echo "SIM rc=$rc despite PASS (step $step)"
+    exit 1
+  fi
+  if [ "${VGTOP_NOCOMPUTE:-0}" = 1 ]; then return 0; fi
+  : > "$OUT/compute-step$step.log"
+  local cfail=0
+  for v in $SESSIONS; do
     set +e
     (cd "$ROOT/verif/tb/apu" && \
-     stdbuf -o0 -e0 "$OUT/sim/tb_g6lc_apu_vgtop" +vec="$v") \
-      > "$OUT/compute-$v.log" 2>&1
+     stdbuf -o0 -e0 "$OUT/sim/tb_g6lc_apu_vgtop" +vec="$v" \
+       "${mpa[@]}") \
+      > "$OUT/compute-s$step-$v.log" 2>&1
     vrc=$?
     set -e
-    grep -E '^(PASS-COMPUTE|PASS|FAIL)' "$OUT/compute-$v.log" \
-      | sed "s/^/[$v] /" | tee -a "$OUT/compute.log"
-    if ! grep -q '^PASS tb_g6lc_apu_vgtop ' "$OUT/compute-$v.log" \
+    grep -E '^(PASS-COMPUTE|PASS|FAIL)' "$OUT/compute-s$step-$v.log" \
+      | sed "s/^/[s$step $v] /" | tee -a "$OUT/compute-step$step.log"
+    if ! grep -q '^PASS tb_g6lc_apu_vgtop ' "$OUT/compute-s$step-$v.log" \
        || [ "$vrc" -ne 0 ]; then
       cfail=1
     fi
   done
   if [ "$cfail" -ne 0 ]; then
-    echo "COMPUTE ARM FAILED"
+    echo "COMPUTE ARM FAILED (step $step)"
     exit 1
   fi
-  echo "COMPUTE ARM OK (31 sessions)"
+  echo "COMPUTE ARM OK step$step (31 sessions)"
+}
+
+# gate step 1: defaults (lat 1/1, ready 100%)
+if [ "${VGTOP_STEP:-0}" != "2" ]; then
+  run_step 1
+fi
+# gate step 2: randomized grant/latency, identical results
+if [ "${VGTOP_STEP:-0}" != "1" ]; then
+  run_step 2 +mp_lat_min=1 +mp_lat_max=20 +mp_ready_pct=60
 fi
 if [ "${VGTOP_SYNTH:-0}" != 1 ]; then
   exit 0

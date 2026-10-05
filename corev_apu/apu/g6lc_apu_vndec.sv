@@ -71,7 +71,10 @@ module g6lc_apu_vndec
   input  logic [15:0] cs_len_i,
   output logic        cs_re_o,
   output logic [15:0] cs_addr_o,
+  input  logic        cs_ready_i,
+  input  logic        cs_rvalid_i,
   input  logic [31:0] cs_rdata_i,
+  input  logic        cs_err_i,
   output logic        busy_o,
   output logic        done_o,
   output apu_vn_op_t  op_o,
@@ -88,6 +91,7 @@ module g6lc_apu_vndec
     assign pay_data_o  = '0;
     logic unused;
     assign unused = clk_i | rst_ni | start_i | cs_rdata_i[0] |
+                    cs_ready_i | cs_rvalid_i | cs_err_i |
                     (|cs_base_i) | (|cs_len_i) | (|cs_rdata_i);
   end else begin : gen_on
     // micro-op encodings (must match gen_vn_tables.py DEC_OPS)
@@ -176,34 +180,38 @@ module g6lc_apu_vndec
     logic [33:0] blob_wn;
     assign blob_wn = (blob_prod[33:0] + 34'd3) >> 2;
 
-    // StBPay emits the word under rdata and fetches the next data word,
-    // so its read address leads pos_q by one.
-    assign cs_addr_o = state_q == StIdle  ? cs_base_i :
-                       state_q == StBPay  ? base_q + pos_q + 16'd1
-                                          : base_q + pos_q;
+    // Handshake CS port (§6c Settled bullet 3): cs_re_o holds until
+    // cs_ready_i, one response returns per request on cs_rvalid_i, and
+    // the consuming state advances only when that response lands.  The
+    // old one-word-per-cycle pipeline is serialized: a word is issued
+    // (pos_q indexes the word being requested, incremented at accept),
+    // its rvalid consumed, and only then is the next word requested —
+    // at most one request in flight.
+    logic rd_pend_q;    // request accepted, response outstanding
+    logic cons_q;       // lo word consumed; second issue allowed
+    logic pnz_q;        // PNEXT presence pair nonzero
+    assign cs_addr_o = base_q + pos_q;
 
-    // combinational read-port steering
+    // per-state read intent (before the rd_pend gate)
+    logic want_rd;
     always_comb begin
-      cs_re_o = 1'b0;
       unique case (state_q)
-        StIdle:    cs_re_o = start_i && cs_len_i >= 16'd2; // base+0
-        StHdrType: cs_re_o = 1'b1;                          // base+1
-        StOp:      cs_re_o = rom_op inside {O_U32, O_STYPE, O_FLAGS,
+        StHdrType: want_rd = 1'b1;                        // w0 then w1
+        StOp:      want_rd = rom_op inside {O_U32, O_STYPE, O_FLAGS,
                                             O_CHECK, O_U64, O_HANDLE,
                                             O_PTR, O_ARRAY, O_BLOB,
                                             O_PNEXT} && pos_q < len_q;
-        StW2Lo, StPnLo: cs_re_o = pos_q < len_q;            // hi word
-        // keep BLOB: prefetch the first data word alongside the count
-        StW2Hi:    cs_re_o = rom_op == O_BLOB && keep_q;
-        StBPay:    cs_re_o = bpay_rem_q > 17'd1;            // next word
-        StPnHi:    cs_re_o = {tmp_q, cs_rdata_i} != 64'h0 &&
-                             pos_q < len_q;               // sType word
-        StPnScan:  cs_re_o = chain_w != 48'h0 &&
+        StW2Lo, StPnLo: want_rd = cons_q && pos_q < len_q; // hi word
+        StPnHi:    want_rd = cons_q && pnz_q && pos_q < len_q;
+        StBPay:    want_rd = bpay_rem_q > 17'd0;         // next data word
+        StPnScan:  want_rd = chain_w != 48'h0 &&
                              chain_w[31:0] == pnext_st_q &&
-                             pos_q < len_q;               // next presence
-        default:   cs_re_o = 1'b0;
+                             pos_q < len_q &&
+                             rec_q.chain_n < 4'd8;
+        default:   want_rd = 1'b0;
       endcase
     end
+    assign cs_re_o = want_rd && !rd_pend_q;
 
     // ---- §7b payload stream -------------------------------------------
     // One word per cycle, decode order; emitted only where the op cannot
@@ -214,14 +222,18 @@ module g6lc_apu_vndec
                        !({cs_rdata_i, tmp_q} == 64'h0 &&
                           rom_a[2:0] != 3'(APU_VN_ROLE_NEW) &&
                           rom_a[2:0] != 3'(APU_VN_ROLE_OPTIONAL));
+    // payload words emit on the response cycle (a faulted or
+    // out-of-window read emits nothing — the fault arm wins anyway)
+    logic cs_good;
+    assign cs_good = cs_rvalid_i && !cs_err_i;
     assign pay_valid_o =
-        (state_q == StW1 && keep_q && rom_op == O_U32) ||
-        (state_q == StW2Hi && keep_q &&
+        (state_q == StW1 && keep_q && rom_op == O_U32 && cs_good) ||
+        (state_q == StW2Hi && keep_q && cs_good &&
          (rom_op == O_U64 ||
           (rom_op == O_HANDLE && handle_ok) ||
           rom_op == O_PTR)) ||
         state_q == StW3 ||
-        state_q == StBPay;
+        (state_q == StBPay && cs_good);
     assign pay_data_o =
         state_q == StW3 ? payw_q :
         (state_q == StW2Hi &&
@@ -264,9 +276,14 @@ module g6lc_apu_vndec
         body_q <= '{default: '0}; body_n_q <= '0;
         scan_q <= '0; pnext_st_q <= '0; skip_d_q <= '0;
         keep_q <= 1'b0; payw_q <= '0; bpay_rem_q <= '0;
+        rd_pend_q <= 1'b0; cons_q <= 1'b0; pnz_q <= 1'b0;
       end else begin
         if (pay_valid_o)
           rec_q.pay_words <= rec_q.pay_words + 16'd1;
+        // CS handshake bookkeeping: accept sets pend, rvalid clears it
+        if (cs_rvalid_i)      rd_pend_q <= 1'b0;
+        else if (cs_re_o && cs_ready_i) rd_pend_q <= 1'b1;
+        if (state_q == StIdle) rd_pend_q <= 1'b0;
         unique case (state_q)
         // ------------------------------------------------ idle / header
         StIdle: if (start_i) begin
@@ -279,6 +296,7 @@ module g6lc_apu_vndec
           pos_q <= '0;
           tmp_q <= '0;
           loop_sp_q <= '0; ret_sp_q <= '0; body_n_q <= '0;
+          cons_q <= 1'b0; pnz_q <= 1'b0;
           if (cs_len_i < 16'd2) begin
             rec_q.fault      <= APU_VN_FAULT_BOUND;
             rec_q.fault_word <= cs_len_i;
@@ -288,25 +306,52 @@ module g6lc_apu_vndec
           end else begin
             base_q  <= cs_base_i;
             len_q   <= cs_len_i;
-            pos_q   <= 16'd1;         // word0 read issued this cycle
             state_q <= StHdrType;
           end
         end
+        // word0: issued here (pos 0), consumed on rvalid; then word1
+        // is issued (pos 1) and consumed by StHdrFlags
         StHdrType: begin
-          rec_q.cmd_type <= cs_rdata_i;
-          pos_q          <= 16'd2;    // word1 read issued this cycle
-          state_q        <= StHdrFlags;
+          if (cs_rvalid_i) begin
+            if (cs_err_i) begin
+              rec_q.fault      <= APU_VN_FAULT_BOUND;
+              rec_q.fault_word <= pos_q - 16'd1;
+              rec_q.fault_val  <= 32'h0;
+              rec_q.words      <= pos_q - 16'd1;
+              state_q          <= StDone;
+            end else begin
+              rec_q.cmd_type <= cs_rdata_i;
+              cons_q         <= 1'b1;
+            end
+          end
+          if (cs_re_o && cs_ready_i) begin
+            pos_q <= pos_q + 16'd1;
+            if (cons_q) begin
+              cons_q  <= 1'b0;
+              state_q <= StHdrFlags;
+            end
+          end
         end
         StHdrFlags: begin
-          rec_q.cmd_flags <= cs_rdata_i;
-          if (ent_mpc == 16'hFFFF) begin
-            rec_q.fault     <= APU_VN_FAULT_UNKNOWN_TYPE;
-            rec_q.fault_val <= rec_q.cmd_type;
-            rec_q.words     <= 16'd2;
-            state_q         <= StDone;
-          end else begin
-            mpc_q   <= ent_mpc;
-            state_q <= StOp;
+          if (cs_rvalid_i) begin
+            if (cs_err_i) begin
+              rec_q.fault      <= APU_VN_FAULT_BOUND;
+              rec_q.fault_word <= pos_q - 16'd1;
+              rec_q.fault_val  <= 32'h0;
+              rec_q.words      <= pos_q - 16'd1;
+              state_q          <= StDone;
+            end else begin
+              rec_q.cmd_flags <= cs_rdata_i;
+              if (ent_mpc == 16'hFFFF) begin
+                rec_q.fault     <= APU_VN_FAULT_UNKNOWN_TYPE;
+                rec_q.fault_val <= rec_q.cmd_type;
+                rec_q.words     <= 16'd2;
+                state_q         <= StDone;
+              end else begin
+                mpc_q   <= ent_mpc;
+                state_q <= StOp;
+              end
+            end
           end
         end
 
@@ -328,7 +373,7 @@ module g6lc_apu_vndec
                 rec_q.fault_word <= pos_q;
                 rec_q.words      <= pos_q;
                 state_q          <= StDone;
-              end else begin
+              end else if (cs_re_o && cs_ready_i) begin
                 pos_q   <= pos_q + 16'd1;
                 state_q <= StW1;
               end
@@ -339,7 +384,7 @@ module g6lc_apu_vndec
                 rec_q.fault_word <= pos_q;
                 rec_q.words      <= pos_q;
                 state_q          <= StDone;
-              end else begin
+              end else if (cs_re_o && cs_ready_i) begin
                 pos_q   <= pos_q + 16'd1;
                 state_q <= StW2Lo;
               end
@@ -350,7 +395,7 @@ module g6lc_apu_vndec
                 rec_q.fault_word <= pos_q;
                 rec_q.words      <= pos_q;
                 state_q          <= StDone;
-              end else begin
+              end else if (cs_re_o && cs_ready_i) begin
                 body_n_q <= '0;
                 pos_q    <= pos_q + 16'd1;
                 state_q  <= StPnLo;
@@ -414,9 +459,17 @@ module g6lc_apu_vndec
 
         // ------------------------------------------------ one-word ops
         StW1: begin
-          state_q <= StOp;
-          mpc_q   <= mpc_q + 16'd1;
-          unique case (rom_op)
+          if (cs_rvalid_i) begin
+            if (cs_err_i) begin
+              rec_q.fault      <= APU_VN_FAULT_BOUND;
+              rec_q.fault_word <= pos_q - 16'd1;
+              rec_q.fault_val  <= 32'h0;
+              rec_q.words      <= pos_q - 16'd1;
+              state_q          <= StDone;
+            end else begin
+              state_q <= StOp;
+              mpc_q   <= mpc_q + 16'd1;
+              unique case (rom_op)
             O_U32: begin
               if (rom_a[6:0] != 7'h7F) begin
                 imm_q[rom_a[3:0]]  <= cs_rdata_i;
@@ -481,26 +534,50 @@ module g6lc_apu_vndec
               rec_q.words      <= pos_q;
               state_q          <= StDone;
             end
-          endcase
+              endcase
+            end
+          end
         end
 
         // ------------------------------------------------ two-word ops
+        // lo word lands on rvalid; only then is the hi word requested
         StW2Lo: begin
-          if (pos_q >= len_q) begin
-            rec_q.fault      <= APU_VN_FAULT_BOUND;
-            rec_q.fault_word <= pos_q;
-            rec_q.words      <= pos_q;
-            state_q          <= StDone;
-          end else begin
-            tmp_q   <= cs_rdata_i;
-            pos_q   <= pos_q + 16'd1;
-            state_q <= StW2Hi;
+          if (cs_rvalid_i) begin
+            if (cs_err_i) begin
+              rec_q.fault      <= APU_VN_FAULT_BOUND;
+              rec_q.fault_word <= pos_q - 16'd1;
+              rec_q.fault_val  <= 32'h0;
+              rec_q.words      <= pos_q - 16'd1;
+              state_q          <= StDone;
+            end else begin
+              tmp_q  <= cs_rdata_i;
+              cons_q <= 1'b1;
+            end
+          end else if (cons_q && !rd_pend_q) begin
+            if (pos_q >= len_q) begin
+              rec_q.fault      <= APU_VN_FAULT_BOUND;
+              rec_q.fault_word <= pos_q;
+              rec_q.words      <= pos_q;
+              state_q          <= StDone;
+            end else if (cs_re_o && cs_ready_i) begin
+              pos_q   <= pos_q + 16'd1;
+              cons_q  <= 1'b0;
+              state_q <= StW2Hi;
+            end
           end
         end
         StW2Hi: begin
-          state_q <= StOp;
-          mpc_q   <= mpc_q + 16'd1;
-          unique case (rom_op)
+          if (cs_rvalid_i) begin
+            if (cs_err_i) begin
+              rec_q.fault      <= APU_VN_FAULT_BOUND;
+              rec_q.fault_word <= pos_q - 16'd1;
+              rec_q.fault_val  <= 32'h0;
+              rec_q.words      <= pos_q - 16'd1;
+              state_q          <= StDone;
+            end else begin
+              state_q <= StOp;
+              mpc_q   <= mpc_q + 16'd1;
+              unique case (rom_op)
             O_U64: begin
               // KEEP emits the lo word this cycle, the hi in StW3
               if (keep_q) begin
@@ -622,50 +699,107 @@ module g6lc_apu_vndec
               rec_q.words      <= pos_q;
               state_q          <= StDone;
             end
-          endcase
+              endcase
+            end
+          end
         end
 
         // ------------------------------------------------ payload walk
         // hi word of a kept 2-word op (payw_q latched in StW2Hi)
         StW3:    state_q <= StOp;
-        // kept BLOB: emit data word under rdata, fetch the next
+        // kept BLOB: issue the next data word (one in flight), emit it
+        // on rvalid; the last consume returns to StOp
         StBPay: begin
-          pos_q      <= pos_q + 16'd1;
-          bpay_rem_q <= bpay_rem_q - 17'd1;
-          if (bpay_rem_q == 17'd1)
-            state_q <= StOp;
+          if (cs_re_o && cs_ready_i)
+            pos_q <= pos_q + 16'd1;
+          if (cs_rvalid_i) begin
+            if (cs_err_i) begin
+              rec_q.fault      <= APU_VN_FAULT_BOUND;
+              rec_q.fault_word <= pos_q - 16'd1;
+              rec_q.fault_val  <= 32'h0;
+              rec_q.words      <= pos_q - 16'd1;
+              state_q          <= StDone;
+            end else if (bpay_rem_q <= 17'd1) begin
+              bpay_rem_q <= '0;
+              state_q    <= StOp;
+            end else begin
+              bpay_rem_q <= bpay_rem_q - 17'd1;
+            end
+          end
         end
 
         // ------------------------------------------------ pNext chain
+        // presence lo consumed on rvalid; then the hi word is issued
         StPnLo: begin
-          if (pos_q >= len_q) begin
-            rec_q.fault      <= APU_VN_FAULT_BOUND;
-            rec_q.fault_word <= pos_q;
-            rec_q.words      <= pos_q;
-            state_q          <= StDone;
-          end else begin
-            tmp_q   <= cs_rdata_i;
-            pos_q   <= pos_q + 16'd1;
-            state_q <= StPnHi;
+          if (cs_rvalid_i) begin
+            if (cs_err_i) begin
+              rec_q.fault      <= APU_VN_FAULT_BOUND;
+              rec_q.fault_word <= pos_q - 16'd1;
+              rec_q.fault_val  <= 32'h0;
+              rec_q.words      <= pos_q - 16'd1;
+              state_q          <= StDone;
+            end else begin
+              tmp_q  <= cs_rdata_i;
+              cons_q <= 1'b1;
+            end
+          end else if (cons_q && !rd_pend_q) begin
+            if (pos_q >= len_q) begin
+              rec_q.fault      <= APU_VN_FAULT_BOUND;
+              rec_q.fault_word <= pos_q;
+              rec_q.words      <= pos_q;
+              state_q          <= StDone;
+            end else if (cs_re_o && cs_ready_i) begin
+              pos_q   <= pos_q + 16'd1;
+              cons_q  <= 1'b0;
+              pnz_q   <= 1'b0;
+              state_q <= StPnHi;
+            end
           end
         end
+        // presence hi consumed on rvalid; a nonzero pair issues the
+        // sType word, a null pointer pops back out
         StPnHi: begin
-          if ({cs_rdata_i, tmp_q} == 64'h0) begin
-            state_q <= StPnPop;
-          end else if (pos_q >= len_q) begin
-            rec_q.fault      <= APU_VN_FAULT_BOUND;
-            rec_q.fault_word <= pos_q;
-            rec_q.words      <= pos_q;
-            state_q          <= StDone;
-          end else begin
-            pos_q   <= pos_q + 16'd1;
-            state_q <= StPnSt;
+          if (cs_rvalid_i) begin
+            if (cs_err_i) begin
+              rec_q.fault      <= APU_VN_FAULT_BOUND;
+              rec_q.fault_word <= pos_q - 16'd1;
+              rec_q.fault_val  <= 32'h0;
+              rec_q.words      <= pos_q - 16'd1;
+              state_q          <= StDone;
+            end else begin
+              pnz_q  <= {cs_rdata_i, tmp_q} != 64'h0;
+              cons_q <= 1'b1;
+            end
+          end else if (cons_q && !rd_pend_q) begin
+            if (!pnz_q) begin
+              cons_q  <= 1'b0;
+              state_q <= StPnPop;
+            end else if (pos_q >= len_q) begin
+              rec_q.fault      <= APU_VN_FAULT_BOUND;
+              rec_q.fault_word <= pos_q;
+              rec_q.words      <= pos_q;
+              state_q          <= StDone;
+            end else if (cs_re_o && cs_ready_i) begin
+              pos_q   <= pos_q + 16'd1;
+              cons_q  <= 1'b0;
+              state_q <= StPnSt;
+            end
           end
         end
         StPnSt: begin
-          pnext_st_q <= cs_rdata_i;
-          scan_q     <= 16'(rom_b);
-          state_q    <= StPnScan;
+          if (cs_rvalid_i) begin
+            if (cs_err_i) begin
+              rec_q.fault      <= APU_VN_FAULT_BOUND;
+              rec_q.fault_word <= pos_q - 16'd1;
+              rec_q.fault_val  <= 32'h0;
+              rec_q.words      <= pos_q - 16'd1;
+              state_q          <= StDone;
+            end else begin
+              pnext_st_q <= cs_rdata_i;
+              scan_q     <= 16'(rom_b);
+              state_q    <= StPnScan;
+            end
+          end
         end
         StPnScan: begin
           if (scan_q >= APU_VN_CHAIN_WORDS || chain_w == 48'h0) begin
@@ -686,7 +820,7 @@ module g6lc_apu_vndec
               rec_q.fault_word <= pos_q;
               rec_q.words      <= pos_q;
               state_q          <= StDone;
-            end else begin
+            end else if (cs_re_o && cs_ready_i) begin
               chain_q[rec_q.chain_n[2:0]] <= 8'(scan_q);
               rec_q.chain_n                   <= rec_q.chain_n + 4'd1;
               body_q[body_n_q[2:0]]           <= chain_w[47:32];
@@ -781,7 +915,10 @@ module g6lc_apu_vndec_fixture
   input  logic [15:0] cs_len_i,
   output logic        cs_re_o,
   output logic [15:0] cs_addr_o,
+  input  logic        cs_ready_i,
+  input  logic        cs_rvalid_i,
   input  logic [31:0] cs_rdata_i,
+  input  logic        cs_err_i,
   output logic        busy_o,
   output logic        done_o,
   output apu_vn_op_t  op_o,

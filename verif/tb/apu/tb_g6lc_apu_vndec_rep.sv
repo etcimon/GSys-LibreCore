@@ -43,6 +43,7 @@ module tb_g6lc_apu_vndec_rep;
   logic        r_re;
   logic [15:0] r_addr;
   logic [31:0] r_rdata = '0;
+  logic        d_rv = 0, r_rv = 0, r_wd = 0;
   logic        r_we;
   logic [15:0] r_waddr;
   logic [31:0] r_wdata;
@@ -70,13 +71,17 @@ module tb_g6lc_apu_vndec_rep;
   g6lc_apu_vndec #(.Enable(1'b1)) i_dec (
     .clk_i(clk), .rst_ni(rst_ni),
     .start_i(d_start), .cs_base_i(d_base), .cs_len_i(d_len),
-    .cs_re_o(d_re), .cs_addr_o(d_addr), .cs_rdata_i(d_rdata),
+    .cs_re_o(d_re), .cs_addr_o(d_addr),
+    .cs_ready_i(1'b1), .cs_rvalid_i(d_rv), .cs_rdata_i(d_rdata),
+    .cs_err_i(1'b0),
     .pay_valid_o(pay_v), .pay_data_o(pay_d),
     .busy_o(d_busy), .done_o(d_done), .op_o(op));
   g6lc_apu_vndec_fixture #(.Enable(1'b0)) i_dec_off (
     .clk_i(clk), .rst_ni(rst_ni),
     .start_i(d_start), .cs_base_i(d_base), .cs_len_i(d_len),
-    .cs_re_o(off_re), .cs_addr_o(off_addr), .cs_rdata_i(d_rdata),
+    .cs_re_o(off_re), .cs_addr_o(off_addr),
+    .cs_ready_i(1'b1), .cs_rvalid_i(1'b0), .cs_rdata_i('0),
+    .cs_err_i(1'b0),
     .pay_valid_o(off_pv), .pay_data_o(off_pd),
     .busy_o(off_busy), .done_o(off_done), .op_o(off_op));
 
@@ -87,8 +92,11 @@ module tb_g6lc_apu_vndec_rep;
     .rep_null_mask_i(rep_null_mask_r),
     .rep_base_i(rep_base_r), .rep_len_i(rep_len_r),
     .cs_base_i(d_base),
-    .cs_re_o(r_re), .cs_addr_o(r_addr), .cs_rdata_i(r_rdata),
+    .cs_re_o(r_re), .cs_addr_o(r_addr),
+    .cs_ready_i(1'b1), .cs_rvalid_i(r_rv), .cs_rdata_i(r_rdata),
+    .cs_err_i(1'b0),
     .rep_we_o(r_we), .rep_addr_o(r_waddr), .rep_wdata_o(r_wdata),
+    .rep_ready_i(1'b1), .rep_done_i(r_wd), .rep_err_i(1'b0),
     .busy_o(r_busy), .done_o(r_done), .rep_words_o(r_words),
     .fault_o(r_fault));
   g6lc_apu_vnrep_fixture #(.Enable(1'b0)) i_rep_off (
@@ -98,22 +106,30 @@ module tb_g6lc_apu_vndec_rep;
     .rep_null_mask_i(rep_null_mask_r),
     .rep_base_i(rep_base_r), .rep_len_i(rep_len_r),
     .cs_base_i(d_base),
-    .cs_re_o(roff_re), .cs_addr_o(roff_addr), .cs_rdata_i(r_rdata),
+    .cs_re_o(roff_re), .cs_addr_o(roff_addr),
+    .cs_ready_i(1'b1), .cs_rvalid_i(1'b0), .cs_rdata_i('0),
+    .cs_err_i(1'b0),
     .rep_we_o(roff_we), .rep_addr_o(roff_waddr),
     .rep_wdata_o(roff_wdata),
+    .rep_ready_i(1'b1), .rep_done_i(1'b0), .rep_err_i(1'b0),
     .busy_o(roff_busy), .done_o(roff_done),
     .rep_words_o(roff_words), .fault_o(roff_fault));
 
   always #5 clk = ~clk;
   always @(posedge clk) cycles++;
 
-  // CS read: vndec and vnrep never overlap (sequential phases)
-  always @(posedge clk) begin
-    if (d_re) d_rdata <= cs[d_addr];
-    if (r_re) r_rdata <= cs[r_addr];
+  // handshake CS read / reply-write models (ready=1, response next
+  // cycle): vndec and vnrep never overlap (sequential phases)
+  always @(posedge clk or negedge rst_ni) begin
+    if (!rst_ni) begin
+      d_rv <= 0; r_rv <= 0; r_wd <= 0; d_rdata <= '0; r_rdata <= '0;
+    end else begin
+      d_rv <= 1'b0; r_rv <= 1'b0; r_wd <= 1'b0;
+      if (d_re) begin d_rv <= 1'b1; d_rdata <= cs[d_addr]; end
+      if (r_re) begin r_rv <= 1'b1; r_rdata <= cs[r_addr]; end
+      if (r_we) begin r_wd <= 1'b1; repm[r_waddr] <= r_wdata; end
+    end
   end
-  // reply-window write model
-  always @(posedge clk) if (r_we) repm[r_waddr] <= r_wdata;
 
   always @(negedge clk) begin
     if (off_re || off_busy || off_done || roff_re || roff_we ||

@@ -80,10 +80,16 @@ module g6lc_apu_vnrep
                                   // cs_base_i + off - 2
   output logic        cs_re_o,
   output logic [15:0] cs_addr_o,
+  input  logic        cs_ready_i,
+  input  logic        cs_rvalid_i,
   input  logic [31:0] cs_rdata_i,
+  input  logic        cs_err_i,
   output logic        rep_we_o,
   output logic [15:0] rep_addr_o,
   output logic [31:0] rep_wdata_o,
+  input  logic        rep_ready_i,
+  input  logic        rep_done_i,
+  input  logic        rep_err_i,
   output logic        busy_o,
   output logic        done_o,
   output logic [15:0] rep_words_o,
@@ -103,6 +109,8 @@ module g6lc_apu_vnrep
     logic unused;
     assign unused_op = op_i;
     assign unused = clk_i | rst_ni | start_i | cs_rdata_i[0] |
+                    cs_ready_i | cs_rvalid_i | cs_err_i |
+                    rep_ready_i | rep_done_i | rep_err_i |
                     (|result_i) | (|exec_n_i) | (|exec_w_i) |
                     (|rep_null_mask_i) |
                     (|rep_base_i) | (|rep_len_i) | (|cs_rdata_i) |
@@ -162,6 +170,16 @@ module g6lc_apu_vnrep
     logic [15:0]   tcur_q;        // RCHAIN reply-table scan cursor
     logic [31:0]   node_st_q;     // recorded node's sType
     logic [15:0]   chain_tgt_q;   // matched reply-body mpc
+    // §6c Settled bullet 3: both ports are now handshake ports —
+    // rep_we_o/cs_re_o hold until rep_ready_i/cs_ready_i and each
+    // request completes with exactly one rep_done_i/cs_rvalid_i pulse
+    // (err flagged on *_err_i).  At most one request outstanding on
+    // each port, so a write state advances on rep_done_i and StBlob
+    // alternates read (-> rd_data_q) and write (-> wpos_q) phases.
+    logic          rd_pend_q;     // CS request accepted, rsp pending
+    logic          wr_pend_q;     // rep request accepted, rsp pending
+    logic          blob_ph_q;     // StBlob: 0 = read phase, 1 = write
+    logic [31:0]   rd_data_q;     // CS word captured at cs_rvalid_i
 
     logic [47:0]   rom_w;
     assign rom_w = 32'(mpc_q) < APU_VN_REPLY_ROM_WORDS
@@ -252,77 +270,84 @@ module g6lc_apu_vnrep
     logic          wpos_ok;
     assign wpos_ok = wpos_q < rep_len_q;
 
+    logic          want_wr;
     always_comb begin
       cs_re_o     = 1'b0;
       cs_addr_o   = blob_off_q;
-      rep_we_o    = 1'b0;
+      want_wr     = 1'b0;
       rep_addr_o  = rep_base_q + wpos_q;
       rep_wdata_o = 32'h0;
       case (state_q)
         StOp: begin
           if (wpos_ok) begin
             case (rom_op)
-              R_RTYPE:   begin rep_we_o = 1'b1;
+              R_RTYPE:   begin want_wr = 1'b1;
                                rep_wdata_o = op_q.cmd_type; end
-              R_RRESULT: begin rep_we_o = 1'b1;
+              R_RRESULT: begin want_wr = 1'b1;
                                rep_wdata_o = result_q; end
-              R_RU32, R_RU64: begin rep_we_o = 1'b1;
+              R_RU32, R_RU64: begin want_wr = 1'b1;
                                rep_wdata_o = src_lo; end
-              R_RHANDLE: begin rep_we_o = 1'b1;
+              R_RHANDLE: begin want_wr = 1'b1;
                                rep_wdata_o = op_q.q[rom_a[2:0]][31:0];
                          end
-              R_RPTR:    begin rep_we_o = 1'b1;
+              R_RPTR:    begin want_wr = 1'b1;
                                rep_wdata_o =
                                  {31'h0, op_q.pres[rom_a[2:0]]}; end
               R_RCONST:  begin
-                           rep_we_o = rom_b[31:16] != 16'h0;
+                           want_wr = rom_b[31:16] != 16'h0;
                            rep_wdata_o = prof_w; end
-              R_RCHAIN:  begin rep_we_o = (cpos_q >= op_q.chain_n);
+              R_RCHAIN:  begin want_wr = (cpos_q >= op_q.chain_n);
                                rep_wdata_o = 32'h0; end
-              R_REXBUF:  begin rep_we_o = 1'b1; rep_wdata_o = exec_w; end
-              R_REXEC:   begin rep_we_o = rom_b != 32'h0;
+              R_REXBUF:  begin want_wr = 1'b1; rep_wdata_o = exec_w; end
+              R_REXEC:   begin want_wr = rom_b != 32'h0;
                                rep_wdata_o = exec_w; end
               default: ;
             endcase
           end
         end
         StEmit2, StEmit3: begin
-          rep_we_o    = wpos_ok;
+          want_wr     = wpos_ok;
           rep_wdata_o = tmp_q;
         end
         StConstCp: begin
-          rep_we_o    = wpos_ok;
+          want_wr     = wpos_ok;
           rep_wdata_o = prof_w;
         end
         StBlob: begin
-          cs_re_o     = blob_first_q || cnt_q != 16'h0;
+          // read phase issues one CS word; write phase emits the
+          // word captured at cs_rvalid_i
+          cs_re_o     = !blob_ph_q && !rd_pend_q && cnt_q != 16'h0;
           cs_addr_o   = blob_off_q;
-          rep_we_o    = ~blob_first_q && wpos_ok;
+          want_wr     = blob_ph_q && wpos_ok;
           // payload words (emission index >= 2, after the u64 count
           // pair) echo VK_NULL_HANDLE for elements marked in
           // rep_null_mask_i: element i's two id words emit at 2+2i
           rep_wdata_o = (blob_em_q >= 16'd2 &&
                          rep_null_mask_i[blob_el])
-                        ? 32'h0 : cs_rdata_i;
+                        ? 32'h0 : rd_data_q;
         end
         StChainScan: begin
           // u64(1) presence lo word on a table match
-          rep_we_o    = scan_w != 48'h0 && scan_w[31:0] == node_st_q &&
+          want_wr     = scan_w != 48'h0 && scan_w[31:0] == node_st_q &&
                         wpos_ok;
           rep_wdata_o = 32'h1;
         end
         StChkNext: begin
           // u64(0) terminator lo word when nodes are exhausted
-          rep_we_o    = cpos_q >= op_q.chain_n && wpos_ok;
+          want_wr     = cpos_q >= op_q.chain_n && wpos_ok;
           rep_wdata_o = 32'h0;
         end
         StXbuf: begin
-          rep_we_o    = wpos_ok;
+          want_wr     = wpos_ok;
           rep_wdata_o = exec_w;
         end
         default: ;
       endcase
     end
+    assign rep_we_o = want_wr && !wr_pend_q;
+    logic wr_done_ok, wr_done_err;
+    assign wr_done_ok  = rep_done_i && !rep_err_i;
+    assign wr_done_err = rep_done_i && rep_err_i;
 
     assign done_o      = state_q == StDone;
     assign fault_o     = fault_q;
@@ -355,7 +380,21 @@ module g6lc_apu_vnrep
         tcur_q       <= '0;
         node_st_q    <= '0;
         chain_tgt_q  <= '0;
+        rd_pend_q    <= 1'b0;
+        wr_pend_q    <= 1'b0;
+        blob_ph_q    <= 1'b0;
+        rd_data_q    <= '0;
       end else begin
+        // handshake bookkeeping: accept sets pend, response clears it
+        if (cs_rvalid_i)      rd_pend_q <= 1'b0;
+        else if (cs_re_o && cs_ready_i) begin
+          rd_pend_q  <= 1'b1;
+          blob_off_q <= blob_off_q + 16'd1;
+          if (blob_first_q) blob_first_q <= 1'b0;
+          else              cnt_q        <= cnt_q - 16'd1;
+        end
+        if (rep_done_i)       wr_pend_q <= 1'b0;
+        else if (rep_we_o && rep_ready_i) wr_pend_q <= 1'b1;
         case (state_q)
           StIdle: begin
             fault_q <= 1'b0;
@@ -407,28 +446,60 @@ module g6lc_apu_vnrep
             end else begin
               case (rom_op)
                 R_RTYPE, R_RRESULT, R_RU32: begin
-                  wpos_q <= wpos_q + 16'd1;
-                  mpc_q  <= mpc_q + 16'd1;
-                  if (rom_op == R_RU32 && rom_a == S_EXEC)
-                    ecur_q <= ecur_q + 7'd1;
+                  if (rep_done_i) begin
+                    if (rep_err_i) begin
+                      fault_q      <= 1'b1;
+                      done_words_q <= wpos_q;
+                      state_q      <= StDone;
+                    end else begin
+                      wpos_q <= wpos_q + 16'd1;
+                      mpc_q  <= mpc_q + 16'd1;
+                      if (rom_op == R_RU32 && rom_a == S_EXEC)
+                        ecur_q <= ecur_q + 7'd1;
+                    end
+                  end
                 end
                 R_RU64: begin
-                  wpos_q  <= wpos_q + 16'd1;
-                  tmp_q   <= src_hi;
-                  state_q <= StEmit2;
-                  if (rom_a == S_EXEC)
-                    ecur_q <= ecur_q + 7'd2;
+                  if (rep_done_i) begin
+                    if (rep_err_i) begin
+                      fault_q      <= 1'b1;
+                      done_words_q <= wpos_q;
+                      state_q      <= StDone;
+                    end else begin
+                      wpos_q  <= wpos_q + 16'd1;
+                      tmp_q   <= src_hi;
+                      state_q <= StEmit2;
+                      if (rom_a == S_EXEC)
+                        ecur_q <= ecur_q + 7'd2;
+                    end
+                  end
                 end
                 R_RHANDLE: begin
-                  wpos_q  <= wpos_q + 16'd1;
-                  tmp_q   <= op_q.q[rom_a[2:0]][63:32];
-                  state_q <= StEmit2;
+                  if (rep_done_i) begin
+                    if (rep_err_i) begin
+                      fault_q      <= 1'b1;
+                      done_words_q <= wpos_q;
+                      state_q      <= StDone;
+                    end else begin
+                      wpos_q  <= wpos_q + 16'd1;
+                      tmp_q   <= op_q.q[rom_a[2:0]][63:32];
+                      state_q <= StEmit2;
+                    end
+                  end
                 end
                 R_RPTR: begin
-                  wpos_q  <= wpos_q + 16'd1;
-                  tmp_q   <= 32'h0;
-                  aux_q   <= rom_b[7:0];
-                  state_q <= StEmit2;
+                  if (rep_done_i) begin
+                    if (rep_err_i) begin
+                      fault_q      <= 1'b1;
+                      done_words_q <= wpos_q;
+                      state_q      <= StDone;
+                    end else begin
+                      wpos_q  <= wpos_q + 16'd1;
+                      tmp_q   <= 32'h0;
+                      aux_q   <= rom_b[7:0];
+                      state_q <= StEmit2;
+                    end
+                  end
                 end
                 R_RCONST: begin
                   if (32'(rom_b[15:0]) + {16'h0, rom_b[31:16]} >
@@ -438,22 +509,36 @@ module g6lc_apu_vnrep
                     state_q      <= StDone;
                   end else if (rom_b[31:16] == 16'h0) begin
                     mpc_q <= mpc_q + 16'd1;
-                  end else if (rom_b[31:16] == 16'h1) begin
-                    wpos_q <= wpos_q + 16'd1;
-                    mpc_q  <= mpc_q + 16'd1;
-                  end else begin
-                    wpos_q  <= wpos_q + 16'd1;
-                    ridx_q  <= 16'(rom_b[15:0]) + 16'd1;
-                    cnt_q   <= rom_b[31:16] - 16'd1;
-                    state_q <= StConstCp;
+                  end else if (rep_done_i) begin
+                    if (rep_err_i) begin
+                      fault_q      <= 1'b1;
+                      done_words_q <= wpos_q;
+                      state_q      <= StDone;
+                    end else if (rom_b[31:16] == 16'h1) begin
+                      wpos_q <= wpos_q + 16'd1;
+                      mpc_q  <= mpc_q + 16'd1;
+                    end else begin
+                      wpos_q  <= wpos_q + 16'd1;
+                      ridx_q  <= 16'(rom_b[15:0]) + 16'd1;
+                      cnt_q   <= rom_b[31:16] - 16'd1;
+                      state_q <= StConstCp;
+                    end
                   end
                 end
                 R_RCHAIN: begin
                   if (cpos_q >= op_q.chain_n) begin
-                    // u64(0) terminator lo word emitted combinationally
-                    wpos_q  <= wpos_q + 16'd1;
-                    tmp_q   <= 32'h0;
-                    state_q <= StEmit2;
+                    // u64(0) terminator lo word write
+                    if (rep_done_i) begin
+                      if (rep_err_i) begin
+                        fault_q      <= 1'b1;
+                        done_words_q <= wpos_q;
+                        state_q      <= StDone;
+                      end else begin
+                        wpos_q  <= wpos_q + 16'd1;
+                        tmp_q   <= 32'h0;
+                        state_q <= StEmit2;
+                      end
+                    end
                   end else if (chain_w == 48'h0) begin
                     fault_q      <= 1'b1;
                     done_words_q <= wpos_q;
@@ -472,31 +557,46 @@ module g6lc_apu_vnrep
                   cnt_q        <= 16'(op_q.blob[rom_a[0]].words)
                                   + 16'd1;
                   blob_first_q <= 1'b1;
+                  blob_ph_q    <= 1'b0;
                   blob_em_q    <= '0;
                   state_q      <= StBlob;
                 end
                 R_REXBUF: begin
-                  // count emitted this cycle; StEmit2 emits the u64
+                  // count word write; StEmit2 emits the u64
                   // high word (0), StXbuf streams the payload
-                  tmp_q      <= 32'h0;
-                  xbuf_cnt_q <= exec_w;
-                  aux_q      <= rom_b[7:0];
-                  wpos_q     <= wpos_q + 16'd1;
-                  ecur_q     <= ecur_q + 7'd1;
-                  state_q    <= StEmit2;
+                  if (rep_done_i) begin
+                    if (rep_err_i) begin
+                      fault_q      <= 1'b1;
+                      done_words_q <= wpos_q;
+                      state_q      <= StDone;
+                    end else begin
+                      tmp_q      <= 32'h0;
+                      xbuf_cnt_q <= exec_w;
+                      aux_q      <= rom_b[7:0];
+                      wpos_q     <= wpos_q + 16'd1;
+                      ecur_q     <= ecur_q + 7'd1;
+                      state_q    <= StEmit2;
+                    end
+                  end
                 end
                 R_REXEC: begin
                   if (rom_b == 32'd0) begin
                     mpc_q <= mpc_q + 16'd1;
-                  end else if (rom_b == 32'd1) begin
-                    wpos_q <= wpos_q + 16'd1;
-                    ecur_q <= ecur_q + 7'd1;
-                    mpc_q  <= mpc_q + 16'd1;
-                  end else begin
-                    wpos_q  <= wpos_q + 16'd1;
-                    ecur_q  <= ecur_q + 7'd1;
-                    cnt_q   <= 16'(rom_b) - 16'd1;
-                    state_q <= StXbuf;
+                  end else if (rep_done_i) begin
+                    if (rep_err_i) begin
+                      fault_q      <= 1'b1;
+                      done_words_q <= wpos_q;
+                      state_q      <= StDone;
+                    end else if (rom_b == 32'd1) begin
+                      wpos_q <= wpos_q + 16'd1;
+                      ecur_q <= ecur_q + 7'd1;
+                      mpc_q  <= mpc_q + 16'd1;
+                    end else begin
+                      wpos_q  <= wpos_q + 16'd1;
+                      ecur_q  <= ecur_q + 7'd1;
+                      cnt_q   <= 16'(rom_b) - 16'd1;
+                      state_q <= StXbuf;
+                    end
                   end
                 end
                 R_REND: begin
@@ -526,48 +626,54 @@ module g6lc_apu_vnrep
               fault_q      <= 1'b1;
               done_words_q <= wpos_q;
               state_q      <= StDone;
-            end else begin
-              wpos_q <= wpos_q + 16'd1;
-              case (rom_op)
-                R_RPTR: begin
-                  if (!op_q.pres[rom_a[2:0]])
-                    mpc_q <= mpc_q + 16'd1 + {8'h0, aux_q};
-                  else
-                    mpc_q <= mpc_q + 16'd1;
-                  state_q <= StOp;
-                end
-                R_RCHAIN: begin
-                  if (cpos_q >= op_q.chain_n) begin
+            end else if (rep_done_i) begin
+              if (rep_err_i) begin
+                fault_q      <= 1'b1;
+                done_words_q <= wpos_q;
+                state_q      <= StDone;
+              end else begin
+                wpos_q <= wpos_q + 16'd1;
+                case (rom_op)
+                  R_RPTR: begin
+                    if (!op_q.pres[rom_a[2:0]])
+                      mpc_q <= mpc_q + 16'd1 + {8'h0, aux_q};
+                    else
+                      mpc_q <= mpc_q + 16'd1;
+                    state_q <= StOp;
+                  end
+                  R_RCHAIN: begin
+                    if (cpos_q >= op_q.chain_n) begin
+                      mpc_q   <= mpc_q + 16'd1;
+                      state_q <= StOp;
+                    end else if (chain_w == 48'h0) begin
+                      fault_q      <= 1'b1;
+                      done_words_q <= wpos_q + 16'd1;
+                      state_q      <= StDone;
+                    end else begin
+                      // third emit = recorded sType, then the body runs
+                      tmp_q   <= node_st_q;
+                      state_q <= StEmit3;
+                    end
+                  end
+                  R_REXBUF: begin
+                    // ceil(count * elem_bytes / 4) payload words;
+                    // a zero-payload buffer skips StXbuf entirely
+                    if (((34'(xbuf_cnt_q) * 34'(aux_q)) + 34'd3) >> 2
+                        == 34'd0) begin
+                      mpc_q   <= mpc_q + 16'd1;
+                      state_q <= StOp;
+                    end else begin
+                      cnt_q   <= 16'(((34'(xbuf_cnt_q) * 34'(aux_q))
+                                      + 34'd3) >> 2);
+                      state_q <= StXbuf;
+                    end
+                  end
+                  default: begin
                     mpc_q   <= mpc_q + 16'd1;
                     state_q <= StOp;
-                  end else if (chain_w == 48'h0) begin
-                    fault_q      <= 1'b1;
-                    done_words_q <= wpos_q + 16'd1;
-                    state_q      <= StDone;
-                  end else begin
-                    // third emit = recorded sType, then the body runs
-                    tmp_q   <= node_st_q;
-                    state_q <= StEmit3;
                   end
-                end
-                R_REXBUF: begin
-                  // ceil(count * elem_bytes / 4) payload words;
-                  // a zero-payload buffer skips StXbuf entirely
-                  if (((34'(xbuf_cnt_q) * 34'(aux_q)) + 34'd3) >> 2
-                      == 34'd0) begin
-                    mpc_q   <= mpc_q + 16'd1;
-                    state_q <= StOp;
-                  end else begin
-                    cnt_q   <= 16'(((34'(xbuf_cnt_q) * 34'(aux_q))
-                                    + 34'd3) >> 2);
-                    state_q <= StXbuf;
-                  end
-                end
-                default: begin
-                  mpc_q   <= mpc_q + 16'd1;
-                  state_q <= StOp;
-                end
-              endcase
+                endcase
+              end
             end
           end
 
@@ -576,13 +682,19 @@ module g6lc_apu_vnrep
               fault_q      <= 1'b1;
               done_words_q <= wpos_q;
               state_q      <= StDone;
-            end else begin
-              wpos_q <= wpos_q + 16'd1;
-              ret_stk_q[ret_sp_q[2:0]] <= mpc_q + 16'd1;
-              ret_sp_q <= ret_sp_q + 4'd1;
-              mpc_q    <= chain_tgt_q;
-              cpos_q   <= cpos_q + 4'd1;
-              state_q  <= StOp;
+            end else if (rep_done_i) begin
+              if (rep_err_i) begin
+                fault_q      <= 1'b1;
+                done_words_q <= wpos_q;
+                state_q      <= StDone;
+              end else begin
+                wpos_q <= wpos_q + 16'd1;
+                ret_stk_q[ret_sp_q[2:0]] <= mpc_q + 16'd1;
+                ret_sp_q <= ret_sp_q + 4'd1;
+                mpc_q    <= chain_tgt_q;
+                cpos_q   <= cpos_q + 4'd1;
+                state_q  <= StOp;
+              end
             end
           end
 
@@ -591,36 +703,60 @@ module g6lc_apu_vnrep
               fault_q      <= 1'b1;
               done_words_q <= wpos_q;
               state_q      <= StDone;
-            end else begin
-              wpos_q <= wpos_q + 16'd1;
-              ridx_q <= ridx_q + 16'd1;
-              if (cnt_q == 16'd1) begin
-                mpc_q   <= mpc_q + 16'd1;
-                state_q <= StOp;
+            end else if (rep_done_i) begin
+              if (rep_err_i) begin
+                fault_q      <= 1'b1;
+                done_words_q <= wpos_q;
+                state_q      <= StDone;
               end else begin
-                cnt_q <= cnt_q - 16'd1;
+                wpos_q <= wpos_q + 16'd1;
+                ridx_q <= ridx_q + 16'd1;
+                if (cnt_q == 16'd1) begin
+                  mpc_q   <= mpc_q + 16'd1;
+                  state_q <= StOp;
+                end else begin
+                  cnt_q <= cnt_q - 16'd1;
+                end
               end
             end
           end
 
+          // serialized read->write pair per emitted word: read phase
+          // issues the CS word (cnt_q counts reads still to issue,
+          // decremented at accept; blob_first_q covers the count-lo
+          // read), the captured word is written out in write phase
           StBlob: begin
-            if (blob_first_q) begin
-              // first CS read (count lo) in flight, nothing to emit
-              blob_first_q <= 1'b0;
-              blob_off_q   <= blob_off_q + 16'd1;
+            if (!blob_ph_q) begin
+              if (cs_rvalid_i) begin
+                if (cs_err_i) begin
+                  fault_q      <= 1'b1;
+                  done_words_q <= wpos_q;
+                  state_q      <= StDone;
+                end else begin
+                  rd_data_q <= cs_rdata_i;
+                  blob_ph_q <= 1'b1;
+                end
+              end
             end else if (!wpos_ok) begin
               fault_q      <= 1'b1;
               done_words_q <= wpos_q;
               state_q      <= StDone;
-            end else begin
-              wpos_q     <= wpos_q + 16'd1;
-              blob_off_q <= blob_off_q + 16'd1;
-              blob_em_q  <= blob_em_q + 16'd1;
-              if (cnt_q == 16'h0) begin
-                mpc_q   <= mpc_q + 16'd1;
-                state_q <= StOp;
+            end else if (rep_done_i) begin
+              if (rep_err_i) begin
+                fault_q      <= 1'b1;
+                done_words_q <= wpos_q;
+                state_q      <= StDone;
               end else begin
-                cnt_q <= cnt_q - 16'd1;
+                wpos_q    <= wpos_q + 16'd1;
+                blob_ph_q <= 1'b0;
+                // emits = count pair + payload = words + 2 words
+                if (blob_em_q ==
+                    16'(op_q.blob[rom_a[0]].words) + 16'd1) begin
+                  mpc_q   <= mpc_q + 16'd1;
+                  state_q <= StOp;
+                end else begin
+                  blob_em_q <= blob_em_q + 16'd1;
+                end
               end
             end
           end
@@ -630,14 +766,20 @@ module g6lc_apu_vnrep
               fault_q      <= 1'b1;
               done_words_q <= wpos_q;
               state_q      <= StDone;
-            end else begin
-              wpos_q <= wpos_q + 16'd1;
-              ecur_q <= ecur_q + 7'd1;
-              if (cnt_q <= 16'd1) begin
-                mpc_q   <= mpc_q + 16'd1;
-                state_q <= StOp;
+            end else if (rep_done_i) begin
+              if (rep_err_i) begin
+                fault_q      <= 1'b1;
+                done_words_q <= wpos_q;
+                state_q      <= StDone;
               end else begin
-                cnt_q <= cnt_q - 16'd1;
+                wpos_q <= wpos_q + 16'd1;
+                ecur_q <= ecur_q + 7'd1;
+                if (cnt_q <= 16'd1) begin
+                  mpc_q   <= mpc_q + 16'd1;
+                  state_q <= StOp;
+                end else begin
+                  cnt_q <= cnt_q - 16'd1;
+                end
               end
             end
           end
@@ -654,10 +796,18 @@ module g6lc_apu_vnrep
               cpos_q  <= cpos_q + 4'd1;
               state_q <= StChkNext;
             end else if (scan_w[31:0] == node_st_q) begin
-              wpos_q      <= wpos_q + 16'd1;
-              tmp_q       <= 32'h0;
-              chain_tgt_q <= scan_w[47:32];
-              state_q     <= StEmit2;
+              if (rep_done_i) begin
+                if (rep_err_i) begin
+                  fault_q      <= 1'b1;
+                  done_words_q <= wpos_q;
+                  state_q      <= StDone;
+                end else begin
+                  wpos_q      <= wpos_q + 16'd1;
+                  tmp_q       <= 32'h0;
+                  chain_tgt_q <= scan_w[47:32];
+                  state_q     <= StEmit2;
+                end
+              end
             end else begin
               tcur_q <= tcur_q + 16'd1;
             end
@@ -669,10 +819,16 @@ module g6lc_apu_vnrep
                 fault_q      <= 1'b1;
                 done_words_q <= wpos_q;
                 state_q      <= StDone;
-              end else begin
-                wpos_q  <= wpos_q + 16'd1;
-                tmp_q   <= 32'h0;
-                state_q <= StEmit2;
+              end else if (rep_done_i) begin
+                if (rep_err_i) begin
+                  fault_q      <= 1'b1;
+                  done_words_q <= wpos_q;
+                  state_q      <= StDone;
+                end else begin
+                  wpos_q  <= wpos_q + 16'd1;
+                  tmp_q   <= 32'h0;
+                  state_q <= StEmit2;
+                end
               end
             end else if (chain_w == 48'h0) begin
               fault_q      <= 1'b1;
@@ -709,10 +865,16 @@ module g6lc_apu_vnrep_fixture
   input  logic [15:0] cs_base_i,
   output logic        cs_re_o,
   output logic [15:0] cs_addr_o,
+  input  logic        cs_ready_i,
+  input  logic        cs_rvalid_i,
   input  logic [31:0] cs_rdata_i,
+  input  logic        cs_err_i,
   output logic        rep_we_o,
   output logic [15:0] rep_addr_o,
   output logic [31:0] rep_wdata_o,
+  input  logic        rep_ready_i,
+  input  logic        rep_done_i,
+  input  logic        rep_err_i,
   output logic        busy_o,
   output logic        done_o,
   output logic [15:0] rep_words_o,

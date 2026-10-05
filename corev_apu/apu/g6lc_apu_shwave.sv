@@ -83,13 +83,18 @@ module g6lc_apu_shwave
   output logic [9:0]   phi_id_o,
   input  logic [159:0] phi_data_i,
   input  logic [127:0] entry_data_i,
-  // guest memory word port (64-bit; TB memory model)
+  // guest memory word port (64-bit): request held until mem_ready_i,
+  // exactly one mem_rvalid_i response per request (writes included,
+  // after the write completes); mem_err_i returns zero data
   output logic         mem_re_o,
   output logic         mem_we_o,
   output logic [63:0]  mem_addr_o,
   output logic [63:0]  mem_wdata_o,
   output logic [7:0]   mem_wstrb_o,
-  input  logic [63:0]  mem_rdata_i
+  input  logic         mem_ready_i,
+  input  logic         mem_rvalid_i,
+  input  logic [63:0]  mem_rdata_i,
+  input  logic         mem_err_i
 );
   if (!Enable) begin : gen_off
     assign busy_o = 1'b0;   assign done_o = 1'b0;
@@ -108,7 +113,8 @@ module g6lc_apu_shwave
                     (|push_i) | (|prog_data_i) | (|type_data_i) |
                     (|const_data_i) | (|memb_data_i) | (|rm_data_i) |
                     (|init_data_i) | (|blk_data_i) | (|phi_data_i) |
-                    (|entry_data_i) | (|mem_rdata_i) | MatHelperEn;
+                    (|entry_data_i) | (|mem_rdata_i) | mem_ready_i |
+                    mem_rvalid_i | mem_err_i | MatHelperEn;
   end else begin : gen_on
     localparam int unsigned LAN  = ShaderLanes;
     localparam int unsigned VEC  = ShaderVec;
@@ -1344,8 +1350,8 @@ module g6lc_apu_shwave
         // bounded waits: only the unit-wait states count cycles
         if (st_q == W_FU0 || st_q == W_FU1 || st_q == W_DQ0 ||
             st_q == W_DQ1 || st_q == W_CVT0 || st_q == W_CVT1 ||
-            st_q == W_NC0 || st_q == W_NC1 || st_q == W_LS2 ||
-            st_q == W_SSB1)
+            st_q == W_NC0 || st_q == W_NC1 || st_q == W_LS1 ||
+            st_q == W_LS2 || st_q == W_SSB1)
           wait_q <= (wait_q != 16'hFFFF) ? wait_q + 1 : wait_q;
         else wait_q <= '0;
         if (wait_q > 16'(WaitBound)) begin
@@ -2417,13 +2423,25 @@ module g6lc_apu_shwave
               st_q <= W_LSA;
             end
           end
-          W_LS1: st_q <= W_LS2;               // mem_re/we issued
+          // mem_re_o/mem_we_o hold until mem_ready_i; a masked-out
+          // store lane issues nothing and skips the wait
+          W_LS1: begin
+            if (mem_re_o || mem_we_o) begin
+              if (mem_ready_i) st_q <= W_LS2;
+            end else st_q <= W_LSA;
+          end
+          // waits the one response (write B included); err returns
+          // zero and counts as an out-of-range robust access
           W_LS2: begin
-            if (!ls_store_q)
-              wb_q[ls_lane_q[2:0]][ls_wc] <=
-                ls_addr_q[2] ? mem_rdata_i[63:32]
-                             : mem_rdata_i[31:0];
-            st_q <= W_LSA;
+            if (mem_rvalid_i) begin
+              if (mem_err_i) robust_q <= robust_q + 1;
+              if (!ls_store_q)
+                wb_q[ls_lane_q[2:0]][ls_wc] <=
+                  mem_err_i ? 32'h0 :
+                  ls_addr_q[2] ? mem_rdata_i[63:32]
+                               : mem_rdata_i[31:0];
+              st_q <= W_LSA;
+            end
           end
           W_SSB: st_q <= W_SSB1;              // sb/sc issued
           W_SSB1: begin
@@ -2984,7 +3002,10 @@ module g6lc_apu_shwave_fixture
   output logic [63:0]  mem_addr_o,
   output logic [63:0]  mem_wdata_o,
   output logic [7:0]   mem_wstrb_o,
-  input  logic [63:0]  mem_rdata_i
+  input  logic         mem_ready_i,
+  input  logic         mem_rvalid_i,
+  input  logic [63:0]  mem_rdata_i,
+  input  logic         mem_err_i
 );
   g6lc_apu_shwave #(.Enable(Enable), .ShaderLanes(ShaderLanes),
       .ShaderVec(ShaderVec), .ShaderRegs(ShaderRegs),

@@ -37,6 +37,7 @@
 // reply bytes in the aperture, and ObjTab live count after teardown.
 
 module tb_g6lc_apu_vgtop;
+  import g6lc_apu_mp_pkg::*;
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
@@ -49,8 +50,6 @@ module tb_g6lc_apu_vgtop;
   localparam int unsigned APW     = 32'h40000;   // 1 MiB aperture
   localparam int unsigned TAPEW   = 32'h100000;
   localparam int unsigned EXPW    = 32'h8000;
-  localparam logic [63:0] GUSED   = 64'h0002_0000;
-  localparam logic [63:0] GUIDX   = 64'h0002_1000;
   localparam int unsigned MAXCYC  = 300_000_000;
 
   logic clk = 0, rst_ni = 0;
@@ -61,24 +60,16 @@ module tb_g6lc_apu_vgtop;
   logic [15:0]     ch_id = '0;
   logic [3:0]      ch_n = '0;
   apu_vg_desc_t [APU_VG_MAX_DESC-1:0] ch_d;
-  logic [63:0]     ch_uelem = '0, ch_uidx = '0;
-  logic            mem_re, mem_we;
-  logic [63:0]     mem_addr;
-  logic [31:0]     mem_wdata, mem_rdata;
-  logic            ap_re, ap_we;
-  logic [17:0]     ap_raddr, ap_waddr;
-  logic [31:0]     ap_wdata, ap_rdata;
+  logic            cpl_v;
+  logic            vg_mf;
+  logic [31:0]     cpl_len;
+  logic [2:0]      mp_rv, mp_rr, mp_rsv;
+  apu_mp_req_t [2:0] mp_req;
+  apu_mp_rsp_t [2:0] mp_rsp;
   logic            w_v, w_done = 0;
   logic            w_r;
   apu_cmdexec_work_t w_o;
-  // §7b/5a-ii: ShaderCore 64-bit aperture port
-  logic            sh_re, sh_we;
-  logic [63:0]     sh_addr, sh_wdata;
-  logic [7:0]      sh_wstrb;
-  logic [63:0]     sh_rdata;
-  logic            d_done, irq;
-  logic [31:0]     isr;
-  logic            isr_ack = 0;
+  logic            d_done, vg_busy;
   logic            f_pulse;
   logic [63:0]     f_id;
   logic [7:0]      f_ring;
@@ -96,19 +87,14 @@ module tb_g6lc_apu_vgtop;
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .chain_valid_i(ch_v), .chain_ready_o(ch_r),
     .chain_id_i(ch_id), .chain_n_i(ch_n), .chain_desc_i(ch_d),
-    .chain_uelem_addr_i(ch_uelem), .chain_uidx_addr_i(ch_uidx),
-    .mem_re_o(mem_re), .mem_we_o(mem_we),
-    .mem_addr_o(mem_addr), .mem_wdata_o(mem_wdata),
-    .mem_rdata_i(mem_rdata),
-    .ap_re_o(ap_re), .ap_raddr_o(ap_raddr),
-    .ap_we_o(ap_we), .ap_waddr_o(ap_waddr),
-    .ap_wdata_o(ap_wdata), .ap_rdata_i(ap_rdata),
+    .cpl_valid_o(cpl_v), .cpl_ready_i(1'b1),
+    .cpl_len_o(cpl_len), .mem_fault_o(vg_mf),
+    .mp_req_valid_o(mp_rv), .mp_req_ready_i(mp_rr),
+    .mp_req_o(mp_req),
+    .mp_rsp_valid_i(mp_rsv), .mp_rsp_i(mp_rsp),
     .work_valid_o(w_v), .work_ready_i(w_r), .work_o(w_o),
     .work_done_i(w_done), .work_done_pl_i('0),
-    .sh_mem_re_o(sh_re), .sh_mem_we_o(sh_we),
-    .sh_mem_addr_o(sh_addr), .sh_mem_wdata_o(sh_wdata),
-    .sh_mem_wstrb_o(sh_wstrb), .sh_mem_rdata_i(sh_rdata),
-    .done_o(d_done), .irq_o(irq), .isr_o(isr), .isr_ack_i(isr_ack),
+    .done_o(d_done), .busy_o(vg_busy),
     .fence_pulse_o(f_pulse), .fence_id_o(f_id), .fence_ring_o(f_ring),
     .ring_active_o(r_active), .ring_status_o(r_status),
     .ring_head_o(r_head), .ring_extra_w_o(r_extra),
@@ -118,43 +104,41 @@ module tb_g6lc_apu_vgtop;
     .dbg_ot_cpl_valid_o(dot_cv), .dbg_ot_cpl_ready_i(1'b0),
     .dbg_ot_cpl_o(dot_cpl));
 
+  // shared memory model: mp ports 0..2 -> {guest, aperture} backing
+  tb_apu_mp_mem #(.N(3), .GMW(GMW), .APW(APW)) i_mem (
+    .clk_i(clk), .rst_ni(rst_ni),
+    .req_valid_i(mp_rv), .req_ready_o(mp_rr), .req_i(mp_req),
+    .rsp_valid_o(mp_rsv), .rsp_o(mp_rsp));
+
   // Enable=0 fixture: all outputs must stay quiet
-  logic            o_chr, o_mre, o_mwe, o_are, o_awe, o_wv, o_dn, o_iq,
-                   o_fp, o_dotr, o_dotcv;
-  logic            o_shre, o_shwe;
-  logic [63:0]     o_shaddr, o_shwd;
-  logic [7:0]      o_shws;
-  logic [31:0]     o_isr;
-  logic [63:0]     o_maddr, o_fid;
-  logic [31:0]     o_mwd;
-  logic [17:0]     o_aaddr, o_awaddr;
-  logic [31:0]     o_awd;
-  apu_cmdexec_work_t o_wo;
+  logic            o_chr, o_wv, o_dn, o_bsy, o_cpl, o_fp,
+                   o_dotr, o_dotcv, o_mf;
+  logic [2:0]      o_mpv;
+  apu_mp_req_t [2:0] o_mpreq;
+  logic [31:0]     o_cplen;
   logic [63:0]     o_fid2;
   logic [7:0]      o_fring;
+  apu_cmdexec_work_t o_wo;
   logic [Rings-1:0]       o_ra;
   logic [Rings-1:0][31:0] o_rs, o_rh;
   logic [Rings-1:0][17:0] o_re;
   logic [15:0]     o_liv;
   apu_objtab_cpl_t o_dotcpl;
+  apu_mp_rsp_t [2:0] mp_rsp0 = '{default: '0};
   apu_vg_desc_t [APU_VG_MAX_DESC-1:0] d_empty = '{default: '0};
 
   g6lc_apu_vgtop #(.Enable(1'b0), .Rings(Rings)) i_off (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .chain_valid_i(1'b0), .chain_ready_o(o_chr),
     .chain_id_i('0), .chain_n_i('0), .chain_desc_i(d_empty),
-    .chain_uelem_addr_i('0), .chain_uidx_addr_i('0),
-    .mem_re_o(o_mre), .mem_we_o(o_mwe), .mem_addr_o(o_maddr),
-    .mem_wdata_o(o_mwd), .mem_rdata_i('0),
-    .ap_re_o(o_are), .ap_raddr_o(o_aaddr),
-    .ap_we_o(o_awe), .ap_waddr_o(o_awaddr),
-    .ap_wdata_o(o_awd), .ap_rdata_i('0),
+    .cpl_valid_o(o_cpl), .cpl_ready_i(1'b0),
+    .cpl_len_o(o_cplen), .mem_fault_o(o_mf),
+    .mp_req_valid_o(o_mpv), .mp_req_ready_i(3'b000),
+    .mp_req_o(o_mpreq),
+    .mp_rsp_valid_i(3'b000), .mp_rsp_i(mp_rsp0),
     .work_valid_o(o_wv), .work_ready_i(1'b0), .work_o(o_wo),
     .work_done_i(1'b0), .work_done_pl_i('0),
-    .sh_mem_re_o(o_shre), .sh_mem_we_o(o_shwe),
-    .sh_mem_addr_o(o_shaddr), .sh_mem_wdata_o(o_shwd),
-    .sh_mem_wstrb_o(o_shws), .sh_mem_rdata_i('0),
-    .done_o(o_dn), .irq_o(o_iq), .isr_o(o_isr), .isr_ack_i(1'b0),
+    .done_o(o_dn), .busy_o(o_bsy),
     .fence_pulse_o(o_fp), .fence_id_o(o_fid2), .fence_ring_o(o_fring),
     .ring_active_o(o_ra), .ring_status_o(o_rs), .ring_head_o(o_rh),
     .ring_extra_w_o(o_re), .objtab_live_o(o_liv),
@@ -163,51 +147,10 @@ module tb_g6lc_apu_vgtop;
     .dbg_ot_cpl_valid_o(o_dotcv), .dbg_ot_cpl_ready_i(1'b0),
     .dbg_ot_cpl_o(o_dotcpl));
 
-  // ---- memories ----------------------------------------------------------
-  logic [31:0] gmem [GMW];
-  logic [31:0] apm  [APW];
+  // ---- tape / expected stores (the guest RAM + aperture live in the
+  // mp model i_mem; this TB pokes i_mem.gmem / i_mem.apm directly) ----
   logic [31:0] tape [TAPEW];
   logic [31:0] expm [EXPW];
-
-  // 1-cycle guest-mem service; write log for publication order
-  int unsigned wrlog_n = 0;
-  logic [63:0] wrlog_a [4096];
-  logic [31:0] wrlog_d [4096];
-  always @(posedge clk) begin
-    if (mem_re) mem_rdata <= gmem[mem_addr[31:0] >> 2];
-    if (mem_we) begin
-      gmem[mem_addr[31:0] >> 2] <= mem_wdata;
-      if (wrlog_n < 4096) begin
-        wrlog_a[wrlog_n] <= mem_addr;
-        wrlog_d[wrlog_n] <= mem_wdata;
-        wrlog_n <= wrlog_n + 1;
-      end
-    end
-  end
-  always @(posedge clk) begin
-    if (ap_we) apm[ap_waddr] <= ap_wdata;
-    if (ap_re) ap_rdata <= apm[ap_raddr];
-  end
-
-  // §7b/5a-ii: ShaderCore 64-bit aperture service — same backing
-  // store as the 32-bit ap_* window (guest buffer writes must be
-  // visible to the shader; unification with the ring/reply memory
-  // is 3c).  Fixed 1-cycle reads, byte-strobed writes.
-  always @(posedge clk) begin
-    if (sh_re) begin
-      for (int b = 0; b < 8; b++) begin
-        automatic int unsigned a = sh_addr[20:0] + b;
-        sh_rdata[b*8 +: 8] <= apm[(a >> 2) % APW][8*(a[1:0]) +: 8];
-      end
-    end
-    if (sh_we) begin
-      for (int b = 0; b < 8; b++) begin
-        automatic int unsigned a = sh_addr[20:0] + b;
-        if (sh_wstrb[b])
-          apm[(a >> 2) % APW][8*(a[1:0]) +: 8] <= sh_wdata[b*8 +: 8];
-      end
-    end
-  end
 
   // ---- work port: accept after 2 cycles, done pulse 3 later ----------------
   int unsigned w_delay = 0;
@@ -231,12 +174,6 @@ module tb_g6lc_apu_vgtop;
   end
   assign w_r = !w_vq;
 
-  // ISR acknowledge one cycle after the irq pulse
-  always @(posedge clk or negedge rst_ni) begin
-    if (!rst_ni) isr_ack <= 0;
-    else         isr_ack <= irq;
-  end
-
   // fence observability: NBA-only writes (no mixed blocking/
   // nonblocking on the same variable in the TB)
   int unsigned f_count = 0;
@@ -253,10 +190,11 @@ module tb_g6lc_apu_vgtop;
   always #5 clk = ~clk;
   always @(posedge clk) cycles++;
   always @(negedge clk) begin
-    if (o_mre || o_mwe || o_are || o_awe || o_wv || o_dn || o_iq ||
-        o_fp || o_dotcv || o_chr || o_shre || o_shwe ||
-        (|o_shaddr) || (|o_shwd) || (|o_shws) ||
-        (|o_isr) || o_liv !== '0)
+    if (o_wv || o_dn || o_bsy || o_cpl || o_fp || o_dotcv || o_chr ||
+        o_mf ||
+        (|o_mpv) || (|o_mpreq) || (|o_cplen) ||
+        (|o_fid2) || (|o_fring) || (|o_ra) || (|o_rs) || (|o_rh) ||
+        (|o_re) || o_liv !== '0)
       $fatal(1, "disabled vgtop active");
     if (cycles > MAXCYC) $fatal(1, "watchdog");
   end
@@ -265,6 +203,7 @@ module tb_g6lc_apu_vgtop;
   int unsigned tp, ep;            // tape / exp cursors
   int unsigned pub_id = 0;        // avail ids / used-elem slots
   int unsigned fc0;               // fence-pulse count at chain submit
+  logic [31:0] cpl_snap;          // cpl_len_o at the completion pulse
 
   // §7a Gate-2 float compare (same rule as tb_g6lc_apu_shwave):
   // sign-aware ULP distance; ±0 equal; NaN==NaN.
@@ -340,9 +279,6 @@ module tb_g6lc_apu_vgtop;
       cx = ntap(); ridx = ntap();
       ch_n = nd[3:0];
       ch_id = pub_id[15:0];
-      ch_uelem = GUSED + 64'(pub_id) * 64'd8;
-      ch_uidx = GUIDX;
-      wr0 = wrlog_n;
       fc0 = f_count;
       // wait for the previous chain to finish completely (done is a
       // pulse; a FENCE response spends an extra cycle in StFence)
@@ -361,69 +297,52 @@ module tb_g6lc_apu_vgtop;
         check(!ch_r, "chain not accepted");
       end
       ch_v = 0;
-      // wait for publication (done pulse) with timeout; done_o is a
-      // one-cycle pulse so sample mid-cycle at negedge
-      begin
+      // wait for the completion pulse (cpl_valid_o = done_o) with
+      // timeout; the pulse is one cycle so sample mid-cycle at negedge
+      begin : wait_cpl
         int unsigned tmo = 0;
-        while (!d_done && tmo < 20_000_000) begin
+        while (!cpl_v && tmo < 20_000_000) begin
           @(negedge clk); tmo++;
         end
-        check(d_done, "chain publication done timeout");
+        check(cpl_v, "chain completion timeout");
+        cpl_snap = cpl_len;
         @(posedge clk);
-        @(negedge clk);    // settle: used/ISR writes just committed
+        @(negedge clk);    // settle
       end
       // EK_RESP {kind, used_len, resp_type, nbody, 0,0,0,0}
       check(rec_kind() == 1, "EK_RESP kind");
       begin
         int unsigned e_used, e_type, e_nbody;
-        ep++;                              // kind word
-        e_used  = nexp();
-        e_type  = nexp();
-        e_nbody = nexp();
-        ep += 4;                           // pad
-        // response header word0 = type, written to the WRITE desc
-        check(gmem[raddr[31:0] >> 2] == e_type,
-              $sformatf("resp type got=%08x exp=%08x",
-                        gmem[raddr[31:0] >> 2], e_type));
-        // response body words at raddr+24
-        for (int i = 0; i < e_nbody; i++) begin
-          check(rec_kind() == 2, "EK_BODY kind");
-          check(gmem[(raddr[31:0] >> 2) + 6 + i] == expm[ep + 1],
-                $sformatf("resp body[%0d] got=%08x exp=%08x", i,
-                          gmem[(raddr[31:0] >> 2) + 6 + i],
-                          expm[ep + 1]));
-          ep += 8;
-        end
-        // used element {id, len} at this chain's slot + used idx
-        check(gmem[(GUSED[31:0] >> 2) + pub_id * 2] == pub_id,
-              $sformatf("used id got=%08x exp=%08x",
-                        gmem[(GUSED[31:0] >> 2) + pub_id * 2],
-                        pub_id));
-        check(gmem[(GUSED[31:0] >> 2) + pub_id * 2 + 1] == e_used,
-              $sformatf("used len got=%08x exp=%08x",
-                        gmem[(GUSED[31:0] >> 2) + pub_id * 2 + 1],
-                        e_used));
-        check(gmem[GUIDX[31:0] >> 2] == pub_id,
-              $sformatf("used idx got=%08x exp=%08x",
-                        gmem[GUIDX[31:0] >> 2], pub_id));
-        check((isr & 32'd1) != 32'h0, "ISR bit0 set");
-        // order: uelem write comes after every response write, idx last
-        begin
-          int unsigned iu = wrlog_n, ii = wrlog_n;
-          logic [63:0] uea = GUSED + 64'(pub_id) * 64'd8;
-          for (int i = wr0; i < wrlog_n; i++) begin
-            if (wrlog_a[i] == uea) iu = i;
-            if (wrlog_a[i] == GUIDX) ii = i;
+          ep++;                              // kind word
+          e_used  = nexp();
+          e_type  = nexp();
+          e_nbody = nexp();
+          ep += 4;                           // pad
+          // response header word0 = type, written to the WRITE desc
+          check(i_mem.gmem[raddr[31:0] >> 2] == e_type,
+                $sformatf("resp type got=%08x exp=%08x",
+                          i_mem.gmem[raddr[31:0] >> 2], e_type));
+          // response body words at raddr+24
+          for (int i = 0; i < e_nbody; i++) begin
+            check(rec_kind() == 2, "EK_BODY kind");
+            check(i_mem.gmem[(raddr[31:0] >> 2) + 6 + i] == expm[ep + 1],
+                  $sformatf("resp body[%0d] got=%08x exp=%08x", i,
+                            i_mem.gmem[(raddr[31:0] >> 2) + 6 + i],
+                            expm[ep + 1]));
+            ep += 8;
           end
-          check(iu < wrlog_n, "used elem written");
-          check(ii < wrlog_n, "used idx written");
-          check(iu < ii, "publication order elem<idx");
-          for (int i = wr0; i < wrlog_n; i++) begin
-            if (wrlog_a[i] >= raddr &&
-                wrlog_a[i] < raddr + 64'(rwords))
-              check(i < iu, "response before used elem");
-          end
+        // completion length the walker would publish as used.len
+        check(cpl_snap == 32'(e_used),
+              $sformatf("cpl_len got=%08x exp=%08x", cpl_snap, e_used));
+        begin : idle_wait
+          // the mp poll loop keeps the pump busy for a bounded backlog;
+          // with mp latency jitter this takes longer than the old
+          // 1-cycle port did — wait generously rather than one cycle
+          int unsigned iw;
+          iw = 0;
+          while (vg_busy && iw < 100000) @(posedge clk) iw++;
         end
+        check(!vg_busy, "vgtop idle after completion");
         // fence record if requested: {8, flo, fhi, ring_idx}
         if ((flags & 1) != 0) begin
           int unsigned t = 0;
@@ -452,8 +371,6 @@ module tb_g6lc_apu_vgtop;
       $display("compute-session tape: %s", vname);
     $readmemh({"vn_vectors/", vname, ".hex"}, tape, 0);
     $readmemh({"vn_vectors/", vname, ".exp"}, expm, 0);
-    for (int i = 0; i < GMW; i++) gmem[i] = '0;
-    for (int i = 0; i < APW; i++) apm[i] = '0;
     tp = 0; ep = 0;
     repeat (8) @(posedge clk);
     rst_ni = 1;
@@ -467,29 +384,29 @@ module tb_g6lc_apu_vgtop;
           int unsigned n = ntap();
           int unsigned al = ntap(), ah = ntap();
           for (int i = 0; i < n; i++)
-            gmem[((al >> 2) + i) % GMW] = ntap();
+            i_mem.gmem[((al >> 2) + i) % GMW] = ntap();
         end
         2: do_chain();
         3: begin // TP_APW
           int unsigned n = ntap();
           int unsigned al = ntap(), ah = ntap();
           for (int i = 0; i < n; i++)
-            apm[((al >> 2) + i) % APW] = ntap();
+            i_mem.apm[((al >> 2) + i) % APW] = ntap();
         end
         4: begin // TP_WAIT_HEAD [ring][ap_addr][exp][tmo]
           int unsigned rg = ntap(), ad = ntap(),
                        eh = ntap(), tmo = ntap();
           int unsigned t = 0;
-          while (apm[(ad >> 2) % APW] != eh && t < tmo) begin
+          while (i_mem.apm[(ad >> 2) % APW] != eh && t < tmo) begin
             @(posedge clk); t++;
           end
-          if (apm[(ad >> 2) % APW] != eh)
+          if (i_mem.apm[(ad >> 2) % APW] != eh)
             $display("DBG WAIT_HEAD ring%0d: ap_head=%08x r_head=%08x r_status=%08x",
-                     rg, apm[(ad >> 2) % APW], r_head[rg],
+                     rg, i_mem.apm[(ad >> 2) % APW], r_head[rg],
                      r_status[rg]);
-          check(apm[(ad >> 2) % APW] == eh,
+          check(i_mem.apm[(ad >> 2) % APW] == eh,
                 $sformatf("WAIT_HEAD ring%0d ap got=%08x exp=%08x",
-                          rg, apm[(ad >> 2) % APW], eh));
+                          rg, i_mem.apm[(ad >> 2) % APW], eh));
           check(rec_kind() == 3, "EK_HEAD kind");
           check(expm[ep + 1] == rg && expm[ep + 2] == eh,
                 "EK_HEAD words");
@@ -502,17 +419,17 @@ module tb_g6lc_apu_vgtop;
           int unsigned rg = ntap(), ad = ntap(), mask = ntap(),
                        want = ntap(), tmo = ntap();
           int unsigned t = 0;
-          while (((apm[(ad >> 2) % APW] & mask) != want) && t < tmo) begin
+          while (((i_mem.apm[(ad >> 2) % APW] & mask) != want) && t < tmo) begin
             @(posedge clk); t++;
           end
-          check((apm[(ad >> 2) % APW] & mask) == want,
+          check((i_mem.apm[(ad >> 2) % APW] & mask) == want,
                 $sformatf("WAIT_IDLE ring%0d status=%08x mask=%0d want=%0d",
-                          rg, apm[(ad >> 2) % APW], mask, want));
+                          rg, i_mem.apm[(ad >> 2) % APW], mask, want));
           check(rec_kind() == 4, "EK_STATUS kind");
           check(r_status[rg] == expm[ep + 2],
                 $sformatf("ring_status_o got=%08x exp=%08x",
                           r_status[rg], expm[ep + 2]));
-          check(apm[(ad >> 2) % APW] == expm[ep + 2],
+          check(i_mem.apm[(ad >> 2) % APW] == expm[ep + 2],
                 "aperture status == exp");
           ep += 8;
         end
@@ -537,13 +454,13 @@ module tb_g6lc_apu_vgtop;
               int unsigned bad = 0;
               for (int i = 0; i < a0; i++) begin
                 check(rec_kind() == 5, "EK_REPLY kind");
-                if (apm[((a1 >> 2) + expm[ep + 1]) % APW] !=
+                if (i_mem.apm[((a1 >> 2) + expm[ep + 1]) % APW] !=
                     expm[ep + 2]) bad++;
-                check(apm[((a1 >> 2) + expm[ep + 1]) % APW] ==
+                check(i_mem.apm[((a1 >> 2) + expm[ep + 1]) % APW] ==
                       expm[ep + 2],
                       $sformatf("CK_REPLY off=%0x idx=%0d got=%08x exp=%08x",
                                 a1, expm[ep + 1],
-                                apm[((a1 >> 2) + expm[ep + 1]) % APW],
+                                i_mem.apm[((a1 >> 2) + expm[ep + 1]) % APW],
                                 expm[ep + 2]));
                 ep += 8;
               end
@@ -551,7 +468,7 @@ module tb_g6lc_apu_vgtop;
                 $display("DBG window off=%0x n=%0d:", a1, a0);
                 for (int i = 0; i < a0; i++)
                   $display("  [%0d] got=%08x", i,
-                           apm[((a1 >> 2) + i) % APW]);
+                           i_mem.apm[((a1 >> 2) + i) % APW]);
               end
             end
             3: begin // CK_LIVE (+ EK_PAGES allocated aperture pages)
@@ -571,11 +488,11 @@ module tb_g6lc_apu_vgtop;
             end
             4: begin // CK_EXTRA [ring][byte off]
               check(rec_kind() == 7, "EK_EXTRA kind");
-              check(apm[(r_extra[a0] + (a1 >> 2)) % APW] ==
+              check(i_mem.apm[(r_extra[a0] + (a1 >> 2)) % APW] ==
                     expm[ep + 3],
                     $sformatf("CK_EXTRA ring%0d off=%0x got=%08x exp=%08x",
                               a0, a1,
-                              apm[(r_extra[a0] + (a1 >> 2)) % APW],
+                              i_mem.apm[(r_extra[a0] + (a1 >> 2)) % APW],
                               expm[ep + 3]));
               ep += 8;
             end
@@ -583,7 +500,7 @@ module tb_g6lc_apu_vgtop;
               // EK_APRCHK {off, model_word, oracle_word, cls}
               for (int i = 0; i < a0; i++) begin
                 automatic logic [31:0] got =
-                    apm[((a1 >> 2) + i) % APW];
+                    i_mem.apm[((a1 >> 2) + i) % APW];
                 automatic int unsigned u;
                 check(rec_kind() == 10, "EK_APRCHK kind");
                 check(expm[ep + 1] == a1 + 4 * i,

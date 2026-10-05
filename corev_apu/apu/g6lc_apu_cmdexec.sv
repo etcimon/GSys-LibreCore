@@ -73,10 +73,14 @@ module g6lc_apu_cmdexec
   output logic [15:0]        done_seq_o,
   output logic [Fences-1:0]  fence_signaled_o,
   output logic [Fences-1:0]  fence_lost_o,
-  input  logic [Fences-1:0]  fence_clr_i
+  input  logic [Fences-1:0]  fence_clr_i,
+  // drained indication: FSM idle, submit FIFO empty, no outstanding
+  // work items (used by the vgsys idle_o / reset sequencer)
+  output logic               busy_o
 );
   if (!Enable) begin : gen_off
     assign submit_ready_o  = 1'b0;
+    assign busy_o          = 1'b0;
     assign cr_req_valid_o  = 1'b0;
     assign cr_req_o        = '0;
     assign cr_cpl_ready_o  = 1'b0;
@@ -204,6 +208,8 @@ module g6lc_apu_cmdexec
 
     // ---- port steering -----------------------------------------------
     assign submit_ready_o = fifo_n_q != 3'(Fifo);
+    assign busy_o         = state_q != StIdle || fifo_n_q != 3'd0 ||
+                            outst_q != 8'd0;
     assign done_seq_o     = done_seq_q;
     assign fence_signaled_o = fsig_q;
     assign fence_lost_o   = flost_q;
@@ -811,7 +817,8 @@ module g6lc_apu_cmdexec_fixture
   output logic [15:0]        done_seq_o,
   output logic [Fences-1:0]  fence_signaled_o,
   output logic [Fences-1:0]  fence_lost_o,
-  input  logic [Fences-1:0]  fence_clr_i
+  input  logic [Fences-1:0]  fence_clr_i,
+  output logic               busy_o
 );
   g6lc_apu_cmdexec #(.Enable(Enable), .Fences(Fences)) i_dut (.*);
 endmodule

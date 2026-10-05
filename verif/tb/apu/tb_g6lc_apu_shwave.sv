@@ -99,7 +99,8 @@ module tb_g6lc_apu_shwave;
     .busy_o(busy), .done_o(done), .done_pl_o(done_pl),
     .mem_re_o(mem_re), .mem_we_o(mem_we), .mem_addr_o(mem_addr),
     .mem_wdata_o(mem_wdata), .mem_wstrb_o(mem_wstrb),
-    .mem_rdata_i(mem_rdata));
+    .mem_ready_i(1'b1), .mem_rvalid_i(mem_rv),
+    .mem_rdata_i(mem_rdata), .mem_err_i(1'b0));
 
   // Enable=0 fixture — every externally visible output is wired and
   // monitored continuously below.
@@ -124,7 +125,8 @@ module tb_g6lc_apu_shwave;
     .busy_o(off_busy), .done_o(off_done), .done_pl_o(off_pl),
     .mem_re_o(off_re), .mem_we_o(off_we), .mem_addr_o(off_addr),
     .mem_wdata_o(off_wdata), .mem_wstrb_o(off_strb),
-    .mem_rdata_i('0));
+    .mem_ready_i(1'b1), .mem_rvalid_i(1'b0),
+    .mem_rdata_i('0), .mem_err_i(1'b0));
 
   // continuous Enable=0 quiet monitor — sticky flag; the failure is
   // counted once at the end (fails is written from the initial
@@ -142,17 +144,27 @@ module tb_g6lc_apu_shwave;
     end
   end
 
-  // ---- memory model: 1-cycle 64-bit port ----------------------------
+  // ---- memory model: handshake port (ready=1, rvalid next cycle) ---
+  logic         mem_rv = 0;
   logic [63:0] mem [0:MEMW-1];
-  always_ff @(posedge clk) begin
+  always_ff @(posedge clk or negedge rst_n) begin
     logic [63:0] wm;
-    if (mem_we) begin
-      wm = mem[mem_addr[16:3]];
-      for (int b = 0; b < 8; b++)
-        if (mem_wstrb[b]) wm[8*b +: 8] = mem_wdata[8*b +: 8];
-      mem[mem_addr[16:3]] <= wm;
+    if (!rst_n) begin
+      mem_rv <= 1'b0; mem_rdata <= '0;
+    end else begin
+      mem_rv <= 1'b0;
+      if (mem_we) begin
+        wm = mem[mem_addr[16:3]];
+        for (int b = 0; b < 8; b++)
+          if (mem_wstrb[b]) wm[8*b +: 8] = mem_wdata[8*b +: 8];
+        mem[mem_addr[16:3]] <= wm;
+        mem_rv <= 1'b1;
+      end
+      if (mem_re) begin
+        mem_rdata <= mem[mem_addr[16:3]];
+        mem_rv <= 1'b1;
+      end
     end
-    if (mem_re) mem_rdata <= mem[mem_addr[16:3]];
   end
 
   logic [31:0] wbuf [MAXW];
@@ -484,7 +496,6 @@ module tb_g6lc_apu_shwave;
     wr_en = 0; commit = 0; retire = 0; work = 0; work_ctype = 0;
     work_imm = '0; disp_slot = 0; binds = '0; push_n = 0; push = '0;
     for (int i = 0; i < MEMW; i++) mem[i] = '0;
-    mem_rdata = '0;
     repeat (8) @(negedge clk); rst_n = 1;
     repeat (4) @(negedge clk);
 

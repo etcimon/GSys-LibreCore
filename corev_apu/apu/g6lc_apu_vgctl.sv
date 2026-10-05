@@ -55,12 +55,20 @@ module g6lc_apu_vgctl
   output logic            chain_ready_o,
   input  logic [3:0]      chain_n_i,
   input  apu_vg_desc_t [APU_VG_MAX_DESC-1:0] chain_desc_i,
-  // guest memory word port (1-cycle read model)
-  output logic            mem_re_o,
+  // guest memory word port (§6c handshake form): mem_req_o held until
+  // mem_ready_i, one mem_rvalid_i per request (writes included);
+  // mem_err_i returns zero data — a read err truncates the chain like
+  // a short chain, a write err sets mem_fault_o and finishes
+  output logic            mem_req_o,
   output logic            mem_we_o,
   output logic [63:0]     mem_addr_o,
-  output logic [31:0]     mem_wdata_o,
-  input  logic [31:0]     mem_rdata_i,
+  output logic [63:0]     mem_wdata_o,
+  output logic [7:0]      mem_wstrb_o,
+  input  logic            mem_ready_i,
+  input  logic            mem_rvalid_i,
+  input  logic [63:0]     mem_rdata_i,
+  input  logic            mem_err_i,
+  output logic            mem_fault_o,   // sticky write fault
   // ObjTab port
   output logic            ot_req_valid_o,
   input  logic            ot_req_ready_i,
@@ -115,8 +123,9 @@ module g6lc_apu_vgctl
 
   if (!Enable) begin : gen_off
     assign chain_ready_o = 1'b0;
-    assign mem_re_o = 1'b0;      assign mem_we_o = 1'b0;
+    assign mem_req_o = 1'b0;     assign mem_we_o = 1'b0;
     assign mem_addr_o = '0;      assign mem_wdata_o = '0;
+    assign mem_wstrb_o = '0;     assign mem_fault_o = 1'b0;
     assign ot_req_valid_o = 1'b0; assign ot_req_o = '0;
     assign ot_cpl_ready_o = 1'b0;
     assign pg_req_valid_o = 1'b0; assign pg_req_o = '0;
@@ -131,6 +140,7 @@ module g6lc_apu_vgctl
     logic unused;
     assign unused = clk_i | rst_ni | testmode_i | chain_valid_i |
                     (|chain_n_i) | (|chain_desc_i[0]) | mem_rdata_i |
+                    mem_ready_i | mem_rvalid_i | mem_err_i |
                     ot_req_ready_i | ot_cpl_valid_i | (|ot_cpl_i) |
                     pg_req_ready_i | pg_cpl_valid_i | (|pg_cpl_i) |
                     xs_ready_i | xs_done_i | xs_fault_i |
@@ -169,6 +179,7 @@ module g6lc_apu_vgctl
     // §7b: blob_id != 0 maps a DEVICE_MEMORY object; aux[0] marks the
     // blob memory-backed so UNREF leaves the pages to the memory.
     logic         blob_mem_q;
+    logic         mem_fault_q;   // sticky write fault (§6c)
     // page-allocator in-flight op
     apu_vgpages_op_e pg_op_q;
     logic [31:0]  pg_base_q, pg_bytes_q;
@@ -189,12 +200,20 @@ module g6lc_apu_vgctl
     assign fence_id_o = rfence_q;
     assign fence_ring_o = 8'(rring_q);
 
-    // ---- guest mem port ---------------------------------------------------
-    assign mem_re_o = state_q == StRdFire;
-    assign mem_we_o = state_q == StWrFire;
-    assign mem_addr_o = (state_q == StWrFire) ? resp_addr_q :
-                        desc_q[rd_d_q[1:0]].addr + 64'(rd_off_q);
-    assign mem_wdata_o = resp_ram[wr_w_q[5:0]];
+    // ---- guest mem port (handshake) ----------------------------------------
+    // 32-bit accesses at 4-byte-aligned guest addresses; the AXI beat
+    // is 8 bytes, so wdata/wstrb/rdata are positioned by addr[2].
+    assign mem_req_o   = state_q == StRdFire || state_q == StWrFire;
+    assign mem_we_o    = state_q == StWrFire;
+    assign mem_addr_o  = (state_q == StWrFire) ? resp_addr_q :
+                         desc_q[rd_d_q[1:0]].addr + 64'(rd_off_q);
+    assign mem_wdata_o = mem_addr_o[2] ? {resp_ram[wr_w_q[5:0]], 32'h0}
+                                       : {32'h0, resp_ram[wr_w_q[5:0]]};
+    assign mem_wstrb_o = mem_addr_o[2] ? 8'hF0 : 8'h0F;
+    assign mem_fault_o = mem_fault_q;
+    // bit2 of the issued read address, for the rdata half-select
+    logic rd_hi;
+    assign rd_hi = desc_q[rd_d_q[1:0]].addr[2] ^ rd_off_q[2];
 
     // ---- ObjTab port -------------------------------------------------------
     logic ot_fire;
@@ -259,6 +278,7 @@ module g6lc_apu_vgctl
         rtype_q <= '0; rflags_q <= '0; rctx_q <= '0; rring_q <= '0;
         rfence_q <= '0; trunc_q <= 1'b0; payload_b_q <= '0;
         blob_addr_q <= '0; blob_size_q <= '0; blob_mem_q <= 1'b0;
+        mem_fault_q <= 1'b0;
         pg_op_q <= APU_VGPAGES_OP_ALLOC; pg_base_q <= '0;
         pg_bytes_q <= '0; pg_ret_q <= StIdle;
         for (int i = 0; i < REQW; i++) req_ram[i] <= '0;
@@ -273,6 +293,9 @@ module g6lc_apu_vgctl
               rd_d_q <= '0; rd_off_q <= '0; read_len_q <= '0;
               stage_q <= '0; wr_w_q <= '0; resp_n_q <= '0;
               used_q <= '0; need_q <= '0; trunc_q <= 1'b0;
+              // mem_fault_q is NOT cleared here: it is sticky across
+              // chains and resets only with rst_ni (the §6c engine
+              // reset — vgtop's mem_fault_o feeds vgsys bus_fault_o)
               payload_b_q <= '0;
               state_q <= StRdDesc;
             end
@@ -293,13 +316,23 @@ module g6lc_apu_vgctl
               state_q <= StRdFire;
             end
           end
-          StRdFire: state_q <= StRdCap;
+          StRdFire: if (mem_ready_i) state_q <= StRdCap;
           StRdCap: begin
-            req_ram[stage_q[5:0]] <= mem_rdata_i;
-            stage_q <= stage_q + 9'd1;
-            rd_off_q <= rd_off_q + 32'd4;
-            read_len_q <= read_len_q + 32'd4;
-            state_q <= StRdDesc;
+            if (mem_rvalid_i) begin
+              if (mem_err_i) begin
+                // out-of-window chain buffer: answer like a truncated
+                // chain (header-only response, truthful used length)
+                trunc_q <= 1'b1;
+                state_q <= StHdr;
+              end else begin
+                req_ram[stage_q[5:0]] <=
+                  rd_hi ? mem_rdata_i[63:32] : mem_rdata_i[31:0];
+                stage_q <= stage_q + 9'd1;
+                rd_off_q <= rd_off_q + 32'd4;
+                read_len_q <= read_len_q + 32'd4;
+                state_q <= StRdDesc;
+              end
+            end
           end
 
           // ---- header parse --------------------------------------------
@@ -571,21 +604,32 @@ module g6lc_apu_vgctl
                 resp_left_q <= desc_q[wr_d_q[1:0]].len;
                 state_q <= StWrFire;
               end else begin
+                // no write desc: the response is never emitted, so the
+                // truthful used length carries only the consumed bytes
+                used_q <= used_q - 32'({resp_n_q, 2'b00});
                 state_q <= StDone;       // no write desc: no response
               end
             end else begin
               wr_d_q <= wr_d_q + 2'd1;
             end
           end
-          StWrFire: state_q <= StWrCap;
+          StWrFire: if (mem_ready_i) state_q <= StWrCap;
           StWrCap: begin
-            wr_w_q <= wr_w_q + 9'd1;
-            resp_addr_q <= resp_addr_q + 64'd4;
-            resp_left_q <= resp_left_q - 32'd4;
-            if (wr_w_q + 9'd1 >= resp_n_q || resp_left_q <= 32'd4)
-              state_q <= StDone;
-            else
-              state_q <= StWrFire;
+            if (mem_rvalid_i) begin
+              if (mem_err_i) begin
+                mem_fault_q <= 1'b1;   // sticky
+                // the faulted word never reached the buffer: only
+                // words actually written count toward used length
+                used_q <= used_q - 32'd4;
+              end
+              wr_w_q <= wr_w_q + 9'd1;
+              resp_addr_q <= resp_addr_q + 64'd4;
+              resp_left_q <= resp_left_q - 32'd4;
+              if (wr_w_q + 9'd1 >= resp_n_q || resp_left_q <= 32'd4)
+                state_q <= StDone;
+              else
+                state_q <= StWrFire;
+            end
           end
 
           // ---- completion ----------------------------------------------------
@@ -642,11 +686,16 @@ module g6lc_apu_vgctl_fixture
   output logic            chain_ready_o,
   input  logic [3:0]      chain_n_i,
   input  apu_vg_desc_t [APU_VG_MAX_DESC-1:0] chain_desc_i,
-  output logic            mem_re_o,
+  output logic            mem_req_o,
   output logic            mem_we_o,
   output logic [63:0]     mem_addr_o,
-  output logic [31:0]     mem_wdata_o,
-  input  logic [31:0]     mem_rdata_i,
+  output logic [63:0]     mem_wdata_o,
+  output logic [7:0]      mem_wstrb_o,
+  input  logic            mem_ready_i,
+  input  logic            mem_rvalid_i,
+  input  logic [63:0]     mem_rdata_i,
+  input  logic            mem_err_i,
+  output logic            mem_fault_o,
   output logic            ot_req_valid_o,
   input  logic            ot_req_ready_i,
   output apu_objtab_req_t ot_req_o,

@@ -21,9 +21,12 @@ module tb_g6lc_apu_vgctl;
   logic            ch_v = 0, ch_r;
   logic [3:0]      ch_n = '0;
   apu_vg_desc_t [APU_VG_MAX_DESC-1:0] ch_d;
-  logic            m_re, m_we;
+  logic            m_req, m_we;
   logic [63:0]     m_addr;
-  logic [31:0]     m_wdata, m_rdata;
+  logic [63:0]     m_wdata;
+  logic [7:0]      m_wstrb;
+  logic            m_rv = 0, m_fault;
+  logic [63:0]     m_rdata = '0;
   logic            ot_v, ot_r, ot_cv, ot_cr;
   apu_objtab_req_t ot_req;
   apu_objtab_cpl_t ot_cpl;
@@ -42,8 +45,10 @@ module tb_g6lc_apu_vgctl;
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .chain_valid_i(ch_v), .chain_ready_o(ch_r),
     .chain_n_i(ch_n), .chain_desc_i(ch_d),
-    .mem_re_o(m_re), .mem_we_o(m_we), .mem_addr_o(m_addr),
-    .mem_wdata_o(m_wdata), .mem_rdata_i(m_rdata),
+    .mem_req_o(m_req), .mem_we_o(m_we), .mem_addr_o(m_addr),
+    .mem_wdata_o(m_wdata), .mem_wstrb_o(m_wstrb),
+    .mem_ready_i(1'b1), .mem_rvalid_i(m_rv), .mem_rdata_i(m_rdata),
+    .mem_err_i(1'b0), .mem_fault_o(m_fault),
     .ot_req_valid_o(ot_v), .ot_req_ready_i(ot_r), .ot_req_o(ot_req),
     .ot_cpl_valid_i(ot_cv), .ot_cpl_ready_o(ot_cr), .ot_cpl_i(ot_cpl),
     .pg_req_valid_o(pg_v), .pg_req_ready_i(pg_r), .pg_req_o(pg_req),
@@ -71,9 +76,28 @@ module tb_g6lc_apu_vgctl;
     .cpl_valid_o(pg_cv), .cpl_ready_i(pg_cr), .cpl_o(pg_cpl));
 
   logic [31:0] gmem [GMW];
-  always @(posedge clk) begin
-    if (m_re) m_rdata <= gmem[m_addr[31:0] >> 2];
-    if (m_we) gmem[m_addr[31:0] >> 2] <= m_wdata;
+  // handshake guest-memory model: ready=1, one rvalid next cycle;
+  // returns the aligned 64-bit beat containing the request address
+  // (vgctl picks the half by addr[2]); writes apply wstrb bytes.
+  always @(posedge clk or negedge rst_ni) begin
+    if (!rst_ni) begin
+      m_rv <= 1'b0; m_rdata <= '0;
+    end else begin
+      m_rv <= 1'b0;
+      if (m_req && !m_we)
+        begin m_rv <= 1'b1;
+          m_rdata <= {gmem[((m_addr[31:0] >> 2) & ~32'h1) + 1],
+                      gmem[(m_addr[31:0] >> 2) & ~32'h1]}; end
+      else if (m_req && m_we) begin
+        m_rv <= 1'b1;
+        // wstrb/wdata are beat-positioned; byte b lands in word
+        // (m_addr & ~7)>>2 + b[2] at byte lane b[1:0]
+        for (int b = 0; b < 8; b++)
+          if (m_wstrb[b])
+            gmem[32'((m_addr[31:0] >> 3) * 2) + (b >= 4 ? 1 : 0)]
+                [b[1:0] * 8 +: 8] <= m_wdata[b * 8 +: 8];
+      end
+    end
   end
 
   always #5 clk = ~clk;

@@ -67,20 +67,22 @@ module g6lc_apu_vnpump
   output logic            xs_done_o,
   output logic            xs_fault_o,
   output logic            xs_active_o,   // pump owns the guest-mem port
-  // aperture word port (1 MiB window, word addressed, 1R1W:
-  // vnrep's RBLOB echo legitimately reads CS words while writing a
-  // reply word in the same cycle, so read and write carry their own
-  // addresses and can be simultaneous)
-  output logic            ap_re_o,
-  output logic [17:0]     ap_raddr_o,
-  output logic            ap_we_o,
-  output logic [17:0]     ap_waddr_o,
-  output logic [31:0]     ap_wdata_o,
-  input  logic [31:0]     ap_rdata_i,
-  // guest-memory read port (execbuffer streams only)
-  output logic            gm_re_o,
-  output logic [63:0]     gm_addr_o,
-  input  logic [31:0]     gm_rdata_i,
+  // shared memory port (§6c apu_mp handshake): one request at a time
+  // for aperture words (dom=1, aperture-relative byte offset),
+  // execbuffer guest reads (dom=0, absolute guest byte address), pump
+  // head/status writes and vnrep reply writes.  Requests are held
+  // until mp_ready_i; exactly one mp_rvalid_i returns per request —
+  // writes included.  mp_err_i returns zero data, no usable beat.
+  output logic            mp_req_o,
+  output logic            mp_we_o,
+  output logic            mp_dom_o,
+  output logic [63:0]     mp_addr_o,
+  output logic [63:0]     mp_wdata_o,
+  output logic [7:0]      mp_wstrb_o,
+  input  logic            mp_ready_i,
+  input  logic            mp_rvalid_i,
+  input  logic [63:0]     mp_rdata_i,
+  input  logic            mp_err_i,
   // ObjTab port (shared pump/front, muxed inside)
   output logic            ot_req_valid_o,
   input  logic            ot_req_ready_i,
@@ -148,10 +150,9 @@ module g6lc_apu_vnpump
   if (!Enable) begin : gen_off
     assign xs_ready_o = 1'b0;   assign xs_done_o = 1'b0;
     assign xs_fault_o = 1'b0;   assign xs_active_o = 1'b0;
-    assign ap_re_o = 1'b0;      assign ap_we_o = 1'b0;
-    assign ap_raddr_o = '0;     assign ap_waddr_o = '0;
-    assign ap_wdata_o = '0;
-    assign gm_re_o = 1'b0;      assign gm_addr_o = '0;
+    assign mp_req_o = 1'b0;     assign mp_we_o = 1'b0;
+    assign mp_dom_o = 1'b0;     assign mp_addr_o = '0;
+    assign mp_wdata_o = '0;     assign mp_wstrb_o = '0;
     assign ot_req_valid_o = 1'b0; assign ot_req_o = '0;
     assign ot_cpl_ready_o = 1'b0;
     assign cr_req_valid_o = 1'b0; assign cr_req_o = '0;
@@ -177,7 +178,8 @@ module g6lc_apu_vnpump
     logic unused;
     assign unused = clk_i | rst_ni | testmode_i | xs_valid_i |
                     (|xs_ndesc_i) | (|xs_off_i) | (|xs_bytes_i) |
-                    (|xs_ctx_i) | (|ap_rdata_i) | (|gm_rdata_i) |
+                    (|xs_ctx_i) | (|mp_rdata_i) | mp_ready_i |
+                    mp_rvalid_i | mp_err_i |
                     ot_req_ready_i | ot_cpl_valid_i | (|ot_cpl_i) |
                     cr_req_ready_i | cr_cpl_valid_i | (|cr_cpl_i) |
                     cr_pay_ready_i |
@@ -257,19 +259,20 @@ module g6lc_apu_vnpump
 
     // poll bookkeeping
     logic [1:0]  poll_q;
-    logic        last_gm_q;
 
     // ---- vndec + vnfront wiring -------------------------------------------
     logic        dec_start_q, dec_busy, dec_done, dec_re;
     logic [15:0] dec_addr;
     logic [31:0] dec_rdata;
+    logic        dec_rdy, dec_rv;
     apu_vn_op_t  dec_op;
     g6lc_apu_vndec #(.Enable(1'b1)) i_dec (
       .clk_i(clk_i), .rst_ni(rst_ni),
       .start_i(dec_start_q), .cs_base_i(16'h0),
       .cs_len_i(16'(st_q[depth_q].bytes - st_q[depth_q].pos > 32'hFFFF
                    ? 32'hFFFF : st_q[depth_q].bytes - st_q[depth_q].pos)),
-      .cs_re_o(dec_re), .cs_addr_o(dec_addr), .cs_rdata_i(dec_rdata),
+      .cs_re_o(dec_re), .cs_addr_o(dec_addr), .cs_ready_i(dec_rdy),
+      .cs_rvalid_i(dec_rv), .cs_rdata_i(dec_rdata), .cs_err_i(mp_err_i),
       .busy_o(dec_busy), .done_o(dec_done), .op_o(dec_op),
       // the pump-level decoder only frames transport headers; its
       // KEEP stream belongs to the vnfront's own decoder instance
@@ -278,6 +281,7 @@ module g6lc_apu_vnpump
     logic        fr_start_q, fr_busy, fr_done, fr_cre, fr_rwe;
     logic [15:0] fr_caddr, fr_raddr;
     logic [31:0] fr_rdata, fr_wdata;
+    logic        fr_cs_rdy, fr_cs_rv, fr_rep_rdy, fr_rep_done;
     logic        fr_ot_v, fr_cpl_rdy;
     apu_objtab_req_t fr_ot_req;
     logic        fr_cr_v, fr_cr_cpl_rdy;
@@ -296,8 +300,11 @@ module g6lc_apu_vnpump
       .rep_len_i(rep_live_q ? 16'((rep_size_q - rep_pos_q) >> 2)
                             : 16'h0),
       .ctx_i(st_q[depth_q].ctx),
-      .cs_re_o(fr_cre), .cs_addr_o(fr_caddr), .cs_rdata_i(fr_rdata),
+      .cs_re_o(fr_cre), .cs_addr_o(fr_caddr), .cs_ready_i(fr_cs_rdy),
+      .cs_rvalid_i(fr_cs_rv), .cs_rdata_i(fr_rdata), .cs_err_i(mp_err_i),
       .rep_we_o(fr_rwe), .rep_addr_o(fr_raddr), .rep_wdata_o(fr_wdata),
+      .rep_ready_i(fr_rep_rdy), .rep_done_i(fr_rep_done),
+      .rep_err_i(mp_err_i),
       .ot_req_valid_o(fr_ot_v), .ot_req_ready_i(ot_req_ready_i),
       .ot_req_o(fr_ot_req),
       .ot_cpl_valid_i(ot_cpl_valid_i), .ot_cpl_ready_o(fr_cpl_rdy),
@@ -386,7 +393,8 @@ module g6lc_apu_vnpump
                      ((state_q == StTrFire) ? (32'(tb_i) << 2)
                                             : (32'(cs_addr) << 2));
 
-    assign pump_re = (state_q == StPollFire) ||
+    assign pump_re = (state_q == StPollFire &&
+                      ring_q[poll_q].live && !ring_q[poll_q].fatal) ||
                      ((state_q == StTrFire) && !cs_via_gm);
     assign pump_gm = (state_q == StTrFire) && cs_via_gm;
     assign pump_we = (state_q == StApWr)   || (state_q == StIdleWr) ||
@@ -401,22 +409,88 @@ module g6lc_apu_vnpump
       endcase
     end
 
-    // port muxes: reads and writes are independent lanes (see the
-    // port comment).  Front reply writes share the write lane with
-    // the pump's own head/status/extra writes; front cs reads share
-    // the read lane with pump reads (those never overlap: pump read
-    // states only run while the front is idle).
-    assign ap_re_o = pump_re | (cs_re && !cs_via_gm);
-    assign ap_raddr_o = pump_re ? pump_addr : apw(rd_boff);
-    assign ap_we_o = fr_rwe | pump_we;
-    assign ap_waddr_o = fr_rwe ? rep_base_w_q + 18'(fr_raddr) :
-                        wr_addr_q;
-    assign ap_wdata_o = fr_rwe ? fr_wdata : wr_data_q;
-    assign gm_re_o = pump_gm ? 1'b1 : (cs_re && cs_via_gm);
-    assign gm_addr_o = gma(xs_boff_q + rd_boff);
+    // ---- shared mp port arbitration ------------------------------------------
+    // One request outstanding.  Fixed pick order: pump writes, front
+    // reply writes, front/decoder CS reads, pump ring/transport reads.
+    // The pick is academic — the engines serialize themselves (front
+    // runs alone, pump write/read states run while it is idle) — but
+    // a stall is always safe since every requester holds its request.
+    typedef enum logic [2:0] {
+      OW_NONE, OW_PWR, OW_FRW, OW_DEC, OW_FRD, OW_PRD
+    } owner_e;
+    owner_e src;
+    owner_e rsp_owner_q;
+    logic   rsp_hi_q;          // addr[2] of the accepted request
+    logic [17:0] fr_waddr;
+    assign fr_waddr = rep_base_w_q + 18'(fr_raddr);
+    always_comb begin
+      src         = OW_NONE;
+      mp_req_o    = 1'b0;
+      mp_we_o     = 1'b0;
+      mp_dom_o    = 1'b0;
+      mp_addr_o   = '0;
+      mp_wdata_o  = '0;
+      mp_wstrb_o  = '0;
+      // one request outstanding: while a response is pending no new
+      // request is issued (requesters simply hold)
+      if (rsp_owner_q != OW_NONE) begin end
+      else if (pump_we) begin
+        src        = OW_PWR;
+        mp_req_o   = 1'b1;
+        mp_we_o    = 1'b1;
+        mp_dom_o   = 1'b1;
+        mp_addr_o  = {44'h0, wr_addr_q, 2'b00};
+        mp_wdata_o = {2{wr_data_q}};
+        mp_wstrb_o = wr_addr_q[0] ? 8'hF0 : 8'h0F;
+      end else if (fr_rwe) begin
+        src        = OW_FRW;
+        mp_req_o   = 1'b1;
+        mp_we_o    = 1'b1;
+        mp_dom_o   = 1'b1;
+        mp_addr_o  = {44'h0, fr_waddr, 2'b00};
+        mp_wdata_o = {2{fr_wdata}};
+        mp_wstrb_o = fr_waddr[0] ? 8'hF0 : 8'h0F;
+      end else if (cs_re) begin
+        src       = dec_re ? OW_DEC : OW_FRD;
+        mp_req_o  = 1'b1;
+        mp_we_o   = 1'b0;
+        if (cs_via_gm) begin
+          mp_dom_o   = 1'b0;
+          mp_addr_o  = gma(xs_boff_q + rd_boff);
+        end else begin
+          mp_dom_o   = 1'b1;
+          mp_addr_o  = {44'h0, apw(rd_boff), 2'b00};
+        end
+      end else if (pump_re) begin
+        src       = OW_PRD;
+        mp_req_o  = 1'b1;
+        mp_we_o   = 1'b0;
+        mp_dom_o  = 1'b1;
+        mp_addr_o = {44'h0, pump_addr, 2'b00};
+      end else if (pump_gm) begin
+        src       = OW_PRD;
+        mp_req_o  = 1'b1;
+        mp_we_o   = 1'b0;
+        mp_dom_o  = 1'b0;
+        mp_addr_o = gma(xs_boff_q + rd_boff);
+      end
+    end
 
-    assign dec_rdata = last_gm_q ? gm_rdata_i : ap_rdata_i;
-    assign fr_rdata  = last_gm_q ? gm_rdata_i : ap_rdata_i;
+    // response routing: the pending request's owner sees rvalid; the
+    // 32-bit payload is the half selected by the issued address bit 2
+    logic [31:0] mp_rd32;
+    assign mp_rd32    = rsp_hi_q ? mp_rdata_i[63:32] : mp_rdata_i[31:0];
+    assign dec_rdy    = mp_ready_i && src == OW_DEC;
+    assign fr_cs_rdy  = mp_ready_i && src == OW_FRD;
+    assign fr_rep_rdy = mp_ready_i && src == OW_FRW;
+    assign dec_rv       = mp_rvalid_i && rsp_owner_q == OW_DEC;
+    assign fr_cs_rv     = mp_rvalid_i && rsp_owner_q == OW_FRD;
+    assign fr_rep_done  = mp_rvalid_i && rsp_owner_q == OW_FRW;
+    logic pump_rd_done, pump_wr_done;
+    assign pump_rd_done = mp_rvalid_i && rsp_owner_q == OW_PRD;
+    assign pump_wr_done = mp_rvalid_i && rsp_owner_q == OW_PWR;
+    assign dec_rdata = mp_rd32;
+    assign fr_rdata  = mp_rd32;
 
     // ---- ObjTab mux (front while busy, pump otherwise) ------------------------
     logic pump_ot_v, pump_ot_cpl_rdy;
@@ -492,12 +566,19 @@ module g6lc_apu_vnpump
         t_rid_q <= '0; t_i_q <= '0;
         blob_base_w_q <= '0; blob_size_q <= '0;
         wr_addr_q <= '0; wr_data_q <= '0;
-        poll_q <= '0; last_gm_q <= 1'b0;
+        poll_q <= '0; rsp_owner_q <= OW_NONE; rsp_hi_q <= 1'b0;
         dec_start_q <= 1'b0; fr_start_q <= 1'b0;
       end else begin
         dec_start_q <= 1'b0;
         fr_start_q <= 1'b0;
-        if (cs_re || pump_re || pump_gm) last_gm_q <= cs_via_gm;
+        // mp bookkeeping: one outstanding; accept tags the owner and
+        // the addressed 32-bit half, the response frees the port
+        if (mp_rvalid_i)
+          rsp_owner_q <= OW_NONE;
+        if (mp_req_o && mp_ready_i) begin
+          rsp_owner_q <= src;
+          rsp_hi_q    <= mp_addr_o[2];
+        end
 
         unique case (state_q)
           // ------------------------------------------------------------
@@ -521,41 +602,54 @@ module g6lc_apu_vnpump
 
           // ---- idle poll loop ----------------------------------------------
           StPollFire: begin
-            // ap_re on ring_q[poll_q].tail_w this cycle
-            if (ring_q[poll_q].live && !ring_q[poll_q].fatal)
-              state_q <= StPollCap;
-            else if (poll_q == 2'(Rings - 1))
+            // mp request on ring_q[poll_q].tail_w while in this state
+            if (ring_q[poll_q].live && !ring_q[poll_q].fatal) begin
+              if (mp_ready_i && src == OW_PRD)
+                state_q <= StPollCap;
+            end else if (poll_q == 2'(Rings - 1))
               state_q <= StIdle;
             else
               poll_q <= poll_q + 2'd1;
           end
           StPollCap: begin
-            if (ap_rdata_i > ring_q[poll_q].head) begin
-              st_q[0] <= '{live: 1'b1, kind: SK_RING, ring: poll_q,
-                           base_head: ring_q[poll_q].head,
-                           base_w: '0,
-                           bytes: ap_rdata_i - ring_q[poll_q].head,
-                           pos: '0, ctx: ring_q[poll_q].ctx,
-                           ring_stream: 1'b1};
-              depth_q <= 1'b0;
-              fatal_stream_q <= 1'b0;
-              ring_q[poll_q].idle_cnt <= '0;
-              state_q <= StDecFire;
-            end else begin
-              if (ring_q[poll_q].idle_cnt + 32'd1 >=
-                  ring_q[poll_q].idle_to) begin
-                ring_q[poll_q].idle <= 1'b1;
-                wr_addr_q <= ring_q[poll_q].status_w;
-                wr_data_q <= APU_VNRING_ALIVE | APU_VNRING_IDLE;
-                state_q <= StIdleWr;
-              end else begin
-                ring_q[poll_q].idle_cnt <=
-                  ring_q[poll_q].idle_cnt + 32'd1;
+            if (pump_rd_done) begin
+              if (mp_err_i) begin
+                // aperture miss on the ring tail: FATAL like a decode
+                // fault, keep polling the rest
+                ring_q[poll_q].fatal <= 1'b1;
                 state_q <= StPollNext;
+              end else if (mp_rd32 > ring_q[poll_q].head) begin
+                st_q[0] <= '{live: 1'b1, kind: SK_RING, ring: poll_q,
+                             base_head: ring_q[poll_q].head,
+                             base_w: '0,
+                             bytes: mp_rd32 - ring_q[poll_q].head,
+                             pos: '0, ctx: ring_q[poll_q].ctx,
+                             ring_stream: 1'b1};
+                depth_q <= 1'b0;
+                fatal_stream_q <= 1'b0;
+                ring_q[poll_q].idle_cnt <= '0;
+                state_q <= StDecFire;
+              end else begin
+                if (ring_q[poll_q].idle_cnt + 32'd1 >=
+                    ring_q[poll_q].idle_to) begin
+                  ring_q[poll_q].idle <= 1'b1;
+                  wr_addr_q <= ring_q[poll_q].status_w;
+                  wr_data_q <= APU_VNRING_ALIVE | APU_VNRING_IDLE;
+                  state_q <= StIdleWr;
+                end else begin
+                  ring_q[poll_q].idle_cnt <=
+                    ring_q[poll_q].idle_cnt + 32'd1;
+                  state_q <= StPollNext;
+                end
               end
             end
           end
-          StIdleWr: state_q <= StPollNext;
+          StIdleWr: begin
+            if (pump_wr_done) begin
+              if (mp_err_i) fatal_stream_q <= 1'b1;
+              state_q <= StPollNext;
+            end
+          end
           StPollNext: begin
             if (poll_q == 2'(Rings - 1)) state_q <= StIdle;
             else begin
@@ -602,14 +696,23 @@ module g6lc_apu_vnpump
           end
 
           // ---- transport: stage the whole command into tbuf ------------------
-          StTrFire: state_q <= StTrCap;
+          StTrFire: begin
+            if (mp_ready_i && src == OW_PRD)
+              state_q <= StTrCap;
+          end
           StTrCap: begin
-            tbuf[depth_q][tb_i] <= last_gm_q ? gm_rdata_i : ap_rdata_i;
-            tb_i <= tb_i + 6'd1;
-            if (tb_i + 6'd1 >= 6'(cmd_words_q[depth_q]))
-              state_q <= StTrExec;
-            else
-              state_q <= StTrFire;
+            if (pump_rd_done) begin
+              if (mp_err_i) begin
+                state_q <= StFatal;      // memory fault = decode fault
+              end else begin
+                tbuf[depth_q][tb_i] <= mp_rd32;
+                tb_i <= tb_i + 6'd1;
+                if (tb_i + 6'd1 >= 6'(cmd_words_q[depth_q]))
+                  state_q <= StTrExec;
+                else
+                  state_q <= StTrFire;
+              end
+            end
           end
 
           // ---- transport dispatch (args at fixed wire offsets) ---------------
@@ -863,8 +966,22 @@ module g6lc_apu_vnpump
           end
 
           // ---- aperture write commit / ring head store --------------------------
-          StApWr:   state_q <= StNext;
-          StHeadWr: state_q <= StDecNext;
+          StApWr: begin
+            if (pump_wr_done) begin
+              if (mp_err_i) fatal_stream_q <= 1'b1;
+              state_q <= StNext;
+            end
+          end
+          StHeadWr: begin
+            if (pump_wr_done) begin
+              if (mp_err_i) begin
+                // a head publish that misses the aperture kills the ring
+                ring_q[st_q[depth_q].ring].fatal <= 1'b1;
+                fatal_stream_q <= 1'b1;
+              end
+              state_q <= StDecNext;
+            end
+          end
 
           StNext: begin
             // side effects complete: publish consumed head for rings
@@ -922,9 +1039,11 @@ module g6lc_apu_vnpump
             end
           end
           StFatalWr: begin
-            fatal_stream_q <= 1'b1;
-            st_q[depth_q].live <= 1'b0;
-            state_q <= StFatalNext;
+            if (pump_wr_done) begin
+              fatal_stream_q <= 1'b1;
+              st_q[depth_q].live <= 1'b0;
+              state_q <= StFatalNext;
+            end
           end
           StFatalNext: begin
             if (depth_q) begin
@@ -947,7 +1066,10 @@ module g6lc_apu_vnpump
               state_q <= StXsDone;
             end
           end
-          StFatalWr2: state_q <= StIdle;
+          StFatalWr2: begin
+            if (pump_wr_done)
+              state_q <= StIdle;
+          end
 
           default: state_q <= StIdle;
         endcase
@@ -986,15 +1108,16 @@ module g6lc_apu_vnpump_fixture
   output logic            xs_done_o,
   output logic            xs_fault_o,
   output logic            xs_active_o,
-  output logic            ap_re_o,
-  output logic [17:0]     ap_raddr_o,
-  output logic            ap_we_o,
-  output logic [17:0]     ap_waddr_o,
-  output logic [31:0]     ap_wdata_o,
-  input  logic [31:0]     ap_rdata_i,
-  output logic            gm_re_o,
-  output logic [63:0]     gm_addr_o,
-  input  logic [31:0]     gm_rdata_i,
+  output logic            mp_req_o,
+  output logic            mp_we_o,
+  output logic            mp_dom_o,
+  output logic [63:0]     mp_addr_o,
+  output logic [63:0]     mp_wdata_o,
+  output logic [7:0]      mp_wstrb_o,
+  input  logic            mp_ready_i,
+  input  logic            mp_rvalid_i,
+  input  logic [63:0]     mp_rdata_i,
+  input  logic            mp_err_i,
   output logic            ot_req_valid_o,
   input  logic            ot_req_ready_i,
   output apu_objtab_req_t ot_req_o,

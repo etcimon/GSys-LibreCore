@@ -113,15 +113,22 @@ module g6lc_apu_vnfront
   input  logic [15:0]        rep_base_i,
   input  logic [15:0]        rep_len_i,
   input  logic [7:0]         ctx_i,      // ObjTab ctx tag for this stream
-  // shared command-stream read port (front reads blob ids while the
-  // engines are idle)
+  // shared command-stream read port, handshake form (front reads
+  // blob ids while the engines are idle; decoder wins, then rep)
   output logic               cs_re_o,
   output logic [15:0]        cs_addr_o,
+  input  logic               cs_ready_i,
+  input  logic               cs_rvalid_i,
   input  logic [31:0]        cs_rdata_i,
-  // reply write port (vnrep writes through)
+  input  logic               cs_err_i,
+  // reply write port (vnrep writes through; held until rep_ready_i,
+  // completed by rep_done_i)
   output logic               rep_we_o,
   output logic [15:0]        rep_addr_o,
   output logic [31:0]        rep_wdata_o,
+  input  logic               rep_ready_i,
+  input  logic               rep_done_i,
+  input  logic               rep_err_i,
   // ObjTab port
   output logic               ot_req_valid_o,
   input  logic               ot_req_ready_i,
@@ -206,7 +213,9 @@ module g6lc_apu_vnfront
     assign fault_o = '0;
     logic unused;
     assign unused = clk_i | rst_ni | testmode_i | start_i |
-                    cs_rdata_i[0] | ot_req_ready_i | ot_cpl_valid_i |
+                    cs_rdata_i[0] | cs_ready_i | cs_rvalid_i |
+                    cs_err_i | rep_ready_i | rep_done_i | rep_err_i |
+                    ot_req_ready_i | ot_cpl_valid_i |
                     (|ot_cpl_i) | cr_req_ready_i | cr_cpl_valid_i |
                     (|cr_cpl_i) | cr_pay_ready_i | op_req_ready_i |
                     op_cpl_valid_i | (|op_cpl_i) |
@@ -389,13 +398,16 @@ module g6lc_apu_vnfront
     logic [64*32-1:0] exec_w_q;
     logic        front_re;
     logic [15:0] front_addr;
+    logic        dec_rdy, rep_cs_rdy, front_rdy;
 
     logic        dec_pay_v;
     logic [31:0] dec_pay_d;
     g6lc_apu_vndec #(.Enable(1'b1)) i_dec (
       .clk_i(clk_i), .rst_ni(rst_ni),
       .start_i(dec_start), .cs_base_i(cs_base_q), .cs_len_i(cs_len_q),
-      .cs_re_o(dec_re), .cs_addr_o(dec_addr), .cs_rdata_i(cs_rdata_i),
+      .cs_re_o(dec_re), .cs_addr_o(dec_addr), .cs_ready_i(dec_rdy),
+      .cs_rvalid_i(cs_rvalid_i), .cs_rdata_i(cs_rdata_i),
+      .cs_err_i(cs_err_i),
       .busy_o(dec_busy), .done_o(dec_done), .op_o(dec_op),
       .pay_valid_o(dec_pay_v), .pay_data_o(dec_pay_d));
 
@@ -414,17 +426,25 @@ module g6lc_apu_vnfront
       .rep_null_mask_i(rep_null_mask_q),
       .rep_base_i(rep_base_q), .rep_len_i(rep_len_q),
       .cs_base_i(cs_base_q),
-      .cs_re_o(rep_re), .cs_addr_o(rep_addr), .cs_rdata_i(cs_rdata_i),
+      .cs_re_o(rep_re), .cs_addr_o(rep_addr), .cs_ready_i(rep_cs_rdy),
+      .cs_rvalid_i(cs_rvalid_i), .cs_rdata_i(cs_rdata_i),
+      .cs_err_i(cs_err_i),
       .rep_we_o(rep_we_o), .rep_addr_o(rep_addr_o),
       .rep_wdata_o(rep_wdata_o),
+      .rep_ready_i(rep_ready_i), .rep_done_i(rep_done_i),
+      .rep_err_i(rep_err_i),
       .busy_o(rep_busy), .done_o(rep_done), .rep_words_o(rep_n),
       .fault_o(rep_fault));
 
     // CS port arbitration: engines win while running; the front reads
-    // blob ids in between.
+    // blob ids in between.  Requests are held until the shared
+    // cs_ready_i; every accepted requester sees exactly one rvalid.
     assign cs_re_o   = dec_re | rep_re | front_re;
     assign cs_addr_o = dec_re ? dec_addr :
                        rep_re ? rep_addr : front_addr;
+    assign dec_rdy    = dec_re && cs_ready_i;
+    assign rep_cs_rdy = !dec_re && rep_re && cs_ready_i;
+    assign front_rdy  = !dec_re && !rep_re && front_re && cs_ready_i;
 
     assign busy_o      = state_q != StIdle;
     assign done_o      = state_q == StDone;
@@ -1035,10 +1055,18 @@ module g6lc_apu_vnfront
             stg_word_q <= stg_rdata;
             state_q    <= stg_ret_q;
           end
-          StCsRd:  state_q <= StCsCap;
+          StCsRd:  if (front_rdy) state_q <= StCsCap;
           StCsCap: begin
-            csw_q   <= cs_rdata_i;
-            state_q <= cs_ret_q;
+            if (cs_rvalid_i) begin
+              if (cs_err_i) begin
+                // CS word outside the window: fail like a decode fault
+                fault_q <= APU_VN_FAULT_BOUND;
+                state_q <= StDone;
+              end else begin
+                csw_q   <= cs_rdata_i;
+                state_q <= cs_ret_q;
+              end
+            end
           end
 
           // ---- blob u64 reader: -> blob_id_q then blob_ret_q ------------
@@ -2442,10 +2470,16 @@ module g6lc_apu_vnfront_fixture
   input  logic [7:0]         ctx_i,
   output logic               cs_re_o,
   output logic [15:0]        cs_addr_o,
+  input  logic               cs_ready_i,
+  input  logic               cs_rvalid_i,
   input  logic [31:0]        cs_rdata_i,
+  input  logic               cs_err_i,
   output logic               rep_we_o,
   output logic [15:0]        rep_addr_o,
   output logic [31:0]        rep_wdata_o,
+  input  logic               rep_ready_i,
+  input  logic               rep_done_i,
+  input  logic               rep_err_i,
   output logic               ot_req_valid_o,
   input  logic               ot_req_ready_i,
   output apu_objtab_req_t    ot_req_o,

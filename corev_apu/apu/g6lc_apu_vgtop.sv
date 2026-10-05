@@ -5,21 +5,13 @@
 // processor -> vnpump ring pump -> vnfront, over a shared ObjTab,
 // CmdRec and CmdExec, plus the used-publication path.
 //
-// Publication: response -> used element {id,len} -> used.idx -> ISR.
-// g6lc_apu_avu/g6lc_apu_uir are NOT reused here: avu's request record
-// is a whole-queue avail-ring walk whose result (apu_avu_t) carries
-// only {first_addr,last_addr,count}, not the per-descriptor
-// {addr,len,write} triples g6lc_apu_vgctl consumes, so it cannot feed
-// this interface without edits.  The thin FSM below publishes the
-// used element, the used index and ISR bit 0 in order through the
-// guest-memory port; the TB sink observes the writes.
-//
-// Guest-memory port arbitration: vgctl (request reads / response
-// writes), the pump's execbuffer reads, and the publication writes
-// are mutually exclusive in this fixture (the pump reads guest memory
-// only while a SUBMIT_3D hand-off owns the stream and vgctl waits;
-// publication runs after vgctl's done).  The mux is static with
-// publication write > pump read > vgctl priority.
+// §6c: all three memory consumers (vgctl control path, vnpump
+// aperture/execbuffer lanes, ShaderCore LSU) issue on separate apu_mp
+// requester ports — hold-valid-until-ready, one response per request,
+// writes included.  Used-ring publication moved out of this module
+// into g6lc_apu_vqwalk: vgtop reports a chain completion on
+// cpl_valid_o/cpl_len_o, held until cpl_ready_i, and the walker owns
+// the used-ring geometry and ordering.
 //
 // ObjTab arbitration: three requesters — pump (incl. vnfront), the
 // vgctl control path, and cmdexec (submit PIN / completion UNPIN /
@@ -28,8 +20,8 @@
 // CmdRec arbitration: pump (front recording ops) > cmdexec (record
 // reads), same grant scheme.
 //
-// Timing impact: arbitration adds no pipeline stages; the mem port
-// mux is a static select.  Publication is three word-writes + ISR.
+// Timing impact: arbitration adds no pipeline stages; the mp request
+// structs are a static select from each engine's held outputs.
 //
 // Review checklist: async active-low reset; no latches; Enable=0
 // elaborates no datapath.  The debug ObjTab port is for TB teardown
@@ -37,6 +29,7 @@
 // idle.
 
 module g6lc_apu_vgtop
+  import g6lc_apu_mp_pkg::*;
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
@@ -68,27 +61,27 @@ module g6lc_apu_vgtop
   input  logic            clk_i,
   input  logic            rst_ni,
   input  logic            testmode_i,
-  // one descriptor chain (TB walks the avail ring)
+  // one descriptor chain (the virtqueue walker drives this)
   input  logic            chain_valid_i,
   output logic            chain_ready_o,
   input  logic [15:0]     chain_id_i,      // avail element id -> used elem
   input  logic [3:0]      chain_n_i,
   input  apu_vg_desc_t [APU_VG_MAX_DESC-1:0] chain_desc_i,
-  input  logic [63:0]     chain_uelem_addr_i,  // used-elem slot address
-  input  logic [63:0]     chain_uidx_addr_i,   // used.idx address
-  // guest memory word port
-  output logic            mem_re_o,
-  output logic            mem_we_o,
-  output logic [63:0]     mem_addr_o,
-  output logic [31:0]     mem_wdata_o,
-  input  logic [31:0]     mem_rdata_i,
-  // aperture word port (Venus shared-memory window, 1R1W)
-  output logic            ap_re_o,
-  output logic [17:0]     ap_raddr_o,
-  output logic            ap_we_o,
-  output logic [17:0]     ap_waddr_o,
-  output logic [31:0]     ap_wdata_o,
-  input  logic [31:0]     ap_rdata_i,
+  // chain completion to the walker (it owns used-ring publication):
+  // cpl_valid_o is held until cpl_ready_i, so a consumer not yet in
+  // its wait state cannot miss the completion
+  output logic            cpl_valid_o,     // held until cpl_ready_i
+  input  logic            cpl_ready_i,
+  output logic [31:0]     cpl_len_o,       // truthful used len
+  // shared memory ports (§6c apu_mp handshake): [0]=CTL (vgctl,
+  // guest), [1]=PUMP (vnpump, aperture+guest), [2]=SH (shader LSU,
+  // aperture).  Requests hold until mp_req_ready_i; one mp_rsp_valid_i
+  // returns per accepted request, writes included.
+  output logic [2:0]         mp_req_valid_o,
+  input  logic [2:0]         mp_req_ready_i,
+  output apu_mp_req_t [2:0]  mp_req_o,
+  input  logic [2:0]         mp_rsp_valid_i,
+  input  apu_mp_rsp_t [2:0]  mp_rsp_i,
   // command-executor work port (TB work sink; dispatch-class records
   // are consumed internally by the ShaderCore, §7b/5a-ii)
   output logic               work_valid_o,
@@ -96,19 +89,12 @@ module g6lc_apu_vgtop
   output apu_cmdexec_work_t  work_o,
   input  logic               work_done_i,
   input  apu_sh_done_t       work_done_pl_i,
-  // ShaderCore guest memory port (64-bit; the TB aperture model
-  // serves it — unification with the ring/reply memory is 3c)
-  output logic               sh_mem_re_o,
-  output logic               sh_mem_we_o,
-  output logic [63:0]        sh_mem_addr_o,
-  output logic [63:0]        sh_mem_wdata_o,
-  output logic [7:0]         sh_mem_wstrb_o,
-  input  logic [63:0]        sh_mem_rdata_i,
-  // completion + publication observability
-  output logic            done_o,          // pulse after ISR published
-  output logic            irq_o,
-  output logic [31:0]     isr_o,
-  input  logic            isr_ack_i,       // TB ISR write-ack
+  // completion + idle observability
+  output logic            done_o,          // pulse at chain completion
+  output logic            busy_o,          // any engine busy
+  output logic            mem_fault_o,     // sticky engine write fault
+                                           // (clears with the engine
+                                           // reset, §6c bullet 5)
   output logic            fence_pulse_o,
   output logic [63:0]     fence_id_o,
   output logic [7:0]      fence_ring_o,
@@ -127,16 +113,11 @@ module g6lc_apu_vgtop
 );
   if (!Enable) begin : gen_off
     assign chain_ready_o = 1'b0;
-    assign mem_re_o = 1'b0; assign mem_we_o = 1'b0;
-    assign mem_addr_o = '0; assign mem_wdata_o = '0;
-    assign ap_re_o = 1'b0;  assign ap_we_o = 1'b0;
-    assign ap_raddr_o = '0; assign ap_waddr_o = '0;
-    assign ap_wdata_o = '0;
+    assign cpl_valid_o = 1'b0; assign cpl_len_o = '0;
+    assign mem_fault_o = 1'b0;
+    assign mp_req_valid_o = '0; assign mp_req_o = '{default: '0};
     assign work_valid_o = 1'b0; assign work_o = '0;
-    assign sh_mem_re_o = 1'b0; assign sh_mem_we_o = 1'b0;
-    assign sh_mem_addr_o = '0; assign sh_mem_wdata_o = '0;
-    assign sh_mem_wstrb_o = '0;
-    assign done_o = 1'b0;   assign irq_o = 1'b0; assign isr_o = '0;
+    assign done_o = 1'b0;   assign busy_o = 1'b0;
     assign fence_pulse_o = 1'b0; assign fence_id_o = '0;
     assign fence_ring_o = '0;
     for (genvar g = 0; g < Rings; g++) begin : g_off_ring
@@ -150,10 +131,10 @@ module g6lc_apu_vgtop
     assign dbg_ot_cpl_o = '0;
     logic unused;
     assign unused = clk_i | rst_ni | testmode_i | chain_valid_i |
-                    (|chain_id_i) | (|chain_n_i) | (|chain_uelem_addr_i) |
-                    (|chain_uidx_addr_i) | (|mem_rdata_i) | (|ap_rdata_i) |
+                    (|chain_id_i) | (|chain_n_i) | cpl_ready_i |
+                    (|mp_req_ready_i) | (|mp_rsp_valid_i) |
+                    (|mp_rsp_i[0]) | (|mp_rsp_i[1]) | (|mp_rsp_i[2]) |
                     work_ready_i | work_done_i | (|work_done_pl_i) |
-                    (|sh_mem_rdata_i) | isr_ack_i |
                     dbg_ot_valid_i | dbg_ot_cpl_ready_i | (|dbg_ot_req_i) |
                     (|chain_desc_i[0]) | (|chain_desc_i[1]) |
                     (|chain_desc_i[2]) | (|chain_desc_i[3]);
@@ -186,9 +167,10 @@ module g6lc_apu_vgtop
     pgg_e pgg_q;
 
     // ---- vgctl -------------------------------------------------------------
-    logic         vc_busy, vc_done, vc_mem_re, vc_mem_we;
-    logic [63:0]  vc_mem_addr;
-    logic [31:0]  vc_mem_wdata, vc_used_len;
+    logic         vc_busy, vc_done, vc_mem_req, vc_mem_we, vc_mem_fault;
+    logic [63:0]  vc_mem_addr, vc_mem_wdata;
+    logic [7:0]   vc_mem_wstrb;
+    logic [31:0]  vc_used_len;
     logic         vc_ot_v, vc_ot_rdy, vc_cpl_rdy;
     apu_objtab_req_t vc_ot_req;
     logic         vc_xs_v, vc_xs_rdy, vc_xs_done, vc_xs_fault;
@@ -196,8 +178,6 @@ module g6lc_apu_vgtop
     logic [3:0]   vc_xs_n;
     logic [31:0]  vc_xs_off, vc_xs_bytes;
     logic [7:0]   vc_xs_ctx;
-    logic [63:0]  uelem_addr_q, uidx_addr_q;
-    logic [15:0]  chain_id_q;
     // §7b/5a-ii: vgctl's aperture page requests (arbitrated below)
     logic         vc_pg_v, vc_pg_rdy, vc_pg_cpl_rdy;
     apu_vgpages_req_t vc_pg_req;
@@ -206,9 +186,13 @@ module g6lc_apu_vgtop
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .chain_valid_i(chain_valid_i), .chain_ready_o(chain_ready_o),
       .chain_n_i(chain_n_i), .chain_desc_i(chain_desc_i),
-      .mem_re_o(vc_mem_re), .mem_we_o(vc_mem_we),
+      .mem_req_o(vc_mem_req), .mem_we_o(vc_mem_we),
       .mem_addr_o(vc_mem_addr), .mem_wdata_o(vc_mem_wdata),
-      .mem_rdata_i(mem_rdata_i),
+      .mem_wstrb_o(vc_mem_wstrb),
+      .mem_ready_i(mp_req_ready_i[0]),
+      .mem_rvalid_i(mp_rsp_valid_i[0]),
+      .mem_rdata_i(mp_rsp_i[0].rdata), .mem_err_i(mp_rsp_i[0].err),
+      .mem_fault_o(vc_mem_fault),
       .ot_req_valid_o(vc_ot_v), .ot_req_ready_i(vc_ot_rdy),
       .ot_req_o(vc_ot_req),
       .ot_cpl_valid_i(ot_cpl_valid), .ot_cpl_ready_o(vc_cpl_rdy),
@@ -228,11 +212,9 @@ module g6lc_apu_vgtop
 
     // ---- vnpump --------------------------------------------------------------
     logic        vp_busy, vp_xs_active;
-    logic        vp_ap_re, vp_ap_we;
-    logic [17:0] vp_ap_raddr, vp_ap_waddr;
-    logic [31:0] vp_ap_wdata;
-    logic        vp_gm_re;
-    logic [63:0] vp_gm_addr;
+    logic        vp_mp_req, vp_mp_we, vp_mp_dom;
+    logic [63:0] vp_mp_addr, vp_mp_wdata;
+    logic [7:0]  vp_mp_wstrb;
     logic        vp_ot_v, vp_ot_rdy, vp_cpl_rdy;
     apu_objtab_req_t vp_ot_req;
     logic        vp_cr_v, vp_cr_rdy, vp_cr_cpl_rdy;
@@ -267,12 +249,12 @@ module g6lc_apu_vgtop
       .xs_ctx_i(vc_xs_ctx),
       .xs_done_o(vc_xs_done), .xs_fault_o(vc_xs_fault),
       .xs_active_o(vp_xs_active),
-      .ap_re_o(vp_ap_re), .ap_we_o(vp_ap_we),
-      .ap_raddr_o(vp_ap_raddr), .ap_waddr_o(vp_ap_waddr),
-      .ap_wdata_o(vp_ap_wdata),
-      .ap_rdata_i(ap_rdata_i),
-      .gm_re_o(vp_gm_re), .gm_addr_o(vp_gm_addr),
-      .gm_rdata_i(mem_rdata_i),
+      .mp_req_o(vp_mp_req), .mp_we_o(vp_mp_we),
+      .mp_dom_o(vp_mp_dom), .mp_addr_o(vp_mp_addr),
+      .mp_wdata_o(vp_mp_wdata), .mp_wstrb_o(vp_mp_wstrb),
+      .mp_ready_i(mp_req_ready_i[1]),
+      .mp_rvalid_i(mp_rsp_valid_i[1]),
+      .mp_rdata_i(mp_rsp_i[1].rdata), .mp_err_i(mp_rsp_i[1].err),
       .ot_req_valid_o(vp_ot_v), .ot_req_ready_i(vp_ot_rdy),
       .ot_req_o(vp_ot_req),
       .ot_cpl_valid_i(ot_cpl_valid), .ot_cpl_ready_o(vp_cpl_rdy),
@@ -307,6 +289,7 @@ module g6lc_apu_vgtop
       .ring_head_o(ring_head_o), .ring_extra_w_o(ring_extra_w_o));
 
     // ---- cmdexec --------------------------------------------------------------
+    logic        ex_busy;
     logic        ex_cr_v, ex_cr_rdy, ex_cr_cpl_rdy;
     apu_cmdrec_req_t ex_cr_req;
     logic        ex_ot_v, ex_ot_rdy, ex_ot_cpl_rdy;
@@ -355,7 +338,7 @@ module g6lc_apu_vgtop
       .push_n_o(ex_push_n), .push_o(ex_push),
       .done_seq_o(ex_done_seq),
       .fence_signaled_o(ex_fence_sig), .fence_lost_o(ex_fence_lost),
-      .fence_clr_i(ex_fence_clr));
+      .fence_clr_i(ex_fence_clr), .busy_o(ex_busy));
 
     // ---- cmdrec -----------------------------------------------------------------
     g6lc_apu_cmdrec #(.Enable(1'b1)) i_rec (
@@ -408,8 +391,12 @@ module g6lc_apu_vgtop
     // ---- ShaderCore ---------------------------------------------------------------
     // §7b/5a-ii: module slots (sm), pCode staging (wr_*) and pipeline
     // commits come from vnfront; dispatch-class work records from
-    // cmdexec issue on the work port; the 64-bit guest memory port is
-    // exposed as sh_mem_* for the TB aperture model.
+    // cmdexec issue on the work port; the LSU port is mp port 2 —
+    // aperture-relative byte offsets, dom=1.
+    logic        sh_busy;
+    logic        sh_mem_req, sh_mem_we;
+    logic [63:0] sh_mem_addr, sh_mem_wdata;
+    logic [7:0]  sh_mem_wstrb;
     g6lc_apu_shcore #(
       .Enable(1'b1), .ShaderRegs(ShaderRegs), .MaxWaves(MaxWaves),
       .ShaderIds(ShaderIds), .ShaderSlots(ShaderSlots),
@@ -428,10 +415,13 @@ module g6lc_apu_vgtop
       .work_ctype_i(work_o.ctype), .work_imm_i(work_o.rec.imm),
       .disp_slot_i(ex_disp_slot), .binds_i(ex_binds),
       .push_n_i(ex_push_n), .push_i(ex_push),
-      .busy_o(), .done_o(sh_done), .done_pl_o(sh_done_pl),
-      .mem_re_o(sh_mem_re_o), .mem_we_o(sh_mem_we_o),
-      .mem_addr_o(sh_mem_addr_o), .mem_wdata_o(sh_mem_wdata_o),
-      .mem_wstrb_o(sh_mem_wstrb_o), .mem_rdata_i(sh_mem_rdata_i));
+      .busy_o(sh_busy), .done_o(sh_done), .done_pl_o(sh_done_pl),
+      .mem_re_o(sh_mem_req), .mem_we_o(sh_mem_we),
+      .mem_addr_o(sh_mem_addr), .mem_wdata_o(sh_mem_wdata),
+      .mem_wstrb_o(sh_mem_wstrb),
+      .mem_ready_i(mp_req_ready_i[2]),
+      .mem_rvalid_i(mp_rsp_valid_i[2]),
+      .mem_rdata_i(mp_rsp_i[2].rdata), .mem_err_i(mp_rsp_i[2].err));
 
     // ---- objtab -------------------------------------------------------------------
     g6lc_apu_objtab #(.Enable(1'b1)) i_tab (
@@ -482,49 +472,28 @@ module g6lc_apu_vgtop
     assign cr_cpl_ready = (cg_q == CG_PUMP) ? vp_cr_cpl_rdy
                                           : ex_cr_cpl_rdy;
 
-    // ---- guest-memory port mux -----------------------------------------------------
-    // consumers: vgctl mem (re+we), pump execbuffer reads (re), the
-    // publication FSM (we).  Mutually exclusive in this fixture.
-    logic        pub_we_q;
-    logic [63:0] pub_addr_q;
-    logic [31:0] pub_data_q;
+    // ---- shared memory ports (apu_mp) ----------------------------------------
+    // [0] CTL: vgctl request/response words, guest absolute (dom=0)
+    // [1] PUMP: vnpump aperture words + execbuffer guest reads (dom)
+    // [2] SH: shader LSU, aperture-relative (dom=1)
+    assign mp_req_valid_o = {sh_mem_req | sh_mem_we, vp_mp_req,
+                             vc_mem_req};
+    assign mp_req_o[0] = '{dom: 1'b0, we: vc_mem_we,
+                          addr: vc_mem_addr, wdata: vc_mem_wdata,
+                          wstrb: vc_mem_wstrb};
+    assign mp_req_o[1] = '{dom: vp_mp_dom, we: vp_mp_we,
+                          addr: vp_mp_addr, wdata: vp_mp_wdata,
+                          wstrb: vp_mp_wstrb};
+    assign mp_req_o[2] = '{dom: 1'b1, we: sh_mem_we,
+                          addr: sh_mem_addr, wdata: sh_mem_wdata,
+                          wstrb: sh_mem_wstrb};
 
-    assign mem_re_o = pub_we_q ? 1'b0 : (vp_gm_re | vc_mem_re);
-    assign mem_we_o = pub_we_q | vc_mem_we;
-    assign mem_addr_o = pub_we_q ? pub_addr_q :
-                        vp_gm_re ? vp_gm_addr : vc_mem_addr;
-    assign mem_wdata_o = pub_we_q ? pub_data_q : vc_mem_wdata;
-    // both readers observe the same rdata (never in flight together)
-
-    // ---- aperture port (pump only) --------------------------------------------------
-    assign ap_re_o = vp_ap_re;
-    assign ap_raddr_o = vp_ap_raddr;
-    assign ap_we_o = vp_ap_we;
-    assign ap_waddr_o = vp_ap_waddr;
-    assign ap_wdata_o = vp_ap_wdata;
-
-    // ---- publication FSM: response(done) -> used elem -> used idx -> ISR ----------
-    typedef enum logic [2:0] { P_IDLE, P_ELEM, P_LEN,
-                               P_IDX, P_ISR } pub_e;
-    pub_e pub_q;
-    logic [15:0] uidx_q;
-    logic [31:0] isr_q;
-
+    // grant-owner tracking for the arbitrated internal ports
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
-        pub_q <= P_IDLE; pub_we_q <= 1'b0;
-        pub_addr_q <= '0; pub_data_q <= '0;
-        uelem_addr_q <= '0; uidx_addr_q <= '0; chain_id_q <= '0;
-        uidx_q <= '0; isr_q <= '0;
         og_q <= OG_NONE; cg_q <= CG_PUMP;
         opg_q <= OPG_PUMP; pgg_q <= PGG_PUMP;
       end else begin
-        // latch publication addresses with the chain
-        if (chain_valid_i && chain_ready_o) begin
-          chain_id_q <= chain_id_i;
-          uelem_addr_q <= chain_uelem_addr_i;
-          uidx_addr_q <= chain_uidx_addr_i;
-        end
         // ObjTab grant owner: set at request accept, cleared at cpl
         if (ot_req_valid && ot_req_ready) begin
           og_q <= vp_ot_v ? OG_PUMP : ex_ot_v ? OG_EXEC :
@@ -538,55 +507,41 @@ module g6lc_apu_vgtop
           opg_q <= vp_op_v ? OPG_PUMP : OPG_EXEC;
         if (pg_req_valid && pg_req_ready)
           pgg_q <= vp_pg_v ? PGG_PUMP : PGG_CTL;
-
-        // ISR sticky bit
-        if (isr_ack_i) isr_q <= '0;
-
-        unique case (pub_q)
-          P_IDLE: begin
-            pub_we_q <= 1'b0;
-            if (vc_done) begin
-              // split-virtqueue used elem {le32 id, le32 len}
-              pub_addr_q <= uelem_addr_q;
-              pub_data_q <= 32'(chain_id_q);
-              pub_we_q <= 1'b1;
-              pub_q <= P_ELEM;
-            end
-          end
-          P_ELEM: begin
-            // used elem word 1: len
-            pub_addr_q <= uelem_addr_q + 64'd4;
-            pub_data_q <= vc_used_len;
-            pub_q <= P_LEN;
-          end
-          P_LEN: begin
-            // used.idx
-            pub_addr_q <= uidx_addr_q;
-            pub_data_q <= 32'(uidx_q);
-            uidx_q <= uidx_q + 16'd1;
-            pub_q <= P_IDX;
-          end
-          P_IDX: pub_q <= P_ISR;
-          P_ISR: begin
-            pub_we_q <= 1'b0;
-            isr_q <= isr_q | 32'd1;
-            pub_q <= P_IDLE;
-          end
-          default: pub_q <= P_IDLE;
-        endcase
       end
     end
 
-    // irq pulses while a new ISR bit is set; isr_o is the sticky
-    // register the TB acks
-    assign irq_o = pub_q == P_ISR;
-    assign isr_o = isr_q;
-    assign done_o = pub_q == P_ISR;
+    // completion hand-off to the virtqueue walker (which publishes
+    // the used element and used.idx): registered on vgctl's done and
+    // held until cpl_ready_i; len is the truthful used length
+    logic        cpl_q;
+    logic [31:0] cpl_len_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        cpl_q     <= 1'b0;
+        cpl_len_q <= '0;
+      end else begin
+        if (vc_done) begin
+          cpl_q     <= 1'b1;
+          cpl_len_q <= vc_used_len;
+        end else if (cpl_q && cpl_ready_i) begin
+          cpl_q <= 1'b0;
+        end
+      end
+    end
+    assign cpl_valid_o = cpl_q;
+    assign cpl_len_o   = cpl_len_q;
+    assign done_o      = vc_done;
+    assign mem_fault_o = vc_mem_fault;
+    assign busy_o      = vc_busy | vp_busy | sh_busy | ex_busy;
+    // chain_id is published by the walker, not consumed here
+    logic unused_chain;
+    assign unused_chain = |chain_id_i;
   end
 endmodule
 
 // Fixture wrapper for the *_SYNTH=1 screens.
 module g6lc_apu_vgtop_fixture
+  import g6lc_apu_mp_pkg::*;
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
@@ -622,34 +577,22 @@ module g6lc_apu_vgtop_fixture
   input  logic [15:0]     chain_id_i,
   input  logic [3:0]      chain_n_i,
   input  apu_vg_desc_t [APU_VG_MAX_DESC-1:0] chain_desc_i,
-  input  logic [63:0]     chain_uelem_addr_i,
-  input  logic [63:0]     chain_uidx_addr_i,
-  output logic            mem_re_o,
-  output logic            mem_we_o,
-  output logic [63:0]     mem_addr_o,
-  output logic [31:0]     mem_wdata_o,
-  input  logic [31:0]     mem_rdata_i,
-  output logic            ap_re_o,
-  output logic [17:0]     ap_raddr_o,
-  output logic            ap_we_o,
-  output logic [17:0]     ap_waddr_o,
-  output logic [31:0]     ap_wdata_o,
-  input  logic [31:0]     ap_rdata_i,
+  output logic            cpl_valid_o,
+  input  logic            cpl_ready_i,
+  output logic [31:0]     cpl_len_o,
+  output logic            mem_fault_o,
+  output logic [2:0]         mp_req_valid_o,
+  input  logic [2:0]         mp_req_ready_i,
+  output apu_mp_req_t [2:0]  mp_req_o,
+  input  logic [2:0]         mp_rsp_valid_i,
+  input  apu_mp_rsp_t [2:0]  mp_rsp_i,
   output logic               work_valid_o,
   input  logic               work_ready_i,
   output apu_cmdexec_work_t  work_o,
   input  logic               work_done_i,
   input  apu_sh_done_t       work_done_pl_i,
-  output logic               sh_mem_re_o,
-  output logic               sh_mem_we_o,
-  output logic [63:0]        sh_mem_addr_o,
-  output logic [63:0]        sh_mem_wdata_o,
-  output logic [7:0]         sh_mem_wstrb_o,
-  input  logic [63:0]        sh_mem_rdata_i,
   output logic            done_o,
-  output logic            irq_o,
-  output logic [31:0]     isr_o,
-  input  logic            isr_ack_i,
+  output logic            busy_o,
   output logic            fence_pulse_o,
   output logic [63:0]     fence_id_o,
   output logic [7:0]      fence_ring_o,

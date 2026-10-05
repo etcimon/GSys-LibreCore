@@ -70,6 +70,7 @@ module tb_g6lc_apu_vnfront;
   logic               cs_re;
   logic [15:0]        cs_addr;
   logic [31:0]        cs_rdata = '0;
+  logic               cs_rv = 0, rep_wd = 0;
   logic               rep_we;
   logic [15:0]        rep_addr;
   logic [31:0]        rep_wdata;
@@ -130,8 +131,11 @@ module tb_g6lc_apu_vnfront;
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .start_i(f_start), .cs_base_i(f_base), .cs_len_i(f_len),
     .rep_base_i(REP_BASE), .rep_len_i(REP_LEN), .ctx_i(8'h0),
-    .cs_re_o(cs_re), .cs_addr_o(cs_addr), .cs_rdata_i(cs_rdata),
+    .cs_re_o(cs_re), .cs_addr_o(cs_addr),
+    .cs_ready_i(1'b1), .cs_rvalid_i(cs_rv), .cs_rdata_i(cs_rdata),
+    .cs_err_i(1'b0),
     .rep_we_o(rep_we), .rep_addr_o(rep_addr), .rep_wdata_o(rep_wdata),
+    .rep_ready_i(1'b1), .rep_done_i(rep_wd), .rep_err_i(1'b0),
     .ot_req_valid_o(fot_v), .ot_req_ready_i(fot_r), .ot_req_o(fot_req),
     .ot_cpl_valid_i(fot_cv), .ot_cpl_ready_o(),
     .ot_cpl_i(ot_cpl),
@@ -166,8 +170,11 @@ module tb_g6lc_apu_vnfront;
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .start_i(f_start), .cs_base_i(f_base), .cs_len_i(f_len),
     .rep_base_i(REP_BASE), .rep_len_i(REP_LEN), .ctx_i(8'h0),
-    .cs_re_o(o_csre), .cs_addr_o(o_addr), .cs_rdata_i(cs_rdata),
+    .cs_re_o(o_csre), .cs_addr_o(o_addr),
+    .cs_ready_i(1'b1), .cs_rvalid_i(1'b0), .cs_rdata_i('0),
+    .cs_err_i(1'b0),
     .rep_we_o(o_repwe), .rep_addr_o(o_raddr), .rep_wdata_o(o_wdata),
+    .rep_ready_i(1'b1), .rep_done_i(1'b0), .rep_err_i(1'b0),
     .ot_req_valid_o(o_otv), .ot_req_ready_i(1'b0), .ot_req_o(o_otreq),
     .ot_cpl_valid_i(1'b0), .ot_cpl_ready_o(), .ot_cpl_i(ot_cpl),
     .cr_req_valid_o(o_crcv), .cr_req_ready_i(1'b0), .cr_req_o(o_crreq),
@@ -225,7 +232,7 @@ module tb_g6lc_apu_vnfront;
     .push_n_o(xpush_n), .push_o(xpush),
     .done_seq_o(f_dseq),
     .fence_signaled_o(f_fsig), .fence_lost_o(f_flost),
-    .fence_clr_i(f_fclr));
+    .fence_clr_i(f_fclr), .busy_o());
 
   // ---- shared backends with 3-master arbitration -----------------------
   // objtab: 0=front, 1=exec, 2=tb(final RESET_CTX)
@@ -345,19 +352,31 @@ module tb_g6lc_apu_vnfront;
     .busy_o(), .done_o(w_done), .done_pl_o(w_done_pl),
     .mem_re_o(shm_re), .mem_we_o(shm_we), .mem_addr_o(shm_addr),
     .mem_wdata_o(shm_wdata), .mem_wstrb_o(shm_wstrb),
-    .mem_rdata_i(shm_rdata));
+    .mem_ready_i(1'b1), .mem_rvalid_i(shm_rv),
+    .mem_rdata_i(shm_rdata), .mem_err_i(1'b0));
 
-  // shader-side aperture: byte-addressed SHM window, 1-cycle read
+  // shader-side aperture: byte-addressed SHM window, handshake
+  // port (ready=1, rvalid next cycle)
   localparam int SHAPB = 1 << 21;
   logic [7:0] shmem [SHAPB];
-  always @(posedge clk) begin
-    if (shm_re)
-      for (int b = 0; b < 8; b++)
-        shm_rdata[b*8 +: 8] <= shmem[shm_addr[20:0] + 21'(b)];
-    if (shm_we)
-      for (int b = 0; b < 8; b++)
-        if (shm_wstrb[b]) shmem[shm_addr[20:0] + 21'(b)] <=
-                          shm_wdata[b*8 +: 8];
+  logic       shm_rv = 0;
+  always @(posedge clk or negedge rst_ni) begin
+    if (!rst_ni) begin
+      shm_rv <= 1'b0; shm_rdata <= '0;
+    end else begin
+      shm_rv <= 1'b0;
+      if (shm_re) begin
+        shm_rv <= 1'b1;
+        for (int b = 0; b < 8; b++)
+          shm_rdata[b*8 +: 8] <= shmem[shm_addr[20:0] + 21'(b)];
+      end
+      if (shm_we) begin
+        shm_rv <= 1'b1;
+        for (int b = 0; b < 8; b++)
+          if (shm_wstrb[b]) shmem[shm_addr[20:0] + 21'(b)] <=
+                            shm_wdata[b*8 +: 8];
+      end
+    end
   end
 
   // ---- memories --------------------------------------------------------
@@ -365,8 +384,16 @@ module tb_g6lc_apu_vnfront;
   logic [31:0] expm [EXPW];
   logic [31:0] paym [PAYW];
   logic [31:0] repm [4096];
-  always @(posedge clk) if (cs_re) cs_rdata <= cs[cs_addr];
-  always @(posedge clk) if (rep_we) repm[rep_addr[11:0]] <= rep_wdata;
+  // handshake CS/reply models: ready=1, response/done next cycle
+  always @(posedge clk or negedge rst_ni) begin
+    if (!rst_ni) begin
+      cs_rv <= 0; rep_wd <= 0; cs_rdata <= '0;
+    end else begin
+      cs_rv <= 1'b0; rep_wd <= 1'b0;
+      if (cs_re)  begin cs_rv <= 1'b1; cs_rdata <= cs[cs_addr]; end
+      if (rep_we) begin rep_wd <= 1'b1; repm[rep_addr[11:0]] <= rep_wdata; end
+    end
+  end
 
   always #5 clk = ~clk;
   always @(posedge clk) cycles++;

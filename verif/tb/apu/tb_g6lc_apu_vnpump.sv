@@ -64,13 +64,12 @@ module tb_g6lc_apu_vnpump;
   logic [31:0]  xs_off, xs_bytes;
   logic [7:0]   xs_ctx;
 
-  // ---- aperture / guest-memory ports --------------------------------
-  logic        ap_re, ap_we;
-  logic [17:0] ap_raddr, ap_waddr;
-  logic [31:0] ap_wdata, ap_rdata;
-  logic        gm_re;
-  logic [63:0] gm_addr;
-  logic [31:0] gm_rdata;
+  // ---- mp port (dom=0 guest-absolute, dom=1 aperture byte offset) ---
+  logic        mp_req, mp_we, mp_dom;
+  logic [63:0] mp_addr, mp_wdata;
+  logic [7:0]  mp_wstrb;
+  logic        mp_rv = 0;
+  logic [63:0] mp_rdata = '0;
 
   // ---- ObjTab (real engine, TB-seeded while the pump is quiet) ------
   logic            ot_v, ot_r;
@@ -109,10 +108,11 @@ module tb_g6lc_apu_vnpump;
     .xs_bytes_i(xs_bytes), .xs_ctx_i(xs_ctx),
     .xs_done_o(xs_done), .xs_fault_o(xs_fault),
     .xs_active_o(xs_active),
-    .ap_re_o(ap_re), .ap_raddr_o(ap_raddr),
-    .ap_we_o(ap_we), .ap_waddr_o(ap_waddr), .ap_wdata_o(ap_wdata),
-    .ap_rdata_i(ap_rdata),
-    .gm_re_o(gm_re), .gm_addr_o(gm_addr), .gm_rdata_i(gm_rdata),
+    .mp_req_o(mp_req), .mp_we_o(mp_we), .mp_dom_o(mp_dom),
+    .mp_addr_o(mp_addr), .mp_wdata_o(mp_wdata),
+    .mp_wstrb_o(mp_wstrb),
+    .mp_ready_i(1'b1), .mp_rvalid_i(mp_rv), .mp_rdata_i(mp_rdata),
+    .mp_err_i(1'b0),
     .ot_req_valid_o(d_ot_v), .ot_req_ready_i(ot_r && !seeding),
     .ot_req_o(d_ot_req),
     .ot_cpl_valid_i(ot_cv && !seeding), .ot_cpl_ready_o(d_ot_cr),
@@ -142,7 +142,7 @@ module tb_g6lc_apu_vnpump;
 
   // Enable=0 fixture: outputs stay quiet
   logic        z_rdy, z_done, z_fault, z_act, z_busy;
-  logic        z_apre, z_apwe, z_gmre, z_otv, z_otcr;
+  logic        z_mpreq, z_mpwe, z_otv, z_otcr;
   logic        z_crv, z_crcr, z_exsv;
   logic        z_cpayv, z_opv;
   logic        z_smv, z_shw, z_shc, z_pgv, z_pgcr;
@@ -157,9 +157,10 @@ module tb_g6lc_apu_vnpump;
     .xs_desc_i('{default: '0}), .xs_ndesc_i(4'd1), .xs_off_i(32'h0),
     .xs_bytes_i(32'h40), .xs_ctx_i(8'h0),
     .xs_done_o(z_done), .xs_fault_o(z_fault), .xs_active_o(z_act),
-    .ap_re_o(z_apre), .ap_raddr_o(), .ap_we_o(z_apwe),
-    .ap_waddr_o(), .ap_wdata_o(), .ap_rdata_i(32'h0),
-    .gm_re_o(z_gmre), .gm_addr_o(), .gm_rdata_i(32'h0),
+    .mp_req_o(z_mpreq), .mp_we_o(z_mpwe), .mp_dom_o(),
+    .mp_addr_o(), .mp_wdata_o(), .mp_wstrb_o(),
+    .mp_ready_i(1'b1), .mp_rvalid_i(1'b0), .mp_rdata_i(64'h0),
+    .mp_err_i(1'b0),
     .ot_req_valid_o(z_otv), .ot_req_ready_i(1'b1), .ot_req_o(),
     .ot_cpl_valid_i(1'b0), .ot_cpl_ready_o(z_otcr), .ot_cpl_i('0),
     .cr_req_valid_o(z_crv), .cr_req_ready_i(1'b1), .cr_req_o(),
@@ -207,13 +208,36 @@ module tb_g6lc_apu_vnpump;
   always @(posedge clk) if (ot_v && ot_r) ot_acc++;
   always @(posedge clk) if (xs_v && xs_rdy) xs_acc++;
 
-  // ---- memory models (1-cycle read, same-cycle write) ----------------
+  // ---- mp memory model (ready=1, rvalid next cycle; dom selects the
+  // aperture or guest array; rdata is the aligned 64-bit beat, wstrb
+  // is beat-positioned) -------------------------------------------------
   logic [31:0] gmem [GMW];
   logic [31:0] apm  [APW];
-  always @(posedge clk) begin
-    if (gm_re) gm_rdata <= gmem[gm_addr[31:0] >> 2];
-    if (ap_re) ap_rdata <= apm[ap_raddr];
-    if (ap_we) apm[ap_waddr] <= ap_wdata;
+  function automatic logic [31:0] mp_word(input logic [63:0] a,
+                                          input int unsigned w);
+    return mp_dom ? apm[32'((a >> 3) * 2) + w] : gmem[32'((a >> 3) * 2) + w];
+  endfunction
+  always @(posedge clk or negedge rst_ni) begin
+    if (!rst_ni) begin
+      mp_rv <= 1'b0; mp_rdata <= '0;
+    end else begin
+      mp_rv <= 1'b0;
+      if (mp_req && !mp_we)
+        begin mp_rv <= 1'b1;
+          mp_rdata <= {mp_word(mp_addr, 1), mp_word(mp_addr, 0)}; end
+      else if (mp_req && mp_we) begin
+        mp_rv <= 1'b1;
+        for (int b = 0; b < 8; b++)
+          if (mp_wstrb[b]) begin
+            if (mp_dom)
+              apm[32'((mp_addr >> 3) * 2) + (b >= 4 ? 1 : 0)]
+                 [b[1:0] * 8 +: 8] <= mp_wdata[b * 8 +: 8];
+            else
+              gmem[32'((mp_addr >> 3) * 2) + (b >= 4 ? 1 : 0)]
+                  [b[1:0] * 8 +: 8] <= mp_wdata[b * 8 +: 8];
+          end
+      end
+    end
   end
 
   always #5 clk = ~clk;
@@ -474,8 +498,8 @@ module tb_g6lc_apu_vnpump;
     // ---- Enable=0 fixture stays quiet --------------------------------
     cases++;
     repeat (4) @(posedge clk);
-    check(!z_rdy && !z_done && !z_fault && !z_busy && !z_apre &&
-          !z_apwe && !z_gmre && !z_otv && !z_crv && !z_exsv &&
+    check(!z_rdy && !z_done && !z_fault && !z_busy && !z_mpreq &&
+          !z_mpwe && !z_otv && !z_crv && !z_exsv &&
           !z_cpayv && !z_opv && !z_smv && !z_shw && !z_shc &&
           !z_pgv && !z_pgcr && z_smpl == '0 && z_shpl == '0 &&
           z_pgreq == '0,

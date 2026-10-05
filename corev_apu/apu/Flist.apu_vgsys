@@ -1,0 +1,17 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
++incdir+${CVA6_REPO_DIR}/corev_apu/apu/include
+// Flist.apu_vgtop first: config_pkg / cfg_pkg, the vn/vg/sh packages,
+// g6lc_apu_mp_pkg, and the full engine composition.
+-f ${CVA6_REPO_DIR}/corev_apu/apu/Flist.apu_vgtop
+// §6c vgsys extras: apu_vq_state_t lives in g6lc_apu_pkg (imported
+// selectively), the AXI typedefs come through g6lc_apu_bus_pkg.
++incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/include
++incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/common_cells/include
++incdir+${CVA6_REPO_DIR}/corev_apu/register_interface/include
+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/src/axi_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_bus_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_apmem.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vqwalk.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgsys.sv
