@@ -11,6 +11,7 @@
 // g6lc_apu_vgpu_avail. A failed beat stops the read; the request
 // can be repeated. TEX is not executed.
 
+// InlineWriteRead (iwr): Inline write that holds the fetched quad.
 module g6lc_apu_vgpu_iwr
   import g6lc_apu_pkg::*;
 #(
@@ -199,6 +200,7 @@ module g6lc_apu_vgpu_iwr
   end
 endmodule
 
+// InlineWriteRead (iwr) enable-0 fixture: Inline write that holds the fetched quad.
 module g6lc_apu_vgpu_iwr_fixture
   import g6lc_apu_pkg::*;
 #(

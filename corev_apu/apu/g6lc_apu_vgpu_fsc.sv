@@ -10,6 +10,7 @@
 // g6lc_apu_vgpu_fs, not g6lc_apu_vgpu_fst, and not g6lc_apu_vgpu_avail.
 // A failed beat stops the read; the request can be repeated.
 
+// FragShaderObjectRead (fsc): Fragment-shader object of the fetched draw. Default-off. The shader is not run.
 module g6lc_apu_vgpu_fsc
   import g6lc_apu_pkg::*;
 #(
@@ -346,6 +347,7 @@ module g6lc_apu_vgpu_fsc
   end
 endmodule
 
+// FragShaderObjectRead (fsc) enable-0 fixture: Fragment-shader object of the fetched draw. Default-off. The shader is not run.
 module g6lc_apu_vgpu_fsc_fixture
   import g6lc_apu_pkg::*;
 #(

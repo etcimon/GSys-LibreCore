@@ -5,6 +5,7 @@
 // is resource 4, 640 by 480, B8G8R8X8. The vertex buffer is resource 3,
 // 96 bytes. This does not allocate memory.
 
+// ResourceCreate3d (c3d): The two RESOURCE_CREATE_3D records. Default-off. Not an allocation.
 module g6lc_apu_vgpu_c3d
   import g6lc_apu_pkg::*;
 #(
@@ -138,6 +139,7 @@ module g6lc_apu_vgpu_c3d
   end
 endmodule
 
+// ResourceCreate3d (c3d) enable-0 fixture: The two RESOURCE_CREATE_3D records. Default-off. Not an allocation.
 module g6lc_apu_vgpu_c3d_fixture
   import g6lc_apu_pkg::*;
 #(

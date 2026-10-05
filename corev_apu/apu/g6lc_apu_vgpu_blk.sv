@@ -4,6 +4,7 @@
 // Keep the blend header, handle, and color word. A second store keeps
 // the first. The zero body words are not kept. No blend is applied.
 
+// BlendObjectReadKeep (blk): The header, the handle, and the color word.
 module g6lc_apu_vgpu_blk
   import g6lc_apu_pkg::*;
 #(
@@ -108,6 +109,7 @@ module g6lc_apu_vgpu_blk
   end
 endmodule
 
+// BlendObjectReadKeep (blk) enable-0 fixture: The header, the handle, and the color word.
 module g6lc_apu_vgpu_blk_fixture
   import g6lc_apu_pkg::*;
 #(

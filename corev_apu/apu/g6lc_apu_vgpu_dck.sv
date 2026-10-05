@@ -4,6 +4,7 @@
 // Keep the depth-stencil header and handle. A second store keeps the
 // first. The four state words are not kept. No depth test is run.
 
+// DepthStencilObjectReadKeep (dck): The header and the handle.
 module g6lc_apu_vgpu_dck
   import g6lc_apu_pkg::*;
 #(
@@ -105,6 +106,7 @@ module g6lc_apu_vgpu_dck
   end
 endmodule
 
+// DepthStencilObjectReadKeep (dck) enable-0 fixture: The header and the handle.
 module g6lc_apu_vgpu_dck_fixture
   import g6lc_apu_pkg::*;
 #(

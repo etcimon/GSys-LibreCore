@@ -4,6 +4,7 @@
 // Keep the two words collected from the ceiling read. The image is
 // not here. A second store keeps the first.
 
+// CeilingBeatReadKeep (rdk): The two words collected from that read.
 module g6lc_apu_vgpu_rdk
   import g6lc_apu_pkg::*;
 #(
@@ -86,6 +87,7 @@ module g6lc_apu_vgpu_rdk
   end
 endmodule
 
+// CeilingBeatReadKeep (rdk) enable-0 fixture: The two words collected from that read.
 module g6lc_apu_vgpu_rdk_fixture
   import g6lc_apu_pkg::*;
 #(

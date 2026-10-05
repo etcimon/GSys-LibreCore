@@ -6,6 +6,7 @@
 // This is later than g6lc_apu_vgpu_b2r. The image is not kept.
 // The shader is not run.
 
+// ReadbackBeat3 (b3r): (24,0) is byte 96, lane 0 of beat 3. (31,0) is byte 124.
 module g6lc_apu_vgpu_b3r
   import g6lc_apu_pkg::*;
 #(
@@ -168,6 +169,7 @@ module g6lc_apu_vgpu_b3r
   end
 endmodule
 
+// ReadbackBeat3 (b3r) enable-0 fixture: (24,0) is byte 96, lane 0 of beat 3. (31,0) is byte 124.
 module g6lc_apu_vgpu_b3r_fixture
   import g6lc_apu_pkg::*;
 #(

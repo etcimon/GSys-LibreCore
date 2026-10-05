@@ -5,6 +5,7 @@
 // A second store keeps the first. The zero body words are not kept.
 // No texture is bound.
 
+// SamplerStateObjectReadKeep (sck): The header, the handle, and the two state words.
 module g6lc_apu_vgpu_sck
   import g6lc_apu_pkg::*;
 #(
@@ -112,6 +113,7 @@ module g6lc_apu_vgpu_sck
   end
 endmodule
 
+// SamplerStateObjectReadKeep (sck) enable-0 fixture: The header, the handle, and the two state words.
 module g6lc_apu_vgpu_sck_fixture
   import g6lc_apu_pkg::*;
 #(

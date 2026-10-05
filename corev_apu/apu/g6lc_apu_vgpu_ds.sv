@@ -4,6 +4,7 @@
 // The depth-stencil object that follows the blend object. The four
 // state words are 0, so depth and stencil stay off. This is not a draw.
 
+// DepthStencilCreate (ds): The depth-stencil object that follows the blend object. Default-off. Depth and stencil stay off.
 module g6lc_apu_vgpu_ds
   import g6lc_apu_pkg::*;
 #(
@@ -144,6 +145,7 @@ module g6lc_apu_vgpu_ds
   end
 endmodule
 
+// DepthStencilCreate (ds) enable-0 fixture: The depth-stencil object that follows the blend object.
 module g6lc_apu_vgpu_ds_fixture
   import g6lc_apu_pkg::*;
 #(

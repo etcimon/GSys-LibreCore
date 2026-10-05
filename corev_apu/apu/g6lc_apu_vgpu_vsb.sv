@@ -4,6 +4,8 @@
 // The vertex-shader bind that follows the rasterizer bind. The body
 // names shader handle 2 at stage 0. The TGSI text stays in the buffer.
 
+// VertexShaderBind (vsb): The vertex-shader bind that follows the rasterizer bind. Default-off. The TGSI text stays in the buffer.
+// Interplay: RasterizerBind (rb) <-> VertexShaderBind (vsb)(buf, rb); handle 2 stage 0. See AGENTS-impl-interplays.md.
 module g6lc_apu_vgpu_vsb
   import g6lc_apu_pkg::*;
 #(
@@ -145,6 +147,7 @@ module g6lc_apu_vgpu_vsb
   end
 endmodule
 
+// VertexShaderBind (vsb) enable-0 fixture: The vertex-shader bind that follows the rasterizer bind.
 module g6lc_apu_vgpu_vsb_fixture
   import g6lc_apu_pkg::*;
 #(

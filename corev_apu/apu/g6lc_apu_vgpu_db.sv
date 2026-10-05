@@ -5,6 +5,7 @@
 // depth-stencil handle 8. Depth and stencil stay off. This does not
 // test depth.
 
+// DepthStencilBind (db): The depth-stencil bind that follows the blend bind. Default-off. Depth and stencil stay off.
 module g6lc_apu_vgpu_db
   import g6lc_apu_pkg::*;
 #(
@@ -138,6 +139,7 @@ module g6lc_apu_vgpu_db
   end
 endmodule
 
+// DepthStencilBind (db) enable-0 fixture: The depth-stencil bind that follows the blend bind.
 module g6lc_apu_vgpu_db_fixture
   import g6lc_apu_pkg::*;
 #(

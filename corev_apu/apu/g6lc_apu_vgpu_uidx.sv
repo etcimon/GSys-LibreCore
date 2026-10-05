@@ -7,6 +7,7 @@
 // store does not replace it. This does not write the element, and it is
 // not g6lc_apu_queue.
 
+// UsedIndexStore (uidx): One guest store of used.idx. Default-off. Not a second element and not a descriptor chain.
 module g6lc_apu_vgpu_uidx
   import g6lc_apu_pkg::*;
 #(
@@ -153,6 +154,7 @@ module g6lc_apu_vgpu_uidx
   end
 endmodule
 
+// UsedIndexStore (uidx) enable-0 fixture: One guest store of used.idx. Default-off. Not a second element.
 module g6lc_apu_vgpu_uidx_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -6,6 +6,7 @@
 // A sample outside the ceiling records a fault. This does not walk a
 // triangle.
 
+// ClearCornerRead (pxr): Read of one stored corner.
 module g6lc_apu_vgpu_pxr
   import g6lc_apu_pkg::*;
 #(
@@ -103,6 +104,7 @@ module g6lc_apu_vgpu_pxr
   end
 endmodule
 
+// ClearCornerRead (pxr) enable-0 fixture: Read of one stored corner.
 module g6lc_apu_vgpu_pxr_fixture
   import g6lc_apu_pkg::*;
 #(

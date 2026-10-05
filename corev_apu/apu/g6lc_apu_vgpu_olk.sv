@@ -5,6 +5,7 @@
 // A second store keeps the first. No caps blob is kept. This is not
 // g6lc_apu_vgpu_cap. FeatureVirgl stays off.
 
+// OpcodeListKeep (olk): The zero count, capset id 0, and the response.
 module g6lc_apu_vgpu_olk
   import g6lc_apu_pkg::*;
 #(
@@ -104,6 +105,7 @@ module g6lc_apu_vgpu_olk
   end
 endmodule
 
+// OpcodeListKeep (olk) enable-0 fixture: The zero count, capset id 0, and the response.
 module g6lc_apu_vgpu_olk_fixture
   import g6lc_apu_pkg::*;
 #(

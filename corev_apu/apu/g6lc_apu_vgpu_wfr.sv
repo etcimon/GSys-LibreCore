@@ -9,6 +9,7 @@
 // not g6lc_apu_vgpu_frd, and not g6lc_apu_vgpu_pxr.
 // The shader is not run. A failed beat stops the walk.
 
+// ClearWindowScan (wfr): Every beat of the 64 by 64 clear-word window.
 module g6lc_apu_vgpu_wfr
   import g6lc_apu_pkg::*;
 #(
@@ -186,6 +187,7 @@ module g6lc_apu_vgpu_wfr
   end
 endmodule
 
+// ClearWindowScan (wfr) enable-0 fixture: Every beat of the 64 by 64 clear-word window.
 module g6lc_apu_vgpu_wfr_fixture
   import g6lc_apu_pkg::*;
 #(

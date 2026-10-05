@@ -16,6 +16,7 @@
 // Not a CVA6 fetch proof, not TEX, not on FPGA/Altera maps.
 // FeatureVirgl stays illegal.
 
+// Interplay: TestharnessLoad --> FwRam ==> 0x90000000. See AGENTS-impl-interplays.md.
 module g6lc_apu_fwram
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_bus_pkg::*;

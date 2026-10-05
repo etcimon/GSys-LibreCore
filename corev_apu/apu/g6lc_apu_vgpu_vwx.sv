@@ -12,6 +12,7 @@
 // not g6lc_apu_vgpu_vp and not g6lc_apu_vgpu_avail. A failed beat stops
 // the read; the request can be repeated. TEX is not executed.
 
+// ViewportRead (vwx): Viewport of the fetched draw, and where ±1 lands.
 module g6lc_apu_vgpu_vwx
   import g6lc_apu_pkg::*;
 #(
@@ -185,6 +186,7 @@ module g6lc_apu_vgpu_vwx
   end
 endmodule
 
+// ViewportRead (vwx) enable-0 fixture: Viewport of the fetched draw, and where ±1 lands.
 module g6lc_apu_vgpu_vwx_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -4,6 +4,7 @@
 // Keep the blend header and handle. A second store keeps the first.
 // No blend is applied.
 
+// BlendBindReadKeep (bbk): The header and the handle.
 module g6lc_apu_vgpu_bbk
   import g6lc_apu_pkg::*;
 #(
@@ -104,6 +105,7 @@ module g6lc_apu_vgpu_bbk
   end
 endmodule
 
+// BlendBindReadKeep (bbk) enable-0 fixture: The header and the handle.
 module g6lc_apu_vgpu_bbk_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -5,6 +5,7 @@
 // resource, a format, and an identity swizzle. Layer and level are 0.
 // This does not sample the texture.
 
+// SamplerViewCreate (sv): The sampler view that follows the vertex elements. Default-off. Not a texture sample.
 module g6lc_apu_vgpu_sv
   import g6lc_apu_pkg::*;
 #(
@@ -152,6 +153,7 @@ module g6lc_apu_vgpu_sv
   end
 endmodule
 
+// SamplerViewCreate (sv) enable-0 fixture: The sampler view that follows the vertex elements.
 module g6lc_apu_vgpu_sv_fixture
   import g6lc_apu_pkg::*;
 #(

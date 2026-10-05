@@ -6,6 +6,7 @@
 // TGSI text stays in the execbuffer. One dword of that text is
 // recorded so its start is known. This is not a draw.
 
+// FragShaderCreate (fs): The fragment shader create that follows the vertex shader. Default-off. The TGSI text stays in the buffer.
 module g6lc_apu_vgpu_fs
   import g6lc_apu_pkg::*;
 #(
@@ -162,6 +163,7 @@ module g6lc_apu_vgpu_fs
   end
 endmodule
 
+// FragShaderCreate (fs) enable-0 fixture: The fragment shader create that follows the vertex shader.
 module g6lc_apu_vgpu_fs_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -6,6 +6,7 @@
 // and is not this point. This is later than g6lc_apu_vgpu_tcr.
 // The image is not kept. The shader is not run.
 
+// ReadbackX7 (p7r): (7,0) of the readback is byte 28.
 module g6lc_apu_vgpu_p7r
   import g6lc_apu_pkg::*;
 #(
@@ -166,6 +167,7 @@ module g6lc_apu_vgpu_p7r
   end
 endmodule
 
+// ReadbackX7 (p7r) enable-0 fixture: (7,0) of the readback is byte 28.
 module g6lc_apu_vgpu_p7r_fixture
   import g6lc_apu_pkg::*;
 #(

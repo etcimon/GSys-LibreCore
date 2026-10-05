@@ -10,6 +10,7 @@
 // g6lc_apu_vgpu_bl and not g6lc_apu_vgpu_avail. A failed beat stops
 // the read; the request can be repeated. TEX is not executed.
 
+// BlendObjectRead (blr): Blend object of the fetched draw.
 module g6lc_apu_vgpu_blr
   import g6lc_apu_pkg::*;
 #(
@@ -278,6 +279,7 @@ module g6lc_apu_vgpu_blr
   end
 endmodule
 
+// BlendObjectRead (blr) enable-0 fixture: Blend object of the fetched draw.
 module g6lc_apu_vgpu_blr_fixture
   import g6lc_apu_pkg::*;
 #(

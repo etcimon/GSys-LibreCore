@@ -9,6 +9,7 @@
 // is not g6lc_apu_vgpu_rb and not g6lc_apu_vgpu_avail. A failed beat
 // stops the read; the request can be repeated. TEX is not executed.
 
+// RasterizerBindRead (rzr): Rasterizer bind of the fetched draw.
 module g6lc_apu_vgpu_rzr
   import g6lc_apu_pkg::*;
 #(
@@ -217,6 +218,7 @@ module g6lc_apu_vgpu_rzr
   end
 endmodule
 
+// RasterizerBindRead (rzr) enable-0 fixture: Rasterizer bind of the fetched draw.
 module g6lc_apu_vgpu_rzr_fixture
   import g6lc_apu_pkg::*;
 #(

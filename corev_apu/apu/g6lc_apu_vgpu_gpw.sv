@@ -8,6 +8,7 @@
 // g6lc_apu_vgpu_frd. The shader is not run. This is not the screenshot.
 // A failed beat stops the write; the request can be repeated.
 
+// ClearWindowWrite (gpw): 64 by 64 guest window of the scene clear word.
 module g6lc_apu_vgpu_gpw
   import g6lc_apu_pkg::*;
 #(
@@ -171,6 +172,7 @@ module g6lc_apu_vgpu_gpw
   end
 endmodule
 
+// ClearWindowWrite (gpw) enable-0 fixture: 64 by 64 guest window of the scene clear word.
 module g6lc_apu_vgpu_gpw_fixture
   import g6lc_apu_pkg::*;
 #(

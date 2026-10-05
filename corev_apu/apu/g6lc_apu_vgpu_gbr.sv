@@ -6,6 +6,7 @@
 // first beat. The other beats stay in the buffer. This is not
 // g6lc_apu_vgpu_gpr. The shader is not run.
 
+// ReadbackCopyRead (gbr): First and last beats of the readback buffer.
 module g6lc_apu_vgpu_gbr
   import g6lc_apu_pkg::*;
 #(
@@ -153,6 +154,7 @@ module g6lc_apu_vgpu_gbr
   end
 endmodule
 
+// ReadbackCopyRead (gbr) enable-0 fixture: First and last beats of the readback buffer.
 module g6lc_apu_vgpu_gbr_fixture
   import g6lc_apu_pkg::*;
 #(

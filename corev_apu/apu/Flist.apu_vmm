@@ -1,0 +1,11 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// Mesa vn_protocol vkMapMemory CS.
+// Not on the testharness flist.
+
++incdir+${CVA6_REPO_DIR}/corev_apu/apu/include
+${CVA6_REPO_DIR}/core/include/config_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/include/g6lc_apu_cfg_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vmm.sv

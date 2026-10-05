@@ -5,6 +5,7 @@
 // band, 640 by 64. A 480-high flush records nothing. Nothing is
 // presented. This is not g6lc_apu_vgpu_flu.
 
+// ScanBandFlush (sfl): RESOURCE_FLUSH of the scan band. Default-off. Does not present.
 module g6lc_apu_vgpu_sfl
   import g6lc_apu_pkg::*;
 #(
@@ -145,6 +146,7 @@ module g6lc_apu_vgpu_sfl
   end
 endmodule
 
+// ScanBandFlush (sfl) enable-0 fixture: RESOURCE_FLUSH of the scan band. Default-off. Does not present.
 module g6lc_apu_vgpu_sfl_fixture
   import g6lc_apu_pkg::*;
 #(

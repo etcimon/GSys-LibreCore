@@ -10,6 +10,7 @@
 // not g6lc_apu_vgpu_avail. A failed beat stops the read; the request
 // can be repeated. TEX is not executed.
 
+// SamplerStateObjectRead (scr): Sampler-state object of the fetched draw.
 module g6lc_apu_vgpu_scr
   import g6lc_apu_pkg::*;
 #(
@@ -292,6 +293,7 @@ module g6lc_apu_vgpu_scr
   end
 endmodule
 
+// SamplerStateObjectRead (scr) enable-0 fixture: Sampler-state object of the fetched draw.
 module g6lc_apu_vgpu_scr_fixture
   import g6lc_apu_pkg::*;
 #(

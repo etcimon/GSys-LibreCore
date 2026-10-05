@@ -6,6 +6,7 @@
 // x = 0 and x = 1 must match the recorded origin and neighbor. y other
 // than 0, and x above 15, record nothing. TEX is not executed.
 
+// SpanBlend (spn): Blend that spans the first two beats.
 module g6lc_apu_vgpu_spn
   import g6lc_apu_pkg::*;
 #(
@@ -210,6 +211,7 @@ module g6lc_apu_vgpu_spn
   end
 endmodule
 
+// SpanBlend (spn) enable-0 fixture: Blend that spans the first two beats.
 module g6lc_apu_vgpu_spn_fixture
   import g6lc_apu_pkg::*;
 #(

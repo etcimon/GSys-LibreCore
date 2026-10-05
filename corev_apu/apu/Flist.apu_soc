@@ -3,6 +3,7 @@
 //
 // SoC attach (trusted grant + sys + testharness-shaped PLIC/xbar adapter)
 // plus the G6LC_APU load compositor. Not on the production testharness flist.
+// Module handoffs: AGENTS-impl-interplays.md.
 
 -f ${CVA6_REPO_DIR}/corev_apu/apu/Flist.apu_mem
 ${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_pkg.sv
@@ -19,3 +20,4 @@ ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_th.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_xbar.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_fwram.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_th_load.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_tdma.sv

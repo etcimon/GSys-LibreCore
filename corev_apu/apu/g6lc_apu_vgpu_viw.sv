@@ -7,6 +7,7 @@
 // the pin stays low. This is not g6lc_apu_vgpu_sun and not
 // g6lc_apu_vgpu_used. The pin is not PLIC source 9. The shader is not run.
 
+// UsedIrqWrite (viw): Used-buffer interrupt after that completion.
 module g6lc_apu_vgpu_viw
   import g6lc_apu_pkg::*;
 #(
@@ -161,6 +162,7 @@ module g6lc_apu_vgpu_viw
   end
 endmodule
 
+// UsedIrqWrite (viw) enable-0 fixture: Used-buffer interrupt after that completion.
 module g6lc_apu_vgpu_viw_fixture
   import g6lc_apu_pkg::*;
 #(

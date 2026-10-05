@@ -5,6 +5,7 @@
 // 64 by 64 window. A second store keeps the first. The bytes are not
 // kept. The shader is not run.
 
+// ClearWindowKeep (gpk): The clear word and the two beat addresses.
 module g6lc_apu_vgpu_gpk
   import g6lc_apu_pkg::*;
 #(
@@ -104,6 +105,7 @@ module g6lc_apu_vgpu_gpk
   end
 endmodule
 
+// ClearWindowKeep (gpk) enable-0 fixture: The clear word and the two beat addresses.
 module g6lc_apu_vgpu_gpk_fixture
   import g6lc_apu_pkg::*;
 #(

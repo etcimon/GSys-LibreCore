@@ -4,6 +4,7 @@
 // GET_CAPSET_INFO for capset index 0. The recorded answer is
 // INVALID_PARAMETER. This does not publish a capset id.
 
+// CapsetInfo (nfo): GET_CAPSET_INFO. Default-off. The answer is no capset.
 module g6lc_apu_vgpu_nfo
   import g6lc_apu_pkg::*;
 #(
@@ -116,6 +117,7 @@ module g6lc_apu_vgpu_nfo
   end
 endmodule
 
+// CapsetInfo (nfo) enable-0 fixture: GET_CAPSET_INFO. Default-off. The answer is no capset.
 module g6lc_apu_vgpu_nfo_fixture
   import g6lc_apu_pkg::*;
 #(

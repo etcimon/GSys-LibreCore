@@ -4,6 +4,7 @@
 // Keep the guest ack, the cleared status, and the used index. A second
 // store keeps the first. The pin is not kept. The shader is not run.
 
+// UsedAckKeep (vak): The ack, the cleared status, and the used index.
 module g6lc_apu_vgpu_vak
   import g6lc_apu_pkg::*;
 #(
@@ -100,6 +101,7 @@ module g6lc_apu_vgpu_vak
   end
 endmodule
 
+// UsedAckKeep (vak) enable-0 fixture: The ack, the cleared status, and the used index.
 module g6lc_apu_vgpu_vak_fixture
   import g6lc_apu_pkg::*;
 #(

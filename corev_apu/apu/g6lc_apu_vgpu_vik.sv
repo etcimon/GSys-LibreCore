@@ -4,6 +4,7 @@
 // Keep the used-buffer interrupt reason and the used index. A second
 // store keeps the first. The pin is not kept. The shader is not run.
 
+// UsedIrqKeep (vik): The reason and the used index.
 module g6lc_apu_vgpu_vik
   import g6lc_apu_pkg::*;
 #(
@@ -98,6 +99,7 @@ module g6lc_apu_vgpu_vik
   end
 endmodule
 
+// UsedIrqKeep (vik) enable-0 fixture: The reason and the used index.
 module g6lc_apu_vgpu_vik_fixture
   import g6lc_apu_pkg::*;
 #(

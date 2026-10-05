@@ -6,6 +6,7 @@
 // (63,63) is the top lane of the last beat. The image is not kept.
 // The shader is not run.
 
+// ReadbackRectLane (gbl): One lane of that rectangle.
 module g6lc_apu_vgpu_gbl
   import g6lc_apu_pkg::*;
 #(
@@ -175,6 +176,7 @@ module g6lc_apu_vgpu_gbl
   end
 endmodule
 
+// ReadbackRectLane (gbl) enable-0 fixture: One lane of that rectangle.
 module g6lc_apu_vgpu_gbl_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -4,6 +4,7 @@
 // The fragment-shader bind that follows the vertex-shader bind. The
 // body names shader handle 3 at stage 1. The TGSI text stays in the buffer.
 
+// FragShaderBind (fsb): The fragment-shader bind that follows the vertex-shader bind. Default-off. The TGSI text stays in the buffer.
 module g6lc_apu_vgpu_fsb
   import g6lc_apu_pkg::*;
 #(
@@ -145,6 +146,7 @@ module g6lc_apu_vgpu_fsb
   end
 endmodule
 
+// FragShaderBind (fsb) enable-0 fixture: The fragment-shader bind that follows the vertex-shader bind.
 module g6lc_apu_vgpu_fsb_fixture
   import g6lc_apu_pkg::*;
 #(

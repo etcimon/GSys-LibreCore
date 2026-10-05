@@ -4,6 +4,7 @@
 // Ceiling pixel (0,0) takes the corner texel. The record is that one
 // word. Other ceiling samples are not written.
 
+// CeilingOriginTexel (pxc): Ceiling (0,0) takes that texel. Default-off. Other samples stay clear.
 module g6lc_apu_vgpu_pxc
   import g6lc_apu_pkg::*;
 #(
@@ -87,6 +88,7 @@ module g6lc_apu_vgpu_pxc
   end
 endmodule
 
+// CeilingOriginTexel (pxc) enable-0 fixture: Ceiling (0,0) takes that texel. Default-off. Other samples stay clear.
 module g6lc_apu_vgpu_pxc_fixture
   import g6lc_apu_pkg::*;
 #(

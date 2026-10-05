@@ -5,6 +5,7 @@
 // Memory alone, exec alone, or both under g6lc_apu_sched.
 // g6lc_apu_axi_lite stays transport-only. Default-off.
 
+// Interplay: guest AXI-Lite ==> VirtioMmio; mailbox <-> ApuMem XOR ExecCluster. Private vgpu leaves --? this module. See AGENTS-impl-interplays.md.
 module g6lc_apu_sys
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

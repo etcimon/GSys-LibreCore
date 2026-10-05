@@ -11,6 +11,7 @@
 // g6lc_apu_vgpu_drw and not g6lc_apu_vgpu_avail. A failed beat stops
 // the read; the request can be repeated. TEX is not executed.
 
+// DrawVboRead (drd): DRAW_VBO at byte 908 of the fetched execbuffer.
 module g6lc_apu_vgpu_drd
   import g6lc_apu_pkg::*;
 #(
@@ -172,6 +173,7 @@ module g6lc_apu_vgpu_drd
   end
 endmodule
 
+// DrawVboRead (drd) enable-0 fixture: DRAW_VBO at byte 908 of the fetched execbuffer.
 module g6lc_apu_vgpu_drd_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -6,6 +6,7 @@
 // every one of its 4096 samples is covered. The stored color stays the
 // clear word. The fragment shader is not run. This is not g6lc_apu_cover.
 
+// QuadCoverage (cv): That strip covers the ceiling. Default-off. The color stays the clear.
 module g6lc_apu_vgpu_cv
   import g6lc_apu_pkg::*;
 #(
@@ -97,6 +98,7 @@ module g6lc_apu_vgpu_cv
   end
 endmodule
 
+// QuadCoverage (cv) enable-0 fixture: That strip covers the ceiling. Default-off. The color stays the clear.
 module g6lc_apu_vgpu_cv_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -9,6 +9,8 @@
 // A failed beat stops the fetch; the request can be repeated.
 // TEX is not executed.
 
+// SceneFetch (fet): Fetch the scene header and the 960-byte execbuffer.
+// Interplay: SceneChain (chn) <-> SceneFetch (fet); fetched-draw census spine. See AGENTS-impl-interplays.md.
 module g6lc_apu_vgpu_fet
   import g6lc_apu_pkg::*;
 #(
@@ -182,6 +184,7 @@ module g6lc_apu_vgpu_fet
   end
 endmodule
 
+// SceneFetch (fet) enable-0 fixture: Fetch the scene header and the 960-byte execbuffer.
 module g6lc_apu_vgpu_fet_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -1,11 +1,7 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
-//
-// Vertex-buffer set after the inline write. Not on the testharness flist.
-// Not a vertex fetch.
-
 +incdir+${CVA6_REPO_DIR}/corev_apu/apu/include
 ${CVA6_REPO_DIR}/core/include/config_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/include/g6lc_apu_cfg_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_pkg.sv
-${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgpu_vb.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vvb.sv

@@ -4,6 +4,7 @@
 // Keep the sampler-view stage, slot, and handle. A second store
 // keeps the first. No texture is bound.
 
+// SamplerViewReadKeep (svk): The stage, the slot, and the handle.
 module g6lc_apu_vgpu_svk
   import g6lc_apu_pkg::*;
 #(
@@ -102,6 +103,7 @@ module g6lc_apu_vgpu_svk
   end
 endmodule
 
+// SamplerViewReadKeep (svk) enable-0 fixture: The stage, the slot, and the handle.
 module g6lc_apu_vgpu_svk_fixture
   import g6lc_apu_pkg::*;
 #(

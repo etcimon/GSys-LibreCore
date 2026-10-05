@@ -8,6 +8,7 @@
 // already stored must match those words. The image is not stored.
 // x or y above 63 records nothing. TEX is not executed.
 
+// CeilingSampler (smp): Any 64 by 64 ceiling sample from the copied band.
 module g6lc_apu_vgpu_smp
   import g6lc_apu_pkg::*;
 #(
@@ -281,6 +282,7 @@ module g6lc_apu_vgpu_smp
   end
 endmodule
 
+// CeilingSampler (smp) enable-0 fixture: Any 64 by 64 ceiling sample from the copied band.
 module g6lc_apu_vgpu_smp_fixture
   import g6lc_apu_pkg::*;
 #(

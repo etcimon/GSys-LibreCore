@@ -4,6 +4,7 @@
 // Keep the ceiling readback record. The image stays in the written
 // beats, not here. A second store keeps the first.
 
+// CeilingBeatKeep (rbk): The readback record: byte count, first word, last address.
 module g6lc_apu_vgpu_rbk
   import g6lc_apu_pkg::*;
 #(
@@ -87,6 +88,7 @@ module g6lc_apu_vgpu_rbk
   end
 endmodule
 
+// CeilingBeatKeep (rbk) enable-0 fixture: The readback record: byte count, first word, last address.
 module g6lc_apu_vgpu_rbk_fixture
   import g6lc_apu_pkg::*;
 #(

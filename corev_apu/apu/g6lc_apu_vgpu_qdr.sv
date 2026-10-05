@@ -12,6 +12,7 @@
 // A failed beat stops the read; the request can be repeated.
 // TEX is not executed.
 
+// NdcFloatsRead (qdr): The 24 NDC floats of the fetched draw.
 module g6lc_apu_vgpu_qdr
   import g6lc_apu_pkg::*;
 #(
@@ -195,6 +196,7 @@ module g6lc_apu_vgpu_qdr
   end
 endmodule
 
+// NdcFloatsRead (qdr) enable-0 fixture: The 24 NDC floats of the fetched draw.
 module g6lc_apu_vgpu_qdr_fixture
   import g6lc_apu_pkg::*;
 #(

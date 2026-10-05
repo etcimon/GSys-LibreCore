@@ -4,6 +4,7 @@
 // Keep the surface header, handle, resource, and format. A second store
 // keeps the first. The two zero body words are not kept. No pixels are stored.
 
+// SurfaceObjectReadKeep (sfe): The header, the handle, the resource, and the format.
 module g6lc_apu_vgpu_sfe
   import g6lc_apu_pkg::*;
 #(
@@ -112,6 +113,7 @@ module g6lc_apu_vgpu_sfe
   end
 endmodule
 
+// SurfaceObjectReadKeep (sfe) enable-0 fixture: The header, the handle, the resource, and the format.
 module g6lc_apu_vgpu_sfe_fixture
   import g6lc_apu_pkg::*;
 #(

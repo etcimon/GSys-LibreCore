@@ -8,6 +8,7 @@
 // g6lc_apu_vgpu_suw, and not g6lc_apu_vgpu_sux. The shader is not run.
 // A failed beat stops the write; the request can be repeated.
 
+// SceneCompleteWrite (gcw): Guest response, used element, and used index after that window.
 module g6lc_apu_vgpu_gcw
   import g6lc_apu_pkg::*;
 #(
@@ -193,6 +194,7 @@ module g6lc_apu_vgpu_gcw
   end
 endmodule
 
+// SceneCompleteWrite (gcw) enable-0 fixture: Guest response, used element, and used index after that window.
 module g6lc_apu_vgpu_gcw_fixture
   import g6lc_apu_pkg::*;
 #(

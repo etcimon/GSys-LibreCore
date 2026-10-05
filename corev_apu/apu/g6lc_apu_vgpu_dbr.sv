@@ -9,6 +9,7 @@
 // g6lc_apu_vgpu_db and not g6lc_apu_vgpu_avail. A failed beat stops
 // the read; the request can be repeated. TEX is not executed.
 
+// DepthStencilBindRead (dbr): Depth-stencil bind of the fetched draw.
 module g6lc_apu_vgpu_dbr
   import g6lc_apu_pkg::*;
 #(
@@ -222,6 +223,7 @@ module g6lc_apu_vgpu_dbr
   end
 endmodule
 
+// DepthStencilBindRead (dbr) enable-0 fixture: Depth-stencil bind of the fetched draw.
 module g6lc_apu_vgpu_dbr_fixture
   import g6lc_apu_pkg::*;
 #(

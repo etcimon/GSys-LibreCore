@@ -4,6 +4,7 @@
 // Keep (24,0) and (31,0). A second store keeps the first.
 // The image is not kept. The shader is not run.
 
+// ReadbackBeat3Keep (b3k): Those offsets and the channels.
 module g6lc_apu_vgpu_b3k
   import g6lc_apu_pkg::*;
 #(
@@ -102,6 +103,7 @@ module g6lc_apu_vgpu_b3k
   end
 endmodule
 
+// ReadbackBeat3Keep (b3k) enable-0 fixture: Those offsets and the channels.
 module g6lc_apu_vgpu_b3k_fixture
   import g6lc_apu_pkg::*;
 #(

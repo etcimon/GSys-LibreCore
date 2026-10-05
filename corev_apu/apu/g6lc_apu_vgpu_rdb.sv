@@ -10,6 +10,7 @@
 // good beat. A second readback of that resource does not replace
 // them. This does not draw, follow a descriptor chain, or sample.
 
+// FragReadback (rdb): One guest readback of the fragment surface. Default-off. Not a draw, not a descriptor chain, and not the HDMI buffer.
 module g6lc_apu_vgpu_rdb
   import g6lc_apu_pkg::*;
 #(
@@ -280,6 +281,7 @@ module g6lc_apu_vgpu_rdb
   end
 endmodule
 
+// FragReadback (rdb) enable-0 fixture: One guest readback of the fragment surface.
 module g6lc_apu_vgpu_rdb_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -4,6 +4,7 @@
 // Keep the vertex-shader header, handle, stage, length, token count, and
 // first text dword. A second store keeps the first. The shader is not run.
 
+// VertexShaderObjectReadKeep (vse): The header, the handle, the stage, the length, the tokens, and text0.
 module g6lc_apu_vgpu_vse
   import g6lc_apu_pkg::*;
 #(
@@ -118,6 +119,7 @@ module g6lc_apu_vgpu_vse
   end
 endmodule
 
+// VertexShaderObjectReadKeep (vse) enable-0 fixture: The header, the handle, the stage, the length, the tokens, and text0.
 module g6lc_apu_vgpu_vse_fixture
   import g6lc_apu_pkg::*;
 #(

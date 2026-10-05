@@ -5,6 +5,7 @@
 // The word stays the clear color. A sample outside the ceiling records
 // nothing. This does not run the fragment shader.
 
+// CoveredSample (cvr): One covered sample. Default-off. Not a shaded pixel.
 module g6lc_apu_vgpu_cvr
   import g6lc_apu_pkg::*;
 #(
@@ -87,6 +88,7 @@ module g6lc_apu_vgpu_cvr
   end
 endmodule
 
+// CoveredSample (cvr) enable-0 fixture: One covered sample. Default-off. Not a shaded pixel.
 module g6lc_apu_vgpu_cvr_fixture
   import g6lc_apu_pkg::*;
 #(

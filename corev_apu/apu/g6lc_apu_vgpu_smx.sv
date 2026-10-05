@@ -3,6 +3,7 @@
 
 // Keep the ceiling sample at x = 0, y = 3. The earlier samples stay put.
 
+// CeilingSampleCheck (smx): The ceiling sample at (0,3).
 module g6lc_apu_vgpu_smx
   import g6lc_apu_pkg::*;
 #(
@@ -84,6 +85,7 @@ module g6lc_apu_vgpu_smx
   end
 endmodule
 
+// CeilingSampleCheck (smx) enable-0 fixture: The ceiling sample at (0,3).
 module g6lc_apu_vgpu_smx_fixture
   import g6lc_apu_pkg::*;
 #(

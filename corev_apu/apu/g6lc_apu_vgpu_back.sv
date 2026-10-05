@@ -9,6 +9,7 @@
 // g6lc_apu_attach. It does not read guest memory, walk an avail ring,
 // or write a used element.
 
+// ResourceBacking (back): One guest backing entry for an existing resource. Default-off. Not a guest-memory read and not a descriptor chain.
 module g6lc_apu_vgpu_back
   import g6lc_apu_pkg::*;
 #(
@@ -153,6 +154,7 @@ module g6lc_apu_vgpu_back
   end
 endmodule
 
+// ResourceBacking (back) enable-0 fixture: One guest backing entry for an existing resource.
 module g6lc_apu_vgpu_back_fixture
   import g6lc_apu_pkg::*;
 #(

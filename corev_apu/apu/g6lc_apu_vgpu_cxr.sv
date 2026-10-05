@@ -11,6 +11,7 @@
 // g6lc_apu_vgpu_avail. A failed beat stops the read; the request
 // can be repeated. TEX is not executed.
 
+// ScissorRead (cxr): Scissor of the fetched draw, matched to the window.
 module g6lc_apu_vgpu_cxr
   import g6lc_apu_pkg::*;
 #(
@@ -165,6 +166,7 @@ module g6lc_apu_vgpu_cxr
   end
 endmodule
 
+// ScissorRead (cxr) enable-0 fixture: Scissor of the fetched draw, matched to the window.
 module g6lc_apu_vgpu_cxr_fixture
   import g6lc_apu_pkg::*;
 #(

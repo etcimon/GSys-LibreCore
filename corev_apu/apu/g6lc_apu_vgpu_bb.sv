@@ -5,6 +5,7 @@
 // blend handle 7. A created object stays unbound until this command.
 // This does not draw.
 
+// BlendBind (bb): The blend bind that follows the rasterizer object. Default-off. Not a draw.
 module g6lc_apu_vgpu_bb
   import g6lc_apu_pkg::*;
 #(
@@ -138,6 +139,7 @@ module g6lc_apu_vgpu_bb
   end
 endmodule
 
+// BlendBind (bb) enable-0 fixture: The blend bind that follows the rasterizer object.
 module g6lc_apu_vgpu_bb_fixture
   import g6lc_apu_pkg::*;
 #(

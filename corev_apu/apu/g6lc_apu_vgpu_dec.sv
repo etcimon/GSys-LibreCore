@@ -7,6 +7,7 @@
 // that fits records its header and stops. The following command is not
 // decoded. This is not a draw.
 
+// FirstCommandDecode (dec): One decode of the first command in that buffer. Default-off. Not the rest of the stream and not a draw.
 module g6lc_apu_vgpu_dec
   import g6lc_apu_pkg::*;
 #(
@@ -163,6 +164,7 @@ module g6lc_apu_vgpu_dec
   end
 endmodule
 
+// FirstCommandDecode (dec) enable-0 fixture: One decode of the first command in that buffer.
 module g6lc_apu_vgpu_dec_fixture
   import g6lc_apu_pkg::*;
 #(

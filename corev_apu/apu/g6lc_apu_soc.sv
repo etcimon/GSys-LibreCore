@@ -6,6 +6,7 @@
 // never inspects PROT. Testharness-shaped PLIC splice and xbar windows
 // live in g6lc_apu_attach; this module is not on the production xbar.
 
+// Interplay: ApuSoc --> TrustedGrant --> ApuSys. No g6lc_apu_vgpu_* child. See AGENTS-impl-interplays.md.
 module g6lc_apu_soc
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

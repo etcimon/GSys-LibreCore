@@ -4,6 +4,7 @@
 // Keep the clear red, blue, and packed word. A second store keeps
 // the first. This does not write a pixel.
 
+// ClearColorReadKeep (cwk): The red, the blue, and the packed word.
 module g6lc_apu_vgpu_cwk
   import g6lc_apu_pkg::*;
 #(
@@ -97,6 +98,7 @@ module g6lc_apu_vgpu_cwk
   end
 endmodule
 
+// ClearColorReadKeep (cwk) enable-0 fixture: The red, the blue, and the packed word.
 module g6lc_apu_vgpu_cwk_fixture
   import g6lc_apu_pkg::*;
 #(

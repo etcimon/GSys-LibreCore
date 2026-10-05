@@ -4,6 +4,7 @@
 // CTX_CREATE for context 1, debug name "main". The payload is the
 // control record, not the execbuffer. This is not an OS context.
 
+// ContextCreate (ctx): CTX_CREATE for context 1. Default-off. Not an OS context.
 module g6lc_apu_vgpu_ctx
   import g6lc_apu_pkg::*;
 #(
@@ -120,6 +121,7 @@ module g6lc_apu_vgpu_ctx
   end
 endmodule
 
+// ContextCreate (ctx) enable-0 fixture: CTX_CREATE for context 1. Default-off. Not an OS context.
 module g6lc_apu_vgpu_ctx_fixture
   import g6lc_apu_pkg::*;
 #(

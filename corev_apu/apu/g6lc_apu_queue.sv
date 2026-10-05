@@ -6,6 +6,7 @@
 // idx leaves a possible unread element prefix that must not be treated as a
 // completed used entry. Does not pulse the transport used_valid sideband.
 
+// Interplay: ApuMem --> UsedQueue --> DmaWrite. Older DMA used-ring, raw map. See AGENTS-impl-interplays.md.
 module g6lc_apu_queue
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

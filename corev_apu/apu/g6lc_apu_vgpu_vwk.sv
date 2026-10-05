@@ -4,6 +4,7 @@
 // Keep the viewport scales and the window edges of the frozen square.
 // A second store keeps the first. This is not a transform.
 
+// ViewportReadKeep (vwk): The scales and the window edges.
 module g6lc_apu_vgpu_vwk
   import g6lc_apu_pkg::*;
 #(
@@ -104,6 +105,7 @@ module g6lc_apu_vgpu_vwk
   end
 endmodule
 
+// ViewportReadKeep (vwk) enable-0 fixture: The scales and the window edges.
 module g6lc_apu_vgpu_vwk_fixture
   import g6lc_apu_pkg::*;
 #(

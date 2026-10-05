@@ -5,6 +5,7 @@
 // shader RUN, RF peek, and DMEM peek (headless color readback). Default-off.
 // Local SRAM only; not a DRAM LSU and not EGL.
 
+// Interplay: ApuSched/ApuSys --> ExecBind --> ExecCluster (exec). See AGENTS-impl-interplays.md.
 module g6lc_apu_exec_bind
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

@@ -5,6 +5,7 @@
 // to exactly one of them. The other stays idle until that op completes.
 // Exec does not read the mapping. This is not a handle resolver.
 
+// Interplay: Mailbox --> ApuMem XOR ExecBind; one op, the other idle. See AGENTS-impl-interplays.md.
 module g6lc_apu_sched
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

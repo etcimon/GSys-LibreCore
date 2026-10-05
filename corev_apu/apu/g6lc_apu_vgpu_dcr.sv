@@ -10,6 +10,7 @@
 // This is not g6lc_apu_vgpu_ds and not g6lc_apu_vgpu_avail. A failed
 // beat stops the read; the request can be repeated. TEX is not executed.
 
+// DepthStencilObjectRead (dcr): Depth-stencil object of the fetched draw.
 module g6lc_apu_vgpu_dcr
   import g6lc_apu_pkg::*;
 #(
@@ -258,6 +259,7 @@ module g6lc_apu_vgpu_dcr
   end
 endmodule
 
+// DepthStencilObjectRead (dcr) enable-0 fixture: Depth-stencil object of the fetched draw.
 module g6lc_apu_vgpu_dcr_fixture
   import g6lc_apu_pkg::*;
 #(

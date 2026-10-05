@@ -9,6 +9,7 @@
 // Command decode, resource lifetime and virgl semantics are deliberately in the
 // protected firmware seam; datapath/DMA execution is a separate APU block.
 
+// Interplay: guest ==> QueueNotify / PFN / ISR. Backend used-ring is a separate port. See AGENTS-impl-interplays.md.
 module g6lc_apu_virtio_mmio
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;
@@ -67,6 +68,7 @@ module g6lc_apu_virtio_mmio
   localparam int unsigned NumQueues = APU_NUM_QUEUES;
   localparam int unsigned QidWidth = (NumQueues > 1) ? $clog2(NumQueues) : 1;
   localparam logic [63:0] DeviceFeatures = apu_device_features(ApuCfg);
+  localparam bit ShmEn = ApuCfg.ShmEn;
 
   // pragma translate_off
   initial begin
@@ -109,6 +111,8 @@ module g6lc_apu_virtio_mmio
   logic [31:0] events_clear;
   logic [31:0] read_data;
   logic stop_read_wait;
+  logic [31:0] shm_sel;
+  logic shm_host;
 
   assign req_write = req_i && we_i && (wstrb_i == 4'hf) &&
                      (addr_i[1:0] == 2'b00) && !reset_pending_q && rst_ni;
@@ -158,6 +162,21 @@ module g6lc_apu_virtio_mmio
   assign irq_set[0] = used_valid_i && used_ready_o;
   assign irq_set[1] = ((status_q & VSTATUS_DRIVER_OK) != 0) &&
                       ((invalid_access && !needs_reset_q) || cfg_display_event_i);
+  assign shm_host = ShmEn && (shm_sel == APU_SHM_ID_HOST_VISIBLE);
+
+  if (ShmEn) begin : gen_shm
+    logic [31:0] shm_sel_q;
+    assign shm_sel = shm_sel_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) shm_sel_q <= '0;
+      else if (dev_reset) shm_sel_q <= '0;
+      else if (req_write && !invalid_access &&
+               addr_i == AddrWidth'(VREG_SHM_SEL))
+        shm_sel_q <= wdata_i;
+    end
+  end else begin : gen_shm_off
+    assign shm_sel = 32'h0;
+  end
 
   always_comb begin
     read_data = 32'h0;
@@ -198,8 +217,15 @@ module g6lc_apu_virtio_mmio
           if (qsel_valid) read_data = vq_q[qsel_idx].used[31:0];
         AddrWidth'(VREG_QUEUE_USED_HI):
           if (qsel_valid) read_data = vq_q[qsel_idx].used[63:32];
-        AddrWidth'(VREG_SHM_LEN_LO), AddrWidth'(VREG_SHM_LEN_HI),
-        AddrWidth'(VREG_SHM_BASE_LO), AddrWidth'(VREG_SHM_BASE_HI): read_data = '1;
+        AddrWidth'(VREG_SHM_SEL): read_data = shm_sel;
+        AddrWidth'(VREG_SHM_LEN_LO):
+          read_data = shm_host ? APU_SHM_BYTES[31:0] : 32'hffff_ffff;
+        AddrWidth'(VREG_SHM_LEN_HI):
+          read_data = shm_host ? APU_SHM_BYTES[63:32] : 32'hffff_ffff;
+        AddrWidth'(VREG_SHM_BASE_LO):
+          read_data = shm_host ? APU_SHM_BASE[31:0] : 32'hffff_ffff;
+        AddrWidth'(VREG_SHM_BASE_HI):
+          read_data = shm_host ? APU_SHM_BASE[63:32] : 32'hffff_ffff;
         AddrWidth'(VREG_QUEUE_RESET):
           if (qsel_valid && ring_reset_enabled)
             read_data = {31'h0, queue_reset_pending_q[qsel_idx]};
@@ -326,6 +352,7 @@ module g6lc_apu_virtio_mmio
               else if (driver_features_sel_q == 1) driver_features_q[63:32] <= wdata_i;
             end
             AddrWidth'(VREG_QUEUE_SEL): queue_sel_q <= wdata_i;
+            AddrWidth'(VREG_SHM_SEL): ;
             AddrWidth'(VREG_QUEUE_NUM): vq_q[qsel_idx].num <= wdata_i[15:0];
             AddrWidth'(VREG_QUEUE_READY): vq_q[qsel_idx].ready <= wdata_i[0];
             AddrWidth'(VREG_QUEUE_DESC_LO): vq_q[qsel_idx].desc[31:0] <= wdata_i;

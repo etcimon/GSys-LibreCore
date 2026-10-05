@@ -10,6 +10,7 @@
 // run. This is not g6lc_apu_vgpu_sh, not g6lc_apu_vgpu_vst, and not
 // g6lc_apu_vgpu_avail. A failed beat stops the read.
 
+// VertexShaderObjectRead (vsc): Vertex-shader object of the fetched draw. Default-off. The shader is not run.
 module g6lc_apu_vgpu_vsc
   import g6lc_apu_pkg::*;
 #(
@@ -358,6 +359,7 @@ module g6lc_apu_vgpu_vsc
   end
 endmodule
 
+// VertexShaderObjectRead (vsc) enable-0 fixture: Vertex-shader object of the fetched draw. Default-off. The shader is not run.
 module g6lc_apu_vgpu_vsc_fixture
   import g6lc_apu_pkg::*;
 #(

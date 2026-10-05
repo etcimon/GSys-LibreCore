@@ -4,6 +4,7 @@
 // Keep (7,0). A second store keeps the first. The image is not
 // kept. The shader is not run.
 
+// ReadbackX7Keep (p7k): That offset and the channels.
 module g6lc_apu_vgpu_p7k
   import g6lc_apu_pkg::*;
 #(
@@ -101,6 +102,7 @@ module g6lc_apu_vgpu_p7k
   end
 endmodule
 
+// ReadbackX7Keep (p7k) enable-0 fixture: That offset and the channels.
 module g6lc_apu_vgpu_p7k_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -5,6 +5,7 @@
 // passthrough VERT program, starting at byte 48. A mismatched dword
 // records nothing. This is not a translate.
 
+// VertexTgsiText (vst): Vertex-shader TGSI text. Default-off. Not a translate.
 module g6lc_apu_vgpu_vst
   import g6lc_apu_pkg::*;
 #(
@@ -157,6 +158,7 @@ module g6lc_apu_vgpu_vst
   end
 endmodule
 
+// VertexTgsiText (vst) enable-0 fixture: Vertex-shader TGSI text. Default-off. Not a translate.
 module g6lc_apu_vgpu_vst_fixture
   import g6lc_apu_pkg::*;
 #(

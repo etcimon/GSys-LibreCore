@@ -7,6 +7,7 @@
 // One dword of that text is recorded so its start is known. This is
 // not a draw.
 
+// VertexShaderCreate (sh): The shader create that follows that surface. Default-off. The TGSI text stays in the buffer.
 module g6lc_apu_vgpu_sh
   import g6lc_apu_pkg::*;
 #(
@@ -162,6 +163,7 @@ module g6lc_apu_vgpu_sh
   end
 endmodule
 
+// VertexShaderCreate (sh) enable-0 fixture: The shader create that follows that surface.
 module g6lc_apu_vgpu_sh_fixture
   import g6lc_apu_pkg::*;
 #(

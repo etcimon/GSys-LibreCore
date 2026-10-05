@@ -6,6 +6,7 @@
 // master. Command DMA reads the published slot, not the mailbox base.
 // One firmware operation at a time; reset/cancel wait for idle.
 
+// Interplay: Storage <-> ScatterGather <-> DmaRead/DmaWrite <-> UsedQueue. See AGENTS-impl-interplays.md.
 module g6lc_apu_mem
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

@@ -6,6 +6,7 @@
 // contains that ceiling. One word stands for all 4096 samples. The
 // triangle is not walked.
 
+// ClearCeilingFill (fil): The clear word covers the 64 by 64 ceiling.
 module g6lc_apu_vgpu_fil
   import g6lc_apu_pkg::*;
 #(
@@ -94,6 +95,7 @@ module g6lc_apu_vgpu_fil
   end
 endmodule
 
+// ClearCeilingFill (fil) enable-0 fixture: The clear word covers the 64 by 64 ceiling.
 module g6lc_apu_vgpu_fil_fixture
   import g6lc_apu_pkg::*;
 #(

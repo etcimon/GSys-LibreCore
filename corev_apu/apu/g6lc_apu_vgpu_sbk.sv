@@ -5,6 +5,7 @@
 // 640 by 480 by 4. The address is nonzero, 4-byte aligned, and not a
 // lab backing address. The bytes are not read.
 
+// ScanBacking (sbk): Backing entry for that resource. Default-off. Not a guest read.
 module g6lc_apu_vgpu_sbk
   import g6lc_apu_pkg::*;
 #(
@@ -147,6 +148,7 @@ module g6lc_apu_vgpu_sbk
   end
 endmodule
 
+// ScanBacking (sbk) enable-0 fixture: Backing entry for that resource. Default-off. Not a guest read.
 module g6lc_apu_vgpu_sbk_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -1,0 +1,7 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// HOST_VISIBLE SHM plus blob/context_init. Not on the testharness flist.
+
+-f ${CVA6_REPO_DIR}/corev_apu/apu/Flist.apu
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_hvis.sv

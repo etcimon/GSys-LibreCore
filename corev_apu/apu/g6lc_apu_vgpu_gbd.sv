@@ -6,6 +6,7 @@
 // nothing. The image is not kept. This is not Mesa glReadPixels.
 // The shader is not run.
 
+// ReadbackRect (gbd): 64 by 64 readback rectangle.
 module g6lc_apu_vgpu_gbd
   import g6lc_apu_pkg::*;
 #(
@@ -96,6 +97,7 @@ module g6lc_apu_vgpu_gbd
   end
 endmodule
 
+// ReadbackRect (gbd) enable-0 fixture: 64 by 64 readback rectangle.
 module g6lc_apu_vgpu_gbd_fixture
   import g6lc_apu_pkg::*;
 #(

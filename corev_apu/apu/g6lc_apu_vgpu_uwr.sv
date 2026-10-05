@@ -6,6 +6,7 @@
 // used.idx must already be nonzero. A second store does not replace
 // it. This does not write used.idx, and it is not g6lc_apu_queue.
 
+// UsedGuestWrite (uwr): One guest write of the local used element. Default-off. Not used.idx and not a descriptor chain.
 module g6lc_apu_vgpu_uwr
   import g6lc_apu_pkg::*;
 #(
@@ -159,6 +160,7 @@ module g6lc_apu_vgpu_uwr
   end
 endmodule
 
+// UsedGuestWrite (uwr) enable-0 fixture: One guest write of the local used element.
 module g6lc_apu_vgpu_uwr_fixture
   import g6lc_apu_pkg::*;
 #(

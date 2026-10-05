@@ -4,6 +4,7 @@
 // Keep the two y = 2 samples. x = 0 first, then x = 1. Each word must
 // differ from the y = 1 sample at that column.
 
+// Row2BlendKeep (y2r): The y = 2 samples at x = 0 and x = 1.
 module g6lc_apu_vgpu_y2r
   import g6lc_apu_pkg::*;
 #(
@@ -90,6 +91,7 @@ module g6lc_apu_vgpu_y2r
   end
 endmodule
 
+// Row2BlendKeep (y2r) enable-0 fixture: The y = 2 samples at x = 0 and x = 1.
 module g6lc_apu_vgpu_y2r_fixture
   import g6lc_apu_pkg::*;
 #(

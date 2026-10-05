@@ -6,6 +6,7 @@
 // A failed beat can be retried. A second store does not replace it.
 // This is not g6lc_apu_vgpu_uidx and it is not 64'h8800_4002.
 
+// SceneUsedIndex (sux): Guest store of that used.idx.
 module g6lc_apu_vgpu_sux
   import g6lc_apu_pkg::*;
 #(
@@ -120,6 +121,7 @@ module g6lc_apu_vgpu_sux
   end
 endmodule
 
+// SceneUsedIndex (sux) enable-0 fixture: Guest store of that used.idx.
 module g6lc_apu_vgpu_sux_fixture
   import g6lc_apu_pkg::*;
 #(

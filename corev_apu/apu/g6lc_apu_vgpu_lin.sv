@@ -8,6 +8,7 @@
 // the next beat and records nothing. A second tap outside this beat is
 // not read. TEX is not executed.
 
+// LinearBlend (lin): Horizontal blend of two taps in the first beat.
 module g6lc_apu_vgpu_lin
   import g6lc_apu_pkg::*;
 #(
@@ -183,6 +184,7 @@ module g6lc_apu_vgpu_lin
   end
 endmodule
 
+// LinearBlend (lin) enable-0 fixture: Horizontal blend of two taps in the first beat.
 module g6lc_apu_vgpu_lin_fixture
   import g6lc_apu_pkg::*;
 #(

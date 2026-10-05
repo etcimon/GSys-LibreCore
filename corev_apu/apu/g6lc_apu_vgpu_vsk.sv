@@ -4,6 +4,7 @@
 // Keep the vertex-shader handle and stage. A second store keeps the
 // first. The shader is not run.
 
+// VertexShaderBindReadKeep (vsk): The handle and the stage.
 module g6lc_apu_vgpu_vsk
   import g6lc_apu_pkg::*;
 #(
@@ -107,6 +108,7 @@ module g6lc_apu_vgpu_vsk
   end
 endmodule
 
+// VertexShaderBindReadKeep (vsk) enable-0 fixture: The handle and the stage.
 module g6lc_apu_vgpu_vsk_fixture
   import g6lc_apu_pkg::*;
 #(

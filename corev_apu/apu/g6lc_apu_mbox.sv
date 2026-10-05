@@ -11,6 +11,7 @@
 //   19/20 sg list base  21/22 sg list bytes  23 sg list resource
 // Exec ops 9-12 reuse 0 idx/thread/shader, 1 inst/reg, 2 poke data.
 
+// Interplay: firmware hart ==> Mailbox <-> ApuMem or ExecBind. See AGENTS-impl-interplays.md.
 module g6lc_apu_mbox
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

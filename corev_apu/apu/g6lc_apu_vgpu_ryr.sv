@@ -6,6 +6,7 @@
 // records nothing. This is later than g6lc_apu_vgpu_byr.
 // The image is not kept. The shader is not run.
 
+// ReadbackRow1 (ryr): Row 1 of the readback starts with that red byte.
 module g6lc_apu_vgpu_ryr
   import g6lc_apu_pkg::*;
 #(
@@ -158,6 +159,7 @@ module g6lc_apu_vgpu_ryr
   end
 endmodule
 
+// ReadbackRow1 (ryr) enable-0 fixture: Row 1 of the readback starts with that red byte.
 module g6lc_apu_vgpu_ryr_fixture
   import g6lc_apu_pkg::*;
 #(

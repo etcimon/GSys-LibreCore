@@ -5,6 +5,7 @@
 // 8'hFF records nothing. A second store keeps the first.
 // The shader is not run.
 
+// ReadbackRow1Check (ryx): Byte 0 of row 1 is red, not blue.
 module g6lc_apu_vgpu_ryx
   import g6lc_apu_pkg::*;
 #(
@@ -99,6 +100,7 @@ module g6lc_apu_vgpu_ryx
   end
 endmodule
 
+// ReadbackRow1Check (ryx) enable-0 fixture: Byte 0 of row 1 is red, not blue.
 module g6lc_apu_vgpu_ryx_fixture
   import g6lc_apu_pkg::*;
 #(

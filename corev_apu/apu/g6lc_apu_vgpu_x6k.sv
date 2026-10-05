@@ -4,6 +4,7 @@
 // Keep (63,0). A second store keeps the first. The image is not
 // kept. The shader is not run.
 
+// ReadbackX63Keep (x6k): That offset and the channels.
 module g6lc_apu_vgpu_x6k
   import g6lc_apu_pkg::*;
 #(
@@ -100,6 +101,7 @@ module g6lc_apu_vgpu_x6k
   end
 endmodule
 
+// ReadbackX63Keep (x6k) enable-0 fixture: That offset and the channels.
 module g6lc_apu_vgpu_x6k_fixture
   import g6lc_apu_pkg::*;
 #(

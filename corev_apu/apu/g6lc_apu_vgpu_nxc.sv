@@ -10,6 +10,8 @@
 // nothing. This is not g6lc_apu_vgpu_avail and not g6lc_apu_vgpu_chn.
 // g6lc_apu_vgpu_avail still rejects NEXT. A failed beat stops the read.
 
+// SceneChainGuestRead (nxc): Guest read of the scene descriptor chain and its avail slot.
+// Interplay: SceneChain (chn) --? SceneChainGuestRead (nxc) ==> 64'h8800E100. Does not consume. See AGENTS-impl-interplays.md.
 module g6lc_apu_vgpu_nxc
   import g6lc_apu_pkg::*;
 #(
@@ -218,6 +220,7 @@ module g6lc_apu_vgpu_nxc
   end
 endmodule
 
+// SceneChainGuestRead (nxc) enable-0 fixture: Guest read of the scene descriptor chain and its avail slot.
 module g6lc_apu_vgpu_nxc_fixture
   import g6lc_apu_pkg::*;
 #(

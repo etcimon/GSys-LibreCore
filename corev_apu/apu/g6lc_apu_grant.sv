@@ -5,6 +5,7 @@
 // the firmware hart ID plus a control-window address, never AXI PROT.
 // Guest virtio MMIO is a separate port and is not gated here. Default-off.
 
+// Interplay: ApuSoc --> TrustedGrant; control writes from the firmware hart only. See AGENTS-impl-interplays.md.
 module g6lc_apu_grant
   import g6lc_apu_cfg_pkg::*;
 #(

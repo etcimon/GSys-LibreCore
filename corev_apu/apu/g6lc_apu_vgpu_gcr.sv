@@ -6,6 +6,7 @@
 // the check. The 24 bytes are not kept. This is not g6lc_apu_vgpu_rsp.
 // The shader is not run.
 
+// SceneCompleteRead (gcr): Those three beats read back.
 module g6lc_apu_vgpu_gcr
   import g6lc_apu_pkg::*;
 #(
@@ -213,6 +214,7 @@ module g6lc_apu_vgpu_gcr
   end
 endmodule
 
+// SceneCompleteRead (gcr) enable-0 fixture: Those three beats read back.
 module g6lc_apu_vgpu_gcr_fixture
   import g6lc_apu_pkg::*;
 #(

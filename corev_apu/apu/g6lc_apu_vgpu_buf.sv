@@ -7,6 +7,8 @@
 // A second read does not replace the buffer. This does not decode the
 // commands, write the response, or draw.
 
+// ExecBufferRead (buf): One read of the execbuffer named by that submit. Default-off. Not a command decode and not a draw.
+// Interplay: Submit3dChain (sub) <-> ExecBufferRead (buf); CREATE/BIND spine. See AGENTS-impl-interplays.md.
 module g6lc_apu_vgpu_buf
   import g6lc_apu_pkg::*;
 #(
@@ -202,6 +204,7 @@ module g6lc_apu_vgpu_buf
   end
 endmodule
 
+// ExecBufferRead (buf) enable-0 fixture: One read of the execbuffer named by that submit.
 module g6lc_apu_vgpu_buf_fixture
   import g6lc_apu_pkg::*;
 #(

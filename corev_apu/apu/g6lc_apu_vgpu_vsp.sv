@@ -7,6 +7,7 @@
 // span. Round half up per byte. y other than 1, and x above 15, record
 // nothing. TEX is not executed.
 
+// VerticalSpanBlend (vsp): y = 1 blend for x = 0..15, including the beat span.
 module g6lc_apu_vgpu_vsp
   import g6lc_apu_pkg::*;
 #(
@@ -244,6 +245,7 @@ module g6lc_apu_vgpu_vsp
   end
 endmodule
 
+// VerticalSpanBlend (vsp) enable-0 fixture: y = 1 blend for x = 0..15, including the beat span.
 module g6lc_apu_vgpu_vsp_fixture
   import g6lc_apu_pkg::*;
 #(

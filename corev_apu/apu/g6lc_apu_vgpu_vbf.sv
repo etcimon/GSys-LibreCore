@@ -11,6 +11,7 @@
 // g6lc_apu_vgpu_avail. A failed beat stops the read; the request
 // can be repeated. TEX is not executed.
 
+// VertexBufferRead (vbf): Vertex-buffer set of the fetched draw.
 module g6lc_apu_vgpu_vbf
   import g6lc_apu_pkg::*;
 #(
@@ -193,6 +194,7 @@ module g6lc_apu_vgpu_vbf
   end
 endmodule
 
+// VertexBufferRead (vbf) enable-0 fixture: Vertex-buffer set of the fetched draw.
 module g6lc_apu_vgpu_vbf_fixture
   import g6lc_apu_pkg::*;
 #(

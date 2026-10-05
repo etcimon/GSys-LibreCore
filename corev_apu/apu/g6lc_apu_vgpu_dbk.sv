@@ -4,6 +4,7 @@
 // Keep the depth-stencil header and handle. A second store keeps the
 // first. No depth test is run.
 
+// DepthStencilBindReadKeep (dbk): The header and the handle.
 module g6lc_apu_vgpu_dbk
   import g6lc_apu_pkg::*;
 #(
@@ -104,6 +105,7 @@ module g6lc_apu_vgpu_dbk
   end
 endmodule
 
+// DepthStencilBindReadKeep (dbk) enable-0 fixture: The header and the handle.
 module g6lc_apu_vgpu_dbk_fixture
   import g6lc_apu_pkg::*;
 #(

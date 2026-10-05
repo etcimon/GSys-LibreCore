@@ -4,6 +4,7 @@
 // The sampler-view set that follows the sampler-state bind. Fragment
 // slot 0 names sampler-view handle 5. This does not sample a texture.
 
+// SamplerViewSet (svb): The sampler-view set that follows the sampler-state bind. Default-off. Not a texture sample.
 module g6lc_apu_vgpu_svb
   import g6lc_apu_pkg::*;
 #(
@@ -146,6 +147,7 @@ module g6lc_apu_vgpu_svb
   end
 endmodule
 
+// SamplerViewSet (svb) enable-0 fixture: The sampler-view set that follows the sampler-state bind.
 module g6lc_apu_vgpu_svb_fixture
   import g6lc_apu_pkg::*;
 #(

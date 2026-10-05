@@ -7,6 +7,7 @@
 // up per byte. y other than 2, and x above 7, record nothing. TEX is
 // not executed.
 
+// Row2Blend (y2b): y = 2 blend for x = 0..7, row 1 and row 2.
 module g6lc_apu_vgpu_y2b
   import g6lc_apu_pkg::*;
 #(
@@ -218,6 +219,7 @@ module g6lc_apu_vgpu_y2b
   end
 endmodule
 
+// Row2Blend (y2b) enable-0 fixture: y = 2 blend for x = 0..7, row 1 and row 2.
 module g6lc_apu_vgpu_y2b_fixture
   import g6lc_apu_pkg::*;
 #(

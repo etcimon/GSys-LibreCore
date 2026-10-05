@@ -5,6 +5,7 @@
 // attributes share vertex buffer 0: position at offset 0 and uv at
 // offset 16. Their instance divisors are zero. This is not a draw.
 
+// VertexElementsCreate (ve): The vertex-elements object that follows the fragment shader. Default-off. Two attributes, position then uv.
 module g6lc_apu_vgpu_ve
   import g6lc_apu_pkg::*;
 #(
@@ -151,6 +152,7 @@ module g6lc_apu_vgpu_ve
   end
 endmodule
 
+// VertexElementsCreate (ve) enable-0 fixture: The vertex-elements object that follows the fragment shader.
 module g6lc_apu_vgpu_ve_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -5,6 +5,7 @@
 // A second store keeps the first. The zero body words are not kept.
 // No texture is bound.
 
+// SamplerViewObjectReadKeep (vck): The header, the handle, the resource, the format, and the swizzle.
 module g6lc_apu_vgpu_vck
   import g6lc_apu_pkg::*;
 #(
@@ -115,6 +116,7 @@ module g6lc_apu_vgpu_vck
   end
 endmodule
 
+// SamplerViewObjectReadKeep (vck) enable-0 fixture: The header, the handle, the resource, the format, and the swizzle.
 module g6lc_apu_vgpu_vck_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -6,6 +6,7 @@
 // scene fence. A failed beat can be retried. A second store does not
 // replace the first. This does not store a pixel.
 
+// SceneResponse (rsp): The scene submit response. Default-off. Not a pixel store.
 module g6lc_apu_vgpu_rsp
   import g6lc_apu_pkg::*;
 #(
@@ -142,6 +143,7 @@ module g6lc_apu_vgpu_rsp
   end
 endmodule
 
+// SceneResponse (rsp) enable-0 fixture: The scene submit response. Default-off. Not a pixel store.
 module g6lc_apu_vgpu_rsp_fixture
   import g6lc_apu_pkg::*;
 #(

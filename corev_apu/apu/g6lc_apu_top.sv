@@ -6,6 +6,7 @@
 // exposes the modern virtio-mmio transport state only; memory/execution blocks
 // attach below this seam as their own gated units.
 
+// Interplay: AxiLiteTransport --> VirtioTop --> VirtioMmio. See AGENTS-impl-interplays.md.
 module g6lc_apu_top
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

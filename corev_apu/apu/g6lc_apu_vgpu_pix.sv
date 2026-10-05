@@ -6,6 +6,7 @@
 // and the framebuffer surface 1. The interior is not written. The
 // triangle is not walked.
 
+// ClearCorners (pix): Four corner samples of that clear. Default-off. Not a triangle walk.
 module g6lc_apu_vgpu_pix
   import g6lc_apu_pkg::*;
 #(
@@ -101,6 +102,7 @@ module g6lc_apu_vgpu_pix
   end
 endmodule
 
+// ClearCorners (pix) enable-0 fixture: Four corner samples of that clear. Default-off. Not a triangle walk.
 module g6lc_apu_vgpu_pix_fixture
   import g6lc_apu_pkg::*;
 #(

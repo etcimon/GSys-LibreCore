@@ -4,6 +4,7 @@
 // The vertex-elements bind that follows the fragment-shader bind. The
 // body names elements handle 4. This does not draw.
 
+// VertexElementsBind (veb): The vertex-elements bind that follows the fragment-shader bind.
 module g6lc_apu_vgpu_veb
   import g6lc_apu_pkg::*;
 #(
@@ -138,6 +139,7 @@ module g6lc_apu_vgpu_veb
   end
 endmodule
 
+// VertexElementsBind (veb) enable-0 fixture: The vertex-elements bind that follows the fragment-shader bind.
 module g6lc_apu_vgpu_veb_fixture
   import g6lc_apu_pkg::*;
 #(

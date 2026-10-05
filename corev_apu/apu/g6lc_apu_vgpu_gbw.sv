@@ -7,6 +7,7 @@
 // stops the copy. This is not Mesa glReadPixels and not the ceiling
 // at 32'h88040000. The shader is not run.
 
+// ReadbackCopy (gbw): Copy of that window into the guest readback buffer.
 module g6lc_apu_vgpu_gbw
   import g6lc_apu_pkg::*;
 #(
@@ -227,6 +228,7 @@ module g6lc_apu_vgpu_gbw
   end
 endmodule
 
+// ReadbackCopy (gbw) enable-0 fixture: Copy of that window into the guest readback buffer.
 module g6lc_apu_vgpu_gbw_fixture
   import g6lc_apu_pkg::*;
 #(

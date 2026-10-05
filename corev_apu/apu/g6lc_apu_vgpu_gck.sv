@@ -5,6 +5,7 @@
 // index. A second store keeps the first. The bytes are not kept.
 // The shader is not run.
 
+// SceneCompleteKeep (gck): The response type, the fence, and the used index.
 module g6lc_apu_vgpu_gck
   import g6lc_apu_pkg::*;
 #(
@@ -115,6 +116,7 @@ module g6lc_apu_vgpu_gck
   end
 endmodule
 
+// SceneCompleteKeep (gck) enable-0 fixture: The response type, the fence, and the used index.
 module g6lc_apu_vgpu_gck_fixture
   import g6lc_apu_pkg::*;
 #(

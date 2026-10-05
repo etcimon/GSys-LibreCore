@@ -4,6 +4,7 @@
 // The vertex-buffer set that follows the inline write. Buffer 0 uses
 // stride 24, offset 0, and resource 3. This does not fetch vertices.
 
+// VertexBuffersSet (vb): The vertex-buffer set that follows the inline write. Default-off. Not a vertex fetch.
 module g6lc_apu_vgpu_vb
   import g6lc_apu_pkg::*;
 #(
@@ -146,6 +147,7 @@ module g6lc_apu_vgpu_vb
   end
 endmodule
 
+// VertexBuffersSet (vb) enable-0 fixture: The vertex-buffer set that follows the inline write.
 module g6lc_apu_vgpu_vb_fixture
   import g6lc_apu_pkg::*;
 #(

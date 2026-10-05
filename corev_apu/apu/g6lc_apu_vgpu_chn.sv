@@ -8,6 +8,8 @@
 // the slot. This does not read guest memory and it is not
 // g6lc_apu_vgpu_avail.
 
+// SceneChain (chn): The scene submit's three-descriptor chain. Default-off. Not the one-descriptor avail walker.
+// Interplay: SceneChain (chn) <-> SceneFetch (fet); posted NEXT, no guest memory. --? avail. See AGENTS-impl-interplays.md.
 module g6lc_apu_vgpu_chn
   import g6lc_apu_pkg::*;
 #(
@@ -140,6 +142,7 @@ module g6lc_apu_vgpu_chn
   end
 endmodule
 
+// SceneChain (chn) enable-0 fixture: The scene submit's three-descriptor chain.
 module g6lc_apu_vgpu_chn_fixture
   import g6lc_apu_pkg::*;
 #(

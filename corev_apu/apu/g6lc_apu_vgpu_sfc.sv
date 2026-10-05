@@ -8,6 +8,7 @@
 // is painted. This is not g6lc_apu_vgpu_fbr and not g6lc_apu_vgpu_avail.
 // A failed beat stops the read; the request can be repeated.
 
+// SurfaceObjectRead (sfc): Surface object at the start of the fetched draw. Default-off. No pixels are stored.
 module g6lc_apu_vgpu_sfc
   import g6lc_apu_pkg::*;
 #(
@@ -332,6 +333,7 @@ module g6lc_apu_vgpu_sfc
   end
 endmodule
 
+// SurfaceObjectRead (sfc) enable-0 fixture: Surface object at the start of the fetched draw. Default-off. No pixels are stored.
 module g6lc_apu_vgpu_sfc_fixture
   import g6lc_apu_pkg::*;
 #(

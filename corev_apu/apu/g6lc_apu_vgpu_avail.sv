@@ -7,6 +7,8 @@
 // are faults and do not consume the slot. Queue length is 8. This does
 // not follow a chain and does not read guest memory.
 
+// AvailDescriptor (avail): One avail-ring descriptor. Default-off. Not a descriptor chain.
+// Interplay: AvailDescriptor (avail) --? SceneChain (chn) --? GuestNextWalk (gnw). NEXT is a fault. See AGENTS-impl-interplays.md.
 module g6lc_apu_vgpu_avail
   import g6lc_apu_pkg::*;
 #(
@@ -123,6 +125,7 @@ module g6lc_apu_vgpu_avail
   end
 endmodule
 
+// AvailDescriptor (avail) enable-0 fixture: One avail-ring descriptor. Default-off. Not a descriptor chain.
 module g6lc_apu_vgpu_avail_fixture
   import g6lc_apu_pkg::*;
 #(

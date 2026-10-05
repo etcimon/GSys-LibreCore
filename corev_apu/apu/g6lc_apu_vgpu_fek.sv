@@ -4,6 +4,7 @@
 // Keep the submit type and the first execbuffer word. The buffer is
 // not here. A second store keeps the first.
 
+// SceneFetchKeep (fek): The submit type and the first command word.
 module g6lc_apu_vgpu_fek
   import g6lc_apu_pkg::*;
 #(
@@ -88,6 +89,7 @@ module g6lc_apu_vgpu_fek
   end
 endmodule
 
+// SceneFetchKeep (fek) enable-0 fixture: The submit type and the first command word.
 module g6lc_apu_vgpu_fek_fixture
   import g6lc_apu_pkg::*;
 #(

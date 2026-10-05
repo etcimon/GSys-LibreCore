@@ -9,6 +9,8 @@
 // Enable=0 keeps no table. This does not walk an avail ring and does not
 // raise an interrupt.
 
+// CmdPayloadDecode (proto): Virtio-gpu command payload decode. Default-off. Not a virtqueue walk.
+// Interplay: CmdPayloadDecode (proto) on the virtio command header. --? ApuSys. See AGENTS-impl-interplays.md.
 module g6lc_apu_vgpu_cmd
   import g6lc_apu_pkg::*;
 #(
@@ -143,6 +145,7 @@ module g6lc_apu_vgpu_cmd
   end
 endmodule
 
+// CmdPayloadDecode (proto) enable-0 fixture: Virtio-gpu command payload decode. Default-off. Not a virtqueue walk.
 module g6lc_apu_vgpu_cmd_fixture
   import g6lc_apu_pkg::*;
 #(

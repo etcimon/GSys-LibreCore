@@ -6,6 +6,7 @@
 // (0,3) sample. The image is not kept. A failed beat stops the walk;
 // the whole request can be repeated. TEX is not executed.
 
+// CeilingBeatRead (rdr): Read the 512 ceiling beats back.
 module g6lc_apu_vgpu_rdr
   import g6lc_apu_pkg::*;
 #(
@@ -160,6 +161,7 @@ module g6lc_apu_vgpu_rdr
   end
 endmodule
 
+// CeilingBeatRead (rdr) enable-0 fixture: Read the 512 ceiling beats back.
 module g6lc_apu_vgpu_rdr_fixture
   import g6lc_apu_pkg::*;
 #(

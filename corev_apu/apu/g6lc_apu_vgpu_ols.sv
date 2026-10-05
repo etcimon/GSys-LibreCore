@@ -8,6 +8,7 @@
 // g6lc_apu_vgpu_cap and not g6lc_apu_vgpu_nfo. FeatureVirgl stays off.
 // A failed beat stops the read; the request can be repeated.
 
+// OpcodeList (ols): Completed-opcode list. Default-off. The list is empty.
 module g6lc_apu_vgpu_ols
   import g6lc_apu_pkg::*;
 #(
@@ -176,6 +177,7 @@ module g6lc_apu_vgpu_ols
   end
 endmodule
 
+// OpcodeList (ols) enable-0 fixture: Completed-opcode list. Default-off. The list is empty.
 module g6lc_apu_vgpu_ols_fixture
   import g6lc_apu_pkg::*;
 #(

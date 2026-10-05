@@ -4,6 +4,7 @@
 // Keep (63,63). A second store keeps the first. The image is not
 // kept. The shader is not run.
 
+// ReadbackFarCornerKeep (tck): That offset and the channels.
 module g6lc_apu_vgpu_tck
   import g6lc_apu_pkg::*;
 #(
@@ -101,6 +102,7 @@ module g6lc_apu_vgpu_tck
   end
 endmodule
 
+// ReadbackFarCornerKeep (tck) enable-0 fixture: That offset and the channels.
 module g6lc_apu_vgpu_tck_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -5,6 +5,7 @@
 // filters, clamp-to-edge wrap, and no mip filter. max_lod is 32.0.
 // This does not sample the texture.
 
+// SamplerStateCreate (ss): The sampler state that follows the sampler view. Default-off. Not a texture sample.
 module g6lc_apu_vgpu_ss
   import g6lc_apu_pkg::*;
 #(
@@ -151,6 +152,7 @@ module g6lc_apu_vgpu_ss
   end
 endmodule
 
+// SamplerStateCreate (ss) enable-0 fixture: The sampler state that follows the sampler view.
 module g6lc_apu_vgpu_ss_fixture
   import g6lc_apu_pkg::*;
 #(

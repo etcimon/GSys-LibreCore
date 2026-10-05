@@ -7,6 +7,7 @@
 // point. This is later than g6lc_apu_vgpu_x6r. The image is not
 // kept. The shader is not run.
 
+// ReadbackFarCorner (tcr): (63,63) of the readback is byte 16380.
 module g6lc_apu_vgpu_tcr
   import g6lc_apu_pkg::*;
 #(
@@ -171,6 +172,7 @@ module g6lc_apu_vgpu_tcr
   end
 endmodule
 
+// ReadbackFarCorner (tcr) enable-0 fixture: (63,63) of the readback is byte 16380.
 module g6lc_apu_vgpu_tcr_fixture
   import g6lc_apu_pkg::*;
 #(

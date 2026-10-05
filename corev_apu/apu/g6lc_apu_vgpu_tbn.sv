@@ -5,6 +5,7 @@
 // state 6. Both are bound on fragment slot 0. A different handle
 // or resource records nothing. This does not fetch a texel.
 
+// TexBind (tbn): TEX bound to the sampler view and sampler state.
 module g6lc_apu_vgpu_tbn
   import g6lc_apu_pkg::*;
 #(
@@ -118,6 +119,7 @@ module g6lc_apu_vgpu_tbn
   end
 endmodule
 
+// TexBind (tbn) enable-0 fixture: TEX bound to the sampler view and sampler state.
 module g6lc_apu_vgpu_tbn_fixture
   import g6lc_apu_pkg::*;
 #(

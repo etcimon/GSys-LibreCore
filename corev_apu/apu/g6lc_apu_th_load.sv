@@ -5,6 +5,7 @@
 // rules + per-core boot PCs. Does not instantiate a CVA6. FeatureVirgl stays
 // illegal. FPGA/Altera maps do not use this module.
 
+// Interplay: TestharnessLoad --> FwRam + ApuXbar. See AGENTS-impl-interplays.md.
 module g6lc_apu_th_load
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

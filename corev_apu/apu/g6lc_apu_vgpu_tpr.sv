@@ -8,6 +8,7 @@
 // g6lc_apu_vgpu_ryr. No triangle is walked. The image is not kept.
 // The shader is not run.
 
+// ReadbackThreePoints (tpr): Three readback points, little-endian clear channels.
 module g6lc_apu_vgpu_tpr
   import g6lc_apu_pkg::*;
 #(
@@ -185,6 +186,7 @@ module g6lc_apu_vgpu_tpr
   end
 endmodule
 
+// ReadbackThreePoints (tpr) enable-0 fixture: Three readback points, little-endian clear channels.
 module g6lc_apu_vgpu_tpr_fixture
   import g6lc_apu_pkg::*;
 #(

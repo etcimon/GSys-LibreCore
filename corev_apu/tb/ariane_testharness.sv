@@ -132,6 +132,14 @@ module ariane_testharness #(
   // Driven from gen_ai_island when MatrixEn; idle otherwise.
   ariane_axi::req_t  ai_dma_req;
   ariane_axi::resp_t ai_dma_resp;
+`ifdef G6LC_APU
+  ariane_axi::req_t  apu_dma_req;
+  ariane_axi::resp_t apu_dma_rsp;
+`ifndef G6LC_AI_DRAM_ISLAND_PORT
+  ariane_axi::req_t  apu_dma_join_req;
+  ariane_axi::resp_t apu_dma_join_rsp;
+`endif
+`endif
 `ifdef G6LC_AI_DRAM_ISLAND_PORT
   // 512-bit island DMA on this define only. ai_dma_req stays the 64-bit
   // type the unset path assigns onto xbar slave[2].
@@ -191,7 +199,12 @@ module ariane_testharness #(
       ;
 `ifdef G6LC_AI_DRAM_ISLAND_PORT
   // Island DMA leaves the 64-bit xbar on a 512-bit port. slave[2] stays idle
-  // so the default address map is unchanged. The join is its only DRAM ingress.
+  // without G6LC_APU. With G6LC_APU the compositor DMA master takes this port
+  // (widths differ, so the 2:1 join is not used).
+`ifdef G6LC_APU
+  `AXI_ASSIGN_FROM_REQ(slave[2], apu_dma_req)
+  `AXI_ASSIGN_TO_RESP(apu_dma_rsp, slave[2])
+`else
   assign slave[2].aw_valid  = 1'b0;
   assign slave[2].aw_id     = '0;
   assign slave[2].aw_addr   = '0;
@@ -224,9 +237,28 @@ module ariane_testharness #(
   assign slave[2].ar_region = '0;
   assign slave[2].ar_user   = '0;
   assign slave[2].r_ready   = 1'b0;
+`endif
+`else
+`ifdef G6LC_APU
+  // Enable=1 so AI DMA still reaches slave[2]. ApuHarness.DmaReadEn=0 keeps
+  // the APU side idle. TdmaEn is the private TB grant and stays 0 on every
+  // profile. FeatureVirgl stays illegal.
+  g6lc_apu_tdma #(
+    .Enable(1'b1),
+    .axi_req_t(ariane_axi::req_t),
+    .axi_rsp_t(ariane_axi::resp_t)
+  ) i_apu_tdma (
+    .clk_i, .rst_ni(ndmreset_n),
+    .a_req_i(apu_dma_req), .a_rsp_o(apu_dma_rsp),
+    .b_req_i(ai_dma_req), .b_rsp_o(ai_dma_resp),
+    .mst_req_o(apu_dma_join_req), .mst_rsp_i(apu_dma_join_rsp)
+  );
+  `AXI_ASSIGN_FROM_REQ(slave[2], apu_dma_join_req)
+  `AXI_ASSIGN_TO_RESP(apu_dma_join_rsp, slave[2])
 `else
   `AXI_ASSIGN_FROM_REQ(slave[2], ai_dma_req)
   `AXI_ASSIGN_TO_RESP(ai_dma_resp, slave[2])
+`endif
 `endif
 
 `ifdef G6LC_APU
@@ -1190,7 +1222,9 @@ module ariane_testharness #(
     .HexFile("apu_fw.hex"),
     .NumSources(ariane_soc::NumSources),
     .axi4_req_t(ariane_axi_soc::req_slv_t),
-    .axi4_rsp_t(ariane_axi_soc::resp_slv_t)
+    .axi4_rsp_t(ariane_axi_soc::resp_slv_t),
+    .dma_req_t(ariane_axi::req_t),
+    .dma_rsp_t(ariane_axi::resp_t)
   ) i_apu_load (
     .clk_i, .rst_ni(ndmreset_n), .testmode_i(test_en),
     .guest_req_i(apu_guest_req), .guest_rsp_o(apu_guest_rsp),
@@ -1206,7 +1240,7 @@ module ariane_testharness #(
     .guest_rule_o(apu_guest_rule), .control_rule_o(apu_ctrl_rule),
     .ram_rule_o(apu_ram_rule),
     .dram_lo_rule_o(apu_dram_lo_rule), .dram_hi_rule_o(apu_dram_hi_rule),
-    .dma_req_o(), .dma_rsp_i('0),
+    .dma_req_o(apu_dma_req), .dma_rsp_i(apu_dma_rsp),
     .ram_fault_o(apu_ram_fault)
   );
   // Pad reset, not ndmreset_n: this output gates ndmreset_n.

@@ -8,6 +8,8 @@
 // the stride must be width*4. This is not g6lc_apu_frag, not a draw
 // command, and not the HDMI scanout buffer.
 
+// ResourceSurface (surf): One covered sample from the resource image. Default-off. Not a draw command and not the HDMI buffer.
+// Interplay: FragStore (frag) --? ResourceSurface (surf); packed-image sample. See AGENTS-impl-interplays.md.
 module g6lc_apu_rsurf
   import g6lc_apu_pkg::*;
 #(
@@ -171,6 +173,7 @@ module g6lc_apu_rsurf
   end
 endmodule
 
+// ResourceSurface (surf) enable-0 fixture: One covered sample from the resource image.
 module g6lc_apu_rsurf_fixture
   import g6lc_apu_pkg::*;
 #(

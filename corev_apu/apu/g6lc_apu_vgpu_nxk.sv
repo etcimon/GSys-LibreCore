@@ -5,6 +5,7 @@
 // A second store keeps the first. The descriptor bytes are not kept.
 // This is not g6lc_apu_vgpu_avail.
 
+// SceneChainGuestKeep (nxk): The head, the execbuffer, the response, and the avail index.
 module g6lc_apu_vgpu_nxk
   import g6lc_apu_pkg::*;
 #(
@@ -110,6 +111,7 @@ module g6lc_apu_vgpu_nxk
   end
 endmodule
 
+// SceneChainGuestKeep (nxk) enable-0 fixture: The head, the execbuffer, the response, and the avail index.
 module g6lc_apu_vgpu_nxk_fixture
   import g6lc_apu_pkg::*;
 #(

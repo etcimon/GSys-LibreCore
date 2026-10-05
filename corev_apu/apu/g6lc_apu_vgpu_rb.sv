@@ -5,6 +5,7 @@
 // names rasterizer handle 9. Fill stays both faces and cull stays
 // none. This does not walk a triangle.
 
+// RasterizerBind (rb): The rasterizer bind that follows the depth-stencil bind. Default-off. Not a triangle walk.
 module g6lc_apu_vgpu_rb
   import g6lc_apu_pkg::*;
 #(
@@ -138,6 +139,7 @@ module g6lc_apu_vgpu_rb
   end
 endmodule
 
+// RasterizerBind (rb) enable-0 fixture: The rasterizer bind that follows the depth-stencil bind.
 module g6lc_apu_vgpu_rb_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -4,6 +4,7 @@
 // GET_CAPSET for virgl capset id 1, version 1, after the info refusal.
 // The recorded answer is INVALID_PARAMETER. No capset blob is stored.
 
+// CapsetGet (cap): GET_CAPSET. Default-off. No capset blob.
 module g6lc_apu_vgpu_cap
   import g6lc_apu_pkg::*;
 #(
@@ -124,6 +125,7 @@ module g6lc_apu_vgpu_cap
   end
 endmodule
 
+// CapsetGet (cap) enable-0 fixture: GET_CAPSET. Default-off. No capset blob.
 module g6lc_apu_vgpu_cap_fixture
   import g6lc_apu_pkg::*;
 #(

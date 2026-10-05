@@ -4,6 +4,7 @@
 // Keep the origin texel and the blended neighbor at x = 1.
 // The origin must match the corner store. The neighbor is the half blend.
 
+// LinearBlendKeep (lnr): Origin texel and the blended neighbor.
 module g6lc_apu_vgpu_lnr
   import g6lc_apu_pkg::*;
 #(
@@ -91,6 +92,7 @@ module g6lc_apu_vgpu_lnr
   end
 endmodule
 
+// LinearBlendKeep (lnr) enable-0 fixture: Origin texel and the blended neighbor.
 module g6lc_apu_vgpu_lnr_fixture
   import g6lc_apu_pkg::*;
 #(

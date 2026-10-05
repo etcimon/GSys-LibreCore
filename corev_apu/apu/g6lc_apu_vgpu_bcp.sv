@@ -7,6 +7,7 @@
 // TEX is not executed. This is not g6lc_apu_vgpu_sxf and not
 // g6lc_apu_vgpu_xfer.
 
+// BandCopy (bcp): Band copy of resource 1. Default-off. Does not store the image.
 module g6lc_apu_vgpu_bcp
   import g6lc_apu_pkg::*;
 #(
@@ -159,6 +160,7 @@ module g6lc_apu_vgpu_bcp
   end
 endmodule
 
+// BandCopy (bcp) enable-0 fixture: Band copy of resource 1. Default-off. Does not store the image.
 module g6lc_apu_vgpu_bcp_fixture
   import g6lc_apu_pkg::*;
 #(

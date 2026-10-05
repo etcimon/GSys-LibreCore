@@ -4,6 +4,7 @@
 // The vertex inline write that follows the sampler-view set. The body
 // names resource 3 and 96 bytes. The floats stay in the buffer.
 
+// ResourceInlineWrite (iw): The vertex inline write that follows the sampler-view set. Default-off. The floats stay in the buffer.
 module g6lc_apu_vgpu_iw
   import g6lc_apu_pkg::*;
 #(
@@ -157,6 +158,7 @@ module g6lc_apu_vgpu_iw
   end
 endmodule
 
+// ResourceInlineWrite (iw) enable-0 fixture: The vertex inline write that follows the sampler-view set.
 module g6lc_apu_vgpu_iw_fixture
   import g6lc_apu_pkg::*;
 #(

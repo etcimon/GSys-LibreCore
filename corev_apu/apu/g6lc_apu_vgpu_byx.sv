@@ -4,6 +4,7 @@
 // The first raw byte is red, 8'h0D. A first byte of 8'hFF records
 // nothing. A second store keeps the first. The shader is not run.
 
+// ClearChannelsCheck (byx): Byte 0 is red.
 module g6lc_apu_vgpu_byx
   import g6lc_apu_pkg::*;
 #(
@@ -93,6 +94,7 @@ module g6lc_apu_vgpu_byx
   end
 endmodule
 
+// ClearChannelsCheck (byx) enable-0 fixture: Byte 0 is red.
 module g6lc_apu_vgpu_byx_fixture
   import g6lc_apu_pkg::*;
 #(

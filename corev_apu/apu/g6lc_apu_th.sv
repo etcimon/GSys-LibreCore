@@ -6,6 +6,7 @@
 // stays the AI island. Default-off. Not instantiated on the production
 // testharness xbar. FeatureVirgl stays illegal.
 
+// Interplay: ApuXbar --> TestharnessAttach(th) --> Axi4LiteAdapter + attach. See AGENTS-impl-interplays.md.
 module g6lc_apu_th
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

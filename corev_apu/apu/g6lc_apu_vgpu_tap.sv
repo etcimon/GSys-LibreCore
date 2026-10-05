@@ -6,6 +6,7 @@
 // clamp-to-edge linear uses this texel alone, and the word must match
 // the band copy. TEX is not executed.
 
+// ClampEdgeTap (tap): One clamp-edge texel from the copied band.
 module g6lc_apu_vgpu_tap
   import g6lc_apu_pkg::*;
 #(
@@ -183,6 +184,7 @@ module g6lc_apu_vgpu_tap
   end
 endmodule
 
+// ClampEdgeTap (tap) enable-0 fixture: One clamp-edge texel from the copied band.
 module g6lc_apu_vgpu_tap_fixture
   import g6lc_apu_pkg::*;
 #(

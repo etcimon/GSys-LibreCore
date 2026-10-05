@@ -6,6 +6,7 @@
 // (-1,-1), (1,-1), (-1,1), (1,1) with u,v at the same corners.
 // A mismatched float records nothing. This is not a transform.
 
+// QuadFloats (qd): The 24 vertex floats of the fullscreen strip.
 module g6lc_apu_vgpu_qd
   import g6lc_apu_pkg::*;
 #(
@@ -127,6 +128,7 @@ module g6lc_apu_vgpu_qd
   end
 endmodule
 
+// QuadFloats (qd) enable-0 fixture: The 24 vertex floats of the fullscreen strip.
 module g6lc_apu_vgpu_qd_fixture
   import g6lc_apu_pkg::*;
 #(

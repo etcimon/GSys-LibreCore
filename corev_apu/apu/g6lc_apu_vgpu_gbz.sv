@@ -4,6 +4,7 @@
 // Keep the byte offset and the lane. A second store keeps the first.
 // The image is not kept. The shader is not run.
 
+// ReadbackOffsetCheck (gbz): The offset and the lane.
 module g6lc_apu_vgpu_gbz
   import g6lc_apu_pkg::*;
 #(
@@ -94,6 +95,7 @@ module g6lc_apu_vgpu_gbz
   end
 endmodule
 
+// ReadbackOffsetCheck (gbz) enable-0 fixture: The offset and the lane.
 module g6lc_apu_vgpu_gbz_fixture
   import g6lc_apu_pkg::*;
 #(

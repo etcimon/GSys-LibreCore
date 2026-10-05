@@ -4,6 +4,7 @@
 // Read the lane at the byte offset of one readback point. The lane
 // is the clear word. The image is not kept. The shader is not run.
 
+// ReadbackOffsetLane (gbo): The lane at that offset.
 module g6lc_apu_vgpu_gbo
   import g6lc_apu_pkg::*;
 #(
@@ -165,6 +166,7 @@ module g6lc_apu_vgpu_gbo
   end
 endmodule
 
+// ReadbackOffsetLane (gbo) enable-0 fixture: The lane at that offset.
 module g6lc_apu_vgpu_gbo_fixture
   import g6lc_apu_pkg::*;
 #(

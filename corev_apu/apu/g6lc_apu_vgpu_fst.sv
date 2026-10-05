@@ -5,6 +5,7 @@
 // TEX program, starting at byte 200. A mismatched dword records
 // nothing. TEX is not executed.
 
+// FragTgsiText (fst): Fragment-shader TGSI text. Default-off. TEX is not executed.
 module g6lc_apu_vgpu_fst
   import g6lc_apu_pkg::*;
 #(
@@ -163,6 +164,7 @@ module g6lc_apu_vgpu_fst
   end
 endmodule
 
+// FragTgsiText (fst) enable-0 fixture: Fragment-shader TGSI text. Default-off. TEX is not executed.
 module g6lc_apu_vgpu_fst_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -5,6 +5,7 @@
 // formats. A second store keeps the first. The divisor words are not
 // kept. No vertices are fetched.
 
+// VertexElementObjectReadKeep (vce): The header, the handle, and the two element offsets and formats.
 module g6lc_apu_vgpu_vce
   import g6lc_apu_pkg::*;
 #(
@@ -118,6 +119,7 @@ module g6lc_apu_vgpu_vce
   end
 endmodule
 
+// VertexElementObjectReadKeep (vce) enable-0 fixture: The header, the handle, and the two element offsets and formats.
 module g6lc_apu_vgpu_vce_fixture
   import g6lc_apu_pkg::*;
 #(

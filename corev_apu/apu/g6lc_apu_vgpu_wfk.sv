@@ -5,6 +5,7 @@
 // scan. A second store keeps the first. The image is not kept.
 // The shader is not run.
 
+// ClearWindowScanKeep (wfk): The clear word at (0,0), (1,0), and (63,63).
 module g6lc_apu_vgpu_wfk
   import g6lc_apu_pkg::*;
 #(
@@ -99,6 +100,7 @@ module g6lc_apu_vgpu_wfk
   end
 endmodule
 
+// ClearWindowScanKeep (wfk) enable-0 fixture: The clear word at (0,0), (1,0), and (63,63).
 module g6lc_apu_vgpu_wfk_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -5,6 +5,7 @@
 // 8'hFF records nothing. A second store keeps the first.
 // The shader is not run.
 
+// ReadbackThreePointsCheck (tpx): Byte 0 of (0,63) is red, not blue.
 module g6lc_apu_vgpu_tpx
   import g6lc_apu_pkg::*;
 #(
@@ -107,6 +108,7 @@ module g6lc_apu_vgpu_tpx
   end
 endmodule
 
+// ReadbackThreePointsCheck (tpx) enable-0 fixture: Byte 0 of (0,63) is red, not blue.
 module g6lc_apu_vgpu_tpx_fixture
   import g6lc_apu_pkg::*;
 #(

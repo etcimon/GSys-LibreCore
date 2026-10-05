@@ -5,6 +5,7 @@
 // A 64 by 64 rectangle and resource 4 record nothing. Nothing is
 // presented. This is not g6lc_apu_vgpu_scn and not g6lc_hdmi_scanout.
 
+// ScanScanout (ssc): SET_SCANOUT of resource 1. Default-off. Does not present.
 module g6lc_apu_vgpu_ssc
   import g6lc_apu_pkg::*;
 #(
@@ -142,6 +143,7 @@ module g6lc_apu_vgpu_ssc
   end
 endmodule
 
+// ScanScanout (ssc) enable-0 fixture: SET_SCANOUT of resource 1. Default-off. Does not present.
 module g6lc_apu_vgpu_ssc_fixture
   import g6lc_apu_pkg::*;
 #(

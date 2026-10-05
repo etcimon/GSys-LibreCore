@@ -13,6 +13,8 @@
 // 0, 0.5, and 1 are different pixels. Any other program is a fault.
 // Enable=0 stores nothing. This is not the HDMI scanout buffer.
 
+// FragStore (frag): Interpolated RGBA8 store of one covered sample.
+// Interplay: CoverSample (cover) <-> FragStore (frag) --? ResourceSurface (surf). See AGENTS-impl-interplays.md.
 module g6lc_apu_frag
   import g6lc_apu_pkg::*;
 #(
@@ -385,6 +387,7 @@ module g6lc_apu_frag
   end
 endmodule
 
+// FragStore (frag) enable-0 fixture: Interpolated RGBA8 store of one covered sample.
 module g6lc_apu_frag_fixture
   import g6lc_apu_pkg::*;
 #(

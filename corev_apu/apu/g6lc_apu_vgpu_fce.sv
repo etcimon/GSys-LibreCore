@@ -5,6 +5,7 @@
 // and first text dword. A second store keeps the first. The rest of the
 // text is not kept. The shader is not run.
 
+// FragShaderObjectReadKeep (fce): The header, the handle, the stage, the length, the tokens, and text0.
 module g6lc_apu_vgpu_fce
   import g6lc_apu_pkg::*;
 #(
@@ -121,6 +122,7 @@ module g6lc_apu_vgpu_fce
   end
 endmodule
 
+// FragShaderObjectReadKeep (fce) enable-0 fixture: The header, the handle, the stage, the length, the tokens, and text0.
 module g6lc_apu_vgpu_fce_fixture
   import g6lc_apu_pkg::*;
 #(

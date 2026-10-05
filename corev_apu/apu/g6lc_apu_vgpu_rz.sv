@@ -5,6 +5,7 @@
 // eight state words are 0: fill both faces and cull none. This does
 // not walk a triangle.
 
+// RasterizerCreate (rz): The rasterizer object that follows the depth-stencil object. Default-off. Not a triangle walk.
 module g6lc_apu_vgpu_rz
   import g6lc_apu_pkg::*;
 #(
@@ -147,6 +148,7 @@ module g6lc_apu_vgpu_rz
   end
 endmodule
 
+// RasterizerCreate (rz) enable-0 fixture: The rasterizer object that follows the depth-stencil object.
 module g6lc_apu_vgpu_rz_fixture
   import g6lc_apu_pkg::*;
 #(

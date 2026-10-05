@@ -5,6 +5,7 @@
 // The word stays the clear color. A sample outside the ceiling
 // records nothing. This does not fetch a texel.
 
+// TexRefusedRead (dnr): One refused sample. Default-off. The color stays the clear.
 module g6lc_apu_vgpu_dnr
   import g6lc_apu_pkg::*;
 #(
@@ -89,6 +90,7 @@ module g6lc_apu_vgpu_dnr
   end
 endmodule
 
+// TexRefusedRead (dnr) enable-0 fixture: One refused sample. Default-off. The color stays the clear.
 module g6lc_apu_vgpu_dnr_fixture
   import g6lc_apu_pkg::*;
 #(

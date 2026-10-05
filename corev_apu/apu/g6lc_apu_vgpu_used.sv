@@ -8,6 +8,8 @@
 // does not raise IRQ. Queue length is 8. This does not read an avail ring
 // and does not write guest memory.
 
+// UsedPublish (used): Local used-element publication and its interrupt.
+// Interplay: UsedPublish (used) --? UsedGuestWrite (uwr) --? UsedIndexStore (uidx). See AGENTS-impl-interplays.md.
 module g6lc_apu_vgpu_used
   import g6lc_apu_pkg::*;
 #(
@@ -128,6 +130,7 @@ module g6lc_apu_vgpu_used
   end
 endmodule
 
+// UsedPublish (used) enable-0 fixture: Local used-element publication and its interrupt.
 module g6lc_apu_vgpu_used_fixture
   import g6lc_apu_pkg::*;
 #(

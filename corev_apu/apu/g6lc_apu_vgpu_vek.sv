@@ -4,6 +4,7 @@
 // Keep the vertex-element header and handle. A second store keeps
 // the first. No vertices are fetched.
 
+// VertexElementBindReadKeep (vek): The header and the handle.
 module g6lc_apu_vgpu_vek
   import g6lc_apu_pkg::*;
 #(
@@ -104,6 +105,7 @@ module g6lc_apu_vgpu_vek
   end
 endmodule
 
+// VertexElementBindReadKeep (vek) enable-0 fixture: The header and the handle.
 module g6lc_apu_vgpu_vek_fixture
   import g6lc_apu_pkg::*;
 #(

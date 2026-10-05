@@ -7,6 +7,7 @@
 // read writes nothing. This does not drive the viw pin and it is not
 // PLIC source 9. The shader is not run.
 
+// UsedAck (vaw): Guest ack of the used-buffer reason.
 module g6lc_apu_vgpu_vaw
   import g6lc_apu_pkg::*;
 #(
@@ -179,6 +180,7 @@ module g6lc_apu_vgpu_vaw
   end
 endmodule
 
+// UsedAck (vaw) enable-0 fixture: Guest ack of the used-buffer reason.
 module g6lc_apu_vgpu_vaw_fixture
   import g6lc_apu_pkg::*;
 #(

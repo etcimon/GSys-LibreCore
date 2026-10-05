@@ -10,6 +10,7 @@
 // g6lc_apu_vgpu_avail. A failed beat stops the read; the request can
 // be repeated. TEX is not executed.
 
+// FragShaderBindRead (fsr): Fragment shader bind of the fetched draw.
 module g6lc_apu_vgpu_fsr
   import g6lc_apu_pkg::*;
 #(
@@ -205,6 +206,7 @@ module g6lc_apu_vgpu_fsr
   end
 endmodule
 
+// FragShaderBindRead (fsr) enable-0 fixture: Fragment shader bind of the fetched draw.
 module g6lc_apu_vgpu_fsr_fixture
   import g6lc_apu_pkg::*;
 #(

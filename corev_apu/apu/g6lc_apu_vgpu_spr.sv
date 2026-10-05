@@ -5,6 +5,7 @@
 // The word stays the clear color. The address is y * 256 + x * 4.
 // This does not present a frame and does not copy a texel.
 
+// ScanUnpresentedSample (spr): One sample while that scanout is unpresented.
 module g6lc_apu_vgpu_spr
   import g6lc_apu_pkg::*;
 #(
@@ -94,6 +95,7 @@ module g6lc_apu_vgpu_spr
   end
 endmodule
 
+// ScanUnpresentedSample (spr) enable-0 fixture: One sample while that scanout is unpresented.
 module g6lc_apu_vgpu_spr_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -3,6 +3,7 @@
 
 // Keep the two y = 1 samples. x = 0 first, then x = 1.
 
+// VerticalBlendKeep (vlr): The y = 1 samples at x = 0 and x = 1.
 module g6lc_apu_vgpu_vlr
   import g6lc_apu_pkg::*;
 #(
@@ -88,6 +89,7 @@ module g6lc_apu_vgpu_vlr
   end
 endmodule
 
+// VerticalBlendKeep (vlr) enable-0 fixture: The y = 1 samples at x = 0 and x = 1.
 module g6lc_apu_vgpu_vlr_fixture
   import g6lc_apu_pkg::*;
 #(

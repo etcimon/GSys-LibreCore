@@ -4,6 +4,7 @@
 // Keep the stride, the offset, and the resource. A second store
 // keeps the first. This does not fetch vertices.
 
+// VertexBufferReadKeep (vbk): The stride, the offset, and the resource.
 module g6lc_apu_vgpu_vbk
   import g6lc_apu_pkg::*;
 #(
@@ -97,6 +98,7 @@ module g6lc_apu_vgpu_vbk
   end
 endmodule
 
+// VertexBufferReadKeep (vbk) enable-0 fixture: The stride, the offset, and the resource.
 module g6lc_apu_vgpu_vbk_fixture
   import g6lc_apu_pkg::*;
 #(

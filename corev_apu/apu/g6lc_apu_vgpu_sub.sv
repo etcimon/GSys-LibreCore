@@ -7,6 +7,7 @@
 // memory. This unit does not read the execbuffer or write the response.
 // A second submit does not replace the first. This is not a draw.
 
+// Submit3dChain (sub): One SUBMIT_3D three-descriptor chain. Default-off. Reads the 32-byte header only. Not the execbuffer and not a draw.
 module g6lc_apu_vgpu_sub
   import g6lc_apu_pkg::*;
 #(
@@ -209,6 +210,7 @@ module g6lc_apu_vgpu_sub
   end
 endmodule
 
+// Submit3dChain (sub) enable-0 fixture: One SUBMIT_3D three-descriptor chain. Default-off. Reads the.
 module g6lc_apu_vgpu_sub_fixture
   import g6lc_apu_pkg::*;
 #(

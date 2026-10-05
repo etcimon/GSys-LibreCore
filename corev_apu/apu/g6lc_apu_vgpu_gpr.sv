@@ -6,6 +6,7 @@
 // in guest memory. This is not g6lc_apu_vgpu_frd and not
 // g6lc_apu_vgpu_pxr. The shader is not run. This is not the screenshot.
 
+// ClearWindowRead (gpr): First and last beats of that window.
 module g6lc_apu_vgpu_gpr
   import g6lc_apu_pkg::*;
 #(
@@ -162,6 +163,7 @@ module g6lc_apu_vgpu_gpr
   end
 endmodule
 
+// ClearWindowRead (gpr) enable-0 fixture: First and last beats of that window.
 module g6lc_apu_vgpu_gpr_fixture
   import g6lc_apu_pkg::*;
 #(

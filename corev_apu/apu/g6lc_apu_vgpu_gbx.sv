@@ -4,6 +4,7 @@
 // Keep the 64 by 64 rectangle and the sampled lane. A second store
 // keeps the first. The image is not kept. The shader is not run.
 
+// ReadbackRectCheck (gbx): The rectangle and the sampled lane.
 module g6lc_apu_vgpu_gbx
   import g6lc_apu_pkg::*;
 #(
@@ -97,6 +98,7 @@ module g6lc_apu_vgpu_gbx
   end
 endmodule
 
+// ReadbackRectCheck (gbx) enable-0 fixture: The rectangle and the sampled lane.
 module g6lc_apu_vgpu_gbx_fixture
   import g6lc_apu_pkg::*;
 #(

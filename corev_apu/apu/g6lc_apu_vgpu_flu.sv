@@ -4,6 +4,7 @@
 // RESOURCE_FLUSH of the recorded scanout: resource 4, 640 by 480.
 // A 64 by 64 rectangle records nothing. This does not present a frame.
 
+// ResourceFlush (flu): RESOURCE_FLUSH of that scanout. Default-off. Not a present.
 module g6lc_apu_vgpu_flu
   import g6lc_apu_pkg::*;
 #(
@@ -126,6 +127,7 @@ module g6lc_apu_vgpu_flu
   end
 endmodule
 
+// ResourceFlush (flu) enable-0 fixture: RESOURCE_FLUSH of that scanout. Default-off. Not a present.
 module g6lc_apu_vgpu_flu_fixture
   import g6lc_apu_pkg::*;
 #(

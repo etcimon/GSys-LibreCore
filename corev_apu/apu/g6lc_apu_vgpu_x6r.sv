@@ -6,6 +6,7 @@
 // than g6lc_apu_vgpu_tpr. (0,63) is byte 16128 and is not this point.
 // The image is not kept. The shader is not run.
 
+// ReadbackX63 (x6r): (63,0) of the readback is byte 252.
 module g6lc_apu_vgpu_x6r
   import g6lc_apu_pkg::*;
 #(
@@ -165,6 +166,7 @@ module g6lc_apu_vgpu_x6r
   end
 endmodule
 
+// ReadbackX63 (x6r) enable-0 fixture: (63,0) of the readback is byte 252.
 module g6lc_apu_vgpu_x6r_fixture
   import g6lc_apu_pkg::*;
 #(

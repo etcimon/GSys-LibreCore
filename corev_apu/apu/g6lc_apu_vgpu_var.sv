@@ -5,6 +5,7 @@
 // 64'h8800E500. The ack low word stays 32'h1. The status low word is
 // 32'h0. Upper bytes are not part of the check. The shader is not run.
 
+// UsedAckRead (var): The ack word and the cleared status read back.
 module g6lc_apu_vgpu_var
   import g6lc_apu_pkg::*;
 #(
@@ -162,6 +163,7 @@ module g6lc_apu_vgpu_var
   end
 endmodule
 
+// UsedAckRead (var) enable-0 fixture: The ack word and the cleared status read back.
 module g6lc_apu_vgpu_var_fixture
   import g6lc_apu_pkg::*;
 #(

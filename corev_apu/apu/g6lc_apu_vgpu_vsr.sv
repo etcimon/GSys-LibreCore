@@ -10,6 +10,7 @@
 // g6lc_apu_vgpu_avail. A failed beat stops the read; the request
 // can be repeated. TEX is not executed.
 
+// VertexShaderBindRead (vsr): Vertex shader bind of the fetched draw.
 module g6lc_apu_vgpu_vsr
   import g6lc_apu_pkg::*;
 #(
@@ -213,6 +214,7 @@ module g6lc_apu_vgpu_vsr
   end
 endmodule
 
+// VertexShaderBindRead (vsr) enable-0 fixture: Vertex shader bind of the fetched draw.
 module g6lc_apu_vgpu_vsr_fixture
   import g6lc_apu_pkg::*;
 #(

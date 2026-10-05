@@ -11,6 +11,7 @@
 // g6lc_apu_vgpu_avail. A failed beat stops the read; the request
 // can be repeated. TEX is not executed.
 
+// SamplerStateRead (ssr): Sampler state of the fetched draw.
 module g6lc_apu_vgpu_ssr
   import g6lc_apu_pkg::*;
 #(
@@ -201,6 +202,7 @@ module g6lc_apu_vgpu_ssr
   end
 endmodule
 
+// SamplerStateRead (ssr) enable-0 fixture: Sampler state of the fetched draw.
 module g6lc_apu_vgpu_ssr_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -4,6 +4,7 @@
 // Report the copied band word beside the clear color. The scene word
 // stays the clear. TEX is not executed.
 
+// BandCopiedWord (bcr): One copied word beside the clear. Default-off. TEX is not executed.
 module g6lc_apu_vgpu_bcr
   import g6lc_apu_pkg::*;
 #(
@@ -81,6 +82,7 @@ module g6lc_apu_vgpu_bcr
   end
 endmodule
 
+// BandCopiedWord (bcr) enable-0 fixture: One copied word beside the clear. Default-off. TEX is not executed.
 module g6lc_apu_vgpu_bcr_fixture
   import g6lc_apu_pkg::*;
 #(

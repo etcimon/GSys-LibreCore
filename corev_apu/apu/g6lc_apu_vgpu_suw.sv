@@ -7,6 +7,7 @@
 // replace the first. This is not g6lc_apu_vgpu_uwr and it is not the
 // element at 64'h8800_3000.
 
+// SceneUsedWrite (suw): Guest store of that element. Default-off. Not the CREATE_2D element.
 module g6lc_apu_vgpu_suw
   import g6lc_apu_pkg::*;
 #(
@@ -121,6 +122,7 @@ module g6lc_apu_vgpu_suw
   end
 endmodule
 
+// SceneUsedWrite (suw) enable-0 fixture: Guest store of that element. Default-off. Not the CREATE_2D element.
 module g6lc_apu_vgpu_suw_fixture
   import g6lc_apu_pkg::*;
 #(

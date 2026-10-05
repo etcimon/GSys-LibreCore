@@ -7,6 +7,7 @@
 // half up per byte. y = 0 and y above 1 record nothing. TEX is not
 // executed.
 
+// VerticalBlend (vln): Vertical blend of row 0 and row 1.
 module g6lc_apu_vgpu_vln
   import g6lc_apu_pkg::*;
 #(
@@ -161,6 +162,7 @@ module g6lc_apu_vgpu_vln
   end
 endmodule
 
+// VerticalBlend (vln) enable-0 fixture: Vertical blend of row 0 and row 1.
 module g6lc_apu_vgpu_vln_fixture
   import g6lc_apu_pkg::*;
 #(

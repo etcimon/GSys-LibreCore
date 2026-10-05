@@ -4,6 +4,7 @@
 // Keep the sampler-state stage, slot, and handle. A second store
 // keeps the first. No texture is bound.
 
+// SamplerStateReadKeep (ssk): The stage, the slot, and the handle.
 module g6lc_apu_vgpu_ssk
   import g6lc_apu_pkg::*;
 #(
@@ -106,6 +107,7 @@ module g6lc_apu_vgpu_ssk
   end
 endmodule
 
+// SamplerStateReadKeep (ssk) enable-0 fixture: The stage, the slot, and the handle.
 module g6lc_apu_vgpu_ssk_fixture
   import g6lc_apu_pkg::*;
 #(

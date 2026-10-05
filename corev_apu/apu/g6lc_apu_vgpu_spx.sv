@@ -3,6 +3,7 @@
 
 // Keep the x = 8 sample. The origin and the x = 1 blend stay put.
 
+// SpanSample (spx): The spanned sample at x = 8.
 module g6lc_apu_vgpu_spx
   import g6lc_apu_pkg::*;
 #(
@@ -83,6 +84,7 @@ module g6lc_apu_vgpu_spx
   end
 endmodule
 
+// SpanSample (spx) enable-0 fixture: The spanned sample at x = 8.
 module g6lc_apu_vgpu_spx_fixture
   import g6lc_apu_pkg::*;
 #(

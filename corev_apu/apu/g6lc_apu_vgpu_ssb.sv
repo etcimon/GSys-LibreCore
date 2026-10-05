@@ -4,6 +4,7 @@
 // The sampler-state bind that follows the vertex-elements bind. Fragment
 // slot 0 names sampler-state handle 6. This does not sample a texture.
 
+// SamplerStateBind (ssb): The sampler-state bind that follows the vertex-elements bind. Default-off. Not a texture sample.
 module g6lc_apu_vgpu_ssb
   import g6lc_apu_pkg::*;
 #(
@@ -146,6 +147,7 @@ module g6lc_apu_vgpu_ssb
   end
 endmodule
 
+// SamplerStateBind (ssb) enable-0 fixture: The sampler-state bind that follows the vertex-elements bind.
 module g6lc_apu_vgpu_ssb_fixture
   import g6lc_apu_pkg::*;
 #(

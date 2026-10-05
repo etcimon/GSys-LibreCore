@@ -5,6 +5,7 @@
 // 0,0,640 by 64, the top band, not the full frame and not the 64 by 64
 // ceiling. No byte is copied. The refused clear word stays in place.
 
+// ScanBandTransfer (sxf): The 64-row transfer of that resource. Default-off. No bytes are copied.
 module g6lc_apu_vgpu_sxf
   import g6lc_apu_pkg::*;
 #(
@@ -151,6 +152,7 @@ module g6lc_apu_vgpu_sxf
   end
 endmodule
 
+// ScanBandTransfer (sxf) enable-0 fixture: The 64-row transfer of that resource. Default-off. No bytes are copied.
 module g6lc_apu_vgpu_sxf_fixture
   import g6lc_apu_pkg::*;
 #(

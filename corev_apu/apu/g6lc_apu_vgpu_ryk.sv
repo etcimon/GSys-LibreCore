@@ -4,6 +4,7 @@
 // Keep the row-1 channels and the B8G8R8X8 tag. A second store keeps
 // the first. The image is not kept. The shader is not run.
 
+// ReadbackRow1Keep (ryk): The row channels and the format tag.
 module g6lc_apu_vgpu_ryk
   import g6lc_apu_pkg::*;
 #(
@@ -95,6 +96,7 @@ module g6lc_apu_vgpu_ryk
   end
 endmodule
 
+// ReadbackRow1Keep (ryk) enable-0 fixture: The row channels and the format tag.
 module g6lc_apu_vgpu_ryk_fixture
   import g6lc_apu_pkg::*;
 #(

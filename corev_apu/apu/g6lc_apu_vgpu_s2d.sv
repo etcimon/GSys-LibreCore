@@ -5,6 +5,7 @@
 // A 64-wide image and format 67 record nothing. No pixels are stored.
 // This is not g6lc_apu_vgpu_cmd.
 
+// ScanCreate2d (s2d): VioScan CREATE_2D for resource 1. Default-off. Not the 64 by 64 create.
 module g6lc_apu_vgpu_s2d
   import g6lc_apu_pkg::*;
 #(
@@ -134,6 +135,7 @@ module g6lc_apu_vgpu_s2d
   end
 endmodule
 
+// ScanCreate2d (s2d) enable-0 fixture: VioScan CREATE_2D for resource 1. Default-off. Not the 64 by 64 create.
 module g6lc_apu_vgpu_s2d_fixture
   import g6lc_apu_pkg::*;
 #(

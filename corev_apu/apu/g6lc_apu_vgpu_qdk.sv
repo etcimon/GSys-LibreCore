@@ -5,6 +5,7 @@
 // The 24 floats are not here. A second store keeps the first. This
 // does not transform a vertex.
 
+// NdcFloatsKeep (qdk): The first float and the last float.
 module g6lc_apu_vgpu_qdk
   import g6lc_apu_pkg::*;
 #(
@@ -96,6 +97,7 @@ module g6lc_apu_vgpu_qdk
   end
 endmodule
 
+// NdcFloatsKeep (qdk) enable-0 fixture: The first float and the last float.
 module g6lc_apu_vgpu_qdk_fixture
   import g6lc_apu_pkg::*;
 #(

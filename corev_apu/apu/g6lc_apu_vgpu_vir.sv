@@ -5,6 +5,7 @@
 // is 32'h1. Upper bytes are not part of the check. The pin may already
 // have been acknowledged. The shader is not run.
 
+// UsedIrqRead (vir): The interrupt reason read back.
 module g6lc_apu_vgpu_vir
   import g6lc_apu_pkg::*;
 #(
@@ -145,6 +146,7 @@ module g6lc_apu_vgpu_vir
   end
 endmodule
 
+// UsedIrqRead (vir) enable-0 fixture: The interrupt reason read back.
 module g6lc_apu_vgpu_vir_fixture
   import g6lc_apu_pkg::*;
 #(

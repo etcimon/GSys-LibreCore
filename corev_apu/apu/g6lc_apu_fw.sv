@@ -5,6 +5,7 @@
 // EXEC_IMEM/POKE/PEEK/RUN. No DRAM DMA in this wrapper. Default-off.
 // Not on the production testharness xbar. FeatureVirgl stays illegal.
 
+// Interplay: resident image path: AxiLiteTransport --> Mailbox --> ExecBind. See AGENTS-impl-interplays.md.
 module g6lc_apu_fw
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

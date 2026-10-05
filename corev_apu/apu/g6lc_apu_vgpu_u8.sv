@@ -6,6 +6,7 @@
 // records nothing. This is not a general float converter and it does
 // not store a pixel.
 
+// ClearToRgba8 (u8): Clear floats to RGBA8 bytes. Default-off. Not a general converter.
 module g6lc_apu_vgpu_u8
   import g6lc_apu_pkg::*;
 #(
@@ -93,6 +94,7 @@ module g6lc_apu_vgpu_u8
   end
 endmodule
 
+// ClearToRgba8 (u8) enable-0 fixture: Clear floats to RGBA8 bytes. Default-off. Not a general converter.
 module g6lc_apu_vgpu_u8_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -7,6 +7,7 @@
 // the production testharness flist until +define+G6LC_APU. FeatureVirgl
 // stays illegal.
 
+// Interplay: TestharnessLoad --> ApuXbar --> TestharnessAttach. Opt-in G6LC_APU. See AGENTS-impl-interplays.md.
 module g6lc_apu_xbar
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

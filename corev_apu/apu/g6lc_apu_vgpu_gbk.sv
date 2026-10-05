@@ -5,6 +5,7 @@
 // A second store keeps the first. The image is not kept.
 // The shader is not run.
 
+// ReadbackCopyKeep (gbk): The clear word, the source, and the readback address.
 module g6lc_apu_vgpu_gbk
   import g6lc_apu_pkg::*;
 #(
@@ -99,6 +100,7 @@ module g6lc_apu_vgpu_gbk
   end
 endmodule
 
+// ReadbackCopyKeep (gbk) enable-0 fixture: The clear word, the source, and the readback address.
 module g6lc_apu_vgpu_gbk_fixture
   import g6lc_apu_pkg::*;
 #(

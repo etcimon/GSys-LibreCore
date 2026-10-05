@@ -8,6 +8,8 @@
 // copied onto the fragment record and is not a function of the triangle.
 // Enable=0 elaborates no datapath. This is not a rasterizer and not a surface.
 
+// CoverSample (cover): One-sample triangle coverage. Default-off. Does not paint, sample, or advertise virgl.
+// Interplay: CoverSample (cover) --? FragStore (frag) --? ApuSys. Lab triangle. See AGENTS-impl-interplays.md.
 module g6lc_apu_cover
   import g6lc_apu_pkg::*;
 #(
@@ -128,6 +130,7 @@ module g6lc_apu_cover
   end
 endmodule
 
+// CoverSample (cover) enable-0 fixture: One-sample triangle coverage. Default-off. Does not paint, sample,.
 module g6lc_apu_cover_fixture
   import g6lc_apu_pkg::*;
 #(

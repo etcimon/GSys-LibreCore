@@ -4,6 +4,7 @@
 // Keep the four channels of the clear word. A second store keeps
 // the first. The image is not kept. The shader is not run.
 
+// ClearChannelsKeep (byk): The four channels.
 module g6lc_apu_vgpu_byk
   import g6lc_apu_pkg::*;
 #(
@@ -91,6 +92,7 @@ module g6lc_apu_vgpu_byk
   end
 endmodule
 
+// ClearChannelsKeep (byk) enable-0 fixture: The four channels.
 module g6lc_apu_vgpu_byk_fixture
   import g6lc_apu_pkg::*;
 #(

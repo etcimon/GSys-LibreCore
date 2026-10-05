@@ -4,6 +4,7 @@
 // Three CTX_ATTACH records: resource 4, resource 3, then resource 1.
 // This does not map guest memory.
 
+// ContextAttach (att): The three CTX_ATTACH records. Default-off. Not a guest mapping.
 module g6lc_apu_vgpu_att
   import g6lc_apu_pkg::*;
 #(
@@ -129,6 +130,7 @@ module g6lc_apu_vgpu_att
   end
 endmodule
 
+// ContextAttach (att) enable-0 fixture: The three CTX_ATTACH records. Default-off. Not a guest mapping.
 module g6lc_apu_vgpu_att_fixture
   import g6lc_apu_pkg::*;
 #(

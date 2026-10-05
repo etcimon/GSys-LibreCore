@@ -10,6 +10,7 @@
 // beat stops the read; the request can be repeated. TEX is not
 // executed.
 
+// VertexElementBindRead (ver): Vertex-element bind of the fetched draw.
 module g6lc_apu_vgpu_ver
   import g6lc_apu_pkg::*;
 #(
@@ -199,6 +200,7 @@ module g6lc_apu_vgpu_ver
   end
 endmodule
 
+// VertexElementBindRead (ver) enable-0 fixture: Vertex-element bind of the fetched draw.
 module g6lc_apu_vgpu_ver_fixture
   import g6lc_apu_pkg::*;
 #(

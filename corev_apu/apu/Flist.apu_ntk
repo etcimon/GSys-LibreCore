@@ -1,0 +1,25 @@
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// notify_pending[0] consumes QueuePump. Not on the testharness flist.
+
++incdir+${CVA6_REPO_DIR}/corev_apu/apu/include
+${CVA6_REPO_DIR}/core/include/config_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/include/g6lc_apu_cfg_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_chain.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_avn.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_spirv.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vnenc.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vnd.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_gnh.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_hrn.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_rdn.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_qrn.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vcap.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_gcs.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_qcm.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_qty.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vct.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_qpu.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_ntk.sv

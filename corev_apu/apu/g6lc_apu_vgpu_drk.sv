@@ -5,6 +5,7 @@
 // execbuffer is not here. A second store keeps the first. The draw
 // is not executed.
 
+// DrawVboReadKeep (drk): The vertex count and the triangle-strip primitive.
 module g6lc_apu_vgpu_drk
   import g6lc_apu_pkg::*;
 #(
@@ -92,6 +93,7 @@ module g6lc_apu_vgpu_drk
   end
 endmodule
 
+// DrawVboReadKeep (drk) enable-0 fixture: The vertex count and the triangle-strip primitive.
 module g6lc_apu_vgpu_drk_fixture
   import g6lc_apu_pkg::*;
 #(

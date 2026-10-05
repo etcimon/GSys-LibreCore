@@ -5,6 +5,7 @@
 // offset is y * 256 + x * 4. x or y of 64 records nothing.
 // The image is not kept. The shader is not run.
 
+// ReadbackOffset (gof): Byte offset of one point in that rectangle.
 module g6lc_apu_vgpu_gof
   import g6lc_apu_pkg::*;
 #(
@@ -104,6 +105,7 @@ module g6lc_apu_vgpu_gof
   end
 endmodule
 
+// ReadbackOffset (gof) enable-0 fixture: Byte offset of one point in that rectangle.
 module g6lc_apu_vgpu_gof_fixture
   import g6lc_apu_pkg::*;
 #(

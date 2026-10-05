@@ -3,6 +3,7 @@
 //
 // The viewport that follows the scissor. Scale is half of 640 by 480. This is not a transform.
 
+// ViewportSet (vp): The viewport that follows the scissor.
 module g6lc_apu_vgpu_vp
   import g6lc_apu_pkg::*;
 #(
@@ -145,6 +146,7 @@ module g6lc_apu_vgpu_vp
   end
 endmodule
 
+// ViewportSet (vp) enable-0 fixture: The viewport that follows the scissor.
 module g6lc_apu_vgpu_vp_fixture
   import g6lc_apu_pkg::*;
 #(

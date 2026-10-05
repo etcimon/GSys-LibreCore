@@ -7,6 +7,8 @@
 // uniform BR, and a horizontal quad exchange. Default-off. Not a rasterizer
 // or EGL.
 
+// ExecCluster (exec): Native execution cluster: one physical FP32/integer lane, lockstep fragment-quad contexts. Default-off; FeatureVirgl stays illegal.
+// Interplay: ExecBind --> ExecCluster (exec); FPnew lane, no virgl grant. See AGENTS-impl-interplays.md.
 module g6lc_apu_exec
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

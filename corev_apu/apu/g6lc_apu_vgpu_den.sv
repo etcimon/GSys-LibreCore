@@ -5,6 +5,7 @@
 // so the sample is refused and the word stays the clear color. This
 // does not fetch a texel.
 
+// TexRefused (den): That sample is refused. Default-off. No texel image.
 module g6lc_apu_vgpu_den
   import g6lc_apu_pkg::*;
 #(
@@ -97,6 +98,7 @@ module g6lc_apu_vgpu_den
   end
 endmodule
 
+// TexRefused (den) enable-0 fixture: That sample is refused. Default-off. No texel image.
 module g6lc_apu_vgpu_den_fixture
   import g6lc_apu_pkg::*;
 #(

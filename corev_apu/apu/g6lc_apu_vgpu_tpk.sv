@@ -4,6 +4,7 @@
 // Keep the three offsets and the clear channels. A second store
 // keeps the first. The image is not kept. The shader is not run.
 
+// ReadbackThreePointsKeep (tpk): The three offsets and the channels.
 module g6lc_apu_vgpu_tpk
   import g6lc_apu_pkg::*;
 #(
@@ -101,6 +102,7 @@ module g6lc_apu_vgpu_tpk
   end
 endmodule
 
+// ReadbackThreePointsKeep (tpk) enable-0 fixture: The three offsets and the channels.
 module g6lc_apu_vgpu_tpk_fixture
   import g6lc_apu_pkg::*;
 #(

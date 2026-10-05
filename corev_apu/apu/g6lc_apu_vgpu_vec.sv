@@ -11,6 +11,7 @@
 // failed beat stops the read; the request can be repeated. TEX is not
 // executed.
 
+// VertexElementObjectRead (vec): Vertex-element object of the fetched draw.
 module g6lc_apu_vgpu_vec
   import g6lc_apu_pkg::*;
 #(
@@ -323,6 +324,7 @@ module g6lc_apu_vgpu_vec
   end
 endmodule
 
+// VertexElementObjectRead (vec) enable-0 fixture: Vertex-element object of the fetched draw.
 module g6lc_apu_vgpu_vec_fixture
   import g6lc_apu_pkg::*;
 #(

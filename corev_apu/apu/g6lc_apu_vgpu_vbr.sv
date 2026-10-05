@@ -4,6 +4,7 @@
 // Keep the y = 1 sample at x = 2. The recorded pair at x = 0 and x = 1
 // stays put.
 
+// VerticalBeatSample (vbr): The y = 1 sample at x = 2.
 module g6lc_apu_vgpu_vbr
   import g6lc_apu_pkg::*;
 #(
@@ -84,6 +85,7 @@ module g6lc_apu_vgpu_vbr
   end
 endmodule
 
+// VerticalBeatSample (vbr) enable-0 fixture: The y = 1 sample at x = 2.
 module g6lc_apu_vgpu_vbr_fixture
   import g6lc_apu_pkg::*;
 #(

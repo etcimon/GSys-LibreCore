@@ -4,6 +4,7 @@
 // Keep the rasterizer header and handle. A second store keeps the first.
 // The eight state words are not kept. No triangle is walked.
 
+// RasterizerObjectReadKeep (rck): The header and the handle.
 module g6lc_apu_vgpu_rck
   import g6lc_apu_pkg::*;
 #(
@@ -105,6 +106,7 @@ module g6lc_apu_vgpu_rck
   end
 endmodule
 
+// RasterizerObjectReadKeep (rck) enable-0 fixture: The header and the handle.
 module g6lc_apu_vgpu_rck_fixture
   import g6lc_apu_pkg::*;
 #(

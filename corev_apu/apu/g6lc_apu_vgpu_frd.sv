@@ -6,6 +6,7 @@
 // The triangle is not walked. g6lc_apu_vgpu_pxr still reports an interior
 // corner-record miss.
 
+// ClearCeilingRead (frd): Read of one sample in that ceiling. Default-off. Not a triangle walk.
 module g6lc_apu_vgpu_frd
   import g6lc_apu_pkg::*;
 #(
@@ -86,6 +87,7 @@ module g6lc_apu_vgpu_frd
   end
 endmodule
 
+// ClearCeilingRead (frd) enable-0 fixture: Read of one sample in that ceiling. Default-off. Not a triangle walk.
 module g6lc_apu_vgpu_frd_fixture
   import g6lc_apu_pkg::*;
 #(

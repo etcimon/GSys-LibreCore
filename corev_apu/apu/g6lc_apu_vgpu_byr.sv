@@ -7,6 +7,7 @@
 // (63,63) is the top lane of the last beat. The image is not kept.
 // The shader is not run.
 
+// ClearChannels (byr): Little-endian channels of the clear word in the readback.
 module g6lc_apu_vgpu_byr
   import g6lc_apu_pkg::*;
 #(
@@ -168,6 +169,7 @@ module g6lc_apu_vgpu_byr
   end
 endmodule
 
+// ClearChannels (byr) enable-0 fixture: Little-endian channels of the clear word in the readback.
 module g6lc_apu_vgpu_byr_fixture
   import g6lc_apu_pkg::*;
 #(

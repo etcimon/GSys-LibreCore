@@ -4,6 +4,7 @@
 // Keep the fragment-shader handle and stage. A second store keeps
 // the first. The shader is not run.
 
+// FragShaderBindReadKeep (fsk): The handle and the stage.
 module g6lc_apu_vgpu_fsk
   import g6lc_apu_pkg::*;
 #(
@@ -106,6 +107,7 @@ module g6lc_apu_vgpu_fsk
   end
 endmodule
 
+// FragShaderBindReadKeep (fsk) enable-0 fixture: The handle and the stage.
 module g6lc_apu_vgpu_fsk_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -5,6 +5,7 @@
 // word. x or y of 64 records nothing. A second store keeps the first.
 // The image is not kept. The shader is not run.
 
+// ClearWindowScanCheck (wfx): One in-range point of that scan.
 module g6lc_apu_vgpu_wfx
   import g6lc_apu_pkg::*;
 #(
@@ -91,6 +92,7 @@ module g6lc_apu_vgpu_wfx
   end
 endmodule
 
+// ClearWindowScanCheck (wfx) enable-0 fixture: One in-range point of that scan.
 module g6lc_apu_vgpu_wfx_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -10,6 +10,7 @@
 // a slot stay published while the child DMA is busy. Optional ICG is
 // power-only (IS_FUNCTIONAL=0) and does not drop SRAM state.
 
+// Interplay: ApuMem --> Storage; mapping table and command snapshot. See AGENTS-impl-interplays.md.
 module g6lc_apu_storage
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

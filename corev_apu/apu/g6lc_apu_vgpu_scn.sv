@@ -5,6 +5,7 @@
 // A 64 by 64 rectangle records nothing. This is not g6lc_hdmi_scanout
 // and it does not change a video mode.
 
+// ScanoutSet (scn): SET_SCANOUT of resource 4. Default-off. Not a HDMI mode.
 module g6lc_apu_vgpu_scn
   import g6lc_apu_pkg::*;
 #(
@@ -122,6 +123,7 @@ module g6lc_apu_vgpu_scn
   end
 endmodule
 
+// ScanoutSet (scn) enable-0 fixture: SET_SCANOUT of resource 4. Default-off. Not a HDMI mode.
 module g6lc_apu_vgpu_scn_fixture
   import g6lc_apu_pkg::*;
 #(

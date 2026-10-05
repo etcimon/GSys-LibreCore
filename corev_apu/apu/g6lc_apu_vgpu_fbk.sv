@@ -4,6 +4,7 @@
 // Keep the color-buffer count, the surface handle, and the clear
 // word. A second store keeps the first. This does not attach memory.
 
+// FramebufferReadKeep (fbk): The color-buffer count, the surface, and the clear word.
 module g6lc_apu_vgpu_fbk
   import g6lc_apu_pkg::*;
 #(
@@ -96,6 +97,7 @@ module g6lc_apu_vgpu_fbk
   end
 endmodule
 
+// FramebufferReadKeep (fbk) enable-0 fixture: The color-buffer count, the surface, and the clear word.
 module g6lc_apu_vgpu_fbk_fixture
   import g6lc_apu_pkg::*;
 #(

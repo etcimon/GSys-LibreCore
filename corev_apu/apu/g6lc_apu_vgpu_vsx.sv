@@ -3,6 +3,7 @@
 
 // Keep the y = 1 sample at x = 8. The earlier y = 1 words stay put.
 
+// VerticalSpanSample (vsx): The y = 1 sample at x = 8.
 module g6lc_apu_vgpu_vsx
   import g6lc_apu_pkg::*;
 #(
@@ -87,6 +88,7 @@ module g6lc_apu_vgpu_vsx
   end
 endmodule
 
+// VerticalSpanSample (vsx) enable-0 fixture: The y = 1 sample at x = 8.
 module g6lc_apu_vgpu_vsx_fixture
   import g6lc_apu_pkg::*;
 #(

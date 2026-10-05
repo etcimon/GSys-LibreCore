@@ -5,6 +5,7 @@
 // The word stays the clear color. TEX is not executed. This is not
 // g6lc_apu_cover.
 
+// HeldClearSample (hld): One covered sample held at the clear. Default-off. Not a shaded pixel.
 module g6lc_apu_vgpu_hld
   import g6lc_apu_pkg::*;
 #(
@@ -89,6 +90,7 @@ module g6lc_apu_vgpu_hld
   end
 endmodule
 
+// HeldClearSample (hld) enable-0 fixture: One covered sample held at the clear. Default-off. Not a shaded pixel.
 module g6lc_apu_vgpu_hld_fixture
   import g6lc_apu_pkg::*;
 #(

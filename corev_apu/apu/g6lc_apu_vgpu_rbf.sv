@@ -6,6 +6,8 @@
 // The image is not kept. A failed sample or a failed beat stops the
 // walk; the whole request can be repeated. TEX is not executed.
 
+// CeilingBeatWrite (rbf): Write the 64 by 64 ceiling as 512 beats.
+// Interplay: CeilingSampler (smp) --> inside CeilingBeatWrite (rbf) when Enable=1. See AGENTS-impl-interplays.md.
 module g6lc_apu_vgpu_rbf
   import g6lc_apu_pkg::*;
 #(
@@ -246,6 +248,7 @@ module g6lc_apu_vgpu_rbf
   end
 endmodule
 
+// CeilingBeatWrite (rbf) enable-0 fixture: Write the 64 by 64 ceiling as 512 beats.
 module g6lc_apu_vgpu_rbf_fixture
   import g6lc_apu_pkg::*;
 #(

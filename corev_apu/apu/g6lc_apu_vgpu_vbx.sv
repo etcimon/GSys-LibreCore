@@ -7,6 +7,7 @@
 // per byte. y other than 1, and x above 7, record nothing. TEX is not
 // executed.
 
+// VerticalBeatBlend (vbx): y = 1 blend for x = 0..7, both row beats.
 module g6lc_apu_vgpu_vbx
   import g6lc_apu_pkg::*;
 #(
@@ -204,6 +205,7 @@ module g6lc_apu_vgpu_vbx
   end
 endmodule
 
+// VerticalBeatBlend (vbx) enable-0 fixture: y = 1 blend for x = 0..7, both row beats.
 module g6lc_apu_vgpu_vbx_fixture
   import g6lc_apu_pkg::*;
 #(

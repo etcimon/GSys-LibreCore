@@ -12,6 +12,7 @@
 // g6lc_apu_vgpu_clr and not g6lc_apu_vgpu_avail. A failed beat stops
 // the read; the request can be repeated. TEX is not executed.
 
+// ClearColorRead (cwr): Clear color of the fetched draw.
 module g6lc_apu_vgpu_cwr
   import g6lc_apu_pkg::*;
 #(
@@ -187,6 +188,7 @@ module g6lc_apu_vgpu_cwr
   end
 endmodule
 
+// ClearColorRead (cwr) enable-0 fixture: Clear color of the fetched draw.
 module g6lc_apu_vgpu_cwr_fixture
   import g6lc_apu_pkg::*;
 #(

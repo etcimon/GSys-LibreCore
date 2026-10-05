@@ -5,6 +5,7 @@
 // 8'hFF records nothing. A second store keeps the first.
 // The shader is not run.
 
+// ReadbackX7Check (p7x): Byte 0 of (7,0) is red, not blue.
 module g6lc_apu_vgpu_p7x
   import g6lc_apu_pkg::*;
 #(
@@ -105,6 +106,7 @@ module g6lc_apu_vgpu_p7x
   end
 endmodule
 
+// ReadbackX7Check (p7x) enable-0 fixture: Byte 0 of (7,0) is red, not blue.
 module g6lc_apu_vgpu_p7x_fixture
   import g6lc_apu_pkg::*;
 #(

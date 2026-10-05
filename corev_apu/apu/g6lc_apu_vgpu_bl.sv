@@ -5,6 +5,7 @@
 // carries source factor ONE, a zero destination factor, and a full
 // color mask. The other buffers are clear. This is not a draw.
 
+// BlendCreate (bl): The blend object that follows the sampler state. Default-off. Not a draw.
 module g6lc_apu_vgpu_bl
   import g6lc_apu_pkg::*;
 #(
@@ -149,6 +150,7 @@ module g6lc_apu_vgpu_bl
   end
 endmodule
 
+// BlendCreate (bl) enable-0 fixture: The blend object that follows the sampler state.
 module g6lc_apu_vgpu_bl_fixture
   import g6lc_apu_pkg::*;
 #(

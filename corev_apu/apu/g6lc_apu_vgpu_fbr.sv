@@ -12,6 +12,7 @@
 // g6lc_apu_vgpu_avail. A failed beat stops the read; the request
 // can be repeated. TEX is not executed.
 
+// FramebufferRead (fbr): Framebuffer of the fetched draw.
 module g6lc_apu_vgpu_fbr
   import g6lc_apu_pkg::*;
 #(
@@ -188,6 +189,7 @@ module g6lc_apu_vgpu_fbr
   end
 endmodule
 
+// FramebufferRead (fbr) enable-0 fixture: Framebuffer of the fetched draw.
 module g6lc_apu_vgpu_fbr_fixture
   import g6lc_apu_pkg::*;
 #(

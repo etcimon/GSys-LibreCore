@@ -7,6 +7,7 @@
 // after the element and before the index does not publish. This does
 // not write guest memory and it is not g6lc_apu_vgpu_used.
 
+// SceneUsedLocal (sun): The local used element for that chain. Default-off. Not a guest store.
 module g6lc_apu_vgpu_sun
   import g6lc_apu_pkg::*;
 #(
@@ -132,6 +133,7 @@ module g6lc_apu_vgpu_sun
   end
 endmodule
 
+// SceneUsedLocal (sun) enable-0 fixture: The local used element for that chain. Default-off. Not a guest store.
 module g6lc_apu_vgpu_sun_fixture
   import g6lc_apu_pkg::*;
 #(

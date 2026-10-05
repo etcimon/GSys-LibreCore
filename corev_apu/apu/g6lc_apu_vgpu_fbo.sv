@@ -3,6 +3,7 @@
 //
 // The framebuffer state that follows the viewport. Surface handle 1. This does not attach memory.
 
+// FramebufferSet (fbo): The framebuffer state that follows the viewport.
 module g6lc_apu_vgpu_fbo
   import g6lc_apu_pkg::*;
 #(
@@ -143,6 +144,7 @@ module g6lc_apu_vgpu_fbo
   end
 endmodule
 
+// FramebufferSet (fbo) enable-0 fixture: The framebuffer state that follows the viewport.
 module g6lc_apu_vgpu_fbo_fixture
   import g6lc_apu_pkg::*;
 #(

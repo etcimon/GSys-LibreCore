@@ -8,6 +8,7 @@
 // alias of that 4 KiB aperture. Default-off. Not instantiated on the
 // production testharness xbar; FeatureVirgl stays illegal.
 
+// Interplay: TestharnessAttach --> ApuSoc; PLIC 9 --? ai_island PLIC 8. See AGENTS-impl-interplays.md.
 module g6lc_apu_attach
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

@@ -4,6 +4,7 @@
 // Keep the inline-write resource and byte count. A second store
 // keeps the first. The floats are not here.
 
+// InlineWriteReadKeep (iwk): The resource and the byte count.
 module g6lc_apu_vgpu_iwk
   import g6lc_apu_pkg::*;
 #(
@@ -97,6 +98,7 @@ module g6lc_apu_vgpu_iwk
   end
 endmodule
 
+// InlineWriteReadKeep (iwk) enable-0 fixture: The resource and the byte count.
 module g6lc_apu_vgpu_iwk_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -5,6 +5,7 @@
 // (0,0) is that texel. Every other sample inside the ceiling stays
 // the clear word. This is not g6lc_apu_vgpu_frd.
 
+// CeilingOriginRead (pxq): One ceiling read after that corner.
 module g6lc_apu_vgpu_pxq
   import g6lc_apu_pkg::*;
 #(
@@ -90,6 +91,7 @@ module g6lc_apu_vgpu_pxq
   end
 endmodule
 
+// CeilingOriginRead (pxq) enable-0 fixture: One ceiling read after that corner.
 module g6lc_apu_vgpu_pxq_fixture
   import g6lc_apu_pkg::*;
 #(

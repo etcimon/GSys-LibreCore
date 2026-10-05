@@ -86,468 +86,1165 @@ package g6lc_apu_cfg_pkg;
     logic [63:0] ControlBase;
     logic [63:0] ControlLength;
     int unsigned IrqSource;
-    // Native execution cluster: one physical FP32/integer lane, lockstep
+    // Local three-letter leaf ids (vsb, sny, gnw, ...) are LibreCore APU
+    // names used on grant bits `XxxEn` and modules `g6lc_apu_vgpu_xxx`
+    // unless the field comment names another module. The PascalCase token
+    // is the human-readable alias. Module handoffs are drawn from those
+    // names in corev_apu/apu/AGENTS-impl-interplays.md.
+    // ExecCluster (exec): Native execution cluster: one physical FP32/integer lane, lockstep
     // fragment-quad contexts. Default-off; FeatureVirgl stays illegal.
     logic        ExecEn;
     int unsigned ExecQuadThreads;
     int unsigned ExecRegs;
     int unsigned ExecMemWords;
-    // One-sample triangle coverage. Default-off. Does not paint, sample,
+    // CoverSample (cover): One-sample triangle coverage. Default-off. Does not paint, sample,
     // or advertise virgl.
     logic        CoverEn;
-    // Interpolated RGBA8 store of one covered sample. Default-off.
+    // FragStore (frag): Interpolated RGBA8 store of one covered sample. Default-off.
     logic        FragEn;
-    // One unfiltered RGBA8 texel at (0,0). Default-off. Not a sampler.
+    // TexelOrigin (texel): One unfiltered RGBA8 texel at (0,0). Default-off. Not a sampler.
     logic        TexelEn;
-    // Virtio-gpu command payload decode. Default-off. Not a virtqueue walk.
+    // CmdPayloadDecode (proto): Virtio-gpu command payload decode. Default-off. Not a virtqueue walk.
     logic        ProtoEn;
-    // Local used-element publication and its interrupt. Default-off.
+    // UsedPublish (used): Local used-element publication and its interrupt. Default-off.
     logic        UsedEn;
-    // One avail-ring descriptor. Default-off. Not a descriptor chain.
+    // AvailDescriptor (avail): One avail-ring descriptor. Default-off. Not a descriptor chain.
     logic        AvailEn;
-    // One guest backing entry for an existing resource. Default-off.
+    // ResourceBacking (back): One guest backing entry for an existing resource. Default-off.
     // Not a guest-memory read and not a descriptor chain.
     logic        BackEn;
-    // One read of that stored entry into the resource. Default-off.
+    // BackingIntoResource (xfer): One read of that stored entry into the resource. Default-off.
     // Not a guest write and not a descriptor chain.
     logic        XferEn;
-    // One guest write of the local used element. Default-off.
+    // UsedGuestWrite (uwr): One guest write of the local used element. Default-off.
     // Not used.idx and not a descriptor chain.
     logic        UwrEn;
-    // One guest store of used.idx. Default-off. Not a second element
+    // UsedIndexStore (uidx): One guest store of used.idx. Default-off. Not a second element
     // and not a descriptor chain.
     logic        UidxEn;
-    // One covered sample from the resource image. Default-off.
+    // ResourceSurface (surf): One covered sample from the resource image. Default-off.
     // Not a draw command and not the HDMI buffer.
     logic        SurfEn;
-    // One guest readback of the fragment surface. Default-off.
+    // FragReadback (rdb): One guest readback of the fragment surface. Default-off.
     // Not a draw, not a descriptor chain, and not the HDMI buffer.
     logic        RdbEn;
-    // One SUBMIT_3D three-descriptor chain. Default-off. Reads the
+    // Submit3dChain (sub): One SUBMIT_3D three-descriptor chain. Default-off. Reads the
     // 32-byte header only. Not the execbuffer and not a draw.
     logic        SubEn;
-    // One read of the execbuffer named by that submit. Default-off.
+    // ExecBufferRead (buf): One read of the execbuffer named by that submit. Default-off.
     // Not a command decode and not a draw.
     logic        BufEn;
-    // One decode of the first command in that buffer. Default-off.
+    // FirstCommandDecode (dec): One decode of the first command in that buffer. Default-off.
     // Not the rest of the stream and not a draw.
     logic        DecEn;
-    // The shader create that follows that surface. Default-off.
+    // VertexShaderCreate (sh): The shader create that follows that surface. Default-off.
     // The TGSI text stays in the buffer.
     logic        ShEn;
-    // The fragment shader create that follows the vertex shader.
+    // FragShaderCreate (fs): The fragment shader create that follows the vertex shader.
     // Default-off. The TGSI text stays in the buffer.
     logic        FsEn;
-    // The vertex-elements object that follows the fragment shader.
+    // VertexElementsCreate (ve): The vertex-elements object that follows the fragment shader.
     // Default-off. Two attributes, position then uv.
     logic        VeEn;
-    // The sampler view that follows the vertex elements. Default-off.
+    // SamplerViewCreate (sv): The sampler view that follows the vertex elements. Default-off.
     // Not a texture sample.
     logic        SvEn;
-    // The sampler state that follows the sampler view. Default-off.
+    // SamplerStateCreate (ss): The sampler state that follows the sampler view. Default-off.
     // Not a texture sample.
     logic        SsEn;
-    // The blend object that follows the sampler state. Default-off.
+    // BlendCreate (bl): The blend object that follows the sampler state. Default-off.
     // Not a draw.
     logic        BlEn;
-    // The depth-stencil object that follows the blend object.
+    // DepthStencilCreate (ds): The depth-stencil object that follows the blend object.
     // Default-off. Depth and stencil stay off.
     logic        DsEn;
-    // The rasterizer object that follows the depth-stencil object.
+    // RasterizerCreate (rz): The rasterizer object that follows the depth-stencil object.
     // Default-off. Not a triangle walk.
     logic        RzEn;
-    // The blend bind that follows the rasterizer object. Default-off.
+    // BlendBind (bb): The blend bind that follows the rasterizer object. Default-off.
     // Not a draw.
     logic        BbEn;
-    // The depth-stencil bind that follows the blend bind. Default-off.
+    // DepthStencilBind (db): The depth-stencil bind that follows the blend bind. Default-off.
     // Depth and stencil stay off.
     logic        DbEn;
-    // The rasterizer bind that follows the depth-stencil bind.
+    // RasterizerBind (rb): The rasterizer bind that follows the depth-stencil bind.
     // Default-off. Not a triangle walk.
     logic        RbEn;
-    // The vertex-shader bind that follows the rasterizer bind.
+    // VertexShaderBind (vsb): The vertex-shader bind that follows the rasterizer bind.
     // Default-off. The TGSI text stays in the buffer.
     logic        VsbEn;
-    // The fragment-shader bind that follows the vertex-shader bind.
+    // FragShaderBind (fsb): The fragment-shader bind that follows the vertex-shader bind.
     // Default-off. The TGSI text stays in the buffer.
     logic        FsbEn;
-    // The vertex-elements bind that follows the fragment-shader bind.
+    // VertexElementsBind (veb): The vertex-elements bind that follows the fragment-shader bind.
     // Default-off.
     logic        VebEn;
-    // The sampler-state bind that follows the vertex-elements bind.
+    // SamplerStateBind (ssb): The sampler-state bind that follows the vertex-elements bind.
     // Default-off. Not a texture sample.
     logic        SsbEn;
-    // The sampler-view set that follows the sampler-state bind.
+    // SamplerViewSet (svb): The sampler-view set that follows the sampler-state bind.
     // Default-off. Not a texture sample.
     logic        SvbEn;
-    // The vertex inline write that follows the sampler-view set.
+    // ResourceInlineWrite (iw): The vertex inline write that follows the sampler-view set.
     // Default-off. The floats stay in the buffer.
     logic        IwEn;
-    // The vertex-buffer set that follows the inline write.
+    // VertexBuffersSet (vb): The vertex-buffer set that follows the inline write.
     // Default-off. Not a vertex fetch.
     logic        VbEn;
-    // The scissor that follows the vertex-buffer set.
+    // ScissorSet (sci): The scissor that follows the vertex-buffer set.
     // Default-off. The box is 640 by 480.
     logic        SciEn;
-    // The viewport that follows the scissor. Default-off.
+    // ViewportSet (vp): The viewport that follows the scissor. Default-off.
     logic        VpEn;
-    // The framebuffer state that follows the viewport. Default-off.
+    // FramebufferSet (fbo): The framebuffer state that follows the viewport. Default-off.
     logic        FboEn;
-    // The clear that follows the framebuffer state. Default-off.
+    // ClearSet (clr): The clear that follows the framebuffer state. Default-off.
     logic        ClrEn;
-    // The draw that follows the clear. Default-off. Not a raster walk.
+    // DrawVbo (drw): The draw that follows the clear. Default-off. Not a raster walk.
     logic        DrwEn;
-    // CTX_CREATE for context 1. Default-off. Not an OS context.
+    // ContextCreate (ctx): CTX_CREATE for context 1. Default-off. Not an OS context.
     logic        CtxEn;
-    // The two RESOURCE_CREATE_3D records. Default-off. Not an allocation.
+    // ResourceCreate3d (c3d): The two RESOURCE_CREATE_3D records. Default-off. Not an allocation.
     logic        C3dEn;
-    // The three CTX_ATTACH records. Default-off. Not a guest mapping.
+    // ContextAttach (att): The three CTX_ATTACH records. Default-off. Not a guest mapping.
     logic        AttEn;
-    // The scene submit response. Default-off. Not a pixel store.
+    // SceneResponse (rsp): The scene submit response. Default-off. Not a pixel store.
     logic        RspEn;
-    // GET_CAPSET_INFO. Default-off. The answer is no capset.
+    // CapsetInfo (nfo): GET_CAPSET_INFO. Default-off. The answer is no capset.
     logic        NfoEn;
-    // GET_CAPSET. Default-off. No capset blob.
+    // CapsetGet (cap): GET_CAPSET. Default-off. No capset blob.
     logic        CapEn;
-    // SET_SCANOUT of resource 4. Default-off. Not a HDMI mode.
+    // ScanoutSet (scn): SET_SCANOUT of resource 4. Default-off. Not a HDMI mode.
     logic        ScnEn;
-    // RESOURCE_FLUSH of that scanout. Default-off. Not a present.
+    // ResourceFlush (flu): RESOURCE_FLUSH of that scanout. Default-off. Not a present.
     logic        FluEn;
-    // The scene submit's three-descriptor chain. Default-off.
+    // SceneChain (chn): The scene submit's three-descriptor chain. Default-off.
     // Not the one-descriptor avail walker.
     logic        ChnEn;
-    // The chain matches the recorded submit and response. Default-off.
+    // SceneChainMatch (cmx): The chain matches the recorded submit and response. Default-off.
     logic        CmxEn;
-    // The local used element for that chain. Default-off. Not a guest store.
+    // SceneUsedLocal (sun): The local used element for that chain. Default-off. Not a guest store.
     logic        SunEn;
-    // Guest store of that element. Default-off. Not the CREATE_2D element.
+    // SceneUsedWrite (suw): Guest store of that element. Default-off. Not the CREATE_2D element.
     logic        SuwEn;
-    // Guest store of that used.idx. Default-off.
+    // SceneUsedIndex (sux): Guest store of that used.idx. Default-off.
     logic        SuxEn;
-    // Clear floats to RGBA8 bytes. Default-off. Not a general converter.
+    // ClearToRgba8 (u8): Clear floats to RGBA8 bytes. Default-off. Not a general converter.
     logic        U8En;
-    // Four corner samples of that clear. Default-off. Not a triangle walk.
+    // ClearCorners (pix): Four corner samples of that clear. Default-off. Not a triangle walk.
     logic        PixEn;
-    // Read of one stored corner. Default-off.
+    // ClearCornerRead (pxr): Read of one stored corner. Default-off.
     logic        PxrEn;
-    // The clear word covers the 64 by 64 ceiling. Default-off.
+    // ClearCeilingFill (fil): The clear word covers the 64 by 64 ceiling. Default-off.
     logic        FilEn;
-    // Read of one sample in that ceiling. Default-off. Not a triangle walk.
+    // ClearCeilingRead (frd): Read of one sample in that ceiling. Default-off. Not a triangle walk.
     logic        FrdEn;
-    // The 24 vertex floats of the fullscreen strip. Default-off.
+    // QuadFloats (qd): The 24 vertex floats of the fullscreen strip. Default-off.
     logic        QdEn;
-    // That strip covers the ceiling. Default-off. The color stays the clear.
+    // QuadCoverage (cv): That strip covers the ceiling. Default-off. The color stays the clear.
     logic        CvEn;
-    // One covered sample. Default-off. Not a shaded pixel.
+    // CoveredSample (cvr): One covered sample. Default-off. Not a shaded pixel.
     logic        CvrEn;
-    // Vertex-shader TGSI text. Default-off. Not a translate.
+    // VertexTgsiText (vst): Vertex-shader TGSI text. Default-off. Not a translate.
     logic        VstEn;
-    // Fragment-shader TGSI text. Default-off. TEX is not executed.
+    // FragTgsiText (fst): Fragment-shader TGSI text. Default-off. TEX is not executed.
     logic        FstEn;
-    // One covered sample held at the clear. Default-off. Not a shaded pixel.
+    // HeldClearSample (hld): One covered sample held at the clear. Default-off. Not a shaded pixel.
     logic        HldEn;
-    // TEX bound to the sampler view and sampler state. Default-off.
+    // TexBind (tbn): TEX bound to the sampler view and sampler state. Default-off.
     logic        TbnEn;
-    // That sample is refused. Default-off. No texel image.
+    // TexRefused (den): That sample is refused. Default-off. No texel image.
     logic        DenEn;
-    // One refused sample. Default-off. The color stays the clear.
+    // TexRefusedRead (dnr): One refused sample. Default-off. The color stays the clear.
     logic        DnrEn;
-    // VioScan CREATE_2D for resource 1. Default-off. Not the 64 by 64 create.
+    // ScanCreate2d (s2d): VioScan CREATE_2D for resource 1. Default-off. Not the 64 by 64 create.
     logic        S2dEn;
-    // Backing entry for that resource. Default-off. Not a guest read.
+    // ScanBacking (sbk): Backing entry for that resource. Default-off. Not a guest read.
     logic        SbkEn;
-    // The 64-row transfer of that resource. Default-off. No bytes are copied.
+    // ScanBandTransfer (sxf): The 64-row transfer of that resource. Default-off. No bytes are copied.
     logic        SxfEn;
-    // SET_SCANOUT of resource 1. Default-off. Does not present.
+    // ScanScanout (ssc): SET_SCANOUT of resource 1. Default-off. Does not present.
     logic        SscEn;
-    // RESOURCE_FLUSH of the scan band. Default-off. Does not present.
+    // ScanBandFlush (sfl): RESOURCE_FLUSH of the scan band. Default-off. Does not present.
     logic        SflEn;
-    // One sample while that scanout is unpresented. Default-off.
+    // ScanUnpresentedSample (spr): One sample while that scanout is unpresented. Default-off.
     logic        SprEn;
-    // Band copy of resource 1. Default-off. Does not store the image.
+    // BandCopy (bcp): Band copy of resource 1. Default-off. Does not store the image.
     logic        BcpEn;
-    // One copied word beside the clear. Default-off. TEX is not executed.
+    // BandCopiedWord (bcr): One copied word beside the clear. Default-off. TEX is not executed.
     logic        BcrEn;
-    // One clamp-edge texel from the copied band. Default-off.
+    // ClampEdgeTap (tap): One clamp-edge texel from the copied band. Default-off.
     logic        TapEn;
-    // Ceiling (0,0) takes that texel. Default-off. Other samples stay clear.
+    // CeilingOriginTexel (pxc): Ceiling (0,0) takes that texel. Default-off. Other samples stay clear.
     logic        PxcEn;
-    // One ceiling read after that corner. Default-off.
+    // CeilingOriginRead (pxq): One ceiling read after that corner. Default-off.
     logic        PxqEn;
-    // Horizontal blend of two taps in the first beat. Default-off.
+    // LinearBlend (lin): Horizontal blend of two taps in the first beat. Default-off.
     logic        LinEn;
-    // Origin texel and the blended neighbor. Default-off.
+    // LinearBlendKeep (lnr): Origin texel and the blended neighbor. Default-off.
     logic        LnrEn;
-    // Blend that spans the first two beats. Default-off.
+    // SpanBlend (spn): Blend that spans the first two beats. Default-off.
     logic        SpnEn;
-    // The spanned sample at x = 8. Default-off.
+    // SpanSample (spx): The spanned sample at x = 8. Default-off.
     logic        SpxEn;
-    // Vertical blend of row 0 and row 1. Default-off.
+    // VerticalBlend (vln): Vertical blend of row 0 and row 1. Default-off.
     logic        VlnEn;
-    // The y = 1 samples at x = 0 and x = 1. Default-off.
+    // VerticalBlendKeep (vlr): The y = 1 samples at x = 0 and x = 1. Default-off.
     logic        VlrEn;
-    // y = 1 blend for x = 0..7, both row beats. Default-off.
+    // VerticalBeatBlend (vbx): y = 1 blend for x = 0..7, both row beats. Default-off.
     logic        VbxEn;
-    // The y = 1 sample at x = 2. Default-off.
+    // VerticalBeatSample (vbr): The y = 1 sample at x = 2. Default-off.
     logic        VbrEn;
-    // y = 1 blend for x = 0..15, including the beat span. Default-off.
+    // VerticalSpanBlend (vsp): y = 1 blend for x = 0..15, including the beat span. Default-off.
     logic        VspEn;
-    // The y = 1 sample at x = 8. Default-off.
+    // VerticalSpanSample (vsx): The y = 1 sample at x = 8. Default-off.
     logic        VsxEn;
-    // y = 2 blend for x = 0..7, row 1 and row 2. Default-off.
+    // Row2Blend (y2b): y = 2 blend for x = 0..7, row 1 and row 2. Default-off.
     logic        Y2bEn;
-    // The y = 2 samples at x = 0 and x = 1. Default-off.
+    // Row2BlendKeep (y2r): The y = 2 samples at x = 0 and x = 1. Default-off.
     logic        Y2rEn;
-    // Any 64 by 64 ceiling sample from the copied band. Default-off.
+    // CeilingSampler (smp): Any 64 by 64 ceiling sample from the copied band. Default-off.
     logic        SmpEn;
-    // The ceiling sample at (0,3). Default-off.
+    // CeilingSampleCheck (smx): The ceiling sample at (0,3). Default-off.
     logic        SmxEn;
-    // Write the 64 by 64 ceiling as 512 beats. Default-off.
+    // CeilingBeatWrite (rbf): Write the 64 by 64 ceiling as 512 beats. Default-off.
     logic        RbfEn;
-    // The readback record: byte count, first word, last address. Default-off.
+    // CeilingBeatKeep (rbk): The readback record: byte count, first word, last address. Default-off.
     logic        RbkEn;
-    // Read the 512 ceiling beats back. Default-off.
+    // CeilingBeatRead (rdr): Read the 512 ceiling beats back. Default-off.
     logic        RdrEn;
-    // The two words collected from that read. Default-off.
+    // CeilingBeatReadKeep (rdk): The two words collected from that read. Default-off.
     logic        RdkEn;
-    // Fetch the scene header and the 960-byte execbuffer. Default-off.
+    // SceneFetch (fet): Fetch the scene header and the 960-byte execbuffer. Default-off.
     logic        FetEn;
-    // The submit type and the first command word. Default-off.
+    // SceneFetchKeep (fek): The submit type and the first command word. Default-off.
     logic        FekEn;
-    // DRAW_VBO at byte 908 of the fetched execbuffer. Default-off.
+    // DrawVboRead (drd): DRAW_VBO at byte 908 of the fetched execbuffer. Default-off.
     logic        DrdEn;
-    // The vertex count and the triangle-strip primitive. Default-off.
+    // DrawVboReadKeep (drk): The vertex count and the triangle-strip primitive. Default-off.
     logic        DrkEn;
-    // The 24 NDC floats of the fetched draw. Default-off.
+    // NdcFloatsRead (qdr): The 24 NDC floats of the fetched draw. Default-off.
     logic        QdrEn;
-    // The first float and the last float. Default-off.
+    // NdcFloatsKeep (qdk): The first float and the last float. Default-off.
     logic        QdkEn;
-    // Viewport of the fetched draw, and where ±1 lands. Default-off.
+    // ViewportRead (vwx): Viewport of the fetched draw, and where ±1 lands. Default-off.
     logic        VwxEn;
-    // The scales and the window edges. Default-off.
+    // ViewportReadKeep (vwk): The scales and the window edges. Default-off.
     logic        VwkEn;
-    // Scissor of the fetched draw, matched to the window. Default-off.
+    // ScissorRead (cxr): Scissor of the fetched draw, matched to the window. Default-off.
     logic        CxrEn;
-    // The scissor width and height. Default-off.
+    // ScissorReadKeep (cxk): The scissor width and height. Default-off.
     logic        CxkEn;
-    // Clear color of the fetched draw. Default-off.
+    // ClearColorRead (cwr): Clear color of the fetched draw. Default-off.
     logic        CwrEn;
-    // The red, the blue, and the packed word. Default-off.
+    // ClearColorReadKeep (cwk): The red, the blue, and the packed word. Default-off.
     logic        CwkEn;
-    // Framebuffer of the fetched draw. Default-off.
+    // FramebufferRead (fbr): Framebuffer of the fetched draw. Default-off.
     logic        FbrEn;
-    // The color-buffer count, the surface, and the clear word. Default-off.
+    // FramebufferReadKeep (fbk): The color-buffer count, the surface, and the clear word. Default-off.
     logic        FbkEn;
-    // Vertex-buffer set of the fetched draw. Default-off.
+    // VertexBufferRead (vbf): Vertex-buffer set of the fetched draw. Default-off.
     logic        VbfEn;
-    // The stride, the offset, and the resource. Default-off.
+    // VertexBufferReadKeep (vbk): The stride, the offset, and the resource. Default-off.
     logic        VbkEn;
-    // Inline write that holds the fetched quad. Default-off.
+    // InlineWriteRead (iwr): Inline write that holds the fetched quad. Default-off.
     logic        IwrEn;
-    // The resource and the byte count. Default-off.
+    // InlineWriteReadKeep (iwk): The resource and the byte count. Default-off.
     logic        IwkEn;
-    // Sampler view of the fetched draw. Default-off.
+    // SamplerViewRead (svr): Sampler view of the fetched draw. Default-off.
     logic        SvrEn;
-    // The stage, the slot, and the handle. Default-off.
+    // SamplerViewReadKeep (svk): The stage, the slot, and the handle. Default-off.
     logic        SvkEn;
-    // Sampler state of the fetched draw. Default-off.
+    // SamplerStateRead (ssr): Sampler state of the fetched draw. Default-off.
     logic        SsrEn;
-    // The stage, the slot, and the handle. Default-off.
+    // SamplerStateReadKeep (ssk): The stage, the slot, and the handle. Default-off.
     logic        SskEn;
-    // Vertex-element bind of the fetched draw. Default-off.
+    // VertexElementBindRead (ver): Vertex-element bind of the fetched draw. Default-off.
     logic        VerEn;
-    // The header and the handle. Default-off.
+    // VertexElementBindReadKeep (vek): The header and the handle. Default-off.
     logic        VekEn;
-    // Fragment shader bind of the fetched draw. Default-off.
+    // FragShaderBindRead (fsr): Fragment shader bind of the fetched draw. Default-off.
     logic        FsrEn;
-    // The handle and the stage. Default-off.
+    // FragShaderBindReadKeep (fsk): The handle and the stage. Default-off.
     logic        FskEn;
-    // Vertex shader bind of the fetched draw. Default-off.
+    // VertexShaderBindRead (vsr): Vertex shader bind of the fetched draw. Default-off.
     logic        VsrEn;
-    // The handle and the stage. Default-off.
+    // VertexShaderBindReadKeep (vsk): The handle and the stage. Default-off.
     logic        VskEn;
-    // Rasterizer bind of the fetched draw. Default-off.
+    // RasterizerBindRead (rzr): Rasterizer bind of the fetched draw. Default-off.
     logic        RzrEn;
-    // The header and the handle. Default-off.
+    // RasterizerBindReadKeep (rzk): The header and the handle. Default-off.
     logic        RzkEn;
-    // Depth-stencil bind of the fetched draw. Default-off.
+    // DepthStencilBindRead (dbr): Depth-stencil bind of the fetched draw. Default-off.
     logic        DbrEn;
-    // The header and the handle. Default-off.
+    // DepthStencilBindReadKeep (dbk): The header and the handle. Default-off.
     logic        DbkEn;
-    // Blend bind of the fetched draw. Default-off.
+    // BlendBindRead (bbr): Blend bind of the fetched draw. Default-off.
     logic        BbrEn;
-    // The header and the handle. Default-off.
+    // BlendBindReadKeep (bbk): The header and the handle. Default-off.
     logic        BbkEn;
-    // Rasterizer object of the fetched draw. Default-off.
+    // RasterizerObjectRead (rcr): Rasterizer object of the fetched draw. Default-off.
     logic        RcrEn;
-    // The header and the handle. Default-off.
+    // RasterizerObjectReadKeep (rck): The header and the handle. Default-off.
     logic        RckEn;
-    // Depth-stencil object of the fetched draw. Default-off.
+    // DepthStencilObjectRead (dcr): Depth-stencil object of the fetched draw. Default-off.
     logic        DcrEn;
-    // The header and the handle. Default-off.
+    // DepthStencilObjectReadKeep (dck): The header and the handle. Default-off.
     logic        DckEn;
-    // Blend object of the fetched draw. Default-off.
+    // BlendObjectRead (blr): Blend object of the fetched draw. Default-off.
     logic        BlrEn;
-    // The header, the handle, and the color word. Default-off.
+    // BlendObjectReadKeep (blk): The header, the handle, and the color word. Default-off.
     logic        BlkEn;
-    // Sampler-state object of the fetched draw. Default-off.
+    // SamplerStateObjectRead (scr): Sampler-state object of the fetched draw. Default-off.
     logic        ScrEn;
-    // The header, the handle, and the two state words. Default-off.
+    // SamplerStateObjectReadKeep (sck): The header, the handle, and the two state words. Default-off.
     logic        SckEn;
-    // Sampler view of the fetched draw. Default-off.
+    // SamplerViewObjectRead (svc): Sampler view of the fetched draw. Default-off.
     logic        SvcEn;
-    // The header, the handle, the resource, the format, and the swizzle. Default-off.
+    // SamplerViewObjectReadKeep (vck): The header, the handle, the resource, the format, and the swizzle. Default-off.
     logic        VckEn;
-    // Vertex-element object of the fetched draw. Default-off.
+    // VertexElementObjectRead (vec): Vertex-element object of the fetched draw. Default-off.
     logic        VecEn;
-    // The header, the handle, and the two element offsets and formats. Default-off.
+    // VertexElementObjectReadKeep (vce): The header, the handle, and the two element offsets and formats. Default-off.
     logic        VceEn;
-    // Fragment-shader object of the fetched draw. Default-off. The shader is not run.
+    // FragShaderObjectRead (fsc): Fragment-shader object of the fetched draw. Default-off. The shader is not run.
     logic        FscEn;
-    // The header, the handle, the stage, the length, the tokens, and text0. Default-off.
+    // FragShaderObjectReadKeep (fce): The header, the handle, the stage, the length, the tokens, and text0. Default-off.
     logic        FceEn;
-    // Vertex-shader object of the fetched draw. Default-off. The shader is not run.
+    // VertexShaderObjectRead (vsc): Vertex-shader object of the fetched draw. Default-off. The shader is not run.
     logic        VscEn;
-    // The header, the handle, the stage, the length, the tokens, and text0. Default-off.
+    // VertexShaderObjectReadKeep (vse): The header, the handle, the stage, the length, the tokens, and text0. Default-off.
     logic        VseEn;
-    // Surface object at the start of the fetched draw. Default-off. No pixels are stored.
+    // SurfaceObjectRead (sfc): Surface object at the start of the fetched draw. Default-off. No pixels are stored.
     logic        SfcEn;
-    // The header, the handle, the resource, and the format. Default-off.
+    // SurfaceObjectReadKeep (sfe): The header, the handle, the resource, and the format. Default-off.
     logic        SfeEn;
-    // Guest read of the scene descriptor chain and its avail slot. Default-off.
+    // SceneChainGuestRead (nxc): Guest read of the scene descriptor chain and its avail slot. Default-off.
     logic        NxcEn;
-    // The head, the execbuffer, the response, and the avail index. Default-off.
+    // SceneChainGuestKeep (nxk): The head, the execbuffer, the response, and the avail index. Default-off.
     logic        NxkEn;
-    // Completed-opcode list. Default-off. The list is empty.
+    // OpcodeList (ols): Completed-opcode list. Default-off. The list is empty.
     logic        OlsEn;
-    // The zero count, capset id 0, and the response. Default-off.
+    // OpcodeListKeep (olk): The zero count, capset id 0, and the response. Default-off.
     logic        OlkEn;
-    // 64 by 64 guest window of the scene clear word. Default-off.
+    // ClearWindowWrite (gpw): 64 by 64 guest window of the scene clear word. Default-off.
     logic        GpwEn;
-    // First and last beats of that window. Default-off.
+    // ClearWindowRead (gpr): First and last beats of that window. Default-off.
     logic        GprEn;
-    // The clear word and the two beat addresses. Default-off.
+    // ClearWindowKeep (gpk): The clear word and the two beat addresses. Default-off.
     logic        GpkEn;
-    // Guest response, used element, and used index after that window. Default-off.
+    // SceneCompleteWrite (gcw): Guest response, used element, and used index after that window. Default-off.
     logic        GcwEn;
-    // Those three beats read back. Default-off.
+    // SceneCompleteRead (gcr): Those three beats read back. Default-off.
     logic        GcrEn;
-    // The response type, the fence, and the used index. Default-off.
+    // SceneCompleteKeep (gck): The response type, the fence, and the used index. Default-off.
     logic        GckEn;
-    // Used-buffer interrupt after that completion. Default-off.
+    // UsedIrqWrite (viw): Used-buffer interrupt after that completion. Default-off.
     logic        ViwEn;
-    // The interrupt reason read back. Default-off.
+    // UsedIrqRead (vir): The interrupt reason read back. Default-off.
     logic        VirEn;
-    // The reason and the used index. Default-off.
+    // UsedIrqKeep (vik): The reason and the used index. Default-off.
     logic        VikEn;
-    // Guest ack of the used-buffer reason. Default-off.
+    // UsedAck (vaw): Guest ack of the used-buffer reason. Default-off.
     logic        VawEn;
-    // The ack word and the cleared status read back. Default-off.
+    // UsedAckRead (var): The ack word and the cleared status read back. Default-off.
     logic        VarEn;
-    // The ack, the cleared status, and the used index. Default-off.
+    // UsedAckKeep (vak): The ack, the cleared status, and the used index. Default-off.
     logic        VakEn;
-    // Every beat of the 64 by 64 clear-word window. Default-off.
+    // ClearWindowScan (wfr): Every beat of the 64 by 64 clear-word window. Default-off.
     logic        WfrEn;
-    // The clear word at (0,0), (1,0), and (63,63). Default-off.
+    // ClearWindowScanKeep (wfk): The clear word at (0,0), (1,0), and (63,63). Default-off.
     logic        WfkEn;
-    // One in-range point of that scan. Default-off.
+    // ClearWindowScanCheck (wfx): One in-range point of that scan. Default-off.
     logic        WfxEn;
-    // Copy of that window into the guest readback buffer. Default-off.
+    // ReadbackCopy (gbw): Copy of that window into the guest readback buffer. Default-off.
     logic        GbwEn;
-    // First and last beats of the readback buffer. Default-off.
+    // ReadbackCopyRead (gbr): First and last beats of the readback buffer. Default-off.
     logic        GbrEn;
-    // The clear word, the source, and the readback address. Default-off.
+    // ReadbackCopyKeep (gbk): The clear word, the source, and the readback address. Default-off.
     logic        GbkEn;
-    // 64 by 64 readback rectangle. Default-off.
+    // ReadbackRect (gbd): 64 by 64 readback rectangle. Default-off.
     logic        GbdEn;
-    // One lane of that rectangle. Default-off.
+    // ReadbackRectLane (gbl): One lane of that rectangle. Default-off.
     logic        GblEn;
-    // The rectangle and the sampled lane. Default-off.
+    // ReadbackRectCheck (gbx): The rectangle and the sampled lane. Default-off.
     logic        GbxEn;
-    // Byte offset of one point in that rectangle. Default-off.
+    // ReadbackOffset (gof): Byte offset of one point in that rectangle. Default-off.
     logic        GofEn;
-    // The lane at that offset. Default-off.
+    // ReadbackOffsetLane (gbo): The lane at that offset. Default-off.
     logic        GboEn;
-    // The offset and the lane. Default-off.
+    // ReadbackOffsetCheck (gbz): The offset and the lane. Default-off.
     logic        GbzEn;
-    // Little-endian channels of the clear word in the readback. Default-off.
+    // ClearChannels (byr): Little-endian channels of the clear word in the readback. Default-off.
     logic        ByrEn;
-    // The four channels. Default-off.
+    // ClearChannelsKeep (byk): The four channels. Default-off.
     logic        BykEn;
-    // Byte 0 is red. Default-off.
+    // ClearChannelsCheck (byx): Byte 0 is red. Default-off.
     logic        ByxEn;
-    // Row 1 of the readback starts with that red byte. Default-off.
+    // ReadbackRow1 (ryr): Row 1 of the readback starts with that red byte. Default-off.
     logic        RyrEn;
-    // The row channels and the format tag. Default-off.
+    // ReadbackRow1Keep (ryk): The row channels and the format tag. Default-off.
     logic        RykEn;
-    // Byte 0 of row 1 is red, not blue. Default-off.
+    // ReadbackRow1Check (ryx): Byte 0 of row 1 is red, not blue. Default-off.
     logic        RyxEn;
-    // Three readback points, little-endian clear channels. Default-off.
+    // ReadbackThreePoints (tpr): Three readback points, little-endian clear channels. Default-off.
     logic        TprEn;
-    // The three offsets and the channels. Default-off.
+    // ReadbackThreePointsKeep (tpk): The three offsets and the channels. Default-off.
     logic        TpkEn;
-    // Byte 0 of (0,63) is red, not blue. Default-off.
+    // ReadbackThreePointsCheck (tpx): Byte 0 of (0,63) is red, not blue. Default-off.
     logic        TpxEn;
-    // (63,0) of the readback is byte 252. Default-off.
+    // ReadbackX63 (x6r): (63,0) of the readback is byte 252. Default-off.
     logic        X6rEn;
-    // That offset and the channels. Default-off.
+    // ReadbackX63Keep (x6k): That offset and the channels. Default-off.
     logic        X6kEn;
-    // Byte 0 of (63,0) is red, not blue. Default-off.
+    // ReadbackX63Check (x6x): Byte 0 of (63,0) is red, not blue. Default-off.
     logic        X6xEn;
-    // (63,63) of the readback is byte 16380. Default-off.
+    // ReadbackFarCorner (tcr): (63,63) of the readback is byte 16380. Default-off.
     logic        TcrEn;
-    // That offset and the channels. Default-off.
+    // ReadbackFarCornerKeep (tck): That offset and the channels. Default-off.
     logic        TckEn;
-    // Byte 0 of (63,63) is red, not blue. Default-off.
+    // ReadbackFarCornerCheck (tcx): Byte 0 of (63,63) is red, not blue. Default-off.
     logic        TcxEn;
-    // (7,0) of the readback is byte 28. Default-off.
+    // ReadbackX7 (p7r): (7,0) of the readback is byte 28. Default-off.
     logic        P7rEn;
-    // That offset and the channels. Default-off.
+    // ReadbackX7Keep (p7k): That offset and the channels. Default-off.
     logic        P7kEn;
-    // Byte 0 of (7,0) is red, not blue. Default-off.
+    // ReadbackX7Check (p7x): Byte 0 of (7,0) is red, not blue. Default-off.
     logic        P7xEn;
-    // Beat 1 of row 0, bytes 32 and 60. Default-off.
+    // ReadbackBeat1 (b1r): Beat 1 of row 0, bytes 32 and 60. Default-off.
     logic        B1rEn;
-    // Those offsets and the channels. Default-off.
+    // ReadbackBeat1Keep (b1k): Those offsets and the channels. Default-off.
     logic        B1kEn;
-    // Byte 0 of (8,0) is red, not blue. Default-off.
+    // ReadbackBeat1Check (b1x): Byte 0 of (8,0) is red, not blue. Default-off.
     logic        B1xEn;
-    // (56,0) is byte 224, lane 0 of the (63,0) beat. Default-off.
+    // ReadbackBeat7 (b7r): (56,0) is byte 224, lane 0 of the (63,0) beat. Default-off.
     logic        B7rEn;
-    // That offset and the channels. Default-off.
+    // ReadbackBeat7Keep (b7k): That offset and the channels. Default-off.
     logic        B7kEn;
-    // Byte 0 of (56,0) is red, not blue. Default-off.
+    // ReadbackBeat7Check (b7x): Byte 0 of (56,0) is red, not blue. Default-off.
     logic        B7xEn;
-    // (16,0) is byte 64, lane 0 of beat 2. (23,0) is byte 92.
+    // ReadbackBeat2 (b2r): (16,0) is byte 64, lane 0 of beat 2. (23,0) is byte 92.
     logic        B2rEn;
-    // Those offsets and the channels. Default-off.
+    // ReadbackBeat2Keep (b2k): Those offsets and the channels. Default-off.
     logic        B2kEn;
-    // Byte 0 of (16,0) is red, not blue. Default-off.
+    // ReadbackBeat2Check (b2x): Byte 0 of (16,0) is red, not blue. Default-off.
     logic        B2xEn;
-    // (24,0) is byte 96, lane 0 of beat 3. (31,0) is byte 124.
+    // ReadbackBeat3 (b3r): (24,0) is byte 96, lane 0 of beat 3. (31,0) is byte 124.
     logic        B3rEn;
-    // Those offsets and the channels. Default-off.
+    // ReadbackBeat3Keep (b3k): Those offsets and the channels. Default-off.
     logic        B3kEn;
-    // Byte 0 of (24,0) is red, not blue. Default-off.
+    // ReadbackBeat3Check (b3x): Byte 0 of (24,0) is red, not blue. Default-off.
     logic        B3xEn;
-    // (32,0) is byte 128, lane 0 of beat 4. (39,0) is byte 156.
+    // ReadbackBeat4 (b4r): (32,0) is byte 128, lane 0 of beat 4. (39,0) is byte 156.
     logic        B4rEn;
-    // Those offsets and the channels. Default-off.
+    // ReadbackBeat4Keep (b4k): Those offsets and the channels. Default-off.
     logic        B4kEn;
-    // Byte 0 of (32,0) is red, not blue. Default-off.
+    // ReadbackBeat4Check (b4x): Byte 0 of (32,0) is red, not blue. Default-off.
     logic        B4xEn;
-    // (40,0) is byte 160, lane 0 of beat 5. (47,0) is byte 188.
+    // ReadbackBeat5 (b5r): (40,0) is byte 160, lane 0 of beat 5. (47,0) is byte 188.
     logic        B5rEn;
-    // Those offsets and the channels. Default-off.
+    // ReadbackBeat5Keep (b5k): Those offsets and the channels. Default-off.
     logic        B5kEn;
-    // Byte 0 of (40,0) is red, not blue. Default-off.
+    // ReadbackBeat5Check (b5x): Byte 0 of (40,0) is red, not blue. Default-off.
     logic        B5xEn;
-    // (48,0) is byte 192, lane 0 of beat 6. (55,0) is byte 220.
+    // ReadbackBeat6 (b6r): (48,0) is byte 192, lane 0 of beat 6. (55,0) is byte 220.
     logic        B6rEn;
-    // Those offsets and the channels. Default-off.
+    // ReadbackBeat6Keep (b6k): Those offsets and the channels. Default-off.
     logic        B6kEn;
-    // Byte 0 of (48,0) is red, not blue. Default-off.
+    // ReadbackBeat6Check (b6x): Byte 0 of (48,0) is red, not blue. Default-off.
     logic        B6xEn;
+    // LinearPairWrite (acw): Linear sample pair written as fragment color. Default-off.
+    logic        AcwEn;
+    // LinearPairRead (acr): Those two words read back. Default-off.
+    logic        AcrEn;
+    // LinearPairCheck (acx): Byte 0 of (1,0) is the sample, not the clear. Default-off.
+    logic        AcxEn;
+    // ColorWindowCopy (csw): 64 by 64 sample copy into the color window. Default-off.
+    logic        CswEn;
+    // ColorWindowRead (csr): Beat 0 of that window read back. Default-off.
+    logic        CsrEn;
+    // ColorWindowCheck (csx): Byte 0 of (1,0) in that window is the sample. Default-off.
+    logic        CsxEn;
+    // ColorWindowRect (crd): 64 by 64 sample rectangle at the color window. Default-off.
+    logic        CrdEn;
+    // ColorWindowRectLane (crl): (1,0) in that rectangle is the half blend. Default-off.
+    logic        CrlEn;
+    // ColorWindowRectCheck (crx): Byte 0 of that point is the sample, not the clear. Default-off.
+    logic        CrxEn;
+    // ColorWindowOffset (cof): Byte offset in the sample rectangle. Default-off.
+    logic        CofEn;
+    // ColorWindowOffsetOrigin (cor): (0,0) in that rectangle is the clamp texel. Default-off.
+    logic        CorEn;
+    // ColorWindowOffsetCheck (cox): Byte 0 of (0,0) is the sample, not the clear. Default-off.
+    logic        CoxEn;
+    // TransferDestCopy (rpw): Guest 64 by 64 TRANSFER_FROM_HOST_3D of the sample rectangle. Default-off.
+    logic        RpwEn;
+    // TransferDestRead (rpr): Beat 0 of that guest buffer read back. Default-off.
+    logic        RprEn;
+    // TransferDestCheck (rpx): Byte 0 of (1,0) in that buffer is the sample. Default-off.
+    logic        RpxEn;
+    // GuestReadpixelsRect (grd): 64 by 64 guest readpixels rectangle. Default-off.
+    logic        GrdEn;
+    // GuestReadpixelsLane (grl): (1,0) in that rectangle is the half blend. Default-off.
+    logic        GrlEn;
+    // GuestReadpixelsCheck (grx): Byte 0 of that point is the sample, not the clear. Default-off.
+    logic        GrxEn;
+    // GuestReadpixelsOffset (rof): Byte offset in the guest readpixels rectangle. Default-off.
+    logic        RofEn;
+    // GuestReadpixelsOffsetOrigin (ror): (0,0) in that guest rectangle is the clamp texel. Default-off.
+    logic        RorEn;
+    // GuestReadpixelsOffsetCheck (rox): Byte 0 of (0,0) is the sample, not the clear. Default-off.
+    logic        RoxEn;
+    // TransferBox (tfb): TRANSFER_FROM_HOST_3D box (0,0,64,64) of the 640 by 480 target. Default-off.
+    logic        TfbEn;
+    // TransferBoxRead (tfr): Guest command beats of that transfer. Default-off.
+    logic        TfrEn;
+    // TransferBoxCheck (tfx): Packed stride 256 of that box, not the 640-wide resource row. Default-off.
+    logic        TfxEn;
+    // TransferAttach (rab): RESOURCE_ATTACH_BACKING of the 64 by 64 readpixels buffer. Default-off.
+    logic        RabEn;
+    // TransferAttachRead (rar): Guest command beats of that attach. Default-off.
+    logic        RarEn;
+    // TransferAttachCheck (rax): Length 16384, not the 640 by 480 backing. Default-off.
+    logic        RaxEn;
+    // TransferFence (rfw): virtio OK_NODATA fence response of the 64 by 64 transfer. Default-off.
+    logic        RfwEn;
+    // TransferFenceRead (rfr): Guest read of that response. Default-off.
+    logic        RfrEn;
+    // TransferFenceCheck (rfx): Fence 2, not the scene fence. Default-off.
+    logic        RfxEn;
+    // TransferUsed (tuw): Used element of the 64 by 64 transfer. Default-off.
+    logic        TuwEn;
+    // TransferUsedRead (tur): Guest read of that used element and index. Default-off.
+    logic        TurEn;
+    // TransferUsedCheck (tux): used.idx 2, not the scene index 1. Default-off.
+    logic        TuxEn;
+    // TransferIrq (tiw): Used-buffer interrupt of the 64 by 64 transfer. Default-off.
+    logic        TiwEn;
+    // TransferIrqRead (tir): Guest read of that interrupt reason. Default-off.
+    logic        TirEn;
+    // TransferIrqCheck (tix): Reason 32'h1 at 64'h880C0000, not the scene status word. Default-off.
+    logic        TixEn;
+    // TransferAck (taw): Guest ack of the 64 by 64 transfer interrupt. Default-off.
+    logic        TawEn;
+    // TransferAckRead (tar): Guest read of that ack and the cleared status. Default-off.
+    logic        TarEn;
+    // TransferAckCheck (tax): Ack 32'h1 and remain 0 with used.idx 2. Default-off.
+    logic        TaxEn;
+    // TransferChain (txc): Guest descriptor chain of the 64 by 64 transfer. Default-off.
+    logic        TxcEn;
+    // TransferChainKeep (txk): Keep that chain. Default-off.
+    logic        TxkEn;
+    // TransferChainCheck (txx): Avail index 2, not the scene index 1. Default-off.
+    logic        TxxEn;
+    // TexSample (ftx): TEX of sampler view 5 returns the backing samples. Default-off.
+    logic        FtxEn;
+    // TexSampleKeep (ftr): Keep that TEX result. Default-off.
+    logic        FtrEn;
+    // TexSampleCheck (ftk): refused is 0 and the word is not the clear color. Default-off.
+    logic        FtkEn;
+    // SceneWindowTexWrite (ocw): TEX pair written into the 64 by 64 scene window. Default-off.
+    logic        OcwEn;
+    // SceneWindowTexRead (ocr): Guest read of that beat. Default-off.
+    logic        OcrEn;
+    // SceneWindowTexCheck (ocx): (0,0) is the clamp texel, not the clear word. Default-off.
+    logic        OcxEn;
+    // ReadbackTexWrite (pbw): TEX pair written into the guest readback. Default-off.
+    logic        PbwEn;
+    // ReadbackTexRead (pbr): Guest read of that readback beat. Default-off.
+    logic        PbrEn;
+    // ReadbackTexCheck (pbx): (0,0) in the readback is the clamp texel. Default-off.
+    logic        PbxEn;
+    // TransferNextWalk (tnw): Posted NEXT walker of the 64 by 64 transfer chain. Default-off.
+    logic        TnwEn;
+    // TransferNextKeep (tnk): Keep that walked chain. Default-off.
+    logic        TnkEn;
+    // TransferNextCheck (tnx): Avail index 2, NEXT accepted. Default-off.
+    logic        TnxEn;
+    // TransferQueueNotify (qnt): Guest QueueNotify of the 64 by 64 transfer. Default-off.
+    logic        QntEn;
+    // TransferQueueNotifyRead (qnr): Guest read of that notify word. Default-off.
+    logic        QnrEn;
+    // TransferQueueNotifyCheck (qnx): Control queue 0 after avail index 2. Default-off.
+    logic        QnxEn;
+    // TransferAvailIdx (qav): Guest avail.idx after that QueueNotify. Default-off.
+    logic        QavEn;
+    // TransferAvailIdxKeep (qak): Keep that avail.idx. Default-off.
+    logic        QakEn;
+    // TransferAvailIdxCheck (qax): Avail index 2 at 64'h880D0100. Default-off.
+    logic        QaxEn;
+    // TransferAvailRing (qrg): Guest avail ring[0] after that idx. Default-off.
+    logic        QrgEn;
+    // TransferAvailRingKeep (qrk): Keep that ring name. Default-off.
+    logic        QrkEn;
+    // TransferAvailRingCheck (qrx): Ring[0] names descriptor 0. Default-off.
+    logic        QrxEn;
+    // TransferDesc0 (qhd): Guest descriptor 0 after that ring name. Default-off.
+    logic        QhdEn;
+    // TransferDesc0Keep (qhk): Keep that descriptor. Default-off.
+    logic        QhkEn;
+    // TransferDesc0Check (qhx): Descriptor 0 is the attach, NEXT to 1. Default-off.
+    logic        QhxEn;
+    // TransferDesc1 (qfd): Guest descriptor 1 after that NEXT. Default-off.
+    logic        QfdEn;
+    // TransferDesc1Keep (qfk): Keep that transfer descriptor. Default-off.
+    logic        QfkEn;
+    // TransferDesc1Check (qfx): Descriptor 1 is the transfer, NEXT to 2. Default-off.
+    logic        QfxEn;
+    // TransferDesc2 (qwd): Guest descriptor 2 after that NEXT. Default-off.
+    logic        QwdEn;
+    // TransferDesc2Keep (qwk): Keep that WRITE descriptor. Default-off.
+    logic        QwkEn;
+    // TransferDesc2Check (qwx): Descriptor 2 is the response WRITE. Default-off.
+    logic        QwxEn;
+    // TransferOkNodata (qok): Guest OK_NODATA WRITE after that descriptor. Default-off.
+    logic        QokEn;
+    // TransferOkNodataRead (qol): Guest read of that response. Default-off.
+    logic        QolEn;
+    // TransferOkNodataCheck (qox): Fence 2 OK_NODATA at 64'h880A0000. Default-off.
+    logic        QoxEn;
+    // TransferUsedWrite (quw): Guest used element after that OK_NODATA. Default-off.
+    logic        QuwEn;
+    // TransferUsedWriteRead (qul): Guest read of that used element. Default-off.
+    logic        QulEn;
+    // TransferUsedWriteCheck (qux): used.idx 2 after the guest WRITE. Default-off.
+    logic        QuxEn;
+    // TransferUsedIrq (qiw): Guest used-buffer interrupt after that index. Default-off.
+    logic        QiwEn;
+    // TransferUsedIrqRead (qir): Guest read of that interrupt reason. Default-off.
+    logic        QirEn;
+    // TransferUsedIrqCheck (qix): Reason 32'h1 after the guest used ring. Default-off.
+    logic        QixEn;
+    // TransferUsedAck (qaw): Guest ack of that interrupt. Default-off.
+    logic        QawEn;
+    // TransferUsedAckRead (qar): Guest read of that ack and remain. Default-off.
+    logic        QarEn;
+    // TransferUsedAckCheck (qay): Ack 32'h1 and remain 0 after the guest used ring. Default-off.
+    logic        QayEn;
+    // SceneAvailIdx (qsv): Scene virtq_avail.idx 1 after that ack. Default-off.
+    logic        QsvEn;
+    // SceneAvailIdxKeep (qsk): Guest keep of that scene index. Default-off.
+    logic        QskEn;
+    // SceneAvailIdxCheck (qsx): Scene index 1 at 64'h8800E200. Default-off.
+    logic        QsxEn;
+    // SceneAvailRing (qsr): Scene virtq_avail.ring[0] after that index. Default-off.
+    logic        QsrEn;
+    // SceneAvailRingKeep (qsl): Guest keep of that scene ring name. Default-off.
+    logic        QslEn;
+    // SceneAvailRingCheck (qsy): Descriptor 0 at 64'h8800E204. Default-off.
+    logic        QsyEn;
+    // SceneDesc0 (qsd): Scene virtq_desc 0 after that ring name. Default-off.
+    logic        QsdEn;
+    // SceneDesc0Keep (qse): Guest keep of that scene header descriptor. Default-off.
+    logic        QseEn;
+    // SceneDesc0Check (qsf): Header at 64'h8800A000 with NEXT to 1. Default-off.
+    logic        QsfEn;
+    // SceneDesc1 (qed): Scene virtq_desc 1 after that NEXT. Default-off.
+    logic        QedEn;
+    // SceneDesc1Keep (qek): Guest keep of that execbuffer descriptor. Default-off.
+    logic        QekEn;
+    // SceneDesc1Check (qex): Execbuffer at 64'h8800B000 with NEXT to 2. Default-off.
+    logic        QexEn;
+    // SceneDesc2 (qrs): Scene virtq_desc 2 WRITE after that NEXT. Default-off.
+    logic        QrsEn;
+    // SceneDesc2Keep (qrt): Guest keep of that scene response descriptor. Default-off.
+    logic        QrtEn;
+    // SceneDesc2Check (qru): WRITE of the 24-byte scene response at 64'h8800A800. Default-off.
+    logic        QruEn;
+    // SceneOkNodata (qso): Scene OK_NODATA WRITE after that descriptor. Default-off.
+    logic        QsoEn;
+    // SceneOkNodataRead (qsp): Guest read of that scene response. Default-off.
+    logic        QspEn;
+    // SceneOkNodataCheck (qsq): Scene fence OK_NODATA at 64'h8800A800. Default-off.
+    logic        QsqEn;
+    // SceneUsedWrite (qsu): Scene used element after that OK_NODATA. Default-off.
+    logic        QsuEn;
+    // SceneUsedWriteRead (qst): Guest read of that scene used element. Default-off.
+    logic        QstEn;
+    // SceneUsedWriteCheck (qsz): used.idx 1 at 64'h8800E480. Default-off.
+    logic        QszEn;
+    // SceneUsedIrq (qsi): Scene used-buffer interrupt after that index. Default-off.
+    logic        QsiEn;
+    // SceneUsedIrqRead (qsn): Guest read of that scene interrupt reason. Default-off.
+    logic        QsnEn;
+    // SceneUsedIrqCheck (qsm): Reason 32'h1 at 64'h8800E500. Default-off.
+    logic        QsmEn;
+    // SceneUsedAck (qga): Scene guest ack after that interrupt. Default-off.
+    logic        QgaEn;
+    // SceneUsedAckKeep (qgk): Guest read of that scene ack and remain. Default-off.
+    logic        QgkEn;
+    // SceneUsedAckCheck (qgx): Ack 32'h1 and remain 0 at 64'h8800E510. Default-off.
+    logic        QgxEn;
+    // SceneNextWalk (snw): Posted NEXT walker of the scene chain. Default-off.
+    logic        SnwEn;
+    // SceneNextKeep (snk): Guest keep of that walked scene chain. Default-off.
+    logic        SnkEn;
+    // SceneNextCheck (snx): Avail index 1 with NEXT accepted. Default-off.
+    logic        SnxEn;
+    // SceneQueueNotify (snt): Scene QueueNotify after that walker. Default-off.
+    logic        SntEn;
+    // SceneQueueNotifyRead (snr): Guest read of that scene notify word. Default-off.
+    logic        SnrEn;
+    // SceneQueueNotifyCheck (sny): Control queue 0 after avail index 1. Default-off.
+    logic        SnyEn;
+    // SceneAvailAfterNotify (sav): Scene virtq_avail.idx after that notify. Default-off.
+    logic        SavEn;
+    // SceneAvailAfterNotifyKeep (sak): Guest keep of that scene avail index. Default-off.
+    logic        SakEn;
+    // SceneAvailAfterNotifyCheck (sax): Avail index 1 at 64'h8800E200 after notify. Default-off.
+    logic        SaxEn;
+    // SceneRingAfterNotify (srg): Scene virtq_avail.ring[0] after that index. Default-off.
+    logic        SrgEn;
+    // SceneRingAfterNotifyKeep (srk): Guest keep of that scene ring name. Default-off.
+    logic        SrkEn;
+    // SceneRingAfterNotifyCheck (srx): Descriptor 0 at 64'h8800E204 after notify. Default-off.
+    logic        SrxEn;
+    // SceneHeaderAfterNotify (shd): Scene virtq_desc 0 after that ring name. Default-off.
+    logic        ShdEn;
+    // SceneHeaderAfterNotifyKeep (shk): Guest keep of that scene header descriptor. Default-off.
+    logic        ShkEn;
+    // SceneHeaderAfterNotifyCheck (shx): Header at 64'h8800A000 with NEXT to 1. Default-off.
+    logic        ShxEn;
+    // SceneExecAfterNotify (sfd): Scene virtq_desc 1 after that NEXT. Default-off.
+    logic        SfdEn;
+    // SceneExecAfterNotifyKeep (sfk): Guest keep of that scene execbuffer descriptor. Default-off.
+    logic        SfkEn;
+    // SceneExecAfterNotifyCheck (sfx): Execbuffer at 64'h8800B000 with NEXT to 2. Default-off.
+    logic        SfxEn;
+    // SceneWriteAfterNotify (swd): Scene virtq_desc 2 WRITE after that NEXT. Default-off.
+    logic        SwdEn;
+    // SceneWriteAfterNotifyKeep (swk): Guest keep of that scene WRITE descriptor. Default-off.
+    logic        SwkEn;
+    // SceneWriteAfterNotifyCheck (swx): WRITE of the 24-byte response at 64'h8800A800. Default-off.
+    logic        SwxEn;
+    // SceneOkAfterNotify (sok): Scene OK_NODATA after that WRITE. Default-off.
+    logic        SokEn;
+    // SceneOkAfterNotifyKeep (sol): Guest keep of that scene OK_NODATA. Default-off.
+    logic        SolEn;
+    // SceneOkAfterNotifyCheck (sox): Scene fence OK_NODATA at 64'h8800A800. Default-off.
+    logic        SoxEn;
+    // SceneUsedAfterNotify (slw): Scene used element after that OK_NODATA. Default-off.
+    logic        SlwEn;
+    // SceneUsedAfterNotifyKeep (sll): Guest keep of that scene used element. Default-off.
+    logic        SllEn;
+    // SceneUsedAfterNotifyCheck (slx): used.idx 1 after scene OK_NODATA. Default-off.
+    logic        SlxEn;
+    // SceneIrqAfterNotify (siw): Scene used-buffer interrupt after used.idx 1 after QueueNotify. Default-off.
+    logic        SiwEn;
+    // SceneIrqAfterNotifyKeep (sir): Guest keep of that scene interrupt reason. Default-off.
+    logic        SirEn;
+    // SceneIrqAfterNotifyCheck (six): Reason 32'h1 at 64'h8800E500 after scene used after notify. Default-off.
+    logic        SixEn;
+    // SceneAckAfterNotify (sga): Scene guest ack after used-buffer interrupt after QueueNotify. Default-off.
+    logic        SgaEn;
+    // SceneAckAfterNotifyKeep (sgk): Guest keep of that scene ack and remain. Default-off.
+    logic        SgkEn;
+    // SceneAckAfterNotifyCheck (sgx): Ack 32'h1 and remain 0 after scene interrupt after notify. Default-off.
+    logic        SgxEn;
+    // TransferNextAfterAckWalk (rnw): Posted NEXT walker of the transfer chain after scene guest ack. Default-off.
+    logic        RnwEn;
+    // TransferNextAfterAckKeep (rnk): Guest keep of that walked transfer chain. Default-off.
+    logic        RnkEn;
+    // TransferNextAfterAckCheck (rnx): Avail index 2 with NEXT after scene guest ack. Default-off.
+    logic        RnxEn;
+    // TransferNotifyAfterAck (rnt): QueueNotify of control queue 0 after that walker. Default-off.
+    logic        RntEn;
+    // TransferNotifyAfterAckKeep (rnr): Guest keep of that notify word. Default-off.
+    logic        RnrEn;
+    // TransferNotifyAfterAckCheck (rny): Control queue 0 after avail index 2 after scene guest ack. Default-off.
+    logic        RnyEn;
+    // TransferAvailAfterAck (rav): virtq_avail.idx 2 after that QueueNotify after scene guest ack. Default-off.
+    logic        RavEn;
+    // TransferAvailAfterAckKeep (rak): Guest keep of that avail index. Default-off.
+    logic        RakEn;
+    // TransferAvailAfterAckCheck (ray): Avail index 2 at 64'h880D0100 after scene guest ack. Default-off.
+    logic        RayEn;
+    // TransferRingAfterAck (rrg): virtq_avail.ring[0] names descriptor 0 after that index after scene guest ack. Default-off.
+    logic        RrgEn;
+    // TransferRingAfterAckKeep (rrk): Guest keep of that ring name. Default-off.
+    logic        RrkEn;
+    // TransferRingAfterAckCheck (rrx): Descriptor 0 at 64'h880D0104 after scene guest ack. Default-off.
+    logic        RrxEn;
+    // TransferDesc0AfterAck (rhd): virtq_desc 0 attach NEXT to 1 after that ring name after scene guest ack. Default-off.
+    logic        RhdEn;
+    // TransferDesc0AfterAckKeep (rhk): Guest keep of that attach descriptor. Default-off.
+    logic        RhkEn;
+    // TransferDesc0AfterAckCheck (rhx): Attach at 64'h88090000 with NEXT to 1 after scene guest ack. Default-off.
+    logic        RhxEn;
+    // TransferDesc1AfterAck (rfd): virtq_desc 1 transfer NEXT to 2 after that attach after scene guest ack. Default-off.
+    logic        RfdEn;
+    // TransferDesc1AfterAckKeep (rfk): Guest keep of that transfer descriptor. Default-off.
+    logic        RfkEn;
+    // TransferDesc1AfterAckCheck (rfy): Transfer at 64'h88080000 with NEXT to 2 after scene guest ack. Default-off.
+    logic        RfyEn;
+    // TransferDesc2AfterAck (rwd): virtq_desc 2 WRITE of the 24-byte response after that transfer after scene guest ack. Default-off.
+    logic        RwdEn;
+    // TransferDesc2AfterAckKeep (rwk): Guest keep of that WRITE descriptor. Default-off.
+    logic        RwkEn;
+    // TransferDesc2AfterAckCheck (rwx): WRITE at 64'h880A0000 after scene guest ack. Default-off.
+    logic        RwxEn;
+    // TransferOkAfterAck (rok): Guest OK_NODATA WRITE after that named WRITE after scene guest ack. Default-off.
+    logic        RokEn;
+    // TransferOkAfterAckKeep (rol): Guest keep of that OK_NODATA. Default-off.
+    logic        RolEn;
+    // TransferOkAfterAckCheck (roy): Fence 2 OK_NODATA at 64'h880A0000 after scene guest ack. Default-off.
+    logic        RoyEn;
+    // TransferUsedAfterAck (ruw): Guest used element after that OK_NODATA after scene guest ack. Default-off.
+    logic        RuwEn;
+    // TransferUsedAfterAckKeep (rul): Guest keep of that used element. Default-off.
+    logic        RulEn;
+    // TransferUsedAfterAckCheck (rux): used.idx 2 after that OK_NODATA after scene guest ack. Default-off.
+    logic        RuxEn;
+    // TransferIrqAfterAck (riw): Guest used-buffer interrupt after that index after scene guest ack. Default-off.
+    logic        RiwEn;
+    // TransferIrqAfterAckKeep (rir): Guest keep of that interrupt reason. Default-off.
+    logic        RirEn;
+    // TransferIrqAfterAckCheck (rix): Reason 32'h1 at 64'h880C0000 after scene guest ack. Default-off.
+    logic        RixEn;
+    // TransferAckAfterAck (rga): Guest ack of that used-buffer interrupt after scene guest ack. Default-off.
+    logic        RgaEn;
+    // TransferAckAfterAckKeep (rgk): Guest keep of that ack and remain. Default-off.
+    logic        RgkEn;
+    // TransferAckAfterAckCheck (rgx): Ack 32'h1 and remain 0 after scene guest ack. Default-off.
+    logic        RgxEn;
+    // TexAfterAck (gtx): TEX of sampler view 5 after that guest ack after scene guest ack. Default-off.
+    logic        GtxEn;
+    // TexAfterAckKeep (gtr): Guest keep of that TEX result. Default-off.
+    logic        GtrEn;
+    // TexAfterAckCheck (gtk): refused 0 origin clamp texel after that guest ack. Default-off.
+    logic        GtkEn;
+    // GuestTransferTexWrite (hcw): TEX pair in beat 0 of the guest transfer buffer after that ack. Default-off.
+    logic        HcwEn;
+    // GuestTransferTexRead (hcr): Guest keep of that guest-buffer beat. Default-off.
+    logic        HcrEn;
+    // GuestTransferTexCheck (hcx): Byte 0 of (0,0) in that guest buffer is sample red. Default-off.
+    logic        HcxEn;
+    // CoveredTexSample (wld): Covered TEX sample (0,0)/(1,0) after that guest-buffer beat. Default-off.
+    logic        WldEn;
+    // CoveredTexSampleKeep (wlr): Guest keep of that covered TEX sample. Default-off.
+    logic        WlrEn;
+    // CoveredTexSampleCheck (wlk): refused 0 held word is clamp or half blend. Default-off.
+    logic        WlkEn;
+    // TexSampleChannels (cyr): Four channels of that covered TEX sample. Default-off.
+    logic        CyrEn;
+    // TexSampleChannelsKeep (cyk): Guest keep of those TEX channels. Default-off.
+    logic        CykEn;
+    // TexSampleChannelsCheck (cyx): Byte 0 of the held TEX sample is red 8'h00. Default-off.
+    logic        CyxEn;
+    // GuestNextWalk (gnw): Guest-rung walk of the scene NEXT chain after QueueNotify. Default-off.
+    logic        GnwEn;
+    // GuestNextKeep (gnk): Guest keep of that guest-rung chain. Default-off.
+    logic        GnkEn;
+    // GuestNextCheck (gnx): Avail index 1 with consumed device index 1. Default-off.
+    logic        GnxEn;
+    // GuestExecFetch (gef): Fetch the execbuffer after that guest-rung walk. Default-off.
+    logic        GefEn;
+    // GuestExecKeep (gek): Guest keep of that fetched submit word. Default-off.
+    logic        GekEn;
+    // GuestExecCheck (gex): cmd0 is CREATE_OBJECT after consumed device index 1. Default-off.
+    logic        GexEn;
+    // SpirvSubset (spirv): Bounded SPIR-V-subset interpreter, immutable program store. Default-off. Bytes+IRQ diagnostic transport; FeatureVirgl stays illegal.
+    logic        SpirvEn;
+    // NextChain (chain): Reusable virtq_desc NEXT walker with programmed table base and head. Default-off. FeatureVirgl stays illegal.
+    logic        ChainEn;
+    // ChainDma (cdma): NextChain joined to checked DmaRead. Default-off. FeatureVirgl stays illegal.
+    logic        CdmaEn;
+    // HostVisibleShm (shm): virtio-mmio SHM id 1 HOST_VISIBLE region. Default-off. FeatureVirgl stays illegal.
+    logic        ShmEn;
+    // HostVisible (hvis): RESOURCE_CREATE_BLOB map into that SHM and CTX_CREATE context_init Venus. Default-off. FeatureVirgl stays illegal.
+    logic        HvisEn;
+    // VenusCs (vncs): HOST_VISIBLE ring CREATE_MODULE/DISPATCH into SpirvSubset. Default-off. FeatureVirgl stays illegal.
+    logic        VncsEn;
+    // VenusCapset (vcap): GET_CAPSET_INFO/GET_CAPSET for Venus id 4. Default-off. FeatureVirgl stays illegal.
+    logic        VcapEn;
+    // VenusRing (vnring): Mesa vn_ring_layout head/tail/status/buffer walker. Default-off. FeatureVirgl stays illegal.
+    logic        VnringEn;
+    // TestharnessDma (tdma): 2:1 AXI join of APU DMA onto the testharness slave[2] path. Default-off. FeatureVirgl stays illegal.
+    logic        TdmaEn;
+    // VenusEncode (vnenc): Mesa vn_protocol vkCreateShaderModule CS. Default-off. FeatureVirgl stays illegal.
+    logic        VnencEn;
+    // VenusPath (vnp): vn_ring buffer feeds vnenc into SpirvSubset. Default-off. FeatureVirgl stays illegal.
+    logic        VnpEn;
+    // AvailNext (avn): virtq_avail.idx + ring[head] feeds NextChain. Default-off. FeatureVirgl stays illegal.
+    logic        AvnEn;
+    // AvailUsed (avu): AvailNext then virtq_used elem and used.idx. Default-off. FeatureVirgl stays illegal.
+    logic        AvuEn;
+    // UsedIrq (uir): AvailUsed then virtio used-buffer ISR. Default-off. FeatureVirgl stays illegal.
+    logic        UirEn;
+    // CmdSnap (cms): AvailNext first-payload snapshot that survives guest mutation. Default-off. FeatureVirgl stays illegal.
+    logic        CmsEn;
+    // PayResp (prs): AvailNext WRITE-window response store. Default-off. FeatureVirgl stays illegal.
+    logic        PrsEn;
+    // QueueDone (qdn): one AvailNext then response, used.idx, and ISR. Default-off. FeatureVirgl stays illegal.
+    logic        QdnEn;
+    // GrantCapset (gcs): AvailNext GET_CAPSET/INFO Venus blob on the WRITE window, then used.idx and ISR. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        GcsEn;
+    // VenusDispatch (vnd): Mesa vn_protocol vkCmdDispatch CS. Default-off. FeatureVirgl stays illegal.
+    logic        VndEn;
+    // GenHandle (gnh): generational context/resource/program table with pin/retire. Default-off. FeatureVirgl stays illegal.
+    logic        GnhEn;
+    // HandleDispatch (hdp): GenHandle lookup of vkCmdDispatch commandBuffer. Default-off. FeatureVirgl stays illegal.
+    logic        HdpEn;
+    // HandlePath (hph): vkCreateShaderModule publishes MODULE, vkCmdDispatch looks up CMDBUF. Default-off. FeatureVirgl stays illegal.
+    logic        HphEn;
+    // HandleRun (hrn): HandlePath create/dispatch then SpirvSubset kick. Default-off. FeatureVirgl stays illegal.
+    logic        HrnEn;
+    // RunDone (rdn): HandleRun dispatch then WRITE result, used.idx, and ISR. Default-off. FeatureVirgl stays illegal.
+    logic        RdnEn;
+    // QueueRun (qrn): AvailNext fetches CS into RunDone CREATE or DISPATCH. Default-off. FeatureVirgl stays illegal.
+    logic        QrnEn;
+    // QueueCmd (qcm): GrantCapset or QueueRun on one request port. Default-off. FeatureVirgl stays illegal.
+    logic        QcmEn;
+    // QueueType (qty): AvailNext type word selects GrantCapset or QueueRun. Default-off. FeatureVirgl stays illegal.
+    logic        QtyEn;
+    // VenusCtrl (vct): Private Venus num_capsets=1 and QueueNotify into QueueType. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VctEn;
+    // QueuePump (qpu): QueueNotify drains AvailNext until EMPTY. Default-off. FeatureVirgl stays illegal.
+    logic        QpuEn;
+    // NotifyTake (ntk): virtio notify_pending[0] consumes QueuePump. Default-off. FeatureVirgl stays illegal.
+    logic        NtkEn;
+    // VqTake (vqt): virtio vq_state[0] arms NotifyTake on notify_pending[0]. Default-off. FeatureVirgl stays illegal.
+    logic        VqtEn;
+    // VqAxi (vax): VqTake guest beats on 64-bit AXI. Default-off. FeatureVirgl stays illegal.
+    logic        VaxEn;
+    // VenusAlloc (vac): Mesa vn_protocol vkAllocateCommandBuffers ALLOC CMDBUF. Default-off. FeatureVirgl stays illegal.
+    logic        VacEn;
+    // HandleAlloc (hal): vkAllocateCommandBuffers ALLOC CMDBUF then vkCmdDispatch LOOKUP on one table. Default-off. FeatureVirgl stays illegal.
+    logic        HalEn;
+    // AllocRun (aru): ALLOC CMDBUF, CREATE MODULE, then DISPATCH SpirvSubset on one table. Default-off. FeatureVirgl stays illegal.
+    logic        AruEn;
+    // QueueAlloc (qal): AvailNext CS into AllocRun ALLOC/CREATE/DISPATCH. Default-off. FeatureVirgl stays illegal.
+    logic        QalEn;
+    // QueueTypeAlloc (qta): AvailNext type word selects GrantCapset or QueueAlloc. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        QtaEn;
+    // VenusCtrlAlloc (vca): Private Venus num_capsets=1 and QueueNotify into QueueTypeAlloc. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VcaEn;
+    // QueuePumpAlloc (qpa): QueueNotify drains QueueTypeAlloc until EMPTY. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        QpaEn;
+    // NotifyTakeAlloc (nta): virtio notify_pending[0] consumes QueuePumpAlloc. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        NtaEn;
+    // VqTakeAlloc (vqa): virtio vq_state[0] arms NotifyTakeAlloc on notify_pending[0]. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VqaEn;
+    // VqAxiAlloc (vaa): VqTakeAlloc guest beats on 64-bit AXI. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VaaEn;
+    // VenusBegin (vbg): Mesa vn_protocol vkBeginCommandBuffer CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VbgEn;
+    // BeginAlloc (bal): vkAllocateCommandBuffers ALLOC CMDBUF then vkBeginCommandBuffer LOOKUP on one table. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        BalEn;
+    // BeginRun (bru): ALLOC CMDBUF, BEGIN LOOKUP, CREATE MODULE, then DISPATCH SpirvSubset on one table. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        BruEn;
+    // QueueBegin (qbn): AvailNext CS into BeginRun ALLOC/BEGIN/CREATE/DISPATCH. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        QbnEn;
+    // QueueTypeBegin (qtb): AvailNext type word selects GrantCapset or QueueBegin. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        QtbEn;
+    // VenusCtrlBegin (vcb): Private Venus num_capsets=1 and QueueNotify into QueueTypeBegin. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VcbEn;
+    // QueuePumpBegin (qpb): QueueNotify drains QueueTypeBegin until EMPTY. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        QpbEn;
+    // NotifyTakeBegin (ntb): virtio notify_pending[0] consumes QueuePumpBegin. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        NtbEn;
+    // VqTakeBegin (vqb): virtio vq_state[0] arms NotifyTakeBegin on notify_pending[0]. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VqbEn;
+    // VqAxiBegin (vab): VqTakeBegin guest beats on 64-bit AXI. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VabEn;
+    // VenusEnd (ven): Mesa vn_protocol vkEndCommandBuffer CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VenEn;
+    // EndAlloc (eal): vkAllocateCommandBuffers ALLOC CMDBUF, vkBeginCommandBuffer LOOKUP, then vkEndCommandBuffer LOOKUP on one table. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        EalEn;
+    // VenusSubmit (vqs): Mesa vn_protocol vkQueueSubmit CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VqsEn;
+    // VenusWaitIdle (vwi): Mesa vn_protocol vkQueueWaitIdle CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VwiEn;
+    // VenusGetQueue (vgq): Mesa vn_protocol vkGetDeviceQueue CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VgqEn;
+    // VenusCreateDevice (vcd): Mesa vn_protocol vkCreateDevice CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VcdEn;
+    // VenusCreateInstance (vci): Mesa vn_protocol vkCreateInstance CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VciEn;
+    // VenusEnumeratePhys (vep): Mesa vn_protocol vkEnumeratePhysicalDevices CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VepEn;
+    // VenusQueueFamily (vqf): Mesa vn_protocol vkGetPhysicalDeviceQueueFamilyProperties CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VqfEn;
+    // VenusPhysFeatures (vpf): Mesa vn_protocol vkGetPhysicalDeviceFeatures CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VpfEn;
+    // VenusPhysProps (vpp): Mesa vn_protocol vkGetPhysicalDeviceProperties CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VppEn;
+    // VenusPhysMemory (vmp): Mesa vn_protocol vkGetPhysicalDeviceMemoryProperties CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VmpEn;
+    // VenusAllocMemory (vam): Mesa vn_protocol vkAllocateMemory CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VamEn;
+    // VenusCreateBuffer (vxb): Mesa vn_protocol vkCreateBuffer CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VxbEn;
+    // VenusBindBuffer (vbb): Mesa vn_protocol vkBindBufferMemory CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VbbEn;
+    // VenusMapMemory (vmm): Mesa vn_protocol vkMapMemory CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VmmEn;
+    // VenusUnmapMemory (vum): Mesa vn_protocol vkUnmapMemory CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VumEn;
+    // VenusBufReq (vbm): Mesa vn_protocol vkGetBufferMemoryRequirements CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VbmEn;
+    // VenusFlushMap (vfm): Mesa vn_protocol vkFlushMappedMemoryRanges CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VfmEn;
+    // VenusInvalidateMap (vim): Mesa vn_protocol vkInvalidateMappedMemoryRanges CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VimEn;
+    // VenusMemCommit (vmc): Mesa vn_protocol vkGetDeviceMemoryCommitment CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VmcEn;
+    // VenusDescLayout (vdl): Mesa vn_protocol vkCreateDescriptorSetLayout CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdlEn;
+    // VenusPipeLayout (vpl): Mesa vn_protocol vkCreatePipelineLayout CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VplEn;
+    // VenusComputePipe (vcp): Mesa vn_protocol vkCreateComputePipelines CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VcpEn;
+    // VenusDescAlloc (vda): Mesa vn_protocol vkAllocateDescriptorSets CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdaEn;
+    // VenusUpdateDesc (vud): Mesa vn_protocol vkUpdateDescriptorSets CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VudEn;
+    // VenusBindPipe (vbp): Mesa vn_protocol vkCmdBindPipeline CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VbpEn;
+    // VenusBindDesc (vbd): Mesa vn_protocol vkCmdBindDescriptorSets CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VbdEn;
+    // VenusDescPool (vpo): Mesa vn_protocol vkCreateDescriptorPool CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VpoEn;
+    // VenusCreateImage (vxi): Mesa vn_protocol vkCreateImage CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VxiEn;
+    // VenusBindImage (vbi): Mesa vn_protocol vkBindImageMemory CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VbiEn;
+    // VenusImageReq (vmi): Mesa vn_protocol vkGetImageMemoryRequirements CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VmiEn;
+    // VenusImageView (vxv): Mesa vn_protocol vkCreateImageView CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VxvEn;
+    // VenusSampler (vsm): Mesa vn_protocol vkCreateSampler CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VsmEn;
+    // VenusRenderPass (vrp): Mesa vn_protocol vkCreateRenderPass CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VrpEn;
+    // VenusGraphicsPipe (vgp): Mesa vn_protocol vkCreateGraphicsPipelines CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VgpEn;
+    // VenusFramebuffer (vfb): Mesa vn_protocol vkCreateFramebuffer CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VfbEn;
+    // VenusRenderBegin (vrb): Mesa vn_protocol vkCmdBeginRenderPass CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VrbEn;
+    // VenusDraw (vdw): Mesa vn_protocol vkCmdDraw CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdwEn;
+    // VenusRenderEnd (vre): Mesa vn_protocol vkCmdEndRenderPass CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VreEn;
+    // VenusBindVtx (vvb): Mesa vn_protocol vkCmdBindVertexBuffers CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VvbEn;
+    // VenusBindIdx (vib): Mesa vn_protocol vkCmdBindIndexBuffer CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VibEn;
+    // VenusDrawIdx (vdi): Mesa vn_protocol vkCmdDrawIndexed CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdiEn;
+    // VenusSetViewport (vvp): Mesa vn_protocol vkCmdSetViewport CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VvpEn;
+    // VenusSetScissor (vsi): Mesa vn_protocol vkCmdSetScissor CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VsiEn;
+    // VenusBarrier (vpb): Mesa vn_protocol vkCmdPipelineBarrier CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VpbEn;
+    // VenusNextSubpass (vns): Mesa vn_protocol vkCmdNextSubpass CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VnsEn;
+    // VenusDestroyFbuf (vdf): Mesa vn_protocol vkDestroyFramebuffer CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdfEn;
+    // VenusDestroyView (vdx): Mesa vn_protocol vkDestroyImageView CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdxEn;
+    // VenusDestroySampler (vdk): Mesa vn_protocol vkDestroySampler CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdkEn;
+    // VenusDestroyRpass (vdr): Mesa vn_protocol vkDestroyRenderPass CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdrEn;
+    // VenusDestroyBuf (vdb): Mesa vn_protocol vkDestroyBuffer CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdbEn;
+    // VenusDestroyImg (vdg): Mesa vn_protocol vkDestroyImage CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdgEn;
+    // VenusFreeMemory (vfe): Mesa vn_protocol vkFreeMemory CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VfeEn;
+    // VenusDestroyModule (vdm): Mesa vn_protocol vkDestroyShaderModule CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdmEn;
+    // VenusDestroyPipe (vdp): Mesa vn_protocol vkDestroyPipeline CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdpEn;
+    // VenusDestroyPlayout (vdy): Mesa vn_protocol vkDestroyPipelineLayout CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdyEn;
+    // VenusDestroyDsl (vdt): Mesa vn_protocol vkDestroyDescriptorSetLayout CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdtEn;
+    // VenusDestroyPool (vdq): Mesa vn_protocol vkDestroyDescriptorPool CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdqEn;
+    // VenusFreeDescset (vfs): Mesa vn_protocol vkFreeDescriptorSets CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VfsEn;
+    // VenusResetCmdbuf (vrc): Mesa vn_protocol vkResetCommandBuffer CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VrcEn;
+    // VenusFreeCmdbuf (vfc): Mesa vn_protocol vkFreeCommandBuffers CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VfcEn;
+    // VenusDestroyDevice (vdd): Mesa vn_protocol vkDestroyDevice CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VddEn;
+    // VenusResetCmdPool (vpc): Mesa vn_protocol vkResetCommandPool CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VpcEn;
+    // VenusDestroyCmdPool (vdc): Mesa vn_protocol vkDestroyCommandPool CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdcEn;
+    // VenusDestroyInstance (vdn): Mesa vn_protocol vkDestroyInstance CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdnEn;
+    // VenusFormatProps (vgf): Mesa vn_protocol vkGetPhysicalDeviceFormatProperties CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VgfEn;
+    // VenusImageFormat (vip): Mesa vn_protocol vkGetPhysicalDeviceImageFormatProperties CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VipEn;
+    // VenusDeviceExt (vxe): Mesa vn_protocol vkEnumerateDeviceExtensionProperties CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VxeEn;
+    // VenusResetDescPool (vrd): Mesa vn_protocol vkResetDescriptorPool CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VrdEn;
+    // VenusInstanceExt (vie): Mesa vn_protocol vkEnumerateInstanceExtensionProperties CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VieEn;
+    // VenusDeviceWait (vwl): Mesa vn_protocol vkDeviceWaitIdle CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VwlEn;
+    // VenusSubresourceLayout (vsl): Mesa vn_protocol vkGetImageSubresourceLayout CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VslEn;
+    // VenusRenderGranularity (vrg): Mesa vn_protocol vkGetRenderAreaGranularity CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VrgEn;
+    // VenusSetLineWidth (vlw): Mesa vn_protocol vkCmdSetLineWidth CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VlwEn;
+    // VenusSetDepthBias (vzb): Mesa vn_protocol vkCmdSetDepthBias CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VzbEn;
+    // VenusSetBlendConst (vbc): Mesa vn_protocol vkCmdSetBlendConstants CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VbcEn;
+    // VenusSetDepthBounds (vbo): Mesa vn_protocol vkCmdSetDepthBounds CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VboEn;
+    // VenusSetStencilCompare (vcm): Mesa vn_protocol vkCmdSetStencilCompareMask CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VcmEn;
+    // VenusSetStencilWrite (vwm): Mesa vn_protocol vkCmdSetStencilWriteMask CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VwmEn;
+    // VenusSetStencilRef (vrf): Mesa vn_protocol vkCmdSetStencilReference CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VrfEn;
+    // VenusCopyBuffer (vcc): Mesa vn_protocol vkCmdCopyBuffer CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VccEn;
+    // VenusCopyImage (vcy): Mesa vn_protocol vkCmdCopyImage CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VcyEn;
+    // VenusBlitImage (vbl): Mesa vn_protocol vkCmdBlitImage CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VblEn;
+    // VenusCopyBufToImg (vbt): Mesa vn_protocol vkCmdCopyBufferToImage CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VbtEn;
+    // VenusCopyImgToBuf (vic): Mesa vn_protocol vkCmdCopyImageToBuffer CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VicEn;
+    // VenusUpdateBuffer (vub): Mesa vn_protocol vkCmdUpdateBuffer CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VubEn;
+    // VenusFillBuffer (vfl): Mesa vn_protocol vkCmdFillBuffer CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VflEn;
+    // VenusClearColor (vcl): Mesa vn_protocol vkCmdClearColorImage CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VclEn;
+    // VenusDrawIndirect (vio): Mesa vn_protocol vkCmdDrawIndirect CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VioEn;
+    // VenusDrawIdxIndirect (vix): Mesa vn_protocol vkCmdDrawIndexedIndirect CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VixEn;
+    // VenusClearDepth (vds): Mesa vn_protocol vkCmdClearDepthStencilImage CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VdsEn;
+    // VenusClearAttach (vat): Mesa vn_protocol vkCmdClearAttachments CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VatEn;
+    // VenusDispatchIndirect (vin): Mesa vn_protocol vkCmdDispatchIndirect CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VinEn;
+    // VenusResolveImage (vrs): Mesa vn_protocol vkCmdResolveImage CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0.
+    logic        VrsEn;
+    // VenusGetFenceStatus (vgs): Mesa vn_protocol vkGetFenceStatus CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0. No FENCE kind.
+    logic        VgsEn;
+    // VenusWaitForFences (vwf): Mesa vn_protocol vkWaitForFences CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0. No FENCE kind.
+    logic        VwfEn;
+    // VenusResetFences (vfr): Mesa vn_protocol vkResetFences CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0. No FENCE kind.
+    logic        VfrEn;
+    // VenusDestroyFence (vfn): Mesa vn_protocol vkDestroyFence CS. Default-off. FeatureVirgl stays illegal. NumCapsets stays 0. No FENCE kind.
+    logic        VfnEn;
   } apu_cfg_t;
 
   localparam apu_cfg_t ApuOff = '{
@@ -802,7 +1499,353 @@ package g6lc_apu_cfg_pkg;
       B5xEn:              1'b0,
       B6rEn:              1'b0,
       B6kEn:              1'b0,
-      B6xEn:              1'b0
+      B6xEn:              1'b0,
+      AcwEn:              1'b0,
+      AcrEn:              1'b0,
+      AcxEn:              1'b0,
+      CswEn:              1'b0,
+      CsrEn:              1'b0,
+      CsxEn:              1'b0,
+      CrdEn:              1'b0,
+      CrlEn:              1'b0,
+      CrxEn:              1'b0,
+      CofEn:              1'b0,
+      CorEn:              1'b0,
+      CoxEn:              1'b0,
+      RpwEn:              1'b0,
+      RprEn:              1'b0,
+      RpxEn:              1'b0,
+      GrdEn:              1'b0,
+      GrlEn:              1'b0,
+      GrxEn:              1'b0,
+      RofEn:              1'b0,
+      RorEn:              1'b0,
+      RoxEn:              1'b0,
+      TfbEn:              1'b0,
+      TfrEn:              1'b0,
+      TfxEn:              1'b0,
+      RabEn:              1'b0,
+      RarEn:              1'b0,
+      RaxEn:              1'b0,
+      RfwEn:              1'b0,
+      RfrEn:              1'b0,
+      RfxEn:              1'b0,
+      TuwEn:              1'b0,
+      TurEn:              1'b0,
+      TuxEn:              1'b0,
+      TiwEn:              1'b0,
+      TirEn:              1'b0,
+      TixEn:              1'b0,
+      TawEn:              1'b0,
+      TarEn:              1'b0,
+      TaxEn:              1'b0,
+      TxcEn:              1'b0,
+      TxkEn:              1'b0,
+      TxxEn:              1'b0,
+      FtxEn:              1'b0,
+      FtrEn:              1'b0,
+      FtkEn:              1'b0,
+      OcwEn:              1'b0,
+      OcrEn:              1'b0,
+      OcxEn:              1'b0,
+      PbwEn:              1'b0,
+      PbrEn:              1'b0,
+      PbxEn:              1'b0,
+      TnwEn:              1'b0,
+      TnkEn:              1'b0,
+      TnxEn:              1'b0,
+      QntEn:              1'b0,
+      QnrEn:              1'b0,
+      QnxEn:              1'b0,
+      QavEn:              1'b0,
+      QakEn:              1'b0,
+      QaxEn:              1'b0,
+      QrgEn:              1'b0,
+      QrkEn:              1'b0,
+      QrxEn:              1'b0,
+      QhdEn:              1'b0,
+      QhkEn:              1'b0,
+      QhxEn:              1'b0,
+      QfdEn:              1'b0,
+      QfkEn:              1'b0,
+      QfxEn:              1'b0,
+      QwdEn:              1'b0,
+      QwkEn:              1'b0,
+      QwxEn:              1'b0,
+      QokEn:              1'b0,
+      QolEn:              1'b0,
+      QoxEn:              1'b0,
+      QuwEn:              1'b0,
+      QulEn:              1'b0,
+      QuxEn:              1'b0,
+      QiwEn:              1'b0,
+      QirEn:              1'b0,
+      QixEn:              1'b0,
+      QawEn:              1'b0,
+      QarEn:              1'b0,
+      QayEn:              1'b0,
+      QsvEn:              1'b0,
+      QskEn:              1'b0,
+      QsxEn:              1'b0,
+      QsrEn:              1'b0,
+      QslEn:              1'b0,
+      QsyEn:              1'b0,
+      QsdEn:              1'b0,
+      QseEn:              1'b0,
+      QsfEn:              1'b0,
+      QedEn:              1'b0,
+      QekEn:              1'b0,
+      QexEn:              1'b0,
+      QrsEn:              1'b0,
+      QrtEn:              1'b0,
+      QruEn:              1'b0,
+      QsoEn:              1'b0,
+      QspEn:              1'b0,
+      QsqEn:              1'b0,
+      QsuEn:              1'b0,
+      QstEn:              1'b0,
+      QszEn:              1'b0,
+      QsiEn:              1'b0,
+      QsnEn:              1'b0,
+      QsmEn:              1'b0,
+      QgaEn:              1'b0,
+      QgkEn:              1'b0,
+      QgxEn:              1'b0,
+      SnwEn:              1'b0,
+      SnkEn:              1'b0,
+      SnxEn:              1'b0,
+      SntEn:              1'b0,
+      SnrEn:              1'b0,
+      SnyEn:              1'b0,
+      SavEn:              1'b0,
+      SakEn:              1'b0,
+      SaxEn:              1'b0,
+      SrgEn:              1'b0,
+      SrkEn:              1'b0,
+      SrxEn:              1'b0,
+      ShdEn:              1'b0,
+      ShkEn:              1'b0,
+      ShxEn:              1'b0,
+      SfdEn:              1'b0,
+      SfkEn:              1'b0,
+      SfxEn:              1'b0,
+      SwdEn:              1'b0,
+      SwkEn:              1'b0,
+      SwxEn:              1'b0,
+      SokEn:              1'b0,
+      SolEn:              1'b0,
+      SoxEn:              1'b0,
+      SlwEn:              1'b0,
+      SllEn:              1'b0,
+      SlxEn:              1'b0,
+      SiwEn:              1'b0,
+      SirEn:              1'b0,
+      SixEn:              1'b0,
+      SgaEn:              1'b0,
+      SgkEn:              1'b0,
+      SgxEn:              1'b0,
+      RnwEn:              1'b0,
+      RnkEn:              1'b0,
+      RnxEn:              1'b0,
+      RntEn:              1'b0,
+      RnrEn:              1'b0,
+      RnyEn:              1'b0,
+      RavEn:              1'b0,
+      RakEn:              1'b0,
+      RayEn:              1'b0,
+      RrgEn:              1'b0,
+      RrkEn:              1'b0,
+      RrxEn:              1'b0,
+      RhdEn:              1'b0,
+      RhkEn:              1'b0,
+      RhxEn:              1'b0,
+      RfdEn:              1'b0,
+      RfkEn:              1'b0,
+      RfyEn:              1'b0,
+      RwdEn:              1'b0,
+      RwkEn:              1'b0,
+      RwxEn:              1'b0,
+      RokEn:              1'b0,
+      RolEn:              1'b0,
+      RoyEn:              1'b0,
+      RuwEn:              1'b0,
+      RulEn:              1'b0,
+      RuxEn:              1'b0,
+      RiwEn:              1'b0,
+      RirEn:              1'b0,
+      RixEn:              1'b0,
+      RgaEn:              1'b0,
+      RgkEn:              1'b0,
+      RgxEn:              1'b0,
+      GtxEn:              1'b0,
+      GtrEn:              1'b0,
+      GtkEn:              1'b0,
+      HcwEn:              1'b0,
+      HcrEn:              1'b0,
+      HcxEn:              1'b0,
+      WldEn:              1'b0,
+      WlrEn:              1'b0,
+      WlkEn:              1'b0,
+      CyrEn:              1'b0,
+      CykEn:              1'b0,
+      CyxEn:              1'b0,
+      GnwEn:              1'b0,
+      GnkEn:              1'b0,
+      GnxEn:              1'b0,
+      GefEn:              1'b0,
+      GekEn:              1'b0,
+      GexEn:              1'b0,
+      SpirvEn:            1'b0,
+      ChainEn:            1'b0,
+      CdmaEn:             1'b0,
+      ShmEn:              1'b0,
+      HvisEn:             1'b0,
+      VncsEn:             1'b0,
+      VcapEn:             1'b0,
+      VnringEn:           1'b0,
+      TdmaEn:             1'b0,
+      VnencEn:            1'b0,
+      VnpEn:              1'b0,
+      AvnEn:              1'b0,
+      AvuEn:              1'b0,
+      UirEn:              1'b0,
+      CmsEn:              1'b0,
+      PrsEn:              1'b0,
+      QdnEn:              1'b0,
+      GcsEn:              1'b0,
+      VndEn:              1'b0,
+      GnhEn:              1'b0,
+      HdpEn:              1'b0,
+      HphEn:              1'b0,
+      HrnEn:              1'b0,
+      RdnEn:              1'b0,
+      QrnEn:              1'b0,
+      QcmEn:              1'b0,
+      QtyEn:              1'b0,
+      VctEn:              1'b0,
+      QpuEn:              1'b0,
+      NtkEn:              1'b0,
+      VqtEn:              1'b0,
+      VaxEn:              1'b0,
+      VacEn:              1'b0,
+      HalEn:              1'b0,
+      AruEn:              1'b0,
+      QalEn:              1'b0,
+      QtaEn:              1'b0,
+      VcaEn:              1'b0,
+      QpaEn:              1'b0,
+      NtaEn:              1'b0,
+      VqaEn:              1'b0,
+      VaaEn:              1'b0,
+      VbgEn:              1'b0,
+      BalEn:              1'b0,
+      BruEn:              1'b0,
+      QbnEn:              1'b0,
+      QtbEn:              1'b0,
+      VcbEn:              1'b0,
+      QpbEn:              1'b0,
+      NtbEn:              1'b0,
+      VqbEn:              1'b0,
+      VabEn:              1'b0,
+      VenEn:              1'b0,
+      EalEn:              1'b0,
+      VqsEn:              1'b0,
+      VwiEn:              1'b0,
+      VgqEn:              1'b0,
+      VcdEn:              1'b0,
+      VciEn:              1'b0,
+      VepEn:              1'b0,
+      VqfEn:              1'b0,
+      VpfEn:              1'b0,
+      VppEn:              1'b0,
+      VmpEn:              1'b0,
+      VamEn:              1'b0,
+      VxbEn:              1'b0,
+      VbbEn:              1'b0,
+      VmmEn:              1'b0,
+      VumEn:              1'b0,
+      VbmEn:              1'b0,
+      VfmEn:              1'b0,
+      VimEn:              1'b0,
+      VmcEn:              1'b0,
+      VdlEn:              1'b0,
+      VplEn:              1'b0,
+      VcpEn:              1'b0,
+      VdaEn:              1'b0,
+      VudEn:              1'b0,
+      VbpEn:              1'b0,
+      VbdEn:              1'b0,
+      VpoEn:              1'b0,
+      VxiEn:              1'b0,
+      VbiEn:              1'b0,
+      VmiEn:              1'b0,
+      VxvEn:              1'b0,
+      VsmEn:              1'b0,
+      VrpEn:              1'b0,
+      VgpEn:              1'b0,
+      VfbEn:              1'b0,
+      VrbEn:              1'b0,
+      VdwEn:              1'b0,
+      VreEn:              1'b0,
+      VvbEn:              1'b0,
+      VibEn:              1'b0,
+      VdiEn:              1'b0,
+      VvpEn:              1'b0,
+      VsiEn:              1'b0,
+      VpbEn:              1'b0,
+      VnsEn:              1'b0,
+      VdfEn:              1'b0,
+      VdxEn:              1'b0,
+      VdkEn:              1'b0,
+      VdrEn:              1'b0,
+      VdbEn:              1'b0,
+      VdgEn:              1'b0,
+      VfeEn:              1'b0,
+      VdmEn:              1'b0,
+      VdpEn:              1'b0,
+      VdyEn:              1'b0,
+      VdtEn:              1'b0,
+      VdqEn:              1'b0,
+      VfsEn:              1'b0,
+      VrcEn:              1'b0,
+      VfcEn:              1'b0,
+      VddEn:              1'b0,
+      VpcEn:              1'b0,
+      VdcEn:              1'b0,
+      VdnEn:              1'b0,
+      VgfEn:              1'b0,
+      VipEn:              1'b0,
+      VxeEn:              1'b0,
+      VrdEn:              1'b0,
+      VieEn:              1'b0,
+      VwlEn:              1'b0,
+      VslEn:              1'b0,
+      VrgEn:              1'b0,
+      VlwEn:              1'b0,
+      VzbEn:              1'b0,
+      VbcEn:              1'b0,
+      VboEn:              1'b0,
+      VcmEn:              1'b0,
+      VwmEn:              1'b0,
+      VrfEn:              1'b0,
+      VccEn:              1'b0,
+      VcyEn:              1'b0,
+      VblEn:              1'b0,
+      VbtEn:              1'b0,
+      VicEn:              1'b0,
+      VubEn:              1'b0,
+      VflEn:              1'b0,
+      VclEn:              1'b0,
+      VioEn:              1'b0,
+      VixEn:              1'b0,
+      VdsEn:              1'b0,
+      VatEn:              1'b0,
+      VinEn:              1'b0,
+      VrsEn:              1'b0,
+      VgsEn:              1'b0,
+      VwfEn:              1'b0,
+      VfrEn:              1'b0,
+      VfnEn:              1'b0
   };
 
   // P1 transport bring-up profile: modern virtio-mmio, control/cursor queue
@@ -1060,7 +2103,353 @@ package g6lc_apu_cfg_pkg;
       B5xEn:              1'b0,
       B6rEn:              1'b0,
       B6kEn:              1'b0,
-      B6xEn:              1'b0
+      B6xEn:              1'b0,
+      AcwEn:              1'b0,
+      AcrEn:              1'b0,
+      AcxEn:              1'b0,
+      CswEn:              1'b0,
+      CsrEn:              1'b0,
+      CsxEn:              1'b0,
+      CrdEn:              1'b0,
+      CrlEn:              1'b0,
+      CrxEn:              1'b0,
+      CofEn:              1'b0,
+      CorEn:              1'b0,
+      CoxEn:              1'b0,
+      RpwEn:              1'b0,
+      RprEn:              1'b0,
+      RpxEn:              1'b0,
+      GrdEn:              1'b0,
+      GrlEn:              1'b0,
+      GrxEn:              1'b0,
+      RofEn:              1'b0,
+      RorEn:              1'b0,
+      RoxEn:              1'b0,
+      TfbEn:              1'b0,
+      TfrEn:              1'b0,
+      TfxEn:              1'b0,
+      RabEn:              1'b0,
+      RarEn:              1'b0,
+      RaxEn:              1'b0,
+      RfwEn:              1'b0,
+      RfrEn:              1'b0,
+      RfxEn:              1'b0,
+      TuwEn:              1'b0,
+      TurEn:              1'b0,
+      TuxEn:              1'b0,
+      TiwEn:              1'b0,
+      TirEn:              1'b0,
+      TixEn:              1'b0,
+      TawEn:              1'b0,
+      TarEn:              1'b0,
+      TaxEn:              1'b0,
+      TxcEn:              1'b0,
+      TxkEn:              1'b0,
+      TxxEn:              1'b0,
+      FtxEn:              1'b0,
+      FtrEn:              1'b0,
+      FtkEn:              1'b0,
+      OcwEn:              1'b0,
+      OcrEn:              1'b0,
+      OcxEn:              1'b0,
+      PbwEn:              1'b0,
+      PbrEn:              1'b0,
+      PbxEn:              1'b0,
+      TnwEn:              1'b0,
+      TnkEn:              1'b0,
+      TnxEn:              1'b0,
+      QntEn:              1'b0,
+      QnrEn:              1'b0,
+      QnxEn:              1'b0,
+      QavEn:              1'b0,
+      QakEn:              1'b0,
+      QaxEn:              1'b0,
+      QrgEn:              1'b0,
+      QrkEn:              1'b0,
+      QrxEn:              1'b0,
+      QhdEn:              1'b0,
+      QhkEn:              1'b0,
+      QhxEn:              1'b0,
+      QfdEn:              1'b0,
+      QfkEn:              1'b0,
+      QfxEn:              1'b0,
+      QwdEn:              1'b0,
+      QwkEn:              1'b0,
+      QwxEn:              1'b0,
+      QokEn:              1'b0,
+      QolEn:              1'b0,
+      QoxEn:              1'b0,
+      QuwEn:              1'b0,
+      QulEn:              1'b0,
+      QuxEn:              1'b0,
+      QiwEn:              1'b0,
+      QirEn:              1'b0,
+      QixEn:              1'b0,
+      QawEn:              1'b0,
+      QarEn:              1'b0,
+      QayEn:              1'b0,
+      QsvEn:              1'b0,
+      QskEn:              1'b0,
+      QsxEn:              1'b0,
+      QsrEn:              1'b0,
+      QslEn:              1'b0,
+      QsyEn:              1'b0,
+      QsdEn:              1'b0,
+      QseEn:              1'b0,
+      QsfEn:              1'b0,
+      QedEn:              1'b0,
+      QekEn:              1'b0,
+      QexEn:              1'b0,
+      QrsEn:              1'b0,
+      QrtEn:              1'b0,
+      QruEn:              1'b0,
+      QsoEn:              1'b0,
+      QspEn:              1'b0,
+      QsqEn:              1'b0,
+      QsuEn:              1'b0,
+      QstEn:              1'b0,
+      QszEn:              1'b0,
+      QsiEn:              1'b0,
+      QsnEn:              1'b0,
+      QsmEn:              1'b0,
+      QgaEn:              1'b0,
+      QgkEn:              1'b0,
+      QgxEn:              1'b0,
+      SnwEn:              1'b0,
+      SnkEn:              1'b0,
+      SnxEn:              1'b0,
+      SntEn:              1'b0,
+      SnrEn:              1'b0,
+      SnyEn:              1'b0,
+      SavEn:              1'b0,
+      SakEn:              1'b0,
+      SaxEn:              1'b0,
+      SrgEn:              1'b0,
+      SrkEn:              1'b0,
+      SrxEn:              1'b0,
+      ShdEn:              1'b0,
+      ShkEn:              1'b0,
+      ShxEn:              1'b0,
+      SfdEn:              1'b0,
+      SfkEn:              1'b0,
+      SfxEn:              1'b0,
+      SwdEn:              1'b0,
+      SwkEn:              1'b0,
+      SwxEn:              1'b0,
+      SokEn:              1'b0,
+      SolEn:              1'b0,
+      SoxEn:              1'b0,
+      SlwEn:              1'b0,
+      SllEn:              1'b0,
+      SlxEn:              1'b0,
+      SiwEn:              1'b0,
+      SirEn:              1'b0,
+      SixEn:              1'b0,
+      SgaEn:              1'b0,
+      SgkEn:              1'b0,
+      SgxEn:              1'b0,
+      RnwEn:              1'b0,
+      RnkEn:              1'b0,
+      RnxEn:              1'b0,
+      RntEn:              1'b0,
+      RnrEn:              1'b0,
+      RnyEn:              1'b0,
+      RavEn:              1'b0,
+      RakEn:              1'b0,
+      RayEn:              1'b0,
+      RrgEn:              1'b0,
+      RrkEn:              1'b0,
+      RrxEn:              1'b0,
+      RhdEn:              1'b0,
+      RhkEn:              1'b0,
+      RhxEn:              1'b0,
+      RfdEn:              1'b0,
+      RfkEn:              1'b0,
+      RfyEn:              1'b0,
+      RwdEn:              1'b0,
+      RwkEn:              1'b0,
+      RwxEn:              1'b0,
+      RokEn:              1'b0,
+      RolEn:              1'b0,
+      RoyEn:              1'b0,
+      RuwEn:              1'b0,
+      RulEn:              1'b0,
+      RuxEn:              1'b0,
+      RiwEn:              1'b0,
+      RirEn:              1'b0,
+      RixEn:              1'b0,
+      RgaEn:              1'b0,
+      RgkEn:              1'b0,
+      RgxEn:              1'b0,
+      GtxEn:              1'b0,
+      GtrEn:              1'b0,
+      GtkEn:              1'b0,
+      HcwEn:              1'b0,
+      HcrEn:              1'b0,
+      HcxEn:              1'b0,
+      WldEn:              1'b0,
+      WlrEn:              1'b0,
+      WlkEn:              1'b0,
+      CyrEn:              1'b0,
+      CykEn:              1'b0,
+      CyxEn:              1'b0,
+      GnwEn:              1'b0,
+      GnkEn:              1'b0,
+      GnxEn:              1'b0,
+      GefEn:              1'b0,
+      GekEn:              1'b0,
+      GexEn:              1'b0,
+      SpirvEn:            1'b0,
+      ChainEn:            1'b0,
+      CdmaEn:             1'b0,
+      ShmEn:              1'b0,
+      HvisEn:             1'b0,
+      VncsEn:             1'b0,
+      VcapEn:             1'b0,
+      VnringEn:           1'b0,
+      TdmaEn:             1'b0,
+      VnencEn:            1'b0,
+      VnpEn:              1'b0,
+      AvnEn:              1'b0,
+      AvuEn:              1'b0,
+      UirEn:              1'b0,
+      CmsEn:              1'b0,
+      PrsEn:              1'b0,
+      QdnEn:              1'b0,
+      GcsEn:              1'b0,
+      VndEn:              1'b0,
+      GnhEn:              1'b0,
+      HdpEn:              1'b0,
+      HphEn:              1'b0,
+      HrnEn:              1'b0,
+      RdnEn:              1'b0,
+      QrnEn:              1'b0,
+      QcmEn:              1'b0,
+      QtyEn:              1'b0,
+      VctEn:              1'b0,
+      QpuEn:              1'b0,
+      NtkEn:              1'b0,
+      VqtEn:              1'b0,
+      VaxEn:              1'b0,
+      VacEn:              1'b0,
+      HalEn:              1'b0,
+      AruEn:              1'b0,
+      QalEn:              1'b0,
+      QtaEn:              1'b0,
+      VcaEn:              1'b0,
+      QpaEn:              1'b0,
+      NtaEn:              1'b0,
+      VqaEn:              1'b0,
+      VaaEn:              1'b0,
+      VbgEn:              1'b0,
+      BalEn:              1'b0,
+      BruEn:              1'b0,
+      QbnEn:              1'b0,
+      QtbEn:              1'b0,
+      VcbEn:              1'b0,
+      QpbEn:              1'b0,
+      NtbEn:              1'b0,
+      VqbEn:              1'b0,
+      VabEn:              1'b0,
+      VenEn:              1'b0,
+      EalEn:              1'b0,
+      VqsEn:              1'b0,
+      VwiEn:              1'b0,
+      VgqEn:              1'b0,
+      VcdEn:              1'b0,
+      VciEn:              1'b0,
+      VepEn:              1'b0,
+      VqfEn:              1'b0,
+      VpfEn:              1'b0,
+      VppEn:              1'b0,
+      VmpEn:              1'b0,
+      VamEn:              1'b0,
+      VxbEn:              1'b0,
+      VbbEn:              1'b0,
+      VmmEn:              1'b0,
+      VumEn:              1'b0,
+      VbmEn:              1'b0,
+      VfmEn:              1'b0,
+      VimEn:              1'b0,
+      VmcEn:              1'b0,
+      VdlEn:              1'b0,
+      VplEn:              1'b0,
+      VcpEn:              1'b0,
+      VdaEn:              1'b0,
+      VudEn:              1'b0,
+      VbpEn:              1'b0,
+      VbdEn:              1'b0,
+      VpoEn:              1'b0,
+      VxiEn:              1'b0,
+      VbiEn:              1'b0,
+      VmiEn:              1'b0,
+      VxvEn:              1'b0,
+      VsmEn:              1'b0,
+      VrpEn:              1'b0,
+      VgpEn:              1'b0,
+      VfbEn:              1'b0,
+      VrbEn:              1'b0,
+      VdwEn:              1'b0,
+      VreEn:              1'b0,
+      VvbEn:              1'b0,
+      VibEn:              1'b0,
+      VdiEn:              1'b0,
+      VvpEn:              1'b0,
+      VsiEn:              1'b0,
+      VpbEn:              1'b0,
+      VnsEn:              1'b0,
+      VdfEn:              1'b0,
+      VdxEn:              1'b0,
+      VdkEn:              1'b0,
+      VdrEn:              1'b0,
+      VdbEn:              1'b0,
+      VdgEn:              1'b0,
+      VfeEn:              1'b0,
+      VdmEn:              1'b0,
+      VdpEn:              1'b0,
+      VdyEn:              1'b0,
+      VdtEn:              1'b0,
+      VdqEn:              1'b0,
+      VfsEn:              1'b0,
+      VrcEn:              1'b0,
+      VfcEn:              1'b0,
+      VddEn:              1'b0,
+      VpcEn:              1'b0,
+      VdcEn:              1'b0,
+      VdnEn:              1'b0,
+      VgfEn:              1'b0,
+      VipEn:              1'b0,
+      VxeEn:              1'b0,
+      VrdEn:              1'b0,
+      VieEn:              1'b0,
+      VwlEn:              1'b0,
+      VslEn:              1'b0,
+      VrgEn:              1'b0,
+      VlwEn:              1'b0,
+      VzbEn:              1'b0,
+      VbcEn:              1'b0,
+      VboEn:              1'b0,
+      VcmEn:              1'b0,
+      VwmEn:              1'b0,
+      VrfEn:              1'b0,
+      VccEn:              1'b0,
+      VcyEn:              1'b0,
+      VblEn:              1'b0,
+      VbtEn:              1'b0,
+      VicEn:              1'b0,
+      VubEn:              1'b0,
+      VflEn:              1'b0,
+      VclEn:              1'b0,
+      VioEn:              1'b0,
+      VixEn:              1'b0,
+      VdsEn:              1'b0,
+      VatEn:              1'b0,
+      VinEn:              1'b0,
+      VrsEn:              1'b0,
+      VgsEn:              1'b0,
+      VwfEn:              1'b0,
+      VfrEn:              1'b0,
+      VfnEn:              1'b0
   };
 
   // Testharness bring-up: same transport grant as P1, with a reserved
@@ -1317,7 +2706,353 @@ package g6lc_apu_cfg_pkg;
       B5xEn:              1'b0,
       B6rEn:              1'b0,
       B6kEn:              1'b0,
-      B6xEn:              1'b0
+      B6xEn:              1'b0,
+      AcwEn:              1'b0,
+      AcrEn:              1'b0,
+      AcxEn:              1'b0,
+      CswEn:              1'b0,
+      CsrEn:              1'b0,
+      CsxEn:              1'b0,
+      CrdEn:              1'b0,
+      CrlEn:              1'b0,
+      CrxEn:              1'b0,
+      CofEn:              1'b0,
+      CorEn:              1'b0,
+      CoxEn:              1'b0,
+      RpwEn:              1'b0,
+      RprEn:              1'b0,
+      RpxEn:              1'b0,
+      GrdEn:              1'b0,
+      GrlEn:              1'b0,
+      GrxEn:              1'b0,
+      RofEn:              1'b0,
+      RorEn:              1'b0,
+      RoxEn:              1'b0,
+      TfbEn:              1'b0,
+      TfrEn:              1'b0,
+      TfxEn:              1'b0,
+      RabEn:              1'b0,
+      RarEn:              1'b0,
+      RaxEn:              1'b0,
+      RfwEn:              1'b0,
+      RfrEn:              1'b0,
+      RfxEn:              1'b0,
+      TuwEn:              1'b0,
+      TurEn:              1'b0,
+      TuxEn:              1'b0,
+      TiwEn:              1'b0,
+      TirEn:              1'b0,
+      TixEn:              1'b0,
+      TawEn:              1'b0,
+      TarEn:              1'b0,
+      TaxEn:              1'b0,
+      TxcEn:              1'b0,
+      TxkEn:              1'b0,
+      TxxEn:              1'b0,
+      FtxEn:              1'b0,
+      FtrEn:              1'b0,
+      FtkEn:              1'b0,
+      OcwEn:              1'b0,
+      OcrEn:              1'b0,
+      OcxEn:              1'b0,
+      PbwEn:              1'b0,
+      PbrEn:              1'b0,
+      PbxEn:              1'b0,
+      TnwEn:              1'b0,
+      TnkEn:              1'b0,
+      TnxEn:              1'b0,
+      QntEn:              1'b0,
+      QnrEn:              1'b0,
+      QnxEn:              1'b0,
+      QavEn:              1'b0,
+      QakEn:              1'b0,
+      QaxEn:              1'b0,
+      QrgEn:              1'b0,
+      QrkEn:              1'b0,
+      QrxEn:              1'b0,
+      QhdEn:              1'b0,
+      QhkEn:              1'b0,
+      QhxEn:              1'b0,
+      QfdEn:              1'b0,
+      QfkEn:              1'b0,
+      QfxEn:              1'b0,
+      QwdEn:              1'b0,
+      QwkEn:              1'b0,
+      QwxEn:              1'b0,
+      QokEn:              1'b0,
+      QolEn:              1'b0,
+      QoxEn:              1'b0,
+      QuwEn:              1'b0,
+      QulEn:              1'b0,
+      QuxEn:              1'b0,
+      QiwEn:              1'b0,
+      QirEn:              1'b0,
+      QixEn:              1'b0,
+      QawEn:              1'b0,
+      QarEn:              1'b0,
+      QayEn:              1'b0,
+      QsvEn:              1'b0,
+      QskEn:              1'b0,
+      QsxEn:              1'b0,
+      QsrEn:              1'b0,
+      QslEn:              1'b0,
+      QsyEn:              1'b0,
+      QsdEn:              1'b0,
+      QseEn:              1'b0,
+      QsfEn:              1'b0,
+      QedEn:              1'b0,
+      QekEn:              1'b0,
+      QexEn:              1'b0,
+      QrsEn:              1'b0,
+      QrtEn:              1'b0,
+      QruEn:              1'b0,
+      QsoEn:              1'b0,
+      QspEn:              1'b0,
+      QsqEn:              1'b0,
+      QsuEn:              1'b0,
+      QstEn:              1'b0,
+      QszEn:              1'b0,
+      QsiEn:              1'b0,
+      QsnEn:              1'b0,
+      QsmEn:              1'b0,
+      QgaEn:              1'b0,
+      QgkEn:              1'b0,
+      QgxEn:              1'b0,
+      SnwEn:              1'b0,
+      SnkEn:              1'b0,
+      SnxEn:              1'b0,
+      SntEn:              1'b0,
+      SnrEn:              1'b0,
+      SnyEn:              1'b0,
+      SavEn:              1'b0,
+      SakEn:              1'b0,
+      SaxEn:              1'b0,
+      SrgEn:              1'b0,
+      SrkEn:              1'b0,
+      SrxEn:              1'b0,
+      ShdEn:              1'b0,
+      ShkEn:              1'b0,
+      ShxEn:              1'b0,
+      SfdEn:              1'b0,
+      SfkEn:              1'b0,
+      SfxEn:              1'b0,
+      SwdEn:              1'b0,
+      SwkEn:              1'b0,
+      SwxEn:              1'b0,
+      SokEn:              1'b0,
+      SolEn:              1'b0,
+      SoxEn:              1'b0,
+      SlwEn:              1'b0,
+      SllEn:              1'b0,
+      SlxEn:              1'b0,
+      SiwEn:              1'b0,
+      SirEn:              1'b0,
+      SixEn:              1'b0,
+      SgaEn:              1'b0,
+      SgkEn:              1'b0,
+      SgxEn:              1'b0,
+      RnwEn:              1'b0,
+      RnkEn:              1'b0,
+      RnxEn:              1'b0,
+      RntEn:              1'b0,
+      RnrEn:              1'b0,
+      RnyEn:              1'b0,
+      RavEn:              1'b0,
+      RakEn:              1'b0,
+      RayEn:              1'b0,
+      RrgEn:              1'b0,
+      RrkEn:              1'b0,
+      RrxEn:              1'b0,
+      RhdEn:              1'b0,
+      RhkEn:              1'b0,
+      RhxEn:              1'b0,
+      RfdEn:              1'b0,
+      RfkEn:              1'b0,
+      RfyEn:              1'b0,
+      RwdEn:              1'b0,
+      RwkEn:              1'b0,
+      RwxEn:              1'b0,
+      RokEn:              1'b0,
+      RolEn:              1'b0,
+      RoyEn:              1'b0,
+      RuwEn:              1'b0,
+      RulEn:              1'b0,
+      RuxEn:              1'b0,
+      RiwEn:              1'b0,
+      RirEn:              1'b0,
+      RixEn:              1'b0,
+      RgaEn:              1'b0,
+      RgkEn:              1'b0,
+      RgxEn:              1'b0,
+      GtxEn:              1'b0,
+      GtrEn:              1'b0,
+      GtkEn:              1'b0,
+      HcwEn:              1'b0,
+      HcrEn:              1'b0,
+      HcxEn:              1'b0,
+      WldEn:              1'b0,
+      WlrEn:              1'b0,
+      WlkEn:              1'b0,
+      CyrEn:              1'b0,
+      CykEn:              1'b0,
+      CyxEn:              1'b0,
+      GnwEn:              1'b0,
+      GnkEn:              1'b0,
+      GnxEn:              1'b0,
+      GefEn:              1'b0,
+      GekEn:              1'b0,
+      GexEn:              1'b0,
+      SpirvEn:            1'b0,
+      ChainEn:            1'b0,
+      CdmaEn:             1'b0,
+      ShmEn:              1'b0,
+      HvisEn:             1'b0,
+      VncsEn:             1'b0,
+      VcapEn:             1'b0,
+      VnringEn:           1'b0,
+      TdmaEn:             1'b0,
+      VnencEn:            1'b0,
+      VnpEn:              1'b0,
+      AvnEn:              1'b0,
+      AvuEn:              1'b0,
+      UirEn:              1'b0,
+      CmsEn:              1'b0,
+      PrsEn:              1'b0,
+      QdnEn:              1'b0,
+      GcsEn:              1'b0,
+      VndEn:              1'b0,
+      GnhEn:              1'b0,
+      HdpEn:              1'b0,
+      HphEn:              1'b0,
+      HrnEn:              1'b0,
+      RdnEn:              1'b0,
+      QrnEn:              1'b0,
+      QcmEn:              1'b0,
+      QtyEn:              1'b0,
+      VctEn:              1'b0,
+      QpuEn:              1'b0,
+      NtkEn:              1'b0,
+      VqtEn:              1'b0,
+      VaxEn:              1'b0,
+      VacEn:              1'b0,
+      HalEn:              1'b0,
+      AruEn:              1'b0,
+      QalEn:              1'b0,
+      QtaEn:              1'b0,
+      VcaEn:              1'b0,
+      QpaEn:              1'b0,
+      NtaEn:              1'b0,
+      VqaEn:              1'b0,
+      VaaEn:              1'b0,
+      VbgEn:              1'b0,
+      BalEn:              1'b0,
+      BruEn:              1'b0,
+      QbnEn:              1'b0,
+      QtbEn:              1'b0,
+      VcbEn:              1'b0,
+      QpbEn:              1'b0,
+      NtbEn:              1'b0,
+      VqbEn:              1'b0,
+      VabEn:              1'b0,
+      VenEn:              1'b0,
+      EalEn:              1'b0,
+      VqsEn:              1'b0,
+      VwiEn:              1'b0,
+      VgqEn:              1'b0,
+      VcdEn:              1'b0,
+      VciEn:              1'b0,
+      VepEn:              1'b0,
+      VqfEn:              1'b0,
+      VpfEn:              1'b0,
+      VppEn:              1'b0,
+      VmpEn:              1'b0,
+      VamEn:              1'b0,
+      VxbEn:              1'b0,
+      VbbEn:              1'b0,
+      VmmEn:              1'b0,
+      VumEn:              1'b0,
+      VbmEn:              1'b0,
+      VfmEn:              1'b0,
+      VimEn:              1'b0,
+      VmcEn:              1'b0,
+      VdlEn:              1'b0,
+      VplEn:              1'b0,
+      VcpEn:              1'b0,
+      VdaEn:              1'b0,
+      VudEn:              1'b0,
+      VbpEn:              1'b0,
+      VbdEn:              1'b0,
+      VpoEn:              1'b0,
+      VxiEn:              1'b0,
+      VbiEn:              1'b0,
+      VmiEn:              1'b0,
+      VxvEn:              1'b0,
+      VsmEn:              1'b0,
+      VrpEn:              1'b0,
+      VgpEn:              1'b0,
+      VfbEn:              1'b0,
+      VrbEn:              1'b0,
+      VdwEn:              1'b0,
+      VreEn:              1'b0,
+      VvbEn:              1'b0,
+      VibEn:              1'b0,
+      VdiEn:              1'b0,
+      VvpEn:              1'b0,
+      VsiEn:              1'b0,
+      VpbEn:              1'b0,
+      VnsEn:              1'b0,
+      VdfEn:              1'b0,
+      VdxEn:              1'b0,
+      VdkEn:              1'b0,
+      VdrEn:              1'b0,
+      VdbEn:              1'b0,
+      VdgEn:              1'b0,
+      VfeEn:              1'b0,
+      VdmEn:              1'b0,
+      VdpEn:              1'b0,
+      VdyEn:              1'b0,
+      VdtEn:              1'b0,
+      VdqEn:              1'b0,
+      VfsEn:              1'b0,
+      VrcEn:              1'b0,
+      VfcEn:              1'b0,
+      VddEn:              1'b0,
+      VpcEn:              1'b0,
+      VdcEn:              1'b0,
+      VdnEn:              1'b0,
+      VgfEn:              1'b0,
+      VipEn:              1'b0,
+      VxeEn:              1'b0,
+      VrdEn:              1'b0,
+      VieEn:              1'b0,
+      VwlEn:              1'b0,
+      VslEn:              1'b0,
+      VrgEn:              1'b0,
+      VlwEn:              1'b0,
+      VzbEn:              1'b0,
+      VbcEn:              1'b0,
+      VboEn:              1'b0,
+      VcmEn:              1'b0,
+      VwmEn:              1'b0,
+      VrfEn:              1'b0,
+      VccEn:              1'b0,
+      VcyEn:              1'b0,
+      VblEn:              1'b0,
+      VbtEn:              1'b0,
+      VicEn:              1'b0,
+      VubEn:              1'b0,
+      VflEn:              1'b0,
+      VclEn:              1'b0,
+      VioEn:              1'b0,
+      VixEn:              1'b0,
+      VdsEn:              1'b0,
+      VatEn:              1'b0,
+      VinEn:              1'b0,
+      VrsEn:              1'b0,
+      VgsEn:              1'b0,
+      VwfEn:              1'b0,
+      VfrEn:              1'b0,
+      VfnEn:              1'b0
   };
 
   // Proof profile for g6lc_apu_sched. Not the testharness boot config:
@@ -1574,7 +3309,353 @@ package g6lc_apu_cfg_pkg;
       B5xEn:              1'b0,
       B6rEn:              1'b0,
       B6kEn:              1'b0,
-      B6xEn:              1'b0
+      B6xEn:              1'b0,
+      AcwEn:              1'b0,
+      AcrEn:              1'b0,
+      AcxEn:              1'b0,
+      CswEn:              1'b0,
+      CsrEn:              1'b0,
+      CsxEn:              1'b0,
+      CrdEn:              1'b0,
+      CrlEn:              1'b0,
+      CrxEn:              1'b0,
+      CofEn:              1'b0,
+      CorEn:              1'b0,
+      CoxEn:              1'b0,
+      RpwEn:              1'b0,
+      RprEn:              1'b0,
+      RpxEn:              1'b0,
+      GrdEn:              1'b0,
+      GrlEn:              1'b0,
+      GrxEn:              1'b0,
+      RofEn:              1'b0,
+      RorEn:              1'b0,
+      RoxEn:              1'b0,
+      TfbEn:              1'b0,
+      TfrEn:              1'b0,
+      TfxEn:              1'b0,
+      RabEn:              1'b0,
+      RarEn:              1'b0,
+      RaxEn:              1'b0,
+      RfwEn:              1'b0,
+      RfrEn:              1'b0,
+      RfxEn:              1'b0,
+      TuwEn:              1'b0,
+      TurEn:              1'b0,
+      TuxEn:              1'b0,
+      TiwEn:              1'b0,
+      TirEn:              1'b0,
+      TixEn:              1'b0,
+      TawEn:              1'b0,
+      TarEn:              1'b0,
+      TaxEn:              1'b0,
+      TxcEn:              1'b0,
+      TxkEn:              1'b0,
+      TxxEn:              1'b0,
+      FtxEn:              1'b0,
+      FtrEn:              1'b0,
+      FtkEn:              1'b0,
+      OcwEn:              1'b0,
+      OcrEn:              1'b0,
+      OcxEn:              1'b0,
+      PbwEn:              1'b0,
+      PbrEn:              1'b0,
+      PbxEn:              1'b0,
+      TnwEn:              1'b0,
+      TnkEn:              1'b0,
+      TnxEn:              1'b0,
+      QntEn:              1'b0,
+      QnrEn:              1'b0,
+      QnxEn:              1'b0,
+      QavEn:              1'b0,
+      QakEn:              1'b0,
+      QaxEn:              1'b0,
+      QrgEn:              1'b0,
+      QrkEn:              1'b0,
+      QrxEn:              1'b0,
+      QhdEn:              1'b0,
+      QhkEn:              1'b0,
+      QhxEn:              1'b0,
+      QfdEn:              1'b0,
+      QfkEn:              1'b0,
+      QfxEn:              1'b0,
+      QwdEn:              1'b0,
+      QwkEn:              1'b0,
+      QwxEn:              1'b0,
+      QokEn:              1'b0,
+      QolEn:              1'b0,
+      QoxEn:              1'b0,
+      QuwEn:              1'b0,
+      QulEn:              1'b0,
+      QuxEn:              1'b0,
+      QiwEn:              1'b0,
+      QirEn:              1'b0,
+      QixEn:              1'b0,
+      QawEn:              1'b0,
+      QarEn:              1'b0,
+      QayEn:              1'b0,
+      QsvEn:              1'b0,
+      QskEn:              1'b0,
+      QsxEn:              1'b0,
+      QsrEn:              1'b0,
+      QslEn:              1'b0,
+      QsyEn:              1'b0,
+      QsdEn:              1'b0,
+      QseEn:              1'b0,
+      QsfEn:              1'b0,
+      QedEn:              1'b0,
+      QekEn:              1'b0,
+      QexEn:              1'b0,
+      QrsEn:              1'b0,
+      QrtEn:              1'b0,
+      QruEn:              1'b0,
+      QsoEn:              1'b0,
+      QspEn:              1'b0,
+      QsqEn:              1'b0,
+      QsuEn:              1'b0,
+      QstEn:              1'b0,
+      QszEn:              1'b0,
+      QsiEn:              1'b0,
+      QsnEn:              1'b0,
+      QsmEn:              1'b0,
+      QgaEn:              1'b0,
+      QgkEn:              1'b0,
+      QgxEn:              1'b0,
+      SnwEn:              1'b0,
+      SnkEn:              1'b0,
+      SnxEn:              1'b0,
+      SntEn:              1'b0,
+      SnrEn:              1'b0,
+      SnyEn:              1'b0,
+      SavEn:              1'b0,
+      SakEn:              1'b0,
+      SaxEn:              1'b0,
+      SrgEn:              1'b0,
+      SrkEn:              1'b0,
+      SrxEn:              1'b0,
+      ShdEn:              1'b0,
+      ShkEn:              1'b0,
+      ShxEn:              1'b0,
+      SfdEn:              1'b0,
+      SfkEn:              1'b0,
+      SfxEn:              1'b0,
+      SwdEn:              1'b0,
+      SwkEn:              1'b0,
+      SwxEn:              1'b0,
+      SokEn:              1'b0,
+      SolEn:              1'b0,
+      SoxEn:              1'b0,
+      SlwEn:              1'b0,
+      SllEn:              1'b0,
+      SlxEn:              1'b0,
+      SiwEn:              1'b0,
+      SirEn:              1'b0,
+      SixEn:              1'b0,
+      SgaEn:              1'b0,
+      SgkEn:              1'b0,
+      SgxEn:              1'b0,
+      RnwEn:              1'b0,
+      RnkEn:              1'b0,
+      RnxEn:              1'b0,
+      RntEn:              1'b0,
+      RnrEn:              1'b0,
+      RnyEn:              1'b0,
+      RavEn:              1'b0,
+      RakEn:              1'b0,
+      RayEn:              1'b0,
+      RrgEn:              1'b0,
+      RrkEn:              1'b0,
+      RrxEn:              1'b0,
+      RhdEn:              1'b0,
+      RhkEn:              1'b0,
+      RhxEn:              1'b0,
+      RfdEn:              1'b0,
+      RfkEn:              1'b0,
+      RfyEn:              1'b0,
+      RwdEn:              1'b0,
+      RwkEn:              1'b0,
+      RwxEn:              1'b0,
+      RokEn:              1'b0,
+      RolEn:              1'b0,
+      RoyEn:              1'b0,
+      RuwEn:              1'b0,
+      RulEn:              1'b0,
+      RuxEn:              1'b0,
+      RiwEn:              1'b0,
+      RirEn:              1'b0,
+      RixEn:              1'b0,
+      RgaEn:              1'b0,
+      RgkEn:              1'b0,
+      RgxEn:              1'b0,
+      GtxEn:              1'b0,
+      GtrEn:              1'b0,
+      GtkEn:              1'b0,
+      HcwEn:              1'b0,
+      HcrEn:              1'b0,
+      HcxEn:              1'b0,
+      WldEn:              1'b0,
+      WlrEn:              1'b0,
+      WlkEn:              1'b0,
+      CyrEn:              1'b0,
+      CykEn:              1'b0,
+      CyxEn:              1'b0,
+      GnwEn:              1'b0,
+      GnkEn:              1'b0,
+      GnxEn:              1'b0,
+      GefEn:              1'b0,
+      GekEn:              1'b0,
+      GexEn:              1'b0,
+      SpirvEn:            1'b0,
+      ChainEn:            1'b0,
+      CdmaEn:             1'b0,
+      ShmEn:              1'b0,
+      HvisEn:             1'b0,
+      VncsEn:             1'b0,
+      VcapEn:             1'b0,
+      VnringEn:           1'b0,
+      TdmaEn:             1'b0,
+      VnencEn:            1'b0,
+      VnpEn:              1'b0,
+      AvnEn:              1'b0,
+      AvuEn:              1'b0,
+      UirEn:              1'b0,
+      CmsEn:              1'b0,
+      PrsEn:              1'b0,
+      QdnEn:              1'b0,
+      GcsEn:              1'b0,
+      VndEn:              1'b0,
+      GnhEn:              1'b0,
+      HdpEn:              1'b0,
+      HphEn:              1'b0,
+      HrnEn:              1'b0,
+      RdnEn:              1'b0,
+      QrnEn:              1'b0,
+      QcmEn:              1'b0,
+      QtyEn:              1'b0,
+      VctEn:              1'b0,
+      QpuEn:              1'b0,
+      NtkEn:              1'b0,
+      VqtEn:              1'b0,
+      VaxEn:              1'b0,
+      VacEn:              1'b0,
+      HalEn:              1'b0,
+      AruEn:              1'b0,
+      QalEn:              1'b0,
+      QtaEn:              1'b0,
+      VcaEn:              1'b0,
+      QpaEn:              1'b0,
+      NtaEn:              1'b0,
+      VqaEn:              1'b0,
+      VaaEn:              1'b0,
+      VbgEn:              1'b0,
+      BalEn:              1'b0,
+      BruEn:              1'b0,
+      QbnEn:              1'b0,
+      QtbEn:              1'b0,
+      VcbEn:              1'b0,
+      QpbEn:              1'b0,
+      NtbEn:              1'b0,
+      VqbEn:              1'b0,
+      VabEn:              1'b0,
+      VenEn:              1'b0,
+      EalEn:              1'b0,
+      VqsEn:              1'b0,
+      VwiEn:              1'b0,
+      VgqEn:              1'b0,
+      VcdEn:              1'b0,
+      VciEn:              1'b0,
+      VepEn:              1'b0,
+      VqfEn:              1'b0,
+      VpfEn:              1'b0,
+      VppEn:              1'b0,
+      VmpEn:              1'b0,
+      VamEn:              1'b0,
+      VxbEn:              1'b0,
+      VbbEn:              1'b0,
+      VmmEn:              1'b0,
+      VumEn:              1'b0,
+      VbmEn:              1'b0,
+      VfmEn:              1'b0,
+      VimEn:              1'b0,
+      VmcEn:              1'b0,
+      VdlEn:              1'b0,
+      VplEn:              1'b0,
+      VcpEn:              1'b0,
+      VdaEn:              1'b0,
+      VudEn:              1'b0,
+      VbpEn:              1'b0,
+      VbdEn:              1'b0,
+      VpoEn:              1'b0,
+      VxiEn:              1'b0,
+      VbiEn:              1'b0,
+      VmiEn:              1'b0,
+      VxvEn:              1'b0,
+      VsmEn:              1'b0,
+      VrpEn:              1'b0,
+      VgpEn:              1'b0,
+      VfbEn:              1'b0,
+      VrbEn:              1'b0,
+      VdwEn:              1'b0,
+      VreEn:              1'b0,
+      VvbEn:              1'b0,
+      VibEn:              1'b0,
+      VdiEn:              1'b0,
+      VvpEn:              1'b0,
+      VsiEn:              1'b0,
+      VpbEn:              1'b0,
+      VnsEn:              1'b0,
+      VdfEn:              1'b0,
+      VdxEn:              1'b0,
+      VdkEn:              1'b0,
+      VdrEn:              1'b0,
+      VdbEn:              1'b0,
+      VdgEn:              1'b0,
+      VfeEn:              1'b0,
+      VdmEn:              1'b0,
+      VdpEn:              1'b0,
+      VdyEn:              1'b0,
+      VdtEn:              1'b0,
+      VdqEn:              1'b0,
+      VfsEn:              1'b0,
+      VrcEn:              1'b0,
+      VfcEn:              1'b0,
+      VddEn:              1'b0,
+      VpcEn:              1'b0,
+      VdcEn:              1'b0,
+      VdnEn:              1'b0,
+      VgfEn:              1'b0,
+      VipEn:              1'b0,
+      VxeEn:              1'b0,
+      VrdEn:              1'b0,
+      VieEn:              1'b0,
+      VwlEn:              1'b0,
+      VslEn:              1'b0,
+      VrgEn:              1'b0,
+      VlwEn:              1'b0,
+      VzbEn:              1'b0,
+      VbcEn:              1'b0,
+      VboEn:              1'b0,
+      VcmEn:              1'b0,
+      VwmEn:              1'b0,
+      VrfEn:              1'b0,
+      VccEn:              1'b0,
+      VcyEn:              1'b0,
+      VblEn:              1'b0,
+      VbtEn:              1'b0,
+      VicEn:              1'b0,
+      VubEn:              1'b0,
+      VflEn:              1'b0,
+      VclEn:              1'b0,
+      VioEn:              1'b0,
+      VixEn:              1'b0,
+      VdsEn:              1'b0,
+      VatEn:              1'b0,
+      VinEn:              1'b0,
+      VrsEn:              1'b0,
+      VgsEn:              1'b0,
+      VwfEn:              1'b0,
+      VfrEn:              1'b0,
+      VfnEn:              1'b0
   };
 
   // Negative control for the grant legality check: virgl cannot be advertised
@@ -1831,7 +3912,353 @@ package g6lc_apu_cfg_pkg;
       B5xEn:              1'b0,
       B6rEn:              1'b0,
       B6kEn:              1'b0,
-      B6xEn:              1'b0
+      B6xEn:              1'b0,
+      AcwEn:              1'b0,
+      AcrEn:              1'b0,
+      AcxEn:              1'b0,
+      CswEn:              1'b0,
+      CsrEn:              1'b0,
+      CsxEn:              1'b0,
+      CrdEn:              1'b0,
+      CrlEn:              1'b0,
+      CrxEn:              1'b0,
+      CofEn:              1'b0,
+      CorEn:              1'b0,
+      CoxEn:              1'b0,
+      RpwEn:              1'b0,
+      RprEn:              1'b0,
+      RpxEn:              1'b0,
+      GrdEn:              1'b0,
+      GrlEn:              1'b0,
+      GrxEn:              1'b0,
+      RofEn:              1'b0,
+      RorEn:              1'b0,
+      RoxEn:              1'b0,
+      TfbEn:              1'b0,
+      TfrEn:              1'b0,
+      TfxEn:              1'b0,
+      RabEn:              1'b0,
+      RarEn:              1'b0,
+      RaxEn:              1'b0,
+      RfwEn:              1'b0,
+      RfrEn:              1'b0,
+      RfxEn:              1'b0,
+      TuwEn:              1'b0,
+      TurEn:              1'b0,
+      TuxEn:              1'b0,
+      TiwEn:              1'b0,
+      TirEn:              1'b0,
+      TixEn:              1'b0,
+      TawEn:              1'b0,
+      TarEn:              1'b0,
+      TaxEn:              1'b0,
+      TxcEn:              1'b0,
+      TxkEn:              1'b0,
+      TxxEn:              1'b0,
+      FtxEn:              1'b0,
+      FtrEn:              1'b0,
+      FtkEn:              1'b0,
+      OcwEn:              1'b0,
+      OcrEn:              1'b0,
+      OcxEn:              1'b0,
+      PbwEn:              1'b0,
+      PbrEn:              1'b0,
+      PbxEn:              1'b0,
+      TnwEn:              1'b0,
+      TnkEn:              1'b0,
+      TnxEn:              1'b0,
+      QntEn:              1'b0,
+      QnrEn:              1'b0,
+      QnxEn:              1'b0,
+      QavEn:              1'b0,
+      QakEn:              1'b0,
+      QaxEn:              1'b0,
+      QrgEn:              1'b0,
+      QrkEn:              1'b0,
+      QrxEn:              1'b0,
+      QhdEn:              1'b0,
+      QhkEn:              1'b0,
+      QhxEn:              1'b0,
+      QfdEn:              1'b0,
+      QfkEn:              1'b0,
+      QfxEn:              1'b0,
+      QwdEn:              1'b0,
+      QwkEn:              1'b0,
+      QwxEn:              1'b0,
+      QokEn:              1'b0,
+      QolEn:              1'b0,
+      QoxEn:              1'b0,
+      QuwEn:              1'b0,
+      QulEn:              1'b0,
+      QuxEn:              1'b0,
+      QiwEn:              1'b0,
+      QirEn:              1'b0,
+      QixEn:              1'b0,
+      QawEn:              1'b0,
+      QarEn:              1'b0,
+      QayEn:              1'b0,
+      QsvEn:              1'b0,
+      QskEn:              1'b0,
+      QsxEn:              1'b0,
+      QsrEn:              1'b0,
+      QslEn:              1'b0,
+      QsyEn:              1'b0,
+      QsdEn:              1'b0,
+      QseEn:              1'b0,
+      QsfEn:              1'b0,
+      QedEn:              1'b0,
+      QekEn:              1'b0,
+      QexEn:              1'b0,
+      QrsEn:              1'b0,
+      QrtEn:              1'b0,
+      QruEn:              1'b0,
+      QsoEn:              1'b0,
+      QspEn:              1'b0,
+      QsqEn:              1'b0,
+      QsuEn:              1'b0,
+      QstEn:              1'b0,
+      QszEn:              1'b0,
+      QsiEn:              1'b0,
+      QsnEn:              1'b0,
+      QsmEn:              1'b0,
+      QgaEn:              1'b0,
+      QgkEn:              1'b0,
+      QgxEn:              1'b0,
+      SnwEn:              1'b0,
+      SnkEn:              1'b0,
+      SnxEn:              1'b0,
+      SntEn:              1'b0,
+      SnrEn:              1'b0,
+      SnyEn:              1'b0,
+      SavEn:              1'b0,
+      SakEn:              1'b0,
+      SaxEn:              1'b0,
+      SrgEn:              1'b0,
+      SrkEn:              1'b0,
+      SrxEn:              1'b0,
+      ShdEn:              1'b0,
+      ShkEn:              1'b0,
+      ShxEn:              1'b0,
+      SfdEn:              1'b0,
+      SfkEn:              1'b0,
+      SfxEn:              1'b0,
+      SwdEn:              1'b0,
+      SwkEn:              1'b0,
+      SwxEn:              1'b0,
+      SokEn:              1'b0,
+      SolEn:              1'b0,
+      SoxEn:              1'b0,
+      SlwEn:              1'b0,
+      SllEn:              1'b0,
+      SlxEn:              1'b0,
+      SiwEn:              1'b0,
+      SirEn:              1'b0,
+      SixEn:              1'b0,
+      SgaEn:              1'b0,
+      SgkEn:              1'b0,
+      SgxEn:              1'b0,
+      RnwEn:              1'b0,
+      RnkEn:              1'b0,
+      RnxEn:              1'b0,
+      RntEn:              1'b0,
+      RnrEn:              1'b0,
+      RnyEn:              1'b0,
+      RavEn:              1'b0,
+      RakEn:              1'b0,
+      RayEn:              1'b0,
+      RrgEn:              1'b0,
+      RrkEn:              1'b0,
+      RrxEn:              1'b0,
+      RhdEn:              1'b0,
+      RhkEn:              1'b0,
+      RhxEn:              1'b0,
+      RfdEn:              1'b0,
+      RfkEn:              1'b0,
+      RfyEn:              1'b0,
+      RwdEn:              1'b0,
+      RwkEn:              1'b0,
+      RwxEn:              1'b0,
+      RokEn:              1'b0,
+      RolEn:              1'b0,
+      RoyEn:              1'b0,
+      RuwEn:              1'b0,
+      RulEn:              1'b0,
+      RuxEn:              1'b0,
+      RiwEn:              1'b0,
+      RirEn:              1'b0,
+      RixEn:              1'b0,
+      RgaEn:              1'b0,
+      RgkEn:              1'b0,
+      RgxEn:              1'b0,
+      GtxEn:              1'b0,
+      GtrEn:              1'b0,
+      GtkEn:              1'b0,
+      HcwEn:              1'b0,
+      HcrEn:              1'b0,
+      HcxEn:              1'b0,
+      WldEn:              1'b0,
+      WlrEn:              1'b0,
+      WlkEn:              1'b0,
+      CyrEn:              1'b0,
+      CykEn:              1'b0,
+      CyxEn:              1'b0,
+      GnwEn:              1'b0,
+      GnkEn:              1'b0,
+      GnxEn:              1'b0,
+      GefEn:              1'b0,
+      GekEn:              1'b0,
+      GexEn:              1'b0,
+      SpirvEn:            1'b0,
+      ChainEn:            1'b0,
+      CdmaEn:             1'b0,
+      ShmEn:              1'b0,
+      HvisEn:             1'b0,
+      VncsEn:             1'b0,
+      VcapEn:             1'b0,
+      VnringEn:           1'b0,
+      TdmaEn:             1'b0,
+      VnencEn:            1'b0,
+      VnpEn:              1'b0,
+      AvnEn:              1'b0,
+      AvuEn:              1'b0,
+      UirEn:              1'b0,
+      CmsEn:              1'b0,
+      PrsEn:              1'b0,
+      QdnEn:              1'b0,
+      GcsEn:              1'b0,
+      VndEn:              1'b0,
+      GnhEn:              1'b0,
+      HdpEn:              1'b0,
+      HphEn:              1'b0,
+      HrnEn:              1'b0,
+      RdnEn:              1'b0,
+      QrnEn:              1'b0,
+      QcmEn:              1'b0,
+      QtyEn:              1'b0,
+      VctEn:              1'b0,
+      QpuEn:              1'b0,
+      NtkEn:              1'b0,
+      VqtEn:              1'b0,
+      VaxEn:              1'b0,
+      VacEn:              1'b0,
+      HalEn:              1'b0,
+      AruEn:              1'b0,
+      QalEn:              1'b0,
+      QtaEn:              1'b0,
+      VcaEn:              1'b0,
+      QpaEn:              1'b0,
+      NtaEn:              1'b0,
+      VqaEn:              1'b0,
+      VaaEn:              1'b0,
+      VbgEn:              1'b0,
+      BalEn:              1'b0,
+      BruEn:              1'b0,
+      QbnEn:              1'b0,
+      QtbEn:              1'b0,
+      VcbEn:              1'b0,
+      QpbEn:              1'b0,
+      NtbEn:              1'b0,
+      VqbEn:              1'b0,
+      VabEn:              1'b0,
+      VenEn:              1'b0,
+      EalEn:              1'b0,
+      VqsEn:              1'b0,
+      VwiEn:              1'b0,
+      VgqEn:              1'b0,
+      VcdEn:              1'b0,
+      VciEn:              1'b0,
+      VepEn:              1'b0,
+      VqfEn:              1'b0,
+      VpfEn:              1'b0,
+      VppEn:              1'b0,
+      VmpEn:              1'b0,
+      VamEn:              1'b0,
+      VxbEn:              1'b0,
+      VbbEn:              1'b0,
+      VmmEn:              1'b0,
+      VumEn:              1'b0,
+      VbmEn:              1'b0,
+      VfmEn:              1'b0,
+      VimEn:              1'b0,
+      VmcEn:              1'b0,
+      VdlEn:              1'b0,
+      VplEn:              1'b0,
+      VcpEn:              1'b0,
+      VdaEn:              1'b0,
+      VudEn:              1'b0,
+      VbpEn:              1'b0,
+      VbdEn:              1'b0,
+      VpoEn:              1'b0,
+      VxiEn:              1'b0,
+      VbiEn:              1'b0,
+      VmiEn:              1'b0,
+      VxvEn:              1'b0,
+      VsmEn:              1'b0,
+      VrpEn:              1'b0,
+      VgpEn:              1'b0,
+      VfbEn:              1'b0,
+      VrbEn:              1'b0,
+      VdwEn:              1'b0,
+      VreEn:              1'b0,
+      VvbEn:              1'b0,
+      VibEn:              1'b0,
+      VdiEn:              1'b0,
+      VvpEn:              1'b0,
+      VsiEn:              1'b0,
+      VpbEn:              1'b0,
+      VnsEn:              1'b0,
+      VdfEn:              1'b0,
+      VdxEn:              1'b0,
+      VdkEn:              1'b0,
+      VdrEn:              1'b0,
+      VdbEn:              1'b0,
+      VdgEn:              1'b0,
+      VfeEn:              1'b0,
+      VdmEn:              1'b0,
+      VdpEn:              1'b0,
+      VdyEn:              1'b0,
+      VdtEn:              1'b0,
+      VdqEn:              1'b0,
+      VfsEn:              1'b0,
+      VrcEn:              1'b0,
+      VfcEn:              1'b0,
+      VddEn:              1'b0,
+      VpcEn:              1'b0,
+      VdcEn:              1'b0,
+      VdnEn:              1'b0,
+      VgfEn:              1'b0,
+      VipEn:              1'b0,
+      VxeEn:              1'b0,
+      VrdEn:              1'b0,
+      VieEn:              1'b0,
+      VwlEn:              1'b0,
+      VslEn:              1'b0,
+      VrgEn:              1'b0,
+      VlwEn:              1'b0,
+      VzbEn:              1'b0,
+      VbcEn:              1'b0,
+      VboEn:              1'b0,
+      VcmEn:              1'b0,
+      VwmEn:              1'b0,
+      VrfEn:              1'b0,
+      VccEn:              1'b0,
+      VcyEn:              1'b0,
+      VblEn:              1'b0,
+      VbtEn:              1'b0,
+      VicEn:              1'b0,
+      VubEn:              1'b0,
+      VflEn:              1'b0,
+      VclEn:              1'b0,
+      VioEn:              1'b0,
+      VixEn:              1'b0,
+      VdsEn:              1'b0,
+      VatEn:              1'b0,
+      VinEn:              1'b0,
+      VrsEn:              1'b0,
+      VgsEn:              1'b0,
+      VwfEn:              1'b0,
+      VfrEn:              1'b0,
+      VfnEn:              1'b0
   };
 
   function automatic bit pow2(input int unsigned v);

@@ -1,6 +1,7 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 
+// Interplay: ApuMem/UsedQueue --> DmaWrite ==> AXI write beats. See AGENTS-impl-interplays.md.
 module g6lc_apu_dma_write
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

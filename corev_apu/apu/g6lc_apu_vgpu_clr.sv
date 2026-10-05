@@ -3,6 +3,7 @@
 //
 // The clear that follows the framebuffer state. Color is about 0.05, 0.05, 0.10, 1. This does not write pixels.
 
+// ClearSet (clr): The clear that follows the framebuffer state.
 module g6lc_apu_vgpu_clr
   import g6lc_apu_pkg::*;
 #(
@@ -148,6 +149,7 @@ module g6lc_apu_vgpu_clr
   end
 endmodule
 
+// ClearSet (clr) enable-0 fixture: The clear that follows the framebuffer state.
 module g6lc_apu_vgpu_clr_fixture
   import g6lc_apu_pkg::*;
 #(

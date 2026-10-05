@@ -9,6 +9,7 @@
 // g6lc_apu_vgpu_bb and not g6lc_apu_vgpu_avail. A failed beat stops
 // the read; the request can be repeated. TEX is not executed.
 
+// BlendBindRead (bbr): Blend bind of the fetched draw.
 module g6lc_apu_vgpu_bbr
   import g6lc_apu_pkg::*;
 #(
@@ -228,6 +229,7 @@ module g6lc_apu_vgpu_bbr
   end
 endmodule
 
+// BlendBindRead (bbr) enable-0 fixture: Blend bind of the fetched draw.
 module g6lc_apu_vgpu_bbr_fixture
   import g6lc_apu_pkg::*;
 #(

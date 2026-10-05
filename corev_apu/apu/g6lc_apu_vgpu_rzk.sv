@@ -4,6 +4,7 @@
 // Keep the rasterizer header and handle. A second store keeps the
 // first. No triangle is walked.
 
+// RasterizerBindReadKeep (rzk): The header and the handle.
 module g6lc_apu_vgpu_rzk
   import g6lc_apu_pkg::*;
 #(
@@ -105,6 +106,7 @@ module g6lc_apu_vgpu_rzk
   end
 endmodule
 
+// RasterizerBindReadKeep (rzk) enable-0 fixture: The header and the handle.
 module g6lc_apu_vgpu_rzk_fixture
   import g6lc_apu_pkg::*;
 #(

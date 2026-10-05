@@ -1,6 +1,7 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
 
+// Interplay: ApuSys --> AxiLiteTransport --> VirtioTop + ApuControl. See AGENTS-impl-interplays.md.
 module g6lc_apu_axi_lite
   import g6lc_apu_cfg_pkg::*;
   import g6lc_apu_pkg::*;

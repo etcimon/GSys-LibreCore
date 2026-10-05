@@ -4,6 +4,7 @@
 // The scissor that follows the vertex-buffer set. The box is 640 by 480.
 // This does not draw.
 
+// ScissorSet (sci): The scissor that follows the vertex-buffer set. Default-off. The box is 640 by 480.
 module g6lc_apu_vgpu_sci
   import g6lc_apu_pkg::*;
 #(
@@ -145,6 +146,7 @@ module g6lc_apu_vgpu_sci
   end
 endmodule
 
+// ScissorSet (sci) enable-0 fixture: The scissor that follows the vertex-buffer set.
 module g6lc_apu_vgpu_sci_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -9,6 +9,7 @@
 // A mismatched response does not commit. This does not write guest
 // memory, attach a second entry, or follow a descriptor chain.
 
+// BackingIntoResource (xfer): One read of that stored entry into the resource. Default-off. Not a guest write and not a descriptor chain.
 module g6lc_apu_vgpu_xfer
   import g6lc_apu_pkg::*;
 #(
@@ -248,6 +249,7 @@ module g6lc_apu_vgpu_xfer
   end
 endmodule
 
+// BackingIntoResource (xfer) enable-0 fixture: One read of that stored entry into the resource.
 module g6lc_apu_vgpu_xfer_fixture
   import g6lc_apu_pkg::*;
 #(

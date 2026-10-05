@@ -11,6 +11,7 @@
 // g6lc_apu_vgpu_avail. A failed beat stops the read; the request
 // can be repeated. TEX is not executed.
 
+// RasterizerObjectRead (rcr): Rasterizer object of the fetched draw.
 module g6lc_apu_vgpu_rcr
   import g6lc_apu_pkg::*;
 #(
@@ -253,6 +254,7 @@ module g6lc_apu_vgpu_rcr
   end
 endmodule
 
+// RasterizerObjectRead (rcr) enable-0 fixture: Rasterizer object of the fetched draw.
 module g6lc_apu_vgpu_rcr_fixture
   import g6lc_apu_pkg::*;
 #(

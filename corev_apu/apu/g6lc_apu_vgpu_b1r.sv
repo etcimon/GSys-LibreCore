@@ -6,6 +6,7 @@
 // base beat and is not this beat. The image is not kept.
 // The shader is not run.
 
+// ReadbackBeat1 (b1r): Beat 1 of row 0, bytes 32 and 60.
 module g6lc_apu_vgpu_b1r
   import g6lc_apu_pkg::*;
 #(
@@ -167,6 +168,7 @@ module g6lc_apu_vgpu_b1r
   end
 endmodule
 
+// ReadbackBeat1 (b1r) enable-0 fixture: Beat 1 of row 0, bytes 32 and 60.
 module g6lc_apu_vgpu_b1r_fixture
   import g6lc_apu_pkg::*;
 #(

@@ -4,6 +4,7 @@
 // The walked chain, the submit record, and the response name the same
 // 960-byte buffer and the same response address. A mismatch links nothing.
 
+// SceneChainMatch (cmx): The chain matches the recorded submit and response.
 module g6lc_apu_vgpu_cmx
   import g6lc_apu_pkg::*;
 #(
@@ -97,6 +98,7 @@ module g6lc_apu_vgpu_cmx
   end
 endmodule
 
+// SceneChainMatch (cmx) enable-0 fixture: The chain matches the recorded submit and response.
 module g6lc_apu_vgpu_cmx_fixture
   import g6lc_apu_pkg::*;
 #(

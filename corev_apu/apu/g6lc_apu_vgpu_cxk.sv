@@ -4,6 +4,7 @@
 // Keep the scissor width and height. A second store keeps the first.
 // No pixel is clipped.
 
+// ScissorReadKeep (cxk): The scissor width and height.
 module g6lc_apu_vgpu_cxk
   import g6lc_apu_pkg::*;
 #(
@@ -101,6 +102,7 @@ module g6lc_apu_vgpu_cxk
   end
 endmodule
 
+// ScissorReadKeep (cxk) enable-0 fixture: The scissor width and height.
 module g6lc_apu_vgpu_cxk_fixture
   import g6lc_apu_pkg::*;
 #(

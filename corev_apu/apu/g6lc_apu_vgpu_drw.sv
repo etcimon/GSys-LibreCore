@@ -3,6 +3,7 @@
 //
 // The draw that follows the clear. Four vertices, triangle strip. This does not walk a triangle.
 
+// DrawVbo (drw): The draw that follows the clear. Default-off. Not a raster walk.
 module g6lc_apu_vgpu_drw
   import g6lc_apu_pkg::*;
 #(
@@ -146,6 +147,7 @@ module g6lc_apu_vgpu_drw
   end
 endmodule
 
+// DrawVbo (drw) enable-0 fixture: The draw that follows the clear. Default-off. Not a raster walk.
 module g6lc_apu_vgpu_drw_fixture
   import g6lc_apu_pkg::*;
 #(
