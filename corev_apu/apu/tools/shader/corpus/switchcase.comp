@@ -1,0 +1,17 @@
+#version 460
+layout(local_size_x = 32) in;
+layout(set = 0, binding = 0) readonly buffer In { uint src[]; };
+layout(set = 0, binding = 1) writeonly buffer Out { uint dst[]; };
+void main() {
+  uint i = gl_LocalInvocationIndex;
+  uint v = src[i] & 7u;
+  uint r = 0u;
+  switch (v) {
+    case 0: r = 10u; break;
+    case 1: r = 20u;
+    case 2: r += 30u; break;
+    case 5: r = 50u; break;
+    default: r = 99u; break;
+  }
+  dst[i] = r;
+}

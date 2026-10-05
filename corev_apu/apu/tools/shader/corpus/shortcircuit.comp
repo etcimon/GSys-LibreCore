@@ -1,0 +1,12 @@
+#version 460
+layout(local_size_x = 32) in;
+layout(set = 0, binding = 0) readonly buffer In { uint src[]; };
+layout(set = 0, binding = 1) writeonly buffer Out { uint dst[]; };
+void main() {
+  uint i = gl_LocalInvocationIndex;
+  uint a = src[i];
+  uint b = src[i + 32u];
+  uint r = (a > 5u && b < 100u) ? a + b
+           : ((a == 0u || b == 0u) ? 7777u : a * b);
+  dst[i] = r;
+}

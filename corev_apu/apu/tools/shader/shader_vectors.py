@@ -88,6 +88,35 @@ DESC = {
                          bindings=[(0, 0, 64, 0), (0, 1, 64, 1)]),
     'localsize64':  dict(groups=(1, 1, 1), fmt='i', push=0,
                          bindings=[(0, 0, 64, 0), (0, 1, 64, 1)]),
+    # ---- increment-4b corpus (§7c): control flow / barriers / matrix
+    # cf=True → the bad arm is an unstructured branch (merge-op
+    # removal) expected to fault APU_SH_FAULT_BRANCH at commit.
+    'ifelse':       dict(groups=(1, 1, 1), fmt='i', push=0, cf=True,
+                         bindings=[(0, 0, 32, 0), (0, 1, 32, 1)]),
+    'loopfor':      dict(groups=(1, 1, 1), fmt='i', push=0, cf=True,
+                         bindings=[(0, 0, 32, 0), (0, 1, 32, 1)]),
+    'loopwhile':    dict(groups=(1, 1, 1), fmt='i', push=0, cf=True,
+                         bindings=[(0, 0, 32, 0), (0, 1, 32, 1)]),
+    'switchcase':   dict(groups=(1, 1, 1), fmt='i', push=0, cf=True,
+                         bindings=[(0, 0, 32, 0), (0, 1, 32, 1)]),
+    'shortcircuit': dict(groups=(1, 1, 1), fmt='i', push=0, cf=True,
+                         bindings=[(0, 0, 64, 0), (0, 1, 32, 1)]),
+    'earlyret':     dict(groups=(1, 1, 1), fmt='i', push=0, cf=True,
+                         bindings=[(0, 0, 32, 0), (0, 1, 32, 1)]),
+    'barrier_prefix': dict(groups=(1, 1, 1), fmt='i', push=0, cf=True,
+                           bindings=[(0, 0, 32, 0), (0, 1, 32, 1)]),
+    'barrier_reduce': dict(groups=(1, 1, 1), fmt='i', push=0, cf=True,
+                           bindings=[(0, 0, 64, 0), (0, 1, 128, 1)]),
+    'matvec':       dict(groups=(1, 1, 1), fmt='f', push=0, cf=False,
+                         bindings=[(0, 0, 128, 0), (0, 1, 128, 1)]),
+    'matmat':       dict(groups=(1, 1, 1), fmt='f', push=0, cf=False,
+                         bindings=[(0, 0, 64, 0), (0, 1, 128, 1)]),
+    'precise_dot':  dict(groups=(1, 1, 1), fmt='f', push=0, cf=False,
+                         bindings=[(0, 0, 256, 0), (0, 1, 128, 1)]),
+    # phiflow is assembled from phiflow.spvasm (hand-written): glslang
+    # never emits OpPhi, so phi coverage needs the .spvasm source.
+    'phiflow':      dict(groups=(1, 1, 1), fmt='f', push=0, cf=True,
+                         bindings=[(0, 0, 64, 0), (0, 1, 32, 1)]),
 }
 SEEDS = [1, 2, 3]
 
@@ -166,49 +195,95 @@ def mutate(words):
     (FAdd<->FSub, IAdd<->ISub, FMul<->FDiv).  Returns a list of
     (mutated_words, word_index) in module order; the caller verifies
     observability through the oracle and keeps the first that changes
-    the output."""
+    the output.  Only words at instruction boundaries qualify — a
+    constant/pointer operand word whose low 16 bits happen to match an
+    opcode value must never be "mutated" (4a corpus accident)."""
     pairs = {129: 131, 131: 129, 128: 130, 130: 128, 133: 136, 136: 133}
     out = []
-    for i in range(5, len(words)):
-        opc = words[i] & 0xFFFF
+    at = 5
+    while at < len(words):
+        wc = words[at] >> 16
+        opc = words[at] & 0xFFFF
         if opc in pairs:
             m = list(words)
-            m[i] = (words[i] & 0xFFFF0000) | pairs[opc]
-            out.append((m, i))
+            m[at] = (words[at] & 0xFFFF0000) | pairs[opc]
+            out.append((m, at))
+        at += wc if wc else 1
     if out:
         return out
     # fallback: reroute the last index operand of the first dynamic
     # OpAccessChain to a constant -> every lane reads element 0.
-    consts = [words[i + 2] for i in range(5, len(words))
-              if (words[i] & 0xFFFF) == 43 and i + 2 < len(words)]
+    consts = []
+    at = 5
+    while at < len(words):
+        wc = words[at] >> 16
+        if (words[at] & 0xFFFF) == 43 and wc > 2:
+            consts.append(words[at + 2])
+        at += wc if wc else 1
     if not consts:
         return out
-    for i in range(5, len(words)):
-        if (words[i] & 0xFFFF) == 65 and (words[i] >> 16) >= 4:
-            wc = words[i] >> 16
-            if words[i + wc - 1] != consts[0]:
+    at = 5
+    while at < len(words):
+        wc = words[at] >> 16
+        if (words[at] & 0xFFFF) == 65 and wc >= 4:
+            if words[at + wc - 1] != consts[0]:
                 m = list(words)
-                m[i + wc - 1] = consts[0]
-                out.append((m, i + wc - 1))
+                m[at + wc - 1] = consts[0]
+                out.append((m, at + wc - 1))
+        at += wc if wc else 1
     return out
 
 
 def inject_bad(words):
-    """append an unsupported opcode (OpSin=13) as a trailing
-    instruction inside the module: we turn the last OpReturn (253,
-    wc=1) into OpReturnValue-free space — simplest: insert OpNop->
-    OpSin swap on the first OpNop-able word.  We patch the first
-    OpStore's opcode word to OpSin so the commit scanner faults with
-    opcode 13 at a deterministic word."""
-    for i in range(5, len(words)):
-        if (words[i] & 0xFFFF) == 62:      # first OpStore
+    """patch the first OpStore's opcode word to OpSin so the commit
+    scanner faults with opcode 13 at a deterministic word.  Walks
+    instruction boundaries — operand words are never patch sites."""
+    at = 5
+    while at < len(words):
+        wc = words[at] >> 16
+        if (words[at] & 0xFFFF) == 62:     # first OpStore
             m = list(words)
-            m[i] = (words[i] & 0xFFFF0000) | 13
-            return m, i
-    # no OpStore: patch the last word (OpReturn -> OpSin)
+            m[at] = (words[at] & 0xFFFF0000) | 13
+            return m, at
+        at += wc if wc else 1
+    # no OpStore: patch the last instruction (OpReturn -> OpSin)
+    at = len(words) - 1
+    while at > 5:
+        if (words[at] >> 16) == 1:
+            m = list(words)
+            m[at] = (words[at] & 0xFFFF0000) | 13
+            return m, at
+        at -= 1
     m = list(words)
-    m[-2] = (m[-2] & 0xFFFF0000) | 13
-    return m, len(m) - 2
+    m[-1] = (m[-1] & 0xFFFF0000) | 13
+    return m, len(m) - 1
+
+
+def inject_bad_cf(words):
+    """4b bad arm: remove a merge instruction (OpSelectionMerge /
+    OpLoopMerge) so the following OpBranchConditional / OpSwitch is
+    unstructured — the commit rule then faults APU_SH_FAULT_BRANCH.
+    Returns (words, fault_code, fault_opcode)."""
+    at = 5
+    while at < len(words):
+        wc = words[at] >> 16
+        if not wc:
+            break
+        opc = words[at] & 0xFFFF
+        nxt = at + wc
+        if opc in (246, 247) and nxt < len(words) and \
+                (words[nxt] & 0xFFFF) in (250, 251):
+            m = words[:at] + words[at + wc:]
+            try:
+                spirv_scan.Scanner(m).scan()
+            except spirv_scan.Fault as f:
+                if f.code == spirv_scan.FAULT['BRANCH']:
+                    return m, f.code, f.opcode
+        at += wc
+    # no merge to remove (straight-line shader): keep the classic
+    # unsupported-opcode arm instead.
+    m, _ = inject_bad(words)
+    return m, spirv_scan.FAULT['OPCODE'], 13
 
 
 def push_words(desc, seed):
@@ -386,11 +461,17 @@ def main():
             if mwords is None:
                 print('%s_mut: no observable mutation — skipped' % name)
             summary.append(base)
-        # unsupported-opcode module (seed 0): commit fault OPCODE
-        bwords, at = inject_bad(words)
+        # bad module (seed 0): cf shaders drop a merge instruction so
+        # a conditional branch is unstructured -> commit BRANCH fault;
+        # straight-line shaders keep the unsupported-opcode arm.
+        if desc.get('cf'):
+            bwords, fcode, fopc = inject_bad_cf(words)
+        else:
+            bwords, _ = inject_bad(words)
+            fcode, fopc = spirv_scan.FAULT['OPCODE'], 13
         inputs = gen_inputs(desc, [b[2] for b in desc['bindings']], 7)
         base, _mc = emit(name + '_bad', 0, bwords, desc, inputs,
-                         expect_fault=(spirv_scan.FAULT['OPCODE'], 13))
+                         expect_fault=(fcode, fopc))
         summary.append(base)
     print('wrote %d cases to %s' % (len(summary), OUT))
     return 0

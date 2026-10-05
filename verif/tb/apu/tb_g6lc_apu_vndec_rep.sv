@@ -49,6 +49,8 @@ module tb_g6lc_apu_vndec_rep;
   logic [15:0] r_words;
   logic [64*32-1:0] exec_w;
   logic [6:0]  exec_n;
+  logic [31:0] rep_null_mask_r = '0; // 5a-ii: null echo exercised via
+                                   // vnfront sessions, not this TB
   logic [31:0] result_r;
   logic [15:0] rep_base_r, rep_len_r;
   apu_vn_op_t  op_r;
@@ -82,6 +84,7 @@ module tb_g6lc_apu_vndec_rep;
     .clk_i(clk), .rst_ni(rst_ni),
     .start_i(r_start), .op_i(op_r), .result_i(result_r),
     .exec_w_i(exec_w), .exec_n_i(exec_n),
+    .rep_null_mask_i(rep_null_mask_r),
     .rep_base_i(rep_base_r), .rep_len_i(rep_len_r),
     .cs_base_i(d_base),
     .cs_re_o(r_re), .cs_addr_o(r_addr), .cs_rdata_i(r_rdata),
@@ -92,6 +95,7 @@ module tb_g6lc_apu_vndec_rep;
     .clk_i(clk), .rst_ni(rst_ni),
     .start_i(r_start), .op_i(op_r), .result_i(result_r),
     .exec_w_i(exec_w), .exec_n_i(exec_n),
+    .rep_null_mask_i(rep_null_mask_r),
     .rep_base_i(rep_base_r), .rep_len_i(rep_len_r),
     .cs_base_i(d_base),
     .cs_re_o(roff_re), .cs_addr_o(roff_addr), .cs_rdata_i(r_rdata),

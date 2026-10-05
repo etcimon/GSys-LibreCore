@@ -1,0 +1,33 @@
+#version 460
+layout(local_size_x = 32) in;
+layout(set = 0, binding = 0) readonly buffer In { float src[]; };
+layout(set = 0, binding = 1) writeonly buffer Out { float dst[]; };
+void main() {
+  uint i = gl_LocalInvocationIndex;
+  // floor() snaps the inputs to integer-valued floats so every dot
+  // term is exactly representable: products (|v|<64, |m|<4 -> <256)
+  // and <=4-term sums (<1024) are integers, making the result
+  // bit-exact under any contraction/fold choice (lavapipe FMA vs
+  // the OpDot products-then-right-leaning-fold semantics).
+  vec4 v = floor(vec4(src[i * 4u], src[i * 4u + 1u], src[i * 4u + 2u],
+                      src[i * 4u + 3u]));
+  mat4 m = mat4(1.0, 0.5, 0.25, 0.125,
+                0.0, 1.0, 0.5, 0.25,
+                0.0, 0.0, 1.0, 0.5,
+                2.0, 0.0, 0.0, 1.0);
+  mat3 m3 = mat3(1.0, 2.0, 3.0, 0.0, 1.0, 4.0, 0.0, 0.0, 1.0);
+  mat2 m2 = mat2(2.0, 1.0, 1.0, 2.0);
+  vec4 r0 = m * v;
+  vec4 r1 = v * m;
+  vec3 v3 = v.xyz;
+  vec3 r2 = m3 * v3;
+  vec2 r3 = m2 * v.xy;
+  // raw components — long add chains would amplify the <=1 ULP
+  // per-term difference between lavapipe's FMA-contracted products
+  // and the OpDot "products then right-leaning fold" semantics past
+  // the 2-ULP Gate-2 bound (observed 4 ULP on r0.x+r1.y+r2.z+r3.x).
+  dst[i * 4u]       = r0.x;
+  dst[i * 4u + 1u]  = r1.y;
+  dst[i * 4u + 2u]  = r2.z;
+  dst[i * 4u + 3u]  = r3.x + r3.y;
+}

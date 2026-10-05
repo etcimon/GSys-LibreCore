@@ -11,8 +11,13 @@
 // Table geometry (per slot, all tc_sram): program 1 w/word,
 // type 3 w/id, const 16 w/id, member 2 w/entry, decor 2 w/id,
 // var 2 w/id, regmap 1 w/id, init 2 w/entry, block 1 w/label,
-// entry 4 w.  regmap = {tag[31:30] (0 reg/1 const),
+// phi 5 w/result-id, entry 4 w.  regmap = {tag[31:30] (0 reg/1 const),
 // aux[29:26] (const word count), type_id[25:16], idx[15:0]}.
+// var word0 = {flags[3:0][31:28], builtin[7:0], binding[7:0],
+// set[7:0], storage[3:0]}; phi row (§7c, one per OpPhi result id,
+// keyed by that id): word0 = parent/value pair count (1..4), word k
+// (1..4) = {parent label id[31:16], value id[15:0]}, in operand
+// order — spirv_scan.py phi_words() emits the same layout.
 // OpMemberDecorate targets are staged in a MDN-entry flop window
 // (they precede the OpTypeStruct they annotate); <=16 OpBranch
 // targets are queued and re-checked forward-only after the walk.
@@ -75,6 +80,8 @@ module g6lc_apu_shmod
   output logic [63:0]  init_data_o,
   input  logic [9:0]   blk_id_i,
   output logic [31:0]  blk_data_o,
+  input  logic [9:0]   phi_id_i,
+  output logic [159:0] phi_data_o,
   output logic [127:0] entry_data_o
 );
   if (!Enable) begin : gen_off
@@ -84,7 +91,8 @@ module g6lc_apu_shmod
     assign const_data_o = '0;  assign memb_data_o = '0;
     assign decor_data_o = '0;  assign var_data_o = '0;
     assign rm_data_o = '0;     assign init_data_o = '0;
-    assign blk_data_o = '0;    assign entry_data_o = '0;
+    assign blk_data_o = '0;    assign phi_data_o = '0;
+    assign entry_data_o = '0;
     logic unused;
     assign unused = clk_i | rst_ni | testmode_i | wr_en_i |
                     (|wr_slot_i) | (|wr_addr_i) | (|wr_data_i) |
@@ -92,7 +100,8 @@ module g6lc_apu_shmod
                     (|retire_slot_i) | (|rd_slot_i) |
                     (|prog_addr_i) | (|type_id_i) | (|const_id_i) |
                     (|memb_id_i) | (|decor_id_i) | (|var_id_i) |
-                    (|rm_id_i) | (|init_id_i) | (|blk_id_i);
+                    (|rm_id_i) | (|init_id_i) | (|blk_id_i) |
+                    (|phi_id_i);
   end else begin : gen_on
     localparam int unsigned SW  = $clog2(ShaderSlots);
     localparam int unsigned PW  = $clog2(ShaderSlots * ShaderWords);
@@ -102,7 +111,8 @@ module g6lc_apu_shmod
     localparam int unsigned INW = $clog2(ShaderInit);
     localparam int unsigned OPB = 32;   // operand staging words
     localparam int unsigned MDN = 64;   // pending member-decor window
-    localparam int unsigned BRN = 16;   // queued forward branches
+    localparam int unsigned BRN = 48;   // queued branch targets
+    localparam int unsigned CFD = 8;    // commit loop-nesting bound (CfDepth)
 
     // ---- table SRAM port signals ---------------------------------------
     logic                  pr_req, pr_we;
@@ -135,11 +145,14 @@ module g6lc_apu_shmod
     logic                  en_req, en_we;
     logic [SW-1:0]         en_addr;
     logic [127:0]          en_wdata, en_rdata;
+    logic                  ph_req, ph_we;
+    logic [IW+SW-1:0]      ph_addr;
+    logic [159:0]          ph_wdata, ph_rdata;
 
     // ---- FSM state ------------------------------------------------------
     typedef enum logic [4:0] {
       S_IDLE, S_CLR, S_HDR, S_IW, S_W0, S_LD, S_OP,
-      S_DRC, S_MDC, S_TYC, S_CON, S_VRB, S_BRC, S_ENT, S_DONE
+      S_DRC, S_MDC, S_TYC, S_CON, S_VRB, S_RES, S_BRC, S_ENT, S_DONE
     } st_e;
     st_e st_q;
     logic [2:0]  slot_q;
@@ -167,11 +180,18 @@ module g6lc_apu_shmod
     // forward-branch check queue
     logic [15:0] br_at_q [BRN];
     logic [9:0]  br_tg_q [BRN];
-    logic [4:0]  br_n_q;
+    logic [5:0]  br_n_q;
+    // structured-flow commit state (4b): mp_q = previous instruction was
+    // OpLoopMerge/OpSelectionMerge; lp_* = open loop {merge,continue} stack
+    logic        mp_q;
+    logic [9:0]  lp_m_q [CFD];
+    logic [9:0]  lp_c_q [CFD];
+    logic [3:0]  lp_n_q;
     // deferred single-row writes from S_OP (land next cycle)
-    logic        dw_rm_q, dw_bk_q;
-    logic [9:0]  dw_rm_id_q, dw_bk_id_q;
+    logic        dw_rm_q, dw_bk_q, dw_ph_q;
+    logic [9:0]  dw_rm_id_q, dw_bk_id_q, dw_ph_id_q;
     logic [31:0] dw_rm_w_q, dw_bk_w_q;
+    logic [159:0] dw_ph_w_q;
     // fault
     logic [7:0]  fl_code_q;
     logic [15:0] fl_opc_q, fl_word_q;
@@ -183,6 +203,7 @@ module g6lc_apu_shmod
     // type row fields (w0..w2 packed in one 96-bit row)
     wire [3:0]  ty_kind    = ty_rdata[3:0];
     wire [2:0]  ty_comps   = ty_rdata[7:5];
+    wire [2:0]  ty_cols    = ty_rdata[10:8];
     wire [3:0]  ty_storage = ty_rdata[14:11];
     wire [9:0]  ty_elem    = ty_rdata[24:15];
     wire [15:0] ty_size    = ty_rdata[79:64];
@@ -215,20 +236,23 @@ module g6lc_apu_shmod
       unique case (o)
         0,3,5,6,7,8,11,12,14,15,16,17,19,20,21,22,23,24,28,29,30,32,33,
         41,42,43,44,46,48,49,50,51,52,54,56,59,61,62,65,66,68,71,72,
-        79,80,81,82,109,110,111,112,124,126,127,128,129,130,131,132,
-        133,134,135,136,137,138,139,142,148,164,165,166,167,168,169,
+        79,80,81,82,84,109,110,111,112,124,126,127,128,129,130,131,132,
+        133,134,135,136,137,138,139,142,143,144,145,146,147,148,
+        164,165,166,167,168,169,
         170,171,172,173,174,175,176,177,178,179,180,182,183,184,186,
-        188,190,194,195,196,197,198,199,200,248,249,253:
+        188,190,194,195,196,197,198,199,200,224,225,245,246,247,248,
+        249,250,251,253,255:
           is_accepted = 1'b1;
         default: is_accepted = 1'b0;
       endcase
     endfunction
     function automatic logic has_result(input logic [15:0] o);
       unique case (o)
-        61,65,66,68,79,80,81,82,109,110,111,112,124,126,127,128,129,
-        130,131,132,133,134,135,136,137,138,139,142,148,164,165,166,
+        61,65,66,68,79,80,81,82,84,109,110,111,112,124,126,127,128,129,
+        130,131,132,133,134,135,136,137,138,139,142,143,144,145,146,
+        147,148,164,165,166,
         167,168,169,170,171,172,173,174,175,176,177,178,179,180,182,
-        183,184,186,188,190,194,195,196,197,198,199,200:
+        183,184,186,188,190,194,195,196,197,198,199,200,245:
           has_result = 1'b1;
         default: has_result = 1'b0;
       endcase
@@ -298,6 +322,30 @@ module g6lc_apu_shmod
       mk_type = {st, sz, ln, mb, 3'h0, nm, el, sc, cols, comps, sgn,
                  kind};
     endfunction
+    // target == innermost open loop merge or continue label (the
+    // merge-free conditional / switch escape hatch of the commit rule)
+    function automatic logic tg_is_lc(input logic [9:0] tg);
+      return (lp_n_q != 0) &&
+             (tg == lp_m_q[lp_n_q-4'd1] || tg == lp_c_q[lp_n_q-4'd1]);
+    endfunction
+    function automatic logic sw_merge_free();
+      logic mf;
+      mf = mp_q | tg_is_lc(ops_q[1][9:0]);
+      for (int k = 0; k < 15; k++)
+        if (k < (wc_q - 3) >> 1 && tg_is_lc(ops_q[3+2*k][9:0]))
+          mf = 1'b1;
+      return mf;
+    endfunction
+    // OpPhi table row: word0 = pair count, word(1+k) = {parent, value}
+    function automatic logic [159:0] phi_pack();
+      logic [159:0] r;
+      r = '0;
+      r[15:0] = (wc_q - 3) >> 1;
+      for (int k = 0; k < 4; k++)
+        if (k < (wc_q - 3) >> 1)
+          r[32*(k+1) +: 32] = {ops_q[3+2*k][15:0], ops_q[2+2*k][15:0]};
+      return r;
+    endfunction
 
     wire id_ok0 = ops_q[0] < 32'(ShaderIds);
     wire id_ok1 = ops_q[1] < 32'(ShaderIds);
@@ -331,6 +379,7 @@ module g6lc_apu_shmod
       mb_req = 1'b0; mb_we = 1'b0; mb_addr = '0; mb_wdata = '0;
       in_req = 1'b0; in_we = 1'b0; in_addr = '0; in_wdata = '0;
       en_req = 1'b0; en_we = 1'b0; en_addr = '0; en_wdata = '0;
+      ph_req = 1'b0; ph_we = 1'b0; ph_addr = '0; ph_wdata = '0;
       if (!busy_q) begin
         if (wr_en_i) begin
           pr_req = 1'b1; pr_we = 1'b1;
@@ -349,6 +398,7 @@ module g6lc_apu_shmod
         mb_req = 1'b1; mb_addr = {rd_slot_i, memb_id_i[MW-1:0]};
         in_req = 1'b1; in_addr = {rd_slot_i, init_id_i[INW-1:0]};
         en_req = 1'b1; en_addr = rd_slot_i;
+        ph_req = 1'b1; ph_addr = {rd_slot_i, phi_id_i};
       end else begin
         if (dw_rm_q) begin
           rm_req = 1'b1; rm_we = 1'b1;
@@ -357,6 +407,10 @@ module g6lc_apu_shmod
         if (dw_bk_q) begin
           bk_req = 1'b1; bk_we = 1'b1;
           bk_addr = {slot_q, dw_bk_id_q}; bk_wdata = dw_bk_w_q;
+        end
+        if (dw_ph_q) begin
+          ph_req = 1'b1; ph_we = 1'b1;
+          ph_addr = {slot_q, dw_ph_id_q}; ph_wdata = dw_ph_w_q;
         end
         unique case (st_q)
           S_CLR: begin
@@ -374,6 +428,7 @@ module g6lc_apu_shmod
               in_req = 1'b1; in_we = 1'b1;
               in_addr = {slot_q, clr_q[INW-1:0]};
             end
+            ph_req = 1'b1; ph_we = 1'b1; ph_addr = {slot_q, clr_q};
           end
           S_HDR: begin
             pr_req = (i_q < 5); pr_addr = {slot_q, PW'(i_q)};
@@ -589,7 +644,12 @@ module g6lc_apu_shmod
           end
           S_BRC: begin
             bk_req = (ph_q < 6'(br_n_q));
-            bk_addr = {slot_q, br_tg_q[ph_q[3:0]]};
+            bk_addr = {slot_q, br_tg_q[ph_q[5:0]]};
+          end
+          S_RES: begin
+            // read the result type row: matrix results occupy one regmap
+            // slot per column (ty_cols)
+            ty_req = (ph_q == 0); ty_addr = {slot_q, ops_q[0][9:0]};
           end
           S_ENT: begin
             en_req = 1'b1; en_we = 1'b1; en_addr = slot_q;
@@ -638,6 +698,10 @@ module g6lc_apu_shmod
               .NumPorts(1)) i_init (
       .clk_i, .rst_ni, .req_i(in_req), .we_i(in_we), .addr_i(in_addr),
       .wdata_i(in_wdata), .be_i(8'hFF), .rdata_o(in_rdata));
+    tc_sram #(.NumWords(ShaderSlots*ShaderIds), .DataWidth(160),
+              .NumPorts(1)) i_phi (
+      .clk_i, .rst_ni, .req_i(ph_req), .we_i(ph_we), .addr_i(ph_addr),
+      .wdata_i(ph_wdata), .be_i('1), .rdata_o(ph_rdata));
     tc_sram #(.NumWords(ShaderSlots), .DataWidth(128), .NumPorts(1))
       i_entry (
       .clk_i, .rst_ni, .req_i(en_req), .we_i(en_we), .addr_i(en_addr),
@@ -652,6 +716,7 @@ module g6lc_apu_shmod
     assign rm_data_o    = rm_rdata;
     assign init_data_o  = in_rdata;
     assign blk_data_o   = bk_rdata;
+    assign phi_data_o   = ph_rdata;
     assign entry_data_o = en_rdata;
 
     integer t;
@@ -668,10 +733,10 @@ module g6lc_apu_shmod
         entry_seen_q <= 1'b0; in_func_q <= 1'b0;
         esize_q <= '0; stride_q <= '0; sz_q <= '0; voff_q <= '0;
         crow_q <= '0; cn_q <= '0; cn_i_q <= '0;
-        dw_rm_q <= 1'b0; dw_bk_q <= 1'b0;
-        dw_rm_id_q <= '0; dw_bk_id_q <= '0;
-        dw_rm_w_q <= '0; dw_bk_w_q <= '0;
-        md_n_q <= '0; br_n_q <= '0;
+        dw_rm_q <= 1'b0; dw_bk_q <= 1'b0; dw_ph_q <= 1'b0;
+        dw_rm_id_q <= '0; dw_bk_id_q <= '0; dw_ph_id_q <= '0;
+        dw_rm_w_q <= '0; dw_bk_w_q <= '0; dw_ph_w_q <= '0;
+        md_n_q <= '0; br_n_q <= '0; mp_q <= 1'b0; lp_n_q <= '0;
         for (t = 0; t < OPB; t++) ops_q[t] <= '0;
         for (t = 0; t < MDN; t++) begin
           md_id_q[t] <= '0; md_m_q[t] <= '0; md_off_q[t] <= '0;
@@ -682,7 +747,7 @@ module g6lc_apu_shmod
         end
       end else begin
         done_o <= 1'b0;
-        dw_rm_q <= 1'b0; dw_bk_q <= 1'b0;
+        dw_rm_q <= 1'b0; dw_bk_q <= 1'b0; dw_ph_q <= 1'b0;
         if (st_q == S_MDC) begin
           if (md_found_d) begin
             if (ops_q[2] == 35) md_off_q[md_hit_d] <= ops_q[3][15:0];
@@ -714,6 +779,7 @@ module g6lc_apu_shmod
               lx_q <= '0; ly_q <= '0; lz_q <= '0; entry_off_q <= '0;
               glsl_id_q <= '0; entry_seen_q <= 1'b0;
               in_func_q <= 1'b0; md_n_q <= '0; br_n_q <= '0;
+              mp_q <= 1'b0; lp_n_q <= '0;
               sz_q <= '0; cn_q <= '0;
               live_q[commit_pl_i.slot] <= 1'b0;
               if (commit_pl_i.nwords < 5) begin
@@ -767,6 +833,9 @@ module g6lc_apu_shmod
           S_W0: begin
             w0_q <= pr_rdata; opc_q <= pr_rdata[15:0];
             wc_q <= pr_rdata[31:16];
+            // remember whether the instruction just dispatched was a
+            // structured merge (gates the next conditional/switch)
+            mp_q <= (opc_q == 246 || opc_q == 247);
             if (pr_rdata[31:16] == 0 ||
                 32'(at_q) + 32'(pr_rdata[31:16]) > 32'(nw_q)) begin
               fl_code_q <= APU_SH_FAULT_WORDS;
@@ -902,6 +971,60 @@ module g6lc_apu_shmod
                   st_q <= S_MDC;
                 end
               end
+              245: begin
+                // OpPhi {rty, rid, (value,parent)*}: the pair table row
+                // rides into the phi SRAM from S_RES; parents become
+                // branch-existence checks like any jump target.
+                if (wc_q < 5 || !wc_q[0] || wc_q > 11) begin
+                  fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else if (br_n_q + 6'((wc_q - 3) >> 1) > 6'(BRN)) begin
+                  fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else if (!id_ok1) begin
+                  fl_code_q <= APU_SH_FAULT_BOUND; fl_word_q <= at_q;
+                  fail_q <= 1'b1; st_q <= S_DONE;
+                end else begin
+                  for (int k = 0; k < 4; k++)
+                    if (k < (wc_q - 3) >> 1) begin
+                      br_at_q[br_n_q + 6'(k)] <= at_q;
+                      br_tg_q[br_n_q + 6'(k)] <= ops_q[3+2*k][9:0];
+                    end
+                  br_n_q <= br_n_q + 6'((wc_q - 3) >> 1);
+                  ph_q <= '0; st_q <= S_RES;
+                end
+              end
+              246: begin
+                // OpLoopMerge {merge, continue, ctl}: push the open loop
+                // so merge-less BranchConditional/Switch inside it may
+                // still target its merge/continue blocks (commit rule).
+                if (lp_n_q >= 4'(CFD) || br_n_q + 6'd2 > 6'(BRN)) begin
+                  fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else begin
+                  br_at_q[br_n_q] <= at_q;
+                  br_tg_q[br_n_q] <= ops_q[0][9:0];
+                  br_at_q[br_n_q+6'd1] <= at_q;
+                  br_tg_q[br_n_q+6'd1] <= ops_q[1][9:0];
+                  br_n_q <= br_n_q + 2;
+                  lp_m_q[lp_n_q] <= ops_q[0][9:0];
+                  lp_c_q[lp_n_q] <= ops_q[1][9:0];
+                  lp_n_q <= lp_n_q + 1;
+                  at_q <= at_q + wc_q; st_q <= S_IW;
+                end
+              end
+              247: begin
+                if (br_n_q >= 6'(BRN)) begin
+                  fl_code_q <= APU_SH_FAULT_BRANCH;
+                  fl_opc_q <= opc_q; fl_word_q <= at_q;
+                  fail_q <= 1'b1; st_q <= S_DONE;
+                end else begin
+                  br_at_q[br_n_q] <= at_q;
+                  br_tg_q[br_n_q] <= ops_q[0][9:0];
+                  br_n_q <= br_n_q + 1;
+                  at_q <= at_q + wc_q; st_q <= S_IW;
+                end
+              end
               248: begin
                 if (!id_ok0) begin
                   fl_code_q <= APU_SH_FAULT_BOUND; fl_word_q <= at_q;
@@ -909,11 +1032,16 @@ module g6lc_apu_shmod
                 end else begin
                   dw_bk_q <= 1'b1; dw_bk_id_q <= ops_q[0][9:0];
                   dw_bk_w_q <= {16'h0, 1'b1, at_q[14:0]};
+                  // reaching a loop merge label closes the innermost
+                  // open loop (commit-time nesting depth tracking)
+                  if (lp_n_q != 0 &&
+                      lp_m_q[lp_n_q-4'd1] == ops_q[0][9:0])
+                    lp_n_q <= lp_n_q - 4'd1;
                   at_q <= at_q + wc_q; st_q <= S_IW;
                 end
               end
               249: begin
-                if (br_n_q >= 5'(BRN)) begin
+                if (br_n_q >= 6'(BRN)) begin
                   fl_code_q <= APU_SH_FAULT_BRANCH;
                   fl_opc_q <= opc_q; fl_word_q <= at_q;
                   fail_q <= 1'b1; st_q <= S_DONE;
@@ -921,9 +1049,52 @@ module g6lc_apu_shmod
                   fl_code_q <= APU_SH_FAULT_BOUND; fl_word_q <= at_q;
                   fail_q <= 1'b1; st_q <= S_DONE;
                 end else begin
-                  br_at_q[br_n_q[3:0]] <= at_q;
-                  br_tg_q[br_n_q[3:0]] <= ops_q[0][9:0];
+                  br_at_q[br_n_q] <= at_q;
+                  br_tg_q[br_n_q] <= ops_q[0][9:0];
                   br_n_q <= br_n_q + 1;
+                  at_q <= at_q + wc_q; st_q <= S_IW;
+                end
+              end
+              250: begin
+                // OpBranchConditional {cond, T, F}: merge-free allowed
+                // only when the previous instruction was a merge op or
+                // a target is the innermost loop merge/continue (the
+                // continue path of a structured loop).
+                if (!mp_q && !tg_is_lc(ops_q[1][9:0]) &&
+                    !tg_is_lc(ops_q[2][9:0])) begin
+                  fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else if (br_n_q + 6'd2 > 6'(BRN)) begin
+                  fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else begin
+                  br_at_q[br_n_q] <= at_q;
+                  br_tg_q[br_n_q] <= ops_q[1][9:0];
+                  br_at_q[br_n_q+6'd1] <= at_q;
+                  br_tg_q[br_n_q+6'd1] <= ops_q[2][9:0];
+                  br_n_q <= br_n_q + 2;
+                  at_q <= at_q + wc_q; st_q <= S_IW;
+                end
+              end
+              251: begin
+                // OpSwitch {sel, default, (lit,label)*}
+                if (!sw_merge_free()) begin
+                  fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else if (wc_q < 3 ||
+                    br_n_q + 6'(((wc_q - 3) >> 1) + 1) > 6'(BRN)) begin
+                  fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else begin
+                  br_at_q[br_n_q] <= at_q;
+                  br_tg_q[br_n_q] <= ops_q[1][9:0];
+                  for (int k = 0; k < 15; k++)
+                    if (k < (wc_q - 3) >> 1) begin
+                      br_at_q[br_n_q + 6'(k) + 6'd1] <= at_q;
+                      br_tg_q[br_n_q + 6'(k) + 6'd1] <=
+                        ops_q[3+2*k][9:0];
+                    end
+                  br_n_q <= br_n_q + 6'(((wc_q - 3) >> 1) + 1);
                   at_q <= at_q + wc_q; st_q <= S_IW;
                 end
               end
@@ -980,18 +1151,13 @@ module g6lc_apu_shmod
                     ph_q <= '0; st_q <= S_CON;
                   end
                 end else if (has_result(opc_q)) begin
-                  if (n_regs_q >= 16'(ShaderRegs)) begin
-                    fl_code_q <= APU_SH_FAULT_REGS; fl_word_q <= at_q;
-                    fail_q <= 1'b1; st_q <= S_DONE;
-                  end else if (!id_ok1) begin
+                  if (!id_ok1) begin
                     fl_code_q <= APU_SH_FAULT_BOUND;
                     fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                   end else begin
-                    dw_rm_q <= 1'b1; dw_rm_id_q <= ops_q[1][9:0];
-                    dw_rm_w_q <= {2'b00, 4'h0, ops_q[0][9:0],
-                                  n_regs_q};
-                    n_regs_q <= n_regs_q + 1;
-                    at_q <= at_q + wc_q; st_q <= S_IW;
+                    // the result type row decides how many regmap slots
+                    // the value reserves (matrices = one per column)
+                    ph_q <= '0; st_q <= S_RES;
                   end
                 end else begin
                   at_q <= at_q + wc_q; st_q <= S_IW;
@@ -1135,9 +1301,11 @@ module g6lc_apu_shmod
                   at_q <= at_q + wc_q; st_q <= S_IW;
                 end else if (ph_q == 6'(2 * (wc_q - 2))) begin
                   n_memb_q <= n_memb_q + (wc_q - 2);
-                  sz_q <= '0;
                   ph_q <= ph_q + 1;
                 end else begin
+                  // ph0: start the struct-size max-accumulation clean —
+                  // sz_q may still hold a preceding OpTypeArray length.
+                  if (ph_q == 0) sz_q <= '0;
                   ph_q <= ph_q + 1;
                 end
               end
@@ -1328,11 +1496,34 @@ module g6lc_apu_shmod
               end
             endcase
           end
-          // ---- queued forward-branch check ---------------------------
+          // ---- result-id register allocation --------------------------
+          // one extra state so the result type row is in hand: matrix
+          // results reserve one regmap slot per column.
+          S_RES: begin
+            if (ph_q == 0) begin
+              ph_q <= 1;
+            end else if (n_regs_q + ((ty_kind == APU_SH_TK_MAT) ?
+                            16'(ty_cols) : 16'd1) > 16'(ShaderRegs)) begin
+              fl_code_q <= APU_SH_FAULT_REGS; fl_word_q <= at_q;
+              fail_q <= 1'b1; st_q <= S_DONE;
+            end else begin
+              dw_rm_q <= 1'b1; dw_rm_id_q <= ops_q[1][9:0];
+              dw_rm_w_q <= {2'b00, 4'h0, ops_q[0][9:0], n_regs_q};
+              n_regs_q <= n_regs_q + ((ty_kind == APU_SH_TK_MAT) ?
+                                      16'(ty_cols) : 16'd1);
+              if (opc_q == 245) begin
+                dw_ph_q <= 1'b1; dw_ph_id_q <= ops_q[1][9:0];
+                dw_ph_w_q <= phi_pack();
+              end
+              at_q <= at_q + wc_q; st_q <= S_IW;
+            end
+          end
+          // ---- queued branch-target existence check ------------------
+          // (targets may be backward edges to a loop continue block, so
+          // only the label-existence bit is verified)
           S_BRC: begin
             if (ph_q != 0) begin
-              if (!bk_rdata[15] ||
-                  bk_rdata[14:0] <= br_at_q[ph_q - 1][14:0]) begin
+              if (!bk_rdata[15]) begin
                 fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= 249;
                 fl_word_q <= br_at_q[ph_q - 1];
                 fail_q <= 1'b1; st_q <= S_DONE;
@@ -1420,6 +1611,8 @@ module g6lc_apu_shmod_fixture
   output logic [63:0]  init_data_o,
   input  logic [9:0]   blk_id_i,
   output logic [31:0]  blk_data_o,
+  input  logic [9:0]   phi_id_i,
+  output logic [159:0] phi_data_o,
   output logic [127:0] entry_data_o
 );
   g6lc_apu_shmod #(.Enable(Enable), .ShaderSlots(ShaderSlots),

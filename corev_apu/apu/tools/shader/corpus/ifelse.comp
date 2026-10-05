@@ -1,0 +1,18 @@
+#version 460
+layout(local_size_x = 32) in;
+layout(set = 0, binding = 0) readonly buffer In { uint src[]; };
+layout(set = 0, binding = 1) writeonly buffer Out { uint dst[]; };
+void main() {
+  uint i = gl_LocalInvocationIndex;
+  uint v = src[i];
+  uint r = 0;
+  if (v < 10u) {
+    r = 1u;
+  } else if (v < 100u) {
+    r = 2u;
+    if ((v & 1u) == 0u) r = 3u;
+  } else {
+    r = 4u;
+  }
+  dst[i] = r * 1000u + v;
+}

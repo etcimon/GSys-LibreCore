@@ -39,6 +39,7 @@ module tb_g6lc_apu_shmod;
   logic [9:0]   rm_id;     logic [31:0]  rm_data;
   logic [9:0]   init_id;   logic [63:0]  init_data;
   logic [9:0]   blk_id;    logic [31:0]  blk_data;
+  logic [9:0]   phi_id;    logic [159:0] phi_data;
   logic [127:0] entry_data;
 
   g6lc_apu_shmod #(.Enable(1)) dut (
@@ -58,6 +59,7 @@ module tb_g6lc_apu_shmod;
     .rm_id_i(rm_id), .rm_data_o(rm_data),
     .init_id_i(init_id), .init_data_o(init_data),
     .blk_id_i(blk_id), .blk_data_o(blk_data),
+    .phi_id_i(phi_id), .phi_data_o(phi_data),
     .entry_data_o(entry_data));
 
   // Enable=0 fixture: every input toggles, outputs must stay '0 —
@@ -81,6 +83,7 @@ module tb_g6lc_apu_shmod;
     .rm_id_i(rm_id), .rm_data_o(),
     .init_id_i(init_id), .init_data_o(),
     .blk_id_i(blk_id), .blk_data_o(),
+    .phi_id_i(phi_id), .phi_data_o(),
     .entry_data_o(off_entry));
 
   // continuous Enable=0 quiet monitor — sticky flag (fails is
@@ -147,7 +150,7 @@ module tb_g6lc_apu_shmod;
     rd_slot = 0;
     type_id = id[9:0]; const_id = id[9:0]; memb_id = id[9:0];
     decor_id = id[9:0]; var_id = id[9:0]; rm_id = id[9:0];
-    init_id = id[9:0]; blk_id = id[9:0];
+    init_id = id[9:0]; blk_id = id[9:0]; phi_id = id[9:0];
     @(negedge clk);
     unique case (tag[0])
       "T": v = type_data[32*j +: 32];
@@ -156,6 +159,7 @@ module tb_g6lc_apu_shmod;
       "V": v = var_data[32*j +: 32];
       "R": v = rm_data;
       "B": v = blk_data;
+      "P": v = phi_data[32*j +: 32];
       "M": v = memb_data[32*j +: 32];
       "I": v = init_data[32*j +: 32];
       default: v = entry_data[32*j +: 32];
@@ -246,10 +250,14 @@ module tb_g6lc_apu_shmod;
     end
   endtask
 
-  string names [15] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [27] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
-      "pushscale", "vec4arith"};
+      "pushscale", "vec4arith",
+      // §7c 4b corpus
+      "ifelse", "loopfor", "loopwhile", "switchcase", "shortcircuit",
+      "earlyret", "phiflow", "barrier_prefix", "barrier_reduce",
+      "matvec", "matmat", "precise_dot"};
 
   initial begin
     checks = 0; cases = 0; fails = 0; cyc = 0;
@@ -261,7 +269,7 @@ module tb_g6lc_apu_shmod;
     repeat (4) @(negedge clk);
 
     // ---- 1. every corpus module: commit + table compare -------------
-    for (int i = 0; i < 15; i++) begin
+    for (int i = 0; i < 27; i++) begin
       cases++;
       run_commit({names[i], "_1.hex"}, 0, 0, 0);
       check_tab(names[i]);
@@ -269,11 +277,23 @@ module tb_g6lc_apu_shmod;
       retire_do(0);
     end
 
-    // ---- 2. unsupported-opcode vectors (OpSin injected) -------------
-    for (int i = 0; i < 15; i++) begin
+    // ---- 2. bad vectors — expected commit fault from <name>.exp -----
+    // 4a bads inject OpSin (FAULT_OPCODE); 4b control-flow bads strip
+    // the merge instruction (FAULT_BRANCH).  The vector's .exp words 0/1
+    // carry the expected fault code and faulting opcode.
+    for (int i = 0; i < 27; i++) begin
+      int efd;
+      logic [31:0] ec, eo;
       cases++;
-      run_commit({names[i], "_bad_0.hex"}, 0,
-                 APU_SH_FAULT_OPCODE, 13);
+      ec = 0; eo = 0;
+      efd = $fopen({shv, "/", names[i], "_bad_0.exp"}, "r");
+      if (efd) begin
+        void'($fscanf(efd, "%x %x", ec, eo));
+        $fclose(efd);
+      end else
+        $display("WARN %s_bad_0.exp unreadable — expect code 0",
+                 names[i]);
+      run_commit({names[i], "_bad_0.hex"}, 0, int'(ec), int'(eo));
       retire_do(0);
     end
 

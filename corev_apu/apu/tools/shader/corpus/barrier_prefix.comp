@@ -1,0 +1,18 @@
+#version 460
+layout(local_size_x = 32) in;
+layout(set = 0, binding = 0) readonly buffer In { uint src[]; };
+layout(set = 0, binding = 1) writeonly buffer Out { uint dst[]; };
+shared uint sh[32];
+void main() {
+  uint i = gl_LocalInvocationIndex;
+  sh[i] = src[i];
+  barrier();
+  // Hillis-Steele prefix sum, in place
+  for (uint off = 1u; off < 32u; off <<= 1) {
+    uint v = (i >= off) ? sh[i - off] : 0u;
+    barrier();
+    sh[i] = sh[i] + v;
+    barrier();
+  }
+  dst[i] = sh[i];
+}

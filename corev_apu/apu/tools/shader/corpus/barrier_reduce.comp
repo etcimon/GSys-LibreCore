@@ -1,0 +1,16 @@
+#version 460
+layout(local_size_x = 64) in;
+layout(set = 0, binding = 0) readonly buffer In { uint src[]; };
+layout(set = 0, binding = 1) writeonly buffer Out { uint dst[]; };
+shared uint sh[64];
+void main() {
+  uint i = gl_LocalInvocationIndex;
+  sh[i] = src[i];
+  barrier();
+  for (uint s = 32u; s > 0u; s >>= 1) {
+    if (i < s) sh[i] = sh[i] + sh[i + s];
+    barrier();
+  }
+  if (i == 0u) dst[0] = sh[0];
+  dst[64u + i] = sh[i];
+}

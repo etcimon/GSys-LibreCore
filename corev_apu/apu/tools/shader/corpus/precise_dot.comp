@@ -1,0 +1,21 @@
+#version 460
+layout(local_size_x = 32) in;
+layout(set = 0, binding = 0) readonly buffer In { float src[]; };
+layout(set = 0, binding = 1) writeonly buffer Out { float dst[]; };
+void main() {
+  uint i = gl_LocalInvocationIndex;
+  vec4 a = vec4(src[i * 4u], src[i * 4u + 1u], src[i * 4u + 2u],
+                src[i * 4u + 3u]);
+  vec4 b = vec4(src[128u + i * 4u], src[128u + i * 4u + 1u],
+                src[128u + i * 4u + 2u], src[128u + i * 4u + 3u]);
+  precise float d;
+  d = dot(a, b);
+  precise mat4 m;
+  m = mat4(a, b, a + b, a - b);
+  precise vec4 r;
+  r = m * b;
+  dst[i * 4u]      = d;
+  dst[i * 4u + 1u] = r.x;
+  dst[i * 4u + 2u] = r.y + r.z;
+  dst[i * 4u + 3u] = r.w;
+}

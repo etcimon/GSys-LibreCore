@@ -1,8 +1,17 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: MIT
 """spirv_model.py — bit-exact reference interpreter for the G6LC
-ShaderCore increment-4a subset (architecture doc §7a, "the ShaderCore's
-commit scanner and the straight-line compute path").
+ShaderCore increment-4b subset (architecture doc §7a/§7c — 4a
+straight-line subset plus structured control flow, workgroup barriers
+and matrix ops).
+
+4b control-flow semantics are INDEPENDENT-LANE, not lockstep: each
+invocation runs its own pc straight through branches (prev_blk
+records the block it came from for OpPhi) until it reaches an
+OpControlBarrier or terminates; a workgroup runs in phases separated
+by barriers, with Workgroup (slab) memory the only shared state.
+Gate 1 (bit-exact RTL == this model) is then the proof that the
+RTL's wave reconvergence stack reproduces independent-lane results.
 
 This is the Gate-1 oracle: `tb_g6lc_apu_shwave` requires the RTL to
 match this model **bit-for-bit** on every output word and on the
@@ -387,7 +396,10 @@ class Model:
         self.rf = None
         self.fault = None
         self.cur_pc = 0
+        self.cur_lbl = 0          # label id of the current block
+        self.prev_lbl = 0         # label id this block was entered from
         self.l0_idx = {}          # (pc, id) -> lane-0 chain index value
+        self.nswitch = 0          # barrier/wave interleave counter (info)
 
     # -- memory --------------------------------------------------------
     def mread(self, byte_addr):
@@ -491,6 +503,39 @@ class Model:
             return [cw[c] if c < len(cw) else cw[0] for c in range(4)]
         return list(self.rf[idx])
 
+    def matv(self, iid):
+        """matrix operand: list of column vectors (each a comps-list).
+        cols-major order, matching the cols consecutive RF rows."""
+        r = self.sc.regmap.get(iid)
+        if r is None:
+            return []
+        tag, idx, tid, aux = r
+        t = self.sc.types.get(tid, {})
+        if t.get('kind') != TK['MAT']:
+            return [self.regv(iid)]
+        cols = t['cols']
+        comps = self.sc.types[t['elem']]['comps']
+        if tag == 1:
+            cw = self.sc.consts.get(iid, [0] * (cols * comps))
+            return [cw[c * comps:(c + 1) * comps] for c in range(cols)]
+        return [list(self.rf[idx + c])[:comps] for c in range(cols)]
+
+    def matshape(self, tid):
+        """(cols, comps) for a MAT type id; (1, comps) otherwise."""
+        t = self.sc.types.get(tid, {})
+        if t.get('kind') == TK['MAT']:
+            return t['cols'], self.sc.types[t['elem']]['comps']
+        return 1, self.ncomps(tid)
+
+    @staticmethod
+    def dotfold(m):
+        """products then right-leaning FMADD fold — OpDot semantics,
+        shared by every matrix product term in 4b (§7c)."""
+        t = fmul(m[-1], 0x3F800000)
+        for c in range(len(m) - 2, -1, -1):
+            t = ffma(m[c], 0x3F800000, t)
+        return t
+
     def regt(self, iid):
         r = self.sc.regmap.get(iid)
         return r[2] if r else 0
@@ -508,6 +553,16 @@ class Model:
     def setres(self, rid, vec, ncomp):
         r = self.sc.regmap.get(rid)
         if r is None or r[0] == 1:
+            return
+        t = self.sc.types.get(r[2], {})
+        if t.get('kind') == TK['MAT']:
+            # vec is a flat cols-major word list (cols*comps); each
+            # column lands in its own consecutive RF row.
+            comps = self.sc.types[t['elem']]['comps']
+            for c in range(t['cols']):
+                dst = self.rf[r[1] + c]
+                for j in range(comps):
+                    dst[j] = vec[c * comps + j] & 0xFFFFFFFF
             return
         dst = self.rf[r[1]]
         for c in range(min(ncomp, 4)):
@@ -761,24 +816,60 @@ class Model:
         vt = [self.regt(opid(k)) for k in range(nva)] + \
              [0] * (4 - nva)
 
-        if opc in (0, 54, 59, 248):           # Nop Function Variable Label
+        if opc in (0, 54, 59):                # Nop Function Variable
+            return pc + wc
+        if opc == 248:                        # Label — track cur block
+            self.cur_lbl = ops[0]
             return pc + wc
         if opc in (56, 253):                  # FunctionEnd / Return
             return 'ret'
-        if opc == 249:                        # Branch (uniform forward)
+        if opc in (246, 247, 225):            # LoopMerge SelectionMerge
+            return pc + wc                    # MemoryBarrier (no-op)
+        if opc == 224:                        # ControlBarrier — phase edge
+            return 'barrier'
+        if opc == 255:                        # Unreachable — run fault
+            self.fault = 'UNREACHABLE'
+            return 'ret'
+        if opc == 245:                        # Phi — pick by prev block
+            val = ops[2]                      # fallback: first pair
+            for k in range((wc - 3) // 2):
+                if ops[3 + 2 * k] == self.prev_lbl:
+                    val = ops[2 + 2 * k]
+                    break
+            self.setres(rid, self.regv(val), ncomp)
+            return pc + wc
+        if opc == 249:                        # Branch
+            self.prev_lbl = self.cur_lbl
             return self.sc.labels[ops[0]]
+        if opc == 250:                        # BranchConditional
+            self.prev_lbl = self.cur_lbl
+            tgt = ops[1] if self.regv(ops[0])[0] else ops[2]
+            return self.sc.labels[tgt]
+        if opc == 251:                        # Switch
+            self.prev_lbl = self.cur_lbl
+            sel = self.regv(ops[0])[0]
+            tgt = ops[1]
+            for k in range((wc - 3) // 2):
+                if ops[2 + 2 * k] == sel:
+                    tgt = ops[3 + 2 * k]
+                    break
+            return self.sc.labels[tgt]
         if opc == 61:                         # Load
-            wb = [0, 0, 0, 0]
+            wb = [0] * ncomp
             for c in range(ncomp):
                 r = self.lsu(va[0][0], va[0][1], c, False, 0, 'i')
                 wb[c] = r if r is not None else 0
             self.setres(rid, wb, ncomp)
             return pc + wc
         if opc == 62:                         # Store
-            ncs = self.ncomps(vt[1])          # stored value type comps
+            ncs = self.ncomps(vt[1])          # stored value words
             cls = self.classof(vt[1])
+            if self.sc.types.get(vt[1], {}).get('kind') == TK['MAT']:
+                src = [w for col in self.matv(ops[1]) for w in col]
+            else:
+                src = va[1]
             for c in range(ncs):
-                self.lsu(va[0][0], va[0][1], c, True, va[1][c], cls)
+                self.lsu(va[0][0], va[0][1], c, True, src[c], cls)
             return pc + wc
         if opc in (65, 66):                   # (InBounds)AccessChain
             wb = self.chain(ops[2], ops[3:]) if len(ops) > 3 \
@@ -812,6 +903,19 @@ class Model:
             self.setres(rid, wb, ncomp)
             return pc + wc
         if opc == 80:                         # CompositeConstruct
+            if self.sc.types.get(rty, {}).get('kind') == TK['MAT']:
+                # constituents are the column vectors — flat cols-major
+                # concatenation into the cols RF rows.
+                flat = []
+                for k in range(nva):
+                    if self.sc.types.get(vt[k], {}).get('kind') \
+                            == TK['MAT']:
+                        for col in self.matv(ops[2 + k]):
+                            flat += col
+                    else:
+                        flat += va[k][:self.ncomps(vt[k])]
+                self.setres(rid, flat, ncomp)
+                return pc + wc
             wb = [0] * 4
             pos = 0
             for k in range(nva):
@@ -832,6 +936,53 @@ class Model:
             return pc + wc
         if opc == 124:                        # Bitcast
             self.setres(rid, va[0], ncomp)
+            return pc + wc
+
+        # ---- matrix ops (§7c lane micro-sequences; products then
+        # right-leaning FMADD fold per output element — OpDot fold) --
+        if opc == 84:                         # Transpose
+            mc, mc2 = self.matshape(vt[0])
+            m = self.matv(ops[2])
+            flat = [m[j][c] for c in range(mc2) for j in range(mc)]
+            self.setres(rid, flat, ncomp)
+            return pc + wc
+        if opc == 143:                        # MatrixTimesScalar
+            s = va[1][0]
+            flat = [fmul(x, s) for col in self.matv(ops[2])
+                    for x in col]
+            self.setres(rid, flat, ncomp)
+            return pc + wc
+        if opc == 145:                        # MatrixTimesVector
+            cols, comps = self.matshape(vt[0])
+            m, v = self.matv(ops[2]), va[1]
+            flat = [self.dotfold([fmul(m[c][j], v[c])
+                                  for c in range(cols)])
+                    for j in range(comps)]
+            self.setres(rid, flat, ncomp)
+            return pc + wc
+        if opc == 144:                        # VectorTimesMatrix
+            cols, comps = self.matshape(vt[1])
+            v, m = va[0], self.matv(ops[3])
+            flat = [self.dotfold([fmul(v[k], m[j][k])
+                                  for k in range(comps)])
+                    for j in range(cols)]
+            self.setres(rid, flat, ncomp)
+            return pc + wc
+        if opc == 146:                        # MatrixTimesMatrix
+            cA, rA = self.matshape(vt[0])     # A: cA cols of vec rA
+            cB, _rB = self.matshape(vt[1])    # B: cB cols of vec cA
+            a, b = self.matv(ops[2]), self.matv(ops[3])
+            flat = [self.dotfold([fmul(a[k][j], b[c][k])
+                                  for k in range(cA)])
+                    for c in range(cB) for j in range(rA)]
+            self.setres(rid, flat, ncomp)
+            return pc + wc
+        if opc == 147:                        # OuterProduct v1 x v2
+            c1 = self.ncomps(vt[0])
+            c2 = self.ncomps(vt[1])
+            flat = [fmul(va[0][j], va[1][c])
+                    for c in range(c2) for j in range(c1)]
+            self.setres(rid, flat, ncomp)
             return pc + wc
 
         # per-component ALU ops
@@ -894,13 +1045,15 @@ class Model:
                         168, 169, 170, 171, 172, 173, 174, 175, 176,
                         177, 178, 179, 194, 195, 196, 197, 198, 199,
                         200))
-    HAS_RTY = frozenset((12, 61, 65, 66, 68, 79, 80, 81, 82, 109, 110,
-                         111, 112, 124, 126, 127, 128, 129, 130, 131,
-                         132, 133, 134, 135, 136, 137, 138, 139, 142,
+    HAS_RTY = frozenset((12, 61, 65, 66, 68, 79, 80, 81, 82, 84, 109,
+                         110, 111, 112, 124, 126, 127, 128, 129, 130,
+                         131, 132, 133, 134, 135, 136, 137, 138, 139,
+                         142, 143, 144, 145, 146, 147,
                          148, 164, 165, 166, 167, 168, 169, 170, 171,
                          172, 173, 174, 175, 176, 177, 178, 179, 180,
                          181, 182, 183, 184, 185, 186, 187, 188, 189,
-                         190, 191, 194, 195, 196, 197, 198, 199, 200))
+                         190, 191, 194, 195, 196, 197, 198, 199, 200,
+                         245))
 
     @staticmethod
     def nva(opc, wc):
@@ -915,10 +1068,12 @@ class Model:
             return 2
         if opc == 12:
             return 3 if wc > 8 else (wc - 5 if wc > 5 else 0)
-        if opc in (61, 65, 66, 68, 81, 109, 110, 111, 112, 124, 126,
-                   127, 146, 168, 200):
+        if opc in (61, 65, 66, 68, 81, 84, 109, 110, 111, 112, 124, 126,
+                   127, 168, 200):
             return 1
         if opc in (54, 56, 248, 249, 253):
+            return 0
+        if opc in (0, 224, 225, 245, 246, 247, 250, 251, 255):
             return 0
         return 2
 
@@ -999,43 +1154,76 @@ class Model:
         return out
 
     # -- dispatch --------------------------------------------------------
-    def run_inv(self):
-        """one invocation (wave/lane already set by the caller)."""
-        # RF init from the scanner's init table — identical per lane
-        self.rf = [[0, 0, 0, 0] for _ in range(self.sc.n_regs)]
+    # §7c independent-lane semantics: each invocation executes
+    # sequentially to a barrier or to the end; the workgroup runs in
+    # phases separated by barriers.  Workgroup (slab) memory is the
+    # only shared state.  There is no lockstep in the model — Gate 1
+    # (bit-exact RTL == model) is the proof that the RTL's wave
+    # reconvergence reproduces independent-lane results.
+
+    def inv_init(self):
+        """fresh per-invocation state dict."""
+        rf = [[0, 0, 0, 0] for _ in range(self.sc.n_regs)]
         for (idx, sc, bi, st, bd, off) in self.sc.init:
             tag = (bd << 20) | (st << 12) | (bi << 4) | sc
-            self.rf[idx] = [off, tag, 0, 0]
-        self.scratch = [0] * self.sc_w
-        pc = self.sc.entry_off
-        steps = 0
+            rf[idx] = [off, tag, 0, 0]
+        return dict(rf=rf, scratch=[0] * self.sc_w,
+                    pc=self.sc.entry_off, cur_lbl=0, prev_lbl=0,
+                    done=False, bwait=False, steps=0)
+
+    def run_inv(self, i):
+        """run invocation i until it ends or waits at a barrier."""
+        s = self.ivs[i]
+        self.wave, self.lane = i // LAN, i % LAN
+        self.inv = i
+        self.rf, self.scratch = s['rf'], s['scratch']
+        self.cur_lbl, self.prev_lbl = s['cur_lbl'], s['prev_lbl']
         while True:
-            self.cur_pc = pc
-            npc = self.exec_one(pc)
-            steps += 1
-            if npc == 'ret' or steps > (1 << 22):
-                return
-            pc = npc
+            self.cur_pc = s['pc']
+            npc = self.exec_one(s['pc'])
+            s['steps'] += 1
+            if npc == 'barrier':
+                s['pc'] += (self.spv[s['pc']] >> 16)  # past the barrier
+                s['bwait'] = True
+                break
+            if npc == 'ret' or s['steps'] > (1 << 22):
+                s['done'] = True
+                break
+            s['pc'] = npc
+        s['cur_lbl'], s['prev_lbl'] = self.cur_lbl, self.prev_lbl
 
     def run(self):
-        """whole dispatch: workgroups x-fastest (W_EOW order), waves of
-        LAN lanes, lanes in order (lane 0 first so its chain-index
-        values are recorded before other lanes need them — matching
-        the RTL's uniform `vix_q[0]` struct-member-index read)."""
+        """whole dispatch: workgroups x-fastest (W_EOW order); within a
+        workgroup the invocations run in barrier-separated phases —
+        each invocation independently to its next OpControlBarrier
+        or to termination, finished invocations counting as arrived."""
         ninv = self.lx * self.ly * self.lz
-        nwaves = (ninv + LAN - 1) // LAN
         for wgz in range(self.gz):
             for wgy in range(self.gy):
                 for wgx in range(self.gx):
                     self.wg = (wgx, wgy, wgz)
                     self.slab = [0] * self.slb_w
-                    for wv in range(nwaves):
-                        self.wave = wv
-                        self.l0_idx = {}
-                        for l in range(min(LAN, ninv - wv * LAN)):
-                            self.lane = l
-                            self.inv = wv * LAN + l
-                            self.run_inv()
+                    self.l0_idx = {}
+                    self.ivs = [self.inv_init() for _ in range(ninv)]
+                    phases = 0
+                    while True:
+                        live = [i for i in range(ninv)
+                                if not self.ivs[i]['done']]
+                        if not live:
+                            break
+                        waiters = [i for i in live
+                                   if self.ivs[i]['bwait']]
+                        if len(waiters) == len(live):
+                            # rendezvous: release everyone
+                            for i in waiters:
+                                self.ivs[i]['bwait'] = False
+                            self.nswitch += 1
+                        for i in live:
+                            if not self.ivs[i]['bwait']:
+                                self.run_inv(i)
+                        phases += 1
+                        if phases > 4096:
+                            break
         return self.mem
 
     # output collection -------------------------------------------------

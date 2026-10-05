@@ -1,0 +1,1 @@
+{"gx": 1, "gy": 1, "gz": 1, "bindings": [{"set": 0, "binding": 0, "size": 128, "init": "/mnt/e/cva6/verif/tb/apu/sh_vectors/ifelse_3_in0.bin"}, {"set": 0, "binding": 1, "size": 128, "init": "/mnt/e/cva6/verif/tb/apu/sh_vectors/ifelse_3_in1.bin"}]}

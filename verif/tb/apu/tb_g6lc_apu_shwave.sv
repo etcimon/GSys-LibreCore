@@ -40,6 +40,8 @@ module tb_g6lc_apu_shwave;
   localparam int unsigned MAXW = 262144;   // hex/exp word buffers
   localparam int unsigned MEMW = 131072;   // 64-bit mem words (1 MiB)
   string  shv;
+  string  only;
+  bit     dbg_sc, dbg_wd;
   int     checks, cases, fails;
   int     ulp1c, ulp2c, maxulp;            // Gate-2 ULP counters
   longint cyc, dcyc;
@@ -47,6 +49,21 @@ module tb_g6lc_apu_shwave;
   logic clk = 0, rst_n = 0;
   always #5 clk = ~clk;
   always_ff @(posedge clk) cyc <= cyc + 1;
+  // scheduler-state watchdog, one line per 100k cycles (+dbg_wd)
+  always_ff @(posedge clk)
+    if (dbg_wd && cyc % 100000 == 99999)
+      $display("DBG cyc=%0d st=%0d wv=%0d pc=%0d cfn=%0d act=%x fin=%x bar=%x nwg=%0d",
+               cyc, dut.gen_on.i_wave.gen_on.st_q,
+               dut.gen_on.i_wave.gen_on.wave_q,
+               dut.gen_on.i_wave.gen_on.pc_q[
+                 dut.gen_on.i_wave.gen_on.wave_q],
+               dut.gen_on.i_wave.gen_on.cfn_q[
+                 dut.gen_on.i_wave.gen_on.wave_q],
+               dut.gen_on.i_wave.gen_on.cmask_q[
+                 dut.gen_on.i_wave.gen_on.wave_q],
+               dut.gen_on.i_wave.gen_on.wfin_q,
+               dut.gen_on.i_wave.gen_on.wbar_q,
+               dut.gen_on.i_wave.gen_on.nwaves_q);
 
   // ---- DUT ----------------------------------------------------------
   logic         wr_en;  logic [2:0]  wr_slot;  logic [15:0] wr_addr;
@@ -74,6 +91,7 @@ module tb_g6lc_apu_shwave;
     .commit_i(commit), .commit_pl_i(commit_pl),
     .c_busy_o(c_busy), .c_done_o(c_done), .c_done_pl_o(c_done_pl),
     .retire_i(retire), .retire_slot_i(retire_slot),
+    .sm_req_i(1'b0), .sm_req_pl_i('0), .sm_cpl_o(), .sm_cpl_pl_o(),
     .work_i(work), .work_ready_o(work_ready),
     .work_ctype_i(work_ctype), .work_imm_i(work_imm),
     .disp_slot_i(disp_slot), .binds_i(binds),
@@ -98,6 +116,7 @@ module tb_g6lc_apu_shwave;
     .c_busy_o(off_cbusy), .c_done_o(off_cdone),
     .c_done_pl_o(off_cpl),
     .retire_i(retire), .retire_slot_i(retire_slot),
+    .sm_req_i(1'b0), .sm_req_pl_i('0), .sm_cpl_o(), .sm_cpl_pl_o(),
     .work_i(work), .work_ready_o(off_ready),
     .work_ctype_i(work_ctype), .work_imm_i(work_imm),
     .disp_slot_i(disp_slot), .binds_i(binds),
@@ -378,26 +397,56 @@ module tb_g6lc_apu_shwave;
         $display("FAIL %s mutated module did not differ", file);
       end
     end
-    $display("CYC %s cycles=%0d code=%0d pc=%0d wave=%0d robust=%0d",
-             file, dcyc, dpl.code, dpl.pc, dpl.wave, dpl.robust);
+    $display("CYC %s cycles=%0d code=%0d pc=%0d wave=%0d robust=%0d wsw=%0d nwaves=%0d",
+             file, dcyc, dpl.code, dpl.pc, dpl.wave, dpl.robust,
+             dut.gen_on.i_wave.gen_on.wsw_q,
+             dut.gen_on.i_wave.gen_on.nwaves_q);
+    // §7c: a multi-wave workgroup must have actually interleaved the
+    // round-robin scheduler at least once during the dispatch.
+    checks++;
+    if (dpl.code == APU_SH_DONE_OK &&
+        dut.gen_on.i_wave.gen_on.nwaves_q > 1 &&
+        dut.gen_on.i_wave.gen_on.wsw_q == 0) begin
+      fails++;
+      $display("FAIL %s multi-wave dispatch never switched waves", file);
+    end
     if (!mut)
       $display("ULP %s max=%0d ulp1=%0d ulp2=%0d", file, cmax,
                cn1, cn2);
+    // +dbg_sc: per-case scratch slab and RF dump for bring-up debug
+    if (dbg_sc) begin
+      for (int w = 0; w < 128; w++)
+        $display("DSC %s sc[%3d] = %08x", file, w,
+                 dut.gen_on.i_wave.gen_on.i_scratch.sram[w]);
+      for (int r = 30; r < 80; r++)
+        $display("DRF %s rf[%2d] = %08x %08x %08x %08x", file, r,
+                 dut.gen_on.i_wave.gen_on.i_rf_lo.sram[r][31:0],
+                 dut.gen_on.i_wave.gen_on.i_rf_lo.sram[r][63:32],
+                 dut.gen_on.i_wave.gen_on.i_rf_lo.sram[r][95:64],
+                 dut.gen_on.i_wave.gen_on.i_rf_lo.sram[r][127:96]);
+    end
     if (cmax > maxulp) maxulp = cmax;
     if (fails != f0)
       $display("CASE %s fails=%0d", file, fails - f0);
     retire_do(0);
   endtask
 
-  string names [15] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [27] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
-      "pushscale", "vec4arith"};
+      "pushscale", "vec4arith",
+      // §7c 4b corpus
+      "ifelse", "loopfor", "loopwhile", "switchcase", "shortcircuit",
+      "earlyret", "phiflow", "barrier_prefix", "barrier_reduce",
+      "matvec", "matmat", "precise_dot"};
 
   initial begin
     checks = 0; cases = 0; fails = 0; cyc = 0; dcyc = 0;
     ulp1c = 0; ulp2c = 0; maxulp = 0;
     if (!$value$plusargs("shv=%s", shv)) shv = "verif/tb/apu/sh_vectors";
+    dbg_sc = $test$plusargs("dbg_sc");
+    dbg_wd = $test$plusargs("dbg_wd");
+    if (!$value$plusargs("only=%s", only)) only = "";
     wr_en = 0; commit = 0; retire = 0; work = 0; work_ctype = 0;
     work_imm = '0; disp_slot = 0; binds = '0; push_n = 0; push = '0;
     for (int i = 0; i < MEMW; i++) mem[i] = '0;
@@ -405,18 +454,21 @@ module tb_g6lc_apu_shwave;
     repeat (8) @(negedge clk); rst_n = 1;
     repeat (4) @(negedge clk);
 
-    for (int i = 0; i < 15; i++) begin
+    for (int i = 0; i < $size(names); i++) begin
       for (int s = 1; s <= 3; s++) begin
+        if (only != "" && names[i] != only) continue;
         cases++;
         run_vec(names[i],
                 {names[i], "_", $sformatf("%0d", s)});
       end
     end
-    for (int i = 0; i < 15; i++) begin
+    for (int i = 0; i < $size(names); i++) begin
+      if (only != "" && names[i] != only) continue;
       cases++;
       run_vec(names[i], {names[i], "_mut_0"});
     end
-    for (int i = 0; i < 15; i++) begin
+    for (int i = 0; i < $size(names); i++) begin
+      if (only != "" && names[i] != only) continue;
       cases++;
       run_vec(names[i], {names[i], "_bad_0"});
     end
@@ -426,10 +478,11 @@ module tb_g6lc_apu_shwave;
       fails++; $display("FAIL Enable=0 not quiet");
     end
 
-    $display("PASS tb_g6lc_apu_shwave cases=%0d checks=%0d ulp1=%0d ulp2=%0d maxulp=%0d cycles=%0d",
-             cases, checks, ulp1c, ulp2c, maxulp, cyc);
-    if (fails) begin
-      $display("FAILURES=%0d", fails);
+    if (fails == 0)
+      $display("PASS tb_g6lc_apu_shwave cases=%0d checks=%0d ulp1=%0d ulp2=%0d maxulp=%0d cycles=%0d",
+               cases, checks, ulp1c, ulp2c, maxulp, cyc);
+    else begin
+      $display("FAILURES=%0d (no PASS)", fails);
       $fatal(1);
     end
     $finish;

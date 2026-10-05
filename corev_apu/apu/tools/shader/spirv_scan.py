@@ -8,6 +8,7 @@ subset, and produces the exact SRAM table images the RTL must build:
   member table 2 words/entry  decor table   2 words/id
   var table    2 words/id     regmap        1 word/id
   init table   2 words/entry  entry record  4 words
+  block table  1 word/id      phi table     5 words/phi-result-id
 
 Usage:
   spirv_scan.py module.spv [--emit-tab module.tab] [--check] [--info]
@@ -27,7 +28,8 @@ SHADER_REGS = 256
 SHADER_MEMBERS = 256
 SHADER_INIT = 128
 MDECOR_MAX = 64            # pending member-decor window (RTL)
-BRANCH_MAX = 16            # queued forward branches (RTL)
+BRANCH_MAX = 48            # queued branch targets (existence check)
+OPN_MAX = 32               # operand words staged (RTL OPB)
 TYPE_WORDS = 3
 CONST_WORDS = 16
 MEMBER_WORDS = 2
@@ -36,6 +38,8 @@ VAR_WORDS = 2
 REGMAP_WORDS = 1
 INIT_WORDS = 2
 ENTRY_WORDS = 4
+PHI_WORDS = 5              # npairs word + 4 packed (value,parent) words
+PHI_MAXPAIRS = 4
 MAX_LOCAL = 64
 
 # ---- fault codes (must match APU_SH_FAULT_*) ----------------------
@@ -101,13 +105,16 @@ OP = dict(
     AccessChain=65, InBoundsAccessChain=66, ArrayLength=68,
     Decorate=71, MemberDecorate=72,
     VectorShuffle=79, CompositeConstruct=80, CompositeExtract=81,
-    CompositeInsert=82,
+    CompositeInsert=82, Transpose=84,
     ConvertFToU=109, ConvertFToS=110, ConvertSToF=111,
     ConvertUToF=112, Bitcast=124,
     SNegate=126, FNegate=127, IAdd=128, FAdd=129, ISub=130, FSub=131,
     IMul=132, FMul=133, UDiv=134, SDiv=135, FDiv=136, UMod=137,
     SRem=138, SMod=139,
-    VectorTimesScalar=142, Dot=148,
+    VectorTimesScalar=142,
+    MatrixTimesScalar=143, VectorTimesMatrix=144,
+    MatrixTimesVector=145, MatrixTimesMatrix=146,
+    OuterProduct=147, Dot=148,
     LogicalEqual=164, LogicalNotEqual=165, LogicalOr=166,
     LogicalAnd=167, LogicalNot=168, Select=169,
     IEqual=170, INotEqual=171, UGreaterThan=172, SGreaterThan=173,
@@ -119,10 +126,19 @@ OP = dict(
     ShiftRightLogical=194, ShiftRightArithmetic=195,
     ShiftLeftLogical=196, BitwiseOr=197, BitwiseXor=198,
     BitwiseAnd=199, Not=200,
-    Label=248, Branch=249, Return=253,
+    ControlBarrier=224, MemoryBarrier=225,
+    Phi=245, LoopMerge=246, SelectionMerge=247,
+    Label=248, Branch=249, BranchConditional=250, Switch=251,
+    Return=253, Unreachable=255,
+    # OpKill (252) and OpReturnValue (254) are deliberately absent:
+    # they fault OPCODE at commit.
 )
 
 ACCEPT = set(OP.values())
+
+# instruction word bound for ops that stage all operand words
+STAGE_BOUND = {245, 224, 225, 246, 247, 250, 251, 84,
+               143, 144, 145, 146, 147, 255}
 
 # GLSL.std.450 extinst numbers accepted in 4a (extinst grammar vulkan-
 # sdk-1.4.309.0); everything else faults at commit.
@@ -157,7 +173,10 @@ class Scanner:
         #                                  scratch_off,type_id)
         self.regmap = {}      # id -> (tag, idx, type_id)
         self.labels = {}      # label id -> word offset (block table)
-        self.branches = []    # (word off, target label id) for fwd check
+        self.branches = []    # (word off, target label id) deferred check
+        self.phis = []        # (result id, [(value,parent)]) — P table
+        self.loops = []       # open (merge_lbl, cont_lbl), innermost last
+        self.merge_pending = False  # previous insn was a merge op
         self.member_base = {}  # type id -> base idx in member table
         self.members = []      # flat member table entries
         self.init = []         # (reg_idx, storage, aux, set, binding, off)
@@ -177,6 +196,9 @@ class Scanner:
     # regmap row: {tag[31:30], aux[29:26] (const word count),
     #              type_id[25:16], idx[15:0]}
     def reg(self, iid, tag=0, tid=0, aux=0):
+        """regmap row {tag[31:30], aux[29:26], type_id[25:16], idx[15:0]}.
+        A MAT-typed id occupies `cols` consecutive RF slots starting at
+        idx (§7c: one 4-lane reg row per column)."""
         if iid == 0:
             return
         if iid in self.regmap:
@@ -185,10 +207,14 @@ class Scanner:
             self.regmap[iid] = (1, iid, tid, aux)
             self.n_consts += 1
         else:
-            if self.n_regs >= SHADER_REGS:
+            n = 1
+            t = self.types.get(tid)
+            if t is not None and t['kind'] == TK['MAT']:
+                n = t['cols']
+            if self.n_regs + n > SHADER_REGS:
                 raise Fault(FAULT['REGS'], 0, 0)
             self.regmap[iid] = (0, self.n_regs, tid, aux)
-            self.n_regs += 1
+            self.n_regs += n
 
     def decor_of(self, iid):
         return self.decor.get(iid, {})
@@ -416,17 +442,22 @@ class Scanner:
             ops = w[at + 1: at + wc]
             if opc not in ACCEPT:
                 raise Fault(FAULT['OPCODE'], opc, at)
+            if opc in STAGE_BOUND and wc - 1 > OPN_MAX:
+                raise Fault(FAULT['WORDS'], opc, at)
             h = getattr(self, 'h_%d' % opc, None)
             if h is None:
                 h = self.h_default
             h(opc, ops, at)
+            # a merge op applies to the immediately following
+            # instruction only (§7c commit rule)
+            self.merge_pending = opc in (246, 247)
             at += wc
         if self.entry is None:
             raise Fault(FAULT['ENTRY'], 0, 0)
         if self.in_function:
             raise Fault(FAULT['WORDS'], 0, len(w) - 1)
         for at, tgt in self.branches:
-            if tgt not in self.labels or self.labels[tgt] <= at:
+            if tgt not in self.labels:
                 raise Fault(FAULT['BRANCH'], 249, at)
         return self
 
@@ -555,11 +586,65 @@ class Scanner:
 
     def h_248(self, opc, ops, at):      # OpLabel — block table
         self.labels[ops[0]] = at
+        # scan-order pop: a label equal to an open loop's merge target
+        # leaves that loop scope (and anything nested inside it)
+        while self.loops and self.loops[-1][0] == ops[0]:
+            self.loops.pop()
 
-    def h_249(self, opc, ops, at):      # OpBranch — uniform fwd only
+    def qbranch(self, at, tgt):
         if len(self.branches) >= BRANCH_MAX:
+            raise Fault(FAULT['BRANCH'], 249, at)
+        self.branches.append((at, tgt))
+
+    def h_249(self, opc, ops, at):      # OpBranch — any direction
+        self.qbranch(at, ops[0])
+
+    def _merge_free_ok(self, targets):
+        """§7c commit rule: a merge-less BranchConditional/Switch is
+        accepted only when one of its targets is the innermost open
+        loop's merge or continue block."""
+        if self.merge_pending:
+            return True
+        if not self.loops:
+            return False
+        m, c = self.loops[-1]
+        return any(t == m or t == c for t in targets)
+
+    def h_250(self, opc, ops, at):      # OpBranchConditional
+        tg = [ops[1], ops[2]]
+        if not self._merge_free_ok(tg):
             raise Fault(FAULT['BRANCH'], opc, at)
-        self.branches.append((at, ops[0]))
+        for t in tg:
+            self.qbranch(at, t)
+
+    def h_251(self, opc, ops, at):      # OpSwitch
+        tg = [ops[1]] + ops[3::2]       # default + pair labels
+        if not self._merge_free_ok(tg):
+            raise Fault(FAULT['BRANCH'], opc, at)
+        for t in tg:
+            self.qbranch(at, t)
+
+    def h_246(self, opc, ops, at):      # OpLoopMerge M C [control]
+        self.qbranch(at, ops[0])
+        self.qbranch(at, ops[1])
+        if len(self.loops) >= 8:        # CfDepth — RTL commit stack
+            raise Fault(FAULT['BRANCH'], opc, at)
+        self.loops.append((ops[0], ops[1]))
+
+    def h_247(self, opc, ops, at):      # OpSelectionMerge M [control]
+        self.qbranch(at, ops[0])
+
+    def h_245(self, opc, ops, at):      # OpPhi rty rid (value,parent)*
+        if len(ops) < 4 or (len(ops) - 2) % 2:
+            raise Fault(FAULT['BRANCH'], opc, at)
+        pairs = [(ops[2 + 2 * k], ops[3 + 2 * k])
+                 for k in range((len(ops) - 2) // 2)]
+        if len(pairs) > PHI_MAXPAIRS:
+            raise Fault(FAULT['BRANCH'], opc, at)
+        for v, p in pairs:
+            self.qbranch(at, p)
+        self.phis.append((ops[1], pairs))
+        self.reg(ops[1], tid=ops[0])
 
     def h_result(self, opc, ops, at):
         """instructions with (result-type, result-id) prefix"""
@@ -569,12 +654,12 @@ class Scanner:
         pass
 
     # result-bearing execution instructions
-    for _o in [61, 65, 66, 68, 79, 80, 81, 82, 109, 110, 111, 112,
+    for _o in [61, 65, 66, 68, 79, 80, 81, 82, 84, 109, 110, 111, 112,
                124, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135,
-               136, 137, 138, 139, 142, 148, 164, 165, 166, 167, 168,
-               169, 170, 171, 172, 173, 174, 175, 176, 177, 178, 179,
-               180, 182, 183, 184, 186, 188, 190, 194, 195, 196, 197,
-               198, 199, 200]:
+               136, 137, 138, 139, 142, 143, 144, 145, 146, 147, 148,
+               164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174,
+               175, 176, 177, 178, 179, 180, 182, 183, 184, 186, 188,
+               190, 194, 195, 196, 197, 198, 199, 200]:
         exec('h_%d = h_result' % _o)
 
     # ---- table emit --------------------------------------------------
@@ -625,8 +710,11 @@ class Scanner:
         v = self.vars.get(iid)
         if v is None:
             return [0, 0]
+        # w0 = {flags[3:0], builtin[7:0], binding[7:0], set[7:0],
+        #       storage[3:0]} — RTL packs de_rdata[27:24] (flags[3:0])
+        # at bits 31:28; flag bits 4..7 are not carried into the row.
         return [w32(v['storage'] | (v['set'] << 4) | (v['binding'] << 12) |
-                    (v['builtin'] << 20) | ((v['flags'] & 0x3F) << 27)),
+                    (v['builtin'] << 20) | ((v['flags'] & 0xF) << 28)),
                 w32(v['off'] | (v['type_id'] << 16))]
 
     def regmap_word(self, iid):
@@ -645,6 +733,24 @@ class Scanner:
     def block_word(self, iid):
         return w32(self.labels.get(iid, 0) | (0x8000 if iid in
                                               self.labels else 0))
+
+    def phi_words(self, rid):
+        """phi row for result id `rid` (§7c): word0 = pair count,
+        word k (1..PHI_MAXPAIRS) = {parent[31:16], value[15:0]}."""
+        pr = None
+        for (r2, pairs) in self.phis:
+            if r2 == rid:
+                pr = pairs
+        if pr is None:
+            return [0] * PHI_WORDS
+        out = [w32(len(pr))]
+        for k in range(PHI_MAXPAIRS):
+            if k < len(pr):
+                v, p = pr[k]
+                out.append(w32((v & 0xFFFF) | ((p & 0xFFFF) << 16)))
+            else:
+                out.append(0)
+        return out
 
     def entry_words(self):
         lx, ly, lz = self.localsize
@@ -667,6 +773,8 @@ class Scanner:
                 lines.append('V %d %d %08x' % (iid, j, v))
             lines.append('R %d 0 %08x' % (iid, self.regmap_word(iid)))
             lines.append('B %d 0 %08x' % (iid, self.block_word(iid)))
+            for j, v in enumerate(self.phi_words(iid)):
+                lines.append('P %d %d %08x' % (iid, j, v))
         for i in range(len(self.members)):
             for j, v in enumerate(self.member_words(i)):
                 lines.append('M %d %d %08x' % (i, j, v))

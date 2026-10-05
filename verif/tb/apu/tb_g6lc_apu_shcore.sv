@@ -348,7 +348,17 @@ module tb_g6lc_apu_shcore;
     do_commit(n, 0, cpl);
     cmp("re.commit.ok", {31'h0, cpl.ok}, 1);
 
-    // 7. bad module faults at commit through the same port
+    // 7. one §7c 4b vector: loopfor_1 (OpLoopMerge/OpBranchConditional
+    //    control flow) commits and dispatches through the composition
+    cases++;
+    stage("loopfor_1", 3, n, nb, np, gx, gy, gz);
+    wr_words(8, n, 3);
+    do_commit(n, 3, cpl);
+    cmp("s3.commit.ok", {31'h0, cpl.ok}, 1);
+    do_work(32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT), gx, gy, gz, 3, dpl);
+    cmp("s3.done.code", {24'h0, dpl.code}, APU_SH_DONE_OK);
+
+    // 8. bad module faults at commit through the same port
     cases++;
     stage("bufcopy_bad_0", 2, n, nb, np, gx, gy, gz);
     wr_words(8, n, 2);
