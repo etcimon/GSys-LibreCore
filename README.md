@@ -4,6 +4,8 @@
 
 **A source-available, Linux-capable RISC-V application-class processor — and the agentic build platform that carries it from core to silicon.**
 
+<img src="superprocessor.jpg" alt="GSys LibreCore — artistic rendering of a RISC-V processor die" width="760"/>
+
 [![RTL: CERN-OHL-S-2.0](https://img.shields.io/badge/RTL-CERN--OHL--S--2.0-0a6b7c?style=flat-square)](LICENSE.CERN-OHL-S)
 [![Tooling: MIT](https://img.shields.io/badge/tooling-MIT-0a6b7c?style=flat-square)](LICENSE.MIT)
 [![Commercial licence](https://img.shields.io/badge/commercial_licence-available-cb007b?style=flat-square)](LICENSE.GSys-Commercial)
