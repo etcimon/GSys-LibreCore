@@ -3910,3 +3910,21 @@ retirements keep growing after 6.3 M (core 0 {969 k, 850 k} at 6 M →
 {1,044 k, 1,153 k} at 7 M, where the pre-fix run froze). The 8 M and 24 M
 I4dp runs (`ooocoh-t17-i4dp-{8M,24M}`) were left running on the builder
 (≈670 cycles/s); their verdicts belong here when harvested.
+
+**T17 addendum — 8 M / 24 M server boots harvested (2026-10-05).** Both reach
+the cap without a verdict, and neither is a hang: on the fixed model the
+`fence.i` storm passes, no trap, `force=0`, `tail 0/0/0/0`, aborts 0 on all
+cores. Cold-boot (lottery) hart 1 keeps retiring to the end (14,116,588
+instructions at 24 M); the other seven harts park in `sbi_hsm_hart_wait`
+(WFI) ≈5 k cycles after `coldboot_done` at 6.68 M — expected HSM behaviour,
+not a stall. Phase timeline on hart 1: `fdt_reset_init` 6.68→9.57 M,
+`sbi_hart_init` 9.99 M, console 10.52 M, **OpenSBI banner 12.01 M**,
+`fdt_irqchip_init` 12.07→21.71 M (9.6 M cycles — eight-hart PLIC context
+setup through the hub, a performance note worth its own look), `fdt_ipi_init`
+21.71 M→cap. Never reached: `sbi_tlb_init`, timer, `sbi_domain_finalize`,
+`sbi_ecall_init`, `sbi_hsm_hart_start_finish`, payload. Note for reading
+server traces: cores 1–3 are clock-gated for the first 200 k cycles
+(`BOOT_HOLD_CYC`), so their cycle columns trail TB time by 200 k. A verdict
+needs ≥ 48 M cycles; **`ooocoh-t17-i4dp-64M` is running on the builder**
+(launched 2026-10-05 02:46 local, ≈18–25 h; harvest per
+`build-platform/workspace/build/n1d-remote/t17/I4DP-64M-LAUNCH.md`).
