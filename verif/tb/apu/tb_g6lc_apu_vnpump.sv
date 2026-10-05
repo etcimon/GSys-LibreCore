@@ -30,6 +30,7 @@ module tb_g6lc_apu_vnpump;
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_vnfront_pkg::*;
@@ -82,9 +83,13 @@ module tb_g6lc_apu_vnpump;
   logic            s_ot_v;
   apu_objtab_req_t s_ot_req;
 
-  // ---- cmdrec / cmdexec tie-offs (no RECORD/submit in this TB) ------
+  // ---- cmdrec / cmdexec / objpay tie-offs (no RECORD/submit in this TB)
   logic            cr_v, cr_cr;
   apu_cmdrec_req_t cr_req;
+  logic            cr_pay_v;
+  logic [31:0]     cr_pay_d;
+  apu_objpay_req_t op_req;
+  logic            op_v;
   logic            ex_sv;
   apu_cmdexec_submit_t ex_s;
   logic [15:0]     ex_fclr;
@@ -112,6 +117,10 @@ module tb_g6lc_apu_vnpump;
     .ot_cpl_i(ot_cpl),
     .cr_req_valid_o(cr_v), .cr_req_ready_i(1'b1), .cr_req_o(cr_req),
     .cr_cpl_valid_i(1'b0), .cr_cpl_ready_o(cr_cr), .cr_cpl_i('0),
+    .cr_pay_valid_o(cr_pay_v), .cr_pay_data_o(cr_pay_d),
+    .cr_pay_ready_i(1'b0),
+    .op_req_valid_o(op_v), .op_req_ready_i(1'b0), .op_req_o(op_req),
+    .op_cpl_valid_i(1'b0), .op_cpl_ready_o(), .op_cpl_i('0),
     .ex_submit_valid_o(ex_sv), .ex_submit_ready_i(1'b1),
     .ex_submit_o(ex_s),
     .ex_done_seq_i(16'h0), .ex_fence_signaled_i(16'h0),
@@ -124,6 +133,7 @@ module tb_g6lc_apu_vnpump;
   logic        z_rdy, z_done, z_fault, z_act, z_busy;
   logic        z_apre, z_apwe, z_gmre, z_otv, z_otcr;
   logic        z_crv, z_crcr, z_exsv;
+  logic        z_cpayv, z_opv;
   logic [3:0]       z_ract;
   logic [3:0][31:0] z_rstat, z_rhead;
   g6lc_apu_vnpump #(.Enable(1'b0), .Rings(4)) dut_off (
@@ -139,6 +149,10 @@ module tb_g6lc_apu_vnpump;
     .ot_cpl_valid_i(1'b0), .ot_cpl_ready_o(z_otcr), .ot_cpl_i('0),
     .cr_req_valid_o(z_crv), .cr_req_ready_i(1'b1), .cr_req_o(),
     .cr_cpl_valid_i(1'b0), .cr_cpl_ready_o(z_crcr), .cr_cpl_i('0),
+    .cr_pay_valid_o(z_cpayv), .cr_pay_data_o(),
+    .cr_pay_ready_i(1'b0),
+    .op_req_valid_o(z_opv), .op_req_ready_i(1'b0), .op_req_o(),
+    .op_cpl_valid_i(1'b0), .op_cpl_ready_o(), .op_cpl_i('0),
     .ex_submit_valid_o(z_exsv), .ex_submit_ready_i(1'b1),
     .ex_submit_o(),
     .ex_done_seq_i(16'h0), .ex_fence_signaled_i(16'h0),
@@ -439,7 +453,8 @@ module tb_g6lc_apu_vnpump;
     cases++;
     repeat (4) @(posedge clk);
     check(!z_rdy && !z_done && !z_fault && !z_busy && !z_apre &&
-          !z_apwe && !z_gmre && !z_otv && !z_crv && !z_exsv,
+          !z_apwe && !z_gmre && !z_otv && !z_crv && !z_exsv &&
+          !z_cpayv && !z_opv,
           "Enable=0 quiet");
 
     // ---- seed the four fixture blobs ----------------------------------

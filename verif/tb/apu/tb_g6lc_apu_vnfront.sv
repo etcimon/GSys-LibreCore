@@ -33,14 +33,27 @@
 // while the pin is held).  flags bit3 marks the first command of each
 // negative arm: the TB resets the whole stack there, matching the
 // model's per-arm reset.
+//   pay[]       : ue_sm5_session.pay -- ObjPay/cmdrec-arena write
+//                 checkpoints, checked after the indexed command:
+//                   tag 1 {tag, rec, n, (addr, word)*n}      ObjPay
+//                   tag 2 {tag, rec, cbuf, n, (idx, word)*n} arena
+//                 sentinel FFFFFFFF.  ObjPay contents are read back
+//                 through the TB's peek of the engine's payload SRAM.
+// +ses=<name> selects a different session file set (used by the
+// ObjPay-FULL arm built with -GObjPayWords=512).
 module tb_g6lc_apu_vnfront;
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
 
+  parameter int unsigned ObjPayWords = 16384;
+
   localparam int RECW  = 386;
-  localparam int EXPW  = 386 * 128;
+  localparam int EXPW  = 386 * 256;
+  localparam int PAYW  = 16384;
+  localparam int PayPerBuf = 256;
   localparam int Fences = 16;
   localparam int Slots  = 256;
   localparam logic [15:0] REP_BASE = 16'h0800;
@@ -70,6 +83,12 @@ module tb_g6lc_apu_vnfront;
   apu_cmdexec_submit_t fsub;
   logic [15:0]        f_dseq;
   logic [Fences-1:0]  f_fsig, f_flost, f_fclr;
+  // payload stream (front -> cmdrec) + objpay port
+  logic               fpay_v, fpay_r;
+  logic [31:0]        fpay_d;
+  logic               fop_v, fop_r, fop_cv;
+  apu_objpay_req_t    fop_req;
+  apu_objpay_cpl_t    fop_cpl;
   // Enable=0 fixture
   logic               o_csre, o_repwe, o_otv, o_crcv, o_subv, o_busy,
                       o_done;
@@ -80,6 +99,9 @@ module tb_g6lc_apu_vnfront;
   apu_cmdrec_req_t    o_crreq;
   apu_cmdexec_submit_t o_sub;
   logic [Fences-1:0]  o_fclr;
+  logic               o_payv, o_opv;
+  logic [31:0]        o_payd;
+  apu_objpay_req_t    o_opreq;
 
   g6lc_apu_vnfront #(.Enable(1'b1), .Fences(Fences), .CbBufs(16))
   i_front (
@@ -94,6 +116,12 @@ module tb_g6lc_apu_vnfront;
     .cr_req_valid_o(fcr_v), .cr_req_ready_i(fcr_r), .cr_req_o(fcr_req),
     .cr_cpl_valid_i(fcr_cv), .cr_cpl_ready_o(),
     .cr_cpl_i(cr_cpl),
+    .cr_pay_valid_o(fpay_v), .cr_pay_data_o(fpay_d),
+    .cr_pay_ready_i(fpay_r),
+    .op_req_valid_o(fop_v), .op_req_ready_i(fop_r),
+    .op_req_o(fop_req),
+    .op_cpl_valid_i(fop_cv), .op_cpl_ready_o(),
+    .op_cpl_i(fop_cpl),
     .ex_submit_valid_o(fsub_v), .ex_submit_ready_i(fsub_r),
     .ex_submit_o(fsub),
     .ex_done_seq_i(f_dseq), .ex_fence_signaled_i(f_fsig),
@@ -112,6 +140,11 @@ module tb_g6lc_apu_vnfront;
     .ot_cpl_valid_i(1'b0), .ot_cpl_ready_o(), .ot_cpl_i(ot_cpl),
     .cr_req_valid_o(o_crcv), .cr_req_ready_i(1'b0), .cr_req_o(o_crreq),
     .cr_cpl_valid_i(1'b0), .cr_cpl_ready_o(), .cr_cpl_i(cr_cpl),
+    .cr_pay_valid_o(o_payv), .cr_pay_data_o(o_payd),
+    .cr_pay_ready_i(1'b0),
+    .op_req_valid_o(o_opv), .op_req_ready_i(1'b0),
+    .op_req_o(o_opreq),
+    .op_cpl_valid_i(1'b0), .op_cpl_ready_o(), .op_cpl_i('0),
     .ex_submit_valid_o(o_subv), .ex_submit_ready_i(1'b0),
     .ex_submit_o(o_sub),
     .ex_done_seq_i('0), .ex_fence_signaled_i('0), .ex_fence_lost_i('0),
@@ -199,11 +232,20 @@ module tb_g6lc_apu_vnfront;
   i_rec (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(cr_vld), .req_ready_o(cr_rdy), .req_i(cr_req),
-    .cpl_valid_o(cr_cvld), .cpl_ready_i(1'b1), .cpl_o(cr_cpl));
+    .cpl_valid_o(cr_cvld), .cpl_ready_i(1'b1), .cpl_o(cr_cpl),
+    .pay_valid_i(fpay_v), .pay_data_i(fpay_d),
+    .pay_ready_o(fpay_r));
+
+  // objpay: single master (the front)
+  g6lc_apu_objpay #(.Enable(1'b1), .PayWords(ObjPayWords)) i_pay (
+    .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
+    .req_valid_i(fop_v), .req_ready_o(fop_r), .req_i(fop_req),
+    .cpl_valid_o(fop_cv), .cpl_ready_i(1'b1), .cpl_o(fop_cpl));
 
   // ---- memories --------------------------------------------------------
   logic [31:0] cs   [65536];
   logic [31:0] expm [EXPW];
+  logic [31:0] paym [PAYW];
   logic [31:0] repm [4096];
   always @(posedge clk) if (cs_re) cs_rdata <= cs[cs_addr];
   always @(posedge clk) if (rep_we) repm[rep_addr[11:0]] <= rep_wdata;
@@ -215,6 +257,7 @@ module tb_g6lc_apu_vnfront;
   always @(negedge clk) begin
     if (o_csre || o_repwe || o_otv || o_crcv || o_subv || o_busy ||
         o_done || o_fclr !== '0 || o_result !== '0 ||
+        o_payv || o_opv || o_payd !== '0 || o_opreq !== '0 ||
         o_rwords !== '0 || o_fault !== '0)
       $fatal(1, "disabled vnfront active");
   end
@@ -311,22 +354,27 @@ module tb_g6lc_apu_vnfront;
     tb_ot = 1'b0;
   endtask
 
-  int rec, tmo;
-  logic [31:0] fl;
+  int rec, tmo, payp, npw;
+  logic [31:0] fl, pw_addr, pw_cbuf;
   logic [511:0] exp_rec;
   int app0, nwork, nrep;
+  string ses;
 
   initial begin
+    if (!$value$plusargs("ses=%s", ses)) ses = "ue_sm5_session";
     for (int i = 0; i < $size(cs); i++) cs[i] = '0;
     for (int i = 0; i < $size(expm); i++) expm[i] = '0;
+    for (int i = 0; i < $size(paym); i++) paym[i] = '0;
     for (int i = 0; i < $size(repm); i++) repm[i] = '0;
-    $readmemh("vn_vectors/ue_sm5_session.hex", cs, 0);
-    $readmemh("vn_vectors/ue_sm5_session.exp", expm, 0);
+    $readmemh($sformatf("vn_vectors/%s.hex", ses), cs, 0);
+    $readmemh($sformatf("vn_vectors/%s.exp", ses), expm, 0);
+    $readmemh($sformatf("vn_vectors/%s.pay", ses), paym, 0);
     @(negedge clk); rst_ni = 1'b0;
     repeat (3) @(negedge clk); rst_ni = 1'b1;
     repeat (2) @(negedge clk);
 
     rec = 0;
+    payp = 0;
     while (ev(rec, 0) !== 32'hFFFFFFFF) begin
       fl = ev(rec, 3);
       if ((fl & 32'd8) != 0) begin
@@ -382,6 +430,34 @@ module tb_g6lc_apu_vnfront;
         check("append seen", appends > app0);
         check("record", last_rec === exp_rec);
       end
+      // §7b payload checkpoints written by this command
+      while (paym[payp] !== 32'hFFFFFFFF &&
+             paym[payp + 1] === 32'(rec)) begin
+        if (paym[payp] == 32'd1) begin
+          npw = int'(paym[payp + 2]);
+          payp += 3;
+          for (int i = 0; i < npw; i++) begin
+            pw_addr = paym[payp];
+            check($sformatf("objpay[%0d]", pw_addr),
+                  i_pay.gen_on.i_pay.sram[pw_addr] === paym[payp + 1]);
+            payp += 2;
+          end
+        end else if (paym[payp] == 32'd2) begin
+          pw_cbuf = paym[payp + 2];
+          npw = int'(paym[payp + 3]);
+          payp += 4;
+          for (int i = 0; i < npw; i++) begin
+            pw_addr = paym[payp];
+            check($sformatf("arena[%0d:%0d]", pw_cbuf, pw_addr),
+                  i_rec.gen_on.i_pay.sram[
+                    int'(pw_cbuf) * PayPerBuf + int'(pw_addr)]
+                  === paym[payp + 1]);
+            payp += 2;
+          end
+        end else begin
+          $fatal(1, "bad .pay tag %08x at %0d", paym[payp], payp);
+        end
+      end
       rec++;
     end
 
@@ -392,6 +468,8 @@ module tb_g6lc_apu_vnfront;
     repeat (4) @(negedge clk);
     check("objtab empty", $countones(i_obj.gen_on.live_q) === 0);
     check("all work consumed", ew_head == ew_tail);
+    check("objpay chunks drained",
+          i_pay.gen_on.free_q === '0);
 
     if (errors == 0)
       $display("PASS tb_g6lc_apu_vnfront cases=%0d checks=%0d cycles=%0d",

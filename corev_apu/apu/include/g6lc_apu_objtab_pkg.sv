@@ -25,7 +25,10 @@ package g6lc_apu_objtab_pkg;
     APU_OBJTAB_OP_SETSTATE  = 4'd5,
     APU_OBJTAB_OP_SETBIND   = 4'd6,
     APU_OBJTAB_OP_RESET_CTX = 4'd7,
-    APU_OBJTAB_OP_SETAUX    = 4'd8
+    APU_OBJTAB_OP_SETAUX    = 4'd8,
+    // §7b: mask/value applied to aux[63:32] instead of aux[31:0]
+    // (object payload {base[15:0], words[15:0]} parking)
+    APU_OBJTAB_OP_SETAUXHI  = 4'd9
   } apu_objtab_op_e;
 
   typedef enum logic [3:0] {

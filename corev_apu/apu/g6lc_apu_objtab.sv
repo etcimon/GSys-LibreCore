@@ -492,15 +492,21 @@ module g6lc_apu_objtab
                 state_q        <= StMutWr;
               end
             end
-            APU_OBJTAB_OP_SETAUX: begin
+            APU_OBJTAB_OP_SETAUX, APU_OBJTAB_OP_SETAUXHI: begin
               if (res_st_q != ResOk) begin
                 cpl_q   <= '{status: res_status(res_st_q), handle: '0,
                              entry: '0};
                 state_q <= StCpl;
               end else begin
                 wr_ent_q     <= res_ent_q;
-                wr_ent_q.aux <= (res_ent_q.aux & ~64'(req_q.mask)) |
-                                (64'(req_q.value) & 64'(req_q.mask));
+                if (req_q.op == APU_OBJTAB_OP_SETAUXHI)
+                  wr_ent_q.aux <= {((res_ent_q.aux[63:32] &
+                                     ~req_q.mask) |
+                                    (req_q.value & req_q.mask)),
+                                   res_ent_q.aux[31:0]};
+                else
+                  wr_ent_q.aux <= (res_ent_q.aux & ~64'(req_q.mask)) |
+                                  (64'(req_q.value) & 64'(req_q.mask));
                 wr_slot_q    <= res_slot_q;
                 cpl_q        <= '{status: APU_OBJTAB_OK,
                                   handle: {res_ent_q.gen, res_slot_q},

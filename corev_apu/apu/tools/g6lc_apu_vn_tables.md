@@ -16,7 +16,7 @@ Decode ROM 1719 words; reply ROM 326 words; chain table 141 words; const pool 69
 
 ## `.exp` expected-record format
 
-`verif/tb/apu/vn_vectors/*.exp` is `$readmemh`-able: one 32-bit hex word per line, **78 words per instance**: a 2-word header `{cs_base, cs_len}` (word offset of the instance's type word in `.hex`, and its word length) followed by a fixed 76-word `apu_vn_op_t` record:
+`verif/tb/apu/vn_vectors/*.exp` is `$readmemh`-able: one 32-bit hex word per line, **335 words per instance**: a 2-word header `{cs_base, cs_len}` (word offset of the instance's type word in `.hex`, and its word length), a fixed 77-word `apu_vn_op_t` record, and a fixed 256-word payload region:
 
 | word | field |
 |---|---|
@@ -39,10 +39,12 @@ Decode ROM 1719 words; reply ROM 326 words; chain table 141 words; const pool 69
 | 73 | fault |
 | 74 | fault_word |
 | 75 | fault_val |
+| 76 | pay_words (KEEP words streamed on the pay port) |
+| 77-332 | pay[0..255] expected payload stream, zero-padded |
 
 The record stream ends with a 2-word `FFFFFFFF FFFFFFFF` sentinel in the `cs_base`/`cs_len` slots so a testbench can detect end of file without knowing the instance count.
 
-Fault enum: 0 NONE, 1 UNKNOWN_TYPE, 2 STYPE, 3 PNEXT, 4 FLAGS, 5 BOUND (incl. truncated stream and count above bound), 6 HANDLE_ZERO, 7 LOOP, 8 ROM.
+Fault enum: 0 NONE, 1 UNKNOWN_TYPE, 2 STYPE, 3 PNEXT, 4 FLAGS, 5 BOUND (incl. truncated stream and count above bound), 6 HANDLE_ZERO, 7 LOOP, 8 ROM, 9 PAYLOAD (staging overflow in the front-end; not produced by the decoder itself).
 
 ## Mesa differential harness
 
@@ -57,158 +59,6 @@ python corev_apu/apu/tools/vn_mesa_diff/vn_mesa_diff.py \
 ```
 
 The harness compiles with WSL `/usr/bin/gcc` (the Windows host has no C toolchain) against Mesa's 37 vendored headers plus the pin's `include/vulkan` + `include/vk_video` headers fetched to scratch (the submodule sparse checkout is intentionally not widened), using stub `vn_cs.h`/`vn_ring.h` (ids = handle values, Vulkan 1.1 + all extensions advertised).  Result at last run: **480/480 instances byte-identical** (seeds 1 and 2, 4 instances/command).
-
-## Venus capset
-
-`struct virgl_renderer_capset_venus` — Mesa 26.0.8 `src/virtio/virtio-gpu/venus_hw.h:29-72` (local copy `build-platform/workspace/build/apu-vn/mesa-src/virtio_virtio-gpu_venus_hw.h:29-72`).  Field order verified against that header: 7 fixed `uint32_t` fields with `vk_extension_mask1[32]` between `supports_blob_id_0` and `allow_vk_wait_syncs`, for **40 words / 160 bytes** total.  Served by `g6lc_apu_vgctl` on `VIRTIO_GPU_CMD_GET_CAPSET` (capset id 4 `VIRTIO_GPU_CAPSET_VENUS`, version 0); emitted as `APU_VN_CAPSET[0:APU_VN_CAPSET_WORDS-1]` in `g6lc_apu_vn_pkg.sv` by `gen_vn_tables.py:capset_words()` (`gen_vn_tables.py:1066-1087`, emission at `gen_vn_tables.py:1327-1331`).
-
-| word(s) | field | generated value | source |
-|---|---|---|---|
-| 0 | `wire_format_version` | `0x00000001` | `[capset_venus] wire_format_version = 1` |
-| 1 | `vk_xml_version` | `0x0040414E` | `VK_MAKE_API_VERSION(0,1,4,334)` — generator's vk.xml 1.4.334 version word (`gen_vn_tables.py:1073-1076`) |
-| 2 | `vk_ext_command_serialization_spec_version` | `0x00000001` | `VK_EXT_COMMAND_SERIALIZATION_SPEC_VERSION` from vk.xml `api_consts` |
-| 3 | `vk_mesa_venus_protocol_spec_version` | `0x00000003` | `VK_MESA_VENUS_PROTOCOL_SPEC_VERSION` from `VK_MESA_venus_protocol.xml` |
-| 4 | `supports_blob_id_0` | `0x00000001` | `[capset_venus] supports_blob_id_0 = 1` |
-| 5–36 | `vk_extension_mask1[32]` | `{1, 0×31}` | `[capset_venus] vk_extension_mask1_bit0_valid = 1` → `mask1[0]=1` only |
-| 37 | `allow_vk_wait_syncs` | `0x00000001` | `[capset_venus] allow_vk_wait_syncs = 1` |
-| 38 | `supports_multiple_timelines` | `0x00000001` | `[capset_venus] supports_multiple_timelines = 1` |
-| 39 | `use_guest_vram` | `0x00000000` | `[capset_venus] use_guest_vram = 0` |
-
-`vk_extension_mask1[32]` is a bitmask over Vulkan extension numbers N → `mask1[N/32] & (1 << N%32)` covering extension numbers 1–1023; it is **not** a scalar field.  `mask1[0]` bit 0 is the backward-compatibility "mask valid" bit (`venus_hw.h:40-47`): when set, the remaining bits enumerate which extensions the renderer supports; when clear, all extensions are assumed supported.  We set only bit 0 — a valid mask claiming no renderer extensions — because the extension list we serialize is the encoder-side set, not a renderer advertisement.
-
-## Driver-checked capset/extension requirements
-
-Research-only audit of Mesa 26.0.8 (`src/virtio/vulkan/` and `src/virtio/virtio-gpu/venus_hw.h`); **no profile change was made**.  "Required" below means a real conditional branch that fails init or changes exposure — not an `assert`-only check (those are listed separately).
-
-### Capset fields checked with a real branch
-
-| field | Mesa check | file:line | consequence for our profile |
-|---|---|---|---|
-| `wire_format_version` | `== 0` → `VK_ERROR_INITIALIZATION_FAILED` | `vn_renderer_virtgpu.c:1588-1594` | must be nonzero |
-| `wire_format_version` | `!= vn_info_wire_format_version()` (=1, `vn_protocol_driver_info.h:212-214`) → `vkCreateInstance` fails | `vn_instance.c:179-186` | must be exactly 1 — profile is 1 |
-| `vk_xml_version` | clamped down to local `0x0040414E`, then `< VN_MIN_RENDERER_VERSION` (`VK_API_VERSION_1_1`, `vn_instance.h:20`) → init fails | `vn_instance.c:188-202` | must be ≥ VK 1.1 word; values above local are clamped, not errors |
-| `vk_xml_version` | caps advertised `apiVersion` (`MIN3(props, VN_MAX_API_VERSION, vk_xml_version)`) and internal `renderer_version` | `vn_physical_device.c:524-525`, `:1588-1590` | higher capset xml version raises the api ceiling we can expose |
-| `vk_ext_command_serialization_spec_version` | only clamped **down** to local spec version; no failure path | `vn_instance.c:204-209` | any value accepted; ours = 1 |
-| `vk_mesa_venus_protocol_spec_version` | only clamped **down** to local spec version; `< 3` additionally clamps advertised `apiVersion` to 1.3 and drops `VK_EXT_host_image_copy` | `vn_instance.c:211-213`; `vn_physical_device.c:535-536`, `:1359-1360` | need ≥ 3 to expose > VK 1.3 and host image copy — profile is 3 |
-| `use_guest_vram` | `bo_blob_mem == HOST3D && use_guest_vram` → `has_guest_vram` (host-visible blobs treated as dedicated guest heap) | `vn_renderer_virtgpu.c:1502-1507` | keep 0 — our ring/reply shmem uses HOST3D `blob_id 0` mappable, not guest VRAM |
-| `vk_extension_mask1` | copied into `info->vk_extension_mask`; **no consumer branch** in 26.0.8 driver code (only the generated `vn_info_extension_mask_test` helper exists) | `vn_renderer_virtgpu.c:1491-1495` | bit0-only mask accepted; claiming more bits would claim renderer extensions we do not serialize |
-
-### Assert-only capset fields (no release-build branch, but functionally mandatory)
-
-| field | Mesa reference | consequence |
-|---|---|---|
-| `supports_blob_id_0` | `assert` at `vn_renderer_virtgpu.c:1489` and `:1551` ("enforced by mandated render server config") | must stay 1 — the driver allocates every shmem object (rings, CS pool, reply pool) with `blob_id 0` |
-| `allow_vk_wait_syncs` | `assert` at `vn_renderer_virtgpu.c:1497` | must stay 1 — the driver passes blocking waits through to the renderer rather than policing them |
-| `supports_multiple_timelines` | `assert` at `vn_renderer_virtgpu.c:1499`; `max_timeline_count = 64` implied by `CONTEXT_INIT` UAPI at `:1646` | must stay 1 — queues bind to per-`ring_idx` timelines |
-
-### VIRTGPU_PARAM_* required (guest-kernel params via `DRM_IOCTL_VIRTGPU_GETPARAM`)
-
-From `virtgpu_init_params` (`vn_renderer_virtgpu.c:1599-1649`).  These are kernel `GETPARAM` values describing device capabilities — they gate whether the Mesa driver loads at all, i.e. they constrain the virtio-gpu **feature bits / GET_CAPSET_INFO** the device presents to the guest kernel, not the capset payload itself.
-
-| param | file:line | consequence |
-|---|---|---|
-| `VIRTGPU_PARAM_3D_FEATURES` | `vn_renderer_virtgpu.c:1603` | required nonzero or `VK_ERROR_INITIALIZATION_FAILED` — device must offer the 3D/virgl feature |
-| `VIRTGPU_PARAM_CAPSET_QUERY_FIX` | `vn_renderer_virtgpu.c:1604` | required nonzero — `GET_CAPSET_INFO` must report the Venus capset correctly |
-| `VIRTGPU_PARAM_RESOURCE_BLOB` | `vn_renderer_virtgpu.c:1605` | required nonzero — `RESOURCE_CREATE_BLOB`/`MAP_BLOB` must be supported |
-| `VIRTGPU_PARAM_CONTEXT_INIT` | `vn_renderer_virtgpu.c:1606` | required nonzero — `CTX_CREATE` with `context_init` (capset id 4) must be supported |
-| `VIRTGPU_PARAM_HOST_VISIBLE` or `VIRTGPU_PARAM_GUEST_VRAM` | `vn_renderer_virtgpu.c:1620-1635` | at least one required; `HOST_VISIBLE` selects `bo_blob_mem = HOST3D` — the configuration our mappable-`blob_id 0` transport uses |
-| `VIRTGPU_PARAM_CROSS_DEVICE` | `vn_renderer_virtgpu.c:1641-1643` | optional — only enables cross-device dma-buf sharing; may stay 0 |
-
-### Renderer apiVersion floor
-
-- Renderer `vkEnumerateInstanceVersion` must return ≥ `VK_API_VERSION_1_1` else `VK_ERROR_INITIALIZATION_FAILED` (`vn_instance.c:100-107`; floor `VN_MIN_RENDERER_VERSION`, `vn_instance.h:20`).
-- Renderer `vkGetPhysicalDeviceProperties().apiVersion` must be ≥ 1.1 else `VK_ERROR_INITIALIZATION_FAILED` (`vn_physical_device.c:1578-1585`).
-- The driver creates the renderer instance with **zero** enabled extensions and `apiVersion = MAX2(app_api_version, 1.1)` (`vn_instance.c:342-359`, `:116-118`) — the renderer `vkCreateInstance` path must accept no extensions and a ≥ 1.1 version request.
-- Guest-visible `apiVersion` = `MIN3(renderer props, VN_MAX_API_VERSION, capset vk_xml_version)` patch-clamped (`vn_physical_device.c:523-528`), further clamped to 1.3 when venus protocol < 3 (`:535-536`) and to 1.2 when `VK_KHR_synchronization2` is not exposable (`:542-543`).
-
-### Renderer-side extension/feature requirements
-
-No renderer extension is required **to initialize** — the check loop creates the device with the app's (fixed) extension list and fails only if the renderer `vkCreateDevice` itself fails (`vn_device.c:492-527`).  Every exposed device extension follows `native ∪ (passthrough ∩ renderer-advertised ∩ encoder-serializable)` (`vn_physical_device.c:1478-1495`, `:1539-1556`): a passthrough extension additionally requires the renderer's `vkEnumerateDeviceExtensionProperties` to advertise it (`:1508-1556`) and the encoder to have a serialization (`vn_extension_get_spec_version` nonzero, `:1546-1548`).
-
-| requirement | file:line | consequence |
-|---|---|---|
-| `VK_KHR_synchronization2` (renderer + passthrough) | `vn_physical_device.c:542-543` | required to advertise **> VK 1.2** (sync2 is a 1.3 feature); under WSI builds it additionally needs renderer sync-fd semaphore import (`:1268-1271`) |
-| `VK_EXT_host_image_copy` passthrough | `vn_physical_device.c:1359-1360` | only exposed when venus protocol spec ≥ 3 |
-| `VK_KHR_deferred_host_operations` | `vn_physical_device.c:1239-1244` | requires renderer `VK_KHR_acceleration_structure` |
-| `VK_KHR_external_fence_fd` | `vn_physical_device.c:1165-1171`, `:1075-1090` | requires `has_external_sync` + renderer `VK_KHR_external_fence_fd` with SYNC_FD exportable |
-| `VK_KHR_external_semaphore_fd` | `vn_physical_device.c:1173-1179`, `:1124-1141` | requires renderer `VK_KHR_external_semaphore_fd` with SYNC_FD import **and** export |
-| `VK_KHR_external_memory_fd` + `VK_EXT_external_memory_dma_buf` (non-Windows) | `vn_physical_device.c:1040-1052`, `:1203-1207` | requires renderer `VK_EXT_external_memory_dma_buf` — the renderer handle type for exported `vn_renderer_bo`s |
-| WSI-only extras (`VN_USE_WSI_PLATFORM`/Android builds): swapchain family needs `semaphore_importable`; `ANDROID_native_buffer` also needs `fence_exportable`; `vn_device_fix_create_info` then auto-enables `EXT_image_drm_format_modifier` (+`KHR_image_format_list` if `renderer_version < 1.2`), `EXT_queue_family_foreign`, `EXT_external_memory_dma_buf` + `KHR_external_memory_fd`, `KHR_external_semaphore_fd`, `KHR_external_fence_fd`, `EXT_external_memory_acquire_unmodified` on the renderer device | `vn_physical_device.c:1212-1225`, `:1198-1200`; `vn_device.c:259-345` | not applicable to the non-WSI build — listed for completeness; the remaining `extra_exts` adds are conditioned on the renderer already advertising them |
-
-## ShaderCore vectors
-
-`corev_apu/apu/tools/shader/shader_vectors.py` emits per-case `verif/tb/apu/sh_vectors/<shader>_<seed>.{hex,exp,desc.json}` plus the raw oracle I/O.  Both `.hex` and `.exp` are `$readmemh` files, one 32-bit word per line, terminated by a `FFFFFFFF FFFFFFFF` sentinel so a testbench detects end-of-file without knowing the record count.
-
-`.hex` — dispatch input record:
-
-| word | field |
-|---|---|
-| 0 | `n_spv_words` — SPIR-V module length in words |
-| 1 | `n_bindings` |
-| 2 | `n_push_words` |
-| 3..5 | `gx`, `gy`, `gz` dispatch groups |
-| 6 | `flags` — bit0: module expected to commit-fault; bit1: mutated module (outputs must *differ* from the unmutated oracle) |
-| 7 | reserved |
-| 8 .. 8+n | SPIR-V module words |
-| +nb×4 | per binding `{set, binding, size_bytes, mem_addr}` |
-| +np | push-constant words |
-| +Σ sz/4 | per binding, in order: initial buffer words |
-
-`.exp` — expected results:
-
-| word | field |
-|---|---|
-| 0 | `expect_commit_fault` — fault code, 0 = commits (codes in `g6lc_apu_sh_pkg`, `APU_SH_FAULT_*`) |
-| 1 | `expect_fault_opcode` — offending opcode, 0 = none |
-| 2 | `expect_robust` — robustness clamp count (from `spirv_model.py`, not lavapipe) |
-| 3 | `expect_done` — 0 no work_done, 1 = `APU_SH_DONE_OK`, 2 = `APU_SH_DONE_FAULT` |
-| 4 | `n_bindings` |
-| +nb×4 | per binding `{binding, size_bytes, mem_addr, is_out}` |
-| +Σ sz/4 | per `is_out` binding: oracle (lavapipe) output words (buffer base `ADDR0 = 0x8000`, bindings 4 KiB apart) |
-| +Σ sz/4 | per `is_out` binding: `spirv_model.py` output words (Gate-1 reference) |
-| +Σ sz/4 | per `is_out` binding: per-word class — 0 = integer/bool (bit-exact), 1 = float (ULP-compared) |
-
-Mutated cases flip one arithmetic/composite opcode in place (word count preserved) and one `_bad_0` case per shader injects `OpSin` to fault at commit.
-
-`tb_g6lc_apu_shwave` applies two hard gates per case.  **Gate 1:** RTL output words and the robustness count must match `spirv_model.py` bit-exact — the model mirrors the RTL's exact micro-sequences, so any divergence is an RTL or model bug, never a tolerance.  **Gate 2:** RTL vs lavapipe oracle — class-0 (integer/bool) words bit-exact, class-1 (float) words within 2 ULP sign-aware (±0 equal, NaN==NaN); per-shader max ULP and 1/2-ULP counts are printed (`ULP <case> max= ulp1= ulp2=`).  There is no per-shader tolerance escape hatch: with the micro-sequences below matching lavapipe's NIR lowering, every corpus shader is bit-exact except `math450`'s `normalize.x`, which lands at 1 ULP (lavapipe `rsqrt` refinement vs our `1.0/sqrt` division — inside the §7a sqrt-class allowance).  The explicit `a*b+c` contraction probe (`OpFMul` then `OpFAdd`, output word 32 of each `math450` invocation) is bit-exact: **lavapipe does not contract to FMA** in this pipeline (Mesa 25.2.8 NIR lowers `ffma` to `fmul`+`fadd`).
-
-### ShaderCore arithmetic definitions
-
-Exact FP32 micro-sequences implemented by `g6lc_apu_shwave` and mirrored
-bit-for-bit by `spirv_model.py` (Gate 1).  `r(x)` denotes one
-round-to-nearest-even to binary32; `fma(a,b,c)` is single-rounded.
-Sequences were chosen to match Mesa 25.2.8 lavapipe's NIR lowering
-(`ffma` → `fmul`+`fadd`, `flrp` strict form, `fsat` clamp), so Gate-2
-float results are bit-exact or ≤1 ULP everywhere in the corpus.
-
-| op | RTL / model sequence |
-|---|---|
-| `OpFAdd`, `OpFSub` | `r(a+b)`, `r(a-b)` — fpnew_fma ADD with operand-A forced +1.0 (`ops[1]±ops[2]` slots) |
-| `OpFMul`, `OpVectorTimesScalar` | `r(a·b)` — fpnew_fma MUL |
-| `OpFDiv` | `r(a/b)` — fpnew_divsqrt_multi DIV (FP32, per lane, comp-iterated) |
-| `OpDot(v0,v1)` n comps | `m_c = r(v0_c·v1_c)` for all c, then right-leaning fold: `t = r(m_{n-1}·1.0)`; `t = r(m_c·1.0 + t)` for c = n-2..0 — matches lavapipe `fdotN` tree `(m_{n-1}+m_{n-2}+…+m_1)+m_0` |
-| `Sqrt` (31) | `r(√x)` — divsqrt SQRT |
-| `InverseSqrt` (32) | `r(1.0 / r(√x))` |
-| `Length` (66) | `r(√ dot(v,v))` with the `OpDot` fold above |
-| `Distance` (67) | `d = r(a-b)` per comp, then `r(√ dot(d,d))` |
-| `Cross` (68) | six independent `r(a_i·b_j)` products, three `r(t0_c − t1_c)` — no FMA |
-| `Normalize` (69) | `dot` fold → `r(√dot)` → `r(1.0/s)` → `r(v_c·r)` per comp |
-| `FMin` (37) / `FMax` (40) | fpnew_noncomp MIN/MAX (RNE/RTZ rnd select) |
-| `FClamp` (43) | `min(max(x, lo), hi)` — two noncomp ops |
-| `FMix` (46) | `r(x·r(1−t)) + r(y·t)` rounded once at the add — lavapipe `nir_lower_flrp` strict form |
-| `Step` (48) | `x < edge ? 0.0 : 1.0` via noncomp compare + select |
-| `SmoothStep` (49) | `t = min(max(r((x−e0)/(e1−e0)), 0), 1)`; `r(t · r(t · r(3.0 + r(−2.0·t))))` — lavapipe `nir_smoothstep` with `ffma` lowered |
-| `Fma` (50) | `r(r(a·b) + c)` — **two roundings**, matching lavapipe (which lowers `ffma`); the FPnew fused unit is used in FMADD mode only as a `·1.0` add for the dot fold, where it is exact |
-| `Floor/Ceil/Trunc/Round/RoundEven` (8,9,3,1,2) | `f2i`/`i2f` round-trip in the matching rounding mode; NaN and `|x| ≥ 2³¹` pass through |
-| `Fract` (10) | `r(x − floor(x))` |
-| `FAbs` (4) / `FSign` (6) | bit ops / ±1.0, ±0.0, NaN passthrough |
-| `SAbs`, `SSign`, `S/UMin/Max/Clamp` | integer compare + select (wrap to 32 bits) |
-| Integer `IDiv/UDiv/SRem/SMod/UMod` | iterative per-lane divider; div-by-0 returns q=0, r=0 (the observed lavapipe value); `SMod` takes the divisor's sign |
-
-Known 4a integration gaps (unchanged, 5-series follow-ups): the 64-bit
-memory port is fixed 1-cycle latency with no ready/valid; waves run one
-at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
-`APU_SH_DONE_UNSUPPORTED` rather than reading group counts from memory.
 
 ## Action classification (design doc 4c)
 
@@ -394,6 +244,40 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 - `vkWaitRingSeqnoMESA` (kind=0, parent_q=none, cmdbuf_q=none, flags=0x00)
 
 `UNSUPPORTED` commands reach the front-end and return `VK_ERROR_FEATURE_NOT_PRESENT` (no reply program is run).
+
+## Payload layouts
+
+KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words on `pay_valid_o`/`pay_data_o` in decode order; `pay_words` counts them.  Keep semantics: `U32`/`U64` emit the value words, `HANDLE` emits the two id words (unresolved), `PTR` emits the 0/1 presence word, `BLOB` emits its data words.  This layout is generated — RTL never hand-encodes it.
+
+### vkCreateDescriptorSetLayout (type 72)
+
+- per `pBindings` element (element count = `bindingCount`): `pBindings.binding` u32, `pBindings.descriptorType` u32, `pBindings.descriptorCount` u32, `pBindings.stageFlags` u32
+
+### vkCreatePipelineLayout (type 68)
+
+- top level: `pSetLayouts` data words
+- per `pPushConstantRanges` element (element count = `pushConstantRangeCount`): `pPushConstantRanges.stageFlags` u32, `pPushConstantRanges.offset` u32, `pPushConstantRanges.size` u32
+
+### vkCreateComputePipelines (type 66)
+
+- per `pCreateInfos` element (element count = `createInfoCount`): `pCreateInfos.stage.module` handle id (2 words), `pCreateInfos.stage.pSpecializationInfo` presence (1 word), `pCreateInfos.layout` handle id (2 words)
+
+### vkAllocateDescriptorSets (type 77)
+
+- top level: `pSetLayouts` data words
+
+### vkUpdateDescriptorSets (type 79)
+
+- per `pDescriptorWrites` element (element count = `descriptorWriteCount`): `pDescriptorWrites.dstSet` handle id (2 words), `pDescriptorWrites.dstBinding` u32, `pDescriptorWrites.dstArrayElement` u32, `pDescriptorWrites.descriptorCount` u32, `pDescriptorWrites.descriptorType` u32
+- per `pDescriptorWrites.pBufferInfo` element (element count = `descriptorCount`): `pDescriptorWrites.pBufferInfo.buffer` handle id (2 words), `pDescriptorWrites.pBufferInfo.offset` u64 (2 words), `pDescriptorWrites.pBufferInfo.range` u64 (2 words)
+
+### vkCmdBindDescriptorSets (type 103)
+
+- top level: `pDescriptorSets` data words, `pDynamicOffsets` data words
+
+### vkCmdPushConstants (type 132)
+
+- top level: `offset` u32, `size` u32, `pValues` data words
 
 ## Per-command maps
 
@@ -596,9 +480,9 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | ARRAY | 0 | 0x0 | pQueueCreateInfos |
 | STYPE | 0 | 0xB | sType |
 | PNEXT | 0 | 0x34 | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | queueFamilyIndex |
-| U32 | 255 | 0x0 | queueCount |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | queueFamilyIndex |
+| U32 | 127 | 0x0 | queueCount |
 | BLOB | 1 | 0x2 | pQueuePriorities |
 | ENDARR | 0 | 0x0 |  |
 | U32 | 2 | 0x0 | enabledLayerCount |
@@ -731,12 +615,12 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | ARRAY | 0 | 0x3 | pSubmits |
 | STYPE | 0 | 0xD | sType |
 | PNEXT | 0 | 0x37 | pNext |
-| U32 | 255 | 0x0 | waitSemaphoreCount |
+| U32 | 127 | 0x0 | waitSemaphoreCount |
 | BLOB | 1 | 0x1 | pWaitSemaphores |
 | BLOB | 0 | 0x2 | pWaitDstStageMask |
-| U32 | 255 | 0x0 | commandBufferCount |
+| U32 | 127 | 0x0 | commandBufferCount |
 | BLOB | 1 | 0x1 | pCommandBuffers |
-| U32 | 255 | 0x0 | signalSemaphoreCount |
+| U32 | 127 | 0x0 | signalSemaphoreCount |
 | BLOB | 0 | 0x1 | pSignalSemaphores |
 | ENDARR | 0 | 0x0 |  |
 | HANDLE | 11 | 0x5 | fence:OPTIONAL |
@@ -786,8 +670,8 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | STYPE | 0 | 0xF | sType |
 | PNEXT | 0 | 0x3F | pNext |
 | HANDLE | 56 | 0x8 | memory:LOOKUP |
-| U64 | 255 | 0x0 | offset |
-| U64 | 255 | 0x0 | size |
+| U64 | 127 | 0x0 | offset |
+| U64 | 127 | 0x0 | size |
 | ENDARR | 0 | 0x0 |  |
 | END | 22 | 0x0 |  |
 
@@ -801,8 +685,8 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | STYPE | 0 | 0xF | sType |
 | PNEXT | 0 | 0x3F | pNext |
 | HANDLE | 56 | 0x8 | memory:LOOKUP |
-| U64 | 255 | 0x0 | offset |
-| U64 | 255 | 0x0 | size |
+| U64 | 127 | 0x0 | offset |
+| U64 | 127 | 0x0 | size |
 | ENDARR | 0 | 0x0 |  |
 | END | 23 | 0x0 |  |
 
@@ -873,7 +757,7 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | PNEXT | 0 | 0x47 | pNext |
 | HANDLE | 56 | 0x7 | buffer:LOOKUP |
 | HANDLE | 56 | 0x8 | memory:LOOKUP |
-| U64 | 255 | 0x0 | memoryOffset |
+| U64 | 127 | 0x0 | memoryOffset |
 | ENDARR | 0 | 0x0 |  |
 | END | 29 | 0x0 |  |
 
@@ -898,7 +782,7 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | PNEXT | 0 | 0x49 | pNext |
 | HANDLE | 56 | 0x6 | image:LOOKUP |
 | HANDLE | 56 | 0x8 | memory:LOOKUP |
-| U64 | 255 | 0x0 | memoryOffset |
+| U64 | 127 | 0x0 | memoryOffset |
 | ENDARR | 0 | 0x0 |  |
 | END | 31 | 0x0 |  |
 
@@ -1115,10 +999,10 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | U32 | 0 | 0x0 | flags |
 | U32 | 1 | 0x0 | bindingCount |
 | ARRAY | 0 | 0x4 | pBindings |
-| U32 | 255 | 0x0 | binding |
-| U32 | 255 | 0x0 | descriptorType |
-| U32 | 255 | 0x0 | descriptorCount |
-| U32 | 255 | 0x0 | stageFlags |
+| U32 | 127 | 0x0 | binding **KEEP** |
+| U32 | 127 | 0x0 | descriptorType **KEEP** |
+| U32 | 127 | 0x0 | descriptorCount **KEEP** |
+| U32 | 127 | 0x0 | stageFlags **KEEP** |
 | BLOB | 1 | 0x1 | pImmutableSamplers |
 | ENDARR | 0 | 0x0 |  |
 | PTR | 1 | 0x0 | pAllocator |
@@ -1147,12 +1031,12 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | PNEXT | 0 | 0x58 | pNext |
 | U32 | 0 | 0x0 | flags |
 | U32 | 1 | 0x0 | setLayoutCount |
-| BLOB | 0 | 0x1 | pSetLayouts |
+| BLOB | 0 | 0x1 | pSetLayouts **KEEP** |
 | U32 | 2 | 0x0 | pushConstantRangeCount |
 | ARRAY | 0 | 0x0 | pPushConstantRanges |
-| U32 | 255 | 0x0 | stageFlags |
-| U32 | 255 | 0x0 | offset |
-| U32 | 255 | 0x0 | size |
+| U32 | 127 | 0x0 | stageFlags **KEEP** |
+| U32 | 127 | 0x0 | offset **KEEP** |
+| U32 | 127 | 0x0 | size **KEEP** |
 | ENDARR | 0 | 0x0 |  |
 | PTR | 1 | 0x0 | pAllocator |
 | PTR | 2 | 0x1 | pPipelineLayout |
@@ -1207,25 +1091,25 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | ARRAY | 0 | 0x5 | pCreateInfos |
 | STYPE | 0 | 0x1F | sType |
 | PNEXT | 0 | 0x5A | pNext |
-| U32 | 255 | 0x0 | flags |
+| U32 | 127 | 0x0 | flags |
 | STYPE | 0 | 0x20 | sType |
 | PNEXT | 0 | 0x5B | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | stage |
-| HANDLE | 59 | 0xD | module:OPTIONAL |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | stage |
+| HANDLE | 59 | 0xD | module:OPTIONAL **KEEP** |
 | BLOB | 1 | 0x0 | pName |
-| PTR | 7 | 0x8 | pSpecializationInfo |
-| U32 | 255 | 0x0 | mapEntryCount |
+| PTR | 7 | 0x8 | pSpecializationInfo **KEEP** |
+| U32 | 127 | 0x0 | mapEntryCount |
 | ARRAY | 1 | 0x6 | pMapEntries |
-| U32 | 255 | 0x0 | constantID |
-| U32 | 255 | 0x0 | offset |
-| U64 | 255 | 0x0 | size |
+| U32 | 127 | 0x0 | constantID |
+| U32 | 127 | 0x0 | offset |
+| U64 | 127 | 0x0 | size |
 | ENDARR | 0 | 0x0 |  |
-| U64 | 255 | 0x0 | dataSize |
+| U64 | 127 | 0x0 | dataSize |
 | BLOB | 0 | 0x0 | pData |
-| HANDLE | 56 | 0xF | layout:LOOKUP |
+| HANDLE | 56 | 0xF | layout:LOOKUP **KEEP** |
 | HANDLE | 59 | 0x11 | basePipelineHandle:OPTIONAL |
-| U32 | 255 | 0x0 | basePipelineIndex |
+| U32 | 127 | 0x0 | basePipelineIndex |
 | ENDARR | 0 | 0x0 |  |
 | PTR | 0 | 0x0 | pAllocator |
 | BLOB | 0 | 0x1 | pPipelines |
@@ -1242,147 +1126,147 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | ARRAY | 0 | 0x5 | pCreateInfos |
 | STYPE | 0 | 0x21 | sType |
 | PNEXT | 0 | 0x5D | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | stageCount |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | stageCount |
 | ARRAY | 1 | 0x5 | pStages |
 | STYPE | 0 | 0x20 | sType |
 | PNEXT | 0 | 0x5B | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | stage |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | stage |
 | HANDLE | 59 | 0xD | module:OPTIONAL |
 | BLOB | 1 | 0x0 | pName |
 | PTR | 7 | 0x4 | pSpecializationInfo |
-| U32 | 255 | 0x0 | mapEntryCount |
+| U32 | 127 | 0x0 | mapEntryCount |
 | BLOB | 0 | 0x4 | pMapEntries |
-| U64 | 255 | 0x0 | dataSize |
+| U64 | 127 | 0x0 | dataSize |
 | BLOB | 1 | 0x0 | pData |
 | ENDARR | 0 | 0x0 |  |
 | PTR | 7 | 0x10 | pVertexInputState |
 | STYPE | 0 | 0x22 | sType |
 | PNEXT | 0 | 0x5E | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | vertexBindingDescriptionCount |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | vertexBindingDescriptionCount |
 | ARRAY | 1 | 0x2 | pVertexBindingDescriptions |
-| U32 | 255 | 0x0 | binding |
-| U32 | 255 | 0x0 | stride |
-| U32 | 255 | 0x0 | inputRate |
+| U32 | 127 | 0x0 | binding |
+| U32 | 127 | 0x0 | stride |
+| U32 | 127 | 0x0 | inputRate |
 | ENDARR | 0 | 0x0 |  |
-| U32 | 255 | 0x0 | vertexAttributeDescriptionCount |
+| U32 | 127 | 0x0 | vertexAttributeDescriptionCount |
 | ARRAY | 1 | 0x2 | pVertexAttributeDescriptions |
-| U32 | 255 | 0x0 | location |
-| U32 | 255 | 0x0 | binding |
-| U32 | 255 | 0x0 | format |
-| U32 | 255 | 0x0 | offset |
+| U32 | 127 | 0x0 | location |
+| U32 | 127 | 0x0 | binding |
+| U32 | 127 | 0x0 | format |
+| U32 | 127 | 0x0 | offset |
 | ENDARR | 0 | 0x0 |  |
 | PTR | 7 | 0x5 | pInputAssemblyState |
 | STYPE | 0 | 0x23 | sType |
 | PNEXT | 0 | 0x5F | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | topology |
-| U32 | 255 | 0x0 | primitiveRestartEnable |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | topology |
+| U32 | 127 | 0x0 | primitiveRestartEnable |
 | PTR | 7 | 0x4 | pTessellationState |
 | STYPE | 0 | 0x24 | sType |
 | PNEXT | 0 | 0x60 | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | patchControlPoints |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | patchControlPoints |
 | PTR | 7 | 0x13 | pViewportState |
 | STYPE | 0 | 0x25 | sType |
 | PNEXT | 0 | 0x62 | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | viewportCount |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | viewportCount |
 | ARRAY | 1 | 0x2 | pViewports |
-| U32 | 255 | 0x0 | x |
-| U32 | 255 | 0x0 | y |
-| U32 | 255 | 0x0 | width |
-| U32 | 255 | 0x0 | height |
-| U32 | 255 | 0x0 | minDepth |
-| U32 | 255 | 0x0 | maxDepth |
+| U32 | 127 | 0x0 | x |
+| U32 | 127 | 0x0 | y |
+| U32 | 127 | 0x0 | width |
+| U32 | 127 | 0x0 | height |
+| U32 | 127 | 0x0 | minDepth |
+| U32 | 127 | 0x0 | maxDepth |
 | ENDARR | 0 | 0x0 |  |
-| U32 | 255 | 0x0 | scissorCount |
+| U32 | 127 | 0x0 | scissorCount |
 | ARRAY | 1 | 0x2 | pScissors |
-| U32 | 255 | 0x0 | x |
-| U32 | 255 | 0x0 | y |
-| U32 | 255 | 0x0 | width |
-| U32 | 255 | 0x0 | height |
+| U32 | 127 | 0x0 | x |
+| U32 | 127 | 0x0 | y |
+| U32 | 127 | 0x0 | width |
+| U32 | 127 | 0x0 | height |
 | ENDARR | 0 | 0x0 |  |
 | PTR | 7 | 0xD | pRasterizationState |
 | STYPE | 0 | 0x26 | sType |
 | PNEXT | 0 | 0x63 | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | depthClampEnable |
-| U32 | 255 | 0x0 | rasterizerDiscardEnable |
-| U32 | 255 | 0x0 | polygonMode |
-| U32 | 255 | 0x0 | cullMode |
-| U32 | 255 | 0x0 | frontFace |
-| U32 | 255 | 0x0 | depthBiasEnable |
-| U32 | 255 | 0x0 | depthBiasConstantFactor |
-| U32 | 255 | 0x0 | depthBiasClamp |
-| U32 | 255 | 0x0 | depthBiasSlopeFactor |
-| U32 | 255 | 0x0 | lineWidth |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | depthClampEnable |
+| U32 | 127 | 0x0 | rasterizerDiscardEnable |
+| U32 | 127 | 0x0 | polygonMode |
+| U32 | 127 | 0x0 | cullMode |
+| U32 | 127 | 0x0 | frontFace |
+| U32 | 127 | 0x0 | depthBiasEnable |
+| U32 | 127 | 0x0 | depthBiasConstantFactor |
+| U32 | 127 | 0x0 | depthBiasClamp |
+| U32 | 127 | 0x0 | depthBiasSlopeFactor |
+| U32 | 127 | 0x0 | lineWidth |
 | PTR | 7 | 0x9 | pMultisampleState |
 | STYPE | 0 | 0x27 | sType |
 | PNEXT | 0 | 0x64 | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | rasterizationSamples |
-| U32 | 255 | 0x0 | sampleShadingEnable |
-| U32 | 255 | 0x0 | minSampleShading |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | rasterizationSamples |
+| U32 | 127 | 0x0 | sampleShadingEnable |
+| U32 | 127 | 0x0 | minSampleShading |
 | BLOB | 0 | 0x2 | pSampleMask |
-| U32 | 255 | 0x0 | alphaToCoverageEnable |
-| U32 | 255 | 0x0 | alphaToOneEnable |
+| U32 | 127 | 0x0 | alphaToCoverageEnable |
+| U32 | 127 | 0x0 | alphaToOneEnable |
 | PTR | 7 | 0x18 | pDepthStencilState |
 | STYPE | 0 | 0x28 | sType |
 | PNEXT | 0 | 0x65 | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | depthTestEnable |
-| U32 | 255 | 0x0 | depthWriteEnable |
-| U32 | 255 | 0x0 | depthCompareOp |
-| U32 | 255 | 0x0 | depthBoundsTestEnable |
-| U32 | 255 | 0x0 | stencilTestEnable |
-| U32 | 255 | 0x0 | failOp |
-| U32 | 255 | 0x0 | passOp |
-| U32 | 255 | 0x0 | depthFailOp |
-| U32 | 255 | 0x0 | compareOp |
-| U32 | 255 | 0x0 | compareMask |
-| U32 | 255 | 0x0 | writeMask |
-| U32 | 255 | 0x0 | reference |
-| U32 | 255 | 0x0 | failOp |
-| U32 | 255 | 0x0 | passOp |
-| U32 | 255 | 0x0 | depthFailOp |
-| U32 | 255 | 0x0 | compareOp |
-| U32 | 255 | 0x0 | compareMask |
-| U32 | 255 | 0x0 | writeMask |
-| U32 | 255 | 0x0 | reference |
-| U32 | 255 | 0x0 | minDepthBounds |
-| U32 | 255 | 0x0 | maxDepthBounds |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | depthTestEnable |
+| U32 | 127 | 0x0 | depthWriteEnable |
+| U32 | 127 | 0x0 | depthCompareOp |
+| U32 | 127 | 0x0 | depthBoundsTestEnable |
+| U32 | 127 | 0x0 | stencilTestEnable |
+| U32 | 127 | 0x0 | failOp |
+| U32 | 127 | 0x0 | passOp |
+| U32 | 127 | 0x0 | depthFailOp |
+| U32 | 127 | 0x0 | compareOp |
+| U32 | 127 | 0x0 | compareMask |
+| U32 | 127 | 0x0 | writeMask |
+| U32 | 127 | 0x0 | reference |
+| U32 | 127 | 0x0 | failOp |
+| U32 | 127 | 0x0 | passOp |
+| U32 | 127 | 0x0 | depthFailOp |
+| U32 | 127 | 0x0 | compareOp |
+| U32 | 127 | 0x0 | compareMask |
+| U32 | 127 | 0x0 | writeMask |
+| U32 | 127 | 0x0 | reference |
+| U32 | 127 | 0x0 | minDepthBounds |
+| U32 | 127 | 0x0 | maxDepthBounds |
 | PTR | 7 | 0x11 | pColorBlendState |
 | STYPE | 0 | 0x29 | sType |
 | PNEXT | 0 | 0x66 | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | logicOpEnable |
-| U32 | 255 | 0x0 | logicOp |
-| U32 | 255 | 0x0 | attachmentCount |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | logicOpEnable |
+| U32 | 127 | 0x0 | logicOp |
+| U32 | 127 | 0x0 | attachmentCount |
 | ARRAY | 1 | 0x0 | pAttachments |
-| U32 | 255 | 0x0 | blendEnable |
-| U32 | 255 | 0x0 | srcColorBlendFactor |
-| U32 | 255 | 0x0 | dstColorBlendFactor |
-| U32 | 255 | 0x0 | colorBlendOp |
-| U32 | 255 | 0x0 | srcAlphaBlendFactor |
-| U32 | 255 | 0x0 | dstAlphaBlendFactor |
-| U32 | 255 | 0x0 | alphaBlendOp |
-| U32 | 255 | 0x0 | colorWriteMask |
+| U32 | 127 | 0x0 | blendEnable |
+| U32 | 127 | 0x0 | srcColorBlendFactor |
+| U32 | 127 | 0x0 | dstColorBlendFactor |
+| U32 | 127 | 0x0 | colorBlendOp |
+| U32 | 127 | 0x0 | srcAlphaBlendFactor |
+| U32 | 127 | 0x0 | dstAlphaBlendFactor |
+| U32 | 127 | 0x0 | alphaBlendOp |
+| U32 | 127 | 0x0 | colorWriteMask |
 | ENDARR | 0 | 0x0 |  |
 | BLOB | 1 | 0x5 | blendConstants |
 | PTR | 7 | 0x5 | pDynamicState |
 | STYPE | 0 | 0x2A | sType |
 | PNEXT | 0 | 0x67 | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | dynamicStateCount |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | dynamicStateCount |
 | BLOB | 0 | 0x2 | pDynamicStates |
 | HANDLE | 59 | 0xF | layout:OPTIONAL |
 | HANDLE | 59 | 0x12 | renderPass:OPTIONAL |
-| U32 | 255 | 0x0 | subpass |
+| U32 | 127 | 0x0 | subpass |
 | HANDLE | 59 | 0x11 | basePipelineHandle:OPTIONAL |
-| U32 | 255 | 0x0 | basePipelineIndex |
+| U32 | 127 | 0x0 | basePipelineIndex |
 | ENDARR | 0 | 0x0 |  |
 | PTR | 0 | 0x0 | pAllocator |
 | BLOB | 0 | 0x1 | pPipelines |
@@ -1410,49 +1294,49 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | U32 | 0 | 0x0 | flags |
 | U32 | 1 | 0x0 | attachmentCount |
 | ARRAY | 0 | 0x5 | pAttachments |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | format |
-| U32 | 255 | 0x0 | samples |
-| U32 | 255 | 0x0 | loadOp |
-| U32 | 255 | 0x0 | storeOp |
-| U32 | 255 | 0x0 | stencilLoadOp |
-| U32 | 255 | 0x0 | stencilStoreOp |
-| U32 | 255 | 0x0 | initialLayout |
-| U32 | 255 | 0x0 | finalLayout |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | format |
+| U32 | 127 | 0x0 | samples |
+| U32 | 127 | 0x0 | loadOp |
+| U32 | 127 | 0x0 | storeOp |
+| U32 | 127 | 0x0 | stencilLoadOp |
+| U32 | 127 | 0x0 | stencilStoreOp |
+| U32 | 127 | 0x0 | initialLayout |
+| U32 | 127 | 0x0 | finalLayout |
 | ENDARR | 0 | 0x0 |  |
 | U32 | 2 | 0x0 | subpassCount |
 | ARRAY | 1 | 0x5 | pSubpasses |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | pipelineBindPoint |
-| U32 | 255 | 0x0 | inputAttachmentCount |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | pipelineBindPoint |
+| U32 | 127 | 0x0 | inputAttachmentCount |
 | ARRAY | 2 | 0x5 | pInputAttachments |
-| U32 | 255 | 0x0 | attachment |
-| U32 | 255 | 0x0 | layout |
+| U32 | 127 | 0x0 | attachment |
+| U32 | 127 | 0x0 | layout |
 | ENDARR | 0 | 0x0 |  |
-| U32 | 255 | 0x0 | colorAttachmentCount |
+| U32 | 127 | 0x0 | colorAttachmentCount |
 | ARRAY | 2 | 0x5 | pColorAttachments |
-| U32 | 255 | 0x0 | attachment |
-| U32 | 255 | 0x0 | layout |
+| U32 | 127 | 0x0 | attachment |
+| U32 | 127 | 0x0 | layout |
 | ENDARR | 0 | 0x0 |  |
 | ARRAY | 2 | 0x5 | pResolveAttachments |
-| U32 | 255 | 0x0 | attachment |
-| U32 | 255 | 0x0 | layout |
+| U32 | 127 | 0x0 | attachment |
+| U32 | 127 | 0x0 | layout |
 | ENDARR | 0 | 0x0 |  |
 | PTR | 7 | 0x2 | pDepthStencilAttachment |
-| U32 | 255 | 0x0 | attachment |
-| U32 | 255 | 0x0 | layout |
-| U32 | 255 | 0x0 | preserveAttachmentCount |
+| U32 | 127 | 0x0 | attachment |
+| U32 | 127 | 0x0 | layout |
+| U32 | 127 | 0x0 | preserveAttachmentCount |
 | BLOB | 1 | 0x2 | pPreserveAttachments |
 | ENDARR | 0 | 0x0 |  |
 | U32 | 3 | 0x0 | dependencyCount |
 | ARRAY | 2 | 0x4 | pDependencies |
-| U32 | 255 | 0x0 | srcSubpass |
-| U32 | 255 | 0x0 | dstSubpass |
-| U32 | 255 | 0x0 | srcStageMask |
-| U32 | 255 | 0x0 | dstStageMask |
-| U32 | 255 | 0x0 | srcAccessMask |
-| U32 | 255 | 0x0 | dstAccessMask |
-| U32 | 255 | 0x0 | dependencyFlags |
+| U32 | 127 | 0x0 | srcSubpass |
+| U32 | 127 | 0x0 | dstSubpass |
+| U32 | 127 | 0x0 | srcStageMask |
+| U32 | 127 | 0x0 | dstStageMask |
+| U32 | 127 | 0x0 | srcAccessMask |
+| U32 | 127 | 0x0 | dstAccessMask |
+| U32 | 127 | 0x0 | dependencyFlags |
 | ENDARR | 0 | 0x0 |  |
 | PTR | 1 | 0x0 | pAllocator |
 | PTR | 2 | 0x1 | pRenderPass |
@@ -1473,67 +1357,67 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | ARRAY | 0 | 0x5 | pAttachments |
 | STYPE | 0 | 0x2D | sType |
 | PNEXT | 0 | 0x6C | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | format |
-| U32 | 255 | 0x0 | samples |
-| U32 | 255 | 0x0 | loadOp |
-| U32 | 255 | 0x0 | storeOp |
-| U32 | 255 | 0x0 | stencilLoadOp |
-| U32 | 255 | 0x0 | stencilStoreOp |
-| U32 | 255 | 0x0 | initialLayout |
-| U32 | 255 | 0x0 | finalLayout |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | format |
+| U32 | 127 | 0x0 | samples |
+| U32 | 127 | 0x0 | loadOp |
+| U32 | 127 | 0x0 | storeOp |
+| U32 | 127 | 0x0 | stencilLoadOp |
+| U32 | 127 | 0x0 | stencilStoreOp |
+| U32 | 127 | 0x0 | initialLayout |
+| U32 | 127 | 0x0 | finalLayout |
 | ENDARR | 0 | 0x0 |  |
 | U32 | 2 | 0x0 | subpassCount |
 | ARRAY | 1 | 0x5 | pSubpasses |
 | STYPE | 0 | 0x2E | sType |
 | PNEXT | 0 | 0x6D | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | pipelineBindPoint |
-| U32 | 255 | 0x0 | viewMask |
-| U32 | 255 | 0x0 | inputAttachmentCount |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | pipelineBindPoint |
+| U32 | 127 | 0x0 | viewMask |
+| U32 | 127 | 0x0 | inputAttachmentCount |
 | ARRAY | 2 | 0x5 | pInputAttachments |
 | STYPE | 0 | 0x2F | sType |
 | PNEXT | 0 | 0x6E | pNext |
-| U32 | 255 | 0x0 | attachment |
-| U32 | 255 | 0x0 | layout |
-| U32 | 255 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | attachment |
+| U32 | 127 | 0x0 | layout |
+| U32 | 127 | 0x0 | aspectMask |
 | ENDARR | 0 | 0x0 |  |
-| U32 | 255 | 0x0 | colorAttachmentCount |
+| U32 | 127 | 0x0 | colorAttachmentCount |
 | ARRAY | 2 | 0x5 | pColorAttachments |
 | STYPE | 0 | 0x2F | sType |
 | PNEXT | 0 | 0x6E | pNext |
-| U32 | 255 | 0x0 | attachment |
-| U32 | 255 | 0x0 | layout |
-| U32 | 255 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | attachment |
+| U32 | 127 | 0x0 | layout |
+| U32 | 127 | 0x0 | aspectMask |
 | ENDARR | 0 | 0x0 |  |
 | ARRAY | 2 | 0x5 | pResolveAttachments |
 | STYPE | 0 | 0x2F | sType |
 | PNEXT | 0 | 0x6E | pNext |
-| U32 | 255 | 0x0 | attachment |
-| U32 | 255 | 0x0 | layout |
-| U32 | 255 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | attachment |
+| U32 | 127 | 0x0 | layout |
+| U32 | 127 | 0x0 | aspectMask |
 | ENDARR | 0 | 0x0 |  |
 | PTR | 7 | 0x5 | pDepthStencilAttachment |
 | STYPE | 0 | 0x2F | sType |
 | PNEXT | 0 | 0x6E | pNext |
-| U32 | 255 | 0x0 | attachment |
-| U32 | 255 | 0x0 | layout |
-| U32 | 255 | 0x0 | aspectMask |
-| U32 | 255 | 0x0 | preserveAttachmentCount |
+| U32 | 127 | 0x0 | attachment |
+| U32 | 127 | 0x0 | layout |
+| U32 | 127 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | preserveAttachmentCount |
 | BLOB | 1 | 0x2 | pPreserveAttachments |
 | ENDARR | 0 | 0x0 |  |
 | U32 | 3 | 0x0 | dependencyCount |
 | ARRAY | 2 | 0x4 | pDependencies |
 | STYPE | 0 | 0x30 | sType |
 | PNEXT | 0 | 0x6F | pNext |
-| U32 | 255 | 0x0 | srcSubpass |
-| U32 | 255 | 0x0 | dstSubpass |
-| U32 | 255 | 0x0 | srcStageMask |
-| U32 | 255 | 0x0 | dstStageMask |
-| U32 | 255 | 0x0 | srcAccessMask |
-| U32 | 255 | 0x0 | dstAccessMask |
-| U32 | 255 | 0x0 | dependencyFlags |
-| U32 | 255 | 0x0 | viewOffset |
+| U32 | 127 | 0x0 | srcSubpass |
+| U32 | 127 | 0x0 | dstSubpass |
+| U32 | 127 | 0x0 | srcStageMask |
+| U32 | 127 | 0x0 | dstStageMask |
+| U32 | 127 | 0x0 | srcAccessMask |
+| U32 | 127 | 0x0 | dstAccessMask |
+| U32 | 127 | 0x0 | dependencyFlags |
+| U32 | 127 | 0x0 | viewOffset |
 | ENDARR | 0 | 0x0 |  |
 | U32 | 4 | 0x0 | correlatedViewMaskCount |
 | BLOB | 0 | 0x2 | pCorrelatedViewMasks |
@@ -1596,8 +1480,8 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | U32 | 1 | 0x0 | maxSets |
 | U32 | 2 | 0x0 | poolSizeCount |
 | ARRAY | 0 | 0x4 | pPoolSizes |
-| U32 | 255 | 0x0 | type |
-| U32 | 255 | 0x0 | descriptorCount |
+| U32 | 127 | 0x0 | type |
+| U32 | 127 | 0x0 | descriptorCount |
 | ENDARR | 0 | 0x0 |  |
 | PTR | 1 | 0x0 | pAllocator |
 | PTR | 2 | 0x1 | pDescriptorPool |
@@ -1634,7 +1518,7 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | PNEXT | 0 | 0x72 | pNext |
 | HANDLE | 8 | 0x14 | descriptorPool:LOOKUP |
 | U32 | 0 | 0x0 | descriptorSetCount |
-| BLOB | 0 | 0x1 | pSetLayouts |
+| BLOB | 0 | 0x1 | pSetLayouts **KEEP** |
 | BLOB | 1 | 0x1 | pDescriptorSets |
 | OBJ | 0 | 0x15 |  |
 | END | 48 | 0x0 |  |
@@ -1659,20 +1543,20 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | ARRAY | 0 | 0x4 | pDescriptorWrites |
 | STYPE | 0 | 0x34 | sType |
 | PNEXT | 0 | 0x73 | pNext |
-| HANDLE | 56 | 0x15 | dstSet:LOOKUP |
-| U32 | 255 | 0x0 | dstBinding |
-| U32 | 255 | 0x0 | dstArrayElement |
-| U32 | 255 | 0x0 | descriptorCount |
-| U32 | 255 | 0x0 | descriptorType |
+| HANDLE | 56 | 0x15 | dstSet:LOOKUP **KEEP** |
+| U32 | 127 | 0x0 | dstBinding **KEEP** |
+| U32 | 127 | 0x0 | dstArrayElement **KEEP** |
+| U32 | 127 | 0x0 | descriptorCount **KEEP** |
+| U32 | 127 | 0x0 | descriptorType **KEEP** |
 | ARRAY | 1 | 0x4 | pImageInfo |
 | HANDLE | 56 | 0xC | sampler:LOOKUP |
 | HANDLE | 56 | 0xB | imageView:LOOKUP |
-| U32 | 255 | 0x0 | imageLayout |
+| U32 | 127 | 0x0 | imageLayout |
 | ENDARR | 0 | 0x0 |  |
 | ARRAY | 1 | 0x4 | pBufferInfo |
-| HANDLE | 59 | 0x7 | buffer:OPTIONAL |
-| U64 | 255 | 0x0 | offset |
-| U64 | 255 | 0x0 | range |
+| HANDLE | 59 | 0x7 | buffer:OPTIONAL **KEEP** |
+| U64 | 127 | 0x0 | offset **KEEP** |
+| U64 | 127 | 0x0 | range **KEEP** |
 | ENDARR | 0 | 0x0 |  |
 | BLOB | 1 | 0x1 | pTexelBufferView |
 | ENDARR | 0 | 0x0 |  |
@@ -1681,12 +1565,12 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | STYPE | 0 | 0x35 | sType |
 | PNEXT | 0 | 0x74 | pNext |
 | HANDLE | 56 | 0x15 | srcSet:LOOKUP |
-| U32 | 255 | 0x0 | srcBinding |
-| U32 | 255 | 0x0 | srcArrayElement |
+| U32 | 127 | 0x0 | srcBinding |
+| U32 | 127 | 0x0 | srcArrayElement |
 | HANDLE | 56 | 0x15 | dstSet:LOOKUP |
-| U32 | 255 | 0x0 | dstBinding |
-| U32 | 255 | 0x0 | dstArrayElement |
-| U32 | 255 | 0x0 | descriptorCount |
+| U32 | 127 | 0x0 | dstBinding |
+| U32 | 127 | 0x0 | dstArrayElement |
+| U32 | 127 | 0x0 | descriptorCount |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 
@@ -1804,9 +1688,9 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | HANDLE | 8 | 0xF | layout:LOOKUP |
 | U32 | 1 | 0x0 | firstSet |
 | U32 | 2 | 0x0 | descriptorSetCount |
-| BLOB | 0 | 0x1 | pDescriptorSets |
+| BLOB | 0 | 0x1 | pDescriptorSets **KEEP** |
 | U32 | 3 | 0x0 | dynamicOffsetCount |
-| BLOB | 1 | 0x2 | pDynamicOffsets |
+| BLOB | 1 | 0x2 | pDynamicOffsets **KEEP** |
 | END | 0 | 0x0 |  |
 
 ### vkCmdBindVertexBuffers — type 105, mpc 1207..1212, reply 0, act RECORD
@@ -1837,9 +1721,9 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | HANDLE | 0 | 0x17 | commandBuffer:LOOKUP |
 | HANDLE | 8 | 0xF | layout:LOOKUP |
 | U32 | 0 | 0x0 | stageFlags |
-| U32 | 1 | 0x0 | offset |
-| U32 | 2 | 0x0 | size |
-| BLOB | 0 | 0x6 | pValues |
+| U32 | 1 | 0x0 | offset **KEEP** |
+| U32 | 2 | 0x0 | size **KEEP** |
+| BLOB | 0 | 0x6 | pValues **KEEP** |
 | END | 0 | 0x0 |  |
 
 ### vkCmdSetViewport — type 94, mpc 1225..1236, reply 0, act RECORD
@@ -1850,12 +1734,12 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | U32 | 0 | 0x0 | firstViewport |
 | U32 | 1 | 0x0 | viewportCount |
 | ARRAY | 0 | 0x2 | pViewports |
-| U32 | 255 | 0x0 | x |
-| U32 | 255 | 0x0 | y |
-| U32 | 255 | 0x0 | width |
-| U32 | 255 | 0x0 | height |
-| U32 | 255 | 0x0 | minDepth |
-| U32 | 255 | 0x0 | maxDepth |
+| U32 | 127 | 0x0 | x |
+| U32 | 127 | 0x0 | y |
+| U32 | 127 | 0x0 | width |
+| U32 | 127 | 0x0 | height |
+| U32 | 127 | 0x0 | minDepth |
+| U32 | 127 | 0x0 | maxDepth |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 
@@ -1867,10 +1751,10 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | U32 | 0 | 0x0 | firstScissor |
 | U32 | 1 | 0x0 | scissorCount |
 | ARRAY | 0 | 0x2 | pScissors |
-| U32 | 255 | 0x0 | x |
-| U32 | 255 | 0x0 | y |
-| U32 | 255 | 0x0 | width |
-| U32 | 255 | 0x0 | height |
+| U32 | 127 | 0x0 | x |
+| U32 | 127 | 0x0 | y |
+| U32 | 127 | 0x0 | width |
+| U32 | 127 | 0x0 | height |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 
@@ -2024,37 +1908,37 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | ARRAY | 0 | 0x0 | pMemoryBarriers |
 | STYPE | 0 | 0x3D | sType |
 | PNEXT | 0 | 0x7E | pNext |
-| U32 | 255 | 0x0 | srcAccessMask |
-| U32 | 255 | 0x0 | dstAccessMask |
+| U32 | 127 | 0x0 | srcAccessMask |
+| U32 | 127 | 0x0 | dstAccessMask |
 | ENDARR | 0 | 0x0 |  |
 | U32 | 4 | 0x0 | bufferMemoryBarrierCount |
 | ARRAY | 1 | 0x0 | pBufferMemoryBarriers |
 | STYPE | 0 | 0x3E | sType |
 | PNEXT | 0 | 0x7F | pNext |
-| U32 | 255 | 0x0 | srcAccessMask |
-| U32 | 255 | 0x0 | dstAccessMask |
-| U32 | 255 | 0x0 | srcQueueFamilyIndex |
-| U32 | 255 | 0x0 | dstQueueFamilyIndex |
+| U32 | 127 | 0x0 | srcAccessMask |
+| U32 | 127 | 0x0 | dstAccessMask |
+| U32 | 127 | 0x0 | srcQueueFamilyIndex |
+| U32 | 127 | 0x0 | dstQueueFamilyIndex |
 | HANDLE | 56 | 0x7 | buffer:LOOKUP |
-| U64 | 255 | 0x0 | offset |
-| U64 | 255 | 0x0 | size |
+| U64 | 127 | 0x0 | offset |
+| U64 | 127 | 0x0 | size |
 | ENDARR | 0 | 0x0 |  |
 | U32 | 5 | 0x0 | imageMemoryBarrierCount |
 | ARRAY | 2 | 0x0 | pImageMemoryBarriers |
 | STYPE | 0 | 0x3F | sType |
 | PNEXT | 0 | 0x80 | pNext |
-| U32 | 255 | 0x0 | srcAccessMask |
-| U32 | 255 | 0x0 | dstAccessMask |
-| U32 | 255 | 0x0 | oldLayout |
-| U32 | 255 | 0x0 | newLayout |
-| U32 | 255 | 0x0 | srcQueueFamilyIndex |
-| U32 | 255 | 0x0 | dstQueueFamilyIndex |
+| U32 | 127 | 0x0 | srcAccessMask |
+| U32 | 127 | 0x0 | dstAccessMask |
+| U32 | 127 | 0x0 | oldLayout |
+| U32 | 127 | 0x0 | newLayout |
+| U32 | 127 | 0x0 | srcQueueFamilyIndex |
+| U32 | 127 | 0x0 | dstQueueFamilyIndex |
 | HANDLE | 56 | 0x6 | image:LOOKUP |
-| U32 | 255 | 0x0 | aspectMask |
-| U32 | 255 | 0x0 | baseMipLevel |
-| U32 | 255 | 0x0 | levelCount |
-| U32 | 255 | 0x0 | baseArrayLayer |
-| U32 | 255 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | baseMipLevel |
+| U32 | 127 | 0x0 | levelCount |
+| U32 | 127 | 0x0 | baseArrayLayer |
+| U32 | 127 | 0x0 | layerCount |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 
@@ -2067,9 +1951,9 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | HANDLE | 16 | 0x7 | dstBuffer:LOOKUP |
 | U32 | 0 | 0x0 | regionCount |
 | ARRAY | 0 | 0x6 | pRegions |
-| U64 | 255 | 0x0 | srcOffset |
-| U64 | 255 | 0x0 | dstOffset |
-| U64 | 255 | 0x0 | size |
+| U64 | 127 | 0x0 | srcOffset |
+| U64 | 127 | 0x0 | dstOffset |
+| U64 | 127 | 0x0 | size |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 
@@ -2084,23 +1968,23 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | U32 | 1 | 0x0 | dstImageLayout |
 | U32 | 2 | 0x0 | regionCount |
 | ARRAY | 0 | 0x0 | pRegions |
-| U32 | 255 | 0x0 | aspectMask |
-| U32 | 255 | 0x0 | mipLevel |
-| U32 | 255 | 0x0 | baseArrayLayer |
-| U32 | 255 | 0x0 | layerCount |
-| U32 | 255 | 0x0 | x |
-| U32 | 255 | 0x0 | y |
-| U32 | 255 | 0x0 | z |
-| U32 | 255 | 0x0 | aspectMask |
-| U32 | 255 | 0x0 | mipLevel |
-| U32 | 255 | 0x0 | baseArrayLayer |
-| U32 | 255 | 0x0 | layerCount |
-| U32 | 255 | 0x0 | x |
-| U32 | 255 | 0x0 | y |
-| U32 | 255 | 0x0 | z |
-| U32 | 255 | 0x0 | width |
-| U32 | 255 | 0x0 | height |
-| U32 | 255 | 0x0 | depth |
+| U32 | 127 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | mipLevel |
+| U32 | 127 | 0x0 | baseArrayLayer |
+| U32 | 127 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | x |
+| U32 | 127 | 0x0 | y |
+| U32 | 127 | 0x0 | z |
+| U32 | 127 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | mipLevel |
+| U32 | 127 | 0x0 | baseArrayLayer |
+| U32 | 127 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | x |
+| U32 | 127 | 0x0 | y |
+| U32 | 127 | 0x0 | z |
+| U32 | 127 | 0x0 | width |
+| U32 | 127 | 0x0 | height |
+| U32 | 127 | 0x0 | depth |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 
@@ -2114,19 +1998,19 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | U32 | 0 | 0x0 | dstImageLayout |
 | U32 | 1 | 0x0 | regionCount |
 | ARRAY | 0 | 0x0 | pRegions |
-| U64 | 255 | 0x0 | bufferOffset |
-| U32 | 255 | 0x0 | bufferRowLength |
-| U32 | 255 | 0x0 | bufferImageHeight |
-| U32 | 255 | 0x0 | aspectMask |
-| U32 | 255 | 0x0 | mipLevel |
-| U32 | 255 | 0x0 | baseArrayLayer |
-| U32 | 255 | 0x0 | layerCount |
-| U32 | 255 | 0x0 | x |
-| U32 | 255 | 0x0 | y |
-| U32 | 255 | 0x0 | z |
-| U32 | 255 | 0x0 | width |
-| U32 | 255 | 0x0 | height |
-| U32 | 255 | 0x0 | depth |
+| U64 | 127 | 0x0 | bufferOffset |
+| U32 | 127 | 0x0 | bufferRowLength |
+| U32 | 127 | 0x0 | bufferImageHeight |
+| U32 | 127 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | mipLevel |
+| U32 | 127 | 0x0 | baseArrayLayer |
+| U32 | 127 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | x |
+| U32 | 127 | 0x0 | y |
+| U32 | 127 | 0x0 | z |
+| U32 | 127 | 0x0 | width |
+| U32 | 127 | 0x0 | height |
+| U32 | 127 | 0x0 | depth |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 
@@ -2140,19 +2024,19 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | HANDLE | 16 | 0x7 | dstBuffer:LOOKUP |
 | U32 | 1 | 0x0 | regionCount |
 | ARRAY | 0 | 0x0 | pRegions |
-| U64 | 255 | 0x0 | bufferOffset |
-| U32 | 255 | 0x0 | bufferRowLength |
-| U32 | 255 | 0x0 | bufferImageHeight |
-| U32 | 255 | 0x0 | aspectMask |
-| U32 | 255 | 0x0 | mipLevel |
-| U32 | 255 | 0x0 | baseArrayLayer |
-| U32 | 255 | 0x0 | layerCount |
-| U32 | 255 | 0x0 | x |
-| U32 | 255 | 0x0 | y |
-| U32 | 255 | 0x0 | z |
-| U32 | 255 | 0x0 | width |
-| U32 | 255 | 0x0 | height |
-| U32 | 255 | 0x0 | depth |
+| U64 | 127 | 0x0 | bufferOffset |
+| U32 | 127 | 0x0 | bufferRowLength |
+| U32 | 127 | 0x0 | bufferImageHeight |
+| U32 | 127 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | mipLevel |
+| U32 | 127 | 0x0 | baseArrayLayer |
+| U32 | 127 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | x |
+| U32 | 127 | 0x0 | y |
+| U32 | 127 | 0x0 | z |
+| U32 | 127 | 0x0 | width |
+| U32 | 127 | 0x0 | height |
+| U32 | 127 | 0x0 | depth |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 
@@ -2167,23 +2051,23 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | U32 | 1 | 0x0 | dstImageLayout |
 | U32 | 2 | 0x0 | regionCount |
 | ARRAY | 0 | 0x0 | pRegions |
-| U32 | 255 | 0x0 | aspectMask |
-| U32 | 255 | 0x0 | mipLevel |
-| U32 | 255 | 0x0 | baseArrayLayer |
-| U32 | 255 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | mipLevel |
+| U32 | 127 | 0x0 | baseArrayLayer |
+| U32 | 127 | 0x0 | layerCount |
 | ARRAY | 1 | 0x7 | srcOffsets |
-| U32 | 255 | 0x0 | x |
-| U32 | 255 | 0x0 | y |
-| U32 | 255 | 0x0 | z |
+| U32 | 127 | 0x0 | x |
+| U32 | 127 | 0x0 | y |
+| U32 | 127 | 0x0 | z |
 | ENDARR | 0 | 0x0 |  |
-| U32 | 255 | 0x0 | aspectMask |
-| U32 | 255 | 0x0 | mipLevel |
-| U32 | 255 | 0x0 | baseArrayLayer |
-| U32 | 255 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | mipLevel |
+| U32 | 127 | 0x0 | baseArrayLayer |
+| U32 | 127 | 0x0 | layerCount |
 | ARRAY | 1 | 0x7 | dstOffsets |
-| U32 | 255 | 0x0 | x |
-| U32 | 255 | 0x0 | y |
-| U32 | 255 | 0x0 | z |
+| U32 | 127 | 0x0 | x |
+| U32 | 127 | 0x0 | y |
+| U32 | 127 | 0x0 | z |
 | ENDARR | 0 | 0x0 |  |
 | ENDARR | 0 | 0x0 |  |
 | U32 | 3 | 0x0 | filter |
@@ -2223,11 +2107,11 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | BLOB | 0 | 0x5 | uint32 |
 | U32 | 1 | 0x0 | rangeCount |
 | ARRAY | 0 | 0x0 | pRanges |
-| U32 | 255 | 0x0 | aspectMask |
-| U32 | 255 | 0x0 | baseMipLevel |
-| U32 | 255 | 0x0 | levelCount |
-| U32 | 255 | 0x0 | baseArrayLayer |
-| U32 | 255 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | baseMipLevel |
+| U32 | 127 | 0x0 | levelCount |
+| U32 | 127 | 0x0 | baseArrayLayer |
+| U32 | 127 | 0x0 | layerCount |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 
@@ -2243,11 +2127,11 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | U32 | 2 | 0x0 | stencil |
 | U32 | 3 | 0x0 | rangeCount |
 | ARRAY | 0 | 0x0 | pRanges |
-| U32 | 255 | 0x0 | aspectMask |
-| U32 | 255 | 0x0 | baseMipLevel |
-| U32 | 255 | 0x0 | levelCount |
-| U32 | 255 | 0x0 | baseArrayLayer |
-| U32 | 255 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | baseMipLevel |
+| U32 | 127 | 0x0 | levelCount |
+| U32 | 127 | 0x0 | baseArrayLayer |
+| U32 | 127 | 0x0 | layerCount |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 
@@ -2258,20 +2142,20 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | HANDLE | 0 | 0x17 | commandBuffer:LOOKUP |
 | U32 | 0 | 0x0 | attachmentCount |
 | ARRAY | 0 | 0x5 | pAttachments |
-| U32 | 255 | 0x0 | aspectMask |
-| U32 | 255 | 0x0 | colorAttachment |
+| U32 | 127 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | colorAttachment |
 | CHECK | 255 | 0x1 | VkClearValue tag 0 |
 | CHECK | 255 | 0xB | VkClearColorValue tag 2 |
 | BLOB | 1 | 0x5 | uint32 |
 | ENDARR | 0 | 0x0 |  |
 | U32 | 1 | 0x0 | rectCount |
 | ARRAY | 1 | 0x0 | pRects |
-| U32 | 255 | 0x0 | x |
-| U32 | 255 | 0x0 | y |
-| U32 | 255 | 0x0 | width |
-| U32 | 255 | 0x0 | height |
-| U32 | 255 | 0x0 | baseArrayLayer |
-| U32 | 255 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | x |
+| U32 | 127 | 0x0 | y |
+| U32 | 127 | 0x0 | width |
+| U32 | 127 | 0x0 | height |
+| U32 | 127 | 0x0 | baseArrayLayer |
+| U32 | 127 | 0x0 | layerCount |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 
@@ -2286,23 +2170,23 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 | U32 | 1 | 0x0 | dstImageLayout |
 | U32 | 2 | 0x0 | regionCount |
 | ARRAY | 0 | 0x0 | pRegions |
-| U32 | 255 | 0x0 | aspectMask |
-| U32 | 255 | 0x0 | mipLevel |
-| U32 | 255 | 0x0 | baseArrayLayer |
-| U32 | 255 | 0x0 | layerCount |
-| U32 | 255 | 0x0 | x |
-| U32 | 255 | 0x0 | y |
-| U32 | 255 | 0x0 | z |
-| U32 | 255 | 0x0 | aspectMask |
-| U32 | 255 | 0x0 | mipLevel |
-| U32 | 255 | 0x0 | baseArrayLayer |
-| U32 | 255 | 0x0 | layerCount |
-| U32 | 255 | 0x0 | x |
-| U32 | 255 | 0x0 | y |
-| U32 | 255 | 0x0 | z |
-| U32 | 255 | 0x0 | width |
-| U32 | 255 | 0x0 | height |
-| U32 | 255 | 0x0 | depth |
+| U32 | 127 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | mipLevel |
+| U32 | 127 | 0x0 | baseArrayLayer |
+| U32 | 127 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | x |
+| U32 | 127 | 0x0 | y |
+| U32 | 127 | 0x0 | z |
+| U32 | 127 | 0x0 | aspectMask |
+| U32 | 127 | 0x0 | mipLevel |
+| U32 | 127 | 0x0 | baseArrayLayer |
+| U32 | 127 | 0x0 | layerCount |
+| U32 | 127 | 0x0 | x |
+| U32 | 127 | 0x0 | y |
+| U32 | 127 | 0x0 | z |
+| U32 | 127 | 0x0 | width |
+| U32 | 127 | 0x0 | height |
+| U32 | 127 | 0x0 | depth |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 
@@ -2478,83 +2362,83 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 
 | op | a | b | note |
 |---|---|---|---|
-| PTR | 255 | 0x3 | pStream |
-| U32 | 255 | 0x0 | resourceId |
-| U64 | 255 | 0x0 | offset |
-| U64 | 255 | 0x0 | size |
+| PTR | 127 | 0x3 | pStream |
+| U32 | 127 | 0x0 | resourceId |
+| U64 | 127 | 0x0 | offset |
+| U64 | 127 | 0x0 | size |
 | END | 0 | 0x0 |  |
 
 ### vkSeekReplyCommandStreamMESA — type 179, mpc 1662..1663, reply 0, act TRANSPORT
 
 | op | a | b | note |
 |---|---|---|---|
-| U64 | 255 | 0x0 | position |
+| U64 | 127 | 0x0 | position |
 | END | 0 | 0x0 |  |
 
 ### vkExecuteCommandStreamsMESA — type 180, mpc 1664..1677, reply 0, act TRANSPORT
 
 | op | a | b | note |
 |---|---|---|---|
-| U32 | 255 | 0x0 | streamCount |
+| U32 | 127 | 0x0 | streamCount |
 | ARRAY | 0 | 0x5 | pStreams |
-| U32 | 255 | 0x0 | resourceId |
-| U64 | 255 | 0x0 | offset |
-| U64 | 255 | 0x0 | size |
+| U32 | 127 | 0x0 | resourceId |
+| U64 | 127 | 0x0 | offset |
+| U64 | 127 | 0x0 | size |
 | ENDARR | 0 | 0x0 |  |
 | BLOB | 0 | 0x1 | pReplyPositions |
-| U32 | 255 | 0x0 | dependencyCount |
+| U32 | 127 | 0x0 | dependencyCount |
 | ARRAY | 1 | 0x5 | pDependencies |
-| U32 | 255 | 0x0 | srcCommandStream |
-| U32 | 255 | 0x0 | dstCommandStream |
+| U32 | 127 | 0x0 | srcCommandStream |
+| U32 | 127 | 0x0 | dstCommandStream |
 | ENDARR | 0 | 0x0 |  |
-| U32 | 255 | 0x0 | flags |
+| U32 | 127 | 0x0 | flags |
 | END | 0 | 0x0 |  |
 
 ### vkCreateRingMESA — type 188, mpc 1678..1694, reply 0, act TRANSPORT
 
 | op | a | b | note |
 |---|---|---|---|
-| U64 | 255 | 0x0 | ring |
-| PTR | 255 | 0xE | pCreateInfo |
+| U64 | 127 | 0x0 | ring |
+| PTR | 127 | 0xE | pCreateInfo |
 | STYPE | 0 | 0x43 | sType |
 | PNEXT | 0 | 0x86 | pNext |
-| U32 | 255 | 0x0 | flags |
-| U32 | 255 | 0x0 | resourceId |
-| U64 | 255 | 0x0 | offset |
-| U64 | 255 | 0x0 | size |
-| U64 | 255 | 0x0 | idleTimeout |
-| U64 | 255 | 0x0 | headOffset |
-| U64 | 255 | 0x0 | tailOffset |
-| U64 | 255 | 0x0 | statusOffset |
-| U64 | 255 | 0x0 | bufferOffset |
-| U64 | 255 | 0x0 | bufferSize |
-| U64 | 255 | 0x0 | extraOffset |
-| U64 | 255 | 0x0 | extraSize |
+| U32 | 127 | 0x0 | flags |
+| U32 | 127 | 0x0 | resourceId |
+| U64 | 127 | 0x0 | offset |
+| U64 | 127 | 0x0 | size |
+| U64 | 127 | 0x0 | idleTimeout |
+| U64 | 127 | 0x0 | headOffset |
+| U64 | 127 | 0x0 | tailOffset |
+| U64 | 127 | 0x0 | statusOffset |
+| U64 | 127 | 0x0 | bufferOffset |
+| U64 | 127 | 0x0 | bufferSize |
+| U64 | 127 | 0x0 | extraOffset |
+| U64 | 127 | 0x0 | extraSize |
 | END | 0 | 0x0 |  |
 
 ### vkDestroyRingMESA — type 189, mpc 1695..1696, reply 0, act TRANSPORT
 
 | op | a | b | note |
 |---|---|---|---|
-| U64 | 255 | 0x0 | ring |
+| U64 | 127 | 0x0 | ring |
 | END | 0 | 0x0 |  |
 
 ### vkNotifyRingMESA — type 190, mpc 1697..1700, reply 0, act TRANSPORT
 
 | op | a | b | note |
 |---|---|---|---|
-| U64 | 255 | 0x0 | ring |
-| U32 | 255 | 0x0 | seqno |
-| U32 | 255 | 0x0 | flags |
+| U64 | 127 | 0x0 | ring |
+| U32 | 127 | 0x0 | seqno |
+| U32 | 127 | 0x0 | flags |
 | END | 0 | 0x0 |  |
 
 ### vkWriteRingExtraMESA — type 191, mpc 1701..1704, reply 0, act TRANSPORT
 
 | op | a | b | note |
 |---|---|---|---|
-| U64 | 255 | 0x0 | ring |
-| U64 | 255 | 0x0 | offset |
-| U32 | 255 | 0x0 | value |
+| U64 | 127 | 0x0 | ring |
+| U64 | 127 | 0x0 | offset |
+| U32 | 127 | 0x0 | value |
 | END | 0 | 0x0 |  |
 
 ### vkGetMemoryResourcePropertiesMESA — type 192, mpc 1705..1710, reply 63, act QUERY
@@ -2572,21 +2456,21 @@ at a time (no barrier scheduling yet); `vkCmdDispatchIndirect` completes
 
 | op | a | b | note |
 |---|---|---|---|
-| U64 | 255 | 0x0 | ring |
-| U64 | 255 | 0x0 | seqno |
+| U64 | 127 | 0x0 | ring |
+| U64 | 127 | 0x0 | seqno |
 | END | 0 | 0x0 |  |
 
 ### vkWaitVirtqueueSeqnoMESA — type 252, mpc 1714..1715, reply 0, act TRANSPORT
 
 | op | a | b | note |
 |---|---|---|---|
-| U64 | 255 | 0x0 | seqno |
+| U64 | 127 | 0x0 | seqno |
 | END | 0 | 0x0 |  |
 
 ### vkWaitRingSeqnoMESA — type 253, mpc 1716..1718, reply 0, act TRANSPORT
 
 | op | a | b | note |
 |---|---|---|---|
-| U64 | 255 | 0x0 | ring |
-| U64 | 255 | 0x0 | seqno |
+| U64 | 127 | 0x0 | ring |
+| U64 | 127 | 0x0 | seqno |
 | END | 0 | 0x0 |  |

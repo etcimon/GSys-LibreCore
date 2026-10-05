@@ -40,9 +40,11 @@ VEC_DIR = REPO / 'verif' / 'tb' / 'apu' / 'vn_vectors'
 FAULT = {'NONE': 0, 'UNKNOWN_TYPE': 1, 'STYPE': 2, 'PNEXT': 3, 'FLAGS': 4,
          'BOUND': 5, 'HANDLE_ZERO': 6, 'LOOP': 7, 'ROM': 8}
 
-# fixed-width .exp record: 76 words, layout documented in
-# g6lc_apu_vn_tables.md ("`.exp` expected-record format")
-EXP_WORDS = 76
+# fixed-width .exp record: 77 record words + 256-word payload region,
+# layout documented in g6lc_apu_vn_tables.md
+# ("`.exp` expected-record format")
+EXP_WORDS = 77
+EXP_PAY = 256
 
 
 class Enc:
@@ -310,7 +312,7 @@ class Sim:
                'q': [0] * 8, 'kind': [0] * 8, 'role': [0] * 8, 'qv': 0,
                'imm': [0] * 16, 'immv': 0, 'cnt': [0] * 4,
                'blob': [(0, 0), (0, 0)], 'pres': [0] * 8,
-               'chain': [], 'obj_kind': 0}
+               'chain': [], 'obj_kind': 0, 'pay': []}
         if want_trace:
             self.trace = []
         else:
@@ -353,7 +355,7 @@ class Sim:
         while True:
             if mpc >= len(dec):
                 raise FaultErr(FAULT['ROM'], r.pos, mpc)
-            op, a, b, note = dec[mpc]
+            op, a, b, note, keep = dec[mpc]
             if self.trace is not None:
                 self.trace.append((mpc, op, r.pos))
             cur = mpc
@@ -415,34 +417,45 @@ class Sim:
                 else:
                     loops.pop()
                 continue
-            mpc = self.exec_simple(op, a, b, rec, r, cur, mpc)
+            mpc = self.exec_simple(op, a, b, rec, r, cur, mpc, keep)
 
-    def exec_simple(self, op, a, b, rec, r, cur, mpc):
+    def exec_simple(self, op, a, b, rec, r, cur, mpc, keep=0):
+        # §7b: a[7] is the KEEP bit on U32/U64/HANDLE/BLOB/PTR; the slot
+        # field is a[6:0] and the discard marker is 0x7F.
+        a7 = a & 0x7F
         if op == 'U32':
             w = r.rd32()
-            if a != G.DISCARD:
-                rec['imm'][a] = w
-                rec['immv'] |= 1 << a
+            if a7 != G.DISCARD7:
+                rec['imm'][a7] = w
+                rec['immv'] |= 1 << a7
+            if keep:
+                rec['pay'].append(w)
         elif op == 'U64':
             w = r.rd64()
-            if a != G.DISCARD:
-                rec['q'][a] = w
-                rec['qv'] |= 1 << a
+            if a7 != G.DISCARD7:
+                rec['q'][a7] = w
+                rec['qv'] |= 1 << a7
+            if keep:
+                rec['pay'] += [w & 0xFFFFFFFF, (w >> 32) & 0xFFFFFFFF]
         elif op == 'HANDLE':
             w = r.rd64()
-            slot = (a >> 3) & 0x1F
-            role = a & 7
+            slot = (a7 >> 3) & 0x1F
+            role = a7 & 7
             if w == 0 and role not in (G.ROLES['NEW'], G.ROLES['OPTIONAL']):
                 raise FaultErr(FAULT['HANDLE_ZERO'], r.pos - 2, w)
-            if slot != G.DISCARD:
+            if slot != G.DISCARD7:
                 rec['q'][slot] = w
                 rec['kind'][slot] = b
                 rec['role'][slot] = role
                 rec['qv'] |= 1 << slot
+            if keep:
+                rec['pay'] += [w & 0xFFFFFFFF, (w >> 32) & 0xFFFFFFFF]
         elif op == 'PTR':
             w = r.rd64()
-            if a != G.DISCARD:
-                rec['pres'][a] = 1 if w else 0
+            if a7 != G.DISCARD7:
+                rec['pres'][a7] = 1 if w else 0
+            if keep:
+                rec['pay'].append(1 if w else 0)
             if not w:
                 mpc += b
         elif op == 'STYPE':
@@ -458,7 +471,9 @@ class Sim:
                 raise FaultErr(FAULT['BOUND'], r.pos - 2, cnt & 0xFFFFFFFF)
             if r.pos + wn > len(r.words):
                 raise FaultErr(FAULT['BOUND'], r.pos, cnt & 0xFFFFFFFF)
-            rec['blob'][a] = (r.pos, min(wn, 0x1FFFF))
+            rec['blob'][a7] = (r.pos, min(wn, 0x1FFFF))
+            if keep:
+                rec['pay'] += r.words[r.pos:r.pos + wn]
             r.pos += wn
         elif op == 'FLAGS':
             w = r.rd32()
@@ -1074,7 +1089,12 @@ def rec_words(rec):
           rec['reply_prog'] & 0xFF, rec['words'] & 0xFFFF,
           rec['fault'] & 0xF, rec['fault_word'] & 0xFFFF,
           rec['fault_val'] & 0xFFFFFFFF]
-    assert len(w) == EXP_WORDS, len(w)
+    w += [len(rec['pay']) & 0xFFFF]
+    assert len(rec['pay']) <= EXP_PAY, \
+        'payload %d exceeds .exp region %d' % (len(rec['pay']), EXP_PAY)
+    w += [x & 0xFFFFFFFF for x in rec['pay']]
+    w += [0] * (EXP_WORDS + EXP_PAY - len(w))
+    assert len(w) == EXP_WORDS + EXP_PAY, len(w)
     return w
 
 
@@ -1376,6 +1396,15 @@ KIND = {}      # filled from the model
 SESSION_EXP_N = 386
 SESSION_MAX_REP = 352
 
+# §7b geometry (defaults; --paywords overrides the ObjPay size)
+PAY_WORDS = 16384
+PAY_CHUNK = 64
+PAY_STAGE = 1024
+PAY_PER_BUF = 256
+APU_VN_FAULT_PAYLOAD = 9
+PAY_KINDS = ('VkDescriptorSetLayout', 'VkPipelineLayout',
+             'VkPipeline', 'VkDescriptorSet')
+
 
 class FrontModel:
     """Mirror of g6lc_apu_vnfront's externally visible state."""
@@ -1384,9 +1413,10 @@ class FrontModel:
     CB_BUFS = 16
     FENCES = 16
 
-    def __init__(self, model, asm):
+    def __init__(self, model, asm, pay_words=PAY_WORDS):
         self.m = model
         self.asm = asm
+        self.pay_words = pay_words
         self.reset()
 
     def reset(self):
@@ -1408,6 +1438,13 @@ class FrontModel:
         self.fence_lost = 0
         self.outstanding = []                  # (fence_slot, pin slots)
         self.work_hold = False                 # TB: gate work_ready_i
+        # §7b: ObjPay mirror -- chunk bitmap (first-fit like the RTL)
+        # plus a sparse content image for the .pay expectations
+        self.pay_used = [0] * (self.pay_words // PAY_CHUNK)
+        self.pay = {}                          # addr -> word
+        # cmdrec per-buffer payload arenas
+        self.pay_top = [0] * self.CB_BUFS
+        self.pay_arena = [dict() for _ in range(self.CB_BUFS)]
 
     # ---- ObjTab -------------------------------------------------------------
     def resolve(self, idv, kind):
@@ -1489,6 +1526,62 @@ class FrontModel:
         e['aux'] = (e['aux'] & ~mask) | (value & mask)
         return 'OK', s
 
+    # ---- §7b: ObjPay mirror -------------------------------------------------
+    def setauxhi(self, h, value32):
+        """aux[63:32] = {base[15:0], words[15:0]}."""
+        st, s, e = self.resolve(h, 0)
+        if st != 'OK':
+            return st, s
+        e['aux'] = (e['aux'] & 0xFFFFFFFF) | \
+            ((value32 & 0xFFFFFFFF) << 32)
+        return 'OK', s
+
+    def pay_alloc(self, words):
+        """First-fit over PAY_CHUNK-word chunks -> base or None."""
+        if words == 0:
+            return 0
+        nch = (words + PAY_CHUNK - 1) // PAY_CHUNK
+        if nch > len(self.pay_used):
+            return None
+        run = start = 0
+        for i, u in enumerate(self.pay_used):
+            if u == 0:
+                if run == 0:
+                    start = i
+                run += 1
+                if run == nch:
+                    for j in range(start, start + nch):
+                        self.pay_used[j] = 1
+                    return start * PAY_CHUNK
+            else:
+                run = 0
+        return None
+
+    def pay_free(self, base, words):
+        if not words:
+            return
+        for j in range(base // PAY_CHUNK,
+                       base // PAY_CHUNK +
+                       (words + PAY_CHUNK - 1) // PAY_CHUNK):
+            self.pay_used[j] = 0
+
+    def pay_free_of(self, e):
+        """Free an entry's aux[63:32] = {base,words} extent."""
+        w = (e['aux'] >> 32) & 0xFFFF
+        b = (e['aux'] >> 48) & 0xFFFF
+        if w:
+            self.pay_free(b, w)
+
+    def arena_append(self, cbuf, words):
+        """cmdrec payload arena bump-alloc -> base or None (PAY_FULL)."""
+        top = self.pay_top[cbuf]
+        if top + len(words) > PAY_PER_BUF:
+            return None
+        for i, w in enumerate(words):
+            self.pay_arena[cbuf][top + i] = w & 0xFFFFFFFF
+        self.pay_top[cbuf] += len(words)
+        return top
+
     def reset_ctx(self, ctx=0):
         """-> (retired, pinned remaining)."""
         ret = pin = 0
@@ -1520,12 +1613,18 @@ class FrontModel:
         act = info['act']
         cls = act['class']
         out = {'result': VK_OK, 'rep': [], 'record': None,
-               'work': [], 'fault': rec['fault']}
+               'work': [], 'fault': rec['fault'],
+               'payw': [], 'arenaw': []}
         ew = list(self.m.profile_words_pool[:64])
         ew += [0] * (64 - len(ew))
         if rec['fault']:
             out['result'] = VK_ERR_UNKNOWN
             self._reply(out, words, rec, rep_sim, info, ew)
+            return out
+        if len(rec['pay']) > PAY_STAGE:
+            # §7b: payload staging overflow is a decode-class fault
+            out['result'] = VK_ERR_UNKNOWN
+            out['fault'] = APU_VN_FAULT_PAYLOAD
             return out
         if cls == 'UNSUPPORTED':
             out['result'] = VK_ERR_FEATURE
@@ -1559,8 +1658,61 @@ class FrontModel:
                            (words[off + 2 * i + 1] << 32))
             return ids
 
-        if cls in ('NOP_OK', 'MAP', 'UPDATE'):
+        if cls in ('NOP_OK', 'MAP'):
             pass
+
+        elif cls == 'UPDATE':
+            # §7b: vkUpdateDescriptorSets walks the staged writes --
+            # per write {dstSet(2), dstBinding, dstArrayElement,
+            # descriptorCount, descriptorType}, then per buffer info
+            # {buffer(2), offset(2), range(2)} for types 6/7
+            if ct == session['T']['vkUpdateDescriptorSets'] \
+                    and rec['imm'][0] != 0:
+                stg = 0
+                pay = rec['pay']
+                for _wi in range(rec['imm'][0] & 0xFFFF):
+                    dst = pay[stg] | (pay[stg + 1] << 32)
+                    dstb, dcnt, dtype = (pay[stg + 2], pay[stg + 4],
+                                         pay[stg + 5])
+                    stg += 6
+                    st, ds, de = self.resolve(
+                        dst, KIND['VkDescriptorSet'])
+                    if st != 'OK':
+                        out['result'] = VK_ERR_UNKNOWN
+                        break
+                    dset_base = (de['aux'] >> 48) & 0xFFFF
+                    dset_words = (de['aux'] >> 32) & 0xFFFF
+                    nbind = dset_words >> 2
+                    for j in range(dcnt & 0xFFFF):
+                        if dtype not in (6, 7):
+                            idx = (dstb + j) & 0xFFFF \
+                                if dstb + j < nbind else \
+                                (nbind - 1) & 0xFFFF
+                            entw = (0, 0, 0, dtype | 0x80000000)
+                        else:
+                            buf = pay[stg] | (pay[stg + 1] << 32)
+                            off_lo, rng_lo = pay[stg + 2], pay[stg + 4]
+                            stg += 6
+                            bst, bs, _be = self.resolve(
+                                buf, KIND['VkBuffer'])
+                            if dstb + j >= nbind:
+                                idx = (nbind - 1) & 0xFFFF
+                                entw = (0, 0, 0, dtype | 0x80000000)
+                            else:
+                                idx = (dstb + j) & 0xFFFF
+                                hndl = ((self.ent[bs]['gen'] << 16) | bs) \
+                                    if bst == 'OK' else 0
+                                w3 = dtype if bst == 'OK' \
+                                    else dtype | 0x80000000
+                                entw = (hndl, off_lo, rng_lo, w3)
+                        if dset_words:
+                            for k, w in enumerate(entw):
+                                a = dset_base + idx * 4 + k
+                                w &= 0xFFFFFFFF
+                                self.pay[a] = w
+                                out['payw'].append((a, w))
+                    if out['result'] != VK_OK:
+                        break
 
         elif cls == 'QUERY':
             ek = self.exec_kind(ct)
@@ -1603,6 +1755,29 @@ class FrontModel:
                                  if not self.falloc[i]), -1)
                 if obj_kind == KIND['VkFence'] and fidx < 0:
                     out['result'] = VK_ERR_OOM
+                elif obj_kind in (KIND['VkDescriptorSetLayout'],
+                                  KIND['VkPipelineLayout']):
+                    # §7b: layout objects take an ObjPay extent BEFORE
+                    # the ObjTab alloc; FULL -> OOM, object not created
+                    pn = 1 if obj_kind == KIND['VkDescriptorSetLayout'] \
+                        else 2
+                    nw = len(rec['pay']) + pn
+                    pbase = self.pay_alloc(nw)
+                    if pbase is None:
+                        out['result'] = VK_ERR_OOM
+                    else:
+                        st, h, slot = self.alloc(rec['q'][new], obj_kind,
+                                                 par)
+                        if st != 'OK':
+                            self.pay_free(pbase, nw)
+                            out['result'] = self._err(st)
+                        else:
+                            prep = rec['imm'][1:1 + pn]
+                            for i, w in enumerate(prep + list(rec['pay'])):
+                                w &= 0xFFFFFFFF
+                                self.pay[pbase + i] = w
+                                out['payw'].append((pbase + i, w))
+                            self.setauxhi(h, (pbase << 16) | nw)
                 else:
                     st, h, slot = self.alloc(rec['q'][new], obj_kind, par)
                     if st != 'OK':
@@ -1630,42 +1805,120 @@ class FrontModel:
                             out['result'] = VK_ERR_UNKNOWN
             else:
                 slot = (act['flags'] >> 1) & 1
-                for idv in blob_ids(slot):
-                    free = next((i for i in range(self.CB_BUFS)
-                                 if not self.cb_alloc[i]), -1)
-                    if obj_kind == KIND['VkCommandBuffer'] and free < 0:
-                        out['result'] = VK_ERR_OOM
-                        break
-                    st, h, s = self.alloc(idv, obj_kind, par)
-                    if st != 'OK':
-                        out['result'] = self._err(st)
-                        break
-                    if obj_kind == KIND['VkCommandBuffer']:
-                        st2, _ = self.setaux(h, 0xFF, free)
-                        if st2 != 'OK':
+                if obj_kind == KIND['VkDescriptorSet']:
+                    # §7b: per set -- staged layout id -> LOOKUP ->
+                    # bindingCount from its payload word 0 -> ObjPay
+                    # alloc(nbind*4) + zeroed/unsupported entries ->
+                    # aux[63:32] = {base,words}
+                    for ei, idv in enumerate(blob_ids(slot)):
+                        lay = (rec['pay'][2 * ei]
+                               | (rec['pay'][2 * ei + 1] << 32))
+                        st, ls, le = self.resolve(
+                            lay, KIND['VkDescriptorSetLayout'])
+                        if st != 'OK':
                             out['result'] = VK_ERR_UNKNOWN
                             break
-                        self.cb_alloc[free] = 1
-                        self.cb_hnd[free] = h
-                        self.cb_pool[free] = hnd[lu[1]] \
-                            if len(lu) > 1 else 0
+                        lay_base = (le['aux'] >> 48) & 0xFFFF
+                        nbind = self.pay.get(lay_base, 0)
+                        nw = nbind * 4
+                        pbase = 0
+                        if nw:
+                            pbase = self.pay_alloc(nw)
+                            if pbase is None:
+                                out['result'] = VK_ERR_OOM
+                                break
+                        st, h, s = self.alloc(idv, obj_kind, par)
+                        if st != 'OK':
+                            if nw:
+                                self.pay_free(pbase, nw)
+                            out['result'] = self._err(st)
+                            break
+                        for j in range(nbind):
+                            ty = self.pay.get(lay_base + 1 + j * 4 + 1, 0)
+                            cnt = self.pay.get(
+                                lay_base + 1 + j * 4 + 2, 0)
+                            w3 = 0x80000000 if (cnt > 1 or
+                                                ty not in (6, 7)) else 0
+                            for k, w in enumerate((0, 0, 0, w3)):
+                                a = pbase + j * 4 + k
+                                self.pay[a] = w
+                                out['payw'].append((a, w))
+                        self.setauxhi(h, (pbase << 16) | nw)
+                else:
+                    # §7b: a compute-pipeline payload extent is taken
+                    # before the element loop; the first created
+                    # pipeline parks {base,words} in aux[63:32]
+                    pbase = nw = 0
+                    pay_att = False
+                    if obj_kind == KIND['VkPipeline'] and rec['pay']:
+                        nw = len(rec['pay'])
+                        pbase = self.pay_alloc(nw)
+                        if pbase is None:
+                            out['result'] = VK_ERR_OOM
+                        else:
+                            for i, w in enumerate(rec['pay']):
+                                w &= 0xFFFFFFFF
+                                self.pay[pbase + i] = w
+                                out['payw'].append((pbase + i, w))
+                    if out['result'] == VK_OK:
+                        for idv in blob_ids(slot):
+                            free = next((i for i in range(self.CB_BUFS)
+                                         if not self.cb_alloc[i]), -1)
+                            if obj_kind == KIND['VkCommandBuffer'] \
+                                    and free < 0:
+                                out['result'] = VK_ERR_OOM
+                                break
+                            st, h, s = self.alloc(idv, obj_kind, par)
+                            if st != 'OK':
+                                out['result'] = self._err(st)
+                                break
+                            if obj_kind == KIND['VkCommandBuffer']:
+                                st2, _ = self.setaux(h, 0xFF, free)
+                                if st2 != 'OK':
+                                    out['result'] = VK_ERR_UNKNOWN
+                                    break
+                                self.cb_alloc[free] = 1
+                                self.cb_hnd[free] = h
+                                self.cb_pool[free] = hnd[lu[1]] \
+                                    if len(lu) > 1 else 0
+                            elif obj_kind == KIND['VkPipeline'] \
+                                    and nw and not pay_att:
+                                self.setauxhi(h, (pbase << 16) | nw)
+                                pay_att = True
+                        if out['result'] != VK_OK \
+                                and obj_kind == KIND['VkPipeline'] \
+                                and nw and not pay_att:
+                            self.pay_free(pbase, nw)
 
         elif cls == 'RETIRE':
             rt = next((i for i in range(8)
                        if rec['qv'] >> i & 1 and rec['role'][i] == 2), -1)
             ids = ([rec['q'][rt]] if rt >= 0 else blob_ids(0))
+            pk = tuple(KIND[k] for k in PAY_KINDS)
             for idv in ids:
                 aux = 0
+                pay_b = pay_w = 0
                 if obj_kind in (KIND['VkCommandBuffer'], KIND['VkFence']):
                     st, s, e = self.resolve(idv, obj_kind)
                     if st != 'OK':
                         out['result'] = VK_ERR_UNKNOWN
                         break
                     aux = e['aux'] & 0xFF
+                elif obj_kind in pk:
+                    # §7b: payload kinds take the same pre-LOOKUP; the
+                    # extent in aux[63:32] is freed after the RETIRE
+                    st, s, e = self.resolve(idv, obj_kind)
+                    if st != 'OK':
+                        out['result'] = VK_ERR_UNKNOWN
+                        break
+                    pay_w = (e['aux'] >> 32) & 0xFFFF
+                    pay_b = (e['aux'] >> 48) & 0xFFFF
                 st, s = self.retire(idv, obj_kind)
                 if st != 'OK':
                     out['result'] = self._err(st)
                     break
+                if pay_w:
+                    self.pay_free(pay_b, pay_w)
                 if obj_kind == KIND['VkCommandBuffer'] \
                         and aux < self.CB_BUFS:
                     self.cb_alloc[aux] = 0
@@ -1699,6 +1952,9 @@ class FrontModel:
                 else:
                     self.rec_state[aux] = 1
                     self.recs[aux] = []
+                    # cmdrec BEGIN clears the payload arena bump ptr
+                    self.pay_top[aux] = 0
+                    self.pay_arena[aux] = {}
                     self.setstate(hnd[cb_q], 0xF, CB_REC)
             elif cls == 'CB_END':
                 if not (e['state'] & CB_REC):
@@ -1709,10 +1965,16 @@ class FrontModel:
             elif cls == 'CB_RESET':
                 self.rec_state[aux] = 0
                 self.recs[aux] = []
+                # cmdrec RESET frees the payload arena too
+                self.pay_top[aux] = 0
+                self.pay_arena[aux] = {}
                 self.setstate(hnd[cb_q], 0xF, 0)
             else:
+                # §7b: pValues over 128 B joins the INVALID path
                 if not (e['state'] & CB_REC) or \
-                        (e['state'] & (CB_INV | CB_PEND)):
+                        (e['state'] & (CB_INV | CB_PEND)) or \
+                        (ct == session['T']['vkCmdPushConstants']
+                         and rec['imm'][2] > 128):
                     out['result'] = VK_ERR_UNKNOWN
                     self.setstate(hnd[cb_q], 0xF, CB_INV)
                 else:
@@ -1741,8 +2003,40 @@ class FrontModel:
                     recd = {'ctype': ct, 'flags': rec['flags'],
                             'handle': rh, 'kind': rk,
                             'imm': list(rec['imm'][:8]), 'spare': 0}
-                    self.recs[aux].append(recd)
-                    out['record'] = recd
+                    # §7b: BindDS streams resolved set handles then the
+                    # dynamic offsets; PushConstants streams the staged
+                    # words verbatim -- both through the pay arena
+                    pwords = []
+                    if ct == session['T']['vkCmdBindDescriptorSets']:
+                        nset = rec['imm'][2] & 0xFFFF
+                        ndyn = rec['imm'][3] & 0xFFFF
+                        for i in range(nset):
+                            sid = rec['pay'][2 * i] | \
+                                (rec['pay'][2 * i + 1] << 32)
+                            bst, bs, be = self.resolve(
+                                sid, KIND['VkDescriptorSet'])
+                            pwords.append(
+                                (be['gen'] << 16) | bs
+                                if bst == 'OK' else 0)
+                        for i in range(ndyn):
+                            pwords.append(
+                                rec['pay'][nset * 2 + i] & 0xFFFFFFFF)
+                    elif ct == session['T']['vkCmdPushConstants']:
+                        pwords = [w & 0xFFFFFFFF for w in rec['pay']]
+                    if pwords:
+                        abase = self.arena_append(aux, pwords)
+                        if abase is None:
+                            # PAY_FULL: the record is dropped, the
+                            # buffer goes INVALID
+                            out['result'] = VK_ERR_UNKNOWN
+                            self.setstate(hnd[cb_q], 0xF, CB_INV)
+                        else:
+                            for i, w in enumerate(pwords):
+                                out['arenaw'].append(
+                                    (aux, abase + i, w))
+                    if out['result'] == VK_OK:
+                        self.recs[aux].append(recd)
+                        out['record'] = recd
 
         elif cls == 'SUBMIT':
             fs = next((i for i in range(8)
@@ -1908,10 +2202,11 @@ def sess_rec_words(recd):
     return [(v >> (32 * i)) & 0xFFFFFFFF for i in range(16)]
 
 
-def build_session(model, asm, sim, rep_sim, enc, gen, rng):
+def build_session(model, asm, sim, rep_sim, enc, gen, rng,
+                  pay_words=PAY_WORDS, kind='main'):
     """-> (steps, instances).  Each step: {name, words, out, reset}."""
     m = model
-    fm = FrontModel(model, asm)
+    fm = FrontModel(model, asm, pay_words=pay_words)
     T = {n: i['type_id'] for n, i in m.cmd_info.items()}
     for t in m.reg.type_table.values():
         if t.category == vkxml.VkType.HANDLE:
@@ -1951,7 +2246,48 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng):
 
     I = {k: newid() for k in
          ('inst', 'pd', 'dev', 'queue', 'mem', 'buf', 'img', 'sm', 'dsl',
-          'pl', 'pipe', 'dp', 'ds', 'cp', 'cb', 'fen')}
+          'pl', 'pipe', 'dp', 'ds', 'ds2', 'cp', 'cb', 'fen')}
+
+    if kind == 'payfull':
+        # §7b ObjPay-FULL arm.  VkDescriptorSetLayoutBinding is bound-
+        # capped at 64 elements, so a single layout can stage at most
+        # 1+4*64 = 257 words (5 chunks).  At --paywords 512 (8 chunks):
+        # dsl_a takes 5, dsl_b needs 5 with only 3 free -> OOM, dsl_c
+        # (2 chunks) still fits and proves the allocator keeps working.
+        if pay_words != 512:
+            raise SystemExit('--payfull-session expects --paywords 512')
+        P = {k: newid() for k in ('inst', 'pd', 'dev', 'dla', 'dlb',
+                                  'dlc')}
+        cmd('vkCreateInstance', pInstance=P['inst'])
+        cmd('vkEnumeratePhysicalDevices', instance=P['inst'],
+            pPhysicalDeviceCount=1, pPhysicalDevices=[P['pd']])
+        cmd('vkCreateDevice', physicalDevice=P['pd'],
+            pCreateInfo=struct('VkDeviceCreateInfo'), pDevice=P['dev'])
+
+        def dsl_ci(n):
+            return struct(
+                'VkDescriptorSetLayoutCreateInfo', bindingCount=n,
+                pBindings=[struct('VkDescriptorSetLayoutBinding',
+                                  binding=i & 0x3F, descriptorType=7,
+                                  descriptorCount=1, stageFlags=0x20,
+                                  pImmutableSamplers=[])
+                           for i in range(n)])
+
+        cmd('vkCreateDescriptorSetLayout', device=P['dev'],
+            pCreateInfo=dsl_ci(64), pSetLayout=P['dla'])
+        cmd('vkCreateDescriptorSetLayout', device=P['dev'],
+            pCreateInfo=dsl_ci(64), pSetLayout=P['dlb'])
+        cmd('vkCreateDescriptorSetLayout', device=P['dev'],
+            pCreateInfo=dsl_ci(24), pSetLayout=P['dlc'])
+        cmd('vkDestroyDescriptorSetLayout', device=P['dev'],
+            descriptorSetLayout=P['dlc'])
+        cmd('vkDestroyDescriptorSetLayout', device=P['dev'],
+            descriptorSetLayout=P['dla'])
+        cmd('vkDestroyDescriptorSetLayout', device=P['dev'],
+            descriptorSetLayout=P['dlb'])
+        cmd('vkDestroyDevice', device=P['dev'])
+        cmd('vkDestroyInstance', instance=P['inst'])
+        return cmds, fm
 
     # ---------------- positive session ------------------------------------
     cmd('vkCreateInstance', pInstance=I['inst'])
@@ -2019,18 +2355,30 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng):
         pShaderModule=I['sm'])
     cmd('vkCreateDescriptorSetLayout', device=I['dev'],
         pCreateInfo=struct(
-            'VkDescriptorSetLayoutCreateInfo', bindingCount=1,
+            'VkDescriptorSetLayoutCreateInfo', bindingCount=3,
             pBindings=[struct(
                 'VkDescriptorSetLayoutBinding', binding=0,
                 descriptorType=7,     # STORAGE_BUFFER
+                descriptorCount=1, stageFlags=0x20,
+                pImmutableSamplers=[]),
+                struct(
+                'VkDescriptorSetLayoutBinding', binding=1,
+                descriptorType=6,     # UNIFORM_BUFFER, count>1
+                descriptorCount=2, stageFlags=0x20,
+                pImmutableSamplers=[]),
+                struct(
+                'VkDescriptorSetLayoutBinding', binding=2,
+                descriptorType=1,     # COMBINED_IMAGE_SAMPLER (unsup)
                 descriptorCount=1, stageFlags=0x20,
                 pImmutableSamplers=[])]),
         pSetLayout=I['dsl'])
     cmd('vkCreatePipelineLayout', device=I['dev'],
         pCreateInfo=struct('VkPipelineLayoutCreateInfo',
                            setLayoutCount=1, pSetLayouts=[I['dsl']],
-                           pushConstantRangeCount=0,
-                           pPushConstantRanges=[]),
+                           pushConstantRangeCount=1,
+                           pPushConstantRanges=[struct(
+                               'VkPushConstantRange', stageFlags=0x20,
+                               offset=0, size=16)]),
         pPipelineLayout=I['pl'])
     cmd('vkCreateComputePipelines', device=I['dev'], pipelineCache=0,
         createInfoCount=1,
@@ -2043,27 +2391,34 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng):
             basePipelineIndex=0)],
         pPipelines=[I['pipe']])
     cmd('vkCreateDescriptorPool', device=I['dev'],
-        pCreateInfo=struct('VkDescriptorPoolCreateInfo', maxSets=1,
+        pCreateInfo=struct('VkDescriptorPoolCreateInfo', maxSets=2,
                            poolSizeCount=1,
                            pPoolSizes=[struct('VkDescriptorPoolSize',
                                               type=7,
-                                              descriptorCount=1)]),
+                                              descriptorCount=3)]),
         pDescriptorPool=I['dp'])
     cmd('vkAllocateDescriptorSets', device=I['dev'],
         pAllocateInfo=struct('VkDescriptorSetAllocateInfo',
                              descriptorPool=I['dp'],
-                             descriptorSetCount=1,
-                             pSetLayouts=[I['dsl']]),
-        pDescriptorSets=[I['ds']])
+                             descriptorSetCount=2,
+                             pSetLayouts=[I['dsl'], I['dsl']]),
+        pDescriptorSets=[I['ds'], I['ds2']])
     cmd('vkUpdateDescriptorSets', device=I['dev'],
-        descriptorWriteCount=1,
+        descriptorWriteCount=2,
         pDescriptorWrites=[struct(
             'VkWriteDescriptorSet', dstSet=I['ds'], dstBinding=0,
             dstArrayElement=0, descriptorCount=1, descriptorType=7,
             pImageInfo=[], pTexelBufferView=[],
             pBufferInfo=[struct('VkDescriptorBufferInfo',
                                 buffer=I['buf'], offset=0,
-                                range=4096)])],
+                                range=4096)]),
+            struct(
+            'VkWriteDescriptorSet', dstSet=I['ds2'], dstBinding=0,
+            dstArrayElement=0, descriptorCount=1, descriptorType=6,
+            pImageInfo=[], pTexelBufferView=[],
+            pBufferInfo=[struct('VkDescriptorBufferInfo',
+                                buffer=I['buf'], offset=256,
+                                range=128)])],
         descriptorCopyCount=0, pDescriptorCopies=[])
     cmd('vkCreateCommandPool', device=I['dev'],
         pCreateInfo=struct('VkCommandPoolCreateInfo',
@@ -2081,10 +2436,12 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng):
         pipelineBindPoint=1, pipeline=I['pipe'])
     cmd('vkCmdBindDescriptorSets', commandBuffer=I['cb'],
         pipelineBindPoint=1, layout=I['pl'], firstSet=0,
-        descriptorSetCount=1, pDescriptorSets=[I['ds']],
-        dynamicOffsetCount=0, pDynamicOffsets=[])
+        descriptorSetCount=2, pDescriptorSets=[I['ds'], I['ds2']],
+        dynamicOffsetCount=1, pDynamicOffsets=[0x40])
     cmd('vkCmdPushConstants', commandBuffer=I['cb'], layout=I['pl'],
-        stageFlags=0x20, offset=0, size=4, pValues=b'\x2a\x00\x00\x00')
+        stageFlags=0x20, offset=0, size=16,
+        pValues=b'\x2a\x00\x00\x00\x2b\x00\x00\x00'
+                b'\x2c\x00\x00\x00\x2d\x00\x00\x00')
     cmd('vkCmdDispatch', commandBuffer=I['cb'],
         groupCountX=1, groupCountY=1, groupCountZ=1)
     cmd('vkEndCommandBuffer', commandBuffer=I['cb'])
@@ -2109,7 +2466,7 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng):
         commandBufferCount=1, pCommandBuffers=[I['cb']])
     cmd('vkDestroyCommandPool', device=I['dev'], commandPool=I['cp'])
     cmd('vkFreeDescriptorSets', device=I['dev'], descriptorPool=I['dp'],
-        descriptorSetCount=1, pDescriptorSets=[I['ds']])
+        descriptorSetCount=2, pDescriptorSets=[I['ds'], I['ds2']])
     cmd('vkDestroyDescriptorPool', device=I['dev'],
         descriptorPool=I['dp'])
     cmd('vkDestroyPipeline', device=I['dev'], pipeline=I['pipe'])
@@ -2262,6 +2619,180 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng):
     cmd('vkDestroyDevice', device=E['dev'])
     cmd('vkDestroyInstance', instance=E['inst'])
 
+    # ---- §7b helpers for the descriptor/payload arms --------------------
+    def dev_prefix(P):
+        cmd('vkCreateInstance', reset=True, pInstance=P['inst'])
+        cmd('vkEnumeratePhysicalDevices', instance=P['inst'],
+            pPhysicalDeviceCount=1, pPhysicalDevices=[P['pd']])
+        cmd('vkCreateDevice', physicalDevice=P['pd'],
+            pCreateInfo=struct('VkDeviceCreateInfo'), pDevice=P['dev'])
+
+    def dset_prefix(P):
+        dev_prefix(P)
+        cmd('vkCreateBuffer', device=P['dev'],
+            pCreateInfo=struct('VkBufferCreateInfo', size=256,
+                               usage=0x60 | 0x01, sharingMode=0,
+                               queueFamilyIndexCount=0,
+                               pQueueFamilyIndices=[]),
+            pBuffer=P['buf'])
+        cmd('vkCreateDescriptorSetLayout', device=P['dev'],
+            pCreateInfo=struct(
+                'VkDescriptorSetLayoutCreateInfo', bindingCount=1,
+                pBindings=[struct('VkDescriptorSetLayoutBinding',
+                                  binding=0, descriptorType=7,
+                                  descriptorCount=1, stageFlags=0x20,
+                                  pImmutableSamplers=[])]),
+            pSetLayout=P['dsl'])
+        cmd('vkCreateDescriptorPool', device=P['dev'],
+            pCreateInfo=struct('VkDescriptorPoolCreateInfo', maxSets=1,
+                               poolSizeCount=1,
+                               pPoolSizes=[struct(
+                                   'VkDescriptorPoolSize', type=7,
+                                   descriptorCount=1)]),
+            pDescriptorPool=P['dp'])
+        cmd('vkAllocateDescriptorSets', device=P['dev'],
+            pAllocateInfo=struct('VkDescriptorSetAllocateInfo',
+                                 descriptorPool=P['dp'],
+                                 descriptorSetCount=1,
+                                 pSetLayouts=[P['dsl']]),
+            pDescriptorSets=[P['ds']])
+
+    def dset_teardown(P, destroy_buf=True):
+        cmd('vkFreeDescriptorSets', device=P['dev'],
+            descriptorPool=P['dp'], descriptorSetCount=1,
+            pDescriptorSets=[P['ds']])
+        cmd('vkDestroyDescriptorPool', device=P['dev'],
+            descriptorPool=P['dp'])
+        cmd('vkDestroyDescriptorSetLayout', device=P['dev'],
+            descriptorSetLayout=P['dsl'])
+        if destroy_buf:
+            cmd('vkDestroyBuffer', device=P['dev'], buffer=P['buf'])
+        cmd('vkDestroyDevice', device=P['dev'])
+        cmd('vkDestroyInstance', instance=P['inst'])
+
+    # ------- arm 6: update to a destroyed buffer -> unsupported entry ----
+    F = {k: newid() for k in ('inst', 'pd', 'dev', 'buf', 'dsl', 'dp',
+                              'ds')}
+    dset_prefix(F)
+    cmd('vkDestroyBuffer', device=F['dev'], buffer=F['buf'])
+    cmd('vkUpdateDescriptorSets', device=F['dev'],
+        descriptorWriteCount=1,
+        pDescriptorWrites=[struct(
+            'VkWriteDescriptorSet', dstSet=F['ds'], dstBinding=0,
+            dstArrayElement=0, descriptorCount=1, descriptorType=7,
+            pImageInfo=[], pTexelBufferView=[],
+            pBufferInfo=[struct('VkDescriptorBufferInfo',
+                                buffer=F['buf'], offset=0,
+                                range=256)])],
+        descriptorCopyCount=0, pDescriptorCopies=[])
+    dset_teardown(F, destroy_buf=False)
+
+    # ------- arm 7: dstBinding >= nbind -> unsupported entry -------------
+    G7 = {k: newid() for k in ('inst', 'pd', 'dev', 'buf', 'dsl', 'dp',
+                               'ds')}
+    dset_prefix(G7)
+    cmd('vkUpdateDescriptorSets', device=G7['dev'],
+        descriptorWriteCount=1,
+        pDescriptorWrites=[struct(
+            'VkWriteDescriptorSet', dstSet=G7['ds'], dstBinding=5,
+            dstArrayElement=0, descriptorCount=1, descriptorType=7,
+            pImageInfo=[], pTexelBufferView=[],
+            pBufferInfo=[struct('VkDescriptorBufferInfo',
+                                buffer=G7['buf'], offset=0,
+                                range=256)])],
+        descriptorCopyCount=0, pDescriptorCopies=[])
+    dset_teardown(G7)
+
+    # ------- arm 8: pValues over 128 B -> UNKNOWN + INVALID --------------
+    H = {k: newid() for k in ('inst', 'pd', 'dev', 'pl', 'cp', 'cb')}
+    dev_prefix(H)
+    cmd('vkCreatePipelineLayout', device=H['dev'],
+        pCreateInfo=struct('VkPipelineLayoutCreateInfo',
+                           setLayoutCount=0, pSetLayouts=[],
+                           pushConstantRangeCount=0,
+                           pPushConstantRanges=[]),
+        pPipelineLayout=H['pl'])
+    cmd('vkCreateCommandPool', device=H['dev'],
+        pCreateInfo=struct('VkCommandPoolCreateInfo',
+                           queueFamilyIndex=0),
+        pCommandPool=H['cp'])
+    cmd('vkAllocateCommandBuffers', device=H['dev'],
+        pAllocateInfo=struct('VkCommandBufferAllocateInfo',
+                             commandPool=H['cp'], level=0,
+                             commandBufferCount=1),
+        pCommandBuffers=[H['cb']])
+    cmd('vkBeginCommandBuffer', commandBuffer=H['cb'],
+        pBeginInfo=struct('VkCommandBufferBeginInfo', flags=0,
+                          pInheritanceInfo=None))
+    cmd('vkCmdPushConstants', commandBuffer=H['cb'], layout=H['pl'],
+        stageFlags=0x20, offset=0, size=132, pValues=b'\x01' * 132)
+    cmd('vkCmdDispatch', commandBuffer=H['cb'],
+        groupCountX=1, groupCountY=1, groupCountZ=1)
+    cmd('vkFreeCommandBuffers', device=H['dev'], commandPool=H['cp'],
+        commandBufferCount=1, pCommandBuffers=[H['cb']])
+    cmd('vkDestroyCommandPool', device=H['dev'], commandPool=H['cp'])
+    cmd('vkDestroyPipelineLayout', device=H['dev'],
+        pipelineLayout=H['pl'])
+    cmd('vkDestroyDevice', device=H['dev'])
+    cmd('vkDestroyInstance', instance=H['inst'])
+
+    # ------- arm 9: payload staging overflow -> PAYLOAD fault ------------
+    # VkDescriptorSetLayoutBinding is bound-capped at 64 elements, so a
+    # layout alone can stage at most 256 words.  vkUpdateDescriptorSets
+    # stages 5 + 6*descriptorCount words per write (bound: 64 writes x
+    # 64 buffer infos); 3 writes x 64 infos = 1167 words > 1024 staged.
+    J = {k: newid() for k in ('inst', 'pd', 'dev', 'ds', 'buf')}
+    dev_prefix(J)
+    cmd('vkUpdateDescriptorSets', device=J['dev'],
+        descriptorWriteCount=3,
+        pDescriptorWrites=[struct(
+            'VkWriteDescriptorSet', dstSet=J['ds'], dstBinding=i,
+            dstArrayElement=0, descriptorCount=64, descriptorType=7,
+            pImageInfo=[], pTexelBufferView=[],
+            pBufferInfo=[struct('VkDescriptorBufferInfo',
+                                buffer=J['buf'], offset=4 * k,
+                                range=16)
+                         for k in range(64)])
+            for i in range(3)],
+        descriptorCopyCount=0, pDescriptorCopies=[])
+    cmd('vkDestroyDevice', device=J['dev'])
+    cmd('vkDestroyInstance', instance=J['inst'])
+
+    # ------- arm 10: cmdrec payload arena overflow -> PAY_FULL -----------
+    K = {k: newid() for k in ('inst', 'pd', 'dev', 'pl', 'cp', 'cb')}
+    dev_prefix(K)
+    cmd('vkCreatePipelineLayout', device=K['dev'],
+        pCreateInfo=struct('VkPipelineLayoutCreateInfo',
+                           setLayoutCount=0, pSetLayouts=[],
+                           pushConstantRangeCount=0,
+                           pPushConstantRanges=[]),
+        pPipelineLayout=K['pl'])
+    cmd('vkCreateCommandPool', device=K['dev'],
+        pCreateInfo=struct('VkCommandPoolCreateInfo',
+                           queueFamilyIndex=0),
+        pCommandPool=K['cp'])
+    cmd('vkAllocateCommandBuffers', device=K['dev'],
+        pAllocateInfo=struct('VkCommandBufferAllocateInfo',
+                             commandPool=K['cp'], level=0,
+                             commandBufferCount=1),
+        pCommandBuffers=[K['cb']])
+    cmd('vkBeginCommandBuffer', commandBuffer=K['cb'],
+        pBeginInfo=struct('VkCommandBufferBeginInfo', flags=0,
+                          pInheritanceInfo=None))
+    # 34 staged words each ({offset,size,32 value words}); the 8th
+    # append crosses the 256-word arena -> PAY_FULL + INVALID
+    for _i in range(8):
+        cmd('vkCmdPushConstants', commandBuffer=K['cb'], layout=K['pl'],
+            stageFlags=0x20, offset=0, size=128,
+            pValues=bytes([_i & 0xFF]) * 128)
+    cmd('vkFreeCommandBuffers', device=K['dev'], commandPool=K['cp'],
+        commandBufferCount=1, pCommandBuffers=[K['cb']])
+    cmd('vkDestroyCommandPool', device=K['dev'], commandPool=K['cp'])
+    cmd('vkDestroyPipelineLayout', device=K['dev'],
+        pipelineLayout=K['pl'])
+    cmd('vkDestroyDevice', device=K['dev'])
+    cmd('vkDestroyInstance', instance=K['inst'])
+
     return cmds, fm
 
 
@@ -2305,10 +2836,33 @@ def write_session(name, cmds, fm):
                           'exec_w': []})
     exp_lines.append('// end')
     exp_lines += ['FFFFFFFF', 'FFFFFFFF']
+    # §7b: ObjPay / cmdrec-arena write expectations, checked by the TB
+    # after the indexed command completes.
+    #   tag 1 {tag, rec, n, (addr, word)*n}      -- ObjPay contents
+    #   tag 2 {tag, rec, cbuf, n, (idx, word)*n} -- arena contents
+    pay_lines = []
+    for i, c in enumerate(cmds):
+        pw = c['out'].get('payw') or []
+        aw = c['out'].get('arenaw') or []
+        if pw:
+            pay_lines.append('// %s' % c['name'])
+            pay_lines += ['%08X' % 1, '%08X' % i, '%08X' % len(pw)]
+            for a, w in pw:
+                pay_lines += ['%08X' % a, '%08X' % w]
+        if aw:
+            pay_lines.append('// %s arena' % c['name'])
+            pay_lines += ['%08X' % 2, '%08X' % i, '%08X' % aw[0][0],
+                          '%08X' % len(aw)]
+            for _b, a, w in aw:
+                pay_lines += ['%08X' % a, '%08X' % w]
+    pay_lines.append('// end')
+    pay_lines.append('FFFFFFFF')
     (VEC_DIR / (name + '.hex')).write_text(
         '\n'.join(hex_lines) + '\n', encoding='utf-8')
     (VEC_DIR / (name + '.exp')).write_text(
         '\n'.join(exp_lines) + '\n', encoding='utf-8')
+    (VEC_DIR / (name + '.pay')).write_text(
+        '\n'.join(pay_lines) + '\n', encoding='utf-8')
     import json as _json
     (VEC_DIR / (name + '.json')).write_text(
         _json.dumps([{'cmd': i['cmd'], 'i': i['i'],
@@ -3420,6 +3974,12 @@ def main():
     ap.add_argument('--vectors', nargs=2, metavar=('NAME', 'SEED'))
     ap.add_argument('--reply-vectors', nargs=2, metavar=('NAME', 'SEED'))
     ap.add_argument('--session', nargs=2, metavar=('NAME', 'SEED'))
+    ap.add_argument('--payfull-session', nargs=2,
+                    metavar=('NAME', 'SEED'),
+                    help='session variant for the ObjPay-FULL arm; '
+                         'pair with --paywords N (default 512)')
+    ap.add_argument('--paywords', type=int, default=512,
+                    help='ObjPay word count modelled by --payfull-session')
     ap.add_argument('--transport', nargs=2, metavar=('NAME', 'SEED'))
     ap.add_argument('--print', dest='print_cmd', metavar='CMD')
     ap.add_argument('--dump-json', metavar='FILE',
@@ -3668,6 +4228,22 @@ def main():
         print('wrote %s session to %s: %d commands, %d sub-sessions, '
               '%d replying, %d non-OK'
               % (name, VEC_DIR, len(cmds), nreset + 1, len(insts), nerr))
+        return 0
+
+    if args.payfull_session:
+        name, seed = args.payfull_session
+        rng = random.Random(int(seed))
+        gen = ArgGen(model, rng)
+        rep_sim = ReplySim(model, asm)
+        VEC_DIR.mkdir(parents=True, exist_ok=True)
+        cmds, fm = build_session(model, asm, sim, rep_sim, enc, gen,
+                                 rng, pay_words=args.paywords,
+                                 kind='payfull')
+        insts = write_session(name, cmds, fm)
+        nerr = sum(1 for c in cmds if c['out']['result'] != VK_OK)
+        print('wrote %s payfull session to %s: %d commands, '
+              '%d non-OK (paywords=%d)'
+              % (name, VEC_DIR, len(cmds), nerr, args.paywords))
         return 0
 
     if args.transport:

@@ -40,13 +40,15 @@ module g6lc_apu_vgtop
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_vnfront_pkg::*;
 #(
   parameter bit          Enable = 1'b0,
   parameter int unsigned Rings  = 4,
-  parameter int unsigned Fences = 16
+  parameter int unsigned Fences = 16,
+  parameter int unsigned PayWords = 16384
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -186,6 +188,11 @@ module g6lc_apu_vgtop
     apu_objtab_req_t vp_ot_req;
     logic        vp_cr_v, vp_cr_rdy, vp_cr_cpl_rdy;
     apu_cmdrec_req_t vp_cr_req;
+    logic        vp_pay_v, vp_pay_rdy;
+    logic [31:0] vp_pay_d;
+    logic        vp_op_v, vp_op_rdy, vp_op_cpl_v, vp_op_cpl_rdy;
+    apu_objpay_req_t vp_op_req;
+    apu_objpay_cpl_t vp_op_cpl;
     logic        vp_ex_v, vp_ex_rdy;
     apu_cmdexec_submit_t vp_ex_submit;
 
@@ -211,6 +218,12 @@ module g6lc_apu_vgtop
       .cr_req_o(vp_cr_req),
       .cr_cpl_valid_i(cr_cpl_valid), .cr_cpl_ready_o(vp_cr_cpl_rdy),
       .cr_cpl_i(cr_cpl),
+      .cr_pay_valid_o(vp_pay_v), .cr_pay_data_o(vp_pay_d),
+      .cr_pay_ready_i(vp_pay_rdy),
+      .op_req_valid_o(vp_op_v), .op_req_ready_i(vp_op_rdy),
+      .op_req_o(vp_op_req),
+      .op_cpl_valid_i(vp_op_cpl_v), .op_cpl_ready_o(vp_op_cpl_rdy),
+      .op_cpl_i(vp_op_cpl),
       .ex_submit_valid_o(vp_ex_v), .ex_submit_ready_i(vp_ex_rdy),
       .ex_submit_o(vp_ex_submit),
       .ex_done_seq_i(ex_done_seq), .ex_fence_signaled_i(ex_fence_sig),
@@ -249,7 +262,18 @@ module g6lc_apu_vgtop
       .req_valid_i(cr_req_valid), .req_ready_o(cr_req_ready),
       .req_i(cr_req),
       .cpl_valid_o(cr_cpl_valid), .cpl_ready_i(cr_cpl_ready),
-      .cpl_o(cr_cpl));
+      .cpl_o(cr_cpl),
+      .pay_valid_i(vp_pay_v), .pay_data_i(vp_pay_d),
+      .pay_ready_o(vp_pay_rdy));
+
+    // ---- objpay -------------------------------------------------------------------
+    // single requester: the vnfront inside vnpump
+    g6lc_apu_objpay #(.Enable(1'b1), .PayWords(PayWords)) i_pay (
+      .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
+      .req_valid_i(vp_op_v), .req_ready_o(vp_op_rdy),
+      .req_i(vp_op_req),
+      .cpl_valid_o(vp_op_cpl_v), .cpl_ready_i(vp_op_cpl_rdy),
+      .cpl_o(vp_op_cpl));
 
     // ---- objtab -------------------------------------------------------------------
     g6lc_apu_objtab #(.Enable(1'b1)) i_tab (
@@ -402,13 +426,15 @@ module g6lc_apu_vgtop_fixture
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_vnfront_pkg::*;
 #(
   parameter bit          Enable = 1'b0,
   parameter int unsigned Rings  = 4,
-  parameter int unsigned Fences = 16
+  parameter int unsigned Fences = 16,
+  parameter int unsigned PayWords = 16384
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -454,6 +480,6 @@ module g6lc_apu_vgtop_fixture
   input  logic            dbg_ot_cpl_ready_i,
   output apu_objtab_cpl_t dbg_ot_cpl_o
 );
-  g6lc_apu_vgtop #(.Enable(Enable), .Rings(Rings), .Fences(Fences))
-    i_dut (.*);
+  g6lc_apu_vgtop #(.Enable(Enable), .Rings(Rings), .Fences(Fences),
+                   .PayWords(PayWords)) i_dut (.*);
 endmodule

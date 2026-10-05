@@ -97,10 +97,15 @@ module tb_g6lc_apu_cmdexec;
   wire apu_cmdrec_req_t cr_req = tb_drv ? tcr_req : xcr_req;
   wire apu_objtab_req_t ot_req = tb_drv ? tot_req : xot_req;
 
+  logic        tpay_v = 1'b0, tpay_r;
+  logic [31:0] tpay_d = '0;
+
   g6lc_apu_cmdrec #(.Enable(1'b1)) i_rec (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(cr_vld), .req_ready_o(cr_rdy), .req_i(cr_req),
-    .cpl_valid_o(cr_cvld), .cpl_ready_i(cr_crdy), .cpl_o(cr_cpl));
+    .cpl_valid_o(cr_cvld), .cpl_ready_i(cr_crdy), .cpl_o(cr_cpl),
+    .pay_valid_i(tpay_v), .pay_data_i(tpay_d),
+    .pay_ready_o(tpay_r));
   g6lc_apu_objtab #(.Enable(1'b1), .Slots(Slots)) i_obj (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(ot_vld), .req_ready_o(ot_rdy), .req_i(ot_req),
@@ -139,15 +144,6 @@ module tb_g6lc_apu_cmdexec;
   // work_ready: deasserted for a cycle out of every 5
   always @(negedge clk) w_r <= (cycles % 5) != 4;
 
-  // debug: trace where lost_q rises
-  always @(posedge clk) if (rst_ni &&
-      i_dut.gen_on.lost_q && !i_dut.gen_on.fence_lost_o[0] &&
-      $past(i_dut.gen_on.lost_q) == 1'b0)
-    $display("[%0t] LOST st=%0d buf=%0d rec=%0d h=%0d pin=%0d crc=%0d otc=%0d",
-             $time, i_dut.gen_on.state_q, i_dut.gen_on.buf_i_q,
-             i_dut.gen_on.rec_i_q, i_dut.gen_on.h_i_q,
-             i_dut.gen_on.pin_i_q, cr_cpl.status, ot_cpl.status);
-
   task automatic check(input string name, input logic ok);
     checks++;
     if (ok !== 1'b1) begin
@@ -159,12 +155,26 @@ module tb_g6lc_apu_cmdexec;
 
   // ---- backend setup helpers ------------------------------------------
   task automatic cr_op(input apu_cmdrec_op_e o, input logic [7:0] b,
-                       input logic [7:0] ix, input apu_cmdrec_rec_t r);
+                       input logic [15:0] ix, input apu_cmdrec_rec_t r,
+                       input logic [15:0] pn = '0);
     @(negedge clk); tcr_v = 1'b1;
-    tcr_req = '{op: o, cbuf: b, idx: ix, rec: r};
+    tcr_req = '{op: o, cbuf: b, idx: ix, rec: r, pay_n: pn};
     @(posedge clk);
     while (!tcr_r) @(posedge clk);
     @(negedge clk); tcr_v = 1'b0;
+    // APPEND with pay_n streams its payload words one per cycle while
+    // the recorder sits in its StPay accept state. Hold pay_valid
+    // across the whole burst: the last word exits StPay on the same
+    // edge that accepts it, so polling pay_ready_o per word can miss
+    // the final handshake under post-edge sampling.
+    if (pn != 0) begin
+      @(negedge clk); tpay_v = 1'b1;
+      for (int i = 0; i < pn; i++) begin
+        tpay_d = 32'hCAFE_0000 + 32'(i);
+        @(negedge clk);
+      end
+      tpay_v = 1'b0;
+    end
     while (!tcr_cv) @(negedge clk);
   endtask
 
@@ -338,6 +348,44 @@ module tb_g6lc_apu_cmdexec;
                          ot_cpl.entry.pins == 8'h0);
     tb_drv = 1'b0;
     cases++;
+
+    // ---- case 7: §7b BindDS payload walk + push-constant state ------------
+    // Two payload records share the buffer's pay arena: BindDS lands at
+    // base 0 (imm[7]=0), PushConstants at base 2 (imm[7]=2).
+    tb_drv = 1'b1;
+    cr_op(APU_CMDREC_OP_BEGIN, 5, 0, '0);
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT, 0, 0, 0);
+      rr.imm[1] = 32'd1;   // firstSet
+      rr.imm[2] = 32'd2;   // descriptorSetCount -> arena words 0,1
+      cr_op(APU_CMDREC_OP_APPEND, 5, 0, rr, 16'd2);
+    end
+    begin
+      apu_cmdrec_rec_t pr = mkrec(
+          APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT, 0, 0, 0);
+      pr.imm[0] = 32'hAB;  // stageFlags
+      pr.imm[2] = 32'd8;   // size bytes
+      cr_op(APU_CMDREC_OP_APPEND, 5, 0, pr, 16'd2);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, 5, 0,
+          mkrec(APU_VN_TYPE_VK_CMD_DISPATCH_EXT, 0, 0, 32'h4));
+    cr_op(APU_CMDREC_OP_END, 5, 0, '0);
+    tb_drv = 1'b0;
+    begin
+      int w0 = work_i;
+      submit(5'd4, 1, 8'd5, cb_h, 8'h0, 32'h0);
+      wait_fence(4, 4000);
+      check("bindds work", work_i == w0 + 1);
+      // streamed pay words are CAFE_0000+i; BindDS reads two ->
+      // dset[firstSet+k]; PushConstants parks base/len in the snap
+      check("dset1", got_snap[w0].dset[1] === 32'hCAFE0000);
+      check("dset2", got_snap[w0].dset[2] === 32'hCAFE0001);
+      check("push_base", got_snap[w0].push_base === 16'd2);
+      check("push_len",  got_snap[w0].push_len === 16'd8);
+      check("bindds no lost", flost[4] === 1'b0);
+      cases++;
+    end
 
     $display("PASS tb_g6lc_apu_cmdexec cases=%0d checks=%0d cycles=%0d",
              cases, checks, cycles);

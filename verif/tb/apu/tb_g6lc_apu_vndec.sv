@@ -4,7 +4,7 @@
 // Vector-driven test of g6lc_apu_vndec. The CS model is a flat word array
 // filled by $readmemh with a two-region layout:
 //   [0,65535)   : ue_sm5_core.hex CS words (comment lines skipped)
-//   [65536,...) : ue_sm5_core.exp records, REC_W=78 words each
+//   [65536,...) : ue_sm5_core.exp records, REC_W=335 words each
 //   (2641 records + sentinel after the transport commands joined the set)
 // .exp record (documented in g6lc_apu_vn_tables.md):
 //   0: cs_base  1: cs_len  2: type  3: flags
@@ -12,13 +12,16 @@
 //   37..52: imm[0..15]  53: immv  54..57: cnt
 //   58..61: blob{off,words} x2  62: pres  63..70: chain
 //   71: chain_n  72: obj_kind  73: reply_prog  74: words
-//   75: fault  76: fault_word  77: fault_val
+//   75: fault  76: fault_word  77: fault_val  78: pay_len
+//   79..334: expected pay_valid_o/pay_data_o stream (pay_len words)
 // Terminated by a {FFFFFFFF,FFFFFFFF} sentinel in the base/len slots.
 module tb_g6lc_apu_vndec;
   import g6lc_apu_vn_pkg::*;
 
-  localparam int REC_W = 78;
+  localparam int REC_W = 335;
   localparam int EXP_BASE = 65536;
+  localparam int PAY_OFF = 79;
+  localparam int PAY_MAX = 256;
 
   logic clk = 0, rst_ni = 0;
   logic start = 0, busy, done;
@@ -26,26 +29,38 @@ module tb_g6lc_apu_vndec;
   logic cs_re; logic [15:0] cs_addr;
   logic [31:0] cs_rdata = '0;
   apu_vn_op_t op, off_op;
-  logic off_busy, off_done, off_re; logic [15:0] off_addr;
+  logic pay_valid; logic [31:0] pay_data;
+  logic off_busy, off_done, off_re, off_pv; logic [15:0] off_addr;
+  logic [31:0] off_pd;
 
-  logic [31:0] cs [0:524287];
+  logic [31:0] cs [0:1048575];
+  // captured payload stream for the in-flight decode
+  logic [31:0] pay_buf [0:PAY_MAX+63];
+  int pay_i = 0;
   int errors = 0, checks = 0, cycles = 0, cases = 0;
 
   g6lc_apu_vndec #(.Enable(1'b1)) i_on (
     .clk_i(clk), .rst_ni(rst_ni),
     .start_i(start), .cs_base_i(cs_base), .cs_len_i(cs_len),
     .cs_re_o(cs_re), .cs_addr_o(cs_addr), .cs_rdata_i(cs_rdata),
-    .busy_o(busy), .done_o(done), .op_o(op));
+    .busy_o(busy), .done_o(done), .op_o(op),
+    .pay_valid_o(pay_valid), .pay_data_o(pay_data));
   g6lc_apu_vndec_fixture #(.Enable(1'b0)) i_off (
     .clk_i(clk), .rst_ni(rst_ni),
     .start_i(start), .cs_base_i(cs_base), .cs_len_i(cs_len),
     .cs_re_o(off_re), .cs_addr_o(off_addr), .cs_rdata_i(cs_rdata),
-    .busy_o(off_busy), .done_o(off_done), .op_o(off_op));
+    .busy_o(off_busy), .done_o(off_done), .op_o(off_op),
+    .pay_valid_o(off_pv), .pay_data_o(off_pd));
 
   always #5 clk = ~clk;
   always @(posedge clk) cycles++;
   always @(posedge clk) if (cs_re) cs_rdata <= cs[cs_addr];
-  always @(negedge clk) if (off_re || off_busy || off_done ||
+  always @(posedge clk) if (pay_valid) begin
+    if (pay_i > PAY_MAX + 63) $fatal(1, "payload overrun in TB");
+    pay_buf[pay_i] <= pay_data;
+    pay_i <= pay_i + 1;
+  end
+  always @(negedge clk) if (off_re || off_busy || off_done || off_pv ||
                             off_op.cmd_type !== '0 || off_op.words !== '0 ||
                             off_op.fault != APU_VN_FAULT_NONE)
     $fatal(1, "disabled vndec active");
@@ -80,7 +95,8 @@ module tb_g6lc_apu_vndec;
     if (op.fault       !== 4'(ev(r,75)))  c++;
     if (op.fault_word  !== 16'(ev(r,76))) c++;
     if (op.fault_val   !== ev(r,77)) c++;
-    checks += 12;
+    if (op.pay_words   !== 16'(ev(r,78))) c++;
+    checks += 13;
     if (c != 0) begin
       errors += c;
       $display("FAIL rec %0d hdr: got typ=%08x flg=%08x qv=%02x immv=%04x pres=%02x cn=%0d ok=%02x rp=%02x w=%0d f=%0d fw=%0d fv=%08x",
@@ -134,6 +150,7 @@ module tb_g6lc_apu_vndec;
       base_w = ev(rec,0);
       len_w  = ev(rec,1);
       @(negedge clk);
+      pay_i = 0;
       cs_base = 16'(base_w); cs_len = 16'(len_w); start = 1'b1;
       @(posedge clk);
       @(negedge clk); start = 1'b0;
@@ -141,6 +158,11 @@ module tb_g6lc_apu_vndec;
       cases++;
       ft = cmp(rec);
       if (ft >= 0 && ft == 0) cmp_tail(rec);
+      // §7b payload stream: word-for-word against the .exp region
+      check("pay_i==pay_words", pay_i == int'(op.pay_words));
+      for (int i = 0; i < pay_i; i++)
+        check($sformatf("pay[%0d]", i),
+              i < PAY_MAX && pay_buf[i] === ev(rec, PAY_OFF + i));
       @(negedge clk);
       check("idle busy", busy == 1'b0);
       rec++;

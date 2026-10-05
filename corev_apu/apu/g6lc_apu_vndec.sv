@@ -35,10 +35,18 @@
 //     RET          : pop return stack (chain body end); empty stack ends
 //                    the program like the golden sim (reply_prog stays 0)
 //
+//   KEEP (a[7] of the ROM word on U32/U64/HANDLE/BLOB/PTR, §7b): the
+//   words the op consumes are also streamed on pay_valid_o/pay_data_o
+//   in decode order — U32 1 word, U64/HANDLE the 2 raw words, PTR the
+//   0/1 presence word, BLOB its data words (the decoder steps through
+//   them instead of skipping).  pay_words counts them in op_o.
+//
 //   Every fault leaves pos at the offending word; words/fault_word are
 //   CS-relative indices, fault_val the diagnostic payload.  CS reads are
 //   issued one cycle ahead (cs_re_o/cs_addr_o -> cs_rdata_i next cycle);
-//   multi-word ops stream at one word per cycle.
+//   multi-word ops stream at one word per cycle.  Payload emission is
+//   gated on the op completing without fault so a truncated or rejected
+//   word is never reported (matches the golden sim).
 //
 // Timing impact: all table lookups are combinational localparam muxes
 // (DEC_ROM 1648x48, CHAIN 147x48, CONST/ARRMETA/BLOBMETA small); the
@@ -66,7 +74,9 @@ module g6lc_apu_vndec
   input  logic [31:0] cs_rdata_i,
   output logic        busy_o,
   output logic        done_o,
-  output apu_vn_op_t  op_o
+  output apu_vn_op_t  op_o,
+  output logic        pay_valid_o,
+  output logic [31:0] pay_data_o
 );
   if (!Enable) begin : gen_off
     assign cs_re_o   = 1'b0;
@@ -74,6 +84,8 @@ module g6lc_apu_vndec
     assign busy_o    = 1'b0;
     assign done_o    = 1'b0;
     assign op_o      = '{fault: APU_VN_FAULT_NONE, default: '0};
+    assign pay_valid_o = 1'b0;
+    assign pay_data_o  = '0;
     logic unused;
     assign unused = clk_i | rst_ni | start_i | cs_rdata_i[0] |
                     (|cs_base_i) | (|cs_len_i) | (|cs_rdata_i);
@@ -97,7 +109,7 @@ module g6lc_apu_vndec
 
     typedef enum logic [4:0] {
       StIdle, StHdrType, StHdrFlags, StOp,
-      StW1, StW2Lo, StW2Hi,
+      StW1, StW2Lo, StW2Hi, StW3, StBPay,
       StPnLo, StPnHi, StPnSt, StPnScan, StPnPop,
       StArrSkip, StDone
     } state_e;
@@ -130,6 +142,11 @@ module g6lc_apu_vndec
     logic [15:0]   scan_q;       // chain-table scan index
     logic [31:0]   pnext_st_q;   // sType being looked up
     logic [15:0]   skip_d_q;     // ARRAY cnt==0 skip depth
+    // §7b payload: KEEP latched per op, hi word held for StW3, BLOB
+    // keep walks the data words in StBPay
+    logic          keep_q;
+    logic [31:0]   payw_q;
+    logic [16:0]   bpay_rem_q;
 
     logic [47:0]   rom_w;
     logic [7:0]    rom_op, rom_a;
@@ -159,7 +176,11 @@ module g6lc_apu_vndec
     logic [33:0] blob_wn;
     assign blob_wn = (blob_prod[33:0] + 34'd3) >> 2;
 
-    assign cs_addr_o = state_q == StIdle ? cs_base_i : base_q + pos_q;
+    // StBPay emits the word under rdata and fetches the next data word,
+    // so its read address leads pos_q by one.
+    assign cs_addr_o = state_q == StIdle  ? cs_base_i :
+                       state_q == StBPay  ? base_q + pos_q + 16'd1
+                                          : base_q + pos_q;
 
     // combinational read-port steering
     always_comb begin
@@ -172,6 +193,9 @@ module g6lc_apu_vndec
                                             O_PTR, O_ARRAY, O_BLOB,
                                             O_PNEXT} && pos_q < len_q;
         StW2Lo, StPnLo: cs_re_o = pos_q < len_q;            // hi word
+        // keep BLOB: prefetch the first data word alongside the count
+        StW2Hi:    cs_re_o = rom_op == O_BLOB && keep_q;
+        StBPay:    cs_re_o = bpay_rem_q > 17'd1;            // next word
         StPnHi:    cs_re_o = {tmp_q, cs_rdata_i} != 64'h0 &&
                              pos_q < len_q;               // sType word
         StPnScan:  cs_re_o = chain_w != 48'h0 &&
@@ -180,6 +204,30 @@ module g6lc_apu_vndec
         default:   cs_re_o = 1'b0;
       endcase
     end
+
+    // ---- §7b payload stream -------------------------------------------
+    // One word per cycle, decode order; emitted only where the op cannot
+    // fault after this point (a truncated u64 or a rejected HANDLE_ZERO
+    // emits nothing, matching the golden sim).
+    logic handle_ok;
+    assign handle_ok = !rom_a[6] &&
+                       !({cs_rdata_i, tmp_q} == 64'h0 &&
+                          rom_a[2:0] != 3'(APU_VN_ROLE_NEW) &&
+                          rom_a[2:0] != 3'(APU_VN_ROLE_OPTIONAL));
+    assign pay_valid_o =
+        (state_q == StW1 && keep_q && rom_op == O_U32) ||
+        (state_q == StW2Hi && keep_q &&
+         (rom_op == O_U64 ||
+          (rom_op == O_HANDLE && handle_ok) ||
+          rom_op == O_PTR)) ||
+        state_q == StW3 ||
+        state_q == StBPay;
+    assign pay_data_o =
+        state_q == StW3 ? payw_q :
+        (state_q == StW2Hi &&
+         rom_op inside {O_U64, O_HANDLE}) ? tmp_q :
+        (state_q == StW2Hi && rom_op == O_PTR)
+            ? 32'(|{cs_rdata_i, tmp_q}) : cs_rdata_i;
 
     assign busy_o = state_q != StIdle;
     assign done_o = state_q == StDone;
@@ -215,7 +263,11 @@ module g6lc_apu_vndec
         ret_stk_q <= '{default: '0}; ret_sp_q <= '0;
         body_q <= '{default: '0}; body_n_q <= '0;
         scan_q <= '0; pnext_st_q <= '0; skip_d_q <= '0;
-      end else unique case (state_q)
+        keep_q <= 1'b0; payw_q <= '0; bpay_rem_q <= '0;
+      end else begin
+        if (pay_valid_o)
+          rec_q.pay_words <= rec_q.pay_words + 16'd1;
+        unique case (state_q)
         // ------------------------------------------------ idle / header
         StIdle: if (start_i) begin
           rec_q <= '{fault: APU_VN_FAULT_NONE, default: '0};
@@ -260,6 +312,9 @@ module g6lc_apu_vndec
 
         // ------------------------------------------------ micro-op dispatch
         StOp: begin
+          // KEEP lives in a[7] of keepable ops only
+          keep_q <= rom_a[7] &&
+                    rom_op inside {O_U32, O_U64, O_HANDLE, O_PTR, O_BLOB};
           if (mpc_q >= APU_VN_DEC_ROM_WORDS) begin
             rec_q.fault      <= APU_VN_FAULT_ROM;
             rec_q.fault_word <= pos_q;
@@ -363,7 +418,7 @@ module g6lc_apu_vndec
           mpc_q   <= mpc_q + 16'd1;
           unique case (rom_op)
             O_U32: begin
-              if (rom_a != 8'hFF) begin
+              if (rom_a[6:0] != 7'h7F) begin
                 imm_q[rom_a[3:0]]  <= cs_rdata_i;
                 immv_q[rom_a[3:0]] <= 1'b1;
               end
@@ -447,13 +502,18 @@ module g6lc_apu_vndec
           mpc_q   <= mpc_q + 16'd1;
           unique case (rom_op)
             O_U64: begin
-              if (rom_a != 8'hFF) begin
+              // KEEP emits the lo word this cycle, the hi in StW3
+              if (keep_q) begin
+                payw_q  <= cs_rdata_i;
+                state_q <= StW3;
+              end
+              if (rom_a[6:0] != 7'h7F) begin
                 q_q[rom_a[2:0]]  <= {cs_rdata_i, tmp_q};
                 qv_q[rom_a[2:0]] <= 1'b1;
               end
             end
             O_HANDLE: begin
-              if (rom_a[7:6] != 2'b00) begin
+              if (rom_a[6]) begin
                 // slot field wider than q[] can express: malformed ROM
                 rec_q.fault      <= APU_VN_FAULT_ROM;
                 rec_q.fault_word <= pos_q;
@@ -469,6 +529,11 @@ module g6lc_apu_vndec
                 rec_q.words      <= pos_q;
                 state_q          <= StDone;
               end else begin
+                // KEEP emits the lo id word this cycle, the hi in StW3
+                if (keep_q) begin
+                  payw_q  <= cs_rdata_i;
+                  state_q <= StW3;
+                end
                 q_q[rom_a[5:3]]     <= {cs_rdata_i, tmp_q};
                 qkind_q[rom_a[5:3]] <= rom_b[5:0];
                 qrole_q[rom_a[5:3]] <= rom_a[2:0];
@@ -476,7 +541,7 @@ module g6lc_apu_vndec
               end
             end
             O_PTR: begin
-              if (rom_a != 8'hFF)
+              if (rom_a[6:0] != 7'h7F)
                 pres_q[rom_a[2:0]] <= |{cs_rdata_i, tmp_q};
               if ({cs_rdata_i, tmp_q} == 64'h0)
                 mpc_q <= mpc_q + 16'd1 + 16'(rom_b);
@@ -538,7 +603,16 @@ module g6lc_apu_vndec
                 blob_q[rom_a[0]].off   <= pos_q;
                 blob_q[rom_a[0]].words <=
                     blob_wn > 34'h1FFFF ? 17'h1FFFF : 17'(blob_wn);
-                pos_q <= pos_q + 16'(blob_wn[15:0]);
+                if (keep_q) begin
+                  // step through the data words, one per StBPay cycle;
+                  // wn == 0 emits nothing and falls straight to StOp
+                  if (blob_wn != 34'h0) begin
+                    bpay_rem_q <= 17'(blob_wn[15:0]);
+                    state_q    <= StBPay;
+                  end
+                end else begin
+                  pos_q <= pos_q + 16'(blob_wn[15:0]);
+                end
               end
             end
             default: begin
@@ -549,6 +623,17 @@ module g6lc_apu_vndec
               state_q          <= StDone;
             end
           endcase
+        end
+
+        // ------------------------------------------------ payload walk
+        // hi word of a kept 2-word op (payw_q latched in StW2Hi)
+        StW3:    state_q <= StOp;
+        // kept BLOB: emit data word under rdata, fetch the next
+        StBPay: begin
+          pos_q      <= pos_q + 16'd1;
+          bpay_rem_q <= bpay_rem_q - 17'd1;
+          if (bpay_rem_q == 17'd1)
+            state_q <= StOp;
         end
 
         // ------------------------------------------------ pNext chain
@@ -664,7 +749,8 @@ module g6lc_apu_vndec
         // ------------------------------------------------ done pulse
         StDone:  state_q <= StIdle;
         default: state_q <= StIdle;
-      endcase
+        endcase
+      end
     end
 
 `ifndef SYNTHESIS
@@ -698,7 +784,9 @@ module g6lc_apu_vndec_fixture
   input  logic [31:0] cs_rdata_i,
   output logic        busy_o,
   output logic        done_o,
-  output apu_vn_op_t  op_o
+  output apu_vn_op_t  op_o,
+  output logic        pay_valid_o,
+  output logic [31:0] pay_data_o
 );
   g6lc_apu_vndec #(.Enable(Enable)) i_dut (.*);
 endmodule

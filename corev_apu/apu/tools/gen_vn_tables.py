@@ -24,10 +24,10 @@ bfa3ebfbb3e8c5894accc9c81c323a24f2a89b17.
 Decode micro-ops follow architecture/uncore/apu-vulkan-engine.md §4.  The
 `a`/`b` operand encodings chosen here:
 
-  U32    a=imm slot | 0xFF discard        b=-
-  U64    a=q slot | 0xFF discard          b=-
+  U32    a=imm slot | 0x7F discard        b=-
+  U64    a=q slot | 0x7F discard          b=-
   HANDLE a={q[4:0], role[2:0]}            b=kind
-  PTR    a=pres slot | 0xFF               b=body ops to skip when pres==0
+  PTR    a=pres slot | 0x7F               b=body ops to skip when pres==0
   STYPE  a=-                              b=constidx of expected sType
   PNEXT  a=-                              b=chain-table index (word offset in
                                             APU_VN_CHAIN)
@@ -42,6 +42,13 @@ Decode micro-ops follow architecture/uncore/apu-vulkan-engine.md §4.  The
   OBJ    a=-                              b=kind this command allocs/retires
   END    a=replyprog id                   b=-
   RET    a=-                              b=-   ends a chain-body program
+
+  KEEP   a[7] on U32/U64/HANDLE/BLOB/PTR: the word(s) the op consumes are
+         also streamed on the decoder payload port (§7b).  U32 -> 1 word,
+         U64/HANDLE -> 2 words (the raw id for handles), PTR -> the 0/1
+         presence word, BLOB -> all data words (the decoder steps through
+         them instead of skipping).  The keep-list lives in
+         vn_device_profile.toml as [keep.<vkCommand>] fields = [...].
 
 Reply ops (APU_VN_REPLY_ROM):
 
@@ -101,6 +108,11 @@ ROLES = {'LOOKUP': 0, 'NEW': 1, 'RETIRE': 2, 'OPTIONAL': 3}
 MAX_Q, MAX_IMM, MAX_CNT, MAX_PRES, MAX_BLOB, MAX_CHAIN = 8, 16, 4, 8, 2, 8
 MAX_LOOP_DEPTH = 2
 DISCARD = 0xFF
+# §7b generated payload capture: KEEP is a[7] of the ROM word on these
+# ops, so their discard marker is 0x7F and slot/role encodings may never
+# set bit 7 (asserted in emit()).
+KEEPABLE_OPS = ('U32', 'U64', 'HANDLE', 'BLOB', 'PTR')
+DISCARD7 = 0x7F
 Q_SCRATCH, PRES_SCRATCH = 7, 7
 
 # bitmask typedefs that carry a profile flag mask
@@ -141,6 +153,18 @@ class Model:
         self.profile_words_pool = []
         self.profile_words_idx = {}
         self.cur_transport = False
+        # §7b keep-lists: profile['keep'][cmd]['fields'] is a list of
+        # dotted member paths (pointer hops transparent, struct-array
+        # and struct members enter the path).  Path state is reset per
+        # command in build_command().
+        self.keep_cfg = profile.get('keep', {})
+        self.path = []
+        self.keep_paths = set()
+        self.keep_seen = set()
+        self.keep_cur = ''
+        self.keep_layout = []    # {path, op, array} per KEEP-marked op
+        self.arr_stack = []      # {'path','cnt','src'} enclosing arrays
+        self.arr_info = []       # per-command array metadata for docs
 
     # ---- registry helpers ---------------------------------------------------
 
@@ -356,26 +380,41 @@ class Model:
         if scratch:
             self.cnt_live.discard(slot)
 
-    def emit(self, op, a=0, b=0, note=''):
-        self.prog.append([op, a, b, note])
+    def emit(self, op, a=0, b=0, note='', keep=0):
+        if op in KEEPABLE_OPS and a == DISCARD:
+            a = DISCARD7
+        assert not keep or op in KEEPABLE_OPS, \
+            'KEEP on non-payload op %s' % op
+        assert op not in KEEPABLE_OPS or not (a & 0x80), \
+            'KEEPABLE op %s uses a[7]' % op
+        if keep:
+            self.keep_seen.add(self.keep_cur)
+            self.keep_layout.append(
+                {'path': self.keep_cur, 'op': op,
+                 'array': self.arr_stack[-1]['path']
+                 if self.arr_stack else None})
+        self.prog.append([op, a, b, note, keep])
 
-    def emit_scalar(self, var, scope):
+    def emit_scalar(self, var, scope, keep=0):
         base = var.ty.base
         size = self.scalar_bytes(base)
         if base.category == vkxml.VkType.BITMASK and size == 4:
             mc = self.flag_mask_const(base)
             if mc is not None:
+                if keep:
+                    raise Unfit('keep field %s maps to non-keepable '
+                                'FLAGS op' % self.keep_cur)
                 self.emit('FLAGS', self.imm_slot(scope), mc, var.name)
                 return
         if size == 4:
-            self.emit('U32', self.imm_slot(scope), 0, var.name)
+            self.emit('U32', self.imm_slot(scope), 0, var.name, keep)
         elif size == 8:
             # element-scope u64s discard like u32s: storing them in the
             # q7 scratch would clobber the last in-element handle there
             # (e.g. VkDescriptorBufferInfo.buffer) while leaving its
             # kind/role behind.
             self.emit('U64', DISCARD if scope else self.q_slot(scope),
-                      0, var.name)
+                      0, var.name, keep)
         else:
             raise Unfit('scalar %s has odd size %d' % (var.name, size))
 
@@ -393,7 +432,7 @@ class Model:
                 'vkFreeCommandBuffers': 'VkCommandBuffer',
                 'vkFreeDescriptorSets': 'VkDescriptorSet'}.get(cmd)
 
-    def emit_handle(self, var, scope, out):
+    def emit_handle(self, var, scope, out, keep=0):
         base = var.ty.base
         role = 'LOOKUP'
         if out:
@@ -404,7 +443,7 @@ class Model:
             role = 'OPTIONAL'
         slot = self.q_slot(scope)
         self.emit('HANDLE', (slot << 3) | ROLES[role],
-                  self.kind(base.name), '%s:%s' % (var.name, role))
+                  self.kind(base.name), '%s:%s' % (var.name, role), keep)
         if not scope:
             self.q_info.append((slot, var.name, role))
         return slot
@@ -413,6 +452,11 @@ class Model:
         base = var.ty.base
         name = var.name
         cat = base.category
+        # §7b keep path: struct-array and plain-struct members enter the
+        # path; pointer hops are transparent (pCreateInfo is invisible,
+        # so 'pBindings.binding' names a member of *pCreateInfo).
+        self.keep_cur = '.'.join(self.path + [name])
+        keep = 1 if self.keep_cur in self.keep_paths else 0
 
         if name == 'sType' and parent.s_type:
             self.emit('STYPE', 0,
@@ -433,7 +477,7 @@ class Model:
                 self.emit('BLOB', self.blob_slot(True),
                           self.blob_meta_idx(1,
                                              (self.blob_bound(name) + 3) // 4),
-                          name + '[]')
+                          name + '[]', keep)
                 self.emit('ENDARR')
                 self.cnt_endarr()
                 return
@@ -446,7 +490,7 @@ class Model:
                 self.emit('BLOB', slot,
                           self.blob_meta_idx(
                               0, (self.blob_bound(name) + 3) // 4),
-                          name)
+                          name, keep)
                 if not scope:
                     self.blob_map[name] = slot
                 return
@@ -460,7 +504,7 @@ class Model:
                 self.emit('BLOB', slot,
                           self.blob_meta_idx(eb,
                                              (self.blob_bound(name) + 3) // 4),
-                          name)
+                          name, keep)
                 if not scope:
                     self.blob_map[name] = slot
                 return
@@ -479,15 +523,25 @@ class Model:
                 if not scope:
                     self.blob_map[name] = slot
                 return
+            if keep:
+                raise Unfit('keep field %s names a struct array; keep '
+                            'its element fields' % self.keep_cur)
             cnt = self.cnt_slot(scope)
             self.emit('ARRAY', cnt,
                       self.arr_meta_idx(self.array_bound(base, name)), name)
             if not scope:
                 self.persist_cnt.append((cnt, name))
+            self.arr_info.append(
+                {'path': self.keep_cur, 'cnt': cnt,
+                 'src': var.attrs.get('len_exprs', [name + ' count'])[0]})
+            self.path.append(name)
+            self.arr_stack.append(self.arr_info[-1])
             self.depth += 1
             elem_partial = 'var_out' in var.attrs or partial
             self.emit_struct(base, True, elem_partial)
             self.depth -= 1
+            self.arr_stack.pop()
+            self.path.pop()
             self.emit('ENDARR')
             self.cnt_endarr()
             return
@@ -518,17 +572,27 @@ class Model:
                 slot = self.blob_slot(scope)
                 self.emit('BLOB', slot,
                           self.blob_meta_idx(n * 4, (dim * n + 3) // 4),
-                          name)
+                          name, keep)
                 if not scope:
                     self.blob_map[name] = slot
                 return
+            if keep:
+                raise Unfit('keep field %s names a struct array; keep '
+                            'its element fields' % self.keep_cur)
             cnt = self.cnt_slot(scope)
             self.emit('ARRAY', cnt, self.arr_meta_idx(dim), name)
             if not scope:
                 self.persist_cnt.append((cnt, name))
+            self.arr_info.append(
+                {'path': self.keep_cur, 'cnt': cnt,
+                 'src': '%d elements' % dim})
+            self.path.append(name)
+            self.arr_stack.append(self.arr_info[-1])
             self.depth += 1
             self.emit_struct(base, True, partial)
             self.depth -= 1
+            self.arr_stack.pop()
+            self.path.pop()
             self.emit('ENDARR')
             self.cnt_endarr()
             return
@@ -538,10 +602,10 @@ class Model:
             if not scope:
                 self.pres_map[name] = pres
             if not self.gen.is_serializable(base):
-                self.emit('PTR', pres, 0, name)   # presence only
+                self.emit('PTR', pres, 0, name, keep)   # presence only
                 return
             mark = len(self.prog)
-            self.emit('PTR', pres, 0, name)
+            self.emit('PTR', pres, 0, name, keep)
             # vn_protocol.py validity model: non-const pointers are 'var_out';
             # a var_out that also appears in another var's len_names is
             # in/out ('var_in' names the array it counts).  Mesa encodes
@@ -566,19 +630,27 @@ class Model:
 
         # plain member
         if cat == vkxml.VkType.HANDLE:
-            self.emit_handle(var, scope, 'var_out' in var.attrs)
+            self.emit_handle(var, scope, 'var_out' in var.attrs, keep)
             return
         if cat in (vkxml.VkType.STRUCT, vkxml.VkType.UNION):
+            if keep:
+                raise Unfit('keep field %s names a struct; keep its '
+                            'members' % self.keep_cur)
+            self.path.append(name)
             self.emit_struct(base, scope, partial)
+            self.path.pop()
             return
         # feature-request bools: validated against the profile allow-mask
         # and discarded rather than consuming an imm slot
         if base.name == 'VkBool32' and parent.name.endswith('Features'):
+            if keep:
+                raise Unfit('keep field %s maps to non-keepable FLAGS op'
+                            % self.keep_cur)
             allowed = 1 if self.profile.get('features', {}).get(
                 name, False) else 0
             self.emit('FLAGS', DISCARD, self.const(allowed), name)
             return
-        self.emit_scalar(var, scope)
+        self.emit_scalar(var, scope, keep)
 
     def emit_struct(self, ty, scope, partial):
         if ty.category == ty.UNION:
@@ -639,13 +711,18 @@ class Model:
     def build_body_prog(self, ty, partial):
         """Chain-node program: PNEXT continuation + members + RET."""
         saved = (self.prog, self.slot_cnt, self.depth,
-                 self._scratch_blob, self.cnt_live, self.cnt_stack)
+                 self._scratch_blob, self.cnt_live, self.cnt_stack,
+                 self.path, self.arr_stack, self.keep_cur)
         self.prog = []
         self.slot_cnt = {'q': 0, 'imm': 0, 'pres': 0, 'blob': 0}
         self.depth = 1          # scratch scope semantics
         self._scratch_blob = 0
         self.cnt_live = set(self.cnt_live)   # outer counts stay live
         self.cnt_stack = []
+        # chain-node member paths are prefixed by the node type so a
+        # command keep-list can never reach inside a chain body
+        self.path = [ty.name]
+        self.arr_stack = []
         # no PNEXT op here: a chain node's own pNext is the chain
         # continuation consumed by the parent's PNEXT op, not part of
         # the body (Mesa _pnext: pres,stype pairs forward, then bodies
@@ -663,7 +740,8 @@ class Model:
         self.emit('RET')
         prog = self.prog
         (self.prog, self.slot_cnt, self.depth,
-         self._scratch_blob, self.cnt_live, self.cnt_stack) = saved
+         self._scratch_blob, self.cnt_live, self.cnt_stack,
+         self.path, self.arr_stack, self.keep_cur) = saved
         return prog
 
     # ---- command program ----------------------------------------------------
@@ -685,8 +763,19 @@ class Model:
         self.q_map = {}
         self.blob_map = {}
         self.q_info = []      # (slot, var name, role) at top scope
+        self.path = []
+        self.keep_paths = set(self.keep_cfg.get(name, {}).get(
+            'fields', []))
+        self.keep_seen = set()
+        self.keep_layout = []
+        self.arr_stack = []
+        self.arr_info = []
         for var in ty.variables:
             self.emit_member(ty, var, False, False)
+        missing = self.keep_paths - self.keep_seen
+        if missing:
+            raise Unfit('%s: keep fields not emitted: %s'
+                        % (name, ', '.join(sorted(missing))))
         # OBJ: the object kind this command allocates/retires, if any
         obj_kind = None
         tail = self.retired_kind_name(name)
@@ -715,6 +804,8 @@ class Model:
             'act': self.act_record(name, obj_kind or 0, reply_id),
             'slots': {k: self.slot_cnt[k] for k in self.slot_cnt},
             'cnt': [n for _, n in []],
+            'keep_layout': self.keep_layout,
+            'arr_info': self.arr_info,
         }
         return self.prog
 
@@ -1256,9 +1347,10 @@ def emit_sv(model, asm, profile):
     A('  localparam int APU_VN_DEC_ROM_WORDS = %d;' % len(dec))
     dec_words = []
     dec_notes = []
-    for op, a, b, note in dec:
-        dec_words.append(enc_word(DEC_OPS[op], a, b))
-        dec_notes.append('%s a=%d b=0x%X %s' % (op, a, b, note))
+    for op, a, b, note, keep in dec:
+        dec_words.append(enc_word(DEC_OPS[op], a | (keep << 7), b))
+        dec_notes.append('%s a=%d b=0x%X %s%s'
+                         % (op, a, b, note, ' KEEP' if keep else ''))
     if dec_words:
         A('  localparam logic [47:0] APU_VN_DEC_ROM '
           '[0:APU_VN_DEC_ROM_WORDS-1] = \'{')
@@ -1396,7 +1488,8 @@ def emit_sv(model, asm, profile):
     A('    APU_VN_FAULT_BOUND = 5,')
     A('    APU_VN_FAULT_HANDLE_ZERO = 6,')
     A('    APU_VN_FAULT_LOOP = 7,')
-    A('    APU_VN_FAULT_ROM = 8')
+    A('    APU_VN_FAULT_ROM = 8,')
+    A('    APU_VN_FAULT_PAYLOAD = 9')
     A('  } apu_vn_fault_e;')
     A('')
     A('  typedef enum logic [2:0] {')
@@ -1431,6 +1524,7 @@ def emit_sv(model, asm, profile):
     A('    apu_vn_fault_e fault;')
     A('    logic [15:0] fault_word;')
     A('    logic [31:0] fault_val;')
+    A('    logic [15:0] pay_words;')
     A('  } apu_vn_op_t;')
     A('')
     A('endpackage')
@@ -1478,10 +1572,10 @@ def emit_md(model, asm, unfit):
     A('## `.exp` expected-record format')
     A('')
     A('`verif/tb/apu/vn_vectors/*.exp` is `$readmemh`-able: one 32-bit '
-      'hex word per line, **78 words per instance**: a 2-word header '
+      'hex word per line, **335 words per instance**: a 2-word header '
       '`{cs_base, cs_len}` (word offset of the instance\'s type word in '
-      '`.hex`, and its word length) followed by a fixed 76-word '
-      '`apu_vn_op_t` record:')
+      '`.hex`, and its word length), a fixed 77-word `apu_vn_op_t` '
+      'record, and a fixed 256-word payload region:')
     A('')
     A('| word | field |')
     A('|---|---|')
@@ -1504,6 +1598,8 @@ def emit_md(model, asm, unfit):
     A('| 73 | fault |')
     A('| 74 | fault_word |')
     A('| 75 | fault_val |')
+    A('| 76 | pay_words (KEEP words streamed on the pay port) |')
+    A('| 77-332 | pay[0..255] expected payload stream, zero-padded |')
     A('')
     A('The record stream ends with a 2-word `FFFFFFFF FFFFFFFF` sentinel '
       'in the `cs_base`/`cs_len` slots so a testbench can detect end of '
@@ -1511,7 +1607,8 @@ def emit_md(model, asm, unfit):
     A('')
     A('Fault enum: 0 NONE, 1 UNKNOWN_TYPE, 2 STYPE, 3 PNEXT, 4 FLAGS, '
       '5 BOUND (incl. truncated stream and count above bound), '
-      '6 HANDLE_ZERO, 7 LOOP, 8 ROM.')
+      '6 HANDLE_ZERO, 7 LOOP, 8 ROM, 9 PAYLOAD (staging overflow in the '
+      'front-end; not produced by the decoder itself).')
     A('')
     A('## Mesa differential harness')
     A('')
@@ -1567,6 +1664,46 @@ def emit_md(model, asm, unfit):
         A('`UNSUPPORTED` commands reach the front-end and return '
           '`VK_ERROR_FEATURE_NOT_PRESENT` (no reply program is run).')
         A('')
+    # ---- §7b payload layouts (generated from the keep-lists) ----------
+    PAY_DESC = {'U32': 'u32', 'U64': 'u64 (2 words)',
+                'HANDLE': 'handle id (2 words)', 'PTR': 'presence (1 word)',
+                'BLOB': 'data words'}
+    keep_cmds = [n for n, i in model.cmd_info.items()
+                 if i['keep_layout']]
+    if keep_cmds:
+        A('## Payload layouts')
+        A('')
+        A('KEEP-marked ROM ops (`a[7]` in the per-command tables below) '
+          'stream their words on `pay_valid_o`/`pay_data_o` in decode '
+          'order; `pay_words` counts them.  Keep semantics: `U32`/`U64` '
+          'emit the value words, `HANDLE` emits the two id words '
+          '(unresolved), `PTR` emits the 0/1 presence word, `BLOB` emits '
+          'its data words.  This layout is generated — RTL never '
+          'hand-encodes it.')
+        A('')
+        for name in keep_cmds:
+            info = model.cmd_info[name]
+            kl = info['keep_layout']
+            arr_by_path = {a['path']: a for a in info['arr_info']}
+            A('### %s (type %d)' % (name, info['type_id']))
+            A('')
+            top = [k for k in kl if k['array'] is None]
+            arrs = []
+            for k in kl:
+                if k['array'] is not None and k['array'] not in arrs:
+                    arrs.append(k['array'])
+            if top:
+                A('- top level: ' + ', '.join(
+                    '`%s` %s' % (k['path'], PAY_DESC[k['op']])
+                    for k in top))
+            for ap in arrs:
+                meta = arr_by_path.get(ap, {})
+                items = [k for k in kl if k['array'] == ap]
+                A('- per `%s` element (element count = `%s`): %s'
+                  % (ap, meta.get('src', '?'), ', '.join(
+                      '`%s` %s' % (k['path'], PAY_DESC[k['op']])
+                      for k in items)))
+            A('')
     A('## Per-command maps')
     A('')
     for name, info in model.cmd_info.items():
@@ -1578,8 +1715,9 @@ def emit_md(model, asm, unfit):
         A('')
         A('| op | a | b | note |')
         A('|---|---|---|---|')
-        for op, a, b, note in prog:
-            A('| %s | %s | 0x%X | %s |' % (op, a, b, note))
+        for op, a, b, note, keep in prog:
+            A('| %s | %s | 0x%X | %s%s |'
+              % (op, a, b, note, ' **KEEP**' if keep else ''))
         A('')
     if unfit:
         A('## Commands that did not fit')

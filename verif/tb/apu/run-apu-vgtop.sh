@@ -63,7 +63,7 @@ if [ "${VGTOP_SYNTH:-0}" != 1 ]; then
 fi
 for en in 0 1; do
   cat > "$OUT/vgtop-synth$en.ys" <<EOF
-read_slang -f $ROOT/corev_apu/apu/Flist.apu_vgtop --top g6lc_apu_vgtop_fixture -GEnable=$en
+read_slang --unroll-limit 32768 -f $ROOT/corev_apu/apu/Flist.apu_vgtop --top g6lc_apu_vgtop_fixture -GEnable=$en
 hierarchy -top g6lc_apu_vgtop_fixture
 flatten
 proc
@@ -83,6 +83,27 @@ EOF
   fi
   echo "SYNTH OK Enable=$en"
 done
+# §7b small screen: exposes logic apart from the ObjPay/CS SRAMs
+cat > "$OUT/vgtop-synth-small.ys" <<EOF
+read_slang --unroll-limit 8192 -f $ROOT/corev_apu/apu/Flist.apu_vgtop --top g6lc_apu_vgtop_fixture -GEnable=1 -GRings=1 -GFences=4 -GPayWords=512
+hierarchy -top g6lc_apu_vgtop_fixture
+flatten
+proc
+opt
+memory_collect
+check -assert
+stat
+synth -top g6lc_apu_vgtop_fixture -noabc
+check -assert
+stat
+select -assert-none t:\$dlatch t:\$_DLATCH_*
+EOF
+if ! "$YOSYS" -Q -T "$OUT/vgtop-synth-small.ys" > "$OUT/synth-small.log" 2>&1; then
+  echo "SYNTH FAILED Enable=1 Rings=1 Fences=4 PayWords=512"
+  tail -n 40 "$OUT/synth-small.log"
+  exit 1
+fi
+echo "SYNTH OK Enable=1 Rings=1 Fences=4 PayWords=512"
 python3 - "$OUT" <<'PY'
 import re, sys, pathlib
 out = pathlib.Path(sys.argv[1])
@@ -96,4 +117,12 @@ for en in (0, 1):
               re.findall(r"^\s+(\d+)\s+(\$_DFF\w*)", gate, re.M))
     print(f"Enable={en}: cells={cells.group(1) if cells else '?'} "
           f"ffs={ffs}")
+text = pathlib.Path(f"{out}/synth-small.log").read_text(errors="replace")
+gate = re.split(r"\d+\. Printing statistics\.", text)[-1]
+cells = re.search(r"Number of cells:\s+(\d+)", gate) or \
+        re.search(r"^\s+(\d+) cells\b", gate, re.M)
+ffs = sum(int(n) for n, _ in
+          re.findall(r"^\s+(\d+)\s+(\$_DFF\w*)", gate, re.M))
+print(f"Enable=1 small: cells={cells.group(1) if cells else '?'} "
+      f"ffs={ffs}")
 PY

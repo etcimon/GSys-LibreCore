@@ -57,6 +57,40 @@ if [ "$rc" -ne 0 ]; then
   echo "SIM rc=$rc despite PASS"
   exit 1
 fi
+# §7b ObjPay-FULL arm: same TB with a 512-word ObjPay and the
+# ue_sm5_payfull session (regenerate with
+#   vn_golden.py --payfull-session ue_sm5_payfull 1 --paywords 512)
+if ! "$VERILATOR" --binary --timing --assert -Wall \
+  -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND -Wno-BLKSEQ \
+  -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY \
+  "${VLTS[@]}" \
+  -f "$ROOT/corev_apu/apu/Flist.apu_vnfront" \
+  "$ROOT/verif/tb/apu/tb_g6lc_apu_vnfront.sv" \
+  --top-module tb_g6lc_apu_vnfront \
+  -GObjPayWords=512 \
+  -Mdir "$OUT/sim-payfull" -o tb_g6lc_apu_vnfront \
+  > "$OUT/build-payfull.log" 2>&1; then
+  echo "VERILATOR BUILD FAILED (payfull)"
+  tail -n 80 "$OUT/build-payfull.log"
+  exit 1
+fi
+echo "VERILATOR BUILD OK (payfull)"
+set +e
+(cd "$ROOT/verif/tb/apu" && stdbuf -o0 -e0 \
+  "$OUT/sim-payfull/tb_g6lc_apu_vnfront" +ses=ue_sm5_payfull) \
+  > "$OUT/sim-payfull.log" 2>&1
+rc=$?
+set -e
+echo "SIM-PAYFULL rc=$rc"
+cat "$OUT/sim-payfull.log"
+if ! grep -q '^PASS tb_g6lc_apu_vnfront ' "$OUT/sim-payfull.log"; then
+  echo "SIM-PAYFULL FAILED"
+  exit 1
+fi
+if [ "$rc" -ne 0 ]; then
+  echo "SIM-PAYFULL rc=$rc despite PASS"
+  exit 1
+fi
 if [ "${VNFRONT_SYNTH:-0}" != 1 ]; then
   exit 0
 fi
@@ -82,6 +116,27 @@ EOF
   fi
   echo "SYNTH OK Enable=$en"
 done
+# §7b small screen: exposes logic apart from the staging SRAM
+cat > "$OUT/vnfront-synth-small.ys" <<EOF
+read_slang -f $ROOT/corev_apu/apu/Flist.apu_vnfront --top g6lc_apu_vnfront_fixture -GEnable=1 -GFences=4 -GCbBufs=2 -GPayStageWords=64
+hierarchy -top g6lc_apu_vnfront_fixture
+flatten
+proc
+opt
+memory_collect
+check -assert
+stat
+synth -top g6lc_apu_vnfront_fixture -noabc
+check -assert
+stat
+select -assert-none t:\$dlatch t:\$_DLATCH_*
+EOF
+if ! "$YOSYS" -Q -T "$OUT/vnfront-synth-small.ys" > "$OUT/synth-small.log" 2>&1; then
+  echo "SYNTH FAILED Enable=1 Fences=4 CbBufs=2 PayStageWords=64"
+  tail -n 40 "$OUT/synth-small.log"
+  exit 1
+fi
+echo "SYNTH OK Enable=1 Fences=4 CbBufs=2 PayStageWords=64"
 python3 - "$OUT" <<'PY'
 import re, sys, pathlib
 out = pathlib.Path(sys.argv[1])
@@ -95,4 +150,12 @@ for en in (0, 1):
               re.findall(r"^\s+(\d+)\s+(\$_DFF\w*)", gate, re.M))
     print(f"Enable={en}: cells={cells.group(1) if cells else '?'} "
           f"ffs={ffs}")
+text = pathlib.Path(f"{out}/synth-small.log").read_text(errors="replace")
+gate = re.split(r"\d+\. Printing statistics\.", text)[-1]
+cells = re.search(r"Number of cells:\s+(\d+)", gate) or \
+        re.search(r"^\s+(\d+) cells\b", gate, re.M)
+ffs = sum(int(n) for n, _ in
+          re.findall(r"^\s+(\d+)\s+(\$_DFF\w*)", gate, re.M))
+print(f"Enable=1 small: cells={cells.group(1) if cells else '?'} "
+      f"ffs={ffs}")
 PY

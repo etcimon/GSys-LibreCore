@@ -276,7 +276,7 @@ package g6lc_apu_vn_pkg;
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 handleType
+    48'h017F00000000, // U32 a=127 b=0x0 handleType
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
@@ -343,7 +343,7 @@ package g6lc_apu_vn_pkg;
     48'h0AFF00000001, // FLAGS a=255 b=0x1 multiviewGeometryShader
     48'h0AFF00000001, // FLAGS a=255 b=0x1 multiviewTessellationShader
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 physicalDeviceCount
+    48'h017F00000000, // U32 a=127 b=0x0 physicalDeviceCount
     48'h090100000001, // BLOB a=1 b=0x1 pPhysicalDevices
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0AFF00000001, // FLAGS a=255 b=0x1 storageBuffer16BitAccess
@@ -357,91 +357,91 @@ package g6lc_apu_vn_pkg;
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderDrawParameters
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 ringIdx
+    48'h017F00000000, // U32 a=127 b=0x0 ringIdx
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 waitSemaphoreCount
+    48'h017F00000000, // U32 a=127 b=0x0 waitSemaphoreCount
     48'h090100000002, // BLOB a=1 b=0x2 pWaitSemaphoreDeviceIndices
-    48'h01FF00000000, // U32 a=255 b=0x0 commandBufferCount
+    48'h017F00000000, // U32 a=127 b=0x0 commandBufferCount
     48'h090000000002, // BLOB a=0 b=0x2 pCommandBufferDeviceMasks
-    48'h01FF00000000, // U32 a=255 b=0x0 signalSemaphoreCount
+    48'h017F00000000, // U32 a=127 b=0x0 signalSemaphoreCount
     48'h090100000002, // BLOB a=1 b=0x2 pSignalSemaphoreDeviceIndices
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 protectedSubmit
+    48'h017F00000000, // U32 a=127 b=0x0 protectedSubmit
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 handleTypes
+    48'h017F00000000, // U32 a=127 b=0x0 handleTypes
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 deviceMask
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 deviceMask
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h033B00000006, // HANDLE a=59 b=0x6 image:OPTIONAL
     48'h033B00000007, // HANDLE a=59 b=0x7 buffer:OPTIONAL
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 resourceId
+    48'h017F00000000, // U32 a=127 b=0x0 resourceId
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 planeAspect
+    48'h017F00000000, // U32 a=127 b=0x0 planeAspect
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 deviceIndexCount
+    48'h017F00000000, // U32 a=127 b=0x0 deviceIndexCount
     48'h090100000002, // BLOB a=1 b=0x2 pDeviceIndices
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 deviceIndexCount
+    48'h017F00000000, // U32 a=127 b=0x0 deviceIndexCount
     48'h090100000002, // BLOB a=1 b=0x2 pDeviceIndices
-    48'h01FF00000000, // U32 a=255 b=0x0 splitInstanceBindRegionCount
+    48'h017F00000000, // U32 a=127 b=0x0 splitInstanceBindRegionCount
     48'h070100000002, // ARRAY a=1 b=0x2 pSplitInstanceBindRegions
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 width
-    48'h01FF00000000, // U32 a=255 b=0x0 height
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 width
+    48'h017F00000000, // U32 a=127 b=0x0 height
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 planeAspect
+    48'h017F00000000, // U32 a=127 b=0x0 planeAspect
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 handleTypes
+    48'h017F00000000, // U32 a=127 b=0x0 handleTypes
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 handleTypes
+    48'h017F00000000, // U32 a=127 b=0x0 handleTypes
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0AFF00000008, // FLAGS a=255 b=0x8 usage
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h03380000000A, // HANDLE a=56 b=0xA conversion:LOOKUP
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h02FF00000000, // U64 a=255 b=0x0 codeSize
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h027F00000000, // U64 a=127 b=0x0 codeSize
     48'h090100000003, // BLOB a=1 b=0x3 pCode
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 domainOrigin
+    48'h017F00000000, // U32 a=127 b=0x0 domainOrigin
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 subpassCount
+    48'h017F00000000, // U32 a=127 b=0x0 subpassCount
     48'h090100000002, // BLOB a=1 b=0x2 pViewMasks
-    48'h01FF00000000, // U32 a=255 b=0x0 dependencyCount
+    48'h017F00000000, // U32 a=127 b=0x0 dependencyCount
     48'h090000000002, // BLOB a=0 b=0x2 pViewOffsets
-    48'h01FF00000000, // U32 a=255 b=0x0 correlationMaskCount
+    48'h017F00000000, // U32 a=127 b=0x0 correlationMaskCount
     48'h090100000002, // BLOB a=1 b=0x2 pCorrelationMasks
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectReferenceCount
+    48'h017F00000000, // U32 a=127 b=0x0 aspectReferenceCount
     48'h070000000000, // ARRAY a=0 b=0x0 pAspectReferences
-    48'h01FF00000000, // U32 a=255 b=0x0 subpass
-    48'h01FF00000000, // U32 a=255 b=0x0 inputAttachmentIndex
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 subpass
+    48'h017F00000000, // U32 a=127 b=0x0 inputAttachmentIndex
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 deviceMask
+    48'h017F00000000, // U32 a=127 b=0x0 deviceMask
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 deviceMask
-    48'h01FF00000000, // U32 a=255 b=0x0 deviceRenderAreaCount
+    48'h017F00000000, // U32 a=127 b=0x0 deviceMask
+    48'h017F00000000, // U32 a=127 b=0x0 deviceRenderAreaCount
     48'h070000000002, // ARRAY a=0 b=0x2 pDeviceRenderAreas
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 width
-    48'h01FF00000000, // U32 a=255 b=0x0 height
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 width
+    48'h017F00000000, // U32 a=127 b=0x0 height
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 handleTypes
+    48'h017F00000000, // U32 a=127 b=0x0 handleTypes
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 handleTypes
+    48'h017F00000000, // U32 a=127 b=0x0 handleTypes
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 maxReportingPeriodMicroseconds
+    48'h017F00000000, // U32 a=127 b=0x0 maxReportingPeriodMicroseconds
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 priority
+    48'h017F00000000, // U32 a=127 b=0x0 priority
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h040000000013, // PTR a=0 b=0x13 pCreateInfo
@@ -564,9 +564,9 @@ package g6lc_apu_vn_pkg;
     48'h070000000000, // ARRAY a=0 b=0x0 pQueueCreateInfos
     48'h05000000000B, // STYPE a=0 b=0xB sType
     48'h060000000034, // PNEXT a=0 b=0x34 pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 queueFamilyIndex
-    48'h01FF00000000, // U32 a=255 b=0x0 queueCount
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 queueFamilyIndex
+    48'h017F00000000, // U32 a=127 b=0x0 queueCount
     48'h090100000002, // BLOB a=1 b=0x2 pQueuePriorities
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010200000000, // U32 a=2 b=0x0 enabledLayerCount
@@ -669,12 +669,12 @@ package g6lc_apu_vn_pkg;
     48'h070000000003, // ARRAY a=0 b=0x3 pSubmits
     48'h05000000000D, // STYPE a=0 b=0xD sType
     48'h060000000037, // PNEXT a=0 b=0x37 pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 waitSemaphoreCount
+    48'h017F00000000, // U32 a=127 b=0x0 waitSemaphoreCount
     48'h090100000001, // BLOB a=1 b=0x1 pWaitSemaphores
     48'h090000000002, // BLOB a=0 b=0x2 pWaitDstStageMask
-    48'h01FF00000000, // U32 a=255 b=0x0 commandBufferCount
+    48'h017F00000000, // U32 a=127 b=0x0 commandBufferCount
     48'h090100000001, // BLOB a=1 b=0x1 pCommandBuffers
-    48'h01FF00000000, // U32 a=255 b=0x0 signalSemaphoreCount
+    48'h017F00000000, // U32 a=127 b=0x0 signalSemaphoreCount
     48'h090000000001, // BLOB a=0 b=0x1 pSignalSemaphores
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h030B00000005, // HANDLE a=11 b=0x5 fence:OPTIONAL
@@ -704,8 +704,8 @@ package g6lc_apu_vn_pkg;
     48'h05000000000F, // STYPE a=0 b=0xF sType
     48'h06000000003F, // PNEXT a=0 b=0x3F pNext
     48'h033800000008, // HANDLE a=56 b=0x8 memory:LOOKUP
-    48'h02FF00000000, // U64 a=255 b=0x0 offset
-    48'h02FF00000000, // U64 a=255 b=0x0 size
+    48'h027F00000000, // U64 a=127 b=0x0 offset
+    48'h027F00000000, // U64 a=127 b=0x0 size
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E1600000000, // END a=22 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
@@ -714,8 +714,8 @@ package g6lc_apu_vn_pkg;
     48'h05000000000F, // STYPE a=0 b=0xF sType
     48'h06000000003F, // PNEXT a=0 b=0x3F pNext
     48'h033800000008, // HANDLE a=56 b=0x8 memory:LOOKUP
-    48'h02FF00000000, // U64 a=255 b=0x0 offset
-    48'h02FF00000000, // U64 a=255 b=0x0 size
+    48'h027F00000000, // U64 a=127 b=0x0 offset
+    48'h027F00000000, // U64 a=127 b=0x0 size
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E1700000000, // END a=23 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
@@ -756,7 +756,7 @@ package g6lc_apu_vn_pkg;
     48'h060000000047, // PNEXT a=0 b=0x47 pNext
     48'h033800000007, // HANDLE a=56 b=0x7 buffer:LOOKUP
     48'h033800000008, // HANDLE a=56 b=0x8 memory:LOOKUP
-    48'h02FF00000000, // U64 a=255 b=0x0 memoryOffset
+    48'h027F00000000, // U64 a=127 b=0x0 memoryOffset
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E1D00000000, // END a=29 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
@@ -771,7 +771,7 @@ package g6lc_apu_vn_pkg;
     48'h060000000049, // PNEXT a=0 b=0x49 pNext
     48'h033800000006, // HANDLE a=56 b=0x6 image:LOOKUP
     48'h033800000008, // HANDLE a=56 b=0x8 memory:LOOKUP
-    48'h02FF00000000, // U64 a=255 b=0x0 memoryOffset
+    48'h027F00000000, // U64 a=127 b=0x0 memoryOffset
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E1F00000000, // END a=31 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
@@ -923,10 +923,10 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 bindingCount
     48'h070000000004, // ARRAY a=0 b=0x4 pBindings
-    48'h01FF00000000, // U32 a=255 b=0x0 binding
-    48'h01FF00000000, // U32 a=255 b=0x0 descriptorType
-    48'h01FF00000000, // U32 a=255 b=0x0 descriptorCount
-    48'h01FF00000000, // U32 a=255 b=0x0 stageFlags
+    48'h01FF00000000, // U32 a=127 b=0x0 binding KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 descriptorType KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 descriptorCount KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 stageFlags KEEP
     48'h090100000001, // BLOB a=1 b=0x1 pImmutableSamplers
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
@@ -945,12 +945,12 @@ package g6lc_apu_vn_pkg;
     48'h060000000058, // PNEXT a=0 b=0x58 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 setLayoutCount
-    48'h090000000001, // BLOB a=0 b=0x1 pSetLayouts
+    48'h098000000001, // BLOB a=0 b=0x1 pSetLayouts KEEP
     48'h010200000000, // U32 a=2 b=0x0 pushConstantRangeCount
     48'h070000000000, // ARRAY a=0 b=0x0 pPushConstantRanges
-    48'h01FF00000000, // U32 a=255 b=0x0 stageFlags
-    48'h01FF00000000, // U32 a=255 b=0x0 offset
-    48'h01FF00000000, // U32 a=255 b=0x0 size
+    48'h01FF00000000, // U32 a=127 b=0x0 stageFlags KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 offset KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 size KEEP
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pPipelineLayout
@@ -985,25 +985,25 @@ package g6lc_apu_vn_pkg;
     48'h070000000005, // ARRAY a=0 b=0x5 pCreateInfos
     48'h05000000001F, // STYPE a=0 b=0x1F sType
     48'h06000000005A, // PNEXT a=0 b=0x5A pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h050000000020, // STYPE a=0 b=0x20 sType
     48'h06000000005B, // PNEXT a=0 b=0x5B pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 stage
-    48'h033B0000000D, // HANDLE a=59 b=0xD module:OPTIONAL
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 stage
+    48'h03BB0000000D, // HANDLE a=59 b=0xD module:OPTIONAL KEEP
     48'h090100000000, // BLOB a=1 b=0x0 pName
-    48'h040700000008, // PTR a=7 b=0x8 pSpecializationInfo
-    48'h01FF00000000, // U32 a=255 b=0x0 mapEntryCount
+    48'h048700000008, // PTR a=7 b=0x8 pSpecializationInfo KEEP
+    48'h017F00000000, // U32 a=127 b=0x0 mapEntryCount
     48'h070100000006, // ARRAY a=1 b=0x6 pMapEntries
-    48'h01FF00000000, // U32 a=255 b=0x0 constantID
-    48'h01FF00000000, // U32 a=255 b=0x0 offset
-    48'h02FF00000000, // U64 a=255 b=0x0 size
+    48'h017F00000000, // U32 a=127 b=0x0 constantID
+    48'h017F00000000, // U32 a=127 b=0x0 offset
+    48'h027F00000000, // U64 a=127 b=0x0 size
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h02FF00000000, // U64 a=255 b=0x0 dataSize
+    48'h027F00000000, // U64 a=127 b=0x0 dataSize
     48'h090000000000, // BLOB a=0 b=0x0 pData
-    48'h03380000000F, // HANDLE a=56 b=0xF layout:LOOKUP
+    48'h03B80000000F, // HANDLE a=56 b=0xF layout:LOOKUP KEEP
     48'h033B00000011, // HANDLE a=59 b=0x11 basePipelineHandle:OPTIONAL
-    48'h01FF00000000, // U32 a=255 b=0x0 basePipelineIndex
+    48'h017F00000000, // U32 a=127 b=0x0 basePipelineIndex
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
     48'h090000000001, // BLOB a=0 b=0x1 pPipelines
@@ -1015,147 +1015,147 @@ package g6lc_apu_vn_pkg;
     48'h070000000005, // ARRAY a=0 b=0x5 pCreateInfos
     48'h050000000021, // STYPE a=0 b=0x21 sType
     48'h06000000005D, // PNEXT a=0 b=0x5D pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 stageCount
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 stageCount
     48'h070100000005, // ARRAY a=1 b=0x5 pStages
     48'h050000000020, // STYPE a=0 b=0x20 sType
     48'h06000000005B, // PNEXT a=0 b=0x5B pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 stage
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 stage
     48'h033B0000000D, // HANDLE a=59 b=0xD module:OPTIONAL
     48'h090100000000, // BLOB a=1 b=0x0 pName
     48'h040700000004, // PTR a=7 b=0x4 pSpecializationInfo
-    48'h01FF00000000, // U32 a=255 b=0x0 mapEntryCount
+    48'h017F00000000, // U32 a=127 b=0x0 mapEntryCount
     48'h090000000004, // BLOB a=0 b=0x4 pMapEntries
-    48'h02FF00000000, // U64 a=255 b=0x0 dataSize
+    48'h027F00000000, // U64 a=127 b=0x0 dataSize
     48'h090100000000, // BLOB a=1 b=0x0 pData
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040700000010, // PTR a=7 b=0x10 pVertexInputState
     48'h050000000022, // STYPE a=0 b=0x22 sType
     48'h06000000005E, // PNEXT a=0 b=0x5E pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 vertexBindingDescriptionCount
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 vertexBindingDescriptionCount
     48'h070100000002, // ARRAY a=1 b=0x2 pVertexBindingDescriptions
-    48'h01FF00000000, // U32 a=255 b=0x0 binding
-    48'h01FF00000000, // U32 a=255 b=0x0 stride
-    48'h01FF00000000, // U32 a=255 b=0x0 inputRate
+    48'h017F00000000, // U32 a=127 b=0x0 binding
+    48'h017F00000000, // U32 a=127 b=0x0 stride
+    48'h017F00000000, // U32 a=127 b=0x0 inputRate
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 vertexAttributeDescriptionCount
+    48'h017F00000000, // U32 a=127 b=0x0 vertexAttributeDescriptionCount
     48'h070100000002, // ARRAY a=1 b=0x2 pVertexAttributeDescriptions
-    48'h01FF00000000, // U32 a=255 b=0x0 location
-    48'h01FF00000000, // U32 a=255 b=0x0 binding
-    48'h01FF00000000, // U32 a=255 b=0x0 format
-    48'h01FF00000000, // U32 a=255 b=0x0 offset
+    48'h017F00000000, // U32 a=127 b=0x0 location
+    48'h017F00000000, // U32 a=127 b=0x0 binding
+    48'h017F00000000, // U32 a=127 b=0x0 format
+    48'h017F00000000, // U32 a=127 b=0x0 offset
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040700000005, // PTR a=7 b=0x5 pInputAssemblyState
     48'h050000000023, // STYPE a=0 b=0x23 sType
     48'h06000000005F, // PNEXT a=0 b=0x5F pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 topology
-    48'h01FF00000000, // U32 a=255 b=0x0 primitiveRestartEnable
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 topology
+    48'h017F00000000, // U32 a=127 b=0x0 primitiveRestartEnable
     48'h040700000004, // PTR a=7 b=0x4 pTessellationState
     48'h050000000024, // STYPE a=0 b=0x24 sType
     48'h060000000060, // PNEXT a=0 b=0x60 pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 patchControlPoints
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 patchControlPoints
     48'h040700000013, // PTR a=7 b=0x13 pViewportState
     48'h050000000025, // STYPE a=0 b=0x25 sType
     48'h060000000062, // PNEXT a=0 b=0x62 pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 viewportCount
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 viewportCount
     48'h070100000002, // ARRAY a=1 b=0x2 pViewports
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 width
-    48'h01FF00000000, // U32 a=255 b=0x0 height
-    48'h01FF00000000, // U32 a=255 b=0x0 minDepth
-    48'h01FF00000000, // U32 a=255 b=0x0 maxDepth
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 width
+    48'h017F00000000, // U32 a=127 b=0x0 height
+    48'h017F00000000, // U32 a=127 b=0x0 minDepth
+    48'h017F00000000, // U32 a=127 b=0x0 maxDepth
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 scissorCount
+    48'h017F00000000, // U32 a=127 b=0x0 scissorCount
     48'h070100000002, // ARRAY a=1 b=0x2 pScissors
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 width
-    48'h01FF00000000, // U32 a=255 b=0x0 height
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 width
+    48'h017F00000000, // U32 a=127 b=0x0 height
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h04070000000D, // PTR a=7 b=0xD pRasterizationState
     48'h050000000026, // STYPE a=0 b=0x26 sType
     48'h060000000063, // PNEXT a=0 b=0x63 pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 depthClampEnable
-    48'h01FF00000000, // U32 a=255 b=0x0 rasterizerDiscardEnable
-    48'h01FF00000000, // U32 a=255 b=0x0 polygonMode
-    48'h01FF00000000, // U32 a=255 b=0x0 cullMode
-    48'h01FF00000000, // U32 a=255 b=0x0 frontFace
-    48'h01FF00000000, // U32 a=255 b=0x0 depthBiasEnable
-    48'h01FF00000000, // U32 a=255 b=0x0 depthBiasConstantFactor
-    48'h01FF00000000, // U32 a=255 b=0x0 depthBiasClamp
-    48'h01FF00000000, // U32 a=255 b=0x0 depthBiasSlopeFactor
-    48'h01FF00000000, // U32 a=255 b=0x0 lineWidth
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 depthClampEnable
+    48'h017F00000000, // U32 a=127 b=0x0 rasterizerDiscardEnable
+    48'h017F00000000, // U32 a=127 b=0x0 polygonMode
+    48'h017F00000000, // U32 a=127 b=0x0 cullMode
+    48'h017F00000000, // U32 a=127 b=0x0 frontFace
+    48'h017F00000000, // U32 a=127 b=0x0 depthBiasEnable
+    48'h017F00000000, // U32 a=127 b=0x0 depthBiasConstantFactor
+    48'h017F00000000, // U32 a=127 b=0x0 depthBiasClamp
+    48'h017F00000000, // U32 a=127 b=0x0 depthBiasSlopeFactor
+    48'h017F00000000, // U32 a=127 b=0x0 lineWidth
     48'h040700000009, // PTR a=7 b=0x9 pMultisampleState
     48'h050000000027, // STYPE a=0 b=0x27 sType
     48'h060000000064, // PNEXT a=0 b=0x64 pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 rasterizationSamples
-    48'h01FF00000000, // U32 a=255 b=0x0 sampleShadingEnable
-    48'h01FF00000000, // U32 a=255 b=0x0 minSampleShading
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 rasterizationSamples
+    48'h017F00000000, // U32 a=127 b=0x0 sampleShadingEnable
+    48'h017F00000000, // U32 a=127 b=0x0 minSampleShading
     48'h090000000002, // BLOB a=0 b=0x2 pSampleMask
-    48'h01FF00000000, // U32 a=255 b=0x0 alphaToCoverageEnable
-    48'h01FF00000000, // U32 a=255 b=0x0 alphaToOneEnable
+    48'h017F00000000, // U32 a=127 b=0x0 alphaToCoverageEnable
+    48'h017F00000000, // U32 a=127 b=0x0 alphaToOneEnable
     48'h040700000018, // PTR a=7 b=0x18 pDepthStencilState
     48'h050000000028, // STYPE a=0 b=0x28 sType
     48'h060000000065, // PNEXT a=0 b=0x65 pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 depthTestEnable
-    48'h01FF00000000, // U32 a=255 b=0x0 depthWriteEnable
-    48'h01FF00000000, // U32 a=255 b=0x0 depthCompareOp
-    48'h01FF00000000, // U32 a=255 b=0x0 depthBoundsTestEnable
-    48'h01FF00000000, // U32 a=255 b=0x0 stencilTestEnable
-    48'h01FF00000000, // U32 a=255 b=0x0 failOp
-    48'h01FF00000000, // U32 a=255 b=0x0 passOp
-    48'h01FF00000000, // U32 a=255 b=0x0 depthFailOp
-    48'h01FF00000000, // U32 a=255 b=0x0 compareOp
-    48'h01FF00000000, // U32 a=255 b=0x0 compareMask
-    48'h01FF00000000, // U32 a=255 b=0x0 writeMask
-    48'h01FF00000000, // U32 a=255 b=0x0 reference
-    48'h01FF00000000, // U32 a=255 b=0x0 failOp
-    48'h01FF00000000, // U32 a=255 b=0x0 passOp
-    48'h01FF00000000, // U32 a=255 b=0x0 depthFailOp
-    48'h01FF00000000, // U32 a=255 b=0x0 compareOp
-    48'h01FF00000000, // U32 a=255 b=0x0 compareMask
-    48'h01FF00000000, // U32 a=255 b=0x0 writeMask
-    48'h01FF00000000, // U32 a=255 b=0x0 reference
-    48'h01FF00000000, // U32 a=255 b=0x0 minDepthBounds
-    48'h01FF00000000, // U32 a=255 b=0x0 maxDepthBounds
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 depthTestEnable
+    48'h017F00000000, // U32 a=127 b=0x0 depthWriteEnable
+    48'h017F00000000, // U32 a=127 b=0x0 depthCompareOp
+    48'h017F00000000, // U32 a=127 b=0x0 depthBoundsTestEnable
+    48'h017F00000000, // U32 a=127 b=0x0 stencilTestEnable
+    48'h017F00000000, // U32 a=127 b=0x0 failOp
+    48'h017F00000000, // U32 a=127 b=0x0 passOp
+    48'h017F00000000, // U32 a=127 b=0x0 depthFailOp
+    48'h017F00000000, // U32 a=127 b=0x0 compareOp
+    48'h017F00000000, // U32 a=127 b=0x0 compareMask
+    48'h017F00000000, // U32 a=127 b=0x0 writeMask
+    48'h017F00000000, // U32 a=127 b=0x0 reference
+    48'h017F00000000, // U32 a=127 b=0x0 failOp
+    48'h017F00000000, // U32 a=127 b=0x0 passOp
+    48'h017F00000000, // U32 a=127 b=0x0 depthFailOp
+    48'h017F00000000, // U32 a=127 b=0x0 compareOp
+    48'h017F00000000, // U32 a=127 b=0x0 compareMask
+    48'h017F00000000, // U32 a=127 b=0x0 writeMask
+    48'h017F00000000, // U32 a=127 b=0x0 reference
+    48'h017F00000000, // U32 a=127 b=0x0 minDepthBounds
+    48'h017F00000000, // U32 a=127 b=0x0 maxDepthBounds
     48'h040700000011, // PTR a=7 b=0x11 pColorBlendState
     48'h050000000029, // STYPE a=0 b=0x29 sType
     48'h060000000066, // PNEXT a=0 b=0x66 pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 logicOpEnable
-    48'h01FF00000000, // U32 a=255 b=0x0 logicOp
-    48'h01FF00000000, // U32 a=255 b=0x0 attachmentCount
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 logicOpEnable
+    48'h017F00000000, // U32 a=127 b=0x0 logicOp
+    48'h017F00000000, // U32 a=127 b=0x0 attachmentCount
     48'h070100000000, // ARRAY a=1 b=0x0 pAttachments
-    48'h01FF00000000, // U32 a=255 b=0x0 blendEnable
-    48'h01FF00000000, // U32 a=255 b=0x0 srcColorBlendFactor
-    48'h01FF00000000, // U32 a=255 b=0x0 dstColorBlendFactor
-    48'h01FF00000000, // U32 a=255 b=0x0 colorBlendOp
-    48'h01FF00000000, // U32 a=255 b=0x0 srcAlphaBlendFactor
-    48'h01FF00000000, // U32 a=255 b=0x0 dstAlphaBlendFactor
-    48'h01FF00000000, // U32 a=255 b=0x0 alphaBlendOp
-    48'h01FF00000000, // U32 a=255 b=0x0 colorWriteMask
+    48'h017F00000000, // U32 a=127 b=0x0 blendEnable
+    48'h017F00000000, // U32 a=127 b=0x0 srcColorBlendFactor
+    48'h017F00000000, // U32 a=127 b=0x0 dstColorBlendFactor
+    48'h017F00000000, // U32 a=127 b=0x0 colorBlendOp
+    48'h017F00000000, // U32 a=127 b=0x0 srcAlphaBlendFactor
+    48'h017F00000000, // U32 a=127 b=0x0 dstAlphaBlendFactor
+    48'h017F00000000, // U32 a=127 b=0x0 alphaBlendOp
+    48'h017F00000000, // U32 a=127 b=0x0 colorWriteMask
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h090100000005, // BLOB a=1 b=0x5 blendConstants
     48'h040700000005, // PTR a=7 b=0x5 pDynamicState
     48'h05000000002A, // STYPE a=0 b=0x2A sType
     48'h060000000067, // PNEXT a=0 b=0x67 pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 dynamicStateCount
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 dynamicStateCount
     48'h090000000002, // BLOB a=0 b=0x2 pDynamicStates
     48'h033B0000000F, // HANDLE a=59 b=0xF layout:OPTIONAL
     48'h033B00000012, // HANDLE a=59 b=0x12 renderPass:OPTIONAL
-    48'h01FF00000000, // U32 a=255 b=0x0 subpass
+    48'h017F00000000, // U32 a=127 b=0x0 subpass
     48'h033B00000011, // HANDLE a=59 b=0x11 basePipelineHandle:OPTIONAL
-    48'h01FF00000000, // U32 a=255 b=0x0 basePipelineIndex
+    48'h017F00000000, // U32 a=127 b=0x0 basePipelineIndex
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
     48'h090000000001, // BLOB a=0 b=0x1 pPipelines
@@ -1173,49 +1173,49 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 attachmentCount
     48'h070000000005, // ARRAY a=0 b=0x5 pAttachments
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 format
-    48'h01FF00000000, // U32 a=255 b=0x0 samples
-    48'h01FF00000000, // U32 a=255 b=0x0 loadOp
-    48'h01FF00000000, // U32 a=255 b=0x0 storeOp
-    48'h01FF00000000, // U32 a=255 b=0x0 stencilLoadOp
-    48'h01FF00000000, // U32 a=255 b=0x0 stencilStoreOp
-    48'h01FF00000000, // U32 a=255 b=0x0 initialLayout
-    48'h01FF00000000, // U32 a=255 b=0x0 finalLayout
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 format
+    48'h017F00000000, // U32 a=127 b=0x0 samples
+    48'h017F00000000, // U32 a=127 b=0x0 loadOp
+    48'h017F00000000, // U32 a=127 b=0x0 storeOp
+    48'h017F00000000, // U32 a=127 b=0x0 stencilLoadOp
+    48'h017F00000000, // U32 a=127 b=0x0 stencilStoreOp
+    48'h017F00000000, // U32 a=127 b=0x0 initialLayout
+    48'h017F00000000, // U32 a=127 b=0x0 finalLayout
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010200000000, // U32 a=2 b=0x0 subpassCount
     48'h070100000005, // ARRAY a=1 b=0x5 pSubpasses
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 pipelineBindPoint
-    48'h01FF00000000, // U32 a=255 b=0x0 inputAttachmentCount
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 pipelineBindPoint
+    48'h017F00000000, // U32 a=127 b=0x0 inputAttachmentCount
     48'h070200000005, // ARRAY a=2 b=0x5 pInputAttachments
-    48'h01FF00000000, // U32 a=255 b=0x0 attachment
-    48'h01FF00000000, // U32 a=255 b=0x0 layout
+    48'h017F00000000, // U32 a=127 b=0x0 attachment
+    48'h017F00000000, // U32 a=127 b=0x0 layout
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 colorAttachmentCount
+    48'h017F00000000, // U32 a=127 b=0x0 colorAttachmentCount
     48'h070200000005, // ARRAY a=2 b=0x5 pColorAttachments
-    48'h01FF00000000, // U32 a=255 b=0x0 attachment
-    48'h01FF00000000, // U32 a=255 b=0x0 layout
+    48'h017F00000000, // U32 a=127 b=0x0 attachment
+    48'h017F00000000, // U32 a=127 b=0x0 layout
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h070200000005, // ARRAY a=2 b=0x5 pResolveAttachments
-    48'h01FF00000000, // U32 a=255 b=0x0 attachment
-    48'h01FF00000000, // U32 a=255 b=0x0 layout
+    48'h017F00000000, // U32 a=127 b=0x0 attachment
+    48'h017F00000000, // U32 a=127 b=0x0 layout
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040700000002, // PTR a=7 b=0x2 pDepthStencilAttachment
-    48'h01FF00000000, // U32 a=255 b=0x0 attachment
-    48'h01FF00000000, // U32 a=255 b=0x0 layout
-    48'h01FF00000000, // U32 a=255 b=0x0 preserveAttachmentCount
+    48'h017F00000000, // U32 a=127 b=0x0 attachment
+    48'h017F00000000, // U32 a=127 b=0x0 layout
+    48'h017F00000000, // U32 a=127 b=0x0 preserveAttachmentCount
     48'h090100000002, // BLOB a=1 b=0x2 pPreserveAttachments
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010300000000, // U32 a=3 b=0x0 dependencyCount
     48'h070200000004, // ARRAY a=2 b=0x4 pDependencies
-    48'h01FF00000000, // U32 a=255 b=0x0 srcSubpass
-    48'h01FF00000000, // U32 a=255 b=0x0 dstSubpass
-    48'h01FF00000000, // U32 a=255 b=0x0 srcStageMask
-    48'h01FF00000000, // U32 a=255 b=0x0 dstStageMask
-    48'h01FF00000000, // U32 a=255 b=0x0 srcAccessMask
-    48'h01FF00000000, // U32 a=255 b=0x0 dstAccessMask
-    48'h01FF00000000, // U32 a=255 b=0x0 dependencyFlags
+    48'h017F00000000, // U32 a=127 b=0x0 srcSubpass
+    48'h017F00000000, // U32 a=127 b=0x0 dstSubpass
+    48'h017F00000000, // U32 a=127 b=0x0 srcStageMask
+    48'h017F00000000, // U32 a=127 b=0x0 dstStageMask
+    48'h017F00000000, // U32 a=127 b=0x0 srcAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 dstAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 dependencyFlags
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pRenderPass
@@ -1231,67 +1231,67 @@ package g6lc_apu_vn_pkg;
     48'h070000000005, // ARRAY a=0 b=0x5 pAttachments
     48'h05000000002D, // STYPE a=0 b=0x2D sType
     48'h06000000006C, // PNEXT a=0 b=0x6C pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 format
-    48'h01FF00000000, // U32 a=255 b=0x0 samples
-    48'h01FF00000000, // U32 a=255 b=0x0 loadOp
-    48'h01FF00000000, // U32 a=255 b=0x0 storeOp
-    48'h01FF00000000, // U32 a=255 b=0x0 stencilLoadOp
-    48'h01FF00000000, // U32 a=255 b=0x0 stencilStoreOp
-    48'h01FF00000000, // U32 a=255 b=0x0 initialLayout
-    48'h01FF00000000, // U32 a=255 b=0x0 finalLayout
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 format
+    48'h017F00000000, // U32 a=127 b=0x0 samples
+    48'h017F00000000, // U32 a=127 b=0x0 loadOp
+    48'h017F00000000, // U32 a=127 b=0x0 storeOp
+    48'h017F00000000, // U32 a=127 b=0x0 stencilLoadOp
+    48'h017F00000000, // U32 a=127 b=0x0 stencilStoreOp
+    48'h017F00000000, // U32 a=127 b=0x0 initialLayout
+    48'h017F00000000, // U32 a=127 b=0x0 finalLayout
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010200000000, // U32 a=2 b=0x0 subpassCount
     48'h070100000005, // ARRAY a=1 b=0x5 pSubpasses
     48'h05000000002E, // STYPE a=0 b=0x2E sType
     48'h06000000006D, // PNEXT a=0 b=0x6D pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 pipelineBindPoint
-    48'h01FF00000000, // U32 a=255 b=0x0 viewMask
-    48'h01FF00000000, // U32 a=255 b=0x0 inputAttachmentCount
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 pipelineBindPoint
+    48'h017F00000000, // U32 a=127 b=0x0 viewMask
+    48'h017F00000000, // U32 a=127 b=0x0 inputAttachmentCount
     48'h070200000005, // ARRAY a=2 b=0x5 pInputAttachments
     48'h05000000002F, // STYPE a=0 b=0x2F sType
     48'h06000000006E, // PNEXT a=0 b=0x6E pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 attachment
-    48'h01FF00000000, // U32 a=255 b=0x0 layout
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 attachment
+    48'h017F00000000, // U32 a=127 b=0x0 layout
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 colorAttachmentCount
+    48'h017F00000000, // U32 a=127 b=0x0 colorAttachmentCount
     48'h070200000005, // ARRAY a=2 b=0x5 pColorAttachments
     48'h05000000002F, // STYPE a=0 b=0x2F sType
     48'h06000000006E, // PNEXT a=0 b=0x6E pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 attachment
-    48'h01FF00000000, // U32 a=255 b=0x0 layout
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 attachment
+    48'h017F00000000, // U32 a=127 b=0x0 layout
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h070200000005, // ARRAY a=2 b=0x5 pResolveAttachments
     48'h05000000002F, // STYPE a=0 b=0x2F sType
     48'h06000000006E, // PNEXT a=0 b=0x6E pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 attachment
-    48'h01FF00000000, // U32 a=255 b=0x0 layout
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 attachment
+    48'h017F00000000, // U32 a=127 b=0x0 layout
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040700000005, // PTR a=7 b=0x5 pDepthStencilAttachment
     48'h05000000002F, // STYPE a=0 b=0x2F sType
     48'h06000000006E, // PNEXT a=0 b=0x6E pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 attachment
-    48'h01FF00000000, // U32 a=255 b=0x0 layout
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
-    48'h01FF00000000, // U32 a=255 b=0x0 preserveAttachmentCount
+    48'h017F00000000, // U32 a=127 b=0x0 attachment
+    48'h017F00000000, // U32 a=127 b=0x0 layout
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 preserveAttachmentCount
     48'h090100000002, // BLOB a=1 b=0x2 pPreserveAttachments
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010300000000, // U32 a=3 b=0x0 dependencyCount
     48'h070200000004, // ARRAY a=2 b=0x4 pDependencies
     48'h050000000030, // STYPE a=0 b=0x30 sType
     48'h06000000006F, // PNEXT a=0 b=0x6F pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 srcSubpass
-    48'h01FF00000000, // U32 a=255 b=0x0 dstSubpass
-    48'h01FF00000000, // U32 a=255 b=0x0 srcStageMask
-    48'h01FF00000000, // U32 a=255 b=0x0 dstStageMask
-    48'h01FF00000000, // U32 a=255 b=0x0 srcAccessMask
-    48'h01FF00000000, // U32 a=255 b=0x0 dstAccessMask
-    48'h01FF00000000, // U32 a=255 b=0x0 dependencyFlags
-    48'h01FF00000000, // U32 a=255 b=0x0 viewOffset
+    48'h017F00000000, // U32 a=127 b=0x0 srcSubpass
+    48'h017F00000000, // U32 a=127 b=0x0 dstSubpass
+    48'h017F00000000, // U32 a=127 b=0x0 srcStageMask
+    48'h017F00000000, // U32 a=127 b=0x0 dstStageMask
+    48'h017F00000000, // U32 a=127 b=0x0 srcAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 dstAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 dependencyFlags
+    48'h017F00000000, // U32 a=127 b=0x0 viewOffset
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010400000000, // U32 a=4 b=0x0 correlatedViewMaskCount
     48'h090000000002, // BLOB a=0 b=0x2 pCorrelatedViewMasks
@@ -1334,8 +1334,8 @@ package g6lc_apu_vn_pkg;
     48'h010100000000, // U32 a=1 b=0x0 maxSets
     48'h010200000000, // U32 a=2 b=0x0 poolSizeCount
     48'h070000000004, // ARRAY a=0 b=0x4 pPoolSizes
-    48'h01FF00000000, // U32 a=255 b=0x0 type
-    48'h01FF00000000, // U32 a=255 b=0x0 descriptorCount
+    48'h017F00000000, // U32 a=127 b=0x0 type
+    48'h017F00000000, // U32 a=127 b=0x0 descriptorCount
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pDescriptorPool
@@ -1357,7 +1357,7 @@ package g6lc_apu_vn_pkg;
     48'h060000000072, // PNEXT a=0 b=0x72 pNext
     48'h030800000014, // HANDLE a=8 b=0x14 descriptorPool:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 descriptorSetCount
-    48'h090000000001, // BLOB a=0 b=0x1 pSetLayouts
+    48'h098000000001, // BLOB a=0 b=0x1 pSetLayouts KEEP
     48'h090100000001, // BLOB a=1 b=0x1 pDescriptorSets
     48'h0D0000000015, // OBJ a=0 b=0x15 
     48'h0E3000000000, // END a=48 b=0x0 
@@ -1372,20 +1372,20 @@ package g6lc_apu_vn_pkg;
     48'h070000000004, // ARRAY a=0 b=0x4 pDescriptorWrites
     48'h050000000034, // STYPE a=0 b=0x34 sType
     48'h060000000073, // PNEXT a=0 b=0x73 pNext
-    48'h033800000015, // HANDLE a=56 b=0x15 dstSet:LOOKUP
-    48'h01FF00000000, // U32 a=255 b=0x0 dstBinding
-    48'h01FF00000000, // U32 a=255 b=0x0 dstArrayElement
-    48'h01FF00000000, // U32 a=255 b=0x0 descriptorCount
-    48'h01FF00000000, // U32 a=255 b=0x0 descriptorType
+    48'h03B800000015, // HANDLE a=56 b=0x15 dstSet:LOOKUP KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 dstBinding KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 dstArrayElement KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 descriptorCount KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 descriptorType KEEP
     48'h070100000004, // ARRAY a=1 b=0x4 pImageInfo
     48'h03380000000C, // HANDLE a=56 b=0xC sampler:LOOKUP
     48'h03380000000B, // HANDLE a=56 b=0xB imageView:LOOKUP
-    48'h01FF00000000, // U32 a=255 b=0x0 imageLayout
+    48'h017F00000000, // U32 a=127 b=0x0 imageLayout
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h070100000004, // ARRAY a=1 b=0x4 pBufferInfo
-    48'h033B00000007, // HANDLE a=59 b=0x7 buffer:OPTIONAL
-    48'h02FF00000000, // U64 a=255 b=0x0 offset
-    48'h02FF00000000, // U64 a=255 b=0x0 range
+    48'h03BB00000007, // HANDLE a=59 b=0x7 buffer:OPTIONAL KEEP
+    48'h02FF00000000, // U64 a=127 b=0x0 offset KEEP
+    48'h02FF00000000, // U64 a=127 b=0x0 range KEEP
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h090100000001, // BLOB a=1 b=0x1 pTexelBufferView
     48'h080000000000, // ENDARR a=0 b=0x0 
@@ -1394,12 +1394,12 @@ package g6lc_apu_vn_pkg;
     48'h050000000035, // STYPE a=0 b=0x35 sType
     48'h060000000074, // PNEXT a=0 b=0x74 pNext
     48'h033800000015, // HANDLE a=56 b=0x15 srcSet:LOOKUP
-    48'h01FF00000000, // U32 a=255 b=0x0 srcBinding
-    48'h01FF00000000, // U32 a=255 b=0x0 srcArrayElement
+    48'h017F00000000, // U32 a=127 b=0x0 srcBinding
+    48'h017F00000000, // U32 a=127 b=0x0 srcArrayElement
     48'h033800000015, // HANDLE a=56 b=0x15 dstSet:LOOKUP
-    48'h01FF00000000, // U32 a=255 b=0x0 dstBinding
-    48'h01FF00000000, // U32 a=255 b=0x0 dstArrayElement
-    48'h01FF00000000, // U32 a=255 b=0x0 descriptorCount
+    48'h017F00000000, // U32 a=127 b=0x0 dstBinding
+    48'h017F00000000, // U32 a=127 b=0x0 dstArrayElement
+    48'h017F00000000, // U32 a=127 b=0x0 descriptorCount
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
@@ -1467,9 +1467,9 @@ package g6lc_apu_vn_pkg;
     48'h03080000000F, // HANDLE a=8 b=0xF layout:LOOKUP
     48'h010100000000, // U32 a=1 b=0x0 firstSet
     48'h010200000000, // U32 a=2 b=0x0 descriptorSetCount
-    48'h090000000001, // BLOB a=0 b=0x1 pDescriptorSets
+    48'h098000000001, // BLOB a=0 b=0x1 pDescriptorSets KEEP
     48'h010300000000, // U32 a=3 b=0x0 dynamicOffsetCount
-    48'h090100000002, // BLOB a=1 b=0x2 pDynamicOffsets
+    48'h098100000002, // BLOB a=1 b=0x2 pDynamicOffsets KEEP
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 firstBinding
@@ -1485,30 +1485,30 @@ package g6lc_apu_vn_pkg;
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h03080000000F, // HANDLE a=8 b=0xF layout:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 stageFlags
-    48'h010100000000, // U32 a=1 b=0x0 offset
-    48'h010200000000, // U32 a=2 b=0x0 size
-    48'h090000000006, // BLOB a=0 b=0x6 pValues
+    48'h018100000000, // U32 a=1 b=0x0 offset KEEP
+    48'h018200000000, // U32 a=2 b=0x0 size KEEP
+    48'h098000000006, // BLOB a=0 b=0x6 pValues KEEP
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 firstViewport
     48'h010100000000, // U32 a=1 b=0x0 viewportCount
     48'h070000000002, // ARRAY a=0 b=0x2 pViewports
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 width
-    48'h01FF00000000, // U32 a=255 b=0x0 height
-    48'h01FF00000000, // U32 a=255 b=0x0 minDepth
-    48'h01FF00000000, // U32 a=255 b=0x0 maxDepth
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 width
+    48'h017F00000000, // U32 a=127 b=0x0 height
+    48'h017F00000000, // U32 a=127 b=0x0 minDepth
+    48'h017F00000000, // U32 a=127 b=0x0 maxDepth
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 firstScissor
     48'h010100000000, // U32 a=1 b=0x0 scissorCount
     48'h070000000002, // ARRAY a=0 b=0x2 pScissors
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 width
-    48'h01FF00000000, // U32 a=255 b=0x0 height
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 width
+    48'h017F00000000, // U32 a=127 b=0x0 height
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
@@ -1602,37 +1602,37 @@ package g6lc_apu_vn_pkg;
     48'h070000000000, // ARRAY a=0 b=0x0 pMemoryBarriers
     48'h05000000003D, // STYPE a=0 b=0x3D sType
     48'h06000000007E, // PNEXT a=0 b=0x7E pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 srcAccessMask
-    48'h01FF00000000, // U32 a=255 b=0x0 dstAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 srcAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 dstAccessMask
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010400000000, // U32 a=4 b=0x0 bufferMemoryBarrierCount
     48'h070100000000, // ARRAY a=1 b=0x0 pBufferMemoryBarriers
     48'h05000000003E, // STYPE a=0 b=0x3E sType
     48'h06000000007F, // PNEXT a=0 b=0x7F pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 srcAccessMask
-    48'h01FF00000000, // U32 a=255 b=0x0 dstAccessMask
-    48'h01FF00000000, // U32 a=255 b=0x0 srcQueueFamilyIndex
-    48'h01FF00000000, // U32 a=255 b=0x0 dstQueueFamilyIndex
+    48'h017F00000000, // U32 a=127 b=0x0 srcAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 dstAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 srcQueueFamilyIndex
+    48'h017F00000000, // U32 a=127 b=0x0 dstQueueFamilyIndex
     48'h033800000007, // HANDLE a=56 b=0x7 buffer:LOOKUP
-    48'h02FF00000000, // U64 a=255 b=0x0 offset
-    48'h02FF00000000, // U64 a=255 b=0x0 size
+    48'h027F00000000, // U64 a=127 b=0x0 offset
+    48'h027F00000000, // U64 a=127 b=0x0 size
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010500000000, // U32 a=5 b=0x0 imageMemoryBarrierCount
     48'h070200000000, // ARRAY a=2 b=0x0 pImageMemoryBarriers
     48'h05000000003F, // STYPE a=0 b=0x3F sType
     48'h060000000080, // PNEXT a=0 b=0x80 pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 srcAccessMask
-    48'h01FF00000000, // U32 a=255 b=0x0 dstAccessMask
-    48'h01FF00000000, // U32 a=255 b=0x0 oldLayout
-    48'h01FF00000000, // U32 a=255 b=0x0 newLayout
-    48'h01FF00000000, // U32 a=255 b=0x0 srcQueueFamilyIndex
-    48'h01FF00000000, // U32 a=255 b=0x0 dstQueueFamilyIndex
+    48'h017F00000000, // U32 a=127 b=0x0 srcAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 dstAccessMask
+    48'h017F00000000, // U32 a=127 b=0x0 oldLayout
+    48'h017F00000000, // U32 a=127 b=0x0 newLayout
+    48'h017F00000000, // U32 a=127 b=0x0 srcQueueFamilyIndex
+    48'h017F00000000, // U32 a=127 b=0x0 dstQueueFamilyIndex
     48'h033800000006, // HANDLE a=56 b=0x6 image:LOOKUP
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
-    48'h01FF00000000, // U32 a=255 b=0x0 baseMipLevel
-    48'h01FF00000000, // U32 a=255 b=0x0 levelCount
-    48'h01FF00000000, // U32 a=255 b=0x0 baseArrayLayer
-    48'h01FF00000000, // U32 a=255 b=0x0 layerCount
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 baseMipLevel
+    48'h017F00000000, // U32 a=127 b=0x0 levelCount
+    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
+    48'h017F00000000, // U32 a=127 b=0x0 layerCount
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
@@ -1640,9 +1640,9 @@ package g6lc_apu_vn_pkg;
     48'h031000000007, // HANDLE a=16 b=0x7 dstBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 regionCount
     48'h070000000006, // ARRAY a=0 b=0x6 pRegions
-    48'h02FF00000000, // U64 a=255 b=0x0 srcOffset
-    48'h02FF00000000, // U64 a=255 b=0x0 dstOffset
-    48'h02FF00000000, // U64 a=255 b=0x0 size
+    48'h027F00000000, // U64 a=127 b=0x0 srcOffset
+    48'h027F00000000, // U64 a=127 b=0x0 dstOffset
+    48'h027F00000000, // U64 a=127 b=0x0 size
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
@@ -1652,23 +1652,23 @@ package g6lc_apu_vn_pkg;
     48'h010100000000, // U32 a=1 b=0x0 dstImageLayout
     48'h010200000000, // U32 a=2 b=0x0 regionCount
     48'h070000000000, // ARRAY a=0 b=0x0 pRegions
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
-    48'h01FF00000000, // U32 a=255 b=0x0 mipLevel
-    48'h01FF00000000, // U32 a=255 b=0x0 baseArrayLayer
-    48'h01FF00000000, // U32 a=255 b=0x0 layerCount
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 z
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
-    48'h01FF00000000, // U32 a=255 b=0x0 mipLevel
-    48'h01FF00000000, // U32 a=255 b=0x0 baseArrayLayer
-    48'h01FF00000000, // U32 a=255 b=0x0 layerCount
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 z
-    48'h01FF00000000, // U32 a=255 b=0x0 width
-    48'h01FF00000000, // U32 a=255 b=0x0 height
-    48'h01FF00000000, // U32 a=255 b=0x0 depth
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 mipLevel
+    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
+    48'h017F00000000, // U32 a=127 b=0x0 layerCount
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 z
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 mipLevel
+    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
+    48'h017F00000000, // U32 a=127 b=0x0 layerCount
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 z
+    48'h017F00000000, // U32 a=127 b=0x0 width
+    48'h017F00000000, // U32 a=127 b=0x0 height
+    48'h017F00000000, // U32 a=127 b=0x0 depth
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
@@ -1677,19 +1677,19 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 dstImageLayout
     48'h010100000000, // U32 a=1 b=0x0 regionCount
     48'h070000000000, // ARRAY a=0 b=0x0 pRegions
-    48'h02FF00000000, // U64 a=255 b=0x0 bufferOffset
-    48'h01FF00000000, // U32 a=255 b=0x0 bufferRowLength
-    48'h01FF00000000, // U32 a=255 b=0x0 bufferImageHeight
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
-    48'h01FF00000000, // U32 a=255 b=0x0 mipLevel
-    48'h01FF00000000, // U32 a=255 b=0x0 baseArrayLayer
-    48'h01FF00000000, // U32 a=255 b=0x0 layerCount
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 z
-    48'h01FF00000000, // U32 a=255 b=0x0 width
-    48'h01FF00000000, // U32 a=255 b=0x0 height
-    48'h01FF00000000, // U32 a=255 b=0x0 depth
+    48'h027F00000000, // U64 a=127 b=0x0 bufferOffset
+    48'h017F00000000, // U32 a=127 b=0x0 bufferRowLength
+    48'h017F00000000, // U32 a=127 b=0x0 bufferImageHeight
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 mipLevel
+    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
+    48'h017F00000000, // U32 a=127 b=0x0 layerCount
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 z
+    48'h017F00000000, // U32 a=127 b=0x0 width
+    48'h017F00000000, // U32 a=127 b=0x0 height
+    48'h017F00000000, // U32 a=127 b=0x0 depth
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
@@ -1698,19 +1698,19 @@ package g6lc_apu_vn_pkg;
     48'h031000000007, // HANDLE a=16 b=0x7 dstBuffer:LOOKUP
     48'h010100000000, // U32 a=1 b=0x0 regionCount
     48'h070000000000, // ARRAY a=0 b=0x0 pRegions
-    48'h02FF00000000, // U64 a=255 b=0x0 bufferOffset
-    48'h01FF00000000, // U32 a=255 b=0x0 bufferRowLength
-    48'h01FF00000000, // U32 a=255 b=0x0 bufferImageHeight
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
-    48'h01FF00000000, // U32 a=255 b=0x0 mipLevel
-    48'h01FF00000000, // U32 a=255 b=0x0 baseArrayLayer
-    48'h01FF00000000, // U32 a=255 b=0x0 layerCount
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 z
-    48'h01FF00000000, // U32 a=255 b=0x0 width
-    48'h01FF00000000, // U32 a=255 b=0x0 height
-    48'h01FF00000000, // U32 a=255 b=0x0 depth
+    48'h027F00000000, // U64 a=127 b=0x0 bufferOffset
+    48'h017F00000000, // U32 a=127 b=0x0 bufferRowLength
+    48'h017F00000000, // U32 a=127 b=0x0 bufferImageHeight
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 mipLevel
+    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
+    48'h017F00000000, // U32 a=127 b=0x0 layerCount
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 z
+    48'h017F00000000, // U32 a=127 b=0x0 width
+    48'h017F00000000, // U32 a=127 b=0x0 height
+    48'h017F00000000, // U32 a=127 b=0x0 depth
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
@@ -1720,23 +1720,23 @@ package g6lc_apu_vn_pkg;
     48'h010100000000, // U32 a=1 b=0x0 dstImageLayout
     48'h010200000000, // U32 a=2 b=0x0 regionCount
     48'h070000000000, // ARRAY a=0 b=0x0 pRegions
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
-    48'h01FF00000000, // U32 a=255 b=0x0 mipLevel
-    48'h01FF00000000, // U32 a=255 b=0x0 baseArrayLayer
-    48'h01FF00000000, // U32 a=255 b=0x0 layerCount
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 mipLevel
+    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
+    48'h017F00000000, // U32 a=127 b=0x0 layerCount
     48'h070100000007, // ARRAY a=1 b=0x7 srcOffsets
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 z
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 z
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
-    48'h01FF00000000, // U32 a=255 b=0x0 mipLevel
-    48'h01FF00000000, // U32 a=255 b=0x0 baseArrayLayer
-    48'h01FF00000000, // U32 a=255 b=0x0 layerCount
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 mipLevel
+    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
+    48'h017F00000000, // U32 a=127 b=0x0 layerCount
     48'h070100000007, // ARRAY a=1 b=0x7 dstOffsets
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 z
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 z
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010300000000, // U32 a=3 b=0x0 filter
@@ -1761,11 +1761,11 @@ package g6lc_apu_vn_pkg;
     48'h090000000005, // BLOB a=0 b=0x5 uint32
     48'h010100000000, // U32 a=1 b=0x0 rangeCount
     48'h070000000000, // ARRAY a=0 b=0x0 pRanges
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
-    48'h01FF00000000, // U32 a=255 b=0x0 baseMipLevel
-    48'h01FF00000000, // U32 a=255 b=0x0 levelCount
-    48'h01FF00000000, // U32 a=255 b=0x0 baseArrayLayer
-    48'h01FF00000000, // U32 a=255 b=0x0 layerCount
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 baseMipLevel
+    48'h017F00000000, // U32 a=127 b=0x0 levelCount
+    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
+    48'h017F00000000, // U32 a=127 b=0x0 layerCount
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
@@ -1776,30 +1776,30 @@ package g6lc_apu_vn_pkg;
     48'h010200000000, // U32 a=2 b=0x0 stencil
     48'h010300000000, // U32 a=3 b=0x0 rangeCount
     48'h070000000000, // ARRAY a=0 b=0x0 pRanges
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
-    48'h01FF00000000, // U32 a=255 b=0x0 baseMipLevel
-    48'h01FF00000000, // U32 a=255 b=0x0 levelCount
-    48'h01FF00000000, // U32 a=255 b=0x0 baseArrayLayer
-    48'h01FF00000000, // U32 a=255 b=0x0 layerCount
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 baseMipLevel
+    48'h017F00000000, // U32 a=127 b=0x0 levelCount
+    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
+    48'h017F00000000, // U32 a=127 b=0x0 layerCount
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 attachmentCount
     48'h070000000005, // ARRAY a=0 b=0x5 pAttachments
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
-    48'h01FF00000000, // U32 a=255 b=0x0 colorAttachment
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 colorAttachment
     48'h0CFF00000001, // CHECK a=255 b=0x1 VkClearValue tag 0
     48'h0CFF0000000B, // CHECK a=255 b=0xB VkClearColorValue tag 2
     48'h090100000005, // BLOB a=1 b=0x5 uint32
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010100000000, // U32 a=1 b=0x0 rectCount
     48'h070100000000, // ARRAY a=1 b=0x0 pRects
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 width
-    48'h01FF00000000, // U32 a=255 b=0x0 height
-    48'h01FF00000000, // U32 a=255 b=0x0 baseArrayLayer
-    48'h01FF00000000, // U32 a=255 b=0x0 layerCount
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 width
+    48'h017F00000000, // U32 a=127 b=0x0 height
+    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
+    48'h017F00000000, // U32 a=127 b=0x0 layerCount
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
@@ -1809,23 +1809,23 @@ package g6lc_apu_vn_pkg;
     48'h010100000000, // U32 a=1 b=0x0 dstImageLayout
     48'h010200000000, // U32 a=2 b=0x0 regionCount
     48'h070000000000, // ARRAY a=0 b=0x0 pRegions
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
-    48'h01FF00000000, // U32 a=255 b=0x0 mipLevel
-    48'h01FF00000000, // U32 a=255 b=0x0 baseArrayLayer
-    48'h01FF00000000, // U32 a=255 b=0x0 layerCount
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 z
-    48'h01FF00000000, // U32 a=255 b=0x0 aspectMask
-    48'h01FF00000000, // U32 a=255 b=0x0 mipLevel
-    48'h01FF00000000, // U32 a=255 b=0x0 baseArrayLayer
-    48'h01FF00000000, // U32 a=255 b=0x0 layerCount
-    48'h01FF00000000, // U32 a=255 b=0x0 x
-    48'h01FF00000000, // U32 a=255 b=0x0 y
-    48'h01FF00000000, // U32 a=255 b=0x0 z
-    48'h01FF00000000, // U32 a=255 b=0x0 width
-    48'h01FF00000000, // U32 a=255 b=0x0 height
-    48'h01FF00000000, // U32 a=255 b=0x0 depth
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 mipLevel
+    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
+    48'h017F00000000, // U32 a=127 b=0x0 layerCount
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 z
+    48'h017F00000000, // U32 a=127 b=0x0 aspectMask
+    48'h017F00000000, // U32 a=127 b=0x0 mipLevel
+    48'h017F00000000, // U32 a=127 b=0x0 baseArrayLayer
+    48'h017F00000000, // U32 a=127 b=0x0 layerCount
+    48'h017F00000000, // U32 a=127 b=0x0 x
+    48'h017F00000000, // U32 a=127 b=0x0 y
+    48'h017F00000000, // U32 a=127 b=0x0 z
+    48'h017F00000000, // U32 a=127 b=0x0 width
+    48'h017F00000000, // U32 a=127 b=0x0 height
+    48'h017F00000000, // U32 a=127 b=0x0 depth
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
@@ -1921,53 +1921,53 @@ package g6lc_apu_vn_pkg;
     48'h020300000000, // U64 a=3 b=0x0 stride
     48'h010200000000, // U32 a=2 b=0x0 flags
     48'h0E3E00000000, // END a=62 b=0x0 
-    48'h04FF00000003, // PTR a=255 b=0x3 pStream
-    48'h01FF00000000, // U32 a=255 b=0x0 resourceId
-    48'h02FF00000000, // U64 a=255 b=0x0 offset
-    48'h02FF00000000, // U64 a=255 b=0x0 size
+    48'h047F00000003, // PTR a=127 b=0x3 pStream
+    48'h017F00000000, // U32 a=127 b=0x0 resourceId
+    48'h027F00000000, // U64 a=127 b=0x0 offset
+    48'h027F00000000, // U64 a=127 b=0x0 size
     48'h0E0000000000, // END a=0 b=0x0 
-    48'h02FF00000000, // U64 a=255 b=0x0 position
+    48'h027F00000000, // U64 a=127 b=0x0 position
     48'h0E0000000000, // END a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 streamCount
+    48'h017F00000000, // U32 a=127 b=0x0 streamCount
     48'h070000000005, // ARRAY a=0 b=0x5 pStreams
-    48'h01FF00000000, // U32 a=255 b=0x0 resourceId
-    48'h02FF00000000, // U64 a=255 b=0x0 offset
-    48'h02FF00000000, // U64 a=255 b=0x0 size
+    48'h017F00000000, // U32 a=127 b=0x0 resourceId
+    48'h027F00000000, // U64 a=127 b=0x0 offset
+    48'h027F00000000, // U64 a=127 b=0x0 size
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h090000000001, // BLOB a=0 b=0x1 pReplyPositions
-    48'h01FF00000000, // U32 a=255 b=0x0 dependencyCount
+    48'h017F00000000, // U32 a=127 b=0x0 dependencyCount
     48'h070100000005, // ARRAY a=1 b=0x5 pDependencies
-    48'h01FF00000000, // U32 a=255 b=0x0 srcCommandStream
-    48'h01FF00000000, // U32 a=255 b=0x0 dstCommandStream
+    48'h017F00000000, // U32 a=127 b=0x0 srcCommandStream
+    48'h017F00000000, // U32 a=127 b=0x0 dstCommandStream
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h0E0000000000, // END a=0 b=0x0 
-    48'h02FF00000000, // U64 a=255 b=0x0 ring
-    48'h04FF0000000E, // PTR a=255 b=0xE pCreateInfo
+    48'h027F00000000, // U64 a=127 b=0x0 ring
+    48'h047F0000000E, // PTR a=127 b=0xE pCreateInfo
     48'h050000000043, // STYPE a=0 b=0x43 sType
     48'h060000000086, // PNEXT a=0 b=0x86 pNext
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
-    48'h01FF00000000, // U32 a=255 b=0x0 resourceId
-    48'h02FF00000000, // U64 a=255 b=0x0 offset
-    48'h02FF00000000, // U64 a=255 b=0x0 size
-    48'h02FF00000000, // U64 a=255 b=0x0 idleTimeout
-    48'h02FF00000000, // U64 a=255 b=0x0 headOffset
-    48'h02FF00000000, // U64 a=255 b=0x0 tailOffset
-    48'h02FF00000000, // U64 a=255 b=0x0 statusOffset
-    48'h02FF00000000, // U64 a=255 b=0x0 bufferOffset
-    48'h02FF00000000, // U64 a=255 b=0x0 bufferSize
-    48'h02FF00000000, // U64 a=255 b=0x0 extraOffset
-    48'h02FF00000000, // U64 a=255 b=0x0 extraSize
+    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h017F00000000, // U32 a=127 b=0x0 resourceId
+    48'h027F00000000, // U64 a=127 b=0x0 offset
+    48'h027F00000000, // U64 a=127 b=0x0 size
+    48'h027F00000000, // U64 a=127 b=0x0 idleTimeout
+    48'h027F00000000, // U64 a=127 b=0x0 headOffset
+    48'h027F00000000, // U64 a=127 b=0x0 tailOffset
+    48'h027F00000000, // U64 a=127 b=0x0 statusOffset
+    48'h027F00000000, // U64 a=127 b=0x0 bufferOffset
+    48'h027F00000000, // U64 a=127 b=0x0 bufferSize
+    48'h027F00000000, // U64 a=127 b=0x0 extraOffset
+    48'h027F00000000, // U64 a=127 b=0x0 extraSize
     48'h0E0000000000, // END a=0 b=0x0 
-    48'h02FF00000000, // U64 a=255 b=0x0 ring
+    48'h027F00000000, // U64 a=127 b=0x0 ring
     48'h0E0000000000, // END a=0 b=0x0 
-    48'h02FF00000000, // U64 a=255 b=0x0 ring
-    48'h01FF00000000, // U32 a=255 b=0x0 seqno
-    48'h01FF00000000, // U32 a=255 b=0x0 flags
+    48'h027F00000000, // U64 a=127 b=0x0 ring
+    48'h017F00000000, // U32 a=127 b=0x0 seqno
+    48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h0E0000000000, // END a=0 b=0x0 
-    48'h02FF00000000, // U64 a=255 b=0x0 ring
-    48'h02FF00000000, // U64 a=255 b=0x0 offset
-    48'h01FF00000000, // U32 a=255 b=0x0 value
+    48'h027F00000000, // U64 a=127 b=0x0 ring
+    48'h027F00000000, // U64 a=127 b=0x0 offset
+    48'h017F00000000, // U32 a=127 b=0x0 value
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 resourceId
@@ -1975,13 +1975,13 @@ package g6lc_apu_vn_pkg;
     48'h050000000044, // STYPE a=0 b=0x44 sType
     48'h060000000089, // PNEXT a=0 b=0x89 pNext
     48'h0E3F00000000, // END a=63 b=0x0 
-    48'h02FF00000000, // U64 a=255 b=0x0 ring
-    48'h02FF00000000, // U64 a=255 b=0x0 seqno
+    48'h027F00000000, // U64 a=127 b=0x0 ring
+    48'h027F00000000, // U64 a=127 b=0x0 seqno
     48'h0E0000000000, // END a=0 b=0x0 
-    48'h02FF00000000, // U64 a=255 b=0x0 seqno
+    48'h027F00000000, // U64 a=127 b=0x0 seqno
     48'h0E0000000000, // END a=0 b=0x0 
-    48'h02FF00000000, // U64 a=255 b=0x0 ring
-    48'h02FF00000000, // U64 a=255 b=0x0 seqno
+    48'h027F00000000, // U64 a=127 b=0x0 ring
+    48'h027F00000000, // U64 a=127 b=0x0 seqno
     48'h0E0000000000 // END a=0 b=0x0 
   };
 
@@ -3014,7 +3014,8 @@ package g6lc_apu_vn_pkg;
     APU_VN_FAULT_BOUND = 5,
     APU_VN_FAULT_HANDLE_ZERO = 6,
     APU_VN_FAULT_LOOP = 7,
-    APU_VN_FAULT_ROM = 8
+    APU_VN_FAULT_ROM = 8,
+    APU_VN_FAULT_PAYLOAD = 9
   } apu_vn_fault_e;
 
   typedef enum logic [2:0] {
@@ -3049,6 +3050,7 @@ package g6lc_apu_vn_pkg;
     apu_vn_fault_e fault;
     logic [15:0] fault_word;
     logic [31:0] fault_val;
+    logic [15:0] pay_words;
   } apu_vn_op_t;
 
 endpackage

@@ -41,6 +41,7 @@ module g6lc_apu_vnpump
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_vnfront_pkg::*;
@@ -92,6 +93,17 @@ module g6lc_apu_vnpump
   input  logic            cr_cpl_valid_i,
   output logic            cr_cpl_ready_o,
   input  apu_cmdrec_cpl_t cr_cpl_i,
+  // CmdRec payload stream pass-through (vnfront inside)
+  output logic            cr_pay_valid_o,
+  output logic [31:0]     cr_pay_data_o,
+  input  logic            cr_pay_ready_i,
+  // ObjPay port (vnfront inside)
+  output logic            op_req_valid_o,
+  input  logic            op_req_ready_i,
+  output apu_objpay_req_t op_req_o,
+  input  logic            op_cpl_valid_i,
+  output logic            op_cpl_ready_o,
+  input  apu_objpay_cpl_t op_cpl_i,
   // cmdexec pass-through (vnfront inside)
   output logic               ex_submit_valid_o,
   input  logic               ex_submit_ready_i,
@@ -122,6 +134,9 @@ module g6lc_apu_vnpump
     assign ot_cpl_ready_o = 1'b0;
     assign cr_req_valid_o = 1'b0; assign cr_req_o = '0;
     assign cr_cpl_ready_o = 1'b0;
+    assign cr_pay_valid_o = 1'b0; assign cr_pay_data_o = '0;
+    assign op_req_valid_o = 1'b0; assign op_req_o = '0;
+    assign op_cpl_ready_o = 1'b0;
     assign ex_submit_valid_o = 1'b0; assign ex_submit_o = '0;
     assign ex_fence_clr_o = '0;
     assign busy_o = 1'b0;
@@ -137,6 +152,8 @@ module g6lc_apu_vnpump
                     (|xs_ctx_i) | (|ap_rdata_i) | (|gm_rdata_i) |
                     ot_req_ready_i | ot_cpl_valid_i | (|ot_cpl_i) |
                     cr_req_ready_i | cr_cpl_valid_i | (|cr_cpl_i) |
+                    cr_pay_ready_i |
+                    op_req_ready_i | op_cpl_valid_i | (|op_cpl_i) |
                     ex_submit_ready_i | (|ex_done_seq_i) |
                     (|ex_fence_signaled_i) | (|ex_fence_lost_i) |
                     (|xs_desc_i[0]) | (|xs_desc_i[1]) |
@@ -216,14 +233,16 @@ module g6lc_apu_vnpump
     logic [15:0] dec_addr;
     logic [31:0] dec_rdata;
     apu_vn_op_t  dec_op;
-
     g6lc_apu_vndec #(.Enable(1'b1)) i_dec (
       .clk_i(clk_i), .rst_ni(rst_ni),
       .start_i(dec_start_q), .cs_base_i(16'h0),
       .cs_len_i(16'(st_q[depth_q].bytes - st_q[depth_q].pos > 32'hFFFF
                    ? 32'hFFFF : st_q[depth_q].bytes - st_q[depth_q].pos)),
       .cs_re_o(dec_re), .cs_addr_o(dec_addr), .cs_rdata_i(dec_rdata),
-      .busy_o(dec_busy), .done_o(dec_done), .op_o(dec_op));
+      .busy_o(dec_busy), .done_o(dec_done), .op_o(dec_op),
+      // the pump-level decoder only frames transport headers; its
+      // KEEP stream belongs to the vnfront's own decoder instance
+      .pay_valid_o(), .pay_data_o());
 
     logic        fr_start_q, fr_busy, fr_done, fr_cre, fr_rwe;
     logic [15:0] fr_caddr, fr_raddr;
@@ -232,6 +251,8 @@ module g6lc_apu_vnpump
     apu_objtab_req_t fr_ot_req;
     logic        fr_cr_v, fr_cr_cpl_rdy;
     apu_cmdrec_req_t fr_cr_req;
+    logic        fr_op_v, fr_op_cpl_rdy;
+    apu_objpay_req_t fr_op_req;
     logic [31:0] fr_result;
     logic [15:0] fr_repn;
     logic [3:0]  fr_fault;
@@ -254,6 +275,12 @@ module g6lc_apu_vnpump
       .cr_req_o(fr_cr_req),
       .cr_cpl_valid_i(cr_cpl_valid_i), .cr_cpl_ready_o(fr_cr_cpl_rdy),
       .cr_cpl_i(cr_cpl_i),
+      .cr_pay_valid_o(cr_pay_valid_o), .cr_pay_data_o(cr_pay_data_o),
+      .cr_pay_ready_i(cr_pay_ready_i),
+      .op_req_valid_o(fr_op_v), .op_req_ready_i(op_req_ready_i),
+      .op_req_o(fr_op_req),
+      .op_cpl_valid_i(op_cpl_valid_i), .op_cpl_ready_o(fr_op_cpl_rdy),
+      .op_cpl_i(op_cpl_i),
       .ex_submit_valid_o(ex_submit_valid_o),
       .ex_submit_ready_i(ex_submit_ready_i),
       .ex_submit_o(ex_submit_o),
@@ -359,6 +386,9 @@ module g6lc_apu_vnpump
     assign cr_req_valid_o = fr_cr_v;
     assign cr_req_o = fr_cr_req;
     assign cr_cpl_ready_o = fr_cr_cpl_rdy;
+    assign op_req_valid_o = fr_op_v;
+    assign op_req_o = fr_op_req;
+    assign op_cpl_ready_o = fr_op_cpl_rdy;
 
     // pump's own ObjTab request: LOOKUP a transport resource id
     // (kind is enforced for non-ALLOC resolves -> BLOB_SHMEM)
@@ -890,6 +920,7 @@ module g6lc_apu_vnpump_fixture
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_vnfront_pkg::*;
@@ -933,6 +964,15 @@ module g6lc_apu_vnpump_fixture
   input  logic            cr_cpl_valid_i,
   output logic            cr_cpl_ready_o,
   input  apu_cmdrec_cpl_t cr_cpl_i,
+  output logic            cr_pay_valid_o,
+  output logic [31:0]     cr_pay_data_o,
+  input  logic            cr_pay_ready_i,
+  output logic            op_req_valid_o,
+  input  logic            op_req_ready_i,
+  output apu_objpay_req_t op_req_o,
+  input  logic            op_cpl_valid_i,
+  output logic            op_cpl_ready_o,
+  input  apu_objpay_cpl_t op_cpl_i,
   output logic               ex_submit_valid_o,
   input  logic               ex_submit_ready_i,
   output apu_cmdexec_submit_t ex_submit_o,

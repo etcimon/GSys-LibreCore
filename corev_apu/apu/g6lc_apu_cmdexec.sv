@@ -86,7 +86,8 @@ module g6lc_apu_cmdexec
       StIdle, StPinReq, StPinCpl, StCntReq, StCntCpl,
       StRdReq, StRdCpl, StResReq, StResCpl, StDispatch,
       StWork, StDrain, StUnpReq, StUnpCpl, StNextBuf,
-      StBufDone, StFinalDrain, StDone
+      StBufDone, StFinalDrain, StDone,
+      StPayReq, StPayCpl
     } state_e;
     state_e              state_q;
     // submit FIFO (flops)
@@ -100,6 +101,8 @@ module g6lc_apu_cmdexec
     logic [7:0]          rec_n_q;       // record count
     apu_cmdrec_rec_t     rec_q;         // current record
     logic [2:0]          h_i_q;         // handle resolve cursor
+    logic [3:0]          pay_i_q;       // §7b arena read cursor
+    logic [3:0]          pay_n_q;       // §7b arena reads left
     logic [3:0]          pinned_q;      // per-buffer pin success
     logic                lost_q;        // DEVICE_LOST on this submit
     logic [7:0]          outst_q;       // outstanding work items
@@ -195,6 +198,13 @@ module g6lc_apu_cmdexec
                              kind: 6'(rec_q.kind[h_i_q[1:0]]),
                              default: '0};
         end
+        StPayReq: begin
+          cr_req_valid_o = 1'b1;
+          cr_req_o       = '{op: APU_CMDREC_OP_PAYREAD,
+                             cbuf: cur_q.crec[buf_i_q[1:0]],
+                             idx: 16'(rec_q.imm[7] + 32'(pay_i_q)),
+                             default: '0};
+        end
         StUnpReq: begin
           ot_req_valid_o = pinned_q[buf_i_q[1:0]];
           ot_req_o       = '{op: APU_OBJTAB_OP_UNPIN,
@@ -225,6 +235,8 @@ module g6lc_apu_cmdexec
         rec_n_q     <= '0;
         rec_q       <= '0;
         h_i_q       <= '0;
+        pay_i_q     <= '0;
+        pay_n_q     <= '0;
         pinned_q    <= '0;
         lost_q      <= 1'b0;
         outst_q     <= '0;
@@ -322,6 +334,21 @@ module g6lc_apu_cmdexec
             end
           end
 
+          // ---- §7b: BindDescriptorSets arena walk ---------------------
+          StPayReq: if (cr_req_ready_i) state_q <= StPayCpl;
+          StPayCpl: if (cr_cpl_valid_i) begin
+            if (cr_cpl_i.status != APU_CMDREC_OK) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              snap_q.dset[2'(rec_q.imm[1] + {28'h0, pay_i_q})] <=
+                  cr_cpl_i.pdata;
+              pay_i_q <= pay_i_q + 4'd1;
+              state_q <= pay_i_q + 4'd1 >= pay_n_q
+                         ? StNextBuf : StPayReq;
+            end
+          end
+
           // ---- dispatch ----------------------------------------------
           StDispatch: begin
             case (rec_cls(rec_q.ctype))
@@ -329,8 +356,15 @@ module g6lc_apu_cmdexec
                 case (rec_q.ctype)
                   APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT:
                     snap_q.pipeline <= rec_q.handle[0];
-                  APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT:
-                    snap_q.dset <= rec_q.handle[2];
+                  APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT: begin
+                    // §7b: resolved set handles live in the payload
+                    // arena at imm[7]; write firstSet..firstSet+count-1
+                    pay_i_q <= '0;
+                    pay_n_q <= 4'(rec_q.imm[1] < 32'd4
+                                  ? (rec_q.imm[2] < 32'd4 - rec_q.imm[1]
+                                     ? rec_q.imm[2] : 32'd4 - rec_q.imm[1])
+                                  : 32'd0);
+                  end
                   APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_EXT:
                     snap_q.vtx <= rec_q.handle[1];
                   APU_VN_TYPE_VK_CMD_BIND_INDEX_BUFFER_EXT:
@@ -339,8 +373,12 @@ module g6lc_apu_cmdexec
                     snap_q.vp <= rec_q.imm[0];
                   APU_VN_TYPE_VK_CMD_SET_SCISSOR_EXT:
                     snap_q.sc <= rec_q.imm[0];
-                  APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT:
-                    snap_q.push <= rec_q.imm[0][15:0];
+                  APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT: begin
+                    snap_q.push      <= rec_q.imm[0][15:0];
+                    // imm[7] = payload arena base (forced by cmdrec)
+                    snap_q.push_base <= rec_q.imm[7][15:0];
+                    snap_q.push_len  <= rec_q.imm[2][15:0];
+                  end
                   APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT,
                   APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_2_EXT: begin
                     snap_q.rp_active <= 1'b1;
@@ -353,7 +391,10 @@ module g6lc_apu_cmdexec
                     snap_q.rp_active <= 1'b0;
                   default: ;
                 endcase
-                state_q <= StNextBuf;
+                state_q <= rec_q.ctype ==
+                               APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT &&
+                           rec_q.imm[1] < 32'd4 && rec_q.imm[2] != 32'h0
+                           ? StPayReq : StNextBuf;
               end
               APU_CMDEXEC_CLS_WORK:     state_q <= StWork;
               APU_CMDEXEC_CLS_BARRIER:  state_q <= StDrain;

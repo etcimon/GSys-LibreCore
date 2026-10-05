@@ -57,15 +57,25 @@ module tb_g6lc_apu_vndec_rep;
   logic [15:0] roff_addr, roff_waddr, roff_words;
   logic [31:0] roff_wdata;
 
+  // §7b decoder payload stream: reply vectors carry no expected-pay
+  // section (the vndec TB covers payload contents); count the words so
+  // the stream is at least exercised, and quiet-check the off engine.
+  logic        pay_v, off_pv;
+  logic [31:0] pay_d, off_pd;
+  int          pay_n = 0;
+  always @(posedge clk) if (pay_v) pay_n++;
+
   g6lc_apu_vndec #(.Enable(1'b1)) i_dec (
     .clk_i(clk), .rst_ni(rst_ni),
     .start_i(d_start), .cs_base_i(d_base), .cs_len_i(d_len),
     .cs_re_o(d_re), .cs_addr_o(d_addr), .cs_rdata_i(d_rdata),
+    .pay_valid_o(pay_v), .pay_data_o(pay_d),
     .busy_o(d_busy), .done_o(d_done), .op_o(op));
   g6lc_apu_vndec_fixture #(.Enable(1'b0)) i_dec_off (
     .clk_i(clk), .rst_ni(rst_ni),
     .start_i(d_start), .cs_base_i(d_base), .cs_len_i(d_len),
     .cs_re_o(off_re), .cs_addr_o(off_addr), .cs_rdata_i(d_rdata),
+    .pay_valid_o(off_pv), .pay_data_o(off_pd),
     .busy_o(off_busy), .done_o(off_done), .op_o(off_op));
 
   g6lc_apu_vnrep #(.Enable(1'b1)) i_rep (
@@ -106,6 +116,7 @@ module tb_g6lc_apu_vndec_rep;
         roff_busy || roff_done || roff_fault ||
         off_op.cmd_type !== '0 || off_op.words !== '0 ||
         off_op.fault != APU_VN_FAULT_NONE ||
+        off_pv || off_pd !== '0 ||
         roff_words !== '0)
       $fatal(1, "disabled engine active");
   end

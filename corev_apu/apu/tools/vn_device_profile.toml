@@ -124,3 +124,53 @@ pData = 1048576             # vkCmdUpdateBuffer / query results staging
 pValues = 128               # vkCmdPushConstants <= maxPushConstantsSize
 pInitialData = 1048576      # pipeline cache data
 default = 1048576
+
+# ---------------------------------------------------------------------------
+# §7b payload keep-lists.  fields = dotted member paths; struct-array and
+# plain-struct members enter the path, pointer hops are transparent (so
+# 'pBindings.binding' names a member of *pCreateInfo).  Each listed field
+# marks its U32/U64/HANDLE/BLOB/PTR op with KEEP (ROM a[7]): the decoder
+# streams the words on the payload port in decode order.  See the
+# "Payload layouts" section of g6lc_apu_vn_tables.md.
+
+[keep.vkCreateDescriptorSetLayout]
+# object payload: {bindingCount, per binding {binding, type, count, flags}}
+# (bindingCount rides the op record; the front prepends it on objpay write)
+fields = ["pBindings.binding", "pBindings.descriptorType",
+          "pBindings.descriptorCount", "pBindings.stageFlags"]
+
+[keep.vkCreatePipelineLayout]
+# {setLayout handles (2w each), per push range {stageFlags, offset, size}}
+fields = ["pSetLayouts", "pPushConstantRanges.stageFlags",
+          "pPushConstantRanges.offset", "pPushConstantRanges.size"]
+
+[keep.vkCreateComputePipelines]
+# per element {module id (2w), pSpecializationInfo presence (1w),
+#              layout id (2w)}
+fields = ["pCreateInfos.layout", "pCreateInfos.stage.module",
+          "pCreateInfos.stage.pSpecializationInfo"]
+
+[keep.vkAllocateDescriptorSets]
+# {set layout ids (2w each)}
+fields = ["pSetLayouts"]
+
+[keep.vkUpdateDescriptorSets]
+# per write {dstSet (2w), dstBinding, dstArrayElement, descriptorCount,
+#            descriptorType, per pBufferInfo {buffer (2w), offset (2w),
+#            range (2w)}}
+fields = ["pDescriptorWrites.dstSet", "pDescriptorWrites.dstBinding",
+          "pDescriptorWrites.dstArrayElement",
+          "pDescriptorWrites.descriptorCount",
+          "pDescriptorWrites.descriptorType",
+          "pDescriptorWrites.pBufferInfo.buffer",
+          "pDescriptorWrites.pBufferInfo.offset",
+          "pDescriptorWrites.pBufferInfo.range"]
+
+[keep.vkCmdBindDescriptorSets]
+# {descriptor-set ids (2w each), dynamic offsets}; the record stores the
+# resolved handles instead of the ids
+fields = ["pDescriptorSets", "pDynamicOffsets"]
+
+[keep.vkCmdPushConstants]
+# {offset, size, value words}
+fields = ["offset", "size", "pValues"]
