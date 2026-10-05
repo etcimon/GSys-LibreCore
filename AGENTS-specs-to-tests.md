@@ -797,6 +797,36 @@ hart 1's code — the detection doubles as the co-residency witness. Runs via
 `REVIEW_MC_DIRECTED_SRC=mc_fp_mixed.S` on `run_mc_int2_review.py`
 (`REVIEW_MC_MARCH=rv64imafdc_zicsr`, `REVIEW_MC_MABI=lp64d`, mask `11`).
 
+## I$ refill survives a killed stream — SMT switch storm after fence.i (T17)
+
+`verif/tests/custom/multicore/mc_icache_switch_storm.S` is the witness for the
+`g6lc_icache` rule that a refilled cacheable line is installed even when the
+requesting stream was killed (`MISS`/`KILL_MISS` → `cache_wren = ~nc & ~flush_d`; only
+a pending I$ flush, i.e. fence.i semantics, forbids it). Spec anchors: Zifencei
+(`#ext:zifencei`, `#zifencei-ff` — fence.i synchronizes the instruction stream with
+prior stores; it does not forbid caching the current memory image) and the WFI/CLINT
+hart-release conventions already used by `mc_fp_smt`. `MC_ICS_NHARTS` participating harts (default 2 = both SMT threads of core
+0; hart 0 writes `msip[1..N-1]` so the siblings are seen by the selector at once and
+the secondary cores leave their boot gate; harts `>= N` park in WFI) rendezvous on an
+`amoadd` barrier, execute `fence.i`, then each walks a straight-line region of 96
+64-byte-aligned blocks (6 KiB = 384 distinct 16 B I$ lines, 16 instructions each,
+`.option norvc`) folding an order-sensitive checksum (`s0 = 3*s0+n+H; s1++; s0 ^= s1;
+s0 ^= s0>>7; s0 += s0<<13`), then compares checksum and block count with the
+assembly-time constants; the fence.i + walk repeats 4 times. Even harts walk `region0`,
+odd harts `region1` (16 KiB further); `-DMC_ICS_SHARED` sends every hart through
+`region0` (the OpenSBI `_reset_regs` shape). Raw tohost codes: 1 pass, 3
+`ORACLE_NEGATIVE` (odd harts' expectation flipped), 5/7 region0/region1 checksum, 9/11
+block count, 13 barrier timeout, 15 unexpected trap. Discrimination on the pre-fix
+server model (`ooocoh-t16fix-build`, `3ee0184c…`): the two-hart arms complete (an
+L2-hit refill returns inside the switch cadence), while `-DMC_ICS_NHARTS=8` (all four
+cores contending through the hub, mask `1111`) stops every core at the first region
+line after the fence.i — `[mc_verdict] FAIL: a core ran and then stopped retiring`,
+exit 126, the I4dp boot's shape; the fixed model passes both. Runs via
+`REVIEW_MC_DIRECTED_SRC=mc_icache_switch_storm.S` with
+`REVIEW_MC_MARCH=rv64imafdc_zicsr_zifencei`, `REVIEW_MC_MABI=lp64d` and
+`REVIEW_MC_DIRECTED_TOHOST_ADDR=auto` (the regions push `tohost` past `0x80001000`);
+masks `01` (2 harts), `11` (int2_l3, `-DMC_ICS_NHARTS=4`), `1111` (server, 8 harts).
+
 ## Historical misaligned-load tests (2026-09-20)
 
 `ooo_mem_min.S` stages32/33 are registered as `ooo_load_misaligned_trap` and

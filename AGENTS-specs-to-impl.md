@@ -1199,3 +1199,15 @@ refill under its tid (a load retired with a foreign line; the other never comple
 ways at elaboration. Upstream HPDCACHE packages (8 entries → 1 × 8) are unchanged. Loads/stores
 (`#ldst`) regain single-copy atomicity on the server profile. Evidence: `core/ooo/AGENTS-ooo-plan.md`
 T16.
+
+## I$ refill installed even for a killed stream (2026-10-04, T17)
+
+`core/cache_subsystem/g6lc_icache.sv` `MISS`/`KILL_MISS` write the refilled line whenever the
+address is cacheable and no I$ flush is pending (`cache_wren = ~paddr_is_nc & ~flush_d`); the
+response to the killed stream is still dropped. Zifencei (`#ext:zifencei`) is preserved: `flush_d`
+is sticky until the FLUSH state runs, so a `fence.i` during the miss forbids the install. Found as
+a fetch livelock on `g6lc64_ooo_server` (eight harts frozen after OpenSBI's `fence.i`: the
+drained-handoff selector's starve switches killed every in-flight I$ miss faster than the hub/L2
+could refill it). Anchors re-baselined (int2_l3 18,357,056; smt2 12,391,556; smt2_ooo_int
+10,472,823); frozen probes and FP suite retirement-exact and faster. Evidence:
+`core/ooo/AGENTS-ooo-plan.md` T17.

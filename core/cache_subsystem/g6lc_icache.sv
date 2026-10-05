@@ -420,9 +420,15 @@ module g6lc_icache
           // taken branch. Cancel only on architectural kills (flush/misp/replay).
           if (!(dreq_i.kill_s1 || flush_d)) begin
             dreq_o.valid = 1'b1;
-            // only write to cache if this address is cacheable
-            cache_wren   = ~paddr_is_nc;
           end
+          // T17: install the line even when the requester killed the stream
+          // (mispredict, SMT hart switch). The refill is current memory for a
+          // cacheable address, so keeping it is always safe; dropping it let
+          // two harts whose I$ miss latency exceeds the starve-switch cadence
+          // kill each other's refill forever (g6lc64_ooo_server after
+          // OpenSBI's fence.i: no hart fetched again for 18 M cycles). Only a
+          // pending I$ flush (fence.i semantics) forbids the install.
+          cache_wren = ~paddr_is_nc & ~flush_d;
           // bail out if this request is being killed
         end else if (dreq_i.kill_s1 || flush_d) begin
           state_d = KILL_MISS;
@@ -445,6 +451,11 @@ module g6lc_icache
       KILL_MISS: begin
         if (mem_rtrn_vld_i && mem_rtrn_i.rtype == ICACHE_IFILL_ACK) begin
           state_d = IDLE;
+          // T17: same as MISS — the killed stream's line is still worth
+          // installing unless an I$ flush is pending (flush_d is sticky until
+          // the FLUSH state performs it, so it covers a fence.i that arrived
+          // anywhere during the miss).
+          cache_wren = ~paddr_is_nc & ~flush_d;
         end
       end
       default: begin

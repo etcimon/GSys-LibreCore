@@ -3857,3 +3857,56 @@ identical, 260w/4s). A `+ld_trace` load round-trip anatomy probe
 result; every server boot cited before this section must be read as
 "did not fail before the cap", and the harness verdict text now has to be
 checked for per-hart retirement progress before it is quoted.
+
+### T17 — I$ refill survives a killed stream: the fence.i switch-storm livelock (2026-10-04)
+
+**Defect.** The first 24 M server boot on the T16-fixed model
+(`ooocoh-t16fix-i4dp-24M`) did not finish: all eight harts stopped fetching
+right after OpenSBI's `fence.i` (`_reset_regs`, `@0x80000638`, 6.08–6.29 M
+cycles) and stayed frozen to 24 M with an **empty scoreboard and nothing
+dispatched** (`[smt-stall]` dumps), while the selector kept starve-switching
+every ≈65 cycles (`req == switches` 1.0 M → 1.24 M). Mechanism: the
+`fence.i` invalidated every core's I$; every fetch then missed; each starve
+switch's `smt_restore_flush` killed the active hart's in-flight miss and
+`g6lc_icache` **discarded the killed refill** (`KILL_MISS` never wrote the
+line, `MISS` only wrote when not killed). Whenever the refill latency exceeded
+the switch cadence — four cores contending through the hub/L2 after a
+simultaneous invalidation — no line was ever installed: a fetch livelock
+with no hart making progress. Two-core WT profiles survive because an L2-hit
+refill returns inside the cadence.
+
+**Fix.** `g6lc_icache.sv`: `MISS` and `KILL_MISS` install the refilled line
+whenever it is cacheable and **no I$ flush is pending**
+(`cache_wren = ~paddr_is_nc & ~flush_d`; `flush_d` is sticky until the FLUSH
+state performs it, so a `fence.i` arriving anywhere during the miss still
+forbids the install — Zifencei semantics kept). The response is still
+dropped for a killed stream. A killed miss's line is current memory for its
+physical address, so keeping it is always safe; it also turns every
+mispredict-killed miss into a free prefetch.
+
+**Witness.** `mc_icache_switch_storm.S` (`MC_ICS_NHARTS` harts rendezvous,
+`fence.i`, walk 96 × 64 B private straight-line blocks with an
+order-sensitive checksum, ×4). On the pre-fix server model the two-hart arm
+completes (65,567), but **`-DMC_ICS_NHARTS=8` stops every core at the first
+region line after the `fence.i`** (exit 126 — the I4dp shape); on the fixed
+model h8 **passes 69,465**, h2 47,293, negatives detected; int2_l3 h2/h4
+pass before and after (38,515 → 37,021 / 44,642 → 38,687).
+
+**Boots and anchors (fixed tree, same firmware profile).** All strictDual:
+int2_l3 ring-16 24 M **18,357,056** (was 18,297,379; boot-hart lottery
+flipped to hart 3, retirement multisets identical except spin/libfdt counts
+and the boot-hart branch); `g6lc64_smt2` **12,391,556** (was 12,406,273;
+the pre-fix model with the same firmware reproduces 12,406,273
+byte-identically, so the delta is this change: −14,717); `smt2_ooo_int`
+mixed **10,472,823** (was 10,459,588; lottery flipped). These are the new
+anchors. Frozen probes all faster and Spike-exact: m4 1,809 / m20 1,769 /
+m32 1,902 / m33 1,913 / m34 1,813 / m35 1,885 / m36 1,884 / m37 1,887 /
+ilp 1,135 / memdep 1,102; FP suite 22/22; `mc_fp_mixed` 5,995 (6,143);
+`mc_fp_smt` **3,644** (3,831); s11 18,276. Lint 0e on six targets; remote
+lint int2_l3 29w / server 36w; synth int2_l3 clean 43w.
+
+**Server boot.** On the fixed model the `fence.i` storm passes: per-hart
+retirements keep growing after 6.3 M (core 0 {969 k, 850 k} at 6 M →
+{1,044 k, 1,153 k} at 7 M, where the pre-fix run froze). The 8 M and 24 M
+I4dp runs (`ooocoh-t17-i4dp-{8M,24M}`) were left running on the builder
+(≈670 cycles/s); their verdicts belong here when harvested.
