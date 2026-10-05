@@ -241,6 +241,12 @@ module tb_g6lc_apu_shwave;
   endtask
 
   // run one vector: commit, load buffers, dispatch, compare
+  // 4b-opt: saved unopt output words for the unopt==opt bit-exact
+  // check — uout[name idx][seed][word pos over out bindings].
+  logic [31:0] uout [27][4][2048];
+  int          cur_nidx, cur_seed, ou_mism, ou_mism_t, ou_words;
+  bit          is_opt;
+
   task automatic run_vec(input string nm, input string file);
     int n, nb, np, gx, gy, gz, flags;
     int base, ebase, mbase, cbase, now;
@@ -248,6 +254,7 @@ module tb_g6lc_apu_shwave;
     apu_sh_done_t dpl;
     int mut, diffs;
     int cmax, cn1, cn2;
+    int wpos;
     int f0 = fails;
     for (int i = 0; i < MAXW; i++) begin
       wbuf[i] = '0; ebuf[i] = '0;
@@ -331,7 +338,7 @@ module tb_g6lc_apu_shwave;
     mbase = ebase + now;
     cbase = mbase + now;
 
-    diffs = 0; cmax = 0; cn1 = 0; cn2 = 0;
+    diffs = 0; cmax = 0; cn1 = 0; cn2 = 0; wpos = 0; ou_mism = 0;
     for (int b = 0; b < ebuf[4]; b++) begin
       logic [31:0] sz, eo;
       logic [63:0] ad;
@@ -384,11 +391,38 @@ module tb_g6lc_apu_shwave;
             end
           end
           if (got !== xo) diffs++;
+          // ---- unopt==opt: stash/compare per-word ------------------
+          if (!is_opt && cur_nidx >= 0 && cur_seed >= 1)
+            uout[cur_nidx][cur_seed][wpos] = got;
+          else if (is_opt) begin
+            ou_words++;
+            if (got !== uout[cur_nidx][cur_seed][wpos]) begin
+              ou_mism++;
+              if (ou_mism <= 16)
+                $display(
+                  "FAIL-OU %s b%0d[%0d]@%x opt=%08x unopt=%08x",
+                  file, b, w2, aa, got,
+                  uout[cur_nidx][cur_seed][wpos]);
+            end
+          end
+          wpos++;
         end
         ebase += int'(sz) / 4;
         mbase += int'(sz) / 4;
         cbase += int'(sz) / 4;
       end
+    end
+    // opt case: the whole output must equal the unoptimized build's
+    // RTL output bit-exact (spirv-opt -O preserves IEEE semantics).
+    if (is_opt) begin
+      checks++;
+      ou_mism_t += ou_mism;
+      if (ou_mism != 0) begin
+        fails++;
+        $display("FAIL %s opt output differs from unopt on %0d words",
+                 file, ou_mism);
+      end
+      $display("OU %s words=%0d mism=%0d", file, wpos, ou_mism);
     end
     if (mut) begin
       checks++;
@@ -442,7 +476,7 @@ module tb_g6lc_apu_shwave;
 
   initial begin
     checks = 0; cases = 0; fails = 0; cyc = 0; dcyc = 0;
-    ulp1c = 0; ulp2c = 0; maxulp = 0;
+    ulp1c = 0; ulp2c = 0; maxulp = 0; ou_mism_t = 0;
     if (!$value$plusargs("shv=%s", shv)) shv = "verif/tb/apu/sh_vectors";
     dbg_sc = $test$plusargs("dbg_sc");
     dbg_wd = $test$plusargs("dbg_wd");
@@ -454,14 +488,17 @@ module tb_g6lc_apu_shwave;
     repeat (8) @(negedge clk); rst_n = 1;
     repeat (4) @(negedge clk);
 
+    is_opt = 0; cur_nidx = -1; cur_seed = 0; ou_words = 0;
     for (int i = 0; i < $size(names); i++) begin
       for (int s = 1; s <= 3; s++) begin
         if (only != "" && names[i] != only) continue;
         cases++;
+        cur_nidx = i; cur_seed = s;
         run_vec(names[i],
                 {names[i], "_", $sformatf("%0d", s)});
       end
     end
+    cur_nidx = -1; cur_seed = 0;
     for (int i = 0; i < $size(names); i++) begin
       if (only != "" && names[i] != only) continue;
       cases++;
@@ -473,14 +510,32 @@ module tb_g6lc_apu_shwave;
       run_vec(names[i], {names[i], "_bad_0"});
     end
 
+    // 4b-opt: the `spirv-opt -O` build of every .comp shader (no
+    // phiflow — it is hand-assembled, no .comp source).  Gates 1+2
+    // plus the unopt==opt bit-exact check against the outputs stashed
+    // during the base runs above.
+    is_opt = 1;
+    for (int i = 0; i < $size(names); i++) begin
+      if (names[i] == "phiflow") continue;
+      for (int s = 1; s <= 3; s++) begin
+        if (only != "" && names[i] != only) continue;
+        cases++;
+        cur_nidx = i; cur_seed = s;
+        run_vec(names[i],
+                {names[i], "_opt_", $sformatf("%0d", s)});
+      end
+    end
+    is_opt = 0; cur_nidx = -1; cur_seed = 0;
+
     checks++;
     if (off_bad) begin
       fails++; $display("FAIL Enable=0 not quiet");
     end
 
     if (fails == 0)
-      $display("PASS tb_g6lc_apu_shwave cases=%0d checks=%0d ulp1=%0d ulp2=%0d maxulp=%0d cycles=%0d",
-               cases, checks, ulp1c, ulp2c, maxulp, cyc);
+      $display("PASS tb_g6lc_apu_shwave cases=%0d checks=%0d ulp1=%0d ulp2=%0d maxulp=%0d ouw=%0d oum=%0d cycles=%0d",
+               cases, checks, ulp1c, ulp2c, maxulp, ou_words,
+               ou_mism_t, cyc);
     else begin
       $display("FAILURES=%0d (no PASS)", fails);
       $fatal(1);

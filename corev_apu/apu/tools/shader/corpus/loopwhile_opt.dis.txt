@@ -1,0 +1,101 @@
+; SPIR-V
+; Version: 1.3
+; Generator: Khronos Glslang Reference Front End; 11
+; Bound: 73
+; Schema: 0
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gl_LocalInvocationIndex
+               OpExecutionMode %main LocalSize 32 1 1
+               OpSource GLSL 460
+               OpName %main "main"
+               OpName %gl_LocalInvocationIndex "gl_LocalInvocationIndex"
+               OpName %In "In"
+               OpMemberName %In 0 "src"
+               OpName %_ ""
+               OpName %Out "Out"
+               OpMemberName %Out 0 "dst"
+               OpName %__0 ""
+               OpDecorate %gl_LocalInvocationIndex BuiltIn LocalInvocationIndex
+               OpDecorate %_runtimearr_uint ArrayStride 4
+               OpDecorate %In Block
+               OpMemberDecorate %In 0 NonWritable
+               OpMemberDecorate %In 0 Offset 0
+               OpDecorate %_ NonWritable
+               OpDecorate %_ Binding 0
+               OpDecorate %_ DescriptorSet 0
+               OpDecorate %_runtimearr_uint_0 ArrayStride 4
+               OpDecorate %Out Block
+               OpMemberDecorate %Out 0 NonReadable
+               OpMemberDecorate %Out 0 Offset 0
+               OpDecorate %__0 NonReadable
+               OpDecorate %__0 Binding 1
+               OpDecorate %__0 DescriptorSet 0
+               OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+%_ptr_Input_uint = OpTypePointer Input %uint
+%gl_LocalInvocationIndex = OpVariable %_ptr_Input_uint Input
+%_runtimearr_uint = OpTypeRuntimeArray %uint
+         %In = OpTypeStruct %_runtimearr_uint
+%_ptr_StorageBuffer_In = OpTypePointer StorageBuffer %In
+          %_ = OpVariable %_ptr_StorageBuffer_In StorageBuffer
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+%_ptr_StorageBuffer_uint = OpTypePointer StorageBuffer %uint
+     %uint_0 = OpConstant %uint 0
+     %uint_1 = OpConstant %uint 1
+       %bool = OpTypeBool
+    %uint_24 = OpConstant %uint 24
+     %uint_2 = OpConstant %uint 2
+     %uint_3 = OpConstant %uint 3
+      %int_1 = OpConstant %int 1
+%_runtimearr_uint_0 = OpTypeRuntimeArray %uint
+        %Out = OpTypeStruct %_runtimearr_uint_0
+%_ptr_StorageBuffer_Out = OpTypePointer StorageBuffer %Out
+        %__0 = OpVariable %_ptr_StorageBuffer_Out StorageBuffer
+ %uint_65536 = OpConstant %uint 65536
+     %v3uint = OpTypeVector %uint 3
+    %uint_32 = OpConstant %uint 32
+%gl_WorkGroupSize = OpConstantComposite %v3uint %uint_32 %uint_1 %uint_1
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+         %11 = OpLoad %uint %gl_LocalInvocationIndex
+         %21 = OpAccessChain %_ptr_StorageBuffer_uint %_ %int_0 %11
+         %22 = OpLoad %uint %21
+               OpBranch %25
+         %25 = OpLabel
+         %71 = OpPhi %uint %uint_0 %5 %55 %28
+         %70 = OpPhi %uint %22 %5 %72 %28
+         %33 = OpUGreaterThan %bool %70 %uint_1
+         %36 = OpULessThan %bool %71 %uint_24
+         %37 = OpLogicalAnd %bool %33 %36
+               OpLoopMerge %27 %28 None
+               OpBranchConditional %37 %26 %27
+         %26 = OpLabel
+         %39 = OpBitwiseAnd %uint %70 %uint_1
+         %40 = OpIEqual %bool %39 %uint_0
+               OpSelectionMerge %43 None
+               OpBranchConditional %40 %42 %47
+         %42 = OpLabel
+         %46 = OpUDiv %uint %70 %uint_2
+               OpBranch %43
+         %47 = OpLabel
+         %50 = OpIMul %uint %70 %uint_3
+         %51 = OpIAdd %uint %50 %uint_1
+               OpBranch %43
+         %43 = OpLabel
+         %72 = OpPhi %uint %46 %42 %51 %47
+         %55 = OpIAdd %uint %71 %int_1
+               OpBranch %28
+         %28 = OpLabel
+               OpBranch %25
+         %27 = OpLabel
+         %63 = OpIMul %uint %71 %uint_65536
+         %65 = OpIAdd %uint %63 %70
+         %66 = OpAccessChain %_ptr_StorageBuffer_uint %__0 %int_0 %11
+               OpStore %66 %65
+               OpReturn
+               OpFunctionEnd

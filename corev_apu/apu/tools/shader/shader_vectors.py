@@ -473,6 +473,45 @@ def main():
         base, _mc = emit(name + '_bad', 0, bwords, desc, inputs,
                          expect_fault=(fcode, fopc))
         summary.append(base)
+    # ---- 4b-opt pass: spirv-opt -O builds ---------------------------
+    # For every corpus shader that has an optimized twin
+    # (corpus/<name>_opt.spv, produced by `spirv-opt -O`), emit
+    # <name>_opt_{1..3} vectors reusing the base shader's DESC —
+    # gen_inputs is a pure function of (desc, seed), so the optimized
+    # build receives bit-identical inputs and the TB can assert
+    # unoptimized-RTL == optimized-RTL bit-exact.  No mut/bad arms.
+    for name in sorted(DESC):
+        desc = DESC[name]
+        ospv = os.path.join(CORPUS, name + '_opt.spv')
+        if not os.path.exists(ospv):
+            continue
+        words = read_spv(ospv)
+        sc = spirv_scan.Scanner(words)
+        try:
+            sc.scan()
+        except spirv_scan.Fault as f:
+            print('%s_opt: COMMIT FAULT %s opcode=%d word=%d — optimizer '
+                  'emitted an out-of-subset opcode' %
+                  (name, spirv_scan.FAULT_NAME[f.code], f.opcode, f.word))
+            return 1
+        sc.emit_tab(os.path.join(OUT, name + '_opt.tab'))
+        for seed in SEEDS:
+            inputs = gen_inputs(desc, [b[2] for b in desc['bindings']],
+                                seed)
+            base, mc = emit(name + '_opt', seed, words, desc, inputs)
+            summary.append(base)
+            if oracle_ok:
+                out_bin = base + '.out.bin'
+                r = run_oracle(ospv, base + '.desc.json', out_bin)
+                if r.returncode != 0:
+                    print('%s_opt_%d: oracle failed: %s' %
+                          (name, seed, r.stderr.strip()))
+                    return 1
+                data = open(out_bin, 'rb').read()
+                owords = list(struct.unpack('<%dI' % (len(data) // 4),
+                                            data))
+                emit(name + '_opt', seed, words, desc, inputs,
+                     oracle_out=owords, model_cache=mc)
     print('wrote %d cases to %s' % (len(summary), OUT))
     return 0
 

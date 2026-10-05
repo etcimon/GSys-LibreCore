@@ -169,7 +169,8 @@ module g6lc_apu_shwave
       W_MWB,                            // matrix result column write
       W_CM0, W_CM1, W_CM2, W_CM3, W_CM4, W_CM5, W_CMW, W_CMF,
       W_MLF, W_MLA,                     // MAT result column flush (load)
-      W_SMR0, W_SMR1                    // MAT store operand column fetch
+      W_SMR0, W_SMR1,                   // MAT store operand column fetch
+      W_XC0, W_XC1                      // MAT composite-extract column read
     } st_e;
     st_e st_q, ret_q;
 
@@ -966,6 +967,10 @@ module g6lc_apu_shwave
             rf_addr = {wave_q, mrd_q};
           end
         end
+        W_XC0: begin                       // matrix extract column read
+          rf_req = 1'b1;
+          rf_addr = {wave_q, oidx_q[0] + RI'(ops_q[3][1:0])};
+        end
         W_MWB: begin                       // matrix result column
           rf_req = 1'b1; rf_we = 1'b1;
           rf_addr = {wave_q, wreg_q + RI'(mi_q)};
@@ -1546,6 +1551,7 @@ module g6lc_apu_shwave
           W_PRE: begin
             unique case (opc_q)
               62:  begin oty_id_q <= vty_q[1]; st_q <= W_OT0; end
+              81:  begin oty_id_q <= vty_q[0]; st_q <= W_OT0; end
               142,148,169:
                    begin oty_id_q <= vty_q[0]; st_q <= W_OT0; end
               65,66: begin
@@ -1722,9 +1728,30 @@ module g6lc_apu_shwave
                 st_q <= W_WB;
               end
               81: begin                            // CompositeExtract
-                for (int l = 0; l < LAN; l++)
-                  wb_q[l][0] <= va_q[0][l][ops_q[3][1:0]];
-                st_q <= W_WB;
+                if (ot_kind_q == APU_SH_TK_MAT) begin
+                  // matrix operand: [col] column extract (vector
+                  // result) or [col][comp] element extract (scalar).
+                  // RF-resident matrix: one extra column-row read.
+                  if (otag_q[0] == APU_SH_RT_CONST) begin
+                    if (wc_q > 4)
+                      for (int l = 0; l < LAN; l++)
+                        wb_q[l][0] <= ocst_q[0]
+                            [32*(ops_q[3][1:0] * {2'b0, ot_comps_q}
+                                 + ops_q[4][1:0]) +: 32];
+                    else
+                      for (int l = 0; l < LAN; l++)
+                        for (int c = 0; c < VEC; c++)
+                          wb_q[l][c] <= ocst_q[0]
+                              [32*(ops_q[3][1:0] * {2'b0, ot_comps_q}
+                                   + c[1:0]) +: 32];
+                    st_q <= W_WB;
+                  end else
+                    st_q <= W_XC0;
+                end else begin
+                  for (int l = 0; l < LAN; l++)
+                    wb_q[l][0] <= va_q[0][l][ops_q[3][1:0]];
+                  st_q <= W_WB;
+                end
               end
               82: begin                            // CompositeInsert
                 wb_q <= va_q[1];
@@ -2761,6 +2788,18 @@ module g6lc_apu_shwave
                     : rf_rdata[l*128 + c*32 +: 32];
               end
             st_q <= mret_q;
+          end
+          // matrix composite-extract: W_XC0 read the operand's column
+          // row; latch the element ([col][comp]) or the whole column
+          W_XC0: st_q <= W_XC1;
+          W_XC1: begin
+            if (wc_q > 4)
+              for (int l = 0; l < LAN; l++)
+                wb_q[l][0] <=
+                  rf_rdata[l*128 + ops_q[4][1:0]*32 +: 32];
+            else
+              wb_q <= rf_rdata;
+            st_q <= W_WB;
           end
           // matrix result column writeback (rf write in the port comb)
           W_MWB: begin

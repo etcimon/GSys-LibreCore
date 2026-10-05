@@ -927,7 +927,18 @@ class Model:
             self.setres(rid, wb, ncomp)
             return pc + wc
         if opc == 81:                         # CompositeExtract
-            self.setres(rid, [va[0][ops[3] & 3], 0, 0, 0], 1)
+            t0 = self.sc.types.get(vt[0], {})
+            if t0.get('kind') == TK['MAT']:
+                # register-resident matrix: cols-major column list;
+                # [col][comp] element extract or [col] column extract
+                m = self.matv(opid(0))
+                col = m[(ops[3] & 3) % len(m)] if m else [0, 0, 0, 0]
+                if len(ops) > 4:
+                    self.setres(rid, [col[ops[4] & 3], 0, 0, 0], 1)
+                else:
+                    self.setres(rid, (col + [0, 0, 0, 0])[:4], ncomp)
+            else:
+                self.setres(rid, [va[0][ops[3] & 3], 0, 0, 0], 1)
             return pc + wc
         if opc == 82:                         # CompositeInsert
             wb = list(va[1])

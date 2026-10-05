@@ -277,6 +277,16 @@ module tb_g6lc_apu_shmod;
       retire_do(0);
     end
 
+    // ---- 1b. every `spirv-opt -O` module: commit + table compare ---
+    // (no phiflow — hand-assembled, no .comp/_opt twin)
+    for (int i = 0; i < 27; i++) begin
+      if (names[i] == "phiflow") continue;
+      cases++;
+      run_commit({names[i], "_opt_1.hex"}, 0, 0, 0);
+      check_tab({names[i], "_opt"});
+      retire_do(0);
+    end
+
     // ---- 2. bad vectors — expected commit fault from <name>.exp -----
     // 4a bads inject OpSin (FAULT_OPCODE); 4b control-flow bads strip
     // the merge instruction (FAULT_BRANCH).  The vector's .exp words 0/1

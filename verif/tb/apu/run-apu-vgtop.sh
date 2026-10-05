@@ -76,6 +76,7 @@ if [ "${VGTOP_NOCOMPUTE:-0}" != 1 ]; then
     ue_cpos_math450_3 ue_cpos_oob_1 ue_cpos_pushscale_1 \
     ue_cpos_vec4arith_1 \
     ue_cpos_loopfor_1 ue_cpos_barrier_reduce_1 \
+    ue_cpos_loopfor_opt_1 ue_cpos_barrier_reduce_opt_1 \
     ue_cneg_badmod_1 ue_cneg_modgone_1 ue_cneg_lostbuf_1 \
     ue_cneg_spec_1 ue_cneg_baddesc_1 ue_cneg_nopipe_1 \
     ue_cneg_pgfull_1 ue_cneg_badmem_1 ue_cneg_bindoob_1 \
@@ -97,7 +98,7 @@ if [ "${VGTOP_NOCOMPUTE:-0}" != 1 ]; then
     echo "COMPUTE ARM FAILED"
     exit 1
   fi
-  echo "COMPUTE ARM OK (29 sessions)"
+  echo "COMPUTE ARM OK (31 sessions)"
 fi
 if [ "${VGTOP_SYNTH:-0}" != 1 ]; then
   exit 0
