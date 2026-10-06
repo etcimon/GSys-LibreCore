@@ -3928,3 +3928,28 @@ server traces: cores 1–3 are clock-gated for the first 200 k cycles
 needs ≥ 48 M cycles; **`ooocoh-t17-i4dp-64M` is running on the builder**
 (launched 2026-10-05 02:46 local, ≈18–25 h; harvest per
 `build-platform/workspace/build/n1d-remote/t17/I4DP-64M-LAUNCH.md`).
+
+**T17 addendum 2 — the 8-hart server strict boot completes (2026-10-06).**
+`ooocoh-t17-i4dp-64M` (T17 model, 64 M cap, 21 h 55 min at 811 cycles/s):
+the cold-boot hart (mhartid 1) retires the strict payload's `li a0,1; sd
+a0,0(t0)` with **t0 = 0x80200200 = the payload's `tohost` at cycle
+44,847,054**, then `fence; wfi`; `strict_fail` never retires; all seven
+warm harts were released from `sbi_hsm_hart_wait` (wake 44.737–44.790 M),
+ran `strict_secondary`, published `strict_seen` (last: hart 7 at
+44,846,974, seen 61 cycles later) and parked. No trap (the seven
+`sbi_trap_handler` entries are the `sbi_hart_start` ecalls), `force=0`,
+`tail 0/0/0/0`, `aborts=0` on every core. **This is the first complete
+strict 8-hart boot of `g6lc64_ooo_server`: PASS at 44,847,054 cycles.**
+The TB nevertheless printed `tohost = 0` at the cap because the ad-hoc
+launcher watched OpenSBI's own `htif.c` `tohost` (`0x80041730`) instead of
+the payload's; `run_opensbi_source_review.py` derives the address from the
+payload ELF and now admits `g6lc64_ooo_server` (8 harts, 4 cores,
+`ariane-ooo-server.dts`) as an experimental target so the canonical flow
+can produce the verdict. The stale "200 M harness green" in
+`AGENTS-todo.md` is superseded by this run. Phase timeline on the boot
+hart: `fdt_irqchip_init` 12.07→21.71 M, `fdt_ipi_init` 21.71→30.50 M,
+`sbi_timer_init` 30.51→38.71 M, `sbi_domain_finalize` 38.71 M,
+`fdt_fixups` 39.98 M, `sbi_ecall_init` 44.18 M, `sbi_hsm_hart_start_finish`
+44.73 M, payload 44.73 M — three FDT-driven phases of 8–9.6 M cycles each
+are a performance note (T18: profile them; 4-hart int2_l3 boots in 18.4 M
+in total).

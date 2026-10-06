@@ -158,7 +158,15 @@ EXPERIMENTAL_TARGETS = frozenset({'g6lc64_smt2_ooo_int', 'g6lc64_ooo_int2',
                                   # WP4 SMT2+AI: two harts, dual issue, the FP AI island
                                   # (SOURCE_REVIEW_DTS=ariane-smt2-ai.dts,
                                   # SOURCE_REVIEW_CONFIG_PKG=g6lc64_smt2_ai_config_pkg.sv).
-                                  'g6lc64_smt2_ai'})
+                                  'g6lc64_smt2_ai',
+                                  # T17: the four-core x two-hart OoO server
+                                  # (SOURCE_REVIEW_HARTS=8, SOURCE_REVIEW_CORES=4,
+                                  # SOURCE_REVIEW_DTS=ariane-ooo-server.dts). The strict
+                                  # payload completes at ~44.85 M cycles; the tohost
+                                  # address MUST come from the payload ELF (nm) — the
+                                  # ad-hoc launches that watched OpenSBI's own htif
+                                  # tohost (0x80041730) reported tohost=0 at the cap.
+                                  'g6lc64_ooo_server'})
 
 
 def compiler_control_failures(control, verfiles, exists, digest, waive):
