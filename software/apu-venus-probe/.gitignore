@@ -1,0 +1,5 @@
+*.o
+*.elf
+*.bin
+tape.h
+venus_map.h

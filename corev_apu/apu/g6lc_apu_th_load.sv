@@ -65,9 +65,15 @@ module g6lc_apu_th_load
     if (ApuCfg.Enable) begin
       assert (apu_soc_legal(ApuCfg, CoreCfg))
         else $fatal(1, "APU th_load: need 2 cores and NrHarts=1");
-      assert (apu_dram_hole_legal(ApuCfg.FirmwareRamBase, ApuCfg.FirmwareRamBytes,
-                                  DramBase, DramBytes))
-        else $fatal(1, "APU th_load: firmware RAM is not a DRAM hole");
+      // Hartless configs (ApuVenus, ApuP1Transport: FirmwareHart ==
+      // UNASSIGNED and zero FirmwareRamBytes) reserve no DRAM hole.
+      if (ApuCfg.FirmwareHart != APU_FW_HART_UNASSIGNED ||
+          ApuCfg.FirmwareRamBytes != 64'h0) begin
+        assert (apu_dram_hole_legal(ApuCfg.FirmwareRamBase,
+                                    ApuCfg.FirmwareRamBytes,
+                                    DramBase, DramBytes))
+          else $fatal(1, "APU th_load: firmware RAM is not a DRAM hole");
+      end
       assert (apu_boot_split_legal(ApuCfg, CoreCfg, AppBoot))
         else $fatal(1, "APU th_load: firmware hart boot is not split from ROM");
       assert (GuestIdx != CtrlIdx && CtrlIdx != RamIdx && GuestIdx != RamIdx)
@@ -76,14 +82,24 @@ module g6lc_apu_th_load
   end
   `endif
 
+  // Degenerate (no firmware RAM hole: FirmwareHart == UNASSIGNED and
+  // FirmwareRamBytes == 0): the lo rule covers the whole DRAM window and
+  // the hi rule repeats it, so neither rule is ever empty (addr_decode
+  // fatals on start_addr >= end_addr).
+  localparam bit NoHole =
+      ApuCfg.FirmwareHart == APU_FW_HART_UNASSIGNED &&
+      ApuCfg.FirmwareRamBytes == 64'h0;
   assign dram_lo_rule_o = '{
       idx: DramIdx,
       start_addr: DramBase,
-      end_addr: apu_dram_lo_end(ApuCfg.FirmwareRamBase)
+      end_addr: NoHole ? DramBase + DramBytes
+                       : apu_dram_lo_end(ApuCfg.FirmwareRamBase)
   };
   assign dram_hi_rule_o = '{
       idx: DramIdx,
-      start_addr: apu_dram_hi_start(ApuCfg.FirmwareRamBase, ApuCfg.FirmwareRamBytes),
+      start_addr: NoHole ? DramBase
+                         : apu_dram_hi_start(ApuCfg.FirmwareRamBase,
+                                             ApuCfg.FirmwareRamBytes),
       end_addr: DramBase + DramBytes
   };
 
