@@ -3765,7 +3765,7 @@ ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus]
 
 | Waiting on | Phase | Exit |
 |---|---|---|
-| 3d bare-metal probe + stock riscv64 boot | B | kernel probe sequence + Venus init on the `G6LC_APU` testharness, then stock Ubuntu + Mesa on the proxy: `vulkaninfo` enumerates, one compute dispatch matches the oracle, `VenusEn=0` fails |
+| 3d-b stock riscv64 boot (3d-a bare-metal probe landed: `tb_g6lc_apu_cva6_venus`, §11 row 3d-a) | B | stock Ubuntu + Mesa on the proxy: `vulkaninfo` enumerates, one compute dispatch matches the oracle, `VenusEn=0` fails; DTS `reserved-memory` + `zicbom`/`svpbmt`, no `dma-coherent` |
 | Sampler / raster (Xfer landed: `g6lc_apu_xfer`, §11 row 5a) | C | images/formats/sampler with memory-resident descriptors (F5), `vkCmdCopyImage`/blits, TBDR raster + ROP into `tc_sram` tiles; G0/A5 via Zink |
 | Memory-resident descriptors (F5) | C | descriptor sets fetched from device memory (objpay/aperture) by the LSU with dynamic indices; ObjTab validation at descriptor-write time + generation check — not the 16-entry flop bind table |
 | `shwave` 1 IPC + `ShaderCores` | D | per-wave throughput 1 IPC; multi-core dispatch via the cluster pattern; `DramChannels` by profile |

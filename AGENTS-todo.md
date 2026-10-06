@@ -75,12 +75,26 @@ Priors: `architecture/uncore/apu-graphics.md`, `corev_apu/apu/AGENTS-impl-interp
   hart/mailbox); driver-model TB probes virtio_mmio/virtio_gpu
   register-for-register, 11 sessions + 5 arms; legacy feature words/FF
   identical. Catalog frozen (`133327577`/`755776ae0`).
-- [ ] 3d: bare-metal virtio-gpu probe on the CVA6 hart (G6LC_APU testharness,
-  `ApuVenus`), then stock Ubuntu riscv64 kernel + Mesa boot on the proxy:
-  `vulkaninfo` enumerates, one compute dispatch matches the oracle,
-  `VenusEn=0` fails. DTS: `reserved-memory` for the aperture,
-  `dma-coherent`/Zicbom decision (§12.1 F6).
-- [ ] Increment 5 per §12.3 C: Xfer → images/sampler with memory-resident
+- [x] **3d-a landed (2026-10-05, `2a38e71c4`)**: `tb_g6lc_apu_cva6_venus` — a CVA6
+  hart (`g6lc64_stream8`) boots bare-metal C from a sparse DRAM model, performs the
+  virtio_mmio/virtio_gpu probe register-for-register, lays out both split
+  virtqueues and replays the transport + compute tapes in software with the
+  kernel's non-coherent discipline (`cbo.flush`+`fence` before doorbells,
+  `cbo.inval` before device-written lines); 60 publications / 60 IRQ
+  rise-ack-fall pairs, every APU beat in-window, `ApuP1Transport` fails at the
+  feature check with zero DMA. Found: MMIO reads need a fence against a pending
+  store to the select register (same as `writel`/`readl`).
+- [ ] 3d-b: stock Ubuntu riscv64 kernel + Mesa boot on the proxy: `vulkaninfo`
+  enumerates, one compute dispatch matches the oracle, `VenusEn=0` fails. DTS:
+  `reserved-memory` for the aperture, non-coherent DMA (`zicbom` + `svpbmt`,
+  `riscv,cbom-block-size`), no `dma-coherent` (§12.1 F6, 3d-a contract).
+- [x] **5a landed (2026-10-05, `1d99eae72`)**: `g6lc_apu_xfer` — CopyBuffer /
+  FillBuffer / UpdateBuffer as checked burst DMA (dma_read/dma_write pair on the
+  shared master through the `tdma` join), regions + update data captured by
+  generated keep-lists, bounds + no-overlap validated before any write; 249
+  standalone cases, copy → barrier → dispatch → fill → readback session bit-exact
+  through vgtop/vgsys/sys-venus, OOB and overlap refused as DEVICE_LOST.
+- [ ] Increment 5 (rest, §12.3 C): images/formats/sampler with memory-resident
   descriptors (F5) → TBDR raster/ROP → UE SM5 profile ROM; G0/A5 via Zink.
 - [ ] §12.3 D/E: shwave 1 IPC + ShaderCores, DramChannels by profile,
   virtio-pci endpoint function (F4), scanout/dma-buf WSI; UE 5.8.3 SM5 on
