@@ -116,7 +116,7 @@ module g6lc_apu_sys
     logic                    vg_reset_done, vg_idle;
 
     g6lc_apu_vgsys #(
-      .Enable(1'b1), .WorkSink(1'b0)
+      .Enable(1'b1), .WorkSink(1'b0), .ApuCfg(ApuCfg)
     ) i_vgsys (
       .clk_i, .rst_ni, .testmode_i,
       .vq0_i(vq_state_o[0]), .vq1_i(vq_state_o[1]),

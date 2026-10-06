@@ -56,7 +56,9 @@ module g6lc_apu_vgtop
   parameter int unsigned ShaderMembers = 256,
   parameter int unsigned ScratchBytes  = 1024,
   parameter int unsigned SlabBytes     = 16384,
-  parameter int unsigned ShaderBudget  = 32'h0010_0000
+  parameter int unsigned ShaderBudget  = 32'h0010_0000,
+  // §12.3 C/5a: the Xfer engine derives its internal DMA view from this
+  parameter g6lc_apu_cfg_pkg::apu_cfg_t ApuCfg = g6lc_apu_cfg_pkg::ApuVenus
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -83,12 +85,22 @@ module g6lc_apu_vgtop
   input  logic [2:0]         mp_rsp_valid_i,
   input  apu_mp_rsp_t [2:0]  mp_rsp_i,
   // command-executor work port (TB work sink; dispatch-class records
-  // are consumed internally by the ShaderCore, §7b/5a-ii)
+  // are consumed internally by the ShaderCore, §7b/5a-ii; Xfer-class
+  // records — CopyBuffer/FillBuffer/UpdateBuffer — go to the xfer
+  // engine, §12.3 C/5a)
   output logic               work_valid_o,
   input  logic               work_ready_i,
   output apu_cmdexec_work_t  work_o,
   input  logic               work_done_i,
   input  apu_sh_done_t       work_done_pl_i,
+  // §5a: Xfer engine — checked-DMA AXI master (joined with apmem by
+  // g6lc_apu_tdma in vgsys), aperture base for mapping construction,
+  // engine reset drain, and a non-idle indication
+  output g6lc_apu_bus_pkg::apu_dma_axi_req_t  xf_axi_req_o,
+  input  g6lc_apu_bus_pkg::apu_dma_axi_resp_t xf_axi_rsp_i,
+  input  logic [63:0]      ap_base_i,
+  input  logic             xf_flush_i,
+  output logic             xfer_busy_o,
   // completion + idle observability
   output logic            done_o,          // pulse at chain completion
   output logic            busy_o,          // any engine busy
@@ -117,6 +129,8 @@ module g6lc_apu_vgtop
     assign mem_fault_o = 1'b0;
     assign mp_req_valid_o = '0; assign mp_req_o = '{default: '0};
     assign work_valid_o = 1'b0; assign work_o = '0;
+    assign xf_axi_req_o = '0;
+    assign xfer_busy_o  = 1'b0;
     assign done_o = 1'b0;   assign busy_o = 1'b0;
     assign fence_pulse_o = 1'b0; assign fence_id_o = '0;
     assign fence_ring_o = '0;
@@ -135,6 +149,7 @@ module g6lc_apu_vgtop
                     (|mp_req_ready_i) | (|mp_rsp_valid_i) |
                     (|mp_rsp_i[0]) | (|mp_rsp_i[1]) | (|mp_rsp_i[2]) |
                     work_ready_i | work_done_i | (|work_done_pl_i) |
+                    (|xf_axi_rsp_i) | (|ap_base_i) | xf_flush_i |
                     dbg_ot_valid_i | dbg_ot_cpl_ready_i | (|dbg_ot_req_i) |
                     (|chain_desc_i[0]) | (|chain_desc_i[1]) |
                     (|chain_desc_i[2]) | (|chain_desc_i[3]);
@@ -306,13 +321,24 @@ module g6lc_apu_vgtop
                        32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT) ||
                        work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_DISPATCH_INDIRECT_EXT);
+    // §12.3 C/5a: Xfer-class records go to the internal DMA engine
+    wire         work_is_xfer = work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
+                       work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT) ||
+                       work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT);
+    logic        xf_done, xf_work_rdy;
+    apu_sh_done_t xf_done_pl;
+    apu_xfer_desc_t ex_xfer;
     logic [2:0]         ex_disp_slot;
     logic [16*113-1:0]  ex_binds;
     logic [5:0]         ex_push_n;
     logic [1023:0]      ex_push;
 
-    assign work_valid_o = ex_work_v && !work_is_disp;
-    assign ex_work_rdy  = work_is_disp ? sh_work_rdy : work_ready_i;
+    assign work_valid_o = ex_work_v && !work_is_disp && !work_is_xfer;
+    assign ex_work_rdy  = work_is_disp ? sh_work_rdy :
+                          work_is_xfer ? xf_work_rdy : work_ready_i;
 
     g6lc_apu_cmdexec #(.Enable(1'b1), .Fences(Fences)) i_exec (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
@@ -331,9 +357,10 @@ module g6lc_apu_vgtop
       .op_cpl_valid_i(op_cpl_valid && opg_q == OPG_EXEC),
       .op_cpl_ready_o(ex_op_cpl_rdy), .op_cpl_i(op_cpl),
       .work_valid_o(ex_work_v), .work_ready_i(ex_work_rdy),
-      .work_o(work_o),
-      .work_done_i(sh_done | work_done_i),
-      .work_done_pl_i(sh_done ? sh_done_pl : work_done_pl_i),
+      .work_o(work_o), .xf_o(ex_xfer),
+      .work_done_i(sh_done | xf_done | work_done_i),
+      .work_done_pl_i(sh_done ? sh_done_pl :
+                      xf_done ? xf_done_pl : work_done_pl_i),
       .disp_slot_o(ex_disp_slot), .binds_o(ex_binds),
       .push_n_o(ex_push_n), .push_o(ex_push),
       .done_seq_o(ex_done_seq),
@@ -423,6 +450,28 @@ module g6lc_apu_vgtop
       .mem_rvalid_i(mp_rsp_valid_i[2]),
       .mem_rdata_i(mp_rsp_i[2].rdata), .mem_err_i(mp_rsp_i[2].err));
 
+    // ---- Xfer engine (§12.3 C/5a) --------------------------------------
+    // CopyBuffer/FillBuffer/UpdateBuffer records arrive with the operand
+    // descriptor cmdexec assembled (ex_xfer); the U64 operands are
+    // replayed from the cmdrec payload arena (a third, lowest-priority
+    // requester).  The checked-DMA pair inside presents one AXI master —
+    // vgsys joins it with apmem's through g6lc_apu_tdma.
+    logic xf_cr_v, xf_cr_rdy, xf_cr_cpl_rdy;
+    apu_cmdrec_req_t xf_cr_req;
+    g6lc_apu_xfer #(.Enable(1'b1), .ApuCfg(ApuCfg)) i_xf (
+      .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
+      .work_valid_i(ex_work_v && work_is_xfer),
+      .work_ready_o(xf_work_rdy),
+      .work_i(work_o), .xf_i(ex_xfer),
+      .done_o(xf_done), .done_pl_o(xf_done_pl),
+      .cr_req_valid_o(xf_cr_v), .cr_req_ready_i(xf_cr_rdy),
+      .cr_req_o(xf_cr_req),
+      .cr_cpl_valid_i(cr_cpl_valid),
+      .cr_cpl_ready_o(xf_cr_cpl_rdy), .cr_cpl_i(cr_cpl),
+      .ap_base_i(ap_base_i), .flush_i(xf_flush_i),
+      .busy_o(xfer_busy_o),
+      .axi_req_o(xf_axi_req_o), .axi_rsp_i(xf_axi_rsp_i));
+
     // ---- objtab -------------------------------------------------------------------
     g6lc_apu_objtab #(.Enable(1'b1)) i_tab (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
@@ -462,15 +511,20 @@ module g6lc_apu_vgtop
     assign dbg_ot_cpl_valid_o = ot_cpl_valid && og_q == OG_DBG;
     assign dbg_ot_cpl_o = ot_cpl;
 
-    // ---- CmdRec arbitration: pump (front) > cmdexec -----------------------------
-    typedef enum logic [0:0] { CG_PUMP, CG_EXEC } cg_e;
+    // ---- CmdRec arbitration: pump (front) > cmdexec > xfer ----------------
+    // §12.3 C/5a: the Xfer engine is the lowest-priority PAYREAD
+    // requester (replay of region/operand words and UpdateBuffer data)
+    typedef enum logic [1:0] { CG_PUMP, CG_EXEC, CG_XFER } cg_e;
     cg_e cg_q;
-    assign cr_req_valid = vp_cr_v | ex_cr_v;
-    assign cr_req = vp_cr_v ? vp_cr_req : ex_cr_req;
+    assign cr_req_valid = vp_cr_v | ex_cr_v | xf_cr_v;
+    assign cr_req = vp_cr_v ? vp_cr_req :
+                    ex_cr_v ? ex_cr_req : xf_cr_req;
     assign vp_cr_rdy = vp_cr_v & cr_req_ready;
     assign ex_cr_rdy = !vp_cr_v & ex_cr_v & cr_req_ready;
-    assign cr_cpl_ready = (cg_q == CG_PUMP) ? vp_cr_cpl_rdy
-                                          : ex_cr_cpl_rdy;
+    assign xf_cr_rdy = !vp_cr_v & !ex_cr_v & xf_cr_v & cr_req_ready;
+    assign cr_cpl_ready = (cg_q == CG_PUMP) ? vp_cr_cpl_rdy :
+                          (cg_q == CG_EXEC) ? ex_cr_cpl_rdy :
+                                              xf_cr_cpl_rdy;
 
     // ---- shared memory ports (apu_mp) ----------------------------------------
     // [0] CTL: vgctl request/response words, guest absolute (dom=0)
@@ -501,7 +555,8 @@ module g6lc_apu_vgtop
         end
         if (ot_cpl_valid && ot_cpl_ready) og_q <= OG_NONE;
         if (cr_req_valid && cr_req_ready)
-          cg_q <= vp_cr_v ? CG_PUMP : CG_EXEC;
+          cg_q <= vp_cr_v ? CG_PUMP :
+                  ex_cr_v ? CG_EXEC : CG_XFER;
         // §7b/5a-ii: ObjPay/vgpages grant owners, same latch scheme
         if (op_req_valid && op_req_ready)
           opg_q <= vp_op_v ? OPG_PUMP : OPG_EXEC;
@@ -532,7 +587,8 @@ module g6lc_apu_vgtop
     assign cpl_len_o   = cpl_len_q;
     assign done_o      = vc_done;
     assign mem_fault_o = vc_mem_fault;
-    assign busy_o      = vc_busy | vp_busy | sh_busy | ex_busy;
+    assign busy_o      = vc_busy | vp_busy | sh_busy | ex_busy |
+                         xfer_busy_o;
     // chain_id is published by the walker, not consumed here
     logic unused_chain;
     assign unused_chain = |chain_id_i;
@@ -567,7 +623,8 @@ module g6lc_apu_vgtop_fixture
   parameter int unsigned ShaderMembers = 256,
   parameter int unsigned ScratchBytes  = 1024,
   parameter int unsigned SlabBytes     = 16384,
-  parameter int unsigned ShaderBudget  = 32'h0010_0000
+  parameter int unsigned ShaderBudget  = 32'h0010_0000,
+  parameter g6lc_apu_cfg_pkg::apu_cfg_t ApuCfg = g6lc_apu_cfg_pkg::ApuVenus
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -591,6 +648,11 @@ module g6lc_apu_vgtop_fixture
   output apu_cmdexec_work_t  work_o,
   input  logic               work_done_i,
   input  apu_sh_done_t       work_done_pl_i,
+  output g6lc_apu_bus_pkg::apu_dma_axi_req_t  xf_axi_req_o,
+  input  g6lc_apu_bus_pkg::apu_dma_axi_resp_t xf_axi_rsp_i,
+  input  logic [63:0]      ap_base_i,
+  input  logic             xf_flush_i,
+  output logic             xfer_busy_o,
   output logic            done_o,
   output logic            busy_o,
   output logic            fence_pulse_o,
@@ -615,5 +677,6 @@ module g6lc_apu_vgtop_fixture
     .ShaderIds(ShaderIds), .ShaderSlots(ShaderSlots),
     .ShaderWords(ShaderWords), .ShaderInit(ShaderInit),
     .ShaderMembers(ShaderMembers), .ScratchBytes(ScratchBytes),
-    .SlabBytes(SlabBytes), .ShaderBudget(ShaderBudget)) i_dut (.*);
+    .SlabBytes(SlabBytes), .ShaderBudget(ShaderBudget),
+    .ApuCfg(ApuCfg)) i_dut (.*);
 endmodule

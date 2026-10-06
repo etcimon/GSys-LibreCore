@@ -62,7 +62,9 @@ module g6lc_apu_vgsys
   // sink).  0 (§6c F1 SoC seam): refuse them truthfully — answered
   // APU_SH_DONE_UNSUPPORTED one cycle after accept, so cmdexec marks
   // the submission DEVICE_LOST exactly like an unsupported dispatch.
-  parameter bit          WorkSink = 1'b1
+  parameter bit          WorkSink = 1'b1,
+  // §12.3 C/5a: the Xfer engine derives its internal DMA view from this
+  parameter g6lc_apu_cfg_pkg::apu_cfg_t ApuCfg = g6lc_apu_cfg_pkg::ApuVenus
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -174,6 +176,12 @@ module g6lc_apu_vgsys
     apu_mp_rsp_t [APU_MP_N-1:0] mp_rsp;
     logic                     mem_outst, mem_idle;
     logic                     apflush;
+    // xfer join signals are declared before first use (slang strict
+    // ordering); see the tdma join below.
+    logic                     xfer_busy;
+    logic                     xf_flush;
+    apu_dma_axi_req_t         mem_axi_req, xf_axi_req;
+    apu_dma_axi_resp_t        mem_axi_rsp, xf_axi_rsp;
 
     // port 0 (PUB) is unused: vqwalk publishes used elements itself
     assign mp_req_valid[APU_MP_PUB] = 1'b0;
@@ -187,9 +195,22 @@ module g6lc_apu_vgsys
       .rsp_valid_o(mp_rsp_valid), .rsp_o(mp_rsp),
       .guest_base_i(guest_base_i), .guest_bytes_i(guest_bytes_i),
       .ap_base_i(ap_base_i), .ap_bytes_i(ap_bytes_i),
-      .axi_req_o(dma_req_o), .axi_rsp_i(dma_rsp_i),
+      .axi_req_o(mem_axi_req), .axi_rsp_i(mem_axi_rsp),
       .outstanding_o(mem_outst), .fault_cnt_o(fault_cnt_o),
       .idle_o(mem_idle));
+
+    // ---- Xfer AXI join (§12.3 C/5a) -----------------------------------
+    // xfer's checked-DMA pair presents one AXI master; g6lc_apu_tdma
+    // joins it with apmem's — apmem keeps the winning (a) port and xfer
+    // takes (b), waiting for an idle window.  tdma locks the granted
+    // port for the whole transaction, so ports serialize per burst
+    // while xfer's own read burst and write round trips still overlap
+    // inside port b.
+    g6lc_apu_tdma #(.Enable(1'b1)) i_tdma (
+      .clk_i(clk_i), .rst_ni(rst_ni),
+      .a_req_i(mem_axi_req), .a_rsp_o(mem_axi_rsp),
+      .b_req_i(xf_axi_req),  .b_rsp_o(xf_axi_rsp),
+      .mst_req_o(dma_req_o), .mst_rsp_i(dma_rsp_i));
 
     // ---- virtqueue walker -------------------------------------------
     logic        vw_idle, vw_cpl_rdy, vw_fault;
@@ -262,7 +283,8 @@ module g6lc_apu_vgsys
       .ShaderIds(ShaderIds), .ShaderSlots(ShaderSlots),
       .ShaderWords(ShaderWords), .ShaderInit(ShaderInit),
       .ShaderMembers(ShaderMembers), .ScratchBytes(ScratchBytes),
-      .SlabBytes(SlabBytes), .ShaderBudget(ShaderBudget)) i_top (
+      .SlabBytes(SlabBytes), .ShaderBudget(ShaderBudget),
+      .ApuCfg(ApuCfg)) i_top (
       .clk_i(clk_i), .rst_ni(eng_rst_n), .testmode_i(testmode_i),
       .chain_valid_i(vw_chain_v), .chain_ready_o(vw_chain_rdy),
       .chain_id_i(vw_chain_id), .chain_n_i(vw_chain_n),
@@ -277,6 +299,9 @@ module g6lc_apu_vgsys
       .work_valid_o(ws_v), .work_ready_i(ws_rdy),
       .work_o(ws_work),
       .work_done_i(ws_done), .work_done_pl_i(ws_done_pl),
+      .xf_axi_req_o(xf_axi_req), .xf_axi_rsp_i(xf_axi_rsp),
+      .ap_base_i(ap_base_i), .xf_flush_i(xf_flush),
+      .xfer_busy_o(xfer_busy),
       .done_o(done_o), .busy_o(vg_busy),
       .fence_pulse_o(fence_pulse_o), .fence_id_o(fence_id_o),
       .fence_ring_o(fence_ring_o),
@@ -290,6 +315,10 @@ module g6lc_apu_vgsys
       .dbg_ot_cpl_o(dbg_ot_cpl_o));
 
     assign apflush = rst_q == RFlush || reset_req_i;
+    // §12.3 C/5a: the Xfer engine gets the same cancel-and-drain as
+    // apmem; its busy stays up until both DMA legs have retired or
+    // halted, which is what RFlush waits on before eng_rst_n falls
+    assign xf_flush = apflush;
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -304,8 +333,9 @@ module g6lc_apu_vgsys
           end
           RFlush: begin
             // apmem drops non-issued requests; an in-flight AXI
-            // transaction must drain before the engines reset
-            if (!mem_outst) begin
+            // transaction must drain before the engines reset — same
+            // for the Xfer engine's DMA pair (§12.3 C/5a)
+            if (!mem_outst && !xfer_busy) begin
               soft_q     <= 1'b1;
               soft_cnt_q <= 3'd4;
               rst_q      <= RSoft;

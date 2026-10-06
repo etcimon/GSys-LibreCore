@@ -1617,7 +1617,16 @@ module g6lc_apu_vnfront
                     APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT
                     ? 16'(op_q.imm[2] + op_q.imm[3])
                     : op_q.cmd_type ==
-                      APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT
+                      APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT ||
+                      // §12.3 C/5a: Xfer operand payloads (copy
+                      // regions, fill/update headers, update data)
+                      // stream verbatim like push constants
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT ||
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT ||
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT
                       ? 16'(op_q.pay_words) : 16'h0;
                 res_i_q <= '0;
                 rhi_q   <= '0;

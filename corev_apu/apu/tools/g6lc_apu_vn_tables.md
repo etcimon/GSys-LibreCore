@@ -279,6 +279,18 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 
 - top level: `offset` u32, `size` u32, `pValues` data words
 
+### vkCmdCopyBuffer (type 112)
+
+- per `pRegions` element (element count = `regionCount`): `pRegions.srcOffset` u64 (2 words), `pRegions.dstOffset` u64 (2 words), `pRegions.size` u64 (2 words)
+
+### vkCmdFillBuffer (type 118)
+
+- top level: `dstOffset` u64 (2 words), `size` u64 (2 words)
+
+### vkCmdUpdateBuffer (type 117)
+
+- top level: `dstOffset` u64 (2 words), `dataSize` u64 (2 words), `pData` data words
+
 ## Per-command maps
 
 ### vkCreateInstance — type 0, mpc 180..204, reply 1, act ALLOC
@@ -1951,9 +1963,9 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 | HANDLE | 16 | 0x7 | dstBuffer:LOOKUP |
 | U32 | 0 | 0x0 | regionCount |
 | ARRAY | 0 | 0x6 | pRegions |
-| U64 | 127 | 0x0 | srcOffset |
-| U64 | 127 | 0x0 | dstOffset |
-| U64 | 127 | 0x0 | size |
+| U64 | 127 | 0x0 | srcOffset **KEEP** |
+| U64 | 127 | 0x0 | dstOffset **KEEP** |
+| U64 | 127 | 0x0 | size **KEEP** |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 
@@ -2079,8 +2091,8 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 |---|---|---|---|
 | HANDLE | 0 | 0x17 | commandBuffer:LOOKUP |
 | HANDLE | 8 | 0x7 | dstBuffer:LOOKUP |
-| U64 | 2 | 0x0 | dstOffset |
-| U64 | 3 | 0x0 | size |
+| U64 | 2 | 0x0 | dstOffset **KEEP** |
+| U64 | 3 | 0x0 | size **KEEP** |
 | U32 | 0 | 0x0 | data |
 | END | 0 | 0x0 |  |
 
@@ -2090,9 +2102,9 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 |---|---|---|---|
 | HANDLE | 0 | 0x17 | commandBuffer:LOOKUP |
 | HANDLE | 8 | 0x7 | dstBuffer:LOOKUP |
-| U64 | 2 | 0x0 | dstOffset |
-| U64 | 3 | 0x0 | dataSize |
-| BLOB | 0 | 0x0 | pData |
+| U64 | 2 | 0x0 | dstOffset **KEEP** |
+| U64 | 3 | 0x0 | dataSize **KEEP** |
+| BLOB | 0 | 0x0 | pData **KEEP** |
 | END | 0 | 0x0 |  |
 
 ### vkCmdClearColorImage — type 119, mpc 1489..1503, reply 0, act RECORD

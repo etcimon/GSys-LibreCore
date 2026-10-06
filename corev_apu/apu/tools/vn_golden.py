@@ -1681,6 +1681,79 @@ class FrontModel:
         for j in range(b, b + (nbytes + VGP_PAGE - 1) // VGP_PAGE):
             self.pg_pages[j] = 0
 
+    def _xfer_extent(self, h, kind):
+        """§12.3 C/5a: mirror cmdexec's StXf* operand assembly —
+        buffer handle -> bound extent (aperture byte base =
+        mem.aux[63:32] + bind_offset, xsize = min(buf.size,
+        mem.size - bind_off)); None -> DEVICE_LOST."""
+        st, _s, be = self.resolve(h, kind)
+        if st != 'OK' or be['size'] > 0xFFFFFFFF:
+            # dead/unbound/over-4 GiB operand (StXfBufCpl)
+            return None
+        ms = be.get('bind_mem', -1)
+        if ms < 0 or ms >= self.SLOTS or self.ent[ms] is None:
+            return None
+        me = self.ent[ms]
+        bo = be.get('bind_off', 0)
+        if (me['kind'] != KIND['VkDeviceMemory'] or
+                me['size'] > 0xFFFFFFFF or bo > me['size']):
+            return None
+        return (((me['aux'] >> 32) & 0xFFFFFFFF) + bo,
+                min(be['size'], me['size'] - bo))
+
+    def _xfer_record_lost(self, session, r, aux):
+        """mirror g6lc_apu_xfer's validation: bounds checked before
+        any write; aperture-space src∩dst overlap refused; FILL/UPDATE
+        alignment rules.  True -> DEVICE_LOST."""
+        T = session['T']
+        ct = r['ctype']
+        ar = self.pay_arena[aux]
+        abase = r['imm'][7] & 0xFFFF
+
+        def a64(i):
+            return (ar.get(abase + i, 0) |
+                    (ar.get(abase + i + 1, 0) << 32))
+        if ct == T['vkCmdCopyBuffer']:
+            se = self._xfer_extent(r['handle'][0], r['kind'][0])
+            de = self._xfer_extent(r['handle'][1], r['kind'][1])
+            if se is None or de is None:
+                return True
+            nr = r['imm'][0] & 0xFFFF
+            srcs, dsts = [], []
+            for i in range(nr):
+                so, do, sz = a64(6 * i), a64(6 * i + 2), a64(6 * i + 4)
+                if (so > se[1] or sz > se[1] - so or
+                        do > de[1] or sz > de[1] - do):
+                    return True
+                srcs.append((se[0] + so, sz))
+                dsts.append((de[0] + do, sz))
+            for sb, ssz in srcs:
+                for db, dsz in dsts:
+                    if (ssz and dsz and
+                            sb < db + dsz and db < sb + ssz):
+                        return True
+            return False
+        de = self._xfer_extent(r['handle'][0], r['kind'][0])
+        if de is None:
+            return True
+        doff, dsz = a64(0), a64(2)
+        WHOLE = 0xFFFFFFFFFFFFFFFF
+        eff = dsz
+        if ct == T['vkCmdFillBuffer'] and dsz == WHOLE:
+            eff = 0 if doff >= de[1] else de[1] - doff
+        if doff & 3:
+            return True
+        if ct == T['vkCmdUpdateBuffer'] and \
+                (dsz & 3 or dsz == 0 or dsz > 65536):
+            return True
+        if ct == T['vkCmdFillBuffer'] and dsz != WHOLE and dsz & 3:
+            return True
+        if ct == T['vkCmdFillBuffer'] and dsz == WHOLE and eff & 3:
+            return True
+        if doff > de[1] or eff > de[1] - doff:
+            return True
+        return False
+
     def _disp_assembly_lost(self, session, aux):
         """§7b/5a-ii: replay one command buffer's records the way
         cmdexec does at submit; True -> DEVICE_LOST on the fence."""
@@ -1741,6 +1814,13 @@ class FrontModel:
             elif ct == T.get('vkCmdDispatchIndirect', -1):
                 # issues on the work port -> shcore UNSUPPORTED -> lost
                 return True
+            elif ct in (T['vkCmdCopyBuffer'], T['vkCmdFillBuffer'],
+                        T['vkCmdUpdateBuffer']):
+                # §12.3 C/5a: Xfer operand resolution + validation —
+                # unbound/OOB/overlap/misalignment refuse the record
+                # (FAULT) -> DEVICE_LOST on the fence
+                if self._xfer_record_lost(session, r, aux):
+                    return True
         return False
 
     def reset_ctx(self, ctx=0):
@@ -2275,6 +2355,14 @@ class FrontModel:
                                 rec['pay'][nset * 2 + i] & 0xFFFFFFFF)
                     elif ct == session['T']['vkCmdPushConstants']:
                         pwords = [w & 0xFFFFFFFF for w in rec['pay']]
+                    elif ct in (session['T']['vkCmdCopyBuffer'],
+                                session['T']['vkCmdFillBuffer'],
+                                session['T']['vkCmdUpdateBuffer']):
+                        # §12.3 C/5a: xfer operand payloads stream
+                        # verbatim through the cmdrec arena (the
+                        # engine replays them with PAYREAD at
+                        # pay_base = imm[7])
+                        pwords = [w & 0xFFFFFFFF for w in rec['pay']]
                     if pwords:
                         abase = self.arena_append(aux, pwords)
                         if abase is None:
@@ -2283,6 +2371,8 @@ class FrontModel:
                             out['result'] = VK_ERR_UNKNOWN
                             self.setstate(hnd[cb_q], 0xF, CB_INV)
                         else:
+                            # cmdrec stamps imm[7] = the payload base
+                            recd['imm'][7] = abase
                             for i, w in enumerate(pwords):
                                 out['arenaw'].append(
                                     (aux, abase + i, w))
@@ -3255,6 +3345,16 @@ RING_STATUS_OFF = 128
 RING_BUF_OFF    = 192
 
 
+def splice_bytes(base_words, dst_off, src_words, src_off, n):
+    """§12.3 C/5a xfer oracle: word list -> bytes, splice n src bytes at
+    dst_off, back to a word list."""
+    b = bytearray(b''.join(struct.pack('<I', w) for w in base_words))
+    s = b''.join(struct.pack('<I', w) for w in src_words)
+    b[dst_off:dst_off + n] = s[src_off:src_off + n]
+    return [struct.unpack('<I', bytes(b[4 * i:4 * i + 4]))[0]
+            for i in range(len(b) // 4)]
+
+
 def le64(v):
     return [v & 0xFFFFFFFF, (v >> 32) & 0xFFFFFFFF]
 
@@ -3899,6 +3999,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         mems = [0x6000_0000_1000 + i * 0x1000_0001
                 for i in range(n_bind)]
         RES_BLOB0 = 200                 # memory-blob resource ids
+        # §12.3 C/5a xfer staging image: 128 B of distinctive data
+        XFER_STAGE_W = [(0xA500_0000 + i) & 0xFFFFFFFF
+                        for i in range(32)]
+        XFER_FILL_W = 0xDEAD_BEEF
+        XFER_UPD_W = [(0xC0FF_0000 + i) & 0xFFFFFFFF
+                      for i in range(16)]
         r = tm.rings[r0['slot']]
         rep_q = []
         batch_no = [0]
@@ -4035,6 +4141,37 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                  allocationSize=0x400000,
                                  memoryTypeIndex=0),
                 pMemory=0x6000_0000_8000)))
+        if variant == 'xfer_copy':
+            # §12.3 C/5a: staging src buffer, fill target, readback —
+            # pure transfer operands (not descriptor-bound)
+            for j, (usg, sz) in enumerate([(0x3, 128), (0x2, 128),
+                                           (0x2, 128)]):
+                bufs.append(0x5000_0000_1000 + (n_bind + j) *
+                            0x1000_0001)
+                mems.append(0x6000_0000_1000 + (n_bind + j) *
+                            0x1000_0001)
+                seg_a1 += [
+                    ('vkCreateBuffer', dict(
+                        device=V['dev'],
+                        pCreateInfo=st('VkBufferCreateInfo', size=sz,
+                                       usage=usg, sharingMode=0,
+                                       queueFamilyIndexCount=0,
+                                       pQueueFamilyIndices=[]),
+                        pBuffer=bufs[n_bind + j])),
+                    ('vkGetBufferMemoryRequirements', dict(
+                        device=V['dev'], buffer=bufs[n_bind + j],
+                        pMemoryRequirements=st(
+                            'VkMemoryRequirements'))),
+                    ('vkAllocateMemory', dict(
+                        device=V['dev'],
+                        pAllocateInfo=st('VkMemoryAllocateInfo',
+                                         allocationSize=sz,
+                                         memoryTypeIndex=0),
+                        pMemory=mems[n_bind + j])),
+                    ('vkBindBufferMemory', dict(
+                        device=V['dev'], buffer=bufs[n_bind + j],
+                        memory=mems[n_bind + j], memoryOffset=0)),
+                ]
         seg_a1 += [
             ('vkCreateShaderModule', dict(
                 device=V['dev'],
@@ -4119,6 +4256,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 blob_base.append(base_b)
                 map_blob(RES_BLOB0 + i)
                 apw(base_b, vec['inits'][i])
+            if variant == 'xfer_copy':
+                # memory-backed blobs for the three transfer-only
+                # buffers; the guest stages the copy source contents
+                for j in range(3):
+                    base_b = create_blob_mem(RES_BLOB0 + n_bind + j,
+                                             128, mems[n_bind + j])
+                    assert base_b is not None, 'xfer blob refused'
+                    blob_base.append(base_b)
+                    map_blob(RES_BLOB0 + n_bind + j)
+                apw(blob_base[n_bind], XFER_STAGE_W)
             if variant == 'badmem':
                 create_blob_mem(199, 4096, 0xDEADBEEF)
 
@@ -4194,6 +4341,34 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     size=len(vec['push']) * 4,
                     pValues=b''.join(struct.pack('<I', w)
                                      for w in vec['push']))))
+            # §12.3 C/5a: xfer records before the dispatch — the copy
+            # feeds the shader's input buffer (barrier orders it), the
+            # update patches it; the negatives append a refusing copy
+            # after the dispatch instead
+            if variant == 'xfer_copy':
+                seg_a2.append(('vkCmdCopyBuffer', dict(
+                    commandBuffer=V['cb'],
+                    srcBuffer=bufs[n_bind], dstBuffer=bufs[0],
+                    regionCount=2,
+                    pRegions=[
+                        st('VkBufferCopy', srcOffset=4, dstOffset=12,
+                           size=32),
+                        st('VkBufferCopy', srcOffset=68, dstOffset=76,
+                           size=16)])))
+                seg_a2.append(('vkCmdPipelineBarrier', dict(
+                    commandBuffer=V['cb'],
+                    srcStageMask=0x2000, dstStageMask=0x8,
+                    dependencyFlags=0,
+                    memoryBarrierCount=0, pMemoryBarriers=[],
+                    bufferMemoryBarrierCount=0, pBufferMemoryBarriers=[],
+                    imageMemoryBarrierCount=0, pImageMemoryBarriers=[])))
+            elif variant == 'xfer_update':
+                seg_a2.append(('vkCmdUpdateBuffer', dict(
+                    commandBuffer=V['cb'], dstBuffer=bufs[0],
+                    dstOffset=16, dataSize=64,
+                    pData=b''.join(struct.pack(
+                        '<I', (0xC0FF_0000 + i) & 0xFFFFFFFF)
+                        for i in range(16)))))
             if variant == 'worksink':
                 # non-dispatch work record: the record issues on the
                 # cmdexec work port — a WorkSink=0 backend answers it
@@ -4204,6 +4379,37 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 seg_a2.append(('vkCmdDispatch', dict(
                     commandBuffer=V['cb'], groupCountX=vec['gx'],
                     groupCountY=vec['gy'], groupCountZ=vec['gz'])))
+            if variant == 'xfer_copy':
+                # post-dispatch: fill a third buffer to its end, then
+                # copy the shader's output into the readback buffer
+                seg_a2.append(('vkCmdFillBuffer', dict(
+                    commandBuffer=V['cb'], dstBuffer=bufs[n_bind + 1],
+                    dstOffset=0, size=0xFFFFFFFFFFFFFFFF,
+                    data=XFER_FILL_W)))
+                seg_a2.append(('vkCmdCopyBuffer', dict(
+                    commandBuffer=V['cb'],
+                    srcBuffer=bufs[1], dstBuffer=bufs[n_bind + 2],
+                    regionCount=1,
+                    pRegions=[st('VkBufferCopy', srcOffset=0,
+                                 dstOffset=0, size=128)])))
+            elif variant == 'xfer_oob':
+                # dst extent past the buffer end -> the engine refuses
+                # before any write -> DEVICE_LOST
+                seg_a2.append(('vkCmdCopyBuffer', dict(
+                    commandBuffer=V['cb'],
+                    srcBuffer=bufs[0], dstBuffer=bufs[1],
+                    regionCount=1,
+                    pRegions=[st('VkBufferCopy', srcOffset=0,
+                                 dstOffset=96, size=64)])))
+            elif variant == 'xfer_overlap':
+                # same-buffer overlapping copy -> refused before any
+                # beat -> DEVICE_LOST
+                seg_a2.append(('vkCmdCopyBuffer', dict(
+                    commandBuffer=V['cb'],
+                    srcBuffer=bufs[0], dstBuffer=bufs[0],
+                    regionCount=1,
+                    pRegions=[st('VkBufferCopy', srcOffset=0,
+                                 dstOffset=64, size=128)])))
             seg_a2 += [
                 ('vkEndCommandBuffer', dict(commandBuffer=V['cb'])),
                 ('vkCreateFence', dict(
@@ -4243,9 +4449,70 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
 
             # ---- §7a gates at the aperture ---------------------------- #
             lost = variant in ('lostbuf', 'baddesc', 'nopipe',
-                               'bindoob', 'worksink')
+                               'bindoob', 'worksink',
+                               'xfer_oob', 'xfer_overlap')
             if not lost:
-                if variant == 'descoob':
+                if variant in ('xfer_copy', 'xfer_update'):
+                    # §12.3 C/5a: the copy/update ran before the
+                    # dispatch (barrier ordering) — the shader's
+                    # expected output is the spirv_model run on the
+                    # *modified* input image
+                    if variant == 'xfer_copy':
+                        inb = splice_bytes(vec['inits'][0], 12,
+                                           XFER_STAGE_W, 4, 32)
+                        inb = splice_bytes(inb, 76,
+                                           XFER_STAGE_W, 68, 16)
+                    else:
+                        inb = splice_bytes(vec['inits'][0], 16,
+                                           XFER_UPD_W, 0, 64)
+                    mw = [len(vec['spv']), len(vec['binds']),
+                          len(vec['push']), vec['gx'], vec['gy'],
+                          vec['gz'], 0, 0] + list(vec['spv'])
+                    for i, b in enumerate(vec['binds']):
+                        mw += [b['set'], b['binding'], b['size'],
+                               0x8000 + i * 0x2000]
+                    mw += list(vec['push'])
+                    for i, b in enumerate(vec['binds']):
+                        mw += inb if i == 0 else list(vec['inits'][i])
+                    cm = spirv_model.Model(mw)
+                    cm.run()
+                    couts = cm.outputs()
+                    ccls = cm.out_classes()
+                    for o in vec['outs']:
+                        k = o['bind_idx']
+                        base_b = blob_base[k]
+                        nw = o['size'] // 4
+                        W(TP_CHECK, CK_APR, nw, base_b)
+                        for j in range(nw):
+                            rec(EK_APRCHK, base_b + 4 * j,
+                                couts[k][j], couts[k][j],
+                                1 if ccls[k][j] == 'f' else 0)
+                    if variant == 'xfer_copy':
+                        # proof the copy landed: the input buffer's
+                        # aperture image itself
+                        base_b = blob_base[0]
+                        W(TP_CHECK, CK_APR, len(inb), base_b)
+                        for j, w in enumerate(inb):
+                            rec(EK_APRCHK, base_b + 4 * j, w, w, 0)
+                        # fill target: 128 B of the pattern word
+                        base_b = blob_base[n_bind + 1]
+                        W(TP_CHECK, CK_APR, 32, base_b)
+                        for j in range(32):
+                            rec(EK_APRCHK, base_b + 4 * j,
+                                XFER_FILL_W, XFER_FILL_W, 0)
+                        # readback buffer: byte copy of the output
+                        base_b = blob_base[n_bind + 2]
+                        exp_rb = (couts[1] if 1 in couts
+                                  else list(vec['inits'][1]))
+                        W(TP_CHECK, CK_APR, 32, base_b)
+                        for j in range(32):
+                            rec(EK_APRCHK, base_b + 4 * j,
+                                exp_rb[j], exp_rb[j], 0)
+                        note("B' gates: xfer_copy oracle+%d buf words"
+                             % (len(inb) + 32 + 32))
+                    else:
+                        note("B' gates: xfer_update oracle words")
+                elif variant == 'descoob':
                     # oracle = spirv_model run with binding 1's view
                     # clamped to 128 B at +128 (the §7b assembly's
                     # min(range, size-eoff) result) — no lavapipe
@@ -4319,7 +4586,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             if variant != 'modgone':
                 seg_c.append(('vkDestroyShaderModule', dict(
                     device=V['dev'], shaderModule=V['sm'])))
-            for i in range(n_bind):
+            for i in range(len(bufs)):
                 if variant == 'lostbuf' and i == 0:
                     pass
                 else:
@@ -4333,7 +4600,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             run_batches(compile_cmds(seg_c))
 
             # memory-backed blobs: unref frees the resource only
-            for i in range(n_bind):
+            for i in range(len(blob_base)):
                 submit(VG_RESOURCE_UNREF, [RES_BLOB0 + i, 0],
                        ctx=CTX_ID, exp_type=VG_RESP_NODATA)
                 tm.blobs.pop(RES_BLOB0 + i)
@@ -4896,7 +5163,8 @@ def main():
     ap.add_argument('--variant', default='',
                     help='compute-session negative arm: spec, modgone, '
                          'lostbuf, baddesc, nopipe, pgfull, badmem, '
-                         'bindoob, descoob, worksink')
+                         'bindoob, descoob, worksink, xfer_copy, '
+                         'xfer_update, xfer_oob, xfer_overlap')
     ap.add_argument('--print', dest='print_cmd', metavar='CMD')
     ap.add_argument('--dump-json', metavar='FILE',
                     help='write every generated instance (args+words) as '

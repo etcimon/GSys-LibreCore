@@ -66,6 +66,7 @@ module g6lc_apu_cmdexec
   input  logic               work_done_i,
   input  apu_sh_done_t       work_done_pl_i,
   // §7b/5a-ii: shcore dispatch sideband (valid with work_o)
+  output apu_xfer_desc_t     xf_o,   // §12.3 C/5a: Xfer operand desc
   output logic [2:0]         disp_slot_o,
   output logic [16*113-1:0]  binds_o,
   output logic [5:0]         push_n_o,
@@ -92,6 +93,7 @@ module g6lc_apu_cmdexec
     assign op_cpl_ready_o  = 1'b0;
     assign work_valid_o    = 1'b0;
     assign work_o          = '0;
+    assign xf_o            = '0;
     assign disp_slot_o     = '0;
     assign binds_o         = '0;
     assign push_n_o        = '0;
@@ -122,7 +124,10 @@ module g6lc_apu_cmdexec
       StDsBndRd, StDsBndCpl, StDsBufChk,
       StDsBufReq, StDsBufCpl,
       StDsMemReq, StDsMemCpl,
-      StDsIssue, StDsDone
+      StDsIssue, StDsDone,
+      // §12.3 C/5a: Xfer operand assembly (buffer LOOKUP + bound-memory
+      // READSLOT per operand, then the record issues on StWork)
+      StXfBufReq, StXfBufCpl, StXfMemReq, StXfMemCpl
     } state_e;
     state_e              state_q;
     // submit FIFO (flops)
@@ -160,6 +165,28 @@ module g6lc_apu_cmdexec
     logic [16*113-1:0]   binds_q;       // {set,binding,base,size,valid}×16
     logic [1023:0]       push_sh_q;     // 32-word push shadow
     logic [5:0]          push_max_q;    // highest written word + 1
+    // §12.3 C/5a: Xfer assembly — operand cursor and resolved extents
+    logic                xf_opnd_q;     // 0 = src (COPY) / dst (others)
+    logic [15:0]         xf_ms_q;       // bound memory slot
+    logic [63:0]         xf_bo_q;       // buffer bind_offset
+    logic [63:0]         xf_bs_q;       // buffer size
+    logic [31:0]         xf_src_base_q, xf_src_size_q;
+    logic [31:0]         xf_dst_base_q, xf_dst_size_q;
+
+    // XFER-class record types, assembled through the StXf* states
+    wire work_is_xfer = rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
+                        rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT) ||
+                        rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT);
+    // operand 0 resolves handle[0] (src for COPY, dst otherwise);
+    // operand 1 is COPY's dst at handle[1] — record handles pack the
+    // non-commandBuffer lookup slots sequentially from 0 (the same
+    // packing StRecFill/StDispatch rely on, e.g. pipeline at [0])
+    wire [1:0] xf_hsel = rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT)
+                        ? {1'b0, xf_opnd_q} : 2'd0;
 
     // ---- record classification --------------------------------------
     function automatic apu_cmdexec_cls_e rec_cls(logic [31:0] t);
@@ -217,6 +244,18 @@ module g6lc_apu_cmdexec
     assign ot_cpl_ready_o = 1'b1;
     assign op_cpl_ready_o = 1'b1;
     assign disp_slot_o    = ds_slot_q;
+    // §12.3 C/5a: assembled Xfer descriptor — valid with work_o for
+    // XFER-class records (the engine replays the U64 operands out of
+    // the record's payload arena at pay_base = imm[7])
+    assign xf_o = '{op: rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT)
+                        ? APU_XFER_OP_COPY :
+                    rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT)
+                        ? APU_XFER_OP_FILL : APU_XFER_OP_UPDATE,
+                   cbuf:     cur_q.crec[buf_i_q[1:0]],
+                   pay_base: rec_q.imm[7][15:0],
+                   regions:  rec_q.imm[0][15:0],
+                   src_base: xf_src_base_q, src_size: xf_src_size_q,
+                   dst_base: xf_dst_base_q, dst_size: xf_dst_size_q};
     assign binds_o        = binds_q;
     assign push_n_o       = push_max_q;
     assign push_o         = push_sh_q;
@@ -308,6 +347,23 @@ module g6lc_apu_cmdexec
           work_valid_o = 1'b1;
           work_o       = '{ctype: rec_q.ctype, snap: snap_q, rec: rec_q};
         end
+        StXfBufReq: begin
+          // §5a: re-resolve the operand buffer (kind already proven by
+          // the StRes walk; we need the live entry fields)
+          ot_req_valid_o = 1'b1;
+          ot_req_o       = '{op: APU_OBJTAB_OP_LOOKUP,
+                             id: {32'h0, rec_q.handle[xf_hsel]},
+                             kind: 6'(APU_VN_KIND_VK_BUFFER),
+                             default: '0};
+        end
+        StXfMemReq: begin
+          ot_req_valid_o = 1'b1;
+          // same seam as the dispatch path: READSLOT the bound memory
+          ot_req_o       = '{op: APU_OBJTAB_OP_READSLOT,
+                             id: {48'h0, xf_ms_q},
+                             kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                             default: '0};
+        end
         StUnpReq: begin
           ot_req_valid_o = pinned_q[buf_i_q[1:0]];
           ot_req_o       = '{op: APU_OBJTAB_OP_UNPIN,
@@ -363,6 +419,12 @@ module g6lc_apu_cmdexec
         push_max_q  <= '0;
         pay_push_q  <= 1'b0;
         pay_dst_q   <= '0;
+        xf_opnd_q   <= '0;
+        xf_ms_q     <= '0;
+        xf_bo_q     <= '0;
+        xf_bs_q     <= '0;
+        xf_src_base_q <= '0; xf_src_size_q <= '0;
+        xf_dst_base_q <= '0; xf_dst_size_q <= '0;
       end else begin
         // work completions retire outstanding items; a non-OK done
         // code (§7b/5a-ii: FAULT/BUDGET/UNSUPPORTED from shcore)
@@ -558,6 +620,10 @@ module g6lc_apu_cmdexec
                     binds_q <= '0;
                     state_q <= StDsPipeReq;
                   end
+                end else if (work_is_xfer) begin
+                  // §12.3 C/5a: resolve the operands before issue
+                  xf_opnd_q <= 1'b0;
+                  state_q   <= StXfBufReq;
                 end else begin
                   state_q <= StWork;
                 end
@@ -719,6 +785,57 @@ module g6lc_apu_cmdexec
             state_q <= StNextBuf;
           end
 
+          // ---- §12.3 C/5a: Xfer operand assembly ----------------------
+          // operand buffer -> {bind_mem_slot, bind_offset, size}
+          StXfBufReq: if (ot_req_ready_i) state_q <= StXfBufCpl;
+          StXfBufCpl: if (ot_cpl_valid_i) begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                ot_cpl_i.entry.bind_mem_slot == APU_OBJTAB_SLOT_NONE ||
+                |ot_cpl_i.entry.size[63:32]) begin
+              // dead/unbound/over-4 GiB operand: submission lost
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              xf_ms_q <= ot_cpl_i.entry.bind_mem_slot;
+              xf_bo_q <= ot_cpl_i.entry.bind_offset;
+              xf_bs_q <= ot_cpl_i.entry.size;
+              state_q <= StXfMemReq;
+            end
+          end
+          // bound memory slot -> aperture page base (aux[63:32])
+          StXfMemReq: if (ot_req_ready_i) state_q <= StXfMemCpl;
+          StXfMemCpl: if (ot_cpl_valid_i) begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                ot_cpl_i.entry.kind != 6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
+                |ot_cpl_i.entry.size[63:32] ||
+                xf_bo_q > ot_cpl_i.entry.size) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              // operand extent = min(buffer.size, memory.size -
+              // bind_offset) — the same defence-in-depth clamp the
+              // dispatch path applies; all values are < 4 GiB here
+              automatic logic [63:0] rem_m =
+                  ot_cpl_i.entry.size - xf_bo_q;
+              automatic logic [31:0] xs =
+                  xf_bs_q < rem_m ? xf_bs_q[31:0] : rem_m[31:0];
+              automatic logic [31:0] xb =
+                  ot_cpl_i.entry.aux[63:32] + xf_bo_q[31:0];
+              if (rec_q.ctype ==
+                  32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) &&
+                  xf_opnd_q == 1'b0) begin
+                xf_src_base_q <= xb;
+                xf_src_size_q <= xs;
+                xf_opnd_q     <= 1'b1;
+                state_q       <= StXfBufReq;
+              end else begin
+                xf_dst_base_q <= xb;
+                xf_dst_size_q <= xs;
+                state_q       <= StWork;
+              end
+            end
+          end
+
           // ---- next record / buffer -----------------------------------
           StNextBuf: begin
             if (rec_i_q + 8'h1 < rec_n_q) begin
@@ -818,6 +935,7 @@ module g6lc_apu_cmdexec_fixture
   output logic [Fences-1:0]  fence_signaled_o,
   output logic [Fences-1:0]  fence_lost_o,
   input  logic [Fences-1:0]  fence_clr_i,
+  output apu_xfer_desc_t     xf_o,
   output logic               busy_o
 );
   g6lc_apu_cmdexec #(.Enable(Enable), .Fences(Fences)) i_dut (.*);

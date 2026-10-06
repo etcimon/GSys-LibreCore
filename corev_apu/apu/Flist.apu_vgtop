@@ -6,6 +6,13 @@
 // may rely on those packages.
 -f ${CVA6_REPO_DIR}/corev_apu/apu/Flist.apu_shcore
 ${CVA6_REPO_DIR}/corev_apu/include/g6lc_apu_cfg_pkg.sv
+// §12.3 C/5a: vgtop's Xfer engine carries an AXI master — the checked
+// DMA pair needs the apu_dma_* contract types and the AXI typedefs
++incdir+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/include
++incdir+${CVA6_REPO_DIR}/corev_apu/register_interface/include
+${CVA6_REPO_DIR}/vendor/pulp-platform/axi/src/axi_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_bus_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vg_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objtab_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objpay_pkg.sv
@@ -25,4 +32,7 @@ ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vnfront.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgpages.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgctl.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vnpump.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_dma_read.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_dma_write.sv
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_xfer.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgtop.sv

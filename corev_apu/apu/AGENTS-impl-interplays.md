@@ -3736,7 +3736,7 @@ mandatory MatrixEn, custom descriptors, UIO daemon or game plugin. HDMI remains
 a separate consumer of a completed common surface. `ApuOff`, all graphics gates
 and `FeatureVirgl` legality are unchanged by this source-review increment.
 
-## 16. Engine arborescence (live, 3c-ii)
+## 16. Engine arborescence (live, 3c-ii + 5a xfer)
 
 ```text
 ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus]
@@ -3754,8 +3754,10 @@ ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus]
                     <-> ObjTab (objtab) <-> ObjPay (objpay) <-> CmdRec (cmdrec)
                 <-> CmdExec (cmdexec)    work port
                     --> ShaderCore (shcore) --> ModuleScanner (shmod) --> WaveEngine (shwave)   mp SH
+                    --> Xfer (xfer)        --> DmaRead/DmaWrite checked pair ==> AXI master (xfer)
             --> PageAllocator (vgpages)
-        --> MemoryPort (apmem)            5 x apu_mp fixed priority ==> one AXI4 master (dma_req_o)
+        --> MemoryPort (apmem)            5 x apu_mp fixed priority ==> tdma 2:1 join (a=apmem, b=xfer)
+                                          ==> one AXI4 master (dma_req_o)
     ==> guest RAM window {DmaWindowBase, DmaWindowBytes} / aperture {APU_SHM_BASE, APU_SHM_BYTES}
 ```
 
@@ -3764,7 +3766,7 @@ ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus]
 | Waiting on | Phase | Exit |
 |---|---|---|
 | 3d bare-metal probe + stock riscv64 boot | B | kernel probe sequence + Venus init on the `G6LC_APU` testharness, then stock Ubuntu + Mesa on the proxy: `vulkaninfo` enumerates, one compute dispatch matches the oracle, `VenusEn=0` fails |
-| Xfer / sampler / raster | C | copies/clears/blits via checked DMA, images/formats/sampler, TBDR raster + ROP into `tc_sram` tiles; G0/A5 via Zink |
+| Sampler / raster (Xfer landed: `g6lc_apu_xfer`, §11 row 5a) | C | images/formats/sampler with memory-resident descriptors (F5), `vkCmdCopyImage`/blits, TBDR raster + ROP into `tc_sram` tiles; G0/A5 via Zink |
 | Memory-resident descriptors (F5) | C | descriptor sets fetched from device memory (objpay/aperture) by the LSU with dynamic indices; ObjTab validation at descriptor-write time + generation check — not the 16-entry flop bind table |
 | `shwave` 1 IPC + `ShaderCores` | D | per-wave throughput 1 IPC; multi-core dispatch via the cluster pattern; `DramChannels` by profile |
 | virtio-pci endpoint function (F4) | D | five virtio-pci capabilities + shared-memory capability over a BAR into the aperture |

@@ -202,11 +202,18 @@ module tb_g6lc_apu_sys_venus;
   logic [31:0] gmem [GBW];   // gmem[off>>2] <-> GB+off
   logic [31:0] apm  [ABW];   // apm[off>>2]  <-> AB+off
 
-  // ---- AXI4 slave model (single outstanding, single beat) ----------------
+  // ---- AXI4 slave model (burst reads, <=3 outstanding) ----------------
+  // Any AW/AR outside the two windows is an immediate test failure.
+  // Since 5a the joined master carries apmem + Xfer through tdma; tdma
+  // grants one owner while it has outstanding traffic, so the wire can
+  // see at most one read burst plus one write transaction in flight —
+  // the global bound assert is 3 (apmem 1 + xfer read 1 + xfer write 1).
   logic        r_act, r_vld, aw_s, w_s, b_vld;
   int unsigned wlog;
   initial wlog = $value$plusargs("wlog=%d", wlog);
   logic [63:0] r_addr;
+  logic [2:0]  r_size;
+  int unsigned r_rem;
   apu_dma_axi_r_chan_t  rch;
   apu_dma_axi_aw_chan_t waw;
   apu_dma_axi_w_chan_t  ww;
@@ -214,8 +221,11 @@ module tb_g6lc_apu_sys_venus;
   int unsigned b_n = 0;
   int unsigned oob_ap = 0;
   int unsigned post_rst_axi = 0;
-  // always-on invariants: <=1 outstanding, channel balance
-  int unsigned aw_n = 0, w_n = 0, ar_n = 0, r_n = 0;
+  // always-on invariants: at most three outstanding transactions on
+  // the master (apmem 1 + xfer read 1 + xfer write 1; tdma's owner
+  // lock makes the achievable peak 2), channel balance
+  int unsigned aw_n = 0, w_n = 0, ar_n = 0, r_n = 0, ar_beats = 0;
+  int unsigned outst = 0;
   logic        wr_pend = 0, rd_pend = 0;
   // off-fixture DMA must stay silent
   int unsigned off_beats = 0;
@@ -255,6 +265,8 @@ module tb_g6lc_apu_sys_venus;
     arsp.aw_ready = !aw_s && !b_vld;
     arsp.w_ready  = !w_s && !b_vld;
     arsp.b_valid  = b_vld;
+    // dma_write drives aw.id=1 and checks b.id==1; echo that id
+    arsp.b        = '{id: 4'd1, resp: axi_pkg::RESP_OKAY, user: '0};
   end
 
   always @(posedge clk or negedge rst_ni) begin
@@ -265,45 +277,59 @@ module tb_g6lc_apu_sys_venus;
     end else begin
       if (areq.ar_valid && arsp.ar_ready) begin
         win_check(areq.ar.addr, "AR");
-        if (rd_pend || wr_pend)
-          $fatal(1, "AXI: AR accepted while a transaction is pending");
+        if (areq.ar.burst != axi_pkg::BURST_INCR)
+          $fatal(1, "AXI: non-INCR read burst");
         rd_pend <= 1;
         ar_n++;
+        ar_beats += int'(areq.ar.len) + 1;
         r_act  <= 1;
         r_addr <= areq.ar.addr;
+        r_size <= areq.ar.size;
+        r_rem  <= int'(areq.ar.len) + 1;
+        outst++;
+        if (outst > 3)
+          $fatal(1, "AXI: outstanding bound %0d > 3", outst);
         if (vg_rdone) post_rst_axi++;
       end
       if (r_act && !r_vld) begin
         r_vld <= 1;
         rch   <= '0;
-        rch.last <= 1'b1;
+        rch.last <= r_rem == 1;
         for (int b = 0; b < 8; b++)
           rch.data[8*b +: 8] <= rd8((r_addr & ~64'h7) + 64'(b));
       end
       if (r_vld && areq.r_ready) begin
         r_n++;
-        rd_pend <= 0;
-        r_vld <= 0; r_act <= 0;
+        r_vld <= 0;
+        r_addr <= r_addr + (64'd1 << r_size);
+        if (r_rem <= 1) begin
+          r_act <= 0; rd_pend <= 0; outst--;
+        end else r_rem <= r_rem - 1;
       end
       if (areq.aw_valid && arsp.aw_ready) begin
         win_check(areq.aw.addr, "AW");
-        if (rd_pend || aw_s)
-          $fatal(1, "AXI: second outstanding transaction (AW)");
+        if (areq.aw.len != 0)
+          $fatal(1, "AXI: write burst len %0d (engines are narrow)",
+                 areq.aw.len);
         wr_pend <= 1;
         aw_n++;
         aw_s <= 1; waw <= areq.aw;
+        outst++;
+        if (outst > 3)
+          $fatal(1, "AXI: outstanding bound %0d > 3", outst);
         if (vg_rdone) post_rst_axi++;
       end
       if (areq.w_valid && arsp.w_ready) begin
-        if (rd_pend || w_s)
-          $fatal(1, "AXI: second outstanding transaction (W)");
-        wr_pend <= 1;
+        if (!areq.w.last)
+          $fatal(1, "AXI: multi-beat write");
         w_n++;
         w_s <= 1; ww <= areq.w;
       end
       if (aw_s && w_s && !b_vld) begin
+        // strb lanes are absolute within aw.addr & ~7 (narrow writes)
         for (int b = 0; b < 8; b++)
-          if (ww.strb[b]) wr8(waw.addr + 64'(b), ww.data[8*b +: 8]);
+          if (ww.strb[b])
+            wr8((waw.addr & ~64'h7) + 64'(b), ww.data[8*b +: 8]);
         b_vld <= 1;
       end
       if (b_vld && areq.b_ready) begin
@@ -311,6 +337,7 @@ module tb_g6lc_apu_sys_venus;
         b_vld <= 0; aw_s <= 0; w_s <= 0;
         b_log[b_n % 4096] <= waw.addr;
         b_n++;
+        outst--;
         if (wlog && b_n < 80)
           $display("WBEAT %016x data=%016x strb=%02x", waw.addr,
                    ww.data, ww.strb);
@@ -327,15 +354,16 @@ module tb_g6lc_apu_sys_venus;
   // balance check (bounded settle for a legitimately in-flight beat)
   task automatic check_axi_bal();
     int unsigned t = 0;
-    while ((aw_n != w_n || w_n != b_n || ar_n != r_n) &&
+    while ((aw_n != w_n || w_n != b_n || ar_beats != r_n) &&
            t < 2_000_000) begin
       @(posedge clk); t++;
     end
     check(aw_n == w_n && w_n == b_n,
           $sformatf("AXI write balance aw=%0d w=%0d b=%0d",
                     aw_n, w_n, b_n));
-    check(ar_n == r_n,
-          $sformatf("AXI read balance ar=%0d r=%0d", ar_n, r_n));
+    check(ar_beats == r_n,
+          $sformatf("AXI read balance beats=%0d r=%0d",
+                    ar_beats, r_n));
   endtask
 
   // ---- fence / used observability --------------------------------------
@@ -371,7 +399,74 @@ module tb_g6lc_apu_sys_venus;
     // interrupts the service hart through fw_irq.)
     if ((|o_areq) || o_bf)
       $fatal(1, "transport-only sys driving backend signals");
-    if (cycles > MAXCYC) $fatal(1, "watchdog");
+    if (cycles > MAXCYC) begin
+      $display("STALL tp=%0d ep=%0d cases=%0d pend=%0d/%0d",
+               tp, ep, cases, pend_n, pend_c);
+      $display("STALL axi outst=%0d r_act=%0d r_rem=%0d aw_s=%0d w_s=%0d b_vld=%0d girq=%0d vg_idle=%0d",
+               outst, r_act, r_rem, aw_s, w_s, b_vld, girq, vg_idle);
+      $display("STALL cnt aw_n=%0d w_n=%0d b_n=%0d ar_n=%0d r_n=%0d",
+               aw_n, w_n, b_n, ar_n, r_n);
+      $display("STALL chan awv=%0d wv=%0d arv=%0d rr=%0d br=%0d",
+               areq.aw_valid, areq.w_valid, areq.ar_valid,
+               areq.r_ready, areq.b_ready);
+      $display("STALL xf st=%0d busy=%0d exw_v=%0d xfrdy=%0d crv=%0d crrdy=%0d crcv=%0d",
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.state_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.xfer_busy,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.ex_work_v,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.xf_work_rdy,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.xf_cr_v,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.xf_cr_rdy,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+          .xf_cr_cpl_rdy);
+      $display("STALL ex_st=%0d wsv=%0d",
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_exec
+          .gen_on.state_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.ws_v);
+      $display("STALL legs fn=%0d rdis=%0d rddone=%0d wris=%0d wrdone=%0d fault=%0d upv=%0d vi=%0d ei=%0d rem=%0d csent=%0d csz=%0d",
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.fn_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.rd_iss_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.rd_done_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.wr_iss_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.wr_done_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.xf_fault_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.up_v_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.vi_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.ei_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.rem_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.csent_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.csz_q);
+      $display("STALL legs rd_st=%0d wr_st=%0d rd_dv=%0d rd_dr=%0d wr_dv=%0d wr_dr=%0d rd_cpl=%0d wr_cpl=%0d",
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.i_rd.gen_on.state_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.i_wr.gen_on.state_q,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.rd_dv,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.rd_dr,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.wr_dv,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.wr_dr,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.rd_cpl_v,
+        i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_xf
+          .gen_on.wr_cpl_v);
+      $fatal(1, "watchdog");
+    end
   end
 
   // ---- helpers -----------------------------------------------------------
@@ -733,9 +828,12 @@ module tb_g6lc_apu_sys_venus;
   endtask
 
   // ---- tape player ---------------------------------------------------------
+  int tlog = 0;
   task automatic play_tape();
+    tlog = $test$plusargs("tlog");
     while (1) begin
       int unsigned op = ntap();
+      if (tlog) $display("[tape] op=%0d tp=%0d t=%0d", op, tp, cycles);
       if (op == 0) break;
       case (op)
         1: begin // TP_MEMW
@@ -1130,7 +1228,7 @@ module tb_g6lc_apu_sys_venus;
   endtask
 
   // queue reset mid-walk: QUEUE_RESET<-1 on queue 0 while an element is
-  // in flight; the pending read drains (<=1 outstanding invariant),
+  // in flight; the pending read drains (<=3 outstanding invariant),
   // the queue state clears, re-ready restarts the element at
   // used position 0.
   task automatic arm_q_reset();

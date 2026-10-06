@@ -1640,9 +1640,9 @@ package g6lc_apu_vn_pkg;
     48'h031000000007, // HANDLE a=16 b=0x7 dstBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 regionCount
     48'h070000000006, // ARRAY a=0 b=0x6 pRegions
-    48'h027F00000000, // U64 a=127 b=0x0 srcOffset
-    48'h027F00000000, // U64 a=127 b=0x0 dstOffset
-    48'h027F00000000, // U64 a=127 b=0x0 size
+    48'h02FF00000000, // U64 a=127 b=0x0 srcOffset KEEP
+    48'h02FF00000000, // U64 a=127 b=0x0 dstOffset KEEP
+    48'h02FF00000000, // U64 a=127 b=0x0 size KEEP
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
@@ -1743,15 +1743,15 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h030800000007, // HANDLE a=8 b=0x7 dstBuffer:LOOKUP
-    48'h020200000000, // U64 a=2 b=0x0 dstOffset
-    48'h020300000000, // U64 a=3 b=0x0 size
+    48'h028200000000, // U64 a=2 b=0x0 dstOffset KEEP
+    48'h028300000000, // U64 a=3 b=0x0 size KEEP
     48'h010000000000, // U32 a=0 b=0x0 data
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h030800000007, // HANDLE a=8 b=0x7 dstBuffer:LOOKUP
-    48'h020200000000, // U64 a=2 b=0x0 dstOffset
-    48'h020300000000, // U64 a=3 b=0x0 dataSize
-    48'h090000000000, // BLOB a=0 b=0x0 pData
+    48'h028200000000, // U64 a=2 b=0x0 dstOffset KEEP
+    48'h028300000000, // U64 a=3 b=0x0 dataSize KEEP
+    48'h098000000000, // BLOB a=0 b=0x0 pData KEEP
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h030800000006, // HANDLE a=8 b=0x6 image:LOOKUP

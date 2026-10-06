@@ -174,3 +174,19 @@ fields = ["pDescriptorSets", "pDynamicOffsets"]
 [keep.vkCmdPushConstants]
 # {offset, size, value words}
 fields = ["offset", "size", "pValues"]
+
+# §12.3 C/5a: Xfer operand payloads — the record's imm[] cannot carry
+# the U64 operands, so they (and UpdateBuffer's data) stage into the
+# cmdrec arena; imm[7] = arena base.
+[keep.vkCmdCopyBuffer]
+# per pRegions element {srcOffset (2w), dstOffset (2w), size (2w)};
+# regionCount stays in rec.imm[0]
+fields = ["pRegions.srcOffset", "pRegions.dstOffset", "pRegions.size"]
+
+[keep.vkCmdFillBuffer]
+# {dstOffset (2w), size (2w)}; the fill pattern stays in rec.imm[0]
+fields = ["dstOffset", "size"]
+
+[keep.vkCmdUpdateBuffer]
+# {dstOffset (2w), dataSize (2w), pData words}
+fields = ["dstOffset", "dataSize", "pData"]

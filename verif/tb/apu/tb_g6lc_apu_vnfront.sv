@@ -232,7 +232,7 @@ module tb_g6lc_apu_vnfront;
     .push_n_o(xpush_n), .push_o(xpush),
     .done_seq_o(f_dseq),
     .fence_signaled_o(f_fsig), .fence_lost_o(f_flost),
-    .fence_clr_i(f_fclr), .busy_o());
+    .fence_clr_i(f_fclr), .xf_o(), .busy_o());
 
   // ---- shared backends with 3-master arbitration -----------------------
   // objtab: 0=front, 1=exec, 2=tb(final RESET_CTX)

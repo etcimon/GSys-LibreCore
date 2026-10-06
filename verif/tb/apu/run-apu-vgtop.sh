@@ -53,7 +53,7 @@ echo "VERILATOR BUILD OK"
 # 100% — the old 1-cycle-port shape); step 2 randomizes request-grant
 # and response latency (+mp_lat_min=1 +mp_lat_max=20
 # +mp_ready_pct=60) and must produce identical result words.  Both
-# steps run the transport session plus the 31-session compute arm.
+# steps run the transport session plus the 35-session compute arm.
 # VGTOP_STEP=1|2 runs a single step; VGTOP_NOCOMPUTE=1 skips the arm.
 SESSIONS="ue_cpos_arrlen_1 ue_cpos_bufcopy_1 ue_cpos_bufscale_1 \
 ue_cpos_builtin_gid_1 ue_cpos_builtin_lid_1 \
@@ -67,7 +67,9 @@ ue_cpos_loopfor_opt_1 ue_cpos_barrier_reduce_opt_1 \
 ue_cneg_badmod_1 ue_cneg_modgone_1 ue_cneg_lostbuf_1 \
 ue_cneg_spec_1 ue_cneg_baddesc_1 ue_cneg_nopipe_1 \
 ue_cneg_pgfull_1 ue_cneg_badmem_1 ue_cneg_bindoob_1 \
-ue_cneg_descoob_1"
+ue_cneg_descoob_1 \
+ue_cpos_xfer_copy_1 ue_cpos_xfer_update_1 \
+ue_cneg_xfer_oob_1 ue_cneg_xfer_overlap_1"
 
 run_step() {
   local step="$1"; shift
@@ -111,7 +113,7 @@ run_step() {
     echo "COMPUTE ARM FAILED (step $step)"
     exit 1
   fi
-  echo "COMPUTE ARM OK step$step (31 sessions)"
+  echo "COMPUTE ARM OK step$step (35 sessions)"
 }
 
 # gate step 1: defaults (lat 1/1, ready 100%)

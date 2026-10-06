@@ -46,6 +46,9 @@ ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vnfront.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgpages.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgctl.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vnpump.sv
+// §12.3 C/5a: the Xfer engine; its checked-DMA pair comes from
+// Flist.apu_axi earlier in the including flist
+${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_xfer.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vgtop.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_apmem.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_vqwalk.sv

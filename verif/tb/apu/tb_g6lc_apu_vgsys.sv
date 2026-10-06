@@ -271,12 +271,18 @@ module tb_g6lc_apu_vgsys;
   logic [31:0] gmem [GBW];   // gmem[off>>2] <-> GB+off
   logic [31:0] apm  [ABW];   // apm[off>>2]  <-> AB+off
 
-  // ---- AXI4 slave model (single outstanding, single beat) ----------------
+  // ---- AXI4 slave model (burst reads, <=3 outstanding) ------------------
   // Any AW/AR outside the two windows is an immediate test failure.
+  // Since 5a the joined master carries apmem + Xfer through tdma; tdma
+  // grants one owner while it has outstanding traffic, so the wire can
+  // see at most one read burst plus one write transaction in flight —
+  // the global bound assert is 3 (apmem 1 + xfer read 1 + xfer write 1).
   logic        r_act, r_vld, aw_s, w_s, b_vld;
   int unsigned wlog;
   initial wlog = $value$plusargs("wlog=%d", wlog);
   logic [63:0] r_addr;
+  logic [2:0]  r_size;
+  int unsigned r_rem;
   apu_dma_axi_r_chan_t  rch;
   apu_dma_axi_aw_chan_t waw;
   apu_dma_axi_w_chan_t  ww;
@@ -287,11 +293,13 @@ module tb_g6lc_apu_vgsys;
   int unsigned oob_ap = 0;
   // number of accepted AW+AR after reset_done_o (must stay 0)
   int unsigned post_rst_axi = 0;
-  // always-on transaction invariants: at most one outstanding
-  // transaction on the master, and every AW+W/AR is answered by a
-  // B/R (checked by check_axi_bal at the end of every arm/session)
-  int unsigned aw_n = 0, w_n = 0, ar_n = 0, r_n = 0;
-  logic        wr_pend = 0, rd_pend = 0;
+  // always-on transaction invariants: at most three outstanding
+  // transactions on the master (apmem 1 + xfer read 1 + xfer write 1;
+  // tdma's owner lock makes the achievable peak 2), and every
+  // AW+W/AR is answered by a B/R (checked by check_axi_bal at the end
+  // of every arm/session)
+  int unsigned aw_n = 0, w_n = 0, ar_n = 0, r_n = 0, ar_beats = 0;
+  int unsigned outst = 0;
   // programmable ready stalls for the flush races (neg_flush):
   // while set the channel's ready stays low no matter the state
   logic        stall_aw = 0, stall_w = 0, stall_ar = 0;
@@ -335,26 +343,33 @@ module tb_g6lc_apu_vgsys;
     arsp.ar_ready = !r_act && !r_vld && !stall_ar;
     arsp.r_valid  = r_vld;
     arsp.r        = rch;
-    arsp.aw_ready = !aw_s && !b_vld && !stall_aw;
-    arsp.w_ready  = !w_s && !b_vld && !stall_w;
+    arsp.aw_ready = !aw_s && !stall_aw;
+    arsp.w_ready  = !w_s && !stall_w;
     arsp.b_valid  = b_vld;
+    arsp.b        = '{id: 4'd1, resp: axi_pkg::RESP_OKAY, user: '0};
   end
 
   always @(posedge clk or negedge rst_ni) begin
     if (!rst_ni) begin
-      r_act <= 0; r_vld <= 0; r_addr <= '0; rch <= '0;
+      r_act <= 0; r_vld <= 0; r_addr <= '0; r_size <= '0; r_rem <= 0;
+      rch <= '0;
       aw_s <= 0; w_s <= 0; b_vld <= 0; waw <= '0; ww <= '0;
-      wr_pend <= 0; rd_pend <= 0; rd_wait <= 0;
+      rd_wait <= 0;
     end else begin
       if (sm_areq.ar_valid && arsp.ar_ready) begin
         win_check(sm_areq.ar.addr, "AR");
-        if (rd_pend || wr_pend)
-          $fatal(1, "AXI: AR accepted while a transaction is pending");
-        rd_pend <= 1;
+        if (sm_areq.ar.burst != axi_pkg::BURST_INCR)
+          $fatal(1, "AXI: non-INCR read burst");
         ar_n++;
-        r_act  <= 1;
+        ar_beats += int'(sm_areq.ar.len) + 1;
+        r_act   <= 1;
         rd_wait <= axi_rd_dly;
-        r_addr <= sm_areq.ar.addr;
+        r_addr  <= sm_areq.ar.addr;
+        r_size  <= sm_areq.ar.size;
+        r_rem   <= int'(sm_areq.ar.len) + 1;
+        outst++;
+        if (outst > 3)
+          $fatal(1, "AXI: outstanding bound %0d > 3", outst);
         if (rdone || w_rdone) post_rst_axi++;
       end
       if (r_act && !r_vld && rd_wait != 0) begin
@@ -362,41 +377,48 @@ module tb_g6lc_apu_vgsys;
       end else if (r_act && !r_vld) begin
         r_vld <= 1;
         rch   <= '0;
-        rch.last <= 1'b1;
+        rch.resp <= axi_pkg::RESP_OKAY;
+        rch.last <= r_rem == 1;
         for (int b = 0; b < 8; b++)
           rch.data[8*b +: 8] <= rd8((r_addr & ~64'h7) + 64'(b));
       end
       if (r_vld && sm_areq.r_ready) begin
         r_n++;
-        rd_pend <= 0;
-        r_vld <= 0; r_act <= 0;
+        r_vld <= 0;
+        r_addr <= r_addr + (64'd1 << r_size);
+        if (r_rem <= 1) begin r_act <= 0; outst--; end
+        else r_rem <= r_rem - 1;
       end
       if (sm_areq.aw_valid && arsp.aw_ready) begin
         win_check(sm_areq.aw.addr, "AW");
-        if (rd_pend || aw_s)
-          $fatal(1, "AXI: second outstanding transaction (AW)");
-        wr_pend <= 1;
+        if (sm_areq.aw.len != 0)
+          $fatal(1, "AXI: write burst len %0d (engines are narrow)",
+                 sm_areq.aw.len);
         aw_n++;
         aw_s <= 1; waw <= sm_areq.aw;
+        outst++;
+        if (outst > 3)
+          $fatal(1, "AXI: outstanding bound %0d > 3", outst);
         if (rdone || w_rdone) post_rst_axi++;
       end
       if (sm_areq.w_valid && arsp.w_ready) begin
-        if (rd_pend || w_s)
-          $fatal(1, "AXI: second outstanding transaction (W)");
-        wr_pend <= 1;
+        if (!sm_areq.w.last)
+          $fatal(1, "AXI: multi-beat write");
         w_n++;
         w_s <= 1; ww <= sm_areq.w;
       end
       if (aw_s && w_s && !b_vld) begin
+        // strb lanes are absolute within aw.addr & ~7 (narrow writes)
         for (int b = 0; b < 8; b++)
-          if (ww.strb[b]) wr8(waw.addr + 64'(b), ww.data[8*b +: 8]);
+          if (ww.strb[b])
+            wr8((waw.addr & ~64'h7) + 64'(b), ww.data[8*b +: 8]);
         b_vld <= 1;
       end
       if (b_vld && sm_areq.b_ready) begin
-        wr_pend <= 0;
         b_vld <= 0; aw_s <= 0; w_s <= 0;
         b_log[b_n % 4096] <= waw.addr;
         b_n++;
+        outst--;
         if (wlog && b_n < 80)
           $display("WBEAT %016x data=%016x strb=%02x", waw.addr,
                    ww.data, ww.strb);
@@ -411,15 +433,16 @@ module tb_g6lc_apu_vgsys;
   // orphaned by the DUT makes the wait time out and the check fails.
   task automatic check_axi_bal();
     int unsigned t = 0;
-    while ((aw_n != w_n || w_n != b_n || ar_n != r_n) &&
+    while ((aw_n != w_n || w_n != b_n || ar_beats != r_n) &&
            t < 2_000_000) begin
       @(posedge clk); t++;
     end
     check(aw_n == w_n && w_n == b_n,
           $sformatf("AXI write balance aw=%0d w=%0d b=%0d",
                     aw_n, w_n, b_n));
-    check(ar_n == r_n,
-          $sformatf("AXI read balance ar=%0d r=%0d", ar_n, r_n));
+    check(ar_beats == r_n,
+          $sformatf("AXI read balance ar=%0d beats=%0d r=%0d",
+                    ar_n, ar_beats, r_n));
   endtask
 
   // ---- work port sink (accept after 1 cycle, done 3 later) ---------------
@@ -1220,8 +1243,8 @@ module tb_g6lc_apu_vgsys;
     uexp[0]    = 0;                    // queue counters restart at 0
     notify[0] = 1'b1;
     repeat (10) @(posedge clk);        // R still in flight
-    check(ar_n == r_n + 1 && aw_n == w_n && w_n == b_n,
-          "neg_qdrop: no new beat before pending R");
+    check(ar_beats > r_n && aw_n == w_n && w_n == b_n,
+          "neg_qdrop: pending R beats not yet delivered");
     // the delayed R lands, StAbort drains it, and the re-notified
     // element is walked and published as position 0 of the new epoch
     wait_used(0);

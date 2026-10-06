@@ -73,7 +73,7 @@ module tb_g6lc_apu_cmdexec;
     .push_n_o(dpushn), .push_o(dpush),
     .done_seq_o(done_seq),
     .fence_signaled_o(fsig), .fence_lost_o(flost),
-    .fence_clr_i(fclr));
+    .fence_clr_i(fclr), .xf_o(), .busy_o());
   g6lc_apu_cmdexec_fixture #(.Enable(1'b0), .Fences(Fences)) i_off (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .submit_valid_i(sub_v), .submit_ready_o(osub_r), .submit_i(sub),
@@ -89,7 +89,7 @@ module tb_g6lc_apu_cmdexec;
     .push_n_o(odpushn), .push_o(odpush),
     .done_seq_o(odone),
     .fence_signaled_o(ofsig), .fence_lost_o(oflost),
-    .fence_clr_i(fclr));
+    .fence_clr_i(fclr), .xf_o(), .busy_o());
 
   // ---- backend mux: TB setup vs executor ------------------------------
   // The real cmdrec/objtab buses fan out to both masters; tb_drv selects
@@ -203,9 +203,16 @@ module tb_g6lc_apu_cmdexec;
   endtask
 
   task automatic ot_op(input apu_objtab_op_e o, input logic [63:0] id,
-                       input logic [7:0] k);
+                       input logic [7:0] k,
+                       input logic [63:0] size = '0,
+                       input logic [63:0] mem_id = '0,
+                       input logic [63:0] offset = '0,
+                       input logic [31:0] mask = '0,
+                       input logic [31:0] value = '0);
     @(negedge clk); tot_v = 1'b1;
-    tot_req = '{op: o, id: id, kind: k[5:0], default: '0};
+    tot_req = '{op: o, id: id, kind: k[5:0], size: size,
+                mem_id: mem_id, offset: offset, mask: mask,
+                value: value, default: '0};
     @(posedge clk);
     while (!tot_r) @(posedge clk);
     @(negedge clk); tot_v = 1'b0;
@@ -263,11 +270,25 @@ module tb_g6lc_apu_cmdexec;
           APU_VN_KIND_VK_DESCRIPTOR_SET);
     dset_h = ot_cpl.handle;
     ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0004,
-          APU_VN_KIND_VK_BUFFER);
+          APU_VN_KIND_VK_BUFFER, .size(64'd128));
     buf0_h = ot_cpl.handle;
     ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0005,
-          APU_VN_KIND_VK_BUFFER);
+          APU_VN_KIND_VK_BUFFER, .size(64'd128));
     buf1_h = ot_cpl.handle;
+    // §12.3 C/5a: the XFER operand assembly re-resolves the operand
+    // buffers' bound memory, so give them a device-memory object with
+    // an aperture page base in aux[63:32] and SETBIND both buffers
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0006,
+          APU_VN_KIND_VK_DEVICE_MEMORY, .size(64'd256));
+    ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0006,
+          APU_VN_KIND_VK_DEVICE_MEMORY,
+          .mask(32'hFFFF_FFFF), .value(32'h0000_4000));
+    ot_op(APU_OBJTAB_OP_SETBIND, 64'h1000_0000_0000_0004,
+          APU_VN_KIND_VK_BUFFER,
+          .mem_id(64'h1000_0000_0000_0006));
+    ot_op(APU_OBJTAB_OP_SETBIND, 64'h1000_0000_0000_0005,
+          APU_VN_KIND_VK_BUFFER,
+          .mem_id(64'h1000_0000_0000_0006), .offset(64'd128));
     check("alloc cb", cb_h !== '0);
 
     // ---- case 1: record + submit buf0 ------------------------------------
@@ -280,10 +301,13 @@ module tb_g6lc_apu_cmdexec;
     cr_op(APU_CMDREC_OP_APPEND, 0, 0,
           mkrec(APU_VN_TYPE_VK_CMD_PIPELINE_BARRIER_EXT, 0, 0, 0));
     begin
+      // one real region descriptor ({srcOff,dstOff,size} u64s = 6
+      // payload words) so imm[7] carries a pay_base like a recorded
+      // vkCmdCopyBuffer
       apu_cmdrec_rec_t rr = mkrec(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT,
-                                  buf0_h, APU_VN_KIND_VK_BUFFER, 0);
+                                  buf0_h, APU_VN_KIND_VK_BUFFER, 1);
       rr.handle[1] = buf1_h; rr.kind[1] = APU_VN_KIND_VK_BUFFER;
-      cr_op(APU_CMDREC_OP_APPEND, 0, 0, rr);
+      cr_op(APU_CMDREC_OP_APPEND, 0, 0, rr, 6);
     end
     cr_op(APU_CMDREC_OP_END, 0, 0, '0);
     check("record buf0", cr_cpl.status == APU_CMDREC_OK);

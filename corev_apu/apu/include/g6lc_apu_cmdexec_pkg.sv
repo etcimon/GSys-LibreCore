@@ -50,6 +50,30 @@ package g6lc_apu_cmdexec_pkg;
     apu_cmdrec_rec_t    rec;
   } apu_cmdexec_work_t;
 
+  // §12.3 C/5a: Xfer operand descriptor, resolved by the executor's
+  // XFER sub-assembly (buffer LOOKUP + bound-memory READSLOT) and valid
+  // alongside work_o while the work record is a CopyBuffer/FillBuffer/
+  // UpdateBuffer.  All bases are aperture-relative byte offsets; sizes
+  // are the operand's effective extent (min(buffer.size, mem.size-off)).
+  // The U64 operands (copy regions, dstOffset/size, update data) ride
+  // the cmdrec payload arena; the engine replays them via PAYREAD.
+  typedef enum logic [1:0] {
+    APU_XFER_OP_COPY   = 2'd0,
+    APU_XFER_OP_FILL   = 2'd1,
+    APU_XFER_OP_UPDATE = 2'd2
+  } apu_xfer_op_e;
+
+  typedef struct packed {
+    apu_xfer_op_e    op;
+    logic [7:0]      cbuf;      // cmdrec arena owner buffer
+    logic [15:0]     pay_base;  // arena word base (rec.imm[7])
+    logic [15:0]     regions;   // COPY: regionCount (rec.imm[0])
+    logic [31:0]     src_base;  // COPY: src buffer aperture offset
+    logic [31:0]     src_size;  // COPY: src operand extent (bytes)
+    logic [31:0]     dst_base;  // dst buffer aperture offset
+    logic [31:0]     dst_size;  // dst operand extent (bytes)
+  } apu_xfer_desc_t;
+
   // per-fence completion status for the WAIT class
   typedef enum logic [1:0] {
     APU_CMDEXEC_FENCE_PENDING     = 2'd0,

@@ -102,7 +102,10 @@ module tb_g6lc_apu_vgtop;
     .dbg_ot_valid_i(1'b0), .dbg_ot_ready_o(dot_r),
     .dbg_ot_req_i(dot_req),
     .dbg_ot_cpl_valid_o(dot_cv), .dbg_ot_cpl_ready_i(1'b0),
-    .dbg_ot_cpl_o(dot_cpl));
+    .dbg_ot_cpl_o(dot_cpl),
+    .xf_axi_req_o(xf_areq), .xf_axi_rsp_i(xf_arsp),
+    .ap_base_i(64'(g6lc_apu_pkg::APU_SHM_BASE)),
+    .xf_flush_i(1'b0), .xfer_busy_o(xf_busy));
 
   // shared memory model: mp ports 0..2 -> {guest, aperture} backing
   tb_apu_mp_mem #(.N(3), .GMW(GMW), .APW(APW)) i_mem (
@@ -110,9 +113,113 @@ module tb_g6lc_apu_vgtop;
     .req_valid_i(mp_rv), .req_ready_o(mp_rr), .req_i(mp_req),
     .rsp_valid_o(mp_rsv), .rsp_o(mp_rsp));
 
+  // xfer AXI aperture slave: burst-capable reads + single-beat
+  // writes over i_mem.apm, window-checked
+  g6lc_apu_bus_pkg::apu_dma_axi_req_t  xf_areq;
+  g6lc_apu_bus_pkg::apu_dma_axi_resp_t xf_arsp;
+  logic            xf_busy;
+  localparam logic [63:0] XAB  = g6lc_apu_pkg::APU_SHM_BASE;
+  localparam logic [63:0] XAPB = 64'(APW) * 4;
+  logic               xr_act, xr_vld;
+  g6lc_apu_bus_pkg::apu_dma_axi_r_chan_t  xrch;
+  logic [63:0]        xr_addr;
+  logic [2:0]         xr_size;
+  int unsigned        xr_rem;
+  logic               xaw_s, xw_s, xb_vld;
+  g6lc_apu_bus_pkg::apu_dma_axi_aw_chan_t xwaw;
+  g6lc_apu_bus_pkg::apu_dma_axi_w_chan_t  xww;
+  int unsigned        xf_aw_n = 0, xf_w_n = 0, xf_b_n = 0;
+  int unsigned        xf_ar_n = 0, xf_r_n = 0, xf_arb = 0;
+  int unsigned        xf_outst = 0;
+  int                 xlog = 0;
+  initial xlog = $test$plusargs("xlog");
+
+  always_comb begin
+    xf_arsp = '0;
+    xf_arsp.ar_ready = !xr_act && !xr_vld;
+    xf_arsp.r_valid  = xr_vld;
+    xf_arsp.r        = xrch;
+    xf_arsp.aw_ready = !xaw_s;
+    xf_arsp.w_ready  = !xw_s;
+    xf_arsp.b_valid  = xb_vld;
+    xf_arsp.b        = '{id: 4'd1, resp: axi_pkg::RESP_OKAY, user: '0};
+  end
+
+  always @(posedge clk or negedge rst_ni) begin
+    if (!rst_ni) begin
+      xr_act <= 0; xr_vld <= 0; xr_rem <= 0; xr_addr <= '0;
+      xr_size <= '0; xaw_s <= 0; xw_s <= 0; xb_vld <= 0;
+      xwaw <= '0; xww <= '0; xrch <= '0;
+    end else begin
+      if (xf_areq.ar_valid && xf_arsp.ar_ready) begin
+        if (!(xf_areq.ar.addr >= XAB && xf_areq.ar.addr < XAB + XAPB))
+          $fatal(1, "xfer AR %016x outside aperture", xf_areq.ar.addr);
+        if (xlog && xf_ar_n < 200)
+          $display("XAR cyc=%0d ar=%016x len=%0d", cycles,
+                   xf_areq.ar.addr, xf_areq.ar.len);
+        xr_act <= 1; xr_addr <= xf_areq.ar.addr;
+        xr_size <= xf_areq.ar.size;
+        xr_rem <= int'(xf_areq.ar.len) + 1;
+        xf_ar_n++; xf_arb += int'(xf_areq.ar.len) + 1; xf_outst++;
+        if (xf_outst > 2) $fatal(1, "xfer outstanding > 2");
+      end
+      if (xr_act && !xr_vld) begin
+        xrch <= '0;
+        xrch.id <= '0; xrch.resp <= axi_pkg::RESP_OKAY;
+        xrch.last <= xr_rem == 1;
+        // R beat is bus-lane aligned: lane b holds the byte at
+        // (xr_addr & ~7) + b, so an unaligned AR head lands in the
+        // upper lanes — dma_read's keep mask depends on it
+        for (int b = 0; b < 8; b++)
+          xrch.data[8*b +: 8] <=
+            i_mem.apm[32'(((xr_addr & ~64'h7) + 64'(b) - XAB) >> 2)]
+                     [8*(((xr_addr & ~64'h7) + 64'(b)) & 64'h3) +: 8];
+        xr_vld <= 1;
+      end
+      if (xr_vld && xf_areq.r_ready) begin
+        xr_vld <= 0;
+        xf_r_n++;
+        xr_addr <= xr_addr + (64'd1 << xr_size);
+        if (xr_rem <= 1) begin xr_act <= 0; xf_outst--; end
+        else xr_rem <= xr_rem - 1;
+      end
+      if (xf_areq.aw_valid && xf_arsp.aw_ready) begin
+        if (!(xf_areq.aw.addr >= XAB && xf_areq.aw.addr < XAB + XAPB))
+          $fatal(1, "xfer AW %016x outside aperture", xf_areq.aw.addr);
+        if (xf_areq.aw.len != 0)
+          $fatal(1, "xfer multi-beat write");
+        xaw_s <= 1; xwaw <= xf_areq.aw;
+        xf_aw_n++; xf_outst++;
+        if (xf_outst > 2) $fatal(1, "xfer outstanding > 2");
+      end
+      if (xf_areq.w_valid && xf_arsp.w_ready) begin
+        if (!xf_areq.w.last) $fatal(1, "xfer write w/o last");
+        xw_s <= 1; xww <= xf_areq.w;
+        xf_w_n++;
+      end
+      if (xaw_s && xw_s && !xb_vld) begin
+        // dma_write strb marks absolute lanes of aw.addr & ~7
+        for (int b = 0; b < 8; b++)
+          if (xww.strb[b])
+            i_mem.apm[32'(((xwaw.addr & ~64'h7) + 64'(b) - XAB) >> 2)]
+                     [8*(((xwaw.addr & ~64'h7) + 64'(b)) & 64'h3) +: 8]
+              <= xww.data[8*b +: 8];
+        xb_vld <= 1;
+      end
+      if (xb_vld && xf_areq.b_ready) begin
+        xb_vld <= 0; xaw_s <= 0; xw_s <= 0;
+        xf_b_n++; xf_outst--;
+        if (xlog && xf_b_n < 200)
+          $display("XW cyc=%0d aw=%016x data=%016x strb=%02x",
+                   cycles, xwaw.addr, xww.data, xww.strb);
+      end
+    end
+  end
+
   // Enable=0 fixture: all outputs must stay quiet
   logic            o_chr, o_wv, o_dn, o_bsy, o_cpl, o_fp,
-                   o_dotr, o_dotcv, o_mf;
+                   o_dotr, o_dotcv, o_mf, o_xbusy;
+  g6lc_apu_bus_pkg::apu_dma_axi_req_t  o_xareq;
   logic [2:0]      o_mpv;
   apu_mp_req_t [2:0] o_mpreq;
   logic [31:0]     o_cplen;
@@ -145,7 +252,10 @@ module tb_g6lc_apu_vgtop;
     .dbg_ot_valid_i(1'b0), .dbg_ot_ready_o(o_dotr),
     .dbg_ot_req_i(dot_req),
     .dbg_ot_cpl_valid_o(o_dotcv), .dbg_ot_cpl_ready_i(1'b0),
-    .dbg_ot_cpl_o(o_dotcpl));
+    .dbg_ot_cpl_o(o_dotcpl),
+    .xf_axi_req_o(o_xareq),
+    .xf_axi_rsp_i(g6lc_apu_bus_pkg::apu_dma_axi_resp_t'('0)),
+    .ap_base_i('0), .xf_flush_i(1'b0), .xfer_busy_o(o_xbusy));
 
   // ---- tape / expected stores (the guest RAM + aperture live in the
   // mp model i_mem; this TB pokes i_mem.gmem / i_mem.apm directly) ----
@@ -191,10 +301,10 @@ module tb_g6lc_apu_vgtop;
   always @(posedge clk) cycles++;
   always @(negedge clk) begin
     if (o_wv || o_dn || o_bsy || o_cpl || o_fp || o_dotcv || o_chr ||
-        o_mf ||
+        o_mf || o_xbusy ||
         (|o_mpv) || (|o_mpreq) || (|o_cplen) ||
         (|o_fid2) || (|o_fring) || (|o_ra) || (|o_rs) || (|o_rh) ||
-        (|o_re) || o_liv !== '0)
+        (|o_re) || o_liv !== '0 || o_xareq !== '0)
       $fatal(1, "disabled vgtop active");
     if (cycles > MAXCYC) $fatal(1, "watchdog");
   end
