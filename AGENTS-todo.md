@@ -84,10 +84,19 @@ Priors: `architecture/uncore/apu-graphics.md`, `corev_apu/apu/AGENTS-impl-interp
   rise-ack-fall pairs, every APU beat in-window, `ApuP1Transport` fails at the
   feature check with zero DMA. Found: MMIO reads need a fence against a pending
   store to the select register (same as `writel`/`readl`).
-- [ ] 3d-b: stock Ubuntu riscv64 kernel + Mesa boot on the proxy: `vulkaninfo`
-  enumerates, one compute dispatch matches the oracle, `VenusEn=0` fails. DTS:
-  `reserved-memory` for the aperture, non-coherent DMA (`zicbom` + `svpbmt`,
-  `riscv,cbom-block-size`), no `dma-coherent` (§12.1 F6, 3d-a contract).
+- [x] **3d-b landed (2026-10-08, `cc4bdca95`)**: RTL-in-the-loop — `g6lc_apu_sys`
+  (`ApuVenus`) in Verilator as a socket server behind an emitted `g6lc-virt` bridge
+  device; unmodified Ubuntu 24.04.5 riscv64 + Mesa 25.2.8 Venus ICD: `vulkaninfo`
+  shows `Virtio-GPU Venus (LibreCore APU)`, `vkcompute` (distro gcc, bufcopy.spv)
+  bit-exact vs the model; `ApuP1Transport` control shows no Venus device/DMA.
+  Stock-stack findings fixed: virtio-gpu command ids + capset-info order (now
+  cross-checked against the pinned UAPI header), 32 MiB aperture with kernel-chosen
+  `MAP_BLOB` offsets (`ALLOC_AT`), ObjTab id namespace + hash, `vkBindBufferMemory2`
+  arrays, `VK_KHR_external_memory_fd` (§12.1 F9). Command trace:
+  `architecture/uncore/apu-venus-command-trace.md`. Not a full-SoC Linux boot (R3b).
+- [ ] 3d-c follow-ups: pump ring-poll backoff (≈1 M aperture reads per guest
+  session), hierarchical/`tc_sram` page bitmap (8192 flops), aperture under real
+  coherence on the Variane testharness once R3b boots Linux.
 - [x] **5a landed (2026-10-05, `1d99eae72`)**: `g6lc_apu_xfer` — CopyBuffer /
   FillBuffer / UpdateBuffer as checked burst DMA (dma_read/dma_write pair on the
   shared master through the `tdma` join), regions + update data captured by
