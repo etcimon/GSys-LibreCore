@@ -133,22 +133,76 @@ module cva6_hpdcache_if_adapter
 `endif
 
       //    Request forwarding
-      assign hpdcache_req_valid_o = cva6_req_i.data_req;
-      assign hpdcache_req.addr_offset = cva6_req_i.address_index;
-      assign hpdcache_req.wdata = '0;
-      assign hpdcache_req.op = hpdcache_pkg::HPDCACHE_REQ_LOAD;
-      assign hpdcache_req.be = cva6_req_i.data_be;
-      assign hpdcache_req.size = hpdcache_pkg::hpdcache_req_size_t'(cva6_req_i.data_size);
-      assign hpdcache_req.sid = hpdcache_req_sid_i;
-      assign hpdcache_req.tid = cva6_req_i.data_id;
-      assign hpdcache_req.need_rsp = 1'b1;
-      assign hpdcache_req.phys_indexed = 1'b0;
-      assign hpdcache_req.addr_tag = '0;  // unused on virtually indexed request
-      assign hpdcache_req.pma.uncacheable = 1'b0;
-      assign hpdcache_req.pma.io = 1'b0;
-      assign hpdcache_req.pma.wr_policy_hint = hpdcache_pkg::HPDCACHE_WR_POLICY_AUTO;
+      hpdcache_req_t hpdcache_req_live;
+      assign hpdcache_req_live.addr_offset = cva6_req_i.address_index;
+      assign hpdcache_req_live.wdata = '0;
+      assign hpdcache_req_live.op = hpdcache_pkg::HPDCACHE_REQ_LOAD;
+      assign hpdcache_req_live.be = cva6_req_i.data_be;
+      assign hpdcache_req_live.size = hpdcache_pkg::hpdcache_req_size_t'(cva6_req_i.data_size);
+      assign hpdcache_req_live.sid = hpdcache_req_sid_i;
+      assign hpdcache_req_live.tid = cva6_req_i.data_id;
+      assign hpdcache_req_live.need_rsp = 1'b1;
+      assign hpdcache_req_live.phys_indexed = 1'b0;
+      assign hpdcache_req_live.addr_tag = '0;  // unused on virtually indexed request
+      assign hpdcache_req_live.pma.uncacheable = 1'b0;
+      assign hpdcache_req_live.pma.io = 1'b0;
+      assign hpdcache_req_live.pma.wr_policy_hint = hpdcache_pkg::HPDCACHE_WR_POLICY_AUTO;
 
+      // T19 (defect 2): a withdrawn request is held until it is granted, then
+      // aborted. The HPDcache CRI is valid/ready with the rule that a source
+      // "cannot retire a pending valid transfer" (docs/source/interface.rst,
+      // valid/ready handshake), but the load unit does exactly that: a flush
+      // (WAIT_GNT -> WAIT_FLUSH on a drain force / exception) or an OoO cancel
+      // (cancelled_request) drops data_req while the request is still waiting
+      // for the grant. hpdcache_fxarb has already latched the grant on this
+      // port while the pipeline was not ready (wait_q/gnt_q), so it keeps
+      // granting the now-idle port until ready returns and the pipeline
+      // accepts a PHANTOM request built from this port's idle payload (stale
+      // index, the current translation's tag, a free load-buffer tid, need_rsp
+      // set): a load nobody issued, to an address nobody checked, whose
+      // response lands on a load-buffer slot that a later real load may own.
+      // Holding the withdrawn request and aborting it in st1 with need_rsp=0
+      // keeps the arbiter/pipeline bookkeeping consistent and produces no
+      // response. data_gnt is masked while holding so the core's next request
+      // cannot be mistaken for the held one. G6LC_MUT_HPD_REQ_WITHDRAW
+      // restores the pre-T19 wire-through for review builds.
+      logic hold_q, abort_q, req_pend_q;
+      hpdcache_req_t hold_req_q;
+      logic req_withdrawn, held, held_fire;
+      // req_pend_q: the core's own request was presented and refused last cycle;
+      // it is withdrawn when the core drops data_req before the grant.
+      assign req_withdrawn = req_pend_q & ~cva6_req_i.data_req & ~hold_q;
+      assign held          = hold_q | req_withdrawn;
+      assign held_fire     = held & hpdcache_req_ready_i;
+      always_ff @(posedge clk_i or negedge rst_ni) begin : hold_ff
+        if (!rst_ni) begin
+          hold_q     <= 1'b0;
+          abort_q    <= 1'b0;
+          req_pend_q <= 1'b0;
+          hold_req_q <= '0;
+        end else begin
+          req_pend_q <= cva6_req_i.data_req & ~hpdcache_req_ready_i & ~held;
+          if (cva6_req_i.data_req & ~hpdcache_req_ready_i & ~held) begin
+            hold_req_q          <= hpdcache_req_live;
+            hold_req_q.need_rsp <= 1'b0;
+          end
+          if (held_fire) hold_q <= 1'b0;
+          else if (req_withdrawn) hold_q <= 1'b1;
+          abort_q <= held_fire;
+        end
+      end
+`ifdef G6LC_MUT_HPD_REQ_WITHDRAW
+      // MUTANT (pre-T19): wire-through; the arbiter may grant a withdrawn request.
+      assign hpdcache_req_valid_o = cva6_req_i.data_req;
+      assign hpdcache_req = hpdcache_req_live;
       assign hpdcache_req_abort_o = cva6_req_i.kill_req;
+      assign cva6_req_o.data_gnt = hpdcache_req_ready_i;
+`else
+      assign hpdcache_req_valid_o = cva6_req_i.data_req | held;
+      assign hpdcache_req = held ? hold_req_q : hpdcache_req_live;
+      assign hpdcache_req_abort_o = cva6_req_i.kill_req | abort_q;
+      assign cva6_req_o.data_gnt = hpdcache_req_ready_i & ~held;
+`endif
       assign hpdcache_req_tag_o = cva6_req_i.address_tag;
       assign hpdcache_req_pma_o.uncacheable = hpdcache_req_is_uncacheable;
       assign hpdcache_req_pma_o.io = 1'b0;
@@ -158,7 +212,6 @@ module cva6_hpdcache_if_adapter
       assign cva6_req_o.data_rvalid = hpdcache_rsp_valid_i;
       assign cva6_req_o.data_rdata = hpdcache_rsp_i.rdata;
       assign cva6_req_o.data_rid = hpdcache_rsp_i.tid;
-      assign cva6_req_o.data_gnt = hpdcache_req_ready_i;
       // CMO sideband is a store-port facility
       assign cmo_valid_o = 1'b0;
       assign cmo_op_o    = '0;

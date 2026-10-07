@@ -3953,3 +3953,103 @@ hart: `fdt_irqchip_init` 12.07→21.71 M, `fdt_ipi_init` 21.71→30.50 M,
 44.73 M, payload 44.73 M — three FDT-driven phases of 8–9.6 M cycles each
 are a performance note (T18: profile them; 4-hart int2_l3 boots in 18.4 M
 in total).
+
+### T18 — server frontend: RAS depth and the statistical corrector's window aliasing (2026-10-06/07)
+
+**Profile.** The three FDT-driven OpenSBI phases that cost 8–9.6 M cycles
+each on the 8-hart server boot are ≈85 % firmware (quadratic libfdt phandle
+walks over twice the harts and a larger DT: 2.2–2.7× the instructions of
+the 4-hart int2_l3) and ≈15 % core CPI (1.28 vs 1.10): no long stalls
+(no inter-retirement gap > 200 cycles), DTB L1-resident, PLIC/CLINT MMIO
+unremarkable. The CPI loss had two server-only causes:
+1. **`RASDepth = 2`** — 97–100 % of the ≈68 k libfdt returns per phase
+   mispredicted (11-cycle redirect each). Raised to 16 like int2_l3 (whose
+   header already said so); RAS-miss is NoCF in the fetch_B frontend, so EX
+   corrects an empty RAS. Cycle-neutral on every directed test.
+2. **Statistical corrector window aliasing** (`g6lc_bp_statcor.sv`): the
+   64-entry untagged corrector was indexed by the fetch-window base for
+   every slot but trained by the resolving branch's own pc bits, so the
+   93 %-taken `bne` at `fdt_next_node+0x5a` saturated the counter that the
+   never-taken `bltu` at `+0x6c` read through its window base → forced
+   taken on every libfdt call (8–16-cycle refetch landing on the next
+   load, ≈0.8 M cycles/phase), and the victim trained a different counter
+   so it could never recover. Proven by a byte-identical standalone
+   reproduction (penalty moves with code placement, vanishes with
+   `BPStatCorEn=0`). Fix: per-slot index `{vpc[OFFSET+ROW_W +: IDX_W-ROW_W],
+   slot}` — the same bits training uses — plus a geometry guard
+   (`NR_ENTRIES > INSTR_PER_FETCH`). `tb_g6lc_bp_statcor` now models per-slot
+   rows and carries the aliasing scenario (fails on the old RTL at every
+   multi-slot geometry, passes on the fix; 4/64/1 = server geometry).
+   `BPStatCorEn` is 0 on int2_l3 / smt2 / smt2_ooo_int (not elaborated →
+   anchors inert by construction); on `g6lc64_ooo` the FP suite 22/22 and
+   the 11 frozen probes stay retirement-exact. Early-boot measurement on the
+   server: the `fdt_offset_ptr+0x70` gap median 11 → 4, intrinsic 8-cycle
+   mode 0/2,316 calls.
+
+**Canonical boot, first attempt (T17 model, firmware `47905b91…`,
+`ooocoh-t18-server-osbi-48M`): FAIL — `outcome: timeout`.** Harts 1, 2,
+4, 5, 6 reached the payload; harts 3 and 7 (thread 1 of cores 1 and 3)
+took `sbi_trap_error` after a `ret` to a corrupted stack word; core 0
+deadlocked at 45.2 M with `force` firing ≈10 k times. The fp3-firmware 64 M
+run of the same model had passed at 44.85 M — a timing-dependent defect
+pair, root-caused in T19.
+
+### T19 — the two warm-boot defects behind the T18 timeout (2026-10-07)
+
+**Defect A — wrong-path instructions retired on harts 3 and 7.** RVFI shows
+the retired stream jump from `aclint_mtimer_sync+0x16 beqz s2` (taken) to
+`atomic_raw_xchg_ulong+0x14` — eight instructions of the *not-taken* path
+(the second 8 B half of I$ line `0x800086e0`) retired while the older
+wrong-path windows were killed and no redirect fired. The `amoswap` in that
+window overwrote the shared mtimer object's first word (`0x8000` →
+`0x8005c550`) and the `sd a5,-24(s0)` wrote the caller's `ra` slot that the
+following `ld ra` read back bit-exact — the "corrupted stack" was the
+hart's own wrong-path store, not a coherence fault (no foreign store to
+either stack line anywhere in the window; 86 cross-core lines, none written
+by two cores). Only the *hart-qualified kill* produces this shape: the
+controller/frontend mispredict kill and redirect are gated on
+`hart_id == smt_active_hart` while the scoreboard cancel is per-entry
+hart-matched — a mismatch cancels the dispatched wrong path but leaves the
+IQ/ID-resident younger windows to issue. Why the two disagreed on a
+*drained* core is **not established** (the SB-empty switch rule should make
+it impossible; both failing harts were thread 1, the siblings were cycling
+through the payload's `wfi` loop); 174 single-hart shapes and a sibling
+pre-warm multicore test did not reproduce it. Change: the hart qualifier is
+now applied under mixed residency only (`cva6.sv`, `fetch_B/frontend.sv`,
+both `scoreboard.sv` cancel loops) — under the drained handoff the resident
+hart owns every in-flight branch, so a mismatch could only lose a kill —
+plus an unconditional sim-only `[misp-hart]` witness that prints any drained
+mispredict whose hart differs from the active hart. Behaviour-neutral where
+the mismatch cannot occur (0 hits on every directed run); the next canonical
+boot's witness count is the datum.
+
+**Defect B — core 0 permanent no-grant: a phantom HPDcache request.** The
+load unit drops `data_req` on a flush (`WAIT_GNT → WAIT_FLUSH`, the drain
+force) or an OoO cancel *before the grant*; the HPDcache CRI forbids
+retiring a pending valid (`interface.rst` valid/ready). `hpdcache_fxarb`
+had already latched the grant for that port while the pipeline was not
+ready and keeps presenting it until ready returns — the pipeline then
+accepts a request nobody issued, built from the idle port's payload (stale
+index, the current translation's tag, a free load-buffer tid, `need_rsp`
+set). Its response lands on a load-buffer slot a later real load may own
+(the `load_unit` "G1l leftover rvalid" guard is its fingerprint), or an
+uncacheable phantom holds `uc_busy` and `core_req_ready` low for every
+port — the observed wedge (`ldu st=WAIT_GNT dreq=1`, uncore idle), which
+the drain force then amplified (≈10 k forces). Fix in
+`cva6_hpdcache_if_adapter.sv` (load port): a withdrawn request is held
+until granted and aborted in st1 with `need_rsp = 0`; `data_gnt` is masked
+while holding; `G6LC_MUT_HPD_REQ_WITHDRAW` restores the wire-through.
+Witness `[hpd-phantom]` in the wrapper: the mutant shows 4 phantom grant
+cycles on `mc_wrongpath_window -DWP_LOADS`, the fix 0 (5 withdrawals
+held). `mc_force_kill_miss` (DRAM latency 320 > `SmtDrainForceCycles`,
+513 forces killing in-flight misses) passes — killing a *granted* miss is
+legal; the hole was the pre-grant withdrawal.
+
+**Regression (T19 tree).** Lint 0e on ooo / int2_l3 / smt2 / server;
+`g6lc64_ooo` frozen probes retirement-exact and cycle-identical to T18B;
+server l2wr/l3scan/slres/ics8 cycle-identical, fpsmt8 6,321 (−9: one held
+withdrawal), negatives detected; int2_l3 `mc_icache_switch_storm` h2
+37,021. New tests: `ooo_wrongpath_window.S`, `mc_wrongpath_window.S`,
+`mc_force_kill_miss.S`. The decisive check is the canonical 48 M boot on
+the T19 server model (`[misp-hart]` / `[hpd-phantom] final` lines are
+unconditional); the T18B boot (RAS16 + statcor, pre-T19) is still running.

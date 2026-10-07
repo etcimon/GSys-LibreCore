@@ -477,8 +477,13 @@ module frontend
       && g6lc_fetch_pkg::predict_fetchable(CVA6Cfg, 64'(predict_address))
       && g6lc_fetch_pkg::cf_consumed(cf_v8, cf_t8, cf_c8);
 
+  // T19 (defect 1): hart-qualify the redirect under MIXED residency only. With
+  // the drained handoff the resident hart owns every in-flight branch, so a
+  // hart mismatch here could only drop the redirect while the controller/
+  // scoreboard still kill — the wrong path then streams on from the IQ/NPC.
   assign resolution_for_active = g6lc_fetch_pkg::redirect_for_hart(
-      SmtEn, resolved_branch_i.valid, 8'(resolved_branch_i.hart_id), 8'(smt_hart_i));
+      SmtEn && !CVA6Cfg.SmtDrainedHandoff, resolved_branch_i.valid,
+      8'(resolved_branch_i.hart_id), 8'(smt_hart_i));
   // A branch that resolves in the cycle an older architectural redirect fires
   // (trap, eret, or a commit-side refetch such as the memory-order replay) is
   // younger than that redirect and squashed by it. Its resolution must not arm

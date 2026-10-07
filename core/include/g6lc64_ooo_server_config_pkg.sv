@@ -78,7 +78,11 @@ package cva6_config_pkg;
   localparam CVA6ConfigNrStorePipeRegs = 0;
   localparam CVA6ConfigNrLoadBufEntries = 24;
 
-  localparam CVA6ConfigRASDepth = 2;
+  // T18 (2026-10-06): the 64 M strict boot profile showed 97-100 % of the
+  // ~68 k libfdt returns per FDT-init phase mispredicted at depth 2 (11-cycle
+  // redirect each, ~0.7 M cycles per phase). Same depth as g6lc64_ooo_int2_l3;
+  // RAS-miss is NoCF in the fetch_B frontend so EX corrects an empty RAS.
+  localparam CVA6ConfigRASDepth = 16;
   localparam CVA6ConfigBTBEntries = 32;
   localparam CVA6ConfigBHTEntries = 128;
 

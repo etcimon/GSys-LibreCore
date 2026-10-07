@@ -2188,6 +2188,41 @@ module cva6
         end
       end
     end
+    // T19: the HPDCACHE pipeline/replay/MSHR anatomy behind a no-grant load
+    // port (defect 2 — `ldu st=1 dreq=1` forever after drain forces killed an
+    // in-flight miss). core_req_ready drops for every port on rtab_full /
+    // a replayable rtab entry / uc_busy / cmo_busy / refill_busy / st1-st2
+    // nops; the load-buffer bitmaps show slots whose response never came.
+    if (CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WT ||
+        CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WB ||
+        CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WT_WB) begin : gen_hpd_stall_probe
+      int unsigned ss_hpd_seen = 0;
+      always @(posedge clk_i) begin
+        if (smt_stats_en && ss_dump_id != ss_hpd_seen) begin
+          ss_hpd_seen = ss_dump_id;
+          $display("[smt-stall] hpd crv=%0d crr=%0d gntq=%b arbv=%b st1v=%0d st2m=%0d rtab v=%b full=%0d empty=%0d fence=%0d pop=%0d | mshr_e=%0d wbuf_e=%0d uc=%0d cmo=%0d refill=%0d | ldbuf v=%h f=%h full=%0d",
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.core_req_valid_i,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.core_req_ready_o,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.core_req_arbiter_i.arb_req_gnt_q,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.core_req_arbiter_i.core_req_valid,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st1_req_valid_q,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st2_mshr_alloc_q,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.hpdcache_rtab_i.valid_q,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.rtab_full,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.rtab_empty_o,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.rtab_fence,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.st0_rtab_pop_try_valid,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.mshr_empty_i,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.wbuf_empty_i,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.uc_busy_i,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.cmo_busy_i,
+                   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.refill_busy_i,
+                   ex_stage_i.lsu_i.i_load_unit.ldbuf_valid_q,
+                   ex_stage_i.lsu_i.i_load_unit.ldbuf_flushed_q,
+                   ex_stage_i.lsu_i.i_load_unit.ldbuf_full);
+        end
+      end
+    end
     always @(posedge clk_i) begin
       if (!rst_ni) begin
         ss_prev_dp <= 1'b0;
@@ -3038,12 +3073,35 @@ module cva6
   always_comb begin
     resolved_branch_ctrl = resolved_branch_fe;
 `ifdef G6LC_FETCH_B
-    if (CVA6Cfg.NrHarts > 1)
+    // T19 (defect 1): the active-hart qualifier is a MIXED-residency device —
+    // only there can a peer hart resolve a branch while another hart owns the
+    // fetch stream. Under the drained handoff every in-flight instruction
+    // belongs to the resident hart, so the qualifier can only ever DROP a
+    // legitimate kill: the scoreboard then still cancels the branch's younger
+    // entries (hart-matched) while the IQ/ID keep the wrong path and the
+    // frontend is never redirected — exactly the retired-wrong-path-window
+    // signature of the ooocoh-t18 boot (harts 3/7). Keep the filter for mixed
+    // residency only; the witness below reports any drained-mode mismatch.
+    if (CVA6Cfg.NrHarts > 1 && !CVA6Cfg.SmtDrainedHandoff)
       resolved_branch_ctrl.is_mispredict = g6lc_fetch_pkg::redirect_for_hart(
           1'b1, resolved_branch_fe.valid && resolved_branch_fe.is_mispredict,
           8'(resolved_branch_fe.hart_id), 8'(smt_active_hart));
 `endif
   end
+//pragma translate_off
+`ifdef G6LC_FETCH_B
+  // T19 witness: a drained-handoff mispredict whose hart is not the active
+  // hart (should be unreachable; the pre-T19 filter silently dropped it).
+  always @(posedge clk_i) begin
+    if (rst_ni && CVA6Cfg.NrHarts > 1 && CVA6Cfg.SmtDrainedHandoff &&
+        resolved_branch_fe.valid && resolved_branch_fe.is_mispredict &&
+        resolved_branch_fe.hart_id != smt_active_hart)
+      $display("[misp-hart] t=%0t drained mispredict hart=%0d active=%0d pc=%h tgt=%h",
+               $time, resolved_branch_fe.hart_id, smt_active_hart,
+               resolved_branch_fe.pc, resolved_branch_fe.target_address);
+  end
+`endif
+//pragma translate_on
 
   controller #(
       .CVA6Cfg(CVA6Cfg),

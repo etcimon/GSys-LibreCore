@@ -25,21 +25,41 @@ module g6lc_bp_statcor
 
   localparam int unsigned OFFSET = CVA6Cfg.RVC == 1'b1 ? 1 : 2;
   localparam int unsigned IDX_W = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);
+  // Slot bits of an instruction address inside the fetch window: slot i of
+  // the window at vpc_i sits at address {vpc_i[..], i}, exactly as the BHT
+  // rows are addressed.
+  localparam int unsigned ROW_W = (CVA6Cfg.INSTR_PER_FETCH > 1) ? $clog2(CVA6Cfg.INSTR_PER_FETCH) : 0;
+
+  if (IDX_W <= ROW_W) begin : gen_err_statcor_geometry
+    $error("g6lc_bp_statcor: NR_ENTRIES must exceed INSTR_PER_FETCH so every slot owns a counter");
+  end
 
   // Unsigned 3-bit taken-outcome counter; reset is neutral.
   logic [NR_ENTRIES-1:0][2:0] w_d, w_q;
-  logic [IDX_W-1:0] idx, uidx;
+  logic [CVA6Cfg.INSTR_PER_FETCH-1:0][IDX_W-1:0] idx;
+  logic [IDX_W-1:0] uidx;
 
-  assign idx  = vpc_i[OFFSET+:IDX_W];
+  // T18: index per SLOT with that slot's own address bits, the same bits the
+  // resolving branch trains with (uidx). Indexing every slot with the window
+  // base aliased all slots of a window onto one counter that another
+  // branch had trained: a saturated taken bne at fdt_next_node forced a
+  // never-taken bltu in a neighbouring window taken on every libfdt call
+  // (8-16-cycle refetch each), and the victim could never retrain its
+  // own counter.
   assign uidx = bht_update_i.pc[OFFSET+:IDX_W];
 
   for (genvar i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin : gen_sc
+    if (ROW_W == 0) begin : gen_idx_single
+      assign idx[i] = vpc_i[OFFSET+:IDX_W];
+    end else begin : gen_idx_slot
+      assign idx[i] = {vpc_i[OFFSET+ROW_W+:(IDX_W-ROW_W)], ROW_W'(i)};
+    end
     always_comb begin
       pred_o[i] = pred_i[i];
       // Strong absolute bias overrides direction only for valid predictions.
-      if (pred_i[i].valid && w_q[idx] < 3'b010) begin
+      if (pred_i[i].valid && w_q[idx[i]] < 3'b010) begin
         pred_o[i].taken = 1'b0;
-      end else if (pred_i[i].valid && w_q[idx] > 3'b101) begin
+      end else if (pred_i[i].valid && w_q[idx[i]] > 3'b101) begin
         pred_o[i].taken = 1'b1;
       end
     end

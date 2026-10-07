@@ -546,7 +546,10 @@ module scoreboard #(
       for (int unsigned k = 0; k < CVA6Cfg.NR_SB_ENTRIES; k++) begin
         if (cid == issue_pointer[0]) break;
         // NrHarts==1 → hart_id always 0 → identity (cancel all younger).
-        if (CVA6Cfg.NrHarts <= 1 ||
+        // T19: the same-hart filter is a MIXED-residency device; under the
+        // drained handoff every live entry is the resident hart's, so a tag
+        // mismatch could only spare a wrong-path entry (program order rules).
+        if (CVA6Cfg.NrHarts <= 1 || CVA6Cfg.SmtDrainedHandoff ||
             mem_q[cid].sbe.hart_id == resolved_branch_i.hart_id) begin
           // Younger-cancel policy (soft-ladder iter-012 / hang-6–7 / R3a cont.5):
           //
@@ -711,7 +714,7 @@ module scoreboard #(
       cid = after_flu_wb;
       for (int unsigned k = 0; k < CVA6Cfg.NR_SB_ENTRIES; k++) begin
         if (cid == issue_pointer[0]) break;
-        if (CVA6Cfg.NrHarts <= 1 ||
+        if (CVA6Cfg.NrHarts <= 1 || CVA6Cfg.SmtDrainedHandoff ||
             mem_q[cid].sbe.hart_id == resolved_branch_i.hart_id) begin
           // EXTRACT E0: same keep as sequential cancel.
           // I13: B mask matches sequential cancel (no exemption list).

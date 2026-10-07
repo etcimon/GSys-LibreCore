@@ -413,4 +413,42 @@ module cva6_hpdcache_wrapper
   assign dcache_miss_o = dcache_read_miss, wbuffer_not_ni_o = wbuffer_empty_o;
   //  }}}
 
+  //pragma translate_off
+  // T19 witness (defect 2): the core arbiter grants a requester whose valid
+  // is low — a PHANTOM request. hpdcache_fxarb latches its grant while the
+  // pipeline is not ready (wait_q/gnt_q) and keeps presenting that port
+  // until ready returns; if the requester withdrew its valid meanwhile (a
+  // CRI protocol violation the pre-T19 load adapter let through on a
+  // flush/cancel in WAIT_GNT), the pipeline accepts the port's idle payload.
+  // Also counts the withdrawals themselves on the load ports (held by the
+  // T19 adapter, wire-through under G6LC_MUT_HPD_REQ_WITHDRAW).
+  int unsigned hpd_phantom_cnt = 0, hpd_withdraw_cnt = 0;
+  logic [HPDCACHE_NREQUESTERS-1:0] hpd_pend_q;
+  always @(posedge clk_i) begin
+    if (rst_ni) begin
+      if (i_hpdcache.core_req_arbiter_i.arb_req_valid_o &&
+          !(|(i_hpdcache.core_req_arbiter_i.arb_req_gnt_d &
+              i_hpdcache.core_req_arbiter_i.core_req_valid))) begin
+        hpd_phantom_cnt++;
+        if (hpd_phantom_cnt <= 20)
+          $display("[hpd-phantom] t=%0t gnt=%b valid=%b ready=%0d off=%h tid=%0d need_rsp=%0d",
+                   $time, i_hpdcache.core_req_arbiter_i.arb_req_gnt_d,
+                   i_hpdcache.core_req_arbiter_i.core_req_valid,
+                   i_hpdcache.core_req_arbiter_i.arb_req_ready_i,
+                   i_hpdcache.core_req_arbiter_i.arb_req_o.addr_offset,
+                   i_hpdcache.core_req_arbiter_i.arb_req_o.tid,
+                   i_hpdcache.core_req_arbiter_i.arb_req_o.need_rsp);
+      end
+      for (int unsigned p = 0; p < NumPorts - 1; p++) begin
+        if (hpd_pend_q[p] && !dcache_req_ports_i[p].data_req) hpd_withdraw_cnt++;
+        hpd_pend_q[p] <= dcache_req_ports_i[p].data_req & ~dcache_req_ports_o[p].data_gnt;
+      end
+    end
+  end
+  final begin
+    $display("[hpd-phantom] final phantom_grants=%0d load_port_withdrawals=%0d",
+             hpd_phantom_cnt, hpd_withdraw_cnt);
+  end
+  //pragma translate_on
+
 endmodule : cva6_hpdcache_wrapper

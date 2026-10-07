@@ -49,7 +49,18 @@ and resolution ownership are unchanged.
 interprets the learned absolute outcome consistently: 0/1 selects not-taken,
 6/7 selects taken, 2..5 defers, and invalid input predictions remain invalid.
 It remains gated by the existing `BPStatCorEn`/predictor configuration. Counters
-are shared by index; no per-PC, per-slot or per-hart isolation guarantee is added.
+are shared by index; no per-PC or per-hart isolation guarantee is added.
+
+T18 (2026-10-06) changed the *lookup* index only: slot `i` of the fetch window at
+`vpc` now reads row `{vpc[OFFSET+ROW_W +: IDX_W-ROW_W], i}` (`ROW_W = $clog2(INSTR_PER_FETCH)`),
+i.e. the slot's own address bits — the same bits the resolving branch trains with —
+instead of the window base for every slot. Before, a hot taken branch whose
+`pc[OFFSET+:IDX_W]` matched a window base forced "taken" onto every valid-predicted
+branch of that window (server boot: `fdt_next_node+0x5a` → `fdt_offset_ptr+0x6c`,
+8–16-cycle refetch per libfdt call), and the victim's own training never reached that
+row. A generate-time guard requires `NR_ENTRIES > INSTR_PER_FETCH`. The leaf
+`verif/tb/core/tb_g6lc_bp_statcor.sv` models the per-slot row and carries two directed
+aliasing shapes (`t18-window-base`, `t18-redirect-base`) that the pre-T18 RTL fails.
 
 | Check | Result / scope |
 |---|---|
