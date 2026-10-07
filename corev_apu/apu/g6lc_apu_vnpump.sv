@@ -141,11 +141,19 @@ module g6lc_apu_vnpump
   output logic [Rings-1:0]       ring_active_o,
   output logic [Rings-1:0][31:0] ring_status_o,
   output logic [Rings-1:0][31:0] ring_head_o,
-  output logic [Rings-1:0][17:0] ring_extra_w_o
+  output logic [Rings-1:0][APU_VG_AP_WORD_W-1:0] ring_extra_w_o
 );
   localparam logic [1:0] SK_RING = 2'd0, SK_LIN_AP = 2'd1,
                         SK_LIN_GM = 2'd2;
   localparam int unsigned TW = APU_VN_DEC_TYPE_MAX + 1;
+  // Venus vkCreateRingMESA carries idleTimeout as a u64 in *nanoseconds*.
+  // The pump has no wall clock — it counts ring-poll rounds — so the
+  // requested timeout is saturated to IdleToMax rounds.  That keeps the
+  // IDLE/ALIVE status refresh cadence bounded (the Mesa ring watchdog
+  // clears ALIVE on every warn iteration and needs the renderer to
+  // re-assert it while the ring is parked); a shorter renderer-side idle
+  // timeout only costs the guest extra vkNotifyRingMESA submits.
+  localparam logic [31:0] IdleToMax = 32'd32;
 
   if (!Enable) begin : gen_off
     assign xs_ready_o = 1'b0;   assign xs_done_o = 1'b0;
@@ -201,12 +209,12 @@ module g6lc_apu_vnpump
       logic [63:0] handle;
       logic [7:0]  ctx;
       logic [31:0] head;          // byte seqno consumed by device
-      logic [17:0] head_w;        // aperture word addrs
-      logic [17:0] tail_w;
-      logic [17:0] status_w;
-      logic [17:0] buf_w;
+      logic [APU_VG_AP_WORD_W-1:0] head_w;        // aperture word addrs
+      logic [APU_VG_AP_WORD_W-1:0] tail_w;
+      logic [APU_VG_AP_WORD_W-1:0] status_w;
+      logic [APU_VG_AP_WORD_W-1:0] buf_w;
       logic [31:0] buf_size;      // bytes, power of two
-      logic [17:0] extra_w;
+      logic [APU_VG_AP_WORD_W-1:0] extra_w;
       logic [31:0] extra_size;
       logic [31:0] idle_to;
       logic [31:0] idle_cnt;
@@ -220,7 +228,7 @@ module g6lc_apu_vnpump
       logic [1:0]  kind;          // SK_*
       logic [1:0]  ring;          // ring slot when SK_RING
       logic [31:0] base_head;     // ring head at stream start (bytes)
-      logic [17:0] base_w;        // ap word base (SK_LIN_AP)
+      logic [APU_VG_AP_WORD_W-1:0] base_w;        // ap word base (SK_LIN_AP)
       logic [31:0] bytes;         // stream size in bytes
       logic [31:0] pos;           // bytes consumed so far
       logic [7:0]  ctx;
@@ -237,7 +245,7 @@ module g6lc_apu_vnpump
 
     // reply window
     logic        rep_live_q;
-    logic [17:0] rep_base_w_q;
+    logic [APU_VG_AP_WORD_W-1:0] rep_base_w_q;
     logic [31:0] rep_size_q;
     logic [31:0] rep_pos_q;       // bytes into the window
 
@@ -252,9 +260,9 @@ module g6lc_apu_vnpump
     logic [63:0] t_hnd_q, t_val_q, t_off64_q, t_size64_q;
     logic [31:0] t_rid_q;
     logic [3:0]  t_i_q;           // exec-window stream index
-    logic [17:0] blob_base_w_q;
+    logic [APU_VG_AP_WORD_W-1:0] blob_base_w_q;
     logic [63:0] blob_size_q;
-    logic [17:0] wr_addr_q;
+    logic [APU_VG_AP_WORD_W-1:0] wr_addr_q;
     logic [31:0] wr_data_q;
 
     // poll bookkeeping
@@ -353,13 +361,13 @@ module g6lc_apu_vnpump
 
     // ---- stream byte addressing --------------------------------------------
     // byte offset of a word index within the current stream
-    function automatic logic [17:0] apw(input logic [31:0] boff);
+    function automatic logic [APU_VG_AP_WORD_W-1:0] apw(input logic [31:0] boff);
       if (st_q[depth_q].kind == SK_RING)
         return ring_q[st_q[depth_q].ring].buf_w +
-               18'(((st_q[depth_q].base_head + boff) &
+               APU_VG_AP_WORD_W'(((st_q[depth_q].base_head + boff) &
                     (ring_q[st_q[depth_q].ring].buf_size - 32'd1))
                    >> 2);
-      return st_q[depth_q].base_w + 18'(boff >> 2);
+      return st_q[depth_q].base_w + APU_VG_AP_WORD_W'(boff >> 2);
     endfunction
 
     // guest-memory byte address for execbuffer stream byte `boff`
@@ -386,7 +394,7 @@ module g6lc_apu_vnpump
 
     // ---- pump's own aperture/guest access ------------------------------------
     logic pump_re, pump_we, pump_gm;
-    logic [17:0] pump_addr;
+    logic [APU_VG_AP_WORD_W-1:0] pump_addr;
     // the transport fetch reads word tb_i of the current command
     logic [31:0] rd_boff;
     assign rd_boff = st_q[depth_q].pos +
@@ -421,8 +429,8 @@ module g6lc_apu_vnpump
     owner_e src;
     owner_e rsp_owner_q;
     logic   rsp_hi_q;          // addr[2] of the accepted request
-    logic [17:0] fr_waddr;
-    assign fr_waddr = rep_base_w_q + 18'(fr_raddr);
+    logic [APU_VG_AP_WORD_W-1:0] fr_waddr;
+    assign fr_waddr = rep_base_w_q + APU_VG_AP_WORD_W'(fr_raddr);
     always_comb begin
       src         = OW_NONE;
       mp_req_o    = 1'b0;
@@ -439,7 +447,7 @@ module g6lc_apu_vnpump
         mp_req_o   = 1'b1;
         mp_we_o    = 1'b1;
         mp_dom_o   = 1'b1;
-        mp_addr_o  = {44'h0, wr_addr_q, 2'b00};
+        mp_addr_o  = {(62-APU_VG_AP_WORD_W)'(1'b0), wr_addr_q, 2'b00};
         mp_wdata_o = {2{wr_data_q}};
         mp_wstrb_o = wr_addr_q[0] ? 8'hF0 : 8'h0F;
       end else if (fr_rwe) begin
@@ -447,7 +455,7 @@ module g6lc_apu_vnpump
         mp_req_o   = 1'b1;
         mp_we_o    = 1'b1;
         mp_dom_o   = 1'b1;
-        mp_addr_o  = {44'h0, fr_waddr, 2'b00};
+        mp_addr_o  = {(62-APU_VG_AP_WORD_W)'(1'b0), fr_waddr, 2'b00};
         mp_wdata_o = {2{fr_wdata}};
         mp_wstrb_o = fr_waddr[0] ? 8'hF0 : 8'h0F;
       end else if (cs_re) begin
@@ -459,14 +467,14 @@ module g6lc_apu_vnpump
           mp_addr_o  = gma(xs_boff_q + rd_boff);
         end else begin
           mp_dom_o   = 1'b1;
-          mp_addr_o  = {44'h0, apw(rd_boff), 2'b00};
+          mp_addr_o  = {(62-APU_VG_AP_WORD_W)'(1'b0), apw(rd_boff), 2'b00};
         end
       end else if (pump_re) begin
         src       = OW_PRD;
         mp_req_o  = 1'b1;
         mp_we_o   = 1'b0;
         mp_dom_o  = 1'b1;
-        mp_addr_o = {44'h0, pump_addr, 2'b00};
+        mp_addr_o = {(62-APU_VG_AP_WORD_W)'(1'b0), pump_addr, 2'b00};
       end else if (pump_gm) begin
         src       = OW_PRD;
         mp_req_o  = 1'b1;
@@ -632,7 +640,12 @@ module g6lc_apu_vnpump
               end else begin
                 if (ring_q[poll_q].idle_cnt + 32'd1 >=
                     ring_q[poll_q].idle_to) begin
+                  // periodic ALIVE|IDLE refresh (the guest ring watchdog
+                  // clears ALIVE while it waits and needs re-assertion);
+                  // re-arm the counter so writes happen every idle_to
+                  // rounds, not every round
                   ring_q[poll_q].idle <= 1'b1;
+                  ring_q[poll_q].idle_cnt <= '0;
                   wr_addr_q <= ring_q[poll_q].status_w;
                   wr_data_q <= APU_VNRING_ALIVE | APU_VNRING_IDLE;
                   state_q <= StIdleWr;
@@ -817,7 +830,7 @@ module g6lc_apu_vnpump
                   state_q <= StFatal;
                 else begin
                   wr_addr_q <= ring_q[ring_of(t_hnd_q)].extra_w +
-                               18'(t_off64_q >> 2);
+                               APU_VG_AP_WORD_W'(t_off64_q >> 2);
                   wr_data_q <= 32'(t_val_q);
                   state_q <= StApWr;
                 end
@@ -836,7 +849,7 @@ module g6lc_apu_vnpump
                 state_q <= StFatal;
               else begin
                 blob_base_w_q <=
-                  18'((ot_cpl_i.entry.bind_offset - APU_VG_SHM_BASE) >> 2);
+                  APU_VG_AP_WORD_W'((ot_cpl_i.entry.bind_offset - APU_VG_SHM_BASE) >> 2);
                 blob_size_q <= ot_cpl_i.entry.size;
                 state_q <= StOtDo;
               end
@@ -849,7 +862,7 @@ module g6lc_apu_vnpump
                   state_q <= StFatal;
                 else begin
                   rep_live_q <= 1'b1;
-                  rep_base_w_q <= blob_base_w_q + 18'(t_off64_q >> 2);
+                  rep_base_w_q <= blob_base_w_q + APU_VG_AP_WORD_W'(t_off64_q >> 2);
                   rep_size_q <= 32'(t_size64_q);
                   rep_pos_q <= '0;
                   state_q <= StNext;
@@ -868,7 +881,7 @@ module g6lc_apu_vnpump
                   st_q[1] <= '{live: 1'b1, kind: SK_LIN_AP,
                                ring: '0, base_head: '0,
                                base_w: blob_base_w_q +
-                                       18'(t_off64_q >> 2),
+                                       APU_VG_AP_WORD_W'(t_off64_q >> 2),
                                bytes: 32'(t_size64_q), pos: '0,
                                ctx: st_q[0].ctx, ring_stream: 1'b0};
                   depth_q <= 1'b1;
@@ -910,27 +923,34 @@ module g6lc_apu_vnpump
                       handle: t_hnd_q,
                       ctx: st_q[depth_q].ctx, head: '0,
                       head_w: blob_base_w_q +
-                        18'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2) +
-                        18'(tbuf[depth_q][17 + 4 * cmd_cn_q[depth_q]] >> 2),
+                        APU_VG_AP_WORD_W'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2) +
+                        APU_VG_AP_WORD_W'(tbuf[depth_q][17 + 4 * cmd_cn_q[depth_q]] >> 2),
                       tail_w: blob_base_w_q +
-                        18'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2) +
-                        18'(tbuf[depth_q][19 + 4 * cmd_cn_q[depth_q]] >> 2),
+                        APU_VG_AP_WORD_W'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2) +
+                        APU_VG_AP_WORD_W'(tbuf[depth_q][19 + 4 * cmd_cn_q[depth_q]] >> 2),
                       status_w: blob_base_w_q +
-                        18'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2) +
-                        18'(tbuf[depth_q][21 + 4 * cmd_cn_q[depth_q]] >> 2),
+                        APU_VG_AP_WORD_W'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2) +
+                        APU_VG_AP_WORD_W'(tbuf[depth_q][21 + 4 * cmd_cn_q[depth_q]] >> 2),
                       buf_w: blob_base_w_q +
-                        18'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2) +
-                        18'(tbuf[depth_q][23 + 4 * cmd_cn_q[depth_q]] >> 2),
+                        APU_VG_AP_WORD_W'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2) +
+                        APU_VG_AP_WORD_W'(tbuf[depth_q][23 + 4 * cmd_cn_q[depth_q]] >> 2),
                       buf_size: tbuf[depth_q][25 + 4 * cmd_cn_q[depth_q]],
                       extra_w: blob_base_w_q +
-                        18'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2) +
-                        18'(tbuf[depth_q][27 + 4 * cmd_cn_q[depth_q]] >> 2),
+                        APU_VG_AP_WORD_W'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2) +
+                        APU_VG_AP_WORD_W'(tbuf[depth_q][27 + 4 * cmd_cn_q[depth_q]] >> 2),
                       extra_size: tbuf[depth_q][29 + 4 * cmd_cn_q[depth_q]],
-                      idle_to: tbuf[depth_q][15 + 4 * cmd_cn_q[depth_q]],
+                      // idleTimeout is a u64 ns count; the pump counts
+                      // poll rounds — saturate at IdleToMax so the
+                      // IDLE/ALIVE refresh stays bounded
+                      idle_to: (|tbuf[depth_q][16 + 4 * cmd_cn_q[depth_q]] ||
+                                tbuf[depth_q][15 + 4 * cmd_cn_q[depth_q]] >
+                                IdleToMax)
+                               ? IdleToMax
+                               : tbuf[depth_q][15 + 4 * cmd_cn_q[depth_q]],
                       idle_cnt: '0};
                   wr_addr_q <= blob_base_w_q +
-                        18'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2) +
-                        18'(tbuf[depth_q][21 + 4 * cmd_cn_q[depth_q]] >> 2);
+                        APU_VG_AP_WORD_W'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2) +
+                        APU_VG_AP_WORD_W'(tbuf[depth_q][21 + 4 * cmd_cn_q[depth_q]] >> 2);
                   wr_data_q <= APU_VNRING_ALIVE;
                   state_q <= StApWr;
                 end
@@ -1168,7 +1188,7 @@ module g6lc_apu_vnpump_fixture
   output logic [Rings-1:0]       ring_active_o,
   output logic [Rings-1:0][31:0] ring_status_o,
   output logic [Rings-1:0][31:0] ring_head_o,
-  output logic [Rings-1:0][17:0] ring_extra_w_o
+  output logic [Rings-1:0][APU_VG_AP_WORD_W-1:0] ring_extra_w_o
 );
   g6lc_apu_vnpump #(.Enable(Enable), .Rings(Rings), .Streams(Streams),
                     .TBUF(TBUF)) i_dut (.*);

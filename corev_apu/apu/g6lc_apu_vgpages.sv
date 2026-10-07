@@ -9,8 +9,15 @@
 //   ALLOC(bytes)      -> {OK, base}    first-fit run of ceil(bytes/
 //                                      PageBytes) pages, marked busy
 //                   -> {FULL, 0}      no run fits
-//   FREE(base,bytes) -> OK            clears the same page run
-//                   -> BOUNDS         unaligned base or run past the end
+//   ALLOC_AT(base,bytes) -> {OK,base} caller-chosen extent (kernel
+//                                     drm_mm): marks every page the
+//                                     byte range covers (4 KiB-class
+//                                     alignment allowed)
+//                        -> {BUSY,0}   any covered page already busy
+//                        -> BOUNDS     run past the window end
+//   FREE(base,bytes) -> OK            unmarks every covered page —
+//                                     same coverage rule as ALLOC_AT
+//                   -> BOUNDS         run past the end (bytes==0 is OK)
 //
 // `base` is a window-relative byte offset (the aperture itself lives at
 // APU_VG_SHM_BASE in the SHM BAR window); callers add the window base.
@@ -111,17 +118,43 @@ module g6lc_apu_vgpages
                 state_q <= StScan;
               end
             end
+            APU_VGPAGES_OP_ALLOC_AT: begin
+              // caller-chosen extent: mark every page the byte range
+              // [base, base+bytes) covers; BUSY on a real overlap.  The
+              // guest kernel allocates at its own (4 KiB-class) grid, so
+              // alignment is checked against the aperture, not PageBytes.
+              if (req_i.bytes == 32'h0 ||
+                  64'(req_i.base) + 64'(req_i.bytes) > 64'(WinBytes)) begin
+                cpl_q <= '{status: APU_VGPAGES_BOUNDS, base: '0};
+              end else if ((free_q &
+                            run_mask((req_i.base + req_i.bytes - 32'h1) /
+                                       PageBytes - req_i.base / PageBytes +
+                                       32'd1,
+                                     req_i.base / PageBytes)) != '0) begin
+                cpl_q <= '{status: APU_VGPAGES_BUSY, base: '0};
+              end else begin
+                free_q <= free_q |
+                          run_mask((req_i.base + req_i.bytes - 32'h1) /
+                                     PageBytes - req_i.base / PageBytes +
+                                     32'd1,
+                                   req_i.base / PageBytes);
+                cpl_q <= '{status: APU_VGPAGES_OK, base: req_i.base};
+              end
+              state_q <= StCpl;
+            end
             default: begin // APU_VGPAGES_OP_FREE
               if (req_i.bytes != 32'h0 &&
-                  (req_i.base % PageBytes != 32'h0 ||
-                   64'(req_i.base) +
-                     64'(pages_of(req_i.bytes)) * PageBytes >
-                     64'(WinBytes))) begin
+                  64'(req_i.base) + 64'(req_i.bytes) > 64'(WinBytes)) begin
                 cpl_q   <= '{status: APU_VGPAGES_BOUNDS, base: '0};
               end else begin
                 if (req_i.bytes != 32'h0)
-                  free_q <= free_q & ~run_mask(pages_of(req_i.bytes),
-                                               req_i.base / PageBytes);
+                  // unmark coverage, matching ALLOC_AT: the last covered
+                  // page may be partially used by an unaligned extent
+                  free_q <= free_q &
+                            ~run_mask((req_i.base + req_i.bytes - 32'h1) /
+                                        PageBytes - req_i.base / PageBytes +
+                                        32'd1,
+                                      req_i.base / PageBytes);
                 cpl_q   <= '{status: APU_VGPAGES_OK, base: '0};
               end
               state_q <= StCpl;

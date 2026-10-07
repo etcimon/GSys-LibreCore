@@ -810,9 +810,9 @@ module tb_g6lc_apu_cva6_venus;
                             .gen_venus.i_vgsys.ring_status_o;
   wire [3:0][31:0] r_head   = i_thl_v.i_xbar.i_th.i_attach.i_soc.i_sys
                             .gen_venus.i_vgsys.ring_head_o;
-  wire [3:0][17:0] r_extra  = i_thl_v.i_xbar.i_th.i_attach.i_soc.i_sys
+  wire [3:0][g6lc_apu_vg_pkg::APU_VG_AP_WORD_W-1:0] r_extra  = i_thl_v.i_xbar.i_th.i_attach.i_soc.i_sys
                             .gen_venus.i_vgsys.ring_extra_w_o;
-  wire [255:0] vgp_free = i_thl_v.i_xbar.i_th.i_attach.i_soc.i_sys
+  wire [g6lc_apu_vg_pkg::APU_VG_PAGES-1:0] vgp_free = i_thl_v.i_xbar.i_th.i_attach.i_soc.i_sys
                             .gen_venus.i_vgsys.gen_on.i_top.gen_on.i_vgp
                             .gen_on.free_q;
   // Guest INTERRUPT_ACK[0] write decode inside the virtio-mmio register
@@ -992,7 +992,11 @@ module tb_g6lc_apu_cva6_venus;
                 64'(4) * (64'(r_extra[ring]) + 64'(arg >> 2))) == exp[31:0],
                 "mbx EK_EXTRA");
       3:  check(r_head[ring] == exp[31:0], "mbx EK_HEAD");
-      4:  check(r_status[ring] == exp[31:0], "mbx EK_STATUS");
+      // RING_IDLE (bit0) is the pump's real-time poll timer; the probe
+      // proves it via TP_WAIT_IDLE mask/want, so compare ALIVE|FATAL only.
+      4:  check((r_status[ring] & ~32'h1) == (exp[31:0] & ~32'h1),
+                $sformatf("mbx EK_STATUS ring=%0d exp=%08x act=%08x",
+                          ring, exp[31:0], r_status[ring]));
       default: check(1'b0, "mbx kind");
     endcase
   endtask
@@ -1070,7 +1074,16 @@ module tb_g6lc_apu_cva6_venus;
         check(pubs == irq_rises, "one used publication per IRQ rise");
         check(irq_src_v[SV_VN_IRQ_SOURCE - 1] == plic_irq,
               "plic source splice");
-        check(vg_idle, "vgsys idle at pass");
+        // vgctl can still be draining a first-fit allocator scan (one
+        // page per cycle over VgPages) when the cookie lands; give the
+        // tail a bounded window before declaring the device non-idle.
+        begin : drain_wait
+          int w;
+          for (w = 0; w < 4 * g6lc_apu_vg_pkg::APU_VG_PAGES && !vg_idle;
+               w++)
+            @(posedge clk);
+          check(vg_idle, "vgsys idle at pass");
+        end
         if (errors != 0) $fatal(1, "APU cva6 venus errors=%0d", errors);
         $display("PASS tb_g6lc_apu_cva6_venus checks=%0d cycles=%0d pubs=%0d irq=%0d apu_aw=%0d apu_ar=%0d apu_w=%0d fence=%0d errors=0",
                  checks, cycles, pubs, irq_rises, apu_aw_n, apu_ar_n,

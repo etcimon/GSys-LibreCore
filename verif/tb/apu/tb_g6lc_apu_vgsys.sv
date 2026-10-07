@@ -30,7 +30,14 @@ module tb_g6lc_apu_vgsys;
   localparam logic [63:0] GB     = 64'h8000_0000;   // guest window
   localparam int unsigned GBW    = 32'h40000;       // 1 MiB / 4 B
   localparam logic [63:0] AB     = APU_VG_SHM_BASE; // aperture window
-  localparam int unsigned ABW    = 32'h40000;
+  localparam int unsigned ABW    = 32'h40000;    // dense 1 MiB model
+                                                   // of the 32 MiB window
+  // first-fit keeps every session low; an index past the dense model
+  // is a tape/model bug — never wrap
+  function automatic int unsigned apix(input int unsigned w);
+    if (w >= ABW) $fatal(1, "aperture word %0d past dense model", w);
+    return w;
+  endfunction
   localparam int unsigned TAPEW  = 32'h20000;
   localparam int unsigned EXPW   = 32'h40000;
   localparam int unsigned MAXCYC = 20_000_000;
@@ -69,7 +76,7 @@ module tb_g6lc_apu_vgsys;
   logic [7:0]      d_fring, f_ring;
   logic [Rings-1:0]       d_ra, r_active;
   logic [Rings-1:0][31:0] d_rs, r_status, d_rh, r_head;
-  logic [Rings-1:0][17:0] d_re, r_extra;
+  logic [Rings-1:0][APU_VG_AP_WORD_W-1:0] d_re, r_extra;
   logic [15:0]     d_liv, ot_live;
   assign nclr     = d_nclr | w_nclr;
   assign u_v      = ws_arm_q ? w_uv   : d_uv;
@@ -90,7 +97,7 @@ module tb_g6lc_apu_vgsys;
   assign ot_live  = ws_arm_q ? w_liv : d_liv;
   apu_dma_axi_req_t  areq;
   apu_dma_axi_resp_t arsp;
-  logic [63:0]     ap_bytes = 64'h100000;
+  logic [63:0]     ap_bytes = APU_VG_SHM_BYTES;
   // debug ObjTab (unused; tied off)
   logic            dot_r;
   apu_objtab_req_t dot_req = '0;
@@ -104,7 +111,7 @@ module tb_g6lc_apu_vgsys;
                         : i_dut.gen_on.vw_chain_v;
   wire vw_cr = ws_arm_q ? i_ws0.gen_on.vw_chain_rdy
                         : i_dut.gen_on.vw_chain_rdy;
-  wire [255:0] vgp_free =
+  wire [APU_VG_PAGES-1:0] vgp_free =
       ws_arm_q ? i_ws0.gen_on.i_top.gen_on.i_vgp.gen_on.free_q
                : i_dut.gen_on.i_top.gen_on.i_vgp.gen_on.free_q;
   wire [255:0] pay_free =
@@ -148,7 +155,7 @@ module tb_g6lc_apu_vgsys;
   logic [7:0]      w_fring;
   logic [Rings-1:0]       w_ra;
   logic [Rings-1:0][31:0] w_rs, w_rh;
-  logic [Rings-1:0][17:0] w_re;
+  logic [Rings-1:0][APU_VG_AP_WORD_W-1:0] w_re;
   logic [15:0]     w_liv;
   logic            w_dotr, w_dotcv;
   apu_dma_axi_req_t w_areq;
@@ -189,7 +196,7 @@ module tb_g6lc_apu_vgsys;
   logic [7:0]      o_fring;
   logic [Rings-1:0]       o_ra;
   logic [Rings-1:0][31:0] o_rs, o_rh;
-  logic [Rings-1:0][17:0] o_re;
+  logic [Rings-1:0][APU_VG_AP_WORD_W-1:0] o_re;
   logic [15:0]     o_liv;
   logic            o_dotr, o_dotcv;
   apu_dma_axi_req_t o_areq;
@@ -269,7 +276,7 @@ module tb_g6lc_apu_vgsys;
 
   // ---- guest RAM + aperture backing stores ------------------------------
   logic [31:0] gmem [GBW];   // gmem[off>>2] <-> GB+off
-  logic [31:0] apm  [ABW];   // apm[off>>2]  <-> AB+off
+  logic [31:0] apm  [ABW];   // apm[apix(off>>2)]  <-> AB+off
 
   // ---- AXI4 slave model (burst reads, <=3 outstanding) ------------------
   // Any AW/AR outside the two windows is an immediate test failure.
@@ -317,7 +324,7 @@ module tb_g6lc_apu_vgsys;
       return gmem[32'(o >> 2)][8*(o & 3) +: 8];
     end
     o = a - AB;
-    return apm[32'(o >> 2)][8*(o & 3) +: 8];
+    return apm[apix(32'(o >> 2))][8*(o & 3) +: 8];
   endfunction
 
   task automatic wr8(input logic [63:0] a, input logic [7:0] d);
@@ -327,15 +334,15 @@ module tb_g6lc_apu_vgsys;
       gmem[32'(o >> 2)][8*(o & 3) +: 8] <= d;
     end else begin
       o = a - AB;
-      apm[32'(o >> 2)][8*(o & 3) +: 8] <= d;
+      apm[apix(32'(o >> 2))][8*(o & 3) +: 8] <= d;
     end
   endtask
 
   task automatic win_check(input logic [63:0] a, input string tag);
     if (!((a >= GB && a < GB + 64'h100000) ||
-          (a >= AB && a < AB + 64'h100000)))
+          (a >= AB && a < AB + APU_VG_SHM_BYTES)))
       $fatal(1, "AXI %s address %016x outside both windows", tag, a);
-    if (a >= AB + ap_bytes && a < AB + 64'h100000) oob_ap++;
+    if (a >= AB + ap_bytes && a < AB + APU_VG_SHM_BYTES) oob_ap++;
   endtask
 
   always_comb begin
@@ -778,18 +785,18 @@ module tb_g6lc_apu_vgsys;
           int unsigned n = ntap();
           int unsigned al = ntap(), ah = ntap();
           for (int i = 0; i < n; i++)
-            apm[((al >> 2) + i) % ABW] = ntap();
+            apm[apix(((al >> 2) + i))] = ntap();
         end
         4: begin // TP_WAIT_HEAD [ring][ap_addr][exp][tmo]
           int unsigned rg = ntap(), ad = ntap(),
                        eh = ntap(), tmo = ntap();
           int unsigned t = 0;
-          while (apm[(ad >> 2) % ABW] != eh && t < tmo) begin
+          while (apm[apix((ad >> 2))] != eh && t < tmo) begin
             @(posedge clk); t++;
           end
-          check(apm[(ad >> 2) % ABW] == eh,
+          check(apm[apix((ad >> 2))] == eh,
                 $sformatf("WAIT_HEAD ring%0d ap got=%08x exp=%08x",
-                          rg, apm[(ad >> 2) % ABW], eh));
+                          rg, apm[apix((ad >> 2))], eh));
           check(rec_kind() == 3, "EK_HEAD kind");
           check(expm[ep + 1] == rg && expm[ep + 2] == eh,
                 "EK_HEAD words");
@@ -802,16 +809,16 @@ module tb_g6lc_apu_vgsys;
           int unsigned rg = ntap(), ad = ntap(), mask = ntap(),
                        want = ntap(), tmo = ntap();
           int unsigned t = 0;
-          while (((apm[(ad >> 2) % ABW] & mask) != want) && t < tmo)
+          while (((apm[apix((ad >> 2))] & mask) != want) && t < tmo)
             begin @(posedge clk); t++; end
-          check((apm[(ad >> 2) % ABW] & mask) == want,
+          check((apm[apix((ad >> 2))] & mask) == want,
                 $sformatf("WAIT_IDLE ring%0d status=%08x mask=%0d want=%0d",
-                          rg, apm[(ad >> 2) % ABW], mask, want));
+                          rg, apm[apix((ad >> 2))], mask, want));
           check(rec_kind() == 4, "EK_STATUS kind");
           check(r_status[rg] == expm[ep + 2],
                 $sformatf("ring_status_o got=%08x exp=%08x",
                           r_status[rg], expm[ep + 2]));
-          check(apm[(ad >> 2) % ABW] == expm[ep + 2],
+          check(apm[apix((ad >> 2))] == expm[ep + 2],
                 "aperture status == exp");
           ep += 8;
         end
@@ -836,12 +843,12 @@ module tb_g6lc_apu_vgsys;
               int unsigned bad = 0;
               for (int i = 0; i < a0; i++) begin
                 check(rec_kind() == 5, "EK_REPLY kind");
-                if (apm[((a1 >> 2) + expm[ep + 1]) % ABW] != expm[ep + 2])
+                if (apm[((a1 >> 2) + expm[ep + 1])] != expm[ep + 2])
                   bad++;
-                check(apm[((a1 >> 2) + expm[ep + 1]) % ABW] == expm[ep + 2],
+                check(apm[((a1 >> 2) + expm[ep + 1])] == expm[ep + 2],
                       $sformatf("CK_REPLY off=%0x idx=%0d got=%08x exp=%08x",
                                 a1, expm[ep + 1],
-                                apm[((a1 >> 2) + expm[ep + 1]) % ABW],
+                                apm[((a1 >> 2) + expm[ep + 1])],
                                 expm[ep + 2]));
                 ep += 8;
               end
@@ -862,17 +869,17 @@ module tb_g6lc_apu_vgsys;
             end
             4: begin // CK_EXTRA [ring][byte off]
               check(rec_kind() == 7, "EK_EXTRA kind");
-              check(apm[(r_extra[a0] + (a1 >> 2)) % ABW] == expm[ep + 3],
+              check(apm[(r_extra[a0] + (a1 >> 2))] == expm[ep + 3],
                     $sformatf("CK_EXTRA ring%0d off=%0x got=%08x exp=%08x",
                               a0, a1,
-                              apm[(r_extra[a0] + (a1 >> 2)) % ABW],
+                              apm[(r_extra[a0] + (a1 >> 2))],
                               expm[ep + 3]));
               ep += 8;
             end
             6: begin // CK_APR [nwords][ap byte off]
               for (int i = 0; i < a0; i++) begin
                 automatic logic [31:0] got =
-                    apm[((a1 >> 2) + i) % ABW];
+                    apm[apix(((a1 >> 2) + i))];
                 automatic int unsigned u;
                 check(rec_kind() == 10, "EK_APRCHK kind");
                 check(expm[ep + 1] == a1 + 4 * i, "EK_APRCHK offset");
@@ -936,7 +943,7 @@ module tb_g6lc_apu_vgsys;
   task automatic vq_init(input logic [31:0] u0);
     // u0 = aperture bytes presented to the DUT (64 KiB shrink arm)
     for (int i = 0; i < GBW; i++) gmem[i] = '0;
-    for (int i = 0; i < ABW; i++) apm[i] = '0;
+    for (int i = 0; i < ABW; i++) apm[apix(i)] = '0;
     vq0 = '{desc: GB + Q0D, avail: GB + Q0A, used: GB + Q0U,
             num: 16'(Q0N), ready: 1'b1};
     vq1 = '{desc: GB + Q1D, avail: GB + Q1A, used: GB + Q1U,
@@ -1037,7 +1044,7 @@ module tb_g6lc_apu_vgsys;
         3: begin
           int unsigned n = ntap();
           int unsigned al = ntap(), ah = ntap();
-          for (int i = 0; i < n; i++) apm[((al >> 2) + i) % ABW] = ntap();
+          for (int i = 0; i < n; i++) apm[apix(((al >> 2) + i))] = ntap();
         end
         // WAIT_HEAD/WAIT_IDLE/CHECK: consume operands, give the pump a
         // bounded window to issue its (faulting) aperture traffic
@@ -1108,7 +1115,7 @@ module tb_g6lc_apu_vgsys;
     rreq = 1'b0;
     repeat (8) @(posedge clk);
     // rebuild queue state and replay the transport session cleanly
-    vq_init(64'h100000);
+    vq_init(APU_VG_SHM_BYTES);
     $readmemh("vn_vectors/ue_sm5_transport.hex", tape, 0);
     $readmemh("vn_vectors/ue_sm5_transport.exp", expm, 0);
     tp = 0; ep = 0;
@@ -1139,7 +1146,7 @@ module tb_g6lc_apu_vgsys;
       int unsigned rq = 32'h20000 + 32'(c) * 32'h100;   // req buffer
       int unsigned rp = 32'h20800 + 32'(c) * 32'h100;   // resp buffer
       for (int i = 0; i < 8; i++)
-        gw(rq + 32'(4 * i), (i == 0) ? 32'h0107 : 32'h0);
+        gw(rq + 32'(4 * i), (i == 0) ? 32'h0108 : 32'h0);
       put_desc(0, 2 * c,     GB + rq, 32'd32, VF_NEXT, 16'(2 * c + 1));
       put_desc(0, 2 * c + 1, GB + rp, 32'd40, VF_WRITE, 16'h0);
       push_avail(0, 2 * c);
@@ -1186,10 +1193,10 @@ module tb_g6lc_apu_vgsys;
     rreq      = 1'b0;
     repeat (10) @(posedge clk);
     // ---- write: stall AW+W, flush on the accepting edge -----------
-    vq_init(64'h100000);
+    vq_init(APU_VG_SHM_BYTES);
     stall_aw = 1'b1; stall_w = 1'b1;
     for (int i = 0; i < 8; i++)
-      gw(32'h21000 + 32'(4 * i), (i == 0) ? 32'h0107 : 32'h0);
+      gw(32'h21000 + 32'(4 * i), (i == 0) ? 32'h0108 : 32'h0);
     put_desc(0, 0, GB + 32'h21000, 32'd32, VF_NEXT, 16'd1);
     put_desc(0, 1, GB + 32'h21100, 32'd40, VF_WRITE, 16'h0);
     push_avail(0, 0);
@@ -1223,7 +1230,7 @@ module tb_g6lc_apu_vgsys;
     put_desc(0, 1, GB + 32'h21400, 32'd32, VF_NEXT, 16'd2);
     put_desc(0, 2, GB + 32'h21500, 32'd40, VF_WRITE, 16'h0);
     for (int i = 0; i < 8; i++)
-      gw(32'h21400 + 32'(4 * i), (i == 0) ? 32'h0107 : 32'h0);
+      gw(32'h21400 + 32'(4 * i), (i == 0) ? 32'h0108 : 32'h0);
     push_avail(0, 0);
     notify[0] = 1'b1;
     t = 0;
@@ -1264,7 +1271,7 @@ module tb_g6lc_apu_vgsys;
     int unsigned f0;
     f0 = fcnt;
     for (int i = 0; i < 8; i++)
-      gw(32'h21800 + 32'(4 * i), (i == 0) ? 32'h0107 : 32'h0);
+      gw(32'h21800 + 32'(4 * i), (i == 0) ? 32'h0108 : 32'h0);
     put_desc(0, 0, GB + 32'h21800, 32'd32, VF_NEXT, 16'd1);
     put_desc(0, 1, 64'h40, 32'd40, VF_WRITE, 16'h0);   // outside window
     push_avail(0, 0);
@@ -1311,7 +1318,7 @@ module tb_g6lc_apu_vgsys;
     end
     rreq = 1'b0;
     repeat (8) @(posedge clk);
-    vq_init(64'h100000);
+    vq_init(APU_VG_SHM_BYTES);
     $readmemh("vn_vectors/ue_sm5_transport.hex", tape, 0);
     $readmemh("vn_vectors/ue_sm5_transport.exp", expm, 0);
     tp = 0; ep = 0;
@@ -1327,44 +1334,44 @@ module tb_g6lc_apu_vgsys;
     if (vname != "") $display("session tape: %s", vname);
     do_reset();
     if (vname == "neg_next_loop") begin
-      vq_init(64'h100000);
+      vq_init(APU_VG_SHM_BYTES);
       neg_next_loop();
     end else if (vname == "neg_desc_oob") begin
-      vq_init(64'h100000);
+      vq_init(APU_VG_SHM_BYTES);
       neg_desc_oob();
     end else if (vname == "neg_buf_oob") begin
-      vq_init(64'h100000);
+      vq_init(APU_VG_SHM_BYTES);
       neg_buf_oob();
     end else if (vname == "neg_aperture") begin
       vq_init(64'h100);            // present only 256 B of aperture
       neg_aperture();
     end else if (vname == "neg_used_oob") begin
-      vq_init(64'h100000);
+      vq_init(APU_VG_SHM_BYTES);
       neg_used_oob();
     end else if (vname == "neg_reset") begin
-      vq_init(64'h100000);
+      vq_init(APU_VG_SHM_BYTES);
       neg_reset();
     end else if (vname == "neg_cursor") begin
-      vq_init(64'h100000);
+      vq_init(APU_VG_SHM_BYTES);
       neg_cursor();
     end else if (vname == "neg_batch") begin
-      vq_init(64'h100000);
+      vq_init(APU_VG_SHM_BYTES);
       neg_batch();
     end else if (vname == "neg_flush") begin
-      vq_init(64'h100000);
+      vq_init(APU_VG_SHM_BYTES);
       neg_flush();
     end else if (vname == "neg_qdrop") begin
-      vq_init(64'h100000);
+      vq_init(APU_VG_SHM_BYTES);
       neg_qdrop();
     end else if (vname == "neg_resp_oob") begin
-      vq_init(64'h100000);
+      vq_init(APU_VG_SHM_BYTES);
       neg_resp_oob();
     end else if (vname == "neg_worksink0") begin
       ws_arm_q = 1'b1;             // i_ws0 owns queues + AXI slave
-      vq_init(64'h100000);
+      vq_init(APU_VG_SHM_BYTES);
       neg_worksink0();
     end else begin
-      vq_init(64'h100000);
+      vq_init(APU_VG_SHM_BYTES);
       $readmemh({"vn_vectors/", vname, ".hex"}, tape, 0);
       $readmemh({"vn_vectors/", vname, ".exp"}, expm, 0);
       tp = 0; ep = 0;

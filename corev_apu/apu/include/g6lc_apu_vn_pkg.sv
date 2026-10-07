@@ -13,7 +13,9 @@ package g6lc_apu_vn_pkg;
 
   localparam int APU_VN_TYPE_VK_CREATE_INSTANCE_EXT = 0;
   localparam int APU_VN_TYPE_VK_DESTROY_INSTANCE_EXT = 1;
+  localparam int APU_VN_TYPE_VK_ENUMERATE_INSTANCE_VERSION_EXT = 137;
   localparam int APU_VN_TYPE_VK_ENUMERATE_PHYSICAL_DEVICES_EXT = 2;
+  localparam int APU_VN_TYPE_VK_ENUMERATE_PHYSICAL_DEVICE_GROUPS_EXT = 143;
   localparam int APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_PROPERTIES_EXT = 6;
   localparam int APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_PROPERTIES_2_EXT = 148;
   localparam int APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_FEATURES_EXT = 3;
@@ -25,6 +27,10 @@ package g6lc_apu_vn_pkg;
   localparam int APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_FORMAT_PROPERTIES_EXT = 4;
   localparam int APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_FORMAT_PROPERTIES_2_EXT = 149;
   localparam int APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_IMAGE_FORMAT_PROPERTIES_2_EXT = 150;
+  localparam int APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_EXTERNAL_BUFFER_PROPERTIES_EXT = 161;
+  localparam int APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_EXTERNAL_FENCE_PROPERTIES_EXT = 162;
+  localparam int APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_PROPERTIES_EXT = 163;
+  localparam int APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_SPARSE_IMAGE_FORMAT_PROPERTIES_2_EXT = 153;
   localparam int APU_VN_TYPE_VK_ENUMERATE_DEVICE_EXTENSION_PROPERTIES_EXT = 14;
   localparam int APU_VN_TYPE_VK_CREATE_DEVICE_EXT = 11;
   localparam int APU_VN_TYPE_VK_DESTROY_DEVICE_EXT = 12;
@@ -176,57 +182,55 @@ package g6lc_apu_vn_pkg;
 
   localparam int APU_VN_DEC_TYPE_MAX = 334;
   localparam logic [15:0] APU_VN_DEC_ENTRY [0:APU_VN_DEC_TYPE_MAX] = '{
-    16'h00B4, 16'h00CD, 16'h00D1, 16'h00DF,
-    16'h0105, 16'hFFFF, 16'h00D7, 16'h00F7,
-    16'h00E7, 16'hFFFF, 16'hFFFF, 16'h0123,
-    16'h0176, 16'hFFFF, 16'h011C, 16'hFFFF,
-    16'hFFFF, 16'h017A, 16'h0190, 16'h018E,
-    16'h018C, 16'h019F, 16'h01AA, 16'hFFFF,
-    16'h01AF, 16'h01B2, 16'h01BC, 16'hFFFF,
-    16'h01E0, 16'h01EF, 16'h01C6, 16'h01D3,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h0620,
-    16'h062A, 16'h062F, 16'h0633, 16'h0636,
-    16'h063C, 16'h0646, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h064B,
-    16'h0658, 16'h0670, 16'h01FE, 16'h020D,
-    16'h0212, 16'h0220, 16'h0225, 16'h023D,
-    16'hFFFF, 16'h0242, 16'h0258, 16'h027B,
-    16'h0287, 16'h02BA, 16'h02C6, 16'hFFFF,
-    16'hFFFF, 16'h02E9, 16'h02CB, 16'h0381,
-    16'h02A3, 16'h02B5, 16'h025D, 16'h0276,
-    16'h028C, 16'h029E, 16'h0426, 16'h0436,
-    16'h043B, 16'h043F, 16'h0449, 16'h044F,
-    16'h0411, 16'h0421, 16'h0386, 16'h040C,
-    16'hFFFF, 16'h0472, 16'h047D, 16'h0482,
-    16'h0486, 16'h0490, 16'h0496, 16'h04A5,
-    16'h04A7, 16'h04AA, 16'h04C9, 16'h04D5,
+    16'h02F9, 16'h0312, 16'h0318, 16'h032F,
+    16'h0355, 16'hFFFF, 16'h0327, 16'h0347,
+    16'h0337, 16'hFFFF, 16'hFFFF, 16'h03A0,
+    16'h03F3, 16'hFFFF, 16'h0399, 16'hFFFF,
+    16'hFFFF, 16'h03F7, 16'h040D, 16'h040B,
+    16'h0409, 16'h041C, 16'h0427, 16'hFFFF,
+    16'h042C, 16'h042F, 16'h0439, 16'hFFFF,
+    16'h045D, 16'h046C, 16'h0443, 16'h0450,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h089D,
+    16'h08A7, 16'h08AC, 16'h08B0, 16'h08B3,
+    16'h08B9, 16'h08C3, 16'hFFFF, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h08C8,
+    16'h08D5, 16'h08ED, 16'h047B, 16'h048A,
+    16'h048F, 16'h049D, 16'h04A2, 16'h04BA,
+    16'hFFFF, 16'h04BF, 16'h04D5, 16'h04F8,
+    16'h0504, 16'h0537, 16'h0543, 16'hFFFF,
+    16'hFFFF, 16'h0566, 16'h0548, 16'h05FE,
+    16'h0520, 16'h0532, 16'h04DA, 16'h04F3,
+    16'h0509, 16'h051B, 16'h06A3, 16'h06B3,
+    16'h06B8, 16'h06BC, 16'h06C6, 16'h06CC,
+    16'h068E, 16'h069E, 16'h0603, 16'h0689,
+    16'hFFFF, 16'h06EF, 16'h06FA, 16'h06FF,
+    16'h0703, 16'h070D, 16'h0713, 16'h0722,
+    16'h0724, 16'h0727, 16'h0746, 16'h0752,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h04AE,
-    16'h04BD, 16'h04B7, 16'h04DF, 16'h04E5,
-    16'h04EC, 16'h04F2, 16'h04F8, 16'h04FD,
-    16'h055B, 16'h0565, 16'h05A9, 16'h057F,
-    16'h0594, 16'h05CB, 16'h05C5, 16'h05D1,
-    16'h05E0, 16'h05EF, 16'h0602, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'h0532, 16'h0662,
-    16'h0667, 16'h065D, 16'h066B, 16'hFFFF,
-    16'h04C2, 16'h0501, 16'h0528, 16'h052B,
-    16'h061C, 16'hFFFF, 16'h01E5, 16'h01F4,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h072B,
+    16'h073A, 16'h0734, 16'h075C, 16'h0762,
+    16'h0769, 16'h076F, 16'h0775, 16'h077A,
+    16'h07D8, 16'h07E2, 16'h0826, 16'h07FC,
+    16'h0811, 16'h0848, 16'h0842, 16'h084E,
+    16'h085D, 16'h086C, 16'h087F, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'h07AF, 16'h08DF,
+    16'h08E4, 16'h08DA, 16'h08E8, 16'hFFFF,
+    16'h073F, 16'h077E, 16'h07A5, 16'h07A8,
+    16'h0899, 16'h0316, 16'h0462, 16'h0471,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h031E,
+    16'h0454, 16'h0447, 16'hFFFF, 16'h0332,
+    16'h032A, 16'h0359, 16'h035F, 16'h034D,
+    16'h033E, 16'h0389, 16'hFFFF, 16'h03FE,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'h01D7, 16'h01CA, 16'hFFFF, 16'h00E2,
-    16'h00DA, 16'h0109, 16'h010F, 16'h00FD,
-    16'h00EE, 16'hFFFF, 16'hFFFF, 16'h0181,
+    16'hFFFF, 16'h036C, 16'h0377, 16'h0380,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h063B,
+    16'h0790, 16'hFFFF, 16'h07AA, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'h08F6, 16'h08FB,
+    16'h08FD, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h03BE,
-    16'h0513, 16'hFFFF, 16'h052D, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'h0679, 16'h067E,
-    16'h0680, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'h068E, 16'h069F, 16'h06A1, 16'h06A5,
-    16'h06A9, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
+    16'h090B, 16'h091C, 16'h091E, 16'h0922,
+    16'h0926, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
@@ -238,8 +242,10 @@ package g6lc_apu_vn_pkg;
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h06AF,
-    16'h06B2, 16'h06B4, 16'hFFFF, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h092C,
+    16'h092F, 16'h0931, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
@@ -262,8 +268,134 @@ package g6lc_apu_vn_pkg;
     16'hFFFF, 16'hFFFF, 16'hFFFF
   };
 
-  localparam int APU_VN_DEC_ROM_WORDS = 1719;
+  localparam int APU_VN_DEC_ROM_WORDS = 2356;
   localparam logic [47:0] APU_VN_DEC_ROM [0:APU_VN_DEC_ROM_WORDS-1] = '{
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 copySrcLayoutCount
+    48'h017F00000000, // U32 a=127 b=0x0 copyDstLayoutCount
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
@@ -279,6 +411,10 @@ package g6lc_apu_vn_pkg;
     48'h017F00000000, // U32 a=127 b=0x0 handleType
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 privateData
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0AFF00000000, // FLAGS a=255 b=0x0 robustBufferAccess
     48'h0AFF00000001, // FLAGS a=255 b=0x1 fullDrawIndexUint32
@@ -351,26 +487,471 @@ package g6lc_apu_vn_pkg;
     48'h0AFF00000001, // FLAGS a=255 b=0x1 storagePushConstant16
     48'h0AFF00000001, // FLAGS a=255 b=0x1 storageInputOutput16
     48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderSubgroupExtendedTypes
+    48'h0F0000000000, // RET a=0 b=0x0 
     48'h0AFF00000001, // FLAGS a=255 b=0x1 samplerYcbcrConversion
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0AFF00000001, // FLAGS a=255 b=0x1 protectedMemory
     48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 advancedBlendCoherentOperations
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 multiDraw
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 inlineUniformBlock
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingInlineUniformBlockUpdateAfterBind
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 maintenance4
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 maintenance5
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 maintenance6
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 maintenance7
+    48'h0F0000000000, // RET a=0 b=0x0 
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderDrawParameters
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderFloat16
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderInt8
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 hostQueryReset
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 globalPriorityQuery
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderInputAttachmentArrayDynamicIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderUniformTexelBufferArrayDynamicIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageTexelBufferArrayDynamicIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderUniformBufferArrayNonUniformIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderSampledImageArrayNonUniformIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageBufferArrayNonUniformIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageImageArrayNonUniformIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderInputAttachmentArrayNonUniformIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderUniformTexelBufferArrayNonUniformIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageTexelBufferArrayNonUniformIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingUniformBufferUpdateAfterBind
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingSampledImageUpdateAfterBind
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingStorageImageUpdateAfterBind
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingStorageBufferUpdateAfterBind
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingUniformTexelBufferUpdateAfterBind
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingStorageTexelBufferUpdateAfterBind
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingUpdateUnusedWhilePending
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingPartiallyBound
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingVariableDescriptorCount
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 runtimeDescriptorArray
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 timelineSemaphore
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 storageBuffer8BitAccess
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 uniformAndStorageBuffer8BitAccess
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 storagePushConstant8
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 conditionalRendering
+    48'h017F00000000, // U32 a=127 b=0x0 inheritedConditionalRendering
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 vulkanMemoryModel
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 vulkanMemoryModelDeviceScope
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 vulkanMemoryModelAvailabilityVisibilityChains
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderBufferInt64Atomics
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderSharedInt64Atomics
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 shaderBufferFloat32Atomics
+    48'h017F00000000, // U32 a=127 b=0x0 shaderBufferFloat32AtomicAdd
+    48'h017F00000000, // U32 a=127 b=0x0 shaderBufferFloat64Atomics
+    48'h017F00000000, // U32 a=127 b=0x0 shaderBufferFloat64AtomicAdd
+    48'h017F00000000, // U32 a=127 b=0x0 shaderSharedFloat32Atomics
+    48'h017F00000000, // U32 a=127 b=0x0 shaderSharedFloat32AtomicAdd
+    48'h017F00000000, // U32 a=127 b=0x0 shaderSharedFloat64Atomics
+    48'h017F00000000, // U32 a=127 b=0x0 shaderSharedFloat64AtomicAdd
+    48'h017F00000000, // U32 a=127 b=0x0 shaderImageFloat32Atomics
+    48'h017F00000000, // U32 a=127 b=0x0 shaderImageFloat32AtomicAdd
+    48'h017F00000000, // U32 a=127 b=0x0 sparseImageFloat32Atomics
+    48'h017F00000000, // U32 a=127 b=0x0 sparseImageFloat32AtomicAdd
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 shaderBufferFloat16Atomics
+    48'h017F00000000, // U32 a=127 b=0x0 shaderBufferFloat16AtomicAdd
+    48'h017F00000000, // U32 a=127 b=0x0 shaderBufferFloat16AtomicMinMax
+    48'h017F00000000, // U32 a=127 b=0x0 shaderBufferFloat32AtomicMinMax
+    48'h017F00000000, // U32 a=127 b=0x0 shaderBufferFloat64AtomicMinMax
+    48'h017F00000000, // U32 a=127 b=0x0 shaderSharedFloat16Atomics
+    48'h017F00000000, // U32 a=127 b=0x0 shaderSharedFloat16AtomicAdd
+    48'h017F00000000, // U32 a=127 b=0x0 shaderSharedFloat16AtomicMinMax
+    48'h017F00000000, // U32 a=127 b=0x0 shaderSharedFloat32AtomicMinMax
+    48'h017F00000000, // U32 a=127 b=0x0 shaderSharedFloat64AtomicMinMax
+    48'h017F00000000, // U32 a=127 b=0x0 shaderImageFloat32AtomicMinMax
+    48'h017F00000000, // U32 a=127 b=0x0 sparseImageFloat32AtomicMinMax
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 vertexAttributeInstanceRateDivisor
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 vertexAttributeInstanceRateZeroDivisor
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 transformFeedback
+    48'h017F00000000, // U32 a=127 b=0x0 geometryStreams
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 computeDerivativeGroupQuads
+    48'h017F00000000, // U32 a=127 b=0x0 computeDerivativeGroupLinear
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 fragmentShaderBarycentric
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 taskShader
+    48'h017F00000000, // U32 a=127 b=0x0 meshShader
+    48'h017F00000000, // U32 a=127 b=0x0 multiviewMeshShader
+    48'h017F00000000, // U32 a=127 b=0x0 primitiveFragmentShadingRateMeshShader
+    48'h017F00000000, // U32 a=127 b=0x0 meshShaderQueries
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 accelerationStructure
+    48'h017F00000000, // U32 a=127 b=0x0 accelerationStructureCaptureReplay
+    48'h017F00000000, // U32 a=127 b=0x0 accelerationStructureIndirectBuild
+    48'h017F00000000, // U32 a=127 b=0x0 accelerationStructureHostCommands
+    48'h017F00000000, // U32 a=127 b=0x0 descriptorBindingAccelerationStructureUpdateAfterBind
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 rayTracingPipeline
+    48'h017F00000000, // U32 a=127 b=0x0 rayTracingPipelineShaderGroupHandleCaptureReplay
+    48'h017F00000000, // U32 a=127 b=0x0 rayTracingPipelineShaderGroupHandleCaptureReplayMixed
+    48'h017F00000000, // U32 a=127 b=0x0 rayTracingPipelineTraceRaysIndirect
+    48'h017F00000000, // U32 a=127 b=0x0 rayTraversalPrimitiveCulling
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 rayQuery
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 rayTracingMaintenance1
+    48'h017F00000000, // U32 a=127 b=0x0 rayTracingPipelineTraceRaysIndirect2
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 scalarBlockLayout
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 uniformBufferStandardLayout
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 depthClipEnable
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 bufferDeviceAddress
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 bufferDeviceAddressCaptureReplay
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 bufferDeviceAddressMultiDevice
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 bufferDeviceAddress
+    48'h017F00000000, // U32 a=127 b=0x0 bufferDeviceAddressCaptureReplay
+    48'h017F00000000, // U32 a=127 b=0x0 bufferDeviceAddressMultiDevice
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 imagelessFramebuffer
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 textureCompressionASTC_HDR
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 ycbcrImageArrays
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 shaderSubgroupClock
+    48'h017F00000000, // U32 a=127 b=0x0 shaderDeviceClock
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 indexTypeUint8
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 fragmentShaderSampleInterlock
+    48'h017F00000000, // U32 a=127 b=0x0 fragmentShaderPixelInterlock
+    48'h017F00000000, // U32 a=127 b=0x0 fragmentShaderShadingRateInterlock
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 separateDepthStencilLayouts
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 primitiveTopologyListRestart
+    48'h017F00000000, // U32 a=127 b=0x0 primitiveTopologyPatchListRestart
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderDemoteToHelperInvocation
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 texelBufferAlignment
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 subgroupSizeControl
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 computeFullSubgroups
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 rectangularLines
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 bresenhamLines
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 smoothLines
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 stippledRectangularLines
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 stippledBresenhamLines
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 stippledSmoothLines
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 pipelineCreationCacheControl
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 storageBuffer16BitAccess
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 uniformAndStorageBuffer16BitAccess
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 storagePushConstant16
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 storageInputOutput16
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 multiview
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 multiviewGeometryShader
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 multiviewTessellationShader
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 variablePointersStorageBuffer
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 variablePointers
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 protectedMemory
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 samplerYcbcrConversion
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderDrawParameters
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 samplerMirrorClampToEdge
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 drawIndirectCount
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 storageBuffer8BitAccess
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 uniformAndStorageBuffer8BitAccess
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 storagePushConstant8
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderBufferInt64Atomics
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderSharedInt64Atomics
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderFloat16
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderInt8
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderInputAttachmentArrayDynamicIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderUniformTexelBufferArrayDynamicIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageTexelBufferArrayDynamicIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderUniformBufferArrayNonUniformIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderSampledImageArrayNonUniformIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageBufferArrayNonUniformIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageImageArrayNonUniformIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderInputAttachmentArrayNonUniformIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderUniformTexelBufferArrayNonUniformIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageTexelBufferArrayNonUniformIndexing
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingUniformBufferUpdateAfterBind
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingSampledImageUpdateAfterBind
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingStorageImageUpdateAfterBind
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingStorageBufferUpdateAfterBind
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingUniformTexelBufferUpdateAfterBind
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingStorageTexelBufferUpdateAfterBind
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingUpdateUnusedWhilePending
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingPartiallyBound
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingVariableDescriptorCount
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 runtimeDescriptorArray
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 samplerFilterMinmax
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 scalarBlockLayout
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 imagelessFramebuffer
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 uniformBufferStandardLayout
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderSubgroupExtendedTypes
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 separateDepthStencilLayouts
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 hostQueryReset
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 timelineSemaphore
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 bufferDeviceAddress
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 bufferDeviceAddressCaptureReplay
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 bufferDeviceAddressMultiDevice
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 vulkanMemoryModel
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 vulkanMemoryModelDeviceScope
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 vulkanMemoryModelAvailabilityVisibilityChains
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderOutputViewportIndex
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderOutputLayer
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 subgroupBroadcastDynamicId
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 robustImageAccess
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 inlineUniformBlock
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 descriptorBindingInlineUniformBlockUpdateAfterBind
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 pipelineCreationCacheControl
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 privateData
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderDemoteToHelperInvocation
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderTerminateInvocation
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 subgroupSizeControl
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 computeFullSubgroups
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 synchronization2
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 textureCompressionASTC_HDR
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderZeroInitializeWorkgroupMemory
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 dynamicRendering
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderIntegerDotProduct
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 maintenance4
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 globalPriorityQuery
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderSubgroupRotate
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderSubgroupRotateClustered
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderFloatControls2
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderExpectAssume
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 rectangularLines
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 bresenhamLines
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 smoothLines
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 stippledRectangularLines
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 stippledBresenhamLines
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 stippledSmoothLines
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 vertexAttributeInstanceRateDivisor
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 vertexAttributeInstanceRateZeroDivisor
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 indexTypeUint8
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 dynamicRenderingLocalRead
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 maintenance5
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 maintenance6
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 pipelineProtectedAccess
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 pipelineRobustness
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 hostImageCopy
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 pushDescriptor
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 customBorderColors
+    48'h017F00000000, // U32 a=127 b=0x0 customBorderColorWithoutFormat
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 borderColorSwizzle
+    48'h017F00000000, // U32 a=127 b=0x0 borderColorSwizzleFromImage
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState2
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState2LogicOp
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState2PatchControlPoints
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3TessellationDomainOrigin
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3DepthClampEnable
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3PolygonMode
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3RasterizationSamples
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3SampleMask
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3AlphaToCoverageEnable
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3AlphaToOneEnable
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3LogicOpEnable
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3ColorBlendEnable
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3ColorBlendEquation
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3ColorWriteMask
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3RasterizationStream
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3ConservativeRasterizationMode
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3ExtraPrimitiveOverestimationSize
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3DepthClipEnable
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3SampleLocationsEnable
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3ColorBlendAdvanced
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3ProvokingVertexMode
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3LineRasterizationMode
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3LineStippleEnable
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3DepthClipNegativeOneToOne
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3ViewportWScalingEnable
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3ViewportSwizzle
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3CoverageToColorEnable
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3CoverageToColorLocation
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3CoverageModulationMode
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3CoverageModulationTableEnable
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3CoverageModulationTable
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3CoverageReductionMode
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3RepresentativeFragmentTestEnable
+    48'h017F00000000, // U32 a=127 b=0x0 extendedDynamicState3ShadingRateImageEnable
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderZeroInitializeWorkgroupMemory
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 shaderSubgroupUniformControlFlow
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 robustBufferAccess2
+    48'h017F00000000, // U32 a=127 b=0x0 robustImageAccess2
+    48'h017F00000000, // U32 a=127 b=0x0 nullDescriptor
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 robustImageAccess
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 workgroupMemoryExplicitLayout
+    48'h017F00000000, // U32 a=127 b=0x0 workgroupMemoryExplicitLayoutScalarBlockLayout
+    48'h017F00000000, // U32 a=127 b=0x0 workgroupMemoryExplicitLayout8BitAccess
+    48'h017F00000000, // U32 a=127 b=0x0 workgroupMemoryExplicitLayout16BitAccess
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 formatA4R4G4B4
+    48'h017F00000000, // U32 a=127 b=0x0 formatA4B4G4R4
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 shaderImageInt64Atomics
+    48'h017F00000000, // U32 a=127 b=0x0 sparseImageInt64Atomics
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 pipelineFragmentShadingRate
+    48'h017F00000000, // U32 a=127 b=0x0 primitiveFragmentShadingRate
+    48'h017F00000000, // U32 a=127 b=0x0 attachmentFragmentShadingRate
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderTerminateInvocation
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 image2DViewOf3D
+    48'h017F00000000, // U32 a=127 b=0x0 sampler2DViewOf3D
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 imageSlicedViewOf3D
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 attachmentFeedbackLoopDynamicState
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 legacyVertexAttributes
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 mutableDescriptorType
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 depthClipControl
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 depthClampControl
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 vertexInputDynamicState
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 shaderRelaxedExtendedInstruction
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 colorWriteEnable
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 synchronization2
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 hostImageCopy
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 primitivesGeneratedQuery
+    48'h017F00000000, // U32 a=127 b=0x0 primitivesGeneratedQueryWithRasterizerDiscard
+    48'h017F00000000, // U32 a=127 b=0x0 primitivesGeneratedQueryWithNonZeroStreams
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 legacyDithering
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 multisampledRenderToSingleSampled
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 pipelineProtectedAccess
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 ycbcr2plane444Formats
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 provokingVertexLast
+    48'h017F00000000, // U32 a=127 b=0x0 transformFeedbackPreservesProvokingVertex
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderIntegerDotProduct
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 dynamicRendering
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 minLod
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 rasterizationOrderColorAttachmentAccess
+    48'h017F00000000, // U32 a=127 b=0x0 rasterizationOrderDepthAttachmentAccess
+    48'h017F00000000, // U32 a=127 b=0x0 rasterizationOrderStencilAttachmentAccess
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 graphicsPipelineLibrary
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 nestedCommandBuffer
+    48'h017F00000000, // U32 a=127 b=0x0 nestedCommandBufferRendering
+    48'h017F00000000, // U32 a=127 b=0x0 nestedCommandBufferSimultaneousUse
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 nonSeamlessCubeMap
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 pipelineRobustness
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 attachmentFeedbackLoopLayout
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 depthClampZeroOne
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 pipelineLibraryGroupHandles
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 dynamicRenderingUnusedAttachments
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 depthBiasControl
+    48'h017F00000000, // U32 a=127 b=0x0 leastRepresentableValueForceUnormRepresentation
+    48'h017F00000000, // U32 a=127 b=0x0 floatRepresentation
+    48'h017F00000000, // U32 a=127 b=0x0 depthBiasExact
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 rayTracingPositionFetch
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 cooperativeMatrix
+    48'h017F00000000, // U32 a=127 b=0x0 cooperativeMatrixRobustBufferAccess
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 shaderMaximalReconvergence
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderSubgroupRotate
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderSubgroupRotateClustered
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderExpectAssume
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderFloatControls2
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h0AFF00000001, // FLAGS a=255 b=0x1 dynamicRenderingLocalRead
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 shaderQuadControl
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 shaderBFloat16Type
+    48'h017F00000000, // U32 a=127 b=0x0 shaderBFloat16DotProduct
+    48'h017F00000000, // U32 a=127 b=0x0 shaderBFloat16CooperativeMatrix
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 shaderReplicatedComposites
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 shaderUniformBufferUnsizedArray
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 shaderFloat8
+    48'h017F00000000, // U32 a=127 b=0x0 shaderFloat8CooperativeMatrix
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 shaderUntypedPointers
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h017F00000000, // U32 a=127 b=0x0 ringIdx
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h017F00000000, // U32 a=127 b=0x0 waitSemaphoreCount
-    48'h090100000002, // BLOB a=1 b=0x2 pWaitSemaphoreDeviceIndices
+    48'h090100000003, // BLOB a=1 b=0x3 pWaitSemaphoreDeviceIndices
     48'h017F00000000, // U32 a=127 b=0x0 commandBufferCount
-    48'h090000000002, // BLOB a=0 b=0x2 pCommandBufferDeviceMasks
+    48'h090000000003, // BLOB a=0 b=0x3 pCommandBufferDeviceMasks
     48'h017F00000000, // U32 a=127 b=0x0 signalSemaphoreCount
-    48'h090100000002, // BLOB a=1 b=0x2 pSignalSemaphoreDeviceIndices
+    48'h090100000003, // BLOB a=1 b=0x3 pSignalSemaphoreDeviceIndices
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h017F00000000, // U32 a=127 b=0x0 protectedSubmit
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h017F00000000, // U32 a=127 b=0x0 handleTypes
+    48'h010000000000, // U32 a=0 b=0x0 handleTypes
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h017F00000000, // U32 a=127 b=0x0 flags
+    48'h010100000000, // U32 a=1 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 deviceMask
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h033B00000006, // HANDLE a=59 b=0x6 image:OPTIONAL
@@ -382,10 +963,10 @@ package g6lc_apu_vn_pkg;
     48'h017F00000000, // U32 a=127 b=0x0 planeAspect
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h017F00000000, // U32 a=127 b=0x0 deviceIndexCount
-    48'h090100000002, // BLOB a=1 b=0x2 pDeviceIndices
+    48'h090100000003, // BLOB a=1 b=0x3 pDeviceIndices
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h017F00000000, // U32 a=127 b=0x0 deviceIndexCount
-    48'h090100000002, // BLOB a=1 b=0x2 pDeviceIndices
+    48'h090100000003, // BLOB a=1 b=0x3 pDeviceIndices
     48'h017F00000000, // U32 a=127 b=0x0 splitInstanceBindRegionCount
     48'h070100000002, // ARRAY a=1 b=0x2 pSplitInstanceBindRegions
     48'h017F00000000, // U32 a=127 b=0x0 x
@@ -400,22 +981,24 @@ package g6lc_apu_vn_pkg;
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h017F00000000, // U32 a=127 b=0x0 handleTypes
     48'h0F0000000000, // RET a=0 b=0x0 
-    48'h0AFF00000008, // FLAGS a=255 b=0x8 usage
+    48'h0AFF00000009, // FLAGS a=255 b=0x9 usage
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h03380000000A, // HANDLE a=56 b=0xA conversion:LOOKUP
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h027F00000000, // U64 a=127 b=0x0 codeSize
-    48'h090100000003, // BLOB a=1 b=0x3 pCode
+    48'h090100000004, // BLOB a=1 b=0x4 pCode
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h017F00000000, // U32 a=127 b=0x0 domainOrigin
     48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 negativeOneToOne
+    48'h0F0000000000, // RET a=0 b=0x0 
     48'h017F00000000, // U32 a=127 b=0x0 subpassCount
-    48'h090100000002, // BLOB a=1 b=0x2 pViewMasks
+    48'h090100000003, // BLOB a=1 b=0x3 pViewMasks
     48'h017F00000000, // U32 a=127 b=0x0 dependencyCount
-    48'h090000000002, // BLOB a=0 b=0x2 pViewOffsets
+    48'h090000000003, // BLOB a=0 b=0x3 pViewOffsets
     48'h017F00000000, // U32 a=127 b=0x0 correlationMaskCount
-    48'h090100000002, // BLOB a=1 b=0x2 pCorrelationMasks
+    48'h090100000003, // BLOB a=1 b=0x3 pCorrelationMasks
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h017F00000000, // U32 a=127 b=0x0 aspectReferenceCount
     48'h070000000000, // ARRAY a=0 b=0x0 pAspectReferences
@@ -426,6 +1009,8 @@ package g6lc_apu_vn_pkg;
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h017F00000000, // U32 a=127 b=0x0 deviceMask
     48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 conditionalRenderingEnable
+    48'h0F0000000000, // RET a=0 b=0x0 
     48'h017F00000000, // U32 a=127 b=0x0 deviceMask
     48'h017F00000000, // U32 a=127 b=0x0 deviceRenderAreaCount
     48'h070000000002, // ARRAY a=0 b=0x2 pDeviceRenderAreas
@@ -434,6 +1019,8 @@ package g6lc_apu_vn_pkg;
     48'h017F00000000, // U32 a=127 b=0x0 width
     48'h017F00000000, // U32 a=127 b=0x0 height
     48'h080000000000, // ENDARR a=0 b=0x0 
+    48'h0F0000000000, // RET a=0 b=0x0 
+    48'h017F00000000, // U32 a=127 b=0x0 acquireUnmodifiedMemory
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h017F00000000, // U32 a=127 b=0x0 handleTypes
     48'h0F0000000000, // RET a=0 b=0x0 
@@ -473,101 +1060,157 @@ package g6lc_apu_vn_pkg;
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
     48'h0D0000000001, // OBJ a=0 b=0x1 
     48'h0E0000000000, // END a=0 b=0x0 
+    48'h040000000000, // PTR a=0 b=0x0 pApiVersion
+    48'h0E0200000000, // END a=2 b=0x0 
     48'h030000000001, // HANDLE a=0 b=0x1 instance:LOOKUP
     48'h040000000001, // PTR a=0 b=0x1 pPhysicalDeviceCount
     48'h010000000000, // U32 a=0 b=0x0 pPhysicalDeviceCount
     48'h090000000001, // BLOB a=0 b=0x1 pPhysicalDevices
     48'h0D0000000002, // OBJ a=0 b=0x2 
-    48'h0E0200000000, // END a=2 b=0x0 
-    48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
-    48'h040000000000, // PTR a=0 b=0x0 pProperties
     48'h0E0300000000, // END a=3 b=0x0 
-    48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
-    48'h040000000002, // PTR a=0 b=0x2 pProperties
+    48'h030000000001, // HANDLE a=0 b=0x1 instance:LOOKUP
+    48'h040000000001, // PTR a=0 b=0x1 pPhysicalDeviceGroupCount
+    48'h010000000000, // U32 a=0 b=0x0 pPhysicalDeviceGroupCount
+    48'h070000000000, // ARRAY a=0 b=0x0 pPhysicalDeviceGroupProperties
     48'h050000000002, // STYPE a=0 b=0x2 sType
     48'h060000000002, // PNEXT a=0 b=0x2 pNext
+    48'h090100000002, // BLOB a=1 b=0x2 physicalDevices
+    48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0400000000, // END a=4 b=0x0 
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
-    48'h040000000000, // PTR a=0 b=0x0 pFeatures
+    48'h040000000000, // PTR a=0 b=0x0 pProperties
     48'h0E0500000000, // END a=5 b=0x0 
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
-    48'h040000000002, // PTR a=0 b=0x2 pFeatures
+    48'h040000000002, // PTR a=0 b=0x2 pProperties
     48'h050000000003, // STYPE a=0 b=0x3 sType
-    48'h060000000010, // PNEXT a=0 b=0x10 pNext
+    48'h060000000003, // PNEXT a=0 b=0x3 pNext
     48'h0E0600000000, // END a=6 b=0x0 
+    48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
+    48'h040000000000, // PTR a=0 b=0x0 pFeatures
+    48'h0E0700000000, // END a=7 b=0x0 
+    48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
+    48'h040000000002, // PTR a=0 b=0x2 pFeatures
+    48'h050000000004, // STYPE a=0 b=0x4 sType
+    48'h06000000002D, // PNEXT a=0 b=0x2D pNext
+    48'h0E0800000000, // END a=8 b=0x0 
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
     48'h040000000004, // PTR a=0 b=0x4 pMemoryProperties
     48'h070000000001, // ARRAY a=0 b=0x1 memoryTypes
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h070100000002, // ARRAY a=1 b=0x2 memoryHeaps
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h0E0700000000, // END a=7 b=0x0 
+    48'h0E0900000000, // END a=9 b=0x0 
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
     48'h040000000006, // PTR a=0 b=0x6 pMemoryProperties
-    48'h050000000004, // STYPE a=0 b=0x4 sType
-    48'h06000000001E, // PNEXT a=0 b=0x1E pNext
+    48'h050000000005, // STYPE a=0 b=0x5 sType
+    48'h060000000115, // PNEXT a=0 b=0x115 pNext
     48'h070000000001, // ARRAY a=0 b=0x1 memoryTypes
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h070100000002, // ARRAY a=1 b=0x2 memoryHeaps
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h0E0800000000, // END a=8 b=0x0 
-    48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
-    48'h040000000001, // PTR a=0 b=0x1 pQueueFamilyPropertyCount
-    48'h010000000000, // U32 a=0 b=0x0 pQueueFamilyPropertyCount
-    48'h070000000000, // ARRAY a=0 b=0x0 pQueueFamilyProperties
-    48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h0E0900000000, // END a=9 b=0x0 
-    48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
-    48'h040000000001, // PTR a=0 b=0x1 pQueueFamilyPropertyCount
-    48'h010000000000, // U32 a=0 b=0x0 pQueueFamilyPropertyCount
-    48'h070000000000, // ARRAY a=0 b=0x0 pQueueFamilyProperties
-    48'h050000000005, // STYPE a=0 b=0x5 sType
-    48'h060000000020, // PNEXT a=0 b=0x20 pNext
-    48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0A00000000, // END a=10 b=0x0 
+    48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
+    48'h040000000001, // PTR a=0 b=0x1 pQueueFamilyPropertyCount
+    48'h010000000000, // U32 a=0 b=0x0 pQueueFamilyPropertyCount
+    48'h070000000000, // ARRAY a=0 b=0x0 pQueueFamilyProperties
+    48'h080000000000, // ENDARR a=0 b=0x0 
+    48'h0E0B00000000, // END a=11 b=0x0 
+    48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
+    48'h040000000001, // PTR a=0 b=0x1 pQueueFamilyPropertyCount
+    48'h010000000000, // U32 a=0 b=0x0 pQueueFamilyPropertyCount
+    48'h070000000000, // ARRAY a=0 b=0x0 pQueueFamilyProperties
+    48'h050000000006, // STYPE a=0 b=0x6 sType
+    48'h060000000117, // PNEXT a=0 b=0x117 pNext
+    48'h080000000000, // ENDARR a=0 b=0x0 
+    48'h0E0C00000000, // END a=12 b=0x0 
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 format
     48'h040000000000, // PTR a=0 b=0x0 pFormatProperties
-    48'h0E0B00000000, // END a=11 b=0x0 
+    48'h0E0D00000000, // END a=13 b=0x0 
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 format
     48'h040000000002, // PTR a=0 b=0x2 pFormatProperties
-    48'h050000000006, // STYPE a=0 b=0x6 sType
-    48'h060000000021, // PNEXT a=0 b=0x21 pNext
-    48'h0E0C00000000, // END a=12 b=0x0 
+    48'h050000000007, // STYPE a=0 b=0x7 sType
+    48'h060000000118, // PNEXT a=0 b=0x118 pNext
+    48'h0E0E00000000, // END a=14 b=0x0 
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
     48'h040000000007, // PTR a=0 b=0x7 pImageFormatInfo
-    48'h050000000007, // STYPE a=0 b=0x7 sType
-    48'h060000000023, // PNEXT a=0 b=0x23 pNext
+    48'h050000000008, // STYPE a=0 b=0x8 sType
+    48'h06000000011C, // PNEXT a=0 b=0x11C pNext
     48'h010000000000, // U32 a=0 b=0x0 format
     48'h010100000000, // U32 a=1 b=0x0 type
     48'h010200000000, // U32 a=2 b=0x0 tiling
-    48'h0A0300000008, // FLAGS a=3 b=0x8 usage
+    48'h0A0300000009, // FLAGS a=3 b=0x9 usage
     48'h010400000000, // U32 a=4 b=0x0 flags
     48'h040100000002, // PTR a=1 b=0x2 pImageFormatProperties
-    48'h050000000009, // STYPE a=0 b=0x9 sType
-    48'h060000000025, // PNEXT a=0 b=0x25 pNext
-    48'h0E0D00000000, // END a=13 b=0x0 
+    48'h05000000000A, // STYPE a=0 b=0xA sType
+    48'h06000000011E, // PNEXT a=0 b=0x11E pNext
+    48'h0E0F00000000, // END a=15 b=0x0 
+    48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
+    48'h040000000005, // PTR a=0 b=0x5 pExternalBufferInfo
+    48'h05000000000B, // STYPE a=0 b=0xB sType
+    48'h060000000128, // PNEXT a=0 b=0x128 pNext
+    48'h010000000000, // U32 a=0 b=0x0 flags
+    48'h0A010000000C, // FLAGS a=1 b=0xC usage
+    48'h010200000000, // U32 a=2 b=0x0 handleType
+    48'h040100000002, // PTR a=1 b=0x2 pExternalBufferProperties
+    48'h05000000000D, // STYPE a=0 b=0xD sType
+    48'h060000000129, // PNEXT a=0 b=0x129 pNext
+    48'h0E1000000000, // END a=16 b=0x0 
+    48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
+    48'h040000000003, // PTR a=0 b=0x3 pExternalFenceInfo
+    48'h05000000000E, // STYPE a=0 b=0xE sType
+    48'h06000000012B, // PNEXT a=0 b=0x12B pNext
+    48'h010000000000, // U32 a=0 b=0x0 handleType
+    48'h040100000002, // PTR a=1 b=0x2 pExternalFenceProperties
+    48'h05000000000F, // STYPE a=0 b=0xF sType
+    48'h06000000012C, // PNEXT a=0 b=0x12C pNext
+    48'h0E1100000000, // END a=17 b=0x0 
+    48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
+    48'h040000000003, // PTR a=0 b=0x3 pExternalSemaphoreInfo
+    48'h050000000010, // STYPE a=0 b=0x10 sType
+    48'h06000000012E, // PNEXT a=0 b=0x12E pNext
+    48'h010000000000, // U32 a=0 b=0x0 handleType
+    48'h040100000002, // PTR a=1 b=0x2 pExternalSemaphoreProperties
+    48'h050000000011, // STYPE a=0 b=0x11 sType
+    48'h06000000012F, // PNEXT a=0 b=0x12F pNext
+    48'h0E1200000000, // END a=18 b=0x0 
+    48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
+    48'h040000000007, // PTR a=0 b=0x7 pFormatInfo
+    48'h050000000012, // STYPE a=0 b=0x12 sType
+    48'h060000000131, // PNEXT a=0 b=0x131 pNext
+    48'h010000000000, // U32 a=0 b=0x0 format
+    48'h010100000000, // U32 a=1 b=0x0 type
+    48'h010200000000, // U32 a=2 b=0x0 samples
+    48'h0A0300000009, // FLAGS a=3 b=0x9 usage
+    48'h010400000000, // U32 a=4 b=0x0 tiling
+    48'h040100000001, // PTR a=1 b=0x1 pPropertyCount
+    48'h010500000000, // U32 a=5 b=0x0 pPropertyCount
+    48'h070000000000, // ARRAY a=0 b=0x0 pProperties
+    48'h050000000013, // STYPE a=0 b=0x13 sType
+    48'h060000000132, // PNEXT a=0 b=0x132 pNext
+    48'h080000000000, // ENDARR a=0 b=0x0 
+    48'h0E1300000000, // END a=19 b=0x0 
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
     48'h090000000000, // BLOB a=0 b=0x0 pLayerName
     48'h040000000001, // PTR a=0 b=0x1 pPropertyCount
     48'h010000000000, // U32 a=0 b=0x0 pPropertyCount
     48'h070000000000, // ARRAY a=0 b=0x0 pProperties
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h0E0E00000000, // END a=14 b=0x0 
+    48'h0E1400000000, // END a=20 b=0x0 
     48'h030000000002, // HANDLE a=0 b=0x2 physicalDevice:LOOKUP
     48'h04000000004C, // PTR a=0 b=0x4C pCreateInfo
-    48'h05000000000A, // STYPE a=0 b=0xA sType
-    48'h06000000002B, // PNEXT a=0 b=0x2B pNext
+    48'h050000000014, // STYPE a=0 b=0x14 sType
+    48'h060000000133, // PNEXT a=0 b=0x133 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 queueCreateInfoCount
     48'h070000000000, // ARRAY a=0 b=0x0 pQueueCreateInfos
-    48'h05000000000B, // STYPE a=0 b=0xB sType
-    48'h060000000034, // PNEXT a=0 b=0x34 pNext
+    48'h050000000015, // STYPE a=0 b=0x15 sType
+    48'h0600000001A9, // PNEXT a=0 b=0x1A9 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 queueFamilyIndex
     48'h017F00000000, // U32 a=127 b=0x0 queueCount
-    48'h090100000002, // BLOB a=1 b=0x2 pQueuePriorities
+    48'h090100000003, // BLOB a=1 b=0x3 pQueuePriorities
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010200000000, // U32 a=2 b=0x0 enabledLayerCount
     48'h070100000000, // ARRAY a=1 b=0x0 ppEnabledLayerNames
@@ -637,7 +1280,7 @@ package g6lc_apu_vn_pkg;
     48'h040300000001, // PTR a=3 b=0x1 pDevice
     48'h030900000003, // HANDLE a=9 b=0x3 pDevice:NEW
     48'h0D0000000003, // OBJ a=0 b=0x3 
-    48'h0E0F00000000, // END a=15 b=0x0 
+    48'h0E1500000000, // END a=21 b=0x0 
     48'h030200000003, // HANDLE a=2 b=0x3 device:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
     48'h0D0000000003, // OBJ a=0 b=0x3 
@@ -648,48 +1291,48 @@ package g6lc_apu_vn_pkg;
     48'h040000000001, // PTR a=0 b=0x1 pQueue
     48'h030900000004, // HANDLE a=9 b=0x4 pQueue:NEW
     48'h0D0000000004, // OBJ a=0 b=0x4 
-    48'h0E1000000000, // END a=16 b=0x0 
+    48'h0E1600000000, // END a=22 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000005, // PTR a=0 b=0x5 pQueueInfo
-    48'h05000000000C, // STYPE a=0 b=0xC sType
-    48'h060000000035, // PNEXT a=0 b=0x35 pNext
+    48'h050000000016, // STYPE a=0 b=0x16 sType
+    48'h0600000001AA, // PNEXT a=0 b=0x1AA pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 queueFamilyIndex
     48'h010200000000, // U32 a=2 b=0x0 queueIndex
     48'h040100000001, // PTR a=1 b=0x1 pQueue
     48'h030900000004, // HANDLE a=9 b=0x4 pQueue:NEW
     48'h0D0000000004, // OBJ a=0 b=0x4 
-    48'h0E1100000000, // END a=17 b=0x0 
+    48'h0E1700000000, // END a=23 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h0E1200000000, // END a=18 b=0x0 
+    48'h0E1800000000, // END a=24 b=0x0 
     48'h030000000004, // HANDLE a=0 b=0x4 queue:LOOKUP
-    48'h0E1300000000, // END a=19 b=0x0 
+    48'h0E1900000000, // END a=25 b=0x0 
     48'h030000000004, // HANDLE a=0 b=0x4 queue:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 submitCount
     48'h070000000003, // ARRAY a=0 b=0x3 pSubmits
-    48'h05000000000D, // STYPE a=0 b=0xD sType
-    48'h060000000037, // PNEXT a=0 b=0x37 pNext
+    48'h050000000017, // STYPE a=0 b=0x17 sType
+    48'h0600000001AC, // PNEXT a=0 b=0x1AC pNext
     48'h017F00000000, // U32 a=127 b=0x0 waitSemaphoreCount
     48'h090100000001, // BLOB a=1 b=0x1 pWaitSemaphores
-    48'h090000000002, // BLOB a=0 b=0x2 pWaitDstStageMask
+    48'h090000000003, // BLOB a=0 b=0x3 pWaitDstStageMask
     48'h017F00000000, // U32 a=127 b=0x0 commandBufferCount
     48'h090100000001, // BLOB a=1 b=0x1 pCommandBuffers
     48'h017F00000000, // U32 a=127 b=0x0 signalSemaphoreCount
     48'h090000000001, // BLOB a=0 b=0x1 pSignalSemaphores
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h030B00000005, // HANDLE a=11 b=0x5 fence:OPTIONAL
-    48'h0E1400000000, // END a=20 b=0x0 
+    48'h0E1A00000000, // END a=26 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000004, // PTR a=0 b=0x4 pAllocateInfo
-    48'h05000000000E, // STYPE a=0 b=0xE sType
-    48'h06000000003A, // PNEXT a=0 b=0x3A pNext
+    48'h050000000018, // STYPE a=0 b=0x18 sType
+    48'h0600000001AF, // PNEXT a=0 b=0x1AF pNext
     48'h020100000000, // U64 a=1 b=0x0 allocationSize
-    48'h010000000000, // U32 a=0 b=0x0 memoryTypeIndex
+    48'h010200000000, // U32 a=2 b=0x0 memoryTypeIndex
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pMemory
     48'h031100000008, // HANDLE a=17 b=0x8 pMemory:NEW
     48'h0D0000000008, // OBJ a=0 b=0x8 
-    48'h0E1500000000, // END a=21 b=0x0 
+    48'h0E1B00000000, // END a=27 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A00000008, // HANDLE a=10 b=0x8 memory:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -701,94 +1344,94 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 memoryRangeCount
     48'h070000000002, // ARRAY a=0 b=0x2 pMemoryRanges
-    48'h05000000000F, // STYPE a=0 b=0xF sType
-    48'h06000000003F, // PNEXT a=0 b=0x3F pNext
+    48'h050000000019, // STYPE a=0 b=0x19 sType
+    48'h0600000001B4, // PNEXT a=0 b=0x1B4 pNext
     48'h033800000008, // HANDLE a=56 b=0x8 memory:LOOKUP
     48'h027F00000000, // U64 a=127 b=0x0 offset
     48'h027F00000000, // U64 a=127 b=0x0 size
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h0E1600000000, // END a=22 b=0x0 
+    48'h0E1C00000000, // END a=28 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 memoryRangeCount
     48'h070000000002, // ARRAY a=0 b=0x2 pMemoryRanges
-    48'h05000000000F, // STYPE a=0 b=0xF sType
-    48'h06000000003F, // PNEXT a=0 b=0x3F pNext
+    48'h050000000019, // STYPE a=0 b=0x19 sType
+    48'h0600000001B4, // PNEXT a=0 b=0x1B4 pNext
     48'h033800000008, // HANDLE a=56 b=0x8 memory:LOOKUP
     48'h027F00000000, // U64 a=127 b=0x0 offset
     48'h027F00000000, // U64 a=127 b=0x0 size
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h0E1700000000, // END a=23 b=0x0 
-    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h030800000007, // HANDLE a=8 b=0x7 buffer:LOOKUP
-    48'h040000000000, // PTR a=0 b=0x0 pMemoryRequirements
-    48'h0E1800000000, // END a=24 b=0x0 
-    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h040000000003, // PTR a=0 b=0x3 pInfo
-    48'h050000000010, // STYPE a=0 b=0x10 sType
-    48'h060000000040, // PNEXT a=0 b=0x40 pNext
-    48'h030800000007, // HANDLE a=8 b=0x7 buffer:LOOKUP
-    48'h040100000002, // PTR a=1 b=0x2 pMemoryRequirements
-    48'h050000000011, // STYPE a=0 b=0x11 sType
-    48'h060000000041, // PNEXT a=0 b=0x41 pNext
-    48'h0E1900000000, // END a=25 b=0x0 
-    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h030800000006, // HANDLE a=8 b=0x6 image:LOOKUP
-    48'h040000000000, // PTR a=0 b=0x0 pMemoryRequirements
-    48'h0E1A00000000, // END a=26 b=0x0 
-    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h040000000003, // PTR a=0 b=0x3 pInfo
-    48'h050000000012, // STYPE a=0 b=0x12 sType
-    48'h060000000045, // PNEXT a=0 b=0x45 pNext
-    48'h030800000006, // HANDLE a=8 b=0x6 image:LOOKUP
-    48'h040100000002, // PTR a=1 b=0x2 pMemoryRequirements
-    48'h050000000011, // STYPE a=0 b=0x11 sType
-    48'h060000000041, // PNEXT a=0 b=0x41 pNext
-    48'h0E1B00000000, // END a=27 b=0x0 
-    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h030800000007, // HANDLE a=8 b=0x7 buffer:LOOKUP
-    48'h031000000008, // HANDLE a=16 b=0x8 memory:LOOKUP
-    48'h020300000000, // U64 a=3 b=0x0 memoryOffset
-    48'h0E1C00000000, // END a=28 b=0x0 
-    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h010000000000, // U32 a=0 b=0x0 bindInfoCount
-    48'h070000000000, // ARRAY a=0 b=0x0 pBindInfos
-    48'h050000000013, // STYPE a=0 b=0x13 sType
-    48'h060000000047, // PNEXT a=0 b=0x47 pNext
-    48'h033800000007, // HANDLE a=56 b=0x7 buffer:LOOKUP
-    48'h033800000008, // HANDLE a=56 b=0x8 memory:LOOKUP
-    48'h027F00000000, // U64 a=127 b=0x0 memoryOffset
-    48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E1D00000000, // END a=29 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
+    48'h030800000007, // HANDLE a=8 b=0x7 buffer:LOOKUP
+    48'h040000000000, // PTR a=0 b=0x0 pMemoryRequirements
+    48'h0E1E00000000, // END a=30 b=0x0 
+    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
+    48'h040000000003, // PTR a=0 b=0x3 pInfo
+    48'h05000000001A, // STYPE a=0 b=0x1A sType
+    48'h0600000001B5, // PNEXT a=0 b=0x1B5 pNext
+    48'h030800000007, // HANDLE a=8 b=0x7 buffer:LOOKUP
+    48'h040100000002, // PTR a=1 b=0x2 pMemoryRequirements
+    48'h05000000001B, // STYPE a=0 b=0x1B sType
+    48'h0600000001B6, // PNEXT a=0 b=0x1B6 pNext
+    48'h0E1F00000000, // END a=31 b=0x0 
+    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030800000006, // HANDLE a=8 b=0x6 image:LOOKUP
+    48'h040000000000, // PTR a=0 b=0x0 pMemoryRequirements
+    48'h0E2000000000, // END a=32 b=0x0 
+    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
+    48'h040000000003, // PTR a=0 b=0x3 pInfo
+    48'h05000000001C, // STYPE a=0 b=0x1C sType
+    48'h0600000001BA, // PNEXT a=0 b=0x1BA pNext
+    48'h030800000006, // HANDLE a=8 b=0x6 image:LOOKUP
+    48'h040100000002, // PTR a=1 b=0x2 pMemoryRequirements
+    48'h05000000001B, // STYPE a=0 b=0x1B sType
+    48'h0600000001B6, // PNEXT a=0 b=0x1B6 pNext
+    48'h0E2100000000, // END a=33 b=0x0 
+    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
+    48'h030800000007, // HANDLE a=8 b=0x7 buffer:LOOKUP
     48'h031000000008, // HANDLE a=16 b=0x8 memory:LOOKUP
     48'h020300000000, // U64 a=3 b=0x0 memoryOffset
-    48'h0E1E00000000, // END a=30 b=0x0 
+    48'h0E2200000000, // END a=34 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 bindInfoCount
     48'h070000000000, // ARRAY a=0 b=0x0 pBindInfos
-    48'h050000000014, // STYPE a=0 b=0x14 sType
-    48'h060000000049, // PNEXT a=0 b=0x49 pNext
-    48'h033800000006, // HANDLE a=56 b=0x6 image:LOOKUP
-    48'h033800000008, // HANDLE a=56 b=0x8 memory:LOOKUP
-    48'h027F00000000, // U64 a=127 b=0x0 memoryOffset
+    48'h05000000001D, // STYPE a=0 b=0x1D sType
+    48'h0600000001BC, // PNEXT a=0 b=0x1BC pNext
+    48'h03B800000007, // HANDLE a=56 b=0x7 buffer:LOOKUP KEEP
+    48'h03B800000008, // HANDLE a=56 b=0x8 memory:LOOKUP KEEP
+    48'h02FF00000000, // U64 a=127 b=0x0 memoryOffset KEEP
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h0E1F00000000, // END a=31 b=0x0 
+    48'h0E2300000000, // END a=35 b=0x0 
+    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
+    48'h030800000006, // HANDLE a=8 b=0x6 image:LOOKUP
+    48'h031000000008, // HANDLE a=16 b=0x8 memory:LOOKUP
+    48'h020300000000, // U64 a=3 b=0x0 memoryOffset
+    48'h0E2400000000, // END a=36 b=0x0 
+    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
+    48'h010000000000, // U32 a=0 b=0x0 bindInfoCount
+    48'h070000000000, // ARRAY a=0 b=0x0 pBindInfos
+    48'h05000000001E, // STYPE a=0 b=0x1E sType
+    48'h0600000001BE, // PNEXT a=0 b=0x1BE pNext
+    48'h03B800000006, // HANDLE a=56 b=0x6 image:LOOKUP KEEP
+    48'h03B800000008, // HANDLE a=56 b=0x8 memory:LOOKUP KEEP
+    48'h02FF00000000, // U64 a=127 b=0x0 memoryOffset KEEP
+    48'h080000000000, // ENDARR a=0 b=0x0 
+    48'h0E2500000000, // END a=37 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000008, // PTR a=0 b=0x8 pCreateInfo
-    48'h050000000015, // STYPE a=0 b=0x15 sType
-    48'h06000000004C, // PNEXT a=0 b=0x4C pNext
+    48'h05000000001F, // STYPE a=0 b=0x1F sType
+    48'h0600000001C1, // PNEXT a=0 b=0x1C1 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h020100000000, // U64 a=1 b=0x0 size
-    48'h0A0100000016, // FLAGS a=1 b=0x16 usage
+    48'h0A010000000C, // FLAGS a=1 b=0xC usage
     48'h010200000000, // U32 a=2 b=0x0 sharingMode
     48'h010300000000, // U32 a=3 b=0x0 queueFamilyIndexCount
-    48'h090000000002, // BLOB a=0 b=0x2 pQueueFamilyIndices
+    48'h090000000003, // BLOB a=0 b=0x3 pQueueFamilyIndices
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pBuffer
     48'h031100000007, // HANDLE a=17 b=0x7 pBuffer:NEW
     48'h0D0000000007, // OBJ a=0 b=0x7 
-    48'h0E2000000000, // END a=32 b=0x0 
+    48'h0E2600000000, // END a=38 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A00000007, // HANDLE a=10 b=0x7 buffer:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -796,8 +1439,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000007, // PTR a=0 b=0x7 pCreateInfo
-    48'h050000000017, // STYPE a=0 b=0x17 sType
-    48'h06000000004E, // PNEXT a=0 b=0x4E pNext
+    48'h050000000020, // STYPE a=0 b=0x20 sType
+    48'h0600000001C3, // PNEXT a=0 b=0x1C3 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h030800000007, // HANDLE a=8 b=0x7 buffer:LOOKUP
     48'h010100000000, // U32 a=1 b=0x0 format
@@ -807,7 +1450,7 @@ package g6lc_apu_vn_pkg;
     48'h040200000001, // PTR a=2 b=0x1 pView
     48'h032100000009, // HANDLE a=33 b=0x9 pView:NEW
     48'h0D0000000009, // OBJ a=0 b=0x9 
-    48'h0E2100000000, // END a=33 b=0x0 
+    48'h0E2700000000, // END a=39 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A00000009, // HANDLE a=10 b=0x9 bufferView:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -815,8 +1458,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000011, // PTR a=0 b=0x11 pCreateInfo
-    48'h050000000018, // STYPE a=0 b=0x18 sType
-    48'h06000000004F, // PNEXT a=0 b=0x4F pNext
+    48'h050000000021, // STYPE a=0 b=0x21 sType
+    48'h0600000001C4, // PNEXT a=0 b=0x1C4 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 imageType
     48'h010200000000, // U32 a=2 b=0x0 format
@@ -827,16 +1470,16 @@ package g6lc_apu_vn_pkg;
     48'h010700000000, // U32 a=7 b=0x0 arrayLayers
     48'h010800000000, // U32 a=8 b=0x0 samples
     48'h010900000000, // U32 a=9 b=0x0 tiling
-    48'h0A0A00000008, // FLAGS a=10 b=0x8 usage
+    48'h0A0A00000009, // FLAGS a=10 b=0x9 usage
     48'h010B00000000, // U32 a=11 b=0x0 sharingMode
     48'h010C00000000, // U32 a=12 b=0x0 queueFamilyIndexCount
-    48'h090000000002, // BLOB a=0 b=0x2 pQueueFamilyIndices
+    48'h090000000003, // BLOB a=0 b=0x3 pQueueFamilyIndices
     48'h010D00000000, // U32 a=13 b=0x0 initialLayout
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pImage
     48'h030900000006, // HANDLE a=9 b=0x6 pImage:NEW
     48'h0D0000000006, // OBJ a=0 b=0x6 
-    48'h0E2200000000, // END a=34 b=0x0 
+    48'h0E2800000000, // END a=40 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A00000006, // HANDLE a=10 b=0x6 image:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -844,8 +1487,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h04000000000F, // PTR a=0 b=0xF pCreateInfo
-    48'h050000000019, // STYPE a=0 b=0x19 sType
-    48'h060000000051, // PNEXT a=0 b=0x51 pNext
+    48'h050000000022, // STYPE a=0 b=0x22 sType
+    48'h0600000001C6, // PNEXT a=0 b=0x1C6 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h030800000006, // HANDLE a=8 b=0x6 image:LOOKUP
     48'h010100000000, // U32 a=1 b=0x0 viewType
@@ -863,7 +1506,7 @@ package g6lc_apu_vn_pkg;
     48'h040200000001, // PTR a=2 b=0x1 pView
     48'h03110000000B, // HANDLE a=17 b=0xB pView:NEW
     48'h0D000000000B, // OBJ a=0 b=0xB 
-    48'h0E2300000000, // END a=35 b=0x0 
+    48'h0E2900000000, // END a=41 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A0000000B, // HANDLE a=10 b=0xB imageView:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -871,8 +1514,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000012, // PTR a=0 b=0x12 pCreateInfo
-    48'h05000000001A, // STYPE a=0 b=0x1A sType
-    48'h060000000054, // PNEXT a=0 b=0x54 pNext
+    48'h050000000023, // STYPE a=0 b=0x23 sType
+    48'h0600000001C9, // PNEXT a=0 b=0x1C9 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 magFilter
     48'h010200000000, // U32 a=2 b=0x0 minFilter
@@ -893,7 +1536,7 @@ package g6lc_apu_vn_pkg;
     48'h040200000001, // PTR a=2 b=0x1 pSampler
     48'h03090000000C, // HANDLE a=9 b=0xC pSampler:NEW
     48'h0D000000000C, // OBJ a=0 b=0xC 
-    48'h0E2400000000, // END a=36 b=0x0 
+    48'h0E2A00000000, // END a=42 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A0000000C, // HANDLE a=10 b=0xC sampler:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -901,16 +1544,16 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000005, // PTR a=0 b=0x5 pCreateInfo
-    48'h05000000001B, // STYPE a=0 b=0x1B sType
-    48'h060000000056, // PNEXT a=0 b=0x56 pNext
+    48'h050000000024, // STYPE a=0 b=0x24 sType
+    48'h0600000001CB, // PNEXT a=0 b=0x1CB pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h020100000000, // U64 a=1 b=0x0 codeSize
-    48'h090000000003, // BLOB a=0 b=0x3 pCode
+    48'h090000000004, // BLOB a=0 b=0x4 pCode
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pShaderModule
     48'h03110000000D, // HANDLE a=17 b=0xD pShaderModule:NEW
     48'h0D000000000D, // OBJ a=0 b=0xD 
-    48'h0E2500000000, // END a=37 b=0x0 
+    48'h0E2B00000000, // END a=43 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A0000000D, // HANDLE a=10 b=0xD shaderModule:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -918,8 +1561,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h04000000000B, // PTR a=0 b=0xB pCreateInfo
-    48'h05000000001C, // STYPE a=0 b=0x1C sType
-    48'h060000000057, // PNEXT a=0 b=0x57 pNext
+    48'h050000000025, // STYPE a=0 b=0x25 sType
+    48'h0600000001CC, // PNEXT a=0 b=0x1CC pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 bindingCount
     48'h070000000004, // ARRAY a=0 b=0x4 pBindings
@@ -933,7 +1576,7 @@ package g6lc_apu_vn_pkg;
     48'h040200000001, // PTR a=2 b=0x1 pSetLayout
     48'h03090000000E, // HANDLE a=9 b=0xE pSetLayout:NEW
     48'h0D000000000E, // OBJ a=0 b=0xE 
-    48'h0E2600000000, // END a=38 b=0x0 
+    48'h0E2C00000000, // END a=44 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A0000000E, // HANDLE a=10 b=0xE descriptorSetLayout:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -941,8 +1584,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h04000000000B, // PTR a=0 b=0xB pCreateInfo
-    48'h05000000001D, // STYPE a=0 b=0x1D sType
-    48'h060000000058, // PNEXT a=0 b=0x58 pNext
+    48'h050000000026, // STYPE a=0 b=0x26 sType
+    48'h0600000001CD, // PNEXT a=0 b=0x1CD pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 setLayoutCount
     48'h098000000001, // BLOB a=0 b=0x1 pSetLayouts KEEP
@@ -956,7 +1599,7 @@ package g6lc_apu_vn_pkg;
     48'h040200000001, // PTR a=2 b=0x1 pPipelineLayout
     48'h03090000000F, // HANDLE a=9 b=0xF pPipelineLayout:NEW
     48'h0D000000000F, // OBJ a=0 b=0xF 
-    48'h0E2700000000, // END a=39 b=0x0 
+    48'h0E2D00000000, // END a=45 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A0000000F, // HANDLE a=10 b=0xF pipelineLayout:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -964,8 +1607,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000005, // PTR a=0 b=0x5 pCreateInfo
-    48'h05000000001E, // STYPE a=0 b=0x1E sType
-    48'h060000000059, // PNEXT a=0 b=0x59 pNext
+    48'h050000000027, // STYPE a=0 b=0x27 sType
+    48'h0600000001CE, // PNEXT a=0 b=0x1CE pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h020100000000, // U64 a=1 b=0x0 initialDataSize
     48'h090000000000, // BLOB a=0 b=0x0 pInitialData
@@ -973,7 +1616,7 @@ package g6lc_apu_vn_pkg;
     48'h040200000001, // PTR a=2 b=0x1 pPipelineCache
     48'h031100000010, // HANDLE a=17 b=0x10 pPipelineCache:NEW
     48'h0D0000000010, // OBJ a=0 b=0x10 
-    48'h0E2800000000, // END a=40 b=0x0 
+    48'h0E2E00000000, // END a=46 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A00000010, // HANDLE a=10 b=0x10 pipelineCache:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -983,11 +1626,11 @@ package g6lc_apu_vn_pkg;
     48'h030B00000010, // HANDLE a=11 b=0x10 pipelineCache:OPTIONAL
     48'h010000000000, // U32 a=0 b=0x0 createInfoCount
     48'h070000000005, // ARRAY a=0 b=0x5 pCreateInfos
-    48'h05000000001F, // STYPE a=0 b=0x1F sType
-    48'h06000000005A, // PNEXT a=0 b=0x5A pNext
+    48'h050000000028, // STYPE a=0 b=0x28 sType
+    48'h0600000001CF, // PNEXT a=0 b=0x1CF pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
-    48'h050000000020, // STYPE a=0 b=0x20 sType
-    48'h06000000005B, // PNEXT a=0 b=0x5B pNext
+    48'h050000000029, // STYPE a=0 b=0x29 sType
+    48'h0600000001D0, // PNEXT a=0 b=0x1D0 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 stage
     48'h03BB0000000D, // HANDLE a=59 b=0xD module:OPTIONAL KEEP
@@ -1008,31 +1651,31 @@ package g6lc_apu_vn_pkg;
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
     48'h090000000001, // BLOB a=0 b=0x1 pPipelines
     48'h0D0000000011, // OBJ a=0 b=0x11 
-    48'h0E2900000000, // END a=41 b=0x0 
+    48'h0E2F00000000, // END a=47 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030B00000010, // HANDLE a=11 b=0x10 pipelineCache:OPTIONAL
     48'h010000000000, // U32 a=0 b=0x0 createInfoCount
     48'h070000000005, // ARRAY a=0 b=0x5 pCreateInfos
-    48'h050000000021, // STYPE a=0 b=0x21 sType
-    48'h06000000005D, // PNEXT a=0 b=0x5D pNext
+    48'h05000000002A, // STYPE a=0 b=0x2A sType
+    48'h0600000001D2, // PNEXT a=0 b=0x1D2 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 stageCount
     48'h070100000005, // ARRAY a=1 b=0x5 pStages
-    48'h050000000020, // STYPE a=0 b=0x20 sType
-    48'h06000000005B, // PNEXT a=0 b=0x5B pNext
+    48'h050000000029, // STYPE a=0 b=0x29 sType
+    48'h0600000001D0, // PNEXT a=0 b=0x1D0 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 stage
     48'h033B0000000D, // HANDLE a=59 b=0xD module:OPTIONAL
     48'h090100000000, // BLOB a=1 b=0x0 pName
     48'h040700000004, // PTR a=7 b=0x4 pSpecializationInfo
     48'h017F00000000, // U32 a=127 b=0x0 mapEntryCount
-    48'h090000000004, // BLOB a=0 b=0x4 pMapEntries
+    48'h090000000005, // BLOB a=0 b=0x5 pMapEntries
     48'h027F00000000, // U64 a=127 b=0x0 dataSize
     48'h090100000000, // BLOB a=1 b=0x0 pData
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040700000010, // PTR a=7 b=0x10 pVertexInputState
-    48'h050000000022, // STYPE a=0 b=0x22 sType
-    48'h06000000005E, // PNEXT a=0 b=0x5E pNext
+    48'h05000000002B, // STYPE a=0 b=0x2B sType
+    48'h0600000001D3, // PNEXT a=0 b=0x1D3 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 vertexBindingDescriptionCount
     48'h070100000002, // ARRAY a=1 b=0x2 pVertexBindingDescriptions
@@ -1048,19 +1691,19 @@ package g6lc_apu_vn_pkg;
     48'h017F00000000, // U32 a=127 b=0x0 offset
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040700000005, // PTR a=7 b=0x5 pInputAssemblyState
-    48'h050000000023, // STYPE a=0 b=0x23 sType
-    48'h06000000005F, // PNEXT a=0 b=0x5F pNext
+    48'h05000000002C, // STYPE a=0 b=0x2C sType
+    48'h0600000001D4, // PNEXT a=0 b=0x1D4 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 topology
     48'h017F00000000, // U32 a=127 b=0x0 primitiveRestartEnable
     48'h040700000004, // PTR a=7 b=0x4 pTessellationState
-    48'h050000000024, // STYPE a=0 b=0x24 sType
-    48'h060000000060, // PNEXT a=0 b=0x60 pNext
+    48'h05000000002D, // STYPE a=0 b=0x2D sType
+    48'h0600000001D5, // PNEXT a=0 b=0x1D5 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 patchControlPoints
     48'h040700000013, // PTR a=7 b=0x13 pViewportState
-    48'h050000000025, // STYPE a=0 b=0x25 sType
-    48'h060000000062, // PNEXT a=0 b=0x62 pNext
+    48'h05000000002E, // STYPE a=0 b=0x2E sType
+    48'h0600000001D7, // PNEXT a=0 b=0x1D7 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 viewportCount
     48'h070100000002, // ARRAY a=1 b=0x2 pViewports
@@ -1079,8 +1722,8 @@ package g6lc_apu_vn_pkg;
     48'h017F00000000, // U32 a=127 b=0x0 height
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h04070000000D, // PTR a=7 b=0xD pRasterizationState
-    48'h050000000026, // STYPE a=0 b=0x26 sType
-    48'h060000000063, // PNEXT a=0 b=0x63 pNext
+    48'h05000000002F, // STYPE a=0 b=0x2F sType
+    48'h0600000001D9, // PNEXT a=0 b=0x1D9 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 depthClampEnable
     48'h017F00000000, // U32 a=127 b=0x0 rasterizerDiscardEnable
@@ -1093,18 +1736,18 @@ package g6lc_apu_vn_pkg;
     48'h017F00000000, // U32 a=127 b=0x0 depthBiasSlopeFactor
     48'h017F00000000, // U32 a=127 b=0x0 lineWidth
     48'h040700000009, // PTR a=7 b=0x9 pMultisampleState
-    48'h050000000027, // STYPE a=0 b=0x27 sType
-    48'h060000000064, // PNEXT a=0 b=0x64 pNext
+    48'h050000000030, // STYPE a=0 b=0x30 sType
+    48'h0600000001DA, // PNEXT a=0 b=0x1DA pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 rasterizationSamples
     48'h017F00000000, // U32 a=127 b=0x0 sampleShadingEnable
     48'h017F00000000, // U32 a=127 b=0x0 minSampleShading
-    48'h090000000002, // BLOB a=0 b=0x2 pSampleMask
+    48'h090000000003, // BLOB a=0 b=0x3 pSampleMask
     48'h017F00000000, // U32 a=127 b=0x0 alphaToCoverageEnable
     48'h017F00000000, // U32 a=127 b=0x0 alphaToOneEnable
     48'h040700000018, // PTR a=7 b=0x18 pDepthStencilState
-    48'h050000000028, // STYPE a=0 b=0x28 sType
-    48'h060000000065, // PNEXT a=0 b=0x65 pNext
+    48'h050000000031, // STYPE a=0 b=0x31 sType
+    48'h0600000001DB, // PNEXT a=0 b=0x1DB pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 depthTestEnable
     48'h017F00000000, // U32 a=127 b=0x0 depthWriteEnable
@@ -1128,8 +1771,8 @@ package g6lc_apu_vn_pkg;
     48'h017F00000000, // U32 a=127 b=0x0 minDepthBounds
     48'h017F00000000, // U32 a=127 b=0x0 maxDepthBounds
     48'h040700000011, // PTR a=7 b=0x11 pColorBlendState
-    48'h050000000029, // STYPE a=0 b=0x29 sType
-    48'h060000000066, // PNEXT a=0 b=0x66 pNext
+    48'h050000000032, // STYPE a=0 b=0x32 sType
+    48'h0600000001DC, // PNEXT a=0 b=0x1DC pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 logicOpEnable
     48'h017F00000000, // U32 a=127 b=0x0 logicOp
@@ -1144,13 +1787,13 @@ package g6lc_apu_vn_pkg;
     48'h017F00000000, // U32 a=127 b=0x0 alphaBlendOp
     48'h017F00000000, // U32 a=127 b=0x0 colorWriteMask
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h090100000005, // BLOB a=1 b=0x5 blendConstants
+    48'h090100000006, // BLOB a=1 b=0x6 blendConstants
     48'h040700000005, // PTR a=7 b=0x5 pDynamicState
-    48'h05000000002A, // STYPE a=0 b=0x2A sType
-    48'h060000000067, // PNEXT a=0 b=0x67 pNext
+    48'h050000000033, // STYPE a=0 b=0x33 sType
+    48'h0600000001DD, // PNEXT a=0 b=0x1DD pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 dynamicStateCount
-    48'h090000000002, // BLOB a=0 b=0x2 pDynamicStates
+    48'h090000000003, // BLOB a=0 b=0x3 pDynamicStates
     48'h033B0000000F, // HANDLE a=59 b=0xF layout:OPTIONAL
     48'h033B00000012, // HANDLE a=59 b=0x12 renderPass:OPTIONAL
     48'h017F00000000, // U32 a=127 b=0x0 subpass
@@ -1160,7 +1803,7 @@ package g6lc_apu_vn_pkg;
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
     48'h090000000001, // BLOB a=0 b=0x1 pPipelines
     48'h0D0000000011, // OBJ a=0 b=0x11 
-    48'h0E2A00000000, // END a=42 b=0x0 
+    48'h0E3000000000, // END a=48 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A00000011, // HANDLE a=10 b=0x11 pipeline:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -1168,8 +1811,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000031, // PTR a=0 b=0x31 pCreateInfo
-    48'h05000000002B, // STYPE a=0 b=0x2B sType
-    48'h060000000068, // PNEXT a=0 b=0x68 pNext
+    48'h050000000034, // STYPE a=0 b=0x34 sType
+    48'h0600000001DE, // PNEXT a=0 b=0x1DE pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 attachmentCount
     48'h070000000005, // ARRAY a=0 b=0x5 pAttachments
@@ -1205,7 +1848,7 @@ package g6lc_apu_vn_pkg;
     48'h017F00000000, // U32 a=127 b=0x0 attachment
     48'h017F00000000, // U32 a=127 b=0x0 layout
     48'h017F00000000, // U32 a=127 b=0x0 preserveAttachmentCount
-    48'h090100000002, // BLOB a=1 b=0x2 pPreserveAttachments
+    48'h090100000003, // BLOB a=1 b=0x3 pPreserveAttachments
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010300000000, // U32 a=3 b=0x0 dependencyCount
     48'h070200000004, // ARRAY a=2 b=0x4 pDependencies
@@ -1221,16 +1864,16 @@ package g6lc_apu_vn_pkg;
     48'h040200000001, // PTR a=2 b=0x1 pRenderPass
     48'h030900000012, // HANDLE a=9 b=0x12 pRenderPass:NEW
     48'h0D0000000012, // OBJ a=0 b=0x12 
-    48'h0E2B00000000, // END a=43 b=0x0 
+    48'h0E3100000000, // END a=49 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000047, // PTR a=0 b=0x47 pCreateInfo
-    48'h05000000002C, // STYPE a=0 b=0x2C sType
-    48'h06000000006B, // PNEXT a=0 b=0x6B pNext
+    48'h050000000035, // STYPE a=0 b=0x35 sType
+    48'h0600000001E1, // PNEXT a=0 b=0x1E1 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 attachmentCount
     48'h070000000005, // ARRAY a=0 b=0x5 pAttachments
-    48'h05000000002D, // STYPE a=0 b=0x2D sType
-    48'h06000000006C, // PNEXT a=0 b=0x6C pNext
+    48'h050000000036, // STYPE a=0 b=0x36 sType
+    48'h0600000001E2, // PNEXT a=0 b=0x1E2 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 format
     48'h017F00000000, // U32 a=127 b=0x0 samples
@@ -1243,47 +1886,47 @@ package g6lc_apu_vn_pkg;
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010200000000, // U32 a=2 b=0x0 subpassCount
     48'h070100000005, // ARRAY a=1 b=0x5 pSubpasses
-    48'h05000000002E, // STYPE a=0 b=0x2E sType
-    48'h06000000006D, // PNEXT a=0 b=0x6D pNext
+    48'h050000000037, // STYPE a=0 b=0x37 sType
+    48'h0600000001E3, // PNEXT a=0 b=0x1E3 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 pipelineBindPoint
     48'h017F00000000, // U32 a=127 b=0x0 viewMask
     48'h017F00000000, // U32 a=127 b=0x0 inputAttachmentCount
     48'h070200000005, // ARRAY a=2 b=0x5 pInputAttachments
-    48'h05000000002F, // STYPE a=0 b=0x2F sType
-    48'h06000000006E, // PNEXT a=0 b=0x6E pNext
+    48'h050000000038, // STYPE a=0 b=0x38 sType
+    48'h0600000001E4, // PNEXT a=0 b=0x1E4 pNext
     48'h017F00000000, // U32 a=127 b=0x0 attachment
     48'h017F00000000, // U32 a=127 b=0x0 layout
     48'h017F00000000, // U32 a=127 b=0x0 aspectMask
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h017F00000000, // U32 a=127 b=0x0 colorAttachmentCount
     48'h070200000005, // ARRAY a=2 b=0x5 pColorAttachments
-    48'h05000000002F, // STYPE a=0 b=0x2F sType
-    48'h06000000006E, // PNEXT a=0 b=0x6E pNext
+    48'h050000000038, // STYPE a=0 b=0x38 sType
+    48'h0600000001E4, // PNEXT a=0 b=0x1E4 pNext
     48'h017F00000000, // U32 a=127 b=0x0 attachment
     48'h017F00000000, // U32 a=127 b=0x0 layout
     48'h017F00000000, // U32 a=127 b=0x0 aspectMask
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h070200000005, // ARRAY a=2 b=0x5 pResolveAttachments
-    48'h05000000002F, // STYPE a=0 b=0x2F sType
-    48'h06000000006E, // PNEXT a=0 b=0x6E pNext
+    48'h050000000038, // STYPE a=0 b=0x38 sType
+    48'h0600000001E4, // PNEXT a=0 b=0x1E4 pNext
     48'h017F00000000, // U32 a=127 b=0x0 attachment
     48'h017F00000000, // U32 a=127 b=0x0 layout
     48'h017F00000000, // U32 a=127 b=0x0 aspectMask
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040700000005, // PTR a=7 b=0x5 pDepthStencilAttachment
-    48'h05000000002F, // STYPE a=0 b=0x2F sType
-    48'h06000000006E, // PNEXT a=0 b=0x6E pNext
+    48'h050000000038, // STYPE a=0 b=0x38 sType
+    48'h0600000001E4, // PNEXT a=0 b=0x1E4 pNext
     48'h017F00000000, // U32 a=127 b=0x0 attachment
     48'h017F00000000, // U32 a=127 b=0x0 layout
     48'h017F00000000, // U32 a=127 b=0x0 aspectMask
     48'h017F00000000, // U32 a=127 b=0x0 preserveAttachmentCount
-    48'h090100000002, // BLOB a=1 b=0x2 pPreserveAttachments
+    48'h090100000003, // BLOB a=1 b=0x3 pPreserveAttachments
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010300000000, // U32 a=3 b=0x0 dependencyCount
     48'h070200000004, // ARRAY a=2 b=0x4 pDependencies
-    48'h050000000030, // STYPE a=0 b=0x30 sType
-    48'h06000000006F, // PNEXT a=0 b=0x6F pNext
+    48'h050000000039, // STYPE a=0 b=0x39 sType
+    48'h0600000001E5, // PNEXT a=0 b=0x1E5 pNext
     48'h017F00000000, // U32 a=127 b=0x0 srcSubpass
     48'h017F00000000, // U32 a=127 b=0x0 dstSubpass
     48'h017F00000000, // U32 a=127 b=0x0 srcStageMask
@@ -1294,12 +1937,12 @@ package g6lc_apu_vn_pkg;
     48'h017F00000000, // U32 a=127 b=0x0 viewOffset
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010400000000, // U32 a=4 b=0x0 correlatedViewMaskCount
-    48'h090000000002, // BLOB a=0 b=0x2 pCorrelatedViewMasks
+    48'h090000000003, // BLOB a=0 b=0x3 pCorrelatedViewMasks
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pRenderPass
     48'h030900000012, // HANDLE a=9 b=0x12 pRenderPass:NEW
     48'h0D0000000012, // OBJ a=0 b=0x12 
-    48'h0E2C00000000, // END a=44 b=0x0 
+    48'h0E3200000000, // END a=50 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A00000012, // HANDLE a=10 b=0x12 renderPass:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -1307,8 +1950,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000009, // PTR a=0 b=0x9 pCreateInfo
-    48'h050000000031, // STYPE a=0 b=0x31 sType
-    48'h060000000070, // PNEXT a=0 b=0x70 pNext
+    48'h05000000003A, // STYPE a=0 b=0x3A sType
+    48'h0600000001E6, // PNEXT a=0 b=0x1E6 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h030800000012, // HANDLE a=8 b=0x12 renderPass:LOOKUP
     48'h010100000000, // U32 a=1 b=0x0 attachmentCount
@@ -1320,7 +1963,7 @@ package g6lc_apu_vn_pkg;
     48'h040200000001, // PTR a=2 b=0x1 pFramebuffer
     48'h031100000013, // HANDLE a=17 b=0x13 pFramebuffer:NEW
     48'h0D0000000013, // OBJ a=0 b=0x13 
-    48'h0E2D00000000, // END a=45 b=0x0 
+    48'h0E3300000000, // END a=51 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A00000013, // HANDLE a=10 b=0x13 framebuffer:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -1328,8 +1971,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000009, // PTR a=0 b=0x9 pCreateInfo
-    48'h050000000032, // STYPE a=0 b=0x32 sType
-    48'h060000000071, // PNEXT a=0 b=0x71 pNext
+    48'h05000000003B, // STYPE a=0 b=0x3B sType
+    48'h0600000001E7, // PNEXT a=0 b=0x1E7 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 maxSets
     48'h010200000000, // U32 a=2 b=0x0 poolSizeCount
@@ -1341,7 +1984,7 @@ package g6lc_apu_vn_pkg;
     48'h040200000001, // PTR a=2 b=0x1 pDescriptorPool
     48'h030900000014, // HANDLE a=9 b=0x14 pDescriptorPool:NEW
     48'h0D0000000014, // OBJ a=0 b=0x14 
-    48'h0E2E00000000, // END a=46 b=0x0 
+    48'h0E3400000000, // END a=52 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A00000014, // HANDLE a=10 b=0x14 descriptorPool:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -1350,28 +1993,28 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030800000014, // HANDLE a=8 b=0x14 descriptorPool:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 flags
-    48'h0E2F00000000, // END a=47 b=0x0 
+    48'h0E3500000000, // END a=53 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000005, // PTR a=0 b=0x5 pAllocateInfo
-    48'h050000000033, // STYPE a=0 b=0x33 sType
-    48'h060000000072, // PNEXT a=0 b=0x72 pNext
+    48'h05000000003C, // STYPE a=0 b=0x3C sType
+    48'h0600000001E8, // PNEXT a=0 b=0x1E8 pNext
     48'h030800000014, // HANDLE a=8 b=0x14 descriptorPool:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 descriptorSetCount
     48'h098000000001, // BLOB a=0 b=0x1 pSetLayouts KEEP
     48'h090100000001, // BLOB a=1 b=0x1 pDescriptorSets
     48'h0D0000000015, // OBJ a=0 b=0x15 
-    48'h0E3000000000, // END a=48 b=0x0 
+    48'h0E3600000000, // END a=54 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030800000014, // HANDLE a=8 b=0x14 descriptorPool:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 descriptorSetCount
     48'h090000000001, // BLOB a=0 b=0x1 pDescriptorSets
     48'h0D0000000015, // OBJ a=0 b=0x15 
-    48'h0E3100000000, // END a=49 b=0x0 
+    48'h0E3700000000, // END a=55 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 descriptorWriteCount
     48'h070000000004, // ARRAY a=0 b=0x4 pDescriptorWrites
-    48'h050000000034, // STYPE a=0 b=0x34 sType
-    48'h060000000073, // PNEXT a=0 b=0x73 pNext
+    48'h05000000003D, // STYPE a=0 b=0x3D sType
+    48'h0600000001E9, // PNEXT a=0 b=0x1E9 pNext
     48'h03B800000015, // HANDLE a=56 b=0x15 dstSet:LOOKUP KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 dstBinding KEEP
     48'h01FF00000000, // U32 a=127 b=0x0 dstArrayElement KEEP
@@ -1391,8 +2034,8 @@ package g6lc_apu_vn_pkg;
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010100000000, // U32 a=1 b=0x0 descriptorCopyCount
     48'h070100000000, // ARRAY a=1 b=0x0 pDescriptorCopies
-    48'h050000000035, // STYPE a=0 b=0x35 sType
-    48'h060000000074, // PNEXT a=0 b=0x74 pNext
+    48'h05000000003E, // STYPE a=0 b=0x3E sType
+    48'h0600000001EA, // PNEXT a=0 b=0x1EA pNext
     48'h033800000015, // HANDLE a=56 b=0x15 srcSet:LOOKUP
     48'h017F00000000, // U32 a=127 b=0x0 srcBinding
     48'h017F00000000, // U32 a=127 b=0x0 srcArrayElement
@@ -1404,15 +2047,15 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000004, // PTR a=0 b=0x4 pCreateInfo
-    48'h050000000036, // STYPE a=0 b=0x36 sType
-    48'h060000000075, // PNEXT a=0 b=0x75 pNext
+    48'h05000000003F, // STYPE a=0 b=0x3F sType
+    48'h0600000001EB, // PNEXT a=0 b=0x1EB pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 queueFamilyIndex
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pCommandPool
     48'h030900000016, // HANDLE a=9 b=0x16 pCommandPool:NEW
     48'h0D0000000016, // OBJ a=0 b=0x16 
-    48'h0E3200000000, // END a=50 b=0x0 
+    48'h0E3800000000, // END a=56 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A00000016, // HANDLE a=10 b=0x16 commandPool:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -1421,17 +2064,17 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030800000016, // HANDLE a=8 b=0x16 commandPool:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 flags
-    48'h0E3300000000, // END a=51 b=0x0 
+    48'h0E3900000000, // END a=57 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000005, // PTR a=0 b=0x5 pAllocateInfo
-    48'h050000000037, // STYPE a=0 b=0x37 sType
-    48'h060000000076, // PNEXT a=0 b=0x76 pNext
+    48'h050000000040, // STYPE a=0 b=0x40 sType
+    48'h0600000001EC, // PNEXT a=0 b=0x1EC pNext
     48'h030800000016, // HANDLE a=8 b=0x16 commandPool:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 level
     48'h010100000000, // U32 a=1 b=0x0 commandBufferCount
     48'h090000000001, // BLOB a=0 b=0x1 pCommandBuffers
     48'h0D0000000017, // OBJ a=0 b=0x17 
-    48'h0E3400000000, // END a=52 b=0x0 
+    48'h0E3A00000000, // END a=58 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030800000016, // HANDLE a=8 b=0x16 commandPool:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 commandBufferCount
@@ -1440,24 +2083,24 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h04000000000C, // PTR a=0 b=0xC pBeginInfo
-    48'h050000000038, // STYPE a=0 b=0x38 sType
-    48'h060000000077, // PNEXT a=0 b=0x77 pNext
+    48'h050000000041, // STYPE a=0 b=0x41 sType
+    48'h0600000001ED, // PNEXT a=0 b=0x1ED pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h040100000008, // PTR a=1 b=0x8 pInheritanceInfo
-    48'h050000000039, // STYPE a=0 b=0x39 sType
-    48'h060000000079, // PNEXT a=0 b=0x79 pNext
+    48'h050000000042, // STYPE a=0 b=0x42 sType
+    48'h0600000001EF, // PNEXT a=0 b=0x1EF pNext
     48'h030B00000012, // HANDLE a=11 b=0x12 renderPass:OPTIONAL
     48'h010100000000, // U32 a=1 b=0x0 subpass
     48'h031300000013, // HANDLE a=19 b=0x13 framebuffer:OPTIONAL
     48'h010200000000, // U32 a=2 b=0x0 occlusionQueryEnable
     48'h010300000000, // U32 a=3 b=0x0 queryFlags
     48'h010400000000, // U32 a=4 b=0x0 pipelineStatistics
-    48'h0E3500000000, // END a=53 b=0x0 
+    48'h0E3B00000000, // END a=59 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
-    48'h0E3600000000, // END a=54 b=0x0 
+    48'h0E3C00000000, // END a=60 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 flags
-    48'h0E3700000000, // END a=55 b=0x0 
+    48'h0E3D00000000, // END a=61 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 pipelineBindPoint
     48'h030800000011, // HANDLE a=8 b=0x11 pipeline:LOOKUP
@@ -1469,7 +2112,7 @@ package g6lc_apu_vn_pkg;
     48'h010200000000, // U32 a=2 b=0x0 descriptorSetCount
     48'h098000000001, // BLOB a=0 b=0x1 pDescriptorSets KEEP
     48'h010300000000, // U32 a=3 b=0x0 dynamicOffsetCount
-    48'h098100000002, // BLOB a=1 b=0x2 pDynamicOffsets KEEP
+    48'h098100000003, // BLOB a=1 b=0x3 pDynamicOffsets KEEP
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 firstBinding
@@ -1487,7 +2130,7 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 stageFlags
     48'h018100000000, // U32 a=1 b=0x0 offset KEEP
     48'h018200000000, // U32 a=2 b=0x0 size KEEP
-    48'h098000000006, // BLOB a=0 b=0x6 pValues KEEP
+    48'h098000000007, // BLOB a=0 b=0x7 pValues KEEP
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 firstViewport
@@ -1547,8 +2190,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h04000000000E, // PTR a=0 b=0xE pRenderPassBegin
-    48'h05000000003A, // STYPE a=0 b=0x3A sType
-    48'h06000000007A, // PNEXT a=0 b=0x7A pNext
+    48'h050000000043, // STYPE a=0 b=0x43 sType
+    48'h0600000001F1, // PNEXT a=0 b=0x1F1 pNext
     48'h030800000012, // HANDLE a=8 b=0x12 renderPass:LOOKUP
     48'h031000000013, // HANDLE a=16 b=0x13 framebuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 x
@@ -1558,15 +2201,15 @@ package g6lc_apu_vn_pkg;
     48'h010400000000, // U32 a=4 b=0x0 clearValueCount
     48'h070000000000, // ARRAY a=0 b=0x0 pClearValues
     48'h0CFF00000001, // CHECK a=255 b=0x1 VkClearValue tag 0
-    48'h0CFF0000000B, // CHECK a=255 b=0xB VkClearColorValue tag 2
-    48'h090100000005, // BLOB a=1 b=0x5 uint32
+    48'h0CFF00000015, // CHECK a=255 b=0x15 VkClearColorValue tag 2
+    48'h090100000006, // BLOB a=1 b=0x6 uint32
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010500000000, // U32 a=5 b=0x0 contents
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h04000000000E, // PTR a=0 b=0xE pRenderPassBegin
-    48'h05000000003A, // STYPE a=0 b=0x3A sType
-    48'h06000000007A, // PNEXT a=0 b=0x7A pNext
+    48'h050000000043, // STYPE a=0 b=0x43 sType
+    48'h0600000001F1, // PNEXT a=0 b=0x1F1 pNext
     48'h030800000012, // HANDLE a=8 b=0x12 renderPass:LOOKUP
     48'h031000000013, // HANDLE a=16 b=0x13 framebuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 x
@@ -1576,12 +2219,12 @@ package g6lc_apu_vn_pkg;
     48'h010400000000, // U32 a=4 b=0x0 clearValueCount
     48'h070000000000, // ARRAY a=0 b=0x0 pClearValues
     48'h0CFF00000001, // CHECK a=255 b=0x1 VkClearValue tag 0
-    48'h0CFF0000000B, // CHECK a=255 b=0xB VkClearColorValue tag 2
-    48'h090100000005, // BLOB a=1 b=0x5 uint32
+    48'h0CFF00000015, // CHECK a=255 b=0x15 VkClearColorValue tag 2
+    48'h090100000006, // BLOB a=1 b=0x6 uint32
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040100000003, // PTR a=1 b=0x3 pSubpassBeginInfo
-    48'h05000000003B, // STYPE a=0 b=0x3B sType
-    48'h06000000007C, // PNEXT a=0 b=0x7C pNext
+    48'h050000000044, // STYPE a=0 b=0x44 sType
+    48'h0600000001F3, // PNEXT a=0 b=0x1F3 pNext
     48'h010500000000, // U32 a=5 b=0x0 contents
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
@@ -1591,8 +2234,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h040000000002, // PTR a=0 b=0x2 pSubpassEndInfo
-    48'h05000000003C, // STYPE a=0 b=0x3C sType
-    48'h06000000007D, // PNEXT a=0 b=0x7D pNext
+    48'h050000000045, // STYPE a=0 b=0x45 sType
+    48'h0600000001F4, // PNEXT a=0 b=0x1F4 pNext
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 srcStageMask
@@ -1600,15 +2243,15 @@ package g6lc_apu_vn_pkg;
     48'h010200000000, // U32 a=2 b=0x0 dependencyFlags
     48'h010300000000, // U32 a=3 b=0x0 memoryBarrierCount
     48'h070000000000, // ARRAY a=0 b=0x0 pMemoryBarriers
-    48'h05000000003D, // STYPE a=0 b=0x3D sType
-    48'h06000000007E, // PNEXT a=0 b=0x7E pNext
+    48'h050000000046, // STYPE a=0 b=0x46 sType
+    48'h0600000001F5, // PNEXT a=0 b=0x1F5 pNext
     48'h017F00000000, // U32 a=127 b=0x0 srcAccessMask
     48'h017F00000000, // U32 a=127 b=0x0 dstAccessMask
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010400000000, // U32 a=4 b=0x0 bufferMemoryBarrierCount
     48'h070100000000, // ARRAY a=1 b=0x0 pBufferMemoryBarriers
-    48'h05000000003E, // STYPE a=0 b=0x3E sType
-    48'h06000000007F, // PNEXT a=0 b=0x7F pNext
+    48'h050000000047, // STYPE a=0 b=0x47 sType
+    48'h0600000001F6, // PNEXT a=0 b=0x1F6 pNext
     48'h017F00000000, // U32 a=127 b=0x0 srcAccessMask
     48'h017F00000000, // U32 a=127 b=0x0 dstAccessMask
     48'h017F00000000, // U32 a=127 b=0x0 srcQueueFamilyIndex
@@ -1619,8 +2262,8 @@ package g6lc_apu_vn_pkg;
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010500000000, // U32 a=5 b=0x0 imageMemoryBarrierCount
     48'h070200000000, // ARRAY a=2 b=0x0 pImageMemoryBarriers
-    48'h05000000003F, // STYPE a=0 b=0x3F sType
-    48'h060000000080, // PNEXT a=0 b=0x80 pNext
+    48'h050000000048, // STYPE a=0 b=0x48 sType
+    48'h0600000001F8, // PNEXT a=0 b=0x1F8 pNext
     48'h017F00000000, // U32 a=127 b=0x0 srcAccessMask
     48'h017F00000000, // U32 a=127 b=0x0 dstAccessMask
     48'h017F00000000, // U32 a=127 b=0x0 oldLayout
@@ -1757,8 +2400,8 @@ package g6lc_apu_vn_pkg;
     48'h030800000006, // HANDLE a=8 b=0x6 image:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 imageLayout
     48'h040000000002, // PTR a=0 b=0x2 pColor
-    48'h0CFF0000000B, // CHECK a=255 b=0xB VkClearColorValue tag 2
-    48'h090000000005, // BLOB a=0 b=0x5 uint32
+    48'h0CFF00000015, // CHECK a=255 b=0x15 VkClearColorValue tag 2
+    48'h090000000006, // BLOB a=0 b=0x6 uint32
     48'h010100000000, // U32 a=1 b=0x0 rangeCount
     48'h070000000000, // ARRAY a=0 b=0x0 pRanges
     48'h017F00000000, // U32 a=127 b=0x0 aspectMask
@@ -1789,8 +2432,8 @@ package g6lc_apu_vn_pkg;
     48'h017F00000000, // U32 a=127 b=0x0 aspectMask
     48'h017F00000000, // U32 a=127 b=0x0 colorAttachment
     48'h0CFF00000001, // CHECK a=255 b=0x1 VkClearValue tag 0
-    48'h0CFF0000000B, // CHECK a=255 b=0xB VkClearColorValue tag 2
-    48'h090100000005, // BLOB a=1 b=0x5 uint32
+    48'h0CFF00000015, // CHECK a=255 b=0x15 VkClearColorValue tag 2
+    48'h090100000006, // BLOB a=1 b=0x6 uint32
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h010100000000, // U32 a=1 b=0x0 rectCount
     48'h070100000000, // ARRAY a=1 b=0x0 pRects
@@ -1834,14 +2477,14 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000003, // PTR a=0 b=0x3 pCreateInfo
-    48'h050000000040, // STYPE a=0 b=0x40 sType
-    48'h060000000081, // PNEXT a=0 b=0x81 pNext
+    48'h050000000049, // STYPE a=0 b=0x49 sType
+    48'h0600000001FA, // PNEXT a=0 b=0x1FA pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pFence
     48'h030900000005, // HANDLE a=9 b=0x5 pFence:NEW
     48'h0D0000000005, // OBJ a=0 b=0x5 
-    48'h0E3800000000, // END a=56 b=0x0 
+    48'h0E3E00000000, // END a=62 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A00000005, // HANDLE a=10 b=0x5 fence:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -1850,26 +2493,26 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 fenceCount
     48'h090000000001, // BLOB a=0 b=0x1 pFences
-    48'h0E3900000000, // END a=57 b=0x0 
+    48'h0E3F00000000, // END a=63 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030800000005, // HANDLE a=8 b=0x5 fence:LOOKUP
-    48'h0E3A00000000, // END a=58 b=0x0 
+    48'h0E4000000000, // END a=64 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 fenceCount
     48'h090000000001, // BLOB a=0 b=0x1 pFences
     48'h010100000000, // U32 a=1 b=0x0 waitAll
     48'h020100000000, // U64 a=1 b=0x0 timeout
-    48'h0E3B00000000, // END a=59 b=0x0 
+    48'h0E4100000000, // END a=65 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000003, // PTR a=0 b=0x3 pCreateInfo
-    48'h050000000041, // STYPE a=0 b=0x41 sType
-    48'h060000000083, // PNEXT a=0 b=0x83 pNext
+    48'h05000000004A, // STYPE a=0 b=0x4A sType
+    48'h0600000001FC, // PNEXT a=0 b=0x1FC pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pSemaphore
     48'h030900000018, // HANDLE a=9 b=0x18 pSemaphore:NEW
     48'h0D0000000018, // OBJ a=0 b=0x18 
-    48'h0E3C00000000, // END a=60 b=0x0 
+    48'h0E4200000000, // END a=66 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A00000018, // HANDLE a=10 b=0x18 semaphore:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -1877,8 +2520,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h040000000006, // PTR a=0 b=0x6 pCreateInfo
-    48'h050000000042, // STYPE a=0 b=0x42 sType
-    48'h060000000085, // PNEXT a=0 b=0x85 pNext
+    48'h05000000004B, // STYPE a=0 b=0x4B sType
+    48'h0600000001FE, // PNEXT a=0 b=0x1FE pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 queryType
     48'h010200000000, // U32 a=2 b=0x0 queryCount
@@ -1887,7 +2530,7 @@ package g6lc_apu_vn_pkg;
     48'h040200000001, // PTR a=2 b=0x1 pQueryPool
     48'h030900000019, // HANDLE a=9 b=0x19 pQueryPool:NEW
     48'h0D0000000019, // OBJ a=0 b=0x19 
-    48'h0E3D00000000, // END a=61 b=0x0 
+    48'h0E4300000000, // END a=67 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h030A00000019, // HANDLE a=10 b=0x19 queryPool:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
@@ -1917,10 +2560,10 @@ package g6lc_apu_vn_pkg;
     48'h010000000000, // U32 a=0 b=0x0 firstQuery
     48'h010100000000, // U32 a=1 b=0x0 queryCount
     48'h020200000000, // U64 a=2 b=0x0 dataSize
-    48'h090000000007, // BLOB a=0 b=0x7 pData
+    48'h090000000008, // BLOB a=0 b=0x8 pData
     48'h020300000000, // U64 a=3 b=0x0 stride
     48'h010200000000, // U32 a=2 b=0x0 flags
-    48'h0E3E00000000, // END a=62 b=0x0 
+    48'h0E4400000000, // END a=68 b=0x0 
     48'h047F00000003, // PTR a=127 b=0x3 pStream
     48'h017F00000000, // U32 a=127 b=0x0 resourceId
     48'h027F00000000, // U64 a=127 b=0x0 offset
@@ -1944,8 +2587,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h027F00000000, // U64 a=127 b=0x0 ring
     48'h047F0000000E, // PTR a=127 b=0xE pCreateInfo
-    48'h050000000043, // STYPE a=0 b=0x43 sType
-    48'h060000000086, // PNEXT a=0 b=0x86 pNext
+    48'h05000000004C, // STYPE a=0 b=0x4C sType
+    48'h0600000001FF, // PNEXT a=0 b=0x1FF pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 resourceId
     48'h027F00000000, // U64 a=127 b=0x0 offset
@@ -1972,9 +2615,9 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 resourceId
     48'h040000000002, // PTR a=0 b=0x2 pMemoryResourceProperties
-    48'h050000000044, // STYPE a=0 b=0x44 sType
-    48'h060000000089, // PNEXT a=0 b=0x89 pNext
-    48'h0E3F00000000, // END a=63 b=0x0 
+    48'h05000000004D, // STYPE a=0 b=0x4D sType
+    48'h060000000202, // PNEXT a=0 b=0x202 pNext
+    48'h0E4500000000, // END a=69 b=0x0 
     48'h027F00000000, // U64 a=127 b=0x0 ring
     48'h027F00000000, // U64 a=127 b=0x0 seqno
     48'h0E0000000000, // END a=0 b=0x0 
@@ -1985,32 +2628,39 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000 // END a=0 b=0x0 
   };
 
-  localparam int APU_VN_REPLY_PROG_MAX = 63;
+  localparam int APU_VN_REPLY_PROG_MAX = 69;
   localparam logic [15:0] APU_VN_REPLY_ENTRY [0:APU_VN_REPLY_PROG_MAX] = '{
-    16'hFFFF, 16'h0000, 16'h0005, 16'h000B,
-    16'h0021, 16'h0027, 16'h003D, 16'h0043,
-    16'h0047, 16'h004D, 16'h0052, 16'h0057,
-    16'h005B, 16'h0067, 16'h006E, 16'h0074,
-    16'h0079, 16'h007D, 16'h0081, 16'h0084,
-    16'h0087, 16'h008A, 16'h008F, 16'h0092,
-    16'h0095, 16'h009C, 16'h00A2, 16'h00A6,
-    16'h00AC, 16'h00AF, 16'h00B2, 16'h00B5,
-    16'h00B8, 16'h00BD, 16'h00C2, 16'h00C7,
-    16'h00CC, 16'h00D1, 16'h00D6, 16'h00DB,
-    16'h00E0, 16'h00E5, 16'h00E9, 16'h00ED,
-    16'h00F2, 16'h00F7, 16'h00FC, 16'h0101,
-    16'h0104, 16'h0108, 16'h010B, 16'h0110,
-    16'h0113, 16'h0117, 16'h011A, 16'h011D,
-    16'h0120, 16'h0125, 16'h0128, 16'h012B,
-    16'h012E, 16'h0133, 16'h0138, 16'h013F
+    16'hFFFF, 16'h0000, 16'h0005, 16'h000A,
+    16'h0010, 16'h0016, 16'h0056, 16'h005C,
+    16'h01B9, 16'h01BF, 16'h01C3, 16'h01C9,
+    16'h01CE, 16'h01D3, 16'h01DA, 16'h01EC,
+    16'h01F3, 16'h01F9, 16'h01FF, 16'h0205,
+    16'h020A, 16'h0210, 16'h0215, 16'h0219,
+    16'h021D, 16'h0220, 16'h0223, 16'h0226,
+    16'h022B, 16'h022E, 16'h0231, 16'h0238,
+    16'h023E, 16'h0242, 16'h0248, 16'h024B,
+    16'h024E, 16'h0251, 16'h0254, 16'h0259,
+    16'h025E, 16'h0263, 16'h0268, 16'h026D,
+    16'h0272, 16'h0277, 16'h027C, 16'h0281,
+    16'h0285, 16'h0289, 16'h028E, 16'h0293,
+    16'h0298, 16'h029D, 16'h02A0, 16'h02A4,
+    16'h02A7, 16'h02AC, 16'h02AF, 16'h02B3,
+    16'h02B6, 16'h02B9, 16'h02BC, 16'h02C1,
+    16'h02C4, 16'h02C7, 16'h02CA, 16'h02CF,
+    16'h02D4, 16'h02DB
   };
 
-  localparam int APU_VN_REPLY_ROM_WORDS = 326;
+  localparam int APU_VN_REPLY_ROM_WORDS = 738;
   localparam logic [47:0] APU_VN_REPLY_ROM [0:APU_VN_REPLY_ROM_WORDS-1] = '{
     48'h010000000000, // RTYPE a=0 b=0x0 vkCreateInstance
     48'h020000000000, // RRESULT a=0 b=0x0 
     48'h060300000001, // RPTR a=3 b=0x1 pInstance
     48'h050000000000, // RHANDLE a=0 b=0x0 pInstance
+    48'h0B0000000000, // REND a=0 b=0x0 
+    48'h010000000000, // RTYPE a=0 b=0x0 vkEnumerateInstanceVersion
+    48'h020000000000, // RRESULT a=0 b=0x0 
+    48'h060000000001, // RPTR a=0 b=0x1 pApiVersion
+    48'h030400000000, // RU32 a=4 b=0x0 pApiVersion
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkEnumeratePhysicalDevices
     48'h020000000000, // RRESULT a=0 b=0x0 
@@ -2018,71 +2668,446 @@ package g6lc_apu_vn_pkg;
     48'h030400000000, // RU32 a=4 b=0x0 pPhysicalDeviceCount
     48'h090000000000, // RBLOB a=0 b=0x0 pPhysicalDevices
     48'h0B0000000000, // REND a=0 b=0x0 
+    48'h010000000000, // RTYPE a=0 b=0x0 vkEnumeratePhysicalDeviceGroups
+    48'h020000000000, // RRESULT a=0 b=0x0 
+    48'h060000000001, // RPTR a=0 b=0x1 pPhysicalDeviceGroupCount
+    48'h030400000000, // RU32 a=4 b=0x0 pPhysicalDeviceGroupCount
+    48'h0A040000011C, // REXBUF a=4 b=0x11C pPhysicalDeviceGroupProperties
+    48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceProperties
     48'h060000000001, // RPTR a=0 b=0x1 pProperties
     48'h070000D90000, // RCONST a=0 b=0xD90000 VkPhysicalDeviceProperties
     48'h0B0000000000, // REND a=0 b=0x0 
-    48'h080000000009, // RCHAIN a=0 b=0x9 VkPhysicalDeviceIDProperties
-    48'h0D0400000012, // REXEC a=4 b=0x12 VkPhysicalDeviceIDProperties
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceDriverProperties
+    48'h0700008900D9, // RCONST a=0 b=0x8900D9 VkPhysicalDeviceDriverProperties
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000009, // RCHAIN a=0 b=0x9 VkPhysicalDeviceMultiviewProperties
-    48'h0D0400000002, // REXEC a=4 b=0x2 VkPhysicalDeviceMultiviewProperties
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceIDProperties
+    48'h070000120162, // RCONST a=0 b=0x120162 VkPhysicalDeviceIDProperties
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000009, // RCHAIN a=0 b=0x9 VkPhysicalDeviceSubgroupProperties
-    48'h0D0400000004, // REXEC a=4 b=0x4 VkPhysicalDeviceSubgroupProperties
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceMultiviewProperties
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceMultiviewProperties
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000009, // RCHAIN a=0 b=0x9 VkPhysicalDevicePointClippingProperties
-    48'h0D0400000001, // REXEC a=4 b=0x1 VkPhysicalDevicePointClippingProperties
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceSubgroupProperties
+    48'h070000040176, // RCONST a=0 b=0x40176 VkPhysicalDeviceSubgroupProperties
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000009, // RCHAIN a=0 b=0x9 VkPhysicalDeviceProtectedMemoryProperties
-    48'h0700000100D9, // RCONST a=0 b=0x100D9 VkPhysicalDeviceProtectedMemoryProperties
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDevicePointClippingProperties
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDevicePointClippingProperties
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000009, // RCHAIN a=0 b=0x9 VkPhysicalDeviceMaintenance3Properties
-    48'h0D0400000003, // REXEC a=4 b=0x3 VkPhysicalDeviceMaintenance3Properties
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceProtectedMemoryProperties
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceProtectedMemoryProperties
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceSamplerFilterMinmaxProperties
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceSamplerFilterMinmaxProperties
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceMaintenance3Properties
+    48'h07000003017B, // RCONST a=0 b=0x3017B VkPhysicalDeviceMaintenance3Properties
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceMaintenance5Properties
+    48'h07000006017E, // RCONST a=0 b=0x6017E VkPhysicalDeviceMaintenance5Properties
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceComputeShaderDerivativesPropertiesKHR
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceComputeShaderDerivativesPropertiesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceVulkan11Properties
+    48'h0700001D0184, // RCONST a=0 b=0x1D0184 VkPhysicalDeviceVulkan11Properties
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceVulkan12Properties
+    48'h070000BA01A1, // RCONST a=0 b=0xBA01A1 VkPhysicalDeviceVulkan12Properties
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceVulkan13Properties
+    48'h07000030025B, // RCONST a=0 b=0x30025B VkPhysicalDeviceVulkan13Properties
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceVulkan14Properties
+    48'h0D0400000000, // REXEC a=4 b=0x0 VkPhysicalDeviceVulkan14Properties
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceExtendedDynamicState3PropertiesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceExtendedDynamicState3PropertiesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceLegacyVertexAttributesPropertiesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceLegacyVertexAttributesPropertiesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceProvokingVertexPropertiesEXT
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceProvokingVertexPropertiesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceShaderIntegerDotProductProperties
+    48'h0700001E028B, // RCONST a=0 b=0x1E028B VkPhysicalDeviceShaderIntegerDotProductProperties
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceFragmentShaderBarycentricPropertiesKHR
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceFragmentShaderBarycentricPropertiesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000018, // RCHAIN a=0 b=0x18 VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceGraphicsPipelineLibraryPropertiesEXT
     48'h0C0000000000, // RRET a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceProperties2
     48'h060000000003, // RPTR a=0 b=0x3 pProperties
-    48'h030300000002, // RU32 a=3 b=0x2 sType
-    48'h080000000009, // RCHAIN a=0 b=0x9 pProperties
+    48'h030300000003, // RU32 a=3 b=0x3 sType
+    48'h080000000018, // RCHAIN a=0 b=0x18 pProperties
     48'h070000D90000, // RCONST a=0 b=0xD90000 VkPhysicalDeviceProperties2
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceFeatures
     48'h060000000001, // RPTR a=0 b=0x1 pFeatures
-    48'h0700003700DA, // RCONST a=0 b=0x3700DA VkPhysicalDeviceFeatures
+    48'h0700003702A9, // RCONST a=0 b=0x3702A9 VkPhysicalDeviceFeatures
     48'h0B0000000000, // REND a=0 b=0x0 
-    48'h080000000017, // RCHAIN a=0 b=0x17 VkPhysicalDeviceVariablePointersFeatures
-    48'h070000020111, // RCONST a=0 b=0x20111 VkPhysicalDeviceVariablePointersFeatures
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDevicePrivateDataFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDevicePrivateDataFeatures
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000017, // RCHAIN a=0 b=0x17 VkPhysicalDeviceMultiviewFeatures
-    48'h070000030113, // RCONST a=0 b=0x30113 VkPhysicalDeviceMultiviewFeatures
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceVariablePointersFeatures
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceVariablePointersFeatures
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000017, // RCHAIN a=0 b=0x17 VkPhysicalDevice16BitStorageFeatures
-    48'h070000040116, // RCONST a=0 b=0x40116 VkPhysicalDevice16BitStorageFeatures
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceMultiviewFeatures
+    48'h0700000302E0, // RCONST a=0 b=0x302E0 VkPhysicalDeviceMultiviewFeatures
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000017, // RCHAIN a=0 b=0x17 VkPhysicalDeviceSamplerYcbcrConversionFeatures
-    48'h0700000100D9, // RCONST a=0 b=0x100D9 VkPhysicalDeviceSamplerYcbcrConversionFeatures
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDevice16BitStorageFeatures
+    48'h0700000402E3, // RCONST a=0 b=0x402E3 VkPhysicalDevice16BitStorageFeatures
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000017, // RCHAIN a=0 b=0x17 VkPhysicalDeviceProtectedMemoryFeatures
-    48'h0700000100D9, // RCONST a=0 b=0x100D9 VkPhysicalDeviceProtectedMemoryFeatures
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000017, // RCHAIN a=0 b=0x17 VkPhysicalDeviceShaderDrawParametersFeatures
-    48'h0700000100D9, // RCONST a=0 b=0x100D9 VkPhysicalDeviceShaderDrawParametersFeatures
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceSamplerYcbcrConversionFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceSamplerYcbcrConversionFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceProtectedMemoryFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceProtectedMemoryFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceBlendOperationAdvancedFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceMultiDrawFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceMultiDrawFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceInlineUniformBlockFeatures
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceInlineUniformBlockFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceMaintenance4Features
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceMaintenance4Features
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceMaintenance5Features
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceMaintenance5Features
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceMaintenance6Features
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceMaintenance6Features
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceMaintenance7FeaturesKHR
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceMaintenance7FeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderDrawParametersFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceShaderDrawParametersFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderFloat16Int8Features
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceShaderFloat16Int8Features
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceHostQueryResetFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceHostQueryResetFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceGlobalPriorityQueryFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceGlobalPriorityQueryFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceDescriptorIndexingFeatures
+    48'h0700001402E7, // RCONST a=0 b=0x1402E7 VkPhysicalDeviceDescriptorIndexingFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceTimelineSemaphoreFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceTimelineSemaphoreFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDevice8BitStorageFeatures
+    48'h0700000302E0, // RCONST a=0 b=0x302E0 VkPhysicalDevice8BitStorageFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceConditionalRenderingFeaturesEXT
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceConditionalRenderingFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceVulkanMemoryModelFeatures
+    48'h0700000302E0, // RCONST a=0 b=0x302E0 VkPhysicalDeviceVulkanMemoryModelFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderAtomicInt64Features
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceShaderAtomicInt64Features
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderAtomicFloatFeaturesEXT
+    48'h0700000C02FB, // RCONST a=0 b=0xC02FB VkPhysicalDeviceShaderAtomicFloatFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT
+    48'h0700000C02FB, // RCONST a=0 b=0xC02FB VkPhysicalDeviceShaderAtomicFloat2FeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceVertexAttributeDivisorFeatures
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceVertexAttributeDivisorFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceTransformFeedbackFeaturesEXT
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceTransformFeedbackFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceComputeShaderDerivativesFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceFragmentShaderBarycentricFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceMeshShaderFeaturesEXT
+    48'h070000050307, // RCONST a=0 b=0x50307 VkPhysicalDeviceMeshShaderFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceAccelerationStructureFeaturesKHR
+    48'h070000050307, // RCONST a=0 b=0x50307 VkPhysicalDeviceAccelerationStructureFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceRayTracingPipelineFeaturesKHR
+    48'h070000050307, // RCONST a=0 b=0x50307 VkPhysicalDeviceRayTracingPipelineFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceRayQueryFeaturesKHR
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceRayQueryFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceRayTracingMaintenance1FeaturesKHR
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceRayTracingMaintenance1FeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceScalarBlockLayoutFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceScalarBlockLayoutFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceUniformBufferStandardLayoutFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceUniformBufferStandardLayoutFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceDepthClipEnableFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceDepthClipEnableFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceBufferDeviceAddressFeatures
+    48'h0700000302E0, // RCONST a=0 b=0x302E0 VkPhysicalDeviceBufferDeviceAddressFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceBufferDeviceAddressFeaturesEXT
+    48'h0700000302E0, // RCONST a=0 b=0x302E0 VkPhysicalDeviceBufferDeviceAddressFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceImagelessFramebufferFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceImagelessFramebufferFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceTextureCompressionASTCHDRFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceTextureCompressionASTCHDRFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceYcbcrImageArraysFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceYcbcrImageArraysFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderClockFeaturesKHR
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceShaderClockFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceIndexTypeUint8Features
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceIndexTypeUint8Features
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT
+    48'h0700000302E0, // RCONST a=0 b=0x302E0 VkPhysicalDeviceFragmentShaderInterlockFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceSeparateDepthStencilLayoutsFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDevicePrimitiveTopologyListRestartFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceTexelBufferAlignmentFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceSubgroupSizeControlFeatures
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceSubgroupSizeControlFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceLineRasterizationFeatures
+    48'h07000006017E, // RCONST a=0 b=0x6017E VkPhysicalDeviceLineRasterizationFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDevicePipelineCreationCacheControlFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDevicePipelineCreationCacheControlFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceVulkan11Features
+    48'h0700000C02FB, // RCONST a=0 b=0xC02FB VkPhysicalDeviceVulkan11Features
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceVulkan12Features
+    48'h0700002F030C, // RCONST a=0 b=0x2F030C VkPhysicalDeviceVulkan12Features
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceVulkan13Features
+    48'h0700000F033B, // RCONST a=0 b=0xF033B VkPhysicalDeviceVulkan13Features
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceVulkan14Features
+    48'h07000015034A, // RCONST a=0 b=0x15034A VkPhysicalDeviceVulkan14Features
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceCustomBorderColorFeaturesEXT
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceCustomBorderColorFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceBorderColorSwizzleFeaturesEXT
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceBorderColorSwizzleFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceExtendedDynamicStateFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceExtendedDynamicStateFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceExtendedDynamicState2FeaturesEXT
+    48'h0700000302E0, // RCONST a=0 b=0x302E0 VkPhysicalDeviceExtendedDynamicState2FeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceExtendedDynamicState3FeaturesEXT
+    48'h0700001F035F, // RCONST a=0 b=0x1F035F VkPhysicalDeviceExtendedDynamicState3FeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceZeroInitializeWorkgroupMemoryFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceZeroInitializeWorkgroupMemoryFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceShaderSubgroupUniformControlFlowFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceRobustness2FeaturesKHR
+    48'h0700000302E0, // RCONST a=0 b=0x302E0 VkPhysicalDeviceRobustness2FeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceImageRobustnessFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceImageRobustnessFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR
+    48'h0700000402E3, // RCONST a=0 b=0x402E3 VkPhysicalDeviceWorkgroupMemoryExplicitLayoutFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDevice4444FormatsFeaturesEXT
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDevice4444FormatsFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceShaderImageAtomicInt64FeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceFragmentShadingRateFeaturesKHR
+    48'h0700000302E0, // RCONST a=0 b=0x302E0 VkPhysicalDeviceFragmentShadingRateFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderTerminateInvocationFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceShaderTerminateInvocationFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceImage2DViewOf3DFeaturesEXT
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceImage2DViewOf3DFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceImageSlicedViewOf3DFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceImageSlicedViewOf3DFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceAttachmentFeedbackLoopDynamicStateFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceLegacyVertexAttributesFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceLegacyVertexAttributesFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceMutableDescriptorTypeFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceDepthClipControlFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceDepthClipControlFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceDepthClampControlFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceDepthClampControlFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderRelaxedExtendedInstructionFeaturesKHR
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceShaderRelaxedExtendedInstructionFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceColorWriteEnableFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceColorWriteEnableFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceSynchronization2Features
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceSynchronization2Features
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceHostImageCopyFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceHostImageCopyFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT
+    48'h0700000302E0, // RCONST a=0 b=0x302E0 VkPhysicalDevicePrimitivesGeneratedQueryFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceLegacyDitheringFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceLegacyDitheringFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceMultisampledRenderToSingleSampledFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDevicePipelineProtectedAccessFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDevicePipelineProtectedAccessFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceYcbcr2Plane444FormatsFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceProvokingVertexFeaturesEXT
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceProvokingVertexFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderIntegerDotProductFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceShaderIntegerDotProductFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceDynamicRenderingFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceDynamicRenderingFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceImageViewMinLodFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceImageViewMinLodFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT
+    48'h0700000302E0, // RCONST a=0 b=0x302E0 VkPhysicalDeviceRasterizationOrderAttachmentAccessFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceGraphicsPipelineLibraryFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceNestedCommandBufferFeaturesEXT
+    48'h0700000302E0, // RCONST a=0 b=0x302E0 VkPhysicalDeviceNestedCommandBufferFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceNonSeamlessCubeMapFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceNonSeamlessCubeMapFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDevicePipelineRobustnessFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDevicePipelineRobustnessFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceAttachmentFeedbackLoopLayoutFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceDepthClampZeroOneFeaturesKHR
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceDepthClampZeroOneFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDevicePipelineLibraryGroupHandlesFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDevicePipelineLibraryGroupHandlesFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceDynamicRenderingUnusedAttachmentsFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceDepthBiasControlFeaturesEXT
+    48'h0700000402E3, // RCONST a=0 b=0x402E3 VkPhysicalDeviceDepthBiasControlFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceRayTracingPositionFetchFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceCooperativeMatrixFeaturesKHR
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceCooperativeMatrixFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceShaderMaximalReconvergenceFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderSubgroupRotateFeatures
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceShaderSubgroupRotateFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderExpectAssumeFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceShaderExpectAssumeFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderFloatControls2Features
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceShaderFloatControls2Features
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceDynamicRenderingLocalReadFeatures
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceDynamicRenderingLocalReadFeatures
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderQuadControlFeaturesKHR
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceShaderQuadControlFeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderBfloat16FeaturesKHR
+    48'h0700000302E0, // RCONST a=0 b=0x302E0 VkPhysicalDeviceShaderBfloat16FeaturesKHR
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderReplicatedCompositesFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceShaderReplicatedCompositesFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderUniformBufferUnsizedArrayFeaturesEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceShaderUniformBufferUnsizedArrayFeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderFloat8FeaturesEXT
+    48'h070000020174, // RCONST a=0 b=0x20174 VkPhysicalDeviceShaderFloat8FeaturesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 VkPhysicalDeviceShaderUntypedPointersFeaturesKHR
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkPhysicalDeviceShaderUntypedPointersFeaturesKHR
     48'h0C0000000000, // RRET a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceFeatures2
     48'h060000000003, // RPTR a=0 b=0x3 pFeatures
-    48'h030300000003, // RU32 a=3 b=0x3 sType
-    48'h080000000017, // RCHAIN a=0 b=0x17 pFeatures
-    48'h0700003700DA, // RCONST a=0 b=0x3700DA VkPhysicalDeviceFeatures2
+    48'h030300000004, // RU32 a=3 b=0x4 sType
+    48'h0800000000A1, // RCHAIN a=0 b=0xA1 pFeatures
+    48'h0700003702A9, // RCONST a=0 b=0x3702A9 VkPhysicalDeviceFeatures2
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceMemoryProperties
     48'h060000000001, // RPTR a=0 b=0x1 pMemoryProperties
-    48'h07000076011A, // RCONST a=0 b=0x76011A VkPhysicalDeviceMemoryProperties
+    48'h07000076037E, // RCONST a=0 b=0x76037E VkPhysicalDeviceMemoryProperties
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceMemoryProperties2
     48'h060000000003, // RPTR a=0 b=0x3 pMemoryProperties
-    48'h030300000004, // RU32 a=3 b=0x4 sType
-    48'h08000000001F, // RCHAIN a=0 b=0x1F pMemoryProperties
-    48'h07000076011A, // RCONST a=0 b=0x76011A VkPhysicalDeviceMemoryProperties2
+    48'h030300000005, // RU32 a=3 b=0x5 sType
+    48'h080000000116, // RCHAIN a=0 b=0x116 pMemoryProperties
+    48'h07000076037E, // RCONST a=0 b=0x76037E VkPhysicalDeviceMemoryProperties2
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceQueueFamilyProperties
     48'h060000000001, // RPTR a=0 b=0x1 pQueueFamilyPropertyCount
@@ -2098,24 +3123,56 @@ package g6lc_apu_vn_pkg;
     48'h060000000001, // RPTR a=0 b=0x1 pFormatProperties
     48'h0D0400000003, // REXEC a=4 b=0x3 VkFormatProperties
     48'h0B0000000000, // REND a=0 b=0x0 
+    48'h08000000011A, // RCHAIN a=0 b=0x11A VkSubpassResolvePerformanceQueryEXT
+    48'h07000001017A, // RCONST a=0 b=0x1017A VkSubpassResolvePerformanceQueryEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceFormatProperties2
     48'h060000000003, // RPTR a=0 b=0x3 pFormatProperties
-    48'h030300000006, // RU32 a=3 b=0x6 sType
-    48'h080000000022, // RCHAIN a=0 b=0x22 pFormatProperties
+    48'h030300000007, // RU32 a=3 b=0x7 sType
+    48'h08000000011A, // RCHAIN a=0 b=0x11A pFormatProperties
     48'h0D0400000003, // REXEC a=4 b=0x3 VkFormatProperties2
     48'h0B0000000000, // REND a=0 b=0x0 
-    48'h080000000028, // RCHAIN a=0 b=0x28 VkExternalImageFormatProperties
+    48'h080000000123, // RCHAIN a=0 b=0x123 VkExternalImageFormatProperties
     48'h0D0400000003, // REXEC a=4 b=0x3 VkExternalImageFormatProperties
     48'h0C0000000000, // RRET a=0 b=0x0 
-    48'h080000000028, // RCHAIN a=0 b=0x28 VkSamplerYcbcrConversionImageFormatProperties
+    48'h080000000123, // RCHAIN a=0 b=0x123 VkSamplerYcbcrConversionImageFormatProperties
     48'h0D0400000001, // REXEC a=4 b=0x1 VkSamplerYcbcrConversionImageFormatProperties
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000123, // RCHAIN a=0 b=0x123 VkFilterCubicImageViewImageFormatPropertiesEXT
+    48'h070000020174, // RCONST a=0 b=0x20174 VkFilterCubicImageViewImageFormatPropertiesEXT
+    48'h0C0000000000, // RRET a=0 b=0x0 
+    48'h080000000123, // RCHAIN a=0 b=0x123 VkHostImageCopyDevicePerformanceQuery
+    48'h070000020174, // RCONST a=0 b=0x20174 VkHostImageCopyDevicePerformanceQuery
     48'h0C0000000000, // RRET a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceImageFormatProperties2
     48'h020000000000, // RRESULT a=0 b=0x0 
     48'h060100000003, // RPTR a=1 b=0x3 pImageFormatProperties
-    48'h030300000009, // RU32 a=3 b=0x9 sType
-    48'h080000000028, // RCHAIN a=0 b=0x28 pImageFormatProperties
+    48'h03030000000A, // RU32 a=3 b=0xA sType
+    48'h080000000123, // RCHAIN a=0 b=0x123 pImageFormatProperties
     48'h0D0400000008, // REXEC a=4 b=0x8 VkImageFormatProperties2
+    48'h0B0000000000, // REND a=0 b=0x0 
+    48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceExternalBufferProperties
+    48'h060100000003, // RPTR a=1 b=0x3 pExternalBufferProperties
+    48'h03030000000D, // RU32 a=3 b=0xD sType
+    48'h08000000012A, // RCHAIN a=0 b=0x12A pExternalBufferProperties
+    48'h0D0400000003, // REXEC a=4 b=0x3 VkExternalBufferProperties
+    48'h0B0000000000, // REND a=0 b=0x0 
+    48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceExternalFenceProperties
+    48'h060100000003, // RPTR a=1 b=0x3 pExternalFenceProperties
+    48'h03030000000F, // RU32 a=3 b=0xF sType
+    48'h08000000012D, // RCHAIN a=0 b=0x12D pExternalFenceProperties
+    48'h0D0400000003, // REXEC a=4 b=0x3 VkExternalFenceProperties
+    48'h0B0000000000, // REND a=0 b=0x0 
+    48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceExternalSemaphoreProperties
+    48'h060100000003, // RPTR a=1 b=0x3 pExternalSemaphoreProperties
+    48'h030300000011, // RU32 a=3 b=0x11 sType
+    48'h080000000130, // RCHAIN a=0 b=0x130 pExternalSemaphoreProperties
+    48'h0D0400000003, // REXEC a=4 b=0x3 VkExternalSemaphoreProperties
+    48'h0B0000000000, // REND a=0 b=0x0 
+    48'h010000000000, // RTYPE a=0 b=0x0 vkGetPhysicalDeviceSparseImageFormatProperties2
+    48'h060100000001, // RPTR a=1 b=0x1 pPropertyCount
+    48'h030400000000, // RU32 a=4 b=0x0 pPropertyCount
+    48'h0A0400000020, // REXBUF a=4 b=0x20 pProperties
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkEnumerateDeviceExtensionProperties
     48'h020000000000, // RRESULT a=0 b=0x0 
@@ -2160,13 +3217,13 @@ package g6lc_apu_vn_pkg;
     48'h060000000001, // RPTR a=0 b=0x1 pMemoryRequirements
     48'h0D0400000005, // REXEC a=4 b=0x5 VkMemoryRequirements
     48'h0B0000000000, // REND a=0 b=0x0 
-    48'h080000000043, // RCHAIN a=0 b=0x43 VkMemoryDedicatedRequirements
-    48'h070000020111, // RCONST a=0 b=0x20111 VkMemoryDedicatedRequirements
+    48'h0800000001B8, // RCHAIN a=0 b=0x1B8 VkMemoryDedicatedRequirements
+    48'h070000020174, // RCONST a=0 b=0x20174 VkMemoryDedicatedRequirements
     48'h0C0000000000, // RRET a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetBufferMemoryRequirements2
     48'h060100000003, // RPTR a=1 b=0x3 pMemoryRequirements
-    48'h030300000011, // RU32 a=3 b=0x11 sType
-    48'h080000000043, // RCHAIN a=0 b=0x43 pMemoryRequirements
+    48'h03030000001B, // RU32 a=3 b=0x1B sType
+    48'h0800000001B8, // RCHAIN a=0 b=0x1B8 pMemoryRequirements
     48'h0D0400000005, // REXEC a=4 b=0x5 VkMemoryRequirements2
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetImageMemoryRequirements
@@ -2175,8 +3232,8 @@ package g6lc_apu_vn_pkg;
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetImageMemoryRequirements2
     48'h060100000003, // RPTR a=1 b=0x3 pMemoryRequirements
-    48'h030300000011, // RU32 a=3 b=0x11 sType
-    48'h080000000043, // RCHAIN a=0 b=0x43 pMemoryRequirements
+    48'h03030000001B, // RU32 a=3 b=0x1B sType
+    48'h0800000001B8, // RCHAIN a=0 b=0x1B8 pMemoryRequirements
     48'h0D0400000005, // REXEC a=4 b=0x5 VkMemoryRequirements2
     48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkBindBufferMemory
@@ -2323,183 +3380,562 @@ package g6lc_apu_vn_pkg;
     48'h020000000000, // RRESULT a=0 b=0x0 
     48'h0A0400000001, // REXBUF a=4 b=0x1 pData
     48'h0B0000000000, // REND a=0 b=0x0 
-    48'h08000000008B, // RCHAIN a=0 b=0x8B VkMemoryResourceAllocationSizePropertiesMESA
+    48'h080000000204, // RCHAIN a=0 b=0x204 VkMemoryResourceAllocationSizePropertiesMESA
     48'h0D0400000002, // REXEC a=4 b=0x2 VkMemoryResourceAllocationSizePropertiesMESA
     48'h0C0000000000, // RRET a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetMemoryResourcePropertiesMESA
     48'h020000000000, // RRESULT a=0 b=0x0 
     48'h060000000003, // RPTR a=0 b=0x3 pMemoryResourceProperties
-    48'h030300000044, // RU32 a=3 b=0x44 sType
-    48'h08000000008B, // RCHAIN a=0 b=0x8B pMemoryResourceProperties
+    48'h03030000004D, // RU32 a=3 b=0x4D sType
+    48'h080000000204, // RCHAIN a=0 b=0x204 pMemoryResourceProperties
     48'h0D0400000001, // REXEC a=4 b=0x1 VkMemoryResourcePropertiesMESA
     48'h0B0000000000 // REND a=0 b=0x0 
   };
 
-  localparam int APU_VN_CHAIN_WORDS = 141;
+  localparam int APU_VN_CHAIN_WORDS = 518;
   localparam logic [47:0] APU_VN_CHAIN [0:APU_VN_CHAIN_WORDS-1] = '{
     48'h0, // terminator
     48'h0, // terminator
-    48'h00003B9BDF5C, // sType=1000071004 mpc=0
-    48'h00013B9B990A, // sType=1000053002 mpc=1
-    48'h00023B9C3930, // sType=1000094000 mpc=2
-    48'h00033B9C9308, // sType=1000117000 mpc=3
-    48'h00043B9D006A, // sType=1000145002 mpc=4
-    48'h00053B9D5A40, // sType=1000168000 mpc=5
     48'h0, // terminator
-    48'h000F3B9BDF5C, // sType=1000071004 mpc=15
-    48'h00123B9B990A, // sType=1000053002 mpc=18
-    48'h00153B9C3930, // sType=1000094000 mpc=21
-    48'h00183B9C9308, // sType=1000117000 mpc=24
-    48'h001B3B9D006A, // sType=1000145002 mpc=27
-    48'h001E3B9D5A40, // sType=1000168000 mpc=30
-    48'h0, // terminator
-    48'h00063B9C9EC0, // sType=1000120000 mpc=6
-    48'h00073B9B9909, // sType=1000053001 mpc=7
-    48'h00083B9C0E38, // sType=1000083000 mpc=8
-    48'h00093B9D2B64, // sType=1000156004 mpc=9
-    48'h000A3B9D0069, // sType=1000145001 mpc=10
-    48'h000B3B9BC018, // sType=1000063000 mpc=11
-    48'h0, // terminator
-    48'h002B3B9C9EC0, // sType=1000120000 mpc=43
-    48'h002E3B9B9909, // sType=1000053001 mpc=46
-    48'h00313B9C0E38, // sType=1000083000 mpc=49
-    48'h00343B9D2B64, // sType=1000156004 mpc=52
-    48'h00373B9D0069, // sType=1000145001 mpc=55
-    48'h003A3B9BC018, // sType=1000063000 mpc=58
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h000C3B9BDF58, // sType=1000071000 mpc=12
-    48'h0, // terminator
-    48'h000E3B9BDF59, // sType=1000071001 mpc=14
-    48'h000F3B9D2B65, // sType=1000156005 mpc=15
-    48'h0, // terminator
-    48'h00613B9BDF59, // sType=1000071001 mpc=97
-    48'h00643B9D2B65, // sType=1000156005 mpc=100
-    48'h0, // terminator
-    48'h00103B9BB078, // sType=1000059000 mpc=16
-    48'h00483B9C9EC0, // sType=1000120000 mpc=72
-    48'h004B3B9B9909, // sType=1000053001 mpc=75
-    48'h004F3B9BDB71, // sType=1000070001 mpc=79
-    48'h00523B9C0E38, // sType=1000083000 mpc=82
-    48'h00573B9D2B64, // sType=1000156004 mpc=87
-    48'h00593B9D0069, // sType=1000145001 mpc=89
-    48'h005B3B9BC018, // sType=1000063000 mpc=91
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h005D3BA0A605, // sType=1000384005 mpc=93
-    48'h0, // terminator
-    48'h005F3B9BB465, // sType=1000060005 mpc=95
-    48'h00663B9D0068, // sType=1000145000 mpc=102
-    48'h0, // terminator
-    48'h00683B9BE342, // sType=1000072002 mpc=104
-    48'h006A3B9BB460, // sType=1000060000 mpc=106
-    48'h006D3B9CBA19, // sType=1000127001 mpc=109
-    48'h00703BA0A602, // sType=1000384002 mpc=112
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h00723B9CBA18, // sType=1000127000 mpc=114
-    48'h0, // terminator
-    48'h00993B9CBA18, // sType=1000127000 mpc=153
-    48'h0, // terminator
-    48'h00733B9D2B63, // sType=1000156003 mpc=115
-    48'h0, // terminator
-    48'h00753B9BB46D, // sType=1000060013 mpc=117
-    48'h0, // terminator
-    48'h00783B9BB46E, // sType=1000060014 mpc=120
-    48'h00823B9D2B62, // sType=1000156002 mpc=130
-    48'h0, // terminator
-    48'h00843B9BE340, // sType=1000072000 mpc=132
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h00863B9BE341, // sType=1000072001 mpc=134
-    48'h0, // terminator
-    48'h00883B9C930A, // sType=1000117002 mpc=136
-    48'h008A3B9D2B61, // sType=1000156001 mpc=138
-    48'h0, // terminator
-    48'h008A3B9D2B61, // sType=1000156001 mpc=138
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h008C00000010, // sType=16 mpc=140
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h00903B9C930B, // sType=1000117003 mpc=144
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h00923B9B9908, // sType=1000053000 mpc=146
-    48'h00993B9C9309, // sType=1000117001 mpc=153
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h00A03B9BB464, // sType=1000060004 mpc=160
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h00A23B9BB463, // sType=1000060003 mpc=162
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h00AB3B9C8368, // sType=1000113000 mpc=171
-    48'h0, // terminator
-    48'h00AD3B9BF6C8, // sType=1000077000 mpc=173
-    48'h0, // terminator
-    48'h0, // terminator
-    48'h00AF3BA0A606, // sType=1000384006 mpc=175
-    48'h00B13BA0A607, // sType=1000384007 mpc=177
-    48'h0, // terminator
-    48'h00B33BA0A603, // sType=1000384003 mpc=179
-    48'h0, // terminator
-    48'h013C3BA0A603, // sType=1000384003 mpc=316
+    48'h00003B9DC7A0, // sType=1000196000 mpc=0
+    48'h00013B9BDF5C, // sType=1000071004 mpc=1
+    48'h00023B9B990A, // sType=1000053002 mpc=2
+    48'h00033B9C3930, // sType=1000094000 mpc=3
+    48'h00043B9C9308, // sType=1000117000 mpc=4
+    48'h00053B9D006A, // sType=1000145002 mpc=5
+    48'h00063B9CC5D0, // sType=1000130000 mpc=6
+    48'h00073B9D5A40, // sType=1000168000 mpc=7
+    48'h00083BA1F5F1, // sType=1000470001 mpc=8
+    48'h00093BA29618, // sType=1000511000 mpc=9
+    48'h000A00000032, // sType=50 mpc=10
+    48'h000B00000034, // sType=52 mpc=11
+    48'h000C00000036, // sType=54 mpc=12
+    48'h000D00000038, // sType=56 mpc=13
+    48'h00103BA1BB59, // sType=1000455001 mpc=16
+    48'h00113BA25799, // sType=1000495001 mpc=17
+    48'h00123B9EAA32, // sType=1000254002 mpc=18
+    48'h00133B9F0FC1, // sType=1000280001 mpc=19
+    48'h00143B9FB3D0, // sType=1000322000 mpc=20
+    48'h00153B9FAC01, // sType=1000320001 mpc=21
+    48'h0, // terminator
+    48'h001A3B9DC7A0, // sType=1000196000 mpc=26
+    48'h001D3B9BDF5C, // sType=1000071004 mpc=29
+    48'h00203B9B990A, // sType=1000053002 mpc=32
+    48'h00233B9C3930, // sType=1000094000 mpc=35
+    48'h00263B9C9308, // sType=1000117000 mpc=38
+    48'h00293B9D006A, // sType=1000145002 mpc=41
+    48'h002C3B9CC5D0, // sType=1000130000 mpc=44
+    48'h002F3B9D5A40, // sType=1000168000 mpc=47
+    48'h00323BA1F5F1, // sType=1000470001 mpc=50
+    48'h00353BA29618, // sType=1000511000 mpc=53
+    48'h003800000032, // sType=50 mpc=56
+    48'h003B00000034, // sType=52 mpc=59
+    48'h003E00000036, // sType=54 mpc=62
+    48'h004100000038, // sType=56 mpc=65
+    48'h00443BA1BB59, // sType=1000455001 mpc=68
+    48'h00473BA25799, // sType=1000495001 mpc=71
+    48'h004A3B9EAA32, // sType=1000254002 mpc=74
+    48'h004D3B9F0FC1, // sType=1000280001 mpc=77
+    48'h00503B9FB3D0, // sType=1000322000 mpc=80
+    48'h00533B9FAC01, // sType=1000320001 mpc=83
+    48'h0, // terminator
+    48'h00163B9F4A58, // sType=1000295000 mpc=22
+    48'h00173B9C9EC0, // sType=1000120000 mpc=23
+    48'h00183B9B9909, // sType=1000053001 mpc=24
+    48'h00193B9C0E38, // sType=1000083000 mpc=25
+    48'h001A3B9D7598, // sType=1000175000 mpc=26
+    48'h001B3B9D2B64, // sType=1000156004 mpc=27
+    48'h001C3B9D0069, // sType=1000145001 mpc=28
+    48'h001D3B9D0C20, // sType=1000148000 mpc=29
+    48'h001E3BA0C540, // sType=1000392000 mpc=30
+    48'h001F3B9CE510, // sType=1000138000 mpc=31
+    48'h00203BA11748, // sType=1000413000 mpc=32
+    48'h00213BA1F5F0, // sType=1000470000 mpc=33
+    48'h00223BA31AE8, // sType=1000545000 mpc=34
+    48'h00233BA35D50, // sType=1000562000 mpc=35
+    48'h00243B9BC018, // sType=1000063000 mpc=36
+    48'h00253B9C0A50, // sType=1000082000 mpc=37
+    48'h00263B9EC588, // sType=1000261000 mpc=38
+    48'h00273BA0B5A0, // sType=1000388000 mpc=39
+    48'h00283B9D3EE9, // sType=1000161001 mpc=40
+    48'h00293B9DF298, // sType=1000207000 mpc=41
+    48'h002A3B9D7D68, // sType=1000177000 mpc=42
+    48'h002B3B9C0669, // sType=1000081001 mpc=43
+    48'h002C3B9E0238, // sType=1000211000 mpc=44
+    48'h002D3B9D8920, // sType=1000180000 mpc=45
+    48'h002E3B9EC1A0, // sType=1000260000 mpc=46
+    48'h002F3B9EF468, // sType=1000273000 mpc=47
+    48'h00303B9DB032, // sType=1000190002 mpc=48
+    48'h00313B9B3760, // sType=1000028000 mpc=49
+    48'h00323B9DDB28, // sType=1000201000 mpc=50
+    48'h00333B9DE2F8, // sType=1000203000 mpc=51
+    48'h00343B9FCB40, // sType=1000328000 mpc=52
+    48'h00353B9D13FD, // sType=1000150013 mpc=53
+    48'h00363BA01578, // sType=1000347000 mpc=54
+    48'h00373BA0196D, // sType=1000348013 mpc=55
+    48'h00383BA0ADD0, // sType=1000386000 mpc=56
+    48'h00393B9E2948, // sType=1000221000 mpc=57
+    48'h003A3B9EA648, // sType=1000253000 mpc=58
+    48'h003B3B9C5870, // sType=1000102000 mpc=59
+    48'h003C3B9EB5E8, // sType=1000257000 mpc=60
+    48'h003D3B9E8320, // sType=1000244000 mpc=61
+    48'h003E3B9C6FE0, // sType=1000108000 mpc=62
+    48'h003F3B9BCBD0, // sType=1000066000 mpc=63
+    48'h00403B9EA260, // sType=1000252000 mpc=64
+    48'h00413B9D8D08, // sType=1000181000 mpc=65
+    48'h00423B9ED528, // sType=1000265000 mpc=66
+    48'h00433B9E9E78, // sType=1000251000 mpc=67
+    48'h00443B9E7768, // sType=1000241000 mpc=68
+    48'h00453BA038A0, // sType=1000356000 mpc=69
+    48'h00463B9F0020, // sType=1000276000 mpc=70
+    48'h00473B9F13A8, // sType=1000281000 mpc=71
+    48'h00483B9E38EA, // sType=1000225002 mpc=72
+    48'h00493B9EBDB8, // sType=1000259000 mpc=73
+    48'h004A3B9F5228, // sType=1000297000 mpc=74
+    48'h004B00000031, // sType=49 mpc=75
+    48'h004C00000033, // sType=51 mpc=76
+    48'h004D00000035, // sType=53 mpc=77
+    48'h004E00000037, // sType=55 mpc=78
+    48'h004F3B9F2B1A, // sType=1000287002 mpc=79
+    48'h00503BA10F78, // sType=1000411000 mpc=80
+    48'h00513B9EDCF8, // sType=1000267000 mpc=81
+    48'h00523BA08AA8, // sType=1000377000 mpc=82
+    48'h00533BA1BB58, // sType=1000455000 mpc=83
+    48'h00543B9FBF88, // sType=1000325000 mpc=84
+    48'h00553B9FB7B8, // sType=1000323000 mpc=85
+    48'h00563B9F2730, // sType=1000286000 mpc=86
+    48'h00573B9FE698, // sType=1000335000 mpc=87
+    48'h00583B9FEA80, // sType=1000336000 mpc=88
+    48'h00593B9FFA20, // sType=1000340000 mpc=89
+    48'h005A3B9E5C10, // sType=1000234000 mpc=90
+    48'h005B3B9E3CD3, // sType=1000226003 mpc=91
+    48'h005C3B9E11D8, // sType=1000215000 mpc=92
+    48'h005D3BA0C928, // sType=1000393000 mpc=93
+    48'h005E3BA12AD0, // sType=1000418000 mpc=94
+    48'h005F3BA2C8E0, // sType=1000524000 mpc=95
+    48'h00603BA25798, // sType=1000495000 mpc=96
+    48'h00613BA02518, // sType=1000351000 mpc=97
+    48'h00623BA034B8, // sType=1000355000 mpc=98
+    48'h00633BA3AB70, // sType=1000582000 mpc=99
+    48'h00643BA02900, // sType=1000352000 mpc=100
+    48'h00653BA34DB0, // sType=1000558000 mpc=101
+    48'h00663BA09A48, // sType=1000381000 mpc=102
+    48'h00673B9F9497, // sType=1000314007 mpc=103
+    48'h00683B9EE8B0, // sType=1000270000 mpc=104
+    48'h00693BA09E30, // sType=1000382000 mpc=105
+    48'h006A3BA1E268, // sType=1000465000 mpc=106
+    48'h006B3BA086C0, // sType=1000376000 mpc=107
+    48'h006C3BA1E650, // sType=1000466000 mpc=108
+    48'h006D3B9FD310, // sType=1000330000 mpc=109
+    48'h006E3B9EAA30, // sType=1000254000 mpc=110
+    48'h006F3B9F0FC0, // sType=1000280000 mpc=111
+    48'h00703B9B75E3, // sType=1000044003 mpc=112
+    48'h00713BA0C158, // sType=1000391000 mpc=113
+    48'h00723BA001F0, // sType=1000342000 mpc=114
+    48'h00733B9FAC00, // sType=1000320000 mpc=115
+    48'h00743BA1ABB8, // sType=1000451000 mpc=116
+    48'h00753BA13A70, // sType=1000422000 mpc=117
+    48'h00763B9BD3A1, // sType=1000068001 mpc=118
+    48'h00773B9FF638, // sType=1000339000 mpc=119
+    48'h00783BA13688, // sType=1000421000 mpc=120
+    48'h00793BA26350, // sType=1000498000 mpc=121
+    48'h007A3BA26738, // sType=1000499000 mpc=122
+    48'h007B3B9F1B78, // sType=1000283000 mpc=123
+    48'h007C3BA220E8, // sType=1000481000 mpc=124
+    48'h007D3BA28290, // sType=1000506000 mpc=125
+    48'h007E3BA16950, // sType=1000434000 mpc=126
+    48'h007F3BA12300, // sType=1000416000 mpc=127
+    48'h00803BA31700, // sType=1000544000 mpc=128
+    48'h00813BA2D880, // sType=1000528000 mpc=129
+    48'h00823B9E5440, // sType=1000232000 mpc=130
+    48'h00833B9E5FF8, // sType=1000235000 mpc=131
+    48'h00843B9CF0C8, // sType=1000141000 mpc=132
+    48'h00853BA36520, // sType=1000564000 mpc=133
+    48'h00863BA495D0, // sType=1000642000 mpc=134
+    48'h00873BA370D8, // sType=1000567000 mpc=135
+    48'h00883BA0B1B8, // sType=1000387000 mpc=136
+    48'h0, // terminator
+    48'h00603B9F4A58, // sType=1000295000 mpc=96
+    48'h00633B9C9EC0, // sType=1000120000 mpc=99
+    48'h00663B9B9909, // sType=1000053001 mpc=102
+    48'h00693B9C0E38, // sType=1000083000 mpc=105
+    48'h006C3B9D7598, // sType=1000175000 mpc=108
+    48'h006F3B9D2B64, // sType=1000156004 mpc=111
+    48'h00723B9D0069, // sType=1000145001 mpc=114
+    48'h00753B9D0C20, // sType=1000148000 mpc=117
+    48'h00783BA0C540, // sType=1000392000 mpc=120
+    48'h007B3B9CE510, // sType=1000138000 mpc=123
+    48'h007E3BA11748, // sType=1000413000 mpc=126
+    48'h00813BA1F5F0, // sType=1000470000 mpc=129
+    48'h00843BA31AE8, // sType=1000545000 mpc=132
+    48'h00873BA35D50, // sType=1000562000 mpc=135
+    48'h008A3B9BC018, // sType=1000063000 mpc=138
+    48'h008D3B9C0A50, // sType=1000082000 mpc=141
+    48'h00903B9EC588, // sType=1000261000 mpc=144
+    48'h00933BA0B5A0, // sType=1000388000 mpc=147
+    48'h00963B9D3EE9, // sType=1000161001 mpc=150
+    48'h00993B9DF298, // sType=1000207000 mpc=153
+    48'h009C3B9D7D68, // sType=1000177000 mpc=156
+    48'h009F3B9C0669, // sType=1000081001 mpc=159
+    48'h00A23B9E0238, // sType=1000211000 mpc=162
+    48'h00A53B9D8920, // sType=1000180000 mpc=165
+    48'h00A83B9EC1A0, // sType=1000260000 mpc=168
+    48'h00AB3B9EF468, // sType=1000273000 mpc=171
+    48'h00AE3B9DB032, // sType=1000190002 mpc=174
+    48'h00B13B9B3760, // sType=1000028000 mpc=177
+    48'h00B43B9DDB28, // sType=1000201000 mpc=180
+    48'h00B73B9DE2F8, // sType=1000203000 mpc=183
+    48'h00BA3B9FCB40, // sType=1000328000 mpc=186
+    48'h00BD3B9D13FD, // sType=1000150013 mpc=189
+    48'h00C03BA01578, // sType=1000347000 mpc=192
+    48'h00C33BA0196D, // sType=1000348013 mpc=195
+    48'h00C63BA0ADD0, // sType=1000386000 mpc=198
+    48'h00C93B9E2948, // sType=1000221000 mpc=201
+    48'h00CC3B9EA648, // sType=1000253000 mpc=204
+    48'h00CF3B9C5870, // sType=1000102000 mpc=207
+    48'h00D23B9EB5E8, // sType=1000257000 mpc=210
+    48'h00D53B9E8320, // sType=1000244000 mpc=213
+    48'h00D83B9C6FE0, // sType=1000108000 mpc=216
+    48'h00DB3B9BCBD0, // sType=1000066000 mpc=219
+    48'h00DE3B9EA260, // sType=1000252000 mpc=222
+    48'h00E13B9D8D08, // sType=1000181000 mpc=225
+    48'h00E43B9ED528, // sType=1000265000 mpc=228
+    48'h00E73B9E9E78, // sType=1000251000 mpc=231
+    48'h00EA3B9E7768, // sType=1000241000 mpc=234
+    48'h00ED3BA038A0, // sType=1000356000 mpc=237
+    48'h00F03B9F0020, // sType=1000276000 mpc=240
+    48'h00F33B9F13A8, // sType=1000281000 mpc=243
+    48'h00F63B9E38EA, // sType=1000225002 mpc=246
+    48'h00F93B9EBDB8, // sType=1000259000 mpc=249
+    48'h00FC3B9F5228, // sType=1000297000 mpc=252
+    48'h00FF00000031, // sType=49 mpc=255
+    48'h010200000033, // sType=51 mpc=258
+    48'h010500000035, // sType=53 mpc=261
+    48'h010800000037, // sType=55 mpc=264
+    48'h010B3B9F2B1A, // sType=1000287002 mpc=267
+    48'h010E3BA10F78, // sType=1000411000 mpc=270
+    48'h01113B9EDCF8, // sType=1000267000 mpc=273
+    48'h01143BA08AA8, // sType=1000377000 mpc=276
+    48'h01173BA1BB58, // sType=1000455000 mpc=279
+    48'h011A3B9FBF88, // sType=1000325000 mpc=282
+    48'h011D3B9FB7B8, // sType=1000323000 mpc=285
+    48'h01203B9F2730, // sType=1000286000 mpc=288
+    48'h01233B9FE698, // sType=1000335000 mpc=291
+    48'h01263B9FEA80, // sType=1000336000 mpc=294
+    48'h01293B9FFA20, // sType=1000340000 mpc=297
+    48'h012C3B9E5C10, // sType=1000234000 mpc=300
+    48'h012F3B9E3CD3, // sType=1000226003 mpc=303
+    48'h01323B9E11D8, // sType=1000215000 mpc=306
+    48'h01353BA0C928, // sType=1000393000 mpc=309
+    48'h01383BA12AD0, // sType=1000418000 mpc=312
+    48'h013B3BA2C8E0, // sType=1000524000 mpc=315
+    48'h013E3BA25798, // sType=1000495000 mpc=318
+    48'h01413BA02518, // sType=1000351000 mpc=321
+    48'h01443BA034B8, // sType=1000355000 mpc=324
+    48'h01473BA3AB70, // sType=1000582000 mpc=327
+    48'h014A3BA02900, // sType=1000352000 mpc=330
+    48'h014D3BA34DB0, // sType=1000558000 mpc=333
+    48'h01503BA09A48, // sType=1000381000 mpc=336
+    48'h01533B9F9497, // sType=1000314007 mpc=339
+    48'h01563B9EE8B0, // sType=1000270000 mpc=342
+    48'h01593BA09E30, // sType=1000382000 mpc=345
+    48'h015C3BA1E268, // sType=1000465000 mpc=348
+    48'h015F3BA086C0, // sType=1000376000 mpc=351
+    48'h01623BA1E650, // sType=1000466000 mpc=354
+    48'h01653B9FD310, // sType=1000330000 mpc=357
+    48'h01683B9EAA30, // sType=1000254000 mpc=360
+    48'h016B3B9F0FC0, // sType=1000280000 mpc=363
+    48'h016E3B9B75E3, // sType=1000044003 mpc=366
+    48'h01713BA0C158, // sType=1000391000 mpc=369
+    48'h01743BA001F0, // sType=1000342000 mpc=372
+    48'h01773B9FAC00, // sType=1000320000 mpc=375
+    48'h017A3BA1ABB8, // sType=1000451000 mpc=378
+    48'h017D3BA13A70, // sType=1000422000 mpc=381
+    48'h01803B9BD3A1, // sType=1000068001 mpc=384
+    48'h01833B9FF638, // sType=1000339000 mpc=387
+    48'h01863BA13688, // sType=1000421000 mpc=390
+    48'h01893BA26350, // sType=1000498000 mpc=393
+    48'h018C3BA26738, // sType=1000499000 mpc=396
+    48'h018F3B9F1B78, // sType=1000283000 mpc=399
+    48'h01923BA220E8, // sType=1000481000 mpc=402
+    48'h01953BA28290, // sType=1000506000 mpc=405
+    48'h01983BA16950, // sType=1000434000 mpc=408
+    48'h019B3BA12300, // sType=1000416000 mpc=411
+    48'h019E3BA31700, // sType=1000544000 mpc=414
+    48'h01A13BA2D880, // sType=1000528000 mpc=417
+    48'h01A43B9E5440, // sType=1000232000 mpc=420
+    48'h01A73B9E5FF8, // sType=1000235000 mpc=423
+    48'h01AA3B9CF0C8, // sType=1000141000 mpc=426
+    48'h01AD3BA36520, // sType=1000564000 mpc=429
+    48'h01B03BA495D0, // sType=1000642000 mpc=432
+    48'h01B33BA370D8, // sType=1000567000 mpc=435
+    48'h01B63BA0B1B8, // sType=1000387000 mpc=438
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h00893BA086C1, // sType=1000376001 mpc=137
+    48'h0, // terminator
+    48'h01D73BA086C1, // sType=1000376001 mpc=471
+    48'h0, // terminator
+    48'h008A3B9BDF58, // sType=1000071000 mpc=138
+    48'h0, // terminator
+    48'h008C3B9BDF59, // sType=1000071001 mpc=140
+    48'h008D3B9D2B65, // sType=1000156005 mpc=141
+    48'h008E3B9D6211, // sType=1000170001 mpc=142
+    48'h008F3B9EE8B9, // sType=1000270009 mpc=143
+    48'h0, // terminator
+    48'h01E03B9BDF59, // sType=1000071001 mpc=480
+    48'h01E33B9D2B65, // sType=1000156005 mpc=483
+    48'h01E63B9D6211, // sType=1000170001 mpc=486
+    48'h01E93B9EE8B9, // sType=1000270009 mpc=489
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h00903B9F4A58, // sType=1000295000 mpc=144
+    48'h00923B9BB078, // sType=1000059000 mpc=146
+    48'h00CA3B9C9EC0, // sType=1000120000 mpc=202
+    48'h00CD3B9B9909, // sType=1000053001 mpc=205
+    48'h00D13B9BDB71, // sType=1000070001 mpc=209
+    48'h00D43B9C0E38, // sType=1000083000 mpc=212
+    48'h00D93B9D7598, // sType=1000175000 mpc=217
+    48'h00DB3B9D2B64, // sType=1000156004 mpc=219
+    48'h00DD3B9D0069, // sType=1000145001 mpc=221
+    48'h00DF3B9D0C20, // sType=1000148000 mpc=223
+    48'h00E13BA0C540, // sType=1000392000 mpc=225
+    48'h00E33B9CE510, // sType=1000138000 mpc=227
+    48'h00E63BA11748, // sType=1000413000 mpc=230
+    48'h00E83BA1F5F0, // sType=1000470000 mpc=232
+    48'h00EA3BA31AE8, // sType=1000545000 mpc=234
+    48'h00EC3BA35D50, // sType=1000562000 mpc=236
+    48'h00EE3B9BC018, // sType=1000063000 mpc=238
+    48'h00F03B9C0A50, // sType=1000082000 mpc=240
+    48'h00F33B9EC588, // sType=1000261000 mpc=243
+    48'h00F53BA0B5A0, // sType=1000388000 mpc=245
+    48'h00F73B9D3EE9, // sType=1000161001 mpc=247
+    48'h010C3B9DF298, // sType=1000207000 mpc=268
+    48'h010E3B9D7D68, // sType=1000177000 mpc=270
+    48'h01123B9C0669, // sType=1000081001 mpc=274
+    48'h01153B9E0238, // sType=1000211000 mpc=277
+    48'h01193B9D8920, // sType=1000180000 mpc=281
+    48'h011C3B9EC1A0, // sType=1000260000 mpc=284
+    48'h01293B9EF468, // sType=1000273000 mpc=297
+    48'h01363B9DB032, // sType=1000190002 mpc=310
+    48'h01393B9B3760, // sType=1000028000 mpc=313
+    48'h013C3B9DDB28, // sType=1000201000 mpc=316
+    48'h013F3B9DE2F8, // sType=1000203000 mpc=319
+    48'h01413B9FCB40, // sType=1000328000 mpc=321
+    48'h01473B9D13FD, // sType=1000150013 mpc=327
+    48'h014D3BA01578, // sType=1000347000 mpc=333
+    48'h01533BA0196D, // sType=1000348013 mpc=339
+    48'h01553BA0ADD0, // sType=1000386000 mpc=341
+    48'h01583B9E2948, // sType=1000221000 mpc=344
+    48'h015A3B9EA648, // sType=1000253000 mpc=346
+    48'h015C3B9C5870, // sType=1000102000 mpc=348
+    48'h015E3B9EB5E8, // sType=1000257000 mpc=350
+    48'h01623B9E8320, // sType=1000244000 mpc=354
+    48'h01663B9C6FE0, // sType=1000108000 mpc=358
+    48'h01683B9BCBD0, // sType=1000066000 mpc=360
+    48'h016A3B9EA260, // sType=1000252000 mpc=362
+    48'h016C3B9D8D08, // sType=1000181000 mpc=364
+    48'h016F3B9ED528, // sType=1000265000 mpc=367
+    48'h01713B9E9E78, // sType=1000251000 mpc=369
+    48'h01753B9E7768, // sType=1000241000 mpc=373
+    48'h01773BA038A0, // sType=1000356000 mpc=375
+    48'h017A3B9F0020, // sType=1000276000 mpc=378
+    48'h017C3B9F13A8, // sType=1000281000 mpc=380
+    48'h017E3B9E38EA, // sType=1000225002 mpc=382
+    48'h01813B9EBDB8, // sType=1000259000 mpc=385
+    48'h01883B9F5228, // sType=1000297000 mpc=392
+    48'h018A00000031, // sType=49 mpc=394
+    48'h019700000033, // sType=51 mpc=407
+    48'h01C700000035, // sType=53 mpc=455
+    48'h01D700000037, // sType=55 mpc=471
+    48'h01ED3B9F2B1A, // sType=1000287002 mpc=493
+    48'h01F03BA10F78, // sType=1000411000 mpc=496
+    48'h01F33B9EDCF8, // sType=1000267000 mpc=499
+    48'h01F53BA08AA8, // sType=1000377000 mpc=501
+    48'h01F93BA1BB58, // sType=1000455000 mpc=505
+    48'h02193B9FBF88, // sType=1000325000 mpc=537
+    48'h021B3B9FB7B8, // sType=1000323000 mpc=539
+    48'h021D3B9F2730, // sType=1000286000 mpc=541
+    48'h02213B9FE698, // sType=1000335000 mpc=545
+    48'h02233B9FEA80, // sType=1000336000 mpc=547
+    48'h02283B9FFA20, // sType=1000340000 mpc=552
+    48'h022B3B9E5C10, // sType=1000234000 mpc=555
+    48'h022E3B9E3CD3, // sType=1000226003 mpc=558
+    48'h02323B9E11D8, // sType=1000215000 mpc=562
+    48'h02343BA0C928, // sType=1000393000 mpc=564
+    48'h02373BA12AD0, // sType=1000418000 mpc=567
+    48'h02393BA2C8E0, // sType=1000524000 mpc=569
+    48'h023B3BA25798, // sType=1000495000 mpc=571
+    48'h023D3BA02518, // sType=1000351000 mpc=573
+    48'h023F3BA034B8, // sType=1000355000 mpc=575
+    48'h02413BA3AB70, // sType=1000582000 mpc=577
+    48'h02433BA02900, // sType=1000352000 mpc=579
+    48'h02453BA34DB0, // sType=1000558000 mpc=581
+    48'h02473BA09A48, // sType=1000381000 mpc=583
+    48'h02493B9F9497, // sType=1000314007 mpc=585
+    48'h024B3B9EE8B0, // sType=1000270000 mpc=587
+    48'h024D3BA09E30, // sType=1000382000 mpc=589
+    48'h02513BA1E268, // sType=1000465000 mpc=593
+    48'h02533BA086C0, // sType=1000376000 mpc=595
+    48'h02553BA1E650, // sType=1000466000 mpc=597
+    48'h02573B9FD310, // sType=1000330000 mpc=599
+    48'h02593B9EAA30, // sType=1000254000 mpc=601
+    48'h025C3B9F0FC0, // sType=1000280000 mpc=604
+    48'h025E3B9B75E3, // sType=1000044003 mpc=606
+    48'h02603BA0C158, // sType=1000391000 mpc=608
+    48'h02623BA001F0, // sType=1000342000 mpc=610
+    48'h02663B9FAC00, // sType=1000320000 mpc=614
+    48'h02683BA1ABB8, // sType=1000451000 mpc=616
+    48'h026C3BA13A70, // sType=1000422000 mpc=620
+    48'h026E3B9BD3A1, // sType=1000068001 mpc=622
+    48'h02703B9FF638, // sType=1000339000 mpc=624
+    48'h02723BA13688, // sType=1000421000 mpc=626
+    48'h02743BA26350, // sType=1000498000 mpc=628
+    48'h02763BA26738, // sType=1000499000 mpc=630
+    48'h02783B9F1B78, // sType=1000283000 mpc=632
+    48'h027D3BA220E8, // sType=1000481000 mpc=637
+    48'h027F3BA28290, // sType=1000506000 mpc=639
+    48'h02823BA16950, // sType=1000434000 mpc=642
+    48'h02843BA12300, // sType=1000416000 mpc=644
+    48'h02873BA31700, // sType=1000544000 mpc=647
+    48'h02893BA2D880, // sType=1000528000 mpc=649
+    48'h028B3B9E5440, // sType=1000232000 mpc=651
+    48'h028D3B9E5FF8, // sType=1000235000 mpc=653
+    48'h028F3B9CF0C8, // sType=1000141000 mpc=655
+    48'h02933BA36520, // sType=1000564000 mpc=659
+    48'h02953BA495D0, // sType=1000642000 mpc=661
+    48'h02973BA370D8, // sType=1000567000 mpc=663
+    48'h029A3BA0B1B8, // sType=1000387000 mpc=666
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h029C3BA0A605, // sType=1000384005 mpc=668
+    48'h0, // terminator
+    48'h029E3B9BB465, // sType=1000060005 mpc=670
+    48'h02A53B9D0068, // sType=1000145000 mpc=677
+    48'h0, // terminator
+    48'h02A73B9BE342, // sType=1000072002 mpc=679
+    48'h02A93B9BB460, // sType=1000060000 mpc=681
+    48'h02AC3B9CBA19, // sType=1000127001 mpc=684
+    48'h02AF3BA0A602, // sType=1000384002 mpc=687
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h02B13B9CBA18, // sType=1000127000 mpc=689
+    48'h0, // terminator
+    48'h02353B9CBA18, // sType=1000127000 mpc=565
+    48'h0, // terminator
+    48'h02B23B9D2B63, // sType=1000156003 mpc=690
+    48'h0, // terminator
+    48'h02B43B9BB46D, // sType=1000060013 mpc=692
+    48'h0, // terminator
+    48'h02B73B9BB46E, // sType=1000060014 mpc=695
+    48'h02C13B9D2B62, // sType=1000156002 mpc=705
+    48'h0, // terminator
+    48'h02C33B9BE340, // sType=1000072000 mpc=707
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h02C53B9BE341, // sType=1000072001 mpc=709
+    48'h0, // terminator
+    48'h02C73B9C930A, // sType=1000117002 mpc=711
+    48'h02C93B9D2B61, // sType=1000156001 mpc=713
+    48'h0, // terminator
+    48'h02C93B9D2B61, // sType=1000156001 mpc=713
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h02CB00000010, // sType=16 mpc=715
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h02CF3B9C930B, // sType=1000117003 mpc=719
+    48'h0, // terminator
+    48'h02D13BA034B9, // sType=1000355001 mpc=721
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h02D33B9B9908, // sType=1000053000 mpc=723
+    48'h02DA3B9C9309, // sType=1000117001 mpc=730
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h02E13B9BB464, // sType=1000060004 mpc=737
+    48'h0, // terminator
+    48'h02E33B9C0668, // sType=1000081000 mpc=739
+    48'h0, // terminator
+    48'h02E53B9BB463, // sType=1000060003 mpc=741
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h02EE3BA1B388, // sType=1000453000 mpc=750
+    48'h0, // terminator
+    48'h02EE3BA1B388, // sType=1000453000 mpc=750
+    48'h0, // terminator
+    48'h02F03B9C8368, // sType=1000113000 mpc=752
+    48'h0, // terminator
+    48'h02F23B9BF6C8, // sType=1000077000 mpc=754
+    48'h0, // terminator
+    48'h0, // terminator
+    48'h02F43BA0A606, // sType=1000384006 mpc=756
+    48'h02F63BA0A607, // sType=1000384007 mpc=758
+    48'h0, // terminator
+    48'h02F83BA0A603, // sType=1000384003 mpc=760
+    48'h0, // terminator
+    48'h02D83BA0A603, // sType=1000384003 mpc=728
     48'h0 // terminator
   };
 
-  localparam int APU_VN_CONST_WORDS = 69;
+  localparam int APU_VN_CONST_WORDS = 78;
   localparam logic [31:0] APU_VN_CONST [0:APU_VN_CONST_WORDS-1] = '{
-    32'h00000001, 32'h00000000, 32'h3B9BB079, 32'h3B9BB078,
-    32'h3B9BB07E, 32'h3B9BB07D, 32'h3B9BB07A, 32'h3B9BB07C,
-    32'h0000003F, 32'h3B9BB07B, 32'h00000003, 32'h00000002,
-    32'h3B9D006B, 32'h00000004, 32'h00000005, 32'h00000006,
-    32'h3B9D0450, 32'h3B9D0453, 32'h3B9D0451, 32'h3B9D2F48,
-    32'h3B9D2F49, 32'h0000000C, 32'h000001FF, 32'h0000000D,
-    32'h0000000E, 32'h0000000F, 32'h0000001F, 32'h00000010,
-    32'h00000020, 32'h0000001E, 32'h00000011, 32'h0000001D,
-    32'h00000012, 32'h0000001C, 32'h00000013, 32'h00000014,
-    32'h00000015, 32'h00000016, 32'h00000017, 32'h00000018,
-    32'h00000019, 32'h0000001A, 32'h0000001B, 32'h00000026,
-    32'h3B9C73CC, 32'h3B9C73C8, 32'h3B9C73CA, 32'h3B9C73C9,
-    32'h3B9C73CB, 32'h00000025, 32'h00000021, 32'h00000022,
-    32'h00000023, 32'h00000024, 32'h00000027, 32'h00000028,
-    32'h0000002A, 32'h00000029, 32'h0000002B, 32'h3B9C73CD,
-    32'h3B9C73CE, 32'h0000002E, 32'h0000002C, 32'h0000002D,
-    32'h00000008, 32'h00000009, 32'h0000000B, 32'h3BA0A600,
-    32'h3BA0A601
+    32'h00000001, 32'h00000000, 32'h3B9BDB70, 32'h3B9BB079,
+    32'h3B9BB078, 32'h3B9BB07E, 32'h3B9BB07D, 32'h3B9BB07A,
+    32'h3B9BB07C, 32'h0EFCFFFF, 32'h3B9BB07B, 32'h3B9BDF5A,
+    32'h0FFBFFFF, 32'h3B9BDF5B, 32'h3B9C7F80, 32'h3B9C7F81,
+    32'h3B9BF2E0, 32'h3B9BF2E1, 32'h3B9BB080, 32'h3B9BB07F,
+    32'h00000003, 32'h00000002, 32'h3B9D006B, 32'h00000004,
+    32'h00000005, 32'h00000006, 32'h3B9D0450, 32'h3B9D0453,
+    32'h3B9D0451, 32'h3B9D2F48, 32'h3B9D2F49, 32'h0000000C,
+    32'h0000000D, 32'h0000000E, 32'h0000000F, 32'h0000001F,
+    32'h00000010, 32'h00000020, 32'h0000001E, 32'h00000011,
+    32'h0000001D, 32'h00000012, 32'h0000001C, 32'h00000013,
+    32'h00000014, 32'h00000015, 32'h00000016, 32'h00000017,
+    32'h00000018, 32'h00000019, 32'h0000001A, 32'h0000001B,
+    32'h00000026, 32'h3B9C73CC, 32'h3B9C73C8, 32'h3B9C73CA,
+    32'h3B9C73C9, 32'h3B9C73CB, 32'h00000025, 32'h00000021,
+    32'h00000022, 32'h00000023, 32'h00000024, 32'h00000027,
+    32'h00000028, 32'h0000002A, 32'h00000029, 32'h0000002B,
+    32'h3B9C73CD, 32'h3B9C73CE, 32'h0000002E, 32'h0000002C,
+    32'h0000002D, 32'h00000008, 32'h00000009, 32'h0000000B,
+    32'h3BA0A600, 32'h3BA0A601
   };
 
   localparam int APU_VN_ARRMETA_WORDS = 8;
@@ -2508,15 +3944,16 @@ package g6lc_apu_vn_pkg;
     24'h000040, 24'h000008, 24'h000400, 24'h000002
   };
 
-  localparam int APU_VN_BLOBMETA_WORDS = 8;
+  localparam int APU_VN_BLOBMETA_WORDS = 9;
   localparam logic [31:0] APU_VN_BLOBMETA [0:APU_VN_BLOBMETA_WORDS-1] = '{
-    32'h04000001, 32'h04000008, 32'h04000004, 32'h01000004,
-    32'h04000010, 32'h00000404, 32'h00002001, 32'h04000000
+    32'h04000001, 32'h04000008, 32'h00004008, 32'h04000004,
+    32'h01000004, 32'h04000010, 32'h00000404, 32'h00002001,
+    32'h04000000
   };
 
-  localparam int APU_VN_PROFILE_WORDS = 400;
+  localparam int APU_VN_PROFILE_WORDS = 1012;
   localparam logic [31:0] APU_VN_PROFILE [0:APU_VN_PROFILE_WORDS-1] = '{
-    32'h20400000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00401000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000100, 32'h00000000, 32'h7262694C,
     32'h726F4365, 32'h50412065, 32'h75282055, 32'h6175716E,
     32'h6966696C, 32'h00296465, 32'h00000000, 32'h00000000,
@@ -2570,14 +4007,167 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000040, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000001, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000100, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000001, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000100, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000010, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000010, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000008, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000008, 32'h00000020,
+    32'h00000001, 32'h00000000, 32'h00000000, 32'h00001000,
+    32'h02000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000010, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000010, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000008, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000100, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000100, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000001, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000001,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
@@ -2631,6 +4221,522 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000001, 32'h00000001, 32'h00000000
   };
+
+  localparam int APU_VN_DEV_EXT_COUNT = 2;
+  localparam int APU_VN_EXT_PROPS_WORDS = 134;
+  localparam logic [4287:0] APU_VN_EXT_PROPS = {
+    32'h00000001, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h73656974,
+    32'h7265706F, 32'h72705F72, 32'h65766972, 32'h645F5248,
+    32'h4B5F4B56, 32'h00000000, 32'h00000100, 32'h00000001,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000064, 32'h665F7972, 32'h6F6D656D,
+    32'h5F6C616E, 32'h72657478, 32'h655F5248, 32'h4B5F4B56,
+    32'h00000000, 32'h00000100
+  };
+
+  localparam int APU_VN_EXEC_WORDS = 136;
+
+  localparam logic [287:0] APU_VN_QF2_ELT = {
+    32'h00000001, 32'h00000001, 32'h00000001, 32'h00000040,
+    32'h00000001, 32'h00000007, 32'h00000000, 32'h00000000,
+    32'h3B9BB07D
+  };
+  localparam logic [2271:0] APU_VN_PDGRP_ELT = {
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000020, 32'h00000001,
+    32'h00000000, 32'h00000000, 32'h3B9BDB70
+  };
+  localparam int APU_VN_PDGRP_PD_LO = 8;
+  localparam int APU_VN_PDGRP_PD_HI = 9;
+
+  localparam logic [255:0] APU_VN_IMGPROPS = {
+    32'h00000001, 32'h00000000, 32'h02000000, 32'h00000001,
+    32'h0000000D, 32'h00000001, 32'h00001000, 32'h00001000
+  };
+
+  localparam int APU_VN_FMT3_WORDS = 768;
+  localparam logic [31:0] APU_VN_FMT3 [0:APU_VN_FMT3_WORDS-1] = '{
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h0000CC81,
+    32'h0000CC81, 32'h0000CC81, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h0000CC81, 32'h0000CC81, 32'h0000CC81, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h0000CC81,
+    32'h0000CC81, 32'h0000CC81, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h0000CC81, 32'h0000CC81, 32'h0000CC81, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h0000CC81,
+    32'h0000CC81, 32'h0000CC81, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h0000C201, 32'h0000C201,
+    32'h0000C201, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h0000C201,
+    32'h0000C201, 32'h0000C201, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000
+  };
+
+  localparam int APU_VN_FMT_USAGE_WORDS = 256;
+  localparam logic [31:0] APU_VN_FMT_USAGE [0:APU_VN_FMT_USAGE_WORDS-1] = '{
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000017, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000017, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000017, 32'h00000000, 32'h00000000,
+    32'h00000017, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000017, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000027, 32'h00000000,
+    32'h00000000, 32'h00000027, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000
+  };
+
+  localparam int APU_VN_STYPE_VK_BIND_BUFFER_MEMORY_DEVICE_GROUP_INFO = 1000060013;
+  localparam int APU_VN_STYPE_VK_BIND_IMAGE_MEMORY_DEVICE_GROUP_INFO = 1000060014;
+  localparam int APU_VN_STYPE_VK_BIND_IMAGE_PLANE_MEMORY_INFO = 1000156002;
+  localparam int APU_VN_STYPE_VK_COMMAND_BUFFER_INHERITANCE_CONDITIONAL_RENDERING_INFO_EXT = 1000081000;
+  localparam int APU_VN_STYPE_VK_DEVICE_GROUP_COMMAND_BUFFER_BEGIN_INFO = 1000060004;
+  localparam int APU_VN_STYPE_VK_DEVICE_GROUP_DEVICE_CREATE_INFO = 1000070001;
+  localparam int APU_VN_STYPE_VK_DEVICE_GROUP_RENDER_PASS_BEGIN_INFO = 1000060003;
+  localparam int APU_VN_STYPE_VK_DEVICE_GROUP_SUBMIT_INFO = 1000060005;
+  localparam int APU_VN_STYPE_VK_DEVICE_QUEUE_TIMELINE_INFO_MESA = 1000384005;
+  localparam int APU_VN_STYPE_VK_EXPORT_FENCE_CREATE_INFO = 1000113000;
+  localparam int APU_VN_STYPE_VK_EXPORT_MEMORY_ALLOCATE_INFO = 1000072002;
+  localparam int APU_VN_STYPE_VK_EXPORT_SEMAPHORE_CREATE_INFO = 1000077000;
+  localparam int APU_VN_STYPE_VK_EXTERNAL_IMAGE_FORMAT_PROPERTIES = 1000071001;
+  localparam int APU_VN_STYPE_VK_EXTERNAL_MEMORY_ACQUIRE_UNMODIFIED_EXT = 1000453000;
+  localparam int APU_VN_STYPE_VK_EXTERNAL_MEMORY_BUFFER_CREATE_INFO = 1000072000;
+  localparam int APU_VN_STYPE_VK_EXTERNAL_MEMORY_IMAGE_CREATE_INFO = 1000072001;
+  localparam int APU_VN_STYPE_VK_FILTER_CUBIC_IMAGE_VIEW_IMAGE_FORMAT_PROPERTIES_EXT = 1000170001;
+  localparam int APU_VN_STYPE_VK_HOST_IMAGE_COPY_DEVICE_PERFORMANCE_QUERY = 1000270009;
+  localparam int APU_VN_STYPE_VK_IMAGE_PLANE_MEMORY_REQUIREMENTS_INFO = 1000156003;
+  localparam int APU_VN_STYPE_VK_IMAGE_VIEW_USAGE_CREATE_INFO = 1000117002;
+  localparam int APU_VN_STYPE_VK_IMPORT_MEMORY_FD_INFO_KHR = 1000074000;
+  localparam int APU_VN_STYPE_VK_IMPORT_MEMORY_RESOURCE_INFO_MESA = 1000384002;
+  localparam int APU_VN_STYPE_VK_MEMORY_ALLOCATE_FLAGS_INFO = 1000060000;
+  localparam int APU_VN_STYPE_VK_MEMORY_DEDICATED_ALLOCATE_INFO = 1000127001;
+  localparam int APU_VN_STYPE_VK_MEMORY_DEDICATED_REQUIREMENTS = 1000127000;
+  localparam int APU_VN_STYPE_VK_MEMORY_RESOURCE_ALLOCATION_SIZE_PROPERTIES_MESA = 1000384003;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_1_6_BIT_STORAGE_FEATURES = 1000083000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_4_4_4_4_FORMATS_FEATURES_EXT = 1000340000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_8_BIT_STORAGE_FEATURES = 1000177000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_ACCELERATION_STRUCTURE_FEATURES_KHR = 1000150013;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_DYNAMIC_STATE_FEATURES_EXT = 1000524000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_ATTACHMENT_FEEDBACK_LOOP_LAYOUT_FEATURES_EXT = 1000339000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_BLEND_OPERATION_ADVANCED_FEATURES_EXT = 1000148000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT = 1000411000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES = 1000257000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT = 1000244000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_COLOR_WRITE_ENABLE_FEATURES_EXT = 1000381000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_FEATURES_KHR = 1000201000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_COMPUTE_SHADER_DERIVATIVES_PROPERTIES_KHR = 1000511000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_CONDITIONAL_RENDERING_FEATURES_EXT = 1000081001;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_COOPERATIVE_MATRIX_FEATURES_KHR = 1000506000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_CUSTOM_BORDER_COLOR_FEATURES_EXT = 1000287002;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_DEPTH_BIAS_CONTROL_FEATURES_EXT = 1000283000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_DEPTH_CLAMP_CONTROL_FEATURES_EXT = 1000582000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_DEPTH_CLAMP_ZERO_ONE_FEATURES_KHR = 1000421000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_DEPTH_CLIP_CONTROL_FEATURES_EXT = 1000355000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_DEPTH_CLIP_ENABLE_FEATURES_EXT = 1000102000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_DESCRIPTOR_INDEXING_FEATURES = 1000161001;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_DRIVER_PROPERTIES = 1000196000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_DYNAMIC_RENDERING_FEATURES = 1000044003;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES = 1000232000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_DYNAMIC_RENDERING_UNUSED_ATTACHMENTS_FEATURES_EXT = 1000499000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_2_FEATURES_EXT = 1000377000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_FEATURES_EXT = 1000455000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_3_PROPERTIES_EXT = 1000455001;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_EXTENDED_DYNAMIC_STATE_FEATURES_EXT = 1000267000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_EXTERNAL_IMAGE_FORMAT_INFO = 1000071000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_FEATURES_2 = 1000059000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_FEATURES_KHR = 1000203000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_FRAGMENT_SHADER_BARYCENTRIC_PROPERTIES_KHR = 1000322000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_FRAGMENT_SHADER_INTERLOCK_FEATURES_EXT = 1000251000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_FRAGMENT_SHADING_RATE_FEATURES_KHR = 1000226003;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_GLOBAL_PRIORITY_QUERY_FEATURES = 1000388000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_FEATURES_EXT = 1000320000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_GRAPHICS_PIPELINE_LIBRARY_PROPERTIES_EXT = 1000320001;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES = 1000270000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_HOST_QUERY_RESET_FEATURES = 1000261000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_I_D_PROPERTIES = 1000071004;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_IMAGE_2_D_VIEW_OF_3_D_FEATURES_EXT = 1000393000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_IMAGE_ROBUSTNESS_FEATURES = 1000335000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_IMAGE_SLICED_VIEW_OF_3_D_FEATURES_EXT = 1000418000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_IMAGE_VIEW_MIN_LOD_FEATURES_EXT = 1000391000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_IMAGELESS_FRAMEBUFFER_FEATURES = 1000108000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_INDEX_TYPE_UINT_8_FEATURES = 1000265000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_INLINE_UNIFORM_BLOCK_FEATURES = 1000138000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_LEGACY_DITHERING_FEATURES_EXT = 1000465000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_LEGACY_VERTEX_ATTRIBUTES_FEATURES_EXT = 1000495000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_LEGACY_VERTEX_ATTRIBUTES_PROPERTIES_EXT = 1000495001;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_LINE_RASTERIZATION_FEATURES = 1000259000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES = 1000168000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_MAINTENANCE_4_FEATURES = 1000413000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES = 1000470000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_MAINTENANCE_5_PROPERTIES = 1000470001;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_MAINTENANCE_6_FEATURES = 1000545000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR = 1000562000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT = 1000328000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_MULTI_DRAW_FEATURES_EXT = 1000392000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_MULTISAMPLED_RENDER_TO_SINGLE_SAMPLED_FEATURES_EXT = 1000376000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_MULTIVIEW_FEATURES = 1000053001;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_MULTIVIEW_PROPERTIES = 1000053002;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_MUTABLE_DESCRIPTOR_TYPE_FEATURES_EXT = 1000351000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_NESTED_COMMAND_BUFFER_FEATURES_EXT = 1000451000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_NON_SEAMLESS_CUBE_MAP_FEATURES_EXT = 1000422000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_PIPELINE_CREATION_CACHE_CONTROL_FEATURES = 1000297000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_PIPELINE_LIBRARY_GROUP_HANDLES_FEATURES_EXT = 1000498000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_PIPELINE_PROTECTED_ACCESS_FEATURES = 1000466000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_PIPELINE_ROBUSTNESS_FEATURES = 1000068001;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_POINT_CLIPPING_PROPERTIES = 1000117000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_PRIMITIVE_TOPOLOGY_LIST_RESTART_FEATURES_EXT = 1000356000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_PRIMITIVES_GENERATED_QUERY_FEATURES_EXT = 1000382000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_PRIVATE_DATA_FEATURES = 1000295000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_PROTECTED_MEMORY_FEATURES = 1000145001;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_PROTECTED_MEMORY_PROPERTIES = 1000145002;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_PROVOKING_VERTEX_FEATURES_EXT = 1000254000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_PROVOKING_VERTEX_PROPERTIES_EXT = 1000254002;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_RASTERIZATION_ORDER_ATTACHMENT_ACCESS_FEATURES_EXT = 1000342000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_RAY_QUERY_FEATURES_KHR = 1000348013;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_RAY_TRACING_MAINTENANCE_1_FEATURES_KHR = 1000386000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_RAY_TRACING_PIPELINE_FEATURES_KHR = 1000347000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_RAY_TRACING_POSITION_FETCH_FEATURES_KHR = 1000481000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_KHR = 1000286000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SAMPLER_FILTER_MINMAX_PROPERTIES = 1000130000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SAMPLER_YCBCR_CONVERSION_FEATURES = 1000156004;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SCALAR_BLOCK_LAYOUT_FEATURES = 1000221000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SEPARATE_DEPTH_STENCIL_LAYOUTS_FEATURES = 1000241000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_2_FEATURES_EXT = 1000273000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT = 1000260000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_ATOMIC_INT_6_4_FEATURES = 1000180000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_BFLOAT_1_6_FEATURES_KHR = 1000141000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_CLOCK_FEATURES_KHR = 1000181000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_DEMOTE_TO_HELPER_INVOCATION_FEATURES = 1000276000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_DRAW_PARAMETERS_FEATURES = 1000063000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_EXPECT_ASSUME_FEATURES = 1000544000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_FLOAT_1_6_INT_8_FEATURES = 1000082000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_FLOAT_8_FEATURES_EXT = 1000567000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_FLOAT_CONTROLS_2_FEATURES = 1000528000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_IMAGE_ATOMIC_INT_6_4_FEATURES_EXT = 1000234000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_FEATURES = 1000280000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_INTEGER_DOT_PRODUCT_PROPERTIES = 1000280001;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_MAXIMAL_RECONVERGENCE_FEATURES_KHR = 1000434000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_QUAD_CONTROL_FEATURES_KHR = 1000235000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_RELAXED_EXTENDED_INSTRUCTION_FEATURES_KHR = 1000558000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_REPLICATED_COMPOSITES_FEATURES_EXT = 1000564000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES = 1000175000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_SUBGROUP_ROTATE_FEATURES = 1000416000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_SUBGROUP_UNIFORM_CONTROL_FLOW_FEATURES_KHR = 1000323000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_TERMINATE_INVOCATION_FEATURES = 1000215000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_UNIFORM_BUFFER_UNSIZED_ARRAY_FEATURES_EXT = 1000642000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SHADER_UNTYPED_POINTERS_FEATURES_KHR = 1000387000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES = 1000094000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SUBGROUP_SIZE_CONTROL_FEATURES = 1000225002;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_SYNCHRONIZATION_2_FEATURES = 1000314007;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_TEXEL_BUFFER_ALIGNMENT_FEATURES_EXT = 1000281000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_TEXTURE_COMPRESSION_A_S_T_C_H_D_R_FEATURES = 1000066000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_TIMELINE_SEMAPHORE_FEATURES = 1000207000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_TRANSFORM_FEEDBACK_FEATURES_EXT = 1000028000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_UNIFORM_BUFFER_STANDARD_LAYOUT_FEATURES = 1000253000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_VARIABLE_POINTERS_FEATURES = 1000120000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES = 1000190002;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT = 1000352000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_VULKAN_1_1_FEATURES = 49;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_VULKAN_1_1_PROPERTIES = 50;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_VULKAN_1_2_FEATURES = 51;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_VULKAN_1_2_PROPERTIES = 52;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_VULKAN_1_3_FEATURES = 53;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_VULKAN_1_3_PROPERTIES = 54;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_VULKAN_1_4_FEATURES = 55;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_VULKAN_1_4_PROPERTIES = 56;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_VULKAN_MEMORY_MODEL_FEATURES = 1000211000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_WORKGROUP_MEMORY_EXPLICIT_LAYOUT_FEATURES_KHR = 1000336000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_YCBCR_2_PLANE_4_4_4_FORMATS_FEATURES_EXT = 1000330000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_YCBCR_IMAGE_ARRAYS_FEATURES_EXT = 1000252000;
+  localparam int APU_VN_STYPE_VK_PHYSICAL_DEVICE_ZERO_INITIALIZE_WORKGROUP_MEMORY_FEATURES = 1000325000;
+  localparam int APU_VN_STYPE_VK_PIPELINE_TESSELLATION_DOMAIN_ORIGIN_STATE_CREATE_INFO = 1000117003;
+  localparam int APU_VN_STYPE_VK_PIPELINE_VIEWPORT_DEPTH_CLIP_CONTROL_CREATE_INFO_EXT = 1000355001;
+  localparam int APU_VN_STYPE_VK_PROTECTED_SUBMIT_INFO = 1000145000;
+  localparam int APU_VN_STYPE_VK_RENDER_PASS_INPUT_ATTACHMENT_ASPECT_CREATE_INFO = 1000117001;
+  localparam int APU_VN_STYPE_VK_RENDER_PASS_MULTIVIEW_CREATE_INFO = 1000053000;
+  localparam int APU_VN_STYPE_VK_RING_MONITOR_INFO_MESA = 1000384006;
+  localparam int APU_VN_STYPE_VK_RING_PRIORITY_INFO_MESA = 1000384007;
+  localparam int APU_VN_STYPE_VK_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES = 1000156005;
+  localparam int APU_VN_STYPE_VK_SAMPLER_YCBCR_CONVERSION_INFO = 1000156001;
+  localparam int APU_VN_STYPE_VK_SHADER_MODULE_CREATE_INFO = 16;
+  localparam int APU_VN_STYPE_VK_SUBPASS_RESOLVE_PERFORMANCE_QUERY_EXT = 1000376001;
+
+  localparam int APU_VN_CVAL_VK_EXPORT_MEMORY_ALLOCATE_INFO_HANDLE_TYPES = 0;
+  localparam int APU_VN_CVAL_VK_MEMORY_ALLOCATE_FLAGS_INFO_FLAGS = 1;
 
   localparam int APU_VN_DEC_MPC_AW = $clog2(APU_VN_DEC_ROM_WORDS);
   localparam int APU_VN_REPLY_MPC_AW = $clog2(APU_VN_REPLY_ROM_WORDS);
@@ -2805,23 +4911,23 @@ package g6lc_apu_vn_pkg;
     24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
     24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
     24'h800000, // RECORD kind=0 pq=0 cq=0 f=00
-    24'h000000, // unsupported
+    24'h403F01, // QUERY kind=0 pq=7 cq=7 f=01
     24'h300701, // BIND kind=0 pq=0 cq=7 f=01
     24'h300701, // BIND kind=0 pq=0 cq=7 f=01
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h000000, // unsupported
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
-    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
     24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
     24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
     24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
     24'h000000, // unsupported
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
     24'h000000, // unsupported
     24'h110701, // ALLOC kind=4 pq=0 cq=7 f=01
     24'h000000, // unsupported
@@ -2829,9 +4935,9 @@ package g6lc_apu_vn_pkg;
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h000000, // unsupported
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
+    24'h400701, // QUERY kind=0 pq=0 cq=7 f=01
     24'h000000, // unsupported
     24'h000000, // unsupported
     24'h000000, // unsupported
@@ -3042,7 +5148,7 @@ package g6lc_apu_vn_pkg;
     logic [31:0] cnt [4];
     apu_vn_blob_t blob [2];
     logic [7:0]  pres;
-    logic [7:0]  chain [8];
+    logic [15:0] chain [8];
     logic [3:0]  chain_n;
     logic [5:0]  obj_kind;
     logic [7:0]  reply_prog;

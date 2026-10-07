@@ -14,6 +14,12 @@ package g6lc_apu_vnfront_pkg;
   localparam logic [31:0] APU_VK_ERROR_FEATURE_NOT_PRESENT =
                                                         32'hFFFF_FFF8;
   localparam logic [31:0] APU_VK_ERROR_UNKNOWN         = 32'hFFFF_FFF3;
+  // 3d-b: VkResult -1000072003 — refused external-memory handle types
+  localparam logic [31:0] APU_VK_ERROR_INVALID_EXTERNAL_HANDLE =
+                                                        32'hC464_1CBD;
+  // 3d-b: VkResult -11 — format/tiling combo not in the profile
+  localparam logic [31:0] APU_VK_ERROR_FORMAT_NOT_SUPPORTED =
+                                                        32'hFFFF_FFF5;
 
   // CMDBUF lifecycle bits in the ObjTab entry state word
   localparam logic [31:0] APU_CB_RECORDING  = 32'h1;

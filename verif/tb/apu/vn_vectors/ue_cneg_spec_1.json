@@ -7,6 +7,7 @@
   "A5 CTX_ATTACH reply blob",
   "A6 SUBMIT_3D[vkCreateRingMESA ring0 + RingMonitorInfo]",
   "ring0 created slot=0",
+  "A6b SUBMIT_3D size=0 (stock Mesa sync-only execbuffer)",
   "B' segment A1: device, 2 buffers+mems, module, layouts, pipeline",
   "D RESOURCE_UNREF exec blob, CTX_DESTROY ctx=4 -> live 0",
   "compute teardown complete"
@@ -54,6 +55,6 @@
   "ring0 vkDestroyDevice head=3268",
   "ring0 vkDestroyInstance head=3292"
  ],
- "tape_words": 4963,
- "exp_records": 175
+ "tape_words": 5108,
+ "exp_records": 185
 }

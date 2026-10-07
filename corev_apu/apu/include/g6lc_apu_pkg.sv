@@ -61,7 +61,10 @@ package g6lc_apu_pkg;
   // VIRTIO_GPU_SHM_ID_HOST_VISIBLE. Length all-ones means the region is absent.
   localparam logic [31:0] APU_SHM_ID_HOST_VISIBLE = 32'd1;
   localparam logic [63:0] APU_SHM_BASE            = 64'h0000_0000_8200_0000;
-  localparam logic [63:0] APU_SHM_BYTES           = 64'h0000_0000_0010_0000;
+  // 32 MiB host-visible aperture (SHM id 1): stock Mesa Venus needs
+  // ~9.3 MiB of HOST3D blobs per instance (8 MiB cs + 1 MiB reply
+  // shmem pools + the 132 KiB ring) before any buffer objects.
+  localparam logic [63:0] APU_SHM_BYTES           = 64'h0000_0000_0200_0000;
   localparam logic [31:0] APU_BLOB_MEM_HOST3D     = 32'h0000_0002;
   localparam logic [31:0] APU_BLOB_FLAG_MAPPABLE  = 32'h0000_0001;
   localparam logic [31:0] APU_VGPU_CAPSET_VENUS   = 32'd4;

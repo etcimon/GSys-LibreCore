@@ -28,7 +28,7 @@ module tb_g6lc_apu_gcs;
   apu_gcs_cpl_t off_cpl;
   apu_gcs_t off_rec;
   int errors = 0, checks = 0, cycles = 0, cases = 0, nwrite = 0;
-  logic [31:0] req_type, req_arg, req_ver, write_len;
+  logic [31:0] req_type, req_arg, req_ver, write_len, req_len;
 
   localparam logic [63:0] Avail1 = 64'h0000_0000_0000_0200;
   localparam logic [63:0] BaseA  = 64'h0000_0000_0000_1000;
@@ -107,7 +107,7 @@ module tb_g6lc_apu_gcs;
     else if (addr == Avail1 + 64'd4)
       lookup = pack_word(32'h0000_0000);
     else if (addr == BaseA + 64'd0)
-      lookup = pack_desc(Pay0, 32'(APU_CMS_BYTES), VIRTQ_DESC_F_NEXT, 16'd1);
+      lookup = pack_desc(Pay0, req_len, VIRTQ_DESC_F_NEXT, 16'd1);
     else if (addr == BaseA + 64'd16)
       lookup = pack_desc(Pay1, write_len, VIRTQ_DESC_F_WRITE, 16'd0);
     else if (addr == Pay0)
@@ -126,7 +126,8 @@ module tb_g6lc_apu_gcs;
         rsp_len <= rd_len;
         rsp_data <= lookup(rd_addr);
         rsp_ok <= (rd_len == 32'd4) || (rd_len == 32'(APU_CHAIN_DESC_BYTES)) ||
-                  (rd_len == 32'(APU_CMS_BYTES));
+                  (rd_len == 32'(APU_CMS_BYTES)) ||
+                  (rd_len == 32'(APU_CMS_BYTES + 4));
         rsp_v <= 1'b1;
       end
       if (wr_rsp_v && wr_rsp_rdy) wr_rsp_v <= 1'b0;
@@ -210,6 +211,7 @@ module tb_g6lc_apu_gcs;
     req_type = VGPU_CMD_GET_CAPSET_INFO;
     req_arg = 32'd0;
     req_ver = 32'd0;
+    req_len = 32'(APU_CMS_BYTES);
     write_len = 32'(APU_GCS_INFO_BYTES);
 
     do_reset;
@@ -251,6 +253,7 @@ module tb_g6lc_apu_gcs;
     req_type = VGPU_CMD_GET_CAPSET;
     req_arg = APU_VGPU_CAPSET_VENUS;
     req_ver = 32'd0;
+    req_len = 32'(APU_CMS_BYTES + 4);
     write_len = 32'(APU_GCS_GET_BYTES);
     w0 = nwrite;
     prep_req(r);
@@ -275,6 +278,7 @@ module tb_g6lc_apu_gcs;
     req_type = VGPU_CMD_GET_CAPSET;
     req_arg = APU_VGPU_CAPSET_VIRGL;
     req_ver = 32'd0;
+    req_len = 32'(APU_CMS_BYTES + 4);
     write_len = 32'(APU_GCS_GET_BYTES);
     w0 = nwrite;
     prep_req(r);
@@ -288,6 +292,7 @@ module tb_g6lc_apu_gcs;
     req_type = VGPU_CMD_GET_CAPSET_INFO;
     req_arg = 32'd0;
     req_ver = 32'd0;
+    req_len = 32'(APU_CMS_BYTES);
     write_len = 32'(APU_GCS_INFO_BYTES);
     w0 = nwrite;
     prep_req(r);

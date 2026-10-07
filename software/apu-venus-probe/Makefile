@@ -26,7 +26,10 @@ all: venus_probe.hex
 venus_map.h vn_map.svh: tools/gen_venus_map.py ../../corev_apu/include/g6lc_apu_cfg_pkg.sv ../../corev_apu/apu/include/g6lc_apu_pkg.sv $(CFG_PKG)
 	python3 tools/gen_venus_map.py venus_map.h vn_map.svh $(CFG_PKG)
 
-tape.h: tools/tape2c.py
+TAPE_SRC := $(foreach t,$(TAPES),../../verif/tb/apu/vn_vectors/$(t).hex \
+            ../../verif/tb/apu/vn_vectors/$(t).exp)
+
+tape.h: tools/tape2c.py $(TAPE_SRC)
 	python3 tools/tape2c.py tape.h $(TAPES)
 
 crt0.o: crt0.S

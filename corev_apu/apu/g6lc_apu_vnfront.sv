@@ -241,6 +241,7 @@ module g6lc_apu_vnfront
       StElemRetL, StElemRetR, StElemRetCpl, StElemRetPay,
       StAllocGo, StAllocCpl, StAllocAux, StRetCpl, StRetPre,
       StBindMemCk,
+      StBind2Rd, StBind2ResC, StBind2MemC, StBind2SetC,
       StCbGo, StCbCrCpl, StCbSetCpl,
       StRecFill, StRecApp, StAppendCpl,
       StSubPush, StSubState, StSubStateNext,
@@ -336,6 +337,17 @@ module g6lc_apu_vnfront
     logic [15:0]         dset_base_q, dset_words_q;
     logic [15:0]         upd_idx_q;    // entry index (dstBinding+k)
 
+    // 3d-b: vkBind{Buffer,Image}Memory2 staged walk — the resource and
+    // memory handles live inside the pBindInfos elements (6 staged
+    // words each: {res(2), mem(2), off(2)}); imm[0] = bindInfoCount.
+    logic [15:0]         b2_i_q;       // element index
+    logic [2:0]          b2_h_q;       // staged word cursor
+    logic [63:0]         b2_res_q;     // staged resource handle
+    logic [63:0]         b2_mem_q;     // staged memory handle
+    logic [63:0]         b2_off_q;     // staged memoryOffset
+    logic [31:0]         b2_rid_q;     // resolved resource {gen,slot}
+    logic [63:0]         b2_rsz_q;     // resource declared size
+
     // cmdrec payload producer
     logic [15:0]         pay_send_q;   // stream index
     logic [15:0]         pay_send_n_q; // total words
@@ -395,7 +407,8 @@ module g6lc_apu_vnfront
     apu_vn_op_t  dec_op;
     logic        rep_start, rep_re, rep_done, rep_busy, rep_fault;
     logic [15:0] rep_addr, rep_n;
-    logic [64*32-1:0] exec_w_q;
+    logic [APU_VN_EXEC_WORDS*32-1:0] exec_w_q;
+    logic [63:0]         pd_id_q;      // last ALLOC'd VkPhysicalDevice id
     logic        front_re;
     logic [15:0] front_addr;
     logic        dec_rdy, rep_cs_rdy, front_rdy;
@@ -422,7 +435,7 @@ module g6lc_apu_vnfront
     g6lc_apu_vnrep #(.Enable(1'b1)) i_rep (
       .clk_i(clk_i), .rst_ni(rst_ni),
       .start_i(rep_start), .op_i(op_q), .result_i(result_q),
-      .exec_w_i(exec_w_q), .exec_n_i(7'd64),
+      .exec_w_i(exec_w_q), .exec_n_i(8'(APU_VN_EXEC_WORDS)),
       .rep_null_mask_i(rep_null_mask_q),
       .rep_base_i(rep_base_q), .rep_len_i(rep_len_q),
       .cs_base_i(cs_base_q),
@@ -495,7 +508,10 @@ module g6lc_apu_vnfront
     endfunction
 
     localparam int ExecNone = 0, ExecBufReq = 1, ExecImgReq = 2,
-                 ExecEnumPd = 3, ExecEnumExt = 4, ExecMres = 5;
+                 ExecEnumPd = 3, ExecEnumExt = 4, ExecMres = 5,
+                 ExecEnumQf2 = 6, ExecEnumQGrp = 7, ExecExtBuf = 8,
+                 ExecExtZero = 9, ExecSparse = 10, ExecFmt = 11,
+                 ExecImgFmt = 12;
     function automatic int exec_kind(input logic [31:0] t);
       case (t)
         APU_VN_TYPE_VK_GET_BUFFER_MEMORY_REQUIREMENTS_EXT,
@@ -510,6 +526,23 @@ module g6lc_apu_vnfront
           return ExecEnumExt;
         APU_VN_TYPE_VK_GET_MEMORY_RESOURCE_PROPERTIES_MESA_EXT:
           return ExecMres;
+        // 3d-b stock-stack gates
+        APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_QUEUE_FAMILY_PROPERTIES_2_EXT:
+          return ExecEnumQf2;
+        APU_VN_TYPE_VK_ENUMERATE_PHYSICAL_DEVICE_GROUPS_EXT:
+          return ExecEnumQGrp;
+        APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_EXTERNAL_BUFFER_PROPERTIES_EXT:
+          return ExecExtBuf;
+        APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_EXTERNAL_FENCE_PROPERTIES_EXT,
+        APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_EXTERNAL_SEMAPHORE_PROPERTIES_EXT:
+          return ExecExtZero;
+        APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_SPARSE_IMAGE_FORMAT_PROPERTIES_2_EXT:
+          return ExecSparse;
+        APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_FORMAT_PROPERTIES_EXT,
+        APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_FORMAT_PROPERTIES_2_EXT:
+          return ExecFmt;
+        APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_IMAGE_FORMAT_PROPERTIES_2_EXT:
+          return ExecImgFmt;
         default: return ExecNone;
       endcase
     endfunction
@@ -650,7 +683,7 @@ module g6lc_apu_vnfront
         pl_modid_q <= '0; pl_layid_q <= '0; pl_spec_q <= 1'b0;
         pl_layh_q <= '0; pl_errv_q <= 1'b0; auxhi_val_q <= '0;
         blob_i_q <= '0; blob_n_q <= '0; blob_sel_q <= 1'b0;
-        blob_id_q <= '0;
+        blob_id_q <= '0; pd_id_q <= '0;
         are_i_q <= '0; aux_free_q <= '0; aux_free_v_q <= 1'b0;
         aux_size_q <= '0;
         sub_q <= '0; rec_q <= '0; rhi_q <= '0;
@@ -683,15 +716,25 @@ module g6lc_apu_vnfront
             stg_n_q <= '0; pay_ovf_q <= 1'b0;
             payf_q <= 1'b0;
             for (int i = 0; i < 8; i++) hnd_q[i] <= '0;
-            for (int i = 0; i < 64; i++)
-              exec_w_q[32*i +: 32] <= APU_VN_PROFILE[i];
+            for (int i = 0; i < APU_VN_EXEC_WORDS; i++)
+              exec_w_q[32*i +: 32] <= i < APU_VN_PROFILE_WORDS
+                                      ? APU_VN_PROFILE[i] : 32'h0;
             state_q <= StDec;
           end
 
           StDec: state_q <= StDecWait;
           StDecWait: if (dec_done) begin
             op_q <= dec_op;
-            if (dec_op.fault != APU_VN_FAULT_NONE) begin
+            if (dec_op.fault == APU_VN_FAULT_FLAGS &&
+                dec_op.cmd_type ==
+                APU_VN_TYPE_VK_CREATE_DEVICE_EXT) begin
+              // 3d-b: a feature bit set outside the profile mask is an
+              // unimplemented-feature request, not a malformed command —
+              // answer VK_ERROR_FEATURE_NOT_PRESENT with a real reply
+              // (pDevice = NULL handle) instead of faulting the ring
+              result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
+              state_q  <= StRep;
+            end else if (dec_op.fault != APU_VN_FAULT_NONE) begin
               result_q   <= APU_VK_ERROR_UNKNOWN;
               fault_q    <= dec_op.fault;
               rep_skip_q <= 1'b1;
@@ -757,7 +800,7 @@ module g6lc_apu_vnfront
               state_q <= StAct;
             end else if (need_res(op_q, res_i_q)) begin
               otr_q  <= '{op: APU_OBJTAB_OP_LOOKUP,
-                          id: op_q.q[res_i_q[2:0]],
+                          id: APU_VN_ID_TAG | op_q.q[res_i_q[2:0]],
                           kind: op_q.qkind[res_i_q[2:0]], default: '0};
               ot_ret_q <= StResCpl;
               state_q  <= StOtReq;
@@ -829,9 +872,124 @@ module g6lc_apu_vnfront
                     state_q     <= StBlobRd;
                   end
                   ExecEnumExt: begin
-                    // zero extensions: RU32 count + REXBUF count
+                    // RU32 count + REXBUF elements from the generated
+                    // [device_extensions] payload (one VkExtension-
+                    // Properties each: u64 name-size + 64 name words
+                    // + spec version); the element count mirrors the
+                    // client's capacity word (imm[0]) like EnumPd
+                    exec_w_q[0*32 +: 32] <= 32'(APU_VN_DEV_EXT_COUNT);
+                    exec_w_q[1*32 +: 32] <= op_q.imm[0] != 32'h0
+                        ? 32'(APU_VN_DEV_EXT_COUNT) : 32'h0;
+                    if (APU_VN_EXT_PROPS_WORDS != 0)
+                      exec_w_q[2*32 +: $bits(APU_VN_EXT_PROPS)]
+                          <= APU_VN_EXT_PROPS;
+                    state_q     <= StRep;
+                  end
+                  ExecEnumQf2: begin
+                    // one queue family: RU32 count + REXBUF element
+                    // {sType, u64 pNext, VkQueueFamilyProperties}
+                    exec_w_q[0*32 +: 32] <= 32'd1;
+                    exec_w_q[1*32 +: 32] <= op_q.imm[0] != 32'h0
+                        ? 32'd1 : 32'h0;
+                    exec_w_q[2*32 +: $bits(APU_VN_QF2_ELT)]
+                        <= APU_VN_QF2_ELT;
+                    state_q     <= StRep;
+                  end
+                  ExecEnumQGrp: begin
+                    // one group holding the registered physical device:
+                    // RU32 count + REXBUF element
+                    exec_w_q[0*32 +: 32] <= 32'd1;
+                    exec_w_q[1*32 +: 32] <= op_q.imm[0] != 32'h0
+                        ? 32'd1 : 32'h0;
+                    exec_w_q[2*32 +: $bits(APU_VN_PDGRP_ELT)]
+                        <= APU_VN_PDGRP_ELT;
+                    exec_w_q[APU_VN_PDGRP_PD_LO*32 +: 32]
+                        <= pd_id_q[31:0];
+                    exec_w_q[APU_VN_PDGRP_PD_HI*32 +: 32]
+                        <= pd_id_q[63:32];
+                    state_q     <= StRep;
+                  end
+                  ExecExtBuf: begin
+                    // OPAQUE_FD (0x1) buffers are export+import capable
+                    // through the aperture blob; anything else -> zero
+                    if (op_q.immv[2] && op_q.imm[2] == 32'h1) begin
+                      exec_w_q[0*32 +: 32] <= 32'd3;
+                      exec_w_q[1*32 +: 32] <= 32'd1;
+                      exec_w_q[2*32 +: 32] <= 32'd1;
+                    end else begin
+                      exec_w_q[0*32 +: 32] <= '0;
+                      exec_w_q[1*32 +: 32] <= '0;
+                      exec_w_q[2*32 +: 32] <= '0;
+                    end
+                    state_q     <= StRep;
+                  end
+                  ExecExtZero: begin
+                    // no external sync: three zero property words
                     exec_w_q[0*32 +: 32] <= '0;
                     exec_w_q[1*32 +: 32] <= '0;
+                    exec_w_q[2*32 +: 32] <= '0;
+                    state_q     <= StRep;
+                  end
+                  ExecSparse: begin
+                    // sparse residency unimplemented: zero elements
+                    exec_w_q[0*32 +: 32] <= '0;
+                    exec_w_q[1*32 +: 32] <= '0;
+                    state_q     <= StRep;
+                  end
+                  ExecFmt: begin
+                    // per-format {linear, optimal, buffer} from the
+                    // generated APU_VN_FMT3 table; format = imm[0]
+                    exec_w_q[0*32 +: 32] <=
+                        APU_VN_FMT3[3*int'(op_q.imm[0][7:0]) + 0];
+                    exec_w_q[1*32 +: 32] <=
+                        APU_VN_FMT3[3*int'(op_q.imm[0][7:0]) + 1];
+                    exec_w_q[2*32 +: 32] <=
+                        APU_VN_FMT3[3*int'(op_q.imm[0][7:0]) + 2];
+                    state_q     <= StRep;
+                  end
+                  ExecImgFmt: begin
+                    // chained output REXEC bodies consume exec words in
+                    // reverse chain order (vnrep nests reply bodies):
+                    // VkExternalImageFormatProperties ->
+                    //   VkExternalMemoryProperties {3,1,1},
+                    // VkSamplerYcbcrConversionImageFormatProperties ->
+                    //   combinedFormatSamplerDescriptorCount = 0;
+                    // then the main VkImageFormatProperties body.
+                    automatic int unsigned wp = 0;
+                    for (int i = 7; i >= 0; i--) begin
+                      if (i < int'(op_q.chain_n)) begin
+                        automatic logic [31:0] st = (32'(op_q.chain[i])
+                            < APU_VN_CHAIN_WORDS)
+                            ? APU_VN_CHAIN[op_q.chain[i]
+                                          [APU_VN_CHAIN_AW-1:0]][31:0]
+                            : 32'h0;
+                        if (st == APU_VN_STYPE_VK_EXTERNAL_IMAGE_FORMAT_PROPERTIES) begin
+                          exec_w_q[wp*32 + 0*32 +: 32] <= 32'd3;
+                          exec_w_q[wp*32 + 1*32 +: 32] <= 32'd1;
+                          exec_w_q[wp*32 + 2*32 +: 32] <= 32'd1;
+                          wp += 3;
+                        end else if (st == APU_VN_STYPE_VK_SAMPLER_YCBCR_CONVERSION_IMAGE_FORMAT_PROPERTIES) begin
+                          exec_w_q[wp*32 +: 32] <= '0;
+                          wp += 1;
+                        end
+                      end
+                    end
+                    exec_w_q[wp*32 +: $bits(APU_VN_IMGPROPS)]
+                        <= APU_VN_IMGPROPS;
+                    // refuse formats outside the profile table, and any
+                    // {type, tiling, usage, flags} we do not implement:
+                    // type must be 2D, tiling OPTIMAL or LINEAR, no
+                    // create flags, usage within the format's
+                    // feature-derived mask (APU_VN_FMT_USAGE).
+                    if (APU_VN_FMT3[3*int'(op_q.imm[0][7:0]) + 1] ==
+                        32'h0 ||
+                        op_q.imm[1] != 32'd1 ||
+                        op_q.imm[2] > 32'd1 ||
+                        op_q.imm[4] != 32'h0 ||
+                        (op_q.imm[3] &
+                         ~APU_VN_FMT_USAGE[int'(op_q.imm[0][7:0])]) !=
+                        32'h0)
+                      result_q <= APU_VK_ERROR_FORMAT_NOT_SUPPORTED;
                     state_q     <= StRep;
                   end
                   ExecMres: begin
@@ -872,14 +1030,57 @@ module g6lc_apu_vnfront
                     state_q   <= StSmReq;
                   end else if (act_q.obj_kind ==
                                6'(APU_VN_KIND_VK_DEVICE_MEMORY)) begin
-                    // §7b/5a-ii: aperture pages first; the object is
-                    // created only if pages exist
-                    automatic int ds = data_slot(op_q);
-                    pg_op_q    <= APU_VGPAGES_OP_ALLOC;
-                    pg_base_q  <= '0;
-                    pg_bytes_q <= ds < 0 ? 32'h0 : 32'(op_q.q[ds]);
-                    pg_ret_q   <= StAllocGo;
-                    state_q    <= StPgReq;
+                    // 3d-b: pNext policy before any allocation —
+                    //   VkExportMemoryAllocateInfo     : handleTypes must
+                    //     subset VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD
+                    //   VkMemoryAllocateFlagsInfo    : flags must be 0
+                    //   VkMemoryDedicatedAllocateInfo: hint, ignored
+                    //   VkImportMemoryFdInfoKHR /
+                    //   VkImportMemoryResourceInfoMESA: refused
+                    automatic logic ext_bad = 1'b0;
+                    automatic logic feat_bad = 1'b0;
+                    for (int i = 0; i < 8; i++) begin
+                      if (i < int'(op_q.chain_n)) begin
+                        automatic logic [31:0] st = (32'(op_q.chain[i])
+                            < APU_VN_CHAIN_WORDS)
+                            ? APU_VN_CHAIN[op_q.chain[i]
+                                          [APU_VN_CHAIN_AW-1:0]][31:0]
+                            : 32'h0;
+                        if (st ==
+                            APU_VN_STYPE_VK_IMPORT_MEMORY_RESOURCE_INFO_MESA ||
+                            st ==
+                            APU_VN_STYPE_VK_IMPORT_MEMORY_FD_INFO_KHR)
+                          ext_bad = 1'b1;
+                      end
+                    end
+                    if (op_q.immv[
+                        APU_VN_CVAL_VK_EXPORT_MEMORY_ALLOCATE_INFO_HANDLE_TYPES] &&
+                        (op_q.imm[
+                          APU_VN_CVAL_VK_EXPORT_MEMORY_ALLOCATE_INFO_HANDLE_TYPES]
+                         & ~32'h1) != 32'h0)
+                      ext_bad = 1'b1;
+                    if (op_q.immv[
+                        APU_VN_CVAL_VK_MEMORY_ALLOCATE_FLAGS_INFO_FLAGS] &&
+                        op_q.imm[
+                          APU_VN_CVAL_VK_MEMORY_ALLOCATE_FLAGS_INFO_FLAGS]
+                        != 32'h0)
+                      feat_bad = 1'b1;
+                    if (ext_bad) begin
+                      result_q <= APU_VK_ERROR_INVALID_EXTERNAL_HANDLE;
+                      state_q  <= StRep;
+                    end else if (feat_bad) begin
+                      result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
+                      state_q  <= StRep;
+                    end else begin
+                      // §7b/5a-ii: aperture pages first; the object is
+                      // created only if pages exist
+                      automatic int ds = data_slot(op_q);
+                      pg_op_q    <= APU_VGPAGES_OP_ALLOC;
+                      pg_base_q  <= '0;
+                      pg_bytes_q <= ds < 0 ? 32'h0 : 32'(op_q.q[ds]);
+                      pg_ret_q   <= StAllocGo;
+                      state_q    <= StPgReq;
+                    end
                   end else begin
                     state_q <= StAllocGo;
                   end
@@ -942,14 +1143,14 @@ module g6lc_apu_vnfront
                   // CB/FENCE; aux[63:32] frees the ObjPay extent for
                   // payload kinds
                   otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
-                               id: op_q.q[
+                               id: APU_VN_ID_TAG | op_q.q[
                                    role_slot(op_q, APU_VN_ROLE_RETIRE)],
                                kind: act_q.obj_kind, default: '0};
                   ot_ret_q <= StRetPre;
                   state_q  <= StOtReq;
                 end else begin
                   otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
-                               id: op_q.q[
+                               id: APU_VN_ID_TAG | op_q.q[
                                    role_slot(op_q, APU_VN_ROLE_RETIRE)],
                                kind: act_q.obj_kind, default: '0};
                   ot_ret_q <= StRetCpl;
@@ -957,20 +1158,37 @@ module g6lc_apu_vnfront
                 end
               end
               APU_VN_ACT_BIND: begin
-                automatic int rs = lu_slot(op_q, 1);
-                automatic int ms = lu_slot(op_q, 2);
-                if (rs < 0 || ms < 0) begin
-                  result_q <= APU_VK_ERROR_UNKNOWN;
-                  state_q  <= StRep;
+                if (op_q.cmd_type ==
+                    APU_VN_TYPE_VK_BIND_BUFFER_MEMORY_2_EXT ||
+                    op_q.cmd_type ==
+                    APU_VN_TYPE_VK_BIND_IMAGE_MEMORY_2_EXT) begin
+                  // 3d-b: the *Memory2 array elements stage
+                  // {res, mem, off} triples — walk them
+                  if (op_q.imm[0][15:0] == 16'h0) begin
+                    state_q <= StRep;
+                  end else begin
+                    b2_i_q    <= '0;
+                    b2_h_q    <= '0;
+                    stg_i_q   <= '0;
+                    stg_ret_q <= StBind2Rd;
+                    state_q   <= StStgRd;
+                  end
                 end else begin
-                  // §7b: fetch the memory entry first — a bind whose
-                  // memoryOffset + resource size overruns the memory's
-                  // extent is invalid usage and is refused
-                  otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
-                               id: {32'h0, hnd_q[ms]},
-                               kind: op_q.qkind[ms], default: '0};
-                  ot_ret_q <= StBindMemCk;
-                  state_q  <= StOtReq;
+                  automatic int rs = lu_slot(op_q, 1);
+                  automatic int ms = lu_slot(op_q, 2);
+                  if (rs < 0 || ms < 0) begin
+                    result_q <= APU_VK_ERROR_UNKNOWN;
+                    state_q  <= StRep;
+                  end else begin
+                    // §7b: fetch the memory entry first — a bind whose
+                    // memoryOffset + resource size overruns the memory's
+                    // extent is invalid usage and is refused
+                    otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                                 id: {32'h0, hnd_q[ms]},
+                                 kind: op_q.qkind[ms], default: '0};
+                    ot_ret_q <= StBindMemCk;
+                    state_q  <= StOtReq;
+                  end
                 end
               end
               APU_VN_ACT_CB_BEGIN, APU_VN_ACT_CB_END,
@@ -1087,7 +1305,10 @@ module g6lc_apu_vnfront
             state_q  <= StCsRd;
           end
           StBlobHi: begin
-            blob_id_q[63:32] <= csw_q;
+            // blob u64s are client object ids: tag them into the
+            // client-id namespace so ObjTab resolves them through the
+            // directory and never the {gen,slot} handle fast path
+            blob_id_q[63:32] <= csw_q | APU_VN_ID_TAG[63:32];
             state_q <= blob_ret_q;
           end
 
@@ -1123,7 +1344,7 @@ module g6lc_apu_vnfront
               if (op_q.cmd_type == APU_VN_TYPE_VK_CREATE_FENCE_EXT)
                 are_i_q <= 5'(fence_free());
               otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
-                         id: op_q.q[ns],
+                         id: APU_VN_ID_TAG | op_q.q[ns],
                          kind: act_q.obj_kind,
                          parent_id: ps < 0 ? 64'h0
                                            : {32'h0, hnd_q[ps]},
@@ -1252,6 +1473,10 @@ module g6lc_apu_vnfront
               state_q <= StRep;
             end else if (act_q.obj_kind ==
                          6'(APU_VN_KIND_VK_COMMAND_BUFFER)) begin
+`ifdef G6LC_CEX_TRACE
+              $display("[vnf] cb alloc handle=%08x arena=%0d",
+                       ot_cpl_i.handle, are_i_q);
+`endif
               cb_hnd_q[are_i_q[$clog2(CbBufs)-1:0]] <= ot_cpl_i.handle;
               otr_q <= '{op: APU_OBJTAB_OP_SETAUX,
                          id: {32'h0, ot_cpl_i.handle},
@@ -1300,6 +1525,10 @@ module g6lc_apu_vnfront
               result_q <= err_of(ot_cpl_i.status);
               state_q  <= StRep;
             end else begin
+              // remember the client id for
+              // vkEnumeratePhysicalDeviceGroups' physicalDevices[] —
+              // blob_id_q is tagged, strip APU_VN_ID_TAG
+              pd_id_q  <= blob_id_q & ~APU_VN_ID_TAG;
               blob_i_q <= blob_i_q + 5'd1;
               state_q  <= StBlobRd;
             end
@@ -1373,6 +1602,10 @@ module g6lc_apu_vnfront
             state_q <= StRecApp;
           end
           StRecApp: begin
+`ifdef G6LC_CEX_TRACE
+            $display("[vnf] rec append ctype=%08x cbuf=%0d pay_n=%0d",
+                     rec_q.ctype, ent_q.aux[7:0], pay_send_n_q);
+`endif
             crr_q    <= '{op: APU_CMDREC_OP_APPEND,
                           cbuf: 8'(ent_q.aux[7:0]), idx: '0,
                           pay_n: pay_send_n_q,
@@ -1481,7 +1714,7 @@ module g6lc_apu_vnfront
                 state_q   <= StSmReq;
               end else begin
                 otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
-                             id: op_q.q[
+                             id: APU_VN_ID_TAG | op_q.q[
                                  role_slot(op_q, APU_VN_ROLE_RETIRE)],
                              kind: act_q.obj_kind, default: '0};
                 ot_ret_q <= StRetCpl;
@@ -1551,6 +1784,89 @@ module g6lc_apu_vnfront
                          ctx: ctx_i, default: '0};
               ot_ret_q <= StRetCpl;   // same status mapping
               state_q  <= StOtReq;
+            end
+          end
+
+          // ---- 3d-b: vkBind{Buffer,Image}Memory2 staged elements ---------
+          // Each pBindInfos element staged {resource(2w), memory(2w),
+          // memoryOffset(2w)} — array-element handles cannot ride the
+          // fixed q slots, so the front resolves each itself.
+          StBind2Rd: begin
+            case (b2_h_q)
+              3'd0:    b2_res_q[31:0]  <= stg_word_q;
+              3'd1:    b2_res_q[63:32] <= stg_word_q;
+              3'd2:    b2_mem_q[31:0]  <= stg_word_q;
+              3'd3:    b2_mem_q[63:32] <= stg_word_q;
+              3'd4:    b2_off_q[31:0]  <= stg_word_q;
+              default: b2_off_q[63:32] <= stg_word_q;
+            endcase
+            stg_i_q <= stg_i_q + 1'b1;
+            b2_h_q  <= b2_h_q + 3'd1;
+            if (b2_h_q == 3'd5) begin
+              otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                           id: APU_VN_ID_TAG | b2_res_q,
+                           kind: op_q.cmd_type ==
+                                 APU_VN_TYPE_VK_BIND_BUFFER_MEMORY_2_EXT
+                                 ? 6'(APU_VN_KIND_VK_BUFFER)
+                                 : 6'(APU_VN_KIND_VK_IMAGE),
+                           ctx: ctx_i, default: '0};
+              ot_ret_q <= StBind2ResC;
+              state_q  <= StOtReq;
+            end else begin
+              stg_ret_q <= StBind2Rd;
+              state_q   <= StStgRd;
+            end
+          end
+          StBind2ResC: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              result_q <= APU_VK_ERROR_UNKNOWN;
+              state_q  <= StRep;
+            end else begin
+              b2_rid_q <= ot_cpl_i.handle;
+              b2_rsz_q <= ot_cpl_i.entry.size;
+              otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                           id: APU_VN_ID_TAG | b2_mem_q,
+                           kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                           ctx: ctx_i, default: '0};
+              ot_ret_q <= StBind2MemC;
+              state_q  <= StOtReq;
+            end
+          end
+          StBind2MemC: begin
+            // same subtractive extent check as the single-bind path
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                b2_off_q > ot_cpl_i.entry.size ||
+                b2_rsz_q > ot_cpl_i.entry.size - b2_off_q) begin
+              result_q <= APU_VK_ERROR_UNKNOWN;
+              state_q  <= StRep;
+            end else begin
+              otr_q <= '{op: APU_OBJTAB_OP_SETBIND,
+                         id: {32'h0, b2_rid_q},
+                         kind: op_q.cmd_type ==
+                               APU_VN_TYPE_VK_BIND_BUFFER_MEMORY_2_EXT
+                               ? 6'(APU_VN_KIND_VK_BUFFER)
+                               : 6'(APU_VN_KIND_VK_IMAGE),
+                         mem_id: {32'h0, ot_cpl_i.handle},
+                         offset: b2_off_q,
+                         // the resource's declared size is the bound
+                         // extent for §7b dispatch
+                         size: b2_rsz_q,
+                         ctx: ctx_i, default: '0};
+              ot_ret_q <= StBind2SetC;
+              state_q  <= StOtReq;
+            end
+          end
+          StBind2SetC: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              result_q <= APU_VK_ERROR_UNKNOWN;
+              state_q  <= StRep;
+            end else if (b2_i_q + 16'd1 >= op_q.imm[0][15:0]) begin
+              state_q <= StRep;
+            end else begin
+              b2_i_q    <= b2_i_q + 16'd1;
+              b2_h_q    <= '0;
+              stg_ret_q <= StBind2Rd;
+              state_q   <= StStgRd;
             end
           end
 
@@ -1635,6 +1951,12 @@ module g6lc_apu_vnfront
             end
           end
           StCbCrCpl: begin
+`ifdef G6LC_CEX_TRACE
+            $display("[vnf] cb %s cbuf=%0d status=%0d",
+                     act_q.act_class == APU_VN_ACT_CB_BEGIN ? "BEGIN" :
+                     act_q.act_class == APU_VN_ACT_CB_END ? "END" : "RESET",
+                     ent_q.aux[7:0], cr_cpl_i.status);
+`endif
             if (cr_cpl_i.status != APU_CMDREC_OK) begin
               result_q <= APU_VK_ERROR_UNKNOWN;
               state_q  <= StRep;
@@ -1788,7 +2110,7 @@ module g6lc_apu_vnfront
           end
           StDSetLayId: begin
             otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
-                         id: {stg_word_q, lay_lo_q},
+                         id: APU_VN_ID_TAG | {stg_word_q, lay_lo_q},
                          kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT),
                          ctx: ctx_i, default: '0};
             ot_ret_q <= StDSetLayCpl;
@@ -1953,7 +2275,7 @@ module g6lc_apu_vnfront
             upd_h_q <= upd_h_q + 3'd1;
             if (upd_h_q == 3'd5) begin
               otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
-                           id: upd_dst_q,
+                           id: APU_VN_ID_TAG | upd_dst_q,
                            kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_SET),
                            ctx: ctx_i, default: '0};
               ot_ret_q <= StUpdSetCpl;
@@ -2023,7 +2345,7 @@ module g6lc_apu_vnfront
           end
           StUpdBufGo: begin
             otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
-                         id: upd_buf_q,
+                         id: APU_VN_ID_TAG | upd_buf_q,
                          kind: 6'(APU_VN_KIND_VK_BUFFER),
                          ctx: ctx_i, default: '0};
             ot_ret_q <= StUpdBufCpl;
@@ -2102,7 +2424,7 @@ module g6lc_apu_vnfront
           end
           StPayResHi: begin
             otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
-                         id: {stg_word_q, lay_lo_q},
+                         id: APU_VN_ID_TAG | {stg_word_q, lay_lo_q},
                          kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_SET),
                          ctx: ctx_i, default: '0};
             ot_ret_q <= StPayResCpl;
@@ -2269,7 +2591,7 @@ module g6lc_apu_vnfront
             automatic int ps = act_q.parent_qslot != APU_VN_QSLOT_NONE
                                ? int'(act_q.parent_qslot) : -1;
             otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
-                       id: op_q.q[ns],
+                       id: APU_VN_ID_TAG | op_q.q[ns],
                        kind: act_q.obj_kind,
                        parent_id: ps < 0 ? 64'h0
                                          : {32'h0, hnd_q[ps]},
@@ -2316,7 +2638,7 @@ module g6lc_apu_vnfront
             end else begin
               // LOOKUP the shader module -> {slot, nwords} in aux
               otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
-                           id: pl_modid_q,
+                           id: APU_VN_ID_TAG | pl_modid_q,
                            kind: 6'(APU_VN_KIND_VK_SHADER_MODULE),
                            ctx: ctx_i, default: '0};
               ot_ret_q <= StPipeModCpl;
@@ -2330,7 +2652,7 @@ module g6lc_apu_vnfront
               sh_slot_q <= ot_cpl_i.entry.aux[2:0];
               sh_nw_q   <= ot_cpl_i.entry.aux[31:16];
               otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
-                           id: pl_layid_q,
+                           id: APU_VN_ID_TAG | pl_layid_q,
                            kind: 6'(APU_VN_KIND_VK_PIPELINE_LAYOUT),
                            ctx: ctx_i, default: '0};
               ot_ret_q <= StPipeLayCpl;
@@ -2422,7 +2744,7 @@ module g6lc_apu_vnfront
           // ---- §7b/5a-ii: retire continuation after sm UNREF ----------
           StRetSm: begin
             otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
-                         id: op_q.q[
+                         id: APU_VN_ID_TAG | op_q.q[
                              role_slot(op_q, APU_VN_ROLE_RETIRE)],
                          kind: act_q.obj_kind, default: '0};
             ot_ret_q <= StRetCpl;

@@ -15,7 +15,7 @@ Ingest is the only part of the package that touches the design's files, and it i
 | `--plane` | Reads | Produces |
 |---|---|---|
 | `core` | core configuration package(s), the shared configuration struct + legality rules, the PMU event matrix, core flists | ISA, CSR, microarchitecture facts, PMU table, instruction-supply selection |
-| `apu` | SoC/peripheral package (`*_soc_pkg.sv`), SoC flist, accelerator island configuration and descriptor package | memory map, peripherals, interrupt-controller geometry (`NumTargets`/`NumSources`), accelerator MMIO + descriptor ABI |
+| `apu` | SoC/peripheral package (`*_soc_pkg.sv`), SoC flist, accelerator island configuration and descriptor package, APU configuration (`g6lc_apu_cfg_pkg.sv` `ApuVenus`) and shared-aperture (`g6lc_apu_pkg.sv` `APU_SHM_*`) packages | memory map, peripherals, interrupt-controller geometry (`NumTargets`/`NumSources`), accelerator MMIO + descriptor ABI, APU virtio-mmio/DMA/aperture geometry for the RTL bridge |
 | `soc` (default) | both | the complete machine |
 
 Device trees are read alongside either plane and cross-checked against both.

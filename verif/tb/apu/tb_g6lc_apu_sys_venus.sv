@@ -50,7 +50,7 @@ module g6lc_apu_sys_venus_fixture
   endfunction
   g6lc_apu_sys #(
     .ApuCfg(ApuCfg), .CoreCfg(venus_core())
-  ) i_dut (
+ ) i_dut (
     .clk_i, .rst_ni, .testmode_i,
     .guest_req_i, .guest_rsp_o, .control_req_i, .control_rsp_o,
     .control_aw_authorized_i, .control_ar_authorized_i,
@@ -66,7 +66,7 @@ module g6lc_apu_sys_venus_fixture
     .dma_req_o, .dma_rsp_i,
     .guest_hold_i(1'b0), .guest_epoch_i('0), .ctrl_hold_i(1'b0),
     .ctrl_epoch_i('0), .epoch_o()
-  );
+ );
 endmodule
 
 module tb_g6lc_apu_sys_venus;
@@ -83,7 +83,14 @@ module tb_g6lc_apu_sys_venus;
   localparam logic [63:0] GB     = 64'h8000_0000;   // guest window
   localparam int unsigned GBW    = 32'h40000;       // 1 MiB / 4 B
   localparam logic [63:0] AB     = APU_SHM_BASE;    // aperture window
-  localparam int unsigned ABW    = 32'h40000;
+  localparam int unsigned ABW    = 32'h40000;    // dense 1 MiB model
+                                                   // of the 32 MiB window
+  // first-fit keeps every session low; an index past the dense model
+  // is a tape/model bug — never wrap
+  function automatic int unsigned apix(input int unsigned w);
+    if (w >= ABW) $fatal(1, "aperture word %0d past dense model", w);
+    return w;
+  endfunction
   localparam int unsigned TAPEW  = 32'h20000;
   localparam int unsigned EXPW   = 32'h40000;
   localparam int unsigned MAXCYC = 20_000_000;
@@ -191,7 +198,7 @@ module tb_g6lc_apu_sys_venus;
       i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_exec.gen_on.flost_q;
   wire [3:0][31:0] r_status = i_venus.i_dut.gen_venus.i_vgsys.ring_status_o;
   wire [3:0][31:0] r_head   = i_venus.i_dut.gen_venus.i_vgsys.ring_head_o;
-  wire [3:0][17:0] r_extra  = i_venus.i_dut.gen_venus.i_vgsys.ring_extra_w_o;
+  wire [3:0][APU_VG_AP_WORD_W-1:0] r_extra  = i_venus.i_dut.gen_venus.i_vgsys.ring_extra_w_o;
 
   // ---- tape / expected stores ------------------------------------------
   logic [31:0] tape [TAPEW];
@@ -200,7 +207,7 @@ module tb_g6lc_apu_sys_venus;
 
   // ---- guest RAM + aperture backing stores ------------------------------
   logic [31:0] gmem [GBW];   // gmem[off>>2] <-> GB+off
-  logic [31:0] apm  [ABW];   // apm[off>>2]  <-> AB+off
+  logic [31:0] apm  [ABW];   // apm[apix(off>>2)]  <-> AB+off
 
   // ---- AXI4 slave model (burst reads, <=3 outstanding) ----------------
   // Any AW/AR outside the two windows is an immediate test failure.
@@ -237,7 +244,7 @@ module tb_g6lc_apu_sys_venus;
       return gmem[32'(o >> 2)][8*(o & 3) +: 8];
     end
     o = a - AB;
-    return apm[32'(o >> 2)][8*(o & 3) +: 8];
+    return apm[apix(32'(o >> 2))][8*(o & 3) +: 8];
   endfunction
 
   task automatic wr8(input logic [63:0] a, input logic [7:0] d);
@@ -247,13 +254,13 @@ module tb_g6lc_apu_sys_venus;
       gmem[32'(o >> 2)][8*(o & 3) +: 8] <= d;
     end else begin
       o = a - AB;
-      apm[32'(o >> 2)][8*(o & 3) +: 8] <= d;
+      apm[apix(32'(o >> 2))][8*(o & 3) +: 8] <= d;
     end
   endtask
 
   task automatic win_check(input logic [63:0] a, input string tag);
     if (!((a >= GB && a < GB + 64'h100000) ||
-          (a >= AB && a < AB + 64'h100000)))
+          (a >= AB && a < AB + APU_VG_SHM_BYTES)))
       $fatal(1, "AXI %s address %016x outside both windows", tag, a);
   endtask
 
@@ -847,18 +854,18 @@ module tb_g6lc_apu_sys_venus;
           int unsigned n = ntap();
           int unsigned al = ntap(), ah = ntap();
           for (int i = 0; i < n; i++)
-            apm[((al >> 2) + i) % ABW] = ntap();
+            apm[apix(((al >> 2) + i))] = ntap();
         end
         4: begin // TP_WAIT_HEAD [ring][ap_addr][exp][tmo]
           int unsigned rg = ntap(), ad = ntap(),
                        eh = ntap(), tmo = ntap();
           int unsigned t = 0;
-          while (apm[(ad >> 2) % ABW] != eh && t < tmo) begin
+          while (apm[apix((ad >> 2))] != eh && t < tmo) begin
             @(posedge clk); t++;
           end
-          check(apm[(ad >> 2) % ABW] == eh,
+          check(apm[apix((ad >> 2))] == eh,
                 $sformatf("WAIT_HEAD ring%0d ap got=%08x exp=%08x",
-                          rg, apm[(ad >> 2) % ABW], eh));
+                          rg, apm[apix((ad >> 2))], eh));
           check(rec_kind() == 3, "EK_HEAD kind");
           check(expm[ep + 1] == rg && expm[ep + 2] == eh,
                 "EK_HEAD words");
@@ -871,16 +878,16 @@ module tb_g6lc_apu_sys_venus;
           int unsigned rg = ntap(), ad = ntap(), mask = ntap(),
                        want = ntap(), tmo = ntap();
           int unsigned t = 0;
-          while (((apm[(ad >> 2) % ABW] & mask) != want) && t < tmo)
+          while (((apm[apix((ad >> 2))] & mask) != want) && t < tmo)
             begin @(posedge clk); t++; end
-          check((apm[(ad >> 2) % ABW] & mask) == want,
+          check((apm[apix((ad >> 2))] & mask) == want,
                 $sformatf("WAIT_IDLE ring%0d status=%08x mask=%0d want=%0d",
-                          rg, apm[(ad >> 2) % ABW], mask, want));
+                          rg, apm[apix((ad >> 2))], mask, want));
           check(rec_kind() == 4, "EK_STATUS kind");
           check(r_status[rg] == expm[ep + 2],
                 $sformatf("ring_status_o got=%08x exp=%08x",
                           r_status[rg], expm[ep + 2]));
-          check(apm[(ad >> 2) % ABW] == expm[ep + 2],
+          check(apm[apix((ad >> 2))] == expm[ep + 2],
                 "aperture status == exp");
           ep += 8;
         end
@@ -905,10 +912,10 @@ module tb_g6lc_apu_sys_venus;
               int unsigned bad = 0;
               for (int i = 0; i < a0; i++) begin
                 check(rec_kind() == 5, "EK_REPLY kind");
-                check(apm[((a1 >> 2) + expm[ep + 1]) % ABW] == expm[ep + 2],
+                check(apm[((a1 >> 2) + expm[ep + 1])] == expm[ep + 2],
                       $sformatf("CK_REPLY off=%0x idx=%0d got=%08x exp=%08x",
                                 a1, expm[ep + 1],
-                                apm[((a1 >> 2) + expm[ep + 1]) % ABW],
+                                apm[((a1 >> 2) + expm[ep + 1])],
                                 expm[ep + 2]));
                 ep += 8;
               end
@@ -931,17 +938,17 @@ module tb_g6lc_apu_sys_venus;
             end
             4: begin // CK_EXTRA [ring][byte off]
               check(rec_kind() == 7, "EK_EXTRA kind");
-              check(apm[(r_extra[a0] + (a1 >> 2)) % ABW] == expm[ep + 3],
+              check(apm[(r_extra[a0] + (a1 >> 2))] == expm[ep + 3],
                     $sformatf("CK_EXTRA ring%0d off=%0x got=%08x exp=%08x",
                               a0, a1,
-                              apm[(r_extra[a0] + (a1 >> 2)) % ABW],
+                              apm[(r_extra[a0] + (a1 >> 2))],
                               expm[ep + 3]));
               ep += 8;
             end
             6: begin // CK_APR [nwords][ap byte off]
               for (int i = 0; i < a0; i++) begin
                 automatic logic [31:0] got =
-                    apm[((a1 >> 2) + i) % ABW];
+                    apm[apix(((a1 >> 2) + i))];
                 automatic int unsigned u;
                 check(rec_kind() == 10, "EK_APRCHK kind");
                 check(expm[ep + 1] == a1 + 4 * i, "EK_APRCHK offset");
@@ -1237,7 +1244,7 @@ module tb_g6lc_apu_sys_venus;
     vq_init();
     virtio_probe(0, 1'b1);
     for (int i = 0; i < 8; i++)
-      gw(32'h21400 + 32'(4 * i), (i == 0) ? 32'h0107 : 32'h0);
+      gw(32'h21400 + 32'(4 * i), (i == 0) ? 32'h0108 : 32'h0);
     put_desc(0, 0, GB + 64'h4000, 32'd4, VF_NEXT, 16'd1);
     put_desc(0, 1, GB + 32'h21400, 32'd32, VF_NEXT, 16'd2);
     put_desc(0, 2, GB + 32'h21500, 32'd40, VF_WRITE, 16'h0);

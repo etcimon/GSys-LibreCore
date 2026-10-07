@@ -50,7 +50,14 @@ diagnosis model and no emitter reads a design file directly.
     "peripherals": [ { "id": "…", "base": "0x…", "len": "0x…", "model": "…", "irq": 1 } ],
     "dram": { "base": "0x…", "len": "0x…" },
     "intc": { "sources": 30, "targets": 16, "max_priority": 7, "contexts_per_hart": 2 },
-    "harts_total": 2
+    "harts_total": 2,
+    "apu": {
+      "mmio_base": "0x…", "mmio_len": "0x…", "irq_source": 9,
+      "dma_window_base": "0x…", "dma_window_bytes": "0x…",
+      "shm_base": "0x…", "shm_bytes": "0x…", "shm_id": 1,
+      "num_capsets": 1, "num_scanouts": 0, "num_queues": 2, "queue_depth": 64
+    },
+    "apu_bridge": true
   },
 
   "accel": {

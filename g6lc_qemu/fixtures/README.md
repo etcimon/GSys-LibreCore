@@ -30,6 +30,8 @@ that hazard is what the test is about, not because it was observed in a particul
 | `ai/g6lc_ai_island_cfg_pkg.sv` | a minimal AI-island configuration package with `QueueClusterMap` | ingest of queue-to-cluster dispatch |
 | `ai/g6lc_ai_desc_pkg.sv` | a packed descriptor package with `desc_t`, `bits_to_desc`, `desc_to_bits`, `make_completion`, per-field `desc_dtype`/`desc_accmode`/`desc_ew`/`desc_sp24` accessors **and** a stale combined type comment | descriptor layout, completion geometry, and the accessor-beats-comment rule for the arithmetic-type subfields |
 | `ai/g6lc_ai_instr_pkg.sv` | a minimal custom-instruction package with `ai.enq`/`ai.poll`/`ai.qfence` encodings | instruction-set ingestion |
+| `apu/g6lc_apu_cfg_pkg.sv` | a minimal APU configuration package with one `ApuVenus` struct literal | APU bridge geometry ingestion (window bases, IRQ source, DMA window, queue counts) |
+| `apu/g6lc_apu_pkg.sv` | the `APU_SHM_*` shared-aperture constants | aperture base/length/SHM-id ingestion |
 
 ## Native numeric exploration
 

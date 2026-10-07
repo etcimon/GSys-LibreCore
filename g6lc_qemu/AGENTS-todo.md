@@ -20,6 +20,19 @@ contract, the pin in `pins.toml` plus the document it names.
 
 ---
 
+## Ubuntu reference-only increment (2026-10-01)
+
+Priors: `linux-dist/ubuntu/README.md`, `linux-dist/ubuntu/pins.toml`.
+
+- [x] Preserve the Ubuntu scaffold; add official Resolute and Noble kernel gitlinks
+  with lazy update and explicit local sparse checkout. Verified tags are source
+  pins, not installed Ubuntu kernel evidence.
+- [x] Record stock 26.04.1 then 24.04 acceptance separately from the historical
+  custom Noble/RISC-V 6.6 development recipe. No generator/runtime code changed.
+- [ ] Collect independent clean-image, installed kernel/config, Mesa/libdrm/loader/
+  ICD manifests and test stock-client execution. Kernel sources alone do not close
+  any boot or graphics acceptance gate.
+
 ## OpenWrt APU baseline boot/probe (2026-09-14)
 
 Priors: `AGENTS.md` §OpenWrt console and graphics probe; `architecture/CLI.md`
@@ -1694,3 +1707,55 @@ These fixes are now in the generator: `g6q-emit-qemu` emits `reg_shift` / `clock
 - Live: `g6lc-g6lc64_ai` builds with both AI machines present and boots OpenSBI v1.5.1
   (`Platform Name: GSys LibreCore g6lc64_ai`, `rv64imafdcbh`); the AI-island smoke on the
   real model is the run in progress (`b1-parity-20260929-r6`).
+
+## APU RTL bridge — 3d-b stage 2 (external device)
+
+- `ApuModel` (`soc.apu`) ingests `g6lc_apu_cfg_pkg.sv` ApuVenus literal plus `g6lc_apu_pkg.sv`
+  `APU_SHM_*` from `corev_apu/apu/Flist.apu_soc` (repo-root path); every emitted constant is a
+  published localparam so nothing is guessed and no RTL_FEEDBACK.md ask is needed.
+- `soc.apu_bridge` set by `--apu-bridge` (`g6q.py install-qemu` forwards it) emits
+  `hw/riscv/g6lc-<target>-apu-bridge.c`: a sysbus socket client to the Verilator bridge server
+  (`verif/tb/apu/bridge/bridge_main.cpp`), bridging virtio-mmio frames, DMA via
+  `address_space_rw`, and IRQ via `qemu_set_irq` with the nested wait loop that services
+  interleaved DMA/IRQ frames while an MMIO reply is pending.
+- Machine retags the board DTS virtio.mmio GPU window to `g6lc,apu-bridge` (or synthesizes it if
+  absent); FDT keeps `virtio,mmio` (no `dma-coherent`) and carves the `APU_SHM_*` aperture out of
+  the `memory@` nodes entirely — a `reserved-memory` child would register a busy iomem resource and
+  fail `virtio_gpu`'s `devm_request_mem_region` with `-EBUSY`. The DRAM `MemoryRegion` still backs
+  the aperture physically; to keep a `-kernel` image's BSS out of the linear-map hole, the emitted
+  machine relocates `kernel_start_addr` to the aperture end when the aperture lies inside DRAM.
+  Bridge wire ABI documented in `architecture/EMIT.md` section 3.7.
+- Fixture `fixtures/apu/` stands in for the design packages; ingest still reports absent when the
+  packages are not on the flist.
+- **B2 plugin guard fix (this pass):** a model can publish the descriptor layout + queue
+  instructions (`G6LC_AI_DESC_DECODE == 1`) while the board peripheral list has no ai-island
+  window (`G6LC_AI_ISLAND_LEN == 0`) — the real `g6lc64_stream8` model hits exactly that
+  combination.  The tensor globals (`g6lc_tensor_file`/`order`/`first_record`), the `tensor=`
+  option, and the at-exit flush were guarded by `ISLAND_LEN != 0` only, while the desc-decode
+  producer path referenced them unconditionally: the emitted plugin failed `-Werror` with
+  undeclared identifiers, and `g6lc_desc_store`/`g6lc_desc_seen` were dead without the island.
+  `plugin.rs` now guards the three shared sites with
+  `G6LC_AI_DESC_DECODE == 1 || G6LC_AI_ISLAND_LEN != 0`, keeps the raw-access fallback
+  island-only, and guards `g6lc_desc_store`/`g6lc_desc_seen` as island-only.
+  Regression test: `tensor_globals_survive_desc_decode_without_an_island_window`.
+- **Aperture growth (3d-b continuation):** `APU_SHM_BYTES` grew to 32 MiB; the emitted bridge
+  comment and the FDT `reserved-memory` node follow `soc.apu.shm_*` automatically — no emitter
+  change needed, re-running `install-qemu` re-derives them.
+- **Stock-guest result (2026-10-07):** the unmodified Ubuntu 24.04.5 riscv64 image (kernel
+  7.0.0-31-generic, `mesa-vulkan-drivers` 25.2.8) boots on the `g6lc-g6lc64_stream8` machine
+  against the Verilator bridge; `virtio_gpu` probes cleanly (capset id 4 VENUS, 32 MiB host
+  window, `renderD128`) and the Mesa Venus wire exchange runs `vkCreateInstance` →
+  `vkEnumeratePhysicalDevices` → `vkGetPhysicalDeviceProperties` →
+  `vkEnumerateDeviceExtensionProperties` before Mesa 25.2.8's `vn_physical_device.c`
+  `KHR_external_memory_fd` hard requirement drops the device (design-side blocker, recorded in
+  `architecture/uncore/apu-vulkan-engine.md` §11 row 3d-b). VenusOff control: llvmpipe-only,
+  zero device DMA/IRQ. Driver at `/tmp/g6lc-apu-bridge/drive_guest.py` (transient, not a
+  package artifact).
+- **3d-b closure (2026-10-08):** with `VK_KHR_external_memory_fd` v1 advertised (the aperture
+  blob *is* Venus's external-memory mechanism — §12.1 F9) and the bind2 staged-payload fix,
+  the stock guest now completes both gates: `vulkaninfo --summary` lists the Venus GPU
+  (`driverName = venus`, apiVersion 1.1.0) and the in-guest `vkcompute` dispatches
+  `bufcopy.spv` bit-exact vs `spirv_model.py` (`G6LC_VKCOMPUTE_PASS words=32`). VenusOff
+  control re-run: llvmpipe-only. Full ordered command stream captured in
+  `architecture/uncore/apu-venus-command-trace.md`; artifacts under
+  `/tmp/g6lc-apu-bridge/`.

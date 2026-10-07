@@ -30,6 +30,10 @@ mod layout {
     /// The AI island's own compile list (packages the ingest reads for the emulated
     /// device); absent on trees without the island.
     pub const AI_FLIST: &[&str] = &["corev_apu/ai_island/Flist.ai_island"];
+    /// The APU SoC compile list; supplies `g6lc_apu_cfg_pkg.sv` and
+    /// `g6lc_apu_pkg.sv`, which publish the Venus backend's guest-facing
+    /// geometry for the RTL bridge device. Absent on trees without the APU.
+    pub const APU_FLIST: &[&str] = &["corev_apu/apu/Flist.apu_soc"];
     pub const ROOT_VAR: &str = "CVA6_REPO_DIR";
 }
 
@@ -368,6 +372,9 @@ pub fn resolve(args: &Args) -> Result<Resolved, String> {
                 flists.push(p);
             }
             if let Some(p) = first_existing(r, layout::AI_FLIST) {
+                flists.push(p);
+            }
+            if let Some(p) = first_existing(r, layout::APU_FLIST) {
                 flists.push(p);
             }
         }

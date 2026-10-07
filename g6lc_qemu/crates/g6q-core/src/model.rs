@@ -1038,6 +1038,64 @@ impl AiIslandModel {
     }
 }
 
+/// The APU/Venus backend's guest-facing geometry, derived from
+/// `g6lc_apu_cfg_pkg.sv`'s `ApuVenus` literal and `g6lc_apu_pkg.sv`'s
+/// `APU_SHM_*` constants. Every field is a published design constant; the
+/// bridge socket path is a device property and deliberately absent here.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ApuModel {
+    /// Guest virtio-mmio window base.
+    pub mmio_base: u64,
+    /// Guest virtio-mmio window length in bytes.
+    pub mmio_len: u64,
+    /// Service-hart control window base (not exposed to the guest bridge).
+    pub control_base: u64,
+    /// Service-hart control window length in bytes.
+    pub control_len: u64,
+    /// PLIC interrupt source the APU raises.
+    pub irq_source: u32,
+    /// Base of the DRAM region the device may DMA into.
+    pub dma_window_base: u64,
+    /// Length of the DMA window in bytes.
+    pub dma_window_bytes: u64,
+    /// Shared-memory aperture base (host-visible SHM region), DRAM in the SoC.
+    pub shm_base: u64,
+    /// Shared-memory aperture length in bytes.
+    pub shm_bytes: u64,
+    /// VIRTIO_GPU_SHM_ID the aperture answers to.
+    pub shm_id: u32,
+    /// Capsets the Venus backend advertises.
+    pub num_capsets: u32,
+    /// Scanouts the Venus backend advertises.
+    pub num_scanouts: u32,
+    /// Virtqueues the transport owns.
+    pub num_queues: u32,
+    /// Descriptor slots per virtqueue.
+    pub queue_depth: u32,
+}
+
+impl ApuModel {
+    /// Render as JSON.
+    pub fn to_json(&self) -> Json {
+        Json::obj([
+            ("mmio_base", Json::addr(self.mmio_base)),
+            ("mmio_len", Json::addr(self.mmio_len)),
+            ("control_base", Json::addr(self.control_base)),
+            ("control_len", Json::addr(self.control_len)),
+            ("irq_source", Json::Int(self.irq_source as i64)),
+            ("dma_window_base", Json::addr(self.dma_window_base)),
+            ("dma_window_bytes", Json::addr(self.dma_window_bytes)),
+            ("shm_base", Json::addr(self.shm_base)),
+            ("shm_bytes", Json::addr(self.shm_bytes)),
+            ("shm_id", Json::Int(self.shm_id as i64)),
+            ("num_capsets", Json::Int(self.num_capsets as i64)),
+            ("num_scanouts", Json::Int(self.num_scanouts as i64)),
+            ("num_queues", Json::Int(self.num_queues as i64)),
+            ("queue_depth", Json::Int(self.queue_depth as i64)),
+        ])
+    }
+}
+
 /// The system-on-chip view: memory map, interrupt geometry, hart count.
 #[derive(Debug, Clone, Default)]
 pub struct Soc {
@@ -1080,6 +1138,18 @@ pub struct Soc {
     pub threads_per_core: Option<u32>,
     /// AI-island model, when the design has one.
     pub ai_island: Option<AiIslandModel>,
+    /// APU (Venus virtio-gpu backend) model, when the design publishes the
+    /// `g6lc_apu_*` packages on the flist.
+    pub apu: Option<ApuModel>,
+    /// Machine-profile choice: drive the APU's virtio-mmio window from the
+    /// external RTL bridge device instead of leaving it unmapped.
+    ///
+    /// False means the guest sees nothing at the APU MMIO base (the faithful
+    /// SoC view keeps an empty virtio transport there). When true the generated
+    /// machine instantiates the `apu_bridge` socket device at the published
+    /// MMIO window; the socket path itself is a device property, not model
+    /// state.
+    pub apu_bridge: bool,
 }
 
 impl Soc {
@@ -1197,6 +1267,18 @@ impl Soc {
                 self.ai_island
                     .as_ref()
                     .map_or(Json::Null, AiIslandModel::to_json),
+            ),
+            (
+                "apu",
+                self.apu.as_ref().map_or(Json::Null, ApuModel::to_json),
+            ),
+            (
+                "apu_bridge",
+                if self.apu_bridge {
+                    Json::Bool(true)
+                } else {
+                    Json::Null
+                },
             ),
         ])
     }

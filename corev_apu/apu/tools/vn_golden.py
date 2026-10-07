@@ -21,6 +21,7 @@ Record layout (what the RTL writes back, one .exp line per command):
 """
 
 import argparse
+import collections
 import os
 import random
 import struct
@@ -659,11 +660,17 @@ class ArgGen:
             if mask:
                 enum_name = base.requires.name if base.requires else None
                 vals = self.m.enum_ints(enum_name)
-                prefix = {'VkBufferUsageFlags': 'VK_BUFFER_USAGE_',
-                          'VkImageUsageFlags': 'VK_IMAGE_USAGE_'}[base.name]
-                v = 0
-                for p in mask.split('|'):
-                    v |= vals[prefix + p + '_BIT']
+                if mask == 'ALL':
+                    v = 0
+                    for b in vals.values():
+                        v |= b
+                else:
+                    prefix = {'VkBufferUsageFlags': 'VK_BUFFER_USAGE_',
+                              'VkImageUsageFlags': 'VK_IMAGE_USAGE_'}[
+                        base.name]
+                    v = 0
+                    for p in mask.split('|'):
+                        v |= vals[prefix + p + '_BIT']
                 return self.rng.randint(0, v) & v
         bits = n * 8
         return self.rng.getrandbits(min(bits, 32)) if n <= 4 else \
@@ -720,8 +727,7 @@ class ArgGen:
     def gen_chain(self, parent):
         out = []
         for nty in parent.p_next:
-            if not self.m.gen.is_serializable(nty) or \
-                    not self.m.core_le_11(nty):
+            if not self.m.chain_admit(nty):
                 continue
             if self.rng.random() < 0.3:
                 out.append(self.gen_struct(nty, 2))
@@ -1089,7 +1095,7 @@ def rec_words(rec):
         if p:
             pres |= 1 << i
     w += [pres]
-    chain = [i & 0xFF for _, i in rec['chain']][:8]
+    chain = [i & 0xFFFF for _, i in rec['chain']][:8]
     chain += [0] * (8 - len(chain))
     w += chain
     w += [len(rec['chain']) & 0xF, rec['obj_kind'] & 0x3F,
@@ -1396,6 +1402,8 @@ VK_ERR_OOM = 0xFFFFFFFE
 VK_ERR_LOST = 0xFFFFFFFC
 VK_ERR_FEATURE = 0xFFFFFFF8
 VK_ERR_UNKNOWN = 0xFFFFFFF3
+VK_ERR_EXT_HANDLE = 0xC4641CBD   # VK_ERROR_INVALID_EXTERNAL_HANDLE
+VK_ERR_FMTNS = 0xFFFFFFF5        # VK_ERROR_FORMAT_NOT_SUPPORTED
 
 CB_REC, CB_EXEC, CB_PEND, CB_INV = 1, 2, 4, 8
 
@@ -1417,7 +1425,10 @@ PAY_KINDS = ('VkDescriptorSetLayout', 'VkPipelineLayout',
 # (ShaderCore slot for modules/pipelines, vgpages for device memory)
 AUXRET_KINDS = ('VkShaderModule', 'VkPipeline', 'VkDeviceMemory')
 SH_SLOTS = 8
-VGP_PAGES = 256
+# aperture allocator geometry == APU_VG_PAGES / APU_VG_PAGE_BYTES
+# (g6lc_apu_vg_pkg.sv): 8192 x 4 KiB pages over the 32 MiB SHM window —
+# the guest kernel packs MAP_BLOB offsets at 4 KiB density
+VGP_PAGES = 8192
 VGP_PAGE = 4096
 
 # commit prediction for vkCreateComputePipelines: the 4a commit
@@ -1474,6 +1485,7 @@ class FrontModel:
         self.pushed = 0
         self.fence_sig = 0
         self.fence_lost = 0
+        self.pd_id = 0             # last ALLOC'd VkPhysicalDevice id
         self.outstanding = []                  # (fence_slot, pin slots)
         self.work_hold = False                 # TB: gate work_ready_i
         # §7b/5a-ii: ShaderCore slot manager + module code shadow
@@ -1495,10 +1507,12 @@ class FrontModel:
     # ---- ObjTab -------------------------------------------------------------
     def resolve(self, idv, kind):
         """-> (status, slot, entry).  Mirrors res_start: handle form iff
-        id[63:32]==0."""
+        id[63:32]==0 and the gen field is nonzero (a live generation is
+        never 0, so a small zero-gen id is a client id and probes the
+        directory like any other id)."""
         if idv == 0:
             return 'MISS', -1, None
-        if idv < (1 << 32):
+        if idv < (1 << 32) and ((idv >> 16) & 0xFFFF) != 0:
             slot, gen = idv & 0xFFFF, (idv >> 16) & 0xFFFF
             if slot >= self.SLOTS:
                 return 'GEN', -1, None
@@ -1866,11 +1880,23 @@ class FrontModel:
         out = {'result': VK_OK, 'rep': [], 'record': None,
                'work': [], 'fault': rec['fault'],
                'payw': [], 'arenaw': [], 'null_mask': set()}
-        ew = list(self.m.profile_words_pool[:64])
-        ew += [0] * (64 - len(ew))
+        ewn = self.m.exec_words_count()
+        ew = list(self.m.profile_words_pool[:ewn])
+        ew += [0] * (ewn - len(ew))
         if rec['fault']:
             out['result'] = VK_ERR_UNKNOWN
-            self._reply(out, words, rec, rep_sim, info, ew)
+            if name == 'vkCreateDevice' and \
+                    rec['fault'] == FAULT['FLAGS']:
+                # 3d-b: feature bit outside the profile mask is a
+                # FEATURE_NOT_PRESENT answer, not a ring fault; the
+                # reply still runs (pDevice = NULL)
+                out['result'] = VK_ERR_FEATURE
+                out['fault'] = 0
+                rec2 = dict(rec)
+                rec2['fault'] = 0
+                self._reply(out, words, rec2, rep_sim, info, ew)
+            else:
+                self._reply(out, words, rec, rep_sim, info, ew)
             return out
         if len(rec['pay']) > PAY_STAGE:
             # §7b: payload staging overflow is a decode-class fault
@@ -1987,8 +2013,81 @@ class FrontModel:
                                             KIND['VkPhysicalDevice'], par)
                     if st != 'OK':
                         out['result'] = self._err(st)
+                    else:
+                        self.pd_id = ids[0]
             elif ek == 'ENUMEXT':
+                # RU32 count + REXBUF elements from the generated
+                # [device_extensions] payload; element count mirrors the
+                # client's capacity word (imm[0])
+                nx = len(self.m.profile.get('device_extensions', {}))
+                payload = self.m.ext_props_payload()
+                ew[0] = nx
+                ew[1] = nx if rec['imm'][0] else 0
+                ew[2:2 + len(payload)] = payload
+            elif ek == 'ENUMQF2':
+                ew[0] = 1
+                ew[1] = 1 if rec['imm'][0] else 0
+                elt = self.m.qf2_elt()
+                ew[2:2 + len(elt)] = elt
+            elif ek == 'ENUMQGRP':
+                ew[0] = 1
+                ew[1] = 1 if rec['imm'][0] else 0
+                elt = self.m.pdgrp_elt()
+                elt[G.Model.PDID_OFF] = self.pd_id & 0xFFFFFFFF
+                elt[G.Model.PDID_OFF + 1] = (self.pd_id >> 32) \
+                    & 0xFFFFFFFF
+                ew[2:2 + len(elt)] = elt
+            elif ek == 'EXTBUF':
+                # OPAQUE_FD buffers are export+import capable through
+                # the aperture blob; anything else -> zeros
+                if (rec['immv'] >> 2) & 1 and rec['imm'][2] == 1:
+                    ew[0], ew[1], ew[2] = 3, 1, 1
+                else:
+                    ew[0] = ew[1] = ew[2] = 0
+            elif ek == 'EXTZERO':
+                ew[0] = ew[1] = ew[2] = 0
+            elif ek == 'SPARSE':
                 ew[0] = ew[1] = 0
+            elif ek == 'FMT':
+                f3 = self.m.fmt3()
+                f = rec['imm'][0] & 0xFF
+                ew[0], ew[1], ew[2] = f3[3 * f], f3[3 * f + 1], \
+                    f3[3 * f + 2]
+            elif ek == 'IMGFMT':
+                # chained output REXEC bodies consume exec words in
+                # reverse chain order (nested reply bodies), then the
+                # main VkImageFormatProperties body
+                styp = {'VkExternalImageFormatProperties': None,
+                        'VkSamplerYcbcrConversionImageFormatProperties':
+                        None}
+                for n in styp:
+                    styp[n] = self.m.stype_values[
+                        self.m.reg.type_table[n].s_type]
+                wp = 0
+                for i in reversed(range(len(rec['chain']))):
+                    st = rec['chain'][i][0]
+                    if st == styp['VkExternalImageFormatProperties']:
+                        ew[wp:wp + 3] = [3, 1, 1]
+                        wp += 3
+                    elif st == styp[
+                            'VkSamplerYcbcrConversionImageFormat'
+                            'Properties']:
+                        ew[wp] = 0
+                        wp += 1
+                ip = self.m.imgprops_words()
+                ew[wp:wp + len(ip)] = ip
+                f3 = self.m.fmt3()
+                fu = self.m.fmt_usage()
+                f = rec['imm'][0] & 0xFF
+                # same checks as ExecImgFmt: supported format, 2D,
+                # OPTIMAL/LINEAR, no create flags, usage inside the
+                # feature-derived mask
+                if f3[3 * f + 1] == 0 or \
+                        rec['imm'][1] != 1 or \
+                        rec['imm'][2] > 1 or \
+                        rec['imm'][4] != 0 or \
+                        (rec['imm'][3] & ~fu[f] & 0xFFFFFFFF) != 0:
+                    out['result'] = VK_ERR_FMTNS
             elif ek == 'MRES':
                 # vkGetMemoryResourcePropertiesMESA: memoryTypeBits = 3
                 ew[0] = 3
@@ -2050,24 +2149,48 @@ class FrontModel:
                             self.setaux(h, 0xFFFF0007,
                                         ((wn & 0xFFFF) << 16) | sh)
                 elif obj_kind == KIND['VkDeviceMemory']:
-                    # §7b/5a-ii: vgpages ALLOC(size) before the object;
-                    # aux[63:32] = page base.  FULL -> OOM, no object
-                    ds = next((i for i in range(8)
-                               if rec['qv'] >> i & 1
-                               and not rec['kind'][i]), -1)
-                    msz = rec['q'][ds] if ds >= 0 else 0
-                    pg = self.pg_alloc(msz)
-                    if pg is None:
-                        out['result'] = VK_ERR_OOM
+                    # 3d-b: pNext policy mirrors vnfront — import structs
+                    # refused INVALID_EXTERNAL_HANDLE, export with
+                    # handleTypes outside OPAQUE_FD refused likewise,
+                    # nonzero AllocateFlagsInfo flags refused
+                    # FEATURE_NOT_PRESENT; all before any allocation.
+                    im = {n: self.m.stype_values[
+                        self.m.reg.type_table[n].s_type]
+                        for n in ('VkImportMemoryResourceInfoMESA',
+                                  'VkImportMemoryFdInfoKHR')}
+                    cv = self.m.cval_named
+                    ht_slot = cv['VkExportMemoryAllocateInfo.handleTypes']
+                    fl_slot = cv['VkMemoryAllocateFlagsInfo.flags']
+                    chained = {st for st, _ in rec['chain']}
+                    ext_bad = chained & set(im.values())
+                    if (rec['immv'] >> ht_slot) & 1 and \
+                            rec['imm'][ht_slot] & ~1:
+                        ext_bad.add(1)
+                    if ext_bad:
+                        out['result'] = VK_ERR_EXT_HANDLE
+                    elif (rec['immv'] >> fl_slot) & 1 and \
+                            rec['imm'][fl_slot] != 0:
+                        out['result'] = VK_ERR_FEATURE
                     else:
-                        st, h, slot = self.alloc(rec['q'][new], obj_kind,
-                                                 par)
-                        if st != 'OK':
-                            self.pg_free(pg, msz)
-                            out['result'] = self._err(st)
+                        # §7b/5a-ii: vgpages ALLOC(size) before the
+                        # object; aux[63:32] = page base.
+                        # FULL -> OOM, no object
+                        ds = next((i for i in range(8)
+                                   if rec['qv'] >> i & 1
+                                   and not rec['kind'][i]), -1)
+                        msz = rec['q'][ds] if ds >= 0 else 0
+                        pg = self.pg_alloc(msz)
+                        if pg is None:
+                            out['result'] = VK_ERR_OOM
                         else:
-                            self.ent[h & 0xFFFF]['size'] = msz
-                            self.setauxhi(h, pg)
+                            st, h, slot = self.alloc(
+                                rec['q'][new], obj_kind, par)
+                            if st != 'OK':
+                                self.pg_free(pg, msz)
+                                out['result'] = self._err(st)
+                            else:
+                                self.ent[h & 0xFFFF]['size'] = msz
+                                self.setauxhi(h, pg)
                 else:
                     st, h, slot = self.alloc(rec['q'][new], obj_kind, par)
                     if st != 'OK':
@@ -2257,22 +2380,52 @@ class FrontModel:
                     self.pg_free((aux_full >> 32) & 0xFFFFFFFF, e_sz)
 
         elif cls == 'BIND':
-            rs, ms = lu[1], lu[2]
-            ds = next((i for i in range(8)
-                       if rec['qv'] >> i & 1 and not rec['kind'][i]), -1)
-            st, _s, e = self.resolve(hnd[rs], 0)
-            if st != 'OK':
-                out['result'] = VK_ERR_UNKNOWN
-            else:
-                st2, _s2, me = self.resolve(hnd[ms], 0)
-                off = rec['q'][ds] if ds >= 0 else 0
-                # §7b: memoryOffset + resource size past the memory's
-                # extent is invalid usage -> refused
-                if st2 != 'OK' or off + e['size'] > me['size']:
-                    out['result'] = VK_ERR_UNKNOWN
-                else:
+            t2 = (session['T'].get('vkBindBufferMemory2'),
+                  session['T'].get('vkBindImageMemory2'))
+            if ct in t2 and ct is not None:
+                # 3d-b: *Memory2 binds carry {resource, memory,
+                # memoryOffset} per pBindInfos element in the staged
+                # stream (6 words each); imm[0] = bindInfoCount.  The
+                # whole command fails on the first bad element.
+                rkind = KIND['VkBuffer'] \
+                    if ct == session['T']['vkBindBufferMemory2'] \
+                    else KIND['VkImage']
+                pay = rec['pay']
+                for ei in range(rec['imm'][0] & 0xFFFF):
+                    res = pay[ei * 6] | (pay[ei * 6 + 1] << 32)
+                    mem = pay[ei * 6 + 2] | (pay[ei * 6 + 3] << 32)
+                    off = pay[ei * 6 + 4] | (pay[ei * 6 + 5] << 32)
+                    st, _s, e = self.resolve(res, rkind)
+                    st2, _s2, me = ('OK', 0, None)
+                    if st == 'OK':
+                        st2, _s2, me = self.resolve(
+                            mem, KIND['VkDeviceMemory'])
+                    # §7b: memoryOffset + resource size past the
+                    # memory's extent is invalid usage -> refused
+                    if st != 'OK' or st2 != 'OK' \
+                            or off + e['size'] > me['size']:
+                        out['result'] = VK_ERR_UNKNOWN
+                        break
                     e['bind_mem'] = _s2
                     e['bind_off'] = off
+            else:
+                rs, ms = lu[1], lu[2]
+                ds = next((i for i in range(8)
+                           if rec['qv'] >> i & 1
+                           and not rec['kind'][i]), -1)
+                st, _s, e = self.resolve(hnd[rs], 0)
+                if st != 'OK':
+                    out['result'] = VK_ERR_UNKNOWN
+                else:
+                    st2, _s2, me = self.resolve(hnd[ms], 0)
+                    off = rec['q'][ds] if ds >= 0 else 0
+                    # §7b: memoryOffset + resource size past the memory's
+                    # extent is invalid usage -> refused
+                    if st2 != 'OK' or off + e['size'] > me['size']:
+                        out['result'] = VK_ERR_UNKNOWN
+                    else:
+                        e['bind_mem'] = _s2
+                        e['bind_off'] = off
 
         elif cls in ('CB_BEGIN', 'CB_END', 'CB_RESET', 'RECORD'):
             cb_q = act['cb_q']
@@ -2527,6 +2680,22 @@ class FrontModel:
             return 'ENUMPD'
         if name == 'vkEnumerateDeviceExtensionProperties':
             return 'ENUMEXT'
+        if name == 'vkGetPhysicalDeviceQueueFamilyProperties2':
+            return 'ENUMQF2'
+        if name == 'vkEnumeratePhysicalDeviceGroups':
+            return 'ENUMQGRP'
+        if name == 'vkGetPhysicalDeviceExternalBufferProperties':
+            return 'EXTBUF'
+        if name in ('vkGetPhysicalDeviceExternalFenceProperties',
+                    'vkGetPhysicalDeviceExternalSemaphoreProperties'):
+            return 'EXTZERO'
+        if name == 'vkGetPhysicalDeviceSparseImageFormatProperties2':
+            return 'SPARSE'
+        if name in ('vkGetPhysicalDeviceFormatProperties',
+                    'vkGetPhysicalDeviceFormatProperties2'):
+            return 'FMT'
+        if name == 'vkGetPhysicalDeviceImageFormatProperties2':
+            return 'IMGFMT'
         if name == 'vkGetMemoryResourcePropertiesMESA':
             return 'MRES'
         return 'NONE'
@@ -2675,7 +2844,7 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng,
     cmd('vkAllocateMemory', device=I['dev'],
         pAllocateInfo=struct('VkMemoryAllocateInfo',
                              allocationSize=0x40000,
-                             memoryTypeIndex=1),
+                             memoryTypeIndex=1, pNext=[]),
         pMemory=I['mem'])
     cmd('vkCreateBuffer', device=I['dev'],
         pCreateInfo=struct('VkBufferCreateInfo', size=4096,
@@ -3260,11 +3429,12 @@ def write_session(name, cmds, fm):
 # §6b transport: virtio-gpu control queue + Venus ring guest-script vectors
 # ---------------------------------------------------------------------------
 
-# virtio-gpu UAPI ids (pinned Resolute linux/virtio_gpu.h)
-VG_GET_CAPSET_INFO   = 0x0107
-VG_GET_CAPSET        = 0x0108
+# virtio-gpu UAPI ids (pinned Resolute linux/virtio_gpu.h);
+# 0x0107 is RESOURCE_DETACH_BACKING — the capset commands are 0x0108/0x0109.
+VG_GET_CAPSET_INFO   = 0x0108
+VG_GET_CAPSET        = 0x0109
 VG_RESOURCE_UNREF    = 0x0102
-VG_RESOURCE_CREATE_BLOB = 0x010B
+VG_RESOURCE_CREATE_BLOB = 0x010C
 VG_CTX_CREATE        = 0x0200
 VG_CTX_DESTROY       = 0x0201
 VG_CTX_ATTACH        = 0x0202
@@ -3285,6 +3455,52 @@ VG_BLOB_HOST3D       = 0x02
 VG_BLOB_MAPPABLE     = 0x01
 VG_MAP_WC            = 0x03
 VG_CAPSET_VENUS      = 4
+
+
+def _check_uapi():
+    """Cross-check the VG_* opcode/response literals against the pinned
+    kernel UAPI header (enum order is load-bearing — a mis-keyed
+    constant once shipped CREATE_BLOB as ASSIGN_UUID's value)."""
+    import re
+    h = (REPO / 'g6lc_qemu' / 'linux-dist' / 'ubuntu' / 'kernel'
+         / 'include' / 'uapi' / 'linux' / 'virtio_gpu.h').read_text()
+    vals = {}
+    cur = None
+    for line in h.splitlines():
+        m = re.match(r'\s*VIRTIO_GPU_(CMD|RESP)_(\w+)'
+                     r'(?:\s*=\s*0x([0-9a-fA-F]+))?,\s*$', line)
+        if not m:
+            continue
+        cur = int(m.group(3), 16) if m.group(3) else cur + 1
+        vals['VIRTIO_GPU_%s_%s' % (m.group(1), m.group(2))] = cur
+    want = {
+        'CMD_GET_CAPSET_INFO': VG_GET_CAPSET_INFO,
+        'CMD_GET_CAPSET': VG_GET_CAPSET,
+        'CMD_RESOURCE_UNREF': VG_RESOURCE_UNREF,
+        'CMD_RESOURCE_CREATE_BLOB': VG_RESOURCE_CREATE_BLOB,
+        'CMD_CTX_CREATE': VG_CTX_CREATE,
+        'CMD_CTX_DESTROY': VG_CTX_DESTROY,
+        'CMD_CTX_ATTACH_RESOURCE': VG_CTX_ATTACH,
+        'CMD_CTX_DETACH_RESOURCE': VG_CTX_DETACH,
+        'CMD_SUBMIT_3D': VG_SUBMIT_3D,
+        'CMD_RESOURCE_MAP_BLOB': VG_MAP_BLOB,
+        'CMD_RESOURCE_UNMAP_BLOB': VG_UNMAP_BLOB,
+        'RESP_OK_NODATA': VG_RESP_NODATA,
+        'RESP_OK_CAPSET_INFO': VG_RESP_CAPSET_INFO,
+        'RESP_OK_CAPSET': VG_RESP_CAPSET,
+        'RESP_OK_MAP_INFO': VG_RESP_MAP_INFO,
+        'RESP_ERR_UNSPEC': VG_ERR_UNSPEC,
+        'RESP_ERR_INVALID_RESOURCE_ID': VG_ERR_RESOURCE,
+        'RESP_ERR_INVALID_CONTEXT_ID': VG_ERR_CTX,
+        'RESP_ERR_INVALID_PARAMETER': VG_ERR_PARAM,
+    }
+    for k, v in want.items():
+        assert vals['VIRTIO_GPU_' + k] == v, \
+            'UAPI mismatch: %s header=%#x model=%#x' % (
+                k, vals['VIRTIO_GPU_' + k], v)
+
+
+_check_uapi()
 
 # tape opcodes (.hex): the TB replays this guest script
 TP_END       = 0   # no operands
@@ -3328,10 +3544,11 @@ RING_IDLE  = 1
 RING_FATAL = 2
 RING_ALIVE = 4
 
-# aperture geometry (§6b): APU_SHM_BASE window, 4 KiB pages, 1 MiB
+# aperture geometry (§6b): APU_SHM_BASE window, 64 KiB pages, 32 MiB
+# (APU_SHM_BYTES in g6lc_apu_pkg.sv — sized for stock Mesa's shmem pools)
 APU_SHM_BASE = 0x82000000
-AP_PAGE      = 0x1000
-AP_WORDS     = 0x40000          # 1 MiB / 4
+AP_PAGE      = VGP_PAGE
+AP_WORDS     = 0x800000         # 32 MiB / 4
 
 # guest RAM layout for the script
 GREQ  = 0x00004000              # request payload scratch (reused)
@@ -3379,7 +3596,9 @@ class TransportModel:
         self.asm = asm
         self.sim = sim
         self.rep_sim = rep_sim
-        self.ap = [0] * AP_WORDS
+        # sparse word store: the 32 MiB aperture is far larger than any
+        # session touches (first-fit keeps allocations low)
+        self.ap = collections.defaultdict(int)
         self.ap_pages = [0] * (AP_WORDS // (AP_PAGE // 4))
         self.gmem = {}
         self.blobs = {}                   # res_id -> dict
@@ -3409,9 +3628,25 @@ class TransportModel:
         return -1
 
     def ap_free(self, base_w, size):
-        b = base_w // (AP_PAGE // 4)
-        for j in range(b, b + (size + AP_PAGE - 1) // AP_PAGE):
+        # coverage semantics (matches ALLOC_AT marking): drop every page
+        # the byte range touches
+        lo = (base_w * 4) // AP_PAGE
+        hi = (base_w * 4 + size - 1) // AP_PAGE
+        for j in range(lo, hi + 1):
             self.ap_pages[j] = 0
+
+    def ap_alloc_at(self, base_b, size):
+        """Kernel-chosen extent (MAP_BLOB): mark every page the byte range
+        covers; -1 on overlap/out-of-window, else the byte base."""
+        if size == 0 or base_b + size > AP_WORDS * 4:
+            return -1
+        lo = base_b // AP_PAGE
+        hi = (base_b + size - 1) // AP_PAGE
+        if any(self.ap_pages[lo:hi + 1]):
+            return -1
+        for j in range(lo, hi + 1):
+            self.ap_pages[j] = 1
+        return base_b
 
     # ---- shared helpers ---------------------------------------------------
     def blob_of(self, rid):
@@ -3564,7 +3799,8 @@ class TransportModel:
             slot = next(i for i, r in enumerate(self.rings) if r is None)
             base_w = b['base_w'] + (off >> 2)
             ring = {'slot': slot, 'handle': handle, 'rid': rid,
-                    'ctx': ctx, 'idle_to': idle, 'head': 0,
+                    'ctx': ctx, 'idle_to': min(idle, IDLE_TO_MAX),
+                    'head': 0,
                     'head_base_w': base_w + (head_o >> 2),
                     'tail_base_w': base_w + (tail_o >> 2),
                     'status_base_w': base_w + (stat_o >> 2),
@@ -3629,6 +3865,7 @@ RES_RING0  = 100         # resource ids
 RES_REPLY  = 101
 RES_RING1  = 102
 RES_EXEC   = 103
+RES_RELOC  = 104         # kernel-offset relocation coverage blob
 
 CTX_ID = 4
 
@@ -3637,6 +3874,7 @@ RING1_SIZE = RING_BUF_OFF + 4096 + 256        # +extra
 EXEC_SIZE  = 4096
 REPLY_SIZE = 16384
 IDLE_TO    = 300                              # idleTimeout cycles
+IDLE_TO_MAX = 32                            # RTL IdleToMax poll-round clamp
 
 
 def load_shvec(name):
@@ -3874,7 +4112,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
     # ------------------------------------------------------------------ #
     note('A1 GET_CAPSET_INFO idx 0')
     submit(VG_GET_CAPSET_INFO, [0, 0], exp_type=VG_RESP_CAPSET_INFO,
-           exp_body=[VG_CAPSET_VENUS, len(capset) * 4, 0, 0])
+           exp_body=[VG_CAPSET_VENUS, 1, len(capset) * 4, 0])
 
     note('A2 GET_CAPSET id 4')
     submit(VG_GET_CAPSET, [VG_CAPSET_VENUS, 0],
@@ -3910,7 +4148,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             submit(VG_RESOURCE_CREATE_BLOB, body, ctx=CTX_ID,
                    exp_type=VG_ERR_RESOURCE)
             return None
-        if size > me['size']:
+        # the guest kernel rounds the BO to its page size; the truthful
+        # bound is the memory's page-granular extent (vgctl StMemCpl)
+        ext_sz = (me['size'] + VGP_PAGE - 1) & ~(VGP_PAGE - 1)
+        if size > ext_sz:
             submit(VG_RESOURCE_CREATE_BLOB, body, ctx=CTX_ID,
                    exp_type=VG_ERR_PARAM)
             return None
@@ -3922,12 +4163,24 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                exp_type=VG_RESP_NODATA)
         return base_b
 
-    def map_blob(rid):
-        tm.blobs[rid]['mapped'] = True
-        # §7b/5a-ii: MAP_INFO reports the real window-relative offset
-        submit(VG_MAP_BLOB, [rid, 0, 0, 0], ctx=CTX_ID,
+    def map_blob(rid, offset=None):
+        """MAP_BLOB: the caller (guest kernel) dictates the window offset.
+        offset=None maps in place; a differing offset relocates the blob's
+        extent (RTL frees the create-time pages and reserves the new
+        extent) and resp_body[1] reports the kernel offset."""
+        b = tm.blobs[rid]
+        if offset is None:
+            offset = b['base_w'] << 2
+        else:
+            tm.ap_free(b['base_w'], b['size'])
+            nb = tm.ap_alloc_at(offset, b['size'])
+            assert nb >= 0, 'map_blob offset %#x busy' % offset
+            b['base_w'] = nb >> 2
+        b['mapped'] = True
+        submit(VG_MAP_BLOB, [rid, 0, offset & 0xFFFFFFFF,
+                             (offset >> 32) & 0xFFFFFFFF], ctx=CTX_ID,
                exp_type=VG_RESP_MAP_INFO,
-               exp_body=[VG_MAP_WC, tm.blobs[rid]['base_w'] << 2])
+               exp_body=[VG_MAP_WC, offset & 0xFFFFFFFF])
 
     note('A4 blobs: ring0 4288, reply 16KiB, ring1 4544(+extra), exec 4KiB')
     # compute sessions carry whole SPIR-V modules in one command; the
@@ -3941,6 +4194,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
     map_blob(RES_REPLY)
     map_blob(RES_RING1)
     map_blob(RES_EXEC)
+
+    # A4b: kernel-dictated map offset — the device must relocate the
+    # blob's extent to the requested window offset (stock virtio-gpu
+    # semantics: drm_mm owns the SHM layout, not the renderer)
+    create_blob(RES_RELOC, 65536)
+    map_blob(RES_RELOC, offset=0x1F00000)
+    map_blob(RES_RELOC, offset=0x1E00000)   # remap elsewhere
 
     note('A5 CTX_ATTACH reply blob')
     submit(VG_CTX_ATTACH, [RES_REPLY, 0], ctx=CTX_ID,
@@ -3959,7 +4219,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                          'sType': 'VK_STRUCTURE_TYPE_RING_CREATE_INFO_MESA',
                          'pNext': [mon], 'flags': 0,
                          'resourceId': RES_RING0, 'offset': 0,
-                         'size': ring0_sz, 'idleTimeout': IDLE_TO,
+                         # stock Mesa passes idleTimeout=1ms (1e6 ns);
+                         # the RTL saturates it to IDLE_TO_MAX poll rounds
+                         'size': ring0_sz, 'idleTimeout': 1_000_000,
                          'headOffset': RING_HEAD_OFF,
                          'tailOffset': RING_TAIL_OFF,
                          'statusOffset': RING_STATUS_OFF,
@@ -3975,6 +4237,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
     rec(EK_STATUS, r0['slot'], RING_ALIVE)
     check_live()
     note('ring0 created slot=%d' % r0['slot'])
+
+    note('A6b SUBMIT_3D size=0 (stock Mesa sync-only execbuffer)')
+    # Mesa flushes batches via drm_virtgpu_execbuffer submissions whose
+    # command payload may be empty (fences/syncobjs only): size word is 0.
+    submit(VG_SUBMIT_3D, [0, 0], ctx=CTX_ID, fence=0x12,
+           exp_type=VG_RESP_NODATA)
 
     # ------------------------------------------------------------------ #
     # Phase B': §7b/5a-ii compute session (vec = load_shvec record)        #
@@ -4128,18 +4396,20 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=V['dev'],
                     pAllocateInfo=st('VkMemoryAllocateInfo',
                                      allocationSize=b['size'],
-                                     memoryTypeIndex=0),
+                                     memoryTypeIndex=0, pNext=[]),
                     pMemory=mems[i])),
                 ('vkBindBufferMemory', dict(
                     device=V['dev'], buffer=bufs[i], memory=mems[i],
                     memoryOffset=boff)),
             ]
         if variant == 'pgfull':
+            # one alloc bigger than the whole aperture window -> the
+            # page allocator reports FULL -> OUT_OF_DEVICE_MEMORY
             seg_a1.append(('vkAllocateMemory', dict(
                 device=V['dev'],
                 pAllocateInfo=st('VkMemoryAllocateInfo',
-                                 allocationSize=0x400000,
-                                 memoryTypeIndex=0),
+                                 allocationSize=AP_WORDS * 4 + 4096,
+                                 memoryTypeIndex=0, pNext=[]),
                 pMemory=0x6000_0000_8000)))
         if variant == 'xfer_copy':
             # §12.3 C/5a: staging src buffer, fill target, readback —
@@ -4166,7 +4436,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         device=V['dev'],
                         pAllocateInfo=st('VkMemoryAllocateInfo',
                                          allocationSize=sz,
-                                         memoryTypeIndex=0),
+                                         memoryTypeIndex=0, pNext=[]),
                         pMemory=mems[n_bind + j])),
                     ('vkBindBufferMemory', dict(
                         device=V['dev'], buffer=bufs[n_bind + j],
@@ -4297,13 +4567,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                             else 7),
                         pImageInfo=[], pTexelBufferView=[],
                         # descoob: binding 1's descriptor view starts
-                        # at +128 with an inflated range — the
+                        # at +64 with an inflated range — the
                         # §7b assembly clamps it to buffer.size-eoff
-                        # = 128 B and the shader's accesses past it
+                        # = 64 B and the shader's accesses past it
                         # robust out
                         pBufferInfo=[st(
                             'VkDescriptorBufferInfo', buffer=bufs[i],
-                            offset=(128 if variant == 'descoob'
+                            offset=(64 if variant == 'descoob'
                                     and i == 1 else 0),
                             range=(512 if variant == 'descoob'
                                    and i == 1 else b['size']))])
@@ -4522,11 +4792,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           vec['gz'], 0, 0] + list(vec['spv'])
                     for i, b in enumerate(vec['binds']):
                         mw += [b['set'], b['binding'],
-                               128 if i == 1 else b['size'],
+                               64 if i == 1 else b['size'],
                                0x8000 + i * 0x2000]
                     mw += list(vec['push'])
                     for i, b in enumerate(vec['binds']):
-                        mw += (vec['inits'][i][32:64] if i == 1
+                        mw += (vec['inits'][i][16:32] if i == 1
                                else list(vec['inits'][i]))
                     cm = spirv_model.Model(mw)
                     cm.run()
@@ -4534,12 +4804,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     ccls = cm.out_classes()
                     doc['note'] = (
                         'descoob: Gate-2 oracle is the spirv_model '
-                        'run with binding 1 clamped to 128 B at '
-                        '+128 (inflated descriptor range); no '
+                        'run with binding 1 clamped to 64 B at '
+                        '+64 (inflated descriptor range); no '
                         'lavapipe comparison for this vector')
                     for idx in sorted(couts):
                         base_b = blob_base[idx] + \
-                            (128 if idx == 1 else 0)
+                            (64 if idx == 1 else 0)
                         W(TP_CHECK, CK_APR, len(couts[idx]), base_b)
                         for j, w in enumerate(couts[idx]):
                             rec(EK_APRCHK, base_b + 4 * j, w, w,
@@ -4612,7 +4882,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                exp_type=VG_RESP_NODATA)
         # blob-owned pages drain only through UNREF (CTX_DESTROY does
         # not free them); ring0's blob goes last, after the ring dies
-        for rid in (RES_REPLY, RES_RING1):
+        for rid in (RES_REPLY, RES_RING1, RES_RELOC):
             b = tm.blobs.pop(rid)
             tm.ap_free(b['base_w'], b['size'])
             submit(VG_RESOURCE_UNREF, [rid, 0], ctx=CTX_ID,
@@ -4687,7 +4957,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             device=I['dev'],
             pAllocateInfo=st('VkMemoryAllocateInfo',
                              allocationSize=0x40000,
-                             memoryTypeIndex=1),
+                             memoryTypeIndex=1, pNext=[]),
             pMemory=I['mem'])),
         ('vkCreateBuffer', dict(
             device=I['dev'],
@@ -4878,13 +5148,27 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
     n = len(cmds_words)
     rep_q = []
     seek_used = False
+    # ring bytes per batch must stay under buf_size or the wrap
+    # clobbers undrained commands; the reply preamble (SetReply +
+    # conditional Seek) counts toward a replying command's cost
+    sw4 = len(vk('vkSetReplyCommandStreamMESA',
+                 pStream={'_ty': None, 'resourceId': RES_REPLY,
+                          'offset': 0, 'size': 0}))
+    sk4 = len(vk('vkSeekReplyCommandStreamMESA', position=0))
     while i < n:
-        # assemble a batch <= 340 words (guest keeps space headroom)
+        # assemble a batch that fits the ring buffer with its reply
+        # preambles included (guest keeps space headroom)
         batch = []
         bw = 0
-        while i < n and bw < 220:
+        while i < n:
+            name, kw, w, a, nb = cmds_words[i]
+            cost = len(w)
+            if model.cmd_info[name]['act']['flags'] & 1:
+                cost += sw4 + sk4
+            if batch and (bw + cost) * 4 > r['buf_size'] - 128:
+                break
             batch.append(cmds_words[i])
-            bw += len(cmds_words[i][2])
+            bw += cost
             i += 1
         if batch_no >= 1:
             # park the ring, check IDLE, then notify with the submit
@@ -5086,7 +5370,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
            exp_type=VG_RESP_NODATA)
     # blob-owned pages drain only through UNREF (CTX_DESTROY does not
     # free them); ring0's blob goes last, after the ring dies
-    for rid in (RES_REPLY, RES_RING1):
+    for rid in (RES_REPLY, RES_RING1, RES_RELOC):
         b = tm.blobs.pop(rid)
         tm.ap_free(b['base_w'], b['size'])
         submit(VG_RESOURCE_UNREF, [rid, 0], ctx=CTX_ID,
@@ -5254,6 +5538,12 @@ def main():
 
         def emit(tag, words, rec):
             nonlocal base, hex_lines, exp_lines
+            # the decoder's stream ports (cs_base_i/cs_addr_o) are 16-bit
+            # and the TB loads .exp at word 65536: the tape must fit.
+            if base + len(words) > 65536:
+                raise RuntimeError(
+                    'vector tape exceeds the 64Ki-word decoder stream '
+                    'window at %s: reduce --count' % tag)
             hex_lines.append('// %s' % tag)
             hex_lines += ['%08X' % w for w in words]
             exp_lines.append('// %s' % tag)
@@ -5322,7 +5612,8 @@ def main():
             rep_base = base + len(words)
             hex_lines += ['%08X' % w for w in rep]
             exp_lines.append('// %s' % tag)
-            ew = list(exec_w[:64]) + [0] * (64 - len(exec_w))
+            ewn = model.exec_words_count()
+            ew = list(exec_w[:ewn]) + [0] * (ewn - len(exec_w))
             rw = list(rep[:MAX_EXP]) + [0] * (MAX_EXP - len(rep))
             exp_lines += ['%08X' % base, '%08X' % len(words),
                           '%08X' % result, '%08X' % len(exec_w)]

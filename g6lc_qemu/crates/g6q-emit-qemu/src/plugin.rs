@@ -47,7 +47,9 @@ fn emit_descriptor_decoder(body: &mut String, island: &g6q_core::model::AiIsland
     let layout = &island.desc_layout;
     body.push_str("/* Per-hart descriptor shadow, filled by stores into the latch window. */\n");
     body.push_str("static uint8_t g6lc_desc_shadow[G6LC_HARTS_TOTAL][G6LC_AI_DESC_BYTES];\n");
+    body.push_str("#if G6LC_AI_ISLAND_LEN != 0\n");
     body.push_str("static uint64_t g6lc_desc_seen[G6LC_HARTS_TOTAL];\n");
+    body.push_str("#endif\n");
     body.push_str(
         "/* Buffered tensor events, written at exit so completion can update done/status. */\n",
     );
@@ -95,6 +97,10 @@ fn emit_descriptor_decoder(body: &mut String, island: &g6q_core::model::AiIsland
     body.push_str("    return v;\n");
     body.push_str("}\n\n");
 
+    // Only the island latch window shadows stores one beat at a time; the
+    // queue-instruction path fills the shadow with a single memcpy, so this
+    // helper is island-only (dead code otherwise, which -Werror rejects).
+    body.push_str("#if G6LC_AI_ISLAND_LEN != 0\n");
     body.push_str("/* Record one store into the descriptor latch window. */\n");
     body.push_str(
         "static void g6lc_desc_store(uint32_t hart, uint64_t off, uint8_t size, uint64_t value)\n{\n",
@@ -104,7 +110,8 @@ fn emit_descriptor_decoder(body: &mut String, island: &g6q_core::model::AiIsland
     body.push_str("        g6lc_desc_shadow[hart][off + i] = (uint8_t)(value >> (i * 8));\n");
     body.push_str("    }\n");
     body.push_str("    g6lc_desc_seen[hart]++;\n");
-    body.push_str("}\n\n");
+    body.push_str("}\n");
+    body.push_str("#endif\n\n");
 
     // Accessor expressions, one per event field, resolved at emit time.
     body.push_str("/* Emit one submission event, shaped exactly like the native artifact. */\n");
@@ -658,10 +665,18 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("static uint64_t g6lc_idle_count[G6LC_HARTS_TOTAL];\n");
     body.push_str("static uint64_t g6lc_resume_count[G6LC_HARTS_TOTAL];\n");
     body.push_str("static uint64_t g6lc_exit_count[G6LC_HARTS_TOTAL];\n");
-    body.push_str("#if G6LC_AI_ISLAND_LEN != 0\n");
+    // The tensor globals serve both producers: the island latch window
+    // (G6LC_AI_ISLAND_LEN != 0) and the queue-instruction descriptor path
+    // (G6LC_AI_DESC_DECODE == 1).  Either may be present without the other —
+    // a model can publish the descriptor layout while the board DTS has no
+    // ai-island peripheral — so the guard is the union, while the raw-access
+    // fallback below stays island-only.
+    body.push_str("#if G6LC_AI_DESC_DECODE == 1 || G6LC_AI_ISLAND_LEN != 0\n");
     body.push_str("static FILE *g6lc_tensor_file;\n");
     body.push_str("static uint64_t g6lc_tensor_order;\n");
     body.push_str("static bool g6lc_tensor_first_record;\n");
+    body.push_str("#endif\n");
+    body.push_str("#if G6LC_AI_ISLAND_LEN != 0\n");
     body.push_str("#if G6LC_AI_DESC_DECODE != 1\n\n");
     body.push_str(
         "/* Geometry unresolved: emit raw AI-island memory accesses as tensor events. */\n",
@@ -1020,7 +1035,7 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("        fclose(g6lc_trace_file);\n");
     body.push_str("        g6lc_trace_file = NULL;\n");
     body.push_str("    }\n");
-    body.push_str("#if G6LC_AI_ISLAND_LEN != 0\n");
+    body.push_str("#if G6LC_AI_DESC_DECODE == 1 || G6LC_AI_ISLAND_LEN != 0\n");
     body.push_str("    if (g6lc_tensor_file) {\n");
     body.push_str("#if G6LC_AI_DESC_DECODE == 1\n");
     body.push_str("        for (uint32_t h = 0; h < G6LC_HARTS_TOTAL; ++h) {\n");
@@ -1087,7 +1102,7 @@ pub fn emit_plugin(model: &TargetModel, version: &str, digest: &str) -> Emission
     body.push_str("                    G6LC_PROFILE, G6LC_PROFILE_TAINTED);\n");
     body.push_str("            }\n");
     body.push_str("        }\n");
-    body.push_str("#if G6LC_AI_ISLAND_LEN != 0\n");
+    body.push_str("#if G6LC_AI_DESC_DECODE == 1 || G6LC_AI_ISLAND_LEN != 0\n");
     body.push_str("        if (strncmp(argv[i], \"tensor=\", 7) == 0) {\n");
     body.push_str("            const char *path = argv[i] + 7;\n");
     body.push_str("            g6lc_tensor_file = fopen(path, \"w\");\n");
@@ -1314,6 +1329,31 @@ mod tests {
         assert!(c.contains("#define G6LC_AI_ST_OK 0U"));
         // No literal stride from the old hand-written surface.
         assert!(!c.contains("G6LC_AI_OFF_PTR_DONE 0x40"));
+    }
+
+    #[test]
+    fn tensor_globals_survive_desc_decode_without_an_island_window() {
+        // The design publishes descriptor geometry and queue instructions, but
+        // the board peripheral list has no ai-island window: ISLAND_LEN=0 with
+        // DESC_DECODE=1 must still declare the tensor globals the descriptor
+        // path references, and must not emit the island-only latch helper
+        // unconditionally — both defects fail the emitted C under -Werror.
+        let mut m = model_with_island();
+        m.soc
+            .peripherals
+            .retain(|p| p.id != "ai-island" && p.id != "ai_matrix");
+        let e = emit_plugin(&m, "0.1.0", "sha256:abc");
+        let c = &e.files[0].contents;
+        assert!(c.contains("#define G6LC_AI_ISLAND_LEN 0"));
+        assert!(c.contains("#define G6LC_AI_DESC_DECODE 1"));
+        assert!(c.contains(
+            "#if G6LC_AI_DESC_DECODE == 1 || G6LC_AI_ISLAND_LEN != 0\n\
+             static FILE *g6lc_tensor_file;"
+        ));
+        assert!(c.contains(
+            "#if G6LC_AI_ISLAND_LEN != 0\n\
+             /* Record one store into the descriptor latch window. */"
+        ));
     }
 
     #[test]

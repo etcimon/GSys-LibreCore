@@ -416,7 +416,69 @@ fn build_soc(
         soc.contexts_per_hart = 2;
     }
     soc.ai_island = flist.and_then(|f| build_ai_island_model(f, pkg));
+    soc.apu = flist.and_then(build_apu_model);
     soc
+}
+
+/// Read the APU's guest-facing geometry from `g6lc_apu_cfg_pkg.sv` (`ApuVenus`
+/// literal) and `g6lc_apu_pkg.sv` (`APU_SHM_*`), when the flist names them.
+///
+/// Both packages must be present and every consumed field must resolve: the
+/// bridge device cannot be emitted from half a map, and a field that silently
+/// defaulted would relocate the guest window without anyone noticing.
+fn build_apu_model(flist: &g6q_flist::Expansion) -> Option<g6q_core::model::ApuModel> {
+    let cfg_path = flist
+        .files
+        .iter()
+        .find(|f| f.ends_with("g6lc_apu_cfg_pkg.sv"))?;
+    let apu_path = flist
+        .files
+        .iter()
+        .find(|f| f.ends_with("g6lc_apu_pkg.sv"))?;
+
+    let cfg_text = std::fs::read_to_string(cfg_path).ok()?;
+    let apu_text = std::fs::read_to_string(apu_path).ok()?;
+    let cfg = g6q_svcfg::read_package(&cfg_text);
+    let apu = g6q_svcfg::read_package(&apu_text);
+
+    let venus = cfg.structs.get("ApuVenus")?;
+    let u64_of = |m: &std::collections::BTreeMap<String, Value>, k: &str| -> Option<u64> {
+        m.get(k).and_then(Value::as_int).map(|v| v as u64)
+    };
+    let u32_of = |m: &std::collections::BTreeMap<String, Value>, k: &str| -> Option<u32> {
+        m.get(k)
+            .and_then(Value::as_int)
+            .and_then(|v| u32::try_from(v).ok())
+    };
+
+    Some(g6q_core::model::ApuModel {
+        mmio_base: u64_of(venus, "MmioBase")?,
+        mmio_len: u64_of(venus, "MmioLength")?,
+        control_base: u64_of(venus, "ControlBase")?,
+        control_len: u64_of(venus, "ControlLength")?,
+        irq_source: u32_of(venus, "IrqSource")?,
+        dma_window_base: u64_of(venus, "DmaWindowBase")?,
+        dma_window_bytes: u64_of(venus, "DmaWindowBytes")?,
+        shm_base: apu
+            .params
+            .get("APU_SHM_BASE")
+            .and_then(Value::as_int)
+            .map(|v| v as u64)?,
+        shm_bytes: apu
+            .params
+            .get("APU_SHM_BYTES")
+            .and_then(Value::as_int)
+            .map(|v| v as u64)?,
+        shm_id: apu
+            .params
+            .get("APU_SHM_ID_HOST_VISIBLE")
+            .and_then(Value::as_int)
+            .and_then(|v| u32::try_from(v).ok())?,
+        num_capsets: u32_of(venus, "NumCapsets")?,
+        num_scanouts: u32_of(venus, "NumScanouts")?,
+        num_queues: u32_of(venus, "NumQueues")?,
+        queue_depth: u32_of(venus, "QueueDepth")?,
+    })
 }
 
 /// Numeric-format grant bits that name a float code (bit index = `flags.numfmt`
@@ -945,6 +1007,48 @@ mod tests {
         assert_eq!(model.desc_layout.offset("ptr_done"), Some(56));
         assert_eq!(model.instr_set.match_enq, 0x0000_505B);
         assert_eq!(model.instr_set.match_qfence, 0x0400_505B);
+    }
+
+    #[test]
+    fn apu_ingestion_reads_the_venus_geometry() {
+        // The bridge device emits the window/base/IRQ constants from this block;
+        // a field that cannot be read must surface as "no block", not as a
+        // defaulted address.
+        let crate_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let fixture = crate_dir
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("fixtures")
+            .join("apu");
+        let mut flist = Expansion::default();
+        for name in ["g6lc_apu_cfg_pkg.sv", "g6lc_apu_pkg.sv"] {
+            flist
+                .files
+                .push(fixture.join(name).to_string_lossy().into_owned());
+        }
+        let apu = build_apu_model(&flist).expect("fixture parses");
+        assert_eq!(apu.mmio_base, 0x6000_1000);
+        assert_eq!(apu.mmio_len, 0x1000);
+        assert_eq!(apu.control_base, 0x6000_2000);
+        assert_eq!(apu.irq_source, 11);
+        assert_eq!(apu.num_queues, 2);
+        assert_eq!(apu.queue_depth, 32);
+        assert_eq!(apu.num_capsets, 1);
+        assert_eq!(apu.num_scanouts, 0);
+        assert_eq!(apu.dma_window_base, 0x8000_0000);
+        assert_eq!(apu.dma_window_bytes, 0x0800_0000);
+        assert_eq!(apu.shm_base, 0x8400_0000);
+        assert_eq!(apu.shm_bytes, 0x0020_0000);
+        assert_eq!(apu.shm_id, 3);
+    }
+
+    #[test]
+    fn apu_ingestion_is_absent_without_the_packages() {
+        let mut flist = Expansion::default();
+        flist.files.push("some/other/pkg.sv".to_string());
+        assert!(build_apu_model(&flist).is_none());
     }
 
     /// A package that publishes the per-field arithmetic-type accessors makes sub-byte and

@@ -152,6 +152,8 @@ module g6lc_apu_vgctl
       StDispatch, StOtReq, StOtCpl, StBindReq, StBindCpl,
       StMemReq, StMemCpl, StAuxReq, StAuxCpl,
       StPgReq, StPgCpl, StXsFire, StXsWait,
+      StMapAllocAt, StMapBind, StMapMemReq, StMapMemCpl,
+      StMapAuxReq, StMapAuxCpl,
       StWrPrep, StWrFind, StWrFire, StWrCap, StDone, StFence
     } state_e;
     state_e state_q;
@@ -179,6 +181,12 @@ module g6lc_apu_vgctl
     // §7b: blob_id != 0 maps a DEVICE_MEMORY object; aux[0] marks the
     // blob memory-backed so UNREF leaves the pages to the memory.
     logic         blob_mem_q;
+    // MAP_BLOB relocation state: the guest kernel dictates the SHM
+    // offset, so a map onto a different extent frees/reallocates pages
+    logic [63:0]  map_size_q;
+    logic         map_memb_q;    // memory-backed blob (aux[0])
+    logic [31:0]  map_memid_q;   // device-memory resource id
+    logic [31:0]  map_memh_q;    // {gen,slot} of the DEVICE_MEMORY
     logic         mem_fault_q;   // sticky write fault (§6c)
     // page-allocator in-flight op
     apu_vgpages_op_e pg_op_q;
@@ -218,21 +226,38 @@ module g6lc_apu_vgctl
     // ---- ObjTab port -------------------------------------------------------
     logic ot_fire;
     assign ot_fire = state_q == StOtReq || state_q == StBindReq ||
-                     state_q == StMemReq || state_q == StAuxReq;
+                     state_q == StMemReq || state_q == StAuxReq ||
+                     state_q == StMapMemReq || state_q == StMapAuxReq;
     assign ot_req_valid_o = ot_fire;
     assign ot_cpl_ready_o = state_q == StOtCpl || state_q == StBindCpl ||
-                            state_q == StMemCpl || state_q == StAuxCpl;
+                            state_q == StMemCpl || state_q == StAuxCpl ||
+                            state_q == StMapMemCpl || state_q == StMapAuxCpl;
     always_comb begin
       ot_req_o = apu_objtab_req_t'('0);
       unique case (state_q)
         StMemReq: ot_req_o = '{op: APU_OBJTAB_OP_LOOKUP,
-            id: {req_ram[11], req_ram[10]},      // blob_id = memory id
+            // blob_id = the VkDeviceMemory client object id; tag it
+            // into the client-id namespace (APU_VN_ID_TAG, bit 33),
+            // disjoint from the resource-id namespace below
+            id: APU_VN_ID_TAG | {req_ram[11], req_ram[10]},
             kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY), default: '0};
         StAuxReq: ot_req_o = '{op: APU_OBJTAB_OP_SETAUX,
             id: APU_VG_ID_TAG | {32'h0, req_ram[6]},
             kind: 6'(APU_VN_KIND_APU_BLOB_SHMEM),
-            mask: 32'h1, value: 32'h1,           // aux[0] = memory-backed
+            // aux[0] = memory-backed; aux[31:8] = memory resource id
+            // (so a MAP_BLOB relocation can find the VkDeviceMemory)
+            mask: 32'hFF_FF_FF_01,
+            value: {req_ram[10][23:0], 8'h1},
             default: '0};
+        StMapMemReq: ot_req_o = '{op: APU_OBJTAB_OP_LOOKUP,
+            // map_memid_q is the VkDeviceMemory client id recorded in
+            // the blob's aux[31:8] — same client-id namespace as the
+            // blob_id lookup above
+            id: APU_VN_ID_TAG | {8'h0, map_memid_q[23:0]},
+            kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY), default: '0};
+        StMapAuxReq: ot_req_o = '{op: APU_OBJTAB_OP_SETAUXHI,
+            id: {32'h0, map_memh_q},             // {gen,slot} handle
+            mask: 32'hFF_FF_FF_FF, value: req_ram[8], default: '0};
         StOtReq: begin
           unique case (rtype_q)
             APU_VG_CTX_CREATE: ot_req_o = '{op: APU_OBJTAB_OP_ALLOC,
@@ -244,7 +269,11 @@ module g6lc_apu_vgctl
             APU_VG_CREATE_BLOB: ot_req_o = '{op: APU_OBJTAB_OP_ALLOC,
                 id: APU_VG_ID_TAG | {32'h0, req_ram[6]},
                 kind: 6'(APU_VN_KIND_APU_BLOB_SHMEM),
-                ctx: 8'(rctx_q), default: '0};
+                // blobs are device-global resources — attach/detach is
+                // access control, not ownership — so they live in the
+                // never-destroyed context 0 and UNREF retires them,
+                // not a CTX_DESTROY sweep (vn_golden parity)
+                ctx: 8'h0, default: '0};
             APU_VG_UNREF: ot_req_o = '{op: APU_OBJTAB_OP_RETIRE,
                 id: APU_VG_ID_TAG | {32'h0, req_ram[6]},
                 kind: 6'(APU_VN_KIND_APU_BLOB_SHMEM), default: '0};
@@ -278,6 +307,8 @@ module g6lc_apu_vgctl
         rtype_q <= '0; rflags_q <= '0; rctx_q <= '0; rring_q <= '0;
         rfence_q <= '0; trunc_q <= 1'b0; payload_b_q <= '0;
         blob_addr_q <= '0; blob_size_q <= '0; blob_mem_q <= 1'b0;
+        map_size_q <= '0; map_memb_q <= 1'b0;
+        map_memid_q <= '0; map_memh_q <= '0;
         mem_fault_q <= 1'b0;
         pg_op_q <= APU_VGPAGES_OP_ALLOC; pg_base_q <= '0;
         pg_bytes_q <= '0; pg_ret_q <= StIdle;
@@ -378,8 +409,8 @@ module g6lc_apu_vgctl
                   if (req_ram[6] == 32'd0) begin
                     resp_ram[0] <= APU_VG_RESP_CAPSET_INFO;
                     resp_ram[6] <= APU_VG_CAPSET_VENUS;
-                    resp_ram[7] <= 32'(APU_VN_CAPSET_WORDS * 4);
-                    resp_ram[8] <= 32'd0;   // max_version
+                    resp_ram[7] <= 32'd1;   // capset_max_version
+                    resp_ram[8] <= 32'(APU_VN_CAPSET_WORDS * 4); // max_size
                     resp_ram[9] <= 32'd0;
                     resp_n_q <= 9'd10;
                   end else begin
@@ -437,9 +468,13 @@ module g6lc_apu_vgctl
                   state_q <= StOtReq;     // LOOKUP / RETIRE
                 end
                 APU_VG_SUBMIT_3D: begin
-                  if (req_ram[6] == 32'd0 ||
-                      64'(req_ram[6]) >
-                      64'(read_len_q) - 64'd32) begin
+                  if (req_ram[6] == 32'd0) begin
+                    // empty execbuffer: a sync-only batch (Mesa signals
+                    // fences/syncobjs through size-0 SUBMIT_3D); nothing
+                    // to execute, answer OK_NODATA and let the fence fire
+                    state_q <= StWrPrep;
+                  end else if (64'(req_ram[6]) >
+                               64'(read_len_q) - 64'd32) begin
                     resp_ram[0] <= APU_VG_ERR_UNSPEC;
                     state_q <= StWrPrep;
                   end else begin
@@ -469,11 +504,64 @@ module g6lc_apu_vgctl
                   resp_ram[0] <= APU_VG_ERR_PARAM;  // aperture exhausted
                   state_q <= StWrPrep;
                 end
+              end else if (pg_op_q == APU_VGPAGES_OP_ALLOC_AT) begin
+                if (pg_cpl_i.status == APU_VGPAGES_OK)
+                  state_q <= pg_ret_q;
+                else begin
+                  // the kernel's offset collides with a live allocation
+                  // or lies outside the window: honest refusal
+                  resp_ram[0] <= APU_VG_ERR_UNSPEC;
+                  state_q <= StWrPrep;
+                end
               end else begin
                 state_q <= pg_ret_q;                // FREE result ignored
               end
             end
           end
+
+          // ---- MAP_BLOB relocation (kernel-chosen SHM offset) --------
+          // blob-owned: free ran first; reserve the requested extent
+          StMapAllocAt: begin
+            pg_op_q    <= APU_VGPAGES_OP_ALLOC_AT;
+            pg_base_q  <= req_ram[8];
+            pg_bytes_q <= map_size_q[31:0];
+            pg_ret_q   <= StMapBind;
+            state_q    <= StPgReq;
+          end
+          // memory-backed: the VkDeviceMemory owns the extent; look it
+          // up (rid recorded in the blob's aux[31:8] at create) so its
+          // pages and page base move with the blob
+          StMapMemReq: if (ot_req_ready_i) state_q <= StMapMemCpl;
+          StMapMemCpl: begin
+            if (ot_cpl_valid_i) begin
+              if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+                resp_ram[0] <= APU_VG_ERR_RID;
+                state_q <= StWrPrep;
+              end else begin
+                map_memh_q <= ot_cpl_i.handle;
+                pg_op_q    <= APU_VGPAGES_OP_FREE;
+                pg_base_q  <= ot_cpl_i.entry.aux[63:32];
+                pg_bytes_q <= map_size_q[31:0];
+                pg_ret_q   <= StMapAllocAt;
+                state_q    <= StPgReq;
+              end
+            end
+          end
+          // pages placed: rebind the blob at the kernel's offset
+          StMapBind: begin
+            blob_addr_q <= APU_VG_SHM_BASE +
+                           64'({req_ram[9], req_ram[8]});
+            blob_size_q <= map_size_q;
+            resp_ram[0] <= APU_VG_RESP_MAP_INFO;
+            resp_ram[6] <= APU_VG_MAP_WC;
+            resp_ram[7] <= req_ram[8];
+            resp_n_q    <= 9'd8;
+            state_q     <= StBindReq;
+          end
+          // memory-backed tail: publish the new page base on the memory
+          // object so engine-side addressing follows the guest's map
+          StMapAuxReq: if (ot_req_ready_i) state_q <= StMapAuxCpl;
+          StMapAuxCpl: if (ot_cpl_valid_i) state_q <= StWrPrep;
 
           // ---- blob_id != 0: memory-object resolve -------------------
           StMemReq: if (ot_req_ready_i) state_q <= StMemCpl;
@@ -483,7 +571,11 @@ module g6lc_apu_vgctl
                 resp_ram[0] <= APU_VG_ERR_RID;   // unknown memory id
                 state_q <= StWrPrep;
               end else if ({req_ram[13], req_ram[12]} >
-                           ot_cpl_i.entry.size) begin
+                           ((ot_cpl_i.entry.size +
+                             64'(APU_VG_PAGE_BYTES - 1)) &
+                            ~64'(APU_VG_PAGE_BYTES - 1))) begin
+                // the guest kernel rounds the BO to its page size; the
+                // truthful bound is the memory's page-granular extent
                 resp_ram[0] <= APU_VG_ERR_PARAM; // blob larger than mem
                 state_q <= StWrPrep;
               end else begin
@@ -510,20 +602,69 @@ module g6lc_apu_vgctl
                 APU_VG_CTX_CREATE,
                 APU_VG_MAP_BLOB,
                 APU_VG_CTX_ATTACH, APU_VG_CTX_DETACH: begin
-                  if (ot_cpl_i.status != APU_OBJTAB_OK)
+                  if (ot_cpl_i.status != APU_OBJTAB_OK) begin
                     resp_ram[0] <= (rtype_q == APU_VG_MAP_BLOB ||
                                     rtype_q == APU_VG_CTX_ATTACH ||
                                     rtype_q == APU_VG_CTX_DETACH)
                                    ? APU_VG_ERR_RID : APU_VG_ERR_CID;
-                  else if (rtype_q == APU_VG_MAP_BLOB) begin
-                    resp_ram[0] <= APU_VG_RESP_MAP_INFO;
-                    resp_ram[6] <= APU_VG_MAP_WC;
-                    // window-relative byte offset of the mapped extent
-                    resp_ram[7] <= 32'(ot_cpl_i.entry.bind_offset -
-                                       APU_VG_SHM_BASE);
-                    resp_n_q <= 9'd8;
+                    state_q <= StWrPrep;
+                  end else if (rtype_q == APU_VG_MAP_BLOB) begin
+                    // The guest kernel owns the SHM layout: the request
+                    // offset is the window offset it will mmap.  Bind the
+                    // blob exactly there (relocating when our create-time
+                    // extent differs), else the guest's writes land where
+                    // the engines never look.
+                    if (req_ram[9] != 32'h0 ||
+                        64'({req_ram[9], req_ram[8]}) +
+                            ot_cpl_i.entry.size > APU_VG_SHM_BYTES) begin
+                      resp_ram[0] <= APU_VG_ERR_PARAM;
+                      state_q     <= StWrPrep;
+                    end else if ({req_ram[9], req_ram[8]} ==
+                                 ot_cpl_i.entry.bind_offset -
+                                 APU_VG_SHM_BASE) begin
+                      resp_ram[0] <= APU_VG_RESP_MAP_INFO;
+                      resp_ram[6] <= APU_VG_MAP_WC;
+                      resp_ram[7] <= req_ram[8];
+                      resp_n_q    <= 9'd8;
+                      state_q     <= StWrPrep;
+                    end else begin
+                      map_size_q  <= ot_cpl_i.entry.size;
+                      map_memb_q  <= ot_cpl_i.entry.aux[0];
+                      map_memid_q <= {8'h0,
+                                      ot_cpl_i.entry.aux[31:8]};
+                      if (ot_cpl_i.entry.aux[0]) begin
+                        // memory-backed: the pages belong to the
+                        // VkDeviceMemory; resolve it, then free+relocate
+                        // the whole extent it sits on
+                        state_q <= StMapMemReq;
+                      end else begin
+                        pg_op_q    <= APU_VGPAGES_OP_FREE;
+                        pg_base_q  <= 32'(ot_cpl_i.entry.bind_offset -
+                                          APU_VG_SHM_BASE);
+                        pg_bytes_q <= ot_cpl_i.entry.size[31:0];
+                        pg_ret_q   <= StMapAllocAt;
+                        state_q    <= StPgReq;
+                      end
+                    end
+                  end else begin
+                    state_q <= StWrPrep;
                   end
-                  state_q <= StWrPrep;
+                end
+                APU_VG_UNMAP_BLOB: begin
+                  if (ot_cpl_i.status == APU_OBJTAB_OK &&
+                      !ot_cpl_i.entry.aux[0] &&
+                      ot_cpl_i.entry.bind_offset != 64'h0) begin
+                    // kernel released its SHM slot: drop our page marks
+                    // (a later MAP re-allocates at the new offset)
+                    pg_op_q    <= APU_VGPAGES_OP_FREE;
+                    pg_base_q  <= 32'(ot_cpl_i.entry.bind_offset -
+                                      APU_VG_SHM_BASE);
+                    pg_bytes_q <= ot_cpl_i.entry.size[31:0];
+                    pg_ret_q   <= StWrPrep;
+                    state_q    <= StPgReq;
+                  end else begin
+                    state_q <= StWrPrep;
+                  end
                 end
                 APU_VG_CREATE_BLOB: begin
                   if (ot_cpl_i.status != APU_OBJTAB_OK) begin
@@ -563,6 +704,9 @@ module g6lc_apu_vgctl
                 state_q <= StWrPrep;
               end else if (rtype_q == APU_VG_CREATE_BLOB && blob_mem_q) begin
                 state_q <= StAuxReq;   // mark memory-backed (aux[0])
+              end else if (rtype_q == APU_VG_MAP_BLOB && map_memb_q) begin
+                // move the VkDeviceMemory page base to the new offset
+                state_q <= StMapAuxReq;
               end else begin
                 state_q <= StWrPrep;
               end

@@ -146,8 +146,11 @@ module tb_g6lc_apu_vgpages;
 
     // ---- bounds -------------------------------------------------------
     cases++;
-    do_req(APU_VGPAGES_OP_FREE, 7, PageBytes, c); // unaligned -> BOUNDS
-    check("free unaligned", c.status == APU_VGPAGES_BOUNDS);
+    // unaligned base is legal for FREE (kernel-chosen extents are
+    // 4 KiB-class; the run unmarks every covered page, matching
+    // ALLOC_AT) — [7, 7+PageBytes) covers pages 0-1, all free anyway
+    do_req(APU_VGPAGES_OP_FREE, 7, PageBytes, c);
+    check("free unaligned", c.status == APU_VGPAGES_OK);
     do_req(APU_VGPAGES_OP_FREE, WinBytes - PageBytes/2, PageBytes, c);
     check("free pastend", c.status == APU_VGPAGES_BOUNDS);
     do_req(APU_VGPAGES_OP_FREE, 0, 0, c);  // bytes==0 -> OK no-op

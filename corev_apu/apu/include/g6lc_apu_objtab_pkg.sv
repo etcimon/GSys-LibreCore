@@ -7,9 +7,21 @@
 // `id[63:32] != 0` the id is a driver-visible object id resolved through
 // the hash directory.  When `id[63:32] == 0` the low 32 bits are a
 // generational handle `{gen[15:0], slot[15:0]}` resolved directly against
-// the entry SRAM; a stale generation reports GEN.  Driver ids are
-// therefore expected to have a non-zero high word (real Venus driver ids
-// are opaque non-zero 64-bit values).
+// the entry SRAM; a stale generation reports GEN.  A live generation is
+// never 0, so `id[63:32] == 0 && id[31:16] == 0` is also resolved as a
+// driver id through the directory — real client ids are tagged into a
+// reserved high-word namespace (below) rather than passed raw: Mesa
+// Venus mints dense small-integer ids (`vn_get_next_obj_id`), so an
+// untagged client id could alias the handle form.
+//
+// Id namespaces (id[63:32] discriminant):
+//   64'h0000_0002_0000_0000 | id   — Vulkan client object ids
+//                                    (vnfront, plus vgctl's memory-id
+//                                    lookups of DEVICE_MEMORY objects)
+//   64'h0000_0001_0000_0000 | id   — virtio-gpu resource/context ids
+//                                    (APU_VG_ID_TAG, g6lc_apu_vg_pkg)
+// Both are disjoint for client/resource ids below 2^32, which covers
+// every id the stock driver can mint.
 //
 // For RESET_CTX the completion `handle[15:0]` carries the number of
 // objects that remained pinned in the context.
@@ -77,6 +89,12 @@ package g6lc_apu_objtab_pkg;
   } apu_objtab_entry_t;
 
   localparam logic [15:0] APU_OBJTAB_SLOT_NONE = 16'hFFFF;
+
+  // Client-object id namespace tag (see header): ORed into every id-
+  // form ObjTab request carrying a Vulkan client object id so it
+  // always takes the directory-probe path, never the {gen,slot}
+  // handle fast path.
+  localparam logic [63:0] APU_VN_ID_TAG = 64'h0000_0002_0000_0000;
 
   typedef struct packed {
     apu_objtab_status_e status;

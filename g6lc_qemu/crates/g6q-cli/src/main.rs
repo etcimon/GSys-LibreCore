@@ -227,6 +227,19 @@ fn cmd_gen(args: &Args) -> Result<(), String> {
         model.soc.bootrom = Some(parse_bootrom(v)?);
     }
 
+    if args.flag("apu-bridge") {
+        // The bridge instantiates the external-RTL socket device at the APU's
+        // published virtio-mmio window; without the ingested geometry there is
+        // no window to put it on.
+        if model.soc.apu.is_none() {
+            return Err(
+                "--apu-bridge needs the APU packages on the flist (g6lc_apu_cfg_pkg.sv / g6lc_apu_pkg.sv); none were found"
+                    .into(),
+            );
+        }
+        model.soc.apu_bridge = true;
+    }
+
     // Legality is a separate question from conformance: an illegal configuration is one
     // the design would refuse to elaborate, and emulating it would be reporting on a
     // machine that does not build.
@@ -600,6 +613,7 @@ fn emit_qemu_machine(args: &Args, model: &TargetModel) -> Result<(), String> {
         emission.push(f.clone());
     }
     g6q_emit_qemu::trans::emit(model, VERSION, &digest, &mut emission);
+    g6q_emit_qemu::apu_bridge::emit(model, VERSION, &digest, &mut emission);
 
     let base = args
         .value("emit-dir")
@@ -697,6 +711,7 @@ fn emit_qemu_all(args: &Args, model: &TargetModel) -> Result<(), String> {
         emission.push(f.clone());
     }
     g6q_emit_qemu::trans::emit(model, VERSION, &digest, &mut emission);
+    g6q_emit_qemu::apu_bridge::emit(model, VERSION, &digest, &mut emission);
 
     let base = args
         .value("emit-dir")

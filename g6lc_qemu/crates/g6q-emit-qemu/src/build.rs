@@ -20,6 +20,9 @@ pub fn emit_build_wiring(model: &TargetModel, version: &str, digest: &str) -> Em
     // Gated on the emitters' own condition so the wiring never lists a file that was not
     // emitted (which fails at meson configure time, before any compiler error).
     let ai_device = crate::ai_island::resolved(model).is_some();
+    // Same gate the emitter uses: the wiring may not name a file that was not
+    // emitted.
+    let apu_device = crate::apu_bridge::enabled(model);
 
     // A single human- and machine-readable integration guide.
     let mut body = String::new();
@@ -48,6 +51,9 @@ pub fn emit_build_wiring(model: &TargetModel, version: &str, digest: &str) -> Em
     body.push_str(&format!("        'g6lc-{name}-dtb.c',\n"));
     if ai_device {
         body.push_str(&format!("        'g6lc-{name}-ai-island.c',\n"));
+    }
+    if apu_device {
+        body.push_str(&format!("        'g6lc-{name}-apu-bridge.c',\n"));
     }
     body.push_str("    ))\n\n");
 

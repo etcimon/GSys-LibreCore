@@ -432,6 +432,11 @@ module g6lc_apu_cmdexec
         if (work_done_i && outst_q != 8'h0) outst_q <= outst_q - 8'h1;
         if (work_done_i && work_done_pl_i.code != 8'(APU_SH_DONE_OK))
           lost_q <= 1'b1;
+`ifdef G6LC_CEX_TRACE
+        if (work_done_i)
+          $display("[cex] work done code=%0d outst=%0d",
+                   work_done_pl_i.code, outst_q);
+`endif
         // fence clear mask (vkResetFences)
         fsig_q  <= fsig_q & ~fence_clr_i;
         flost_q <= flost_q & ~fence_clr_i;
@@ -445,6 +450,13 @@ module g6lc_apu_cmdexec
         case (state_q)
           StIdle: begin
             if (fifo_n_q != 3'd0) begin
+`ifdef G6LC_CEX_TRACE
+              $display("[cex] submit pop nbufs=%0d fence=%0d crec=%p chndl=%p",
+                       fifo_q[fifo_head_q[1:0]].nbufs,
+                       fifo_q[fifo_head_q[1:0]].fence_idx,
+                       fifo_q[fifo_head_q[1:0]].crec,
+                       fifo_q[fifo_head_q[1:0]].chndl);
+`endif
               cur_q       <= fifo_q[fifo_head_q[1:0]];
               fifo_head_q <= fifo_head_q + 3'd1;
               fifo_n_q    <= fifo_n_q - 3'd1;
@@ -475,6 +487,11 @@ module g6lc_apu_cmdexec
           // ---- per-buffer record walk --------------------------------
           StCntReq: if (cr_req_ready_i) state_q <= StCntCpl;
           StCntCpl: if (cr_cpl_valid_i) begin
+`ifdef G6LC_CEX_TRACE
+            $display("[cex] cnt cbuf=%0d status=%0d count=%0d",
+                     cur_q.crec[buf_i_q[1:0]], cr_cpl_i.status,
+                     cr_cpl_i.count);
+`endif
             if (cr_cpl_i.status != APU_CMDREC_OK) begin
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
@@ -492,6 +509,10 @@ module g6lc_apu_cmdexec
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
             end else begin
+`ifdef G6LC_CEX_TRACE
+              $display("[cex] rec buf=%0d idx=%0d ctype=%08x",
+                       buf_i_q, rec_i_q, cr_cpl_i.rec.ctype);
+`endif
               rec_q   <= cr_cpl_i.rec;
               h_i_q   <= '0;
               state_q <= StResReq;
@@ -633,6 +654,11 @@ module g6lc_apu_cmdexec
             endcase
           end
           StWork: if (work_ready_i) begin
+`ifdef G6LC_CEX_TRACE
+            $display("[cex] work issue ctype=%08x dst=%08x+%08x src=%08x+%08x",
+                     rec_q.ctype, xf_dst_base_q, xf_dst_size_q,
+                     xf_src_base_q, xf_src_size_q);
+`endif
             outst_q <= outst_q + 8'h1 -
                        ((work_done_i && outst_q != 8'h0) ? 8'h1 : 8'h0);
             state_q <= StNextBuf;
@@ -871,6 +897,10 @@ module g6lc_apu_cmdexec
           end
 
           StDone: begin
+`ifdef G6LC_CEX_TRACE
+            $display("[cex] submit done seq=%0d lost=%0d fence=%0d",
+                     done_seq_q + 16'h1, lost_q, cur_q.fence_idx);
+`endif
             done_seq_q <= done_seq_q + 16'h1;
             if (cur_q.fence_idx != FENCE_NONE &&
                 cur_q.fence_idx < 5'(Fences)) begin

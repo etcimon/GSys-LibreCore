@@ -268,14 +268,49 @@ fn build_dts(model: &TargetModel) -> Node {
     root.children.push(cpus);
 
     // memory
+    //
+    // When the Venus aperture sits inside the DRAM window the aperture must NOT
+    // appear in any `memory@` node (nor as a `reserved-memory` entry, which the
+    // kernel also registers as a busy iomem resource): `virtio_gpu` learns the
+    // host-visible window from the device's SHM registers and reserves it with
+    // `devm_request_mem_region`, which fails -EBUSY if System RAM or a reserved
+    // child already covers the range. QEMU's DRAM MemoryRegion still spans the
+    // aperture, so device-side DMA sees real memory; only the guest kernel's
+    // usable-RAM list is carved.
+    let aperture_range = if crate::apu_bridge::enabled(model) {
+        model.soc.apu.as_ref().map(|a| (a.shm_base, a.shm_bytes))
+    } else {
+        None
+    };
     if let Some((base, len)) = model.soc.dram {
-        let mut mem = Node {
-            name: format!("memory@{base:x}"),
-            ..Node::default()
-        };
-        mem.props.insert("device_type".into(), s("memory"));
-        mem.props.insert("reg".into(), addr_size_reg(base, len));
-        root.children.push(mem);
+        let mut spans = vec![(base, len)];
+        if let Some((abase, alen)) = aperture_range {
+            spans = spans
+                .into_iter()
+                .flat_map(|(b, l)| {
+                    let mut out = Vec::new();
+                    let end = b + l;
+                    let aend = abase + alen;
+                    if abase > b {
+                        out.push((b, abase.min(end) - b));
+                    }
+                    if aend < end {
+                        out.push((aend.max(b), end - aend.max(b)));
+                    }
+                    out
+                })
+                .filter(|(_, l)| *l > 0)
+                .collect();
+        }
+        for (base, len) in spans {
+            let mut mem = Node {
+                name: format!("memory@{base:x}"),
+                ..Node::default()
+            };
+            mem.props.insert("device_type".into(), s("memory"));
+            mem.props.insert("reg".into(), addr_size_reg(base, len));
+            root.children.push(mem);
+        }
     }
 
     // soc
@@ -340,7 +375,7 @@ fn build_dts(model: &TargetModel) -> Node {
         };
         let compatible = if is_clint(&p) {
             "sifive,clint0"
-        } else if is_virtio_mmio(&p) {
+        } else if is_virtio_mmio(&p) || is_apu_bridge(&p) {
             "virtio,mmio"
         } else {
             p.model.as_deref().unwrap_or("")
@@ -548,6 +583,16 @@ fn is_virtio_mmio(p: &Peripheral) -> bool {
         .unwrap_or("")
         .to_lowercase()
         .contains("virtio-mmio")
+}
+
+/// The external-RTL bridge occupies the APU's virtio-mmio window; software
+/// still binds it as a plain virtio-mmio transport.
+fn is_apu_bridge(p: &Peripheral) -> bool {
+    p.model
+        .as_deref()
+        .unwrap_or("")
+        .to_lowercase()
+        .contains("apu-bridge")
 }
 
 fn plic_compatible(p: &&Peripheral) -> &'static str {
@@ -1014,6 +1059,70 @@ mod tests {
             v1.prop("compatible").and_then(|p| p.first_string()),
             Some("virtio,mmio")
         );
+    }
+
+    #[test]
+    fn apu_bridge_emits_gpu_node_and_reserved_aperture() {
+        let mut m = TargetModel::new("t");
+        m.soc.dram = Some((0x8000_0000, 0x1000_0000));
+        m.soc.harts_total = 1;
+        m.soc.contexts_per_hart = 1;
+        m.soc.intc_sources = 16;
+        m.soc.intc_targets = 16;
+        m.soc.apu = Some(g6q_core::model::ApuModel {
+            mmio_base: 0x4000_1000,
+            mmio_len: 0x1000,
+            control_base: 0x4000_2000,
+            control_len: 0x1000,
+            irq_source: 9,
+            dma_window_base: 0x8000_0000,
+            dma_window_bytes: 0x1000_0000,
+            shm_base: 0x8200_0000,
+            shm_bytes: 0x0010_0000,
+            shm_id: 1,
+            num_capsets: 1,
+            num_scanouts: 0,
+            num_queues: 2,
+            queue_depth: 64,
+        });
+        m.soc.apu_bridge = true;
+        m.soc.peripherals.push(g6q_core::model::Peripheral {
+            id: "gpu".into(),
+            base: 0x4000_1000,
+            len: 0x1000,
+            model: Some("virtio,mmio".into()),
+            irq: Some(9),
+            ..g6q_core::model::Peripheral::default()
+        });
+        let e = emit_dtb(&m, "0.1.0", "sha256:abc");
+        let c = e.files.iter().find(|f| f.path.ends_with(".c")).unwrap();
+        let blob = extract_blob(&c.contents);
+        let root = g6q_dts::from_blob(&blob).expect("valid blob");
+
+        // The aperture must be a hole in the usable-RAM list, not a
+        // reserved-memory entry (which the kernel registers as a busy iomem
+        // resource and would break virtio_gpu's devm_request_mem_region).
+        assert!(root.child("reserved-memory").is_none());
+        let lo = root.child("memory@80000000").expect("lo memory");
+        let hi = root.child("memory@82100000").expect("hi memory");
+        assert_eq!(
+            lo.prop("reg").and_then(|p| p.cells()).map(|c| (c[1], c[3])),
+            Some((0x8000_0000, 0x0200_0000))
+        );
+        assert_eq!(
+            hi.prop("reg").and_then(|p| p.cells()).map(|c| (c[1], c[3])),
+            Some((0x8210_0000, 0x0df0_0000))
+        );
+
+        let soc = root.child("soc").expect("soc");
+        let gpu = soc.child("gpu@40001000").expect("gpu");
+        assert_eq!(
+            gpu.prop("compatible").and_then(|p| p.first_string()),
+            Some("virtio,mmio")
+        );
+        assert_eq!(gpu.prop("interrupts").and_then(|p| p.u64()), Some(9));
+        // The backend DMAs through the bridge, not a coherent interconnect.
+        assert!(gpu.prop("dma-coherent").is_none());
     }
 
     fn extract_blob(c: &str) -> Vec<u8> {

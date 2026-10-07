@@ -66,8 +66,8 @@ module g6lc_apu_vnrep
   input  logic        start_i,
   input  apu_vn_op_t  op_i,
   input  logic [31:0] result_i,
-  input  logic [64*32-1:0] exec_w_i,
-  input  logic [6:0]  exec_n_i,
+  input  logic [APU_VN_EXEC_WORDS*32-1:0] exec_w_i,
+  input  logic [7:0]  exec_n_i,
   // §7b/5a-ii: per-element null-echo mask for the RBLOB out-id echo
   // of a multi-create (vkCreateComputePipelines).  Element i masked
   // -> its two id payload words echo 0 (VK_NULL_HANDLE).  Driven by
@@ -150,14 +150,14 @@ module g6lc_apu_vnrep
     logic [15:0]   rep_base_q, rep_len_q;
     logic [15:0]   mpc_q;
     logic [15:0]   wpos_q;        // words emitted so far
-    logic [6:0]    ecur_q;        // exec_w cursor
+    logic [7:0]    ecur_q;        // exec_w cursor
     logic [3:0]    cpos_q;        // op.chain[] cursor
     logic [15:0]   cs_base_q;     // command base for RBLOB echo
     logic [31:0]   tmp_q;         // staged second/third emit word
     logic [15:0]   cnt_q;         // remaining loop count
     logic [15:0]   ridx_q;        // loop index (profile copy)
     logic [31:0]   xbuf_cnt_q;    // REXBUF exec count
-    logic [7:0]    aux_q;         // RPTR skip / REXBUF element bytes
+    logic [15:0]   aux_q;         // RPTR skip / REXBUF element bytes
     logic [15:0]   blob_off_q;    // CS read address cursor
     logic          blob_first_q;  // StBlob read-ahead marker
     logic [15:0]   blob_em_q;     // emitted-word index in this blob
@@ -198,7 +198,8 @@ module g6lc_apu_vnrep
     logic [47:0]   chain_w;
     assign chain_w = (cpos_q < op_q.chain_n) &&
                      (32'(op_q.chain[cpos_q[2:0]]) < APU_VN_CHAIN_WORDS)
-                     ? APU_VN_CHAIN[op_q.chain[cpos_q[2:0]]] : 48'h0;
+                     ? APU_VN_CHAIN[op_q.chain[cpos_q[2:0]]
+                                    [APU_VN_CHAIN_AW-1:0]] : 48'h0;
 
     // reply-table scan word (0-terminated entries {mpc, sType})
     logic [47:0]   scan_w;
@@ -216,7 +217,7 @@ module g6lc_apu_vnrep
 
     logic [31:0]   exec_w;
     assign exec_w = ecur_q < exec_n_i
-                    ? exec_w_i[32*ecur_q[5:0] +: 32] : 32'h0;
+                    ? exec_w_i[32*ecur_q +: 32] : 32'h0;
 
     // selected RU32/RU64 source words
     logic [31:0]   src_lo, src_hi;
@@ -234,9 +235,9 @@ module g6lc_apu_vnrep
     always_comb begin
       case (rom_a)
         S_Q:     src_hi = op_q.q[rom_b[2:0]][63:32];
-        default: src_hi = (ecur_q + 7'd1) < exec_n_i &&
+        default: src_hi = (ecur_q + 8'd1) < exec_n_i &&
                           rom_a == S_EXEC
-                          ? exec_w_i[32*(ecur_q[5:0] + 6'd1) +: 32]
+                          ? exec_w_i[32*(ecur_q + 8'd1) +: 32]
                           : 32'h0;
       endcase
     end
@@ -415,15 +416,15 @@ module g6lc_apu_vnrep
                 done_words_q <= '0;
                 state_q      <= StDone;
               end else if (op_i.reply_prog > 8'(APU_VN_REPLY_PROG_MAX) ||
-                           APU_VN_REPLY_ENTRY[op_i.reply_prog[5:0]]
+                           APU_VN_REPLY_ENTRY[op_i.reply_prog[6:0]]
                            == 16'hFFFF ||
-                           32'(APU_VN_REPLY_ENTRY[op_i.reply_prog[5:0]])
+                           32'(APU_VN_REPLY_ENTRY[op_i.reply_prog[6:0]])
                            >= APU_VN_REPLY_ROM_WORDS) begin
                 done_words_q <= '0;
                 fault_q      <= 1'b1;
                 state_q      <= StDone;
               end else begin
-                mpc_q   <= APU_VN_REPLY_ENTRY[op_i.reply_prog[5:0]];
+                mpc_q   <= APU_VN_REPLY_ENTRY[op_i.reply_prog[6:0]];
                 state_q <= StOp;
               end
             end
@@ -455,7 +456,7 @@ module g6lc_apu_vnrep
                       wpos_q <= wpos_q + 16'd1;
                       mpc_q  <= mpc_q + 16'd1;
                       if (rom_op == R_RU32 && rom_a == S_EXEC)
-                        ecur_q <= ecur_q + 7'd1;
+                        ecur_q <= ecur_q + 8'd1;
                     end
                   end
                 end
@@ -470,7 +471,7 @@ module g6lc_apu_vnrep
                       tmp_q   <= src_hi;
                       state_q <= StEmit2;
                       if (rom_a == S_EXEC)
-                        ecur_q <= ecur_q + 7'd2;
+                        ecur_q <= ecur_q + 8'd2;
                     end
                   end
                 end
@@ -496,7 +497,7 @@ module g6lc_apu_vnrep
                     end else begin
                       wpos_q  <= wpos_q + 16'd1;
                       tmp_q   <= 32'h0;
-                      aux_q   <= rom_b[7:0];
+                      aux_q   <= rom_b[15:0];
                       state_q <= StEmit2;
                     end
                   end
@@ -572,9 +573,9 @@ module g6lc_apu_vnrep
                     end else begin
                       tmp_q      <= 32'h0;
                       xbuf_cnt_q <= exec_w;
-                      aux_q      <= rom_b[7:0];
+                      aux_q      <= rom_b[15:0];
                       wpos_q     <= wpos_q + 16'd1;
-                      ecur_q     <= ecur_q + 7'd1;
+                      ecur_q     <= ecur_q + 8'd1;
                       state_q    <= StEmit2;
                     end
                   end
@@ -589,11 +590,11 @@ module g6lc_apu_vnrep
                       state_q      <= StDone;
                     end else if (rom_b == 32'd1) begin
                       wpos_q <= wpos_q + 16'd1;
-                      ecur_q <= ecur_q + 7'd1;
+                      ecur_q <= ecur_q + 8'd1;
                       mpc_q  <= mpc_q + 16'd1;
                     end else begin
                       wpos_q  <= wpos_q + 16'd1;
-                      ecur_q  <= ecur_q + 7'd1;
+                      ecur_q  <= ecur_q + 8'd1;
                       cnt_q   <= 16'(rom_b) - 16'd1;
                       state_q <= StXbuf;
                     end
@@ -636,7 +637,7 @@ module g6lc_apu_vnrep
                 case (rom_op)
                   R_RPTR: begin
                     if (!op_q.pres[rom_a[2:0]])
-                      mpc_q <= mpc_q + 16'd1 + {8'h0, aux_q};
+                      mpc_q <= mpc_q + 16'd1 + 16'(aux_q);
                     else
                       mpc_q <= mpc_q + 16'd1;
                     state_q <= StOp;
@@ -773,7 +774,7 @@ module g6lc_apu_vnrep
                 state_q      <= StDone;
               end else begin
                 wpos_q <= wpos_q + 16'd1;
-                ecur_q <= ecur_q + 7'd1;
+                ecur_q <= ecur_q + 8'd1;
                 if (cnt_q <= 16'd1) begin
                   mpc_q   <= mpc_q + 16'd1;
                   state_q <= StOp;
@@ -857,8 +858,8 @@ module g6lc_apu_vnrep_fixture
   input  logic        start_i,
   input  apu_vn_op_t  op_i,
   input  logic [31:0] result_i,
-  input  logic [64*32-1:0] exec_w_i,
-  input  logic [6:0]  exec_n_i,
+  input  logic [APU_VN_EXEC_WORDS*32-1:0] exec_w_i,
+  input  logic [7:0]  exec_n_i,
   input  logic [31:0] rep_null_mask_i,
   input  logic [15:0] rep_base_i,
   input  logic [15:0] rep_len_i,

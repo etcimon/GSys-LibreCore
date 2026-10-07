@@ -2,6 +2,31 @@
 # Values here seed APU_VN_PROFILE words consumed by reply programs (RCONST).
 # Nothing in this file is asserted to a stock client until the lane qualifies.
 
+# sType values emitted as APU_VN_STYPE_* for executor chain-policy
+# matching even though the struct never reaches a generated table:
+# VkImportMemoryFdInfoKHR carries a plain int fd and is unserializable
+# on the Venus wire, so a client cannot send it — the constant exists so
+# the documented refusal lives with the serializable import refusal.
+named_stypes = ["VkImportMemoryFdInfoKHR"]
+
+# 3d-b: non-bool chained property structs admitted to the dec/rep chain
+# tables with all-zero reply bodies ("not implemented" — the device is
+# Vulkan 1.1, so every 1.2+ rollup reports no capability).  All-VkBool32
+# feature structs need no entry: they are admitted unconditionally and
+# answer all-zero / FLAGS-validated by construction.
+zero_bodies = [
+    "VkPhysicalDeviceVulkan11Properties",
+    "VkPhysicalDeviceVulkan12Properties",
+    "VkPhysicalDeviceVulkan13Properties",
+    "VkPhysicalDeviceVulkan14Properties",
+    # VkPhysicalDeviceDriverProperties: all-zero is the truthful renderer
+    # answer — no renderer-side driver identity is claimed (unqualified
+    # device).  Mesa overrides driverName="venus"/driverID=MESA_VENUS and
+    # hashes driverUUID from its own strings at sanitize time, so the
+    # wire body is never seen by the application.
+    "VkPhysicalDeviceDriverProperties",
+]
+
 [device]
 apiVersion = "1.1.0"
 driverVersion = 0
@@ -53,10 +78,58 @@ minImageTransferGranularity = [1, 1, 1]
 color = ["R8G8B8A8_UNORM", "B8G8R8A8_UNORM", "R16G16B16A16_SFLOAT", "R32_SFLOAT", "R32G32B32A32_SFLOAT"]
 depth = ["D32_SFLOAT", "D24_UNORM_S8_UINT"]
 
+[device_extensions]
+# vkEnumerateDeviceExtensionProperties elements.  In the Venus model the
+# renderer's KHR_external_memory_fd is how device memory becomes a
+# guest-mappable blob (host alloc exported as an fd, mmap'd into the
+# host-visible window).  LibreCore's aperture blob — RESOURCE_CREATE_BLOB
+# (blob_id = memory id) mapping the memory's pages onto the SHM window —
+# is that mechanism natively; no fd ever crosses the wire
+# (vkGetMemoryFdKHR / vkGetMemoryFdPropertiesKHR are guest-side Mesa
+# calls, vn_renderer_bo_export_dma_buf is a kernel ioctl).  This is a
+# truthful capability statement, not a vacuous name.
+"VK_KHR_external_memory_fd" = 1
+# KHR_driver_properties (promoted to Vulkan 1.2): the device answers the
+# query — VkPhysicalDeviceDriverProperties rides the props2 chain with
+# the zero_bodies entry above — so the capability statement is truthful;
+# Mesa sanitizes the real values (driverName "venus", driverID
+# VK_DRIVER_ID_MESA_VENUS) over the wire body before the app sees them.
+"VK_KHR_driver_properties" = 1
+
+[subgroup]
+# VkPhysicalDeviceSubgroupProperties — ShaderLanes = 8 SIMT lanes.
+subgroupSize = 8
+supportedStages = "COMPUTE"
+supportedOperations = "BASIC"
+quadOperationsInAllStages = false
+
+[maintenance3]
+# VkPhysicalDeviceMaintenance3Properties — allocation bound is the SHM
+# aperture (APU_SHM_BYTES = 32 MiB); descriptor sets cap at 4096 per set.
+maxPerSetDescriptors = 4096
+maxMemoryAllocationSize = 0x2000000
+
+[image_format_props]
+# VkImageFormatProperties body for a supported 2D image.
+maxMipLevels = 13
+maxArrayLayers = 1
+maxResourceSize = 0x2000000
+sampleCounts = 1
+
+[cap."vkAllocateMemory"]
+# Chained pNext members captured into the op record's imm[] for the
+# front-end executor's allocation policy (handleTypes must subset
+# OPAQUE_FD, allocate-flags must be 0).
+fields = ["VkExportMemoryAllocateInfo.handleTypes",
+          "VkMemoryAllocateFlagsInfo.flags"]
+
 [flag_masks]
 # FLAGS decode rejects any bit outside these masks (per field type).
-VkBufferUsageFlags = "TRANSFER_SRC|TRANSFER_DST|UNIFORM_TEXEL_BUFFER|STORAGE_TEXEL_BUFFER|UNIFORM_BUFFER|STORAGE_BUFFER|INDEX_BUFFER|VERTEX_BUFFER|INDIRECT_BUFFER"
-VkImageUsageFlags = "TRANSFER_SRC|TRANSFER_DST|SAMPLED|STORAGE|COLOR_ATTACHMENT|DEPTH_STENCIL_ATTACHMENT"
+# "ALL" = every spec-defined enum bit — protocol-validity only; semantic
+# support is the executor's decision (e.g. APU_VN_FMT_USAGE for image
+# format properties), so format/usage probes may ask any combination.
+VkBufferUsageFlags = "ALL"
+VkImageUsageFlags = "ALL"
 
 [capset_venus]
 # struct virgl_renderer_capset_venus (Mesa 26.0.8 src/virtio/virtio-gpu/
@@ -190,3 +263,19 @@ fields = ["dstOffset", "size"]
 [keep.vkCmdUpdateBuffer]
 # {dstOffset (2w), dataSize (2w), pData words}
 fields = ["dstOffset", "dataSize", "pData"]
+
+# 3d-b: the *Memory2 bind commands carry their resource/memory handles
+# inside the pBindInfos array elements — per-element handles cannot fit
+# the fixed q-slots (the generator maps both to slot 7 and the memory
+# wins).  Keep {resource, memory, memoryOffset} per element so vnfront
+# can walk the staged triples and LOOKUP/SETBIND each itself;
+# bindInfoCount stays in imm[0].
+[keep.vkBindBufferMemory2]
+# per pBindInfos element {buffer (2w), memory (2w), memoryOffset (2w)}
+fields = ["pBindInfos.buffer", "pBindInfos.memory",
+          "pBindInfos.memoryOffset"]
+
+[keep.vkBindImageMemory2]
+# per pBindInfos element {image (2w), memory (2w), memoryOffset (2w)}
+fields = ["pBindInfos.image", "pBindInfos.memory",
+          "pBindInfos.memoryOffset"]

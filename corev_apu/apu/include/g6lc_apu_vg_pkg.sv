@@ -23,16 +23,26 @@ package g6lc_apu_vg_pkg;
 
   localparam int unsigned APU_VG_MAX_DESC = 4;
 
-  // Guest-physical base of the 1 MiB Venus shared-memory window the
-  // aperture allocator carves into 4 KiB pages.  Must equal the
-  // virtio-mmio ShmEn SHM id 1 (HOST_VISIBLE) base published by
-  // g6lc_apu_virtio_mmio; kept local so the vg engines do not depend
-  // on g6lc_apu_pkg.
-  localparam logic [63:0] APU_VG_SHM_BASE = 64'h8200_0000;
+  // Guest-physical base/extent of the Venus shared-memory window the
+  // aperture allocator carves into pages.  Must equal the
+  // virtio-mmio ShmEn SHM id 1 (HOST_VISIBLE) window published by
+  // g6lc_apu_virtio_mmio (APU_SHM_BASE/APU_SHM_BYTES); kept local so
+  // the vg engines do not depend on g6lc_apu_pkg.  The guest kernel's
+  // shm drm_mm packs MAP_BLOB offsets at guest-page (4 KiB) density, so
+  // the allocator bitmap tracks 4 KiB pages — 8192 flops for 32 MiB.
+  localparam logic [63:0] APU_VG_SHM_BASE  = 64'h8200_0000;
+  localparam logic [63:0] APU_VG_SHM_BYTES = 64'h0200_0000;
+  localparam int unsigned APU_VG_PAGES     = 8192;
+  localparam int unsigned APU_VG_PAGE_BYTES =
+      32'(APU_VG_SHM_BYTES / APU_VG_PAGES);
+  // aperture word-address width (aperture-relative byte offset >> 2)
+  localparam int unsigned APU_VG_AP_WORD_W = $clog2(32'(APU_VG_SHM_BYTES / 4));
 
   // ---- virtio_gpu_ctrl_type / response types (UAPI) ----------------
-  localparam logic [31:0] APU_VG_GET_CAPSET_INFO   = 32'h0107;
-  localparam logic [31:0] APU_VG_GET_CAPSET        = 32'h0108;
+  // UAPI enum order: 0x0107 is RESOURCE_DETACH_BACKING; the capset
+  // commands follow it (GET_CAPSET_INFO 0x0108, GET_CAPSET 0x0109).
+  localparam logic [31:0] APU_VG_GET_CAPSET_INFO   = 32'h0108;
+  localparam logic [31:0] APU_VG_GET_CAPSET        = 32'h0109;
   localparam logic [31:0] APU_VG_CTX_CREATE        = 32'h0200;
   localparam logic [31:0] APU_VG_CTX_DESTROY       = 32'h0201;
   localparam logic [31:0] APU_VG_CTX_ATTACH        = 32'h0202;
@@ -40,7 +50,7 @@ package g6lc_apu_vg_pkg;
   localparam logic [31:0] APU_VG_SUBMIT_3D         = 32'h0207;
   localparam logic [31:0] APU_VG_MAP_BLOB          = 32'h0208;
   localparam logic [31:0] APU_VG_UNMAP_BLOB        = 32'h0209;
-  localparam logic [31:0] APU_VG_CREATE_BLOB       = 32'h010B;
+  localparam logic [31:0] APU_VG_CREATE_BLOB       = 32'h010C;
   localparam logic [31:0] APU_VG_UNREF             = 32'h0102;
 
   localparam logic [31:0] APU_VG_RESP_NODATA       = 32'h1100;

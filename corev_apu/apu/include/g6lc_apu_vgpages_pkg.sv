@@ -8,14 +8,20 @@
 package g6lc_apu_vgpages_pkg;
 
   typedef enum logic [1:0] {
-    APU_VGPAGES_OP_ALLOC = 2'd0,
-    APU_VGPAGES_OP_FREE  = 2'd1
+    APU_VGPAGES_OP_ALLOC    = 2'd0,
+    APU_VGPAGES_OP_FREE     = 2'd1,
+    // reserve the caller-chosen extent (MAP_BLOB: the guest kernel owns
+    // the SHM layout and dictates the window offset); the bitmap marks
+    // every page the extent covers, so coverage may round up to whole
+    // pages while `base` stays the exact byte offset
+    APU_VGPAGES_OP_ALLOC_AT = 2'd2
   } apu_vgpages_op_e;
 
   typedef enum logic [1:0] {
     APU_VGPAGES_OK     = 2'd0,
     APU_VGPAGES_FULL   = 2'd1,
-    APU_VGPAGES_BOUNDS = 2'd2
+    APU_VGPAGES_BOUNDS = 2'd2,
+    APU_VGPAGES_BUSY   = 2'd3   // ALLOC_AT extent overlaps a live alloc
   } apu_vgpages_status_e;
 
   typedef struct packed {

@@ -83,7 +83,7 @@ module g6lc_apu_gcs
     logic [31:0] pay_len_q;
     logic [15:0] uidx_q, desc_q, next_idx;
     logic [7:0] qsize_q, uslot;
-    logic info_q, info_now, wr_busy, pay_rd, len_ok;
+    logic info_q, info_now, wr_busy, pay_rd, len_ok, cmd_len_ok;
     logic avn_req_v, avn_rdy, avn_cpl, avn_ack;
     logic avn_rd_v, avn_rd_r, avn_rsp_v, avn_rsp_r;
     logic [63:0] avn_rd_addr;
@@ -140,13 +140,20 @@ module g6lc_apu_gcs
     assign beat = (remain > 32'(APU_VGPU_BEAT_BYTES)) ? 32'(APU_VGPU_BEAT_BYTES)
                                                       : remain;
     assign wbase = 6'(off_q[7:2]);
+    // Legal command lengths differ per request: GET_CAPSET_INFO is
+    // hdr + cap_set_id + padding (APU_CMS_BYTES), GET_CAPSET additionally
+    // carries cap_set_version (APU_CMS_BYTES + 4). The exact per-command
+    // length is re-checked at FireVcap once the opcode is decoded.
     assign chain_ok = (avn_rec.last_flags & VIRTQ_DESC_F_WRITE) != 16'd0 &&
                       (avn_rec.last_len != 32'd0) &&
                       (avn_rec.last_len[1:0] == 2'd0) &&
                       (avn_rec.last_addr[1:0] == 2'd0) &&
-                      (avn_rec.first_len == 32'(APU_CMS_BYTES)) &&
+                      ((avn_rec.first_len == 32'(APU_CMS_BYTES)) ||
+                       (avn_rec.first_len == 32'(APU_CMS_BYTES) + 32'd4)) &&
                       (avn_rec.first_addr[1:0] == 2'd0) &&
                       (req_q.used_base[1:0] == 2'd0);
+    assign cmd_len_ok = info_now ? (pay_len_q == 32'(APU_CMS_BYTES))
+                                 : (pay_len_q == 32'(APU_CMS_BYTES) + 32'd4);
     assign type_ok = (snap_q[3'd0] == VGPU_CMD_GET_CAPSET_INFO &&
                       snap_q[3'd6] == 32'd0) ||
                      (snap_q[3'd0] == VGPU_CMD_GET_CAPSET);
@@ -297,7 +304,7 @@ module g6lc_apu_gcs
             end
           end
           FireVcap: begin
-            if (!type_ok || !len_ok) begin
+            if (!type_ok || !len_ok || !cmd_len_ok) begin
               cpl_q.status <= APU_GCS_FAULT;
               rec_q.irq <= isr_q[0];
               rec_q.isr <= isr_q;

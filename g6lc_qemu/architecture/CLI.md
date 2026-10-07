@@ -130,6 +130,7 @@ The fixture mask 0xfb is software exploration only, never a live hardware grant.
 | `--intc-sources N` / `--intc-targets N` | from the SoC package | target count bounds total harts |
 | `--uart-model … \|none`, `--uart-freq`, `--uart-baud` | from the device tree | console |
 | `--accel on\|off\|auto` | `auto` from config | accelerator device presence |
+| `--apu-bridge` | off | machine-profile flag; instantiates the external-RTL APU socket bridge at the published virtio-mmio window ([`EMIT.md`](EMIT.md) §3.7). Needs the APU packages on the flist; the socket path is the `sock` device property / `G6LC_APU_RTL_SOCK` |
 | `--accel-cfg FILE` | the design's island configuration package | capability geometry |
 | `--l2 auto\|off\|SIZE` / `--l3 auto\|off\|SIZE` | `auto` | cache levels |
 | `--bootrom BASE:LEN\|none` | `none` | zero-stage boot ROM window (e.g. `0x1000:0xf000`) |

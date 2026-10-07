@@ -188,6 +188,39 @@ present as a driver bug anywhere except where it is.
 When the guard does *not* pass, the machine falls back to `unimplemented-device` for the `ai-island`
 peripheral, so the window still exists for the B2 plugin to observe.
 
+### 3.7 APU RTL bridge (B1, external device)
+
+When the model carries `soc.apu` (ingested from `g6lc_apu_cfg_pkg.sv`'s `ApuVenus` literal and
+`g6lc_apu_pkg.sv`'s `APU_SHM_*`, found via `corev_apu/apu/Flist.apu_soc` on the repo-root path) and
+`--apu-bridge` selects the bridge profile, B1 emits `hw/riscv/g6lc-<target>-apu-bridge.c`: a sysbus
+device that is the QEMU half of the APU RTL-in-the-loop link to the Verilator server
+(`verif/tb/apu/bridge/bridge_main.cpp` in the design tree). Guest virtio-mmio accesses become
+request/reply frames, the device's AXI bursts become `DMA_RD`/`DMA_WR` frames served from
+`address_space_memory`, and IRQ frames drive `qemu_set_irq`. The MMIO wait loop services interleaved
+DMA/IRQ frames, so a burst in flight cannot deadlock the access that triggered it.
+
+The window is *not* a new peripheral entry: the board tree already names the APU transport a
+`gpu@` node with `compatible = "virtio,mmio"`. With the flag set, `merged_peripherals()` retags that
+node's model to `g6lc,apu-bridge`, the machine creates the socket device in its place, and the FDT
+still renders `virtio,mmio` — without `dma-coherent`, because the backend's DMA goes through the
+bridge, not a coherent interconnect. The host-visible shared-memory aperture
+(`APU_SHM_BASE`/`APU_SHM_BYTES`, DRAM in the design) is carved out of the `memory@` nodes entirely:
+any in-memory description (System RAM or a `reserved-memory` child) registers a busy iomem resource
+and makes `virtio_gpu`'s `devm_request_mem_region` fail `-EBUSY`. QEMU's DRAM `MemoryRegion` still
+backs the aperture physically, so device DMA and the guest's device mmap see real memory while the
+kernel linear map has a hole there. Because a `-kernel` image loaded at `dram_base + 2 MiB` can
+physically span that hole (its BSS pages would be unreachable through the linear map), the emitted
+machine relocates `kernel_start_addr` to the end of the aperture whenever the aperture lies inside
+DRAM. With the flag clear the node is a plain (unbound) `virtio,mmio` window, unchanged.
+
+The socket path is a `sock` device property, falling back to `G6LC_APU_RTL_SOCK` and then
+`/tmp/g6lc-apu-rtl.sock`. Frame types, the length-prefixed layout and the strobed-DMA encoding are
+the *bridge ABI* shared with the RTL testbench — they are named once in the generated C header
+comment and in `bridge_main.cpp`, not read from the design, because they describe the cable between
+the two simulators rather than anything the hardware publishes. `g6q.py install-qemu` forwards
+`--apu-bridge` to the generator; `build.rs` adds the file to the machine's `riscv_ss` block under
+the same `enabled()` guard.
+
 ---
 
 ## 4. B2 — TCG plugins

@@ -139,10 +139,10 @@ module tb_g6lc_apu_vndec;
       check($sformatf("blob%0d", i),
             op.blob[i] === {16'(ev(r,58+2*i)), 17'(ev(r,59+2*i))});
     for (int i = 0; i < 8; i++) begin
-      if (op.chain[i] !== 8'(ev(r,63+i)))
-        $display("     rec %0d chain%0d got=%02x exp=%08x", r, i,
+      if (op.chain[i] !== 16'(ev(r,63+i)))
+        $display("     rec %0d chain%0d got=%04x exp=%08x", r, i,
                  op.chain[i], ev(r,63+i));
-      check($sformatf("chain%0d", i), op.chain[i] === 8'(ev(r,63+i)));
+      check($sformatf("chain%0d", i), op.chain[i] === 16'(ev(r,63+i)));
     end
   endtask
 

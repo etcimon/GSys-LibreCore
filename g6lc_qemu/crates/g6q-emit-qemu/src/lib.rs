@@ -27,6 +27,7 @@
 #![forbid(unsafe_code)]
 
 pub mod ai_island;
+pub mod apu_bridge;
 pub mod build;
 pub mod cpu;
 pub mod dts;

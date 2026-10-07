@@ -165,6 +165,19 @@ class Model:
         self.keep_layout = []    # {path, op, array} per KEEP-marked op
         self.arr_stack = []      # {'path','cnt','src'} enclosing arrays
         self.arr_info = []       # per-command array metadata for docs
+        # 3d-b capture lists: profile['cap'][cmd]['fields'] marks chain-
+        # body members whose u32 value must persist into the op record's
+        # imm[] (allocated from the PARENT scope counter so the executor
+        # can read them); APU_VN_CVAL_* names them in the package.
+        self.cap_cfg = profile.get('cap', {})
+        self.cval_paths = set()
+        self.cval_named = {}   # member path -> persistent imm slot
+        self.saved_slot_cnt = None
+        # sType values collected while building chain tables (dec+rep);
+        # emitted as APU_VN_STYPE_* so executors can match rec['chain']
+        # sTypes.  profile['named_stypes'] adds names that never reach a
+        # generated table (e.g. an unserializable refused struct).
+        self.named_stypes = {}
 
     # ---- registry helpers ---------------------------------------------------
 
@@ -225,6 +238,26 @@ class Model:
             if ty in feat.types:
                 return feat.number in ('1.0', '1.1')
         return False
+
+    def chain_admit(self, nty):
+        """pNext chain-node admission (dec + rep tables).
+
+        3d-b: beyond core <= 1.1 and VK_MESA_venus_protocol nodes, admit
+        all-VkBool32 feature structs at any core version — their request
+        bodies decode into FLAGS ops validated against the profile
+        feature mask (true bit -> FEATURE_NOT_PRESENT) and their reply
+        bodies are all-zero RCONST blocks ("not implemented").  Non-bool
+        property structs join only through the profile 'zero_bodies'
+        allowlist (same truthful all-zero reply)."""
+        if not self.gen.is_serializable(nty):
+            return False
+        if self.core_le_11(nty) or nty.name.endswith('MESA'):
+            return True
+        mem = [v for v in nty.variables
+               if v.name not in ('sType', 'pNext')]
+        if mem and all(v.ty.base.name == 'VkBool32' for v in mem):
+            return True
+        return nty.name in self.profile.get('zero_bodies', [])
 
     def const(self, val):
         val &= 0xFFFFFFFF
@@ -310,6 +343,14 @@ class Model:
             return None
         enum_name = base.requires.name if base.requires else None
         vals = self.enum_ints(enum_name) if enum_name else {}
+        if masks[base.name] == 'ALL':
+            # protocol validity only — every spec-defined bit decodes;
+            # semantic support is decided by the executor (e.g. the
+            # IMGFMT usage check), so queries may probe any combination.
+            mask = 0
+            for v in vals.values():
+                mask |= v
+            return self.const(mask)
         prefix = {'VkBufferUsageFlags': 'VK_BUFFER_USAGE_',
                   'VkImageUsageFlags': 'VK_IMAGE_USAGE_'}[base.name]
         mask = 0
@@ -397,6 +438,22 @@ class Model:
 
     def emit_scalar(self, var, scope, keep=0):
         base = var.ty.base
+        # 3d-b: profile-declared capture — the member's value must reach
+        # the op record's persistent imm[] (chain-body scopes allocate
+        # fresh scratch, so the slot comes from the parent counter).
+        if self.keep_cur in self.cval_paths:
+            if self.scalar_bytes(base) != 4:
+                raise Unfit('cap field %s is not a u32' % self.keep_cur)
+            cnt = self.saved_slot_cnt \
+                if self.saved_slot_cnt is not None else self.slot_cnt
+            slot = cnt['imm']
+            if slot >= MAX_IMM:
+                raise Unfit('cap field %s out of imm slots'
+                            % self.keep_cur)
+            cnt['imm'] = slot + 1
+            self.cval_named[self.keep_cur] = slot
+            self.emit('U32', slot, 0, var.name)
+            return
         size = self.scalar_bytes(base)
         if base.category == vkxml.VkType.BITMASK and size == 4:
             mc = self.flag_mask_const(base)
@@ -693,14 +750,15 @@ class Model:
             # core <= 1.1 candidates plus VK_MESA_venus_protocol chain
             # nodes (VkRingMonitorInfoMESA/VkRingPriorityInfoMESA on
             # VkRingCreateInfoMESA, VkImportMemoryResourceInfoMESA on
-            # VkMemoryAllocateInfo, ...) — Mesa's own pnext tables
-            # accept them on these parents.
-            if not self.gen.is_serializable(nty) or not \
-                    (self.core_le_11(nty) or nty.name.endswith('MESA')):
+            # VkMemoryAllocateInfo, ...), every all-VkBool32 feature
+            # struct, and the profile's zero_bodies allowlist — see
+            # chain_admit() for the honesty argument.
+            if not self.chain_admit(nty):
                 continue
             st = self.stype_values.get(nty.s_type)
             if st is None:
                 continue
+            self.named_stypes[nty.name] = st
             pkey = ('body', nty.name, bool(partial))
             if pkey not in self.progs:
                 self.progs[pkey] = None
@@ -712,7 +770,8 @@ class Model:
         """Chain-node program: PNEXT continuation + members + RET."""
         saved = (self.prog, self.slot_cnt, self.depth,
                  self._scratch_blob, self.cnt_live, self.cnt_stack,
-                 self.path, self.arr_stack, self.keep_cur)
+                 self.path, self.arr_stack, self.keep_cur,
+                 self.saved_slot_cnt)
         self.prog = []
         self.slot_cnt = {'q': 0, 'imm': 0, 'pres': 0, 'blob': 0}
         self.depth = 1          # scratch scope semantics
@@ -723,6 +782,9 @@ class Model:
         # command keep-list can never reach inside a chain body
         self.path = [ty.name]
         self.arr_stack = []
+        # chain-body captures allocate persistent imm slots from the
+        # parent scope's counter (saved above)
+        self.saved_slot_cnt = saved[1]
         # no PNEXT op here: a chain node's own pNext is the chain
         # continuation consumed by the parent's PNEXT op, not part of
         # the body (Mesa _pnext: pres,stype pairs forward, then bodies
@@ -741,7 +803,8 @@ class Model:
         prog = self.prog
         (self.prog, self.slot_cnt, self.depth,
          self._scratch_blob, self.cnt_live, self.cnt_stack,
-         self.path, self.arr_stack, self.keep_cur) = saved
+         self.path, self.arr_stack, self.keep_cur,
+         self.saved_slot_cnt) = saved
         return prog
 
     # ---- command program ----------------------------------------------------
@@ -764,7 +827,10 @@ class Model:
         self.blob_map = {}
         self.q_info = []      # (slot, var name, role) at top scope
         self.path = []
+        self.saved_slot_cnt = None
         self.keep_paths = set(self.keep_cfg.get(name, {}).get(
+            'fields', []))
+        self.cval_paths = set(self.cap_cfg.get(name, {}).get(
             'fields', []))
         self.keep_seen = set()
         self.keep_layout = []
@@ -988,12 +1054,12 @@ class Model:
         entries = []
         self.chain_list.append({'key': key, 'entries': entries})
         for nty in ty.p_next:
-            if not self.gen.is_serializable(nty) or not \
-                    (self.core_le_11(nty) or nty.name.endswith('MESA')):
+            if not self.chain_admit(nty):
                 continue
             st = self.stype_values.get(nty.s_type)
             if st is None:
                 continue
+            self.named_stypes[nty.name] = st
             # reply chain bodies are keyed by (node, parent): Mesa's
             # *_pnext walks the whole chain against the PARENT's
             # candidate set, so a node's continuation must look the next
@@ -1053,6 +1119,49 @@ class Model:
             return self.struct_words(base, depth)
         sz = self.scalar_bytes(base)
         return (sz + 3) // 4 if sz else 1
+
+    def zero_member_words(self, var, out):
+        """Append one member's all-zero body, preserving the u64
+        array_size(dim) marker a static array carries on the wire and
+        any union default tag (mirrors member_skeleton in
+        vn_golden.py)."""
+        base = var.ty.base
+        cat = base.category
+        if var.ty.is_static_array():
+            dim_s = var.ty.static_array_size()
+            try:
+                dim = int(str(dim_s), 0)
+            except ValueError:
+                dim = self.const_int(dim_s)
+            out += [dim, 0]
+            if cat in (vkxml.VkType.STRUCT, vkxml.VkType.UNION):
+                for _ in range(dim):
+                    self.zero_struct_words(base, out)
+            else:
+                out += [0] * ((dim * self.scalar_bytes(base) + 3) // 4)
+            return
+        if cat == vkxml.VkType.UNION:
+            tag = vn_protocol.Gen.UNION_DEFAULT_TAGS.get(base.name)
+            if tag is None:
+                out += [0] * (self.struct_words(base) or 0)
+                return
+            out.append(tag)
+            self.zero_member_words(base.variables[tag], out)
+            return
+        if cat == vkxml.VkType.STRUCT:
+            self.zero_struct_words(base, out)
+            return
+        sz = self.scalar_bytes(base)
+        out += [0] * ((sz + 3) // 4 if sz else 1)
+
+    def zero_struct_words(self, ty, out=None):
+        if out is None:
+            out = []
+        for var in ty.variables:
+            if var.name in ('sType', 'pNext'):
+                continue
+            self.zero_member_words(var, out)
+        return out
 
     def profile_block(self, words):
         key = tuple(words)
@@ -1127,7 +1236,7 @@ class Model:
         if name == 'VkPhysicalDeviceProperties':
             d = p.get('device', {})
             ver = str(d.get('apiVersion', '0.0.0')).split('.')
-            api = (int(ver[0]) << 29) | (int(ver[1]) << 22) | int(ver[2])
+            api = (int(ver[0]) << 22) | (int(ver[1]) << 12) | int(ver[2])
             dt = self.enum_ints('VkPhysicalDeviceType')
             words = [api, int(d.get('driverVersion', 0)),
                      int(d.get('vendorID', 0)), int(d.get('deviceID', 0)),
@@ -1145,6 +1254,55 @@ class Model:
             words += self.profile_words(
                 self.reg.type_table['VkPhysicalDeviceSparseProperties'])
             return words
+        # 3d-b: chained reply property structs.  Static device constants
+        # become RCONST blocks (positional exec words would otherwise
+        # carry VkPhysicalDeviceProperties garbage).
+        if name == 'VkPhysicalDeviceIDProperties':
+            # {uuid u64-markered arrays, nodeMask, luidValid} — zeros;
+            # Mesa derives the real UUIDs itself by hashing
+            # pipelineCacheUUID + vendorID + deviceID + driverName.
+            # The array_size markers are ELEMENT counts on the wire
+            # (vn_decode_array_size fatals on any other value):
+            # VK_UUID_SIZE 16 / VK_LUID_SIZE 8.
+            return [16, 0] + [0] * 4 + [16, 0] + [0] * 4 \
+                + [8, 0] + [0] * 2 + [0, 0]
+        if name == 'VkPhysicalDeviceMaintenance3Properties':
+            m3 = p.get('maintenance3', {})
+            sz = int(m3.get('maxMemoryAllocationSize', 0))
+            return [int(m3.get('maxPerSetDescriptors', 0)),
+                    sz & 0xFFFFFFFF, (sz >> 32) & 0xFFFFFFFF]
+        if name == 'VkPhysicalDeviceMultiviewProperties':
+            mv = p.get('multiview', {})
+            return [int(mv.get('maxMultiviewViewCount', 0)),
+                    int(mv.get('maxMultiviewInstanceIndex', 0))]
+        if name == 'VkPhysicalDevicePointClippingProperties':
+            # VK_POINT_CLIPPING_BEHAVIOR_ALL_CLIP_PLANES
+            return [0]
+        if name == 'VkPhysicalDeviceSubgroupProperties':
+            sg = p.get('subgroup', {})
+            stg = self.enum_ints('VkShaderStageFlagBits')
+            sop = self.enum_ints('VkSubgroupFeatureFlagBits')
+            sv = 0
+            for t in str(sg.get('supportedStages', 'COMPUTE'))\
+                    .split('|'):
+                sv |= stg['VK_SHADER_STAGE_' + t + '_BIT']
+            ov = 0
+            for t in str(sg.get('supportedOperations', 'BASIC'))\
+                    .split('|'):
+                ov |= sop['VK_SUBGROUP_FEATURE_' + t + '_BIT']
+            return [int(sg.get('subgroupSize', 8)), sv, ov,
+                    1 if sg.get('quadOperationsInAllStages', False)
+                    else 0]
+        # 3d-b: profile 'zero_bodies' allowlist — non-bool chained
+        # property structs whose truthful answer is all zeros
+        # ("not implemented"; the device is Vulkan 1.1).  The u64
+        # array_size(dim) markers every static member array carries on
+        # the wire are structural, not data: they must survive the zero
+        # fill or Mesa's vn_decode_array_size fatals the reply.
+        if name in self.profile.get('zero_bodies', []):
+            zn = self.struct_words(ty)
+            if zn is not None:
+                return self.zero_struct_words(ty)
         # all-bool feature structs (chained onto *Features2): all-zero block
         members = [v for v in ty.variables
                    if v.name not in ('sType', 'pNext')]
@@ -1190,6 +1348,132 @@ class Model:
             v = int(val) & 0xFFFFFFFFFFFFFFFF
             return [v & 0xFFFFFFFF, (v >> 32) & 0xFFFFFFFF]
         return [self.num_word(base, val)]
+
+    # ---- 3d-b executor reply constants ----------------------------------------
+
+    def flag_bits(self, names, enum_name, prefix, suffix):
+        ei = self.enum_ints(enum_name)
+        v = 0
+        for t in str(names).split('|'):
+            v |= ei[prefix + t + suffix]
+        return v
+
+    def ext_props_payload(self):
+        """vkEnumerateDeviceExtensionProperties element payload: per
+        [device_extensions] entry {u64 256, extensionName[64w],
+        specVersion}."""
+        payload = []
+        for ename, specv in self.profile.get(
+                'device_extensions', {}).items():
+            nm = ename.encode()
+            assert len(nm) <= 256
+            nm += b'\0' * (256 - len(nm))
+            payload += [256, 0]
+            payload += [int.from_bytes(nm[i:i + 4], 'little')
+                        for i in range(0, 256, 4)]
+            payload += [int(specv)]
+        return payload
+
+    def exec_words_count(self):
+        """vnrep exec buffer size in words: profile front + the largest
+        REXBUF payload the executor may stage (ext props 67/ext, one
+        VkPhysicalDeviceGroupProperties element 71), rounded up to 8."""
+        n = max(64, 2 + 71, 2 + len(self.ext_props_payload()))
+        return (n + 7) & ~7
+
+    def qf2_elt(self):
+        """vkGetPhysicalDeviceQueueFamilyProperties2 reply element:
+        {sType, u64 NULL pNext, VkQueueFamilyProperties}."""
+        st = self.stype_values[
+            self.reg.type_table['VkQueueFamilyProperties2'].s_type]
+        return [st, 0, 0] + self.profile_words(
+            self.reg.type_table['VkQueueFamilyProperties'])
+
+    def pdgrp_elt(self):
+        """vkEnumeratePhysicalDeviceGroups reply element for our single
+        group: {sType, u64 NULL, 1 device, u64 arr-size, 32 ids,
+        no subset}.  The executor patches the first id (word offset
+        PDID_OFF) with the registered physical-device id."""
+        st = self.stype_values[
+            self.reg.type_table[
+                'VkPhysicalDeviceGroupProperties'].s_type]
+        return [st, 0, 0, 1, 32, 0] + [0] * 64 + [0]
+
+    # element word offset of physicalDevices[0] inside pdgrp_elt
+    PDID_OFF = 6
+
+    def fmt3(self):
+        """APU_VN_FMT3[256*3]: per VkFormat {linear, optimal, buffer}
+        feature masks mirrored from [formats]; unsupported = zeros."""
+        ff = self.enum_ints('VkFormatFeatureFlagBits')
+        fe = self.enum_ints('VkFormat')
+        fmt = self.profile.get('formats', {})
+        color = self.flag_bits(
+            'SAMPLED_IMAGE|COLOR_ATTACHMENT|BLIT_SRC|BLIT_DST|'
+            'TRANSFER_SRC|TRANSFER_DST',
+            'VkFormatFeatureFlagBits', 'VK_FORMAT_FEATURE_', '_BIT')
+        depth = self.flag_bits(
+            'SAMPLED_IMAGE|DEPTH_STENCIL_ATTACHMENT|TRANSFER_SRC|'
+            'TRANSFER_DST', 'VkFormatFeatureFlagBits',
+            'VK_FORMAT_FEATURE_', '_BIT')
+        tbl = [0] * 768
+        for nm, bits in ((fmt.get('color', []), color),
+                         (fmt.get('depth', []), depth)):
+            for n in nm:
+                f = fe['VK_FORMAT_' + n]
+                tbl[3 * f:3 * f + 3] = [bits, bits, bits]
+        return tbl
+
+    def fmt_usage(self):
+        """APU_VN_FMT_USAGE[256]: per VkFormat allowed VkImageUsageFlags
+        for vkGetPhysicalDeviceImageFormatProperties2.  A usage bit is
+        allowed when the format's optimal-tiling features claim the
+        capability it exercises (fixed spec mapping, resolved here at
+        generation time); TRANSIENT_ATTACHMENT has no feature gate but
+        requires a LAZILY_ALLOCATED memory type we do not advertise, so
+        it is never allowed.  Unsupported formats map to 0."""
+        fu = self.enum_ints('VkImageUsageFlagBits')
+        f3 = self.fmt3()
+        u2f = self.enum_ints('VkFormatFeatureFlagBits')
+        usage_to_feature = {
+            'VK_IMAGE_USAGE_TRANSFER_SRC_BIT':
+                'VK_FORMAT_FEATURE_TRANSFER_SRC_BIT',
+            'VK_IMAGE_USAGE_TRANSFER_DST_BIT':
+                'VK_FORMAT_FEATURE_TRANSFER_DST_BIT',
+            'VK_IMAGE_USAGE_SAMPLED_BIT':
+                'VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT',
+            'VK_IMAGE_USAGE_STORAGE_BIT':
+                'VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT',
+            'VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT':
+                'VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT',
+            'VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT':
+                'VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT',
+            'VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT':
+                'VK_FORMAT_FEATURE_INPUT_ATTACHMENT_BIT',
+        }
+        tbl = [0] * 256
+        for f in range(256):
+            opt = f3[3 * f + 1]
+            m = 0
+            for uname, fname in usage_to_feature.items():
+                if uname in fu and fname in u2f and \
+                        opt & u2f[fname]:
+                    m |= fu[uname]
+            tbl[f] = m
+        return tbl
+
+    def imgprops_words(self):
+        """vkGetPhysicalDeviceImageFormatProperties2 body for a
+        supported 2D image: extent/mip/layers/size/samples."""
+        lim = self.profile.get('limits', {})
+        ip = self.profile.get('image_format_props', {})
+        d2 = int(lim.get('maxImageDimension2D', 4096))
+        sz = int(ip.get('maxResourceSize', 0))
+        return [d2, d2, 1,
+                int(ip.get('maxMipLevels', 1)),
+                int(ip.get('maxArrayLayers', 1)),
+                sz & 0xFFFFFFFF, (sz >> 32) & 0xFFFFFFFF,
+                int(ip.get('sampleCounts', 1))]
 
     # ---- driver ---------------------------------------------------------------
 
@@ -1423,6 +1707,72 @@ def emit_sv(model, asm, profile):
     arr(32, 'APU_VN_CAPSET', '[0:APU_VN_CAPSET_WORDS-1]',
         cap, lambda w: "32'h%08X" % w)
     A('')
+
+    def packed(width, name, words):
+        """Packed concat literal, word 0 at bits [31:0] (SV lists MSB
+        first)."""
+        if not words:
+            A('  localparam logic [%d:0] %s = %d\'h0;'
+              % (width - 1, name, width))
+            return
+        A('  localparam logic [%d:0] %s = {' % (width - 1, name))
+        body = ["32'h%08X" % (w & 0xFFFFFFFF) for w in reversed(words)]
+        for i in range(0, len(body), 4):
+            row = body[i:i + 4]
+            comma = ',' if i + 4 < len(body) else ''
+            A('    ' + ', '.join(row) + comma)
+        A('  };')
+
+    # 3d-b: device extension table for
+    # vkEnumerateDeviceExtensionProperties (REXBUF element payload).
+    ep = model.ext_props_payload()
+    A('  localparam int APU_VN_DEV_EXT_COUNT = %d;'
+      % len(model.profile.get('device_extensions', {})))
+    A('  localparam int APU_VN_EXT_PROPS_WORDS = %d;' % len(ep))
+    packed(len(ep) * 32 or 32, 'APU_VN_EXT_PROPS', ep)
+    A('')
+    # vnrep exec buffer depth: profile front + largest staged REXBUF
+    A('  localparam int APU_VN_EXEC_WORDS = %d;'
+      % model.exec_words_count())
+    A('')
+    # single-queue-family reply skeletons (word 0 at [31:0])
+    packed(len(model.qf2_elt()) * 32, 'APU_VN_QF2_ELT', model.qf2_elt())
+    ge = model.pdgrp_elt()
+    packed(len(ge) * 32, 'APU_VN_PDGRP_ELT', ge)
+    A('  localparam int APU_VN_PDGRP_PD_LO = %d;'
+      % (2 + Model.PDID_OFF))
+    A('  localparam int APU_VN_PDGRP_PD_HI = %d;'
+      % (3 + Model.PDID_OFF))
+    A('')
+    packed(len(model.imgprops_words()) * 32, 'APU_VN_IMGPROPS',
+           model.imgprops_words())
+    A('')
+    f3 = model.fmt3()
+    A('  localparam int APU_VN_FMT3_WORDS = %d;' % len(f3))
+    arr(32, 'APU_VN_FMT3', '[0:APU_VN_FMT3_WORDS-1]',
+        f3, lambda w: "32'h%08X" % w)
+    A('')
+    fu = model.fmt_usage()
+    A('  localparam int APU_VN_FMT_USAGE_WORDS = %d;' % len(fu))
+    arr(32, 'APU_VN_FMT_USAGE', '[0:APU_VN_FMT_USAGE_WORDS-1]',
+        fu, lambda w: "32'h%08X" % w)
+    A('')
+    # sType ids for every generated chain-table node + profile-declared
+    # names — executors match rec['chain'] sTypes against these
+    for n in model.profile.get('named_stypes', []):
+        sty = model.reg.type_table[n].s_type
+        model.named_stypes[n] = model.stype_values[sty]
+    for n, st in sorted(model.named_stypes.items()):
+        A('  localparam int APU_VN_STYPE_%s = %d;'
+          % (model.reg.upper_name(n), st))
+    A('')
+    # profile-declared captured member slots (op_q.imm indices)
+    for path, slot in sorted(model.cval_named.items()):
+        n = '_'.join(
+            model.reg.upper_name(t)
+            for t in path.replace('[0]', '').split('.'))
+        A('  localparam int APU_VN_CVAL_%s = %d;' % (n, slot))
+    A('')
     # generated index widths (clog2 of each table's word count); RTL must
     # index generated ROMs/tables through these, not hard-coded slices
     A('  localparam int APU_VN_DEC_MPC_AW = '
@@ -1516,7 +1866,7 @@ def emit_sv(model, asm, profile):
     A('    logic [31:0] cnt [4];')
     A('    apu_vn_blob_t blob [2];')
     A('    logic [7:0]  pres;')
-    A('    logic [7:0]  chain [8];')
+    A('    logic [15:0] chain [8];')
     A('    logic [3:0]  chain_n;')
     A('    logic [5:0]  obj_kind;')
     A('    logic [7:0]  reply_prog;')

@@ -7,10 +7,11 @@
   "A5 CTX_ATTACH reply blob",
   "A6 SUBMIT_3D[vkCreateRingMESA ring0 + RingMonitorInfo]",
   "ring0 created slot=0",
+  "A6b SUBMIT_3D size=0 (stock Mesa sync-only execbuffer)",
   "B' segment A1: device, 2 buffers+mems, module, layouts, pipeline",
   "B' segment A2: descriptors, cmdbuf, dispatch, fence",
   "B' segment B: QueueSubmit + waits",
-  "B' gates: 32 output words checked (model-only oracle)",
+  "B' gates: 16 output words checked (model-only oracle)",
   "B' segment C: teardown",
   "D RESOURCE_UNREF exec blob, CTX_DESTROY ctx=4 -> live 0",
   "compute teardown complete"
@@ -92,7 +93,7 @@
   "ring0 vkDestroyDevice head=5140",
   "ring0 vkDestroyInstance head=5164"
  ],
- "tape_words": 6035,
- "exp_records": 267,
- "note": "descoob: Gate-2 oracle is the spirv_model run with binding 1 clamped to 128 B at +128 (inflated descriptor range); no lavapipe comparison for this vector"
+ "tape_words": 6180,
+ "exp_records": 261,
+ "note": "descoob: Gate-2 oracle is the spirv_model run with binding 1 clamped to 64 B at +64 (inflated descriptor range); no lavapipe comparison for this vector"
 }

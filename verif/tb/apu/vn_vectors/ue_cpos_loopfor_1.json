@@ -7,6 +7,7 @@
   "A5 CTX_ATTACH reply blob",
   "A6 SUBMIT_3D[vkCreateRingMESA ring0 + RingMonitorInfo]",
   "ring0 created slot=0",
+  "A6b SUBMIT_3D size=0 (stock Mesa sync-only execbuffer)",
   "B' segment A1: device, 2 buffers+mems, module, layouts, pipeline",
   "B' segment A2: descriptors, cmdbuf, dispatch, fence",
   "B' segment B: QueueSubmit + waits",
@@ -92,6 +93,6 @@
   "ring0 vkDestroyDevice head=5704",
   "ring0 vkDestroyInstance head=5728"
  ],
- "tape_words": 6112,
- "exp_records": 267
+ "tape_words": 6257,
+ "exp_records": 277
 }

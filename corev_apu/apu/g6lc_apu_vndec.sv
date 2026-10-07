@@ -129,7 +129,7 @@ module g6lc_apu_vndec
     logic [31:0]   imm_q [16];
     logic [31:0]   cnt_q [4];
     apu_vn_blob_t  blob_q [2];
-    logic [7:0]    chain_q [8];
+    logic [15:0]   chain_q [8];
     logic [7:0]    qv_q, pres_q; // op_o.qv / .pres (see note above)
     logic [15:0]   immv_q;       // op_o.immv
     logic [31:0]   tmp_q;        // low word of a pending u64
@@ -821,7 +821,7 @@ module g6lc_apu_vndec
               rec_q.words      <= pos_q;
               state_q          <= StDone;
             end else if (cs_re_o && cs_ready_i) begin
-              chain_q[rec_q.chain_n[2:0]] <= 8'(scan_q);
+              chain_q[rec_q.chain_n[2:0]] <= 16'(scan_q);
               rec_q.chain_n                   <= rec_q.chain_n + 4'd1;
               body_q[body_n_q[2:0]]           <= chain_w[47:32];
               body_n_q                        <= body_n_q + 4'd1;

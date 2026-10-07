@@ -147,13 +147,16 @@ module g6lc_apu_objtab
       .wdata_i(dir_wdata), .be_i('1), .rdata_o(dir_rdata)
     );
 
-    // XOR-fold the 64-bit id down to DirBits.
+    // Multiplicative (Fibonacci) hash of the 64-bit id down to
+    // DirBits.  Driver ids are sequential and structured — Mesa's
+    // dense object counters, the virtio resource ids, and tagged
+    // namespaces — so an XOR-fold lands them in consecutive buckets;
+    // a single run of 8 live buckets trips the probe cap and reports
+    // a spurious FULL.  Knuth's golden-ratio multiplier scatters
+    // sequential ids uniformly, making that unreachable in practice.
     function automatic logic [DirBits-1:0] dir_hash(logic [63:0] id);
-      logic [DirBits-1:0] h;
-      h = '0;
-      for (int c = 0; c < 64; c += DirBits)
-        h ^= DirBits'(id >> c);
-      return h;
+      return DirBits'((id * 64'h9E37_79B9_7F4A_7C15) >>
+                      (64 - DirBits));
     endfunction
 
     logic        bk_valid, bk_tomb;
@@ -290,7 +293,10 @@ module g6lc_apu_objtab
       probe_base_q <= dir_hash(id);
       tomb_v_q     <= 1'b0;
       res_bkv_q    <= 1'b0;
-      if (hnd_en && id[63:32] == 32'h0) begin
+      // A {gen,slot} handle always has a nonzero gen — gen_next() never
+      // returns 0 — so a 48-bit-or-smaller id with gen==0 is a plain
+      // client id (Mesa numbers objects 1,2,3...), not a handle.
+      if (hnd_en && id[63:32] == 32'h0 && id[31:16] != 16'h0) begin
         res_hdl_q <= 1'b1;
         if (id[15:0] >= Slots) begin
           res_st_q <= ResGen;

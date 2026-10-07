@@ -186,16 +186,17 @@ module tb_g6lc_apu_vgctl;
 
     // ---- A1: GET_CAPSET_INFO idx 0 -------------------------------------
     // hdr 6w {type,flags,fence_lo,fence_hi,ctx,ring} + body {idx,pad}
-    wr(0, 32'h0107); wr(1, 0); wr(2, 0); wr(3, 0); wr(4, 0); wr(5, 0);
+    wr(0, 32'h0108); wr(1, 0); wr(2, 0); wr(3, 0); wr(4, 0); wr(5, 0);
     wr(6, 0); wr(7, 0);
     run_chain(8, 40);
     exp_resp(APU_VG_RESP_CAPSET_INFO);
     check(resp(6) == 4,  "capset id 4");
-    check(resp(7) == 160, "capset size 160");
+    check(resp(7) == 1,  "capset max_version 1");
+    check(resp(8) == 160, "capset size 160");
     check(used_len == 8 * 4 + 40, "capset-info used_len");
 
     // ---- A2: GET_CAPSET id 4 ---------------------------------------------
-    wr(0, 32'h0108); wr(6, 4); wr(7, 0);
+    wr(0, 32'h0109); wr(6, 4); wr(7, 0);
     run_chain(8, 24 + 160);
     exp_resp(APU_VG_RESP_CAPSET);
     check(resp(6) == APU_VN_CAPSET[0], "capset[0] wire fmt");
@@ -211,7 +212,7 @@ module tb_g6lc_apu_vgctl;
     exp_resp(APU_VG_RESP_NODATA);
 
     // ---- A4: CREATE_BLOB valid (rid 10, 8 KiB) ----------------------------
-    wr(0, 32'h010B); wr(4, 4);
+    wr(0, 32'h010C); wr(4, 4);
     wr(6, 10);           // resource_id
     wr(7, APU_VG_BLOB_HOST3D);
     wr(8, APU_VG_BLOB_MAPPABLE);
@@ -254,7 +255,7 @@ module tb_g6lc_apu_vgctl;
     // ---- C3: CREATE_BLOB blob_id != 0, unknown memory -> ERR_RID -----
     // 5a-ii: blob_id != 0 resolves a VkDeviceMemory object of that id;
     // no such object here -> the resource-refusal path (ERR_RID).
-    wr(0, 32'h010B); wr(4, 4);
+    wr(0, 32'h010C); wr(4, 4);
     wr(6, 20); wr(7, APU_VG_BLOB_HOST3D);
     wr(8, APU_VG_BLOB_MAPPABLE); wr(9, 0);
     wr(10, 0); wr(11, 1);          // blob_id = 1<<32 (unknown memory)

@@ -99,7 +99,7 @@ module tb_g6lc_apu_vnpump;
   logic [3:0]       ring_active;
   logic [3:0][31:0] ring_status;
   logic [3:0][31:0] ring_head;
-  logic [3:0][17:0] ring_extra;
+  logic [3:0][APU_VG_AP_WORD_W-1:0] ring_extra;
 
   g6lc_apu_vnpump #(.Enable(1'b1), .Rings(4)) dut (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
@@ -215,7 +215,10 @@ module tb_g6lc_apu_vnpump;
   logic [31:0] apm  [APW];
   function automatic logic [31:0] mp_word(input logic [63:0] a,
                                           input int unsigned w);
-    return mp_dom ? apm[32'((a >> 3) * 2) + w] : gmem[32'((a >> 3) * 2) + w];
+    int unsigned idx = 32'((a >> 3) * 2) + w;
+    if (mp_dom && idx >= APW)
+      $fatal(1, "aperture word %d past dense model (%d)", idx, APW);
+    return mp_dom ? apm[idx] : gmem[idx];
   endfunction
   always @(posedge clk or negedge rst_ni) begin
     if (!rst_ni) begin
@@ -229,9 +232,13 @@ module tb_g6lc_apu_vnpump;
         mp_rv <= 1'b1;
         for (int b = 0; b < 8; b++)
           if (mp_wstrb[b]) begin
-            if (mp_dom)
-              apm[32'((mp_addr >> 3) * 2) + (b >= 4 ? 1 : 0)]
-                 [b[1:0] * 8 +: 8] <= mp_wdata[b * 8 +: 8];
+            if (mp_dom) begin
+              automatic int unsigned idx =
+                  32'((mp_addr >> 3) * 2) + (b >= 4 ? 1 : 0);
+              if (idx >= APW)
+                $fatal(1, "aperture write word %d past dense model", idx);
+              apm[idx][b[1:0] * 8 +: 8] <= mp_wdata[b * 8 +: 8];
+            end
             else
               gmem[32'((mp_addr >> 3) * 2) + (b >= 4 ? 1 : 0)]
                   [b[1:0] * 8 +: 8] <= mp_wdata[b * 8 +: 8];
@@ -583,7 +590,7 @@ module tb_g6lc_apu_vnpump;
     wait_ap(R1_BASE, 32'd28, "T9 ring1 head=28");
     cases++;
     check(apm[R1_BASE + 560] == 32'hdeadbeef, "T9 extra word");
-    check(ring_extra[1] == 18'(R1_BASE + 560), "T9 extra_w");
+    check(ring_extra[1] == APU_VG_AP_WORD_W'(R1_BASE + 560), "T9 extra_w");
 
     // ---- T10: idle timeout publishes IDLE, NotifyRing clears -----------
     wait_ap(R1_BASE + 32, ST_IDLE, "T10 IDLE published");

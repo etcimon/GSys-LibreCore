@@ -78,10 +78,9 @@ module tb_g6lc_apu_objtab;
   endfunction
 
   function automatic logic [DirB-1:0] mhash(logic [63:0] id);
-    logic [DirB-1:0] h;
-    h = '0;
-    for (int c = 0; c < 64; c += DirB) h ^= DirB'(id >> c);
-    return h;
+    logic [63:0] x;
+    x = id * 64'h9E37_79B9_7F4A_7C15;
+    return DirB'(x >> (64 - DirB));
   endfunction
 
   // ---------------- reference model ----------------
@@ -117,13 +116,16 @@ module tb_g6lc_apu_objtab;
   endfunction
 
   // resolve like the DUT (id or handle); status out, slot out.
-  // handle mode only when id[63:32]==0.
+  // handle mode iff id[63:32]==0 and the gen field is nonzero.
   function automatic apu_objtab_status_e m_resolve(
       input logic [63:0] id, input logic [5:0] kind,
       input logic knd_en, output int slot);
     int hb, rb;
     slot = -1;
-    if (id[63:32] == 0) begin
+    // handle form iff id[63:32]==0 and the gen field is nonzero — a
+    // live generation is never 0, so a zero-gen id is a client id and
+    // probes the directory like any other id
+    if (id[63:32] == 0 && id[31:16] != 0) begin
       if (id[15:0] >= Slots) return APU_OBJTAB_GEN;
       slot = int'(id[15:0]);
       if (!me_live[slot] || me_gen[slot] != int'(id[31:16]))
@@ -365,28 +367,23 @@ module tb_g6lc_apu_objtab;
     m_reset;
     do_reset;
     begin
-      logic [63:0] base, deltas [16];
-      int nfull;
-      base = 64'hF000_0000_0000_0000 | 64'(mhash(64'h1));
-      for (int k = 0; k < 4; k++) begin
-        // pairs of bits that fold to the same hash bit cancel out
-      end
-      nfull = 0;
-      for (int n = 0; n < 12; n++) begin
+      logic [63:0] base;
+      int nfull, nfound;
+      base = 64'hF000_0000_0000_0000;
+      nfull = 0; nfound = 0;
+      // brute-force 12 ids landing on base's bucket; the multiplicative
+      // hash scatters sequential candidates, ~1/DirW hit rate
+      for (longint t = 0; t < 200000 && nfound < 12; t++) begin
         logic [63:0] cid;
-        cid = base;
-        for (int k = 0; k < 4; k++)
-          if ((n & (1 << k)) != 0)
-            cid ^= (64'd1 << k) ^ (64'd1 << (k + DirB));
+        cid = base + 64'(t + 1);
         if (cid[63:32] == 0) cid |= 64'h1000_0000_0000_0000;
-        if (mhash(cid) != mhash(base)) begin
-          $display("collision id %0d hash mismatch", n);
-          errors++;
-        end
+        if (mhash(cid) != mhash(base)) continue;
+        nfound++;
         op(mkr(APU_OBJTAB_OP_ALLOC, cid, 6'd6, 0, 8'd9, 0, 0, 0, 0, 0), c);
         if (c.status == APU_OBJTAB_FULL) nfull++;
         else void'(m_alloc(cid, 6'd6, 64'h0, 8'd9, slot, gen));
       end
+      check("collision search", nfound == 12);
       check("collision cap", nfull == 12 - 8);
     end
     cases++;

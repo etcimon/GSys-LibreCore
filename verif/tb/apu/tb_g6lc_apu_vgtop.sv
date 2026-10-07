@@ -47,7 +47,14 @@ module tb_g6lc_apu_vgtop;
 
   localparam int unsigned Rings   = 4;
   localparam int unsigned GMW     = 32'h40000;   // 1 MiB guest RAM
-  localparam int unsigned APW     = 32'h40000;   // 1 MiB aperture
+  localparam int unsigned APW     = 32'h40000;   // dense 1 MiB model
+                                                   // of the 32 MiB window
+  // first-fit allocation keeps every session in the dense range; an
+  // index past it is a tape/model bug — never wrap
+  function automatic int unsigned apix(input int unsigned w);
+    if (w >= APW) $fatal(1, "aperture word %0d past dense model", w);
+    return w;
+  endfunction
   localparam int unsigned TAPEW   = 32'h100000;
   localparam int unsigned EXPW    = 32'h8000;
   localparam int unsigned MAXCYC  = 300_000_000;
@@ -75,7 +82,7 @@ module tb_g6lc_apu_vgtop;
   logic [7:0]      f_ring;
   logic [Rings-1:0]       r_active;
   logic [Rings-1:0][31:0] r_status, r_head;
-  logic [Rings-1:0][17:0] r_extra;
+  logic [Rings-1:0][APU_VG_AP_WORD_W-1:0] r_extra;
   logic [15:0]     ot_live;
   // debug ObjTab (unused; tied off)
   logic            dot_r;
@@ -119,7 +126,7 @@ module tb_g6lc_apu_vgtop;
   g6lc_apu_bus_pkg::apu_dma_axi_resp_t xf_arsp;
   logic            xf_busy;
   localparam logic [63:0] XAB  = g6lc_apu_pkg::APU_SHM_BASE;
-  localparam logic [63:0] XAPB = 64'(APW) * 4;
+  localparam logic [63:0] XAPB = APU_VG_SHM_BYTES;
   logic               xr_act, xr_vld;
   g6lc_apu_bus_pkg::apu_dma_axi_r_chan_t  xrch;
   logic [63:0]        xr_addr;
@@ -172,7 +179,7 @@ module tb_g6lc_apu_vgtop;
         // upper lanes — dma_read's keep mask depends on it
         for (int b = 0; b < 8; b++)
           xrch.data[8*b +: 8] <=
-            i_mem.apm[32'(((xr_addr & ~64'h7) + 64'(b) - XAB) >> 2)]
+            i_mem.apm[apix(32'(((xr_addr & ~64'h7) + 64'(b) - XAB) >> 2))]
                      [8*(((xr_addr & ~64'h7) + 64'(b)) & 64'h3) +: 8];
         xr_vld <= 1;
       end
@@ -201,7 +208,7 @@ module tb_g6lc_apu_vgtop;
         // dma_write strb marks absolute lanes of aw.addr & ~7
         for (int b = 0; b < 8; b++)
           if (xww.strb[b])
-            i_mem.apm[32'(((xwaw.addr & ~64'h7) + 64'(b) - XAB) >> 2)]
+            i_mem.apm[apix(32'(((xwaw.addr & ~64'h7) + 64'(b) - XAB) >> 2))]
                      [8*(((xwaw.addr & ~64'h7) + 64'(b)) & 64'h3) +: 8]
               <= xww.data[8*b +: 8];
         xb_vld <= 1;
@@ -228,7 +235,7 @@ module tb_g6lc_apu_vgtop;
   apu_cmdexec_work_t o_wo;
   logic [Rings-1:0]       o_ra;
   logic [Rings-1:0][31:0] o_rs, o_rh;
-  logic [Rings-1:0][17:0] o_re;
+  logic [Rings-1:0][APU_VG_AP_WORD_W-1:0] o_re;
   logic [15:0]     o_liv;
   apu_objtab_cpl_t o_dotcpl;
   apu_mp_rsp_t [2:0] mp_rsp0 = '{default: '0};
@@ -501,22 +508,22 @@ module tb_g6lc_apu_vgtop;
           int unsigned n = ntap();
           int unsigned al = ntap(), ah = ntap();
           for (int i = 0; i < n; i++)
-            i_mem.apm[((al >> 2) + i) % APW] = ntap();
+            i_mem.apm[apix(((al >> 2) + i))] = ntap();
         end
         4: begin // TP_WAIT_HEAD [ring][ap_addr][exp][tmo]
           int unsigned rg = ntap(), ad = ntap(),
                        eh = ntap(), tmo = ntap();
           int unsigned t = 0;
-          while (i_mem.apm[(ad >> 2) % APW] != eh && t < tmo) begin
+          while (i_mem.apm[apix((ad >> 2))] != eh && t < tmo) begin
             @(posedge clk); t++;
           end
-          if (i_mem.apm[(ad >> 2) % APW] != eh)
+          if (i_mem.apm[apix((ad >> 2))] != eh)
             $display("DBG WAIT_HEAD ring%0d: ap_head=%08x r_head=%08x r_status=%08x",
-                     rg, i_mem.apm[(ad >> 2) % APW], r_head[rg],
+                     rg, i_mem.apm[apix((ad >> 2))], r_head[rg],
                      r_status[rg]);
-          check(i_mem.apm[(ad >> 2) % APW] == eh,
+          check(i_mem.apm[apix((ad >> 2))] == eh,
                 $sformatf("WAIT_HEAD ring%0d ap got=%08x exp=%08x",
-                          rg, i_mem.apm[(ad >> 2) % APW], eh));
+                          rg, i_mem.apm[apix((ad >> 2))], eh));
           check(rec_kind() == 3, "EK_HEAD kind");
           check(expm[ep + 1] == rg && expm[ep + 2] == eh,
                 "EK_HEAD words");
@@ -529,17 +536,17 @@ module tb_g6lc_apu_vgtop;
           int unsigned rg = ntap(), ad = ntap(), mask = ntap(),
                        want = ntap(), tmo = ntap();
           int unsigned t = 0;
-          while (((i_mem.apm[(ad >> 2) % APW] & mask) != want) && t < tmo) begin
+          while (((i_mem.apm[apix((ad >> 2))] & mask) != want) && t < tmo) begin
             @(posedge clk); t++;
           end
-          check((i_mem.apm[(ad >> 2) % APW] & mask) == want,
+          check((i_mem.apm[apix((ad >> 2))] & mask) == want,
                 $sformatf("WAIT_IDLE ring%0d status=%08x mask=%0d want=%0d",
-                          rg, i_mem.apm[(ad >> 2) % APW], mask, want));
+                          rg, i_mem.apm[apix((ad >> 2))], mask, want));
           check(rec_kind() == 4, "EK_STATUS kind");
           check(r_status[rg] == expm[ep + 2],
                 $sformatf("ring_status_o got=%08x exp=%08x",
                           r_status[rg], expm[ep + 2]));
-          check(i_mem.apm[(ad >> 2) % APW] == expm[ep + 2],
+          check(i_mem.apm[apix((ad >> 2))] == expm[ep + 2],
                 "aperture status == exp");
           ep += 8;
         end
@@ -564,13 +571,13 @@ module tb_g6lc_apu_vgtop;
               int unsigned bad = 0;
               for (int i = 0; i < a0; i++) begin
                 check(rec_kind() == 5, "EK_REPLY kind");
-                if (i_mem.apm[((a1 >> 2) + expm[ep + 1]) % APW] !=
+                if (i_mem.apm[apix((a1 >> 2) + expm[ep + 1])] !=
                     expm[ep + 2]) bad++;
-                check(i_mem.apm[((a1 >> 2) + expm[ep + 1]) % APW] ==
+                check(i_mem.apm[apix((a1 >> 2) + expm[ep + 1])] ==
                       expm[ep + 2],
                       $sformatf("CK_REPLY off=%0x idx=%0d got=%08x exp=%08x",
                                 a1, expm[ep + 1],
-                                i_mem.apm[((a1 >> 2) + expm[ep + 1]) % APW],
+                                i_mem.apm[apix((a1 >> 2) + expm[ep + 1])],
                                 expm[ep + 2]));
                 ep += 8;
               end
@@ -578,7 +585,7 @@ module tb_g6lc_apu_vgtop;
                 $display("DBG window off=%0x n=%0d:", a1, a0);
                 for (int i = 0; i < a0; i++)
                   $display("  [%0d] got=%08x", i,
-                           i_mem.apm[((a1 >> 2) + i) % APW]);
+                           i_mem.apm[apix(((a1 >> 2) + i))]);
               end
             end
             3: begin // CK_LIVE (+ EK_PAGES allocated aperture pages)
@@ -598,11 +605,11 @@ module tb_g6lc_apu_vgtop;
             end
             4: begin // CK_EXTRA [ring][byte off]
               check(rec_kind() == 7, "EK_EXTRA kind");
-              check(i_mem.apm[(r_extra[a0] + (a1 >> 2)) % APW] ==
+              check(i_mem.apm[apix(r_extra[a0] + (a1 >> 2))] ==
                     expm[ep + 3],
                     $sformatf("CK_EXTRA ring%0d off=%0x got=%08x exp=%08x",
                               a0, a1,
-                              i_mem.apm[(r_extra[a0] + (a1 >> 2)) % APW],
+                              i_mem.apm[apix(r_extra[a0] + (a1 >> 2))],
                               expm[ep + 3]));
               ep += 8;
             end
@@ -610,7 +617,7 @@ module tb_g6lc_apu_vgtop;
               // EK_APRCHK {off, model_word, oracle_word, cls}
               for (int i = 0; i < a0; i++) begin
                 automatic logic [31:0] got =
-                    i_mem.apm[((a1 >> 2) + i) % APW];
+                    i_mem.apm[apix(((a1 >> 2) + i))];
                 automatic int unsigned u;
                 check(rec_kind() == 10, "EK_APRCHK kind");
                 check(expm[ep + 1] == a1 + 4 * i,

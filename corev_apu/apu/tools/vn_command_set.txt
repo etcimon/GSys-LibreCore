@@ -10,7 +10,9 @@
 
 vkCreateInstance
 vkDestroyInstance
+vkEnumerateInstanceVersion
 vkEnumeratePhysicalDevices
+vkEnumeratePhysicalDeviceGroups
 vkGetPhysicalDeviceProperties
 vkGetPhysicalDeviceProperties2
 vkGetPhysicalDeviceFeatures
@@ -22,6 +24,12 @@ vkGetPhysicalDeviceQueueFamilyProperties2
 vkGetPhysicalDeviceFormatProperties
 vkGetPhysicalDeviceFormatProperties2
 vkGetPhysicalDeviceImageFormatProperties2
+# 3d-b stock-stack gates: external-memory/fence/semaphore queries and the
+# sparse-image query Mesa issues during physical-device init.
+vkGetPhysicalDeviceExternalBufferProperties
+vkGetPhysicalDeviceExternalFenceProperties
+vkGetPhysicalDeviceExternalSemaphoreProperties
+vkGetPhysicalDeviceSparseImageFormatProperties2
 vkEnumerateDeviceExtensionProperties
 vkCreateDevice
 vkDestroyDevice

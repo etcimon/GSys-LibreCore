@@ -1648,6 +1648,7 @@ def _gen_command(
     dts_overlay: str | None,
     machine: str | None = None,
     virtio_mmio: str | None = None,
+    apu_bridge: bool = False,
 ) -> list[str]:
     if _is_repo_root(pkg):
         cmd = [str(gen_bin), "gen", "--emit", "qemu", "--repo-root", str(pkg)]
@@ -1659,6 +1660,8 @@ def _gen_command(
             cmd.extend(["--machine", machine])
         if virtio_mmio:
             cmd.extend(["--virtio-mmio", virtio_mmio])
+        if apu_bridge:
+            cmd.append("--apu-bridge")
         return cmd
 
     cfg = _find_one(pkg, "*_config_pkg.sv")
@@ -1691,6 +1694,8 @@ def _gen_command(
         cmd.extend(["--machine", machine])
     if virtio_mmio:
         cmd.extend(["--virtio-mmio", virtio_mmio])
+    if apu_bridge:
+        cmd.append("--apu-bridge")
     return cmd
 
 
@@ -1724,6 +1729,7 @@ def cmd_install_qemu(args: argparse.Namespace) -> int:
             args.dts_overlay,
             args.machine,
             args.virtio_mmio,
+            args.apu_bridge,
         )
     except ValueError as e:
         err(str(e))
@@ -1956,6 +1962,8 @@ def main(argv: list[str] | None = None) -> int:
                    help="machine profile: g6lc-soc (default) or g6lc-virt")
     p.add_argument("--virtio-mmio", default=None,
                    help="number of virtio-mmio transports (g6lc-virt defaults to 8)")
+    p.add_argument("--apu-bridge", action="store_true",
+                   help="instantiate the external-RTL APU bridge at the APU virtio-mmio window")
     p.add_argument("--dts-overlay", default=None,
                    help="overlay .dts to apply before generation")
     p.add_argument("--dry-run", action="store_true",

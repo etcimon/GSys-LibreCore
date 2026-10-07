@@ -8,17 +8,18 @@
 // compared word-for-word with the golden reply.
 //
 //   cs[]        : ue_sm5_reply.hex (command words + golden reply words)
-//   exp[]       : ue_sm5_reply.exp, REC_W=456 words per record:
+//   exp[]       : ue_sm5_reply.exp, REC_W words per record:
 //     0: cs_base  1: cs_len  2: result  3: exec_n
-//     4..67:   exec_w[0..63]
-//     68: rep_base  69: rep_len  70: exp_words
-//     71..454: expected reply words (MAX_EXP=384, zero padded)
-//     455: expected fault
+//     4..4+EXEC_WORDS-1: exec_w[0..EXEC_WORDS-1]
+//     4+EW: rep_base  5+EW: rep_len  6+EW: exp_words
+//     7+EW..: expected reply words (MAX_EXP=384, zero padded)
+//     REC_W-1: expected fault
 //   Terminated by a {FFFFFFFF,FFFFFFFF} sentinel in words 0/1.
 module tb_g6lc_apu_vndec_rep;
   import g6lc_apu_vn_pkg::*;
 
-  localparam int REC_W = 456;
+  localparam int REC_W = 4 + APU_VN_EXEC_WORDS + 3 + 384 + 1;
+  localparam int EW = APU_VN_EXEC_WORDS;
   localparam int MAX_EXP = 384;
 
   logic clk = 0, rst_ni = 0;
@@ -26,7 +27,7 @@ module tb_g6lc_apu_vndec_rep;
 
   // ---- CS model (shared: vndec scans, vnrep echoes RBLOB) ----
   logic [31:0] cs   [0:65535];
-  logic [31:0] expm [0:262143];
+  logic [31:0] expm [0:524287];
   logic [31:0] repm [0:65535];
 
   // ---- vndec ----
@@ -48,8 +49,8 @@ module tb_g6lc_apu_vndec_rep;
   logic [15:0] r_waddr;
   logic [31:0] r_wdata;
   logic [15:0] r_words;
-  logic [64*32-1:0] exec_w;
-  logic [6:0]  exec_n;
+  logic [APU_VN_EXEC_WORDS*32-1:0] exec_w;
+  logic [7:0]  exec_n;
   logic [31:0] rep_null_mask_r = '0; // 5a-ii: null echo exercised via
                                    // vnfront sessions, not this TB
   logic [31:0] result_r;
@@ -179,32 +180,34 @@ module tb_g6lc_apu_vndec_rep;
       check("decode fault-free", op.fault == APU_VN_FAULT_NONE);
       // ---- phase 2: build the reply ----
       result_r   = ev(rec, 2);
-      exec_n     = 7'(ev(rec, 3));
-      for (int i = 0; i < 64; i++) exec_w[32*i +: 32] = ev(rec, 4 + i);
-      rep_base_r = 16'(ev(rec, 68));
-      rep_len_r  = 16'(ev(rec, 69));
+      exec_n     = 8'(ev(rec, 3));
+      for (int i = 0; i < EW; i++) exec_w[32*i +: 32] = ev(rec, 4 + i);
+      rep_base_r = 16'(ev(rec, 4 + EW));
+      rep_len_r  = 16'(ev(rec, 5 + EW));
       op_r       = op;
       @(negedge clk); r_start = 1'b1;
       @(posedge clk);
       @(negedge clk); r_start = 1'b0;
       while (!r_done) @(negedge clk);
       cases++;
-      check("fault status", r_fault == 1'(ev(rec, 455)));
-      if (ev(rec, 455) == 0) begin
-        nw = int'(ev(rec, 70));
-        check("rep_words", r_words === 16'(ev(rec, 70)));
+      check("fault status", r_fault == 1'(ev(rec, REC_W-1)));
+      if (ev(rec, REC_W-1) == 0) begin
+        nw = int'(ev(rec, 6 + EW));
+        check("rep_words", r_words === 16'(ev(rec, 6 + EW)));
         for (int i = 0; i < nw; i++)
           check($sformatf("rep[%0d] got=%08x exp=%08x", i,
-                          repm[16'(ev(rec, 68)) + i], ev(rec, 71 + i)),
-                repm[16'(ev(rec, 68)) + i] === ev(rec, 71 + i));
+                          repm[16'(ev(rec, 4 + EW)) + i],
+                          ev(rec, 7 + EW + i)),
+                repm[16'(ev(rec, 4 + EW)) + i] === ev(rec, 7 + EW + i));
       end else begin
         // overrun: window filled exactly, prefix words correct
-        nw = int'(ev(rec, 69));
-        check("rep_words bounded", r_words === 16'(ev(rec, 69)));
+        nw = int'(ev(rec, 5 + EW));
+        check("rep_words bounded", r_words === 16'(ev(rec, 5 + EW)));
         for (int i = 0; i < nw; i++)
           check($sformatf("ovr rep[%0d] got=%08x exp=%08x", i,
-                          repm[16'(ev(rec, 68)) + i], ev(rec, 71 + i)),
-                repm[16'(ev(rec, 68)) + i] === ev(rec, 71 + i));
+                          repm[16'(ev(rec, 4 + EW)) + i],
+                          ev(rec, 7 + EW + i)),
+                repm[16'(ev(rec, 4 + EW)) + i] === ev(rec, 7 + EW + i));
       end
       @(negedge clk);
       check("idle busy", r_busy == 1'b0);
@@ -224,11 +227,11 @@ module tb_g6lc_apu_vndec_rep;
       while (!d_done) @(negedge clk);
       op2 = op;
       op2.cmd_flags = op.cmd_flags & ~32'h1;
-      repm[16'(ev(0, 68))] = sentinel;
+      repm[16'(ev(0, 4 + EW))] = sentinel;
       result_r   = ev(0, 2);
-      exec_n     = 7'(ev(0, 3));
-      rep_base_r = 16'(ev(0, 68));
-      rep_len_r  = 16'(ev(0, 69));
+      exec_n     = 8'(ev(0, 3));
+      rep_base_r = 16'(ev(0, 4 + EW));
+      rep_len_r  = 16'(ev(0, 5 + EW));
       op_r       = op2;
       @(negedge clk); r_start = 1'b1;
       @(posedge clk);
@@ -236,7 +239,8 @@ module tb_g6lc_apu_vndec_rep;
       while (!r_done) @(negedge clk);
       check("noreply words", r_words === 16'h0);
       check("noreply fault", r_fault === 1'b0);
-      check("noreply no writes", repm[16'(ev(0, 68))] === sentinel);
+      check("noreply no writes",
+            repm[16'(ev(0, 4 + EW))] === sentinel);
       cases++;
     end
 

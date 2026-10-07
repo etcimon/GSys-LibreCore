@@ -434,12 +434,44 @@ module tb_g6lc_apu_vnfront;
   end
 
   // ---- record-append monitor (front cmdrec port) -----------------------
+  // The cmdrec stamps the stored record's imm[7] <- pay_top when an
+  // APPEND carries a payload — the request view shows imm[7]==0, so the
+  // monitor shadows each buffer's arena cursor and applies the same
+  // stamp.  BEGIN/RESET clear it; the cursor advances only on an OK
+  // completion (PAY_FULL drops the record, cursor unchanged).
   apu_cmdrec_rec_t last_rec;
   int              appends = 0;
-  always @(posedge clk)
-    if (fcr_v && fcr_r && fcr_req.op == APU_CMDREC_OP_APPEND) begin
-      last_rec <= fcr_req.rec;
-      appends   = appends + 1;
+  logic [15:0]     pay_top_q [256];
+  logic [7:0]      pend_buf_q;
+  logic [15:0]     pend_pay_q;
+  logic            pend_app_q;
+  always @(posedge clk or negedge rst_ni)
+    if (!rst_ni) begin
+      pend_app_q <= 1'b0;
+      pend_buf_q <= '0;
+      pend_pay_q <= '0;
+      for (int i = 0; i < 256; i++) pay_top_q[i] = '0;
+    end else begin
+      if (fcr_v && fcr_r) begin
+        if (fcr_req.op == APU_CMDREC_OP_BEGIN)
+          pay_top_q[fcr_req.cbuf] <= '0;
+        else if (fcr_req.op == APU_CMDREC_OP_RESET)
+          for (int i = 0; i < 256; i++) pay_top_q[i] = '0;
+        else if (fcr_req.op == APU_CMDREC_OP_APPEND) begin
+          last_rec   <= fcr_req.rec;
+          if (fcr_req.pay_n != 16'h0)
+            last_rec.imm[7] <= {16'h0, pay_top_q[fcr_req.cbuf]};
+          pend_app_q <= 1'b1;
+          pend_buf_q <= fcr_req.cbuf;
+          pend_pay_q <= fcr_req.pay_n;
+          appends     = appends + 1;
+        end
+      end
+      if (pend_app_q && fcr_cv) begin
+        pend_app_q <= 1'b0;
+        if (cr_cpl.status == APU_CMDREC_OK)
+          pay_top_q[pend_buf_q] <= pay_top_q[pend_buf_q] + pend_pay_q;
+      end
     end
 
   function automatic logic [31:0] ev(input int rec, input int w);
@@ -577,6 +609,11 @@ module tb_g6lc_apu_vnfront;
         for (int i = 0; i < 16; i++)
           exp_rec[32 * i +: 32] = ev(rec, 8 + i);
         check("append seen", appends > app0);
+        if (last_rec !== exp_rec) begin
+          for (int i = 0; i < 16; i++)
+            $display("  rec word %0d got %08x exp %08x", i,
+                     last_rec[32 * i +: 32], exp_rec[32 * i +: 32]);
+        end
         check("record", last_rec === exp_rec);
       end
       // §7b payload checkpoints written by this command

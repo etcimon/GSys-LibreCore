@@ -91,12 +91,22 @@ module tb_apu_mp_mem
               for (int b = 0; b < 8; b++) begin
                 automatic int unsigned byt = int'(a) + b;
                 if (rq_q[p].wstrb[b]) begin
-                  if (rq_q[p].dom)
-                    apm[(byt >> 2) % APW][8*(byt[1:0]) +: 8] <=
+                  // dense arrays are smaller than the real windows;
+                  // first-fit keeps every session low — a genuine
+                  // over-run is a tape/model bug, never wrap it
+                  if (rq_q[p].dom) begin
+                    if ((byt >> 2) >= APW)
+                      $fatal(1, "aperture word %0d past dense model",
+                             byt >> 2);
+                    apm[byt >> 2][8*(byt[1:0]) +: 8] <=
                       rq_q[p].wdata[b*8 +: 8];
-                  else
-                    gmem[(byt >> 2) % GMW][8*(byt[1:0]) +: 8] <=
+                  end else begin
+                    if ((byt >> 2) >= GMW)
+                      $fatal(1, "guest word %0d past dense model",
+                             byt >> 2);
+                    gmem[byt >> 2][8*(byt[1:0]) +: 8] <=
                       rq_q[p].wdata[b*8 +: 8];
+                  end
                 end
               end
             end else begin
@@ -104,10 +114,17 @@ module tb_apu_mp_mem
               automatic logic [63:0] d = '0;
               for (int b = 0; b < 8; b++) begin
                 automatic int unsigned byt = int'(a) + b;
-                if (rq_q[p].dom)
-                  d[b*8 +: 8] = apm[(byt >> 2) % APW][8*(byt[1:0]) +: 8];
-                else
-                  d[b*8 +: 8] = gmem[(byt >> 2) % GMW][8*(byt[1:0]) +: 8];
+                if (rq_q[p].dom) begin
+                  if ((byt >> 2) >= APW)
+                    $fatal(1, "aperture word %0d past dense model",
+                           byt >> 2);
+                  d[b*8 +: 8] = apm[byt >> 2][8*(byt[1:0]) +: 8];
+                end else begin
+                  if ((byt >> 2) >= GMW)
+                    $fatal(1, "guest word %0d past dense model",
+                           byt >> 2);
+                  d[b*8 +: 8] = gmem[byt >> 2][8*(byt[1:0]) +: 8];
+                end
               end
               rsp_o[p].rdata <= d;
             end

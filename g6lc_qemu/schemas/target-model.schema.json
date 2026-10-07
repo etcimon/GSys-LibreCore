@@ -425,6 +425,31 @@
               }
             }
           }
+        },
+        "apu": {
+          "description": "APU (Venus virtio-gpu backend) geometry from g6lc_apu_cfg_pkg.sv's ApuVenus literal and g6lc_apu_pkg.sv's APU_SHM_* constants. Null when the flist does not name the APU packages.",
+          "type": ["object", "null"],
+          "additionalProperties": false,
+          "properties": {
+            "mmio_base": { "$ref": "#/$defs/hex" },
+            "mmio_len": { "$ref": "#/$defs/hex" },
+            "control_base": { "$ref": "#/$defs/hex" },
+            "control_len": { "$ref": "#/$defs/hex" },
+            "irq_source": { "type": "integer", "minimum": 0 },
+            "dma_window_base": { "$ref": "#/$defs/hex" },
+            "dma_window_bytes": { "$ref": "#/$defs/hex" },
+            "shm_base": { "$ref": "#/$defs/hex" },
+            "shm_bytes": { "$ref": "#/$defs/hex" },
+            "shm_id": { "type": "integer", "minimum": 0 },
+            "num_capsets": { "type": "integer", "minimum": 0 },
+            "num_scanouts": { "type": "integer", "minimum": 0 },
+            "num_queues": { "type": "integer", "minimum": 0 },
+            "queue_depth": { "type": "integer", "minimum": 0 }
+          }
+        },
+        "apu_bridge": {
+          "description": "Machine-profile choice (not an RTL constant): true means the generated machine instantiates the external-RTL apu_bridge socket device at the APU virtio-mmio window.",
+          "type": ["boolean", "null"]
         }
       }
     },

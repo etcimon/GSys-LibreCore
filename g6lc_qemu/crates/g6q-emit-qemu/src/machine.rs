@@ -58,6 +58,34 @@ pub(crate) fn merged_peripherals(model: &TargetModel) -> Vec<g6q_core::model::Pe
             });
         }
     }
+    // The RTL-bridge machine profile re-tags the APU's virtio-mmio window (the
+    // board tree's `gpu@` node, declared `virtio,mmio` there) so the device
+    // creation loop instantiates the socket bridge instead of treating it as a
+    // plain emulated transport. When the tree never declared the window — an
+    // incomplete board description, not a different design — the node is
+    // synthesized from the package constants so the model still drives every
+    // emitted address.
+    if crate::apu_bridge::enabled(model) {
+        let apu = model.soc.apu.as_ref().unwrap();
+        match all.iter_mut().find(|p| {
+            p.base == apu.mmio_base
+                && p.model
+                    .as_deref()
+                    .unwrap_or("")
+                    .to_lowercase()
+                    .contains("virtio,mmio")
+        }) {
+            Some(p) => p.model = Some("g6lc,apu-bridge".into()),
+            None => all.push(g6q_core::model::Peripheral {
+                id: "gpu".into(),
+                base: apu.mmio_base,
+                len: apu.mmio_len,
+                model: Some("g6lc,apu-bridge".into()),
+                irq: Some(apu.irq_source),
+                ..g6q_core::model::Peripheral::default()
+            }),
+        }
+    }
     all
 }
 
@@ -158,6 +186,17 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
     } else {
         body.push_str("static const uint64_t dram_base = 0x80000000ULL;\n");
         body.push_str("static const uint64_t dram_size = 0x40000000ULL;\n");
+    }
+    if crate::apu_bridge::enabled(model) {
+        let apu = model.soc.apu.as_ref().unwrap();
+        body.push_str(&format!(
+            "static const uint64_t apu_shm_base = {};\n",
+            hex_ull(apu.shm_base)
+        ));
+        body.push_str(&format!(
+            "static const uint64_t apu_shm_bytes = {};\n",
+            hex_ull(apu.shm_bytes)
+        ));
     }
 
     if harts_total_used {
@@ -287,6 +326,12 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
         body.push_str("static const char *g6lc_qom_type_for_model(const char *model)\n{\n");
         body.push_str("    if (!model || !model[0])\n");
         body.push_str("        return NULL;\n");
+        if crate::apu_bridge::enabled(model) {
+            body.push_str(&format!(
+                "    if (strstr(model, \"apu-bridge\"))\n        return \"{}\";\n",
+                crate::apu_bridge::qom_type(model)
+            ));
+        }
         body.push_str("    if (strstr(model, \"virtio-mmio\"))\n");
         body.push_str("        return \"virtio-mmio\";\n");
         body.push_str("    if (strstr(model, \"ns16550\"))\n");
@@ -336,7 +381,10 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
         body.push_str("                g6lc_peripherals[i].base, plic_hart_config,\n");
         body.push_str("                g6lc_harts_total, 0,\n");
         body.push_str("                g6lc_intc_sources,\n");
-        body.push_str("                0,\n");
+        body.push_str("                /* 3-bit priority field: SiFive PLIC exposes levels 0-7.\n");
+        body.push_str("                 * 0 would make every source priority WARL-to-0 and the\n");
+        body.push_str("                 * PLIC would never raise an interrupt. */\n");
+        body.push_str("                (1U << 3) - 1,\n");
         body.push_str("                0, 0x1000, 0x2000, 0x80,\n");
         body.push_str("                0x200000, 0x1000,\n");
         body.push_str("                g6lc_peripherals[i].len);\n");
@@ -397,6 +445,12 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
         body.push_str("            qdev_prop_set_string(dev, \"name\",\n");
         body.push_str("                                  g6lc_peripherals[i].model);\n");
         body.push_str("        }\n");
+        if crate::apu_bridge::enabled(model) {
+            body.push_str(&format!(
+                "        if (strcmp(qom, \"{}\") == 0) {{\n            dev = qdev_new(qom);\n        }}\n",
+                crate::apu_bridge::qom_type(model)
+            ));
+        }
         body.push_str("        if (strcmp(qom, \"virtio-mmio\") == 0) {\n");
         body.push_str("            dev = qdev_new(\"virtio-mmio\");\n");
         body.push_str("        }\n");
@@ -576,11 +630,27 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
     body.push_str("    /* Resolve the device tree before -kernel so riscv_load_initrd can\n");
     body.push_str("     * write linux,initrd-* (QEMU virt does the same). */\n");
     body.push_str("    if (machine->dtb) {\n");
-    body.push_str("        machine->fdt = load_device_tree(machine->dtb, NULL);\n");
-    body.push_str("        if (!machine->fdt) {\n");
+    body.push_str("        /* load_device_tree returns an exact-size blob; reopen it into\n");
+    body.push_str("         * a slack buffer so riscv_load_initrd can write linux,initrd-*\n");
+    body.push_str("         * (same treatment as the packed blob below). */\n");
+    body.push_str("        int raw_size;\n");
+    body.push_str("        void *raw = load_device_tree(machine->dtb, &raw_size);\n");
+    body.push_str("        if (!raw) {\n");
     body.push_str("            error_report(\"load_device_tree() failed\");\n");
     body.push_str("            exit(1);\n");
     body.push_str("        }\n");
+    body.push_str("        {\n");
+    body.push_str("            int fdt_size = raw_size * 2;\n");
+    body.push_str("            if (fdt_size < raw_size + 0x1000) {\n");
+    body.push_str("                fdt_size = raw_size + 0x1000;\n");
+    body.push_str("            }\n");
+    body.push_str("            machine->fdt = g_malloc0(fdt_size);\n");
+    body.push_str("            if (fdt_open_into(raw, machine->fdt, fdt_size)) {\n");
+    body.push_str("                error_report(\"fdt_open_into failed\");\n");
+    body.push_str("                exit(1);\n");
+    body.push_str("            }\n");
+    body.push_str("        }\n");
+    body.push_str("        g_free(raw);\n");
     body.push_str("    } else if (!machine->fdt) {\n");
     body.push_str("        /* Packed blob has no slack for linux,initrd-* / bootargs. */\n");
     body.push_str(&format!("        const void *blob = g6lc_{name}_dtb;\n"));
@@ -601,6 +671,20 @@ pub fn emit_machine(model: &TargetModel, version: &str, digest: &str) -> Emissio
     body.push_str("    /* Load -kernel at DRAM+2MiB (QEMU virt / U-Boot TEXT_BASE). */\n");
     body.push_str("    if (machine->kernel_filename) {\n");
     body.push_str("        target_ulong kernel_start_addr = dram_base + 0x200000ULL;\n");
+    if crate::apu_bridge::enabled(model) {
+        body.push_str("        /* The DTS carves the APU aperture out of the memory@\n");
+        body.push_str("         * nodes (System RAM there would make virtio_gpu's\n");
+        body.push_str("         * devm_request_mem_region fail -EBUSY), so the linear\n");
+        body.push_str("         * map has a hole at the aperture while QEMU RAM still\n");
+        body.push_str("         * backs it. An image that physically spans the hole\n");
+        body.push_str("         * owns pages the linear map cannot reach; load it\n");
+        body.push_str("         * above the aperture. */\n");
+        body.push_str("        if (apu_shm_base < dram_base + dram_size &&\n");
+        body.push_str("            kernel_start_addr < apu_shm_base + apu_shm_bytes &&\n");
+        body.push_str("            apu_shm_base + apu_shm_bytes < dram_base + dram_size) {\n");
+        body.push_str("            kernel_start_addr = apu_shm_base + apu_shm_bytes;\n");
+        body.push_str("        }\n");
+    }
     body.push_str("        if (kernel_start_addr < firmware_end_addr) {\n");
     body.push_str("            kernel_start_addr = firmware_end_addr;\n");
     body.push_str("        }\n");
@@ -819,6 +903,98 @@ mod tests {
         let m = TargetModel::new("t");
         let e = emit_machine(&m, "0.1.0", "sha256:abc");
         assert!(e.files[0].contents.contains("dram_base = 0x80000000ULL"));
+    }
+
+    fn apu_model() -> g6q_core::model::ApuModel {
+        g6q_core::model::ApuModel {
+            mmio_base: 0x4000_1000,
+            mmio_len: 0x1000,
+            control_base: 0x4000_2000,
+            control_len: 0x1000,
+            irq_source: 9,
+            dma_window_base: 0x8000_0000,
+            dma_window_bytes: 0x1000_0000,
+            shm_base: 0x8200_0000,
+            shm_bytes: 0x0010_0000,
+            shm_id: 1,
+            num_capsets: 1,
+            num_scanouts: 0,
+            num_queues: 2,
+            queue_depth: 64,
+        }
+    }
+
+    #[test]
+    fn apu_bridge_retags_the_dts_gpu_window() {
+        let mut m = TargetModel::new("g6lc64_test");
+        m.soc.dram = Some((0x8000_0000, 0x1000_0000));
+        m.soc.harts_total = 1;
+        m.soc.apu = Some(apu_model());
+        m.soc.apu_bridge = true;
+        m.soc.peripherals.push(g6q_core::model::Peripheral {
+            id: "gpu".into(),
+            base: 0x4000_1000,
+            len: 0x1000,
+            model: Some("virtio,mmio".into()),
+            irq: Some(9),
+            ..g6q_core::model::Peripheral::default()
+        });
+
+        let e = emit_machine(&m, "0.1.0", "sha256:abc");
+        let f = &e.files[0];
+        assert!(f
+            .contents
+            .contains("{ \"gpu\", 0x40001000ULL, 0x1000ULL, \"g6lc,apu-bridge\", 9,"));
+        assert!(f
+            .contents
+            .contains("return \"g6lc-g6lc64_test-apu-bridge\";"));
+        assert!(f
+            .contents
+            .contains("strcmp(qom, \"g6lc-g6lc64_test-apu-bridge\") == 0"));
+        // The aperture is a linear-map hole; the kernel image must load above it.
+        assert!(f.contents.contains("apu_shm_base = 0x82000000ULL"));
+        assert!(f
+            .contents
+            .contains("kernel_start_addr = apu_shm_base + apu_shm_bytes;"));
+    }
+
+    #[test]
+    fn apu_bridge_synthesizes_the_window_when_the_tree_lacks_it() {
+        let mut m = TargetModel::new("g6lc64_test");
+        m.soc.dram = Some((0x8000_0000, 0x1000_0000));
+        m.soc.harts_total = 1;
+        m.soc.apu = Some(apu_model());
+        m.soc.apu_bridge = true;
+
+        let merged = merged_peripherals(&m);
+        let gpu = merged.iter().find(|p| p.id == "gpu").expect("gpu added");
+        assert_eq!(gpu.base, 0x4000_1000);
+        assert_eq!(gpu.irq, Some(9));
+        assert_eq!(gpu.model.as_deref(), Some("g6lc,apu-bridge"));
+    }
+
+    #[test]
+    fn apu_bridge_flag_without_the_block_changes_nothing() {
+        let mut m = TargetModel::new("g6lc64_test");
+        m.soc.apu_bridge = true;
+        m.soc.peripherals.push(g6q_core::model::Peripheral {
+            id: "gpu".into(),
+            base: 0x4000_1000,
+            len: 0x1000,
+            model: Some("virtio,mmio".into()),
+            irq: Some(9),
+            ..g6q_core::model::Peripheral::default()
+        });
+        let merged = merged_peripherals(&m);
+        assert_eq!(
+            merged
+                .iter()
+                .find(|p| p.id == "gpu")
+                .unwrap()
+                .model
+                .as_deref(),
+            Some("virtio,mmio")
+        );
     }
 
     #[test]
