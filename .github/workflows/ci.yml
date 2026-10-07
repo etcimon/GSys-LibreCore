@@ -240,15 +240,18 @@ jobs:
           bun-version: latest
 
       - uses: actions/setup-python@v5
+        id: py
         with:
           python-version: "3.12"
 
       # `svt.py` only ever drives its contained toolchain under sv-timing/.tools.
+      # The venv symlinks the exact hosted Python patch release, so the key
+      # carries it: a runner image upgrade must not restore a dangling venv.
       - name: Cache contained toolchain
         uses: actions/cache@v4
         with:
           path: sv-timing/.tools
-          key: svt-tools-${{ runner.os }}-${{ hashFiles('sv-timing/rust-toolchain.toml', 'sv-timing/requirements.txt') }}
+          key: svt-tools-${{ runner.os }}-py${{ steps.py.outputs.python-version }}-${{ hashFiles('sv-timing/rust-toolchain.toml', 'sv-timing/requirements.txt') }}
 
       - name: Cache cargo target
         uses: actions/cache@v4

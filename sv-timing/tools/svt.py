@@ -193,10 +193,11 @@ def install_venv(root: Path) -> Path:
     if venv_python_works(root):
         log(f"python venv already present: {subprocess.check_output([str(vpy), '--version'], text=True).strip()}")
     else:
-        if vpy.is_file():
-            # Dead shim: the recorded base interpreter is gone. Recreating over it is
-            # what `setup` is for, so say so rather than failing later.
-            log(f"python venv at {vpy} is STALE (base interpreter missing); recreating")
+        if python_venv(root).exists():
+            # Dead shim (Windows) or dangling symlink (POSIX, e.g. a cached venv whose
+            # base interpreter was upgraded): `is_file()` is False for the latter, and
+            # `python -m venv` over such a tree fails. Recreating is what `setup` is for.
+            log(f"python venv at {python_venv(root)} is STALE (base interpreter missing); recreating")
             shutil.rmtree(python_venv(root), ignore_errors=True)
         host = find_host_python()
         if not host:
