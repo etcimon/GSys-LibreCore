@@ -575,6 +575,15 @@ module scoreboard #(
 `ifdef G6LC_FETCH_B
           mem_n[cid].cancelled = 1'b1;
           mem_n[cid].sbe.valid = 1'b1;
+          // T20 (defect A): a memory-order replay flagged on an entry that
+          // the mispredict now cancels is a WRONG-PATH replay. The redirect
+          // of the resolving branch is the only restart authority for the
+          // younger window; honouring the dropped load's `replay` at commit
+          // would set_pc the hart to the wrong-path load's own PC after the
+          // branch already redirected it (ooocoh-t19 hart 5: `beqz` taken ->
+          // `atomic_raw_xchg_ulong+0x14..ret` retired). Drop the flag here;
+          // the same-cycle violation below is gated on this clear.
+          mem_n[cid].replay    = 1'b0;
 `else
           if (!g6lc_sb_keep::keep(
                   CVA6Cfg,
@@ -593,6 +602,7 @@ module scoreboard #(
                   resolved_branch_i.cf_type)) begin
             mem_n[cid].cancelled = 1'b1;
             mem_n[cid].sbe.valid = 1'b1;
+            mem_n[cid].replay    = 1'b0;  // T20 (defect A): see the FETCH_B arm
           end
 `endif
         end
@@ -602,14 +612,21 @@ module scoreboard #(
 
     // Memory-order violation: the load keeps its slot, retires as a drop and
     // asks commit to refetch from its own PC.
-    if (CVA6Cfg.OoOEn && mem_violation_i && mem_q[mem_violation_id_i].issued) begin
+    // T20 (defect A): never on a wrong-path entry. After the cancel loop
+    // above, `mem_n.cancelled && !mem_n.replay` identifies an entry cancelled
+    // by a mispredict (this cycle or earlier) — a violation-cancelled entry
+    // carries replay=1. Such a load is dropped at commit without a refetch:
+    // the branch redirect already restarted the correct path.
+    if (CVA6Cfg.OoOEn && mem_violation_i && mem_q[mem_violation_id_i].issued &&
+        !(mem_n[mem_violation_id_i].cancelled && !mem_n[mem_violation_id_i].replay)) begin
       mem_n[mem_violation_id_i].cancelled = 1'b1;
       mem_n[mem_violation_id_i].replay    = 1'b1;
       mem_n[mem_violation_id_i].sbe.valid = 1'b1;
     end
     if (CVA6Cfg.CohPolicy == config_pkg::COH_OOO) begin
       for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
-        if (phys_replay_i[i] && mem_q[i].issued && mem_q[i].sbe.fu == ariane_pkg::LOAD) begin
+        if (phys_replay_i[i] && mem_q[i].issued && mem_q[i].sbe.fu == ariane_pkg::LOAD &&
+            !(mem_n[i].cancelled && !mem_n[i].replay)) begin
           mem_n[i].cancelled = 1'b1;
           mem_n[i].replay = 1'b1;
           mem_n[i].sbe.valid = 1'b1;

@@ -4053,3 +4053,31 @@ withdrawal), negatives detected; int2_l3 `mc_icache_switch_storm` h2
 `mc_force_kill_miss.S`. The decisive check is the canonical 48 M boot on
 the T19 server model (`[misp-hart]` / `[hpd-phantom] final` lines are
 unconditional); the T18B boot (RAS16 + statcor, pre-T19) is still running.
+
+### T20 — defect A root cause: a wrong-path load's memory-order replay refetched the wrong path (2026-10-08)
+
+The T19 canonical boot reproduced both T18 defects with the T19 witnesses
+silent (`[misp-hart]` 0, `[hpd-phantom]` 0), so the hart-qualified-kill
+hypothesis was wrong. The restart at exactly `0x800086e8` is the
+**memory-order replay refetch of a wrong-path load**: with `MemDepPredEn`
+the untrained load bypassed an older store whose address resolved late,
+the LSQ flagged a violation and `scoreboard.sv` set `cancelled | replay` on
+the load; the mispredicting `beqz` then cancelled the same younger entries
+but left `replay` set; at commit the dropped load still carried `replay`,
+so `commit_stage` raised the replay flush, the controller issued
+`set_pc_commit` with `mem_replay_pc`, and the frontend / PC bank restarted
+at the wrong-path load's own PC — after the branch had already redirected
+the hart. The instructions after it (the `amoswap` that corrupted the
+mtimer object, the `ld ra` that trapped) then retired. Fix: the younger
+cancel clears `replay` (both arms) and a violation / `phys_replay` is never
+applied to a mispredict-cancelled entry (`!(cancelled && !replay)`): the
+branch redirect is the only restart authority for the younger window.
+Directed `ooo_wrongpath_replay.S` (cold always-taken `beqz`, wrong path =
+late-address store + bypassing load + sentinel stores; exit 2 = replay
+leak) FAILS on the old scoreboard and PASSES on the fix; frozen probes
+Spike-exact and cycle-identical. Boot-level confirmation (hart 5 retiring
+`0x8001b6f0` after the `beqz` instead of `0x800086e8`) is the fix-A MT4
+boot queued behind the instrumented reproduction. Defect B (HPDcache
+replay table 4/4 full with MSHR/wbuf empty) is still open — the
+instrumented reproduction (`ooocoh-t20-server-repro-mt4`, `+hpd_rtab_trace`)
+is running; its entry-level deps/release log decides the seam.
