@@ -5,7 +5,7 @@ export default {
   index: 'Overview',
   'l2-l3-cache': 'L2 / L3 Cache',
   'multi-core': 'Multi-Core Cluster',
-  'ai-island': 'AI Island (Xg6lcai)',
+  'ai-island': 'SI Island (Xg6lcai)',
   controllers: 'Controllers & PHY',
   'devin-agents': 'Agent Workflow',
 }

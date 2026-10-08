@@ -16,7 +16,7 @@ import { checkPin, computePin, type PinOptions } from "../../tooling/aiOverlay.t
 
 export const aiOverlayCommand: Command = {
   name: "ai-overlay",
-  summary: "Pin the AI overlay as generated <pkg>_ai packages + DTS; check drift.",
+  summary: "Pin the SI overlay as generated <pkg>_ai packages + DTS; check drift.",
   usage:
     "bun run src/cli/index.ts ai-overlay <pin|check|list> [--target <g6lc64_pkg>] [--int] [--island-cfg <literal>] [--dry-run]",
   details:

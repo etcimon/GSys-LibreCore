@@ -33,7 +33,7 @@ It ships with an unusual amount of surrounding machinery: a self-contained **Bun
 platform** that provisions its own toolchain and drives lint, formal, simulation, regression, board
 bring-up, vendored uncore IP and foundry/PDK adaptation from one typed control surface; a **Rust
 static-timing analyser** (`sv-timing/`); and a layered set of `AGENTS*.md` guides that make every
-level of the stack legible to an AI agent.
+level of the stack legible to a super-intelligence (SI) agent.
 
 > **Status.** Active development, pre-release. The core boots Linux under OpenSBI in simulation.
 >
@@ -58,7 +58,7 @@ level of the stack legible to an AI agent.
 > | **OoO coherence (`COH_OOO`)** | integration | Promoted 2026-09-24 for the `g6lc64_ooo_int2` envelope (2 WT cores × 2 harts, L2, no L3): SRAM sharer-signature filter, hub response ownership/ordering repairs, accepted-physical-address load validation through retirement; the composed hub + real-L2 bench excludes the stale-refill counterexample; same-id R ordering guard, local AMO/CAS apply-event coverage, PMU group-2 events, credit-consistent L2 MSHR depth and the signature-SRAM DFT plan followed. Post-boot repairs (2026-09-25): writers acquire signature presence, WT repair copies are invalidation-bounded, NC ACKs stay out of the repair queue, CLINT MSIP read lanes fixed — the directed cross-core shared-line and four-hart boot/release programs pass in the isolated two-core route. Deferred: matched multicore firmware/compliance runs, in-order WT re-runs, foundry macro/MBIST insertion, STA/power/area — [`AGENTS-todo.md`](AGENTS-todo.md) | [`core/ooo/AGENTS-ooo-contract.md`](core/ooo/AGENTS-ooo-contract.md) · [`multi-core/`](architecture/multi-core/) |
 > | **Multi-core cluster / L2 / L3** | boot | `NrCores` 1…8, `g6lc_cluster`, coherence hub, scaled CLINT/PLIC, L1 inv adapters; L2 done (concurrent fills, hit-under-miss merging, killed-fill retention, OoO-gated write fairness); L3 + server stream prefetcher config-gated. 2026-09-26: WT cores now allocate in the L2 (`WtAxiAllocEn` — the shim was modifiable-only, measured 0 hits before), inclusion is a package policy (`L3InclusiveEn`), tags can live behind `tc_sram` (`L2TagSramEn`), and the non-inclusive-L3 packages `g6lc64_ooo_int2_l3` / `g6lc64_smt2_l3` pass their strict SMT2 OpenSBI boots. 2026-09-27: `L2WriteUpdateEn` merges an eligible write-through into a resident L2/L3 line instead of purging it — boot L2 misses ~103k→~1.5k, strict boots 17,993,674 / 18,244,344 / 13,814,448 cycles, latency-40 boots −11.5 % / −13.2 % with the first boot-workload `l3_hit`; disabled packages stay bit-identical. M1a adds end-to-end CBO: a `cmo_*` core sideband + `g6lc_cmo_engine` broadcast/match-invalidate L1/L2/L3 for `cbo.inval` (the old WT decode hung the store buffer), `clean`/`flush` gate on the L2/L3 write-idle trackers, `cbo.zero` drains as a commit-queue burst; allocation/write-update/CMO are now on for every eWT package (smt2/smt2_ooo_int anchors re-baselined) and `CohMaxOutstanding` is measured at 8 on the int2 packages. 2026-09-28: `L2PostedWriteEn` posts writes and bypass reads through L2/L3 trackers — hits and misses are served while writes drain (B still comes from memory, routed per-id), `wr_stall` on the mixed credits burst is 0 at OT8, and the L40 write/read kernel drops to 518,507/543,093 cycles. M1d then puts every postable write on one reserved downstream write id `WR_ID`, so AXI same-id ordering preserves the merge order and the different-id same-line AW hold (the measured ~100 % of posted-write holds) disappears for posted-vs-posted pairs. 2026-09-29: M5 adds a demand-miss-trained L2 stream/stride prefetcher (`L2PrefetchEn`) — scan/write-read kernels gain 8–13 %, pointer chase is neutral, but both strict boots pay ~+0.3 %, so it ships **off** pending a burst-throttling policy | [`multi-core/`](architecture/multi-core/) · [`l2-l3-cache/`](architecture/l2-l3-cache/) |
 > | **Stream8** | leaf | `g6lc64_stream8`, `mc-spo-veri` 9/9, AMOCAS W/D/Q, H-edge 3/3; optional suite (not default CI) | [`stream8-class.md`](architecture/stream8-class.md) |
-> | **AI island (`Xg6lcai`)** | integration | **FP island shipped on `g6lc64_ai`** (2026-09-30: seven formats INT8/INT4/FP8×2/FP16/BF16/FP32, 512 MAC/cycle, flat-panel byte-capacity banks, two-slot VA-Turbo residency, accumulate mode, wide C store); measured on the SoC model: decode `1×512×512` INT8 cold 34,136 cycles / resident 590 (57×), B stream at 1.00 cycles/beat; scaling ladder V1 wide port (leaf 60.4 B/cycle, SoC point owed) → V2 column array (RTL, OutCols 1/2/4 verified) → V3/V4 `g6lc_ai_cluster_dispatch` (RTL + island-top elaboration, leaf-verified; nameplates 49/98 TOPS are **derived**); bounded formal on the flat-panel arithmetic; oracle-controlled SoC suite; `g6lc64_smt2_ai` two-hart AI package runs the AI subset; **island on any package** (2026-10-01): `+define+G6LC_AI_OVERLAY` or a generated `<pkg>_ai` pin, coherent outputs by construction (`AiCfg.DmaInvalEn` -> CMO writer port, CAP `0xA0`), every core enqueues (arbiter + island ticket stream), CVXIF at the commit head under OoO -- leaves + mutations green, SoC discriminators queued; **ai-tensor** PyTorch/Diffusers backend with qualified INT8/BF16 recipes and a calibrated cost model | [`ai-matrix/`](architecture/ai-matrix/) · [`scaling-100tops.md`](architecture/ai-matrix/scaling-100tops.md) · [`log-2026-09.md`](architecture/ai-matrix/log-2026-09.md) |
+> | **SI island (`Xg6lcai`)** | integration | **FP island shipped on `g6lc64_ai`** (2026-09-30: seven formats INT8/INT4/FP8×2/FP16/BF16/FP32, 512 MAC/cycle, flat-panel byte-capacity banks, two-slot VA-Turbo residency, accumulate mode, wide C store); measured on the SoC model: decode `1×512×512` INT8 cold 34,136 cycles / resident 590 (57×), B stream at 1.00 cycles/beat; scaling ladder V1 wide port (leaf 60.4 B/cycle, SoC point owed) → V2 column array (RTL, OutCols 1/2/4 verified) → V3/V4 `g6lc_ai_cluster_dispatch` (RTL + island-top elaboration, leaf-verified; nameplates 49/98 TOPS are **derived**); bounded formal on the flat-panel arithmetic; oracle-controlled SoC suite; `g6lc64_smt2_ai` two-hart SI package runs the SI subset; **island on any package** (2026-10-01): `+define+G6LC_AI_OVERLAY` or a generated `<pkg>_ai` pin, coherent outputs by construction (`AiCfg.DmaInvalEn` -> CMO writer port, CAP `0xA0`), every core enqueues (arbiter + island ticket stream), CVXIF at the commit head under OoO -- leaves + mutations green, SoC discriminators queued; **ai-tensor** PyTorch/Diffusers backend with qualified INT8/BF16 recipes and a calibrated cost model | [`ai-matrix/`](architecture/ai-matrix/) · [`scaling-100tops.md`](architecture/ai-matrix/scaling-100tops.md) · [`log-2026-09.md`](architecture/ai-matrix/log-2026-09.md) |
 >
 > Defaults keep **netlist identity** for small targets: `OoOEn=0`, `SliceOoOEn=0`,
 > `NrHarts=1`, `L2En=0` / `L3En=0`, `DeepSpecEn=0`, `AiMatrixEn=0`. Profiles opt in via
@@ -276,7 +276,7 @@ and L2), `g6lc64_server_math_v` (the same plus RVV through the Ara attach),
 `g6lc64_stream8` (stream8 class), `g6lc64_stream8_l3` and
 `g6lc64_server_math_l3` (the two in-order packages plus the same
 non-inclusive 1 MiB L3; M6),
-`g6lc64_ai` (Xg6lcai AI island), and
+`g6lc64_ai` (Xg6lcai SI island), and
 `g6lc64_ooo` / `g6lc64_ooo_server` — FP-on-OoO packages: `g6lc64_ooo` is legal
 single-hart FP since T9g/M4, `g6lc64_ooo_server` remains opt-in/unqualified.
 
@@ -286,9 +286,9 @@ A performance model lives in `perf-model/`. Ecosystem pointers: [`RESOURCES.md`]
 
 ---
 
-## AI optimization path and current status
+## SI optimization path and current status
 
-The AI-island optimization work treats runtime decisions as a **compressed policy
+The SI-island optimization work treats runtime decisions as a **compressed policy
 codec**, not a learned profiler. Shape buckets, opcode class, native sparsity
 samples, continuity and compute/movement balance select one of eight 3-bit
 codewords. Hysteresis and feature-signature silence limit reevaluation; current
@@ -300,8 +300,8 @@ address/bank hints. Skipping still requires an independent exact-zero proof.
 | T2 GEMM (`g6lc64_ai`) | **FP island shipped**: INT8, INT4, FP8 E4M3/E5M2, FP16, BF16, FP32 (grant `0x00FB`, SP24 refused); 512 lanes; flat-panel byte-capacity banks (A 2 / B 1 / C 2 MiB); two-slot resident-B directory; accumulate mode; intra-row trail + wide C store | Verilator SoC model of the built geometry (cycles, not timing): `1×512×512` INT8 cold 34,136 / resident 590; `1×768×512` two panels both resident (39×); 8-lane bench 226 records seven formats, both float pipes |
 | Scaling ladder | V1 wide port plumbing (join upsizer, 512-bit channel; leaf: 60.4 B/cycle island stream); V2 `OutCols` column array (RTL, 1/2/4 verified, island gate strict lint 0); V3/V4 `g6lc_ai_cluster_dispatch` (RTL, island top elaborates Clusters 1/2/4, 2- and 4-cluster C bit-identical to the single engine) | V1 SoC point not yet measured; V2 measured on the bench only; V3/V4 leaf only — 16.4 / 49.2 / 98.3 TOPS are **nameplates**, decode stays bytes-bound |
 | Verification | oracle controls (`ai_must_pass`/`ai_must_fail`, `ORACLE INVALID`), bounded formal on the flat-panel/stripe/slot arithmetic (mutation fails), C1–C4 run-time contracts, directed leaves per lever, `+ai_pmu_trace` records | a pass is positive evidence only with the controls in the run; remote runs serialized one harness at a time |
-| SMT2 + AI | `g6lc64_smt2_ai` (two harts, dual issue, per-hart AI banks) builds; `ai_dot4`/`mma`/queue/MMIO smokes pass; two-hart bench `HARTS=1` control: 4 decode jobs, 135,931 wall cycles (33,872 each); DTS ready; strict boot admitted | boot not run (~24 h at the FP-island model's ~140 cycles/s); `HARTS=2` rerun owed (ELF queue-1 region fixed); sideband `ai.enq` hang on the two-hart core under triage |
-| Island on any configuration | `+define+G6LC_AI_OVERLAY[_INT]` splices `config_pkg::AiCfgIsland` + CVXIF into any package; pinned `g6lc64_{ooo_int2_l3,stream8_l3,smt2_ooo_int}_ai` packages + DTS (drift-tested); `AiCfg.DmaInvalEn` invalidates every island write through the CMO engine after its B and holds completion until done (`CAP_OFF_COH`); `g6lc_ai_enq_arb` + island-allocated tickets; CVXIF issues only at the commit head under OoO; `IslandFpEn` no longer needs RVF/RVD | L0 lint sweep + SoC-top lint clean; leaves with oracle negatives and RTL mutations PASS (`ai-matrix-directed` 226/3/1, the 3 are pre-existing LiteDRAM-wrap items); SoC `ai_coh_stale`/`ai_mc_enq`/OoO AI subset **not yet run**, DMA-invalidation cost unmeasured |
+| SMT2 + SI | `g6lc64_smt2_ai` (two harts, dual issue, per-hart SI banks) builds; `ai_dot4`/`mma`/queue/MMIO smokes pass; two-hart bench `HARTS=1` control: 4 decode jobs, 135,931 wall cycles (33,872 each); DTS ready; strict boot admitted | boot not run (~24 h at the FP-island model's ~140 cycles/s); `HARTS=2` rerun owed (ELF queue-1 region fixed); sideband `ai.enq` hang on the two-hart core under triage |
+| Island on any configuration | `+define+G6LC_AI_OVERLAY[_INT]` splices `config_pkg::AiCfgIsland` + CVXIF into any package; pinned `g6lc64_{ooo_int2_l3,stream8_l3,smt2_ooo_int}_ai` packages + DTS (drift-tested); `AiCfg.DmaInvalEn` invalidates every island write through the CMO engine after its B and holds completion until done (`CAP_OFF_COH`); `g6lc_ai_enq_arb` + island-allocated tickets; CVXIF issues only at the commit head under OoO; `IslandFpEn` no longer needs RVF/RVD | L0 lint sweep + SoC-top lint clean; leaves with oracle negatives and RTL mutations PASS (`ai-matrix-directed` 226/3/1, the 3 are pre-existing LiteDRAM-wrap items); SoC `ai_coh_stale`/`ai_mc_enq`/OoO SI subset **not yet run**, DMA-invalidation cost unmeasured |
 | Host software (`ai-tensor`) | PyTorch `AiTensorLinear`/`Conv2d` + Diffusers; qualified recipes (LLM INT8 g128 + FP16 head; UNet INT8 g64 or BF16); `cost_model` calibrated on the measured points; QEMU B1 contract emulator boots OpenSBI and passes the queue smoke | virtual evidence (PSNR/perplexity, bytes), never RTL timing |
 | Policy codec / benefit steering | Isolated, verified RTL; off in production | control decisions, not throughput |
 
@@ -324,7 +324,7 @@ definition, the plane split and the batch-1 trap), the running
 [log](architecture/ai-matrix/log-2026-09.md) (every measured/derived/void result with its
 instrument), the [island status](corev_apu/ai_island/README.md),
 [ai-tensor](ai-tensor/README.md), the [B3 evaluation](g6lc_qemu/README.md#native-tensor-evaluation-and-optimization),
-and the docs-site page [AI Island](https://etcimon.github.io/GSys-LibreCore/corev-apu/ai-island).
+and the docs-site page [SI Island](https://etcimon.github.io/GSys-LibreCore/corev-apu/ai-island).
 Local checks in minutes: `test ai-ops-bench` (8-lane bench, seven formats), `test ai-scale-ladder`,
 `verify --formal` (flat-panel proof), `verif/regress/ai-matrix-directed.sh`; SoC runs use the
 remote proxy with the oracle controls in the suite.
@@ -358,7 +358,7 @@ All of it is **opt-in and additive** — the defaults leave the classic CVA6 cor
 they were. SoC / tape-out readiness is a first-class rule, not an afterthought: see
 [`AGENTS.md` §0](AGENTS.md).
 
-The `AGENTS*.md` layer is unusual and worth knowing about if you use AI tooling: it routes a question
+The `AGENTS*.md` layer is unusual and worth knowing about if you use SI tooling: it routes a question
 like *"where does branch prediction live, in the spec and in the code?"* to a small set of spec
 anchors and exact `file:line` loci instead of a whole-repository scan.
 
@@ -445,8 +445,8 @@ Before opening a PR: read [`AGENTS.md` §0](AGENTS.md), then run `g6lc-build ver
 | `optimization/` | measured-optimization ledger — tasks and applied notes behind `AGENTS-optimization-tool.md` |
 | `g6lc_bios/` | BIOS / boot firmware work |
 | `g6lc_qemu/` | vendored QEMU snapshot and native tensor evaluation notes |
-| `ai-tensor/` | AI tensor software experiments |
-| `quantum_ai/` | quantum-AI bridge notes and code |
+| `ai-tensor/` | SI tensor software experiments |
+| `quantum_ai/` | quantum-SI bridge notes and code |
 | `monorepo-soak/` | monorepo soak tests |
 | `spyglass/` | Spyglass lint/CDC collateral |
 | `pd/` | physical-design collateral and the `pd/pdk/` foundry drop-in seam (gitignored) |

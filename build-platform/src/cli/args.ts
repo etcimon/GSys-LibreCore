@@ -94,7 +94,7 @@ const VALUE_FLAGS = new Set([
   "remote-ssh",
   "remote-ssh-pass",
   "remote-ssh-identity",
-  // AI island / matrix (test/diag/verify/remote/g6q — same pattern as OoO)
+  // SI island / matrix (test/diag/verify/remote/g6q — same pattern as OoO)
   "channels",
   "ai-dram",
   "ai-ghz",

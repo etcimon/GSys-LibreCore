@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 //
-// AI overlay pins: every configured <pkg>_ai package/DTS equals a fresh generation.
+// SI overlay pins: every configured <pkg>_ai package/DTS equals a fresh generation.
 import { describe, expect, test } from "bun:test";
 import { join } from "node:path";
 import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";

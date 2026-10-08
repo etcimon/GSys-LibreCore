@@ -192,7 +192,7 @@ describe("motherboard engine", () => {
     expect(sv).toContain("localparam bit MbCtrl_litedram_En = 1'b0;");
     expect(sv).toContain("MbIf_ETH0_En");
     expect(sv).toContain('MbIf_ETH0_Phy = "RTL8211E";');
-    // Non-AI boards stay MbAi_En=0 (additive optional ai{}).
+    // Non-SI boards stay MbAi_En=0 (additive optional ai{}).
     expect(sv).toContain("localparam bit MbAi_En = 1'b0;");
     expect(sv).toContain("endpackage : testboard_board_pkg");
   });
@@ -262,7 +262,7 @@ describe("motherboard engine", () => {
     const ctx = makeCtx(tmp);
     const virt = sampleSpec({
       boardid: "virt-ai-pcie",
-      name: "Virtual PCIe AI card (sim)",
+      name: "Virtual PCIe SI card (sim)",
       vendor: "GSys",
       status: "custom",
       class: "virtual",

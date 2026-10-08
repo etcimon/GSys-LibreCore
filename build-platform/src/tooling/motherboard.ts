@@ -118,8 +118,8 @@ export interface BoardSpec {
   phys: BoardPhy[];
   references?: BoardReferences;
   /**
-   * Optional AI island / UIO host path. When present and not disabled, `mb select`
-   * emits AI DTS/profile/env artifacts and MbAi_* board-package localparams.
+   * Optional SI island / UIO host path. When present and not disabled, `mb select`
+   * emits SI DTS/profile/env artifacts and MbAi_* board-package localparams.
    * See build-platform/src/tooling/ai-board.ts and architecture/ai-matrix/board-uio-eventfd.md.
    */
   ai?: BoardAiSpec;
@@ -306,7 +306,7 @@ function validateBoardSpec(raw: unknown, boardid: string): string[] {
   if (s.interfaces !== undefined && !Array.isArray(s.interfaces)) issues.push("interfaces must be an array.");
   if (s.phys !== undefined && !Array.isArray(s.phys)) issues.push("phys must be an array.");
 
-  // Optional AI island / UIO connectors (custom AI boards).
+  // Optional SI island / UIO connectors (custom SI boards).
   issues.push(...validateBoardAi(s.ai, boardid));
 
   return issues;
@@ -477,7 +477,7 @@ export interface GenerateResult {
   packageFile: string;
   makefileSnippet: string;
   wrote: boolean;
-  /** Present when board.json enables AI island. */
+  /** Present when board.json enables SI island. */
   aiDtsFile?: string;
   aiProfileFile?: string;
   aiEnvFile?: string;
@@ -594,8 +594,8 @@ export interface ScaffoldOptions {
   xlen?: 32 | 64;
   dryRun?: boolean;
   /**
-   * When true, pin core to g6lc64_ai (xlen 64), attach starter AI UIO connectors,
-   * and seed board.json ai{} for AI island / ai-tensor discovery.
+   * When true, pin core to g6lc64_ai (xlen 64), attach starter SI UIO connectors,
+   * and seed board.json ai{} for SI island / ai-tensor discovery.
    */
   ai?: boolean;
 }
@@ -612,7 +612,7 @@ export function starterSpec(boardid: string, opts: ScaffoldOptions): BoardSpec {
       ? ["i", "m", "a", "c", "zicsr", "zifencei"]
       : ["i", "m", "a", "f", "d", "c", "zicsr", "zifencei"];
   const summary = ai
-    ? `Custom AI-island board scaffold (g6lc64_ai + Xg6lcai). Advertise xg6lcai only when AiMatrixEn=1. Edit board.json ai.uioConnectors and corev-mb/architecture/${boardid}/README.md.`
+    ? `Custom SI-island board scaffold (g6lc64_ai + Xg6lcai). Advertise xg6lcai only when AiMatrixEn=1. Edit board.json ai.uioConnectors and corev-mb/architecture/${boardid}/README.md.`
     : "New custom board scaffold — edit board.json and corev-mb/architecture/" + boardid + "/README.md.";
   const interfaces: BoardInterface[] = [];
   if (ai) {

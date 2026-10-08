@@ -367,7 +367,7 @@ function resolveCoreConfig(
 
 /**
  * Load board.json ai{} and resolve AI_TENSOR_* env for child processes.
- * Returns null when board missing or has no AI block.
+ * Returns null when board missing or has no SI block.
  */
 export async function loadTensorBoardEnv(
   ctx: PlatformContext,
@@ -773,7 +773,7 @@ export async function runAiTensorSpawn(
   ) {
     opts2.board = "virt-ai-pcie";
   }
-  // Default core for AI island path when unset
+  // Default core for SI island path when unset
   if (
     (cmd === "frameworks" || cmd === "pytorch" || cmd === "regress") &&
     !opts2.core &&

@@ -194,7 +194,7 @@ class CardAgent:
 
 
 def main(argv: Optional[list] = None) -> int:
-    p = argparse.ArgumentParser(description="Virtual PCIe AI card agent")
+    p = argparse.ArgumentParser(description="Virtual PCIe SI card agent")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=18765)
     args = p.parse_args(argv)

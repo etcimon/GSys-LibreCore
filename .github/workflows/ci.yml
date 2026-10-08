@@ -9,7 +9,7 @@
 # through `./build.sh` (build-platform CLI) wherever a surface exists:
 #
 #   platform   build-platform typecheck + unit tests + offline CLI/timings lab (ubuntu, windows)
-#   rtl-lint   Verilator v5.008 --lint-only of the core / SMT2 / OoO / AI packages (`diag run`)
+#   rtl-lint   Verilator v5.008 --lint-only of the core / SMT2 / OoO / SI packages (`diag run`)
 #   sv-timing  sv-timing cargo tests + `test sv-timing-smoke` (timings compile of a fixture)
 #   bios       g6lc_bios `g6b check --rust-only` (spec-sync, independence, fmt, clippy, cargo test, bios-regress)
 #   qemu       g6lc_qemu `g6q check` (independence, fmt, clippy, cargo test)
@@ -207,7 +207,7 @@ jobs:
 
       # core = ISA red lines + firmware-accommodation scan + cv64a6_imafdc_sv39 /
       # cv32a65x lint + formal-package presence. The named ids add the LibreCore
-      # packages (SMT2, integer OoO, two-core OoO coherence + L3, AI island).
+      # packages (SMT2, integer OoO, two-core OoO coherence + L3, SI island).
       - name: Diagnostics
         run: |
           ./build.sh diag run core \

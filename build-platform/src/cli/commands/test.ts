@@ -77,7 +77,7 @@ export const testCommand: Command = {
     "host — unless you accept an interactive install prompt (or pass --yes).\n" +
     "`--list` shows every suite with its runnable status.\n" +
     "\n" +
-    "AI knobs (export AI_ISLAND_DRAM_* / S4_FLAVOUR for regress scripts):\n" +
+    "SI knobs (export AI_ISLAND_DRAM_* / S4_FLAVOUR for regress scripts):\n" +
     "  --channels 1|2|4|8      DramChannels stripe (x4 = class-1 LiteDRAM N=4)\n" +
     "  --ai-dram 0|1           0=SRAM (class 0), 1=DDR4 LiteDRAM (N×19 GB/s nameplate)\n" +
     "  --ai-ghz G              island clock (enables Cas=14 timing SKU when class 0)\n" +

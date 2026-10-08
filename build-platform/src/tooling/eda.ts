@@ -616,7 +616,7 @@ export async function lintTarget(
   ctx: PlatformContext,
   paths: EdaPaths,
   target: string,
-  /** Extra Verilog defines (`NAME` or `NAME=VALUE`), e.g. the AI overlay. */
+  /** Extra Verilog defines (`NAME` or `NAME=VALUE`), e.g. the SI overlay. */
   extraDefines: string[] = [],
 ): Promise<StageOutcome> {
   const started = performance.now();

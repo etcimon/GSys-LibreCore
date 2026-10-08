@@ -132,13 +132,13 @@ export const remoteCommand: Command = {
     "run <elf>, soak, pull, shell, clean [runs|work|all|everything].\n" +
     "Passphrase is cached in build-platform/.remote-ssh-creds (gitignored, 0600).\n" +
     "\n" +
-    "AI (same knobs as test --ai / diag run ai):\n" +
+    "SI (same knobs as test --ai / diag run ai):\n" +
     "  --ai                 default flavour ai-dt when `build` has no flavour arg\n" +
     "  --channels 1|2|4|8   map onto ai-d{1,2,4,8} (class 1) or ai-sc* (class 0)\n" +
     "  --ai-dram 0|1        SRAM vs DDR4 LiteDRAM\n" +
     "  --ai-flavour NAME    explicit proxy flavour\n" +
-    "  --jobs N             C++ make -j (AI default 1: cc1plus OOM at -j2 on 30Gi)\n" +
-    "  --vthreads N         Verilator --threads (AI default: remote nproc)\n" +
+    "  --jobs N             C++ make -j (SI default 1: cc1plus OOM at -j2 on 30Gi)\n" +
+    "  --vthreads N         Verilator --threads (SI default: remote nproc)\n" +
     "S4 directed ELF: test --ai-remote  (s4-mshr-xbar.sh). Not cookie. Not 400 GB/s.",
   examples: [
     "bun run src/cli/index.ts remote --remote-ssh ovh_calltorch doctor",

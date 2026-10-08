@@ -229,7 +229,7 @@
           "minimum": 1
         },
         "ai_island": {
-          "description": "AI-island model, when the design exposes one.",
+          "description": "SI-island model, when the design exposes one.",
           "type": ["object", "null"],
           "additionalProperties": false,
           "properties": {

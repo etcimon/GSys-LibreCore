@@ -1,11 +1,11 @@
 {
   "boardid": "virt-ai-pcie",
-  "name": "Virtual PCIe AI card (sim)",
+  "name": "Virtual PCIe SI card (sim)",
   "vendor": "GSys",
   "status": "custom",
   "class": "virtual",
   "skidl": "omitted",
-  "summary": "Hostless stand-in for the PCIe endpoint CPU+AI card (architecture/uncore/pcie-endpoint.md + ai-matrix). No PCB, no kernel, no real PCIe: soft-sticky UIO + eventfd userspace path for CI (ai-tensor/tools/virt_ai_card). Models virtio-net/SSH workload push and BAR4 bulk tensor transfer over localhost TCP.",
+  "summary": "Hostless stand-in for the PCIe endpoint CPU+SI card (architecture/uncore/pcie-endpoint.md + ai-matrix). No PCB, no kernel, no real PCIe: soft-sticky UIO + eventfd userspace path for CI (ai-tensor/tools/virt_ai_card). Models virtio-net/SSH workload push and BAR4 bulk tensor transfer over localhost TCP.",
   "core": {
     "config": "g6lc64_ai",
     "xlen": 64,

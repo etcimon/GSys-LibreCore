@@ -223,7 +223,7 @@ async function cmdSelect(
     logger.info("No vendor controllers requested by this board.");
   }
 
-  // 4) Generate the (non-compiled) board package + board.mk (+ AI artifacts when enabled).
+  // 4) Generate the (non-compiled) board package + board.mk (+ SI artifacts when enabled).
   const gen = await writeGeneratedArtifacts(ctx, spec, { dryRun });
   logger.heading("Generated artifacts");
   logger.info(`  ${gen.wrote ? "wrote" : "[dry-run]"} ${gen.packageFile}`);
@@ -235,7 +235,7 @@ async function cmdSelect(
   const ai = resolveAiBoard(spec);
   for (const hint of aiCoreHints(spec, ai)) logger.warn(hint);
   if (ai) {
-    logger.heading("AI island");
+    logger.heading("SI island");
     logger.info(`  board_id=${ai.boardid}  mmio=${"0x" + ai.mmioBase.toString(16)}  plic=${ai.plicSource}`);
     logger.info(`  UIO primary id=${ai.primaryUioId} path=${ai.primaryUioPath}`);
     logger.info(`  source ${gen.aiEnvFile ?? "generated/ai-tensor.env"} for AI_TENSOR_* discovery`);
@@ -316,7 +316,7 @@ async function cmdCreate(
     dryRun,
     ai,
   });
-  logger.heading(`Scaffold board ${boardid}${ai ? " (AI island)" : ""}`);
+  logger.heading(`Scaffold board ${boardid}${ai ? " (SI island)" : ""}`);
   for (const f of result.created) logger.info(`  ${dryRun ? "[dry-run] would create" : "created"} ${f}`);
   if (dryRun && result.created.length === 0) logger.info(`  [dry-run] would create ${paths.specFile}`);
   logger.heading("Next");

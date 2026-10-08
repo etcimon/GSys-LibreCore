@@ -7,7 +7,7 @@
 ```bash
 pip install torch   # optional for full suite; Device cases run without torch
 PYTHONPATH=python python python/examples/torch_island_smoke.py
-# Virtual PCIe AI board (ai_island feature validation):
+# Virtual PCIe SI board (ai_island feature validation):
 PYTHONPATH=python:tools python python/tests/test_torch_virt_ai_island.py
 # Monorepo (select board + g6lc64_ai core):
 #   cva6-build tensor pytorch --board virt-ai-pcie --core g6lc64_ai

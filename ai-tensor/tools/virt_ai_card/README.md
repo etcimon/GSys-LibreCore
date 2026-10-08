@@ -1,6 +1,6 @@
-# virt_ai_card — virtual PCIe AI card (userspace)
+# virt_ai_card — virtual PCIe SI card (userspace)
 
-Hostless **soft UIO / eventfd** stand-in for the LibreCore PCIe AI card.
+Hostless **soft UIO / eventfd** stand-in for the LibreCore PCIe SI card.
 Pure Python (stdlib); numpy not required.
 
 | Module | Role |

@@ -30,8 +30,8 @@ Confirm exact filenames under `core/include/`.
 | `g6lc64_server_math_v` | + RVV | `VExtEn`, Ara attach; `CvxifEn` exclusive with accelerator path |
 | `g6lc64_stream8` | Stream8-class bring-up | In-order, `NrCores=2`, H+Sstc, Zacas W/D/Q |
 | `g6lc64_stream8_l3`, `g6lc64_server_math_l3` | In-order two-core + L3 (M6) | HPDCACHE_WT, `COH_FILTERED`, non-inclusive 1 MiB L3, eWT L2; strict two-core OpenSBI boots |
-| `g6lc64_ai` | AI island | `stream8` envelope + `Xg6lcai` / `ai_island` |
-| `g6lc64_smt2_ai` | SMT2 + AI island | `smt2` envelope (2 harts, dual issue) + `Xg6lcai` / `ai_island`, per-hart accumulator banks |
+| `g6lc64_ai` | SI island | `stream8` envelope + `Xg6lcai` / `ai_island` |
+| `g6lc64_smt2_ai` | SMT2 + SI island | `smt2` envelope (2 harts, dual issue) + `Xg6lcai` / `ai_island`, per-hart accumulator banks |
 
 Default packages (e.g. `cv64a6_imafdc_sv39`) remain the **identity** path for
 integrators who want classic CVA6 behavior.

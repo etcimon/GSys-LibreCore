@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 //
-// ai-board.test.ts — Unit tests for AI island board factoring (mb + UIO).
+// ai-board.test.ts — Unit tests for SI island board factoring (mb + UIO).
 
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
@@ -224,7 +224,7 @@ describe("ai-board package + artifacts", () => {
     expect(sv).toContain("localparam bit MbAi_En = 1'b0;");
   });
 
-  test("writeGeneratedArtifacts emits AI dtsi/profile/env when resolved", async () => {
+  test("writeGeneratedArtifacts emits SI dtsi/profile/env when resolved", async () => {
     const ctx = makeCtx(tmp);
     const spec = baseSpec({
       boardid: "aicard",

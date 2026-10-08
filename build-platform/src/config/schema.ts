@@ -92,7 +92,7 @@ export interface SocConfig {
   /** Optional hwconfig option string forwarded to cva6.py --hwconfig_opts. */
   hwconfigOpts?: string;
   /**
-   * AI overlay pins: the `<pkg>_ai` packages + DTS that `ai-overlay pin`
+   * SI overlay pins: the `<pkg>_ai` packages + DTS that `ai-overlay pin`
    * generated from a base package (config_pkg::AiCfgIsland spliced in). `ai-overlay
    * check` and `bun test` regenerate each entry and fail on drift. Iteration on any
    * other target uses `verify --ai-overlay` (+define+G6LC_AI_OVERLAY) instead.
@@ -106,7 +106,7 @@ export interface SocConfig {
   aiIslandCfg?: string;
 }
 
-/** One generated AI package pin (see tooling/aiOverlay.ts). */
+/** One generated SI package pin (see tooling/aiOverlay.ts). */
 export interface AiOverlayPin {
   /** Base package name (g6lc64_*). */
   target: string;

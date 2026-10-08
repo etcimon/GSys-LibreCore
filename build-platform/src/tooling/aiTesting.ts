@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 //
-// aiTesting.ts — Shared AI-island CLI knobs for test / diag / verify / remote / g6q.
+// aiTesting.ts — Shared SI-island CLI knobs for test / diag / verify / remote / g6q.
 //
 // Mirrors the OoO surface (`diag run ooo`, `test --suite ooo-l3-tests`, `--from-timing`)
 // so Xg6lcai clusters, matrix, DRAM channels, GHz/timing, and ai-tensor/QEMU
@@ -464,7 +464,7 @@ export function resolveAiTesting(knobs: AiTestKnobs): AiResolved {
   };
 }
 
-/** Stamp resolved AI env onto `process.env` so runner / g6q / proxy children see it. */
+/** Stamp resolved SI env onto `process.env` so runner / g6q / proxy children see it. */
 export function applyAiEnv(resolved: AiResolved): void {
   Object.assign(process.env, resolved.env);
 }
@@ -548,7 +548,7 @@ export function injectG6qAiTarget(childArgs: string[]): string[] {
 export function formatAiResolvedLine(resolved: AiResolved): string {
   const ghz = resolved.ghz != null ? ` ghz=${resolved.ghz}` : "";
   return (
-    `AI flavour=${resolved.flavour} class=${resolved.dramClass} ` +
+    `SI flavour=${resolved.flavour} class=${resolved.dramClass} ` +
     `channels=${resolved.channels} clusters=${resolved.clusters}${ghz} ` +
     `verlib=${resolved.meta.verlib}` +
     (resolved.meta.defines ? ` defines=${resolved.meta.defines}` : "")

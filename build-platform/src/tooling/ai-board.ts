@@ -1,7 +1,7 @@
 // Copyright (c) 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
 //
-// ai-board.ts — Factor generic AI-island board defaults for the `mb` layer.
+// ai-board.ts — Factor generic SI-island board defaults for the `mb` layer.
 //
 // Custom boards can opt into an optional `ai` object on board.json. On
 // `mb select` / writeGeneratedArtifacts we emit:
@@ -74,7 +74,7 @@ export interface BoardAiUioConnector {
 }
 
 export interface BoardAiSpec {
-  /** When false, AI artifacts are suppressed even if `ai` is present. Default true if object present. */
+  /** When false, SI artifacts are suppressed even if `ai` is present. Default true if object present. */
   enabled?: boolean;
   mmioBase?: number | string;
   mmioSize?: number | string;
@@ -221,7 +221,7 @@ function defaultConnectors(): BoardAiUioConnector[] {
 }
 
 /**
- * Resolve AI board settings. Returns null when `ai` is absent or explicitly
+ * Resolve SI board settings. Returns null when `ai` is absent or explicitly
  * disabled. If connectors are omitted, synthesizes one uio-mmio island0.
  */
 export function resolveAiBoard(spec: AiBoardView): ResolvedAiBoard | null {
@@ -288,13 +288,13 @@ export function resolveAiBoard(spec: AiBoardView): ResolvedAiBoard | null {
   };
 }
 
-/** Soft warnings when core.config is not the preferred AI package. */
+/** Soft warnings when core.config is not the preferred SI package. */
 export function aiCoreHints(spec: AiBoardView, resolved: ResolvedAiBoard | null): string[] {
   if (!resolved) return [];
   const hints: string[] = [];
   if (spec.core.config !== AI_BOARD_DEFAULTS.preferredCoreConfig) {
     hints.push(
-      `board '${spec.boardid}' enables AI island but core.config='${spec.core.config}' ` +
+      `board '${spec.boardid}' enables SI island but core.config='${spec.core.config}' ` +
         `(preferred '${AI_BOARD_DEFAULTS.preferredCoreConfig}' so xg6lcai / AiMatrixEn match DTS).`,
     );
   }
@@ -412,7 +412,7 @@ export function generateAiTensorEnv(r: ResolvedAiBoard): string {
   ].join("\n");
 }
 
-/** SystemVerilog localparams block when AI is enabled (inserted into board package). */
+/** SystemVerilog localparams block when SI is enabled (inserted into board package). */
 export function generateAiBoardPackageParams(r: ResolvedAiBoard): string {
   const lines = [
     "  // --- AI island (board.json ai / UIO connectors) -----------------------",
@@ -439,7 +439,7 @@ export function generateAiBoardPackageParams(r: ResolvedAiBoard): string {
   return lines.join("\n");
 }
 
-/** SystemVerilog localparams when the board has no AI island. */
+/** SystemVerilog localparams when the board has no SI island. */
 export function generateAiBoardPackageDisabled(): string {
   return [
     "  // --- AI island (disabled — no board.json ai or ai.enabled=false) ------",

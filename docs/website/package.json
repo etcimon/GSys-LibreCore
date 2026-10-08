@@ -2,7 +2,7 @@
   "name": "@g6lc/docs",
   "version": "0.1.0",
   "private": true,
-  "description": "Next.js + Nextra documentation site for GSys LibreCore (G6LC): CPU, corev_apu, corev-mb, build-platform, AI agent workflows, and technology optimization.",
+  "description": "Next.js + Nextra documentation site for GSys LibreCore (G6LC): CPU, corev_apu, corev-mb, build-platform, SI agent workflows, and technology optimization.",
   "license": "MIT",
   "author": "Etienne Cimon",
   "type": "module",

@@ -192,7 +192,7 @@ class HostClient:
 
 
 def main(argv: Optional[list] = None) -> int:
-    p = argparse.ArgumentParser(description="Virtual PCIe AI card host client")
+    p = argparse.ArgumentParser(description="Virtual PCIe SI card host client")
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=18765)
     args = p.parse_args(argv)

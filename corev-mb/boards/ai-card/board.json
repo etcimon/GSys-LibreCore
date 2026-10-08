@@ -1,11 +1,11 @@
 {
   "boardid": "ai-card",
-  "name": "GSys LibreCore AI card (custom)",
+  "name": "GSys LibreCore SI card (custom)",
   "vendor": "GSys",
   "status": "custom",
   "class": "custom",
   "skidl": "custom",
-  "summary": "Example custom AI-island board using g6lc64_ai + default UIO connectors (island0 uio-mmio / island0_irq eventfd). Xg6lcai must only be advertised when AiMatrixEn=1. Host path: architecture/ai-matrix/board-uio-eventfd.md.",
+  "summary": "Example custom SI-island board using g6lc64_ai + default UIO connectors (island0 uio-mmio / island0_irq eventfd). Xg6lcai must only be advertised when AiMatrixEn=1. Host path: architecture/ai-matrix/board-uio-eventfd.md.",
   "core": {
     "config": "g6lc64_ai",
     "xlen": 64,

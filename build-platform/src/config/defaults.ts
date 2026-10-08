@@ -34,7 +34,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
     targetFrequencyMHz: 1250,
     targetVoltageV: 0.8,
     process: "tsmc12ffc-class",
-    // AI overlay pins (architecture/ai-matrix/log-2026-09.md, "island on any
+    // SI overlay pins (architecture/ai-matrix/log-2026-09.md, "island on any
     // configuration"): generated <pkg>_ai packages + DTS, drift-tested. The base
     // g6lc64_ai / g6lc64_smt2_ai packages are hand-stated and are not pins.
     //   ooo_int2_l3   : the all-on target (2 cores x 2 harts, OoO, L2 + L3, RV64GC+B)
@@ -633,7 +633,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         optional: true,
       },
       {
-        // Xg6lcai AI matrix — config surface smoke (package + check_cfg).
+        // Xg6lcai SI matrix — config surface smoke (package + check_cfg).
         // Not in defaultSuites. Map: architecture/ai-matrix/README.md · AGENTS-todo AI-1
         id: "ai-config-smoke",
         description:
@@ -698,7 +698,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         // derived ladder table. Local, minutes; SoC and synthesis points are remote gates.
         id: "ai-scale-ladder",
         description:
-          "OPTIONAL local: AI island scaling ladder -- SKU literals, bounded formal, V2 column array at OutCols 1/2/4 on the 8-lane bench, derived V1..V4 table (derived, not measured).",
+          "OPTIONAL local: SI island scaling ladder -- SKU literals, bounded formal, V2 column array at OutCols 1/2/4 on the 8-lane bench, derived V1..V4 table (derived, not measured).",
         script: "verif/regress/ai-scale-ladder.sh",
         group: "benchmark",
         target: "g6lc64_ai",
@@ -716,7 +716,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         // Knobs: AI_MATRIX_BENCH_{FMTS,SHAPES,PATHS,REUSE,T0,ITER}; AI_MATRIX_VERI_REBUILD=1.
         id: "ai-ops-bench-soc",
         description:
-          "OPTIONAL: AI ops bench matrix on the g6lc64_ai bench SKU (formats x shapes x mmio/ai.enq x cold/reuse_a/reuse_b + T0 ops) -> cycles per op at the built geometry; not a timing claim.",
+          "OPTIONAL: SI ops bench matrix on the g6lc64_ai bench SKU (formats x shapes x mmio/ai.enq x cold/reuse_a/reuse_b + T0 ops) -> cycles per op at the built geometry; not a timing claim.",
         script: "verif/regress/ai-ops-bench-soc.sh",
         group: "benchmark",
         target: "g6lc64_ai",
@@ -1656,10 +1656,10 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // candidates. These are the L2 rung of the feedback-latency ladder: a
       // violation is a counterexample in seconds instead of a firmware pin ten
       // million cycles downstream.
-      // AI island GEMM sequencer: flat-panel pitch/capacity, row disjointness, burst
+      // SI island GEMM sequencer: flat-panel pitch/capacity, row disjointness, burst
       // length, DRAM stripe cap and resident-B slot placement over the pure functions
       // of g6lc_ai_island_cfg_pkg the sequencer's address paths call. Swept over the
-      // 8-lane bench and the 512-lane live geometries (WP2 of the AI scaling plan).
+      // 8-lane bench and the 512-lane live geometries (WP2 of the SI scaling plan).
       "corev_apu/ai_island/formal/g6lc_ai_gemm_flat.sby",
       "core/fetch_B/formal/g6lc_fetch_align.sby",
       "core/fetch_B/formal/g6lc_fetch_order.sby",
@@ -1978,9 +1978,9 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         ],
       },
       {
-        // WP4 SMT2+AI: the two-hart AI package and its DTS (strict boot + boot-load bench).
+        // WP4 SMT2+SI: the two-hart SI package and its DTS (strict boot + boot-load bench).
         id: "diag-smt2-ai-paths",
-        description: "SMT2+AI config package, DTS, dual-issue mini and two-hart bench on disk.",
+        description: "SMT2+SI config package, DTS, dual-issue mini and two-hart bench on disk.",
         compartment: "smt2",
         kind: "path-check",
         paths: [
@@ -2090,7 +2090,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // --- core: fetch bounded formal present (L2 rung) --------------------
       {
         id: "diag-ai-formal-paths",
-        description: "AI island bounded-formal property packages on disk (flat panel, stripe cap, slots).",
+        description: "SI island bounded-formal property packages on disk (flat panel, stripe cap, slots).",
         compartment: "core",
         kind: "path-check",
         paths: [
@@ -2246,7 +2246,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       {
         id: "diag-ai-remote-proxy",
         description:
-          "Remote testharness AI flavours (ai/ai-dt/ai-d1/ai-d*) + S4 driver.",
+          "Remote testharness SI flavours (ai/ai-dt/ai-d1/ai-d*) + S4 driver.",
         compartment: "ai",
         kind: "path-check",
         paths: [
@@ -2271,7 +2271,7 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       {
         id: "diag-ai-qemu-bridge",
         description:
-          "g6lc_qemu AI bridge (higher-level Linux emulation, not Variane evidence).",
+          "g6lc_qemu SI bridge (higher-level Linux emulation, not Variane evidence).",
         compartment: "ai",
         kind: "path-check",
         optional: true,

@@ -19,7 +19,7 @@ test("config resolves and validates", async () => {
   }
 });
 
-test("AI policy validation compartments stay optional", async () => {
+test("SI policy validation compartments stay optional", async () => {
   const { config } = await loadConfig();
   for (const id of ["ai-policy-codec", "ai-policy-subcode", "ai-policy-calibration"]) {
     const suite = config.tests.suites.find((s) => s.id === id);
@@ -30,7 +30,7 @@ test("AI policy validation compartments stay optional", async () => {
   }
 });
 
-test("AI native evaluation and scalar floating gates stay optional", async () => {
+test("SI native evaluation and scalar floating gates stay optional", async () => {
   const { config } = await loadConfig();
   for (const id of ["ai-native-eval", "ai-desc-formats", "ai-fp-mac"]) {
     const suite = config.tests.suites.find((s) => s.id === id);

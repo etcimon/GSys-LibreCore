@@ -14,7 +14,7 @@ import {
   stripGatewayFlags,
 } from "../src/tooling/aiTesting.ts";
 
-describe("AI testing CLI knobs", () => {
+describe("SI testing CLI knobs", () => {
   test("diag compartment ai is catalogued like ooo", () => {
     expect(DIAG_COMPARTMENTS).toContain("ai");
     expect(DIAG_COMPARTMENTS).toContain("ooo");
@@ -26,7 +26,7 @@ describe("AI testing CLI knobs", () => {
     expect(lint?.verilator?.target).toBe("g6lc64_ai");
   });
 
-  test("default suites include AI directed + remote + qemu + wrap", () => {
+  test("default suites include SI directed + remote + qemu + wrap", () => {
     const ids = DEFAULT_CONFIG.tests.suites.map((s) => s.id);
     for (const id of [
       "ai-config-smoke",

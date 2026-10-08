@@ -52,7 +52,7 @@ under a different root; the workflow derives it from the repository name and
 | Section | Path | Focus |
 |---|---|---|
 | Getting Started | `pages/getting-started.mdx` | Bootstrap + first checks |
-| Architecture | `pages/architecture/` | Worktree, upgrade program, SKU matrix, specs/DTS, AI development |
+| Architecture | `pages/architecture/` | Worktree, upgrade program, SKU matrix, specs/DTS, SI development |
 | Core / APU / MB / Tech | `pages/core/`, `corev-apu/`, `corev-mb/`, `technology/` | Layer + product features (OoO, SMT, H, RVV, L2/L3, multi-core, …) |
 | Build Platform | `pages/build-platform/` | Commands, probe/verify, timings, extending |
 | sv-timing | `pages/sv-timing/` | Structural FO4 package + host boundary |

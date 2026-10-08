@@ -125,7 +125,7 @@ export const verifyCommand: Command = {
     "                    from verify.qualifications[P]; skips/fallbacks cannot qualify.\n" +
     "                    This qualifies simulation only, not full RTL or PPA sign-off.\n" +
     "  --from-timing DIR  validate timings precompile package before stages\n" +
-    "  --ai               opt-in g6lc64_ai lint target + AI directed sim suites\n" +
+    "  --ai               opt-in g6lc64_ai lint target + SI directed sim suites\n" +
     "                     (like --target g6lc64_ooo_server). Remote S4 is\n" +
     "                     `test --ai-remote`, not this gate.\n" +
     "  --channels / --ai-dram / --ai-ghz / --ai-flavour\n" +
@@ -280,7 +280,7 @@ export const verifyCommand: Command = {
 
     const stages = requestedStages(args.flags as Record<string, unknown>, config.verify.stages);
     const targetFlag = typeof args.flags.target === "string" ? args.flags.target : null;
-    // AI overlay (L0 of the "island on any configuration" ladder): lint +
+    // SI overlay (L0 of the "island on any configuration" ladder): lint +
     // strict-elaborate every selected target with +define+G6LC_AI_OVERLAY
     // (build_config splices config_pkg::AiCfgIsland and the CVXIF coprocessor
     // into the package; --ai-overlay-int forces the integer strip). A refusal
@@ -288,7 +288,7 @@ export const verifyCommand: Command = {
     const overlayDefines: string[] = args.flags["ai-overlay"]
       ? ["G6LC_AI_OVERLAY", ...(args.flags["ai-overlay-int"] ? ["G6LC_AI_OVERLAY_INT"] : [])]
       : [];
-    if (overlayDefines.length > 0) logger.info(`AI overlay defines: ${overlayDefines.join(" ")}`);
+    if (overlayDefines.length > 0) logger.info(`SI overlay defines: ${overlayDefines.join(" ")}`);
     const targets = qualification
       ? [...new Set(qualification.map((entry) => entry.target))]
       : targetFlag

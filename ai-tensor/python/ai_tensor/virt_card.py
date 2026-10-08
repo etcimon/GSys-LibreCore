@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 """
-Virtual PCIe AI card session for ``Device(backend='virt-card')``.
+Virtual PCIe SI card session for ``Device(backend='virt-card')``.
 
 Stand-in for host↔card PCIe/SSH + soft UIO/eventfd (board ``virt-ai-pcie``).
 
