@@ -267,6 +267,15 @@ module g6lc_apu_vnpump
 
     // poll bookkeeping
     logic [1:0]  poll_q;
+    // §12.3 E: exponential poll backoff — an idle poll round (a full
+    // sweep over the rings that found no new tail) waits `gap_q`
+    // cycles before the next round; the gap doubles from 1 up to
+    // PollGapMax and collapses to 0 on any new work, NotifyRing or
+    // ring creation so a live ring's tail is not re-read every cycle
+    // while it sits idle
+    localparam int unsigned PollGapMax = 256;
+    logic [8:0]  gap_q;
+    logic [8:0]  gap_cnt_q;
 
     // ---- vndec + vnfront wiring -------------------------------------------
     logic        dec_start_q, dec_busy, dec_done, dec_re;
@@ -359,7 +368,7 @@ module g6lc_apu_vnpump
 
     // ---- FSM ---------------------------------------------------------------
     typedef enum logic [5:0] {
-      StIdle, StPollFire, StPollCap, StPollNext, StIdleWr,
+      StIdle, StPollFire, StPollCap, StPollNext, StPollGap, StIdleWr,
       StDecFire, StDecWait, StFrontWait,
       StTrFire, StTrCap, StTrExec, StTrDo,
       StOtReq, StOtCpl, StOtDo, StCreate,
@@ -544,7 +553,11 @@ module g6lc_apu_vnpump
     assign pump_ot_v = state_q == StOtReq;
     assign pump_ot_cpl_rdy = state_q == StOtCpl;
 
-    assign busy_o = state_q != StIdle;
+    // the idle-poll sweep reports busy so observers see a sweep in
+    // progress, but the inter-round backoff wait is quiescent: a
+    // completed sweep that found no work deasserts busy_o exactly
+    // where the un-paced loop used to pass through StIdle
+    assign busy_o = state_q != StIdle && state_q != StPollGap;
     assign xs_ready_o = state_q == StIdle && rst_ni;
     assign xs_done_o = state_q == StXsDone;
     assign xs_fault_o = fatal_stream_q;
@@ -596,7 +609,8 @@ module g6lc_apu_vnpump
         t_rid_q <= '0; t_i_q <= '0;
         blob_base_w_q <= '0; blob_size_q <= '0;
         wr_addr_q <= '0; wr_data_q <= '0;
-        poll_q <= '0; rsp_owner_q <= OW_NONE; rsp_hi_q <= 1'b0;
+        poll_q <= '0; gap_q <= '0; gap_cnt_q <= '0;
+        rsp_owner_q <= OW_NONE; rsp_hi_q <= 1'b0;
         dec_start_q <= 1'b0; fr_start_q <= 1'b0;
       end else begin
         dec_start_q <= 1'b0;
@@ -614,6 +628,7 @@ module g6lc_apu_vnpump
           // ------------------------------------------------------------
           StIdle: begin
             if (xs_valid_i) begin
+              gap_q <= '0; gap_cnt_q <= '0;   // new work: no backoff
               xs_d_q <= xs_desc_i;
               xs_n_q <= xs_ndesc_i;
               xs_boff_q <= xs_off_i;
@@ -637,7 +652,7 @@ module g6lc_apu_vnpump
               if (mp_ready_i && src == OW_PRD)
                 state_q <= StPollCap;
             end else if (poll_q == 2'(Rings - 1))
-              state_q <= StIdle;
+              state_q <= StPollGap;   // idle round complete
             else
               poll_q <= poll_q + 2'd1;
           end
@@ -658,6 +673,7 @@ module g6lc_apu_vnpump
                 depth_q <= 1'b0;
                 fatal_stream_q <= 1'b0;
                 ring_q[poll_q].idle_cnt <= '0;
+                gap_q <= '0; gap_cnt_q <= '0;   // new tail: no backoff
                 state_q <= StDecFire;
               end else begin
                 if (ring_q[poll_q].idle_cnt + 32'd1 >=
@@ -686,10 +702,31 @@ module g6lc_apu_vnpump
             end
           end
           StPollNext: begin
-            if (poll_q == 2'(Rings - 1)) state_q <= StIdle;
+            if (poll_q == 2'(Rings - 1)) state_q <= StPollGap;
             else begin
               poll_q <= poll_q + 2'd1;
               state_q <= StPollFire;
+            end
+          end
+          // §12.3 E: inter-round backoff — sit here for `gap_q` cycles
+          // (a zero gap still costs one state visit, i.e. the first
+          // idle round waits ~1 cycle), then double the gap up to
+          // PollGapMax and start the next sweep.  An execbuf push
+          // aborts the wait immediately
+          StPollGap: begin
+            if (xs_valid_i) begin
+              gap_q <= '0; gap_cnt_q <= '0;
+              state_q <= StIdle;
+            end else if (gap_cnt_q + 9'd1 <
+                         (gap_q == 9'd0 ? 9'd1 : gap_q)) begin
+              gap_cnt_q <= gap_cnt_q + 9'd1;
+            end else begin
+              gap_cnt_q <= '0;
+              gap_q     <= (gap_q == 9'd0)               ? 9'd2 :
+                           (gap_q >= 9'(PollGapMax / 2)) ? 9'(PollGapMax)
+                                                        : {gap_q[7:0], 1'b0};
+              poll_q    <= '0;
+              state_q   <= StPollFire;
             end
           end
 
@@ -838,6 +875,7 @@ module g6lc_apu_vnpump
                 else begin
                   ring_q[ring_of(t_hnd_q)].idle_cnt <= '0;
                   ring_q[ring_of(t_hnd_q)].idle <= 1'b0;
+                  gap_q <= '0; gap_cnt_q <= '0;
                   wr_addr_q <= ring_q[ring_of(t_hnd_q)].status_w;
                   wr_data_q <= APU_VNRING_ALIVE |
                                (ring_q[ring_of(t_hnd_q)].fatal
@@ -940,6 +978,7 @@ module g6lc_apu_vnpump
                   state_q <= StFatal;
                 else begin
                   // ring aperture base = blob base + (off >> 2)
+                  gap_q <= '0; gap_cnt_q <= '0;   // new live ring
                   ring_q[ring_free()] <=
                     '{live: 1'b1, fatal: 1'b0, idle: 1'b0,
                       handle: t_hnd_q,

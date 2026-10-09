@@ -74,13 +74,19 @@ maxVertexInputAttributes = 16
 maxVertexInputBindings = 16
 
 [memory]
-# VkPhysicalDeviceMemoryProperties: heap 0 DEVICE_LOCAL, two types on heap 0.
-# §12.3 F5: aperture-backed memory capacity is the guest-mappable
-# span (SHM_LEN = 24 MiB) — the window's top 8 MiB is the
-# device-private descriptor arena
-heap0_size = 0x01800000
+# VkPhysicalDeviceMemoryProperties: two heaps (§12.3 C).
+#   heap 0 = the device-private arena (top 8 MiB of the SHM window);
+#            type 0 DEVICE_LOCAL allocations are eager ALLOC_PRIV there
+#   heap 1 = the guest-mappable span (SHM_LEN = 24 MiB);
+#            type 1 DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT is LAZY —
+#            vkAllocateMemory takes no pages; MAP_BLOB ALLOC_ATs the
+#            extent inside the guest window
+heap0_size = 0x00800000
+heap1_size = 0x01800000
 type0_flags = "DEVICE_LOCAL"
-type1_flags = "HOST_VISIBLE|HOST_COHERENT"
+type0_heap = 0
+type1_flags = "DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT"
+type1_heap = 1
 
 [queue_family0]
 queueFlags = "GRAPHICS|COMPUTE|TRANSFER"

@@ -62,7 +62,9 @@ ue_cneg_pgfull_1 ue_cneg_badmem_1 ue_cneg_bindoob_1 \
 ue_cneg_descoob_1 ue_cneg_updoob_1 ue_cneg_layoutmix_1 \
 ue_cneg_deadpool_1 ue_cneg_poolfull_1 \
 ue_cpos_xfer_copy_1 ue_cpos_xfer_update_1 \
-ue_cneg_xfer_oob_1 ue_cneg_xfer_overlap_1"
+ue_cneg_xfer_oob_1 ue_cneg_xfer_overlap_1 \
+ue_cpos_poolreset_1 ue_cpos_dslcompat_1 \
+ue_cpos_memsplit_1 ue_cneg_unbacked_1"
 NEGATIVES="neg_next_loop neg_desc_oob neg_buf_oob neg_aperture \
 neg_used_oob neg_reset neg_cursor neg_batch neg_flush neg_qdrop \
 neg_resp_oob neg_worksink0 epoch_reuse"
@@ -87,7 +89,7 @@ if [ "$cfail" -ne 0 ]; then
   echo "SESSIONS FAILED"
   exit 1
 fi
-echo "SESSIONS OK (36 incl. transport)"
+echo "SESSIONS OK (40 incl. transport)"
 
 if [ "${VGSYS_NONEG:-0}" != 1 ]; then
   : > "$OUT/negatives.log"

@@ -45,7 +45,15 @@ package g6lc_apu_objtab_pkg;
     // check, no kind check, no directory probe.  MISS when the slot is
     // not live.  Used by the executor to resolve a bound-memory slot
     // recorded by SETBIND without a generational handle.
-    APU_OBJTAB_OP_READSLOT  = 4'd10
+    APU_OBJTAB_OP_READSLOT  = 4'd10,
+    // §12.3 F5-d: kill every live entry with parent_slot == id[15:0]
+    // (raw slot addressing, no directory probe), then zero the
+    // parent's refcnt so the parent's own RETIRE cannot stall on
+    // BUSY_CHILDREN.  No SWEEP stream — children of this call own
+    // nothing outside their parent's arena.  The final completion is
+    // OK with handle[15:0] = number retired; MISS when the slot index
+    // is out of range.
+    APU_OBJTAB_OP_RETIRE_KIDS = 4'd11
   } apu_objtab_op_e;
 
   typedef enum logic [3:0] {
@@ -95,6 +103,13 @@ package g6lc_apu_objtab_pkg;
   } apu_objtab_entry_t;
 
   localparam logic [15:0] APU_OBJTAB_SLOT_NONE = 16'hFFFF;
+
+  // §12.3 C: VkDeviceMemory aux[63:32] unbacked sentinel — a type-1
+  // (host-visible) allocation is lazy: it holds no aperture pages
+  // until the kernel MAP_BLOBs it, and returns here at UNMAP_BLOB.
+  // Engine uses (descriptor bound-write, Xfer operand, dispatch) must
+  // refuse it, never fabricate a base.
+  localparam logic [31:0] APU_MEM_UNBACKED = 32'hFFFF_FFFF;
 
   // Client-object id namespace tag (see header): ORed into every id-
   // form ObjTab request carrying a Vulkan client object id so it

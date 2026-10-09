@@ -203,6 +203,10 @@ module tb_g6lc_apu_vnpump;
   end
   int unsigned xs_seen = 0;
   always @(posedge clk) if (xs_done) xs_seen++;
+  // §12.3 E observability: aperture reads issued (ring tail polls are
+  // the dominant source while the pump sits idle-but-live)
+  int unsigned ap_rd = 0;
+  always @(posedge clk) if (mp_req && !mp_we && mp_dom) ap_rd++;
   // accept counters sampled at the same posedge the engines use
   int unsigned ot_acc = 0, xs_acc = 0;
   always @(posedge clk) if (ot_v && ot_r) ot_acc++;
@@ -481,6 +485,10 @@ module tb_g6lc_apu_vnpump;
   localparam logic [31:0] NOTIFY1 [6] = '{
     32'h000000be, 32'h00000000, 32'h00000400, 32'h00000000,
     32'h00000000, 32'h00000000};
+  // NOTIFY0 ring=0x100 (for the T16 backoff-liveness push)
+  localparam logic [31:0] NOTIFY0 [6] = '{
+    32'h000000be, 32'h00000000, 32'h00000100, 32'h00000000,
+    32'h00000000, 32'h00000000};
   localparam logic [31:0] WAITR1 [6] = '{
     32'h000000fd, 32'h00000000, 32'h00000400, 32'h00000000,
     32'h0000001c, 32'h00000000};
@@ -647,6 +655,42 @@ module tb_g6lc_apu_vnpump;
     cases++;
     // DestroyRing clears the live bit; fatal/idle bits remain as observed
     check(ring_status[1][2] == 1'b0, "T15 ring1 cleared");
+
+    // ---- T16: §12.3 E poll backoff -------------------------------------
+    // fresh live ring; let the exponential gap saturate, then count
+    // aperture reads over a fixed idle-but-live window.  Unpaced the
+    // pump would issue one tail read every ~3 cycles; the backoff
+    // (1..256, doubling) must cut that by far more than 8x
+    // a real guest initialises the ring buffer it hands to
+    // vkCreateRingMESA (head=tail=0); the old ring0 left tail=40 in
+    // the aperture, so recreate on the same window must clear it or
+    // the first poll would legitimately consume 40 stale bytes
+    apm[R0_BASE]      = 32'd0;   // head
+    apm[R0_BASE + 16] = 32'd0;   // tail
+    wq = {};
+    for (int i = 0; i < 35; i++) wq.push_back(CRING0[i]);
+    xs_go(wq, 1'b0, "T16 re-create ring0");
+    check(ring_active[0] == 1'b1, "T16 ring0 active");
+    begin
+      automatic int unsigned rd0;
+      automatic int unsigned rd_win = 4096;
+      repeat (2048) @(posedge clk);     // gap saturates well before this
+      rd0 = ap_rd;
+      repeat (rd_win) @(posedge clk);
+      cases++;
+      // unpaced: ~rd_win/3 reads; paced: ~rd_win/260 + ramp -> bound
+      // rd_win/16 is comfortably >8x fewer and far above the real value
+      $display("T16 idle-but-live aperture reads=%0d over %0d cycles",
+               ap_rd - rd0, rd_win);
+      check(ap_rd - rd0 <= rd_win / 16,
+            "T16 poll reads collapse >8x with backoff");
+      // liveness: work pushed mid-backoff is still consumed within a
+      // bounded latency (one NotifyRing command = 24 bytes)
+      wq = {};
+      for (int i = 0; i < 6; i++) wq.push_back(NOTIFY0[i]);
+      ring_put(R0_BASE + 48, 0, wq, R0_BASE + 16, 24);
+      wait_ap(R0_BASE, 32'd24, "T16 head catches new work");
+    end
 
     if (errors == 0)
       $display("PASS tb_g6lc_apu_vnpump cases=%0d checks=%0d cycles=%0d",

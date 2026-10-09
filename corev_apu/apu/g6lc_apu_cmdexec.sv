@@ -128,6 +128,7 @@ module g6lc_apu_cmdexec
       StDsSlRd, StDsSlRdC, StDsSlHi, StDsSlHiC,
       StDsSlReq, StDsSlCpl,
       StDsSetReq, StDsSetCpl,
+      StDsDslReq, StDsDslCpl,
       StDsPoolReq, StDsPoolCpl,
       StDsRowNb, StDsRowNbC,
       StDsRowRd, StDsRowRdC,
@@ -172,6 +173,12 @@ module g6lc_apu_cmdexec
     logic [31:0]         ds_slo_q;      // setLayout objectpay base
     logic [15:0]         ds_slw_q;      // setLayout payload words
     logic [31:0]         ds_slh_q;      // setLayout handle {gen,slot}
+    // §12.3 F5-d: content-hash compatibility — the pipeline layout's
+    // DSL carries its FNV-1a row hash in state[31:0]; the bound set's
+    // DSL (aux[63:32] {gen,slot}) is READSLOT'd and must hash equal
+    logic [31:0]         ds_slhash_q;   // pipeline DSL content hash
+    logic [15:0]         ds_sdsl_q;     // set's DSL slot
+    logic [15:0]         ds_sdg_q;      // set's DSL generation
     logic [31:0]         ds_pool_q;     // bound set's pool handle
     logic [15:0]         ds_epoch_q;    // bound set's pool epoch
     logic [4:0]          ds_i_q;        // binding-row cursor
@@ -370,6 +377,16 @@ module g6lc_apu_cmdexec
                              kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_SET),
                              default: '0};
         end
+        StDsDslReq: begin
+          ot_req_valid_o = 1'b1;
+          // §12.3 F5-d: the set's own DSL — content hash vs the
+          // pipeline layout's (identical-layout objects are
+          // Vulkan-compatible; the generation still pins liveness)
+          ot_req_o       = '{op: APU_OBJTAB_OP_READSLOT,
+                             id: {48'h0, ds_sdsl_q},
+                             kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT),
+                             default: '0};
+        end
         StDsPoolReq: begin
           ot_req_valid_o = 1'b1;
           ot_req_o       = '{op: APU_OBJTAB_OP_READSLOT,
@@ -453,6 +470,8 @@ module g6lc_apu_cmdexec
         ds_plpay_q  <= '0;   ds_plw_q <= '0;
         ds_slid_q   <= '0;   ds_slo_q <= '0;
         ds_slw_q    <= '0;   ds_slh_q <= '0;
+        ds_slhash_q <= '0;
+        ds_sdsl_q   <= '0;   ds_sdg_q <= '0;
         ds_pool_q   <= '0;   ds_epoch_q <= '0;
         ds_i_q      <= '0;   ds_nb_q <= '0;
         ds_rw0_q    <= '0;
@@ -826,25 +845,44 @@ module g6lc_apu_cmdexec
               ds_slh_q <= ot_cpl_i.handle;
               ds_slo_q <= {16'h0, ot_cpl_i.entry.aux[63:48]};
               ds_slw_q <= ot_cpl_i.entry.aux[47:32];
+              // §12.3 F5-d: content hash minted at create — the
+              // compatibility key against the set's own layout
+              ds_slhash_q <= ot_cpl_i.entry.state;
               state_q  <= StDsSetReq;
             end
           end
-          // bound set: live, unpoisoned, allocated from the layout
-          // the pipeline layout declares for this slot
+          // bound set: live, unpoisoned; layout compatibility is by
+          // content hash (checked at StDsDslCpl), not object identity
           StDsSetReq: if (ot_req_ready_i) state_q <= StDsSetCpl;
           StDsSetCpl: if (ot_cpl_valid_i) begin
             if (ot_cpl_i.status != APU_OBJTAB_OK ||
-                ot_cpl_i.entry.aux[APU_DESC_POISON] ||
-                ot_cpl_i.entry.aux[63:32] != ds_slh_q) begin
+                ot_cpl_i.entry.aux[APU_DESC_POISON]) begin
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
             end else begin
               desc_q.set_base[ds_set_q] <=
                   {7'h0, ot_cpl_i.entry.aux[24:0]};
               desc_q.dyn_off[ds_set_q]  <= snap_q.dyn[ds_set_q];
+              ds_sdsl_q  <= ot_cpl_i.entry.aux[47:32];
+              ds_sdg_q   <= ot_cpl_i.entry.aux[63:48];
               ds_pool_q  <= ot_cpl_i.entry.size[31:0];
               ds_epoch_q <= ot_cpl_i.entry.state[15:0];
-              state_q    <= StDsPoolReq;
+              state_q    <= StDsDslReq;
+            end
+          end
+          // the set's DSL must still live at its minted generation and
+          // hash-identical to the pipeline's layout for this slot
+          StDsDslReq: if (ot_req_ready_i) state_q <= StDsDslCpl;
+          StDsDslCpl: if (ot_cpl_valid_i) begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                ot_cpl_i.entry.kind !=
+                    6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT) ||
+                ot_cpl_i.entry.gen != ds_sdg_q ||
+                ot_cpl_i.entry.state != ds_slhash_q) begin
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              state_q <= StDsPoolReq;
             end
           end
           // pool liveness: slot resolves, generation and reset epoch
@@ -937,6 +975,10 @@ module g6lc_apu_cmdexec
             if (ot_cpl_i.status != APU_OBJTAB_OK ||
                 ot_cpl_i.entry.kind != 6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
                 |ot_cpl_i.entry.size[63:32] ||
+                // §12.3 C: an unbacked (lazy type-1, not yet MAP_BLOB'd)
+                // memory has no aperture base — the transfer fails
+                // truthfully, never silently to a fabricaed offset
+                ot_cpl_i.entry.aux[63:32] == APU_MEM_UNBACKED ||
                 xf_bo_q > ot_cpl_i.entry.size) begin
               lost_q  <= 1'b1;
               state_q <= StUnpReq;

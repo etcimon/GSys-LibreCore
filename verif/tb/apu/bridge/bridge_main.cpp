@@ -529,6 +529,23 @@ static void stats() {
     (unsigned long)st_dma_rd_bytes, (unsigned long)st_dma_wr,
     (unsigned long)st_dma_wr_bytes, (unsigned long)st_irq,
     (unsigned long)st_oob);
+  if (dbg) {
+    // wedge snapshot: ObjTab live count, {f_seen,rdone,vg_idle},
+    // vgpages used, per-ring head + {live,fatal,idle} status, vnfront
+    // state — cheap comb reads of the TB debug mux
+    uint32_t otl = dbg_read(DBG_BASE + 1 * 8);
+    uint32_t flg = dbg_read(DBG_BASE + 3 * 8);
+    uint32_t vgp = dbg_read(DBG_BASE + 6 * 8);
+    uint32_t frst = dbg_read(DBG_BASE + 32 * 8);
+    fprintf(stderr,
+      "[dbg] otl=%u flg=%x vgp=%u fr=%x "
+      "rh=[%08x %08x %08x %08x] rs=[%08x %08x %08x %08x]\n",
+      otl, flg, vgp, frst,
+      dbg_read(DBG_BASE + 16 * 8), dbg_read(DBG_BASE + 17 * 8),
+      dbg_read(DBG_BASE + 18 * 8), dbg_read(DBG_BASE + 19 * 8),
+      dbg_read(DBG_BASE + 20 * 8), dbg_read(DBG_BASE + 21 * 8),
+      dbg_read(DBG_BASE + 22 * 8), dbg_read(DBG_BASE + 23 * 8));
+  }
 }
 
 static void on_sig(int) { running = false; }

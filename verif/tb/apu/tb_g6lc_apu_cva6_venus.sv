@@ -812,9 +812,9 @@ module tb_g6lc_apu_cva6_venus;
                             .gen_venus.i_vgsys.ring_head_o;
   wire [3:0][g6lc_apu_vg_pkg::APU_VG_AP_WORD_W-1:0] r_extra  = i_thl_v.i_xbar.i_th.i_attach.i_soc.i_sys
                             .gen_venus.i_vgsys.ring_extra_w_o;
-  wire [g6lc_apu_vg_pkg::APU_VG_PAGES-1:0] vgp_free = i_thl_v.i_xbar.i_th.i_attach.i_soc.i_sys
+  wire [31:0] vgp_used = i_thl_v.i_xbar.i_th.i_attach.i_soc.i_sys
                             .gen_venus.i_vgsys.gen_on.i_top.gen_on.i_vgp
-                            .gen_on.free_q;
+                            .gen_on.used_q;
   // Guest INTERRUPT_ACK[0] write decode inside the virtio-mmio register
   // block (combinational pulse on the register-write strobe).
   wire        irq_ack_pulse =
@@ -987,7 +987,7 @@ module tb_g6lc_apu_cva6_venus;
       8:  check(f_seen_id == exp && f_seen_ring == 8'(ring) &&
                 f_seen_n != 0, "mbx fence pulse");
       6:  check(ot_live == 16'(exp[31:0]), "mbx EK_LIVE");
-      11: check($countones(vgp_free) == int'(exp[31:0]), "mbx EK_PAGES");
+      11: check(vgp_used == int'(exp[31:0]), "mbx EK_PAGES");
       7:  check(i_dram.peek32(SV_VN_SHM_BASE +
                 64'(4) * (64'(r_extra[ring]) + 64'(arg >> 2))) == exp[31:0],
                 "mbx EK_EXTRA");

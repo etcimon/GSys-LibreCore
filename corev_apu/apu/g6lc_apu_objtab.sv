@@ -129,6 +129,12 @@ module g6lc_apu_objtab
     apu_objtab_entry_t  par_ent_q;
     logic [15:0]        par_slot_q;
     logic [SlotBits:0]  scan_q;
+    // §12.3 F5-d: scan mode — 0 = RESET_CTX ctx sweep, 1 =
+    // RETIRE_KIDS parent sweep (id[15:0] = parent slot in rtk_slot_q;
+    // kills count into pinned_q, no SWEEP stream)
+    logic               scan_kids_q;
+    logic [15:0]        rtk_slot_q;
+    logic               rtk_par_q;   // parent refcnt already zeroed
     // RESET_CTX sweep: tombstoned entry + slot staged for the interim
     // SWEEP completion so the caller can reclaim owned resources
     apu_objtab_entry_t  swe_ent_q;
@@ -342,6 +348,7 @@ module g6lc_apu_objtab
         hit_slot_q <= '0; wr_ent_q <= '0; wr_slot_q <= '0;
         par_ent_q <= '0; par_slot_q <= '0;
         scan_q <= '0; pinned_q <= '0; live_q <= '0;
+        scan_kids_q <= '0; rtk_slot_q <= '0; rtk_par_q <= '0;
       end else begin
         unique case (state_q)
         // ---------------- init sweep ----------------
@@ -354,9 +361,27 @@ module g6lc_apu_objtab
         StIdle: if (req_valid_i) begin
           req_q <= req_i;
           if (req_i.op == APU_OBJTAB_OP_RESET_CTX) begin
-            scan_q   <= '0;
-            pinned_q <= '0;
-            state_q  <= StScanRd;
+            scan_q      <= '0;
+            pinned_q    <= '0;
+            scan_kids_q <= 1'b0;
+            state_q     <= StScanRd;
+          end else if (req_i.op == APU_OBJTAB_OP_RETIRE_KIDS) begin
+            // §12.3 F5-d: parent-slot sweep — kill every live child of
+            // id[15:0], then zero the parent's refcnt.  Children own
+            // nothing reachable by the sweep (descriptor sets live in
+            // their pool's arena), so there is no SWEEP stream.
+            if (req_i.id[15:0] >= 16'(Slots)) begin
+              cpl_q   <= '{status: APU_OBJTAB_MISS, handle: '0,
+                           entry: '0};
+              state_q <= StCpl;
+            end else begin
+              scan_q      <= '0;
+              pinned_q    <= '0;
+              scan_kids_q <= 1'b1;
+              rtk_slot_q  <= req_i.id[15:0];
+              rtk_par_q   <= 1'b0;
+              state_q     <= StScanRd;
+            end
           end else if (req_i.op == APU_OBJTAB_OP_READSLOT) begin
             // §7b/5a-ii: direct slot read, no generation check; a dead
             // slot reports MISS (ResMiss -> APU_OBJTAB_MISS).  The kind
@@ -377,9 +402,13 @@ module g6lc_apu_objtab
               state_q    <= StResEntRd;
             end
           end else begin
+            // kind 0 is a wildcard exactly as for READSLOT: callers
+            // that do not carry the target kind (the pool/fence reset
+            // path SETSTATE) must not be rejected as KIND.
             res_start(req_i.id,
                       req_i.op != APU_OBJTAB_OP_ALLOC,
-                      req_i.op != APU_OBJTAB_OP_ALLOC,
+                      req_i.op != APU_OBJTAB_OP_ALLOC &&
+                        req_i.kind != 6'h0,
                       req_i.op == APU_OBJTAB_OP_ALLOC,
                       StAfter);
           end
@@ -705,11 +734,13 @@ module g6lc_apu_objtab
         // ---------------- simple mutator write ----------------
         StMutWr: state_q <= StCpl;
 
-        // ---------------- RESET_CTX sweep ----------------
+        // ---------------- RESET_CTX / RETIRE_KIDS sweep ------------
         StScanRd: state_q <= StScanCmp;
         StScanCmp: begin
-          if (ent_rdata_t.live && ent_rdata_t.ctx == req_q.ctx) begin
-            if (ent_rdata_t.pins != 8'h0) begin
+          if (ent_rdata_t.live &&
+              (scan_kids_q ? ent_rdata_t.parent_slot == rtk_slot_q
+                           : ent_rdata_t.ctx == req_q.ctx)) begin
+            if (!scan_kids_q && ent_rdata_t.pins != 8'h0) begin
               pinned_q <= pinned_q + 16'h1;
               scan_q   <= scan_q + 1'b1;
               state_q  <= scan_q == Slots - 1 ? StScanDone : StScanRd;
@@ -729,18 +760,31 @@ module g6lc_apu_objtab
         StScanWr: begin
           live_q[scan_q[SlotBits-1:0]] <= 1'b0;
           scan_q  <= scan_q + 1'b1;
-          if (par_slot_q == APU_OBJTAB_SLOT_NONE)
-            cpl_q <= '{status: APU_OBJTAB_SWEEP,
-                       handle: {16'h0, swe_slot_q}, entry: swe_ent_q};
-          if (par_slot_q != APU_OBJTAB_SLOT_NONE) state_q <= StScanParRd;
-          else state_q <= StScanEmit;
+          if (scan_kids_q) begin
+            // §12.3 F5-d: count the kill, no SWEEP record, no per-child
+            // parent walk — the parent's refcnt is zeroed once at the
+            // end (StScanDone)
+            pinned_q <= pinned_q + 16'h1;
+            state_q  <= scan_q == Slots - 1 ? StScanDone : StScanRd;
+          end else begin
+            if (par_slot_q == APU_OBJTAB_SLOT_NONE)
+              cpl_q <= '{status: APU_OBJTAB_SWEEP,
+                         handle: {16'h0, swe_slot_q}, entry: swe_ent_q};
+            if (par_slot_q != APU_OBJTAB_SLOT_NONE) state_q <= StScanParRd;
+            else state_q <= StScanEmit;
+          end
         end
         StScanParRd:  state_q <= StScanParCap;
         StScanParCap: state_q <= StScanParWr;
         StScanParWr: begin
-          cpl_q   <= '{status: APU_OBJTAB_SWEEP,
-                       handle: {16'h0, swe_slot_q}, entry: swe_ent_q};
-          state_q <= StScanEmit;
+          if (scan_kids_q) begin
+            // RETIRE_KIDS tail: refcnt write only, then the count cpl
+            state_q <= StScanDone;
+          end else begin
+            cpl_q   <= '{status: APU_OBJTAB_SWEEP,
+                         handle: {16'h0, swe_slot_q}, entry: swe_ent_q};
+            state_q <= StScanEmit;
+          end
         end
         // interim completion per tombstoned entry: the requester owns
         // the reclaim (aperture/ObjPay extents, ShaderCore refs) that
@@ -753,9 +797,19 @@ module g6lc_apu_objtab
             state_q <= scan_q == Slots ? StScanDone : StScanRd;
         end
         StScanDone: begin
-          cpl_q   <= '{status: APU_OBJTAB_OK,
-                       handle: {16'h0, pinned_q}, entry: '0};
-          state_q <= StCpl;
+          if (scan_kids_q && !rtk_par_q) begin
+            // zero the parent's refcnt once so its own RETIRE can
+            // never stall on BUSY_CHILDREN
+            rtk_par_q  <= 1'b1;
+            par_slot_q <= rtk_slot_q;
+            state_q    <= StScanParRd;
+          end else begin
+            // RESET_CTX: handle[15:0] = pinned count; RETIRE_KIDS:
+            // the number of children killed
+            cpl_q   <= '{status: APU_OBJTAB_OK,
+                         handle: {16'h0, pinned_q}, entry: '0};
+            state_q <= StCpl;
+          end
         end
 
         StCpl: if (cpl_ready_i) state_q <= StIdle;
@@ -766,8 +820,13 @@ module g6lc_apu_objtab
       // decremented value.
       if (state_q == StRetParCap || state_q == StScanParCap) begin
         par_ent_q        <= ent_rdata_t;
-        par_ent_q.refcnt <= ent_rdata_t.live && ent_rdata_t.refcnt != 16'h0
-                            ? ent_rdata_t.refcnt - 16'h1 : ent_rdata_t.refcnt;
+        // RETIRE_KIDS zeroes the parent's refcnt wholesale (the sweep
+        // already killed every live child); RESET_CTX/RETIRE decrement
+        par_ent_q.refcnt <= state_q == StScanParCap && scan_kids_q
+                            ? 16'h0 :
+                            (ent_rdata_t.live && ent_rdata_t.refcnt != 16'h0
+                             ? ent_rdata_t.refcnt - 16'h1
+                             : ent_rdata_t.refcnt);
       end
       end
     end

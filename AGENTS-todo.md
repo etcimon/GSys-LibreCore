@@ -94,17 +94,67 @@ Priors: `architecture/uncore/apu-graphics.md`, `corev_apu/apu/AGENTS-impl-interp
   `MAP_BLOB` offsets (`ALLOC_AT`), ObjTab id namespace + hash, `vkBindBufferMemory2`
   arrays, `VK_KHR_external_memory_fd` (§12.1 F9). Command trace:
   `architecture/uncore/apu-venus-command-trace.md`. Not a full-SoC Linux boot (R3b).
-- [ ] 3d-c follow-ups: pump ring-poll backoff (≈1 M aperture reads per guest
-  session), hierarchical/`tc_sram` page bitmap (8192 flops), aperture under real
-  coherence on the Variane testharness once R3b boots Linux.
+- [x] **F5 landed (2026-10-08, `1290036ec`)**: memory-resident descriptors —
+  32-byte aperture records (`APU_DESC_*`), pools in a device-private arena (top
+  8 MiB; `SHM_LEN` publishes the 24 MiB guest span so the kernel's `drm_mm` can
+  never overlap it), per-set bump tables, update-time buffer/bound-memory
+  validation with a set poison bit, `{set, ndyn}` + dynamic offsets per bind;
+  dispatch assembly resolves pipeline → pipeline layout → per-set {layout, pool
+  gen + reset epoch, binding rows} into one held sideband (`apu_sh_desc_t`, not
+  re-latched by shwave: −581 FF each in shcore/shwave); shwave resolves
+  `{set,binding,idx}` per lane through a 16-row CAM + 8-entry dispatch-scoped
+  record cache, so divergent runtime-indexed descriptor arrays execute
+  (`descarr`/`multiset`/`arroob`) and both `*BufferArrayDynamicIndexing`
+  features are advertised truthfully. Root cause found by the stock guest:
+  ObjTab `RESET_CTX` left directory rows valid for dead entries, so a recycled
+  slot aliased the next process's ids (`begin cb -1`, `map -5`, null records);
+  rows now carry the insert-time gen, stale hits are tombstoned and the probe
+  continues; `RESET_CTX` streams `SWEEP` completions so vgctl reclaims
+  aperture/ObjPay/slot resources. Evidence: objtab 2,237 checks (3-cycle epoch
+  reuse), vnfront 179+11, shwave 237 (ulp2=0), vgtop 35×2, vgsys 36 + 13 arms,
+  sys-venus 21/21, CVA6 probe 238 + VenusOff, bridge self-test 2,651, stock
+  guest `vulkaninfo` + `vkcompute` + `vkdescarr` PASS (kernel 7.0.0-31, Mesa
+  25.2.8). Known limits carried to 3d-c/F5-b: host-visible allocations transit
+  the 8 MiB private arena; pool reset/destroy leaves minted sets in ObjTab
+  until context reset; DSL compatibility is by object identity; flat 8192-flop
+  page bitmap; pump polls back-to-back while a ring is live.
+- [x] **3d-c / F5-b landed (2026-10-09)**: the stock-guest gate is in-tree
+  (`verif/tb/apu/bridge/run-guest.sh` + `guest/` — sha256-pinned image,
+  cloud-init seed, `vkcompute.c`/`vkdescarr.c`/`vkmem.c`, venus + venusoff
+  arms) and `verif/tb/apu/run-apu-regress.sh` runs unit → top → soc → bridge →
+  guest → synth serially with a PASS-line summary; `vgpages` bitmap is a
+  `tc_sram` word array + per-word full/empty flop summary (first-fit skips 64
+  pages per cycle; worst-case ALLOC 258 cycles at 8192 pages, 2,050 at 65536 =
+  256 MiB — both geometries simulated and synthesised); two truthful heaps
+  (heap0 = 8 MiB private arena, type 0 DEVICE_LOCAL eager; heap1 = 24 MiB guest
+  span, type 1 DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT lazy — backed only by
+  `MAP_BLOB`, unbacked use is poison/DEVICE_LOST); `RETIRE_KIDS` sweeps a
+  pool's sets on reset/destroy (UE per-frame pattern no longer leaks ObjTab
+  slots); DSL compatibility by FNV-1a content hash in the DSL `state` word;
+  `vnpump` exponential poll gap 1..256 (CVA6 probe aperture reads 34,192 →
+  7,608); fresh fence objects clear inherited signaled/lost bits. Evidence:
+  vgsys 40 sessions + 13 arms, vgtop 39×2, sys-venus 21/21, CVA6 probe 238 +
+  VenusOff, bridge self-test 2,651, stock guest `vulkaninfo` + `vkcompute` +
+  `vkdescarr` + `vkmem` (12 MiB host-visible alloc/map/verify, 2 MiB
+  device-local bind, 12 MiB device-local refused −2 under
+  `VN_PERF=no_async_mem_alloc` — Venus allocates asynchronously, so a
+  renderer OOM on non-mappable memory is otherwise unobservable at
+  `vkAllocateMemory`) + venusoff `GUEST-PASS`. Known limits: DSL hash is
+  binding-order-sensitive (spec compatibility is order-free); dispatch
+  assembly re-reads binding rows every dispatch (cache by unchanged set/layout
+  is the next performance lever once a draw path exists); `vnfront` full synth
+  OOMs the 15 GiB WSL VM (pre-synth stat only; remote proxy screen pending).
+- [ ] 3d-c remainder: aperture under real coherence on the Variane testharness
+  once R3b boots Linux; remote default-geometry synth screens for `vnfront`.
 - [x] **5a landed (2026-10-05, `1d99eae72`)**: `g6lc_apu_xfer` — CopyBuffer /
   FillBuffer / UpdateBuffer as checked burst DMA (dma_read/dma_write pair on the
   shared master through the `tdma` join), regions + update data captured by
   generated keep-lists, bounds + no-overlap validated before any write; 249
   standalone cases, copy → barrier → dispatch → fill → readback session bit-exact
   through vgtop/vgsys/sys-venus, OOB and overlap refused as DEVICE_LOST.
-- [ ] Increment 5 (rest, §12.3 C): images/formats/sampler with memory-resident
-  descriptors (F5) → TBDR raster/ROP → UE SM5 profile ROM; G0/A5 via Zink.
+- [ ] Increment 5 (rest, §12.3 C): images/formats/sampler on the F5 record
+  format (bytes 16..31 reserved for the image/sampler halves) → `vkCmdCopyImage`
+  / blits through Xfer → TBDR raster/ROP → UE SM5 profile ROM; G0/A5 via Zink.
 - [ ] §12.3 D/E: shwave 1 IPC + ShaderCores, DramChannels by profile,
   virtio-pci endpoint function (F4), scanout/dma-buf WSI; UE 5.8.3 SM5 on
   26.04.1/24.04; CS2 requirement pin.

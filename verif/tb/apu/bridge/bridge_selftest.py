@@ -464,8 +464,10 @@ class Player:
             for _ in range(a0):
                 self.check(self.rec_kind() == 5, "EK_REPLY kind")
                 self.ep += 1
-                self.check(self.ap32(a1 + 4 * self.exp[self.ep]) ==
-                           self.exp[self.ep + 1], "CK_REPLY word")
+                got = self.ap32(a1 + 4 * self.exp[self.ep])
+                self.check(got == self.exp[self.ep + 1],
+                           f"CK_REPLY @{a1 + 4 * self.exp[self.ep]:#x} "
+                           f"got={got:#x} exp={self.exp[self.ep + 1]:#x}")
                 self.ep += 7
         elif what == 3:    # CK_LIVE + EK_PAGES
             self.check(self.rec_kind() == 6, "EK_LIVE kind")

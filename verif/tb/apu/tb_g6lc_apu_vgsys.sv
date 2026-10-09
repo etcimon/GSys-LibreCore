@@ -30,11 +30,11 @@ module tb_g6lc_apu_vgsys;
   localparam logic [63:0] GB     = 64'h8000_0000;   // guest window
   localparam int unsigned GBW    = 32'h40000;       // 1 MiB / 4 B
   localparam logic [63:0] AB     = APU_VG_SHM_BASE; // aperture window
-  localparam int unsigned ABW    = 32'h40000;    // dense 1 MiB model
-                                                   // of the 32 MiB window
-  // §12.3 F5: the device-private arena sits at APU_VG_GUEST_BYTES..top;
-  // the dense model covers it in [ABW, ABW+PPW) of apm
+  // §12.3 F5-c: the dense model covers the whole guest span — lazy
+  // type-1 blobs (memsplit) can first-fit above the low MiB — plus the
+  // device-private arena at APU_VG_GUEST_BYTES..top in [PWB, PWB+PPW)
   localparam int unsigned PWB    = 32'(APU_VG_GUEST_BYTES >> 2);
+  localparam int unsigned ABW    = PWB;
   localparam int unsigned PPW    =
       APU_VG_PRIV_PAGES * (APU_VG_PAGE_BYTES / 4);
   localparam int unsigned APWT   = ABW + PPW;
@@ -120,9 +120,11 @@ module tb_g6lc_apu_vgsys;
                         : i_dut.gen_on.vw_chain_v;
   wire vw_cr = ws_arm_q ? i_ws0.gen_on.vw_chain_rdy
                         : i_dut.gen_on.vw_chain_rdy;
-  wire [APU_VG_PAGES-1:0] vgp_free =
-      ws_arm_q ? i_ws0.gen_on.i_top.gen_on.i_vgp.gen_on.free_q
-               : i_dut.gen_on.i_top.gen_on.i_vgp.gen_on.free_q;
+  // §12.3 3d-c: the busy bitmap moved into tc_sram; the DUT keeps an
+  // incremental busy-page count for observability
+  wire [31:0] vgp_used =
+      ws_arm_q ? i_ws0.gen_on.i_top.gen_on.i_vgp.gen_on.used_q
+               : i_dut.gen_on.i_top.gen_on.i_vgp.gen_on.used_q;
   wire [255:0] pay_free =
       ws_arm_q ? i_ws0.gen_on.i_top.gen_on.i_pay.gen_on.free_q
                : i_dut.gen_on.i_top.gen_on.i_pay.gen_on.free_q;
@@ -869,10 +871,10 @@ module tb_g6lc_apu_vgsys;
                               ot_live, expm[ep + 1]));
               ep += 8;
               check(rec_kind() == 11, "EK_PAGES kind");
-              check($countones(vgp_free)
+              check(vgp_used
                     == int'(expm[ep + 1]),
                     $sformatf("CK_PAGES got=%0d exp=%0d",
-                              $countones(vgp_free),
+                              vgp_used,
                               expm[ep + 1]));
               ep += 8;
             end
@@ -1351,16 +1353,24 @@ module tb_g6lc_apu_vgsys;
   always @(negedge clk) begin
     if (dot_v || dot_cv || i_dut.gen_on.i_top.gen_on.ot_cpl_valid ||
         i_dut.gen_on.i_top.gen_on.ot_req_valid)
-      $display("  [eptr] st=%0d og=%0d rv=%b rr=%b cv=%b dcv=%b vcb=%b vpb=%b erst=%b rq=%0d iq=%0d",
+      $display("  [eptr t=%0d] st=%0d og=%0d rv=%b rr=%b dv=%b cv=%b dcv=%b vcb=%b vpb=%b rq=%0d iq=%0d rop=%0d rid=%x rst=%0d cop=%x cst=%0d rsid=%x drd=%x",
+               cycles,
                i_dut.gen_on.i_top.gen_on.i_tab.gen_on.state_q,
                i_dut.gen_on.i_top.gen_on.og_q,
                i_dut.gen_on.i_top.gen_on.ot_req_valid,
-               dot_r,
+               dot_r, dot_v,
                i_dut.gen_on.i_top.gen_on.ot_cpl_valid, dot_cv,
                i_dut.gen_on.i_top.gen_on.vc_busy,
                i_dut.gen_on.i_top.gen_on.vp_busy,
-               i_dut.gen_on.eng_rst_n, i_dut.gen_on.rst_q,
-               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.init_q);
+               i_dut.gen_on.rst_q,
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.init_q,
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.req_q.op,
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.req_q.id,
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.res_st_q,
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.cpl_q.handle,
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.cpl_q.status,
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.res_id_q,
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.dir_rdata);
   end
 `endif
   task automatic ot_op(input  apu_objtab_op_e     op,
@@ -1378,8 +1388,12 @@ module tb_g6lc_apu_vgsys;
     @(negedge clk);
     dot_v = 1'b1;
     t = 0;
+    // the accept lands on the posedge where valid&&ready; ready is a
+    // one-cycle StIdle window, so a negedge-only sample can miss it —
+    // the request would then be re-offered on the next StIdle and run
+    // twice.  Observe the accept on the posedge itself.
     forever begin
-      @(negedge clk); t++;
+      @(posedge clk); t++;
       if (dot_r) break;
       if (t > 10000) begin
         check(1'b0, "epoch ot_op req timeout (arbiter never granted)");

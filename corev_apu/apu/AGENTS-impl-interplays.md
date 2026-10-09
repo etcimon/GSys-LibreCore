@@ -3736,7 +3736,7 @@ mandatory MatrixEn, custom descriptors, UIO daemon or game plugin. HDMI remains
 a separate consumer of a completed common surface. `ApuOff`, all graphics gates
 and `FeatureVirgl` legality are unchanged by this source-review increment.
 
-## 16. Engine arborescence (live, 3c-ii + 5a xfer + F5 descriptors)
+## 16. Engine arborescence (live, 3c-ii + 5a xfer + F5 descriptors + 3d-c roll-up)
 
 ```text
 ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus]
@@ -3763,20 +3763,32 @@ ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus]
 Descriptor-memory path (F5): pool/set backing pages vgpages ALLOC_PRIV ->
 vnfront bump-allocates set tables and writes 32-byte records through
 RingPump's mp PUMP port; CmdExec sideband = set_base/dyn_off/boff per bound
-set (layout rows read from ObjPay at dispatch); WaveEngine's LSU fetches
+set (layout rows read from ObjPay at dispatch; set/pool lifecycle =
+RETIRE_KIDS sweep, DSL compatibility = FNV-1a content hash in the DSL
+entry's state word); WaveEngine's LSU fetches
 records on mp SH (8-entry {set,binding,idx} cache, invalidated per
 dispatch) -> aperture.  Aperture split (guest-allocator collision fix): the
 32 MiB window is 24 MiB guest-visible (APU_VG_GUEST_BYTES, advertised as
 SHM_LEN) + 8 MiB device-private tail; guest-kernel MAP_BLOB extents are
 ALLOC_AT inside the guest span only, while device-internal allocations
-(VkDeviceMemory, descriptor pools) take ALLOC_PRIV in the tail —
-blob-owned CREATE_BLOB backing is lazy (no extent until MAP_BLOB;
-bind_offset 0 = unmapped; Mesa's 8 MiB cs shmem pool cannot fit an 8 MiB
-private arena even empty).  A memory-backed MAP_BLOB frees the private
-extent, ALLOC_ATs the kernel's guest extent, and SETAUXHI's the
-VkDeviceMemory's aperture base so engine-side addressing follows the
-guest's map (UNMAP_BLOB frees the guest extent, re-privatizes the memory
-backing, and drops the blob to bind_offset 0).
+(descriptor pools) take ALLOC_PRIV in the tail.  vgpages' free bitmap is
+hierarchical: a tc_sram Pages/64 x 64b word array plus a flop summary
+(empty/full) per word, so first-fit skips 64 pages at a time and the
+same code scales to 256 MiB (65536 pages) — worst-case ALLOC measured
+2050 cycles at Pages=65536.  Two memory heaps (memory-model
+truthfulness, §12.3 C): heap0 = the private arena (type 0
+DEVICE_LOCAL, eager ALLOC_PRIV at vkAllocateMemory) and heap1 = the
+guest span (type 1 DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT, LAZY — no
+backing until MAP_BLOB ALLOC_ATs the kernel-chosen extent; UNMAP_BLOB
+frees it and drops the blob to bind_offset 0 — there is no
+re-privatization for memory-backed blobs).  Engine use of an
+unbacked type-1 memory fails truthfully (poison/DEVICE_LOST);
+blob-owned CREATE_BLOB backing is lazy too (Mesa's 8 MiB cs shmem pool
+cannot fit an 8 MiB private arena even empty).  vnpump paces ring
+tail polls with an exponential gap (1..256, doubling while a live
+non-idle ring round finds no new tail; reset on work/NotifyRing/
+doorbell) — 16 aperture reads per 4096 idle-but-live cycles vs 580
+unpaced.
 ```
 
 ### What §16 still waits on (§12.3 phases B–D)

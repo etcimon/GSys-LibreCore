@@ -78,7 +78,7 @@ module tb_g6lc_apu_vgctl;
   apu_vgpages_cpl_t pg_cpl;
   // §12.3 F5: 48 guest pages + 16 device-private pages so ALLOC_PRIV
   // (blob-owned backing, device memory) has an arena to serve
-  g6lc_apu_vgpages #(.Enable(1'b1), .Pages(64), .GuestPages(48)) i_pages (
+  g6lc_apu_vgpages #(.Enable(1'b1), .Pages(512), .GuestPages(256)) i_pages (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(pg_v), .req_ready_o(pg_r), .req_i(pg_req),
     .cpl_valid_o(pg_cv), .cpl_ready_i(pg_cr), .cpl_o(pg_cpl));

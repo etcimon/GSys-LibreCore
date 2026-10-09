@@ -274,6 +274,11 @@ module tb_g6lc_apu_objtab;
                       0, 0, 0, 0, 0, 0, 0), APU_OBJTAB_DUP);
     xpect("kind", mkr(APU_OBJTAB_OP_LOOKUP, 64'hB000_0000_0000_0001, 6'd9,
                        0, 0, 0, 0, 0, 0, 0), APU_OBJTAB_KIND);
+    // kind 0 is a wildcard on non-ALLOC ops (the READSLOT convention);
+    // vnfront's pool/fence reset SETSTATE carries obj_kind = 0
+    xpect("kind0 wildcard",
+          mkr(APU_OBJTAB_OP_LOOKUP, 64'hB000_0000_0000_0001, 6'd0, 0, 0,
+              0, 0, 0, 0, 0), APU_OBJTAB_OK);
     xpect("miss", mkr(APU_OBJTAB_OP_LOOKUP, 64'hB000_0000_DEAD_BEEF, 6'd5,
                        0, 0, 0, 0, 0, 0, 0), APU_OBJTAB_MISS);
     // retire -> realloc -> stale handle GEN
@@ -449,7 +454,7 @@ module tb_g6lc_apu_objtab;
         end
         case (rnd[4:3])
           2'd0: begin
-            est = m_resolve(rid, 6'(rnd[13:8]), 1'b1, s2);
+            est = m_resolve(rid, 6'(rnd[13:8]), 6'(rnd[13:8]) != 0, s2);
             op(mkr(APU_OBJTAB_OP_LOOKUP, rid, 6'(rnd[13:8]), 0, 0, 0, 0,
                    0, 0, 0), c);
             g_exp = int'(est); check($sformatf("rnd lookup %0d", i), c.status == est);
@@ -457,7 +462,7 @@ module tb_g6lc_apu_objtab;
           2'd1: begin
             logic [5:0] kk;
             kk = 6'(rnd[13:8]);
-            est = m_resolve(rid, kk, 1'b1, s2);
+            est = m_resolve(rid, kk, kk != 0, s2);
             if (est != APU_OBJTAB_OK) est = est;
             else if (me_pins[s2] != 0) est = APU_OBJTAB_PINNED;
             else if (me_refcnt[s2] != 0) est = APU_OBJTAB_BUSY_CHILDREN;
@@ -478,7 +483,7 @@ module tb_g6lc_apu_objtab;
             end
           end
           2'd2: begin
-            est = m_resolve(rid, 6'(rnd[13:8]), 1'b1, s2);
+            est = m_resolve(rid, 6'(rnd[13:8]), 6'(rnd[13:8]) != 0, s2);
             if (est == APU_OBJTAB_OK)
               me_pins[s2] = me_pins[s2] == 255 ? 255 : me_pins[s2] + 1;
             op(mkr(APU_OBJTAB_OP_PIN, rid, 6'(rnd[13:8]), 0, 0, 0, 0, 0,
@@ -486,7 +491,7 @@ module tb_g6lc_apu_objtab;
             g_exp = int'(est); check($sformatf("rnd pin %0d", i), c.status == est);
           end
           default: begin
-            est = m_resolve(rid, 6'(rnd[13:8]), 1'b1, s2);
+            est = m_resolve(rid, 6'(rnd[13:8]), 6'(rnd[13:8]) != 0, s2);
             if (est == APU_OBJTAB_OK && me_pins[s2] > 0) me_pins[s2]--;
             op(mkr(APU_OBJTAB_OP_UNPIN, rid, 6'(rnd[13:8]), 0, 0, 0, 0,
                    0, 0, 0), c);
@@ -557,7 +562,7 @@ module tb_g6lc_apu_objtab;
           end
         end else begin
           rid[63:32] = rid[63:32] ^ 32'hDEAD0000;
-          est = m_resolve(rid, 6'(rnd[13:8]), 1'b1, s2);
+          est = m_resolve(rid, 6'(rnd[13:8]), 6'(rnd[13:8]) != 0, s2);
           op(mkr(APU_OBJTAB_OP_LOOKUP, rid, 6'(rnd[13:8]), 0, 0, 0, 0, 0,
                  0, 0), c);
           g_exp = int'(est); check($sformatf("rnd miss %0d", i), c.status == est);
@@ -634,6 +639,87 @@ module tb_g6lc_apu_objtab;
               live_o_w == 16'(6 + 4 * (rep + 1)));
       end
     end
+    cases++;
+
+    // ---- RETIRE_KIDS: pool-shaped parent sweep (§12.3 F5-d) ---------
+    m_reset;
+    do_reset;
+    begin
+      int psl, kn;
+      // pool P + 5 sets parented on it (the vkAllocateDescriptorSets
+      // shape); a sixth set lives under a second pool and must survive
+      op(mkr(APU_OBJTAB_OP_ALLOC, 64'hD000_0000_0000_0001, 6'd20, 0,
+             8'd3, 0, 0, 0, 0, 0), c);
+      check("kids: alloc pool A", c.status == APU_OBJTAB_OK);
+      psl = int'(c.handle[15:0]);
+      void'(m_alloc(64'hD000_0000_0000_0001, 6'd20, 64'h0, 8'd3,
+                    slot, gen));
+      op(mkr(APU_OBJTAB_OP_ALLOC, 64'hD000_0000_0000_0002, 6'd20, 0,
+             8'd3, 0, 0, 0, 0, 0), c);
+      check("kids: alloc pool B", c.status == APU_OBJTAB_OK);
+      void'(m_alloc(64'hD000_0000_0000_0002, 6'd20, 64'h0, 8'd3,
+                    slot, gen));
+      for (int i = 0; i < 5; i++) begin
+        id = 64'hD000_0000_0000_0100 | 64'(i + 1);
+        st = m_alloc(id, 6'd21, 64'hD000_0000_0000_0001, 8'd3,
+                     slot, gen);
+        op(mkr(APU_OBJTAB_OP_ALLOC, id, 6'd21,
+               64'hD000_0000_0000_0001, 8'd3, 0, 0, 0, 0, 0), c);
+        check($sformatf("kids: alloc set %0d", i),
+              st == APU_OBJTAB_OK && c.status == APU_OBJTAB_OK &&
+              c.handle == {16'(gen), 16'(slot)});
+      end
+      id = 64'hD000_0000_0000_0200;
+      st = m_alloc(id, 6'd21, 64'hD000_0000_0000_0002, 8'd3,
+                   slot, gen);
+      op(mkr(APU_OBJTAB_OP_ALLOC, id, 6'd21, 64'hD000_0000_0000_0002,
+             8'd3, 0, 0, 0, 0, 0), c);
+      check("kids: alloc set B0",
+            st == APU_OBJTAB_OK && c.status == APU_OBJTAB_OK);
+      // parent with live kids still refuses a plain RETIRE
+      xpect("kids: busy parent", mkr(APU_OBJTAB_OP_RETIRE,
+              64'hD000_0000_0000_0001, 6'd20, 0, 0, 0, 0, 0, 0, 0),
+            APU_OBJTAB_BUSY_CHILDREN);
+      // sweep by parent slot: kills == 5, pool B's set untouched
+      op(mkr(APU_OBJTAB_OP_RETIRE_KIDS, 64'(psl), 6'd0, 0, 0,
+             0, 0, 0, 0, 0), c);
+      check("kids: sweep count", c.status == APU_OBJTAB_OK &&
+                                c.handle[15:0] == 16'd5);
+      kn = 0;
+      for (int i = 0; i < Slots; i++)
+        if (me_live[i] && me_parent[i] == psl) begin
+          me_live[i] = 0; kn++;
+        end
+      check("kids: model count", kn == 5);
+      me_refcnt[psl] = 0;
+      check("kids: live_o", live_o_w == 16'd3);
+      for (int i = 0; i < 5; i++) begin
+        id = 64'hD000_0000_0000_0100 | 64'(i + 1);
+        xpect($sformatf("kids: dead set %0d", i),
+              mkr(APU_OBJTAB_OP_LOOKUP, id, 6'd21, 0, 0, 0, 0, 0, 0, 0),
+              APU_OBJTAB_MISS);
+      end
+      xpect("kids: sibling set lives",
+            mkr(APU_OBJTAB_OP_LOOKUP, 64'hD000_0000_0000_0200, 6'd21,
+                0, 0, 0, 0, 0, 0, 0), APU_OBJTAB_OK);
+      // the swept pool retires cleanly — no BUSY_CHILDREN
+      xpect("kids: retire pool A", mkr(APU_OBJTAB_OP_RETIRE,
+              64'hD000_0000_0000_0001, 6'd20, 0, 0, 0, 0, 0, 0, 0),
+            APU_OBJTAB_OK);
+      me_live[psl] = 0;
+      void'(m_probe(64'hD000_0000_0000_0001, hb, rb));
+      if (hb >= 0) md_t[hb] = 1;
+      // out-of-range parent slot -> MISS
+      xpect("kids: range", mkr(APU_OBJTAB_OP_RETIRE_KIDS,
+              64'(Slots + 7), 6'd0, 0, 0, 0, 0, 0, 0, 0),
+            APU_OBJTAB_MISS);
+      // childless parent slot (never allocated) -> OK, count 0
+      op(mkr(APU_OBJTAB_OP_RETIRE_KIDS, 64'(Slots - 1), 6'd0, 0, 0,
+             0, 0, 0, 0, 0), c);
+      check("kids: empty sweep", c.status == APU_OBJTAB_OK &&
+                                 c.handle[15:0] == 16'd0);
+    end
+    cases++;
 
     // ---- global invariant: every model-live slot answers its handle;
     //      the model holds each (kind,id) at most once by construction ----

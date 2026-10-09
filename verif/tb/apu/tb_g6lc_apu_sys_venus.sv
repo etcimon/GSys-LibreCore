@@ -83,11 +83,11 @@ module tb_g6lc_apu_sys_venus;
   localparam logic [63:0] GB     = 64'h8000_0000;   // guest window
   localparam int unsigned GBW    = 32'h40000;       // 1 MiB / 4 B
   localparam logic [63:0] AB     = APU_SHM_BASE;    // aperture window
-  localparam int unsigned ABW    = 32'h40000;    // dense 1 MiB model
-                                                   // of the 32 MiB window
-  // §12.3 F5: the device-private arena sits at APU_VG_GUEST_BYTES..top;
-  // the dense model covers it in [ABW, ABW+PPW) of apm
+  // §12.3 F5-c: the dense model covers the whole guest span — lazy
+  // type-1 blobs can first-fit above the low MiB — plus the
+  // device-private arena in [PWB, PWB+PPW)
   localparam int unsigned PWB    = 32'(APU_VG_GUEST_BYTES >> 2);
+  localparam int unsigned ABW    = PWB;
   localparam int unsigned PPW    =
       APU_VG_PRIV_PAGES * (APU_VG_PAGE_BYTES / 4);
   localparam int unsigned APWT   = ABW + PPW;
@@ -935,12 +935,12 @@ module tb_g6lc_apu_sys_venus;
                               ot_live, expm[ep + 1]));
               ep += 8;
               check(rec_kind() == 11, "EK_PAGES kind");
-              check($countones(i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top
-                               .gen_on.i_vgp.gen_on.free_q)
-                    == int'(expm[ep + 1]),
+              check(i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top
+                    .gen_on.i_vgp.gen_on.used_q
+                    == 32'(expm[ep + 1]),
                     $sformatf("CK_PAGES got=%0d exp=%0d",
-                              $countones(i_venus.i_dut.gen_venus.i_vgsys
-                                .gen_on.i_top.gen_on.i_vgp.gen_on.free_q),
+                              i_venus.i_dut.gen_venus.i_vgsys
+                                .gen_on.i_top.gen_on.i_vgp.gen_on.used_q,
                               expm[ep + 1]));
               ep += 8;
             end

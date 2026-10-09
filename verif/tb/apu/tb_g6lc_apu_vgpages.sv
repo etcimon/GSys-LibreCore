@@ -6,10 +6,14 @@
 // window-full and bounds arms, Enable=0 quiet.  A TB-side reference
 // model (bitmap) predicts every completion; ALLOC must return the
 // exact first-fit base.
-module tb_g6lc_apu_vgpages;
+module tb_g6lc_apu_vgpages
   import g6lc_apu_vgpages_pkg::*;
-
-  localparam int unsigned Pages     = 64;
+#(
+  // §12.3 3d-c: run the same body at the shipped 8192-page (32 MiB)
+  // geometry and at 65536 pages (256 MiB) — run-apu-vgpages.sh builds
+  // both via -GPages
+  parameter int unsigned Pages = 8192
+);
   localparam int unsigned PageBytes = 4096;
   localparam int unsigned WinBytes  = Pages * PageBytes;
 
@@ -33,14 +37,18 @@ module tb_g6lc_apu_vgpages;
     .req_valid_i(req_v), .req_ready_o(off_req_r), .req_i(req),
     .cpl_valid_o(off_cpl_v), .cpl_ready_i(cpl_r), .cpl_o(off_cpl));
 
-  // §12.3 F5: second instance with an 8-page device-private arena —
+  // §12.3 F5/3d-c: second instance with a device-private arena —
   // guest ops are bounded to [0, GuestBytes), ALLOC_PRIV scans
-  // [GuestPages, Pages); the two pools are independent
-  localparam int unsigned GPages = Pages - 8;
+  // [GuestPages, Pages); the two pools are independent.  The split
+  // must land on a 64-page word boundary and the arena must cover at
+  // least 1 MiB (elaboration assertions): 768/1024 pages = 3 MiB guest
+  // + 1 MiB private at 4 KiB.
+  localparam int unsigned PPages = 1024;
+  localparam int unsigned GPages = 768;
   logic pv_v = 0, pv_r, pv_cpl_v;
   apu_vgpages_req_t pv_req = '0;
   apu_vgpages_cpl_t pv_cpl;
-  g6lc_apu_vgpages #(.Enable(1'b1), .Pages(Pages),
+  g6lc_apu_vgpages #(.Enable(1'b1), .Pages(PPages),
                      .PageBytes(PageBytes), .GuestPages(GPages)) i_priv (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(pv_v), .req_ready_o(pv_r), .req_i(pv_req),
@@ -109,9 +117,13 @@ module tb_g6lc_apu_vgpages;
 
   apu_vgpages_cpl_t c;
   int base_a, base_b, base_c, base_d, m_base;
+  int maxalloc = 0;   // worst observed ALLOC latency in cycles
 
   task automatic t_alloc(input int b, output int base);
+    int c0;
+    c0 = cycles;
     do_req(APU_VGPAGES_OP_ALLOC, 0, b, c);
+    if (cycles - c0 > maxalloc) maxalloc = cycles - c0;
     m_base = m_alloc(b);
     check($sformatf("alloc(%0d) status", b),
           c.status == (m_base < 0 ? APU_VGPAGES_FULL : APU_VGPAGES_OK));
@@ -213,6 +225,18 @@ module tb_g6lc_apu_vgpages;
       end
     end
 
+    // ---- worst-case scan latency (§12.3 3d-c) -----------------------
+    // fill every word but the last, then a 1-page ALLOC walks all
+    // Words summaries (full words skip at 1 cycle each) and finds the
+    // only free run at the top of the window
+    cases++;
+    t_alloc(WinBytes - PageBytes, base_a);
+    check("fill base0", base_a == 0);
+    t_alloc(PageBytes, base_b);
+    check("worst-fit top page", base_b == WinBytes - PageBytes);
+    t_free(base_b, PageBytes);
+    t_free(base_a, WinBytes - PageBytes);
+
     // ---- private arena (§12.3 F5) ------------------------------------
     cases++;
     begin
@@ -222,7 +246,8 @@ module tb_g6lc_apu_vgpages;
             pc.base == 32'h0);
       do_pv(APU_VGPAGES_OP_ALLOC, 0, PageBytes, pc);
       check("guest window full", pc.status == APU_VGPAGES_FULL);
-      do_pv(APU_VGPAGES_OP_ALLOC_PRIV, 0, 8 * PageBytes, pc);
+      do_pv(APU_VGPAGES_OP_ALLOC_PRIV, 0, 32'(PPages - GPages) *
+            PageBytes, pc);
       check("priv whole arena", pc.status == APU_VGPAGES_OK &&
             pc.base == 32'(GPages) * PageBytes);
       do_pv(APU_VGPAGES_OP_ALLOC_PRIV, 0, PageBytes, pc);
@@ -234,7 +259,7 @@ module tb_g6lc_apu_vgpages;
             pc.status == APU_VGPAGES_BOUNDS);
       // freeing the private extent releases it for reuse
       do_pv(APU_VGPAGES_OP_FREE, 32'(GPages) * PageBytes,
-            8 * PageBytes, pc);
+            32'(PPages - GPages) * PageBytes, pc);
       check("priv free", pc.status == APU_VGPAGES_OK);
       do_pv(APU_VGPAGES_OP_ALLOC_PRIV, 0, PageBytes, pc);
       check("priv reuse", pc.status == APU_VGPAGES_OK &&
@@ -243,8 +268,8 @@ module tb_g6lc_apu_vgpages;
       do_pv(APU_VGPAGES_OP_FREE, 0, 32'(GPages) * PageBytes, pc);
     end
 
-    $display("PASS tb_g6lc_apu_vgpages cases=%0d checks=%0d cycles=%0d",
-             cases, checks, cycles);
+    $display("PASS tb_g6lc_apu_vgpages pages=%0d cases=%0d checks=%0d \
+cycles=%0d maxalloc=%0d", Pages, cases, checks, cycles, maxalloc);
     if (errors != 0) $fatal(1, "vgpages %0d errors", errors);
     $finish;
   end

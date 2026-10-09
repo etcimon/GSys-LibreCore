@@ -240,8 +240,8 @@ module tb_g6lc_apu_bridge
     wire [3:0][31:0] r_status = i_dut.gen_venus.i_vgsys.ring_status_o;
     wire [3:0][31:0] r_head   = i_dut.gen_venus.i_vgsys.ring_head_o;
     wire [3:0][g6lc_apu_vg_pkg::APU_VG_AP_WORD_W-1:0] r_extra  = i_dut.gen_venus.i_vgsys.ring_extra_w_o;
-    wire [g6lc_apu_vg_pkg::APU_VG_PAGES-1:0] vgp_free = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
-                              .i_vgp.gen_on.free_q;
+    wire [31:0] vgp_used = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                              .i_vgp.gen_on.used_q;
     wire [255:0] pay_free = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
                               .i_pay.gen_on.free_q;
 
@@ -383,7 +383,7 @@ module tb_g6lc_apu_bridge
         8'd3:    dbg_rdata_o = 64'({6'h0, f_seen_q, rdone, vg_idle});
         8'd4:    dbg_rdata_o = f_id_q;
         8'd5:    dbg_rdata_o = 64'(f_ring_q);
-        8'd6:    dbg_rdata_o = 64'($countones(vgp_free));
+        8'd6:    dbg_rdata_o = 64'(vgp_used);
         8'd7:    dbg_rdata_o = 64'(|pay_free);   // 0 = chunks drained
         // F5 bring-up: vnfront descriptor-path state taps
         8'd32:   dbg_rdata_o = {24'h0, fr_state, fr_result};

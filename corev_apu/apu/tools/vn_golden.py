@@ -1438,12 +1438,24 @@ VGP_PAGE = 4096
 VGP_GUEST_BYTES = 0x01800000
 VGP_GUEST_PAGES = VGP_GUEST_BYTES // VGP_PAGE
 
+# §12.3 C: APU_MEM_UNBACKED — a type-1 (host-visible) VkDeviceMemory's
+# aux[63:32] until MAP_BLOB establishes backing in the guest window;
+# any engine use of an unbacked extent fails truthfully
+UNBACKED = 0xFFFFFFFF
+
+
+def fnv1a(h, w):
+    """§12.3 F5-d: FNV-1a 32-bit step matching vnfront's fnv1a_w."""
+    return ((h ^ (w & 0xFFFFFFFF)) * 0x01000193) & 0xFFFFFFFF
+
 # commit prediction for vkCreateComputePipelines: the 4a commit
 # scanner mirrors g6lc_apu_shmod 1:1 (Fault -> VK_ERROR_UNKNOWN)
 sys.path.insert(0, os.path.join(os.path.dirname(
     os.path.abspath(__file__)), 'shader'))
 import spirv_scan                                   # noqa: E402
 import spirv_model                                  # noqa: E402
+
+rep_dbg = bool(os.environ.get('VN_REP_DBG'))
 
 
 def spv_words(name):
@@ -1583,6 +1595,28 @@ class FrontModel:
         self.idmap.pop(e['id'], None)
         self.live_cnt -= 1
         return 'OK', s
+
+    def retire_kids(self, h, kind):
+        """§12.3 F5-d: APU_OBJTAB_OP_RETIRE_KIDS mirror — id[15:0] is
+        the parent slot itself (no directory probe); every live entry
+        parented on it dies and the parent's refcount is zeroed
+        wholesale so its own RETIRE cannot BUSY_CHILDREN.
+        -> (status, killed)
+        """
+        s = h & 0xFFFF
+        if s >= self.SLOTS:
+            return 'MISS', 0
+        n = 0
+        for i, c in enumerate(self.ent):
+            if c is not None and c['parent'] == s:
+                self.ent[i] = None
+                self.idmap.pop(c['id'], None)
+                self.live_cnt -= 1
+                n += 1
+        e = self.ent[s]
+        if e is not None:
+            e['refcnt'] = 0
+        return 'OK', n
 
     def setstate(self, h, mask, value):
         st, s, e = self.resolve(h, 0)
@@ -1803,6 +1837,7 @@ class FrontModel:
                 WHOLE = 0xFFFFFFFFFFFFFFFF
                 rng_eff = bsz - off if rng == WHOLE else rng
                 if me['kind'] == KIND['VkDeviceMemory'] and not (
+                        mbase == UNBACKED or      # §12.3 C lazy mem
                         off > bsz or rng_eff > bsz - off or
                         boff + off + rng_eff > me['size']):
                     elok = 1
@@ -1829,7 +1864,9 @@ class FrontModel:
         me = self.ent[ms]
         bo = be.get('bind_off', 0)
         if (me['kind'] != KIND['VkDeviceMemory'] or
-                me['size'] > 0xFFFFFFFF or bo > me['size']):
+                me['size'] > 0xFFFFFFFF or bo > me['size'] or
+                (me['aux'] >> 32) & 0xFFFFFFFF == UNBACKED):
+            # §12.3 C: unbacked type-1 memory -> no extent -> LOST
             return None
         return (((me['aux'] >> 32) & 0xFFFFFFFF) + bo,
                 min(be['size'], me['size'] - bo))
@@ -1917,6 +1954,9 @@ class FrontModel:
                     dset[fs + i] = self.pay_arena[aux].get(
                         abase + 2 * i, 0)
             elif ct == T['vkCmdDispatch']:
+                if rep_dbg:
+                    sys.stderr.write('DISPDBG bound=%x dset=%s plw?\n'
+                                     % (bound, ['%x' % d for d in dset]))
                 if bound == 0:
                     return True
                 st, _s, pe = self.resolve(bound, KIND['VkPipeline'])
@@ -1932,6 +1972,10 @@ class FrontModel:
                 plpay = (ple['aux'] >> 48) & 0xFFFF
                 plw = (ple['aux'] >> 32) & 0xFFFF
                 for s in range(4):
+                    if rep_dbg:
+                        sys.stderr.write(
+                            'DISPDBG s=%d dset=%x plw=%d slid?\n'
+                            % (s, dset[s], plw))
                     if dset[s] == 0 or plw < 4 + 2 * s:
                         continue
                     slid = (self.pay.get(plpay + 2 + 2 * s, 0) |
@@ -1947,11 +1991,27 @@ class FrontModel:
                         return True
                     if (sse['aux'] >> 31) & 1:
                         return True        # poisoned set
-                    if ((sse['aux'] >> 32) & 0xFFFFFFFF) != slh:
+                    # §12.3 F5-d: compatibility by content — resolve
+                    # the set's DSL {gen,slot} (aux[63:32]) and compare
+                    # the FNV-1a row hash in state[31:0], not handles
+                    sdsl = (sse['aux'] >> 32) & 0xFFFFFFFF
+                    sde = self.ent[sdsl & 0xFFFF] \
+                        if (sdsl & 0xFFFF) < self.SLOTS else None
+                    if (sde is None or sde['kind'] !=
+                            KIND['VkDescriptorSetLayout'] or
+                            sde['gen'] != (sdsl >> 16) & 0xFFFF or
+                            sde['state'] != lle['state']):
                         return True        # incompatible layout
                     ph = sse['size'] & 0xFFFFFFFF
                     psl = ph & 0xFFFF
                     ppe = self.ent[psl] if psl < self.SLOTS else None
+                    if rep_dbg:
+                        sys.stderr.write(
+                            'DISPDBG pool sst=%s sse_aux=%x ph=%x ppe=%s\n'
+                            % (sst, sse['aux'], ph,
+                               None if ppe is None else (
+                                   ppe['kind'], ppe['gen'],
+                                   ppe['state'])))
                     if (ppe is None or
                             ppe['kind'] != KIND['VkDescriptorPool'] or
                             ppe['gen'] != (ph >> 16) & 0xFFFF or
@@ -1985,7 +2045,10 @@ class FrontModel:
             if e['kind'] in (KIND['VkShaderModule'], KIND['VkPipeline']):
                 self.sm_unref(e['aux'] & 7)
             elif e['kind'] == KIND['VkDeviceMemory']:
-                self.pg_free((e['aux'] >> 32) & 0xFFFFFFFF, e['size'])
+                # §12.3 C: an unbacked extent frees nothing
+                if (e['aux'] >> 32) & 0xFFFFFFFF != UNBACKED:
+                    self.pg_free((e['aux'] >> 32) & 0xFFFFFFFF,
+                                 e['size'])
             elif e['kind'] == KIND['VkDescriptorPool']:
                 # §12.3 F5: pool record store pages at aux[31:0]
                 self.pg_free(e['aux'] & 0xFFFFFFFF, e['size'])
@@ -2344,6 +2407,19 @@ class FrontModel:
                                     self.setaux(h, 0xFFFFFFFF,
                                                 (dn << 16) |
                                                 ((off << 5) & 0xFFFF))
+                                    # §12.3 F5-d: FNV-1a over the
+                                    # emitted row words then ndyn ->
+                                    # state[31:0]; dispatch compares
+                                    # content, not object identity
+                                    hh = 0x811C9DC5
+                                    for (b, ty, cn, of, dyn, dnb) in \
+                                            rows:
+                                        hh = fnv1a(hh, (b << 24) |
+                                                   (ty << 16) | cn)
+                                        hh = fnv1a(hh, (of << 12) |
+                                                   (dyn << 11) | dnb)
+                                    hh = fnv1a(hh, dn)
+                                    self.setstate(h, 0xFFFFFFFF, hh)
                 elif obj_kind == KIND['VkDescriptorPool']:
                     # §12.3 F5: Σ pPoolSizes.descriptorCount records of
                     # backing through vgpages; aux[31:0]=page base,
@@ -2433,27 +2509,44 @@ class FrontModel:
                             rec['imm'][fl_slot] != 0:
                         out['result'] = VK_ERR_FEATURE
                     else:
-                        # §7b/5a-ii: vgpages ALLOC_PRIV(size) before
-                        # the object; aux[63:32] = page base.  Device
-                        # memory lives in the private arena — the guest
-                        # kernel's shm drm_mm can never collide with it
-                        # at MAP_BLOB (F9).  FULL -> OOM, no object
+                        # §12.3 C two-heap model: type 1 (heap 1,
+                        # HOST_VISIBLE) is LAZY — no backing until
+                        # MAP_BLOB places it in the guest window;
+                        # aux[63:32] = UNBACKED sentinel.  Type 0 stays
+                        # eager ALLOC_PRIV in the private arena.
                         ds = next((i for i in range(8)
                                    if rec['qv'] >> i & 1
                                    and not rec['kind'][i]), -1)
                         msz = rec['q'][ds] if ds >= 0 else 0
-                        pg = self.pg_alloc(msz, priv=True)
-                        if pg is None:
-                            out['result'] = VK_ERR_OOM
-                        else:
+                        mtype = rec['imm'][2] \
+                            if (rec['immv'] >> 2) & 1 else 0
+                        if mtype == 1:
                             st, h, slot = self.alloc(
                                 rec['q'][new], obj_kind, par)
                             if st != 'OK':
-                                self.pg_free(pg, msz)
                                 out['result'] = self._err(st)
                             else:
                                 self.ent[h & 0xFFFF]['size'] = msz
-                                self.setauxhi(h, pg)
+                                self.setauxhi(h, UNBACKED)
+                        else:
+                            # §7b/5a-ii: vgpages ALLOC_PRIV(size) before
+                            # the object; aux[63:32] = page base.
+                            # Device memory lives in the private arena —
+                            # the guest kernel's shm drm_mm can never
+                            # collide with it at MAP_BLOB (F9).  FULL ->
+                            # OOM, no object
+                            pg = self.pg_alloc(msz, priv=True)
+                            if pg is None:
+                                out['result'] = VK_ERR_OOM
+                            else:
+                                st, h, slot = self.alloc(
+                                    rec['q'][new], obj_kind, par)
+                                if st != 'OK':
+                                    self.pg_free(pg, msz)
+                                    out['result'] = self._err(st)
+                                else:
+                                    self.ent[h & 0xFFFF]['size'] = msz
+                                    self.setauxhi(h, pg)
                 else:
                     st, h, slot = self.alloc(rec['q'][new], obj_kind, par)
                     if st != 'OK':
@@ -2464,6 +2557,11 @@ class FrontModel:
                             out['result'] = VK_ERR_UNKNOWN
                         else:
                             self.falloc[fidx] = 1
+                            # the new object reclaims slot fidx: clear
+                            # signaled/lost state left by its previous
+                            # occupant (mirrors ex_fence_clr at create)
+                            self.fence_sig &= ~(1 << fidx)
+                            self.fence_lost &= ~(1 << fidx)
                     elif ct in (session['T']['vkCreateBuffer'],
                                 session['T']['vkCreateImage']):
                         if ct == session['T']['vkCreateBuffer']:
@@ -2523,7 +2621,11 @@ class FrontModel:
                             ds_err = True
                             out['null_mask'].add(ei)
                             continue
-                        st, h, s = self.alloc(idv, obj_kind, par)
+                        # §12.3 F5-d: sets are ObjTab children of the
+                        # pool — vkResetDescriptorPool /
+                        # vkDestroyDescriptorPool sweep them with
+                        # RETIRE_KIDS
+                        st, h, s = self.alloc(idv, obj_kind, ph)
                         if st != 'OK':
                             out['result'] = self._err(st)
                             ds_err = True
@@ -2633,6 +2735,13 @@ class FrontModel:
                         break
                     aux_full = e['aux']
                     e_sz = e['size']
+                    if obj_kind == KIND['VkDescriptorPool']:
+                        # §12.3 F5-d: RETIRE_KIDS before the pool's own
+                        # RETIRE — vkDestroyDescriptorPool with live
+                        # sets is legal and must not BUSY_CHILDREN.
+                        # The op's operand is the parent SLOT (no
+                        # directory probe), not the client id.
+                        self.retire_kids(s, KIND['VkDescriptorPool'])
                 elif obj_kind in pk:
                     # §7b: payload kinds take the same pre-LOOKUP; the
                     # extent in aux[63:32] is freed after the RETIRE
@@ -2660,9 +2769,13 @@ class FrontModel:
                 elif obj_kind == KIND['VkPipeline']:
                     self.sm_unref(aux_full & 7)
                 elif obj_kind == KIND['VkDeviceMemory']:
-                    self.pg_free((aux_full >> 32) & 0xFFFFFFFF, e_sz)
+                    # §12.3 C: an unbacked memory frees nothing
+                    if (aux_full >> 32) & 0xFFFFFFFF != UNBACKED:
+                        self.pg_free((aux_full >> 32) & 0xFFFFFFFF,
+                                     e_sz)
                 elif obj_kind == KIND['VkDescriptorPool']:
-                    # §12.3 F5: record store at aux[31:0], size bytes
+                    # §12.3 F5-d: record store at aux[31,0], size
+                    # bytes (the sets were already swept pre-RETIRE)
                     self.pg_free(aux_full & 0xFFFFFFFF, e_sz)
 
         elif cls == 'BIND':
@@ -2931,14 +3044,17 @@ class FrontModel:
 
         elif cls == 'POOL_RESET':
             if ct == session['T']['vkResetDescriptorPool']:
-                # §12.3 F5: epoch++ makes every set minted from the
-                # pool dead; {nsets,bump} -> 0 reclaims the store
+                # §12.3 F5-d: RETIRE_KIDS marks the minted sets dead
+                # (they share the pool's arena, so nothing per-set is
+                # returned); epoch++ stays as defence in depth;
+                # {nsets,bump} -> 0 reclaims the store
                 ph = hnd[lu[1]] if len(lu) > 1 else 0
                 st, _ps, pe = self.resolve(ph,
                                            KIND['VkDescriptorPool'])
                 if st != 'OK':
                     out['result'] = VK_ERR_UNKNOWN
                 else:
+                    self.retire_kids(_ps, KIND['VkDescriptorPool'])
                     pe['state'] = ((pe['state'] & 0xFFFF0000) |
                                    ((pe['state'] + 1) & 0xFFFF))
                     pe['aux'] &= 0xFFFFFFFF
@@ -4008,6 +4124,13 @@ class TransportModel:
                                    depth)
             else:
                 out = fm.step(name, None, cmdw, rec, self.rep_sim, ses)
+                if rep_dbg:
+                    sys.stderr.write('REPDBG %s off=%d rep=%s\n' % (
+                        name,
+                        (self.reply['base_w'] +
+                         (self.reply['pos'] >> 2)) << 2
+                        if self.reply is not None else -1,
+                        ' '.join('%08x' % w for w in (out['rep'] or []))))
                 self.reply_put(out['rep'])
                 if out['rep']:
                     self.exec_log.append((name, out))
@@ -4490,7 +4613,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                    exp_type=VG_ERR_PARAM)
             return None
         base_b = (me['aux'] >> 32) & 0xFFFFFFFF
-        tm.blobs[rid] = {'base_w': base_b >> 2, 'size': me['size'],
+        # §12.3 C: a lazy type-1 memory has no aperture extent yet —
+        # the blob binds at 0 until MAP_BLOB relocates it
+        base_w = 0 if base_b == UNBACKED else base_b >> 2
+        tm.blobs[rid] = {'base_w': base_w, 'size': me['size'],
                          'mapped': False, 'ctx': CTX_ID,
                          'mem_backed': True, 'mem_id': mem_id}
         submit(VG_RESOURCE_CREATE_BLOB, body, ctx=CTX_ID,
@@ -4519,8 +4645,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         if offset is None:
             offset = guest_fit(b['size'])
         # lazy create: an unmapped blob-owned resource holds no extent;
-        # a memory-backed blob always frees the memory's current one
-        if b['mapped'] or b.get('mem_backed'):
+        # a memory-backed blob frees the memory's current extent unless
+        # it is still unbacked (§12.3 C — nothing was ever allocated)
+        if b['mapped'] or (b.get('mem_backed') and
+                           (fm.ent[fm.idmap[b['mem_id']]]['aux'] >> 32)
+                           & 0xFFFFFFFF != UNBACKED):
             tm.ap_free(b['base_w'], b['size'])
         nb = tm.ap_alloc_at(offset, b['size'])
         assert nb >= 0, 'map_blob offset %#x busy' % offset
@@ -4753,7 +4882,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     device=V['dev'],
                     pAllocateInfo=st('VkMemoryAllocateInfo',
                                      allocationSize=b['size'],
-                                     memoryTypeIndex=0, pNext=[]),
+                                     # unbacked: buffer 0's memory is
+                                     # type 1 and never MAP_BLOB'd —
+                                     # it stays UNBACKED so the
+                                     # update-time validation poisons
+                                     # the set -> DEVICE_LOST
+                                     memoryTypeIndex=(
+                                         1 if variant == 'unbacked'
+                                         and i == 0 else 0),
+                                     pNext=[]),
                     pMemory=mems[i])),
                 ('vkBindBufferMemory', dict(
                     device=V['dev'], buffer=bufs[i], memory=mems[i],
@@ -4768,6 +4905,26 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                  allocationSize=AP_WORDS * 4 + 4096,
                                  memoryTypeIndex=0, pNext=[]),
                 pMemory=0x6000_0000_8000)))
+        if variant == 'memsplit':
+            # §12.3 C two heaps: a 12 MiB HOST_VISIBLE alloc — larger
+            # than the 8 MiB private arena, only possible because
+            # type 1 is lazy until MAP_BLOB — plus a 2 MiB
+            # DEVICE_LOCAL alloc (eager ALLOC_PRIV)
+            mems += [0x6000_0000_8001, 0x6000_0000_8002]
+            seg_a1 += [
+                ('vkAllocateMemory', dict(
+                    device=V['dev'],
+                    pAllocateInfo=st('VkMemoryAllocateInfo',
+                                     allocationSize=12 << 20,
+                                     memoryTypeIndex=1, pNext=[]),
+                    pMemory=mems[-2])),
+                ('vkAllocateMemory', dict(
+                    device=V['dev'],
+                    pAllocateInfo=st('VkMemoryAllocateInfo',
+                                     allocationSize=2 << 20,
+                                     memoryTypeIndex=0, pNext=[]),
+                    pMemory=mems[-1])),
+            ]
         if variant == 'xfer_copy':
             # §12.3 C/5a: staging src buffer, fill target, readback —
             # pure transfer operands (not descriptor-bound)
@@ -4844,22 +5001,33 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         stageFlags=0x20, pImmutableSamplers=[])
                         for r in srows[s]]),
                 pSetLayout=dsls[k])))
-        if variant == 'layoutmix':
-            # a second layout object with set 0's shape: the set is
-            # allocated from it while the pipeline layout declares
-            # dsls[0] -> the dispatch-time layout-compat check fails
+        rows2 = None
+        if variant in ('layoutmix', 'dslcompat'):
+            # §12.3 F5-d: compatibility is by CONTENT — both variants
+            # mint a second layout object and allocate set 0 from it
+            # while the pipeline layout declares dsls[0].  dslcompat's
+            # rows are identical -> the content hash matches -> the
+            # dispatch must run.  layoutmix perturbs one row (row
+            # order, or a count bump when there is only one) -> hash
+            # mismatch -> DEVICE_LOST at dispatch.
+            rows2 = [dict(r) for r in srows[setnos[0]]]
+            if variant == 'layoutmix':
+                if len(rows2) > 1:
+                    rows2 = [rows2[-1]] + rows2[:-1]
+                else:
+                    rows2[0]['count'] += 1
             seg_a1.append(('vkCreateDescriptorSetLayout', dict(
                 device=V['dev'],
                 pCreateInfo=st(
                     'VkDescriptorSetLayoutCreateInfo',
-                    bindingCount=len(srows[setnos[0]]),
+                    bindingCount=len(rows2),
                     pBindings=[st(
                         'VkDescriptorSetLayoutBinding',
                         binding=r['binding'],
                         descriptorCount=r['count'],
                         descriptorType=r['kind'],
                         stageFlags=0x20, pImmutableSamplers=[])
-                        for r in srows[setnos[0]]]),
+                        for r in rows2]),
                 pSetLayout=V['dsl'] + 4)))
         seg_a1 += [
             ('vkCreatePipelineLayout', dict(
@@ -4919,6 +5087,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # the initial buffer contents at the mapped offset
             blob_base = []
             for i, b in enumerate(vec['binds']):
+                if variant == 'unbacked' and i == 0:
+                    # no blob -> no MAP_BLOB -> mems[0] keeps its
+                    # UNBACKED sentinel (§12.3 C)
+                    blob_base.append(None)
+                    continue
                 base_b = create_blob_mem(RES_BLOB0 + i, b['size'],
                                          mems[i])
                 assert base_b is not None, 'memory blob refused'
@@ -4927,6 +5100,27 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 base_b = map_blob(RES_BLOB0 + i)
                 blob_base.append(base_b)
                 apw(base_b, vec['inits'][i])
+            if variant == 'memsplit':
+                # the lazy type-1 memory takes backing only here, via
+                # MAP_BLOB -> ALLOC_AT in the guest window
+                base_ms = create_blob_mem(RES_BLOB0 + 8, 12 << 20,
+                                          mems[-2])
+                assert base_ms is not None, 'memsplit blob refused'
+                base_ms = map_blob(RES_BLOB0 + 8)
+                apw(base_ms, [0x5EA1_0000, 0x5EA1_0001])
+                W(TP_CHECK, CK_APR, 2, base_ms)
+                rec(EK_APRCHK, base_ms, 0x5EA1_0000, 0x5EA1_0000, 0)
+                rec(EK_APRCHK, base_ms + 4, 0x5EA1_0001,
+                    0x5EA1_0001, 0)
+                # the 2 MiB type-0 alloc goes through the same
+                # private-eager -> guest-window relocation
+                base_dl = create_blob_mem(RES_BLOB0 + 9, 2 << 20,
+                                          mems[-1])
+                assert base_dl is not None, 'memsplit blob refused'
+                base_dl = map_blob(RES_BLOB0 + 9)
+                apw(base_dl, [0x0B10_0000])
+                W(TP_CHECK, CK_APR, 1, base_dl)
+                rec(EK_APRCHK, base_dl, 0x0B10_0000, 0x0B10_0000, 0)
             if variant == 'xfer_copy':
                 # memory-backed blobs for the three transfer-only
                 # buffers; the guest stages the copy source contents
@@ -4948,7 +5142,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             psizes = []
             psums = {}
             for s in setnos:
-                for rw in srows[s]:
+                for rw in (rows2 if variant == 'layoutmix'
+                           and s == setnos[0] else srows[s]):
                     psums[rw['kind']] = psums.get(rw['kind'], 0) + \
                         rw['count']
             for k in sorted(psums):
@@ -4956,8 +5151,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                  descriptorCount=psums[k]))
             extra = 1 if variant == 'poolfull' else 0
             alloc_lays = [(V['dsl'] + 4
-                           if variant == 'layoutmix' and k == 0
-                           else dsls[k])
+                           if variant in ('layoutmix', 'dslcompat')
+                           and k == 0 else dsls[k])
                           for k in range(nsets)] + \
                          [dsls[0]] * extra
             alloc_sets = dsets + [V['ds'] + 7] * extra
@@ -5178,11 +5373,31 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             note("B' segment B: QueueSubmit + waits")
             run_batches(compile_cmds(seg_b))
 
+            if variant == 'lostbuf':
+                # §12.3 3d-c review: recycle the lost fence's executor
+                # slot — a fresh vkCreateFence must see clean
+                # signaled/lost state even though the slot's previous
+                # occupant ended DEVICE_LOST (the bits live in cmdexec
+                # keyed by slot, not by object).  Without the
+                # create-time clear the status read reports LOST.
+                seg_f = [
+                    ('vkDestroyFence', dict(device=V['dev'],
+                                            fence=V['fen'])),
+                    ('vkCreateFence', dict(
+                        device=V['dev'],
+                        pCreateInfo=st('VkFenceCreateInfo', flags=0),
+                        pFence=V['fen'] + 1)),
+                    ('vkGetFenceStatus', dict(device=V['dev'],
+                                              fence=V['fen'] + 1)),
+                ]
+                note("B' fence-recycle: destroy+create+status")
+                run_batches(compile_cmds(seg_f))
+
             # ---- §7a gates at the aperture ---------------------------- #
             lost = variant in ('lostbuf', 'baddesc', 'nopipe',
                                'bindoob', 'worksink', 'descoob',
                                'updoob', 'layoutmix', 'deadpool',
-                               'xfer_oob', 'xfer_overlap')
+                               'xfer_oob', 'xfer_overlap', 'unbacked')
             if not lost:
                 # §12.3 F5: the descriptor record-store image — every
                 # record word (zeroed or {base,size,kind,flags}) must
@@ -5281,10 +5496,100 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 note("B' gates: dispatch lost (%s), no readback"
                      % variant)
 
+            if variant == 'poolreset':
+                # §12.3 D per-frame pool reset: alloc N sets, reset,
+                # realloc the same ids (legal only once RETIRE_KIDS
+                # has killed them), three cycles; the live count must
+                # return to baseline each time.  Then destroy a pool
+                # with live sets and prove the children died by
+                # re-minting the same set ids under a fresh pool.
+                note("B' poolreset: alloc/reset x3 + "
+                     'destroy-with-live')
+                psizes3 = [st('VkDescriptorPoolSize', type=k,
+                              descriptorCount=psums[k] * 3)
+                           for k in sorted(psums)]
+                dsets2 = [V['ds'] + 8 + k for k in range(3)]
+                run_batches(compile_cmds([(
+                    'vkCreateDescriptorPool', dict(
+                        device=V['dev'],
+                        pCreateInfo=st('VkDescriptorPoolCreateInfo',
+                                       maxSets=3,
+                                       poolSizeCount=len(psizes3),
+                                       pPoolSizes=psizes3),
+                        pDescriptorPool=V['dp'] + 1))]))
+                live_base = (fm.live_cnt + len(tm.blobs)
+                             + len(tm.ctxs))
+                for _cyc in range(3):
+                    run_batches(compile_cmds([
+                        ('vkAllocateDescriptorSets', dict(
+                            device=V['dev'],
+                            pAllocateInfo=st(
+                                'VkDescriptorSetAllocateInfo',
+                                descriptorPool=V['dp'] + 1,
+                                descriptorSetCount=3,
+                                pSetLayouts=[dsls[0]] * 3),
+                            pDescriptorSets=dsets2))]))
+                    check_live()    # baseline + 3 live sets
+                    run_batches(compile_cmds([
+                        ('vkResetDescriptorPool', dict(
+                            device=V['dev'],
+                            descriptorPool=V['dp'] + 1, flags=0))]))
+                    # ot_live == model count: the pool stays live
+                    # while its sets are dead again
+                    check_live()
+                    assert (fm.live_cnt + len(tm.blobs) +
+                            len(tm.ctxs)) == live_base, \
+                        'pool reset did not return to baseline'
+                run_batches(compile_cmds([
+                    ('vkAllocateDescriptorSets', dict(
+                        device=V['dev'],
+                        pAllocateInfo=st(
+                            'VkDescriptorSetAllocateInfo',
+                            descriptorPool=V['dp'] + 1,
+                            descriptorSetCount=3,
+                            pSetLayouts=[dsls[0]] * 3),
+                        pDescriptorSets=dsets2)),
+                    # destroy with the three sets live: RETIRE_KIDS
+                    # sweeps them so the destroy cannot BUSY_CHILDREN
+                    ('vkDestroyDescriptorPool', dict(
+                        device=V['dev'], descriptorPool=V['dp'] + 1)),
+                ]))
+                # live_o back to baseline — the sets died with the pool
+                check_live()
+                run_batches(compile_cmds([
+                    # re-minting the same ids under a fresh pool must
+                    # succeed — a live stale entry would answer DUP
+                    ('vkCreateDescriptorPool', dict(
+                        device=V['dev'],
+                        pCreateInfo=st('VkDescriptorPoolCreateInfo',
+                                       maxSets=3,
+                                       poolSizeCount=len(psizes3),
+                                       pPoolSizes=psizes3),
+                        pDescriptorPool=V['dp'] + 2)),
+                    ('vkAllocateDescriptorSets', dict(
+                        device=V['dev'],
+                        pAllocateInfo=st(
+                            'VkDescriptorSetAllocateInfo',
+                            descriptorPool=V['dp'] + 2,
+                            descriptorSetCount=3,
+                            pSetLayouts=[dsls[0]] * 3),
+                        pDescriptorSets=dsets2)),
+                    ('vkFreeDescriptorSets', dict(
+                        device=V['dev'], descriptorPool=V['dp'] + 2,
+                        descriptorSetCount=3, pDescriptorSets=dsets2)),
+                    ('vkDestroyDescriptorPool', dict(
+                        device=V['dev'], descriptorPool=V['dp'] + 2)),
+                ]))
+                check_live()
+
             # ---- segment C: reverse-order teardown -------------------- #
             seg_c = [
+                # lostbuf already destroyed V['fen'] in the
+                # fence-recycle arm above; tear down the replacement
                 ('vkDestroyFence', dict(device=V['dev'],
-                                        fence=V['fen'])),
+                                        fence=V['fen'] + 1
+                                        if variant == 'lostbuf'
+                                        else V['fen'])),
                 ('vkFreeCommandBuffers', dict(
                     device=V['dev'], commandPool=V['cp'],
                     commandBufferCount=1, pCommandBuffers=[V['cb']])),
@@ -5311,7 +5616,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             for k in range(nsets):
                 seg_c.append(('vkDestroyDescriptorSetLayout', dict(
                     device=V['dev'], descriptorSetLayout=dsls[k])))
-            if variant == 'layoutmix':
+            if variant in ('layoutmix', 'dslcompat'):
                 seg_c.append(('vkDestroyDescriptorSetLayout', dict(
                     device=V['dev'],
                     descriptorSetLayout=V['dsl'] + 4)))
@@ -5326,6 +5631,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         device=V['dev'], buffer=bufs[i])))
                 seg_c.append(('vkFreeMemory', dict(
                     device=V['dev'], memory=mems[i])))
+            if variant == 'memsplit':
+                seg_c += [('vkFreeMemory', dict(device=V['dev'],
+                                               memory=mems[-2])),
+                          ('vkFreeMemory', dict(device=V['dev'],
+                                                memory=mems[-1]))]
             seg_c += [('vkDestroyDevice', dict(device=V['dev'])),
                       ('vkDestroyInstance', dict(instance=V['inst']))]
             note("B' segment C: teardown")
@@ -5333,9 +5643,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
 
             # memory-backed blobs: unref frees the resource only
             for i in range(len(blob_base)):
+                if blob_base[i] is None:
+                    continue    # unbacked: no blob was created
                 submit(VG_RESOURCE_UNREF, [RES_BLOB0 + i, 0],
                        ctx=CTX_ID, exp_type=VG_RESP_NODATA)
                 tm.blobs.pop(RES_BLOB0 + i)
+            if variant == 'memsplit':
+                for rid in (RES_BLOB0 + 8, RES_BLOB0 + 9):
+                    submit(VG_RESOURCE_UNREF, [rid, 0], ctx=CTX_ID,
+                           exp_type=VG_RESP_NODATA)
+                    tm.blobs.pop(rid)
 
         note('D RESOURCE_UNREF exec blob, CTX_DESTROY ctx=4 -> live 0')
         eb = tm.blobs.pop(RES_EXEC)

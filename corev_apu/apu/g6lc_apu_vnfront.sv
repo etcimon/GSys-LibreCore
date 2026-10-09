@@ -275,6 +275,7 @@ module g6lc_apu_vnfront
       StElemRec, StElemRecCpl,
       StElemRetL, StElemRetR, StElemRetCpl, StElemRetPay,
       StAllocGo, StAllocCpl, StAllocAux, StRetCpl, StRetPre,
+      StRetKids,
       StBindMemCk,
       StBind2Rd, StBind2ResC, StBind2MemC, StBind2SetC,
       StCbGo, StCbCrCpl, StCbSetCpl,
@@ -294,9 +295,9 @@ module g6lc_apu_vnfront
       //           and reset (epoch++)
       StDPoolSum, StDPoolSumC, StDPoolPgC, StDPoolAuxH,
       StDPoolAuxS,
-      StDPoolRs, StDPoolRsHi,
+      StDPoolRs, StDPoolRsK, StDPoolRsHi,
       // §12.3 F5: descriptor-set-layout row build in objpay
-      StDslHdrC, StDslRd, StDslWr, StDslWrC, StDslAuxL,
+      StDslHdrC, StDslRd, StDslWr, StDslWrC, StDslAuxL, StDslHash,
       // §12.3 F5: descriptor-set allocation element chain
       StDSetLayLo, StDSetLayHi, StDSetLayId, StDSetLayCpl,
       StDSetPoolC, StDSetObj, StDSetOCpl, StDSetAuxH,
@@ -394,6 +395,11 @@ module g6lc_apu_vnfront
     logic [19:0]         dsl_off_q;    // running record offset
     logic [15:0]         dsl_dn_q;     // dynamic descriptor count
     logic [15:0]         dsl_recs_q;   // total record count
+    // §12.3 F5-d: FNV-1a content hash over the row words (word-step:
+    // h = (h ^ w) * 0x01000193 per emitted word, then the final ndyn
+    // word) — stored in the DSL entry state[31:0]; dispatch compares
+    // content, not object identity
+    logic [31:0]         dsl_hash_q;
 
     // descriptor-set allocation element chain
     logic [31:0]         lay_lo_q;     // staged layout id low word
@@ -617,6 +623,11 @@ module g6lc_apu_vnfront
         if (o.qv[i] && o.qkind[i] == 6'd0) return i;
       return -1;
     endfunction
+    // §12.3 F5-d: FNV-1a 32-bit step over one emitted row word
+    function automatic logic [31:0] fnv1a_w(input logic [31:0] h,
+                                            input logic [31:0] w);
+      return (h ^ w) * 32'h0100_0193;
+    endfunction
     function automatic logic [7:0] arena_free();
       for (int i = 0; i < CbBufs; i++)
         if (!cb_alloc_q[i]) return 8'(i);
@@ -802,6 +813,7 @@ module g6lc_apu_vnfront
         dsl_i_q <= '0; dsl_h_q <= '0; dsl_k_q <= 1'b0;
         dsl_b_q <= '0; dsl_t_q <= '0; dsl_c_q <= '0;
         dsl_off_q <= '0; dsl_dn_q <= '0; dsl_recs_q <= '0;
+        dsl_hash_q <= '0;
         lay_lo_q <= '0;
         ent_j_q <= '0;
         ds_layh_q <= '0; ds_layb_q <= '0; ds_layw_q <= '0;
@@ -1266,13 +1278,24 @@ module g6lc_apu_vnfront
                     end else if (feat_bad) begin
                       result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
                       state_q  <= StRep;
+                    end else if (op_q.imm[2] == 32'd1) begin
+                      // §12.3 C: type-1 (heap-1, host-visible)
+                      // memory is LAZY — no aperture backing at
+                      // vkAllocateMemory; MAP_BLOB establishes it at
+                      // the kernel's window offset (ALLOC_AT) and
+                      // UNMAP_BLOB returns it to the unbacked
+                      // sentinel.  aux[63:32] = APU_MEM_UNBACKED
+                      pg_ok_q  <= 1'b1;
+                      pg_res_q <= APU_MEM_UNBACKED;
+                      state_q  <= StAllocGo;
                     end else begin
-                      // §7b/5a-ii: aperture pages first; the object is
-                      // created only if pages exist.  §12.3 F5: the
-                      // backing comes from the private arena — guest
-                      // window placement happens only at MAP_BLOB, so
-                      // an unmapped VkDeviceMemory can never collide
-                      // with the kernel's shm drm_mm choices
+                      // §7b/5a-ii: type-0 (heap-0, device-local) is
+                      // eager — aperture pages from the private arena
+                      // first; the object is created only if pages
+                      // exist.  Guest window placement happens only
+                      // at MAP_BLOB, so an unmapped VkDeviceMemory can
+                      // never collide with the kernel's shm drm_mm
+                      // choices
                       automatic int ds = data_slot(op_q);
                       pg_op_q    <= APU_VGPAGES_OP_ALLOC_PRIV;
                       pg_base_q  <= '0;
@@ -1601,11 +1624,13 @@ module g6lc_apu_vnfront
                 sm_op_q  <= APU_SH_SM_UNREF;
                 sm_ret_q <= StRep;
                 state_q  <= StSmReq;
-              end else if (act_q.obj_kind ==
-                           6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
+              end else if ((act_q.obj_kind ==
+                            6'(APU_VN_KIND_VK_DEVICE_MEMORY) &&
+                            pg_res_q != APU_MEM_UNBACKED) ||
                            act_q.obj_kind ==
                            6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)) begin
-                // release the held aperture pages
+                // release the held aperture pages — §12.3 C: a lazy
+                // type-1 allocation holds none
                 pg_op_q  <= APU_VGPAGES_OP_FREE;
                 pg_ret_q <= StRep;
                 state_q  <= StPgReq;
@@ -1686,8 +1711,13 @@ module g6lc_apu_vnfront
           StAllocAux: begin
             if (ot_cpl_i.status != APU_OBJTAB_OK)
               result_q <= APU_VK_ERROR_UNKNOWN;
-            else if (op_q.cmd_type == APU_VN_TYPE_VK_CREATE_FENCE_EXT)
+            else if (op_q.cmd_type == APU_VN_TYPE_VK_CREATE_FENCE_EXT) begin
               falloc_q[are_i_q[$clog2(Fences)-1:0]] <= 1'b1;
+              // a fresh fence object owns a clean executor slot: drop
+              // signaled/lost state a destroyed fence left behind
+              // (fence bits survive the object's lifetime otherwise)
+              ex_fence_clr_o[are_i_q[$clog2(Fences)-1:0]] <= 1'b1;
+            end
             state_q <= StRep;
           end
 
@@ -1947,9 +1977,10 @@ module g6lc_apu_vnfront
               if (act_q.obj_kind ==
                   6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)) begin
                 // §12.3 F5: pool's record store lives at aux[31:0]
-                // (aux[63:32] is {nsets,bump}); freeing the pages kills
-                // every set minted from it — their epoch/pool-gen
-                // check turns dispatch into DEVICE_LOST
+                // (aux[63:32] is {nsets,bump}); §12.3 F5-d: retire
+                // the pool's live descriptor sets first — they own
+                // nothing outside the pool arena and must not hold
+                // the table entry past the parent's death
                 pg_base_q  <= ot_cpl_i.entry.aux[31:0];
                 pg_bytes_q <= 32'(ot_cpl_i.entry.size);
               end
@@ -1962,6 +1993,15 @@ module g6lc_apu_vnfront
                 sm_slot_q <= ot_cpl_i.entry.aux[2:0];
                 sm_ret_q  <= StRetSm;
                 state_q   <= StSmReq;
+              end else if (act_q.obj_kind ==
+                           6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)) begin
+                // §12.3 F5-d: kill live sets first so the pool's own
+                // RETIRE cannot report BUSY_CHILDREN
+                otr_q    <= '{op: APU_OBJTAB_OP_RETIRE_KIDS,
+                             id: {48'h0, ot_cpl_i.handle[15:0]},
+                             default: '0};
+                ot_ret_q <= StRetKids;
+                state_q  <= StOtReq;
               end else begin
                 otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
                              id: APU_VN_ID_TAG | op_q.q[
@@ -1970,6 +2010,22 @@ module g6lc_apu_vnfront
                 ot_ret_q <= StRetCpl;
                 state_q  <= StOtReq;
               end
+            end
+          end
+          // §12.3 F5-d: descriptor-pool retire tail — sets are dead,
+          // the parent's refcnt was zeroed wholesale; now retire the
+          // pool itself
+          StRetKids: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              result_q <= APU_VK_ERROR_UNKNOWN;
+              state_q  <= StRep;
+            end else begin
+              otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
+                           id: APU_VN_ID_TAG | op_q.q[
+                               role_slot(op_q, APU_VN_ROLE_RETIRE)],
+                           kind: act_q.obj_kind, default: '0};
+              ot_ret_q <= StRetCpl;
+              state_q  <= StOtReq;
             end
           end
           StRetCpl: begin
@@ -1995,12 +2051,14 @@ module g6lc_apu_vnfront
                               default: '0};
                 op_ret_q <= StRep;
                 state_q  <= StOpReq;
-              end else if (act_q.obj_kind ==
-                           6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
+              end else if ((act_q.obj_kind ==
+                            6'(APU_VN_KIND_VK_DEVICE_MEMORY) &&
+                            pg_base_q != APU_MEM_UNBACKED) ||
                            act_q.obj_kind ==
                            6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)) begin
                 // §7b/5a-ii/§12.3 F5: vkFreeMemory/vkDestroyDescriptor-
-                // Pool returns its aperture pages
+                // Pool returns its aperture pages; §12.3 C: an
+                // unbacked memory frees nothing
                 pg_op_q    <= APU_VGPAGES_OP_FREE;
                 pg_ret_q   <= StRep;
                 state_q    <= StPgReq;
@@ -2451,17 +2509,33 @@ module g6lc_apu_vnfront
           end
 
           // ---- §12.3 F5: vkResetDescriptorPool ----------------------------
-          // epoch++ kills every set minted from the pool;
-          // {nsets,bump} -> 0 reclaims the record store
+          // RETIRE_KIDS kills every set minted from the pool
+          // (per-frame-reset leak fix; epoch++ stays as defence in
+          // depth), then {nsets,bump} -> 0 reclaims the record store
           StDPoolRs: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              result_q <= APU_VK_ERROR_UNKNOWN;
+              state_q  <= StRep;
+            end else begin
+              ds_pent_q <= ot_cpl_i.entry;
+              otr_q    <= '{op: APU_OBJTAB_OP_RETIRE_KIDS,
+                           id: {48'h0, ot_cpl_i.handle[15:0]},
+                           default: '0};
+              ot_ret_q <= StDPoolRsK;
+              state_q  <= StOtReq;
+            end
+          end
+          // children dead -> bump the epoch (defence in depth) then
+          // {nsets,bump} -> 0 via the auxhi write
+          StDPoolRsK: begin
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
               result_q <= APU_VK_ERROR_UNKNOWN;
               state_q  <= StRep;
             end else begin
               automatic int ps = lu_slot(op_q, 1);
               hnd_pay_q   <= hnd_q[ps];
-              stv_val_q   <= {ot_cpl_i.entry.state[31:16],
-                              ot_cpl_i.entry.state[15:0] + 16'd1};
+              stv_val_q   <= {ds_pent_q.state[31:16],
+                              ds_pent_q.state[15:0] + 16'd1};
               stv_mask_q  <= 32'hFFFF_FFFF;
               stv_ret_q   <= StDPoolRsHi;
               state_q     <= StStSet;
@@ -2489,6 +2563,7 @@ module g6lc_apu_vnfront
               dsl_off_q  <= '0;
               dsl_dn_q   <= '0;
               dsl_recs_q <= '0;
+              dsl_hash_q <= 32'h811C_9DC5;   // FNV-1a offset basis
               stg_i_q    <= '0;
               stg_ret_q  <= StDslRd;
               state_q    <= StStgRd;
@@ -2543,15 +2618,20 @@ module g6lc_apu_vnfront
             state_q  <= StOpReq;
           end
           StDslWrC: begin
+            automatic logic dyn = dsl_t_q == 8'd8 || dsl_t_q == 8'd9;
             if (op_cpl_i.status != APU_OBJPAY_OK) begin
               result_q <= APU_VK_ERROR_UNKNOWN;
               state_q  <= StRep;
             end else if (dsl_k_q == 1'b0) begin
-              dsl_k_q <= 1'b1;
+              dsl_k_q    <= 1'b1;
+              dsl_hash_q <= fnv1a_w(dsl_hash_q,
+                                    {dsl_b_q, dsl_t_q, dsl_c_q});
               state_q <= StDslWr;
             end else begin
-              automatic logic dyn =
-                  dsl_t_q == 8'd8 || dsl_t_q == 8'd9;
+              dsl_hash_q <= fnv1a_w(
+                  dsl_hash_q,
+                  {dsl_off_q, dsl_t_q == 8'd8 || dsl_t_q == 8'd9,
+                   7'b0, dsl_dn_q[3:0]});
               dsl_off_q  <= dsl_off_q + 20'(dsl_c_q);
               dsl_recs_q <= dsl_recs_q + dsl_c_q;
               if (dyn) dsl_dn_q <= dsl_dn_q + dsl_c_q;
@@ -2570,8 +2650,17 @@ module g6lc_apu_vnfront
           StDslAuxL: begin
             auxlo_val_q  <= {dsl_dn_q, 16'(dsl_off_q << 5)};
             auxlo_mask_q <= 32'hFFFF_FFFF;
-            auxlo_ret_q  <= StRep;
+            auxlo_ret_q  <= StDslHash;
             state_q      <= StAuxLo;
+          end
+          // §12.3 F5-d: DSL state[31:0] = FNV-1a content hash over the
+          // emitted row words plus the final ndyn count — dispatch
+          // compatibility is by content, not object identity
+          StDslHash: begin
+            stv_val_q  <= fnv1a_w(dsl_hash_q, {16'h0, dsl_dn_q});
+            stv_mask_q <= 32'hFFFF_FFFF;
+            stv_ret_q  <= StRep;
+            state_q    <= StStSet;
           end
 
           // ---- §12.3 F5: vkAllocateDescriptorSets element chain ----------
@@ -2654,11 +2743,11 @@ module g6lc_apu_vnfront
             otr_q    <= '{op: APU_OBJTAB_OP_ALLOC,
                          id: blob_id_q,
                          kind: act_q.obj_kind,
-                         parent_id: act_q.parent_qslot ==
-                                    APU_VN_QSLOT_NONE
-                                    ? 64'h0
-                                    : {32'h0,
-                                       hnd_q[int'(act_q.parent_qslot)]},
+                         // §12.3 F5-d: sets are pool children — the
+                         // first LOOKUP arg (device) is pq=0, so the
+                         // pool is lu_slot 1; RETIRE_KIDS on the pool
+                         // sweeps them at reset/destroy
+                         parent_id: {32'h0, hnd_q[lu_slot(op_q, 1)]},
                          // entry.size[31:0] = minting pool {gen,slot}
                          size: {32'h0, hnd_q[lu_slot(op_q, 1)]},
                          ctx: ctx_i, default: '0};
@@ -3000,6 +3089,9 @@ module g6lc_apu_vnfront
             if (ot_cpl_i.status != APU_OBJTAB_OK ||
                 ot_cpl_i.entry.kind !=
                     6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
+                // §12.3 C: unbacked memory (type-1 not yet MAP_BLOB'd)
+                // must fail the record, not fabricate a base
+                ot_cpl_i.entry.aux[63:32] == APU_MEM_UNBACKED ||
                 upd_off_q > 64'(upd_esz_q) ||
                 rng_eff > 64'(upd_esz_q) - upd_off_q ||
                 64'(upd_eb_q) + upd_off_q + rng_eff >

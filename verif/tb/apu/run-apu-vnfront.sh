@@ -109,9 +109,11 @@ opt
 memory_collect
 check -assert
 stat
-synth -top g6lc_apu_vnfront_fixture -noabc
-check -assert
-stat
+$(if [ "${VNFRONT_SYNTH_PREONLY:-0}" != 1 ]; then
+  echo "synth -top g6lc_apu_vnfront_fixture -noabc"
+  echo "check -assert"
+  echo "stat"
+fi)
 select -assert-none t:\$dlatch t:\$_DLATCH_*
 EOF
   if ! "$YOSYS" -Q -T "$OUT/vnfront-synth$en.ys" > "$OUT/synth-$en.log" 2>&1; then

@@ -165,3 +165,6 @@ corev_apu/ai_island/formal/*/
 corev_apu/ai_island/generated/
 trace.spec
 
+
+# APU regression / guest caches (WSL-ephemeral /tmp substitute)
+.cache/

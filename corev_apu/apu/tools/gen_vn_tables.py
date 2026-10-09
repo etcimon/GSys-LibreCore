@@ -1212,16 +1212,27 @@ class Model:
                 for t in v.split('|'):
                     r |= mhf['VK_MEMORY_HEAP_' + t + '_BIT']
                 return r
+            # §12.3 C: two heaps — type 0 on heap 0 (private arena,
+            # eager), type 1 on heap 1 (guest span, lazy until MAP_BLOB)
             words = [2, 32, 0,
-                     mp(mem.get('type0_flags', 'DEVICE_LOCAL')), 0,
+                     mp(mem.get('type0_flags', 'DEVICE_LOCAL')),
+                     int(mem.get('type0_heap', 0)),
                      mp(mem.get('type1_flags',
-                                'HOST_VISIBLE|HOST_COHERENT')), 0]
+                                'DEVICE_LOCAL|HOST_VISIBLE|'
+                                'HOST_COHERENT')),
+                     int(mem.get('type1_heap', 1))]
             words += [0, 0] * 30
-            words += [1, 16, 0]
+            nh = 2 if int(mem.get('heap1_size', 0)) else 1
+            words += [nh, 16, 0]
             size = int(mem.get('heap0_size', 0))
             words += [size & 0xFFFFFFFF, (size >> 32) & 0xFFFFFFFF,
                       mh('DEVICE_LOCAL')]
-            words += [0, 0, 0] * 15
+            if nh > 1:
+                size = int(mem.get('heap1_size', 0))
+                words += [size & 0xFFFFFFFF,
+                          (size >> 32) & 0xFFFFFFFF,
+                          mh('DEVICE_LOCAL')]
+            words += [0, 0, 0] * (16 - nh)
             return words
         if name == 'VkQueueFamilyProperties':
             q = p.get('queue_family0', {})

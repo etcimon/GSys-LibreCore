@@ -617,7 +617,11 @@ module g6lc_apu_vgctl
                 pg_op_q    <= APU_VGPAGES_OP_FREE;
                 pg_base_q  <= ot_cpl_i.entry.aux[63:32];
                 pg_bytes_q <= map_size_q[31:0];
-                // UNMAP_BLOB re-privatizes instead of ALLOC_AT
+                // §12.3 C: UNMAP_BLOB drops the memory back to the
+                // unbacked sentinel (lazy type-1 has no private
+                // extent to return to); MAP_BLOB goes to ALLOC_AT.
+                // A FREE of the unbacked sentinel is BOUNDS and is
+                // ignored, so a first map needs no special case.
                 pg_ret_q   <= map_unmap_q ? StUnmapPriv : StMapAllocAt;
                 state_q    <= StPgReq;
               end
@@ -689,16 +693,13 @@ module g6lc_apu_vgctl
           StReapSmReq: if (sm_gnt_i)       state_q <= StReapSmCpl;
           StReapSmCpl: if (sm_cpl_i)       state_q <= StOtCpl;
 
-          // ---- UNMAP_BLOB re-privatization ------------------------------
-          // guest extent freed; back the object privately again so its
-          // bookkeeping (and any device-side addressing) stays live and
-          // nothing device-placed lingers inside the kernel's window
+          // ---- UNMAP_BLOB: memory returns to unbacked ---------------
+          // §12.3 C: the guest extent is freed; a type-1 memory has no
+          // private extent to return to — publish APU_MEM_UNBACKED so
+          // engine uses fail truthfully until the next MAP_BLOB
           StUnmapPriv: begin
-            pg_op_q    <= APU_VGPAGES_OP_ALLOC_PRIV;
-            pg_base_q  <= '0;
-            pg_bytes_q <= map_size_q[31:0];
-            pg_ret_q   <= map_memb_q ? StMapAuxReq : StBindReq;
-            state_q    <= StPgReq;
+            auxv_q  <= APU_MEM_UNBACKED;
+            state_q <= map_memb_q ? StMapAuxReq : StBindReq;
           end
 
           // ---- blob_id != 0: memory-object resolve -------------------
@@ -717,9 +718,14 @@ module g6lc_apu_vgctl
                 resp_ram[0] <= APU_VG_ERR_PARAM; // blob larger than mem
                 state_q <= StWrPrep;
               end else begin
-                // map onto the memory's aperture extent
-                blob_addr_q <= APU_VG_SHM_BASE +
-                               ot_cpl_i.entry.aux[63:32];
+                // map onto the memory's aperture extent; §12.3 C: a
+                // lazy (not yet MAP_BLOB'd) type-1 memory has no base
+                // — bind the blob at 0 so MAP_BLOB relocates it
+                blob_addr_q <= ot_cpl_i.entry.aux[63:32] ==
+                               APU_MEM_UNBACKED
+                               ? 64'h0
+                               : APU_VG_SHM_BASE +
+                                 ot_cpl_i.entry.aux[63:32];
                 blob_size_q <= ot_cpl_i.entry.size;
                 // {gen,slot} of the backing VkDeviceMemory — written
                 // to the blob's aux[63:32] at StAuxHiReq so a later
@@ -1006,8 +1012,7 @@ module g6lc_apu_vgctl_fixture
   import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_sh_pkg::*;
 #(
-  parameter bit          Enable   = 1'b0,
-  parameter int unsigned ShmPages = 256
+  parameter bit          Enable   = 1'b0
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -1065,5 +1070,5 @@ module g6lc_apu_vgctl_fixture
   output logic [63:0]     fence_id_o,
   output logic [7:0]      fence_ring_o
 );
-  g6lc_apu_vgctl #(.Enable(Enable), .ShmPages(ShmPages)) i_dut (.*);
+  g6lc_apu_vgctl #(.Enable(Enable)) i_dut (.*);
 endmodule

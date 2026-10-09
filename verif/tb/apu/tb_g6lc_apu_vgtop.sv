@@ -47,11 +47,12 @@ module tb_g6lc_apu_vgtop;
 
   localparam int unsigned Rings   = 4;
   localparam int unsigned GMW     = 32'h40000;   // 1 MiB guest RAM
-  localparam int unsigned APW     = 32'h40000;   // dense 1 MiB model
-                                                   // of the 32 MiB window
+  // §12.3 F5-c: dense model spans the whole guest window — lazy type-1
+  // blobs (memsplit) can first-fit above the low MiB
+  localparam int unsigned PWB     = 32'(APU_VG_GUEST_BYTES >> 2);
+  localparam int unsigned APW     = PWB;
   // §12.3 F5: the device-private arena sits at APU_VG_GUEST_BYTES..top;
   // the dense model covers it in [APW, APW+PPW) of i_mem.apm
-  localparam int unsigned PWB     = 32'(APU_VG_GUEST_BYTES >> 2);
   localparam int unsigned PPW     =
       APU_VG_PRIV_PAGES * (APU_VG_PAGE_BYTES / 4);
   // first-fit allocation keeps every session in the dense range; an
@@ -603,11 +604,10 @@ module tb_g6lc_apu_vgtop;
                               ot_live, expm[ep + 1]));
               ep += 8;
               check(rec_kind() == 11, "EK_PAGES kind");
-              check($countones(i_dut.gen_on.i_vgp.gen_on.free_q) ==
-                    int'(expm[ep + 1]),
+              check(i_dut.gen_on.i_vgp.gen_on.used_q ==
+                    32'(expm[ep + 1]),
                     $sformatf("CK_PAGES got=%0d exp=%0d",
-                              $countones(
-                                  i_dut.gen_on.i_vgp.gen_on.free_q),
+                              i_dut.gen_on.i_vgp.gen_on.used_q,
                               expm[ep + 1]));
               ep += 8;
             end

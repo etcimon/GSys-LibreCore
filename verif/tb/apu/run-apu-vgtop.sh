@@ -71,7 +71,9 @@ ue_cneg_pgfull_1 ue_cneg_badmem_1 ue_cneg_bindoob_1 \
 ue_cneg_descoob_1 ue_cneg_updoob_1 ue_cneg_layoutmix_1 \
 ue_cneg_deadpool_1 ue_cneg_poolfull_1 \
 ue_cpos_xfer_copy_1 ue_cpos_xfer_update_1 \
-ue_cneg_xfer_oob_1 ue_cneg_xfer_overlap_1"
+ue_cneg_xfer_oob_1 ue_cneg_xfer_overlap_1 \
+ue_cpos_poolreset_1 ue_cpos_dslcompat_1 \
+ue_cpos_memsplit_1 ue_cneg_unbacked_1"
 
 run_step() {
   local step="$1"; shift
@@ -115,7 +117,7 @@ run_step() {
     echo "COMPUTE ARM FAILED (step $step)"
     exit 1
   fi
-  echo "COMPUTE ARM OK step$step (35 sessions)"
+  echo "COMPUTE ARM OK step$step (39 sessions)"
 }
 
 # gate step 1: defaults (lat 1/1, ready 100%)
