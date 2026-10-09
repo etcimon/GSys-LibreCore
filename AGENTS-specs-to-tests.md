@@ -2299,3 +2299,18 @@ When a test suite / testlist changes:
    `AGENTS-specs-coverage.md` (it may move from *implemented* to *implemented & tested*).
 3. Keep the suite catalog in `build-platform/src/config/defaults.ts` and this file in agreement
    (id, group, target, tools).
+
+## T18–T20 directed witnesses (2026-10-06..09)
+
+`tb_g6lc_bp_statcor` carries the per-slot aliasing scenario (fails on the window-base RTL at
+every multi-slot geometry). `verif/tests/custom/ooo/ooo_wrongpath_replay.S`: cold always-taken
+`beqz`, wrong path = late-address store + bypassing load + sentinel stores; exit 2 = a wrong-path
+load's memory-order replay refetched the wrong path (fails pre-fix). `verif/tests/custom/multicore/
+mc_lrsc_set_zombie.S`: eight `lr.d` on same-set lines then a miss to that set — the unfixed server
+model wedges (exit 126, replay-table head on `dir_unavailable`), the fixed one passes (1,343) with
+`[hpd-zombie] final zombie_dir_writes=0`. `mc_wrongpath_window.S` / `ooo_wrongpath_window.S`
+(mispredict-kill shapes, incl. `-DWP_LOADS` withdrawals → `[hpd-phantom]` 4 on the mutant adapter,
+0 fixed) and `mc_force_kill_miss.S` (DRAM latency > `SmtDrainForceCycles`, 513 forced kills of
+granted misses, must pass). The canonical server strict boot runs through
+`run_opensbi_source_review.py` (experimental target, 8 harts, 4 cores, tohost from the payload
+ELF): PASS 38,988,173 cycles on the T20 tree.

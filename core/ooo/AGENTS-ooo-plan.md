@@ -4111,3 +4111,37 @@ windowed `+smt_sched_trace`/`+smt_handoff_trace`) stay in the tree,
 translate_off. Final canonical 48 M boot on the fixed model
 (`ooocoh-t20-final-server-osbi-48M`) running — harvest per
 `t20/LAUNCH-FINAL.md`.
+
+**T20 close-out (2026-10-09) — the 8-hart server boots strict, and the tree
+is regression-clean.** `ooocoh-t20-final-server-osbi-48M` (HEAD model with
+fixes A + B, canonical flow): **`outcome: pass`, `strictDualPassed: true`,
+38,988,173 cycles** (tracer-terminated on the payload's `tohost` store;
+all eight harts ran the payload and parked in `strict_park`), `force=0`
+on every core, `[hpd-phantom]` 0, `[hpd-zombie]` 0, `[misp-hart]` 0, no
+trap. 5.9 M cycles faster than the fp3-firmware pass (44.85 M) — the RAS
+and corrector fixes — and 6.2 M before the point where the T18/T19 runs
+died. The fix-A-only control (`…-fixA-server-repro-mt4`) behaves exactly
+as predicted: hart 5 retires `0x8001b6f0` after the `beqz` (the
+`SRC_COMMIT` redirect to `0x800086e8` is gone, `MEMVIOL` still flagged
+but no longer replayed) while the core-0 wedge recurs with the identical
+`dir_unavailable` shape — the two defects are independent and each fix is
+attributed. Regression on HEAD: lint 0e on seven targets, remote lint /
+synth at baseline, formal (thread_select, rob, fp_owner, fetch_*) PASS
+with mutations failing as designed, leaves matched; `g6lc64_ooo` FP suite
+22/22 + probes cycle-identical and Spike-exact; **int2_l3 ring-16
+18,357,056, smt2_ooo_int 10,472,823, smt2 12,391,556 — all byte-identical
+RVFI to T17** (the replay-clear and the corrector change are inert on
+them); server directed set (14 programs with negatives) cycle-identical.
+Harness note: `g6lc_tb.cpp` printed `*** SUCCESS *** (tohost = 0)` both for
+a real pass and for a cycle-budget exit; the budget exit now carries a
+`[cycle budget reached: no tohost verdict]` suffix (grammar unchanged for
+the runners, which classify `cycles >= cap` as timeout themselves).
+
+**Server status after T20.** `g6lc64_ooo_server` lints, synthesizes
+(`stat` + latch check; the full `check -assert` needs > 128 GB), boots
+OpenSBI strict on eight harts, and passes the cross-core coherence
+directed set. Still opt-in: owed are the `COH_FILTERED` qualification
+breadth (multi-writer lines, CBO under contention, L3 inclusive/eviction
+cases), a Linux-class boot on a faster host, the full combinational-loop
+check, and a performance pass on the boot (FDT phases ≈8 M cycles each;
+`SmtFetchQuantum 4` drain bubbles in the two-hart regime).

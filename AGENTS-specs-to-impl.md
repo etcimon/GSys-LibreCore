@@ -1211,3 +1211,21 @@ drained-handoff selector's starve switches killed every in-flight I$ miss faster
 could refill it). Anchors re-baselined (int2_l3 18,357,056; smt2 12,391,556; smt2_ooo_int
 10,472,823); frozen probes and FP suite retirement-exact and faster. Evidence:
 `core/ooo/AGENTS-ooo-plan.md` T17.
+
+## T18–T20: server frontend, wrong-path replay, HPDcache zombie ways (2026-10-06..09)
+
+- `core/frontend/g6lc_bp_statcor.sv` indexes the statistical corrector per fetch slot with the
+  slot's own address bits (the bits training uses) and refuses `NR_ENTRIES <= INSTR_PER_FETCH`;
+  `g6lc64_ooo_server` `RASDepth` 2 → 16 (`#bp`, speculation guide).
+- `core/scoreboard.sv`: a mispredict-cancelled entry never keeps or acquires a memory-order
+  `replay` (`#ldst` single-copy atomicity of the *correct* path; the branch redirect is the
+  restart authority) — a wrong-path load's replay had refetched the wrong path.
+- `core/cache_subsystem/cva6_hpdcache_if_adapter.sv` (load port): a request withdrawn before
+  its grant is held and aborted in st1 with `need_rsp=0` (HPDcache CRI valid/ready contract).
+- `core/cache_subsystem/hpdcache` (fork gitlink `f3e7354`): the uncacheable-hit invalidation
+  clears the directory fetch bit; previously the way became `valid=0/fetch=1` and left victim
+  selection forever (LR/SC are uncacheable on CVA6 → eight zombie ways in OpenSBI's scratch set).
+- `core/cva6.sv`: hart-qualified mispredict kill under mixed residency only; sim-only witnesses
+  `[misp-hart]`, `[hpd-phantom]`, `[hpd-zombie]` and the `+hpd_rtab_trace` / `+fe_trace` probes.
+Evidence: `core/ooo/AGENTS-ooo-plan.md` T18, T19, T20. First strict 8-hart boot of
+`g6lc64_ooo_server`: 38,988,173 cycles; drained anchors byte-identical.

@@ -214,6 +214,9 @@ extern remote_bitbang_t * jtag;
 // A wall-clock kill must not print SUCCESS: record it so the verdict line
 // reads TERMINATED (exit 124, the `timeout` convention) instead of a pass.
 static volatile sig_atomic_t sigterm_seen = 0;
+// Set when the main loop leaves on -m / +max-cycles rather than on a tohost
+// or exit handshake; the final verdict line must not call that a success.
+static bool budget_exit = false;
 
 void handle_sigterm(int sig) {
   sigterm_seen = 1;
@@ -731,8 +734,10 @@ done_processing:
 
     // Honor -m / +max-cycles= (parsed above). Without this the TB never times
     // out on bare-metal/OpenSBI images that lack a tohost handshake.
-    if (main_time >= max_cycles)
+    if (main_time >= max_cycles) {
+      budget_exit = true;
       break;
+    }
     // Soft-ladder soak-exit + optional parameterized trace (g6lc_tb_trace.h).
     // Default exits: cookie 51b1babe, pin mepc/mcause, dual-WFI.
     // CVA6_TRACE / CVA6_TRACE_SPEC / CVA6_TRACE_FILE add log/exit rules.
@@ -1931,7 +1936,17 @@ done_processing:
   } else if (sigterm_seen) {
     fprintf(stderr, "%s *** TERMINATED (SIGTERM) *** after %ld cycles\n", htif_argv[1], main_time);
     ret = 124;
+  } else if (budget_exit) {
+    // T20: a cycle-budget exit is not a verdict. Three server boots were read
+    // as passes from a bare "SUCCESS (tohost = 0) after <cap> cycles" line
+    // (plan T16/T17). The banner grammar is kept (the review runners parse
+    // `*** SUCCESS|FAILED *** (tohost = N) after M cycles` and classify
+    // M >= cap as a timeout themselves); the suffix makes the raw line honest.
+    fprintf(stderr, "%s *** SUCCESS *** (tohost = 0) after %ld cycles [cycle budget reached: no tohost verdict]\n",
+            htif_argv[1], main_time);
   } else {
+    // Ended on a tohost/exit handshake reporting success (HTIF exit code 0,
+    // i.e. the guest wrote tohost = 1); the banner reports the exit code.
     fprintf(stderr, "%s *** SUCCESS *** (tohost = 0) after %ld cycles\n", htif_argv[1], main_time);
   }
 
