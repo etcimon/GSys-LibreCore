@@ -42,7 +42,7 @@ module tb_g6lc_apu_shcore;
   logic [31:0]  work_ctype;
   logic [8*32-1:0] work_imm;
   logic [2:0]   disp_slot;
-  logic [16*113-1:0] binds;
+  apu_sh_desc_t desc;
   logic [5:0]   push_n;
   logic [1023:0] push;
   logic         busy, done; apu_sh_done_t done_pl;
@@ -70,7 +70,7 @@ module tb_g6lc_apu_shcore;
     .sm_cpl_o(sm_cpl), .sm_cpl_pl_o(sm_cpl_pl),
     .work_i(work), .work_ready_o(work_ready),
     .work_ctype_i(work_ctype), .work_imm_i(work_imm),
-    .disp_slot_i(disp_slot), .binds_i(binds),
+    .disp_slot_i(disp_slot), .desc_i(desc),
     .push_n_i(push_n), .push_i(push),
     .busy_o(busy), .done_o(done), .done_pl_o(done_pl),
     .mem_re_o(mem_re), .mem_we_o(mem_we), .mem_addr_o(mem_addr),
@@ -91,7 +91,7 @@ module tb_g6lc_apu_shcore;
     .sm_cpl_o(off_sm_cpl), .sm_cpl_pl_o(off_sm_pl),
     .work_i(work), .work_ready_o(off_ready),
     .work_ctype_i(work_ctype), .work_imm_i(work_imm),
-    .disp_slot_i(disp_slot), .binds_i(binds),
+    .disp_slot_i(disp_slot), .desc_i(desc),
     .push_n_i(push_n), .push_i(push),
     .busy_o(off_busy), .done_o(off_done), .done_pl_o(off_pl),
     .mem_re_o(off_mem_re), .mem_we_o(off_mem_we),
@@ -127,14 +127,14 @@ module tb_g6lc_apu_shcore;
     end else begin
       mem_rv <= 1'b0;
       if (mem_we) begin
-        wm = mem[mem_addr[16:3]];
+        wm = mem[mem_addr[19:3]];
         for (int b = 0; b < 8; b++)
           if (mem_wstrb[b]) wm[8*b +: 8] = mem_wdata[8*b +: 8];
-        mem[mem_addr[16:3]] <= wm;
+        mem[mem_addr[19:3]] <= wm;
         mem_rv <= 1'b1;
       end
       if (mem_re) begin
-        mem_rdata <= mem[mem_addr[16:3]];
+        mem_rdata <= mem[mem_addr[19:3]];
         mem_rv <= 1'b1;
       end
     end
@@ -241,28 +241,103 @@ module tb_g6lc_apu_shcore;
     n  = wbuf[0]; nb = wbuf[1]; np = wbuf[2];
     gx = wbuf[3]; gy = wbuf[4]; gz = wbuf[5];
     base = 8 + n;
-    binds = '0;
-    for (int b = 0; b < nb; b++) begin
-      logic [7:0] st, bd;
-      logic [31:0] sz;
-      logic [63:0] ad;
-      st = wbuf[base + b*4 + 0][7:0];
-      bd = wbuf[base + b*4 + 1][7:0];
-      sz = wbuf[base + b*4 + 2];
-      ad = {32'h0, wbuf[base + b*4 + 3]};
-      binds[b*113 +: 113] = {st, bd, ad, sz[31:0], 1'b1};
+    // §12.3 F5: bindings -> aperture descriptor records + sideband.
+    // 5-word entries {set,binding,size,addr,aux={kind,dyn,idx}};
+    // elements of a (set,binding) share one boff row.
+    desc = '0;
+    begin
+      int ecnt [4];
+      int dord [4];
+      int nrow [4];
+      int row_of [32];
+      int row_cnt [4][16];
+      int row_off [4][16];
+      int row_dynb [4][16];
+      bit row_dyn [4][16];
+      for (int i = 0; i < 4; i++) begin
+        ecnt[i] = 0; dord[i] = 0; nrow[i] = 0;
+        desc.set_base[i] = 32'hF0000 + 32'(i) * 32'd1024;
+        for (int r = 0; r < 16; r++) begin
+          row_cnt[i][r] = 0; row_off[i][r] = 0;
+          row_dynb[i][r] = 0; row_dyn[i][r] = 0;
+        end
+      end
+      for (int b = 0; b < nb; b++) begin
+        logic [7:0] st, bd;
+        st = wbuf[base + b*5 + 0][7:0];
+        bd = wbuf[base + b*5 + 1][7:0];
+        row_of[b] = -1;
+        for (int c = 0; c < b; c++)
+          if (wbuf[base + c*5 + 0][7:0] == st &&
+              wbuf[base + c*5 + 1][7:0] == bd)
+            row_of[b] = row_of[c];
+        if (row_of[b] < 0 && st < 4 && nrow[st] < 16) begin
+          row_of[b] = nrow[st];
+          row_off[st][nrow[st]] = ecnt[st];
+          row_dyn[st][nrow[st]] = wbuf[base + b*5 + 4][8];
+          row_dynb[st][nrow[st]] = dord[st];
+          nrow[st]++;
+        end
+        if (row_of[b] >= 0) begin
+          int r = row_of[b];
+          int i2 = wbuf[base + b*5 + 4][7:0];
+          row_cnt[st][r] = (i2 + 1 > row_cnt[st][r])
+                           ? i2 + 1 : row_cnt[st][r];
+          ecnt[st] = row_off[st][r] + row_cnt[st][r] > ecnt[st]
+                     ? row_off[st][r] + row_cnt[st][r] : ecnt[st];
+          if (row_dyn[st][r])
+            dord[st] = (row_dynb[st][r] + i2 + 1 > dord[st])
+                       ? row_dynb[st][r] + i2 + 1 : dord[st];
+        end
+      end
+      for (int b = 0; b < nb; b++) begin
+        logic [7:0] st, bd, kind;
+        logic [31:0] sz;
+        logic [63:0] ad;
+        int        i2, r;
+        longint    ra;
+        st   = wbuf[base + b*5 + 0][7:0];
+        bd   = wbuf[base + b*5 + 1][7:0];
+        sz   = wbuf[base + b*5 + 2];
+        ad   = {32'h0, wbuf[base + b*5 + 3]};
+        i2   = wbuf[base + b*5 + 4][7:0];
+        kind = wbuf[base + b*5 + 4][23:16];
+        if (kind == 8'h00) kind = 8'h06;
+        if (row_of[b] >= 0) begin
+          r  = row_of[b];
+          ra = 64'(desc.set_base[st[1:0]]) +
+               64'(row_off[st][r] + i2) * 32;
+          desc.boff[st[1:0]][r[3:0]] =
+              '{binding: bd, count: 16'(row_cnt[st][r]),
+                off32: 20'(row_off[st][r]), dyn: row_dyn[st][r],
+                dynbase: 4'(row_dynb[st][r])};
+          mem[ra >> 3]       = {sz, ad[31:0]};
+          mem[(ra + 8) >> 3] = {48'h0, 8'h01, kind};
+        end
+      end
     end
-    base += nb * 4;
+    base += nb * 5;
     push_n = np[5:0];
     push = '0;
     for (int i = 0; i < np && i < 32; i++)
       push[i*32 +: 32] = wbuf[base + i];
     base += np;
+    // dynamic-offset section: n entries {set, ord, off}
+    begin
+      int nd = int'(wbuf[base]);
+      base += 1;
+      for (int d = 0; d < nd; d++) begin
+        desc.dyn_off[wbuf[base + d*3 + 0][1:0]]
+                    [wbuf[base + d*3 + 1][3:0]] =
+            wbuf[base + d*3 + 2];
+      end
+      base += nd * 3;
+    end
     for (int b = 0; b < nb; b++) begin
       logic [31:0] sz;
       logic [63:0] ad;
-      sz = wbuf[8 + n + b*4 + 2];
-      ad = {32'h0, wbuf[8 + n + b*4 + 3]};
+      sz = wbuf[8 + n + b*5 + 2];
+      ad = {32'h0, wbuf[8 + n + b*5 + 3]};
       for (int w2 = 0; w2 < sz/4; w2++) begin
         if ((ad + w2*4) & 7)
           mem[(ad + w2*4) >> 3][63:32] = wbuf[base + w2];
@@ -270,6 +345,41 @@ module tb_g6lc_apu_shcore;
           mem[(ad + w2*4) >> 3][31:0] = wbuf[base + w2];
       end
       base += sz/4;
+    end
+  endtask
+
+  // compare output binding words in the aperture model against the
+  // vector's model section (ebuf[4] binding records, then oracle words,
+  // then model words — same layout as the shwave .exp).
+  task automatic cmp_out(input string tag);
+    int ebase2, mbase2, now2;
+    ebase2 = 5 + ebuf[4] * 4;
+    now2 = 0;
+    for (int b = 0; b < ebuf[4]; b++)
+      if (ebuf[5 + b*4 + 3]) now2 += int'(ebuf[5 + b*4 + 1]) / 4;
+    mbase2 = ebase2 + now2;
+    for (int b = 0; b < ebuf[4]; b++) begin
+      logic [31:0] sz, eo;
+      logic [63:0] ad;
+      sz = ebuf[5 + b*4 + 1];
+      ad = {32'h0, ebuf[5 + b*4 + 2]};
+      eo = ebuf[5 + b*4 + 3];
+      if (eo) begin
+        for (int w2 = 0; w2 < sz/4; w2++) begin
+          longint    aa;
+          logic [31:0] got;
+          aa = ad + w2*4;
+          got = (aa & 7) ? mem[aa >> 3][63:32] : mem[aa >> 3][31:0];
+          checks++;
+          if (got !== ebuf[mbase2 + w2]) begin
+            fails++;
+            $display("FAIL %s.out b%0d[%0d]@%x got=%08x exp=%08x",
+                     tag, b, w2, aa, got, ebuf[mbase2 + w2]);
+          end
+        end
+        ebase2 += int'(sz) / 4;
+        mbase2 += int'(sz) / 4;
+      end
     end
   endtask
 
@@ -282,7 +392,7 @@ module tb_g6lc_apu_shcore;
     checks = 0; cases = 0; fails = 0; cyc = 0;
     wr_en = 0; commit = 0; retire = 0; work = 0; work_ctype = 0;
     sm_req = 0; sm_pl = '0;
-    work_imm = '0; disp_slot = 0; binds = '0; push_n = 0; push = '0;
+    work_imm = '0; disp_slot = 0; desc = '0; push_n = 0; push = '0;
     for (int i = 0; i < MEMW; i++) mem[i] = '0;
     repeat (8) @(negedge clk); rst_n = 1;
     repeat (4) @(negedge clk);
@@ -370,6 +480,30 @@ module tb_g6lc_apu_shcore;
     cmp("s3.commit.ok", {31'h0, cpl.ok}, 1);
     do_work(32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT), gx, gy, gz, 3, dpl);
     cmp("s3.done.code", {24'h0, dpl.code}, APU_SH_DONE_OK);
+
+    // 7b. F5 descriptor array: descarr_1 indexes a 4-element SSBO
+    //     array dynamically; output checked vs the model words
+    cases++;
+    stage("descarr_1", 4, n, nb, np, gx, gy, gz);
+    wr_words(8, n, 4);
+    do_commit(n, 4, cpl);
+    cmp("da.commit.ok", {31'h0, cpl.ok}, 1);
+    do_work(32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT), gx, gy, gz, 4, dpl);
+    cmp("da.done.code", {24'h0, dpl.code}, APU_SH_DONE_OK);
+    cmp("da.robust", dpl.robust, ebuf[2]);
+    cmp_out("da");
+
+    // 7c. F5 four sets + dynamic offset: multiset_1 binds one SSBO per
+    //     set, set 2 a dynamic descriptor with a non-zero offset
+    cases++;
+    stage("multiset_1", 5, n, nb, np, gx, gy, gz);
+    wr_words(8, n, 5);
+    do_commit(n, 5, cpl);
+    cmp("ms.commit.ok", {31'h0, cpl.ok}, 1);
+    do_work(32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT), gx, gy, gz, 5, dpl);
+    cmp("ms.done.code", {24'h0, dpl.code}, APU_SH_DONE_OK);
+    cmp("ms.robust", dpl.robust, ebuf[2]);
+    cmp_out("ms");
 
     // 8. bad module faults at commit through the same port
     cases++;

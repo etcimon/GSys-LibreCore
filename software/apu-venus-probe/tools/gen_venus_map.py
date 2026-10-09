@@ -84,6 +84,10 @@ def main():
         "VN_NUM_CAPSETS":  F("NumCapsets"),
         "VN_SHM_BASE":     C("APU_SHM_BASE"),
         "VN_SHM_BYTES":    C("APU_SHM_BYTES"),
+        # §12.3 F5: the advertised SHM_LEN — the guest-mappable span;
+        # the window's top (VN_SHM_BYTES - VN_SHM_GUEST_BYTES) is the
+        # device-private arena
+        "VN_SHM_GUEST_BYTES": C("APU_SHM_GUEST_BYTES"),
         "VN_SHM_ID":       C("APU_SHM_ID_HOST_VISIBLE"),
         "VN_MAGIC":        C("VIRTIO_MMIO_MAGIC"),
         "VN_VERSION":      C("VIRTIO_MMIO_VERSION2"),

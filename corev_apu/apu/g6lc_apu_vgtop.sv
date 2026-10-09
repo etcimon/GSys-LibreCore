@@ -47,6 +47,9 @@ module g6lc_apu_vgtop
   // §7b/5a-ii: aperture page allocator + ShaderCore geometry
   parameter int unsigned VgPages      = APU_VG_PAGES,
   parameter int unsigned VgPageBytes  = APU_VG_PAGE_BYTES,
+  // §12.3 F5: pages below VgGuestPages are the guest-mappable window;
+  // [VgGuestPages, VgPages) is the device-private arena
+  parameter int unsigned VgGuestPages = APU_VG_GUEST_PAGES,
   parameter int unsigned ShaderRegs    = 256,
   parameter int unsigned MaxWaves      = 8,
   parameter int unsigned ShaderIds     = 1024,
@@ -176,7 +179,7 @@ module g6lc_apu_vgtop
     logic            pg_req_ready, pg_cpl_ready;
     apu_vgpages_req_t pg_req;
     apu_vgpages_cpl_t pg_cpl;
-    typedef enum logic [0:0] { OPG_PUMP, OPG_EXEC } opg_e;
+    typedef enum logic [1:0] { OPG_PUMP, OPG_EXEC, OPG_CTL } opg_e;
     typedef enum logic [0:0] { PGG_PUMP, PGG_CTL } pgg_e;
     opg_e opg_q;
     pgg_e pgg_q;
@@ -196,6 +199,12 @@ module g6lc_apu_vgtop
     // §7b/5a-ii: vgctl's aperture page requests (arbitrated below)
     logic         vc_pg_v, vc_pg_rdy, vc_pg_cpl_rdy;
     apu_vgpages_req_t vc_pg_req;
+    // RESET_CTX reap ports (arbitrated below): ObjPay extent frees and
+    // ShaderCore slot unrefs for entries the ctx sweep tombstones
+    logic         vc_op_v, vc_op_rdy, vc_op_cpl_rdy;
+    apu_objpay_req_t vc_op_req;
+    logic         vc_sm_req, vc_sm_gnt;
+    apu_sh_sm_req_t vc_sm_req_pl;
 
     g6lc_apu_vgctl #(.Enable(1'b1)) i_ctl (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
@@ -221,6 +230,13 @@ module g6lc_apu_vgtop
       .pg_req_o(vc_pg_req),
       .pg_cpl_valid_i(pg_cpl_valid && pgg_q == PGG_CTL),
       .pg_cpl_ready_o(vc_pg_cpl_rdy), .pg_cpl_i(pg_cpl),
+      .op_req_valid_o(vc_op_v), .op_req_ready_i(vc_op_rdy),
+      .op_req_o(vc_op_req),
+      .op_cpl_valid_i(op_cpl_valid && opg_q == OPG_CTL),
+      .op_cpl_ready_o(vc_op_cpl_rdy), .op_cpl_i(op_cpl),
+      .sm_req_o(vc_sm_req), .sm_req_pl_o(vc_sm_req_pl),
+      .sm_gnt_i(vc_sm_gnt),
+      .sm_cpl_i(vp_sm_cpl), .sm_cpl_pl_i(vp_sm_cpl_pl),
       .busy_o(vc_busy), .done_o(vc_done), .used_len_o(vc_used_len),
       .fence_done_o(fence_pulse_o), .fence_id_o(fence_id_o),
       .fence_ring_o(fence_ring_o));
@@ -332,7 +348,7 @@ module g6lc_apu_vgtop
     apu_sh_done_t xf_done_pl;
     apu_xfer_desc_t ex_xfer;
     logic [2:0]         ex_disp_slot;
-    logic [16*113-1:0]  ex_binds;
+    apu_sh_desc_t           ex_desc;
     logic [5:0]         ex_push_n;
     logic [1023:0]      ex_push;
 
@@ -361,7 +377,7 @@ module g6lc_apu_vgtop
       .work_done_i(sh_done | xf_done | work_done_i),
       .work_done_pl_i(sh_done ? sh_done_pl :
                       xf_done ? xf_done_pl : work_done_pl_i),
-      .disp_slot_o(ex_disp_slot), .binds_o(ex_binds),
+      .disp_slot_o(ex_disp_slot), .desc_o(ex_desc),
       .push_n_o(ex_push_n), .push_o(ex_push),
       .done_seq_o(ex_done_seq),
       .fence_signaled_o(ex_fence_sig), .fence_lost_o(ex_fence_lost),
@@ -388,12 +404,17 @@ module g6lc_apu_vgtop
       .cpl_valid_o(op_cpl_valid), .cpl_ready_i(op_cpl_ready),
       .cpl_o(op_cpl));
 
-    assign op_req_valid = vp_op_v | ex_op_v;
-    assign op_req = vp_op_v ? vp_op_req : ex_op_req;
+    // §6c: vgctl's RESET_CTX reap frees join as a third, lowest-priority
+    // requester
+    assign op_req_valid = vp_op_v | ex_op_v | vc_op_v;
+    assign op_req = vp_op_v ? vp_op_req :
+                    ex_op_v ? ex_op_req : vc_op_req;
     assign vp_op_rdy = vp_op_v & op_req_ready;
     assign ex_op_rdy = !vp_op_v & ex_op_v & op_req_ready;
-    assign op_cpl_ready = (opg_q == OPG_PUMP) ? vp_op_cpl_rdy
-                                            : ex_op_cpl_rdy;
+    assign vc_op_rdy = !vp_op_v & !ex_op_v & vc_op_v & op_req_ready;
+    assign op_cpl_ready = (opg_q == OPG_PUMP) ? vp_op_cpl_rdy :
+                          (opg_q == OPG_EXEC) ? ex_op_cpl_rdy
+                                              : vc_op_cpl_rdy;
 
     // ---- vgpages -------------------------------------------------------------------
     // §7b/5a-ii: one aperture page allocator, arbitrated between the
@@ -401,7 +422,8 @@ module g6lc_apu_vgtop
     // (RESOURCE_CREATE_BLOB blob_id != 0 / RESOURCE_UNREF).  Front has
     // priority; the grant is held until the completion is consumed.
     g6lc_apu_vgpages #(.Enable(1'b1), .Pages(VgPages),
-                       .PageBytes(VgPageBytes)) i_vgp (
+                       .PageBytes(VgPageBytes),
+                       .GuestPages(VgGuestPages)) i_vgp (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .req_valid_i(pg_req_valid), .req_ready_o(pg_req_ready),
       .req_i(pg_req),
@@ -414,6 +436,7 @@ module g6lc_apu_vgtop
     assign vc_pg_rdy = !vp_pg_v & vc_pg_v & pg_req_ready;
     assign pg_cpl_ready = (pgg_q == PGG_PUMP) ? vp_pg_cpl_rdy
                                             : vc_pg_cpl_rdy;
+    assign vc_sm_gnt = vc_sm_req & ~vp_sm_req;
 
     // ---- ShaderCore ---------------------------------------------------------------
     // §7b/5a-ii: module slots (sm), pCode staging (wr_*) and pipeline
@@ -436,11 +459,15 @@ module g6lc_apu_vgtop
       .commit_i(vp_sh_commit), .commit_pl_i(vp_sh_commit_pl),
       .c_busy_o(), .c_done_o(vp_sh_cdone), .c_done_pl_o(vp_sh_cpl),
       .retire_i(1'b0), .retire_slot_i('0),
-      .sm_req_i(vp_sm_req), .sm_req_pl_i(vp_sm_req_pl),
+      // §6c: vgctl's RESET_CTX reap joins the slot-manager port; the
+      // pump's one-cycle pulses win, vgctl level-holds its request
+      // until vc_sm_gnt marks the accepted cycle
+      .sm_req_i(vp_sm_req | vc_sm_req),
+      .sm_req_pl_i(vp_sm_req ? vp_sm_req_pl : vc_sm_req_pl),
       .sm_cpl_o(vp_sm_cpl), .sm_cpl_pl_o(vp_sm_cpl_pl),
       .work_i(ex_work_v && work_is_disp), .work_ready_o(sh_work_rdy),
       .work_ctype_i(work_o.ctype), .work_imm_i(work_o.rec.imm),
-      .disp_slot_i(ex_disp_slot), .binds_i(ex_binds),
+      .disp_slot_i(ex_disp_slot), .desc_i(ex_desc),
       .push_n_i(ex_push_n), .push_i(ex_push),
       .busy_o(sh_busy), .done_o(sh_done), .done_pl_o(sh_done_pl),
       .mem_re_o(sh_mem_req), .mem_we_o(sh_mem_we),
@@ -553,13 +580,17 @@ module g6lc_apu_vgtop
           og_q <= vp_ot_v ? OG_PUMP : ex_ot_v ? OG_EXEC :
                   vc_ot_v ? OG_CTL : OG_DBG;
         end
-        if (ot_cpl_valid && ot_cpl_ready) og_q <= OG_NONE;
+        // RESET_CTX streams interim SWEEP completions — the grant stays
+        // with the owner until the final (non-SWEEP) completion so the
+        // whole reap stream is routed to the requester
+        if (ot_cpl_valid && ot_cpl_ready &&
+            ot_cpl.status != APU_OBJTAB_SWEEP) og_q <= OG_NONE;
         if (cr_req_valid && cr_req_ready)
           cg_q <= vp_cr_v ? CG_PUMP :
                   ex_cr_v ? CG_EXEC : CG_XFER;
         // §7b/5a-ii: ObjPay/vgpages grant owners, same latch scheme
         if (op_req_valid && op_req_ready)
-          opg_q <= vp_op_v ? OPG_PUMP : OPG_EXEC;
+          opg_q <= vp_op_v ? OPG_PUMP : ex_op_v ? OPG_EXEC : OPG_CTL;
         if (pg_req_valid && pg_req_ready)
           pgg_q <= vp_pg_v ? PGG_PUMP : PGG_CTL;
       end
@@ -614,6 +645,7 @@ module g6lc_apu_vgtop_fixture
   parameter int unsigned PayWords = 16384,
   parameter int unsigned VgPages      = APU_VG_PAGES,
   parameter int unsigned VgPageBytes  = APU_VG_PAGE_BYTES,
+  parameter int unsigned VgGuestPages = APU_VG_GUEST_PAGES,
   parameter int unsigned ShaderRegs    = 256,
   parameter int unsigned MaxWaves      = 8,
   parameter int unsigned ShaderIds     = 1024,
@@ -673,6 +705,7 @@ module g6lc_apu_vgtop_fixture
   g6lc_apu_vgtop #(
     .Enable(Enable), .Rings(Rings), .Fences(Fences),
     .PayWords(PayWords), .VgPages(VgPages), .VgPageBytes(VgPageBytes),
+    .VgGuestPages(VgGuestPages),
     .ShaderRegs(ShaderRegs), .MaxWaves(MaxWaves),
     .ShaderIds(ShaderIds), .ShaderSlots(ShaderSlots),
     .ShaderWords(ShaderWords), .ShaderInit(ShaderInit),

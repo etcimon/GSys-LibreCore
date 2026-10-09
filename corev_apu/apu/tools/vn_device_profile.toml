@@ -39,11 +39,25 @@ deviceName = "LibreCore APU (unqualified)"
 # VkPhysicalDeviceFeatures members set true; everything else stays 0.
 fragmentStoresAndAtomics = true
 robustBufferAccess = true
+# §12.3 F5: descriptor-array indexing is lowered onto the LSU record
+# path (descarr/multiset/arroob corpus, shwave cases 220+); both buffer
+# classes resolve through the same {base,size} record fetch.
+shaderStorageBufferArrayDynamicIndexing = true
+shaderUniformBufferArrayDynamicIndexing = true
 shaderStorageImageWriteWithoutFormat = false
 
 [limits]
 # VkPhysicalDeviceLimits members set non-zero; everything else stays 0.
 maxBoundDescriptorSets = 4
+# §12.3 F5: 16 binding rows per set (boff CAM depth), 16 dynamic
+# ordinals per set (dyn_off table); the array count per binding is
+# bounded only by pool aperture, not advertised here.
+maxPerStageDescriptorUniformBuffers = 16
+maxPerStageDescriptorStorageBuffers = 16
+maxDescriptorSetUniformBuffers = 16
+maxDescriptorSetStorageBuffers = 16
+maxDescriptorSetUniformBuffersDynamic = 16
+maxDescriptorSetStorageBuffersDynamic = 16
 maxImageDimension2D = 4096
 maxPushConstantsSize = 128
 maxComputeWorkGroupSize = [64, 64, 64]
@@ -61,7 +75,10 @@ maxVertexInputBindings = 16
 
 [memory]
 # VkPhysicalDeviceMemoryProperties: heap 0 DEVICE_LOCAL, two types on heap 0.
-heap0_size = 0x10000000
+# §12.3 F5: aperture-backed memory capacity is the guest-mappable
+# span (SHM_LEN = 24 MiB) — the window's top 8 MiB is the
+# device-private descriptor arena
+heap0_size = 0x01800000
 type0_flags = "DEVICE_LOCAL"
 type1_flags = "HOST_VISIBLE|HOST_COHERENT"
 
@@ -223,6 +240,11 @@ fields = ["pSetLayouts", "pPushConstantRanges.stageFlags",
 fields = ["pCreateInfos.layout", "pCreateInfos.stage.module",
           "pCreateInfos.stage.pSpecializationInfo"]
 
+[keep.vkCreateDescriptorPool]
+# §12.3 F5: {type, descriptorCount} pairs — the front sums the counts
+# into the pool's aperture record-store capacity
+fields = ["pPoolSizes.type", "pPoolSizes.descriptorCount"]
+
 [keep.vkAllocateDescriptorSets]
 # {set layout ids (2w each)}
 fields = ["pSetLayouts"]
@@ -230,14 +252,21 @@ fields = ["pSetLayouts"]
 [keep.vkUpdateDescriptorSets]
 # per write {dstSet (2w), dstBinding, dstArrayElement, descriptorCount,
 #            descriptorType, per pBufferInfo {buffer (2w), offset (2w),
-#            range (2w)}}
+#            range (2w)}}; per copy {srcSet (2w), srcBinding,
+#            srcArrayElement, dstSet (2w), dstBinding, dstArrayElement,
+#            descriptorCount}
 fields = ["pDescriptorWrites.dstSet", "pDescriptorWrites.dstBinding",
           "pDescriptorWrites.dstArrayElement",
           "pDescriptorWrites.descriptorCount",
           "pDescriptorWrites.descriptorType",
           "pDescriptorWrites.pBufferInfo.buffer",
           "pDescriptorWrites.pBufferInfo.offset",
-          "pDescriptorWrites.pBufferInfo.range"]
+          "pDescriptorWrites.pBufferInfo.range",
+          "pDescriptorCopies.srcSet", "pDescriptorCopies.srcBinding",
+          "pDescriptorCopies.srcArrayElement",
+          "pDescriptorCopies.dstSet", "pDescriptorCopies.dstBinding",
+          "pDescriptorCopies.dstArrayElement",
+          "pDescriptorCopies.descriptorCount"]
 
 [keep.vkCmdBindDescriptorSets]
 # {descriptor-set ids (2w each), dynamic offsets}; the record stores the

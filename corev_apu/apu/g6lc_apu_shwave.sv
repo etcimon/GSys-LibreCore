@@ -58,7 +58,7 @@ module g6lc_apu_shwave
   // dispatch (single-cycle strobe; only while !busy_o)
   input  logic         disp_i,
   input  apu_sh_dispatch_t disp_pl_i,
-  input  logic [16*113-1:0] binds_i,   // {set,binding,base,size,valid}
+  input  apu_sh_desc_t desc_i,         // §12.3 F5 descriptor sideband
   input  logic [5:0]   push_n_i,       // valid push words (0..32)
   input  logic [1023:0] push_i,        // push-constant block
   output logic         busy_o,
@@ -109,7 +109,7 @@ module g6lc_apu_shwave
     assign mem_wstrb_o = '0;
     logic unused;
     assign unused = clk_i | rst_ni | testmode_i | disp_i |
-                    (|disp_pl_i) | (|binds_i) | (|push_n_i) |
+                    (|disp_pl_i) | (|desc_i) | (|push_n_i) |
                     (|push_i) | (|prog_data_i) | (|type_data_i) |
                     (|const_data_i) | (|memb_data_i) | (|rm_data_i) |
                     (|init_data_i) | (|blk_data_i) | (|phi_data_i) |
@@ -176,7 +176,11 @@ module g6lc_apu_shwave
       W_CM0, W_CM1, W_CM2, W_CM3, W_CM4, W_CM5, W_CMW, W_CMF,
       W_MLF, W_MLA,                     // MAT result column flush (load)
       W_SMR0, W_SMR1,                   // MAT store operand column fetch
-      W_XC0, W_XC1                      // MAT composite-extract column read
+      W_XC0, W_XC1,                     // MAT composite-extract column read
+      // §12.3 F5: memory-resident descriptor resolve (boff CAM ->
+      // record cache -> two-beat aperture fetch) shared by the LSU
+      // and OpArrayLength, plus the post-resolve bounds-check point
+      W_DS0, W_DS1, W_DS2, W_DS3, W_DS4, W_DS5, W_LSC
     } st_e;
     st_e st_q, ret_q;
 
@@ -184,9 +188,27 @@ module g6lc_apu_shwave
     logic [2:0]   slot_q;
     logic [15:0]  gx_q, gy_q, gz_q;
     logic [31:0]  wid_q;
-    logic [15:0][112:0] binds_q;
+    // F5: desc_i is NOT latched — cmdexec holds desc_o stable from
+    // dispatch until work_done (StDsDone blocks on work_done_i), so a
+    // second ~5.3 kbit copy here would be dead area
     logic [31:0]  push_q [32];
     logic [5:0]   push_n_q;
+    // F5 descriptor-record fetch: the LSU (W_LS0) and OpArrayLength
+    // (W_AL0) enter W_DS0 with the key latched here; the subroutine
+    // returns to dret_q with ls_bind/ls_bsz/ls_bok filled.
+    st_e          dret_q;
+    logic [7:0]   dsc_set_q, dsc_bd_q;
+    logic [15:0]  dsc_idx_q;
+    apu_sh_bindrow_t dsc_row_q;    // resolved binding row
+    logic [63:0]  dsc_addr_q;      // current record beat address
+    logic [63:0]  dsc_lo_q;        // beat0 {size,base}
+    logic         dsc_err_q;
+    // F5 descriptor cache: key {idx,binding,set}, value {kind,flags,
+    // base,size}; invalidated on every dispatch
+    logic [APU_DESC_CACHE-1:0]        dc_v_q;
+    logic [APU_DESC_CACHE-1:0][25:0]  dc_key_q;
+    logic [APU_DESC_CACHE-1:0][79:0]  dc_val_q;
+    logic [2:0]                       dc_vic_q;
     // entry record
     logic [15:0]  eoff_q, escratch_q;
     logic [7:0]   lx_q, ly_q, lz_q, ninit_q;
@@ -448,20 +470,46 @@ module g6lc_apu_shwave
         endcase
       end
     endfunction
-    // binding match {set,binding} → {base,size,ok} packed
-    // bind table entry: {set[112:105], binding[104:97],
-    // base[96:33], size[32:1], valid[0]}; returns {v,base,size}
-    function automatic logic [96:0] f_bind(input logic [7:0] st,
+    // ---- §12.3 F5 descriptor resolution helpers ---------------------
+    // boff CAM: {set,binding} -> {found, row}; an absent row (count 0)
+    // or an out-of-range set is reported as not found
+    function automatic logic [49:0] f_brow(input logic [3:0] s,
                                            input logic [7:0] bd);
-      logic [96:0] r;
+      f_brow = '0;
+      if (s < 4'(APU_DESC_SETS))
+        for (int b = 0; b < APU_DESC_BND; b++)
+          if (desc_i.boff[s[1:0]][b].count != 16'h0 &&
+              desc_i.boff[s[1:0]][b].binding == bd)
+            f_brow = {1'b1, desc_i.boff[s[1:0]][b]};
+    endfunction
+    // record cache: {set[1:0],binding,idx} -> {hit, kind8,flags8,
+    // base32,size32}; invalidated at dispatch
+    function automatic logic [80:0] f_dhit(input logic [1:0] s,
+                                           input logic [7:0] bd,
+                                           input logic [15:0] i);
+      f_dhit = '0;
+      for (int c = 0; c < APU_DESC_CACHE; c++)
+        if (dc_v_q[c] &&
+            dc_key_q[c] == {i, bd, s})
+          f_dhit = {1'b1, dc_val_q[c]};
+    endfunction
+    // dynamic-offset table index: row.dynbase + element index,
+    // saturating at the APU_DESC_DYN window
+    function automatic logic [31:0] f_doff(input logic [1:0] s,
+                                           input apu_sh_bindrow_t r,
+                                           input logic [15:0] i);
+      logic [31:0] di;
       begin
-        r = '0;
-        for (int b = 0; b < 16; b++)
-          if (binds_q[b][0] && binds_q[b][112:105] == st &&
-              binds_q[b][104:97] == bd)
-            r = {binds_q[b][96:33], binds_q[b][32:1], 1'b1};
-        f_bind = r;
+        di = 32'(r.dynbase) + 32'(i);
+        f_doff = !r.dyn ? 32'h0 :
+                 desc_i.dyn_off[s][di >= 32'(APU_DESC_DYN)
+                                  ? 4'(APU_DESC_DYN-1) : di[3:0]];
       end
+    endfunction
+    // buffer descriptor kinds the LSU may execute (image/sampler
+    // kinds write records but stay refused)
+    function automatic logic f_buf_kind(input logic [7:0] k);
+      f_buf_kind = k == 8'd6 || k == 8'd7 || k == 8'd8 || k == 8'd9;
     endfunction
     // unit operand source: {cmode[1:0], src[3:0]} → 32-bit operand
     localparam logic [3:0] S_V0 = 0, S_V1 = 1, S_V2 = 2, S_V3 = 3,
@@ -1054,11 +1102,13 @@ module g6lc_apu_shwave
 
     wire ls_mem = (ls_sc_q == APU_SH_SC_UNIFORM) ||
                   (ls_sc_q == APU_SH_SC_SBUF);
-    assign mem_re_o    = (st_q == W_LS1) && ls_mem && !ls_store_q &&
-                         ls_bok_q;
+    // F5: W_DS1/W_DS3 issue the descriptor-record beats
+    wire dsc_mem = (st_q == W_DS1) || (st_q == W_DS3);
+    assign mem_re_o    = ((st_q == W_LS1) && ls_mem && !ls_store_q &&
+                          ls_bok_q) || dsc_mem;
     assign mem_we_o    = (st_q == W_LS1) && ls_mem && ls_store_q &&
                          ls_bok_q && act_w[ls_lane_q[2:0]];
-    assign mem_addr_o  = ls_addr_q & ~64'h7;
+    assign mem_addr_o  = dsc_mem ? dsc_addr_q : (ls_addr_q & ~64'h7);
     assign mem_wdata_o = ls_addr_q[2] ? {ls_wd, 32'h0}
                                       : {32'h0, ls_wd};
     assign mem_wstrb_o = ls_addr_q[2] ? 8'hF0 : 8'h0F;
@@ -1277,7 +1327,11 @@ module g6lc_apu_shwave
       if (!rst_ni) begin
         st_q <= W_IDLE; ret_q <= W_EX;
         slot_q <= '0; gx_q <= '0; gy_q <= '0; gz_q <= '0; wid_q <= '0;
-        binds_q <= '0; push_n_q <= '0;
+        push_n_q <= '0;
+        dc_v_q <= '0; dc_vic_q <= '0;
+        dsc_set_q <= '0; dsc_bd_q <= '0; dsc_idx_q <= '0;
+        dsc_row_q <= '0; dsc_addr_q <= '0; dsc_lo_q <= '0;
+        dsc_err_q <= '0; dret_q <= W_IDLE;
         for (int i = 0; i < 32; i++) push_q[i] <= '0;
         eoff_q <= '0; escratch_q <= '0;
         lx_q <= '0; ly_q <= '0; lz_q <= '0; ninit_q <= '0;
@@ -1365,8 +1419,10 @@ module g6lc_apu_shwave
             gx_q <= disp_pl_i.gx; gy_q <= disp_pl_i.gy;
             gz_q <= disp_pl_i.gz; wid_q <= disp_pl_i.work_id;
             push_n_q <= push_n_i;
-            for (int i = 0; i < 16; i++)
-              binds_q[i] <= binds_i[i*113 +: 113];
+            // F5: desc_i stays live (cmdexec holds it through
+            // work_done); the record cache is dispatch-scoped
+            dc_v_q  <= '0;
+            dc_vic_q <= '0;
             for (int i = 0; i < 32; i++)
               push_q[i] <= push_i[i*32 +: 32];
             wgx_q <= '0; wgy_q <= '0; wgz_q <= '0;
@@ -1711,6 +1767,9 @@ module g6lc_apu_shwave
                 for (int l = 0; l < LAN; l++) begin
                   poff_q[l][0] <= va_q[0][l][0];
                   poff_q[l][1] <= va_q[0][l][1];
+                  // F5: an already-indexed pointer keeps its
+                  // descriptor element through a re-chain
+                  poff_q[l][2] <= va_q[0][l][2];
                 end
                 ctag_q <= va_q[0][0][1];
                 cmstride_q <= '0;
@@ -2275,7 +2334,21 @@ module g6lc_apu_shwave
                 st_q <= W_CHM0;
               end
               4'd7, 4'd8: begin                  // array / runtime array
-                if (ty_stride != 0) begin
+                if (ck_q == 4'd0 &&
+                    (ctag_q[3:0] == APU_SH_SC_UNIFORM ||
+                     ctag_q[3:0] == APU_SH_SC_SBUF)) begin
+                  // §12.3 F5: first index into an array of descriptor
+                  // records — selects the record, not a byte offset
+                  for (int l = 0; l < LAN; l++)
+                    poff_q[l][2] <= vix_q[l][0];
+                  cty_q <= ty_elem;
+                  if (ck_q + 1 >= wc_q - 4) st_q <= W_CHFIN;
+                  else begin
+                    ck_q <= ck_q + 1;
+                    res_id_q <= ops_q[3 + ck_q + 1][9:0];
+                    st_q <= W_IR0;
+                  end
+                end else if (ty_stride != 0) begin
                   al_st_q <= ty_stride;
                   cty2_q <= ty_elem; st_q <= W_CHX;
                 end else begin
@@ -2323,19 +2396,21 @@ module g6lc_apu_shwave
             for (int l = 0; l < LAN; l++) begin
               wb_q[l][0] <= poff_q[l][0];
               wb_q[l][1] <= poff_q[l][1];
-              wb_q[l][2] <= '0; wb_q[l][3] <= '0;
+              // F5: comp2 carries the descriptor element index
+              wb_q[l][2] <= poff_q[l][2]; wb_q[l][3] <= '0;
             end
             wbm_q <= 4'b1111;
             st_q <= W_WB;
           end
-          // OpArrayLength: ptr → struct → member(off, mtype) → stride
+          // OpArrayLength: ptr → struct → member(off, mtype) → stride;
+          // F5: the buffer extent comes from the memory-resident
+          // record selected by the pointer's descriptor index
           W_AL0: begin
-            logic [96:0] bn;
-            bn = f_bind(va_q[0][0][1][19:12], va_q[0][0][1][27:20]);
-            ls_bind_q <= bn[96:33];
-            ls_bsz_q  <= bn[32:1];
-            ls_bok_q  <= bn[0];
-            st_q <= W_AL1;
+            dsc_set_q <= va_q[0][0][1][19:12];
+            dsc_bd_q  <= va_q[0][0][1][27:20];
+            dsc_idx_q <= va_q[0][0][2][15:0];
+            dret_q    <= W_AL1;
+            st_q      <= W_DS0;
           end
           W_AL1: begin al_ty_q <= ty_elem; st_q <= W_AL2; end
           W_AL2: st_q <= W_AL3;
@@ -2371,17 +2446,12 @@ module g6lc_apu_shwave
           // W_LSA advances the (lane,comp) cursor.
           W_LS0: begin
             logic [31:0] o32, tg;
-            logic [96:0] bn;
             o32 = va_q[0][ls_lane_q[2:0]][0] +
                   {21'h0, (ls_mat_q ? ls_flw : ls_comp_q), 2'b00};
             tg  = va_q[0][ls_lane_q[2:0]][1];
-            bn  = f_bind(tg[19:12], tg[27:20]);
             ls_off_q <= o32;
             ls_sc_q  <= tg[3:0];
             ls_bi_q  <= tg[11:4];
-            ls_bind_q <= bn[96:33];
-            ls_bsz_q  <= bn[32:1];
-            ls_bok_q  <= bn[0];
             if (!act_w[ls_lane_q[2:0]]) st_q <= W_LSA;
             else if (tg[3:0] == APU_SH_SC_INPUT) begin
               // builtin vec component comes from the pointer byte
@@ -2403,15 +2473,13 @@ module g6lc_apu_shwave
               st_q <= W_LSA;
             end else if (tg[3:0] == APU_SH_SC_UNIFORM ||
                          tg[3:0] == APU_SH_SC_SBUF) begin
-              if (!bn[0] || {32'h0, o32} + 4 > {32'h0, bn[32:1]}) begin
-                robust_q <= robust_q + 1;
-                if (!ls_store_q)
-                  wb_q[ls_lane_q[2:0]][ls_wc] <= '0;
-                st_q <= W_LSA;
-              end else begin
-                ls_addr_q <= bn[96:33] + {32'h0, o32};
-                st_q <= W_LS1;
-              end
+              // §12.3 F5: {set,binding,idx} -> binding row -> record
+              // fetch -> bounds check at W_LSC
+              dsc_set_q <= tg[19:12];
+              dsc_bd_q  <= tg[27:20];
+              dsc_idx_q <= va_q[0][ls_lane_q[2:0]][2][15:0];
+              dret_q    <= W_LSC;
+              st_q      <= W_DS0;
             end else if (tg[3:0] == APU_SH_SC_WORKGROUP ||
                          tg[3:0] == APU_SH_SC_FUNCTION ||
                          tg[3:0] == APU_SH_SC_PRIVATE) begin
@@ -2421,6 +2489,96 @@ module g6lc_apu_shwave
               if (!ls_store_q)
                 wb_q[ls_lane_q[2:0]][ls_wc] <= '0;
               st_q <= W_LSA;
+            end
+          end
+          // ---- §12.3 F5: descriptor record resolve ------------------
+          // dsc_set/bd/idx + dret are latched by the caller (W_LS0,
+          // W_AL0).  W_DS0 runs the binding CAM and the record cache;
+          // a miss fetches the record's first 16 bytes in two 64-bit
+          // beats.  All exits write ls_bind/ls_bsz/ls_bok and jump to
+          // dret_q.
+          W_DS0: begin
+            logic [49:0] br;
+            logic [80:0] hit;
+            br  = f_brow(4'(dsc_set_q[3:0]), dsc_bd_q);
+            hit = f_dhit(dsc_set_q[1:0], dsc_bd_q, dsc_idx_q);
+            if (!br[49] ||
+                {16'h0, dsc_idx_q} >= {16'h0, br[40:25]}) begin
+              // unbound set / no such binding / idx past the array:
+              // null descriptor (zero size, invalid)
+              ls_bind_q <= '0; ls_bsz_q <= '0; ls_bok_q <= 1'b0;
+              st_q <= dret_q;
+            end else begin
+              dsc_row_q <= br[48:0];
+              if (hit[80]) begin
+                // {kind,flags,base,size} + dynamic offset
+                ls_bind_q <= hit[63:32] +
+                             f_doff(dsc_set_q[1:0],
+                                    apu_sh_bindrow_t'(br[48:0]),
+                                    dsc_idx_q);
+                ls_bsz_q  <= hit[31:0];
+                ls_bok_q  <= hit[64] && f_buf_kind(hit[79:72]);
+                st_q <= dret_q;
+              end else begin
+                dsc_err_q <= 1'b0;
+                dsc_addr_q <= {32'h0, desc_i.set_base[dsc_set_q[1:0]]} +
+                              ((64'(br[24:5]) + 64'(dsc_idx_q))
+                               << 5);
+                st_q <= W_DS1;
+              end
+            end
+          end
+          W_DS1: begin
+            // mem_re_o high (desc beat); hold until accepted
+            if (mem_ready_i) st_q <= W_DS2;
+          end
+          W_DS2: begin
+            if (mem_rvalid_i) begin
+              dsc_lo_q   <= mem_err_i ? 64'h0 : mem_rdata_i;
+              dsc_err_q  <= mem_err_i;
+              dsc_addr_q <= dsc_addr_q + 64'd8;
+              st_q <= W_DS3;
+            end
+          end
+          W_DS3: begin
+            if (mem_ready_i) st_q <= W_DS4;
+          end
+          W_DS4: begin
+            if (mem_rvalid_i) begin
+              logic [79:0] val;
+              logic [7:0]  kind, flags;
+              logic [31:0] base, size;
+              base  = dsc_lo_q[31:0];
+              size  = dsc_lo_q[63:32];
+              kind  = mem_err_i ? 8'h0 : mem_rdata_i[7:0];
+              flags = mem_err_i ? 8'h0 : mem_rdata_i[15:8];
+              val   = {kind, flags, base, size};
+              // fill the record cache (round-robin victim)
+              dc_v_q[dc_vic_q]   <= 1'b1;
+              dc_key_q[dc_vic_q] <= {dsc_idx_q, dsc_bd_q,
+                                     dsc_set_q[1:0]};
+              dc_val_q[dc_vic_q] <= val;
+              dc_vic_q           <= dc_vic_q == 3'(APU_DESC_CACHE-1)
+                                    ? 3'h0 : dc_vic_q + 3'h1;
+              ls_bind_q <= base + f_doff(dsc_set_q[1:0], dsc_row_q,
+                                         dsc_idx_q);
+              ls_bsz_q  <= size;
+              ls_bok_q  <= !dsc_err_q && !mem_err_i &&
+                           flags[0] && f_buf_kind(kind);
+              st_q <= dret_q;
+            end
+          end
+          // post-resolve bounds check for the resource access
+          W_LSC: begin
+            if (!ls_bok_q || {32'h0, ls_off_q} + 4 > {32'h0, ls_bsz_q})
+            begin
+              robust_q <= robust_q + 1;
+              if (!ls_store_q)
+                wb_q[ls_lane_q[2:0]][ls_wc] <= '0;
+              st_q <= W_LSA;
+            end else begin
+              ls_addr_q <= ls_bind_q + {32'h0, ls_off_q};
+              st_q <= W_LS1;
             end
           end
           // mem_re_o/mem_we_o hold until mem_ready_i; a masked-out
@@ -2973,7 +3131,7 @@ module g6lc_apu_shwave_fixture
   input  logic         testmode_i,
   input  logic         disp_i,
   input  apu_sh_dispatch_t disp_pl_i,
-  input  logic [16*113-1:0] binds_i,
+  input  apu_sh_desc_t desc_i,
   input  logic [5:0]   push_n_i,
   input  logic [1023:0] push_i,
   output logic         busy_o,

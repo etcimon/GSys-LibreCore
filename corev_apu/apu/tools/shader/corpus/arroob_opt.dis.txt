@@ -1,0 +1,66 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Khronos Glslang Reference Front End; 11
+; Bound: 38
+; Schema: 0
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gl_GlobalInvocationID
+               OpExecutionMode %main LocalSize 8 1 1
+               OpSource GLSL 460
+               OpName %main "main"
+               OpName %gl_GlobalInvocationID "gl_GlobalInvocationID"
+               OpName %Out "Out"
+               OpMemberName %Out 0 "o"
+               OpName %_ ""
+               OpName %In "In"
+               OpMemberName %In 0 "v"
+               OpName %ins "ins"
+               OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
+               OpDecorate %_runtimearr_float ArrayStride 4
+               OpDecorate %Out BufferBlock
+               OpMemberDecorate %Out 0 Offset 0
+               OpDecorate %_ Binding 1
+               OpDecorate %_ DescriptorSet 0
+               OpDecorate %_runtimearr_float_0 ArrayStride 4
+               OpDecorate %In BufferBlock
+               OpMemberDecorate %In 0 Offset 0
+               OpDecorate %ins Binding 0
+               OpDecorate %ins DescriptorSet 0
+               OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+     %v3uint = OpTypeVector %uint 3
+%_ptr_Input_v3uint = OpTypePointer Input %v3uint
+%gl_GlobalInvocationID = OpVariable %_ptr_Input_v3uint Input
+     %uint_0 = OpConstant %uint 0
+%_ptr_Input_uint = OpTypePointer Input %uint
+      %float = OpTypeFloat 32
+%_runtimearr_float = OpTypeRuntimeArray %float
+        %Out = OpTypeStruct %_runtimearr_float
+%_ptr_Uniform_Out = OpTypePointer Uniform %Out
+          %_ = OpVariable %_ptr_Uniform_Out Uniform
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+%_runtimearr_float_0 = OpTypeRuntimeArray %float
+         %In = OpTypeStruct %_runtimearr_float_0
+     %uint_4 = OpConstant %uint 4
+%_arr_In_uint_4 = OpTypeArray %In %uint_4
+%_ptr_Uniform__arr_In_uint_4 = OpTypePointer Uniform %_arr_In_uint_4
+        %ins = OpVariable %_ptr_Uniform__arr_In_uint_4 Uniform
+%_ptr_Uniform_float = OpTypePointer Uniform %float
+     %uint_8 = OpConstant %uint 8
+     %uint_1 = OpConstant %uint 1
+%gl_WorkGroupSize = OpConstantComposite %v3uint %uint_8 %uint_1 %uint_1
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+         %14 = OpAccessChain %_ptr_Input_uint %gl_GlobalInvocationID %uint_0
+         %15 = OpLoad %uint %14
+         %32 = OpAccessChain %_ptr_Uniform_float %ins %15 %int_0 %int_0
+         %33 = OpLoad %float %32
+         %34 = OpAccessChain %_ptr_Uniform_float %_ %int_0 %15
+               OpStore %34 %33
+               OpReturn
+               OpFunctionEnd

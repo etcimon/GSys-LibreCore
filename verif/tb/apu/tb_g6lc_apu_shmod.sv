@@ -250,14 +250,16 @@ module tb_g6lc_apu_shmod;
     end
   endtask
 
-  string names [27] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [30] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
       "pushscale", "vec4arith",
       // §7c 4b corpus
       "ifelse", "loopfor", "loopwhile", "switchcase", "shortcircuit",
       "earlyret", "phiflow", "barrier_prefix", "barrier_reduce",
-      "matvec", "matmat", "precise_dot"};
+      "matvec", "matmat", "precise_dot",
+      // §12.3 F5 memory-resident descriptor corpus
+      "descarr", "multiset", "arroob"};
 
   initial begin
     checks = 0; cases = 0; fails = 0; cyc = 0;

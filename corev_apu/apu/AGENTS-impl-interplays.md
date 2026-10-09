@@ -3736,7 +3736,7 @@ mandatory MatrixEn, custom descriptors, UIO daemon or game plugin. HDMI remains
 a separate consumer of a completed common surface. `ApuOff`, all graphics gates
 and `FeatureVirgl` legality are unchanged by this source-review increment.
 
-## 16. Engine arborescence (live, 3c-ii + 5a xfer)
+## 16. Engine arborescence (live, 3c-ii + 5a xfer + F5 descriptors)
 
 ```text
 ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus]
@@ -3759,6 +3759,24 @@ ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus]
         --> MemoryPort (apmem)            5 x apu_mp fixed priority ==> tdma 2:1 join (a=apmem, b=xfer)
                                           ==> one AXI4 master (dma_req_o)
     ==> guest RAM window {DmaWindowBase, DmaWindowBytes} / aperture {APU_SHM_BASE, APU_SHM_BYTES}
+
+Descriptor-memory path (F5): pool/set backing pages vgpages ALLOC_PRIV ->
+vnfront bump-allocates set tables and writes 32-byte records through
+RingPump's mp PUMP port; CmdExec sideband = set_base/dyn_off/boff per bound
+set (layout rows read from ObjPay at dispatch); WaveEngine's LSU fetches
+records on mp SH (8-entry {set,binding,idx} cache, invalidated per
+dispatch) -> aperture.  Aperture split (guest-allocator collision fix): the
+32 MiB window is 24 MiB guest-visible (APU_VG_GUEST_BYTES, advertised as
+SHM_LEN) + 8 MiB device-private tail; guest-kernel MAP_BLOB extents are
+ALLOC_AT inside the guest span only, while device-internal allocations
+(VkDeviceMemory, descriptor pools) take ALLOC_PRIV in the tail —
+blob-owned CREATE_BLOB backing is lazy (no extent until MAP_BLOB;
+bind_offset 0 = unmapped; Mesa's 8 MiB cs shmem pool cannot fit an 8 MiB
+private arena even empty).  A memory-backed MAP_BLOB frees the private
+extent, ALLOC_ATs the kernel's guest extent, and SETAUXHI's the
+VkDeviceMemory's aperture base so engine-side addressing follows the
+guest's map (UNMAP_BLOB frees the guest extent, re-privatizes the memory
+backing, and drops the blob to bind_offset 0).
 ```
 
 ### What §16 still waits on (§12.3 phases B–D)
@@ -3767,7 +3785,7 @@ ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus]
 |---|---|---|
 | Full-SoC Linux (3d-a bare-metal probe and 3d-b stock-stack RTL-in-the-loop landed: §11 rows 3d-a/3d-b, `architecture/uncore/apu-venus-command-trace.md`) | B | stock Ubuntu on the Variane testharness itself (R3b program): same `vulkaninfo`/dispatch under real caches and the non-coherent DMA contract (`zicbom`/`svpbmt`, no `dma-coherent`) |
 | Sampler / raster (Xfer landed: `g6lc_apu_xfer`, §11 row 5a) | C | images/formats/sampler with memory-resident descriptors (F5), `vkCmdCopyImage`/blits, TBDR raster + ROP into `tc_sram` tiles; G0/A5 via Zink |
-| Memory-resident descriptors (F5) | C | descriptor sets fetched from device memory (objpay/aperture) by the LSU with dynamic indices; ObjTab validation at descriptor-write time + generation check — not the 16-entry flop bind table |
+| ~~Memory-resident descriptors~~ (F5 **landed** — §11 row F5: records in aperture memory, LSU dynamic-index fetch + 8-entry cache; the descriptor-memory path is in the tree above) | C | images/sampler arrays on the reserved record half (`vkCmdCopyImage`/blits), `tc_sram` descriptor cache beyond 8 entries |
 | `shwave` 1 IPC + `ShaderCores` | D | per-wave throughput 1 IPC; multi-core dispatch via the cluster pattern; `DramChannels` by profile |
 | virtio-pci endpoint function (F4) | D | five virtio-pci capabilities + shared-memory capability over a BAR into the aperture |
 | Scanout / WSI | D | `RESOURCE_UUID`/dma-buf export (G2) |

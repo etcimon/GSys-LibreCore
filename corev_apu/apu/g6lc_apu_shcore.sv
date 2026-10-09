@@ -13,7 +13,7 @@
 // integration item).  A record presented while `work_ready_o` is
 // low is NOT consumed — the caller must hold it.  In increment 4a
 // the pipeline → slot resolution and descriptor state are supplied
-// directly on the sideband inputs (disp_slot_i/binds_i/push_*), one
+// directly on the sideband inputs (disp_slot_i/desc_i/push_*), one
 // outstanding dispatch at a time; commit and dispatch are
 // serialized by the caller (shmod owns its read ports while busy).
 //
@@ -66,7 +66,7 @@ module g6lc_apu_shcore
   input  logic [8*32-1:0] work_imm_i,   // first 8 imm words
   // dispatch sideband (4a: direct slot + descriptor state)
   input  logic [2:0]   disp_slot_i,
-  input  logic [16*113-1:0] binds_i,
+  input  apu_sh_desc_t desc_i,
   input  logic [5:0]   push_n_i,
   input  logic [1023:0] push_i,
   // completion
@@ -101,7 +101,7 @@ module g6lc_apu_shcore
                     commit_i | (|commit_pl_i) | retire_i |
                     (|retire_slot_i) | sm_req_i | (|sm_req_pl_i) |
                     work_i | (|work_ctype_i) |
-                    (|work_imm_i) | (|disp_slot_i) | (|binds_i) |
+                    (|work_imm_i) | (|disp_slot_i) | (|desc_i) |
                     (|push_n_i) | (|push_i) | (|mem_rdata_i) |
                     mem_ready_i | mem_rvalid_i | mem_err_i;
   end else begin : gen_on
@@ -282,7 +282,7 @@ module g6lc_apu_shcore
     ) i_wave (
       .clk_i, .rst_ni, .testmode_i,
       .disp_i(disp_q_valid && !wbusy), .disp_pl_i(disp_q),
-      .binds_i, .push_n_i, .push_i,
+      .desc_i, .push_n_i, .push_i,
       .busy_o(wbusy), .done_o(wdone), .done_pl_o(wdone_pl),
       .rd_slot_o(rd_slot), .prog_addr_o(prog_addr),
       .prog_data_i(prog_data),
@@ -342,7 +342,7 @@ module g6lc_apu_shcore_fixture
   input  logic [31:0]  work_ctype_i,
   input  logic [8*32-1:0] work_imm_i,
   input  logic [2:0]   disp_slot_i,
-  input  logic [16*113-1:0] binds_i,
+  input  apu_sh_desc_t desc_i,
   input  logic [5:0]   push_n_i,
   input  logic [1023:0] push_i,
   output logic         busy_o,

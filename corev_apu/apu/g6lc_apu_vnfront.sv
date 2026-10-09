@@ -46,32 +46,51 @@
 // After decode:
 //   ALLOC     VkDescriptorSetLayout/VkPipelineLayout allocate an
 //             ObjPay extent first (FULL -> OUT_OF_DEVICE_MEMORY, no
-//             object), then copy staging -> ObjPay (the count words
-//             riding the op record are prepended) and park
-//             aux[63:32] = {base,words} via SETAUXHI.  Compute
+//             object).  §12.3 F5: the layout's payload is a row table,
+//             word0={pad,nbind} then per binding {binding,type,count} +
+//             {off32,dyn,dynbase} built from the staged quad; aux =
+//             {{base,words}, {ndyn, set_bytes}}.  VkPipelineLayout
+//             copies staging verbatim (count words prepended) and
+//             parks aux[63:32] = {base,words} via SETAUXHI.  Compute
 //             pipelines store the whole payload extent once and the
 //             first created pipeline object parks it.
-//             vkAllocateDescriptorSets resolves each staged layout
-//             id, reads bindingCount from the layout payload, then
-//             ObjPay-allocates nbind*4 words of set storage and marks
-//             bindings whose descriptorCount > 1 or type is not a
-//             buffer type (6/7) with word3 bit31 at allocation.
-//   RETIRE    payload kinds free their ObjPay extent from aux[63:32]
-//   UPDATE    vkUpdateDescriptorSets walks the staged writes: each
-//             {dstSet, dstBinding, descriptorCount, type, buffer
-//             infos} resolves the set storage and each buffer through
-//             ObjTab and writes {handle, offset lo, range lo,
-//             type|unsupported<<31} entries.  A buffer MISS or a
-//             dstBinding+k >= nbind marks the entry unsupported
-//             (clamped to the last entry for out-of-range indices)
-//             rather than faulting.  dstArrayElement is ignored in
-//             5a-i (binding index == position).
+//             vkCreateDescriptorPool sums pPoolSizes.descriptorCount
+//             into dsum_q, vgpages-allocates dsum*APU_DESC_BYTES of
+//             record storage, and mints aux = {{nsets,bump}, base},
+//             size = capacity bytes, state = {maxSets, epoch}.
+//             vkAllocateDescriptorSets bump-allocates each set's table
+//             from the pool (dead pool / maxSets / capacity ->
+//             VK_ERROR_OUT_OF_POOL_MEMORY and the rest of the elements
+//             echo VK_NULL_HANDLE), zeroes the records through the
+//             ap_* port, and mints aux = {layout {gen,slot},
+//             poison|ndyn|set_base}, size = pool {gen,slot},
+//             state[15:0] = pool epoch.
+//   RETIRE    payload kinds free their ObjPay extent from aux[63:32];
+//             descriptor pools free their vgpages extent (aux[31:0],
+//             size bytes) — minted sets stay in ObjTab but their
+//             pool-gen/epoch check turns a dispatch into DEVICE_LOST
+//   UPDATE    vkUpdateDescriptorSets writes 32-byte records through
+//             ap_*: for each staged write it resolves the set, its
+//             pool (epoch + generation — a dead pool skips the write
+//             silently) and its layout row (binding-number scan), then
+//             per element resolves the buffer, its bound memory
+//             (READSLOT) and writes {base,size,kind,flags} at
+//             set_base + (off32 + dstArrayElement + i)*32.  Any
+//             row miss, type mismatch, array overrun or failed buffer
+//             bound-write sets the set's poison bit (aux[31]) so the
+//             dispatch is DEVICE_LOST.  Copies resolve src and dst
+//             sets the same way and move the record bytes.
 //   RECORD    vkCmdPushConstants/vkCmdBindDescriptorSets stream their
 //             payloads into the cmdrec per-buffer arena; the record's
 //             imm[7] carries the arena base.  BindDescriptorSets
 //             resolves each staged set id through ObjTab at record
-//             time (a MISS stores a null handle).  pValues over 128 B
-//             takes the INVALID path.
+//             time (a MISS stores a null handle) and emits {handle,
+//             ndyn} pairs ahead of the dynamic-offset words.
+//             pValues over 128 B takes the INVALID path.
+//   POOL_RESET vkResetDescriptorPool bumps the pool's epoch and
+//             clears {nsets,bump} — minted sets become dead for any
+//             later dispatch (their ObjTab slots persist until
+//             destroy/context reset; documented device limit).
 //
 // exec_w contract (vnrep EXEC words): filled from the front of the
 // device profile (APU_VN_PROFILE[0..63]) at command start, then
@@ -174,6 +193,19 @@ module g6lc_apu_vnfront
   input  logic               pg_cpl_valid_i,
   output logic               pg_cpl_ready_o,
   input  apu_vgpages_cpl_t   pg_cpl_i,
+  // §12.3 F5: descriptor-record aperture port — vnpump arbitrates
+  // this onto the shared mp port (dom=1, aperture-relative byte
+  // address, 8-byte beats).  ap_req_o is held until ap_ready_i; every
+  // accepted request sees exactly one ap_done_i.
+  output logic               ap_req_o,
+  output logic               ap_we_o,
+  output logic [31:0]        ap_addr_o,
+  output logic [63:0]        ap_wdata_o,
+  output logic [7:0]         ap_wstrb_o,
+  input  logic               ap_ready_i,
+  input  logic               ap_done_i,
+  input  logic [63:0]        ap_rdata_i,
+  input  logic               ap_err_i,
   // cmdexec submit + fence interface
   output logic               ex_submit_valid_o,
   input  logic               ex_submit_ready_i,
@@ -206,6 +238,9 @@ module g6lc_apu_vnfront
     assign sh_commit_o = 1'b0;     assign sh_commit_pl_o = '0;
     assign pg_req_valid_o = 1'b0;  assign pg_req_o = '0;
     assign pg_cpl_ready_o = 1'b0;
+    assign ap_req_o = 1'b0;   assign ap_we_o = 1'b0;
+    assign ap_addr_o = '0;    assign ap_wdata_o = '0;
+    assign ap_wstrb_o = '0;
     assign ex_submit_valid_o = 1'b0; assign ex_submit_o = '0;
     assign ex_fence_clr_o = '0;
     assign busy_o = 1'b0;         assign done_o = 1'b0;
@@ -229,7 +264,7 @@ module g6lc_apu_vnfront
   end else begin : gen_on
     localparam logic [4:0] FENCE_NONE = 5'd31;
 
-    typedef enum logic [6:0] {
+    typedef enum logic [7:0] {
       StIdle, StDec, StDecWait, StResolve, StResCpl, StAct,
       StOtReq, StOtCpl, StCrReq, StCrCpl, StCsRd, StCsCap,
       StBlobRd, StBlobLo, StBlobHi,
@@ -251,11 +286,30 @@ module g6lc_apu_vnfront
       StOpReq, StOpCpl, StStgRd, StStgCap,
       StPayAlcCpl, StPayLoop, StPayNext, StPayWr, StAuxSet,
       StAuxHiCpl,
+      // §12.3 F5: generic SETAUX-lo / SETSTATE subroutines
+      StAuxLo, StAuxLoCpl, StStSet, StStSetCpl,
+      // §12.3 F5: aperture-record port subroutine
+      StApReq, StApCpl,
+      // §12.3 F5: descriptor-pool create (pPoolSizes sum -> pages)
+      //           and reset (epoch++)
+      StDPoolSum, StDPoolSumC, StDPoolPgC, StDPoolAuxH,
+      StDPoolAuxS,
+      StDPoolRs, StDPoolRsHi,
+      // §12.3 F5: descriptor-set-layout row build in objpay
+      StDslHdrC, StDslRd, StDslWr, StDslWrC, StDslAuxL,
+      // §12.3 F5: descriptor-set allocation element chain
       StDSetLayLo, StDSetLayHi, StDSetLayId, StDSetLayCpl,
-      StDSetNbCpl, StDSetAlcCpl, StDSetObj, StDSetOCpl,
-      StDSetFill, StDSetFillT, StDSetFillC, StDSetWr, StDSetWrC,
-      StUpdHdrC, StUpdSetCpl, StUpdInfo, StUpdInfoC,
-      StUpdBufGo, StUpdBufCpl, StUpdWr, StUpdWrC, StUpdInfoNext,
+      StDSetPoolC, StDSetObj, StDSetOCpl, StDSetAuxH,
+      StDSetEpoch, StDSetZero, StDSetZeroC, StDSetBump, StDSetBumpC,
+      // §12.3 F5: vkUpdateDescriptorSets — resolve-set and
+      // binding-row-scan subroutines, then record writes/copies
+      StRsvLuC, StRsvPoolC, StRsvLayC,
+      StRowSc, StRowW0C, StRowW1C,
+      StUpdHdrC, StUpdSetCpl, StUpdWBegin, StUpdWBad, StUpdWNext,
+      StUpdInfo, StUpdInfoC, StUpdBufGo, StUpdBufCpl, StUpdMemCpl,
+      StUpdWr0, StUpdWr1, StUpdElemCk, StUpdPoisC,
+      StUpdCpRd, StUpdCpS, StUpdCpD, StUpdCpDSet, StUpdCpGo,
+      StUpdCpPC, StUpdCpRC, StUpdCpBC, StUpdCpNext,
       StPayProd, StPayResLo, StPayResHi, StPayResCpl, StPayCapW,
       StPaySend,
       // §7b/5a-ii: slot manager, module staging, pipeline commit,
@@ -273,8 +327,10 @@ module g6lc_apu_vnfront
     state_e              state_q, ot_ret_q, cr_ret_q, cs_ret_q;
     state_e              blob_ret_q, blob_done_q;
     state_e              op_ret_q, stg_ret_q, auxhi_ret_q,
+                         auxlo_ret_q, stv_ret_q, ap_ret_q,
                          pro_ret_q, pay_done_q;
-    state_e              sm_ret_q, sh_ret_q, shc_ret_q, pg_ret_q;
+    state_e              sm_ret_q, sh_ret_q, shc_ret_q, pg_ret_q,
+                         rsv_ret_q, row_ret_q;
 
     logic [15:0]         cs_base_q, cs_len_q, rep_base_q, rep_len_q;
     apu_vn_op_t          op_q;
@@ -312,30 +368,95 @@ module g6lc_apu_vnfront
     logic [15:0]         pay_i_q;      // objpay write cursor
     logic [1:0]          prepend_n_q;  // count words prepended to payload
     logic [31:0]         prepend_w_q [2];
-    logic [31:0]         hnd_pay_q;    // object {gen,slot} for SETAUXHI
+    logic [31:0]         hnd_pay_q;    // object {gen,slot} for aux writes
     logic                payf_q;       // retire frees a payload extent
     logic [15:0]         payf_base_q, payf_words_q;
+    logic [31:0]         auxlo_val_q, auxlo_mask_q; // SETAUX operand
+    logic [31:0]         stv_val_q, stv_mask_q;     // SETSTATE operand
+
+    // §12.3 F5: descriptor-record aperture port request operand
+    logic                ap_we_q;
+    logic [31:0]         ap_addr_q;
+    logic [63:0]         ap_wdata_q;
+    logic [7:0]          ap_wstrb_q;
+    logic [63:0]         ap_rd_q;      // read data captured at ap_done_i
+
+    // §12.3 F5: descriptor-pool create (Σ pPoolSizes.descriptorCount)
+    logic [15:0]         ds_i_q;       // pPoolSizes element cursor
+    logic [63:0]         dsum_q;       // running descriptor count
+
+    // §12.3 F5: descriptor-set-layout row build (§16 record format)
+    logic [15:0]         dsl_i_q;      // binding cursor
+    logic [2:0]          dsl_h_q;      // staged word cursor (4/binding)
+    logic                dsl_k_q;      // row word cursor (2/row)
+    logic [7:0]          dsl_b_q, dsl_t_q;
+    logic [15:0]         dsl_c_q;
+    logic [19:0]         dsl_off_q;    // running record offset
+    logic [15:0]         dsl_dn_q;     // dynamic descriptor count
+    logic [15:0]         dsl_recs_q;   // total record count
 
     // descriptor-set allocation element chain
     logic [31:0]         lay_lo_q;     // staged layout id low word
-    logic [15:0]         lay_base_q;   // layout payload extent
-    logic [15:0]         lay_words_q;
-    logic [15:0]         lay_nbind_q;  // bindingCount from layout
-    logic [15:0]         ent_j_q;      // binding/entry cursor
-    logic [1:0]          ent_k_q;      // word within the 4-word entry
-    logic [3:0][31:0]    entw_q;       // entry words being written
-    logic [31:0]         lay_type_q;   // layout descriptorType word
+    logic [15:0]         ent_j_q;      // generic element cursor
+    logic [63:0]         ds_layh_q;    // allocated set's layout {gen,slot}
+    logic [15:0]         ds_layb_q, ds_layw_q; // layout payload extent
+    logic [15:0]         ds_sbyt_q;    // layout set-table byte extent
+    logic [15:0]         ds_ndyn_q;    // layout dynamic count
+    logic [24:0]         ds_sbase_q;   // allocated set-table base
+    logic [15:0]         ds_z_i_q;     // record-zeroing beat cursor
+    logic [15:0]         ds_z_n_q;     // record-zeroing beat count
+    apu_objtab_entry_t   ds_pent_q;    // pool entry sampled at alloc
+    logic                ds_err_q;     // a set element already failed
+
+    // §12.3 F5: resolve-descriptor-set subroutine (rsv_*) — LOOKUP set,
+    // READSLOT pool (epoch), READSLOT layout → rsv_ok/dead/base/nbind
+    logic [31:0]         rsv_hnd_q;    // resolved set {gen,slot}
+    logic [24:0]         rsv_base_q;   // set_table_base
+    logic [63:0]         rsv_layh_q;   // set's layout {gen,slot}
+    logic [31:0]         rsv_phnd_q;   // set's pool {gen,slot}
+    logic [15:0]         rsv_ep_q;     // set's pool epoch
+    logic [15:0]         rsv_layb_q;   // layout payload base
+    logic [15:0]         rsv_nbnd_q;   // layout binding count
+    logic                rsv_ok_q, rsv_dead_q;
+
+    // §12.3 F5: binding-row scan subroutine — finds the row whose
+    // binding number matches in the layout's objpay table
+    logic [15:0]         rw_i_q;       // row cursor
+    logic [7:0]          rw_bind_q;    // wanted binding number
+    logic                rw_ok_q;
+    logic [19:0]         rw_off_q;     // record offset (32B units)
+    logic [15:0]         rw_cnt_q;     // array count
+    logic [7:0]          rw_typ_q;     // descriptor type
 
     // vkUpdateDescriptorSets staged walk
     logic [15:0]         upd_i_q;      // write index
-    logic [2:0]          upd_h_q;      // header/info word cursor
+    logic [3:0]          upd_h_q;      // header/info word cursor
     logic [63:0]         upd_dst_q;    // dstSet id
     logic [63:0]         upd_buf_q;    // buffer id
     logic [63:0]         upd_off_q, upd_rng_q;
     logic [31:0]         upd_dstb_q, upd_arr_q, upd_dcnt_q,
                          upd_type_q;
-    logic [15:0]         dset_base_q, dset_words_q;
-    logic [15:0]         upd_idx_q;    // entry index (dstBinding+k)
+    logic [31:0]         upd_rec_q;    // current record byte address
+    logic                upd_bad_q;    // write-level row/type/bounds fail
+    logic                upd_pois_q;   // an element needs the poison bit
+    logic                upd_elok_q;   // current element resolves clean
+    logic [31:0]         upd_eb_q, upd_esz_q; // element {base,size}
+    logic [15:0]         ud_mslot_q;   // buffer's bound memory slot
+
+    // vkUpdateDescriptorSets copies
+    logic [15:0]         cp_i_q;       // copy index
+    logic [63:0]         cp_src_q, cp_dsid_q; // src/dst set ids
+    logic [31:0]         cp_sb_q, cp_sa_q, cp_db_q, cp_da_q, cp_n_q;
+    logic [24:0]         cp_sbase_q, cp_dbase_q;
+    logic [19:0]         cp_soff_q, cp_doff_q;
+    logic [15:0]         cp_scnt_q, cp_dcnt2_q;
+    logic [3:0]          cp_b_q;       // 8-byte beat cursor
+    logic [31:0]         cp_dhnd_q;    // dst set {gen,slot} for poison
+    logic                cp_srcbad_q, cp_dead_q;
+
+    // bind-stream producer: {set handle, ndyn} pairs then dyn offsets
+    logic [15:0]         pay_pbnd_q;   // 2×bound-set count
+    logic [4:0]          pay_ndyn_q;   // ndyn of the set being emitted
 
     // 3d-b: vkBind{Buffer,Image}Memory2 staged walk — the resource and
     // memory handles live inside the pBindInfos elements (6 staged
@@ -557,17 +678,25 @@ module g6lc_apu_vnfront
     function automatic logic is_pay_kind(input logic [5:0] k);
       // §7b/5a-ii: pipelines no longer park an ObjPay extent — the
       // staged payload is consumed at creation and the object keeps
-      // {slot, layout} in aux instead
+      // {slot, layout} in aux instead.  §12.3 F5: descriptor sets
+      // store their records in aperture memory, not ObjPay — only the
+      // layout tables still carry an extent.
       return k == 6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT) ||
-             k == 6'(APU_VN_KIND_VK_PIPELINE_LAYOUT) ||
-             k == 6'(APU_VN_KIND_VK_DESCRIPTOR_SET);
+             k == 6'(APU_VN_KIND_VK_PIPELINE_LAYOUT);
     endfunction
-    // 5a-ii: kinds whose retire needs a pre-LOOKUP (aux carries a
-    // ShaderCore slot or a vgpages extent)
+    // 5a-ii/§12.3 F5: kinds whose retire needs a pre-LOOKUP (aux
+    // carries a ShaderCore slot, a vgpages extent or a payload extent)
     function automatic logic is_auxret_kind(input logic [5:0] k);
       return k == 6'(APU_VN_KIND_VK_SHADER_MODULE) ||
              k == 6'(APU_VN_KIND_VK_PIPELINE) ||
-             k == 6'(APU_VN_KIND_VK_DEVICE_MEMORY);
+             k == 6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
+             k == 6'(APU_VN_KIND_VK_DESCRIPTOR_POOL) ||
+             k == 6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT);
+    endfunction
+    // §12.3 F5: descriptor types that carry pBufferInfo staged words
+    // (UNIFORM/STORAGE_BUFFER + their *_DYNAMIC forms)
+    function automatic logic is_buf_typ(input logic [7:0] t);
+      return t == 8'd6 || t == 8'd7 || t == 8'd8 || t == 8'd9;
     endfunction
     // prepend words ahead of the staged payload copy
     function automatic int prepend_n(input logic [5:0] k);
@@ -588,6 +717,9 @@ module g6lc_apu_vnfront
       sh_wr_addr_o = '0;        sh_wr_data_o = '0;
       sh_commit_o = 1'b0;       sh_commit_pl_o = '0;
       pg_req_valid_o = 1'b0;    pg_req_o = '0;
+      ap_req_o = 1'b0;          ap_we_o = ap_we_q;
+      ap_addr_o = ap_addr_q;    ap_wdata_o = ap_wdata_q;
+      ap_wstrb_o = ap_wstrb_q;
       front_re = 1'b0;          front_addr = '0;
       dec_start = 1'b0;         rep_start = 1'b0;
       stg_req = 1'b0;           stg_we = 1'b0;
@@ -624,6 +756,7 @@ module g6lc_apu_vnfront
                          pg_req_o = '{op: pg_op_q,
                                      base: pg_base_q,
                                      bytes: pg_bytes_q};         end
+        StApReq:   ap_req_o = 1'b1;
         StSubPush: begin ex_submit_valid_o = 1'b1;
                          ex_submit_o = sub_q;                     end
         StDec:     dec_start = 1'b1;
@@ -661,17 +794,46 @@ module g6lc_apu_vnfront
         for (int i = 0; i < 2; i++) prepend_w_q[i] <= '0;
         hnd_pay_q <= '0; payf_q <= 1'b0;
         payf_base_q <= '0; payf_words_q <= '0;
-        lay_lo_q <= '0; lay_base_q <= '0; lay_words_q <= '0;
-        lay_nbind_q <= '0; lay_type_q <= '0;
-        ent_j_q <= '0; ent_k_q <= '0; entw_q <= '0;
+        auxlo_val_q <= '0; auxlo_mask_q <= '0;
+        stv_val_q <= '0; stv_mask_q <= '0;
+        ap_we_q <= 1'b0; ap_addr_q <= '0; ap_wdata_q <= '0;
+        ap_wstrb_q <= '0; ap_rd_q <= '0;
+        ds_i_q <= '0; dsum_q <= '0;
+        dsl_i_q <= '0; dsl_h_q <= '0; dsl_k_q <= 1'b0;
+        dsl_b_q <= '0; dsl_t_q <= '0; dsl_c_q <= '0;
+        dsl_off_q <= '0; dsl_dn_q <= '0; dsl_recs_q <= '0;
+        lay_lo_q <= '0;
+        ent_j_q <= '0;
+        ds_layh_q <= '0; ds_layb_q <= '0; ds_layw_q <= '0;
+        ds_sbyt_q <= '0; ds_ndyn_q <= '0; ds_sbase_q <= '0;
+        ds_z_i_q <= '0; ds_z_n_q <= '0; ds_pent_q <= '0;
+        ds_err_q <= 1'b0;
+        rsv_hnd_q <= '0; rsv_base_q <= '0;
+        rsv_layh_q <= '0; rsv_phnd_q <= '0; rsv_ep_q <= '0;
+        rsv_layb_q <= '0; rsv_nbnd_q <= '0;
+        rsv_ok_q <= 1'b0; rsv_dead_q <= 1'b0;
+        rsv_ret_q <= StIdle; row_ret_q <= StIdle;
+        rw_i_q <= '0; rw_bind_q <= '0; rw_ok_q <= 1'b0;
+        rw_off_q <= '0; rw_cnt_q <= '0; rw_typ_q <= '0;
         upd_i_q <= '0; upd_h_q <= '0;
         upd_dst_q <= '0; upd_buf_q <= '0;
         upd_off_q <= '0; upd_rng_q <= '0;
         upd_dstb_q <= '0; upd_arr_q <= '0;
         upd_dcnt_q <= '0; upd_type_q <= '0;
-        dset_base_q <= '0; dset_words_q <= '0; upd_idx_q <= '0;
+        upd_rec_q <= '0; upd_bad_q <= 1'b0; upd_pois_q <= 1'b0;
+        upd_elok_q <= 1'b0; upd_eb_q <= '0; upd_esz_q <= '0;
+        ud_mslot_q <= '0;
+        cp_i_q <= '0; cp_src_q <= '0; cp_dsid_q <= '0;
+        cp_sb_q <= '0; cp_sa_q <= '0; cp_db_q <= '0;
+        cp_da_q <= '0; cp_n_q <= '0;
+        cp_sbase_q <= '0; cp_dbase_q <= '0;
+        cp_soff_q <= '0; cp_doff_q <= '0;
+        cp_scnt_q <= '0; cp_dcnt2_q <= '0; cp_b_q <= '0;
+        cp_dhnd_q <= '0;
+        cp_srcbad_q <= 1'b0; cp_dead_q <= 1'b0;
         pay_send_q <= '0; pay_send_n_q <= '0; pay_word_q <= '0;
         pay_nset_q <= '0; pay_bind_q <= 1'b0;
+        pay_pbnd_q <= '0; pay_ndyn_q <= '0;
         sm_op_q <= APU_SH_SM_ALLOC; sm_slot_q <= '0;
         sm_ok_q <= 1'b0; sm_rslot_q <= '0;
         shw_i_q <= '0; shw_n_q <= '0;
@@ -826,7 +988,8 @@ module g6lc_apu_vnfront
               APU_VN_ACT_NOP_OK, APU_VN_ACT_MAP:
                 state_q <= StRep;
               APU_VN_ACT_UPDATE: begin
-                // §7b: vkUpdateDescriptorSets walks the staged writes
+                // §12.3 F5: vkUpdateDescriptorSets walks the staged
+                // writes, then the staged copies
                 if (op_q.cmd_type ==
                     APU_VN_TYPE_VK_UPDATE_DESCRIPTOR_SETS_EXT &&
                     op_q.imm[0] != 32'h0) begin
@@ -834,6 +997,14 @@ module g6lc_apu_vnfront
                   upd_h_q   <= '0;
                   stg_i_q   <= '0;
                   stg_ret_q <= StUpdHdrC;
+                  state_q   <= StStgRd;
+                end else if (op_q.cmd_type ==
+                             APU_VN_TYPE_VK_UPDATE_DESCRIPTOR_SETS_EXT &&
+                             op_q.imm[1] != 32'h0) begin
+                  cp_i_q    <= '0;
+                  upd_h_q   <= '0;
+                  stg_i_q   <= '0;
+                  stg_ret_q <= StUpdCpRd;
                   state_q   <= StStgRd;
                 end else begin
                   state_q <= StRep;
@@ -1006,8 +1177,6 @@ module g6lc_apu_vnfront
                   // §7b: layout objects park a payload extent first —
                   // an ObjPay FULL means the object is never created
                   if (act_q.obj_kind ==
-                      6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT) ||
-                      act_q.obj_kind ==
                       6'(APU_VN_KIND_VK_PIPELINE_LAYOUT)) begin
                     prepend_w_q[0] <= op_q.imm[1];
                     prepend_w_q[1] <= op_q.imm[2];
@@ -1020,6 +1189,32 @@ module g6lc_apu_vnfront
                                   default: '0};
                     op_ret_q <= StPayAlcCpl;
                     state_q  <= StOpReq;
+                  end else if (act_q.obj_kind ==
+                      6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT)) begin
+                    // §12.3 F5: bindings become two-word {binding,type,
+                    // count}/{off,dyn,dynbase} rows behind a header
+                    // word; <= APU_DESC_BND bindings is a device limit
+                    if (op_q.imm[1] > 32'(APU_DESC_BND)) begin
+                      result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                      state_q  <= StRep;
+                    end else begin
+                      prepend_n_q <= '0;
+                      op_words_q  <= 16'd1 + 2*16'(op_q.imm[1]);
+                      opr_q    <= '{op: APU_OBJPAY_OP_ALLOC,
+                                    words: 32'd1 + 2*op_q.imm[1],
+                                    default: '0};
+                      op_ret_q <= StPayAlcCpl;
+                      state_q  <= StOpReq;
+                    end
+                  end else if (act_q.obj_kind ==
+                               6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)) begin
+                    // §12.3 F5: Σ pPoolSizes.descriptorCount ×
+                    // APU_DESC_BYTES of aperture record backing,
+                    // allocated through vgpages after the staged
+                    // {type,count} pairs are summed
+                    ds_i_q  <= '0;
+                    dsum_q  <= '0;
+                    state_q <= StDPoolSum;
                   end else if (act_q.obj_kind ==
                                6'(APU_VN_KIND_VK_SHADER_MODULE)) begin
                     // §7b/5a-ii: claim a ShaderCore slot, then stream
@@ -1073,9 +1268,13 @@ module g6lc_apu_vnfront
                       state_q  <= StRep;
                     end else begin
                       // §7b/5a-ii: aperture pages first; the object is
-                      // created only if pages exist
+                      // created only if pages exist.  §12.3 F5: the
+                      // backing comes from the private arena — guest
+                      // window placement happens only at MAP_BLOB, so
+                      // an unmapped VkDeviceMemory can never collide
+                      // with the kernel's shm drm_mm choices
                       automatic int ds = data_slot(op_q);
-                      pg_op_q    <= APU_VGPAGES_OP_ALLOC;
+                      pg_op_q    <= APU_VGPAGES_OP_ALLOC_PRIV;
                       pg_base_q  <= '0;
                       pg_bytes_q <= ds < 0 ? 32'h0 : 32'(op_q.q[ds]);
                       pg_ret_q   <= StAllocGo;
@@ -1086,8 +1285,12 @@ module g6lc_apu_vnfront
                   end
                 end else if (act_q.obj_kind ==
                              6'(APU_VN_KIND_VK_DESCRIPTOR_SET)) begin
-                  // §7b: vkAllocateDescriptorSets elements need the
-                  // staged layout ids — descriptor-set chain
+                  // §12.3 F5: vkAllocateDescriptorSets elements need
+                  // the staged layout ids — descriptor-set chain;
+                  // the first failure latches ds_err_q so the
+                  // remaining elements echo VK_NULL_HANDLE without
+                  // further pool consumption
+                  ds_err_q    <= 1'b0;
                   blob_sel_q  <= act_q.flags[1];
                   blob_i_q    <= '0;
                   blob_n_q    <= 5'(op_q.blob[act_q.flags[1]].words
@@ -1249,8 +1452,26 @@ module g6lc_apu_vnfront
                 endcase
               end
               APU_VN_ACT_POOL_RESET: begin
-                are_i_q <= '0;
-                state_q <= StPoolLoop;
+                if (op_q.cmd_type ==
+                    APU_VN_TYPE_VK_RESET_DESCRIPTOR_POOL_EXT) begin
+                  // §12.3 F5: bump the pool epoch so sets minted from
+                  // it become dead at dispatch; bump/counters clear
+                  automatic int ps = lu_slot(op_q, 1);
+                  if (ps < 0) begin
+                    result_q <= APU_VK_ERROR_UNKNOWN;
+                    state_q  <= StRep;
+                  end else begin
+                    otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                                 id: {32'h0, hnd_q[ps]},
+                                 kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_POOL),
+                                 default: '0};
+                    ot_ret_q <= StDPoolRs;
+                    state_q  <= StOtReq;
+                  end
+                end else begin
+                  are_i_q <= '0;
+                  state_q <= StPoolLoop;
+                end
               end
               default: begin
                 result_q <= APU_VK_ERROR_UNKNOWN;
@@ -1322,8 +1543,10 @@ module g6lc_apu_vnfront
                 fence_free() == 8'hFF) begin
               result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
               state_q  <= StRep;
-            end else if (act_q.obj_kind ==
-                         6'(APU_VN_KIND_VK_DEVICE_MEMORY) &&
+            end else if ((act_q.obj_kind ==
+                          6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
+                          act_q.obj_kind ==
+                          6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)) &&
                          !pg_ok_q) begin
               // §7b/5a-ii: vgpages FULL -> OOM, no object created
               result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
@@ -1349,8 +1572,13 @@ module g6lc_apu_vnfront
                          parent_id: ps < 0 ? 64'h0
                                            : {32'h0, hnd_q[ps]},
                          // §7b/5a-ii: entry.size feeds descriptor
-                         // dispatch (buffer size) and the memory FREE
-                         size: ds < 0 ? 64'h0 : op_q.q[ds],
+                         // dispatch (buffer size) and the memory FREE;
+                         // §12.3 F5: for pools it is the record-store
+                         // byte capacity Σcount×APU_DESC_BYTES
+                         size: act_q.obj_kind ==
+                              6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)
+                              ? 64'(dsum_q << 5)
+                              : ds < 0 ? 64'h0 : op_q.q[ds],
                          ctx: ctx_i, default: '0};
               ot_ret_q <= StAllocCpl;
               state_q  <= StOtReq;
@@ -1374,7 +1602,9 @@ module g6lc_apu_vnfront
                 sm_ret_q <= StRep;
                 state_q  <= StSmReq;
               end else if (act_q.obj_kind ==
-                           6'(APU_VN_KIND_VK_DEVICE_MEMORY)) begin
+                           6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
+                           act_q.obj_kind ==
+                           6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)) begin
                 // release the held aperture pages
                 pg_op_q  <= APU_VGPAGES_OP_FREE;
                 pg_ret_q <= StRep;
@@ -1382,6 +1612,16 @@ module g6lc_apu_vnfront
               end else begin
                 state_q <= StRep;
               end
+            end else if (act_q.obj_kind ==
+                         6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)) begin
+              // §12.3 F5: aux[31:0] = record-store aperture byte base,
+              // aux[63:32] = {nsets[19:0], bump[11:0]},
+              // state = {maxSets[15:0], epoch[15:0]}
+              hnd_pay_q   <= ot_cpl_i.handle;
+              auxlo_val_q <= pg_res_q;
+              auxlo_mask_q <= 32'hFFFF_FFFF;
+              auxlo_ret_q <= StDPoolAuxH;
+              state_q     <= StAuxLo;
             end else if (op_q.cmd_type ==
                              APU_VN_TYPE_VK_CREATE_BUFFER_EXT ||
                          op_q.cmd_type ==
@@ -1423,13 +1663,22 @@ module g6lc_apu_vnfront
               auxhi_ret_q <= StRep;
               state_q     <= StAuxSet;
             end else if (is_pay_kind(act_q.obj_kind)) begin
-              // §7b: copy staging -> ObjPay, then SETAUXHI {base,words}
+              // §7b: copy staging -> ObjPay, then SETAUXHI
+              // {base,words}; §12.3 F5: the descriptor-set-layout's
+              // row table is already written — auxhi, then the
+              // {ndyn,set_bytes} aux half
               hnd_pay_q   <= ot_cpl_i.handle;
               auxhi_val_q <= {op_base_q, op_words_q};
-              pay_i_q     <= '0;
-              pay_done_q  <= StAuxSet;
-              auxhi_ret_q <= StRep;
-              state_q     <= StPayLoop;
+              if (act_q.obj_kind ==
+                  6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT)) begin
+                auxhi_ret_q <= StDslAuxL;
+                state_q     <= StAuxSet;
+              end else begin
+                pay_i_q     <= '0;
+                pay_done_q  <= StAuxSet;
+                auxhi_ret_q <= StRep;
+                state_q     <= StPayLoop;
+              end
             end else begin
               state_q <= StRep;
             end
@@ -1473,10 +1722,6 @@ module g6lc_apu_vnfront
               state_q <= StRep;
             end else if (act_q.obj_kind ==
                          6'(APU_VN_KIND_VK_COMMAND_BUFFER)) begin
-`ifdef G6LC_CEX_TRACE
-              $display("[vnf] cb alloc handle=%08x arena=%0d",
-                       ot_cpl_i.handle, are_i_q);
-`endif
               cb_hnd_q[are_i_q[$clog2(CbBufs)-1:0]] <= ot_cpl_i.handle;
               otr_q <= '{op: APU_OBJTAB_OP_SETAUX,
                          id: {32'h0, ot_cpl_i.handle},
@@ -1602,10 +1847,6 @@ module g6lc_apu_vnfront
             state_q <= StRecApp;
           end
           StRecApp: begin
-`ifdef G6LC_CEX_TRACE
-            $display("[vnf] rec append ctype=%08x cbuf=%0d pay_n=%0d",
-                     rec_q.ctype, ent_q.aux[7:0], pay_send_n_q);
-`endif
             crr_q    <= '{op: APU_CMDREC_OP_APPEND,
                           cbuf: 8'(ent_q.aux[7:0]), idx: '0,
                           pay_n: pay_send_n_q,
@@ -1704,6 +1945,15 @@ module g6lc_apu_vnfront
                 pg_bytes_q <= 32'(ot_cpl_i.entry.size);
               end
               if (act_q.obj_kind ==
+                  6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)) begin
+                // §12.3 F5: pool's record store lives at aux[31:0]
+                // (aux[63:32] is {nsets,bump}); freeing the pages kills
+                // every set minted from it — their epoch/pool-gen
+                // check turns dispatch into DEVICE_LOST
+                pg_base_q  <= ot_cpl_i.entry.aux[31:0];
+                pg_bytes_q <= 32'(ot_cpl_i.entry.size);
+              end
+              if (act_q.obj_kind ==
                   6'(APU_VN_KIND_VK_SHADER_MODULE) ||
                   act_q.obj_kind == 6'(APU_VN_KIND_VK_PIPELINE)) begin
                 // §7b/5a-ii: release the ShaderCore slot reference
@@ -1746,8 +1996,11 @@ module g6lc_apu_vnfront
                 op_ret_q <= StRep;
                 state_q  <= StOpReq;
               end else if (act_q.obj_kind ==
-                           6'(APU_VN_KIND_VK_DEVICE_MEMORY)) begin
-                // §7b/5a-ii: vkFreeMemory returns its aperture pages
+                           6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
+                           act_q.obj_kind ==
+                           6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)) begin
+                // §7b/5a-ii/§12.3 F5: vkFreeMemory/vkDestroyDescriptor-
+                // Pool returns its aperture pages
                 pg_op_q    <= APU_VGPAGES_OP_FREE;
                 pg_ret_q   <= StRep;
                 state_q    <= StPgReq;
@@ -1924,14 +2177,22 @@ module g6lc_apu_vnfront
                                  op_q.imm[4], op_q.imm[3], op_q.imm[2],
                                  op_q.imm[1], op_q.imm[0]},
                            spare: '0};
-                // §7b: payload-arena word counts per record
+                // §7b/§12.3 F5: payload-arena word counts per record —
+                // BindDS emits {set handle, ndyn} pairs (2×sets)
+                // ahead of the verbatim dynamic-offset words
                 pay_bind_q <= op_q.cmd_type ==
                               APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT;
                 pay_nset_q <= 16'(op_q.imm[2]);
+                pay_pbnd_q <=
+                    16'(op_q.imm[2] > 32'd4 - op_q.imm[1]
+                        ? 32'd4 - op_q.imm[1] : op_q.imm[2]) << 1;
                 pay_send_n_q <=
                     op_q.cmd_type ==
                     APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT
-                    ? 16'(op_q.imm[2] + op_q.imm[3])
+                    ? 16'(2*(op_q.imm[2] > 32'd4 - op_q.imm[1]
+                             ? 32'd4 - op_q.imm[1] : op_q.imm[2])
+                          + (op_q.imm[3] > 32'd64
+                             ? 32'd64 : op_q.imm[3]))
                     : op_q.cmd_type ==
                       APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT ||
                       // §12.3 C/5a: Xfer operand payloads (copy
@@ -1951,12 +2212,6 @@ module g6lc_apu_vnfront
             end
           end
           StCbCrCpl: begin
-`ifdef G6LC_CEX_TRACE
-            $display("[vnf] cb %s cbuf=%0d status=%0d",
-                     act_q.act_class == APU_VN_ACT_CB_BEGIN ? "BEGIN" :
-                     act_q.act_class == APU_VN_ACT_CB_END ? "END" : "RESET",
-                     ent_q.aux[7:0], cr_cpl_i.status);
-`endif
             if (cr_cpl_i.status != APU_CMDREC_OK) begin
               result_q <= APU_VK_ERROR_UNKNOWN;
               state_q  <= StRep;
@@ -2037,8 +2292,18 @@ module g6lc_apu_vnfront
                 pay_i_q    <= '0;
                 pay_done_q <= StBlobRd;
                 state_q    <= StPayLoop;
+              end else if (act_q.obj_kind ==
+                           6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT)) begin
+                // §12.3 F5: header {pad,nbind}, then binding rows are
+                // built from the staged {bind,type,cnt,flags} words
+                opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
+                              addr: {16'h0, 16'(op_cpl_i.base)},
+                              wdata: {16'h0, 16'(op_q.imm[1])},
+                              default: '0};
+                op_ret_q <= StDslHdrC;
+                state_q  <= StOpReq;
               end else begin
-                // DSL/PL: ObjTab.ALLOC next, copy in StAllocCpl
+                // PL: ObjTab.ALLOC next, copy in StAllocCpl
                 state_q <= StAllocGo;
               end
             end
@@ -2095,12 +2360,235 @@ module g6lc_apu_vnfront
             end
           end
 
-          // ---- §7b: vkAllocateDescriptorSets element chain -------------------
-          // staged layout id for set blob_i_q -> LOOKUP -> bindingCount
+          // ---- §12.3 F5: generic aux-lo / state writers ----------------
+          // SETAUX (aux[31:0]) on hnd_pay_q, then auxlo_ret_q
+          StAuxLo: begin
+            otr_q    <= '{op: APU_OBJTAB_OP_SETAUX,
+                         id: {32'h0, hnd_pay_q},
+                         kind: act_q.obj_kind,
+                         mask: auxlo_mask_q, value: auxlo_val_q,
+                         ctx: ctx_i, default: '0};
+            ot_ret_q <= StAuxLoCpl;
+            state_q  <= StOtReq;
+          end
+          StAuxLoCpl: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              result_q <= err_of(ot_cpl_i.status);
+              state_q  <= StRep;
+            end else begin
+              state_q <= auxlo_ret_q;
+            end
+          end
+          // SETSTATE on hnd_pay_q, then stv_ret_q
+          StStSet: begin
+            otr_q    <= '{op: APU_OBJTAB_OP_SETSTATE,
+                         id: {32'h0, hnd_pay_q},
+                         kind: act_q.obj_kind,
+                         mask: stv_mask_q, value: stv_val_q,
+                         ctx: ctx_i, default: '0};
+            ot_ret_q <= StStSetCpl;
+            state_q  <= StOtReq;
+          end
+          StStSetCpl: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              result_q <= err_of(ot_cpl_i.status);
+              state_q  <= StRep;
+            end else begin
+              state_q <= stv_ret_q;
+            end
+          end
+
+          // ---- §12.3 F5: descriptor-record aperture port -----------------
+          // ap_*_q holds the request; one accepted request = one done
+          StApReq: if (ap_ready_i) state_q <= StApCpl;
+          StApCpl: if (ap_done_i) begin
+            ap_rd_q <= ap_rdata_i;
+            state_q <= ap_ret_q;
+          end
+
+          // ---- §12.3 F5: vkCreateDescriptorPool ----------------------------
+          // Σ pPoolSizes[i].descriptorCount (staged {type,count} pairs,
+          // count rides the odd word) -> dsum_q records -> vgpages
+          StDPoolSum: begin
+            if (32'(ds_i_q) >= op_q.imm[2]) begin
+              // sum complete: hand the byte count to vgpages; the
+              // record store is device-internal so it comes from the
+              // private arena — the guest kernel's shm drm_mm can
+              // never collide with it at MAP_BLOB
+              pg_op_q    <= APU_VGPAGES_OP_ALLOC_PRIV;
+              pg_base_q  <= '0;
+              pg_bytes_q <= dsum_q > 64'h7FF_FFFF
+                            ? 32'hFFFF_FFFF : 32'(dsum_q << 5);
+              pg_ret_q   <= StDPoolPgC;
+              state_q    <= StPgReq;
+            end else begin
+              stg_i_q   <= StgBits'({16'h0, ds_i_q} << 1) + 10'd1;
+              stg_ret_q <= StDPoolSumC;
+              state_q   <= StStgRd;
+            end
+          end
+          StDPoolSumC: begin
+            dsum_q  <= dsum_q + 64'(stg_word_q);
+            ds_i_q  <= ds_i_q + 16'd1;
+            state_q <= StDPoolSum;
+          end
+          // vgpages completion rides pg_ok_q/pg_res_q; StAllocGo's
+          // pool branch refuses on !pg_ok_q
+          StDPoolPgC: state_q <= StAllocGo;
+          // after the object exists: aux[31:0]=page base was written
+          // via StAuxLo; auxhi={nsets,bump}=0, then
+          // state={maxSets,epoch=0}
+          StDPoolAuxH: begin
+            auxhi_val_q <= '0;
+            auxhi_ret_q <= StDPoolAuxS;
+            state_q     <= StAuxSet;
+          end
+          StDPoolAuxS: begin
+            stv_val_q  <= {16'(op_q.imm[1]), 16'h0};
+            stv_mask_q <= 32'hFFFF_FFFF;
+            stv_ret_q  <= StRep;
+            state_q    <= StStSet;
+          end
+
+          // ---- §12.3 F5: vkResetDescriptorPool ----------------------------
+          // epoch++ kills every set minted from the pool;
+          // {nsets,bump} -> 0 reclaims the record store
+          StDPoolRs: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              result_q <= APU_VK_ERROR_UNKNOWN;
+              state_q  <= StRep;
+            end else begin
+              automatic int ps = lu_slot(op_q, 1);
+              hnd_pay_q   <= hnd_q[ps];
+              stv_val_q   <= {ot_cpl_i.entry.state[31:16],
+                              ot_cpl_i.entry.state[15:0] + 16'd1};
+              stv_mask_q  <= 32'hFFFF_FFFF;
+              stv_ret_q   <= StDPoolRsHi;
+              state_q     <= StStSet;
+            end
+          end
+          StDPoolRsHi: begin
+            auxhi_val_q <= '0;
+            auxhi_ret_q <= StRep;
+            state_q     <= StAuxSet;
+          end
+
+          // ---- §12.3 F5: vkCreateDescriptorSetLayout row build -----------
+          // StPayAlcCpl already wrote {pad,nbind}; walk the staged
+          // {binding,type,count,stageFlags} quads and emit two-word
+          // apu_sh_bindrow_t-compatible rows at op_base+1+2j
+          StDslHdrC: begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
+              result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
+              state_q  <= StRep;
+            end else if (op_q.imm[1] == 32'h0) begin
+              state_q <= StAllocGo;
+            end else begin
+              dsl_i_q    <= '0;
+              dsl_h_q    <= '0;
+              dsl_off_q  <= '0;
+              dsl_dn_q   <= '0;
+              dsl_recs_q <= '0;
+              stg_i_q    <= '0;
+              stg_ret_q  <= StDslRd;
+              state_q    <= StStgRd;
+            end
+          end
+          StDslRd: begin
+            case (dsl_h_q)
+              3'd0: dsl_b_q <= stg_word_q[7:0];
+              3'd1: dsl_t_q <= stg_word_q[7:0];
+              3'd2: dsl_c_q <= stg_word_q[15:0];
+              default: ;                    // stageFlags: unused
+            endcase
+            if (dsl_h_q != 3'd3) begin
+              dsl_h_q   <= dsl_h_q + 3'd1;
+              stg_i_q   <= stg_i_q + 1'b1;
+              stg_ret_q <= StDslRd;
+              state_q   <= StStgRd;
+            end else begin
+              // the whole quad is captured: refuse on the device
+              // limits (>APU_DESC_DYN dynamics, >2047 records), else
+              // emit the two row words
+              automatic logic bad =
+                  ((dsl_t_q == 8'd8 || dsl_t_q == 8'd9) &&
+                   20'(dsl_dn_q) + 20'(dsl_c_q)
+                          > 20'(APU_DESC_DYN)) ||
+                  (20'(dsl_recs_q) + 20'(dsl_c_q) > 20'd2047);
+              if (bad) begin
+                opr_q    <= '{op: APU_OBJPAY_OP_FREE,
+                             addr: {16'h0, op_base_q},
+                             words: {16'h0, op_words_q},
+                             default: '0};
+                op_ret_q <= StRep;
+                result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                state_q  <= StOpReq;
+              end else begin
+                dsl_k_q <= 1'b0;
+                state_q <= StDslWr;
+              end
+            end
+          end
+          StDslWr: begin
+            opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
+                         addr: {16'h0, op_base_q} + 32'd1 +
+                               (32'(dsl_i_q) << 1) + 32'(dsl_k_q),
+                         wdata: dsl_k_q == 1'b0
+                                ? {dsl_b_q, dsl_t_q, dsl_c_q}
+                                : {dsl_off_q,
+                                   dsl_t_q == 8'd8 || dsl_t_q == 8'd9,
+                                   7'b0, dsl_dn_q[3:0]},
+                         default: '0};
+            op_ret_q <= StDslWrC;
+            state_q  <= StOpReq;
+          end
+          StDslWrC: begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
+              result_q <= APU_VK_ERROR_UNKNOWN;
+              state_q  <= StRep;
+            end else if (dsl_k_q == 1'b0) begin
+              dsl_k_q <= 1'b1;
+              state_q <= StDslWr;
+            end else begin
+              automatic logic dyn =
+                  dsl_t_q == 8'd8 || dsl_t_q == 8'd9;
+              dsl_off_q  <= dsl_off_q + 20'(dsl_c_q);
+              dsl_recs_q <= dsl_recs_q + dsl_c_q;
+              if (dyn) dsl_dn_q <= dsl_dn_q + dsl_c_q;
+              dsl_i_q <= dsl_i_q + 16'd1;
+              dsl_h_q <= '0;
+              if (dsl_i_q + 16'd1 >= 16'(op_q.imm[1])) begin
+                state_q <= StAllocGo;
+              end else begin
+                stg_i_q   <= stg_i_q + 1'b1;   // skip stageFlags
+                stg_ret_q <= StDslRd;
+                state_q   <= StStgRd;
+              end
+            end
+          end
+          // DSL aux[31:0] = {ndyn[15:0], set_bytes[15:0]} then reply
+          StDslAuxL: begin
+            auxlo_val_q  <= {dsl_dn_q, 16'(dsl_off_q << 5)};
+            auxlo_mask_q <= 32'hFFFF_FFFF;
+            auxlo_ret_q  <= StRep;
+            state_q      <= StAuxLo;
+          end
+
+          // ---- §12.3 F5: vkAllocateDescriptorSets element chain ----------
+          // staged layout id for set blob_i_q -> LOOKUP -> READSLOT pool
+          // (capacity + epoch) -> ALLOC -> aux -> zero records -> bump
           StDSetLayLo: begin
-            stg_i_q   <= StgBits'({2'b0, blob_i_q} << 1);
-            stg_ret_q <= StDSetLayHi;
-            state_q   <= StStgRd;
+            if (ds_err_q) begin
+              // an earlier element failed: null the rest without
+              // further pool consumption
+              rep_null_mask_q[blob_i_q] <= 1'b1;
+              blob_i_q <= blob_i_q + 5'd1;
+              state_q  <= StBlobRd;
+            end else begin
+              stg_i_q   <= StgBits'({2'b0, blob_i_q} << 1);
+              stg_ret_q <= StDSetLayHi;
+              state_q   <= StStgRd;
+            end
           end
           StDSetLayHi: begin
             lay_lo_q  <= stg_word_q;
@@ -2118,42 +2606,47 @@ module g6lc_apu_vnfront
           end
           StDSetLayCpl: begin
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              // dead/foreign layout id: the element fails
               result_q <= APU_VK_ERROR_UNKNOWN;
-              state_q  <= StRep;
+              ds_err_q <= 1'b1;
+              rep_null_mask_q[blob_i_q] <= 1'b1;
+              blob_i_q <= blob_i_q + 5'd1;
+              state_q  <= StBlobRd;
             end else begin
-              lay_base_q  <= ot_cpl_i.entry.aux[63:48];
-              lay_words_q <= ot_cpl_i.entry.aux[47:32];
-              opr_q    <= '{op: APU_OBJPAY_OP_READ,
-                            addr: {16'h0, ot_cpl_i.entry.aux[63:48]},
-                            default: '0};
-              op_ret_q <= StDSetNbCpl;
-              state_q  <= StOpReq;
+              ds_layh_q <= ot_cpl_i.handle;
+              ds_ndyn_q <= ot_cpl_i.entry.aux[31:16];
+              ds_sbyt_q <= ot_cpl_i.entry.aux[15:0];
+              // pool entry for the capacity / maxSets checks
+              otr_q    <= '{op: APU_OBJTAB_OP_READSLOT,
+                           id: {48'h0, hnd_q[lu_slot(op_q, 1)][15:0]},
+                           kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_POOL),
+                           default: '0};
+              ot_ret_q <= StDSetPoolC;
+              state_q  <= StOtReq;
             end
           end
-          StDSetNbCpl: begin
-            // layout payload word 0 = bindingCount
-            lay_nbind_q <= op_cpl_i.rdata[15:0];
-            if (op_cpl_i.status != APU_OBJPAY_OK) begin
-              result_q <= APU_VK_ERROR_UNKNOWN;
-              state_q  <= StRep;
-            end else if (op_cpl_i.rdata == 32'h0) begin
-              op_base_q  <= '0;
-              op_words_q <= '0;
-              state_q    <= StDSetObj;
+          StDSetPoolC: begin
+            automatic int ps = lu_slot(op_q, 1);
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                ot_cpl_i.entry.kind !=
+                    6'(APU_VN_KIND_VK_DESCRIPTOR_POOL) ||
+                ot_cpl_i.entry.gen != hnd_q[ps][31:16] ||
+                32'(ot_cpl_i.entry.aux[63:44]) >=
+                    ot_cpl_i.entry.state[31:16] ||
+                64'(ot_cpl_i.entry.aux[43:32]) * 64'd32 +
+                    64'(ds_sbyt_q) > ot_cpl_i.entry.size) begin
+              // dead pool, maxSets reached, or the record store is
+              // exhausted — Vulkan OUT_OF_POOL_MEMORY; later elements
+              // of this call fail the same way
+              result_q <= APU_VK_ERROR_OUT_OF_POOL_MEMORY;
+              ds_err_q <= 1'b1;
+              rep_null_mask_q[blob_i_q] <= 1'b1;
+              blob_i_q <= blob_i_q + 5'd1;
+              state_q  <= StBlobRd;
             end else begin
-              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC,
-                            words: op_cpl_i.rdata << 2, default: '0};
-              op_ret_q <= StDSetAlcCpl;
-              state_q  <= StOpReq;
-            end
-          end
-          StDSetAlcCpl: begin
-            if (op_cpl_i.status != APU_OBJPAY_OK) begin
-              result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
-              state_q  <= StRep;
-            end else begin
-              op_base_q  <= 16'(op_cpl_i.base);
-              op_words_q <= lay_nbind_q << 2;
+              ds_pent_q  <= ot_cpl_i.entry;
+              ds_sbase_q <= 25'(ot_cpl_i.entry.aux[31:0] +
+                                 (ot_cpl_i.entry.aux[43:32] << 5));
               state_q    <= StDSetObj;
             end
           end
@@ -2166,6 +2659,8 @@ module g6lc_apu_vnfront
                                     ? 64'h0
                                     : {32'h0,
                                        hnd_q[int'(act_q.parent_qslot)]},
+                         // entry.size[31:0] = minting pool {gen,slot}
+                         size: {32'h0, hnd_q[lu_slot(op_q, 1)]},
                          ctx: ctx_i, default: '0};
             ot_ret_q <= StDSetOCpl;
             state_q  <= StOtReq;
@@ -2173,107 +2668,190 @@ module g6lc_apu_vnfront
           StDSetOCpl: begin
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
               result_q <= err_of(ot_cpl_i.status);
-              if (op_words_q != 16'h0) begin
-                opr_q    <= '{op: APU_OBJPAY_OP_FREE,
-                              addr: {16'h0, op_base_q},
-                              words: {16'h0, op_words_q},
-                              default: '0};
-                op_ret_q <= StRep;
-                state_q  <= StOpReq;
-              end else begin
-                state_q <= StRep;
-              end
+              ds_err_q <= 1'b1;
+              rep_null_mask_q[blob_i_q] <= 1'b1;
+              blob_i_q <= blob_i_q + 5'd1;
+              state_q  <= StBlobRd;
             end else begin
-              hnd_pay_q <= ot_cpl_i.handle;
-              ent_j_q   <= '0;
-              state_q   <= StDSetFill;
+              // aux[63:32] = layout {gen,slot},
+              // aux[31:0]  = {poison=0, ndyn[5:0], set_base[24:0]}
+              hnd_pay_q    <= ot_cpl_i.handle;
+              auxlo_val_q  <= {1'b0, ds_ndyn_q[5:0], ds_sbase_q};
+              auxlo_mask_q <= 32'hFFFF_FFFF;
+              auxlo_ret_q  <= StDSetAuxH;
+              state_q      <= StAuxLo;
             end
           end
-          // per binding: read {type,count} from the layout payload,
-          // write the zeroed entry with the unsupported flag set when
-          // descriptorCount > 1 or the type is not a buffer type
-          StDSetFill: begin
-            if (ent_j_q >= lay_nbind_q) begin
-              blob_i_q    <= blob_i_q + 5'd1;
-              auxhi_val_q <= {op_base_q, op_words_q};
-              auxhi_ret_q <= StBlobRd;
-              state_q     <= StAuxSet;
+          StDSetAuxH: begin
+            auxhi_val_q <= ds_layh_q[31:0];
+            auxhi_ret_q <= StDSetEpoch;
+            state_q     <= StAuxSet;
+          end
+          StDSetEpoch: begin
+            // state[15:0] = the pool epoch the set was minted under
+            stv_val_q  <= {16'h0, ds_pent_q.state[15:0]};
+            stv_mask_q <= 32'h0000_FFFF;
+            stv_ret_q  <= StDSetZero;
+            state_q    <= StStSet;
+          end
+          // zero the record store: ds_sbyt_q bytes, 8 per beat
+          StDSetZero: begin
+            ds_z_i_q <= '0;
+            ds_z_n_q <= ds_sbyt_q >> 3;
+            if (ds_sbyt_q == 16'h0) begin
+              state_q <= StDSetBump;
             end else begin
-              opr_q    <= '{op: APU_OBJPAY_OP_READ,
-                            addr: {16'h0, lay_base_q} +
-                                  32'd1 + (32'(ent_j_q) << 2) + 32'd1,
-                            default: '0};
-              op_ret_q <= StDSetFillT;
-              state_q  <= StOpReq;
+              ap_we_q    <= 1'b1;
+              ap_addr_q  <= {7'h0, ds_sbase_q};
+              ap_wdata_q <= '0;
+              ap_wstrb_q <= 8'hFF;
+              ap_ret_q   <= StDSetZeroC;
+              state_q    <= StApReq;
             end
           end
-          StDSetFillT: begin
-            if (op_cpl_i.status != APU_OBJPAY_OK) begin
-              result_q <= APU_VK_ERROR_UNKNOWN;
+          StDSetZeroC: begin
+            ds_z_i_q <= ds_z_i_q + 16'd1;
+            if (ds_z_i_q + 16'd1 >= ds_z_n_q) begin
+              state_q <= StDSetBump;
+            end else begin
+              ap_addr_q <= ap_addr_q + 32'd8;
+              ap_ret_q  <= StDSetZeroC;
+              state_q   <= StApReq;
+            end
+          end
+          // hand {nsets+1, bump+records} to the pool and finish
+          StDSetBump: begin
+            otr_q    <= '{op: APU_OBJTAB_OP_SETAUXHI,
+                         id: {32'h0, hnd_q[lu_slot(op_q, 1)]},
+                         kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_POOL),
+                         mask: 32'hFFFF_FFFF,
+                         value: {ds_pent_q.aux[63:44] + 20'd1,
+                                 ds_pent_q.aux[43:32] +
+                                 12'(ds_sbyt_q >> 5)},
+                         default: '0};
+            ot_ret_q <= StDSetBumpC;
+            state_q  <= StOtReq;
+          end
+          StDSetBumpC: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              result_q <= err_of(ot_cpl_i.status);
               state_q  <= StRep;
             end else begin
-              lay_type_q <= op_cpl_i.rdata;
-              opr_q    <= '{op: APU_OBJPAY_OP_READ,
-                            addr: {16'h0, lay_base_q} +
-                                  32'd1 + (32'(ent_j_q) << 2) + 32'd2,
-                            default: '0};
-              op_ret_q <= StDSetFillC;
-              state_q  <= StOpReq;
-            end
-          end
-          StDSetFillC: begin
-            if (op_cpl_i.status != APU_OBJPAY_OK) begin
-              result_q <= APU_VK_ERROR_UNKNOWN;
-              state_q  <= StRep;
-            end else begin
-              // entry {handle, offset, range, flags}; only word 3 is
-              // non-zero at allocation time
-              entw_q  <= '{(op_cpl_i.rdata > 32'd1 ||
-                            (lay_type_q != 32'd6 &&
-                             lay_type_q != 32'd7))
-                           ? 32'h8000_0000 : 32'h0,
-                           32'h0, 32'h0, 32'h0};
-              ent_k_q <= '0;
-              state_q <= StDSetWr;
-            end
-          end
-          StDSetWr: begin
-            opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
-                          addr: {16'h0, op_base_q} +
-                                (32'(ent_j_q) << 2) + 32'(ent_k_q),
-                          wdata: entw_q[ent_k_q], default: '0};
-            op_ret_q <= StDSetWrC;
-            state_q  <= StOpReq;
-          end
-          StDSetWrC: begin
-            if (op_cpl_i.status != APU_OBJPAY_OK) begin
-              result_q <= APU_VK_ERROR_UNKNOWN;
-              state_q  <= StRep;
-            end else if (ent_k_q == 2'd3) begin
-              ent_j_q <= ent_j_q + 16'd1;
-              state_q <= StDSetFill;
-            end else begin
-              ent_k_q <= ent_k_q + 2'd1;
-              state_q <= StDSetWr;
+              blob_i_q <= blob_i_q + 5'd1;
+              state_q  <= StBlobRd;
             end
           end
 
-          // ---- §7b: vkUpdateDescriptorSets staged walk -----------------------
+          // ---- §12.3 F5: resolve-descriptor-set subroutine -----------------
+          // Caller issues the set LOOKUP with ot_ret_q=StRsvLuC and
+          // rsv_ret_q=continuation; outputs rsv_ok/dead/base/layb/nbnd
+          StRsvLuC: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              rsv_ok_q   <= 1'b0;
+              rsv_dead_q <= 1'b0;
+              state_q    <= rsv_ret_q;
+            end else begin
+              rsv_ok_q   <= 1'b1;
+              rsv_hnd_q  <= ot_cpl_i.handle;
+              rsv_base_q <= ot_cpl_i.entry.aux[24:0];
+              rsv_layh_q <= ot_cpl_i.entry.aux[63:32];
+              rsv_phnd_q <= ot_cpl_i.entry.size[31:0];
+              rsv_ep_q   <= ot_cpl_i.entry.state[15:0];
+              otr_q    <= '{op: APU_OBJTAB_OP_READSLOT,
+                           id: {48'h0, ot_cpl_i.entry.size[15:0]},
+                           kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_POOL),
+                           default: '0};
+              ot_ret_q <= StRsvPoolC;
+              state_q  <= StOtReq;
+            end
+          end
+          StRsvPoolC: begin
+            rsv_dead_q <= !(ot_cpl_i.status == APU_OBJTAB_OK &&
+                            ot_cpl_i.entry.kind ==
+                            6'(APU_VN_KIND_VK_DESCRIPTOR_POOL) &&
+                            ot_cpl_i.handle == rsv_phnd_q &&
+                            ot_cpl_i.entry.state[15:0] == rsv_ep_q);
+            otr_q    <= '{op: APU_OBJTAB_OP_READSLOT,
+                         id: {48'h0, rsv_layh_q[15:0]},
+                         kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT),
+                         default: '0};
+            ot_ret_q <= StRsvLayC;
+            state_q  <= StOtReq;
+          end
+          StRsvLayC: begin
+            rsv_dead_q <= rsv_dead_q ||
+                          !(ot_cpl_i.status == APU_OBJTAB_OK &&
+                            ot_cpl_i.entry.kind ==
+                            6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT) &&
+                            ot_cpl_i.handle == rsv_layh_q);
+            rsv_layb_q <= ot_cpl_i.status == APU_OBJTAB_OK
+                          ? ot_cpl_i.entry.aux[63:48] : 16'h0;
+            rsv_nbnd_q <= ot_cpl_i.status == APU_OBJTAB_OK
+                          ? (ot_cpl_i.entry.aux[47:32] - 16'd1) >> 1
+                          : 16'h0;
+            state_q <= rsv_ret_q;
+          end
+
+          // ---- §12.3 F5: binding-row scan subroutine -----------------------
+          // rsv_layb_q/rsv_nbnd_q + rw_bind_q -> rw_ok/off/cnt/typ, then
+          // row_ret_q
+          StRowSc: begin
+            if (rw_i_q >= rsv_nbnd_q) begin
+              rw_ok_q <= 1'b0;
+              state_q <= row_ret_q;
+            end else begin
+              opr_q    <= '{op: APU_OBJPAY_OP_READ,
+                           addr: {16'h0, rsv_layb_q} + 32'd1 +
+                                 (32'(rw_i_q) << 1),
+                           default: '0};
+              op_ret_q <= StRowW0C;
+              state_q  <= StOpReq;
+            end
+          end
+          StRowW0C: begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
+              rw_ok_q <= 1'b0;
+              state_q <= row_ret_q;
+            end else if (op_cpl_i.rdata[31:24] == rw_bind_q) begin
+              rw_cnt_q <= op_cpl_i.rdata[15:0];
+              rw_typ_q <= op_cpl_i.rdata[23:16];
+              opr_q    <= '{op: APU_OBJPAY_OP_READ,
+                           addr: {16'h0, rsv_layb_q} + 32'd2 +
+                                 (32'(rw_i_q) << 1),
+                           default: '0};
+              op_ret_q <= StRowW1C;
+              state_q  <= StOpReq;
+            end else begin
+              rw_i_q  <= rw_i_q + 16'd1;
+              state_q <= StRowSc;
+            end
+          end
+          StRowW1C: begin
+            rw_off_q <= op_cpl_i.status == APU_OBJPAY_OK
+                        ? op_cpl_i.rdata[31:12] : 20'h0;
+            rw_ok_q  <= op_cpl_i.status == APU_OBJPAY_OK;
+            state_q  <= row_ret_q;
+          end
+
+          // ---- §12.3 F5: vkUpdateDescriptorSets staged walk ----------------
           // write header {dstSet(2), dstBinding, dstArrayElement,
           // descriptorCount, descriptorType} then descriptorCount buffer
-          // infos {buffer(2), offset(2), range(2)} for buffer types
+          // infos {buffer(2), offset(2), range(2)} for buffer types;
+          // copies follow the writes: {srcSet(2), srcBinding,
+          // srcArrayElement, dstSet(2), dstBinding, dstArrayElement,
+          // descriptorCount}
           StUpdHdrC: begin
             case (upd_h_q)
-              3'd0: upd_dst_q[31:0]  <= stg_word_q;
-              3'd1: upd_dst_q[63:32] <= stg_word_q;
-              3'd2: upd_dstb_q       <= stg_word_q;
-              3'd3: upd_arr_q        <= stg_word_q;
-              3'd4: upd_dcnt_q       <= stg_word_q;
+              4'd0: upd_dst_q[31:0]  <= stg_word_q;
+              4'd1: upd_dst_q[63:32] <= stg_word_q;
+              4'd2: upd_dstb_q       <= stg_word_q;
+              4'd3: upd_arr_q        <= stg_word_q;
+              4'd4: upd_dcnt_q       <= stg_word_q;
               default: upd_type_q    <= stg_word_q;
             endcase
             stg_i_q <= stg_i_q + 1'b1;
-            upd_h_q <= upd_h_q + 3'd1;
-            if (upd_h_q == 3'd5) begin
+            upd_h_q <= upd_h_q + 4'd1;
+            if (upd_h_q == 4'd5) begin
               otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
                            id: APU_VN_ID_TAG | upd_dst_q,
                            kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_SET),
@@ -2290,53 +2868,93 @@ module g6lc_apu_vnfront
               result_q <= APU_VK_ERROR_UNKNOWN;
               state_q  <= StRep;
             end else begin
-              dset_base_q  <= ot_cpl_i.entry.aux[63:48];
-              dset_words_q <= ot_cpl_i.entry.aux[47:32];
-              ent_j_q      <= '0;
-              state_q      <= StUpdInfo;
+              // dst set resolved: enter the shared pool/layout chain
+              rsv_ok_q   <= 1'b1;
+              rsv_hnd_q  <= ot_cpl_i.handle;
+              rsv_base_q <= ot_cpl_i.entry.aux[24:0];
+              rsv_layh_q <= ot_cpl_i.entry.aux[63:32];
+              rsv_phnd_q <= ot_cpl_i.entry.size[31:0];
+              rsv_ep_q   <= ot_cpl_i.entry.state[15:0];
+              rsv_ret_q  <= StUpdWBegin;
+              otr_q    <= '{op: APU_OBJTAB_OP_READSLOT,
+                           id: {48'h0, ot_cpl_i.entry.size[15:0]},
+                           kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_POOL),
+                           default: '0};
+              ot_ret_q <= StRsvPoolC;
+              state_q  <= StOtReq;
+            end
+          end
+          StUpdWBegin: begin
+            upd_pois_q <= 1'b0;
+            if (rsv_dead_q) begin
+              // dead pool or layout: the records are unreachable —
+              // consume this write's staged infos and move on
+              if (is_buf_typ(upd_type_q[7:0]))
+                stg_i_q <= stg_i_q + StgBits'(upd_dcnt_q[15:0] * 6);
+              state_q <= StUpdWNext;
+            end else begin
+              rw_bind_q <= upd_dstb_q[7:0];
+              rw_i_q    <= '0;
+              row_ret_q <= StUpdWBad;
+              state_q   <= StRowSc;
+            end
+          end
+          StUpdWBad: begin
+            // write-level failures poison the set at WNext; the
+            // element loop only covers the in-range prefix
+            upd_bad_q <= !rw_ok_q || rw_typ_q != upd_type_q[7:0];
+            if (!rw_ok_q || rw_typ_q != upd_type_q[7:0] ||
+                upd_arr_q + upd_dcnt_q > {16'h0, rw_cnt_q})
+              upd_pois_q <= 1'b1;
+            if (!rw_ok_q || rw_typ_q != upd_type_q[7:0]) begin
+              if (is_buf_typ(upd_type_q[7:0]))
+                stg_i_q <= stg_i_q + StgBits'(upd_dcnt_q[15:0] * 6);
+              state_q <= StUpdWNext;
+            end else begin
+              ent_j_q <= '0;
+              state_q <= StUpdInfo;
             end
           end
           StUpdInfo: begin
-            if (ent_j_q >= upd_dcnt_q[15:0]) begin
-              // next write
-              if (upd_i_q + 16'd1 >= op_q.imm[0][15:0]) begin
-                state_q <= StRep;
-              end else begin
-                upd_i_q   <= upd_i_q + 16'd1;
-                upd_h_q   <= '0;
-                stg_ret_q <= StUpdHdrC;
-                state_q   <= StStgRd;
-              end
-            end else if (upd_type_q != 32'd6 && upd_type_q != 32'd7) begin
-              // non-buffer descriptor type: no staged infos; the
-              // binding's entry is marked unsupported
-              entw_q     <= '{upd_type_q | 32'h8000_0000,
-                              32'h0, 32'h0, 32'h0};
-              ent_k_q    <= '0;
-              upd_idx_q  <= 32'(upd_dstb_q) + 32'(ent_j_q) <
-                            {16'h0, dset_words_q[15:2]}
-                            ? upd_dstb_q[15:0] + ent_j_q
-                            : dset_words_q[15:2] - 16'd1;
-              state_q    <= dset_words_q != 16'h0
-                            ? StUpdWr : StUpdInfoNext;
-            end else begin
+            if (32'(ent_j_q) >= upd_dcnt_q ||
+                upd_arr_q + 32'(ent_j_q) >= {16'h0, rw_cnt_q}) begin
+              // elements beyond the binding's array bound were already
+              // poisoned at WBad — consume their staged infos in bulk
+              automatic logic [31:0] left =
+                  upd_dcnt_q > {16'h0, ent_j_q}
+                  ? upd_dcnt_q - {16'h0, ent_j_q} : 32'h0;
+              if (is_buf_typ(upd_type_q[7:0]))
+                stg_i_q <= stg_i_q + StgBits'(left[15:0] * 6);
+              state_q <= StUpdWNext;
+            end else if (is_buf_typ(upd_type_q[7:0])) begin
               upd_h_q   <= '0;
               stg_ret_q <= StUpdInfoC;
               state_q   <= StStgRd;
+            end else begin
+              // non-buffer descriptor record: no staged info; write a
+              // null record carrying the declared kind (image/sampler
+              // execution stays refused downstream — F6)
+              upd_elok_q <= 1'b0;
+              upd_eb_q   <= '0;
+              upd_esz_q  <= '0;
+              upd_rec_q  <= {7'h0, rsv_base_q} +
+                            ((32'(rw_off_q) + upd_arr_q +
+                              32'(ent_j_q)) << 5);
+              state_q    <= StUpdWr0;
             end
           end
           StUpdInfoC: begin
             case (upd_h_q)
-              3'd0: upd_buf_q[31:0]  <= stg_word_q;
-              3'd1: upd_buf_q[63:32] <= stg_word_q;
-              3'd2: upd_off_q[31:0]  <= stg_word_q;
-              3'd3: upd_off_q[63:32] <= stg_word_q;
-              3'd4: upd_rng_q[31:0]  <= stg_word_q;
+              4'd0: upd_buf_q[31:0]  <= stg_word_q;
+              4'd1: upd_buf_q[63:32] <= stg_word_q;
+              4'd2: upd_off_q[31:0]  <= stg_word_q;
+              4'd3: upd_off_q[63:32] <= stg_word_q;
+              4'd4: upd_rng_q[31:0]  <= stg_word_q;
               default: upd_rng_q[63:32] <= stg_word_q;
             endcase
             stg_i_q <= stg_i_q + 1'b1;
-            upd_h_q <= upd_h_q + 3'd1;
-            if (upd_h_q == 3'd5) begin
+            upd_h_q <= upd_h_q + 4'd1;
+            if (upd_h_q == 4'd5) begin
               state_q <= StUpdBufGo;
             end else begin
               stg_ret_q <= StUpdInfoC;
@@ -2352,69 +2970,283 @@ module g6lc_apu_vnfront
             state_q  <= StOtReq;
           end
           StUpdBufCpl: begin
-            if (32'(upd_dstb_q) + 32'(ent_j_q) >=
-                {16'h0, dset_words_q[15:2]}) begin
-              // dstBinding+k out of range: the set's last entry is
-              // marked unsupported rather than faulting
-              entw_q    <= '{upd_type_q | 32'h8000_0000,
-                             32'h0, 32'h0, 32'h0};
-              upd_idx_q <= dset_words_q[15:2] - 16'd1;
+            upd_rec_q <= {7'h0, rsv_base_q} +
+                         ((32'(rw_off_q) + upd_arr_q +
+                           32'(ent_j_q)) << 5);
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                ot_cpl_i.entry.bind_mem_slot == APU_OBJTAB_SLOT_NONE) begin
+              upd_elok_q <= 1'b0;
+              state_q    <= StUpdWr0;
             end else begin
-              entw_q    <= '{(ot_cpl_i.status != APU_OBJTAB_OK ||
-                              upd_type_q != 32'd6 &&
-                              upd_type_q != 32'd7)
-                            ? upd_type_q | 32'h8000_0000 : upd_type_q,
-                            upd_rng_q[31:0], upd_off_q[31:0],
-                            ot_cpl_i.status == APU_OBJTAB_OK
-                            ? ot_cpl_i.handle : 32'h0};
-              upd_idx_q <= upd_dstb_q[15:0] + ent_j_q;
-            end
-            ent_k_q <= '0;
-            state_q <= dset_words_q != 16'h0
-                       ? StUpdWr : StUpdInfoNext;
-          end
-          StUpdWr: begin
-            opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
-                          addr: {16'h0, dset_base_q} +
-                                (32'(upd_idx_q) << 2) + 32'(ent_k_q),
-                          wdata: entw_q[ent_k_q], default: '0};
-            op_ret_q <= StUpdWrC;
-            state_q  <= StOpReq;
-          end
-          StUpdWrC: begin
-            if (op_cpl_i.status != APU_OBJPAY_OK) begin
-              result_q <= APU_VK_ERROR_UNKNOWN;
-              state_q  <= StRep;
-            end else if (ent_k_q == 2'd3) begin
-              state_q <= StUpdInfoNext;
-            end else begin
-              ent_k_q <= ent_k_q + 2'd1;
-              state_q <= StUpdWr;
+              ud_mslot_q <= ot_cpl_i.entry.bind_mem_slot;
+              upd_eb_q   <= ot_cpl_i.entry.bind_offset[31:0];
+              upd_esz_q  <= ot_cpl_i.entry.size[31:0];
+              otr_q    <= '{op: APU_OBJTAB_OP_READSLOT,
+                           id: {48'h0, ot_cpl_i.entry.bind_mem_slot},
+                           kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                           default: '0};
+              ot_ret_q <= StUpdMemCpl;
+              state_q  <= StOtReq;
             end
           end
-          StUpdInfoNext: begin
+          StUpdMemCpl: begin
+            // buffer {bind_offset,size} in upd_eb/upd_esz, memory in
+            // ot_cpl_i: aperture address = mem_base + bind_off +
+            // info.offset; visible range = info.range (VK_WHOLE_SIZE
+            // -> buf.size - info.offset), bounded by the buffer extent
+            automatic logic [63:0] rng_eff =
+                upd_rng_q == 64'hFFFF_FFFF_FFFF_FFFF
+                ? 64'(upd_esz_q) - upd_off_q : upd_rng_q;
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                ot_cpl_i.entry.kind !=
+                    6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
+                upd_off_q > 64'(upd_esz_q) ||
+                rng_eff > 64'(upd_esz_q) - upd_off_q ||
+                64'(upd_eb_q) + upd_off_q + rng_eff >
+                    ot_cpl_i.entry.size) begin
+              upd_elok_q <= 1'b0;
+            end else begin
+              upd_elok_q <= 1'b1;
+              upd_eb_q   <= 32'(64'(ot_cpl_i.entry.aux[63:32]) +
+                                64'(upd_eb_q) + upd_off_q);
+              upd_esz_q  <= rng_eff[31:0];
+            end
+            state_q <= StUpdWr0;
+          end
+          // record beats: {size,base} then {flags,kind} at [15:8]
+          StUpdWr0: begin
+            ap_we_q    <= 1'b1;
+            ap_addr_q  <= upd_rec_q;
+            ap_wdata_q <= {upd_elok_q ? upd_esz_q : 32'h0,
+                           upd_elok_q ? upd_eb_q : 32'h0};
+            ap_wstrb_q <= 8'hFF;
+            ap_ret_q   <= StUpdWr1;
+            state_q    <= StApReq;
+          end
+          StUpdWr1: begin
+            ap_we_q    <= 1'b1;
+            ap_addr_q  <= upd_rec_q + 32'd8;
+            // record byte8 = kind, byte9 = flags (LSU W_DS4 parse)
+            ap_wdata_q <= {32'h0, 16'h0, 7'h0, upd_elok_q,
+                           upd_type_q[7:0]};
+            ap_wstrb_q <= 8'h03;
+            ap_ret_q   <= StUpdElemCk;
+            state_q    <= StApReq;
+          end
+          StUpdElemCk: begin
+            // a failed buffer-descriptor element poisons the set;
+            // image/sampler records are written with flags=0 (kind
+            // preserved — refused at the LSU, not at dispatch)
+            if (!upd_elok_q && is_buf_typ(upd_type_q[7:0]))
+              upd_pois_q <= 1'b1;
             ent_j_q <= ent_j_q + 16'd1;
             state_q <= StUpdInfo;
           end
+          // write end: apply the poison bit, then advance / copies
+          StUpdPoisC: begin
+            upd_pois_q <= 1'b0;
+            state_q    <= StUpdWNext;
+          end
+          StUpdWNext: begin
+            if (upd_pois_q) begin
+              otr_q    <= '{op: APU_OBJTAB_OP_SETAUX,
+                           id: {32'h0, rsv_hnd_q},
+                           kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_SET),
+                           mask: 32'h8000_0000, value: 32'h8000_0000,
+                           ctx: ctx_i, default: '0};
+              ot_ret_q <= StUpdPoisC;
+              state_q  <= StOtReq;
+            end else if (32'(upd_i_q) + 32'd1 < op_q.imm[0]) begin
+              upd_i_q   <= upd_i_q + 16'd1;
+              upd_h_q   <= '0;
+              stg_ret_q <= StUpdHdrC;
+              state_q   <= StStgRd;
+            end else if (op_q.imm[1] != 32'h0) begin
+              cp_i_q    <= '0;
+              upd_h_q   <= '0;
+              stg_ret_q <= StUpdCpRd;
+              state_q   <= StStgRd;
+            end else begin
+              state_q <= StRep;
+            end
+          end
 
-          // ---- §7b: cmdrec payload producer ----------------------------------
+          // ---- §12.3 F5: vkUpdateDescriptorSets copies ---------------------
+          StUpdCpRd: begin
+            case (upd_h_q)
+              4'd0: cp_src_q[31:0]   <= stg_word_q;
+              4'd1: cp_src_q[63:32]  <= stg_word_q;
+              4'd2: cp_sb_q          <= stg_word_q;
+              4'd3: cp_sa_q          <= stg_word_q;
+              4'd4: cp_dsid_q[31:0]  <= stg_word_q;
+              4'd5: cp_dsid_q[63:32] <= stg_word_q;
+              4'd6: cp_db_q          <= stg_word_q;
+              4'd7: cp_da_q          <= stg_word_q;
+              default: cp_n_q        <= stg_word_q;
+            endcase
+            stg_i_q <= stg_i_q + 1'b1;
+            upd_h_q <= upd_h_q + 4'd1;
+            if (upd_h_q == 4'd8) begin
+              otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                           id: APU_VN_ID_TAG | cp_src_q,
+                           kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_SET),
+                           ctx: ctx_i, default: '0};
+              ot_ret_q <= StRsvLuC;
+              rsv_ret_q <= StUpdCpS;
+              state_q  <= StOtReq;
+            end else begin
+              stg_ret_q <= StUpdCpRd;
+              state_q   <= StStgRd;
+            end
+          end
+          // src set resolved: snapshot and scan its row for srcBinding
+          StUpdCpS: begin
+            cp_srcbad_q <= !rsv_ok_q || rsv_dead_q;
+            cp_sbase_q  <= rsv_base_q;
+            rw_bind_q   <= cp_sb_q[7:0];
+            rw_i_q      <= '0;
+            row_ret_q   <= StUpdCpD;
+            state_q     <= StRowSc;
+          end
+          // src row done: resolve the dst set
+          StUpdCpD: begin
+            if (!rw_ok_q) begin
+              cp_srcbad_q <= 1'b1;
+            end else begin
+              cp_soff_q <= rw_off_q;
+              cp_scnt_q <= rw_cnt_q;
+            end
+            otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                         id: APU_VN_ID_TAG | cp_dsid_q,
+                         kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_SET),
+                         ctx: ctx_i, default: '0};
+            ot_ret_q <= StRsvLuC;
+            rsv_ret_q <= StUpdCpDSet;
+            state_q  <= StOtReq;
+          end
+          // dst resolved: scan its row for dstBinding
+          StUpdCpDSet: begin
+            cp_dbase_q <= rsv_base_q;
+            cp_dhnd_q  <= rsv_hnd_q;
+            cp_dead_q  <= !rsv_ok_q || rsv_dead_q;
+            rw_bind_q  <= cp_db_q[7:0];
+            rw_i_q     <= '0;
+            row_ret_q  <= StUpdCpGo;
+            state_q    <= StRowSc;
+          end
+          // both rows resolved: bounds-check then copy record beats
+          StUpdCpGo: begin
+            automatic logic bad =
+                cp_srcbad_q || !rw_ok_q ||
+                cp_sa_q + cp_n_q > {16'h0, cp_scnt_q} ||
+                cp_da_q + cp_n_q > {16'h0, rw_cnt_q};
+            cp_doff_q  <= rw_off_q;
+            cp_dcnt2_q <= rw_cnt_q;
+            if (cp_dead_q) begin
+              // destination's pool/layout is dead: nothing to touch
+              state_q <= StUpdCpNext;
+            end else if (bad) begin
+              // poison the dst set; the copy writes nothing
+              otr_q    <= '{op: APU_OBJTAB_OP_SETAUX,
+                           id: {32'h0, rsv_hnd_q},
+                           kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_SET),
+                           mask: 32'h8000_0000, value: 32'h8000_0000,
+                           ctx: ctx_i, default: '0};
+              ot_ret_q <= StUpdCpPC;
+              state_q  <= StOtReq;
+            end else if (cp_n_q == 32'h0) begin
+              state_q <= StUpdCpNext;
+            end else begin
+              ent_j_q   <= '0;
+              cp_b_q    <= '0;
+              ap_we_q   <= 1'b0;
+              ap_addr_q <= {7'h0, cp_sbase_q} +
+                           ((32'(cp_soff_q) + cp_sa_q) << 5);
+              ap_ret_q  <= StUpdCpRC;
+              state_q   <= StApReq;
+            end
+          end
+          StUpdCpPC: begin
+            state_q <= StUpdCpNext;
+          end
+          // read beat done -> write it to the dst record
+          StUpdCpRC: begin
+            ap_we_q    <= 1'b1;
+            ap_addr_q  <= {7'h0, cp_dbase_q} +
+                          ((32'(cp_doff_q) + cp_da_q +
+                            32'(ent_j_q)) << 5) +
+                          {28'h0, cp_b_q} * 32'd8;
+            ap_wdata_q <= ap_rd_q;
+            ap_wstrb_q <= 8'hFF;
+            ap_ret_q   <= StUpdCpBC;
+            state_q    <= StApReq;
+          end
+          StUpdCpBC: begin
+            if (cp_b_q == 4'd3) begin
+              // element done
+              if (32'(ent_j_q) + 32'd1 >= cp_n_q) begin
+                state_q <= StUpdCpNext;
+              end else begin
+                ent_j_q   <= ent_j_q + 16'd1;
+                cp_b_q    <= '0;
+                ap_we_q   <= 1'b0;
+                ap_addr_q <= {7'h0, cp_sbase_q} +
+                             ((32'(cp_soff_q) + cp_sa_q +
+                               32'(ent_j_q) + 32'd1) << 5);
+                ap_ret_q  <= StUpdCpRC;
+                state_q   <= StApReq;
+              end
+            end else begin
+              cp_b_q    <= cp_b_q + 4'd1;
+              ap_we_q   <= 1'b0;
+              ap_addr_q <= {7'h0, cp_sbase_q} +
+                           ((32'(cp_soff_q) + cp_sa_q +
+                             32'(ent_j_q)) << 5) +
+                           {26'h0, cp_b_q + 4'd1} * 32'd8;
+              ap_ret_q  <= StUpdCpRC;
+              state_q   <= StApReq;
+            end
+          end
+          StUpdCpNext: begin
+            if (32'(cp_i_q) + 32'd1 >= op_q.imm[1]) begin
+              state_q <= StRep;
+            end else begin
+              cp_i_q    <= cp_i_q + 16'd1;
+              upd_h_q   <= '0;
+              stg_ret_q <= StUpdCpRd;
+              state_q   <= StStgRd;
+            end
+          end
+
+          // ---- §7b/§12.3 F5: cmdrec payload producer -------------------------
           // produce stream word pay_send_q into pay_word_q:
           // PushConstants streams staged words verbatim;
-          // BindDescriptorSets resolves each staged set id through
-          // ObjTab (LOOKUP at record time) then streams the offsets
+          // BindDescriptorSets emits {set handle, ndyn} pairs (the set
+          // id resolves through ObjTab, ndyn rides the set's aux) then
+          // streams the verbatim dynamic-offset words
           StPayProd: begin
-            if (pay_bind_q && pay_send_q < pay_nset_q) begin
-              stg_i_q   <= StgBits'(pay_send_q << 1);
-              stg_ret_q <= StPayResLo;
+            if (pay_bind_q && pay_send_q < pay_pbnd_q) begin
+              if (!pay_send_q[0]) begin
+                // even send index = handle word: staged set id for
+                // set s sits at words 2s/2s+1 — send == 2s here
+                stg_i_q   <= StgBits'(pay_send_q);
+                stg_ret_q <= StPayResLo;
+                state_q   <= StStgRd;
+              end else begin
+                // odd send index = the set's dynamic-descriptor count
+                pay_word_q <= {27'h0, pay_ndyn_q};
+                state_q    <= pro_ret_q;
+              end
             end else if (pay_bind_q) begin
               stg_i_q   <= StgBits'((pay_nset_q << 1) +
-                                    (pay_send_q - pay_nset_q));
+                                    (pay_send_q - pay_pbnd_q));
               stg_ret_q <= StPayCapW;
+              state_q   <= StStgRd;
             end else begin
               stg_i_q   <= StgBits'(pay_send_q);
               stg_ret_q <= StPayCapW;
+              state_q   <= StStgRd;
             end
-            state_q <= StStgRd;
           end
           StPayResLo: begin
             lay_lo_q  <= stg_word_q;
@@ -2432,9 +3264,13 @@ module g6lc_apu_vnfront
           end
           StPayResCpl: begin
             // a set that misses at record time stores a null handle;
-            // the dispatch-time re-resolve refuses it
+            // the dispatch-time re-resolve refuses it.  ndyn comes
+            // from aux[30:25] so the executor can group the following
+            // dynamic-offset words per set
             pay_word_q <= ot_cpl_i.status == APU_OBJTAB_OK
                           ? ot_cpl_i.handle : 32'h0;
+            pay_ndyn_q <= ot_cpl_i.status == APU_OBJTAB_OK
+                          ? ot_cpl_i.entry.aux[29:25] : 5'h0;
             state_q    <= pro_ret_q;
           end
           StPayCapW: begin
@@ -2850,6 +3686,15 @@ module g6lc_apu_vnfront_fixture
   input  logic               pg_cpl_valid_i,
   output logic               pg_cpl_ready_o,
   input  apu_vgpages_cpl_t   pg_cpl_i,
+  output logic               ap_req_o,
+  output logic               ap_we_o,
+  output logic [31:0]        ap_addr_o,
+  output logic [63:0]        ap_wdata_o,
+  output logic [7:0]         ap_wstrb_o,
+  input  logic               ap_ready_i,
+  input  logic               ap_done_i,
+  input  logic [63:0]        ap_rdata_i,
+  input  logic               ap_err_i,
   output logic               ex_submit_valid_o,
   input  logic               ex_submit_ready_i,
   output apu_cmdexec_submit_t ex_submit_o,

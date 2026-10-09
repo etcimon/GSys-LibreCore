@@ -55,15 +55,17 @@ ue_cpos_math450_3 ue_cpos_oob_1 ue_cpos_pushscale_1 \
 ue_cpos_vec4arith_1 \
 ue_cpos_loopfor_1 ue_cpos_barrier_reduce_1 \
 ue_cpos_loopfor_opt_1 ue_cpos_barrier_reduce_opt_1 \
+ue_cpos_descarr_1 ue_cpos_multiset_1 ue_cpos_arroob_1 \
 ue_cneg_badmod_1 ue_cneg_modgone_1 ue_cneg_lostbuf_1 \
 ue_cneg_spec_1 ue_cneg_baddesc_1 ue_cneg_nopipe_1 \
 ue_cneg_pgfull_1 ue_cneg_badmem_1 ue_cneg_bindoob_1 \
-ue_cneg_descoob_1 \
+ue_cneg_descoob_1 ue_cneg_updoob_1 ue_cneg_layoutmix_1 \
+ue_cneg_deadpool_1 ue_cneg_poolfull_1 \
 ue_cpos_xfer_copy_1 ue_cpos_xfer_update_1 \
 ue_cneg_xfer_oob_1 ue_cneg_xfer_overlap_1"
 NEGATIVES="neg_next_loop neg_desc_oob neg_buf_oob neg_aperture \
 neg_used_oob neg_reset neg_cursor neg_batch neg_flush neg_qdrop \
-neg_resp_oob neg_worksink0"
+neg_resp_oob neg_worksink0 epoch_reuse"
 
 cfail=0
 : > "$OUT/sessions.log"

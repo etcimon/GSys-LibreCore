@@ -1,0 +1,117 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Khronos Glslang Reference Front End; 11
+; Bound: 68
+; Schema: 0
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gl_GlobalInvocationID
+               OpExecutionMode %main LocalSize 8 1 1
+               OpSource GLSL 460
+               OpName %main "main"
+               OpName %gl_GlobalInvocationID "gl_GlobalInvocationID"
+               OpName %Out "Out"
+               OpMemberName %Out 0 "o"
+               OpName %_ ""
+               OpName %B0 "B0"
+               OpMemberName %B0 0 "v"
+               OpName %b0 "b0"
+               OpName %B1 "B1"
+               OpMemberName %B1 0 "v"
+               OpName %b1 "b1"
+               OpName %B2 "B2"
+               OpMemberName %B2 0 "v"
+               OpName %b2 "b2"
+               OpName %B3 "B3"
+               OpMemberName %B3 0 "v"
+               OpName %b3 "b3"
+               OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
+               OpDecorate %_runtimearr_float ArrayStride 4
+               OpDecorate %Out BufferBlock
+               OpMemberDecorate %Out 0 Offset 0
+               OpDecorate %_ Binding 1
+               OpDecorate %_ DescriptorSet 0
+               OpDecorate %_runtimearr_float_0 ArrayStride 4
+               OpDecorate %B0 BufferBlock
+               OpMemberDecorate %B0 0 Offset 0
+               OpDecorate %b0 Binding 0
+               OpDecorate %b0 DescriptorSet 0
+               OpDecorate %_runtimearr_float_1 ArrayStride 4
+               OpDecorate %B1 BufferBlock
+               OpMemberDecorate %B1 0 Offset 0
+               OpDecorate %b1 Binding 0
+               OpDecorate %b1 DescriptorSet 1
+               OpDecorate %_runtimearr_float_2 ArrayStride 4
+               OpDecorate %B2 BufferBlock
+               OpMemberDecorate %B2 0 Offset 0
+               OpDecorate %b2 Binding 0
+               OpDecorate %b2 DescriptorSet 2
+               OpDecorate %_runtimearr_float_3 ArrayStride 4
+               OpDecorate %B3 BufferBlock
+               OpMemberDecorate %B3 0 Offset 0
+               OpDecorate %b3 Binding 0
+               OpDecorate %b3 DescriptorSet 3
+               OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+     %v3uint = OpTypeVector %uint 3
+%_ptr_Input_v3uint = OpTypePointer Input %v3uint
+%gl_GlobalInvocationID = OpVariable %_ptr_Input_v3uint Input
+     %uint_0 = OpConstant %uint 0
+%_ptr_Input_uint = OpTypePointer Input %uint
+      %float = OpTypeFloat 32
+%_runtimearr_float = OpTypeRuntimeArray %float
+        %Out = OpTypeStruct %_runtimearr_float
+%_ptr_Uniform_Out = OpTypePointer Uniform %Out
+          %_ = OpVariable %_ptr_Uniform_Out Uniform
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+%_runtimearr_float_0 = OpTypeRuntimeArray %float
+         %B0 = OpTypeStruct %_runtimearr_float_0
+%_ptr_Uniform_B0 = OpTypePointer Uniform %B0
+         %b0 = OpVariable %_ptr_Uniform_B0 Uniform
+%_ptr_Uniform_float = OpTypePointer Uniform %float
+     %uint_8 = OpConstant %uint 8
+%_runtimearr_float_1 = OpTypeRuntimeArray %float
+         %B1 = OpTypeStruct %_runtimearr_float_1
+%_ptr_Uniform_B1 = OpTypePointer Uniform %B1
+         %b1 = OpVariable %_ptr_Uniform_B1 Uniform
+    %uint_16 = OpConstant %uint 16
+%_runtimearr_float_2 = OpTypeRuntimeArray %float
+         %B2 = OpTypeStruct %_runtimearr_float_2
+%_ptr_Uniform_B2 = OpTypePointer Uniform %B2
+         %b2 = OpVariable %_ptr_Uniform_B2 Uniform
+    %uint_24 = OpConstant %uint 24
+%_runtimearr_float_3 = OpTypeRuntimeArray %float
+         %B3 = OpTypeStruct %_runtimearr_float_3
+%_ptr_Uniform_B3 = OpTypePointer Uniform %B3
+         %b3 = OpVariable %_ptr_Uniform_B3 Uniform
+     %uint_1 = OpConstant %uint 1
+%gl_WorkGroupSize = OpConstantComposite %v3uint %uint_8 %uint_1 %uint_1
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+         %14 = OpAccessChain %_ptr_Input_uint %gl_GlobalInvocationID %uint_0
+         %15 = OpLoad %uint %14
+         %30 = OpAccessChain %_ptr_Uniform_float %b0 %int_0 %15
+         %31 = OpLoad %float %30
+         %32 = OpAccessChain %_ptr_Uniform_float %_ %int_0 %15
+               OpStore %32 %31
+         %35 = OpIAdd %uint %15 %uint_8
+         %41 = OpAccessChain %_ptr_Uniform_float %b1 %int_0 %15
+         %42 = OpLoad %float %41
+         %43 = OpAccessChain %_ptr_Uniform_float %_ %int_0 %35
+               OpStore %43 %42
+         %46 = OpIAdd %uint %15 %uint_16
+         %52 = OpAccessChain %_ptr_Uniform_float %b2 %int_0 %15
+         %53 = OpLoad %float %52
+         %54 = OpAccessChain %_ptr_Uniform_float %_ %int_0 %46
+               OpStore %54 %53
+         %57 = OpIAdd %uint %15 %uint_24
+         %63 = OpAccessChain %_ptr_Uniform_float %b3 %int_0 %15
+         %64 = OpLoad %float %63
+         %65 = OpAccessChain %_ptr_Uniform_float %_ %int_0 %57
+               OpStore %65 %64
+               OpReturn
+               OpFunctionEnd

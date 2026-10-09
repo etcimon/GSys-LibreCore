@@ -449,9 +449,9 @@ package g6lc_apu_vn_pkg;
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageImageMultisample
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageImageReadWithoutFormat
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageImageWriteWithoutFormat
-    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderUniformBufferArrayDynamicIndexing
+    48'h0AFF00000000, // FLAGS a=255 b=0x0 shaderUniformBufferArrayDynamicIndexing
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderSampledImageArrayDynamicIndexing
-    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageBufferArrayDynamicIndexing
+    48'h0AFF00000000, // FLAGS a=255 b=0x0 shaderStorageBufferArrayDynamicIndexing
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageImageArrayDynamicIndexing
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderClipDistance
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderCullDistance
@@ -1254,9 +1254,9 @@ package g6lc_apu_vn_pkg;
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageImageMultisample
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageImageReadWithoutFormat
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageImageWriteWithoutFormat
-    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderUniformBufferArrayDynamicIndexing
+    48'h0AFF00000000, // FLAGS a=255 b=0x0 shaderUniformBufferArrayDynamicIndexing
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderSampledImageArrayDynamicIndexing
-    48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageBufferArrayDynamicIndexing
+    48'h0AFF00000000, // FLAGS a=255 b=0x0 shaderStorageBufferArrayDynamicIndexing
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderStorageImageArrayDynamicIndexing
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderClipDistance
     48'h0AFF00000001, // FLAGS a=255 b=0x1 shaderCullDistance
@@ -1977,8 +1977,8 @@ package g6lc_apu_vn_pkg;
     48'h010100000000, // U32 a=1 b=0x0 maxSets
     48'h010200000000, // U32 a=2 b=0x0 poolSizeCount
     48'h070000000004, // ARRAY a=0 b=0x4 pPoolSizes
-    48'h017F00000000, // U32 a=127 b=0x0 type
-    48'h017F00000000, // U32 a=127 b=0x0 descriptorCount
+    48'h01FF00000000, // U32 a=127 b=0x0 type KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 descriptorCount KEEP
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pDescriptorPool
@@ -2036,13 +2036,13 @@ package g6lc_apu_vn_pkg;
     48'h070100000000, // ARRAY a=1 b=0x0 pDescriptorCopies
     48'h05000000003E, // STYPE a=0 b=0x3E sType
     48'h0600000001EA, // PNEXT a=0 b=0x1EA pNext
-    48'h033800000015, // HANDLE a=56 b=0x15 srcSet:LOOKUP
-    48'h017F00000000, // U32 a=127 b=0x0 srcBinding
-    48'h017F00000000, // U32 a=127 b=0x0 srcArrayElement
-    48'h033800000015, // HANDLE a=56 b=0x15 dstSet:LOOKUP
-    48'h017F00000000, // U32 a=127 b=0x0 dstBinding
-    48'h017F00000000, // U32 a=127 b=0x0 dstArrayElement
-    48'h017F00000000, // U32 a=127 b=0x0 descriptorCount
+    48'h03B800000015, // HANDLE a=56 b=0x15 srcSet:LOOKUP KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 srcBinding KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 srcArrayElement KEEP
+    48'h03B800000015, // HANDLE a=56 b=0x15 dstSet:LOOKUP KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 dstBinding KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 dstArrayElement KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 descriptorCount KEEP
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
@@ -3976,10 +3976,10 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000080, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000004, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000004, 32'h00000000, 32'h00000010, 32'h00000010,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000010, 32'h00000010, 32'h00000010,
+    32'h00000010, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000010, 32'h00000010, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
@@ -4131,8 +4131,8 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000001,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
-    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000001, 32'h00000000,
+    32'h00000001, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
@@ -4194,7 +4194,7 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000001, 32'h00000010, 32'h00000000,
-    32'h10000000, 32'h00000000, 32'h00000001, 32'h00000000,
+    32'h01800000, 32'h00000000, 32'h00000001, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,

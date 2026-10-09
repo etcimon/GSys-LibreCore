@@ -365,10 +365,22 @@ class Player:
     def chain_expect(self):
         head, flags, fence, raddr, ridx = self.pend
         ulen, uid = self.wait_used()
-        irq_was = self.cl.irq_level
-        st = self.cl.mmio_rd(VN["VREG_INTERRUPT_STATUS"])
-        self.check(st & 1, "INTERRUPT_STATUS bit0")
-        self.check(irq_was == 1, "irq line high before ack")
+        # The used.idx write lands in guest memory one publication state
+        # (a few DUT cycles) before the used_valid handshake latches
+        # irq_status_q; a host-side memory poll can sample INTERRUPT_STATUS
+        # inside that window at low sim rates.  Wait for the level —
+        # the check still proves the IRQ follows the publication.
+        t0 = time.time()
+        while True:
+            st = self.cl.mmio_rd(VN["VREG_INTERRUPT_STATUS"])
+            if st & 1:
+                break
+            self.cl.pump(0.01)
+            if time.time() - t0 > 60:
+                raise Fail(f"{self.name}: INTERRUPT_STATUS bit0 "
+                           f"(never set after used publish)")
+        self.cl.pump(0.01)   # drain the pending T_IRQ edge frame
+        self.check(self.cl.irq_level == 1, "irq line high before ack")
         self.cl.mmio_wr(VN["VREG_INTERRUPT_ACK"], 1)
         self.cl.pump(0.02)
         self.check(self.cl.irq_level == 0, "irq line low after ack")
@@ -599,9 +611,11 @@ def probe(cl, venus=True):
         VN["VN_ACKNOWLEDGE"] | VN["VN_DRIVER"] | VN["VN_FEATURES_OK"])
     ck(vrd(VN["VREG_STATUS"]) & VN["VN_FEATURES_OK"], "features_ok")
     vwr(VN["VREG_SHM_SEL"], 1)
-    for reg, want, m in (("VREG_SHM_LEN_LO", VN["VN_SHM_BYTES"] & 0xFFFFFFFF,
+    # §12.3 F5: SHM_LEN publishes the guest-mappable span; the window's
+    # private tail holds device-internal descriptor record stores
+    for reg, want, m in (("VREG_SHM_LEN_LO", VN["VN_SHM_GUEST_BYTES"] & 0xFFFFFFFF,
                           "shm len lo"),
-                         ("VREG_SHM_LEN_HI", VN["VN_SHM_BYTES"] >> 32,
+                         ("VREG_SHM_LEN_HI", VN["VN_SHM_GUEST_BYTES"] >> 32,
                           "shm len hi"),
                          ("VREG_SHM_BASE_LO", VN["VN_SHM_BASE"] & 0xFFFFFFFF,
                           "shm base lo"),

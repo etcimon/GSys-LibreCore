@@ -85,11 +85,19 @@ module tb_g6lc_apu_sys_venus;
   localparam logic [63:0] AB     = APU_SHM_BASE;    // aperture window
   localparam int unsigned ABW    = 32'h40000;    // dense 1 MiB model
                                                    // of the 32 MiB window
+  // §12.3 F5: the device-private arena sits at APU_VG_GUEST_BYTES..top;
+  // the dense model covers it in [ABW, ABW+PPW) of apm
+  localparam int unsigned PWB    = 32'(APU_VG_GUEST_BYTES >> 2);
+  localparam int unsigned PPW    =
+      APU_VG_PRIV_PAGES * (APU_VG_PAGE_BYTES / 4);
+  localparam int unsigned APWT   = ABW + PPW;
   // first-fit keeps every session low; an index past the dense model
   // is a tape/model bug — never wrap
   function automatic int unsigned apix(input int unsigned w);
-    if (w >= ABW) $fatal(1, "aperture word %0d past dense model", w);
-    return w;
+    if (w < ABW) return w;
+    if (w >= PWB && w < PWB + PPW) return ABW + (w - PWB);
+    $fatal(1, "aperture word %0d past dense model", w);
+    return 0;
   endfunction
   localparam int unsigned TAPEW  = 32'h20000;
   localparam int unsigned EXPW   = 32'h40000;
@@ -207,7 +215,7 @@ module tb_g6lc_apu_sys_venus;
 
   // ---- guest RAM + aperture backing stores ------------------------------
   logic [31:0] gmem [GBW];   // gmem[off>>2] <-> GB+off
-  logic [31:0] apm  [ABW];   // apm[apix(off>>2)]  <-> AB+off
+  logic [31:0] apm  [APWT];  // apm[apix(off>>2)]  <-> AB+off
 
   // ---- AXI4 slave model (burst reads, <=3 outstanding) ----------------
   // Any AW/AR outside the two windows is an immediate test failure.
@@ -912,10 +920,10 @@ module tb_g6lc_apu_sys_venus;
               int unsigned bad = 0;
               for (int i = 0; i < a0; i++) begin
                 check(rec_kind() == 5, "EK_REPLY kind");
-                check(apm[((a1 >> 2) + expm[ep + 1])] == expm[ep + 2],
+                check(apm[apix((a1 >> 2) + expm[ep + 1])] == expm[ep + 2],
                       $sformatf("CK_REPLY off=%0x idx=%0d got=%08x exp=%08x",
                                 a1, expm[ep + 1],
-                                apm[((a1 >> 2) + expm[ep + 1])],
+                                apm[apix((a1 >> 2) + expm[ep + 1])],
                                 expm[ep + 2]));
                 ep += 8;
               end
@@ -938,10 +946,10 @@ module tb_g6lc_apu_sys_venus;
             end
             4: begin // CK_EXTRA [ring][byte off]
               check(rec_kind() == 7, "EK_EXTRA kind");
-              check(apm[(r_extra[a0] + (a1 >> 2))] == expm[ep + 3],
+              check(apm[apix(r_extra[a0] + (a1 >> 2))] == expm[ep + 3],
                     $sformatf("CK_EXTRA ring%0d off=%0x got=%08x exp=%08x",
                               a0, a1,
-                              apm[(r_extra[a0] + (a1 >> 2))],
+                              apm[apix(r_extra[a0] + (a1 >> 2))],
                               expm[ep + 3]));
               ep += 8;
             end
@@ -1011,7 +1019,7 @@ module tb_g6lc_apu_sys_venus;
   // ---- queue init ---------------------------------------------------------
   task automatic vq_init();
     for (int i = 0; i < GBW; i++) gmem[i] = '0;
-    for (int i = 0; i < ABW; i++) apm[i] = '0;
+    for (int i = 0; i < APWT; i++) apm[i] = '0;
     av_push[0] = 0; av_push[1] = 0;
     dcur[0] = 0;    dcur[1] = 0;
     uexp[0] = 0;    uexp[1] = 0;
@@ -1100,10 +1108,10 @@ module tb_g6lc_apu_sys_venus;
       // SHM selectors
       vwrite(VREG_SHM_SEL, 32'h1);
       vread(VREG_SHM_LEN_LO, r);
-      check(r == (venus ? APU_SHM_BYTES[31:0] : 32'hffff_ffff),
+      check(r == (venus ? APU_SHM_GUEST_BYTES[31:0] : 32'hffff_ffff),
             $sformatf("shm len lo got=%08x", r));
       vread(VREG_SHM_LEN_HI, r);
-      check(r == (venus ? APU_SHM_BYTES[63:32] : 32'hffff_ffff),
+      check(r == (venus ? APU_SHM_GUEST_BYTES[63:32] : 32'hffff_ffff),
             $sformatf("shm len hi got=%08x", r));
       vread(VREG_SHM_BASE_LO, r);
       check(r == (venus ? APU_SHM_BASE[31:0] : 32'hffff_ffff),

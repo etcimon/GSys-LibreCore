@@ -44,6 +44,8 @@ module g6lc_apu_vgctl
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_vgpages_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
+  import g6lc_apu_sh_pkg::*;
 #(
   parameter bit          Enable   = 1'b0
 ) (
@@ -83,6 +85,22 @@ module g6lc_apu_vgctl
   input  logic             pg_cpl_valid_i,
   output logic             pg_cpl_ready_o,
   input  apu_vgpages_cpl_t pg_cpl_i,
+  // ObjPay + ShaderCore-slot ports for the RESET_CTX reap: the sweep
+  // reports each tombstoned entry (APU_OBJTAB_SWEEP) and vgctl frees
+  // the resource it owned — layout payload extents here, module/
+  // pipeline slot refs on the sm port (level-held request; sm_gnt_i
+  // marks the cycle the arbiter accepted it)
+  output logic            op_req_valid_o,
+  input  logic            op_req_ready_i,
+  output apu_objpay_req_t op_req_o,
+  input  logic            op_cpl_valid_i,
+  output logic            op_cpl_ready_o,
+  input  apu_objpay_cpl_t op_cpl_i,
+  output logic            sm_req_o,
+  output apu_sh_sm_req_t  sm_req_pl_o,
+  input  logic            sm_gnt_i,
+  input  logic            sm_cpl_i,
+  input  apu_sh_sm_cpl_t  sm_cpl_pl_i,
   // pump handoff: SUBMIT_3D execbuffer stream (guest memory)
   output logic            xs_valid_o,
   input  logic            xs_ready_i,
@@ -130,6 +148,9 @@ module g6lc_apu_vgctl
     assign ot_cpl_ready_o = 1'b0;
     assign pg_req_valid_o = 1'b0; assign pg_req_o = '0;
     assign pg_cpl_ready_o = 1'b0;
+    assign op_req_valid_o = 1'b0; assign op_req_o = '0;
+    assign op_cpl_ready_o = 1'b0;
+    assign sm_req_o = 1'b0;       assign sm_req_pl_o = '0;
     assign xs_valid_o = 1'b0;    assign xs_desc_o = '{default: '0};
     assign xs_ndesc_o = '0;      assign xs_off_o = '0;
     assign xs_bytes_o = '0;      assign xs_ctx_o = '0;
@@ -143,17 +164,20 @@ module g6lc_apu_vgctl
                     mem_ready_i | mem_rvalid_i | mem_err_i |
                     ot_req_ready_i | ot_cpl_valid_i | (|ot_cpl_i) |
                     pg_req_ready_i | pg_cpl_valid_i | (|pg_cpl_i) |
+                    op_req_ready_i | op_cpl_valid_i | (|op_cpl_i) |
+                    sm_gnt_i | sm_cpl_i | (|sm_cpl_pl_i) |
                     xs_ready_i | xs_done_i | xs_fault_i |
                     (|chain_desc_i[1]) | (|chain_desc_i[2]) |
                     (|chain_desc_i[3]);
   end else begin : gen_on
-    typedef enum logic [4:0] {
+    typedef enum logic [5:0] {
       StIdle, StRdDesc, StRdFire, StRdCap, StHdr, StBody,
       StDispatch, StOtReq, StOtCpl, StBindReq, StBindCpl,
-      StMemReq, StMemCpl, StAuxReq, StAuxCpl,
+      StMemReq, StMemCpl, StAuxReq, StAuxCpl, StAuxHiReq, StAuxHiCpl,
       StPgReq, StPgCpl, StXsFire, StXsWait,
       StMapAllocAt, StMapBind, StMapMemReq, StMapMemCpl,
-      StMapAuxReq, StMapAuxCpl,
+      StMapAuxReq, StMapAuxCpl, StUnmapPriv,
+      StReapDec, StReapOpReq, StReapOpCpl, StReapSmReq, StReapSmCpl,
       StWrPrep, StWrFind, StWrFire, StWrCap, StDone, StFence
     } state_e;
     state_e state_q;
@@ -185,13 +209,20 @@ module g6lc_apu_vgctl
     // offset, so a map onto a different extent frees/reallocates pages
     logic [63:0]  map_size_q;
     logic         map_memb_q;    // memory-backed blob (aux[0])
-    logic [31:0]  map_memid_q;   // device-memory resource id
     logic [31:0]  map_memh_q;    // {gen,slot} of the DEVICE_MEMORY
+    logic [31:0]  auxv_q;        // SETAUXHI value (map offset / priv base)
+    logic         map_unmap_q;   // StMapMem* serving UNMAP_BLOB
     logic         mem_fault_q;   // sticky write fault (§6c)
     // page-allocator in-flight op
     apu_vgpages_op_e pg_op_q;
     logic [31:0]  pg_base_q, pg_bytes_q;
     state_e       pg_ret_q;
+    // RESET_CTX reap: tombstoned entry fields reported by the sweep's
+    // interim SWEEP completions (§6c teardown order — the kernel unmaps
+    // the resources after CTX_DESTROY, so the extents must already be
+    // back in the allocator)
+    logic [5:0]   reap_kind_q;
+    logic [63:0]  reap_aux_q, reap_size_q;
 
     // bytes remaining in current read desc
     logic [31:0] rd_rem;
@@ -227,10 +258,12 @@ module g6lc_apu_vgctl
     logic ot_fire;
     assign ot_fire = state_q == StOtReq || state_q == StBindReq ||
                      state_q == StMemReq || state_q == StAuxReq ||
+                     state_q == StAuxHiReq ||
                      state_q == StMapMemReq || state_q == StMapAuxReq;
     assign ot_req_valid_o = ot_fire;
     assign ot_cpl_ready_o = state_q == StOtCpl || state_q == StBindCpl ||
                             state_q == StMemCpl || state_q == StAuxCpl ||
+                            state_q == StAuxHiCpl ||
                             state_q == StMapMemCpl || state_q == StMapAuxCpl;
     always_comb begin
       ot_req_o = apu_objtab_req_t'('0);
@@ -244,20 +277,30 @@ module g6lc_apu_vgctl
         StAuxReq: ot_req_o = '{op: APU_OBJTAB_OP_SETAUX,
             id: APU_VG_ID_TAG | {32'h0, req_ram[6]},
             kind: 6'(APU_VN_KIND_APU_BLOB_SHMEM),
-            // aux[0] = memory-backed; aux[31:8] = memory resource id
-            // (so a MAP_BLOB relocation can find the VkDeviceMemory)
+            // aux[0] = memory-backed; aux[31:8] = low 24 bits of the
+            // memory client id (debug shadow; resolution uses the
+            // {gen,slot} handle in aux[63:32])
             mask: 32'hFF_FF_FF_01,
             value: {req_ram[10][23:0], 8'h1},
             default: '0};
+        StAuxHiReq: ot_req_o = '{op: APU_OBJTAB_OP_SETAUXHI,
+            id: APU_VG_ID_TAG | {32'h0, req_ram[6]},
+            kind: 6'(APU_VN_KIND_APU_BLOB_SHMEM),
+            // aux[63:32] = {gen,slot} of the backing VkDeviceMemory
+            mask: 32'hFF_FF_FF_FF, value: map_memh_q, default: '0};
         StMapMemReq: ot_req_o = '{op: APU_OBJTAB_OP_LOOKUP,
-            // map_memid_q is the VkDeviceMemory client id recorded in
-            // the blob's aux[31:8] — same client-id namespace as the
-            // blob_id lookup above
-            id: APU_VN_ID_TAG | {8'h0, map_memid_q[23:0]},
+            // map_memh_q is the VkDeviceMemory {gen,slot} handle
+            // recorded in the blob's aux[63:32] at create — handle
+            // form survives 64-bit client ids (aux[31:8] truncates)
+            id: {32'h0, map_memh_q},
             kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY), default: '0};
         StMapAuxReq: ot_req_o = '{op: APU_OBJTAB_OP_SETAUXHI,
             id: {32'h0, map_memh_q},             // {gen,slot} handle
-            mask: 32'hFF_FF_FF_FF, value: req_ram[8], default: '0};
+            // ObjTab enforces kind on every non-ALLOC op — required
+            kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+            // map path: the kernel's offset; unmap path: the private
+            // re-allocation base captured at ALLOC_PRIV completion
+            mask: 32'hFF_FF_FF_FF, value: auxv_q, default: '0};
         StOtReq: begin
           unique case (rtype_q)
             APU_VG_CTX_CREATE: ot_req_o = '{op: APU_OBJTAB_OP_ALLOC,
@@ -296,6 +339,18 @@ module g6lc_apu_vgctl
     assign pg_req_o = '{op: pg_op_q, base: pg_base_q,
                        bytes: pg_bytes_q};
 
+    // ---- ObjPay / ShaderCore-slot reap ports ------------------------------
+    assign op_req_valid_o = state_q == StReapOpReq;
+    assign op_cpl_ready_o = state_q == StReapOpCpl;
+    // aux[63:32] = {base[15:0], words[15:0]} (vnfront parks it so)
+    assign op_req_o = '{op: APU_OBJPAY_OP_FREE,
+                       addr: {16'h0, reap_aux_q[63:48]},
+                       words: {16'h0, reap_aux_q[47:32]},
+                       default: '0};
+    assign sm_req_o    = state_q == StReapSmReq;
+    assign sm_req_pl_o = '{op: APU_SH_SM_UNREF,
+                          slot: reap_aux_q[2:0]};
+
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         state_q <= StIdle;
@@ -308,10 +363,12 @@ module g6lc_apu_vgctl
         rfence_q <= '0; trunc_q <= 1'b0; payload_b_q <= '0;
         blob_addr_q <= '0; blob_size_q <= '0; blob_mem_q <= 1'b0;
         map_size_q <= '0; map_memb_q <= 1'b0;
-        map_memid_q <= '0; map_memh_q <= '0;
+        map_memh_q <= '0;
+        auxv_q <= '0; map_unmap_q <= 1'b0;
         mem_fault_q <= 1'b0;
         pg_op_q <= APU_VGPAGES_OP_ALLOC; pg_base_q <= '0;
         pg_bytes_q <= '0; pg_ret_q <= StIdle;
+        reap_kind_q <= '0; reap_aux_q <= '0; reap_size_q <= '0;
         for (int i = 0; i < REQW; i++) req_ram[i] <= '0;
         for (int i = 0; i < RESPW; i++) resp_ram[i] <= '0;
       end else begin
@@ -455,13 +512,18 @@ module g6lc_apu_vgctl
                     blob_mem_q <= 1'b1;
                     state_q    <= StMemReq;
                   end else begin
+                    // §12.3 F5: blob-owned backing is LAZY — every
+                    // MAPPABLE blob is moved into the guest window by
+                    // MAP_BLOB immediately, so an extent taken at
+                    // create would only sit in the private arena until
+                    // freed again (and Mesa's 8 MiB cs pool does not
+                    // fit an 8 MiB private arena at all).  An unmapped
+                    // blob is bind_offset 0 — the same sentinel the
+                    // unmap path already tests.
                     blob_mem_q  <= 1'b0;
+                    blob_addr_q <= '0;
                     blob_size_q <= {req_ram[13], req_ram[12]};
-                    pg_op_q     <= APU_VGPAGES_OP_ALLOC;
-                    pg_base_q   <= '0;
-                    pg_bytes_q  <= req_ram[12];
-                    pg_ret_q    <= StOtReq;
-                    state_q     <= StPgReq;
+                    state_q     <= StOtReq;
                   end
                 end
                 APU_VG_MAP_BLOB, APU_VG_UNMAP_BLOB, APU_VG_UNREF: begin
@@ -494,11 +556,13 @@ module g6lc_apu_vgctl
           StPgReq: if (pg_req_ready_i) state_q <= StPgCpl;
           StPgCpl: begin
             if (pg_cpl_valid_i) begin
-              if (pg_op_q == APU_VGPAGES_OP_ALLOC) begin
+              if (pg_op_q == APU_VGPAGES_OP_ALLOC ||
+                  pg_op_q == APU_VGPAGES_OP_ALLOC_PRIV) begin
                 if (pg_cpl_i.status == APU_VGPAGES_OK) begin
                   // window-relative byte offset -> SHM window address
                   blob_addr_q <= APU_VG_SHM_BASE +
                                  64'(pg_cpl_i.base);
+                  auxv_q      <= pg_cpl_i.base;
                   state_q <= pg_ret_q;
                 end else begin
                   resp_ram[0] <= APU_VG_ERR_PARAM;  // aperture exhausted
@@ -535,14 +599,26 @@ module g6lc_apu_vgctl
           StMapMemCpl: begin
             if (ot_cpl_valid_i) begin
               if (ot_cpl_i.status != APU_OBJTAB_OK) begin
-                resp_ram[0] <= APU_VG_ERR_RID;
-                state_q <= StWrPrep;
+                if (map_unmap_q) begin
+                  // §6c teardown order: the kernel unmaps the GEM
+                  // resources after CTX_DESTROY, so the backing
+                  // VkDeviceMemory is already tombstoned and the sweep
+                  // (or an earlier vkFreeMemory retire) has reclaimed
+                  // its extent.  The mapping is therefore already
+                  // gone — rebind the blob lazy and answer OK; a
+                  // MAP_BLOB on a dead memory still refuses.
+                  state_q <= StBindReq;
+                end else begin
+                  resp_ram[0] <= APU_VG_ERR_RID;
+                  state_q <= StWrPrep;
+                end
               end else begin
                 map_memh_q <= ot_cpl_i.handle;
                 pg_op_q    <= APU_VGPAGES_OP_FREE;
                 pg_base_q  <= ot_cpl_i.entry.aux[63:32];
                 pg_bytes_q <= map_size_q[31:0];
-                pg_ret_q   <= StMapAllocAt;
+                // UNMAP_BLOB re-privatizes instead of ALLOC_AT
+                pg_ret_q   <= map_unmap_q ? StUnmapPriv : StMapAllocAt;
                 state_q    <= StPgReq;
               end
             end
@@ -551,6 +627,7 @@ module g6lc_apu_vgctl
           StMapBind: begin
             blob_addr_q <= APU_VG_SHM_BASE +
                            64'({req_ram[9], req_ram[8]});
+            auxv_q      <= req_ram[8];
             blob_size_q <= map_size_q;
             resp_ram[0] <= APU_VG_RESP_MAP_INFO;
             resp_ram[6] <= APU_VG_MAP_WC;
@@ -561,7 +638,68 @@ module g6lc_apu_vgctl
           // memory-backed tail: publish the new page base on the memory
           // object so engine-side addressing follows the guest's map
           StMapAuxReq: if (ot_req_ready_i) state_q <= StMapAuxCpl;
-          StMapAuxCpl: if (ot_cpl_valid_i) state_q <= StWrPrep;
+          // unmap path: rebind the blob to 0 (lazy) after the memory's
+          // base was re-privatized; map path is done after the publish
+          StMapAuxCpl: if (ot_cpl_valid_i)
+            state_q <= map_unmap_q ? StBindReq : StWrPrep;
+
+          // ---- RESET_CTX reap -------------------------------------------
+          // One tombstoned entry per SWEEP completion: release the
+          // resource it owned — vnfront's retire path does the same per
+          // kind (vn_golden parity).  Command-buffer/fence arena slots
+          // are vnfront-internal and are never held by entries a live
+          // guest context can lose this way (CTX_DESTROY follows idle
+          // — an in-flight buffer tombstone leaks only its arena slot,
+          // documented §12.3).
+          StReapDec: begin
+            unique case (reap_kind_q)
+              6'(APU_VN_KIND_VK_DEVICE_MEMORY): begin
+                // aperture extent at aux[63:32] (private base, or the
+                // guest-window offset a MAP_BLOB moved it to)
+                pg_op_q    <= APU_VGPAGES_OP_FREE;
+                pg_base_q  <= reap_aux_q[63:32];
+                pg_bytes_q <= reap_size_q[31:0];
+                pg_ret_q   <= StOtCpl;
+                state_q    <= StPgReq;
+              end
+              6'(APU_VN_KIND_VK_DESCRIPTOR_POOL): begin
+                // F5: descriptor record store at aux[31:0]
+                pg_op_q    <= APU_VGPAGES_OP_FREE;
+                pg_base_q  <= reap_aux_q[31:0];
+                pg_bytes_q <= reap_size_q[31:0];
+                pg_ret_q   <= StOtCpl;
+                state_q    <= StPgReq;
+              end
+              6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT),
+              6'(APU_VN_KIND_VK_PIPELINE_LAYOUT): begin
+                // ObjPay extent {base[15:0], words[15:0]} at aux[63:32]
+                state_q    <= StReapOpReq;
+              end
+              6'(APU_VN_KIND_VK_SHADER_MODULE),
+              6'(APU_VN_KIND_VK_PIPELINE): begin
+                // ShaderCore slot reference at aux[2:0]
+                state_q    <= StReapSmReq;
+              end
+              default: state_q <= StOtCpl;   // stateless kind
+            endcase
+          end
+          StReapOpReq: if (op_req_ready_i) state_q <= StReapOpCpl;
+          // reclaim status is advisory — the object is already dead
+          StReapOpCpl: if (op_cpl_valid_i) state_q <= StOtCpl;
+          StReapSmReq: if (sm_gnt_i)       state_q <= StReapSmCpl;
+          StReapSmCpl: if (sm_cpl_i)       state_q <= StOtCpl;
+
+          // ---- UNMAP_BLOB re-privatization ------------------------------
+          // guest extent freed; back the object privately again so its
+          // bookkeeping (and any device-side addressing) stays live and
+          // nothing device-placed lingers inside the kernel's window
+          StUnmapPriv: begin
+            pg_op_q    <= APU_VGPAGES_OP_ALLOC_PRIV;
+            pg_base_q  <= '0;
+            pg_bytes_q <= map_size_q[31:0];
+            pg_ret_q   <= map_memb_q ? StMapAuxReq : StBindReq;
+            state_q    <= StPgReq;
+          end
 
           // ---- blob_id != 0: memory-object resolve -------------------
           StMemReq: if (ot_req_ready_i) state_q <= StMemCpl;
@@ -583,6 +721,12 @@ module g6lc_apu_vgctl
                 blob_addr_q <= APU_VG_SHM_BASE +
                                ot_cpl_i.entry.aux[63:32];
                 blob_size_q <= ot_cpl_i.entry.size;
+                // {gen,slot} of the backing VkDeviceMemory — written
+                // to the blob's aux[63:32] at StAuxHiReq so a later
+                // MAP_BLOB relocation resolves it by handle (the
+                // 24-bit aux[31:8] client-id shadow cannot express
+                // 64-bit client ids)
+                map_memh_q  <= ot_cpl_i.handle;
                 state_q     <= StOtReq;          // ALLOC the blob entry
               end
             end
@@ -590,7 +734,13 @@ module g6lc_apu_vgctl
 
           // mark the blob memory-backed so UNREF skips the page free
           StAuxReq: if (ot_req_ready_i) state_q <= StAuxCpl;
-          StAuxCpl: if (ot_cpl_valid_i) state_q <= StWrPrep;
+          StAuxCpl: if (ot_cpl_valid_i) begin
+            // a second aux word records the memory's {gen,slot} handle
+            state_q <= (rtype_q == APU_VG_CREATE_BLOB && blob_mem_q)
+                       ? StAuxHiReq : StWrPrep;
+          end
+          StAuxHiReq: if (ot_req_ready_i) state_q <= StAuxHiCpl;
+          StAuxHiCpl: if (ot_cpl_valid_i) state_q <= StWrPrep;
 
           // ---- ObjTab transactions ------------------------------------------
           // the request holds valid until the table is ready: the
@@ -616,7 +766,7 @@ module g6lc_apu_vgctl
                     // the engines never look.
                     if (req_ram[9] != 32'h0 ||
                         64'({req_ram[9], req_ram[8]}) +
-                            ot_cpl_i.entry.size > APU_VG_SHM_BYTES) begin
+                            ot_cpl_i.entry.size > APU_VG_GUEST_BYTES) begin
                       resp_ram[0] <= APU_VG_ERR_PARAM;
                       state_q     <= StWrPrep;
                     end else if ({req_ram[9], req_ram[8]} ==
@@ -630,20 +780,26 @@ module g6lc_apu_vgctl
                     end else begin
                       map_size_q  <= ot_cpl_i.entry.size;
                       map_memb_q  <= ot_cpl_i.entry.aux[0];
-                      map_memid_q <= {8'h0,
-                                      ot_cpl_i.entry.aux[31:8]};
+                      // {gen,slot} of the backing memory recorded at
+                      // create (aux[63:32])
+                      map_memh_q  <= ot_cpl_i.entry.aux[63:32];
+                      map_unmap_q <= 1'b0;
                       if (ot_cpl_i.entry.aux[0]) begin
                         // memory-backed: the pages belong to the
                         // VkDeviceMemory; resolve it, then free+relocate
                         // the whole extent it sits on
                         state_q <= StMapMemReq;
                       end else begin
+                        // blob-owned: bind_offset==0 means the lazy
+                        // create never allocated — go straight to
+                        // ALLOC_AT; else free the extent it holds
                         pg_op_q    <= APU_VGPAGES_OP_FREE;
                         pg_base_q  <= 32'(ot_cpl_i.entry.bind_offset -
                                           APU_VG_SHM_BASE);
                         pg_bytes_q <= ot_cpl_i.entry.size[31:0];
                         pg_ret_q   <= StMapAllocAt;
-                        state_q    <= StPgReq;
+                        state_q    <= (ot_cpl_i.entry.bind_offset !=
+                                       64'h0) ? StPgReq : StMapAllocAt;
                       end
                     end
                   end else begin
@@ -652,16 +808,28 @@ module g6lc_apu_vgctl
                 end
                 APU_VG_UNMAP_BLOB: begin
                   if (ot_cpl_i.status == APU_OBJTAB_OK &&
-                      !ot_cpl_i.entry.aux[0] &&
                       ot_cpl_i.entry.bind_offset != 64'h0) begin
-                    // kernel released its SHM slot: drop our page marks
-                    // (a later MAP re-allocates at the new offset)
-                    pg_op_q    <= APU_VGPAGES_OP_FREE;
-                    pg_base_q  <= 32'(ot_cpl_i.entry.bind_offset -
-                                      APU_VG_SHM_BASE);
-                    pg_bytes_q <= ot_cpl_i.entry.size[31:0];
-                    pg_ret_q   <= StWrPrep;
-                    state_q    <= StPgReq;
+                    // kernel released its SHM slot: free the guest
+                    // extent and drop the blob back to unmapped
+                    // (bind_offset 0 — a later MAP re-allocates at the
+                    // new offset).  Memory-backed blobs also re-base
+                    // the VkDeviceMemory onto a fresh private extent.
+                    map_size_q  <= ot_cpl_i.entry.size;
+                    map_memb_q  <= ot_cpl_i.entry.aux[0];
+                    blob_addr_q <= '0;
+                    blob_size_q <= ot_cpl_i.entry.size;
+                    if (ot_cpl_i.entry.aux[0]) begin
+                      map_memh_q  <= ot_cpl_i.entry.aux[63:32];
+                      map_unmap_q <= 1'b1;
+                      state_q     <= StMapMemReq;
+                    end else begin
+                      pg_op_q     <= APU_VGPAGES_OP_FREE;
+                      pg_base_q   <= 32'(ot_cpl_i.entry.bind_offset -
+                                         APU_VG_SHM_BASE);
+                      pg_bytes_q  <= ot_cpl_i.entry.size[31:0];
+                      pg_ret_q    <= StBindReq;
+                      state_q     <= StPgReq;
+                    end
                   end else begin
                     state_q <= StWrPrep;
                   end
@@ -682,17 +850,31 @@ module g6lc_apu_vgctl
                     // memory-backed blob: the pages belong to the
                     // DEVICE_MEMORY object (freed at vkFreeMemory)
                     state_q <= StWrPrep;
-                  end else begin
-                    // blob-owned pages: return them to the allocator
+                  end else if (ot_cpl_i.entry.bind_offset != 64'h0) begin
+                    // blob-owned mapped pages: return them to the
+                    // allocator (bind_offset 0 = lazy create, nothing
+                    // was ever allocated)
                     pg_op_q    <= APU_VGPAGES_OP_FREE;
                     pg_base_q  <= 32'(ot_cpl_i.entry.bind_offset -
                                       APU_VG_SHM_BASE);
                     pg_bytes_q <= ot_cpl_i.entry.size[31:0];
                     pg_ret_q   <= StWrPrep;
                     state_q    <= StPgReq;
+                  end else begin
+                    state_q <= StWrPrep;
                   end
                 end
-                default: state_q <= StWrPrep;   // CTX_DESTROY (RESET_CTX)
+                // CTX_DESTROY (RESET_CTX): the sweep streams one SWEEP
+                // completion per tombstoned entry — reap the resource
+                // each owned — then a final OK carries the pinned count
+                default: if (ot_cpl_i.status == APU_OBJTAB_SWEEP) begin
+                  reap_kind_q <= ot_cpl_i.entry.kind;
+                  reap_aux_q  <= ot_cpl_i.entry.aux;
+                  reap_size_q <= ot_cpl_i.entry.size;
+                  state_q     <= StReapDec;
+                end else begin
+                  state_q <= StWrPrep;
+                end
               endcase
             end
           end
@@ -803,7 +985,8 @@ module g6lc_apu_vgctl
 
     // SUBMIT_3D handoff fields
     logic unused;
-    assign unused = testmode_i | ot_req_ready_i | (|ot_cpl_i);
+    assign unused = testmode_i | ot_req_ready_i | (|ot_cpl_i) |
+                    (|op_cpl_i) | (|sm_cpl_pl_i);
     assign xs_ndesc_o = ndesc_q;
     assign xs_off_o = 32'd32;
     assign xs_bytes_o = req_ram[6];
@@ -819,6 +1002,9 @@ module g6lc_apu_vgctl_fixture
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_vgpages_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
+  import g6lc_apu_sh_pkg::*;
 #(
   parameter bit          Enable   = 1'b0,
   parameter int unsigned ShmPages = 256
@@ -846,6 +1032,23 @@ module g6lc_apu_vgctl_fixture
   input  logic            ot_cpl_valid_i,
   output logic            ot_cpl_ready_o,
   input  apu_objtab_cpl_t ot_cpl_i,
+  output logic             pg_req_valid_o,
+  input  logic             pg_req_ready_i,
+  output apu_vgpages_req_t pg_req_o,
+  input  logic             pg_cpl_valid_i,
+  output logic             pg_cpl_ready_o,
+  input  apu_vgpages_cpl_t pg_cpl_i,
+  output logic            op_req_valid_o,
+  input  logic            op_req_ready_i,
+  output apu_objpay_req_t op_req_o,
+  input  logic            op_cpl_valid_i,
+  output logic            op_cpl_ready_o,
+  input  apu_objpay_cpl_t op_cpl_i,
+  output logic            sm_req_o,
+  output apu_sh_sm_req_t  sm_req_pl_o,
+  input  logic            sm_gnt_i,
+  input  logic            sm_cpl_i,
+  input  apu_sh_sm_cpl_t  sm_cpl_pl_i,
   output logic            xs_valid_o,
   input  logic            xs_ready_i,
   output apu_vg_desc_t [APU_VG_MAX_DESC-1:0] xs_desc_o,

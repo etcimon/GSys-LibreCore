@@ -1,0 +1,17 @@
+#version 460
+layout(local_size_x = 8) in;
+// §12.3 F5: four bound descriptor sets; the set-2 buffer is bound as
+// STORAGE_BUFFER_DYNAMIC in the vector's layout so its dispatch-time
+// dynamic offset lands on the record base.
+layout(set = 0, binding = 0) buffer B0 { float v[]; } b0;
+layout(set = 1, binding = 0) buffer B1 { float v[]; } b1;
+layout(set = 2, binding = 0) buffer B2 { float v[]; } b2;
+layout(set = 3, binding = 0) buffer B3 { float v[]; } b3;
+layout(set = 0, binding = 1) buffer Out { float o[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    o[i]      = b0.v[i];
+    o[i + 8]  = b1.v[i];
+    o[i + 16] = b2.v[i];
+    o[i + 24] = b3.v[i];
+}

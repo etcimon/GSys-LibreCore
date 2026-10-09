@@ -65,6 +65,12 @@ package g6lc_apu_pkg;
   // ~9.3 MiB of HOST3D blobs per instance (8 MiB cs + 1 MiB reply
   // shmem pools + the 132 KiB ring) before any buffer objects.
   localparam logic [63:0] APU_SHM_BYTES           = 64'h0000_0000_0200_0000;
+  // §12.3 F5: the top 8 MiB is a device-private arena (descriptor-pool
+  // record stores, APU_VGPAGES_OP_ALLOC_PRIV); the guest kernel's shm
+  // drm_mm only spans the advertised SHM_LEN so internal allocations
+  // can never collide with MAP_BLOB placement.  Must equal
+  // g6lc_apu_vg_pkg::APU_VG_GUEST_BYTES.
+  localparam logic [63:0] APU_SHM_GUEST_BYTES     = 64'h0000_0000_0180_0000;
   localparam logic [31:0] APU_BLOB_MEM_HOST3D     = 32'h0000_0002;
   localparam logic [31:0] APU_BLOB_FLAG_MAPPABLE  = 32'h0000_0001;
   localparam logic [31:0] APU_VGPU_CAPSET_VENUS   = 32'd4;

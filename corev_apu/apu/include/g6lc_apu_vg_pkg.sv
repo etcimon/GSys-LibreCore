@@ -35,6 +35,19 @@ package g6lc_apu_vg_pkg;
   localparam int unsigned APU_VG_PAGES     = 8192;
   localparam int unsigned APU_VG_PAGE_BYTES =
       32'(APU_VG_SHM_BYTES / APU_VG_PAGES);
+  // §12.3 F5: the guest kernel's shm drm_mm owns MAP_BLOB placement
+  // over the whole advertised window and cannot see the device bitmap —
+  // a device-internal allocation in the guest range collides at
+  // ALLOC_AT (ERR_UNSPEC).  The top of the window is therefore a
+  // device-private arena (APU_VGPAGES_OP_ALLOC_PRIV) and SHM_LEN
+  // reports only APU_VG_GUEST_BYTES so the kernel's allocator can
+  // never select it.  APU_VG_GUEST_BYTES must equal the SHM_LEN VREG
+  // published by g6lc_apu_virtio_mmio (APU_SHM_GUEST_BYTES).
+  localparam logic [63:0] APU_VG_GUEST_BYTES = 64'h0180_0000;  // 24 MiB
+  localparam int unsigned APU_VG_GUEST_PAGES =
+      32'(APU_VG_GUEST_BYTES / APU_VG_PAGE_BYTES);
+  localparam int unsigned APU_VG_PRIV_PAGES  =
+      APU_VG_PAGES - APU_VG_GUEST_PAGES;
   // aperture word-address width (aperture-relative byte offset >> 2)
   localparam int unsigned APU_VG_AP_WORD_W = $clog2(32'(APU_VG_SHM_BYTES / 4));
 

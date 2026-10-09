@@ -48,6 +48,7 @@ module g6lc_apu_vgsys
   parameter int unsigned PayWords = 16384,
   parameter int unsigned VgPages      = APU_VG_PAGES,
   parameter int unsigned VgPageBytes  = APU_VG_PAGE_BYTES,
+  parameter int unsigned VgGuestPages = APU_VG_GUEST_PAGES,
   parameter int unsigned ShaderRegs    = 256,
   parameter int unsigned MaxWaves      = 8,
   parameter int unsigned ShaderIds     = 1024,
@@ -279,6 +280,7 @@ module g6lc_apu_vgsys
     g6lc_apu_vgtop #(
       .Enable(1'b1), .Rings(Rings), .Fences(Fences),
       .PayWords(PayWords), .VgPages(VgPages), .VgPageBytes(VgPageBytes),
+      .VgGuestPages(VgGuestPages),
       .ShaderRegs(ShaderRegs), .MaxWaves(MaxWaves),
       .ShaderIds(ShaderIds), .ShaderSlots(ShaderSlots),
       .ShaderWords(ShaderWords), .ShaderInit(ShaderInit),
@@ -385,6 +387,7 @@ module g6lc_apu_vgsys_fixture
   parameter int unsigned PayWords = 16384,
   parameter int unsigned VgPages      = APU_VG_PAGES,
   parameter int unsigned VgPageBytes  = APU_VG_PAGE_BYTES,
+  parameter int unsigned VgGuestPages = APU_VG_GUEST_PAGES,
   parameter int unsigned ShaderRegs    = 256,
   parameter int unsigned MaxWaves      = 8,
   parameter int unsigned ShaderIds     = 1024,
@@ -445,6 +448,7 @@ module g6lc_apu_vgsys_fixture
   g6lc_apu_vgsys #(
     .Enable(Enable), .Rings(Rings), .Fences(Fences),
     .PayWords(PayWords), .VgPages(VgPages), .VgPageBytes(VgPageBytes),
+    .VgGuestPages(VgGuestPages),
     .ShaderRegs(ShaderRegs), .MaxWaves(MaxWaves),
     .ShaderIds(ShaderIds), .ShaderSlots(ShaderSlots),
     .ShaderWords(ShaderWords), .ShaderInit(ShaderInit),

@@ -1,1 +1,1 @@
-{"gx": 2, "gy": 1, "gz": 1, "bindings": [{"set": 0, "binding": 0, "size": 256, "init": "/mnt/e/cva6/verif/tb/apu/sh_vectors/localsize32_opt_3_in0.bin"}, {"set": 0, "binding": 1, "size": 256, "init": "/mnt/e/cva6/verif/tb/apu/sh_vectors/localsize32_opt_3_in1.bin"}]}
+{"gx": 2, "gy": 1, "gz": 1, "bindings": [{"set": 0, "binding": 0, "size": 256, "init": "/mnt/e/cva6/verif/tb/apu/sh_vectors/localsize32_opt_3_in0.bin", "idx": 0, "dyn": 0}, {"set": 0, "binding": 1, "size": 256, "init": "/mnt/e/cva6/verif/tb/apu/sh_vectors/localsize32_opt_3_in1.bin", "idx": 0, "dyn": 0}]}

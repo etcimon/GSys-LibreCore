@@ -1399,6 +1399,7 @@ def gen_reply_exec(model, asm, rep_sim, cmd, ty, cs_words, rec, result,
 VK_OK = 0
 VK_NOT_READY = 1
 VK_ERR_OOM = 0xFFFFFFFE
+VK_ERR_OOPM = 0xFFFFFFFB   # VK_ERROR_OUT_OF_POOL_MEMORY (F5)
 VK_ERR_LOST = 0xFFFFFFFC
 VK_ERR_FEATURE = 0xFFFFFFF8
 VK_ERR_UNKNOWN = 0xFFFFFFF3
@@ -1419,17 +1420,23 @@ PAY_PER_BUF = 256
 APU_VN_FAULT_PAYLOAD = 9
 # §7b/5a-ii: pipelines keep no ObjPay extent — the staged payload is
 # consumed at creation and the object carries {slot, layout} in aux.
-PAY_KINDS = ('VkDescriptorSetLayout', 'VkPipelineLayout',
-             'VkDescriptorSet')
+PAY_KINDS = ('VkDescriptorSetLayout', 'VkPipelineLayout')
 # §7b/5a-ii: kinds whose retire needs a pre-LOOKUP for the aux extent
-# (ShaderCore slot for modules/pipelines, vgpages for device memory)
-AUXRET_KINDS = ('VkShaderModule', 'VkPipeline', 'VkDeviceMemory')
+# (ShaderCore slot for modules/pipelines, vgpages for device memory;
+# §12.3 F5: descriptor pools hold a vgpages extent in aux[31:0])
+AUXRET_KINDS = ('VkShaderModule', 'VkPipeline', 'VkDeviceMemory',
+                'VkDescriptorPool')
 SH_SLOTS = 8
 # aperture allocator geometry == APU_VG_PAGES / APU_VG_PAGE_BYTES
 # (g6lc_apu_vg_pkg.sv): 8192 x 4 KiB pages over the 32 MiB SHM window —
 # the guest kernel packs MAP_BLOB offsets at 4 KiB density
 VGP_PAGES = 8192
 VGP_PAGE = 4096
+# §12.3 F5: APU_VG_GUEST_BYTES — guest-mappable span (SHM_LEN); the
+# pages above it are the device-private arena (ALLOC_PRIV) the kernel's
+# shm drm_mm can never select
+VGP_GUEST_BYTES = 0x01800000
+VGP_GUEST_PAGES = VGP_GUEST_BYTES // VGP_PAGE
 
 # commit prediction for vkCreateComputePipelines: the 4a commit
 # scanner mirrors g6lc_apu_shmod 1:1 (Fault -> VK_ERROR_UNKNOWN)
@@ -1503,6 +1510,10 @@ class FrontModel:
         # cmdrec per-buffer payload arenas
         self.pay_top = [0] * self.CB_BUFS
         self.pay_arena = [dict() for _ in range(self.CB_BUFS)]
+        # §12.3 F5: sparse aperture mirror for descriptor records the
+        # front writes (word-indexed); the tape mode binds self.ap to
+        # the TransportModel and writes land there instead
+        self.apm = {}
 
     # ---- ObjTab -------------------------------------------------------------
     def resolve(self, idv, kind):
@@ -1667,14 +1678,19 @@ class FrontModel:
         except spirv_scan.Fault:
             return False
 
-    def pg_alloc(self, nbytes):
-        """vgpages first-fit ALLOC -> window-relative byte base."""
+    def pg_alloc(self, nbytes, priv=False):
+        """vgpages first-fit ALLOC -> window-relative byte base.
+        `priv` selects the device-private arena above the guest
+        window (APU_VGPAGES_OP_ALLOC_PRIV)."""
         pages = (nbytes + VGP_PAGE - 1) // VGP_PAGE
         if self.ap is not None:
-            base_w = self.ap.ap_alloc(nbytes)
+            base_w = self.ap.ap_alloc(nbytes, priv=priv)
             return None if base_w < 0 else base_w * 4
+        lo = VGP_GUEST_PAGES if priv else 0
+        hi = VGP_PAGES if priv else VGP_GUEST_PAGES
         run = start = 0
-        for i, u in enumerate(self.pg_pages):
+        for i in range(lo, hi):
+            u = self.pg_pages[i]
             if u == 0:
                 if run == 0:
                     start = i
@@ -1694,6 +1710,109 @@ class FrontModel:
         b = byte_base // VGP_PAGE
         for j in range(b, b + (nbytes + VGP_PAGE - 1) // VGP_PAGE):
             self.pg_pages[j] = 0
+
+    # ---- §12.3 F5: descriptor memory path --------------------------------
+    DESC_BYTES = 32
+
+    def apw32(self, out, addr, w):
+        """Front ap-port write mirror: the aperture word at a byte
+        address, plus a .pay tag-3 expectation for the TB."""
+        w &= 0xFFFFFFFF
+        self.apm[addr >> 2] = w
+        if self.ap is not None:
+            self.ap.ap[addr >> 2] = w
+        out['apw'].append((addr, w))
+
+    def apr64(self, addr):
+        """Read two aperture words (the copy path's source beats)."""
+        if self.ap is not None:
+            return (self.ap.ap[addr >> 2] |
+                    (self.ap.ap[(addr >> 2) + 1] << 32))
+        return (self.apm.get(addr >> 2, 0) |
+                (self.apm.get((addr >> 2) + 1, 0) << 32))
+
+    def dset_dead(self, de):
+        """StRsvPoolC/StRsvLayC mirror: the set's recorded pool
+        {gen,slot} must still resolve with the mint-time epoch and the
+        layout {gen,slot} must still be live.  Returns (dead, lay_ent).
+        """
+        ph = de['size'] & 0xFFFFFFFF
+        ps = ph & 0xFFFF
+        pe = self.ent[ps] if ps < self.SLOTS else None
+        dead = not (pe is not None and
+                    pe['kind'] == KIND['VkDescriptorPool'] and
+                    pe['gen'] == (ph >> 16) & 0xFFFF and
+                    (pe['state'] & 0xFFFF) == (de['state'] & 0xFFFF))
+        lh = (de['aux'] >> 32) & 0xFFFFFFFF
+        ls = lh & 0xFFFF
+        le = self.ent[ls] if ls < self.SLOTS else None
+        dead = dead or not (le is not None and
+                            le['kind'] == KIND['VkDescriptorSetLayout']
+                            and le['gen'] == (lh >> 16) & 0xFFFF)
+        return dead, le
+
+    def lay_rows(self, le):
+        """-> [{binding,type,count,off,dyn,dynbase}] from the layout's
+        ObjPay row table (word0 = nbind header)."""
+        if le is None:
+            return []
+        base = (le['aux'] >> 48) & 0xFFFF
+        nbind = (((le['aux'] >> 32) & 0xFFFF) - 1) >> 1
+        rows = []
+        for j in range(nbind):
+            w0 = self.pay.get(base + 1 + 2 * j, 0)
+            w1 = self.pay.get(base + 2 + 2 * j, 0)
+            rows.append({'binding': (w0 >> 24) & 0xFF,
+                         'type': (w0 >> 16) & 0xFF,
+                         'count': w0 & 0xFFFF,
+                         'off': (w1 >> 12) & 0xFFFFF,
+                         'dyn': (w1 >> 11) & 1,
+                         'dynbase': w1 & 0xF})
+        return rows
+
+    def lay_row(self, le, binding):
+        """StRowSc mirror: the row whose binding number matches."""
+        for r in self.lay_rows(le):
+            if r['binding'] == (binding & 0xFF):
+                return r
+        return None
+
+    @staticmethod
+    def _buf_typ(t):
+        return t in (6, 7, 8, 9)
+
+    def _upd_elem(self, out, stg, sbase, row, idx, dtype, pay):
+        """Mirror StUpdInfo..StUpdElemCk: one 32-byte record write at
+        set_base + (off + idx)*32.  `stg` is the staged-word cursor of
+        this element's buffer info.  Returns the element's poison
+        contribution (1 = failed buffer-descriptor write)."""
+        rec_addr = sbase + ((row['off'] + idx) << 5)
+        elok = 0
+        eb = esz = 0
+        if self._buf_typ(dtype):
+            buf = pay[stg] | (pay[stg + 1] << 32)
+            off = pay[stg + 2] | (pay[stg + 3] << 32)
+            rng = pay[stg + 4] | (pay[stg + 5] << 32)
+            bst, bs, be = self.resolve(buf, KIND['VkBuffer'])
+            if bst == 'OK' and 0 <= be.get('bind_mem', -1) < \
+                    self.SLOTS and self.ent[be['bind_mem']] is not None:
+                me = self.ent[be['bind_mem']]
+                bsz = be['size'] & 0xFFFFFFFF
+                boff = be['bind_off'] & 0xFFFFFFFF
+                mbase = (me['aux'] >> 32) & 0xFFFFFFFF
+                WHOLE = 0xFFFFFFFFFFFFFFFF
+                rng_eff = bsz - off if rng == WHOLE else rng
+                if me['kind'] == KIND['VkDeviceMemory'] and not (
+                        off > bsz or rng_eff > bsz - off or
+                        boff + off + rng_eff > me['size']):
+                    elok = 1
+                    eb = (mbase + boff + off) & 0xFFFFFFFF
+                    esz = rng_eff & 0xFFFFFFFF
+        # record = {base[31:0], size[31:0], kind[7:0], flags[7:0]}
+        self.apw32(out, rec_addr, eb if elok else 0)
+        self.apw32(out, rec_addr + 4, esz if elok else 0)
+        self.apw32(out, rec_addr + 8, (elok << 8) | dtype)
+        return 1 if self._buf_typ(dtype) and not elok else 0
 
     def _xfer_extent(self, h, kind):
         """§12.3 C/5a: mirror cmdexec's StXf* operand assembly —
@@ -1769,12 +1888,14 @@ class FrontModel:
         return False
 
     def _disp_assembly_lost(self, session, aux):
-        """§7b/5a-ii: replay one command buffer's records the way
-        cmdexec does at submit; True -> DEVICE_LOST on the fence."""
+        """§7b/5a-ii + §12.3 F5: replay one command buffer's records
+        the way cmdexec does at submit; True -> DEVICE_LOST on the
+        fence.  Descriptor state resolves: bound set -> pipeline
+        layout's declared set layout {gen,slot} (compatibility), set
+        poison bit, pool generation + reset epoch."""
         T = session['T']
         bound = 0
         dset = [0] * 4
-        nbinds = 0
         for r in self.recs[aux]:
             ct = r['ctype']
             # generic per-record handle resolve (cmdexec StResReq)
@@ -1787,44 +1908,56 @@ class FrontModel:
             if ct == T['vkCmdBindPipeline']:
                 bound = r['handle'][0]
             elif ct == T['vkCmdBindDescriptorSets']:
+                # §12.3 F5 arena stream: {handle,ndyn} pairs then the
+                # dynamic-offset words
                 abase = r['imm'][7] & 0xFFFF
                 fs = r['imm'][1] & 0xFFFF
                 nset = r['imm'][2] & 0xFFFF
                 for i in range(max(0, min(nset, 4 - fs))):
-                    dset[fs + i] = self.pay_arena[aux].get(abase + i, 0)
+                    dset[fs + i] = self.pay_arena[aux].get(
+                        abase + 2 * i, 0)
             elif ct == T['vkCmdDispatch']:
                 if bound == 0:
                     return True
-                st, _s, _e = self.resolve(bound, KIND['VkPipeline'])
+                st, _s, pe = self.resolve(bound, KIND['VkPipeline'])
                 if st != 'OK':
                     return True
-                for dh in dset:
-                    if dh == 0:
+                pls = (pe['aux'] >> 32) & 0xFFFF
+                plg = (pe['aux'] >> 48) & 0xFFFF
+                ple = self.ent[pls] if pls < self.SLOTS else None
+                if (ple is None or
+                        ple['kind'] != KIND['VkPipelineLayout'] or
+                        ple['gen'] != plg):
+                    return True
+                plpay = (ple['aux'] >> 48) & 0xFFFF
+                plw = (ple['aux'] >> 32) & 0xFFFF
+                for s in range(4):
+                    if dset[s] == 0 or plw < 4 + 2 * s:
                         continue
-                    st, _ds, de = self.resolve(
-                        dh, KIND['VkDescriptorSet'])
-                    if st != 'OK':
+                    slid = (self.pay.get(plpay + 2 + 2 * s, 0) |
+                            self.pay.get(plpay + 3 + 2 * s, 0) << 32)
+                    lst, lsl, lle = self.resolve(
+                        slid, KIND['VkDescriptorSetLayout'])
+                    if lst != 'OK':
                         return True
-                    base = (de['aux'] >> 48) & 0xFFFF
-                    nw = (de['aux'] >> 32) & 0xFFFF
-                    for j in range(nw // 4):
-                        if nbinds >= 16:
-                            return True
-                        w3 = self.pay.get(base + j * 4 + 3, 0)
-                        if w3 & 0x80000000:
-                            return True
-                        bh = self.pay.get(base + j * 4, 0)
-                        if bh == 0:
-                            return True
-                        bst, bs, be = self.resolve(
-                            bh, KIND['VkBuffer'])
-                        if bst != 'OK':
-                            return True
-                        ms = be.get('bind_mem', -1)
-                        if ms < 0 or ms >= self.SLOTS \
-                                or self.ent[ms] is None:
-                            return True
-                        nbinds += 1
+                    slh = ((lle['gen'] << 16) | lsl) & 0xFFFFFFFF
+                    sst, _ssl, sse = self.resolve(
+                        dset[s], KIND['VkDescriptorSet'])
+                    if sst != 'OK':
+                        return True
+                    if (sse['aux'] >> 31) & 1:
+                        return True        # poisoned set
+                    if ((sse['aux'] >> 32) & 0xFFFFFFFF) != slh:
+                        return True        # incompatible layout
+                    ph = sse['size'] & 0xFFFFFFFF
+                    psl = ph & 0xFFFF
+                    ppe = self.ent[psl] if psl < self.SLOTS else None
+                    if (ppe is None or
+                            ppe['kind'] != KIND['VkDescriptorPool'] or
+                            ppe['gen'] != (ph >> 16) & 0xFFFF or
+                            (ppe['state'] & 0xFFFF) !=
+                            (sse['state'] & 0xFFFF)):
+                        return True        # dead pool / stale epoch
             elif ct == T.get('vkCmdDispatchIndirect', -1):
                 # issues on the work port -> shcore UNSUPPORTED -> lost
                 return True
@@ -1853,6 +1986,9 @@ class FrontModel:
                 self.sm_unref(e['aux'] & 7)
             elif e['kind'] == KIND['VkDeviceMemory']:
                 self.pg_free((e['aux'] >> 32) & 0xFFFFFFFF, e['size'])
+            elif e['kind'] == KIND['VkDescriptorPool']:
+                # §12.3 F5: pool record store pages at aux[31:0]
+                self.pg_free(e['aux'] & 0xFFFFFFFF, e['size'])
             if e['kind'] in pk and (e['aux'] >> 32):
                 self.pay_free((e['aux'] >> 48) & 0xFFFF,
                               (e['aux'] >> 32) & 0xFFFF)
@@ -1878,6 +2014,7 @@ class FrontModel:
         act = info['act']
         cls = act['class']
         out = {'result': VK_OK, 'rep': [], 'record': None,
+               'apw': [],
                'work': [], 'fault': rec['fault'],
                'payw': [], 'arenaw': [], 'null_mask': set()}
         ewn = self.m.exec_words_count()
@@ -1939,57 +2076,98 @@ class FrontModel:
             pass
 
         elif cls == 'UPDATE':
-            # §7b: vkUpdateDescriptorSets walks the staged writes --
-            # per write {dstSet(2), dstBinding, dstArrayElement,
-            # descriptorCount, descriptorType}, then per buffer info
-            # {buffer(2), offset(2), range(2)} for types 6/7
-            if ct == session['T']['vkUpdateDescriptorSets'] \
-                    and rec['imm'][0] != 0:
+            # §12.3 F5: vkUpdateDescriptorSets writes 32-byte records
+            # through the aperture port.  Staged order: per write
+            # {dstSet(2), dstBinding, dstArrayElement, descriptorCount,
+            # descriptorType} then descriptorCount buffer infos
+            # {buffer(2), offset(2), range(2)} for buffer types
+            # (6..9); per copy {srcSet(2), srcBinding, srcArrayElement,
+            # dstSet(2), dstBinding, dstArrayElement, descriptorCount}.
+            if ct == session['T']['vkUpdateDescriptorSets']:
                 stg = 0
                 pay = rec['pay']
                 for _wi in range(rec['imm'][0] & 0xFFFF):
                     dst = pay[stg] | (pay[stg + 1] << 32)
-                    dstb, dcnt, dtype = (pay[stg + 2], pay[stg + 4],
-                                         pay[stg + 5])
+                    dstb, darr, dcnt, dtype = (pay[stg + 2],
+                                               pay[stg + 3],
+                                               pay[stg + 4],
+                                               pay[stg + 5] & 0xFF)
                     stg += 6
                     st, ds, de = self.resolve(
                         dst, KIND['VkDescriptorSet'])
                     if st != 'OK':
                         out['result'] = VK_ERR_UNKNOWN
                         break
-                    dset_base = (de['aux'] >> 48) & 0xFFFF
-                    dset_words = (de['aux'] >> 32) & 0xFFFF
-                    nbind = dset_words >> 2
-                    for j in range(dcnt & 0xFFFF):
-                        if dtype not in (6, 7):
-                            idx = (dstb + j) & 0xFFFF \
-                                if dstb + j < nbind else \
-                                (nbind - 1) & 0xFFFF
-                            entw = (0, 0, 0, dtype | 0x80000000)
-                        else:
-                            buf = pay[stg] | (pay[stg + 1] << 32)
-                            off_lo, rng_lo = pay[stg + 2], pay[stg + 4]
-                            stg += 6
-                            bst, bs, _be = self.resolve(
-                                buf, KIND['VkBuffer'])
-                            if dstb + j >= nbind:
-                                idx = (nbind - 1) & 0xFFFF
-                                entw = (0, 0, 0, dtype | 0x80000000)
-                            else:
-                                idx = (dstb + j) & 0xFFFF
-                                hndl = ((self.ent[bs]['gen'] << 16) | bs) \
-                                    if bst == 'OK' else 0
-                                w3 = dtype if bst == 'OK' \
-                                    else dtype | 0x80000000
-                                entw = (hndl, off_lo, rng_lo, w3)
-                        if dset_words:
-                            for k, w in enumerate(entw):
-                                a = dset_base + idx * 4 + k
-                                w &= 0xFFFFFFFF
-                                self.pay[a] = w
-                                out['payw'].append((a, w))
-                    if out['result'] != VK_OK:
-                        break
+                    dead, le = self.dset_dead(de)
+                    sbase = de['aux'] & 0x1FFFFFF
+                    pois = 0
+                    if dead:
+                        # pool/layout dead: consume infos, touch nothing
+                        if self._buf_typ(dtype):
+                            stg += (dcnt & 0xFFFF) * 6
+                        continue
+                    row = self.lay_row(le, dstb)
+                    if row is None or row['type'] != dtype:
+                        pois = 1
+                        if self._buf_typ(dtype):
+                            stg += (dcnt & 0xFFFF) * 6
+                    elif darr + (dcnt & 0xFFFF) > row['count']:
+                        pois = 1
+                        # in-range prefix still lands
+                        upto = max(0, row['count'] - darr)
+                        for j in range(min(dcnt & 0xFFFF, upto)):
+                            pois |= self._upd_elem(
+                                out, stg, sbase, row, darr + j,
+                                dtype, pay)
+                            stg += 6 * self._buf_typ(dtype)
+                        if self._buf_typ(dtype):
+                            stg += ((dcnt & 0xFFFF) - upto) * 6
+                    else:
+                        for j in range(dcnt & 0xFFFF):
+                            pois |= self._upd_elem(
+                                out, stg, sbase, row, darr + j,
+                                dtype, pay)
+                            stg += 6 * self._buf_typ(dtype)
+                    if pois:
+                        de['aux'] |= 0x80000000
+                for _ci in range(rec['imm'][1] & 0xFFFF):
+                    src = pay[stg] | (pay[stg + 1] << 32)
+                    sb, sa = pay[stg + 2], pay[stg + 3]
+                    dst = pay[stg + 4] | (pay[stg + 5] << 32)
+                    db, da, cn = pay[stg + 6], pay[stg + 7], pay[stg + 8]
+                    stg += 9
+                    sst, _ss, se = self.resolve(
+                        src, KIND['VkDescriptorSet'])
+                    sdead, sle = (True, None) if sst != 'OK' \
+                        else self.dset_dead(se)
+                    srow = None if sle is None else \
+                        self.lay_row(sle, sb)
+                    dst_, _ds2, dde = self.resolve(
+                        dst, KIND['VkDescriptorSet'])
+                    ddead, dle = (True, None) if dst_ != 'OK' \
+                        else self.dset_dead(dde)
+                    drow = None if dle is None else \
+                        self.lay_row(dle, db)
+                    if ddead:
+                        continue      # dst unreachable: touch nothing
+                    bad = (sst != 'OK' or sdead or srow is None or
+                           drow is None or
+                           sa + cn > srow['count'] or
+                           da + cn > drow['count'])
+                    if bad:
+                        dde['aux'] |= 0x80000000
+                        continue
+                    so = se['aux'] & 0x1FFFFFF
+                    do = dde['aux'] & 0x1FFFFFF
+                    for j in range(cn & 0xFFFF):
+                        ra = so + ((srow['off'] + sa + j) << 5)
+                        wa = do + ((drow['off'] + da + j) << 5)
+                        for b in range(4):
+                            v = self.apr64(ra + b * 8)
+                            self.apw32(out, wa + b * 8,
+                                       v & 0xFFFFFFFF)
+                            self.apw32(out, wa + b * 8 + 4,
+                                       (v >> 32) & 0xFFFFFFFF)
 
         elif cls == 'QUERY':
             ek = self.exec_kind(ct)
@@ -2105,12 +2283,95 @@ class FrontModel:
                                  if not self.falloc[i]), -1)
                 if obj_kind == KIND['VkFence'] and fidx < 0:
                     out['result'] = VK_ERR_OOM
-                elif obj_kind in (KIND['VkDescriptorSetLayout'],
-                                  KIND['VkPipelineLayout']):
+                elif obj_kind == KIND['VkDescriptorSetLayout']:
+                    # §12.3 F5: the layout's ObjPay payload is a row
+                    # table — word0 {pad,nbind} then per binding
+                    # {binding,type,count} + {off32,dyn,dynbase} built
+                    # from the staged {binding,type,count,flags} quads;
+                    # >16 bindings, >16 dynamic elements or >2047
+                    # records are device limits -> OOM
+                    nbind = rec['imm'][1] & 0xFFFF
+                    if nbind > 16:
+                        out['result'] = VK_ERR_OOM
+                    else:
+                        nw = 1 + 2 * nbind
+                        pbase = self.pay_alloc(nw)
+                        if pbase is None:
+                            out['result'] = VK_ERR_OOM
+                        else:
+                            off = dn = recs = 0
+                            rows = []
+                            bad = False
+                            for j in range(nbind):
+                                b = rec['pay'][4 * j] & 0xFF
+                                ty = rec['pay'][4 * j + 1] & 0xFF
+                                cn = rec['pay'][4 * j + 2] & 0xFFFF
+                                dyn = 1 if ty in (8, 9) else 0
+                                if (dyn and dn + cn > 16) or \
+                                        recs + cn > 2047:
+                                    bad = True
+                                    break
+                                rows.append((b, ty, cn, off, dyn, dn))
+                                off += cn
+                                recs += cn
+                                if dyn:
+                                    dn += cn
+                            w = nbind
+                            self.pay[pbase] = w
+                            out['payw'].append((pbase, w))
+                            if bad:
+                                self.pay_free(pbase, nw)
+                                out['result'] = VK_ERR_OOM
+                            else:
+                                for j, (b, ty, cn, of, dyn, dnb) in \
+                                        enumerate(rows):
+                                    for k, w in enumerate(
+                                            ((b << 24) | (ty << 16) | cn,
+                                             (of << 12) | (dyn << 11) |
+                                             dnb)):
+                                        a = pbase + 1 + 2 * j + k
+                                        w &= 0xFFFFFFFF
+                                        self.pay[a] = w
+                                        out['payw'].append((a, w))
+                                st, h, slot = self.alloc(
+                                    rec['q'][new], obj_kind, par)
+                                if st != 'OK':
+                                    self.pay_free(pbase, nw)
+                                    out['result'] = self._err(st)
+                                else:
+                                    self.setauxhi(h,
+                                                  (pbase << 16) | nw)
+                                    self.setaux(h, 0xFFFFFFFF,
+                                                (dn << 16) |
+                                                ((off << 5) & 0xFFFF))
+                elif obj_kind == KIND['VkDescriptorPool']:
+                    # §12.3 F5: Σ pPoolSizes.descriptorCount records of
+                    # backing through vgpages; aux[31:0]=page base,
+                    # aux[63:32]={nsets,bump}=0, state={maxSets,epoch=0}
+                    dsum = sum(rec['pay'][2 * i + 1] & 0xFFFFFFFF
+                               for i in range(rec['imm'][2] & 0xFFFF))
+                    cap = min(dsum << 5, 0xFFFFFFFF)
+                    pg = self.pg_alloc(cap, priv=True)
+                    if pg is None:
+                        out['result'] = VK_ERR_OOM
+                    else:
+                        st, h, slot = self.alloc(rec['q'][new],
+                                                 obj_kind, par)
+                        if st != 'OK':
+                            self.pg_free(pg, cap)
+                            out['result'] = self._err(st)
+                        else:
+                            e = self.ent[slot]
+                            e['size'] = cap
+                            self.setaux(h, 0xFFFFFFFF, pg)
+                            self.setauxhi(h, 0)
+                            self.setstate(h, 0xFFFFFFFF,
+                                          (rec['imm'][1] & 0xFFFF)
+                                          << 16)
+                elif obj_kind == KIND['VkPipelineLayout']:
                     # §7b: layout objects take an ObjPay extent BEFORE
                     # the ObjTab alloc; FULL -> OOM, object not created
-                    pn = 1 if obj_kind == KIND['VkDescriptorSetLayout'] \
-                        else 2
+                    pn = 2
                     nw = len(rec['pay']) + pn
                     pbase = self.pay_alloc(nw)
                     if pbase is None:
@@ -2172,14 +2433,16 @@ class FrontModel:
                             rec['imm'][fl_slot] != 0:
                         out['result'] = VK_ERR_FEATURE
                     else:
-                        # §7b/5a-ii: vgpages ALLOC(size) before the
-                        # object; aux[63:32] = page base.
-                        # FULL -> OOM, no object
+                        # §7b/5a-ii: vgpages ALLOC_PRIV(size) before
+                        # the object; aux[63:32] = page base.  Device
+                        # memory lives in the private arena — the guest
+                        # kernel's shm drm_mm can never collide with it
+                        # at MAP_BLOB (F9).  FULL -> OOM, no object
                         ds = next((i for i in range(8)
                                    if rec['qv'] >> i & 1
                                    and not rec['kind'][i]), -1)
                         msz = rec['q'][ds] if ds >= 0 else 0
-                        pg = self.pg_alloc(msz)
+                        pg = self.pg_alloc(msz, priv=True)
                         if pg is None:
                             out['result'] = VK_ERR_OOM
                         else:
@@ -2221,44 +2484,64 @@ class FrontModel:
             else:
                 slot = (act['flags'] >> 1) & 1
                 if obj_kind == KIND['VkDescriptorSet']:
-                    # §7b: per set -- staged layout id -> LOOKUP ->
-                    # bindingCount from its payload word 0 -> ObjPay
-                    # alloc(nbind*4) + zeroed/unsupported entries ->
-                    # aux[63:32] = {base,words}
+                    # §12.3 F5: staged layout id -> DSL LOOKUP -> pool
+                    # READSLOT (epoch/gen + maxSets + capacity) ->
+                    # ALLOC -> aperture-resident zeroed records -> pool
+                    # bump.  aux = {layout {gen,slot}, {poison=0, ndyn,
+                    # set_base}}; size = pool {gen,slot}; state[15:0] =
+                    # the pool epoch.  A failed element nulls the rest.
+                    ds_err = False
                     for ei, idv in enumerate(blob_ids(slot)):
+                        if ds_err:
+                            out['null_mask'].add(ei)
+                            continue
                         lay = (rec['pay'][2 * ei]
                                | (rec['pay'][2 * ei + 1] << 32))
                         st, ls, le = self.resolve(
                             lay, KIND['VkDescriptorSetLayout'])
                         if st != 'OK':
                             out['result'] = VK_ERR_UNKNOWN
-                            break
-                        lay_base = (le['aux'] >> 48) & 0xFFFF
-                        nbind = self.pay.get(lay_base, 0)
-                        nw = nbind * 4
-                        pbase = 0
-                        if nw:
-                            pbase = self.pay_alloc(nw)
-                            if pbase is None:
-                                out['result'] = VK_ERR_OOM
-                                break
+                            ds_err = True
+                            out['null_mask'].add(ei)
+                            continue
+                        layh = ((le['gen'] << 16) | ls) & 0xFFFFFFFF
+                        ndyn = (le['aux'] >> 16) & 0xFFFF
+                        sbyt = le['aux'] & 0xFFFF
+                        ph = hnd[lu[1]]
+                        ps_ = ph & 0xFFFF
+                        pe = self.ent[ps_] if ps_ < self.SLOTS else None
+                        nsets = ((pe['aux'] >> 44) & 0xFFFFF
+                                 if pe else 0)
+                        bump = ((pe['aux'] >> 32) & 0xFFF if pe else 0)
+                        if (pe is None or
+                                pe['kind'] != KIND['VkDescriptorPool']
+                                or pe['gen'] != (ph >> 16) & 0xFFFF
+                                or nsets >= (pe['state'] >> 16)
+                                or bump * 32 + sbyt >
+                                (pe['size'] & 0xFFFFFFFF)):
+                            out['result'] = VK_ERR_OOPM
+                            ds_err = True
+                            out['null_mask'].add(ei)
+                            continue
                         st, h, s = self.alloc(idv, obj_kind, par)
                         if st != 'OK':
-                            if nw:
-                                self.pay_free(pbase, nw)
                             out['result'] = self._err(st)
-                            break
-                        for j in range(nbind):
-                            ty = self.pay.get(lay_base + 1 + j * 4 + 1, 0)
-                            cnt = self.pay.get(
-                                lay_base + 1 + j * 4 + 2, 0)
-                            w3 = 0x80000000 if (cnt > 1 or
-                                                ty not in (6, 7)) else 0
-                            for k, w in enumerate((0, 0, 0, w3)):
-                                a = pbase + j * 4 + k
-                                self.pay[a] = w
-                                out['payw'].append((a, w))
-                        self.setauxhi(h, (pbase << 16) | nw)
+                            ds_err = True
+                            out['null_mask'].add(ei)
+                            continue
+                        sbase = (pe['aux'] & 0xFFFFFFFF) + (bump << 5)
+                        se = self.ent[s]
+                        se['size'] = ph & 0xFFFFFFFF
+                        self.setaux(h, 0xFFFFFFFF,
+                                    ((ndyn & 0x3F) << 25) |
+                                    (sbase & 0x1FFFFFF))
+                        self.setauxhi(h, layh)
+                        self.setstate(h, 0xFFFF, pe['state'] & 0xFFFF)
+                        for k in range(sbyt >> 2):
+                            self.apw32(out, sbase + 4 * k, 0)
+                        pe['aux'] = (pe['aux'] & 0xFFFFFFFF) | \
+                            ((((nsets + 1) & 0xFFFFF) << 44) |
+                             (((bump + (sbyt >> 5)) & 0xFFF) << 32))
                 elif obj_kind == KIND['VkPipeline']:
                     # §7b/5a-ii: the staged payload is consumed per
                     # element {module id(2), spec presence(1), layout
@@ -2378,6 +2661,9 @@ class FrontModel:
                     self.sm_unref(aux_full & 7)
                 elif obj_kind == KIND['VkDeviceMemory']:
                     self.pg_free((aux_full >> 32) & 0xFFFFFFFF, e_sz)
+                elif obj_kind == KIND['VkDescriptorPool']:
+                    # §12.3 F5: record store at aux[31:0], size bytes
+                    self.pg_free(aux_full & 0xFFFFFFFF, e_sz)
 
         elif cls == 'BIND':
             t2 = (session['T'].get('vkBindBufferMemory2'),
@@ -2493,6 +2779,11 @@ class FrontModel:
                     # words verbatim -- both through the pay arena
                     pwords = []
                     if ct == session['T']['vkCmdBindDescriptorSets']:
+                        # §12.3 F5: the record stream is {set handle,
+                        # ndyn} pairs for each bound set followed by the
+                        # verbatim dynamic-offset words — the pair lets
+                        # cmdexec group the dyn window per set without
+                        # re-reading the layouts
                         nset = rec['imm'][2] & 0xFFFF
                         ndyn = rec['imm'][3] & 0xFFFF
                         for i in range(nset):
@@ -2501,8 +2792,10 @@ class FrontModel:
                             bst, bs, be = self.resolve(
                                 sid, KIND['VkDescriptorSet'])
                             pwords.append(
-                                (be['gen'] << 16) | bs
+                                ((be['gen'] << 16) | bs)
                                 if bst == 'OK' else 0)
+                            pwords.append((be['aux'] >> 25) & 0x1F
+                                          if bst == 'OK' else 0)
                         for i in range(ndyn):
                             pwords.append(
                                 rec['pay'][nset * 2 + i] & 0xFFFFFFFF)
@@ -2637,12 +2930,25 @@ class FrontModel:
                                      else VK_NOT_READY)
 
         elif cls == 'POOL_RESET':
-            par = hnd[act['parent_q']] if act['parent_q'] != 7 else 0
-            for i in range(self.CB_BUFS):
-                if self.cb_alloc[i] and self.cb_pool[i] == par:
-                    self.rec_state[i] = 0
-                    self.recs[i] = []
-                    self.setstate(self.cb_hnd[i], 0xF, 0)
+            if ct == session['T']['vkResetDescriptorPool']:
+                # §12.3 F5: epoch++ makes every set minted from the
+                # pool dead; {nsets,bump} -> 0 reclaims the store
+                ph = hnd[lu[1]] if len(lu) > 1 else 0
+                st, _ps, pe = self.resolve(ph,
+                                           KIND['VkDescriptorPool'])
+                if st != 'OK':
+                    out['result'] = VK_ERR_UNKNOWN
+                else:
+                    pe['state'] = ((pe['state'] & 0xFFFF0000) |
+                                   ((pe['state'] + 1) & 0xFFFF))
+                    pe['aux'] &= 0xFFFFFFFF
+            else:
+                par = hnd[act['parent_q']] if act['parent_q'] != 7 else 0
+                for i in range(self.CB_BUFS):
+                    if self.cb_alloc[i] and self.cb_pool[i] == par:
+                        self.rec_state[i] = 0
+                        self.recs[i] = []
+                        self.setstate(self.cb_hnd[i], 0xF, 0)
 
         # gate the TB work port from a successful submit until the
         # first WAIT command, so command-buffer pins stay held for the
@@ -3393,10 +3699,13 @@ def write_session(name, cmds, fm):
     # after the indexed command completes.
     #   tag 1 {tag, rec, n, (addr, word)*n}      -- ObjPay contents
     #   tag 2 {tag, rec, cbuf, n, (idx, word)*n} -- arena contents
+    #   tag 3 {tag, rec, n, (byteaddr, word)*n}  -- §12.3 F5 descriptor
+    #           records in the TB aperture (shmem)
     pay_lines = []
     for i, c in enumerate(cmds):
         pw = c['out'].get('payw') or []
         aw = c['out'].get('arenaw') or []
+        apw = c['out'].get('apw') or []
         if pw:
             pay_lines.append('// %s' % c['name'])
             pay_lines += ['%08X' % 1, '%08X' % i, '%08X' % len(pw)]
@@ -3407,6 +3716,11 @@ def write_session(name, cmds, fm):
             pay_lines += ['%08X' % 2, '%08X' % i, '%08X' % aw[0][0],
                           '%08X' % len(aw)]
             for _b, a, w in aw:
+                pay_lines += ['%08X' % a, '%08X' % w]
+        if apw:
+            pay_lines.append('// %s aperture' % c['name'])
+            pay_lines += ['%08X' % 3, '%08X' % i, '%08X' % len(apw)]
+            for a, w in apw:
                 pay_lines += ['%08X' % a, '%08X' % w]
     pay_lines.append('// end')
     pay_lines.append('FFFFFFFF')
@@ -3615,11 +3929,13 @@ class TransportModel:
                     for n, i in model.cmd_info.items()}
 
     # ---- aperture allocator (first-fit, 4 KiB pages) ---------------------
-    def ap_alloc(self, size):
+    def ap_alloc(self, size, priv=False):
         pages = (size + AP_PAGE - 1) // AP_PAGE
+        lo = VGP_GUEST_PAGES if priv else 0
+        hi = len(self.ap_pages) if priv else VGP_GUEST_PAGES
         run = 0
-        for i, used in enumerate(self.ap_pages):
-            run = 0 if used else run + 1
+        for i in range(lo, hi):
+            run = 0 if self.ap_pages[i] else run + 1
             if run == pages:
                 base = (i - pages + 1) * (AP_PAGE // 4)
                 for j in range(i - pages + 1, i + 1):
@@ -3637,8 +3953,10 @@ class TransportModel:
 
     def ap_alloc_at(self, base_b, size):
         """Kernel-chosen extent (MAP_BLOB): mark every page the byte range
-        covers; -1 on overlap/out-of-window, else the byte base."""
-        if size == 0 or base_b + size > AP_WORDS * 4:
+        covers; -1 on overlap/out-of-window, else the byte base.
+        Bounded by the advertised guest window — the device-private
+        arena above VGP_GUEST_BYTES is never guest-mappable."""
+        if size == 0 or base_b + size > VGP_GUEST_BYTES:
             return -1
         lo = base_b // AP_PAGE
         hi = (base_b + size - 1) // AP_PAGE
@@ -3896,11 +4214,21 @@ def load_shvec(name):
     i += n_spv
     binds = []
     for _ in range(n_bind):
-        st_, bd, sz, _ma = hw[i:i + 4]
-        i += 4
-        binds.append({'set': st_, 'binding': bd, 'size': sz})
+        # §12.3 F5: 5-word entries {set,binding,size,addr,aux}
+        st_, bd, sz, _ma, ax = hw[i:i + 5]
+        i += 5
+        binds.append({'set': st_, 'binding': bd, 'size': sz,
+                      'idx': ax & 0xFF, 'dyn': (ax >> 8) & 1,
+                      'kind': (ax >> 16) & 0xFF})
     push = hw[i:i + n_push]
     i += n_push
+    dyn_off = []
+    nd = hw[i]
+    i += 1
+    for _ in range(nd):
+        dyn_off.append({'set': hw[i], 'ord': hw[i + 1],
+                        'off': hw[i + 2]})
+        i += 3
     inits = []
     for b in binds:
         inits.append(hw[i:i + b['size'] // 4])
@@ -3932,7 +4260,7 @@ def load_shvec(name):
                          'cls': cls[n]})
     return {'name': name, 'spv': spv, 'gx': gx, 'gy': gy, 'gz': gz,
             'push': push, 'binds': binds, 'inits': inits,
-            'ebinds': ebinds, 'outs': outs,
+            'dyn_off': dyn_off, 'ebinds': ebinds, 'outs': outs,
             'commit_fault': commit_fault}
 
 
@@ -4129,9 +4457,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
            ctx=CTX_ID, exp_type=VG_RESP_NODATA)
 
     def create_blob(rid, size):
-        tm.blobs[rid] = {'base_w': tm.ap_alloc(size), 'size': size,
+        # §12.3 F9/F5: blob-owned backing is LAZY — every MAPPABLE blob
+        # is MAP_BLOB'd into the guest window right after create, so an
+        # extent taken here would only hold a private/guest page until
+        # freed again (Mesa's 8 MiB cs pool cannot fit an 8 MiB private
+        # arena even empty).  bind_offset 0 = nothing allocated.
+        tm.blobs[rid] = {'base_w': 0,
+                         'size': size,
                          'mapped': False, 'ctx': CTX_ID,
-                         'mem_backed': False}
+                         'mem_backed': False, 'mem_id': 0}
         submit(VG_RESOURCE_CREATE_BLOB,
                [rid, VG_BLOB_HOST3D, VG_BLOB_MAPPABLE, 0, 0, 0,
                 size & 0xFFFFFFFF, (size >> 32) & 0xFFFFFFFF],
@@ -4158,29 +4492,50 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         base_b = (me['aux'] >> 32) & 0xFFFFFFFF
         tm.blobs[rid] = {'base_w': base_b >> 2, 'size': me['size'],
                          'mapped': False, 'ctx': CTX_ID,
-                         'mem_backed': True}
+                         'mem_backed': True, 'mem_id': mem_id}
         submit(VG_RESOURCE_CREATE_BLOB, body, ctx=CTX_ID,
                exp_type=VG_RESP_NODATA)
         return base_b
 
+    def guest_fit(size):
+        """Model of the kernel's shm drm_mm: first fit inside the
+        guest-visible window (the private arena is never returned)."""
+        pages = (size + VGP_PAGE - 1) // VGP_PAGE
+        run = 0
+        for i in range(VGP_GUEST_PAGES):
+            run = 0 if tm.ap_pages[i] else run + 1
+            if run == pages:
+                return (i - pages + 1) * VGP_PAGE
+        raise AssertionError('guest window exhausted')
+
     def map_blob(rid, offset=None):
-        """MAP_BLOB: the caller (guest kernel) dictates the window offset.
-        offset=None maps in place; a differing offset relocates the blob's
-        extent (RTL frees the create-time pages and reserves the new
-        extent) and resp_body[1] reports the kernel offset."""
+        """MAP_BLOB: the caller (guest kernel) dictates the window
+        offset.  offset=None models drm_mm first fit inside the guest
+        window.  The device frees the old extent (a private base after
+        F9) and reserves the new one; a memory-backed blob re-bases its
+        VkDeviceMemory (SETAUXHI).  resp_body[1] reports the kernel
+        offset.  Returns the mapped byte base."""
         b = tm.blobs[rid]
         if offset is None:
-            offset = b['base_w'] << 2
-        else:
+            offset = guest_fit(b['size'])
+        # lazy create: an unmapped blob-owned resource holds no extent;
+        # a memory-backed blob always frees the memory's current one
+        if b['mapped'] or b.get('mem_backed'):
             tm.ap_free(b['base_w'], b['size'])
-            nb = tm.ap_alloc_at(offset, b['size'])
-            assert nb >= 0, 'map_blob offset %#x busy' % offset
-            b['base_w'] = nb >> 2
+        nb = tm.ap_alloc_at(offset, b['size'])
+        assert nb >= 0, 'map_blob offset %#x busy' % offset
+        b['base_w'] = nb >> 2
+        if b.get('mem_backed'):
+            st, _s, _me = fm.resolve(b['mem_id'],
+                                     KIND['VkDeviceMemory'])
+            assert st == 'OK'
+            fm.setauxhi(b['mem_id'], offset)
         b['mapped'] = True
         submit(VG_MAP_BLOB, [rid, 0, offset & 0xFFFFFFFF,
                              (offset >> 32) & 0xFFFFFFFF], ctx=CTX_ID,
                exp_type=VG_RESP_MAP_INFO,
                exp_body=[VG_MAP_WC, offset & 0xFFFFFFFF])
+        return offset
 
     note('A4 blobs: ring0 4288, reply 16KiB, ring1 4544(+extra), exec 4KiB')
     # compute sessions carry whole SPIR-V modules in one command; the
@@ -4197,10 +4552,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
 
     # A4b: kernel-dictated map offset — the device must relocate the
     # blob's extent to the requested window offset (stock virtio-gpu
-    # semantics: drm_mm owns the SHM layout, not the renderer)
+    # semantics: drm_mm owns the SHM layout, not the renderer).  The
+    # offsets stay below VGP_GUEST_BYTES — the arena above is the
+    # device-private region the guest can never map.
     create_blob(RES_RELOC, 65536)
-    map_blob(RES_RELOC, offset=0x1F00000)
-    map_blob(RES_RELOC, offset=0x1E00000)   # remap elsewhere
+    map_blob(RES_RELOC, offset=0x1700000)
+    map_blob(RES_RELOC, offset=0x1600000)   # remap elsewhere
 
     note('A5 CTX_ATTACH reply blob')
     submit(VG_CTX_ATTACH, [RES_REPLY, 0], ctx=CTX_ID,
@@ -4442,6 +4799,29 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         device=V['dev'], buffer=bufs[n_bind + j],
                         memory=mems[n_bind + j], memoryOffset=0)),
                 ]
+        # §12.3 F5: descriptor sets are aperture-resident — per-set
+        # layout objects whose rows group vector binds sharing a
+        # (set,binding) (count = largest element index + 1); dynamic
+        # kinds come from the vector's aux.dyn flag.
+        setnos = []
+        for b in vec['binds']:
+            if b['set'] not in setnos:
+                setnos.append(b['set'])
+        nsets = len(setnos)
+        dsls = [V['dsl'] + k for k in range(nsets)]
+        dsets = [V['ds'] + k for k in range(nsets)]
+        srows = {s: [] for s in setnos}
+        for i, b in enumerate(vec['binds']):
+            kind = (1 if (variant == 'baddesc' and i == 0)
+                    else 9 if b.get('dyn') else 7)
+            for rw in srows[b['set']]:
+                if rw['binding'] == b['binding']:
+                    rw['count'] = max(rw['count'], b['idx'] + 1)
+                    break
+            else:
+                srows[b['set']].append(
+                    dict(binding=b['binding'], kind=kind,
+                         count=b['idx'] + 1))
         seg_a1 += [
             ('vkCreateShaderModule', dict(
                 device=V['dev'],
@@ -4449,25 +4829,44 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                codeSize=len(vec['spv']) * 4,
                                pCode=vec['spv']),
                 pShaderModule=V['sm'])),
-            ('vkCreateDescriptorSetLayout', dict(
+        ]
+        for k, s in enumerate(setnos):
+            seg_a1.append(('vkCreateDescriptorSetLayout', dict(
                 device=V['dev'],
                 pCreateInfo=st(
                     'VkDescriptorSetLayoutCreateInfo',
-                    bindingCount=n_bind,
+                    bindingCount=len(srows[s]),
                     pBindings=[st(
                         'VkDescriptorSetLayoutBinding',
-                        binding=b['binding'], descriptorCount=1,
-                        descriptorType=(
-                            1 if (variant == 'baddesc' and i == 0)
-                            else 7),
+                        binding=r['binding'],
+                        descriptorCount=r['count'],
+                        descriptorType=r['kind'],
                         stageFlags=0x20, pImmutableSamplers=[])
-                        for i, b in enumerate(vec['binds'])]),
-                pSetLayout=V['dsl'])),
+                        for r in srows[s]]),
+                pSetLayout=dsls[k])))
+        if variant == 'layoutmix':
+            # a second layout object with set 0's shape: the set is
+            # allocated from it while the pipeline layout declares
+            # dsls[0] -> the dispatch-time layout-compat check fails
+            seg_a1.append(('vkCreateDescriptorSetLayout', dict(
+                device=V['dev'],
+                pCreateInfo=st(
+                    'VkDescriptorSetLayoutCreateInfo',
+                    bindingCount=len(srows[setnos[0]]),
+                    pBindings=[st(
+                        'VkDescriptorSetLayoutBinding',
+                        binding=r['binding'],
+                        descriptorCount=r['count'],
+                        descriptorType=r['kind'],
+                        stageFlags=0x20, pImmutableSamplers=[])
+                        for r in srows[setnos[0]]]),
+                pSetLayout=V['dsl'] + 4)))
+        seg_a1 += [
             ('vkCreatePipelineLayout', dict(
                 device=V['dev'],
                 pCreateInfo=st(
                     'VkPipelineLayoutCreateInfo',
-                    setLayoutCount=1, pSetLayouts=[V['dsl']],
+                    setLayoutCount=nsets, pSetLayouts=dsls,
                     pushConstantRangeCount=1 if vec['push'] else 0,
                     pPushConstantRanges=[st(
                         'VkPushConstantRange', stageFlags=0x20,
@@ -4523,8 +4922,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 base_b = create_blob_mem(RES_BLOB0 + i, b['size'],
                                          mems[i])
                 assert base_b is not None, 'memory blob refused'
+                # guest-visible base = the kernel's map offset (the
+                # create-time private base is released at MAP_BLOB)
+                base_b = map_blob(RES_BLOB0 + i)
                 blob_base.append(base_b)
-                map_blob(RES_BLOB0 + i)
                 apw(base_b, vec['inits'][i])
             if variant == 'xfer_copy':
                 # memory-backed blobs for the three transfer-only
@@ -4533,51 +4934,102 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     base_b = create_blob_mem(RES_BLOB0 + n_bind + j,
                                              128, mems[n_bind + j])
                     assert base_b is not None, 'xfer blob refused'
+                    base_b = map_blob(RES_BLOB0 + n_bind + j)
                     blob_base.append(base_b)
-                    map_blob(RES_BLOB0 + n_bind + j)
                 apw(blob_base[n_bind], XFER_STAGE_W)
             if variant == 'badmem':
                 create_blob_mem(199, 4096, 0xDEADBEEF)
 
             # ---- segment A part 2: descriptors + cmdbuf + fence ------ #
+            # pool capacity = every row element of every set; the
+            # poolfull variant sizes maxSets one short and asks for
+            # nsets+1 sets so the last AllocateDescriptorSets element
+            # answers VK_ERROR_OUT_OF_POOL_MEMORY.
+            psizes = []
+            psums = {}
+            for s in setnos:
+                for rw in srows[s]:
+                    psums[rw['kind']] = psums.get(rw['kind'], 0) + \
+                        rw['count']
+            for k in sorted(psums):
+                psizes.append(st('VkDescriptorPoolSize', type=k,
+                                 descriptorCount=psums[k]))
+            extra = 1 if variant == 'poolfull' else 0
+            alloc_lays = [(V['dsl'] + 4
+                           if variant == 'layoutmix' and k == 0
+                           else dsls[k])
+                          for k in range(nsets)] + \
+                         [dsls[0]] * extra
+            alloc_sets = dsets + [V['ds'] + 7] * extra
+            # update writes: one VkWriteDescriptorSet per bind element —
+            # or, in multiwr, the Mesa shape: one write per (set,binding)
+            # whose descriptorCount spans the array, exercising the
+            # multi-element record-write loop
+            if variant == 'multiwr':
+                _grp = {}
+                for _i, _b in enumerate(vec['binds']):
+                    _grp.setdefault((_b['set'], _b['binding']),
+                                    []).append((_i, _b))
+                upd_w = []
+                for (_gs, _gb), _mem in _grp.items():
+                    _mem.sort(key=lambda t: t[1]['idx'])
+                    upd_w.append(st(
+                        'VkWriteDescriptorSet',
+                        dstSet=dsets[setnos.index(_gs)],
+                        dstBinding=_gb,
+                        dstArrayElement=_mem[0][1]['idx'],
+                        descriptorCount=len(_mem),
+                        descriptorType=(9 if _mem[0][1].get('dyn')
+                                        else 7),
+                        pImageInfo=[], pTexelBufferView=[],
+                        pBufferInfo=[st(
+                            'VkDescriptorBufferInfo', buffer=bufs[_i],
+                            offset=0, range=_b['size'])
+                            for _i, _b in _mem]))
+            else:
+                upd_w = [st(
+                    'VkWriteDescriptorSet',
+                    dstSet=dsets[setnos.index(b['set'])],
+                    dstBinding=b['binding'],
+                    dstArrayElement=b['idx'],
+                    descriptorCount=1,
+                    # baddesc: the layout declares binding 0 as a
+                    # combined image sampler but the write posts a
+                    # buffer descriptor — the type mismatch poisons
+                    # the set (§12.1 F5) -> DEVICE_LOST at dispatch
+                    descriptorType=(9 if b.get('dyn') else 7),
+                    pImageInfo=[], pTexelBufferView=[],
+                    # descoob/updoob: a descriptor view whose
+                    # offset+range runs past the buffer — the F5
+                    # update-time bounds check fails it and
+                    # poisons the set -> DEVICE_LOST at dispatch
+                    pBufferInfo=[st(
+                        'VkDescriptorBufferInfo', buffer=bufs[i],
+                        offset=(64 if variant == 'descoob'
+                                and i == 1 else 0),
+                        range=(512 if variant == 'descoob'
+                               and i == 1 else
+                               b['size'] * 2 if variant == 'updoob'
+                               and i == 0 else b['size']))])
+                    for i, b in enumerate(vec['binds'])]
             seg_a2 = [
                 ('vkCreateDescriptorPool', dict(
                     device=V['dev'],
                     pCreateInfo=st('VkDescriptorPoolCreateInfo',
-                                   maxSets=1, poolSizeCount=1,
-                                   pPoolSizes=[st(
-                                       'VkDescriptorPoolSize', type=7,
-                                       descriptorCount=n_bind)]),
+                                   maxSets=nsets,
+                                   poolSizeCount=len(psizes),
+                                   pPoolSizes=psizes),
                     pDescriptorPool=V['dp'])),
                 ('vkAllocateDescriptorSets', dict(
                     device=V['dev'],
                     pAllocateInfo=st('VkDescriptorSetAllocateInfo',
                                      descriptorPool=V['dp'],
-                                     descriptorSetCount=1,
-                                     pSetLayouts=[V['dsl']]),
-                    pDescriptorSets=[V['ds']])),
+                                     descriptorSetCount=nsets + extra,
+                                     pSetLayouts=alloc_lays),
+                    pDescriptorSets=alloc_sets)),
                 ('vkUpdateDescriptorSets', dict(
-                    device=V['dev'], descriptorWriteCount=n_bind,
-                    pDescriptorWrites=[st(
-                        'VkWriteDescriptorSet', dstSet=V['ds'],
-                        dstBinding=b['binding'], dstArrayElement=0,
-                        descriptorCount=1,
-                        descriptorType=(
-                            1 if (variant == 'baddesc' and i == 0)
-                            else 7),
-                        pImageInfo=[], pTexelBufferView=[],
-                        # descoob: binding 1's descriptor view starts
-                        # at +64 with an inflated range — the
-                        # §7b assembly clamps it to buffer.size-eoff
-                        # = 64 B and the shader's accesses past it
-                        # robust out
-                        pBufferInfo=[st(
-                            'VkDescriptorBufferInfo', buffer=bufs[i],
-                            offset=(64 if variant == 'descoob'
-                                    and i == 1 else 0),
-                            range=(512 if variant == 'descoob'
-                                   and i == 1 else b['size']))])
-                        for i, b in enumerate(vec['binds'])],
+                    device=V['dev'], descriptorWriteCount=len(upd_w),
+                    pDescriptorWrites=upd_w,
                     descriptorCopyCount=0, pDescriptorCopies=[])),
                 ('vkCreateCommandPool', dict(
                     device=V['dev'],
@@ -4601,9 +5053,18 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     pipeline=V['pipe'])))
             seg_a2.append(('vkCmdBindDescriptorSets', dict(
                 commandBuffer=V['cb'], pipelineBindPoint=1,
-                layout=V['pl'], firstSet=0, descriptorSetCount=1,
-                pDescriptorSets=[V['ds']], dynamicOffsetCount=0,
-                pDynamicOffsets=[])))
+                layout=V['pl'], firstSet=0,
+                descriptorSetCount=nsets,
+                pDescriptorSets=dsets,
+                dynamicOffsetCount=len(vec['dyn_off']),
+                pDynamicOffsets=[d['off']
+                                 for d in vec['dyn_off']])))
+            if variant == 'deadpool':
+                # §12.3 F5: the bound sets' pool dies before the
+                # submit — dispatch assembly's pool READSLOT fails
+                # -> DEVICE_LOST
+                seg_a2.append(('vkDestroyDescriptorPool', dict(
+                    device=V['dev'], descriptorPool=V['dp'])))
             if vec['push']:
                 seg_a2.append(('vkCmdPushConstants', dict(
                     commandBuffer=V['cb'], layout=V['pl'],
@@ -4719,9 +5180,27 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
 
             # ---- §7a gates at the aperture ---------------------------- #
             lost = variant in ('lostbuf', 'baddesc', 'nopipe',
-                               'bindoob', 'worksink',
+                               'bindoob', 'worksink', 'descoob',
+                               'updoob', 'layoutmix', 'deadpool',
                                'xfer_oob', 'xfer_overlap')
             if not lost:
+                # §12.3 F5: the descriptor record-store image — every
+                # record word (zeroed or {base,size,kind,flags}) must
+                # match what the front wrote through the ap port
+                for dsi in dsets:
+                    dst_, _dss, dse = fm.resolve(
+                        dsi, KIND['VkDescriptorSet'])
+                    if dst_ != 'OK':
+                        continue
+                    sbase = dse['aux'] & 0x1FFFFFF
+                    lsl = (dse['aux'] >> 32) & 0xFFFF
+                    sbyt = fm.ent[lsl]['aux'] & 0xFFFF
+                    W(TP_CHECK, CK_APR, sbyt // 4, sbase)
+                    for j in range(sbyt // 4):
+                        w = fm.apm.get((sbase >> 2) + j, 0)
+                        rec(EK_APRCHK, sbase + 4 * j, w, w, 0)
+                    note("B' gates: %d descriptor record words"
+                         % (sbyt // 4))
                 if variant in ('xfer_copy', 'xfer_update'):
                     # §12.3 C/5a: the copy/update ran before the
                     # dispatch (barrier ordering) — the shader's
@@ -4740,8 +5219,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           vec['gz'], 0, 0] + list(vec['spv'])
                     for i, b in enumerate(vec['binds']):
                         mw += [b['set'], b['binding'], b['size'],
-                               0x8000 + i * 0x2000]
+                               blob_base[i],
+                               (b['idx'] | (b.get('dyn', 0) << 8)
+                                | ((b.get('kind', 0) or 7) << 16))]
                     mw += list(vec['push'])
+                    mw += [len(vec['dyn_off'])]
+                    for d in vec['dyn_off']:
+                        mw += [d['set'], d['ord'], d['off']]
                     for i, b in enumerate(vec['binds']):
                         mw += inb if i == 0 else list(vec['inits'][i])
                     cm = spirv_model.Model(mw)
@@ -4782,41 +5266,6 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                              % (len(inb) + 32 + 32))
                     else:
                         note("B' gates: xfer_update oracle words")
-                elif variant == 'descoob':
-                    # oracle = spirv_model run with binding 1's view
-                    # clamped to 128 B at +128 (the §7b assembly's
-                    # min(range, size-eoff) result) — no lavapipe
-                    # comparison for this vector
-                    mw = [len(vec['spv']), len(vec['binds']),
-                          len(vec['push']), vec['gx'], vec['gy'],
-                          vec['gz'], 0, 0] + list(vec['spv'])
-                    for i, b in enumerate(vec['binds']):
-                        mw += [b['set'], b['binding'],
-                               64 if i == 1 else b['size'],
-                               0x8000 + i * 0x2000]
-                    mw += list(vec['push'])
-                    for i, b in enumerate(vec['binds']):
-                        mw += (vec['inits'][i][16:32] if i == 1
-                               else list(vec['inits'][i]))
-                    cm = spirv_model.Model(mw)
-                    cm.run()
-                    couts = cm.outputs()
-                    ccls = cm.out_classes()
-                    doc['note'] = (
-                        'descoob: Gate-2 oracle is the spirv_model '
-                        'run with binding 1 clamped to 64 B at '
-                        '+64 (inflated descriptor range); no '
-                        'lavapipe comparison for this vector')
-                    for idx in sorted(couts):
-                        base_b = blob_base[idx] + \
-                            (64 if idx == 1 else 0)
-                        W(TP_CHECK, CK_APR, len(couts[idx]), base_b)
-                        for j, w in enumerate(couts[idx]):
-                            rec(EK_APRCHK, base_b + 4 * j, w, w,
-                                1 if ccls[idx][j] == 'f' else 0)
-                    note("B' gates: %d output words checked "
-                         "(model-only oracle)"
-                         % sum(len(w) for w in couts.values()))
                 else:
                     for o in vec['outs']:
                         base_b = blob_base[o['bind_idx']]
@@ -4841,18 +5290,31 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     commandBufferCount=1, pCommandBuffers=[V['cb']])),
                 ('vkDestroyCommandPool', dict(
                     device=V['dev'], commandPool=V['cp'])),
-                ('vkFreeDescriptorSets', dict(
-                    device=V['dev'], descriptorPool=V['dp'],
-                    descriptorSetCount=1, pDescriptorSets=[V['ds']])),
-                ('vkDestroyDescriptorPool', dict(
-                    device=V['dev'], descriptorPool=V['dp'])),
+            ]
+            if variant != 'deadpool':
+                # deadpool already destroyed the pool (and its sets
+                # with it) before the submit
+                seg_c += [
+                    ('vkFreeDescriptorSets', dict(
+                        device=V['dev'], descriptorPool=V['dp'],
+                        descriptorSetCount=nsets,
+                        pDescriptorSets=dsets)),
+                    ('vkDestroyDescriptorPool', dict(
+                        device=V['dev'], descriptorPool=V['dp'])),
+                ]
+            seg_c += [
                 ('vkDestroyPipeline', dict(
                     device=V['dev'], pipeline=V['pipe'])),
                 ('vkDestroyPipelineLayout', dict(
                     device=V['dev'], pipelineLayout=V['pl'])),
-                ('vkDestroyDescriptorSetLayout', dict(
-                    device=V['dev'], descriptorSetLayout=V['dsl'])),
             ]
+            for k in range(nsets):
+                seg_c.append(('vkDestroyDescriptorSetLayout', dict(
+                    device=V['dev'], descriptorSetLayout=dsls[k])))
+            if variant == 'layoutmix':
+                seg_c.append(('vkDestroyDescriptorSetLayout', dict(
+                    device=V['dev'],
+                    descriptorSetLayout=V['dsl'] + 4)))
             if variant != 'modgone':
                 seg_c.append(('vkDestroyShaderModule', dict(
                     device=V['dev'], shaderModule=V['sm'])))
@@ -5447,7 +5909,9 @@ def main():
     ap.add_argument('--variant', default='',
                     help='compute-session negative arm: spec, modgone, '
                          'lostbuf, baddesc, nopipe, pgfull, badmem, '
-                         'bindoob, descoob, worksink, xfer_copy, '
+                         'bindoob, descoob, updoob, layoutmix, '
+                         'deadpool, poolfull, worksink, multiwr, '
+                         'xfer_copy, '
                          'xfer_update, xfer_oob, xfer_overlap')
     ap.add_argument('--print', dest='print_cmd', metavar='CMD')
     ap.add_argument('--dump-json', metavar='FILE',

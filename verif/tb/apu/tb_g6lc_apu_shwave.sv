@@ -30,8 +30,13 @@
 //   class section:   per is_out binding, size/4 class words
 //                    (0 = int/bool bit-exact, 1 = float ≤2 ULP)
 //
-// Bind table entry (113 b): {set[112:105], binding[104:97],
-// base[96:33], size[32:1], valid[0]} — matches g6lc_apu_shwave.
+// §12.3 F5: the vector's {set,binding,size,addr} binding list is
+// materialised as aperture-resident descriptor records (32 B each,
+// {base,size,kind,flags} in the first two 64-bit beats) plus a
+// desc sideband {set_base, boff rows, dyn_off} — matches
+// g6lc_apu_shwave's LSU resolver.  Records park at RECBASE upward
+// per set (512 B window each), above every buffer the vectors use.
+localparam int unsigned RECBASE = 32'hF0000;   // 960 KiB, 1 KiB/set
 
 module tb_g6lc_apu_shwave;
   import g6lc_apu_vn_pkg::*;
@@ -75,7 +80,7 @@ module tb_g6lc_apu_shwave;
   logic [31:0]  work_ctype;
   logic [8*32-1:0] work_imm;
   logic [2:0]   disp_slot;
-  logic [16*113-1:0] binds;
+  apu_sh_desc_t desc;
   logic [5:0]   push_n;
   logic [1023:0] push;
   logic         busy, done; apu_sh_done_t done_pl;
@@ -94,7 +99,7 @@ module tb_g6lc_apu_shwave;
     .sm_req_i(1'b0), .sm_req_pl_i('0), .sm_cpl_o(), .sm_cpl_pl_o(),
     .work_i(work), .work_ready_o(work_ready),
     .work_ctype_i(work_ctype), .work_imm_i(work_imm),
-    .disp_slot_i(disp_slot), .binds_i(binds),
+    .disp_slot_i(disp_slot), .desc_i(desc),
     .push_n_i(push_n), .push_i(push),
     .busy_o(busy), .done_o(done), .done_pl_o(done_pl),
     .mem_re_o(mem_re), .mem_we_o(mem_we), .mem_addr_o(mem_addr),
@@ -120,7 +125,7 @@ module tb_g6lc_apu_shwave;
     .sm_req_i(1'b0), .sm_req_pl_i('0), .sm_cpl_o(), .sm_cpl_pl_o(),
     .work_i(work), .work_ready_o(off_ready),
     .work_ctype_i(work_ctype), .work_imm_i(work_imm),
-    .disp_slot_i(disp_slot), .binds_i(binds),
+    .disp_slot_i(disp_slot), .desc_i(desc),
     .push_n_i(push_n), .push_i(push),
     .busy_o(off_busy), .done_o(off_done), .done_pl_o(off_pl),
     .mem_re_o(off_re), .mem_we_o(off_we), .mem_addr_o(off_addr),
@@ -147,23 +152,37 @@ module tb_g6lc_apu_shwave;
   // ---- memory model: handshake port (ready=1, rvalid next cycle) ---
   logic         mem_rv = 0;
   logic [63:0] mem [0:MEMW-1];
+  logic         dbg_dsc;  int dbg_dsc_n = 0;
+  initial dbg_dsc = $test$plusargs("dbg_dsc");
   always_ff @(posedge clk or negedge rst_n) begin
     logic [63:0] wm;
     if (!rst_n) begin
       mem_rv <= 1'b0; mem_rdata <= '0;
     end else begin
       mem_rv <= 1'b0;
+      if (mem_we || mem_re) begin
+        if (mem_addr >= 64'(MEMW) * 8)
+          $fatal(1, "mem access out of bounds: %x", mem_addr);
+      end
       if (mem_we) begin
-        wm = mem[mem_addr[16:3]];
+        wm = mem[mem_addr[19:3]];
         for (int b = 0; b < 8; b++)
           if (mem_wstrb[b]) wm[8*b +: 8] = mem_wdata[8*b +: 8];
-        mem[mem_addr[16:3]] <= wm;
+        mem[mem_addr[19:3]] <= wm;
         mem_rv <= 1'b1;
       end
       if (mem_re) begin
-        mem_rdata <= mem[mem_addr[16:3]];
+        mem_rdata <= mem[mem_addr[19:3]];
         mem_rv <= 1'b1;
+        if (dbg_dsc && dbg_dsc_n < 40) begin
+          dbg_dsc_n <= dbg_dsc_n + 1;
+          $display("DSCRD cyc=%0d addr=%x -> %x", cyc, mem_addr,
+                   mem[mem_addr[19:3]]);
+        end
       end
+      if (dbg_dsc && mem_we && mem_addr >= 64'hF0000)
+        $display("DSCWR cyc=%0d addr=%x data=%x", cyc, mem_addr,
+                 mem_wdata);
     end
   end
 
@@ -255,7 +274,7 @@ module tb_g6lc_apu_shwave;
   // run one vector: commit, load buffers, dispatch, compare
   // 4b-opt: saved unopt output words for the unopt==opt bit-exact
   // check — uout[name idx][seed][word pos over out bindings].
-  logic [31:0] uout [27][4][2048];
+  logic [31:0] uout [30][4][2048];
   int          cur_nidx, cur_seed, ou_mism, ou_mism_t, ou_words;
   bit          is_opt;
 
@@ -297,30 +316,108 @@ module tb_g6lc_apu_shwave;
       return;
     end
 
-    // bindings → bind table + memory init
+    // bindings → F5 aperture descriptor records + desc sideband.
+    // Each entry is 5 words {set,binding,size,addr,aux} where
+    // aux = {kind[23:16], dyn[8], elem_idx[7:0]}; elements of one
+    // (set,binding) share a boff row.
     base = 8 + n;
-    binds = '0;
-    for (int b = 0; b < nb; b++) begin
-      logic [7:0] st, bd;
-      logic [31:0] sz;
-      logic [63:0] ad;
-      st = wbuf[base + b*4 + 0][7:0];
-      bd = wbuf[base + b*4 + 1][7:0];
-      sz = wbuf[base + b*4 + 2];
-      ad = {32'h0, wbuf[base + b*4 + 3]};
-      binds[b*113 +: 113] = {st, bd, ad, sz[31:0], 1'b1};
+    desc = '0;
+    begin
+      int ecnt [4];                    // record cursor (32 B units)
+      int dord [4];                    // dynamic-element ordinal
+      int nrow [4];                    // binding-row cursor
+      int row_of [32];                 // bind entry -> row index
+      int row_cnt [4][16];
+      int row_off [4][16];
+      int row_dynb [4][16];
+      bit row_dyn [4][16];
+      for (int i = 0; i < 4; i++) begin
+        ecnt[i] = 0; dord[i] = 0; nrow[i] = 0;
+        desc.set_base[i] = RECBASE + 32'(i) * 32'd1024;
+        for (int r = 0; r < 16; r++) begin
+          row_cnt[i][r] = 0; row_off[i][r] = 0;
+          row_dynb[i][r] = 0; row_dyn[i][r] = 0;
+        end
+      end
+      // pass 1: assign each bind entry a row within its set
+      for (int b = 0; b < nb; b++) begin
+        logic [7:0] st, bd;
+        st = wbuf[base + b*5 + 0][7:0];
+        bd = wbuf[base + b*5 + 1][7:0];
+        row_of[b] = -1;
+        for (int c = 0; c < b; c++)
+          if (wbuf[base + c*5 + 0][7:0] == st &&
+              wbuf[base + c*5 + 1][7:0] == bd)
+            row_of[b] = row_of[c];
+        if (row_of[b] < 0 && st < 4 && nrow[st] < 16) begin
+          row_of[b] = nrow[st];
+          row_off[st][nrow[st]] = ecnt[st];
+          row_dyn[st][nrow[st]] = wbuf[base + b*5 + 4][8];
+          row_dynb[st][nrow[st]] = dord[st];
+          nrow[st]++;
+        end
+        if (row_of[b] >= 0) begin
+          int r = row_of[b];
+          int i2 = wbuf[base + b*5 + 4][7:0];
+          row_cnt[st][r] = (i2 + 1 > row_cnt[st][r])
+                           ? i2 + 1 : row_cnt[st][r];
+          ecnt[st] = row_off[st][r] + row_cnt[st][r] > ecnt[st]
+                     ? row_off[st][r] + row_cnt[st][r] : ecnt[st];
+          if (row_dyn[st][r])
+            dord[st] = (row_dynb[st][r] + i2 + 1 > dord[st])
+                       ? row_dynb[st][r] + i2 + 1 : dord[st];
+        end
+      end
+      // pass 2: rows into desc.boff + records into aperture mem
+      for (int b = 0; b < nb; b++) begin
+        logic [7:0] st, bd, kind;
+        logic [31:0] sz;
+        logic [63:0] ad;
+        int        i2, r;
+        longint    ra;
+        st   = wbuf[base + b*5 + 0][7:0];
+        bd   = wbuf[base + b*5 + 1][7:0];
+        sz   = wbuf[base + b*5 + 2];
+        ad   = {32'h0, wbuf[base + b*5 + 3]};
+        i2   = wbuf[base + b*5 + 4][7:0];
+        kind = wbuf[base + b*5 + 4][23:16];
+        if (kind == 8'h00) kind = 8'h06;
+        if (row_of[b] >= 0) begin
+          r  = row_of[b];
+          ra = 64'(desc.set_base[st[1:0]]) +
+               64'(row_off[st][r] + i2) * 32;
+          desc.boff[st[1:0]][r[3:0]] =
+              '{binding: bd, count: 16'(row_cnt[st][r]),
+                off32: 20'(row_off[st][r]), dyn: row_dyn[st][r],
+                dynbase: 4'(row_dynb[st][r])};
+          // record beat 0 {size,base}; beat 1 {kind, flags=1}
+          mem[ra >> 3]        = {sz, ad[31:0]};
+          mem[(ra + 8) >> 3]  = {48'h0, 8'h01, kind};
+        end
+      end
     end
-    base += nb * 4;
+    base += nb * 5;
     push_n = np[5:0];
     push = '0;
     for (int i = 0; i < np && i < 32; i++)
       push[i*32 +: 32] = wbuf[base + i];
     base += np;
+    // dynamic-offset section: n entries {set, ord, off}
+    begin
+      int nd = int'(wbuf[base]);
+      base += 1;
+      for (int d = 0; d < nd; d++) begin
+        desc.dyn_off[wbuf[base + d*3 + 0][1:0]]
+                    [wbuf[base + d*3 + 1][3:0]] =
+            wbuf[base + d*3 + 2];
+      end
+      base += nd * 3;
+    end
     for (int b = 0; b < nb; b++) begin
       logic [31:0] sz;
       logic [63:0] ad;
-      sz = wbuf[8 + n + b*4 + 2];
-      ad = {32'h0, wbuf[8 + n + b*4 + 3]};
+      sz = wbuf[8 + n + b*5 + 2];
+      ad = {32'h0, wbuf[8 + n + b*5 + 3]};
       for (int w2 = 0; w2 < sz/4; w2++) begin
         if ((ad + w2*4) & 7)
           mem[(ad + w2*4) >> 3][63:32] = wbuf[base + w2];
@@ -477,14 +574,16 @@ module tb_g6lc_apu_shwave;
     retire_do(0);
   endtask
 
-  string names [27] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [30] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
       "pushscale", "vec4arith",
       // §7c 4b corpus
       "ifelse", "loopfor", "loopwhile", "switchcase", "shortcircuit",
       "earlyret", "phiflow", "barrier_prefix", "barrier_reduce",
-      "matvec", "matmat", "precise_dot"};
+      "matvec", "matmat", "precise_dot",
+      // §12.3 F5 memory-resident descriptor corpus
+      "descarr", "multiset", "arroob"};
 
   initial begin
     checks = 0; cases = 0; fails = 0; cyc = 0; dcyc = 0;
@@ -494,7 +593,7 @@ module tb_g6lc_apu_shwave;
     dbg_wd = $test$plusargs("dbg_wd");
     if (!$value$plusargs("only=%s", only)) only = "";
     wr_en = 0; commit = 0; retire = 0; work = 0; work_ctype = 0;
-    work_imm = '0; disp_slot = 0; binds = '0; push_n = 0; push = '0;
+    work_imm = '0; disp_slot = 0; desc = '0; push_n = 0; push = '0;
     for (int i = 0; i < MEMW; i++) mem[i] = '0;
     repeat (8) @(negedge clk); rst_n = 1;
     repeat (4) @(negedge clk);

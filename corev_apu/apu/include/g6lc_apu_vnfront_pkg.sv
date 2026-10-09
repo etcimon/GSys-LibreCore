@@ -28,4 +28,30 @@ package g6lc_apu_vnfront_pkg;
   localparam logic [31:0] APU_CB_INVALID    = 32'h8;
   localparam logic [31:0] APU_CB_STATE_MASK = 32'hF;
 
+  // §12.3 F5 descriptor objects (memory-resident records; record
+  // format + row packing in g6lc_apu_sh_pkg).
+  localparam logic [31:0] APU_VK_ERROR_OUT_OF_POOL_MEMORY =
+                                                        32'hFFFF_FFFB;
+  // DESCRIPTOR_POOL entry:
+  //   aux[31:0]   aperture byte base of the record store (vgpages)
+  //   aux[43:32]  bump — records handed out, 32-byte units (bump
+  //               allocation; reset/destroy return it wholesale)
+  //   aux[63:44]  nsets — sets minted from the pool
+  //   size[31:0]  record-store byte capacity (Σ descriptorCount×32)
+  //   state[31:16] maxSets;  state[15:0] epoch — ++ on
+  //               vkResetDescriptorPool; sets minted under an older
+  //               epoch are dead at dispatch
+  // DESCRIPTOR_SET entry:
+  //   aux[31:0]   {poison[31], ndyn[30:25], set_base[24:0]} —
+  //               aperture byte base of the set's record table
+  //   aux[63:32]  layout handle {gen,slot} minted at allocate time
+  //   size[31:0]  pool handle {gen,slot} (destroy/reset detection)
+  //   state[15:0] pool epoch sampled at allocate time
+  // DESCRIPTOR_SET_LAYOUT entry (ObjPay payload of 1+2*nbind words):
+  //   word0       = {pad[31:16], nbind[15:0]}
+  //   rows        = apu_sh_bindrow_t packing (2 words each)
+  //   aux[63:32]  = {payload base, payload words}
+  //   aux[31:16]  = ndyn — dynamic descriptor elements in the layout
+  //   aux[15:0]   = set_bytes — the set's record-table extent
+
 endpackage

@@ -399,8 +399,11 @@ static void probe(void) {
   vwr(VREG_STATUS, VN_ACKNOWLEDGE | VN_DRIVER | VN_FEATURES_OK);
   if ((vrd(VREG_STATUS) & VN_FEATURES_OK) == 0) fail(7);
   vwr(VREG_SHM_SEL, 1);
-  if (vrd(VREG_SHM_LEN_LO) != (uint32_t)VN_SHM_BYTES) fail(8);
-  if (vrd(VREG_SHM_LEN_HI) != (uint32_t)(VN_SHM_BYTES >> 32)) fail(9);
+  /* §12.3 F5: SHM_LEN is the guest-mappable span; the top of the
+   * VN_SHM_BYTES window is the device-private descriptor arena */
+  if (vrd(VREG_SHM_LEN_LO) != (uint32_t)VN_SHM_GUEST_BYTES) fail(8);
+  if (vrd(VREG_SHM_LEN_HI) != (uint32_t)(VN_SHM_GUEST_BYTES >> 32))
+    fail(9);
   if (vrd(VREG_SHM_BASE_LO) != (uint32_t)VN_SHM_BASE) fail(10);
   if (vrd(VREG_SHM_BASE_HI) != (uint32_t)(VN_SHM_BASE >> 32)) fail(11);
   vwr(VREG_SHM_SEL, 0);

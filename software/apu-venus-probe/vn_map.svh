@@ -10,6 +10,7 @@ localparam logic [63:0] SV_VN_QUEUE_DEPTH = 64'h40;
 localparam logic [63:0] SV_VN_NUM_CAPSETS = 64'h1;
 localparam logic [63:0] SV_VN_SHM_BASE = 64'h82000000;
 localparam logic [63:0] SV_VN_SHM_BYTES = 64'h2000000;
+localparam logic [63:0] SV_VN_SHM_GUEST_BYTES = 64'h1800000;
 localparam logic [63:0] SV_VN_SHM_ID = 64'h1;
 localparam logic [63:0] SV_VN_MAGIC = 64'h74726976;
 localparam logic [63:0] SV_VN_VERSION = 64'h2;

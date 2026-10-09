@@ -10,7 +10,11 @@
 // desc.json (produced by shader_vectors.py):
 //   { "gx":N, "gy":N, "gz":N,
 //     "push": [w0,w1,...],              // <=32 words, may be absent
-//     "bindings": [ {"set":0,"binding":0,"size":N,"init":"in0.bin"}, ...] }
+//     "dyn_off": [o0,o1,...],           // pDynamicOffsets, may be absent
+//     "bindings": [ {"set":0,"binding":0,"size":N,"init":"in0.bin",
+//                    "idx":0,"dyn":0}, ...] }
+// "idx" is the descriptor-array element; "dyn" selects
+// STORAGE_BUFFER_DYNAMIC for that binding's set-layout row.
 //
 // Writes <out.bin>: for each binding in order, the buffer's `size`
 // result bytes (raw, little-endian).
@@ -37,9 +41,11 @@ static char *slurp(const char *path, size_t *n) {
 }
 
 #define MAXBIND 16
-struct bind { unsigned set, binding, size; char init[512]; };
+#define MAXSET 4
+struct bind { unsigned set, binding, size, idx, dyn; char init[512]; };
 static unsigned gx = 1, gy = 1, gz = 1;
 static unsigned pushw[32]; static int npush = 0;
+static unsigned dynw[32]; static int ndyn = 0;
 static struct bind binds[MAXBIND]; static int nbind = 0;
 
 /* find "key":value inside [lo,hi) and return the numeric value, or
@@ -71,6 +77,18 @@ static void parse_desc(const char *txt) {
             }
         }
     }
+    const char *d = strstr(txt, "\"dyn_off\"");
+    if (d) {
+        const char *a = strchr(d, '[');
+        if (a) {
+            a++;
+            while (*a && *a != ']' && ndyn < 32) {
+                while (*a == ' ' || *a == ',') a++;
+                if (*a == ']') break;
+                dynw[ndyn++] = strtoul(a, (char **)&a, 0);
+            }
+        }
+    }
     const char *b = strstr(txt, "\"bindings\"");
     if (!b) return;
     b = strchr(b, '['); if (!b) return;
@@ -83,6 +101,8 @@ static void parse_desc(const char *txt) {
         bd->set = jnum(o, e, "set", 0);
         bd->binding = jnum(o, e, "binding", 0);
         bd->size = jnum(o, e, "size", 0);
+        bd->idx = jnum(o, e, "idx", 0);
+        bd->dyn = jnum(o, e, "dyn", 0);
         const char *s = strstr(o, "\"init\"");
         if (s && s < e) {
             const char *c = strchr(s + 6, ':');
@@ -152,25 +172,50 @@ int main(int argc, char **argv) {
     if ((r = vkCreateShaderModule(dev, &smi, NULL, &sm)) != VK_SUCCESS)
         die("vkCreateShaderModule", r);
 
-    VkDescriptorSetLayoutBinding lbd[MAXBIND];
+    /* unique sets in first-occurrence order -> one DSL per set; a
+     * set-layout row's count is its binding's largest idx + 1. */
+    unsigned sets[MAXSET]; int nsets = 0;
     for (int i = 0; i < nbind; i++) {
-        lbd[i] = (VkDescriptorSetLayoutBinding){
-            binds[i].binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
-            VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+        int k;
+        for (k = 0; k < nsets; k++)
+            if (sets[k] == binds[i].set) break;
+        if (k == nsets && nsets < MAXSET) sets[nsets++] = binds[i].set;
     }
-    VkDescriptorSetLayoutCreateInfo dli = {
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0,
-        nbind, lbd};
-    VkDescriptorSetLayout dsl;
-    if ((r = vkCreateDescriptorSetLayout(dev, &dli, NULL, &dsl))
-        != VK_SUCCESS)
-        die("vkCreateDescriptorSetLayout", r);
+    VkDescriptorSetLayout dsl[MAXSET];
+    for (int s = 0; s < nsets; s++) {
+        VkDescriptorSetLayoutBinding lbd[MAXBIND];
+        int nl = 0;
+        for (int i = 0; i < nbind; i++) {
+            if (binds[i].set != sets[s]) continue;
+            int k;
+            for (k = 0; k < nl; k++)
+                if (lbd[k].binding == binds[i].binding) break;
+            unsigned cnt = binds[i].idx + 1;
+            if (k < nl) {
+                if (cnt > lbd[k].descriptorCount)
+                    lbd[k].descriptorCount = cnt;
+            } else {
+                lbd[nl++] = (VkDescriptorSetLayoutBinding){
+                    binds[i].binding,
+                    binds[i].dyn
+                        ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
+                        : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    cnt, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
+            }
+        }
+        VkDescriptorSetLayoutCreateInfo dli = {
+            VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO,
+            NULL, 0, nl, lbd};
+        if ((r = vkCreateDescriptorSetLayout(dev, &dli, NULL,
+                                             &dsl[s])) != VK_SUCCESS)
+            die("vkCreateDescriptorSetLayout", r);
+    }
 
     VkPushConstantRange pr = {VK_SHADER_STAGE_COMPUTE_BIT, 0,
                               npush * 4};
     VkPipelineLayoutCreateInfo pli = {
         VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, NULL, 0,
-        1, &dsl, npush ? 1 : 0, npush ? &pr : NULL};
+        nsets, dsl, npush ? 1 : 0, npush ? &pr : NULL};
     VkPipelineLayout pl;
     if ((r = vkCreatePipelineLayout(dev, &pli, NULL, &pl)) != VK_SUCCESS)
         die("vkCreatePipelineLayout", r);
@@ -185,19 +230,31 @@ int main(int argc, char **argv) {
                                     NULL, &pipe)) != VK_SUCCESS)
         die("vkCreateComputePipelines", r);
 
-    VkDescriptorPoolSize ps = {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
-                               nbind};
+    /* pool covers every element of every row, both kinds */
+    unsigned nstor = 0, ndynb = 0;
+    for (int i = 0; i < nbind; i++) {
+        if (binds[i].dyn) ndynb++;
+        else nstor++;
+    }
+    VkDescriptorPoolSize ps[2];
+    int nps = 0;
+    if (nstor)
+        ps[nps++] = (VkDescriptorPoolSize){
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nstor};
+    if (ndynb)
+        ps[nps++] = (VkDescriptorPoolSize){
+            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, ndynb};
     VkDescriptorPoolCreateInfo dpi = {
-        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 1,
-        1, &ps};
+        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0,
+        nsets, nps, ps};
     VkDescriptorPool dp;
     if ((r = vkCreateDescriptorPool(dev, &dpi, NULL, &dp)) != VK_SUCCESS)
         die("vkCreateDescriptorPool", r);
     VkDescriptorSetAllocateInfo dai = {
-        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, dp, 1,
-        &dsl};
-    VkDescriptorSet ds;
-    if ((r = vkAllocateDescriptorSets(dev, &dai, &ds)) != VK_SUCCESS)
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, dp,
+        nsets, dsl};
+    VkDescriptorSet dsets[MAXSET];
+    if ((r = vkAllocateDescriptorSets(dev, &dai, dsets)) != VK_SUCCESS)
         die("vkAllocateDescriptorSets", r);
 
     /* buffers + host-visible memory (one allocation per buffer) */
@@ -244,10 +301,16 @@ int main(int argc, char **argv) {
         }
         vkUnmapMemory(dev, mem[i]);
 
+        unsigned dsidx = 0;
+        for (int s = 0; s < nsets; s++)
+            if (sets[s] == binds[i].set) dsidx = s;
         VkDescriptorBufferInfo dbi = {buf[i], 0, binds[i].size};
         VkWriteDescriptorSet wds = {
-            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, ds,
-            binds[i].binding, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, dsets[dsidx],
+            binds[i].binding, binds[i].idx, 1,
+            binds[i].dyn
+                ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
+                : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
             NULL, &dbi, NULL};
         vkUpdateDescriptorSets(dev, 1, &wds, 0, NULL);
     }
@@ -268,7 +331,7 @@ int main(int argc, char **argv) {
     vkBeginCommandBuffer(cb, &bbi);
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0,
-                            1, &ds, 0, NULL);
+                            nsets, dsets, ndyn, dynw);
     if (npush)
         vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                            npush * 4, pushw);

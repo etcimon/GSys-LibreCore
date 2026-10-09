@@ -37,6 +37,8 @@
 //                 checkpoints, checked after the indexed command:
 //                   tag 1 {tag, rec, n, (addr, word)*n}      ObjPay
 //                   tag 2 {tag, rec, cbuf, n, (idx, word)*n} arena
+//                   tag 3 {tag, rec, n, (byteaddr, word)*n}  aperture
+//                       descriptor records (shmem, §12.3 F5)
 //                 sentinel FFFFFFFF.  ObjPay contents are read back
 //                 through the TB's peek of the engine's payload SRAM.
 // +ses=<name> selects a different session file set (used by the
@@ -48,6 +50,7 @@ module tb_g6lc_apu_vnfront;
   import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_sh_pkg::*;
+  import g6lc_apu_vg_pkg::*;
   import g6lc_apu_vgpages_pkg::*;
 
   parameter int unsigned ObjPayWords = 16384;
@@ -108,9 +111,14 @@ module tb_g6lc_apu_vnfront;
   logic               fpg_v, fpg_r, fpg_cv;
   apu_vgpages_req_t   fpg_req;
   apu_vgpages_cpl_t   fpg_cpl;
+  // F5: front descriptor-record aperture port
+  logic               fap_req, fap_we, fap_done;
+  logic [31:0]        fap_addr;
+  logic [63:0]        fap_wdata, fap_rdata;
+  logic [7:0]         fap_wstrb;
   // Enable=0 fixture
   logic               o_csre, o_repwe, o_otv, o_crcv, o_subv, o_busy,
-                      o_done;
+                      o_done, o_apreq;
   logic [15:0]        o_addr, o_raddr, o_rwords;
   logic [31:0]        o_wdata, o_result;
   logic [3:0]         o_fault;
@@ -158,6 +166,10 @@ module tb_g6lc_apu_vnfront;
     .pg_req_o(fpg_req),
     .pg_cpl_valid_i(fpg_cv), .pg_cpl_ready_o(),
     .pg_cpl_i(fpg_cpl),
+    .ap_req_o(fap_req), .ap_we_o(fap_we), .ap_addr_o(fap_addr),
+    .ap_wdata_o(fap_wdata), .ap_wstrb_o(fap_wstrb),
+    .ap_ready_i(1'b1), .ap_done_i(fap_done), .ap_rdata_i(fap_rdata),
+    .ap_err_i(1'b0),
     .ex_submit_valid_o(fsub_v), .ex_submit_ready_i(fsub_r),
     .ex_submit_o(fsub),
     .ex_done_seq_i(f_dseq), .ex_fence_signaled_i(f_fsig),
@@ -193,6 +205,9 @@ module tb_g6lc_apu_vnfront;
     .pg_req_valid_o(o_pgv), .pg_req_ready_i(1'b0),
     .pg_req_o(o_pgreq),
     .pg_cpl_valid_i(1'b0), .pg_cpl_ready_o(), .pg_cpl_i('0),
+    .ap_req_o(o_apreq), .ap_we_o(), .ap_addr_o(), .ap_wdata_o(),
+    .ap_wstrb_o(), .ap_ready_i(1'b0), .ap_done_i(1'b0),
+    .ap_rdata_i('0), .ap_err_i(1'b0),
     .ex_submit_valid_o(o_subv), .ex_submit_ready_i(1'b0),
     .ex_submit_o(o_sub),
     .ex_done_seq_i('0), .ex_fence_signaled_i('0), .ex_fence_lost_i('0),
@@ -213,7 +228,7 @@ module tb_g6lc_apu_vnfront;
   logic               w_done;
   apu_sh_done_t       w_done_pl;
   logic [2:0]         xdisp_slot;
-  logic [16*113-1:0]  xbinds;
+  apu_sh_desc_t       xdesc;
   logic [5:0]         xpush_n;
   logic [1023:0]      xpush;
 
@@ -228,7 +243,7 @@ module tb_g6lc_apu_vnfront;
     .op_cpl_valid_i(xop_cv), .op_cpl_ready_o(), .op_cpl_i(xop_cpl),
     .work_valid_o(w_v), .work_ready_i(w_r), .work_o(w_o),
     .work_done_i(w_done), .work_done_pl_i(w_done_pl),
-    .disp_slot_o(xdisp_slot), .binds_o(xbinds),
+    .disp_slot_o(xdisp_slot), .desc_o(xdesc),
     .push_n_o(xpush_n), .push_o(xpush),
     .done_seq_o(f_dseq),
     .fence_signaled_o(f_fsig), .fence_lost_o(f_flost),
@@ -263,7 +278,10 @@ module tb_g6lc_apu_vnfront;
   always @(posedge clk or negedge rst_ni)
     if (!rst_ni) begin ot_busy <= 1'b0; ot_own <= '0; end
     else if (ot_take) begin ot_busy <= 1'b1; ot_own <= ot_sel; end
-    else if (ot_cvld) ot_busy <= 1'b0;
+    // RESET_CTX streams SWEEP completions before the final status —
+    // the grant stays with the owner through the whole stream
+    else if (ot_cvld && ot_cpl.status != APU_OBJTAB_SWEEP)
+      ot_busy <= 1'b0;
 
   // cmdrec: front + exec only
   logic               cr_vld, cr_rdy, cr_cvld;
@@ -321,8 +339,12 @@ module tb_g6lc_apu_vnfront;
     .req_valid_i(op_vld), .req_ready_o(op_rdy), .req_i(op_req),
     .cpl_valid_o(op_cvld), .cpl_ready_i(1'b1), .cpl_o(op_cpl));
 
-  // §7b/5a-ii: real vgpages (front is the only master in this TB)
-  g6lc_apu_vgpages #(.Enable(1'b1), .Pages(256), .PageBytes(4096))
+  // §7b/5a-ii: real vgpages at the shipped geometry (front is the
+  // only master in this TB); the guest/private split must match the
+  // vn_golden model so ALLOC_PRIV pool bases agree with the tapes
+  g6lc_apu_vgpages #(.Enable(1'b1), .Pages(APU_VG_PAGES),
+                     .PageBytes(APU_VG_PAGE_BYTES),
+                     .GuestPages(APU_VG_GUEST_PAGES))
   i_vgp (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(fpg_v), .req_ready_o(fpg_r), .req_i(fpg_req),
@@ -347,7 +369,7 @@ module tb_g6lc_apu_vnfront;
     .sm_cpl_o(sm_cpl), .sm_cpl_pl_o(sm_cpl_pl),
     .work_i(w_v_sh), .work_ready_o(w_r_sh),
     .work_ctype_i(w_o.ctype), .work_imm_i(w_o.rec.imm),
-    .disp_slot_i(xdisp_slot), .binds_i(xbinds),
+    .disp_slot_i(xdisp_slot), .desc_i(xdesc),
     .push_n_i(xpush_n), .push_i(xpush),
     .busy_o(), .done_o(w_done), .done_pl_o(w_done_pl),
     .mem_re_o(shm_re), .mem_we_o(shm_we), .mem_addr_o(shm_addr),
@@ -358,23 +380,51 @@ module tb_g6lc_apu_vnfront;
   // shader-side aperture: byte-addressed SHM window, handshake
   // port (ready=1, rvalid next cycle)
   localparam int SHAPB = 1 << 21;
-  logic [7:0] shmem [SHAPB];
+  // §12.3 F5: pool record stores land in the device-private arena
+  // [APU_VG_GUEST_BYTES, APU_VG_SHM_BYTES) — the dense model covers
+  // the low window plus that range via the compressed apb() view
+  localparam int PV0   = 32'(g6lc_apu_vg_pkg::APU_VG_GUEST_BYTES);
+  localparam int PVN   = g6lc_apu_vg_pkg::APU_VG_PRIV_PAGES *
+                         g6lc_apu_vg_pkg::APU_VG_PAGE_BYTES;
+  localparam int SHAPN = SHAPB + PVN;
+  logic [7:0] shmem [SHAPN];
+  function automatic int unsigned apb(input int unsigned a);
+    if (a < SHAPB) return a;
+    if (a >= PV0 && a < PV0 + PVN) return SHAPB + (a - PV0);
+    $fatal(1, "aperture byte %08x past TB model", a);
+    return 0;
+  endfunction
   logic       shm_rv = 0;
   always @(posedge clk or negedge rst_ni) begin
     if (!rst_ni) begin
       shm_rv <= 1'b0; shm_rdata <= '0;
+      fap_done <= 1'b0; fap_rdata <= '0;
     end else begin
       shm_rv <= 1'b0;
       if (shm_re) begin
         shm_rv <= 1'b1;
         for (int b = 0; b < 8; b++)
-          shm_rdata[b*8 +: 8] <= shmem[shm_addr[20:0] + 21'(b)];
+          shm_rdata[b*8 +: 8] <= shmem[apb(32'(shm_addr) + 32'(b))];
       end
       if (shm_we) begin
         shm_rv <= 1'b1;
         for (int b = 0; b < 8; b++)
-          if (shm_wstrb[b]) shmem[shm_addr[20:0] + 21'(b)] <=
+          if (shm_wstrb[b]) shmem[apb(32'(shm_addr) + 32'(b))] <=
                             shm_wdata[b*8 +: 8];
+      end
+      // F5: front descriptor-record port — same aperture array,
+      // ready=1 / done next cycle (mirrors the vnpump OW_FAP arbiter)
+      fap_done <= 1'b0;
+      if (fap_req) begin
+        fap_done <= 1'b1;
+        if (fap_we) begin
+          for (int b = 0; b < 8; b++)
+            if (fap_wstrb[b])
+              shmem[apb(fap_addr + 32'(b))] <= fap_wdata[b*8 +: 8];
+        end else begin
+          for (int b = 0; b < 8; b++)
+            fap_rdata[b*8 +: 8] <= shmem[apb(fap_addr + 32'(b))];
+        end
       end
     end
   end
@@ -404,7 +454,7 @@ module tb_g6lc_apu_vnfront;
         o_done || o_fclr !== '0 || o_result !== '0 ||
         o_payv || o_opv || o_payd !== '0 || o_opreq !== '0 ||
         o_smreq || o_smpl !== '0 || o_shwr || o_shcom ||
-        o_shcpl !== '0 || o_pgv || o_pgreq !== '0 ||
+        o_shcpl !== '0 || o_pgv || o_pgreq !== '0 || o_apreq ||
         o_rwords !== '0 || o_fault !== '0)
       $fatal(1, "disabled vnfront active");
   end
@@ -530,6 +580,11 @@ module tb_g6lc_apu_vnfront;
     while (!tot_r) @(posedge clk);
     @(negedge clk); tot_v = 1'b0;
     while (!tot_cv) @(negedge clk);
+    // drain interim SWEEP completions to the final OK
+    while (ot_cpl.status == APU_OBJTAB_SWEEP) begin
+      @(negedge clk);
+      while (!tot_cv) @(negedge clk);
+    end
     @(negedge clk);
     tb_ot = 1'b0;
   endtask
@@ -546,7 +601,7 @@ module tb_g6lc_apu_vnfront;
     for (int i = 0; i < $size(expm); i++) expm[i] = '0;
     for (int i = 0; i < $size(paym); i++) paym[i] = '0;
     for (int i = 0; i < $size(repm); i++) repm[i] = '0;
-    for (int i = 0; i < SHAPB; i++) shmem[i] = '0;
+    for (int i = 0; i < SHAPN; i++) shmem[i] = '0;
     $readmemh($sformatf("vn_vectors/%s.hex", ses), cs, 0);
     $readmemh($sformatf("vn_vectors/%s.exp", ses), expm, 0);
     $readmemh($sformatf("vn_vectors/%s.pay", ses), paym, 0);
@@ -637,6 +692,19 @@ module tb_g6lc_apu_vnfront;
             check($sformatf("arena[%0d:%0d]", pw_cbuf, pw_addr),
                   i_rec.gen_on.i_pay.sram[
                     int'(pw_cbuf) * PayPerBuf + int'(pw_addr)]
+                  === paym[payp + 1]);
+            payp += 2;
+          end
+        end else if (paym[payp] == 32'd3) begin
+          // §12.3 F5: aperture-resident descriptor records — {byte
+          // address, word32} pairs against the TB's shmem model
+          npw = int'(paym[payp + 2]);
+          payp += 3;
+          for (int i = 0; i < npw; i++) begin
+            pw_addr = paym[payp];
+            check($sformatf("aperture[%0d]", pw_addr),
+                  {shmem[apb(pw_addr + 3)], shmem[apb(pw_addr + 2)],
+                   shmem[apb(pw_addr + 1)], shmem[apb(pw_addr)]}
                   === paym[payp + 1]);
             payp += 2;
           end

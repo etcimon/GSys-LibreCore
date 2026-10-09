@@ -18,7 +18,12 @@ module tb_apu_mp_mem
 #(
   parameter int unsigned N   = 3,
   parameter int unsigned GMW = 32'h40000,   // guest words (1 MiB)
-  parameter int unsigned APW = 32'h40000    // aperture words (1 MiB)
+  parameter int unsigned APW = 32'h40000,   // aperture words (1 MiB)
+  // §12.3 F5: the aperture word range [PWB, PWB+PPW) is the
+  // device-private arena; the dense model covers [0,APW) plus that
+  // range, addressed through the compressed apix() view
+  parameter int unsigned PWB = 0,
+  parameter int unsigned PPW = 0
 ) (
   input  logic               clk_i,
   input  logic               rst_ni,
@@ -31,7 +36,16 @@ module tb_apu_mp_mem
   // backing stores, 32-bit words; the parent TB reads/writes these
   // directly for tape loads and result checks
   logic [31:0] gmem [GMW];
-  logic [31:0] apm  [APW];
+  logic [31:0] apm  [APW + PPW];
+
+  // compressed aperture index: [0,APW) is the dense low window and
+  // [APW,APW+PPW) maps the device-private arena [PWB,PWB+PPW)
+  function automatic int unsigned apix(input int unsigned w);
+    if (w < APW) return w;
+    if (w >= PWB && w < PWB + PPW) return APW + (w - PWB);
+    $fatal(1, "aperture word %0d past dense model", w);
+    return 0;
+  endfunction
 
   int unsigned lat_min, lat_max, rdy_pct;
   initial begin
@@ -42,7 +56,7 @@ module tb_apu_mp_mem
     if (lat_min == 0) lat_min = 1;
     if (lat_max < lat_min) lat_max = lat_min;
     for (int i = 0; i < GMW; i++) gmem[i] = '0;
-    for (int i = 0; i < APW; i++) apm[i] = '0;
+    for (int i = 0; i < APW + PPW; i++) apm[i] = '0;
   end
 
   // per-port state: one outstanding per requester
@@ -95,10 +109,7 @@ module tb_apu_mp_mem
                   // first-fit keeps every session low — a genuine
                   // over-run is a tape/model bug, never wrap it
                   if (rq_q[p].dom) begin
-                    if ((byt >> 2) >= APW)
-                      $fatal(1, "aperture word %0d past dense model",
-                             byt >> 2);
-                    apm[byt >> 2][8*(byt[1:0]) +: 8] <=
+                    apm[apix(byt >> 2)][8*(byt[1:0]) +: 8] <=
                       rq_q[p].wdata[b*8 +: 8];
                   end else begin
                     if ((byt >> 2) >= GMW)
@@ -115,10 +126,7 @@ module tb_apu_mp_mem
               for (int b = 0; b < 8; b++) begin
                 automatic int unsigned byt = int'(a) + b;
                 if (rq_q[p].dom) begin
-                  if ((byt >> 2) >= APW)
-                    $fatal(1, "aperture word %0d past dense model",
-                           byt >> 2);
-                  d[b*8 +: 8] = apm[byt >> 2][8*(byt[1:0]) +: 8];
+                  d[b*8 +: 8] = apm[apix(byt >> 2)][8*(byt[1:0]) +: 8];
                 end else begin
                   if ((byt >> 2) >= GMW)
                     $fatal(1, "guest word %0d past dense model",

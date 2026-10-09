@@ -72,7 +72,14 @@ module g6lc_apu_objtab
     localparam int unsigned DirWords = 2 * Slots;
     localparam int unsigned DirBits  = $clog2(DirWords);
     localparam int unsigned EntWidth = $bits(apu_objtab_entry_t);
-    localparam int unsigned DirWidth = 1 + 1 + 64 + 16; // valid,tomb,id,slot
+    // row = {valid, tomb, id[63:0], slot[15:0], gen[15:0]}: the row records
+    // the generation its slot carried at insert time.  RESET_CTX and
+    // handle-addressed RETIRE kill the entry but leave the row for lazy
+    // tombstoning; when the slot is recycled under a different id the
+    // entry's newer gen marks the row stale, so a probe for the old id
+    // tombstones it and keeps probing instead of resolving to a foreign
+    // live entry (DUP/KIND/wrong-object aliases).
+    localparam int unsigned DirWidth = 1 + 1 + 64 + 16 + 16;
 
     typedef enum logic [1:0] { ResOk, ResMiss, ResGen, ResKind } res_e;
 
@@ -87,7 +94,7 @@ module g6lc_apu_objtab
       StAllocPar, StAllocSlot, StAllocGen, StAllocWrE, StAllocWrD,
       StAllocParW,
       StScanRd, StScanCmp, StScanWr, StScanParRd, StScanParCap,
-      StScanParWr, StScanDone,
+      StScanParWr, StScanEmit, StScanDone,
       StCpl
     } state_e;
 
@@ -107,6 +114,7 @@ module g6lc_apu_objtab
     res_e               res_st_q;
     logic [DirBits-1:0] res_bucket_q;
     logic               res_bkv_q;
+    logic [15:0]        res_rowgen_q; // gen recorded in the hit dir row
     logic [DirBits-1:0] alloc_bucket_q; // claimed dir bucket, held across
                                         // the parent resolve
     logic [15:0]        res_slot_q;
@@ -121,6 +129,10 @@ module g6lc_apu_objtab
     apu_objtab_entry_t  par_ent_q;
     logic [15:0]        par_slot_q;
     logic [SlotBits:0]  scan_q;
+    // RESET_CTX sweep: tombstoned entry + slot staged for the interim
+    // SWEEP completion so the caller can reclaim owned resources
+    apu_objtab_entry_t  swe_ent_q;
+    logic [15:0]        swe_slot_q;
     logic [15:0]        pinned_q;
     logic [Slots-1:0]   live_q;
     assign live_o = 16'($countones(live_q));
@@ -162,7 +174,8 @@ module g6lc_apu_objtab
     logic        bk_valid, bk_tomb;
     logic [63:0] bk_id;
     logic [15:0] bk_slot;
-    assign {bk_valid, bk_tomb, bk_id, bk_slot} = dir_rdata;
+    logic [15:0] bk_gen;
+    assign {bk_valid, bk_tomb, bk_id, bk_slot, bk_gen} = dir_rdata;
 
     // first dead slot - wide OR tree (see header note)
     logic [15:0] free_slot;
@@ -209,7 +222,7 @@ module g6lc_apu_objtab
           dir_req   = 1'b1;
           dir_we    = 1'b1;
           dir_addr  = res_bucket_q;
-          dir_wdata = {1'b0, 1'b1, res_id_q, 16'h0};
+          dir_wdata = {1'b0, 1'b1, res_id_q, 16'h0, 16'h0};
         end
         StRetEntWr, StMutWr: begin
           ent_req   = 1'b1;
@@ -242,7 +255,7 @@ module g6lc_apu_objtab
           dir_req   = 1'b1;
           dir_we    = 1'b1;
           dir_addr  = alloc_bucket_q;
-          dir_wdata = {1'b1, 1'b0, req_q.id, hit_slot_q};
+          dir_wdata = {1'b1, 1'b0, req_q.id, hit_slot_q, wr_ent_q.gen};
         end
         StScanRd: begin
           ent_req  = 1'b1;
@@ -259,7 +272,9 @@ module g6lc_apu_objtab
     end
 
     assign req_ready_o = state_q == StIdle;
-    assign cpl_valid_o = state_q == StCpl;
+    // RESET_CTX streams one SWEEP completion per tombstoned entry
+    // (caller-side resource reclaim) before the final OK completion
+    assign cpl_valid_o = state_q == StCpl || state_q == StScanEmit;
     assign cpl_o       = cpl_q;
 
     function automatic logic [15:0] gen_next(logic [15:0] g);
@@ -314,11 +329,13 @@ module g6lc_apu_objtab
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         state_q <= StInit; res_ret_q <= StIdle;
+        swe_ent_q <= '0; swe_slot_q <= '0;
         req_q <= '0; cpl_q <= '0; init_q <= '0;
         res_id_q <= '0; res_hnd_q <= 1'b0; res_knd_q <= 1'b0;
         res_alloc_q <= 1'b0; probe_q <= '0; probe_base_q <= '0;
         tomb_first_q <= '0; tomb_v_q <= 1'b0;
         res_st_q <= ResMiss; res_bucket_q <= '0; res_bkv_q <= 1'b0;
+        res_rowgen_q <= '0;
         alloc_bucket_q <= '0;
         res_slot_q <= '0; res_ent_q <= '0; res_hdl_q <= 1'b0;
         res_nogen_q <= 1'b0;
@@ -374,6 +391,7 @@ module g6lc_apu_objtab
           if (bk_valid && !bk_tomb && bk_id == res_id_q) begin
             res_bucket_q <= probe_base_q + DirBits'(probe_q);
             res_slot_q   <= bk_slot;
+            res_rowgen_q <= bk_gen;
             state_q      <= StResEntRd;
           end else if ((!bk_valid && !bk_tomb) || probe_q == 4'd7) begin
             // absent: never-used bucket or probe cap (8 buckets max)
@@ -416,16 +434,19 @@ module g6lc_apu_objtab
               res_st_q <= ResOk;
               state_q  <= res_ret_q;
             end
-          end else if (!ent_rdata_t.live) begin
-            if (res_alloc_q) begin
-              // dead entry behind a live bucket: reclaim the bucket
-              res_st_q  <= ResMiss;
-              res_bkv_q <= 1'b1;
-              state_q   <= res_ret_q;
-            end else begin
-              res_st_q <= ResMiss;
-              state_q  <= StResTomb; // lazy tombstone, then return
+          end else if (!ent_rdata_t.live ||
+                       ent_rdata_t.gen != res_rowgen_q) begin
+            // stale row: the slot is dead or was recycled under a
+            // different id while this row stayed valid (RESET_CTX and
+            // handle-addressed RETIRE leave rows for lazy tombstoning).
+            // Tombstone the row and keep probing — a live duplicate may
+            // still sit deeper in the chain, so ALLOC must reach an
+            // empty bucket before it may reuse this one.
+            if (res_alloc_q && !tomb_v_q) begin
+              tomb_v_q     <= 1'b1;
+              tomb_first_q <= res_bucket_q;
             end
+            state_q <= StResTomb;
           end else if (res_alloc_q) begin
             res_st_q <= ResOk;      // live same-id -> DUP for ALLOC
             state_q  <= res_ret_q;
@@ -437,7 +458,21 @@ module g6lc_apu_objtab
             state_q  <= res_ret_q;
           end
         end
-        StResTomb: state_q <= res_ret_q;
+        StResTomb: begin
+          // tombstone written this cycle; resume the probe past the
+          // stale row (probe_q still points at the bucket just hit)
+          if (probe_q == 4'd7) begin
+            if (res_alloc_q) begin
+              res_bucket_q <= tomb_first_q; // the stale row, or earlier tomb
+              res_bkv_q    <= 1'b1;
+            end
+            res_st_q <= ResMiss;
+            state_q  <= res_ret_q;
+          end else begin
+            probe_q <= probe_q + 1'b1;
+            state_q <= StResProbe;
+          end
+        end
 
         // ---------------- post-resolve dispatch ----------------
         StAfter: begin
@@ -681,6 +716,8 @@ module g6lc_apu_objtab
             end else begin
               wr_ent_q      <= ent_rdata_t;
               wr_ent_q.live <= 1'b0;
+              swe_ent_q     <= ent_rdata_t;
+              swe_slot_q    <= 16'(scan_q);
               par_slot_q    <= ent_rdata_t.parent_slot;
               state_q       <= StScanWr;
             end
@@ -692,14 +729,28 @@ module g6lc_apu_objtab
         StScanWr: begin
           live_q[scan_q[SlotBits-1:0]] <= 1'b0;
           scan_q  <= scan_q + 1'b1;
+          if (par_slot_q == APU_OBJTAB_SLOT_NONE)
+            cpl_q <= '{status: APU_OBJTAB_SWEEP,
+                       handle: {16'h0, swe_slot_q}, entry: swe_ent_q};
           if (par_slot_q != APU_OBJTAB_SLOT_NONE) state_q <= StScanParRd;
-          else state_q <= scan_q == Slots - 1 ? StScanDone : StScanRd;
+          else state_q <= StScanEmit;
         end
         StScanParRd:  state_q <= StScanParCap;
         StScanParCap: state_q <= StScanParWr;
         StScanParWr: begin
+          cpl_q   <= '{status: APU_OBJTAB_SWEEP,
+                       handle: {16'h0, swe_slot_q}, entry: swe_ent_q};
+          state_q <= StScanEmit;
+        end
+        // interim completion per tombstoned entry: the requester owns
+        // the reclaim (aperture/ObjPay extents, ShaderCore refs) that
+        // the bare sweep cannot reach; the stream ends at StScanDone's
+        // OK completion.  The scan stalls here while the caller is
+        // busy reaping (ot_cpl_ready_i backpressure).
+        StScanEmit: begin
           // scan_q was already incremented in StScanWr
-          state_q <= scan_q == Slots ? StScanDone : StScanRd;
+          if (cpl_ready_i)
+            state_q <= scan_q == Slots ? StScanDone : StScanRd;
         end
         StScanDone: begin
           cpl_q   <= '{status: APU_OBJTAB_OK,

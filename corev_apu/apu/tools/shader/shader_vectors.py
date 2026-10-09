@@ -117,6 +117,36 @@ DESC = {
     # never emits OpPhi, so phi coverage needs the .spvasm source.
     'phiflow':      dict(groups=(1, 1, 1), fmt='f', push=0, cf=True,
                          bindings=[(0, 0, 64, 0), (0, 1, 32, 1)]),
+    # §12.3 F5 corpus — memory-resident descriptor records.
+    # bind aux = {kind[23:16], dyn[8], elem_idx[7:0]}; kind 7 =
+    # STORAGE_BUFFER, 9 = STORAGE_BUFFER_DYNAMIC.
+    # descarr: one 4-element array binding + an output; gid/8 indexes
+    # it divergently (32 invocations -> elements 0..3).
+    'descarr':      dict(groups=(4, 1, 1), fmt='f', push=0, cf=False,
+                         bindings=[(0, 0, 32, 0, (7 << 16) | 0),
+                                   (0, 0, 32, 0, (7 << 16) | 1),
+                                   (0, 0, 32, 0, (7 << 16) | 2),
+                                   (0, 0, 32, 0, (7 << 16) | 3),
+                                   (0, 1, 32, 1, 7 << 16)]),
+    # multiset: four sets, one SSBO each; set 2 is bound dynamic with
+    # a +128 B dispatch-time offset (reads the buffer's upper half);
+    # set 0 also carries the 32-word output.
+    'multiset':     dict(groups=(1, 1, 1), fmt='f', push=0, cf=False,
+                         dyn_off=[(2, 0, 128)],
+                         bindings=[(0, 0, 32, 0, 7 << 16),
+                                   (0, 1, 32, 1, 7 << 16),
+                                   (1, 0, 32, 0, 7 << 16),
+                                   (2, 0, 96, 0,
+                                    (9 << 16) | (1 << 8)),
+                                   (3, 0, 32, 0, 7 << 16)]),
+    # arroob: gid indexes a 4-element array with gid up to 15;
+    # elements >= 4 hit the null record -> robust zero loads.
+    'arroob':       dict(groups=(2, 1, 1), fmt='f', push=0, cf=False,
+                         bindings=[(0, 0, 8, 0, (7 << 16) | 0),
+                                   (0, 0, 8, 0, (7 << 16) | 1),
+                                   (0, 0, 8, 0, (7 << 16) | 2),
+                                   (0, 0, 8, 0, (7 << 16) | 3),
+                                   (0, 1, 16, 1, 7 << 16)]),
 }
 SEEDS = [1, 2, 3]
 
@@ -127,18 +157,19 @@ import spirv_model  # noqa: E402
 
 def model_run(hexw, bindings):
     """run spirv_model on a dispatch record; returns
-    (robust, model_words_by_out_binding, class_words_by_out_binding).
-    Raises spirv_scan.Fault if the module does not commit."""
+    (robust, model_words_by_out_binding, class_words_by_out_binding,
+    the Model).  Raises spirv_scan.Fault if the module can't commit."""
     m = spirv_model.Model(list(hexw))
     m.run()
     outs = m.outputs()
     cls = m.out_classes()
     mw, cw = [], []
-    for i, (st, bd, w, o) in enumerate(bindings):
+    for i, b in enumerate(bindings):
+        st, bd, w, o = b[:4]
         if o:
             mw += outs.get(i, [0] * w)
             cw += [1 if c == 'f' else 0 for c in cls.get(i, ['i'] * w)]
-    return m.robust, mw, cw
+    return m.robust, mw, cw, m
 
 
 def words_to_hex(words):
@@ -317,9 +348,18 @@ def emit(name, seed, spv_words, desc, inputs, expect_fault=(0, 0),
             desc['groups'][0], desc['groups'][1], desc['groups'][2],
             (1 if expect_fault[0] else 0) | (2 if mutated else 0), 0]
     hexw += spv_words
-    for i, (st, bd, w, o) in enumerate(bindings):
-        hexw += [st, bd, w * 4, ADDR0 + i * 0x1000]
+    # §12.3 F5: 5-word bind entries; aux = {kind[23:16], dyn[8],
+    # elem_idx[7:0]} so elements of one descriptor array share a row.
+    for i, b in enumerate(bindings):
+        st, bd, w, o = b[:4]
+        ax = b[4] if len(b) > 4 else 0
+        hexw += [st, bd, w * 4, ADDR0 + i * 0x1000, ax]
     hexw += push_words(desc, seed)
+    # dynamic-offset section: n entries {set, ordinal, offset}
+    dynl = desc.get('dyn_off', [])
+    hexw += [len(dynl)]
+    for (s, o2, v) in dynl:
+        hexw += [s, o2, v]
     for i in range(len(bindings)):
         hexw += pack_floats(inputs[i], desc['fmt'])
     hexw += SENT
@@ -328,20 +368,22 @@ def emit(name, seed, spv_words, desc, inputs, expect_fault=(0, 0),
     # model run (skipped for commit-fault modules); model_cache lets
     # the post-oracle re-emit reuse the result.
     if model_cache is not None:
-        mrob, mwords, cwords = model_cache
+        mrob, mwords, cwords, _m = model_cache
     elif not expect_fault[0]:
-        mrob, mwords, cwords = model_run(hexw, bindings)
+        mrob, mwords, cwords, _m = model_run(hexw, bindings)
     else:
-        mrob, mwords, cwords = 0, None, None
+        mrob, mwords, cwords, _m = 0, None, None, None
     robust = mrob
 
     expw = [expect_fault[0], expect_fault[1], robust,
             0 if expect_fault[0] else 1, len(bindings)]
-    for i, (st, bd, w, o) in enumerate(bindings):
+    for i, b in enumerate(bindings):
+        st, bd, w, o = b[:4]
         expw += [bd, w * 4, ADDR0 + i * 0x1000, o]
     if oracle_out is not None:
         off = 0
-        for i, (st, bd, w, o) in enumerate(bindings):
+        for i, b in enumerate(bindings):
+            st, bd, w, o = b[:4]
             if o:
                 expw += oracle_out[off:off + w]
             off += w
@@ -350,20 +392,81 @@ def emit(name, seed, spv_words, desc, inputs, expect_fault=(0, 0),
     expw += SENT
     open(base + '.exp', 'w').write('\n'.join(words_to_hex(expw)) + '\n')
 
-    # oracle side inputs
+    # oracle side inputs — idx/dyn describe the descriptor-array
+    # element and dynamic kind; dyn_off is the pDynamicOffsets list.
     descj = {'gx': desc['groups'][0], 'gy': desc['groups'][1],
              'gz': desc['groups'][2], 'bindings': []}
     if push:
         descj['push'] = push_words(desc, seed)
-    for i, (st, bd, w, o) in enumerate(bindings):
+    if desc.get('dyn_off'):
+        descj['dyn_off'] = [v for (_s, _o, v) in desc['dyn_off']]
+    for i, b in enumerate(bindings):
+        st, bd, w, o = b[:4]
+        ax = b[4] if len(b) > 4 else 0
         ib = base + '_in%d.bin' % i
         packed = pack_floats(inputs[i], desc['fmt'])
         open(ib, 'wb').write(b''.join(
             struct.pack('<I', v) for v in packed))
-        descj['bindings'].append({'set': st, 'binding': bd, 'size': w * 4,
-                                  'init': ib})
+        descj['bindings'].append({'set': st, 'binding': bd,
+                                  'size': w * 4, 'init': ib,
+                                  'idx': ax & 0xFF,
+                                  'dyn': (ax >> 8) & 1})
     open(base + '.desc.json', 'w').write(json.dumps(descj))
-    return base, (mrob, mwords, cwords)
+    return base, (mrob, mwords, cwords, _m)
+
+
+def ulpd(a, b):
+    """mirror of the TB's ulpd(): bit-diff as ULP count, NaN==NaN,
+    sign-cross = infinity."""
+    if a == b:
+        return 0
+    if (a & 0x7FFFFFFF) == 0 and (b & 0x7FFFFFFF) == 0:
+        return 0
+    if (a & 0x7F800000) == 0x7F800000 and (a & 0x7FFFFF) != 0 and \
+       (b & 0x7F800000) == 0x7F800000 and (b & 0x7FFFFF) != 0:
+        return 0
+    if (a ^ b) & 0x80000000:
+        return 0x7FFFFFFF
+    return abs(a - b)
+
+
+def oracle_image(owords, mc, desc):
+    """Gate-2-aware oracle comparison: the model's full post-dispatch
+    buffer image vs lavapipe's dump, with int words bit-exact and
+    float words within 2 ULP (the .exp class section's rule).  Returns
+    the oracle word list to fold into .exp, or the model image when
+    the oracle strays beyond Gate-2 tolerance (e.g. UB descriptor-
+    array OOB under lavapipe)."""
+    bindings = desc['bindings']
+    if mc[3] is None:
+        return owords
+    m = mc[3]
+    mfull = []
+    off = 0
+    for i, b in enumerate(bindings):
+        ad = ADDR0 + i * 0x1000
+        mfull += [m.mem.get((ad >> 2) + k, 0) for k in range(b[2])]
+        off += b[2]
+    if len(owords) != len(mfull):
+        return mfull
+    mcls = m.out_classes()
+    bad = False
+    off = 0
+    for i, b in enumerate(bindings):
+        st, bd, w, o = b[:4]
+        for k in range(w):
+            xo = owords[off + k]
+            xm = mfull[off + k]
+            cls = 'i'
+            if o and i in mcls and k < len(mcls[i]):
+                cls = mcls[i][k]
+            if cls == 'f':
+                if ulpd(xm, xo) > 2:
+                    bad = True
+            elif xm != xo:
+                bad = True
+        off += w
+    return mfull if bad else owords
 
 
 ORACLE = os.environ.get('ORACLE', '/tmp/g6lc-vk-oracle')
@@ -415,9 +518,14 @@ def main():
                 data = open(out_bin, 'rb').read()
                 owords = list(struct.unpack('<%dI' % (len(data) // 4),
                                             data))
+                o2 = oracle_image(owords, mc, desc)
+                if o2 is not owords:
+                    print('%s_%d: oracle beyond Gate-2 tolerance — '
+                          'ORACLE section carries model words'
+                          % (name, seed))
                 # fold oracle output into the .exp (model cached)
                 emit(name, seed, words, desc, inputs,
-                     oracle_out=owords, model_cache=mc)
+                     oracle_out=o2, model_cache=mc)
         # mutated module (seed 0): commits fine but the output must
         # DIFFER from the unmutated oracle output at identical inputs.
         # .exp carries the UNMUTATED oracle words; the TB asserts
@@ -510,8 +618,13 @@ def main():
                 data = open(out_bin, 'rb').read()
                 owords = list(struct.unpack('<%dI' % (len(data) // 4),
                                             data))
+                o2 = oracle_image(owords, mc, desc)
+                if o2 is not owords:
+                    print('%s_opt_%d: oracle beyond Gate-2 tolerance — '
+                          'ORACLE section carries model words'
+                          % (name, seed))
                 emit(name + '_opt', seed, words, desc, inputs,
-                     oracle_out=owords, model_cache=mc)
+                     oracle_out=o2, model_cache=mc)
     print('wrote %d cases to %s' % (len(summary), OUT))
     return 0
 

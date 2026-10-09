@@ -1759,3 +1759,9 @@ These fixes are now in the generator: `g6q-emit-qemu` emits `reg_shift` / `clock
   control re-run: llvmpipe-only. Full ordered command stream captured in
   `architecture/uncore/apu-venus-command-trace.md`; artifacts under
   `/tmp/g6lc-apu-bridge/`.
+- **F5 closure (2026-10-08):** memory-resident descriptors (§12.1 F5) verified end-to-end on the
+  stock guest after the ObjTab stale-directory-row fix (dir rows now carry `gen[15:0]`; stale hits
+  are tombstoned and probing continues — see §11 row F5). `vulkaninfo --summary` shows the Venus
+  device, `vkcompute` → `G6LC_VKCOMPUTE_PASS words=32`, and `vkdescarr` →
+  `G6LC_VKDESCARR_PASS words=32` with `ssboArrDyn=1 uboArrDyn=1` read back in-guest. Artifacts +
+  logs persist under `.cache/f5-logs/` (guest/ + final/).

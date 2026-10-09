@@ -32,11 +32,19 @@ module tb_g6lc_apu_vgsys;
   localparam logic [63:0] AB     = APU_VG_SHM_BASE; // aperture window
   localparam int unsigned ABW    = 32'h40000;    // dense 1 MiB model
                                                    // of the 32 MiB window
+  // §12.3 F5: the device-private arena sits at APU_VG_GUEST_BYTES..top;
+  // the dense model covers it in [ABW, ABW+PPW) of apm
+  localparam int unsigned PWB    = 32'(APU_VG_GUEST_BYTES >> 2);
+  localparam int unsigned PPW    =
+      APU_VG_PRIV_PAGES * (APU_VG_PAGE_BYTES / 4);
+  localparam int unsigned APWT   = ABW + PPW;
   // first-fit keeps every session low; an index past the dense model
   // is a tape/model bug — never wrap
   function automatic int unsigned apix(input int unsigned w);
-    if (w >= ABW) $fatal(1, "aperture word %0d past dense model", w);
-    return w;
+    if (w < ABW) return w;
+    if (w >= PWB && w < PWB + PPW) return ABW + (w - PWB);
+    $fatal(1, "aperture word %0d past dense model", w);
+    return 0;
   endfunction
   localparam int unsigned TAPEW  = 32'h20000;
   localparam int unsigned EXPW   = 32'h40000;
@@ -100,6 +108,7 @@ module tb_g6lc_apu_vgsys;
   logic [63:0]     ap_bytes = APU_VG_SHM_BYTES;
   // debug ObjTab (unused; tied off)
   logic            dot_r;
+  logic            dot_v = 1'b0, dot_cr = 1'b0;
   apu_objtab_req_t dot_req = '0;
   logic            dot_cv;
   apu_objtab_cpl_t dot_cpl;
@@ -138,9 +147,9 @@ module tb_g6lc_apu_vgsys;
     .ring_active_o(d_ra), .ring_status_o(d_rs),
     .ring_head_o(d_rh), .ring_extra_w_o(d_re),
     .objtab_live_o(d_liv),
-    .dbg_ot_valid_i(1'b0), .dbg_ot_ready_o(dot_r),
+    .dbg_ot_valid_i(dot_v), .dbg_ot_ready_o(dot_r),
     .dbg_ot_req_i(dot_req),
-    .dbg_ot_cpl_valid_o(dot_cv), .dbg_ot_cpl_ready_i(1'b0),
+    .dbg_ot_cpl_valid_o(dot_cv), .dbg_ot_cpl_ready_i(dot_cr),
     .dbg_ot_cpl_o(dot_cpl));
 
   // WorkSink=0 twin (§6c F1): same queues, refuses non-dispatch work
@@ -276,7 +285,7 @@ module tb_g6lc_apu_vgsys;
 
   // ---- guest RAM + aperture backing stores ------------------------------
   logic [31:0] gmem [GBW];   // gmem[off>>2] <-> GB+off
-  logic [31:0] apm  [ABW];   // apm[apix(off>>2)]  <-> AB+off
+  logic [31:0] apm  [APWT];  // apm[apix(off>>2)]  <-> AB+off
 
   // ---- AXI4 slave model (burst reads, <=3 outstanding) ------------------
   // Any AW/AR outside the two windows is an immediate test failure.
@@ -843,12 +852,12 @@ module tb_g6lc_apu_vgsys;
               int unsigned bad = 0;
               for (int i = 0; i < a0; i++) begin
                 check(rec_kind() == 5, "EK_REPLY kind");
-                if (apm[((a1 >> 2) + expm[ep + 1])] != expm[ep + 2])
+                if (apm[apix((a1 >> 2) + expm[ep + 1])] != expm[ep + 2])
                   bad++;
-                check(apm[((a1 >> 2) + expm[ep + 1])] == expm[ep + 2],
+                check(apm[apix((a1 >> 2) + expm[ep + 1])] == expm[ep + 2],
                       $sformatf("CK_REPLY off=%0x idx=%0d got=%08x exp=%08x",
                                 a1, expm[ep + 1],
-                                apm[((a1 >> 2) + expm[ep + 1])],
+                                apm[apix((a1 >> 2) + expm[ep + 1])],
                                 expm[ep + 2]));
                 ep += 8;
               end
@@ -869,10 +878,10 @@ module tb_g6lc_apu_vgsys;
             end
             4: begin // CK_EXTRA [ring][byte off]
               check(rec_kind() == 7, "EK_EXTRA kind");
-              check(apm[(r_extra[a0] + (a1 >> 2))] == expm[ep + 3],
+              check(apm[apix(r_extra[a0] + (a1 >> 2))] == expm[ep + 3],
                     $sformatf("CK_EXTRA ring%0d off=%0x got=%08x exp=%08x",
                               a0, a1,
-                              apm[(r_extra[a0] + (a1 >> 2))],
+                              apm[apix(r_extra[a0] + (a1 >> 2))],
                               expm[ep + 3]));
               ep += 8;
             end
@@ -943,7 +952,7 @@ module tb_g6lc_apu_vgsys;
   task automatic vq_init(input logic [31:0] u0);
     // u0 = aperture bytes presented to the DUT (64 KiB shrink arm)
     for (int i = 0; i < GBW; i++) gmem[i] = '0;
-    for (int i = 0; i < ABW; i++) apm[apix(i)] = '0;
+    for (int i = 0; i < APWT; i++) apm[i] = '0;
     vq0 = '{desc: GB + Q0D, avail: GB + Q0A, used: GB + Q0U,
             num: 16'(Q0N), ready: 1'b1};
     vq1 = '{desc: GB + Q1D, avail: GB + Q1A, used: GB + Q1U,
@@ -1327,6 +1336,140 @@ module tb_g6lc_apu_vgsys;
     cases++;
   endtask
 
+  // ---- §12.3 F5 epoch-reuse arm --------------------------------------
+  // Two guest-process lifetimes driven through the debug ObjTab port on
+  // the REAL vgtop arbiter (the stock-guest vkdescarr failure mode):
+  // session ctx=1 allocates ids, RESET_CTX sweeps them dead, blob-style
+  // ALLOCs (VG tag, ctx=9) recycle the freed slots, then session ctx=2
+  // reuses the same ids.  Stale directory rows must not alias the
+  // recycled slots: LOOKUP of a dead id -> MISS (never KIND/DUP), and
+  // re-ALLOC -> OK with a fresh generation.
+  localparam int unsigned EP_IDS = 6;
+  // epoch-arm bring-up trace (compile with -D G6LC_APU_DEBUG): one line
+  // per cycle while a dbg ObjTab op is in flight
+`ifdef G6LC_APU_DEBUG
+  always @(negedge clk) begin
+    if (dot_v || dot_cv || i_dut.gen_on.i_top.gen_on.ot_cpl_valid ||
+        i_dut.gen_on.i_top.gen_on.ot_req_valid)
+      $display("  [eptr] st=%0d og=%0d rv=%b rr=%b cv=%b dcv=%b vcb=%b vpb=%b erst=%b rq=%0d iq=%0d",
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.state_q,
+               i_dut.gen_on.i_top.gen_on.og_q,
+               i_dut.gen_on.i_top.gen_on.ot_req_valid,
+               dot_r,
+               i_dut.gen_on.i_top.gen_on.ot_cpl_valid, dot_cv,
+               i_dut.gen_on.i_top.gen_on.vc_busy,
+               i_dut.gen_on.i_top.gen_on.vp_busy,
+               i_dut.gen_on.eng_rst_n, i_dut.gen_on.rst_q,
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.init_q);
+  end
+`endif
+  task automatic ot_op(input  apu_objtab_op_e     op,
+                       input  logic [63:0]      id,
+                       input  logic [5:0]       kind,
+                       input  logic [7:0]       ctx,
+                       output apu_objtab_status_e st,
+                       output logic [31:0]      hnd,
+                       output int               swept);
+    int t;
+    st = APU_OBJTAB_MISS; hnd = '0; swept = 0;
+    dot_req = '{op: op, id: id, kind: kind, ctx: ctx, default: '0};
+    // stimulus changes only at negedge (half a cycle clear of both the
+    // request-accept and completion-consume posedges)
+    @(negedge clk);
+    dot_v = 1'b1;
+    t = 0;
+    forever begin
+      @(negedge clk); t++;
+      if (dot_r) break;
+      if (t > 10000) begin
+        check(1'b0, "epoch ot_op req timeout (arbiter never granted)");
+        dot_v = 1'b0;
+        return;
+      end
+    end
+    @(negedge clk);           // the accept posedge has passed
+    dot_v = 1'b0;
+    t = 0;
+    forever begin
+      @(negedge clk); t++;
+      if (t > 100000) begin
+        check(1'b0, "epoch ot_op cpl timeout");
+        break;
+      end
+      if (dot_cv) begin
+        if (dot_cpl.status == APU_OBJTAB_SWEEP) begin
+          swept++;
+        end else begin
+          st  = dot_cpl.status;
+          hnd = dot_cpl.handle;
+          break;
+        end
+      end
+    end
+  endtask
+
+  task automatic arm_epoch();
+    apu_objtab_status_e st;
+    logic [31:0] hnd;
+    int          swept, live_slots[$];
+    int unsigned g0;
+    dot_cr = 1'b1;            // dbg-port cpl_ready for the whole arm
+    for (int rep = 0; rep < 3; rep++) begin
+      // session ctx=1: allocate EP_IDS descriptor-pool objects
+      live_slots.delete();
+      for (int i = 1; i <= EP_IDS; i++) begin
+        ot_op(APU_OBJTAB_OP_ALLOC,
+              APU_VN_ID_TAG | 64'(i),
+              6'(APU_VN_KIND_VK_DESCRIPTOR_POOL), 8'd1, st, hnd, swept);
+        check(st == APU_OBJTAB_OK,
+              $sformatf("epoch%0d alloc id%0d st=%0d", rep, i, st));
+        live_slots.push_back(32'(hnd[15:0]));
+        if (rep == 0 && i == 1) g0 = hnd[31:16];
+      end
+      // process exit: RESET_CTX sweeps ctx=1 dead
+      ot_op(APU_OBJTAB_OP_RESET_CTX, '0, '0, 8'd1, st, hnd, swept);
+      check(st == APU_OBJTAB_OK, "epoch reset_ctx ok");
+      check(swept == EP_IDS,
+            $sformatf("epoch%0d swept=%0d exp=%0d", rep, swept, EP_IDS));
+      // blob-style ALLOCs (VG tag) recycle the freed slots
+      for (int i = 0; i < EP_IDS; i++) begin
+        ot_op(APU_OBJTAB_OP_ALLOC,
+              APU_VG_ID_TAG | 64'(64'h40 + i),
+              6'(APU_VN_KIND_APU_BLOB_SHMEM), 8'd9, st, hnd, swept);
+        check(st == APU_OBJTAB_OK,
+              $sformatf("epoch%0d blob alloc st=%0d", rep, st));
+        check(hnd[15:0] inside {live_slots},
+              $sformatf("epoch%0d blob slot %0d not a recycled slot",
+                        rep, hnd[15:0]));
+      end
+      // second session ctx=2: old ids must MISS (not KIND/DUP),
+      // then re-ALLOC must succeed with a fresh generation
+      for (int i = 1; i <= EP_IDS; i++) begin
+        ot_op(APU_OBJTAB_OP_LOOKUP,
+              APU_VN_ID_TAG | 64'(i),
+              6'(APU_VN_KIND_VK_DESCRIPTOR_POOL), 8'd2, st, hnd, swept);
+        check(st == APU_OBJTAB_MISS,
+              $sformatf("epoch%0d stale lookup id%0d st=%0d exp=MISS",
+                        rep, i, st));
+      end
+      for (int i = 1; i <= EP_IDS; i++) begin
+        ot_op(APU_OBJTAB_OP_ALLOC,
+              APU_VN_ID_TAG | 64'(i),
+              6'(APU_VN_KIND_VK_DESCRIPTOR_POOL), 8'd2, st, hnd, swept);
+        check(st == APU_OBJTAB_OK,
+              $sformatf("epoch%0d realloc id%0d st=%0d", rep, i, st));
+      end
+      // clean ctx=2 and the blobs for the next epoch
+      ot_op(APU_OBJTAB_OP_RESET_CTX, '0, '0, 8'd2, st, hnd, swept);
+      check(st == APU_OBJTAB_OK, "epoch ctx2 reset_ctx ok");
+      ot_op(APU_OBJTAB_OP_RESET_CTX, '0, '0, 8'd9, st, hnd, swept);
+      check(st == APU_OBJTAB_OK, "epoch blob reset_ctx ok");
+      cases++;
+    end
+    check(g0 != 0, "epoch: live generation nonzero");
+    check_axi_bal();
+  endtask
+
   // --------------------------------------------------------------------------
   initial begin
     string vname;
@@ -1370,6 +1513,10 @@ module tb_g6lc_apu_vgsys;
       ws_arm_q = 1'b1;             // i_ws0 owns queues + AXI slave
       vq_init(APU_VG_SHM_BYTES);
       neg_worksink0();
+    end else if (vname == "epoch_reuse") begin
+      // queues stay disabled: the debug ObjTab port is only granted
+      // while vgctl/vnpump are idle
+      arm_epoch();
     end else begin
       vq_init(APU_VG_SHM_BYTES);
       $readmemh({"vn_vectors/", vname, ".hex"}, tape, 0);

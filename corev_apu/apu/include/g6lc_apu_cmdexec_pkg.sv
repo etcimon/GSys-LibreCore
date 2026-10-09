@@ -42,6 +42,10 @@ package g6lc_apu_cmdexec_pkg;
     logic [15:0]        push_len;       // §7b: its byte size
     logic               rp_active;
     logic [3:0]         subpass;
+    // §12.3 F5: per-set dynamic-offset shadow — vkCmdBindDescriptorSets
+    // streams, per bound set, {handle, ndyn, dyn offsets} so the
+    // offsets land per set even across interleaved bind calls.
+    logic [3:0][15:0][31:0] dyn;
   } apu_cmdexec_state_t;
 
   typedef struct packed {

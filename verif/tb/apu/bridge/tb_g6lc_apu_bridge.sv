@@ -245,6 +245,128 @@ module tb_g6lc_apu_bridge
     wire [255:0] pay_free = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
                               .i_pay.gen_on.free_q;
 
+    // F5 bring-up observability: vnfront's descriptor-path state,
+    // readable over the bridge debug overlay (sel 32..47)
+    wire [7:0]  fr_state = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.state_q;
+    wire [31:0] fr_result = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_pump.gen_on.i_fr.gen_on.result_q;
+    wire [31:0] fr_cmd   = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.op_q.cmd_type;
+    wire [31:0] fr_imm0  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.op_q.imm[0];
+    wire [31:0] fr_imm1  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.op_q.imm[1];
+    wire [7:0]  fr_flags = {i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_pump.gen_on.i_fr.gen_on.ds_err_q,
+                            i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_pump.gen_on.i_fr.gen_on.upd_elok_q,
+                            i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_pump.gen_on.i_fr.gen_on.upd_pois_q,
+                            i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_pump.gen_on.i_fr.gen_on.upd_bad_q,
+                            i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_pump.gen_on.i_fr.gen_on.rw_ok_q,
+                            i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_pump.gen_on.i_fr.gen_on.rsv_dead_q,
+                            i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_pump.gen_on.i_fr.gen_on.rsv_ok_q,
+                            i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_pump.gen_on.i_fr.gen_on.busy_o};
+    wire [15:0] fr_upd_i = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.upd_i_q;
+    wire [15:0] fr_ent_j = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.ent_j_q;
+    wire [7:0]  fr_rw_b  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.rw_bind_q;
+    wire [7:0]  fr_rw_t  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.rw_typ_q;
+    wire [15:0] fr_rw_c  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.rw_cnt_q;
+    wire [19:0] fr_rw_o  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.rw_off_q;
+    wire [31:0] fr_rec   = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.upd_rec_q;
+    wire [15:0] fr_dcnt  = 16'(i_dut.gen_venus.i_vgsys.gen_on.i_top
+                               .gen_on.i_pump.gen_on.i_fr.gen_on.upd_dcnt_q);
+    wire [15:0] fr_arr   = 16'(i_dut.gen_venus.i_vgsys.gen_on.i_top
+                               .gen_on.i_pump.gen_on.i_fr.gen_on.upd_arr_q);
+    wire [7:0]  fr_dstb  = 8'(i_dut.gen_venus.i_vgsys.gen_on.i_top
+                              .gen_on.i_pump.gen_on.i_fr.gen_on.upd_dstb_q);
+    wire [7:0]  fr_utyp  = 8'(i_dut.gen_venus.i_vgsys.gen_on.i_top
+                              .gen_on.i_pump.gen_on.i_fr.gen_on.upd_type_q);
+    wire [15:0] fr_sbyt  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.ds_sbyt_q;
+    wire [15:0] fr_ndyn  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.ds_ndyn_q;
+    wire [24:0] fr_sbase = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.ds_sbase_q;
+    wire [63:0] fr_udst  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.upd_dst_q;
+    wire [63:0] fr_ubuf  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.upd_buf_q;
+    wire [24:0] fr_rsvb  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.rsv_base_q;
+    wire [15:0] fr_rsvp  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.rsv_phnd_q[15:0];
+    wire [15:0] fr_rsve  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.rsv_ep_q;
+    wire [15:0] fr_rsvl  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.rsv_layh_q[15:0];
+    wire [31:0] fr_eb    = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.upd_eb_q;
+    wire [31:0] fr_esz   = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.upd_esz_q;
+    // ObjTab request/completion taps (fr boundary)
+    wire        fr_ot_rv = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.ot_req_valid_o;
+    wire        fr_ot_rr = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.ot_req_ready_i;
+    wire        fr_ot_cv = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.ot_cpl_valid_i;
+    wire [3:0]  fr_ot_cst = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_pump.gen_on.i_fr.gen_on.ot_cpl_i.status;
+    wire [31:0] fr_ot_ch = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.ot_cpl_i.handle;
+    wire [3:0]  fr_ot_op = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.otr_q.op;
+    wire [63:0] fr_ot_id = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.otr_q.id;
+    wire [63:0] fr_ot_par = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_pump.gen_on.i_fr.gen_on.otr_q.parent_id;
+    wire [5:0]  fr_ot_knd = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_pump.gen_on.i_fr.gen_on.otr_q.kind;
+    wire [7:0]  fr_ctx   = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.ctx_i;
+
+`ifdef G6LC_APU_DEBUG
+    // F5 bring-up trace (-D G6LC_APU_DEBUG): command decode +
+    // descriptor-path state transitions + ObjTab req/cpl -> stdout.
+    logic [7:0]  fr_prev_q;
+    logic [31:0] fr_pcmd_q;
+    wire fr_isdesc = (fr_cmd >= 32'h48 && fr_cmd <= 32'h4f);
+    always_ff @(posedge clk_i) begin
+      if (fr_cmd != fr_pcmd_q)
+        $display("[f5tr] cmd=%08x imm0=%0d imm1=%0d",
+                 fr_cmd, fr_imm0, fr_imm1);
+      if (fr_state != fr_prev_q &&
+          (fr_isdesc || fr_state == 8'd155 || fr_result != 32'h0))
+        $display("[f5tr] st=%0d res=%08x fl=%02x ui=%0d ej=%0d rwb=%0d rwt=%0d rwc=%0d rwo=%0d rec=%08x dcnt=%0d arr=%0d dstb=%0d utyp=%0d sbyt=%0d sb=%07x udst=%x ubuf=%x rsvb=%07x rsvp=%x rsve=%x rsvl=%x eb=%08x esz=%08x",
+                 fr_state, fr_result, fr_flags, fr_upd_i, fr_ent_j,
+                 fr_rw_b, fr_rw_t, fr_rw_c, fr_rw_o, fr_rec,
+                 fr_dcnt, fr_arr, fr_dstb, fr_utyp, fr_sbyt,
+                 fr_sbase, fr_udst, fr_ubuf, fr_rsvb, fr_rsvp,
+                 fr_rsve, fr_rsvl, fr_eb, fr_esz);
+      if (fr_ot_rv && fr_ot_rr)
+        $display("[f5ot] req op=%0d id=%016x par=%016x knd=%0d ctx=%0d",
+                 fr_ot_op, fr_ot_id, fr_ot_par, fr_ot_knd, fr_ctx);
+      if (fr_ot_cv)
+        $display("[f5ot] cpl st=%0d hnd=%08x", fr_ot_cst, fr_ot_ch);
+      fr_prev_q <= fr_state;
+      fr_pcmd_q <= fr_cmd;
+    end
+`endif
+
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         f_seen_q <= 1'b0; f_id_q <= '0; f_ring_q <= '0;
@@ -263,6 +385,23 @@ module tb_g6lc_apu_bridge
         8'd5:    dbg_rdata_o = 64'(f_ring_q);
         8'd6:    dbg_rdata_o = 64'($countones(vgp_free));
         8'd7:    dbg_rdata_o = 64'(|pay_free);   // 0 = chunks drained
+        // F5 bring-up: vnfront descriptor-path state taps
+        8'd32:   dbg_rdata_o = {24'h0, fr_state, fr_result};
+        8'd33:   dbg_rdata_o = {32'h0, fr_cmd};
+        8'd34:   dbg_rdata_o = {32'h0, fr_imm0};
+        8'd35:   dbg_rdata_o = {32'h0, fr_imm1};
+        8'd36:   dbg_rdata_o = {16'h0, fr_flags, fr_upd_i, fr_ent_j};
+        8'd37:   dbg_rdata_o = {12'h0, fr_rw_b, fr_rw_t, fr_rw_c,
+                              fr_rw_o};
+        8'd38:   dbg_rdata_o = {32'h0, fr_rec};
+        8'd39:   dbg_rdata_o = {fr_arr, fr_dcnt, fr_dstb, fr_utyp};
+        8'd40:   dbg_rdata_o = {7'h0, fr_sbyt, fr_ndyn, fr_sbase};
+        8'd42:   dbg_rdata_o = fr_udst;
+        8'd43:   dbg_rdata_o = fr_ubuf;
+        8'd44:   dbg_rdata_o = {39'h0, fr_rsvb};
+        8'd45:   dbg_rdata_o = {16'h0, fr_rsvp, fr_rsvl, fr_rsve};
+        8'd46:   dbg_rdata_o = {32'h0, fr_eb};
+        8'd47:   dbg_rdata_o = {32'h0, fr_esz};
         default: begin
           if (dbg_sel_i >= 8'd16 && dbg_sel_i < 8'd20)
             dbg_rdata_o = 64'(r_head[dbg_sel_i[1:0]]);

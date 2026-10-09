@@ -33,6 +33,29 @@ module tb_g6lc_apu_vgpages;
     .req_valid_i(req_v), .req_ready_o(off_req_r), .req_i(req),
     .cpl_valid_o(off_cpl_v), .cpl_ready_i(cpl_r), .cpl_o(off_cpl));
 
+  // §12.3 F5: second instance with an 8-page device-private arena —
+  // guest ops are bounded to [0, GuestBytes), ALLOC_PRIV scans
+  // [GuestPages, Pages); the two pools are independent
+  localparam int unsigned GPages = Pages - 8;
+  logic pv_v = 0, pv_r, pv_cpl_v;
+  apu_vgpages_req_t pv_req = '0;
+  apu_vgpages_cpl_t pv_cpl;
+  g6lc_apu_vgpages #(.Enable(1'b1), .Pages(Pages),
+                     .PageBytes(PageBytes), .GuestPages(GPages)) i_priv (
+    .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
+    .req_valid_i(pv_v), .req_ready_o(pv_r), .req_i(pv_req),
+    .cpl_valid_o(pv_cpl_v), .cpl_ready_i(1'b1), .cpl_o(pv_cpl));
+
+  task automatic do_pv(input apu_vgpages_op_e op, input logic [31:0] b,
+                       input logic [31:0] n, output apu_vgpages_cpl_t c);
+    @(negedge clk);  // let StCpl retire before the next request
+    pv_v = 1'b1; pv_req = '{op: op, base: b, bytes: n};
+    @(posedge clk);
+    @(negedge clk); pv_v = 1'b0;
+    while (!pv_cpl_v) @(negedge clk);
+    c = pv_cpl;
+  endtask
+
   always #5 clk = ~clk;
   always @(posedge clk) cycles++;
   always @(negedge clk) if (off_req_r || off_cpl_v || |off_cpl)
@@ -188,6 +211,36 @@ module tb_g6lc_apu_vgpages;
         live--;
         t_free(bases[live], bs[live]);
       end
+    end
+
+    // ---- private arena (§12.3 F5) ------------------------------------
+    cases++;
+    begin
+      apu_vgpages_cpl_t pc;
+      do_pv(APU_VGPAGES_OP_ALLOC, 0, 32'(GPages) * PageBytes, pc);
+      check("guest whole window", pc.status == APU_VGPAGES_OK &&
+            pc.base == 32'h0);
+      do_pv(APU_VGPAGES_OP_ALLOC, 0, PageBytes, pc);
+      check("guest window full", pc.status == APU_VGPAGES_FULL);
+      do_pv(APU_VGPAGES_OP_ALLOC_PRIV, 0, 8 * PageBytes, pc);
+      check("priv whole arena", pc.status == APU_VGPAGES_OK &&
+            pc.base == 32'(GPages) * PageBytes);
+      do_pv(APU_VGPAGES_OP_ALLOC_PRIV, 0, PageBytes, pc);
+      check("priv arena full", pc.status == APU_VGPAGES_FULL);
+      // guest-chosen extents cannot reach into the private arena
+      do_pv(APU_VGPAGES_OP_ALLOC_AT, 32'(GPages) * PageBytes, PageBytes,
+            pc);
+      check("alloc_at into priv bounds",
+            pc.status == APU_VGPAGES_BOUNDS);
+      // freeing the private extent releases it for reuse
+      do_pv(APU_VGPAGES_OP_FREE, 32'(GPages) * PageBytes,
+            8 * PageBytes, pc);
+      check("priv free", pc.status == APU_VGPAGES_OK);
+      do_pv(APU_VGPAGES_OP_ALLOC_PRIV, 0, PageBytes, pc);
+      check("priv reuse", pc.status == APU_VGPAGES_OK &&
+            pc.base == 32'(GPages) * PageBytes);
+      do_pv(APU_VGPAGES_OP_FREE, 32'(GPages) * PageBytes, PageBytes, pc);
+      do_pv(APU_VGPAGES_OP_FREE, 0, 32'(GPages) * PageBytes, pc);
     end
 
     $display("PASS tb_g6lc_apu_vgpages cases=%0d checks=%0d cycles=%0d",

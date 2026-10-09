@@ -219,9 +219,9 @@ module g6lc_apu_virtio_mmio
           if (qsel_valid) read_data = vq_q[qsel_idx].used[63:32];
         AddrWidth'(VREG_SHM_SEL): read_data = shm_sel;
         AddrWidth'(VREG_SHM_LEN_LO):
-          read_data = shm_host ? APU_SHM_BYTES[31:0] : 32'hffff_ffff;
+          read_data = shm_host ? APU_SHM_GUEST_BYTES[31:0] : 32'hffff_ffff;
         AddrWidth'(VREG_SHM_LEN_HI):
-          read_data = shm_host ? APU_SHM_BYTES[63:32] : 32'hffff_ffff;
+          read_data = shm_host ? APU_SHM_GUEST_BYTES[63:32] : 32'hffff_ffff;
         AddrWidth'(VREG_SHM_BASE_LO):
           read_data = shm_host ? APU_SHM_BASE[31:0] : 32'hffff_ffff;
         AddrWidth'(VREG_SHM_BASE_HI):

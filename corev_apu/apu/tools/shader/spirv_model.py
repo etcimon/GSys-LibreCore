@@ -370,17 +370,51 @@ class Model:
         self.flags = words[6]
         self.spv = words[8:8 + n]
         p = 8 + n
-        self.binds = []                        # (set,bd,size,addr)
+        # §12.1 F5: bind entries carry aux = {kind[23:16], dyn[8],
+        # elem_idx[7:0]} — elem_idx is the record's index inside its
+        # (set,binding) row so descriptor arrays share one row.
+        self.binds = []                        # (set,bd,size,addr,aux)
         for _ in range(self.nb):
-            self.binds.append(tuple(words[p:p + 4]))
-            p += 4
+            self.binds.append(tuple(words[p:p + 5]))
+            p += 5
         self.push = words[p:p + self.np]
         p += self.np
+        # dynamic-offset section: n entries {set, ord, off} -> dyn[s][o]
+        self.dyn = [[0] * 16 for _ in range(4)]
+        nd = words[p]
+        p += 1
+        for _ in range(nd):
+            s, o, v = words[p], words[p + 1], words[p + 2]
+            p += 3
+            if s < 4 and o < 16:
+                self.dyn[s][o] = v
         self.mem = {}                          # word addr -> u32
-        for (st, bd, sz, ad) in self.binds:
+        for (st, bd, sz, ad, ax) in self.binds:
             for i in range(sz // 4):
                 self.mem[(ad >> 2) + i] = words[p + i]
             p += sz // 4
+        # memory-resident descriptor model: binding rows (per-set
+        # element cursor in 32B record units) + the records themselves.
+        self.drows = {}                        # (set,bd) -> row dict
+        self.drecs = {}                        # (set,off32) -> record
+        ecnt = [0] * 4
+        dord = [0] * 4
+        for (st, bd, sz, ad, ax) in self.binds:
+            idx = ax & 0xFF
+            dyn = (ax >> 8) & 1
+            kind = ((ax >> 16) & 0xFF) or 7
+            key = (st, bd)
+            row = self.drows.get(key)
+            if row is None:
+                row = dict(count=0, off32=ecnt[st], dyn=dyn,
+                           dynbase=dord[st])
+                self.drows[key] = row
+            row['count'] = max(row['count'], idx + 1)
+            if dyn:
+                dord[st] = max(dord[st], row['dynbase'] + idx + 1)
+            ecnt[st] = max(ecnt[st], row['off32'] + row['count'])
+            self.drecs[(st, row['off32'] + idx)] = \
+                (ad, sz, kind, 1)              # (base,size,kind,flags)
         # ---- scan the module (spirv_scan golden tables) ----
         self.sc = spirv_scan.Scanner(self.spv)
         self.sc.scan()
@@ -409,14 +443,23 @@ class Model:
         self.mem[byte_addr >> 2] = val & 0xFFFFFFFF
         self.wclass[byte_addr >> 2] = cls
 
-    def binding(self, st, bd):
-        """f_bind: last matching bind record wins (RTL scans 0..15 and
-        overwrites r on match)."""
-        r = None
-        for (s2, b2, sz, ad) in self.binds:
-            if s2 == st and b2 == bd:
-                r = (ad, sz)
-        return r                              # (base,size) or None
+    def desc_rec(self, st, bd, idx):
+        """§12.1 F5 resolve: (set,binding,idx) -> (base,size,ok) or
+        None when no such binding row / idx >= count (RTL null desc).
+        ok folds record valid + supported kind; dynamic kinds add the
+        bound dynamic offset to the record base."""
+        row = self.drows.get((st, bd))
+        if row is None or idx >= row['count']:
+            return None
+        rec = self.drecs.get((st, row['off32'] + idx))
+        if rec is None:
+            return (0, 0, False)
+        base, size, kind, flags = rec
+        ok = bool(flags & 1) and kind in (6, 7, 8, 9)
+        if row['dyn']:
+            base = u32(base + self.dyn[st]
+                       [min(row['dynbase'] + idx, 15)])
+        return (base, size, ok)
 
     def builtin(self, bi, c):
         """f_bi() — lane builtin values for the current invocation."""
@@ -447,8 +490,10 @@ class Model:
         return 0
 
     # -- LSU -----------------------------------------------------------
-    def lsu(self, ptr_off, ptr_tag, comp, is_store, val, cls):
-        """One (lane,comp) access; returns loaded word (loads) or None."""
+    def lsu(self, ptr_off, ptr_tag, didx, comp, is_store, val, cls):
+        """One (lane,comp) access; returns loaded word (loads) or
+        None.  didx = the descriptor-array element index carried by
+        the pointer (ptr[2])."""
         o32 = u32(ptr_off + comp * 4)
         sc = ptr_tag & 0xF
         bi = (ptr_tag >> 4) & 0xFF
@@ -464,8 +509,8 @@ class Model:
                 return 0 if not is_store else None
             return None if is_store else self.push[o32 >> 2]
         if sc in (SC_UNIFORM, SC_SBUF):
-            b = self.binding(st, bd)
-            if b is None or o32 + 4 > b[1]:
+            b = self.desc_rec(st, bd, didx)
+            if b is None or not b[2] or o32 + 4 > b[1]:
                 self.robust += 1
                 return 0 if not is_store else None
             if is_store:
@@ -596,14 +641,26 @@ class Model:
         ptr = self.regv(base)
         off = ptr[0]
         tag = ptr[1]
+        didx = ptr[2]                          # carried desc index
         cty = self.sc.types.get(self.regt(base), {})
         cty = cty.get('elem', 0)               # pointee type
         cmstride = 0
+        first = True
         for iid in ids:
             t = self.sc.types.get(cty)
             if t is None:
                 break
             k = t['kind']
+            # §12.3 F5 (W_CHT1): first index into an array under
+            # UNIFORM/SBUF storage selects the descriptor record —
+            # it lands in ptr[2], not the byte offset.
+            if (first and k in (TK['ARRAY'], TK['RARRAY']) and
+                    (tag & 0xF) in (SC_UNIFORM, SC_SBUF)):
+                didx = self.idxval(iid)
+                cty = t.get('elem', cty)
+                first = False
+                continue
+            first = False
             if k == TK['STRUCT']:
                 midx = self.idxval_struct(iid)
                 mb = self.sc.member_base.get(cty, 0) + midx
@@ -626,7 +683,7 @@ class Model:
             elem = t.get('elem', cty)
             off = u32(off + self.idxval(iid) * st_)
             cty = elem
-        return [off, tag, 0, 0]
+        return [off, tag, didx, 0]
 
     def natural_size(self, tid):
         """W_CHE0: ty_size != 0 ? size : 4 (natural layout)."""
@@ -857,7 +914,8 @@ class Model:
         if opc == 61:                         # Load
             wb = [0] * ncomp
             for c in range(ncomp):
-                r = self.lsu(va[0][0], va[0][1], c, False, 0, 'i')
+                r = self.lsu(va[0][0], va[0][1], va[0][2], c,
+                             False, 0, 'i')
                 wb[c] = r if r is not None else 0
             self.setres(rid, wb, ncomp)
             return pc + wc
@@ -869,7 +927,8 @@ class Model:
             else:
                 src = va[1]
             for c in range(ncs):
-                self.lsu(va[0][0], va[0][1], c, True, src[c], cls)
+                self.lsu(va[0][0], va[0][1], va[0][2], c,
+                         True, src[c], cls)
             return pc + wc
         if opc in (65, 66):                   # (InBounds)AccessChain
             wb = self.chain(ops[2], ops[3:]) if len(ops) > 3 \
@@ -878,7 +937,8 @@ class Model:
             return pc + wc
         if opc == 68:                         # ArrayLength
             ptr = va[0]
-            b = self.binding((ptr[1] >> 12) & 0xFF, (ptr[1] >> 20) & 0xFF)
+            b = self.desc_rec((ptr[1] >> 12) & 0xFF,
+                              (ptr[1] >> 20) & 0xFF, ptr[2])
             bsz = b[1] if b else 0
             stt = self.sc.types.get(self.regt(ops[2]), {})
             sty = self.sc.types.get(stt.get('elem', 0), {})
@@ -1241,7 +1301,7 @@ class Model:
     def outputs(self):
         """{(bind_idx): [words]} for bindings that received stores."""
         out = {}
-        for i, (st, bd, sz, ad) in enumerate(self.binds):
+        for i, (st, bd, sz, ad, ax) in enumerate(self.binds):
             if any((ad >> 2) + k in self.wclass for k in range(sz // 4)):
                 out[i] = [self.mem.get((ad >> 2) + k, 0)
                           for k in range(sz // 4)]
@@ -1249,7 +1309,7 @@ class Model:
 
     def out_classes(self):
         out = {}
-        for i, (st, bd, sz, ad) in enumerate(self.binds):
+        for i, (st, bd, sz, ad, ax) in enumerate(self.binds):
             if any((ad >> 2) + k in self.wclass for k in range(sz // 4)):
                 out[i] = [self.wclass.get((ad >> 2) + k, 'i')
                           for k in range(sz // 4)]

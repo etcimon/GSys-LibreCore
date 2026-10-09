@@ -53,6 +53,12 @@ module tb_g6lc_apu_vgctl;
     .ot_cpl_valid_i(ot_cv), .ot_cpl_ready_o(ot_cr), .ot_cpl_i(ot_cpl),
     .pg_req_valid_o(pg_v), .pg_req_ready_i(pg_r), .pg_req_o(pg_req),
     .pg_cpl_valid_i(pg_cv), .pg_cpl_ready_o(pg_cr), .pg_cpl_i(pg_cpl),
+    // reap ports — this TB sweeps only VG-space kinds (ctx/blob), so
+    // no ObjPay/ShaderCore request is ever issued
+    .op_req_valid_o(), .op_req_ready_i(1'b0), .op_req_o(),
+    .op_cpl_valid_i(1'b0), .op_cpl_ready_o(), .op_cpl_i('0),
+    .sm_req_o(), .sm_req_pl_o(), .sm_gnt_i(1'b0),
+    .sm_cpl_i(1'b0), .sm_cpl_pl_i('0),
     .xs_valid_o(xs_v), .xs_ready_i(1'b0),
     .xs_desc_o(xs_d), .xs_ndesc_o(xs_n), .xs_off_o(xs_off),
     .xs_bytes_o(xs_bytes), .xs_ctx_o(xs_ctx),
@@ -70,7 +76,9 @@ module tb_g6lc_apu_vgctl;
   logic            pg_v, pg_r, pg_cv, pg_cr;
   apu_vgpages_req_t pg_req;
   apu_vgpages_cpl_t pg_cpl;
-  g6lc_apu_vgpages #(.Enable(1'b1), .Pages(64)) i_pages (
+  // §12.3 F5: 48 guest pages + 16 device-private pages so ALLOC_PRIV
+  // (blob-owned backing, device memory) has an arena to serve
+  g6lc_apu_vgpages #(.Enable(1'b1), .Pages(64), .GuestPages(48)) i_pages (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(pg_v), .req_ready_o(pg_r), .req_i(pg_req),
     .cpl_valid_o(pg_cv), .cpl_ready_i(pg_cr), .cpl_o(pg_cpl));

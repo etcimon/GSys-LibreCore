@@ -1,1 +1,1 @@
-{"gx": 2, "gy": 2, "gz": 1, "bindings": [{"set": 0, "binding": 0, "size": 256, "init": "/mnt/e/cva6/verif/tb/apu/sh_vectors/builtin_lindex_1_in0.bin"}]}
+{"gx": 2, "gy": 2, "gz": 1, "bindings": [{"set": 0, "binding": 0, "size": 256, "init": "/mnt/e/cva6/verif/tb/apu/sh_vectors/builtin_lindex_1_in0.bin", "idx": 0, "dyn": 0}]}

@@ -88,8 +88,75 @@ package g6lc_apu_sh_pkg;
   // comp0 = byte offset within the storage space
   // comp1 = {storage[3:0], builtin[7:0], set[7:0], binding[7:0],
   //          flags[4:0]}  (builtin 0xFF = none)
+  // comp2 = descriptor-array element index (F5): written by
+  //         OpAccessChain's first index when the base is a Uniform /
+  //         StorageBuffer array of descriptor records; carried to the
+  //         LSU, which uses it to select the memory-resident record.
   localparam int APU_SH_PTR_OFF = 0;
   localparam int APU_SH_PTR_TAG = 1;
+  localparam int APU_SH_PTR_DIDX = 2;
+
+  // ---- §12.3 F5: memory-resident descriptors --------------------------
+  // One descriptor record = APU_DESC_BYTES (32) aperture bytes at
+  //   set_base[s] + boff.off32*32 + array_index*32:
+  //   +0   base[31:0]    aperture byte offset of the resource
+  //   +4   size[31:0]    byte extent
+  //   +8   kind[7:0]     VkDescriptorType (6/7 buffer, 8/9 dynamic)
+  //   +9   flags[7:0]    bit0 = valid
+  //   +10  rsvd[15:0]
+  //   +12  rsvd[31:0]
+  //   +16..+31 reserved zero — image/sampler halves land here (F6),
+  //            fixed now so the record format never changes.
+  // An all-zero (null/invalid) record bounds-checks as a zero-size
+  // buffer: loads read 0, stores drop, robust_q++.
+  // Scaling levers toward UE SM5 / CS2-class bindless:
+  //   APU_DESC_SETS  bound sets per dispatch — must equal the profile's
+  //                  maxBoundDescriptorSets
+  //   APU_DESC_BND   binding rows per set in the dispatch sideband —
+  //                  profile per-stage/per-set descriptor limits must
+  //                  not exceed this
+  //   APU_DESC_DYN   dynamic-offset slots per set — profile
+  //                  maxDescriptorSet*Dynamic must not exceed this
+  //   APU_DESC_CACHE LSU record-cache entries (dispatch-scoped flops;
+  //                  the only per-access flop cost — grow for more
+  //                  distinct {set,binding,idx} keys per dispatch)
+  //   record arena   the device-private aperture tail
+  //                  (g6lc_apu_pkg::APU_SHM_BYTES - APU_SHM_GUEST_BYTES);
+  //                  pool arenas are carved from it by vgpages
+  //                  ALLOC_PRIV, so descriptor capacity scales with the
+  //                  aperture, not with flops
+  localparam int unsigned APU_DESC_BYTES = 32;
+  localparam int unsigned APU_DESC_WORDS = 8;     // 32-byte records
+  localparam int unsigned APU_DESC_SETS  = 4;     // maxBoundDescriptorSets
+  localparam int unsigned APU_DESC_BND   = 16;    // binding rows per set
+  localparam int unsigned APU_DESC_DYN   = 16;    // dynamic elems per set
+  localparam int unsigned APU_DESC_CACHE = 8;     // LSU record cache entries
+  localparam int unsigned APU_DESC_POISON = 31;   // set aux poison bit
+
+  // binding row — one per descriptor-set-layout binding, stored in the
+  // layout's ObjPay payload as two words (vnfront writes, cmdexec and
+  // vn_golden mirror the packing; the {w0,w1} low 49 bits cast to the
+  // struct below):
+  //   w0 = {binding[31:24], type[23:16], count[15:0]}
+  //   w1 = {off32[31:12], dyn[11], pad[10:4], dynbase[3:0]}
+  typedef struct packed {
+    logic [7:0]  binding;   // descriptor binding number
+    logic [15:0] count;     // array element count (0 = row absent)
+    logic [19:0] off32;     // record offset in the set, 32-byte units
+    logic        dyn;       // *_DYNAMIC descriptor type
+    logic [3:0]  dynbase;   // per-set dynamic ordinal of element 0
+  } apu_sh_bindrow_t;
+
+  // dispatch sideband replacing the 16x113 flop bind table: the LSU
+  // resolves (set,binding,idx) through boff (a 16-entry CAM per bound
+  // set), then fetches the record at set_base[set] + off32*32 + idx*32
+  // through the shared memory port, adding dyn_off[set][dynbase+idx]
+  // for *_DYNAMIC kinds.
+  typedef struct packed {
+    apu_sh_bindrow_t [APU_DESC_SETS-1:0][APU_DESC_BND-1:0] boff;
+    logic            [APU_DESC_SETS-1:0][31:0]             set_base;
+    logic            [APU_DESC_SETS-1:0][APU_DESC_DYN-1:0][31:0] dyn_off;
+  } apu_sh_desc_t;
 
   // ---- commit status record (out of shmod) ---------------------------
   typedef struct packed {

@@ -49,11 +49,18 @@ module tb_g6lc_apu_vgtop;
   localparam int unsigned GMW     = 32'h40000;   // 1 MiB guest RAM
   localparam int unsigned APW     = 32'h40000;   // dense 1 MiB model
                                                    // of the 32 MiB window
+  // §12.3 F5: the device-private arena sits at APU_VG_GUEST_BYTES..top;
+  // the dense model covers it in [APW, APW+PPW) of i_mem.apm
+  localparam int unsigned PWB     = 32'(APU_VG_GUEST_BYTES >> 2);
+  localparam int unsigned PPW     =
+      APU_VG_PRIV_PAGES * (APU_VG_PAGE_BYTES / 4);
   // first-fit allocation keeps every session in the dense range; an
   // index past it is a tape/model bug — never wrap
   function automatic int unsigned apix(input int unsigned w);
-    if (w >= APW) $fatal(1, "aperture word %0d past dense model", w);
-    return w;
+    if (w < APW) return w;
+    if (w >= PWB && w < PWB + PPW) return APW + (w - PWB);
+    $fatal(1, "aperture word %0d past dense model", w);
+    return 0;
   endfunction
   localparam int unsigned TAPEW   = 32'h100000;
   localparam int unsigned EXPW    = 32'h8000;
@@ -115,7 +122,8 @@ module tb_g6lc_apu_vgtop;
     .xf_flush_i(1'b0), .xfer_busy_o(xf_busy));
 
   // shared memory model: mp ports 0..2 -> {guest, aperture} backing
-  tb_apu_mp_mem #(.N(3), .GMW(GMW), .APW(APW)) i_mem (
+  tb_apu_mp_mem #(.N(3), .GMW(GMW), .APW(APW),
+                  .PWB(PWB), .PPW(PPW)) i_mem (
     .clk_i(clk), .rst_ni(rst_ni),
     .req_valid_i(mp_rv), .req_ready_o(mp_rr), .req_i(mp_req),
     .rsp_valid_o(mp_rsv), .rsp_o(mp_rsp));

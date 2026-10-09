@@ -296,6 +296,12 @@ module g6lc_apu_vnpump
     apu_cmdrec_req_t fr_cr_req;
     logic        fr_op_v, fr_op_cpl_rdy;
     apu_objpay_req_t fr_op_req;
+    // §12.3 F5: front descriptor-record aperture port, arbitrated
+    // onto mp as owner OW_FAP (dom=1, aperture byte address)
+    logic        fap_req, fap_we, fap_rdy, fap_done;
+    logic [31:0] fap_addr;
+    logic [63:0] fap_wdata;
+    logic [7:0]  fap_wstrb;
     logic [31:0] fr_result;
     logic [15:0] fr_repn;
     logic [3:0]  fr_fault;
@@ -337,6 +343,10 @@ module g6lc_apu_vnpump
       .pg_req_o(pg_req_o),
       .pg_cpl_valid_i(pg_cpl_valid_i), .pg_cpl_ready_o(pg_cpl_ready_o),
       .pg_cpl_i(pg_cpl_i),
+      .ap_req_o(fap_req), .ap_we_o(fap_we), .ap_addr_o(fap_addr),
+      .ap_wdata_o(fap_wdata), .ap_wstrb_o(fap_wstrb),
+      .ap_ready_i(fap_rdy), .ap_done_i(fap_done),
+      .ap_rdata_i(mp_rdata_i), .ap_err_i(mp_err_i),
       .ex_submit_valid_o(ex_submit_valid_o),
       .ex_submit_ready_i(ex_submit_ready_i),
       .ex_submit_o(ex_submit_o),
@@ -419,12 +429,13 @@ module g6lc_apu_vnpump
 
     // ---- shared mp port arbitration ------------------------------------------
     // One request outstanding.  Fixed pick order: pump writes, front
-    // reply writes, front/decoder CS reads, pump ring/transport reads.
+    // reply writes, front descriptor-aperture traffic, front/decoder
+    // CS reads, pump ring/transport reads.
     // The pick is academic — the engines serialize themselves (front
     // runs alone, pump write/read states run while it is idle) — but
     // a stall is always safe since every requester holds its request.
     typedef enum logic [2:0] {
-      OW_NONE, OW_PWR, OW_FRW, OW_DEC, OW_FRD, OW_PRD
+      OW_NONE, OW_PWR, OW_FRW, OW_FAP, OW_DEC, OW_FRD, OW_PRD
     } owner_e;
     owner_e src;
     owner_e rsp_owner_q;
@@ -458,6 +469,15 @@ module g6lc_apu_vnpump
         mp_addr_o  = {(62-APU_VG_AP_WORD_W)'(1'b0), fr_waddr, 2'b00};
         mp_wdata_o = {2{fr_wdata}};
         mp_wstrb_o = fr_waddr[0] ? 8'hF0 : 8'h0F;
+      end else if (fap_req) begin
+        // front descriptor records: full 64-bit aperture access
+        src        = OW_FAP;
+        mp_req_o   = 1'b1;
+        mp_we_o    = fap_we;
+        mp_dom_o   = 1'b1;
+        mp_addr_o  = {32'h0, fap_addr};
+        mp_wdata_o = fap_wdata;
+        mp_wstrb_o = fap_wstrb;
       end else if (cs_re) begin
         src       = dec_re ? OW_DEC : OW_FRD;
         mp_req_o  = 1'b1;
@@ -491,6 +511,8 @@ module g6lc_apu_vnpump
     assign dec_rdy    = mp_ready_i && src == OW_DEC;
     assign fr_cs_rdy  = mp_ready_i && src == OW_FRD;
     assign fr_rep_rdy = mp_ready_i && src == OW_FRW;
+    assign fap_rdy    = mp_ready_i && src == OW_FAP;
+    assign fap_done   = mp_rvalid_i && rsp_owner_q == OW_FAP;
     assign dec_rv       = mp_rvalid_i && rsp_owner_q == OW_DEC;
     assign fr_cs_rv     = mp_rvalid_i && rsp_owner_q == OW_FRD;
     assign fr_rep_done  = mp_rvalid_i && rsp_owner_q == OW_FRW;

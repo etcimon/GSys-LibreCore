@@ -16,12 +16,14 @@ module tb_g6lc_apu_objtab;
   apu_objtab_req_t req = '0;
   apu_objtab_cpl_t cpl;
   logic off_rdy, off_v; apu_objtab_cpl_t off_cpl;
+  logic [15:0] live_o_w;
   int errors = 0, checks = 0, cycles = 0, cases = 0;
 
   g6lc_apu_objtab #(.Enable(1'b1), .Slots(Slots)) i_on (
     .clk_i(clk), .rst_ni, .testmode_i(testmode),
     .req_valid_i(req_v), .req_ready_o(req_rdy), .req_i(req),
-    .cpl_valid_o(cpl_v), .cpl_ready_i(cpl_r), .cpl_o(cpl), .live_o());
+    .cpl_valid_o(cpl_v), .cpl_ready_i(cpl_r), .cpl_o(cpl),
+    .live_o(live_o_w));
   g6lc_apu_objtab_fixture #(.Enable(1'b0), .Slots(Slots)) i_off (
     .clk_i(clk), .rst_ni, .testmode_i(testmode),
     .req_valid_i(req_v), .req_ready_o(off_rdy), .req_i(req),
@@ -59,8 +61,18 @@ module tb_g6lc_apu_objtab;
     req = r; req_v = 1'b1;
     @(posedge clk);
     @(negedge clk); req_v = 1'b0;
+    // RESET_CTX streams one SWEEP completion per tombstoned entry
+    // before the final status — drain them here so callers always see
+    // the terminating completion
     while (!cpl_v) @(negedge clk);
     c = cpl;
+    while (c.status == APU_OBJTAB_SWEEP) begin
+      cpl_r = 1'b1;
+      @(posedge clk);
+      @(negedge clk); cpl_r = 1'b0;
+      while (!cpl_v) @(negedge clk);
+      c = cpl;
+    end
     g_got = int'(c.status);
     cpl_r = 1'b1;
     @(posedge clk);
@@ -86,7 +98,7 @@ module tb_g6lc_apu_objtab;
   // ---------------- reference model ----------------
   bit         md_v [DirW], md_t [DirW];
   logic [63:0] md_id [DirW];
-  int          md_slot [DirW];
+  int          md_slot [DirW], md_gen [DirW];
   bit          me_live [Slots];
   int          me_kind [Slots], me_gen [Slots], me_parent [Slots];
   int          me_refcnt [Slots], me_pins [Slots], me_ctx [Slots];
@@ -103,6 +115,13 @@ module tb_g6lc_apu_objtab;
       automatic int b;
       b = (mhash(id) + i) % DirW;
       if (md_v[b] && !md_t[b] && md_id[b] == id) begin
+        // stale row: slot dead or recycled under another id (its gen
+        // moved on) — tombstone the row and keep probing, like the DUT
+        if (!me_live[md_slot[b]] || me_gen[md_slot[b]] != md_gen[b]) begin
+          md_t[b] = 1'b1;
+          if (first_tomb < 0) first_tomb = b;
+          continue;
+        end
         hitb = b; return 0;
       end
       if (!md_v[b] && !md_t[b]) begin
@@ -146,6 +165,7 @@ module tb_g6lc_apu_objtab;
   task automatic m_reset;
     for (int i = 0; i < DirW; i++) begin
       md_v[i] = 0; md_t[i] = 0; md_id[i] = '0; md_slot[i] = 0;
+      md_gen[i] = 0;
     end
     for (int i = 0; i < Slots; i++) begin
       me_live[i] = 0; me_kind[i] = 0; me_gen[i] = 0; me_parent[i] = -1;
@@ -180,6 +200,7 @@ module tb_g6lc_apu_objtab;
     me_boff[slot] = '0; me_size[slot] = '0;
     if (hb >= 0) begin end
     md_v[rb] = 1; md_t[rb] = 0; md_id[rb] = id; md_slot[rb] = slot;
+    md_gen[rb] = gen;
     if (pid != 0) me_refcnt[pslot]++;
     return APU_OBJTAB_OK;
   endfunction
@@ -544,6 +565,75 @@ module tb_g6lc_apu_objtab;
       end
     end
     cases++;
+
+    // ---- epoch reuse: rows a RESET_CTX leaves behind must not alias
+    //      slots recycled under different ids.  Stock-guest regression:
+    //      each Mesa process re-issues object ids 1..N while blob allocs
+    //      (CREATE_BLOB, ctx 0) claim the swept slots — a stale row for a
+    //      dead id then resolves to a live foreign entry (DUP/KIND).
+    //      Repeat >=3 times to prove chains stay bounded.
+    m_reset;
+    do_reset;
+    begin
+      int slot0, a0_slot;
+      // epoch 0 seeds six ctx-1 objects; each rep then runs the
+      // guest-shaped cycle: ctx destroy (lazy rows) -> blob allocs in
+      // ctx 0 recycle the freed slots -> probing the dead ids must MISS
+      // (not DUP/KIND via the recycled slot) -> re-ALLOC must succeed
+      // (the ids are live again for the next rep).
+      for (int rep = 0; rep < 3; rep++) begin
+        if (rep == 0) begin
+          for (int i = 0; i < 6; i++) begin
+            id = 64'hCAFE_0000_0000_0000 | 64'(i + 1);
+            st = m_alloc(id, 6'd7, 64'h0, 8'd1, slot, gen);
+            op(mkr(APU_OBJTAB_OP_ALLOC, id, 6'd7, 0, 8'd1,
+                   0, 0, 0, 0, 0), c);
+            check($sformatf("epoch%0d alloc A%0d", rep, i),
+                  st == APU_OBJTAB_OK && c.status == APU_OBJTAB_OK &&
+                  c.handle == {16'(gen), 16'(slot)});
+            if (i == 0) a0_slot = slot;
+          end
+        end
+        // ctx destroy: entries die, directory rows stay (lazy tombstone)
+        op(mkr(APU_OBJTAB_OP_RESET_CTX, 0, 0, 0, 8'd1, 0, 0, 0, 0, 0), c);
+        check($sformatf("epoch%0d reset_ctx", rep),
+              c.status == APU_OBJTAB_OK && c.handle[15:0] == 16'd0);
+        for (int i = 0; i < Slots; i++)
+          if (me_live[i] && me_ctx[i] == 8'd1 && me_pins[i] == 0)
+            me_live[i] = 0;
+        // blob-style epoch: different ids in ctx 0 recycle the freed
+        // slots — first-fit takes the lowest dead slot, which is the
+        // same one epoch-A's A0 row still points at
+        for (int i = 0; i < 4; i++) begin
+          id = 64'hB10B_0000_0000_0000 | 64'(rep * 16 + i + 1);
+          st = m_alloc(id, 6'd27, 64'h0, 8'd0, slot, gen);
+          op(mkr(APU_OBJTAB_OP_ALLOC, id, 6'd27, 0, 8'd0,
+                 0, 0, 0, 0, 0), c);
+          check($sformatf("epoch%0d blob %0d", rep, i),
+                st == APU_OBJTAB_OK && c.status == APU_OBJTAB_OK);
+          if (i == 0) slot0 = slot;
+        end
+        check($sformatf("epoch%0d blobs recycled epoch-A slots", rep),
+              slot0 == a0_slot);
+        // probing the dead ids must MISS — not DUP/KIND via the recycled
+        // slot — and a re-ALLOC must succeed
+        for (int i = 0; i < 6; i++) begin
+          id = 64'hCAFE_0000_0000_0000 | 64'(i + 1);
+          xpect($sformatf("epoch%0d lookup A%0d", rep, i),
+                mkr(APU_OBJTAB_OP_LOOKUP, id, 6'd7, 0, 0, 0, 0, 0, 0, 0),
+                APU_OBJTAB_MISS);
+          st = m_alloc(id, 6'd7, 64'h0, 8'd1, slot, gen);
+          op(mkr(APU_OBJTAB_OP_ALLOC, id, 6'd7, 0, 8'd1, 0, 0, 0, 0, 0),
+             c);
+          check($sformatf("epoch%0d realloc A%0d", rep, i),
+                st == APU_OBJTAB_OK && c.status == APU_OBJTAB_OK &&
+                c.handle == {16'(gen), 16'(slot)});
+          if (i == 0) a0_slot = slot;
+        end
+        check($sformatf("epoch%0d live A+blob", rep),
+              live_o_w == 16'(6 + 4 * (rep + 1)));
+      end
+    end
 
     // ---- global invariant: every model-live slot answers its handle;
     //      the model holds each (kind,id) at most once by construction ----

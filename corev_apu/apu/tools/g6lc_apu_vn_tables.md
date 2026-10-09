@@ -276,6 +276,10 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 
 - per `pCreateInfos` element (element count = `createInfoCount`): `pCreateInfos.stage.module` handle id (2 words), `pCreateInfos.stage.pSpecializationInfo` presence (1 word), `pCreateInfos.layout` handle id (2 words)
 
+### vkCreateDescriptorPool (type 74)
+
+- per `pPoolSizes` element (element count = `poolSizeCount`): `pPoolSizes.type` u32, `pPoolSizes.descriptorCount` u32
+
 ### vkAllocateDescriptorSets (type 77)
 
 - top level: `pSetLayouts` data words
@@ -284,6 +288,7 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 
 - per `pDescriptorWrites` element (element count = `descriptorWriteCount`): `pDescriptorWrites.dstSet` handle id (2 words), `pDescriptorWrites.dstBinding` u32, `pDescriptorWrites.dstArrayElement` u32, `pDescriptorWrites.descriptorCount` u32, `pDescriptorWrites.descriptorType` u32
 - per `pDescriptorWrites.pBufferInfo` element (element count = `descriptorCount`): `pDescriptorWrites.pBufferInfo.buffer` handle id (2 words), `pDescriptorWrites.pBufferInfo.offset` u64 (2 words), `pDescriptorWrites.pBufferInfo.range` u64 (2 words)
+- per `pDescriptorCopies` element (element count = `descriptorCopyCount`): `pDescriptorCopies.srcSet` handle id (2 words), `pDescriptorCopies.srcBinding` u32, `pDescriptorCopies.srcArrayElement` u32, `pDescriptorCopies.dstSet` handle id (2 words), `pDescriptorCopies.dstBinding` u32, `pDescriptorCopies.dstArrayElement` u32, `pDescriptorCopies.descriptorCount` u32
 
 ### vkCmdBindDescriptorSets (type 103)
 
@@ -639,9 +644,9 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 | FLAGS | 255 | 0x1 | shaderStorageImageMultisample |
 | FLAGS | 255 | 0x1 | shaderStorageImageReadWithoutFormat |
 | FLAGS | 255 | 0x1 | shaderStorageImageWriteWithoutFormat |
-| FLAGS | 255 | 0x1 | shaderUniformBufferArrayDynamicIndexing |
+| FLAGS | 255 | 0x0 | shaderUniformBufferArrayDynamicIndexing |
 | FLAGS | 255 | 0x1 | shaderSampledImageArrayDynamicIndexing |
-| FLAGS | 255 | 0x1 | shaderStorageBufferArrayDynamicIndexing |
+| FLAGS | 255 | 0x0 | shaderStorageBufferArrayDynamicIndexing |
 | FLAGS | 255 | 0x1 | shaderStorageImageArrayDynamicIndexing |
 | FLAGS | 255 | 0x1 | shaderClipDistance |
 | FLAGS | 255 | 0x1 | shaderCullDistance |
@@ -1592,8 +1597,8 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 | U32 | 1 | 0x0 | maxSets |
 | U32 | 2 | 0x0 | poolSizeCount |
 | ARRAY | 0 | 0x4 | pPoolSizes |
-| U32 | 127 | 0x0 | type |
-| U32 | 127 | 0x0 | descriptorCount |
+| U32 | 127 | 0x0 | type **KEEP** |
+| U32 | 127 | 0x0 | descriptorCount **KEEP** |
 | ENDARR | 0 | 0x0 |  |
 | PTR | 1 | 0x0 | pAllocator |
 | PTR | 2 | 0x1 | pDescriptorPool |
@@ -1676,13 +1681,13 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 | ARRAY | 1 | 0x0 | pDescriptorCopies |
 | STYPE | 0 | 0x3E | sType |
 | PNEXT | 0 | 0x1EA | pNext |
-| HANDLE | 56 | 0x15 | srcSet:LOOKUP |
-| U32 | 127 | 0x0 | srcBinding |
-| U32 | 127 | 0x0 | srcArrayElement |
-| HANDLE | 56 | 0x15 | dstSet:LOOKUP |
-| U32 | 127 | 0x0 | dstBinding |
-| U32 | 127 | 0x0 | dstArrayElement |
-| U32 | 127 | 0x0 | descriptorCount |
+| HANDLE | 56 | 0x15 | srcSet:LOOKUP **KEEP** |
+| U32 | 127 | 0x0 | srcBinding **KEEP** |
+| U32 | 127 | 0x0 | srcArrayElement **KEEP** |
+| HANDLE | 56 | 0x15 | dstSet:LOOKUP **KEEP** |
+| U32 | 127 | 0x0 | dstBinding **KEEP** |
+| U32 | 127 | 0x0 | dstArrayElement **KEEP** |
+| U32 | 127 | 0x0 | descriptorCount **KEEP** |
 | ENDARR | 0 | 0x0 |  |
 | END | 0 | 0x0 |  |
 

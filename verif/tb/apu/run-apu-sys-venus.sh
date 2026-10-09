@@ -44,9 +44,10 @@ echo "VERILATOR BUILD OK"
 SESSIONS="ue_sm5_transport \
 ue_cpos_bufcopy_1 ue_cpos_math450_1 ue_cpos_loopfor_1 \
 ue_cpos_barrier_reduce_1 ue_cpos_oob_1 ue_cpos_loopfor_opt_1 \
+ue_cpos_descarr_1 ue_cpos_multiset_1 \
 ue_cpos_xfer_copy_1 \
 ue_cneg_baddesc_1 ue_cneg_badmem_1 ue_cneg_badmod_1 \
-ue_cneg_nopipe_1"
+ue_cneg_nopipe_1 ue_cneg_layoutmix_1 ue_cneg_deadpool_1"
 ARMS="dev_reset q_reset venusoff worksink0 legality"
 
 cfail=0

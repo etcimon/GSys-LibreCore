@@ -41,7 +41,11 @@ module g6lc_apu_vgpages
 #(
   parameter bit          Enable    = 1'b0,
   parameter int unsigned Pages     = 256,
-  parameter int unsigned PageBytes = 4096
+  parameter int unsigned PageBytes = 4096,
+  // pages below GuestPages form the guest-mappable window the kernel's
+  // shm drm_mm places MAP_BLOB extents in; pages [GuestPages, Pages)
+  // are the device-private arena reachable only through ALLOC_PRIV
+  parameter int unsigned GuestPages = Pages
 ) (
   input  logic              clk_i,
   input  logic              rst_ni,
@@ -61,8 +65,10 @@ module g6lc_apu_vgpages
     assign unused = clk_i | rst_ni | testmode_i | req_valid_i |
                     cpl_ready_i | (|req_i);
   end else begin : gen_on
-    localparam int unsigned PageBits = $clog2(Pages);
-    localparam int unsigned WinBytes = Pages * PageBytes;
+    localparam int unsigned PageBits  = $clog2(Pages);
+    localparam int unsigned WinBytes  = Pages * PageBytes;
+    localparam int unsigned GuestBytes = GuestPages * PageBytes;
+    localparam int unsigned PrivPages  = Pages - GuestPages;
     // pages covering `bytes` bytes
     function automatic logic [31:0] pages_of(input logic [31:0] bytes);
       return (bytes + PageBytes - 1) / PageBytes;
@@ -75,6 +81,7 @@ module g6lc_apu_vgpages
     logic [Pages-1:0]  free_q;
     logic [PageBits-1:0] scan_q;   // probe index
     logic [31:0]         npg_q;    // pages needed by in-flight op
+    logic                priv_q;   // in-flight scan is the private arena
     logic [PageBits:0]   run_q;    // current free-run length
     logic [PageBits-1:0] run_s_q;  // current free-run start
 
@@ -97,22 +104,27 @@ module g6lc_apu_vgpages
       if (!rst_ni) begin
         state_q <= StIdle; cpl_q <= '0;
         free_q <= '0; scan_q <= '0; npg_q <= '0;
+        priv_q <= '0;
         run_q <= '0; run_s_q <= '0;
       end else begin
         unique case (state_q)
         // ---------------- request accept / dispatch ----------------
         StIdle: if (req_valid_i) begin
           unique case (req_i.op)
-            APU_VGPAGES_OP_ALLOC: begin
+            APU_VGPAGES_OP_ALLOC, APU_VGPAGES_OP_ALLOC_PRIV: begin
               if (req_i.bytes == 32'h0) begin
                 cpl_q   <= '{status: APU_VGPAGES_OK, base: '0};
                 state_q <= StCpl;
-              end else if (pages_of(req_i.bytes) > Pages) begin
+              end else if (pages_of(req_i.bytes) >
+                           (req_i.op == APU_VGPAGES_OP_ALLOC_PRIV
+                            ? 32'(PrivPages) : 32'(GuestPages))) begin
                 cpl_q   <= '{status: APU_VGPAGES_FULL, base: '0};
                 state_q <= StCpl;
               end else begin
                 npg_q   <= pages_of(req_i.bytes);
-                scan_q  <= '0;
+                priv_q  <= req_i.op == APU_VGPAGES_OP_ALLOC_PRIV;
+                scan_q  <= req_i.op == APU_VGPAGES_OP_ALLOC_PRIV
+                           ? PageBits'(GuestPages) : '0;
                 run_q   <= '0;
                 run_s_q <= '0;
                 state_q <= StScan;
@@ -123,8 +135,12 @@ module g6lc_apu_vgpages
               // [base, base+bytes) covers; BUSY on a real overlap.  The
               // guest kernel allocates at its own (4 KiB-class) grid, so
               // alignment is checked against the aperture, not PageBytes.
+              // Guest placements may not reach the device-private arena:
+              // the kernel's drm_mm only spans the advertised SHM_LEN,
+              // but enforce it here so a stray guest extent can never
+              // share a page with internal allocations.
               if (req_i.bytes == 32'h0 ||
-                  64'(req_i.base) + 64'(req_i.bytes) > 64'(WinBytes)) begin
+                  64'(req_i.base) + 64'(req_i.bytes) > 64'(GuestBytes)) begin
                 cpl_q <= '{status: APU_VGPAGES_BOUNDS, base: '0};
               end else if ((free_q &
                             run_mask((req_i.base + req_i.bytes - 32'h1) /
@@ -177,7 +193,8 @@ module g6lc_apu_vgpages
                                               : 32'(run_s_q)) *
                                 PageBytes};
               state_q <= StCpl;
-            end else if (scan_q == Pages - 1) begin
+            end else if (scan_q == PageBits'(priv_q ? Pages - 1
+                                                    : GuestPages - 1)) begin
               cpl_q   <= '{status: APU_VGPAGES_FULL, base: '0};
               state_q <= StCpl;
             end else begin
@@ -185,7 +202,8 @@ module g6lc_apu_vgpages
             end
           end else begin
             run_q <= '0;
-            if (scan_q == Pages - 1) begin
+            if (scan_q == PageBits'(priv_q ? Pages - 1
+                                           : GuestPages - 1)) begin
               cpl_q   <= '{status: APU_VGPAGES_FULL, base: '0};
               state_q <= StCpl;
             end else begin
@@ -215,7 +233,8 @@ module g6lc_apu_vgpages_fixture
   import g6lc_apu_vgpages_pkg::*;
 #(parameter bit          Enable    = 1'b0,
   parameter int unsigned Pages     = 256,
-  parameter int unsigned PageBytes = 4096) (
+  parameter int unsigned PageBytes = 4096,
+  parameter int unsigned GuestPages = Pages) (
   input  logic             clk_i,
   input  logic             rst_ni,
   input  logic             testmode_i,
@@ -227,5 +246,6 @@ module g6lc_apu_vgpages_fixture
   output apu_vgpages_cpl_t cpl_o
 );
   g6lc_apu_vgpages #(.Enable(Enable), .Pages(Pages),
-                     .PageBytes(PageBytes)) i_dut (.*);
+                     .PageBytes(PageBytes),
+                     .GuestPages(GuestPages)) i_dut (.*);
 endmodule

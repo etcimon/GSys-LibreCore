@@ -53,7 +53,7 @@ module tb_g6lc_apu_cmdexec;
   apu_objpay_req_t    xop_req, oop_req;
   apu_sh_done_t       w_done_pl;
   logic [2:0]         dslot, odslot;
-  logic [16*113-1:0]  dbinds, odbinds;
+  apu_sh_desc_t       ddesc, oddesc;
   logic [5:0]         dpushn, odpushn;
   logic [1023:0]      dpush, odpush;
   assign w_done_pl = '{code: APU_SH_DONE_OK, default: '0};
@@ -69,7 +69,7 @@ module tb_g6lc_apu_cmdexec;
     .op_cpl_valid_i(1'b0), .op_cpl_ready_o(xop_cr), .op_cpl_i('0),
     .work_valid_o(w_v), .work_ready_i(w_r), .work_o(w_o),
     .work_done_i(w_done), .work_done_pl_i(w_done_pl),
-    .disp_slot_o(dslot), .binds_o(dbinds),
+    .disp_slot_o(dslot), .desc_o(ddesc),
     .push_n_o(dpushn), .push_o(dpush),
     .done_seq_o(done_seq),
     .fence_signaled_o(fsig), .fence_lost_o(flost),
@@ -85,7 +85,7 @@ module tb_g6lc_apu_cmdexec;
     .op_cpl_valid_i(1'b0), .op_cpl_ready_o(oop_cr), .op_cpl_i('0),
     .work_valid_o(ow_v), .work_ready_i(w_r), .work_o(ow_o),
     .work_done_i(w_done), .work_done_pl_i(w_done_pl),
-    .disp_slot_o(odslot), .binds_o(odbinds),
+    .disp_slot_o(odslot), .desc_o(oddesc),
     .push_n_o(odpushn), .push_o(odpush),
     .done_seq_o(odone),
     .fence_signaled_o(ofsig), .fence_lost_o(oflost),
@@ -139,7 +139,7 @@ module tb_g6lc_apu_cmdexec;
                             oxot_cr || oop_v || oop_cr || osub_r ||
                             odone !== '0 || ofsig !== '0 ||
                             oflost !== '0 || odslot !== '0 ||
-                            odbinds !== '0 || odpushn !== '0 ||
+                            oddesc !== '0 || odpushn !== '0 ||
                             odpush !== '0)
     $fatal(1, "disabled cmdexec active");
 
@@ -266,6 +266,14 @@ module tb_g6lc_apu_cmdexec;
     ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0002,
           APU_VN_KIND_VK_PIPELINE);
     pipe_h = ot_cpl.handle;
+    // §12.3 F5: dispatch assembly resolves the pipeline's layout —
+    // give the fake pipeline a live (empty) PIPELINE_LAYOUT handle in
+    // aux[63:32] like vnfront's vkCreateComputePipelines does
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0007,
+          APU_VN_KIND_VK_PIPELINE_LAYOUT);
+    ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0002,
+          APU_VN_KIND_VK_PIPELINE,
+          .mask(32'hFFFF_FFFF), .value(ot_cpl.handle));
     ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0003,
           APU_VN_KIND_VK_DESCRIPTOR_SET);
     dset_h = ot_cpl.handle;
@@ -403,11 +411,14 @@ module tb_g6lc_apu_cmdexec;
     tb_drv = 1'b1;
     cr_op(APU_CMDREC_OP_BEGIN, 5, 0, '0);
     begin
+      // §12.3 F5 stream: {handle,ndyn} pairs then the call's
+      // dynamic-offset words — 2 sets x 2 + 2 dyn = 6 words
       apu_cmdrec_rec_t rr = mkrec(
           APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT, 0, 0, 0);
       rr.imm[1] = 32'd1;   // firstSet
-      rr.imm[2] = 32'd2;   // descriptorSetCount -> arena words 0,1
-      cr_op(APU_CMDREC_OP_APPEND, 5, 0, rr, 16'd2);
+      rr.imm[2] = 32'd2;   // descriptorSetCount
+      rr.imm[3] = 32'd2;   // dynamicOffsetCount
+      cr_op(APU_CMDREC_OP_APPEND, 5, 0, rr, 16'd6);
     end
     begin
       apu_cmdrec_rec_t pr = mkrec(
@@ -429,11 +440,16 @@ module tb_g6lc_apu_cmdexec;
       submit(5'd4, 1, 8'd5, cb_h, 8'h0, 32'h0);
       wait_fence(4, 4000);
       check("bindds work", work_i == w0 + 1);
-      // streamed pay words are CAFE_0000+i; BindDS reads two ->
-      // dset[firstSet+k]; PushConstants parks base/len in the snap
+      // streamed pay words are CAFE_0000+i; F5 pairs then dyn words:
+      // {hnd0,ndyn0=1,hnd1,ndyn1=3,dyn,dyn} -> dset[1]=0000,
+      // dset[2]=0002, dyn[1][0]=0004, dyn[2][0]=0005 (set 2 asked 3,
+      // one word left before the stream ends)
       check("dset1", got_snap[w0].dset[1] === 32'hCAFE0000);
-      check("dset2", got_snap[w0].dset[2] === 32'hCAFE0001);
-      check("push_base", got_snap[w0].push_base === 16'd2);
+      check("dset2", got_snap[w0].dset[2] === 32'hCAFE0002);
+      check("dyn1_0", got_snap[w0].dyn[1][0] === 32'hCAFE0004);
+      check("dyn2_0", got_snap[w0].dyn[2][0] === 32'hCAFE0005);
+      // push constants land after the 6-word bind stream in the arena
+      check("push_base", got_snap[w0].push_base === 16'd6);
       check("push_len",  got_snap[w0].push_len === 16'd8);
       check("bindds no lost", flost[4] === 1'b0);
       cases++;

@@ -14,7 +14,11 @@ package g6lc_apu_vgpages_pkg;
     // the SHM layout and dictates the window offset); the bitmap marks
     // every page the extent covers, so coverage may round up to whole
     // pages while `base` stays the exact byte offset
-    APU_VGPAGES_OP_ALLOC_AT = 2'd2
+    APU_VGPAGES_OP_ALLOC_AT = 2'd2,
+    // first-fit like ALLOC but inside the device-private arena above
+    // the guest-visible window (descriptor-pool record stores; the
+    // kernel's drm_mm can never pick it so no MAP_BLOB can collide)
+    APU_VGPAGES_OP_ALLOC_PRIV = 2'd3
   } apu_vgpages_op_e;
 
   typedef enum logic [1:0] {

@@ -57,7 +57,13 @@ package g6lc_apu_objtab_pkg;
     APU_OBJTAB_PINNED        = 4'd5,
     APU_OBJTAB_BUSY_CHILDREN = 4'd6,
     APU_OBJTAB_GEN           = 4'd7,
-    APU_OBJTAB_PARENT_MISS   = 4'd8
+    APU_OBJTAB_PARENT_MISS   = 4'd8,
+    // RESET_CTX stream record: one interim completion per tombstoned
+    // entry (handle[15:0] = slot, entry = the entry as swept) so the
+    // caller can reclaim resources the sweep itself cannot reach
+    // (aperture extents, ObjPay extents, ShaderCore slot refs).  The
+    // final completion reports OK with the pinned count as before.
+    APU_OBJTAB_SWEEP         = 4'd9
   } apu_objtab_status_e;
 
   typedef struct packed {
