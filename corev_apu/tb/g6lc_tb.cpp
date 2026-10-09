@@ -176,6 +176,28 @@ static const char *verilog_plusargs[] = {
     // [ld_lo, ld_hi] window plus always-on handshake events. Same allowlist
     // rule as above.
     "ld_trace", "ld_lo", "ld_hi",
+    // T20 HPDCACHE replay-table anatomy probe (core/cva6.sv gen_hpd_trace,
+    // translate_off): rtab entries/deps/pipeline dump on every [smt-stall]
+    // ticket, on every rtab alloc/pop/commit/rollback inside [hpd_lo, hpd_hi],
+    // and once per leak episode (parked entries with nothing left to release
+    // them). Same allowlist rule as above.
+    "hpd_trace", "hpd_lo", "hpd_hi",
+    // T20b aliases / filters of the same probe: +hpd_rtab_trace == +hpd_trace,
+    // +hpd_core=N keeps only core N (default 0, -1 = all).
+    "hpd_rtab_trace", "hpd_core",
+    // T20 fetch-window lifecycle probe (core/cva6.sv gen_win_trace,
+    // translate_off): I$ request/response/take, loop-buffer inject, IQ push
+    // per slot, FTQ push/pop/flush, kills/redirects, IQ->ID and ID->issue
+    // handoffs inside [win_lo, win_hi], optionally for one global hart
+    // (+win_hart=N). Same allowlist rule as above.
+    "win_trace", "win_lo", "win_hi", "win_hart",
+    // T20b aliases / filters: +fe_trace/+fe_lo/+fe_hi == +win_trace/_lo/_hi,
+    // +fe_core=N keeps only core N (default -1 = all); PC-bank writes added.
+    "fe_trace", "fe_lo", "fe_hi", "fe_core",
+    // T20b windows for the two pre-existing SMT observers (whole run when
+    // absent): core/smt/g6lc_thread_select.sv [smt-sched] and core/cva6.sv
+    // [smt-flow]/[smt-probe] (+smt_handoff_trace == +smt_flow_trace).
+    "smt_sched_lo", "smt_sched_hi", "smt_handoff_trace", "smt_flow_lo", "smt_flow_hi",
     // AI island per-job PMU record (corev_apu/ai_island/g6lc_ai_island_top.sv,
     // translate_off): one AI_JOB line per completed descriptor, harvested by
     // verif/regress/ai-matrix-veri.sh AI_MATRIX_BENCH=1.

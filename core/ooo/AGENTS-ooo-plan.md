@@ -4081,3 +4081,33 @@ boot queued behind the instrumented reproduction. Defect B (HPDcache
 replay table 4/4 full with MSHR/wbuf empty) is still open — the
 instrumented reproduction (`ooocoh-t20-server-repro-mt4`, `+hpd_rtab_trace`)
 is running; its entry-level deps/release log decides the seam.
+
+**T20 — defect B root cause: HPDcache "zombie" ways (2026-10-09).** The
+instrumented MT4 reproduction (`ooocoh-t20-server-repro-mt4`, byte-identical
+to the T19 oracle through the end; `+hpd_rtab_trace`) shows the head replay
+entry for hart 0's `ld 0x80054080` parked on **`dir_unavailable`** with an
+empty MSHR (`RTAB-ALLOC … victunav=1 du=1`), the other three linked behind
+it, and no release event to the cap. Mechanism in the vendored HPDcache:
+the uncacheable-request cache-HIT invalidation (`hpdcache_ctrl_pe.sv`
+~546) writes the way `valid=0` but leaves `st2_dir_updt_fetch_o` at its
+sticky stage-2 value (1 after any preceding miss allocation) → the way
+becomes `valid=0, fetch=1`, which `hpdcache_victim_plru` never offers
+again (`unused_ways = ~fetch & ~valid`) and nothing ever rewrites. LR/SC
+are forced uncacheable by the CVA6 adapter; OpenSBI's HSM
+`atomic_cmpxchg` does an `lr.d` on each hart's `sbi_scratch+0x88` right
+after loading that line, all eight scratch lines map to D$ set 8 → eight
+zombie ways → every later miss to set 8 parks forever; the drain force
+then re-issued the load every 256 cycles. Fix: one line in the submodule
+(`st2_dir_updt_fetch_o = 1'b0` on that path; matches upstream
+cv-hpdcache master), committed in the fork (`f3e7354`), gitlink updated.
+Witness `[hpd-zombie]` (wrapper, sim-only) prints any `valid=0/fetch=1`
+directory write without an MSHR allocation. Reproduction
+`mc_lrsc_set_zombie.S` (eight LR.D on same-set lines, then a miss to that
+set): unfixed server model wedges after 1,069 cycles (exit 126, `du=1`),
+fixed model passes 1,343 cycles, negative detected, `zombie_dir_writes=0`.
+Server directed set on the fixed MT4 model cycle-identical to T19; lint
+0e server/int2_l3. The T20 probes (`+hpd_rtab_trace`, `+fe_trace`,
+windowed `+smt_sched_trace`/`+smt_handoff_trace`) stay in the tree,
+translate_off. Final canonical 48 M boot on the fixed model
+(`ooocoh-t20-final-server-osbi-48M`) running — harvest per
+`t20/LAUNCH-FINAL.md`.

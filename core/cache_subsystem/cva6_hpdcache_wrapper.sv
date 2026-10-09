@@ -449,6 +449,34 @@ module cva6_hpdcache_wrapper
     $display("[hpd-phantom] final phantom_grants=%0d load_port_withdrawals=%0d",
              hpd_phantom_cnt, hpd_withdraw_cnt);
   end
+  // T20 witness (defect B): a stage-2 directory update that leaves a way
+  // INVALID but FETCHING without an MSHR allocation behind it -- a "zombie"
+  // way. Only a miss allocation may write valid=0/fetch=1 (an unused victim
+  // pre-allocated for its refill); any other writer (the uncacheable-hit
+  // invalidation in hpdcache_ctrl_pe before the fetch-bit fix) parks the way
+  // out of victim selection forever (hpdcache_victim_plru: unused_ways =
+  // ~fetch & ~valid) and, once every way of a set is a zombie, every miss to
+  // that set waits in the replay table on dir_unavailable with nothing to
+  // release it. Prints the first 20, totals at the end.
+  int unsigned hpd_zombie_cnt = 0;
+  always @(posedge clk_i) begin
+    if (rst_ni) begin
+      if (i_hpdcache.hpdcache_ctrl_i.st2_dir_updt_q &&
+          !i_hpdcache.hpdcache_ctrl_i.st2_dir_updt_valid_q &&
+          i_hpdcache.hpdcache_ctrl_i.st2_dir_updt_fetch_q &&
+          !i_hpdcache.hpdcache_ctrl_i.st2_mshr_alloc_q) begin
+        hpd_zombie_cnt++;
+        if (hpd_zombie_cnt <= 20)
+          $display("[hpd-zombie] t=%0t set=%0d way=%b tag=%h: dir write valid=0 fetch=1 without MSHR alloc",
+                   $time, i_hpdcache.hpdcache_ctrl_i.st2_dir_updt_set_q,
+                   i_hpdcache.hpdcache_ctrl_i.st2_dir_updt_way_q,
+                   i_hpdcache.hpdcache_ctrl_i.st2_dir_updt_tag_q);
+      end
+    end
+  end
+  final begin
+    $display("[hpd-zombie] final zombie_dir_writes=%0d", hpd_zombie_cnt);
+  end
   //pragma translate_on
 
 endmodule : cva6_hpdcache_wrapper

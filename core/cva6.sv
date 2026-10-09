@@ -1905,6 +1905,11 @@ module cva6
   );
 
   //pragma translate_off
+  // T20: one-ticket-per-dump handshake from the [smt-stall] dump (inside
+  // gen_smt_stats, drained SMT targets only) to the HPDCACHE replay-table
+  // probe gen_hpd_trace below (any HPDCACHE target). Module-level so that
+  // neither generate scope has to name the other.
+  int unsigned hpd_ticket = 0;
 `ifdef G6LC_FETCH_B
   // N1/T10a drained-handoff observer (+smt_stats). Reads the selector's
   // drain FSM hierarchically (sim-only) and attributes every
@@ -2093,6 +2098,9 @@ module cva6
                  issue_stage_i.i_scoreboard.mem_q[hs].sbe.trans_id);
       end
       ss_dump_id = ss_dump_id + 1;
+      // T20: hand the ticket to the module-level HPDCACHE replay-table probe
+      // (gen_hpd_trace, +hpd_trace) so it dumps the rtab anatomy as well.
+      hpd_ticket = hpd_ticket + 1;
     endfunction
     // N1d-2: OoO-only deep anatomy. gen_full_ooo / the second csr_buffer
     // entry do not exist on the in-order drained targets, so the references
@@ -3715,13 +3723,31 @@ module cva6
 
   //pragma translate_off
 `ifdef G6LC_FETCH_B
+  // T20b: `+smt_handoff_trace` is an alias of `+smt_flow_trace`;
+  // `+smt_flow_lo=N +smt_flow_hi=M` window both the handoff and the
+  // [smt-probe] kill/req/resp/pop lines (default: whole run, as before), and
+  // the handoff line carries the core (hart_id_i) and the cycle.
   bit smt_handoff_trace;
-  initial smt_handoff_trace = $test$plusargs("smt_flow_trace");
+  int unsigned smt_flow_lo, smt_flow_hi, smt_flow_cyc;
+  logic smt_flow_on;
+  initial begin
+    smt_handoff_trace = $test$plusargs("smt_flow_trace") || $test$plusargs("smt_handoff_trace");
+    smt_flow_lo = 0;
+    smt_flow_hi = 32'hFFFF_FFFF;
+    void'($value$plusargs("smt_flow_lo=%0d", smt_flow_lo));
+    void'($value$plusargs("smt_flow_hi=%0d", smt_flow_hi));
+  end
   always @(posedge clk_i) begin
-    if (rst_ni && smt_handoff_trace && smt_switch) begin
-      $display("[smt-flow] handoff time=%0t from=%0d to=%0d frontier_candidate=%h transport=%h restore=%h empty=%b stores_clear=%b",
-               $time, smt_outgoing_hart, smt_active_hart, smt_restart_pc, smt_npc_live,
-               smt_npc_restore, smt_sb_empty, no_st_pending_commit);
+    if (!rst_ni) smt_flow_cyc = 0;
+    else smt_flow_cyc = smt_flow_cyc + 1;
+  end
+  assign smt_flow_on = smt_handoff_trace && smt_flow_cyc >= smt_flow_lo && smt_flow_cyc <= smt_flow_hi;
+  always @(posedge clk_i) begin
+    if (rst_ni && smt_flow_on && smt_switch) begin
+      $display("[smt-flow] handoff core=%0d cyc=%0d time=%0t from=%0d to=%0d frontier_candidate=%h transport=%h restore=%h empty=%b stores_clear=%b forced=%b force_pc=%h",
+               hart_id_i[7:0], smt_flow_cyc, $time, smt_outgoing_hart, smt_active_hart, smt_restart_pc,
+               smt_npc_live, smt_npc_restore, smt_sb_empty, no_st_pending_commit,
+               smt_drain_forced, smt_drain_force_pc);
       $display("[smt-flow] transport pending=%b target=%h inflight=%b inflight_pc=%h cursor=%h registered=%b registered_pc=%h carry=%b carry_pc=%h ftq=%b ftq_pc=%h",
                i_frontend.redirect_pend_q, i_frontend.redirect_pc_q,
                i_frontend.inflight_q, i_frontend.inflight_addr_q, i_frontend.npc_q,
@@ -3738,10 +3764,10 @@ module cva6
     // and what the peer-restart frontier can see at that instant. Prints on
     // every pre-dispatch kill, every I$ request accept, every I$ response
     // (taken or dropped), and every queue->ID transfer.
-    if (rst_ni && smt_handoff_trace && $time > 64'd1040000) begin
+    if (rst_ni && smt_flow_on && $time > 64'd1040000) begin
       if (flush_ctrl_if || flush_unissued_instr_ctrl_id || flush_ctrl_id) begin
-        $display("[smt-probe] kill t=%0t fif=%b uniss=%b fid=%b rb=%b misp=%b rb_h=%0d ex=%b eret=%b spc=%b replay=%b sw=%b act=%0d",
-                 $time, flush_ctrl_if, flush_unissued_instr_ctrl_id, flush_ctrl_id,
+        $display("[smt-probe] kill core=%0d cyc=%0d t=%0t fif=%b uniss=%b fid=%b rb=%b misp=%b rb_h=%0d ex=%b eret=%b spc=%b replay=%b sw=%b act=%0d",
+                 hart_id_i[7:0], smt_flow_cyc, $time, flush_ctrl_if, flush_unissued_instr_ctrl_id, flush_ctrl_id,
                  resolved_branch.valid, resolved_branch.is_mispredict,
                  resolved_branch.hart_id, ex_commit.valid, eret,
                  set_pc_ctrl_pcgen, mem_replay_pc_ctrl_pcgen, smt_switch,
@@ -4514,6 +4540,589 @@ module cva6
       end
     end
   end
+
+  // T20 diagnostic probe (+hpd_trace): HPDCACHE replay-table anatomy behind
+  // the core-0 wedge of ooocoh-t19-server-osbi-48M (`rtab v=1111 full=1` with
+  // MSHR/wbuf empty and no refill -- four parked requests whose dependencies
+  // can never resolve, so core_req_ready_o is low for every port forever).
+  //   * [hpd-rtab] full dump (pipeline st0/st1/st2, arbiter, every rtab entry
+  //     with its request, deps and age, pop FSM, wbuf/miss/flush inputs) on
+  //     every [smt-stall] ticket (hpd_ticket), on every rtab alloc / pop /
+  //     commit / rollback inside [+hpd_lo, +hpd_hi] (default 38.9M-39.1M), and
+  //     once per "LEAK" episode: rtab non-empty, nothing replayable, MSHR /
+  //     wbuf / flush / pipeline all idle for HPD_LEAK_IDLE cycles (always on
+  //     when armed -- a leaked entry is caught wherever it happens).
+  //   * [hpd-ev] one-line events inside the window: st1 abort (with the st1
+  //     request it hits), load-port kill_req (with the load-unit state), the
+  //     T19 adapter hold/held_fire/abort_q, load-port req/gnt/rsp, refill
+  //     rtab update + MSHR ack, flush ack, uc/cmo handoff.
+  //   * T20b: `+hpd_rtab_trace` is an alias of `+hpd_trace`; `+hpd_core=N`
+  //     restricts the probe to core N (hart_id_i / NrHarts; default 0 = the
+  //     wedged core, -1 = every core); `[hpd-ev] LEVEL` lines on every change
+  //     of rtab_full (always) and of core_req_valid/ready (inside the window);
+  //     a periodic "full" dump every HPD_FULL_PERIOD cycles while rtab_full
+  //     persists (the life of the four parked entries, with their age).
+  // Read-only, sim-only (hierarchical reads), gated by the plusarg.
+  bit hpd_trace;
+  int unsigned hpd_lo, hpd_hi, hpd_cycle;
+  int hpd_core;
+  initial begin
+    hpd_trace = $test$plusargs("hpd_trace") || $test$plusargs("hpd_rtab_trace");
+    hpd_lo = 38900000;
+    hpd_hi = 39100000;
+    hpd_core = 0;
+    void'($value$plusargs("hpd_lo=%0d", hpd_lo));
+    void'($value$plusargs("hpd_hi=%0d", hpd_hi));
+    void'($value$plusargs("hpd_core=%0d", hpd_core));
+  end
+  always @(posedge clk_i) begin
+    if (!rst_ni) hpd_cycle = 0;
+    else hpd_cycle = hpd_cycle + 1;
+  end
+  if (CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WT ||
+      CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WB ||
+      CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WT_WB) begin : gen_hpd_trace
+`define HPDT      gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache
+`define HPDT_CTRL gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i
+`define HPDT_RTAB gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.hpdcache_rtab_i
+`define HPDT_ARB  gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.core_req_arbiter_i
+`define HPDT_MH   gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i
+`define HPDT_LDA  gen_cache_hpd.i_cache_subsystem.i_dcache.gen_cva6_hpdcache_load_if_adapter[1].i_cva6_hpdcache_load_if_adapter.load_port_gen
+`define HPDT_LDU  ex_stage_i.lsu_i.i_load_unit
+    // same value as cva6_hpdcache_subsystem::hpdcacheSetConfig (rtabEntries)
+    localparam int unsigned HPD_RTAB_N = 4;
+    localparam int unsigned HPD_LEAK_IDLE = 256;
+    localparam int unsigned HPD_FULL_PERIOD = 10000;
+    localparam int unsigned HPD_NH = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
+    int unsigned hpd_age[HPD_RTAB_N];
+    int unsigned hpd_seen_ticket = 0;
+    int unsigned hpd_idle_cnt = 0;
+    int unsigned hpd_full_last = 0;
+    bit hpd_leak_reported = 0;
+    bit hpd_leak_logged_once = 0;
+    bit hpd_full_q = 0, hpd_crv_q = 0, hpd_crr_q = 0, hpd_lvl_seen = 0;
+    logic hpd_in_win, hpd_idle, hpd_on;
+    assign hpd_in_win = hpd_cycle >= hpd_lo && hpd_cycle <= hpd_hi;
+    // core filter: hart_id_i is the core's base hart id (NrHarts per core)
+    assign hpd_on = hpd_trace && (hpd_core < 0 ||
+                                  (int'(hart_id_i[7:0]) / int'(HPD_NH)) == hpd_core);
+    // nothing in flight that could still clear a dependency bit
+    assign hpd_idle = (|`HPDT_RTAB.valid_q) && !`HPDT_CTRL.st0_rtab_pop_try_valid &&
+                      `HPDT_CTRL.mshr_empty_i && `HPDT_CTRL.wbuf_empty_i &&
+                      `HPDT_CTRL.flush_empty_i && !`HPDT_CTRL.refill_busy_i &&
+                      !`HPDT_CTRL.refill_req_valid_i && !`HPDT_CTRL.st1_req_valid_q &&
+                      !`HPDT_CTRL.st2_mshr_alloc_q && !`HPDT_CTRL.st2_dir_updt_q &&
+                      !`HPDT_CTRL.st2_flush_alloc_q && !`HPDT_CTRL.uc_busy_i &&
+                      !`HPDT_CTRL.cmo_busy_i;
+
+    function automatic void hpd_rtab_dump(input string why);
+      $display("[hpd-rtab] %s c=%0d h=%0d | st0 crv=%0d crr=%0d arbv=%b gntd=%b gntq=%b fxwait=%0d fxgnt=%b op=%0d off=%h tid=%0d sid=%0d nrsp=%0d pi=%0d tag=%h abort_in=%0d | st1 v=%0d rtab=%0d op=%0d addr=%h tid=%0d sid=%0d nrsp=%0d pi=%0d err=%0d abort=%0d ptr=%0d dirhit=%0d mshrhit=%0d mshrfull=%0d missrdy=%0d chk=%0d chkhit=%0d wbrdhit=%0d wbwrrdy=%0d flchk=%0d flrdy=%0d npt=%0d alloc=%0d link=%0d commit=%0d rback=%0d rspv=%0d rspab=%0d | st2 m=%0d d=%0d f=%0d | mshr_e=%0d wbuf_e=%0d flush_e=%0d refill_busy=%0d refill_req=%0d uc=%0d cmo=%0d flushbusy=%0d",
+               why, hpd_cycle, hart_id_i[7:0],
+               `HPDT_CTRL.core_req_valid_i, `HPDT_CTRL.core_req_ready_o,
+               `HPDT_ARB.core_req_valid, `HPDT_ARB.arb_req_gnt_d, `HPDT_ARB.arb_req_gnt_q,
+               `HPDT_ARB.req_arbiter_i.wait_q, `HPDT_ARB.req_arbiter_i.gnt_q,
+               int'(`HPDT_CTRL.core_req_i.op), `HPDT_CTRL.core_req_i.addr_offset,
+               `HPDT_CTRL.core_req_i.tid, `HPDT_CTRL.core_req_i.sid,
+               `HPDT_CTRL.core_req_i.need_rsp, `HPDT_CTRL.core_req_i.phys_indexed,
+               `HPDT_CTRL.core_req_tag_i, `HPDT_CTRL.core_req_abort_i,
+               `HPDT_CTRL.st1_req_valid_q, `HPDT_CTRL.st1_req.from_rtab,
+               int'(`HPDT_CTRL.st1_req.req.op), `HPDT_CTRL.st1_req_addr,
+               `HPDT_CTRL.st1_req.req.tid, `HPDT_CTRL.st1_req.req.sid,
+               `HPDT_CTRL.st1_req.req.need_rsp, `HPDT_CTRL.st1_req.req.phys_indexed,
+               `HPDT_CTRL.st1_req.is_error, `HPDT_CTRL.st1_req_abort,
+               `HPDT_CTRL.st1_rtab_pop_try_ptr_q, `HPDT_CTRL.st1_dir_hit,
+               `HPDT_CTRL.st1_mshr_hit_i, `HPDT_CTRL.st1_mshr_alloc_full_i,
+               `HPDT_CTRL.st1_mshr_alloc_ready_i,
+               `HPDT_CTRL.st1_rtab_check, `HPDT_CTRL.st1_rtab_check_hit,
+               `HPDT_CTRL.wbuf_read_hit_i, `HPDT_CTRL.wbuf_write_ready_i,
+               `HPDT_CTRL.flush_check_hit_i, `HPDT_CTRL.flush_alloc_ready_i,
+               `HPDT_CTRL.st1_no_pend_trans,
+               `HPDT_CTRL.st1_rtab_alloc, `HPDT_CTRL.st1_rtab_alloc_and_link,
+               `HPDT_CTRL.st1_rtab_pop_try_commit, `HPDT_CTRL.st1_rtab_pop_try_rback,
+               `HPDT_CTRL.st1_rsp_valid, `HPDT_CTRL.st1_rsp_aborted,
+               `HPDT_CTRL.st2_mshr_alloc_q, `HPDT_CTRL.st2_dir_updt_q, `HPDT_CTRL.st2_flush_alloc_q,
+               `HPDT_CTRL.mshr_empty_i, `HPDT_CTRL.wbuf_empty_i, `HPDT_CTRL.flush_empty_i,
+               `HPDT_CTRL.refill_busy_i, `HPDT_CTRL.refill_req_valid_i,
+               `HPDT_CTRL.uc_busy_i, `HPDT_CTRL.cmo_busy_i, `HPDT_CTRL.flush_busy_i);
+      $display("[hpd-rtab] %s c=%0d h=%0d | rtab v=%b head=%b tail=%b ready=%b nodeps=%b fence=%b fence_only=%0d npt=%0d full=%0d empty=%0d popv=%0d popst=%0d popsel=%b popnext=%b popgnt=%b | alloc=%0d link=%0d free=%b chk=%0d chknl=%h chkhit=%b chktail=%b | pop_try=%0d ptr=%0d commit=%0d cptr=%0d rback=%0d rptr=%0d | missrdy=%0d refill=%0d rnl=%h rway=%0d wbsel=%b wbaddr=%h wbrd=%0d wbhit=%0d%0d%0d wbnr=%0d flrdy=%0d flack=%0d flnl=%h | mshr_v=%b refill_fsm=%0d miss_fsm=%0d rok=%0d",
+               why, hpd_cycle, hart_id_i[7:0],
+               `HPDT_RTAB.valid_q, `HPDT_RTAB.head_q, `HPDT_RTAB.tail_q, `HPDT_RTAB.ready,
+               `HPDT_RTAB.nodeps, `HPDT_RTAB.fence_bv, `HPDT_RTAB.fence_only,
+               `HPDT_RTAB.no_pend_trans_i, `HPDT_RTAB.full_o, `HPDT_RTAB.empty_o,
+               `HPDT_RTAB.pop_try_valid_o, int'(`HPDT_RTAB.pop_try_state_q),
+               `HPDT_RTAB.pop_sel, `HPDT_RTAB.pop_try_next_q, `HPDT_RTAB.pop_gnt,
+               `HPDT_RTAB.alloc_i, `HPDT_RTAB.alloc_and_link_i, `HPDT_RTAB.free_alloc,
+               `HPDT_RTAB.check_i, `HPDT_RTAB.check_nline_i, `HPDT_RTAB.check_hit,
+               `HPDT_RTAB.match_check_tail,
+               `HPDT_RTAB.pop_try_i, `HPDT_RTAB.pop_try_ptr_o,
+               `HPDT_RTAB.pop_commit_i, `HPDT_RTAB.pop_commit_ptr_i,
+               `HPDT_RTAB.pop_rback_i, `HPDT_RTAB.pop_rback_ptr_i,
+               `HPDT_RTAB.miss_ready_i, `HPDT_RTAB.refill_i, `HPDT_RTAB.refill_nline_i,
+               `HPDT_RTAB.refill_way_index_i,
+               `HPDT_RTAB.wbuf_sel, `HPDT_RTAB.wbuf_addr_o, `HPDT_RTAB.wbuf_is_read_o,
+               `HPDT_RTAB.wbuf_hit_open_i, `HPDT_RTAB.wbuf_hit_pend_i, `HPDT_RTAB.wbuf_hit_sent_i,
+               `HPDT_RTAB.wbuf_not_ready_i, `HPDT_RTAB.flush_ready_i,
+               `HPDT_RTAB.flush_ack_i, `HPDT_RTAB.flush_ack_nline_i,
+               `HPDT_MH.hpdcache_mshr_i.mshr_valid_q, int'(`HPDT_MH.refill_fsm_q),
+               int'(`HPDT_MH.miss_req_fsm_q), `HPDT_MH.refill_fifo_resp_meta_rok);
+      for (int unsigned e = 0; e < HPD_RTAB_N; e++) begin
+        $display("[hpd-rtab] %s c=%0d h=%0d |  e%0d v=%0d head=%0d tail=%0d next=%0d age=%0d op=%0d addr=%h nline=%h off=%h tid=%0d sid=%0d nrsp=%0d pi=%0d err=%0d uc=%0d wayf=%0d deps mh=%0d mf=%0d mr=%0d wm=%0d wh=%0d wnr=%0d du=%0d df=%0d fh=%0d fnr=%0d pt=%0d",
+                 why, hpd_cycle, hart_id_i[7:0], e,
+                 `HPDT_RTAB.valid_q[e], `HPDT_RTAB.head_q[e], `HPDT_RTAB.tail_q[e],
+                 `HPDT_RTAB.next_q[e], hpd_age[e],
+                 int'(`HPDT_RTAB.req_q[e].req.req.op), `HPDT_RTAB.addr[e], `HPDT_RTAB.nline[e],
+                 `HPDT_RTAB.req_q[e].req.req.addr_offset,
+                 `HPDT_RTAB.req_q[e].req.req.tid, `HPDT_RTAB.req_q[e].req.req.sid,
+                 `HPDT_RTAB.req_q[e].req.req.need_rsp, `HPDT_RTAB.req_q[e].req.req.phys_indexed,
+                 `HPDT_RTAB.error_q[e], `HPDT_RTAB.req_q[e].req.req.pma.uncacheable,
+                 `HPDT_RTAB.req_q[e].way_fetch,
+                 `HPDT_RTAB.deps_q[e].mshr_hit, `HPDT_RTAB.deps_q[e].mshr_full,
+                 `HPDT_RTAB.deps_q[e].mshr_ready, `HPDT_RTAB.deps_q[e].write_miss,
+                 `HPDT_RTAB.deps_q[e].wbuf_hit, `HPDT_RTAB.deps_q[e].wbuf_not_ready,
+                 `HPDT_RTAB.deps_q[e].dir_unavailable, `HPDT_RTAB.deps_q[e].dir_fetch,
+                 `HPDT_RTAB.deps_q[e].flush_hit, `HPDT_RTAB.deps_q[e].flush_not_ready,
+                 `HPDT_RTAB.deps_q[e].pend_trans);
+      end
+      $display("[hpd-rtab] %s c=%0d h=%0d | ldu st=%0d vin=%0d tid=%0d vaddr=%h paddr=%h dtlb=%0d dreq=%0d gnt=%0d tagv=%0d kill=%0d rvld=%0d rid=%0d flush=%0d canc=%0d ldbuf v=%h f=%h last=%0d widx=%0d | adp hold=%0d abort_q=%0d pend=%0d held=%0d fire=%0d withdrawn=%0d hold_off=%h hold_tid=%0d | port1 v=%0d rdy=%0d abort=%0d off=%h tid=%0d tag=%h",
+               why, hpd_cycle, hart_id_i[7:0],
+               int'(`HPDT_LDU.state_q), `HPDT_LDU.valid_i, `HPDT_LDU.lsu_ctrl_i.trans_id,
+               `HPDT_LDU.lsu_ctrl_i.vaddr, `HPDT_LDU.paddr_i, `HPDT_LDU.dtlb_hit_i,
+               `HPDT_LDU.req_port_o.data_req, `HPDT_LDU.req_port_i.data_gnt,
+               `HPDT_LDU.req_port_o.tag_valid, `HPDT_LDU.req_port_o.kill_req,
+               `HPDT_LDU.req_port_i.data_rvalid, `HPDT_LDU.req_port_i.data_rid,
+               `HPDT_LDU.flush_i, `HPDT_LDU.cancelled_request,
+               `HPDT_LDU.ldbuf_valid_q, `HPDT_LDU.ldbuf_flushed_q, `HPDT_LDU.ldbuf_last_id_q,
+               `HPDT_LDU.ldbuf_windex,
+               `HPDT_LDA.hold_q, `HPDT_LDA.abort_q, `HPDT_LDA.req_pend_q, `HPDT_LDA.held,
+               `HPDT_LDA.held_fire, `HPDT_LDA.req_withdrawn,
+               `HPDT_LDA.hold_req_q.addr_offset, `HPDT_LDA.hold_req_q.tid,
+               gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req_valid[1],
+               gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req_ready[1],
+               gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req_abort[1],
+               gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req[1].addr_offset,
+               gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req[1].tid,
+               gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req_tag[1]);
+    endfunction
+
+    // compact one-liner used by the windowed events
+    function automatic void hpd_rtab_brief(input string ev);
+      $display("[hpd-ev] c=%0d h=%0d %s | rtab v=%b head=%b ready=%b fence=%b npt=%0d popv=%0d popst=%0d crv=%0d crr=%0d gntq=%b st1v=%0d st1op=%0d st1addr=%h st1tid=%0d st1sid=%0d st1rtab=%0d st1ptr=%0d abort=%0d mshr_v=%b wbuf_e=%0d refill_busy=%0d uc=%0d",
+               hpd_cycle, hart_id_i[7:0], ev,
+               `HPDT_RTAB.valid_q, `HPDT_RTAB.head_q, `HPDT_RTAB.ready, `HPDT_RTAB.fence_bv,
+               `HPDT_RTAB.no_pend_trans_i, `HPDT_RTAB.pop_try_valid_o,
+               int'(`HPDT_RTAB.pop_try_state_q),
+               `HPDT_CTRL.core_req_valid_i, `HPDT_CTRL.core_req_ready_o, `HPDT_ARB.arb_req_gnt_q,
+               `HPDT_CTRL.st1_req_valid_q, int'(`HPDT_CTRL.st1_req.req.op), `HPDT_CTRL.st1_req_addr,
+               `HPDT_CTRL.st1_req.req.tid, `HPDT_CTRL.st1_req.req.sid, `HPDT_CTRL.st1_req.from_rtab,
+               `HPDT_CTRL.st1_rtab_pop_try_ptr_q, `HPDT_CTRL.st1_req_abort,
+               `HPDT_MH.hpdcache_mshr_i.mshr_valid_q, `HPDT_CTRL.wbuf_empty_i,
+               `HPDT_CTRL.refill_busy_i, `HPDT_CTRL.uc_busy_i);
+    endfunction
+
+    always @(posedge clk_i) begin
+      if (!rst_ni) begin
+        for (int unsigned e = 0; e < HPD_RTAB_N; e++) hpd_age[e] = 0;
+        hpd_idle_cnt = 0;
+        hpd_leak_reported = 0;
+      end else if (hpd_on) begin
+        // ---- per-entry residency age (cycles since the entry became valid)
+        for (int unsigned e = 0; e < HPD_RTAB_N; e++)
+          hpd_age[e] = `HPDT_RTAB.valid_q[e] ? hpd_age[e] + 1 : 0;
+        // ---- ticket from the [smt-stall] dump
+        if (hpd_ticket != hpd_seen_ticket) begin
+          hpd_seen_ticket = hpd_ticket;
+          hpd_rtab_dump("ticket");
+        end
+        // ---- T20b level changes: rtab_full always, core_req valid/ready in the window
+        if (!hpd_lvl_seen || `HPDT_RTAB.full_o != hpd_full_q ||
+            (hpd_in_win && (`HPDT_CTRL.core_req_valid_i != hpd_crv_q ||
+                            `HPDT_CTRL.core_req_ready_o != hpd_crr_q))) begin
+          $display("[hpd-ev] c=%0d h=%0d LEVEL rtab_full=%0d crv=%0d crr=%0d rtab v=%b head=%b ready=%b | mshr_e=%0d wbuf_e=%0d refill_busy=%0d refill_req=%0d uc=%0d cmo=%0d fence=%0d st1v=%0d st2m=%0d st2d=%0d gntq=%b",
+                   hpd_cycle, hart_id_i[7:0], `HPDT_RTAB.full_o,
+                   `HPDT_CTRL.core_req_valid_i, `HPDT_CTRL.core_req_ready_o,
+                   `HPDT_RTAB.valid_q, `HPDT_RTAB.head_q, `HPDT_RTAB.ready,
+                   `HPDT_CTRL.mshr_empty_i, `HPDT_CTRL.wbuf_empty_i, `HPDT_CTRL.refill_busy_i,
+                   `HPDT_CTRL.refill_req_valid_i, `HPDT_CTRL.uc_busy_i, `HPDT_CTRL.cmo_busy_i,
+                   `HPDT_RTAB.fence_o, `HPDT_CTRL.st1_req_valid_q, `HPDT_CTRL.st2_mshr_alloc_q,
+                   `HPDT_CTRL.st2_dir_updt_q, `HPDT_ARB.arb_req_gnt_q);
+          hpd_lvl_seen = 1;
+          hpd_full_q = `HPDT_RTAB.full_o;
+          hpd_crv_q = `HPDT_CTRL.core_req_valid_i;
+          hpd_crr_q = `HPDT_CTRL.core_req_ready_o;
+        end
+        // ---- T20b periodic dump while the replay table stays full
+        if (`HPDT_RTAB.full_o) begin
+          if (hpd_cycle - hpd_full_last >= HPD_FULL_PERIOD) begin
+            hpd_full_last = hpd_cycle;
+            hpd_rtab_dump("full-periodic");
+          end
+        end else begin
+          hpd_full_last = hpd_cycle;
+        end
+        // ---- leak episode: parked entries with nothing left to release them
+        if (hpd_idle) begin
+          hpd_idle_cnt = hpd_idle_cnt + 1;
+          if (hpd_idle_cnt == HPD_LEAK_IDLE && !hpd_leak_reported) begin
+            hpd_leak_reported = 1;
+            hpd_rtab_dump("LEAK");
+            if (!hpd_leak_logged_once) begin
+              hpd_leak_logged_once = 1;
+              $display("[hpd-rtab] LEAK first episode at c=%0d h=%0d", hpd_cycle, hart_id_i[7:0]);
+            end
+          end
+        end else begin
+          hpd_idle_cnt = 0;
+          if (!(|`HPDT_RTAB.valid_q)) hpd_leak_reported = 0;
+        end
+        // ---- windowed events
+        if (hpd_in_win) begin
+          if (`HPDT_CTRL.st1_rtab_alloc || `HPDT_CTRL.st1_rtab_alloc_and_link) begin
+            $display("[hpd-ev] c=%0d h=%0d RTAB-ALLOC link=%0d entry=%b op=%0d addr=%h nline=%h tid=%0d sid=%0d nrsp=%0d uc=%0d rtab_src=%0d dirhit=%0d dirfetch=%0d mshrhit=%0d mshrfull=%0d missrdy=%0d victunav=%0d victdirty=%0d wbrdhit=%0d wbwrrdy=%0d npt=%0d deps mh=%0d mf=%0d mr=%0d wm=%0d wh=%0d wnr=%0d du=%0d df=%0d fh=%0d fnr=%0d pt=%0d",
+                     hpd_cycle, hart_id_i[7:0], `HPDT_CTRL.st1_rtab_alloc_and_link,
+                     `HPDT_RTAB.free_alloc, int'(`HPDT_CTRL.st1_req.req.op), `HPDT_CTRL.st1_req_addr,
+                     `HPDT_CTRL.st1_req_nline, `HPDT_CTRL.st1_req.req.tid, `HPDT_CTRL.st1_req.req.sid,
+                     `HPDT_CTRL.st1_req.req.need_rsp, `HPDT_CTRL.st1_req_is_uncacheable,
+                     `HPDT_CTRL.st1_req.from_rtab, `HPDT_CTRL.st1_dir_hit, `HPDT_CTRL.st1_dir_hit_fetch,
+                     `HPDT_CTRL.st1_mshr_hit_i, `HPDT_CTRL.st1_mshr_alloc_full_i,
+                     `HPDT_CTRL.st1_mshr_alloc_ready_i, `HPDT_CTRL.st1_dir_victim_unavailable,
+                     `HPDT_CTRL.st1_dir_victim_dirty, `HPDT_CTRL.wbuf_read_hit_i,
+                     `HPDT_CTRL.wbuf_write_ready_i, `HPDT_CTRL.st1_no_pend_trans,
+                     `HPDT_CTRL.st1_rtab_deps.mshr_hit, `HPDT_CTRL.st1_rtab_deps.mshr_full,
+                     `HPDT_CTRL.st1_rtab_deps.mshr_ready, `HPDT_CTRL.st1_rtab_deps.write_miss,
+                     `HPDT_CTRL.st1_rtab_deps.wbuf_hit, `HPDT_CTRL.st1_rtab_deps.wbuf_not_ready,
+                     `HPDT_CTRL.st1_rtab_deps.dir_unavailable, `HPDT_CTRL.st1_rtab_deps.dir_fetch,
+                     `HPDT_CTRL.st1_rtab_deps.flush_hit, `HPDT_CTRL.st1_rtab_deps.flush_not_ready,
+                     `HPDT_CTRL.st1_rtab_deps.pend_trans);
+            hpd_rtab_dump(`HPDT_CTRL.st1_rtab_alloc_and_link ? "alloc-link" : "alloc");
+          end
+          if (`HPDT_CTRL.st0_rtab_pop_try_valid && `HPDT_CTRL.st0_rtab_pop_try_ready) begin
+            hpd_rtab_brief("RTAB-POP");
+            hpd_rtab_dump("pop");
+          end
+          if (`HPDT_CTRL.st1_rtab_pop_try_commit) hpd_rtab_brief("RTAB-COMMIT");
+          if (`HPDT_CTRL.st1_rtab_pop_try_rback) begin
+            hpd_rtab_brief("RTAB-RBACK");
+            hpd_rtab_dump("rback");
+          end
+          if (`HPDT_CTRL.core_req_abort_i)
+            $display("[hpd-ev] c=%0d h=%0d ABORT st1v=%0d st1_abort=%0d gntq=%b abortv=%b st1 op=%0d addr=%h tid=%0d sid=%0d nrsp=%0d pi=%0d rtab=%0d rspv=%0d rspab=%0d | ldu st=%0d kill=%0d tagv=%0d | adp abort_q=%0d hold=%0d",
+                     hpd_cycle, hart_id_i[7:0], `HPDT_CTRL.st1_req_valid_q, `HPDT_CTRL.st1_req_abort,
+                     `HPDT_ARB.arb_req_gnt_q, `HPDT_ARB.core_req_abort,
+                     int'(`HPDT_CTRL.st1_req.req.op), `HPDT_CTRL.st1_req_addr,
+                     `HPDT_CTRL.st1_req.req.tid, `HPDT_CTRL.st1_req.req.sid,
+                     `HPDT_CTRL.st1_req.req.need_rsp, `HPDT_CTRL.st1_req.req.phys_indexed,
+                     `HPDT_CTRL.st1_req.from_rtab, `HPDT_CTRL.st1_rsp_valid, `HPDT_CTRL.st1_rsp_aborted,
+                     int'(`HPDT_LDU.state_q), `HPDT_LDU.req_port_o.kill_req, `HPDT_LDU.req_port_o.tag_valid,
+                     `HPDT_LDA.abort_q, `HPDT_LDA.hold_q);
+          if (`HPDT_LDU.req_port_o.kill_req)
+            $display("[hpd-ev] c=%0d h=%0d KILLREQ ldu st=%0d vin=%0d tid=%0d vaddr=%h paddr=%h dtlb=%0d flush=%0d canc=%0d ex=%0d exptw=%0d dreq=%0d gnt=%0d tagv=%0d ldbuf v=%h f=%h last=%0d | gntq=%b st1v=%0d st1pi=%0d st1rtab=%0d st1tid=%0d st1sid=%0d st1addr=%h -> abort=%0d",
+                     hpd_cycle, hart_id_i[7:0], int'(`HPDT_LDU.state_q), `HPDT_LDU.valid_i,
+                     `HPDT_LDU.lsu_ctrl_i.trans_id, `HPDT_LDU.lsu_ctrl_i.vaddr, `HPDT_LDU.paddr_i,
+                     `HPDT_LDU.dtlb_hit_i, `HPDT_LDU.flush_i, `HPDT_LDU.cancelled_request,
+                     `HPDT_LDU.ex_i.valid, `HPDT_LDU.ex_ptw_i,
+                     `HPDT_LDU.req_port_o.data_req, `HPDT_LDU.req_port_i.data_gnt,
+                     `HPDT_LDU.req_port_o.tag_valid, `HPDT_LDU.ldbuf_valid_q, `HPDT_LDU.ldbuf_flushed_q,
+                     `HPDT_LDU.ldbuf_last_id_q, `HPDT_ARB.arb_req_gnt_q, `HPDT_CTRL.st1_req_valid_q,
+                     `HPDT_CTRL.st1_req.req.phys_indexed, `HPDT_CTRL.st1_req.from_rtab,
+                     `HPDT_CTRL.st1_req.req.tid, `HPDT_CTRL.st1_req.req.sid, `HPDT_CTRL.st1_req_addr,
+                     `HPDT_CTRL.st1_req_abort);
+          if (`HPDT_LDA.req_withdrawn || `HPDT_LDA.held_fire || `HPDT_LDA.abort_q)
+            $display("[hpd-ev] c=%0d h=%0d HELD withdrawn=%0d held=%0d fire=%0d abort_q=%0d hold_q=%0d pend=%0d dreq=%0d rdy=%0d gntd=%b hold off=%h tid=%0d | ldu st=%0d flush=%0d canc=%0d",
+                     hpd_cycle, hart_id_i[7:0], `HPDT_LDA.req_withdrawn, `HPDT_LDA.held,
+                     `HPDT_LDA.held_fire, `HPDT_LDA.abort_q, `HPDT_LDA.hold_q, `HPDT_LDA.req_pend_q,
+                     `HPDT_LDU.req_port_o.data_req,
+                     gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_req_ready[1],
+                     `HPDT_ARB.arb_req_gnt_d, `HPDT_LDA.hold_req_q.addr_offset, `HPDT_LDA.hold_req_q.tid,
+                     int'(`HPDT_LDU.state_q), `HPDT_LDU.flush_i, `HPDT_LDU.cancelled_request);
+          if (`HPDT_LDU.req_port_o.data_req && `HPDT_LDU.req_port_i.data_gnt)
+            $display("[hpd-ev] c=%0d h=%0d LDU-GNT tid=%0d id=%0d vaddr=%h st=%0d ldbuf_v=%h",
+                     hpd_cycle, hart_id_i[7:0], `HPDT_LDU.lsu_ctrl_i.trans_id, `HPDT_LDU.req_port_o.data_id,
+                     `HPDT_LDU.lsu_ctrl_i.vaddr, int'(`HPDT_LDU.state_q), `HPDT_LDU.ldbuf_valid_q);
+          if (`HPDT_LDU.req_port_o.tag_valid)
+            $display("[hpd-ev] c=%0d h=%0d LDU-TAG tag=%h kill=%0d st=%0d",
+                     hpd_cycle, hart_id_i[7:0], `HPDT_LDU.req_port_o.address_tag,
+                     `HPDT_LDU.req_port_o.kill_req, int'(`HPDT_LDU.state_q));
+          if (`HPDT_LDU.req_port_i.data_rvalid)
+            $display("[hpd-ev] c=%0d h=%0d LDU-RSP rid=%0d ldbuf_v=%h f=%h sid_rsp=%0d aborted=%0d err=%0d",
+                     hpd_cycle, hart_id_i[7:0], `HPDT_LDU.req_port_i.data_rid, `HPDT_LDU.ldbuf_valid_q,
+                     `HPDT_LDU.ldbuf_flushed_q,
+                     gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_rsp[1].sid,
+                     gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_rsp[1].aborted,
+                     gen_cache_hpd.i_cache_subsystem.i_dcache.dcache_rsp[1].error);
+          // every accepted st0 request (any port) with its arbiter view
+          if (`HPDT_CTRL.core_req_valid_i && `HPDT_CTRL.core_req_ready_o)
+            $display("[hpd-ev] c=%0d h=%0d ST0-ACCEPT gnt=%b op=%0d off=%h tid=%0d sid=%0d nrsp=%0d pi=%0d uc=%0d",
+                     hpd_cycle, hart_id_i[7:0], `HPDT_ARB.arb_req_gnt_d, int'(`HPDT_CTRL.core_req_i.op),
+                     `HPDT_CTRL.core_req_i.addr_offset, `HPDT_CTRL.core_req_i.tid, `HPDT_CTRL.core_req_i.sid,
+                     `HPDT_CTRL.core_req_i.need_rsp, `HPDT_CTRL.core_req_i.phys_indexed,
+                     `HPDT_CTRL.core_req_i.pma.uncacheable);
+          if (`HPDT_CTRL.refill_updt_rtab_i)
+            hpd_rtab_brief("REFILL-UPDT");
+          if (`HPDT_MH.mshr_ack)
+            $display("[hpd-ev] c=%0d h=%0d MSHR-ACK r_id=%0d set=%0d way=%0d tag=%h cset=%0d sid=%0d tid=%0d nrsp=%0d mshr_v=%b",
+                     hpd_cycle, hart_id_i[7:0], `HPDT_MH.refill_fifo_resp_meta_rdata.r_id,
+                     `HPDT_MH.mshr_ack_set, `HPDT_MH.mshr_ack_way, `HPDT_MH.mshr_ack_cache_tag,
+                     `HPDT_MH.mshr_ack_cache_set, `HPDT_MH.mshr_ack_src_id, `HPDT_MH.mshr_ack_req_id,
+                     `HPDT_MH.mshr_ack_need_rsp, `HPDT_MH.hpdcache_mshr_i.mshr_valid_q);
+          if (`HPDT.miss_mshr_alloc)
+            $display("[hpd-ev] c=%0d h=%0d MSHR-ALLOC nline=%h sid=%0d tid=%0d nrsp=%0d mshr_v=%b",
+                     hpd_cycle, hart_id_i[7:0], `HPDT.miss_mshr_alloc_nline, `HPDT.miss_mshr_alloc_sid,
+                     `HPDT.miss_mshr_alloc_tid, `HPDT.miss_mshr_alloc_need_rsp,
+                     `HPDT_MH.hpdcache_mshr_i.mshr_valid_q);
+          if (`HPDT_CTRL.flush_ack_i)
+            $display("[hpd-ev] c=%0d h=%0d FLUSH-ACK nline=%h", hpd_cycle, hart_id_i[7:0],
+                     `HPDT_CTRL.flush_ack_nline_i);
+          if (`HPDT_CTRL.uc_req_valid_o || `HPDT_CTRL.cmo_req_valid_o)
+            $display("[hpd-ev] c=%0d h=%0d HANDOFF uc=%0d cmo=%0d op=%0d addr=%h tid=%0d sid=%0d nrsp=%0d rtab=%0d uc_busy=%0d cmo_busy=%0d",
+                     hpd_cycle, hart_id_i[7:0], `HPDT_CTRL.uc_req_valid_o, `HPDT_CTRL.cmo_req_valid_o,
+                     int'(`HPDT_CTRL.st1_req.req.op), `HPDT_CTRL.st1_req_addr, `HPDT_CTRL.st1_req.req.tid,
+                     `HPDT_CTRL.st1_req.req.sid, `HPDT_CTRL.st1_req.req.need_rsp, `HPDT_CTRL.st1_req.from_rtab,
+                     `HPDT_CTRL.uc_busy_i, `HPDT_CTRL.cmo_busy_i);
+        end
+      end
+    end
+`undef HPDT
+`undef HPDT_CTRL
+`undef HPDT_RTAB
+`undef HPDT_ARB
+`undef HPDT_MH
+`undef HPDT_LDA
+`undef HPDT_LDU
+  end
+
+  // T20 diagnostic probe (+win_trace): the whole fetch-window lifecycle around
+  // a mispredict, for the hart-5 wrong-path commit of ooocoh-t19-server-osbi-48M
+  // (window 0x800086e8 delivered after the taken `beqz` at 0x8001b690). One
+  // [win] line per event inside [+win_lo, +win_hi] (default 38.76M-38.78M),
+  // optionally filtered to one global hart (+win_hart=N, N = hart_id_i +
+  // smt_active_hart; default: every hart of the core):
+  //   KILL  controller flush_if / flush_unissued / flush_id, resolved_branch,
+  //         the frontend's is_mispredict / kill_s1 / kill_s2 / bp_fire / replay,
+  //         the redirect encoder (arch_src/arch_pc), NPC, FTQ head, token want
+  //         state, bp_pend filter, IQ flush, cf_hold
+  //   REQ   I$ request accepted (vaddr, token, demand/pf)
+  //   RSP   I$ response (vaddr, token, take, kill_drop, want state)
+  //   LBUF  loop-buffer inject (vaddr, take)
+  //   PUSH  realigner window presented to the instruction queue: source,
+  //         window vaddr, leftover carry, per-slot pc/instr/valid/consumed,
+  //         cf_type, predict_address, the IQ FIFOs written, replay
+  //   FTQ   push (vaddr, taken) / pop (head) / flush (expression)
+  //   POP   instruction queue -> ID handoff per port (pc, hart, insn)
+  //   ISS   ID -> issue handshake per port (pc, hart, scoreboard issue ptr)
+  //   PCBANK (T20b, NrHarts > 1) every g6lc_smt_pc_bank write source: retire
+  //         ports (hart, next pc), primary/secondary redirect (hart, pc, the
+  //         set_pc/eret/ex/mem_replay cause), the switch (outgoing hart,
+  //         npc_live / forced-drain alt value), smt_pc_restore with the
+  //         npc_restore value, and both bank entries after the write.
+  // T20b: `+fe_trace` / `+fe_lo` / `+fe_hi` are aliases of `+win_trace` /
+  // `+win_lo` / `+win_hi`; `+fe_core=N` restricts the probe to core N
+  // (hart_id_i / NrHarts; default -1 = every core).
+  // Read-only, sim-only (hierarchical reads into i_frontend / the IQ).
+  bit win_trace;
+  int unsigned win_lo, win_hi, win_cycle;
+  int win_hart, win_core;
+  initial begin
+    win_trace = $test$plusargs("win_trace") || $test$plusargs("fe_trace");
+    win_lo = 38760000;
+    win_hi = 38780000;
+    win_hart = -1;
+    win_core = -1;
+    void'($value$plusargs("win_lo=%0d", win_lo));
+    void'($value$plusargs("win_hi=%0d", win_hi));
+    void'($value$plusargs("fe_lo=%0d", win_lo));
+    void'($value$plusargs("fe_hi=%0d", win_hi));
+    void'($value$plusargs("win_hart=%0d", win_hart));
+    void'($value$plusargs("fe_core=%0d", win_core));
+  end
+  always @(posedge clk_i) begin
+    if (!rst_ni) win_cycle = 0;
+    else win_cycle = win_cycle + 1;
+  end
+`ifdef G6LC_FETCH_B
+  if (CVA6Cfg.FtqDepth != 0) begin : gen_win_trace
+    localparam int unsigned WIN_NH = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
+    logic win_on, win_cf_hold_q;
+    int unsigned win_ghart;
+    assign win_ghart = int'(hart_id_i[7:0]) + int'(smt_active_hart);
+    assign win_on = win_trace && rst_ni && win_cycle >= win_lo && win_cycle <= win_hi &&
+                    (win_hart < 0 || win_ghart == win_hart) &&
+                    (win_core < 0 || (int'(hart_id_i[7:0]) / int'(WIN_NH)) == win_core);
+    assign win_cf_hold_q = i_frontend.gen_ftq.cf_hold_q;
+    always @(posedge clk_i) begin
+      if (win_on) begin
+        // ---- kills / redirects
+        if (flush_ctrl_if || flush_unissued_instr_ctrl_id || flush_ctrl_id ||
+            resolved_branch.valid || i_frontend.is_mispredict || i_frontend.kill_s1 ||
+            i_frontend.kill_s2 || i_frontend.bp_fire || i_frontend.replay ||
+            i_frontend.replay_q || i_frontend.arch_valid || smt_switch || smt_pc_restore) begin
+          $display("[win] c=%0d h=%0d KILL fif=%0d uniss=%0d fid=%0d | rb v=%0d misp=%0d taken=%0d cf=%0d pc=%h tgt=%h rbh=%0d tid=%0d | ctrl_misp=%0d fe_misp=%0d res_act=%0d outranked=%0d k1=%0d k2=%0d bpf=%0d fl=%0d rp=%0d rpq=%0d rpaddr=%h | arch v=%0d src=%0d pc=%h step=%0d reseed=%0d | npc_q=%h npc_d=%h faddr=%h | ftq hv=%0d head=%h push=%0d pv=%h pop=%0d cfhold=%0d | want v=%0d tok=%0d addr=%h hart=%0d pf=%0d reqtok=%0d | bp_pend=%0d tgt=%h ttl=%0d | redir pend=%0d pc=%h infl=%0d ia=%h | iqflush=%0d iqrdy=%0d una=%0d lov=%0d lopc=%h | ex=%0d eret=%0d spc=%0d sw=%0d restore=%0d act=%0d | sb iptr=%0d cptr=%0d",
+                   win_cycle, win_ghart, flush_ctrl_if, flush_unissued_instr_ctrl_id, flush_ctrl_id,
+                   resolved_branch.valid, resolved_branch.is_mispredict, resolved_branch.is_taken,
+                   int'(resolved_branch.cf_type), resolved_branch.pc, resolved_branch.target_address,
+                   resolved_branch.hart_id, resolved_branch.trans_id,
+                   resolved_branch_ctrl.is_mispredict, i_frontend.is_mispredict,
+                   i_frontend.resolution_for_active, i_frontend.misp_outranked,
+                   i_frontend.kill_s1, i_frontend.kill_s2, i_frontend.bp_fire, i_frontend.flush_i,
+                   i_frontend.replay, i_frontend.replay_q, i_frontend.replay_addr_q,
+                   i_frontend.arch_valid, int'(i_frontend.arch_src), i_frontend.arch_pc,
+                   i_frontend.arch_step, i_frontend.arch_reseed,
+                   i_frontend.npc_q, i_frontend.npc_d, i_frontend.fetch_address,
+                   i_frontend.ftq_head_valid, i_frontend.ftq_head_vaddr, i_frontend.ftq_push,
+                   i_frontend.ftq_push_vaddr, i_frontend.ftq_pop, win_cf_hold_q,
+                   i_frontend.want_valid_q, i_frontend.want_token_q, i_frontend.want_addr_q,
+                   i_frontend.want_hart_q, i_frontend.want_pf_q, i_frontend.req_token_q,
+                   i_frontend.bp_pend_q, i_frontend.bp_tgt_q, i_frontend.bp_misp_ttl_q,
+                   i_frontend.redirect_pend_q, i_frontend.redirect_pc_q, i_frontend.inflight_q,
+                   i_frontend.inflight_addr_q,
+                   i_frontend.i_instr_queue.flush_i, i_frontend.instr_queue_ready,
+                   i_frontend.serving_unaligned, i_frontend.leftover_valid, i_frontend.leftover_pc,
+                   ex_commit.valid, eret, set_pc_ctrl_pcgen, smt_switch, smt_pc_restore,
+                   smt_active_hart,
+                   issue_stage_i.i_scoreboard.issue_pointer_q,
+                   issue_stage_i.i_scoreboard.commit_pointer_q[0]);
+        end
+        // ---- I$ request accepted
+        if (icache_dreq_if_cache.req && icache_dreq_cache_if.ready)
+          $display("[win] c=%0d h=%0d REQ va=%h tok=%0d demand=%0d pf=%0d spec=%0d k1=%0d k2=%0d ftq_head=%h hv=%0d npc_q=%h",
+                   win_cycle, win_ghart, icache_dreq_if_cache.vaddr, icache_dreq_if_cache.token,
+                   i_frontend.demand_req, i_frontend.pf_req, icache_dreq_if_cache.spec,
+                   i_frontend.kill_s1, i_frontend.kill_s2, i_frontend.ftq_head_vaddr,
+                   i_frontend.ftq_head_valid, i_frontend.npc_q);
+        // ---- I$ response
+        if (icache_dreq_cache_if.valid)
+          $display("[win] c=%0d h=%0d RSP va=%h tok=%0d take=%0d kdrop=%0d want v=%0d tok=%0d addr=%h hart=%0d pf=%0d | bp_pend=%0d tgt=%h | k1=%0d k2=%0d fl=%0d mp=%0d bpf=%0d rpq=%0d | ex=%0d",
+                   win_cycle, win_ghart, icache_dreq_cache_if.vaddr, icache_dreq_cache_if.token,
+                   i_frontend.icache_take, i_frontend.kill_drop,
+                   i_frontend.want_valid_q, i_frontend.want_token_q, i_frontend.want_addr_q,
+                   i_frontend.want_hart_q, i_frontend.want_pf_q,
+                   i_frontend.bp_pend_q, i_frontend.bp_tgt_q,
+                   i_frontend.kill_s1, i_frontend.kill_s2, i_frontend.flush_i,
+                   i_frontend.is_mispredict, i_frontend.bp_fire, i_frontend.replay_q,
+                   icache_dreq_cache_if.ex.valid);
+        // ---- loop-buffer inject
+        if (i_frontend.lbuf_inject)
+          $display("[win] c=%0d h=%0d LBUF va=%h take=%0d hit=%0d bp_pend=%0d tgt=%h fl=%0d mp=%0d k1=%0d k2=%0d",
+                   win_cycle, win_ghart, i_frontend.ftq_head_vaddr, i_frontend.icache_take,
+                   i_frontend.lbuf_hit, i_frontend.bp_pend_q, i_frontend.bp_tgt_q,
+                   i_frontend.flush_i, i_frontend.is_mispredict, i_frontend.kill_s1,
+                   i_frontend.kill_s2);
+        // ---- window presented to the instruction queue (realigner valid)
+        if (i_frontend.icache_take) begin
+          $display("[win] c=%0d h=%0d PUSH src=%s va=%h una=%0d lopc=%h vmask=%b cons=%b iqpush=%b isq=%b dsq=%b full=%b rdy=%0d replay=%0d rpaddr=%h cf=[%0d %0d %0d %0d] pred=%h fl=%0d mp=%0d k1=%0d k2=%0d bpf=%0d stamp_hart=%0d",
+                   win_cycle, win_ghart,
+                   icache_dreq_cache_if.valid ? "ICACHE" : "LBUF",
+                   i_frontend.realigner_vaddr, i_frontend.serving_unaligned, i_frontend.leftover_pc,
+                   i_frontend.instruction_valid, i_frontend.instr_queue_consumed,
+                   i_frontend.i_instr_queue.push_instr_fifo, i_frontend.i_instr_queue.idx_is_q,
+                   i_frontend.i_instr_queue.idx_ds_q, i_frontend.i_instr_queue.instr_queue_full,
+                   i_frontend.instr_queue_ready, i_frontend.replay, i_frontend.replay_addr,
+                   int'(i_frontend.cf_type[0]), int'(i_frontend.cf_type[1 % CVA6Cfg.INSTR_PER_FETCH]),
+                   int'(i_frontend.cf_type[2 % CVA6Cfg.INSTR_PER_FETCH]),
+                   int'(i_frontend.cf_type[3 % CVA6Cfg.INSTR_PER_FETCH]),
+                   i_frontend.predict_address, i_frontend.flush_i, i_frontend.is_mispredict,
+                   i_frontend.kill_s1, i_frontend.kill_s2, i_frontend.bp_fire, smt_active_hart);
+          for (int unsigned s = 0; s < CVA6Cfg.INSTR_PER_FETCH; s++)
+            if (i_frontend.instruction_valid_raw[s])
+              $display("[win] c=%0d h=%0d PUSH  slot%0d pc=%h insn=%h v=%0d cons=%0d cf=%0d",
+                       win_cycle, win_ghart, s, i_frontend.addr[s], i_frontend.instr[s],
+                       i_frontend.instruction_valid[s], i_frontend.instr_queue_consumed[s],
+                       int'(i_frontend.cf_type[s]));
+        end
+        // ---- FTQ push / pop / flush
+        if (i_frontend.ftq_push || i_frontend.ftq_pop ||
+            (i_frontend.flush_i | i_frontend.is_mispredict | i_frontend.bp_fire |
+             i_frontend.replay_q | i_frontend.smt_restore_flush))
+          $display("[win] c=%0d h=%0d FTQ push=%0d pv=%h taken=%0d tgt=%h pop=%0d head=%h hv=%0d flush=%0d (fl=%0d mp=%0d bpf=%0d rpq=%0d rst=%0d) demand=%0d dfire=%0d lbuf=%0d if_ready=%0d cfhold=%0d full=%0d",
+                   win_cycle, win_ghart, i_frontend.ftq_push, i_frontend.ftq_push_vaddr,
+                   i_frontend.bp_fire, i_frontend.predict_address, i_frontend.ftq_pop,
+                   i_frontend.ftq_head_vaddr, i_frontend.ftq_head_valid,
+                   (i_frontend.flush_i | i_frontend.is_mispredict | i_frontend.bp_fire |
+                    i_frontend.replay_q | i_frontend.smt_restore_flush),
+                   i_frontend.flush_i, i_frontend.is_mispredict, i_frontend.bp_fire,
+                   i_frontend.replay_q, i_frontend.smt_restore_flush,
+                   i_frontend.demand_req, i_frontend.demand_fire, i_frontend.lbuf_consume,
+                   i_frontend.if_ready, win_cf_hold_q, i_frontend.ftq_full);
+        // ---- IQ -> ID
+        for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++)
+          if (fetch_valid_if_id[p] && fetch_ready_id_if[p])
+            $display("[win] c=%0d h=%0d POP port=%0d pc=%h insn=%h hart=%0d cf=%0d pred=%h",
+                     win_cycle, win_ghart, p, fetch_entry_if_id[p].address,
+                     fetch_entry_if_id[p].instruction, fetch_entry_if_id[p].hart_id,
+                     int'(fetch_entry_if_id[p].branch_predict.cf),
+                     fetch_entry_if_id[p].branch_predict.predict_address);
+        // ---- ID -> issue
+        for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++)
+          if (issue_entry_valid_id_issue[p] && issue_instr_issue_id[p])
+            $display("[win] c=%0d h=%0d ISS port=%0d pc=%h hart=%0d fu=%0d op=%0d iptr=%0d",
+                     win_cycle, win_ghart, p, issue_entry_id_issue[p].pc,
+                     issue_entry_id_issue[p].hart_id, int'(issue_entry_id_issue[p].fu),
+                     int'(issue_entry_id_issue[p].op),
+                     issue_stage_i.i_scoreboard.issue_pointer_q);
+        // ---- commit side: every retire / drop / replay-refetch, and every
+        //      memory-order violation the LSQ reports (the suspected path for
+        //      defect 1: a wrong-path load cancelled by the mispredict that
+        //      also carries the mem-order `replay` flag is honoured at commit
+        //      as a refetch of its own -- wrong-path -- PC).
+        for (int unsigned p = 0; p < CVA6Cfg.NrCommitPorts; p++)
+          if (commit_ack[p])
+            $display("[win] c=%0d h=%0d CMT port=%0d pc=%h tid=%0d hart=%0d fu=%0d drop=%0d replay=%0d flush_commit=%0d mem_replay_pc=%0d spc=%0d",
+                     win_cycle, win_ghart, p, commit_instr_id_commit[p].pc,
+                     commit_instr_id_commit[p].trans_id, commit_instr_id_commit[p].hart_id,
+                     int'(commit_instr_id_commit[p].fu), commit_drop_id_commit[p],
+                     commit_replay_id_commit[p], flush_commit, mem_replay_pc_ctrl_pcgen,
+                     set_pc_ctrl_pcgen);
+        if (issue_stage_i.i_scoreboard.mem_violation_i)
+          $display("[win] c=%0d h=%0d MEMVIOL tid=%0d pc=%h issued=%0d cancelled=%0d replay=%0d cmask=%0d bmiss=%0d sb iptr=%0d cptr=%0d",
+                   win_cycle, win_ghart, issue_stage_i.i_scoreboard.mem_violation_id_i,
+                   issue_stage_i.i_scoreboard.mem_q[issue_stage_i.i_scoreboard.mem_violation_id_i].sbe.pc,
+                   issue_stage_i.i_scoreboard.mem_q[issue_stage_i.i_scoreboard.mem_violation_id_i].issued,
+                   issue_stage_i.i_scoreboard.mem_q[issue_stage_i.i_scoreboard.mem_violation_id_i].cancelled,
+                   issue_stage_i.i_scoreboard.mem_q[issue_stage_i.i_scoreboard.mem_violation_id_i].replay,
+                   issue_stage_i.i_scoreboard.cancelled_mask_o[issue_stage_i.i_scoreboard.mem_violation_id_i],
+                   issue_stage_i.i_scoreboard.bmiss,
+                   issue_stage_i.i_scoreboard.issue_pointer_q,
+                   issue_stage_i.i_scoreboard.commit_pointer_q[0]);
+        if (resolved_branch.valid && resolved_branch.is_mispredict) begin
+          // the scoreboard window the cancel loop walks, with each entry's state
+          for (int unsigned s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
+            if (issue_stage_i.i_scoreboard.mem_q[s].issued)
+              $display("[win] c=%0d h=%0d BMISS-SB slot=%0d pc=%h fu=%0d issued=1 valid=%0d cancelled=%0d replay=%0d cmask=%0d hart=%0d",
+                       win_cycle, win_ghart, s, issue_stage_i.i_scoreboard.mem_q[s].sbe.pc,
+                       int'(issue_stage_i.i_scoreboard.mem_q[s].sbe.fu),
+                       issue_stage_i.i_scoreboard.mem_q[s].sbe.valid,
+                       issue_stage_i.i_scoreboard.mem_q[s].cancelled,
+                       issue_stage_i.i_scoreboard.mem_q[s].replay,
+                       issue_stage_i.i_scoreboard.cancelled_mask_o[s],
+                       issue_stage_i.i_scoreboard.mem_q[s].sbe.hart_id);
+        end
+      end
+    end
+    // ---- T20b: PC-bank writes (g6lc_smt_pc_bank), SMT targets only. One line
+    //      per cycle in which any bank write source is active, plus the
+    //      restore beat; the bank entries printed are the post-write values
+    //      (sampled on the next edge, i.e. "after" the listed write).
+    if (CVA6Cfg.NrHarts > 1) begin : gen_win_pcbank
+      always @(posedge clk_i) begin
+        if (win_on && ((|smt_retire_valid) || smt_arch_redirect_valid || smt_arch_redirect2_valid ||
+                       smt_switch || smt_pc_restore || smt_drain_forced)) begin
+          $display("[win] c=%0d h=%0d PCBANK retire v=%b h0=%0d pc0=%h h1=%0d pc1=%h | redir v=%0d h=%0d pc=%h (spc=%0d halt=%0d mem_replay=%0d eret=%0d ex=%0d pc_commit=%h) | redir2 v=%0d h=%0d pc=%h | switch=%0d out=%0d live_v=%0d live=%h alt_v=%0d alt=%h | restore=%0d npc_restore=%h act=%0d | bank0=%h bank1=%h",
+                   win_cycle, win_ghart, smt_retire_valid,
+                   smt_retire_hart[0], smt_retire_pc[0],
+                   smt_retire_hart[CVA6Cfg.NrCommitPorts > 1 ? 1 : 0],
+                   smt_retire_pc[CVA6Cfg.NrCommitPorts > 1 ? 1 : 0],
+                   smt_arch_redirect_valid, smt_arch_redirect_hart, smt_arch_redirect_pc,
+                   set_pc_ctrl_pcgen, halt_ctrl, mem_replay_pc_ctrl_pcgen, eret, ex_commit.valid,
+                   pc_commit,
+                   smt_arch_redirect2_valid, smt_arch_redirect2_hart, smt_arch_redirect2_pc,
+                   smt_switch, smt_outgoing_hart, smt_restart_valid, smt_restart_pc,
+                   smt_drain_forced, smt_drain_force_pc,
+                   smt_pc_restore, smt_npc_restore, smt_active_hart,
+                   i_smt_pc_bank.gen_banked.npc_bank_q[0], i_smt_pc_bank.gen_banked.npc_bank_q[1]);
+        end
+      end
+    end
+  end
+`endif
 
   initial begin
     assert (!(CVA6Cfg.SuperscalarEn && CVA6Cfg.EnableAccelerator))

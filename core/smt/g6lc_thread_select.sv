@@ -580,13 +580,26 @@ module g6lc_thread_select
     // only when a reported field changes, so the reader reconstructs intervals.
     // The cycle counter must match smt_flow_cycle in scoreboard.sv (increment
     // first, then print) or the reported cycles cannot be correlated.
+    // T20b: `+smt_sched_lo=N +smt_sched_hi=M` window the observer (default:
+    // the whole run, as before) and every line carries `inst=%m` so the
+    // per-core selectors of a multi-core harness can be told apart.
     localparam int unsigned SMT_SCHED_W = HID_W + 4 * NH + 4;
     bit smt_sched_trace;
     int unsigned smt_sched_cycle;
     int unsigned smt_sched_decide;
+    int unsigned smt_sched_lo, smt_sched_hi;
     bit smt_sched_seen;
+    logic smt_sched_on;
     logic [SMT_SCHED_W-1:0] smt_sched_shadow, smt_sched_now;
-    initial smt_sched_trace = $test$plusargs("smt_sched_trace");
+    initial begin
+      smt_sched_trace = $test$plusargs("smt_sched_trace");
+      smt_sched_lo = 0;
+      smt_sched_hi = 32'hFFFF_FFFF;
+      void'($value$plusargs("smt_sched_lo=%0d", smt_sched_lo));
+      void'($value$plusargs("smt_sched_hi=%0d", smt_sched_hi));
+    end
+    assign smt_sched_on = smt_sched_trace && smt_sched_cycle >= smt_sched_lo &&
+                          smt_sched_cycle <= smt_sched_hi;
     always @(posedge clk_i) begin
       if (!rst_ni) begin
         smt_sched_cycle  = 0;
@@ -597,31 +610,39 @@ module g6lc_thread_select
         smt_sched_cycle = smt_sched_cycle + 1;
         smt_sched_now = {active_q, hart_ready_i, hart_dmiss_i, hart_imiss_i, hart_block_i,
                          quiesce_o, hold_i, trap_hold_i, flush_i};
-        if (!smt_sched_seen || (smt_sched_now !== smt_sched_shadow)) begin
-          $display("[smt-sched] state cycle=%0d active=%0d ready=%b dmiss=%b imiss=%b block=%b quiesce=%b hold=%b trap=%b flush=%b",
+        if (smt_sched_on && (!smt_sched_seen || (smt_sched_now !== smt_sched_shadow))) begin
+          $display("[smt-sched] state cycle=%0d active=%0d ready=%b dmiss=%b imiss=%b block=%b quiesce=%b hold=%b trap=%b flush=%b drain_pend=%0d forced=%0d inst=%m",
                    smt_sched_cycle, active_q, hart_ready_i, hart_dmiss_i, hart_imiss_i,
-                   hart_block_i, quiesce_o, hold_i, trap_hold_i, flush_i);
+                   hart_block_i, quiesce_o, hold_i, trap_hold_i, flush_i, drain_pending_q,
+                   drain_forced_o);
           smt_sched_seen   = 1'b1;
           smt_sched_shadow = smt_sched_now;
         end
+        if (!smt_sched_on) smt_sched_seen = 1'b0;
         // A drain cannot be requested while one is pending, so decide and its
         // completion never coincide and the reader can pair them one to one.
         if (drain_pending_d && !drain_pending_q) begin
           smt_sched_decide = smt_sched_cycle;
-          $display("[smt-sched] decide cycle=%0d from=%0d to=%0d reason=%b",
-                   smt_sched_cycle, active_q, drain_peer_d, drain_reason_d);
+          if (smt_sched_on)
+            $display("[smt-sched] decide cycle=%0d from=%0d to=%0d reason=%b inst=%m",
+                     smt_sched_cycle, active_q, drain_peer_d, drain_reason_d);
         end else if (drain_pending_q && !drain_pending_d) begin
           // Cleared either by the real switch or because the target peer stopped
           // being ready; the second case is an abort, not a handoff.
-          if (do_switch)
-            $display("[smt-sched] switch cycle=%0d from=%0d to=%0d reason=%b waited=%0d",
-                     smt_sched_cycle, active_q, drain_peer_q, drain_reason_q,
-                     smt_sched_cycle - smt_sched_decide);
-          else
-            $display("[smt-sched] abort cycle=%0d from=%0d to=%0d reason=%b waited=%0d",
-                     smt_sched_cycle, active_q, drain_peer_q, drain_reason_q,
-                     smt_sched_cycle - smt_sched_decide);
+          if (smt_sched_on) begin
+            if (do_switch)
+              $display("[smt-sched] switch cycle=%0d from=%0d to=%0d reason=%b waited=%0d forced=%0d head_pc=%h inst=%m",
+                       smt_sched_cycle, active_q, drain_peer_q, drain_reason_q,
+                       smt_sched_cycle - smt_sched_decide, drain_forced_o, head_pc_i);
+            else
+              $display("[smt-sched] abort cycle=%0d from=%0d to=%0d reason=%b waited=%0d inst=%m",
+                       smt_sched_cycle, active_q, drain_peer_q, drain_reason_q,
+                       smt_sched_cycle - smt_sched_decide);
+          end
         end
+        if (smt_sched_on && drain_force_o)
+          $display("[smt-sched] force cycle=%0d active=%0d wfi=%0d abs=%0d head_pc=%h inst=%m",
+                   smt_sched_cycle, active_q, drain_force_wfi_o, drain_force_abs_o, head_pc_i);
       end
     end
 `endif
