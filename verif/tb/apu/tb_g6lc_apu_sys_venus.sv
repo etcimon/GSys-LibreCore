@@ -970,6 +970,28 @@ module tb_g6lc_apu_sys_venus;
                   check(got == expm[ep + 3],
                         $sformatf("G2i off=%0x got=%08x exp=%08x",
                                   a1 + 4 * i, got, expm[ep + 3]));
+                end else if (expm[ep + 4] == 2) begin
+                  // §12.3 C/5b: unorm-sampled float — |d| <= ~2/255,
+                  // same arm as tb_g6lc_apu_shwave xc==2
+                  real rg, ro, rd;
+                  rg = f32r(got);
+                  ro = f32r(expm[ep + 3]);
+                  rd = rg - ro;
+                  if (rd < 0.0) rd = -rd;
+                  check(rd <= 0.005,
+                        $sformatf("G2u off=%0x got=%08x exp=%08x d=%f",
+                                  a1 + 4 * i, got, expm[ep + 3], rd));
+                end else if (expm[ep + 4] == 3) begin
+                  // packed unorm/sRGB byte lanes: +-1 code per byte
+                  int bad_b = 0;
+                  for (int bb = 0; bb < 4; bb++) begin
+                    int dg, do_;
+                    dg = got[bb*8 +: 8]; do_ = expm[ep + 3][bb*8 +: 8];
+                    if ((dg > do_ ? dg - do_ : do_ - dg) > 1) bad_b++;
+                  end
+                  check(bad_b == 0,
+                        $sformatf("G2p off=%0x got=%08x exp=%08x",
+                                  a1 + 4 * i, got, expm[ep + 3]));
                 end else begin
                   u = ulpd(got, expm[ep + 3]);
                   if (u == 1) ulp1++;
@@ -1011,6 +1033,21 @@ module tb_g6lc_apu_sys_venus;
       d = (a > b) ? a - b : b - a;
       return int'(d);
     end
+  endfunction
+
+  // fp32 bits -> real (Gate-2 'u' class; Verilator-safe manual unpack,
+  // same rule as tb_g6lc_apu_shwave)
+  function automatic real f32r(input logic [31:0] b);
+    int e;
+    real m;
+    e = b[30:23];
+    if (e == 0)
+      m = b[22:0] * (2.0 ** (-149));
+    else if (e == 255)
+      m = 0.0;
+    else
+      m = (1.0 + b[22:0] * (2.0 ** (-23))) * (2.0 ** (e - 127));
+    return b[31] ? -m : m;
   endfunction
 
   int unsigned g1_n = 0, g1_bad = 0, g2_n = 0;

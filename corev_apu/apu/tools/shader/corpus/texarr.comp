@@ -1,0 +1,11 @@
+#version 450
+// §12.3 C/5b — 2D-array layer selection: texelFetch on a
+// sampler2DArray with the layer taken from the lane index.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) uniform sampler2DArray tex;
+layout(set = 0, binding = 1) buffer Out { vec4 o[]; } ob;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    ob.o[i] = texelFetch(tex, ivec3(i & 1, i & 1, i & 3), 0);
+}

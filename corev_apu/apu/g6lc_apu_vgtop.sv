@@ -205,6 +205,12 @@ module g6lc_apu_vgtop
     apu_objpay_req_t vc_op_req;
     logic         vc_sm_req, vc_sm_gnt;
     apu_sh_sm_req_t vc_sm_req_pl;
+    // §7b/5a-ii: the shared ShaderCore SM completion back to whichever
+    // port was granted (vnpump drives it; vgctl consumes it)
+    logic         vp_sm_cpl;
+    apu_sh_sm_cpl_t vp_sm_cpl_pl;
+    logic         vc_ctx_kill_v;
+    logic [7:0]   vc_ctx_kill_id;
 
     g6lc_apu_vgctl #(.Enable(1'b1)) i_ctl (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
@@ -237,6 +243,7 @@ module g6lc_apu_vgtop
       .sm_req_o(vc_sm_req), .sm_req_pl_o(vc_sm_req_pl),
       .sm_gnt_i(vc_sm_gnt),
       .sm_cpl_i(vp_sm_cpl), .sm_cpl_pl_i(vp_sm_cpl_pl),
+      .ctx_kill_valid_o(vc_ctx_kill_v), .ctx_kill_id_o(vc_ctx_kill_id),
       .busy_o(vc_busy), .done_o(vc_done), .used_len_o(vc_used_len),
       .fence_done_o(fence_pulse_o), .fence_id_o(fence_id_o),
       .fence_ring_o(fence_ring_o));
@@ -257,8 +264,6 @@ module g6lc_apu_vgtop
     // §7b/5a-ii: vnfront's ShaderCore + vgports (inside the pump)
     logic        vp_sm_req;
     apu_sh_sm_req_t vp_sm_req_pl;
-    logic        vp_sm_cpl;
-    apu_sh_sm_cpl_t vp_sm_cpl_pl;
     logic        vp_sh_wr_en;
     logic [2:0]  vp_sh_wr_slot;
     logic [15:0] vp_sh_wr_addr;
@@ -315,6 +320,7 @@ module g6lc_apu_vgtop
       .ex_submit_o(vp_ex_submit),
       .ex_done_seq_i(ex_done_seq), .ex_fence_signaled_i(ex_fence_sig),
       .ex_fence_lost_i(ex_fence_lost), .ex_fence_clr_o(ex_fence_clr),
+      .ctx_kill_valid_i(vc_ctx_kill_v), .ctx_kill_id_i(vc_ctx_kill_id),
             .busy_o(vp_busy),
       .ring_active_o(ring_active_o), .ring_status_o(ring_status_o),
       .ring_head_o(ring_head_o), .ring_extra_w_o(ring_extra_w_o));
@@ -337,13 +343,21 @@ module g6lc_apu_vgtop
                        32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT) ||
                        work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_DISPATCH_INDIRECT_EXT);
-    // §12.3 C/5a: Xfer-class records go to the internal DMA engine
+    // §12.3 C/5a+5b: Xfer-class records go to the internal DMA engine
     wire         work_is_xfer = work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
                        work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT) ||
                        work_o.ctype ==
-                       32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT);
+                       32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT) ||
+                       work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT) ||
+                       work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT) ||
+                       work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) ||
+                       work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT);
     logic        xf_done, xf_work_rdy;
     apu_sh_done_t xf_done_pl;
     apu_xfer_desc_t ex_xfer;

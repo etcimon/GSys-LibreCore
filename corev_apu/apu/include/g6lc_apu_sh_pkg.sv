@@ -48,6 +48,11 @@ package g6lc_apu_sh_pkg;
   localparam logic [3:0] APU_SH_TK_STRUCT = 4'd9;
   localparam logic [3:0] APU_SH_TK_PTR    = 4'd10;
   localparam logic [3:0] APU_SH_TK_FUNC   = 4'd11;
+  // §12.3 C/5b: image-family types — IMG cols[1:0] = sampled (1
+  // sampled / 2 storage), comps[0] = arrayed, sign = depth
+  localparam logic [3:0] APU_SH_TK_IMG    = 4'd12;
+  localparam logic [3:0] APU_SH_TK_SAMP   = 4'd13;
+  localparam logic [3:0] APU_SH_TK_SIMG   = 4'd14;
 
   // ---- storage classes ----------------------------------------------
   localparam logic [3:0] APU_SH_SC_UNIFORMCONST = 4'd0;
@@ -96,17 +101,30 @@ package g6lc_apu_sh_pkg;
   localparam int APU_SH_PTR_TAG = 1;
   localparam int APU_SH_PTR_DIDX = 2;
 
-  // ---- §12.3 F5: memory-resident descriptors --------------------------
+  // ---- §12.3 F5+C/5b: memory-resident descriptors ---------------------
   // One descriptor record = APU_DESC_BYTES (32) aperture bytes at
   //   set_base[s] + boff.off32*32 + array_index*32:
-  //   +0   base[31:0]    aperture byte offset of the resource
-  //   +4   size[31:0]    byte extent
-  //   +8   kind[7:0]     VkDescriptorType (6/7 buffer, 8/9 dynamic)
+  //   +0   base[31:0]    aperture byte offset of the resource (images:
+  //                      view's first subresource = mem base + bind
+  //                      offset + off(baseLayer, baseMip))
+  //   +4   size[31:0]    byte extent (images: bytes the view may touch)
+  //   +8   kind[7:0]     VkDescriptorType (0 sampler, 1 combined,
+  //                      2 sampled image, 3 storage image, 6/7 buffer,
+  //                      8/9 dynamic)
   //   +9   flags[7:0]    bit0 = valid
-  //   +10  rsvd[15:0]
-  //   +12  rsvd[31:0]
-  //   +16..+31 reserved zero — image/sampler halves land here (F6),
-  //            fixed now so the record format never changes.
+  //   +10  w[15:0]       view mip-0 width  (image records)
+  //   +12  h[15:0]       view mip-0 height
+  //   +14  fmt[7:0]      APU_IMG_FMT_* device format id
+  //   +15  {rsvd2, dim[1:0], mips[3:0]}  dim 0=2D 1=2D-array
+  //   +16  layers[15:0]
+  //   +18  swizzle[11:0] 4x3b {a,b,g,r} VkComponentSwizzle; 0 = identity
+  //   +20  sampler w0: {rsvd11, {cmpEn,cmpOp3}, border3,
+  //                    addrW/V/U 3x3b, mipmap1, minF2, magF2}
+  //   +24  sampler w1: {rsvd7, bias9{s4.4}, maxLod8 u4.4, minLod8 u4.4}
+  //   +28..+31 reserved zero
+  // A sampler record (kind 0) fills only +20..+27; a sampled/storage
+  // image record (kind 2/3) fills +0..+19; combined (1) fills both.
+  // OpSampledImage merges a kind-2 and a kind-0 record at the LSU.
   // An all-zero (null/invalid) record bounds-checks as a zero-size
   // buffer: loads read 0, stores drop, robust_q++.
   // Scaling levers toward UE SM5 / CS2-class bindless:

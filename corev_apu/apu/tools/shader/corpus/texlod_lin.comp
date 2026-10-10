@@ -1,0 +1,14 @@
+#version 450
+// §12.3 C/5b — OpImageSampleExplicitLod, linear min/mag, fractional
+// coordinates near the edges (wrap mode supplied by the descriptor:
+// the corpus varies it per case via the record meta).
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D tex;
+layout(set = 0, binding = 1) buffer Out { vec4 o[]; } ob;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    float u = float(i) * 0.19 - 0.07;    // dips below 0 and past 1
+    float v = 0.13 + float(i & 3) * 0.37;
+    ob.o[i] = textureLod(tex, vec2(u, v), 0.0);
+}

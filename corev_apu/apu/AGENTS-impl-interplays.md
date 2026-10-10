@@ -3736,7 +3736,7 @@ mandatory MatrixEn, custom descriptors, UIO daemon or game plugin. HDMI remains
 a separate consumer of a completed common surface. `ApuOff`, all graphics gates
 and `FeatureVirgl` legality are unchanged by this source-review increment.
 
-## 16. Engine arborescence (live, 3c-ii + 5a xfer + F5 descriptors + 3d-c roll-up)
+## 16. Engine arborescence (live, 3c-ii + 5a xfer + F5 descriptors + 3d-c roll-up + 5b images)
 
 ```text
 ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus]
@@ -3788,7 +3788,36 @@ cannot fit an 8 MiB private arena even empty).  vnpump paces ring
 tail polls with an exponential gap (1..256, doubling while a live
 non-idle ring round finds no new tail; reset on work/NotifyRing/
 doorbell) — 16 aperture reads per 4096 idle-but-live cycles vs 580
-unpaced.
+unpaced.  Context-kill retirement (5b-r2): vgctl pulses a registered
+ctx_kill_valid/id when CTX_DESTROY issues RESET_CTX; vgtop routes it
+to vnpump, which drops every live ring of that ctx with no status
+write and suppresses head/status publication for its in-flight st_q[]
+streams (ring_overlap stays as defence in depth) — a dead ring can no
+longer write FATAL/idle status into a later blob at the same window.
+Texture path (5b): an image/sampler descriptor fills the
+reserved record half — {view base = mem+bind+off(baseLayer,baseMip),
+view size, w/h, fmt id, mips/dim/layers, swizzle, two sampler words}
+— and `OpSampledImage` merges an image record with a sampler record;
+shwave's `W_TX*` subroutine resolves the record through the same LSU
+fetch, walks mip offsets (≤13-step, 1-entry {record,mip} cache),
+fetches ≤8 texels through a dispatch-scoped texel cache
+(`TexCacheLines`=16 x 64 B, tc_sram), filters UNORM/SRGB in 8-bit-
+fraction fixed point (sRGB via the generated `g6lc_apu_srgb_pkg` LUT)
+and float formats on the FMA units, and answers
+QuerySize{,Lod}/QueryLevels straight from the record metadata;
+Xfer loops image regions row-wise over the checked DMA pair and
+accepts pipeline-barrier layout transitions as no-ops (one device
+layout).  5b-r2 Xfer corrections: CLEAR conversion is selected by
+APU_VN_IMG_ATTR (uint/float-32 raw uint32 union words; half via
+f_f32_f16; SRGB via a sequential 8-step f_srgb_enc search; else
+UNORM8), and all image/region addressing is computed by ONE
+iterative 32x32->64 multiplier (MulRadixBits=8, 4 cycles/product,
+address-gen product list) as 32-bit aperture-relative addresses —
+any >32-bit product/sum or a nonzero bufferOffset upper word is a
+validation FAULT before any write (replaces the 64-bit need guard
+and closes the u32 wrap); the advertised queue is
+COMPUTE|TRANSFER-only with raster limits zeroed and resource
+counts bounded by the shared ObjTab (vn_device_profile.toml).
 ```
 
 ### What §16 still waits on (§12.3 phases B–D)
@@ -3796,7 +3825,7 @@ unpaced.
 | Waiting on | Phase | Exit |
 |---|---|---|
 | Full-SoC Linux (3d-a bare-metal probe and 3d-b stock-stack RTL-in-the-loop landed: §11 rows 3d-a/3d-b, `architecture/uncore/apu-venus-command-trace.md`) | B | stock Ubuntu on the Variane testharness itself (R3b program): same `vulkaninfo`/dispatch under real caches and the non-coherent DMA contract (`zicbom`/`svpbmt`, no `dma-coherent`) |
-| Sampler / raster (Xfer landed: `g6lc_apu_xfer`, §11 row 5a) | C | images/formats/sampler with memory-resident descriptors (F5), `vkCmdCopyImage`/blits, TBDR raster + ROP into `tc_sram` tiles; G0/A5 via Zink |
+| ~~Sampler~~ / raster (Xfer landed §11 5a; compute sampler+images landed §11 5b — `W_TX*` texture path in the tree above) | C | blits, implicit-lod/derivative ops (need fragment derivatives), TBDR raster + ROP into `tc_sram` tiles; G0/A5 via Zink |
 | ~~Memory-resident descriptors~~ (F5 **landed** — §11 row F5: records in aperture memory, LSU dynamic-index fetch + 8-entry cache; the descriptor-memory path is in the tree above) | C | images/sampler arrays on the reserved record half (`vkCmdCopyImage`/blits), `tc_sram` descriptor cache beyond 8 entries |
 | `shwave` 1 IPC + `ShaderCores` | D | per-wave throughput 1 IPC; multi-core dispatch via the cluster pattern; `DramChannels` by profile |
 | virtio-pci endpoint function (F4) | D | five virtio-pci capabilities + shared-memory capability over a BAR into the aperture |

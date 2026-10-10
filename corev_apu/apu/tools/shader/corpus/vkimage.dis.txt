@@ -1,0 +1,109 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Khronos Glslang Reference Front End; 11
+; Bound: 76
+; Schema: 0
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gl_GlobalInvocationID
+               OpExecutionMode %main LocalSize 8 1 1
+               OpSource GLSL 450
+               OpName %main "main"
+               OpName %i "i"
+               OpName %gl_GlobalInvocationID "gl_GlobalInvocationID"
+               OpName %u "u"
+               OpName %v "v"
+               OpName %dst "dst"
+               OpName %texEdge "texEdge"
+               OpName %texRep "texRep"
+               OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
+               OpDecorate %dst NonReadable
+               OpDecorate %dst Binding 2
+               OpDecorate %dst DescriptorSet 0
+               OpDecorate %texEdge Binding 0
+               OpDecorate %texEdge DescriptorSet 0
+               OpDecorate %texRep Binding 1
+               OpDecorate %texRep DescriptorSet 0
+               OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+%_ptr_Function_int = OpTypePointer Function %int
+       %uint = OpTypeInt 32 0
+     %v3uint = OpTypeVector %uint 3
+%_ptr_Input_v3uint = OpTypePointer Input %v3uint
+%gl_GlobalInvocationID = OpVariable %_ptr_Input_v3uint Input
+     %uint_0 = OpConstant %uint 0
+%_ptr_Input_uint = OpTypePointer Input %uint
+      %float = OpTypeFloat 32
+%_ptr_Function_float = OpTypePointer Function %float
+%float_0_189999998 = OpConstant %float 0.189999998
+%float_0_0700000003 = OpConstant %float 0.0700000003
+%float_0_129999995 = OpConstant %float 0.129999995
+      %int_3 = OpConstant %int 3
+%float_0_370000005 = OpConstant %float 0.370000005
+         %36 = OpTypeImage %float 2D 0 0 0 2 Rgba32f
+%_ptr_UniformConstant_36 = OpTypePointer UniformConstant %36
+        %dst = OpVariable %_ptr_UniformConstant_36 UniformConstant
+      %int_2 = OpConstant %int 2
+      %v2int = OpTypeVector %int 2
+         %47 = OpTypeImage %float 2D 0 0 0 1 Unknown
+         %48 = OpTypeSampledImage %47
+%_ptr_UniformConstant_48 = OpTypePointer UniformConstant %48
+    %texEdge = OpVariable %_ptr_UniformConstant_48 UniformConstant
+    %v2float = OpTypeVector %float 2
+    %float_0 = OpConstant %float 0
+    %v4float = OpTypeVector %float 4
+      %int_4 = OpConstant %int 4
+     %texRep = OpVariable %_ptr_UniformConstant_48 UniformConstant
+     %uint_8 = OpConstant %uint 8
+     %uint_1 = OpConstant %uint 1
+%gl_WorkGroupSize = OpConstantComposite %v3uint %uint_8 %uint_1 %uint_1
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+          %i = OpVariable %_ptr_Function_int Function
+          %u = OpVariable %_ptr_Function_float Function
+          %v = OpVariable %_ptr_Function_float Function
+         %15 = OpAccessChain %_ptr_Input_uint %gl_GlobalInvocationID %uint_0
+         %16 = OpLoad %uint %15
+         %17 = OpBitcast %int %16
+               OpStore %i %17
+         %21 = OpLoad %int %i
+         %22 = OpConvertSToF %float %21
+         %24 = OpFMul %float %22 %float_0_189999998
+         %26 = OpFSub %float %24 %float_0_0700000003
+               OpStore %u %26
+         %29 = OpLoad %int %i
+         %31 = OpBitwiseAnd %int %29 %int_3
+         %32 = OpConvertSToF %float %31
+         %34 = OpFMul %float %32 %float_0_370000005
+         %35 = OpFAdd %float %float_0_129999995 %34
+               OpStore %v %35
+         %39 = OpLoad %36 %dst
+         %40 = OpLoad %int %i
+         %41 = OpBitwiseAnd %int %40 %int_3
+         %42 = OpLoad %int %i
+         %44 = OpShiftRightArithmetic %int %42 %int_2
+         %46 = OpCompositeConstruct %v2int %41 %44
+         %51 = OpLoad %48 %texEdge
+         %52 = OpLoad %float %u
+         %53 = OpLoad %float %v
+         %55 = OpCompositeConstruct %v2float %52 %53
+         %58 = OpImageSampleExplicitLod %v4float %51 %55 Lod %float_0
+               OpImageWrite %39 %46 %58
+         %59 = OpLoad %36 %dst
+         %61 = OpLoad %int %i
+         %62 = OpBitwiseAnd %int %61 %int_3
+         %63 = OpIAdd %int %int_4 %62
+         %64 = OpLoad %int %i
+         %65 = OpShiftRightArithmetic %int %64 %int_2
+         %66 = OpCompositeConstruct %v2int %63 %65
+         %68 = OpLoad %48 %texRep
+         %69 = OpLoad %float %u
+         %70 = OpLoad %float %v
+         %71 = OpCompositeConstruct %v2float %69 %70
+         %72 = OpImageSampleExplicitLod %v4float %68 %71 Lod %float_0
+               OpImageWrite %59 %66 %72
+               OpReturn
+               OpFunctionEnd

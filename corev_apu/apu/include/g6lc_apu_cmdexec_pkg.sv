@@ -61,11 +61,31 @@ package g6lc_apu_cmdexec_pkg;
   // are the operand's effective extent (min(buffer.size, mem.size-off)).
   // The U64 operands (copy regions, dstOffset/size, update data) ride
   // the cmdrec payload arena; the engine replays them via PAYREAD.
-  typedef enum logic [1:0] {
-    APU_XFER_OP_COPY   = 2'd0,
-    APU_XFER_OP_FILL   = 2'd1,
-    APU_XFER_OP_UPDATE = 2'd2
+  typedef enum logic [2:0] {
+    APU_XFER_OP_COPY   = 3'd0,
+    APU_XFER_OP_FILL   = 3'd1,
+    APU_XFER_OP_UPDATE = 3'd2,
+    // §12.3 C/5b: image-class records — BufferToImage, ImageToBuffer,
+    // CopyImage (two image operands), ClearColorImage
+    APU_XFER_OP_B2I    = 3'd3,
+    APU_XFER_OP_I2B    = 3'd4,
+    APU_XFER_OP_I2I    = 3'd5,
+    APU_XFER_OP_CLEARI = 3'd6
   } apu_xfer_op_e;
+
+  // §12.3 C/5b: resolved image operand — the image object's layout
+  // summary (g6lc_apu_vnfront packs aux={usage,layers,mips,fmt,h,w} and
+  // state=layer_bytes>>6 at vkCreateImage) plus its bound aperture
+  // base/extent.  All image addressing is aperture-relative bytes.
+  typedef struct packed {
+    logic [31:0] base;         // aperture byte offset of bound base
+    logic [31:0] size;         // bound extent (bytes)
+    logic [15:0] w, h;         // mip-0 extent
+    logic [7:0]  fmt;          // APU_IMG_FMT_* device format id
+    logic [4:0]  mips;         // mipLevels
+    logic [9:0]  layers;       // arrayLayers
+    logic [31:0] layer_bytes;  // Σ_m pitch_m*h_m per layer
+  } apu_xfer_img_t;
 
   typedef struct packed {
     apu_xfer_op_e    op;
@@ -76,6 +96,8 @@ package g6lc_apu_cmdexec_pkg;
     logic [31:0]     src_size;  // COPY: src operand extent (bytes)
     logic [31:0]     dst_base;  // dst buffer aperture offset
     logic [31:0]     dst_size;  // dst operand extent (bytes)
+    apu_xfer_img_t   img0;      // B2I dst / I2B+I2I src / CLEAR dst
+    apu_xfer_img_t   img1;      // I2I dst
   } apu_xfer_desc_t;
 
   // per-fence completion status for the WAIT class

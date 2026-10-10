@@ -1,0 +1,14 @@
+#version 450
+// §12.3 C/5b — sRGB sample (hardware LUT decode) + sRGB store
+// (binary-search encode) on rgba8_srgb images.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D tex;   // R8G8B8A8_SRGB
+layout(set = 0, binding = 1, rgba8) uniform writeonly image2D dst;
+layout(set = 0, binding = 2) buffer Out { vec4 o[]; } ob;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    vec4 c = texelFetch(tex, ivec2(i & 3, (i >> 2) & 1), 0);
+    imageStore(dst, ivec2(i & 3, (i >> 2) & 1), c * 0.5);
+    ob.o[i] = c;
+}

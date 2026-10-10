@@ -216,10 +216,15 @@ module tb_g6lc_apu_vgtop;
       if (xaw_s && xw_s && !xb_vld) begin
         // dma_write strb marks absolute lanes of aw.addr & ~7
         for (int b = 0; b < 8; b++)
-          if (xww.strb[b])
-            i_mem.apm[apix(32'(((xwaw.addr & ~64'h7) + 64'(b) - XAB) >> 2))]
-                     [8*(((xwaw.addr & ~64'h7) + 64'(b)) & 64'h3) +: 8]
-              <= xww.data[8*b +: 8];
+          if (xww.strb[b]) begin
+            logic [63:0] woff;
+            woff = (xwaw.addr & ~64'h7) + 64'(b) - XAB;
+            if (!i_mem.guard_ok(woff))
+              $fatal(1, "APGUARD: xfer write outside allow-list off=%0x d=%02x",
+                     woff, xww.data[8*b +: 8]);
+            i_mem.apm[apix(32'(woff >> 2))][8*(woff & 64'h3) +: 8] <=
+              xww.data[8*b +: 8];
+          end
         xb_vld <= 1;
       end
       if (xb_vld && xf_areq.b_ready) begin
@@ -347,6 +352,21 @@ module tb_g6lc_apu_vgtop;
       d = (a > b) ? a - b : b - a;
       return int'(d);
     end
+  endfunction
+
+  // fp32 bits -> real (Gate-2 'u' class; Verilator-safe manual unpack,
+  // same rule as tb_g6lc_apu_shwave)
+  function automatic real f32r(input logic [31:0] b);
+    int e;
+    real m;
+    e = b[30:23];
+    if (e == 0)
+      m = b[22:0] * (2.0 ** (-149));
+    else if (e == 255)
+      m = 0.0;
+    else
+      m = (1.0 + b[22:0] * (2.0 ** (-23))) * (2.0 ** (e - 127));
+    return b[31] ? -m : m;
   endfunction
 
   int unsigned g1_n = 0, g1_bad = 0, g2_n = 0;
@@ -637,11 +657,31 @@ module tb_g6lc_apu_vgtop;
                       $sformatf("G1 off=%0x got=%08x exp=%08x",
                                 a1 + 4 * i, got, expm[ep + 2]));
                 // Gate 2: oracle compare — cls 0 int/bool exact,
-                // cls 1 float <= 2 ULP
+                // cls 1 float <= 2 ULP, cls 2 unorm-sampled |d|<=0.005,
+                // cls 3 packed byte +-1 (same arms as tb_g6lc_apu_shwave)
                 g2_n++;
                 if (expm[ep + 4] == 0) begin
                   check(got == expm[ep + 3],
                         $sformatf("G2i off=%0x got=%08x exp=%08x",
+                                  a1 + 4 * i, got, expm[ep + 3]));
+                end else if (expm[ep + 4] == 2) begin
+                  real rg, ro, rd;
+                  rg = f32r(got);
+                  ro = f32r(expm[ep + 3]);
+                  rd = rg - ro;
+                  if (rd < 0.0) rd = -rd;
+                  check(rd <= 0.005,
+                        $sformatf("G2u off=%0x got=%08x exp=%08x d=%f",
+                                  a1 + 4 * i, got, expm[ep + 3], rd));
+                end else if (expm[ep + 4] == 3) begin
+                  int bad_b = 0;
+                  for (int bb = 0; bb < 4; bb++) begin
+                    int dg, do_;
+                    dg = got[bb*8 +: 8]; do_ = expm[ep + 3][bb*8 +: 8];
+                    if ((dg > do_ ? dg - do_ : do_ - dg) > 1) bad_b++;
+                  end
+                  check(bad_b == 0,
+                        $sformatf("G2p off=%0x got=%08x exp=%08x",
                                   a1 + 4 * i, got, expm[ep + 3]));
                 end else begin
                   u = ulpd(got, expm[ep + 3]);
@@ -662,6 +702,22 @@ module tb_g6lc_apu_vgtop;
         7: begin // TP_DELAY
           int unsigned n = ntap();
           repeat (n) @(posedge clk);
+        end
+        8: begin // TP_APGUARD [n][per-range: lo lo_hi sz]*n
+          i_mem.guard_on = 1'b1;
+          i_mem.guard_n  = ntap();
+          check(i_mem.guard_n <= i_mem.GUARD_MAX,
+                "APGUARD range count");
+          for (int i = 0; i < i_mem.guard_n; i++) begin
+            logic [63:0] lo;
+            logic [63:0] sz;
+            lo  = 64'(ntap());             // lo32
+            lo |= (64'(ntap()) << 32);     // hi32
+            sz  = 64'(ntap());
+            i_mem.guard_lo[i] = lo;
+            i_mem.guard_hi[i] = lo + sz;
+          end
+          $display("[apguard] armed with %0d ranges", i_mem.guard_n);
         end
         default: $fatal(1, "unknown tape op %0d", op);
       endcase

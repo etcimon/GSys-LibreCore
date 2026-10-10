@@ -40,6 +40,13 @@ module tb_g6lc_apu_vgctl;
   logic            f_dn;
   logic [63:0]     f_id;
   logic [7:0]      f_ring;
+  logic            ck_v;
+  logic [7:0]      ck_id;
+  int unsigned     ck_count = 0;
+  logic [7:0]      ck_seen = '0;
+  always @(posedge clk) if (ck_v) begin
+    ck_count++; ck_seen <= ck_id;
+  end
 
   g6lc_apu_vgctl #(.Enable(1'b1)) i_dut (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
@@ -63,6 +70,7 @@ module tb_g6lc_apu_vgctl;
     .xs_desc_o(xs_d), .xs_ndesc_o(xs_n), .xs_off_o(xs_off),
     .xs_bytes_o(xs_bytes), .xs_ctx_o(xs_ctx),
     .xs_done_i(xs_done), .xs_fault_i(xs_fault),
+    .ctx_kill_valid_o(ck_v), .ctx_kill_id_o(ck_id),
     .busy_o(busy), .done_o(dn), .used_len_o(used_len),
     .fence_done_o(f_dn), .fence_id_o(f_id), .fence_ring_o(f_ring));
 
@@ -318,6 +326,8 @@ module tb_g6lc_apu_vgctl;
     wr(6, 0); wr(7, 0);
     run_chain(8, 24);
     exp_resp(APU_VG_RESP_NODATA);
+    // §12.3 5b-r2: the kill pulse for vnpump fires on CTX_DESTROY
+    check(ck_count == 1 && ck_seen == 8'd4, "ctx kill pulse ctx=4");
 
     if (errors == 0)
       $display("PASS tb_g6lc_apu_vgctl cases=%0d checks=%0d cycles=%0d",

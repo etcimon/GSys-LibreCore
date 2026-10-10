@@ -285,8 +285,9 @@ def main():
                 "  [ -n \"$d\" ] && mount -o ro $d /mnt/cidata 2>/dev/null && break; "
                 "done; "
                 "cp /mnt/cidata/vkcompute.c /mnt/cidata/vkdescarr.c "
-                "/mnt/cidata/vkmem.c "
+                "/mnt/cidata/vkmem.c /mnt/cidata/vkimage.c "
                 "/mnt/cidata/bufcopy.spv /mnt/cidata/descarr.spv "
+                "/mnt/cidata/vkimage.spv "
                 "/mnt/cidata/expected.json /root/ && ls -la /root/",
                 timeout=60)
 
@@ -318,6 +319,13 @@ def main():
             rc = con.run("cd /root && gcc -O2 -o vkmem vkmem.c -lvulkan "
                          "&& ./vkmem", timeout=1200)
             print(f"[drive] vkmem rc={rc}", flush=True)
+            fail |= (rc != 0)
+            # §12.3 C/5b: images + samplers + Xfer image copies on the
+            # stock path (textureLod bilinear edge/repeat into an
+            # rgba32f storage image, CopyImageToBuffer readback).
+            rc = con.run("cd /root && gcc -O2 -o vkimage vkimage.c -lvulkan "
+                         "-lm && ./vkimage vkimage.spv", timeout=1200)
+            print(f"[drive] vkimage rc={rc}", flush=True)
             fail |= (rc != 0)
 
         # post-mortem: dump the whole aperture window from QEMU RAM

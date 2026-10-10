@@ -1,0 +1,14 @@
+#version 450
+// §12.3 C/5b — imageLoad/imageStore on rgba32f storage images.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0, rgba32f) uniform readonly image2D src;
+layout(set = 0, binding = 1, rgba32f) uniform writeonly image2D dst;
+layout(set = 0, binding = 2) buffer Out { vec4 o[]; } ob;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    ivec2 p = ivec2(i & 3, (i >> 2) & 1);
+    vec4 v = imageLoad(src, p) * 2.0;
+    imageStore(dst, p, v);
+    ob.o[i] = v;
+}

@@ -154,6 +154,190 @@ module tb_g6lc_apu_shwave;
   logic [63:0] mem [0:MEMW-1];
   logic         dbg_dsc;  int dbg_dsc_n = 0;
   initial dbg_dsc = $test$plusargs("dbg_dsc");
+  // +dbg_flt: report the state that raised a dispatch fault
+  logic dbg_flt;
+  logic [7:0] flt_prev;
+  initial begin dbg_flt = $test$plusargs("dbg_flt"); flt_prev = '0; end
+  always_ff @(posedge clk) begin
+    if (dbg_flt && flt_prev != 8'hFF &&
+        dut.gen_on.i_wave.gen_on.done_code_q ==
+          APU_SH_DONE_FAULT) begin
+      $display("FLT cyc=%0d prev_st=%0d pc=%0d opc=%0d wc=%0d lane=%0d",
+               cyc, flt_prev,
+               dut.gen_on.i_wave.gen_on.pc_q[
+                 dut.gen_on.i_wave.gen_on.wave_q],
+               dut.gen_on.i_wave.gen_on.opc_q,
+               dut.gen_on.i_wave.gen_on.wc_q,
+               dut.gen_on.i_wave.gen_on.ls_lane_q);
+      flt_prev <= 8'hFF;
+    end else if (dut.gen_on.i_wave.gen_on.done_code_q !=
+                 APU_SH_DONE_FAULT)
+      flt_prev <= 8'(dut.gen_on.i_wave.gen_on.st_q);
+  end
+
+  // +dbg_tx: dump the texture-path datapath for one op
+  logic dbg_tx;
+  initial dbg_tx = $test$plusargs("dbg_tx");
+  always_ff @(posedge clk)
+    if (dbg_tx) begin
+      if (dut.gen_on.i_wave.gen_on.st_q == 8'd110)    // W_TX2
+        $display("TX1 cyc=%0d pc=%0d wv=%0d act=%x lane=%0d v1=%08x %08x %08x %08x iu=%0d iv=%0d",
+                 cyc,
+                 dut.gen_on.i_wave.gen_on.pc_q[
+                   dut.gen_on.i_wave.gen_on.wave_q],
+                 dut.gen_on.i_wave.gen_on.wave_q,
+                 dut.gen_on.i_wave.gen_on.cmask_q[
+                   dut.gen_on.i_wave.gen_on.wave_q],
+                 dut.gen_on.i_wave.gen_on.ls_lane_q,
+                 dut.gen_on.i_wave.gen_on.va_q[1][
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][0],
+                 dut.gen_on.i_wave.gen_on.va_q[1][
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][1],
+                 dut.gen_on.i_wave.gen_on.va_q[1][
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][2],
+                 dut.gen_on.i_wave.gen_on.va_q[1][
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][3],
+                 dut.gen_on.i_wave.gen_on.tx_iu_q,
+                 dut.gen_on.i_wave.gen_on.tx_iv_q);
+    end
+  always_ff @(posedge clk)
+    if (dbg_tx &&
+        (dut.gen_on.i_wave.gen_on.st_q == 8'd65 ||   // W_EOW
+         dut.gen_on.i_wave.gen_on.st_q == 8'd68 ||   // W_WG0
+         dut.gen_on.i_wave.gen_on.st_q == 8'd66 ||   // W_DONE
+         dut.gen_on.i_wave.gen_on.st_q == 8'd2))     // W_ENT1
+      $display("TE  cyc=%0d st=%0d gx=%0d gy=%0d gz=%0d wgx=%0d wgy=%0d wgz=%0d wfin=%x",
+               cyc, dut.gen_on.i_wave.gen_on.st_q,
+               dut.gen_on.i_wave.gen_on.gx_q,
+               dut.gen_on.i_wave.gen_on.gy_q,
+               dut.gen_on.i_wave.gen_on.gz_q,
+               dut.gen_on.i_wave.gen_on.wgx_q,
+               dut.gen_on.i_wave.gen_on.wgy_q,
+               dut.gen_on.i_wave.gen_on.wgz_q,
+               dut.gen_on.i_wave.gen_on.wfin_q);
+  always_ff @(posedge clk)
+    if (dbg_tx &&
+        dut.gen_on.i_wave.gen_on.st_q == 8'd6) begin  // W_F1
+      $display("TF  cyc=%0d pc=%04x opc=%0d wc=%0d wv=%0d", cyc,
+               dut.gen_on.i_wave.gen_on.pc_q[0],
+               dut.gen_on.i_wave.gen_on.prog_data_i[15:0],
+               dut.gen_on.i_wave.gen_on.prog_data_i[31:16],
+               dut.gen_on.i_wave.gen_on.wave_q);
+    end
+  always_ff @(posedge clk)
+    if (dbg_tx &&
+        dut.gen_on.i_wave.gen_on.st_q == 8'd63) begin // W_WB
+      $display("TWB cyc=%0d pc=%04x opc=%0d", cyc,
+               dut.gen_on.i_wave.gen_on.pc_q[0],
+               dut.gen_on.i_wave.gen_on.opc_q);
+      for (int l = 0; l < 8; l++)
+        $display("TWB cyc=%0d l%0d %08x %08x %08x %08x", cyc, l,
+                 dut.gen_on.i_wave.gen_on.wb_q[l][0],
+                 dut.gen_on.i_wave.gen_on.wb_q[l][1],
+                 dut.gen_on.i_wave.gen_on.wb_q[l][2],
+                 dut.gen_on.i_wave.gen_on.wb_q[l][3]);
+    end
+  always_ff @(posedge clk)
+    if (dbg_tx) begin
+      if (dut.gen_on.i_wave.gen_on.st_q == 8'd110)   // W_TX2
+        $display("TX2 cyc=%0d opc=%0d lane=%0d set=%0d bd=%0d idx=%0d rec=%08x tg=%08x",
+                 cyc,
+                 dut.gen_on.i_wave.gen_on.opc_q,
+                 dut.gen_on.i_wave.gen_on.ls_lane_q,
+                 dut.gen_on.i_wave.gen_on.dsc_set_q,
+                 dut.gen_on.i_wave.gen_on.dsc_bd_q,
+                 dut.gen_on.i_wave.gen_on.dsc_idx_q,
+                 dut.gen_on.i_wave.gen_on.tx_rec_q[31:0],
+                 dut.gen_on.i_wave.gen_on.va_q[0][
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][1]);
+      if (dut.gen_on.i_wave.gen_on.st_q == 8'd127)   // W_TXD
+        $display("TXD cyc=%0d pc=%0d wv=%0d act=%x lane=%0d gi=%0d gn=%0d td0=%x td1=%x brd=%0d ta=%x",
+                 cyc,
+                 dut.gen_on.i_wave.gen_on.pc_q[
+                   dut.gen_on.i_wave.gen_on.wave_q],
+                 dut.gen_on.i_wave.gen_on.wave_q,
+                 dut.gen_on.i_wave.gen_on.cmask_q[
+                   dut.gen_on.i_wave.gen_on.wave_q],
+                 dut.gen_on.i_wave.gen_on.ls_lane_q,
+                 dut.gen_on.i_wave.gen_on.tx_gi_q,
+                 dut.gen_on.i_wave.gen_on.tx_gn_q,
+                 dut.gen_on.i_wave.gen_on.tx_td_q[0],
+                 dut.gen_on.i_wave.gen_on.tx_td_q[1],
+                 dut.gen_on.i_wave.gen_on.tx_brd_q,
+                 dut.gen_on.i_wave.gen_on.tx_ta_q);
+      if (dut.gen_on.i_wave.gen_on.st_q == 8'd122)   // W_TXT0
+        $display("TXG cyc=%0d lane=%0d smp=%016x lin=%0d gn=%0d g0=%0d,%0d,b%0d,w%0d g1=%0d,%0d,b%0d,w%0d g2=%0d,%0d,b%0d,w%0d g3=%0d,%0d,b%0d,w%0d g4=%0d,%0d,b%0d,w%0d g5=%0d,%0d,b%0d,w%0d g6=%0d,%0d,b%0d,w%0d g7=%0d,%0d,b%0d,w%0d",
+                 cyc,
+                 dut.gen_on.i_wave.gen_on.ls_lane_q,
+                 dut.gen_on.i_wave.gen_on.tx_smp_q,
+                 dut.gen_on.i_wave.gen_on.tx_lin_q,
+                 dut.gen_on.i_wave.gen_on.tx_gn_q,
+                 dut.gen_on.i_wave.gen_on.tx_gu_q[0],
+                 dut.gen_on.i_wave.gen_on.tx_gv_q[0],
+                 dut.gen_on.i_wave.gen_on.tx_gb_q[0],
+                 dut.gen_on.i_wave.gen_on.tx_gw_q[0],
+                 dut.gen_on.i_wave.gen_on.tx_gu_q[1],
+                 dut.gen_on.i_wave.gen_on.tx_gv_q[1],
+                 dut.gen_on.i_wave.gen_on.tx_gb_q[1],
+                 dut.gen_on.i_wave.gen_on.tx_gw_q[1],
+                 dut.gen_on.i_wave.gen_on.tx_gu_q[2],
+                 dut.gen_on.i_wave.gen_on.tx_gv_q[2],
+                 dut.gen_on.i_wave.gen_on.tx_gb_q[2],
+                 dut.gen_on.i_wave.gen_on.tx_gw_q[2],
+                 dut.gen_on.i_wave.gen_on.tx_gu_q[3],
+                 dut.gen_on.i_wave.gen_on.tx_gv_q[3],
+                 dut.gen_on.i_wave.gen_on.tx_gb_q[3],
+                 dut.gen_on.i_wave.gen_on.tx_gw_q[3],
+                 dut.gen_on.i_wave.gen_on.tx_gu_q[4],
+                 dut.gen_on.i_wave.gen_on.tx_gv_q[4],
+                 dut.gen_on.i_wave.gen_on.tx_gb_q[4],
+                 dut.gen_on.i_wave.gen_on.tx_gw_q[4],
+                 dut.gen_on.i_wave.gen_on.tx_gu_q[5],
+                 dut.gen_on.i_wave.gen_on.tx_gv_q[5],
+                 dut.gen_on.i_wave.gen_on.tx_gb_q[5],
+                 dut.gen_on.i_wave.gen_on.tx_gw_q[5],
+                 dut.gen_on.i_wave.gen_on.tx_gu_q[6],
+                 dut.gen_on.i_wave.gen_on.tx_gv_q[6],
+                 dut.gen_on.i_wave.gen_on.tx_gb_q[6],
+                 dut.gen_on.i_wave.gen_on.tx_gw_q[6],
+                 dut.gen_on.i_wave.gen_on.tx_gu_q[7],
+                 dut.gen_on.i_wave.gen_on.tx_gv_q[7],
+                 dut.gen_on.i_wave.gen_on.tx_gb_q[7],
+                 dut.gen_on.i_wave.gen_on.tx_gw_q[7]);
+      if (dut.gen_on.i_wave.gen_on.st_q == 8'd132)   // W_TXR0
+        $display("TXR cyc=%0d pc=%0d lane=%0d acc=%x %x %x %x bad=%0d int=%0d flt=%0d",
+                 cyc,
+                 dut.gen_on.i_wave.gen_on.pc_q[
+                   dut.gen_on.i_wave.gen_on.wave_q],
+                 dut.gen_on.i_wave.gen_on.ls_lane_q,
+                 dut.gen_on.i_wave.gen_on.tx_acc_q[0],
+                 dut.gen_on.i_wave.gen_on.tx_acc_q[1],
+                 dut.gen_on.i_wave.gen_on.tx_acc_q[2],
+                 dut.gen_on.i_wave.gen_on.tx_acc_q[3],
+                 dut.gen_on.i_wave.gen_on.tx_bad_q,
+                 dut.gen_on.i_wave.gen_on.tx_isint_q,
+                 dut.gen_on.i_wave.gen_on.tx_isflt_q);
+      if (dut.gen_on.i_wave.gen_on.st_q == 8'd54)    // W_LS0
+        $display("LS0 cyc=%0d pc=%04x opc=%0d lane=%0d comp=%0d ptr=%08x tg=%08x v1=%08x",
+                 cyc,
+                 dut.gen_on.i_wave.gen_on.pc_q[0],
+                 dut.gen_on.i_wave.gen_on.opc_q,
+                 dut.gen_on.i_wave.gen_on.ls_lane_q,
+                 dut.gen_on.i_wave.gen_on.ls_comp_q,
+                 dut.gen_on.i_wave.gen_on.va_q[0][
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][0],
+                 dut.gen_on.i_wave.gen_on.va_q[0][
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][1],
+                 dut.gen_on.i_wave.gen_on.va_q[1][
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][
+                   dut.gen_on.i_wave.gen_on.ls_comp_q[1:0]]);
+      if (dut.gen_on.i_wave.gen_on.sc_req)
+        $display("SC  cyc=%0d we=%0d addr=%x wd=%x",
+                 cyc,
+                 dut.gen_on.i_wave.gen_on.sc_we,
+                 dut.gen_on.i_wave.gen_on.sc_addr,
+                 dut.gen_on.i_wave.gen_on.sc_wdata);
+    end
   always_ff @(posedge clk or negedge rst_n) begin
     logic [63:0] wm;
     if (!rst_n) begin
@@ -168,6 +352,9 @@ module tb_g6lc_apu_shwave;
         wm = mem[mem_addr[19:3]];
         for (int b = 0; b < 8; b++)
           if (mem_wstrb[b]) wm[8*b +: 8] = mem_wdata[8*b +: 8];
+        if (dbg_tx)
+          $display("MEMW cyc=%0d addr=%x wd=%x strb=%x", cyc, mem_addr,
+                   mem_wdata, mem_wstrb);
         mem[mem_addr[19:3]] <= wm;
         mem_rv <= 1'b1;
       end
@@ -217,6 +404,20 @@ module tb_g6lc_apu_shwave;
     end
   endfunction
 
+  // fp32 bits -> real (Gate-2 'u' class; Verilator-safe manual unpack)
+  function automatic real f32r(input logic [31:0] b);
+    int e;
+    real m;
+    e = b[30:23];
+    if (e == 0)
+      m = b[22:0] * (2.0 ** (-149));
+    else if (e == 255)
+      m = 0.0;                        // inf/NaN never in unorm data
+    else
+      m = (1.0 + b[22:0] * (2.0 ** (-23))) * (2.0 ** (e - 127));
+    return b[31] ? -m : m;
+  endfunction
+
   task automatic wr_words(input int base, input int n, input int slot);
     for (int i = 0; i < n; i++) begin
       @(negedge clk);
@@ -245,8 +446,11 @@ module tb_g6lc_apu_shwave;
   task automatic do_dispatch(input int gx, input int gy, input int gz,
                              input int slot, output apu_sh_done_t pl);
     longint t0;
-    // valid/ready: hold the record until work_ready_o accepts it
-    work = 1; work_ctype = 32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT);
+    // valid/ready: assert only after the engine is observed idle —
+    // holding work high across the ready-wait lets a second accept
+    // slip through on the posedge between the first observed ready
+    // and deassertion (the whole dispatch ran twice).
+    work_ctype = 32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT);
     work_imm = '0;
     work_imm[15:0]  = gx[15:0];
     work_imm[47:32] = gy[15:0];
@@ -254,6 +458,7 @@ module tb_g6lc_apu_shwave;
     disp_slot = slot[2:0];
     t0 = cyc;
     do @(negedge clk); while (!work_ready);
+    work = 1;
     @(negedge clk); work = 0;
     for (int g = 0; g < 20000000; g++) begin
       @(negedge clk);
@@ -274,13 +479,14 @@ module tb_g6lc_apu_shwave;
   // run one vector: commit, load buffers, dispatch, compare
   // 4b-opt: saved unopt output words for the unopt==opt bit-exact
   // check — uout[name idx][seed][word pos over out bindings].
-  logic [31:0] uout [30][4][2048];
+  logic [31:0] uout [38][4][2048];
   int          cur_nidx, cur_seed, ou_mism, ou_mism_t, ou_words;
   bit          is_opt;
 
   task automatic run_vec(input string nm, input string file);
     int n, nb, np, gx, gy, gz, flags;
     int base, ebase, mbase, cbase, now;
+    int boff_w [32];                 // bind entry -> .hex word off
     apu_sh_cpl_t cpl;
     apu_sh_done_t dpl;
     int mut, diffs;
@@ -319,7 +525,9 @@ module tb_g6lc_apu_shwave;
     // bindings → F5 aperture descriptor records + desc sideband.
     // Each entry is 5 words {set,binding,size,addr,aux} where
     // aux = {kind[23:16], dyn[8], elem_idx[7:0]}; elements of one
-    // (set,binding) share a boff row.
+    // (set,binding) share a boff row.  §12.3 C/5b: aux bit24 marks
+    // an image/sampler bind — 5 meta words follow carrying the
+    // record's bytes 10..27 ({h,w},{layers,mdim,fmt},swz,smp0,smp1).
     base = 8 + n;
     desc = '0;
     begin
@@ -331,6 +539,12 @@ module tb_g6lc_apu_shwave;
       int row_off [4][16];
       int row_dynb [4][16];
       bit row_dyn [4][16];
+      int q;
+      q = base;
+      for (int b = 0; b < nb; b++) begin
+        boff_w[b] = q;
+        q += wbuf[q + 4][24] ? 10 : 5;
+      end
       for (int i = 0; i < 4; i++) begin
         ecnt[i] = 0; dord[i] = 0; nrow[i] = 0;
         desc.set_base[i] = RECBASE + 32'(i) * 32'd1024;
@@ -342,23 +556,23 @@ module tb_g6lc_apu_shwave;
       // pass 1: assign each bind entry a row within its set
       for (int b = 0; b < nb; b++) begin
         logic [7:0] st, bd;
-        st = wbuf[base + b*5 + 0][7:0];
-        bd = wbuf[base + b*5 + 1][7:0];
+        st = wbuf[boff_w[b] + 0][7:0];
+        bd = wbuf[boff_w[b] + 1][7:0];
         row_of[b] = -1;
         for (int c = 0; c < b; c++)
-          if (wbuf[base + c*5 + 0][7:0] == st &&
-              wbuf[base + c*5 + 1][7:0] == bd)
+          if (wbuf[boff_w[c] + 0][7:0] == st &&
+              wbuf[boff_w[c] + 1][7:0] == bd)
             row_of[b] = row_of[c];
         if (row_of[b] < 0 && st < 4 && nrow[st] < 16) begin
           row_of[b] = nrow[st];
           row_off[st][nrow[st]] = ecnt[st];
-          row_dyn[st][nrow[st]] = wbuf[base + b*5 + 4][8];
+          row_dyn[st][nrow[st]] = wbuf[boff_w[b] + 4][8];
           row_dynb[st][nrow[st]] = dord[st];
           nrow[st]++;
         end
         if (row_of[b] >= 0) begin
           int r = row_of[b];
-          int i2 = wbuf[base + b*5 + 4][7:0];
+          int i2 = wbuf[boff_w[b] + 4][7:0];
           row_cnt[st][r] = (i2 + 1 > row_cnt[st][r])
                            ? i2 + 1 : row_cnt[st][r];
           ecnt[st] = row_off[st][r] + row_cnt[st][r] > ecnt[st]
@@ -375,12 +589,12 @@ module tb_g6lc_apu_shwave;
         logic [63:0] ad;
         int        i2, r;
         longint    ra;
-        st   = wbuf[base + b*5 + 0][7:0];
-        bd   = wbuf[base + b*5 + 1][7:0];
-        sz   = wbuf[base + b*5 + 2];
-        ad   = {32'h0, wbuf[base + b*5 + 3]};
-        i2   = wbuf[base + b*5 + 4][7:0];
-        kind = wbuf[base + b*5 + 4][23:16];
+        st   = wbuf[boff_w[b] + 0][7:0];
+        bd   = wbuf[boff_w[b] + 1][7:0];
+        sz   = wbuf[boff_w[b] + 2];
+        ad   = {32'h0, wbuf[boff_w[b] + 3]};
+        i2   = wbuf[boff_w[b] + 4][7:0];
+        kind = wbuf[boff_w[b] + 4][23:16];
         if (kind == 8'h00) kind = 8'h06;
         if (row_of[b] >= 0) begin
           r  = row_of[b];
@@ -392,11 +606,26 @@ module tb_g6lc_apu_shwave;
                 dynbase: 4'(row_dynb[st][r])};
           // record beat 0 {size,base}; beat 1 {kind, flags=1}
           mem[ra >> 3]        = {sz, ad[31:0]};
-          mem[(ra + 8) >> 3]  = {48'h0, 8'h01, kind};
+          if (wbuf[boff_w[b] + 4][24]) begin
+            // image record: meta words carry bytes 10..27
+            logic [31:0] hw, mlf, swz, s0, s1;
+            hw  = wbuf[boff_w[b] + 5];
+            mlf = wbuf[boff_w[b] + 6];
+            swz = wbuf[boff_w[b] + 7];
+            s0  = wbuf[boff_w[b] + 8];
+            s1  = wbuf[boff_w[b] + 9];
+            mem[(ra + 8) >> 3]  = {{mlf[15:0], hw[31:16]},
+                                   {hw[15:0], 8'h01, kind}};
+            mem[(ra + 16) >> 3] = {s0, {4'h0, swz[11:0],
+                                        mlf[31:16]}};
+            mem[(ra + 24) >> 3] = {32'h0, s1};
+          end else begin
+            mem[(ra + 8) >> 3]  = {48'h0, 8'h01, kind};
+          end
         end
       end
+      base = q;
     end
-    base += nb * 5;
     push_n = np[5:0];
     push = '0;
     for (int i = 0; i < np && i < 32; i++)
@@ -416,8 +645,8 @@ module tb_g6lc_apu_shwave;
     for (int b = 0; b < nb; b++) begin
       logic [31:0] sz;
       logic [63:0] ad;
-      sz = wbuf[8 + n + b*5 + 2];
-      ad = {32'h0, wbuf[8 + n + b*5 + 3]};
+      sz = wbuf[boff_w[b] + 2];
+      ad = {32'h0, wbuf[boff_w[b] + 3]};
       for (int w2 = 0; w2 < sz/4; w2++) begin
         if ((ad + w2*4) & 7)
           mem[(ad + w2*4) >> 3][63:32] = wbuf[base + w2];
@@ -483,6 +712,37 @@ module tb_g6lc_apu_shwave;
                   $display(
                     "FAIL-G2i %s b%0d[%0d]@%x got=%08x orc=%08x",
                     file, b, w2, aa, got, xo);
+              end
+            end else if (xc == 2) begin
+              // §12.3 C/5b: unorm-sampled float — |d| <= ~2/255
+              // (8-bit fractional weights vs lavapipe's float mul).
+              // f32r: $bitstoshortreal has 64-bit semantics under
+              // this simulator, so unpack the fp32 by hand.
+              real rg, ro, rd;
+              rg = f32r(got);
+              ro = f32r(xo);
+              rd = rg - ro;
+              if (rd < 0.0) rd = -rd;
+              if (rd > 0.005) begin
+                fails++;
+                if (fails < 3000)
+                  $display(
+                    "FAIL-G2u %s b%0d[%0d]@%x got=%08x orc=%08x d=%f",
+                    file, b, w2, aa, got, xo, rd);
+              end
+            end else if (xc == 3) begin
+              // packed unorm/sRGB byte lanes: +-1 code per byte
+              for (int bb = 0; bb < 4; bb++) begin
+                int dg, do_;
+                dg = got[bb*8 +: 8]; do_ = xo[bb*8 +: 8];
+                if ((dg > do_ ? dg - do_ : do_ - dg) > 1) begin
+                  fails++;
+                  if (fails < 3000)
+                    $display(
+                      "FAIL-G2p %s b%0d[%0d]@%x got=%08x orc=%08x",
+                      file, b, w2, aa, got, xo);
+                  break;
+                end
               end
             end else begin                  // float: <=2 ULP
               u = ulpd(got, xo);
@@ -574,7 +834,7 @@ module tb_g6lc_apu_shwave;
     retire_do(0);
   endtask
 
-  string names [30] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [38] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
       "pushscale", "vec4arith",
@@ -583,7 +843,11 @@ module tb_g6lc_apu_shwave;
       "earlyret", "phiflow", "barrier_prefix", "barrier_reduce",
       "matvec", "matmat", "precise_dot",
       // §12.3 F5 memory-resident descriptor corpus
-      "descarr", "multiset", "arroob"};
+      "descarr", "multiset", "arroob",
+      // §12.3 C/5b image corpus (texelFetch/imageLoad/imageStore/
+      // textureLod bilinear+mip/address modes, sRGB, 2D-array, query)
+      "texfetch", "texfetch_mip", "texlod_lin", "texlod_mip",
+      "imgloadstore", "texarr", "texsrgb", "texquery"};
 
   initial begin
     checks = 0; cases = 0; fails = 0; cyc = 0; dcyc = 0;

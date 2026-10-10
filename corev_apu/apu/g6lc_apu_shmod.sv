@@ -234,9 +234,15 @@ module g6lc_apu_shmod
     // ---- opcode predicates -------------------------------------------
     function automatic logic is_accepted(input logic [15:0] o);
       unique case (o)
-        0,3,5,6,7,8,11,12,14,15,16,17,19,20,21,22,23,24,28,29,30,32,33,
+        0,3,5,6,7,8,11,12,14,15,16,17,19,20,21,22,23,24,25,26,27,28,29,
+        30,32,33,
         41,42,43,44,46,48,49,50,51,52,54,56,59,61,62,65,66,68,71,72,
-        79,80,81,82,84,109,110,111,112,124,126,127,128,129,130,131,132,
+        79,80,81,82,84,
+        // §12.3 C/5b image ops — OpImageSampleImplicitLod (87) stays
+        // refused: compute has no derivatives (glslang emits
+        // ExplicitLod)
+        86,88,95,98,99,100,103,104,106,
+        109,110,111,112,124,126,127,128,129,130,131,132,
         133,134,135,136,137,138,139,142,143,144,145,146,147,148,
         164,165,166,167,168,169,
         170,171,172,173,174,175,176,177,178,179,180,182,183,184,186,
@@ -248,7 +254,9 @@ module g6lc_apu_shmod
     endfunction
     function automatic logic has_result(input logic [15:0] o);
       unique case (o)
-        61,65,66,68,79,80,81,82,84,109,110,111,112,124,126,127,128,129,
+        61,65,66,68,79,80,81,82,84,
+        86,88,95,98,100,103,104,106,
+        109,110,111,112,124,126,127,128,129,
         130,131,132,133,134,135,136,137,138,139,142,143,144,145,146,
         147,148,164,165,166,
         167,168,169,170,171,172,173,174,175,176,177,178,179,180,182,
@@ -259,7 +267,7 @@ module g6lc_apu_shmod
     endfunction
     function automatic logic is_type_op(input logic [15:0] o);
       unique case (o)
-        19,20,21,22,23,24,28,29,30,32,33: is_type_op = 1'b1;
+        19,20,21,22,23,24,25,26,27,28,29,30,32,33: is_type_op = 1'b1;
         default: is_type_op = 1'b0;
       endcase
     endfunction
@@ -468,6 +476,36 @@ module g6lc_apu_shmod
           end
           S_TYC: begin
             unique case (opc_q)
+              // §12.3 C/5b: TypeImage / TypeSampledImage read the
+              // operand type row at ph0, write their row at ph2
+              25,27: begin
+                if (ph_q == 0) begin
+                  ty_req = 1'b1;
+                  ty_addr = {slot_q, ops_q[1][9:0]};
+                end else if (ph_q == 2) begin
+                  ty_req = 1'b1; ty_we = 1'b1;
+                  ty_addr = {slot_q, ops_q[0][9:0]};
+                  // IMG row: sign = depth, comps[0] = arrayed,
+                  // cols[1:0] = sampled (1 sampled / 2 storage)
+                  ty_wdata = (opc_q == 25)
+                      ? mk_type(APU_SH_TK_IMG, ops_q[3][0],
+                                {2'b0, ops_q[4][0]}, ops_q[6][2:0],
+                                4'h0, ops_q[1][9:0], 4'h0, 16'h0,
+                                16'h0, 16'd4, 16'h0)
+                      : mk_type(APU_SH_TK_SIMG, 1'b0, 3'h0, 3'h0,
+                                4'h0, ops_q[1][9:0], 4'h0, 16'h0,
+                                16'h0, 16'd4, 16'h0);
+                end
+              end
+              26: begin
+                if (ph_q == 1) begin
+                  ty_req = 1'b1; ty_we = 1'b1;
+                  ty_addr = {slot_q, ops_q[0][9:0]};
+                  ty_wdata = mk_type(APU_SH_TK_SAMP, 1'b0, 3'h0, 3'h0,
+                                     4'h0, 10'h0, 4'h0, 16'h0, 16'h0,
+                                     16'd4, 16'h0);
+                end
+              end
               23,24,32: begin
                 if (ph_q == 0) begin
                   ty_req = 1'b1;
@@ -867,7 +905,8 @@ module g6lc_apu_shmod
                 at_q <= at_q + wc_q; st_q <= S_IW;
               end
               17: begin
-                if (ops_q[0] != 1) begin
+                // §12.3 C/5b: Capability Shader (1) and ImageQuery (50)
+                if (ops_q[0] != 32'd1 && ops_q[0] != 32'd50) begin
                   fl_code_q <= APU_SH_FAULT_CAP; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else begin
@@ -1119,8 +1158,10 @@ module g6lc_apu_shmod
                 if (wc_q > 4) begin
                   fl_code_q <= APU_SH_FAULT_VAR; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
-                end else if (!is_sc_ok(ops_q[2][3:0]) ||
-                             ops_q[2][3:0] == APU_SH_SC_UNIFORMCONST) begin
+                end else if (!is_sc_ok(ops_q[2][3:0])) begin
+                  // §12.3 C/5b: UNIFORMCONST vars stay legal only when
+                  // the pointee is an image-family type — S_VRB ph2
+                  // checks the element type row once it is in hand
                   fl_code_q <= APU_SH_FAULT_STORAGE;
                   fl_opc_q <= opc_q; fl_word_q <= at_q;
                   fail_q <= 1'b1; st_q <= S_DONE;
@@ -1179,6 +1220,71 @@ module g6lc_apu_shmod
           // ---- type ops ----------------------------------------------
           S_TYC: begin
             unique case (opc_q)
+              // ---- §12.3 C/5b: image-family types -------------------
+              25: begin
+                unique case (ph_q)
+                  0: begin
+                    // {sampled_type, dim, depth, arrayed, ms, sampled,
+                    //  format, [aq]} — 2D only, no MSAA, sampled ∈ {1,2};
+                    // the declared ImageFormat is informational (the
+                    // descriptor record format governs decode) so any
+                    // defined SPIR-V value (<=41) is accepted
+                    if (ops_q[1] >= 32'(ShaderIds) ||
+                        ops_q[2] != 32'd1 || ops_q[3] > 32'd1 ||
+                        ops_q[4] > 32'd1 || ops_q[5] != 32'd0 ||
+                        (ops_q[6] != 32'd1 && ops_q[6] != 32'd2) ||
+                        ops_q[7] > 32'd41) begin
+                      fl_code_q <= APU_SH_FAULT_TYPE;
+                      fl_opc_q <= opc_q; fl_word_q <= at_q;
+                      fail_q <= 1'b1; st_q <= S_DONE;
+                    end else ph_q <= 1;
+                  end
+                  1: begin
+                    if (ty_kind != APU_SH_TK_INT &&
+                        ty_kind != APU_SH_TK_FLOAT) begin
+                      fl_code_q <= APU_SH_FAULT_TYPE;
+                      fl_opc_q <= opc_q; fl_word_q <= at_q;
+                      fail_q <= 1'b1; st_q <= S_DONE;
+                    end else ph_q <= 2;
+                  end
+                  default: begin
+                    at_q <= at_q + wc_q; st_q <= S_IW;
+                  end
+                endcase
+              end
+              26: begin
+                if (wc_q != 2) begin          // OpTypeSampler %id
+                  fl_code_q <= APU_SH_FAULT_TYPE; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else if (ph_q == 0) ph_q <= 1;
+                else begin
+                  at_q <= at_q + wc_q; st_q <= S_IW;
+                end
+              end
+              27: begin
+                unique case (ph_q)
+                  0: begin
+                    if (ops_q[1] >= 32'(ShaderIds)) begin
+                      fl_code_q <= APU_SH_FAULT_FWDREF;
+                      fl_opc_q <= opc_q; fl_word_q <= at_q;
+                      fail_q <= 1'b1; st_q <= S_DONE;
+                    end else ph_q <= 1;
+                  end
+                  1: begin
+                    // the sampled-image's element must be a sampled
+                    // (cols==1) image type
+                    if (ty_kind != APU_SH_TK_IMG ||
+                        ty_rdata[10:8] != 3'd1) begin
+                      fl_code_q <= APU_SH_FAULT_TYPE;
+                      fl_opc_q <= opc_q; fl_word_q <= at_q;
+                      fail_q <= 1'b1; st_q <= S_DONE;
+                    end else ph_q <= 2;
+                  end
+                  default: begin
+                    at_q <= at_q + wc_q; st_q <= S_IW;
+                  end
+                endcase
+              end
               19,20,21,22: begin
                 if (ph_q == 0) begin
                   if ((opc_q == 21 || opc_q == 22) && ops_q[1] != 32) begin
@@ -1484,6 +1590,19 @@ module g6lc_apu_shmod
                     scratch_q <= scratch_q +
                                  16'((32'(ty_size) + 15) &
                                      32'hFFFF_FFF0);
+                  end
+                  APU_SH_SC_UNIFORMCONST: begin
+                    // §12.3 C/5b: image/sampler/sampled-image pointee
+                    // only — the variable is a descriptor slot, not
+                    // scratch storage (ty_rdata = the elem type row)
+                    if (ty_kind != APU_SH_TK_IMG &&
+                        ty_kind != APU_SH_TK_SAMP &&
+                        ty_kind != APU_SH_TK_SIMG) begin
+                      fl_code_q <= APU_SH_FAULT_STORAGE;
+                      fl_opc_q <= opc_q; fl_word_q <= at_q;
+                      fail_q <= 1'b1; st_q <= S_DONE;
+                    end
+                    voff_q <= '0;
                   end
                   default: voff_q <= '0;
                 endcase

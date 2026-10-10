@@ -1,0 +1,13 @@
+#version 450
+// §12.3 C/5b — trilinear sampling (mipmap LINEAR) at fractional lod.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D tex;
+layout(set = 0, binding = 1) buffer Out { vec4 o[]; } ob;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    float u = 0.1 + float(i & 3) * 0.27;
+    float v = 0.9 - float(i & 1) * 0.55;
+    float lod = float(i & 1) * 0.5;      // 0.0 / 0.5 -> tri blend
+    ob.o[i] = textureLod(tex, vec2(u, v), lod);
+}

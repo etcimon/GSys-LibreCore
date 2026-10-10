@@ -365,6 +365,151 @@ module tb_g6lc_apu_bridge
       fr_prev_q <= fr_state;
       fr_pcmd_q <= fr_cmd;
     end
+
+    // 5b guest-bring-up trace: pump FATAL entry + status writes.
+    // StFatal=25 is the only source of a FATAL-bit ring-status write.
+    logic [5:0] pu_prev_q;
+    wire [5:0]  pu_state = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_pump.gen_on.state_q;
+    wire [31:0] pu_ct0  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_pump.gen_on.cmd_type_q[0];
+    wire [31:0] pu_ct1  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_pump.gen_on.cmd_type_q[1];
+    wire        pu_rs0  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_pump.gen_on.st_q[0].ring_stream;
+    wire        pu_rs1  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_pump.gen_on.st_q[1].ring_stream;
+    wire [1:0]  pu_ring = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_pump.gen_on.st_q[0].ring;
+    wire [31:0] pu_pos  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_pump.gen_on.st_q[0].pos;
+    wire [31:0] pu_byt  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_pump.gen_on.st_q[0].bytes;
+    wire        pu_dep  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_pump.gen_on.depth_q;
+    wire [31:0] pu_df   = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_pump.gen_on.dec_op.fault;
+    wire [31:0] pu_ff   = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_pump.gen_on.fr_fault;
+    always_ff @(posedge clk_i) begin
+      if (pu_state != pu_prev_q && pu_state == 6'd25)
+        $display("[f5pu] FATAL prev=%0d ct0=%08x ct1=%08x rs0=%0d rs1=%0d ring=%0d pos=%08x byt=%08x dep=%0d df=%08x ff=%08x",
+                 pu_prev_q, pu_ct0, pu_ct1, pu_rs0, pu_rs1, pu_ring,
+                 pu_pos, pu_byt, pu_dep, pu_df, pu_ff);
+      pu_prev_q <= pu_state;
+    end
+
+    // [f5pu2]: stream create/die + ring head/live/fatal changes so a
+    // bad base_head/bytes or a phantom head advance is directly
+    // visible in the DMA trace.
+`define _PU i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_pump.gen_on
+    logic [31:0] pu_h_q[4];
+    logic [7:0]  pu_rfl_q;
+    logic        pu_s0lv_q, pu_s1lv_q;
+    always_ff @(posedge clk_i) begin
+      if (!pu_s0lv_q && `_PU.st_q[0].live)
+        $display("[f5pu2] S0NEW rs=%0d knd=%0d rng=%0d bh=%08x bw=%08x pos=%08x byt=%08x hd0=%08x",
+                 `_PU.st_q[0].ring_stream, `_PU.st_q[0].kind,
+                 `_PU.st_q[0].ring, `_PU.st_q[0].base_head,
+                 `_PU.st_q[0].base_w, `_PU.st_q[0].pos,
+                 `_PU.st_q[0].bytes, `_PU.ring_q[0].head);
+      if (pu_s0lv_q && !`_PU.st_q[0].live)
+        $display("[f5pu2] S0DIE pos=%08x byt=%08x hd0=%08x st=%0d",
+                 `_PU.st_q[0].pos, `_PU.st_q[0].bytes,
+                 `_PU.ring_q[0].head, `_PU.state_q);
+      if (!pu_s1lv_q && `_PU.st_q[1].live)
+        $display("[f5pu2] S1NEW bw=%08x byt=%08x pos=%08x",
+                 `_PU.st_q[1].base_w, `_PU.st_q[1].bytes,
+                 `_PU.st_q[1].pos);
+      if (pu_s1lv_q && !`_PU.st_q[1].live)
+        $display("[f5pu2] S1DIE pos=%08x byt=%08x st=%0d",
+                 `_PU.st_q[1].pos, `_PU.st_q[1].bytes, `_PU.state_q);
+      for (int r = 0; r < 4; r++) begin
+        if (`_PU.ring_q[r].head != pu_h_q[r])
+          $display("[f5pu2] HEAD r%0d %08x -> %08x st=%0d",
+                   r, pu_h_q[r], `_PU.ring_q[r].head, `_PU.state_q);
+        if ({`_PU.ring_q[r].fatal, `_PU.ring_q[r].live} !=
+            pu_rfl_q[2*r +: 2])
+          $display("[f5pu2] RING r%0d live=%0d fatal=%0d st=%0d",
+                   r, `_PU.ring_q[r].live, `_PU.ring_q[r].fatal,
+                   `_PU.state_q);
+        pu_h_q[r]            <= `_PU.ring_q[r].head;
+        pu_rfl_q[2*r +: 2]   <= {`_PU.ring_q[r].fatal,
+                                `_PU.ring_q[r].live};
+      end
+      pu_s0lv_q <= `_PU.st_q[0].live;
+      pu_s1lv_q <= `_PU.st_q[1].live;
+    end
+
+    // [f5wx]: 5b image-path trace — work issue (dispatch/xfer with the
+    // resolved operand bases), per-work completion codes, and the
+    // xfer fault edge; localizes a wrong-data submit to copy vs shader.
+`define _TOP i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+    logic        xf_ffq_q;
+    always_ff @(posedge clk_i) begin
+      if (`_TOP.ex_work_v && `_TOP.ex_work_rdy &&
+          (`_TOP.work_is_disp || `_TOP.work_is_xfer))
+        $display("[f5wx] ISSUE ct=%02x xop=%0d sb=%08x ss=%08x db=%08x ds=%08x i0={b%08x s%08x w%0d h%0d f%02x m%0d l%0d lb%08x} i1={b%08x w%0d h%0d f%02x}",
+                 `_TOP.work_o.ctype, `_TOP.ex_xfer.op,
+                 `_TOP.ex_xfer.src_base, `_TOP.ex_xfer.src_size,
+                 `_TOP.ex_xfer.dst_base, `_TOP.ex_xfer.dst_size,
+                 `_TOP.ex_xfer.img0.base, `_TOP.ex_xfer.img0.size,
+                 `_TOP.ex_xfer.img0.w, `_TOP.ex_xfer.img0.h,
+                 `_TOP.ex_xfer.img0.fmt, `_TOP.ex_xfer.img0.mips,
+                 `_TOP.ex_xfer.img0.layers,
+                 `_TOP.ex_xfer.img0.layer_bytes,
+                 `_TOP.ex_xfer.img1.base, `_TOP.ex_xfer.img1.w,
+                 `_TOP.ex_xfer.img1.h, `_TOP.ex_xfer.img1.fmt);
+      if (`_TOP.sh_done)
+        $display("[f5wx] SHDONE code=%02x", `_TOP.sh_done_pl.code);
+      if (`_TOP.xf_done)
+        $display("[f5wx] XFDONE code=%02x", `_TOP.xf_done_pl.code);
+      if (`_TOP.i_xf.gen_on.xf_fault_q && !xf_ffq_q)
+        $display("[f5wx] XFFAULT st=%0d xop=%0d",
+                 `_TOP.i_xf.gen_on.state_q, `_TOP.i_xf.gen_on.xf_q.op);
+      xf_ffq_q <= `_TOP.i_xf.gen_on.xf_fault_q;
+    end
+
+    // [f5cx]: cmdexec FSM transitions with the live record ctype —
+    // shows exactly where a work record diverges from the issue path.
+    logic [7:0] cx_prev_q;
+    always_ff @(posedge clk_i) begin
+      if (`_TOP.i_exec.gen_on.state_q != cx_prev_q)
+        $display("[f5cx] st %0d->%0d ct=%02x buf=%0d rec=%0d opnd=%0d lost=%0d",
+                 cx_prev_q, `_TOP.i_exec.gen_on.state_q,
+                 `_TOP.i_exec.gen_on.rec_q.ctype,
+                 `_TOP.i_exec.gen_on.buf_i_q,
+                 `_TOP.i_exec.gen_on.rec_i_q,
+                 `_TOP.i_exec.gen_on.xf_opnd_q,
+                 `_TOP.i_exec.gen_on.lost_q);
+      cx_prev_q <= `_TOP.i_exec.gen_on.state_q;
+    end
+
+    // [f5cr]: cmdrec appends + walk reads — which records each cbuf
+    // stored and which the submit actually walked.
+    always_ff @(posedge clk_i) begin
+      if (`_TOP.cr_req_valid && `_TOP.cr_req_ready &&
+          `_TOP.cr_req.op != 4'd6)
+        $display("[f5cr] REQ op=%0d cbuf=%0d idx=%0d ct=%02x pn=%0d",
+                 `_TOP.cr_req.op, `_TOP.cr_req.cbuf, `_TOP.cr_req.idx,
+                 `_TOP.cr_req.rec.ctype, `_TOP.cr_req.pay_n);
+      if (`_TOP.cr_cpl_valid && `_TOP.cr_cpl_ready)
+        $display("[f5cr] CPL st=%0d cnt=%0d ct=%02x",
+                 `_TOP.cr_cpl.status, `_TOP.cr_cpl.count,
+                 `_TOP.cr_cpl.rec.ctype);
+    end
+
+    // [f5ap]: every aperture write at the vgsys mp mux (records,
+    // texel fills, image stores) — the data-path ground truth.
+`define _VS i_dut.gen_venus.i_vgsys.gen_on
+    always_ff @(posedge clk_i) begin
+      for (int p = 0; p < 5; p++)
+        if (`_VS.mp_req_valid[p] && `_VS.mp_req_ready[p] &&
+            `_VS.mp_req[p].we)
+          $display("[f5ap] WR p%0d dom=%0d a=%08x d=%x s=%02x", p,
+                   `_VS.mp_req[p].dom, `_VS.mp_req[p].addr,
+                   `_VS.mp_req[p].wdata, `_VS.mp_req[p].wstrb);
+    end
 `endif
 
     always_ff @(posedge clk_i or negedge rst_ni) begin

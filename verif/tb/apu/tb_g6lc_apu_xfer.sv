@@ -55,6 +55,7 @@ module tb_g6lc_apu_xfer;
   localparam int unsigned SRCB = 32'h2000;   // src buffer base offset
   localparam int unsigned DSTB = 32'h8000;   // dst buffer base offset
   localparam int unsigned BUFZ = 32'h2000;   // 8 KiB each
+  localparam int unsigned IMGB = 32'h10000;  // image backing (<= 60 KiB)
 
   logic clk = 0, rst_ni = 0;
   int errors = 0, checks = 0, cases = 0, cycles = 0;
@@ -425,7 +426,197 @@ module tb_g6lc_apu_xfer;
     issue('{op: APU_XFER_OP_COPY, cbuf: 8'd0, pay_base: 16'(pb),
            regions: 16'(nreg),
            src_base: SRCB, src_size: BUFZ,
-           dst_base: same_map ? SRCB : DSTB, dst_size: BUFZ},
+           dst_base: same_map ? SRCB : DSTB, dst_size: BUFZ, img0: '0, img1: '0},
+          '0, pl);
+  endtask
+
+  // ---- image CLEAR ------------------------------------------------------------
+  // Dev-format ids (APU_VN_IMG_BPP index): 2=RGBA8_UNORM 3=RGBA8_SRGB
+  // 6=RGBA16F 7=R32_SFLOAT 10=R32_UINT.  The model helpers below are the
+  // same bit-level arithmetic as the RTL conversion functions; the
+  // Python golden independently re-derives them for the vgsys sessions.
+  // These mirror the DUT's f_f32_u8 / f_f32_l16 / f_f32_f16 and the
+  // XSrEnc search rule (nearest LUT entry, ties upward) verbatim.
+  function automatic logic [7:0] m_f32_u8(input logic [31:0] f);
+    logic [39:0] p; logic [8:0] sh;
+    p  = 40'({1'b1, f[22:0]}) * 40'd255;
+    sh = 9'd150 - {1'b0, f[30:23]};
+    if (f[31])              return 8'h00;
+    if (f[30:23] >= 8'd127) return 8'hff;
+    return 8'((p + (40'h1 << (sh - 9'd1))) >> sh);
+  endfunction
+  function automatic logic [15:0] m_f32_l16(input logic [31:0] f);
+    logic [47:0] p; logic [8:0] sh;
+    p  = 48'({1'b1, f[22:0]}) * 48'd65535;
+    sh = 9'd150 - {1'b0, f[30:23]};
+    if (f[31])              return 16'h0000;
+    if (f[30:23] >= 8'd127) return 16'hffff;
+    return 16'((p + (48'h1 << (sh - 9'd1))) >> sh);
+  endfunction
+  function automatic logic [7:0] m_srgb(input logic [15:0] lin);
+    int flo; logic [15:0] flut, lup;
+    flo = 0;
+    for (int i = 0; i < 256; i++)
+      if (g6lc_apu_srgb_pkg::APU_SRGB_TO_LIN[i] <= lin) flo = i;
+    if (flo == 255) return 8'd255;
+    flut = g6lc_apu_srgb_pkg::APU_SRGB_TO_LIN[flo];
+    lup  = g6lc_apu_srgb_pkg::APU_SRGB_TO_LIN[flo + 1];
+    if (17'(lup) - 17'(lin) > 17'(lin) - 17'(flut))
+      return 8'(flo);
+    return 8'(flo + 1);
+  endfunction
+  function automatic logic [15:0] m_f32_f16(input logic [31:0] f);
+    logic s; logic [7:0] e; logic [10:0] mr; logic [9:0] sh;
+    logic [23:0] m, msh, half;
+    s = f[31]; e = f[30:23];
+    if (e == 8'hff)
+      return {s, 5'h1f, |f[22:0] ? 10'h1 : 10'h0};
+    if (e >= 8'd143) return {s, 5'h1f, 10'h0};
+    if (e < 8'd102)  return {s, 15'h0};
+    m = {1'b1, f[22:0]};
+    if (e >= 8'd113) begin
+      mr = {1'b0, f[22:13]} +
+           (f[12] && (|f[11:0] || f[13]) ? 11'd1 : 11'd0);
+      return {s, 15'({5'(e - 8'd112), 10'h0} + {4'h0, mr})};
+    end
+    sh   = 10'(8'd126 - e);
+    half = 24'h1 << (sh - 10'd1);
+    msh  = m >> sh;
+    if ((m & half) != 24'h0 &&
+        ((m & (half - 24'h1)) != 24'h0 || msh[0]))
+      msh = msh + 24'd1;
+    return {s, 15'(msh[10:0])};
+  endfunction
+
+  // model CLEAR color -> packed texel word pattern (bpp bytes), comp j
+  // occupies byte j; mirrors the RTL selection on APU_VN_IMG_ATTR
+  // (uint/flt -> raw union word, half -> f32->f16, sRGB -> LUT encode
+  // on colour comps only, else UNORM8; BGRA swaps comps 0/2)
+  function automatic logic [127:0] m_clear_pat(
+      input logic [7:0] fmt, input logic [31:0] cw [4]);
+    logic [7:0] at; logic [127:0] tex; int nc, cb;
+    at = APU_VN_IMG_ATTR[fmt[3:0]];
+    nc = at[2:0] + 1;
+    cb = 8 * APU_VN_IMG_BPP[fmt[3:0]] / nc;
+    tex = '0;
+    for (int c = 0; c < nc; c++) begin
+      int           cj;
+      logic         alpha;
+      logic [127:0] cv;
+      alpha = nc == 4 && c == 3;
+      if (at[3] || at[4])        cv = 128'(cw[c]);
+      else if (at[5])            cv = 128'(32'(m_f32_f16(cw[c])));
+      else if (at[7] && !alpha)  cv = 128'(32'(m_srgb(m_f32_l16(cw[c]))));
+      else                       cv = 128'(32'(m_f32_u8(cw[c])));
+      cj = (at[6] && c < 3) ? 2 - c : c;
+      tex |= cv << (cj * cb);
+    end
+    return tex;
+  endfunction
+
+  // device layout helpers: pitch_m = align(w_m*bpp, 64), mip_off is the
+  // prefix sum, layer_bytes the total
+  function automatic int unsigned m_mip_off(
+      input apu_xfer_img_t im, input int m);
+    int unsigned o; int wp;
+    o = 0;
+    for (int i = 0; i < m; i++) begin
+      wp = ((im.w >> i) == 0 ? 1 : (im.w >> i)) * APU_VN_IMG_BPP[im.fmt[3:0]];
+      wp = (wp + 63) & ~63;
+      o += wp * ((im.h >> i) == 0 ? 1 : (im.h >> i));
+    end
+    return o;
+  endfunction
+  function automatic int unsigned m_pitch(
+      input apu_xfer_img_t im, input int m);
+    int unsigned wp;
+    wp = ((im.w >> m) == 0 ? 1 : (im.w >> m)) * APU_VN_IMG_BPP[im.fmt[3:0]];
+    return (wp + 63) & ~63;
+  endfunction
+
+  // apply a CLEAR range set to the epm shadow
+  task automatic m_apply_clear(input apu_xfer_img_t im,
+                               input logic [31:0] cw [4],
+                               input int unsigned nr,
+                               input logic [31:0] rg []);
+    logic [127:0] tex; int bpp;
+    tex = m_clear_pat(im.fmt, cw);
+    bpp = APU_VN_IMG_BPP[im.fmt[3:0]];
+    for (int r = 0; r < int'(nr); r++) begin
+      int asp, bm, lc, bl, nl;
+      asp = rg[5*r+0][7:0]; bm = rg[5*r+1]; lc = rg[5*r+2];
+      bl  = rg[5*r+3];      nl = rg[5*r+4];
+      for (int l = bl; l < bl + nl; l++)
+        for (int m = bm; m < bm + lc; m++) begin
+          int unsigned wm, hm, pit;
+          wm  = (im.w >> m) == 0 ? 1 : (im.w >> m);
+          hm  = (im.h >> m) == 0 ? 1 : (im.h >> m);
+          pit = m_pitch(im, m);
+          for (int y = 0; y < hm; y++)
+            for (int x = 0; x < wm; x++)
+              for (int b = 0; b < bpp; b++)
+                ewr8(im.base + l * im.layer_bytes + m_mip_off(im, m) +
+                     y * pit + x * bpp + b, tex[8*b +: 8]);
+        end
+    end
+  endtask
+
+  // stage 4 color words + nr 5-word ranges, then issue CLEARI
+  task automatic run_clear(input apu_xfer_img_t im,
+                           input logic [31:0] cw [4],
+                           input int unsigned nr,
+                           input logic [31:0] rg [],
+                           output apu_sh_done_t pl);
+    int unsigned pb;
+    begin_buf(0);
+    for (int i = 0; i < 4; i++) stage_w[i] = cw[i];
+    for (int r = 0; r < int'(nr); r++)
+      for (int w = 0; w < 5; w++) stage_w[4 + 5*r + w] = rg[5*r + w];
+    pb = pay_top;
+    append_payload(0, 4 + 5*int'(nr));
+    seal_buf(0);
+    issue('{op: APU_XFER_OP_CLEARI, cbuf: 8'd0, pay_base: 16'(pb),
+           regions: 16'(nr),
+           src_base: '0, src_size: '0,
+           dst_base: '0, dst_size: '0, img0: im, img1: '0}, '0, pl);
+  endtask
+
+  // ---- B2I / I2B drivers ------------------------------------------------------
+  // payload words per region: {bo u64, rl, ih, asp, mip, baseLayer,
+  // layerCount, off.xyz, ext.whd} = 14 words
+  task automatic run_b2i(input apu_xfer_img_t im,
+                         input logic [63:0] bb, bs,
+                         input int unsigned nr,
+                         input logic [31:0] rg [],
+                         output apu_sh_done_t pl);
+    int unsigned pb;
+    begin_buf(0);
+    for (int r = 0; r < int'(nr); r++)
+      for (int w = 0; w < 14; w++) stage_w[14*r + w] = rg[14*r + w];
+    pb = pay_top;
+    append_payload(0, 14*int'(nr));
+    seal_buf(0);
+    issue('{op: APU_XFER_OP_B2I, cbuf: 8'd0, pay_base: 16'(pb),
+           regions: 16'(nr),
+           src_base: bb[31:0], src_size: bs[31:0],
+           dst_base: '0, dst_size: '0, img0: im, img1: '0}, '0, pl);
+  endtask
+  task automatic run_i2b(input apu_xfer_img_t im,
+                         input logic [63:0] bb, bs,
+                         input int unsigned nr,
+                         input logic [31:0] rg [],
+                         output apu_sh_done_t pl);
+    int unsigned pb;
+    begin_buf(0);
+    for (int r = 0; r < int'(nr); r++)
+      for (int w = 0; w < 14; w++) stage_w[14*r + w] = rg[14*r + w];
+    pb = pay_top;
+    append_payload(0, 14*int'(nr));
+    seal_buf(0);
+    issue('{op: APU_XFER_OP_I2B, cbuf: 8'd0, pay_base: 16'(pb),
+           regions: 16'(nr),
+           src_base: '0, src_size: '0,
+           dst_base: bb[31:0], dst_size: bs[31:0], img0: im, img1: '0},
           '0, pl);
   endtask
 
@@ -548,7 +739,7 @@ module tb_g6lc_apu_xfer;
     for (int i = 64; i < 64 + 512; i++) ewr8(DSTB + i, 8'h5A);
     issue('{op: APU_XFER_OP_FILL, cbuf: 8'd0, pay_base: 16'(0),
            regions: '0, src_base: '0, src_size: '0,
-           dst_base: DSTB, dst_size: BUFZ}, 32'h5A5A_5A5A, pl);
+           dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, 32'h5A5A_5A5A, pl);
     check(pl.code == APU_SH_DONE_OK, "fill done code");
     cmp_range(DSTB, DSTB + BUFZ, "fill");
     axi_balance("fill");
@@ -563,7 +754,7 @@ module tb_g6lc_apu_xfer;
     for (int i = 32'h1FF0; i < int'(BUFZ); i++) ewr8(DSTB + i, 8'hC3);
     issue('{op: APU_XFER_OP_FILL, cbuf: 8'd0, pay_base: 16'(0),
            regions: '0, src_base: '0, src_size: '0,
-           dst_base: DSTB, dst_size: BUFZ}, 32'hC3C3_C3C3, pl);
+           dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, 32'hC3C3_C3C3, pl);
     check(pl.code == APU_SH_DONE_OK, "fill WHOLE done code");
     cmp_range(DSTB, DSTB + BUFZ, "fill WHOLE");
     axi_balance("fill-whole");
@@ -578,7 +769,7 @@ module tb_g6lc_apu_xfer;
     wmark = w_n;
     issue('{op: APU_XFER_OP_FILL, cbuf: 8'd0, pay_base: 16'(0),
            regions: '0, src_base: '0, src_size: '0,
-           dst_base: DSTB, dst_size: BUFZ}, 32'hAAAA_AAAA, pl);
+           dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, 32'hAAAA_AAAA, pl);
     check(pl.code == APU_SH_DONE_FAULT, "fill misaligned dstOff FAULT");
     check(w_n == wmark, "fill misaligned: zero W beats");
     cmp_range(DSTB, DSTB + BUFZ, "fill misaligned guard");
@@ -593,7 +784,7 @@ module tb_g6lc_apu_xfer;
     wmark = w_n;
     issue('{op: APU_XFER_OP_FILL, cbuf: 8'd0, pay_base: 16'(0),
            regions: '0, src_base: '0, src_size: '0,
-           dst_base: DSTB, dst_size: BUFZ}, 32'hBBBB_BBBB, pl);
+           dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, 32'hBBBB_BBBB, pl);
     check(pl.code == APU_SH_DONE_FAULT, "fill misaligned size FAULT");
     check(w_n == wmark, "fill misaligned size: zero W beats");
 
@@ -611,7 +802,7 @@ module tb_g6lc_apu_xfer;
            8'((32'hD00D_0000 + 32'(i >> 2)) >> (8 * (i & 3))));
     issue('{op: APU_XFER_OP_UPDATE, cbuf: 8'd0, pay_base: 16'(0),
            regions: '0, src_base: '0, src_size: '0,
-           dst_base: DSTB, dst_size: BUFZ}, '0, pl);
+           dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, '0, pl);
     check(pl.code == APU_SH_DONE_OK, "update done code");
     cmp_range(DSTB, DSTB + BUFZ, "update");
     axi_balance("update");
@@ -626,7 +817,7 @@ module tb_g6lc_apu_xfer;
     wmark = w_n;
     issue('{op: APU_XFER_OP_UPDATE, cbuf: 8'd0, pay_base: 16'(0),
            regions: '0, src_base: '0, src_size: '0,
-           dst_base: DSTB, dst_size: BUFZ}, '0, pl);
+           dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, '0, pl);
     check(pl.code == APU_SH_DONE_FAULT, "update misaligned FAULT");
     check(w_n == wmark, "update misaligned: zero W beats");
 
@@ -642,7 +833,7 @@ module tb_g6lc_apu_xfer;
     wmark = w_n;
     issue('{op: APU_XFER_OP_COPY, cbuf: 8'd0, pay_base: 16'(0),
            regions: 16'd1, src_base: SRCB, src_size: BUFZ,
-           dst_base: DSTB, dst_size: BUFZ}, '0, pl);
+           dst_base: DSTB, dst_size: BUFZ, img0: '0, img1: '0}, '0, pl);
     check(pl.code == APU_SH_DONE_FAULT, "oob copy FAULT");
     check(w_n == wmark, "oob copy: zero W beats");
     cmp_range(DSTB, DSTB + BUFZ, "oob dst untouched");
@@ -658,10 +849,189 @@ module tb_g6lc_apu_xfer;
     wmark = w_n;
     issue('{op: APU_XFER_OP_COPY, cbuf: 8'd0, pay_base: 16'(0),
            regions: 16'd1, src_base: SRCB, src_size: BUFZ,
-           dst_base: SRCB, dst_size: BUFZ}, '0, pl);
+           dst_base: SRCB, dst_size: BUFZ, img0: '0, img1: '0}, '0, pl);
     check(pl.code == APU_SH_DONE_FAULT, "overlap copy FAULT");
     check(w_n == wmark, "overlap copy: zero W beats");
     cmp_range(SRCB, SRCB + BUFZ, "overlap buffer untouched");
+
+    // ============ image ops: B2I / I2B round-trip ==========================
+    // geometry IM0: w=12 h=8 mips=2 layers=2 fmt=2 (RGBA8_UNORM bpp=4)
+    //   pitch0 = align(48,64) = 64, mip_bytes0 = 512, mip_off1 = 512
+    //   pitch1 = 64 (w_m=6 -> align(24,64)), mip_bytes1 = 256
+    //   layer_bytes = 768, size = 1536
+    begin
+      automatic apu_xfer_img_t im;
+      automatic logic [31:0] rg [];
+      im = '{base: IMGB, size: 1536, w: 16'd12, h: 16'd8, fmt: 8'd2,
+             mips: 5'd2, layers: 10'd2, layer_bytes: 32'd768};
+      // B2I: one region per mip covering both layers, packed rows
+      // region {bo u64, rl, ih, asp, mip, bl, lc, x, y, z, w, h, d}
+      rg = new[28];
+      // mip0: packed 12x8 rows x2 layers = 768 B at bo=0
+      rg[0]=0; rg[1]=0; rg[2]=0; rg[3]=0; rg[4]=1; rg[5]=0;
+      rg[6]=0; rg[7]=2; rg[8]=0; rg[9]=0; rg[10]=0;
+      rg[11]=12; rg[12]=8; rg[13]=1;
+      // mip1: 6x4 x2 layers = 192 B at bo=768
+      rg[14]=768; rg[15]=0; rg[16]=0; rg[17]=0; rg[18]=1; rg[19]=1;
+      rg[20]=0; rg[21]=2; rg[22]=0; rg[23]=0; rg[24]=0;
+      rg[25]=6; rg[26]=4; rg[27]=1;
+      cases++;
+      poison(IMGB, 1536);
+      fill_src(SRCB, 960, 42);
+      // shadow: image gets layer-major packed rows inside pitch-64 rows
+      for (int l = 0; l < 2; l++)
+        for (int y = 0; y < 8; y++)
+          for (int i = 0; i < 48; i++)
+            ewr8(IMGB + l*768 + y*64 + i,
+                 erd8(SRCB + l*384 + y*48 + i));
+      for (int l = 0; l < 2; l++)
+        for (int y = 0; y < 4; y++)
+          for (int i = 0; i < 24; i++)
+            ewr8(IMGB + l*768 + 512 + y*64 + i,
+                 erd8(SRCB + 768 + l*96 + y*24 + i));
+      run_b2i(im, SRCB, 960, 2, rg, pl);
+      check(pl.code == APU_SH_DONE_OK, "b2i done code");
+      cmp_range(IMGB, IMGB + 1536, "b2i image");
+      axi_balance("b2i");
+
+      // I2B back to dst buffer (packed layout == src layout)
+      cases++;
+      rg[0]=0; rg[14]=768;
+      poison(DSTB, 960);
+      for (int i = 0; i < 960; i++)
+        ewr8(DSTB + i, erd8(SRCB + i));
+      run_i2b(im, DSTB, 960, 2, rg, pl);
+      check(pl.code == APU_SH_DONE_OK, "i2b done code");
+      cmp_range(DSTB, DSTB + 960, "i2b buffer");
+      axi_balance("i2b");
+    end
+
+    // ============ CLEAR: five format classes ===============================
+    // IM1: w=16 h=16 mips=3 layers=2 fmt=2 RGBA8_UNORM
+    //   mip_bytes = 1024, 512, 256 -> layer_bytes 1792, size 3584
+    begin
+      automatic apu_xfer_img_t im;
+      automatic logic [31:0] cw [4];
+      automatic logic [31:0] rg [];
+      automatic int unsigned fp;
+      im = '{base: IMGB, size: 3584, w: 16'd16, h: 16'd16, fmt: 8'd2,
+             mips: 5'd3, layers: 10'd2, layer_bytes: 32'd1792};
+      fp = 3584;
+      cases++;
+      poison(IMGB, fp);
+      fill_src(IMGB, fp, 77);
+      cw[0]=32'h3F00_0000; cw[1]=32'h3E80_0000;  // 0.5, 0.25
+      cw[2]=32'h3F40_0000; cw[3]=32'h3F80_0000;  // 0.75, 1.0
+      rg = new[5]; rg[0]=1; rg[1]=1; rg[2]=2; rg[3]=1; rg[4]=1;
+      m_apply_clear(im, cw, 1, rg);
+      run_clear(im, cw, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_OK, "clear rgba8 done code");
+      cmp_range(IMGB, IMGB + fp, "clear rgba8 (subrange only)");
+      axi_balance("clear rgba8");
+
+      // fmt=3 R8G8B8A8_SRGB: colour comps through the LUT, alpha UNORM
+      cases++;
+      im.fmt = 8'd3;
+      poison(IMGB, fp); fill_src(IMGB, fp, 78);
+      rg = new[5]; rg[0]=1; rg[1]=0; rg[2]=1; rg[3]=0; rg[4]=2;
+      m_apply_clear(im, cw, 1, rg);
+      run_clear(im, cw, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_OK, "clear srgb done code");
+      cmp_range(IMGB, IMGB + fp, "clear srgb");
+      axi_balance("clear srgb");
+
+      // fmt=6 R16G16B16A16_SFLOAT bpp=8: layer_bytes doubles
+      // pitch0 = align(128,64) = 128, mb = 2048,1024,512 -> lb 3584
+      begin
+        automatic apu_xfer_img_t im2;
+        im2 = '{base: IMGB, size: 7168, w: 16'd16, h: 16'd16, fmt: 8'd6,
+                mips: 5'd3, layers: 10'd2, layer_bytes: 32'd3584};
+        cases++;
+        fp = 7168;
+        poison(IMGB, fp); fill_src(IMGB, fp, 79);
+        // denormal-ish f32 2^-30 and 70000 (>65504 -> fp16 inf)
+        cw[0]=32'h3100_0000; cw[1]=32'h4788_AC80;  // ~2^-30, 70000
+        cw[2]=32'h3F00_0000; cw[3]=32'h3F80_0000;  // 0.5, 1.0
+        rg = new[5]; rg[0]=1; rg[1]=0; rg[2]=3; rg[3]=0; rg[4]=1;
+        m_apply_clear(im2, cw, 1, rg);
+        run_clear(im2, cw, 1, rg, pl);
+        check(pl.code == APU_SH_DONE_OK, "clear rgba16f done code");
+        cmp_range(IMGB, IMGB + fp, "clear rgba16f");
+        axi_balance("clear rgba16f");
+      end
+
+      // fmt=7 R32_SFLOAT bpp=4 ncomp=1: raw fp32 word
+      // pitch0 = align(64,64) = 64; reuse IM1 geometry, mips=1 layer=1
+      begin
+        automatic apu_xfer_img_t im3;
+        im3 = '{base: IMGB, size: 1024, w: 16'd16, h: 16'd16, fmt: 8'd7,
+                mips: 5'd1, layers: 10'd1, layer_bytes: 32'd1024};
+        cases++;
+        fp = 1024;
+        poison(IMGB, fp); fill_src(IMGB, fp, 80);
+        cw[0]=32'h4049_0FDB; cw[1]=0; cw[2]=0; cw[3]=0;  // pi f32
+        rg = new[5]; rg[0]=1; rg[1]=0; rg[2]=1; rg[3]=0; rg[4]=1;
+        m_apply_clear(im3, cw, 1, rg);
+        run_clear(im3, cw, 1, rg, pl);
+        check(pl.code == APU_SH_DONE_OK, "clear r32f done code");
+        cmp_range(IMGB, IMGB + fp, "clear r32f");
+        axi_balance("clear r32f");
+      end
+
+      // fmt=10 R32_UINT bpp=4 ncomp=1: raw uint32 union word
+      begin
+        automatic apu_xfer_img_t im4;
+        im4 = '{base: IMGB, size: 1024, w: 16'd16, h: 16'd16, fmt: 8'd10,
+                mips: 5'd1, layers: 10'd1, layer_bytes: 32'd1024};
+        cases++;
+        fp = 1024;
+        poison(IMGB, fp); fill_src(IMGB, fp, 81);
+        cw[0]=32'hFFFF_FFFF; cw[1]=0; cw[2]=0; cw[3]=0;
+        rg = new[5]; rg[0]=1; rg[1]=0; rg[2]=1; rg[3]=0; rg[4]=1;
+        m_apply_clear(im4, cw, 1, rg);
+        run_clear(im4, cw, 1, rg, pl);
+        check(pl.code == APU_SH_DONE_OK, "clear r32u done code");
+        cmp_range(IMGB, IMGB + fp, "clear r32u");
+        axi_balance("clear r32u");
+      end
+
+      // ---- negatives: every CLEAR range rule faults before a write ----
+      // (a) aspect != COLOR
+      cases++;
+      im = '{base: IMGB, size: 3584, w: 16'd16, h: 16'd16, fmt: 8'd2,
+             mips: 5'd3, layers: 10'd2, layer_bytes: 32'd1792};
+      fp = 3584;
+      poison(IMGB, fp); fill_src(IMGB, fp, 82);
+      rg = new[5]; rg[0]=4; rg[1]=0; rg[2]=1; rg[3]=0; rg[4]=1;
+      wmark = w_n;
+      run_clear(im, cw, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_FAULT, "clear aspect FAULT");
+      check(w_n == wmark, "clear aspect: zero W beats");
+      cmp_range(IMGB, IMGB + fp, "clear aspect untouched");
+      // (b) baseMip + levelCount > mips
+      cases++;
+      rg = new[5]; rg[0]=1; rg[1]=2; rg[2]=2; rg[3]=0; rg[4]=1;
+      wmark = w_n;
+      run_clear(im, cw, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_FAULT, "clear mip-oob FAULT");
+      check(w_n == wmark, "clear mip-oob: zero W beats");
+      cmp_range(IMGB, IMGB + fp, "clear mip-oob untouched");
+      // (c) baseLayer + layerCount > layers
+      cases++;
+      rg = new[5]; rg[0]=1; rg[1]=0; rg[2]=1; rg[3]=1; rg[4]=2;
+      wmark = w_n;
+      run_clear(im, cw, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_FAULT, "clear layer-oob FAULT");
+      check(w_n == wmark, "clear layer-oob: zero W beats");
+      cmp_range(IMGB, IMGB + fp, "clear layer-oob untouched");
+      // (d) levelCount == 0
+      cases++;
+      rg = new[5]; rg[0]=1; rg[1]=0; rg[2]=0; rg[3]=0; rg[4]=1;
+      wmark = w_n;
+      run_clear(im, cw, 1, rg, pl);
+      check(pl.code == APU_SH_DONE_FAULT, "clear lc0 FAULT");
+      check(w_n == wmark, "clear lc0: zero W beats");
+    end
 
     // ============ Enable=0 fixture ========================================
     check(!o_wr && !o_dn && !o_crv && !o_bsy && o_areq == '0,

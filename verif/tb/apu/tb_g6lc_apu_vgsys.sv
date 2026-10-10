@@ -338,6 +338,15 @@ module tb_g6lc_apu_vgsys;
     return apm[apix(32'(o >> 2))][8*(o & 3) +: 8];
   endfunction
 
+  // §12.3 5b-r2 C: TP_APGUARD arms an aperture-write allow-list.  Any
+  // device write outside a listed {lo,size} range is fatal; an empty
+  // list forbids all writes (the ctx-kill silence windows).
+  localparam int APGUARD_MAX = 16;
+  logic        guard_on;
+  int unsigned guard_n;
+  logic [63:0] guard_lo [APGUARD_MAX];
+  logic [63:0] guard_hi [APGUARD_MAX];
+
   task automatic wr8(input logic [63:0] a, input logic [7:0] d);
     logic [63:0] o;
     if (a >= GB && a < GB + 64'h100000) begin
@@ -345,6 +354,17 @@ module tb_g6lc_apu_vgsys;
       gmem[32'(o >> 2)][8*(o & 3) +: 8] <= d;
     end else begin
       o = a - AB;
+`ifdef G6LC_APU_DEBUG
+      if (o >= 64'h8000 && o < 64'hc000)
+        $display("[apwr t=%0t] addr=%010x d=%02x", $time, a, d);
+`endif
+      if (guard_on) begin
+        automatic logic ok = 1'b0;
+        for (int gi = 0; gi < guard_n; gi++)
+          if (o >= guard_lo[gi] && o < guard_hi[gi]) ok = 1'b1;
+        if (!ok)
+          $fatal(1, "APGUARD: aperture write outside allow-list off=%010x d=%02x", o, d);
+      end
       apm[apix(32'(o >> 2))][8*(o & 3) +: 8] <= d;
     end
   endtask
@@ -904,6 +924,29 @@ module tb_g6lc_apu_vgsys;
                   check(got == expm[ep + 3],
                         $sformatf("G2i off=%0x got=%08x exp=%08x",
                                   a1 + 4 * i, got, expm[ep + 3]));
+                end else if (expm[ep + 4] == 2) begin
+                  // §12.3 C/5b: unorm-sampled float — |d| <= ~2/255
+                  // (8-bit fractional weights vs lavapipe's float mul),
+                  // same arm as tb_g6lc_apu_shwave xc==2
+                  real rg, ro, rd;
+                  rg = f32r(got);
+                  ro = f32r(expm[ep + 3]);
+                  rd = rg - ro;
+                  if (rd < 0.0) rd = -rd;
+                  check(rd <= 0.005,
+                        $sformatf("G2u off=%0x got=%08x exp=%08x d=%f",
+                                  a1 + 4 * i, got, expm[ep + 3], rd));
+                end else if (expm[ep + 4] == 3) begin
+                  // packed unorm/sRGB byte lanes: +-1 code per byte
+                  int bad_b = 0;
+                  for (int bb = 0; bb < 4; bb++) begin
+                    int dg, do_;
+                    dg = got[bb*8 +: 8]; do_ = expm[ep + 3][bb*8 +: 8];
+                    if ((dg > do_ ? dg - do_ : do_ - dg) > 1) bad_b++;
+                  end
+                  check(bad_b == 0,
+                        $sformatf("G2p off=%0x got=%08x exp=%08x",
+                                  a1 + 4 * i, got, expm[ep + 3]));
                 end else begin
                   u = ulpd(got, expm[ep + 3]);
                   if (u == 1) ulp1++;
@@ -923,6 +966,21 @@ module tb_g6lc_apu_vgsys;
         7: begin // TP_DELAY
           int unsigned n = ntap();
           repeat (n) @(posedge clk);
+        end
+        8: begin // TP_APGUARD [n][per-range: lo lo_hi sz]*n
+          guard_on = 1'b1;
+          guard_n  = ntap();
+          check(guard_n <= APGUARD_MAX, "APGUARD range count");
+          for (int i = 0; i < guard_n; i++) begin
+            logic [63:0] lo;
+            logic [63:0] sz;
+            lo  = 64'(ntap());             // lo32
+            lo |= (64'(ntap()) << 32);     // hi32
+            sz  = 64'(ntap());
+            guard_lo[i] = lo;
+            guard_hi[i] = lo + sz;
+          end
+          $display("[apguard] armed with %0d ranges", guard_n);
         end
         default: $fatal(1, "unknown tape op %0d", op);
       endcase
@@ -950,6 +1008,21 @@ module tb_g6lc_apu_vgsys;
   int unsigned g1_n = 0, g1_bad = 0, g2_n = 0;
   int unsigned ulp1 = 0, ulp2 = 0, maxulp = 0;
 
+  // fp32 bits -> real (Gate-2 'u' class; Verilator-safe manual unpack,
+  // same rule as tb_g6lc_apu_shwave)
+  function automatic real f32r(input logic [31:0] b);
+    int e;
+    real m;
+    e = b[30:23];
+    if (e == 0)
+      m = b[22:0] * (2.0 ** (-149));
+    else if (e == 255)
+      m = 0.0;
+    else
+      m = (1.0 + b[22:0] * (2.0 ** (-23))) * (2.0 ** (e - 127));
+    return b[31] ? -m : m;
+  endfunction
+
   // ---- queue init / reset --------------------------------------------------
   task automatic vq_init(input logic [31:0] u0);
     // u0 = aperture bytes presented to the DUT (64 KiB shrink arm)
@@ -964,6 +1037,7 @@ module tb_g6lc_apu_vgsys;
     uexp[0] = 0;    uexp[1] = 0;
     pend_n = 0; pend_c = 0;
     ap_bytes = u0;
+    guard_on = 1'b0; guard_n = 0;
     qen = 2'b11;
   endtask
 
@@ -1353,7 +1427,7 @@ module tb_g6lc_apu_vgsys;
   always @(negedge clk) begin
     if (dot_v || dot_cv || i_dut.gen_on.i_top.gen_on.ot_cpl_valid ||
         i_dut.gen_on.i_top.gen_on.ot_req_valid)
-      $display("  [eptr t=%0d] st=%0d og=%0d rv=%b rr=%b dv=%b cv=%b dcv=%b vcb=%b vpb=%b rq=%0d iq=%0d rop=%0d rid=%x rst=%0d cop=%x cst=%0d rsid=%x drd=%x",
+      $display("  [eptr t=%0d] st=%0d og=%0d rv=%b rr=%b dv=%b cv=%b dcv=%b vcb=%b vpb=%b rq=%0d iq=%0d rop=%0d rid=%x rst=%0d cop=%x cst=%0d rsid=%x drd=%x rval=%x rmask=%x rax=%x cax=%x",
                cycles,
                i_dut.gen_on.i_top.gen_on.i_tab.gen_on.state_q,
                i_dut.gen_on.i_top.gen_on.og_q,
@@ -1370,7 +1444,160 @@ module tb_g6lc_apu_vgsys;
                i_dut.gen_on.i_top.gen_on.i_tab.gen_on.cpl_q.handle,
                i_dut.gen_on.i_top.gen_on.i_tab.gen_on.cpl_q.status,
                i_dut.gen_on.i_top.gen_on.i_tab.gen_on.res_id_q,
-               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.dir_rdata);
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.dir_rdata,
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.req_q.value,
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.req_q.mask,
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.res_ent_q.aux,
+               i_dut.gen_on.i_top.gen_on.i_tab.gen_on.cpl_q.entry.aux);
+  end
+  // 5b debug: front op-decode dump (imm fields) at decoder completion
+  always @(posedge clk) begin
+    if (i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_done &&
+        i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_op.cmd_type == 32'd70)
+      $display("[dec70 t=%0d] immv=%04x i0=%08x i1=%08x i3=%08x i4=%08x i7=%08x i10=%08x i11=%08x i12=%08x i13=%08x i14=%08x i15=%08x w=%0d",
+               cycles,
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_op.immv,
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_op.imm[0],
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_op.imm[1],
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_op.imm[3],
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_op.imm[4],
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_op.imm[7],
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_op.imm[10],
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_op.imm[11],
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_op.imm[12],
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_op.imm[13],
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_op.imm[14],
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_op.imm[15],
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.i_fr.gen_on.dec_op.words);
+  end
+  // 5b debug: shwave texture-path trace (state transitions, the fetched
+  // record, and the fill port) — compile with -D G6LC_APU_DEBUG
+  logic [7:0] txdbg_st;
+  initial txdbg_st = 8'hFF;
+  always @(posedge clk) begin
+    if (i_dut.gen_on.i_top.gen_on.i_sh.gen_on.i_wave.gen_on.st_q !== txdbg_st) begin
+      txdbg_st = i_dut.gen_on.i_top.gen_on.i_sh.gen_on.i_wave.gen_on.st_q;
+      $display("[txdbg t=%0d] st=%0d txrec79=%x gn=%0d gi=%0d opc=%0d",
+               cycles, txdbg_st,
+               i_dut.gen_on.i_top.gen_on.i_sh.gen_on.i_wave.gen_on.tx_rec_q[79:0],
+               i_dut.gen_on.i_top.gen_on.i_sh.gen_on.i_wave.gen_on.tx_gn_q,
+               i_dut.gen_on.i_top.gen_on.i_sh.gen_on.i_wave.gen_on.tx_gi_q,
+               i_dut.gen_on.i_top.gen_on.i_sh.gen_on.i_wave.gen_on.opc_q);
+    end
+    if (i_dut.gen_on.i_top.gen_on.i_sh.gen_on.i_wave.mem_re_o &&
+        i_dut.gen_on.i_top.gen_on.i_sh.gen_on.i_wave.mem_ready_i)
+      $display("[txmem t=%0d] RE addr=%x", cycles,
+               i_dut.gen_on.i_top.gen_on.i_sh.gen_on.i_wave.mem_addr_o);
+    if (i_dut.gen_on.i_top.gen_on.i_sh.gen_on.i_wave.mem_rvalid_i)
+      $display("[txmem t=%0d] RV data=%x err=%b", cycles,
+               i_dut.gen_on.i_top.gen_on.i_sh.gen_on.i_wave.mem_rdata_i,
+               i_dut.gen_on.i_top.gen_on.i_sh.gen_on.i_wave.mem_err_i);
+  end
+  // 5b debug: pump state trace + StFatal entry (which transition faulted)
+  logic [7:0] pmdbg_st;
+  initial pmdbg_st = 8'hFF;
+  always @(posedge clk) begin
+    if (i_dut.gen_on.i_top.gen_on.i_pump.gen_on.state_q == 8'd7 &&
+        i_dut.gen_on.i_top.gen_on.i_pump.gen_on.dec_done)
+      $display("[pmdec t=%0d] fault=%0d fw=%0d fv=%x ctype=%x words=%0d cn=%0d dq=%0d rs=%b",
+               cycles,
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.dec_op.fault,
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.dec_op.fault_word,
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.dec_op.fault_val,
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.dec_op.cmd_type,
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.dec_op.words,
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.dec_op.chain_n,
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.depth_q,
+               i_dut.gen_on.i_top.gen_on.i_pump.gen_on.st_q[
+                 i_dut.gen_on.i_top.gen_on.i_pump.gen_on.depth_q].ring_stream);
+    if (i_dut.gen_on.i_top.gen_on.i_pump.gen_on.state_q !== pmdbg_st) begin
+      if (i_dut.gen_on.i_top.gen_on.i_pump.gen_on.state_q == 8'd25)
+        $display("[pmfatal t=%0d] prev=%0d frfault=%0d frrepn=%0d reppos=%0d ctype=%x dq=%0d rs=%b rg=%0d hnd=%x",
+                 cycles, pmdbg_st,
+                 i_dut.gen_on.i_top.gen_on.i_pump.gen_on.fr_fault,
+                 i_dut.gen_on.i_top.gen_on.i_pump.gen_on.fr_repn,
+                 i_dut.gen_on.i_top.gen_on.i_pump.gen_on.rep_pos_q,
+                 i_dut.gen_on.i_top.gen_on.i_pump.gen_on.cmd_type_q[
+                   i_dut.gen_on.i_top.gen_on.i_pump.gen_on.depth_q],
+                 i_dut.gen_on.i_top.gen_on.i_pump.gen_on.depth_q,
+                 i_dut.gen_on.i_top.gen_on.i_pump.gen_on.st_q[
+                   i_dut.gen_on.i_top.gen_on.i_pump.gen_on.depth_q].ring_stream,
+                 i_dut.gen_on.i_top.gen_on.i_pump.gen_on.st_q[
+                   i_dut.gen_on.i_top.gen_on.i_pump.gen_on.depth_q].ring,
+                 i_dut.gen_on.i_top.gen_on.i_pump.gen_on.t_hnd_q);
+      else if (i_dut.gen_on.i_top.gen_on.i_pump.gen_on.state_q
+               inside {8'd9, 8'd10, 8'd11, 8'd12, 8'd13, 8'd14})
+        $display("[pm t=%0d] st=%0d (prev=%0d) ctype=%x",
+                 cycles,
+                 i_dut.gen_on.i_top.gen_on.i_pump.gen_on.state_q, pmdbg_st,
+                 i_dut.gen_on.i_top.gen_on.i_pump.gen_on.cmd_type_q[
+                   i_dut.gen_on.i_top.gen_on.i_pump.gen_on.depth_q]);
+      pmdbg_st = i_dut.gen_on.i_top.gen_on.i_pump.gen_on.state_q;
+    end
+  end
+  // 5b debug: cmdexec record walk + xfer work/done trace
+  logic [7:0] cedbg_st;
+  initial cedbg_st = 8'hFF;
+  always @(posedge clk) begin
+    if (i_dut.gen_on.i_top.gen_on.i_exec.gen_on.state_q !== cedbg_st) begin
+      cedbg_st = i_dut.gen_on.i_top.gen_on.i_exec.gen_on.state_q;
+      $display("[ce t=%0d] st=%0d ctype=%0d rec_i=%0d outst=%0d lost=%b",
+               cycles, cedbg_st,
+               i_dut.gen_on.i_top.gen_on.i_exec.gen_on.rec_q.ctype,
+               i_dut.gen_on.i_top.gen_on.i_exec.gen_on.rec_i_q,
+               i_dut.gen_on.i_top.gen_on.i_exec.gen_on.outst_q,
+               i_dut.gen_on.i_top.gen_on.i_exec.gen_on.lost_q);
+    end
+    if (i_dut.gen_on.i_top.gen_on.ex_work_v &&
+        i_dut.gen_on.i_top.gen_on.work_is_xfer)
+      $display("[xf t=%0d] ISSUE op=%0d src=%x/%x dst=%x/%x i0={bs=%x sz=%x lb=%x w=%0d h=%0d mips=%0d lay=%0d fmt=%0d} regs=%0d",
+               cycles,
+               i_dut.gen_on.i_top.gen_on.ex_xfer.op,
+               i_dut.gen_on.i_top.gen_on.ex_xfer.src_base,
+               i_dut.gen_on.i_top.gen_on.ex_xfer.src_size,
+               i_dut.gen_on.i_top.gen_on.ex_xfer.dst_base,
+               i_dut.gen_on.i_top.gen_on.ex_xfer.dst_size,
+               i_dut.gen_on.i_top.gen_on.ex_xfer.img0.base,
+               i_dut.gen_on.i_top.gen_on.ex_xfer.img0.size,
+               i_dut.gen_on.i_top.gen_on.ex_xfer.img0.layer_bytes,
+               i_dut.gen_on.i_top.gen_on.ex_xfer.img0.w,
+               i_dut.gen_on.i_top.gen_on.ex_xfer.img0.h,
+               i_dut.gen_on.i_top.gen_on.ex_xfer.img0.mips,
+               i_dut.gen_on.i_top.gen_on.ex_xfer.img0.layers,
+               i_dut.gen_on.i_top.gen_on.ex_xfer.img0.fmt,
+               i_dut.gen_on.i_top.gen_on.ex_xfer.regions);
+    if (i_dut.gen_on.i_top.gen_on.xf_done)
+      $display("[xf t=%0d] DONE code=%0d", cycles,
+               i_dut.gen_on.i_top.gen_on.xf_done_pl.code);
+  end
+  logic [7:0] xfdbg_st;
+  initial xfdbg_st = 8'hFF;
+  always @(posedge clk) begin
+    if (i_dut.gen_on.i_top.gen_on.i_xf.gen_on.state_q !== xfdbg_st) begin
+      xfdbg_st = i_dut.gen_on.i_top.gen_on.i_xf.gen_on.state_q;
+      $display("[xfs t=%0d] st=%0d fault=%b ri=%0d pay=%x ", cycles,
+               xfdbg_st,
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.xf_fault_q,
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.ri_q,
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.pay_adr_q);
+    end
+    if (i_dut.gen_on.i_top.gen_on.i_xf.gen_on.state_q == 5'd16)
+      $display("[xfr t=%0d] rg=%x %x %x %x %x %x %x %x %x %x %x %x %x %x",
+               cycles,
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.rg_q[0],
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.rg_q[1],
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.rg_q[2],
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.rg_q[3],
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.rg_q[4],
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.rg_q[5],
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.rg_q[6],
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.rg_q[7],
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.rg_q[8],
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.rg_q[9],
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.rg_q[10],
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.rg_q[11],
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.rg_q[12],
+               i_dut.gen_on.i_top.gen_on.i_xf.gen_on.rg_q[13]);
   end
 `endif
   task automatic ot_op(input  apu_objtab_op_e     op,

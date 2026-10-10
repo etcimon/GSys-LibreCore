@@ -111,6 +111,11 @@ module g6lc_apu_vgctl
   output logic [7:0]      xs_ctx_o,
   input  logic            xs_done_i,
   input  logic            xs_fault_i,
+  // context kill: one registered pulse per CTX_DESTROY so the ring
+  // pump can retire that context's rings deterministically (they
+  // would otherwise linger as defence-in-depth ring_overlap only)
+  output logic            ctx_kill_valid_o,
+  output logic [7:0]      ctx_kill_id_o,
   // completion
   output logic            busy_o,
   output logic            done_o,          // pulse: resp+used published
@@ -154,6 +159,7 @@ module g6lc_apu_vgctl
     assign xs_valid_o = 1'b0;    assign xs_desc_o = '{default: '0};
     assign xs_ndesc_o = '0;      assign xs_off_o = '0;
     assign xs_bytes_o = '0;      assign xs_ctx_o = '0;
+    assign ctx_kill_valid_o = 1'b0; assign ctx_kill_id_o = '0;
     assign busy_o = 1'b0;        assign done_o = 1'b0;
     assign used_len_o = '0;
     assign fence_done_o = 1'b0;  assign fence_id_o = '0;
@@ -369,9 +375,11 @@ module g6lc_apu_vgctl
         pg_op_q <= APU_VGPAGES_OP_ALLOC; pg_base_q <= '0;
         pg_bytes_q <= '0; pg_ret_q <= StIdle;
         reap_kind_q <= '0; reap_aux_q <= '0; reap_size_q <= '0;
+        ctx_kill_valid_o <= 1'b0; ctx_kill_id_o <= '0;
         for (int i = 0; i < REQW; i++) req_ram[i] <= '0;
         for (int i = 0; i < RESPW; i++) resp_ram[i] <= '0;
       end else begin
+        ctx_kill_valid_o <= 1'b0;
         unique case (state_q)
           // ----------------------------------------------------------
           StIdle: begin
@@ -495,7 +503,13 @@ module g6lc_apu_vgctl
                     state_q <= StOtReq;   // ALLOC the context entry
                   end
                 end
-                APU_VG_CTX_DESTROY: state_q <= StOtReq;   // RESET_CTX
+                APU_VG_CTX_DESTROY: begin
+                  // deterministic ring retirement: notify vnpump the
+                  // context is dead so its rings stop publishing
+                  ctx_kill_valid_o <= 1'b1;
+                  ctx_kill_id_o    <= 8'(rctx_q);
+                  state_q          <= StOtReq;   // RESET_CTX
+                end
                 APU_VG_CTX_ATTACH, APU_VG_CTX_DETACH: begin
                   state_q <= StOtReq;     // LOOKUP the resource
                 end
@@ -1063,6 +1077,8 @@ module g6lc_apu_vgctl_fixture
   output logic [7:0]      xs_ctx_o,
   input  logic            xs_done_i,
   input  logic            xs_fault_i,
+  output logic            ctx_kill_valid_o,
+  output logic [7:0]      ctx_kill_id_o,
   output logic            busy_o,
   output logic            done_o,
   output logic [31:0]     used_len_o,

@@ -136,6 +136,12 @@ module g6lc_apu_vnpump
   input  logic [15:0]        ex_fence_signaled_i,
   input  logic [15:0]        ex_fence_lost_i,
   output logic [15:0]        ex_fence_clr_o,
+  // context kill (§12.3 5b-r2): registered pulse from vgctl's
+  // CTX_DESTROY — retire the context's rings deterministically so a
+  // later memory blob remapped at the same window never sees a dead
+  // ring's FATAL/idle status or head publish
+  input  logic               ctx_kill_valid_i,
+  input  logic [7:0]         ctx_kill_id_i,
   // observability
   output logic            busy_o,
   output logic [Rings-1:0]       ring_active_o,
@@ -197,6 +203,7 @@ module g6lc_apu_vnpump
                     pg_req_ready_i | pg_cpl_valid_i | (|pg_cpl_i) |
                     ex_submit_ready_i | (|ex_done_seq_i) |
                     (|ex_fence_signaled_i) | (|ex_fence_lost_i) |
+                    ctx_kill_valid_i | (|ctx_kill_id_i) |
                     (|xs_desc_i[0]) | (|xs_desc_i[1]) |
                     (|xs_desc_i[2]) | (|xs_desc_i[3]);
   end else begin : gen_on
@@ -528,6 +535,14 @@ module g6lc_apu_vnpump
     logic pump_rd_done, pump_wr_done;
     assign pump_rd_done = mp_rvalid_i && rsp_owner_q == OW_PRD;
     assign pump_wr_done = mp_rvalid_i && rsp_owner_q == OW_PWR;
+    // ctx-kill same-cycle guard: a kill pulse landing in the cycle a
+    // ring stream was about to publish head or write FATAL status must
+    // still suppress the write (the registered retire applies from
+    // the next cycle)
+    wire kill_strm = ctx_kill_valid_i &&
+                     st_q[depth_q].ctx == ctx_kill_id_i;
+    wire kill_strm0 = ctx_kill_valid_i &&
+                      st_q[0].ctx == ctx_kill_id_i;
     assign dec_rdata = mp_rd32;
     assign fr_rdata  = mp_rd32;
 
@@ -583,6 +598,24 @@ module g6lc_apu_vnpump
       return -1;
     endfunction
 
+    // live ring g's poll tail or command buffer collides with a
+    // candidate ring window [lo,hi) (or its buffer covers the
+    // candidate): the guest reused the shmem window without
+    // vkDestroyRingMESA (process teardown frees the blob while
+    // the device slot stays live); the stale slot's cached head
+    // would mis-frame the new owner's stream and its FATAL/idle
+    // status writes would corrupt it, so the slot is retired
+    function automatic logic ring_overlap(input int g,
+        input logic [APU_VG_AP_WORD_W-1:0] lo,
+        input logic [APU_VG_AP_WORD_W-1:0] hi);
+      return ring_q[g].live &&
+             ((lo <= ring_q[g].tail_w && ring_q[g].tail_w < hi) ||
+              (lo <= ring_q[g].buf_w  && ring_q[g].buf_w  < hi) ||
+              (ring_q[g].buf_w <= lo &&
+               lo < ring_q[g].buf_w +
+                    APU_VG_AP_WORD_W'(ring_q[g].buf_size >> 2)));
+    endfunction
+
     // power of two and non-zero
     function automatic logic pow2nz(input logic [31:0] v);
       return v != 32'h0 && (v & (v - 32'd1)) == 32'h0;
@@ -622,6 +655,25 @@ module g6lc_apu_vnpump
         if (mp_req_o && mp_ready_i) begin
           rsp_owner_q <= src;
           rsp_hi_q    <= mp_addr_o[2];
+        end
+
+        // §12.3 5b-r2 CTX_DESTROY: retire every live ring of the dead
+        // context with NO status write — the aperture window can be
+        // re-assigned to another context's memory blob at once, and a
+        // dead ring must never write FATAL/IDLE there.  In-flight ring
+        // streams of that ctx are demoted (ring_stream <= 0) so they
+        // neither publish head (StNext gate) nor write status on fault
+        // (StFatal gate); they still drain their bytes harmlessly —
+        // ObjTab lookups under the tombstoned ctx fail truthfully.
+        // ring_overlap stays as defence in depth for window reuse.
+        if (ctx_kill_valid_i) begin
+          for (int i = 0; i < Rings; i++)
+            if (ring_q[i].live && ring_q[i].ctx == ctx_kill_id_i)
+              ring_q[i].live <= 1'b0;
+          for (int i = 0; i < 2; i++)
+            if (st_q[i].live && st_q[i].ring_stream &&
+                st_q[i].ctx == ctx_kill_id_i)
+              st_q[i].ring_stream <= 1'b0;
         end
 
         unique case (state_q)
@@ -979,6 +1031,18 @@ module g6lc_apu_vnpump
                 else begin
                   // ring aperture base = blob base + (off >> 2)
                   gap_q <= '0; gap_cnt_q <= '0;   // new live ring
+                  // the new ring claims its window; retire any stale
+                  // slot whose tail/buffer the window covers (shmem
+                  // reuse without vkDestroyRingMESA) with no status
+                  // write -- the words now belong to the new owner
+                  for (int g = 0; g < Rings; g++)
+                    if (ring_overlap(g,
+                            blob_base_w_q +
+                            APU_VG_AP_WORD_W'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2),
+                            blob_base_w_q +
+                            APU_VG_AP_WORD_W'((tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] +
+                                               tbuf[depth_q][13 + 4 * cmd_cn_q[depth_q]]) >> 2)))
+                      ring_q[g].live <= 1'b0;
                   ring_q[ring_free()] <=
                     '{live: 1'b1, fatal: 1'b0, idle: 1'b0,
                       handle: t_hnd_q,
@@ -1068,7 +1132,11 @@ module g6lc_apu_vnpump
             // side effects complete: publish consumed head for rings
             st_q[depth_q].pos <= st_q[depth_q].pos +
                                  32'(cmd_words_q[depth_q]) * 32'd4;
-            if (st_q[depth_q].ring_stream) begin
+            // a slot retired by a same-window CreateRing mid-stream
+            // (or guest DestroyRing) must not publish head -- the
+            // words now belong to the ring's new owner
+            if (st_q[depth_q].ring_stream &&
+                ring_q[st_q[depth_q].ring].live && !kill_strm) begin
               ring_q[st_q[depth_q].ring].head <=
                 ring_q[st_q[depth_q].ring].head +
                 32'(cmd_words_q[depth_q]) * 32'd4;
@@ -1092,7 +1160,11 @@ module g6lc_apu_vnpump
               if (depth_q) begin
                 depth_q <= 1'b0;
                 state_q <= StWinNext;
-              end else if (st_q[0].ring_stream) begin
+              end else if (st_q[0].kind != SK_LIN_GM) begin
+                // ring streams — including ones demoted by ctx-kill —
+                // drain silently to idle; xs_done_o/xs_fault_o belong
+                // to execbuffer streams only, so a killed ring must
+                // not pulse a phantom completion to vgctl
                 st_q[0].live <= 1'b0;
                 state_q <= StIdle;
               end else begin
@@ -1106,7 +1178,7 @@ module g6lc_apu_vnpump
 
           // ---- fatal ------------------------------------------------------------
           StFatal: begin
-            if (st_q[depth_q].ring_stream) begin
+            if (st_q[depth_q].ring_stream && !kill_strm) begin
               ring_q[st_q[depth_q].ring].fatal <= 1'b1;
               wr_addr_q <= ring_q[st_q[depth_q].ring].status_w;
               wr_data_q <= APU_VNRING_ALIVE | APU_VNRING_FATAL |
@@ -1114,7 +1186,11 @@ module g6lc_apu_vnpump
                             ? APU_VNRING_IDLE : 32'h0);
               state_q <= StFatalWr;
             end else begin
-              fatal_stream_q <= 1'b1;
+              // only execbuffer streams may set xs_fault_o; a ring
+              // stream demoted by ctx-kill (or faulting in a nested
+              // window under a ring outer) drains silently instead
+              if (st_q[0].kind == SK_LIN_GM)
+                fatal_stream_q <= 1'b1;
               st_q[depth_q].live <= 1'b0;
               state_q <= StFatalNext;
             end
@@ -1131,7 +1207,7 @@ module g6lc_apu_vnpump
               // a nested-window fault kills the outer stream too
               depth_q <= 1'b0;
               st_q[1].live <= 1'b0;
-              if (st_q[0].ring_stream) begin
+              if (st_q[0].ring_stream && !kill_strm0) begin
                 ring_q[st_q[0].ring].fatal <= 1'b1;
                 wr_addr_q <= ring_q[st_q[0].ring].status_w;
                 wr_data_q <= APU_VNRING_ALIVE | APU_VNRING_FATAL |
@@ -1139,9 +1215,12 @@ module g6lc_apu_vnpump
                               ? APU_VNRING_IDLE : 32'h0);
                 state_q <= StFatalWr2;
               end else begin
-                state_q <= StXsDone;
+                // execbuffer outers report; ring outers (live or
+                // ctx-kill demoted) drain silently
+                state_q <= st_q[0].kind == SK_LIN_GM ? StXsDone
+                                                     : StIdle;
               end
-            end else if (st_q[0].ring_stream) begin
+            end else if (st_q[0].kind != SK_LIN_GM) begin
               state_q <= StIdle;   // ring dead until DestroyRing
             end else begin
               state_q <= StXsDone;
@@ -1245,6 +1324,8 @@ module g6lc_apu_vnpump_fixture
   input  logic [15:0]        ex_fence_signaled_i,
   input  logic [15:0]        ex_fence_lost_i,
   output logic [15:0]        ex_fence_clr_o,
+  input  logic            ctx_kill_valid_i,
+  input  logic [7:0]      ctx_kill_id_i,
   output logic            busy_o,
   output logic [Rings-1:0]       ring_active_o,
   output logic [Rings-1:0][31:0] ring_status_o,

@@ -1,0 +1,18 @@
+#version 450
+// §12.3 C/5b guest proof — two combined image samplers (CLAMP_TO_EDGE
+// vs REPEAT) bilinear-sample an rgba8 texture at fractional coords and
+// imageStore into an rgba32f storage image; the host reads it back via
+// vkCmdCopyImageToBuffer and compares against a CPU reference.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D texEdge;
+layout(set = 0, binding = 1) uniform sampler2D texRep;
+layout(set = 0, binding = 2, rgba32f) uniform writeonly image2D dst;
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    float u = float(i) * 0.19 - 0.07;    // dips below 0 and past 1
+    float v = 0.13 + float(i & 3) * 0.37;
+    imageStore(dst, ivec2(i & 3, i >> 2),
+               textureLod(texEdge, vec2(u, v), 0.0));
+    imageStore(dst, ivec2(4 + (i & 3), i >> 2),
+               textureLod(texRep, vec2(u, v), 0.0));
+}

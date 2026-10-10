@@ -191,12 +191,13 @@ module g6lc_apu_cmdexec
     // bind-descriptor-set arena walk cursor
     logic                pay_bind_q;
     // §12.3 C/5a: Xfer assembly — operand cursor and resolved extents
-    logic                xf_opnd_q;     // 0 = src (COPY) / dst (others)
+    logic [1:0]          xf_opnd_q;     // operand walk cursor (0/1)
     logic [15:0]         xf_ms_q;       // bound memory slot
-    logic [63:0]         xf_bo_q;       // buffer bind_offset
-    logic [63:0]         xf_bs_q;       // buffer size
+    logic [63:0]         xf_bo_q;       // resource bind_offset
+    logic [63:0]         xf_bs_q;       // resource bound size
     logic [31:0]         xf_src_base_q, xf_src_size_q;
     logic [31:0]         xf_dst_base_q, xf_dst_size_q;
+    apu_xfer_img_t       xf_img0_q, xf_img1_q;
 
     // XFER-class record types, assembled through the StXf* states
     wire work_is_xfer = rec_q.ctype ==
@@ -204,14 +205,41 @@ module g6lc_apu_cmdexec
                         rec_q.ctype ==
                         32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT) ||
                         rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT);
-    // operand 0 resolves handle[0] (src for COPY, dst otherwise);
-    // operand 1 is COPY's dst at handle[1] — record handles pack the
-    // non-commandBuffer lookup slots sequentially from 0 (the same
-    // packing StRecFill/StDispatch rely on, e.g. pipeline at [0])
-    wire [1:0] xf_hsel = rec_q.ctype ==
-                        32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT)
-                        ? {1'b0, xf_opnd_q} : 2'd0;
+                        32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT) ||
+                        rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT) ||
+                        rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT) ||
+                        rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) ||
+                        rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT);
+    // operand handles pack the non-commandBuffer lookup slots
+    // sequentially: {srcBuffer,dstImage}, {srcImage,dstBuffer},
+    // {srcImage,dstImage}, {image} — operand n rides handle[n].
+    wire [1:0] xf_hsel = xf_opnd_q;
+    // operand n is an image for every image-class type except the
+    // B2I buffer (op 0) and the I2B buffer (op 1)
+    wire xf_op_img =
+        (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT)) ||
+        (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT)) ||
+        (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT)
+         && xf_opnd_q == 2'd1) ||
+        (rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT)
+         && xf_opnd_q == 2'd0);
+    // image-desc slot: I2I's second operand lands in img1
+    wire xf_img_sel = rec_q.ctype ==
+                      32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) &&
+                      xf_opnd_q == 2'd1;
+    // two-operand records revisit the walk once
+    wire xf_two_ops = rec_q.ctype ==
+                      32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
+                      rec_q.ctype ==
+                      32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT) ||
+                      rec_q.ctype ==
+                      32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT) ||
+                      rec_q.ctype ==
+                      32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT);
 
     // ---- record classification --------------------------------------
     function automatic apu_cmdexec_cls_e rec_cls(logic [31:0] t);
@@ -275,12 +303,35 @@ module g6lc_apu_cmdexec
     assign xf_o = '{op: rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT)
                         ? APU_XFER_OP_COPY :
                     rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT)
-                        ? APU_XFER_OP_FILL : APU_XFER_OP_UPDATE,
+                        ? APU_XFER_OP_FILL :
+                    rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT)
+                        ? APU_XFER_OP_UPDATE :
+                    rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT)
+                        ? APU_XFER_OP_B2I :
+                    rec_q.ctype ==
+                        32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT)
+                        ? APU_XFER_OP_I2B :
+                    rec_q.ctype == 32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT)
+                        ? APU_XFER_OP_I2I : APU_XFER_OP_CLEARI,
                    cbuf:     cur_q.crec[buf_i_q[1:0]],
                    pay_base: rec_q.imm[7][15:0],
-                   regions:  rec_q.imm[0][15:0],
+                   // region/range count rides imm[2] (CopyImage),
+                   // imm[1] (B2I/I2B/CLEAR behind imageLayout) or
+                   // imm[0] (CopyBuffer)
+                   regions:  rec_q.ctype ==
+                             32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT)
+                             ? rec_q.imm[2][15:0]
+                             : rec_q.ctype ==
+                               32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) ||
+                               rec_q.ctype ==
+                               32'(APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT) ||
+                               rec_q.ctype ==
+                               32'(APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT)
+                               ? rec_q.imm[0][15:0] : rec_q.imm[1][15:0],
                    src_base: xf_src_base_q, src_size: xf_src_size_q,
-                   dst_base: xf_dst_base_q, dst_size: xf_dst_size_q};
+                   dst_base: xf_dst_base_q, dst_size: xf_dst_size_q,
+                   img0: xf_img0_q, img1: xf_img1_q};
     assign desc_o         = desc_q;
     assign push_n_o       = push_max_q;
     assign push_o         = push_sh_q;
@@ -409,12 +460,14 @@ module g6lc_apu_cmdexec
           work_o       = '{ctype: rec_q.ctype, snap: snap_q, rec: rec_q};
         end
         StXfBufReq: begin
-          // §5a: re-resolve the operand buffer (kind already proven by
-          // the StRes walk; we need the live entry fields)
+          // §5a: re-resolve the operand resource (kind already proven
+          // by the StRes walk; we need the live entry fields)
           ot_req_valid_o = 1'b1;
           ot_req_o       = '{op: APU_OBJTAB_OP_LOOKUP,
                              id: {32'h0, rec_q.handle[xf_hsel]},
-                             kind: 6'(APU_VN_KIND_VK_BUFFER),
+                             kind: xf_op_img
+                                  ? 6'(APU_VN_KIND_VK_IMAGE)
+                                  : 6'(APU_VN_KIND_VK_BUFFER),
                              default: '0};
         end
         StXfMemReq: begin
@@ -489,6 +542,7 @@ module g6lc_apu_cmdexec
         xf_bs_q     <= '0;
         xf_src_base_q <= '0; xf_src_size_q <= '0;
         xf_dst_base_q <= '0; xf_dst_size_q <= '0;
+        xf_img0_q   <= '0; xf_img1_q <= '0;
       end else begin
         // work completions retire outstanding items; a non-OK done
         // code (§7b/5a-ii: FAULT/BUDGET/UNSUPPORTED from shcore)
@@ -953,7 +1007,10 @@ module g6lc_apu_cmdexec
           end
 
           // ---- §12.3 C/5a: Xfer operand assembly ----------------------
-          // operand buffer -> {bind_mem_slot, bind_offset, size}
+          // operand resource -> {bind_mem_slot, bind_offset, size};
+          // §12.3 C/5b: image operands additionally carry the layout
+          // vnfront packed into aux={usage,layers,mips,fmt,h,w} and
+          // state=layer_bytes>>6
           StXfBufReq: if (ot_req_ready_i) state_q <= StXfBufCpl;
           StXfBufCpl: if (ot_cpl_valid_i) begin
             if (ot_cpl_i.status != APU_OBJTAB_OK ||
@@ -966,6 +1023,25 @@ module g6lc_apu_cmdexec
               xf_ms_q <= ot_cpl_i.entry.bind_mem_slot;
               xf_bo_q <= ot_cpl_i.entry.bind_offset;
               xf_bs_q <= ot_cpl_i.entry.size;
+              if (xf_op_img) begin
+                if (xf_img_sel) begin
+                  xf_img1_q.w           <= ot_cpl_i.entry.aux[15:0];
+                  xf_img1_q.h           <= ot_cpl_i.entry.aux[31:16];
+                  xf_img1_q.fmt         <= ot_cpl_i.entry.aux[39:32];
+                  xf_img1_q.mips        <= ot_cpl_i.entry.aux[44:40];
+                  xf_img1_q.layers      <= ot_cpl_i.entry.aux[53:45];
+                  xf_img1_q.layer_bytes <=
+                      {7'h0, ot_cpl_i.entry.state[18:0], 6'h0};
+                end else begin
+                  xf_img0_q.w           <= ot_cpl_i.entry.aux[15:0];
+                  xf_img0_q.h           <= ot_cpl_i.entry.aux[31:16];
+                  xf_img0_q.fmt         <= ot_cpl_i.entry.aux[39:32];
+                  xf_img0_q.mips        <= ot_cpl_i.entry.aux[44:40];
+                  xf_img0_q.layers      <= ot_cpl_i.entry.aux[53:45];
+                  xf_img0_q.layer_bytes <=
+                      {7'h0, ot_cpl_i.entry.state[18:0], 6'h0};
+                end
+              end
               state_q <= StXfMemReq;
             end
           end
@@ -983,7 +1059,7 @@ module g6lc_apu_cmdexec
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
             end else begin
-              // operand extent = min(buffer.size, memory.size -
+              // operand extent = min(res.size, memory.size -
               // bind_offset) — the same defence-in-depth clamp the
               // dispatch path applies; all values are < 4 GiB here
               automatic logic [63:0] rem_m =
@@ -992,17 +1068,45 @@ module g6lc_apu_cmdexec
                   xf_bs_q < rem_m ? xf_bs_q[31:0] : rem_m[31:0];
               automatic logic [31:0] xb =
                   ot_cpl_i.entry.aux[63:32] + xf_bo_q[31:0];
-              if (rec_q.ctype ==
-                  32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT) &&
-                  xf_opnd_q == 1'b0) begin
+              if (xf_op_img) begin
+                if (xf_img_sel) begin
+                  xf_img1_q.base <= xb;
+                  xf_img1_q.size <= xs;
+                end else begin
+                  xf_img0_q.base <= xb;
+                  xf_img0_q.size <= xs;
+                end
+                if (xf_two_ops && xf_opnd_q == 2'd0) begin
+                  xf_opnd_q <= 2'd1;
+                  state_q   <= StXfBufReq;
+                end else begin
+                  state_q <= StWork;
+                end
+              end else if (xf_two_ops && xf_opnd_q == 2'd0 &&
+                           rec_q.ctype ==
+                           32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT)) begin
                 xf_src_base_q <= xb;
                 xf_src_size_q <= xs;
-                xf_opnd_q     <= 1'b1;
+                xf_opnd_q     <= 2'd1;
                 state_q       <= StXfBufReq;
               end else begin
-                xf_dst_base_q <= xb;
-                xf_dst_size_q <= xs;
-                state_q       <= StWork;
+                // single-operand records land their buffer in dst; a
+                // B2I source buffer / I2B destination buffer lands in
+                // src/dst respectively per the op direction
+                if (rec_q.ctype ==
+                    32'(APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT)) begin
+                  xf_src_base_q <= xb;
+                  xf_src_size_q <= xs;
+                end else begin
+                  xf_dst_base_q <= xb;
+                  xf_dst_size_q <= xs;
+                end
+                if (xf_two_ops && xf_opnd_q == 2'd0) begin
+                  xf_opnd_q <= 2'd1;
+                  state_q   <= StXfBufReq;
+                end else begin
+                  state_q <= StWork;
+                end
               end
             end
           end

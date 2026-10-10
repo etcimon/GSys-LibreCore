@@ -73,7 +73,17 @@ ue_cneg_deadpool_1 ue_cneg_poolfull_1 \
 ue_cpos_xfer_copy_1 ue_cpos_xfer_update_1 \
 ue_cneg_xfer_oob_1 ue_cneg_xfer_overlap_1 \
 ue_cpos_poolreset_1 ue_cpos_dslcompat_1 \
-ue_cpos_memsplit_1 ue_cneg_unbacked_1"
+ue_cpos_memsplit_1 ue_cneg_unbacked_1 \
+ue_cpos_texfetch_1 ue_cpos_texfetch_mip_1 ue_cpos_texarr_1 \
+ue_cpos_texlod_lin_1 ue_cpos_texlod_mip_1 ue_cpos_texquery_1 \
+ue_cpos_texsrgb_1 ue_cpos_imgloadstore_1 \
+ue_cneg_texfetch_bad_1 ue_cneg_texlod_lin_bad_1 \
+ue_cneg_imgloadstore_bad_1 ue_cneg_texquery_bad_1 \
+ue_cneg_badfmt_1 ue_cneg_viewoob_1 ue_cneg_kindmix_1 \
+ue_cneg_xfer_img_oob_1 ue_cneg_unnorm_1 \
+ue_cpos_clear_rgba8_1 ue_cpos_clear_r32f_1 ue_cpos_clear_r32u_1 \
+ue_cpos_clear_srgb_1 ue_cpos_clear_rgba16f_1 \
+ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1"
 
 run_step() {
   local step="$1"; shift

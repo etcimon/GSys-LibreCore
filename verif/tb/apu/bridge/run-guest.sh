@@ -85,8 +85,9 @@ provision() {
     xorrisofs -quiet -V CIDATA -r -o "$GUEST_CACHE/cidata.img" \
       "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
       "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
+      "$GUEST/vkimage.c" \
       "$GUEST/expected.json" \
-      "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv"
+      "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv"
   fi
   if [ ! -f "$GUEST_CACHE/swap.raw" ]; then
     truncate -s 768M "$GUEST_CACHE/swap.raw"
@@ -110,8 +111,9 @@ if [ -f "$GUEST_CACHE/cidata.img" ] && \
   xorrisofs -quiet -V CIDATA -r -o "$GUEST_CACHE/cidata.img" \
     "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
     "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
+    "$GUEST/vkimage.c" \
     "$GUEST/expected.json" \
-    "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv"
+    "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv"
 fi
 
 need_build=0

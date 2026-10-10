@@ -59,6 +59,7 @@ vkCreateBufferView
 vkDestroyBufferView
 vkCreateImage
 vkDestroyImage
+vkGetImageSubresourceLayout
 vkCreateImageView
 vkDestroyImageView
 vkCreateSampler

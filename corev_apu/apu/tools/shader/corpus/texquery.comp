@@ -1,0 +1,15 @@
+#version 450
+// §12.3 C/5b — query ops: textureSize (QuerySizeLod), imageSize
+// (QuerySize on a storage image), textureQueryLevels.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D tex;
+layout(set = 0, binding = 1, r32ui) uniform readonly uimage2D img;
+layout(set = 0, binding = 2) buffer Out { ivec4 o[]; } ob;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    ivec2 s0 = textureSize(tex, i & 1);
+    ivec2 si = imageSize(img);
+    int lv = textureQueryLevels(tex);
+    ob.o[i] = ivec4(s0.x + si.x, s0.y + si.y, lv, i);
+}

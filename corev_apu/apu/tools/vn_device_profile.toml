@@ -41,10 +41,15 @@ fragmentStoresAndAtomics = true
 robustBufferAccess = true
 # §12.3 F5: descriptor-array indexing is lowered onto the LSU record
 # path (descarr/multiset/arroob corpus, shwave cases 220+); both buffer
-# classes resolve through the same {base,size} record fetch.
+# classes resolve through the same {base,size} record fetch.  §12.3 5b:
+# image/sampler records resolve through the identical per-lane path, so
+# the image dynamic-indexing features are equally truthful.
 shaderStorageBufferArrayDynamicIndexing = true
 shaderUniformBufferArrayDynamicIndexing = true
+shaderSampledImageArrayDynamicIndexing = true
+shaderStorageImageArrayDynamicIndexing = true
 shaderStorageImageWriteWithoutFormat = false
+shaderStorageImageReadWithoutFormat = false
 
 [limits]
 # VkPhysicalDeviceLimits members set non-zero; everything else stays 0.
@@ -58,7 +63,16 @@ maxDescriptorSetUniformBuffers = 16
 maxDescriptorSetStorageBuffers = 16
 maxDescriptorSetUniformBuffersDynamic = 16
 maxDescriptorSetStorageBuffersDynamic = 16
+# §12.3 5b: image/sampler descriptor classes bound by the same
+# 16-row binding table (APU_DESC_BND)
+maxPerStageDescriptorSamplers = 16
+maxPerStageDescriptorSampledImages = 16
+maxPerStageDescriptorStorageImages = 16
+maxDescriptorSetSamplers = 16
+maxDescriptorSetSampledImages = 16
+maxDescriptorSetStorageImages = 16
 maxImageDimension2D = 4096
+maxImageArrayLayers = 256
 maxPushConstantsSize = 128
 maxComputeWorkGroupSize = [64, 64, 64]
 maxComputeWorkGroupInvocations = 64
@@ -66,12 +80,30 @@ maxComputeSharedMemorySize = 16384
 minUniformBufferOffsetAlignment = 256
 minStorageBufferOffsetAlignment = 256
 nonCoherentAtomSize = 64
-maxViewports = 1
-maxColorAttachments = 4
-maxFramebufferWidth = 4096
-maxFramebufferHeight = 4096
-maxVertexInputAttributes = 16
-maxVertexInputBindings = 16
+# §12.3 5b-r2: graphics-only limits stay 0 until raster lands —
+# queueFlags advertises COMPUTE|TRANSFER only, so framebuffer/viewport/
+# vertex-input capability must not leak through the limits table.
+maxViewports = 0
+maxColorAttachments = 0
+maxFramebufferWidth = 0
+maxFramebufferHeight = 0
+maxVertexInputAttributes = 0
+maxVertexInputBindings = 0
+# sampler truth: the shwave sampler implements 4.4 fixed-point LOD and
+# ignores anisotropy entirely (not advertised)
+maxSamplerLodBias = 15.0
+maxSamplerAnisotropy = 1.0
+# both allocation counts are bounded by the shared ObjTab entry table —
+# every live sampler/memory consumes one slot, and the table is sized
+# far below the spec's 4096 defaults
+maxSamplerAllocationCount = 64
+maxMemoryAllocationCount = 64
+maxUniformBufferRange = 0x01000000
+maxStorageBufferRange = 0x01000000
+mipmapPrecisionBits = 4
+subTexelPrecisionBits = 8
+maxPerStageResources = 16
+minMemoryMapAlignment = 4096
 
 [memory]
 # VkPhysicalDeviceMemoryProperties: two heaps (§12.3 C).
@@ -89,17 +121,41 @@ type1_flags = "DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT"
 type1_heap = 1
 
 [queue_family0]
-queueFlags = "GRAPHICS|COMPUTE|TRANSFER"
+# §12.3 5b-r2: truthful capability — compute + transfer only.  GRAPHICS
+# returns with raster support (and evidence), not before.
+queueFlags = "COMPUTE|TRANSFER"
 queueCount = 1
 timestampValidBits = 64
 minImageTransferGranularity = [1, 1, 1]
 
 [formats]
-# name = optimalTiling feature names (linear/buffer mirror unless overridden).
-# Color formats get SAMPLED|COLOR_ATTACHMENT|BLIT_SRC|BLIT_DST|TRANSFER_SRC|TRANSFER_DST;
-# depth formats get SAMPLED|DEPTH_STENCIL_ATTACHMENT|TRANSFER_SRC|TRANSFER_DST.
-color = ["R8G8B8A8_UNORM", "B8G8R8A8_UNORM", "R16G16B16A16_SFLOAT", "R32_SFLOAT", "R32G32B32A32_SFLOAT"]
-depth = ["D32_SFLOAT", "D24_UNORM_S8_UINT"]
+# §12.3 5b: explicit per-format feature table — the truth of what the
+# shader/Xfer paths implement; no COLOR/DEPTH_STENCIL attachment or
+# BLIT features until raster lands.  Keys:
+#   f      = VkFormatFeatureFlagBits names (VK_FORMAT_FEATURE_*_BIT),
+#            identical for linear/optimal/buffer columns
+#   bpp    = texel bytes
+#   comps  = component count (default 4)
+#   srgb   = texels are sRGB-encoded (decode via the generated LUT)
+#   bgr    = B/R channels swapped vs R8G8B8A8 order
+#   half   = fp16 components, flt = fp32 components, uint = raw integers
+# Each entry also yields a generated device format id (APU_IMG_FMT_*,
+# in declaration order) used by the descriptor record's fmt field.
+R8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 1, comps = 1 }
+R8G8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 2, comps = 2 }
+R8G8B8A8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 4 }
+R8G8B8A8_SRGB = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST", bpp = 4, srgb = 1 }
+B8G8R8A8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 4, bgr = 1 }
+B8G8R8A8_SRGB = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST", bpp = 4, bgr = 1, srgb = 1 }
+R16G16B16A16_SFLOAT = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 8, half = 1 }
+R32_SFLOAT = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 4, comps = 1, flt = 1 }
+R32G32_SFLOAT = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 8, comps = 2, flt = 1 }
+R32G32B32A32_SFLOAT = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 16, flt = 1 }
+R32_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 4, comps = 1, uint = 1 }
+R32G32B32A32_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 16, uint = 1 }
+# depth formats: known to the wire but advertise no features
+D32_SFLOAT = { f = "" }
+D24_UNORM_S8_UINT = { f = "" }
 
 [device_extensions]
 # vkEnumerateDeviceExtensionProperties elements.  In the Venus model the
@@ -135,7 +191,7 @@ maxMemoryAllocationSize = 0x2000000
 [image_format_props]
 # VkImageFormatProperties body for a supported 2D image.
 maxMipLevels = 13
-maxArrayLayers = 1
+maxArrayLayers = 256
 maxResourceSize = 0x2000000
 sampleCounts = 1
 
@@ -255,16 +311,33 @@ fields = ["pPoolSizes.type", "pPoolSizes.descriptorCount"]
 # {set layout ids (2w each)}
 fields = ["pSetLayouts"]
 
+# Handles legal-null on the wire: decode role OPTIONAL (skips the
+# HANDLE_ZERO fault).  VkDescriptorImageInfo.{sampler,imageView} are
+# vk.xml noautovalidity "ignored otherwise" — real Mesa sends the
+# unused member verbatim as 0 (SAMPLER writes post imageView=0,
+# {SAMPLED,STORAGE}_IMAGE writes post sampler=0).  The front still
+# resolves the member the descriptor type actually needs and poisons
+# the set on a miss.
+[optional_handles.vkUpdateDescriptorSets]
+fields = ["pDescriptorWrites.pImageInfo.sampler",
+          "pDescriptorWrites.pImageInfo.imageView"]
+
 [keep.vkUpdateDescriptorSets]
 # per write {dstSet (2w), dstBinding, dstArrayElement, descriptorCount,
-#            descriptorType, per pBufferInfo {buffer (2w), offset (2w),
-#            range (2w)}}; per copy {srcSet (2w), srcBinding,
+#            descriptorType, per pImageInfo {sampler (2w), imageView
+#            (2w), imageLayout}, per pBufferInfo {buffer (2w), offset
+#            (2w), range (2w)}}; per copy {srcSet (2w), srcBinding,
 #            srcArrayElement, dstSet (2w), dstBinding, dstArrayElement,
-#            descriptorCount}
+#            descriptorCount}.  The pImageInfo array precedes
+#            pBufferInfo in decode order, so an image-descriptor write
+#            stages 5 words per element where a buffer write stages 6.
 fields = ["pDescriptorWrites.dstSet", "pDescriptorWrites.dstBinding",
           "pDescriptorWrites.dstArrayElement",
           "pDescriptorWrites.descriptorCount",
           "pDescriptorWrites.descriptorType",
+          "pDescriptorWrites.pImageInfo.sampler",
+          "pDescriptorWrites.pImageInfo.imageView",
+          "pDescriptorWrites.pImageInfo.imageLayout",
           "pDescriptorWrites.pBufferInfo.buffer",
           "pDescriptorWrites.pBufferInfo.offset",
           "pDescriptorWrites.pBufferInfo.range",
@@ -314,3 +387,59 @@ fields = ["pBindInfos.buffer", "pBindInfos.memory",
 # per pBindInfos element {image (2w), memory (2w), memoryOffset (2w)}
 fields = ["pBindInfos.image", "pBindInfos.memory",
           "pBindInfos.memoryOffset"]
+
+# §12.3 5b: image transfer operands — the record's imm[] holds only the
+# scalar header (regionCount, imageLayout); the region bodies stage in
+# the cmdrec arena at rec.imm[7].
+[keep.vkCmdCopyBufferToImage]
+# per pRegions element {bufferOffset (2w), bufferRowLength,
+# bufferImageHeight, imageSubresource {aspectMask, mipLevel,
+# baseArrayLayer, layerCount}, imageOffset {x,y,z}, imageExtent
+# {width,height,depth}} = 14 words; regionCount in rec.imm[0],
+# dstImageLayout in imm
+fields = ["pRegions.bufferOffset", "pRegions.bufferRowLength",
+          "pRegions.bufferImageHeight",
+          "pRegions.imageSubresource.aspectMask",
+          "pRegions.imageSubresource.mipLevel",
+          "pRegions.imageSubresource.baseArrayLayer",
+          "pRegions.imageSubresource.layerCount",
+          "pRegions.imageOffset.x", "pRegions.imageOffset.y",
+          "pRegions.imageOffset.z", "pRegions.imageExtent.width",
+          "pRegions.imageExtent.height", "pRegions.imageExtent.depth"]
+
+[keep.vkCmdCopyImageToBuffer]
+# same VkBufferImageCopy element layout
+fields = ["pRegions.bufferOffset", "pRegions.bufferRowLength",
+          "pRegions.bufferImageHeight",
+          "pRegions.imageSubresource.aspectMask",
+          "pRegions.imageSubresource.mipLevel",
+          "pRegions.imageSubresource.baseArrayLayer",
+          "pRegions.imageSubresource.layerCount",
+          "pRegions.imageOffset.x", "pRegions.imageOffset.y",
+          "pRegions.imageOffset.z", "pRegions.imageExtent.width",
+          "pRegions.imageExtent.height", "pRegions.imageExtent.depth"]
+
+[keep.vkCmdCopyImage]
+# per pRegions element {srcSubresource 4w, srcOffset 3w,
+# dstSubresource 4w, dstOffset 3w, extent 3w} = 17 words
+fields = ["pRegions.srcSubresource.aspectMask",
+          "pRegions.srcSubresource.mipLevel",
+          "pRegions.srcSubresource.baseArrayLayer",
+          "pRegions.srcSubresource.layerCount",
+          "pRegions.srcOffset.x", "pRegions.srcOffset.y",
+          "pRegions.srcOffset.z",
+          "pRegions.dstSubresource.aspectMask",
+          "pRegions.dstSubresource.mipLevel",
+          "pRegions.dstSubresource.baseArrayLayer",
+          "pRegions.dstSubresource.layerCount",
+          "pRegions.dstOffset.x", "pRegions.dstOffset.y",
+          "pRegions.dstOffset.z", "pRegions.extent.width",
+          "pRegions.extent.height", "pRegions.extent.depth"]
+
+[keep.vkCmdClearColorImage]
+# {pColor 4w (the union's selected uint32 arm), per pRanges element
+# {aspectMask, baseMipLevel, levelCount, baseArrayLayer, layerCount}
+# = 5w}; rangeCount and imageLayout stay in rec.imm[]
+fields = ["uint32", "pRanges.aspectMask", "pRanges.baseMipLevel",
+          "pRanges.levelCount", "pRanges.baseArrayLayer",
+          "pRanges.layerCount"]

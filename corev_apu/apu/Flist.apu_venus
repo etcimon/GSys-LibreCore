@@ -24,6 +24,7 @@ ${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_divsqrt_th_32.sv
 ${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_cast_multi.sv
 ${CVA6_REPO_DIR}/core/cvfpu/src/fpnew_noncomp.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vn_pkg.sv
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_srgb_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_sh_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_shmod.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_shwave.sv

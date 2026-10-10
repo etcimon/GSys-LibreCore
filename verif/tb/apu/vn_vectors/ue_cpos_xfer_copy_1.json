@@ -129,6 +129,6 @@
   "ring0 vkDestroyDevice head=6424",
   "ring0 vkDestroyInstance head=6448"
  ],
- "tape_words": 6944,
- "exp_records": 470
+ "tape_words": 6995,
+ "exp_records": 473
 }

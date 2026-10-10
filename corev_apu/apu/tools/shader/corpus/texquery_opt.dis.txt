@@ -1,0 +1,84 @@
+; SPIR-V
+; Version: 1.3
+; Generator: Khronos Glslang Reference Front End; 11
+; Bound: 67
+; Schema: 0
+               OpCapability Shader
+               OpCapability ImageQuery
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gl_GlobalInvocationID
+               OpExecutionMode %main LocalSize 8 1 1
+               OpSource GLSL 450
+               OpName %main "main"
+               OpName %gl_GlobalInvocationID "gl_GlobalInvocationID"
+               OpName %tex "tex"
+               OpName %img "img"
+               OpName %Out "Out"
+               OpMemberName %Out 0 "o"
+               OpName %ob "ob"
+               OpDecorate %gl_GlobalInvocationID BuiltIn GlobalInvocationId
+               OpDecorate %tex Binding 0
+               OpDecorate %tex DescriptorSet 0
+               OpDecorate %img NonWritable
+               OpDecorate %img Binding 1
+               OpDecorate %img DescriptorSet 0
+               OpDecorate %_runtimearr_v4int ArrayStride 16
+               OpDecorate %Out Block
+               OpMemberDecorate %Out 0 Offset 0
+               OpDecorate %ob Binding 2
+               OpDecorate %ob DescriptorSet 0
+               OpDecorate %gl_WorkGroupSize BuiltIn WorkgroupSize
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+        %int = OpTypeInt 32 1
+       %uint = OpTypeInt 32 0
+     %v3uint = OpTypeVector %uint 3
+%_ptr_Input_v3uint = OpTypePointer Input %v3uint
+%gl_GlobalInvocationID = OpVariable %_ptr_Input_v3uint Input
+     %uint_0 = OpConstant %uint 0
+%_ptr_Input_uint = OpTypePointer Input %uint
+      %v2int = OpTypeVector %int 2
+      %float = OpTypeFloat 32
+         %22 = OpTypeImage %float 2D 0 0 0 1 Unknown
+         %23 = OpTypeSampledImage %22
+%_ptr_UniformConstant_23 = OpTypePointer UniformConstant %23
+        %tex = OpVariable %_ptr_UniformConstant_23 UniformConstant
+      %int_1 = OpConstant %int 1
+         %33 = OpTypeImage %uint 2D 0 0 0 2 R32ui
+%_ptr_UniformConstant_33 = OpTypePointer UniformConstant %33
+        %img = OpVariable %_ptr_UniformConstant_33 UniformConstant
+      %v4int = OpTypeVector %int 4
+%_runtimearr_v4int = OpTypeRuntimeArray %v4int
+        %Out = OpTypeStruct %_runtimearr_v4int
+%_ptr_StorageBuffer_Out = OpTypePointer StorageBuffer %Out
+         %ob = OpVariable %_ptr_StorageBuffer_Out StorageBuffer
+      %int_0 = OpConstant %int 0
+     %uint_1 = OpConstant %uint 1
+%_ptr_StorageBuffer_v4int = OpTypePointer StorageBuffer %v4int
+     %uint_8 = OpConstant %uint 8
+%gl_WorkGroupSize = OpConstantComposite %v3uint %uint_8 %uint_1 %uint_1
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+         %15 = OpAccessChain %_ptr_Input_uint %gl_GlobalInvocationID %uint_0
+         %16 = OpLoad %uint %15
+         %17 = OpBitcast %int %16
+         %26 = OpLoad %23 %tex
+         %29 = OpBitwiseAnd %int %17 %int_1
+         %30 = OpImage %22 %26
+         %31 = OpImageQuerySizeLod %v2int %30 %29
+         %36 = OpLoad %33 %img
+         %37 = OpImageQuerySize %v2int %36
+         %40 = OpImage %22 %26
+         %41 = OpImageQueryLevels %int %40
+         %50 = OpCompositeExtract %int %31 0
+         %52 = OpCompositeExtract %int %37 0
+         %53 = OpIAdd %int %50 %52
+         %56 = OpCompositeExtract %int %31 1
+         %58 = OpCompositeExtract %int %37 1
+         %59 = OpIAdd %int %56 %58
+         %62 = OpCompositeConstruct %v4int %53 %59 %41 %17
+         %64 = OpAccessChain %_ptr_StorageBuffer_v4int %ob %int_0 %17
+               OpStore %64 %62
+               OpReturn
+               OpFunctionEnd

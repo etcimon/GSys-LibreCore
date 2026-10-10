@@ -67,6 +67,8 @@ from fractions import Fraction
 HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import spirv_scan  # noqa: E402
+import srgb_lut    # noqa: E402  generated — mirrors g6lc_apu_srgb_pkg
+import img_fmts    # noqa: E402  generated — mirrors APU_VN_IMG_*
 
 SC = spirv_scan.SC
 TK = spirv_scan.TK
@@ -84,6 +86,7 @@ SC_WORKGROUP = SC['WORKGROUP']
 SC_PRIVATE = SC['PRIVATE']
 SC_FUNCTION = SC['FUNCTION']
 SC_PUSHCONST = SC['PUSHCONST']
+SC_UCONST = SC['UNIFORMCONST']
 
 BI_NUMWG = 24
 BI_WGSIZE = 25
@@ -350,6 +353,115 @@ def u32(x):
 
 
 # ---------------------------------------------------------------------
+# §12.3 C/5b image helpers — every one mirrors a g6lc_apu_shwave
+# function (f_*) bit-exactly
+# ---------------------------------------------------------------------
+
+# descriptor-kind legality per opcode (f_tx_kind): 0 SAMPLER,
+# 1 COMBINED_IMAGE_SAMPLER, 2 SAMPLED_IMAGE, 3 STORAGE_IMAGE
+IMG_KIND_OK = {95: (1, 2), 88: (1, 2), 98: (2, 3), 99: (3,),
+               103: (0, 1, 2, 3), 104: (0, 1, 2, 3), 106: (0, 1, 2, 3)}
+
+
+def f16_f32(h):
+    """f_f16_f32 — exact fp16 -> fp32 widening."""
+    e = (h >> 10) & 0x1F
+    m = h & 0x3FF
+    s = (h & 0x8000) << 16
+    if e == 0x1F:
+        return s | 0x7F800000 | (m << 13)
+    if e == 0:
+        if m == 0:
+            return s
+        sh = 0
+        for i in range(9, -1, -1):
+            if m & (1 << i):
+                sh = 9 - i
+                break
+        ae = 113 - sh
+        return s | (ae << 23) | (((m << (sh + 1)) & 0x3FF) << 13)
+    return s | ((e + 112) << 23) | (m << 13)
+
+
+def f32_f16(f):
+    """f_f32_f16 — fp32 -> fp16 RNE; overflow -> inf; nan/inf kept."""
+    fe = (f >> 23) & 0xFF
+    s = (f >> 16) & 0x8000
+    if fe == 0xFF:
+        return s | 0x7C00 | (0x200 if f & 0x7FFFFF else 0)
+    if fe == 0:
+        return s
+    if fe >= 143:
+        return s | 0x7C00
+    if fe >= 113:
+        rn = s | ((fe - 112) << 10) | ((f >> 13) & 0x3FF)
+        up = (f >> 12) & 1 and ((f & 0xFFF) != 0 or (f >> 13) & 1)
+        return (rn + 1) & 0xFFFF if up else rn
+    sh = 126 - fe
+    if sh > 30:
+        return s
+    fmn = (1 << 23) | (f & 0x7FFFFF)
+    r = fmn >> sh
+    rem = fmn & ((1 << sh) - 1)
+    if rem > (1 << (sh - 1)) or (rem == (1 << (sh - 1)) and r & 1):
+        r += 1
+    return s | (r & 0x7FFF)
+
+
+def twrap(i, n, m):
+    """f_twrap — returns (border, coord).  REPEAT=0 MIRRORED=1
+    CLAMP_TO_EDGE=2 CLAMP_TO_BORDER=3."""
+    if m == 0:
+        return (0, i % n)
+    if m == 1:
+        mm = i if i >= 0 else -i - 1
+        r = mm % (2 * n)
+        if r >= n:
+            r = 2 * n - 1 - r
+        return (0, r)
+    if m == 2:
+        return (0, 0 if i < 0 else (n - 1 if i >= n else i))
+    if i < 0 or i >= n:
+        return (1, 0)
+    return (0, i)
+
+
+def bord16(b, c):
+    if b in (4, 5):
+        return 0xFFFF
+    if b in (2, 3):
+        return 0xFFFF if c == 3 else 0
+    return 0
+
+
+def bord32(b, c):
+    if b in (4, 5):
+        return 0x3F800000
+    if b in (2, 3):
+        return 0x3F800000 if c == 3 else 0
+    return 0
+
+
+def bord_int(b, c):
+    if b >= 4:
+        return 1
+    return 1 if (b == 3 and c == 3) else 0
+
+
+def f01(f):
+    """f_f01 — clamp fp32 bits to [0,1]; NaN -> 0."""
+    if (f >> 31) & 1 or isnan(f):
+        return 0
+    return 0x3F800000 if ((f >> 23) & 0xFF) >= 127 else f
+
+
+def swz_sel(s, c):
+    """f_swz — VkComponentSwizzle: 0 identity, 1 zero, 2 one, 3..6 RGBA."""
+    w = (s >> (3 * c)) & 7
+    return (3 + c) if w == 0 else w
+
+
+# ---------------------------------------------------------------------
 # The interpreter
 # ---------------------------------------------------------------------
 
@@ -373,10 +485,18 @@ class Model:
         # §12.1 F5: bind entries carry aux = {kind[23:16], dyn[8],
         # elem_idx[7:0]} — elem_idx is the record's index inside its
         # (set,binding) row so descriptor arrays share one row.
-        self.binds = []                        # (set,bd,size,addr,aux)
+        # §12.3 C/5b: aux bit24 marks image/sampler binds — 5 meta
+        # words follow carrying the record's bytes 10..27:
+        #   {h[31:16],w[15:0]}, {layers[31:16],mdim[15:8],fmt[7:0]},
+        #   swizzle[11:0], smpw0, smpw1
+        self.binds = []                        # (set,bd,size,addr,aux[,meta])
         for _ in range(self.nb):
-            self.binds.append(tuple(words[p:p + 5]))
+            e = tuple(words[p:p + 5])
             p += 5
+            if e[4] & (1 << 24):
+                e += tuple(words[p:p + 5])
+                p += 5
+            self.binds.append(e)
         self.push = words[p:p + self.np]
         p += self.np
         # dynamic-offset section: n entries {set, ord, off} -> dyn[s][o]
@@ -389,7 +509,8 @@ class Model:
             if s < 4 and o < 16:
                 self.dyn[s][o] = v
         self.mem = {}                          # word addr -> u32
-        for (st, bd, sz, ad, ax) in self.binds:
+        for b in self.binds:
+            st, bd, sz, ad = b[0], b[1], b[2], b[3]
             for i in range(sz // 4):
                 self.mem[(ad >> 2) + i] = words[p + i]
             p += sz // 4
@@ -399,7 +520,15 @@ class Model:
         self.drecs = {}                        # (set,off32) -> record
         ecnt = [0] * 4
         dord = [0] * 4
-        for (st, bd, sz, ad, ax) in self.binds:
+        for b in self.binds:
+            st, bd, sz, ad, ax = b[:5]
+            meta = None
+            if ax & (1 << 24):
+                hw, mlf, swz, s0, s1 = b[5:10]
+                meta = dict(w=hw & 0xFFFF, h=(hw >> 16) & 0xFFFF,
+                            fmt=mlf & 0xFF, mdim=(mlf >> 8) & 0xFF,
+                            layers=(mlf >> 16) & 0xFFFF,
+                            swz=swz & 0xFFF, smp0=s0, smp1=s1)
             idx = ax & 0xFF
             dyn = (ax >> 8) & 1
             kind = ((ax >> 16) & 0xFF) or 7
@@ -414,7 +543,7 @@ class Model:
                 dord[st] = max(dord[st], row['dynbase'] + idx + 1)
             ecnt[st] = max(ecnt[st], row['off32'] + row['count'])
             self.drecs[(st, row['off32'] + idx)] = \
-                (ad, sz, kind, 1)              # (base,size,kind,flags)
+                (ad, sz, kind, 1, meta)        # (base,size,kind,fl,meta)
         # ---- scan the module (spirv_scan golden tables) ----
         self.sc = spirv_scan.Scanner(self.spv)
         self.sc.scan()
@@ -454,12 +583,429 @@ class Model:
         rec = self.drecs.get((st, row['off32'] + idx))
         if rec is None:
             return (0, 0, False)
-        base, size, kind, flags = rec
+        base, size, kind, flags = rec[:4]
         ok = bool(flags & 1) and kind in (6, 7, 8, 9)
         if row['dyn']:
             base = u32(base + self.dyn[st]
                        [min(row['dynbase'] + idx, 15)])
         return (base, size, ok)
+
+    # -- §12.3 C/5b image path (W_TX* mirror) --------------------------
+    def img_rec(self, ptr):
+        """image/sampler pointer -> record (base,size,kind,flags,meta)
+        or None when no row/index exists (RTL null record)."""
+        st = (ptr[1] >> 12) & 0xFF
+        bd = (ptr[1] >> 20) & 0xFF
+        idx = ptr[2] & 0xFFFF
+        row = self.drows.get((st, bd))
+        if row is None or idx >= row['count']:
+            return None
+        return self.drecs.get((st, row['off32'] + idx))
+
+    def bread8(self, a):
+        return (self.mread(a) >> (8 * (a & 3))) & 0xFF
+
+    def bread32(self, a):
+        return (self.bread8(a) | (self.bread8(a + 1) << 8) |
+                (self.bread8(a + 2) << 16) | (self.bread8(a + 3) << 24))
+
+    def bwrite8(self, a, v, cls):
+        w = self.mread(a)
+        sh = 8 * (a & 3)
+        self.mem[a >> 2] = (w & ~(0xFF << sh)) | ((v & 0xFF) << sh)
+        self.wclass[a >> 2] = cls
+
+    def img_walk(self, meta, m0, m1=-1):
+        """W_TXM — {level: (mof,pit,w,h)} for m0/m1 + layer_bytes."""
+        bpp = img_fmts.BPP[meta['fmt'] & 15]
+        wm, hm, macc = meta['w'], meta['h'], 0
+        out = {}
+        for m in range(meta['mdim'] & 0xF):
+            wd, hd = (wm if wm else 1), (hm if hm else 1)
+            pit = (wd * bpp + 63) & ~63
+            if m == m0:
+                out[m0] = (macc, pit, wd, hd)
+            if m == m1:
+                out[m1] = (macc, pit, wd, hd)
+            macc += pit * hd
+            wm, hm = wd >> 1, hd >> 1
+        return out, macc
+
+    def tx_decode(self, meta, bcol, brd, by):
+        """W_TXD — by = texel byte list -> (ch16[4], fc32[4])."""
+        attr = img_fmts.ATTR[meta['fmt'] & 15]
+        bgr = (attr >> 6) & 1
+        ch = [0, 0, 0, 0]
+        fc = [0, 0, 0, 0]
+        if brd:
+            if (attr >> 3) & 1:                   # int: integer border
+                fc = [bord_int(bcol, c) for c in range(4)]
+            else:
+                fc = [bord32(bcol, c) for c in range(4)]
+            ch = [bord16(bcol, c) for c in range(4)]
+            return ch, fc
+        fmt = meta['fmt']
+        if fmt == 0:                              # R8_UNORM
+            ch[0] = by[0] * 0x101
+            ch[3] = 0xFFFF
+        elif fmt == 1:                            # R8G8_UNORM
+            ch[0] = by[0] * 0x101
+            ch[1] = by[1] * 0x101
+            ch[3] = 0xFFFF
+        elif fmt in (2, 4):                       # [B]RGBA8_UNORM
+            ch[2 if bgr else 0] = by[0] * 0x101
+            ch[1] = by[1] * 0x101
+            ch[0 if bgr else 2] = by[2] * 0x101
+            ch[3] = by[3] * 0x101
+        elif fmt in (3, 5):                       # [B]RGBA8_SRGB
+            ch[2 if bgr else 0] = srgb_lut.TO_LIN16[by[0]]
+            ch[1] = srgb_lut.TO_LIN16[by[1]]
+            ch[0 if bgr else 2] = srgb_lut.TO_LIN16[by[2]]
+            ch[3] = by[3] * 0x101                 # alpha is linear
+        elif fmt == 6:                            # RGBA16_SFLOAT
+            fc = [f16_f32(by[2 * c] | (by[2 * c + 1] << 8))
+                  for c in range(4)]
+        elif fmt == 7:                            # R32_SFLOAT
+            fc[0] = by[0] | by[1] << 8 | by[2] << 16 | by[3] << 24
+            fc[3] = 0x3F800000
+        elif fmt == 8:                            # R32G32_SFLOAT
+            fc[0] = by[0] | by[1] << 8 | by[2] << 16 | by[3] << 24
+            fc[1] = by[4] | by[5] << 8 | by[6] << 16 | by[7] << 24
+            fc[3] = 0x3F800000
+        elif fmt == 9:                            # R32G32B32A32_SFLOAT
+            fc = [(by[4 * c] | by[4 * c + 1] << 8 |
+                   by[4 * c + 2] << 16 | by[4 * c + 3] << 24)
+                  for c in range(4)]
+        elif fmt == 10:                           # R32_UINT
+            fc[0] = by[0] | by[1] << 8 | by[2] << 16 | by[3] << 24
+            fc[3] = 1
+        else:                                     # R32G32B32A32_UINT
+            fc = [(by[4 * c] | by[4 * c + 1] << 8 |
+                   by[4 * c + 2] << 16 | by[4 * c + 3] << 24)
+                  for c in range(4)]
+        return ch, fc
+
+    def img_op(self, pc, opc, wc, ops, va, rty, rid, ncomp):
+        """the whole W_TX* sequence for one invocation; returns the
+        next pc or 'ret' (on a device-lost fault)."""
+        nxt = pc + wc
+        # W_TX0 operand-mask legality (only Lod 0x2 is decoded)
+        if (opc == 95 and wc > 6 and (ops[4] & ~0x2) != 0) or \
+           (opc == 88 and (wc < 7 or (ops[4] & ~0x2) != 0 or
+                           not (ops[4] & 0x2))) or \
+           (opc == 98 and wc > 5 and ops[4] != 0) or \
+           (opc == 99 and wc > 4 and ops[3] != 0):
+            self.fault = 'IMGOPMASK'
+            return 'ret'
+        rec = self.img_rec(va[0])
+        valid = bool(rec and (rec[3] & 1))
+        kind = rec[2] if rec else 0
+        meta = rec[4] if rec else None
+        # W_TX2 kind legality — mismatch is a truthful device-lost
+        if valid and kind not in IMG_KIND_OK[opc]:
+            self.fault = 'IMGKIND'
+            return 'ret'
+        smp = 0
+        if opc == 88 and valid:
+            if va[0][1] & 0x80000000:
+                # merged OpSampledImage: fetch the SAMPLER record
+                sk = va[0][0]
+                st, bd, idx = ((sk >> 16) & 0xFF, (sk >> 24) & 0xFF,
+                               sk & 0xFFFF)
+                srow = self.drows.get((st, bd))
+                srec = None if srow is None else \
+                    self.drecs.get((st, srow['off32'] + idx))
+                if srec is None or not (srec[3] & 1) or srec[2] != 0:
+                    self.fault = 'IMGKIND'
+                    return 'ret'
+                smeta = srec[4]
+                smp = (smeta['smp0'] | smeta['smp1'] << 32) \
+                    if smeta else 0
+            elif kind != 1:
+                self.fault = 'IMGKIND'    # SAMPLED_IMAGE w/o sampler
+                return 'ret'
+            else:
+                smp = meta['smp0'] | (meta['smp1'] << 32)
+        elif meta:
+            smp = meta['smp0'] | (meta['smp1'] << 32)
+        wb = [0, 0, 0, 0]
+        if not valid or meta is None:
+            # invalid record -> robust zero / dropped store (W_TXR0)
+            self.robust += 1
+            if opc != 99:
+                self.setres(rid, wb, ncomp)
+            return nxt
+        fmt = meta['fmt'] & 15
+        attr = img_fmts.ATTR[fmt]
+        bpp = img_fmts.BPP[fmt]
+        nch = (attr & 7) + 1
+        isflt = ((attr >> 4) | (attr >> 5)) & 1
+        isf16 = (attr >> 5) & 1
+        isint = (attr >> 3) & 1
+        issr = (attr >> 7) & 1
+        lvl = meta['mdim'] & 0xF
+        dim = (meta['mdim'] >> 4) & 3
+        layers = meta['layers']
+        swz = meta['swz']
+        bcol = (smp >> 14) & 7
+        base = rec[0]
+        size = rec[1]
+        # ---- query ops (W_TXQ) --------------------------------------
+        if opc == 106:                            # QueryLevels
+            wb[0] = lvl
+            self.setres(rid, wb, ncomp)
+            return nxt
+        if opc == 104:                            # QuerySize
+            wb[0], wb[1] = meta['w'], meta['h']
+            if dim == 1:
+                wb[2] = layers
+            self.setres(rid, wb, ncomp)
+            return nxt
+        if opc == 103:                            # QuerySizeLod
+            lod = va[1][0] & 0x1F
+            mt = lod if lod < lvl else lvl - 1
+            wk, _lb = self.img_walk(meta, mt)
+            wb[0], wb[1] = wk[mt][2], wk[mt][3]
+            if dim == 1:
+                wb[2] = layers
+            self.setres(rid, wb, ncomp)
+            return nxt
+        # ---- int-coordinate ops (95 fetch / 98 read / 99 write) ------
+        if opc in (95, 98, 99):
+            lod = (va[2][0] & 0x1F) if (opc == 95 and wc > 6) else 0
+            if lod >= lvl:
+                self.robust += 1
+                if opc != 99:
+                    self.setres(rid, wb, ncomp)
+                return nxt
+            iu, iv = s32(va[1][0]), s32(va[1][1])
+            ly = (va[1][2] & 0xFFFF) if dim == 1 else 0
+            wk, layb = self.img_walk(meta, lod)
+            mof, pit, w0, h0 = wk[lod]
+            # W_TXB bounds
+            if (ly >= layers or iu < 0 or iv < 0 or
+                    iu >= w0 or iv >= h0):
+                self.robust += 1
+                if opc != 99:
+                    self.setres(rid, wb, ncomp)
+                return nxt
+            ta = base + ly * layb + mof + iv * pit + iu * bpp
+            if opc == 99:
+                self.tx_store(va[2], fmt, attr, bpp, nch,
+                              isint, isflt, isf16, issr, ta)
+                return nxt
+            # fetch/read: one gather point, weight 65536, fw = 0
+            pts = [(iu, iv, 65536, 0, False)]
+            return self.tx_finish(pts, ta, meta, rec, bcol,
+                                  isint, isflt, issr, swz,
+                                  rid, ncomp, wb, nxt, lvl)
+        # ---- OpImageSampleExplicitLod (88) ---------------------------
+        addrU = (smp >> 5) & 7
+        addrV = (smp >> 8) & 7
+        lin0 = ((smp >> 2) & 3) != 0              # min filter
+        mag0 = (smp & 3) != 0                     # mag filter
+        min44 = (smp >> 32) & 0xFF
+        max44 = (smp >> 40) & 0xFF
+        bias = (smp >> 48) & 0xFF
+        le = s32(f2i(ffma(va[2][0], 0x41800000, 0), False, 'RNE'))
+        le += -bias if (smp >> 56) & 1 else bias
+        le = min(max(le, min44), max44)
+        le = max(le, 0)
+        lin = lin0 if le > 0 else mag0
+        if (smp >> 4) & 1:                        # mipmap LINEAR
+            m0, m1 = le >> 4, (le >> 4) + 1
+            fw = (le & 0xF) << 4
+        else:
+            m0 = m1 = (le + 8) >> 4
+            fw = 0
+        m0 = min(m0, lvl - 1)
+        m1 = min(m1, lvl - 1)
+        tril = m1 != m0
+        ly = (s32(f2i(va[1][2], False, 'RNE')) & 0xFFFF) if dim == 1 \
+            else 0
+        wk, layb = self.img_walk(meta, m0, m1 if tril else -1)
+        mof0, pit0, w0, h0 = wk[m0]
+        mof1 = pit1 = w1 = h1 = 0
+        if tril:
+            mof1, pit1, w1, h1 = wk[m1]
+        # coords: linear -> 8.8 (u*w<<8 - 128), nearest -> pixels
+        sc8 = 8 if lin else 0
+        cst = 0xC3000000 if lin else 0
+        su0 = s32(f2i(ffma(va[1][0], i2f(w0 << sc8, True), cst),
+                      False, 'RDN'))
+        sv0 = s32(f2i(ffma(va[1][1], i2f(h0 << sc8, True), cst),
+                      False, 'RDN'))
+        su1 = sv1 = 0
+        if tril:
+            su1 = s32(f2i(ffma(va[1][0], i2f(w1 << sc8, True), cst),
+                          False, 'RDN'))
+            sv1 = s32(f2i(ffma(va[1][1], i2f(h1 << sc8, True), cst),
+                          False, 'RDN'))
+        # gather list: (u, v, weight, mip, border)
+        pts = []
+        if lin:
+            fu0, fv0 = su0 & 0xFF, sv0 & 0xFF
+            iu0, iv0 = su0 >> 8, sv0 >> 8
+            for (du, dv, wu, wv, mi) in (
+                    (iu0, iv0, 256 - fu0, 256 - fv0, 0),
+                    (iu0 + 1, iv0, fu0, 256 - fv0, 0),
+                    (iu0, iv0 + 1, 256 - fu0, fv0, 0),
+                    (iu0 + 1, iv0 + 1, fu0, fv0, 0)):
+                bu, cu = twrap(du, w0, addrU)
+                bv, cv = twrap(dv, h0, addrV)
+                pts.append((cu, cv, wu * wv, 0, bool(bu or bv)))
+            if tril:
+                fu1, fv1 = su1 & 0xFF, sv1 & 0xFF
+                iu1, iv1 = su1 >> 8, sv1 >> 8
+                for (du, dv, wu, wv, mi) in (
+                        (iu1, iv1, 256 - fu1, 256 - fv1, 1),
+                        (iu1 + 1, iv1, fu1, 256 - fv1, 1),
+                        (iu1, iv1 + 1, 256 - fu1, fv1, 1),
+                        (iu1 + 1, iv1 + 1, fu1, fv1, 1)):
+                    bu, cu = twrap(du, w1, addrU)
+                    bv, cv = twrap(dv, h1, addrV)
+                    pts.append((cu, cv, wu * wv, 1, bool(bu or bv)))
+        else:
+            bu, cu = twrap(su0, w0, addrU)
+            bv, cv = twrap(sv0, h0, addrV)
+            pts.append((cu, cv, 65536, 0, bool(bu or bv)))
+            if tril:
+                bu, cu = twrap(su1, w1, addrU)
+                bv, cv = twrap(sv1, h1, addrV)
+                pts.append((cu, cv, 65536, 1, bool(bu or bv)))
+        mofs = (mof0, mof1)
+        pits = (pit0, pit1)
+        ta = None                                  # per-point ta
+        return self.tx_finish_pts(pts, mofs, pits, layb, ly, meta, rec,
+                                  bcol, fw, tril, rid, ncomp, wb, nxt)
+
+    def tx_texel(self, base, layb, ly, mof, pit, gu, gv, bpp):
+        """byte list of the texel at (gu,gv) of mip/layer, or None."""
+        ta = base + ly * layb + mof + gv * pit + gu * bpp
+        return ta, [self.bread8(ta + i) for i in range(bpp)]
+
+    def tx_finish_pts(self, pts, mofs, pits, layb, ly, meta, rec,
+                      bcol, fw, tril, rid, ncomp, wb, nxt):
+        """fetch/sample accumulate tail (W_TXT0/W_TXD/W_TXA/W_TXR0)."""
+        attr = img_fmts.ATTR[meta['fmt'] & 15]
+        bpp = img_fmts.BPP[meta['fmt'] & 15]
+        isint = (attr >> 3) & 1
+        isflt = ((attr >> 4) | (attr >> 5)) & 1
+        acc = [0, 0, 0, 0]
+        acc1 = [0, 0, 0, 0]
+        facc = [0, 0, 0, 0]
+        base, size = rec[0], rec[1]
+        for (gu, gv, gw, gm, gb) in pts:
+            ta = base + ly * layb + mofs[gm] + gv * pits[gm] + gu * bpp
+            brd = gb
+            if not brd and ta + bpp > base + size:
+                self.robust += 1
+                brd = True
+            by = [0] * 16 if brd else \
+                [self.bread8(ta + i) for i in range(bpp)]
+            ch, fc = self.tx_decode(meta, bcol, brd, by)
+            if isint:
+                for c in range(4):
+                    s = swz_sel(meta['swz'], c)
+                    wb[c] = 0 if s == 1 else \
+                        (1 if s == 2 else fc[s - 3])
+            elif isflt:
+                wi = gw * (fw if gm == 1 else 256 - fw)
+                wf = fmul(i2f(wi, True), 0x33800000)
+                for c in range(4):
+                    facc[c] = ffma(wf, fc[c], facc[c])
+            else:
+                d = acc1 if gm == 1 else acc
+                for c in range(4):
+                    d[c] = (d[c] + gw * ch[c]) & 0xFFFFFFFFFF
+        if isint:
+            pass
+        elif isflt:
+            for c in range(4):
+                s = swz_sel(meta['swz'], c)
+                wb[c] = 0 if s == 1 else \
+                    (0x3F800000 if s == 2 else facc[s - 3])
+        else:
+            rr = [0, 0, 0, 0]
+            for c in range(4):
+                rr[c] = 0xFFFF if acc[c] + 0x8000 >= 0x100000000 \
+                    else (acc[c] + 0x8000) >> 16
+                if tril:
+                    r1 = 0xFFFF if acc1[c] + 0x8000 >= 0x100000000 \
+                        else (acc1[c] + 0x8000) >> 16
+                    rr[c] = (rr[c] * (256 - fw) + r1 * fw + 128) >> 8
+            for c in range(4):
+                s = swz_sel(meta['swz'], c)
+                x16 = 0 if s == 1 else (65535 if s == 2 else rr[s - 3])
+                wb[c] = fmul(i2f(x16, True), 0x37800080)
+        self.setres(rid, wb, ncomp)
+        return nxt
+
+    def tx_finish(self, pts, ta, meta, rec, bcol, isint, isflt, issr,
+                  swz, rid, ncomp, wb, nxt, lvl):
+        """fetch/read tail — the single-point gather (W_TXB)."""
+        attr = img_fmts.ATTR[meta['fmt'] & 15]
+        bpp = img_fmts.BPP[meta['fmt'] & 15]
+        base, size = rec[0], rec[1]
+        brd = ta + bpp > base + size
+        if brd:
+            self.robust += 1
+        by = [0] * 16 if brd else \
+            [self.bread8(ta + i) for i in range(bpp)]
+        ch, fc = self.tx_decode(meta, bcol, brd, by)
+        if isint:
+            for c in range(4):
+                s = swz_sel(swz, c)
+                wb[c] = 0 if s == 1 else (1 if s == 2 else fc[s - 3])
+        elif isflt:
+            for c in range(4):
+                s = swz_sel(swz, c)
+                wb[c] = 0 if s == 1 else \
+                    (0x3F800000 if s == 2 else fc[s - 3])
+        else:
+            for c in range(4):
+                s = swz_sel(swz, c)
+                x16 = 0 if s == 1 else (65535 if s == 2 else ch[s - 3])
+                wb[c] = fmul(i2f(x16, True), 0x37800080)
+        self.setres(rid, wb, ncomp)
+        return nxt
+
+    def tx_store(self, val, fmt, attr, bpp, nch, isint, isflt, isf16,
+                 issr, ta):
+        """W_TXE0..W_TXW1 — encode va[2] into the image at ta.
+        UNORM/SRGB byte stores get class 'p' (Gate-2 per-byte +-1 —
+        lavapipe's quantize may differ one code from the RTL's
+        fixed-point encode)."""
+        cls = 'f' if isflt else ('i' if isint else 'p')
+        if isint or (isflt and not isf16):
+            for i in range(bpp):
+                self.bwrite8(ta + i,
+                             (val[i >> 2] >> (8 * (i & 3))) & 0xFF, cls)
+            return
+        if isf16:
+            for c in range(4):
+                if c < nch:
+                    h = f32_f16(val[c])
+                    self.bwrite8(ta + 2 * c, h & 0xFF, cls)
+                    self.bwrite8(ta + 2 * c + 1, h >> 8, cls)
+            return
+        # UNORM / sRGB: f01 -> *scale -> RNE int -> clamp / LUT
+        bgr = (attr >> 6) & 1
+        u8 = [0, 0, 0, 0]
+        for c in range(4):
+            if c >= nch:
+                continue
+            t = fmul(f01(val[c]),
+                     0x477FFF00 if (issr and c < 3) else 0x437F0000)
+            xi = s32(f2i(t, False, 'RNE'))
+            if issr and c < 3:
+                x16 = 0 if xi < 0 else (0xFFFF if xi > 65535 else xi)
+                u8[c] = srgb_lut.lin16_to_srgb8(x16)
+            else:
+                u8[c] = 0 if xi < 0 else (0xFF if xi > 255 else xi)
+        for c in range(nch):
+            bi = (2 if c == 0 else (0 if c == 2 else c)) if bgr else c
+            self.bwrite8(ta + bi, u8[c], cls)
 
     def builtin(self, bi, c):
         """f_bi() — lane builtin values for the current invocation."""
@@ -655,7 +1201,7 @@ class Model:
             # UNIFORM/SBUF storage selects the descriptor record —
             # it lands in ptr[2], not the byte offset.
             if (first and k in (TK['ARRAY'], TK['RARRAY']) and
-                    (tag & 0xF) in (SC_UNIFORM, SC_SBUF)):
+                    (tag & 0xF) in (SC_UNIFORM, SC_SBUF, SC_UCONST)):
                 didx = self.idxval(iid)
                 cty = t.get('elem', cty)
                 first = False
@@ -862,8 +1408,14 @@ class Model:
         ncomp = self.ncomps(rty) if opc in self.HAS_RTY else 1
         # operand vectors
         def opid(k):
-            if opc == 62:
+            if opc in (62, 99):               # Store / ImageWrite: no rty
                 return ops[k] if k < len(ops) else 0
+            if opc in (95, 88):               # operand mask word at [4]
+                if k == 0:
+                    return ops[2]
+                if k == 1:
+                    return ops[3]
+                return ops[5] if 5 < len(ops) else 0
             if opc == 12:
                 return ops[4 + k] if 4 + k < len(ops) else 0
             return ops[2 + k] if 2 + k < len(ops) else 0
@@ -911,7 +1463,25 @@ class Model:
                     tgt = ops[3 + 2 * k]
                     break
             return self.sc.labels[tgt]
+        if opc in (86, 100):                  # SampledImage / Image
+            if opc == 86:
+                sp = va[1]
+                wb = [(((sp[1] >> 20) & 0xFF) << 24) |
+                      (((sp[1] >> 12) & 0xFF) << 16) |
+                      (sp[2] & 0xFFFF),
+                      va[0][1] | 0x80000000, va[0][2], 0]
+            else:
+                wb = [0, va[0][1] & 0x7FFFFFFF, va[0][2], 0]
+            self.setres(rid, wb, 4)
+            return pc + wc
+        if opc in (88, 95, 98, 99, 103, 104, 106):
+            return self.img_op(pc, opc, wc, ops, va, rty, rid, ncomp)
         if opc == 61:                         # Load
+            tk = self.sc.types.get(rty, {}).get('kind')
+            if tk in (TK['IMG'], TK['SAMP'], TK['SIMG']):
+                # image/sampler loads pass the descriptor ref through
+                self.setres(rid, va[0], 4)
+                return pc + wc
             wb = [0] * ncomp
             for c in range(ncomp):
                 r = self.lsu(va[0][0], va[0][1], va[0][2], c,
@@ -1116,10 +1686,11 @@ class Model:
                         168, 169, 170, 171, 172, 173, 174, 175, 176,
                         177, 178, 179, 194, 195, 196, 197, 198, 199,
                         200))
-    HAS_RTY = frozenset((12, 61, 65, 66, 68, 79, 80, 81, 82, 84, 109,
-                         110, 111, 112, 124, 126, 127, 128, 129, 130,
-                         131, 132, 133, 134, 135, 136, 137, 138, 139,
-                         142, 143, 144, 145, 146, 147,
+    HAS_RTY = frozenset((12, 61, 65, 66, 68, 79, 80, 81, 82, 84, 86,
+                         88, 95, 98, 100, 103, 104, 106,
+                         109, 110, 111, 112, 124, 126, 127, 128, 129,
+                         130, 131, 132, 133, 134, 135, 136, 137, 138,
+                         139, 142, 143, 144, 145, 146, 147,
                          148, 164, 165, 166, 167, 168, 169, 170, 171,
                          172, 173, 174, 175, 176, 177, 178, 179, 180,
                          181, 182, 183, 184, 185, 186, 187, 188, 189,
@@ -1139,6 +1710,12 @@ class Model:
             return 2
         if opc == 12:
             return 3 if wc > 8 else (wc - 5 if wc > 5 else 0)
+        if opc == 99:
+            return 3                          # img, coord, texel
+        if opc == 95:
+            return 3 if wc > 6 else 2         # img, coord[, lod]
+        if opc in (88, 103):
+            return 3 if opc == 88 else 2
         if opc in (61, 65, 66, 68, 81, 84, 109, 110, 111, 112, 124, 126,
                    127, 168, 200):
             return 1
@@ -1301,7 +1878,8 @@ class Model:
     def outputs(self):
         """{(bind_idx): [words]} for bindings that received stores."""
         out = {}
-        for i, (st, bd, sz, ad, ax) in enumerate(self.binds):
+        for i, b in enumerate(self.binds):
+            st, bd, sz, ad = b[0], b[1], b[2], b[3]
             if any((ad >> 2) + k in self.wclass for k in range(sz // 4)):
                 out[i] = [self.mem.get((ad >> 2) + k, 0)
                           for k in range(sz // 4)]
@@ -1309,7 +1887,8 @@ class Model:
 
     def out_classes(self):
         out = {}
-        for i, (st, bd, sz, ad, ax) in enumerate(self.binds):
+        for i, b in enumerate(self.binds):
+            st, bd, sz, ad = b[0], b[1], b[2], b[3]
             if any((ad >> 2) + k in self.wclass for k in range(sz // 4)):
                 out[i] = [self.wclass.get((ad >> 2) + k, 'i')
                           for k in range(sz // 4)]

@@ -14,9 +14,15 @@ For every corpus shader x every seeded input set this emits
               module -- outputs must DIFFER from the unmutated .exp)
   [7] case tag (free)
   [8..] spv words
-  then per binding: {set, binding, size_bytes, mem_addr} (4 words)
+  then per binding: {set, binding, size_bytes, mem_addr, aux}
+       (5 words; aux bit24 = image/sampler bind — then 5 meta words
+        follow carrying the record's bytes 10..27:
+        {h[31:16],w[15:0]}, {layers[31:16],mdim[15:8],fmt[7:0]},
+        swizzle[11:0], sampler word0, sampler word1)
   then n_push_words push words
-  then per binding in order: size_bytes/4 init words
+  then the dynamic-offset section: n entries {set, ordinal, offset}
+  then per binding in order: size_bytes/4 init words (image binds:
+       device layout — layer-major, per-mip 64B-aligned pitch)
   sentinel: FFFFFFFF FFFFFFFF
 
 .exp (expected, $readmemh):
@@ -32,7 +38,9 @@ For every corpus shader x every seeded input set this emits
   then MODEL section:  per is_out binding, size/4 spirv_model words
   then CLASS section:  per is_out binding, size/4 class words
                        (0 = integer/bool → Gate 2 bit-exact,
-                        1 = float → Gate 2 <= 2 ULP)
+                        1 = float → Gate 2 <= 2 ULP,
+                        2 = unorm-sampled float → |d| <= 0.005,
+                        3 = packed unorm byte lanes → +-1 per byte)
   sentinel: FFFFFFFF FFFFFFFF
   Commit-fault cases carry no oracle/model/class sections.
 
@@ -51,6 +59,123 @@ OUT = os.path.abspath(os.path.join(HERE, '..', '..', '..', '..', 'verif',
                                    'tb', 'apu', 'sh_vectors'))
 ADDR0 = 0x8000
 SENT = [0xFFFFFFFF, 0xFFFFFFFF]
+
+sys.path.insert(0, HERE)
+import img_fmts  # noqa: E402
+
+# ---- §12.3 C/5b image binds -------------------------------------------
+def img_mdim(v, m):
+    return max(v >> m, 1)
+
+
+def img_words(spec):
+    """device layout byte size in u32 words (layer-major, per-mip
+    64B-aligned pitch) — mirrors vnfront/vn_golden img_layer_bytes."""
+    bpp = img_fmts.BPP[spec['fmt'] & 15]
+    wm, hm, acc = spec['w'], spec['h'], 0
+    for _m in range(spec.get('mips', 1)):
+        wd, hd = img_mdim(wm, 0), img_mdim(hm, 0)
+        acc += ((wd * bpp + 63) & ~63) * hd
+        wm, hm = wd >> 1, hd >> 1
+    return acc * spec.get('layers', 1) // 4
+
+
+def smp_words(s):
+    """sampler params -> the record's {w0,w1} (vnfront StSamCk)."""
+    s = s or {}
+    def q44(x):
+        return max(0, min(255, int(round(float(x) * 16))))
+    w0 = (s.get('mag', 0) | s.get('min', 0) << 2 | s.get('mm', 0) << 4 |
+          s.get('au', 0) << 5 | s.get('av', 0) << 8 |
+          s.get('aw', 0) << 11 | s.get('bc', 0) << 14)
+    w1 = (q44(s.get('minl', 0.0)) | q44(s.get('maxl', 0.0)) << 8 |
+          ((q44(abs(s.get('bias', 0.0))) |
+            (0x100 if s.get('bias', 0.0) < 0 else 0)) << 16))
+    return w0, w1
+
+
+def img_spec(spec, seed):
+    return spec(seed) if callable(spec) else spec
+
+
+def img_meta(spec, seed):
+    """the 5 record-meta words trailing an image bind entry."""
+    sp = img_spec(spec, seed)
+    s0, s1 = smp_words(sp.get('smp'))
+    mdim = ((sp.get('dim', 0) & 3) << 4) | (sp.get('mips', 1) & 0xF)
+    return [sp['w'] | sp['h'] << 16,
+            sp['fmt'] | mdim << 8 | sp.get('layers', 1) << 16,
+            sp.get('swz', 0), s0, s1]
+
+
+def img_bind(st, bd, spec, kind, out=0, idx=0, smp=None):
+    """image binding tuple; spec may be dict or seed->dict (then smp
+    is folded in per seed)."""
+    if callable(spec) or smp is not None:
+        def full(s, _spec=spec, _smp=smp):
+            sp = dict(_spec(s) if callable(_spec) else _spec)
+            extra = _smp(s) if callable(_smp) else _smp
+            if extra:
+                sp['smp'] = extra
+            return sp
+        spec = full
+    size = img_words(img_spec(spec, 1))
+    return (st, bd, size, out, (kind << 16) | idx | (1 << 24), spec)
+
+
+def img_init(spec, seed):
+    """init words in device layout (layer-major, 64B-aligned rows)."""
+    rng = random.Random(seed * 7919 + spec['w'] + spec['fmt'] * 131)
+    fmt = spec['fmt'] & 15
+    bpp = img_fmts.BPP[fmt]
+    attr = img_fmts.ATTR[fmt]
+    isint = (attr >> 3) & 1
+    ish16 = (attr >> 5) & 1
+    isflt = ((attr >> 4) | ish16) & 1
+    buf = bytearray(img_words(spec) * 4)
+    wm, hm = spec['w'], spec['h']
+    mofs = []
+    acc = 0
+    for _m in range(spec.get('mips', 1)):
+        wd, hd = img_mdim(wm, 0), img_mdim(hm, 0)
+        pit = (wd * bpp + 63) & ~63
+        mofs.append((acc, pit, wd, hd))
+        acc += pit * hd
+        wm, hm = wd >> 1, hd >> 1
+    layb = acc
+    for ly in range(spec.get('layers', 1)):
+        for m, (mo, pit, wd, hd) in enumerate(mofs):
+            for y in range(hd):
+                for x in range(wd):
+                    off = ly * layb + mo + y * pit + x * bpp
+                    if isint:
+                        for c in range(bpp // 4):
+                            v = (x * 1009 + y * 101 + c * 11 +
+                                 ly * 13 + m * 17 + seed) & 0xFFFFFFFF
+                            struct.pack_into('<I', buf, off + c * 4, v)
+                    elif isflt and not ish16:
+                        for c in range(bpp // 4):
+                            f = (x * 0.5 + y * 0.25 + c * 0.125 +
+                                 ly * 0.75 + m * 0.375 +
+                                 rng.uniform(-0.1, 0.1))
+                            struct.pack_into('<f', buf, off + c * 4, f)
+                    elif ish16:
+                        for c in range(bpp // 2):
+                            f = (x * 0.25 + y * 0.125 + c * 0.0625 +
+                                 ly * 0.5 + m * 0.25)
+                            struct.pack_into('<e', buf, off + c * 2, f)
+                    else:
+                        for c in range(bpp):
+                            buf[off + c] = (x * 53 + y * 31 + c * 17 +
+                                            ly * 29 + m * 23 +
+                                            seed * 7) & 0xFF
+    return [struct.unpack_from('<I', buf, i)[0]
+            for i in range(0, len(buf), 4)]
+
+
+# VkFormat enum for each device format id (img_fmts.VK2D inverted).
+IMG_VKFMT = (9, 16, 37, 43, 44, 50, 97, 100, 103, 109, 98, 107)
+
 
 # per-shader case description:
 #   groups: (gx,gy,gz)   push: n push words   oob: expected-robust fn
@@ -147,6 +272,70 @@ DESC = {
                                    (0, 0, 8, 0, (7 << 16) | 2),
                                    (0, 0, 8, 0, (7 << 16) | 3),
                                    (0, 1, 16, 1, 7 << 16)]),
+    # ---- §12.3 C/5b image corpus --------------------------------------
+    # A binding's 6th element is the image spec (or a function of the
+    # case seed returning one): {w,h,fmt,mips,layers,dim,swz,smp}.
+    # fmt is the img_fmts device id; dim 0=2D/1=2D-array; swz the
+    # packed 4x3b VkComponentSwizzle field (0=identity); smp the
+    # sampler parameter dict {mag,min,mm,au,av,aw,bc,minl,maxl,bias}
+    # (VkFilter/VkSamplerAddressMode/VkBorderColor codes; lods/bias
+    # float).  Descriptor kinds: 1=COMBINED_IMAGE_SAMPLER,
+    # 3=STORAGE_IMAGE.  ucls marks SSBO float outs that carry
+    # unorm-sampled values (Gate-2 abs tolerance, class 2).
+    'texfetch':     dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=2), kind=1),
+        (0, 1, 32, 1, 7 << 16)]),
+    'texfetch_mip': dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=2, mips=2), kind=1),
+        (0, 1, 32, 1, 7 << 16)]),
+    # texlod_lin varies the address mode pair per seed: REPEAT /
+    # MIRRORED_REPEAT / CLAMP_TO_EDGE / CLAMP_TO_BORDER (opaque-white
+    # and opaque-black borders) all appear across seeds 1..3.
+    'texlod_lin':   dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=2), kind=1,
+                 smp=lambda s: dict(
+                     mag=1, min=1,
+                     au=(0, 1, 2)[(s - 1) % 3],
+                     av=(2, 3, 0)[(s - 1) % 3],
+                     bc=(0, 4, 2)[(s - 1) % 3])),
+        (0, 1, 32, 1, 7 << 16)]),
+    'texlod_mip':   dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=2, mips=3), kind=1,
+                 smp=dict(mag=1, min=1, mm=1, au=2, av=2,
+                          maxl=2.0)),
+        (0, 1, 32, 1, 7 << 16)]),
+    'imgloadstore': dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=2, fmt=9), kind=3),
+        img_bind(0, 1, dict(w=4, h=2, fmt=9), kind=3, out=1),
+        (0, 2, 32, 1, 7 << 16)]),
+    'texarr':       dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=2, h=2, fmt=2, layers=4, dim=1),
+                 kind=1),
+        (0, 1, 32, 1, 7 << 16)]),
+    # texsrgb: R8G8B8A8_SRGB sample + R8G8B8A8_UNORM (rgba8) store.
+    # The store-out words carry packed unorm bytes -> class 3.
+    'texsrgb':      dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         ucls=True,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=2, fmt=3), kind=1),
+        img_bind(0, 1, dict(w=4, h=2, fmt=2), kind=3, out=1),
+        (0, 2, 32, 1, 7 << 16)]),
+    'texquery':     dict(groups=(1, 1, 1), fmt='i', push=0, cf=False,
+                         bindings=[
+        img_bind(0, 0, dict(w=4, h=4, fmt=2, mips=2), kind=1),
+        img_bind(0, 1, dict(w=4, h=2, fmt=10), kind=3),
+        (0, 2, 32, 1, 7 << 16)]),
 }
 SEEDS = [1, 2, 3]
 
@@ -155,7 +344,10 @@ import spirv_scan  # noqa: E402
 import spirv_model  # noqa: E402
 
 
-def model_run(hexw, bindings):
+CLSMAP = {'i': 0, 'f': 1, 'u': 2, 'p': 3}
+
+
+def model_run(hexw, bindings, ucls=False):
     """run spirv_model on a dispatch record; returns
     (robust, model_words_by_out_binding, class_words_by_out_binding,
     the Model).  Raises spirv_scan.Fault if the module can't commit."""
@@ -168,7 +360,12 @@ def model_run(hexw, bindings):
         st, bd, w, o = b[:4]
         if o:
             mw += outs.get(i, [0] * w)
-            cw += [1 if c == 'f' else 0 for c in cls.get(i, ['i'] * w)]
+            cc = list(cls.get(i, ['i'] * w))
+            if ucls and not (len(b) > 5):
+                # unorm-sampled floats in the SSBO compare against
+                # lavapipe with the §12.3 1/255-class tolerance
+                cc = ['u' if c == 'f' else c for c in cc]
+            cw += [CLSMAP[c] for c in cc]
     return m.robust, mw, cw, m
 
 
@@ -181,10 +378,18 @@ def read_spv(path):
     return list(struct.unpack('<%dI' % (len(data) // 4), data))
 
 
-def gen_inputs(desc, nbind_words, seed):
-    rng = random.Random(seed * 7919 + sum(nbind_words))
+def gen_inputs(desc, seed):
+    # one RNG stream per shader, consumed binding-by-binding — the
+    # pre-5b vectors depend on this exact stream; image inits get
+    # their own rng inside img_init.
+    rng = random.Random(seed * 7919 +
+                        sum(x[2] for x in desc['bindings']))
     outs = []
-    for w in nbind_words:
+    for b in desc['bindings']:
+        if len(b) > 5:
+            outs.append(img_init(img_spec(b[5], seed), seed))
+            continue
+        w = b[2]
         if desc['fmt'] == 'f':
             outs.append([struct.unpack('<f', struct.pack(
                 '<f', rng.uniform(-64.0, 64.0)))[0]
@@ -350,10 +555,14 @@ def emit(name, seed, spv_words, desc, inputs, expect_fault=(0, 0),
     hexw += spv_words
     # §12.3 F5: 5-word bind entries; aux = {kind[23:16], dyn[8],
     # elem_idx[7:0]} so elements of one descriptor array share a row.
+    # §12.3 C/5b: aux bit24 marks an image/sampler bind — 5 meta words
+    # (the record's bytes 10..27) follow the entry.
     for i, b in enumerate(bindings):
         st, bd, w, o = b[:4]
         ax = b[4] if len(b) > 4 else 0
         hexw += [st, bd, w * 4, ADDR0 + i * 0x1000, ax]
+        if ax & (1 << 24):
+            hexw += img_meta(b[5], seed)
     hexw += push_words(desc, seed)
     # dynamic-offset section: n entries {set, ordinal, offset}
     dynl = desc.get('dyn_off', [])
@@ -370,7 +579,8 @@ def emit(name, seed, spv_words, desc, inputs, expect_fault=(0, 0),
     if model_cache is not None:
         mrob, mwords, cwords, _m = model_cache
     elif not expect_fault[0]:
-        mrob, mwords, cwords, _m = model_run(hexw, bindings)
+        mrob, mwords, cwords, _m = model_run(
+            hexw, bindings, ucls=desc.get('ucls', False))
     else:
         mrob, mwords, cwords, _m = 0, None, None, None
     robust = mrob
@@ -407,10 +617,30 @@ def emit(name, seed, spv_words, desc, inputs, expect_fault=(0, 0),
         packed = pack_floats(inputs[i], desc['fmt'])
         open(ib, 'wb').write(b''.join(
             struct.pack('<I', v) for v in packed))
-        descj['bindings'].append({'set': st, 'binding': bd,
-                                  'size': w * 4, 'init': ib,
-                                  'idx': ax & 0xFF,
-                                  'dyn': (ax >> 8) & 1})
+        bd_j = {'set': st, 'binding': bd, 'size': w * 4, 'init': ib,
+                'idx': ax & 0xFF, 'dyn': (ax >> 8) & 1,
+                'kind': (ax >> 16) & 0xFF or 7}
+        if ax & (1 << 24):
+            # image/sampler record (§12.3 C/5b): flat keys keep the
+            # oracle's permissive JSON scanner happy
+            sp = img_spec(b[5], seed)
+            smp = sp.get('smp') or {}
+            bd_j['img'] = 1
+            bd_j['imgfmt'] = IMG_VKFMT[sp['fmt'] & 15]
+            bd_j['imgw'] = sp['w']
+            bd_j['imgh'] = sp['h']
+            bd_j['imgmips'] = sp.get('mips', 1)
+            bd_j['imglayers'] = sp.get('layers', 1)
+            bd_j['imgarr'] = sp.get('dim', 0)
+            swz = sp.get('swz', 0)
+            for c in range(4):
+                bd_j['swz%d' % c] = (swz >> (3 * c)) & 7
+            for k in ('mag', 'min', 'mm', 'au', 'av', 'aw', 'bc'):
+                bd_j['smp' + k] = smp.get(k, 0)
+            bd_j['smpminl'] = int(round(smp.get('minl', 0.0) * 16))
+            bd_j['smpmaxl'] = int(round(smp.get('maxl', 0.0) * 16))
+            bd_j['smpbias'] = int(round(smp.get('bias', 0.0) * 16))
+        descj['bindings'].append(bd_j)
     open(base + '.desc.json', 'w').write(json.dumps(descj))
     return base, (mrob, mwords, cwords, _m)
 
@@ -450,6 +680,7 @@ def oracle_image(owords, mc, desc):
     if len(owords) != len(mfull):
         return mfull
     mcls = m.out_classes()
+    ucls = desc.get('ucls', False)
     bad = False
     off = 0
     for i, b in enumerate(bindings):
@@ -460,9 +691,21 @@ def oracle_image(owords, mc, desc):
             cls = 'i'
             if o and i in mcls and k < len(mcls[i]):
                 cls = mcls[i][k]
+            if ucls and len(b) <= 5 and cls == 'f':
+                cls = 'u'
             if cls == 'f':
                 if ulpd(xm, xo) > 2:
                     bad = True
+            elif cls == 'u':
+                if abs(struct.unpack('<f', struct.pack('<I', xm))[0] -
+                       struct.unpack('<f', struct.pack('<I', xo))[0]) \
+                        > 0.005:
+                    bad = True
+            elif cls == 'p':
+                for bb in range(4):
+                    if abs(((xm >> (8 * bb)) & 0xFF) -
+                           ((xo >> (8 * bb)) & 0xFF)) > 1:
+                        bad = True
             elif xm != xo:
                 bad = True
         off += w
@@ -504,8 +747,7 @@ def main():
             return 1
         sc.emit_tab(os.path.join(OUT, name + '.tab'))
         for seed in SEEDS:
-            inputs = gen_inputs(desc, [b[2] for b in desc['bindings']],
-                                seed)
+            inputs = gen_inputs(desc, seed)
             base, mc = emit(name, seed, words, desc, inputs)
             summary.append(base)
             if oracle_ok:
@@ -534,8 +776,7 @@ def main():
         muts = mutate(words)
         mwords = None
         if muts:
-            inputs = gen_inputs(desc, [b[2] for b in desc['bindings']],
-                                7)
+            inputs = gen_inputs(desc, 7)
             base = None
             for mwords_c, at_c in muts:
                 base, mc = emit(name + '_mut', 0, mwords_c, desc,
@@ -577,7 +818,7 @@ def main():
         else:
             bwords, _ = inject_bad(words)
             fcode, fopc = spirv_scan.FAULT['OPCODE'], 13
-        inputs = gen_inputs(desc, [b[2] for b in desc['bindings']], 7)
+        inputs = gen_inputs(desc, 7)
         base, _mc = emit(name + '_bad', 0, bwords, desc, inputs,
                          expect_fault=(fcode, fopc))
         summary.append(base)
@@ -604,8 +845,7 @@ def main():
             return 1
         sc.emit_tab(os.path.join(OUT, name + '_opt.tab'))
         for seed in SEEDS:
-            inputs = gen_inputs(desc, [b[2] for b in desc['bindings']],
-                                seed)
+            inputs = gen_inputs(desc, seed)
             base, mc = emit(name + '_opt', seed, words, desc, inputs)
             summary.append(base)
             if oracle_ok:

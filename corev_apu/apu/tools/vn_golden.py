@@ -1448,12 +1448,232 @@ def fnv1a(h, w):
     """§12.3 F5-d: FNV-1a 32-bit step matching vnfront's fnv1a_w."""
     return ((h ^ (w & 0xFFFFFFFF)) * 0x01000193) & 0xFFFFFFFF
 
+
+# ---- §12.3 C/5b: device image layout (mirrors vnfront/xfer f_mdim /
+# f_mpitch: off(layer,mip) = layer*layer_bytes + mip_off[mip]) ---------
+_IMG_VK2D = _IMG_BPP = None
+
+
+def img_fmt_tables(model):
+    """-> (vk2dfmt[256], bpp[16], attr[16]) generated once."""
+    global _IMG_VK2D, _IMG_BPP
+    if _IMG_VK2D is None:
+        _names, _IMG_VK2D, _IMG_BPP, _attr = model.img_fmt_tables()
+    return _IMG_VK2D, _IMG_BPP
+
+
+def img_fmt_id(model, vkfmt):
+    """wire VkFormat -> device id, or 0xFF unsupported."""
+    v2d, _b = img_fmt_tables(model)
+    return v2d[vkfmt] if vkfmt < 256 else 0xFF
+
+
+def img_mdim(d, m):
+    s = d >> m
+    return s if s else 1
+
+
+def img_mpitch(model, w, did, m):
+    _v, bpp = img_fmt_tables(model)
+    return (img_mdim(w, m) * bpp[did] + 63) & ~63
+
+
+def img_layer_bytes(model, w, h, did, mips):
+    return sum(img_mpitch(model, w, did, m) * img_mdim(h, m)
+               for m in range(mips))
+
+
+def f32_q44(f):
+    """fp32 bits -> unsigned q4.4 (clamp [0, 15.9375], round-nearest),
+    mirroring vnfront f_f32_q44."""
+    if f & 0x80000000:
+        return 0
+    e = (f >> 23) & 0xFF
+    if e >= 131:
+        return 0xFF
+    p = (1 << 23) | (f & 0x7FFFFF)
+    sh = 146 - e
+    if sh <= 0:
+        return 0xFF
+    return min(0xFF, (p + (1 << (sh - 1))) >> sh)
+
+# §12.3 C/5b-r2: CLEAR colour conversions — bit-exact mirrors of the
+# g6lc_apu_xfer XClrPat/XSrEnc path (fp32 source words; uint/flt
+# formats take the VkClearColorValue union words raw)
+def cl_f32_u8(f):
+    """fp32 bits -> UNORM8, clamped round-to-nearest (f_f32_u8)."""
+    if f & 0x80000000:
+        return 0
+    e = (f >> 23) & 0xFF
+    if e >= 127:
+        return 0xFF
+    p = ((1 << 23) | (f & 0x7FFFFF)) * 255
+    sh = 150 - e
+    term = (1 << (sh - 1)) if sh - 1 < 40 else 0
+    return (p + term) >> sh
+
+
+def cl_f32_l16(f):
+    """fp32 bits -> linear 16 (f_f32_l16); feeds the sRGB search."""
+    if f & 0x80000000:
+        return 0
+    e = (f >> 23) & 0xFF
+    if e >= 127:
+        return 0xFFFF
+    p = ((1 << 23) | (f & 0x7FFFFF)) * 65535
+    sh = 150 - e
+    term = (1 << (sh - 1)) if sh - 1 < 48 else 0
+    return ((p + term) >> sh) & 0xFFFF
+
+
+def cl_f32_f16(f):
+    """fp32 bits -> fp16 bits, RNE, saturate to inf (f_f32_f16)."""
+    s = (f >> 31) & 1
+    e = (f >> 23) & 0xFF
+    if e == 0xFF:
+        return (s << 15) | (0x1F << 10) | (1 if f & 0x7FFFFF else 0)
+    if e >= 143:
+        return (s << 15) | (0x1F << 10)
+    if e < 102:
+        return s << 15
+    m = (1 << 23) | (f & 0x7FFFFF)
+    if e >= 113:
+        mr = (f >> 13) & 0x3FF
+        if (f >> 12) & 1 and ((f & 0xFFF) or ((f >> 13) & 1)):
+            mr += 1
+        return ((s << 15) + ((e - 112) << 10) + mr) & 0xFFFF
+    sh = 126 - e
+    half = 1 << (sh - 1)
+    msh = m >> sh
+    if (m & half) and ((m & (half - 1)) or (msh & 1)):
+        msh += 1
+    return (s << 15) | (msh & 0x7FF)
+
+
+def img_clear_texel(model, did, cw):
+    """packed CLEAR texel (bpp bytes, component j at byte j) — the
+    XClrPat selection on APU_VN_IMG_ATTR: uint/flt raw, half ->
+    f32->f16, sRGB -> LUT encode (colour comps only), else UNORM8;
+    BGRA swaps components 0/2."""
+    _n, _v2d, bpp, attr = model.img_fmt_tables()
+    at = attr[did & 15]
+    nc = (at & 7) + 1
+    cb = bpp[did & 15] * 8 // nc
+    tex = 0
+    for c in range(nc):
+        alpha = nc == 4 and c == 3
+        if at & 0x18:
+            cv = cw[c]
+        elif at & 0x20:
+            cv = cl_f32_f16(cw[c])
+        elif at & 0x80 and not alpha:
+            cv = srgb_lut.lin16_to_srgb8(cl_f32_l16(cw[c]))
+        else:
+            cv = cl_f32_u8(cw[c])
+        cj = 2 - c if (at & 0x40 and c < 3) else c
+        tex |= cv << (cj * cb)
+    return tex.to_bytes(bpp[did & 15], 'little')
+
+
+def img_mip_off(model, w, h, did, m):
+    return sum(img_mpitch(model, w, did, i) * img_mdim(h, i)
+               for i in range(m))
+
+
+def img_dev_foot(model, words, im):
+    """device-layout footprint after the same-address upload: only the
+    (layer, mip) row data lands — pitch padding keeps the blob init
+    (zero), so the expected footprint is not the staging pattern."""
+    _v, bpp = img_fmt_tables(model)
+    bpp_ = bpp[im['fmt'] & 15]
+    layb = img_layer_bytes(model, im['w'], im['h'], im['fmt'],
+                           im['mips'])
+    src = bytearray(b''.join(struct.pack('<I', w) for w in words))
+    ba = bytearray(len(src))
+    for l in range(im['layers']):
+        off = 0
+        for m in range(im['mips']):
+            wm, hm = img_mdim(im['w'], m), img_mdim(im['h'], m)
+            pt = img_mpitch(model, im['w'], im['fmt'], m)
+            rb = wm * bpp_
+            for y in range(hm):
+                s = l * layb + off + y * pt
+                ba[s:s + rb] = src[s:s + rb]
+            off += pt * hm
+    return [struct.unpack('<I', bytes(ba[4 * i:4 * i + 4]))[0]
+            for i in range(len(words))]
+
+
+def img_clear_words(model, words, im, cw, ranges):
+    """apply vkCmdClearColorImage to a device-layout word image.
+    im = {w,h,fmt,mips,layers}; cw = four colour words;
+    ranges = [(aspect, baseMip, levelCount, baseLayer, layerCount)] —
+    every (layer, mip) in every aspect==COLOR range gets the packed
+    texel per texel; untouched subresources keep their words."""
+    _v, bpp = img_fmt_tables(model)
+    bpp_ = bpp[im['fmt'] & 15]
+    tb = img_clear_texel(model, im['fmt'], cw)
+    layb = img_layer_bytes(model, im['w'], im['h'], im['fmt'],
+                           im['mips'])
+    ba = bytearray(b''.join(struct.pack('<I', w) for w in words))
+    for asp, bm, lc, bl, nl in ranges:
+        if asp != 1:
+            continue
+        for l in range(bl, bl + nl):
+            for m in range(bm, bm + lc):
+                wm, hm = img_mdim(im['w'], m), img_mdim(im['h'], m)
+                pt = img_mpitch(model, im['w'], im['fmt'], m)
+                off = l * layb + img_mip_off(model, im['w'], im['h'],
+                                             im['fmt'], m)
+                for y in range(hm):
+                    for x in range(wm):
+                        s = off + y * pt + x * bpp_
+                        ba[s:s + bpp_] = tb
+    return [struct.unpack('<I', bytes(ba[4 * i:4 * i + 4]))[0]
+            for i in range(len(words))]
+
+
+# §12.3 C/5b-r2: the CLEAR sessions — {vkfmt, image geometry, colour
+# words, ranges} per variant; clear_oob carries three ranges that each
+# violate one subresource rule -> DEVICE_LOST, no write.
+F32_PI   = 0x40490FDB
+F32_1E30 = 0x2E043787          # ~1e-30, lands in fp16 denormal range
+F32_70K  = 0x4788AC80          # 70000.0 -> fp16 inf (> 65504)
+F32_H    = 0x3F000000          # 0.5
+F32_Q    = 0x3E800000          # 0.25
+F32_TQ   = 0x3F400000          # 0.75
+F32_ONE  = 0x3F800000          # 1.0
+
+CLEAR_SESSIONS = {
+    'clear_rgba8':   dict(vkfmt=37, w=16, h=16, mips=3, layers=2,
+                          cw=[F32_H, F32_Q, F32_TQ, F32_ONE],
+                          ranges=[(1, 1, 2, 1, 1)]),
+    'clear_srgb':    dict(vkfmt=43, w=16, h=16, mips=3, layers=2,
+                          cw=[F32_H, F32_Q, F32_TQ, F32_ONE],
+                          ranges=[(1, 0, 1, 0, 2)]),
+    'clear_rgba16f': dict(vkfmt=97, w=16, h=16, mips=3, layers=2,
+                          cw=[F32_1E30, F32_70K, F32_H, F32_ONE],
+                          ranges=[(1, 0, 3, 0, 1)]),
+    'clear_r32f':    dict(vkfmt=100, w=16, h=16, mips=1, layers=1,
+                          cw=[F32_PI, 0, 0, 0],
+                          ranges=[(1, 0, 1, 0, 1)]),
+    'clear_r32u':    dict(vkfmt=98, w=16, h=16, mips=1, layers=1,
+                          cw=[0xFFFFFFFF, 0, 0, 0],
+                          ranges=[(1, 0, 1, 0, 1)]),
+    'clear_oob':     dict(vkfmt=37, w=16, h=16, mips=3, layers=2,
+                          cw=[F32_H, F32_Q, F32_TQ, F32_ONE],
+                          ranges=[(1, 0, 4, 0, 1), (1, 0, 1, 1, 2),
+                                  (2, 0, 1, 0, 1)]),
+}
+
+
 # commit prediction for vkCreateComputePipelines: the 4a commit
 # scanner mirrors g6lc_apu_shmod 1:1 (Fault -> VK_ERROR_UNKNOWN)
 sys.path.insert(0, os.path.join(os.path.dirname(
     os.path.abspath(__file__)), 'shader'))
 import spirv_scan                                   # noqa: E402
 import spirv_model                                  # noqa: E402
+import srgb_lut                                     # noqa: E402
 
 rep_dbg = bool(os.environ.get('VN_REP_DBG'))
 
@@ -1815,15 +2035,95 @@ class FrontModel:
     def _buf_typ(t):
         return t in (6, 7, 8, 9)
 
+    @staticmethod
+    def _img_typ(t):
+        """§12.3 C/5b: types staging VkDescriptorImageInfo."""
+        return t <= 3
+
+    def _upd_stride(self, t):
+        if self._buf_typ(t):
+            return 6
+        if self._img_typ(t):
+            return 5
+        return 0
+
     def _upd_elem(self, out, stg, sbase, row, idx, dtype, pay):
         """Mirror StUpdInfo..StUpdElemCk: one 32-byte record write at
         set_base + (off + idx)*32.  `stg` is the staged-word cursor of
-        this element's buffer info.  Returns the element's poison
-        contribution (1 = failed buffer-descriptor write)."""
+        this element's info.  Returns the element's poison contribution
+        (1 = failed buffer/image-descriptor write)."""
         rec_addr = sbase + ((row['off'] + idx) << 5)
         elok = 0
         eb = esz = 0
-        if self._buf_typ(dtype):
+        iw = [0] * 5
+        if self._img_typ(dtype):
+            # §12.3 C/5b: staged VkDescriptorImageInfo {sampler u64,
+            # imageView u64, imageLayout u32} — mirrors
+            # StUpdImgRd/Go/VC/IC/MW/MC/SC
+            smp = pay[stg] | (pay[stg + 1] << 32)
+            vw = pay[stg + 2] | (pay[stg + 3] << 32)
+            if dtype == 0:                     # SAMPLER only
+                sst, _ss, se = self.resolve(smp, KIND['VkSampler'])
+                if sst == 'OK':
+                    elok = 1
+                    iw[3] = se['aux'] & 0xFFFFFFFF
+                    iw[4] = (se['aux'] >> 32) & 0xFFFFFFFF
+            else:
+                vst, _vs, ve = self.resolve(vw, KIND['VkImageView'])
+                if vst == 'OK':
+                    va = ve['aux']
+                    islot = va & 0xFFFF
+                    bm = (va >> 28) & 0xF
+                    ie = self.ent[islot] if 0 <= islot < self.SLOTS \
+                        else None
+                    need = 0x008 if dtype == 3 else 0x004
+                    if (ie is not None and
+                            ie['kind'] == KIND['VkImage'] and
+                            ((ie['aux'] >> 54) & need) == need and
+                            0 <= ie.get('bind_mem', -1) < self.SLOTS):
+                        me = self.ent[ie['bind_mem']]
+                        iw_ = ie['aux'] & 0xFFFF
+                        ih_ = (ie['aux'] >> 16) & 0xFFFF
+                        did = (ie['aux'] >> 32) & 0xFF
+                        nm = (ie['aux'] >> 40) & 0x1F
+                        lay = (ie['state'] & 0x7FFFF) << 6
+                        off = pit = 0
+                        acc = 0
+                        wm = hm = 1
+                        for mm in range(nm):
+                            pt = img_mpitch(self.m, iw_, did, mm)
+                            if mm == bm:
+                                off, pit = acc, pt
+                                wm, hm = (img_mdim(iw_, mm),
+                                          img_mdim(ih_, mm))
+                            acc += pt * img_mdim(ih_, mm)
+                        if (me is not None and
+                                me['kind'] == KIND['VkDeviceMemory']
+                                and (me['aux'] >> 32) & 0xFFFFFFFF
+                                != UNBACKED):
+                            bl = (va >> 36) & 0x3FF
+                            ac = (va >> 46) & 0x3FF
+                            eb = (((me['aux'] >> 32) & 0xFFFFFFFF)
+                                  + (ie.get('bind_off', 0)
+                                     & 0xFFFFFFFF)
+                                  + bl * lay + off) & 0xFFFFFFFF
+                            esz = (ac * lay - off) & 0xFFFFFFFF
+                            iw[0] = (wm << 16) | dtype
+                            iw[1] = ((((va >> 56) & 3) << 4 |
+                                      (va >> 32) & 0xF) << 24) | \
+                                (did << 16) | hm
+                            iw[2] = (((va >> 16) & 0xFFF) << 16) | ac
+                            if dtype != 1:
+                                elok = 1
+                            else:
+                                sst, _ss, se = self.resolve(
+                                    smp, KIND['VkSampler'])
+                                if sst == 'OK':
+                                    elok = 1
+                                    iw[3] = se['aux'] & 0xFFFFFFFF
+                                    iw[4] = (se['aux'] >> 32) \
+                                        & 0xFFFFFFFF
+        elif self._buf_typ(dtype):
             buf = pay[stg] | (pay[stg + 1] << 32)
             off = pay[stg + 2] | (pay[stg + 3] << 32)
             rng = pay[stg + 4] | (pay[stg + 5] << 32)
@@ -1843,11 +2143,21 @@ class FrontModel:
                     elok = 1
                     eb = (mbase + boff + off) & 0xFFFFFFFF
                     esz = rng_eff & 0xFFFFFFFF
-        # record = {base[31:0], size[31:0], kind[7:0], flags[7:0]}
+        # record = {base[31:0], size[31:0], kind[7:0], flags[7:0], ...}
         self.apw32(out, rec_addr, eb if elok else 0)
         self.apw32(out, rec_addr + 4, esz if elok else 0)
-        self.apw32(out, rec_addr + 8, (elok << 8) | dtype)
-        return 1 if self._buf_typ(dtype) and not elok else 0
+        if self._img_typ(dtype):
+            self.apw32(out, rec_addr + 8,
+                       (iw[0] & 0xFFFF00FF) | (elok << 8))
+            self.apw32(out, rec_addr + 12, iw[1])
+            self.apw32(out, rec_addr + 16, iw[2])
+            self.apw32(out, rec_addr + 20, iw[3])
+            self.apw32(out, rec_addr + 24, iw[4])
+            self.apw32(out, rec_addr + 28, 0)
+        else:
+            self.apw32(out, rec_addr + 8, (elok << 8) | dtype)
+        return 1 if (self._buf_typ(dtype) or self._img_typ(dtype)) \
+            and not elok else 0
 
     def _xfer_extent(self, h, kind):
         """§12.3 C/5a: mirror cmdexec's StXf* operand assembly —
@@ -1870,6 +2180,32 @@ class FrontModel:
             return None
         return (((me['aux'] >> 32) & 0xFFFFFFFF) + bo,
                 min(be['size'], me['size'] - bo))
+
+    def _xfer_img_extent(self, h, kind):
+        """§12.3 C/5b: mirror cmdexec's StXf* image-operand assembly —
+        like _xfer_extent plus the layout fields vnfront packed into
+        aux={usage,layers,mips,fmt,h,w} / state=layer_bytes>>6."""
+        st, _s, ie = self.resolve(h, kind)
+        if st != 'OK' or ie['kind'] != KIND['VkImage'] or \
+                ie['size'] > 0xFFFFFFFF:
+            return None
+        ms = ie.get('bind_mem', -1)
+        if ms < 0 or ms >= self.SLOTS or self.ent[ms] is None:
+            return None
+        me = self.ent[ms]
+        bo = ie.get('bind_off', 0)
+        if (me['kind'] != KIND['VkDeviceMemory'] or
+                me['size'] > 0xFFFFFFFF or bo > me['size'] or
+                (me['aux'] >> 32) & 0xFFFFFFFF == UNBACKED):
+            return None
+        return {'base': ((me['aux'] >> 32) & 0xFFFFFFFF) + bo,
+                'size': min(ie['size'], me['size'] - bo),
+                'w': ie['aux'] & 0xFFFF,
+                'h': (ie['aux'] >> 16) & 0xFFFF,
+                'fmt': (ie['aux'] >> 32) & 0xFF,
+                'mips': (ie['aux'] >> 40) & 0x1F,
+                'layers': (ie['aux'] >> 45) & 0x1FF,
+                'layb': (ie['state'] & 0x7FFFF) << 6}
 
     def _xfer_record_lost(self, session, r, aux):
         """mirror g6lc_apu_xfer's validation: bounds checked before
@@ -1902,6 +2238,85 @@ class FrontModel:
                     if (ssz and dsz and
                             sb < db + dsz and db < sb + ssz):
                         return True
+            return False
+        # ---- §12.3 C/5b: image-class records (XImgChk mirror) --------
+        def a32(i):
+            return ar.get(abase + i, 0)
+        if ct in (T['vkCmdCopyBufferToImage'],
+                  T['vkCmdCopyImageToBuffer']):
+            b2i = ct == T['vkCmdCopyBufferToImage']
+            img = self._xfer_img_extent(
+                r['handle'][1 if b2i else 0],
+                r['kind'][1 if b2i else 0])
+            buf = self._xfer_extent(
+                r['handle'][0 if b2i else 1],
+                r['kind'][0 if b2i else 1])
+            if img is None or buf is None:
+                return True
+            nr = r['imm'][1] & 0xFFFF
+            bpp = img_fmt_tables(self.m)[1][img['fmt'] & 15]
+            for i in range(nr):
+                o = 14 * i
+                bo, rl0, ih0 = a64(o), a32(o + 2), a32(o + 3)
+                asp, mip, bl, lc = (a32(o + 4), a32(o + 5),
+                                    a32(o + 6), a32(o + 7))
+                ox, oy, oz = a32(o + 8), a32(o + 9), a32(o + 10)
+                ew, eh, ed = a32(o + 11), a32(o + 12), a32(o + 13)
+                wm = img_mdim(img['w'], mip)
+                hm = img_mdim(img['h'], mip)
+                rl = ew if rl0 == 0 else rl0
+                ih = eh if ih0 == 0 else ih0
+                need = (bo + (((lc - 1) * ih + (eh - 1)) * rl + ew)
+                        * bpp) if lc >= 1 else 0
+                if not (asp == 1 and mip < img['mips'] and
+                        lc >= 1 and bl + lc <= img['layers'] and
+                        oz == 0 and ed == 1 and
+                        ew >= 1 and eh >= 1 and
+                        ox + ew <= wm and oy + eh <= hm and
+                        rl >= ew and ih >= eh and need <= buf[1]):
+                    return True
+            return False
+        if ct == T['vkCmdCopyImage']:
+            s0 = self._xfer_img_extent(r['handle'][0], r['kind'][0])
+            d0 = self._xfer_img_extent(r['handle'][1], r['kind'][1])
+            if s0 is None or d0 is None:
+                return True
+            nr = r['imm'][2] & 0xFFFF
+            for i in range(nr):
+                o = 17 * i
+                asp, sm, sbl, slc = (a32(o), a32(o + 1),
+                                     a32(o + 2), a32(o + 3))
+                sox, soy, soz = a32(o + 4), a32(o + 5), a32(o + 6)
+                das, dm, dbl, dlc = (a32(o + 7), a32(o + 8),
+                                     a32(o + 9), a32(o + 10))
+                dox, doy, doz = (a32(o + 11), a32(o + 12),
+                                 a32(o + 13))
+                ew, eh, ed = a32(o + 14), a32(o + 15), a32(o + 16)
+                if not (asp == 1 and das == 1 and
+                        sm < s0['mips'] and dm < d0['mips'] and
+                        slc >= 1 and slc == dlc and
+                        sbl + slc <= s0['layers'] and
+                        dbl + dlc <= d0['layers'] and
+                        soz == 0 and doz == 0 and
+                        ew >= 1 and eh >= 1 and ed == 1 and
+                        sox + ew <= img_mdim(s0['w'], sm) and
+                        soy + eh <= img_mdim(s0['h'], sm) and
+                        dox + ew <= img_mdim(d0['w'], dm) and
+                        doy + eh <= img_mdim(d0['h'], dm)):
+                    return True
+            return False
+        if ct == T['vkCmdClearColorImage']:
+            img = self._xfer_img_extent(r['handle'][0], r['kind'][0])
+            if img is None:
+                return True
+            nr = r['imm'][1] & 0xFFFF
+            for i in range(nr):
+                o = 4 + 5 * i
+                if not (a32(o) == 1 and a32(o + 2) >= 1 and
+                        a32(o + 1) + a32(o + 2) <= img['mips'] and
+                        a32(o + 4) >= 1 and
+                        a32(o + 3) + a32(o + 4) <= img['layers']):
+                    return True
             return False
         de = self._xfer_extent(r['handle'][0], r['kind'][0])
         if de is None:
@@ -2022,10 +2437,14 @@ class FrontModel:
                 # issues on the work port -> shcore UNSUPPORTED -> lost
                 return True
             elif ct in (T['vkCmdCopyBuffer'], T['vkCmdFillBuffer'],
-                        T['vkCmdUpdateBuffer']):
-                # §12.3 C/5a: Xfer operand resolution + validation —
-                # unbound/OOB/overlap/misalignment refuse the record
-                # (FAULT) -> DEVICE_LOST on the fence
+                        T['vkCmdUpdateBuffer'],
+                        T['vkCmdCopyBufferToImage'],
+                        T['vkCmdCopyImageToBuffer'],
+                        T['vkCmdCopyImage'],
+                        T['vkCmdClearColorImage']):
+                # §12.3 C/5a + C/5b: Xfer operand resolution +
+                # validation — unbound/OOB/overlap/misalignment refuse
+                # the record (FAULT) -> DEVICE_LOST on the fence
                 if self._xfer_record_lost(session, r, aux):
                     return True
         return False
@@ -2164,16 +2583,15 @@ class FrontModel:
                     dead, le = self.dset_dead(de)
                     sbase = de['aux'] & 0x1FFFFFF
                     pois = 0
+                    stride = self._upd_stride(dtype)
                     if dead:
                         # pool/layout dead: consume infos, touch nothing
-                        if self._buf_typ(dtype):
-                            stg += (dcnt & 0xFFFF) * 6
+                        stg += (dcnt & 0xFFFF) * stride
                         continue
                     row = self.lay_row(le, dstb)
                     if row is None or row['type'] != dtype:
                         pois = 1
-                        if self._buf_typ(dtype):
-                            stg += (dcnt & 0xFFFF) * 6
+                        stg += (dcnt & 0xFFFF) * stride
                     elif darr + (dcnt & 0xFFFF) > row['count']:
                         pois = 1
                         # in-range prefix still lands
@@ -2182,15 +2600,14 @@ class FrontModel:
                             pois |= self._upd_elem(
                                 out, stg, sbase, row, darr + j,
                                 dtype, pay)
-                            stg += 6 * self._buf_typ(dtype)
-                        if self._buf_typ(dtype):
-                            stg += ((dcnt & 0xFFFF) - upto) * 6
+                            stg += stride
+                        stg += ((dcnt & 0xFFFF) - upto) * stride
                     else:
                         for j in range(dcnt & 0xFFFF):
                             pois |= self._upd_elem(
                                 out, stg, sbase, row, darr + j,
                                 dtype, pay)
-                            stg += 6 * self._buf_typ(dtype)
+                            stg += stride
                     if pois:
                         de['aux'] |= 0x80000000
                 for _ci in range(rec['imm'][1] & 0xFFFF):
@@ -2240,10 +2657,40 @@ class FrontModel:
                 ew[0], ew[1] = sz & 0xFFFFFFFF, (sz >> 32) & 0xFFFFFFFF
                 ew[2], ew[3], ew[4] = 256, 0, 3
             elif ek == 'IMGREQ':
+                # §12.3 C/5b: size = layers * layer_bytes (aux[53:45]
+                # x state[18:0]<<6), alignment 64, both heaps
                 e = ent_of(lu[1] if len(lu) > 1 else lu[0])
-                sz = (e['aux'] >> 8) << 12
+                sz = ((e['aux'] >> 45) & 0x1FF) * \
+                    ((e['state'] & 0x7FFFF) << 6)
                 ew[0], ew[1] = sz & 0xFFFFFFFF, (sz >> 32) & 0xFFFFFFFF
-                ew[2], ew[3], ew[4] = 4096, 0, 3
+                ew[2], ew[3], ew[4] = 64, 0, 3
+            elif ek == 'IMGSUB':
+                # §12.3 C/5b: VkSubresourceLayout — walk the mip chain
+                # (mirrors StImgMip seeded from the image aux)
+                e = ent_of(lu[1] if len(lu) > 1 else lu[0])
+                w = e['aux'] & 0xFFFF
+                hh = (e['aux'] >> 16) & 0xFFFF
+                did = (e['aux'] >> 32) & 0xFF
+                mips = (e['aux'] >> 40) & 0x1F
+                lays = (e['aux'] >> 45) & 0x1FF
+                lay = (e['state'] & 0x7FFFF) << 6
+                asp, mip, arr = (rec['imm'][0] & 0xFFFFFFFF,
+                                 rec['imm'][1] & 0xFFFFFFFF,
+                                 rec['imm'][2] & 0xFFFFFFFF)
+                if asp == 1 and mip < mips and arr < lays:
+                    acc = off = pit = 0
+                    w1 = h1 = 1
+                    for mm in range(mips):
+                        pt = img_mpitch(self.m, w, did, mm)
+                        if mm == mip:
+                            off, pit = acc, pt
+                            w1, h1 = img_mdim(w, mm), img_mdim(hh, mm)
+                        acc += pt * img_mdim(hh, mm)
+                    vals = [arr * lay + off, pit * h1, pit, lay,
+                            pit * h1]
+                    for i, v in enumerate(vals):
+                        ew[2 * i] = v & 0xFFFFFFFF
+                        ew[2 * i + 1] = (v >> 32) & 0xFFFFFFFF
             elif ek == 'ENUMPD':
                 ew[0] = 1
                 ids = blob_ids(0)
@@ -2547,6 +2994,125 @@ class FrontModel:
                                 else:
                                     self.ent[h & 0xFFFF]['size'] = msz
                                     self.setauxhi(h, pg)
+                elif obj_kind == KIND['VkImage']:
+                    # §12.3 C/5b image create — mirrors StImgCk /
+                    # StImgMip / StImgAuxH / StImgState.  Validate
+                    # BEFORE the alloc; the entry then carries
+                    # aux={usage,layers,mips,fmt,h,w}, state=lay>>6,
+                    # size=layers*layer_bytes.
+                    did = img_fmt_id(self.m, rec['imm'][2] & 0xFF)
+                    w, hh = rec['imm'][3] & 0xFFFF, rec['imm'][4] & 0xFFFF
+                    mips = rec['imm'][6] & 0x1F
+                    lays = rec['imm'][7] & 0x1FF
+                    if did == 0xFF:
+                        out['result'] = VK_ERR_FMTNS
+                    elif (rec['imm'][1] != 1 or          # 2D only
+                          rec['imm'][5] != 1 or          # depth 1
+                          rec['imm'][8] != 1 or          # samples 1
+                          rec['imm'][9] > 1 or           # tiling
+                          not 1 <= w <= 4096 or
+                          not 1 <= hh <= 4096 or
+                          not 1 <= mips <= 13 or
+                          not 1 <= lays <= 256 or
+                          rec['imm'][10] == 0 or
+                          rec['imm'][10] & ~0xF):
+                        out['result'] = VK_ERR_FEATURE
+                    else:
+                        lay = img_layer_bytes(self.m, w, hh, did, mips)
+                        st, h, slot = self.alloc(rec['q'][new],
+                                                 obj_kind, par)
+                        if st != 'OK':
+                            out['result'] = self._err(st)
+                        else:
+                            e = self.ent[slot]
+                            e['size'] = lays * lay
+                            self.setaux(h, 0xFFFFFFFF,
+                                        (hh << 16) | w)
+                            self.setauxhi(h,
+                                          ((rec['imm'][10] & 0x3FF)
+                                           << 22)
+                                          | (lays << 13)
+                                          | (mips << 8) | did)
+                            self.setstate(h, 0x7FFFF, lay >> 6)
+                elif obj_kind == KIND['VkImageView']:
+                    # §12.3 C/5b view create — mirrors StImgVwCk; the
+                    # image entry is the second resolve (lu[1]) and is
+                    # watched into ent_q.  aux lo = {baseMip, swz a,b,
+                    # g,r, img_slot}, hi = {vt-1, layers, baseLayer,
+                    # levels}.
+                    st, is_, ie = self.resolve(hnd[lu[1]],
+                                               KIND['VkImage'])
+                    imips = (ie['aux'] >> 40) & 0x1F
+                    ilays = (ie['aux'] >> 45) & 0x1FF
+                    bm, bl = rec['imm'][8], rec['imm'][10]
+                    lc = rec['imm'][9]
+                    ac = rec['imm'][11]
+                    if lc == 0xFFFFFFFF:
+                        lc = imips - bm
+                    if ac == 0xFFFFFFFF:
+                        ac = ilays - bl
+                    fmt_ok = img_fmt_id(self.m, rec['imm'][2] & 0xFF) \
+                        == (ie['aux'] >> 32) & 0xFF
+                    if (rec['imm'][1] not in (1, 5) or
+                            rec['imm'][7] != 1 or
+                            rec['imm'][3] > 6 or rec['imm'][4] > 6 or
+                            rec['imm'][5] > 6 or rec['imm'][6] > 6):
+                        out['result'] = VK_ERR_FEATURE
+                    elif not fmt_ok or bm >= imips or lc == 0 or \
+                            bm + lc > imips or bl >= ilays or \
+                            ac == 0 or bl + ac > ilays:
+                        out['result'] = VK_ERR_FMTNS
+                    else:
+                        st, h, slot = self.alloc(rec['q'][new],
+                                                 obj_kind, par)
+                        if st != 'OK':
+                            out['result'] = self._err(st)
+                        else:
+                            self.setaux(h, 0xFFFFFFFF,
+                                        ((bm & 0xF) << 28)
+                                        | ((rec['imm'][6] & 7) << 25)
+                                        | ((rec['imm'][5] & 7) << 22)
+                                        | ((rec['imm'][4] & 7) << 19)
+                                        | ((rec['imm'][3] & 7) << 16)
+                                        | (is_ & 0xFFFF))
+                            self.setauxhi(h,
+                                          ((1 if rec['imm'][1] == 5
+                                            else 0) << 24)
+                                          | ((ac & 0x3FF) << 14)
+                                          | ((bl & 0x3FF) << 4)
+                                          | (lc & 0xF))
+                elif obj_kind == KIND['VkSampler']:
+                    # §12.3 C/5b sampler — mirrors StSamCk; the record's
+                    # +20..+27 words are parked in aux
+                    if (rec['imm'][1] > 1 or rec['imm'][2] > 1 or
+                            rec['imm'][3] > 1 or rec['imm'][8] != 0 or
+                            rec['imm'][11] > 7 or rec['imm'][14] > 5 or
+                            rec['imm'][4] > 3 or rec['imm'][5] > 3 or
+                            rec['imm'][6] > 3 or rec['imm'][15] != 0):
+                        out['result'] = VK_ERR_FEATURE
+                    else:
+                        st, h, slot = self.alloc(rec['q'][new],
+                                                 obj_kind, par)
+                        if st != 'OK':
+                            out['result'] = self._err(st)
+                        else:
+                            bias = ((rec['imm'][7] >> 31) << 8) | \
+                                f32_q44(rec['imm'][7] & 0x7FFFFFFF)
+                            self.setaux(h, 0xFFFFFFFF,
+                                        (((rec['imm'][10] & 1) << 3)
+                                         | (rec['imm'][11] & 7)) << 17
+                                        | (rec['imm'][14] & 7) << 14
+                                        | (rec['imm'][6] & 7) << 11
+                                        | (rec['imm'][5] & 7) << 8
+                                        | (rec['imm'][4] & 7) << 5
+                                        | (rec['imm'][3] & 1) << 4
+                                        | (rec['imm'][2] & 3) << 2
+                                        | (rec['imm'][1] & 3))
+                            self.setauxhi(h,
+                                          (bias << 16)
+                                          | (f32_q44(rec['imm'][13])
+                                             << 8)
+                                          | f32_q44(rec['imm'][12]))
                 else:
                     st, h, slot = self.alloc(rec['q'][new], obj_kind, par)
                     if st != 'OK':
@@ -2562,19 +3128,13 @@ class FrontModel:
                             # occupant (mirrors ex_fence_clr at create)
                             self.fence_sig &= ~(1 << fidx)
                             self.fence_lost &= ~(1 << fidx)
-                    elif ct in (session['T']['vkCreateBuffer'],
-                                session['T']['vkCreateImage']):
-                        if ct == session['T']['vkCreateBuffer']:
-                            ds = next((i for i in range(8)
-                                       if rec['qv'] >> i & 1
-                                       and not rec['kind'][i]), -1)
-                            sz = rec['q'][ds] if ds >= 0 else 0
-                            blocks = (sz + 255) >> 8
-                            self.ent[h & 0xFFFF]['size'] = sz
-                        else:
-                            sz = rec['imm'][3] * rec['imm'][4] * 4
-                            blocks = (sz + 4095) >> 12
-                            self.ent[h & 0xFFFF]['size'] = sz
+                    elif ct == session['T']['vkCreateBuffer']:
+                        ds = next((i for i in range(8)
+                                   if rec['qv'] >> i & 1
+                                   and not rec['kind'][i]), -1)
+                        sz = rec['q'][ds] if ds >= 0 else 0
+                        blocks = (sz + 255) >> 8
+                        self.ent[h & 0xFFFF]['size'] = sz
                         st2, _s2 = self.setaux(h, 0xFFFFFF00,
                                                (blocks & 0xFFFFFF) << 8)
                         if st2 != 'OK':
@@ -2916,10 +3476,14 @@ class FrontModel:
                         pwords = [w & 0xFFFFFFFF for w in rec['pay']]
                     elif ct in (session['T']['vkCmdCopyBuffer'],
                                 session['T']['vkCmdFillBuffer'],
-                                session['T']['vkCmdUpdateBuffer']):
-                        # §12.3 C/5a: xfer operand payloads stream
-                        # verbatim through the cmdrec arena (the
-                        # engine replays them with PAYREAD at
+                                session['T']['vkCmdUpdateBuffer'],
+                                session['T']['vkCmdCopyBufferToImage'],
+                                session['T']['vkCmdCopyImageToBuffer'],
+                                session['T']['vkCmdCopyImage'],
+                                session['T']['vkCmdClearColorImage']):
+                        # §12.3 C/5a + C/5b: xfer operand payloads
+                        # stream verbatim through the cmdrec arena
+                        # (the engine replays them with PAYREAD at
                         # pay_base = imm[7])
                         pwords = [w & 0xFFFFFFFF for w in rec['pay']]
                     if pwords:
@@ -3118,6 +3682,8 @@ class FrontModel:
             return 'FMT'
         if name == 'vkGetPhysicalDeviceImageFormatProperties2':
             return 'IMGFMT'
+        if name == 'vkGetImageSubresourceLayout':
+            return 'IMGSUB'
         if name == 'vkGetMemoryResourcePropertiesMESA':
             return 'MRES'
         return 'NONE'
@@ -3279,7 +3845,7 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng,
     cmd('vkBindBufferMemory', device=I['dev'], buffer=I['buf'],
         memory=I['mem'], memoryOffset=0)
     cmd('vkCreateImage', device=I['dev'],
-        pCreateInfo=struct('VkImageCreateInfo', imageType=0,
+        pCreateInfo=struct('VkImageCreateInfo', imageType=1,   # 2D
                            format=37,     # R8G8B8A8_UNORM
                            extent=struct('VkExtent3D', width=64,
                                          height=64, depth=1),
@@ -3941,6 +4507,11 @@ TP_WAIT_HEAD = 4   # [ring][target_lo][target_hi][timeout]
 TP_WAIT_IDLE = 5   # [ring][timeout]   poll ring.status for the IDLE bit
 TP_CHECK     = 6   # [what][a0][a1]    consume .exp record(s) (a0,a1 = aux)
 TP_DELAY     = 7   # [cycles]          idle the TB clock this long
+TP_APGUARD   = 8   # [n][per-range: lo lo_hi sz]*n  arm the aperture-write
+                   # allow-list: every device aperture write outside a
+                   # listed {lo,size} range is fatal (n=0 = no writes at
+                   # all).  §12.3 5b-r2 C ctx-kill session proof.
+APGUARD_MAX  = 16
 
 # CHECK 'what' selectors
 CK_HEAD   = 0      # a0=ring
@@ -4173,6 +4744,18 @@ class TransportModel:
                        % (ring['slot'], ring['head']))
         ring['idle_count'] = 0
 
+    def kill_ctx(self, ctx):
+        """vgctl CTX_DESTROY -> vnpump ctx-kill (§12.3 5b-r2): every live
+        ring of the context retires silently -- live<=0 with NO status
+        write and NO head publication, and a stale in-flight stream of
+        that ctx may not write either once its slot is gone (same guard
+        shape as ring_overlap).  ring_overlap stays as defence in depth
+        for reuse without a kill."""
+        for i, r in enumerate(self.rings):
+            if r is not None and r['ctx'] == ctx:
+                del self.ring_of[r['handle']]
+                self.rings[i] = None
+
     # ---- transport commands ------------------------------------------------
     def t_cmd(self, name, w, rec, fm, ses, log, ctx, depth):
         """Execute one TRANSPORT command; w = raw command words.
@@ -4239,6 +4822,21 @@ class TransportModel:
                 return True
             slot = next(i for i, r in enumerate(self.rings) if r is None)
             base_w = b['base_w'] + (off >> 2)
+            # the new ring claims its window; a stale slot whose tail
+            # or buffer lies inside belonged to a ring whose shmem the
+            # guest reused without vkDestroyRingMESA (process exit frees
+            # the blob while the device slot stays live) -- retire it
+            # silently so its stale head can never mis-frame or
+            # FATAL-poison the new owner's stream (mirrors vnpump)
+            win_hi = base_w + (size >> 2)
+            for i, r in enumerate(self.rings):
+                if r is not None and (
+                        base_w <= r['tail_base_w'] < win_hi or
+                        base_w <= r['buf_base_w'] < win_hi or
+                        (r['buf_base_w'] <= base_w <
+                         r['buf_base_w'] + (r['buf_size'] >> 2))):
+                    del self.ring_of[r['handle']]
+                    self.rings[i] = None
             ring = {'slot': slot, 'handle': handle, 'rid': rid,
                     'ctx': ctx, 'idle_to': min(idle, IDLE_TO_MAX),
                     'head': 0,
@@ -4340,9 +4938,21 @@ def load_shvec(name):
         # §12.3 F5: 5-word entries {set,binding,size,addr,aux}
         st_, bd, sz, _ma, ax = hw[i:i + 5]
         i += 5
-        binds.append({'set': st_, 'binding': bd, 'size': sz,
-                      'idx': ax & 0xFF, 'dyn': (ax >> 8) & 1,
-                      'kind': (ax >> 16) & 0xFF})
+        b = {'set': st_, 'binding': bd, 'size': sz,
+             'idx': ax & 0xFF, 'dyn': (ax >> 8) & 1,
+             'kind': (ax >> 16) & 0xFF}
+        if ax & (1 << 24):
+            # §12.3 C/5b: image/sampler binds carry the record's
+            # bytes 10..27 as five meta words — {w,h}, {fmt, mdim,
+            # layers}, swizzle, sampler w0, sampler w1
+            hw_, mlf, swz, s0, s1 = hw[i:i + 5]
+            i += 5
+            b['img'] = {'w': hw_ & 0xFFFF, 'h': (hw_ >> 16) & 0xFFFF,
+                        'fmt': mlf & 0xFF, 'mips': (mlf >> 8) & 0xF,
+                        'dim': (mlf >> 12) & 3,
+                        'layers': (mlf >> 16) & 0xFFFF,
+                        'swz': swz, 's0': s0, 's1': s1}
+        binds.append(b)
     push = hw[i:i + n_push]
     i += n_push
     dyn_off = []
@@ -4579,7 +5189,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
     submit(VG_CTX_CREATE, [len(nmb) - 1, VG_CAPSET_VENUS] + name_words,
            ctx=CTX_ID, exp_type=VG_RESP_NODATA)
 
-    def create_blob(rid, size):
+    def create_blob(rid, size, ctx=CTX_ID):
         # §12.3 F9/F5: blob-owned backing is LAZY — every MAPPABLE blob
         # is MAP_BLOB'd into the guest window right after create, so an
         # extent taken here would only hold a private/guest page until
@@ -4587,14 +5197,14 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # arena even empty).  bind_offset 0 = nothing allocated.
         tm.blobs[rid] = {'base_w': 0,
                          'size': size,
-                         'mapped': False, 'ctx': CTX_ID,
+                         'mapped': False, 'ctx': ctx,
                          'mem_backed': False, 'mem_id': 0}
         submit(VG_RESOURCE_CREATE_BLOB,
                [rid, VG_BLOB_HOST3D, VG_BLOB_MAPPABLE, 0, 0, 0,
                 size & 0xFFFFFFFF, (size >> 32) & 0xFFFFFFFF],
-               ctx=CTX_ID, exp_type=VG_RESP_NODATA)
+               ctx=ctx, exp_type=VG_RESP_NODATA)
 
-    def create_blob_mem(rid, size, mem_id):
+    def create_blob_mem(rid, size, mem_id, ctx=CTX_ID):
         """§7b/5a-ii: blob_id != 0 -> the resource maps onto the
         VkDeviceMemory aperture extent.  Returns the expected base."""
         mst, _ms, me = fm.resolve(mem_id, KIND['VkDeviceMemory'])
@@ -4602,7 +5212,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 mem_id & 0xFFFFFFFF, (mem_id >> 32) & 0xFFFFFFFF,
                 size & 0xFFFFFFFF, (size >> 32) & 0xFFFFFFFF]
         if mst != 'OK':
-            submit(VG_RESOURCE_CREATE_BLOB, body, ctx=CTX_ID,
+            submit(VG_RESOURCE_CREATE_BLOB, body, ctx=ctx,
                    exp_type=VG_ERR_RESOURCE)
             return None
         # the guest kernel rounds the BO to its page size; the truthful
@@ -4617,9 +5227,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # the blob binds at 0 until MAP_BLOB relocates it
         base_w = 0 if base_b == UNBACKED else base_b >> 2
         tm.blobs[rid] = {'base_w': base_w, 'size': me['size'],
-                         'mapped': False, 'ctx': CTX_ID,
+                         'mapped': False, 'ctx': ctx,
                          'mem_backed': True, 'mem_id': mem_id}
-        submit(VG_RESOURCE_CREATE_BLOB, body, ctx=CTX_ID,
+        submit(VG_RESOURCE_CREATE_BLOB, body, ctx=ctx,
                exp_type=VG_RESP_NODATA)
         return base_b
 
@@ -4634,7 +5244,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 return (i - pages + 1) * VGP_PAGE
         raise AssertionError('guest window exhausted')
 
-    def map_blob(rid, offset=None):
+    def map_blob(rid, offset=None, ctx=CTX_ID):
         """MAP_BLOB: the caller (guest kernel) dictates the window
         offset.  offset=None models drm_mm first fit inside the guest
         window.  The device frees the old extent (a private base after
@@ -4661,7 +5271,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             fm.setauxhi(b['mem_id'], offset)
         b['mapped'] = True
         submit(VG_MAP_BLOB, [rid, 0, offset & 0xFFFFFFFF,
-                             (offset >> 32) & 0xFFFFFFFF], ctx=CTX_ID,
+                             (offset >> 32) & 0xFFFFFFFF], ctx=ctx,
                exp_type=VG_RESP_MAP_INFO,
                exp_body=[VG_MAP_WC, offset & 0xFFFFFFFF])
         return offset
@@ -4753,6 +5363,94 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         mems = [0x6000_0000_1000 + i * 0x1000_0001
                 for i in range(n_bind)]
         RES_BLOB0 = 200                 # memory-blob resource ids
+        # §12.3 C/5b: image binds mint VkImage + view (+ sampler for
+        # combined) plus a per-bind upload-staging buffer (feeds
+        # vkCmdCopyBufferToImage) and a readback buffer (target of
+        # vkCmdCopyImageToBuffer).  The device image layout IS the
+        # upload staging byte order: pitch-padded rows, layer-major
+        # mip tail; the readback packs rows (rowLen=0).
+        imgs, views, smps = {}, {}, {}
+        stage_i, rb_i = {}, {}
+        _v2d, _bpp = img_fmt_tables(model)
+        d2vk = {d: v for v, d in enumerate(_v2d) if d != 0xFF}
+
+        def f32b(f):
+            return struct.unpack('<I', struct.pack('<f', f))[0]
+
+        first_img_i = next((i for i, b in enumerate(vec['binds'])
+                            if 'img' in b), -1)
+
+        def img_layb(im):
+            return img_layer_bytes(model, im['w'], im['h'],
+                                   im['fmt'], im['mips'])
+
+        def img_foot(b):
+            return img_layb(b['img']) * b['img']['layers']
+
+        def img_regions(b, pack=0):
+            """per-(mip,layer) VkBufferImageCopy regions; pack=0 keeps
+            the device pitch in the buffer (upload staging IS the
+            device image), pack=1 packs rows w*bpp (readback)."""
+            im = b['img']
+            layb = img_layb(im)
+            bpp_ = _bpp[im['fmt'] & 15]
+            regs = []
+            off = 0
+            boff = 0
+            for m in range(im['mips']):
+                wm, hm = img_mdim(im['w'], m), img_mdim(im['h'], m)
+                pt = (wm * bpp_ + 63) & ~63
+                for l in range(im['layers']):
+                    regs.append(dict(
+                        bufferOffset=(boff if pack
+                                      else l * layb + off),
+                        bufferRowLength=0 if pack else pt // bpp_,
+                        bufferImageHeight=0 if pack else hm,
+                        sub=(1, m, l, 1), ext=(wm, hm, 1)))
+                    boff += hm * wm * bpp_
+                off += pt * hm
+            return regs
+
+        def img_pack(words, im):
+            """device-layout bytes -> the CopyImageToBuffer packed-row
+            order (mip-major, layer inner, w*bpp rows)."""
+            bpp_ = _bpp[im['fmt'] & 15]
+            layb = img_layb(im)
+            out = []
+            off = 0
+            for m in range(im['mips']):
+                wm, hm = img_mdim(im['w'], m), img_mdim(im['h'], m)
+                pt = (wm * bpp_ + 63) & ~63
+                assert (wm * bpp_) % 4 == 0
+                for l in range(im['layers']):
+                    for r in range(hm):
+                        s = l * layb + off + r * pt
+                        out += words[s // 4:s // 4 + (wm * bpp_) // 4]
+                off += pt * hm
+            return out
+
+        # §12.3 C/5b-r2: the clear_* variants mint one transfer-only
+        # image (never descriptor-bound) plus upload-staging and
+        # readback buffers; the cbuf runs B2I -> ClearColorImage ->
+        # I2B and the gates read back both the device footprint and
+        # the packed buffer.  clear_oob submits one record whose three
+        # ranges each violate a subresource rule -> DEVICE_LOST, and
+        # the footprint gate proves nothing was written.
+        clr = CLEAR_SESSIONS.get(variant)
+        clr_b = clr_im = None
+        cl_img, cl_imem = 0x5100_0000_9000, 0x6000_0000_9000
+        cl_sbuf, cl_smem = 0x5000_0000_9000, 0x6000_0000_9001
+        cl_rbuf, cl_rmem = 0x5000_0000_9001, 0x6000_0000_9002
+        clr_init = []
+        if clr is not None:
+            did = img_fmt_id(model, clr['vkfmt'])
+            assert did != 0xFF, 'clear variant fmt unsupported'
+            clr_im = {'w': clr['w'], 'h': clr['h'], 'fmt': did,
+                      'mips': clr['mips'], 'layers': clr['layers']}
+            clr_b = {'img': clr_im}
+            clr_init = [((i * 0x01010101) + 0xA5A5_5A5A) & 0xFFFFFFFF
+                        for i in range(img_foot(clr_b) // 4)]
+
         # §12.3 C/5a xfer staging image: 128 B of distinctive data
         XFER_STAGE_W = [(0xA500_0000 + i) & 0xFFFFFFFF
                         for i in range(32)]
@@ -4767,7 +5465,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         def compile_cmds(session):
             cw = [(n, k) + vka(n, **k) for n, k in session]
             dry = FrontModel(model, asm)
-            dry.ctx = CTX_ID
+            dry.ctx = fm.ctx
             sized = []
             for (name, kw, w, a) in cw:
                 drec = sim.run(w)
@@ -4789,15 +5487,38 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             while i < n:
                 batch = []
                 bw = 0
+                # §12.3 5b: the reply blob must never wrap inside one
+                # batch — a wrapped window clobbers a reply the flush
+                # has not checked yet.  Project the cursor; a replying
+                # command that would wrap starts the next batch (the
+                # emit loop's Seek-to-0 then lands it at offset 0).
+                rp_proj = tm.rep_cursor
+                sk_proj = seek_used[0]
                 while i < n:
                     name, kw, w, a, nb = sized_list[i]
                     cost = len(w) * 4
-                    if model.cmd_info[name]['act']['flags'] & 1:
+                    replies = bool(
+                        model.cmd_info[name]['act']['flags'] & 1)
+                    if replies:
                         cost += sw4 + sk4
                     if batch and bw + cost > r['buf_size'] - 128:
                         break
+                    if replies and batch:
+                        stw = max(512, (nb + 63) & ~63)
+                        if not sk_proj and batch_no[0] >= 1:
+                            stw += 64
+                        if rp_proj + stw > REPLY_SIZE:
+                            break
                     batch.append(sized_list[i])
                     bw += cost
+                    if replies:
+                        stw = max(512, (nb + 63) & ~63)
+                        if not sk_proj and batch_no[0] >= 1:
+                            stw += 64
+                            sk_proj = True
+                        if rp_proj + stw > REPLY_SIZE:
+                            rp_proj = 0
+                        rp_proj += stw
                     i += 1
                 if batch_no[0] >= 1:
                     delay(IDLE_TO * 2)
@@ -4832,9 +5553,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         tm.rep_cursor += stride
                 tail_store(r)
                 if batch_no[0] >= 1:
-                    nf = vk('vkNotifyRingMESA', ring=RING0_H,
+                    nf = vk('vkNotifyRingMESA', ring=r['handle'],
                             seqno=r['cur'], flags=0)
-                    execbuf(nf)
+                    execbuf(nf, ctx=r['ctx'])
                 tm.drain_ring(r, fm, ses, log)
                 wait_head(r['slot'])
                 flush_replies()
@@ -4867,6 +5588,97 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # §7b BIND arm refuses it (buffer stays unbound -> the
             # submit-time assembly fails -> DEVICE_LOST)
             boff = b['size'] if variant == 'bindoob' and i == 0 else 0
+            if 'img' in b:
+                # §12.3 C/5b image bind: VkImage + view (+sampler),
+                # eager type-0 memory bound at offset 0
+                im = b['img']
+                vkfmt = d2vk[im['fmt']]
+                if variant == 'badfmt' and i == first_img_i:
+                    # §12.3 5b: D32_SFLOAT is outside the format
+                    # table -> vkCreateImage answers
+                    # FORMAT_NOT_SUPPORTED; the dead handle cascades
+                    # -> DEVICE_LOST at dispatch
+                    vkfmt = 126
+                usage = (0x3 | (0x4 if b['kind'] in (1, 2) else 0)
+                         | (0x8 if b['kind'] == 3 else 0))
+                imgs[i] = 0x5100_0000_1000 + i * 0x1000_0001
+                views[i] = 0x5200_0000_1000 + i * 0x1000_0001
+                seg_a1 += [
+                    ('vkCreateImage', dict(
+                        device=V['dev'],
+                        pCreateInfo=st('VkImageCreateInfo',
+                            flags=0, imageType=1, format=vkfmt,
+                            extent=st('VkExtent3D', width=im['w'],
+                                      height=im['h'], depth=1),
+                            mipLevels=im['mips'],
+                            arrayLayers=im['layers'],
+                            samples=1, tiling=0, usage=usage,
+                            sharingMode=0, queueFamilyIndexCount=0,
+                            pQueueFamilyIndices=[], initialLayout=0),
+                        pImage=imgs[i])),
+                    ('vkGetImageMemoryRequirements', dict(
+                        device=V['dev'], image=imgs[i],
+                        pMemoryRequirements=st(
+                            'VkMemoryRequirements'))),
+                    ('vkAllocateMemory', dict(
+                        device=V['dev'],
+                        pAllocateInfo=st('VkMemoryAllocateInfo',
+                                         allocationSize=img_foot(b),
+                                         memoryTypeIndex=0, pNext=[]),
+                        pMemory=mems[i])),
+                    ('vkBindImageMemory', dict(
+                        device=V['dev'], image=imgs[i], memory=mems[i],
+                        memoryOffset=0)),
+                    ('vkCreateImageView', dict(
+                        device=V['dev'],
+                        pCreateInfo=st('VkImageViewCreateInfo',
+                            flags=0, image=imgs[i],
+                            viewType=5 if im['dim'] else 1,
+                            format=vkfmt,
+                            components=st('VkComponentMapping',
+                                          r=(im['swz'] >> 0) & 7,
+                                          g=(im['swz'] >> 3) & 7,
+                                          b=(im['swz'] >> 6) & 7,
+                                          a=(im['swz'] >> 9) & 7),
+                            subresourceRange=st(
+                                'VkImageSubresourceRange', aspectMask=1,
+                                baseMipLevel=0,
+                                levelCount=(im['mips'] + 1
+                                            if variant == 'viewoob'
+                                            and i == first_img_i
+                                            else im['mips']),
+                                baseArrayLayer=0,
+                                layerCount=im['layers'])),
+                        pView=views[i])),
+                ]
+                if b['kind'] in (0, 1):
+                    s0, s1 = im['s0'], im['s1']
+                    bmag = (s1 >> 16) & 0xFF
+                    smps[i] = 0x5300_0000_1000 + i * 0x1000_0001
+                    seg_a1.append(('vkCreateSampler', dict(
+                        device=V['dev'],
+                        pCreateInfo=st('VkSamplerCreateInfo',
+                            flags=0, magFilter=s0 & 3,
+                            minFilter=(s0 >> 2) & 3,
+                            mipmapMode=(s0 >> 4) & 1,
+                            addressModeU=(s0 >> 5) & 7,
+                            addressModeV=(s0 >> 8) & 7,
+                            addressModeW=(s0 >> 11) & 7,
+                            mipLodBias=f32b(bmag / 16.0
+                                            * (-1 if s1 & (1 << 24)
+                                               else 1)),
+                            anisotropyEnable=0, maxAnisotropy=0,
+                            compareEnable=0, compareOp=0,
+                            minLod=f32b((s1 & 0xFF) / 16.0),
+                            maxLod=f32b(((s1 >> 8) & 0xFF) / 16.0),
+                            borderColor=(s0 >> 14) & 7,
+                            # §12.3 5b: unnormalized coordinates are
+                            # refused with FEATURE_NOT_PRESENT
+                            unnormalizedCoordinates=(
+                                1 if variant == 'unnorm'
+                                and i == first_img_i else 0)),
+                        pSampler=smps[i])))
+                continue
             seg_a1 += [
                 ('vkCreateBuffer', dict(
                     device=V['dev'],
@@ -4956,6 +5768,98 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         device=V['dev'], buffer=bufs[n_bind + j],
                         memory=mems[n_bind + j], memoryOffset=0)),
                 ]
+        for i, b in enumerate(vec['binds']):
+            if 'img' not in b:
+                continue
+            # §12.3 C/5b: upload staging + readback buffers — pure
+            # transfer operands (not descriptor-bound)
+            for tag in ('st', 'rb'):
+                j = len(bufs)
+                bufs.append(0x5000_0000_1000 + j * 0x1000_0001)
+                mems.append(0x6000_0000_1000 + j * 0x1000_0001)
+                (stage_i if tag == 'st' else rb_i)[i] = j
+                seg_a1 += [
+                    ('vkCreateBuffer', dict(
+                        device=V['dev'],
+                        pCreateInfo=st('VkBufferCreateInfo',
+                                       size=img_foot(b),
+                                       usage=0x1 if tag == 'st'
+                                       else 0x2,
+                                       sharingMode=0,
+                                       queueFamilyIndexCount=0,
+                                       pQueueFamilyIndices=[]),
+                        pBuffer=bufs[j])),
+                    ('vkGetBufferMemoryRequirements', dict(
+                        device=V['dev'], buffer=bufs[j],
+                        pMemoryRequirements=st(
+                            'VkMemoryRequirements'))),
+                    ('vkAllocateMemory', dict(
+                        device=V['dev'],
+                        pAllocateInfo=st('VkMemoryAllocateInfo',
+                                         allocationSize=img_foot(b),
+                                         memoryTypeIndex=0, pNext=[]),
+                        pMemory=mems[j])),
+                    ('vkBindBufferMemory', dict(
+                        device=V['dev'], buffer=bufs[j],
+                        memory=mems[j], memoryOffset=0)),
+                ]
+        if clr_b is not None:
+            # §12.3 C/5b-r2: the CLEAR image (TRANSFER_SRC|DST usage
+            # only — honest usage bits) + transfer-only staging and
+            # readback buffers
+            seg_a1 += [
+                ('vkCreateImage', dict(
+                    device=V['dev'],
+                    pCreateInfo=st('VkImageCreateInfo',
+                        flags=0, imageType=1, format=clr['vkfmt'],
+                        extent=st('VkExtent3D', width=clr['w'],
+                                  height=clr['h'], depth=1),
+                        mipLevels=clr['mips'],
+                        arrayLayers=clr['layers'],
+                        samples=1, tiling=0, usage=0x3,
+                        sharingMode=0, queueFamilyIndexCount=0,
+                        pQueueFamilyIndices=[], initialLayout=0),
+                    pImage=cl_img)),
+                ('vkGetImageMemoryRequirements', dict(
+                    device=V['dev'], image=cl_img,
+                    pMemoryRequirements=st(
+                        'VkMemoryRequirements'))),
+                ('vkAllocateMemory', dict(
+                    device=V['dev'],
+                    pAllocateInfo=st('VkMemoryAllocateInfo',
+                                     allocationSize=img_foot(clr_b),
+                                     memoryTypeIndex=0, pNext=[]),
+                    pMemory=cl_imem)),
+                ('vkBindImageMemory', dict(
+                    device=V['dev'], image=cl_img, memory=cl_imem,
+                    memoryOffset=0)),
+            ]
+            for bf, bmem, usg in ((cl_sbuf, cl_smem, 0x1),
+                                  (cl_rbuf, cl_rmem, 0x2)):
+                seg_a1 += [
+                    ('vkCreateBuffer', dict(
+                        device=V['dev'],
+                        pCreateInfo=st('VkBufferCreateInfo',
+                                       size=img_foot(clr_b),
+                                       usage=usg, sharingMode=0,
+                                       queueFamilyIndexCount=0,
+                                       pQueueFamilyIndices=[]),
+                        pBuffer=bf)),
+                    ('vkGetBufferMemoryRequirements', dict(
+                        device=V['dev'], buffer=bf,
+                        pMemoryRequirements=st(
+                            'VkMemoryRequirements'))),
+                    ('vkAllocateMemory', dict(
+                        device=V['dev'],
+                        pAllocateInfo=st('VkMemoryAllocateInfo',
+                                         allocationSize=img_foot(clr_b),
+                                         memoryTypeIndex=0, pNext=[]),
+                        pMemory=bmem)),
+                    ('vkBindBufferMemory', dict(
+                        device=V['dev'], buffer=bf, memory=bmem,
+                        memoryOffset=0)),
+                ]
+
         # §12.3 F5: descriptor sets are aperture-resident — per-set
         # layout objects whose rows group vector binds sharing a
         # (set,binding) (count = largest element index + 1); dynamic
@@ -4970,6 +5874,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         srows = {s: [] for s in setnos}
         for i, b in enumerate(vec['binds']):
             kind = (1 if (variant == 'baddesc' and i == 0)
+                    else b.get('kind', 0) if 'img' in b
                     else 9 if b.get('dyn') else 7)
             for rw in srows[b['set']]:
                 if rw['binding'] == b['binding']:
@@ -5074,11 +5979,31 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 ('vkDestroyShaderModule', dict(
                     device=V['dev'], shaderModule=V['sm'])),
             ]
-            for i in range(n_bind):
+            for i, b in enumerate(vec['binds']):
+                if 'img' in b:
+                    if i in smps:
+                        seg_t.append(('vkDestroySampler', dict(
+                            device=V['dev'], sampler=smps[i])))
+                    seg_t += [('vkDestroyImageView', dict(
+                        device=V['dev'], imageView=views[i])),
+                              ('vkDestroyImage', dict(
+                                  device=V['dev'], image=imgs[i])),
+                              ('vkFreeMemory', dict(
+                                  device=V['dev'], memory=mems[i]))]
+                else:
+                    seg_t += [('vkDestroyBuffer', dict(
+                        device=V['dev'], buffer=bufs[i])),
+                              ('vkFreeMemory', dict(
+                                  device=V['dev'], memory=mems[i]))]
+            for i in stage_i:
                 seg_t += [('vkDestroyBuffer', dict(
-                    device=V['dev'], buffer=bufs[i])),
+                    device=V['dev'], buffer=bufs[stage_i[i]])),
+                          ('vkDestroyBuffer', dict(
+                              device=V['dev'], buffer=bufs[rb_i[i]])),
                           ('vkFreeMemory', dict(
-                              device=V['dev'], memory=mems[i]))]
+                              device=V['dev'], memory=mems[stage_i[i]])),
+                          ('vkFreeMemory', dict(
+                              device=V['dev'], memory=mems[rb_i[i]]))]
             seg_t += [('vkDestroyDevice', dict(device=V['dev'])),
                       ('vkDestroyInstance', dict(instance=V['inst']))]
             run_batches(compile_cmds(seg_t))
@@ -5092,14 +6017,48 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     # UNBACKED sentinel (§12.3 C)
                     blob_base.append(None)
                     continue
-                base_b = create_blob_mem(RES_BLOB0 + i, b['size'],
-                                         mems[i])
+                sz = img_foot(b) if 'img' in b else b['size']
+                base_b = create_blob_mem(RES_BLOB0 + i, sz, mems[i])
                 assert base_b is not None, 'memory blob refused'
                 # guest-visible base = the kernel's map offset (the
                 # create-time private base is released at MAP_BLOB)
                 base_b = map_blob(RES_BLOB0 + i)
                 blob_base.append(base_b)
-                apw(base_b, vec['inits'][i])
+                if 'img' not in b:
+                    apw(base_b, vec['inits'][i])
+            # §12.3 C/5b: blob+map the image staging + readback
+            # buffers; the upload staging receives the device-layout
+            # init bytes — the image itself is only ever written by
+            # vkCmdCopyBufferToImage
+            stage_base, rb_base = {}, {}
+            for i in stage_i:
+                for j in (stage_i[i], rb_i[i]):
+                    base_b = create_blob_mem(
+                        RES_BLOB0 + j, img_foot(vec['binds'][i]),
+                        mems[j])
+                    assert base_b is not None, 'img blob refused'
+                    base_b = map_blob(RES_BLOB0 + j)
+                    blob_base.append(base_b)
+                    if j == stage_i[i]:
+                        stage_base[i] = base_b
+                        apw(base_b, vec['inits'][i])
+                    else:
+                        rb_base[i] = base_b
+            clr_img_base = clr_st_base = clr_rb_base = None
+            if clr_b is not None:
+                # §12.3 C/5b-r2: blob+map the CLEAR image memory and
+                # both transfer buffers; the upload staging receives
+                # the device-layout init bytes — the image itself is
+                # only ever written by the cbuf's records
+                for mid in (cl_imem, cl_smem, cl_rmem):
+                    rid = RES_BLOB0 + len(blob_base)
+                    base_b = create_blob_mem(rid, img_foot(clr_b),
+                                             mid)
+                    assert base_b is not None, 'clear blob refused'
+                    blob_base.append(map_blob(rid))
+                clr_img_base, clr_st_base, clr_rb_base = \
+                    blob_base[-3:]
+                apw(clr_st_base, clr_init)
             if variant == 'memsplit':
                 # the lazy type-1 memory takes backing only here, via
                 # MAP_BLOB -> ALLOC_AT in the guest window
@@ -5174,13 +6133,21 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         dstBinding=_gb,
                         dstArrayElement=_mem[0][1]['idx'],
                         descriptorCount=len(_mem),
-                        descriptorType=(9 if _mem[0][1].get('dyn')
-                                        else 7),
-                        pImageInfo=[], pTexelBufferView=[],
+                        descriptorType=(
+                            _mem[0][1].get('kind', 0)
+                            if 'img' in _mem[0][1]
+                            else 9 if _mem[0][1].get('dyn') else 7),
+                        pImageInfo=[st(
+                            'VkDescriptorImageInfo',
+                            sampler=smps.get(_i, 0),
+                            imageView=views.get(_i, 0),
+                            imageLayout=0)
+                            for _i, _b in _mem if 'img' in _b],
+                        pTexelBufferView=[],
                         pBufferInfo=[st(
                             'VkDescriptorBufferInfo', buffer=bufs[_i],
                             offset=0, range=_b['size'])
-                            for _i, _b in _mem]))
+                            for _i, _b in _mem if 'img' not in _b]))
             else:
                 upd_w = [st(
                     'VkWriteDescriptorSet',
@@ -5192,8 +6159,22 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     # combined image sampler but the write posts a
                     # buffer descriptor — the type mismatch poisons
                     # the set (§12.1 F5) -> DEVICE_LOST at dispatch
-                    descriptorType=(9 if b.get('dyn') else 7),
-                    pImageInfo=[], pTexelBufferView=[],
+                    descriptorType=(b.get('kind', 0) if 'img' in b
+                                    else 9 if b.get('dyn') else 7)
+                    if not (variant == 'kindmix'
+                            and i == first_img_i and 'img' in b)
+                    # kindmix: the write posts a different image kind
+                    # than the DSL row (SAMPLED vs STORAGE) -> the
+                    # update-time type check poisons the set
+                    else (3 if b.get('kind', 0) != 3 else 2),
+                    # §12.3 C/5b: image binds post
+                    # VkDescriptorImageInfo {sampler, view, layout}
+                    pImageInfo=[st('VkDescriptorImageInfo',
+                                   sampler=smps.get(i, 0),
+                                   imageView=views.get(i, 0),
+                                   imageLayout=0)]
+                                if 'img' in b else [],
+                    pTexelBufferView=[],
                     # descoob/updoob: a descriptor view whose
                     # offset+range runs past the buffer — the F5
                     # update-time bounds check fails it and
@@ -5205,7 +6186,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         range=(512 if variant == 'descoob'
                                and i == 1 else
                                b['size'] * 2 if variant == 'updoob'
-                               and i == 0 else b['size']))])
+                               and i == 0 else b['size']))]
+                        if 'img' not in b else [])
                     for i, b in enumerate(vec['binds'])]
             seg_a2 = [
                 ('vkCreateDescriptorPool', dict(
@@ -5267,6 +6249,129 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     size=len(vec['push']) * 4,
                     pValues=b''.join(struct.pack('<I', w)
                                      for w in vec['push']))))
+            for i, b in enumerate(vec['binds']):
+                if 'img' not in b:
+                    continue
+                # §12.3 C/5b: upload the device-layout init bytes
+                # through vkCmdCopyBufferToImage (one region per
+                # (mip,layer), rowLength = pitch/bpp)
+                regs = img_regions(b, pack=0)
+                if variant == 'xfer_img_oob' and i == first_img_i:
+                    # extent past the mip bounds -> the engine refuses
+                    # before any write -> DEVICE_LOST
+                    r0 = dict(regs[0])
+                    r0['ext'] = (r0['ext'][0] + 1, r0['ext'][1],
+                                 r0['ext'][2])
+                    regs[0] = r0
+                seg_a2.append(('vkCmdCopyBufferToImage', dict(
+                    commandBuffer=V['cb'],
+                    srcBuffer=bufs[stage_i[i]], dstImage=imgs[i],
+                    dstImageLayout=5, regionCount=len(regs),
+                    pRegions=[st('VkBufferImageCopy',
+                                 bufferOffset=r['bufferOffset'],
+                                 bufferRowLength=r['bufferRowLength'],
+                                 bufferImageHeight=r['bufferImageHeight'],
+                                 imageSubresource=st(
+                                     'VkImageSubresourceLayers',
+                                     aspectMask=r['sub'][0],
+                                     mipLevel=r['sub'][1],
+                                     baseArrayLayer=r['sub'][2],
+                                     layerCount=r['sub'][3]),
+                                 imageOffset=st('VkOffset3D', x=0,
+                                                y=0, z=0),
+                                 imageExtent=st('VkExtent3D',
+                                                width=r['ext'][0],
+                                                height=r['ext'][1],
+                                                depth=r['ext'][2]))
+                              for r in regs])))
+            if clr_b is not None:
+                # §12.3 C/5b-r2: B2I upload (one region per mip,layer,
+                # pitch rows) -> CLEAR the variant's subresource
+                # ranges -> packed I2B readback.  clear_oob's ranges
+                # fail validation -> the record writes nothing and the
+                # submission dies.
+                regs = img_regions(clr_b, pack=0)
+                seg_a2.append(('vkCmdCopyBufferToImage', dict(
+                    commandBuffer=V['cb'],
+                    srcBuffer=cl_sbuf, dstImage=cl_img,
+                    dstImageLayout=5, regionCount=len(regs),
+                    pRegions=[st('VkBufferImageCopy',
+                                 bufferOffset=r['bufferOffset'],
+                                 bufferRowLength=r['bufferRowLength'],
+                                 bufferImageHeight=r['bufferImageHeight'],
+                                 imageSubresource=st(
+                                     'VkImageSubresourceLayers',
+                                     aspectMask=r['sub'][0],
+                                     mipLevel=r['sub'][1],
+                                     baseArrayLayer=r['sub'][2],
+                                     layerCount=r['sub'][3]),
+                                 imageOffset=st('VkOffset3D', x=0,
+                                                y=0, z=0),
+                                 imageExtent=st('VkExtent3D',
+                                                width=r['ext'][0],
+                                                height=r['ext'][1],
+                                                depth=r['ext'][2]))
+                              for r in regs])))
+                seg_a2.append(('vkCmdClearColorImage', dict(
+                    commandBuffer=V['cb'], image=cl_img,
+                    imageLayout=5,
+                    pColor=st('VkClearColorValue',
+                              uint32=list(clr['cw'])),
+                    rangeCount=len(clr['ranges']),
+                    pRanges=[st('VkImageSubresourceRange',
+                                aspectMask=asp, baseMipLevel=bm,
+                                levelCount=lc, baseArrayLayer=bl,
+                                layerCount=nl)
+                             for asp, bm, lc, bl, nl in
+                             clr['ranges']])))
+                regs = img_regions(clr_b, pack=1)
+                seg_a2.append(('vkCmdCopyImageToBuffer', dict(
+                    commandBuffer=V['cb'],
+                    srcImage=cl_img, srcImageLayout=5,
+                    dstBuffer=cl_rbuf, regionCount=len(regs),
+                    pRegions=[st('VkBufferImageCopy',
+                                 bufferOffset=r['bufferOffset'],
+                                 bufferRowLength=r['bufferRowLength'],
+                                 bufferImageHeight=r['bufferImageHeight'],
+                                 imageSubresource=st(
+                                     'VkImageSubresourceLayers',
+                                     aspectMask=r['sub'][0],
+                                     mipLevel=r['sub'][1],
+                                     baseArrayLayer=r['sub'][2],
+                                     layerCount=r['sub'][3]),
+                                 imageOffset=st('VkOffset3D', x=0,
+                                                y=0, z=0),
+                                 imageExtent=st('VkExtent3D',
+                                                width=r['ext'][0],
+                                                height=r['ext'][1],
+                                                depth=r['ext'][2]))
+                              for r in regs])))
+            if imgs:
+                # §12.3 5b: image layout transitions are no-ops on the
+                # single device layout but must be accepted
+                seg_a2.append(('vkCmdPipelineBarrier', dict(
+                    commandBuffer=V['cb'],
+                    srcStageMask=0x2, dstStageMask=0x8,
+                    dependencyFlags=0,
+                    memoryBarrierCount=0, pMemoryBarriers=[],
+                    bufferMemoryBarrierCount=0,
+                    pBufferMemoryBarriers=[],
+                    imageMemoryBarrierCount=len(imgs),
+                    pImageMemoryBarriers=[st(
+                        'VkImageMemoryBarrier',
+                        srcAccessMask=0x80, dstAccessMask=0x100,
+                        oldLayout=0, newLayout=5,
+                        srcQueueFamilyIndex=0xFFFFFFFF,
+                        dstQueueFamilyIndex=0xFFFFFFFF,
+                        image=imgs[i],
+                        subresourceRange=st(
+                            'VkImageSubresourceRange', aspectMask=1,
+                            baseMipLevel=0,
+                            levelCount=vec['binds'][i]['img']['mips'],
+                            baseArrayLayer=0,
+                            layerCount=vec['binds'][i]['img']
+                                        ['layers']))
+                        for i in imgs])))
             # §12.3 C/5a: xfer records before the dispatch — the copy
             # feeds the shader's input buffer (barrier orders it), the
             # update patches it; the negatives append a refusing copy
@@ -5305,6 +6410,32 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 seg_a2.append(('vkCmdDispatch', dict(
                     commandBuffer=V['cb'], groupCountX=vec['gx'],
                     groupCountY=vec['gy'], groupCountZ=vec['gz'])))
+            for i, b in enumerate(vec['binds']):
+                if 'img' not in b:
+                    continue
+                # §12.3 C/5b: post-dispatch readback — packed rows
+                regs = img_regions(b, pack=1)
+                seg_a2.append(('vkCmdCopyImageToBuffer', dict(
+                    commandBuffer=V['cb'],
+                    srcImage=imgs[i], srcImageLayout=5,
+                    dstBuffer=bufs[rb_i[i]], regionCount=len(regs),
+                    pRegions=[st('VkBufferImageCopy',
+                                 bufferOffset=r['bufferOffset'],
+                                 bufferRowLength=r['bufferRowLength'],
+                                 bufferImageHeight=r['bufferImageHeight'],
+                                 imageSubresource=st(
+                                     'VkImageSubresourceLayers',
+                                     aspectMask=r['sub'][0],
+                                     mipLevel=r['sub'][1],
+                                     baseArrayLayer=r['sub'][2],
+                                     layerCount=r['sub'][3]),
+                                 imageOffset=st('VkOffset3D', x=0,
+                                                y=0, z=0),
+                                 imageExtent=st('VkExtent3D',
+                                                width=r['ext'][0],
+                                                height=r['ext'][1],
+                                                depth=r['ext'][2]))
+                              for r in regs])))
             if variant == 'xfer_copy':
                 # post-dispatch: fill a third buffer to its end, then
                 # copy the shader's output into the readback buffer
@@ -5397,7 +6528,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             lost = variant in ('lostbuf', 'baddesc', 'nopipe',
                                'bindoob', 'worksink', 'descoob',
                                'updoob', 'layoutmix', 'deadpool',
-                               'xfer_oob', 'xfer_overlap', 'unbacked')
+                               'xfer_oob', 'xfer_overlap', 'unbacked',
+                               'badfmt', 'viewoob', 'kindmix',
+                               'xfer_img_oob', 'unnorm', 'clear_oob')
             if not lost:
                 # §12.3 F5: the descriptor record-store image — every
                 # record word (zeroed or {base,size,kind,flags}) must
@@ -5483,18 +6616,90 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         note("B' gates: xfer_update oracle words")
                 else:
                     for o in vec['outs']:
-                        base_b = blob_base[o['bind_idx']]
+                        k = o['bind_idx']
+                        im = vec['binds'][k].get('img')
+                        if im is not None:
+                            # §12.3 C/5b: the gate is the
+                            # CopyImageToBuffer readback — packed rows
+                            # lifted out of the device layout — plus
+                            # the image aperture footprint itself
+                            # (device layout, padding included)
+                            pm = img_pack(o['model'], im)
+                            po = img_pack(o['oracle'], im)
+                            pc = img_pack(o['cls'], im)
+                            base_b = rb_base[k]
+                            W(TP_CHECK, CK_APR, len(pm), base_b)
+                            for j in range(len(pm)):
+                                rec(EK_APRCHK, base_b + 4 * j,
+                                    pm[j], po[j], pc[j])
+                            base_b = blob_base[k]
+                            W(TP_CHECK, CK_APR, len(o['model']),
+                              base_b)
+                            for j in range(len(o['model'])):
+                                rec(EK_APRCHK, base_b + 4 * j,
+                                    o['model'][j], o['oracle'][j],
+                                    o['cls'][j])
+                            continue
+                        base_b = blob_base[k]
                         nw = o['size'] // 4
                         W(TP_CHECK, CK_APR, nw, base_b)
                         for j in range(nw):
                             rec(EK_APRCHK, base_b + 4 * j,
                                 o['model'][j], o['oracle'][j],
                                 o['cls'][j])
+                    # §12.3 C/5b: in-only images also read back —
+                    # checks the CopyBufferToImage upload verbatim
+                    out_idx = set(o['bind_idx'] for o in vec['outs'])
+                    for i, b in enumerate(vec['binds']):
+                        if 'img' not in b or i in out_idx:
+                            continue
+                        # in-only image: the footprint must equal the
+                        # upload verbatim (B2I is same-address) and the
+                        # packed readback must equal the packed init
+                        base_b = blob_base[i]
+                        W(TP_CHECK, CK_APR, len(vec['inits'][i]),
+                          base_b)
+                        for j in range(len(vec['inits'][i])):
+                            rec(EK_APRCHK, base_b + 4 * j,
+                                vec['inits'][i][j],
+                                vec['inits'][i][j], 0)
+                        base_b = rb_base[i]
+                        pm = img_pack(vec['inits'][i], b['img'])
+                        W(TP_CHECK, CK_APR, len(pm), base_b)
+                        for j in range(len(pm)):
+                            rec(EK_APRCHK, base_b + 4 * j,
+                                pm[j], pm[j], 0)
                     note("B' gates: %d output words checked"
                          % sum(o['size'] // 4 for o in vec['outs']))
             else:
                 note("B' gates: dispatch lost (%s), no readback"
                      % variant)
+
+            if clr_b is not None:
+                # §12.3 C/5b-r2: the CLEAR gates — the image aperture
+                # footprint bit-exact (positive: model-cleared words;
+                # clear_oob: the uploaded init verbatim, proving the
+                # refused record wrote nothing), then the packed I2B
+                # readback on positive arms.  The footprint's pitch
+                # padding is never written by B2I — clr_dev masks the
+                # staging pattern to the (layer,mip) row data.
+                clr_dev = img_dev_foot(model, clr_init, clr_im)
+                clr_exp = (clr_dev if variant == 'clear_oob'
+                           else img_clear_words(model, clr_dev,
+                                                clr_im, clr['cw'],
+                                                clr['ranges']))
+                W(TP_CHECK, CK_APR, len(clr_exp), clr_img_base)
+                for j, w in enumerate(clr_exp):
+                    rec(EK_APRCHK, clr_img_base + 4 * j, w, w, 0)
+                if variant != 'clear_oob':
+                    pm = img_pack(clr_exp, clr_im)
+                    W(TP_CHECK, CK_APR, len(pm), clr_rb_base)
+                    for j, w in enumerate(pm):
+                        rec(EK_APRCHK, clr_rb_base + 4 * j, w, w, 0)
+                note("B' gates: clear %s %d footprint words%s"
+                     % (variant, len(clr_exp),
+                        ' + packed readback'
+                        if variant != 'clear_oob' else ''))
 
             if variant == 'poolreset':
                 # §12.3 D per-frame pool reset: alloc N sets, reset,
@@ -5624,7 +6829,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 seg_c.append(('vkDestroyShaderModule', dict(
                     device=V['dev'], shaderModule=V['sm'])))
             for i in range(len(bufs)):
-                if variant == 'lostbuf' and i == 0:
+                if i < n_bind and 'img' in vec['binds'][i]:
+                    # §12.3 C/5b: image binds never minted a buffer
+                    if i in smps:
+                        seg_c.append(('vkDestroySampler', dict(
+                            device=V['dev'], sampler=smps[i])))
+                    seg_c += [('vkDestroyImageView', dict(
+                        device=V['dev'], imageView=views[i])),
+                              ('vkDestroyImage', dict(
+                                  device=V['dev'], image=imgs[i]))]
+                elif variant == 'lostbuf' and i == 0:
                     pass
                 else:
                     seg_c.append(('vkDestroyBuffer', dict(
@@ -5636,6 +6850,21 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                                memory=mems[-2])),
                           ('vkFreeMemory', dict(device=V['dev'],
                                                 memory=mems[-1]))]
+            if clr_b is not None:
+                seg_c += [
+                    ('vkDestroyImage', dict(device=V['dev'],
+                                            image=cl_img)),
+                    ('vkFreeMemory', dict(device=V['dev'],
+                                          memory=cl_imem)),
+                    ('vkDestroyBuffer', dict(device=V['dev'],
+                                             buffer=cl_sbuf)),
+                    ('vkDestroyBuffer', dict(device=V['dev'],
+                                             buffer=cl_rbuf)),
+                    ('vkFreeMemory', dict(device=V['dev'],
+                                          memory=cl_smem)),
+                    ('vkFreeMemory', dict(device=V['dev'],
+                                          memory=cl_rmem)),
+                ]
             seg_c += [('vkDestroyDevice', dict(device=V['dev'])),
                       ('vkDestroyInstance', dict(instance=V['inst']))]
             note("B' segment C: teardown")
@@ -5654,30 +6883,364 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                            exp_type=VG_RESP_NODATA)
                     tm.blobs.pop(rid)
 
-        note('D RESOURCE_UNREF exec blob, CTX_DESTROY ctx=4 -> live 0')
-        eb = tm.blobs.pop(RES_EXEC)
-        tm.ap_free(eb['base_w'], EXEC_SIZE)
-        submit(VG_RESOURCE_UNREF, [RES_EXEC, 0], ctx=CTX_ID,
-               exp_type=VG_RESP_NODATA)
-        # blob-owned pages drain only through UNREF (CTX_DESTROY does
-        # not free them); ring0's blob goes last, after the ring dies
-        for rid in (RES_REPLY, RES_RING1, RES_RELOC):
-            b = tm.blobs.pop(rid)
-            tm.ap_free(b['base_w'], b['size'])
-            submit(VG_RESOURCE_UNREF, [rid, 0], ctx=CTX_ID,
+        if variant == 'ctxkill_reuse':
+            # ---- §12.3 5b-r2 C: ctx-kill ring retirement + reuse ----- #
+            # Stock path: the kernel closes the Venus DRM fd and vgctl
+            # emits CTX_DESTROY -- ring0 AND ring1 are still live (no
+            # vkDestroyRingMESA).  vnpump must retire both with no
+            # status write and no head publication, and ctx5 must be
+            # able to claim ring0's exact shmem window and run the same
+            # compute bit-exactly.  The aperture guard makes any device
+            # write outside the armed allow-list a hard failure:
+            #   phase 1 (kill -> ctx5's ring claim): nothing may write
+            #   phase 2 (ctx5's run): private arena + mapped extents
+            #   phase 3 (ctx5's kill -> end): nothing again
+            assert not any('img' in b for b in vec['binds']), \
+                'ctxkill_reuse wants a buffer-only shvec'
+            CTX5 = 5
+            RING0B_H = 0x200
+            RES5 = 300
+            note('D/ctxkill: arm guard; CTX_DESTROY ctx4 with '
+                 'ring0+ring1 live')
+            W(TP_APGUARD, 0)
+            submit(VG_CTX_DESTROY, [], ctx=CTX_ID,
                    exp_type=VG_RESP_NODATA)
-        dr0 = vk('vkDestroyRingMESA', ring=RING0_H)
-        assert not execbuf(dr0), 'ring0 destroy failed'
-        b = tm.blobs.pop(RES_RING0)
-        tm.ap_free(b['base_w'], b['size'])
-        submit(VG_RESOURCE_UNREF, [RES_RING0, 0], ctx=CTX_ID,
-               exp_type=VG_RESP_NODATA)
-        submit(VG_CTX_DESTROY, [], ctx=CTX_ID, exp_type=VG_RESP_NODATA)
-        tm.blobs.clear()
-        tm.ctxs.clear()
-        fm.reset_ctx(CTX_ID)
-        check_live()
-        note('compute teardown complete')
+            tm.kill_ctx(CTX_ID)
+            fm.reset_ctx(CTX_ID)
+            tm.ctxs.pop(CTX_ID)
+            delay(8192)             # a stale write could only land here
+
+            note('D/ctxkill: ctx5 bring-up on the shared resources')
+            tm.ctxs[CTX5] = {'id': CTX5}
+            fm.ctx = CTX5
+            submit(VG_CTX_CREATE,
+                   [len(nmb) - 1, VG_CAPSET_VENUS] + name_words,
+                   ctx=CTX5, exp_type=VG_RESP_NODATA)
+            submit(VG_CTX_ATTACH, [RES_REPLY, 0], ctx=CTX5,
+                   exp_type=VG_RESP_NODATA)
+            # guest zeroes the reused window's ring control block; the
+            # device-side page was never freed (blob-owned)
+            apw(tm.blobs[RES_RING0]['base_w'] << 2,
+                [0] * (RING_BUF_OFF // 4))
+
+            def guard_arm():
+                """Allow-list: private arena + every mapped extent."""
+                rs = [(VGP_GUEST_BYTES, AP_WORDS * 4 - VGP_GUEST_BYTES)]
+                rs += [(b['base_w'] << 2, b['size'])
+                       for b in tm.blobs.values() if b['mapped']]
+                co = []
+                for lo, sz in sorted(rs):
+                    if co and lo <= co[-1][0] + co[-1][1]:
+                        co[-1] = (co[-1][0],
+                                  max(co[-1][1],
+                                      lo + sz - co[-1][0]))
+                    else:
+                        co.append((lo, sz))
+                assert len(co) <= APGUARD_MAX, co
+                W(TP_APGUARD, len(co))
+                for lo, sz in co:
+                    W(lo & 0xFFFFFFFF, (lo >> 32) & 0xFFFFFFFF,
+                      sz & 0xFFFFFFFF)
+
+            # arm before the claim: the only new writes allowed are
+            # into already-mapped extents or the private arena
+            guard_arm()
+            note('D/ctxkill: ctx5 CreateRing claims ring0 window')
+            rc5 = vk('vkCreateRingMESA', ring=RING0B_H,
+                     pCreateInfo={'_ty': None,
+                                  'sType': 'VK_STRUCTURE_TYPE_RING_'
+                                  'CREATE_INFO_MESA',
+                                  'pNext': [], 'flags': 0,
+                                  'resourceId': RES_RING0, 'offset': 0,
+                                  'size': ring0_sz,
+                                  'idleTimeout': 1_000_000,
+                                  'headOffset': RING_HEAD_OFF,
+                                  'tailOffset': RING_TAIL_OFF,
+                                  'statusOffset': RING_STATUS_OFF,
+                                  'bufferOffset': RING_BUF_OFF,
+                                  'bufferSize': ring0_sz - RING_BUF_OFF,
+                                  'extraOffset': ring0_sz,
+                                  'extraSize': 0})
+            assert not execbuf(rc5, ctx=CTX5), 'ctx5 ring create failed'
+            rB = tm.rings[tm.ring_of[RING0B_H]]
+            ring_bind_guest(rB['slot'])
+            r = rB
+            W(TP_CHECK, CK_STATUS, rB['slot'], 0)
+            rec(EK_STATUS, rB['slot'], RING_ALIVE)
+
+            # ---- ctx5 segment: device + buffers + memory ------------- #
+            V5 = {k: v + 0x0800_0000 for k, v in V.items()}
+            bufs5 = [v + 0x0800_0000 for v in bufs]
+            mems5 = [v + 0x0800_0000 for v in mems]
+            dsls5 = [v + 0x0800_0000 for v in dsls]
+            dsets5 = [v + 0x0800_0000 for v in dsets]
+            seg_b1 = [
+                ('vkCreateInstance', dict(pInstance=V5['inst'])),
+                ('vkEnumeratePhysicalDevices', dict(
+                    instance=V5['inst'], pPhysicalDeviceCount=1,
+                    pPhysicalDevices=[V5['pd']])),
+                ('vkCreateDevice', dict(
+                    physicalDevice=V5['pd'],
+                    pCreateInfo=st(
+                        'VkDeviceCreateInfo', queueCreateInfoCount=1,
+                        pQueueCreateInfos=[st(
+                            'VkDeviceQueueCreateInfo',
+                            queueFamilyIndex=0, queueCount=1,
+                            pQueuePriorities=[0x3F800000])],
+                        pEnabledFeatures=None, enabledExtensionCount=0,
+                        ppEnabledExtensionNames=[],
+                        enabledLayerCount=0,
+                        ppEnabledLayerNames=[]),
+                    pDevice=V5['dev'])),
+                ('vkGetDeviceQueue', dict(
+                    device=V5['dev'], queueFamilyIndex=0,
+                    queueIndex=0, pQueue=V5['queue'])),
+            ]
+            for i, b in enumerate(vec['binds']):
+                seg_b1 += [
+                    ('vkCreateBuffer', dict(
+                        device=V5['dev'],
+                        pCreateInfo=st('VkBufferCreateInfo',
+                                       size=b['size'], usage=0x61,
+                                       sharingMode=0,
+                                       queueFamilyIndexCount=0,
+                                       pQueueFamilyIndices=[]),
+                        pBuffer=bufs5[i])),
+                    ('vkGetBufferMemoryRequirements', dict(
+                        device=V5['dev'], buffer=bufs5[i],
+                        pMemoryRequirements=st(
+                            'VkMemoryRequirements'))),
+                    ('vkAllocateMemory', dict(
+                        device=V5['dev'],
+                        pAllocateInfo=st('VkMemoryAllocateInfo',
+                                         allocationSize=b['size'],
+                                         memoryTypeIndex=0, pNext=[]),
+                        pMemory=mems5[i])),
+                    ('vkBindBufferMemory', dict(
+                        device=V5['dev'], buffer=bufs5[i],
+                        memory=mems5[i], memoryOffset=0)),
+                ]
+            seg_b1 += [('vkCreateShaderModule', dict(
+                device=V5['dev'],
+                pCreateInfo=st('VkShaderModuleCreateInfo',
+                               codeSize=len(vec['spv']) * 4,
+                               pCode=vec['spv']),
+                pShaderModule=V5['sm']))]
+            for k, s in enumerate(setnos):
+                seg_b1 += [('vkCreateDescriptorSetLayout', dict(
+                    device=V5['dev'],
+                    pCreateInfo=st(
+                        'VkDescriptorSetLayoutCreateInfo',
+                        bindingCount=len(srows[s]),
+                        pBindings=[st(
+                            'VkDescriptorSetLayoutBinding',
+                            binding=r['binding'],
+                            descriptorCount=r['count'],
+                            descriptorType=r['kind'],
+                            stageFlags=0x20, pImmutableSamplers=[])
+                            for r in srows[s]]),
+                    pSetLayout=dsls5[k]))]
+            seg_b1 += [
+                ('vkCreatePipelineLayout', dict(
+                    device=V5['dev'],
+                    pCreateInfo=st('VkPipelineLayoutCreateInfo',
+                                   setLayoutCount=nsets,
+                                   pSetLayouts=dsls5,
+                                   pushConstantRangeCount=(
+                                       1 if vec['push'] else 0),
+                                   pPushConstantRanges=[st(
+                                       'VkPushConstantRange',
+                                       stageFlags=0x20, offset=0,
+                                       size=len(vec['push']) * 4)]
+                                   if vec['push'] else []),
+                    pPipelineLayout=V5['pl'])),
+                ('vkCreateComputePipelines', dict(
+                    device=V5['dev'], pipelineCache=0,
+                    createInfoCount=1,
+                    pCreateInfos=[st(
+                        'VkComputePipelineCreateInfo', flags=0,
+                        stage=st('VkPipelineShaderStageCreateInfo',
+                                 stage=0x20, module=V5['sm'],
+                                 pName='main',
+                                 pSpecializationInfo=None),
+                        layout=V5['pl'], basePipelineHandle=0,
+                        basePipelineIndex=-1)],
+                    pPipelines=[V5['pipe']])),
+            ]
+            note('D/ctxkill: ctx5 device+buffers through its ring')
+            run_batches(compile_cmds(seg_b1))
+            blob5_base = [None] * n_bind
+            for i, b in enumerate(vec['binds']):
+                base_b = create_blob_mem(RES5 + i, b['size'],
+                                         mems5[i], ctx=CTX5)
+                assert base_b is not None, 'ctx5 blob refused'
+                blob5_base[i] = map_blob(RES5 + i, ctx=CTX5)
+            for i in range(n_bind):
+                apw(blob5_base[i], list(vec['inits'][i]))
+
+            # re-arm with the newly-mapped extents, then run the same
+            # compute bit-exactly through ctx5's ring
+            guard_arm()
+            upd5_w = [st(
+                'VkWriteDescriptorSet',
+                dstSet=dsets5[setnos.index(b['set'])],
+                dstBinding=b['binding'], dstArrayElement=b['idx'],
+                descriptorCount=1,
+                descriptorType=9 if b.get('dyn') else 7,
+                pImageInfo=[], pTexelBufferView=[],
+                pBufferInfo=[st('VkDescriptorBufferInfo',
+                                buffer=bufs5[i], offset=0,
+                                range=b['size'])])
+                for i, b in enumerate(vec['binds'])]
+            seg_b2 = [
+                ('vkCreateDescriptorPool', dict(
+                    device=V5['dev'],
+                    pCreateInfo=st('VkDescriptorPoolCreateInfo',
+                                   maxSets=nsets,
+                                   poolSizeCount=len(psizes),
+                                   pPoolSizes=psizes),
+                    pDescriptorPool=V5['dp'])),
+                ('vkAllocateDescriptorSets', dict(
+                    device=V5['dev'],
+                    pAllocateInfo=st('VkDescriptorSetAllocateInfo',
+                                     descriptorPool=V5['dp'],
+                                     descriptorSetCount=nsets,
+                                     pSetLayouts=dsls5),
+                    pDescriptorSets=dsets5)),
+                ('vkUpdateDescriptorSets', dict(
+                    device=V5['dev'],
+                    descriptorWriteCount=len(upd5_w),
+                    pDescriptorWrites=upd5_w,
+                    descriptorCopyCount=0, pDescriptorCopies=[])),
+                ('vkCreateCommandPool', dict(
+                    device=V5['dev'],
+                    pCreateInfo=st('VkCommandPoolCreateInfo',
+                                   queueFamilyIndex=0),
+                    pCommandPool=V5['cp'])),
+                ('vkAllocateCommandBuffers', dict(
+                    device=V5['dev'],
+                    pAllocateInfo=st('VkCommandBufferAllocateInfo',
+                                     commandPool=V5['cp'], level=0,
+                                     commandBufferCount=1),
+                    pCommandBuffers=[V5['cb']])),
+                ('vkBeginCommandBuffer', dict(
+                    commandBuffer=V5['cb'],
+                    pBeginInfo=st('VkCommandBufferBeginInfo', flags=0,
+                                  pInheritanceInfo=None))),
+                ('vkCmdBindPipeline', dict(
+                    commandBuffer=V5['cb'], pipelineBindPoint=1,
+                    pipeline=V5['pipe'])),
+                ('vkCmdBindDescriptorSets', dict(
+                    commandBuffer=V5['cb'], pipelineBindPoint=1,
+                    layout=V5['pl'], firstSet=0,
+                    descriptorSetCount=nsets,
+                    pDescriptorSets=dsets5,
+                    dynamicOffsetCount=len(vec['dyn_off']),
+                    pDynamicOffsets=[d['off']
+                                     for d in vec['dyn_off']])),
+                ] + ([('vkCmdPushConstants', dict(
+                    commandBuffer=V5['cb'], layout=V5['pl'],
+                    stageFlags=0x20, offset=0,
+                    size=len(vec['push']) * 4,
+                    pValues=b''.join(struct.pack('<I', w)
+                                     for w in vec['push'])))]
+                    if vec['push'] else []) + [
+                ('vkCmdDispatch', dict(
+                    commandBuffer=V5['cb'], groupCountX=vec['gx'],
+                    groupCountY=vec['gy'], groupCountZ=vec['gz'])),
+                ('vkEndCommandBuffer', dict(commandBuffer=V5['cb'])),
+                ('vkCreateFence', dict(
+                    device=V5['dev'],
+                    pCreateInfo=st('VkFenceCreateInfo', flags=0),
+                    pFence=V5['fen'])),
+                ('vkQueueSubmit', dict(
+                    device=V5['dev'], queue=V5['queue'], submitCount=1,
+                    pSubmits=[st(
+                        'VkSubmitInfo', waitSemaphoreCount=0,
+                        pWaitSemaphores=[], pWaitDstStageMask=[],
+                        commandBufferCount=1,
+                        pCommandBuffers=[V5['cb']],
+                        signalSemaphoreCount=0,
+                        pSignalSemaphores=[])],
+                    fence=V5['fen'])),
+                ('vkDeviceWaitIdle', dict(device=V5['dev'])),
+                ('vkWaitForFences', dict(
+                    device=V5['dev'], fenceCount=1,
+                    pFences=[V5['fen']], waitAll=1,
+                    timeout=0xFFFFFFFFFFFFFFFF)),
+                ('vkGetFenceStatus', dict(device=V5['dev'],
+                                          fence=V5['fen'])),
+            ]
+            note('D/ctxkill: ctx5 descriptors+dispatch through its ring')
+            run_batches(compile_cmds(seg_b2))
+
+            # gates: bit-exact model/oracle readback on ctx5's extents
+            for o in vec['outs']:
+                k = o['bind_idx']
+                base_b = blob5_base[k]
+                nw = o['size'] // 4
+                W(TP_CHECK, CK_APR, nw, base_b)
+                for j in range(nw):
+                    rec(EK_APRCHK, base_b + 4 * j,
+                        o['model'][j], o['oracle'][j], o['cls'][j])
+            note('D/ctxkill: ctx5 output gates (%d outs)'
+                 % len(vec['outs']))
+
+            # ---- ctx5 teardown: nothing may write after its kill ---- #
+            note('D/ctxkill: ctx5 blob unrefs, then final kill')
+            for i in range(n_bind):
+                b = tm.blobs.pop(RES5 + i)
+                tm.ap_free(b['base_w'], b['size'])
+                submit(VG_RESOURCE_UNREF, [RES5 + i, 0], ctx=CTX5,
+                       exp_type=VG_RESP_NODATA)
+            eb = tm.blobs.pop(RES_EXEC)
+            tm.ap_free(eb['base_w'], EXEC_SIZE)
+            submit(VG_RESOURCE_UNREF, [RES_EXEC, 0], ctx=CTX5,
+                   exp_type=VG_RESP_NODATA)
+            for rid in (RES_REPLY, RES_RING1, RES_RELOC):
+                b = tm.blobs.pop(rid)
+                tm.ap_free(b['base_w'], b['size'])
+                submit(VG_RESOURCE_UNREF, [rid, 0], ctx=CTX5,
+                       exp_type=VG_RESP_NODATA)
+            W(TP_APGUARD, 0)        # phase 3: silence again
+            submit(VG_CTX_DESTROY, [], ctx=CTX5,
+                   exp_type=VG_RESP_NODATA)
+            tm.kill_ctx(CTX5)
+            fm.reset_ctx(CTX5)
+            tm.ctxs.pop(CTX5)
+            delay(8192)
+            b = tm.blobs.pop(RES_RING0)
+            tm.ap_free(b['base_w'], b['size'])
+            submit(VG_RESOURCE_UNREF, [RES_RING0, 0], ctx=CTX5,
+                   exp_type=VG_RESP_NODATA)
+            check_live()
+            note('ctxkill teardown complete')
+        else:
+            note('D RESOURCE_UNREF exec blob, CTX_DESTROY ctx=4 -> live 0')
+            eb = tm.blobs.pop(RES_EXEC)
+            tm.ap_free(eb['base_w'], EXEC_SIZE)
+            submit(VG_RESOURCE_UNREF, [RES_EXEC, 0], ctx=CTX_ID,
+                   exp_type=VG_RESP_NODATA)
+            # blob-owned pages drain only through UNREF (CTX_DESTROY does
+            # not free them); ring0's blob goes last, after the ring dies
+            for rid in (RES_REPLY, RES_RING1, RES_RELOC):
+                b = tm.blobs.pop(rid)
+                tm.ap_free(b['base_w'], b['size'])
+                submit(VG_RESOURCE_UNREF, [rid, 0], ctx=CTX_ID,
+                       exp_type=VG_RESP_NODATA)
+            dr0 = vk('vkDestroyRingMESA', ring=RING0_H)
+            assert not execbuf(dr0), 'ring0 destroy failed'
+            b = tm.blobs.pop(RES_RING0)
+            tm.ap_free(b['base_w'], b['size'])
+            submit(VG_RESOURCE_UNREF, [RES_RING0, 0], ctx=CTX_ID,
+                   exp_type=VG_RESP_NODATA)
+            submit(VG_CTX_DESTROY, [], ctx=CTX_ID,
+                   exp_type=VG_RESP_NODATA)
+            tm.blobs.clear()
+            tm.ctxs.clear()
+            fm.reset_ctx(CTX_ID)
+            check_live()
+            note('compute teardown complete')
 
         W(TP_END)
         insts = []
@@ -5939,15 +7502,36 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # preambles included (guest keeps space headroom)
         batch = []
         bw = 0
+        # §12.3 5b: never let the reply blob wrap inside one batch —
+        # a wrapped window clobbers a reply before its flush check
+        # runs, so a replying command that would wrap starts the next
+        # batch instead (Seek-to-0 lands it at offset 0 there).
+        rp_proj = tm.rep_cursor
+        sk_proj = seek_used
         while i < n:
             name, kw, w, a, nb = cmds_words[i]
             cost = len(w)
-            if model.cmd_info[name]['act']['flags'] & 1:
+            replies = bool(model.cmd_info[name]['act']['flags'] & 1)
+            if replies:
                 cost += sw4 + sk4
             if batch and (bw + cost) * 4 > r['buf_size'] - 128:
                 break
+            if replies and batch:
+                stw = max(512, (nb + 63) & ~63)
+                if not sk_proj and batch_no >= 1:
+                    stw += 64
+                if rp_proj + stw > REPLY_SIZE:
+                    break
             batch.append(cmds_words[i])
             bw += cost
+            if replies:
+                stw = max(512, (nb + 63) & ~63)
+                if not sk_proj and batch_no >= 1:
+                    stw += 64
+                    sk_proj = True
+                if rp_proj + stw > REPLY_SIZE:
+                    rp_proj = 0
+                rp_proj += stw
             i += 1
         if batch_no >= 1:
             # park the ring, check IDLE, then notify with the submit

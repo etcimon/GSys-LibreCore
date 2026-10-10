@@ -100,6 +100,9 @@ module tb_g6lc_apu_vnpump;
   logic [3:0][31:0] ring_status;
   logic [3:0][31:0] ring_head;
   logic [3:0][APU_VG_AP_WORD_W-1:0] ring_extra;
+  // ctx-kill pulse (vgctl CTX_DESTROY)
+  logic        ctx_kill_v;
+  logic [7:0]  ctx_kill_id;
 
   g6lc_apu_vnpump #(.Enable(1'b1), .Rings(4)) dut (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
@@ -136,6 +139,7 @@ module tb_g6lc_apu_vnpump;
     .ex_submit_o(ex_s),
     .ex_done_seq_i(16'h0), .ex_fence_signaled_i(16'h0),
     .ex_fence_lost_i(16'h0), .ex_fence_clr_o(ex_fclr),
+    .ctx_kill_valid_i(ctx_kill_v), .ctx_kill_id_i(ctx_kill_id),
     .busy_o(busy),
     .ring_active_o(ring_active), .ring_status_o(ring_status),
     .ring_head_o(ring_head), .ring_extra_w_o(ring_extra));
@@ -180,6 +184,7 @@ module tb_g6lc_apu_vnpump;
     .ex_submit_o(),
     .ex_done_seq_i(16'h0), .ex_fence_signaled_i(16'h0),
     .ex_fence_lost_i(16'h0), .ex_fence_clr_o(),
+    .ctx_kill_valid_i(1'b0), .ctx_kill_id_i(8'h0),
     .busy_o(z_busy),
     .ring_active_o(z_ract), .ring_status_o(z_rstat),
     .ring_head_o(z_rhead), .ring_extra_w_o());
@@ -207,6 +212,9 @@ module tb_g6lc_apu_vnpump;
   // the dominant source while the pump sits idle-but-live)
   int unsigned ap_rd = 0;
   always @(posedge clk) if (mp_req && !mp_we && mp_dom) ap_rd++;
+  // aperture writes — a dead ctx must never issue one (T18)
+  int unsigned ap_wr = 0;
+  always @(posedge clk) if (mp_req && mp_we && mp_dom) ap_wr++;
   // accept counters sampled at the same posedge the engines use
   int unsigned ot_acc = 0, xs_acc = 0;
   always @(posedge clk) if (ot_v && ot_r) ot_acc++;
@@ -306,6 +314,13 @@ module tb_g6lc_apu_vnpump;
   // virtio execbuffer header, mirroring vgctl's xs_off=32)
   task automatic xs_go(input logic [31:0] words [$],
                        input bit exp_fault, input string tag);
+    xs_goc(words, 8'd4, exp_fault, tag);
+  endtask
+
+  // ctx-parameterized variant (T18 runs a second context)
+  task automatic xs_goc(input logic [31:0] words [$],
+                        input logic [7:0] ctx,
+                        input bit exp_fault, input string tag);
     int unsigned t;
     cases++;
     for (int i = 0; i < 8; i++) gmem[GXW + i] = 32'h0;
@@ -315,7 +330,7 @@ module tb_g6lc_apu_vnpump;
                 write: 1'b0, default: '0};
     xs_d[1] = '0; xs_d[2] = '0; xs_d[3] = '0;
     xs_n = 4'd1; xs_off = 32'd32;
-    xs_bytes = 32'(words.size() * 4); xs_ctx = 8'd4;
+    xs_bytes = 32'(words.size() * 4); xs_ctx = ctx;
     begin int unsigned s0 = xs_seen;
       int unsigned a0 = xs_acc;
       @(negedge clk);
@@ -414,6 +429,18 @@ module tb_g6lc_apu_vnpump;
     32'h00000000, 32'h00000080, 32'h00000000, 32'h000000c0,
     32'h00000000, 32'h00000800, 32'h00000000, 32'h000008c0,
     32'h00000000, 32'h00000010, 32'h00000000};
+  // CRING_REUSE: ring=0x200 res=100 -- same window as CRING0 (shmem
+  // reuse after process teardown without vkDestroyRingMESA)
+  localparam logic [31:0] CRING_REUSE [35] = '{
+    32'h000000bc, 32'h00000000, 32'h00000200, 32'h00000000,
+    32'h00000001, 32'h00000000, 32'h3ba0a600, 32'h00000001,
+    32'h00000000, 32'h3ba0a606, 32'h00000000, 32'h00000000,
+    32'h000003e8, 32'h00000000, 32'h00000064, 32'h00000000,
+    32'h00000000, 32'h000008c0, 32'h00000000, 32'h0000012c,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000040,
+    32'h00000000, 32'h00000080, 32'h00000000, 32'h000000c0,
+    32'h00000000, 32'h00000800, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000};
   // CRING_BADSZ: bufferSize=2000 (not a power of two)
   localparam logic [31:0] CRING_BADSZ [35] = '{
     32'h000000bc, 32'h00000000, 32'h00000200, 32'h00000000,
@@ -505,6 +532,7 @@ module tb_g6lc_apu_vnpump;
 `endif
     xs_v = 0; xs_d = '{default: '0}; xs_n = '0;
     xs_off = '0; xs_bytes = '0; xs_ctx = '0;
+    ctx_kill_v = 1'b0; ctx_kill_id = '0;
     seeding = 1'b0; s_ot_v = 1'b0; s_ot_req = '0;
     repeat (8) @(posedge clk);
     rst_ni = 1;
@@ -691,6 +719,78 @@ module tb_g6lc_apu_vnpump;
       ring_put(R0_BASE + 48, 0, wq, R0_BASE + 16, 24);
       wait_ap(R0_BASE, 32'd24, "T16 head catches new work");
     end
+
+    // ---- T17: same-window CreateRing retires the stale slot -----------
+    // guest process teardown frees a ring's shmem without
+    // vkDestroyRingMESA; the aperture window is reused by the next
+    // vkCreateRingMESA.  The stale slot must be retired silently (no
+    // head/status writes) or its mis-framed stream would FATAL-poison
+    // the new owner's control block (stock-guest vkimage failure).
+    wq = {};
+    for (int i = 0; i < 35; i++) wq.push_back(CRING_REUSE[i]);
+    xs_go(wq, 1'b0, "T17 create ring same window");
+    cases++;
+    check(ring_active[0] == 1'b0, "T17 stale ring0 retired");
+    check(ring_active[1] == 1'b1, "T17 new ring active in slot 1");
+    // the new owner consumes its own stream from seqno 0; the retired
+    // slot must never publish a head or FATAL into the shared control
+    apm[R0_BASE]      = 32'd0;   // head  (guest re-inits on create)
+    apm[R0_BASE + 16] = 32'd0;   // tail
+    wq = {};
+    for (int i = 0; i < 6; i++) wq.push_back(SUBVQ7[i]);
+    ring_put(R0_BASE + 48, 0, wq, R0_BASE + 16, 24);
+    wait_ap(R0_BASE, 32'd24, "T17 new ring head advances");
+    check(apm[R0_BASE + 32] == ST_ALIVE, "T17 status stays ALIVE");
+    check(ring_status[1] == ST_ALIVE, "T17 new ring status");
+
+    // ---- T18: CTX_DESTROY kill retires a live ring mid-stream (5b-r2) --
+    // The T17 ring (slot 1, ctx 4, R0 window) is fed a long stream so
+    // it is in-flight with pending head publishes when ctx_kill_v
+    // pulses: the slot must die with NO status write and the demoted
+    // stream must never publish head or FATAL/IDLE into the window —
+    // which a different context's memory blob may already own.
+    wq = {};
+    for (int c = 0; c < 60; c++)
+      for (int i = 0; i < 6; i++) wq.push_back(SUBVQ7[i]);
+    ring_put(R0_BASE + 48, 24, wq, R0_BASE + 16, 24 + 1440);
+    wait_ap(R0_BASE, 32'd48, "T18 stream in-flight");
+    begin
+      automatic int unsigned wr0;
+      automatic logic [31:0] head0, stat0;
+      @(negedge clk);
+      ctx_kill_id = 8'd4; ctx_kill_v = 1'b1;
+      @(negedge clk);
+      ctx_kill_v = 1'b0;
+      // let any head/status write that was already in flight when the
+      // pulse landed drain before the baselines are captured
+      repeat (32) @(posedge clk);
+      cases++;
+      check(ring_active[1] == 1'b0, "T18 ctx kill retires ring slot");
+      head0 = apm[R0_BASE];
+      stat0 = apm[R0_BASE + 32];
+      wr0 = ap_wr;
+      // ~1400 B of demoted stream still drains: plenty of cycles for a
+      // stale head publish or FATAL/IDLE write to leak if it could
+      repeat (2000) @(posedge clk);
+      cases++;
+      check(ap_wr == wr0, "T18 dead ctx issued no aperture write");
+      check(apm[R0_BASE] == head0, "T18 head frozen");
+      check(apm[R0_BASE + 32] == stat0, "T18 status untouched");
+    end
+    // ctx 5 claims the same window and runs bit-exactly
+    apm[R0_BASE]      = 32'd0;   // guest re-inits the control block
+    apm[R0_BASE + 16] = 32'd0;
+    wq = {};
+    for (int i = 0; i < 35; i++) wq.push_back(CRING_REUSE[i]);
+    xs_goc(wq, 8'd5, 1'b0, "T18 create ring ctx5 same window");
+    cases++;
+    check(ring_active[0] == 1'b1, "T18 new ring active");
+    check(apm[R0_BASE + 32] == ST_ALIVE, "T18 new ring ALIVE");
+    wq = {};
+    for (int i = 0; i < 6; i++) wq.push_back(SUBVQ7[i]);
+    ring_put(R0_BASE + 48, 0, wq, R0_BASE + 16, 24);
+    wait_ap(R0_BASE, 32'd24, "T18 ctx5 head advances");
+    check(apm[R0_BASE + 32] == ST_ALIVE, "T18 status stays ALIVE");
 
     if (errors == 0)
       $display("PASS tb_g6lc_apu_vnpump cases=%0d checks=%0d cycles=%0d",

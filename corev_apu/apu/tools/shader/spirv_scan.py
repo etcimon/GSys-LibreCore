@@ -51,7 +51,8 @@ FAULT_NAME = {v: k for k, v in FAULT.items()}
 
 # ---- type kinds (must match APU_SH_TK_*) ---------------------------
 TK = dict(NONE=0, VOID=1, BOOL=2, INT=3, FLOAT=4, VEC=5, MAT=6,
-          ARRAY=7, RARRAY=8, STRUCT=9, PTR=10, FUNC=11)
+          ARRAY=7, RARRAY=8, STRUCT=9, PTR=10, FUNC=11,
+          IMG=12, SAMP=13, SIMG=14)          # §12.3 C/5b
 
 # ---- storage classes (must match APU_SH_SC_*) ----------------------
 SC = dict(UNIFORMCONST=0, INPUT=1, UNIFORM=2, OUTPUT=3, WORKGROUP=4,
@@ -83,7 +84,7 @@ DEC_MBR_OK = {DEC['RelaxedPrecision'], DEC['RowMajor'], DEC['ColMajor'],
               DEC['MatrixStride'], DEC['Offset'], DEC['NonWritable'],
               DEC['NonReadable'], DEC['NoContraction'], DEC['SpecId']}
 
-CAP_OK = {1}           # OpCapability Shader only
+CAP_OK = {1, 50}       # OpCapability Shader + ImageQuery (§12.3 C)
 EXEC_MODE_OK = {17}    # LocalSize only
 MEM_OK = (0, 1)        # Logical GLSL450
 ENTRY_MODEL_OK = {5}   # GLCompute
@@ -95,12 +96,19 @@ OP = dict(
     ExtInstImport=11, ExtInst=12, MemoryModel=14, EntryPoint=15,
     ExecutionMode=16, Capability=17,
     TypeVoid=19, TypeBool=20, TypeInt=21, TypeFloat=22, TypeVector=23,
-    TypeMatrix=24, TypeArray=28, TypeRuntimeArray=29,
+    TypeMatrix=24, TypeImage=25, TypeSampler=26, TypeSampledImage=27,
+    TypeArray=28, TypeRuntimeArray=29,
     TypeStruct=30, TypePointer=32, TypeFunction=33,
     ConstantTrue=41, ConstantFalse=42, Constant=43,
     ConstantComposite=44, ConstantNull=46,
     SpecConstantTrue=48, SpecConstantFalse=49, SpecConstant=50,
     SpecConstantComposite=51, SpecConstantOp=52,
+    # §12.3 C/5b image ops — OpImageSampleImplicitLod (87) is
+    # deliberately absent: compute has no derivatives, so it faults
+    # OPCODE at commit (truthful; glslang emits ExplicitLod anyway)
+    SampledImage=86, ImageSampleExplicitLod=88,
+    ImageFetch=95, ImageRead=98, ImageWrite=99, Image=100,
+    ImageQuerySizeLod=103, ImageQuerySize=104, ImageQueryLevels=106,
     Function=54, FunctionEnd=56, Variable=59, Load=61, Store=62,
     AccessChain=65, InBoundsAccessChain=66, ArrayLength=68,
     Decorate=71, MemberDecorate=72,
@@ -293,6 +301,41 @@ class Scanner:
             t = dict(kind=TK['MAT'], sign=0, comps=et['comps'], cols=n,
                      storage=0, elem=elem, nmemb=0, length=0,
                      size=4 * n * et['comps'], stride=0)
+        elif opc == OP['TypeImage']:
+            # §12.3 C/5b: {sampled_type, dim, depth, arrayed, ms,
+            # sampled, format, [aq]} — 2D images only, no MSAA, format
+            # Unknown (the descriptor record carries the real format);
+            # sampled 1 = sampled image, 2 = storage image
+            st, dim, depth, arr, ms, smp, fmt = ops[:7]
+            if st not in self.types:
+                raise Fault(FAULT['FWDREF'], opc, at)
+            if self.types[st]['kind'] not in (TK['INT'], TK['FLOAT']):
+                raise Fault(FAULT['TYPE'], opc, at)
+            # 2D images only, no MSAA; the declared ImageFormat operand
+            # (0..41 defined) is informational — the descriptor record's
+            # format governs decode, so any legal value is accepted
+            if (dim != 1 or depth > 1 or arr > 1 or ms != 0 or
+                    smp not in (1, 2) or fmt > 41):
+                raise Fault(FAULT['TYPE'], opc, at)
+            t = dict(kind=TK['IMG'], sign=depth, comps=arr,
+                     cols=smp, storage=0, elem=st, nmemb=0, length=0,
+                     size=4, stride=0)
+        elif opc == OP['TypeSampler']:
+            if ops:
+                raise Fault(FAULT['TYPE'], opc, at)
+            t = dict(kind=TK['SAMP'], sign=0, comps=0, cols=0,
+                     storage=0, elem=0, nmemb=0, length=0,
+                     size=4, stride=0)
+        elif opc == OP['TypeSampledImage']:
+            (it,) = ops
+            if it not in self.types:
+                raise Fault(FAULT['FWDREF'], opc, at)
+            it_ = self.types[it]
+            if it_['kind'] != TK['IMG'] or it_['cols'] != 1:
+                raise Fault(FAULT['TYPE'], opc, at)
+            t = dict(kind=TK['SIMG'], sign=0, comps=0, cols=0,
+                     storage=0, elem=it, nmemb=0, length=0,
+                     size=4, stride=0)
         elif opc == OP['TypeArray']:
             elem, cid = ops
             if elem not in self.types or cid not in self.consts:
@@ -395,11 +438,16 @@ class Scanner:
         sc = ops[0]
         if sc not in SC_OK:
             raise Fault(FAULT['STORAGE'], OP['Variable'], at)
-        if sc in (SC['UNIFORMCONST'],):
-            raise Fault(FAULT['STORAGE'], OP['Variable'], at)
         t = self.types.get(rty)
         if t is None or t['kind'] != TK['PTR']:
             raise Fault(FAULT['TYPE'], OP['Variable'], at)
+        if sc in (SC['UNIFORMCONST'],):
+            # §12.3 C/5b: image/sampler/sampled-image vars only —
+            # everything else under UniformConstant stays refused
+            et = self.types.get(t['elem'])
+            if et is None or et['kind'] not in (
+                    TK['IMG'], TK['SAMP'], TK['SIMG']):
+                raise Fault(FAULT['STORAGE'], OP['Variable'], at)
         d = self.decor_of(rid)
         off = 0
         if len(self.init) >= SHADER_INIT:
@@ -531,6 +579,9 @@ class Scanner:
     h_22 = h_19
     h_23 = h_19
     h_24 = h_19
+    h_25 = h_19                          # TypeImage
+    h_26 = h_19                          # TypeSampler
+    h_27 = h_19                          # TypeSampledImage
     h_28 = h_19
     h_29 = h_19
     h_30 = h_19
@@ -659,8 +710,12 @@ class Scanner:
                136, 137, 138, 139, 142, 143, 144, 145, 146, 147, 148,
                164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174,
                175, 176, 177, 178, 179, 180, 182, 183, 184, 186, 188,
-               190, 194, 195, 196, 197, 198, 199, 200]:
+               190, 194, 195, 196, 197, 198, 199, 200,
+               # §12.3 C/5b: image ops with a result register
+               86, 88, 95, 98, 100, 103, 104, 106]:
         exec('h_%d = h_result' % _o)
+
+    h_99 = h_noresult                        # OpImageWrite
 
     # ---- table emit --------------------------------------------------
     def type_words(self, tid):

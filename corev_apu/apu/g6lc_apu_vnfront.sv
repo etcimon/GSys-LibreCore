@@ -308,7 +308,9 @@ module g6lc_apu_vnfront
       StRowSc, StRowW0C, StRowW1C,
       StUpdHdrC, StUpdSetCpl, StUpdWBegin, StUpdWBad, StUpdWNext,
       StUpdInfo, StUpdInfoC, StUpdBufGo, StUpdBufCpl, StUpdMemCpl,
-      StUpdWr0, StUpdWr1, StUpdElemCk, StUpdPoisC,
+      StUpdImgRd, StUpdImgGo, StUpdImgVC, StUpdImgIC, StUpdImgMW,
+      StUpdImgMC, StUpdImgSC,
+      StUpdWr0, StUpdWr1, StUpdWr2, StUpdWr3, StUpdElemCk, StUpdPoisC,
       StUpdCpRd, StUpdCpS, StUpdCpD, StUpdCpDSet, StUpdCpGo,
       StUpdCpPC, StUpdCpRC, StUpdCpBC, StUpdCpNext,
       StPayProd, StPayResLo, StPayResHi, StPayResCpl, StPayCapW,
@@ -323,6 +325,10 @@ module g6lc_apu_vnfront
       StPipeLay0, StPipeModCpl, StPipeLayCpl, StPipeAllocC,
       StPipeAuxC, StPipeAuxCpl, StPipeAuxHiC, StPipeFail,
       StRetSm,
+      // §12.3 C/5b: image layout walk, image/view/sampler create,
+      // subresource layout reply
+      StImgCk, StImgMip, StImgAuxH, StImgState,
+      StImgVwCk, StImgVwAuxH, StSamCk, StSamAuxH, StImgSubRep,
       StRep, StRepKick, StRepWait, StDone
     } state_e;
     state_e              state_q, ot_ret_q, cr_ret_q, cs_ret_q;
@@ -446,7 +452,11 @@ module g6lc_apu_vnfront
     logic                upd_bad_q;    // write-level row/type/bounds fail
     logic                upd_pois_q;   // an element needs the poison bit
     logic                upd_elok_q;   // current element resolves clean
+    logic                upd_img_q;    // element is an image-family type
     logic [31:0]         upd_eb_q, upd_esz_q; // element {base,size}
+    logic [63:0]         upd_smp_q;    // staged VkSampler id
+    logic [63:0]         upd_vw_q;     // image-view aux {hi:lo}
+    logic [4:0][31:0]    upd_iw_q;     // record words at +8..+24
     logic [15:0]         ud_mslot_q;   // buffer's bound memory slot
 
     // vkUpdateDescriptorSets copies
@@ -512,6 +522,26 @@ module g6lc_apu_vnfront
     logic [23:0]         aux_size_q;   // created size blocks for SETAUX
     logic [7:0]          aux_free_q;   // arena idx freed by a CB retire
     logic                aux_free_v_q;
+
+    // §12.3 C/5b: device image-layout mip walk (off(layer,mip) =
+    // layer*layer_bytes + Σ pitch_i*h_i, pitch = align(w_m*bpp,64)).
+    // Operands come from op_q.imm (create) or ent_q.aux (query).
+    logic [4:0]          imw_m_q;      // level cursor
+    logic [4:0]          imw_nm_q;     // mipLevels of the operand
+    logic [4:0]          imw_tgt_q;    // capture level (5'h1F = none)
+    logic [31:0]         imw_acc_q;    // running Σ pitch*h
+    logic [15:0]         imw_w_q, imw_h_q;
+    logic [7:0]          imw_fmt_q;    // APU_IMG_FMT_* id
+    logic [31:0]         imw_lay_q;    // layer_bytes at walk end
+    logic [31:0]         imw_off_q, imw_pit_q;  // off/pitch at tgt
+    logic [15:0]         imw_wm_q, imw_hm_q;    // dims at tgt
+    state_e              imw_ret_q;
+    // vkCreateImageView: resolved effective range (VK_REMAINING_*)
+    logic [3:0]          vw_lvl_q;
+    logic [9:0]          vw_lay_q;
+    // vkCreateSampler: packed record words (+20..+27 of the descriptor
+    // record) parked until the post-alloc aux writes
+    logic [31:0]         sam_w0_q, sam_w1_q;
     apu_cmdexec_submit_t sub_q;
     apu_cmdrec_rec_t     rec_q;
     logic [3:0]          rhi_q;
@@ -628,6 +658,39 @@ module g6lc_apu_vnfront
                                             input logic [31:0] w);
       return (h ^ w) * 32'h0100_0193;
     endfunction
+    // §12.3 C/5b: device image-layout helpers — identical formulae to
+    // g6lc_apu_xfer (off(layer,mip) = layer*layer_bytes + mip_off)
+    function automatic logic [15:0] f_mdim(input logic [15:0] d,
+                                           input logic [4:0]  m);
+      logic [15:0] s;
+      s = d >> m;
+      return s == 16'h0 ? 16'd1 : s;
+    endfunction
+    function automatic logic [31:0] f_mpitch(input logic [15:0] w,
+                                             input logic [7:0]  fmt,
+                                             input logic [4:0]  m);
+      return ((32'(f_mdim(w, m)) * 32'(APU_VN_IMG_BPP[fmt[3:0]])) +
+              32'd63) & ~32'd63;
+    endfunction
+    // wire format -> device id, or 8'hFF unsupported
+    function automatic logic [7:0] f_img_fmt(input logic [31:0] f);
+      return f < 32'd256 ? APU_VN_IMG_FMT[f[7:0]] : 8'hFF;
+    endfunction
+    // fp32 -> unsigned q4.4 (clamp [0, 15.9375], round-to-nearest) for
+    // the sampler record's minLod/maxLod/bias fields
+    function automatic logic [7:0] f_f32_q44(input logic [31:0] f);
+      logic [31:0] p;
+      logic [8:0]  sh;
+      logic [31:0] r;
+      // q4.4 = mantissa >> (146-e): {1,frac} * 2^(e-150) rounds to
+      // value*16; clamp at 0xFF like the model (min(0xFF, ...))
+      p  = 32'({1'b1, f[22:0]});
+      sh = 9'd146 - {1'b0, f[30:23]};
+      if (f[31])              return 8'h00;
+      if (f[30:23] >= 8'd131) return 8'hff;    // f >= 16
+      r = (p + (32'h1 << (sh - 9'd1))) >> sh;
+      return r > 32'd255 ? 8'hff : r[7:0];
+    endfunction
     function automatic logic [7:0] arena_free();
       for (int i = 0; i < CbBufs; i++)
         if (!cb_alloc_q[i]) return 8'(i);
@@ -643,7 +706,7 @@ module g6lc_apu_vnfront
                  ExecEnumPd = 3, ExecEnumExt = 4, ExecMres = 5,
                  ExecEnumQf2 = 6, ExecEnumQGrp = 7, ExecExtBuf = 8,
                  ExecExtZero = 9, ExecSparse = 10, ExecFmt = 11,
-                 ExecImgFmt = 12;
+                 ExecImgFmt = 12, ExecImgSub = 13;
     function automatic int exec_kind(input logic [31:0] t);
       case (t)
         APU_VN_TYPE_VK_GET_BUFFER_MEMORY_REQUIREMENTS_EXT,
@@ -675,6 +738,8 @@ module g6lc_apu_vnfront
           return ExecFmt;
         APU_VN_TYPE_VK_GET_PHYSICAL_DEVICE_IMAGE_FORMAT_PROPERTIES_2_EXT:
           return ExecImgFmt;
+        APU_VN_TYPE_VK_GET_IMAGE_SUBRESOURCE_LAYOUT_EXT:
+          return ExecImgSub;
         default: return ExecNone;
       endcase
     endfunction
@@ -708,6 +773,18 @@ module g6lc_apu_vnfront
     // (UNIFORM/STORAGE_BUFFER + their *_DYNAMIC forms)
     function automatic logic is_buf_typ(input logic [7:0] t);
       return t == 8'd6 || t == 8'd7 || t == 8'd8 || t == 8'd9;
+    endfunction
+    // §12.3 C/5b: types that stage VkDescriptorImageInfo {sampler u64,
+    // imageView u64, imageLayout u32} — SAMPLER, COMBINED_IMAGE_SAMPLER,
+    // SAMPLED_IMAGE, STORAGE_IMAGE
+    function automatic logic is_img_typ(input logic [7:0] t);
+      return t <= 8'd3;
+    endfunction
+    // staged words consumed per element of a descriptor write
+    function automatic logic [4:0] upd_stride(input logic [7:0] t);
+      if (is_buf_typ(t)) return 5'd6;
+      if (is_img_typ(t)) return 5'd5;
+      return 5'd0;
     endfunction
     // prepend words ahead of the staged payload copy
     function automatic int prepend_n(input logic [5:0] k);
@@ -833,7 +910,9 @@ module g6lc_apu_vnfront
         upd_dstb_q <= '0; upd_arr_q <= '0;
         upd_dcnt_q <= '0; upd_type_q <= '0;
         upd_rec_q <= '0; upd_bad_q <= 1'b0; upd_pois_q <= 1'b0;
-        upd_elok_q <= 1'b0; upd_eb_q <= '0; upd_esz_q <= '0;
+        upd_elok_q <= 1'b0; upd_img_q <= 1'b0; upd_eb_q <= '0;
+        upd_esz_q <= '0; upd_smp_q <= '0; upd_vw_q <= '0;
+        upd_iw_q <= '0;
         ud_mslot_q <= '0;
         cp_i_q <= '0; cp_src_q <= '0; cp_dsid_q <= '0;
         cp_sb_q <= '0; cp_sa_q <= '0; cp_db_q <= '0;
@@ -852,6 +931,14 @@ module g6lc_apu_vnfront
         sh_slot_q <= '0; sh_nw_q <= '0; shc_ok_q <= 1'b0;
         pg_op_q <= APU_VGPAGES_OP_ALLOC;
         pg_base_q <= '0; pg_bytes_q <= '0;
+        imw_m_q <= '0; imw_nm_q <= '0; imw_tgt_q <= '0;
+        imw_acc_q <= '0; imw_w_q <= '0; imw_h_q <= '0;
+        imw_fmt_q <= '0; imw_lay_q <= '0;
+        imw_off_q <= '0; imw_pit_q <= '0;
+        imw_wm_q <= '0; imw_hm_q <= '0;
+        imw_ret_q <= StIdle;
+        vw_lvl_q <= '0; vw_lay_q <= '0;
+        sam_w0_q <= '0; sam_w1_q <= '0;
         pg_ok_q <= 1'b0; pg_res_q <= '0;
         rep_null_mask_q <= '0;
         pl_modid_q <= '0; pl_layid_q <= '0; pl_spec_q <= 1'b0;
@@ -942,6 +1029,16 @@ module g6lc_apu_vnfront
                            exec_kind(dec_op.cmd_type) == ExecImgReq ||
                            dec_op.cmd_type ==
                            APU_VN_TYPE_VK_GET_FENCE_STATUS_EXT) begin
+                automatic int ls = lu_slot(dec_op, 1);
+                watch_q <= ls < 0 ? 4'hF : 4'(ls);
+              end else if (dec_op.cmd_type ==
+                           APU_VN_TYPE_VK_CREATE_IMAGE_VIEW_EXT ||
+                           dec_op.cmd_type ==
+                           APU_VN_TYPE_VK_GET_IMAGE_SUBRESOURCE_LAYOUT_EXT
+                          ) begin
+                // §12.3 5b: watch the image (second LOOKUP after the
+                // device) so ent_q carries its {w,h,fmt,mips,layers}
+                // aux + layer_bytes state
                 automatic int ls = lu_slot(dec_op, 1);
                 watch_q <= ls < 0 ? 4'hF : 4'(ls);
               end else if (APU_VN_ACT[dec_op.cmd_type[
@@ -1036,12 +1133,32 @@ module g6lc_apu_vnfront
                     state_q <= StRep;
                   end
                   ExecImgReq: begin
-                    exec_w_q[0*32 +: 32] <= {ent_q.aux[27:8], 12'h0};
-                    exec_w_q[1*32 +: 32] <= {28'h0, ent_q.aux[31:28]};
-                    exec_w_q[2*32 +: 32] <= 32'd4096;
+                    // §12.3 C/5b: size = layers * layer_bytes (the
+                    // aux[53:45]/state[18:0] fields written at create),
+                    // alignment 64, both heaps
+                    automatic logic [31:0] ib =
+                        32'({23'h0, ent_q.aux[53:45]}) *
+                        (32'({13'h0, ent_q.state[18:0]}) << 6);
+                    exec_w_q[0*32 +: 32] <= ib;
+                    exec_w_q[1*32 +: 32] <= '0;
+                    exec_w_q[2*32 +: 32] <= 32'd64;
                     exec_w_q[3*32 +: 32] <= '0;
                     exec_w_q[4*32 +: 32] <= 32'd3;
                     state_q <= StRep;
+                  end
+                  ExecImgSub: begin
+                    // §12.3 C/5b: mip walk seeded from the image entry,
+                    // capturing level imm[1]; StImgSubRep emits the
+                    // VkSubresourceLayout
+                    imw_m_q   <= '0;
+                    imw_nm_q  <= ent_q.aux[44:40];
+                    imw_tgt_q <= 5'(op_q.imm[1]);
+                    imw_acc_q <= '0;
+                    imw_w_q   <= ent_q.aux[15:0];
+                    imw_h_q   <= ent_q.aux[31:16];
+                    imw_fmt_q <= ent_q.aux[39:32];
+                    imw_ret_q <= StImgSubRep;
+                    state_q   <= StImgMip;
                   end
                   ExecEnumPd: begin
                     exec_w_q[0*32 +: 32] <= 32'd1;   // one physical device
@@ -1185,6 +1302,11 @@ module g6lc_apu_vnfront
                 endcase
               end
               APU_VN_ACT_ALLOC: begin
+`ifdef VNFRONT_TRACE
+                $display("ALLOC kind=%0d new=%0d ct=%0d",
+                         act_q.obj_kind, role_slot(op_q, APU_VN_ROLE_NEW),
+                         op_q.cmd_type);
+`endif
                 if (role_slot(op_q, APU_VN_ROLE_NEW) >= 0) begin
                   // §7b: layout objects park a payload extent first —
                   // an ObjPay FULL means the object is never created
@@ -1303,6 +1425,17 @@ module g6lc_apu_vnfront
                       pg_ret_q   <= StAllocGo;
                       state_q    <= StPgReq;
                     end
+                  end else if (act_q.obj_kind ==
+                               6'(APU_VN_KIND_VK_IMAGE)) begin
+                    // §12.3 C/5b: validate + mip-walk layer_bytes
+                    // before the ALLOC (entry.size = requirement)
+                    state_q <= StImgCk;
+                  end else if (act_q.obj_kind ==
+                               6'(APU_VN_KIND_VK_IMAGE_VIEW)) begin
+                    state_q <= StImgVwCk;
+                  end else if (act_q.obj_kind ==
+                               6'(APU_VN_KIND_VK_SAMPLER)) begin
+                    state_q <= StSamCk;
                   end else begin
                     state_q <= StAllocGo;
                   end
@@ -1576,13 +1709,12 @@ module g6lc_apu_vnfront
               state_q  <= StRep;
             end else begin
               // created size -> aux[31:8] blocks (ObjTab.ALLOC ignores
-              // req.size); buffers in 256B units, images in 4KiB units
+              // req.size); buffers in 256B units — §12.3 5b: images
+              // carry {h,w} in aux[31:0] instead and layer_bytes>>6 in
+              // state, so no size aux write
               if (op_q.cmd_type == APU_VN_TYPE_VK_CREATE_BUFFER_EXT)
                 aux_size_q <= 24'((ds < 0 ? 64'h0 : op_q.q[ds]) +
                                   64'd255 >> 8);
-              else if (op_q.cmd_type == APU_VN_TYPE_VK_CREATE_IMAGE_EXT)
-                aux_size_q <= 24'((64'(op_q.imm[3]) * 64'(op_q.imm[4]) *
-                                  64'd4 + 64'd4095) >> 12);
               else
                 aux_size_q <= '0;
               // executor fence index -> aux[7:0] via SETAUX (are_i_q
@@ -1597,10 +1729,15 @@ module g6lc_apu_vnfront
                          // §7b/5a-ii: entry.size feeds descriptor
                          // dispatch (buffer size) and the memory FREE;
                          // §12.3 F5: for pools it is the record-store
-                         // byte capacity Σcount×APU_DESC_BYTES
+                         // byte capacity Σcount×APU_DESC_BYTES;
+                         // §12.3 5b: for images it is the bound-memory
+                         // requirement layers*layer_bytes
                          size: act_q.obj_kind ==
                               6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)
                               ? 64'(dsum_q << 5)
+                              : act_q.obj_kind ==
+                                6'(APU_VN_KIND_VK_IMAGE)
+                              ? 64'(op_q.imm[7]) * 64'(imw_lay_q)
                               : ds < 0 ? 64'h0 : op_q.q[ds],
                          ctx: ctx_i, default: '0};
               ot_ret_q <= StAllocCpl;
@@ -1648,9 +1785,7 @@ module g6lc_apu_vnfront
               auxlo_ret_q <= StDPoolAuxH;
               state_q     <= StAuxLo;
             end else if (op_q.cmd_type ==
-                             APU_VN_TYPE_VK_CREATE_BUFFER_EXT ||
-                         op_q.cmd_type ==
-                             APU_VN_TYPE_VK_CREATE_IMAGE_EXT) begin
+                         APU_VN_TYPE_VK_CREATE_BUFFER_EXT) begin
               otr_q <= '{op: APU_OBJTAB_OP_SETAUX,
                          id: {32'h0, ot_cpl_i.handle},
                          kind: act_q.obj_kind,
@@ -1659,6 +1794,39 @@ module g6lc_apu_vnfront
                          ctx: ctx_i, default: '0};
               ot_ret_q <= StAllocAux;
               state_q  <= StOtReq;
+            end else if (op_q.cmd_type ==
+                         APU_VN_TYPE_VK_CREATE_IMAGE_EXT) begin
+              // §12.3 C/5b image aux: [15:0]=w [31:16]=h [39:32]=fmt
+              // [44:40]=mips [53:45]=layers [63:54]=usage; state[18:0]
+              // = layer_bytes>>6.  The 4K-page aux convention is gone —
+              // MemReq answers layers*layer_bytes exactly.
+              hnd_pay_q   <= ot_cpl_i.handle;
+              auxlo_val_q <= {op_q.imm[4][15:0], op_q.imm[3][15:0]};
+              auxlo_mask_q <= 32'hFFFF_FFFF;
+              auxlo_ret_q <= StImgAuxH;
+              state_q     <= StAuxLo;
+            end else if (op_q.cmd_type ==
+                         APU_VN_TYPE_VK_CREATE_IMAGE_VIEW_EXT) begin
+              // view aux: [15:0]=image slot, [27:16]=swizzle (4x3b),
+              // [31:28]=baseMip, [35:32]=levelCount, [45:36]=baseLayer,
+              // [55:46]=layerCount, [57:56]=viewType-1
+              hnd_pay_q   <= ot_cpl_i.handle;
+              auxlo_val_q <= {4'(op_q.imm[8]),
+                              3'(op_q.imm[6][2:0]),
+                              3'(op_q.imm[5][2:0]),
+                              3'(op_q.imm[4][2:0]),
+                              3'(op_q.imm[3][2:0]),
+                              hnd_q[lu_slot(op_q, 1)][15:0]};
+              auxlo_mask_q <= 32'hFFFF_FFFF;
+              auxlo_ret_q <= StImgVwAuxH;
+              state_q     <= StAuxLo;
+            end else if (op_q.cmd_type ==
+                         APU_VN_TYPE_VK_CREATE_SAMPLER_EXT) begin
+              hnd_pay_q    <= ot_cpl_i.handle;
+              auxlo_val_q  <= sam_w0_q;
+              auxlo_mask_q <= 32'hFFFF_FFFF;
+              auxlo_ret_q  <= StSamAuxH;
+              state_q      <= StAuxLo;
             end else if (op_q.cmd_type ==
                          APU_VN_TYPE_VK_CREATE_FENCE_EXT) begin
               otr_q <= '{op: APU_OBJTAB_OP_SETAUX,
@@ -2253,15 +2421,24 @@ module g6lc_apu_vnfront
                              ? 32'd64 : op_q.imm[3]))
                     : op_q.cmd_type ==
                       APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT ||
-                      // §12.3 C/5a: Xfer operand payloads (copy
-                      // regions, fill/update headers, update data)
-                      // stream verbatim like push constants
+                      // §12.3 C/5a+5b: Xfer operand payloads (copy
+                      // regions, fill/update headers, update data,
+                      // image region/range words) stream verbatim
+                      // like push constants
                       op_q.cmd_type ==
                       APU_VN_TYPE_VK_CMD_COPY_BUFFER_EXT ||
                       op_q.cmd_type ==
                       APU_VN_TYPE_VK_CMD_FILL_BUFFER_EXT ||
                       op_q.cmd_type ==
-                      APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT
+                      APU_VN_TYPE_VK_CMD_UPDATE_BUFFER_EXT ||
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_COPY_BUFFER_TO_IMAGE_EXT ||
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_COPY_IMAGE_TO_BUFFER_EXT ||
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT ||
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT
                       ? 16'(op_q.pay_words) : 16'h0;
                 res_i_q <= '0;
                 rhi_q   <= '0;
@@ -2975,11 +3152,12 @@ module g6lc_apu_vnfront
           end
           StUpdWBegin: begin
             upd_pois_q <= 1'b0;
+            upd_img_q  <= 1'b0;
             if (rsv_dead_q) begin
               // dead pool or layout: the records are unreachable —
               // consume this write's staged infos and move on
-              if (is_buf_typ(upd_type_q[7:0]))
-                stg_i_q <= stg_i_q + StgBits'(upd_dcnt_q[15:0] * 6);
+              stg_i_q <= stg_i_q + StgBits'(upd_dcnt_q[15:0] *
+                         16'(upd_stride(upd_type_q[7:0])));
               state_q <= StUpdWNext;
             end else begin
               rw_bind_q <= upd_dstb_q[7:0];
@@ -2996,8 +3174,8 @@ module g6lc_apu_vnfront
                 upd_arr_q + upd_dcnt_q > {16'h0, rw_cnt_q})
               upd_pois_q <= 1'b1;
             if (!rw_ok_q || rw_typ_q != upd_type_q[7:0]) begin
-              if (is_buf_typ(upd_type_q[7:0]))
-                stg_i_q <= stg_i_q + StgBits'(upd_dcnt_q[15:0] * 6);
+              stg_i_q <= stg_i_q + StgBits'(upd_dcnt_q[15:0] *
+                         16'(upd_stride(upd_type_q[7:0])));
               state_q <= StUpdWNext;
             end else begin
               ent_j_q <= '0;
@@ -3012,17 +3190,24 @@ module g6lc_apu_vnfront
               automatic logic [31:0] left =
                   upd_dcnt_q > {16'h0, ent_j_q}
                   ? upd_dcnt_q - {16'h0, ent_j_q} : 32'h0;
-              if (is_buf_typ(upd_type_q[7:0]))
-                stg_i_q <= stg_i_q + StgBits'(left[15:0] * 6);
+              stg_i_q <= stg_i_q + StgBits'(left[15:0] *
+                         16'(upd_stride(upd_type_q[7:0])));
               state_q <= StUpdWNext;
             end else if (is_buf_typ(upd_type_q[7:0])) begin
               upd_h_q   <= '0;
               stg_ret_q <= StUpdInfoC;
               state_q   <= StStgRd;
+            end else if (is_img_typ(upd_type_q[7:0])) begin
+              // §12.3 C/5b: VkDescriptorImageInfo {sampler u64,
+              // imageView u64, imageLayout u32} — 5 staged words
+              upd_h_q   <= '0;
+              stg_ret_q <= StUpdImgRd;
+              state_q   <= StStgRd;
             end else begin
-              // non-buffer descriptor record: no staged info; write a
-              // null record carrying the declared kind (image/sampler
-              // execution stays refused downstream — F6)
+              // other descriptor kinds: no staged info; write a
+              // null record carrying the declared kind (refused
+              // downstream — texel buffers land with raster)
+              upd_img_q  <= 1'b0;
               upd_elok_q <= 1'b0;
               upd_eb_q   <= '0;
               upd_esz_q  <= '0;
@@ -3105,6 +3290,153 @@ module g6lc_apu_vnfront
             end
             state_q <= StUpdWr0;
           end
+          // ---- §12.3 C/5b: image-family descriptor elements ----------
+          // Staged VkDescriptorImageInfo = {sampler u64, imageView u64,
+          // imageLayout u32} — layout is ignored (one device layout).
+          StUpdImgRd: begin
+            case (upd_h_q)
+              4'd0: upd_smp_q[31:0]  <= stg_word_q;
+              4'd1: upd_smp_q[63:32] <= stg_word_q;
+              4'd2: upd_buf_q[31:0]  <= stg_word_q;
+              4'd3: upd_buf_q[63:32] <= stg_word_q;
+              default: upd_off_q[31:0] <= stg_word_q;   // layout: unused
+            endcase
+            stg_i_q <= stg_i_q + 1'b1;
+            upd_h_q <= upd_h_q + 4'd1;
+            if (upd_h_q == 4'd4) begin
+              state_q <= StUpdImgGo;
+            end else begin
+              stg_ret_q <= StUpdImgRd;
+              state_q   <= StStgRd;
+            end
+          end
+          StUpdImgGo: begin
+            upd_img_q  <= 1'b1;
+            upd_elok_q <= 1'b0;
+            upd_eb_q   <= '0;
+            upd_esz_q  <= '0;
+            upd_iw_q   <= '0;
+            upd_rec_q  <= {7'h0, rsv_base_q} +
+                          ((32'(rw_off_q) + upd_arr_q +
+                            32'(ent_j_q)) << 5);
+            if (upd_type_q[7:0] == 8'd0) begin
+              // SAMPLER: no image; the record is just the sampler pair
+              otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                           id: APU_VN_ID_TAG | upd_smp_q,
+                           kind: 6'(APU_VN_KIND_VK_SAMPLER),
+                           ctx: ctx_i, default: '0};
+              ot_ret_q <= StUpdImgSC;
+              state_q  <= StOtReq;
+            end else begin
+              otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                           id: APU_VN_ID_TAG | upd_buf_q,
+                           kind: 6'(APU_VN_KIND_VK_IMAGE_VIEW),
+                           ctx: ctx_i, default: '0};
+              ot_ret_q <= StUpdImgVC;
+              state_q  <= StOtReq;
+            end
+          end
+          StUpdImgVC: begin
+            // view resolved: capture its aux, walk to the image entry
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              state_q <= StUpdWr0;
+            end else begin
+              upd_vw_q <= ot_cpl_i.entry.aux;
+              otr_q    <= '{op: APU_OBJTAB_OP_READSLOT,
+                           id: {48'h0, ot_cpl_i.entry.aux[15:0]},
+                           kind: 6'(APU_VN_KIND_VK_IMAGE),
+                           default: '0};
+              ot_ret_q <= StUpdImgIC;
+              state_q  <= StOtReq;
+            end
+          end
+          StUpdImgIC: begin
+            // image entry: usage must cover the descriptor type, and a
+            // bound memory slot must exist.  Seed the mip walker at the
+            // view's base level so StUpdImgMW gets off/pitch/dims.
+            automatic logic [9:0] usage = ot_cpl_i.entry.aux[63:54];
+            automatic logic [9:0] need  =
+                upd_type_q[7:0] == 8'd3 ? 10'h008 : 10'h004;
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                ot_cpl_i.entry.kind != 6'(APU_VN_KIND_VK_IMAGE) ||
+                ot_cpl_i.entry.bind_mem_slot ==
+                    APU_OBJTAB_SLOT_NONE ||
+                (usage & need) != need) begin
+              state_q <= StUpdWr0;
+            end else begin
+              imw_m_q   <= '0;
+              imw_nm_q  <= 5'(ot_cpl_i.entry.aux[44:40]);
+              imw_tgt_q <= {1'b0, upd_vw_q[31:28]};
+              imw_acc_q <= '0;
+              imw_w_q   <= ot_cpl_i.entry.aux[15:0];
+              imw_h_q   <= ot_cpl_i.entry.aux[31:16];
+              imw_fmt_q <= ot_cpl_i.entry.aux[39:32];
+              // partial base: bind_offset; layer/mip offsets at MW
+              upd_eb_q  <= ot_cpl_i.entry.bind_offset[31:0];
+              imw_ret_q <= StUpdImgMW;
+              state_q   <= StImgMip;
+            end
+          end
+          StUpdImgMW: begin
+            // after the walk (no ObjTab op intervened: ot_cpl_i.entry
+            // still holds the image entry) — off(bl,bm) = bl*lay+off_m,
+            // size = ac*lay - off_m; mip-0 dims in imw_wm_q/imw_hm_q
+            upd_eb_q  <= upd_eb_q + 32'(upd_vw_q[45:36]) * imw_lay_q +
+                         imw_off_q;
+            upd_esz_q <= 32'(upd_vw_q[55:46]) * imw_lay_q - imw_off_q;
+            otr_q    <= '{op: APU_OBJTAB_OP_READSLOT,
+                         id: {48'h0, ot_cpl_i.entry.bind_mem_slot},
+                         kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                         default: '0};
+            ot_ret_q <= StUpdImgMC;
+            state_q  <= StOtReq;
+          end
+          StUpdImgMC: begin
+            // memory entry: unbacked type-1 backing fails the record
+            // truthfully (§12.3 C); else fold in the aperture base and
+            // assemble the record's image words
+            if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                ot_cpl_i.entry.kind !=
+                    6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
+                ot_cpl_i.entry.aux[63:32] == APU_MEM_UNBACKED) begin
+              upd_elok_q <= 1'b0;
+            end else begin
+              upd_elok_q <= 1'b1;
+              upd_eb_q   <= upd_eb_q + ot_cpl_i.entry.aux[63:32];
+              // +8 word: {w16, kind8} — flags written from elok at Wr1
+              upd_iw_q[0] <= {imw_wm_q, 8'h0, upd_type_q[7:0]};
+              // +12 word: {{dim,mips}8, fmt8, h16}
+              upd_iw_q[1] <= {{2'b00, upd_vw_q[57:56],
+                               upd_vw_q[35:32]},
+                              imw_fmt_q, imw_hm_q};
+              // +16 word: {4'b0, swz12, layers16}
+              upd_iw_q[2] <= {4'h0, upd_vw_q[27:16],
+                              16'(upd_vw_q[55:46])};
+            end
+            if (upd_type_q[7:0] == 8'd1) begin
+              // COMBINED_IMAGE_SAMPLER still needs the sampler pair
+              otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                           id: APU_VN_ID_TAG | upd_smp_q,
+                           kind: 6'(APU_VN_KIND_VK_SAMPLER),
+                           ctx: ctx_i, default: '0};
+              ot_ret_q <= StUpdImgSC;
+              state_q  <= StOtReq;
+            end else begin
+              state_q <= StUpdWr0;
+            end
+          end
+          StUpdImgSC: begin
+            // sampler resolved: record words +20/+24 = its packed aux
+            if (ot_cpl_i.status == APU_OBJTAB_OK) begin
+              upd_iw_q[3] <= ot_cpl_i.entry.aux[31:0];
+              upd_iw_q[4] <= ot_cpl_i.entry.aux[63:32];
+              if (upd_type_q[7:0] == 8'd0)
+                upd_elok_q <= 1'b1;
+            end else begin
+              upd_elok_q <= 1'b0;
+            end
+            state_q <= StUpdWr0;
+          end
           // record beats: {size,base} then {flags,kind} at [15:8]
           StUpdWr0: begin
             ap_we_q    <= 1'b1;
@@ -3118,18 +3450,49 @@ module g6lc_apu_vnfront
           StUpdWr1: begin
             ap_we_q    <= 1'b1;
             ap_addr_q  <= upd_rec_q + 32'd8;
-            // record byte8 = kind, byte9 = flags (LSU W_DS4 parse)
-            ap_wdata_q <= {32'h0, 16'h0, 7'h0, upd_elok_q,
-                           upd_type_q[7:0]};
-            ap_wstrb_q <= 8'h03;
+            // record byte8 = kind, byte9 = flags (LSU W_DS4 parse);
+            // image records carry {kind,flags,w,h,fmt,{dim,mips}} here
+            if (upd_img_q) begin
+              // u32@8 = {w16, flags8, kind8}: kind stays at byte 8,
+              // flags byte9 = {7'h0, elok}, w at bytes 10..11
+              ap_wdata_q <= {upd_iw_q[1],
+                             upd_iw_q[0][31:16], 7'h0, upd_elok_q,
+                             upd_iw_q[0][7:0]};
+              ap_wstrb_q <= 8'hFF;
+              ap_ret_q   <= StUpdWr2;
+            end else begin
+              ap_wdata_q <= {32'h0, 16'h0, 7'h0, upd_elok_q,
+                             upd_type_q[7:0]};
+              ap_wstrb_q <= 8'h03;
+              ap_ret_q   <= StUpdElemCk;
+            end
+            state_q    <= StApReq;
+          end
+          StUpdWr2: begin
+            // image record bytes 16..23: {swz,layers} + sampler w0
+            ap_we_q    <= 1'b1;
+            ap_addr_q  <= upd_rec_q + 32'd16;
+            ap_wdata_q <= {upd_iw_q[3], upd_iw_q[2]};
+            ap_wstrb_q <= 8'hFF;
+            ap_ret_q   <= StUpdWr3;
+            state_q    <= StApReq;
+          end
+          StUpdWr3: begin
+            // image record bytes 24..31: sampler w1 + reserved zero
+            ap_we_q    <= 1'b1;
+            ap_addr_q  <= upd_rec_q + 32'd24;
+            ap_wdata_q <= {32'h0, upd_iw_q[4]};
+            ap_wstrb_q <= 8'hFF;
             ap_ret_q   <= StUpdElemCk;
             state_q    <= StApReq;
           end
           StUpdElemCk: begin
-            // a failed buffer-descriptor element poisons the set;
-            // image/sampler records are written with flags=0 (kind
-            // preserved — refused at the LSU, not at dispatch)
-            if (!upd_elok_q && is_buf_typ(upd_type_q[7:0]))
+            // a failed buffer- or image-descriptor element poisons the
+            // set (unbacked memory / bad handle / usage mismatch are
+            // truthfully fatal at dispatch)
+            if (!upd_elok_q &&
+                (is_buf_typ(upd_type_q[7:0]) ||
+                 is_img_typ(upd_type_q[7:0])))
               upd_pois_q <= 1'b1;
             ent_j_q <= ent_j_q + 16'd1;
             state_q <= StUpdInfo;
@@ -3677,6 +4040,192 @@ module g6lc_apu_vnfront
                          kind: act_q.obj_kind, default: '0};
             ot_ret_q <= StRetCpl;
             state_q  <= StOtReq;
+          end
+
+          // ---- §12.3 C/5b: image create validation + mip walk ---------
+          // imm: 1=imageType 2=format 3=w 4=h 5=depth 6=mipLevels
+          //      7=arrayLayers 8=samples 9=tiling 10=usage 11=sharing
+          StImgCk: begin
+`ifdef VNFRONT_TRACE
+            $display("IMGCK type=%0d fmt=%0d w=%0d h=%0d mips=%0d lay=%0d",
+                     op_q.imm[1], op_q.imm[2], op_q.imm[3], op_q.imm[4],
+                     op_q.imm[6], op_q.imm[7]);
+`endif
+            if (f_img_fmt(op_q.imm[2]) == APU_IMG_FMT_NONE) begin
+              result_q <= APU_VK_ERROR_FORMAT_NOT_SUPPORTED;
+              state_q  <= StRep;
+            end else if (op_q.imm[1] != 32'd1 ||          // 2D only
+                         op_q.imm[5] != 32'd1 ||          // depth 1
+                         op_q.imm[8] != 32'd1 ||          // samples 1
+                         op_q.imm[9] > 32'd1 ||           // tiling
+                         op_q.imm[3] < 32'd1 ||
+                         op_q.imm[3] > 32'd4096 ||        // maxImageDimension2D
+                         op_q.imm[4] < 32'd1 ||
+                         op_q.imm[4] > 32'd4096 ||
+                         op_q.imm[6] < 32'd1 ||
+                         op_q.imm[6] > 32'd13 ||          // log2(4096)+1
+                         op_q.imm[7] < 32'd1 ||
+                         op_q.imm[7] > 32'd256 ||         // maxImageArrayLayers
+                         op_q.imm[10] == 32'h0 ||
+                         (op_q.imm[10] & ~32'hF) != 32'h0 // usage ⊆ TS|TD|S|ST
+                        ) begin
+              result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
+              state_q  <= StRep;
+            end else begin
+              // mip-0 levelCount must not exceed the chain implied by
+              // the extent (spec VU), and the walk seeds from imm
+              imw_m_q   <= '0;
+              imw_nm_q  <= 5'(op_q.imm[6]);
+              imw_tgt_q <= 5'h1F;
+              imw_acc_q <= '0;
+              imw_w_q   <= 16'(op_q.imm[3]);
+              imw_h_q   <= 16'(op_q.imm[4]);
+              imw_fmt_q <= f_img_fmt(op_q.imm[2]);
+              imw_ret_q <= StAllocGo;
+              state_q   <= StImgMip;
+            end
+          end
+          // one mip level per cycle; captures off/pitch/dims at imw_tgt_q
+          StImgMip: begin
+            automatic logic [15:0] wm = f_mdim(imw_w_q, imw_m_q);
+            automatic logic [15:0] hm = f_mdim(imw_h_q, imw_m_q);
+            automatic logic [31:0] pt =
+                f_mpitch(imw_w_q, imw_fmt_q, imw_m_q);
+            if (imw_m_q == imw_tgt_q) begin
+              imw_off_q <= imw_acc_q;
+              imw_pit_q <= pt;
+              imw_wm_q  <= wm;
+              imw_hm_q  <= hm;
+            end
+            if (imw_m_q + 5'd1 >= imw_nm_q) begin
+              imw_lay_q <= imw_acc_q + pt * 32'(hm);
+              state_q   <= imw_ret_q;
+            end else begin
+              imw_acc_q <= imw_acc_q + pt * 32'(hm);
+              imw_m_q   <= imw_m_q + 5'd1;
+            end
+          end
+          // image post-alloc: aux[63:32] = {usage,layers,mips,fmt},
+          // then state[18:0] = layer_bytes>>6
+          StImgAuxH: begin
+            auxhi_val_q <= {10'(op_q.imm[10]),
+                            9'(op_q.imm[7]),
+                            5'(op_q.imm[6]),
+                            f_img_fmt(op_q.imm[2])};
+            auxhi_ret_q <= StImgState;
+            state_q     <= StAuxSet;
+          end
+          StImgState: begin
+            stv_val_q  <= {13'h0, 19'(imw_lay_q >> 6)};
+            stv_mask_q <= 32'h0007_FFFF;
+            stv_ret_q  <= StRep;
+            state_q    <= StStSet;
+          end
+
+          // ---- §12.3 C/5b: image-view create validation ----------------
+          // ent_q = watched image entry.  imm: 1=viewType 2=format
+          // 3..6=swizzle r/g/b/a 7=aspect 8=baseMip 9=levelCount
+          // 10=baseLayer 11=layerCount (VK_REMAINING_* = all-ones)
+          StImgVwCk: begin
+            automatic logic [4:0]  imips = 5'(ent_q.aux[44:40]);
+            automatic logic [9:0]  ilays = {1'b0, ent_q.aux[53:45]};
+            automatic logic [31:0] lc = op_q.imm[9] == 32'hFFFF_FFFF
+                ? 32'(imips) - op_q.imm[8] : op_q.imm[9];
+            automatic logic [31:0] ac = op_q.imm[11] == 32'hFFFF_FFFF
+                ? 32'(ilays) - op_q.imm[10] : op_q.imm[11];
+            if (op_q.imm[1] != 32'd1 && op_q.imm[1] != 32'd5 ||
+                op_q.imm[7] != 32'd1 ||
+                op_q.imm[3] > 32'd6 || op_q.imm[4] > 32'd6 ||
+                op_q.imm[5] > 32'd6 || op_q.imm[6] > 32'd6) begin
+              result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
+              state_q  <= StRep;
+            end else if (f_img_fmt(op_q.imm[2]) == APU_IMG_FMT_NONE ||
+                         f_img_fmt(op_q.imm[2]) != ent_q.aux[39:32]) begin
+              result_q <= APU_VK_ERROR_FORMAT_NOT_SUPPORTED;
+              state_q  <= StRep;
+            end else if (op_q.imm[8] >= 32'(imips) || lc == 32'h0 ||
+                         op_q.imm[8] + lc > 32'(imips) ||
+                         op_q.imm[10] >= 32'(ilays) || ac == 32'h0 ||
+                         op_q.imm[10] + ac > 32'(ilays)) begin
+              // range escapes the image's subresources: refuse
+              result_q <= APU_VK_ERROR_FORMAT_NOT_SUPPORTED;
+              state_q  <= StRep;
+            end else begin
+              vw_lvl_q <= 4'(lc);
+              vw_lay_q <= 10'(ac);
+              state_q  <= StAllocGo;
+            end
+          end
+          StImgVwAuxH: begin
+            // dim field: 0 = 2D (viewType 1), 1 = 2D-array (viewType 5)
+            auxhi_val_q <= {6'h0, op_q.imm[1] == 32'd5 ? 2'd1 : 2'd0,
+                            vw_lay_q, 10'(op_q.imm[10]), vw_lvl_q};
+            auxhi_ret_q <= StRep;
+            state_q     <= StAuxSet;
+          end
+
+          // ---- §12.3 C/5b: sampler create --------------------------------
+          // imm: 1=mag 2=min 3=mipmap 4..6=addrU/V/W 7=bias(f32)
+          // 8=anisoEn 10=cmpEn 11=cmpOp 12=minLod 13=maxLod
+          // 14=borderColor 15=unnormCoords
+          StSamCk: begin
+            if (op_q.imm[1] > 32'd1 || op_q.imm[2] > 32'd1 ||
+                op_q.imm[3] > 32'd1 || op_q.imm[8] != 32'h0 ||
+                op_q.imm[11] > 32'd7 || op_q.imm[14] > 32'd5) begin
+              result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
+              state_q  <= StRep;
+            end else if (op_q.imm[4] > 32'd3 || op_q.imm[5] > 32'd3 ||
+                         op_q.imm[6] > 32'd3 || op_q.imm[15] != 32'h0) begin
+              // MIRROR_CLAMP_TO_EDGE + unnormalized coords: refused
+              result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
+              state_q  <= StRep;
+            end else begin
+              // record +20..+27: word0 {mag[1:0],min[3:2],mm[4],
+              // addrU[7:5],addrV[10:8],addrW[13:11],border[16:14],
+              // {cmpEn,cmpOp}[20:17]}; word1 {minLod[7:0](q4.4),
+              // maxLod[15:8](q4.4),bias[24:16](sign+4.4)}
+              sam_w0_q <= {11'h0,
+                           4'({op_q.imm[10][0], op_q.imm[11][2:0]}),
+                           3'(op_q.imm[14]), 3'(op_q.imm[6]),
+                           3'(op_q.imm[5]), 3'(op_q.imm[4]),
+                           1'(op_q.imm[3]), 2'(op_q.imm[2]),
+                           2'(op_q.imm[1])};
+              sam_w1_q <= {7'h0,
+                           {op_q.imm[7][31],
+                            f_f32_q44({1'b0, op_q.imm[7][30:0]})},
+                           f_f32_q44(op_q.imm[13]),
+                           f_f32_q44(op_q.imm[12])};
+              state_q <= StAllocGo;
+            end
+          end
+          StSamAuxH: begin
+            auxhi_val_q <= sam_w1_q;
+            auxhi_ret_q <= StRep;
+            state_q     <= StAuxSet;
+          end
+
+          // ---- §12.3 C/5b: vkGetImageSubresourceLayout -------------------
+          // ent_q = image; imm: 0=aspect 1=mipLevel 2=arrayLayer.
+          // Reply VkSubresourceLayout {offset,size,rowPitch,arrayPitch,
+          // depthPitch} = 10 words of exec_w
+          StImgSubRep: begin
+            for (int i = 0; i < APU_VN_EXEC_WORDS; i++)
+              exec_w_q[32*i +: 32] <= '0;
+            if (op_q.imm[0] != 32'd1 ||
+                op_q.imm[1] >= 32'({27'h0, ent_q.aux[44:40]}) ||
+                op_q.imm[2] >= 32'({23'h0, ent_q.aux[53:45]})) begin
+              result_q <= APU_VK_SUCCESS;   // out-of-range: zero layout
+              state_q  <= StRep;
+            end else begin
+              exec_w_q[0*32 +: 32] <=
+                  op_q.imm[2] * imw_lay_q + imw_off_q;
+              exec_w_q[2*32 +: 32] <= imw_pit_q * 32'(imw_hm_q);
+              exec_w_q[4*32 +: 32] <= imw_pit_q;
+              exec_w_q[6*32 +: 32] <= imw_lay_q;
+              exec_w_q[8*32 +: 32] <= imw_pit_q * 32'(imw_hm_q);
+              result_q <= APU_VK_SUCCESS;
+              state_q  <= StRep;
+            end
           end
 
           // ---- reply --------------------------------------------------------

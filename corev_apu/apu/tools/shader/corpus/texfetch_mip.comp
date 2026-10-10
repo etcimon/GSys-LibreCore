@@ -1,0 +1,15 @@
+#version 450
+// §12.3 C/5b — OpImageFetch at a nonzero mip level (Lod operand) on a
+// 4x4 2-mip texture; also exercises OpImageQuerySizeLod/QueryLevels.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) uniform sampler2D tex;
+layout(set = 0, binding = 1) buffer Out { vec4 o[]; } ob;
+
+void main() {
+    int i = int(gl_GlobalInvocationID.x);
+    vec4 t = texelFetch(tex, ivec2(i & 1, (i >> 1) & 1), 1);
+    ivec2 sz = textureSize(tex, 1);
+    int lv = textureQueryLevels(tex);
+    ob.o[i] = t + vec4(float(sz.x) * 1e-9, float(sz.y) * 1e-9,
+                       float(lv) * 1e-9, 0.0);
+}

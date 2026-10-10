@@ -48,8 +48,28 @@ module tb_apu_mp_mem
   endfunction
 
   int unsigned lat_min, lat_max, rdy_pct;
+
+  // §12.3 5b-r2 C: optional aperture-write allow-list.  The parent TB
+  // arms it through the TP_APGUARD tape op (guard_on + ranges, aperture
+  // byte offsets); every dom=1 write outside a listed range is fatal.
+  // Peers that bypass this model (the vgtop xfer slave) read the same
+  // fields hierarchically.
+  localparam int unsigned GUARD_MAX = 16;
+  logic        guard_on;
+  int unsigned guard_n;
+  logic [63:0] guard_lo [GUARD_MAX];
+  logic [63:0] guard_hi [GUARD_MAX];
+
+  function automatic logic guard_ok(input logic [63:0] byt);
+    if (!guard_on) return 1'b1;
+    for (int gi = 0; gi < guard_n; gi++)
+      if (byt >= guard_lo[gi] && byt < guard_hi[gi]) return 1'b1;
+    return 1'b0;
+  endfunction
+
   initial begin
     lat_min = 1; lat_max = 1; rdy_pct = 100;
+    guard_on = 1'b0; guard_n = 0;
     void'($value$plusargs("mp_lat_min=%d", lat_min));
     void'($value$plusargs("mp_lat_max=%d", lat_max));
     void'($value$plusargs("mp_ready_pct=%d", rdy_pct));
@@ -109,6 +129,9 @@ module tb_apu_mp_mem
                   // first-fit keeps every session low — a genuine
                   // over-run is a tape/model bug, never wrap it
                   if (rq_q[p].dom) begin
+                    if (!guard_ok(64'(byt)))
+                      $fatal(1, "APGUARD: aperture write outside allow-list off=%0x d=%02x",
+                             byt, rq_q[p].wdata[b*8 +: 8]);
                     apm[apix(byt >> 2)][8*(byt[1:0]) +: 8] <=
                       rq_q[p].wdata[b*8 +: 8];
                   end else begin

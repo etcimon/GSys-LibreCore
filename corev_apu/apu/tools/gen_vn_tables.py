@@ -171,6 +171,15 @@ class Model:
         # can read them); APU_VN_CVAL_* names them in the package.
         self.cap_cfg = profile.get('cap', {})
         self.cval_paths = set()
+        # profile['optional_handles'][cmd]['fields']: dotted member
+        # paths (same naming as keep fields) whose handles may legally
+        # be null on the wire — e.g. VkDescriptorImageInfo.{sampler,
+        # imageView} are vk.xml noautovalidity "ignored otherwise", so
+        # real Mesa sends 0 for the member the descriptor type does not
+        # use.  Decode role OPTIONAL skips the HANDLE_ZERO fault; the
+        # front still rejects a null where the type needs one.
+        self.opt_cfg = profile.get('optional_handles', {})
+        self.opt_paths = set()
         self.cval_named = {}   # member path -> persistent imm slot
         self.saved_slot_cnt = None
         # sType values collected while building chain tables (dec+rep);
@@ -496,7 +505,7 @@ class Model:
             role = 'NEW'
         elif base.name == self.retired_kind_name(self.cur_cmd):
             role = 'RETIRE'
-        elif var.is_optional():
+        elif var.is_optional() or self.keep_cur in self.opt_paths:
             role = 'OPTIONAL'
         slot = self.q_slot(scope)
         self.emit('HANDLE', (slot << 3) | ROLES[role],
@@ -616,7 +625,7 @@ class Model:
                 slot = self.blob_slot(scope)
                 self.emit('BLOB', slot,
                           self.blob_meta_idx(eb, (dim * eb + 3) // 4),
-                          name)
+                          name, keep)
                 if not scope:
                     self.blob_map[name] = slot
                 return
@@ -831,6 +840,8 @@ class Model:
         self.keep_paths = set(self.keep_cfg.get(name, {}).get(
             'fields', []))
         self.cval_paths = set(self.cap_cfg.get(name, {}).get(
+            'fields', []))
+        self.opt_paths = set(self.opt_cfg.get(name, {}).get(
             'fields', []))
         self.keep_seen = set()
         self.keep_layout = []
@@ -1415,25 +1426,60 @@ class Model:
 
     def fmt3(self):
         """APU_VN_FMT3[256*3]: per VkFormat {linear, optimal, buffer}
-        feature masks mirrored from [formats]; unsupported = zeros."""
-        ff = self.enum_ints('VkFormatFeatureFlagBits')
+        feature masks mirrored from [formats]; unsupported = zeros.
+        §12.3 5b: each [formats] entry carries its own explicit feature
+        string `f` — the table is exactly what the engine implements."""
         fe = self.enum_ints('VkFormat')
         fmt = self.profile.get('formats', {})
-        color = self.flag_bits(
-            'SAMPLED_IMAGE|COLOR_ATTACHMENT|BLIT_SRC|BLIT_DST|'
-            'TRANSFER_SRC|TRANSFER_DST',
-            'VkFormatFeatureFlagBits', 'VK_FORMAT_FEATURE_', '_BIT')
-        depth = self.flag_bits(
-            'SAMPLED_IMAGE|DEPTH_STENCIL_ATTACHMENT|TRANSFER_SRC|'
-            'TRANSFER_DST', 'VkFormatFeatureFlagBits',
-            'VK_FORMAT_FEATURE_', '_BIT')
         tbl = [0] * 768
-        for nm, bits in ((fmt.get('color', []), color),
-                         (fmt.get('depth', []), depth)):
-            for n in nm:
-                f = fe['VK_FORMAT_' + n]
-                tbl[3 * f:3 * f + 3] = [bits, bits, bits]
+        for nm, ent in fmt.items():
+            if not isinstance(ent, dict):
+                continue
+            f = fe.get('VK_FORMAT_' + nm)
+            if f is None:
+                continue
+            bits = self.flag_bits(
+                ent.get('f', '') or 'SAMPLED_IMAGE',
+                'VkFormatFeatureFlagBits',
+                'VK_FORMAT_FEATURE_', '_BIT') \
+                if ent.get('f') else 0
+            tbl[3 * f:3 * f + 3] = [bits, bits, bits]
         return tbl
+
+    def img_fmt_tables(self):
+        """§12.3 5b device format ids.  -> (names, vk2dfmt[256],
+        bpp[16], attr[16]).  A [formats] entry earns an id only when it
+        advertises features (D32/D24 stay unwired); ids follow
+        declaration order.  attr packs g6lc_apu_sh_pkg APU_IMG_ATTR_*:
+        {comps-1[2:0], uint[3], flt[4], half[5], bgr[6], srgb[7]}."""
+        fe = self.enum_ints('VkFormat')
+        fmt = self.profile.get('formats', {})
+        names, vk2dfmt = [], [255] * 256
+        bpp, attr = [0] * 16, [0] * 16
+        for nm, ent in fmt.items():
+            if not isinstance(ent, dict) or not ent.get('f'):
+                continue
+            f = fe.get('VK_FORMAT_' + nm)
+            if f is None:
+                continue
+            did = len(names)
+            assert did < 16, 'device format table overflow'
+            names.append(nm)
+            vk2dfmt[f] = did
+            bpp[did] = int(ent.get('bpp', 4))
+            a = (int(ent.get('comps', 4)) - 1) & 7
+            if ent.get('uint'):
+                a |= 1 << 3
+            if ent.get('flt'):
+                a |= 1 << 4
+            if ent.get('half'):
+                a |= 1 << 5
+            if ent.get('bgr'):
+                a |= 1 << 6
+            if ent.get('srgb'):
+                a |= 1 << 7
+            attr[did] = a
+        return names, vk2dfmt, bpp, attr
 
     def fmt_usage(self):
         """APU_VN_FMT_USAGE[256]: per VkFormat allowed VkImageUsageFlags
@@ -1768,6 +1814,23 @@ def emit_sv(model, asm, profile):
     arr(32, 'APU_VN_FMT_USAGE', '[0:APU_VN_FMT_USAGE_WORDS-1]',
         fu, lambda w: "32'h%08X" % w)
     A('')
+    # §12.3 5b device-format tables: VkFormat -> APU_IMG_FMT_* id (255 =
+    # unsupported), bytes-per-texel and attribute byte per id
+    fnames, v2d, fbpp, fattr = model.img_fmt_tables()
+    for i, nm in enumerate(fnames):
+        A('  localparam int APU_IMG_FMT_%s = %d;' % (nm, i))
+    A('  localparam int APU_IMG_FMT_COUNT = %d;' % len(fnames))
+    A('  localparam int APU_IMG_FMT_NONE = 255;')
+    A('')
+    arr(8, 'APU_VN_IMG_FMT', '[0:255]',
+        v2d, lambda w: "8'h%02X" % w)
+    A('')
+    arr(8, 'APU_VN_IMG_BPP', '[0:15]',
+        fbpp, lambda w: "8'h%02X" % w)
+    A('')
+    arr(8, 'APU_VN_IMG_ATTR', '[0:15]',
+        fattr, lambda w: "8'h%02X" % w)
+    A('')
     # sType ids for every generated chain-table node + profile-declared
     # names — executors match rec['chain'] sTypes against these
     for n in model.profile.get('named_stypes', []):
@@ -2089,6 +2152,116 @@ def emit_md(model, asm, unfit):
     return '\n'.join(out)
 
 
+def srgb_lut():
+    """§12.3 5b: sRGB u8 -> linear u16 fixed point, round-to-nearest
+    of the sRGB EOTF at 1/65535 scale.  The inverse encode is a binary
+    search on this monotone table (nearest entry, ties upward) — the
+    same rule lands in RTL and the Python model so the two cannot
+    drift."""
+    tab = []
+    for u in range(256):
+        c = u / 255.0
+        lin = c / 12.92 if c <= 0.04045 else \
+            ((c + 0.055) / 1.055) ** 2.4
+        tab.append(min(65535, max(0, int(lin * 65535.0 + 0.5))))
+    return tab
+
+
+def emit_srgb(tab):
+    """Write g6lc_apu_srgb_pkg.sv and tools/shader/srgb_lut.py from one
+    generated table."""
+    sv = []
+    A = sv.append
+    A('// Copyright 2026 Etienne Cimon')
+    A('// SPDX-License-Identifier: CERN-OHL-S-2.0 OR '
+      'LicenseRef-GSys-Commercial')
+    A('// GENERATED by corev_apu/apu/tools/gen_vn_tables.py (srgb_lut).')
+    A('// Do not edit — mirrors tools/shader/srgb_lut.py bit-exactly.')
+    A('//')
+    A('// §12.3 5b: 8-bit sRGB -> 16-bit linear (EOTF at 1/65535 fixed')
+    A('// point).  The encode direction searches this monotone table')
+    A('// for the nearest entry (binary search, ties upward) — no')
+    A('// second table is needed on either side.')
+    A('package g6lc_apu_srgb_pkg;')
+    A('  localparam logic [15:0] APU_SRGB_TO_LIN [0:255] = \'{')
+    for i, v in enumerate(tab):
+        A("    16'h%04X%s" % (v, ',' if i < 255 else ''))
+    A('  };')
+    A('endpackage')
+    (REPO / 'corev_apu' / 'apu' / 'include' /
+     'g6lc_apu_srgb_pkg.sv').write_text('\n'.join(sv) + '\n',
+                                       encoding='utf-8')
+    py = []
+    P = py.append
+    P('#!/usr/bin/env python3')
+    P('# Copyright 2026 Etienne Cimon')
+    P('# SPDX-License-Identifier: MIT')
+    P('"""GENERATED by ../gen_vn_tables.py (srgb_lut) — do not edit.')
+    P('')
+    P('sRGB <-> linear16 tables mirroring g6lc_apu_srgb_pkg.sv')
+    P('bit-exactly: TO_LIN16[u8] is the hardware LUT; lin16_to_srgb8')
+    P('is the binary-search encode both sides implement."""')
+    P('')
+    P('TO_LIN16 = (')
+    for i in range(0, 256, 8):
+        P('    ' + ', '.join('0x%04X' % v for v in tab[i:i + 8]) + ',')
+    P(')')
+    P('')
+    P('')
+    P('def srgb8_to_lin16(u):')
+    P('    return TO_LIN16[u & 0xFF]')
+    P('')
+    P('')
+    P('def lin16_to_srgb8(x):')
+    P('    """binary search: nearest table entry, ties upward — the')
+    P('    same rule the RTL encode path implements."""')
+    P('    lo, hi = 0, 255')
+    P('    while lo < hi:')
+    P('        mid = (lo + hi + 1) >> 1')
+    P('        if TO_LIN16[mid] <= x:')
+    P('            lo = mid')
+    P('        else:')
+    P('            hi = mid - 1')
+    P('    if lo < 255 and TO_LIN16[lo + 1] - x <= x - TO_LIN16[lo]:')
+    P('        lo += 1')
+    P('    return lo')
+    (TOOLS / 'shader' / 'srgb_lut.py').write_text('\n'.join(py) + '\n',
+                                                encoding='utf-8')
+
+
+def emit_imgfmts(model):
+    """Write tools/shader/img_fmts.py — the device image-format table
+    (names, vk2dfmt, bpp, attr) mirroring APU_VN_IMG_FMT/IMG_BPP/
+    IMG_ATTR in g6lc_apu_vn_pkg.sv so spirv_model cannot drift."""
+    names, vk2d, bpp, attr = model.img_fmt_tables()
+    py = []
+    P = py.append
+    P('#!/usr/bin/env python3')
+    P('# Copyright 2026 Etienne Cimon')
+    P('# SPDX-License-Identifier: MIT')
+    P('"""GENERATED by ../gen_vn_tables.py (img_fmts) — do not edit.')
+    P('')
+    P('Device image-format ids mirroring APU_VN_IMG_FMT/IMG_BPP/')
+    P('IMG_ATTR in include/g6lc_apu_vn_pkg.sv.  ATTR packs')
+    P('{comps-1[2:0], uint[3], flt[4], half[5], bgr[6], srgb[7]}."""')
+    P('')
+    P('NAMES = (')
+    for n in names:
+        P('    %r,' % n)
+    P(')')
+    P('')
+    P('VK2D = (')
+    for i in range(0, 256, 16):
+        P('    ' + ', '.join('%d' % v for v in vk2d[i:i + 16]) + ',')
+    P(')')
+    P('')
+    P('BPP = %r' % (tuple(bpp),))
+    P('')
+    P('ATTR = %r' % (tuple(attr),))
+    (TOOLS / 'shader' / 'img_fmts.py').write_text('\n'.join(py) + '\n',
+                                                 encoding='utf-8')
+
+
 def main():
     profile_path = TOOLS / 'vn_device_profile.toml'
     profile = tomllib.loads(profile_path.read_text(encoding='utf-8'))
@@ -2096,6 +2269,8 @@ def main():
     names = model.read_command_set(TOOLS / 'vn_command_set.txt')
     unfit = model.run(names)
     asm = model.assemble()
+    emit_srgb(srgb_lut())
+    emit_imgfmts(model)
     # fix PNEXT/RPTR table operands now that offsets are known
     # (chain tbl indices were stored as list indices; recompute word offsets)
     sv = emit_sv(model, asm, profile)

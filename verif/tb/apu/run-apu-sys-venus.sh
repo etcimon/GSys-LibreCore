@@ -50,7 +50,9 @@ ue_cpos_xfer_copy_1 \
 ue_cpos_poolreset_1 ue_cpos_dslcompat_1 ue_cpos_memsplit_1 \
 ue_cneg_baddesc_1 ue_cneg_badmem_1 ue_cneg_badmod_1 \
 ue_cneg_nopipe_1 ue_cneg_layoutmix_1 ue_cneg_deadpool_1 \
-ue_cneg_unbacked_1"
+ue_cneg_unbacked_1 \
+ue_cpos_texfetch_1 ue_cpos_texlod_lin_1 ue_cpos_imgloadstore_1 \
+ue_cneg_badfmt_1 ue_cneg_xfer_img_oob_1"
 ARMS="dev_reset q_reset venusoff worksink0 legality"
 
 cfail=0

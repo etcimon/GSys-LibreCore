@@ -12,12 +12,29 @@
 //     "push": [w0,w1,...],              // <=32 words, may be absent
 //     "dyn_off": [o0,o1,...],           // pDynamicOffsets, may be absent
 //     "bindings": [ {"set":0,"binding":0,"size":N,"init":"in0.bin",
-//                    "idx":0,"dyn":0}, ...] }
+//                    "idx":0,"dyn":0,"kind":K,
+//                    ["img":1,"imgfmt":F,"imgw":W,"imgh":H,
+//                     "imgmips":M,"imglayers":L,"imgarr":A,
+//                     "swz0..3":S,"smpmag","smpmin","smpmm","smpau",
+//                     "smpav","smpaw","smpbc","smpminl","smpmaxl",
+//                     "smpbias"]}, ...] }
 // "idx" is the descriptor-array element; "dyn" selects
-// STORAGE_BUFFER_DYNAMIC for that binding's set-layout row.
+// STORAGE_BUFFER_DYNAMIC for that binding's set-layout row.  "kind"
+// is the Vulkan descriptor type (0..3 image kinds, 7/9 buffers).
+//
+// §12.3 C/5b image binds: "size"/"init" bytes are the APU *device
+// layout* (layer-major, per-mip 64B-aligned pitch).  The oracle maps
+// that exactly: each (layer,mip) becomes one vkCmdCopyBufferToImage /
+// vkCmdCopyImageToBuffer region with bufferRowLength = pitch/bpp, so
+// the staging buffer's bytes ARE the device image.  imgarr=1 selects
+// VK_IMAGE_VIEW_TYPE_2D_ARRAY.  swz* are VkComponentSwizzle codes
+// (0 = identity); smp* are VkFilter/VkSamplerMipmapMode/
+// VkSamplerAddressMode/VkBorderColor codes; smpminl/maxl/bias are
+// q4.4 fixed (float * 16).
 //
 // Writes <out.bin>: for each binding in order, the buffer's `size`
-// result bytes (raw, little-endian).
+// result bytes (raw, little-endian); image binds dump the image's
+// device layout bytes.
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -42,7 +59,15 @@ static char *slurp(const char *path, size_t *n) {
 
 #define MAXBIND 16
 #define MAXSET 4
-struct bind { unsigned set, binding, size, idx, dyn; char init[512]; };
+struct bind {
+    unsigned set, binding, size, idx, dyn, kind;
+    int img;
+    unsigned imgfmt, imgw, imgh, imgmips, imglayers, imgarr;
+    unsigned swz[4];
+    unsigned smpmag, smpmin, smpmm, smpau, smpav, smpaw, smpbc;
+    int smpminl, smpmaxl, smpbias;          /* q4.4 fixed */
+    char init[512];
+};
 static unsigned gx = 1, gy = 1, gz = 1;
 static unsigned pushw[32]; static int npush = 0;
 static unsigned dynw[32]; static int ndyn = 0;
@@ -98,11 +123,35 @@ static void parse_desc(const char *txt) {
         const char *e = strchr(o, '}');
         if (!e) break;
         struct bind *bd = &binds[nbind];
+        memset(bd, 0, sizeof(*bd));
         bd->set = jnum(o, e, "set", 0);
         bd->binding = jnum(o, e, "binding", 0);
         bd->size = jnum(o, e, "size", 0);
         bd->idx = jnum(o, e, "idx", 0);
         bd->dyn = jnum(o, e, "dyn", 0);
+        bd->kind = jnum(o, e, "kind", 7);
+        bd->img = (int)jnum(o, e, "img", 0);
+        bd->imgfmt = jnum(o, e, "imgfmt", 0);
+        bd->imgw = jnum(o, e, "imgw", 1);
+        bd->imgh = jnum(o, e, "imgh", 1);
+        bd->imgmips = jnum(o, e, "imgmips", 1);
+        bd->imglayers = jnum(o, e, "imglayers", 1);
+        bd->imgarr = jnum(o, e, "imgarr", 0);
+        for (int c = 0; c < 4; c++) {
+            char k[8];
+            snprintf(k, sizeof(k), "swz%d", c);
+            bd->swz[c] = jnum(o, e, k, 0);
+        }
+        bd->smpmag = jnum(o, e, "smpmag", 0);
+        bd->smpmin = jnum(o, e, "smpmin", 0);
+        bd->smpmm = jnum(o, e, "smpmm", 0);
+        bd->smpau = jnum(o, e, "smpau", 0);
+        bd->smpav = jnum(o, e, "smpav", 0);
+        bd->smpaw = jnum(o, e, "smpaw", 0);
+        bd->smpbc = jnum(o, e, "smpbc", 0);
+        bd->smpminl = (int)jnum(o, e, "smpminl", 0);
+        bd->smpmaxl = (int)jnum(o, e, "smpmaxl", 0);
+        bd->smpbias = (int)jnum(o, e, "smpbias", 0);
         const char *s = strstr(o, "\"init\"");
         if (s && s < e) {
             const char *c = strchr(s + 6, ':');
@@ -197,9 +246,10 @@ int main(int argc, char **argv) {
             } else {
                 lbd[nl++] = (VkDescriptorSetLayoutBinding){
                     binds[i].binding,
-                    binds[i].dyn
-                        ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
-                        : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+                    (VkDescriptorType)(
+                        binds[i].dyn
+                            ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
+                            : binds[i].kind),
                     cnt, VK_SHADER_STAGE_COMPUTE_BIT, NULL};
             }
         }
@@ -230,20 +280,25 @@ int main(int argc, char **argv) {
                                     NULL, &pipe)) != VK_SUCCESS)
         die("vkCreateComputePipelines", r);
 
-    /* pool covers every element of every row, both kinds */
-    unsigned nstor = 0, ndynb = 0;
+    /* pool covers every element of every row, per descriptor type */
+    unsigned ptyp[16]; int npt = 0;
     for (int i = 0; i < nbind; i++) {
-        if (binds[i].dyn) ndynb++;
-        else nstor++;
+        unsigned t = binds[i].dyn
+            ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
+            : binds[i].kind;
+        int k;
+        for (k = 0; k < npt; k++)
+            if ((ptyp[k] & 0xFFFF) == t) break;
+        if (k == npt && npt < 16) {
+            ptyp[npt] = t; npt++;
+        }
+        ptyp[k] += 1 << 16;
     }
-    VkDescriptorPoolSize ps[2];
-    int nps = 0;
-    if (nstor)
-        ps[nps++] = (VkDescriptorPoolSize){
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, nstor};
-    if (ndynb)
-        ps[nps++] = (VkDescriptorPoolSize){
-            VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC, ndynb};
+    VkDescriptorPoolSize ps[16];
+    int nps = npt;
+    for (int k = 0; k < npt; k++)
+        ps[k] = (VkDescriptorPoolSize){
+            (VkDescriptorType)(ptyp[k] & 0xFFFF), ptyp[k] >> 16};
     VkDescriptorPoolCreateInfo dpi = {
         VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0,
         nsets, nps, ps};
@@ -257,13 +312,142 @@ int main(int argc, char **argv) {
     if ((r = vkAllocateDescriptorSets(dev, &dai, dsets)) != VK_SUCCESS)
         die("vkAllocateDescriptorSets", r);
 
-    /* buffers + host-visible memory (one allocation per buffer) */
+    /* per-binding objects: SSBOs (dyn or not) and §12.3 C/5b image
+     * binds (VkImage + view + optional sampler + staging buffer) */
     VkBuffer buf[MAXBIND];
     VkDeviceMemory mem[MAXBIND];
+    VkImage img[MAXBIND];
+    VkImageView view[MAXBIND];
+    VkSampler smp[MAXBIND];
     void *map[MAXBIND];
     VkPhysicalDeviceMemoryProperties mp;
     vkGetPhysicalDeviceMemoryProperties(pd, &mp);
+    uint32_t host_mt = UINT32_MAX;
+    for (uint32_t t = 0; t < mp.memoryTypeCount; t++)
+        if (mp.memoryTypes[t].propertyFlags &
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
+            host_mt = t;
+            break;
+        }
+    if (host_mt == UINT32_MAX)
+        die("no host-visible memory type",
+            VK_ERROR_INITIALIZATION_FAILED);
     for (int i = 0; i < nbind; i++) {
+        buf[i] = VK_NULL_HANDLE;
+        img[i] = VK_NULL_HANDLE;
+        if (binds[i].img) {
+            /* staging buffer carries the device-layout bytes; image
+             * gets the same usage bits regardless of descriptor kind
+             * so transfers are always legal */
+            VkBufferCreateInfo bci = {
+                VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, NULL, 0,
+                binds[i].size,
+                VK_BUFFER_USAGE_TRANSFER_SRC_BIT |
+                VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+                VK_SHARING_MODE_EXCLUSIVE, 0, NULL};
+            if ((r = vkCreateBuffer(dev, &bci, NULL, &buf[i]))
+                != VK_SUCCESS)
+                die("vkCreateBuffer(staging)", r);
+            VkMemoryRequirements mr;
+            vkGetBufferMemoryRequirements(dev, buf[i], &mr);
+            VkMemoryAllocateInfo mai = {
+                VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, NULL,
+                mr.size, host_mt};
+            if ((r = vkAllocateMemory(dev, &mai, NULL, &mem[i]))
+                != VK_SUCCESS)
+                die("vkAllocateMemory(staging)", r);
+            vkBindBufferMemory(dev, buf[i], mem[i], 0);
+            vkMapMemory(dev, mem[i], 0, binds[i].size, 0, &map[i]);
+            if (binds[i].init[0]) {
+                size_t n;
+                char *init = slurp(binds[i].init, &n);
+                memcpy(map[i], init,
+                       n < binds[i].size ? n : binds[i].size);
+                free(init);
+            } else {
+                memset(map[i], 0, binds[i].size);
+            }
+            VkImageCreateInfo ici = {
+                VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, NULL, 0,
+                VK_IMAGE_TYPE_2D,
+                (VkFormat)binds[i].imgfmt,
+                {binds[i].imgw, binds[i].imgh, 1},
+                binds[i].imgmips, binds[i].imglayers,
+                VK_SAMPLE_COUNT_1_BIT, VK_IMAGE_TILING_OPTIMAL,
+                VK_IMAGE_USAGE_SAMPLED_BIT |
+                VK_IMAGE_USAGE_STORAGE_BIT |
+                VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+                VK_SHARING_MODE_EXCLUSIVE, 0, NULL,
+                VK_IMAGE_LAYOUT_UNDEFINED};
+            if ((r = vkCreateImage(dev, &ici, NULL, &img[i]))
+                != VK_SUCCESS)
+                die("vkCreateImage", r);
+            vkGetImageMemoryRequirements(dev, img[i], &mr);
+            VkDeviceMemory imem;
+            mai.allocationSize = mr.size;
+            mai.memoryTypeIndex = host_mt;
+            if ((r = vkAllocateMemory(dev, &mai, NULL, &imem))
+                != VK_SUCCESS)
+                die("vkAllocateMemory(img)", r);
+            vkBindImageMemory(dev, img[i], imem, 0);
+            VkComponentMapping cm = {
+                (VkComponentSwizzle)(binds[i].swz[0]
+                                     ? binds[i].swz[0]
+                                     : VK_COMPONENT_SWIZZLE_R),
+                (VkComponentSwizzle)(binds[i].swz[1]
+                                     ? binds[i].swz[1]
+                                     : VK_COMPONENT_SWIZZLE_G),
+                (VkComponentSwizzle)(binds[i].swz[2]
+                                     ? binds[i].swz[2]
+                                     : VK_COMPONENT_SWIZZLE_B),
+                (VkComponentSwizzle)(binds[i].swz[3]
+                                     ? binds[i].swz[3]
+                                     : VK_COMPONENT_SWIZZLE_A)};
+            VkImageViewCreateInfo vci = {
+                VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO, NULL, 0,
+                img[i],
+                binds[i].imgarr ? VK_IMAGE_VIEW_TYPE_2D_ARRAY
+                                : VK_IMAGE_VIEW_TYPE_2D,
+                (VkFormat)binds[i].imgfmt, cm,
+                {VK_IMAGE_ASPECT_COLOR_BIT, 0, binds[i].imgmips,
+                 0, binds[i].imglayers}};
+            if ((r = vkCreateImageView(dev, &vci, NULL, &view[i]))
+                != VK_SUCCESS)
+                die("vkCreateImageView", r);
+            smp[i] = VK_NULL_HANDLE;
+            if (binds[i].kind <= 1) {
+                VkSamplerCreateInfo sci = {
+                    VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO, NULL, 0,
+                    (VkFilter)binds[i].smpmag,
+                    (VkFilter)binds[i].smpmin,
+                    (VkSamplerMipmapMode)binds[i].smpmm,
+                    (VkSamplerAddressMode)binds[i].smpau,
+                    (VkSamplerAddressMode)binds[i].smpav,
+                    (VkSamplerAddressMode)binds[i].smpaw,
+                    binds[i].smpbias / 16.0f,
+                    VK_FALSE, 1.0f,
+                    VK_FALSE, VK_COMPARE_OP_ALWAYS,
+                    binds[i].smpminl / 16.0f,
+                    binds[i].smpmaxl / 16.0f,
+                    (VkBorderColor)binds[i].smpbc,
+                    VK_FALSE};
+                if ((r = vkCreateSampler(dev, &sci, NULL, &smp[i]))
+                    != VK_SUCCESS)
+                    die("vkCreateSampler", r);
+            }
+            unsigned dsidx = 0;
+            for (int s = 0; s < nsets; s++)
+                if (sets[s] == binds[i].set) dsidx = s;
+            VkDescriptorImageInfo dii = {
+                smp[i], view[i], VK_IMAGE_LAYOUT_GENERAL};
+            VkWriteDescriptorSet wds = {
+                VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL,
+                dsets[dsidx], binds[i].binding, binds[i].idx, 1,
+                (VkDescriptorType)binds[i].kind, &dii, NULL, NULL};
+            vkUpdateDescriptorSets(dev, 1, &wds, 0, NULL);
+            continue;
+        }
         VkBufferCreateInfo bci = {VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO,
                                   NULL, 0, binds[i].size,
                                   VK_BUFFER_USAGE_STORAGE_BUFFER_BIT,
@@ -272,20 +456,8 @@ int main(int argc, char **argv) {
             die("vkCreateBuffer", r);
         VkMemoryRequirements mr;
         vkGetBufferMemoryRequirements(dev, buf[i], &mr);
-        uint32_t mt = UINT32_MAX;
-        for (uint32_t t = 0; t < mp.memoryTypeCount; t++)
-            if ((mr.memoryTypeBits & (1u << t)) &&
-                (mp.memoryTypes[t].propertyFlags &
-                 VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ==
-                    VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) {
-                mt = t;
-                break;
-            }
-        if (mt == UINT32_MAX)
-            die("no host-visible memory type",
-                VK_ERROR_INITIALIZATION_FAILED);
         VkMemoryAllocateInfo mai = {VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO,
-                                    NULL, mr.size, mt};
+                                    NULL, mr.size, host_mt};
         if ((r = vkAllocateMemory(dev, &mai, NULL, &mem[i]))
             != VK_SUCCESS)
             die("vkAllocateMemory", r);
@@ -308,11 +480,40 @@ int main(int argc, char **argv) {
         VkWriteDescriptorSet wds = {
             VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, dsets[dsidx],
             binds[i].binding, binds[i].idx, 1,
-            binds[i].dyn
-                ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
-                : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER,
+            (VkDescriptorType)(
+                binds[i].dyn
+                    ? VK_DESCRIPTOR_TYPE_STORAGE_BUFFER_DYNAMIC
+                    : binds[i].kind),
             NULL, &dbi, NULL};
         vkUpdateDescriptorSets(dev, 1, &wds, 0, NULL);
+    }
+
+    /* device-layout helpers: the staging buffer's per-(layer,mip)
+     * offsets are exactly the APU device layout (64B-aligned pitch) */
+    uint32_t img_bpp[MAXBIND], img_pit[MAXBIND][16],
+        img_off[MAXBIND][16], img_w[MAXBIND][16], img_h[MAXBIND][16],
+        img_layb[MAXBIND];
+    for (int i = 0; i < nbind; i++) {
+        if (!binds[i].img) continue;
+        /* bpp by VkFormat family */
+        unsigned f = binds[i].imgfmt;
+        unsigned bpp =
+            (f == 9) ? 1 : (f == 16) ? 2 :
+            (f >= 37 && f <= 50) ? 4 :
+            (f == 97) ? 8 :
+            (f == 100 || f == 98) ? 4 :
+            (f == 103) ? 8 : 16;
+        img_bpp[i] = bpp;
+        unsigned wm = binds[i].imgw, hm = binds[i].imgh, acc = 0;
+        for (unsigned m = 0; m < binds[i].imgmips && m < 16; m++) {
+            unsigned wd = wm ? wm : 1, hd = hm ? hm : 1;
+            img_off[i][m] = acc;
+            img_pit[i][m] = (wd * bpp + 63) & ~63u;
+            img_w[i][m] = wd; img_h[i][m] = hd;
+            acc += img_pit[i][m] * hd;
+            wm >>= 1; hm >>= 1;
+        }
+        img_layb[i] = acc;
     }
 
     VkCommandPoolCreateInfo cpci = {
@@ -329,6 +530,44 @@ int main(int argc, char **argv) {
         VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL,
         VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
     vkBeginCommandBuffer(cb, &bbi);
+    /* §12.3 C/5b: stage the device-layout bytes into each image
+     * (UNDEFINED -> TRANSFER_DST -> per-(layer,mip) B2I -> GENERAL) */
+    for (int i = 0; i < nbind; i++) {
+        if (!binds[i].img) continue;
+        VkImageMemoryBarrier imb = {
+            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+            0, VK_ACCESS_TRANSFER_WRITE_BIT,
+            VK_IMAGE_LAYOUT_UNDEFINED,
+            VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, img[i],
+            {VK_IMAGE_ASPECT_COLOR_BIT, 0, binds[i].imgmips,
+             0, binds[i].imglayers}};
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                             NULL, 0, NULL, 1, &imb);
+        VkBufferImageCopy reg[16 * 16];
+        int nr = 0;
+        for (unsigned l = 0; l < binds[i].imglayers; l++)
+            for (unsigned m = 0; m < binds[i].imgmips && m < 16;
+                 m++) {
+                reg[nr++] = (VkBufferImageCopy){
+                    l * img_layb[i] + img_off[i][m],
+                    img_pit[i][m] / img_bpp[i], 0,
+                    {VK_IMAGE_ASPECT_COLOR_BIT, m, l, 1},
+                    {0, 0, 0}, {img_w[i][m], img_h[i][m], 1}};
+            }
+        vkCmdCopyBufferToImage(cb, buf[i], img[i],
+                               VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                               nr, reg);
+        imb.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
+        imb.dstAccessMask = VK_ACCESS_SHADER_READ_BIT |
+                            VK_ACCESS_SHADER_WRITE_BIT;
+        imb.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
+        imb.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+        vkCmdPipelineBarrier(cb, VK_PIPELINE_STAGE_TRANSFER_BIT,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, 0,
+                             0, NULL, 0, NULL, 1, &imb);
+    }
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, pl, 0,
                             nsets, dsets, ndyn, dynw);
@@ -336,6 +575,38 @@ int main(int argc, char **argv) {
         vkCmdPushConstants(cb, pl, VK_SHADER_STAGE_COMPUTE_BIT, 0,
                            npush * 4, pushw);
     vkCmdDispatch(cb, gx, gy, gz);
+    /* read back every image into its staging buffer (the .out.bin
+     * dump below then carries the device-layout bytes) */
+    for (int i = 0; i < nbind; i++) {
+        if (!binds[i].img) continue;
+        VkImageMemoryBarrier imb = {
+            VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER, NULL,
+            VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+            VK_ACCESS_TRANSFER_READ_BIT,
+            VK_IMAGE_LAYOUT_GENERAL,
+            VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+            VK_QUEUE_FAMILY_IGNORED, VK_QUEUE_FAMILY_IGNORED, img[i],
+            {VK_IMAGE_ASPECT_COLOR_BIT, 0, binds[i].imgmips,
+             0, binds[i].imglayers}};
+        vkCmdPipelineBarrier(cb,
+                             VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0,
+                             NULL, 0, NULL, 1, &imb);
+        VkBufferImageCopy reg[16 * 16];
+        int nr = 0;
+        for (unsigned l = 0; l < binds[i].imglayers; l++)
+            for (unsigned m = 0; m < binds[i].imgmips && m < 16;
+                 m++) {
+                reg[nr++] = (VkBufferImageCopy){
+                    l * img_layb[i] + img_off[i][m],
+                    img_pit[i][m] / img_bpp[i], 0,
+                    {VK_IMAGE_ASPECT_COLOR_BIT, m, l, 1},
+                    {0, 0, 0}, {img_w[i][m], img_h[i][m], 1}};
+            }
+        vkCmdCopyImageToBuffer(cb, img[i],
+                               VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL,
+                               buf[i], nr, reg);
+    }
     vkEndCommandBuffer(cb);
     VkSubmitInfo si = {VK_STRUCTURE_TYPE_SUBMIT_INFO, NULL, 0, NULL,
                        NULL, 1, &cb, 0, NULL};
@@ -347,9 +618,14 @@ int main(int argc, char **argv) {
     FILE *out = fopen(argv[3], "wb");
     if (!out) { perror(argv[3]); return 2; }
     for (int i = 0; i < nbind; i++) {
-        vkMapMemory(dev, mem[i], 0, binds[i].size, 0, &map[i]);
-        fwrite(map[i], 1, binds[i].size, out);
-        vkUnmapMemory(dev, mem[i]);
+        if (binds[i].img) {
+            fwrite(map[i], 1, binds[i].size, out);
+            vkUnmapMemory(dev, mem[i]);
+        } else {
+            vkMapMemory(dev, mem[i], 0, binds[i].size, 0, &map[i]);
+            fwrite(map[i], 1, binds[i].size, out);
+            vkUnmapMemory(dev, mem[i]);
+        }
     }
     fclose(out);
     vkDeviceWaitIdle(dev);
