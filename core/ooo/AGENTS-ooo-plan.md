@@ -4284,3 +4284,17 @@ lint 289 w / 0 e. The 48 M boot launched on the committed T21
 (`ooocoh-t21f-server-osbi-48M`) is kept as the control for defect (1)
 (`refused`/`restore_dropped` expected in its `[ckpt] final`); the verdict
 boot is relaunched on this tree.
+
+**T21c — server SMT knobs aligned with the qualified profiles (2026-10-10).**
+The P1 anatomy's second sink was not the quantum but the anti-starvation
+leg: at `SmtStarveLimit 16` a ready peer takes the core within 16 cycles,
+so the cold boot alternated 8-instruction spinner blocks with 5–8
+instruction boot-hart blocks (52.6 K drained handoffs in 1.3 M cycles,
+44 % of the cycles in the drain). The 1.3 M A/B with `SmtFetchQuantum
+128` alone (`t21/T21-FOLLOWUP-REPORT.md` §1) reached `fdt_next_node` at
+372,441 vs 612,061 cycles (−39 %), retired 83 % more boot-hart
+instructions, −22 % switches, every `[ckpt] final` clean, the server
+directed smoke matched (`fpsmt8` 6,310 → 4,774). `g6lc64_ooo_server` now
+carries 128 / 64 like int2_l3, smt2 and smt2_ooo_int. Qualification: the
+canonical 48 M strict boot on the T21b RTL + this package
+(`ooocoh-t21c-server-osbi-48M`), T20 reference 38,988,173.

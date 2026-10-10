@@ -224,8 +224,16 @@ package cva6_config_pkg;
       // 2 SMT threads per core
       NrHarts: unsigned'(2),
       SmtPolicy: config_pkg::SMT_HYBRID,
-      SmtFetchQuantum: unsigned'(4),
-      SmtStarveLimit: unsigned'(16),
+      // T21 (2026-10-10): aligned with every qualified SMT profile (int2_l3,
+      // smt2, smt2_ooo_int: 128 / 64). At 4 / 16 the anti-starvation leg
+      // handed the core to the spinning sibling every 16 cycles during the
+      // cold boot: 52.6 K drained handoffs in the first 1.3 M cycles, 44 % of
+      // the cycles in the drain, the boot hart's share 11 %. The 1.3 M A/B
+      // with quantum 128 alone (`t21/T21-FOLLOWUP-REPORT.md`) reached
+      // fdt_next_node 39 % earlier and retired 83 % more boot-hart
+      // instructions; the starve limit is the binding trigger at 16.
+      SmtFetchQuantum: unsigned'(128),
+      SmtStarveLimit: unsigned'(64),
       // 4-core coherent cluster
       NrCores: unsigned'(4),
       CohPolicy: config_pkg::COH_FILTERED,
