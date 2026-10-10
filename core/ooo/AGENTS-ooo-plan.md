@@ -4298,3 +4298,23 @@ directed smoke matched (`fpsmt8` 6,310 → 4,774). `g6lc64_ooo_server` now
 carries 128 / 64 like int2_l3, smt2 and smt2_ooo_int. Qualification: the
 canonical 48 M strict boot on the T21b RTL + this package
 (`ooocoh-t21c-server-osbi-48M`), T20 reference 38,988,173.
+
+**T21 read-out from the stopped verdict boots (2026-10-10,
+`t21/T21-FOLLOWUP-REPORT.md` §2).** The T21-RTL boot (`ooocoh-t21f-server-
+osbi-48M`, stopped at 7.74 M when the T21b/T21c models superseded it) is
+healthy to the stop (force 0, traps 0, witnesses 0, `[ckpt] final`
+mismatch/dead/dropped/refused 0 on all cores) and settles the P2 question
+for the sites of the T20 anatomy: **`fdt_next_tag`'s `ret` is predicted on
+every execution (gap 19.85 → 0.00)**, the P2 fragment's IPC is 0.929 (T20
+0.901), P1 is 106 K cycles shorter; **the always-taken `bltu 0x80012a94`
+is still mispredicted on 1,502 / 1,503 executions with the 23–24-cycle
+retire gap, and the taken `beqz +0x7a` at 25.6** — the direction fabric,
+not the recovery, owns those two. Projected whole boot on the T21 RTL
+alone ≈ 37.9 M (−2.8 %). The starve-64 A/B on the pre-T21b RTL showed
+17 `ret` mispredicts in 1.3 M cycles, eight of them the same return 65
+cycles after a switch-in — the shape the T21b clear-time restore from the
+oldest live entry targets; the T21c verdict boot's census decides it.
+Next experiments on the T21c model: a P2 `+fe_trace` window
+(`ooocoh-t21c-server-p2win`, BPCHAIN per slot: which of TAGE / loop /
+corrector flips the `bltu`, and the anatomy of the 23–24-cycle gap), then
+`BPStatCorEn` tagged-or-off.
