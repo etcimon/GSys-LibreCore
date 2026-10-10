@@ -31,8 +31,9 @@
 // Capacity: span = alloc - head (entries ever allocated and not yet reclaimed
 // at the head, holes included). A window whose CFs do not fit is not
 // checkpointed (alloc_v_o low; the instructions carry ckpt_v = 0). The head
-// advances one freed entry per cycle; a mispredict reclaims everything from
-// its own entry on (younger = allocated after it = wrong path).
+// follows the oldest live entry (holes left by out-of-order frees are
+// reclaimed at once); a mispredict reclaims everything from its own entry on
+// (younger = allocated after it = wrong path).
 
 module g6lc_bp_ckpt
   import ariane_pkg::*;
