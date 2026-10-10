@@ -2314,3 +2314,16 @@ model wedges (exit 126, replay-table head on `dir_unavailable`), the fixed one p
 granted misses, must pass). The canonical server strict boot runs through
 `run_opensbi_source_review.py` (experimental target, 8 harts, 4 cores, tohost from the payload
 ELF): PASS 38,988,173 cycles on the T20 tree.
+
+## T21 witnesses (2026-10-10)
+
+`verif/tb/core/tb_g6lc_rtl_review.sv` `tb_g6lc_review_ckpt` (REVIEW_RTL_CKPT, 7 scenarios, 6
+negatives: `CKPT_OOO_ORDER` own-entry identity under out-of-order resolution, `CKPT_YOUNGER_DEAD`,
+`CKPT_REUSE`, `CKPT_STALE_TAG`, `CKPT_CLEAR_RESTORE`, `CKPT_MISP_ALLOC`) and `tb_g6lc_review_ras`
+(REVIEW_RTL_RAS, 6 scenarios, 5 negatives: shift-stack equivalence incl. `RAS_EMPTY_RA`, replace-top,
+checkpoint restore after a wrong-path pop+push, own-effect re-pop / re-push, flush + full-stack
+checkpoint). Integration witness `[ckpt] final core=N … pop_mismatch= restore_mismatch=
+restore_dropped= pop_dead= refused= | resolves br/ret/jmp mispredicts br/ret/jmp` (cva6.sv
+`gen_ckpt_trace`, `+ckpt_trace` for per-event lines): old design 26.6 % / 55.9 % mismatch on the
+server boot core, T21 0 everywhere. Drained anchors byte-identical (int2_l3 18,357,056, smt2_ooo_int
+10,472,823, smt2 12,391,556); `g6lc64_ooo` FP suite + probes Spike-exact (s11 −1.2 %).

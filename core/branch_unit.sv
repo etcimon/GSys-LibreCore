@@ -76,9 +76,14 @@ module branch_unit #(
     resolved_branch_o.ckpt_restore = 1'b0;
     // R3a: carry branch SB tid for younger-cancel (not FLU_WB mux tid)
     resolved_branch_o.trans_id = fu_data_i.trans_id;
+    // T21: the CF's own BP checkpoint identity and RAS effect, for the frontend
+    resolved_branch_o.ckpt_v   = branch_predict_i.ckpt_v;
+    resolved_branch_o.ckpt_idx = branch_predict_i.ckpt_idx;
+    resolved_branch_o.is_call  = branch_predict_i.is_call;
     // calculate next PC, depending on whether the instruction is compressed or not this may be different
     // TODO(zarubaf): We already calculate this a couple of times, maybe re-use?
     next_pc                          = instr_pc + ((is_compressed_instr_i) ? {{CVA6Cfg.VLEN-2{1'b0}}, 2'h2} : {{CVA6Cfg.VLEN-3{1'b0}}, 3'h4});
+    resolved_branch_o.next_pc  = next_pc;
     // calculate target address simple 64 bit addition
     target_address = $unsigned($signed(jump_base) + $signed(fu_data_i.imm[CVA6Cfg.VLEN-1:0]));
     // on a JALR we are supposed to reset the LSB to 0 (according to the specification)

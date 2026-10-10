@@ -64,6 +64,12 @@ module instr_queue
     input logic [CVA6Cfg.VLEN-1:0] predict_address_i,
     // Instruction predict address - FRONTEND
     input ariane_pkg::cf_t [CVA6Cfg.INSTR_PER_FETCH-1:0] cf_type_i,
+    // T21: BP checkpoint identity of each CF slot (allocated this cycle) and
+    // the call flag; delivered in fetch_entry_o.branch_predict so the resolve
+    // path can address its own checkpoint and re-apply its RAS effect
+    input logic [CVA6Cfg.INSTR_PER_FETCH-1:0] ckpt_v_i,
+    input logic [CVA6Cfg.INSTR_PER_FETCH-1:0][7:0] ckpt_idx_i,
+    input logic [CVA6Cfg.INSTR_PER_FETCH-1:0] is_call_i,
     // Replay instruction because one of the FIFO was full - FRONTEND
     output logic replay_o,
     // Address at which to replay the fetch - FRONTEND
@@ -100,6 +106,9 @@ module instr_queue
     logic [31:0]                     instr;      // instruction word
     logic [CVA6Cfg.VLEN-1:0]         pc;         // instr PC from realign (not reconstructed)
     ariane_pkg::cf_t                 cf;         // branch was taken
+    logic                            ckpt_v;     // T21: BP checkpoint allocated for this CF
+    logic [7:0]                      ckpt_idx;   // T21: its index
+    logic                            is_call;    // T21: decoded call (RAS push at fetch)
     ariane_pkg::frontend_exception_t ex;         // exception happened
     logic [CVA6Cfg.VLEN-1:0]         ex_vaddr;   // lower VLEN bits of tval for exception
     logic [CVA6Cfg.GPLEN-1:0]        ex_gpaddr;  // lower GPLEN bits of tval2 for exception
@@ -262,6 +271,9 @@ module instr_queue
       instr_data_in[f].instr = instr_i[s];
       instr_data_in[f].pc = addr_i[s];
       instr_data_in[f].cf = cf_type_i[s];
+      instr_data_in[f].ckpt_v = ckpt_v_i[s];
+      instr_data_in[f].ckpt_idx = ckpt_idx_i[s];
+      instr_data_in[f].is_call = is_call_i[s];
       // an exception holds for the whole fetch packet
       instr_data_in[f].ex = exception_i;
       instr_data_in[f].ex_vaddr = exception_addr_i;
@@ -361,6 +373,9 @@ module instr_queue
             fetch_entry_o[p].ex.gva   = instr_data_out[f].ex_gva;
           end
           fetch_entry_o[p].branch_predict.cf = instr_data_out[f].cf;
+          fetch_entry_o[p].branch_predict.ckpt_v = instr_data_out[f].ckpt_v;
+          fetch_entry_o[p].branch_predict.ckpt_idx = instr_data_out[f].ckpt_idx;
+          fetch_entry_o[p].branch_predict.is_call = instr_data_out[f].is_call;
           fetch_entry_o[p].hart_id = instr_data_out[f].hart;
         end
       end

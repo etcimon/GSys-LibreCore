@@ -38,6 +38,13 @@ module cva6
     localparam type branchpredict_sbe_t = struct packed {
       cf_t                     cf;               // type of control flow prediction
       logic [CVA6Cfg.VLEN-1:0] predict_address;  // target address at which to jump, or not
+      // T21: identity of the BP checkpoint allocated for this control flow at
+      // fetch (0 when none: no TAGE fabric, buffer full, not a CF) and the
+      // decoded call flag, so the resolve path frees/restores its own
+      // checkpoint and re-applies its own RAS effect.
+      logic                    ckpt_v;
+      logic [7:0]              ckpt_idx;
+      logic                    is_call;
     },
 
     parameter type exception_t = struct packed {
@@ -165,6 +172,12 @@ module cva6
       // R3a: resolving branch's SB trans_id (cancel younger must not use FLU_WB
       // when mult/ALU shares the FLU port the same cycle as branch resolve).
       logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id;
+      // T21: the resolving CF's BP checkpoint identity (from branch_predict),
+      // its call flag and its link address (pc + 2/4) for the RAS re-push.
+      logic                    ckpt_v;
+      logic [7:0]              ckpt_idx;
+      logic                    is_call;
+      logic [CVA6Cfg.VLEN-1:0] next_pc;
     },
 
     // All information needed to determine whether we need to associate an interrupt
@@ -5023,10 +5036,11 @@ module cva6
                    i_frontend.kill_s1, i_frontend.kill_s2, i_frontend.bp_fire, smt_active_hart);
           for (int unsigned s = 0; s < CVA6Cfg.INSTR_PER_FETCH; s++)
             if (i_frontend.instruction_valid_raw[s])
-              $display("[win] c=%0d h=%0d PUSH  slot%0d pc=%h insn=%h v=%0d cons=%0d cf=%0d",
+              $display("[win] c=%0d h=%0d PUSH  slot%0d pc=%h insn=%h v=%0d cons=%0d cf=%0d bht v=%0d t=%0d",
                        win_cycle, win_ghart, s, i_frontend.addr[s], i_frontend.instr[s],
                        i_frontend.instruction_valid[s], i_frontend.instr_queue_consumed[s],
-                       int'(i_frontend.cf_type[s]));
+                       int'(i_frontend.cf_type[s]), i_frontend.bht_prediction_shifted[s].valid,
+                       i_frontend.bht_prediction_shifted[s].taken);
         end
         // ---- FTQ push / pop / flush
         if (i_frontend.ftq_push || i_frontend.ftq_pop ||
@@ -5120,6 +5134,140 @@ module cva6
                    i_smt_pc_bank.gen_banked.npc_bank_q[0], i_smt_pc_bank.gen_banked.npc_bank_q[1]);
         end
       end
+    end
+    // ---- T21: direction-override chain per fetch window (TAGE fabric only):
+    //      which stage of TAGE -> loop -> statistical corrector produced the
+    //      direction each conditional-branch slot saw. Rows are indexed by the
+    //      slot's own address bits, as gen_prediction_shifted does.
+    if (CVA6Cfg.FtqDepth != 0 && CVA6Cfg.BPType == config_pkg::TAGE_LITE) begin : gen_win_bp_chain
+      localparam int unsigned BPC_W = (CVA6Cfg.INSTR_PER_FETCH > 1) ? $clog2(CVA6Cfg.INSTR_PER_FETCH) : 1;
+      int unsigned bpc_row;
+      always @(posedge clk_i) begin
+        if (win_on && i_frontend.icache_take) begin
+          for (int unsigned s = 0; s < CVA6Cfg.INSTR_PER_FETCH; s++) begin
+            if (i_frontend.instruction_valid_raw[s] && i_frontend.is_branch[s]) begin
+              bpc_row = int'(i_frontend.addr[s][BPC_W:1]) % CVA6Cfg.INSTR_PER_FETCH;
+              $display("[win] c=%0d h=%0d BPCHAIN slot%0d pc=%h vpc=%h row=%0d tage v=%0d t=%0d | loop v=%0d t=%0d | sc v=%0d t=%0d | used v=%0d t=%0d cf=%0d",
+                       win_cycle, win_ghart, s, i_frontend.addr[s], i_frontend.vpc_bht, bpc_row,
+                       i_frontend.gen_tage_lite.i_bp_top.tage_pred[bpc_row].valid,
+                       i_frontend.gen_tage_lite.i_bp_top.tage_pred[bpc_row].taken,
+                       i_frontend.gen_tage_lite.i_bp_top.loop_pred[bpc_row].valid,
+                       i_frontend.gen_tage_lite.i_bp_top.loop_pred[bpc_row].taken,
+                       i_frontend.gen_tage_lite.i_bp_top.sc_pred[bpc_row].valid,
+                       i_frontend.gen_tage_lite.i_bp_top.sc_pred[bpc_row].taken,
+                       i_frontend.bht_prediction_shifted[s].valid,
+                       i_frontend.bht_prediction_shifted[s].taken, int'(i_frontend.cf_type[s]));
+            end
+          end
+        end
+      end
+    end
+    // ---- T21: BP checkpoint association (TAGE fabric with BPCkptDepth != 0).
+    //      Checkpoints are allocated per consumed CF slot at predict time and
+    //      addressed by the index the instruction carries back at resolve. A
+    //      shadow of the slot pc behind every allocated entry checks that each
+    //      resolve/restore reads its own snapshot (`mismatch` must stay 0 --
+    //      the order-paired FIFO this replaced mismatched on every OoO
+    //      resolution), and counts the fallbacks: a resolve whose entry is
+    //      gone (`dead`: cleared by a switch/replay flush or reclaimed by an
+    //      older mispredict), a restore without a live entry, and windows
+    //      that were not checkpointed because the bank was full (`refused`).
+    //      `+ckpt_trace` prints the events inside the `+fe_lo/+fe_hi` window;
+    //      `[ckpt] final` always prints the totals per core.
+    if (CVA6Cfg.BPType == config_pkg::TAGE_LITE && CVA6Cfg.BPCkptDepth != 0 &&
+        CVA6Cfg.RASDepth != 0) begin : gen_ckpt_trace
+      localparam int unsigned CK_NH = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
+      localparam int unsigned CK_D  = CVA6Cfg.BPCkptDepth;
+      bit ckpt_trace;
+      initial ckpt_trace = $test$plusargs("ckpt_trace");
+      logic [63:0] ck_shadow_pc [CK_NH][CK_D];
+      int unsigned ck_allocs, ck_pops, ck_pop_mismatch, ck_pop_dead, ck_restores,
+                   ck_restore_mismatch, ck_restore_dropped, ck_refused, ck_clears;
+      // mispredict census by resolved cf class (Branch / Return / JumpR+Jump)
+      int unsigned ck_misp_br, ck_misp_ret, ck_misp_jmp, ck_res_br, ck_res_ret, ck_res_jmp;
+      int unsigned ck_psel, ck_csel, ck_idx;
+      initial begin
+        ck_allocs = 0; ck_pops = 0; ck_pop_mismatch = 0; ck_pop_dead = 0; ck_restores = 0;
+        ck_restore_mismatch = 0; ck_restore_dropped = 0; ck_refused = 0; ck_clears = 0;
+        ck_misp_br = 0; ck_misp_ret = 0; ck_misp_jmp = 0; ck_res_br = 0; ck_res_ret = 0; ck_res_jmp = 0;
+      end
+      always @(posedge clk_i) begin
+        if (rst_ni) begin
+          if (resolved_branch.valid) begin
+            case (resolved_branch.cf_type)
+              ariane_pkg::Branch: begin ck_res_br++;  if (resolved_branch.is_mispredict) ck_misp_br++;  end
+              ariane_pkg::Return: begin ck_res_ret++; if (resolved_branch.is_mispredict) ck_misp_ret++; end
+              default:            begin ck_res_jmp++; if (resolved_branch.is_mispredict) ck_misp_jmp++; end
+            endcase
+          end
+          ck_psel = int'(i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.psel);
+          ck_csel = int'(i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.csel);
+          ck_idx  = int'(i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.pop_slot);
+          if (i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.clear_i ||
+              i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.flush_i) ck_clears++;
+          // resolve side
+          if (i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.restore_i) begin
+            ck_restores++;
+            if (!i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.restore_valid_o) begin
+              ck_restore_dropped++;
+              if (ckpt_trace && win_cycle >= win_lo && win_cycle <= win_hi)
+                $display("[ckpt] c=%0d core=%0d RESTORE-DROPPED pc=%h ckpt_v=%0d idx=%0d span=%0d",
+                         win_cycle, int'(hart_id_i[7:0]) / int'(CK_NH), resolved_branch.pc,
+                         resolved_branch.ckpt_v, ck_idx,
+                         int'(i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.span[ck_csel]));
+            end else if (ck_shadow_pc[ck_csel][ck_idx] != 64'(resolved_branch.pc)) begin
+              ck_restore_mismatch++;
+              if (ckpt_trace && win_cycle >= win_lo && win_cycle <= win_hi)
+                $display("[ckpt] c=%0d core=%0d RESTORE-MISMATCH pc=%h entry_pc=%h idx=%0d cf=%0d",
+                         win_cycle, int'(hart_id_i[7:0]) / int'(CK_NH), resolved_branch.pc,
+                         ck_shadow_pc[ck_csel][ck_idx], ck_idx, int'(resolved_branch.cf_type));
+            end else if (ckpt_trace && win_cycle >= win_lo && win_cycle <= win_hi) begin
+              $display("[ckpt] c=%0d core=%0d RESTORE pc=%h idx=%0d cf=%0d call=%0d ras tos=%0d cnt=%0d top=%h",
+                       win_cycle, int'(hart_id_i[7:0]) / int'(CK_NH), resolved_branch.pc, ck_idx,
+                       int'(resolved_branch.cf_type), resolved_branch.is_call,
+                       int'(i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.entry_ras_tos_o),
+                       int'(i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.entry_ras_cnt_o),
+                       i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.entry_ras_top_o);
+            end
+          end else if (i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.pop_i &&
+                       i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.pop_v_i) begin
+            ck_pops++;
+            if (!i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.pop_live) ck_pop_dead++;
+            else if (ck_shadow_pc[ck_csel][ck_idx] != 64'(resolved_branch.pc)) begin
+              ck_pop_mismatch++;
+              if (ckpt_trace && win_cycle >= win_lo && win_cycle <= win_hi)
+                $display("[ckpt] c=%0d core=%0d POP-MISMATCH pc=%h entry_pc=%h idx=%0d cf=%0d",
+                         win_cycle, int'(hart_id_i[7:0]) / int'(CK_NH), resolved_branch.pc,
+                         ck_shadow_pc[ck_csel][ck_idx], ck_idx, int'(resolved_branch.cf_type));
+            end
+          end
+          // allocation side
+          if (i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.alloc_en) begin
+            for (int unsigned s = 0; s < CVA6Cfg.INSTR_PER_FETCH; s++) begin
+              if (i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.push_i[s]) begin
+                ck_shadow_pc[ck_psel][int'(i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.alloc_idx_o[s]) % CK_D] =
+                    64'(i_frontend.addr[s]);
+                ck_allocs++;
+              end
+            end
+          end else if (i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.push_cnt != '0 &&
+                       !i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.restore_i &&
+                       !i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.flush_i &&
+                       !i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.clear_i) begin
+            ck_refused++;
+            if (ckpt_trace && win_cycle >= win_lo && win_cycle <= win_hi)
+              $display("[ckpt] c=%0d core=%0d ALLOC-REFUSED span=%0d want=%0d", win_cycle,
+                       int'(hart_id_i[7:0]) / int'(CK_NH),
+                       int'(i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.span[ck_psel]),
+                       int'(i_frontend.gen_tage_lite.i_bp_top.gen_ckpt.i_ckpt.push_cnt));
+          end
+        end
+      end
+      final
+        $display("[ckpt] final core=%0d allocs=%0d pops=%0d pop_mismatch=%0d pop_dead=%0d restores=%0d restore_mismatch=%0d restore_dropped=%0d refused=%0d clears=%0d | resolves br=%0d ret=%0d jmp=%0d mispredicts br=%0d ret=%0d jmp=%0d",
+                 int'(hart_id_i[7:0]) / int'(CK_NH), ck_allocs, ck_pops, ck_pop_mismatch, ck_pop_dead,
+                 ck_restores, ck_restore_mismatch, ck_restore_dropped, ck_refused, ck_clears,
+                 ck_res_br, ck_res_ret, ck_res_jmp, ck_misp_br, ck_misp_ret, ck_misp_jmp);
     end
   end
 `endif

@@ -133,6 +133,8 @@ def main():
                       'trigger_module.sv','rvfi_types.svh']
     if os.environ.get('REVIEW_RTL_PERF')=='1':
         names[-1:-1]=['perf_counters.sv']
+    if os.environ.get('REVIEW_RTL_RAS')=='1':
+        names[-1:-1]=['ras.sv']
     if os.environ.get('REVIEW_RTL_TLB')=='1':
         names[-1:-1]=['cva6_tlb.sv','cf_math_pkg.sv','lzc.sv','rvfi_types.svh']
     if os.environ.get('REVIEW_RTL_STLB')=='1':
@@ -373,10 +375,16 @@ def main():
             configurations=[('tage','s2-c1',[],[(n,None) for n in range(4)]),
                             ('ghist','h2',[],[(0,None),(1,None)])]
     elif os.environ.get('REVIEW_RTL_CKPT')=='1':
-        # Prediction-time checkpoint FIFO: conservation, full push+pop single
-        # head advance, restore drains younger wrong-path entries, overflow
-        # desync gating, cross-window ordering.
+        # T21 indexed prediction-time checkpoint buffer: own-entry identity
+        # under out-of-order resolution, two-slot allocation, restore reclaims
+        # younger, capacity/refusal/reuse, stale-epoch tag, clear_i, same-bank
+        # mispredict-cycle allocation refusal + flush.
         configurations=[('ckpt','d4',[],[(n,None) for n in range(7)])]
+    elif os.environ.get('REVIEW_RTL_RAS')=='1':
+        # T21 pointer RAS: shift-stack equivalence, replace-top, checkpoint
+        # restore after a wrong-path pop+push, own-effect re-pop / re-push,
+        # flush + full-stack checkpoint.
+        configurations=[('ras','d4',[],[(n,None) for n in range(6)])]
     elif os.environ.get('REVIEW_RTL_SBHEAD')=='1':
         # T6b-2a: per-hart oldest-issued head. The parallel rotate/find-first
         # must reproduce the serial ring-order scan, including across a
@@ -593,7 +601,8 @@ def main():
                 # positive trials; oracle_negative gets no extra arm there.
                 if geometry!='mut-shareghr':
                     trials+=[(0,True,'GHIST_FOLD_TRAIN'),(1,True,'GHIST_SWITCH_BANK')]
-            elif kind=='ckpt':trials+=[(0,True,'CKPT_MULTI'),(1,True,'CKPT_DOUBLE_ADV'),(3,True,'CKPT_DESYNC_RV'),(5,True,'CKPT_DROPPED_OWNER'),(6,True,'CKPT_EMPTY_RESTORE_HEAD')]
+            elif kind=='ras':trials+=[(0,True,'RAS_POP'),(2,True,'RAS_RESTORE_TOP'),(3,True,'RAS_RESTORE_POP'),(4,True,'RAS_RESTORE_PUSH'),(5,True,'RAS_RESTORE_FULL_CNT')]
+            elif kind=='ckpt':trials+=[(0,True,'CKPT_OOO_ORDER'),(2,True,'CKPT_YOUNGER_DEAD'),(3,True,'CKPT_REUSE'),(4,True,'CKPT_STALE_TAG'),(5,True,'CKPT_CLEAR_RESTORE'),(6,True,'CKPT_MISP_ALLOC')]
             elif kind=='csrbuf':
                 trials+=[(n,True,('CSRBUF_ADDR','CSRBUF_READY','CSRBUF_CANCEL','CSRBUF_FLUSH','CSRBUF_INORDER','CSRBUF_PIPE',
                                  'CSRBUF_COMMIT_ALLOC','CSRBUF_CANCEL_ALLOC','CSRBUF_FLUSH_ALLOC','CSRBUF_MATCHED_CREDIT')[n]) for n,_ in cases]

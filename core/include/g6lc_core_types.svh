@@ -47,6 +47,9 @@
 `define G6LC_BRANCHPREDICT_SBE_T(cfg) struct packed {                          \
   ariane_pkg::cf_t         cf;                                                 \
   logic [(cfg).VLEN-1:0]   predict_address;                                    \
+  logic                    ckpt_v;                                             \
+  logic [7:0]              ckpt_idx;                                           \
+  logic                    is_call;                                            \
 }
 
 // Exception (cva6.sv `exception_t`).

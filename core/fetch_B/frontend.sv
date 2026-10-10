@@ -1164,47 +1164,78 @@ module frontend
   // ------------------------------------------------------------------
   // Prediction structures
   // ------------------------------------------------------------------
-  // RAS snapshot / restore for the BP checkpoint; train_hart is the hart of the
-  // resolving branch so snap/restore stay per-hart
-  logic ras_restore;
-  ras_t [CVA6Cfg.RASDepth == 0 ? 0 : CVA6Cfg.RASDepth-1:0] ras_stack_snap;
-  ras_t [CVA6Cfg.RASDepth == 0 ? 0 : CVA6Cfg.RASDepth-1:0] ras_restore_stack;
+  // RAS top-of-stack checkpoint / restore for the BP checkpoint (T21: pointer
+  // RAS, {tos, cnt, top} snapshot of the fetch hart; restore targets the
+  // resolving branch's hart and re-applies that branch's own stack effect)
+  localparam int unsigned RasPtrW = (CVA6Cfg.RASDepth <= 1) ? 1 : $clog2(CVA6Cfg.RASDepth);
+  localparam int unsigned RasCntW = (CVA6Cfg.RASDepth < 1) ? 1 : $clog2(CVA6Cfg.RASDepth + 1);
+  localparam int unsigned CkptIdxW = 8;  // branch_predict.ckpt_idx width
+  logic ras_restore, ras_restore_own;
+  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] ras_restore_hart;
+  logic [RasPtrW-1:0] ras_snap_tos, ras_restore_tos;
+  logic [RasCntW-1:0] ras_snap_cnt, ras_restore_cnt;
+  logic [CVA6Cfg.VLEN-1:0] ras_snap_top, ras_restore_top;
   logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] resolve_hart;
   assign resolve_hart = resolved_branch_i.hart_id;
 
-  // Prediction-time checkpoint bookkeeping (TAGE fabric): push one entry per
-  // consumed real-CF slot — decode type, not predicted cf_type, so the push
-  // set equals the resolve set; pop one per resolved CF.
+  // Prediction-time checkpoint bookkeeping (TAGE fabric): allocate one entry
+  // per consumed real-CF slot — decode type, not predicted cf_type, so the
+  // allocation set equals the resolve set; each resolve frees its own entry
+  // (index carried by the instruction, T21).
   logic [NrInstr-1:0] bp_push_cf;
   logic             bp_cf_resolve;
+  logic             ckpt_alloc_v;
+  logic [NrInstr-1:0] ckpt_slot_v;
+  logic [NrInstr-1:0][CkptIdxW-1:0] ckpt_slot_idx;
   for (genvar i = 0; i < NrInstr; i++) begin : gen_bp_push_cf
     assign bp_push_cf[i] = (is_branch[i] | is_jump[i] | is_jalr[i] | is_return[i])
                            & instr_queue_consumed[i];
+    assign ckpt_slot_v[i] = ckpt_alloc_v & bp_push_cf[i];
   end
   assign bp_cf_resolve = resolved_branch_i.valid
                          && (resolved_branch_i.cf_type != ariane_pkg::NoCF);
+  // T21: an IF flush that is not this frontend's mispredict redirect (SMT
+  // switch, commit-side replay, exception, a mispredict outranked by an
+  // architectural redirect) kills the fetch hart's consumed-unresolved CFs:
+  // drop its checkpoints so they cannot pin the bank.
+  logic ckpt_clear;
+  assign ckpt_clear = (flush_i | smt_restore_flush) && !is_mispredict;
 
   if (CVA6Cfg.RASDepth == 0) begin : gen_no_ras
-    assign ras_predict = '0;
-    assign ras_stack_snap = '0;
+    assign ras_predict  = '0;
+    assign ras_snap_tos = '0;
+    assign ras_snap_cnt = '0;
+    assign ras_snap_top = '0;
   end else begin : gen_ras
     ras #(
         .CVA6Cfg(CVA6Cfg),
         .ras_t  (ras_t),
-        .DEPTH  (CVA6Cfg.RASDepth)
+        .DEPTH  (CVA6Cfg.RASDepth),
+        .PTR_W  (RasPtrW),
+        .CNT_W  (RasCntW)
     ) i_ras (
         .clk_i,
         .rst_ni,
-        .flush_bp_i      (flush_bp_i),
-        .hart_i          (smt_hart_i),
-        .train_hart_i    (resolve_hart),
-        .push_i          (ras_push),
-        .pop_i           (ras_pop),
-        .data_i          (ras_update),
-        .data_o          (ras_predict),
-        .stack_snapshot_o(ras_stack_snap),
-        .restore_i       (ras_restore),
-        .restore_stack_i (ras_restore_stack)
+        .flush_bp_i       (flush_bp_i),
+        .hart_i           (smt_hart_i),
+        .restore_hart_i   (ras_restore_hart),
+        .push_i           (ras_push),
+        .pop_i            (ras_pop),
+        .data_i           (ras_update),
+        .data_o           (ras_predict),
+        .snap_tos_o       (ras_snap_tos),
+        .snap_cnt_o       (ras_snap_cnt),
+        .snap_top_o       (ras_snap_top),
+        .restore_i        (ras_restore),
+        .restore_tos_i    (ras_restore_tos),
+        .restore_cnt_i    (ras_restore_cnt),
+        .restore_top_i    (ras_restore_top),
+        // the checkpoint is the state before the resolving CF's window: a
+        // mispredicted return re-pops, a mispredicted call re-pushes its link
+        // (a switch/replay clear restores the frontier context as is)
+        .restore_pop_i    (ras_restore_own && resolved_branch_i.cf_type == ariane_pkg::Return),
+        .restore_push_i   (ras_restore_own && resolved_branch_i.is_call),
+        .restore_push_ra_i(resolved_branch_i.next_pc)
     );
   end
 
@@ -1291,7 +1322,9 @@ module frontend
         .bht_update_t    (bht_update_t),
         .btb_update_t    (btb_update_t),
         .btb_prediction_t(btb_prediction_t),
-        .ras_t           (ras_t)
+        .CKPT_IDX_W      (CkptIdxW),
+        .RAS_PTR_W       (RasPtrW),
+        .RAS_CNT_W       (RasCntW)
     ) i_bp_top (
         .clk_i,
         .rst_ni,
@@ -1299,16 +1332,27 @@ module frontend
         .debug_mode_i,
         .hart_i             (smt_hart_i),
         .resolve_hart_i     (resolve_hart),
+        .clear_i            (ckpt_clear),
         .push_cf_i          (bp_push_cf),
+        .ckpt_alloc_v_o     (ckpt_alloc_v),
+        .ckpt_alloc_idx_o   (ckpt_slot_idx),
         .cf_resolve_i       (bp_cf_resolve),
+        .ckpt_v_i           (resolved_branch_i.ckpt_v),
+        .ckpt_idx_i         (resolved_branch_i.ckpt_idx),
         .vpc_bht_i          (vpc_bht),
         .vpc_btb_i          (vpc_btb),
         .bht_update_i       (bht_update),
         .btb_update_i       (btb_update),
         .mispredict_i       (resolved_branch_i.valid && resolved_branch_i.is_mispredict),
-        .ras_stack_i        (ras_stack_snap),
+        .ras_tos_i          (ras_snap_tos),
+        .ras_cnt_i          (ras_snap_cnt),
+        .ras_top_i          (ras_snap_top),
         .ras_restore_o      (ras_restore),
-        .ras_restore_stack_o(ras_restore_stack),
+        .ras_restore_own_o  (ras_restore_own),
+        .ras_restore_hart_o (ras_restore_hart),
+        .ras_restore_tos_o  (ras_restore_tos),
+        .ras_restore_cnt_o  (ras_restore_cnt),
+        .ras_restore_top_o  (ras_restore_top),
         .bht_prediction_o   (bht_prediction),
         .btb_prediction_o   (btb_fabric)
     );
@@ -1319,8 +1363,14 @@ module frontend
 
   // only the TAGE fabric checkpoints the RAS; flush_bp still clears it
   if (CVA6Cfg.BPType != config_pkg::TAGE_LITE) begin : gen_no_ras_restore
-    assign ras_restore = 1'b0;
-    assign ras_restore_stack = '0;
+    assign ras_restore     = 1'b0;
+    assign ras_restore_own = 1'b0;
+    assign ras_restore_hart = resolve_hart;
+    assign ras_restore_tos = '0;
+    assign ras_restore_cnt = '0;
+    assign ras_restore_top = '0;
+    assign ckpt_alloc_v    = 1'b0;
+    assign ckpt_slot_idx   = '0;
   end
 
   // we need to inspect up to INSTR_PER_FETCH instructions for branches and jumps
@@ -1371,6 +1421,10 @@ module frontend
       .exception_gva_i    (CVA6Cfg.RVH && icache_dreq_i.valid && icache_dreq_i.ex.gva),
       .predict_address_i  (predict_address),
       .cf_type_i          (cf_type),
+      // T21: BP checkpoint identity + call flag ride with the instruction
+      .ckpt_v_i           (ckpt_slot_v),
+      .ckpt_idx_i         (ckpt_slot_idx),
+      .is_call_i          (is_call),
       .valid_i            (instruction_valid),     // from re-aligner
       .leftover_complete_i(serving_unaligned),
       .consumed_o         (instr_queue_consumed),

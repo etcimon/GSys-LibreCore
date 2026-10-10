@@ -2906,11 +2906,12 @@ module tb_g6lc_review_ghist;
   end
 endmodule
 
-// Prediction-time checkpoint FIFO: per-slot push vector, split push/pop
-// harts, restore consumes the head and drops younger wrong-path entries,
-// overflow raises desync until the bank drains. Observability is via the
-// comb outputs (empty/full/desync/restore_*) and distinct per-push ghist
-// values read back through restore_ghist_o (the head entry).
+// Prediction-time checkpoint buffer (T21, indexed): per-slot allocation
+// returns the tag each CF carries; a resolve frees ITS OWN entry (pop_idx),
+// a restore reads it and reclaims every younger entry; a non-mispredict IF
+// flush (clear_i) drops the bank; a stale tag (reclaimed epoch) is dead.
+// Observability is via entry_valid_o / entry_ghist_o (the resolving CF's own
+// snapshot), restore_valid_o, empty/full, and the alloc_* outputs.
 module tb_g6lc_review_ckpt;
   import ariane_pkg::*;
   function automatic config_pkg::cva6_cfg_t configuration();
@@ -2919,122 +2920,263 @@ module tb_g6lc_review_ckpt;
   endfunction
   localparam config_pkg::cva6_cfg_t C=configuration();
   localparam int DEPTH=4;
-  logic clk=0,rst_n=0,flush=0,pop=0,restore=0;
+  localparam int TAGW=4; // 2 index bits + 2 epoch bits
+  logic clk=0,rst_n=0,flush=0,clear=0,pop=0,popv=0,restore=0;
   logic [0:0] phart='0, chart='0;
   logic [1:0] push='0;
-  logic [7:0] pghist='0, rghist;
-  logic rv,empty,full,desync;
+  logic [7:0] pghist='0, eghist;
+  logic [TAGW-1:0] popidx='0;
+  logic [1:0][TAGW-1:0] aidx;
+  logic av,ev,rv,empty,full,crv;
+  logic [31:0] cghost;
   bit negative;int scenario;
-  g6lc_bp_ckpt #(.CVA6Cfg(C),.GHIST_LEN(8),.DEPTH(DEPTH),.RAS_DEPTH(0),.RAS_VLEN(32),.NR_PUSH(2)) dut(
-    .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.push_hart_i(phart),.pop_hart_i(chart),
-    .push_i(push),.push_ghist_i(pghist),.push_ras_valid_i('0),.push_ras_ra_i('0),
-    .pop_i(pop),.restore_i(restore),
-    .restore_ghist_o(rghist),.restore_ras_valid_o(),.restore_ras_ra_o(),
-    .restore_valid_o(rv),.empty_o(empty),.full_o(full),.desync_o(desync));
+  logic [TAGW-1:0] t[8];
+  g6lc_bp_ckpt #(.CVA6Cfg(C),.GHIST_LEN(8),.DEPTH(DEPTH),.RAS_DEPTH(0),.RAS_PTR_W(1),.RAS_CNT_W(1),
+                 .RAS_VLEN(32),.NR_PUSH(2),.TAG_W(TAGW)) dut(
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.clear_i(clear),.clear_restore_o(crv),.clear_ras_tos_o(),.clear_ras_cnt_o(),.clear_ras_top_o(cghost),
+    .push_hart_i(phart),.pop_hart_i(chart),
+    .push_i(push),.push_ghist_i(pghist),.push_ras_tos_i('0),.push_ras_cnt_i('0),.push_ras_top_i('0),
+    .alloc_v_o(av),.alloc_idx_o(aidx),
+    .pop_i(pop),.pop_v_i(popv),.pop_idx_i(popidx),.restore_i(restore),
+    .entry_valid_o(ev),.entry_ghist_o(eghist),.entry_ras_tos_o(),.entry_ras_cnt_o(),.entry_ras_top_o(),
+    .restore_valid_o(rv),.empty_o(empty),.full_o(full));
   task automatic tick;clk=1;#2;clk=0;#2;endtask
-  task automatic push1(input logic [7:0] g);
-    push=2'b01;pghist=g;tick();push='0;
+  // allocate one CF (slot 0) with history g; returns its tag (or fails if refused)
+  task automatic alloc1(input logic [7:0] g, output logic [TAGW-1:0] tag, input bit expect_ok=1);
+    push=2'b01;pghist=g;#1;
+    if(av!==expect_ok)$fatal(1,"CKPT_ALLOC_V g=%0h av=%0b want=%0b",g,av,expect_ok);
+    tag=aidx[0];tick();push='0;
   endtask
+  // present a resolve of tag; sample entry_valid/ghist before the edge
+  task automatic resolve(input logic [TAGW-1:0] tag, input bit misp, output bit live, output logic [7:0] g, output bit rvo);
+    popidx=tag;popv=1;pop=1;restore=misp;#1;
+    live=ev;g=eghist;rvo=rv;tick();pop=0;popv=0;restore=0;
+  endtask
+  bit live,rvo;logic [7:0] g;
   initial begin
     negative=$test$plusargs("oracle_negative");
     if(!$value$plusargs("scenario=%d",scenario))scenario=0;
     #2;tick();rst_n=1;tick();
     case(scenario)
-      // Conservation + ordering: push 0x11, then a two-slot push of 0x22
-      // (count=3). Head must read 0x11; after one pop it reads 0x22.
+      // Identity: three allocations read back their own history regardless of
+      // the order they resolve in (the FIFO this replaced paired by order).
       0:begin
-        push1(8'h11);
-        push=2'b11;pghist=8'h22;tick();push='0;
-        #2;
-        if(rghist!==8'h11)$fatal(1,"CKPT_HEAD0 %0h",rghist);
-        pop=1;tick();pop=0;#2;
-        if(rghist!==8'h22)$fatal(1,"CKPT_HEAD1 %0h",rghist);
-        if(empty)$fatal(1,"CKPT_EMPTY");
-        if(negative) begin
-          // With multi-entry storage, one more pop leaves one entry, not
-          // empty: asserting empty reproduces the pre-fix single-entry shape.
-          pop=1;tick();pop=0;#2;
-          if(!empty)$fatal(1,"CKPT_MULTI");
-        end
+        alloc1(8'h11,t[0]);alloc1(8'h22,t[1]);alloc1(8'h33,t[2]);
+        resolve(t[1],0,live,g,rvo);
+        if(!live||g!==8'h22)$fatal(1,"CKPT_OWN_ENTRY live=%0b g=%0h",live,g);
+        resolve(t[2],0,live,g,rvo);
+        if(!live||g!==8'h33)$fatal(1,"CKPT_OWN_ENTRY2 live=%0b g=%0h",live,g);
+        resolve(t[0],0,live,g,rvo);
+        if(!live||g!==(negative?8'h22:8'h11))$fatal(1,"CKPT_OOO_ORDER live=%0b g=%0h",live,g);
+        repeat(3)tick();
+        if(!empty)$fatal(1,"CKPT_DRAIN_EMPTY");
       end
-      // Full FIFO, same-cycle push+pop: the pop frees the slot the push
-      // takes, so the head advances exactly once and count stays DEPTH.
-      // Pre-fix RTL advanced head twice (drop-oldest + pop), losing 0x20.
+      // Two-slot allocation gets two consecutive tags and both read back.
       1:begin
-        push1(8'h10);push1(8'h20);push1(8'h30);push1(8'h40);
-        if(!full)$fatal(1,"CKPT_FULL");
-        push=2'b01;pghist=8'h50;pop=1;tick();push='0;pop=0;#2;
-        if(!full)$fatal(1,"CKPT_COUNT");
-        if(negative) begin
-          if(rghist!==8'h30)$fatal(1,"CKPT_DOUBLE_ADV");
-        end else begin
-          if(rghist!==8'h20)$fatal(1,"CKPT_DOUBLE_ADV %0h",rghist);
-        end
+        push=2'b11;pghist=8'h40;#1;
+        if(!av)$fatal(1,"CKPT_ALLOC2_V");
+        t[0]=aidx[0];t[1]=aidx[1];tick();push='0;
+        if(t[1][1:0]!==t[0][1:0]+2'd1)$fatal(1,"CKPT_ALLOC2_RANK %0d %0d",t[0],t[1]);
+        resolve(t[0],0,live,g,rvo);if(!live||g!==8'h40)$fatal(1,"CKPT_ALLOC2_A");
+        resolve(t[1],0,live,g,rvo);if(!live||g!==8'h40)$fatal(1,"CKPT_ALLOC2_B");
+        if(negative)$fatal(1,"CKPT_NEG_UNREACH");
       end
-      // Restore consumes the head (0x11) and drops the younger 0x22/0x33:
-      // the bank ends empty and a later pop is a no-op.
+      // Restore on the middle entry reclaims it and the younger one; the
+      // older stays live. The reclaimed younger tag is dead afterwards.
       2:begin
-        push1(8'h11);push1(8'h22);push1(8'h33);
-        #2;
-        if(rghist!==8'h11)$fatal(1,"CKPT_RHEAD %0h",rghist);
-        restore=1;#2;
-        if(!rv)$fatal(1,"CKPT_RV");
-        tick();restore=0;#2;
-        if(!empty)$fatal(1,"CKPT_DRAIN");
-        pop=1;tick();pop=0;#2;
-        if(!empty)$fatal(1,"CKPT_POP_EMPTY");
-        if(negative)$fatal(1,"CKPT_NEG_UNREACH");
+        alloc1(8'h11,t[0]);alloc1(8'h22,t[1]);alloc1(8'h33,t[2]);
+        resolve(t[1],1,live,g,rvo);
+        if(!rvo||g!==8'h22)$fatal(1,"CKPT_RESTORE_OWN rv=%0b g=%0h",rvo,g);
+        resolve(t[2],0,live,g,rvo);
+        if(live!==(negative?1'b1:1'b0))$fatal(1,"CKPT_YOUNGER_DEAD live=%0b",live);
+        resolve(t[0],0,live,g,rvo);
+        if(!live||g!==8'h11)$fatal(1,"CKPT_OLDER_LIVE live=%0b g=%0h",live,g);
+        repeat(2)tick();
+        if(!empty)$fatal(1,"CKPT_RESTORE_DRAIN");
       end
-      // Overflow: fifth push on a full bank is dropped -> desync -> restore
-      // is not qualified (rv stays low). Draining the bank clears desync.
+      // Capacity: DEPTH entries fill the bank, the next allocation is refused
+      // (alloc_v low, nothing stored); freeing the head makes room again.
       3:begin
-        push1(8'h10);push1(8'h20);push1(8'h30);push1(8'h40);
-        push1(8'h50);#2;
-        if(!desync)$fatal(1,"CKPT_DESYNC");
-        restore=1;#2;
-        if(negative) begin
-          if(!rv)$fatal(1,"CKPT_DESYNC_RV");
-        end else begin
-          if(rv)$fatal(1,"CKPT_DESYNC_RV");
-        end
-        tick();restore=0;#2;
-        if(!empty || desync)$fatal(1,"CKPT_DESYNC_CLEAR e=%0b d=%0b",empty,desync);
+        alloc1(8'h10,t[0]);alloc1(8'h20,t[1]);alloc1(8'h30,t[2]);alloc1(8'h40,t[3]);
+        if(!full)$fatal(1,"CKPT_FULL");
+        alloc1(8'h50,t[4],0);
+        resolve(t[0],0,live,g,rvo);if(!live||g!==8'h10)$fatal(1,"CKPT_FULL_HEAD");
+        tick();  // head reclaim takes a cycle
+        alloc1(8'h60,t[5],1);
+        resolve(t[5],0,live,g,rvo);
+        if(live!==(negative?1'b0:1'b1)||(live&&g!==8'h60))$fatal(1,"CKPT_REUSE live=%0b g=%0h",live,g);
       end
-      // Multi-slot push ordering across windows: 0xAA then 0xBB -> head
-      // must be 0xAA; restore drains both.
+      // Stale tag: after a restore reclaims an entry and the index is
+      // reallocated, the OLD tag (previous epoch) must not touch the new owner.
       4:begin
-        push1(8'hAA);push1(8'hBB);#2;
-        if(rghist!==8'hAA)$fatal(1,"CKPT_ORDER %0h",rghist);
-        restore=1;tick();restore=0;#2;
-        if(!empty)$fatal(1,"CKPT_ORDER_DRAIN");
-        if(negative)$fatal(1,"CKPT_NEG_UNREACH");
+        alloc1(8'h11,t[0]);alloc1(8'h22,t[1]);
+        resolve(t[0],1,live,g,rvo);  // reclaims both; epoch advances
+        if(!rvo)$fatal(1,"CKPT_EPOCH_RESTORE");
+        repeat(2)tick();
+        alloc1(8'hAA,t[2]);alloc1(8'hBB,t[3]);
+        if(t[2][1:0]!==t[0][1:0])$fatal(1,"CKPT_EPOCH_SETUP idx %0d vs %0d",t[2],t[0]);
+        resolve(t[1],0,live,g,rvo);   // stale tag, same slot as t[3]
+        if(live!==(negative?1'b1:1'b0))$fatal(1,"CKPT_STALE_TAG live=%0b",live);
+        resolve(t[3],0,live,g,rvo);
+        if(!live||g!==8'hBB)$fatal(1,"CKPT_NEW_OWNER_INTACT live=%0b g=%0h",live,g);
       end
+      // clear_i (non-mispredict IF flush) drops the bank: the in-flight tags
+      // are dead, the bank is empty and allocation works again.
       5:begin
-        push1(8'h10);push1(8'h20);push1(8'h30);push1(8'h40);
-        push1(8'h50);
-        pop=1;repeat(4)tick();pop=0;#2;
-        if(!empty)$fatal(1,"CKPT_STORED_DRAIN");
-        push1(8'h60);#2;
-        restore=1;#2;
-        if(rv!==(negative?1'b1:1'b0))$fatal(1,"CKPT_DROPPED_OWNER");
-        tick();restore=0;#2;
-        if(!empty||desync)$fatal(1,"CKPT_RESYNC_RESTORE");
-        push1(8'h70);restore=1;#2;
-        if(!rv||rghist!==8'h70)$fatal(1,"CKPT_RESYNC_HEAD");
+        alloc1(8'h11,t[0]);alloc1(8'h22,t[1]);
+        resolve(t[0],0,live,g,rvo);tick();  // oldest resolves -> head moves to t[1]
+        push=2'b01;pghist=8'h99;clear=1;#1;    // allocation on the clear cycle is refused
+        if(av)$fatal(1,"CKPT_CLEAR_ALLOC");
+        if(crv!==(negative?1'b0:1'b1))$fatal(1,"CKPT_CLEAR_RESTORE crv=%0b",crv);
+        tick();clear=0;push='0;#1;
+        if(crv)$fatal(1,"CKPT_CLEAR_RESTORE_ONESHOT");
+        if(!empty)$fatal(1,"CKPT_CLEAR_EMPTY");
+        resolve(t[0],1,live,g,rvo);
+        if(rvo!==(negative?1'b1:1'b0))$fatal(1,"CKPT_CLEAR_DEAD rv=%0b",rvo);
+        alloc1(8'h33,t[2]);resolve(t[2],0,live,g,rvo);
+        if(!live||g!==8'h33)$fatal(1,"CKPT_CLEAR_REALLOC");
       end
+      // Allocation on the mispredict cycle (same bank) is refused: the window
+      // consumed then is wrong-path. flush_i drops the bank like clear_i.
       6:begin
-        push1(8'h10);push1(8'h20);push1(8'h30);push1(8'h40);
-        push1(8'h50);
-        pop=1;repeat(4)tick();pop=0;#2;
-        if(!empty||!desync)$fatal(1,"CKPT_EMPTY_POISON");
-        restore=1;tick();restore=0;#2;
-        if(!empty||desync)$fatal(1,"CKPT_EMPTY_RESYNC");
-        push1(8'h80);restore=1;#2;
-        if(rv!==(negative?1'b0:1'b1)||rghist!==8'h80)$fatal(1,"CKPT_EMPTY_RESTORE_HEAD");
+        alloc1(8'h11,t[0]);
+        push=2'b01;pghist=8'h77;popidx=t[0];popv=1;pop=1;restore=1;#1;
+        if(av!==(negative?1'b1:1'b0))$fatal(1,"CKPT_MISP_ALLOC av=%0b",av);
+        if(!rv)$fatal(1,"CKPT_MISP_RV");
+        tick();push='0;pop=0;popv=0;restore=0;#1;
+        if(!empty)$fatal(1,"CKPT_MISP_EMPTY");
+        alloc1(8'h88,t[1]);flush=1;tick();flush=0;#1;
+        if(!empty)$fatal(1,"CKPT_FLUSH_EMPTY");
       end
       default:$fatal(1,"CKPT_SCENARIO");
     endcase
     $display("RTL_REVIEW_PASS ckpt scenario=%0d",scenario);$finish;
+  end
+endmodule
+
+// T21 pointer RAS: push/pop/top semantics equal the shift stack it replaced
+// (overflow drops the oldest, pops run the stack empty, push+pop replaces the
+// top); the {tos,cnt,top} checkpoint restores a stack whose top a wrong-path
+// pop-then-push overwrote; restore_pop_i / restore_push_i re-apply the
+// resolving CF's own effect; banks are independent (push hart vs restore hart).
+module tb_g6lc_review_ras;
+  import ariane_pkg::*;
+  parameter int unsigned HARTS=1;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c=config_pkg::cva6_cfg_empty;
+    c.VLEN=32;c.RVC=1;c.NrHarts=HARTS;c.RASDepth=4;return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C=configuration();
+  localparam int DEPTH=4;
+  typedef struct packed {logic valid;logic [31:0] ra;} ras_t;
+  logic clk=0,rst_n=0,flush=0,push=0,pop=0,restore=0,rpop=0,rpush=0;
+  logic [0:0] hart='0,thart='0;
+  logic [31:0] data='0,rtop='0,rpush_ra='0;
+  logic [1:0] stos,rtos='0;
+  logic [2:0] scnt,rcnt='0;
+  logic [31:0] stop;
+  ras_t top;
+  bit negative;int scenario;
+  // reference: shift stack
+  logic [DEPTH-1:0] rv_q;logic [DEPTH-1:0][31:0] rra_q;
+  ras #(.CVA6Cfg(C),.ras_t(ras_t),.DEPTH(DEPTH)) dut(
+    .clk_i(clk),.rst_ni(rst_n),.flush_bp_i(flush),.hart_i(hart),.restore_hart_i(thart),
+    .push_i(push),.pop_i(pop),.data_i(data),.data_o(top),
+    .snap_tos_o(stos),.snap_cnt_o(scnt),.snap_top_o(stop),
+    .restore_i(restore),.restore_tos_i(rtos),.restore_cnt_i(rcnt),.restore_top_i(rtop),
+    .restore_pop_i(rpop),.restore_push_i(rpush),.restore_push_ra_i(rpush_ra));
+  task automatic tick;clk=1;#2;clk=0;#2;endtask
+  task automatic ref_step;
+    if(push&&pop)begin rra_q[0]=data;rv_q[0]=1;end
+    else if(push)begin rra_q={rra_q[DEPTH-2:0],data};rv_q={rv_q[DEPTH-2:0],1'b1};end
+    else if(pop)begin rra_q={32'h0,rra_q[DEPTH-1:1]};rv_q={1'b0,rv_q[DEPTH-1:1]};end
+  endtask
+  task automatic check(input string why);
+    if(top.valid!==rv_q[0]||(rv_q[0]&&top.ra!==rra_q[0]))
+      $fatal(1,"RAS_%s valid=%0b/%0b ra=%h/%h",why,top.valid,rv_q[0],top.ra,rra_q[0]);
+  endtask
+  task automatic op(input bit pu,input bit po,input logic [31:0] d);
+    push=pu;pop=po;data=d;#1;ref_step();tick();push=0;pop=0;#1;
+  endtask
+  task automatic snap(output logic [1:0] t,output logic [2:0] c,output logic [31:0] v);
+    t=stos;c=scnt;v=stop;
+  endtask
+  task automatic do_restore(input logic [1:0] t,input logic [2:0] c,input logic [31:0] v,input bit rp,input bit rpu,input logic [31:0] ra);
+    restore=1;rtos=t;rcnt=c;rtop=v;rpop=rp;rpush=rpu;rpush_ra=ra;tick();restore=0;rpop=0;rpush=0;#1;
+  endtask
+  logic [1:0] t0;logic [2:0] c0;logic [31:0] v0;
+  initial begin
+    negative=$test$plusargs("oracle_negative");
+    if(!$value$plusargs("scenario=%d",scenario))scenario=0;
+    rv_q='0;rra_q='0;
+    #2;tick();rst_n=1;tick();
+    case(scenario)
+      // Reference equivalence: 6 pushes (2 overflow), 6 pops (2 on empty).
+      0:begin
+        for(int i=1;i<=6;i++)begin op(1,0,32'h100*i);check("PUSH");end
+        for(int i=0;i<6;i++)begin
+          if(negative&&i==4&&top.valid)$fatal(1,"RAS_NEG_SETUP");
+          if(negative&&i==4)begin rv_q[0]=1;end
+          check("POP");op(0,1,0);
+        end
+        check("EMPTY");
+        // an empty stack presents ra = 0 (the branch unit relies on it for
+        // an unpredicted return that travels as cf = Return)
+        if(top.valid||top.ra!==32'h0)$fatal(1,"RAS_EMPTY_RA valid=%0b ra=%h",top.valid,top.ra);
+      end
+      // push+pop in one window replaces the top; on an empty stack it pushes.
+      1:begin
+        op(1,1,32'hA0);check("REPLACE_EMPTY");
+        op(1,0,32'hA1);op(1,1,32'hA2);check("REPLACE");
+        op(0,1,0);check("REPLACE_UNDER");
+        if(negative)$fatal(1,"RAS_NEG_UNREACH");
+      end
+      // Checkpoint before a branch window with stack [B,A]; wrong path pops B
+      // and pushes C over its slot; restore (no own effect) must bring B back.
+      2:begin
+        op(1,0,32'hAA);op(1,0,32'hBB);snap(t0,c0,v0);
+        op(0,1,0);op(1,0,32'hCC);
+        if(top.ra!==32'hCC)$fatal(1,"RAS_WRONGPATH_SETUP");
+        do_restore(t0,c0,v0,0,0,0);
+        if(top.valid!==1||top.ra!==(negative?32'hCC:32'hBB))$fatal(1,"RAS_RESTORE_TOP %h",top.ra);
+        rv_q='0;rra_q='0;rv_q[1:0]=2'b11;rra_q[0]=32'hBB;rra_q[1]=32'hAA;
+        op(0,1,0);check("RESTORE_UNDER");op(0,1,0);check("RESTORE_EMPTY");
+      end
+      // Own effect, return: checkpoint before the `ret` window ([B,A]); fetch
+      // popped B; wrong path pushed D; the ret mispredicts -> restore + re-pop.
+      3:begin
+        op(1,0,32'hAA);op(1,0,32'hBB);snap(t0,c0,v0);
+        op(0,1,0);op(1,0,32'hDD);
+        do_restore(t0,c0,v0,1,0,0);
+        if(top.valid!==1||top.ra!==(negative?32'hBB:32'hAA))$fatal(1,"RAS_RESTORE_POP %h",top.ra);
+        op(0,1,0);if(top.valid)$fatal(1,"RAS_RESTORE_POP_CNT");
+      end
+      // Own effect, call: checkpoint before the `jal` window ([A]); fetch
+      // pushed L; wrong path popped twice; mispredict -> restore + re-push L.
+      4:begin
+        op(1,0,32'hAA);snap(t0,c0,v0);
+        op(1,0,32'h1000);op(0,1,0);op(0,1,0);
+        if(top.valid)$fatal(1,"RAS_CALL_SETUP");
+        do_restore(t0,c0,v0,0,1,32'h1000);
+        if(top.valid!==1||top.ra!==(negative?32'hAA:32'h1000))$fatal(1,"RAS_RESTORE_PUSH %h",top.ra);
+        op(0,1,0);if(top.valid!==1||top.ra!==32'hAA)$fatal(1,"RAS_RESTORE_PUSH_UNDER");
+      end
+      // flush_bp empties the fetch bank; a checkpoint taken on a full stack
+      // restores a full stack (cnt saturates at DEPTH).
+      5:begin
+        for(int i=1;i<=5;i++)op(1,0,32'h10*i);
+        snap(t0,c0,v0);
+        if(c0!==3'd4)$fatal(1,"RAS_SNAP_CNT %0d",c0);
+        flush=1;tick();flush=0;#1;
+        if(top.valid)$fatal(1,"RAS_FLUSH");
+        do_restore(t0,c0,v0,0,0,0);
+        if(top.ra!==32'h50)$fatal(1,"RAS_RESTORE_FULL_TOP");
+        for(int i=0;i<4;i++)op(0,1,0);
+        if(top.valid!==(negative?1'b1:1'b0))$fatal(1,"RAS_RESTORE_FULL_CNT");
+      end
+      default:$fatal(1,"RAS_SCENARIO");
+    endcase
+    $display("RTL_REVIEW_PASS ras scenario=%0d",scenario);$finish;
   end
 endmodule
 

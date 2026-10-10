@@ -139,6 +139,29 @@ prediction-time, branch-correlated snapshot FIFO:
   legal predictor-timing changes classify instead of fail — a real
   instruction-stream divergence still fails `matchedBaseline`.
 
+### T21 (2026-10-10): checkpoints are addressed by the branch, not by order
+
+The order-paired FIFO above is superseded (`core/ooo/AGENTS-ooo-plan.md` T21).
+The out-of-order backend resolves a ready younger branch before an older one,
+and the SMT drained handoff kills consumed-unissued CFs without `flush_bp`, so
+"head == resolving CF" failed on 26.6 % of resolves and 55.9 % of restores on
+the server boot core. `g6lc_bp_ckpt` now allocates per consumed CF slot and
+returns a tag `{epoch, index}` that rides in `branch_predict.ckpt_idx`
+(IQ → decoder → scoreboard → branch unit → `bp_resolve_t`); a resolve frees its
+own entry and the TAGE/ITTAGE update folds *that* entry's GHR; a mispredict
+restores from it and reclaims every younger entry; a non-mispredict IF flush
+(`clear_i`) restores the fetch hart's RAS from the oldest live entry (the
+restart frontier) and drops the bank; a full bank refuses the window
+(`ckpt_v = 0`, fallback) instead of desyncing. `ras.sv` is a pointer stack whose
+checkpoint is `{tos, cnt, ra[tos]}` with the resolving CF's own push/pop
+re-applied on restore; an empty stack presents `ra = 0` (`ras_empty_zero`) —
+the branch unit depends on it for an unpredicted return. Leaves
+`REVIEW_RTL_CKPT` / `REVIEW_RTL_RAS`; integration witness `[ckpt] final`
+(`pop_mismatch = restore_mismatch = 0`). The "out-of-order resolution remains
+open" residual above is closed; the same-window residual (an unpredicted
+indirect call's push missing from a younger sibling's snapshot) remains and
+self-heals.
+
 Source presence of TAGE/loop/SC/ITTAGE does not qualify their combined semantics.
 Keep matched branch-pattern/alias controls and the protected SMT2 baseline.
 

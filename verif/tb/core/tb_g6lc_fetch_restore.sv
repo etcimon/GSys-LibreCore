@@ -65,6 +65,9 @@ module tb_g6lc_fetch_restore;
   typedef struct packed {
     cf_t             cf;
     logic [VLEN-1:0] predict_address;
+    logic            ckpt_v;    // T21
+    logic [7:0]      ckpt_idx;  // T21
+    logic            is_call;   // T21
   } bp_t;
   typedef struct packed {
     logic [VLEN-1:0]  address;
@@ -82,6 +85,10 @@ module tb_g6lc_fetch_restore;
     cf_t              cf_type;
     logic [HW-1:0]    hart_id;
     logic             ckpt_restore;
+    logic             ckpt_v;    // T21
+    logic [7:0]       ckpt_idx;  // T21
+    logic             is_call;   // T21
+    logic [VLEN-1:0]  next_pc;   // T21
   } bpr_t;
   typedef struct packed {
     logic            req;
@@ -205,7 +212,7 @@ module tb_g6lc_fetch_restore;
         rb = '{valid: 1'b1, pc: BRANCH_PC, target_address: 64'h60,
                is_mispredict: 1'b0, is_taken: 1'b1,
                cf_type: ariane_pkg::Branch, hart_id: HW'(0),
-               ckpt_restore: 1'b0};
+               ckpt_restore: 1'b0, ckpt_v: 1'b0, ckpt_idx: 8'd0, is_call: 1'b0, next_pc: '0};
       if (dut.gen_ftq.gen_lbuf.i_lbuf.armed_q) armed_seen = 1;
       if (armed_seen) settle++;
       tick(); cycles++;

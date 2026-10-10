@@ -115,6 +115,9 @@ module g6lc_fetch_restore_props #(
   typedef struct packed {
     cf_t             cf;
     logic [VLEN-1:0] predict_address;
+    logic            ckpt_v;    // T21
+    logic [7:0]      ckpt_idx;  // T21
+    logic            is_call;   // T21
   } bp_sbe_t;
 
   typedef struct packed {
@@ -134,6 +137,10 @@ module g6lc_fetch_restore_props #(
     cf_t              cf_type;
     logic [HARTW-1:0] hart_id;
     logic             ckpt_restore;
+    logic             ckpt_v;    // T21
+    logic [7:0]       ckpt_idx;  // T21
+    logic             is_call;   // T21
+    logic [VLEN-1:0]  next_pc;   // T21
   } bpr_t;
 
   typedef struct packed {
@@ -161,7 +168,8 @@ module g6lc_fetch_restore_props #(
   assign resolved_branch_i = '{valid: rb_valid_i, pc: rb_pc_i, target_address: rb_target_i,
                                is_mispredict: rb_is_mispredict_i, is_taken: rb_is_taken_i,
                                cf_type: cf_t'(rb_cf_type_i), hart_id: rb_hart_id_i,
-                               ckpt_restore: rb_ckpt_restore_i};
+                               ckpt_restore: rb_ckpt_restore_i,
+                               ckpt_v: 1'b0, ckpt_idx: 8'd0, is_call: 1'b0, next_pc: '0};
   assign icache_dreq_i = '{ready: rsp_ready_i, valid: rsp_valid_i, data: rsp_data_i,
                            user: rsp_user_i, token: rsp_token_i, vaddr: rsp_vaddr_i,
                            ex: exc_t'('0)};

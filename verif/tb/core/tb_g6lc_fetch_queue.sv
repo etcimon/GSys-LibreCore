@@ -34,6 +34,9 @@ module tb_g6lc_fetch_queue;
   typedef struct packed {
     cf_t cf;
     logic [63:0] predict_address;
+    logic ckpt_v;          // T21
+    logic [7:0] ckpt_idx;  // T21
+    logic is_call;         // T21
   } bp_t;
   typedef struct packed {
     logic [63:0] address;
@@ -71,6 +74,7 @@ module tb_g6lc_fetch_queue;
     .ready_o(ready), .consumed_o(consumed), .exception_i(exception),
     .exception_addr_i(exception_addr), .exception_gpaddr_i('0), .exception_tinst_i('0),
     .exception_gva_i(1'b0), .predict_address_i(prediction), .cf_type_i(cf),
+    .ckpt_v_i('0), .ckpt_idx_i('0), .is_call_i('0),
     .replay_o(replay), .replay_addr_o(replay_addr),
     .fetch_entry_o(entry), .fetch_entry_valid_o(entry_valid), .fetch_entry_ready_i(entry_ready),
     .queue_oldest_valid_o(q_oldest_valid), .queue_oldest_pc_o(q_oldest_pc)

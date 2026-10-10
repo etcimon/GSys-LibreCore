@@ -4145,3 +4145,115 @@ breadth (multi-writer lines, CBO under contention, L3 inclusive/eviction
 cases), a Linux-class boot on a faster host, the full combinational-loop
 check, and a performance pass on the boot (FDT phases ≈8 M cycles each;
 `SmtFetchQuantum 4` drain bubbles in the two-hart regime).
+
+## T21 — Branch-prediction recovery under out-of-order resolution: indexed checkpoints, pointer RAS, switch-safe RAS (2026-10-10)
+
+**Why.** The T20 boot anatomy (`t20/T20-PERF-ANATOMY.md`) ranked the
+server's cycle sinks: libfdt's O(harts×DT) scans (firmware), the SMT
+quantum against the spinning sibling in P1, and a control-flow band in
+`fdt_next_tag` — `ret` mispredicted on 96 % of its 59 K executions, an
+always-taken `bltu` never predicted, `jr a5` 44–95 % wrong — on the T18B
+tree where T17 had predicted the same sites. `g6lc64_ooo_int2_l3` (BHT,
+no checkpoint) pays ≤ 6 cycles at the same sites. A sim-only probe
+(`gen_ckpt_trace`, cva6.sv) shadowed the pc behind every entry of the
+prediction checkpoint FIFO (`g6lc_bp_ckpt`) and checked each pop/restore
+against the branch that actually resolved. Old design, 720 K-cycle
+server window (`ooocoh-t21-server-ckpt-700k`), boot core: **pop_mismatch
+7,512 / 28,288 (26.6 %), restore_mismatch 1,282 / 2,293 (55.9 %), 31,186
+pushes refused, desynced 97.5 % of the cycles**; in the traced window
+100 % of the misassociation roots were entries orphaned by the drained
+handoff switch (IQ/ID flushed, `flush_bp = 0`, FIFO untouched: 1–5
+orphans per switch, 28.9 K switches), and the T20 P3 extract shows the
+other root the FIFO cannot survive — **the OoO backend resolves a ready
+younger branch before an older one waiting on a load** (94 inversions /
+2,742 resolves, issue→resolve up to 127 cycles). The FIFO paired pushes
+and pops by order, so TAGE/ITTAGE trained the wrong history row (the
+tables never converged on an always-taken branch) and a mispredict
+restored another branch's RAS. Two more RAS defects rode along: a
+consumed-then-killed `jal`/`ret` had already pushed/popped the RAS and
+did so again when refetched after the switch (hart 1: 64/112 calls,
+108/160 returns killed → 34/40 executed returns mispredicted), and the
+T18 depth-16 full-stack snapshot cost ≈118 kbit of flops per core.
+
+**Design (`core/frontend/g6lc_bp_ckpt.sv`, `ras.sv`, `g6lc_bp_top.sv`,
+`core/fetch_B/{frontend,instr_queue}.sv`, `core/branch_unit.sv`,
+`core/cva6.sv` types, `core/include/g6lc_core_types.svh`).**
+- Checkpoints are **allocated per consumed CF slot and addressed by a tag
+  the instruction carries** (`branchpredict_sbe_t.ckpt_v/ckpt_idx`,
+  through the IQ, decoder, scoreboard and back in `bp_resolve_t`): a
+  resolve frees its own entry (the TAGE/ITTAGE update fold reads that
+  entry's GHR), a mispredict restores from it and reclaims every younger
+  entry; the two spare tag bits are a per-bank epoch, so a resolve that
+  outlives a reclaim cannot touch the new owner of its index. A full bank
+  refuses the window (`ckpt_v = 0` → fall back, never desync).
+- An IF flush that is not this frontend's mispredict (switch, commit-side
+  replay, exception, outranked mispredict) **clears the fetch hart's bank
+  and first restores its RAS from the oldest live entry** — the context at
+  the restart frontier (every CF between the frontier and it would be an
+  older live entry) — so the killed parcels' speculative pushes/pops are
+  undone before they are refetched.
+- The RAS is a **pointer stack** (`{ra[DEPTH], tos, cnt}` per hart); push /
+  pop / replace-top / overflow / empty semantics equal the shift stack it
+  replaced, and an empty stack presents `ra = 0` as the shift stack did
+  (the branch unit relies on it: an unpredicted return travels as
+  `cf = Return` with that address and is caught at resolve only because
+  it cannot equal the target — the first T21 cut returned the stale cell
+  and the int2_l3 boot retired `fp_init`'s fall-through, §below). A
+  checkpoint is `{tos, cnt, ra[tos]}` (the one cell a wrong-path
+  pop-then-push can overwrite); on a mispredict restore the resolving
+  CF's own effect is re-applied (`Return` re-pops, `is_call` re-pushes
+  `next_pc`, both carried in `bp_resolve_t`) because the snapshot is the
+  state before its window. Restore targets the resolving hart on a
+  mispredict and the fetch hart on a clear (`restore_hart_i`).
+- Timing: the checkpoint tag is a small adder on `instr_queue_consumed`
+  into the IQ data input; the RAS restore adds a 64-bit mux on the stack
+  write. Area: server `cva6` synth smoke **284,711 cells (T15 baseline
+  286,763 with RASDepth 2; the T18 full-stack design was never
+  synthesized)**, latch check clean; int2_l3 cluster +0.38 % pre-sweep
+  cells (the carried tag on a profile without a bank).
+
+**Evidence (`t21/T21-CKPT-PROBE.md`, `t21/T21-VERIFY-REPORT.md`).**
+Lint 0 e on seven targets (+1/+2 w: the new struct fields), remote lint
+29/36 w at baseline, remote synth int2_l3 clean 43 w. Formal: all fetch_B
+`.sby` tasks PASS except the pre-existing non-terminating `g6lc_fetch_iq
+cover` and `g6lc_fetch_iq_order prove/cover` (bmc PASS); thread_select /
+rob / fp_owner as before. Leaves: fetch_queue 5 geometries, fetch_restore
++ mutant, statcor; new `REVIEW_RTL_RAS` (6 scenarios + 5 negatives) and
+the rewritten `REVIEW_RTL_CKPT` (7 scenarios + 6 negatives: own-entry
+identity under OoO resolution, two-slot allocation, restore reclaims
+younger, capacity/refusal/reuse, stale-epoch tag, clear + clear-time
+restore, mispredict-cycle refusal + flush). `g6lc64_ooo` FP suite 22/22 +
+11 probes Spike retirement-exact, every `[ckpt] final` 0 mismatch / dead /
+dropped / refused, cycles equal except s10 −16 and s11 −136 (−1.2 %).
+**Drained anchors byte-identical RVFI: int2_l3 ring-16 18,357,056,
+smt2_ooo_int 10,472,823, smt2 12,391,556** (the pointer RAS is inert on
+the BHT profiles once `ra = 0` on empty). Server directed set (14
+programs + negatives) all pass, witnesses 0. Server 720 K A/B against the
+old-design probe run: boot core `pop_mismatch 7,512 → 0`,
+`restore_mismatch 1,282 → 0`, refused 31,186 → 0, mispredicts in the
+window 2,293 → 1,016 restores, `ret` mispredicts 0 / 1,459 resolves,
+`fdt_next_tag` `ret` retire gap 6 → 1 and `jr a5 → +0xb8` 3.97 → 0.00,
+`fdt_next_node` reached 13,116 cycles earlier; P1 is bounded by the
+quantum switch, so the P2 gain (the 27 M-cycle libfdt phases) is read
+from the canonical boot. **Canonical 48 M strict server boot on the T21
+tree running: `ooocoh-t21f-server-osbi-48M` (launched 02:38 UTC);
+T20 reference 38,988,173.**
+
+**The defect the battery caught.** The first pointer-RAS cut returned
+`ra_q[tos]` regardless of `cnt`; on int2_l3 the boot was RVFI-identical for
+2,840,183 lines, then `fp_init`'s `jr t0` (RAS empty after a
+BTB-mispredicted `jalr t0` window had popped it) travelled as `cf =
+Return` with the stale cell — the true target — the branch unit saw no
+mispredict, the frontend had not redirected, and the fall-through
+`put_f32_reg` table retired until the cap. Fixed by zeroing `ra` when
+empty (shift-stack semantics), asserted (`ras_empty_zero`) and covered by
+the RAS leaf. The contract itself (an unpredicted return relying on a
+wrong address to be caught) is recorded as a frontend hardening item.
+
+**Residuals / next.** `BPStatCorEn` on the server (64 untagged counters
+overriding TAGE; the always-taken `bltu` in P2 is the test — read the
+48 M boot's `[ckpt] final` branch census and the site gaps before
+touching it); `SmtFetchQuantum 4 → 128` A/B for P1; the fetch_A
+frontends do not drive the new `branch_predict` fields (not compiled);
+the unpredicted-indirect-call same-window residual of the pre-window
+snapshot (self-heals).

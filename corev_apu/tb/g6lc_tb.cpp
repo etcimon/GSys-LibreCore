@@ -198,6 +198,10 @@ static const char *verilog_plusargs[] = {
     // absent): core/smt/g6lc_thread_select.sv [smt-sched] and core/cva6.sv
     // [smt-flow]/[smt-probe] (+smt_handoff_trace == +smt_flow_trace).
     "smt_sched_lo", "smt_sched_hi", "smt_handoff_trace", "smt_flow_lo", "smt_flow_hi",
+    // T21 BP checkpoint association probe (core/cva6.sv gen_ckpt_trace,
+    // translate_off): mismatch / dead / refused events inside the fe window;
+    // the [ckpt] final census prints regardless. Same allowlist rule as above.
+    "ckpt_trace",
     // AI island per-job PMU record (corev_apu/ai_island/g6lc_ai_island_top.sv,
     // translate_off): one AI_JOB line per completed descriptor, harvested by
     // verif/regress/ai-matrix-veri.sh AI_MATRIX_BENCH=1.

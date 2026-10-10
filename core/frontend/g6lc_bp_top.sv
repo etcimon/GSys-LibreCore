@@ -4,9 +4,13 @@
 // Versions of this file released before 2026-08-05 were additionally available
 // under Apache-2.0 WITH SHL-2.1; that grant is irrevocable for those versions.
 //
-// U1 prediction fabric top: composes GHR, checkpoint (GHR+RAS), TAGE-lite,
-// optional loop / SC / ITTAGE. FSE S2: restore GHR+RAS on mispredict; if the
-// checkpoint is empty, flush GHR rather than silently desyncing history.
+// U1 prediction fabric top: composes GHR, checkpoint (GHR + RAS top-of-stack),
+// TAGE-lite, optional loop / SC / ITTAGE. FSE S2 / T21: every consumed control
+// flow allocates a checkpoint whose tag travels with the instruction; its
+// resolution addresses that entry for the update fold, and a mispredict
+// restores the RAS from it (then re-applies the CF's own push/pop) and
+// reclaims every younger entry. A resolve whose entry is gone falls back to
+// the live history and leaves the RAS alone.
 
 module g6lc_bp_top
   import ariane_pkg::*;
@@ -15,7 +19,11 @@ module g6lc_bp_top
     parameter type bht_update_t = logic,
     parameter type btb_update_t = logic,
     parameter type btb_prediction_t = logic,
-    parameter type ras_t = logic
+    // T21: width of the checkpoint index carried by branch_predict.ckpt_idx,
+    // and the RAS top-of-stack checkpoint field widths (ras PTR_W / CNT_W)
+    parameter int unsigned CKPT_IDX_W = 8,
+    parameter int unsigned RAS_PTR_W = (CVA6Cfg.RASDepth <= 1) ? 1 : $clog2(CVA6Cfg.RASDepth),
+    parameter int unsigned RAS_CNT_W = (CVA6Cfg.RASDepth < 1) ? 1 : $clog2(CVA6Cfg.RASDepth + 1)
 ) (
     input  logic                    clk_i,
     input  logic                    rst_ni,
@@ -25,25 +33,42 @@ module g6lc_bp_top
     input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] hart_i,
     // FSE S5: resolve/train hart for ckpt push/pop/restore and GHR train
     input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] resolve_hart_i,
-    // Prediction-time checkpoint push: one bit per fetch slot carrying a real
-    // control-flow instruction that was consumed by the instruction queue this
-    // cycle. Entries are pushed in fetch (= program) order so the FIFO head is
-    // always the oldest in-flight CF.
+    // T21: IF-level flush that is not a mispredict (switch / commit replay):
+    // the fetch hart's consumed CFs die unresolved, drop its checkpoints
+    input  logic                    clear_i,
+    // Prediction-time checkpoint allocation: one bit per fetch slot carrying a
+    // real control-flow instruction that was consumed by the instruction queue
+    // this cycle. The allocated index per slot travels with the instruction.
     input  logic [CVA6Cfg.INSTR_PER_FETCH-1:0] push_cf_i,
-    // Any control-flow resolve this cycle (branch/jump/jalr/ret): pops one
-    // checkpoint. mispredict_i additionally restores + drops younger entries.
+    output logic                    ckpt_alloc_v_o,
+    output logic [CVA6Cfg.INSTR_PER_FETCH-1:0][CKPT_IDX_W-1:0] ckpt_alloc_idx_o,
+    // Any control-flow resolve this cycle (branch/jump/jalr/ret) frees its own
+    // checkpoint (ckpt_v_i/ckpt_idx_i as carried by the instruction);
+    // mispredict_i additionally restores from it and drops younger entries.
     input  logic                    cf_resolve_i,
+    input  logic                    ckpt_v_i,
+    input  logic [CKPT_IDX_W-1:0]   ckpt_idx_i,
     input  logic [CVA6Cfg.VLEN-1:0] vpc_bht_i,
     input  logic [CVA6Cfg.VLEN-1:0] vpc_btb_i,
     input  bht_update_t             bht_update_i,
     input  btb_update_t             btb_update_i,
     // Mispredict restore of GHR/RAS (from resolved branch path)
     input  logic                    mispredict_i,
-    // FSE S2: live RAS stack for checkpointing (train-hart snapshot)
-    input  ras_t [CVA6Cfg.RASDepth == 0 ? 0 : CVA6Cfg.RASDepth-1:0] ras_stack_i,
-    // FSE S2: restore RAS stack on mispredict
+    // T21: live RAS top-of-stack checkpoint of the fetch hart (ras snap_*_o)
+    input  logic [RAS_PTR_W-1:0]    ras_tos_i,
+    input  logic [RAS_CNT_W-1:0]    ras_cnt_i,
+    input  logic [CVA6Cfg.VLEN-1:0] ras_top_i,
+    // T21: restore the RAS top-of-stack checkpoint -- on a mispredict (the
+    // resolving CF's entry, ras_restore_own_o set: the frontend re-applies
+    // that CF's own push/pop) or on clear_i (the fetch hart's oldest live
+    // entry = the restart frontier context; no own effect). ras_restore_hart_o
+    // names the bank.
     output logic                    ras_restore_o,
-    output ras_t [CVA6Cfg.RASDepth == 0 ? 0 : CVA6Cfg.RASDepth-1:0] ras_restore_stack_o,
+    output logic                    ras_restore_own_o,
+    output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] ras_restore_hart_o,
+    output logic [RAS_PTR_W-1:0]    ras_restore_tos_o,
+    output logic [RAS_CNT_W-1:0]    ras_restore_cnt_o,
+    output logic [CVA6Cfg.VLEN-1:0] ras_restore_top_o,
     output bht_prediction_t [CVA6Cfg.INSTR_PER_FETCH-1:0] bht_prediction_o,
     output btb_prediction_t [CVA6Cfg.INSTR_PER_FETCH-1:0] btb_prediction_o
 );
@@ -62,13 +87,14 @@ module g6lc_bp_top
       (CVA6Cfg.BPIndirectEntries != 0) ? CVA6Cfg.BPIndirectEntries : 32;
   localparam int unsigned FOLD_W = 8;
   localparam int unsigned NR_FOLDS = 8;
-  localparam int unsigned RAS_D = (CVA6Cfg.RASDepth < 1) ? 1 : CVA6Cfg.RASDepth;
+
+  localparam int unsigned CKPT_IDX_LOCAL = (CKPT_DEPTH <= 1) ? 1 : $clog2(CKPT_DEPTH);
 
   logic [GHIST_LEN-1:0] ghist, train_ghist, ckpt_ghist, fold_src;
   logic [NR_FOLDS-1:0][FOLD_W-1:0] folded, folded_src;
   logic hist_upd_v, hist_upd_taken;
   logic restore_v;
-  logic ckpt_empty, ckpt_desync;
+  logic ckpt_entry_v;
   // The GHR bank only ever shifts in resolved (architectural) outcomes, so a
   // mispredict never needs a GHR restore — there is no speculative history to
   // unwind. flush_bp_i remains the only reset of a bank.
@@ -79,16 +105,20 @@ module g6lc_bp_top
   assign train_h = (hist_upd_v || mispredict_i) ? resolve_hart_i : hart_i;
 
   // Update-fold source: the resolving CF's own prediction-time GHR snapshot
-  // (checkpoint head) when the association is trustworthy, else the live
-  // train-hart bank (also the only source when BPCkptDepth==0).
-  assign fold_src = (!ckpt_empty && !ckpt_desync) ? ckpt_ghist : train_ghist;
+  // (its checkpoint entry, addressed by the index it carried) when that entry
+  // is live, else the live train-hart bank (also the only source when
+  // BPCkptDepth==0 or the window was not checkpointed).
+  assign fold_src = ckpt_entry_v ? ckpt_ghist : train_ghist;
   // Suppress pushes on a mispredict cycle: any window consumed then is
   // wrong-path and is being flushed, so its CFs never resolve.
   logic [CVA6Cfg.INSTR_PER_FETCH-1:0] push_cf;
   assign push_cf = push_cf_i & {CVA6Cfg.INSTR_PER_FETCH{~mispredict_i}};
 
-  logic [RAS_D-1:0] push_ras_v, rest_ras_v;
-  logic [RAS_D-1:0][CVA6Cfg.VLEN-1:0] push_ras_ra, rest_ras_ra;
+  logic [CVA6Cfg.INSTR_PER_FETCH-1:0][CKPT_IDX_W-1:0] alloc_idx;
+  logic                 clear_rest;
+  logic [RAS_PTR_W-1:0] entry_tos, clear_tos;
+  logic [RAS_CNT_W-1:0] entry_cnt, clear_cnt;
+  logic [CVA6Cfg.VLEN-1:0] entry_top, clear_top;
 
   bht_prediction_t [CVA6Cfg.INSTR_PER_FETCH-1:0] tage_pred, loop_pred, sc_pred;
   btb_prediction_t [CVA6Cfg.INSTR_PER_FETCH-1:0] ittage_pred;
@@ -120,16 +150,12 @@ module g6lc_bp_top
       .folded_src_o     (folded_src)
   );
 
-  // ----- Checkpoint (GHR + RAS stack), banked per resolve hart (FSE S5) -----
+  // ----- Checkpoint (GHR + RAS top-of-stack), banked per hart (FSE S5) -----
+  // T21: indexed; the entry index travels with the instruction and comes back
+  // with its resolution (ckpt_v_i / ckpt_idx_i).
   if (CVA6Cfg.BPCkptDepth != 0) begin : gen_ckpt
-    if (CVA6Cfg.RASDepth != 0) begin : gen_ras_pack
-      for (genvar r = 0; r < CVA6Cfg.RASDepth; r++) begin : gen_r
-        assign push_ras_v[r]  = ras_stack_i[r].valid;
-        assign push_ras_ra[r] = ras_stack_i[r].ra;
-      end
-    end else begin : gen_no_ras_pack
-      assign push_ras_v  = '0;
-      assign push_ras_ra = '0;
+    if (CKPT_IDX_W < CKPT_IDX_LOCAL) begin : gen_err_ckpt_idx_width
+      $error("g6lc_bp_top: the carried checkpoint index is narrower than BPCkptDepth needs");
     end
 
     g6lc_bp_ckpt #(
@@ -137,52 +163,74 @@ module g6lc_bp_top
         .GHIST_LEN(GHIST_LEN),
         .DEPTH    (CKPT_DEPTH),
         .RAS_DEPTH(CVA6Cfg.RASDepth),
+        .RAS_PTR_W(RAS_PTR_W),
+        .RAS_CNT_W(RAS_CNT_W),
         .RAS_VLEN (CVA6Cfg.VLEN),
-        .NR_PUSH  (CVA6Cfg.INSTR_PER_FETCH)
+        .NR_PUSH  (CVA6Cfg.INSTR_PER_FETCH),
+        .IDX_W    (CKPT_IDX_LOCAL),
+        .TAG_W    (CKPT_IDX_W)
     ) i_ckpt (
         .clk_i,
         .rst_ni,
         .flush_i          (flush_bp_i),
+        .clear_i          (clear_i),
+        .clear_restore_o  (clear_rest),
+        .clear_ras_tos_o  (clear_tos),
+        .clear_ras_cnt_o  (clear_cnt),
+        .clear_ras_top_o  (clear_top),
         .push_hart_i      (hart_i),
         .pop_hart_i       (resolve_hart_i),
-        // Predict-time push: one entry per consumed CF slot, snapshotting the
-        // live fetch-hart GHR and RAS stack — the context the prediction used.
+        // Predict-time allocation: one entry per consumed CF slot, snapshotting
+        // the live fetch-hart GHR and RAS top — the context the prediction used.
         .push_i           (push_cf),
         .push_ghist_i     (ghist),
-        .push_ras_valid_i (push_ras_v),
-        .push_ras_ra_i    (push_ras_ra),
+        .push_ras_tos_i   (ras_tos_i),
+        .push_ras_cnt_i   (ras_cnt_i),
+        .push_ras_top_i   (ras_top_i),
+        .alloc_v_o        (ckpt_alloc_v_o),
+        .alloc_idx_o      (alloc_idx),
         .pop_i            (cf_resolve_i),
+        .pop_v_i          (ckpt_v_i),
+        .pop_idx_i        (ckpt_idx_i),
         .restore_i        (mispredict_i),
-        .restore_ghist_o  (ckpt_ghist),
-        .restore_ras_valid_o(rest_ras_v),
-        .restore_ras_ra_o   (rest_ras_ra),
+        .entry_valid_o    (ckpt_entry_v),
+        .entry_ghist_o    (ckpt_ghist),
+        .entry_ras_tos_o  (entry_tos),
+        .entry_ras_cnt_o  (entry_cnt),
+        .entry_ras_top_o  (entry_top),
         .restore_valid_o  (restore_v),
-        .empty_o          (ckpt_empty),
-        .full_o           (),
-        .desync_o         (ckpt_desync)
+        .empty_o          (),
+        .full_o           ()
     );
-
-    if (CVA6Cfg.RASDepth != 0) begin : gen_ras_restore
-      assign ras_restore_o = restore_v;
-      for (genvar r = 0; r < CVA6Cfg.RASDepth; r++) begin : gen_rr
-        assign ras_restore_stack_o[r].valid = rest_ras_v[r];
-        assign ras_restore_stack_o[r].ra    = rest_ras_ra[r];
-      end
-    end else begin : gen_no_ras_restore
-      assign ras_restore_o = 1'b0;
-      assign ras_restore_stack_o = '0;
-    end
+    assign ckpt_alloc_idx_o = alloc_idx;
+    // clear and mispredict restore are exclusive by construction (clear_i is
+    // the non-mispredict flush); the clear wins should they ever coincide.
+    assign ras_restore_o      = (CVA6Cfg.RASDepth != 0) && (clear_rest || restore_v);
+    assign ras_restore_own_o  = !clear_rest && restore_v;
+    assign ras_restore_hart_o = clear_rest ? hart_i : resolve_hart_i;
+    assign ras_restore_tos_o  = clear_rest ? clear_tos : entry_tos;
+    assign ras_restore_cnt_o  = clear_rest ? clear_cnt : entry_cnt;
+    assign ras_restore_top_o  = clear_rest ? clear_top : entry_top;
   end else begin : gen_no_ckpt
-    assign restore_v     = 1'b0;
-    assign ckpt_ghist    = '0;
-    assign ckpt_empty    = 1'b1;
-    assign ckpt_desync   = 1'b0;
-    assign push_ras_v    = '0;
-    assign push_ras_ra   = '0;
-    assign rest_ras_v    = '0;
-    assign rest_ras_ra   = '0;
-    assign ras_restore_o = 1'b0;
-    assign ras_restore_stack_o = '0;
+    assign restore_v          = 1'b0;
+    assign ckpt_entry_v       = 1'b0;
+    assign ckpt_ghist         = '0;
+    assign alloc_idx          = '0;
+    assign ckpt_alloc_v_o     = 1'b0;
+    assign ckpt_alloc_idx_o   = '0;
+    assign clear_rest         = 1'b0;
+    assign entry_tos          = '0;
+    assign entry_cnt          = '0;
+    assign entry_top          = '0;
+    assign clear_tos          = '0;
+    assign clear_cnt          = '0;
+    assign clear_top          = '0;
+    assign ras_restore_o      = 1'b0;
+    assign ras_restore_own_o  = 1'b0;
+    assign ras_restore_hart_o = resolve_hart_i;
+    assign ras_restore_tos_o  = '0;
+    assign ras_restore_cnt_o  = '0;
+    assign ras_restore_top_o  = '0;
   end
 
   // ----- TAGE direction -----

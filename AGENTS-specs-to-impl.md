@@ -1229,3 +1229,15 @@ could refill it). Anchors re-baselined (int2_l3 18,357,056; smt2 12,391,556; smt
   `[misp-hart]`, `[hpd-phantom]`, `[hpd-zombie]` and the `+hpd_rtab_trace` / `+fe_trace` probes.
 Evidence: `core/ooo/AGENTS-ooo-plan.md` T18, T19, T20. First strict 8-hart boot of
 `g6lc64_ooo_server`: 38,988,173 cycles; drained anchors byte-identical.
+
+## T21: branch-prediction recovery under out-of-order resolution (2026-10-10)
+
+- `core/frontend/g6lc_bp_ckpt.sv`: indexed checkpoint buffer (tag = {epoch, index} carried by the
+  instruction; resolve/restore by tag; clear on non-mispredict IF flush with a RAS restore from the
+  oldest live entry); `core/frontend/ras.sv`: pointer stack with `{tos, cnt, ra[tos]}` checkpoint and
+  own-effect replay, `ra = 0` when empty; `core/frontend/g6lc_bp_top.sv` composes them.
+- `core/fetch_B/instr_queue.sv` / `core/branch_unit.sv` / `core/cva6.sv` types /
+  `core/include/g6lc_core_types.svh`: `branchpredict_sbe_t += {ckpt_v, ckpt_idx[7:0], is_call}`,
+  `bp_resolve_t += {ckpt_v, ckpt_idx, is_call, next_pc}` (`#bp` speculation guide: recovery state
+  is per branch, not per order).
+- Area: server `cva6` 284,711 cells at RASDepth 16 (T15 286,763 at depth 2). Evidence: plan T21.
