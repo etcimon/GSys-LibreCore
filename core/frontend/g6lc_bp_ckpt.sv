@@ -159,11 +159,18 @@ module g6lc_bp_ckpt
   // An entry is live when its valid bit is set and its index lies inside the
   // bank's span (distance from head < span); indices outside the span belong
   // to reclaimed generations.
-  logic [SPAN_W-1:0] pop_dist;
+  // pop_dist: the entry's ring distance from the head. The slot subtraction
+  // wraps modulo 2^SPAN_W when the entry lies past the ring boundary (slot <
+  // head slot), so it is folded back onto the ring with idx_of -- for the
+  // liveness test AND for the restore truncation below (the raw difference
+  // there pulled the allocation pointer back a whole lap too far: the span
+  // read d + DEPTH, nothing younger was reclaimed and the bank refused every
+  // allocation until the next clear).
+  logic [SPAN_W-1:0] pop_diff, pop_dist;
   logic              pop_live;
-  assign pop_dist = SPAN_W'(idx_of({1'b0, pop_slot})) - SPAN_W'(idx_of(head_q[csel]));
-  assign pop_live = pop_v_i && valid_q[csel][pop_slot] &&
-                    (SPAN_W'(idx_of(pop_dist)) < span[csel]) &&
+  assign pop_diff = SPAN_W'(idx_of({1'b0, pop_slot})) - SPAN_W'(idx_of(head_q[csel]));
+  assign pop_dist = SPAN_W'(idx_of(pop_diff));
+  assign pop_live = pop_v_i && valid_q[csel][pop_slot] && (pop_dist < span[csel]) &&
                     (EPOCH_W == 0 || mem_q[csel][pop_slot].epoch == pop_epoch);
   assign entry_valid_o   = pop_live;
   assign entry_ghist_o   = mem_q[csel][pop_slot].ghist;
@@ -172,13 +179,15 @@ module g6lc_bp_ckpt
   assign entry_ras_top_o = mem_q[csel][pop_slot].ras_top;
   assign restore_valid_o = restore_i && pop_live;
 
-  // ---- clear-side read: the fetch hart's oldest live entry
-  logic [IDX_W-1:0] head_slot;
-  assign head_slot       = idx_of(head_q[psel]);
-  assign clear_restore_o = clear_i && !flush_i && (span[psel] != '0) && valid_q[psel][head_slot];
-  assign clear_ras_tos_o = mem_q[psel][head_slot].ras_tos;
-  assign clear_ras_cnt_o = mem_q[psel][head_slot].ras_cnt;
-  assign clear_ras_top_o = mem_q[psel][head_slot].ras_top;
+  // ---- clear-side read: the fetch hart's oldest live entry (after this
+  // cycle's frees -- a CF resolving on the clear cycle is older than the
+  // frontier and must not be the restore point)
+  logic [NH-1:0]            live_any;
+  logic [NH-1:0][IDX_W-1:0] live_slot;
+  assign clear_restore_o = clear_i && !flush_i && live_any[psel];
+  assign clear_ras_tos_o = mem_q[psel][live_slot[psel]].ras_tos;
+  assign clear_ras_cnt_o = mem_q[psel][live_slot[psel]].ras_cnt;
+  assign clear_ras_top_o = mem_q[psel][live_slot[psel]].ras_top;
 
   // ---- allocation: all of this cycle's slots or none
   logic [PUSH_CNT_W-1:0] push_cnt;
@@ -205,28 +214,67 @@ module g6lc_bp_ckpt
     end
   end
 
-  // ---- next state
+  // ---- post-free state: this cycle's valid vector / allocation pointer after
+  // the resolve-side frees (plain resolve, restore truncation) and before
+  // allocation and the bank drop. The oldest-live search and the clear-side
+  // read work on this view: a CF resolving on the clear cycle is older than
+  // the restart frontier and must not be the restore point, and the drop
+  // must not hide the entry the clear restores from. alloc_free is the
+  // allocation pointer that pairs with valid_free (restore pulls it back to
+  // head + pop_dist); the head collapses onto it when nothing is live.
+  logic [NH-1:0][DEPTH-1:0]  valid_free;
+  logic [NH-1:0][SPAN_W-1:0] alloc_free;
   logic [SPAN_W-1:0] k_dist;
   always_comb begin
-    valid_d = valid_q;
-    head_d  = head_q;
-    alloc_d = alloc_q;
-    epoch_d = epoch_q;
-    k_dist  = '0;
-
+    valid_free = valid_q;
+    alloc_free = alloc_q;
+    k_dist     = '0;
     // resolve bank: restore reclaims the entry and every younger one; a plain
     // resolve frees its entry
     if (restore_i && pop_live) begin
       for (int unsigned k = 0; k < DEPTH; k++) begin
         k_dist = SPAN_W'(IDX_W'(k)) - SPAN_W'(idx_of(head_q[csel]));
         k_dist = SPAN_W'(idx_of(k_dist));
-        if (k_dist >= pop_dist && k_dist < span[csel]) valid_d[csel][k] = 1'b0;
+        if (k_dist >= pop_dist && k_dist < span[csel]) valid_free[csel][k] = 1'b0;
       end
-      alloc_d[csel] = head_q[csel] + pop_dist;
-      epoch_d[csel] = epoch_q[csel] + EP_W'(1);
+      alloc_free[csel] = head_q[csel] + pop_dist;
     end else if (pop_i && pop_live) begin
-      valid_d[csel][pop_slot] = 1'b0;
+      valid_free[csel][pop_slot] = 1'b0;
     end
+  end
+
+  // ---- oldest live entry per bank (on the post-free valid vector). valid
+  // bits only ever exist inside [head, alloc_free), so the first set bit of
+  // the head-rotated vector is the oldest live entry.
+  logic [NH-1:0][DEPTH-1:0]  valid_rot;
+  logic [NH-1:0][IDX_W-1:0]  live_off;
+  logic [NH-1:0]             live_none;
+  for (genvar h = 0; h < NH; h++) begin : gen_oldest_live
+    logic [2*DEPTH-1:0] rot_ext;
+    assign rot_ext      = {valid_free[h], valid_free[h]} >> idx_of(head_q[h]);
+    assign valid_rot[h] = rot_ext[DEPTH-1:0];
+    if (DEPTH > 1) begin : gen_lzc
+      lzc #(.WIDTH(DEPTH), .MODE(1'b0)) i_lzc (
+          .in_i   (valid_rot[h]),
+          .cnt_o  (live_off[h]),
+          .empty_o(live_none[h])
+      );
+    end else begin : gen_lzc1
+      assign live_off[h]  = '0;
+      assign live_none[h] = !valid_rot[h][0];
+    end
+    assign live_any[h]  = !live_none[h];
+    assign live_slot[h] = idx_of(head_q[h] + SPAN_W'(live_off[h]));
+  end
+
+  // ---- next state (a separate block from the post-free view: it consumes
+  // the lzc result, the post-free block feeds it -- one block for both would
+  // read its own output through the search)
+  always_comb begin
+    valid_d = valid_free;
+    alloc_d = alloc_free;
+    epoch_d = epoch_q;
+    if (restore_i && pop_live) epoch_d[csel] = epoch_q[csel] + EP_W'(1);
 
     // allocation bank (after the reclaim, so a same-bank restore + allocate
     // cannot coexist -- alloc_en already excludes it)
@@ -237,11 +285,13 @@ module g6lc_bp_ckpt
       alloc_d[psel] = alloc_q[psel] + SPAN_W'(push_cnt);
     end
 
-    // head reclaim: one freed entry per cycle (frees arrive at most one per
-    // cycle; the span shrinks as fast as it needs to)
+    // head reclaim: the head moves to the oldest live entry (holes left by
+    // out-of-order frees are reclaimed at once); an all-free span collapses
+    // onto the post-free allocation pointer -- NOT onto alloc_d, which already
+    // counts this cycle's allocations: those sit at [alloc_free, alloc_d) and
+    // are the live entries the head must stop at.
     for (int unsigned h = 0; h < NH; h++) begin
-      if ((alloc_d[h] - head_q[h]) != '0 && !valid_d[h][idx_of(head_q[h])])
-        head_d[h] = head_q[h] + SPAN_W'(1);
+      head_d[h] = live_none[h] ? alloc_free[h] : head_q[h] + SPAN_W'(live_off[h]);
     end
 
     // fetch-hart bank drop: exception/fence flush, or an IF flush that is not

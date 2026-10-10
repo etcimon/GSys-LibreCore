@@ -3054,6 +3054,199 @@ module tb_g6lc_review_ckpt;
   end
 endmodule
 
+// T21B: randomized self-checking bench for g6lc_bp_ckpt against an independent
+// list-based reference model (REVIEW_RTL_CKPTRAND; +scenario=N is the seed).
+// The seven directed scenarios above never allocate past the ring boundary or
+// into an emptied bank -- the two defects this bench caught (restore truncation
+// across the ring wrap, head collapse past the cycle's allocations) were
+// invisible to them. Checks, every cycle, before the edge:
+//   * resolve: entry_valid_o == "tag is live in the model" and the entry payload (ghist / ras fields) is the one allocated
+//   * restore_valid_o == restore_i && live; a restore kills the entry and every younger entry of its bank, older ones stay
+//   * alloc_v_o == (push_cnt != 0 && !(restore_i && same bank) && !clear && !flush && span + push_cnt <= DEPTH) with
+//     span = alloc - head of the model (head = oldest live entry after the previous cycle's frees, or the post-free
+//     allocation pointer when nothing is live -- the T21B oldest-live reclaim); alloc_idx_o[k] == position mod DEPTH
+//   * clear_restore_o == clear && !flush && (a live entry remains in the fetch bank after this cycle's frees), and the
+//     clear_ras_* payload is that oldest live entry's
+//   * empty_o / full_o of the resolve bank; stale tags (dead for < 8 cycles) read dead
+//   * white-box invariants: span <= DEPTH; every valid bit lies inside [head, alloc)
+// Plusargs: +seed=N +cycles=N +pclear=N (per-mille) ; parameters NH, DEPTH, NR_PUSH, TAGW via -G.
+module tb_g6lc_review_ckptrand;
+  import ariane_pkg::*;
+  parameter int unsigned NH = 2;
+  parameter int unsigned DEPTH = 4;
+  parameter int unsigned NR_PUSH = 2;
+  parameter int unsigned IDXW = (DEPTH <= 1) ? 1 : $clog2(DEPTH);
+  parameter int unsigned TAGW = IDXW + 4;
+  parameter int unsigned GL = 8;
+  function automatic config_pkg::cva6_cfg_t configuration();
+    config_pkg::cva6_cfg_t c = config_pkg::cva6_cfg_empty;
+    c.VLEN = 32; c.RVC = 1; c.INSTR_PER_FETCH = NR_PUSH; c.NrHarts = NH; c.RASDepth = 4; return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C = configuration();
+  localparam int unsigned HW = $clog2(NH > 1 ? NH : 2);
+
+  logic clk = 0, rst_n = 0, flush = 0, clear = 0, pop = 0, popv = 0, restore = 0;
+  logic [HW-1:0] phart = '0, chart = '0;
+  logic [NR_PUSH-1:0] push = '0;
+  logic [GL-1:0] pghist = '0, eghist;
+  logic [1:0] ptos = '0, etos, ctos;
+  logic [2:0] pcnt = '0, ecnt, ccnt;
+  logic [31:0] ptop = '0, etop, ctop;
+  logic [TAGW-1:0] popidx = '0;
+  logic [NR_PUSH-1:0][TAGW-1:0] aidx;
+  logic av, ev, rv, empty, full, crv;
+
+  g6lc_bp_ckpt #(.CVA6Cfg(C), .GHIST_LEN(GL), .DEPTH(DEPTH), .RAS_DEPTH(4), .RAS_PTR_W(2), .RAS_CNT_W(3),
+                 .RAS_VLEN(32), .NR_PUSH(NR_PUSH), .TAG_W(TAGW)) dut (
+    .clk_i(clk), .rst_ni(rst_n), .flush_i(flush), .clear_i(clear),
+    .clear_restore_o(crv), .clear_ras_tos_o(ctos), .clear_ras_cnt_o(ccnt), .clear_ras_top_o(ctop),
+    .push_hart_i(phart), .pop_hart_i(chart),
+    .push_i(push), .push_ghist_i(pghist), .push_ras_tos_i(ptos), .push_ras_cnt_i(pcnt), .push_ras_top_i(ptop),
+    .alloc_v_o(av), .alloc_idx_o(aidx),
+    .pop_i(pop), .pop_v_i(popv), .pop_idx_i(popidx), .restore_i(restore),
+    .entry_valid_o(ev), .entry_ghist_o(eghist), .entry_ras_tos_o(etos), .entry_ras_cnt_o(ecnt), .entry_ras_top_o(etop),
+    .restore_valid_o(rv), .empty_o(empty), .full_o(full));
+
+  // ---- reference model
+  typedef struct { logic [TAGW-1:0] tag; int pos; logic [GL-1:0] g; logic [1:0] tos; logic [2:0] cnt; logic [31:0] top; } ent_t;
+  localparam int unsigned NHX = (NH < 2) ? 2 : NH;  // (a variable index into a 1-element array of queues miscompiles under Verilator 5.020)
+  ent_t live[NHX][$];          // allocation order (oldest first)
+  int   head_m[NHX], alloc_m[NHX];
+  typedef struct { logic [TAGW-1:0] tag; int bank; int cyc; } dead_t;
+  dead_t dead[$];
+  int cyc = 0, errors = 0, n_alloc = 0, n_res = 0, n_live_res = 0, n_restore = 0, n_live_restore = 0, n_clear = 0, n_clr_restore = 0, n_refused = 0, n_stale = 0;
+  int seed = 1, cycles = 4000, pclear = 20; bit trace = 0, wb = 0;  // +wbonly: design-independent checks only (liveness, payload, span<=DEPTH, valid in [head,alloc))
+
+  function automatic int find_live(int b, logic [TAGW-1:0] t);
+    foreach (live[b][i]) if (live[b][i].tag == t) return i;
+    return -1;
+  endfunction
+  task automatic tick; clk = 1; #2; clk = 0; #2; endtask
+  function automatic int span_m(int b); return alloc_m[b] - head_m[b]; endfunction
+  `define CHK(cond, msg) if (!(cond)) begin errors++; $display("[%0d] CHECK FAILED: %s", cyc, msg); if (errors > 10) $fatal(1, "too many errors"); end
+
+  int b, i, k, pc, n, pick, rtag_i;
+  bit do_res, misp, stale;
+  logic [TAGW-1:0] rtag;
+  bit alloc_exp, live_exp, crv_exp;
+  int oldest_after;
+  ent_t e, ne;
+  dead_t dd;
+  task automatic kill(int bank, logic [TAGW-1:0] t); dd.tag = t; dd.bank = bank; dd.cyc = cyc; dead.push_back(dd); endtask
+  initial begin
+    void'($value$plusargs("seed=%d", seed)); void'($value$plusargs("scenario=%d", seed)); void'($value$plusargs("cycles=%d", cycles)); void'($value$plusargs("pclear=%d", pclear)); trace = $test$plusargs("trace"); wb = $test$plusargs("wbonly");
+    void'($urandom(seed));
+    for (b = 0; b < NH; b++) begin head_m[b] = 0; alloc_m[b] = 0; end
+    #2; tick(); rst_n = 1; tick();
+    for (cyc = 0; cyc < cycles; cyc++) begin
+      // ---- stimulus
+      phart = HW'($urandom_range(NH - 1));
+      push = NR_PUSH'($urandom_range((1 << NR_PUSH) - 1));
+      if ($urandom_range(99) < 30) push = '0;
+      pghist = GL'($urandom()); ptos = 2'($urandom()); pcnt = 3'($urandom()); ptop = $urandom();
+      pc = 0; for (k = 0; k < NR_PUSH; k++) pc += push[k];
+      do_res = 0; misp = 0; stale = 0; pop = 0; popv = 0; restore = 0;
+      b = $urandom_range(NH - 1); chart = HW'(b);
+      pick = $urandom_range(99);
+      if (pick < 55 && live[b].size() != 0) begin
+        do_res = 1; rtag_i = $urandom_range(live[b].size() - 1); rtag = live[b][rtag_i].tag; misp = ($urandom_range(99) < 30);
+      end else if (pick < 65 && dead.size() != 0) begin
+        // a stale tag of this bank (dead for < 8 cycles: no epoch aliasing possible)
+        n = -1; foreach (dead[j]) if (dead[j].bank == b && cyc - dead[j].cyc < 8) n = j;
+        if (n >= 0) begin do_res = 1; stale = 1; rtag = dead[n].tag; misp = ($urandom_range(99) < 50); end
+      end else if (pick < 68) begin
+        pop = 1; popv = 0; restore = ($urandom_range(99) < 50); rtag = TAGW'($urandom()); // unchecked CF: nothing may happen
+      end
+      if (do_res) begin pop = 1; popv = 1; restore = misp; end
+      popidx = rtag;
+      clear = ($urandom_range(999) < pclear); flush = ($urandom_range(999) < pclear / 4);
+      #1;
+      if (trace) begin
+        $write("[%0d] psel=%0d push=%b csel=%0d pop=%0b popv=%0b misp=%0b tag=%0h stale=%0b clear=%0b flush=%0b | ", cyc, phart, push, b, pop, popv, restore, rtag, stale, clear, flush);
+        for (int h = 0; h < NH; h++) $write("bank%0d: head=%0d alloc=%0d span=%0d valid=%b model(head=%0d alloc=%0d live=%0d) ", h, dut.head_q[h], dut.alloc_q[h], dut.span[h], dut.valid_q[h], head_m[h], alloc_m[h], live[h].size());
+        $display(" | av=%0b ev=%0b rv=%0b crv=%0b", av, ev, rv, crv);
+      end
+      // ---- expectations
+      live_exp = do_res && !stale && (find_live(b, rtag) >= 0);
+      `CHK(ev == live_exp, $sformatf("entry_valid_o=%0b exp=%0b bank=%0d tag=%0h stale=%0b", ev, live_exp, b, rtag, stale))
+      if (live_exp) begin
+        e = live[b][find_live(b, rtag)];
+        `CHK(eghist == e.g && etos == e.tos && ecnt == e.cnt && etop == e.top,
+             $sformatf("entry payload ghist=%0h/%0h tos=%0d/%0d cnt=%0d/%0d top=%0h/%0h", eghist, e.g, etos, e.tos, ecnt, e.cnt, etop, e.top))
+      end
+      `CHK(rv == (restore && live_exp), $sformatf("restore_valid_o=%0b exp=%0b", rv, restore && live_exp))
+      alloc_exp = (pc != 0) && !(restore && (phart == chart)) && !flush && !clear && (span_m(phart) + pc <= DEPTH);
+      if (!wb) `CHK(av == alloc_exp, $sformatf("alloc_v_o=%0b exp=%0b bank=%0d span=%0d pc=%0d restore=%0b samebank=%0b clear=%0b flush=%0b", av, alloc_exp, phart, span_m(phart), pc, restore, phart == chart, clear, flush))
+      if (av) begin
+        n = 0;
+        for (k = 0; k < NR_PUSH; k++) if (push[k]) begin
+          `CHK(int'(aidx[k][IDXW-1:0]) == ((alloc_m[phart] + n) % DEPTH), $sformatf("alloc_idx_o[%0d]=%0d exp pos %0d", k, aidx[k][IDXW-1:0], (alloc_m[phart] + n) % DEPTH))
+          n++;
+        end
+      end
+      // clear-side read: oldest live of the fetch bank after this cycle's frees
+      oldest_after = -1;
+      foreach (live[phart][j]) begin
+        if (live_exp && (phart == chart)) begin
+          if (misp) begin if (live[phart][j].pos < e.pos) begin oldest_after = j; break; end end
+          else if (live[phart][j].tag != rtag) begin oldest_after = j; break; end
+        end else begin oldest_after = j; break; end
+      end
+      crv_exp = clear && !flush && (oldest_after >= 0);
+      if (!wb) `CHK(crv == crv_exp, $sformatf("clear_restore_o=%0b exp=%0b bank=%0d", crv, crv_exp, phart))
+      if (crv_exp && !wb) begin
+        `CHK(ctos == live[phart][oldest_after].tos && ccnt == live[phart][oldest_after].cnt && ctop == live[phart][oldest_after].top,
+             $sformatf("clear payload tos=%0d/%0d cnt=%0d/%0d top=%0h/%0h", ctos, live[phart][oldest_after].tos, ccnt, live[phart][oldest_after].cnt, ctop, live[phart][oldest_after].top))
+      end
+      if (!wb) `CHK(empty == (span_m(b) == 0), $sformatf("empty_o=%0b span=%0d", empty, span_m(b)))
+      if (!wb) `CHK(full == (span_m(b) == DEPTH), $sformatf("full_o=%0b span=%0d", full, span_m(b)))
+      // white-box invariants on the registered state
+      for (int h = 0; h < NH; h++) begin
+        `CHK(int'(dut.span[h]) <= DEPTH, $sformatf("dut.span[%0d]=%0d", h, dut.span[h]))
+        if (!wb) `CHK(int'(dut.span[h]) == span_m(h), $sformatf("dut.span[%0d]=%0d model=%0d", h, dut.span[h], span_m(h)))
+        for (int s = 0; s < DEPTH; s++) if (dut.valid_q[h][s]) begin
+          int d; d = (s - (int'(dut.head_q[h]) % DEPTH) + DEPTH) % DEPTH;
+          `CHK(d < int'(dut.span[h]), $sformatf("valid bit outside [head,alloc): bank %0d slot %0d head %0d span %0d", h, s, int'(dut.head_q[h]) % DEPTH, dut.span[h]))
+        end
+      end
+      // ---- bookkeeping (what the edge will do)
+      if (do_res) begin n_res++; if (live_exp) n_live_res++; if (stale) n_stale++; end
+      if (restore && popv) begin n_restore++; if (live_exp) n_live_restore++; end
+      if (clear || flush) n_clear++;
+      if (crv) n_clr_restore++;
+      if (pc != 0 && !av && !restore && !clear && !flush) n_refused++;
+      if (live_exp) begin
+        i = find_live(b, rtag);
+        if (misp) begin
+          // kill it and every younger entry; the allocation pointer falls back to its position
+          while (live[b].size() > i) begin kill(b, live[b][live[b].size()-1].tag); live[b].pop_back(); end
+          alloc_m[b] = e.pos;
+        end else begin
+          live[b].delete(i);
+        end
+      end
+      // head: oldest live after the frees, or the post-free allocation pointer
+      for (int h = 0; h < NH; h++) head_m[h] = (live[h].size() == 0) ? alloc_m[h] : live[h][0].pos;
+      if (av) begin
+        for (k = 0; k < NR_PUSH; k++) if (push[k]) begin
+          ne.tag = aidx[k]; ne.pos = alloc_m[phart]; ne.g = pghist; ne.tos = ptos; ne.cnt = pcnt; ne.top = ptop; live[phart].push_back(ne); alloc_m[phart]++; n_alloc++;
+        end
+      end
+      if (clear || flush) begin
+        while (live[phart].size() != 0) begin kill(phart, live[phart][live[phart].size()-1].tag); live[phart].pop_back(); end
+        head_m[phart] = 0; alloc_m[phart] = 0;
+      end
+      while (dead.size() > 64) dead.pop_front();
+      tick();
+      push = '0; pop = 0; popv = 0; restore = 0; clear = 0; flush = 0;
+    end
+    $display("RTL_REVIEW_%s ckptrand NH=%0d DEPTH=%0d NR_PUSH=%0d seed=%0d cycles=%0d allocs=%0d resolves=%0d (live %0d, stale %0d) restores=%0d (live %0d) clears=%0d clear_restores=%0d refused=%0d errors=%0d",
+             errors == 0 ? "PASS" : "FAIL", NH, DEPTH, NR_PUSH, seed, cycles, n_alloc, n_res, n_live_res, n_stale, n_restore, n_live_restore, n_clear, n_clr_restore, n_refused, errors);
+    if (errors != 0) $fatal(1, "CKPT_RAND_MODEL_MISMATCH");
+    $finish;
+  end
+endmodule
+
 // T21 pointer RAS: push/pop/top semantics equal the shift stack it replaced
 // (overflow drops the oldest, pops run the stack empty, push+pop replaces the
 // top); the {tos,cnt,top} checkpoint restores a stack whose top a wrong-path

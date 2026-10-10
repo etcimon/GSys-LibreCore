@@ -4257,3 +4257,30 @@ touching it); `SmtFetchQuantum 4 → 128` A/B for P1; the fetch_A
 frontends do not drive the new `branch_predict` fields (not compiled);
 the unpredicted-indirect-call same-window residual of the pre-window
 snapshot (self-heals).
+
+**T21b — checkpoint buffer: ring-wrap restore truncation and oldest-live
+head reclaim (2026-10-10).** A randomized model-vs-DUT bench written for the
+reclaim change (now `tb_g6lc_review_ckptrand`, `REVIEW_RTL_CKPTRAND`:
+NH 1/2 × DEPTH 4..64 × NR_PUSH 1..4 × seeds, every cycle checks liveness,
+payload, `alloc_v`/`alloc_idx`, clear restore, span == model, valid ⊆
+[head, alloc)) caught two defects the seven directed scenarios could not
+reach: (1) in the committed T21 the restore truncation used the raw slot
+difference instead of the ring distance, so a mispredict whose entry lay
+past the ring boundary left `span = d + DEPTH` and the bank refused every
+allocation until the next clear — unreachable in every T21 battery run
+(the SMT quantum clears reset the ring every ≤ 7 allocations) but due in
+the solo phase of a strict boot; (2) the first cut of the oldest-live
+reclaim collapsed an all-free bank onto the post-allocation pointer and
+lost the cycle's own allocations. Fixed (`pop_dist = idx_of(pop_diff)`;
+`alloc_free`/`valid_free` post-free view feeding a head-rotated `lzc`
+search, head → oldest live or the post-free pointer; three blocks so the
+`always_comb` never reads its own output through the search). Evidence
+(`t21/T21B-RECLAIM-REPORT.md`): bench 30/30 PASS (4 K and 20 K cycles,
+~2.4 K restores and ~900 stale resolves per run), `REVIEW_RTL_CKPT` 13/13,
+`REVIEW_RTL_RAS` 11/11, fetch_B restore/hold/token PASS (parse-level: those
+proofs elaborate `BPCkptDepth 0`), `g6lc64_ooo` FP 22/22 + probes + wprp
+Spike-exact with every cycle count and `[ckpt] final` identical to T21,
+lint 289 w / 0 e. The 48 M boot launched on the committed T21
+(`ooocoh-t21f-server-osbi-48M`) is kept as the control for defect (1)
+(`refused`/`restore_dropped` expected in its `[ckpt] final`); the verdict
+boot is relaunched on this tree.

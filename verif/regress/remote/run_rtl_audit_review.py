@@ -135,6 +135,9 @@ def main():
         names[-1:-1]=['perf_counters.sv']
     if os.environ.get('REVIEW_RTL_RAS')=='1':
         names[-1:-1]=['ras.sv']
+    if os.environ.get('REVIEW_RTL_CKPT')=='1' or os.environ.get('REVIEW_RTL_CKPTRAND')=='1':
+        # T21: the checkpoint buffer's oldest-live search uses common_cells lzc.
+        names[-1:-1]=['cf_math_pkg.sv','lzc.sv']
     if os.environ.get('REVIEW_RTL_TLB')=='1':
         names[-1:-1]=['cva6_tlb.sv','cf_math_pkg.sv','lzc.sv','rvfi_types.svh']
     if os.environ.get('REVIEW_RTL_STLB')=='1':
@@ -380,6 +383,13 @@ def main():
         # younger, capacity/refusal/reuse, stale-epoch tag, clear_i, same-bank
         # mispredict-cycle allocation refusal + flush.
         configurations=[('ckpt','d4',[],[(n,None) for n in range(7)])]
+    elif os.environ.get('REVIEW_RTL_CKPTRAND')=='1':
+        # T21B randomized model-vs-DUT bench for the indexed checkpoint buffer
+        # (scenario = seed): geometries that wrap the ring and empty the bank.
+        configurations=[('ckptrand','nh2-d64-np4',['-GNH=2','-GDEPTH=64','-GNR_PUSH=4'],[(n,None) for n in (1,2,3)]),
+                        ('ckptrand','nh1-d32-np2',['-GNH=1','-GDEPTH=32','-GNR_PUSH=2'],[(n,None) for n in (1,2)]),
+                        ('ckptrand','nh2-d4-np2',['-GNH=2','-GDEPTH=4','-GNR_PUSH=2'],[(n,None) for n in (1,2)]),
+                        ('ckptrand','nh2-d8-np1',['-GNH=2','-GDEPTH=8','-GNR_PUSH=1'],[(1,None)])]
     elif os.environ.get('REVIEW_RTL_RAS')=='1':
         # T21 pointer RAS: shift-stack equivalence, replace-top, checkpoint
         # restore after a wrong-path pop+push, own-effect re-pop / re-push,
