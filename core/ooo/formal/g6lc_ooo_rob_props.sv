@@ -54,7 +54,6 @@ module g6lc_ooo_rob_props #(
       .rst_ni,
       .flush_i,
       .cancelled_mask_i,
-      .bulk_drop_mask_i('0),
       .alloc_valid_i,
       .alloc_entry_i,
       .alloc_tid_i,

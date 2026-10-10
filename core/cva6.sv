@@ -902,7 +902,6 @@ module cva6
   logic sb_full;
   logic spec_cancel;
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_cancelled_mask;
-  logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_bulk_drop_mask;  // T21d (consumed inside issue_stage)
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_live_mask;
   logic [1:0] mem_phys_valid, mem_mod_valid;
   logic [1:0][CVA6Cfg.PLEN-1:0] mem_phys_addr, mem_mod_addr;
@@ -2291,8 +2290,6 @@ module cva6
             ss_drain_abort = ss_drain_abort + 1;
           end
         end
-        for (int unsigned s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
-          if (sb_bulk_drop_mask[s]) ss_drop = ss_drop + 1;  // T21d bulk drops
         for (int unsigned p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin
           if (commit_ack[p] && commit_drop_id_commit[p])
             ss_drop = ss_drop + 1;
@@ -2457,7 +2454,6 @@ module cva6
       .sb_empty_o              (smt_sb_empty),
       .spec_cancel_o           (spec_cancel),
       .cancelled_mask_o        (sb_cancelled_mask),
-      .bulk_drop_mask_o        (sb_bulk_drop_mask),
       .sb_live_o               (sb_live_mask),
       // T6b: per-hart oldest-live PC, exported for the T6b-2 recovery
       // restart; no consumer yet.

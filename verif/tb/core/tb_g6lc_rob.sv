@@ -40,7 +40,7 @@ module tb_g6lc_rob;
   g6lc_rob #(.ROB_ENTRIES(ROB_ENTRIES),.ROB_W(ROB_W),.NR_ALLOC(NR_ALLOC),
       .NR_RETIRE(NR_RETIRE),.NR_COMPLETE(NR_COMPLETE),.TID_W(TID_W),
       .NR_SB(NR_SB),.entry_t(logic[15:0])) dut (
-    .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.cancelled_mask_i(cancelled),.bulk_drop_mask_i('0),
+    .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.cancelled_mask_i(cancelled),
     .alloc_valid_i(alloc_v),.alloc_entry_i(alloc_e),.alloc_tid_i(alloc_tid),
     .alloc_id_o(alloc_id),.full_o(full),.empty_o(empty),
     .complete_valid_i(complete_v),.complete_tid_i(complete_tid),

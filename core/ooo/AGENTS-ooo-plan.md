@@ -4365,3 +4365,21 @@ the other call site's link — a stack one entry off, the shape of the
 overwrites the entry under the top) or of a push left behind by a kill
 that is not a restore. A `[win] RAS` event probe is in the tree for the
 next window.
+
+**T21d correction — bulk drop reverted (2026-10-10).** The T21e P2 window
+(`ooocoh-t21e-server-p2win`, bulk drop + tagged corrector + larger
+predictor tables) stopped at 2,339,759 cycles on
+`store_buffer.sv ooo_no_younger_forward` ("OoO load tid 30 forwarded from
+a younger store"). Mechanism: the store buffer, the LSQ and the load unit
+reject a late wrong-path arrival by its scoreboard slot's *sticky*
+`cancelled` bit (`valid_i && !cancelled_mask_i[trans_id_i]`); the port
+walk kept that bit visible for the ~24 cycles a wrong-path store needs to
+clear the store unit's pipeline, the bulk drop cleared it the next cycle,
+and a dead store was admitted to the speculative queue and forwarded to a
+load. The slow walk-out was load-bearing. Reverted (scoreboard /
+issue_stage / dispatch / rob / backend / leaf / props back to T21c); the
+tagged corrector, the `[win] RAS` probe and the analysis stay. Lesson
+recorded in the contract: a cancelled entry's slot may not be reclaimed
+before every unit that keys on its tid has seen the cancel; a faster
+recovery needs an explicit per-slot epoch, not a shorter walk. Measured
+loss from the revert ≈ 0.1 % P2 CPI.
