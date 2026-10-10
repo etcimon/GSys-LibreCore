@@ -4383,3 +4383,21 @@ recorded in the contract: a cancelled entry's slot may not be reclaimed
 before every unit that keys on its tid has seen the cancel; a faster
 recovery needs an explicit per-slot epoch, not a shorter walk. Measured
 loss from the revert ≈ 0.1 % P2 CPI.
+
+**T21c verdict — canonical 48 M strict server boot on the T21b RTL + 128/64
+knobs (2026-10-10): `ooocoh-t21c-server-osbi-48M` PASS, `strictDualPassed`,
+33,978,590 cycles (T20 38,988,173: −5.01 M, −12.9 %).** Tracer-terminated
+on the payload's `tohost`, all eight harts ran the payload (boot hart 0:
+29,969,207 retirements; the others 604.9–672.5 K), force / force_wfi /
+force_abs / aborts 0 on every core, traps 0, `[hpd-phantom]` 0,
+`[hpd-zombie]` 0, `[misp-hart]` 0, `[ckpt] final` pop_mismatch /
+restore_mismatch / restore_dropped / pop_dead / refused 0 on all cores.
+Census, boot core: 3,393,153 branch resolves / 133,116 mispredicts
+(3.9 %), 416,553 returns / 3,830 mispredicts (0.9 %; T20's fdt_next_tag
+return alone mispredicted 96 % of 59 K), 658,774 jumps / 24,570 (3.7 %).
+Switch count on the boot core 25,580 for the whole boot (T20: 28,829 in
+the first 720 K cycles). Harvest:
+`remote-runs/ooocoh-t21c-server-osbi-48M-harvest/output/`,
+`t21/osbi-harvest-t21c-48M.out`. This is the number the server profile
+carries from here; T21e (tagged corrector + predictor sizing) runs its
+own verdict next.
