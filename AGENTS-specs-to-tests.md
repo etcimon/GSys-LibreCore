@@ -2332,8 +2332,9 @@ server boot core, T21 0 everywhere. Drained anchors byte-identical (int2_l3 18,3
 
 `tb_g6lc_bp_statcor` carries the tagged model (table-alias scenario: the alias owner never forces PC0,
 PC0's training decays then takes the row over; coverage requires takeovers / decays / tag-miss lookups).
-`tb_g6lc_review_ckptrand` (REVIEW_RTL_CKPTRAND) randomized checkpoint-buffer bench. The bulk drop is
-witnessed by `[smt-drain] FINAL drop=` (dead before T21d), the `[ooo-misp]` recovery histogram
-(`+misp_stats`: 24–31-cycle band 3,082 → 7 in the server P2 window) and the `[win]` KILL→CMT timeline
-(resolve → target commit 25 → 7); exactness by the FP suite / probes (Spike) and the drained anchors
-(smt2_ooo_int / smt2 byte-identical, int2_l3 strict PASS with timing-legible spin/lock differences only).
+`tb_g6lc_review_ckptrand` (REVIEW_RTL_CKPTRAND) randomized checkpoint-buffer bench. The reverted bulk
+drop left one witness worth keeping in mind: `store_buffer.sv ooo_no_younger_forward` fired within 2.4 M
+cycles of the server boot when a cancelled slot was reclaimed before the store unit had seen the cancel —
+the sim-only assertion is the guard for any future recovery-latency change. The `[ooo-misp]` histogram
+(`+misp_stats`) and the `[win]` KILL→CMT timeline measure the walk-out (25-cycle resolve → target commit
+with ~36 entries in flight on the server).

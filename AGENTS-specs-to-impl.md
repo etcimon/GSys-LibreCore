@@ -1248,7 +1248,7 @@ Evidence: `core/ooo/AGENTS-ooo-plan.md` T18, T19, T20. First strict 8-hart boot 
   qualified SMT profile; the 16-cycle starve leg had owned the cold boot).
 - `core/frontend/g6lc_bp_statcor.sv`: rows tagged with 8 address bits above the index; override on a tag
   hit only, weak-row takeover, strong-row decay (`#bp`: a corrector may only speak for the branch it saw).
-- `core/scoreboard.sv` `gen_bulk_drop` + `bulk_drop_mask_o` → `issue_stage` → `g6lc_ooo_dispatch` →
-  `g6lc_rob.bulk_drop_mask_i`: the cancelled run behind the acked commit ports is reclaimed up to 8 per
-  cycle (drained / single-hart pointer; CSR/CVXIF and replay-marked entries left to the port path).
+- Scoreboard bulk drop of the cancelled run: tried and reverted (plan T21d correction) — the sticky
+  `cancelled` bit is the tid consumers' late-arrival filter (`#ldst` single-copy atomicity: a dead store
+  must never become visible); contract row "Cancelled-slot lifetime".
 Evidence: plan T21c / T21d (`t21/T21-FOLLOWUP-REPORT.md`, `t21/T21D-REPORT.md`).
