@@ -48,6 +48,8 @@ module issue_stage
     output logic spec_cancel_o,
     // U5 production: SB cancel mask for OoO squash
     output logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cancelled_mask_o,
+    // T21d: cancelled slots bulk-reclaimed behind the commit ports (ROB free)
+    output logic [CVA6Cfg.NR_SB_ENTRIES-1:0] bulk_drop_mask_o,
     // Scoreboard issued mask - EX_STAGE (store-buffer liveness assertion)
     output logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_live_o,
     // T6b: per-hart head of the live scoreboard ring — oldest issued entry's
@@ -300,6 +302,7 @@ module issue_stage
       .sb_empty_o              (sb_empty_o),
       .spec_cancel_o           (spec_cancel_o),
       .cancelled_mask_o        (cancelled_mask_o),
+      .bulk_drop_mask_o        (bulk_drop_mask_o),
       .sb_live_o               (sb_live),
       .sb_head_pc_o            (sb_head_pc_o),
       .sb_head_valid_o         (sb_head_valid_o),
@@ -365,6 +368,7 @@ module issue_stage
         .flush_i          (flush_i),
         .flush_unissued_i (flush_unissued_instr_i),
         .cancelled_mask_i (cancelled_mask_o),
+        .bulk_drop_mask_i (bulk_drop_mask_o),
         .sb_live_i        (sb_live),
         .dispatch_sbe_i   (issue_instr_sb),
         .dispatch_orig_i  (orig_instr_sb),

@@ -36,6 +36,9 @@ module scoreboard #(
     output logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              cancelled_mask_o,
     // Per-slot issued mask (OoO IQ/LSQ liveness assertions)
     output logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              sb_live_o,
+    // T21d: slots of cancelled entries reclaimed this cycle behind the acked
+    // commit ports (bulk drop); the ROB frees the matching entries.
+    output logic [CVA6Cfg.NR_SB_ENTRIES-1:0]              bulk_drop_mask_o,
     // T6b: per-hart head of the live ring — PC of the oldest issued entry of
     // each hart, found scanning from commit_pointer_q[0] in ring order.
     // T6b-2 recovery restarts each hart at this PC; unused until then.
@@ -148,6 +151,21 @@ module scoreboard #(
 
   logic [CVA6Cfg.NrCommitPorts-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] commit_pointer_n, commit_pointer_q;
   logic [$clog2(CVA6Cfg.NrCommitPorts):0] num_commit;
+  // T21d bulk drop: the run of cancelled entries directly behind the acked
+  // ports is reclaimed in the same cycle (up to BULK_DROP_MAX), instead of
+  // walking out through the two commit ports one or two per cycle. A
+  // mispredict with a deep wrong-path window (the 4-wide server fills ~48
+  // slots behind a load-dependent branch) otherwise pays ~24 cycles of
+  // commit-pointer walk on top of the refetch: the correct-path instructions
+  // sat complete behind the cancelled run. Same safety class as the port-0
+  // drop (the cancel marks the entry complete; port 0 never waited for a
+  // writeback, port 1 drops the ALU / LOAD / CTRL_FLOW / MULT / FPU classes
+  // the same way); the run stops at an entry that is not cancelled, carries
+  // a replay, or is a CSR / CVXIF op (left to the port-0 path). Drained /
+  // single-hart (legacy pointer) only.
+  localparam int unsigned BULK_DROP_MAX = (CVA6Cfg.NR_SB_ENTRIES < 8) ? CVA6Cfg.NR_SB_ENTRIES : 8;
+  logic [$clog2(BULK_DROP_MAX+1)-1:0] bulk_drop_cnt;
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]  bulk_drop_mask;
 
   // Free-slot count for N-wide issue (port k needs k+1 free entries).
   logic [$clog2(CVA6Cfg.NR_SB_ENTRIES+1)-1:0] sb_issued_cnt, sb_free_cnt;
@@ -649,6 +667,15 @@ module scoreboard #(
         mem_n[commit_sel_slot[i]].sbe.valid = 1'b0;
       end
     end
+    // T21d: bulk drop of the cancelled run behind the acked ports
+    for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
+      if (bulk_drop_mask[i]) begin
+        mem_n[i].issued    = 1'b0;
+        mem_n[i].cancelled = 1'b0;
+        mem_n[i].replay    = 1'b0;
+        mem_n[i].sbe.valid = 1'b0;
+      end
+    end
 
     // ------
     // Flush
@@ -781,6 +808,8 @@ module scoreboard #(
   // advancing by the ack popcount. commit_pointer_q[k>0] is unused under
   // MIXED (the port select is commit_sel_slot); gen_cnt_incr stays for shape.
   if (MixedSmt) begin : gen_reclaim_ptr
+    assign bulk_drop_mask = '0;
+    assign bulk_drop_cnt  = '0;
     assign commit_pointer_n[0] = (flush_i) ? '0 : reclaim_n;
     // Offsets from the underlying expression, not commit_pointer_n[0] — an
     // intra-vector read makes the packed signal self-referential (UNOPTFLAT).
@@ -788,13 +817,35 @@ module scoreboard #(
       assign commit_pointer_n[k] = (flush_i) ? '0 : reclaim_n + CVA6Cfg.TRANS_ID_BITS'(k);
     end
   end else begin : gen_commit_ptr
-    assign commit_pointer_n[0] = (flush_i) ? '0 : commit_pointer_q[0] + CVA6Cfg.TRANS_ID_BITS'(num_commit);
+    // T21d: the cancelled run behind the acked ports (legacy contiguous
+    // commit: the acked ports are commit_pointer_q[0] .. +num_commit-1).
+    always_comb begin : gen_bulk_drop
+      automatic logic run;
+      automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] slot;
+      bulk_drop_mask = '0;
+      bulk_drop_cnt  = '0;
+      run = !flush_i && CVA6Cfg.SpeculativeSb;
+      for (int unsigned k = 0; k < BULK_DROP_MAX; k++) begin
+        slot = commit_pointer_q[0] + CVA6Cfg.TRANS_ID_BITS'(num_commit) + CVA6Cfg.TRANS_ID_BITS'(k);
+        if (run && mem_q[slot].issued && mem_q[slot].cancelled && !mem_q[slot].replay &&
+            !(mem_q[slot].sbe.fu inside {ariane_pkg::CSR, ariane_pkg::CVXIF})) begin
+          bulk_drop_mask[slot] = 1'b1;
+          bulk_drop_cnt        = bulk_drop_cnt + 1'b1;
+        end else begin
+          run = 1'b0;
+        end
+      end
+    end
+    assign commit_pointer_n[0] = (flush_i) ? '0 : commit_pointer_q[0] + CVA6Cfg.TRANS_ID_BITS'(num_commit)
+                                                                       + CVA6Cfg.TRANS_ID_BITS'(bulk_drop_cnt);
     for (genvar k = 1; k < CVA6Cfg.NrCommitPorts; k++) begin : gen_commit_incr
       assign commit_pointer_n[k] = (flush_i) ? '0 : commit_pointer_q[0] +
                                    CVA6Cfg.TRANS_ID_BITS'(num_commit) +
+                                   CVA6Cfg.TRANS_ID_BITS'(bulk_drop_cnt) +
                                    CVA6Cfg.TRANS_ID_BITS'(k);
     end
   end
+  assign bulk_drop_mask_o = bulk_drop_mask;
 
   always_comb begin : assign_issue_pointer_n
     issue_pointer_n = issue_pointer[num_issue];

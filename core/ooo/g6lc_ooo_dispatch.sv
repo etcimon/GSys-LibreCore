@@ -49,6 +49,8 @@ module g6lc_ooo_dispatch
     input  logic flush_unissued_i,
     // Younger wrong-path SB slots (SpeculativeSb cancel + same-cycle bmiss)
     input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]                   cancelled_mask_i,
+    // T21d: cancelled slots bulk-reclaimed by the scoreboard this cycle (ROB free)
+    input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]                   bulk_drop_mask_i,
     // Scoreboard issued mask (IQ/LSQ liveness assertions)
     input  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]                   sb_live_i,
     input  scoreboard_entry_t [CVA6Cfg.NrIssuePorts-1:0]       dispatch_sbe_i,
@@ -583,7 +585,8 @@ module g6lc_ooo_dispatch
       .retire_id_o   (),
       .retire_ack_i  (commit_ack_i),
       // T6b-4b: frees are keyed by the committing tid, not head position.
-      .retire_tid_i  (rob_retire_tid)
+      .retire_tid_i  (rob_retire_tid),
+      .bulk_drop_mask_i(bulk_drop_mask_i)
   );
 
   // ---- PRF first (needed for live AGU) — issue selects feed PRF read ----

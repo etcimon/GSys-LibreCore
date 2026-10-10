@@ -902,6 +902,7 @@ module cva6
   logic sb_full;
   logic spec_cancel;
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_cancelled_mask;
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_bulk_drop_mask;  // T21d (consumed inside issue_stage)
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_live_mask;
   logic [1:0] mem_phys_valid, mem_mod_valid;
   logic [1:0][CVA6Cfg.PLEN-1:0] mem_phys_addr, mem_mod_addr;
@@ -2290,6 +2291,8 @@ module cva6
             ss_drain_abort = ss_drain_abort + 1;
           end
         end
+        for (int unsigned s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
+          if (sb_bulk_drop_mask[s]) ss_drop = ss_drop + 1;  // T21d bulk drops
         for (int unsigned p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin
           if (commit_ack[p] && commit_drop_id_commit[p])
             ss_drop = ss_drop + 1;
@@ -2454,6 +2457,7 @@ module cva6
       .sb_empty_o              (smt_sb_empty),
       .spec_cancel_o           (spec_cancel),
       .cancelled_mask_o        (sb_cancelled_mask),
+      .bulk_drop_mask_o        (sb_bulk_drop_mask),
       .sb_live_o               (sb_live_mask),
       // T6b: per-hart oldest-live PC, exported for the T6b-2 recovery
       // restart; no consumer yet.
@@ -5132,6 +5136,26 @@ module cva6
                    smt_drain_forced, smt_drain_force_pc,
                    smt_pc_restore, smt_npc_restore, smt_active_hart,
                    i_smt_pc_bank.gen_banked.npc_bank_q[0], i_smt_pc_bank.gen_banked.npc_bank_q[1]);
+        end
+      end
+    end
+    // ---- T21e: RAS events (TAGE fabric, RASDepth != 0): every speculative
+    //      push / pop at consume and every restore (mispredict: own effect
+    //      re-applied; clear: frontier context), with the fetch bank's
+    //      {tos, cnt, top} before and the restore payload. Inside the fe
+    //      window only.
+    if (CVA6Cfg.FtqDepth != 0 && CVA6Cfg.BPType == config_pkg::TAGE_LITE &&
+        CVA6Cfg.RASDepth != 0) begin : gen_win_ras
+      always @(posedge clk_i) begin
+        if (win_on && (i_frontend.ras_push || i_frontend.ras_pop || i_frontend.ras_restore)) begin
+          $display("[win] c=%0d h=%0d RAS push=%0d ra=%h pop=%0d pred_v=%0d pred=%h | restore=%0d own=%0d hart=%0d tos=%0d cnt=%0d top=%h repop=%0d repush=%0d repush_ra=%h | bank tos=%0d cnt=%0d",
+                   win_cycle, win_ghart, i_frontend.ras_push, i_frontend.ras_update,
+                   i_frontend.ras_pop, i_frontend.ras_predict.valid, i_frontend.ras_predict.ra,
+                   i_frontend.ras_restore, i_frontend.ras_restore_own, int'(i_frontend.ras_restore_hart),
+                   int'(i_frontend.ras_restore_tos), int'(i_frontend.ras_restore_cnt), i_frontend.ras_restore_top,
+                   i_frontend.gen_ras.i_ras.restore_pop_i, i_frontend.gen_ras.i_ras.restore_push_i,
+                   i_frontend.gen_ras.i_ras.restore_push_ra_i,
+                   int'(i_frontend.ras_snap_tos), int'(i_frontend.ras_snap_cnt));
         end
       end
     end

@@ -20,6 +20,9 @@ module g6lc_rob #(
     input  logic flush_i,
     // U5 production: squash slots whose scoreboard tid is cancelled
     input  logic [NR_SB-1:0]                       cancelled_mask_i,
+    // T21d: cancelled slots the scoreboard bulk-reclaimed this cycle without
+    // a commit ack; their entries are freed here by tid.
+    input  logic [NR_SB-1:0]                       bulk_drop_mask_i,
     // Allocate at dispatch
     input  logic [NR_ALLOC-1:0]                    alloc_valid_i,
     input  entry_t [NR_ALLOC-1:0]                  alloc_entry_i,
@@ -131,6 +134,13 @@ module g6lc_rob #(
             count_d        = count_d - 1'b1;
           end
         end
+      end
+    end
+    // T21d: bulk-dropped cancelled entries free without an ack.
+    for (int unsigned i = 0; i < ROB_ENTRIES; i++) begin
+      if (rob_d[i].valid && bulk_drop_mask_i[rob_d[i].tid]) begin
+        rob_d[i].valid = 1'b0;
+        count_d        = count_d - 1'b1;
       end
     end
     // Re-anchor the report-only head on the oldest remaining entry.

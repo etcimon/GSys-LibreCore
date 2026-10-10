@@ -3204,7 +3204,7 @@ module tb_g6lc_review_ckptrand;
       for (int h = 0; h < NH; h++) begin
         `CHK(int'(dut.span[h]) <= DEPTH, $sformatf("dut.span[%0d]=%0d", h, dut.span[h]))
         if (!wb) `CHK(int'(dut.span[h]) == span_m(h), $sformatf("dut.span[%0d]=%0d model=%0d", h, dut.span[h], span_m(h)))
-        for (int s = 0; s < DEPTH; s++) if (dut.valid_q[h][s]) begin
+        for (int s = 0; s < DEPTH; s++) if (dut.valid_q[h][s]) begin : chk_valid_in_span
           int d; d = (s - (int'(dut.head_q[h]) % DEPTH) + DEPTH) % DEPTH;
           `CHK(d < int'(dut.span[h]), $sformatf("valid bit outside [head,alloc): bank %0d slot %0d head %0d span %0d", h, s, int'(dut.head_q[h]) % DEPTH, dut.span[h]))
         end

@@ -4318,3 +4318,50 @@ Next experiments on the T21c model: a P2 `+fe_trace` window
 (`ooocoh-t21c-server-p2win`, BPCHAIN per slot: which of TAGE / loop /
 corrector flips the `bltu`, and the anatomy of the 23–24-cycle gap), then
 `BPStatCorEn` tagged-or-off.
+
+**T21d — tagged statistical corrector; bulk drop of the cancelled run
+(2026-10-10).** The P2 `+fe_trace` window on the T21c tree
+(`ooocoh-t21c-server-p2win`, BPCHAIN per slot) answered the two open
+questions of the anatomy. (1) The always-taken `bltu` at
+`fdt_next_tag+0x120` was flipped by the statistical corrector
+(`tage t=1 | loop t=1 | sc t=0`): 64 untagged counters indexed by pc[6:1]
+over a 100 KB firmware, every row shared by dozens of branches (T18 only
+moved the victims). `g6lc_bp_statcor` now tags its rows (8 address bits
+above the index): an override needs a tag hit, a tag miss takes over a
+free or weak row and decays a strong one. Leaf model updated (takeover /
+decay / tag-miss coverage; 7 geometries + 2 elaboration guards pass). On
+the server P2 window the `bltu` goes from a 23.4-cycle mean retire gap to
+3.6 (992 / 1,233 ≤ 3) and `fdt_get_property_by_offset_+0x18` from 25.9 to
+3.5. (2) The 23–24-cycle penalty itself: the target instruction was
+issued 4 cycles after the resolve but committed 21 cycles later because
+the ~48 wrong-path entries behind the branch walked out through the two
+commit ports (`[ooo-misp]`: 57 % of recoveries 24–31 cycles with ≈ 36
+entries in flight). `scoreboard.sv` `gen_bulk_drop` reclaims the run of
+cancelled entries behind the acked ports (up to 8 per cycle, any FU but
+CSR / CVXIF, no replay; drained / single-hart pointer only), the ROB frees
+the same tids (`bulk_drop_mask`), `[smt-drain] drop=` counts them (it was
+a dead counter). Resolve → target commit 25 → 7 cycles, the 24–31 band
+3,082 → 7 events. Measured value is modest — P2 CPI −0.08 %, `wprp`
+−0.9 %, int2_l3 ring-16 +826 cycles (+0.005 %) through a changed lock
+order — the walk-out mostly overlapped with execution; kept for the
+shorter recovery and the freed window. Evidence (`t21/T21D-REPORT.md`):
+`g6lc64_ooo` FP 22/22 + probes + wprp Spike-exact, cycles never up;
+int2_l3 24 M strict PASS 18,357,882 (RVFI differences = spin / poll loop
+counts, two `rdtime` values, one heap-lock order swap; multiset identical
+outside them); smt2_ooo_int 10,472,823 and smt2 12,391,556 byte-identical;
+server directed set matched, witnesses 0; leaves rob / sbcommit / commit /
+ckpt / ras / statcor; formal rob / fp_owner / thread_select.
+
+**What the window exposed next (T21e, in flight).** With the corrector no
+longer forcing not-taken, the never-taken `c.beqz` at `fdt_next_tag+0x20`
+is mispredicted 1,057 times: it is 0x100 from the `bltu` and the TAGE base
+bimodal (128 entries = 32 rows × 4 slots, pc[7:1]) thrashes one counter
+between them — `BHTEntries` 1024 (and tagged tables 256, indirect 128) on
+the server package is the sizing fix under test. `ret` mispredicts rose
+55 → 333 in the window once the preceding branch stopped mispredicting
+(its restore had been re-installing the RAS): one captured case predicted
+the other call site's link — a stack one entry off, the shape of the
+{tos, cnt, top} checkpoint's blind spot (a wrong-path pop-pop-push
+overwrites the entry under the top) or of a push left behind by a kill
+that is not a restore. A `[win] RAS` event probe is in the tree for the
+next window.

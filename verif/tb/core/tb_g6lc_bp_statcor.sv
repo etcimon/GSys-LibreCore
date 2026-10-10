@@ -8,14 +8,21 @@
 // branch trains with (its own pc >> SHIFT). Before T18 the DUT read one
 // window-base row for every slot, so a hot taken branch at pc X forced
 // "taken" onto every branch of every window whose base aliased X.
+// T21: rows are TAGGED with the address bits above the index (TAGB bits). An
+// override needs a tag hit; training on a tag miss takes a free or weakly
+// held (counter 3..5) row over, one step from neutral, and decays a strongly
+// held row one step toward neutral instead. The table-alias scenario and the
+// random scenario exercise the takeover / decay rules.
 
 module tb_g6lc_bp_statcor;
   import ariane_pkg::*;
   parameter int unsigned SLOTS = 2;
   parameter int unsigned ENTRIES = 64;
   parameter bit RVC = 1;
+  parameter int unsigned TAGB = 8;
   localparam int unsigned SHIFT = RVC ? 1 : 2;
   localparam int unsigned ROW = (SLOTS > 1) ? $clog2(SLOTS) : 0;
+  localparam int unsigned IDXB = (ENTRIES <= 1) ? 1 : $clog2(ENTRIES);
   localparam logic [63:0] PC0 = 64'h80000140;
   // Window / slot geometry helpers (SLOTS and ENTRIES are powers of two).
   localparam logic [63:0] SLOT_STRIDE = 64'd1 << SHIFT;
@@ -42,13 +49,15 @@ module tb_g6lc_bp_statcor;
   update_t update;
   bht_prediction_t [SLOTS-1:0] prediction, result;
   int unsigned weights[ENTRIES];
+  logic [TAGB-1:0] tags[ENTRIES];
+  bit valids[ENTRIES];
   int unsigned checks = 0, low = 0, high = 0, neutral = 0, invalid = 0;
   int unsigned resets = 0, flushes = 0, aliases = 0, concurrent = 0;
-  int unsigned slot_split = 0, directed = 0;
+  int unsigned slot_split = 0, directed = 0, takeovers = 0, decays = 0, tag_miss_lookups = 0;
   string scenario = "init";
   bit negative;
 
-  g6lc_bp_statcor #(.CVA6Cfg(cfg()), .bht_update_t(update_t), .NR_ENTRIES(ENTRIES)) dut (
+  g6lc_bp_statcor #(.CVA6Cfg(cfg()), .bht_update_t(update_t), .NR_ENTRIES(ENTRIES), .TAG_BITS(TAGB)) dut (
     .clk_i(clk), .rst_ni(rst_n), .flush_i(flush), .vpc_i(pc),
     .bht_update_i(update), .pred_i(prediction), .pred_o(result)
   );
@@ -72,23 +81,45 @@ module tb_g6lc_bp_statcor;
     return urow(address);
   endfunction
 
+  // T21: tag of an address = the bits above the row index.
+  function automatic logic [TAGB-1:0] tag_of(input logic [63:0] address);
+    return address[SHIFT+IDXB+:TAGB];
+  endfunction
+  // Row r, as seen by a lookup/training at `address`, is owned by that branch.
+  function automatic bit owns(input int unsigned r, input logic [63:0] address);
+    return valids[r] && tags[r] == tag_of(address);
+  endfunction
+  function automatic bit forced_low(input logic [63:0] vpc, input int unsigned slot);
+    return owns(row(vpc, slot), vpc) && weights[row(vpc, slot)] <= 1;
+  endfunction
+  function automatic bit forced_high(input logic [63:0] vpc, input int unsigned slot);
+    return owns(row(vpc, slot), vpc) && weights[row(vpc, slot)] >= 6;
+  endfunction
+  function automatic void reset_model();
+    foreach (weights[i]) begin weights[i] = 4; valids[i] = 0; tags[i] = '0; end
+  endfunction
+
   task automatic check_result;
     bht_prediction_t expected, actual;
     for (int p = 0; p < SLOTS; p++) begin
       expected = prediction[p];
       if (prediction[p].valid) begin
-        if (weights[row(pc, p)] <= 1) begin
+        if (forced_low(pc, p)) begin
           expected.taken = 0;
           low++;
-        end else if (weights[row(pc, p)] >= 6) begin
+        end else if (forced_high(pc, p)) begin
           expected.taken = 1;
           high++;
-        end else neutral++;
+        end else begin
+          neutral++;
+          if (valids[row(pc, p)] && !owns(row(pc, p), pc) &&
+              (weights[row(pc, p)] <= 1 || weights[row(pc, p)] >= 6)) tag_miss_lookups++;
+        end
         // A check that only a per-slot model gets right: this slot's row is
         // not the window base row and the two counters disagree on the override.
         if (row(pc, p) != base_row(pc) &&
-            ((weights[row(pc, p)] <= 1) != (weights[base_row(pc)] <= 1) ||
-             (weights[row(pc, p)] >= 6) != (weights[base_row(pc)] >= 6)))
+            (forced_low(pc, p) != (owns(base_row(pc), pc) && weights[base_row(pc)] <= 1) ||
+             forced_high(pc, p) != (owns(base_row(pc), pc) && weights[base_row(pc)] >= 6)))
           slot_split++;
       end else invalid++;
       actual = result[p];
@@ -103,10 +134,17 @@ module tb_g6lc_bp_statcor;
     end
   endtask
 
-  // Reference-model training on a resolved branch.
+  // Reference-model training on a resolved branch (T21 tagged policy).
   function automatic void train(input logic [63:0] train_pc, input bit taken);
-    if (taken && weights[urow(train_pc)] < 7) weights[urow(train_pc)] = weights[urow(train_pc)] + 1;
-    if (!taken && weights[urow(train_pc)] > 0) weights[urow(train_pc)] = weights[urow(train_pc)] - 1;
+    int unsigned r = urow(train_pc);
+    if (owns(r, train_pc)) begin
+      if (taken && weights[r] < 7) weights[r] = weights[r] + 1;
+      if (!taken && weights[r] > 0) weights[r] = weights[r] - 1;
+    end else if (!valids[r] || (weights[r] >= 3 && weights[r] <= 5)) begin
+      valids[r] = 1; tags[r] = tag_of(train_pc); weights[r] = taken ? 5 : 3; takeovers++;
+    end else begin
+      weights[r] = (weights[r] > 4) ? weights[r] - 1 : weights[r] + 1; decays++;
+    end
   endfunction
 
   task automatic step(input logic [63:0] lookup,
@@ -128,7 +166,7 @@ module tb_g6lc_bp_statcor;
     #2;
     if (!reset) check_result();
     if (reset || squash) begin
-      foreach (weights[i]) weights[i] = 4;
+      reset_model();
       if (reset) resets++;
       else flushes++;
     end else if (train_en) begin
@@ -197,10 +235,11 @@ module tb_g6lc_bp_statcor;
         row(w1, slot_a) != urow(a_pc))
       $fatal(1, "STATCOR_T18_SETUP %s: w1=%h A=%h urow(A)=%0d w2=%h base_row(w2)=%0d B=%h row(w2,%0d)=%0d",
              name, w1, a_pc, urow(a_pc), w2, base_row(w2), b_pc, slot_b, row(w2, slot_b));
-    // A resolves taken 12 times (counter 4 -> 7) while its own window is
-    // fetched; from the 3rd update on its incoming not-taken is overridden.
+    // A resolves taken 12 times (takeover to 5, then 6 -> 7) while its own
+    // window is fetched; from the 2nd update on its incoming not-taken is
+    // overridden.
     for (int n = 0; n < 12; n++)
-      slot_cycle("trainer-saturating", w1, slot_a, 0, weights[urow(a_pc)] >= 6, 1, a_pc, 1);
+      slot_cycle("trainer-saturating", w1, slot_a, 0, forced_high(w1, slot_a), 1, a_pc, 1);
     if (weights[urow(a_pc)] != 7) $fatal(1, "STATCOR_T18_SETUP %s: A counter %0d", name, weights[urow(a_pc)]);
     // B's base predictor says not-taken; the corrector must leave it alone
     // (B's own counter is neutral) even though the window base aliases A.
@@ -210,7 +249,7 @@ module tb_g6lc_bp_statcor;
     // incoming taken is overridden from the 3rd update on); A must still be
     // forced taken on its own window and B forced not-taken.
     for (int n = 0; n < 12; n++)
-      slot_cycle("victim-training", w2, slot_b, 1, weights[urow(b_pc)] > 1, 1, b_pc, 0);
+      slot_cycle("victim-training", w2, slot_b, 1, !forced_low(w2, slot_b), 1, b_pc, 0);
     if (weights[urow(b_pc)] != 0 || weights[urow(a_pc)] != 7)
       $fatal(1, "STATCOR_T18_SETUP %s: B counter %0d A counter %0d", name, weights[urow(b_pc)], weights[urow(a_pc)]);
     slot_cycle("trainer-lost-override-after-victim-training", w1, slot_a, 0, 1);
@@ -218,8 +257,8 @@ module tb_g6lc_bp_statcor;
     // The other slots of both windows are untouched (neutral), except a slot
     // of w2 that legitimately owns A's row.
     for (int p = 0; p < SLOTS; p++) begin
-      if (p != slot_a) slot_cycle("trainer-window-neighbour", w1, p, 0, weights[row(w1, p)] >= 6);
-      if (p != slot_b) slot_cycle("victim-window-neighbour", w2, p, 0, weights[row(w2, p)] >= 6);
+      if (p != slot_a) slot_cycle("trainer-window-neighbour", w1, p, 0, forced_high(w1, p));
+      if (p != slot_b) slot_cycle("victim-window-neighbour", w2, p, 0, forced_high(w2, p));
     end
     directed++;
     $display("STATCOR_T18_ALIAS_OK %s A=%h(row %0d) B=%h(row %0d) fetch=%h base_row=%0d", name, a_pc, urow(a_pc), b_pc, urow(b_pc), w2, base_row(w2));
@@ -232,7 +271,7 @@ module tb_g6lc_bp_statcor;
     // +t18_shape=window|redirect runs a single directed shape (attribution
     // runs against a pre-T18 DUT); default is both.
     void'($value$plusargs("t18_shape=%s", shape));
-    foreach (weights[i]) weights[i] = 4;
+    reset_model();
     step(PC0, 0, PC0, 0, 0, 1);
     if (SLOTS > 1 && shape != "redirect") begin
       // T18 firmware shape (fdt_offset_ptr+0x6c): trainer at slot 0 of its
@@ -264,8 +303,20 @@ module tb_g6lc_bp_statcor;
     step(PC0, 1, PC0, 0, 1);
     for (int n = 0; n < 12; n++) step(PC0, 1, PC0, 0, 0, 0, n);
     scenario = "table-alias";
+    // T21: a branch one table span away shares PC0's row but not its tag. It
+    // takes the (weakly held) row over and saturates it; PC0's lookups must
+    // never be forced by it, and PC0's own training must only decay it.
     for (int n = 0; n < 12; n++)
       step(PC0, 1, PC0 + TABLE_STRIDE, 1, 0, 0, n);
+    if (!owns(urow(PC0 + TABLE_STRIDE), PC0 + TABLE_STRIDE) || weights[urow(PC0)] != 7)
+      $fatal(1, "STATCOR_T21_SETUP alias owner weights=%0d", weights[urow(PC0)]);
+    slot_cycle("alias-owner-does-not-force-pc0", PC0, 0, 0, 0);
+    for (int n = 0; n < 2; n++) step(PC0, 1, PC0, 0, 0, 0, n);
+    if (weights[urow(PC0)] != 5 || !owns(urow(PC0), PC0 + TABLE_STRIDE))
+      $fatal(1, "STATCOR_T21_DECAY weights=%0d", weights[urow(PC0)]);
+    step(PC0, 1, PC0, 0, 0, 0, 2);
+    if (!owns(urow(PC0), PC0) || weights[urow(PC0)] != 3)
+      $fatal(1, "STATCOR_T21_TAKEOVER weights=%0d", weights[urow(PC0)]);
     scenario = "neighbour";
     for (int n = 0; n < 12; n++)
       step(PC0, 1, PC0 + SLOT_STRIDE, 0, 0, 0, n);
@@ -279,11 +330,11 @@ module tb_g6lc_bp_statcor;
            n % 31 == 30, 0, n);
     end
     if (!checks || !low || !high || !neutral || !invalid || resets < 2 || !flushes || !aliases || !concurrent ||
-        directed != want_directed || (SLOTS > 1 && !slot_split))
-      $fatal(1, "STATCOR_COVERAGE checks=%0d low=%0d high=%0d neutral=%0d invalid=%0d resets=%0d flushes=%0d aliases=%0d concurrent=%0d directed=%0d slot_split=%0d",
-             checks, low, high, neutral, invalid, resets, flushes, aliases, concurrent, directed, slot_split);
-    $display("STATCOR_PASS checks=%0d low=%0d high=%0d neutral=%0d invalid=%0d resets=%0d flushes=%0d aliases=%0d concurrent=%0d directed=%0d slot_split=%0d",
-             checks, low, high, neutral, invalid, resets, flushes, aliases, concurrent, directed, slot_split);
+        directed != want_directed || (SLOTS > 1 && !slot_split) || !takeovers || !decays || !tag_miss_lookups)
+      $fatal(1, "STATCOR_COVERAGE checks=%0d low=%0d high=%0d neutral=%0d invalid=%0d resets=%0d flushes=%0d aliases=%0d concurrent=%0d directed=%0d slot_split=%0d takeovers=%0d decays=%0d tag_miss=%0d",
+             checks, low, high, neutral, invalid, resets, flushes, aliases, concurrent, directed, slot_split, takeovers, decays, tag_miss_lookups);
+    $display("STATCOR_PASS checks=%0d low=%0d high=%0d neutral=%0d invalid=%0d resets=%0d flushes=%0d aliases=%0d concurrent=%0d directed=%0d slot_split=%0d takeovers=%0d decays=%0d tag_miss=%0d",
+             checks, low, high, neutral, invalid, resets, flushes, aliases, concurrent, directed, slot_split, takeovers, decays, tag_miss_lookups);
     $finish;
   end
 endmodule

@@ -106,6 +106,7 @@ module g6lc_ooo_backend
       .rst_ni,
       .flush_i,
       .cancelled_mask_i('0),
+      .bulk_drop_mask_i('0),
       .alloc_valid_i ('0),
       .alloc_entry_i ('0),
       .alloc_tid_i   ('0),
