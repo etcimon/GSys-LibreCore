@@ -162,6 +162,19 @@ open" residual above is closed; the same-window residual (an unpredicted
 indirect call's push missing from a younger sibling's snapshot) remains and
 self-heals.
 
+### T21d (2026-10-10): the statistical corrector is tagged
+
+`g6lc_bp_statcor` rows carry an 8-bit tag of the address above the index; an
+override needs a tag hit, a tag miss takes over a free or weakly held row one
+step from neutral and decays a strongly held one. Rationale: 64 untagged rows
+over a 100 KB firmware put dozens of branches on every row, and a saturated
+owner forced its direction onto all of them — the T21c P2 window showed it
+flipping an always-taken libfdt branch that TAGE predicted (`tage t=1 | sc
+t=0`). The leaf model carries the takeover / decay rules. Sizing note from the
+same window: the TAGE base bimodal indexes `pc[OFFSET+COL_BITS +: log2(rows)]`,
+so 128 entries on a 4-slot fetch is a 256-byte alias period — too small for the
+server (T21e raises it).
+
 Source presence of TAGE/loop/SC/ITTAGE does not qualify their combined semantics.
 Keep matched branch-pattern/alias controls and the protected SMT2 baseline.
 

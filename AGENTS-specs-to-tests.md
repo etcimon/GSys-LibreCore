@@ -2327,3 +2327,13 @@ restore_dropped= pop_dead= refused= | resolves br/ret/jmp mispredicts br/ret/jmp
 `gen_ckpt_trace`, `+ckpt_trace` for per-event lines): old design 26.6 % / 55.9 % mismatch on the
 server boot core, T21 0 everywhere. Drained anchors byte-identical (int2_l3 18,357,056, smt2_ooo_int
 10,472,823, smt2 12,391,556); `g6lc64_ooo` FP suite + probes Spike-exact (s11 −1.2 %).
+
+## T21d witnesses (2026-10-10)
+
+`tb_g6lc_bp_statcor` carries the tagged model (table-alias scenario: the alias owner never forces PC0,
+PC0's training decays then takes the row over; coverage requires takeovers / decays / tag-miss lookups).
+`tb_g6lc_review_ckptrand` (REVIEW_RTL_CKPTRAND) randomized checkpoint-buffer bench. The bulk drop is
+witnessed by `[smt-drain] FINAL drop=` (dead before T21d), the `[ooo-misp]` recovery histogram
+(`+misp_stats`: 24–31-cycle band 3,082 → 7 in the server P2 window) and the `[win]` KILL→CMT timeline
+(resolve → target commit 25 → 7); exactness by the FP suite / probes (Spike) and the drained anchors
+(smt2_ooo_int / smt2 byte-identical, int2_l3 strict PASS with timing-legible spin/lock differences only).

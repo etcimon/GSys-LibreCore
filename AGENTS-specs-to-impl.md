@@ -1241,3 +1241,14 @@ Evidence: `core/ooo/AGENTS-ooo-plan.md` T18, T19, T20. First strict 8-hart boot 
   `bp_resolve_t += {ckpt_v, ckpt_idx, is_call, next_pc}` (`#bp` speculation guide: recovery state
   is per branch, not per order).
 - Area: server `cva6` 284,711 cells at RASDepth 16 (T15 286,763 at depth 2). Evidence: plan T21.
+
+## T21c/T21d: server SMT knobs, tagged corrector, bulk drop (2026-10-10)
+
+- `core/include/g6lc64_ooo_server_config_pkg.sv`: `SmtFetchQuantum 128` / `SmtStarveLimit 64` (as every
+  qualified SMT profile; the 16-cycle starve leg had owned the cold boot).
+- `core/frontend/g6lc_bp_statcor.sv`: rows tagged with 8 address bits above the index; override on a tag
+  hit only, weak-row takeover, strong-row decay (`#bp`: a corrector may only speak for the branch it saw).
+- `core/scoreboard.sv` `gen_bulk_drop` + `bulk_drop_mask_o` → `issue_stage` → `g6lc_ooo_dispatch` →
+  `g6lc_rob.bulk_drop_mask_i`: the cancelled run behind the acked commit ports is reclaimed up to 8 per
+  cycle (drained / single-hart pointer; CSR/CVXIF and replay-marked entries left to the port path).
+Evidence: plan T21c / T21d (`t21/T21-FOLLOWUP-REPORT.md`, `t21/T21D-REPORT.md`).
