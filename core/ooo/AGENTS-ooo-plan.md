@@ -4401,3 +4401,27 @@ the first 720 K cycles). Harvest:
 `t21/osbi-harvest-t21c-48M.out`. This is the number the server profile
 carries from here; T21e (tagged corrector + predictor sizing) runs its
 own verdict next.
+
+**T21d correction, corrected (2026-10-11).** The `ooo_no_younger_forward`
+stop reproduced at the same instruction on the model *without* the bulk
+drop (`ooocoh-t21g-server-p2win`, 2,366,755 cycles), and the cycle-exact
+window (`t21/T21E-REPORT.md` §2.2) shows no wrong-path store, no
+reclaimed tid: the boot hart's `sbi_heap_init` loop held iteration 1's
+`ld 48(a4)` 88 cycles behind the `hpctrl` line's write path while
+iteration 2 ran ahead on the predicted `bltu`, so iteration 2's `ld 48(a4)`
+forwarded (correctly) from iteration 1's `sd` with iteration 2's younger
+`sd` to the same word already in the speculative queue. The witness
+flagged the *presence* of a younger same-address entry, not the source of
+the bytes — a false positive on a legal OoO store-queue state (the
+page-offset interlock a few lines above explicitly supports it). Rewritten
+to the stated intent: every forwarded byte must have a visible source
+(commit queue, `spec_visible` speculative entry, or the arriving older
+store). The bulk-drop "lesson" is therefore re-labelled: the hazard it
+described (a cancelled slot reclaimed before the store unit's
+WAIT_TRANSLATION store is re-presented) is a *theoretical* exposure that
+the port walk only narrows, not the observed defect. The bulk drop stays
+reverted on its small measured value; re-landing it needs the store-unit /
+lsu_bypass cancel audit and a per-slot epoch, not a shorter walk. Why the
+128-entry models never tripped the witness: with the base-table alias the
+loop's first load retired 5 cycles after issue; alias-free, the frontend
+ran a full iteration ahead during the 88-cycle stall.

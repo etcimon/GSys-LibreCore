@@ -2332,9 +2332,9 @@ server boot core, T21 0 everywhere. Drained anchors byte-identical (int2_l3 18,3
 
 `tb_g6lc_bp_statcor` carries the tagged model (table-alias scenario: the alias owner never forces PC0,
 PC0's training decays then takes the row over; coverage requires takeovers / decays / tag-miss lookups).
-`tb_g6lc_review_ckptrand` (REVIEW_RTL_CKPTRAND) randomized checkpoint-buffer bench. The reverted bulk
-drop left one witness worth keeping in mind: `store_buffer.sv ooo_no_younger_forward` fired within 2.4 M
-cycles of the server boot when a cancelled slot was reclaimed before the store unit had seen the cancel —
-the sim-only assertion is the guard for any future recovery-latency change. The `[ooo-misp]` histogram
-(`+misp_stats`) and the `[win]` KILL→CMT timeline measure the walk-out (25-cycle resolve → target commit
-with ~36 entries in flight on the server).
+`tb_g6lc_review_ckptrand` (REVIEW_RTL_CKPTRAND) randomized checkpoint-buffer bench. `store_buffer.sv
+ooo_no_younger_forward` was rewritten in T21e: the old form fired on a legal state (younger same-address
+store resident while an older load forwards from an older one — `sbi_heap_init` on the server once the
+base-table alias was gone); the new form asserts every forwarded byte has a visible (older) source. The
+`[ooo-misp]` histogram (`+misp_stats`) and the `[win]` KILL→CMT timeline measure the recovery walk-out
+(25-cycle resolve → target commit with ~36 entries in flight on the server).

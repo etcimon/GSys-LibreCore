@@ -929,18 +929,44 @@ module store_buffer
                  smt_store_cycle, load_paddr_i, st_fwd_valid_o, st_fwd_data_o, st_fwd_be_o, g1ao_hold_hit);
     end
   end
-  // Witness for the forwarding age contract: does any speculative entry that is
-  // NOT older than the querying load overlap the bytes it is taking?
-  logic ooo_younger_spec_hit;
+  // Witness for the forwarding age contract (T21e rewrite): every byte the
+  // load takes must have a VISIBLE source -- a commit-queue entry (older by
+  // construction), a speculative entry older than the load (spec_visible),
+  // or the arriving store when it is older. The previous form flagged the
+  // mere presence of a younger same-address entry in the queue while the load
+  // forwarded from an older one -- a legal OoO state (an older load held on a
+  // write-path stall while the next loop iteration's store to the same word
+  // arrived; sbi_heap_init on the server) and the merge above never read that
+  // entry, so it was a false positive. This form fails only if a byte is
+  // forwarded with no older source behind it, i.e. if the merge ever stopped
+  // applying the age filter.
+  logic [(CVA6Cfg.XLEN/8)-1:0] ooo_fwd_visible_cover;
+  logic ooo_fwd_without_visible_source;
   always_comb begin
-    ooo_younger_spec_hit = 1'b0;
-    if (CVA6Cfg.OoOEn && load_paddr_valid_i) begin
+    ooo_fwd_visible_cover = '0;
+    ooo_fwd_without_visible_source = 1'b0;
+    if (CVA6Cfg.OoOEn && load_paddr_valid_i && st_fwd_valid_o) begin
+      for (int unsigned i = 0; i < DEPTH_COMMIT; i++)
+        if (commit_queue_q[i].valid)
+          for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++)
+            if ((pa_eq(commit_queue_q[i].address, load_paddr_i) && commit_queue_q[i].be[b]) ||
+                (CVA6Cfg.RVZiCboz && cboz_covers(commit_queue_q[i].cbo_op, commit_queue_q[i].address,
+                                                 load_paddr_i + CVA6Cfg.PLEN'(b))))
+              ooo_fwd_visible_cover[b] = 1'b1;
       for (int unsigned i = 0; i < DEPTH_SPEC; i++)
-        if (speculative_queue_q[i].valid &&
-            !ooo_older(speculative_queue_q[i].trans_id, load_trans_id_i) &&
-            pa_eq(speculative_queue_q[i].address, load_paddr_i) &&
-            (|(speculative_queue_q[i].be & st_fwd_be_o)))
-          ooo_younger_spec_hit = 1'b1;
+        if (speculative_queue_q[i].valid && spec_visible(speculative_queue_q[i].trans_id) &&
+            (!HART_OWN || speculative_queue_q[i].hart == load_hart_i))
+          for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++)
+            if ((pa_eq(speculative_queue_q[i].address, load_paddr_i) && speculative_queue_q[i].be[b]) ||
+                (CVA6Cfg.RVZiCboz && cboz_covers(speculative_queue_q[i].cbo_op, speculative_queue_q[i].address,
+                                                 load_paddr_i + CVA6Cfg.PLEN'(b))))
+              ooo_fwd_visible_cover[b] = 1'b1;
+      if (valid_without_flush_i && spec_visible(trans_id_i) && (!HART_OWN || st_hart_i == load_hart_i))
+        for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++)
+          if ((pa_eq(paddr_i, load_paddr_i) && be_i[b]) ||
+              (CVA6Cfg.RVZiCboz && cboz_covers(cbo_op_i, paddr_i, load_paddr_i + CVA6Cfg.PLEN'(b))))
+            ooo_fwd_visible_cover[b] = 1'b1;
+      ooo_fwd_without_visible_source = |(st_fwd_be_o & ~ooo_fwd_visible_cover);
     end
   end
 
@@ -976,13 +1002,14 @@ module store_buffer
     $error("[Speculative Queue] OoO commit handoff took tid %0d, commit is retiring tid %0d",
            speculative_queue_q[speculative_read_pointer_q].trans_id, commit_trans_id_i);
 
-  // U5.4 OoO: a store younger than the querying load must never reach it.
+  // U5.4 OoO: a store younger than the querying load must never reach it --
+  // every forwarded byte has an older (visible) source.
   ooo_no_younger_forward :
   assert property (@(posedge clk_i) disable iff (!rst_ni)
                    (CVA6Cfg.OoOEn && load_paddr_valid_i && st_fwd_valid_o) |->
-                   !ooo_younger_spec_hit)
-  else $error("[Speculative Queue] OoO load tid %0d forwarded from a younger store",
-              load_trans_id_i);
+                   !ooo_fwd_without_visible_source)
+  else $error("[Speculative Queue] OoO load tid %0d forwarded bytes %b with no older source (visible cover %b)",
+              load_trans_id_i, st_fwd_be_o, ooo_fwd_visible_cover);
 
   // OoO reservation liveness: every valid speculative-queue entry names a
   // scoreboard slot that is still issued/live. A reservation outliving its
