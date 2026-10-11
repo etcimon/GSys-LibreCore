@@ -175,6 +175,17 @@ same window: the TAGE base bimodal indexes `pc[OFFSET+COL_BITS +: log2(rows)]`,
 so 128 entries on a 4-slot fetch is a 256-byte alias period — too small for the
 server (T21e raises it).
 
+### T21e (2026-10-11): predictor output slots are COLUMNS of the aligned block
+
+`fetch_B/frontend.sv gen_prediction_shifted` reads `prediction[addr[i][IdxW:1] &
+(NrInstr-1)]` and keeps `prediction[NrInstr-1]` as `bht_q` for the unaligned
+leftover. Every per-slot predictor must therefore compute slot i for the PC
+`{vpc[VLEN-1:OFFSET+COL_BITS], i, 0}` -- the aligned block's column i -- not for
+`vpc + i` instructions. `g6lc_bp_tage` and `g6lc_bp_ittage` had the positional
+form (T18 fixed only the corrector): on every mid-block redirect target each CF
+read a neighbour PC's entry. `tb_g6lc_review_tage` scenarios 2-4 pin the
+column contract; the positional RTL fails them.
+
 Source presence of TAGE/loop/SC/ITTAGE does not qualify their combined semantics.
 Keep matched branch-pattern/alias controls and the protected SMT2 baseline.
 

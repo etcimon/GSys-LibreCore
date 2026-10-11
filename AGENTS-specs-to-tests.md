@@ -2355,3 +2355,11 @@ store resident while an older load forwards from an older one — `sbi_heap_init
 base-table alias was gone); the new form asserts every forwarded byte has a visible (older) source. The
 `[ooo-misp]` histogram (`+misp_stats`) and the `[win]` KILL→CMT timeline measure the recovery walk-out
 (25-cycle resolve → target commit with ~36 entries in flight on the server).
+
+## T21e witnesses (2026-10-11)
+
+`tb_g6lc_review_tage` scenario 4 (`TAGE_COLUMN_UNALIGNED`) + scenarios 2/3 re-expressed on the column
+contract (`REVIEW_RTL_TAGE`, 5 positives + 5 negatives); the positional RTL fails 2/3/4. Server P2
+window BPCHAIN census (`t21/q-bpchain-t21e.py`) and the site table (`q-p2site-t21e.py`) are the
+system-level readout; the RAS forensics script (`q-ras-forensics-t21e.py`) classifies mispredicted
+returns from the `[win] RAS` probe.

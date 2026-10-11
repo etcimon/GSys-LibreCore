@@ -1252,3 +1252,12 @@ Evidence: `core/ooo/AGENTS-ooo-plan.md` T18, T19, T20. First strict 8-hart boot 
   `cancelled` bit is the tid consumers' late-arrival filter (`#ldst` single-copy atomicity: a dead store
   must never become visible); contract row "Cancelled-slot lifetime".
 Evidence: plan T21c / T21d (`t21/T21-FOLLOWUP-REPORT.md`, `t21/T21D-REPORT.md`).
+
+## T21e: predictor column addressing, server sizing (2026-10-11)
+
+- `core/frontend/g6lc_bp_tage.sv`, `core/frontend/g6lc_bp_ittage.sv`: `slot_pc[i]` = column i of the
+  aligned fetch block (`#bp`: a prediction belongs to the instruction whose address indexed it).
+- `core/include/g6lc64_ooo_server_config_pkg.sv`: `BHTEntries 1024`, `BPTageTableEntries 256`,
+  `BPIndirectEntries 128` (base alias period 256 B -> 2 KB).
+- `core/store_buffer.sv`: `ooo_no_younger_forward` asserts a visible (older) source per forwarded byte.
+Evidence: plan T21e (`t21/T21E-REPORT.md`).
