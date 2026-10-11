@@ -2811,32 +2811,60 @@ module tb_g6lc_review_tage;
           if(prediction[0].taken)$fatal(1,"TAGE_UPDATE_FOLD_MISS");
         end
       end
-      // Unaligned base window (RVC): train pc 0x1002 taken twice -> new
-      // addressing lands row0 col1; old overlapped addressing put it in
-      // row1 col1. Folded lookups forced to miss so the base decides.
+      // Unaligned base window (RVC): train pc 0x1002 taken twice -> row0
+      // col1. T21e column contract: output slot i is COLUMN i of the aligned
+      // block (the frontend reads prediction[addr[i][1]] and saves
+      // prediction[NrInstr-1] for the unaligned leftover), so for the window
+      // at vpc=0x1002 the trained branch must show at prediction[1], and
+      // prediction[0] (column 0 = pc 0x1000, untrained) must not be taken.
+      // The positional form (slot i = vpc + 2i) put it at prediction[0] -- on
+      // every mid-block redirect target each CF read a neighbour PC's entry
+      // (fdt_next_tag+0xaa/+0xc0 mispredicted on every execution once the
+      // 1024-entry base table stopped aliasing them into luck). Folded
+      // lookups forced to miss so the base decides.
       2:begin
         upd(32'h1002,1'b1);upd(32'h1002,1'b1);
         folded[0]=8'h07;folded[1]=8'h07;
         vpc=32'h1002;#2;
         if(negative) begin
-          if(!prediction[1].taken)$fatal(1,"TAGE_BASE_ALIAS");
-        end else begin
           if(!prediction[0].taken)$fatal(1,"TAGE_BASE_ALIAS");
-          if(prediction[1].taken)$fatal(1,"TAGE_BASE_ALIAS1");
+        end else begin
+          if(!prediction[1].taken)$fatal(1,"TAGE_BASE_ALIAS");
+          if(prediction[0].taken)$fatal(1,"TAGE_BASE_ALIAS0");
         end
       end
-      // ITTAGE unaligned ownership: train pc 0x1012 -> target 0x4000. New
-      // addressing: uindex=pc[4:2]=4, urow=pc[1]=1. Old overlapped addressing
-      // wrote index1 row1, so a vpc=0x1012 window hit slot1 (wrong PC), not
-      // slot0.
+      // ITTAGE unaligned ownership, same column contract: train pc 0x1012 ->
+      // target 0x4000 (uindex=pc[4:2]=4, urow=pc[1]=1). The window at
+      // vpc=0x1012 must present it at btb_pred[1] (column 1), never at
+      // btb_pred[0] (column 0 = pc 0x1010).
       3:begin
         upd_ind(32'h1012,32'h4000);
         vpc=32'h1012;#2;
         if(negative) begin
-          if(!btb_pred[1].valid)$fatal(1,"ITTAGE_SLOT_ALIAS");
+          if(!btb_pred[0].valid)$fatal(1,"ITTAGE_SLOT_ALIAS");
         end else begin
-          if(!(btb_pred[0].valid && btb_pred[0].target_address==32'h4000))$fatal(1,"ITTAGE_SLOT0");
-          if(btb_pred[1].valid)$fatal(1,"ITTAGE_SLOT1_ALIAS");
+          if(!(btb_pred[1].valid && btb_pred[1].target_address==32'h4000))$fatal(1,"ITTAGE_SLOT1");
+          if(btb_pred[0].valid)$fatal(1,"ITTAGE_SLOT0_ALIAS");
+        end
+      end
+      // T21e: the production shape -- a mid-block redirect target. Train the
+      // branch at pc 0x1006 (row 0 col 1... for IPF=2 the block is 4 bytes:
+      // 0x1004/0x1006, columns 0/1) and the one at 0x1004; fetch the window
+      // starting at 0x1006 (column 1 only is live): prediction[1] must be
+      // 0x1006's and prediction[0] must be 0x1004's (what bht_q would keep
+      // for a leftover), i.e. the aligned block's columns regardless of vpc.
+      4:begin
+        upd(32'h1006,1'b1);upd(32'h1006,1'b1);
+        upd(32'h1004,1'b0);upd(32'h1004,1'b0);upd(32'h1004,1'b0);
+        folded[0]=8'h07;folded[1]=8'h07;
+        vpc=32'h1006;#2;
+        if(negative) begin
+          if(!prediction[0].taken)$fatal(1,"TAGE_COLUMN_UNALIGNED");
+        end else begin
+          if(!prediction[1].taken)$fatal(1,"TAGE_COLUMN_UNALIGNED");
+          if(prediction[0].taken)$fatal(1,"TAGE_COLUMN_UNALIGNED0");
+          vpc=32'h1004;#2;
+          if(!prediction[1].taken || prediction[0].taken)$fatal(1,"TAGE_COLUMN_ALIGNED");
         end
       end
       default:$fatal(1,"TAGE_SCENARIO");

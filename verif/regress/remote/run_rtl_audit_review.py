@@ -375,7 +375,7 @@ def main():
             configurations=[('ghist','mut-shareghr',['-DG6LC_MUT_BP_SHARE_GHR'],
                              [(0,'GHIST_BANK'),(1,'GHIST_SWITCH_BANK')])]
         else:
-            configurations=[('tage','s2-c1',[],[(n,None) for n in range(4)]),
+            configurations=[('tage','s2-c1',[],[(n,None) for n in range(5)]),
                             ('ghist','h2',[],[(0,None),(1,None)])]
     elif os.environ.get('REVIEW_RTL_CKPT')=='1':
         # T21 indexed prediction-time checkpoint buffer: own-entry identity
@@ -605,7 +605,7 @@ def main():
                          [(n,True,'DISPATCH_WB_VALUE') for n in (11,12,13,14)]
                          if os.environ.get('REVIEW_RTL_WB_OWNER')=='1' else
                          [(1,True,'DISPATCH_ID'),(3,True,'DISPATCH_LOAD_ORDER'),(6,True,'DISPATCH_STORE_WB_RETIRE'),(7,True,'DISPATCH_LOAD_UNBLOCKED'),(8,True,'DISPATCH_WRAP_ORDER'),(9,True,'DISPATCH_TAG_REUSE'),(10,True,'DISPATCH_LSQ_CREDIT'),(20,True,'DISPATCH_RECOVERY_ISSUE'),(21,True,'DISPATCH_RECOVERY_WAKE'),(22,True,'DISPATCH_RECOVERY_ISSUE'),(23,True,'DISPATCH_RECOVERY_ISSUE'),(28,True,'DISPATCH_LATE_WAKE_EARLY'),(29,True,'DISPATCH_LATE_WAKE_EARLY')])
-            elif kind=='tage':trials+=[(0,True,'TAGE_SLOT_BROADCAST'),(1,True,'TAGE_UPDATE_FOLD'),(2,True,'TAGE_BASE_ALIAS'),(3,True,'ITTAGE_SLOT_ALIAS')]
+            elif kind=='tage':trials+=[(0,True,'TAGE_SLOT_BROADCAST'),(1,True,'TAGE_UPDATE_FOLD'),(2,True,'TAGE_BASE_ALIAS'),(3,True,'ITTAGE_SLOT_ALIAS'),(4,True,'TAGE_COLUMN_UNALIGNED')]
             elif kind=='ghist':
                 # The mutation geometry runs only its expected-failure
                 # positive trials; oracle_negative gets no extra arm there.

@@ -39,8 +39,8 @@ module g6lc_bp_tage
   localparam int unsigned OFFSET = CVA6Cfg.RVC == 1'b1 ? 1 : 2;
   localparam int unsigned NR_ROWS = NR_ENTRIES / CVA6Cfg.INSTR_PER_FETCH;
   // Column bits select the instruction slot inside a row; row bits sit above
-  // them. Slot i's PC is vpc_i + i instructions — for an unaligned fetch window
-  // the slot's own PC bits must drive row/column, not the slot position.
+  // them. Output slot i is the instruction at column i of the aligned fetch
+  // block (see gen_slot_pc), so its own PC bits drive row/column.
   localparam int unsigned COL_BITS = (CVA6Cfg.INSTR_PER_FETCH <= 1) ? 0 : $clog2(CVA6Cfg.INSTR_PER_FETCH);
   localparam int unsigned SLOT_W   = (COL_BITS == 0) ? 1 : COL_BITS;
   localparam int unsigned BASE_IDX_W = (NR_ROWS <= 1) ? 1 : $clog2(NR_ROWS);
@@ -60,7 +60,18 @@ module g6lc_bp_tage
   logic [SLOT_W-1:0]     update_row;
 
   for (genvar i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin : gen_slot_pc
-    assign slot_pc[i] = vpc_i + CVA6Cfg.VLEN'(i << OFFSET);
+    // T21e: output slot i is consumed by COLUMN (frontend.sv
+    // gen_prediction_shifted reads prediction[addr[i][2:1]] and saves
+    // prediction[NrInstr-1] for the unaligned leftover), so slot i's PC is
+    // the aligned window base plus i instructions -- not vpc_i + i, which on
+    // an unaligned window (a redirect target mid-block) made every slot read
+    // a neighbour PC's entry. The base / tagged / target indices and tags
+    // derived from slot_pc then match what the resolving branch trains with.
+    if (COL_BITS == 0) begin : gen_slot_pc_single
+      assign slot_pc[i] = vpc_i;
+    end else begin : gen_slot_pc_col
+      assign slot_pc[i] = {vpc_i[CVA6Cfg.VLEN-1:OFFSET+COL_BITS], COL_BITS'(i), {OFFSET{1'b0}}};
+    end
     if (COL_BITS == 0) begin : gen_nocol
       assign base_row_i[i] = slot_pc[i][OFFSET +: BASE_IDX_W];
       assign base_col_i[i] = '0;

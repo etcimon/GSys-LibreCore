@@ -1845,6 +1845,23 @@ reference diagnostic; none of these tests proves APU RTL or adds ISA coverage.
 
 ## Standalone APU transport verification (non-ISA)
 
+**2026-10-10 harness/profile continuation (no ISA promotion):**
+`verif/regress/remote/test_testharness_proxy.py::{ApuRegressionGateTests,ApuProfileAuditTests}`
+adds 22 host-only tests using temporary shell fixtures and independent profile rules.
+They reproduce then reject invalid/empty stages, overwritten output, zero checked work,
+failure/skip/timeout false greens, source drift, missing synthesis geometries and failed
+bridge dependencies. No Verilator is run by these tests. Run under WSL on Windows:
+`python3 -B -m unittest test_testharness_proxy.ApuRegressionGateTests test_testharness_proxy.ApuProfileAuditTests`
+from `verif/regress/remote`.
+
+`gen_vn_tables.py --audit-profile` is read-only and returns nonzero on the checked
+normative minimum/format/timestamp gaps; the current profile has 19 findings/29 rules.
+The optional build-platform `apu-profile-audit` suite invokes the same audit through
+`run-apu-regress.sh --stages profile`, not through a hardware qualification profile.
+`build-platform/test/qualification.test.ts` checks suite registration and typed argv.
+Aggregate source inventories/log hashes and selected-stage PASS records do not replace
+an elaborated build manifest, complete Vulkan CTS, full-SoC coherence or physical evidence.
+
 `verif/tb/apu/run-virtio-mmio.sh` consumes `corev_apu/apu/Flist.apu` and runs
 `tb_g6lc_apu_virtio_mmio.sv` through the remote testharness proxy. Virtio 1.3 CSD01
 sections 2.1/2.6/4.2.2 are the register/status/split-queue references. The test first

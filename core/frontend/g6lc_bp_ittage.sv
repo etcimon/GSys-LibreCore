@@ -53,7 +53,18 @@ module g6lc_bp_ittage
   logic [TAG_BITS-1:0] utag;
 
   for (genvar i = 0; i < CVA6Cfg.INSTR_PER_FETCH; i++) begin : gen_slot_pc
-    assign slot_pc[i] = vpc_i + CVA6Cfg.VLEN'(i << OFFSET);
+    // T21e: output slot i is consumed by COLUMN (frontend.sv
+    // gen_prediction_shifted reads prediction[addr[i][2:1]] and saves
+    // prediction[NrInstr-1] for the unaligned leftover), so slot i's PC is
+    // the aligned window base plus i instructions -- not vpc_i + i, which on
+    // an unaligned window (a redirect target mid-block) made every slot read
+    // a neighbour PC's entry. The base / tagged / target indices and tags
+    // derived from slot_pc then match what the resolving branch trains with.
+    if (COL_BITS == 0) begin : gen_slot_pc_single
+      assign slot_pc[i] = vpc_i;
+    end else begin : gen_slot_pc_col
+      assign slot_pc[i] = {vpc_i[CVA6Cfg.VLEN-1:OFFSET+COL_BITS], COL_BITS'(i), {OFFSET{1'b0}}};
+    end
     assign index[i]   = slot_pc[i][OFFSET+COL_BITS+:IDX_W] ^ folded_i[IDX_W-1:0];
     assign tag[i]     = slot_pc[i][OFFSET+COL_BITS+IDX_W+:TAG_BITS] ^ TAG_BITS'(folded_i);
   end

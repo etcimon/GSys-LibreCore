@@ -84,7 +84,13 @@ package cva6_config_pkg;
   // RAS-miss is NoCF in the fetch_B frontend so EX corrects an empty RAS.
   localparam CVA6ConfigRASDepth = 16;
   localparam CVA6ConfigBTBEntries = 32;
-  localparam CVA6ConfigBHTEntries = 128;
+  // T21e (2026-10-10): the TAGE base bimodal is indexed by pc bits above the
+  // slot (NR_ENTRIES / INSTR_PER_FETCH rows); at 128 entries that is 32 rows
+  // of 4 slots, a 256-byte alias period. In libfdt the always-taken bltu at
+  // fdt_next_tag+0x120 and the never-taken c.beqz at +0x20 are 0x100 apart
+  // and thrashed one counter (P2 window: 1,057 mispredicts of the latter
+  // once the corrector stopped masking it). 1024 entries = 256 rows (2 KB).
+  localparam CVA6ConfigBHTEntries = 1024;
 
   localparam CVA6ConfigTvalEn = 1;
 
@@ -154,11 +160,14 @@ package cva6_config_pkg;
       BHTHist: unsigned'(3),
       BPGhistLen: unsigned'(24),
       BPTageTables: unsigned'(3),
-      BPTageTableEntries: unsigned'(64),
+      // T21e: 3 x 64 tagged entries and 32 indirect targets could not hold
+      // the libfdt walk (jr a5 at fdt_next_tag+0x74 44-95 % mispredicted);
+      // 256 / 128 with the same 8-bit tags.
+      BPTageTableEntries: unsigned'(256),
       BPTageTagBits: unsigned'(8),
       BPLoopEn: bit'(1),
       BPIndirectEn: bit'(1),
-      BPIndirectEntries: unsigned'(32),
+      BPIndirectEntries: unsigned'(128),
       BPStatCorEn: bit'(1),
       BPCkptDepth: unsigned'(64),
       DmBaseAddress: 64'h0,

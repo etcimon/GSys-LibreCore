@@ -4425,3 +4425,37 @@ lsu_bypass cancel audit and a per-slot epoch, not a shorter walk. Why the
 128-entry models never tripped the witness: with the base-table alias the
 loop's first load retired 5 cycles after issue; alias-free, the frontend
 ran a full iteration ahead during the 88-cycle stall.
+
+**T21e — predictor slot addressing by column; server predictor sizing
+(2026-10-11).** The first alias-free P2 window (`ooocoh-t21g2-server-p2win`,
+`t21/T21E-REPORT.md` §3) read worse than T21c (CPI 1.0810 vs 1.0764): the
+`bltu`/`c.beqz` pair was fixed, but `fdt_next_tag+0xaa` and `+0xc0` were
+now mispredicted on every execution. BPCHAIN per slot showed why:
+`g6lc_bp_tage` and `g6lc_bp_ittage` computed slot i's PC positionally
+(`vpc_i + 2i`) while `fetch_B/frontend.sv gen_prediction_shifted` consumes
+the predictions by COLUMN (`prediction[addr[i][2:1]]`, and saves
+`prediction[NrInstr-1]` for the unaligned leftover). On any window that
+starts mid-block — every return / jump target — each CF read a neighbour
+PC's entry. With 128 base entries those neighbour entries were aliased and
+valid (direction by luck; this is also the true mechanism behind T21d's
+1,057 `+0x20` mispredicts), with 1024 they were untrained and the static
+fallback made every backward branch "taken". Fix: `slot_pc[i] = {vpc[..:
+OFFSET+COL_BITS], i, 0}` in both predictors (the corrector already used
+the column form since T18; the upstream `bht.sv`/`btb.sv` always did).
+`tb_g6lc_review_tage` scenarios 2/3 re-expressed on the column contract and
+a scenario 4 (mid-block redirect target) added; the positional RTL fails
+2/3/4, the fixed RTL passes 5/5 + 5 negatives. Server package:
+`BHTEntries 1024`, `BPTageTableEntries 256`, `BPIndirectEntries 128`
+(alias period 2 KB; `0x80012994`/`0x80012a94` now rows 50/82).
+
+**RAS residual (recorded, not fixed).** Forensics on the alias-free window
+(`q-ras-forensics-t21g2.out`): 6 / 6 mispredicted returns are the
+{tos, cnt, top} checkpoint's blind spot — a wrong path that pops ≥ 2 and
+pushes overwrites the cell(s) under the restored top (1 at depth 1, 5
+inherited from depth-2 corruptions; 11 corrupted live cells in the window,
+9 at depth 2). Model desyncs 0, restore payload = snapshot 189 / 189, no
+kill-path or own-effect class. Cost in the T21c boot: 3,830 return
+mispredicts of 416 K (0.9 %) ≈ 0.2 % of the cycles. Options: snapshot the
+top 3 cells (covers all 11 observed; ≈ 24.6 kbit / core) or a bounded
+push undo-log replayed at restore (≈ 1 kbit; multi-cycle replay). Deferred
+behind the T21e verdict.
