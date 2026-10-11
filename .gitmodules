@@ -153,3 +153,7 @@
 	url = https://gitlab.freedesktop.org/virgl/venus-protocol.git
 	update = none
 	shallow = true
+[submodule "tools/verilator"]
+	path = tools/verilator
+	url = https://github.com/etcimon/verilator.git
+	branch = g6lc
