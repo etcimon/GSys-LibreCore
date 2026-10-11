@@ -4486,3 +4486,19 @@ entry 751, 4.5 K). Verdict boot `ooocoh-t21i-server-osbi-48M` in flight.
 Infra note: the fe window is core-local and the cold-boot lottery moves
 between cores/models (hart 0 on T21c, hart 1 on T21g2, hart 6 on T21i) —
 capture windows must be placed on the boot core's clock.
+
+**T21e verdict — canonical 48 M strict server boot on the T21e tree
+(2026-10-11): `ooocoh-t21i-server-osbi-48M` PASS, `strictDualPassed`,
+33,001,884 cycles (T21c 33,978,590: −2.9 %; T20 38,988,173: −15.4 %).**
+Tracer-terminated on the payload's `tohost`; the lottery put the cold boot
+on hart 6 (core 3: 29,726,804 retirements; the others 572.5–916.4 K);
+force / force_wfi / force_abs / aborts 0 on every core, traps 0,
+`[hpd-phantom]` 0, `[hpd-zombie]` 0, `[misp-hart]` 0, no assertion or
+warning, `[ckpt] final` mismatch / dead / dropped / refused 0 on all cores.
+Boot-core census: 3,359,475 branch resolves / 42,465 mispredicts
+(1.26 %; T21c 3.9 %), 640,987 jumps / 14,661 (2.3 %; T21c 3.7 %), 405,601
+returns / 3,614 (0.9 %, unchanged — the RAS residual). Harvest:
+`remote-runs/ooocoh-t21i-server-osbi-48M-harvest/output/`,
+`t21/osbi-harvest-t21i-48M.out`. This is the server profile's number;
+the remaining P2 edges (taken `beqz +0x7a`, three-target `jr a5`, the
+entry-751 base alias, the RAS blind spot) are the next predictor pass.
