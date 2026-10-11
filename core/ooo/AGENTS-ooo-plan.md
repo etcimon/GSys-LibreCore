@@ -4459,3 +4459,30 @@ mispredicts of 416 K (0.9 %) ≈ 0.2 % of the cycles. Options: snapshot the
 top 3 cells (covers all 11 observed; ≈ 24.6 kbit / core) or a bounded
 push undo-log replayed at restore (≈ 1 kbit; multi-cycle replay). Deferred
 behind the T21e verdict.
+
+**T21e battery (2026-10-11, `t21/T21E2-REPORT.md`).** Tree = HEAD
+(column-addressed TAGE/ITTAGE, server 1024 / 256 / 128, tagged corrector,
+witness rewrite, no bulk drop). Leaves: `REVIEW_RTL_TAGE` 14/14 on the
+builder (5 + 5 locally), `CKPT` 13/13, `RAS` 11/11, `CKPTRAND` 8/8 (runs
+on the builder's 5.008 now), statcor 7 geometries + 2 guards; formal
+fetch_B restore/hold/token, `g6lc_ooo_rob`, thread_select prove/cover/abs
+PASS with the mutants failing; lint 0 e on seven targets. `g6lc64_ooo`
+(TAGE_LITE): FP 22/22 + 11 probes + wprp Spike-exact, every cycle count
+identical to T21 v3 (the probes' windows are aligned). BHT packages
+byte-identical to the T21 anchors: int2_l3 ring-16 18,357,056
+(`b58a6368…` / `62650353…`), smt2_ooo_int 10,472,823, smt2 12,391,556.
+Server (`ooocoh-t21i-server-mt4-build`): directed set 14/14 matched,
+witnesses 0, 96 `[ckpt] final` lines clean; 720 K window boot-hart
+retirements +6.6 % vs T21c, core-0 branch mispredicts 608 vs 1,299; **P2
+CPI 1.0454 vs T21c's 1.0764 (−2.9 %)** — `fdt_next_tag+0xc0` 24.2 → 3.0,
+`+0xaa` 24.5 → 1.0, the `+0x86` return 16.5 → 0.0, top-24 ≥ 11-cycle edges
+43.5 K cycles vs 82.8 K; the RAS forensics on this window: 0 corrupted
+cells, 0 mispredicted returns (the blind spot needs the wrong paths the
+positional addressing used to produce). Remaining P2 edges: the taken
+`beqz +0x7a` (10.6 K), `jr a5 +0x74` with three targets (15 K),
+`fdt_next_node +0x52/+0x5a` (6.2 K), and one new base alias pair at 1024
+entries (`fdt_ro_probe_+0xfa` ↔ `fdt_get_property_by_offset_+0x18`,
+entry 751, 4.5 K). Verdict boot `ooocoh-t21i-server-osbi-48M` in flight.
+Infra note: the fe window is core-local and the cold-boot lottery moves
+between cores/models (hart 0 on T21c, hart 1 on T21g2, hart 6 on T21i) —
+capture windows must be placed on the boot core's clock.
