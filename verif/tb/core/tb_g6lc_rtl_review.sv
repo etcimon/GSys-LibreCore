@@ -3214,7 +3214,7 @@ module tb_g6lc_review_ckptrand;
       end
       // clear-side read: oldest live of the fetch bank after this cycle's frees
       oldest_after = -1;
-      foreach (live[phart][j]) begin
+      foreach (live[phart][j]) begin : find_oldest_after
         if (live_exp && (phart == chart)) begin
           if (misp) begin if (live[phart][j].pos < e.pos) begin oldest_after = j; break; end end
           else if (live[phart][j].tag != rtag) begin oldest_after = j; break; end
@@ -3229,7 +3229,7 @@ module tb_g6lc_review_ckptrand;
       if (!wb) `CHK(empty == (span_m(b) == 0), $sformatf("empty_o=%0b span=%0d", empty, span_m(b)))
       if (!wb) `CHK(full == (span_m(b) == DEPTH), $sformatf("full_o=%0b span=%0d", full, span_m(b)))
       // white-box invariants on the registered state
-      for (int h = 0; h < NH; h++) begin
+      for (int h = 0; h < NH; h++) begin : chk_bank_wb
         `CHK(int'(dut.span[h]) <= DEPTH, $sformatf("dut.span[%0d]=%0d", h, dut.span[h]))
         if (!wb) `CHK(int'(dut.span[h]) == span_m(h), $sformatf("dut.span[%0d]=%0d model=%0d", h, dut.span[h], span_m(h)))
         for (int s = 0; s < DEPTH; s++) if (dut.valid_q[h][s]) begin : chk_valid_in_span
