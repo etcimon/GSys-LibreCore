@@ -678,6 +678,83 @@ prerequisite for this work under the existing dual license. No licensing policy 
   host** (>128 GB) or via a per-block budget; uncore tops already pass
   `run_cluster_synth_review.py`. Verilator `__Vilp` recipe:
   `verif/regress/remote/patch_vilp.sh`.
+- [x] **T21 (2026-10-10): branch-prediction recovery was order-paired and
+  the OoO backend resolves out of order.** The checkpoint FIFO mismatched
+  26.6 % of resolves / 55.9 % of restores on the server boot core
+  (switch-orphaned entries + OoO resolution), the RAS was double-pushed/
+  popped by switch-killed parcels, and the T18 depth-16 full-stack snapshot
+  cost ≈118 kbit/core. Now: indexed checkpoints (tag carried by the
+  instruction), pointer RAS with `{tos,cnt,top}` checkpoint + own-effect
+  replay, clear-time RAS restore from the restart frontier. `ret`
+  mispredicts 0 in the 720 K server window (was every one), server synth
+  284,711 cells (< T15's 286,763 at depth 2), anchors byte-identical,
+  FP suite Spike-exact. The first cut's empty-stack stale `ra` retired a
+  wrong path on int2_l3 (caught by the anchor battery; `ras_empty_zero`).
+  Plan T21. T21b (937ee22f4) then fixed a ring-wrap restore truncation
+  the randomized bench caught (`REVIEW_RTL_CKPTRAND`) and made the head
+  reclaim an oldest-live search; T21c (d27496f8a) aligned the server SMT
+  knobs (quantum 128 / starve 64) with the qualified profiles after the
+  1.3 M A/B (fdt_next_node −39 %, +83 % boot-hart retirements). **Verdict:
+  `ooocoh-t21c-server-osbi-48M` PASS strictDual at 33,978,590 cycles (T20
+  38,988,173, −12.9 %), witnesses 0, traps 0, `[ckpt] final` clean on all
+  cores, returns mispredicted 0.9 %.** Plan T21c verdict.
+- [ ] **Frontend hardening: an unpredicted return travels as `cf = Return`
+  with `predict_address = 0` and is caught at resolve only because 0 is
+  never the target.** Make it `NoCF` (fetch falls through consistently) or
+  carry a `predicted` bit; the T21 RAS leaf pins the current contract.
+- [x] **T21d (2026-10-10): the corrector was the `bltu` culprit (BPCHAIN:
+  `tage t=1 | sc t=0`); rows are now tagged.** The 24-cycle penalty is the
+  cancelled run walking out through two commit ports; a bulk drop (25 → 7
+  cycles resolve→target commit, CPI −0.08 %) was tried and **reverted** on
+  its small value; the `ooo_no_younger_forward` stop that triggered the
+  revert turned out to be a false-positive witness (rewritten, plan T21d
+  correction) — the cancelled-slot-lifetime hazard it suggested is
+  theoretical. Re-landing needs the store-unit cancel audit + a per-slot
+  epoch. Plan T21d.
+- [x] **T21e (2026-10-11): TAGE/ITTAGE slot addressing was positional
+  (`vpc + 2i`) while the frontend consumes predictions by column** — every
+  mid-block redirect target read a neighbour PC's entry (masked by base
+  aliasing at 128 entries, exposed at 1024). Fixed in both predictors,
+  leaf scenario 4 added (positional RTL fails 2/3/4). Server sizing
+  `BHTEntries 1024`, tagged 256, indirect 128. **Verdict:
+  `ooocoh-t21i-server-osbi-48M` PASS strictDual 33,001,884 cycles (T21c
+  33,978,590, T20 38,988,173), witnesses 0, branch mispredicts 1.26 %.**
+  Anchors byte-identical (int2_l3 / smt2 / smt2_ooo_int), g6lc64_ooo
+  Spike-exact. Plan T21e.
+- [ ] **RAS checkpoint blind spot (recorded)**: 6/6 mispredicted returns in
+  the alias-free window are wrong-path pop>=2-then-push corruptions under the
+  {tos,cnt,top} snapshot (9 of 11 corrupted cells at depth 2); about 0.2 % of
+  the T21c boot. Options: top-3 snapshot (~24.6 kbit/core) or a bounded
+  push undo-log replayed at restore (~1 kbit). Plan T21e.
+- [x] **T20 closed (2026-10-09): first strict 8-hart `g6lc64_ooo_server`
+  OpenSBI boot — PASS 38,988,173 cycles** (`ooocoh-t20-final-server-osbi-48M`,
+  `strictDualPassed`, force 0, `[hpd-phantom]`/`[hpd-zombie]`/`[misp-hart]` 0,
+  no trap). Two independent defects fixed, each attributed by a control
+  run: **A** `scoreboard.sv` — a wrong-path load's memory-order `replay`
+  survived the mispredict cancel and refetched the wrong path at commit
+  (hart 5 retired `0x800086e8`, corrupted stack → `sbi_trap_error`);
+  **B** vendored HPDcache — the uncacheable-hit invalidation left ways
+  `valid=0/fetch=1` (sticky stage-2 fetch bit), eight `lr.d` on OpenSBI's
+  scratch set made every later miss to that set park on `dir_unavailable`
+  with an empty MSHR (fork gitlink `f3e7354`). Also the T19 adapter
+  withdraw-hold (phantom grants). Witnesses `ooo_wrongpath_replay`,
+  `mc_lrsc_set_zombie`, `mc_wrongpath_window`, `mc_force_kill_miss`.
+  Regression on HEAD: all drained anchors byte-identical to T17, FP suite
+  + probes Spike-exact, formal/leaves/lint/synth at baseline. Plan T20.
+- [ ] **Server still opt-in after T20.** Owed: `COH_FILTERED` breadth
+  (multi-writer lines, CBO under contention, L3 eviction/inclusion), a
+  Linux-class boot on a faster host (780 cyc/s on the builder), the full
+  `check -assert`, and a boot-performance pass (FDT phases ≈8 M cycles
+  each, drain bubbles at `SmtFetchQuantum 4`).
+- [x] **T18 fixed (2026-10-06): statistical corrector slot aliasing** — one
+  counter (window-base row) was read for every fetch slot while training
+  wrote the branch-PC row, so a hot taken branch forced an unrelated slot's
+  direction; now per-slot rows + `NR_ENTRIES` guard. Server `RASDepth` 2→16
+  (OpenSBI call depth > 2 made every `ret` a mispredict). `tb_g6lc_bp_statcor`
+  alias scenario is the witness; int2_l3/smt2 anchors unchanged (corrector off).
+- [x] **Harness: `g6lc_tb.cpp` cycle-budget exit now says so** (`[cycle budget
+  reached: no tohost verdict]` suffix; banner grammar kept for the runners).
+  Three earlier server "passes" were cap exits read from the bare line.
 - [x] **T17 fixed (2026-10-04): fence.i switch-storm fetch livelock.** The
   first 24 M server boot after T16 froze all eight harts right after
   OpenSBI's `fence.i`: starve switches killed every in-flight I$ miss and
