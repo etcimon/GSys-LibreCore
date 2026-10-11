@@ -613,6 +613,11 @@ def main():
                     trials+=[(0,True,'GHIST_FOLD_TRAIN'),(1,True,'GHIST_SWITCH_BANK')]
             elif kind=='ras':trials+=[(0,True,'RAS_POP'),(2,True,'RAS_RESTORE_TOP'),(3,True,'RAS_RESTORE_POP'),(4,True,'RAS_RESTORE_PUSH'),(5,True,'RAS_RESTORE_FULL_CNT')]
             elif kind=='ckpt':trials+=[(0,True,'CKPT_OOO_ORDER'),(2,True,'CKPT_YOUNGER_DEAD'),(3,True,'CKPT_REUSE'),(4,True,'CKPT_STALE_TAG'),(5,True,'CKPT_CLEAR_RESTORE'),(6,True,'CKPT_MISP_ALLOC')]
+            elif kind=='ckptrand':
+                # Randomized model-vs-DUT bench: the reference model is the
+                # oracle (CKPT_RAND_MODEL_MISMATCH on any divergence); no
+                # oracle_negative arm.
+                pass
             elif kind=='csrbuf':
                 trials+=[(n,True,('CSRBUF_ADDR','CSRBUF_READY','CSRBUF_CANCEL','CSRBUF_FLUSH','CSRBUF_INORDER','CSRBUF_PIPE',
                                  'CSRBUF_COMMIT_ALLOC','CSRBUF_CANCEL_ALLOC','CSRBUF_FLUSH_ALLOC','CSRBUF_MATCHED_CREDIT')[n]) for n,_ in cases]

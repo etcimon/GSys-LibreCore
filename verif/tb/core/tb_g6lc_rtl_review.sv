@@ -3153,7 +3153,7 @@ module tb_g6lc_review_ckptrand;
   function automatic int span_m(int b); return alloc_m[b] - head_m[b]; endfunction
   `define CHK(cond, msg) if (!(cond)) begin errors++; $display("[%0d] CHECK FAILED: %s", cyc, msg); if (errors > 10) $fatal(1, "too many errors"); end
 
-  int b, i, k, pc, n, pick, rtag_i;
+  int b, i, k, pc, n, pick, rtag_i, hh, ss, dd_dist;
   bit do_res, misp, stale;
   logic [TAGW-1:0] rtag;
   bit alloc_exp, live_exp, crv_exp;
@@ -3191,7 +3191,7 @@ module tb_g6lc_review_ckptrand;
       #1;
       if (trace) begin
         $write("[%0d] psel=%0d push=%b csel=%0d pop=%0b popv=%0b misp=%0b tag=%0h stale=%0b clear=%0b flush=%0b | ", cyc, phart, push, b, pop, popv, restore, rtag, stale, clear, flush);
-        for (int h = 0; h < NH; h++) $write("bank%0d: head=%0d alloc=%0d span=%0d valid=%b model(head=%0d alloc=%0d live=%0d) ", h, dut.head_q[h], dut.alloc_q[h], dut.span[h], dut.valid_q[h], head_m[h], alloc_m[h], live[h].size());
+        for (hh = 0; hh < NH; hh++) $write("bank%0d: head=%0d alloc=%0d span=%0d valid=%b model(head=%0d alloc=%0d live=%0d) ", hh, dut.head_q[hh], dut.alloc_q[hh], dut.span[hh], dut.valid_q[hh], head_m[hh], alloc_m[hh], live[hh].size());
         $display(" | av=%0b ev=%0b rv=%0b crv=%0b", av, ev, rv, crv);
       end
       // ---- expectations
@@ -3229,12 +3229,12 @@ module tb_g6lc_review_ckptrand;
       if (!wb) `CHK(empty == (span_m(b) == 0), $sformatf("empty_o=%0b span=%0d", empty, span_m(b)))
       if (!wb) `CHK(full == (span_m(b) == DEPTH), $sformatf("full_o=%0b span=%0d", full, span_m(b)))
       // white-box invariants on the registered state
-      for (int h = 0; h < NH; h++) begin : chk_bank_wb
-        `CHK(int'(dut.span[h]) <= DEPTH, $sformatf("dut.span[%0d]=%0d", h, dut.span[h]))
-        if (!wb) `CHK(int'(dut.span[h]) == span_m(h), $sformatf("dut.span[%0d]=%0d model=%0d", h, dut.span[h], span_m(h)))
-        for (int s = 0; s < DEPTH; s++) if (dut.valid_q[h][s]) begin : chk_valid_in_span
-          int d; d = (s - (int'(dut.head_q[h]) % DEPTH) + DEPTH) % DEPTH;
-          `CHK(d < int'(dut.span[h]), $sformatf("valid bit outside [head,alloc): bank %0d slot %0d head %0d span %0d", h, s, int'(dut.head_q[h]) % DEPTH, dut.span[h]))
+      for (hh = 0; hh < NH; hh++) begin
+        `CHK(int'(dut.span[hh]) <= DEPTH, $sformatf("dut.span[%0d]=%0d", hh, dut.span[hh]))
+        if (!wb) `CHK(int'(dut.span[hh]) == span_m(hh), $sformatf("dut.span[%0d]=%0d model=%0d", hh, dut.span[hh], span_m(hh)))
+        for (ss = 0; ss < DEPTH; ss++) if (dut.valid_q[hh][ss]) begin
+          dd_dist = (ss - (int'(dut.head_q[hh]) % DEPTH) + DEPTH) % DEPTH;
+          `CHK(dd_dist < int'(dut.span[hh]), $sformatf("valid bit outside [head,alloc): bank %0d slot %0d head %0d span %0d", hh, ss, int'(dut.head_q[hh]) % DEPTH, dut.span[hh]))
         end
       end
       // ---- bookkeeping (what the edge will do)
@@ -3254,7 +3254,7 @@ module tb_g6lc_review_ckptrand;
         end
       end
       // head: oldest live after the frees, or the post-free allocation pointer
-      for (int h = 0; h < NH; h++) head_m[h] = (live[h].size() == 0) ? alloc_m[h] : live[h][0].pos;
+      for (hh = 0; hh < NH; hh++) head_m[hh] = (live[hh].size() == 0) ? alloc_m[hh] : live[hh][0].pos;
       if (av) begin
         for (k = 0; k < NR_PUSH; k++) if (push[k]) begin
           ne.tag = aidx[k]; ne.pos = alloc_m[phart]; ne.g = pghist; ne.tos = ptos; ne.cnt = pcnt; ne.top = ptop; live[phart].push_back(ne); alloc_m[phart]++; n_alloc++;
