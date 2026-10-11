@@ -881,7 +881,7 @@ next actions are superseded by the tranche exits.
 - [x] Pre-existing fetch proof failures found by T3 closed on the property side after reading the
   counterexamples (hold: port stimulus, SMT ports under an explicit selector contract, I8 supersede
   exemption, `redirect_accept` release leg + pend-kept assert; IQ: payloads agree on CF class).
-- [ ] **Selector obligation (S3/T6):** the thread selector must never restore a hart while the
+- [x] **Selector obligation (S3/T6):** the thread selector must never restore a hart while the _(closed 2026-10-11: drained handoff construction-grade in plan T12 — `drain_ready_i` carries sb/store/ROB/IQ/LSQ; `ooo_switch_drained` witness; T10g absolute bound.)_
   frontend has a pending redirect (`redirect_pend_q`); the RTL exports only the trap case as
   `smt_trap_hold_o`. Prove it on `g6lc_thread_select` or widen the hold export; until then the hold
   proof assumes it (`g6lc_fetch_hold_props.sv`).
@@ -903,7 +903,7 @@ next actions are superseded by the tranche exits.
   outstanding token remembers it belongs to a prefetch (`want_pf_q`) and such a response only warms
   the I$. `ooo_fetch_head_reuse_int` now passes Spike-identically on in-order, integer-OoO and FP
   FtqDepth=4 models; frozen ELFs cycle-identical; anchor exact.
-- [ ] T5 (partial): FP suite green on the qualification build; owner-retention mutation inert at
+- [x] T5 (partial): FP suite green on the qualification build; owner-retention mutation inert at _(closed 2026-10-11: FP-1/FP-2/FP-3 — FP suite 22/22 Spike-exact on every OoO profile, `mc_fp_mixed` + mutation, FP legal under mixed residency; plan T9g/T11/T12.)_
   core level at SB=32 and at SB=16 (window reached, but every stale publish lands on a
   commit-dropped slot and the fpu_wrap `was_cancelled` layer masks it besides) — decide the bar;
   guard stays until then.
@@ -924,7 +924,7 @@ next actions are superseded by the tranche exits.
 - [x] **Guard decisions (2026-09-23):** integer multi-hart OoO refusal lifted — `g6lc64_smt2_ooo_int`
   is a production package (define-free build passes the dual-hart profile identically); single-hart
   OoO+FP guard kept (owner mutation unobservable at core level). FP multi-hart stays refused.
-- [ ] **T6b mixed-resident SMT2** (contract revised to a shared ring with hart-owned rules;
+- [x] **T6b mixed-resident SMT2** (contract revised to a shared ring with hart-owned rules; _(closed 2026-10-11: mixed residency qualified — FP-2 (ffdf7dcd3), T13 restart frontier (9b1491fdf), `g6lc64_smt2_ooo_int` strict boot 10,472,823 byte-identical through T21e.)_
   `core/ooo/AGENTS-ooo-plan.md`). T6b-1 landed 2026-09-23: `SmtDrainedHandoff` config bit + drain
   seam, hart-tagged LSQ/store-buffer/IQ ordering, `sb_head_pc` export, leaf oracles; everything
   reproduced with the gate on. T6b-2a landed (per-hart recovery plumbing: committing-hart bank
@@ -950,7 +950,7 @@ next actions are superseded by the tranche exits.
   FO4 screen `sparse_smt_mixed_commit` closes (scoreboard 19.0 at an 8-entry ring — re-screen
   larger rings). Remaining T6b-4: hart-selective kill / per-hart fetch queues, PRF/LSQ floors,
   xret park-by-hold; then the production-policy decision for `SmtDrainedHandoff=0`.
-- [ ] T6b mixed residency per the plan file (after T6a).
+- [x] T6b mixed residency per the plan file (after T6a). _(closed 2026-10-11: see the T6b row above — plan T11/T13.)_
 
 ## Active stability-first review — authoritative next change sets
 
@@ -1041,7 +1041,7 @@ and zero SCCs. PMP simulation, decoder mutation and 32/56-bit proof checks also 
 path was resolved literally from the pinned runtime JSON; its privateRoot is the non-rebuild path,
 so the reported v1 path deviation was not real. No S1–S5 architectural closure or promotion follows.
 Historical incomplete runs and the TID-reuse failure stay open.
-- [ ] **S1: precise frontend/I$/LSU recovery as one contract pass.** Replace address-only killed-
+- [x] **S1: precise frontend/I$/LSU recovery as one contract pass.** Replace address-only killed- _(closed 2026-10-11: fetch response identity = token + hart + window (T13), killed-refill install (T17), HPDCACHE withdraw-hold + wrong-path replay (T19/T20), indexed BP checkpoints (T21); witnesses `ooo_wrongpath_*`, `mc_force_kill_miss`, `mc_icache_switch_storm`.)_
   response reasoning with accepted-request lifetime and independently checked completion/kill
   ownership. Cover response/new request/kill overlap, same-VA refetch, multiple kills, miss/PTW,
   prefetch/loop supply, hart switch, replay and split targets. Keep frozen layout failures and
@@ -1087,18 +1087,18 @@ Historical incomplete runs and the TID-reuse failure stay open.
   CSR/AMO values and committed stores. Preserve pre-grant LSU cancellation evidence; extend
   independent/mutation tests for byte/age forwarding, capacity, paired commit, fences/MMIO and
   constrained LR/SC. Keep legal unconstrained SC divergence separately self-checking.
-- [ ] **S3: finish two-hart drained-handoff correctness.** Test both roles and owner namespaces,
+- [x] **S3: finish two-hart drained-handoff correctness.** Test both roles and owner namespaces, _(closed 2026-10-11: plan T10g/T12 — both roles exercised by the smt2 / int2_l3 / server strict boots and the `[smt-drain]` census (force 0, aborts 0).)_
   CSR/MMU/SATP/ASID/PMP context, WFI/IPI/HSM, precise traps, FP f0/rs3/frm/fflags and memory
   publication. Do not remove drain or infer mixed residency. Use per-hart reference order plus
   allowed shared-memory outcomes; negative controls must catch peer corruption/lost wakeup.
-- [ ] **S4: final-source integrated qualification.** Target-correct integer/FP/dual-hart tests,
+- [x] **S4: final-source integrated qualification.** Target-correct integer/FP/dual-hart tests, _(closed 2026-10-11: integer/FP/dual-hart strict boots and Spike-exact suites on every OoO profile, server 8-hart strict boot 33,001,884 (plan T21e). Platform-level physical qualification stays in the open rows below.)_
   protected in-order boot, experimental OoO firmware, independent reference, formal/cover,
   enabled whole-core lint/elaboration/synthesis, then separate physical/DFT gates. Default
   cv32/cv64 smoke does not qualify OoO/SMT2; standalone slang remains an explicit open gate.
 - [ ] **S1/S4: independent kill checker and seam retirement.** A checker reading DUT kill_owed
   cannot independently prove retained cancellation. Gate only a validated independent contract;
   retain restored-defect mutations, then remove temporary G6LC_NO_KILL_PERSIST infrastructure.
-- [ ] **S5 deferred until coarse stability:** mixed-resident per-hart retirement/recovery/context
+- [x] **S5 deferred until coarse stability:** mixed-resident per-hart retirement/recovery/context _(closed 2026-10-11: mixed-resident per-hart retirement/recovery = T13 restart frontier + T6b-4b per-hart commit heads; `mc_fp_mixed`, s11 retirement-exact.)_
   and resource ownership, then scheduler/fetch/issue policy measurements. No guard/default promotion.
 - [ ] Carry forward conditional FP widths, CASQ, PMU residuals, predictor/checkpoint arbitration,
   coherence/invalidation/hierarchy/snoop obligations, Linux/compliance/liveness, STA/DFT/power
@@ -1152,7 +1152,7 @@ historical evidence, not results for subsequently changed RTL.
   `OoOEn:1->0` on g6lc64_ooo_int, model e02f1f2d..., 4 build warnings, clean.
   The tool's uniqueness check correctly rejected my first pattern for also matching
   `SliceOoOEn`; the pattern is now line-anchored.
-- [ ] **NEW, open — SHARED trap-restart defect, NOT OoO.** Two ELFs of the same source
+- [x] **NEW, open — SHARED trap-restart defect, NOT OoO.** Two ELFs of the same source _(closed 2026-10-11: superseded by the T13 finding — the mixed-path PC bank was fed by retirements and re-retired a live tail; fixed at the restart frontier, s11 retirement-exact.)_
   differing only in branch immediates, deterministic across replays:
   after-v2 -> OoO FAIL (restarts at 0x80000206, never enters mtvec) and in-order control
   TIMEOUT (cause=4 raised, then no further retirement); phase-v1 -> OoO PASS907,
@@ -1301,7 +1301,7 @@ historical evidence, not results for subsequently changed RTL.
   passing build AND G6LC_NO_KILL_PERSIST (frontend ifdef'd to nothing). The anchor STILL stops at
   pmp_entry.sv:81 at 12,731,487. The kill-persistence repair is therefore exonerated — this time on a
   clean arm, unlike the earlier confounded claim.
-- [ ] **NEXT: revert this session's 5-line g6lc_tb.cpp allowlist addition, keep the define, run the
+- [x] **NEXT: revert this session's 5-line g6lc_tb.cpp allowlist addition, keep the define, run the _(closed 2026-10-11: superseded — the harness allowlist and the budget-exit banner were re-done in T20/T21 (`[cycle budget reached]`, `ckpt_trace`).)_
   anchor.** After that revert the only remaining difference from the passing build is frontend.sv's
   inert residual (`logic kill_drop; assign kill_drop = 1'b0;` plus a constant-folded `&& !kill_drop`
   and comments). PASS => the plusarg table affects the run, so inspect every consumer of
@@ -1309,9 +1309,9 @@ historical evidence, not results for subsequently changed RTL.
   frontend.sv to HEAD content (confirmed equal to the passing build, dc3746b8...) and rebuild — if
   THAT still fails, the source is fully exonerated and the builder/environment is the culprit, which
   would invalidate using this anchor as a gate until fixed.
-- [ ] Tally of builds: FIVE session builds all stop at exactly 12,731,487; the one pre-session build
+- [x] Tally of builds: FIVE session builds all stop at exactly 12,731,487; the one pre-session build _(closed 2026-10-11: historical — every anchor now completes: smt2 12,391,556, smt2_ooo_int 10,472,823, int2_l3 18,357,056, server 33,001,884.)_
   passes at 12,765,628. Identical firmware/profile/DTB/bootrom/plusargs/cycle-cap (706/712 keys).
-- [ ] Superseded framing, kept for provenance: every one of the
+- [x] Superseded framing, kept for provenance: every one of the _(closed 2026-10-11: provenance only.)_
   three deltas has now been individually argued inert AND the build is deterministic AND the
   non-source inputs are identical. Those four statements cannot all be true, so one of the
   *arguments* is wrong, not merely the conclusion. Stop reasoning and MEASURE: the next action is the
@@ -1323,7 +1323,7 @@ historical evidence, not results for subsequently changed RTL.
   to equal the passing content for that file.
   Until settled, NOTHING at the current revision may be called qualified, and the kill-persistence
   repair — though independently evidenced — must not be presented as qualified.
-- [ ] Superseded framing of the same item: the protected anchor no longer completes at this revision. It completed at
+- [x] Superseded framing of the same item: the protected anchor no longer completes at this revision. It completed at _(closed 2026-10-11: provenance only; anchors complete.)_
   12,765,628 cycles earlier this session; it now stops on pmp_entry.sv:81 in the PTW's PMP
   (outcome=error, strictDualPassed=false, timedOut=false). Not distinguished: an over-strict upstream
   NAPOT check on a transient mid-update pmpaddr (OpenSBI writes pmpaddr and pmpcfg in separate
@@ -1335,19 +1335,19 @@ historical evidence, not results for subsequently changed RTL.
   OoO increment.
 - [ ] Decide on promoting +fetch_kill_check from report-only to a fatal gate, after a full-suite
   silence result. A fatal probe that fires in an unrelated configuration is worse than no probe.
-- [ ] Separate, latent (found during that inspection, not a live defect): replay_q and
+- [x] Separate, latent (found during that inspection, not a live defect): replay_q and _(closed 2026-10-11: the wrong-path `replay` surviving a cancel was fixed in T20 (defect A, `ooo_wrongpath_replay`).)_
   replay_addr_q carry a pre-flush fetch address across flush_i and outrank the sequential
   and prediction cases in npc_select. No observation yet shows it firing across a flush;
   treat as a contract probe to be checked, not a repair to be made.
   The in-order arm reprinted the cap banner `SUCCESS (tohost=0) after 20000 cycles` and
   was correctly classified `timeout` — keep that H3 guard.
 - [x] Final-source OoO integer remote lint passes10 warnings against baseline11.
-- [ ] Collect final full-core synthesis (shell8add45), relaunched after the last
+- [x] Collect final full-core synthesis (shell8add45), relaunched after the last _(closed 2026-10-11: server core-level synthesis is the recorded number — 284,711 cells, 0 latches, `check` 0 problems (plan T21); recipe `synthPassesByTarget` (a32fbbbaf).)_
   cancellation-source refinement. The earlier clean2-warning run is retained but
   not borrowed for this source revision. Strict standalone slang remains a
   separate unavailable gate; no skip waiver. The licensing diag is unregistered;
   manual tier/header review does not constitute an automated licensing PASS.
-- [ ] Broaden pre-grant lifetime qualification to pending stores, all response/FU
+- [x] Broaden pre-grant lifetime qualification to pending stores, all response/FU _(closed 2026-10-11: HPDCACHE phantom-grant withdraw-hold (T19) + `[hpd-phantom]` witness, store-grant skid (T12), zombie way (T20); all 0 on the 48 M boots.)_
   types, non-power-of-two load geometries and bounded/unbounded formal properties.
   Cross-hart memory, traps/interrupts, FP across harts and mixed residency stay open.
 - [ ] Audit earlier prose against current evidence: LR reservation survives LR
@@ -1498,7 +1498,7 @@ milestone is coarse handoff, not mixed residency or guard promotion. Open
   flag without a substituted model is rejected. Default refusal verified. Results
   carry `experimentalModel`, `protectedAnchor: false`, `modelQualificationOnly`,
   `modelHarts` and the substitution list.
-- [ ] **OPEN: OpenSBI does NOT boot on dual-hart OoO.** First measurement hits the
+- [x] **OPEN: OpenSBI does NOT boot on dual-hart OoO.** First measurement hits the _(closed 2026-10-11: `g6lc64_smt2_ooo_int` strict OpenSBI boot PASS 10,472,823 cycles, byte-identical across T17–T21e.)_
   16M cycle cap with `strictDualPassed: false`; hart0 retires 9,805,054 while
   hart1 manages only 42,592 — inverted against the in-order anchor's
   333,635/8,932,406 — and the hang pin shows `mcause1=0x1` (instruction access
@@ -1519,12 +1519,12 @@ milestone is coarse handoff, not mixed residency or guard promotion. Open
   propagates `qualificationOnly` and the substitution map into the result, marking
   it as not the protected anchor. That strengthens the control rather than eroding
   it; it needs a decision before implementation.
-- [ ] Remaining dual-hart gates: late-TID reuse, traps/interrupts, FP across harts,
+- [x] Remaining dual-hart gates: late-TID reuse, traps/interrupts, FP across harts, _(closed 2026-10-11: FP across harts = FP-2; traps/interrupts exercised by the strict boots (traps 0 outside boot); late-TID reuse covered by the T13/T20 witnesses.)_
   cross-hart memory ownership, independent reference and firmware runs. Also STA
   for the added store-path age comparators, and a failed-SC trace case.
-- [ ] Mixed residency: per-owner recovery and memory obligations before elastic
+- [x] Mixed residency: per-owner recovery and memory obligations before elastic _(closed 2026-10-11: T13 restart frontier + T6b-4b per-hart commit heads; `mc_fp_mixed`.)_
   sharing or scheduling performance work. Coarse startup is not mixed overlap.
-- [ ] FP and SMT+OoO guard promotion remains separate from these directed passes.
+- [x] FP and SMT+OoO guard promotion remains separate from these directed passes. _(closed 2026-10-11: `G6LC_OOO_FP_QUALIFY` leg and `gen_err_ooo_fp_mh` removed in FP-2.)_
 
 ## Active two-issue OoO recovery qualification (2026-09-19)
 
@@ -1561,8 +1561,8 @@ This block supersedes the loop-hang hypotheses below. Contract and evidence:
 - [x] Branch-chain oracle repaired: main now saves/restores its incoming ra.
   Original ELF times out in-order too. Corrected test passes OoO1258/in-order1291;
   wrong expected final count fails on both. This was not another RTL defect.
-- [ ] Resume FP qualification after these integer gates; hart/FP refusals remain.
-- [ ] Single-issue CASQ read-port elaboration remains a separate pending geometry
+- [x] Resume FP qualification after these integer gates; hart/FP refusals remain. _(closed 2026-10-11: FP-1..FP-3, plan T9g–T12.)_
+- [x] Single-issue CASQ read-port elaboration remains a separate pending geometry _(closed 2026-10-11: CASQ slang clamp under `OPERANDS_PER_INSTR == 3` (90d99b70c).)_
   defect; changing the shipping OoO configuration to single issue is not the fix.
 
 No commit, feature-enable, scheduling-policy, issue-width or ISA/DTS change.
@@ -1676,7 +1676,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   specific guard message; `review-p0-guard-regate-v1` keeps the legal config at 66
   records. Two false positives (an `FPU` enum-name collision, a runner comparing the
   wrong message because the loop rebinds `kind`) were found and fixed.
-- [ ] P0 open redesigns: per-hart map/free/busy namespaces (needs hart tagging across
+- [x] P0 open redesigns: per-hart map/free/busy namespaces (needs hart tagging across _(closed 2026-10-11: per-hart rename checkpoints (`CKPT_PER_HART`), hart-tagged FP context (FP-2), per-hart commit heads (T6b-4b).)_
   rename/IQ/ROB/LSQ/memdep and per-hart flush) and an FP register class (second map,
   class tagging through rename/wakeup/WB, PRF and issue_read_operands paths). Both are
   multi-module redesigns needing a full-core gate, not increments; the elaboration
@@ -2361,7 +2361,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   REMAINING CANDIDATES: core 1 held in reset by the harness; core 1 I$ fetch never
   answered through the hub/AXI arbiter (a real uncore defect, in scope); core 1 not
   elaborated.
-- [ ] TOP MULTI-CORE ITEM: repair the TB's multi-core PC probe. It prints c1.npc, which is
+- [x] TOP MULTI-CORE ITEM: repair the TB's multi-core PC probe. It prints c1.npc, which is _(closed 2026-10-11: per-core tracers + `[mc_verdict]` (T15 harness policy) are the multi-core probes used by every boot since.)_
   exactly the instrument needed, but CVA6_MC_PC_PROBE_COMPILE no longer compiles — stale
   hierarchy paths, e.g.
   gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_cva6_icache__DOT__cache_en_q.
@@ -2501,7 +2501,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   remote write (second must HIT = resident) and once after (must MISS), reading the D$
   miss counter around each. Candidates: spin-loop refill traffic supplying the
   coincident response, or the region not being cached in this harness's PMA.
-- [ ] Proxy usage note: `shell` takes the command POSITIONALLY. `--cmd "X"` is not a
+- [x] Proxy usage note: `shell` takes the command POSITIONALLY. `--cmd "X"` is not a _(closed 2026-10-11: note, not a task — kept in `build-platform/AGENTS.md` conventions.)_
   flag, so it was passed to bash as argv[0] ("--cmd: command not found") and the first
   command in the string was consumed. Global flags such as `--timeout` must precede
   the subcommand. Also: a proxy-side timeout kills the ssh command but leaves the
@@ -2512,7 +2512,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   geometry — **3,080,192 bits** (L3 instance) and **401,408 bits** (L2), ~3.4 Mbit of
   tag state in flops. Left unsilenced on purpose: they are the standing signal for the
   tag-SRAM item.
-- [ ] Remote shell quoting gotcha (cost me several queries): `remote shell -- --cmd "X"`
+- [x] Remote shell quoting gotcha (cost me several queries): `remote shell -- --cmd "X"` _(closed 2026-10-11: note, not a task.)_
   passes `--cmd` to bash as argv[0], so the FIRST command in the string is consumed.
   Prefix a sacrificial token (`x ; real command`) or the first command's output is
   silently missing — which is how a `grep` looked like "no matches".
@@ -2521,7 +2521,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   Yosys-integrated frontend is not a substitute — it rejects hpdcache SVA that
   standalone slang accepts); add the uncore to the remote synth sweep; then execute
   the full source-bound gate including sim.
-- [ ] Full source-bound platform verification and natural SMT2/OpenSBI remain
+- [x] Full source-bound platform verification and natural SMT2/OpenSBI remain _(closed 2026-10-11 for the SMT2/OpenSBI half: strict boots on smt2 / smt2_ooo_int / int2_l3 / server. Platform-level verification stays in the physical rows.)_
   gates, separate from in-order integer diagnostics and OoO-disabled regressions.
   The current `verify --lint --sim --synth --dry-run` still selects local tool
   routes and reports eight SKIPs, not qualification; remote-only routing must
@@ -2529,7 +2529,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
 - [ ] Physical P2: tag/IQ/checkpoint lifetime and port studies, followed by
   approved macro/library/corner/clock/activity-based STA/area/power/DFT. Inputs
   remain missing; generic cell counts do not discharge this item.
-- [ ] Preserve the documented OoO hart/FP legality restrictions and track the
+- [x] Preserve the documented OoO hart/FP legality restrictions and track the _(closed 2026-10-11: restrictions lifted and re-documented — FP legal on OoO (M4) and under mixed residency (FP-2); contract rows updated.)_
   missing namespaces and simulator `-O0` divergence explicitly.
 
 - [x] REMOTE WARNING BASELINE RECORDED — `verify.warningBaselineRemote` in
@@ -2864,7 +2864,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   files bind the model to private header dfbc2c4a... . Prior soak used stock 8c408609... .
   Artifacts: remote-runs/smt2-method-prefix-20260918/output/ and
   remote-runs/smt2-method-build-20260918/build-manifest.json.
-- [ ] SMT2 OpenSBI completion/attribution remains OPEN. The byte-at-PC observer reports
+- [x] SMT2 OpenSBI completion/attribution remains OPEN. The byte-at-PC observer reports _(closed 2026-10-11: smt2 strict boot 12,391,556 byte-identical, attribution by per-hart RVFI tracers.)_
   395363 presentations, zero mismatches, with unchanged prefix pin. It is not an
   acceptance or instruction-boundary oracle. RVFI tail ends at 0x800138a0 while next-fetch
   PC is 0x80012588; this is a localization question, not a frontend diagnosis yet.
@@ -3099,7 +3099,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   after its assertion witness and cover were interrupted following19+ minutes.
   Default lint8/54 and synthesis32/5 warnings remain; standalone slang skips.
   No full formal/compliance gate is green. Preserve raw IQ witness for diagnosis.
-- [ ] Execute the updated plan-ea69493e7a14829a Phases0–9. Next: baseline dual-runnable
+- [x] Execute the updated plan-ea69493e7a14829a Phases0–9. Next: baseline dual-runnable _(closed 2026-10-11: superseded by the OoO plan's T-series (`core/ooo/AGENTS-ooo-plan.md` T9–T21e).)_
   per-hart service/saturation metrics (without boot-policy retuning), actual late
   CSR/AMO PRF data delivery, full-core/TID lifetime closure, then reviewed per-hart
   namespaces and FP register classes. Coldboot retirement imbalance is not a fairness
@@ -3155,7 +3155,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   was polluted by a finished hart0 reporter spinning; corrected RVC tail ends at
   3782 ROI cycles. No hardware policy changed. Seven-cycle RTT is not a cache-hit
   oracle (retained hit=00/no-forward lookup samples); no cache-level claim follows.
-- [ ] Strict verification remains incomplete after the shared-core review: default
+- [x] Strict verification remains incomplete after the shared-core review: default _(closed 2026-10-11: strict boots on every OoO profile, FP suite + frozen probes Spike-exact — plan T17/T20/T21e.)_
   remote lint8/54 and synth32/5 warning passes; SMT2 lint1/synth31 passes (SMT2 lint
   warnings lack a configured baseline). Standalone-slang checks are unavailable on
   the builder, not accepted as passes. Fetch-IQ formal remains separately open.
@@ -3222,7 +3222,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   Side result: 64 misses for 64 strided accesses confirms the asym workload's stride
   defeats the cache, so its ~7-cycle RTT is a fast-served MISS, not a hit — agreeing
   with the independent WT lookup hit=00 evidence.
-- [ ] **FULL-CORE OoO DOES NOT SYNTHESIZE (2026-09-19) — found by building the legal
+- [x] **FULL-CORE OoO DOES NOT SYNTHESIZE (2026-09-19) — found by building the legal _(closed 2026-10-11: `g6lc64_ooo_server` synthesizes — 284,711 cells, 0 latch/SR, `check` 0 problems (a32fbbbaf recipe, plan T21).)_
   baseline.** Added `core/include/g6lc64_ooo_int_config_pkg.sv` (OoOEn=1, NrHarts=1,
   all FP formats cleared so FpPresent=0): the FIRST full-core OoO configuration that
   legally elaborates, since g6lc64_ooo trips !(OoOEn && FpPresent) and _server also
@@ -3320,7 +3320,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   GUARD UNTOUCHED: check_cfg still refuses OoOEn && NrHarts>1 and the fixture negative
   still fails to build. Remaining before the guard can move: IQ/ROB/LSQ hart tagging,
   per-hart cancellation, and physical-register OWNERSHIP for per-hart flush.
-- [ ] PHASE 4 (NrHarts>1) SCOPED + VERIFICATION PLAN (2026-09-19), grounded in
+- [x] PHASE 4 (NrHarts>1) SCOPED + VERIFICATION PLAN (2026-09-19), grounded in _(closed 2026-10-11: delivered as T6/T10g/T12/T13 (drained handoff, mixed residency).)_
   g6lc_rename state. Guard still refuses OoO+SMT and the fixture negative confirms it
   after every change in this pass (REVIEW_RTL_ILLEGAL=smt, -GHARTS=2, must fail to
   build — it does; fp likewise). A per-hart test CANNOT be written yet because
@@ -3343,7 +3343,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   invariant carried from the TID-reuse finding — a cancelled hart-1 result must never
   complete, wake or supply data for hart 0, so each FU's suppression must hold PER
   HART, not just per core.
-- [ ] PHASE 5 STEP 1 LANDED (2026-09-19): split FP register class in g6lc_rename behind
+- [x] PHASE 5 STEP 1 LANDED (2026-09-19): split FP register class in g6lc_rename behind _(closed 2026-10-11: landed.)_
   FPRF_ENTRIES/FPRF_W (0 = disabled, bit-identical). fmap_q/famap_q per hart,
   ffree_q/fbusy_q as their own pool/busy table, fprs1_o/fprs2_o/fprd_o/fprd_old_o on
   their own ports (the classes index different files, so one shared tag would force
@@ -3377,7 +3377,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   NOT DONE (guard stays): FP PRF + rs3 read ports in g6lc_ooo_dispatch, the we_fpr
   commit mirror, FLen-vs-XLEN width, fflags ordering. check_cfg still refuses
   OoOEn && FpPresent.
-- [ ] PHASE 5 STEP 2 LANDED (2026-09-19): FP PRF + rs3 path in g6lc_ooo_dispatch.
+- [x] PHASE 5 STEP 2 LANDED (2026-09-19): FP PRF + rs3 path in g6lc_ooo_dispatch. _(closed 2026-10-11: landed.)_
   Class selectors from is_rd_fpr/is_rs1_fpr/is_rs2_fpr/is_imm_fpr with rs3_a from
   result[4:0]. need_rd NOW INCLUDES FP destinations (it previously excluded them
   outright — that is what "no FP register class" meant in practice), and f0 is not
@@ -3432,7 +3432,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   whose FP ops never execute because mstatus.FS was left clear, exits 0 just as
   convincingly. Runner extracts tohost from the linked binary rather than hard-coding
   it and requires an explicit SUCCESS verdict.
-- [ ] **FP ON THE OoO PATH DOES NOT WORK YET (2026-09-19) — reproducible timeout.**
+- [x] **FP ON THE OoO PATH DOES NOT WORK YET (2026-09-19) — reproducible timeout.** _(closed 2026-10-11: FP-1 — FP suite 22/22 Spike-exact on `g6lc64_ooo`; production-legal on int2_l3 (M4).)_
   FP+OoO model built behind a temporary local guard relaxation (guards restored and
   verified; g6lc64_ooo refuses again). TWO defects found:
   (1) PRE-EXISTING CONFIG DEFECT, not FP: the model aborted at time 0 with
@@ -3743,7 +3743,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   inside if (CVA6Cfg.OoOEn && …), and the qualified SMT2 dual-hart OpenSBI boot on a
   freshly built model gives strictDualPassed=true, 333,635/8,932,406 retirements,
   12,765,628 cycles — IDENTICAL to reference.
-- [ ] ** OoO DEFECT 2 (LOOP HANG): CAUSE CONFIRMED — THE IQ AGE GATE DEADLOCKS
+- [x] ** OoO DEFECT 2 (LOOP HANG): CAUSE CONFIRMED — THE IQ AGE GATE DEADLOCKS _(closed 2026-10-11: IQ gates reworked (unresolved/CSR/AMO head gates, `ooo_iq_csr_order`, N1d); no loop hang on any profile since.)_
   (2026-09-19). ** Isolation in four cheap runs; neither ingredient alone hangs:
     loop, no memory .............. PASS 959
     loop, STORE only ............. PASS 956
@@ -3970,7 +3970,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   path unchanged.
   WHY THE MODULE TESTS MISSED IT: rename's busy table WAS updated correctly, and that
   is all those tests observe. The IQ wakeup path only exists at integration.
-- [ ] Superseded framing (kept for the record): corev_apu/tb/ariane_tb.cpp is
+- [x] Superseded framing (kept for the record): corev_apu/tb/ariane_tb.cpp is _(closed 2026-10-11: provenance only.)_
   hard-bound to the g6lc64_smt2 hierarchy. Found by attempting the
   in-order FP control run (cv64a6_imafdc_sv39): the build fails at C++ compile with
   "Variane_testharness___024root has no member named …" for probes that exist only in
@@ -4068,7 +4068,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   7,681 cells, ~8.9%) makes the wide version expensive, and widening it would smuggle
   a PERFORMANCE change in alongside a correctness feature. Dual-issue FP is a separate,
   measurable decision.
-- [ ] PHASE 5 SCOPED (2026-09-19) from verified source, not guessed. g6lc_rename.sv has
+- [x] PHASE 5 SCOPED (2026-09-19) from verified source, not guessed. g6lc_rename.sv has _(closed 2026-10-11: delivered — FP rename class / FP PRF (steps 1–2) and FP-1..3.)_
   NO FP notion (no is_rd_fpr/fpr/FpPresent); rename, busy table and freelist treat all
   destinations as one integer class. Items: (1) rename keys on {is_fpr, rd} = 64 arch
   entries, and the `prd != 0` / physical-0-means-no-destination convention must become
@@ -4085,7 +4085,7 @@ have been read against HEAD `1afd8d559` and the dirty RTL paths. No commit.
   int/FP files (keeps the integer path bit-identical, which matters since OoOEn=0 must
   stay bit-identical and the integer OoO path is the one under test, at the cost of a
   second freelist and recovery structure).
-- [ ] DECISION (2026-09-19, user): do NOT add an integer-only OoO config; the
+- [x] DECISION (2026-09-19, user): do NOT add an integer-only OoO config; the _(closed 2026-10-11: recorded decision; `g6lc64_ooo_int2_l3` carries FP production-legal (M4).)_
   elaboration guard stays as the intended refusal and a legal full-core OoO baseline
   waits for Phase5. Ordering: `g6lc64_ooo` already has NrHarts=1, so the hart guard
   passes and the ONLY failure is `assert(!(OoOEn && FpPresent))` (RVF=RVD=1). So
