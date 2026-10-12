@@ -1,6 +1,5 @@
 """WT tag-response ownership regression, independent of firmware addresses.
 
-from yosys_bin import yosys_bin
 Copyright (c) 2026 Etienne Cimon
 SPDX-License-Identifier: MIT
 """
@@ -11,6 +10,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from yosys_bin import yosys_bin
 
 
 def sha(path):

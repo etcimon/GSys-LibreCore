@@ -1,6 +1,5 @@
 """Directed issue-order contract with matched source and oracle fault controls.
 
-from yosys_bin import yosys_bin
 Copyright (c) 2026 Etienne Cimon
 SPDX-License-Identifier: MIT
 """
@@ -11,6 +10,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+from yosys_bin import yosys_bin
 
 
 def digest(path):

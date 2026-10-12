@@ -1,6 +1,5 @@
 """Probe valid NAPOT configuration transitions with existing PMP assertions enabled.
 
-from yosys_bin import yosys_bin
 Copyright (c) 2026 Etienne Cimon
 SPDX-License-Identifier: MIT
 """
@@ -10,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+from yosys_bin import yosys_bin
 
 
 def main():
