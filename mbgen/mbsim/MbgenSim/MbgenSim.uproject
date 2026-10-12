@@ -1,0 +1,20 @@
+{
+  "FileVersion": 3,
+  "EngineAssociation": "5.8",
+  "Category": "",
+  "Description": "mbgen board preview. Generated. Open this in the Unreal editor, let it compile MbgenSim, then press Play.",
+  "Modules": [
+    {
+      "Name": "MbgenSim",
+      "Type": "Runtime",
+      "LoadingPhase": "Default"
+    }
+  ],
+  "Plugins": [
+    { "Name": "PythonScriptPlugin", "Enabled": true },
+    { "Name": "ProceduralMeshComponent", "Enabled": true },
+    { "Name": "EditorScriptingUtilities", "Enabled": true },
+    { "Name": "SQLiteCore", "Enabled": true }
+  ],
+  "TargetPlatforms": [ "Windows" ]
+}

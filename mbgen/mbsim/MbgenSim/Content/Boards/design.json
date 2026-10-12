@@ -1,0 +1,171 @@
+{
+	"template_id": "mini-itx",
+	"settings":
+	{
+		"package_id": "cv64a6_imafdc_sv39",
+		"gap_um": 1500,
+		"hotkey": "DEL",
+		"timeout_ms": 2000,
+		"product": "desktop"
+	},
+	"ports": [
+		{
+			"id": "socket",
+			"role": "socket",
+			"width_um": 45000
+		},
+		{
+			"id": "spi0",
+			"role": "spi_flash",
+			"width_um": 8000
+		},
+		{
+			"id": "bat0",
+			"role": "rtc_battery",
+			"width_um": 20000
+		},
+		{
+			"id": "usb0",
+			"role": "usb_stack",
+			"width_um": 15000
+		},
+		{
+			"id": "lan0",
+			"role": "gbe_magjack",
+			"width_um": 16000
+		},
+		{
+			"id": "hdmi0",
+			"role": "hdmi",
+			"width_um": 15000
+		},
+		{
+			"id": "fp0",
+			"role": "front_panel",
+			"width_um": 8000
+		},
+		{
+			"id": "mem0",
+			"role": "dimm",
+			"width_um": 10000
+		},
+		{
+			"id": "usb1",
+			"role": "usb_stack",
+			"width_um": 15000
+		},
+		{
+			"id": "sata0",
+			"role": "sata",
+			"width_um": 12000
+		},
+		{
+			"id": "nvme0",
+			"role": "nvme_m2",
+			"width_um": 22000
+		},
+		{
+			"id": "slot0",
+			"role": "pcie_slot",
+			"width_um": 20320
+		}
+	],
+	"placements": [
+		{
+			"id": "socket",
+			"edge": "cpu",
+			"s_um": 85000,
+			"stack": 0,
+			"pinned": true,
+			"order": 0
+		},
+		{
+			"id": "spi0",
+			"edge": "power",
+			"s_um": 108052,
+			"stack": 0,
+			"pinned": true,
+			"order": 1
+		},
+		{
+			"id": "bat0",
+			"edge": "cpu",
+			"s_um": 120000,
+			"stack": 0,
+			"pinned": true,
+			"order": 2
+		},
+		{
+			"id": "usb0",
+			"edge": "rear_io",
+			"s_um": 13125,
+			"stack": 0,
+			"pinned": false,
+			"order": 3
+		},
+		{
+			"id": "lan0",
+			"edge": "rear_io",
+			"s_um": 30125,
+			"stack": 0,
+			"pinned": false,
+			"order": 4
+		},
+		{
+			"id": "hdmi0",
+			"edge": "rear_io",
+			"s_um": 47125,
+			"stack": 0,
+			"pinned": false,
+			"order": 5
+		},
+		{
+			"id": "fp0",
+			"edge": "front",
+			"s_um": 19721,
+			"stack": 0,
+			"pinned": true,
+			"order": 6
+		},
+		{
+			"id": "mem0",
+			"edge": "memory",
+			"s_um": 51726,
+			"stack": 0,
+			"pinned": true,
+			"order": 7
+		},
+		{
+			"id": "usb1",
+			"edge": "rear_io",
+			"s_um": 63625,
+			"stack": 0,
+			"pinned": false,
+			"order": 8
+		},
+		{
+			"id": "sata0",
+			"edge": "drive",
+			"s_um": 20071,
+			"stack": 0,
+			"pinned": true,
+			"order": 9
+		},
+		{
+			"id": "nvme0",
+			"edge": "drive",
+			"s_um": 55505,
+			"stack": 0,
+			"pinned": true,
+			"order": 10
+		},
+		{
+			"id": "slot0",
+			"edge": "slot",
+			"s_um": 10160,
+			"stack": 0,
+			"pinned": true,
+			"order": 11
+		}
+	]
+}

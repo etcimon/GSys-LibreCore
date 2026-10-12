@@ -1,0 +1,37 @@
+[
+  {
+    "id": "mini-itx",
+    "w_um": 170000,
+    "d_um": 170000,
+    "cpu_y_frac": 62,
+    "has_cpu": true
+  },
+  {
+    "id": "matx",
+    "w_um": 244000,
+    "d_um": 244000,
+    "cpu_y_frac": 62,
+    "has_cpu": true
+  },
+  {
+    "id": "atx",
+    "w_um": 305000,
+    "d_um": 244000,
+    "cpu_y_frac": 62,
+    "has_cpu": true
+  },
+  {
+    "id": "pico-itx",
+    "w_um": 100000,
+    "d_um": 72000,
+    "cpu_y_frac": 50,
+    "has_cpu": true
+  },
+  {
+    "id": "pcie-card",
+    "w_um": 167650,
+    "d_um": 68900,
+    "cpu_y_frac": 50,
+    "has_cpu": false
+  }
+]

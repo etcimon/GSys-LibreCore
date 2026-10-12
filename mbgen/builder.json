@@ -1,0 +1,8 @@
+{
+  "project_name": "MbgenSim",
+  "unreal_version": "5.8",
+  "engine_association": "5.8",
+  "template": "mini-itx",
+  "package_id": "cv64a6_imafdc_sv39",
+  "output": "mbsim/MbgenSim"
+}

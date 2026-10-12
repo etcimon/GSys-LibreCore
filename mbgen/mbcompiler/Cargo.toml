@@ -1,0 +1,17 @@
+[package]
+name = "mbcompiler"
+version = "0.1.0"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+description = "Preview command for mbgen. Compile arrives when the product snapshot does."
+
+[[bin]]
+name = "mbgen"
+path = "src/main.rs"
+
+[dependencies]
+mbcore = { path = "../mbcore" }
+serde_json = "1"
+image = { version = "0.25", default-features = false, features = ["png"] }
+serde = { version = "1", features = ["derive"] }

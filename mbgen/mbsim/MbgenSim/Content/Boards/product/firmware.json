@@ -1,0 +1,84 @@
+{
+  "connectors": {
+    "uncore": [
+      "uart",
+      "spi"
+    ]
+  },
+  "core": {
+    "ooo": false
+  },
+  "entry": {
+    "hotkey": "DEL",
+    "timeout_ms": 2000
+  },
+  "harts": {
+    "cores": 1,
+    "count": 1,
+    "threads": 1
+  },
+  "isa": {
+    "extensions": {
+      "a": "live",
+      "c": "live",
+      "d": "live",
+      "f": "live",
+      "i": "live",
+      "m": "live"
+    },
+    "march": "rv64imafdc",
+    "mmu": "sv39",
+    "xlen": 64
+  },
+  "memory": {
+    "dram_base": "0x80000000",
+    "dram_len": "0x40000000",
+    "text_offset": "0x200000"
+  },
+  "peripherals": [
+    {
+      "base": "",
+      "class": "spi_flash",
+      "id": "spi0",
+      "model": ""
+    },
+    {
+      "base": "",
+      "class": "gbe_magjack",
+      "id": "lan0",
+      "model": "verilog-ethernet"
+    },
+    {
+      "base": "",
+      "class": "hdmi",
+      "id": "hdmi0",
+      "model": "hdmi"
+    },
+    {
+      "base": "",
+      "class": "dimm",
+      "id": "mem0",
+      "model": "litedram"
+    },
+    {
+      "base": "",
+      "class": "sata",
+      "id": "sata0",
+      "model": "litesata"
+    },
+    {
+      "base": "",
+      "class": "nvme_m2",
+      "id": "nvme0",
+      "model": "verilog-pcie"
+    },
+    {
+      "base": "",
+      "class": "pcie_slot",
+      "id": "slot0",
+      "model": "verilog-pcie"
+    }
+  ],
+  "product": "desktop",
+  "schema_version": 1
+}

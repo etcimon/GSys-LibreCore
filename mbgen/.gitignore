@@ -1,0 +1,9 @@
+/target/
+mbsim/MbgenSim/Binaries/
+mbsim/MbgenSim/Intermediate/
+mbsim/MbgenSim/Saved/
+mbsim/MbgenSim/DerivedDataCache/
+mbsim/MbgenSim/Build/
+**/__pycache__/
+*.pdb
+

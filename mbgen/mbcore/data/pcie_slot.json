@@ -1,0 +1,664 @@
+{
+  "role": "pcie_slot",
+  "lcsc": "C426228",
+  "source": "cache",
+  "hash": "13b08ac152775c0aeb6aef1ce2a4cd6f4aaebc1915c94172869ecc3c12420fbb",
+  "pins": [
+    {
+      "number": "1",
+      "name": "A1"
+    },
+    {
+      "number": "2",
+      "name": "A2"
+    },
+    {
+      "number": "3",
+      "name": "A3"
+    },
+    {
+      "number": "4",
+      "name": "A4"
+    },
+    {
+      "number": "5",
+      "name": "A5"
+    },
+    {
+      "number": "6",
+      "name": "A6"
+    },
+    {
+      "number": "7",
+      "name": "A7"
+    },
+    {
+      "number": "8",
+      "name": "A8"
+    },
+    {
+      "number": "9",
+      "name": "A9"
+    },
+    {
+      "number": "10",
+      "name": "A10"
+    },
+    {
+      "number": "11",
+      "name": "A11"
+    },
+    {
+      "number": "12",
+      "name": "A12"
+    },
+    {
+      "number": "13",
+      "name": "A13"
+    },
+    {
+      "number": "14",
+      "name": "A14"
+    },
+    {
+      "number": "15",
+      "name": "A15"
+    },
+    {
+      "number": "16",
+      "name": "A16"
+    },
+    {
+      "number": "17",
+      "name": "A17"
+    },
+    {
+      "number": "18",
+      "name": "A18"
+    },
+    {
+      "number": "19",
+      "name": "A19"
+    },
+    {
+      "number": "20",
+      "name": "A20"
+    },
+    {
+      "number": "21",
+      "name": "A21"
+    },
+    {
+      "number": "22",
+      "name": "A22"
+    },
+    {
+      "number": "23",
+      "name": "A23"
+    },
+    {
+      "number": "24",
+      "name": "A24"
+    },
+    {
+      "number": "25",
+      "name": "A25"
+    },
+    {
+      "number": "26",
+      "name": "A26"
+    },
+    {
+      "number": "27",
+      "name": "A27"
+    },
+    {
+      "number": "28",
+      "name": "A28"
+    },
+    {
+      "number": "29",
+      "name": "A29"
+    },
+    {
+      "number": "30",
+      "name": "A30"
+    },
+    {
+      "number": "31",
+      "name": "A31"
+    },
+    {
+      "number": "32",
+      "name": "A32"
+    },
+    {
+      "number": "33",
+      "name": "A33"
+    },
+    {
+      "number": "34",
+      "name": "A34"
+    },
+    {
+      "number": "35",
+      "name": "A35"
+    },
+    {
+      "number": "36",
+      "name": "A36"
+    },
+    {
+      "number": "37",
+      "name": "A37"
+    },
+    {
+      "number": "38",
+      "name": "A38"
+    },
+    {
+      "number": "39",
+      "name": "A39"
+    },
+    {
+      "number": "40",
+      "name": "A40"
+    },
+    {
+      "number": "41",
+      "name": "A41"
+    },
+    {
+      "number": "42",
+      "name": "A42"
+    },
+    {
+      "number": "43",
+      "name": "A43"
+    },
+    {
+      "number": "44",
+      "name": "A44"
+    },
+    {
+      "number": "45",
+      "name": "A45"
+    },
+    {
+      "number": "46",
+      "name": "A46"
+    },
+    {
+      "number": "47",
+      "name": "A47"
+    },
+    {
+      "number": "48",
+      "name": "A48"
+    },
+    {
+      "number": "49",
+      "name": "A49"
+    },
+    {
+      "number": "50",
+      "name": "A50"
+    },
+    {
+      "number": "51",
+      "name": "A51"
+    },
+    {
+      "number": "52",
+      "name": "A52"
+    },
+    {
+      "number": "53",
+      "name": "A53"
+    },
+    {
+      "number": "54",
+      "name": "A54"
+    },
+    {
+      "number": "55",
+      "name": "A55"
+    },
+    {
+      "number": "56",
+      "name": "A56"
+    },
+    {
+      "number": "57",
+      "name": "A57"
+    },
+    {
+      "number": "58",
+      "name": "A58"
+    },
+    {
+      "number": "59",
+      "name": "A59"
+    },
+    {
+      "number": "60",
+      "name": "A60"
+    },
+    {
+      "number": "61",
+      "name": "A61"
+    },
+    {
+      "number": "62",
+      "name": "A62"
+    },
+    {
+      "number": "63",
+      "name": "A63"
+    },
+    {
+      "number": "64",
+      "name": "A64"
+    },
+    {
+      "number": "65",
+      "name": "A65"
+    },
+    {
+      "number": "66",
+      "name": "A66"
+    },
+    {
+      "number": "67",
+      "name": "A67"
+    },
+    {
+      "number": "68",
+      "name": "A68"
+    },
+    {
+      "number": "69",
+      "name": "A69"
+    },
+    {
+      "number": "70",
+      "name": "A70"
+    },
+    {
+      "number": "71",
+      "name": "A71"
+    },
+    {
+      "number": "72",
+      "name": "A72"
+    },
+    {
+      "number": "73",
+      "name": "A73"
+    },
+    {
+      "number": "74",
+      "name": "A74"
+    },
+    {
+      "number": "75",
+      "name": "A75"
+    },
+    {
+      "number": "76",
+      "name": "A76"
+    },
+    {
+      "number": "77",
+      "name": "A77"
+    },
+    {
+      "number": "78",
+      "name": "A78"
+    },
+    {
+      "number": "79",
+      "name": "A79"
+    },
+    {
+      "number": "80",
+      "name": "A80"
+    },
+    {
+      "number": "81",
+      "name": "A81"
+    },
+    {
+      "number": "82",
+      "name": "A82"
+    },
+    {
+      "number": "83",
+      "name": "B1"
+    },
+    {
+      "number": "84",
+      "name": "B2"
+    },
+    {
+      "number": "85",
+      "name": "B3"
+    },
+    {
+      "number": "86",
+      "name": "B4"
+    },
+    {
+      "number": "87",
+      "name": "B5"
+    },
+    {
+      "number": "88",
+      "name": "B6"
+    },
+    {
+      "number": "89",
+      "name": "B7"
+    },
+    {
+      "number": "90",
+      "name": "B8"
+    },
+    {
+      "number": "91",
+      "name": "B9"
+    },
+    {
+      "number": "92",
+      "name": "B10"
+    },
+    {
+      "number": "93",
+      "name": "B11"
+    },
+    {
+      "number": "94",
+      "name": "B12"
+    },
+    {
+      "number": "95",
+      "name": "B13"
+    },
+    {
+      "number": "96",
+      "name": "B14"
+    },
+    {
+      "number": "97",
+      "name": "B15"
+    },
+    {
+      "number": "98",
+      "name": "B16"
+    },
+    {
+      "number": "99",
+      "name": "B17"
+    },
+    {
+      "number": "100",
+      "name": "B18"
+    },
+    {
+      "number": "101",
+      "name": "B19"
+    },
+    {
+      "number": "102",
+      "name": "B20"
+    },
+    {
+      "number": "103",
+      "name": "B21"
+    },
+    {
+      "number": "104",
+      "name": "B22"
+    },
+    {
+      "number": "105",
+      "name": "B23"
+    },
+    {
+      "number": "106",
+      "name": "B24"
+    },
+    {
+      "number": "107",
+      "name": "B25"
+    },
+    {
+      "number": "108",
+      "name": "B26"
+    },
+    {
+      "number": "109",
+      "name": "B27"
+    },
+    {
+      "number": "110",
+      "name": "B28"
+    },
+    {
+      "number": "111",
+      "name": "B29"
+    },
+    {
+      "number": "112",
+      "name": "B30"
+    },
+    {
+      "number": "113",
+      "name": "B31"
+    },
+    {
+      "number": "114",
+      "name": "B32"
+    },
+    {
+      "number": "115",
+      "name": "B33"
+    },
+    {
+      "number": "116",
+      "name": "B34"
+    },
+    {
+      "number": "117",
+      "name": "B35"
+    },
+    {
+      "number": "118",
+      "name": "B36"
+    },
+    {
+      "number": "119",
+      "name": "B37"
+    },
+    {
+      "number": "120",
+      "name": "B38"
+    },
+    {
+      "number": "121",
+      "name": "B39"
+    },
+    {
+      "number": "122",
+      "name": "B40"
+    },
+    {
+      "number": "123",
+      "name": "B41"
+    },
+    {
+      "number": "124",
+      "name": "B42"
+    },
+    {
+      "number": "125",
+      "name": "B43"
+    },
+    {
+      "number": "126",
+      "name": "B44"
+    },
+    {
+      "number": "127",
+      "name": "B45"
+    },
+    {
+      "number": "128",
+      "name": "B46"
+    },
+    {
+      "number": "129",
+      "name": "B47"
+    },
+    {
+      "number": "130",
+      "name": "B48"
+    },
+    {
+      "number": "131",
+      "name": "B49"
+    },
+    {
+      "number": "132",
+      "name": "B50"
+    },
+    {
+      "number": "133",
+      "name": "B51"
+    },
+    {
+      "number": "134",
+      "name": "B52"
+    },
+    {
+      "number": "135",
+      "name": "B53"
+    },
+    {
+      "number": "136",
+      "name": "B54"
+    },
+    {
+      "number": "137",
+      "name": "B55"
+    },
+    {
+      "number": "138",
+      "name": "B56"
+    },
+    {
+      "number": "139",
+      "name": "B57"
+    },
+    {
+      "number": "140",
+      "name": "B58"
+    },
+    {
+      "number": "141",
+      "name": "B59"
+    },
+    {
+      "number": "142",
+      "name": "B60"
+    },
+    {
+      "number": "143",
+      "name": "B61"
+    },
+    {
+      "number": "144",
+      "name": "B62"
+    },
+    {
+      "number": "145",
+      "name": "B63"
+    },
+    {
+      "number": "146",
+      "name": "B64"
+    },
+    {
+      "number": "147",
+      "name": "B65"
+    },
+    {
+      "number": "148",
+      "name": "B66"
+    },
+    {
+      "number": "149",
+      "name": "B67"
+    },
+    {
+      "number": "150",
+      "name": "B68"
+    },
+    {
+      "number": "151",
+      "name": "B69"
+    },
+    {
+      "number": "152",
+      "name": "B70"
+    },
+    {
+      "number": "153",
+      "name": "B71"
+    },
+    {
+      "number": "154",
+      "name": "B72"
+    },
+    {
+      "number": "155",
+      "name": "B73"
+    },
+    {
+      "number": "156",
+      "name": "B74"
+    },
+    {
+      "number": "157",
+      "name": "B75"
+    },
+    {
+      "number": "158",
+      "name": "B76"
+    },
+    {
+      "number": "159",
+      "name": "B77"
+    },
+    {
+      "number": "160",
+      "name": "B78"
+    },
+    {
+      "number": "161",
+      "name": "B79"
+    },
+    {
+      "number": "162",
+      "name": "B80"
+    },
+    {
+      "number": "163",
+      "name": "B81"
+    },
+    {
+      "number": "164",
+      "name": "B82"
+    }
+  ]
+}

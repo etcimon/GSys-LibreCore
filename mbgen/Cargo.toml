@@ -1,0 +1,12 @@
+[workspace]
+resolver = "2"
+members = ["mbcore", "mbcompiler", "mbcore_c"]
+
+[workspace.package]
+edition = "2021"
+license = "MIT"
+rust-version = "1.75"
+
+# Release cdylib for Unreal: no unwind into the editor.
+[profile.release]
+panic = "abort"

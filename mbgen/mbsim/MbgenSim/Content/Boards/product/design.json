@@ -1,0 +1,294 @@
+{
+  "placements": [
+    {
+      "edge": "cpu",
+      "id": "socket",
+      "order": 0,
+      "pinned": true,
+      "s_um": 85000,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "power",
+      "id": "spi0",
+      "order": 1,
+      "pinned": true,
+      "s_um": 108052,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "cpu",
+      "id": "bat0",
+      "order": 2,
+      "pinned": true,
+      "s_um": 120000,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "rear_io",
+      "id": "usb0",
+      "order": 3,
+      "pinned": false,
+      "s_um": 13125,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "rear_io",
+      "id": "lan0",
+      "order": 4,
+      "pinned": false,
+      "s_um": 30125,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "rear_io",
+      "id": "hdmi0",
+      "order": 5,
+      "pinned": false,
+      "s_um": 47125,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "front",
+      "id": "fp0",
+      "order": 6,
+      "pinned": true,
+      "s_um": 19721,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "memory",
+      "id": "mem0",
+      "order": 7,
+      "pinned": true,
+      "s_um": 51726,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "rear_io",
+      "id": "usb1",
+      "order": 8,
+      "pinned": false,
+      "s_um": 63625,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "drive",
+      "id": "sata0",
+      "order": 9,
+      "pinned": true,
+      "s_um": 20071,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "drive",
+      "id": "nvme0",
+      "order": 10,
+      "pinned": true,
+      "s_um": 55505,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "slot",
+      "id": "slot0",
+      "order": 11,
+      "pinned": true,
+      "s_um": 10160,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "phy",
+      "id": "phy_lan0",
+      "order": 12,
+      "pinned": false,
+      "s_um": 74000,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "phy",
+      "id": "xtal_lan0",
+      "order": 13,
+      "pinned": false,
+      "s_um": 82500,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "phy",
+      "id": "esd_usb0",
+      "order": 14,
+      "pinned": false,
+      "s_um": 89000,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "phy",
+      "id": "esd_usb1",
+      "order": 15,
+      "pinned": false,
+      "s_um": 94500,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "power",
+      "id": "vtt0",
+      "order": 16,
+      "pinned": false,
+      "s_um": 117552,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "power",
+      "id": "c0",
+      "order": 17,
+      "pinned": false,
+      "s_um": 124652,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "power",
+      "id": "c1",
+      "order": 18,
+      "pinned": false,
+      "s_um": 129352,
+      "stack": 0,
+      "yaw_q": 0
+    },
+    {
+      "edge": "power",
+      "id": "c2",
+      "order": 19,
+      "pinned": false,
+      "s_um": 134052,
+      "stack": 0,
+      "yaw_q": 0
+    }
+  ],
+  "ports": [
+    {
+      "id": "socket",
+      "role": "socket",
+      "width_um": 45000
+    },
+    {
+      "id": "spi0",
+      "role": "spi_flash",
+      "width_um": 8000
+    },
+    {
+      "id": "bat0",
+      "role": "rtc_battery",
+      "width_um": 20000
+    },
+    {
+      "id": "usb0",
+      "role": "usb_stack",
+      "width_um": 15000
+    },
+    {
+      "id": "lan0",
+      "role": "gbe_magjack",
+      "width_um": 16000
+    },
+    {
+      "id": "hdmi0",
+      "role": "hdmi",
+      "width_um": 15000
+    },
+    {
+      "id": "fp0",
+      "role": "front_panel",
+      "width_um": 8000
+    },
+    {
+      "id": "mem0",
+      "role": "dimm",
+      "width_um": 10000
+    },
+    {
+      "id": "usb1",
+      "role": "usb_stack",
+      "width_um": 15000
+    },
+    {
+      "id": "sata0",
+      "role": "sata",
+      "width_um": 12000
+    },
+    {
+      "id": "nvme0",
+      "role": "nvme_m2",
+      "width_um": 22000
+    },
+    {
+      "id": "slot0",
+      "role": "pcie_slot",
+      "width_um": 20320
+    },
+    {
+      "id": "phy_lan0",
+      "role": "phy_gbe",
+      "width_um": 8000
+    },
+    {
+      "id": "xtal_lan0",
+      "role": "crystal",
+      "width_um": 6000
+    },
+    {
+      "id": "esd_usb0",
+      "role": "esd",
+      "width_um": 4000
+    },
+    {
+      "id": "esd_usb1",
+      "role": "esd",
+      "width_um": 4000
+    },
+    {
+      "id": "vtt0",
+      "role": "vtt",
+      "width_um": 8000
+    },
+    {
+      "id": "c0",
+      "role": "decap",
+      "width_um": 3200
+    },
+    {
+      "id": "c1",
+      "role": "decap",
+      "width_um": 3200
+    },
+    {
+      "id": "c2",
+      "role": "decap",
+      "width_um": 3200
+    }
+  ],
+  "settings": {
+    "gap_um": 1500,
+    "hotkey": "DEL",
+    "package_id": "cv64a6_imafdc_sv39",
+    "product": "desktop",
+    "timeout_ms": 2000
+  },
+  "template_id": "mini-itx"
+}

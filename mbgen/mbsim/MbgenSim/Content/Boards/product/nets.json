@@ -1,0 +1,65 @@
+[
+  {
+    "class": "Ground",
+    "id": "1",
+    "pins": [
+      "sata0.1"
+    ]
+  },
+  {
+    "class": "Ground",
+    "id": "4",
+    "pins": [
+      "sata0.4"
+    ]
+  },
+  {
+    "class": "Ground",
+    "id": "7",
+    "pins": [
+      "sata0.7"
+    ]
+  },
+  {
+    "class": "Ground",
+    "id": "GND",
+    "pins": [
+      "slot0.4",
+      "slot0.12",
+      "slot0.15",
+      "slot0.18",
+      "slot0.86",
+      "slot0.89",
+      "slot0.95",
+      "slot0.98",
+      "slot0.100"
+    ]
+  },
+  {
+    "class": "Power",
+    "id": "P12V",
+    "pins": [
+      "slot0.2",
+      "slot0.3",
+      "slot0.83",
+      "slot0.84",
+      "slot0.85"
+    ]
+  },
+  {
+    "class": "Power",
+    "id": "P3V3",
+    "pins": [
+      "slot0.9",
+      "slot0.10",
+      "slot0.90"
+    ]
+  },
+  {
+    "class": "Power",
+    "id": "P3V3_AUX",
+    "pins": [
+      "slot0.92"
+    ]
+  }
+]

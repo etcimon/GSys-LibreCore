@@ -1,0 +1,48 @@
+{
+  "role": "front_panel",
+  "lcsc": "C492422",
+  "source": "cache",
+  "hash": "0f20889434d68d3b3d4b80cf68d046bd18d4bf5fceb5b3417f35c10e4e797cab",
+  "pins": [
+    {
+      "number": "1",
+      "name": "1"
+    },
+    {
+      "number": "2",
+      "name": "2"
+    },
+    {
+      "number": "3",
+      "name": "3"
+    },
+    {
+      "number": "4",
+      "name": "4"
+    },
+    {
+      "number": "5",
+      "name": "5"
+    },
+    {
+      "number": "6",
+      "name": "6"
+    },
+    {
+      "number": "7",
+      "name": "7"
+    },
+    {
+      "number": "8",
+      "name": "8"
+    },
+    {
+      "number": "9",
+      "name": "9"
+    },
+    {
+      "number": "10",
+      "name": "10"
+    }
+  ]
+}

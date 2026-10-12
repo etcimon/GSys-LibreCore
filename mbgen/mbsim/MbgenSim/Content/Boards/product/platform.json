@@ -1,0 +1,411 @@
+{
+  "apu": {
+    "axiDataWidth": 64,
+    "controllers": [
+      {
+        "enable": false,
+        "id": "verilog-ethernet",
+        "license": "MIT",
+        "note": "MAC on-die; jack is a board PHY"
+      },
+      {
+        "enable": false,
+        "id": "hdmi",
+        "license": "MIT",
+        "note": "TMDS encoder is catalogued, not yet in a flist"
+      },
+      {
+        "enable": false,
+        "id": "litedram",
+        "license": "BSD-2-Clause",
+        "note": "DRAM controller is vendored"
+      },
+      {
+        "enable": false,
+        "id": "litesata",
+        "license": "BSD-2-Clause",
+        "note": "SATA controller is catalogued"
+      },
+      {
+        "enable": false,
+        "id": "verilog-pcie",
+        "license": "MIT",
+        "note": "NVMe rides the PCIe root; it is not its own controller"
+      }
+    ],
+    "noc": "axi4",
+    "socket": {
+      "enabled": true,
+      "type": "lga"
+    }
+  },
+  "boardid": "mini-itx",
+  "class": "custom",
+  "core": {
+    "config": "cv64a6_imafdc_sv39",
+    "extensions": [
+      "i",
+      "m",
+      "a",
+      "f",
+      "d",
+      "c"
+    ],
+    "isaString": "rv64imafdc",
+    "xlen": 64
+  },
+  "gaps": [
+    {
+      "defer": true,
+      "id": "usb0",
+      "note": "USB host controller is not in the vendor catalog",
+      "role": "usb_stack"
+    },
+    {
+      "defer": true,
+      "id": "usb1",
+      "note": "USB host controller is not in the vendor catalog",
+      "role": "usb_stack"
+    },
+    {
+      "defer": true,
+      "id": "esd_usb0",
+      "note": "USB host controller is not in the vendor catalog",
+      "role": "esd"
+    },
+    {
+      "defer": true,
+      "id": "esd_usb1",
+      "note": "USB host controller is not in the vendor catalog",
+      "role": "esd"
+    }
+  ],
+  "interfaces": [
+    {
+      "controller": null,
+      "count": 1,
+      "domain": "peripheral",
+      "id": "socket",
+      "kind": "socket"
+    },
+    {
+      "controller": null,
+      "count": 1,
+      "domain": "storage",
+      "id": "spi0",
+      "kind": "spi_flash"
+    },
+    {
+      "controller": null,
+      "count": 1,
+      "domain": "peripheral",
+      "id": "bat0",
+      "kind": "rtc_battery"
+    },
+    {
+      "controller": null,
+      "count": 1,
+      "domain": "usb",
+      "id": "usb0",
+      "kind": "usb_stack"
+    },
+    {
+      "controller": "verilog-ethernet",
+      "count": 1,
+      "domain": "network",
+      "id": "lan0",
+      "kind": "gbe_magjack"
+    },
+    {
+      "controller": "hdmi",
+      "count": 1,
+      "domain": "display",
+      "id": "hdmi0",
+      "kind": "hdmi"
+    },
+    {
+      "controller": null,
+      "count": 1,
+      "domain": "peripheral",
+      "id": "fp0",
+      "kind": "front_panel"
+    },
+    {
+      "controller": "litedram",
+      "count": 1,
+      "domain": "memory",
+      "id": "mem0",
+      "kind": "dimm"
+    },
+    {
+      "controller": null,
+      "count": 1,
+      "domain": "usb",
+      "id": "usb1",
+      "kind": "usb_stack"
+    },
+    {
+      "controller": "litesata",
+      "count": 1,
+      "domain": "storage",
+      "id": "sata0",
+      "kind": "sata"
+    },
+    {
+      "controller": "verilog-pcie",
+      "count": 1,
+      "domain": "interconnect",
+      "id": "nvme0",
+      "kind": "nvme_m2"
+    },
+    {
+      "controller": "verilog-pcie",
+      "count": 1,
+      "domain": "interconnect",
+      "id": "slot0",
+      "kind": "pcie_slot"
+    },
+    {
+      "controller": "verilog-ethernet",
+      "count": 1,
+      "domain": "network",
+      "id": "phy_lan0",
+      "kind": "phy_gbe"
+    },
+    {
+      "controller": null,
+      "count": 1,
+      "domain": "peripheral",
+      "id": "xtal_lan0",
+      "kind": "crystal"
+    },
+    {
+      "controller": null,
+      "count": 1,
+      "domain": "usb",
+      "id": "esd_usb0",
+      "kind": "esd"
+    },
+    {
+      "controller": null,
+      "count": 1,
+      "domain": "usb",
+      "id": "esd_usb1",
+      "kind": "esd"
+    },
+    {
+      "controller": "litedram",
+      "count": 1,
+      "domain": "memory",
+      "id": "vtt0",
+      "kind": "vtt"
+    },
+    {
+      "controller": null,
+      "count": 1,
+      "domain": "peripheral",
+      "id": "c0",
+      "kind": "decap"
+    },
+    {
+      "controller": null,
+      "count": 1,
+      "domain": "peripheral",
+      "id": "c1",
+      "kind": "decap"
+    },
+    {
+      "controller": null,
+      "count": 1,
+      "domain": "peripheral",
+      "id": "c2",
+      "kind": "decap"
+    }
+  ],
+  "name": "mini-itx",
+  "phys": [
+    {
+      "interface": "socket",
+      "mcp": {
+        "query": "electronic component",
+        "tool": "jlc_search"
+      },
+      "ref": "socket",
+      "status": "selected"
+    },
+    {
+      "interface": "spi_flash",
+      "mcp": {
+        "query": "WSON-8 SPI NOR flash",
+        "tool": "jlc_search"
+      },
+      "ref": "spi0",
+      "status": "selected"
+    },
+    {
+      "interface": "rtc_battery",
+      "mcp": {
+        "query": "CR2032 battery holder",
+        "tool": "jlc_search"
+      },
+      "ref": "bat0",
+      "status": "selected"
+    },
+    {
+      "interface": "usb_stack",
+      "mcp": {
+        "query": "stacked USB 3.0 type-A receptacle",
+        "tool": "jlc_search"
+      },
+      "ref": "usb0",
+      "status": "planned"
+    },
+    {
+      "interface": "gbe_magjack",
+      "mcp": {
+        "query": "1G RJ45 magjack",
+        "tool": "jlc_search"
+      },
+      "ref": "lan0",
+      "status": "documented"
+    },
+    {
+      "interface": "hdmi",
+      "mcp": {
+        "query": "HDMI receptacle",
+        "tool": "jlc_search"
+      },
+      "ref": "hdmi0",
+      "status": "documented"
+    },
+    {
+      "interface": "front_panel",
+      "mcp": {
+        "query": "2.54mm 2x5 pin header",
+        "tool": "jlc_search"
+      },
+      "ref": "fp0",
+      "status": "selected"
+    },
+    {
+      "interface": "dimm",
+      "mcp": {
+        "query": "DDR4 DIMM socket 288",
+        "tool": "jlc_search"
+      },
+      "ref": "mem0",
+      "status": "documented"
+    },
+    {
+      "interface": "usb_stack",
+      "mcp": {
+        "query": "stacked USB 3.0 type-A receptacle",
+        "tool": "jlc_search"
+      },
+      "ref": "usb1",
+      "status": "planned"
+    },
+    {
+      "interface": "sata",
+      "mcp": {
+        "query": "SATA 7-pin right angle",
+        "tool": "jlc_search"
+      },
+      "ref": "sata0",
+      "status": "documented"
+    },
+    {
+      "interface": "nvme_m2",
+      "mcp": {
+        "query": "M.2 key M 2280 connector",
+        "tool": "jlc_search"
+      },
+      "ref": "nvme0",
+      "status": "documented"
+    },
+    {
+      "interface": "pcie_slot",
+      "mcp": {
+        "query": "PCIe x16 slot",
+        "tool": "jlc_search"
+      },
+      "ref": "slot0",
+      "status": "documented"
+    },
+    {
+      "interface": "phy_gbe",
+      "mcp": {
+        "query": "electronic component",
+        "tool": "jlc_search"
+      },
+      "ref": "phy_lan0",
+      "status": "documented"
+    },
+    {
+      "interface": "crystal",
+      "mcp": {
+        "query": "electronic component",
+        "tool": "jlc_search"
+      },
+      "ref": "xtal_lan0",
+      "status": "selected"
+    },
+    {
+      "interface": "esd",
+      "mcp": {
+        "query": "electronic component",
+        "tool": "jlc_search"
+      },
+      "ref": "esd_usb0",
+      "status": "planned"
+    },
+    {
+      "interface": "esd",
+      "mcp": {
+        "query": "electronic component",
+        "tool": "jlc_search"
+      },
+      "ref": "esd_usb1",
+      "status": "planned"
+    },
+    {
+      "interface": "vtt",
+      "mcp": {
+        "query": "electronic component",
+        "tool": "jlc_search"
+      },
+      "ref": "vtt0",
+      "status": "documented"
+    },
+    {
+      "interface": "decap",
+      "mcp": {
+        "query": "electronic component",
+        "tool": "jlc_search"
+      },
+      "ref": "c0",
+      "status": "selected"
+    },
+    {
+      "interface": "decap",
+      "mcp": {
+        "query": "electronic component",
+        "tool": "jlc_search"
+      },
+      "ref": "c1",
+      "status": "selected"
+    },
+    {
+      "interface": "decap",
+      "mcp": {
+        "query": "electronic component",
+        "tool": "jlc_search"
+      },
+      "ref": "c2",
+      "status": "selected"
+    }
+  ],
+  "skidl": "custom",
+  "status": "custom",
+  "vendor": "mbgen"
+}
