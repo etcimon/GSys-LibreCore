@@ -157,3 +157,7 @@
 	path = tools/verilator
 	url = https://github.com/etcimon/verilator.git
 	branch = g6lc
+[submodule "tools/yosys"]
+	path = tools/yosys
+	url = https://github.com/etcimon/yosys.git
+	branch = g6lc

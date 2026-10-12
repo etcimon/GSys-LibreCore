@@ -83,8 +83,9 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       spike: "vendored",
       iverilog: "v12_0",
       dtc: "1.6.1",
-      // Yosys main. Must stay >= v0.67: that is where the sv-elab/slang
-      // SystemVerilog frontend became integrated (no plugin .so). Below it,
+      // Fallback clone ref when tools/yosys is absent. The version of record
+      // is that submodule (branch g6lc). It must stay >= v0.67: that is where
+      // the sv-elab/slang frontend became integrated (no plugin .so). Below it,
       // `read_slang` does not exist and the classic frontend cannot parse
       // core/include/config_pkg.sv -- it rejects `ai_cfg_t'(0)`.
       yosys: "main",

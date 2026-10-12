@@ -29,6 +29,7 @@ import shutil
 import subprocess
 import tarfile
 from pathlib import Path
+from yosys_bin import yosys_bin
 
 # REVIEW_MC_MARCH/REVIEW_MC_MABI override the ISA/ABI for directed tests that
 # need extensions beyond the integer baseline (mc_fp_smt.S needs rv64...d).
@@ -863,7 +864,7 @@ endmodule
         script += 'synth -top clint_synth -flatten; check -assert; scc -expect 0; stat'
         (out / 'synth.ys').write_text(script)
         with (out / 'synth.log').open('w') as log:
-            rc = subprocess.run(['/opt/testharness/toolchains/formal/bin/yosys', '-p', script],
+            rc = subprocess.run([yosys_bin(), '-p', script],
                                 stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode
         (out / 'synth-result.json').write_text(json.dumps({'rc': rc, 'passed': rc==0}))
         assert rc==0, 'clint synthesis'

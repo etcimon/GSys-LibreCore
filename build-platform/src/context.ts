@@ -115,6 +115,7 @@ export function childEnv(
     ...(ossCadBin && existsSync(ossCadBin) ? [ossCadBin] : []),
     tools.spikeBin,
     tools.iverilogBin,
+    tools.formalBin,
     tools.pythonVenvBin,
   ];
   const currentPath = process.env.PATH ?? process.env.Path ?? "";
@@ -133,6 +134,10 @@ export function childEnv(
       ? { VERILATOR_ROOT: join(verilatorInstallDir, "share", "verilator") }
       : {}),
     SPIKE_INSTALL_DIR: tools.spike,
+    // Managed Yosys is the tools/yosys pin (install-formal.sh / install-yosys-g6lc.sh).
+    ...(existsSync(join(tools.formalBin, "yosys"))
+      ? { YOSYS: join(tools.formalBin, "yosys") }
+      : {}),
     TARGET_CFG: config.soc.coreConfig,
     NUM_JOBS: String(recommendedJobs()),
     ...extra,

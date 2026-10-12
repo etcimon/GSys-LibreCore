@@ -1,5 +1,6 @@
 """Coarse-grained SMT handoff protocol and fault controls.
 
+from yosys_bin import yosys_bin
 Copyright (c) 2026 Etienne Cimon
 SPDX-License-Identifier: MIT
 """
@@ -141,7 +142,7 @@ endmodule
                           + '\nproc\nflatten\nopt\ncheck -assert\nscc -expect 0\nstat\n'
                           + f'write_json {out}/synth.json\n')
         with (out / 'synth.log').open('w') as log:
-            rc = subprocess.run(['/opt/testharness/toolchains/formal/bin/yosys', '-s', str(script)],
+            rc = subprocess.run([yosys_bin(), '-s', str(script)],
                                 stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode
         if rc:
             raise RuntimeError('live-port scheduler synthesis failed')

@@ -1,5 +1,6 @@
 """Probe valid NAPOT configuration transitions with existing PMP assertions enabled.
 
+from yosys_bin import yosys_bin
 Copyright (c) 2026 Etienne Cimon
 SPDX-License-Identifier: MIT
 """
@@ -71,7 +72,7 @@ endmodule
                               + '\nprep -top pmp_match\nflatten\nchformal -lower\nopt\ncheck -assert\nscc -expect 0\n'
                               + 'sat -prove-asserts -verify -show-ports\n')
             with (out / f'formal-{width}.log').open('w') as log:
-                rc = subprocess.run(['/opt/testharness/toolchains/formal/bin/yosys', '-s', str(script)],
+                rc = subprocess.run([yosys_bin(), '-s', str(script)],
                                     stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode
             text = (out / f'formal-{width}.log').read_text()
             matched = (rc != 0 and 'model found: FAIL!' in text) if fault else (

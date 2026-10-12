@@ -60,7 +60,7 @@ Source of truth: `build-platform/src/cli/registry.ts` (`COMMANDS` order).
 | `tools` | `install [profile\|recipe]` · list pins | Managed toolchain under `workspace/tooling/` |
 
 **Install profiles:** `sim` / `open-source-sim` · `dual-hart` · `opensbi` · `all`  
-**Recipes:** `riscv-gcc` · `verilator` · `spike` · `iverilog` · `opensbi-smt2`
+**Recipes:** `riscv-gcc` · `verilator` · `spike` · `iverilog` · `opensbi-smt2` · `formal` (Yosys from the `tools/yosys` submodule). Builder prefix: `build-platform/scripts/install-yosys-g6lc.sh`, same role as `install-verilator-g6lc.sh`.
 
 ### 2.3 Uncore / board / foundry
 

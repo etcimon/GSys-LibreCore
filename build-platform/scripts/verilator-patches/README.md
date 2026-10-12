@@ -15,6 +15,11 @@ bash build-platform/scripts/install-verilator-g6lc.sh
 #    for the build driver's T16_VLT_ROOT (t21s-build.sh)
 ```
 
+The Yosys fork is the sibling submodule `tools/yosys` (branch `g6lc`).
+`build-platform/scripts/install-yosys-g6lc.sh` installs it to
+`/opt/testharness/toolchains/yosys-g6lc`. `tools install formal` builds that
+same checkout. See `agents/guides/AGENTS-verilator-performance.md`.
+
 Commits on `g6lc` (newest first), each one codegen-only and measured with callgrind
 (`agents/guides/AGENTS-verilator-performance.md`):
 

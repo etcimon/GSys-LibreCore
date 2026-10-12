@@ -45,6 +45,13 @@ if ! command -v "$VERILATOR" >/dev/null 2>&1; then
   done
 fi
 command -v "$VERILATOR" >/dev/null 2>&1 || { echo "[l2-tb] no verilator" >&2; exit 2; }
+YOSYS="${YOSYS:-yosys}"
+if ! command -v "$YOSYS" >/dev/null 2>&1; then
+  for c in /opt/testharness/toolchains/yosys-g6lc/bin/yosys \
+           /opt/testharness/toolchains/formal/bin/yosys; do
+    [ -x "$c" ] && YOSYS="$c" && break
+  done
+fi
 "$VERILATOR" --version
 ulimit -c 0
 warning_args=()

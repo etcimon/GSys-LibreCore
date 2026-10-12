@@ -245,6 +245,19 @@ RTL-only by nature and must be `ifdef`-able out of a netlist build.
   runs `$VERILATOR_ROOT/bin/verilator_bin`). A model built that way carries
   `recipe.verilatorRoot` in its manifest; qualification records say which compiler
   built the model.
+- **Yosys fork**: the synthesis-speed changes live in `github.com/etcimon/yosys`,
+  branch `g6lc`, pinned as the submodule `tools/yosys` (not under `tools/verilator`).
+  `build-platform/scripts/install-yosys-g6lc.sh` builds that gitlink into
+  `/opt/testharness/toolchains/yosys-g6lc`. `tools install formal` builds the same
+  checkout into `workspace/tooling/formal` and adds SymbiYosys. Verif prefers the
+  g6lc binary when it is installed, then `toolchains/formal/bin/yosys`.
+  Landed, and checked against Yosys's own tests (not a CVA6 timing run): `SigMap`
+  stores a whole-wire connection as one alias and keeps a constant tie-off visible
+  past the union-find root; `check` builds a bit-level loop graph only for wires
+  that sit in a wire-level cycle; `opt_merge` joins a removed output in one `add`
+  and rehashes only cells that read a redirected wire. `opt -fast` still runs until
+  `opt_dff` stops changing the design. The server synth smoke stays
+  `proc; opt_clean; stat; check -latchonly`.
 
 ## 4a. What the first compile/bisect of the redesign taught (2026-10-11)
 

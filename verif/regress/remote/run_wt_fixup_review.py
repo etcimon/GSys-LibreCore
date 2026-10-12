@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 import shutil
 import subprocess
+from yosys_bin import yosys_bin
 
 
 def nc_review(source, out, names):
@@ -86,7 +87,7 @@ endmodule
                     + ' '.join(rtl + [str(harness)]) + '\nprep -top wt_fixup_nc\nflatten\nasync2sync\nchformal -lower\nmemory_map\nopt\ncheck -assert\n'
                     + f'sim -clock clk -n 85 -assert -q -vcd {out}/{label}.vcd\n')
                 with (out / (label + '.log')).open('w') as log:
-                    rc = subprocess.run(['/opt/testharness/toolchains/formal/bin/yosys', '-s', str(script)],
+                    rc = subprocess.run([yosys_bin(), '-s', str(script)],
                         stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode
                 output = (out / (label + '.log')).read_text()
                 expected_failure = negative or ((before or fault) and depth>0 and scenario!=2)
@@ -234,7 +235,7 @@ endmodule
                     + ' '.join(rtl + [str(harness)]) + '\nprep -top wt_fixup_inv\nflatten\nasync2sync\nchformal -lower\nmemory_map\nopt\ncheck -assert\n'
                     + f'sim -clock clk -n 85 -assert -q -vcd {out}/{label}.vcd\n')
                 with (out / (label + '.log')).open('w') as log:
-                    rc = subprocess.run(['/opt/testharness/toolchains/formal/bin/yosys', '-s', str(script)],
+                    rc = subprocess.run([yosys_bin(), '-s', str(script)],
                         stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode
                 output = (out / (label + '.log')).read_text()
                 expected_marker = fault_expect.get(fault, {}).get(scenario) if (depth > 0 or scenario == 7) else None
@@ -428,7 +429,7 @@ endmodule
                                   + '\nprep -top wt_fixup_copy\nflatten\nasync2sync\nchformal -lower\nmemory_map\nopt\ncheck -assert\n'
                                   + f'sim -clock clk -n 85 {"" if os.environ.get("WT_FIXUP_NOASSERT") else "-assert"} -q -vcd {out}/{label}.vcd -summary {out}/{label}-summary.json\n')
                 with (out / (label + '.log')).open('w') as log:
-                    rc = subprocess.run(['/opt/testharness/toolchains/formal/bin/yosys', '-s', str(script)],
+                    rc = subprocess.run([yosys_bin(), '-s', str(script)],
                                         stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode
                 log_text = (out / (label + '.log')).read_text()
                 expected_failure = bool(fault) or negative or before or (export_before and scenario < 3)

@@ -164,37 +164,45 @@ check_toolchain() {
 }
 
 # --- yosys (with integrated sv-elab/slang) ----------------------------------
+# The version of record is the tools/yosys submodule (etcimon/yosys, branch
+# g6lc), the same way install-verilator-g6lc.sh builds tools/verilator.
+# FORMAL_YOSYS_REF is only the fallback clone when that checkout is absent.
 build_yosys() {
-  local src="$BUILD_ROOT/yosys"
+  local repo src pin
+  repo="${CVA6_REPO_DIR:-$(cd "$(dirname "$0")/../.." && pwd)}"
+  src="${FORMAL_YOSYS_SRC:-$repo/tools/yosys}"
+  pin="$(git -C "$repo" ls-tree HEAD tools/yosys 2>/dev/null | awk '{print $3}')"
   mkdir -p "$BUILD_ROOT"
-  if [[ -d "$src/.git" ]]; then
-    log "updating yosys source ($FORMAL_YOSYS_REF)"
-    git -C "$src" fetch --depth 1 origin "$FORMAL_YOSYS_REF"
-    git -C "$src" checkout --force FETCH_HEAD
-  else
-    log "cloning yosys ($FORMAL_YOSYS_REF)"
+  if [[ ! -f "$src/CMakeLists.txt" ]]; then
+    log "tools/yosys is not populated; cloning etcimon/yosys ($FORMAL_YOSYS_REF)"
+    src="$BUILD_ROOT/yosys"
     rm -rf "$src"
-    git clone --depth 1 --branch "$FORMAL_YOSYS_REF" \
-      https://github.com/YosysHQ/yosys.git "$src" 2>/dev/null || \
-      git clone --depth 1 https://github.com/YosysHQ/yosys.git "$src"
+    git clone --branch "$FORMAL_YOSYS_REF" https://github.com/etcimon/yosys.git "$src" 2>/dev/null || \
+      git clone https://github.com/etcimon/yosys.git "$src"
+    pin=""
   fi
+  if [[ -n "$pin" ]]; then
+    log "checking out pinned tools/yosys $pin"
+    git -C "$src" checkout --force "$pin"
+  fi
+  log "yosys source $(git -C "$src" rev-parse --short HEAD)"
 
   # abc, slang, sv-elab, fmt, cxxopts, tomlplusplus, boost_regex, symfpu.
   log "fetching submodules (includes libs/slang and frontends/slang/lib)"
-  git -C "$src" submodule update --init --depth 1 --recursive
+  git -C "$src" submodule update --init --recursive
 
   [[ -d "$src/frontends/slang" ]] || die \
     "this yosys has no frontends/slang; need >= v0.67 for integrated sv-elab"
 
   log "configuring yosys (Release, Ninja, prefix=$FORMAL_INSTALL_DIR)"
-  cmake -S "$src" -B "$src/build" -G Ninja \
+  cmake -S "$src" -B "$BUILD_ROOT/yosys-build" -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DYOSYS_ENABLE_UNIT_TESTS=OFF \
     -DCMAKE_INSTALL_PREFIX="$FORMAL_INSTALL_DIR"
 
   log "building yosys with $NUM_JOBS jobs"
-  cmake --build "$src/build" -j "$NUM_JOBS"
-  cmake --install "$src/build"
+  cmake --build "$BUILD_ROOT/yosys-build" -j "$NUM_JOBS"
+  cmake --install "$BUILD_ROOT/yosys-build"
 }
 
 # --- SymbiYosys -------------------------------------------------------------

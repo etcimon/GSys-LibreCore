@@ -1,5 +1,6 @@
 """Directed issue-order contract with matched source and oracle fault controls.
 
+from yosys_bin import yosys_bin
 Copyright (c) 2026 Etienne Cimon
 SPDX-License-Identifier: MIT
 """
@@ -113,7 +114,7 @@ endmodule
                           + 'hierarchy -check -top issue_order_synth_top\nproc\nflatten\nopt\ncheck -assert\nstat\n'
                           + 'write_json ' + str(out / 'netlist.json') + '\n')
         with (out / 'synth.log').open('w') as log:
-            rc = subprocess.run(['/opt/testharness/toolchains/formal/bin/yosys', '-s', str(script)],
+            rc = subprocess.run([yosys_bin(), '-s', str(script)],
                                 stdout=log, stderr=subprocess.STDOUT, timeout=180).returncode
         if rc:
             raise RuntimeError('issue-order synthesis failed')

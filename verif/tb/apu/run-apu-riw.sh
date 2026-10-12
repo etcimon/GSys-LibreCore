@@ -12,9 +12,12 @@ if ! command -v "$VERILATOR" >/dev/null 2>&1 && \
    [ -x /opt/testharness/toolchains/verilator-v5.008/bin/verilator ]; then
   VERILATOR=/opt/testharness/toolchains/verilator-v5.008/bin/verilator
 fi
-if ! command -v "$YOSYS" >/dev/null 2>&1 && \
-   [ -x /opt/testharness/toolchains/formal/bin/yosys ]; then
-  YOSYS=/opt/testharness/toolchains/formal/bin/yosys
+if ! command -v "$YOSYS" >/dev/null 2>&1; then
+  if [ -x /opt/testharness/toolchains/yosys-g6lc/bin/yosys ]; then
+    YOSYS=/opt/testharness/toolchains/yosys-g6lc/bin/yosys
+  elif [ -x /opt/testharness/toolchains/formal/bin/yosys ]; then
+    YOSYS=/opt/testharness/toolchains/formal/bin/yosys
+  fi
 fi
 rm -rf "$OUT"
 mkdir -p "$OUT"

@@ -1,5 +1,6 @@
 """WT tag-response ownership regression, independent of firmware addresses.
 
+from yosys_bin import yosys_bin
 Copyright (c) 2026 Etienne Cimon
 SPDX-License-Identifier: MIT
 """
@@ -106,7 +107,7 @@ endmodule
                                   + f'write_rtlil {out}/{label}.il\n'
                                   + f'sat -seq 12 -prove-asserts -verify -show-ports -show rd_tag -show rd_index -show previous_read -show previous_tag -show dut.check_en_q -dump_vcd {out}/{label}.vcd\n')
                 with (out / (label + '.log')).open('w') as log:
-                    rc = subprocess.run(['/opt/testharness/toolchains/formal/bin/yosys', '-s', str(script)],
+                    rc = subprocess.run([yosys_bin(), '-s', str(script)],
                                         stdout=log, stderr=subprocess.STDOUT, timeout=120).returncode
                 text = (out / (label + '.log')).read_text()
                 expect_failure = before or fault or negative
@@ -120,7 +121,7 @@ endmodule
                 if not expect_failure:
                     cover = f'read_rtlil {out}/{label}.il\nchformal -assert -remove\nsat -seq 12 -prove saw_tail 0 -prove-skip 11 -verify -show-ports\n'
                     with (out / (label + '-cover.log')).open('w') as log:
-                        cr = subprocess.run(['/opt/testharness/toolchains/formal/bin/yosys', '-p', cover],
+                        cr = subprocess.run([yosys_bin(), '-p', cover],
                                             stdout=log, stderr=subprocess.STDOUT, timeout=120).returncode
                     if cr == 0 or 'model found: FAIL!' not in (out / (label + '-cover.log')).read_text():
                         raise RuntimeError('last-response handoff was not reached')

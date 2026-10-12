@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import zipfile
+from yosys_bin import yosys_bin
 
 
 SOURCES = (
@@ -162,7 +163,7 @@ endmodule
     script.write_text("read_slang -I" + str(source) + " --top g6lc_ai_dma_review " + inputs + " " + str(wrapper)
                       + "\nproc\nflatten\nopt -fast\ncheck -assert\nscc -expect 0\nstat\n"
                       + "write_json " + str(out / "dma-synth.json") + "\n")
-    rc, _ = run(["/opt/testharness/toolchains/formal/bin/yosys", "-s", str(script)], out / "dma-synth.log", 600)
+    rc, _ = run([yosys_bin(), "-s", str(script)], out / "dma-synth.log", 600)
     if rc:
         return {"status": "FAIL", "rc": rc, "wrapper_sha256": sha(wrapper)}
     cells = json.loads((out / "dma-synth.json").read_text())["modules"]["g6lc_ai_dma_review"]["cells"]
@@ -172,7 +173,7 @@ endmodule
     rate_script.write_text("read_slang -I" + str(source) + " --top g6lc_ai_pmu_rate " + inputs
                            + "\nproc\nflatten\nopt -fast\ncheck -assert\nscc -expect 0\n"
                            + "select -assert-none t:$div t:$mod t:$mul\nstat\nwrite_json " + str(out / "rate-synth.json") + "\n")
-    rate_rc, _ = run(["/opt/testharness/toolchains/formal/bin/yosys", "-s", str(rate_script)], out / "rate-synth.log", 120)
+    rate_rc, _ = run([yosys_bin(), "-s", str(rate_script)], out / "rate-synth.log", 120)
     if rate_rc:
         return {"status": "FAIL", "phase": "iterative-rate-structure", "rc": rate_rc}
     rate_cells = json.loads((out / "rate-synth.json").read_text())["modules"]["g6lc_ai_pmu_rate"]["cells"]
@@ -201,7 +202,7 @@ endmodule
     script.write_text("read_slang --top command_fifo_review " + str(source / "tc_sram.sv") + " "
                       + str(source / "g6lc_ai_cmd_fifo.sv") + " " + str(wrapper)
                       + "\nproc\nflatten\nopt -fast\ncheck -assert\nscc -expect 0\nstat\nwrite_json " + str(netlist) + "\n")
-    rc, _ = run(["/opt/testharness/toolchains/formal/bin/yosys", "-s", str(script)], out / "command-fifo-synth.log", 120)
+    rc, _ = run([yosys_bin(), "-s", str(script)], out / "command-fifo-synth.log", 120)
     if rc:
         return {"status": "FAIL", "rc": rc}
     cells = json.loads(netlist.read_text())["modules"]["command_fifo_review"]["cells"]
@@ -262,7 +263,7 @@ def verify_fifo(source, out, depth):
   end
 endmodule
 ''')
-    yosys = "/opt/testharness/toolchains/formal/bin/yosys"
+    yosys = yosys_bin()
     build = out / "fifo-proof-build.ys"
     lowered = out / "fifo-proof.il"
     netlist = out / "fifo-proof.json"
@@ -557,7 +558,7 @@ def main():
     negative = neg_rc != 0 and negative_marker in neg_text
     synthesis = None
     if passed and negative and not dma:
-        yosys = Path("/opt/testharness/toolchains/formal/bin/yosys")
+        yosys = Path(yosys_bin())
         if not yosys.is_file():
             raise RuntimeError("qualified synthesis tool is missing")
         script = out / "synth.ys"

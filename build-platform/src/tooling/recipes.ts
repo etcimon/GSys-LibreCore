@@ -434,7 +434,7 @@ export async function installFormal(
     ].join("; ");
 
     logger.info(`Formal toolchain: building under WSL → ${tools.formal}`);
-    logger.info(`  yosys ref ${yosysRef} (needs >= v0.67 for integrated slang), ${jobs} jobs`);
+    logger.info(`  yosys source tools/yosys (fallback ref ${yosysRef}), ${jobs} jobs`);
 
     const res = await run("wsl", ["-e", "bash", "-lc", shellCmd], {
       cwd: repoRoot,
@@ -467,7 +467,7 @@ export async function installFormal(
     NUM_JOBS: jobs,
     FORMAL_FORCE: options.force ? "1" : "0",
   });
-  logger.info(`Formal toolchain: building natively → ${tools.formal} (${jobs} jobs)`);
+  logger.info(`Formal toolchain: building tools/yosys natively → ${tools.formal} (${jobs} jobs)`);
   const res = await runBashScript(scriptRel, [], {
     cwd: repoRoot,
     env,

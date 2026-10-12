@@ -11,7 +11,7 @@ subsequent test uploads only its ELF.
 Remote layout (default root ``/opt/testharness``)::
 
     /opt/testharness/
-      toolchains/          provisioned once (verilator, riscv gcc, spike)
+      toolchains/          provisioned once (verilator, yosys-g6lc, riscv gcc, spike)
       repo/                rsync'd RTL + build sources
       work/                build workdir (verilator --Mdir libraries)
       runs/<tag>/          per-test ELF + logs
@@ -61,6 +61,8 @@ import traceback
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+
+from yosys_bin import remote_yosys
 
 # --------------------------------------------------------------------------
 # defaults
@@ -1940,7 +1942,7 @@ def cmd_l2_leaf(rem: Remote, args) -> int:
         "L2TB_WRITE_UPDATE": "1" if getattr(args, "write_update", False) else "0",
     }
     if mode == "synth":
-        env["YOSYS"] = f"{REMOTE_ROOT}/toolchains/formal/bin/yosys"
+        env["YOSYS"] = remote_yosys(REMOTE_ROOT)
     command = " ".join(shlex.quote(f"{key}={value}") for key, value in env.items())
     plus = "+bypass-backpressure +atop-drain +amo-arith " if mode == "sim" else ""
     log(f"isolated L2 leaf mode={mode} -> {rundir}; no shared repo sync or cleanup")
@@ -2016,7 +2018,6 @@ def cmd_l2_equiv(rem: Remote, args) -> int:
     checksums = "".join(f"{digest}  {path}\n" for path, digest in sources.items())
     rem.run(f"cd {shlex.quote(source_dir)} && printf %s {shlex.quote(checksums)} | sha256sum -c -")
     mem = "" if args.mem == "auto" else args.mem
-    formal_bin = f"{REMOTE_ROOT}/toolchains/formal/bin"
     env = {
         "L2TB_OUT": f"{rundir}/output", "L2TB_MODE": "equiv",
         "L2TB_BYTE_SIZE": str(args.byte_size), "L2TB_SET_ASSOC": str(args.ways),
@@ -2026,7 +2027,7 @@ def cmd_l2_equiv(rem: Remote, args) -> int:
         "L2TB_EQ_TIMEOUT": str(int(command_timeout(args.timeout, 120 if mem == "map" or args.byte_size <= 512 else 300))),
         "L2TB_EQ_TAGS": "1" if getattr(args, "eq_tags", False) else "0",
         "L2TB_WRITE_UPDATE": "1" if getattr(args, "write_update", False) else "0",
-        "YOSYS": f"{formal_bin}/yosys",
+        "YOSYS": remote_yosys(REMOTE_ROOT),
     }
     command = " ".join(shlex.quote(f"{key}={value}") for key, value in env.items() if value != "")
     log(f"isolated L2 equiv -> {rundir}; no shared repo sync or cleanup")
@@ -2191,7 +2192,7 @@ def apu_leaf_launch_script(source_dir: str, rundir: str, stages: str,
     prepends its dirname to PATH so sibling tools (qemu-img) resolve.
     """
     verilator = f"{REMOTE_ROOT}/toolchains/verilator-{VERILATOR_VERSION}/bin/verilator"
-    yosys = f"{REMOTE_ROOT}/toolchains/formal/bin/yosys"
+    yosys = remote_yosys(REMOTE_ROOT)
     extra_env = ''.join(f"{k}={shlex.quote(v)} "
                         for k, v in (env or {}).items())
     qemu = (env or {}).get('G6LC_QEMU')
@@ -2319,7 +2320,8 @@ def cmd_apu_leaf(rem: Remote, args) -> int:
             f"sha256sum --quiet -c {shlex.quote(rundir + '/snapshot.sha256')} && "
             "find . -name '*.sh' -exec chmod u+x {} +")
     verilator = f"{REMOTE_ROOT}/toolchains/verilator-{VERILATOR_VERSION}/bin/verilator"
-    yosys = f"{REMOTE_ROOT}/toolchains/formal/bin/yosys"
+    yosys_g6lc = remote_yosys(REMOTE_ROOT)
+    yosys_formal = f"{REMOTE_ROOT}/toolchains/formal/bin/yosys"
     probe = (
         f"{env_prefix()} "
         "printf 'nproc=%s\\n' \"$(nproc)\"; "
@@ -2328,7 +2330,7 @@ def cmd_apu_leaf(rem: Remote, args) -> int:
         "printf 'uname=%s\\n' \"$(uname -a)\"; "
         "printf 'date_utc=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"; "
         f"printf 'verilator=%s\\n' \"$({shlex.quote(verilator)} --version 2>/dev/null)\"; "
-        f"printf 'yosys=%s\\n' \"$({shlex.quote(yosys)} -V 2>/dev/null | head -1)\"; "
+        f"printf 'yosys=%s\\n' \"$(if [ -x {shlex.quote(yosys_g6lc)} ]; then {shlex.quote(yosys_g6lc)} -V; else {shlex.quote(yosys_formal)} -V; fi 2>/dev/null | head -1)\"; "
         "printf 'riscv_gcc=%s\\n' \"$(riscv-none-elf-gcc --version 2>/dev/null | head -1)\"; "
         "printf 'gxx=%s\\n' \"$(g++ --version 2>/dev/null | head -1)\"; "
         "printf 'python3=%s\\n' \"$(python3 --version 2>&1)\""

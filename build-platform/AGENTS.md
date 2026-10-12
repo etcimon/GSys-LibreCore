@@ -296,7 +296,12 @@ bun run src/cli/index.ts setup --install --profile dual-hart
 
 - **formal**: source-builds **Yosys (>= v0.67)** with the *integrated* sv-elab/slang
   frontend, plus SymbiYosys, into `workspace/tooling/formal`
-  (`scripts/install-formal.sh`; CMake+Ninja, `NUM_JOBS` cores). It first tries to
+  (`scripts/install-formal.sh`; CMake+Ninja, `NUM_JOBS` cores). The Yosys source
+  is the submodule `tools/yosys` (branch `g6lc`); `toolchain.versions.yosys` is
+  only the fallback clone ref when that checkout is absent. The builder-only
+  prefix is `scripts/install-yosys-g6lc.sh` →
+  `/opt/testharness/toolchains/yosys-g6lc`, the same shape as
+  `install-verilator-g6lc.sh`. It first tries to
   **adopt** an existing install that already has `read_slang`, which is minutes
   cheaper than rebuilding. Windows delegates to **WSL** (`platform/wsl.ts`),
   the same rule as Spike, and installs Linux ELFs into the managed prefix.
@@ -468,7 +473,9 @@ bun run src/cli/index.ts verify [--lint] [--formal] [--sim] [--synth]
   needs `--unroll-limit=262144`). `verify.synthPassesByTarget[target]` overrides the
   pass tail after `hierarchy -check` — the server runs `proc; opt_clean; stat;
   check -latchonly -assert` because `opt -fast`'s `OPT_MERGE` is asymptotic on it
-  (≈11 merges/min from ~273k cells, cut at a 6 h cap) and the full `check -assert`
+  (≈11 merges/min from ~273k cells on the pre-fork Yosys, cut at a 6 h cap; the
+  `tools/yosys` pin rehashes only cells that read a redirected wire, which is not
+  a new CVA6 timing) and the full `check -assert`
   on the un-merged 287k-cell netlist is OOM-killed at 118 GB (bit-level loop
   TopoSort). Measured: 286,763 cells, `$dlatch`/`$sr` 0, 2,934 s, 99.5 GB peak. The
   loop/driver check for the server is owed on a larger host; per-block synthesis via

@@ -43,6 +43,7 @@ import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from yosys_bin import yosys_bin
 
 #  Major uncore tops. Each must be a real module name in the cluster flist.
 #  Typed wrappers where the bare module cannot be a synthesis top (see
@@ -76,7 +77,7 @@ def main():
     out = Path(os.environ.get("TH_OUT_DIR", "/tmp/cluster-synth-review")).resolve()
     out.mkdir(parents=True, exist_ok=True)
 
-    ys = os.environ.get("YOSYS", "/opt/testharness/toolchains/formal/bin/yosys")
+    ys = yosys_bin()
     if not Path(ys).is_file():
         ys = "yosys"
 

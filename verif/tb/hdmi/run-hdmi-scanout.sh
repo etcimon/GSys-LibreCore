@@ -50,7 +50,13 @@ python3 "$ROOT/verif/tb/hdmi/simplefb_model.py" \
   -Mdir "$OUT/ser" -o tb_g6lc_hdmi_ser
 ( cd "$OUT/ser" && ./tb_g6lc_hdmi_ser )
 if [[ "${HDMI_SYNTH:-1}" == 1 ]]; then
-  YOSYS="${YOSYS:-/opt/testharness/toolchains/formal/bin/yosys}"
+  if [[ -z "${YOSYS:-}" ]]; then
+    if [[ -x /opt/testharness/toolchains/yosys-g6lc/bin/yosys ]]; then
+      YOSYS=/opt/testharness/toolchains/yosys-g6lc/bin/yosys
+    else
+      YOSYS=/opt/testharness/toolchains/formal/bin/yosys
+    fi
+  fi
   for en in 0 1; do
     "$VERILATOR" --lint-only -Wall -Wno-TIMESCALEMOD -Wno-WIDTHEXPAND \
       -Wno-UNUSEDSIGNAL \
