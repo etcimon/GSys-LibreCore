@@ -243,6 +243,11 @@ package cva6_config_pkg;
       // instructions; the starve limit is the binding trigger at 16.
       SmtFetchQuantum: unsigned'(128),
       SmtStarveLimit: unsigned'(64),
+      // CoreSleepGate stays 0: the T21i strict-boot evidence (33,001,884 cycles) is
+      // for the ungated cluster, and the gate measured -17 % simulation speed while
+      // awake / +4 % net on the 8-hart boot (AGENTS-todo T22). Enable per build for
+      // the power feature or the sleep witness (`mc_sleep_gate_wake.S`).
+      CoreSleepGate: bit'(0),
       // 4-core coherent cluster
       NrCores: unsigned'(4),
       CohPolicy: config_pkg::COH_FILTERED,

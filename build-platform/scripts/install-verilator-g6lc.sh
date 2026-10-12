@@ -31,9 +31,13 @@ echo "[vlt-g6lc] source $(git rev-parse --short HEAD) $(git log -1 --format=%s |
 make -j"$JOBS" > make.log 2>&1
 make install > install.log 2>&1
 "$PREFIX/bin/verilator" --version
-if [[ -d "$PINNED_RUNTIME" ]]; then
-  RT="$PREFIX/runtime"; rm -rf "$RT"; mkdir -p "$RT"; cp -a "$PINNED_RUNTIME/." "$RT/"
-  cp -f "$PREFIX/bin/verilator_bin" "$RT/bin/verilator_bin"
-  echo "[vlt-g6lc] runtime dir $RT (pinned headers + fork verilator_bin)"
-fi
+# Runtime dir in the layout the pinned `verilator` wrapper expects from VERILATOR_ROOT
+# (bin/verilator_bin + include/): the fork's own headers (verilated_funcs.h /
+# verilated_types.h carry runtime changes too) plus its compiler binary. The pinned
+# runtime stays untouched for qualification builds.
+RT="$PREFIX/runtime"; rm -rf "$RT"; mkdir -p "$RT"
+cp -a "$PREFIX/share/verilator/." "$RT/"
+mkdir -p "$RT/bin"; cp -f "$PREFIX/bin/verilator_bin" "$RT/bin/verilator_bin"
+cp -f "$PREFIX/bin/verilator_bin_dbg" "$RT/bin/verilator_bin_dbg" 2>/dev/null || true
+echo "[vlt-g6lc] runtime dir $RT (fork headers + fork verilator_bin); pinned runtime: $PINNED_RUNTIME"
 echo "[vlt-g6lc] installed at $PREFIX"

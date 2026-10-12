@@ -371,6 +371,8 @@ module ariane_verilog_wrap
     .time_irq_i  ( time_irq   ),
     .rtc_time_i  ( rtc_time_i ),
     .debug_req_i ( debug_req  ),
+    .core_wfi_all_o (          ),
+    .core_wake_o    (          ),
     .noc_req_o   ( l15_req    ),
     .noc_resp_i  ( l15_rtrn   ),
     .l1_inval_addr_i  ( 64'b0 ),

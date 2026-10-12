@@ -395,6 +395,13 @@ module cva6
     input logic [63:0] rtc_time_i,
     // Debug (async) request - SUBSYSTEM
     input logic debug_req_i,
+    // G6LC core sleep: every resident hart is parked in WFI (csr wfi_q). The cluster
+    // combines it with its NoC-idle count and the ungated wake sources to drive the
+    // per-core ICG when CVA6Cfg.CoreSleepGate is set; otherwise observability only.
+    output logic core_wfi_all_o,
+    // G6LC core sleep: a hart's WFI wake-up condition holds (evaluated from inputs and
+    // registered state, valid while the core clock is stopped) — the gate's wake source.
+    output logic core_wake_o,
     // Probes to build RVFI, can be left open when not used - RVFI
     output rvfi_probes_t rvfi_probes_o,
     // CVXIF request - SUBSYSTEM
@@ -1662,6 +1669,9 @@ module cva6
   end else begin : gen_smt_halt_multi
     assign smt_hart_halt = smt_csr_hart_halt;
   end
+  // Core sleep request: the csr bank reports per-hart WFI (width-1 vector for a
+  // single hart); the core may lose its clock only when every hart is parked.
+  assign core_wfi_all_o = &smt_csr_hart_halt;
 
   g6lc_hart_state #(
       .CVA6Cfg(CVA6Cfg)
@@ -2150,7 +2160,7 @@ module cva6
                      issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].rs1_rdy,
                      issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].rs2_rdy,
                      issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].rs3_rdy,
-                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ready[e],
+                     issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ready_dbg[e],
                      int'(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].sbe.trans_id) == hs
                          ? " <== HEAD" : "");
       endfunction
@@ -2863,6 +2873,7 @@ module cva6
       .flush_o                 (flush_csr_ctrl),
       .halt_csr_o              (halt_csr_ctrl),
       .hart_halt_o             (smt_csr_hart_halt),
+      .wfi_wake_o              (core_wake_o),
       .commit_instr_i          (commit_instr_id_commit[0]),
       .commit_ack_i            (commit_ack),
       .commit_hart_i           (commit_hart),

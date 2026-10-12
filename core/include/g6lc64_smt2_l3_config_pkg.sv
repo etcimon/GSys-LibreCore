@@ -253,6 +253,7 @@ package cva6_config_pkg;
       SmtPolicy: config_pkg::SMT_HYBRID,
       SmtFetchQuantum: unsigned'(128),  // dual-ready RR; OpenSBI-scale (miss thrash fix)
       SmtStarveLimit: unsigned'(64),
+      CoreSleepGate: bit'(0),
       NrCores: unsigned'(1),
       CohPolicy: config_pkg::COH_FILTERED,
       SnoopFilterEn: bit'(0),

@@ -36,6 +36,19 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+# The qualified private 5.008 runtime (verilated_funcs.h). Qualification evidence
+# requires it. A performance-experiment model built against another runtime (the
+# tools/verilator fork) can be reviewed only when its runtime header hash is declared
+# in REVIEW_EXPERIMENTAL_RUNTIME_SHA256 (comma-separated); the record then carries
+# runtimeQualified=false so it can never be mistaken for qualification evidence.
+QUALIFIED_RUNTIME_SHA256 = 'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
+
+
+def accepted_runtime_hashes() -> set:
+    declared = os.environ.get('REVIEW_EXPERIMENTAL_RUNTIME_SHA256', '')
+    return {QUALIFIED_RUNTIME_SHA256} | {h.strip() for h in declared.split(',') if h.strip()}
+
+
 def run_outcome(returncode: int, text: str, cycle_cap: int) -> str:
     if cycle_cap <= 0:
         raise ValueError('cycle cap must be positive')
@@ -292,12 +305,17 @@ def main() -> int:
     dependencies = '\n'.join(p.read_text() for p in model.parent.glob('*.d'))
     runtime_headers = set(re.findall(r'\S+/include/verilated_funcs\.h', dependencies))
     runtime_hashes = {p: sha(Path(p)) for p in sorted(runtime_headers)}
-    if not runtime_hashes or set(runtime_hashes.values()) != {
-            'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'}:
+    if not runtime_hashes or not set(runtime_hashes.values()) <= accepted_runtime_hashes():
         raise RuntimeError('review model does not use the qualified private runtime')
+    runtime_qualified = set(runtime_hashes.values()) == {QUALIFIED_RUNTIME_SHA256}
     record = {'label': label, 'test': test, 'stage': stage,
               'modelSha256': sha(model), 'model': str(model),
-              'modelInputsSha256': sha(model_inputs), 'runtimeHeaders': runtime_hashes}
+              'modelInputsSha256': sha(model_inputs), 'runtimeHeaders': runtime_hashes,
+              'runtimeQualified': runtime_qualified}
+    if not runtime_qualified:
+        record['runtimeExperimental'] = sorted(set(runtime_hashes.values()))
+        print('[fp-review] EXPERIMENTAL runtime (declared via REVIEW_EXPERIMENTAL_RUNTIME_SHA256): '
+              'retirement comparison only, not qualification evidence', flush=True)
     reuse = os.environ.get('FP_REVIEW_ELF')
     if reuse:
         if any(os.environ.get(key) for key in

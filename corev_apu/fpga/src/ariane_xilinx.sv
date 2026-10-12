@@ -794,6 +794,8 @@ ariane #(
     .rtc_time_i   ( clint_mtime         ),
     .rvfi_probes_o( rvfi_probes         ),
     .debug_req_i  ( debug_req_irq       ),
+    .core_wfi_all_o (                   ),
+    .core_wake_o    (                   ),
     .noc_req_o    ( axi_ariane_req      ),
     .noc_resp_i   ( axi_ariane_resp     ),
     .l1_inval_addr_i  ( 64'b0           ),

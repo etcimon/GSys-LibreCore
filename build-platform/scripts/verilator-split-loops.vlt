@@ -1,0 +1,143 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2026 Etienne Cimon
+//
+// Control file (split_var) for the packed aggregates that form FALSE combinational
+// loops (UNOPTFLAT) in the LibreCore testharness, so the scheduler can order the logic
+// instead of breaking the loops into "hybrid" logic with change-detection triggers and
+// extra act-region iterations (measured: 4.6 trigger evaluations and 2.2 act passes per
+// eval step on g6lc64_ooo, 247 suppressed UNOPTFLAT). Every entry is a variable that
+// `--report-unoptflat` listed as "can split_var" in at least one loop; splitting changes
+// no semantics (the variable is represented as its fields/elements inside the model).
+// RTL is untouched. See agents/guides/AGENTS-verilator-performance.md §2.2.
+//
+// Usage: appended to the Verilator arguments of a build (T16_SPLIT_VLT=1 in the t21s
+// build driver); an entry the tool cannot honour is reported as SPLITVAR.
+`verilator_config
+
+// --- uncore: AXI crossbar / arbiters (the 2140-bit mst_resps was the widest trigger)
+split_var -module "axi_xbar"        -var "mst_resps"
+split_var -module "axi_xbar"        -var "slv_reqs"
+split_var -module "rr_arb_tree"     -var "req_nodes"
+split_var -module "rr_arb_tree"     -var "gnt_nodes"
+split_var -module "rr_arb_tree"     -var "data_nodes"
+split_var -module "rr_arb_tree"     -var "index_nodes"
+split_var -module "rr_arb_tree"     -var "req_d"
+split_var -module "axi_delayer"     -var "mst_resp"
+split_var -module "axi_riscv_amos"  -var "atop_valid_d"
+split_var -module "lzc"             -var "index_nodes"
+split_var -module "lzc"             -var "sel_nodes"
+split_var -module "lzc"             -var "in_tmp"
+
+// --- core top / commit / CSR
+// The I$ request bundle also feeds the PMU, which turns frontend kill/spec/vaddr and
+// the I$ ready into one pseudo-loop; the decoder's output struct closes another through
+// id_stage. (Second round, from the remaining hybrid triggers of the first build.)
+split_var -module "cva6"            -var "icache_dreq_if_cache"
+split_var -module "cva6"            -var "icache_dreq_cache_if"
+split_var -module "decoder"         -var "instruction_o"
+split_var -module "cva6"            -var "dcache_req_ports_cache_ex"
+split_var -module "cva6"            -var "commit_ack"
+split_var -module "cva6"            -var "commit_ack_commit_id"
+split_var -module "cva6"            -var "csr_op_commit_csr"
+split_var -module "cva6"            -var "csr_wdata_commit_csr"
+split_var -module "cva6"            -var "csr_rdata_csr_commit"
+split_var -module "cva6"            -var "epc_commit_pcgen"
+split_var -module "cva6"            -var "trap_vector_base_commit_pcgen"
+split_var -module "csr_regfile"     -var "csr_wdata"
+split_var -module "csr_regfile"     -var "csr_rdata"
+split_var -module "csr_regfile"     -var "trap_to_priv_lvl"
+
+// --- frontend (fetch_B) and predictors
+split_var -module "frontend"        -var "vpc_bht"
+split_var -module "frontend"        -var "instruction_valid"
+split_var -module "frontend"        -var "cf_type"
+split_var -module "frontend"        -var "predict_address"
+split_var -module "frontend"        -var "fetch_address"
+split_var -module "frontend"        -var "seq_base"
+split_var -module "frontend"        -var "present_exp"
+split_var -module "frontend"        -var "rvi_imm"
+split_var -module "frontend"        -var "rvc_imm"
+split_var -module "frontend"        -var "btb_prediction_shifted"
+split_var -module "instr_realign"   -var "hw"
+split_var -module "instr_queue"     -var "valid"
+split_var -module "instr_queue"     -var "slot_fifo"
+split_var -module "instr_queue"     -var "push_instr_fifo"
+split_var -module "instr_queue"     -var "instr_data_in"
+split_var -module "instr_queue"     -var "fire_prefix"
+split_var -module "g6lc_bp_tage"    -var "base_row_i"
+split_var -module "g6lc_bp_statcor" -var "idx"
+split_var -module "g6lc_bp_ckpt"    -var "push_rank"
+
+// --- issue / OoO
+split_var -module "g6lc_iq"         -var "ready"
+split_var -module "g6lc_iq"         -var "rem"
+split_var -module "g6lc_iq"         -var "grant"
+split_var -module "g6lc_iq"         -var "g"
+split_var -module "scoreboard"      -var "issue_pointer"
+
+// --- FPU (cvfpu) ready chains
+split_var -module "fpnew_opgroup_block"        -var "fmt_in_ready"
+split_var -module "fpnew_noncomp"              -var "inp_pipe_ready"
+split_var -module "fpnew_fma"                  -var "inp_pipe_ready"
+split_var -module "fpnew_fma"                  -var "mid_pipe_ready"
+split_var -module "fpnew_fma"                  -var "out_pipe_ready"
+split_var -module "fpnew_fma"                  -var "regular_status"
+split_var -module "fpnew_cast_multi"           -var "inp_pipe_ready"
+split_var -module "fpnew_cast_multi"           -var "mid_pipe_ready"
+split_var -module "fpnew_cast_multi"           -var "fp_regular_status"
+split_var -module "fpnew_divsqrt_th_64_multi"  -var "inp_pipe_ready"
+split_var -module "fpnew_divsqrt_th_64_multi"  -var "out_pipe_ready"
+
+// --- WT data cache (g6lc64_ooo / int2 profiles; HPDCACHE profiles ignore these)
+split_var -module "wt_dcache_wbuffer" -var "wbuffer_hit_oh"
+split_var -module "wt_dcache_wbuffer" -var "rd_hit_oh_d"
+split_var -module "wt_dcache_mem"     -var "wbuffer_hit_oh"
+split_var -module "wt_dcache_mem"     -var "wbuffer_cmp_addr"
+split_var -module "wt_dcache_mem"     -var "wbuffer_rdata"
+split_var -module "wt_dcache_mem"     -var "wbuffer_ruser"
+split_var -module "wt_dcache_mem"     -var "rdata"
+split_var -module "wt_dcache_mem"     -var "ruser"
+split_var -module "wt_dcache"         -var "wbuf_port_req"
+split_var -module "wt_dcache"         -var "rd_data"
+
+// --- g6lc64_ooo_server (HPDCACHE, 4 cores): remaining loops from `--report-unoptflat` with the
+// entries above applied, generated by verif/regress/remote/vlt_autosplit.py (2026-10-11).
+// Entries whose module is absent from a configuration are inert.
+split_var -module "axi_demux" -var "mst_r_chans"  // width 1529, loops 42, fanout 42
+split_var -module "axi_xbar" -var "mst_reqs"  // width 14340, loops 28, fanout 3920
+split_var -module "axi_xbar" -var "slv_resps"  // width 7194, loops 28, fanout 2268
+split_var -module "g6lc_cluster" -var "core_resp"  // width 872, loops 28, fanout 560
+split_var -module "g6lc_cluster" -var "guarded_req"  // width 1912, loops 28, fanout 336
+split_var -module "cva6_hpdcache_if_adapter" -var "hpdcache_req_live"  // width 151, loops 23, fanout 23
+split_var -module "cva6" -var "dcache_req_to_cache"  // width 844, loops 20, fanout 620
+split_var -module "hpdcache_ctrl" -var "st1_req"  // width 154, loops 20, fanout 500
+split_var -module "hpdcache_ctrl" -var "st0_req"  // width 154, loops 20, fanout 100
+split_var -module "cva6_hpdcache_wrapper" -var "dcache_req"  // width 151, loops 20, fanout 100
+split_var -module "cva6_hpdcache_if_adapter" -var "hpdcache_req_store"  // width 151, loops 20, fanout 40
+split_var -module "cva6_hpdcache_if_adapter" -var "hpdcache_req_amo"  // width 151, loops 17, fanout 34
+split_var -module "g6lc_bp_tage" -var "t_index"  // width 96, loops 14, fanout 168
+split_var -module "g6lc_cluster" -var "core_req"  // width 1912, loops 14, fanout 56
+split_var -module "cva6_hpdcache_wrapper" -var "dcache_rsp"  // width 74, loops 10, fanout 90
+split_var -module "hpdcache_core_arbiter" -var "arb_req_gnt_d"  // width 5, loops 10, fanout 70
+split_var -module "cva6_hpdcache_wrapper" -var "dcache_req_tag"  // width 44, loops 10, fanout 50
+split_var -module "cva6_hpdcache_wrapper" -var "dcache_req_pma"  // width 5, loops 10, fanout 50
+split_var -module "hpdcache_core_arbiter" -var "core_req"  // width 755, loops 10, fanout 10
+split_var -module "hpdcache_core_arbiter" -var "core_req_tag"  // width 220, loops 10, fanout 10
+split_var -module "g6lc_smt_csr_bank" -var "commit_ack_g"  // width 4, loops 8, fanout 16
+split_var -module "g6lc_smt_csr_bank" -var "csr_ex_b"  // width 203, loops 8, fanout 8
+split_var -module "g6lc_smt_csr_bank" -var "csr_rdata_b"  // width 64, loops 8, fanout 8
+split_var -module "frontend" -var "realigner_data"  // width 64, loops 7, fanout 35
+split_var -module "g6lc_bp_tage" -var "any_hit"  // width 4, loops 7, fanout 28
+split_var -module "g6lc_bp_tage" -var "t_tag"  // width 96, loops 7, fanout 7
+split_var -module "load_store_unit" -var "lsu_req_i"  // width 386, loops 4, fanout 4
+split_var -module "alu" -var "operand_a_bitmanip"  // width 64, loops 2, fanout 102
+split_var -module "alu_wrapper" -var "fu_data_bypass"  // width 403, loops 2, fanout 42
+split_var -module "alu" -var "adder_in_b"  // width 65, loops 2, fanout 8
+split_var -module "dm_top" -var "cmderror"  // width 3, loops 2, fanout 2
+split_var -module "cva6" -var "fetch_valid_if_id"  // width 4, loops 2, fanout 2
+split_var -module "alu" -var "adder_result_ext_o"  // width 66, loops 2, fanout 2
+split_var -module "alu" -var "adder_in_a"  // width 65, loops 2, fanout 2
+split_var -module "alu" -var "shift_right_result"  // width 65, loops 2, fanout 2
+split_var -module "alu" -var "shift_op_a_64"  // width 65, loops 2, fanout 2
+split_var -module "alu" -var "operand_a_rev"  // width 64, loops 1, fanout 3
+split_var -module "alu" -var "operand_a_rev32"  // width 32, loops 1, fanout 2

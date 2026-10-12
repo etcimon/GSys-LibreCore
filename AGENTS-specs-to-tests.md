@@ -1862,6 +1862,27 @@ The optional build-platform `apu-profile-audit` suite invokes the same audit thr
 Aggregate source inventories/log hashes and selected-stage PASS records do not replace
 an elaborated build manifest, complete Vulkan CTS, full-SoC coherence or physical evidence.
 
+2026-10-11: the whole launcher runs remotely through `testharness_proxy.py apu-leaf <repo>
+--stages …` / `apu-leaf-collect <tag>`. The git-visible closure of the APU surfaces plus the
+generated oracle inputs under `verif/tb/apu/{sh_vectors,vn_vectors}` is pushed to an isolated
+`/opt/testharness/runs/apu-leaf-<tag>/source`, sha256-checked on arrival, run detached with
+the pinned Verilator 5.008 / Yosys 0.68 / xpack gcc 14.2.0, and pulled as hashed evidence
+(`remote-runs/<tag>/leaf-result.json`, `output/summary.json`). `verif/tb/apu/apu_source_manifest.py`
+(`APU_SOURCE_FILES`) makes the local and remote identities comparable; the verdict is
+`incomplete` whenever they differ, before any pass/fail is read. `ApuSourceManifestTests`
+and `ApuLeafTests` (9 host tests) cover list/walk inventories, drift, stage validation, the
+git-visible source set and verdict precedence; `build-platform/test/config.test.ts` checks the
+optional `apu-remote-leaf` suite (`execution: remote-proxy`, outside `defaultSuites`). The
+run `apu-leaf-20261011T035154-cac68fd2335a` (identity `3cecae55…` equal locally, before and
+after) passed all 25 suites of `unit,top,soc,bridge,synth` on the pinned toolchain. Its
+predecessor `…T010751…` failed `tb_g6lc_apu_vgpages` case 8 and `bridge_selftest`; both were
+test-side: Verilator 5.008 mis-reads a `ref` unpacked-array argument in the vgpages TB model
+(hoisted to module scope; DUT identical on both versions), and the bridge self-test now
+replays the two-session `ue_probe_bufcopy_1` oracle instead of the fresh-device
+`ue_cpos_bufcopy_1` one. Three further TB/script surfaces were made 5.008-clean without RTL
+change. Oracle freshness versus `shader_vectors.py`/`vn_golden.py` is not checked by the leaf,
+and the guest stage requires a remote QEMU carrying the `g6lc-g6lc64_stream8` machine.
+
 `verif/tb/apu/run-virtio-mmio.sh` consumes `corev_apu/apu/Flist.apu` and runs
 `tb_g6lc_apu_virtio_mmio.sv` through the remote testharness proxy. Virtio 1.3 CSD01
 sections 2.1/2.6/4.2.2 are the register/status/split-queue references. The test first

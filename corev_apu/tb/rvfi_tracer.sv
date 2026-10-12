@@ -41,8 +41,13 @@ module rvfi_tracer #(
   string binary;
   int f;
   int unsigned SIM_FINISH;
+  // +rvfi_notrace: keep the tohost / end-of-test detection but skip the per-instruction
+  // trace writes (3-6 $fwrite per retired instruction, i.e. ~100 GB and a sizeable share
+  // of the host time over a kernel-boot-length run). Default: tracing on (unchanged).
+  bit trace_en;
   initial begin
     TOHOST_ADDR = '0;
+    trace_en = !$test$plusargs("rvfi_notrace");
     f = $fopen($sformatf("trace_rvfi_hart_%h.dasm", HART_ID), "w");
     // Default 40M: rv64ui-v-* vm_boot page-table memset on WT-dcache configs
     // needs ~12–18M cycles (run-to-run variance); the historical 2M default
@@ -116,6 +121,16 @@ module rvfi_tracer #(
       // print the instruction information if the instruction is valid or a trap is taken
       if (rvfi_i[i].valid) begin
         logic dest_is_fp;
+        // End-of-test detection is independent of the trace writes below
+        if (rvfi_i[i].mem_wmask != 0 && TOHOST_ADDR != '0 &&
+            rvfi_i[i].mem_paddr == TOHOST_ADDR &&
+            rvfi_i[i].mem_wdata[0] == 1'b1) begin
+          end_of_test_q <= rvfi_i[i].mem_wdata[31:0];
+          $display("*** [rvfi_tracer] INFO: Simulation terminated after %d cycles!\n", cycles);
+        end
+        if (!trace_en) begin
+          // tracing off: nothing else to write for this instruction
+        end else begin
         // Instruction information
         if (rvfi_i[i].intr[2]) begin
            $fwrite(f, "core   INTERRUPT 0: 0x%h (0x%h) DASM(%h)\n",
@@ -164,14 +179,9 @@ module rvfi_tracer #(
         // Handle memory writes (including for AMO instructions which have both rd and mem_wmask)
         if (rvfi_i[i].mem_wmask != 0) begin
           $fwrite(f, " mem 0x%h 0x%h", rvfi_i[i].mem_addr, rvfi_i[i].mem_wdata);
-          if (TOHOST_ADDR != '0 &&
-              rvfi_i[i].mem_paddr == TOHOST_ADDR &&
-              rvfi_i[i].mem_wdata[0] == 1'b1) begin
-            end_of_test_q <= rvfi_i[i].mem_wdata[31:0];
-            $display("*** [rvfi_tracer] INFO: Simulation terminated after %d cycles!\n", cycles);
-          end
         end
         $fwrite(f, "\n");
+        end // trace_en
       end else begin
         if (rvfi_i[i].trap) begin
           case (rvfi_i[i].cause)
@@ -190,7 +200,8 @@ module rvfi_tracer #(
             32'hd: cause = "LOAD_PAGE_FAULT";
             32'hf: cause = "STORE_PAGE_FAULT";
           endcase;
-          if (rvfi_i[i].insn[1:0] != 2'b11) begin
+          if (!trace_en) begin
+          end else if (rvfi_i[i].insn[1:0] != 2'b11) begin
             $fwrite(f, "%s exception @ 0x%h (0x%h)\n", cause, pc64, rvfi_i[i].insn[15:0]);
           end else begin
             $fwrite(f, "%s exception @ 0x%h (0x%h)\n", cause, pc64, rvfi_i[i].insn);

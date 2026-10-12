@@ -451,6 +451,11 @@ module g6lc_iq
   end
 
   //pragma translate_off
+  // Simulation-only view of `ready` for the cva6.sv dump probes. A hierarchical
+  // reference to `ready` itself would stop the simulator from splitting that vector
+  // per entry (the grant cascade is otherwise a false combinational loop through it).
+  logic [DEPTH-1:0] ready_dbg;
+  assign ready_dbg = ready;
   // Immediate posedge assertions: `assert property` makes Verilator snapshot
   // every referenced signal into __Vsampled, and for the unpacked q_q array
   // that snapshot is a __Vilp copy loop whose DepSet partitioning can emit

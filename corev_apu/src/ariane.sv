@@ -85,6 +85,9 @@ module ariane import ariane_pkg::*; #(
   // Platform mtime counter value for Sstc (tie to '0 when CVA6Cfg.SstcEn is 0)
   input  logic [63:0]                  rtc_time_i,
   input  logic                         debug_req_i,  // debug request (async)
+  // G6LC core sleep request (every hart in WFI) for the cluster's per-core ICG
+  output logic                         core_wfi_all_o,
+  output logic                         core_wake_o,
   // RISC-V formal interface port (`rvfi`):
   // Can be left open when formal tracing is not needed.
   output rvfi_probes_t rvfi_probes_o,
@@ -182,6 +185,8 @@ module ariane import ariane_pkg::*; #(
       .time_irq_i           ( time_irq_i                ),
       .rtc_time_i           ( rtc_time_i                ),
       .debug_req_i          ( debug_req_i               ),
+      .core_wfi_all_o       ( core_wfi_all_o            ),
+      .core_wake_o          ( core_wake_o               ),
       .rvfi_probes_o        ( rvfi_probes_o             ),
       .cvxif_req_o          ( cvxif_req                 ),
       .cvxif_resp_i         ( cvxif_resp                ),
@@ -413,6 +418,8 @@ module ariane import ariane_pkg::*; #(
       .time_irq_i           ( time_irq_i                ),
       .rtc_time_i           ( rtc_time_i                ),
       .debug_req_i          ( debug_req_i               ),
+      .core_wfi_all_o       ( core_wfi_all_o            ),
+      .core_wake_o          ( core_wake_o               ),
       .rvfi_probes_o        ( rvfi_probes_o             ),
       .cvxif_req_o          ( acc_req                   ),
       .cvxif_resp_i         ( acc_resp                  ),

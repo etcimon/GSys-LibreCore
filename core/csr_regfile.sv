@@ -50,6 +50,10 @@ module csr_regfile
     output logic flush_o,
     // halt requested - CONTROLLER
     output logic halt_csr_o,
+    // G6LC core sleep gate: the WFI wake-up condition of wfi_ctrl evaluated from the
+    // inputs and registered state only (no mip_q, which needs a clock edge to update),
+    // so an ungated clock gate can see it while this hart's clock is stopped.
+    output logic wfi_wake_o,
     // Instruction to be committed - ID_STAGE
     input scoreboard_entry_t commit_instr_i,
     // Commit acknowledged an instruction -> increase instret CSR - COMMIT_STAGE
@@ -3184,6 +3188,20 @@ module csr_regfile
     assign tsr_o = mstatus_q.tsr;
   end
   assign halt_csr_o = wfi_q;
+  // Everything that clears wfi_q in wfi_ctrl, one edge earlier: the enabled external
+  // lines as they enter mip_d, the registered-but-stable software pending bits, the
+  // Sstc comparators (combinational from the ungated rtc_time_i), SEIP and debug.
+  always_comb begin : wfi_wake
+    wfi_wake_o = (|(mip_q & mie_q)) || (CVA6Cfg.DebugEn && debug_req_i) || irq_i[1];
+    if (irq_i[0] && mie_q[riscv::IRQ_M_EXT]) wfi_wake_o = 1'b1;
+    if (CVA6Cfg.SoftwareInterruptEn && ipi_i && mie_q[riscv::IRQ_M_SOFT]) wfi_wake_o = 1'b1;
+    if (time_irq_i && mie_q[riscv::IRQ_M_TIMER]) wfi_wake_o = 1'b1;
+    if (CVA6Cfg.SstcEn && mstce_q && stimecmp_hit_d && mie_q[riscv::IRQ_S_TIMER])
+      wfi_wake_o = 1'b1;
+    if (CVA6Cfg.SstcEn && CVA6Cfg.RVH && mstce_q && hstce_q && vstimecmp_hit_d &&
+        mie_q[riscv::IRQ_VS_TIMER])
+      wfi_wake_o = 1'b1;
+  end
 `ifdef PITON_ARIANE
   assign icache_en_o = icache_q[0];
 `else
@@ -3572,6 +3590,15 @@ module csr_regfile
   assert property (@(posedge clk_i) disable iff (!rst_ni !== '0) !(eret_o && ex_i.valid))
   else begin
     $error("eret and exception should never be valid at the same time");
+    $stop();
+  end
+  // Core sleep gate contract: wfi_wake_o must cover every reason wfi_q can clear, or a
+  // gated core would miss the edge it needed. The only wake source outside it is a
+  // counter-overflow interrupt (lcofi_i), which cannot arise while the clock is gated.
+  assert property (@(posedge clk_i) disable iff (!rst_ni !== '0)
+                   (wfi_q && !wfi_wake_o && !lcofi_i) |=> wfi_q)
+  else begin
+    $error("wfi_q cleared without wfi_wake_o: the core sleep gate would have missed this wake-up");
     $stop();
   end
   //pragma translate_on

@@ -332,8 +332,20 @@ def main():
         raise RuntimeError('excluded source input')
     dependencies = '\n'.join(p.read_text(errors='replace') for p in model.parent.glob('*.d'))
     headers = set(re.findall(r'\S+/include/verilated_funcs\.h', dependencies))
-    if not headers or any(sha(Path(p)) != 'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166' for p in headers):
+    # Qualification evidence requires the qualified private runtime. A model built against
+    # a declared experimental runtime (REVIEW_EXPERIMENTAL_RUNTIME_SHA256, comma-separated
+    # header hashes; the tools/verilator fork) is accepted with runtimeQualified=false in
+    # the provenance, so its boot can never be filed as qualification evidence.
+    qualified_sha = 'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
+    declared = {h.strip() for h in os.environ.get('REVIEW_EXPERIMENTAL_RUNTIME_SHA256', '').split(',') if h.strip()}
+    header_hashes = {sha(Path(p)) for p in headers}
+    if not headers or not header_hashes <= ({qualified_sha} | declared):
         raise RuntimeError('unqualified model runtime')
+    provenance['runtimeQualified'] = header_hashes == {qualified_sha}
+    if not provenance['runtimeQualified']:
+        provenance['runtimeExperimental'] = sorted(header_hashes)
+        print('[t18] EXPERIMENTAL model runtime (declared): performance/retirement evidence only',
+              flush=True)
     previous = os.environ.get('SOURCE_REVIEW_PROFILE')
     if previous:
         profile = Path(previous) / 'profile.json'

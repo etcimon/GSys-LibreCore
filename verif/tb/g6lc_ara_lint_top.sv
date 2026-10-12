@@ -41,6 +41,8 @@ module g6lc_ara_lint_top
       .time_irq_i       ('0),
       .rtc_time_i       ('0),
       .debug_req_i      (1'b0),
+      .core_wfi_all_o   (),
+      .core_wake_o      (),
       .rvfi_probes_o    (),
       .noc_req_o        (noc_req),
       .noc_resp_i       (noc_resp),

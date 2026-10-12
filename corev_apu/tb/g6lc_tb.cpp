@@ -110,6 +110,15 @@ static vluint64_t main_time = 0;
 static const char *verilog_plusargs[] = {
     "jtag_rbb_enable", "time_out", "debug_disable", "tohost_addr", "elf_file",
     "quiet_axi", "fetch_snap", "fetch_snap_lo", "fetch_snap_hi",
+    // Verilator runtime options (+verilator+prof+exec+start+N for the execution
+    // profile / verilator_gantt, +verilator+debug / +verilator+debugi+N for the
+    // trigger dumps of a VL_DEBUG build, +verilator+seed+N, ...). Prefix match:
+    // every +verilator+... option reaches Verilated::commandArgs. Same allowlist
+    // rule as above: unlisted, HTIF rejects it and the run dies.
+    "verilator+",
+    // +rvfi_notrace (corev_apu/tb/rvfi_tracer.sv): skip the per-instruction
+    // trace writes on kernel-boot-length runs; tohost detection stays on.
+    "rvfi_notrace",
     // I1-at-supply oracle (core/id_stage.sv). Must be allowlisted or the arg
     // parser hands it to HTIF, which rejects it and the run dies before the
     // checker ever arms -- a silent-oracle failure mode, since a rejected plusarg

@@ -501,7 +501,15 @@ def visibility_review():
         assert sha(seed / name) == (digest if isinstance(digest, str) else digest['reviewSha256']), name
     runtime = Path('/opt/testharness/runs/review-private-runtime-20260915/runtime')
     runtime_header = parent.get('runtimeHeader') or parent['recipe']['runtimeHeader']
-    assert sha(runtime / 'include/verilated_funcs.h') == runtime_header
+    # The parent model's runtime: the qualified private runtime, or a declared
+    # experimental one (REVIEW_EXPERIMENTAL_RUNTIME_SHA256, comma-separated hashes of
+    # verilated_funcs.h; the tools/verilator fork). Experimental runs are recorded with
+    # runtimeQualified=false and are never qualification evidence.
+    declared = {h.strip() for h in os.environ.get('REVIEW_EXPERIMENTAL_RUNTIME_SHA256', '').split(',') if h.strip()}
+    runtime_qualified = sha(runtime / 'include/verilated_funcs.h') == runtime_header
+    assert runtime_qualified or runtime_header in declared, 'parent model runtime is neither qualified nor declared'
+    if not runtime_qualified:
+        print('[mc-review] EXPERIMENTAL parent runtime (declared): retirement evidence only', flush=True)
     target = parent.get('target', 'g6lc64_ooo_int2')
     repo, model = out.parent / 'repo', out.parent / 'model'
     shutil.copytree(seed, repo, symlinks=True)

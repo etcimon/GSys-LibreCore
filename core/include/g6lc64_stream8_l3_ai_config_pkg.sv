@@ -242,6 +242,7 @@ package cva6_config_pkg;
       SmtPolicy: config_pkg::SMT_HYBRID,
       SmtFetchQuantum: unsigned'(4),
       SmtStarveLimit: unsigned'(16),
+      CoreSleepGate: bit'(0),
       NrCores: unsigned'(2),
       CohPolicy: config_pkg::COH_FILTERED,
       SnoopFilterEn: bit'(1),

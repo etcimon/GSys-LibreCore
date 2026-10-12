@@ -52,6 +52,8 @@ module g6lc_smt_csr_bank
     // Per-hart WFI halt (bank-local). Thread select must use this vector so an
     // inactive bank woken by timer/IPI becomes ready without waiting to be active.
     output logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0] hart_halt_o,
+    // G6LC core sleep gate: any hart's WFI wake condition (ungated-evaluable)
+    output logic wfi_wake_o,
     input  scoreboard_entry_t commit_instr_i,
     input  logic [CVA6Cfg.NrCommitPorts-1:0] commit_ack_i,
     // T6b-4b: committing hart per commit port. Under mixed residency a
@@ -240,6 +242,7 @@ module g6lc_smt_csr_bank
         .rtc_time_i,
         .flush_o,
         .halt_csr_o,
+        .wfi_wake_o,
         .commit_instr_i,
         .commit_ack_i,
         .boot_addr_i,
@@ -413,6 +416,7 @@ module g6lc_smt_csr_bank
     // Bank outputs
     logic flush_b[NH];
     logic halt_b[NH];
+    logic wake_b[NH];
     logic [CVA6Cfg.XLEN-1:0] csr_rdata_b[NH];
     exception_t csr_ex_b[NH];
     logic [CVA6Cfg.VLEN-1:0] epc_b[NH];
@@ -477,6 +481,7 @@ module g6lc_smt_csr_bank
           .rtc_time_i,
           .flush_o(flush_b[h]),
           .halt_csr_o(halt_b[h]),
+          .wfi_wake_o(wake_b[h]),
           .commit_instr_i(commit_instr_i),
           .commit_ack_i(commit_ack_g[h]),
           .boot_addr_i,
@@ -574,6 +579,10 @@ module g6lc_smt_csr_bank
       );
     end
 
+    always_comb begin : wake_any
+      wfi_wake_o = 1'b0;
+      for (int h = 0; h < NH; h++) if (wake_b[h]) wfi_wake_o = 1'b1;
+    end
     // Per-hart WFI for thread select (not sticky-active-only).
     for (genvar h = 0; h < NH; h++) begin : gen_halt_pack
       assign hart_halt_o[h] = halt_b[h];

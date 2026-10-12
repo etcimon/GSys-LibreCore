@@ -357,6 +357,7 @@ package build_config_pkg;
     cfg.SmtFetchQuantum = (CVA6Cfg.SmtFetchQuantum == 0) ? unsigned'(1)
                                                          : CVA6Cfg.SmtFetchQuantum;
     cfg.SmtStarveLimit = CVA6Cfg.SmtStarveLimit;
+    cfg.CoreSleepGate = CVA6Cfg.CoreSleepGate;
     // Cluster size: 0 → 1 (single-core identity). Cap at CVA6_MAX_CORES.
     if (CVA6Cfg.NrCores == 0)
       cfg.NrCores = unsigned'(1);

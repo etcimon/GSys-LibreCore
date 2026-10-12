@@ -170,6 +170,7 @@ localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
       SmtPolicy: config_pkg::SMT_HYBRID,
       SmtFetchQuantum: unsigned'(4),
       SmtStarveLimit: unsigned'(16),
+      CoreSleepGate: bit'(0),
       NrCores: unsigned'(1),
       CohPolicy: config_pkg::COH_FILTERED,
       SnoopFilterEn: bit'(0),

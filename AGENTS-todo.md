@@ -726,6 +726,126 @@ prerequisite for this work under the existing dual license. No licensing policy 
   {tos,cnt,top} snapshot (9 of 11 corrupted cells at depth 2); about 0.2 % of
   the T21c boot. Options: top-3 snapshot (~24.6 kbit/core) or a bounded
   push undo-log replayed at restore (~1 kbit). Plan T21e.
+- [ ] **Simulation speed program (2026-10-11, `agents/guides/AGENTS-verilator-performance.md`
+  §4a/§4b) — experimental, uncommitted fork working tree in `tools/verilator`.**
+  Pinned-compiler findings: the "review-private" 5.008 runtime is patched
+  (`VL_CONSTHI_W_*X` writes past the array; now `VL_C_END_HI_` in the fork);
+  V3SplitVar runs before V3Unroll upstream, so every loop-indexed access
+  blocks a split. Fork: unroll-before-split, run-time-indexed element reads
+  as a mux, Premit wide-concat lowering, constant-argument substitution,
+  bit-packed trigger vector, change-flagged wide `prev` copies, narrowed
+  hybrid sensitivities, `--prof-exec` loop records. Control file
+  `build-platform/scripts/verilator-split-loops.vlt` (+ `vlt_autosplit.py`),
+  PGO recipe `T16_PGO=1`, `+rvfi_notrace`, `+verilator+…` pass-through, two
+  sim-only probe fixes (`instr_queue` negedge probe, `g6lc_iq.ready_dbg`).
+  **Measured on `g6lc64_ooo`:** hybrid class 47,285 → 10,226, act passes
+  2.2 → 1.05 per eval step, s11 Ir/cycle 590 k → 270 k (−54 %), I1 misses
+  −41 %, spin ×1.8 (fork) / ×3.5 (fork + PGO) vs the pinned model; s11 and
+  wrong-path-replay RVFI traces byte-identical for every variant.
+  **Owed-before-adoption battery (same day):** runtime-hash bookkeeping done
+  (review runners accept a *declared* experimental runtime via
+  `REVIEW_EXPERIMENTAL_RUNTIME_SHA256` and record `runtimeQualified=false`;
+  `t21s-build.sh` manifests carry the real runtime header); 11 frozen
+  probes + FP suite 22/22 + wprp on `ooocoh-t21s-ooo-vltwt7-split-pgo-build`
+  all Spike-exact with cycle counts identical to the pinned references;
+  server MT4 300 k-cycle OpenSBI segment per-core RVFI byte-identical to the
+  pinned model at **1,443 → 2,996 cycles/s (×2.08)**; a second compiler
+  defect (concat lowering into a `STMTTEMP`, V3Subst internal error on
+  int2_l3) fixed in `wt9`; **anchors on `wt9` all PASS with the anchor cycle
+  counts (18,357,056 / 10,472,823 / 12,391,556) and byte-identical RVFI
+  traces**; fork committed as seven commits on its local `g6lc` branch
+  (`2321008fa`…`83d24ed6e`, not pushed). Still owed: the `wt7`+PGO server
+  model (building) with the gantt and a 48 M strict boot timing, and a
+  decision on adopting the fork as the *performance* compiler (the
+  qualification runtime stays pinned; fork-runtime records carry
+  `runtimeQualified=false`). **Server `wt7`+C++ PGO measured: 924 → 3,379
+  cycles/s (×3.66) on the 300 k boot segment, RVFI identical; gantt says the
+  4-thread partition delivers 1.9× (cost model 7× low) → `--prof-pgo` ran,
+  `profile.vlt` written, final model (`…vltwt9-final-pgo-mt4-build`: fork +
+  109-entry .vlt incl. 38 HPDCACHE/xbar/cluster loops, hybrid 398,598 →
+  92,588 + `profile.vlt` + C++ PGO) measured 3,265 cycles/s = no gain over
+  `wt7`+PGO (3,318): the 4-thread partition is synchronisation-bound (54 coarse
+  MTasks, critical-path thread busy 19 %), not cost-mispredicted.** Callgrind on the final
+  single-core model: 253 k instructions and **15.9 k L1I misses per cycle =
+  one miss per cache line** — ≈ 1 MB of distinct code streamed per simulated
+  cycle, i.e. fetch-bandwidth bound (guide §6); plain loop rolling refuted
+  (+65 % Ir, same misses). 1–2 G-cycle Linux boot in a few hours needs
+  ≈ 100–200 k cycles/s: not reached — the levers that remain are the thread
+  partition (in flight), core-level clock gating in `wfi` (an RTL power
+  feature that also removes idle cores from every cycle), the SoA footprint
+  redesign, kernel-side boot-cycle reduction, and a faster host (§6.3:
+  ×2.3–10.8 composite, all three needed for 10×).
+- [~] **T22 — WFI core sleep clock gate (`CVA6Cfg.CoreSleepGate`, 2026-10-12,
+  implemented, evidence pending).** Lever 2 of guide §6.1: a per-core
+  functional ICG in `g6lc_cluster` (shared with the boot hold) stops a
+  core's clock while every hart is in WFI and its AXI port is idle
+  (ungated in-flight count); the wake sources are the harts' own
+  `wfi_ctrl` condition recomputed from the raw lines / Sstc comparators /
+  stable enables (`csr_regfile.wfi_wake_o` → `cva6.core_wake_o`), debug,
+  L1 invalidation, CMO done and the island completion — the first
+  delivered edge is the one the ungated core would have used. Config-gated
+  (default 0 everywhere; the server package carried 1 during the A/B), `check_cfg` excludes
+  `EnableAccelerator`, lint clean (server, ooo), `mcycle`/hpm do not
+  advance while gated (documented in `AGENTS-specs-to-impl.md`). Witness
+  `mc_sleep_gate_wake.S` (M timer / Sstc / cross-core IPI) passes on the
+  pinned gate-less model (reference RVFI). **Measured on the fork models**
+  (`ooocoh-t21t-server-{gate,nogate}-mt4-build{3,2}`, same overlay, flag
+  1/0): witness passes on both; the gate model keeps core 0 gated for
+  15,930 of 17,058 cycles and its trace differs only in the `mtime` values
+  read after each WFI (wake timing moves ±1 tick: an ungated halted core's
+  frontend keeps prefetching through the WFI loop, the gated one does not —
+  architecturally invisible, cycle counts of boots with WFI phases shift). The
+  `csr_regfile` wake-coverage assertion (`wfi_q && !wfi_wake_o |=> wfi_q`)
+  stayed silent. The testharness pulses the core reset during its ELF
+  preload while the uncore runs on → orphan AXI responses; the in-flight
+  count now saturates at 0/255 and reports orphans. **Cost while awake:** the
+  300 k boot segment (no sleep yet: all harts active) runs **−17 %** on the
+  gate model (3,101 → 2,551 cycles/s, RVFI identical): the scheduler
+  structure is unchanged (same act/nba/hybrid sizes) but core 0 now sits on
+  a derived clock, which changes the MTask partition and lengthens the
+  critical path 32 % (gantt). The 48 M strict boots on both models
+  (`ooocoh-t21t-server-{gate,nogate}-osbi-48M-c`, concurrent) hit the 4 h
+  wall budget at 28 M / 27 M cycles — **net ≈ +4 % for the gate on the
+  8-hart boot**: marginal as a simulation lever (only `always_ff` work
+  disappears; a gated core's comb functions stay in uncore-shared trigger
+  classes), valid as the power feature it was designed as. **Server default
+  returned to 0** (every package 0): the T21i strict-boot evidence is for the
+  ungated cluster and the awake penalty is not worth +4 %; the feature is
+  config-gated and the witness builds with the flag.
+  **Owed:** a verdict run with an 8 h budget (timeout ≠ failure); a partition that
+  keeps the gated core's logic with its uncore (`hier_block` per core or a
+  per-trigger-domain MTask merge in V3Partition); a PMU event for sleep
+  entries (the counter is sim-only); a formal task on the gate enable; DFT:
+  `test_en_i` of the cluster ICGs is still tied 0 (pre-existing).
+- [~] **T23 — fork commit `63c0953ce` ("sliced tables and O(1) host
+  structures", pinned by `7f9edfdad`) evaluated and corrected (2026-10-12).**
+  Six new passes on by default (`V3Soa`, `V3Prio`, `V3Wake`, `V3ClkSkip`,
+  `V3SplitPlan`, `V3Dirty`) + V3Table slicing + MTask predecessor bitmask +
+  hash-map `V3DupFinder`/`V3Param`. **As pinned it miscompiles the core**: the
+  `g6lc64_ooo` model never fetches (`npc=0`, empty RVFI). Bisect by pass
+  (`VERILATOR_FNO=…`, new knob — `-fno-*` on the command line is undone by the
+  build flow's trailing `-O3`): `V3ClkSkip` is the culprit — a generic
+  memoisation of per-instance comb statements whose input compare is
+  sampled at the top of the function, before earlier statements of the same
+  function update those inputs (parent → child chains after inlining), so
+  groups are skipped with stale outputs; the "do not memoise cones" entry of
+  guide §6.2, now with a measurement. Second defect: `V3Soa` missed
+  hierarchical references (`AstVarXRef`), converted `bht_prediction_shifted`
+  under the `cva6.sv` probes and the C++ did not compile; fixed (collector on
+  `AstNodeVarRef`). **Cost, callgrind s11 (all RVFI-exact):** all six off
+  267.2 k Ir/cycle; five on (skip off) **356.7 k (+33 %)** — `V3SplitPlan`
+  alone +80 k (over-splits past the 109-entry `.vlt`; as a `.vlt` replacement
+  353 k, no better), table slicing +6 k, `soa`/`prio`/`wake`/`dirty` 0 each
+  and +2.2 % together (the 56 SoA conversions are lzc LUTs, FPU slices, TLB
+  match vectors — the IQ/scoreboard arrays are read whole, ports or split_var
+  targets and are refused 13,800 times). **Decision:** all six passes opt-in
+  (excluded from `-O<n>`), their eight `test_regress` cases pass with the
+  explicit flags; defaults of the corrected compiler reproduce `wt9` exactly
+  (hybrid class 10,226, s11 `de4f42cfe7cb`). Still owed: the server MT4 A/B
+  for the always-on MTask bitmask (`ooocoh-t22g-server-wt2-mt4-build` vs the
+  `wt` no-gate model, 300 k segment, per-core RVFI), and the guide §7.3 list
+  of what a real SoA would need (field-level tables, whole-array rewrites,
+  per-element NBA commit) before any footprint gain can be claimed.
 - [x] **T20 closed (2026-10-09): first strict 8-hart `g6lc64_ooo_server`
   OpenSBI boot — PASS 38,988,173 cycles** (`ooocoh-t20-final-server-osbi-48M`,
   `strictDualPassed`, force 0, `[hpd-phantom]`/`[hpd-zombie]`/`[misp-hart]` 0,

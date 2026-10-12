@@ -663,6 +663,10 @@ package config_pkg;
     smt_policy_t SmtPolicy;           // RR / switch-on-miss / hybrid
     int unsigned SmtFetchQuantum;     // consecutive fetch grants before RR (0→1)
     int unsigned SmtStarveLimit;      // force switch after N idle cycles (0=off)
+    // Core-level sleep clock gate (cluster ICG): the core clock stops while every hart
+    // sits in WFI and the core has no NoC transaction in flight; any interrupt, debug
+    // request, L1 invalidation or CMO completion re-enables it combinationally.
+    bit          CoreSleepGate;
     // U6.2 coherent multi-core cluster (SoC; inert when NrCores==1)
     int unsigned NrCores;             // physical cores: 1..CVA6_MAX_CORES (2–8 multi-core)
     coh_policy_t CohPolicy;           // write-inval / broadcast / filtered
@@ -870,6 +874,7 @@ package config_pkg;
     smt_policy_t SmtPolicy;
     int unsigned SmtFetchQuantum;
     int unsigned SmtStarveLimit;
+    bit CoreSleepGate;
     int unsigned NrCores;
     coh_policy_t CohPolicy;
     bit SnoopFilterEn;
@@ -1101,6 +1106,9 @@ package config_pkg;
     // Multi-hart needs checkpoint depth for per-hart BP recovery (if ckpts used).
     assert (!(Cfg.NrHarts > 1 && Cfg.SpeculativeSb && Cfg.BPCkptDepth != 0 &&
               Cfg.BPCkptDepth < Cfg.NR_SB_ENTRIES));
+    // Core sleep gate: the cluster's NoC idle counter covers the core's AXI port only;
+    // accelerator (CVXIF/Ara) traffic is outside it, so the two are exclusive.
+    assert (!(Cfg.CoreSleepGate && Cfg.EnableAccelerator));
     // U6.2 multi-core cluster (1..CVA6_MAX_CORES; multi-core path is 2–8).
     assert (Cfg.NrCores >= 1 && Cfg.NrCores <= CVA6_MAX_CORES);
     // Software hart count is the PRODUCT of the two topology axes; the PLIC

@@ -467,7 +467,10 @@ module instr_queue
     end
   end
 
-  always @(negedge clk_i) begin
+  // Sampled on the posedge (pre-update values): a negedge-sensitive block here was the
+  // only negedge logic in the model and forced a full act/nba scheduler pass on every
+  // negedge evaluation step of every simulation, armed or not.
+  always @(posedge clk_i) begin
     if (rst_ni && iqt_en && $time() < 200000) begin
       if ((|push_instr_fifo) || (|consumed_o) || (|fetch_entry_valid_o)) begin
         // Single string literal: a concatenated {"..",".."} format compiles but

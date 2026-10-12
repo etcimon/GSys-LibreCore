@@ -223,15 +223,92 @@ module g6lc_cluster
     end
   end
 
+  // Core sleep gate (CVA6Cfg.CoreSleepGate): a core whose harts all sit in WFI and
+  // that has no NoC transaction in flight loses its clock through the same functional
+  // ICG as the boot hold. Everything that can make such a core do work again is an
+  // ungated wake source and re-enables the clock combinationally in the cycle it
+  // asserts, so the first clock edge the core sees is the one it would have seen
+  // without the gate: the harts' own WFI wake condition re-evaluated from the raw
+  // PLIC/CLINT lines, the Sstc comparators and the stable enable bits (core_wake_o —
+  // mip is registered inside the gated domain, so it cannot be used), debug, an L1
+  // invalidation it has to accept, a CMO completion, and an AI island completion
+  // broadcast. The in-flight count is kept
+  // here on the ungated clock from the core's own AXI handshakes (one per AW/AR
+  // issued, one per B/R-last returned), so a response can never arrive at a stopped
+  // core. Architecturally visible effect: mcycle/mhpmcounters do not advance while
+  // the core is gated (allowed: no core clock cycles execute); `time` comes from the
+  // ungated platform timer. Timing: en_i is a flop AND-tree over ≤ NrHarts WFI bits,
+  // a registered counter==0 and an OR of input lines — no new long path.
+  localparam bit SLEEP_GATE = CVA6Cfg.CoreSleepGate;
+  logic [NC-1:0] core_wfi_all;
+  logic [NC-1:0] core_wake;
+  logic [NC-1:0] core_sleep_ok;
+  logic [NC-1:0] core_noc_idle;
+
   for (genvar c = 0; c < NC; c++) begin : gen_core
-    if (BOOT_HOLD && (c != 0)) begin : gen_boot_icg
+    if (SLEEP_GATE) begin : gen_sleep_cnt
+      logic aw_hs, ar_hs, b_hs, rl_hs;
+      logic [7:0] inflight_q;
+      assign aw_hs = core_req[c].aw_valid & core_resp[c].aw_ready;
+      assign ar_hs = core_req[c].ar_valid & core_resp[c].ar_ready;
+      assign b_hs  = core_resp[c].b_valid & core_req[c].b_ready;
+      assign rl_hs = core_resp[c].r_valid & core_req[c].r_ready & core_resp[c].r.last;
+      // Saturating at 0: a response for a transaction issued before a core-only reset
+      // (the testharness pulses core reset during its ELF preload while the uncore keeps
+      // running) is an orphan the reset core drops; it must not wrap the count to 255
+      // and pin the core awake. Saturating at 255 keeps a pathological count "busy".
+      logic [7:0] inflight_d;
+      always_comb begin
+        inflight_d = inflight_q;
+        if (aw_hs) inflight_d = inflight_d + 8'd1;
+        if (ar_hs) inflight_d = inflight_d + 8'd1;
+        if (b_hs  && inflight_d != 8'd0) inflight_d = inflight_d - 8'd1;
+        if (rl_hs && inflight_d != 8'd0) inflight_d = inflight_d - 8'd1;
+        if (inflight_q == 8'hff && (aw_hs || ar_hs)) inflight_d = 8'hff;
+      end
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) begin
+          inflight_q <= '0;
+        end else begin
+          inflight_q <= inflight_d;
+        end
+      end
+      //pragma translate_off
+      // Orphan responses are reported (expected only after a core-only reset pulse);
+      // a saturated count is a defect (more than 255 transactions in flight).
+      always_ff @(posedge clk_i) begin
+        if (rst_ni) begin
+          if ((b_hs || rl_hs) && inflight_q == 8'd0 && !(aw_hs || ar_hs))
+            $display("[sleep] core%0d orphan NoC response (count 0) at %0t", c, $time);
+          assert (inflight_q != 8'hff)
+            else $error("[sleep] core%0d NoC in-flight count saturated", c);
+        end
+      end
+      //pragma translate_on
+      // idle: nothing outstanding and nothing being presented on any request channel
+      assign core_noc_idle[c] = (inflight_q == 8'd0) & ~core_req[c].aw_valid &
+                                ~core_req[c].ar_valid & ~core_req[c].w_valid;
+      assign core_sleep_ok[c] = core_wfi_all[c] & core_noc_idle[c] & ~core_wake[c] &
+                                ~debug_req_i[c] & ~l1_inv_valid[c] & ~cmo_done[c] &
+                                ~ai_isl_retired_valid_i;
+    end else begin : gen_sleep_off
+      assign core_noc_idle[c]  = 1'b1;
+      assign core_sleep_ok[c]  = 1'b0;
+    end
+
+    // (block name and `rel` are probed by ariane_testharness's hold verdict)
+    if (SLEEP_GATE || (BOOT_HOLD && (c != 0))) begin : gen_boot_icg
       logic rel;
-      assign rel = (boot_hold_q >= BOOT_HOLD_CYC) || ipi_seen_q[c];
+      if (BOOT_HOLD && (c != 0)) begin : gen_boot_rel
+        assign rel = (boot_hold_q >= BOOT_HOLD_CYC) || ipi_seen_q[c];
+      end else begin : gen_boot_norel
+        assign rel = 1'b1;
+      end
       tc_clk_gating #(
           .IS_FUNCTIONAL(1'b1)
-      ) i_boot_icg (
+      ) i_core_icg (
           .clk_i,
-          .en_i     (rel),
+          .en_i     (rel & ~core_sleep_ok[c]),
           .test_en_i(1'b0),
           .clk_o    (core_clk[c])
       );
@@ -255,6 +332,8 @@ module g6lc_cluster
 
         .rtc_time_i       (rtc_time_i),
         .debug_req_i      (debug_req_i[c]),
+        .core_wfi_all_o   (core_wfi_all[c]),
+        .core_wake_o      (core_wake[c]),
         .rvfi_probes_o    (core_rvfi[c]),
         .noc_req_o        (core_req[c]),
         .noc_resp_i       (core_resp[c]),
@@ -312,6 +391,32 @@ module g6lc_cluster
   end
 
   assign rvfi_probes_o = core_rvfi[0];
+
+  //pragma translate_off
+  // [sleep] evidence: cycles each core spent clock-gated by the sleep gate and how
+  // many times it entered sleep (ungated clock; printed at the end of the run).
+  if (SLEEP_GATE) begin : gen_sleep_probe
+    longint unsigned sleep_cyc_q [NC];
+    longint unsigned sleep_ent_q [NC];
+    logic [NC-1:0]   sleep_prev_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        for (int c = 0; c < NC; c++) begin sleep_cyc_q[c] <= 0; sleep_ent_q[c] <= 0; end
+        sleep_prev_q <= '0;
+      end else begin
+        for (int c = 0; c < NC; c++) begin
+          if (core_sleep_ok[c]) sleep_cyc_q[c] <= sleep_cyc_q[c] + 1;
+          if (core_sleep_ok[c] && !sleep_prev_q[c]) sleep_ent_q[c] <= sleep_ent_q[c] + 1;
+        end
+        sleep_prev_q <= core_sleep_ok;
+      end
+    end
+    final begin
+      for (int c = 0; c < NC; c++)
+        $display("[sleep] core%0d gated_cycles=%0d entries=%0d", c, sleep_cyc_q[c], sleep_ent_q[c]);
+    end
+  end
+  //pragma translate_on
 
   // Sideband enqueue arbiter (g6lc_ai_enq_arb): round-robin over the cores'
   // held kicks, one kick offered per cycle, ready back to the winner only.

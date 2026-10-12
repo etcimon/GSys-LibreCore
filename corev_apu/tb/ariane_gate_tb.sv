@@ -123,6 +123,8 @@ module ariane_gate_tb;
         .time_irq_i           ( 1'b0  /*timer_irq*/ ),
         .rtc_time_i           ( 64'b0               ),
         .debug_req_i          ( 1'b0                ),
+        .core_wfi_all_o       (                     ),
+        .core_wake_o          (                     ),
         .rvfi_probes_o        ( rvfi_probes         ),
         .noc_req_o            ( axi_ariane_req      ),
         .noc_resp_i           ( axi_ariane_resp     ),
