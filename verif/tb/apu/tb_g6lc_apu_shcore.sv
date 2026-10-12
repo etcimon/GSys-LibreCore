@@ -19,6 +19,7 @@
 
 module tb_g6lc_apu_shcore;
   import g6lc_apu_vn_pkg::*;
+  import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_sh_pkg::*;
 
   localparam int unsigned MAXW = 262144;
@@ -76,7 +77,37 @@ module tb_g6lc_apu_shcore;
     .mem_re_o(mem_re), .mem_we_o(mem_we), .mem_addr_o(mem_addr),
     .mem_wdata_o(mem_wdata), .mem_wstrb_o(mem_wstrb),
     .mem_ready_i(1'b1), .mem_rvalid_i(mem_rv),
-    .mem_rdata_i(mem_rdata), .mem_err_i(1'b0));
+    .mem_rdata_i(mem_rdata), .mem_err_i(1'b0),
+    .ot_req_valid_o(otb_v), .ot_req_ready_i(1'b1),
+    .ot_req_o(otb_req),
+    .ot_cpl_valid_i(otb_cv), .ot_cpl_ready_o(), .ot_cpl_i(otb_cpl));
+
+  // §12.3 3d-d: ObjTab READSLOT stub — slot named by the record
+  // handle {gen:1,slot:1} is a live DEVICE_MEMORY with base 0, so the
+  // resolved base equals the record's +28 offset (the .hex binding
+  // address, same as the old absolute +0).
+  logic            otb_v;
+  apu_objtab_req_t otb_req;
+  logic            otb_cv = 1'b0;
+  apu_objtab_cpl_t otb_cpl;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      otb_cv <= 1'b0; otb_cpl <= '0;
+    end else begin
+      otb_cv <= 1'b0;
+      if (otb_v) begin
+        otb_cv  <= 1'b1;
+        otb_cpl <= '{status: APU_OBJTAB_OK,
+                     entry: '{live: 1'b1,
+                              kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                              gen: 16'd1,
+                              aux: {32'h0, 32'(APU_MEM_DEVBACKED)},
+                              size: '1,
+                              default: '0},
+                     default: '0};
+      end
+    end
+  end
 
   logic off_sm_cpl; apu_sh_sm_cpl_t off_sm_pl;
   g6lc_apu_shcore #(.Enable(0)) off (
@@ -98,7 +129,10 @@ module tb_g6lc_apu_shcore;
     .mem_addr_o(off_mem_addr), .mem_wdata_o(off_mem_wdata),
     .mem_wstrb_o(off_mem_wstrb),
     .mem_ready_i(1'b1), .mem_rvalid_i(1'b0),
-    .mem_rdata_i('0), .mem_err_i(1'b0));
+    .mem_rdata_i('0), .mem_err_i(1'b0),
+    .ot_req_valid_o(), .ot_req_ready_i(1'b0),
+    .ot_req_o(),
+    .ot_cpl_valid_i(1'b0), .ot_cpl_ready_o(), .ot_cpl_i('0));
 
   // continuous Enable=0 quiet monitor — sticky flag (fails is
   // written from the initial process; counted once at the end)
@@ -311,8 +345,11 @@ module tb_g6lc_apu_shcore;
               '{binding: bd, count: 16'(row_cnt[st][r]),
                 off32: 20'(row_off[st][r]), dyn: row_dyn[st][r],
                 dynbase: 4'(row_dynb[st][r])};
-          mem[ra >> 3]       = {sz, ad[31:0]};
+          // §12.3 3d-d record: +0 = mem handle {gen:1,slot:1},
+          // +28 = resource offset (stub base 0 -> same resolved base)
+          mem[ra >> 3]       = {sz, 32'h0001_0001};
           mem[(ra + 8) >> 3] = {48'h0, 8'h01, kind};
+          mem[(ra + 24) >> 3] = {ad[31:0], 32'h0};
         end
       end
     end

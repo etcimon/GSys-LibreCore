@@ -9,7 +9,7 @@ a sparse python "guest DRAM", IRQ frames level-tracked.
 Reproduces software/apu-venus-probe/venus_probe.c exactly: the stock
 virtio-mmio/virtio-gpu probe, split-virtqueue descriptor/avail/doorbell/
 used/ISR flow, then the vn_golden tapes ue_sm5_transport and
-ue_cpos_bufcopy_1 with their .exp records.  The internal checkpoints the
+ue_probe_bufcopy_1 with their .exp records.  The internal checkpoints the
 C probe pushed through the DRAM mailbox (EK_FENCE/LIVE/PAGES/EXTRA and
 the CK_HEAD/CK_STATUS hierarchy fallbacks) are answered here through
 the bridge debug overlay (offsets >= VN_DBG_BASE, served by
@@ -700,7 +700,10 @@ def main():
             n = probe(cl, venus=True)
             print(f"[venus] probe: {n} checks OK")
             checks_total += n
-            for name in ("ue_sm5_transport", "ue_cpos_bufcopy_1"):
+            # ue_probe_bufcopy_1: identical tape to ue_cpos_bufcopy_1;
+            # .exp carries the ObjTab generations a two-session run
+            # actually sees (software/apu-venus-probe/Makefile).
+            for name in ("ue_sm5_transport", "ue_probe_bufcopy_1"):
                 t0 = time.time()
                 pl = Player(cl, name)
                 pl.play()

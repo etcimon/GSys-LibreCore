@@ -22,16 +22,18 @@ rm -rf "$OUT"
 mkdir -p "$OUT"
 # GENUNNAMED does not exist before Verilator 5.016; gate the waiver.
 VLTS=("$ROOT/verif/tb/apu/apu_axi.vlt")
+WNO=()
 vver="$("$VERILATOR" --version | grep -o '[0-9][0-9.]*' | head -1)"
 if awk -v v="$vver" 'BEGIN{split(v,a,"."); exit !(a[1]>5||(a[1]==5&&a[2]>=16))}'; then
   VLTS+=("$ROOT/verif/tb/apu/apu_vn.vlt")
+  WNO+=(-Wno-GENUNNAMED)
 fi
 rc=0
 for pages in ${VGPAGES_PAGES:-8192 65536}; do
   if ! "$VERILATOR" --binary --timing --assert -Wall \
     -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND -Wno-BLKSEQ \
     -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY \
-    -Wno-GENUNNAMED \
+    "${WNO[@]}" \
     "${VLTS[@]}" \
     -f "$ROOT/corev_apu/apu/Flist.apu_vgpages" \
     "$ROOT/verif/tb/apu/tb_g6lc_apu_vgpages.sv" \

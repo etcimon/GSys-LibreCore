@@ -1,0 +1,61 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Khronos Glslang Reference Front End; 11
+; Bound: 37
+; Schema: 0
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %gl_FragCoord %vcol %o
+               OpExecutionMode %main OriginUpperLeft
+               OpSource GLSL 450
+               OpName %main "main"
+               OpName %uv "uv"
+               OpName %gl_FragCoord "gl_FragCoord"
+               OpName %vcol "vcol"
+               OpName %o "o"
+               OpName %tex "tex"
+               OpDecorate %gl_FragCoord BuiltIn FragCoord
+               OpDecorate %vcol Location 0
+               OpDecorate %o Location 0
+               OpDecorate %tex Binding 0
+               OpDecorate %tex DescriptorSet 0
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+      %float = OpTypeFloat 32
+    %v2float = OpTypeVector %float 2
+%_ptr_Function_v2float = OpTypePointer Function %v2float
+    %v4float = OpTypeVector %float 4
+%_ptr_Input_v4float = OpTypePointer Input %v4float
+%gl_FragCoord = OpVariable %_ptr_Input_v4float Input
+       %uint = OpTypeInt 32 0
+     %uint_0 = OpConstant %uint 0
+%_ptr_Input_float = OpTypePointer Input %float
+  %float_128 = OpConstant %float 128
+       %vcol = OpVariable %_ptr_Input_v4float Input
+     %uint_1 = OpConstant %uint 1
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+          %o = OpVariable %_ptr_Output_v4float Output
+         %30 = OpTypeImage %float 2D 0 0 0 1 Unknown
+         %31 = OpTypeSampledImage %30
+%_ptr_UniformConstant_31 = OpTypePointer UniformConstant %31
+        %tex = OpVariable %_ptr_UniformConstant_31 UniformConstant
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+         %uv = OpVariable %_ptr_Function_v2float Function
+         %16 = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_0
+         %17 = OpLoad %float %16
+         %18 = OpAccessChain %_ptr_Input_float %gl_FragCoord %uint_0
+         %19 = OpLoad %float %18
+         %20 = OpFMul %float %17 %19
+         %22 = OpFDiv %float %20 %float_128
+         %25 = OpAccessChain %_ptr_Input_float %vcol %uint_1
+         %26 = OpLoad %float %25
+         %27 = OpCompositeConstruct %v2float %22 %26
+               OpStore %uv %27
+         %34 = OpLoad %31 %tex
+         %35 = OpLoad %v2float %uv
+         %36 = OpImageSampleImplicitLod %v4float %34 %35
+               OpStore %o %36
+               OpReturn
+               OpFunctionEnd

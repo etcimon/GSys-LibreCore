@@ -21,6 +21,7 @@
 // datapath.  Enable=0 ties every output off.
 
 module g6lc_apu_shcore
+  import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_sh_pkg::*;
 #(
@@ -83,7 +84,16 @@ module g6lc_apu_shcore
   input  logic         mem_ready_i,
   input  logic         mem_rvalid_i,
   input  logic [63:0]  mem_rdata_i,
-  input  logic         mem_err_i
+  input  logic         mem_err_i,
+  // §12.3 3d-d: wave-engine ObjTab port — descriptor record memory
+  // handles resolve their current base through a READSLOT here
+  // (vgtop's 5th, lowest-priority requester)
+  output logic            ot_req_valid_o,
+  input  logic            ot_req_ready_i,
+  output apu_objtab_req_t ot_req_o,
+  input  logic            ot_cpl_valid_i,
+  output logic            ot_cpl_ready_o,
+  input  apu_objtab_cpl_t ot_cpl_i
 );
   if (!Enable) begin : gen_off
     assign c_busy_o = 1'b0;    assign c_done_o = 1'b0;
@@ -95,6 +105,8 @@ module g6lc_apu_shcore
     assign mem_re_o = 1'b0;    assign mem_we_o = 1'b0;
     assign mem_addr_o = '0;    assign mem_wdata_o = '0;
     assign mem_wstrb_o = '0;
+    assign ot_req_valid_o = 1'b0; assign ot_req_o = '0;
+    assign ot_cpl_ready_o = 1'b0;
     logic unused;
     assign unused = clk_i | rst_ni | testmode_i | wr_en_i |
                     (|wr_slot_i) | (|wr_addr_i) | (|wr_data_i) |
@@ -103,7 +115,8 @@ module g6lc_apu_shcore
                     work_i | (|work_ctype_i) |
                     (|work_imm_i) | (|disp_slot_i) | (|desc_i) |
                     (|push_n_i) | (|push_i) | (|mem_rdata_i) |
-                    mem_ready_i | mem_rvalid_i | mem_err_i;
+                    mem_ready_i | mem_rvalid_i | mem_err_i |
+                    ot_req_ready_i | ot_cpl_valid_i | (|ot_cpl_i);
   end else begin : gen_on
     typedef enum logic [0:0] { C_IDLE, C_SENT } cast_e;
     cast_e cast_q;
@@ -128,6 +141,12 @@ module g6lc_apu_shcore
 
     wire is_dispatch = (work_ctype_i ==
                         32'(APU_VN_TYPE_VK_CMD_DISPATCH_EXT));
+    // graphics wave work (APU_SH_WORK_VS/FS pseudo-ctypes): a dispatch
+    // whose imm words carry the record batch instead of gx/gy/gz; the
+    // pseudo-ctype itself doubles as the work_id so completions are
+    // distinguishable from compute dispatches
+    wire is_gfx = (work_ctype_i == APU_SH_WORK_VS) ||
+                  (work_ctype_i == APU_SH_WORK_FS);
 
     // ---- slot manager (§7b): users-per-slot ownership ------------------
     // ALLOC picks the lowest users==0 slot; REF/UNREF adjust a slot's
@@ -220,12 +239,13 @@ module g6lc_apu_shcore
         done_o <= 1'b0;
         if (work_i && work_ready_o) begin
           wid_q <= wid_q + 1;
-          if (is_dispatch) begin
+          if (is_dispatch || is_gfx) begin
             disp_q.slot    <= disp_slot_i;
-            disp_q.gx      <= work_imm_i[15:0];
-            disp_q.gy      <= work_imm_i[47:32];
-            disp_q.gz      <= work_imm_i[79:64];
-            disp_q.work_id <= wid_q;
+            disp_q.gx      <= is_gfx ? '0 : work_imm_i[15:0];
+            disp_q.gy      <= is_gfx ? '0 : work_imm_i[47:32];
+            disp_q.gz      <= is_gfx ? '0 : work_imm_i[79:64];
+            disp_q.imm     <= is_gfx ? work_imm_i : '0;
+            disp_q.work_id <= is_gfx ? work_ctype_i : wid_q;
             disp_q_valid   <= 1'b1;
             cast_q <= C_SENT;
           end else begin
@@ -296,13 +316,16 @@ module g6lc_apu_shcore
       .entry_data_i(entry_data),
       .mem_re_o, .mem_we_o, .mem_addr_o, .mem_wdata_o,
       .mem_wstrb_o, .mem_ready_i, .mem_rvalid_i, .mem_rdata_i,
-      .mem_err_i
+      .mem_err_i,
+      .ot_req_valid_o, .ot_req_ready_i, .ot_req_o,
+      .ot_cpl_valid_i, .ot_cpl_ready_o, .ot_cpl_i
     );
   end
 endmodule
 
 // Thin fixture for the yosys Enable=0/1 screens (generic flow).
 module g6lc_apu_shcore_fixture
+  import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_sh_pkg::*;
 #(
   parameter bit          Enable        = 1'b0,
@@ -356,7 +379,13 @@ module g6lc_apu_shcore_fixture
   input  logic         mem_ready_i,
   input  logic         mem_rvalid_i,
   input  logic [63:0]  mem_rdata_i,
-  input  logic         mem_err_i
+  input  logic         mem_err_i,
+  output logic            ot_req_valid_o,
+  input  logic            ot_req_ready_i,
+  output apu_objtab_req_t ot_req_o,
+  input  logic            ot_cpl_valid_i,
+  output logic            ot_cpl_ready_o,
+  input  apu_objtab_cpl_t ot_cpl_i
 );
   g6lc_apu_shcore #(.Enable(Enable), .ShaderLanes(ShaderLanes),
       .ShaderVec(ShaderVec), .ShaderRegs(ShaderRegs),

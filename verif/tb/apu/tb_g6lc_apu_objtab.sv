@@ -721,6 +721,193 @@ module tb_g6lc_apu_objtab;
     end
     cases++;
 
+    // ---- SCAN_OVL: MAP_BLOB squatter eviction probe (§12.3 3d-d) ---
+    // id[15:0] = excluded slot, kind = DEVICE_MEMORY, offset/size =
+    // the half-open window [offset, size).  Returns the first (lowest
+    // slot) live DEVBACKED entry whose extent overlaps; MISS when the
+    // sweep finds none.  Entries: A/B DEVBACKED and overlapping,
+    // C kernel-backed (DEVBACKED clear), D UNBACKED, E wrong kind.
+    m_reset;
+    do_reset;
+    begin
+      int o_slot [5], o_gen [5];
+      logic [63:0] o_ids [5];
+      //        entry: kind, aux[63:32] base,   aux[0] devbacked, size
+      //        A      8    0x8000              1                 0x4000
+      //        B      8    0x8800              1                 0x1000
+      //        C      8    0x8400              0                 0x0800
+      //        D      8    UNBACKED            1                 0x4000
+      //        E      7    0x8000              1                 0x4000
+      o_ids[0] = 64'h0E11_0000_0000_0001;
+      o_ids[1] = 64'h0E11_0000_0000_0002;
+      o_ids[2] = 64'h0E11_0000_0000_0003;
+      o_ids[3] = 64'h0E11_0000_0000_0004;
+      o_ids[4] = 64'h0E11_0000_0000_0005;
+      for (int i = 0; i < 5; i++) begin
+        op(mkr(APU_OBJTAB_OP_ALLOC, o_ids[i], i == 4 ? 6'd7 : 6'd8,
+               0, 8'd1, 0, 0, 0, 0, 0), c);
+        check($sformatf("ovl: alloc %0d", i),
+              c.status == APU_OBJTAB_OK);
+        o_slot[i] = int'(c.handle[15:0]);
+        o_gen[i]  = int'(c.handle[31:16]);
+        void'(m_alloc(o_ids[i], i == 4 ? 6'd7 : 6'd8, 64'h0, 8'd1,
+                      slot, gen));
+      end
+      // extent sizes via SETBIND (size field)
+      begin
+        logic [63:0] szs [5];
+        szs[0] = 64'h4000; szs[1] = 64'h1000; szs[2] = 64'h0800;
+        szs[3] = 64'h4000; szs[4] = 64'h4000;
+        for (int i = 0; i < 5; i++) begin
+          op(mkr(APU_OBJTAB_OP_SETBIND, o_ids[i],
+                 i == 4 ? 6'd7 : 6'd8, 0, 0, 0, 0,
+                 o_ids[0], 0, szs[i]), c);
+          check($sformatf("ovl: setbind %0d", i),
+                c.status == APU_OBJTAB_OK);
+        end
+      end
+      // aux[63:32] = extent base (SETAUXHI), aux[0] = DEVBACKED
+      begin
+        logic [31:0] bases [5];
+        bases[0] = 32'h8000; bases[1] = 32'h8800; bases[2] = 32'h8400;
+        bases[3] = APU_MEM_UNBACKED; bases[4] = 32'h8000;
+        for (int i = 0; i < 5; i++) begin
+          op(mkr(APU_OBJTAB_OP_SETAUXHI, o_ids[i],
+                 i == 4 ? 6'd7 : 6'd8, 0, 0, 32'hFFFF_FFFF,
+                 bases[i], 0, 0, 0), c);
+          check($sformatf("ovl: setauxhi %0d", i),
+                c.status == APU_OBJTAB_OK);
+          if (i != 2) begin
+            op(mkr(APU_OBJTAB_OP_SETAUX, o_ids[i],
+                   i == 4 ? 6'd7 : 6'd8, 0, 0, 32'h1, 32'h1,
+                   0, 0, 0), c);
+            check($sformatf("ovl: devbacked %0d", i),
+                  c.status == APU_OBJTAB_OK);
+          end
+        end
+      end
+      // the map target's own slot is excluded — first match is A
+      op(mkr(APU_OBJTAB_OP_SCAN_OVL, 64'hFFFF,
+             6'd8, 0, 0, 0, 0, 0, 64'h7000, 64'h9000), c);
+      check("ovl: first match A", c.status == APU_OBJTAB_OK &&
+            c.handle == {16'(o_gen[0]), 16'(o_slot[0])});
+      // excluding A yields B; excluding B yields A again
+      op(mkr(APU_OBJTAB_OP_SCAN_OVL, 64'(o_slot[0]),
+             6'd8, 0, 0, 0, 0, 0, 64'h7000, 64'h9000), c);
+      check("ovl: next match B", c.status == APU_OBJTAB_OK &&
+            c.handle == {16'(o_gen[1]), 16'(o_slot[1])});
+      op(mkr(APU_OBJTAB_OP_SCAN_OVL, 64'(o_slot[1]),
+             6'd8, 0, 0, 0, 0, 0, 64'h7000, 64'h9000), c);
+      check("ovl: A not excluded", c.status == APU_OBJTAB_OK &&
+            c.handle == {16'(o_gen[0]), 16'(o_slot[0])});
+      // disjoint window -> MISS (C is DEVBACKED-clear, D UNBACKED,
+      // E is the wrong kind — none may be reported)
+      xpect("ovl: disjoint", mkr(APU_OBJTAB_OP_SCAN_OVL, 64'hFFFF,
+             6'd8, 0, 0, 0, 0, 0, 64'h1000, 64'h7000),
+            APU_OBJTAB_MISS);
+      // half-open edge: [0xC000, 0xD000) touches A's end exactly
+      xpect("ovl: edge", mkr(APU_OBJTAB_OP_SCAN_OVL, 64'hFFFF,
+             6'd8, 0, 0, 0, 0, 0, 64'hC000, 64'hD000),
+            APU_OBJTAB_MISS);
+      // B-only window [0x8800, 0x9800): A ends at 0xC000 so it
+      // overlaps too — lowest slot wins (A)
+      op(mkr(APU_OBJTAB_OP_SCAN_OVL, 64'hFFFF,
+             6'd8, 0, 0, 0, 0, 0, 64'h8800, 64'h9800), c);
+      check("ovl: A precedes B", c.status == APU_OBJTAB_OK &&
+            c.handle == {16'(o_gen[0]), 16'(o_slot[0])});
+      // after A retires the same probe reports B, then MISS once B
+      // retires as well
+      xpect("ovl: retire A", mkr(APU_OBJTAB_OP_RETIRE, o_ids[0],
+              6'd8, 0, 0, 0, 0, 0, 0, 0), APU_OBJTAB_OK);
+      me_live[o_slot[0]] = 0;
+      op(mkr(APU_OBJTAB_OP_SCAN_OVL, 64'hFFFF,
+             6'd8, 0, 0, 0, 0, 0, 64'h7000, 64'h9000), c);
+      check("ovl: evicted B", c.status == APU_OBJTAB_OK &&
+            c.handle == {16'(o_gen[1]), 16'(o_slot[1])});
+      xpect("ovl: retire B", mkr(APU_OBJTAB_OP_RETIRE, o_ids[1],
+              6'd8, 0, 0, 0, 0, 0, 0, 0), APU_OBJTAB_OK);
+      me_live[o_slot[1]] = 0;
+      xpect("ovl: all evicted", mkr(APU_OBJTAB_OP_SCAN_OVL, 64'hFFFF,
+              6'd8, 0, 0, 0, 0, 0, 64'h7000, 64'h9000),
+            APU_OBJTAB_MISS);
+    end
+    cases++;
+
+    // ---- SETAUXHI_CAS: atomic aux[63:32] publish (§12.3 3d-d) ------
+    // A fresh DEVICE_MEMORY sits at aux[63:32]=UNBACKED (0xFFFFFFFF):
+    // the bind-side CAS wins exactly once, a second publisher gets
+    // CONFLICT with the live entry, and a wrong-expected CAS fails
+    // without touching the entry.
+    m_reset;
+    do_reset;
+    begin
+      int          cs_slot, cs_gen;
+      logic [63:0] cs_id;
+      cs_id = 64'h0E33_0000_0000_0001;
+      op(mkr(APU_OBJTAB_OP_ALLOC, cs_id, 6'd8, 0, 8'd1, 0, 0, 0, 0, 0),
+         c);
+      check("cas: alloc", c.status == APU_OBJTAB_OK);
+      cs_slot = int'(c.handle[15:0]); cs_gen = int'(c.handle[31:16]);
+      void'(m_alloc(cs_id, 6'd8, 64'h0, 8'd1, slot, gen));
+      h1 = hnd(cs_gen, cs_slot);
+      // expected mismatch (entry aux[63:32] = 0): CONFLICT, aux intact
+      xpect("cas: expect UNBACKED vs 0",
+            mkr(APU_OBJTAB_OP_SETAUXHI_CAS, h1, 6'd8, 0, 0, 32'h1,
+                32'h017F_C000, 0, 64'hFFFF_FFFF, 0),
+            APU_OBJTAB_CONFLICT);
+      // install UNBACKED like a lazy type-1 create does
+      xpect("cas: setauxhi UNBACKED",
+            mkr(APU_OBJTAB_OP_SETAUXHI, h1, 6'd8, 0, 0, 32'hFFFF_FFFF,
+                32'hFFFF_FFFF, 0, 0, 0), APU_OBJTAB_OK);
+      // bind-side publish: expected UNBACKED -> {base, DEVBACKED}
+      // (cpl.entry is the entry as resolved — pre-write)
+      op(mkr(APU_OBJTAB_OP_SETAUXHI_CAS, h1, 6'd8, 0, 0, 32'h1,
+             32'h017F_C000, 0, 64'hFFFF_FFFF, 0), c);
+      check("cas: bind publish", c.status == APU_OBJTAB_OK &&
+            c.entry.aux == 64'hFFFF_FFFF_0000_0000);
+      op(mkr(APU_OBJTAB_OP_LOOKUP, h1, 6'd8, 0, 0, 0, 0, 0, 0, 0), c);
+      check("cas: aux after publish",
+            c.status == APU_OBJTAB_OK &&
+            c.entry.aux == 64'h017F_C000_0000_0001);
+      // map-side publish racing behind the bind: expected UNBACKED,
+      // sees the devb base -> CONFLICT carrying the live entry
+      op(mkr(APU_OBJTAB_OP_SETAUXHI_CAS, h1, 6'd8, 0, 0, 32'h0,
+             32'h0012_3000, 0, 64'hFFFF_FFFF, 0), c);
+      check("cas: late map loses", c.status == APU_OBJTAB_CONFLICT &&
+            c.entry.aux[63:32] == 32'h017F_C000);
+      // the surviving base is still the bind's
+      op(mkr(APU_OBJTAB_OP_LOOKUP, h1, 6'd8, 0, 0, 0, 0, 0, 0, 0), c);
+      check("cas: aux preserved",
+            c.status == APU_OBJTAB_OK &&
+            c.entry.aux == 64'h017F_C000_0000_0001);
+      // map-side publish on a still-UNBACKED memory succeeds
+      cs_id = 64'h0E33_0000_0000_0002;
+      op(mkr(APU_OBJTAB_OP_ALLOC, cs_id, 6'd8, 0, 8'd1, 0, 0, 0, 0, 0),
+         c);
+      cs_slot = int'(c.handle[15:0]); cs_gen = int'(c.handle[31:16]);
+      void'(m_alloc(cs_id, 6'd8, 64'h0, 8'd1, slot, gen));
+      h1 = hnd(cs_gen, cs_slot);
+      xpect("cas: setauxhi UNBACKED 2",
+            mkr(APU_OBJTAB_OP_SETAUXHI, h1, 6'd8, 0, 0, 32'hFFFF_FFFF,
+                32'hFFFF_FFFF, 0, 0, 0), APU_OBJTAB_OK);
+      op(mkr(APU_OBJTAB_OP_SETAUXHI_CAS, h1, 6'd8, 0, 0, 32'h0,
+             32'h0092_6000, 0, 64'hFFFF_FFFF, 0), c);
+      check("cas: map publish", c.status == APU_OBJTAB_OK);
+      op(mkr(APU_OBJTAB_OP_LOOKUP, h1, 6'd8, 0, 0, 0, 0, 0, 0, 0), c);
+      check("cas: map published base",
+            c.status == APU_OBJTAB_OK &&
+            c.entry.aux == 64'h0092_6000_0000_0000);
+      // dead entry -> MISS, not CONFLICT
+      xpect("cas: dead is MISS",
+            mkr(APU_OBJTAB_OP_RETIRE, cs_id, 6'd8, 0, 0, 0, 0, 0, 0, 0),
+            APU_OBJTAB_OK);
+      me_live[cs_slot] = 0;
+      xpect("cas: dead handle",
+            mkr(APU_OBJTAB_OP_SETAUXHI_CAS, h1, 6'd8, 0, 0, 32'h0,
+                32'h1, 0, 64'hFFFF_FFFF, 0), APU_OBJTAB_GEN);
+    end
+    cases++;
+
     // ---- global invariant: every model-live slot answers its handle;
     //      the model holds each (kind,id) at most once by construction ----
     begin

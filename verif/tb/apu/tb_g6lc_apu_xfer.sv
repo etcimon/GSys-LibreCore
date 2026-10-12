@@ -680,29 +680,31 @@ module tb_g6lc_apu_xfer;
         n  = mx == 0 ? 0 :
              $urandom(seed + c*37 + r*3) % (mx > 1024 ? 1025 : mx + 1);
         if (c % 13 == 5) n = 0;           // a sprinkling of size-0
-        if (same_map) begin
+        if (same_map) begin : blk_samemap
           // Vulkan union rule: union(src) must not intersect
           // union(dst) — the engine checks every src/dst pair, so the
           // TB must keep the committed extents disjoint too
-          automatic bit bad = 1'b0;
+          // Vlt 5.008 double-links a `do begin end while` body (self-
+          // duplicate block); the while form keeps the same trip count.
+          automatic bit bad = 1'b1;
           automatic int unsigned tries = 0;
-          do begin
+          while (bad && tries < 8) begin : blk_retry
             bad = 1'b0;
-            if (n != 0) begin
+            if (n != 0) begin : blk_overlap
               if (doff < soff + n && soff < doff + n) bad = 1'b1;
-              for (int k = 0; k < int'(r); k++) begin
+              for (int k = 0; k < int'(r); k++) begin : blk_prevregs
                 if (soff < int'(do_[k]) + int'(sz[k]) &&
                     int'(do_[k]) < soff + n) bad = 1'b1;
                 if (doff < int'(so[k]) + int'(sz[k]) &&
                     int'(so[k]) < doff + n) bad = 1'b1;
               end
             end
-            if (bad) begin
+            if (bad) begin : blk_reseed
               tries++;
               doff = $urandom(seed + c*101 + r*7 + tries) % BUFZ;
               if (doff + n > BUFZ) n = BUFZ - doff;
             end
-          end while (bad && tries < 8);
+          end
           if (bad) n = 0;
         end
         so[r] = 64'(soff); do_[r] = 64'(doff); sz[r] = 64'(n);

@@ -58,15 +58,51 @@ TK = dict(NONE=0, VOID=1, BOOL=2, INT=3, FLOAT=4, VEC=5, MAT=6,
 SC = dict(UNIFORMCONST=0, INPUT=1, UNIFORM=2, OUTPUT=3, WORKGROUP=4,
           CROSSWG=5, PRIVATE=6, FUNCTION=7, GENERIC=8, PUSHCONST=9,
           ATOMICCTR=10, IMAGE=11, SBUF=12)
-SC_OK = {SC['INPUT'], SC['UNIFORM'], SC['SBUF'], SC['PUSHCONST'],
-         SC['WORKGROUP'], SC['PRIVATE'], SC['FUNCTION'],
-         SC['UNIFORMCONST']}
+SC_OK = {SC['INPUT'], SC['OUTPUT'], SC['UNIFORM'], SC['SBUF'],
+         SC['PUSHCONST'], SC['WORKGROUP'], SC['PRIVATE'],
+         SC['FUNCTION'], SC['UNIFORMCONST']}
 
 # builtins we materialize per lane
 BUILTIN = dict(NumWorkgroups=24, WorkgroupSize=25, WorkgroupId=26,
                LocalInvocationId=27, GlobalInvocationId=28,
                LocalInvocationIndex=29)
 BUILTIN_OK = set(BUILTIN.values())
+
+# ---- graphics stages (first-pixel increment) --------------------
+# execution models (OpEntryPoint operand)
+EM = dict(VERTEX=0, FRAGMENT=4, GLCOMPUTE=5)
+# graphics builtins: Position/PointSize/ClipDistance/CullDistance are
+# the gl_PerVertex members; FragCoord/FrontFacing are FS inputs;
+# VertexIndex/InstanceIndex are VS inputs
+BI_GFX = dict(POSITION=0, POINTSIZE=1, CLIPDIST=3, CULLDIST=4,
+              FRAGCOORD=15, FRONTFACING=17, VERTEXINDEX=42,
+              INSTANCEINDEX=43)
+BI_GFX_IDS = set(BI_GFX.values())
+BI_GFX_DROP = {BI_GFX['POINTSIZE'], BI_GFX['CLIPDIST'],
+               BI_GFX['CULLDIST']}
+BUILTIN_OK |= BI_GFX_IDS          # id-level set; stage rules in variable()
+MBR_BI_OK = {BI_GFX['POSITION'], BI_GFX['POINTSIZE'],
+             BI_GFX['CLIPDIST'], BI_GFX['CULLDIST']}
+# varying/attribute records, 16 B per location, fixed stride:
+#   VS-in:  Location l at 16*l          stride ATTR (128)
+#   VS-out: Position at 0, loc l 16*(1+l) stride VARY (144)
+#   FS-in:  FragCoord at 0, loc l 16*(1+l) stride VARY
+#   FS-out: Location l at 16*l          stride ATTR
+VARY_LOCS = 8
+ATTR_STRIDE = 16 * (1 + VARY_LOCS)  # 144 (VS-in slot 8 = VertexIndex/InstanceIndex)
+VARY_STRIDE = 16 * (1 + VARY_LOCS)  # 144
+# interface-variable/pointer flags nibble (var row w0[31:28], init
+# row w0[31:28], pointer tag comp1[31:28])
+VF_REC = 0x1     # aperture record access
+VF_DROP = 0x2    # dropped builtin region (stores dropped, loads 0)
+MF_DROP = 0x40   # member-table flag: dropped builtin member
+# decor-row flags-byte markers: bit5 = builtin field valid (0 is a
+# legal builtin id), bit6 = word1 holds a Location
+DF_BI = 0x20
+DF_LOC = 0x40
+# type-table word0 spare bit marking a struct with builtin members
+# (gl_PerVertex shape)
+TY_HAS_MBI = 1 << 29
 
 # decorations we accept (id-level and member-level)
 DEC = dict(RelaxedPrecision=0, SpecId=1, Block=2, BufferBlock=3,
@@ -79,20 +115,22 @@ DEC_ID_OK = {DEC['RelaxedPrecision'], DEC['Block'], DEC['BufferBlock'],
              DEC['ArrayStride'], DEC['Builtin'], DEC['Restrict'],
              DEC['Aliased'], DEC['NonWritable'], DEC['NonReadable'],
              DEC['Binding'], DEC['DescriptorSet'], DEC['NoContraction'],
-             DEC['SpecId'], DEC['Uniform']}
+             DEC['SpecId'], DEC['Uniform'], DEC['Location']}
 DEC_MBR_OK = {DEC['RelaxedPrecision'], DEC['RowMajor'], DEC['ColMajor'],
               DEC['MatrixStride'], DEC['Offset'], DEC['NonWritable'],
-              DEC['NonReadable'], DEC['NoContraction'], DEC['SpecId']}
+              DEC['NonReadable'], DEC['NoContraction'], DEC['SpecId'],
+              DEC['Builtin']}
 
-CAP_OK = {1, 50}       # OpCapability Shader + ImageQuery (§12.3 C)
-EXEC_MODE_OK = {17}    # LocalSize only
+CAP_OK = {1, 50, 51}   # Shader + ImageQuery + DerivativeControl (G2b)
+EXEC_MODE_OK = {17}    # LocalSize (OriginUpperLeft=7 handled inline)
 MEM_OK = (0, 1)        # Logical GLSL450
-ENTRY_MODEL_OK = {5}   # GLCompute
+ENTRY_MODEL_OK = set(EM.values())   # Vertex/Fragment/GLCompute
 
 # accepted opcodes (grammar spirv.core.grammar.json vulkan-sdk-
 # 1.4.309.0): the 4a execution subset plus header/type/decor
 OP = dict(
-    Nop=0, Source=3, Name=5, MemberName=6, String=7, Line=8,
+    Nop=0, Source=3, SourceExtension=4, Name=5, MemberName=6,
+    String=7, Line=8,
     ExtInstImport=11, ExtInst=12, MemoryModel=14, EntryPoint=15,
     ExecutionMode=16, Capability=17,
     TypeVoid=19, TypeBool=20, TypeInt=21, TypeFloat=22, TypeVector=23,
@@ -103,10 +141,11 @@ OP = dict(
     ConstantComposite=44, ConstantNull=46,
     SpecConstantTrue=48, SpecConstantFalse=49, SpecConstant=50,
     SpecConstantComposite=51, SpecConstantOp=52,
-    # §12.3 C/5b image ops — OpImageSampleImplicitLod (87) is
-    # deliberately absent: compute has no derivatives, so it faults
-    # OPCODE at commit (truthful; glslang emits ExplicitLod anyway)
-    SampledImage=86, ImageSampleExplicitLod=88,
+    # §12.3 C/5b image ops — OpImageSampleImplicitLod (87, G2b) is
+    # fragment-only (FRAG_ONLY below); the projected/depth-ref
+    # implicit forms (89..93) stay absent and fault OPCODE
+    SampledImage=86, ImageSampleImplicitLod=87,
+    ImageSampleExplicitLod=88,
     ImageFetch=95, ImageRead=98, ImageWrite=99, Image=100,
     ImageQuerySizeLod=103, ImageQuerySize=104, ImageQueryLevels=106,
     Function=54, FunctionEnd=56, Variable=59, Load=61, Store=62,
@@ -134,6 +173,11 @@ OP = dict(
     ShiftRightLogical=194, ShiftRightArithmetic=195,
     ShiftLeftLogical=196, BitwiseOr=197, BitwiseXor=198,
     BitwiseAnd=199, Not=200,
+    # G2b derivative family — fragment-only (FRAG_ONLY); quads are
+    # lanes {4k..4k+3} of a wave
+    DPdx=207, DPdy=208, Fwidth=209,
+    DPdxFine=210, DPdyFine=211, FwidthFine=212,
+    DPdxCoarse=213, DPdyCoarse=214, FwidthCoarse=215,
     ControlBarrier=224, MemoryBarrier=225,
     Phi=245, LoopMerge=246, SelectionMerge=247,
     Label=248, Branch=249, BranchConditional=250, Switch=251,
@@ -143,6 +187,11 @@ OP = dict(
 )
 
 ACCEPT = set(OP.values())
+
+# opcodes legal only inside a Fragment-execution-model module: the
+# implicit-LOD sample (87) needs quad derivatives that VS/compute
+# waves never form, and 207-215 *are* quad derivatives
+FRAG_ONLY = {87, 207, 208, 209, 210, 211, 212, 213, 214, 215}
 
 # instruction word bound for ops that stage all operand words
 STAGE_BOUND = {245, 224, 225, 246, 247, 250, 251, 84,
@@ -189,6 +238,9 @@ class Scanner:
         self.members = []      # flat member table entries
         self.init = []         # (reg_idx, storage, aux, set, binding, off)
         self.entry = None
+        self.em = EM['GLCOMPUTE']  # execution model (h_15 overrides)
+        self.in_mask = 0           # Location'd Input variables (bit/loc)
+        self.out_mask = 0          # Location'd Output variables
         self.localsize = (0, 0, 0)
         self.scratch = 0
         self.slab = 0
@@ -356,6 +408,15 @@ class Scanner:
                 raise Fault(FAULT['WORDS'], opc, at)
             mb = len(self.members)
             self.member_base[rid] = mb
+            # builtin members are only legal in the gl_PerVertex
+            # shape: member 0 = Position, every later member a
+            # dropped builtin (PointSize/ClipDistance/CullDistance)
+            bis = [self.mdecor.get((rid, i), {}).get('builtin')
+                   for i in range(len(ops))]
+            has_bi = any(b is not None for b in bis)
+            if has_bi and (bis[0] != BI_GFX['POSITION'] or
+                           any(b not in BI_GFX_DROP for b in bis[1:])):
+                raise Fault(FAULT['DECOR'], opc, at)
             for i, mt in enumerate(ops):
                 if mt not in self.types:
                     raise Fault(FAULT['FWDREF'], opc, at)
@@ -365,7 +426,7 @@ class Scanner:
                                          flags=d.get('flags', 0)))
             t = dict(kind=TK['STRUCT'], sign=0, comps=0, cols=0,
                      storage=0, elem=0, nmemb=len(ops), length=0,
-                     size=0, stride=0)
+                     size=0, stride=0, has_bi=has_bi)
         elif opc == OP['TypePointer']:
             sc, elem = ops
             if sc not in SC_OK:
@@ -450,8 +511,79 @@ class Scanner:
                 raise Fault(FAULT['STORAGE'], OP['Variable'], at)
         d = self.decor_of(rid)
         off = 0
+        fl = 0                    # {VF_DROP, VF_REC} for gfx I/O vars
         if len(self.init) >= SHADER_INIT:
             raise Fault(FAULT['REGS'], OP['Variable'], at)
+        bi = d.get('builtin')
+        gfx_io = self.em != EM['GLCOMPUTE'] and \
+            sc in (SC['INPUT'], SC['OUTPUT'])
+        if self.em == EM['GLCOMPUTE']:
+            # compute accepts only the compute builtins, on any storage
+            if bi is not None and bi not in BUILTIN.values():
+                raise Fault(FAULT['VAR'], OP['Variable'], at)
+        elif gfx_io:
+            # graphics interface variable — aperture record layout
+            loc = d.get('location')
+            rec = drop = False
+            et = self.types.get(t['elem'])
+            if self.em == EM['VERTEX']:
+                if sc == SC['INPUT']:
+                    if bi is not None:
+                        # VertexIndex/InstanceIndex keep the builtin path
+                        if bi not in (BI_GFX['VERTEXINDEX'],
+                                      BI_GFX['INSTANCEINDEX']):
+                            raise Fault(FAULT['VAR'], OP['Variable'], at)
+                    elif loc is None or loc > VARY_LOCS - 1:
+                        raise Fault(FAULT['VAR'], OP['Variable'], at)
+                    else:
+                        off = 16 * loc
+                        rec = True
+                        self.in_mask |= 1 << loc
+                else:                            # VS Output
+                    if bi is not None:
+                        if bi == BI_GFX['POSITION']:
+                            rec = True           # record slot 0
+                        elif bi in BI_GFX_DROP:
+                            drop = True          # stores dropped/loads 0
+                        else:
+                            raise Fault(FAULT['VAR'], OP['Variable'], at)
+                    elif loc is not None:
+                        if loc > VARY_LOCS - 1:
+                            raise Fault(FAULT['VAR'], OP['Variable'], at)
+                        off = 16 * (1 + loc)
+                        rec = True
+                        self.out_mask |= 1 << loc
+                    elif et is not None and et['kind'] == TK['STRUCT'] \
+                            and et.get('has_bi'):
+                        # gl_PerVertex block: Position member at slot 0
+                        rec = True
+                    else:
+                        raise Fault(FAULT['VAR'], OP['Variable'], at)
+            else:                                # Fragment
+                if sc == SC['INPUT']:
+                    if bi is not None:
+                        if bi == BI_GFX['FRAGCOORD']:
+                            rec = True           # record slot 0
+                        elif bi != BI_GFX['FRONTFACING']:
+                            raise Fault(FAULT['VAR'], OP['Variable'], at)
+                    elif loc is None or loc > VARY_LOCS - 1:
+                        raise Fault(FAULT['VAR'], OP['Variable'], at)
+                    else:
+                        off = 16 * (1 + loc)
+                        rec = True
+                        self.in_mask |= 1 << loc
+                else:                            # FS Output
+                    if bi is not None or loc is None or \
+                            loc > VARY_LOCS - 1:
+                        raise Fault(FAULT['VAR'], OP['Variable'], at)
+                    off = 16 * loc
+                    rec = True
+                    self.out_mask |= 1 << loc
+            fl = (VF_REC if rec else 0) | (VF_DROP if drop else 0)
+        elif bi is not None:
+            # builtin decorations have no meaning off the interface in
+            # a graphics stage
+            raise Fault(FAULT['VAR'], OP['Variable'], at)
         if sc == SC['WORKGROUP']:
             sz = self.type_size(t['elem'])
             off = self.slab
@@ -464,10 +596,10 @@ class Scanner:
                               binding=d.get('binding', 0),
                               builtin=d.get('builtin', 0xFF),
                               off=off, type_id=t['elem'],
-                              flags=d.get('flags', 0))
+                              flags=fl if gfx_io else d.get('flags', 0))
         self.reg(rid, tid=rty)
         self.init.append((self.regmap[rid][1], sc, d.get('builtin', 0xFF),
-                          d.get('set', 0), d.get('binding', 0), off))
+                          d.get('set', 0), d.get('binding', 0), off, fl))
 
     # -- main walk ----------------------------------------------------
     def scan(self):
@@ -489,6 +621,8 @@ class Scanner:
                 raise Fault(FAULT['WORDS'], opc, at)
             ops = w[at + 1: at + wc]
             if opc not in ACCEPT:
+                raise Fault(FAULT['OPCODE'], opc, at)
+            if opc in FRAG_ONLY and self.em != EM['FRAGMENT']:
                 raise Fault(FAULT['OPCODE'], opc, at)
             if opc in STAGE_BOUND and wc - 1 > OPN_MAX:
                 raise Fault(FAULT['WORDS'], opc, at)
@@ -527,10 +661,13 @@ class Scanner:
         self.entry_count += 1
         if self.entry_count > 1:
             raise Fault(FAULT['TWO_ENTRY'], opc, at)
+        self.em = ops[0]
         self.entry = dict(func=ops[1], name_bytes=ops[2:])
 
     def h_16(self, opc, ops, at):       # OpExecutionMode
-        if ops[1] != 17:                # LocalSize only
+        if ops[1] == 7:                 # OriginUpperLeft (FS): ignore
+            return
+        if ops[1] != 17:                # LocalSize
             raise Fault(FAULT['EXECMODE'], opc, at)
         lx, ly, lz = ops[2], ops[3], ops[4]
         if lx * ly * lz > MAX_LOCAL or lx * ly * lz == 0:
@@ -548,10 +685,21 @@ class Scanner:
             d['set'] = ops[2]
         elif dec == DEC['Builtin']:
             if ops[2] not in BUILTIN_OK:
-                raise Fault(FAULT['DECOR'], opc, at)
+                # G2a: FragDepth (22) is a recognised graphics builtin
+                # the engine cannot honour — FAULT_VAR, not DECOR
+                raise Fault(FAULT['VAR'] if ops[2] == 22
+                            else FAULT['DECOR'], opc, at)
             d['builtin'] = ops[2]
+            # marker bit (0 is a legal builtin id, so the field alone
+            # cannot distinguish "Position" from "undecorated")
+            d['flags'] = d.get('flags', 0) | DF_BI
         elif dec == DEC['ArrayStride']:
             d['stride'] = ops[2]
+            d['aux1'] = ops[2]
+        elif dec == DEC['Location']:
+            d['location'] = ops[2]
+            d['aux1'] = ops[2]          # decor word1 carries the value
+            d['flags'] = d.get('flags', 0) | DF_LOC
         else:
             d['flags'] = d.get('flags', 0) | (1 << (dec % 8))
 
@@ -567,6 +715,14 @@ class Scanner:
             d['offset'] = ops[3]
         elif dec == DEC['MatrixStride']:
             d['mstride'] = ops[3]
+        elif dec == DEC['Builtin']:
+            # gl_PerVertex members: Position (record slot 0) or the
+            # dropped region (PointSize/ClipDistance/CullDistance)
+            if ops[3] not in MBR_BI_OK:
+                raise Fault(FAULT['DECOR'], opc, at)
+            d['builtin'] = ops[3]
+            if ops[3] in BI_GFX_DROP:
+                d['flags'] = d.get('flags', 0) | MF_DROP
         else:
             d['flags'] = d.get('flags', 0) | (1 << (dec % 8))
 
@@ -711,6 +867,8 @@ class Scanner:
                164, 165, 166, 167, 168, 169, 170, 171, 172, 173, 174,
                175, 176, 177, 178, 179, 180, 182, 183, 184, 186, 188,
                190, 194, 195, 196, 197, 198, 199, 200,
+               # G2b: implicit LOD + quad-derivative result registers
+               87, 207, 208, 209, 210, 211, 212, 213, 214, 215,
                # §12.3 C/5b: image ops with a result register
                86, 88, 95, 98, 100, 103, 104, 106]:
         exec('h_%d = h_result' % _o)
@@ -724,7 +882,8 @@ class Scanner:
             return [0, 0, 0]
         w0 = (t['kind'] | (t['sign'] << 4) | (t['comps'] << 5) |
               (t['cols'] << 8) | (t['storage'] << 11) | (t['elem'] << 15) |
-              (t['nmemb'] << 25))
+              (t['nmemb'] << 25) |
+              (TY_HAS_MBI if t.get('has_bi') else 0))
         w1 = (self.member_base.get(tid, 0) & 0xFFFF) | \
              ((t['length'] & 0xFFFF) << 16)
         w2 = (self.size_of(tid) & 0xFFFF) | ((t['stride'] & 0xFFFF) << 16)
@@ -759,7 +918,7 @@ class Scanner:
         return [w32(d.get('set', 0) | (d.get('binding', 0) << 8) |
                     (d.get('builtin', 0xFF) << 16) |
                     (d.get('flags', 0) << 24)),
-                w32(d.get('stride', 0))]
+                w32(d.get('aux1', 0))]
 
     def var_words(self, iid):
         v = self.vars.get(iid)
@@ -781,8 +940,9 @@ class Scanner:
                    ((r[2] & 0x3FF) << 16) | (r[1] & 0xFFFF))
 
     def init_words(self, i):
-        idx, sc, bi, st, bd, off = self.init[i]
-        return [w32(idx | (sc << 16) | ((bi & 0xFF) << 20)),
+        idx, sc, bi, st, bd, off, fl = self.init[i]
+        return [w32(idx | (sc << 16) | ((bi & 0xFF) << 20) |
+                    ((fl & 0xF) << 28)),
                 w32(st | (bd << 8) | (off << 16))]
 
     def block_word(self, iid):
@@ -808,11 +968,17 @@ class Scanner:
         return out
 
     def entry_words(self):
-        lx, ly, lz = self.localsize
+        # graphics stages have no LocalSize: lx=ly=lz=1 and the
+        # execution model + Location masks ride the entry record's
+        # spare half-words (w2[31:16] = {out,in}_mask, w3[31:28] = em)
+        lx, ly, lz = self.localsize if self.em == EM['GLCOMPUTE'] \
+            else (1, 1, 1)
         return [w32((self.entry_off & 0xFFFF) | (self.n_regs << 16)),
                 w32(lx | (ly << 8) | (lz << 16) |
                     (len(self.init) << 24)),
-                w32(self.scratch), w32(self.slab)]
+                w32(self.scratch | (self.in_mask << 16) |
+                    (self.out_mask << 24)),
+                w32(self.slab | (self.em << 28))]
 
     def emit_tab(self, path):
         """flat list of (table, addr, word) triples the TB compares."""

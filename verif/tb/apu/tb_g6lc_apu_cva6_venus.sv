@@ -1062,6 +1062,13 @@ module tb_g6lc_apu_cva6_venus;
                    checks, cycles, cookie_v[31:0]);
           $finish;
         end else begin
+          begin
+            logic [63:0] d0, d1;
+            d0 = i_dram.peek64(SV_VN_COOKIE_ADDR + 8);
+            d1 = i_dram.peek64(SV_VN_COOKIE_ADDR + 16);
+            $display("[dbg-fail] ap=%08x got=%08x exp=%08x idx=%08x",
+                     d0[31:0], d0[63:32], d1[31:0], d1[63:32]);
+          end
           $fatal(1, "Venus probe FAIL cookie %016x step=%02x",
                  cookie_v, cookie_v[7:0]);
         end

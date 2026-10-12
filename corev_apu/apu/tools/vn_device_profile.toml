@@ -50,6 +50,11 @@ shaderSampledImageArrayDynamicIndexing = true
 shaderStorageImageArrayDynamicIndexing = true
 shaderStorageImageWriteWithoutFormat = false
 shaderStorageImageReadWithoutFormat = false
+# G2a: per-attachment blend state is supported; clamping z to the
+# viewport and dual-source blending are not.
+independentBlend = true
+depthClamp = false
+dualSrcBlend = false
 
 [limits]
 # VkPhysicalDeviceLimits members set non-zero; everything else stays 0.
@@ -80,15 +85,28 @@ maxComputeSharedMemorySize = 16384
 minUniformBufferOffsetAlignment = 256
 minStorageBufferOffsetAlignment = 256
 nonCoherentAtomSize = 64
-# §12.3 5b-r2: graphics-only limits stay 0 until raster lands —
-# queueFlags advertises COMPUTE|TRANSFER only, so framebuffer/viewport/
-# vertex-input capability must not leak through the limits table.
-maxViewports = 0
-maxColorAttachments = 0
-maxFramebufferWidth = 0
-maxFramebufferHeight = 0
-maxVertexInputAttributes = 0
-maxVertexInputBindings = 0
+# G1c/G2a graphics limits: up to 4 colour attachments on a <=4 KiB
+# framebuffer, 8 vertex attributes across 4 bindings, a single
+# dynamic viewport, list/strip/fan triangle topology.
+maxViewports = 1
+maxViewportDimensions = [4096, 4096]
+viewportBoundsRange = [-8192.0, 8191.0]
+maxColorAttachments = 4
+maxFramebufferWidth = 4096
+maxFramebufferHeight = 4096
+maxFramebufferLayers = 1
+framebufferColorSampleCounts = 1
+maxVertexInputAttributes = 8
+maxVertexInputBindings = 4
+maxVertexInputAttributeOffset = 2047
+maxVertexInputBindingStride = 2048
+maxVertexOutputComponents = 32
+maxFragmentInputComponents = 32
+maxFragmentOutputAttachments = 4
+maxDrawIndexedIndexValue = 0xFFFFFFFF
+maxDrawIndirectCount = 1
+pointSizeRange = [1.0, 1.0]
+lineWidthRange = [1.0, 1.0]
 # sampler truth: the shwave sampler implements 4.4 fixed-point LOD and
 # ignores anisotropy entirely (not advertised)
 maxSamplerLodBias = 15.0
@@ -102,6 +120,9 @@ maxUniformBufferRange = 0x01000000
 maxStorageBufferRange = 0x01000000
 mipmapPrecisionBits = 4
 subTexelPrecisionBits = 8
+# raster setup quantizes vertex positions to 16.8 fixed-point — the
+# advertised subpixel resolution of the rasterizer itself
+subPixelPrecisionBits = 8
 maxPerStageResources = 16
 minMemoryMapAlignment = 4096
 
@@ -110,9 +131,11 @@ minMemoryMapAlignment = 4096
 #   heap 0 = the device-private arena (top 8 MiB of the SHM window);
 #            type 0 DEVICE_LOCAL allocations are eager ALLOC_PRIV there
 #   heap 1 = the guest-mappable span (SHM_LEN = 24 MiB);
-#            type 1 DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT is LAZY —
-#            vkAllocateMemory takes no pages; MAP_BLOB ALLOC_ATs the
-#            extent inside the guest window
+#            type 1 DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT is lazy at
+#            vkAllocateMemory and backed at first bind or map (§12.3
+#            3d-d): bind ALLOC_HI's a device-chosen extent (DEVBACKED);
+#            MAP_BLOB ALLOC_ATs the kernel offset, relocating the
+#            DEVBACKED extent when it differs
 heap0_size = 0x00800000
 heap1_size = 0x01800000
 type0_flags = "DEVICE_LOCAL"
@@ -121,41 +144,50 @@ type1_flags = "DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT"
 type1_heap = 1
 
 [queue_family0]
-# §12.3 5b-r2: truthful capability — compute + transfer only.  GRAPHICS
-# returns with raster support (and evidence), not before.
-queueFlags = "COMPUTE|TRANSFER"
+# G1c: GRAPHICS joins now that the raster engine + draw assembly exist.
+queueFlags = "GRAPHICS|COMPUTE|TRANSFER"
 queueCount = 1
 timestampValidBits = 64
 minImageTransferGranularity = [1, 1, 1]
 
 [formats]
 # §12.3 5b: explicit per-format feature table — the truth of what the
-# shader/Xfer paths implement; no COLOR/DEPTH_STENCIL attachment or
-# BLIT features until raster lands.  Keys:
+# shader/Xfer paths implement.  Keys:
 #   f      = VkFormatFeatureFlagBits names (VK_FORMAT_FEATURE_*_BIT),
-#            identical for linear/optimal/buffer columns
+#            image features — fills the linear and optimal columns
+#   fb     = names for the buffer column only (VERTEX_BUFFER); the
+#            three columns are independent so image-only bits no
+#            longer leak into bufferFeatures
 #   bpp    = texel bytes
 #   comps  = component count (default 4)
 #   srgb   = texels are sRGB-encoded (decode via the generated LUT)
 #   bgr    = B/R channels swapped vs R8G8B8A8 order
 #   half   = fp16 components, flt = fp32 components, uint = raw integers
-# Each entry also yields a generated device format id (APU_IMG_FMT_*,
-# in declaration order) used by the descriptor record's fmt field.
+# Each entry with 'f' also yields a generated device format id
+# (APU_IMG_FMT_*, in declaration order) used by the descriptor record's
+# fmt field.
 R8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 1, comps = 1 }
 R8G8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 2, comps = 2 }
-R8G8B8A8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 4 }
-R8G8B8A8_SRGB = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST", bpp = 4, srgb = 1 }
-B8G8R8A8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 4, bgr = 1 }
-B8G8R8A8_SRGB = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST", bpp = 4, bgr = 1, srgb = 1 }
+# G1c: COLOR_ATTACHMENT on the ROP formats; VERTEX_BUFFER on the
+# float vertex-attribute formats the raster gather reads.  G2a: all
+# four 8-bit colour formats attach + blend; sRGB encodes through the
+# generated APU_SRGB_ENC table.
+R8G8B8A8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST|COLOR_ATTACHMENT|COLOR_ATTACHMENT_BLEND", fb = "VERTEX_BUFFER", bpp = 4 }
+R8G8B8A8_SRGB = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST|COLOR_ATTACHMENT|COLOR_ATTACHMENT_BLEND", bpp = 4, srgb = 1 }
+B8G8R8A8_UNORM = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST|COLOR_ATTACHMENT|COLOR_ATTACHMENT_BLEND", bpp = 4, bgr = 1 }
+B8G8R8A8_SRGB = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST|COLOR_ATTACHMENT|COLOR_ATTACHMENT_BLEND", bpp = 4, bgr = 1, srgb = 1 }
 R16G16B16A16_SFLOAT = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 8, half = 1 }
-R32_SFLOAT = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 4, comps = 1, flt = 1 }
-R32G32_SFLOAT = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 8, comps = 2, flt = 1 }
-R32G32B32A32_SFLOAT = { f = "SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 16, flt = 1 }
+R32_SFLOAT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER", bpp = 4, comps = 1, flt = 1 }
+R32G32_SFLOAT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER", bpp = 8, comps = 2, flt = 1 }
+# vertex-buffer-only: an 'fb'-without-'f' row gets no APU_IMG_FMT_* id
+R32G32B32_SFLOAT = { fb = "VERTEX_BUFFER", bpp = 12, comps = 3, flt = 1 }
+R32G32B32A32_SFLOAT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER", bpp = 16, flt = 1 }
 R32_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 4, comps = 1, uint = 1 }
 R32G32B32A32_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 16, uint = 1 }
-# depth formats: known to the wire but advertise no features
-D32_SFLOAT = { f = "" }
+# depth formats: D32/D16 attach (G2a); D24 stays unwired
+D32_SFLOAT = { f = "DEPTH_STENCIL_ATTACHMENT|TRANSFER_SRC|TRANSFER_DST", bpp = 4, comps = 1, flt = 1 }
 D24_UNORM_S8_UINT = { f = "" }
+D16_UNORM = { f = "DEPTH_STENCIL_ATTACHMENT|TRANSFER_SRC|TRANSFER_DST", bpp = 2, comps = 1 }
 
 [device_extensions]
 # vkEnumerateDeviceExtensionProperties elements.  In the Venus model the
@@ -443,3 +475,151 @@ fields = ["pRegions.srcSubresource.aspectMask",
 fields = ["uint32", "pRanges.aspectMask", "pRanges.baseMipLevel",
           "pRanges.levelCount", "pRanges.baseArrayLayer",
           "pRanges.layerCount"]
+
+# ---------------------------------------------------------------------------
+# G1c graphics payload keep-lists.  vkCmdDraw/vkCmdDrawIndexed's counts are
+# scalar immediates and already land in rec.imm; vkCmdBindIndexBuffer's
+# buffer handle is a top-level q-slot and lands in rec.handle — its u64
+# offset decodes into a q-slot (never the record), so it rides the arena.
+
+[keep.vkCreateGraphicsPipelines]
+# per element, vk.xml decode order: stageCount, per stage {stage,
+# module id (2w)}, pVertexInputState presence, bindingCount, per
+# binding {binding, stride, inputRate}, attrCount, per attr
+# {location, binding, format, offset}, pInputAssemblyState presence,
+# topology, pRasterizationState presence, cullMode, frontFace,
+# pDepthStencilState presence + its four enables/op,
+# pColorBlendState presence + attachmentCount + the eight fields per
+# attachment + the 4-word blendConstants blob, pDynamicState
+# presence + dynamicStateCount + the dynamicStates blob, then the
+# layout id (2w) — layout follows the state structs in the
+# create-info wire order.  Pointee members drop the pointer hop from
+# the path (pVertexInputState/pInputAssemblyState/pRasterizationState/
+# pDepthStencilState/pColorBlendState/pDynamicState are transparent).
+fields = ["pCreateInfos.stageCount",
+          "pCreateInfos.pStages.stage",
+          "pCreateInfos.pStages.module",
+          "pCreateInfos.pVertexInputState",
+          "pCreateInfos.vertexBindingDescriptionCount",
+          "pCreateInfos.pVertexBindingDescriptions.binding",
+          "pCreateInfos.pVertexBindingDescriptions.stride",
+          "pCreateInfos.pVertexBindingDescriptions.inputRate",
+          "pCreateInfos.vertexAttributeDescriptionCount",
+          "pCreateInfos.pVertexAttributeDescriptions.location",
+          "pCreateInfos.pVertexAttributeDescriptions.binding",
+          "pCreateInfos.pVertexAttributeDescriptions.format",
+          "pCreateInfos.pVertexAttributeDescriptions.offset",
+          "pCreateInfos.pInputAssemblyState",
+          "pCreateInfos.topology",
+          "pCreateInfos.pRasterizationState",
+          "pCreateInfos.cullMode",
+          "pCreateInfos.frontFace",
+          "pCreateInfos.pDepthStencilState",
+          "pCreateInfos.depthTestEnable",
+          "pCreateInfos.depthWriteEnable",
+          "pCreateInfos.depthCompareOp",
+          "pCreateInfos.stencilTestEnable",
+          "pCreateInfos.pColorBlendState",
+          "pCreateInfos.attachmentCount",
+          "pCreateInfos.pAttachments.blendEnable",
+          "pCreateInfos.pAttachments.srcColorBlendFactor",
+          "pCreateInfos.pAttachments.dstColorBlendFactor",
+          "pCreateInfos.pAttachments.colorBlendOp",
+          "pCreateInfos.pAttachments.srcAlphaBlendFactor",
+          "pCreateInfos.pAttachments.dstAlphaBlendFactor",
+          "pCreateInfos.pAttachments.alphaBlendOp",
+          "pCreateInfos.pAttachments.colorWriteMask",
+          "pCreateInfos.blendConstants",
+          "pCreateInfos.pDynamicState",
+          "pCreateInfos.dynamicStateCount",
+          "pCreateInfos.pDynamicStates",
+          "pCreateInfos.layout"]
+
+[keep.vkCreateRenderPass]
+# {attachmentCount, per attachment {format, loadOp, storeOp},
+#  subpassCount, per subpass {colorAttachmentCount, per color ref
+#  {attachment}}} — pCreateInfo is a transparent pointer hop.
+fields = ["attachmentCount",
+          "pAttachments.format",
+          "pAttachments.loadOp",
+          "pAttachments.storeOp",
+          "subpassCount",
+          "pSubpasses.colorAttachmentCount",
+          "pSubpasses.pColorAttachments.attachment",
+          "pSubpasses.attachment"]
+
+[keep.vkCreateRenderPass2]
+# same member names on the *2 structs (VkAttachmentDescription2 /
+# VkSubpassDescription2 / VkAttachmentReference2).  The
+# pDepthStencilAttachment pointer hop is transparent, so the depth
+# reference's attachment index lands as pSubpasses.attachment right
+# after the colour-reference words.
+fields = ["attachmentCount",
+          "pAttachments.format",
+          "pAttachments.loadOp",
+          "pAttachments.storeOp",
+          "subpassCount",
+          "pSubpasses.colorAttachmentCount",
+          "pSubpasses.pColorAttachments.attachment",
+          "pSubpasses.attachment"]
+
+[keep.vkCreateFramebuffer]
+# {renderPass id (2w), attachmentCount, per attachment view id (2w),
+#  width, height, layers}
+fields = ["renderPass", "attachmentCount",
+          "pAttachments", "width", "height", "layers"]
+
+[keep.vkCmdBeginRenderPass]
+# {renderPass id (2w), framebuffer id (2w), renderArea {x, y, w, h},
+#  clearValueCount, per clear value the raw union words (u32 tag +
+#  4 colour words)} — the front resolves the two ids into record
+#  handles; the rest stream to the arena verbatim.  pRenderPassBegin
+#  is a transparent pointer hop.
+fields = ["renderPass", "framebuffer",
+          "renderArea.offset.x",
+          "renderArea.offset.y",
+          "renderArea.extent.width",
+          "renderArea.extent.height",
+          "clearValueCount",
+          "pClearValues.color.uint32"]
+
+[keep.vkCmdBeginRenderPass2]
+# same VkRenderPassBeginInfo struct as vkCmdBeginRenderPass
+fields = ["renderPass", "framebuffer",
+          "renderArea.offset.x",
+          "renderArea.offset.y",
+          "renderArea.extent.width",
+          "renderArea.extent.height",
+          "clearValueCount",
+          "pClearValues.color.uint32"]
+
+[keep.vkCmdSetBlendConstants]
+# G2a: the four float blend constants ride the arena verbatim;
+# cmdexec snapshots them for pipelines that declare BLEND_CONSTANTS
+# dynamic.
+fields = ["blendConstants"]
+
+[keep.vkCmdBindVertexBuffers]
+# {buffer ids (2w each) then offsets (2w each)} — the front resolves
+# each buffer id at record time and streams {handle, offset lo,
+# offset hi} triples to the arena; firstBinding/bindingCount stay in
+# rec.imm.
+fields = ["pBuffers", "pOffsets"]
+
+[keep.vkCmdSetViewport]
+# per pViewports element {x, y, width, height, minDepth, maxDepth}
+fields = ["pViewports.x", "pViewports.y", "pViewports.width",
+          "pViewports.height", "pViewports.minDepth",
+          "pViewports.maxDepth"]
+
+[keep.vkCmdBindIndexBuffer]
+# offset is a u64 — it decodes into a q-slot, not rec.imm, so it has
+# to ride the arena (buffer is the record's q-slot handle; indexType
+# stays in rec.imm[0])
+fields = ["offset"]
+
+[keep.vkCmdSetScissor]
+# per pScissors element {offset.x, offset.y, extent.width,
+# extent.height}
+fields = ["pScissors.offset.x", "pScissors.offset.y",
+          "pScissors.extent.width", "pScissors.extent.height"]

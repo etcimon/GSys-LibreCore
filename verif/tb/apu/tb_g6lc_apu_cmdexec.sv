@@ -56,6 +56,10 @@ module tb_g6lc_apu_cmdexec;
   apu_sh_desc_t       ddesc, oddesc;
   logic [5:0]         dpushn, odpushn;
   logic [1023:0]      dpush, odpush;
+  // §12.3 3d-d: relocation hold — cmdexec must stop dequeuing new
+  // submissions while high and report true drain on idle_o
+  logic               hold = 1'b0;
+  logic               ce_idle;
   assign w_done_pl = '{code: APU_SH_DONE_OK, default: '0};
 
   g6lc_apu_cmdexec #(.Enable(1'b1), .Fences(Fences)) i_dut (
@@ -73,7 +77,8 @@ module tb_g6lc_apu_cmdexec;
     .push_n_o(dpushn), .push_o(dpush),
     .done_seq_o(done_seq),
     .fence_signaled_o(fsig), .fence_lost_o(flost),
-    .fence_clr_i(fclr), .xf_o(), .busy_o());
+    .fence_clr_i(fclr), .xf_o(), .rd_o(),
+    .hold_i(hold), .idle_o(ce_idle), .busy_o());
   g6lc_apu_cmdexec_fixture #(.Enable(1'b0), .Fences(Fences)) i_off (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .submit_valid_i(sub_v), .submit_ready_o(osub_r), .submit_i(sub),
@@ -89,7 +94,8 @@ module tb_g6lc_apu_cmdexec;
     .push_n_o(odpushn), .push_o(odpush),
     .done_seq_o(odone),
     .fence_signaled_o(ofsig), .fence_lost_o(oflost),
-    .fence_clr_i(fclr), .xf_o(), .busy_o());
+    .fence_clr_i(fclr), .xf_o(), .rd_o(),
+    .hold_i(hold), .idle_o(), .busy_o());
 
   // ---- backend mux: TB setup vs executor ------------------------------
   // The real cmdrec/objtab buses fan out to both masters; tb_drv selects
@@ -374,10 +380,12 @@ module tb_g6lc_apu_cmdexec;
     end
 
     // ---- case 5: two buffers in one submit -------------------------------
+    // (DRAW_EXT would now gate on a bound graphics pipeline + active
+    // attachment; EXECUTE_COMMANDS stays a plain work record)
     tb_drv = 1'b1;
     cr_op(APU_CMDREC_OP_BEGIN, 3, 0, '0);
     cr_op(APU_CMDREC_OP_APPEND, 3, 0,
-          mkrec(APU_VN_TYPE_VK_CMD_DRAW_EXT, 0, 0, 4));
+          mkrec(APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT, 0, 0, 4));
     cr_op(APU_CMDREC_OP_END, 3, 0, '0);
     cr_op(APU_CMDREC_OP_BEGIN, 4, 0, '0);
     cr_op(APU_CMDREC_OP_APPEND, 4, 0,
@@ -389,7 +397,8 @@ module tb_g6lc_apu_cmdexec;
       submit(5'd3, 2, 8'd3, cb_h, 8'd4, cb_h);
       wait_fence(3, 4000);
       check("two-buf work", work_i == w0 + 2);
-      check("buf order0", got_work[w0] == APU_VN_TYPE_VK_CMD_DRAW_EXT);
+      check("buf order0",
+            got_work[w0] == APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT);
       check("buf order1",
             got_work[w0 + 1] == APU_VN_TYPE_VK_CMD_DISPATCH_EXT);
       check("two-buf ok", flost[3] === 1'b0);
@@ -428,11 +437,13 @@ module tb_g6lc_apu_cmdexec;
       cr_op(APU_CMDREC_OP_APPEND, 5, 0, pr, 16'd2);
     end
     // §7b/5a-ii: a DISPATCH here would enter the full descriptor
-    // assembly (the CAFE dset handles resolve to nothing); probe the
-    // snap through a non-dispatch work record instead.  Dispatch
-    // assembly itself is covered end-to-end in tb_g6lc_apu_vgtop.
+    // assembly (the CAFE dset handles resolve to nothing) and a DRAW
+    // now loses the submission without a bound graphics pipeline +
+    // attachment; probe the snap through a plain work record instead.
+    // Dispatch assembly itself is covered end-to-end in
+    // tb_g6lc_apu_vgtop.
     cr_op(APU_CMDREC_OP_APPEND, 5, 0,
-          mkrec(APU_VN_TYPE_VK_CMD_DRAW_EXT, 0, 0, 32'h4));
+          mkrec(APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT, 0, 0, 32'h4));
     cr_op(APU_CMDREC_OP_END, 5, 0, '0);
     tb_drv = 1'b0;
     begin

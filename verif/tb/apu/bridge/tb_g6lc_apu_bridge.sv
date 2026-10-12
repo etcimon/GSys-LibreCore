@@ -245,6 +245,23 @@ module tb_g6lc_apu_bridge
     wire [255:0] pay_free = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
                               .i_pay.gen_on.free_q;
 
+    // §12.3 3d-d: relocation cost — one [reloc] line per completed
+    // DEVBACKED MAP_BLOB hold (drain + evictions + move + publish)
+    // plus the cumulative cycle counter on dbg sel 8
+    wire        vc_hold  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .vc_hold;
+    wire [31:0] vc_reloc = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_ctl.gen_on.reloc_cyc_q;
+    logic [31:0] reloc_dur_q = '0;
+    always_ff @(posedge clk_i) begin
+      if (vc_hold) reloc_dur_q <= reloc_dur_q + 1;
+      else if (reloc_dur_q != 0) begin
+        $display("[reloc] DEVBACKED MAP_BLOB relocation: %0d cycles (cumulative %0d)",
+                 reloc_dur_q, vc_reloc);
+        reloc_dur_q <= '0;
+      end
+    end
+
     // F5 bring-up observability: vnfront's descriptor-path state,
     // readable over the bridge debug overlay (sel 32..47)
     wire [7:0]  fr_state = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
@@ -330,6 +347,50 @@ module tb_g6lc_apu_bridge
                            .i_pump.gen_on.i_fr.gen_on.ot_cpl_i.handle;
     wire [3:0]  fr_ot_op = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
                            .i_pump.gen_on.i_fr.gen_on.otr_q.op;
+
+    // ---- wedge diagnosis: graphics-path FSM states (sel 48..55) ----
+    wire [7:0]  ra_st   = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_rast.gen_on.st_q;
+    wire [7:0]  ra_ret  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_rast.gen_on.mp_ret_q;
+    wire [7:0]  ra_fret = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_rast.gen_on.fp_ret_q;
+    wire [63:0] ra_ctx  = {20'h0,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.gen_on.code_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.gen_on.nf_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.gen_on.nv_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.gen_on.p_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.gen_on.f_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.gen_on.t_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.gen_on.lc_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.gen_on.lane_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.gen_on.clip_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.gen_on.vsw_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.gen_on.help_q};
+    wire [63:0] ra_cur  = {32'h0,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.gen_on.sx_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.gen_on.sy_q};
+    wire [7:0]  ra_hs   = {
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.mp_rsp_i.err,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.gen_on.mp_acked_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.mp_req_valid_o,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.mp_req_ready_i,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.mp_rsp_valid_i,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.sh_work_valid_o,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.sh_work_ready_i,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_rast.sh_done_i};
+    wire [15:0] ex_st   = {1'h0,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_exec.gen_on.state_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_exec.gen_on.outst_q};
+    wire [7:0]  sh_hs   = {4'h0,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_sh.gen_on.cast_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_sh.gen_on.wbusy,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_sh.gen_on.wdone,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_sh.gen_on.disp_q_valid};
+    wire [7:0]  wv_st   = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_sh.gen_on.i_wave.gen_on.st_q;
+    wire [7:0]  wv_ret  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_sh.gen_on.i_wave.gen_on.ret_q;
     wire [63:0] fr_ot_id = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
                            .i_pump.gen_on.i_fr.gen_on.otr_q.id;
     wire [63:0] fr_ot_par = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
@@ -510,6 +571,49 @@ module tb_g6lc_apu_bridge
                    `_VS.mp_req[p].dom, `_VS.mp_req[p].addr,
                    `_VS.mp_req[p].wdata, `_VS.mp_req[p].wstrb);
     end
+
+    // 3d-d debug: [f5ot2] taps the arbitrated ObjTab port — every
+    // requester (pump/exec/ctl/dbg/sh) — incl. the record-handle
+    // READSLOTs and relocation SCAN_OVL/SETAUX ops; [reloc+] reports
+    // the vgctl relocation bases and each squatter eviction.
+`define _VC i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_ctl.gen_on
+    logic [5:0] vc_st_q = '0;
+    always_ff @(posedge clk_i) begin
+      if (`_TOP.ot_req_valid && `_TOP.ot_req_ready)
+        $display("[f5ot2] req who=%0d op=%0d id=%016x knd=%0d off=%x sz=%x msk=%x val=%x mid=%x",
+                 `_TOP.ot_grant_pump ? 1 : `_TOP.ot_grant_exec ? 2 :
+                 `_TOP.ot_grant_ctl ? 3 : `_TOP.ot_grant_dbg ? 4 : 5,
+                 `_TOP.ot_req.op, `_TOP.ot_req.id, `_TOP.ot_req.kind,
+                 `_TOP.ot_req.offset, `_TOP.ot_req.size,
+                 `_TOP.ot_req.mask, `_TOP.ot_req.value,
+                 `_TOP.ot_req.mem_id);
+      if (`_TOP.ot_cpl_valid && `_TOP.ot_cpl_ready)
+        $display("[f5ot2] cpl og=%0d st=%0d hnd=%08x live=%0d knd=%0d gen=%x sz=%x aux=%x bm=%x",
+                 `_TOP.og_q,
+                 `_TOP.ot_cpl.status, `_TOP.ot_cpl.handle,
+                 `_TOP.ot_cpl.entry.live, `_TOP.ot_cpl.entry.kind,
+                 `_TOP.ot_cpl.entry.gen, `_TOP.ot_cpl.entry.size,
+                 `_TOP.ot_cpl.entry.aux, `_TOP.ot_cpl.entry.bind_mem);
+      if (`_VC.state_q != vc_st_q) begin
+        if (`_VC.state_q == 6'd28)   // StMapDrain
+          $display("[reloc+] begin K=%x S=%x B=%08x hold=%0d",
+                   `_VC.req_ram[8], `_VC.map_size_q,
+                   `_VC.map_oldb_q, `_VC.drain_idle_i);
+        if (`_VC.state_q == 6'd31)   // StMapEvMv
+          $display("[reloc+] evict h=%08x %08x->%08x sz=%x",
+                   `_VC.ovl_h_q, `_VC.ovl_base_q,
+                   `_VC.ovl_newb_q, `_VC.ovl_size_q);
+        // the mover regs load inside StMapEvMv/StMapMv — print on the
+        // transition into StMvRd when they hold this move's values
+        if (`_VC.state_q == 6'd40 &&
+            (vc_st_q == 6'd31 || vc_st_q == 6'd35))
+          $display("[reloc+] move %08x->%08x len=%x",
+                   `_VC.mv_src_q, `_VC.mv_dst_q, `_VC.mv_len_q);
+        if (`_VC.state_q == 6'd39)   // StMapMvFail
+          $display("[reloc+] MVFAIL");
+      end
+      vc_st_q <= `_VC.state_q;
+    end
 `endif
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -530,6 +634,8 @@ module tb_g6lc_apu_bridge
         8'd5:    dbg_rdata_o = 64'(f_ring_q);
         8'd6:    dbg_rdata_o = 64'(vgp_used);
         8'd7:    dbg_rdata_o = 64'(|pay_free);   // 0 = chunks drained
+        // §12.3 3d-d: cumulative DEVBACKED relocation hold cycles
+        8'd8:    dbg_rdata_o = 64'(vc_reloc);
         // F5 bring-up: vnfront descriptor-path state taps
         8'd32:   dbg_rdata_o = {24'h0, fr_state, fr_result};
         8'd33:   dbg_rdata_o = {32'h0, fr_cmd};
@@ -547,6 +653,14 @@ module tb_g6lc_apu_bridge
         8'd45:   dbg_rdata_o = {16'h0, fr_rsvp, fr_rsvl, fr_rsve};
         8'd46:   dbg_rdata_o = {32'h0, fr_eb};
         8'd47:   dbg_rdata_o = {32'h0, fr_esz};
+        // graphics-path wedge taps
+        8'd48:   dbg_rdata_o = {32'h0, ra_ret, ra_fret, ra_st, sh_hs};
+        8'd49:   dbg_rdata_o = ra_ctx;
+        8'd50:   dbg_rdata_o = ra_cur;
+        8'd51:   dbg_rdata_o = {56'h0, ra_hs};
+        8'd52:   dbg_rdata_o = {48'h0, ex_st};
+        8'd53:   dbg_rdata_o = {56'h0, wv_st};
+        8'd54:   dbg_rdata_o = {56'h0, wv_ret};
         default: begin
           if (dbg_sel_i >= 8'd16 && dbg_sel_i < 8'd20)
             dbg_rdata_o = 64'(r_head[dbg_sel_i[1:0]]);

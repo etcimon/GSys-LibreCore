@@ -45,7 +45,7 @@ Apply these when adding or renaming a leaf. They are ordered by how much stale-m
 | **H4** | Plane split is structural | SoC box (`-->`) never grows a `g6lc_apu_vgpu_*` child until `g6lc_apu_sys` is *meant* to instantiate it. Private leaves stay `--?` the SoC. |
 | **H5** | Named path is one spine | The guest-rung G0 story is section 5. A new virtqueue clone extends that spine or starts a labeled fork. It does not silently duplicate an older `q*` / `s*` / `r*` row. |
 | **H6** | Beats name addresses | A walker/reader that issues `rd_*` / `wr_*` documents the stand-in address in the same bullet (`==>`). |
-| **H7** | Open gates stay visible | `AvailDescriptor (avail)` still faults `NEXT`. Compiler `TEX` still returns `-26`. `FeatureVirgl` stays illegal. HDMI and `ai_island` stay other devices. |
+| **H7** | Open gates stay visible | Frozen `AvailDescriptor (avail)` still faults `NEXT`; legacy compiler `TEX` returns `-26`. VenusEn publishes the 3D transport bit while refusing virgl capset 1; raster/conformance/presentation remain open. HDMI and `ai_island` stay separate devices. |
 
 A leaf that only names another texel of the clear word does not get a new tree; it hangs under the existing readback census.
 
@@ -3739,26 +3739,46 @@ and `FeatureVirgl` legality are unchanged by this source-review increment.
 ## 16. Engine arborescence (live, 3c-ii + 5a xfer + F5 descriptors + 3d-c roll-up + 5b images)
 
 ```text
-ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus]
+ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus; WorkSink=0]
     --> AxiLiteTransport (g6lc_apu_axi_lite)
         --> VirtioTop --> VirtioMmio      ==> notify levels out / used event + ISR in
         [VenusEn: no ApuControl; be_* seam]
     --> VenusSystem (g6lc_apu_vgsys)
         --> VirtqueueWalker (vqwalk)      ==> avail/desc/used beats (dom 0)
-            <-> VenusTop (vgtop)          chain_* in, cpl held handshake back
         --> VenusTop (vgtop)
-            --> ControlQueue (vgctl)      <-> ObjTab, vgpages          mp CTL
-            --> RingPump (vnpump)                                        mp PUMP
+            --> ControlQueue (vgctl)                                      mp CTL
+            --> RingPump (vnpump)                                         mp PUMP
+                --> Decoder (vndec)       transport decoding
                 --> Front (vnfront)
-                    --> Decoder (vndec)  --> ReplyBuilder (vnrep)
-                    <-> ObjTab (objtab) <-> ObjPay (objpay) <-> CmdRec (cmdrec)
-                <-> CmdExec (cmdexec)    work port
-                    --> ShaderCore (shcore) --> ModuleScanner (shmod) --> WaveEngine (shwave)   mp SH
-                    --> Xfer (xfer)        --> DmaRead/DmaWrite checked pair ==> AXI master (xfer)
+                    --> Decoder (vndec)
+                    --> ReplyBuilder (vnrep)
+            --> CmdExec (cmdexec)
+            --> CmdRec (cmdrec)
+            --> ObjPay (objpay)
+            --> ObjTab (objtab)
             --> PageAllocator (vgpages)
-        --> MemoryPort (apmem)            5 x apu_mp fixed priority ==> tdma 2:1 join (a=apmem, b=xfer)
-                                          ==> one AXI4 master (dma_req_o)
+            --> ShaderCore (shcore)                                       mp SH
+                --> ModuleScanner (shmod)
+                --> WaveEngine (shwave)
+            --> Xfer (xfer)
+                --> DmaRead/DmaWrite checked pair                         AXI xfer
+        --> MemoryPort (apmem)            5 x apu_mp fixed-priority arbiter AXI apmem
+        --> DmaJoin (tdma)                a=apmem, b=xfer ==> one AXI4 master
     ==> guest RAM window {DmaWindowBase, DmaWindowBytes} / aperture {APU_SHM_BASE, APU_SHM_BYTES}
+
+Dataflow (not structural children):
+    VirtqueueWalker <-> VenusTop          chain_* / held cpl handshake
+    ControlQueue <-> ObjTab / PageAllocator
+    RingPump.Front <-> ObjTab / ObjPay / CmdRec / CmdExec
+    CmdExec <-> ShaderCore | Xfer         held work and completion
+    ShaderCore <-> ObjTab                 READSLOT, 5th requester (3d-d)
+    ModuleScanner <-> WaveEngine          table read ports, not instantiation
+    ControlQueue ==> CmdExec              hold_i while relocation drains (3d-d)
+    response bytes ==> used element ==> used.idx ==> ISR
+
+The 3d-d edges above describe existing working-tree changes, not a new qualified
+integration result. Draw work is still refused by the production WorkSink=0 path
+until a real graphics engine consumes it; decoded commands do not render pixels.
 
 Descriptor-memory path (F5): pool/set backing pages vgpages ALLOC_PRIV ->
 vnfront bump-allocates set tables and writes 32-byte records through
@@ -3767,7 +3787,13 @@ set (layout rows read from ObjPay at dispatch; set/pool lifecycle =
 RETIRE_KIDS sweep, DSL compatibility = FNV-1a content hash in the DSL
 entry's state word); WaveEngine's LSU fetches
 records on mp SH (8-entry {set,binding,idx} cache, invalidated per
-dispatch) -> aperture.  Aperture split (guest-allocator collision fix): the
+dispatch) -> aperture.  Records carry no absolute base (3d-d): +0 =
+memory handle {gen,slot}, +28 = resource-relative offset; the LSU
+resolves the base through ObjTab READSLOT on a record-cache miss via a
+5th (lowest-priority) ObjTab requester shcore -> vgtop, so MAP_BLOB
+relocation and memory free/reuse can never strand a record — a dead or
+generation-mismatched memory resolves as the null record (loads 0,
+stores dropped, robust_q++).  Aperture split (guest-allocator collision fix): the
 32 MiB window is 24 MiB guest-visible (APU_VG_GUEST_BYTES, advertised as
 SHM_LEN) + 8 MiB device-private tail; guest-kernel MAP_BLOB extents are
 ALLOC_AT inside the guest span only, while device-internal allocations
@@ -3778,9 +3804,32 @@ same code scales to 256 MiB (65536 pages) — worst-case ALLOC measured
 2050 cycles at Pages=65536.  Two memory heaps (memory-model
 truthfulness, §12.3 C): heap0 = the private arena (type 0
 DEVICE_LOCAL, eager ALLOC_PRIV at vkAllocateMemory) and heap1 = the
-guest span (type 1 DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT, LAZY — no
-backing until MAP_BLOB ALLOC_ATs the kernel-chosen extent; UNMAP_BLOB
-frees it and drops the blob to bind_offset 0 — there is no
+guest span (type 1 DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT, lazy at
+vkAllocateMemory, backed at first bind or map — 3d-d): a bind to an
+unbacked type-1 memory ALLOC_HIs a device-chosen extent top-down in
+the guest window (away from the kernel's bottom-up drm_mm) and flags
+it DEVBACKED — an ALLOC_HI miss fails the whole Bind call
+VK_ERROR_OUT_OF_DEVICE_MEMORY.  Base publication is atomic across the
+ring/control split (the guest can bind on the ring while the kernel's
+MAP_BLOB lands on ctrl): a type-1 entry is born aux[63:32]=UNBACKED
+in the ObjTab ALLOC itself (offset field carries the initial aux —
+no create->SETAUXHI window), and the bind's {base,DEVBACKED} publish
+goes through ObjTab SETAUXHI_CAS {expected=UNBACKED}; the plain map
+uses the same CAS, but only when its lookup actually saw UNBACKED —
+a backed base (type-0 private extent or a kernel remap) keeps the
+unconditional publish, since the bind-side CAS never fires there.
+A losing publisher gets CONFLICT
+with the live entry — the bind frees its candidate extent and binds
+to the kernel base, while the map drops its ALLOC_AT reservation,
+re-reads the entry and takes the relocation path).  MAP_BLOB on a
+DEVBACKED memory holds new submissions (hold_o -> cmdexec), drains to
+idle, evicts any DEVBACKED squatter overlapping the kernel's range
+(ObjTab SCAN_OVL -> ALLOC_HI with the range excluded -> word-mover
+copy on vgctl's mp CTL port in the aperture domain -> free ->
+republish), ALLOC_ATs the kernel offset, moves the data, frees the
+old extent and clears DEVBACKED — eviction with no room fails the map
+(VK_ERROR_MEMORY_MAP_FAILED in the guest); UNMAP_BLOB frees whatever
+extent is current and drops the blob to bind_offset 0 — there is no
 re-privatization for memory-backed blobs).  Engine use of an
 unbacked type-1 memory fails truthfully (poison/DEVICE_LOST);
 blob-owned CREATE_BLOB backing is lazy too (Mesa's 8 MiB cs shmem pool
@@ -3795,7 +3844,7 @@ write and suppresses head/status publication for its in-flight st_q[]
 streams (ring_overlap stays as defence in depth) — a dead ring can no
 longer write FATAL/idle status into a later blob at the same window.
 Texture path (5b): an image/sampler descriptor fills the
-reserved record half — {view base = mem+bind+off(baseLayer,baseMip),
+reserved record half — {memory handle, relative view offset,
 view size, w/h, fmt id, mips/dim/layers, swizzle, two sampler words}
 — and `OpSampledImage` merges an image record with a sampler record;
 shwave's `W_TX*` subroutine resolves the record through the same LSU
@@ -3826,7 +3875,7 @@ counts bounded by the shared ObjTab (vn_device_profile.toml).
 |---|---|---|
 | Full-SoC Linux (3d-a bare-metal probe and 3d-b stock-stack RTL-in-the-loop landed: §11 rows 3d-a/3d-b, `architecture/uncore/apu-venus-command-trace.md`) | B | stock Ubuntu on the Variane testharness itself (R3b program): same `vulkaninfo`/dispatch under real caches and the non-coherent DMA contract (`zicbom`/`svpbmt`, no `dma-coherent`) |
 | ~~Sampler~~ / raster (Xfer landed §11 5a; compute sampler+images landed §11 5b — `W_TX*` texture path in the tree above) | C | blits, implicit-lod/derivative ops (need fragment derivatives), TBDR raster + ROP into `tc_sram` tiles; G0/A5 via Zink |
-| ~~Memory-resident descriptors~~ (F5 **landed** — §11 row F5: records in aperture memory, LSU dynamic-index fetch + 8-entry cache; the descriptor-memory path is in the tree above) | C | images/sampler arrays on the reserved record half (`vkCmdCopyImage`/blits), `tc_sram` descriptor cache beyond 8 entries |
+| Descriptor/memory model (F5 and 5b landed; 3d-d is existing working-tree work) | C | source-matched relocation/lifetime proof; order-independent layout compatibility with collision-safe comparison; bindless/update-after-bind and scalable descriptor caching |
 | `shwave` 1 IPC + `ShaderCores` | D | per-wave throughput 1 IPC; multi-core dispatch via the cluster pattern; `DramChannels` by profile |
 | virtio-pci endpoint function (F4) | D | five virtio-pci capabilities + shared-memory capability over a BAR into the aperture |
 | Scanout / WSI | D | `RESOURCE_UUID`/dma-buf export (G2) |

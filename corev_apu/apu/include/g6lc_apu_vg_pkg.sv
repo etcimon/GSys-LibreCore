@@ -71,6 +71,10 @@ package g6lc_apu_vg_pkg;
   localparam logic [31:0] APU_VG_RESP_CAPSET       = 32'h1103;
   localparam logic [31:0] APU_VG_RESP_MAP_INFO     = 32'h1106;
   localparam logic [31:0] APU_VG_ERR_UNSPEC        = 32'h1200;
+  // §12.3 3d-d: MAP_BLOB relocation could not evict every DEVBACKED
+  // squatter (the kernel's UAPI code; Mesa reports
+  // VK_ERROR_MEMORY_MAP_FAILED)
+  localparam logic [31:0] APU_VG_ERR_OUT_OF_MEMORY = 32'h1201;
   localparam logic [31:0] APU_VG_ERR_RID           = 32'h1203;
   localparam logic [31:0] APU_VG_ERR_CID           = 32'h1204;
   localparam logic [31:0] APU_VG_ERR_PARAM         = 32'h1205;

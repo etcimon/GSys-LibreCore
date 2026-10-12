@@ -27,6 +27,8 @@ Subcommands
   soak      run the OpenSBI cookie soak remotely
   di        compile and run the directed mini suite remotely in parallel
   py        upload Python scripts and run them with a remote thread pool
+  apu-leaf  run the whole APU/Venus regression on an isolated pushed snapshot
+  apu-leaf-collect  collect a detached apu-leaf run and emit its verdict
   pull      copy remote logs back
   shell     interactive ssh into the remote workdir
   clean     remove remote work/run dirs
@@ -46,6 +48,7 @@ import concurrent.futures
 import hashlib
 import json
 import os
+import posixpath
 import re
 import shlex
 import shutil
@@ -689,7 +692,7 @@ class Remote:
         )
         log(f"push done in {time.time()-t0:.3f}s")
 
-    def pull(self, remote_path: str, local: Path) -> None:
+    def pull(self, remote_path: str, local: Path, optional: bool = False) -> None:
         local.mkdir(parents=True, exist_ok=True)
         ssh_cmd = "ssh " + " ".join(shlex.quote(o) for o in self.base_opts())
         log(f"pull {self.host}:{remote_path} -> {local}")
@@ -699,7 +702,49 @@ class Remote:
             check=False,
         )
         log(f"pull rc={proc.returncode} in {time.time()-t0:.3f}s")
-        proc.check_returncode()
+        if not optional:
+            proc.check_returncode()
+
+    def push_tree(self, root: Path, files_from: Path, remote_dir: str) -> None:
+        """Push exactly the root-relative paths listed in ``files_from``.
+
+        rsync --files-from preserves the directory structure below ``root``,
+        so the remote tree is a sparse mirror of the snapshot rather than a
+        flat directory. Used by the APU leaf, which must not touch the shared
+        synced repo on the builder.
+        """
+        ssh_cmd = "ssh " + " ".join(shlex.quote(o) for o in self.base_opts())
+        n_files = sum(1 for ln in files_from.read_text().splitlines() if ln.strip())
+        cmd = [*RSYNC_BIN, "-az", f"--files-from={files_from}",
+               "-e", ssh_cmd, f"{root}/", f"{self.host}:{remote_dir}/"]
+        self.vlog("rsync " + " ".join(shlex.quote(c) for c in cmd))
+        t0 = time.time()
+        proc = subprocess.run(cmd, check=False)
+        if proc.returncode != 0:
+            die(f"tree push failed (rc={proc.returncode})")
+        log(f"pushed {n_files} files -> {remote_dir} in {time.time()-t0:.1f}s")
+
+    def pull_filtered(self, remote_path: str, local: Path,
+                      includes: list[str]) -> None:
+        """Pull a remote directory keeping only directories + whitelisted names.
+
+        -m prunes directories left empty by the filter, so logs and JSON come
+        back while binaries and Verilator Mdirs never traverse the link. A
+        missing remote directory is logged but not fatal: the caller's verdict
+        logic treats absent artifacts as an incomplete run.
+        """
+        local.mkdir(parents=True, exist_ok=True)
+        ssh_cmd = "ssh " + " ".join(shlex.quote(o) for o in self.base_opts())
+        filters = (["--include=*/"] + [f"--include={pat}" for pat in includes]
+                   + ["--exclude=*"])
+        log(f"pull_filtered {self.host}:{remote_path} -> {local}")
+        t0 = time.time()
+        proc = subprocess.run(
+            [*RSYNC_BIN, "-azm", "-e", ssh_cmd, *filters,
+             f"{self.host}:{remote_path}", str(local)],
+            check=False,
+        )
+        log(f"pull_filtered rc={proc.returncode} in {time.time()-t0:.3f}s")
 
 
 # --------------------------------------------------------------------------
@@ -2010,6 +2055,349 @@ def cmd_l2_equiv(rem: Remote, args) -> int:
     return 0 if passed else 1
 
 
+APU_LEAF_STAGES = ('unit', 'top', 'soc', 'bridge', 'guest', 'synth', 'profile')
+# Generated oracle inputs (shader_vectors.py / vn_golden.py outputs) that the
+# testbenches $readmem at runtime. verif/.gitignore ignores *.hex, so these
+# dirs would otherwise never ride along — the suites cannot regenerate them
+# on a bare snapshot.
+APU_LEAF_GENERATED_INPUT_DIRS = ('verif/tb/apu/sh_vectors',
+                                 'verif/tb/apu/vn_vectors')
+
+# Env vars a leaf run may inject into the detached launcher: guest-stage
+# QEMU plumbing only; anything else is rejected up front so the remote
+# environment stays pinned by env.sh.
+APU_LEAF_ENV_ALLOW = ('G6LC_QEMU', 'G6LC_QLIB', 'TARGET_CFG')
+
+
+def apu_leaf_env(pairs: list[str]) -> dict[str, str]:
+    """Parse --env KEY=VALUE pairs against APU_LEAF_ENV_ALLOW."""
+    env: dict[str, str] = {}
+    for pair in pairs:
+        key, sep, value = pair.partition('=')
+        if not sep or not key:
+            die(f"--env expects KEY=VALUE, got '{pair}'")
+        if key not in APU_LEAF_ENV_ALLOW:
+            die(f"--env {key} not allowed "
+                f"(choose: {', '.join(APU_LEAF_ENV_ALLOW)})")
+        env[key] = value
+    return env
+
+
+def _apu_source_manifest():
+    """Import the manifest module kept beside run-apu-regress.sh."""
+    import importlib.util
+    path = repo_root() / 'verif' / 'tb' / 'apu' / 'apu_source_manifest.py'
+    spec = importlib.util.spec_from_file_location('apu_source_manifest', path)
+    if spec is None or spec.loader is None:
+        die(f"cannot load {path}")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def apu_leaf_stages(text: str) -> list[str]:
+    """Validate a --stages list with the same rules as run-apu-regress.sh."""
+    if text.startswith(',') or text.endswith(',') or ',,' in text:
+        die(f"invalid stages: {text}", 2)
+    stages = text.split(',') if text else []
+    seen: set[str] = set()
+    for stage in stages:
+        if stage not in APU_LEAF_STAGES:
+            die(f"unknown stage: {stage}", 2)
+        if stage in seen:
+            die(f"duplicate stage: {stage}", 2)
+        seen.add(stage)
+    if not stages:
+        die("no stages selected", 2)
+    return stages
+
+
+def apu_leaf_sources(root: Path) -> list[str]:
+    """Tracked + untracked files under the APU manifest surfaces.
+
+    The union of ``git ls-files --cached --recurse-submodules`` and
+    ``git ls-files --others --exclude-standard`` — dirty working-tree edits
+    ride along, staged/worktree deletions drop out via the is_file() check,
+    and .gitignore'd artifacts are never enumerated. Untracked files *inside*
+    submodules are intentionally not enumerated: git does not expand
+    --others into submodule worktrees.
+
+    One exception: APU_LEAF_GENERATED_INPUT_DIRS are additionally enumerated
+    with ``--others --ignored --exclude-standard``, so the gitignored
+    generated oracle inputs the testbenches consume are part of the snapshot
+    and hashed into the identity. Freshness versus their generators is NOT
+    checked by this leaf.
+    """
+    surfaces = list(_apu_source_manifest().SURFACES)
+    found: set[str] = set()
+    for mode, pathspecs in (
+            (('--cached', '--recurse-submodules'), surfaces),
+            (('--others', '--exclude-standard'), surfaces),
+            (('--others', '--ignored', '--exclude-standard'),
+             list(APU_LEAF_GENERATED_INPUT_DIRS))):
+        proc = subprocess.run(
+            ['git', '-C', str(root), 'ls-files', '-z', *mode, '--', *pathspecs],
+            capture_output=True)
+        if proc.returncode != 0:
+            die(f"git ls-files failed in {root}: "
+                f"{proc.stderr.decode(errors='replace').strip()}")
+        for rel in proc.stdout.decode(errors='replace').split('\0'):
+            if rel and (root / rel).is_file():
+                found.add(Path(rel).as_posix())
+    return sorted(found)
+
+
+def apu_leaf_verdict(summary: dict | None, local_sha: str,
+                     rc: int | None) -> tuple[str, str]:
+    """Classify a collected leaf run into (status, reason).
+
+    Identity mismatch outranks every suite outcome except a missing
+    summary: a run on sources that do not match the pushed snapshot is not
+    evidence about the snapshot at all.
+    """
+    if summary is None:
+        return 'incomplete', 'runner did not produce summary.json'
+    if (summary.get('sourceSha256Before') != local_sha
+            or summary.get('sourceSha256After') != local_sha):
+        return ('incomplete',
+                'source identity mismatch between local snapshot and remote run')
+    status = summary.get('status')
+    if status == 'fail':
+        return 'fail', 'runner reported failure'
+    if status == 'incomplete':
+        return 'incomplete', 'runner reported incomplete'
+    if status == 'pass' and rc not in (0, None):
+        return 'incomplete', f'runner exit {rc} contradicts PASS'
+    return 'pass', ''
+
+
+def apu_leaf_launch_script(source_dir: str, rundir: str, stages: str,
+                           suite_timeout: int, tag: str,
+                           env: dict[str, str] | None = None) -> str:
+    """Remote bash that detaches the regression launcher via setsid/nohup.
+
+    The runner's --out must not pre-exist, so output/ is created by the
+    launcher itself. pid.txt/start.txt/end.txt/rc.txt let the proxy poll and
+    reconstruct the run without holding the ssh session open.
+
+    The whole ``cd && detached-job`` list is parenthesized before the
+    redirections: without the subshell, ``&`` backgrounds the entire
+    ``cd && setsid`` list while ``>/dev/null`` binds only to ``bash -c``, so
+    the backgrounded subshell keeps the ssh pipes open and the launch call
+    hangs until the remote job exits.
+
+    ``env`` holds allowlisted KEY=VALUE pairs (--env) that precede setsid
+    so the detached launcher inherits them.  A G6LC_QEMU value also
+    prepends its dirname to PATH so sibling tools (qemu-img) resolve.
+    """
+    verilator = f"{REMOTE_ROOT}/toolchains/verilator-{VERILATOR_VERSION}/bin/verilator"
+    yosys = f"{REMOTE_ROOT}/toolchains/formal/bin/yosys"
+    extra_env = ''.join(f"{k}={shlex.quote(v)} "
+                        for k, v in (env or {}).items())
+    qemu = (env or {}).get('G6LC_QEMU')
+    if qemu:
+        extra_env += (f"PATH={shlex.quote(posixpath.dirname(qemu))}:$PATH ")
+    inner = (
+        f"bash verif/tb/apu/run-apu-regress.sh --stages {stages} "
+        f"--out {shlex.quote(rundir + '/output')} "
+        f"> {shlex.quote(rundir + '/driver.log')} 2>&1; "
+        f"echo $? > {shlex.quote(rundir + '/rc.txt')}; "
+        f"date +%s > {shlex.quote(rundir + '/end.txt')}"
+    )
+    return (
+        f"{env_prefix()} "
+        f"(cd {shlex.quote(source_dir)} && "
+        f"APU_SOURCE_FILES={shlex.quote(rundir + '/snapshot-files.txt')} "
+        f"TH_PROXY_TAG={shlex.quote(tag)} "
+        f"VERILATOR={shlex.quote(verilator)} "
+        f"YOSYS={shlex.quote(yosys)} "
+        f"APU_REGRESS_TIMEOUT={shlex.quote(str(suite_timeout))} "
+        f"{extra_env}"
+        f"setsid nohup bash -c {shlex.quote(inner)}) "
+        f">/dev/null 2>&1 </dev/null & "
+        f"echo $! > {shlex.quote(rundir + '/pid.txt')}; "
+        f"date +%s > {shlex.quote(rundir + '/start.txt')}"
+    )
+
+
+def _apu_leaf_provisional(dest: Path, tag: str, stages: list[str],
+                        local: dict, remote_host: dict | None,
+                        reason: str,
+                        leaf_env: dict | None = None) -> None:
+    """Write a leaf-result.json for a run whose remote job is still live."""
+    record = {
+        'kind': 'apu-regress-leaf', 'execution': 'remote-proxy', 'runId': tag,
+        'status': 'incomplete', 'reason': reason,
+        'stages': stages, 'sourceSha256': local.get('sourceSha256'),
+        'fileCount': local.get('fileCount'), 'remoteReturnCode': None,
+        'remoteHost': remote_host, 'summary': None,
+        'leafEnv': leaf_env,
+        'summaryPath': 'output/summary.json',
+        'strictQualification': False, 'qualification': False,
+        'scope': 'selected stages on an isolated source snapshot; not Vulkan '
+                 'conformance, full-SoC or physical qualification',
+    }
+    (dest / 'leaf-result.json').write_text(json.dumps(record, indent=2) + '\n')
+
+
+def _apu_leaf_collect(rem: Remote, tag: str, dest: Path) -> int:
+    """Pull a finished (or still-running) leaf run and emit the verdict."""
+    rundir = f"{REMOTE_ROOT}/runs/{tag}"
+    for name in ('driver.log', 'rc.txt', 'end.txt', 'start.txt', 'pid.txt'):
+        rem.pull(f"{rundir}/{name}", dest, optional=True)
+    rem.pull_filtered(f"{rundir}/output/", dest / 'output',
+                      ['*.log', '*.json', '*.tsv', '*.txt', '*.h', '*.sha256'])
+    summary_path = dest / 'output' / 'summary.json'
+    summary = None
+    if summary_path.is_file():
+        try:
+            summary = json.loads(summary_path.read_text())
+        except ValueError:
+            summary = None
+    rc = None
+    rc_path = dest / 'rc.txt'
+    if rc_path.is_file():
+        text = rc_path.read_text().strip()
+        if re.fullmatch(r'-?\d+', text):
+            rc = int(text)
+    local = json.loads((dest / 'source-local.json').read_text())
+    local_sha = local.get('sourceSha256')
+    status, reason = apu_leaf_verdict(summary, local_sha, rc)
+    remote_host = None
+    host_path = dest / 'remote-host.json'
+    if host_path.is_file():
+        try:
+            remote_host = json.loads(host_path.read_text())
+        except ValueError:
+            remote_host = None
+    leaf_env = None
+    if isinstance(remote_host, dict):
+        leaf_env = remote_host.get('leafEnv')
+    record = {
+        'kind': 'apu-regress-leaf', 'execution': 'remote-proxy', 'runId': tag,
+        'status': status, 'reason': reason,
+        'stages': local.get('stages'), 'sourceSha256': local_sha,
+        'fileCount': local.get('fileCount'), 'remoteReturnCode': rc,
+        'remoteHost': remote_host, 'summary': summary,
+        'leafEnv': leaf_env,
+        'summaryPath': 'output/summary.json',
+        'strictQualification': False, 'qualification': False,
+        'scope': 'selected stages on an isolated source snapshot; not Vulkan '
+                 'conformance, full-SoC or physical qualification',
+    }
+    (dest / 'leaf-result.json').write_text(json.dumps(record, indent=2) + '\n')
+    log(f"APU leaf {status.upper()}: {reason} — {dest}")
+    return {'pass': 0, 'fail': 1, 'incomplete': 4}[status]
+
+
+def cmd_apu_leaf(rem: Remote, args) -> int:
+    root = Path(args.snapshot).resolve()
+    stages = apu_leaf_stages(args.stages)
+    leaf_env = apu_leaf_env(getattr(args, 'env', None) or [])
+    files = apu_leaf_sources(root)
+    manifest_mod = _apu_source_manifest()
+    local = manifest_mod.manifest(root, ','.join(stages), None, files=files)
+    tag = f"apu-leaf-{datetime.now().strftime('%Y%m%dT%H%M%S')}-{os.urandom(6).hex()}"
+    rundir = f"{REMOTE_ROOT}/runs/{tag}"
+    source_dir = f"{rundir}/source"
+    dest = repo_root() / "remote-runs" / tag
+    dest.mkdir(parents=True, exist_ok=False)
+    (dest / 'snapshot-files.txt').write_text(''.join(f'{p}\n' for p in files))
+    (dest / 'snapshot.sha256').write_text(
+        ''.join(f'{digest}  {path}\n' for path, digest in
+                sorted(local['sources'].items()) if digest))
+    (dest / 'source-local.json').write_text(json.dumps(local, indent=2) + '\n')
+    log(f"isolated APU leaf -> {rundir}; {len(files)} files, "
+        f"identity {local['sourceSha256'][:12]}; no shared repo sync or cleanup")
+    rem.start_master()
+    rem.run(f"ls -d {shlex.quote(REMOTE_ROOT + '/runs')} && "
+            f"mkdir {shlex.quote(rundir)} {shlex.quote(source_dir)}")
+    rem.push(dest / 'snapshot-files.txt', f"{rundir}/snapshot-files.txt")
+    rem.push(dest / 'snapshot.sha256', f"{rundir}/snapshot.sha256")
+    rem.push_tree(root, dest / 'snapshot-files.txt', source_dir)
+    rem.run(f"cd {shlex.quote(source_dir)} && "
+            f"sha256sum --quiet -c {shlex.quote(rundir + '/snapshot.sha256')} && "
+            "find . -name '*.sh' -exec chmod u+x {} +")
+    verilator = f"{REMOTE_ROOT}/toolchains/verilator-{VERILATOR_VERSION}/bin/verilator"
+    yosys = f"{REMOTE_ROOT}/toolchains/formal/bin/yosys"
+    probe = (
+        f"{env_prefix()} "
+        "printf 'nproc=%s\\n' \"$(nproc)\"; "
+        "printf 'loadavg=%s\\n' \"$(cut -d' ' -f1-3 /proc/loadavg)\"; "
+        "printf 'mem_available_kib=%s\\n' \"$(awk '/^MemAvailable:/ {print $2}' /proc/meminfo)\"; "
+        "printf 'uname=%s\\n' \"$(uname -a)\"; "
+        "printf 'date_utc=%s\\n' \"$(date -u +%Y-%m-%dT%H:%M:%SZ)\"; "
+        f"printf 'verilator=%s\\n' \"$({shlex.quote(verilator)} --version 2>/dev/null)\"; "
+        f"printf 'yosys=%s\\n' \"$({shlex.quote(yosys)} -V 2>/dev/null | head -1)\"; "
+        "printf 'riscv_gcc=%s\\n' \"$(riscv-none-elf-gcc --version 2>/dev/null | head -1)\"; "
+        "printf 'gxx=%s\\n' \"$(g++ --version 2>/dev/null | head -1)\"; "
+        "printf 'python3=%s\\n' \"$(python3 --version 2>&1)\""
+    )
+    if leaf_env.get('G6LC_QEMU'):
+        qemu = shlex.quote(leaf_env['G6LC_QEMU'])
+        qemu_repo = f"{REMOTE_ROOT}/g6lc-qemu/repo"
+        probe += (
+            f"; printf 'qemu_version=%s\\n' "
+            f"\"$({qemu} --version 2>/dev/null | head -1)\""
+            f"; printf 'qemu_sha256=%s\\n' "
+            f"\"$(sha256sum {qemu} 2>/dev/null | cut -d' ' -f1)\""
+            f"; printf 'qemu_devices_g6lc=%s\\n' "
+            f"\"$({qemu} -device help 2>/dev/null | grep -i g6lc | tr '\\n' ';')\""
+            f"; printf 'qemu_repo_describe=%s\\n' "
+            f"\"$(test -d {shlex.quote(qemu_repo + '/.git')} && "
+            f"git -C {shlex.quote(qemu_repo)} "
+            f"describe --always --dirty --long 2>/dev/null)\""
+        )
+    remote_host: dict[str, str] = {}
+    for line in rem.out(probe).splitlines():
+        key, sep, value = line.partition('=')
+        if sep:
+            remote_host[key.strip()] = value.strip()
+    remote_host['leafEnv'] = leaf_env
+    (dest / 'remote-host.json').write_text(json.dumps(remote_host, indent=2) + '\n')
+    rem.run(apu_leaf_launch_script(source_dir, rundir, ','.join(stages),
+                                   args.suite_timeout, tag, leaf_env),
+            timeout=120, heartbeat=False)
+    log(f"launched {tag} (stages={','.join(stages)}); polling every "
+        f"{args.poll_interval}s")
+    if args.detach:
+        print(tag)
+        print(f"collect: {sys.argv[0]} apu-leaf-collect {tag}")
+        _apu_leaf_provisional(dest, tag, stages, local, remote_host,
+                              'detached; collect later', leaf_env)
+        return 4
+    budget = command_timeout(args.timeout, 21600)
+    deadline = time.time() + budget
+    t0 = time.time()
+    while True:
+        probe_out = rem.out(
+            f"cat {shlex.quote(rundir + '/end.txt')} 2>/dev/null; echo @@; "
+            f"tail -n 1 {shlex.quote(rundir + '/driver.log')} 2>/dev/null")
+        end_txt, _, last_line = probe_out.partition('@@')
+        log(f"apu-leaf elapsed={time.time() - t0:.0f}s "
+            f"remote: {last_line.strip()[:120]}")
+        if end_txt.strip():
+            break
+        if time.time() >= deadline:
+            log(f"poll budget exhausted; remote job left running under {rundir}")
+            log(f"collect: {sys.argv[0]} apu-leaf-collect {tag}")
+            _apu_leaf_provisional(
+                dest, tag, stages, local, remote_host,
+                'poll budget exhausted; remote job left running', leaf_env)
+            return 4
+        time.sleep(args.poll_interval)
+    return _apu_leaf_collect(rem, tag, dest)
+
+
+def cmd_apu_leaf_collect(rem: Remote, args) -> int:
+    dest = repo_root() / "remote-runs" / args.tag
+    if not (dest / 'source-local.json').is_file():
+        die(f"no local snapshot record for tag '{args.tag}': "
+            f"{dest / 'source-local.json'}")
+    rem.start_master()
+    return _apu_leaf_collect(rem, args.tag, dest)
+
+
 def cmd_shell(rem: Remote, args) -> int:
     args.command = _shell_command(args)
     rem.start_master()
@@ -2389,6 +2777,37 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--write-update", action="store_true",
                     help="enable the resident-line write merge (T8f) on both sides")
     sp.set_defaults(fn=cmd_l2_equiv)
+
+    sp = sub.add_parser(
+        "apu-leaf",
+        help="push an isolated APU/Venus source snapshot and run the whole "
+             "regression launcher on it remotely (selected-stage evidence on "
+             "an isolated snapshot, not device qualification)")
+    sp.add_argument("snapshot",
+                    help="repository root; pushed via git ls-files over the "
+                         "APU manifest surfaces (dirty worktree included)")
+    sp.add_argument("--stages", default="unit,top,soc,bridge,synth",
+                    help="comma-separated stage list "
+                         "(default unit,top,soc,bridge,synth)")
+    sp.add_argument("--suite-timeout", type=int, default=7200, metavar="SECONDS",
+                    help="per-suite timeout exported as APU_REGRESS_TIMEOUT "
+                         "(default 7200)")
+    sp.add_argument("--env", action="append", default=[], metavar="KEY=VALUE",
+                    help="extra env for the detached launcher (repeatable); "
+                         "allowlist: " + ", ".join(APU_LEAF_ENV_ALLOW))
+    sp.add_argument("--poll-interval", type=int, default=60, metavar="SECONDS",
+                    help="delay between remote completion polls (default 60)")
+    sp.add_argument("--detach", action="store_true",
+                    help="launch and return immediately; finish with "
+                         "apu-leaf-collect <tag>")
+    sp.set_defaults(fn=cmd_apu_leaf)
+
+    sp = sub.add_parser(
+        "apu-leaf-collect",
+        help="collect a detached apu-leaf run into remote-runs/<tag> and emit "
+             "the verdict (selected-stage evidence, not device qualification)")
+    sp.add_argument("tag", help="apu-leaf-<timestamp>-<rand> run tag")
+    sp.set_defaults(fn=cmd_apu_leaf_collect)
 
     sp = sub.add_parser("shell", help="interactive ssh into the remote root, or run one command")
     sp.add_argument("command", default=None, nargs="*",

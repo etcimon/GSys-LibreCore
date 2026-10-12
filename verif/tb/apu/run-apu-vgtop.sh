@@ -83,7 +83,11 @@ ue_cneg_badfmt_1 ue_cneg_viewoob_1 ue_cneg_kindmix_1 \
 ue_cneg_xfer_img_oob_1 ue_cneg_unnorm_1 \
 ue_cpos_clear_rgba8_1 ue_cpos_clear_r32f_1 ue_cpos_clear_r32u_1 \
 ue_cpos_clear_srgb_1 ue_cpos_clear_rgba16f_1 \
-ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1"
+ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1 \
+ue_cpos_rb_mapafter_1 ue_cpos_ubo_bindfirst_1 \
+ue_cpos_evict_1 ue_cpos_reloc_hold_1 \
+ue_cneg_evict_full_1 ue_cneg_bind_full_1 ue_cneg_stale_mem_1 \
+ue_donecol_1"
 
 run_step() {
   local step="$1"; shift
@@ -127,7 +131,7 @@ run_step() {
     echo "COMPUTE ARM FAILED (step $step)"
     exit 1
   fi
-  echo "COMPUTE ARM OK step$step (39 sessions)"
+  echo "COMPUTE ARM OK step$step ($(wc -w <<<"$SESSIONS") sessions)"
 }
 
 # gate step 1: defaults (lat 1/1, ready 100%)

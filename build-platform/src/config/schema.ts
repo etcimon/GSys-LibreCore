@@ -297,6 +297,7 @@ export interface TestSuite {
   /** Heavy/slow — excluded from `--all` unless explicitly named. */
   optional?: boolean;
   execution?: "host" | "remote-proxy";
+  args?: string[];
 }
 
 export interface TestsConfig {

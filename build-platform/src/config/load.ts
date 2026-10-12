@@ -144,6 +144,12 @@ export function validateConfig(config: ResolvedBuildConfig): void {
     );
   }
   const suiteIds = new Set(tests.suites.map((s) => s.id));
+  for (const suite of tests.suites) {
+    if (suite.args !== undefined && (!Array.isArray(suite.args) ||
+        suite.args.some((arg) => typeof arg !== "string" || arg.includes("\u0000")))) {
+      issues.push(`tests.suites '${suite.id}' args must be an array of NUL-free strings.`);
+    }
+  }
   for (const id of tests.defaultSuites) {
     if (!suiteIds.has(id)) {
       issues.push(`tests.defaultSuites references unknown suite '${id}'.`);

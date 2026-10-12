@@ -11,7 +11,18 @@ at U0. The graphics lane is a parallel envelope. Its map is
 [`uncore/apu-graphics.md`](uncore/apu-graphics.md). A 100 TOPS pass does not advance it,
 and a graphics leaf does not qualify HDMI or the island.
 
-**Graphics override, 2026-10-01:** the long graphics rows below are historical
+**Graphics current, 2026-10-10:** the authoritative contract is
+`uncore/apu-vulkan-engine.md` (current continuation) and the live structural/dataflow
+map is `corev_apu/apu/AGENTS-impl-interplays.md` §16. Venus is attached; bounded
+stock-Mesa compute/image tests exist. The dirty 3d-d memory work is not freshly
+qualified. Raster/ROP, full-SoC coherence, WSI and physical deployment remain open.
+The API-1.1 bring-up profile is not conformant (bounded audit: 19 findings/29 rules).
+The selected release requires Vulkan 1.4 plus the full requested advanced features,
+x86 Ubuntu UE/CS2 first, no custom runtime, and official uptake of missing generic
+Venus support. Performance/area is a Pareto-study gate, not an AI-TOPS/FPS estimate.
+All graphics material below is historical except explicitly dated successor records.
+
+**Historical graphics override, 2026-10-01:** the long graphics rows below are historical
 fixture censuses, not current qualification or authoritative tracked/untracked
 labels. Pinned UE 5.8.3 and two official Ubuntu kernel references are now local,
 clean and lazy. The current requirement matrix is in `uncore/apu-graphics.md`;

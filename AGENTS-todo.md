@@ -12,6 +12,189 @@ is the queue, not the design.
 | Host / verify | [`AGENTS-build-platform.md`](AGENTS-build-platform.md) · [`AGENTS-build.md`](AGENTS-build.md) · [`build-platform/AGENTS.md`](build-platform/AGENTS.md) | CLI, residual soaks, probe→verify |
 | Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
 
+## APU full-feature continuation (2026-10-10)
+
+Contract: `architecture/uncore/apu-vulkan-engine.md` current continuation; plan
+`C:\Users\etcim\.devin\plans\plan-96c6986262437fe2.md`. All requested advanced features
+remain release requirements; intermediate raster gates do not narrow the product.
+
+- [x] Source review distinguishes committed Venus/compute/image progress, the frozen
+  catalog, and dirty 3d-d memory changes; §16 now separates structural/dataflow edges.
+- [x] Reproduce and fix aggregate false-green cases: invalid/empty stages, unchecked
+  logs, failure/skip markers, timeout, reused outputs, source drift and missing full
+  synth evidence. JSON source inventories/log hashes are diagnostic, not strict
+  build manifests. `--remote` partial routing is refused rather than silently local.
+- [x] Add read-only bounded profile auditing and optional `apu-profile-audit` suite:
+  29 checked rules, 19 current findings; expected nonzero, not a Vulkan/CTS verdict.
+- [x] Host verification: 22 APU harness/profile tests pass, build-platform has 245
+  passes / one intentionally skipped hardware suite, and typecheck passes. The full
+  proxy unit suite retains two cache-counter expectation failures, reproduced using
+  the HEAD test source with unchanged parser files; not caused or repaired by this pass.
+- [x] Guest-log succession located (2026-10-11): `r1/guest.log` (2026-10-09 06:07)
+  GUEST-FAIL on the async 12 MiB device-local negative → `r1/guest3-runguest.log`
+  (09:07) GUEST-PASS with `G6LC_VKMEM_PASS`, the negative arm running under the
+  `VN_PERF=no_async_mem_alloc` diagnostic that `vkmem.c` sets itself → `5b-r2/guest-run2.log`
+  (2026-10-10 12:24) both arms GUEST-PASS incl. `G6LC_VKIMAGE_PASS` (commit `2b909f1b8`
+  evidence) → `3d-d/guest-run.log` (18:31) GUEST-FAIL `bind->update->map->dispatch
+  mismatches=32`, taken before the ObjTab CAS race fix; no guest run exists after it.
+  The default-async negative path is therefore still unproven on a stock guest.
+- [x] Isolated remote dispatch landed: `testharness_proxy.py apu-leaf <repo> --stages …`
+  / `apu-leaf-collect <tag>` push the git-visible closure plus the generated oracle
+  inputs (`sh_vectors`, `vn_vectors`) to `/opt/testharness/runs/apu-leaf-<tag>/source`,
+  verify sha256 on arrival, run the launcher detached with the pinned Verilator 5.008 /
+  Yosys 0.68 / xpack gcc 14.2.0, and pull hashed evidence; `apu_source_manifest.py`
+  (`APU_SOURCE_FILES`) makes local and remote identity comparable; optional build-platform
+  suite `apu-remote-leaf`. Tool-identity findings fixed on the TB side only: three
+  surfaces were authored against local Verilator 5.020 and did not build on the 5.008 pin
+  (`-Wno-GENUNNAMED`, a `do…while` block, `inside{}` on a queue); `run-cva6-venus.sh`
+  rebuilt the tracked `venus_probe.hex` in-tree (drift). Dependency-DAG scheduling, safe
+  guest-image reuse and strict qualification registration remain open.
+- [x] 3d-d RTL stages pass on the pinned toolchain. Leaf
+  `apu-leaf-20261011T035154-cac68fd2335a` (identity `3cecae55…` local = before = after,
+  Verilator 5.008 / Yosys 0.68 / xpack gcc 14.2.0): **25/25 suites** — objtab 2,283 (CAS
+  case), vgpages 3,526 at 8192 and 65536 pages incl. `ALLOC_HI`, vgctl 75, vnfront 2,500
+  incl. bindfull, cmdexec 31, xfer 2,018, gcs 12, vndec 176,908, vnrep 10,678, vnpump 122,
+  shmod 1,629,285, shwave 40,861, shcore 18,751, vgtop 241,968, vgsys 143,112, sys-venus
+  49,340, cva6-venus 488, bridge build + self-test 2,651, and full Enable=0/1 synth for
+  vgpages (both geometries)/objtab/vnpump/cmdexec/vgctl/vnfront. Two discrepancies seen
+  in the preceding leaf `…T010751…` were root-caused to the test side, not the RTL or the
+  golden model: Verilator 5.008 mis-reads a `ref` unpacked-array argument in the vgpages
+  TB model (DUT traces identical on 5.008/5.020; model hoisted to module scope), and
+  `bridge_selftest.py` replayed the fresh-device `ue_cpos_bufcopy_1` oracle after the
+  transport session where the two-session `ue_probe_bufcopy_1` oracle applies — RTL
+  `{gen=2,slot=0xb}` after `RESET_CTX` slot reuse is the documented contract. Earlier
+  tags `…T220739…` (toolchain/snapshot failures), `…T230949…` (venus_probe.hex drift)
+  and `…T010751…` are retained as failed evidence.
+- [x] **3d-d guest-gate failure root-caused: a test defect, not the engine.** Isolated
+  remote QEMU built from the local emitted sources (`g6q_remote.py remote-build`, root
+  `/opt/testharness/runs/apu-qemu-stream8-20261011T054522`, QEMU 10.0.0 pin, sha256
+  `d5309a5a…`, machine `g6lc-g6lc64_stream8`; the shared `/opt/testharness/g6lc-qemu`
+  predates stream8). Guest leaves `apu-leaf-20261011T065347-f4e72edaa73c` and
+  `…T072101-06d7684072e3` (venus arm, stock Ubuntu 24.04.5 riscv64, Mesa 25.2.8):
+  `G6LC_VKCOMPUTE_PASS`, `G6LC_VKDESCARR_PASS`, `G6LC_VKIMAGE_PASS maxerr=0.00260`, then
+  `vkmem` test E `FAIL: bind->update->map->dispatch mismatches=32`, deterministic and
+  identical to the pre-CAS-fix `3d-d/guest-run.log`. Debug-bridge taps (local diagnostic,
+  `~/vkmem-dbg/out/server.log`) show ALLOC/bind/MAP_BLOB relocation and both descriptor
+  records correct, and **no dispatch ever issued**: `vkmem.c` re-began test D's EXECUTABLE
+  command buffer from a pool without `RESET_COMMAND_BUFFER_BIT`
+  (VUID-vkBeginCommandBuffer-commandBuffer-00050); vnfront's `state != 0` gate rejected it
+  exactly as `apu-vulkan-engine.md`, `g6lc_apu_vnfront.sv` and `vn_golden.py` all specify,
+  Mesa Venus swallowed the five wire errors, and the still-signaled test-D fence let
+  `vkWaitForFences` pass, so the readback saw the relocated-but-never-written extent (a
+  recycled fill page). Fix: test E now uses its own command buffer and fence (tier T).
+  Local diagnostic rerun: `3d-d bind->update->map->dispatch PASS`, `G6LC_VKMEM_PASS`, with
+  `[f5wx] ISSUE ct=6e … SHDONE code=00` proving the dispatch executed — WSL, not evidence.
+  Coverage gap recorded: no vector begins a non-initial command buffer; add
+  `ue_cneg_cb_rebegin_1` (expect `VK_ERROR_UNKNOWN` + INVALID, records/submit refused).
+- [x] **Venus arm of the stock-guest gate is green on the builder with the fixed test**
+  (`apu-leaf-20261011T104810-64504101eb0e` and `…T121022-c91c2167cc22`, identities
+  `09bad64a…` / `1e70ad5a…` local = before = after, isolated stream8 QEMU): stock Ubuntu
+  24.04.5 riscv64 / Mesa 25.2.8 enumerate `Virtio-GPU Venus (LibreCore APU (unqualified))`;
+  `G6LC_VKCOMPUTE_PASS`, `G6LC_VKDESCARR_PASS`, `3d-d bind->update->map->dispatch PASS`,
+  `G6LC_VKMEM_PASS`, `G6LC_VKIMAGE_PASS words=64 maxerr=0.00260`, terminal `GUEST-PASS` —
+  twice. Harness hardening landed (tier T): CIDATA ext seed when `xorrisofs` is absent,
+  `bootcmd` un-expire + early swapon, cloud-init completion gate, alternating-password and
+  forced-change login handling, `virtio_gpu` rebind guard, `|| true` so the venusoff arm
+  always runs, marker on its own line.
+- [ ] **Whole guest gate (both arms in one leaf) is not yet green.** `…T104810…`: both arms
+  functionally PASS (venusoff: `venus device absent -> PASS`) but the markers raced the
+  kernel `reboot:` line so the runner's terminal-line rule returned INCOMPLETE;
+  `…T121022…`: venus PASS with clean markers, venusoff FAIL because the TCG `apt install`
+  outran its 2,400 s `con.run` budget (2,586 s) and `vulkaninfo` then hit its 300 s window
+  (`rc=None`) — slowness, not a Venus-detection result. `…T100707…` lost its venus arm to a
+  `virtio_gpu` probe `-ENOMEM` (224 MiB usable DRAM under cloud-init/apt). Eleven
+  environment-failure guest tags retained. Next: raise/skip the venusoff arm's provisioning
+  budget, one more leaf; then the `ue_cneg_cb_rebegin_1` vector, bind/map/eviction/error/
+  reset and unmap/remap lifetime closure, oracle-freshness checking, real-cache/full-SoC and
+  default-geometry synth.
+- [ ] Complete shader/memory/sync → raster/ROP → VM/cache/matrix/RT/mesh/scheduling engines
+  and configuration-safe throughput, using the full feature matrix in the plan.
+- [ ] Clear generic Venus/protocol stock-package blockers, virtio-pci/external-sync/WSI,
+  full Vulkan core/extension CTS, unchanged UE/CS2 and physical release gates.
+
+### Graphics pipeline fast track (2026-10-11, user-directed: velocity, smoke tests only)
+
+Development mode for this track: cheap invariants kept (async-active-low reset,
+always_ff/always_comb, no latches, tc_sram arrays, Enable=0 inert, parameters), one small
+vector per new behaviour on local Verilator 5.020, 5.008 `--lint-only` per module, the
+pinned-toolchain leaf only at milestones. First-pixel architecture: VS and FS run as
+ShaderCore waves whose Input/Output storage classes are fixed-stride memory records
+(`g6lc_apu_sh_pkg` graphics section: VS-in attribute records 128 B, VS-out/FS-in varying
+records 144 B with the stage builtin in slot 0, FS-out 128 B); `g6lc_apu_rast` gathers
+attributes, issues `APU_SH_WORK_VS`, does setup/cull/scissor/top-left scan in 16.8 fixed
+point with one fpnew FMA/DIV/CAST each, writes perspective-correct FS-in records, issues
+`APU_SH_WORK_FS` and performs the UNORM8 ROP. v1 limits are in the rast header: no
+clipping (w ≤ 0 skips the primitive), no depth/stencil/blend/MSAA, one colour attachment,
+list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsupported.
+
+- [x] G1a — Vertex/Fragment execution models (`EM 0/4`), Location/BuiltIn record mapping
+  (Position/FragCoord slot 0, PointSize/Clip/Cull dropped), VertexIndex/InstanceIndex/
+  FrontFacing builtins, `entry.em/in_mask/out_mask`, `APU_SH_WORK_VS/FS` on the shcore work
+  port, `spirv_scan.py`/`spirv_model.py`/`shader_vectors.py` mirrored; corpus
+  `vs_passthru.vert`, `fs_color.frag`. Evidence (local 5.020): shmod 88/1,629,285; shwave
+  306 cases / 41,671 checks, `oum=0`, new `vs_passthru_1`/`fs_color_1` ULP max 0; shcore
+  11/18,751; vgtop 39 compute sessions unchanged; 5.008 lint clean.
+- [x] G1b — `g6lc_apu_rast` + `g6lc_apu_rast_pkg` (draw descriptor, CLEAR/DRAW ops, 63-vertex
+  VS batches, 64-fragment FS batches, 64 KiB lazily carved scratch rings), `APU_MP_RAST`
+  port 5, vgtop shader-port mux (rast waves win; latched desc/push), vgpages third
+  requester, drain includes rast. Smoke `tb_g6lc_apu_rast`: 4 cases / 4,096 pixel checks
+  (clear, CCW triangle vs SV reference 0 mismatches, reversed winding fully culled,
+  strip + scissor), 67,797 cycles for the triangle case; vgtop/vgsys unchanged; 5.008 lint
+  clean. Found and fixed a `+:` size-cast bug and the fpnew ADD/MUL operand conventions.
+- [x] G1c — **first triangle through the Venus protocol on the RTL.** Keep-lists for
+  graphics pipeline / render pass(2) / framebuffer / begin-render-pass / vertex buffers /
+  viewport / scissor (`vn_device_profile.toml` `[keep.*]`); vnfront graphics pipeline
+  (VS/FS module commit + REF, `aux[2:0]`/`aux[5:3]` slots, `aux[6]` graphics,
+  `aux[31:16]` ObjPay base of the 13-word state), render pass + framebuffer as
+  PipelineLayout-style payload objects; cmdexec snapshot `vb_hnd/vb_off/ib/vp/sc/fb/rp/
+  clear/ca`, attachment resolve rp→fb→view→image→memory through the factored Xfer operand
+  resolver at BeginRenderPass, loadOp CLEAR as an internal rast work, draw assembly with
+  the `rd_o` sideband (DEVICE_LOST without a graphics pipeline or active attachment);
+  profile queue GRAPHICS|COMPUTE|TRANSFER, colour-attachment and vertex-buffer format
+  bits with independent fmt3 columns (audit findings 19 → 7, all intentional limits),
+  graphics limits. `vn_golden --graphics-session ue_gpos_tri_1` with a Python
+  integer-pipeline reference: **vgsys 26 cases / 17,173 checks, sys-venus 27 / 17,342,
+  all 4,096 readback words match** (flat (51,102,153,255) inside, clear outside, 512 px),
+  286 k cycles. Other sessions unchanged. Fixed on the way: a `vn_golden.py` `r0` shadow
+  that aborted vector regeneration (pre-existing), `gp_nbind_q` width, a `dr_vbmask`
+  clobber, two cmdexec TB probes that used DRAW as a generic work record, the sys-venus
+  drain budget. Local 5.020 evidence only; the pinned-toolchain leaf is the G1d gate.
+- [x] G1d — **milestone: stock Ubuntu 24.04.5 / Mesa 25.2.8 Venus renders a triangle on the
+  RTL, pixel-exact.** Pinned-toolchain leaves `apu-leaf-20261011T215450-f73808dbba34`
+  (top/soc/bridge/synth: vgtop 241,968, vgsys 160,285 incl. `ue_gpos_tri_1`, sys-venus
+  66,682, cva6-venus 488, bridge self-test 2,651, synth ×7 incl. new `synth-rast`
+  Enable=0 inert / Enable=1 146,474 cells, 15,584 FFs, no latch) and
+  `…20261012T005107-fa291a0f1b26` (all 14 unit suites incl. rast 4,096 and the regenerated
+  `ue_sm5_core`/`ue_sm5_reply` decoder vectors, identity `5e2e2b60…`); guest leaf
+  `…20261012T010726-ac5f825384e5` **PASS both arms**: venus arm `G6LC_VKCOMPUTE/VKDESCARR/
+  VKMEM/VKIMAGE_PASS` + **`G6LC_VKTRI_PASS covered=512 maxdiff=0`** (gradient FS vs an
+  in-guest C reference of the rast op sequence), venusoff `venus device absent -> PASS`
+  with the raised 4,800 s apt budget. `vktri.c`, `fs_flat.{frag,spv}`, `run-apu-rast.sh`
+  synth screen, `synth-rast` in the runner. Stale decoder vectors were the only 5.008
+  failures (regen list fixed). Build-platform `bun test` has one unrelated in-flight
+  failure (`ai-overlay` pinned packages, another session's `CoreSleepGate` edit).
+- [x] G2a — BGRA/sRGB attachments (12-bit `APU_SRGB_ENC` LUT package), colorWriteMask,
+  per-attachment blending (all 15 factors, 5 ops, static/dynamic constants), up to 4 colour
+  attachments; D32/D16 depth attachment with early-Z (compare ops, write), depth clear;
+  indexed draws (UINT16/32, vertexOffset) with per-lane VertexIndex/InstanceIndex in VS-in
+  slot 8 (VS-in stride 144), instance-rate attributes, fans; 22-word graphics ObjPay state;
+  keep-lists for blend/depth/dynamic state/blend constants/depth reference. Evidence
+  (local 5.020): rast smoke 8 cases / 7,174 checks (sRGB, blend, depth, indexed+instanced),
+  rast synth Enable=1 173,144 cells / 17,612 FFs no latch, shwave 306/41,735, vgsys
+  `ue_gpos_tri_1` still exact, vnfront/cmdexec/vgtop unchanged.
+- [x] G2b — clip-space Sutherland–Hodgman against near/far/w/guard-band planes into a
+  clip ring with fan triangulation (19 fpnew ops per clipped vertex; fixed a non-idempotent
+  re-clip of boundary vertices), 2×2 quad scan with helper lanes that never reach the ROP,
+  FrontFacing from the primitive, derivatives (DPdx/DPdy/Fwidth fine/coarse) in FS waves,
+  OpImageSampleImplicitLod via quad derivatives and a linear-mantissa log2 (max error
+  0.086); vectors `fs_deriv`, `fs_tex_implicit`. Evidence (local 5.020 + 5.008 lint):
+  rast 10 cases / 9,223 checks (clip case exact vs a double-precision reference, sliver
+  case exact), rast synth 197,882 cells / 19,692 FFs no latch, shwave 308/42,897,
+  shmod/shcore/vgtop/vgsys unchanged.
+- [ ] G2c — guest `vkcmp.c`: eight scenes rendered on Venus and on the guest's llvmpipe and
+  compared (gradient, depth, blend layers, indexed+instanced, mip-nearest texture,
+  near-clip, sRGB, derivatives); pinned-toolchain RTL leaf + guest leaf as the G2 gate.
+
 ## APU stock-runtime reference consolidation (2026-10-01)
 
 Priors: `architecture/uncore/apu-graphics.md`, `corev_apu/apu/AGENTS-impl-interplays.md`
@@ -24,10 +207,11 @@ Priors: `architecture/uncore/apu-graphics.md`, `corev_apu/apu/AGENTS-impl-interp
   record source-only UE/kernel requirements and six APU working-tree identities.
 - [ ] Finish per-family historical source/log/oracle inventory. The six-boundary
   review is not complete log reconciliation or current-topology requalification.
-- [ ] Prove/reject a stock-client hardware backend with no custom runtime. Current
-  MMIO exposes no host-visible aperture in `APU_IMPL_FEATURES`; fixed-scene fetch does
-  not retain programs; testharness DMA joins slave[2] under `G6LC_APU` with
-  `ApuHarness.DmaReadEn=0`. Do not enable FeatureVirgl/Venus to bypass these.
+- [x] Reach the bounded stock-client hardware prototype (`cc4bdca95`, subsequent
+  descriptor/image work): VenusEn has a real aperture and backend, publishes the
+  transport FeatureVirgl bit while refusing virgl capset 1, and uses no firmware hart.
+  This closes prototype reachability only; conformance and stock physical release
+  remain open under the full-feature continuation above.
 - [ ] Qualify independent stock Ubuntu 26.04.1 and 24.04 manifests and an unchanged
   packaged UE SM5 workload; G0/WSI/SM6/CS2/RISC-V CPU support remain separate gates.
 - [ ] **Consolidate the Venus frontend into generated engines** (2026-10-03,
@@ -152,9 +336,52 @@ Priors: `architecture/uncore/apu-graphics.md`, `corev_apu/apu/AGENTS-impl-interp
   generated keep-lists, bounds + no-overlap validated before any write; 249
   standalone cases, copy → barrier → dispatch → fill → readback session bit-exact
   through vgtop/vgsys/sys-venus, OOB and overlap refused as DEVICE_LOST.
-- [ ] Increment 5 (rest, §12.3 C): images/formats/sampler on the F5 record
-  format (bytes 16..31 reserved for the image/sampler halves) → `vkCmdCopyImage`
-  / blits through Xfer → TBDR raster/ROP → UE SM5 profile ROM; G0/A5 via Zink.
+- [x] **5b landed (2026-10-10, `2b909f1b8`)**: compute-visible images and
+  samplers on the F5 record (bytes 10..27: view extent/format/mips/layers/
+  swizzle + packed sampler state), device linear layout (layer-major, 64 B row
+  pitch, per-mip offsets) answered by `vkGetImageMemoryRequirements` /
+  `vkGetImageSubresourceLayout`; shwave texture path (fetch / read / write /
+  SampleExplicitLod / Query*, UNORM8 + sRGB LUT + fp16 + fp32 + uint, repeat /
+  mirror / clamp / border, bilinear + mip nearest/linear) serialized per lane
+  over a dispatch-scoped 16×64 B texel cache in `tc_sram`; Xfer
+  CopyBufferToImage / CopyImageToBuffer / CopyImage / ClearColorImage as a
+  row-loop over the checked DMA legs with one shared iterative 32×32 multiplier
+  and 32-bit aperture addressing (any overflow faults the record — 66,237
+  cells, down from a 143 k first cut with parallel 64-bit products); vnpump
+  retires a context's rings on `CTX_DESTROY` (stock process teardown never
+  sends `vkDestroyRingMESA`) and on window reuse; profile: explicit per-format
+  feature table (no attachment/blit claims before raster), compute-only queue,
+  sampler/allocation limits = hardware. Evidence: xfer 520/4,036, vnpump
+  40/122, shwave 301/40,852 (ulp2=0), vgtop 5,090/229,764, vgsys 2,654/135,550
+  (8 image + 5 clear + ctx-kill sessions, 11 negative arms), sys-venus
+  1,056/46,878, Mesa differentials, bridge 2,651, stock guest `vulkaninfo` +
+  `vkcompute` + `vkdescarr` + `vkmem` + `vkimage` (upload → sample → store →
+  clear → readback, `maxerr=0.0026`; D32 refused) + venusoff. Follow-ups:
+  shwave address-multiply sharing, unnormalized-coordinate samplers,
+  multi-core texel-cache invalidation at barriers, ObjTab scaling for UE-class
+  object counts, `vnpump`/`vgtop` full synth needs a >15 GiB box.
+- [ ] **3d-d (next, §12.1 F10)**: host-visible memory must be device-usable
+  before the guest maps it — Mesa Venus creates the blob lazily at
+  `vkMapMemory`, so today a GPU write → fence → map readback (vkcube, CTS,
+  screenshots) is refused as DEVICE_LOST and `vkimage.c` had to map first.
+  Bind-time backing (`ALLOC_HI`, top-down) + relocation at `MAP_BLOB` with
+  squatter eviction, records keyed by memory handle so relocation never
+  strands a descriptor; revert `vkimage.c` to the natural map-after-fence.
+  State 2026-10-11 (isolated remote leaf `apu-leaf-20261011T035154-cac68fd2335a`,
+  see the continuation section above): RTL + CAS race fix in the dirty tree;
+  25/25 RTL/bridge/synth suites pass on the pinned toolchain after two test-side
+  repairs (5.008 `ref`-array model bug in the vgpages TB; bridge self-test now
+  replays the two-session `ue_probe_bufcopy_1` oracle). Guest gate rerun on an
+  isolated remote QEMU (`apu-leaf-20261011T065347…`, `…T072101…`): compute,
+  descriptor-array and image tests PASS; `vkmem` test E
+  `bind->update->map->dispatch mismatches=32` was a test defect (illegal
+  re-begin of an EXECUTABLE command buffer, correctly refused by the engine)
+  — fixed in `vkmem.c`; the venus arm then passes every guest test on the
+  builder twice (`…T104810…`, `…T121022…`); a single leaf with both arms
+  green is still owed (venusoff provisioning budget under TCG). 3d-d is not
+  closed: the re-begin vector and lifetime closure remain.
+- [ ] Increment 5 (rest, §12.3 C): `vkCmdBlitImage` → TBDR raster/ROP → UE
+  SM5 profile ROM; G0/A5 via Zink.
 - [ ] §12.3 D/E: shwave 1 IPC + ShaderCores, DramChannels by profile,
   virtio-pci endpoint function (F4), scanout/dma-buf WSI; UE 5.8.3 SM5 on
   26.04.1/24.04; CS2 requirement pin.

@@ -776,9 +776,11 @@ module tb_g6lc_apu_vgsys;
         ep += 8;
       end
       check_used_img(0, head, u_len_s);
-      // drain + idle
+      // drain + idle — G1c graphics submissions run the micro-
+      // sequenced raster FS waves (~250k cycles per 64-fragment
+      // flush); the budget must cover a full-frame drain
       t = 0;
-      while (!idle && t < 100000) begin @(posedge clk); t++; end
+      while (!idle && t < 5000000) begin @(posedge clk); t++; end
       check(idle, "vgsys idle after completion");
       if ((flags & 1) != 0) begin
         check(rec_kind() == 8, "EK_FENCE kind");
@@ -1649,6 +1651,15 @@ module tb_g6lc_apu_vgsys;
     end
   endtask
 
+  // inside{queue} on unpacked arrays needs Vlt >=5.020; the loop
+  // keeps the same membership predicate for older versions.
+  function automatic bit in_slots(input logic [15:0] v,
+                                  const ref int slots[$]);
+    for (int i = 0; i < slots.size(); i++)
+      if (slots[i] == int'(v)) return 1'b1;
+    return 1'b0;
+  endfunction
+
   task automatic arm_epoch();
     apu_objtab_status_e st;
     logic [31:0] hnd;
@@ -1679,7 +1690,7 @@ module tb_g6lc_apu_vgsys;
               6'(APU_VN_KIND_APU_BLOB_SHMEM), 8'd9, st, hnd, swept);
         check(st == APU_OBJTAB_OK,
               $sformatf("epoch%0d blob alloc st=%0d", rep, st));
-        check(hnd[15:0] inside {live_slots},
+        check(in_slots(hnd[15:0], live_slots),
               $sformatf("epoch%0d blob slot %0d not a recycled slot",
                         rep, hnd[15:0]));
       end

@@ -545,6 +545,17 @@ static void stats() {
       dbg_read(DBG_BASE + 18 * 8), dbg_read(DBG_BASE + 19 * 8),
       dbg_read(DBG_BASE + 20 * 8), dbg_read(DBG_BASE + 21 * 8),
       dbg_read(DBG_BASE + 22 * 8), dbg_read(DBG_BASE + 23 * 8));
+    uint64_t ra0 = dbg_read(DBG_BASE + 48 * 8) |
+                   ((uint64_t)dbg_read(DBG_BASE + 48 * 8 + 4) << 32);
+    fprintf(stderr,
+      "[dbg] rast st=%02x fret=%02x mret=%02x sh=%02x ctx=%08x%08x "
+      "cur=%08x%08x hs=%02x exec=%04x wv=%02x wret=%02x\n",
+      (unsigned)((ra0 >> 8) & 0xff), (unsigned)((ra0 >> 16) & 0xff),
+      (unsigned)((ra0 >> 24) & 0xff), (unsigned)(ra0 & 0xff),
+      dbg_read(DBG_BASE + 49 * 8 + 4), dbg_read(DBG_BASE + 49 * 8),
+      dbg_read(DBG_BASE + 50 * 8 + 4), dbg_read(DBG_BASE + 50 * 8),
+      dbg_read(DBG_BASE + 51 * 8), dbg_read(DBG_BASE + 52 * 8),
+      dbg_read(DBG_BASE + 53 * 8), dbg_read(DBG_BASE + 54 * 8));
   }
 }
 

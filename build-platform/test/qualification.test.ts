@@ -51,6 +51,26 @@ function config() {
   };
 }
 
+test("APU profile audit is explicit, host-only and separate from RTL qualification", () => {
+  const suite = DEFAULT_CONFIG.tests.suites.find((item) => item.id === "apu-profile-audit");
+  expect(suite).toBeDefined();
+  expect(suite?.script).toBe("verif/tb/apu/run-apu-regress.sh");
+  expect(suite?.args).toEqual(["--stages", "profile"]);
+  expect(suite?.execution).toBe("host");
+  expect(DEFAULT_CONFIG.tests.defaultSuites).not.toContain("apu-profile-audit");
+});
+
+test("suite arguments reject non-arrays, non-strings and embedded NUL", () => {
+  for (const args of ["--stages profile", [1], ["bad\u0000argument"], null]) {
+    const cfg = structuredClone(DEFAULT_CONFIG);
+    Object.assign(cfg.tests.suites[0]!, { args });
+    expect(() => validateConfig(cfg)).toThrow();
+  }
+  const cfg = structuredClone(DEFAULT_CONFIG);
+  Object.assign(cfg.tests.suites[0]!, { args: ["--stages", "profile"] });
+  expect(() => validateConfig(cfg)).not.toThrow();
+});
+
 test("qualification option consumes its profile argument", () => {
   const args = parseArgs(["verify", "--sim", "--qualification", "perf-foundation", "--target", "g6lc64_stream8"]);
   expect(args.flags.qualification).toBe("perf-foundation");

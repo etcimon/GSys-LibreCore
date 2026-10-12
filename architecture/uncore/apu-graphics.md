@@ -1,6 +1,29 @@
 # Graphics lane — structure and current state
 
-## Current consolidation snapshot (2026-10-01)
+## Current continuation (2026-10-10)
+
+Architecture and sequence: `apu-vulkan-engine.md` current contract; actual engine
+hierarchy/dataflow: `corev_apu/apu/AGENTS-impl-interplays.md` §16. The older snapshots
+and catalog below retain historical observations, not today's reachability or verdicts.
+
+- Hardware Venus is attached and executes bounded compute/image workloads from stock
+  Mesa. The frozen per-command catalog is not production rendering logic.
+- 3d-d host-visible backing/relocation exists in the working tree and still needs
+  source-matched qualification; full-SoC coherence, raster/ROP and WSI remain open.
+- The current API-1.1 bring-up profile is **not Vulkan-conformant**. The bounded
+  `gen_vn_tables.py --audit-profile` check reports 19 findings across 29 rules;
+  do not increase constants to satisfy an application admission check.
+- Release requires Vulkan 1.4 and all requested RT/matrix/mesh/bindless/raster/VM/
+  scheduling features. x86-64 UE/CS2 qualification comes first; RISC-V application
+  CPU compatibility is independent. A measured graphics Pareto study selects the SKU.
+- Final runtime is official Ubuntu kernel/Mesa/loader, no custom ICD, firmware backend
+  or bridge. Missing generic Venus/protocol support must reach official packages;
+  current Mesa 26.0.8 lacks descriptor-buffer exposure required by the pinned UE SM6
+  profile. WSI needs real external synchronization as well as buffer/scanout support.
+- G0/A5 is retained through stock Zink/Venus after Zink's own requirements are met;
+  G1 common surface, G2 present, CTS, UE/CS2 and physical qualification remain distinct.
+
+## Historical consolidation snapshot (2026-10-01)
 
 This review supersedes historical ownership labels and the old single-scene-only
 scope below; it does not promote any fixture result to device qualification.

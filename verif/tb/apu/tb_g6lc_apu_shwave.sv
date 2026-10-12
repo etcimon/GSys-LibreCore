@@ -40,6 +40,7 @@ localparam int unsigned RECBASE = 32'hF0000;   // 960 KiB, 1 KiB/set
 
 module tb_g6lc_apu_shwave;
   import g6lc_apu_vn_pkg::*;
+  import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_sh_pkg::*;
 
   localparam int unsigned MAXW = 262144;   // hex/exp word buffers
@@ -105,7 +106,45 @@ module tb_g6lc_apu_shwave;
     .mem_re_o(mem_re), .mem_we_o(mem_we), .mem_addr_o(mem_addr),
     .mem_wdata_o(mem_wdata), .mem_wstrb_o(mem_wstrb),
     .mem_ready_i(1'b1), .mem_rvalid_i(mem_rv),
-    .mem_rdata_i(mem_rdata), .mem_err_i(1'b0));
+    .mem_rdata_i(mem_rdata), .mem_err_i(1'b0),
+    .ot_req_valid_o(otb_v), .ot_req_ready_i(1'b1),
+    .ot_req_o(otb_req),
+    .ot_cpl_valid_i(otb_cv), .ot_cpl_ready_o(), .ot_cpl_i(otb_cpl));
+
+  // §12.3 3d-d: ObjTab READSLOT stub for record memory-handle
+  // resolve.  The record writer names handle {gen:1,slot:1} and puts
+  // the binding's absolute base in record +28, so a resolved base is
+  // the same address the old absolute-base record carried — the .hex
+  // vector format is unchanged.  Knobs drive the negative arms:
+  //   otb_dead=1  -> MISS (freed slot)
+  //   otb_gen!=1  -> generation drift (slot recycled)
+  //   otb_size    -> tiny extent (off+size > mem.size)
+  logic            otb_v;
+  apu_objtab_req_t otb_req;
+  logic            otb_cv = 1'b0;
+  apu_objtab_cpl_t otb_cpl;
+  logic            otb_dead = 1'b0;
+  logic [15:0]     otb_gen  = 16'd1;
+  logic [63:0]     otb_size = '1;
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      otb_cv <= 1'b0; otb_cpl <= '0;
+    end else begin
+      otb_cv <= 1'b0;
+      if (otb_v) begin
+        otb_cv  <= 1'b1;
+        otb_cpl <= '{status: otb_dead ? APU_OBJTAB_MISS
+                                     : APU_OBJTAB_OK,
+                     entry: '{live: !otb_dead,
+                              kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                              gen: otb_gen,
+                              aux: {32'h0, 32'(APU_MEM_DEVBACKED)},
+                              size: otb_size,
+                              default: '0},
+                     default: '0};
+      end
+    end
+  end
 
   // Enable=0 fixture — every externally visible output is wired and
   // monitored continuously below.
@@ -131,7 +170,10 @@ module tb_g6lc_apu_shwave;
     .mem_re_o(off_re), .mem_we_o(off_we), .mem_addr_o(off_addr),
     .mem_wdata_o(off_wdata), .mem_wstrb_o(off_strb),
     .mem_ready_i(1'b1), .mem_rvalid_i(1'b0),
-    .mem_rdata_i('0), .mem_err_i(1'b0));
+    .mem_rdata_i('0), .mem_err_i(1'b0),
+    .ot_req_valid_o(), .ot_req_ready_i(1'b0),
+    .ot_req_o(),
+    .ot_cpl_valid_i(1'b0), .ot_cpl_ready_o(), .ot_cpl_i('0));
 
   // continuous Enable=0 quiet monitor — sticky flag; the failure is
   // counted once at the end (fails is written from the initial
@@ -239,7 +281,7 @@ module tb_g6lc_apu_shwave;
     end
   always_ff @(posedge clk)
     if (dbg_tx) begin
-      if (dut.gen_on.i_wave.gen_on.st_q == 8'd110)   // W_TX2
+      if (dut.gen_on.i_wave.gen_on.st_q == 8'd112)   // W_TX2
         $display("TX2 cyc=%0d opc=%0d lane=%0d set=%0d bd=%0d idx=%0d rec=%08x tg=%08x",
                  cyc,
                  dut.gen_on.i_wave.gen_on.opc_q,
@@ -250,7 +292,7 @@ module tb_g6lc_apu_shwave;
                  dut.gen_on.i_wave.gen_on.tx_rec_q[31:0],
                  dut.gen_on.i_wave.gen_on.va_q[0][
                    dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][1]);
-      if (dut.gen_on.i_wave.gen_on.st_q == 8'd127)   // W_TXD
+      if (dut.gen_on.i_wave.gen_on.st_q == 8'd143)   // W_TXD
         $display("TXD cyc=%0d pc=%0d wv=%0d act=%x lane=%0d gi=%0d gn=%0d td0=%x td1=%x brd=%0d ta=%x",
                  cyc,
                  dut.gen_on.i_wave.gen_on.pc_q[
@@ -265,7 +307,7 @@ module tb_g6lc_apu_shwave;
                  dut.gen_on.i_wave.gen_on.tx_td_q[1],
                  dut.gen_on.i_wave.gen_on.tx_brd_q,
                  dut.gen_on.i_wave.gen_on.tx_ta_q);
-      if (dut.gen_on.i_wave.gen_on.st_q == 8'd122)   // W_TXT0
+      if (dut.gen_on.i_wave.gen_on.st_q == 8'd137)   // W_TXT0
         $display("TXG cyc=%0d lane=%0d smp=%016x lin=%0d gn=%0d g0=%0d,%0d,b%0d,w%0d g1=%0d,%0d,b%0d,w%0d g2=%0d,%0d,b%0d,w%0d g3=%0d,%0d,b%0d,w%0d g4=%0d,%0d,b%0d,w%0d g5=%0d,%0d,b%0d,w%0d g6=%0d,%0d,b%0d,w%0d g7=%0d,%0d,b%0d,w%0d",
                  cyc,
                  dut.gen_on.i_wave.gen_on.ls_lane_q,
@@ -304,7 +346,7 @@ module tb_g6lc_apu_shwave;
                  dut.gen_on.i_wave.gen_on.tx_gv_q[7],
                  dut.gen_on.i_wave.gen_on.tx_gb_q[7],
                  dut.gen_on.i_wave.gen_on.tx_gw_q[7]);
-      if (dut.gen_on.i_wave.gen_on.st_q == 8'd132)   // W_TXR0
+      if (dut.gen_on.i_wave.gen_on.st_q == 8'd148)   // W_TXR0
         $display("TXR cyc=%0d pc=%0d lane=%0d acc=%x %x %x %x bad=%0d int=%0d flt=%0d",
                  cyc,
                  dut.gen_on.i_wave.gen_on.pc_q[
@@ -471,6 +513,38 @@ module tb_g6lc_apu_shwave;
     dcyc = cyc - t0;
   endtask
 
+  // G1a graphics wave work: WORK_VS/FS pseudo-ctype, imm = {count,
+  // in_base, out_base, vbase, inst}; the done record's work_id is the
+  // ctype (distinguishes it from a compute dispatch).
+  task automatic do_gfx(input int ctype, input int cnt,
+                        input int inb, input int outb, input int vb,
+                        input int inst, input int slot,
+                        output apu_sh_done_t pl);
+    longint t0;
+    work_ctype = 32'(ctype);
+    work_imm = '0;
+    work_imm[31:0]    = cnt[31:0];
+    work_imm[63:32]   = inb[31:0];
+    work_imm[95:64]   = outb[31:0];
+    work_imm[127:96]  = vb[31:0];
+    work_imm[159:128] = inst[31:0];
+    disp_slot = slot[2:0];
+    t0 = cyc;
+    do @(negedge clk); while (!work_ready);
+    work = 1;
+    @(negedge clk); work = 0;
+    for (int g = 0; g < 20000000; g++) begin
+      @(negedge clk);
+      if (done) break;
+    end
+    if (!done) begin
+      fails++; $display("FAIL gfx dispatch timeout");
+    end
+    pl = done_pl;
+    dcyc = cyc - t0;
+    cmp("gfx.work_id", pl.work_id, 32'(ctype));
+  endtask
+
   task automatic retire_do(input int slot);
     @(negedge clk); retire = 1; retire_slot = slot[2:0];
     @(negedge clk); retire = 0;
@@ -483,8 +557,16 @@ module tb_g6lc_apu_shwave;
   int          cur_nidx, cur_seed, ou_mism, ou_mism_t, ou_words;
   bit          is_opt;
 
-  task automatic run_vec(input string nm, input string file);
+  // §12.3 3d-d: null_mode=1 is the record-handle negative arm — the
+  // otb_* stub knobs are set by the caller so every record resolves
+  // dead/stale/out-of-bounds: the dispatch must still commit OK with
+  // a nonzero robust count (zero loads / dropped stores), and the
+  // output compares below do not apply.
+  task automatic run_vec(input string nm, input string file,
+                         input int null_mode = 0);
     int n, nb, np, gx, gy, gz, flags;
+    bit gfx;
+    int gstage, gcount, gin, gout, gvb, ginst, gnin;
     int base, ebase, mbase, cbase, now;
     int boff_w [32];                 // bind entry -> .hex word off
     apu_sh_cpl_t cpl;
@@ -604,8 +686,11 @@ module tb_g6lc_apu_shwave;
               '{binding: bd, count: 16'(row_cnt[st][r]),
                 off32: 20'(row_off[st][r]), dyn: row_dyn[st][r],
                 dynbase: 4'(row_dynb[st][r])};
-          // record beat 0 {size,base}; beat 1 {kind, flags=1}
-          mem[ra >> 3]        = {sz, ad[31:0]};
+          // §12.3 3d-d record: beat 0 {size,memh{gen,slot}}; beat 1
+          // {kind,flags=1}; +28 = resource offset (the .hex binding's
+          // absolute base — the stub memory has base 0, so the
+          // resolved base is byte-identical to the old record's +0)
+          mem[ra >> 3]        = {sz, 32'h0001_0001};
           if (wbuf[boff_w[b] + 4][24]) begin
             // image record: meta words carry bytes 10..27
             logic [31:0] hw, mlf, swz, s0, s1;
@@ -618,9 +703,10 @@ module tb_g6lc_apu_shwave;
                                    {hw[15:0], 8'h01, kind}};
             mem[(ra + 16) >> 3] = {s0, {4'h0, swz[11:0],
                                         mlf[31:16]}};
-            mem[(ra + 24) >> 3] = {32'h0, s1};
+            mem[(ra + 24) >> 3] = {ad[31:0], s1};
           end else begin
             mem[(ra + 8) >> 3]  = {48'h0, 8'h01, kind};
+            mem[(ra + 24) >> 3] = {ad[31:0], 32'h0};
           end
         end
       end
@@ -656,12 +742,59 @@ module tb_g6lc_apu_shwave;
       base += sz/4;
     end
 
+    // G1a graphics wave work (flags bit2): {stage, count, in_base,
+    // out_base, vbase, inst, n_in} + the input-record image
+    gfx = flags[2];
+    gstage = 0; gcount = 0; gin = 0; gout = 0; gvb = 0; ginst = 0;
+    gnin = 0;
+    if (gfx) begin
+      gstage = int'(wbuf[base]);
+      gcount = int'(wbuf[base + 1]);
+      gin    = int'(wbuf[base + 2]);
+      gout   = int'(wbuf[base + 3]);
+      gvb    = int'(wbuf[base + 4]);
+      ginst  = int'(wbuf[base + 5]);
+      gnin   = int'(wbuf[base + 6]);
+      base += 7;
+      for (int w2 = 0; w2 < gnin; w2++) begin
+        if ((gin + w2*4) & 7)
+          mem[(gin + w2*4) >> 3][63:32] = wbuf[base + w2];
+        else
+          mem[(gin + w2*4) >> 3][31:0] = wbuf[base + w2];
+      end
+      base += gnin;
+      // the output arena is shared between gfx vectors; the model
+      // treats unwritten bytes as zero, so the batch extent
+      // (count*out_stride) must start clean
+      for (int w2 = 0;
+           w2 < gcount * int'((gstage == 0) ? APU_SH_VARY_STRIDE
+                                           : APU_SH_ATTR_STRIDE) / 8;
+           w2++)
+        mem[(gout >> 3) + w2] = '0;
+    end
+
     // dispatch
-    do_dispatch(gx, gy, gz, 0, dpl);
+    if (gfx)
+      do_gfx(gstage == 0 ? APU_SH_WORK_VS : APU_SH_WORK_FS,
+             gcount, gin, gout, gvb, ginst, 0, dpl);
+    else
+      do_dispatch(gx, gy, gz, 0, dpl);
     if (ebuf[3] == 1) begin
       cmp({file, ".done"}, {24'h0, dpl.code}, APU_SH_DONE_OK);
     end else if (ebuf[3] == 2) begin
       cmp({file, ".done"}, {24'h0, dpl.code}, APU_SH_DONE_FAULT);
+    end
+    if (null_mode) begin
+      // null records: every access robust-faulted but the dispatch
+      // commits cleanly (§12.3 3d-d resolve-to-null)
+      checks++;
+      if (dpl.code != APU_SH_DONE_OK || dpl.robust == 0) begin
+        fails++;
+        $display("FAIL %s null-record arm code=%0d robust=%0d",
+                 file, dpl.code, dpl.robust);
+      end
+      retire_do(0);
+      return;
     end
     // Gate 1 robust: model predicts the count for every committed
     // module (including mutants — the .exp robust is the mutant's own
@@ -781,6 +914,28 @@ module tb_g6lc_apu_shwave;
         cbase += int'(sz) / 4;
       end
     end
+    // G1a graphics outputs: .exp gfx section at ebuf[5] =
+    // {n_out_words, out_base} + model words + class words —
+    // Gate-1 bit-exact vs the spirv_model output records.
+    if (gfx) begin
+      int gn, gbo;
+      gn  = int'(ebuf[5]);
+      gbo = int'(ebuf[6]);
+      for (int w2 = 0; w2 < gn; w2++) begin
+        logic [31:0] got, xm;
+        longint    aa;
+        aa  = gbo + w2 * 4;
+        got = (aa & 7) ? mem[aa >> 3][63:32] : mem[aa >> 3][31:0];
+        xm  = ebuf[7 + w2];
+        checks++;
+        if (got !== xm) begin
+          fails++;
+          if (fails < 3000)
+            $display("FAIL-G1 %s gout[%0d]@%x got=%08x model=%08x",
+                     file, w2, aa, got, xm);
+        end
+      end
+    end
     // opt case: the whole output must equal the unoptimized build's
     // RTL output bit-exact (spirv-opt -O preserves IEEE semantics).
     if (is_opt) begin
@@ -834,6 +989,10 @@ module tb_g6lc_apu_shwave;
     retire_do(0);
   endtask
 
+  // G1a graphics wave work — no mut/bad/opt arms (single vector each)
+  string gfx_names [4] = '{"vs_passthru", "fs_color",
+                          "fs_deriv", "fs_tex_implicit"};
+
   string names [38] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
@@ -884,6 +1043,13 @@ module tb_g6lc_apu_shwave;
       run_vec(names[i], {names[i], "_bad_0"});
     end
 
+    // G1a graphics wave work: vertex/fragment record batches
+    for (int i = 0; i < $size(gfx_names); i++) begin
+      if (only != "" && gfx_names[i] != only) continue;
+      cases++;
+      run_vec(gfx_names[i], {gfx_names[i], "_1"});
+    end
+
     // 4b-opt: the `spirv-opt -O` build of every .comp shader (no
     // phiflow — it is hand-assembled, no .comp source).  Gates 1+2
     // plus the unopt==opt bit-exact check against the outputs stashed
@@ -900,6 +1066,23 @@ module tb_g6lc_apu_shwave;
       end
     end
     is_opt = 0; cur_nidx = -1; cur_seed = 0;
+
+    // ---- §12.3 3d-d: record-handle resolve negative arms ----------
+    // bufcopy_1's records all name {gen:1,slot:1} — drive the stub to
+    // dead / stale-generation / tiny-extent; every load then returns
+    // zeros (stores dropped) and robust counts them.
+    cases++;
+    otb_dead = 1'b1;
+    run_vec("nul_dead", "bufcopy_1", 1);
+    otb_dead = 1'b0;
+    cases++;
+    otb_gen = 16'd2;                    // slot recycled under the record
+    run_vec("nul_gen", "bufcopy_1", 1);
+    otb_gen = 16'd1;
+    cases++;
+    otb_size = 64'd8;                   // off + size > mem.size
+    run_vec("nul_oob", "bufcopy_1", 1);
+    otb_size = '1;
 
     checks++;
     if (off_bad) begin

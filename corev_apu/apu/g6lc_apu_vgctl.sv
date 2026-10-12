@@ -63,6 +63,7 @@ module g6lc_apu_vgctl
   // a short chain, a write err sets mem_fault_o and finishes
   output logic            mem_req_o,
   output logic            mem_we_o,
+  output logic            mem_dom_o,   // 1 = aperture-relative (mover)
   output logic [63:0]     mem_addr_o,
   output logic [63:0]     mem_wdata_o,
   output logic [7:0]      mem_wstrb_o,
@@ -116,6 +117,13 @@ module g6lc_apu_vgctl
   // would otherwise linger as defence-in-depth ring_overlap only)
   output logic            ctx_kill_valid_o,
   output logic [7:0]      ctx_kill_id_o,
+  // §12.3 3d-d: DEVBACKED MAP_BLOB relocation — hold_o blocks new
+  // cmdexec submissions for the whole move; drain_idle_i
+  // (cmdexec+xfer+shcore all at rest, aggregated in vgtop) gates the
+  // first word move.  The kernel waits on the map fence, so stalling
+  // the control queue here is legal.
+  output logic            hold_o,
+  input  logic            drain_idle_i,
   // completion
   output logic            busy_o,
   output logic            done_o,          // pulse: resp+used published
@@ -147,6 +155,7 @@ module g6lc_apu_vgctl
   if (!Enable) begin : gen_off
     assign chain_ready_o = 1'b0;
     assign mem_req_o = 1'b0;     assign mem_we_o = 1'b0;
+    assign mem_dom_o = 1'b0;
     assign mem_addr_o = '0;      assign mem_wdata_o = '0;
     assign mem_wstrb_o = '0;     assign mem_fault_o = 1'b0;
     assign ot_req_valid_o = 1'b0; assign ot_req_o = '0;
@@ -160,6 +169,7 @@ module g6lc_apu_vgctl
     assign xs_ndesc_o = '0;      assign xs_off_o = '0;
     assign xs_bytes_o = '0;      assign xs_ctx_o = '0;
     assign ctx_kill_valid_o = 1'b0; assign ctx_kill_id_o = '0;
+    assign hold_o = 1'b0;
     assign busy_o = 1'b0;        assign done_o = 1'b0;
     assign used_len_o = '0;
     assign fence_done_o = 1'b0;  assign fence_id_o = '0;
@@ -173,6 +183,7 @@ module g6lc_apu_vgctl
                     op_req_ready_i | op_cpl_valid_i | (|op_cpl_i) |
                     sm_gnt_i | sm_cpl_i | (|sm_cpl_pl_i) |
                     xs_ready_i | xs_done_i | xs_fault_i |
+                    drain_idle_i |
                     (|chain_desc_i[1]) | (|chain_desc_i[2]) |
                     (|chain_desc_i[3]);
   end else begin : gen_on
@@ -183,6 +194,12 @@ module g6lc_apu_vgctl
       StPgReq, StPgCpl, StXsFire, StXsWait,
       StMapAllocAt, StMapBind, StMapMemReq, StMapMemCpl,
       StMapAuxReq, StMapAuxCpl, StUnmapPriv,
+      // §12.3 3d-d: DEVBACKED relocation — drain, squatter eviction
+      // scan, word mover, base publish, flag clear
+      StMapDrain, StMapScan, StMapScanC,
+      StMapEvMv, StMapEvFree, StMapEvPub, StMapEvPubC,
+      StMapMv, StMapMvF, StMapDevAux, StMapDevAuxC, StMapMvFail,
+      StMvRd, StMvRdC, StMvWr, StMvWrC,
       StReapDec, StReapOpReq, StReapOpCpl, StReapSmReq, StReapSmCpl,
       StWrPrep, StWrFind, StWrFire, StWrCap, StDone, StFence
     } state_e;
@@ -219,9 +236,33 @@ module g6lc_apu_vgctl
     logic [31:0]  auxv_q;        // SETAUXHI value (map offset / priv base)
     logic         map_unmap_q;   // StMapMem* serving UNMAP_BLOB
     logic         mem_fault_q;   // sticky write fault (§6c)
+    // §12.3 3d-d: DEVBACKED relocation bookkeeping
+    logic         map_hold_q;    // cmdexec submission hold (hold_o)
+    logic         map_dev_q;     // M was DEVBACKED — clear at publish
+    logic         map_unb_q;     // M was UNBACKED — publish via CAS
+    logic [31:0]  map_oldb_q;    // M's device-chosen base B
+    logic [31:0]  ovl_h_q;       // squatter {gen,slot}
+    logic [31:0]  ovl_base_q;    // squatter extent base
+    logic [63:0]  ovl_size_q;    // squatter extent size
+    logic [31:0]  ovl_newb_q;    // squatter's evicted base (ALLOC_HI)
+    // word mover: aperture-relative src/dst + byte cursors, one
+    // 64-bit read then write per beat (≤1 outstanding — a rare path;
+    // an xfer-DMA variant is a documented follow-up).  mv_rev_q walks
+    // the copy backwards when dst > src so an overlapping move cannot
+    // read what it already rewrote (the evicted extent's new base can
+    // sit above the kernel range and still touch the old extent)
+    logic [31:0]  mv_src_q, mv_dst_q, mv_len_q, mv_i_q;
+    logic         mv_rev_q;
+    logic [63:0]  mv_word_q;
+    state_e       mv_ret_q;
+    // relocation cost observability: cumulative cycles under the
+    // submission hold (drain + evictions + move + publish), read out
+    // through the bridge debug taps / unit TBs
+    logic [31:0]  reloc_cyc_q;
     // page-allocator in-flight op
     apu_vgpages_op_e pg_op_q;
     logic [31:0]  pg_base_q, pg_bytes_q;
+    logic [31:0]  pg_exclh_q;    // ALLOC_HI exclusion high
     state_e       pg_ret_q;
     // RESET_CTX reap: tombstoned entry fields reported by the sweep's
     // interim SWEEP completions (§6c teardown order — the kernel unmaps
@@ -239,6 +280,10 @@ module g6lc_apu_vgctl
 
     assign chain_ready_o = state_q == StIdle && rst_ni;
     assign busy_o = state_q != StIdle;
+    // §12.3 3d-d: submission hold spans the entire DEVBACKED
+    // relocation (drain + evictions + move + publish); every exit —
+    // success or refusal — lands in StWrPrep, which clears it
+    assign hold_o = map_hold_q;
     assign done_o = state_q == StDone;
     assign used_len_o = used_q;
     assign fence_done_o = state_q == StFence;
@@ -248,13 +293,26 @@ module g6lc_apu_vgctl
     // ---- guest mem port (handshake) ----------------------------------------
     // 32-bit accesses at 4-byte-aligned guest addresses; the AXI beat
     // is 8 bytes, so wdata/wstrb/rdata are positioned by addr[2].
-    assign mem_req_o   = state_q == StRdFire || state_q == StWrFire;
-    assign mem_we_o    = state_q == StWrFire;
-    assign mem_addr_o  = (state_q == StWrFire) ? resp_addr_q :
+    // the word mover rides this port in the aperture domain (dom=1):
+    // mv_*_q/mv_i_q are already aperture-relative byte offsets, so no
+    // SHM base is added — the requester-facing contract stays byte
+    // granularity on both domains
+    assign mem_req_o   = state_q == StRdFire || state_q == StWrFire ||
+                         state_q == StMvRd || state_q == StMvWr;
+    assign mem_we_o    = state_q == StWrFire || state_q == StMvWr;
+    assign mem_dom_o   = state_q == StMvRd || state_q == StMvWr;
+    assign mem_addr_o  = state_q == StMvRd
+                         ? 64'(mv_src_q) + 64'(mv_i_q)
+                       : state_q == StMvWr
+                         ? 64'(mv_dst_q) + 64'(mv_i_q)
+                       : (state_q == StWrFire) ? resp_addr_q :
                          desc_q[rd_d_q[1:0]].addr + 64'(rd_off_q);
-    assign mem_wdata_o = mem_addr_o[2] ? {resp_ram[wr_w_q[5:0]], 32'h0}
+    assign mem_wdata_o = state_q == StMvWr ? mv_word_q
+                       : mem_addr_o[2] ? {resp_ram[wr_w_q[5:0]], 32'h0}
                                        : {32'h0, resp_ram[wr_w_q[5:0]]};
-    assign mem_wstrb_o = mem_addr_o[2] ? 8'hF0 : 8'h0F;
+    assign mem_wstrb_o = state_q == StMvWr ? 8'hFF
+                                           : mem_addr_o[2] ? 8'hF0
+                                                           : 8'h0F;
     assign mem_fault_o = mem_fault_q;
     // bit2 of the issued read address, for the rdata half-select
     logic rd_hi;
@@ -265,12 +323,18 @@ module g6lc_apu_vgctl
     assign ot_fire = state_q == StOtReq || state_q == StBindReq ||
                      state_q == StMemReq || state_q == StAuxReq ||
                      state_q == StAuxHiReq ||
-                     state_q == StMapMemReq || state_q == StMapAuxReq;
+                     state_q == StMapMemReq || state_q == StMapAuxReq ||
+                     state_q == StMapScan  || state_q == StMapEvPub ||
+                     state_q == StMapDevAux;
     assign ot_req_valid_o = ot_fire;
     assign ot_cpl_ready_o = state_q == StOtCpl || state_q == StBindCpl ||
                             state_q == StMemCpl || state_q == StAuxCpl ||
                             state_q == StAuxHiCpl ||
-                            state_q == StMapMemCpl || state_q == StMapAuxCpl;
+                            state_q == StMapMemCpl ||
+                            state_q == StMapAuxCpl ||
+                            state_q == StMapScanC ||
+                            state_q == StMapEvPubC ||
+                            state_q == StMapDevAuxC;
     always_comb begin
       ot_req_o = apu_objtab_req_t'('0);
       unique case (state_q)
@@ -300,13 +364,52 @@ module g6lc_apu_vgctl
             // form survives 64-bit client ids (aux[31:8] truncates)
             id: {32'h0, map_memh_q},
             kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY), default: '0};
-        StMapAuxReq: ot_req_o = '{op: APU_OBJTAB_OP_SETAUXHI,
-            id: {32'h0, map_memh_q},             // {gen,slot} handle
-            // ObjTab enforces kind on every non-ALLOC op — required
+        StMapAuxReq: begin
+          if (!map_unmap_q && !map_dev_q && map_unb_q) begin
+            // §12.3 3d-d: plain path on an UNBACKED memory — publish
+            // the kernel offset atomically.  A ring-queue bind can
+            // land between our LOOKUP and this write; if its DEVBACKED
+            // publish won, the CAS reports CONFLICT and the map
+            // restarts as a relocation (StMapAuxCpl).  A backed base
+            // (type-0 private extent or a kernel remap) goes through
+            // the unconditional publish — the bind-side CAS only ever
+            // fires on UNBACKED, so it cannot lose a race here
+            ot_req_o = '{op: APU_OBJTAB_OP_SETAUXHI_CAS,
+                id: {32'h0, map_memh_q},
+                kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                offset: {32'h0, APU_MEM_UNBACKED},
+                mask: 32'h0, value: auxv_q, default: '0};
+          end else begin
+            ot_req_o = '{op: APU_OBJTAB_OP_SETAUXHI,
+                id: {32'h0, map_memh_q},             // {gen,slot} handle
+                // ObjTab enforces kind on every non-ALLOC op — required
+                kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                // map path: the kernel's offset; unmap path: the
+                // UNBACKED sentinel a re-mappable lazy memory rests at
+                mask: 32'hFF_FF_FF_FF, value: auxv_q, default: '0};
+          end
+        end
+        StMapScan: ot_req_o = '{op: APU_OBJTAB_OP_SCAN_OVL,
+            // §12.3 3d-d: first live DEVBACKED DEVICE_MEMORY ≠ M whose
+            // extent overlaps the kernel's [K, K+S) — id[15:0] is the
+            // excluded slot, {offset,size} is the probe window
+            id: {48'h0, map_memh_q[15:0]},
             kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
-            // map path: the kernel's offset; unmap path: the private
-            // re-allocation base captured at ALLOC_PRIV completion
-            mask: 32'hFF_FF_FF_FF, value: auxv_q, default: '0};
+            offset: 64'({req_ram[9], req_ram[8]}),
+            size: 64'({req_ram[9], req_ram[8]}) + map_size_q,
+            default: '0};
+        StMapEvPub: ot_req_o = '{op: APU_OBJTAB_OP_SETAUXHI,
+            id: {32'h0, ovl_h_q},
+            kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+            // the squatter's evicted base; it stays DEVBACKED — a later
+            // kernel map of it relocates it the same way
+            mask: 32'hFF_FF_FF_FF, value: ovl_newb_q, default: '0};
+        StMapDevAux: ot_req_o = '{op: APU_OBJTAB_OP_SETAUX,
+            id: {32'h0, map_memh_q},
+            kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+            // relocation done: M now sits at the kernel's offset and is
+            // no longer device-relocatable
+            mask: 32'h0000_0001, value: 32'h0, default: '0};
         StOtReq: begin
           unique case (rtype_q)
             APU_VG_CTX_CREATE: ot_req_o = '{op: APU_OBJTAB_OP_ALLOC,
@@ -343,6 +446,7 @@ module g6lc_apu_vgctl
     assign pg_req_valid_o = state_q == StPgReq;
     assign pg_cpl_ready_o = state_q == StPgCpl;
     assign pg_req_o = '{op: pg_op_q, base: pg_base_q,
+                       excl_hi: pg_exclh_q,
                        bytes: pg_bytes_q};
 
     // ---- ObjPay / ShaderCore-slot reap ports ------------------------------
@@ -372,7 +476,16 @@ module g6lc_apu_vgctl
         map_memh_q <= '0;
         auxv_q <= '0; map_unmap_q <= 1'b0;
         mem_fault_q <= 1'b0;
+        map_hold_q <= 1'b0; map_dev_q <= 1'b0; map_unb_q <= 1'b0;
+        map_oldb_q <= '0;
+        ovl_h_q <= '0; ovl_base_q <= '0; ovl_size_q <= '0;
+        ovl_newb_q <= '0;
+        mv_src_q <= '0; mv_dst_q <= '0; mv_len_q <= '0;
+        mv_i_q <= '0; mv_rev_q <= 1'b0; mv_word_q <= '0;
+        mv_ret_q <= StIdle;
+        reloc_cyc_q <= '0;
         pg_op_q <= APU_VGPAGES_OP_ALLOC; pg_base_q <= '0;
+        pg_exclh_q <= '0;
         pg_bytes_q <= '0; pg_ret_q <= StIdle;
         reap_kind_q <= '0; reap_aux_q <= '0; reap_size_q <= '0;
         ctx_kill_valid_o <= 1'b0; ctx_kill_id_o <= '0;
@@ -380,6 +493,7 @@ module g6lc_apu_vgctl
         for (int i = 0; i < RESPW; i++) resp_ram[i] <= '0;
       end else begin
         ctx_kill_valid_o <= 1'b0;
+        if (map_hold_q) reloc_cyc_q <= reloc_cyc_q + 1;
         unique case (state_q)
           // ----------------------------------------------------------
           StIdle: begin
@@ -389,6 +503,7 @@ module g6lc_apu_vgctl
               rd_d_q <= '0; rd_off_q <= '0; read_len_q <= '0;
               stage_q <= '0; wr_w_q <= '0; resp_n_q <= '0;
               used_q <= '0; need_q <= '0; trunc_q <= 1'b0;
+              map_dev_q <= 1'b0;
               // mem_fault_q is NOT cleared here: it is sticky across
               // chains and resets only with rst_ni (the §6c engine
               // reset — vgtop's mem_fault_o feeds vgsys bus_fault_o)
@@ -591,6 +706,17 @@ module g6lc_apu_vgctl
                   resp_ram[0] <= APU_VG_ERR_UNSPEC;
                   state_q <= StWrPrep;
                 end
+              end else if (pg_op_q == APU_VGPAGES_OP_ALLOC_HI) begin
+                if (pg_cpl_i.status == APU_VGPAGES_OK) begin
+                  // squatter's new high-window extent (§12.3 3d-d)
+                  ovl_newb_q <= pg_cpl_i.base;
+                  state_q    <= pg_ret_q;
+                end else begin
+                  // no room to evict: the map fails, M and X unchanged
+                  // (the hold drops in StWrPrep)
+                  resp_ram[0] <= APU_VG_ERR_OUT_OF_MEMORY;
+                  state_q <= StWrPrep;
+                end
               end else begin
                 state_q <= pg_ret_q;                // FREE result ignored
               end
@@ -598,13 +724,132 @@ module g6lc_apu_vgctl
           end
 
           // ---- MAP_BLOB relocation (kernel-chosen SHM offset) --------
-          // blob-owned: free ran first; reserve the requested extent
+          // blob-owned: free ran first; reserve the requested extent.
+          // A DEVBACKED memory (map_dev_q) resumes at the word mover —
+          // its contents follow it to the kernel's offset.
           StMapAllocAt: begin
             pg_op_q    <= APU_VGPAGES_OP_ALLOC_AT;
             pg_base_q  <= req_ram[8];
             pg_bytes_q <= map_size_q[31:0];
+            pg_ret_q   <= map_dev_q ? StMapMv : StMapBind;
+            state_q    <= StPgReq;
+          end
+
+          // ---- §12.3 3d-d: DEVBACKED relocation ---------------------
+          // hold_o is already up: block new submissions until the
+          // engines drain (the kernel waits on the map fence)
+          StMapDrain: if (drain_idle_i) state_q <= StMapScan;
+          // squatter sweep: first DEVBACKED DEVICE_MEMORY ≠ M whose
+          // extent overlaps the kernel's [K, K+S)
+          StMapScan:  if (ot_req_ready_i) state_q <= StMapScanC;
+          StMapScanC: begin
+            if (ot_cpl_valid_i) begin
+              if (ot_cpl_i.status == APU_OBJTAB_MISS) begin
+                // no squatter left: reserve the kernel's extent for M
+                state_q <= StMapAllocAt;
+              end else if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+                resp_ram[0] <= APU_VG_ERR_UNSPEC;
+                state_q     <= StWrPrep;
+              end else if (|ot_cpl_i.entry.size[63:32]) begin
+                // a squatter too large to re-place honestly (cannot
+                // happen for ALLOC_HI extents — truthful refusal)
+                resp_ram[0] <= APU_VG_ERR_OUT_OF_MEMORY;
+                state_q     <= StWrPrep;
+              end else begin
+                // evict X: ALLOC_HI(size_X, excl=[K,K+S)) keeps its
+                // new extent out of the kernel's range
+                ovl_h_q    <= ot_cpl_i.handle;
+                ovl_base_q <= ot_cpl_i.entry.aux[63:32];
+                ovl_size_q <= ot_cpl_i.entry.size;
+                pg_op_q    <= APU_VGPAGES_OP_ALLOC_HI;
+                pg_base_q  <= req_ram[8];                  // excl_lo
+                pg_exclh_q <= 32'(64'({req_ram[9], req_ram[8]}) +
+                                  map_size_q);             // excl_hi
+                pg_bytes_q <= ot_cpl_i.entry.size[31:0];
+                pg_ret_q   <= StMapEvMv;
+                state_q    <= StPgReq;
+              end
+            end
+          end
+          // evicted extent landed (ovl_newb_q): word-move X old->new
+          StMapEvMv: begin
+            mv_src_q <= ovl_base_q;
+            mv_dst_q <= ovl_newb_q;
+            mv_len_q <= ovl_size_q[31:0];
+            mv_rev_q <= ovl_newb_q > ovl_base_q;
+            mv_i_q   <= ovl_newb_q > ovl_base_q
+                        ? ovl_size_q[31:0] - 32'd8 : '0;
+            mv_ret_q <= StMapEvFree;
+            state_q  <= StMvRd;
+          end
+          // copy done: release X's old extent, then publish the new base
+          StMapEvFree: begin
+            pg_op_q    <= APU_VGPAGES_OP_FREE;
+            pg_base_q  <= ovl_base_q;
+            pg_bytes_q <= ovl_size_q[31:0];
+            pg_ret_q   <= StMapEvPub;
+            state_q    <= StPgReq;
+          end
+          StMapEvPub:  if (ot_req_ready_i) state_q <= StMapEvPubC;
+          // X published at its new base (still DEVBACKED): rescan —
+          // another squatter may overlap the kernel's range
+          StMapEvPubC: if (ot_cpl_valid_i) state_q <= StMapScan;
+          // kernel extent reserved: move M's contents B -> K
+          StMapMv: begin
+            mv_src_q <= map_oldb_q;
+            mv_dst_q <= req_ram[8];   // K < APU_VG_GUEST_BYTES < 2^32
+            mv_len_q <= map_size_q[31:0];
+            mv_rev_q <= req_ram[8] > map_oldb_q;
+            mv_i_q   <= req_ram[8] > map_oldb_q
+                        ? map_size_q[31:0] - 32'd8 : '0;
+            mv_ret_q <= StMapMvF;
+            state_q  <= StMvRd;
+          end
+          // M's contents are at K: release the device-chosen extent
+          StMapMvF: begin
+            pg_op_q    <= APU_VGPAGES_OP_FREE;
+            pg_base_q  <= map_oldb_q;
+            pg_bytes_q <= map_size_q[31:0];
             pg_ret_q   <= StMapBind;
             state_q    <= StPgReq;
+          end
+          // kernel base published (StMapAux*): clear DEVBACKED — M's
+          // extent is kernel-chosen now
+          StMapDevAux:  if (ot_req_ready_i) state_q <= StMapDevAuxC;
+          StMapDevAuxC: if (ot_cpl_valid_i) state_q <= StWrPrep;
+          StMapMvFail: begin
+            // mover fault (read/write err): refuse the map truthfully;
+            // extents moved so far stay live at their new bases
+            resp_ram[0] <= APU_VG_ERR_UNSPEC;
+            state_q     <= StWrPrep;
+          end
+
+          // ---- word mover: one 64-bit read then write per beat ------
+          StMvRd:  if (mem_ready_i)  state_q <= StMvRdC;
+          StMvRdC: begin
+            if (mem_rvalid_i) begin
+              if (mem_err_i) begin
+                state_q <= StMapMvFail;
+              end else begin
+                mv_word_q <= mem_rdata_i;
+                state_q   <= StMvWr;
+              end
+            end
+          end
+          StMvWr:  if (mem_ready_i)  state_q <= StMvWrC;
+          StMvWrC: begin
+            if (mem_rvalid_i) begin
+              if (mem_err_i) begin
+                mem_fault_q <= 1'b1;   // aperture write fault (§6c)
+                state_q     <= StMapMvFail;
+              end else if (mv_rev_q ? mv_i_q == 32'h0
+                                   : mv_i_q + 32'd8 >= mv_len_q) begin
+                state_q <= mv_ret_q;
+              end else begin
+                mv_i_q  <= mv_rev_q ? mv_i_q - 32'd8 : mv_i_q + 32'd8;
+                state_q <= StMvRd;
+              end
+            end
           end
           // memory-backed: the VkDeviceMemory owns the extent; look it
           // up (rid recorded in the blob's aux[31:8] at create) so its
@@ -628,16 +873,32 @@ module g6lc_apu_vgctl
                 end
               end else begin
                 map_memh_q <= ot_cpl_i.handle;
-                pg_op_q    <= APU_VGPAGES_OP_FREE;
-                pg_base_q  <= ot_cpl_i.entry.aux[63:32];
-                pg_bytes_q <= map_size_q[31:0];
-                // §12.3 C: UNMAP_BLOB drops the memory back to the
-                // unbacked sentinel (lazy type-1 has no private
-                // extent to return to); MAP_BLOB goes to ALLOC_AT.
-                // A FREE of the unbacked sentinel is BOUNDS and is
-                // ignored, so a first map needs no special case.
-                pg_ret_q   <= map_unmap_q ? StUnmapPriv : StMapAllocAt;
-                state_q    <= StPgReq;
+                map_unb_q  <= ot_cpl_i.entry.aux[63:32] ==
+                              APU_MEM_UNBACKED;
+                if (!map_unmap_q &&
+                    (ot_cpl_i.entry.aux & APU_MEM_DEVBACKED) != 64'h0 &&
+                    ot_cpl_i.entry.aux[63:32] != APU_MEM_UNBACKED) begin
+                  // §12.3 3d-d: the memory sits on a device-chosen
+                  // extent — hold new submissions, drain the engines,
+                  // then evict squatters and word-move it to the
+                  // kernel's offset
+                  map_hold_q <= 1'b1;
+                  map_dev_q  <= 1'b1;
+                  map_oldb_q <= ot_cpl_i.entry.aux[63:32];
+                  state_q    <= StMapDrain;
+                end else begin
+                  pg_op_q    <= APU_VGPAGES_OP_FREE;
+                  pg_base_q  <= ot_cpl_i.entry.aux[63:32];
+                  pg_bytes_q <= map_size_q[31:0];
+                  // §12.3 C: UNMAP_BLOB drops the memory back to the
+                  // unbacked sentinel (lazy type-1 has no private
+                  // extent to return to); MAP_BLOB goes to ALLOC_AT.
+                  // A FREE of the unbacked sentinel is BOUNDS and is
+                  // ignored, so a first map needs no special case.
+                  pg_ret_q   <= map_unmap_q ? StUnmapPriv
+                                            : StMapAllocAt;
+                  state_q    <= StPgReq;
+                end
               end
             end
           end
@@ -657,9 +918,24 @@ module g6lc_apu_vgctl
           // object so engine-side addressing follows the guest's map
           StMapAuxReq: if (ot_req_ready_i) state_q <= StMapAuxCpl;
           // unmap path: rebind the blob to 0 (lazy) after the memory's
-          // base was re-privatized; map path is done after the publish
-          StMapAuxCpl: if (ot_cpl_valid_i)
-            state_q <= map_unmap_q ? StBindReq : StWrPrep;
+          // base was re-privatized; a relocated memory still owes the
+          // DEVBACKED clear; otherwise the map path is done — unless
+          // the plain-path CAS lost to a racing bind, in which case
+          // release the kernel extent and re-resolve (the fresh lookup
+          // sees DEVBACKED and takes the relocation path)
+          StMapAuxCpl: if (ot_cpl_valid_i) begin
+            if (!map_unmap_q && !map_dev_q && map_unb_q &&
+                ot_cpl_i.status == APU_OBJTAB_CONFLICT) begin
+              pg_op_q    <= APU_VGPAGES_OP_FREE;
+              pg_base_q  <= auxv_q;
+              pg_bytes_q <= map_size_q[31:0];
+              pg_ret_q   <= StMapMemReq;
+              state_q    <= StPgReq;
+            end else begin
+              state_q <= map_unmap_q ? StBindReq :
+                         map_dev_q   ? StMapDevAux : StWrPrep;
+            end
+          end
 
           // ---- RESET_CTX reap -------------------------------------------
           // One tombstoned entry per SWEEP completion: release the
@@ -931,6 +1207,9 @@ module g6lc_apu_vgctl
 
           // ---- response write into the first WRITE descriptor --------------
           StWrPrep: begin
+            // §12.3 3d-d: relocation over (success or refusal) —
+            // release the submission hold
+            map_hold_q <= 1'b0;
             // locate the first WRITE descriptor
             wr_d_q <= '0; wr_w_q <= '0;
             if (desc_q[2'd0].write) begin
@@ -1037,6 +1316,7 @@ module g6lc_apu_vgctl_fixture
   input  apu_vg_desc_t [APU_VG_MAX_DESC-1:0] chain_desc_i,
   output logic            mem_req_o,
   output logic            mem_we_o,
+  output logic            mem_dom_o,
   output logic [63:0]     mem_addr_o,
   output logic [63:0]     mem_wdata_o,
   output logic [7:0]      mem_wstrb_o,
@@ -1079,6 +1359,8 @@ module g6lc_apu_vgctl_fixture
   input  logic            xs_fault_i,
   output logic            ctx_kill_valid_o,
   output logic [7:0]      ctx_kill_id_o,
+  output logic            hold_o,
+  input  logic            drain_idle_i,
   output logic            busy_o,
   output logic            done_o,
   output logic [31:0]     used_len_o,

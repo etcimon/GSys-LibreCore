@@ -1,0 +1,58 @@
+; SPIR-V
+; Version: 1.0
+; Generator: Khronos Glslang Reference Front End; 11
+; Bound: 39
+; Schema: 0
+               OpCapability Shader
+               OpCapability DerivativeControl
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint Fragment %main "main" %o %vcol
+               OpExecutionMode %main OriginUpperLeft
+               OpSource GLSL 450
+               OpSourceExtension "GL_ARB_derivative_control"
+               OpName %main "main"
+               OpName %o "o"
+               OpName %vcol "vcol"
+               OpDecorate %o Location 0
+               OpDecorate %vcol Location 0
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+      %float = OpTypeFloat 32
+    %v4float = OpTypeVector %float 4
+%_ptr_Output_v4float = OpTypePointer Output %v4float
+          %o = OpVariable %_ptr_Output_v4float Output
+%_ptr_Input_v4float = OpTypePointer Input %v4float
+       %vcol = OpVariable %_ptr_Input_v4float Input
+       %uint = OpTypeInt 32 0
+     %uint_0 = OpConstant %uint 0
+%_ptr_Input_float = OpTypePointer Input %float
+     %uint_1 = OpConstant %uint 1
+     %uint_2 = OpConstant %uint 2
+     %uint_3 = OpConstant %uint 3
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+         %15 = OpAccessChain %_ptr_Input_float %vcol %uint_0
+         %16 = OpLoad %float %15
+         %17 = OpDPdx %float %16
+         %19 = OpAccessChain %_ptr_Input_float %vcol %uint_1
+         %20 = OpLoad %float %19
+         %21 = OpDPdy %float %20
+         %23 = OpAccessChain %_ptr_Input_float %vcol %uint_2
+         %24 = OpLoad %float %23
+         %25 = OpFwidth %float %24
+         %27 = OpAccessChain %_ptr_Input_float %vcol %uint_3
+         %28 = OpLoad %float %27
+         %29 = OpDPdxFine %float %28
+         %30 = OpAccessChain %_ptr_Input_float %vcol %uint_3
+         %31 = OpLoad %float %30
+         %32 = OpDPdyCoarse %float %31
+         %33 = OpFAdd %float %29 %32
+         %34 = OpAccessChain %_ptr_Input_float %vcol %uint_3
+         %35 = OpLoad %float %34
+         %36 = OpFwidthFine %float %35
+         %37 = OpFAdd %float %33 %36
+         %38 = OpCompositeConstruct %v4float %17 %21 %25 %37
+               OpStore %o %38
+               OpReturn
+               OpFunctionEnd

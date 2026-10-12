@@ -195,6 +195,43 @@ module tb_g6lc_apu_virtio_mmio;
     req = 1'b0;
   endtask
 
+  // Held-request variants for the reset-pending stall: the reg-bus
+  // protocol keeps req high until rvalid, so a stalled access lands on
+  // the cycle after the backend ACK clears reset_pending_q.
+  task automatic reg_write_wait(input logic [15:0] a, input logic [31:0] d);
+    @(negedge clk);
+    req   = 1'b1;
+    we    = 1'b1;
+    addr  = a;
+    wdata = d;
+    wstrb = 4'hf;
+    do @(posedge clk); while (!rvalid);
+    if (error) begin
+      $display("FAIL: ","write error at %h", a);
+      errors++;
+    end
+    @(negedge clk);
+    req = 1'b0;
+    we  = 1'b0;
+    #1;
+  endtask
+
+  task automatic reg_read_wait(input logic [15:0] a, output logic [31:0] d);
+    @(negedge clk);
+    req   = 1'b1;
+    we    = 1'b0;
+    addr  = a;
+    wstrb = 4'hf;
+    do @(posedge clk); while (!rvalid);
+    d = rdata;
+    if (error) begin
+      $display("FAIL: ","read response error at %h", a);
+      errors++;
+    end
+    @(negedge clk);
+    req = 1'b0;
+  endtask
+
   task automatic program_queue(
       input int unsigned q,
       input logic [63:0] desc,
@@ -597,22 +634,76 @@ module tb_g6lc_apu_virtio_mmio;
     @(negedge clk);
     req = 1'b0;
     we = 1'b0;
+    // a status read arriving while the backend reset pends stalls on
+    // rvalid — the bus makes the reset synchronous from the driver's
+    // point of view; the same held request completes after the ACK
+    @(negedge clk);
+    req = 1'b1;
+    we = 1'b0;
+    addr = VREG_STATUS;
     repeat (4) begin
-      reg_read(VREG_STATUS, r);
-      expect_bit("device status nonzero until reset ACK", r != 0);
+      @(posedge clk);
+      #1;
+      expect_eq("status read stalls while reset pending", rvalid, 1'b0);
       expect_eq("device reset request held", fw_reset_req, 1'b1);
       expect_eq("device reset blocks all queues", queue_enable, 2'b00);
       expect_eq("device reset blocks completions", used_ready, 1'b0);
       expect_eq("reset cannot publish stale fence", last_used_fence, 64'hffff_ffff_ffff_ffff);
+      @(negedge clk);
     end
-    @(negedge clk);
     used_valid = 1'b0;
     fw_reset_ack = 1'b1;
-    reg_read(VREG_STATUS, r);
-    expect_eq("device reset completed after ACK", r, 32'h0);
+    @(posedge clk);
+    #1;
+    expect_eq("status read released after reset ACK", rvalid, 1'b1);
+    expect_eq("device reset completed after ACK", rdata, 32'h0);
+    @(negedge clk);
+    req = 1'b0;
     expect_eq("device reset request released", fw_reset_req, 1'b0);
     expect_eq("device reset clears metadata", last_used_fence, 64'h0);
     expect_eq("device reset clears context", last_used_context, 32'h0);
+
+    // ---- delayed-ACK reset: the stock vm_reset() sequence ----------
+    // A real backend (vgsys aperture flush + engine reset) needs
+    // several cycles to ACK fw_reset_req; the Linux driver does not
+    // poll status after writing 0 — it pushes straight on with the
+    // feature negotiation.  Every access while the reset pends must
+    // stall on rvalid and land afterward (not be acked-and-dropped):
+    // without the stall the negotiation writes vanish and the next
+    // status read returns 0x40 (DEVICE_NEEDS_RESET).
+    begin
+      logic [31:0] df_hi;
+      fw_reset_ack = 1'b0;
+      reg_write_wait(VREG_STATUS, 32'h0);      // vm_reset()
+      // stream the negotiation while the ACK is held back; 32 cycles
+      // covers the whole sequence so every access lands inside the
+      // pending window (each holds req until rvalid)
+      fork
+        begin : ack_delay
+          repeat (32) @(posedge clk);
+          @(negedge clk);
+          fw_reset_ack = 1'b1;
+        end
+        begin : driver_seq
+          reg_write_wait(VREG_STATUS, 32'h1);              // ACKNOWLEDGE
+          reg_write_wait(VREG_STATUS, 32'h3);              // +DRIVER
+          reg_write_wait(VREG_DEVICE_FEAT_SEL, 32'd1);
+          reg_read_wait(VREG_DEVICE_FEATURES, df_hi);
+          expect_eq("delayed-ACK device feat hi", df_hi,
+                    32'h0000_0101);
+          reg_write_wait(VREG_DRIVER_FEAT_SEL, 32'd1);
+          reg_write_wait(VREG_DRIVER_FEATURES, 32'h0000_0101);
+          reg_write_wait(VREG_DRIVER_FEAT_SEL, 32'd0);
+          reg_write_wait(VREG_DRIVER_FEATURES, 32'h0);
+          reg_write_wait(VREG_STATUS, VSTATUS_ACKNOWLEDGE |
+                VSTATUS_DRIVER | VSTATUS_FEATURES_OK);
+          reg_read_wait(VREG_STATUS, r);
+          expect_eq("delayed-ACK features_ok", r, 32'h0000_000b);
+        end
+      join
+      fw_reset_ack = 1'b1;
+      reg_write_wait(VREG_STATUS, 32'h0);
+    end
 
     reg_write(VREG_QUEUE_SEL, 32'hffff_ffff);
     reg_read(VREG_QUEUE_NUM_MAX, r);

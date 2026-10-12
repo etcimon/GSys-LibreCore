@@ -57,7 +57,19 @@ module tb_g6lc_apu_vgpages
   task automatic do_pv(input apu_vgpages_op_e op, input logic [31:0] b,
                        input logic [31:0] n, output apu_vgpages_cpl_t c);
     @(negedge clk);  // let StCpl retire before the next request
-    pv_v = 1'b1; pv_req = '{op: op, base: b, bytes: n};
+    pv_v = 1'b1; pv_req = '{op: op, base: b, excl_hi: '0, bytes: n};
+    @(posedge clk);
+    @(negedge clk); pv_v = 1'b0;
+    while (!pv_cpl_v) @(negedge clk);
+    c = pv_cpl;
+  endtask
+
+  // §12.3 3d-d: exclusion-carrying variant (base doubles as excl_lo)
+  task automatic do_pvx(input apu_vgpages_op_e op,
+                        input logic [31:0] b, input logic [31:0] xh,
+                        input logic [31:0] n, output apu_vgpages_cpl_t c);
+    @(negedge clk);
+    pv_v = 1'b1; pv_req = '{op: op, base: b, excl_hi: xh, bytes: n};
     @(posedge clk);
     @(negedge clk); pv_v = 1'b0;
     while (!pv_cpl_v) @(negedge clk);
@@ -71,6 +83,9 @@ module tb_g6lc_apu_vgpages
 
   // ---- reference model -------------------------------------------------
   bit m_free [Pages];
+  // §12.3 3d-d: model for the private instance's guest window (case 8);
+  // module scope because Vlt <5.020 mis-reads `ref` unpacked-array args
+  bit p_free [Pages];
 
   function automatic int m_pages(input int b);
     return (b + PageBytes - 1) / PageBytes;
@@ -94,6 +109,27 @@ module tb_g6lc_apu_vgpages
     int n = m_pages(b);
     for (int i = 0; i < n; i++) m_free[base / PageBytes + i] = 1;
   endfunction
+  // §12.3 3d-d: top-down first-fit inside the guest window, skipping
+  // every candidate overlapping the byte exclusion [el, eh)
+  // (el == eh = none); -1 when nothing fits.  Operates on p_free:
+  // passing it as a `ref` array arg is mis-read by Vlt <5.020.
+  function automatic int m_alloc_hi(input int b, input int el,
+                                    input int eh, input int gpages);
+    int n = m_pages(b);
+    if (b == 0) return 0;
+    if (n > gpages) return -1;
+    for (int s = gpages - n; s >= 0; s--) begin
+      bit ok = 1'b1;
+      for (int i = 0; i < n; i++) ok &= p_free[s + i];
+      // page-granular overlap of [s, s+n) with [el, eh)
+      ok &= !(s * PageBytes < eh && el < (s + n) * PageBytes);
+      if (ok) begin
+        for (int i = 0; i < n; i++) p_free[s + i] = 0;
+        return s * PageBytes;
+      end
+    end
+    return -1;
+  endfunction
 
   task automatic check(input string name, input logic ok);
     checks++;
@@ -108,7 +144,7 @@ module tb_g6lc_apu_vgpages
   task automatic do_req(input apu_vgpages_op_e op, input logic [31:0] b,
                         input logic [31:0] n, output apu_vgpages_cpl_t c);
     @(negedge clk);
-    req_v = 1'b1; req = '{op: op, base: b, bytes: n};
+    req_v = 1'b1; req = '{op: op, base: b, excl_hi: '0, bytes: n};
     @(posedge clk);
     @(negedge clk); req_v = 1'b0;
     while (!cpl_v) @(negedge clk);
@@ -266,6 +302,80 @@ module tb_g6lc_apu_vgpages
             pc.base == 32'(GPages) * PageBytes);
       do_pv(APU_VGPAGES_OP_FREE, 32'(GPages) * PageBytes, PageBytes, pc);
       do_pv(APU_VGPAGES_OP_FREE, 0, 32'(GPages) * PageBytes, pc);
+    end
+
+    // ---- §12.3 3d-d: ALLOC_HI top-down + exclusion -------------------
+    cases++;
+    begin
+      apu_vgpages_cpl_t pc;
+      int               mb;
+      // model mirror for the private instance's guest window: the
+      // guest range [0,GPages) starts all-free here
+      for (int i = 0; i < Pages; i++) p_free[i] = (i < GPages);
+      // highest-address placement in the guest window
+      do_pvx(APU_VGPAGES_OP_ALLOC_HI, 0, 0, 4 * PageBytes, pc);
+      mb = m_alloc_hi(4 * PageBytes, 0, 0, GPages);
+      check("hi top-down status", pc.status == APU_VGPAGES_OK);
+      check("hi top-down base", pc.base == 32'((GPages - 4) * PageBytes)
+            && mb == int'(pc.base));
+      do_pvx(APU_VGPAGES_OP_ALLOC_HI, 0, 0, 2 * PageBytes, pc);
+      mb = m_alloc_hi(2 * PageBytes, 0, 0, GPages);
+      check("hi second base", pc.status == APU_VGPAGES_OK &&
+            pc.base == 32'((GPages - 6) * PageBytes) &&
+            mb == int'(pc.base));
+      // exclusion [GPages-8, GPages-4): the evicted squatter must land
+      // below the excluded kernel range, not inside or above it
+      do_pvx(APU_VGPAGES_OP_ALLOC_HI,
+             32'((GPages - 8) * PageBytes),
+             32'((GPages - 4) * PageBytes),
+             2 * PageBytes, pc);
+      mb = m_alloc_hi(2 * PageBytes, (GPages - 8) * PageBytes,
+                      (GPages - 4) * PageBytes, GPages);
+      check("hi excl status", pc.status == APU_VGPAGES_OK);
+      check("hi excl base", pc.base == 32'((GPages - 10) * PageBytes)
+            && mb == int'(pc.base));
+      // seeded ALLOC_HI/FREE loop against the model
+      begin
+        int hb [16]; int hbz [16]; int hlv;
+        logic [31:0] rnd, xb, xe;
+        hlv = 0;
+        for (int it = 0; it < 300; it++) begin
+          rnd = $urandom;
+          if (hlv < 12 && (rnd[1:0] != 2'd3 || hlv == 0)) begin
+            int b = 1 + ($urandom % (8 * PageBytes));
+            xb = rnd[7] ? 32'($urandom % WinBytes) : 32'h0;
+            xe = rnd[7] ? xb + 32'($urandom % (16 * PageBytes)) : 32'h0;
+            do_pvx(APU_VGPAGES_OP_ALLOC_HI, xb, xe, b, pc);
+            mb = m_alloc_hi(b, int'(xb), int'(xe), GPages);
+            check("hi rand status",
+                  pc.status == (mb < 0 ? APU_VGPAGES_FULL
+                                       : APU_VGPAGES_OK));
+            if (mb >= 0 && pc.base != 32'(mb))
+              $display("HI-DIV it=%0d b=%0d xb=%08x xe=%08x dut=%08x mdl=%08x st=%0d",
+                       it, b, xb, xe, pc.base, 32'(mb), pc.status);
+            check("hi rand base",
+                  mb < 0 || pc.base == 32'(mb));
+            if (pc.status == APU_VGPAGES_OK) begin
+              hb[hlv] = int'(pc.base); hbz[hlv] = b; hlv++;
+            end
+          end else begin
+            int k = $urandom % hlv;
+            do_pv(APU_VGPAGES_OP_FREE, hb[k], hbz[k], pc);
+            check("hi rand free", pc.status == APU_VGPAGES_OK);
+            for (int i = 0; i < hbz[k]; i += PageBytes)
+              p_free[(hb[k] + i) / PageBytes] = 1;
+            hb[k] = hb[hlv-1]; hbz[k] = hbz[hlv-1]; hlv--;
+          end
+        end
+        while (hlv > 0) begin
+          hlv--;
+          do_pv(APU_VGPAGES_OP_FREE, hb[hlv], hbz[hlv], pc);
+        end
+      end
+      // FULL: exclude almost the whole window, ask for two pages
+      do_pvx(APU_VGPAGES_OP_ALLOC_HI, PageBytes,
+             32'((GPages - 1) * PageBytes), 2 * PageBytes, pc);
+      check("hi full", pc.status == APU_VGPAGES_FULL);
     end
 
     $display("PASS tb_g6lc_apu_vgpages pages=%0d cases=%0d checks=%0d \

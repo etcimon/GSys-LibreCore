@@ -38,6 +38,7 @@ module g6lc_apu_vgtop
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_vnfront_pkg::*;
   import g6lc_apu_sh_pkg::*;
+  import g6lc_apu_rast_pkg::*;
   import g6lc_apu_vgpages_pkg::*;
 #(
   parameter bit          Enable = 1'b0,
@@ -80,13 +81,14 @@ module g6lc_apu_vgtop
   output logic [31:0]     cpl_len_o,       // truthful used len
   // shared memory ports (§6c apu_mp handshake): [0]=CTL (vgctl,
   // guest), [1]=PUMP (vnpump, aperture+guest), [2]=SH (shader LSU,
-  // aperture).  Requests hold until mp_req_ready_i; one mp_rsp_valid_i
+  // aperture), [3]=RAST (raster gather/record/ROP, aperture).
+  // Requests hold until mp_req_ready_i; one mp_rsp_valid_i
   // returns per accepted request, writes included.
-  output logic [2:0]         mp_req_valid_o,
-  input  logic [2:0]         mp_req_ready_i,
-  output apu_mp_req_t [2:0]  mp_req_o,
-  input  logic [2:0]         mp_rsp_valid_i,
-  input  apu_mp_rsp_t [2:0]  mp_rsp_i,
+  output logic [3:0]         mp_req_valid_o,
+  input  logic [3:0]         mp_req_ready_i,
+  output apu_mp_req_t [3:0]  mp_req_o,
+  input  logic [3:0]         mp_rsp_valid_i,
+  input  apu_mp_rsp_t [3:0]  mp_rsp_i,
   // command-executor work port (TB work sink; dispatch-class records
   // are consumed internally by the ShaderCore, §7b/5a-ii; Xfer-class
   // records — CopyBuffer/FillBuffer/UpdateBuffer — go to the xfer
@@ -151,6 +153,7 @@ module g6lc_apu_vgtop
                     (|chain_id_i) | (|chain_n_i) | cpl_ready_i |
                     (|mp_req_ready_i) | (|mp_rsp_valid_i) |
                     (|mp_rsp_i[0]) | (|mp_rsp_i[1]) | (|mp_rsp_i[2]) |
+                    (|mp_rsp_i[3]) |
                     work_ready_i | work_done_i | (|work_done_pl_i) |
                     (|xf_axi_rsp_i) | (|ap_base_i) | xf_flush_i |
                     dbg_ot_valid_i | dbg_ot_cpl_ready_i | (|dbg_ot_req_i) |
@@ -180,12 +183,14 @@ module g6lc_apu_vgtop
     apu_vgpages_req_t pg_req;
     apu_vgpages_cpl_t pg_cpl;
     typedef enum logic [1:0] { OPG_PUMP, OPG_EXEC, OPG_CTL } opg_e;
-    typedef enum logic [0:0] { PGG_PUMP, PGG_CTL } pgg_e;
+    // raster is the third, lowest-priority vgpages requester
+    typedef enum logic [1:0] { PGG_PUMP, PGG_CTL, PGG_RAST } pgg_e;
     opg_e opg_q;
     pgg_e pgg_q;
 
     // ---- vgctl -------------------------------------------------------------
     logic         vc_busy, vc_done, vc_mem_req, vc_mem_we, vc_mem_fault;
+    logic         vc_mem_dom;
     logic [63:0]  vc_mem_addr, vc_mem_wdata;
     logic [7:0]   vc_mem_wstrb;
     logic [31:0]  vc_used_len;
@@ -211,12 +216,16 @@ module g6lc_apu_vgtop
     apu_sh_sm_cpl_t vp_sm_cpl_pl;
     logic         vc_ctx_kill_v;
     logic [7:0]   vc_ctx_kill_id;
+    // §12.3 3d-d: relocation hold + engine-drain aggregation
+    // (drain_idle is driven after the sh/xfer declarations below)
+    logic         vc_hold, ex_idle, drain_idle;
 
     g6lc_apu_vgctl #(.Enable(1'b1)) i_ctl (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .chain_valid_i(chain_valid_i), .chain_ready_o(chain_ready_o),
       .chain_n_i(chain_n_i), .chain_desc_i(chain_desc_i),
       .mem_req_o(vc_mem_req), .mem_we_o(vc_mem_we),
+      .mem_dom_o(vc_mem_dom),
       .mem_addr_o(vc_mem_addr), .mem_wdata_o(vc_mem_wdata),
       .mem_wstrb_o(vc_mem_wstrb),
       .mem_ready_i(mp_req_ready_i[0]),
@@ -244,6 +253,7 @@ module g6lc_apu_vgtop
       .sm_gnt_i(vc_sm_gnt),
       .sm_cpl_i(vp_sm_cpl), .sm_cpl_pl_i(vp_sm_cpl_pl),
       .ctx_kill_valid_o(vc_ctx_kill_v), .ctx_kill_id_o(vc_ctx_kill_id),
+      .hold_o(vc_hold), .drain_idle_i(drain_idle),
       .busy_o(vc_busy), .done_o(vc_done), .used_len_o(vc_used_len),
       .fence_done_o(fence_pulse_o), .fence_id_o(fence_id_o),
       .fence_ring_o(fence_ring_o));
@@ -358,6 +368,15 @@ module g6lc_apu_vgtop
                        32'(APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT) ||
                        work_o.ctype ==
                        32'(APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT);
+    // draw-class records route to the raster engine: vkCmdDraw,
+    // vkCmdDrawIndexed, and in-render-pass vkCmdClearAttachments
+    // (CLEAR_COLOR_IMAGE stays on the Xfer DMA path)
+    wire         work_is_draw = work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_DRAW_EXT) ||
+                       work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_DRAW_INDEXED_EXT) ||
+                       work_o.ctype ==
+                       32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT);
     logic        xf_done, xf_work_rdy;
     apu_sh_done_t xf_done_pl;
     apu_xfer_desc_t ex_xfer;
@@ -365,10 +384,14 @@ module g6lc_apu_vgtop
     apu_sh_desc_t           ex_desc;
     logic [5:0]         ex_push_n;
     logic [1023:0]      ex_push;
+    logic               ex_done_v;
+    apu_sh_done_t       ex_done_pl;
 
-    assign work_valid_o = ex_work_v && !work_is_disp && !work_is_xfer;
-    assign ex_work_rdy  = work_is_disp ? sh_work_rdy :
-                          work_is_xfer ? xf_work_rdy : work_ready_i;
+    assign work_valid_o = ex_work_v && !work_is_disp && !work_is_xfer &&
+                          !work_is_draw;
+    assign ex_work_rdy  = work_is_disp ? (sh_work_rdy && !rast_sh_own) :
+                          work_is_xfer ? xf_work_rdy :
+                          work_is_draw ? rs_work_rdy : work_ready_i;
 
     g6lc_apu_cmdexec #(.Enable(1'b1), .Fences(Fences)) i_exec (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
@@ -387,15 +410,18 @@ module g6lc_apu_vgtop
       .op_cpl_valid_i(op_cpl_valid && opg_q == OPG_EXEC),
       .op_cpl_ready_o(ex_op_cpl_rdy), .op_cpl_i(op_cpl),
       .work_valid_o(ex_work_v), .work_ready_i(ex_work_rdy),
-      .work_o(work_o), .xf_o(ex_xfer),
-      .work_done_i(sh_done | xf_done | work_done_i),
-      .work_done_pl_i(sh_done ? sh_done_pl :
-                      xf_done ? xf_done_pl : work_done_pl_i),
+      .work_o(work_o), .xf_o(ex_xfer), .rd_o(rs_rd),
+      .work_done_i(ex_done_v),
+      .work_done_pl_i(ex_done_pl),
       .disp_slot_o(ex_disp_slot), .desc_o(ex_desc),
       .push_n_o(ex_push_n), .push_o(ex_push),
       .done_seq_o(ex_done_seq),
       .fence_signaled_o(ex_fence_sig), .fence_lost_o(ex_fence_lost),
-      .fence_clr_i(ex_fence_clr), .busy_o(ex_busy));
+      .fence_clr_i(ex_fence_clr),
+      // §12.3 3d-d: vgctl's relocation hold blocks new dequeues;
+      // ex_idle reports nothing in flight for the drain wait
+      .hold_i(vc_hold), .idle_o(ex_idle),
+      .busy_o(ex_busy));
 
     // ---- cmdrec -----------------------------------------------------------------
     g6lc_apu_cmdrec #(.Enable(1'b1)) i_rec (
@@ -432,9 +458,11 @@ module g6lc_apu_vgtop
 
     // ---- vgpages -------------------------------------------------------------------
     // §7b/5a-ii: one aperture page allocator, arbitrated between the
-    // vnfront (vkAllocateMemory/vkFreeMemory) and vgctl
-    // (RESOURCE_CREATE_BLOB blob_id != 0 / RESOURCE_UNREF).  Front has
-    // priority; the grant is held until the completion is consumed.
+    // vnfront (vkAllocateMemory/vkFreeMemory), vgctl
+    // (RESOURCE_CREATE_BLOB blob_id != 0 / RESOURCE_UNREF), and the
+    // raster engine's one-time private scratch allocation (lowest
+    // priority).  Front has priority; the grant is held until the
+    // completion is consumed.
     g6lc_apu_vgpages #(.Enable(1'b1), .Pages(VgPages),
                        .PageBytes(VgPageBytes),
                        .GuestPages(VgGuestPages)) i_vgp (
@@ -444,12 +472,15 @@ module g6lc_apu_vgtop
       .cpl_valid_o(pg_cpl_valid), .cpl_ready_i(pg_cpl_ready),
       .cpl_o(pg_cpl));
 
-    assign pg_req_valid = vp_pg_v | vc_pg_v;
-    assign pg_req = vp_pg_v ? vp_pg_req : vc_pg_req;
+    assign pg_req_valid = vp_pg_v | vc_pg_v | rs_pg_v;
+    assign pg_req = vp_pg_v ? vp_pg_req :
+                    vc_pg_v ? vc_pg_req : rs_pg_req;
     assign vp_pg_rdy = vp_pg_v & pg_req_ready;
     assign vc_pg_rdy = !vp_pg_v & vc_pg_v & pg_req_ready;
-    assign pg_cpl_ready = (pgg_q == PGG_PUMP) ? vp_pg_cpl_rdy
-                                            : vc_pg_cpl_rdy;
+    assign rs_pg_rdy = !vp_pg_v & !vc_pg_v & rs_pg_v & pg_req_ready;
+    assign pg_cpl_ready = (pgg_q == PGG_PUMP) ? vp_pg_cpl_rdy :
+                          (pgg_q == PGG_CTL)  ? vc_pg_cpl_rdy
+                                              : rs_pg_cpl_rdy;
     assign vc_sm_gnt = vc_sm_req & ~vp_sm_req;
 
     // ---- ShaderCore ---------------------------------------------------------------
@@ -461,6 +492,111 @@ module g6lc_apu_vgtop
     logic        sh_mem_req, sh_mem_we;
     logic [63:0] sh_mem_addr, sh_mem_wdata;
     logic [7:0]  sh_mem_wstrb;
+    // §12.3 3d-d: the wave engine's descriptor memory-handle
+    // resolution joins the ObjTab mux as the 5th, lowest-priority
+    // requester
+    logic        sh_ot_v, sh_ot_rdy, sh_cpl_rdy;
+    apu_objtab_req_t sh_ot_req;
+    // ---- raster engine (G1b) -------------------------------------------------
+    // Draw-class records route here instead of the TB work sink; the
+    // engine emits its VS/FS wave batches on the shared ShaderCore
+    // work port and owns mp port 3.  rast_sh_own marks the cycles the
+    // shcore sidebands carry the raster's latched desc/push: the wave
+    // issue itself and the whole time a raster wave is in flight
+    // (shwave reads desc_i live during LSU descriptor resolution).
+    // A graphics wave's done payload carries work_id = the pseudo-ctype
+    // (APU_SH_WORK_VS/FS) so it routes back here, never to cmdexec.
+    logic              rs_work_rdy, rs_done, rs_busy;
+    apu_sh_done_t      rs_done_pl;
+    apu_rast_draw_t    rs_rd;
+    logic              rast_sh_v, rast_sh_own, rast_shown_q;
+    logic [31:0]       rast_sh_ctype;
+    logic [7:0][31:0]  rast_sh_imm;
+    logic [2:0]        rast_sh_slot;
+    apu_sh_desc_t      rast_sh_desc;
+    logic [5:0]        rast_sh_push_n;
+    logic [1023:0]     rast_sh_push;
+    wire               gfx_done = sh_done &&
+                       (sh_done_pl.work_id == APU_SH_WORK_VS ||
+                        sh_done_pl.work_id == APU_SH_WORK_FS);
+
+    // cmdexec counts one work_done_i per completion, but engine done_o
+    // pulses are single-cycle and engines run concurrently — two
+    // coincident pulses (e.g. a raster draw finishing the same cycle
+    // as an xfer readback) would collapse into one decrement and
+    // strand outst_q forever (StDrain livelock, fence never signals).
+    // Queue the completions and emit one work_done_i per cycle.  The
+    // depth derives from the worst-case outstanding set — MaxWaves
+    // shader waves + 1 raster + 1 xfer + 1 external — plus one slot of
+    // slack so head != tail still distinguishes a full queue.
+    localparam int unsigned Dqn = 1 << $clog2(MaxWaves + 4);
+    localparam int unsigned DqW = $clog2(Dqn);
+    apu_sh_done_t          dq_q   [Dqn];
+    logic [DqW-1:0]        dq_head_q, dq_tail_q;
+    wire                   dq_p_sh = sh_done && !gfx_done;
+    wire                   dq_p_xf = xf_done;
+    wire                   dq_p_rs = rs_done;
+    wire                   dq_p_ex = work_done_i;
+    wire [DqW-1:0]         dq_nsh = DqW'(dq_p_sh);
+    wire [DqW-1:0]         dq_nxf = DqW'(dq_p_xf);
+    wire [DqW-1:0]         dq_nrs = DqW'(dq_p_rs);
+    wire [DqW:0]           dq_push_n = {1'b0, dq_p_sh} + {1'b0, dq_p_xf} +
+                                       {1'b0, dq_p_rs} + {1'b0, dq_p_ex};
+    wire                   dq_pop = dq_head_q != dq_tail_q;
+    wire [DqW-1:0]         dq_occ = dq_tail_q - dq_head_q;
+    assign ex_done_v  = dq_pop;
+    assign ex_done_pl = dq_q[dq_head_q];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        dq_head_q <= '0;
+        dq_tail_q <= '0;
+      end else begin
+        if (dq_p_sh) dq_q[dq_tail_q] <= sh_done_pl;
+        if (dq_p_xf) dq_q[dq_tail_q + dq_nsh] <= xf_done_pl;
+        if (dq_p_rs) dq_q[dq_tail_q + dq_nsh + dq_nxf] <= rs_done_pl;
+        if (dq_p_ex) dq_q[dq_tail_q + dq_nsh + dq_nxf + dq_nrs]
+                       <= work_done_pl_i;
+        dq_tail_q <= dq_tail_q + dq_push_n[DqW-1:0];
+        dq_head_q <= dq_head_q + DqW'(dq_pop);
+      end
+    end
+    // pragma translate_off
+    // Occupancy bound: at most MaxWaves+3 completions can ever be in
+    // flight, so pushes may never take the queue to Dqn — occupancy
+    // equal to the depth would alias head == tail back to empty and
+    // silently drop a completion.
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        ({1'b0, dq_occ} + dq_push_n - {{DqW{1'b0}}, dq_pop})
+        <= (DqW+1)'(Dqn - 1))
+      else $fatal(1, "g6lc_apu_vgtop: done-queue overflow");
+    // pragma translate_on
+`ifdef G6LC_APU_DBG_LOST
+    // debug probe: every done-queue push/pop with its payload —
+    // catches lost or phantom completions (temporary bring-up aid)
+    always_ff @(posedge clk_i) begin
+      if (dq_p_sh)
+        $display("[DBG] dqv push sh code=%0d wid=%08x t=%0t",
+                 sh_done_pl.code, sh_done_pl.work_id, $time);
+      if (dq_p_xf)
+        $display("[DBG] dqv push xf code=%0d t=%0t",
+                 xf_done_pl.code, $time);
+      if (dq_p_rs)
+        $display("[DBG] dqv push rs code=%0d wid=%08x t=%0t",
+                 rs_done_pl.code, rs_done_pl.work_id, $time);
+      if (dq_p_ex)
+        $display("[DBG] dqv push ex code=%0d t=%0t",
+                 work_done_pl_i.code, $time);
+      if (dq_pop)
+        $display("[DBG] dqv pop  code=%0d wid=%08x t=%0t",
+                 ex_done_pl.code, ex_done_pl.work_id, $time);
+    end
+`endif
+    logic              rs_pg_v, rs_pg_rdy, rs_pg_cpl_rdy;
+    apu_vgpages_req_t  rs_pg_req;
+    logic              rs_mp_v;
+    apu_mp_req_t       rs_mp_req;
+
+    // G1c: rs_rd is driven by cmdexec's draw assembly (rd_o)
     g6lc_apu_shcore #(
       .Enable(1'b1), .ShaderRegs(ShaderRegs), .MaxWaves(MaxWaves),
       .ShaderIds(ShaderIds), .ShaderSlots(ShaderSlots),
@@ -479,17 +615,29 @@ module g6lc_apu_vgtop
       .sm_req_i(vp_sm_req | vc_sm_req),
       .sm_req_pl_i(vp_sm_req ? vp_sm_req_pl : vc_sm_req_pl),
       .sm_cpl_o(vp_sm_cpl), .sm_cpl_pl_o(vp_sm_cpl_pl),
-      .work_i(ex_work_v && work_is_disp), .work_ready_o(sh_work_rdy),
-      .work_ctype_i(work_o.ctype), .work_imm_i(work_o.rec.imm),
-      .disp_slot_i(ex_disp_slot), .desc_i(ex_desc),
-      .push_n_i(ex_push_n), .push_i(ex_push),
+      // G1b: the raster's VS/FS wave batches win the work port over
+      // cmdexec dispatches; while a raster wave is issued/in flight
+      // the sidebands (desc live-read by the LSU; push latched at
+      // dispatch) come from the raster's copies
+      .work_i(rast_sh_v | (ex_work_v && work_is_disp && !rast_sh_own)),
+      .work_ready_o(sh_work_rdy),
+      .work_ctype_i(rast_sh_own ? rast_sh_ctype : work_o.ctype),
+      .work_imm_i(rast_sh_own ? rast_sh_imm : work_o.rec.imm),
+      .disp_slot_i(rast_sh_own ? rast_sh_slot : ex_disp_slot),
+      .desc_i(rast_sh_own ? rast_sh_desc : ex_desc),
+      .push_n_i(rast_sh_own ? rast_sh_push_n : ex_push_n),
+      .push_i(rast_sh_own ? rast_sh_push : ex_push),
       .busy_o(sh_busy), .done_o(sh_done), .done_pl_o(sh_done_pl),
       .mem_re_o(sh_mem_req), .mem_we_o(sh_mem_we),
       .mem_addr_o(sh_mem_addr), .mem_wdata_o(sh_mem_wdata),
       .mem_wstrb_o(sh_mem_wstrb),
       .mem_ready_i(mp_req_ready_i[2]),
       .mem_rvalid_i(mp_rsp_valid_i[2]),
-      .mem_rdata_i(mp_rsp_i[2].rdata), .mem_err_i(mp_rsp_i[2].err));
+      .mem_rdata_i(mp_rsp_i[2].rdata), .mem_err_i(mp_rsp_i[2].err),
+      .ot_req_valid_o(sh_ot_v), .ot_req_ready_i(sh_ot_rdy),
+      .ot_req_o(sh_ot_req),
+      .ot_cpl_valid_i(ot_cpl_valid), .ot_cpl_ready_o(sh_cpl_rdy),
+      .ot_cpl_i(ot_cpl));
 
     // ---- Xfer engine (§12.3 C/5a) --------------------------------------
     // CopyBuffer/FillBuffer/UpdateBuffer records arrive with the operand
@@ -513,6 +661,38 @@ module g6lc_apu_vgtop
       .busy_o(xfer_busy_o),
       .axi_req_o(xf_axi_req_o), .axi_rsp_i(xf_axi_rsp_i));
 
+    g6lc_apu_rast #(.Enable(1'b1)) i_rast (
+      .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
+      .work_valid_i(ex_work_v && work_is_draw),
+      .work_ready_o(rs_work_rdy),
+      .work_i(work_o), .rd_i(rs_rd),
+      .desc_i(ex_desc), .push_n_i(ex_push_n), .push_i(ex_push),
+      .done_o(rs_done), .done_pl_o(rs_done_pl),
+      .sh_work_valid_o(rast_sh_v), .sh_work_ready_i(sh_work_rdy),
+      .sh_ctype_o(rast_sh_ctype), .sh_imm_o(rast_sh_imm),
+      .sh_slot_o(rast_sh_slot), .sh_desc_o(rast_sh_desc),
+      .sh_push_n_o(rast_sh_push_n), .sh_push_o(rast_sh_push),
+      .sh_done_i(gfx_done), .sh_done_pl_i(sh_done_pl),
+      .mp_req_valid_o(rs_mp_v),
+      .mp_req_ready_i(mp_req_ready_i[3]),
+      .mp_req_o(rs_mp_req),
+      .mp_rsp_valid_i(mp_rsp_valid_i[3]), .mp_rsp_i(mp_rsp_i[3]),
+      .pg_req_valid_o(rs_pg_v), .pg_req_ready_i(rs_pg_rdy),
+      .pg_req_o(rs_pg_req),
+      .pg_cpl_valid_i(pg_cpl_valid && pgg_q == PGG_RAST),
+      .pg_cpl_ready_o(rs_pg_cpl_rdy), .pg_cpl_i(pg_cpl),
+      .busy_o(rs_busy));
+
+    // wave-in-flight latch (clocked with the grant owners below):
+    // while set, the shcore sidebands carry the raster's copies —
+    // shwave reads desc_i live during LSU descriptor resolution
+    assign rast_sh_own = rast_sh_v | rast_shown_q;
+
+    // §12.3 3d-d: relocation drain — nothing in flight anywhere the
+    // aperture data could move under (cmdexec FSM+outstanding work,
+    // a running dispatch, an in-flight DMA, a raster chain)
+    assign drain_idle = ex_idle & ~sh_busy & ~xfer_busy_o & ~rs_busy;
+
     // ---- objtab -------------------------------------------------------------------
     g6lc_apu_objtab #(.Enable(1'b1)) i_tab (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
@@ -521,33 +701,42 @@ module g6lc_apu_vgtop
       .cpl_valid_o(ot_cpl_valid), .cpl_ready_i(ot_cpl_ready),
       .cpl_o(ot_cpl), .live_o(objtab_live_o));
 
-    // ---- ObjTab arbitration: pump > cmdexec > vgctl > debug ----------------------
-    typedef enum logic [2:0] { OG_NONE, OG_PUMP, OG_EXEC, OG_CTL, OG_DBG }
-      og_e;
+    // ---- ObjTab arbitration: pump > cmdexec > vgctl > debug > shwave --------
+    // §12.3 3d-d: shwave's record-handle READSLOTs are the lowest-
+    // priority requester — they wait behind every control-plane user
+    typedef enum logic [2:0] { OG_NONE, OG_PUMP, OG_EXEC, OG_CTL,
+                               OG_DBG, OG_SH } og_e;
     og_e og_q;   // completion owner
-    logic ot_grant_pump, ot_grant_exec, ot_grant_ctl, ot_grant_dbg;
+    logic ot_grant_pump, ot_grant_exec, ot_grant_ctl, ot_grant_dbg,
+          ot_grant_sh;
 
     assign ot_grant_pump = vp_ot_v;
     assign ot_grant_exec = !vp_ot_v && ex_ot_v;
     assign ot_grant_ctl  = !vp_ot_v && !ex_ot_v && vc_ot_v;
     assign ot_grant_dbg  = !vp_ot_v && !ex_ot_v && !vc_ot_v &&
                            dbg_ot_valid_i && !vc_busy && !vp_busy;
+    assign ot_grant_sh   = !vp_ot_v && !ex_ot_v && !vc_ot_v &&
+                           !ot_grant_dbg && sh_ot_v;
 
     assign ot_req_valid = vp_ot_v | ex_ot_v | vc_ot_v |
-                          (ot_grant_dbg & dbg_ot_valid_i);
+                          (ot_grant_dbg & dbg_ot_valid_i) |
+                          (ot_grant_sh & sh_ot_v);
     assign ot_req = vp_ot_v ? vp_ot_req :
                     ex_ot_v ? ex_ot_req :
-                    vc_ot_v ? vc_ot_req : dbg_ot_req_i;
+                    vc_ot_v ? vc_ot_req :
+                    ot_grant_dbg ? dbg_ot_req_i : sh_ot_req;
 
     assign vp_ot_rdy = ot_grant_pump & ot_req_ready;
     assign ex_ot_rdy = ot_grant_exec & ot_req_ready;
     assign vc_ot_rdy = ot_grant_ctl  & ot_req_ready;
     assign dbg_ot_ready_o = ot_grant_dbg & ot_req_ready;
+    assign sh_ot_rdy = ot_grant_sh & ot_req_ready;
 
     // completion routing: owner latched at request acceptance
     assign ot_cpl_ready = (og_q == OG_PUMP) ? vp_cpl_rdy :
                           (og_q == OG_EXEC) ? ex_ot_cpl_rdy :
                           (og_q == OG_CTL)  ? vc_cpl_rdy :
+                          (og_q == OG_SH)   ? sh_cpl_rdy :
                           (og_q == OG_DBG)  ? dbg_ot_cpl_ready_i : 1'b0;
     assign dbg_ot_cpl_valid_o = ot_cpl_valid && og_q == OG_DBG;
     assign dbg_ot_cpl_o = ot_cpl;
@@ -568,12 +757,16 @@ module g6lc_apu_vgtop
                                               xf_cr_cpl_rdy;
 
     // ---- shared memory ports (apu_mp) ----------------------------------------
-    // [0] CTL: vgctl request/response words, guest absolute (dom=0)
+    // [0] CTL: vgctl request/response words, guest absolute (dom=0);
+    //     the MAP_BLOB word mover raises dom for aperture-relative
+    //     beats (§12.3 3d-d DEVBACKED relocation)
     // [1] PUMP: vnpump aperture words + execbuffer guest reads (dom)
     // [2] SH: shader LSU, aperture-relative (dom=1)
-    assign mp_req_valid_o = {sh_mem_req | sh_mem_we, vp_mp_req,
+    // [3] RAST: raster engine, aperture-relative (dom=1), the engine
+    //     already drives a full apu_mp_req_t
+    assign mp_req_valid_o = {rs_mp_v, sh_mem_req | sh_mem_we, vp_mp_req,
                              vc_mem_req};
-    assign mp_req_o[0] = '{dom: 1'b0, we: vc_mem_we,
+    assign mp_req_o[0] = '{dom: vc_mem_dom, we: vc_mem_we,
                           addr: vc_mem_addr, wdata: vc_mem_wdata,
                           wstrb: vc_mem_wstrb};
     assign mp_req_o[1] = '{dom: vp_mp_dom, we: vp_mp_we,
@@ -582,17 +775,20 @@ module g6lc_apu_vgtop
     assign mp_req_o[2] = '{dom: 1'b1, we: sh_mem_we,
                           addr: sh_mem_addr, wdata: sh_mem_wdata,
                           wstrb: sh_mem_wstrb};
+    assign mp_req_o[3] = rs_mp_req;
 
     // grant-owner tracking for the arbitrated internal ports
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
         og_q <= OG_NONE; cg_q <= CG_PUMP;
         opg_q <= OPG_PUMP; pgg_q <= PGG_PUMP;
+        rast_shown_q <= 1'b0;
       end else begin
         // ObjTab grant owner: set at request accept, cleared at cpl
         if (ot_req_valid && ot_req_ready) begin
           og_q <= vp_ot_v ? OG_PUMP : ex_ot_v ? OG_EXEC :
-                  vc_ot_v ? OG_CTL : OG_DBG;
+                  vc_ot_v ? OG_CTL :
+                  ot_grant_dbg ? OG_DBG : OG_SH;
         end
         // RESET_CTX streams interim SWEEP completions — the grant stays
         // with the owner until the final (non-SWEEP) completion so the
@@ -606,7 +802,10 @@ module g6lc_apu_vgtop
         if (op_req_valid && op_req_ready)
           opg_q <= vp_op_v ? OPG_PUMP : ex_op_v ? OPG_EXEC : OPG_CTL;
         if (pg_req_valid && pg_req_ready)
-          pgg_q <= vp_pg_v ? PGG_PUMP : PGG_CTL;
+          pgg_q <= vp_pg_v ? PGG_PUMP : vc_pg_v ? PGG_CTL : PGG_RAST;
+        // raster wave in flight on the shcore work port
+        if (rast_sh_v && sh_work_rdy) rast_shown_q <= 1'b1;
+        if (gfx_done)                 rast_shown_q <= 1'b0;
       end
     end
 
@@ -633,7 +832,7 @@ module g6lc_apu_vgtop
     assign done_o      = vc_done;
     assign mem_fault_o = vc_mem_fault;
     assign busy_o      = vc_busy | vp_busy | sh_busy | ex_busy |
-                         xfer_busy_o;
+                         xfer_busy_o | rs_busy;
     // chain_id is published by the walker, not consumed here
     logic unused_chain;
     assign unused_chain = |chain_id_i;
@@ -651,6 +850,7 @@ module g6lc_apu_vgtop_fixture
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_vnfront_pkg::*;
   import g6lc_apu_sh_pkg::*;
+  import g6lc_apu_rast_pkg::*;
   import g6lc_apu_vgpages_pkg::*;
 #(
   parameter bit          Enable = 1'b0,
@@ -684,11 +884,11 @@ module g6lc_apu_vgtop_fixture
   input  logic            cpl_ready_i,
   output logic [31:0]     cpl_len_o,
   output logic            mem_fault_o,
-  output logic [2:0]         mp_req_valid_o,
-  input  logic [2:0]         mp_req_ready_i,
-  output apu_mp_req_t [2:0]  mp_req_o,
-  input  logic [2:0]         mp_rsp_valid_i,
-  input  apu_mp_rsp_t [2:0]  mp_rsp_i,
+  output logic [3:0]         mp_req_valid_o,
+  input  logic [3:0]         mp_req_ready_i,
+  output apu_mp_req_t [3:0]  mp_req_o,
+  input  logic [3:0]         mp_rsp_valid_i,
+  input  apu_mp_rsp_t [3:0]  mp_rsp_i,
   output logic               work_valid_o,
   input  logic               work_ready_i,
   output apu_cmdexec_work_t  work_o,

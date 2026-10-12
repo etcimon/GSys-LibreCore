@@ -133,6 +133,9 @@ module g6lc_apu_objtab
     // RETIRE_KIDS parent sweep (id[15:0] = parent slot in rtk_slot_q;
     // kills count into pinned_q, no SWEEP stream)
     logic               scan_kids_q;
+    // §12.3 3d-d: SCAN_OVL mode — read-only overlap probe; first
+    // matching entry completes OK, no tombstones, no SWEEP stream
+    logic               scan_ovl_q;
     logic [15:0]        rtk_slot_q;
     logic               rtk_par_q;   // parent refcnt already zeroed
     // RESET_CTX sweep: tombstoned entry + slot staged for the interim
@@ -348,7 +351,8 @@ module g6lc_apu_objtab
         hit_slot_q <= '0; wr_ent_q <= '0; wr_slot_q <= '0;
         par_ent_q <= '0; par_slot_q <= '0;
         scan_q <= '0; pinned_q <= '0; live_q <= '0;
-        scan_kids_q <= '0; rtk_slot_q <= '0; rtk_par_q <= '0;
+        scan_kids_q <= '0; scan_ovl_q <= '0;
+        rtk_slot_q <= '0; rtk_par_q <= '0;
       end else begin
         unique case (state_q)
         // ---------------- init sweep ----------------
@@ -364,6 +368,16 @@ module g6lc_apu_objtab
             scan_q      <= '0;
             pinned_q    <= '0;
             scan_kids_q <= 1'b0;
+            scan_ovl_q  <= 1'b0;
+            state_q     <= StScanRd;
+          end else if (req_i.op == APU_OBJTAB_OP_SCAN_OVL) begin
+            // §12.3 3d-d: read-only slot sweep for MAP_BLOB eviction;
+            // req.kind filters (DEVICE_MEMORY), req.id[15:0] excludes
+            // the mapping memory itself
+            scan_q      <= '0;
+            pinned_q    <= '0;
+            scan_kids_q <= 1'b0;
+            scan_ovl_q  <= 1'b1;
             state_q     <= StScanRd;
           end else if (req_i.op == APU_OBJTAB_OP_RETIRE_KIDS) begin
             // §12.3 F5-d: parent-slot sweep — kill every live child of
@@ -378,6 +392,7 @@ module g6lc_apu_objtab
               scan_q      <= '0;
               pinned_q    <= '0;
               scan_kids_q <= 1'b1;
+              scan_ovl_q  <= 1'b0;
               rtk_slot_q  <= req_i.id[15:0];
               rtk_par_q   <= 1'b0;
               state_q     <= StScanRd;
@@ -610,6 +625,31 @@ module g6lc_apu_objtab
                 state_q      <= StMutWr;
               end
             end
+            APU_OBJTAB_OP_SETAUXHI_CAS: begin
+              // §12.3 3d-d: atomic aux[63:32] publish — succeeds only
+              // while the base still equals the expected value; a
+              // racing publisher's base is reported back via CONFLICT
+              if (res_st_q != ResOk) begin
+                cpl_q   <= '{status: res_status(res_st_q), handle: '0,
+                             entry: '0};
+                state_q <= StCpl;
+              end else if (res_ent_q.aux[63:32] !=
+                           req_q.offset[31:0]) begin
+                cpl_q   <= '{status: APU_OBJTAB_CONFLICT,
+                             handle: {res_ent_q.gen, res_slot_q},
+                             entry: res_ent_q};
+                state_q <= StCpl;
+              end else begin
+                wr_ent_q      <= res_ent_q;
+                wr_ent_q.aux  <= {req_q.value,
+                                  res_ent_q.aux[31:0] | req_q.mask};
+                wr_slot_q     <= res_slot_q;
+                cpl_q         <= '{status: APU_OBJTAB_OK,
+                                   handle: {res_ent_q.gen, res_slot_q},
+                                   entry: res_ent_q};
+                state_q       <= StMutWr;
+              end
+            end
             APU_OBJTAB_OP_SETBIND: begin
               if (res_st_q != ResOk) begin
                 cpl_q   <= '{status: res_status(res_st_q), handle: '0,
@@ -619,9 +659,9 @@ module g6lc_apu_objtab
                 wr_ent_q  <= res_ent_q;
                 wr_slot_q <= res_slot_q;
                 if (req_q.mem_id == 64'h0) begin
-                  wr_ent_q.bind_mem_slot <= APU_OBJTAB_SLOT_NONE;
-                  wr_ent_q.bind_offset   <= 64'h0;
-                  wr_ent_q.size          <= 64'h0;
+                  wr_ent_q.bind_mem    <= {16'h0, APU_OBJTAB_SLOT_NONE};
+                  wr_ent_q.bind_offset <= 64'h0;
+                  wr_ent_q.size        <= 64'h0;
                   cpl_q                  <= '{status: APU_OBJTAB_OK,
                                                handle: {res_ent_q.gen,
                                                         res_slot_q},
@@ -645,9 +685,13 @@ module g6lc_apu_objtab
             cpl_q   <= '{status: APU_OBJTAB_MISS, handle: '0, entry: '0};
             state_q <= StCpl;
           end else begin
-            wr_ent_q.bind_mem_slot <= res_slot_q;
-            wr_ent_q.bind_offset   <= req_q.offset;
-            wr_ent_q.size          <= req_q.size;
+            // §12.3 3d-d: record the bound memory's generation too —
+            // a slot recycled after the bound memory died must not
+            // resolve as the bind's object at descriptor update /
+            // operand resolve time
+            wr_ent_q.bind_mem    <= {res_ent_q.gen, res_slot_q};
+            wr_ent_q.bind_offset <= req_q.offset;
+            wr_ent_q.size        <= req_q.size;
             cpl_q                  <= '{status: APU_OBJTAB_OK,
                                          handle: {wr_ent_q.gen, wr_slot_q},
                                          entry: wr_ent_q};
@@ -682,9 +726,16 @@ module g6lc_apu_objtab
                         gen: gen_next(ent_rdata_t.gen),
                         parent_slot: par_slot_q,
                         refcnt: 16'h0, pins: 8'h0, state: 32'h0,
-                        bind_mem_slot: APU_OBJTAB_SLOT_NONE,
+                        bind_mem: {16'h0, APU_OBJTAB_SLOT_NONE},
                         bind_offset: 64'h0, size: req_q.size,
-                        aux: 64'h0, ctx: req_q.ctx};
+                        // §12.3 3d-d: req.offset is the entry's
+                        // initial aux — a DEVICE_MEMORY alloc passes
+                        // {UNBACKED,0} so the entry is born lazy and
+                        // no create→SETAUXHI window exists in which a
+                        // racing MAP_BLOB would read aux=0 as "backed
+                        // at base 0".  Callers that do not need an
+                        // initial aux pass offset=0.
+                        aux: req_q.offset, ctx: req_q.ctx};
           state_q  <= StAllocWrE;
         end
         StAllocWrE: begin
@@ -737,7 +788,27 @@ module g6lc_apu_objtab
         // ---------------- RESET_CTX / RETIRE_KIDS sweep ------------
         StScanRd: state_q <= StScanCmp;
         StScanCmp: begin
-          if (ent_rdata_t.live &&
+          if (scan_ovl_q) begin
+            // §12.3 3d-d: first live kind-matched DEVBACKED entry ≠
+            // the excluded slot whose extent overlaps the window —
+            // the candidate MAP_BLOB must evict
+            if (ent_rdata_t.live &&
+                ent_rdata_t.kind == req_q.kind &&
+                16'(scan_q) != req_q.id[15:0] &&
+                (ent_rdata_t.aux & APU_MEM_DEVBACKED) != 64'h0 &&
+                ent_rdata_t.aux[63:32] != APU_MEM_UNBACKED &&
+                64'(ent_rdata_t.aux[63:32]) < req_q.size &&
+                req_q.offset <
+                    64'(ent_rdata_t.aux[63:32]) + ent_rdata_t.size) begin
+              cpl_q   <= '{status: APU_OBJTAB_OK,
+                           handle: {ent_rdata_t.gen, 16'(scan_q)},
+                           entry: ent_rdata_t};
+              state_q <= StCpl;
+            end else begin
+              scan_q  <= scan_q + 1'b1;
+              state_q <= scan_q == Slots - 1 ? StScanDone : StScanRd;
+            end
+          end else if (ent_rdata_t.live &&
               (scan_kids_q ? ent_rdata_t.parent_slot == rtk_slot_q
                            : ent_rdata_t.ctx == req_q.ctx)) begin
             if (!scan_kids_q && ent_rdata_t.pins != 8'h0) begin
@@ -797,7 +868,12 @@ module g6lc_apu_objtab
             state_q <= scan_q == Slots ? StScanDone : StScanRd;
         end
         StScanDone: begin
-          if (scan_kids_q && !rtk_par_q) begin
+          if (scan_ovl_q) begin
+            // §12.3 3d-d: full sweep, no conflicting DEVBACKED extent
+            cpl_q   <= '{status: APU_OBJTAB_MISS, handle: '0,
+                         entry: '0};
+            state_q <= StCpl;
+          end else if (scan_kids_q && !rtk_par_q) begin
             // zero the parent's refcnt once so its own RETIRE can
             // never stall on BUSY_CHILDREN
             rtk_par_q  <= 1'b1;

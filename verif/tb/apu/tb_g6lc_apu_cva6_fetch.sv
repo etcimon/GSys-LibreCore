@@ -57,6 +57,8 @@ module tb_g6lc_apu_cva6_fetch;
     .time_irq_i('0),
     .rtc_time_i('0),
     .debug_req_i(1'b0),
+    .core_wfi_all_o(),
+    .core_wake_o   (),
     .rvfi_probes_o(rvfi),
     .noc_req_o(core_req),
     .noc_resp_i(core_rsp),

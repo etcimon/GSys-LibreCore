@@ -176,6 +176,13 @@ module g6lc_apu_shmod
     logic [15:0] md_off_q [MDN];
     logic [15:0] md_ms_q  [MDN];
     logic [7:0]  md_fl_q  [MDN];
+    logic [6:0]  md_bi_q  [MDN];   // member BuiltIn id (7'h7F = none)
+    logic        sbi_q;            // struct member0 carries a builtin
+    // graphics stages: execution model, Location masks, interface-var
+    // flags nibble for the row currently being committed
+    logic [3:0]  em_q;
+    logic [7:0]  in_mask_q, out_mask_q;
+    logic [3:0]  vfl_q;
     logic [6:0]  md_n_q;
     // forward-branch check queue
     logic [15:0] br_at_q [BRN];
@@ -213,6 +220,7 @@ module g6lc_apu_shmod
     logic        md_found_d, md_found_s;
     logic [15:0] mdv_off, mdv_ms;
     logic [7:0]  mdv_fl;
+    logic [6:0]  mdv_bi;
     always_comb begin
       md_hit_d = md_n_q; md_found_d = 1'b0;
       md_hit_s = md_n_q; md_found_s = 1'b0;
@@ -229,25 +237,29 @@ module g6lc_apu_shmod
       mdv_off = md_found_s ? md_off_q[md_hit_s] : 16'h0;
       mdv_ms  = md_found_s ? md_ms_q[md_hit_s]  : 16'h0;
       mdv_fl  = md_found_s ? md_fl_q[md_hit_s]  : 8'h0;
+      mdv_bi  = md_found_s ? md_bi_q[md_hit_s]  : 7'h7F;
     end
 
     // ---- opcode predicates -------------------------------------------
     function automatic logic is_accepted(input logic [15:0] o);
       unique case (o)
-        0,3,5,6,7,8,11,12,14,15,16,17,19,20,21,22,23,24,25,26,27,28,29,
+        0,3,4,5,6,7,8,11,12,14,15,16,17,19,20,21,22,23,24,25,26,27,28,29,
         30,32,33,
         41,42,43,44,46,48,49,50,51,52,54,56,59,61,62,65,66,68,71,72,
         79,80,81,82,84,
-        // §12.3 C/5b image ops — OpImageSampleImplicitLod (87) stays
-        // refused: compute has no derivatives (glslang emits
-        // ExplicitLod)
-        86,88,95,98,99,100,103,104,106,
+        // §12.3 C/5b image ops — OpImageSampleImplicitLod (87, G2b)
+        // is fragment-only; the projected/depth-ref implicit forms
+        // (89..93) stay refused through the default arm.  The G2b
+        // derivative family (207-215) is likewise fragment-only —
+        // both are gated on the execution model in S_OP.
+        86,87,88,95,98,99,100,103,104,106,
         109,110,111,112,124,126,127,128,129,130,131,132,
         133,134,135,136,137,138,139,142,143,144,145,146,147,148,
         164,165,166,167,168,169,
         170,171,172,173,174,175,176,177,178,179,180,182,183,184,186,
-        188,190,194,195,196,197,198,199,200,224,225,245,246,247,248,
-        249,250,251,253,255:
+        188,190,194,195,196,197,198,199,200,
+        207,208,209,210,211,212,213,214,215,
+        224,225,245,246,247,248,249,250,251,253,255:
           is_accepted = 1'b1;
         default: is_accepted = 1'b0;
       endcase
@@ -255,12 +267,13 @@ module g6lc_apu_shmod
     function automatic logic has_result(input logic [15:0] o);
       unique case (o)
         61,65,66,68,79,80,81,82,84,
-        86,88,95,98,100,103,104,106,
+        86,87,88,95,98,100,103,104,106,
         109,110,111,112,124,126,127,128,129,
         130,131,132,133,134,135,136,137,138,139,142,143,144,145,146,
         147,148,164,165,166,
         167,168,169,170,171,172,173,174,175,176,177,178,179,180,182,
-        183,184,186,188,190,194,195,196,197,198,199,200,245:
+        183,184,186,188,190,194,195,196,197,198,199,200,
+        207,208,209,210,211,212,213,214,215,245:
           has_result = 1'b1;
         default: has_result = 1'b0;
       endcase
@@ -286,22 +299,44 @@ module g6lc_apu_shmod
     endfunction
     function automatic logic is_dec_id(input logic [15:0] d);
       unique case (d)
-        0,1,2,3,6,11,19,20,24,25,26,33,34,42: is_dec_id = 1'b1;
+        0,1,2,3,6,11,19,20,24,25,26,30,33,34,42: is_dec_id = 1'b1;
         default: is_dec_id = 1'b0;
       endcase
     endfunction
     function automatic logic is_dec_mbr(input logic [15:0] d);
       unique case (d)
-        0,1,4,5,7,24,25,35,42: is_dec_mbr = 1'b1;
+        0,1,4,5,7,11,24,25,35,42: is_dec_mbr = 1'b1;
         default: is_dec_mbr = 1'b0;
       endcase
     endfunction
     function automatic logic is_sc_ok(input logic [3:0] s);
       unique case (s)
-        APU_SH_SC_UNIFORMCONST, APU_SH_SC_INPUT, APU_SH_SC_UNIFORM,
+        APU_SH_SC_UNIFORMCONST, APU_SH_SC_INPUT, APU_SH_SC_OUTPUT,
+        APU_SH_SC_UNIFORM,
         APU_SH_SC_WORKGROUP, APU_SH_SC_PRIVATE, APU_SH_SC_FUNCTION,
         APU_SH_SC_PUSHCONST, APU_SH_SC_SBUF: is_sc_ok = 1'b1;
         default: is_sc_ok = 1'b0;
+      endcase
+    endfunction
+    // id-level builtins accepted by OpDecorate; stage legality is
+    // checked per variable in S_VRB (compute keeps 24..29 only)
+    function automatic logic is_bi_ok(input logic [15:0] b);
+      unique case (b)
+        0,1,3,4,15,17,24,25,26,27,28,29,42,43: is_bi_ok = 1'b1;
+        default: is_bi_ok = 1'b0;
+      endcase
+    endfunction
+    // gl_PerVertex member builtins (member-level OpMemberDecorate)
+    function automatic logic is_mbi_ok(input logic [15:0] b);
+      unique case (b)
+        0,1,3,4: is_mbi_ok = 1'b1;
+        default: is_mbi_ok = 1'b0;
+      endcase
+    endfunction
+    function automatic logic is_mbi_drop(input logic [15:0] b);
+      unique case (b)
+        1,3,4: is_mbi_drop = 1'b1;
+        default: is_mbi_drop = 1'b0;
       endcase
     endfunction
     function automatic logic [15:0] ops_need(input logic [15:0] o,
@@ -311,7 +346,7 @@ module g6lc_apu_shmod
         15:                 ops_need = 2;
         17,248,249:         ops_need = 1;
         14:                 ops_need = 2;
-        16:                 ops_need = 5;
+        16:                 ops_need = (n < 5) ? n : 5;
         11:                 ops_need = (n < 5) ? n : 5;
         12:                 ops_need = 4;
         71:                 ops_need = 3;
@@ -359,18 +394,40 @@ module g6lc_apu_shmod
     wire id_ok1 = ops_q[1] < 32'(ShaderIds);
     wire [15:0] ld_sum = at_q + i_q + 16'd1;
 
+    // graphics interface-var decode at S_VRB ph2 (decor row fields:
+    // [29] builtin valid, [23:16] builtin id, [30] Location valid,
+    // [63:32] Location value; ty_rdata holds the pointee's type row —
+    // bit29 marks a builtin-membered struct, i.e. gl_PerVertex)
+    wire        vrb_has_bi  = de_rdata[29];
+    wire [6:0]  vrb_bi      = de_rdata[22:16];
+    wire        vrb_has_loc = de_rdata[30];
+    wire [31:0] vrb_loc     = de_rdata[63:32];
+    wire        vrb_pvx     = (ty_kind == APU_SH_TK_STRUCT) &&
+                              ty_rdata[29];
+    // graphics interface variable: the var row's flags nibble carries
+    // the VF_* record flags exclusively (decor flags do not merge in)
+    wire        vrb_gio     = (em_q != APU_SH_EM_GLCOMPUTE) &&
+                              (ops_q[2][3:0] == APU_SH_SC_INPUT ||
+                               ops_q[2][3:0] == APU_SH_SC_OUTPUT);
+
+    // entry record local size: graphics stages carry (1,1,1)
+    wire [7:0]  ent_lx = (em_q != APU_SH_EM_GLCOMPUTE) ? 8'd1 : lx_q;
+    wire [7:0]  ent_ly = (em_q != APU_SH_EM_GLCOMPUTE) ? 8'd1 : ly_q;
+    wire [7:0]  ent_lz = (em_q != APU_SH_EM_GLCOMPUTE) ? 8'd1 : lz_q;
+
     // var/init row assembly (from the ph2 captures)
     logic [31:0] var_w0, var_w1, init_w0, init_w1;
     logic [7:0]  drc_nb;
     always_comb begin
-      // undecorated variables default builtin to 8'hFF (Python
-      // d.get('builtin', 0xFF)); the decor table row itself keeps 0.
-      var_w0 = {de_rdata[28:24],
-                (de_rdata[23:16] == 8'h0) ? 8'hFF : de_rdata[23:16],
+      // builtin ids carry a validity marker at flag bit5 (id 0 =
+      // Position is legal, so the field alone cannot double as the
+      // "none" sentinel); undecorated ids default to 8'hFF
+      var_w0 = {vrb_gio ? vfl_q : de_rdata[27:24],
+                de_rdata[29] ? de_rdata[23:16] : 8'hFF,
                 de_rdata[15:8], de_rdata[7:0], ops_q[2][3:0]};
       var_w1 = {6'h0, elem_q, voff_q};
-      init_w0 = {4'h0,
-                 (de_rdata[23:16] == 8'h0) ? 8'hFF : de_rdata[23:16],
+      init_w0 = {vfl_q,
+                 de_rdata[29] ? de_rdata[23:16] : 8'hFF,
                  ops_q[2][3:0], n_regs_q};
       init_w1 = {voff_q, de_rdata[15:8], de_rdata[7:0]};
     end
@@ -455,8 +512,10 @@ module g6lc_apu_shmod
               // builtin field defaults to 8'hFF (Python
               // decor.get('builtin', 0xFF)); a written row with the
               // field still zero means "not yet decorated".
-              drc_nb = (de_rdata[23:16] == 8'h0) ? 8'hFF
-                       : de_rdata[23:16];
+              // builtin validity rides flag bit5 — id 0 (Position)
+              // is a legal builtin, so the field cannot double as the
+              // "none" sentinel
+              drc_nb = de_rdata[29] ? de_rdata[23:16] : 8'hFF;
               unique case (ops_q[1][15:0])
                 33: de_wdata = {de_rdata[63:32], de_rdata[31:24],
                                 drc_nb, ops_q[2][7:0],
@@ -464,10 +523,16 @@ module g6lc_apu_shmod
                 34: de_wdata = {de_rdata[63:32], de_rdata[31:24],
                                 drc_nb, de_rdata[15:8],
                                 ops_q[2][7:0]};
-                11: de_wdata = {de_rdata[63:32], de_rdata[31:24],
+                11: de_wdata = {de_rdata[63:32],
+                                de_rdata[31:24] | APU_SH_DF_BI,
                                 ops_q[2][7:0], de_rdata[15:0]};
                 6:  de_wdata = {ops_q[2], de_rdata[31:24], drc_nb,
                                 de_rdata[15:0]};
+                // Location: value rides word1 (shares the ArrayStride
+                // slot — a var never carries both), marker at bit6
+                30: de_wdata = {ops_q[2],
+                                de_rdata[31:24] | APU_SH_DF_LOC,
+                                drc_nb, de_rdata[15:0]};
                 default: de_wdata = {de_rdata[63:32],
                       de_rdata[31:24] | 8'(8'h1 << ops_q[1][2:0]),
                       drc_nb, de_rdata[15:0]};
@@ -575,9 +640,13 @@ module g6lc_apu_shmod
                 if (ph_q == 6'(2 * (wc_q - 2))) begin
                   ty_req = 1'b1; ty_we = 1'b1;
                   ty_addr = {slot_q, ops_q[0][9:0]};
+                  // spare bit29: struct carries builtin members
+                  // (gl_PerVertex) — lets S_VRB distinguish it from a
+                  // Location-less plain struct
                   ty_wdata = mk_type(APU_SH_TK_STRUCT, 0, 0, 0, 0, 0,
                                      4'(wc_q - 2), n_memb_q, 0,
-                                     sz_q, 0);
+                                     sz_q, 0) |
+                             (sbi_q ? (96'h1 << 29) : 96'h0);
                 end
               end
               33: begin
@@ -691,8 +760,11 @@ module g6lc_apu_shmod
           end
           S_ENT: begin
             en_req = 1'b1; en_we = 1'b1; en_addr = slot_q;
-            en_wdata = {32'(slab_q), 32'(scratch_q),
-                        8'(n_init_q), lz_q, ly_q, lx_q,
+            // graphics stages carry lx=ly=lz=1 plus the execution
+            // model and Location masks in the record's spare halves
+            en_wdata = {em_q, 12'h0, slab_q,
+                        out_mask_q, in_mask_q, scratch_q,
+                        8'(n_init_q), ent_lz, ent_ly, ent_lx,
                         n_regs_q, entry_off_q};
           end
           default: ;
@@ -778,8 +850,10 @@ module g6lc_apu_shmod
         for (t = 0; t < OPB; t++) ops_q[t] <= '0;
         for (t = 0; t < MDN; t++) begin
           md_id_q[t] <= '0; md_m_q[t] <= '0; md_off_q[t] <= '0;
-          md_ms_q[t] <= '0; md_fl_q[t] <= '0;
+          md_ms_q[t] <= '0; md_fl_q[t] <= '0; md_bi_q[t] <= '0;
         end
+        em_q <= APU_SH_EM_GLCOMPUTE; sbi_q <= 1'b0;
+        in_mask_q <= '0; out_mask_q <= '0; vfl_q <= '0;
         for (t = 0; t < BRN; t++) begin
           br_at_q[t] <= '0; br_tg_q[t] <= '0;
         end
@@ -791,7 +865,11 @@ module g6lc_apu_shmod
             if (ops_q[2] == 35) md_off_q[md_hit_d] <= ops_q[3][15:0];
             else if (ops_q[2] == 7) md_ms_q[md_hit_d] <=
                                      ops_q[3][15:0];
-            else md_fl_q[md_hit_d] <= md_fl_q[md_hit_d] |
+            else if (ops_q[2] == 11) begin
+              md_bi_q[md_hit_d] <= ops_q[3][6:0];
+              md_fl_q[md_hit_d] <= md_fl_q[md_hit_d] |
+                  (is_mbi_drop(ops_q[3][15:0]) ? APU_SH_MF_DROP : 8'h0);
+            end else md_fl_q[md_hit_d] <= md_fl_q[md_hit_d] |
                                       8'(8'h1 << ops_q[2][2:0]);
           end else begin
             md_id_q[md_hit_d] <= ops_q[0][9:0];
@@ -800,7 +878,12 @@ module g6lc_apu_shmod
                                    ops_q[3][15:0] : '0;
             md_ms_q[md_hit_d] <= (ops_q[2] == 7) ? ops_q[3][15:0] : '0;
             md_fl_q[md_hit_d] <= (ops_q[2] == 35 || ops_q[2] == 7) ?
-                                  8'h0 : 8'(8'h1 << ops_q[2][2:0]);
+                                  8'h0 :
+                (ops_q[2] == 11) ?
+                (is_mbi_drop(ops_q[3][15:0]) ? APU_SH_MF_DROP : 8'h0) :
+                8'(8'h1 << ops_q[2][2:0]);
+            md_bi_q[md_hit_d] <= (ops_q[2] == 11) ? ops_q[3][6:0]
+                                                  : 7'h7F;
             md_n_q <= md_n_q + 1;
           end
         end
@@ -819,6 +902,8 @@ module g6lc_apu_shmod
               in_func_q <= 1'b0; md_n_q <= '0; br_n_q <= '0;
               mp_q <= 1'b0; lp_n_q <= '0;
               sz_q <= '0; cn_q <= '0;
+              em_q <= APU_SH_EM_GLCOMPUTE;
+              in_mask_q <= '0; out_mask_q <= '0; sbi_q <= 1'b0;
               live_q[commit_pl_i.slot] <= 1'b0;
               if (commit_pl_i.nwords < 5) begin
                 fl_code_q <= APU_SH_FAULT_MAGIC; fail_q <= 1'b1;
@@ -905,8 +990,12 @@ module g6lc_apu_shmod
                 at_q <= at_q + wc_q; st_q <= S_IW;
               end
               17: begin
-                // §12.3 C/5b: Capability Shader (1) and ImageQuery (50)
-                if (ops_q[0] != 32'd1 && ops_q[0] != 32'd50) begin
+                // §12.3 C/5b: Capability Shader (1), ImageQuery (50)
+                // and G2b DerivativeControl (51 — enables the Fine/
+                // Coarse derivative ops this module accepts for
+                // fragment execution models)
+                if (ops_q[0] != 32'd1 && ops_q[0] != 32'd50 &&
+                    ops_q[0] != 32'd51) begin
                   fl_code_q <= APU_SH_FAULT_CAP; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else begin
@@ -923,7 +1012,11 @@ module g6lc_apu_shmod
                 end
               end
               15: begin
-                if (ops_q[0] != 5) begin
+                // Vertex(0)/Fragment(4)/GLCompute(5) — the graphics
+                // models skip the LocalSize requirement
+                if (ops_q[0] != APU_SH_EM_VERTEX &&
+                    ops_q[0] != APU_SH_EM_FRAGMENT &&
+                    ops_q[0] != APU_SH_EM_GLCOMPUTE) begin
                   fl_code_q <= APU_SH_FAULT_ENTRY; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else if (entry_seen_q) begin
@@ -932,11 +1025,15 @@ module g6lc_apu_shmod
                   fail_q <= 1'b1; st_q <= S_DONE;
                 end else begin
                   entry_seen_q <= 1'b1;
+                  em_q <= ops_q[0][3:0];
                   at_q <= at_q + wc_q; st_q <= S_IW;
                 end
               end
               16: begin
-                if (ops_q[1] != 17) begin
+                if (ops_q[1] == 7) begin
+                  // OriginUpperLeft (fragment) — accepted, ignored
+                  at_q <= at_q + wc_q; st_q <= S_IW;
+                end else if (ops_q[1] != 17) begin
                   fl_code_q <= APU_SH_FAULT_EXECMODE;
                   fl_opc_q <= opc_q; fl_word_q <= at_q;
                   fail_q <= 1'b1; st_q <= S_DONE;
@@ -985,9 +1082,12 @@ module g6lc_apu_shmod
               end
               71: begin
                 if (!is_dec_id(ops_q[1][15:0]) ||
-                    (ops_q[1] == 11 &&
-                     !(ops_q[2] >= 24 && ops_q[2] <= 29))) begin
-                  fl_code_q <= APU_SH_FAULT_DECOR;
+                    (ops_q[1] == 11 && !is_bi_ok(ops_q[2][15:0]))) begin
+                  // G2a: BuiltIn FragDepth (22) is a recognised
+                  // graphics builtin the engine cannot honour — a
+                  // distinct FAULT_VAR, not a malformed-decoration
+                  fl_code_q <= (ops_q[1] == 11 && ops_q[2][15:0] == 16'd22)
+                               ? APU_SH_FAULT_VAR : APU_SH_FAULT_DECOR;
                   fl_opc_q <= opc_q; fl_word_q <= at_q;
                   fail_q <= 1'b1; st_q <= S_DONE;
                 end else if (!id_ok0) begin
@@ -998,7 +1098,9 @@ module g6lc_apu_shmod
                 end
               end
               72: begin
-                if (!is_dec_mbr(ops_q[2][15:0])) begin
+                if (!is_dec_mbr(ops_q[2][15:0]) ||
+                    (ops_q[2] == 11 &&
+                     !is_mbi_ok(ops_q[3][15:0]))) begin
                   fl_code_q <= APU_SH_FAULT_DECOR;
                   fl_opc_q <= opc_q; fl_word_q <= at_q;
                   fail_q <= 1'b1; st_q <= S_DONE;
@@ -1174,6 +1276,21 @@ module g6lc_apu_shmod
                   fail_q <= 1'b1; st_q <= S_DONE;
                 end else begin
                   ph_q <= '0; st_q <= S_VRB;
+                end
+              end
+              // G2b: fragment-only opcodes — OpImageSampleImplicitLod
+              // (87) needs quad derivatives and the 207-215 family
+              // produces them; neither exists in VS/compute waves
+              87,207,208,209,210,211,212,213,214,215: begin
+                if (em_q != APU_SH_EM_FRAGMENT) begin
+                  fl_code_q <= APU_SH_FAULT_OPCODE;
+                  fl_opc_q <= opc_q; fl_word_q <= at_q;
+                  fail_q <= 1'b1; st_q <= S_DONE;
+                end else if (!id_ok1) begin
+                  fl_code_q <= APU_SH_FAULT_BOUND;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else begin
+                  ph_q <= '0; st_q <= S_RES;
                 end
               end
               default: begin
@@ -1398,7 +1515,24 @@ module g6lc_apu_shmod
                     fl_code_q <= APU_SH_FAULT_WORDS;
                     fl_opc_q <= opc_q; fl_word_q <= at_q;
                     fail_q <= 1'b1; st_q <= S_DONE;
+                  end else if (((ph_q >> 1) == 0 &&
+                                mdv_bi != 7'h7F &&
+                                mdv_bi != 7'(APU_SH_BI_POSITION)) ||
+                             ((ph_q >> 1) != 0 && sbi_q &&
+                              mdv_bi != 7'(APU_SH_BI_POINTSIZE) &&
+                              mdv_bi != 7'(APU_SH_BI_CLIPDIST) &&
+                              mdv_bi != 7'(APU_SH_BI_CULLDIST)) ||
+                             ((ph_q >> 1) != 0 && !sbi_q &&
+                              mdv_bi != 7'h7F)) begin
+                    // gl_PerVertex is the only builtin-member shape:
+                    // member0 = Position; every later member a dropped
+                    // builtin — anything else faults
+                    fl_code_q <= APU_SH_FAULT_DECOR;
+                    fl_opc_q <= opc_q; fl_word_q <= at_q;
+                    fail_q <= 1'b1; st_q <= S_DONE;
                   end else begin
+                    if ((ph_q >> 1) == 0)
+                      sbi_q <= (mdv_bi != 7'h7F);
                     if (mdv_off + ty_size > sz_q)
                       sz_q <= mdv_off + ty_size;
                     ph_q <= ph_q + 1;
@@ -1411,7 +1545,9 @@ module g6lc_apu_shmod
                 end else begin
                   // ph0: start the struct-size max-accumulation clean —
                   // sz_q may still hold a preceding OpTypeArray length.
-                  if (ph_q == 0) sz_q <= '0;
+                  if (ph_q == 0) begin
+                    sz_q <= '0; sbi_q <= 1'b0;
+                  end
                   ph_q <= ph_q + 1;
                 end
               end
@@ -1569,7 +1705,7 @@ module g6lc_apu_shmod
           // ---- variable ----------------------------------------------
           S_VRB: begin
             unique case (ph_q)
-              0: ph_q <= 1;
+              0: begin vfl_q <= '0; voff_q <= '0; ph_q <= 1; end
               1: begin
                 if (ty_kind != APU_SH_TK_PTR) begin
                   fl_code_q <= APU_SH_FAULT_TYPE; fl_opc_q <= opc_q;
@@ -1584,12 +1720,28 @@ module g6lc_apu_shmod
                     voff_q <= slab_q;
                     slab_q <= slab_q +
                               16'((32'(ty_size) + 15) & 32'hFFFF_FFF0);
+                    if (vrb_has_bi &&
+                        (em_q != APU_SH_EM_GLCOMPUTE ||
+                         !(vrb_bi >= 7'd24 && vrb_bi <= 7'd29))) begin
+                      // builtins are interface-only under graphics;
+                      // compute accepts only its own 24..29 set
+                      fl_code_q <= APU_SH_FAULT_VAR; fl_opc_q <= opc_q;
+                      fl_word_q <= at_q; fail_q <= 1'b1;
+                      st_q <= S_DONE;
+                    end
                   end
                   APU_SH_SC_FUNCTION, APU_SH_SC_PRIVATE: begin
                     voff_q <= scratch_q;
                     scratch_q <= scratch_q +
                                  16'((32'(ty_size) + 15) &
                                      32'hFFFF_FFF0);
+                    if (vrb_has_bi &&
+                        (em_q != APU_SH_EM_GLCOMPUTE ||
+                         !(vrb_bi >= 7'd24 && vrb_bi <= 7'd29))) begin
+                      fl_code_q <= APU_SH_FAULT_VAR; fl_opc_q <= opc_q;
+                      fl_word_q <= at_q; fail_q <= 1'b1;
+                      st_q <= S_DONE;
+                    end
                   end
                   APU_SH_SC_UNIFORMCONST: begin
                     // §12.3 C/5b: image/sampler/sampled-image pointee
@@ -1601,10 +1753,135 @@ module g6lc_apu_shmod
                       fl_code_q <= APU_SH_FAULT_STORAGE;
                       fl_opc_q <= opc_q; fl_word_q <= at_q;
                       fail_q <= 1'b1; st_q <= S_DONE;
+                    end else if (vrb_has_bi &&
+                                 (em_q != APU_SH_EM_GLCOMPUTE ||
+                                  !(vrb_bi >= 7'd24 &&
+                                    vrb_bi <= 7'd29))) begin
+                      fl_code_q <= APU_SH_FAULT_VAR; fl_opc_q <= opc_q;
+                      fl_word_q <= at_q; fail_q <= 1'b1;
+                      st_q <= S_DONE;
                     end
                     voff_q <= '0;
                   end
-                  default: voff_q <= '0;
+                  APU_SH_SC_INPUT, APU_SH_SC_OUTPUT: begin
+                    if (em_q == APU_SH_EM_GLCOMPUTE) begin
+                      // compute: builtin decors are checked at S_DRC;
+                      // interface vars stay voff 0
+                      voff_q <= '0;
+                      if (vrb_has_bi &&
+                          !(vrb_bi >= 7'd24 && vrb_bi <= 7'd29)) begin
+                        fl_code_q <= APU_SH_FAULT_VAR;
+                        fl_opc_q <= opc_q; fl_word_q <= at_q;
+                        fail_q <= 1'b1; st_q <= S_DONE;
+                      end
+                    end else begin
+                      // graphics interface variable — aperture record
+                      // layout (see the APU_SH_*_STRIDE records);
+                      // vfl_q gets {2'b0, DROP, REC}
+                      unique case ({em_q == APU_SH_EM_FRAGMENT,
+                                   ops_q[2][3:0]})
+                        // Vertex Input: builtins 42/43 keep f_bi;
+                        // Location l -> record offset 16*l
+                        {1'b0, APU_SH_SC_INPUT}: begin
+                          if (vrb_has_bi) begin
+                            if (vrb_bi != APU_SH_BI_VERTEXINDEX &&
+                                vrb_bi != APU_SH_BI_INSTANCEINDEX) begin
+                              fl_code_q <= APU_SH_FAULT_VAR;
+                              fl_opc_q <= opc_q; fl_word_q <= at_q;
+                              fail_q <= 1'b1; st_q <= S_DONE;
+                            end
+                          end else if (!vrb_has_loc || vrb_loc > 7) begin
+                            fl_code_q <= APU_SH_FAULT_VAR;
+                            fl_opc_q <= opc_q; fl_word_q <= at_q;
+                            fail_q <= 1'b1; st_q <= S_DONE;
+                          end else begin
+                            voff_q <= 16'(vrb_loc << 4);
+                            vfl_q  <= APU_SH_VF_REC;
+                            in_mask_q[vrb_loc[2:0]] <= 1'b1;
+                          end
+                        end
+                        // Vertex Output: Position/gl_PerVertex -> slot
+                        // 0; PointSize/Clip/Cull -> dropped; Location l
+                        // -> 16*(1+l)
+                        {1'b0, APU_SH_SC_OUTPUT}: begin
+                          if (vrb_has_bi) begin
+                            if (vrb_bi == APU_SH_BI_POSITION)
+                              vfl_q <= APU_SH_VF_REC;
+                            else if (vrb_bi == APU_SH_BI_POINTSIZE ||
+                                     vrb_bi == APU_SH_BI_CLIPDIST ||
+                                     vrb_bi == APU_SH_BI_CULLDIST)
+                              vfl_q <= APU_SH_VF_DROP;
+                            else begin
+                              fl_code_q <= APU_SH_FAULT_VAR;
+                              fl_opc_q <= opc_q; fl_word_q <= at_q;
+                              fail_q <= 1'b1; st_q <= S_DONE;
+                            end
+                          end else if (vrb_has_loc) begin
+                            if (vrb_loc > 7) begin
+                              fl_code_q <= APU_SH_FAULT_VAR;
+                              fl_opc_q <= opc_q; fl_word_q <= at_q;
+                              fail_q <= 1'b1; st_q <= S_DONE;
+                            end else begin
+                              voff_q <= 16'((vrb_loc + 1) << 4);
+                              vfl_q  <= APU_SH_VF_REC;
+                              out_mask_q[vrb_loc[2:0]] <= 1'b1;
+                            end
+                          end else if (vrb_pvx) begin
+                            vfl_q <= APU_SH_VF_REC;
+                          end else begin
+                            fl_code_q <= APU_SH_FAULT_VAR;
+                            fl_opc_q <= opc_q; fl_word_q <= at_q;
+                            fail_q <= 1'b1; st_q <= S_DONE;
+                          end
+                        end
+                        // Fragment Input: FragCoord -> slot 0;
+                        // FrontFacing keeps f_bi; Location l -> 16*(1+l)
+                        {1'b1, APU_SH_SC_INPUT}: begin
+                          if (vrb_has_bi) begin
+                            if (vrb_bi == APU_SH_BI_FRAGCOORD)
+                              vfl_q <= APU_SH_VF_REC;
+                            else if (vrb_bi != APU_SH_BI_FRONTFACING) begin
+                              fl_code_q <= APU_SH_FAULT_VAR;
+                              fl_opc_q <= opc_q; fl_word_q <= at_q;
+                              fail_q <= 1'b1; st_q <= S_DONE;
+                            end
+                          end else if (!vrb_has_loc || vrb_loc > 7) begin
+                            fl_code_q <= APU_SH_FAULT_VAR;
+                            fl_opc_q <= opc_q; fl_word_q <= at_q;
+                            fail_q <= 1'b1; st_q <= S_DONE;
+                          end else begin
+                            voff_q <= 16'((vrb_loc + 1) << 4);
+                            vfl_q  <= APU_SH_VF_REC;
+                            in_mask_q[vrb_loc[2:0]] <= 1'b1;
+                          end
+                        end
+                        // Fragment Output: Location l -> 16*l; no
+                        // builtins
+                        default: begin
+                          if (vrb_has_bi || !vrb_has_loc ||
+                              vrb_loc > 7) begin
+                            fl_code_q <= APU_SH_FAULT_VAR;
+                            fl_opc_q <= opc_q; fl_word_q <= at_q;
+                            fail_q <= 1'b1; st_q <= S_DONE;
+                          end else begin
+                            voff_q <= 16'(vrb_loc << 4);
+                            vfl_q  <= APU_SH_VF_REC;
+                            out_mask_q[vrb_loc[2:0]] <= 1'b1;
+                          end
+                        end
+                      endcase
+                    end
+                  end
+                  default: begin
+                    voff_q <= '0;
+                    if (vrb_has_bi &&
+                        (em_q != APU_SH_EM_GLCOMPUTE ||
+                         !(vrb_bi >= 7'd24 && vrb_bi <= 7'd29))) begin
+                      fl_code_q <= APU_SH_FAULT_VAR; fl_opc_q <= opc_q;
+                      fl_word_q <= at_q; fail_q <= 1'b1;
+                      st_q <= S_DONE;
+                    end
+                  end
                 endcase
                 ph_q <= 3;
               end
@@ -1663,11 +1940,14 @@ module g6lc_apu_shmod
             done_pl_o.fault.opcode <= fl_opc_q;
             done_pl_o.fault.word <= fl_word_q;
             done_pl_o.entry.entry_off <= entry_off_q;
-            done_pl_o.entry.lx <= lx_q;
-            done_pl_o.entry.ly <= ly_q;
-            done_pl_o.entry.lz <= lz_q;
+            done_pl_o.entry.lx <= ent_lx;
+            done_pl_o.entry.ly <= ent_ly;
+            done_pl_o.entry.lz <= ent_lz;
             done_pl_o.entry.scratch <= scratch_q;
             done_pl_o.entry.slab <= slab_q;
+            done_pl_o.entry.em <= em_q;
+            done_pl_o.entry.in_mask <= in_mask_q;
+            done_pl_o.entry.out_mask <= out_mask_q;
             done_pl_o.n_regs <= n_regs_q;
             done_pl_o.n_vars <= n_init_q;
             st_q <= S_IDLE;

@@ -247,10 +247,12 @@ module tb_g6lc_apu_vnfront;
     .push_n_o(xpush_n), .push_o(xpush),
     .done_seq_o(f_dseq),
     .fence_signaled_o(f_fsig), .fence_lost_o(f_flost),
-    .fence_clr_i(f_fclr), .xf_o(), .busy_o());
+    .fence_clr_i(f_fclr), .xf_o(), .rd_o(),
+    .hold_i(1'b0), .idle_o(), .busy_o());
 
-  // ---- shared backends with 3-master arbitration -----------------------
-  // objtab: 0=front, 1=exec, 2=tb(final RESET_CTX)
+  // ---- shared backends with 4-master arbitration -----------------------
+  // objtab: 0=front, 1=exec, 2=tb(final RESET_CTX), 3=shcore record
+  // resolve (READSLOT) — lowest priority, mirrors vgtop's 5th requester
   logic               tb_ot = 1'b0, tot_v = 1'b0, tot_r, tot_cv;
   apu_objtab_req_t    tot_req;
   logic               ot_vld, ot_rdy, ot_cvld;
@@ -259,6 +261,8 @@ module tb_g6lc_apu_vnfront;
   logic               ot_busy = 1'b0;
   logic [1:0]         ot_own = '0;
 
+  logic               shot_v, shot_r, shot_cv;
+  apu_objtab_req_t    shot_req;
   wire   ot_take = ot_vld && ot_rdy;
   wire   [1:0] ot_sel = ot_busy ? ot_own
                        : (tb_ot ? 2'd2
@@ -266,15 +270,18 @@ module tb_g6lc_apu_vnfront;
                              : (xot_v ? 2'd1 : 2'd3)));
   assign ot_vld = ot_sel == 2'd0 ? fot_v
                 : ot_sel == 2'd1 ? xot_v
-                : ot_sel == 2'd2 ? tot_v : 1'b0;
+                : ot_sel == 2'd2 ? tot_v : shot_v;
   assign ot_req = ot_sel == 2'd0 ? fot_req
-                : ot_sel == 2'd1 ? xot_req : tot_req;
+                : ot_sel == 2'd1 ? xot_req
+                : ot_sel == 2'd2 ? tot_req : shot_req;
   assign fot_r = ot_sel == 2'd0 && ot_rdy;
   assign xot_r = ot_sel == 2'd1 && ot_rdy;
   assign tot_r = ot_sel == 2'd2 && ot_rdy;
+  assign shot_r = ot_sel == 2'd3 && ot_rdy;
   assign fot_cv = ot_cvld && ot_busy && ot_own == 2'd0;
   assign xot_cv = ot_cvld && ot_busy && ot_own == 2'd1;
   assign tot_cv = ot_cvld && ot_busy && ot_own == 2'd2;
+  assign shot_cv = ot_cvld && ot_busy && ot_own == 2'd3;
   always @(posedge clk or negedge rst_ni)
     if (!rst_ni) begin ot_busy <= 1'b0; ot_own <= '0; end
     else if (ot_take) begin ot_busy <= 1'b1; ot_own <= ot_sel; end
@@ -375,7 +382,10 @@ module tb_g6lc_apu_vnfront;
     .mem_re_o(shm_re), .mem_we_o(shm_we), .mem_addr_o(shm_addr),
     .mem_wdata_o(shm_wdata), .mem_wstrb_o(shm_wstrb),
     .mem_ready_i(1'b1), .mem_rvalid_i(shm_rv),
-    .mem_rdata_i(shm_rdata), .mem_err_i(1'b0));
+    .mem_rdata_i(shm_rdata), .mem_err_i(1'b0),
+    .ot_req_valid_o(shot_v), .ot_req_ready_i(shot_r),
+    .ot_req_o(shot_req),
+    .ot_cpl_valid_i(shot_cv), .ot_cpl_ready_o(), .ot_cpl_i(ot_cpl));
 
   // shader-side aperture: byte-addressed SHM window, handshake
   // port (ready=1, rvalid next cycle)

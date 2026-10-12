@@ -3,7 +3,7 @@
 // Venus system composition (§6c Settled bullet 5 of
 // architecture/uncore/apu-vulkan-engine.md): g6lc_apu_vqwalk +
 // g6lc_apu_vgtop + g6lc_apu_apmem — a virtqueue walker, the engine
-// composition, and one shared AXI4 master serving all five apu_mp
+// composition, and one shared AXI4 master serving all six apu_mp
 // requesters.
 //
 // apu_mp port map (fixed priority, index 0 highest):
@@ -12,6 +12,7 @@
 //   2 CTL  — vgtop mp[0] (vgctl, guest, dom=0)
 //   3 PUMP — vgtop mp[1] (vnpump, dom selects aperture/execbuffer)
 //   4 SH   — vgtop mp[2] (ShaderCore LSU, aperture, dom=1)
+//   5 RAST — vgtop mp[3] (raster engine, aperture, dom=1)
 //
 // Reset (§6c bullet 5): reset_req_i flushes apmem (non-issued requests
 // dropped, issued transactions always complete) and clears the walker
@@ -276,7 +277,8 @@ module g6lc_apu_vgsys
     end
 
     // ---- engine composition ------------------------------------------
-    // vgtop mp[0..2] map onto apmem ports CTL=2, PUMP=3, SH=4.
+    // vgtop mp[0..3] map onto apmem ports CTL=2, PUMP=3, SH=4,
+    // RAST=5 (lowest priority).
     g6lc_apu_vgtop #(
       .Enable(1'b1), .Rings(Rings), .Fences(Fences),
       .PayWords(PayWords), .VgPages(VgPages), .VgPageBytes(VgPageBytes),
@@ -293,11 +295,11 @@ module g6lc_apu_vgsys
       .chain_desc_i(vw_chain_desc),
       .cpl_valid_o(vg_cpl_v), .cpl_ready_i(vw_cpl_rdy),
       .cpl_len_o(vg_cpl_len), .mem_fault_o(vg_fault),
-      .mp_req_valid_o(mp_req_valid[APU_MP_SH:APU_MP_CTL]),
-      .mp_req_ready_i(mp_req_ready[APU_MP_SH:APU_MP_CTL]),
-      .mp_req_o(mp_req[APU_MP_SH:APU_MP_CTL]),
-      .mp_rsp_valid_i(mp_rsp_valid[APU_MP_SH:APU_MP_CTL]),
-      .mp_rsp_i(mp_rsp[APU_MP_SH:APU_MP_CTL]),
+      .mp_req_valid_o(mp_req_valid[APU_MP_RAST:APU_MP_CTL]),
+      .mp_req_ready_i(mp_req_ready[APU_MP_RAST:APU_MP_CTL]),
+      .mp_req_o(mp_req[APU_MP_RAST:APU_MP_CTL]),
+      .mp_rsp_valid_i(mp_rsp_valid[APU_MP_RAST:APU_MP_CTL]),
+      .mp_rsp_i(mp_rsp[APU_MP_RAST:APU_MP_CTL]),
       .work_valid_o(ws_v), .work_ready_i(ws_rdy),
       .work_o(ws_work),
       .work_done_i(ws_done), .work_done_pl_i(ws_done_pl),

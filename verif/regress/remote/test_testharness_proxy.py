@@ -1,6 +1,7 @@
 # Copyright (c) 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 import argparse
+import importlib.util
 import json
 import os
 import shutil
@@ -12,6 +13,433 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 import testharness_proxy as proxy
+
+
+class ApuRegressionGateTests(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='g6lc-apu-gate-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        self.tb = self.root / 'verif/tb/apu'
+        self.tb.mkdir(parents=True)
+        for name in ('run-apu-regress.sh', 'apu_source_manifest.py'):
+            source = Path(__file__).resolve().parents[2] / 'tb/apu' / name
+            shutil.copyfile(source, self.tb / name)
+        self.runner = self.tb / 'run-apu-regress.sh'
+        self.out = self.root / 'out'
+        self.names = ('objtab', 'vgpages', 'vgctl', 'vnfront', 'cmdexec', 'xfer',
+                      'rast', 'gcs', 'vndec', 'vnrep', 'vnpump', 'shmod',
+                      'shwave', 'shcore')
+        self.stubs('PASS tb_stub cases=1 checks=2 cycles=3')
+
+    def stubs(self, output, command=''):
+        for name in self.names:
+            script = self.tb / f'run-apu-{name}.sh'
+            script.write_text(f'#!/bin/sh\n{command}\nprintf "%s\\n" "{output}"\n')
+            script.chmod(0o755)
+
+    def run_gate(self, *args, extra_env=None):
+        env = dict(os.environ)
+        for key in ('APU_BRIDGE_OUT', 'APU_REGRESS_STAGES', 'APU_REGRESS_TIMEOUT',
+                    'TH_OUT_DIR', 'TH_PROXY_TAG', 'VNFRONT_SYNTH_PREONLY'):
+            env.pop(key, None)
+        env.update(extra_env or {})
+        return subprocess.run(['bash', str(self.runner), '--out', str(self.out), *args],
+                              cwd=self.root, env=env, text=True,
+                              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15)
+
+    def test_bad_stage_selections_fail_before_creating_artifacts(self):
+        for stages in ('', 'typo', 'unit,typo', 'unit,unit', ',unit', 'unit,'):
+            with self.subTest(stages=stages):
+                result = self.run_gate('--stages', stages)
+                self.assertEqual(result.returncode, 2, result.stdout)
+                self.assertNotIn('APU-REGRESS PASS', result.stdout)
+                self.assertFalse(self.out.exists())
+
+    def test_missing_option_value_fails_without_looping(self):
+        for option in ('--stages', '--out'):
+            result = self.run_gate(option)
+            self.assertEqual(result.returncode, 2, result.stdout)
+            self.assertFalse(self.out.exists())
+
+    def test_existing_output_is_never_overwritten(self):
+        self.out.mkdir()
+        marker = self.out / 'objtab.log'
+        marker.write_text('retained evidence\n')
+        result = self.run_gate('--stages', 'unit')
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(marker.read_text(), 'retained evidence\n')
+
+    def test_success_requires_positive_checked_work(self):
+        self.stubs('build completed, no simulation verdict')
+        result = self.run_gate('--stages', 'unit')
+        self.assertEqual(result.returncode, 4, result.stdout)
+        self.assertIn('INCOMPLETE', result.stdout)
+
+    def test_zero_work_is_incomplete(self):
+        self.stubs('PASS tb_stub cases=0 checks=0 cycles=0')
+        result = self.run_gate('--stages', 'unit')
+        self.assertEqual(result.returncode, 4, result.stdout)
+
+    def test_failure_text_outranks_a_successful_exit(self):
+        self.stubs('PASS tb_stub cases=1 checks=2 cycles=3\nFAIL tb_stub')
+        result = self.run_gate('--stages', 'unit')
+        self.assertEqual(result.returncode, 1, result.stdout)
+        self.assertNotIn('APU-REGRESS PASS', result.stdout)
+
+    def test_skip_is_not_a_pass(self):
+        self.stubs('PASS tb_stub cases=1 checks=2 cycles=3\nSYNTH SKIPPED Enable=1')
+        result = self.run_gate('--stages', 'unit')
+        self.assertEqual(result.returncode, 4, result.stdout)
+
+    def test_selected_stages_have_structured_evidence(self):
+        result = self.run_gate('--stages', 'unit')
+        self.assertEqual(result.returncode, 0, result.stdout)
+        report = json.loads((self.out / 'summary.json').read_text())
+        self.assertEqual(report['stages'], ['unit'])
+        self.assertEqual(len(report['results']), len(self.names))
+        self.assertEqual(report['status'], 'pass')
+        self.assertFalse(report['qualification'])
+        self.assertTrue(all(row['checks'] == 2 for row in report['results']))
+        self.assertTrue(all(len(row['logSha256']) == 64 for row in report['results']))
+        self.assertEqual(report['sourceSha256Before'], report['sourceSha256After'])
+
+    def test_source_drift_is_incomplete(self):
+        self.stubs('PASS tb_stub cases=1 checks=2 cycles=3',
+                   'printf "\\n" >> "$CVA6_REPO_DIR/verif/tb/apu/run-apu-objtab.sh"')
+        result = self.run_gate('--stages', 'unit')
+        self.assertEqual(result.returncode, 4, result.stdout)
+        self.assertIn('source changed', result.stdout)
+
+    def test_remote_option_cannot_run_a_partial_local_gate(self):
+        result = self.run_gate('--remote', '--stages', 'unit')
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertFalse(self.out.exists())
+
+    def test_timeout_cannot_pass(self):
+        script = self.tb / 'run-apu-objtab.sh'
+        script.write_text('#!/bin/sh\nsleep 3\nprintf "PASS tb_stub checks=2\\n"\n')
+        result = self.run_gate('--stages', 'unit', extra_env={'APU_REGRESS_TIMEOUT': '1'})
+        self.assertEqual(result.returncode, 4, result.stdout)
+        report = json.loads((self.out / 'summary.json').read_text())
+        self.assertEqual(report['results'][0]['rc'], 124)
+
+    def test_presynthesis_is_incomplete(self):
+        self.stubs('PASS tb_stub checks=2\nSYNTH OK Enable=0\nSYNTH PREONLY Enable=1')
+        result = self.run_gate('--stages', 'synth')
+        self.assertEqual(result.returncode, 4, result.stdout)
+
+    def test_full_synthesis_needs_both_geometries_and_enable_states(self):
+        self.stubs('PASS tb_stub checks=2\nSYNTH OK Enable=0\nSYNTH OK Enable=1')
+        script = self.tb / 'run-apu-vgpages.sh'
+        script.write_text(script.read_text() +
+                          '\nfor p in 8192 65536; do for en in 0 1; do '
+                          'echo "SYNTH OK Enable=$en Pages=$p"; done; done\n')
+        result = self.run_gate('--stages', 'synth')
+        self.assertEqual(result.returncode, 0, result.stdout)
+
+    def test_failed_profile_retains_checked_rules_and_findings(self):
+        path = self.root / 'corev_apu/apu/tools/gen_vn_tables.py'
+        path.parent.mkdir(parents=True)
+        report = {'status': 'fail', 'checkedRules': 2, 'findings': [{'rule': 'limit'}]}
+        path.write_text(f'import json\nprint(json.dumps({report!r}))\nraise SystemExit(1)\n')
+        result = self.run_gate('--stages', 'profile')
+        self.assertEqual(result.returncode, 1, result.stdout)
+        summary = json.loads((self.out / 'summary.json').read_text())
+        self.assertEqual(summary['results'][0]['checks'], 2)
+        self.assertEqual(summary['results'][0]['profileAudit'], report)
+
+    def test_failed_bridge_build_blocks_consumers(self):
+        bridge = self.tb / 'bridge'
+        bridge.mkdir()
+        script = bridge / 'build-bridge.sh'
+        script.write_text('#!/bin/sh\necho "VERILATOR BUILD FAILED"\nexit 1\n')
+        script.chmod(0o755)
+        result = self.run_gate('--stages', 'bridge,guest')
+        self.assertEqual(result.returncode, 1, result.stdout)
+        report = json.loads((self.out / 'summary.json').read_text())
+        self.assertEqual([row['status'] for row in report['results']],
+                         ['fail', 'incomplete', 'incomplete'])
+
+    def _list_inventory(self):
+        (self.root / 'core').mkdir()
+        (self.root / 'core/a.sv').write_text('module a; endmodule\n')
+        listing = self.root / 'snapshot-files.txt'
+        listing.write_text('core/a.sv\n')
+        return listing
+
+    def test_list_inventory_flags_listed_source_drift(self):
+        listing = self._list_inventory()
+        self.stubs('PASS tb_stub cases=1 checks=2 cycles=3',
+                   'printf "\\n" >> "$CVA6_REPO_DIR/core/a.sv"')
+        result = self.run_gate('--stages', 'unit',
+                               extra_env={'APU_SOURCE_FILES': str(listing)})
+        self.assertEqual(result.returncode, 4, result.stdout)
+        self.assertIn('INCOMPLETE: source changed during the run', result.stdout)
+
+    def test_unlisted_generated_file_is_not_drift(self):
+        listing = self._list_inventory()
+        self.stubs('PASS tb_stub cases=1 checks=2 cycles=3',
+                   'printf "ff\\n" > "$CVA6_REPO_DIR/core/new.hex"')
+        result = self.run_gate('--stages', 'unit',
+                               extra_env={'APU_SOURCE_FILES': str(listing)})
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertIn('APU-REGRESS PASS', result.stdout)
+
+
+class ApuSourceManifestTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        path = (Path(__file__).resolve().parents[2]
+                / 'tb/apu/apu_source_manifest.py')
+        spec = importlib.util.spec_from_file_location('apu_source_manifest_test', path)
+        cls.mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.mod)
+
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory(prefix='g6lc-apu-manifest-')
+        self.addCleanup(self.temp.cleanup)
+        self.root = Path(self.temp.name)
+        (self.root / 'core/build').mkdir(parents=True)
+        (self.root / 'corev_apu').mkdir()
+        (self.root / 'docs').mkdir()
+        (self.root / 'core/a.sv').write_text('module a; endmodule\n')
+        (self.root / 'core/build/x.sv').write_text('module x; endmodule\n')
+        (self.root / 'corev_apu/notes.weird').write_text('notes\n')
+        (self.root / 'docs/readme.md').write_text('# docs\n')
+        (self.root / 'verilator_config.vlt').write_text('`verilator_config\n')
+
+    def test_list_mode_follows_the_list_not_the_extensions(self):
+        files = ['core/a.sv', 'core/build/x.sv', 'corev_apu/notes.weird',
+                 'docs/readme.md', 'verilator_config.vlt', 'core/missing.sv']
+        inv = self.mod.inventory(self.root, files)
+        self.assertEqual(list(inv), ['core/a.sv', 'core/missing.sv',
+                                     'corev_apu/notes.weird',
+                                     'verilator_config.vlt'])
+        self.assertIsNone(inv['core/missing.sv'])
+        self.assertNotIn('docs/readme.md', inv)
+        self.assertNotIn('core/build/x.sv', inv)
+
+    def test_walk_mode_filters_extensions_and_excludes_dirs(self):
+        target = self.root / 'core/cache_subsystem/hpdcache/rtl/src/target'
+        target.mkdir(parents=True)
+        (target / 't.sv').write_text('module t; endmodule\n')
+        inv = self.mod.inventory(self.root)
+        self.assertEqual(list(inv), [
+            'core/a.sv',
+            'core/cache_subsystem/hpdcache/rtl/src/target/t.sv',
+            'verilator_config.vlt',
+        ])
+
+    def test_identity_tracks_listed_files_only(self):
+        listed = ['core/a.sv', 'verilator_config.vlt']
+        first = self.mod.manifest(self.root, 'unit', None, files=listed)
+        self.assertEqual(first['inventoryMode'], 'file-list')
+        (self.root / 'core/a.sv').write_text('module a2; endmodule\n')
+        second = self.mod.manifest(self.root, 'unit', None, files=listed)
+        self.assertNotEqual(first['sourceSha256'], second['sourceSha256'])
+        (self.root / 'core/generated.hex').write_text('deadbeef\n')
+        third = self.mod.manifest(self.root, 'unit', None, files=listed)
+        self.assertEqual(second['sourceSha256'], third['sourceSha256'])
+
+
+class ApuLeafTests(unittest.TestCase):
+    def test_stage_list_rules_match_the_runner(self):
+        self.assertEqual(proxy.apu_leaf_stages('unit,top'), ['unit', 'top'])
+        for bad in ('', 'unit,', 'unit,typo', 'unit,unit'):
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    proxy.apu_leaf_stages(bad)
+
+    def test_verdict_branches(self):
+        sha = 'a' * 64
+        self.assertEqual(
+            proxy.apu_leaf_verdict(None, sha, 0),
+            ('incomplete', 'runner did not produce summary.json'))
+        mismatch = {'status': 'pass',
+                    'sourceSha256Before': 'b' * 64, 'sourceSha256After': sha}
+        self.assertEqual(
+            proxy.apu_leaf_verdict(mismatch, sha, 0),
+            ('incomplete',
+             'source identity mismatch between local snapshot and remote run'))
+        failing = {'status': 'fail',
+                   'sourceSha256Before': sha, 'sourceSha256After': sha}
+        self.assertEqual(proxy.apu_leaf_verdict(failing, sha, 1),
+                         ('fail', 'runner reported failure'))
+        failing_mismatch = {'status': 'fail',
+                            'sourceSha256Before': sha,
+                            'sourceSha256After': 'c' * 64}
+        self.assertEqual(
+            proxy.apu_leaf_verdict(failing_mismatch, sha, 1),
+            ('incomplete',
+             'source identity mismatch between local snapshot and remote run'))
+        incomplete = {'status': 'incomplete',
+                      'sourceSha256Before': sha, 'sourceSha256After': sha}
+        self.assertEqual(proxy.apu_leaf_verdict(incomplete, sha, 4),
+                         ('incomplete', 'runner reported incomplete'))
+        passing = {'status': 'pass',
+                   'sourceSha256Before': sha, 'sourceSha256After': sha}
+        self.assertEqual(proxy.apu_leaf_verdict(passing, sha, 1),
+                         ('incomplete', 'runner exit 1 contradicts PASS'))
+        self.assertEqual(proxy.apu_leaf_verdict(passing, sha, 0), ('pass', ''))
+
+    def test_launch_script_detaches_and_marks_completion(self):
+        rundir = '/opt/testharness/runs/apu-leaf-x'
+        script = proxy.apu_leaf_launch_script(
+            f'{rundir}/source', rundir, 'unit,top', 7200, 'apu-leaf-x')
+        self.assertIn('--stages unit,top', script)
+        self.assertIn('APU_SOURCE_FILES=', script)
+        self.assertIn('setsid nohup', script)
+        self.assertIn('rc.txt', script)
+        self.assertIn('end.txt', script)
+        self.assertIn(f'{rundir}/output', script)
+
+    def test_leaf_env_allowlist(self):
+        self.assertEqual(
+            proxy.apu_leaf_env(['G6LC_QEMU=/opt/q/bin/qemu-system-riscv64',
+                                'TARGET_CFG=cfg/x.json']),
+            {'G6LC_QEMU': '/opt/q/bin/qemu-system-riscv64',
+             'TARGET_CFG': 'cfg/x.json'})
+        for bad in ('EDITOR=vi', 'PATH=/x', 'G6LC_FAKE=1'):
+            with self.subTest(bad=bad):
+                with self.assertRaises(SystemExit):
+                    proxy.apu_leaf_env([bad])
+        for malformed in ('NOEQUALS', '=novalue', ''):
+            with self.subTest(malformed=malformed):
+                with self.assertRaises(SystemExit):
+                    proxy.apu_leaf_env([malformed])
+
+    def test_launch_script_injects_allowlisted_env(self):
+        rundir = '/opt/testharness/runs/apu-leaf-y'
+        script = proxy.apu_leaf_launch_script(
+            f'{rundir}/source', rundir, 'bridge,guest', 14400, 'apu-leaf-y',
+            {'G6LC_QEMU': '/opt/q/qemu-system-riscv64',
+             'G6LC_QLIB': '/opt/q/share dir'})
+        self.assertIn(
+            "G6LC_QEMU=/opt/q/qemu-system-riscv64 "
+            "G6LC_QLIB='/opt/q/share dir' "
+            "PATH=/opt/q:$PATH setsid nohup", script)
+        no_qemu = proxy.apu_leaf_launch_script(
+            f'{rundir}/source', rundir, 'unit', 7200, 'apu-leaf-y',
+            {'TARGET_CFG': 'cfg/x.json'})
+        self.assertNotIn('PATH=', no_qemu)
+
+    def test_sources_come_from_git_index_and_worktree(self):
+        temp = tempfile.TemporaryDirectory(prefix='g6lc-apu-leaf-')
+        self.addCleanup(temp.cleanup)
+        root = Path(temp.name)
+
+        def git(*args):
+            subprocess.run(['git', '-C', str(root), *args],
+                           check=True, capture_output=True)
+
+        git('init', '-q')
+        git('config', 'user.name', 'leaf-test')
+        git('config', 'user.email', 'leaf-test@example.invalid')
+        (root / 'core').mkdir()
+        (root / 'verif/tb').mkdir(parents=True)
+        (root / 'verif/tb/apu/sh_vectors').mkdir(parents=True)
+        (root / 'verif/tb/apu/other').mkdir(parents=True)
+        (root / 'docs').mkdir()
+        (root / 'core/a.sv').write_text('module a; endmodule\n')
+        (root / 'core/gone.sv').write_text('module gone; endmodule\n')
+        (root / 'verilator_config.vlt').write_text('`verilator_config\n')
+        (root / 'docs/x.md').write_text('# docs\n')
+        (root / '.gitignore').write_text('*.o\n*.hex\n')
+        (root / 'core/junk.o').write_text('obj\n')
+        (root / 'verif/tb/apu/sh_vectors/x_1.hex').write_text('vec\n')
+        (root / 'verif/tb/apu/other/y.hex').write_text('vec\n')
+        (root / 'verif/tb/new.exp').write_text('exp\n')
+        git('add', '-A')
+        git('commit', '-qm', 'init')
+        (root / 'core/gone.sv').unlink()
+        self.assertEqual(proxy.apu_leaf_sources(root),
+                         ['core/a.sv', 'verif/tb/apu/sh_vectors/x_1.hex',
+                          'verif/tb/new.exp', 'verilator_config.vlt'])
+
+
+class ApuProfileAuditTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.root = Path(__file__).resolve().parents[3]
+        path = cls.root / 'corev_apu/apu/tools/gen_vn_tables.py'
+        spec = importlib.util.spec_from_file_location('apu_tables_audit_test', path)
+        cls.tables = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.tables)
+
+    def profile(self):
+        return {'device': {'apiVersion': '1.1.0'}, 'features': {},
+                'queue_family0': {'queueFlags': 'COMPUTE|TRANSFER', 'timestampValidBits': 0},
+                'limits': {'maxBoundDescriptorSets': 4, 'maxPushConstantsSize': 128,
+                           'maxPerStageResources': 128, 'maxDescriptorSetUniformBuffers': 72,
+                           'maxDescriptorSetStorageBuffers': 24, 'maxDescriptorSetStorageImages': 24,
+                           'maxComputeWorkGroupInvocations': 128,
+                           'maxComputeWorkGroupSize': [128, 128, 64],
+                           'maxImageDimension2D': 4096, 'maxImageArrayLayers': 256,
+                           'subTexelPrecisionBits': 4, 'mipmapPrecisionBits': 4},
+                'formats': {'R8_UNORM': {'f': ''}}}
+
+    def test_bounded_audit_never_claims_conformance(self):
+        result = self.tables.audit_profile(self.profile())
+        self.assertEqual(result['status'], 'pass')
+        self.assertFalse(result['conformance'])
+        self.assertGreater(result['checkedRules'], 0)
+
+    def test_minimum_limits_are_checked_independently(self):
+        profile = self.profile()
+        profile['limits']['maxComputeWorkGroupInvocations'] = 64
+        profile['limits']['maxComputeWorkGroupSize'] = [64, 64, 64]
+        profile['limits']['maxPerStageResources'] = 16
+        result = self.tables.audit_profile(profile)
+        rules = {row['rule'] for row in result['findings']}
+        self.assertEqual(result['status'], 'fail')
+        self.assertIn('limits.maxComputeWorkGroupInvocations', rules)
+        self.assertIn('limits.maxComputeWorkGroupSize', rules)
+        self.assertIn('limits.maxPerStageResources', rules)
+
+    def test_image_feature_bits_cannot_be_buffer_features(self):
+        profile = self.profile()
+        # G1c: fmt3's buffer column is the entry's fb string — image
+        # features in f are legal, so the negative case has to poison fb
+        profile['formats']['R8_UNORM']['fb'] = 'SAMPLED_IMAGE|STORAGE_IMAGE'
+        result = self.tables.audit_profile(profile)
+        self.assertIn('formats.R8_UNORM.bufferFeatures', {row['rule'] for row in result['findings']})
+
+    def test_timestamps_require_a_positive_period(self):
+        profile = self.profile()
+        profile['queue_family0']['timestampValidBits'] = 64
+        result = self.tables.audit_profile(profile)
+        self.assertIn('limits.timestampPeriod', {row['rule'] for row in result['findings']})
+
+    def test_vulkan14_is_more_than_an_api_version_number(self):
+        profile = self.profile()
+        profile['device']['apiVersion'] = '1.4.0'
+        result = self.tables.audit_profile(profile)
+        rules = {row['rule'] for row in result['findings']}
+        self.assertIn('limits.maxBoundDescriptorSets', rules)
+        self.assertIn('limits.maxPushConstantsSize', rules)
+        self.assertIn('features.samplerAnisotropy', rules)
+        self.assertIn('subgroup.supportedOperations', rules)
+
+    def test_malformed_values_do_not_pass_or_crash(self):
+        for value in (True, '128', -1, None):
+            profile = self.profile()
+            profile['limits']['maxComputeWorkGroupInvocations'] = value
+            self.assertEqual(self.tables.audit_profile(profile)['status'], 'fail')
+        profile = self.profile()
+        profile['device']['apiVersion'] = 'latest'
+        self.assertEqual(self.tables.audit_profile(profile)['status'], 'fail')
+
+    def test_live_profile_is_reported_as_experimental_not_conformant(self):
+        generated = self.root / 'corev_apu/apu/include/g6lc_apu_vn_pkg.sv'
+        before = generated.read_bytes()
+        result = subprocess.run([sys.executable, '-B', str(self.root / 'corev_apu/apu/tools/gen_vn_tables.py'),
+                                 '--audit-profile'], capture_output=True, text=True, timeout=30)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        report = json.loads(result.stdout)
+        self.assertEqual(report['status'], 'fail')
+        self.assertFalse(report['conformance'])
+        self.assertEqual(generated.read_bytes(), before)
 
 
 class OoORunVerdictTests(unittest.TestCase):

@@ -78,10 +78,10 @@ module tb_g6lc_apu_vgtop;
   logic            cpl_v;
   logic            vg_mf;
   logic [31:0]     cpl_len;
-  logic [2:0]      mp_rv, mp_rr, mp_rsv;
-  apu_mp_req_t [2:0] mp_req;
-  apu_mp_rsp_t [2:0] mp_rsp;
-  logic            w_v, w_done = 0;
+  logic [3:0]      mp_rv, mp_rr, mp_rsv;
+  apu_mp_req_t [3:0] mp_req;
+  apu_mp_rsp_t [3:0] mp_rsp;
+  logic            w_v, w_done;
   logic            w_r;
   apu_cmdexec_work_t w_o;
   logic            d_done, vg_busy;
@@ -122,8 +122,8 @@ module tb_g6lc_apu_vgtop;
     .ap_base_i(64'(g6lc_apu_pkg::APU_SHM_BASE)),
     .xf_flush_i(1'b0), .xfer_busy_o(xf_busy));
 
-  // shared memory model: mp ports 0..2 -> {guest, aperture} backing
-  tb_apu_mp_mem #(.N(3), .GMW(GMW), .APW(APW),
+  // shared memory model: mp ports 0..3 -> {guest, aperture} backing
+  tb_apu_mp_mem #(.N(4), .GMW(GMW), .APW(APW),
                   .PWB(PWB), .PPW(PPW)) i_mem (
     .clk_i(clk), .rst_ni(rst_ni),
     .req_valid_i(mp_rv), .req_ready_o(mp_rr), .req_i(mp_req),
@@ -241,8 +241,8 @@ module tb_g6lc_apu_vgtop;
   logic            o_chr, o_wv, o_dn, o_bsy, o_cpl, o_fp,
                    o_dotr, o_dotcv, o_mf, o_xbusy;
   g6lc_apu_bus_pkg::apu_dma_axi_req_t  o_xareq;
-  logic [2:0]      o_mpv;
-  apu_mp_req_t [2:0] o_mpreq;
+  logic [3:0]      o_mpv;
+  apu_mp_req_t [3:0] o_mpreq;
   logic [31:0]     o_cplen;
   logic [63:0]     o_fid2;
   logic [7:0]      o_fring;
@@ -252,7 +252,7 @@ module tb_g6lc_apu_vgtop;
   logic [Rings-1:0][APU_VG_AP_WORD_W-1:0] o_re;
   logic [15:0]     o_liv;
   apu_objtab_cpl_t o_dotcpl;
-  apu_mp_rsp_t [2:0] mp_rsp0 = '{default: '0};
+  apu_mp_rsp_t [3:0] mp_rsp0 = '{default: '0};
   apu_vg_desc_t [APU_VG_MAX_DESC-1:0] d_empty = '{default: '0};
 
   g6lc_apu_vgtop #(.Enable(1'b0), .Rings(Rings)) i_off (
@@ -261,9 +261,9 @@ module tb_g6lc_apu_vgtop;
     .chain_id_i('0), .chain_n_i('0), .chain_desc_i(d_empty),
     .cpl_valid_o(o_cpl), .cpl_ready_i(1'b0),
     .cpl_len_o(o_cplen), .mem_fault_o(o_mf),
-    .mp_req_valid_o(o_mpv), .mp_req_ready_i(3'b000),
+    .mp_req_valid_o(o_mpv), .mp_req_ready_i(4'b0000),
     .mp_req_o(o_mpreq),
-    .mp_rsp_valid_i(3'b000), .mp_rsp_i(mp_rsp0),
+    .mp_rsp_valid_i(4'b0000), .mp_rsp_i(mp_rsp0),
     .work_valid_o(o_wv), .work_ready_i(1'b0), .work_o(o_wo),
     .work_done_i(1'b0), .work_done_pl_i('0),
     .done_o(o_dn), .busy_o(o_bsy),
@@ -284,20 +284,63 @@ module tb_g6lc_apu_vgtop;
   logic [31:0] expm [EXPW];
 
   // ---- work port: accept after 2 cycles, done pulse 3 later ----------------
+  // Directed done-queue collision arm (ue_donecol_1): the buffer
+  // holds EXECUTE_COMMANDS (generic work — the sink holds its
+  // completion) then CopyBuffer then the dispatch.  Both the exec
+  // record and the copy decrement cmdexec's outst_q, so the TB
+  // releases w_done on the exact cycle the copy's internal xf_done
+  // pulses and two completions push into i_dut's queue at once.  A
+  // merged work_done_i would lose one decrement and strand outst_q
+  // at 1 — StFinalDrain never exits and the fence never signals;
+  // the queue serializes both instead.  col_win counts the two
+  // serialized pops.
   int unsigned w_delay = 0;
-  logic      w_vq = 0;
+  logic      w_vq = 0, w_hold = 0;
+  logic      w_done_q;
+  assign w_done = w_done_q || (w_hold && i_dut.gen_on.xf_done);
+  int unsigned col_pops = 0;
+  logic [3:0]  col_win = 0;
+  logic        col_armed = 0;
+  bit          col_trace = 0;
+  initial col_trace = $test$plusargs("donecol_trace");
+  // chain-completion wait bound — default sized for the slowest mp
+  // jitter session; +cpl_tmo=N shortens it for directed wedge runs
+  int unsigned cpl_tmo = 20_000_000;
+  initial void'($value$plusargs("cpl_tmo=%d", cpl_tmo));
+  always @(posedge clk) begin
+    if (w_hold && i_dut.gen_on.xf_done)
+      col_win <= 4'd8;
+    else if (col_win != 0)
+      col_win <= col_win - 4'd1;
+    if (col_win != 0 && i_dut.gen_on.ex_done_v) col_pops++;
+    if (col_trace && (w_vq || w_hold || col_win != 0 ||
+        i_dut.gen_on.xf_done || i_dut.gen_on.ex_done_v))
+      $display("[donecol t=%0d] xf=%b exv=%b wid=%08x outst=%0d ex_st=%0d hold=%b wq=%b",
+               cycles, i_dut.gen_on.xf_done, i_dut.gen_on.ex_done_v,
+               i_dut.gen_on.ex_done_pl.work_id,
+               i_dut.gen_on.i_exec.gen_on.outst_q,
+               i_dut.gen_on.i_exec.gen_on.state_q, w_hold, w_vq);
+  end
   always @(posedge clk or negedge rst_ni) begin
     if (!rst_ni) begin
-      w_delay <= 0; w_vq <= 0; w_done <= 0;
+      w_delay <= 0; w_vq <= 0; w_done_q <= 0; w_hold <= 0;
     end else begin
-      w_done <= 0;
+      w_done_q <= 0;
       if (w_v && w_r) begin
         w_vq <= 1'b1;
-        w_delay <= 3;
+        if (w_o.ctype ==
+            32'(APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT)) begin
+          w_hold   <= 1'b1;
+          col_armed <= 1'b1;
+        end else
+          w_delay <= 3;
+      end else if (w_hold && i_dut.gen_on.xf_done) begin
+        w_hold <= 0;
+        w_vq   <= 0;
       end else if (w_vq && w_delay != 0) begin
         w_delay <= w_delay - 1;
         if (w_delay == 1) begin
-          w_done <= 1'b1;
+          w_done_q <= 1'b1;
           w_vq <= 0;
         end
       end
@@ -447,7 +490,7 @@ module tb_g6lc_apu_vgtop;
       // timeout; the pulse is one cycle so sample mid-cycle at negedge
       begin : wait_cpl
         int unsigned tmo = 0;
-        while (!cpl_v && tmo < 20_000_000) begin
+        while (!cpl_v && tmo < cpl_tmo) begin
           @(negedge clk); tmo++;
         end
         check(cpl_v, "chain completion timeout");
@@ -727,6 +770,18 @@ module tb_g6lc_apu_vgtop;
     // checked by the last CK_LIVE; ObjPay chunks must all be freed too
     check(i_dut.gen_on.i_pay.gen_on.free_q === '0,
           "objpay chunks drained");
+    // ue_donecol_1: the held EXECUTE_COMMANDS completion collided with
+    // the CopyBuffer's xf_done — the queue must have delivered BOTH to
+    // cmdexec (two serialized pops; outst drained, fence signaled via
+    // the tape's own EK_FENCE checks)
+    if (vname == "ue_donecol_1") begin
+      check(col_armed, "donecol: EXECUTE_COMMANDS record never issued");
+      check(col_pops == 2,
+            $sformatf("donecol: %0d done-queue pops, expected 2",
+                      col_pops));
+      check(i_dut.gen_on.i_exec.gen_on.outst_q == 8'h0,
+            "donecol: cmdexec outst_q not drained");
+    end
     if (errors == 0) begin
       if (g1_n != 0)
         $display("PASS-COMPUTE g1=%0d g2=%0d ulp1=%0d ulp2=%0d maxulp=%0d cycles=%0d",
@@ -738,4 +793,33 @@ module tb_g6lc_apu_vgtop;
                cases, checks, errors);
     $finish;
   end
+
+`ifdef G6LC_APU_DEBUG
+  // bring-up trace (-D G6LC_APU_DEBUG): one line per FSM state change
+  // across the engines — hangs show the live-lock pair directly
+  int pc_ctl = -1, pc_vgp = -1, pc_fr = -1, pc_ex = -1, pc_tab = -1,
+      pc_pu = -1;
+  always @(negedge clk) begin
+    if (i_dut.gen_on.i_ctl.gen_on.state_q != pc_ctl ||
+        i_dut.gen_on.i_vgp.gen_on.state_q != pc_vgp ||
+        i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.state_q != pc_fr ||
+        i_dut.gen_on.i_pump.gen_on.state_q != pc_pu ||
+        i_dut.gen_on.i_exec.gen_on.state_q != pc_ex ||
+        i_dut.gen_on.i_tab.gen_on.state_q != pc_tab) begin
+      $display("[dbg t=%0d] ctl=%0d vgp=%0d pump=%0d fr=%0d ex=%0d tab=%0d",
+               cycles, i_dut.gen_on.i_ctl.gen_on.state_q,
+               i_dut.gen_on.i_vgp.gen_on.state_q,
+               i_dut.gen_on.i_pump.gen_on.state_q,
+               i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.state_q,
+               i_dut.gen_on.i_exec.gen_on.state_q,
+               i_dut.gen_on.i_tab.gen_on.state_q);
+      pc_ctl = i_dut.gen_on.i_ctl.gen_on.state_q;
+      pc_vgp = i_dut.gen_on.i_vgp.gen_on.state_q;
+      pc_fr  = i_dut.gen_on.i_pump.gen_on.i_fr.gen_on.state_q;
+      pc_pu  = i_dut.gen_on.i_pump.gen_on.state_q;
+      pc_ex  = i_dut.gen_on.i_exec.gen_on.state_q;
+      pc_tab = i_dut.gen_on.i_tab.gen_on.state_q;
+    end
+  end
+`endif
 endmodule

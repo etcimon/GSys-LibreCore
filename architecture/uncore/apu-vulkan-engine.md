@@ -1,10 +1,140 @@
 # APU Vulkan engine — consolidated structure (2026-10-03)
 
-Controlling plan: `C:\Users\etcim\.devin\plans\plan-5ddc97674e5bf9b0.md` (steps 3–5, 8).
-Lane map: `apu-graphics.md`. Module graph: `corev_apu/apu/AGENTS-impl-interplays.md` §15.
-This file owns the **engine decomposition** the stock-client (hardware Venus) route is
-built on, the generated-decoder methodology, and the interfaces the consolidation
-increments implement. It does not promote any fixture result to qualification.
+Controlling continuation: `C:\Users\etcim\.devin\plans\plan-96c6986262437fe2.md`.
+Prior plan: `plan-5ddc97674e5bf9b0.md` (A0–A7); Grok G0–G4 objectives remain traceable.
+Lane map: `apu-graphics.md`. Live module graph: `corev_apu/apu/AGENTS-impl-interplays.md` §16;
+§15 and the catalog below are historical. This file owns the engine decomposition,
+generated-decoder methodology and implementation contracts. A fixture result is not qualification.
+
+## Current contract — full-feature continuation (2026-10-10)
+
+Reviewed at HEAD `51927af9e` plus the existing dirty 3d-d changes. The generated
+Venus backend is attached: `32668990c`/`7822b1672`; stock-client compute evidence
+landed in `cc4bdca95`, memory-resident descriptors in `1290036ec`, allocator/lifetime
+work in `eb79b6de9`, and compute-visible images/sampling in `2b909f1b8`.
+The old command catalog is frozen (`133327577`/`755776ae0`), not the next implementation path.
+
+| Boundary | Current state | Next evidence |
+|---|---|---|
+| Transport → compute/image memory | Connected under `VenusEn`; QEMU CPU + RTL APU stock-Mesa tests exist | Distinct source-matched guest, full-SoC coherence and physical gates |
+| 3d-d memory backing/relocation | Present in the working tree, including CAS publication and generation-bearing descriptors | Bind/map races, eviction/error/reset, unmap/remap lifetime, and matching full integration results |
+| Graphics | No general vertex/fragment raster/ROP path; no production WSI | Complete retained graphics state, quad/derivative semantics, common image-backed tiles, then present |
+| API/profile | Experimental and **not Vulkan-conformant**, despite the 1.1 bring-up version | Normative limits/features/formats and actual execution, not larger profile constants |
+| Scaling | Serial wave/LSU, single-outstanding `apmem`, fixed RF slices/slot widths | Banked/parameter-safe execution and measured compute/texture/memory bottlenecks |
+| Matrix helper | `MatHelperEn` has no instantiated helper | Numerical applicability and equal-budget area/throughput study |
+
+**Release decisions:** x86-64 Ubuntu Unreal/CS2 first, RISC-V graphics separately;
+stock kernel/Mesa/loader and no custom device firmware, ICD, daemon or runtime bridge.
+All 27 requested advanced features remain required before first release, in addition
+to Vulkan 1.4; intermediate raster gates do not reduce that scope. Generic Venus/protocol
+improvements may be developed upstream, but official Ubuntu package uptake is a release
+blocker. Select a graphics SKU from a measured performance/area/bandwidth Pareto study.
+
+Mesa `mesa-26.0.8` `src/virtio/vulkan/vn_physical_device.c` passes through ray tracing,
+cooperative matrices, mesh, shading-rate and interlock features, but its inspected
+allowlist lacks `VK_EXT_descriptor_buffer`, device-generated commands, opacity micromaps
+and ray-tracing invocation reorder. The pinned UE SM6 profile requires descriptor buffers;
+SM6 RT also requires nine bound sets. Registry XML presence is not stock-driver support.
+WSI additionally requires the real external semaphore/sync-fd path: scanout/RESOURCE_UUID
+alone is insufficient. Sparse binding is not unconditionally disabled in that Mesa source.
+
+**Bounded capability audit:** `python3 -B corev_apu/apu/tools/gen_vn_tables.py --audit-profile`
+or `bun build-platform/src/cli/index.ts test --suite apu-profile-audit`. The reviewed profile
+fails 19 of 29 checked rules: six limits, timestamp period, and twelve format-buffer masks.
+This read-only audit neither regenerates RTL nor checks complete Vulkan semantics/CTS;
+even a future static PASS will not establish conformance. Fragment atomics and query
+execution must be audited separately from the advertised flags.
+
+**Evidence discipline:** `.cache/apu-regress/r1/guest.log` has compute/descriptor PASS
+markers but ends in GUEST-FAIL on the 12 MiB allocation-negative test. Its successors are
+`r1/guest3-runguest.log` (GUEST-PASS, `G6LC_VKMEM_PASS`; the negative arm runs under the
+`VN_PERF=no_async_mem_alloc` diagnostic that `vkmem.c` sets on itself, so the default
+asynchronous path is still unproven), `5b-r2/guest-run2.log` (both arms GUEST-PASS with
+`G6LC_VKIMAGE_PASS`, the `2b909f1b8` evidence) and `3d-d/guest-run.log` (GUEST-FAIL,
+`bind->update->map->dispatch mismatches=32`, taken before the ObjTab CAS race fix). The
+failed observations stay recorded; neither an older pass nor a commit message qualifies
+today's tree. The aggregate runner requires a new output directory, nonempty valid stages,
+positive checked work and enabled/disabled synth evidence, and records source inventories
+and hashed logs in JSON. Old partial `--remote` routing is refused; the whole launcher runs
+through `testharness_proxy.py apu-leaf` on an isolated `/opt/testharness/runs/apu-leaf-*`
+snapshot whose sha256 identity is proven equal locally, on arrival, and after the run.
+
+**Isolated-snapshot result for the dirty 3d-d tree (2026-10-11, leaf
+`apu-leaf-20261011T035154-cac68fd2335a`, identity `3cecae55…` equal locally, on arrival and
+after the run; Verilator 5.008 / Yosys 0.68 / xpack gcc 14.2.0):** all 25 selected suites
+pass — objtab 2,283 checks including the CAS case, vgpages 3,526 at both 8192 and 65536
+pages including `ALLOC_HI`, vgctl 75, vnfront 2,500 including the bindfull arm, cmdexec 31,
+xfer 2,018, shwave 40,861, shcore 18,751, vgtop 241,968, vgsys 143,112, sys-venus 49,340,
+cva6-venus 488, bridge build and self-test 2,651, and full Enable=0/1 yosys screens for
+vgpages (both geometries), objtab, vnpump, cmdexec, vgctl and vnfront. The preceding leaf
+`…T010751…` had two failures, both root-caused to the test side and retained as evidence:
+Verilator 5.008 mis-evaluates a `ref` unpacked-array argument in the vgpages TB reference
+model (DUT traces were identical on 5.008 and 5.020; the model now lives at module scope),
+and `bridge_selftest.py` replayed the fresh-device `ue_cpos_bufcopy_1` oracle after the
+transport session, where the two-session `ue_probe_bufcopy_1` oracle applies — the RTL's
+`{gen=2, slot=0xb}` after `RESET_CTX` slot reuse is the documented ObjTab contract and
+`vn_golden.py` models it the same way. Three TB/script surfaces authored against 5.020 were
+made 5.008-clean without RTL change, and `run-cva6-venus.sh` now builds the probe in a
+shadow copy because it rewrote the tracked `venus_probe.hex` differently under the pinned
+compiler. **Stock-guest gate after the CAS fix:** on an isolated remote QEMU built from the
+local emitted sources (QEMU 10.0.0 pin, `g6lc-g6lc64_stream8`, sha256 `d5309a5a…`; the
+shared remote build predates stream8), leaves `apu-leaf-20261011T065347…` and `…T072101…`
+boot stock Ubuntu 24.04.5 riscv64 / Mesa 25.2.8, enumerate Venus, and pass `vkcompute`,
+`vkdescarr` and `vkimage` (`maxerr=0.00260`); `vkmem` test E failed deterministically with
+`bind->update->map->dispatch mismatches=32`, the same signature as the pre-CAS-fix
+`3d-d/guest-run.log`. Debug-bridge taps root-caused it to the **test**, not the engine:
+ALLOC, bind (`SETAUXHI_CAS` → DEVBACKED), both MAP_BLOB relocations and both descriptor
+records were correct, but `vkmem.c` re-began test D's EXECUTABLE command buffer from a
+pool without `RESET_COMMAND_BUFFER_BIT` (VUID-vkBeginCommandBuffer-commandBuffer-00050);
+vnfront's `state != 0` gate refused it as this document (§ command buffers), the RTL and
+`vn_golden.py` all specify, Mesa Venus swallowed the wire errors, the still-signaled
+test-D fence let the wait pass, and the readback saw a relocated-but-never-written extent
+that happened to hold test D's fill. Test E now uses its own command buffer and fence; a
+local debug rerun shows `3d-d bind->update->map->dispatch PASS`, `G6LC_VKMEM_PASS` and the
+dispatch issuing (`[f5wx] ISSUE ct=6e … SHDONE code=00`) — diagnostic, not evidence. The
+remaining coverage gap is a vector that begins a non-initial command buffer
+(`ue_cneg_cb_rebegin_1`). With the fixed test, the venus arm is green on the builder in
+two consecutive leaves (`apu-leaf-20261011T104810…`, `…T121022…`): `vulkaninfo`
+enumerates Venus, `vkcompute`, `vkdescarr`, `vkmem` (including `3d-d
+bind->update->map->dispatch PASS`) and `vkimage` all pass, terminal `GUEST-PASS`. A single
+leaf with both arms green is still owed: in `…T104810…` both arms passed functionally but
+the markers raced the kernel's `reboot:` line past the runner's terminal-line rule
+(INCOMPLETE, fixed by printing the marker on its own line); in `…T121022…` the venusoff
+control arm's TCG `apt install` outran its 2,400 s budget and `vulkaninfo` then timed out
+(FAIL by slowness, not a Venus-detection result); `…T100707…` lost its venus arm to a
+`virtio_gpu` probe `-ENOMEM` under the 224 MiB usable DRAM of the stream8 machine (now
+guarded by a rebind). Still open: that green two-arm run, the re-begin vector, oracle
+freshness against the generators, dependency-DAG parallelism, qualified build reuse,
+guest-image reuse and strict qualification registration. A source inventory is not an
+elaborated build manifest, and aggregate PASS is selected-stage evidence only — not
+Vulkan conformance, not full-SoC coherence, not physical qualification.
+
+**Graphics fast track (2026-10-11/12, velocity mode — smoke tests, pinned-toolchain leaf at
+milestones):** VS/FS execution models run as ShaderCore waves whose Input/Output storage
+classes are fixed-stride memory records (`g6lc_apu_sh_pkg` graphics section; VS-in 128 B,
+VS-out/FS-in 144 B with Position/FragCoord in slot 0, FS-out 128 B; `APU_SH_WORK_VS/FS` on the
+work port); `g6lc_apu_rast` gathers attributes, issues VS waves, does setup/cull/scissor and the
+top-left scan in 16.8 fixed point with one fpnew FMA/DIV/CAST each, writes perspective-correct
+FS-in records, issues FS waves and performs the UNORM8 ROP; cmdexec assembles draws
+(`rd_o`), resolves the attachment at BeginRenderPass and issues loadOp CLEAR to rast; vnfront
+creates graphics pipelines (two committed module slots, 13-word ObjPay state), render passes
+and framebuffers; the profile advertises a GRAPHICS queue, colour-attachment and vertex-buffer
+format bits and graphics limits. **Milestone G1 evidence:** `ue_gpos_tri_1` passes in vgsys and
+sys-venus (all 4,096 readback words), the pinned-toolchain leaves `apu-leaf-20261011T215450…` +
+`…20261012T005107…` are green across all 26 suites including the Enable=0/1 synth screen of rast
+(146,474 cells, 15,584 FFs, no latch), and the stock-guest leaf `…20261012T010726…` passes both
+arms with **`G6LC_VKTRI_PASS covered=512 maxdiff=0`** — stock Mesa Venus drawing a gradient
+triangle on the RTL, pixel-exact against an in-guest C model of the rast op sequence. v1
+limits (rast header): no clipping, depth/stencil/blend/MSAA, one attachment, list/strip only,
+dynamic viewport/scissor only, indexed `gl_VertexIndex` unsupported, UNORM8 RGBA/BGRA only. The
+compute-only profile audit findings dropped from 19 to 7 intentional limits.
+
+**Sequence:** consolidate evidence/contracts and qualify 3d-d → complete memory/synchronization
+and the common shader pipeline → raster/ROP and scalable VM/cache → matrix/RT/mesh/advanced
+geometry and scheduling → full core/extension CTS, UE/CS2 and physical release. Transport
+and generic upstream gaps proceed in parallel; shared shader/memory contracts precede dependent
+engines. Optional hardware gates remain default-off, but the full release profile must enable
+and prove every promised feature. G0/A5 remains the unchanged Zink/Venus readback regression.
 
 ## 1. Review of the catalog structure (what this consolidates)
 
@@ -82,7 +212,9 @@ generator name, pin and vk.xml version in its banner.
    Python golden encoder that follows the same rules (`vn_golden.py`), with the expected
    decode record for each command.
 
-Adding a command means adding one line to the command set and regenerating; no RTL edit.
+Adding a wire layout means extending the command set and regenerating. Executing a new
+command still requires a semantic owner, retained state, synchronization and tests; generated
+recognition alone cannot authorize advertisement or successful completion.
 
 ## 3. Engine decomposition and config gates
 
@@ -732,16 +864,25 @@ The scanner's block table (label → pc, already built) is the only metadata nee
 
 ## 8. MatHelper — AI island arithmetic behind a graphics-owned port
 
-`g6lc_ai_pe_dot_float_pipe` (FP8/FP16/BF16/FP32 lanes, block-floating-point reduction,
-one dot per cycle, latency `clog2(P2)+4`) and `g6lc_ai_fp_mac` are instantiated **by the
-shader core** (`MatHelperEn`), not borrowed from the island at runtime: the ordinary path
-must work with `MatrixEn=0`. Mapping: `mat4×vec4` = four 4-lane dots; `mat4×mat4` = 16;
-`OpDot` = one. Precision: Vulkan allows fused/contracted FP32 dot products, and the BFP
-single-rounding is at least as accurate as sequential FP32 adds, so this is API-legal;
-the discriminator test (plan §8) still compares helper-on/helper-off images bit-for-bit
-under `NoContraction` and within ULP bounds otherwise. VA-Turbo/policy approximation stays
-off for graphics. Physical sharing of the island (one set of PEs for AI and graphics) is a
-later scheduler question; this increment shares the *module*, not the silicon.
+`MatHelperEn` is currently a placeholder: no helper is instantiated. Candidate reuse is
+`g6lc_ai_pe_dot_float_pipe` (FP8/FP16/BF16/FP32 lanes, one single-rounded dot per cycle,
+latency `clog2(P2)+4`) or `g6lc_ai_fp_mac`, behind a graphics-owned tagged interface.
+The ordinary shader path must work with `MatrixEn=0`. Four 4-lane dots can implement a
+mat4×vec4 only where the operation's numerical contract permits that reduction.
+
+Single rounding or smaller error does **not** itself prove Vulkan equivalence. Preserve
+operation-specific contraction, explicit FMA, rounding, denormal and NaN/Inf/signed-zero
+rules; retain the baseline arithmetic when a substitution is not permitted. Qualify
+`NoContraction` and permitted alternatives with independent adversarial numerical tests,
+not a blanket image/ULP tolerance. Add return buffering/credits before connecting the
+fixed-latency pulse PE to a backpressured shader pipeline. Measure helper area and operand
+packing/transfer overhead before promotion. Standard cooperative-matrix and integer-dot
+operations are explicit consumers, with exact advertised type/shape/scope/stage support.
+
+Initially reuse the module, not the physical island. Sharing silicon later needs protected
+ownership, bounded QoS/preemption and coherent lifetime handling. AI residency/banking and
+scheduling research can inform exact caching and scheduling; VA-Turbo approximation and
+implicit neural replacement of ordinary application passes remain off.
 
 ## 9. Raster — tile-based deferred rendering
 
@@ -800,7 +941,7 @@ rectangle, not a limit. `Xfer` handles copies/clears/blits and MSAA resolve.
 
 | 5b (RTL+guest done 2026-10-09, compute-visible images + sampler + Xfer image copies — §12.3 C "images/formats/sampler") | **Device image layout** (both LINEAR and OPTIMAL tiling map to it): layer-major `off(layer,mip) = layer*layer_bytes + mip_off[mip]`, `pitch_m = align(max(w>>m,1)*bpp, 64)`, `mip_bytes_m = pitch_m*max(h>>m,1)`; `vkGetImageMemoryRequirements(2)` answers `size = layers*layer_bytes`/`alignment = 64`/`memoryTypeBits = 0b11` from the VkImage entry (`{w,h,fmt,mips,layers,usage}` in aux), `vkGetImageSubresourceLayout` answers the same pitch/offset so LINEAR host-visible images are CPU-readable; 3D/cube/MSAA refused `FEATURE_NOT_PRESENT`. **Descriptor record bytes 16..31** (F5 reserved half, format fixed): `+0 view base` (mem base + bind offset + `off(baseLayer,baseMip)`), `+4 view size`, `+8 kind`, `+9 flags`, `+10 w`, `+12 h`, `+14 fmt` (generated `APU_IMG_FMT_*` id), `+15 {mips,dim}`, `+16 layers`, `+18 swizzle` (4×3, identity=0), `+20..+27 two sampler words` (filters/mipmap mode/addressU-V-W/border/compare/minLod-maxLod/bias), `+28..+31 zero`; SAMPLER fills only sampler words, SAMPLED/STORAGE_IMAGE only image fields, COMBINED both, `OpSampledImage` merges the two records. **Formats**: the profile's `[formats]` table is the single source — generated into `vn_pkg` feature answers, the device format ids, and the golden image metadata; implemented set = R8/R8G8/R8G8B8A8/B8G8R8A8 UNORM, R8G8B8A8/B8G8R8A8 SRGB, R16G16B16A16/R32/R32G32/R32G32B32A32 SFLOAT, R32/R32G32B32A32 UINT, all with exactly `SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST` (linear-filter and storage dropped where untrue: `*_UINT` no linear, `*_SRGB` no storage); D32_SFLOAT/D24_UNORM_S8_UINT advertise **zero** features (no attachment/blit bits until raster); `vkCreateImage` refuses out-of-table format/usage `VK_ERROR_FORMAT_NOT_SUPPORTED`. sRGB decode is a generated 256-entry LUT (8→16-bit linear, `g6lc_apu_srgb_pkg`) emitted by one script beside a Python table so RTL and `spirv_model.py` cannot drift; encode = inverse LUT + interpolation. **Decoder truthfulness fix** (found by the `vkUpdateDescriptorSets` stream): `VkDescriptorImageInfo.{sampler,imageView}` are `noautovalidity` in vk.xml — required-ness is per descriptor type (SAMPLER→sampler only, SAMPLED/STORAGE_IMAGE→view only, COMBINED→both; Mesa sends 0 for the ignored handle), so `gen_vn_tables.py` gained profile-driven optional-handle overrides (`vn_device_profile.toml`) instead of weakening validation — vnfront still poisons genuinely-invalid sets. **Shader ops** (`W_TX*` states in shwave, sharing the LSU port and F5 record resolve, lanes serialized): `OpImageFetch`, `OpImageRead`, `OpImageWrite`, `OpImageSampleExplicitLod` (nearest/linear mag+min, mipmap nearest/linear → ≤8 texels), `OpImageQuerySize{,Lod}`/`OpImageQueryLevels`, `OpSampledImage`, `OpImage`; ImplicitLod/derivative ops and `unnormalizedCoordinates` refused truthfully at commit/create (glslang emits ExplicitLod for compute). UNORM/SRGB filtering in fixed point with 8-bit fractional weights, float formats via the FMA units; a dispatch-scoped **texel cache** (`TexCacheLines`=16 × 64 B lines, `tc_sram`, 1-cycle) makes adjacent lanes share a fetch; mip offsets by a ≤13-step walk with a 1-entry {record,mip} cache. **Xfer image copies**: `vkCmdCopyBufferToImage`/`vkCmdCopyImageToBuffer`/`vkCmdCopyImage` (same bpp)/`vkCmdClearColorImage` as per-row loops through the existing checked DMA (rowLength/imageHeight honoured, mip/layer ranges, all bounds validated before any write; refused records write nothing); `vkCmdPipelineBarrier` layout transitions accepted as no-ops (one device layout). | Corpus: 8 new shader families (`texfetch{,_mip}`, `texlod_lin`, `texlod_mip`, `texsrgb`, `texarr`, `texquery`, `imgloadstore` + `_opt` twins + bad/mut arms) — **shwave PASS 301 cases/40,852 checks** (`maxulp=1`, `oum=0`); lavapipe oracle Gate-2 on every case (`texquery*` lands in the documented "oracle beyond Gate-2 tolerance" class — lavapipe returns mip-0 dims for `OpImageQuerySizeLod` while the model/RTL return the spec-correct per-mip dims, so the ORACLE section carries model words; Gate-1 is model-vs-RTL bit-exact `mism=0`). vnfront 179+payfull 11, vndec 2,505 (regenerated decoder ROM for the optional-handle fix), vnrep 563, vnpump 31, cmdexec 7, xfer 249, objtab/vgctl/vgpages/gcs/shmod/shcore all green. `vgtop` 39 sessions × 2 steps; `vgsys` 40 sessions incl. `ue_cpos_{texfetch,texlod_lin,texlod_mip,texsrgb,texarr,texquery,imgloadstore}_1` + negatives `ue_cneg_{badfmt,viewoob,xfer_img_oob,unnorm,kindmix,imgloadstore_bad,texfetch_bad,texlod_lin_bad,texquery_bad}_1` + 11 arms; `sys-venus` same sessions/arms; bridge self-test; **stock guest** `vkimage` (`guest/vkimage.c` + corpus `vkimage.comp`: D32_SFLOAT → 0 features + `vkCreateImage` refused, RGBA8 staging→`CopyBufferToImage`→`textureLod` edge/repeat into rgba32f storage →`CopyImageToBuffer`→CPU compare ≤4/255; the readback buffer is persistently mapped pre-submit — host-visible memory is lazy-backed, so a copy into still-unbacked memory is refused truthfully). Lint zero warnings in `g6lc_apu_*`; Enable=0 synth 0 cells everywhere; Enable=1 fixture stats in the handoff table (TexCache lives in `tc_sram` — FF counts include generic-model SRAM contents). Follow-ups: implicit-lod/derivative ops when raster lands, blits, `tc_sram` descriptor cache beyond 8 entries, virtio-pci endpoint. **5b-r2 corrective pass (2026-10-10, review rework):** CLEAR conversions are attribute-selected (`APU_VN_IMG_ATTR`: uint/float-32 formats take the `VkClearColorValue` uint32 union words raw; half formats use `f_f32_f16`; SRGB uses `f_srgb_enc(f_f32_l16)` as an 8-cycle sequential binary search instead of an unrolled compare chain; else UNORM8 round-to-nearest) — the previous `bpp <= 4` selector sent R32_SFLOAT/R32_UINT through `f_f32_u8`; `vn_golden.py` models the cleared pixels per (layer, mip) range; six vgsys/vgtop sessions gated bit-exact through I2B readback — `ue_cpos_clear_{rgba8,r32f,r32u,srgb,rgba16f}_1` (3 mips × 2 layers with a range covering mips 1..2 of layer 1 only so untouched subresources keep their B2I contents; rgba16f includes a denormal and a >65504 → inf) plus `ue_cneg_clear_oob_1` (baseMip+levelCount > mips, baseLayer+layerCount > layers, aspect ≠ COLOR → DEVICE_LOST, nothing written); guest `vkimage` gained a 2-mip RGBA8 clear + mip-1 `CopyImageToBuffer` vs the exact CPU conversion. Xfer image addressing runs through **one** iterative 32×32→64 multiplier (`MulRadixBits`=8 → 4 cycles/product) walked by an address-gen product list — no `*` operator in the image states outside the constant-multiplier UNORM/l16 conversions and `f_mpitch` — and all image/region addressing is 32-bit aperture-relative: any product or sum that exceeds 32 bits, or a nonzero `bufferOffset` upper word, is a validation FAULT/DEVICE_LOST (replaces the 64-bit `need` guard and closes the u32 `rowLength`×`imageHeight` wrap the check itself could miss); Enable=1 area 66,237 cells — down from 143,286 but ~10% over the 60k target, so the per-cell-type breakdown stands: 19,611 AND + 16,196 MUX + 11,658 OR + 7,686 XOR + 3,397 NOT + 7,689 DFF, no $mul (row-loop cycle count preserved — per-row comparison in the handoff). Deterministic context-kill retirement: vgctl pulses registered `ctx_kill_valid_o`/`ctx_kill_id_o` when CTX_DESTROY issues RESET_CTX; vgtop routes the pair to `vnpump.ctx_kill_valid_i`/`ctx_kill_id_i`, which retires every live ring of that ctx (`live<=0`, no status write) and suppresses head/status publication for its in-flight `st_q[]` streams — `ring_overlap` remains defence in depth; vnpump T18 (live ring with a pending head publication → ctx kill → different-ctx ring at the same window → old slot never writes) and `ue_cpos_ctxkill_reuse_1` (ctx A ring + compute session, CTX_DESTROY without DestroyRingMESA, ctx B ring at the same window bit-exact; the TB asserts no aperture write outside B's ring/replies/memory after the kill). Profile truthfulness (`vn_device_profile.toml` → regenerated tables/pkg/vectors): `queueFlags = COMPUTE|TRANSFER` (GRAPHICS returns with raster, with evidence), raster-only limits zeroed (viewports, color attachments, framebuffer w/h, vertex input attrs/bindings), `maxSamplerLodBias = 15.0`, `maxSamplerAnisotropy = 1.0`, `maxSamplerAllocationCount`/`maxMemoryAllocationCount` = 64 (bounded by the shared ObjTab — commented in the profile), `maxUniformBufferRange`/`maxStorageBufferRange` = 16 MiB, `mipmapPrecisionBits = 4`, `subTexelPrecisionBits = 8`, `maxPerStageResources = 16`, `minMemoryMapAlignment = 4096`; `vulkaninfo` still enumerates and all four guest tests pass on the compute-only queue (they bind family 0 directly, no GRAPHICS check). Accepted as-is from the review: the 237 `.desc.json` `kind` additions, `barrier_prefix_mut_0.out.bin` drift, the `G6LC_APU_DEBUG` taps, the texquery lavapipe deviation (model authoritative), `FEATURE_NOT_PRESENT`/`FORMAT_NOT_SUPPORTED` as defence-in-depth create errors. Added follow-ups: shwave address-multiply sharing (`W_TXB`/`W_TXT0`/`W_TXM` through one 16×32 MAC), `unnormalizedCoordinates` samplers, multi-core texel-cache invalidation at barriers, ObjTab scaling for UE-class object counts |
 
-## 12. Re-evaluated roadmap (2026-10-05) — controlling sequence from here
+## 12. Re-evaluated roadmap (2026-10-05) — sequencing baseline, amended by the current contract
 
 Re-planned against HEAD `a91f9deb8` plus the catalog freeze commit, the Devin plan
 `plan-5ddc97674e5bf9b0.md` (A0–A7, acceptance matrix), the Grok session plan (G0–G4),
@@ -818,9 +959,10 @@ point here. Nothing below promotes a fixture result to qualification.
 | F4 | UE Linux targets x86-64/ARM64 only; CS2 is x86-64 only. RISC-V Ubuntu proves the driver contract (vkcube, Zink, CTS subsets), not those workloads. | The **virtio-pci endpoint function** (PCI `1af4:1050`, five virtio-pci capabilities + the shared-memory capability over a BAR into the aperture) is on the critical path before UE, and belongs on the multi-function virtio-pci endpoint already proposed in `pcie-endpoint.md`. Invariant: the `vgsys` front/back seam (`vq_state[]`, `queue_enable[]`, `notify[]`, `used_valid/qid/len/ready`, `reset_req/done`, `idle`, SHM window) is transport-agnostic — 3c-ii must not let MMIO specifics leak below it. |
 | F5 (**landed** §11 row F5) | The 5a-ii dispatch assembly resolves descriptor sets into a 16-entry flop binding table. UE SM5 needs ≥ 4 bound sets with image/sampler arrays; Source 2 is reported to need descriptor-indexing-class bindless (to be pinned from the binary with a Vulkan layer trace, dev-only). | Increment 5's texture unit fetches descriptors from **device memory** (objpay/aperture) with dynamic indices through the LSU; ObjTab validation moves to descriptor-write time plus a generation check. The flop table is a compute-prototype shape, not extended. *Landed*: 32-byte records in aperture memory, pool/layout/set/update on real backing, dynamic-index LSU fetch + 8-entry cache; image/sampler records reserved — see §11 F5. |
 | F6 | The TBs model flat memory. Two coherence contracts exist: guest RAM through the kernel DMA API (`dma-coherent` or Zicbom CMO in the DT, both stock) and the aperture, which must be **CPU-uncached** (`APU_SHM_BASE` outside the core's cached PMA regions) so WC mappings are coherent by construction. | Plan-§4 "cached input visibility and output/fence ordering on the composed L1/L2/L3" is a 3c-ii exit arm. The island's `DmaInvalEn → CMO writer` and multi-client enqueue arbiter are the patterns to reuse for publication, not a flat-memory TB. |
-| F7 | Capacity: 32 FP32 FMA units at ~20 cycles/instruction ≈ 1.6 FMA/cycle. A CS2-playable floor (1080p low, ~60 fps) is a ~1 TFLOPS-class device ≈ 500 FMA/cycle at 1 GHz: ~20× from pipelining `shwave` to one instruction/cycle/wave, ~16× from `ShaderCores`. TBDR keeps 1080p60 deferred traffic at single-digit GB/s, inside the SoC DRAM slave's 8–19 GB/s at `DramChannels = 1`. | ASIC-class silicon for the workload gates; FPGA proves correctness at small resolution. Capacity work (12.3 D) starts only after a frame profile names the stall, per the Grok plan's rule. |
+| F7 (re-evaluated 2026-10-10) | The existing wave engine instantiates 32 FP32 FMAs but serializes instruction phases and memory accesses. The old ~1-TFLOPS/1080p60 and single-digit-GB/s estimates were unsupported workload hypotheses, not a CS2 floor or measured traffic. RF defaults alone imply 256 KiB/core before scratch/shared/module storage. | Measure command/ALU/texture/raster/RT and memory rooflines, MRT formats/MSAA, cache behavior, CPU submission and frame-time distributions. Select bank/issue/core/channel geometry from equal-budget Pareto points and mapped timing/area; no FPS claim follows from FMA count or AI TOPS. |
 | F8 | Each catalog fold cost ~66 min remote synth and kept the four attach files dirty. 5a-ii covers strictly more than `bru/qbn/qtb`. | Folds stop at the freeze commit; the leaves' wire facts are already covered by the generated Mesa differential (524/524), so nothing is ported. |
 | F9 | 3d-b proved the stock gate: Mesa's `vn_physical_device_init_renderer_extensions` hard-requires the renderer to advertise `VK_KHR_external_memory_fd`. We advertise it, because our hardware implements what it means in Venus. In the Venus model the renderer's `KHR_external_memory_fd` is the mechanism by which device memory becomes a guest-mappable blob (virglrenderer exports the host allocation as an fd and mmaps it into the host-visible window). LibreCore's aperture blob — `RESOURCE_CREATE_BLOB(blob_id = memory id)` mapping the memory's pages onto the SHM window (5a-ii) — *is* that mechanism natively; no fd ever crosses the wire (`vkGetMemoryFdKHR`/`vkGetMemoryFdPropertiesKHR` are guest-side in Mesa, `vn_renderer_bo_export_dma_buf` is a kernel ioctl). So this is a truthful capability statement, not a vacuous name. | `VK_KHR_external_memory_fd` spec v1 is advertised in `vkEnumerateDeviceExtensionProperties`; `vkAllocateMemory`'s pNext policy accepts `VkExportMemoryAllocateInfo` only for `handleTypes ⊆ OPAQUE_FD` (the aperture-mappable class), accepts `VkMemoryDedicatedAllocateInfo`/`VkMemoryAllocateFlagsInfo(flags=0)` as no-ops, and refuses imports (`VkImportMemoryFdInfoKHR`/`VkImportMemoryResourceInfoMESA`) with `VK_ERROR_INVALID_EXTERNAL_HANDLE`. `vkGetPhysicalDeviceExternalBufferProperties` answers `EXPORTABLE\|IMPORTABLE` for `OPAQUE_FD` only, all-zero otherwise; external fence/semaphore properties answer all-zero (no external synchronization). This was the gate that unblocked `vulkaninfo` + `vkcompute` on the stock stack (§11 3d-b). |
+| F10 | Mesa Venus creates the blob for host-visible memory lazily — `vn_device_memory.c`: "mem alloc is done upon bo map or export" — and the kernel's `virtio_gpu_vram_create` picks the host-visible offset (`drm_mm` first-fit) and sends `RESOURCE_MAP_BLOB` at that moment, i.e. at the first `vkMapMemory`. On a flat DRAM aperture the device cannot know the kernel's offset earlier, and the 3d-c lazy heap 1 therefore refused every device use before the map (`DEVICE_LOST`). That breaks legal, ubiquitous patterns: GPU write → fence → map readback (vkcube screenshots, CTS, UE readback utilities) and alloc → bind → descriptor update → map. The stock guest exposed it in 5b (`vkimage` had to map first). | **3d-d**: heap-1 memory is backed at first *bind* (`ALLOC_HI`: top-down first-fit in the guest window, away from the kernel's bottom-up `drm_mm`) and flagged `DEVBACKED`; `MAP_BLOB` on a `DEVBACKED` memory relocates it — hold new submissions, drain to idle, evict any `DEVBACKED` squatter overlapping the kernel's range (`ALLOC_HI` with the range excluded, word-mover copy, free), `ALLOC_AT` the kernel offset, copy, free the old extent, publish. Eviction with no room fails the map (`VK_ERROR_MEMORY_MAP_FAILED` in the guest); an `ALLOC_HI` miss at bind is `VK_ERROR_OUT_OF_DEVICE_MEMORY`. Descriptor records stop carrying absolute bases: record +0 = memory handle `{gen,slot}`, +28 = resource offset, and the LSU resolves the base through ObjTab `READSLOT` on a record-cache miss — so relocation and memory free/reuse can never strand a record (generation-checked; a dead memory reads as the null record). `vkimage.c` returns to the natural map-after-fence order; `vkmem.c` gains the fill → fence → map and bind → update → map → dispatch arms. |
 
 ### 12.2 AI island → graphics (plan §8, made concrete)
 
@@ -832,7 +974,7 @@ point here. Nothing below promotes a fixture result to qualification.
 | `DmaInvalEn → CMO writer`, `ai.enq` arbiter | Used-ring/reply/fence publication order; multi-queue | Fails-if-removed test on the composed caches |
 | `DramChannels` 1/2/4/8 | Frame bandwidth | A frame profile showing the stall before N moves |
 | `g6lc_ai_pe_dot_float_pipe` as MatHelper (4c) | `OpDot`/matrix ops, single-rounded | Helper on/off bit-identical under `NoContraction`, measured ULP elsewhere. ~115 k generic cells at `Lanes = 4` versus four FPnew FMAs: a precision/multi-format option, **not** an area win — optional, behind raster in priority |
-| Dot PEs via `VK_KHR_cooperative_matrix` | The only API-legal way stock applications (including Vulkan AI runtimes) reach the matrix hardware | Later gate; not needed by UE SM5 or CS2 |
+| Dot PEs via `VK_KHR_cooperative_matrix` | Standard explicit matrix access for supporting applications; internal scalar/vector lowering is also possible where numerically legal | Required by the full release feature contract, independent of whether UE SM5 or CS2 uses it |
 
 Not transferable: VA-Turbo/policy steer, Desc64 as a graphics ABI, UIO/ai-tensor daemons,
 and neural upscaling of an unmodified game's frames (CS2's FSR option is a game shader pass
@@ -862,7 +1004,10 @@ Verilator testharness, then a stock Ubuntu riscv64 kernel + Mesa boot on the pro
 Exit: plan A3 + the "prove/reject stock-client backend" checkbox in `AGENTS-todo.md`.
 Status: met — 3d-b proved the gate; 3d-c put it in-tree and reproducible
 (`verif/tb/apu/bridge/run-guest.sh` + `guest/` assets, sha256-pinned image;
-`run-apu-regress.sh` runs unit → top → soc → bridge → guest → synth serially).
+`run-apu-regress.sh` runs unit → top → soc → bridge → guest → synth serially);
+3d-d closes the host-visible memory model against stock Venus (§12.1 F10 —
+bind-time `DEVBACKED` backing + `MAP_BLOB` relocation + handle-keyed
+descriptor records).
 
 **C — Graphics engines (the mass).** Increment 5 in this order: Xfer (copies/clears/blits
 via checked DMA; unlocks vkcube-class tests), images/formats/sampler with memory-resident
@@ -896,8 +1041,11 @@ deltas) and SM6-class features as separate gates; physical A7/P5.
 Release = stock Ubuntu kernel (`virtio_mmio` on the SoC DTS node `compatible =
 "virtio,mmio"`, or `virtio_pci` on the card) → `virtio_gpu`; stock Mesa
 `mesa-vulkan-drivers` (`libvulkan_virtio.so`, present on amd64 and riscv64) → loader;
-Zink for GL. Nothing installed, no ICD override, no DKMS, no DTS property beyond the
-virtio node.
+Zink for GL. No device-specific installer, ICD override or DKMS; the selected official
+image must actually contain the required distro packages. Reserved-memory, cacheability,
+DMA and interrupt descriptions must match the platform, not just the virtio node.
+Generic upstream Venus/protocol changes are development-only until official packages
+supply them; the complete external-sync/WSI and physical transport gates remain open.
 
 | Dev-only component | Removal condition |
 |---|---|

@@ -53,7 +53,26 @@ package g6lc_apu_objtab_pkg;
     // nothing outside their parent's arena.  The final completion is
     // OK with handle[15:0] = number retired; MISS when the slot index
     // is out of range.
-    APU_OBJTAB_OP_RETIRE_KIDS = 4'd11
+    APU_OBJTAB_OP_RETIRE_KIDS = 4'd11,
+    // §12.3 3d-d: overlap scan for MAP_BLOB eviction — iterate the
+    // slots and report the FIRST live entry of kind == req.kind, other
+    // than the excluded slot req.id[15:0], whose DEVBACKED extent
+    // [aux[63:32], aux[63:32]+size) overlaps the byte window
+    // [req.offset, req.size).  OK + {gen,slot} handle + entry on a
+    // match (repeat the scan after each eviction to take the next),
+    // MISS when no conflicting entry exists.  One completion, no
+    // SWEEP stream.
+    APU_OBJTAB_OP_SCAN_OVL   = 4'd12,
+    // §12.3 3d-d: compare-and-set publish of aux[63:32] — writes
+    // aux[63:32] := req.value and ORs req.mask into aux[31:0] only
+    // while the entry's aux[63:32] still equals req.offset[31:0];
+    // CONFLICT (with the live entry) otherwise.  The two agents that
+    // can publish a DEVICE_MEMORY base — vnfront's bind-time DEVBACKED
+    // backing (ring queue) and vgctl's MAP_BLOB (ctrl queue) — issue
+    // on unordered queues, so each publish must be atomic against the
+    // other: whichever lands second either skips (bind sees a placed
+    // base) or restarts as a relocation (map sees DEVBACKED).
+    APU_OBJTAB_OP_SETAUXHI_CAS = 4'd13
   } apu_objtab_op_e;
 
   typedef enum logic [3:0] {
@@ -71,7 +90,10 @@ package g6lc_apu_objtab_pkg;
     // caller can reclaim resources the sweep itself cannot reach
     // (aperture extents, ObjPay extents, ShaderCore slot refs).  The
     // final completion reports OK with the pinned count as before.
-    APU_OBJTAB_SWEEP         = 4'd9
+    APU_OBJTAB_SWEEP         = 4'd9,
+    // §12.3 3d-d: SETAUXHI_CAS compare failed — another agent already
+    // published a base; the returned entry carries it
+    APU_OBJTAB_CONFLICT      = 4'd10
   } apu_objtab_status_e;
 
   typedef struct packed {
@@ -95,7 +117,8 @@ package g6lc_apu_objtab_pkg;
     logic [15:0] refcnt;
     logic [7:0]  pins;
     logic [31:0] state;
-    logic [15:0] bind_mem_slot;  // 16'hFFFF = unbound
+    logic [31:0] bind_mem;       // bound DEVICE_MEMORY {gen[31:16],
+                                // slot[15:0]}; [15:0]==16'hFFFF = unbound
     logic [63:0] bind_offset;
     logic [63:0] size;
     logic [63:0] aux;          // user state (cmdrec buf idx in [7:0])
@@ -105,11 +128,23 @@ package g6lc_apu_objtab_pkg;
   localparam logic [15:0] APU_OBJTAB_SLOT_NONE = 16'hFFFF;
 
   // §12.3 C: VkDeviceMemory aux[63:32] unbacked sentinel — a type-1
-  // (host-visible) allocation is lazy: it holds no aperture pages
-  // until the kernel MAP_BLOBs it, and returns here at UNMAP_BLOB.
-  // Engine uses (descriptor bound-write, Xfer operand, dispatch) must
-  // refuse it, never fabricate a base.
+  // (host-visible) allocation is lazy at vkAllocateMemory: it holds
+  // no aperture pages until bound or mapped.  Engine uses
+  // (descriptor bound-write, Xfer operand, dispatch) must still
+  // refuse the sentinel, never fabricate a base — §12.3 3d-d makes
+  // that an invariant legal traffic cannot reach.
   localparam logic [31:0] APU_MEM_UNBACKED = 32'hFFFF_FFFF;
+
+  // §12.3 3d-d: VkDeviceMemory aux[0] = DEVBACKED — the memory's
+  // aperture extent was chosen by the DEVICE (vnfront ALLOC_HI at
+  // bind time, top-down in the guest window) and is relocatable.
+  // Three backing states for a DEVICE_MEMORY entry:
+  //   aux[63:32] == APU_MEM_UNBACKED          — lazy, no extent
+  //   DEVBACKED set                          — device-chosen extent,
+  //                                            MAP_BLOB may relocate it
+  //   DEVBACKED clear, base != UNBACKED      — kernel-chosen extent
+  //                                            (ALLOC_AT at MAP_BLOB)
+  localparam logic [63:0] APU_MEM_DEVBACKED = 64'h1;
 
   // Client-object id namespace tag (see header): ORed into every id-
   // form ObjTab request carrying a Vulkan client object id so it

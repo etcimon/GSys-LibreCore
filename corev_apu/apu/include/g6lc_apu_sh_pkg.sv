@@ -74,6 +74,49 @@ package g6lc_apu_sh_pkg;
   localparam logic [6:0] APU_SH_BI_LINDEX  = 7'd29;
   localparam logic [7:0] APU_SH_BI_NONE    = 8'hFF;
 
+  // ---- graphics stages (first-pixel increment) ----
+  localparam logic [3:0] APU_SH_EM_VERTEX    = 4'd0;   // OpEntryPoint execution model
+  localparam logic [3:0] APU_SH_EM_FRAGMENT  = 4'd4;
+  localparam logic [3:0] APU_SH_EM_GLCOMPUTE = 4'd5;
+  localparam logic [6:0] APU_SH_BI_POSITION      = 7'd0;   // VS Output, record slot 0
+  localparam logic [6:0] APU_SH_BI_POINTSIZE     = 7'd1;   // accepted, stores dropped
+  localparam logic [6:0] APU_SH_BI_CLIPDIST      = 7'd3;   // dropped region
+  localparam logic [6:0] APU_SH_BI_CULLDIST      = 7'd4;   // dropped region
+  localparam logic [6:0] APU_SH_BI_FRAGCOORD     = 7'd15;  // FS Input, record slot 0 = {x+.5, y+.5, z, 1/w}
+  localparam logic [6:0] APU_SH_BI_FRONTFACING   = 7'd17;  // FS Input builtin value (v1: 1)
+  localparam logic [6:0] APU_SH_BI_VERTEXINDEX   = 7'd42;  // VS Input builtin = VS-in record slot 8 word 0
+  localparam logic [6:0] APU_SH_BI_INSTANCEINDEX = 7'd43;  // VS Input builtin = VS-in record slot 8 word 1
+  // varying/attribute records, 16 B per location, fixed stride:
+  //   VS-in  record (per vertex):   attribute Location l at 16*l            stride APU_SH_ATTR_STRIDE = 16*APU_SH_VARY_LOCS
+  //   VS-out record (per vertex):   Position at 0, Location l at 16*(1+l)  stride APU_SH_VARY_STRIDE = 16*(1+APU_SH_VARY_LOCS)
+  //   FS-in  record (per fragment): FragCoord at 0, Location l at 16*(1+l) stride APU_SH_VARY_STRIDE
+  //   FS-out record (per fragment): color Location l at 16*l               stride APU_SH_ATTR_STRIDE
+  localparam int unsigned APU_SH_VARY_LOCS   = 8;
+  // VS-in records carry a ninth slot (8) with {VertexIndex,
+  // InstanceIndex, 0, 0} — the shader builtins read it; FS-out records
+  // share the stride (loc l at 16*l).
+  localparam int unsigned APU_SH_ATTR_STRIDE = 16 * (1 + APU_SH_VARY_LOCS);  // 144
+  localparam int unsigned APU_SH_VARY_STRIDE = 16 * (1 + APU_SH_VARY_LOCS);  // 144
+  // graphics wave work (issued by the raster engine on the shcore work port; pseudo-ctypes outside the VN range)
+  localparam logic [31:0] APU_SH_WORK_VS = 32'hF000_0001;  // imm[0]=lane count, imm[1]=in_base, imm[2]=out_base, imm[3]=vbase (first vertex index of the batch), imm[4]=instance index
+  localparam logic [31:0] APU_SH_WORK_FS = 32'hF000_0002;  // imm[0]=lane count, imm[1]=in_base, imm[2]=out_base
+  // per-wave graphics stage register (0 = compute dispatch)
+  localparam logic [1:0] APU_SH_GFX_NONE = 2'd0;
+  localparam logic [1:0] APU_SH_GFX_VS   = 2'd1;
+  localparam logic [1:0] APU_SH_GFX_FS   = 2'd2;
+  // interface-variable/pointer flags nibble (var row w0[31:28], init
+  // row w0[31:28], pointer tag comp1[31:28]):
+  localparam logic [3:0] APU_SH_VF_REC  = 4'h1;   // aperture record access
+  localparam logic [3:0] APU_SH_VF_DROP = 4'h2;   // dropped builtin region
+  // member-table flag bit marking a dropped builtin member
+  // (PointSize/ClipDistance/CullDistance): stores dropped, loads 0
+  localparam logic [7:0] APU_SH_MF_DROP = 8'h40;
+  // decor-row marker bits in the flags byte (word0[31:24]): [5] the
+  // builtin field holds a real id (0 is a legal builtin, so it cannot
+  // double as the "none" sentinel), [6] word1 holds a Location
+  localparam logic [7:0] APU_SH_DF_BI  = 8'h20;
+  localparam logic [7:0] APU_SH_DF_LOC = 8'h40;
+
   // ---- table words per entry (mirrors spirv_scan.py) -----------------
   localparam int APU_SH_TYPE_WORDS   = 3;
   localparam int APU_SH_CONST_WORDS  = 16;
@@ -101,12 +144,18 @@ package g6lc_apu_sh_pkg;
   localparam int APU_SH_PTR_TAG = 1;
   localparam int APU_SH_PTR_DIDX = 2;
 
-  // ---- §12.3 F5+C/5b: memory-resident descriptors ---------------------
+  // ---- §12.3 F5+C/5b + 3d-d: memory-resident descriptors -------------
   // One descriptor record = APU_DESC_BYTES (32) aperture bytes at
   //   set_base[s] + boff.off32*32 + array_index*32:
-  //   +0   base[31:0]    aperture byte offset of the resource (images:
-  //                      view's first subresource = mem base + bind
-  //                      offset + off(baseLayer, baseMip))
+  //   +0   mem{gen[15:0],slot[15:0]}  bound memory handle; 0 = null.
+  //                      3d-d: records no longer carry an absolute
+  //                      base — the LSU resolves the aperture base
+  //                      through ObjTab READSLOT on a record-cache miss
+  //                      (live && gen match && DEVICE_MEMORY && base !=
+  //                      UNBACKED && off+size <= mem.size), so MAP_BLOB
+  //                      relocation and memory free/reuse can never
+  //                      strand a record: a dead or stale-generation
+  //                      memory resolves as the null record
   //   +4   size[31:0]    byte extent (images: bytes the view may touch)
   //   +8   kind[7:0]     VkDescriptorType (0 sampler, 1 combined,
   //                      2 sampled image, 3 storage image, 6/7 buffer,
@@ -121,10 +170,12 @@ package g6lc_apu_sh_pkg;
   //   +20  sampler w0: {rsvd11, {cmpEn,cmpOp3}, border3,
   //                    addrW/V/U 3x3b, mipmap1, minF2, magF2}
   //   +24  sampler w1: {rsvd7, bias9{s4.4}, maxLod8 u4.4, minLod8 u4.4}
-  //   +28..+31 reserved zero
+  //   +28  off[31:0]     resource-relative offset (bind offset +
+  //                      view subresource offset)
   // A sampler record (kind 0) fills only +20..+27; a sampled/storage
-  // image record (kind 2/3) fills +0..+19; combined (1) fills both.
-  // OpSampledImage merges a kind-2 and a kind-0 record at the LSU.
+  // image record (kind 2/3) fills +0..+19 and +28; combined (1) fills
+  // both.  OpSampledImage merges a kind-2 and a kind-0 record at the
+  // LSU.  abs base = resolved mem.base + off.
   // An all-zero (null/invalid) record bounds-checks as a zero-size
   // buffer: loads read 0, stores drop, robust_q++.
   // Scaling levers toward UE SM5 / CS2-class bindless:
@@ -185,9 +236,15 @@ package g6lc_apu_sh_pkg;
 
   typedef struct packed {
     logic [15:0] entry_off;   // word offset of OpFunction
-    logic [7:0]  lx, ly, lz;  // OpExecutionMode LocalSize
+    logic [7:0]  lx, ly, lz;  // OpExecutionMode LocalSize (1,1,1 for gfx)
     logic [15:0] scratch;     // Function/Private bytes per invocation
     logic [15:0] slab;        // Workgroup slab bytes
+    // graphics stages (first-pixel increment): execution model
+    // (APU_SH_EM_*) and the Input/Output Location masks — locations
+    // declared by interface variables; builtins are not counted
+    logic [3:0]  em;
+    logic [7:0]  in_mask;
+    logic [7:0]  out_mask;
   } apu_sh_entry_t;
 
   // ---- commit request/completion ------------------------------------
@@ -219,6 +276,10 @@ package g6lc_apu_sh_pkg;
     logic [2:0]      slot;      // committed module slot
     logic [15:0]     gx, gy, gz;
     logic [31:0]     work_id;
+    // graphics wave work immediates (APU_SH_WORK_VS / APU_SH_WORK_FS;
+    // work_id carries the pseudo-ctype there): count, in/out record
+    // aperture bases, vbase, instance index at imm[0..4]
+    logic [8*32-1:0] imm;
   } apu_sh_dispatch_t;
 
   typedef struct packed {

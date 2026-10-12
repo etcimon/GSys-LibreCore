@@ -42,6 +42,10 @@ module tb_g6lc_apu_vgctl;
   logic [7:0]      f_ring;
   logic            ck_v;
   logic [7:0]      ck_id;
+  // §12.3 3d-d: relocation hold/drain — hold_o stops cmdexec dequeue,
+  // drain_idle_i is the engine quiescence the mover waits on
+  logic            hold;
+  logic            drain_idle = 1'b1;
   int unsigned     ck_count = 0;
   logic [7:0]      ck_seen = '0;
   always @(posedge clk) if (ck_v) begin
@@ -52,7 +56,8 @@ module tb_g6lc_apu_vgctl;
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .chain_valid_i(ch_v), .chain_ready_o(ch_r),
     .chain_n_i(ch_n), .chain_desc_i(ch_d),
-    .mem_req_o(m_req), .mem_we_o(m_we), .mem_addr_o(m_addr),
+    .mem_req_o(m_req), .mem_we_o(m_we), .mem_dom_o(),
+    .mem_addr_o(m_addr),
     .mem_wdata_o(m_wdata), .mem_wstrb_o(m_wstrb),
     .mem_ready_i(1'b1), .mem_rvalid_i(m_rv), .mem_rdata_i(m_rdata),
     .mem_err_i(1'b0), .mem_fault_o(m_fault),
@@ -71,6 +76,7 @@ module tb_g6lc_apu_vgctl;
     .xs_bytes_o(xs_bytes), .xs_ctx_o(xs_ctx),
     .xs_done_i(xs_done), .xs_fault_i(xs_fault),
     .ctx_kill_valid_o(ck_v), .ctx_kill_id_o(ck_id),
+    .hold_o(hold), .drain_idle_i(drain_idle),
     .busy_o(busy), .done_o(dn), .used_len_o(used_len),
     .fence_done_o(f_dn), .fence_id_o(f_id), .fence_ring_o(f_ring));
 

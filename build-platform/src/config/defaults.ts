@@ -116,6 +116,33 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
     // extra dependency is present. Scripts read their own DV_TARGET default, so
     // dvTarget is only pinned where it documents that same default.
     suites: [
+      {
+        id: "apu-profile-audit",
+        description: "Bounded static Vulkan capability audit; expected to fail until the experimental APU profile meets the checked requirements. Not RTL or CTS qualification.",
+        script: "verif/tb/apu/run-apu-regress.sh",
+        args: ["--stages", "profile"],
+        group: "directed",
+        target: "g6lc64_stream8",
+        dvSimulators: "none",
+        tools: [],
+        openSource: true,
+        optional: true,
+        execution: "host",
+      },
+      {
+        id: "apu-remote-leaf",
+        description:
+          "Entire APU/Venus regression launcher on an isolated remote source snapshot through the testharness proxy (selected stages; evidence, not device qualification).",
+        script: "verif/tb/apu/run-apu-remote-leaf.sh",
+        args: [],
+        group: "directed",
+        target: "g6lc64_stream8",
+        dvSimulators: "none",
+        tools: [],
+        openSource: true,
+        optional: true,
+        execution: "remote-proxy",
+      },
       // --- smoke: fast per-target sanity -----------------------------------
       {
         id: "smoke-cv64a6",

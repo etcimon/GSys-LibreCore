@@ -2,3 +2,11 @@
 password: ubuntu
 chpasswd: { expire: False }
 ssh_pwauth: True
+# the preinstalled image ships ubuntu with lastchg=0 (PAM-forced change on
+# first login); un-expire so the serial driver can log in directly.
+bootcmd:
+  - chage -d 20000 ubuntu || true
+  # 224 MiB usable post-aperture OOMs under cloud-init+apt before the
+  # serial driver can swapon; activate the 768 MiB swap disk here, at
+  # init stage.  Size 1572864 sectors == 768 MiB identifies it.
+  - for d in /sys/block/vd*; do [ "$(cat $d/size)" = 1572864 ] && { mkswap /dev/${d##*/}; swapon /dev/${d##*/}; } ; done || true

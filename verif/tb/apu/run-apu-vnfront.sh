@@ -96,6 +96,25 @@ if [ "$rc" -ne 0 ]; then
   echo "SIM-PAYFULL rc=$rc despite PASS"
   exit 1
 fi
+# §12.3 3d-d bind-FULL arm: bind-time ALLOC_HI exhaustion on type-1
+# memory (regenerate with vn_golden.py --bindfull-session
+# ue_sm5_bindfull 1).  Reuses the default-geometry sim binary.
+set +e
+(cd "$ROOT/verif/tb/apu" && stdbuf -o0 -e0 \
+  "$OUT/sim/tb_g6lc_apu_vnfront" +ses=ue_sm5_bindfull) \
+  > "$OUT/sim-bindfull.log" 2>&1
+rc=$?
+set -e
+echo "SIM-BINDFULL rc=$rc"
+cat "$OUT/sim-bindfull.log"
+if ! grep -q '^PASS tb_g6lc_apu_vnfront ' "$OUT/sim-bindfull.log"; then
+  echo "SIM-BINDFULL FAILED"
+  exit 1
+fi
+if [ "$rc" -ne 0 ]; then
+  echo "SIM-BINDFULL rc=$rc despite PASS"
+  exit 1
+fi
 if [ "${VNFRONT_SYNTH:-0}" != 1 ]; then
   exit 0
 fi

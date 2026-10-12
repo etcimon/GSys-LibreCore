@@ -81,13 +81,41 @@ provision() {
     rm -f "$GUEST_CACHE/rootfs.part"
   fi
   if [ ! -f "$GUEST_CACHE/cidata.img" ]; then
-    echo "[guest] building cidata.iso payload"
-    xorrisofs -quiet -V CIDATA -r -o "$GUEST_CACHE/cidata.img" \
-      "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
-      "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
-      "$GUEST/vkimage.c" \
-      "$GUEST/expected.json" \
-      "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv"
+    if command -v xorrisofs >/dev/null 2>&1; then
+      echo "[guest] building cidata.iso payload"
+      xorrisofs -quiet -V CIDATA -r -o "$GUEST_CACHE/cidata.img" \
+        "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
+        "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
+        "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" \
+        "$GUEST/expected.json" \
+        "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv" \
+        "$CORPUS/vs_passthru.spv" "$CORPUS/fs_color.spv" \
+        "$CORPUS/vs_pc.spv" "$CORPUS/fs_vcol.spv" "$CORPUS/vs_pos3.spv" \
+        "$CORPUS/vs_inst.spv" "$CORPUS/vs_tex.spv" "$CORPUS/fs_mip.spv" \
+        "$CORPUS/vs_clip.spv" "$CORPUS/vs_uvc.spv" \
+        "$CORPUS/fs_deriv2.spv"
+    else
+      # NoCloud only requires a filesystem labelled CIDATA; on hosts
+      # without xorrisofs/genisoimage an ext image serves the same seed
+      # (mke2fs -d populates it without a loop mount).
+      echo "[guest] xorrisofs missing — building CIDATA ext image"
+      cidata_src="$(mktemp -d)"
+      cp "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
+        "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
+        "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" \
+        "$GUEST/expected.json" \
+        "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv" \
+        "$CORPUS/vs_passthru.spv" "$CORPUS/fs_color.spv" \
+        "$CORPUS/vs_pc.spv" "$CORPUS/fs_vcol.spv" "$CORPUS/vs_pos3.spv" \
+        "$CORPUS/vs_inst.spv" "$CORPUS/vs_tex.spv" "$CORPUS/fs_mip.spv" \
+        "$CORPUS/vs_clip.spv" "$CORPUS/vs_uvc.spv" \
+        "$CORPUS/fs_deriv2.spv" \
+        "$cidata_src/"
+      truncate -s 16M "$GUEST_CACHE/cidata.img"
+      mke2fs -q -t ext4 -L CIDATA -d "$cidata_src" \
+        "$GUEST_CACHE/cidata.img"
+      rm -rf "$cidata_src"
+    fi
   fi
   if [ ! -f "$GUEST_CACHE/swap.raw" ]; then
     truncate -s 768M "$GUEST_CACHE/swap.raw"
@@ -111,9 +139,14 @@ if [ -f "$GUEST_CACHE/cidata.img" ] && \
   xorrisofs -quiet -V CIDATA -r -o "$GUEST_CACHE/cidata.img" \
     "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
     "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
-    "$GUEST/vkimage.c" \
+    "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" \
     "$GUEST/expected.json" \
-    "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv"
+    "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv" \
+    "$CORPUS/vs_passthru.spv" "$CORPUS/fs_color.spv" \
+    "$CORPUS/vs_pc.spv" "$CORPUS/fs_vcol.spv" "$CORPUS/vs_pos3.spv" \
+    "$CORPUS/vs_inst.spv" "$CORPUS/vs_tex.spv" "$CORPUS/fs_mip.spv" \
+    "$CORPUS/vs_clip.spv" "$CORPUS/vs_uvc.spv" \
+    "$CORPUS/fs_deriv2.spv"
 fi
 
 need_build=0
@@ -137,11 +170,14 @@ if [ "$need_build" = 1 ]; then
 fi
 
 rc_all=0
-python3 "$GUEST/drive_guest.py" --out "$OUT" 2>&1 | tee "$OUT/drive-venus.log"
+# `|| true`: pipefail would otherwise let a failed arm abort the script
+# before the venusoff control arm runs.
+python3 "$GUEST/drive_guest.py" --out "$OUT" 2>&1 | tee "$OUT/drive-venus.log" \
+  || true
 grep -q "GUEST-PASS" "$OUT/drive-venus.log" || rc_all=1
 if [ "$VENUS_ONLY" = 0 ]; then
   python3 "$GUEST/drive_guest.py" --out "$OUT" --venusoff \
-    2>&1 | tee "$OUT/drive-venusoff.log"
+    2>&1 | tee "$OUT/drive-venusoff.log" || true
   grep -q "GUEST-PASS" "$OUT/drive-venusoff.log" || rc_all=1
 fi
 echo "[guest] logs: $OUT"

@@ -302,7 +302,14 @@ static void do_check(const vn_session_t *s) {
       ep++;
       if (ep[0] != a1 + 4 * i) fail(0x3a);
       uint32_t got = ap_rd(a1 + 4 * i);
-      if (got != ep[1]) fail(0x3b);
+      if (got != ep[1]) {
+        ((volatile uint32_t *)(VN_COOKIE_ADDR + 8))[0] = a1 + 4 * i;
+        ((volatile uint32_t *)(VN_COOKIE_ADDR + 8))[1] = got;
+        ((volatile uint32_t *)(VN_COOKIE_ADDR + 8))[2] = ep[1];
+        ((volatile uint32_t *)(VN_COOKIE_ADDR + 8))[3] = i;
+        flush_range(VN_COOKIE_ADDR + 8, 16);
+        fail(0x3b);
+      }
       if (ep[3] == 0) {
         if (got != ep[2]) fail(0x3c);
       } else if (ulpd(got, ep[2]) > 2) {

@@ -210,19 +210,69 @@ def main():
             return 3
         print(f"[drive] login prompt at +{time.time()-t0:.1f}s", flush=True)
 
-        con.send("ubuntu\n")
-        m = con.expect(r"Password:", 60)
+        # Gate login on cloud-init completion — the ubuntu password is
+        # committed in modules:config, which can land tens of seconds
+        # after the login prompt appears.
+        m = con.expect(r"cloud-init.*finished|Finished cloud-final", 900)
         if m:
+            print(f"[drive] cloud-init finished at +{time.time()-t0:.1f}s",
+                  flush=True)
+        else:
+            print("[drive] cloud-init completion not seen", flush=True)
+
+        # Preinstalled images ship ubuntu with lastchg=0 (PAM-forced
+        # change on first login) and cloud-init finishes the user setup
+        # (password unlock) late — a fast boot can reach the login prompt
+        # before either lands.  bootcmd in user-data pre-empts the
+        # forced change; the loop below also answers the prompts if it
+        # fires anyway, and retries while cloud-init is still running.
+        login_ok = False
+        # The rw image persists a forced password change made by the
+        # other arm — alternate the candidate across attempts.
+        passwords = ("ubuntu\n", "G6lcGuest-2026\n")
+        for _attempt in range(6):
+            con.buf = b""
             con.send("ubuntu\n")
-        m = con.expect(r"ubuntu@g6lc", 120)
-        if not m:
+            m = con.expect(r"Password:", 60)
+            if m:
+                con.send(passwords[_attempt % len(passwords)])
+            m = con.expect(r"ubuntu@|Current password:|Login incorrect", 120)
+            g = m.group(0) if m else b""
+            if b"ubuntu@" in g:
+                login_ok = True
+                break
+            if b"Current password" in g:
+                con.send("ubuntu\n")
+                con.expect(r"New password:", 30)
+                con.send("G6lcGuest-2026\n")
+                con.expect(r"Retype new password:", 30)
+                con.send("G6lcGuest-2026\n")
+                m = con.expect(r"ubuntu@", 60)
+                login_ok = bool(m)
+                break
+            time.sleep(15)  # Login incorrect — cloud-init still setting up
+        if not login_ok:
             print("[drive] login failed", flush=True)
             return 4
         print(f"[drive] logged in at +{time.time()-t0:.1f}s", flush=True)
         print(f"BOOT_WALL_SECONDS={time.time()-t0:.1f}", flush=True)
 
+        # sudo -i: NOPASSWD on cloud images, but answer a password prompt
+        # if one appears.  con.expect searches the accumulated console
+        # buffer, so buf is cleared before each expect — otherwise a
+        # stale "password for ubuntu" re-matches instantly and stray
+        # sends land at the shell (typed text executes as commands).
         con.send("sudo -i\n")
-        con.expect(r"root@g6lc", 30)
+        con.buf = b""
+        m = con.expect(r"root@|password for ubuntu", 30)
+        if m and b"password" in m.group(0):
+            con.send("ubuntu\n")
+            con.buf = b""
+            m = con.expect(r"root@|try again", 30)
+            if m and b"try again" in m.group(0):
+                con.send("G6lcGuest-2026\n")
+                con.buf = b""
+                m = con.expect(r"root@", 30)
 
         # systemd-resolved is masked (crash-loops under TCG); give the
         # guest a direct nameserver on the user-mode net.
@@ -235,8 +285,11 @@ def main():
 
         # 256 MiB DRAM OOMs during apt — a dedicated virtio-blk swap
         # device (whole disk, no fs indirection).  Find it by size:
-        # 768 MiB == 1572864 512B sectors.
-        con.run("for d in /sys/block/vd*; do "
+        # 768 MiB == 1572864 512B sectors.  bootcmd in user-data already
+        # swapon'd it on later seeds; only mkswap when it is not active
+        # yet (mkswap on a live swap would rewrite its signature).
+        con.run("swapon --show | grep -q . || "
+                "for d in /sys/block/vd*; do "
                 "  if [ \"$(cat $d/size)\" = 1572864 ]; then "
                 "    mkswap /dev/${d##*/} && swapon /dev/${d##*/}; "
                 "  fi; done; free -m", timeout=300)
@@ -249,8 +302,25 @@ def main():
                 timeout=300)
 
         if args.boot_only:
-            print("GUEST-PASS (boot-only)", flush=True)
+            print("\nGUEST-PASS (boot-only)", flush=True)
             return 0
+
+        # If the virtio_gpu probe died early (ENOMEM under boot memory
+        # pressure leaves no /dev/dri node), re-bind the virtio device
+        # with id 0x0010 once and re-check.  The tests run either way —
+        # a still-missing node fails downstream exactly as before.
+        rc = con.run("ls /dev/dri/card* >/dev/null 2>&1", timeout=15)
+        if rc == 0:
+            print("[drive] virtio_gpu rebind: present", flush=True)
+        else:
+            con.run("for v in /sys/bus/virtio/devices/virtio*; do "
+                    "grep -q '^0x0010$' $v/device 2>/dev/null && "
+                    "echo ${v##*/} > /sys/bus/virtio/drivers/virtio_gpu/bind; "
+                    "done; sleep 2; ls -l /dev/dri 2>&1; "
+                    "dmesg | grep -i virtio_gpu | tail -5", timeout=60)
+            rc = con.run("ls /dev/dri/card* >/dev/null 2>&1", timeout=15)
+            print(f"[drive] virtio_gpu rebind: "
+                  f"{'rebound' if rc == 0 else 'still-missing'}", flush=True)
 
         t_apt0 = time.time()
         if os.environ.get("G6LC_SKIP_APT"):
@@ -261,7 +331,7 @@ def main():
             print(f"[drive] apt update rc={rc} (+{time.time()-t_apt0:.0f}s)",
                   flush=True)
             rc = con.run("DEBIAN_FRONTEND=noninteractive apt-get install -y "
-                         "mesa-vulkan-drivers vulkan-tools", timeout=2400)
+                         "mesa-vulkan-drivers vulkan-tools", timeout=4800)
             print(f"[drive] apt install rc={rc} (+{time.time()-t_apt0:.0f}s total)",
                   flush=True)
         print(f"APT_WALL_SECONDS={time.time()-t_apt0:.1f}", flush=True)
@@ -274,7 +344,7 @@ def main():
 
         t_vk = time.time()
         con.run("vulkaninfo --summary 2>&1 | tee /root/vulkaninfo-summary.txt | tail -60",
-                timeout=300)
+                timeout=900)
         print(f"VULKANINFO_WALL_SECONDS={time.time()-t_vk:.1f}", flush=True)
 
         # pull cidata files into rootfs — find the seed by fs label;
@@ -286,15 +356,22 @@ def main():
                 "done; "
                 "cp /mnt/cidata/vkcompute.c /mnt/cidata/vkdescarr.c "
                 "/mnt/cidata/vkmem.c /mnt/cidata/vkimage.c "
+                "/mnt/cidata/vktri.c /mnt/cidata/vkcmp.c "
                 "/mnt/cidata/bufcopy.spv /mnt/cidata/descarr.spv "
                 "/mnt/cidata/vkimage.spv "
+                "/mnt/cidata/vs_passthru.spv /mnt/cidata/fs_color.spv "
+                "/mnt/cidata/vs_pc.spv /mnt/cidata/fs_vcol.spv "
+                "/mnt/cidata/vs_pos3.spv /mnt/cidata/vs_inst.spv "
+                "/mnt/cidata/vs_tex.spv /mnt/cidata/fs_mip.spv "
+                "/mnt/cidata/vs_clip.spv /mnt/cidata/vs_uvc.spv "
+                "/mnt/cidata/fs_deriv2.spv "
                 "/mnt/cidata/expected.json /root/ && ls -la /root/",
                 timeout=60)
 
         if args.venusoff:
             # control: no Venus GPU may appear — llvmpipe only.
             rc = con.run("vulkaninfo --summary 2>&1 | grep -c -i venus",
-                         timeout=300)
+                         timeout=900)
             ok = (rc == 1)  # grep -c exits 1 when the count is 0
             print(f"[drive] venusoff: venus device absent -> "
                   f"{'PASS' if ok else 'FAIL'}", flush=True)
@@ -317,7 +394,7 @@ def main():
             print(f"[drive] vkdescarr rc={rc}", flush=True)
             fail |= (rc != 0)
             rc = con.run("cd /root && gcc -O2 -o vkmem vkmem.c -lvulkan "
-                         "&& ./vkmem", timeout=1200)
+                         "&& ./vkmem bufcopy.spv", timeout=1200)
             print(f"[drive] vkmem rc={rc}", flush=True)
             fail |= (rc != 0)
             # §12.3 C/5b: images + samplers + Xfer image copies on the
@@ -326,6 +403,31 @@ def main():
             rc = con.run("cd /root && gcc -O2 -o vkimage vkimage.c -lvulkan "
                          "-lm && ./vkimage vkimage.spv", timeout=1200)
             print(f"[drive] vkimage rc={rc}", flush=True)
+            fail |= (rc != 0)
+            # G1d: the first stock-guest triangle — vs_passthru + fs_color
+            # through a real render pass; the C reference rasterizer
+            # mirrors g6lc_apu_rast.sv's op sequence (-ffp-contract=off
+            # keeps it honest at single precision).
+            rc = con.run("cd /root && gcc -O2 -ffp-contract=off "
+                         "-fexcess-precision=standard -o vktri vktri.c "
+                         "-lvulkan -lm && ./vktri vs_passthru.spv "
+                         "fs_color.spv", timeout=1200)
+            print(f"[drive] vktri rc={rc}", flush=True)
+            fail |= (rc != 0)
+            # G2c: the broad oracle — the same 8 scenes rendered on
+            # Venus and on Mesa llvmpipe (lavapipe ICD in the same
+            # guest), readback compared per channel.  Venus can take
+            # tens of seconds per scene.
+            vkenv = os.environ.get("G6LC_VKCMP_ENV", "")
+            rc = con.run("cd /root && gcc -O2 -ffp-contract=off "
+                         "-fexcess-precision=standard -o vkcmp vkcmp.c "
+                         "-lvulkan -lm && " + vkenv +
+                         " ./vkcmp vs_passthru.spv "
+                         "fs_color.spv vs_pc.spv fs_vcol.spv "
+                         "vs_pos3.spv vs_inst.spv vs_tex.spv fs_mip.spv "
+                         "vs_clip.spv vs_uvc.spv fs_deriv2.spv",
+                         timeout=3600)
+            print(f"[drive] vkcmp rc={rc}", flush=True)
             fail |= (rc != 0)
 
         # post-mortem: dump the whole aperture window from QEMU RAM
@@ -350,9 +452,15 @@ def main():
         except OSError as e:
             print(f"[drive] monitor dump failed: {e}", flush=True)
 
-        con.run("poweroff -f", timeout=120)
-        con.expect(r"reboot|Power down|System halted", 60)
-        print(f"GUEST-{'FAIL' if fail else 'PASS'}", flush=True)
+        # send (not run): the DONE marker can never echo back once the
+        # guest starts halting.  virtio-blk teardown can panic the guest
+        # during poweroff; that still means QEMU is on its way out.
+        con.send("poweroff -f\n")
+        con.expect(r"reboot|Power down|System halted|Kernel panic", 60)
+        # Leading newline: the final serial chunk can end mid-line
+        # (kernel 'reboot:' text races this print); the runner requires
+        # the marker to be the terminal line verbatim.
+        print(f"\nGUEST-{'FAIL' if fail else 'PASS'}", flush=True)
         return 1 if fail else 0
     finally:
         for p in (qemu, server):

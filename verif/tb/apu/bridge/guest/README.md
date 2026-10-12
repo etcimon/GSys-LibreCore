@@ -56,23 +56,33 @@ provision time from `corev_apu/apu/tools/shader/corpus/`).
 - `vkdescarr descarr.spv` → `G6LC_VKDESCARR_PASS words=32` — dynamic
   descriptor-array indexing (`shader*ArrayDynamicIndexing` enabled).
 - `vkmem` → `G6LC_VKMEM_PASS` — 12 MiB host-visible alloc+map+verify,
-  2 MiB device-local alloc+bind, and the 12 MiB device-local negative.
-  The negative runs under `VN_PERF=no_async_mem_alloc` (set inside
-  vkmem.c): Venus submits `vkAllocateMemory` asynchronously and returns
-  `VK_SUCCESS` unconditionally, so a renderer-side OOM is only
-  observable synchronously with Mesa's documented no-async knob.
-- `vkimage vkimage.spv` → `G6LC_VKIMAGE_PASS words=64` — §12.3 C/5b:
-  format-properties truthfulness (D32_SFLOAT zero features,
+  2 MiB device-local alloc+bind, the 12 MiB device-local negative,
+  and the §12.3 3d-d arms proving host-visible memory is
+  device-usable before its first map: **(D)** alloc 1 MiB
+  host-visible → bind → `vkCmdFillBuffer` → fence → `vkMapMemory` →
+  verify — the fill lands on the device-chosen `DEVBACKED` extent and
+  the kernel's `RESOURCE_MAP_BLOB` relocates it to the guest offset,
+  contents carried; **(E)** alloc → bind → `vkUpdateDescriptorSets`
+  (UBO) → map → write → dispatch → readback — descriptor records
+  carry the memory *handle* `{gen,slot}` + resource offset, so they
+  stay valid across the relocation.  The negative runs under
+  `VN_PERF=no_async_mem_alloc` (set inside vkmem.c): Venus submits
+  `vkAllocateMemory` asynchronously and returns `VK_SUCCESS`
+  unconditionally, so a renderer-side OOM is only observable
+  synchronously with Mesa's documented no-async knob.
+- `vkimage vkimage.spv` → `G6LC_VKIMAGE_PASS words=64` — §12.3 C/5b +
+  3d-d: format-properties truthfulness (D32_SFLOAT zero features,
   R8G8B8A8_UNORM exactly the generated set), 4x4 RGBA8 upload via
   staging + `vkCmdCopyBufferToImage`, compute `textureLod` bilinear at
   fractional coords with CLAMP_TO_EDGE and REPEAT samplers writing an
   rgba32f storage image, `vkCmdCopyImageToBuffer` readback vs a CPU
   reference (abs tolerance 4/255), plus the D32_SFLOAT
-  `vkCreateImage` negative arm.  The readback buffer is mapped
-  *before* the submit: host-visible memory is lazy-backed (backing is
-  established only by MAP_BLOB at vkMapMemory), so a GPU copy into
-  still-unbacked memory is refused truthfully with DEVICE_LOST —
-  persistent mapping is the recommended real-world pattern anyway.
+  `vkCreateImage` negative arm.  The readback buffer is mapped in the
+  natural **map-after-fence** order — the bind backs the host-visible
+  memory on a `DEVBACKED` extent so the GPU copy lands before any
+  `vkMapMemory`, and the first map's `RESOURCE_MAP_BLOB` relocates
+  the extent to the kernel's offset with the contents carried (this
+  arm is the stock-guest proof of the 3d-d memory model).
 - `--venusoff` run: `vulkaninfo --summary` must show *no* Venus device
   (llvmpipe-only control).
 - The driver prints `GUEST-PASS` / `GUEST-FAIL` last; `run-guest.sh`

@@ -94,6 +94,27 @@ BI_WGID = 26
 BI_LID = 27
 BI_GID = 28
 BI_LINDEX = 29
+BI_FRONTFACING = 17
+BI_VERTEXINDEX = 42
+BI_INSTANCEINDEX = 43
+
+# graphics record layout (mirrors g6lc_apu_sh_pkg)
+SC_OUTPUT = SC['OUTPUT']
+VARY_LOCS = 8
+# VS-in records carry a ninth slot (8) = {VertexIndex, InstanceIndex,
+# 0, 0}; FS-out records share the stride
+ATTR_STRIDE = 16 * (1 + VARY_LOCS)
+VARY_STRIDE = 16 * (1 + VARY_LOCS)
+VF_REC = 0x1
+VF_DROP = 0x2
+# graphics stage codes mirror APU_SH_GFX_* (0 = compute dispatch) —
+# the SPIR-V execution model (0=Vertex) cannot double as the "is gfx"
+# flag, so the .hex stage word is remapped
+GFX_NONE = 0
+GFX_VS = 1
+GFX_FS = 2
+EM2GFX = {spirv_scan.EM['VERTEX']: GFX_VS,
+          spirv_scan.EM['FRAGMENT']: GFX_FS}
 
 QNAN = 0x7FC00000
 
@@ -359,7 +380,8 @@ def u32(x):
 
 # descriptor-kind legality per opcode (f_tx_kind): 0 SAMPLER,
 # 1 COMBINED_IMAGE_SAMPLER, 2 SAMPLED_IMAGE, 3 STORAGE_IMAGE
-IMG_KIND_OK = {95: (1, 2), 88: (1, 2), 98: (2, 3), 99: (3,),
+IMG_KIND_OK = {95: (1, 2), 87: (1, 2), 88: (1, 2), 98: (2, 3),
+               99: (3,),
                103: (0, 1, 2, 3), 104: (0, 1, 2, 3), 106: (0, 1, 2, 3)}
 
 
@@ -514,6 +536,21 @@ class Model:
             for i in range(sz // 4):
                 self.mem[(ad >> 2) + i] = words[p + i]
             p += sz // 4
+        # G1a graphics wave work (flags bit2): {stage, count, in_base,
+        # out_base, vbase, inst, n_in} + the input-record image; the
+        # stage word is a SPIR-V execution model, remapped to the
+        # APU_SH_GFX_* code (0=Vertex cannot be a truthy flag)
+        self.gfx = GFX_NONE
+        self.gcnt = self.vbase = self.inst = 0
+        self.in_base = self.out_base = 0
+        if self.flags & 4:
+            (stage, self.gcnt, self.in_base, self.out_base,
+             self.vbase, self.inst, nin) = words[p:p + 7]
+            self.gfx = EM2GFX.get(stage, GFX_NONE)
+            p += 7
+            for i in range(nin):
+                self.mem[(self.in_base >> 2) + i] = words[p + i]
+            p += nin
         # memory-resident descriptor model: binding rows (per-set
         # element cursor in 32B record units) + the records themselves.
         self.drows = {}                        # (set,bd) -> row dict
@@ -562,6 +599,7 @@ class Model:
         self.cur_lbl = 0          # label id of the current block
         self.prev_lbl = 0         # label id this block was entered from
         self.l0_idx = {}          # (pc, id) -> lane-0 chain index value
+        self.dvals = {}           # (pc, id) -> {inv: operand value} G2b
         self.nswitch = 0          # barrier/wave interleave counter (info)
 
     # -- memory --------------------------------------------------------
@@ -689,8 +727,10 @@ class Model:
         """the whole W_TX* sequence for one invocation; returns the
         next pc or 'ret' (on a device-lost fault)."""
         nxt = pc + wc
-        # W_TX0 operand-mask legality (only Lod 0x2 is decoded)
+        # W_TX0 operand-mask legality (only Lod 0x2 is decoded); 87
+        # takes no image operands in v1 (Bias rides the sampler record)
         if (opc == 95 and wc > 6 and (ops[4] & ~0x2) != 0) or \
+           (opc == 87 and wc > 5 and ops[4] != 0) or \
            (opc == 88 and (wc < 7 or (ops[4] & ~0x2) != 0 or
                            not (ops[4] & 0x2))) or \
            (opc == 98 and wc > 5 and ops[4] != 0) or \
@@ -706,7 +746,7 @@ class Model:
             self.fault = 'IMGKIND'
             return 'ret'
         smp = 0
-        if opc == 88 and valid:
+        if opc in (87, 88) and valid:
             if va[0][1] & 0x80000000:
                 # merged OpSampledImage: fetch the SAMPLER record
                 sk = va[0][0]
@@ -799,7 +839,7 @@ class Model:
             return self.tx_finish(pts, ta, meta, rec, bcol,
                                   isint, isflt, issr, swz,
                                   rid, ncomp, wb, nxt, lvl)
-        # ---- OpImageSampleExplicitLod (88) ---------------------------
+        # ---- OpImageSample{Implicit,Explicit}Lod (87/88) --------------
         addrU = (smp >> 5) & 7
         addrV = (smp >> 8) & 7
         lin0 = ((smp >> 2) & 3) != 0              # min filter
@@ -807,7 +847,11 @@ class Model:
         min44 = (smp >> 32) & 0xFF
         max44 = (smp >> 40) & 0xFF
         bias = (smp >> 48) & 0xFF
-        le = s32(f2i(ffma(va[2][0], 0x41800000, 0), False, 'RNE'))
+        if opc == 87:
+            lod_in = self.ilod(pc, ops[3], meta['w'], meta['h'])
+        else:
+            lod_in = va[2][0]
+        le = s32(f2i(ffma(lod_in, 0x41800000, 0), False, 'RNE'))
         le += -bias if (smp >> 56) & 1 else bias
         le = min(max(le, min44), max44)
         le = max(le, 0)
@@ -1033,6 +1077,15 @@ class Model:
                 lz if c == 2 else 0
         if bi == BI_LINDEX:
             return inv if c == 0 else 0
+        # graphics builtins — inv enumerates records (wave*LAN + lane)
+        if bi == BI_VERTEXINDEX:
+            return u32(self.vbase + inv) if c == 0 else 0
+        if bi == BI_INSTANCEINDEX:
+            return self.inst if c == 0 else 0
+        if bi == BI_FRONTFACING:
+            # G2b: FS waves carry the primitive's front-facing bit in
+            # the work record's vbase field (imm[3].0)
+            return (self.vbase & 1) if c == 0 else 0
         return 0
 
     # -- LSU -----------------------------------------------------------
@@ -1045,9 +1098,44 @@ class Model:
         bi = (ptr_tag >> 4) & 0xFF
         st = (ptr_tag >> 12) & 0xFF
         bd = (ptr_tag >> 20) & 0xFF
+        fl = (ptr_tag >> 28) & 0xF
+        if fl == VF_DROP:
+            # dropped variable/member (PointSize/Clip/CullDistance):
+            # stores ignored, loads read zero
+            return None if is_store else 0
+        if (fl == VF_REC and self.gfx and
+                sc in (SC_INPUT, SC_OUTPUT)):
+            # record access: base + inv*stride + off, bounded by the
+            # batch extent count*stride (W_LSC mirror)
+            if sc == SC_INPUT:
+                base = self.in_base
+                stride = ATTR_STRIDE if self.gfx == GFX_VS \
+                    else VARY_STRIDE
+            else:
+                base = self.out_base
+                stride = VARY_STRIDE if self.gfx == GFX_VS \
+                    else ATTR_STRIDE
+            aoff = u32(self.inv * stride + o32)
+            if aoff + 4 > self.gcnt * stride:
+                self.robust += 1
+                return 0 if not is_store else None
+            if is_store:
+                self.mwrite(u32(base + aoff), val, cls)
+                return None
+            return self.mread(u32(base + aoff))
         if sc == SC_INPUT:
             if is_store:
                 return None                    # stores to input: nothing
+            if self.gfx == GFX_VS and \
+                    bi in (BI_VERTEXINDEX, BI_INSTANCEINDEX):
+                # G2a: the record's slot 8 is the source of truth —
+                # {VertexIndex, InstanceIndex, 0, 0} at +128
+                aoff = u32(self.inv * ATTR_STRIDE + 128 +
+                           (4 if bi == BI_INSTANCEINDEX else 0))
+                if aoff + 4 > self.gcnt * ATTR_STRIDE:
+                    self.robust += 1
+                    return 0
+                return self.mread(u32(self.in_base + aoff))
             return self.builtin(bi, o32 >> 2)
         if sc == SC_PUSHCONST:
             if (o32 >> 2) >= self.np:
@@ -1159,6 +1247,92 @@ class Model:
         for c in range(min(ncomp, 4)):
             dst[c] = vec[c] & 0xFFFFFFFF
 
+    # -- quad-lane operand values (G2b derivatives) -----------------------
+    # The model steps graphics invocations one instruction at a time in
+    # lane order, so at a derivative op the lanes after the current one
+    # still hold their at-pc registers and the earlier lanes' values are
+    # replayed from dvals[(pc, id)][inv], recorded as each lane passed
+    # the instruction.  Uniform control flow makes the two views agree;
+    # divergent derivatives are UB in SPIR-V anyway.
+    def regv_for(self, iid, inv):
+        """regv() of another (still-live) invocation's rf."""
+        r = self.sc.regmap.get(iid)
+        if r is None:
+            return [0, 0, 0, 0]
+        tag, idx, tid, aux = r
+        if tag == 1:
+            cw = self.sc.consts.get(iid, [0])
+            return [cw[c] if c < len(cw) else cw[0] for c in range(4)]
+        return list(self.ivs[inv]['rf'][idx])
+
+    def dpeer(self, pc, iid, inv):
+        """operand iid's value as invocation inv sees it at pc."""
+        if inv >= len(self.ivs):
+            return [0, 0, 0, 0]             # inactive lane reads 0
+        got = self.dvals.get((pc, iid), {})
+        if inv in got:
+            return got[inv]
+        if self.ivs[inv]['done']:
+            return [0, 0, 0, 0]
+        return self.regv_for(iid, inv)
+
+    def deriv(self, pc, opc, iid):
+        """OpDPdx/DPdy/Fwidth{,Fine,Coarse}: quads are lanes {4k..4k+3}
+        of a wave.  Fine: dx(l)=v[l|1]-v[l&~1], dy(l)=v[l|2]-v[l&~2];
+        coarse (and the non-suffixed forms) broadcast the quad's
+        lane-0-based pair dx=v[q+1]-v[q], dy=v[q+2]-v[q].
+        Fwidth = |dx| + |dy|."""
+        l = self.lane
+        q = l & ~3
+        base = self.wave * LAN
+        self.dvals.setdefault((pc, iid), {})[self.inv] = self.regv(iid)
+        v = [self.dpeer(pc, iid, base + s) for s in range(q, q + 4)]
+
+        def pair(sa, sb):
+            return [fsub(v[sa & 3][c], v[sb & 3][c]) for c in range(4)]
+
+        if opc in (207, 213):                 # DPdx / DPdxCoarse
+            dx = pair(q + 1, q)
+            return dx
+        if opc in (208, 214):                 # DPdy / DPdyCoarse
+            return pair(q + 2, q)
+        if opc == 210:                        # DPdxFine
+            return pair(l | 1, l & ~1)
+        if opc == 211:                        # DPdyFine
+            return pair(l | 2, l & ~2)
+        if opc == 212:                        # FwidthFine
+            dx, dy = pair(l | 1, l & ~1), pair(l | 2, l & ~2)
+        else:                                 # 209/215 Fwidth[Coarse]
+            dx, dy = pair(q + 1, q), pair(q + 2, q)
+        return [fadd(dx[c] & 0x7FFFFFFF, dy[c] & 0x7FFFFFFF)
+                for c in range(4)]
+
+    def ilod(self, pc, iid, w0, h0):
+        """OpImageSampleImplicitLod λ for the current lane: quad-lane
+        fine derivatives of the texcoord scaled by mip-0 dims —
+        rho2 = max(dx2, dy2), lam = 0.5*log2(rho2).
+        log2 uses the RTL's linear-mantissa approximation
+        log2(x) = exp(x) + (mant(x) - 1) (max err ~0.086)."""
+        l = self.lane
+        q = l & ~3
+        base = self.wave * LAN
+        self.dvals.setdefault((pc, iid), {})[self.inv] = self.regv(iid)
+        v = [self.dpeer(pc, iid, base + s) for s in range(q, q + 4)]
+        li = l & 3
+        wf = i2f(w0, True)
+        hf = i2f(h0, True)
+        ax = fmul(fsub(v[li | 1][0], v[li & ~1][0]), wf)
+        bx = fmul(fsub(v[li | 1][1], v[li & ~1][1]), hf)
+        ay = fmul(fsub(v[li | 2][0], v[li & ~2][0]), wf)
+        by = fmul(fsub(v[li | 2][1], v[li & ~2][1]), hf)
+        dx2 = ffma(bx, bx, fmul(ax, ax))
+        dy2 = ffma(by, by, fmul(ay, ay))
+        rho2 = fp_minmax(dx2, dy2, True)
+        e = fadd(i2f((rho2 >> 23) & 0xFF, True), 0xC2FE0000)
+        mant = 0x3F800000 | (rho2 & 0x7FFFFF)
+        l0 = ffma(mant, 0x3F800000, e)
+        return fmul(fsub(l0, 0x3F800000), 0x3F000000)
+
     # -- per-lane value for a chain index operand -------------------------
     def idxval(self, iid):
         """chain index word0 of the current invocation."""
@@ -1215,6 +1389,8 @@ class Model:
                     off = u32(off + m['offset'])
                     cmstride = m['mstride']
                     cty = m['type']
+                    if m['flags'] & 0x40:      # MF_DROP (W_CHM1)
+                        tag = (tag & 0x0FFFFFFF) | (VF_DROP << 28)
                 continue
             if k in (TK['ARRAY'], TK['RARRAY']):
                 st_ = t['stride'] if t['stride'] else \
@@ -1410,7 +1586,7 @@ class Model:
         def opid(k):
             if opc in (62, 99):               # Store / ImageWrite: no rty
                 return ops[k] if k < len(ops) else 0
-            if opc in (95, 88):               # operand mask word at [4]
+            if opc in (95, 87, 88):           # operand mask word at [4]
                 if k == 0:
                     return ops[2]
                 if k == 1:
@@ -1474,8 +1650,11 @@ class Model:
                 wb = [0, va[0][1] & 0x7FFFFFFF, va[0][2], 0]
             self.setres(rid, wb, 4)
             return pc + wc
-        if opc in (88, 95, 98, 99, 103, 104, 106):
+        if opc in (87, 88, 95, 98, 99, 103, 104, 106):
             return self.img_op(pc, opc, wc, ops, va, rty, rid, ncomp)
+        if opc in (207, 208, 209, 210, 211, 212, 213, 214, 215):
+            self.setres(rid, self.deriv(pc, opc, ops[2]), ncomp)
+            return pc + wc
         if opc == 61:                         # Load
             tk = self.sc.types.get(rty, {}).get('kind')
             if tk in (TK['IMG'], TK['SAMP'], TK['SIMG']):
@@ -1687,7 +1866,7 @@ class Model:
                         177, 178, 179, 194, 195, 196, 197, 198, 199,
                         200))
     HAS_RTY = frozenset((12, 61, 65, 66, 68, 79, 80, 81, 82, 84, 86,
-                         88, 95, 98, 100, 103, 104, 106,
+                         87, 88, 95, 98, 100, 103, 104, 106,
                          109, 110, 111, 112, 124, 126, 127, 128, 129,
                          130, 131, 132, 133, 134, 135, 136, 137, 138,
                          139, 142, 143, 144, 145, 146, 147,
@@ -1695,6 +1874,7 @@ class Model:
                          172, 173, 174, 175, 176, 177, 178, 179, 180,
                          181, 182, 183, 184, 185, 186, 187, 188, 189,
                          190, 191, 194, 195, 196, 197, 198, 199, 200,
+                         207, 208, 209, 210, 211, 212, 213, 214, 215,
                          245))
 
     @staticmethod
@@ -1714,7 +1894,7 @@ class Model:
             return 3                          # img, coord, texel
         if opc == 95:
             return 3 if wc > 6 else 2         # img, coord[, lod]
-        if opc in (88, 103):
+        if opc in (87, 88, 103):
             return 3 if opc == 88 else 2
         if opc in (61, 65, 66, 68, 81, 84, 109, 110, 111, 112, 124, 126,
                    127, 168, 200):
@@ -1812,15 +1992,17 @@ class Model:
     def inv_init(self):
         """fresh per-invocation state dict."""
         rf = [[0, 0, 0, 0] for _ in range(self.sc.n_regs)]
-        for (idx, sc, bi, st, bd, off) in self.sc.init:
-            tag = (bd << 20) | (st << 12) | (bi << 4) | sc
+        for (idx, sc, bi, st, bd, off, fl) in self.sc.init:
+            tag = (fl << 28) | (bd << 20) | (st << 12) | (bi << 4) | sc
             rf[idx] = [off, tag, 0, 0]
         return dict(rf=rf, scratch=[0] * self.sc_w,
                     pc=self.sc.entry_off, cur_lbl=0, prev_lbl=0,
                     done=False, bwait=False, steps=0)
 
-    def run_inv(self, i):
-        """run invocation i until it ends or waits at a barrier."""
+    def run_inv(self, i, single=False):
+        """run invocation i until it ends or waits at a barrier; with
+        single=True it executes exactly one instruction (the graphics
+        lockstep that makes quad-lane derivative values visible)."""
         s = self.ivs[i]
         self.wave, self.lane = i // LAN, i % LAN
         self.inv = i
@@ -1838,17 +2020,21 @@ class Model:
                 s['done'] = True
                 break
             s['pc'] = npc
+            if single:
+                break
         s['cur_lbl'], s['prev_lbl'] = self.cur_lbl, self.prev_lbl
 
     def run(self):
         """whole dispatch: workgroups x-fastest (W_EOW order); within a
         workgroup the invocations run in barrier-separated phases —
         each invocation independently to its next OpControlBarrier
-        or to termination, finished invocations counting as arrived."""
-        ninv = self.lx * self.ly * self.lz
-        for wgz in range(self.gz):
-            for wgy in range(self.gy):
-                for wgx in range(self.gx):
+        or to termination, finished invocations counting as arrived.
+        Graphics wave work runs a single batch of `gcnt` records (one
+        "workgroup" — lanes enumerate record indices)."""
+        ninv = self.gcnt if self.gfx else self.lx * self.ly * self.lz
+        for wgz in range(1 if self.gfx else self.gz):
+            for wgy in range(1 if self.gfx else self.gy):
+                for wgx in range(1 if self.gfx else self.gx):
                     self.wg = (wgx, wgy, wgz)
                     self.slab = [0] * self.slb_w
                     self.l0_idx = {}
@@ -1868,7 +2054,10 @@ class Model:
                             self.nswitch += 1
                         for i in live:
                             if not self.ivs[i]['bwait']:
-                                self.run_inv(i)
+                                # graphics waves step one instruction
+                                # per round (lane order) so derivative
+                                # ops see every quad lane's at-pc value
+                                self.run_inv(i, bool(self.gfx))
                         phases += 1
                         if phases > 4096:
                             break
@@ -1893,6 +2082,18 @@ class Model:
                 out[i] = [self.wclass.get((ad >> 2) + k, 'i')
                           for k in range(sz // 4)]
         return out
+
+    def gfx_outputs(self):
+        """graphics wave work: (words, classes) over the output-record
+        extent — count records of out_stride bytes at out_base."""
+        if not self.gfx:
+            return [], []
+        stride = VARY_STRIDE if self.gfx == GFX_VS else ATTR_STRIDE
+        n = self.gcnt * stride // 4
+        return ([self.mem.get((self.out_base >> 2) + k, 0)
+                 for k in range(n)],
+                [self.wclass.get((self.out_base >> 2) + k, 'i')
+                 for k in range(n)])
 
 
 def load_hex(path):

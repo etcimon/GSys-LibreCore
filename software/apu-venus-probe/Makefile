@@ -19,7 +19,13 @@ CFLAGS  := -march=rv64imac_zicsr_zifencei -mabi=lp64 -mcmodel=medany \
            -fno-stack-protector
 LDFLAGS := -nostdlib -T link.ld
 
-TAPES := ue_sm5_transport ue_cpos_bufcopy_1
+# ue_probe_bufcopy_1: identical tape to ue_cpos_bufcopy_1, .exp carries
+# the ObjTab generations a two-session run actually sees (slot reuse
+# bumps gen; vgtop/vgsys run each session on a fresh DUT so the
+# standalone file keeps gen 1).  Regenerate with:
+#   python3 corev_apu/apu/tools/vn_golden.py --probe-sessions \
+#       ue_sm5_transport ue_probe_bufcopy_1 bufcopy_1
+TAPES := ue_sm5_transport ue_probe_bufcopy_1
 
 all: venus_probe.hex
 

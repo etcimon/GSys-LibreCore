@@ -408,7 +408,7 @@ export async function runSuite(
       `regress engine: ${resolveRegressEngine()} (set G6LC_REGRESS_ENGINE=wsl|git-bash to override)`,
     );
   }
-  const result = await runRegressScript(scriptPath, [], {
+  const result = await runRegressScript(scriptPath, suite.args ?? [], {
     cwd: repoRoot,
     env,
     logger,

@@ -9,6 +9,11 @@
 //   ALLOC(bytes)      -> {OK, base}    first-fit run of ceil(bytes/
 //                                      PageBytes) pages, marked busy
 //                   -> {FULL, 0}      no run fits
+//   ALLOC_HI(bytes,   -> {OK, base}    §12.3 3d-d: same, but top-down
+//     excl_lo,excl_hi)                  inside the guest window — the
+//                                       highest-address fit — treating
+//                                       the exclusion pages as busy
+//                   -> {FULL, 0}      no fit outside the exclusion
 //   ALLOC_AT(base,bytes) -> {OK,base} caller-chosen extent (kernel
 //                                     drm_mm): marks every page the
 //                                     byte range covers (4 KiB-class
@@ -127,19 +132,36 @@ module g6lc_apu_vgpages
         if (32'(i) + n <= 64 && g[i]) return 7'(i);
       return 7'd64;
     endfunction
+    // §12.3 3d-d: highest word-local window for ALLOC_HI — same
+    // accumulate as first_run but returning the largest index.
+    function automatic logic [6:0] last_run(
+        input logic [63:0] w, input logic [31:0] n);
+      logic [63:0] f, g;
+      f = ~w;
+      g = f;
+      for (int k = 1; k < 64; k++)
+        if (k < n) g &= f >> k;
+      for (int i = 63; i >= 0; i--)
+        if (32'(i) + n <= 64 && g[i]) return 7'(i);
+      return 7'd64;
+    endfunction
     // bits of word m covered by the page extent [f0, f1]
     function automatic logic [63:0] ext_mask(
         input logic [WBits-1:0] m,
         input logic [31:0]      f0,
         input logic [31:0]      f1);
       logic [31:0] lo, hi;
+      // a word entirely outside the extent contributes nothing —
+      // required because the ALLOC_HI exclusion mask applies this to
+      // every scanned word, not just words the extent intersects
+      if (32'(m) * 64 > f1 || 32'(m) * 64 + 63 < f0) return '0;
       lo = (32'(m) * 64 >= f0) ? 32'h0 : f0 - 32'(m) * 64;
       hi = (32'(m) * 64 + 63 <= f1) ? 32'd63 : f1 - 32'(m) * 64;
       if (lo == 0 && hi == 63) return '1;
       return ((64'h1 << (hi - lo + 1)) - 64'h1) << lo;
     endfunction
 
-    typedef enum logic [2:0] {
+    typedef enum logic [3:0] {
       StIdle,   // request accept / dispatch
       StScan,   // ALLOC first-fit: summary consult or read issue
       StScanW,  // process the mixed word read in StScan
@@ -147,7 +169,10 @@ module g6lc_apu_vgpages
       StChkW,   // test the read word against the extent mask
       StMark,   // mark/unmark: write direct or issue a word read
       StMarkW,  // complete a read-modify-write
-      StCpl
+      StCpl,
+      // §12.3 3d-d: ALLOC_HI top-down scan — same two-state shape as
+      // StScan/StScanW but descending and exclusion-masked
+      StScanH, StScanHW
     } state_e;
 
     state_e            state_q;
@@ -162,6 +187,9 @@ module g6lc_apu_vgpages
     logic [31:0]       run_s_q;  // open free-run start page
     logic [31:0]       f0_q, f1_q;  // page extent being marked/checked
     logic [31:0]       res_q;    // ALLOC result (byte offset)
+    // §12.3 3d-d: ALLOC_HI exclusion in page space ([ep0_q, ep1_q]);
+    // ep0_q > ep1_q marks "no exclusion"
+    logic [31:0]       ep0_q, ep1_q;
     // last word read from / written to the map (edge-word RMW cache)
     logic [63:0]       word_q;
     logic [WBits-1:0]  word_i_q;
@@ -187,6 +215,12 @@ module g6lc_apu_vgpages
     assign cpl_valid_o = state_q == StCpl;
     assign cpl_o       = cpl_q;
 
+    // §12.3 3d-d: exclusion mask over word widx_q for ALLOC_HI —
+    // exclusion pages scan as busy, which is exactly "skip every
+    // candidate overlapping [excl_lo, excl_hi)" at page granularity.
+    wire [63:0] xh_mask = ep0_q <= ep1_q ? ext_mask(widx_q, ep0_q, ep1_q)
+                                        : 64'h0;
+
     // mask the mark pass applies to word widx_q
     wire [63:0] mk_mask = ext_mask(widx_q, f0_q, f1_q);
     // word content known without a read: just-touched cache, or a
@@ -207,6 +241,7 @@ module g6lc_apu_vgpages
       map_wdata = mk_wdat;
       unique case (state_q)
         StScan:  map_req = !(empty_q[widx_q] || full_q[widx_q]);
+        StScanH: map_req = !(empty_q[widx_q] || full_q[widx_q]);
         StChk:   map_req = !(empty_q[widx_q] || full_q[widx_q]);
         // write direct when the new content is already known, else
         // issue the read half of the read-modify-write
@@ -232,6 +267,7 @@ module g6lc_apu_vgpages
         clr_q <= '0;
         run_q <= '0; run_s_q <= '0;
         f0_q <= '0; f1_q <= '0; res_q <= '0;
+        ep0_q <= '1; ep1_q <= '0;
         word_q <= '0; word_i_q <= '0; word_v_q <= '0;
         used_q <= '0;
       end else begin
@@ -240,7 +276,8 @@ module g6lc_apu_vgpages
         // ---------------- request accept / dispatch ----------------
         StIdle: if (req_valid_i) begin
           unique case (req_i.op)
-            APU_VGPAGES_OP_ALLOC, APU_VGPAGES_OP_ALLOC_PRIV: begin
+            APU_VGPAGES_OP_ALLOC, APU_VGPAGES_OP_ALLOC_PRIV,
+            APU_VGPAGES_OP_ALLOC_HI: begin
               if (req_i.bytes == 32'h0) begin
                 cpl_q   <= '{status: APU_VGPAGES_OK, base: '0};
                 state_q <= StCpl;
@@ -249,6 +286,20 @@ module g6lc_apu_vgpages
                             ? 32'(PrivPages) : 32'(GuestPages))) begin
                 cpl_q   <= '{status: APU_VGPAGES_FULL, base: '0};
                 state_q <= StCpl;
+              end else if (req_i.op == APU_VGPAGES_OP_ALLOC_HI) begin
+                // §12.3 3d-d: top-down scan of the guest window; the
+                // exclusion folds into the scan as busy pages
+                npg_q   <= pages_of(req_i.bytes);
+                clr_q   <= 1'b0;
+                widx_q  <= WBits'(GuestWords - 1);
+                wend_q  <= '0;
+                run_q   <= '0;
+                run_s_q <= '0;
+                ep0_q   <= req_i.base < req_i.excl_hi
+                           ? req_i.base / PageBytes : 32'hFFFF_FFFF;
+                ep1_q   <= req_i.base < req_i.excl_hi
+                           ? (req_i.excl_hi - 32'h1) / PageBytes : '0;
+                state_q <= StScanH;
               end else begin
                 npg_q   <= pages_of(req_i.bytes);
                 clr_q   <= 1'b0;
@@ -415,6 +466,93 @@ module g6lc_apu_vgpages
                 widx_q <= widx_q + 1'b1;
                 state_q <= StScan;
               end
+            end
+          end
+        end
+
+        // ---------------- §12.3 3d-d: ALLOC_HI top-down scan ---------
+        // Descends the guest window one word per cycle; run_q counts
+        // the free pages contiguous from page (widx+1)*64 upward —
+        // the part of the current free segment already scanned.
+        // Exclusion pages fold into the busy view via xh_mask, so a
+        // run can never straddle [excl_lo, excl_hi).  A fit lands at
+        // the top of the highest reachable run — the highest-address
+        // placement — then shares the StMark machinery.
+        StScanH: begin
+          automatic logic [63:0] w = empty_q[widx_q] ? xh_mask :
+              full_q[widx_q] ? 64'hFFFF_FFFF_FFFF_FFFF : 64'h0;
+          automatic logic [6:0]  cl = clz64(w);
+          automatic logic [6:0]  lr = last_run(w, npg_q);
+          if (!empty_q[widx_q] && !full_q[widx_q]) begin
+            // mixed word: read and resolve in StScanHW
+            word_i_q <= widx_q;
+            state_q  <= StScanHW;
+          end else if (32'(cl) + run_q >= npg_q) begin
+            // free region [64w+64-clz, 64w+64+run): extent at its top
+            f0_q    <= 32'(widx_q) * 64 + 63 + run_q - (npg_q - 1);
+            f1_q    <= 32'(widx_q) * 64 + 63 + run_q;
+            res_q   <= (32'(widx_q) * 64 + 63 + run_q - (npg_q - 1)) *
+                       PageBytes;
+            widx_q  <= WBits'((32'(widx_q) * 64 + 63 + run_q -
+                               (npg_q - 1)) >> 6);
+            wend_q  <= WBits'((32'(widx_q) * 64 + 63 + run_q) >> 6);
+            state_q <= StMark;
+          end else if (lr != 7'd64) begin
+            // highest in-word window below the top busy/excluded bit
+            f0_q    <= 32'(widx_q) * 64 + 32'(lr);
+            f1_q    <= 32'(widx_q) * 64 + 32'(lr) + npg_q - 1;
+            res_q   <= (32'(widx_q) * 64 + 32'(lr)) * PageBytes;
+            widx_q  <= WBits'((32'(widx_q) * 64 + 32'(lr)) >> 6);
+            wend_q  <= WBits'((32'(widx_q) * 64 + 32'(lr) + npg_q - 1)
+                              >> 6);
+            state_q <= StMark;
+          end else begin
+            // carry the free bottom of this word into the next one
+            run_q <= cl == 7'd64 ? run_q + 32'd64 : 32'(ctz64(w));
+            if (widx_q == '0) begin
+              cpl_q   <= '{status: APU_VGPAGES_FULL, base: '0};
+              state_q <= StCpl;
+            end else begin
+              widx_q <= widx_q - 1'b1;
+            end
+          end
+        end
+
+        StScanHW: begin
+          // map_rdata = busy bits of word widx_q (word_i_q); xh_mask
+          // merges the exclusion in for the fit logic only — the
+          // cached word stays the real bitmap so a later mark RMW
+          // cannot write exclusion bits into the map
+          automatic logic [63:0] w = map_rdata | xh_mask;
+          automatic logic [6:0]  cl = clz64(w);
+          automatic logic [6:0]  lr = last_run(w, npg_q);
+          word_q   <= map_rdata;
+          word_v_q <= 1'b1;
+          if (32'(cl) + run_q >= npg_q) begin
+            f0_q    <= 32'(widx_q) * 64 + 63 + run_q - (npg_q - 1);
+            f1_q    <= 32'(widx_q) * 64 + 63 + run_q;
+            res_q   <= (32'(widx_q) * 64 + 63 + run_q - (npg_q - 1)) *
+                       PageBytes;
+            widx_q  <= WBits'((32'(widx_q) * 64 + 63 + run_q -
+                               (npg_q - 1)) >> 6);
+            wend_q  <= WBits'((32'(widx_q) * 64 + 63 + run_q) >> 6);
+            state_q <= StMark;
+          end else if (lr != 7'd64) begin
+            f0_q    <= 32'(widx_q) * 64 + 32'(lr);
+            f1_q    <= 32'(widx_q) * 64 + 32'(lr) + npg_q - 1;
+            res_q   <= (32'(widx_q) * 64 + 32'(lr)) * PageBytes;
+            widx_q  <= WBits'((32'(widx_q) * 64 + 32'(lr)) >> 6);
+            wend_q  <= WBits'((32'(widx_q) * 64 + 32'(lr) + npg_q - 1)
+                              >> 6);
+            state_q <= StMark;
+          end else begin
+            run_q <= cl == 7'd64 ? run_q + 32'd64 : 32'(ctz64(w));
+            if (widx_q == '0) begin
+              cpl_q   <= '{status: APU_VGPAGES_FULL, base: '0};
+              state_q <= StCpl;
+            end else begin
+              widx_q <= widx_q - 1'b1;
+              state_q <= StScanH;
             end
           end
         end

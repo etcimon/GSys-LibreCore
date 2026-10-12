@@ -183,3 +183,18 @@ Before calling a class landed:
 
 If `doctor` cannot reach `ovh_calltorch`, **stop and report**. Do not substitute a
 local Variane soak as the recorded result.
+
+---
+
+## 9. Isolated leaves (not MT evidence; same builder, same pins)
+
+`l2-leaf` / `l2-equiv` and, since 2026-10-11, `apu-leaf <repo> --stages …` /
+`apu-leaf-collect <tag>` never touch `repo/` or `work/`: each run pushes its own
+source closure to `runs/<tag>/source`, checks it with `sha256sum -c`, runs with the
+pinned `toolchains/verilator-v5.008` / `toolchains/formal/bin/yosys` / xpack gcc, and
+pulls logs plus a `leaf-result.json` (`strictQualification: false`). `apu-leaf`
+launches `verif/tb/apu/run-apu-regress.sh` detached (`setsid nohup`, `pid/start/end/rc`
+markers) and polls, so an SSH drop never ends the job; the verdict is `incomplete`
+whenever the local, pre-run and post-run source identities differ. The leaf does not
+apply the Variane overlap guard — it runs no `Variane_testharness` — so keep its load
+in mind when MT soaks are active, and never kill a foreign job to make room.

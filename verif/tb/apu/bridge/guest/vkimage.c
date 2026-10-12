@@ -13,10 +13,12 @@
 // image with a float colour, CopyImageToBuffer of mip 1, exact
 // UNORM8 round-to-nearest compare.
 //
-// Also checks format-properties truthfulness: D32_SFLOAT must report
-// zero features and R8G8B8A8_UNORM exactly the generated table's set
-// (SAMPLED_IMAGE | FILTER_LINEAR | STORAGE_IMAGE | TRANSFER_SRC |
-// TRANSFER_DST), and a vkCreateImage with a depth format must fail.
+// Also checks format-properties truthfulness: D32_SFLOAT reports
+// exactly the generated table's set (DEPTH_STENCIL_ATTACHMENT |
+// TRANSFER_SRC | TRANSFER_DST — G2a added depth attachments), and
+// R8G8B8A8_UNORM exactly its set (SAMPLED_IMAGE | FILTER_LINEAR |
+// STORAGE_IMAGE | TRANSFER_SRC | TRANSFER_DST); a vkCreateImage with
+// the still-unsupported D24_UNORM_S8_UINT must fail.
 //
 //   gcc -O2 -o vkimage vkimage.c -lvulkan && ./vkimage vkimage.spv
 //
@@ -111,9 +113,14 @@ int main(int argc, char **argv)
     vkGetPhysicalDeviceFormatProperties(pdev, VK_FORMAT_D32_SFLOAT, &fp);
     printf("D32_SFLOAT features %x %x %x\n", fp.linearTilingFeatures,
            fp.optimalTilingFeatures, fp.bufferFeatures);
-    if (fp.linearTilingFeatures || fp.optimalTilingFeatures ||
+    const VkFormatFeatureFlags want_d32 =
+        VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT |
+        VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
+        VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    if (fp.linearTilingFeatures != want_d32 ||
+        fp.optimalTilingFeatures != want_d32 ||
         fp.bufferFeatures) {
-        printf("FAIL: D32_SFLOAT advertises features\n");
+        printf("FAIL: D32_SFLOAT features != %x\n", want_d32);
         return 1;
     }
     vkGetPhysicalDeviceFormatProperties(pdev, VK_FORMAT_R8G8B8A8_UNORM,
@@ -171,18 +178,19 @@ int main(int argc, char **argv)
     ic.usage = VK_IMAGE_USAGE_STORAGE_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
     chk(vkCreateImage(dev, &ic, NULL, &dst_img), "create dst");
 
-    /* negative arm: depth format must be refused */
-    ic.format = VK_FORMAT_D32_SFLOAT;
+    /* negative arm: D24_UNORM_S8_UINT is outside the format table
+       (G2a added D32/D16 depth only) and must be refused */
+    ic.format = VK_FORMAT_D24_UNORM_S8_UINT;
     ic.extent = (VkExtent3D){4, 4, 1};
     ic.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
     VkImage bad_img;
     VkResult br = vkCreateImage(dev, &ic, NULL, &bad_img);
     if (br == VK_SUCCESS) {
-        printf("FAIL: D32_SFLOAT vkCreateImage succeeded\n");
+        printf("FAIL: D24_UNORM_S8_UINT vkCreateImage succeeded\n");
         vkDestroyImage(dev, bad_img, NULL);
         return 1;
     }
-    printf("neg: D32_SFLOAT vkCreateImage -> %d (expected failure)\n",
+    printf("neg: D24_UNORM_S8_UINT vkCreateImage -> %d (expected failure)\n",
            (int)br);
 
     VkDeviceMemory tex_mem, dst_mem;
@@ -296,14 +304,11 @@ int main(int argc, char **argv)
         mai.memoryTypeIndex = __builtin_ctz(mr.memoryTypeBits);
     chk(vkAllocateMemory(dev, &mai, NULL, &rb_mem), "rb mem");
     chk(vkBindBufferMemory(dev, rb_buf, rb_mem, 0), "rb bind");
-    /* Persistently map the readback buffer before it becomes a copy
-       destination: host-visible memory is lazy-backed, so the MAP_BLOB
-       that establishes its backing only happens at vkMapMemory — a GPU
-       write into still-unbacked memory is refused truthfully by the
-       device.  Persistent mapping is the recommended pattern anyway. */
-    void *rb_map;
-    chk(vkMapMemory(dev, rb_mem, 0, bci.size, 0, &rb_map),
-        "map rb early");
+    /* 3d-d: no early map — the natural map-after-fence order.  The
+       bind backs this host-visible memory on a device-chosen extent
+       (DEVBACKED) so the CopyImageToBuffer write lands before
+       vkMapMemory ever runs; the kernel's MAP_BLOB then relocates it
+       to the guest's offset, contents carried. */
 
     /* ---- descriptors ---------------------------------------------- */
     VkDescriptorSetLayoutBinding lb[3] = {
@@ -482,6 +487,11 @@ int main(int argc, char **argv)
     chk(vkQueueSubmit(q, 1, &si, fence), "submit");
     chk(vkWaitForFences(dev, 1, &fence, VK_TRUE, UINT64_MAX), "fence wait");
 
+    /* first vkMapMemory — Mesa sends RESOURCE_MAP_BLOB now; the
+       device relocates the extent it chose at bind time to the
+       kernel's offset, carrying the GPU-written contents */
+    void *rb_map;
+    chk(vkMapMemory(dev, rb_mem, 0, bci.size, 0, &rb_map), "map rb");
     float out[64];
     memcpy(out, rb_map, sizeof(out));
     uint8_t clr_rb[16];

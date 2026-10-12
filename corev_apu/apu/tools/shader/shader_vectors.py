@@ -712,6 +712,187 @@ def oracle_image(owords, mc, desc):
     return mfull if bad else owords
 
 
+# ---- G1a graphics wave work (Vertex/Fragment records) ----------------
+# A gfx vector carries no descriptor bindings: the dispatch record is
+# {count, in_base, out_base, vbase, inst} and the input/output images
+# are aperture-resident record batches (layout in g6lc_apu_sh_pkg).
+GFXIN = 0x40000        # input-record arena base (aperture byte addr)
+GFXOUT = 0x50000       # output-record arena base
+GFXBIND = 0x60000      # texture binding base (gfx vectors)
+GFX = {
+    # 8 vertices: pos@loc0, col@loc1 -> vcol(loc0) + gl_Position
+    'vs_passthru': dict(stage=0, count=8, vbase=3, inst=0),
+    # 16 fragments: FragCoord + vcol(loc0) -> o(loc0)
+    'fs_color':    dict(stage=4, count=16, vbase=0, inst=0),
+    # 16 fragments in 4 quads: linear loc-0 varyings exercise
+    # dFdx/dFdy/fwidth plus the Fine/Coarse forms (vbase.0 fronts)
+    'fs_deriv':    dict(stage=4, count=16, vbase=1, inst=0),
+    # 16 fragments: vcol.xy texcoords, a 2-mip texture and per-quad
+    # uv gradients that select mip 1 in quads 0/2 and mip 0 in 1/3
+    'fs_tex_implicit': dict(stage=4, count=16, vbase=1, inst=0,
+                           binds=[img_bind(0, 0,
+                                           dict(w=4, h=4, fmt=2,
+                                                mips=2),
+                                           kind=1,
+                                           smp=dict(mag=0, min=0,
+                                                    mm=0, au=2,
+                                                    av=2,
+                                                    maxl=2.0))]),
+}
+GFX_SEEDS = [1]
+
+
+def f2b_w(x):
+    return struct.unpack('<I', struct.pack('<f', x))[0]
+
+
+def gfx_inputs(name, g, seed):
+    """deterministic input records — one record per invocation,
+    fields at their record-layout offsets (attr/vary strides)."""
+    w = []
+    if name == 'fs_deriv':
+        # loc-0 varying linear inside every 2x2 quad so each lane's
+        # derivatives are exact: r -> dx .125, g -> dy .25,
+        # b -> dx .0625 + dy .125 (fwidth .1875),
+        # a -> dx .5 + dy .25 for the Fine/Coarse terms (q adds a
+        # per-quad base so the quads differ)
+        for i in range(g['count']):
+            lx, ly, q = i & 1, (i >> 1) & 1, i >> 2
+            rec = [0] * (spirv_model.VARY_STRIDE // 4)
+            rec[0] = f2b_w(i + 0.5)
+            rec[1] = f2b_w(0.5)
+            rec[2] = f2b_w(0.0)
+            rec[3] = f2b_w(1.0)
+            rec[4] = f2b_w(0.125 * lx + 0.5 * q + 0.03125)
+            rec[5] = f2b_w(0.25 * ly + 0.125 * q)
+            rec[6] = f2b_w(0.0625 * lx + 0.125 * ly)
+            rec[7] = f2b_w(0.5 * lx + 0.25 * ly + 0.03125 * q)
+            w += rec
+        return w
+    if name == 'fs_tex_implicit':
+        # vcol.xy texcoords: quad 0 dx-only 0.5 px^-1, quad 1 a mild
+        # 0.125, quad 2 dy-only 0.5, quad 3 mild in both — a 4x4
+        # mip-0 texture puts quads 0/2 at lambda=+1 (mip 1) and
+        # quads 1/3 at lambda=-1 (mip 0)
+        for i in range(g['count']):
+            lx, ly, q = i & 1, (i >> 1) & 1, i >> 2
+            du = (0.5, 0.125, 0.0, 0.0625)[q]
+            dv = (0.0, 0.0, 0.5, 0.125)[q]
+            rec = [0] * (spirv_model.VARY_STRIDE // 4)
+            rec[0] = f2b_w(i + 0.5)
+            rec[1] = f2b_w(0.5)
+            rec[2] = f2b_w(0.0)
+            rec[3] = f2b_w(1.0)
+            rec[4] = f2b_w(0.25 + lx * du)
+            rec[5] = f2b_w(0.25 + ly * dv + (0.25 if q == 2 else 0.0))
+            w += rec
+        return w
+    if g['stage'] == 0:
+        # VS input (ATTR_STRIDE 144 B): pos vec2 @loc0, col vec4 @loc1,
+        # slot 8 = {VertexIndex, InstanceIndex, 0, 0} (G2a — the
+        # builtin path reads it; vbase/inst stay in the vector header
+        # only for the compat f_bi path)
+        for i in range(g['count']):
+            rec = [0] * (spirv_model.ATTR_STRIDE // 4)
+            rec[0] = f2b_w(0.25 * i - 1.0)
+            rec[1] = f2b_w(1.0 - 0.125 * i)
+            rec[4] = f2b_w(0.0625 * i)
+            rec[5] = f2b_w(1.0 - 0.03125 * i)
+            rec[6] = f2b_w(0.25)
+            rec[7] = f2b_w(1.0)
+            rec[32] = g['vbase'] + i
+            rec[33] = g['inst']
+            w += rec
+    else:
+        # FS input (VARY_STRIDE 144 B): FragCoord @0, vcol @loc0(+16)
+        for i in range(g['count']):
+            rec = [0] * (spirv_model.VARY_STRIDE // 4)
+            rec[0] = f2b_w(i + 0.5)          # pixel-center x
+            rec[1] = f2b_w(0.5)
+            rec[2] = f2b_w(0.0)
+            rec[3] = f2b_w(1.0)
+            rec[4] = f2b_w(0.03125 * i)
+            rec[5] = f2b_w(0.5)
+            rec[6] = f2b_w(0.75 - 0.03125 * i)
+            rec[7] = f2b_w(1.0)
+            w += rec
+    return w
+
+
+def emit_gfx(name, seed, spv_words, g):
+    """graphics wave-work vector — the .hex appends a gfx section
+    (gated by flags bit2): {stage,count,in_base,out_base,vbase,inst,
+    n_in} + input-record words.  The .exp appends {n_out,out_base} +
+    model words + class words; no lavapipe oracle for VS/FS.
+    g['binds'] adds descriptor bindings + their data blocks before
+    the gfx section (same layout as the compute corpus)."""
+    base = os.path.join(OUT, '%s_%d' % (name, seed))
+    binds = g.get('binds', [])
+    in_words = gfx_inputs(name, g, seed)
+    hexw = [len(spv_words), len(binds), 0, 0, 0, 0, 4, 0]
+    hexw += spv_words
+    for i, b in enumerate(binds):
+        st, bd, w, o = b[:4]
+        ax = b[4] if len(b) > 4 else 0
+        hexw += [st, bd, w * 4, GFXBIND + i * 0x1000, ax]
+        if ax & (1 << 24):
+            hexw += img_meta(b[5], seed)
+    hexw += [0]                        # dynamic-offset section: empty
+    for i, b in enumerate(binds):
+        if len(b) > 5:
+            hexw += img_init(img_spec(b[5], seed), seed)
+        else:
+            hexw += [0] * b[2]
+    hexw += [g['stage'], g['count'], GFXIN, GFXOUT,
+             g['vbase'], g['inst'], len(in_words)]
+    hexw += in_words
+    hexw += SENT
+    open(base + '.hex', 'w').write('\n'.join(words_to_hex(hexw)) + '\n')
+
+    m = spirv_model.Model(list(hexw))
+    m.run()
+    ow, oc = m.gfx_outputs()
+    expw = [0, 0, m.robust, 1, 0]
+    expw += [len(ow), GFXOUT]
+    expw += ow
+    expw += [CLSMAP[c] for c in oc]
+    expw += SENT
+    open(base + '.exp', 'w').write('\n'.join(words_to_hex(expw)) + '\n')
+
+    descj = {'stage': g['stage'], 'count': g['count'],
+             'in_base': GFXIN, 'out_base': GFXOUT,
+             'vbase': g['vbase'], 'inst': g['inst'],
+             'in_bytes': b''.join(
+                 struct.pack('<I', w) for w in in_words).hex()}
+    open(base + '.desc.json', 'w').write(json.dumps(descj))
+    return base
+
+
+def gfx_main():
+    """`shader_vectors.py gfx` — (re)generate only the G1a graphics
+    vectors; the compute corpus' oracle-backed .exp files are not
+    touched."""
+    os.makedirs(OUT, exist_ok=True)
+    summary = []
+    for name in sorted(GFX):
+        g = GFX[name]
+        spv = os.path.join(CORPUS, name + '.spv')
+        words = read_spv(spv)
+        sc = spirv_scan.Scanner(words)
+        try:
+            sc.scan()
+        except spirv_scan.Fault as f:
+            print('%s: COMMIT FAULT %s opcode=%d word=%d — FIX CORPUS' %
+                  (name, spirv_scan.FAULT_NAME[f.code], f.opcode,
+                   f.word))
+            return 1
+        sc.emit_tab(os.path.join(OUT, name + '.tab'))
+        for seed in GFX_SEEDS:
+            summary.append(emit_gfx(name, seed, words, g))
+    print('wrote %d gfx cases to %s' % (len(summary), OUT))
+    return 0
+
+
 ORACLE = os.environ.get('ORACLE', '/tmp/g6lc-vk-oracle')
 
 
@@ -870,4 +1051,6 @@ def main():
 
 
 if __name__ == '__main__':
+    if len(sys.argv) > 1 and sys.argv[1] == 'gfx':
+        sys.exit(gfx_main())
     sys.exit(main())

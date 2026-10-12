@@ -33,12 +33,20 @@ if ! command -v "${RISCV}gcc" >/dev/null 2>&1; then
   exit 1
 fi
 t0=$SECONDS
-( cd "$ROOT/software/apu-venus-probe" && \
-  make RISCV="$RISCV" TARGET_CFG="$TARGET_CFG" ) 2>&1 | tee "$OUT/sw.log"
-cp "$ROOT/software/apu-venus-probe/venus_probe.hex" "$OUT/venus_probe.hex"
-cp "$ROOT/software/apu-venus-probe/vn_map.svh" "$OUT/vn_map.svh"
+# Build in a shadow copy: the Makefile writes all products into cwd, and
+# venus_probe.hex/vn_map.svh are tracked sources — in-tree output would
+# dirty the worktree and trip the regression's source-drift check. The
+# Makefile's ../../ refs resolve through the $OUT symlinks.
+PROBE="$OUT/probe/apu-venus-probe"
+mkdir -p "$PROBE"
+cp -r "$ROOT/software/apu-venus-probe/." "$PROBE/"
+for d in core corev_apu verif; do ln -sfn "$ROOT/$d" "$OUT/$d"; done
+( cd "$PROBE" && \
+  make -B RISCV="$RISCV" TARGET_CFG="$TARGET_CFG" ) 2>&1 | tee "$OUT/sw.log"
+cp "$PROBE/venus_probe.hex" "$OUT/venus_probe.hex"
+cp "$PROBE/vn_map.svh" "$OUT/vn_map.svh"
 # image size accounting for the report
-( cd "$ROOT/software/apu-venus-probe" && \
+( cd "$PROBE" && \
   "${RISCV}size" venus_probe.elf ) 2>&1 | tee -a "$OUT/sw.log"
 SW_SECS=$((SECONDS - t0))
 

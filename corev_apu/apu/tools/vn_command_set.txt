@@ -105,6 +105,7 @@ vkCmdBindIndexBuffer
 vkCmdPushConstants
 vkCmdSetViewport
 vkCmdSetScissor
+vkCmdSetBlendConstants
 vkCmdDraw
 vkCmdDrawIndexed
 vkCmdDrawIndirect

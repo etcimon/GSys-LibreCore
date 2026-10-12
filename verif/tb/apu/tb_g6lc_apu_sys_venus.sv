@@ -821,9 +821,12 @@ module tb_g6lc_apu_sys_venus;
         ep += 8;
       end
       check_used_img(0, head, u_len_s);
-      // drain + idle
+      // drain + idle — same budget as tb_g6lc_apu_vgsys: G1c graphics
+      // submissions run the micro-sequenced raster FS waves (~250k
+      // cycles per 64-fragment flush); the budget must cover a
+      // full-frame drain
       t = 0;
-      while (!vg_idle && t < 100000) begin @(posedge clk); t++; end
+      while (!vg_idle && t < 5000000) begin @(posedge clk); t++; end
       check(vg_idle, "vgsys idle after completion");
       if ((flags & 1) != 0) begin
         check(rec_kind() == 8, "EK_FENCE kind");

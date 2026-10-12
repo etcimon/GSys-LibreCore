@@ -278,6 +278,9 @@ module g6lc_apu_vnfront
       StRetKids,
       StBindMemCk,
       StBind2Rd, StBind2ResC, StBind2MemC, StBind2SetC,
+      // §12.3 3d-d: bind-time device backing — ALLOC_HI completion
+      // check, DEVBACKED aux write, then the SETBIND (single/array)
+      StBindDev, StBindDevCas, StBindSet, StBind2Set,
       StCbGo, StCbCrCpl, StCbSetCpl,
       StRecFill, StRecApp, StAppendCpl,
       StSubPush, StSubState, StSubStateNext,
@@ -310,7 +313,8 @@ module g6lc_apu_vnfront
       StUpdInfo, StUpdInfoC, StUpdBufGo, StUpdBufCpl, StUpdMemCpl,
       StUpdImgRd, StUpdImgGo, StUpdImgVC, StUpdImgIC, StUpdImgMW,
       StUpdImgMC, StUpdImgSC,
-      StUpdWr0, StUpdWr1, StUpdWr2, StUpdWr3, StUpdElemCk, StUpdPoisC,
+      StUpdWr0, StUpdWr1, StUpdWr2, StUpdWr3, StUpdWrO, StUpdElemCk,
+      StUpdPoisC,
       StUpdCpRd, StUpdCpS, StUpdCpD, StUpdCpDSet, StUpdCpGo,
       StUpdCpPC, StUpdCpRC, StUpdCpBC, StUpdCpNext,
       StPayProd, StPayResLo, StPayResHi, StPayResCpl, StPayCapW,
@@ -324,7 +328,18 @@ module g6lc_apu_vnfront
       StPipeH0, StPipeH1, StPipeH2, StPipeH3, StPipeH4,
       StPipeLay0, StPipeModCpl, StPipeLayCpl, StPipeAllocC,
       StPipeAuxC, StPipeAuxCpl, StPipeAuxHiC, StPipeFail,
-      StRetSm,
+      StRetSm, StRetSmF,
+      // G1c: graphics-pipeline element — staged keep-word parse in
+      // vk.xml decode order (StGpRd/StGpCap walk a phase counter),
+      // the VS/FS module commit loop, then the 13-word ObjPay state
+      // block + the aux pair; StGpUnr unwinds taken ShaderCore refs
+      // on failure, StGpFrC releases the ObjPay extent
+      StGpRd, StGpCap, StGpModL, StGpModC, StGpRefC,
+      StGpLayC, StGpAlcC, StGpPayW, StGpPayWd, StGpObjC,
+      StGpAuxH, StGpUnr, StRetUnrV,
+      // G1c: BeginRenderPass record handles — the staged
+      // renderPass/framebuffer ids resolve into rec.handle[0..1]
+      StBrpIdLo, StBrpIdHi, StBrpIdCpl,
       // §12.3 C/5b: image layout walk, image/view/sampler create,
       // subresource layout reply
       StImgCk, StImgMip, StImgAuxH, StImgState,
@@ -453,11 +468,13 @@ module g6lc_apu_vnfront
     logic                upd_pois_q;   // an element needs the poison bit
     logic                upd_elok_q;   // current element resolves clean
     logic                upd_img_q;    // element is an image-family type
-    logic [31:0]         upd_eb_q, upd_esz_q; // element {base,size}
+    logic [31:0]         upd_eb_q, upd_esz_q; // element {off,size}
+    logic [31:0]         upd_mh_q;   // §12.3 3d-d: record mem {gen,slot}
     logic [63:0]         upd_smp_q;    // staged VkSampler id
     logic [63:0]         upd_vw_q;     // image-view aux {hi:lo}
     logic [4:0][31:0]    upd_iw_q;     // record words at +8..+24
-    logic [15:0]         ud_mslot_q;   // buffer's bound memory slot
+    logic [15:0]         ud_mslot_q;   // bound memory slot
+    logic [15:0]         ud_mgen_q;    // §12.3 3d-d: bound memory gen
 
     // vkUpdateDescriptorSets copies
     logic [15:0]         cp_i_q;       // copy index
@@ -484,6 +501,12 @@ module g6lc_apu_vnfront
     logic [63:0]         b2_off_q;     // staged memoryOffset
     logic [31:0]         b2_rid_q;     // resolved resource {gen,slot}
     logic [63:0]         b2_rsz_q;     // resource declared size
+    // §12.3 3d-d: bind-time backing — memory {gen,slot} for the
+    // DEVBACKED/base publish, its size (extent release when the CAS
+    // loses to a racing MAP_BLOB), and the array/single flag
+    logic [31:0]         bnd_memh_q;
+    logic [31:0]         bnd_msz_q;
+    logic                bnd_arr_q;
 
     // cmdrec payload producer
     logic [15:0]         pay_send_q;   // stream index
@@ -491,6 +514,7 @@ module g6lc_apu_vnfront
     logic [31:0]         pay_word_q;   // current cr_pay_data_o
     logic [15:0]         pay_nset_q;   // BindDS resolved-handle count
     logic                pay_bind_q;   // stream mode: resolve sets
+    logic                pay_vb_q;     // stream mode: BindVB buffers
 
     // §7b/5a-ii: ShaderCore slot manager / staging / commit + pages
     apu_sh_sm_op_e       sm_op_q;
@@ -512,9 +536,42 @@ module g6lc_apu_vnfront
     logic                pl_spec_q;
     logic [31:0]         pl_layh_q;    // layout {gen,slot}
     logic                pl_errv_q;    // first error latched
+    // G1c: vkCreateGraphicsPipelines element state — the staged keep
+    // words parse in vk.xml decode order behind phase counter
+    // gp_ph_q; the VS then FS modules commit through the StShCommit
+    // loop (gp_st_q) and the packed 13-word state block lands in
+    // ObjPay (layout below at gp_pay_w).
+    logic                pre_gp_q;    // elements are graphics pipes
+    logic [5:0]          gp_ph_q;     // parse phase
+    logic [7:0]          gp_stg_q;    // staged-word cursor
+    logic [63:0]         gp_mod0_q, gp_mod1_q; // VS/FS module ids
+    logic                gp_st_q;     // commit loop: 0 VS, 1 FS
+    logic [1:0]          gp_refs_q;   // ShaderCore refs held
+    logic [2:0]          gp_vs_q, gp_fs_q;
+    logic [7:0]          gp_fsm_q;    // FS entry.in_mask
+    logic [3:0]          gp_nbind_q;
+    logic [3:0]          gp_nattr_q;
+    logic [3:0]          gp_i_q;      // binding/attr/attach/dyn cursor
+    logic [7:0]          gp_top_q;    // VkPrimitiveTopology
+    logic [1:0]          gp_cull_q;   // VkCullModeFlags
+    logic                gp_ff_q;     // VK_FRONT_FACE_COUNTER_CLOCKWISE
+    logic [3:0][21:0]    gp_bnd_q;    // {rate[21], valid[20], binding[19:16], stride[15:0]}
+    logic [7:0][31:0]    gp_atr_q;    // {valid[31], loc[26:24], binding[21:20],
+                                    //   fmt[19:12], offset[11:0]}
+    // G2a: depth/stencil + per-attachment blend + constants
+    logic                gp_dte_q, gp_dwr_q, gp_sten_q;
+    logic [2:0]          gp_dcmp_q;
+    logic [2:0]          gp_natt_q;   // colorBlend attachmentCount (0..4)
+    logic [3:0][31:0]    gp_blend_q;  // apu_rast_blend_t packing
+    logic [3:0][31:0]    gp_bconst_q; // static blendConstants f32[4]
+    logic                gp_bcdyn_q;  // BLEND_CONSTANTS in pDynamicStates
+    logic [7:0]          gp_ndyn_q;   // dynamicStateCount
+    logic [2:0]          ret_fs_q;    // pipeline retire: FS slot
+    logic                ret_gp_q;    // pipeline retire: aux[6] graphics
     logic [31:0]         auxhi_val_q;  // generic SETAUXHI value
 
     logic [4:0]          blob_i_q;     // current blob element
+    logic                brp_i_q;      // BeginRP handle cursor (0 rp, 1 fb)
     logic [4:0]          blob_n_q;     // element count
     logic                blob_sel_q;
     logic [63:0]         blob_id_q;
@@ -672,6 +729,42 @@ module g6lc_apu_vnfront
       return ((32'(f_mdim(w, m)) * 32'(APU_VN_IMG_BPP[fmt[3:0]])) +
               32'd63) & ~32'd63;
     endfunction
+    // G1c: vertex-attribute formats the raster engine accepts
+    // (R32/R32G32/R32G32B32/R32G32B32A32_SFLOAT + R8G8B8A8_UNORM —
+    // mirrors g6lc_apu_rast_pkg APU_RAST_VF_*)
+    function automatic logic f_vattr_ok(input logic [31:0] f);
+      return f == 32'd37 || f == 32'd100 || f == 32'd103 ||
+             f == 32'd106 || f == 32'd109;
+    endfunction
+    // G2a: graphics-pipeline ObjPay state word i (22 words):
+    //   w0 = {fs_in_mask[31:24], topology[23:16], nattr[15:12],
+    //         nbind[11:8], 4'h0, cull[3:2], front_ccw[1], 1'b1}
+    //   w1+b = {10'h0, rate[21], valid[20], binding[19:16], stride[15:0]}
+    //   w5+a = {valid[31], loc[26:24], binding[21:20], fmt[19:12],
+    //           offset[11:0]}
+    //   w13 = {16'h0, 1'b0, nattach[14:12], 3'h0[11:9],
+    //          stencilTest[8], 1'b0, compareOp[6:4], 1'b0, bc_dyn[2],
+    //          depthWrite[1], depthTest[0]}
+    //   w14+a = per-attachment VkPipelineColorBlendAttachmentState as
+    //           apu_rast_blend_t: {pad[31], mask[30:27], opA[26:24],
+    //           dstA[23:19], srcA[18:14], opC[13:11], dstC[10:6],
+    //           srcC[5:1], en[0]}
+    //   w18+a = static blendConstants f32[4]
+    function automatic logic [31:0] gp_pay_w(input logic [4:0] i);
+      if (i == 5'd0)
+        return {gp_fsm_q, gp_top_q, gp_nattr_q, gp_nbind_q,
+                4'h0, gp_cull_q, gp_ff_q, 1'b1};
+      if (i < 5'd5)
+        return {10'h0, gp_bnd_q[i - 5'd1]};
+      if (i < 5'd13)
+        return gp_atr_q[i - 5'd5];
+      if (i == 5'd13)
+        return {16'h0, 1'b0, gp_natt_q, 3'h0, gp_sten_q, 1'b0,
+                gp_dcmp_q, 1'b0, gp_bcdyn_q, gp_dwr_q, gp_dte_q};
+      if (i < 5'd18)
+        return gp_blend_q[i - 5'd14];
+      return gp_bconst_q[i - 5'd18];
+    endfunction
     // wire format -> device id, or 8'hFF unsupported
     function automatic logic [7:0] f_img_fmt(input logic [31:0] f);
       return f < 32'd256 ? APU_VN_IMG_FMT[f[7:0]] : 8'hFF;
@@ -758,7 +851,11 @@ module g6lc_apu_vnfront
       // store their records in aperture memory, not ObjPay — only the
       // layout tables still carry an extent.
       return k == 6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT) ||
-             k == 6'(APU_VN_KIND_VK_PIPELINE_LAYOUT);
+             k == 6'(APU_VN_KIND_VK_PIPELINE_LAYOUT) ||
+             // G1c: render pass / framebuffer park the verbatim keep
+             // words (attachments, subpass refs; rp id, view ids, w/h/l)
+             k == 6'(APU_VN_KIND_VK_RENDER_PASS) ||
+             k == 6'(APU_VN_KIND_VK_FRAMEBUFFER);
     endfunction
     // 5a-ii/§12.3 F5: kinds whose retire needs a pre-LOOKUP (aux
     // carries a ShaderCore slot, a vgpages extent or a payload extent)
@@ -843,6 +940,9 @@ module g6lc_apu_vnfront
         StPgReq:   begin pg_req_valid_o = 1'b1;
                          pg_req_o = '{op: pg_op_q,
                                      base: pg_base_q,
+                                     // bind-time ALLOC_HI never
+                                     // excludes (excl_lo == excl_hi)
+                                     excl_hi: '0,
                                      bytes: pg_bytes_q};         end
         StApReq:   ap_req_o = 1'b1;
         StSubPush: begin ex_submit_valid_o = 1'b1;
@@ -912,8 +1012,8 @@ module g6lc_apu_vnfront
         upd_rec_q <= '0; upd_bad_q <= 1'b0; upd_pois_q <= 1'b0;
         upd_elok_q <= 1'b0; upd_img_q <= 1'b0; upd_eb_q <= '0;
         upd_esz_q <= '0; upd_smp_q <= '0; upd_vw_q <= '0;
-        upd_iw_q <= '0;
-        ud_mslot_q <= '0;
+        upd_iw_q <= '0; upd_mh_q <= '0;
+        ud_mslot_q <= '0; ud_mgen_q <= '0;
         cp_i_q <= '0; cp_src_q <= '0; cp_dsid_q <= '0;
         cp_sb_q <= '0; cp_sa_q <= '0; cp_db_q <= '0;
         cp_da_q <= '0; cp_n_q <= '0;
@@ -923,7 +1023,7 @@ module g6lc_apu_vnfront
         cp_dhnd_q <= '0;
         cp_srcbad_q <= 1'b0; cp_dead_q <= 1'b0;
         pay_send_q <= '0; pay_send_n_q <= '0; pay_word_q <= '0;
-        pay_nset_q <= '0; pay_bind_q <= 1'b0;
+        pay_nset_q <= '0; pay_bind_q <= 1'b0; pay_vb_q <= 1'b0;
         pay_pbnd_q <= '0; pay_ndyn_q <= '0;
         sm_op_q <= APU_SH_SM_ALLOC; sm_slot_q <= '0;
         sm_ok_q <= 1'b0; sm_rslot_q <= '0;
@@ -943,7 +1043,16 @@ module g6lc_apu_vnfront
         rep_null_mask_q <= '0;
         pl_modid_q <= '0; pl_layid_q <= '0; pl_spec_q <= 1'b0;
         pl_layh_q <= '0; pl_errv_q <= 1'b0; auxhi_val_q <= '0;
+        pre_gp_q <= 1'b0; gp_ph_q <= '0; gp_stg_q <= '0;
+        gp_mod0_q <= '0; gp_mod1_q <= '0;
+        gp_st_q <= 1'b0; gp_refs_q <= '0;
+        gp_vs_q <= '0; gp_fs_q <= '0; gp_fsm_q <= '0;
+        gp_nbind_q <= '0; gp_nattr_q <= '0; gp_i_q <= '0;
+        gp_top_q <= '0; gp_cull_q <= '0; gp_ff_q <= 1'b0;
+        gp_bnd_q <= '0; gp_atr_q <= '0;
+        ret_fs_q <= '0; ret_gp_q <= 1'b0;
         blob_i_q <= '0; blob_n_q <= '0; blob_sel_q <= 1'b0;
+        brp_i_q  <= 1'b0;
         blob_id_q <= '0; pd_id_q <= '0;
         are_i_q <= '0; aux_free_q <= '0; aux_free_v_q <= 1'b0;
         aux_size_q <= '0;
@@ -1436,6 +1545,21 @@ module g6lc_apu_vnfront
                   end else if (act_q.obj_kind ==
                                6'(APU_VN_KIND_VK_SAMPLER)) begin
                     state_q <= StSamCk;
+                  end else if (act_q.obj_kind ==
+                               6'(APU_VN_KIND_VK_RENDER_PASS) ||
+                               act_q.obj_kind ==
+                               6'(APU_VN_KIND_VK_FRAMEBUFFER)) begin
+                    // G1c: payload objects — the staged keep words
+                    // copy verbatim to ObjPay; the object gets
+                    // aux[63:48]=base, aux[47:32]=words (retire frees
+                    // the extent through the is_pay_kind path)
+                    prepend_n_q <= '0;
+                    op_words_q  <= 16'(op_q.pay_words);
+                    opr_q    <= '{op: APU_OBJPAY_OP_ALLOC,
+                                  words: 32'(op_q.pay_words),
+                                  default: '0};
+                    op_ret_q <= StPayAlcCpl;
+                    state_q  <= StOpReq;
                   end else begin
                     state_q <= StAllocGo;
                   end
@@ -1461,11 +1585,16 @@ module g6lc_apu_vnfront
                   // in the staging SRAM; out-ids in the flags[1] blob.
                   // No ObjPay extent — the object keeps {slot,layout}
                   // in aux and failed elements echo VK_NULL_HANDLE.
+                  // G1c: graphics elements take the staged keep-word
+                  // parse at StGpRd and DO park a 13-word ObjPay state
+                  // block ({pay_base,gfx,fs,vs} in aux lo).
                   blob_sel_q  <= act_q.flags[1];
                   blob_i_q    <= '0;
                   blob_n_q    <= 5'(op_q.blob[act_q.flags[1]].words
                                     >> 1);
                   pl_errv_q   <= 1'b0;
+                  pre_gp_q    <= op_q.cmd_type ==
+                                 APU_VN_TYPE_VK_CREATE_GRAPHICS_PIPELINES_EXT;
                   blob_ret_q  <= StPipeH0;
                   blob_done_q <= StRep;
                   state_q     <= StBlobRd;
@@ -1739,6 +1868,14 @@ module g6lc_apu_vnfront
                                 6'(APU_VN_KIND_VK_IMAGE)
                               ? 64'(op_q.imm[7]) * 64'(imw_lay_q)
                               : ds < 0 ? 64'h0 : op_q.q[ds],
+                         // §12.3 3d-d: a type-1 (lazy host-visible)
+                         // entry is born aux[63:32]=UNBACKED — no
+                         // SETAUXHI window in which a racing
+                         // MAP_BLOB could read aux=0 as base 0
+                         offset: act_q.obj_kind ==
+                                 6'(APU_VN_KIND_VK_DEVICE_MEMORY) &&
+                                 op_q.imm[2] == 32'd1
+                                 ? {APU_MEM_UNBACKED, 32'h0} : 64'h0,
                          ctx: ctx_i, default: '0};
               ot_ret_q <= StAllocCpl;
               state_q  <= StOtReq;
@@ -1850,11 +1987,18 @@ module g6lc_apu_vnfront
               state_q  <= StOtReq;
             end else if (act_q.obj_kind ==
                          6'(APU_VN_KIND_VK_DEVICE_MEMORY)) begin
-              // §7b/5a-ii: aux[63:32] = aperture page base
-              hnd_pay_q   <= ot_cpl_i.handle;
-              auxhi_val_q <= pg_res_q;
-              auxhi_ret_q <= StRep;
-              state_q     <= StAuxSet;
+              // §7b/5a-ii: aux[63:32] = aperture page base.
+              // §12.3 3d-d: a type-1 entry carries its UNBACKED aux
+              // from the ALLOC — only the type-0 private-arena base
+              // still goes through SETAUXHI.
+              hnd_pay_q <= ot_cpl_i.handle;
+              if (op_q.imm[2] == 32'd1)
+                state_q <= StRep;
+              else begin
+                auxhi_val_q <= pg_res_q;
+                auxhi_ret_q <= StRep;
+                state_q     <= StAuxSet;
+              end
             end else if (is_pay_kind(act_q.obj_kind)) begin
               // §7b: copy staging -> ObjPay, then SETAUXHI
               // {base,words}; §12.3 F5: the descriptor-set-layout's
@@ -2044,6 +2188,42 @@ module g6lc_apu_vnfront
             end
             state_q <= StRecApp;
           end
+          // G1c: BeginRenderPass — staged {renderPass, framebuffer}
+          // ids become record handles 0/1 (the executor re-resolves
+          // them at submit); a miss stores a null handle like the
+          // record-time element resolves
+          StBrpIdLo: begin
+            lay_lo_q  <= stg_word_q;
+            stg_i_q   <= stg_i_q + 1'b1;
+            stg_ret_q <= StBrpIdHi;
+            state_q   <= StStgRd;
+          end
+          StBrpIdHi: begin
+            otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                          id: APU_VN_ID_TAG | {stg_word_q, lay_lo_q},
+                          kind: brp_i_q
+                                ? 6'(APU_VN_KIND_VK_FRAMEBUFFER)
+                                : 6'(APU_VN_KIND_VK_RENDER_PASS),
+                          ctx: ctx_i, default: '0};
+            ot_ret_q <= StBrpIdCpl;
+            state_q  <= StOtReq;
+          end
+          StBrpIdCpl: begin
+            rec_q.handle[brp_i_q] <=
+                ot_cpl_i.status == APU_OBJTAB_OK
+                ? ot_cpl_i.handle : 32'h0;
+            rec_q.kind[brp_i_q]   <=
+                {2'b0, brp_i_q ? 6'(APU_VN_KIND_VK_FRAMEBUFFER)
+                               : 6'(APU_VN_KIND_VK_RENDER_PASS)};
+            if (brp_i_q) begin
+              state_q <= StRecApp;
+            end else begin
+              brp_i_q   <= 1'b1;
+              stg_i_q   <= StgBits'(2);
+              stg_ret_q <= StBrpIdLo;
+              state_q   <= StStgRd;
+            end
+          end
           StRecApp: begin
             crr_q    <= '{op: APU_CMDREC_OP_APPEND,
                           cbuf: 8'(ent_q.aux[7:0]), idx: '0,
@@ -2161,6 +2341,21 @@ module g6lc_apu_vnfront
                 sm_slot_q <= ot_cpl_i.entry.aux[2:0];
                 sm_ret_q  <= StRetSm;
                 state_q   <= StSmReq;
+                if (act_q.obj_kind == 6'(APU_VN_KIND_VK_PIPELINE) &&
+                    ot_cpl_i.entry.aux[6]) begin
+                  // G1c/G2a: a graphics pipeline frees its 22-word
+                  // ObjPay state block and drops BOTH stage refs — the
+                  // FS slot waits behind ret_fs_q for StRetSm's second
+                  // UNREF (StRetUnrV runs the VS one after the FREE)
+                  ret_gp_q <= 1'b1;
+                  ret_fs_q <= ot_cpl_i.entry.aux[5:3];
+                  opr_q    <= '{op: APU_OBJPAY_OP_FREE,
+                               addr: {16'h0,
+                                      ot_cpl_i.entry.aux[31:16]},
+                               words: 32'd22, default: '0};
+                  op_ret_q <= StRetUnrV;
+                  state_q  <= StOpReq;
+                end
               end else if (act_q.obj_kind ==
                            6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)) begin
                 // §12.3 F5-d: kill live sets first so the pool's own
@@ -2250,6 +2445,26 @@ module g6lc_apu_vnfront
                 ent_q.size > ot_cpl_i.entry.size - moff) begin
               result_q <= APU_VK_ERROR_UNKNOWN;
               state_q  <= StRep;
+            end else if (ot_cpl_i.entry.aux[63:32] ==
+                         APU_MEM_UNBACKED) begin
+              // §12.3 3d-d: a lazy type-1 memory is backed at first
+              // bind — ALLOC_HI (top-down in the guest window, no
+              // exclusion), publish base + DEVBACKED, then the bind.
+              // FULL fails the whole call OOM; nothing is bound.
+              if (|ot_cpl_i.entry.size[63:32]) begin
+                result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                state_q  <= StRep;
+              end else begin
+                hnd_pay_q  <= ot_cpl_i.handle;
+                bnd_memh_q <= ot_cpl_i.handle;
+                bnd_msz_q  <= ot_cpl_i.entry.size[31:0];
+                bnd_arr_q  <= 1'b0;
+                pg_op_q    <= APU_VGPAGES_OP_ALLOC_HI;
+                pg_base_q  <= '0;
+                pg_bytes_q <= ot_cpl_i.entry.size[31:0];
+                pg_ret_q   <= StBindDev;
+                state_q    <= StPgReq;
+              end
             end else begin
               otr_q <= '{op: APU_OBJTAB_OP_SETBIND,
                          id: {32'h0, hnd_q[rs]},
@@ -2318,6 +2533,25 @@ module g6lc_apu_vnfront
                 b2_rsz_q > ot_cpl_i.entry.size - b2_off_q) begin
               result_q <= APU_VK_ERROR_UNKNOWN;
               state_q  <= StRep;
+            end else if (ot_cpl_i.entry.aux[63:32] ==
+                         APU_MEM_UNBACKED) begin
+              // §12.3 3d-d: same bind-time backing as the single path;
+              // a FULL fails the whole Bind*2 call before any SETBIND
+              // of this element commits
+              if (|ot_cpl_i.entry.size[63:32]) begin
+                result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
+                state_q  <= StRep;
+              end else begin
+                hnd_pay_q  <= ot_cpl_i.handle;
+                bnd_memh_q <= ot_cpl_i.handle;
+                bnd_msz_q  <= ot_cpl_i.entry.size[31:0];
+                bnd_arr_q  <= 1'b1;
+                pg_op_q    <= APU_VGPAGES_OP_ALLOC_HI;
+                pg_base_q  <= '0;
+                pg_bytes_q <= ot_cpl_i.entry.size[31:0];
+                pg_ret_q   <= StBindDev;
+                state_q    <= StPgReq;
+              end
             end else begin
               otr_q <= '{op: APU_OBJTAB_OP_SETBIND,
                          id: {32'h0, b2_rid_q},
@@ -2334,6 +2568,77 @@ module g6lc_apu_vnfront
               ot_ret_q <= StBind2SetC;
               state_q  <= StOtReq;
             end
+          end
+          StBind2Set: begin
+            // §12.3 3d-d: SETBIND after the DEVBACKED publish — the
+            // memory handle was captured before the allocator detour
+            otr_q <= '{op: APU_OBJTAB_OP_SETBIND,
+                       id: {32'h0, b2_rid_q},
+                       kind: op_q.cmd_type ==
+                             APU_VN_TYPE_VK_BIND_BUFFER_MEMORY_2_EXT
+                             ? 6'(APU_VN_KIND_VK_BUFFER)
+                             : 6'(APU_VN_KIND_VK_IMAGE),
+                       mem_id: {32'h0, bnd_memh_q},
+                       offset: b2_off_q,
+                       size: b2_rsz_q,
+                       ctx: ctx_i, default: '0};
+            ot_ret_q <= StBind2SetC;
+            state_q  <= StOtReq;
+          end
+
+          // ---- §12.3 3d-d: bind-time device backing publish ---------
+          // ALLOC_HI landed a device-chosen extent (pg_res_q): publish
+          // {base,DEVBACKED} atomically — a ctrl-queue MAP_BLOB can
+          // land between this bind's LOOKUP and the publish (the two
+          // queues are unordered); the CAS loses to a base the map
+          // already installed and the bind proceeds with it.
+          StBindDev: begin
+            if (!pg_ok_q) begin
+              result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
+              state_q  <= StRep;
+            end else begin
+              otr_q    <= '{op: APU_OBJTAB_OP_SETAUXHI_CAS,
+                           id: {32'h0, bnd_memh_q},
+                           kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                           offset: {32'h0, APU_MEM_UNBACKED},
+                           value: pg_res_q,
+                           mask: 32'(APU_MEM_DEVBACKED),
+                           ctx: ctx_i, default: '0};
+              ot_ret_q <= StBindDevCas;
+              state_q  <= StOtReq;
+            end
+          end
+          StBindDevCas: begin
+            if (ot_cpl_i.status == APU_OBJTAB_CONFLICT) begin
+              // the map's kernel offset won: release the extent we
+              // allocated — the memory stays where the kernel put it
+              pg_op_q    <= APU_VGPAGES_OP_FREE;
+              pg_base_q  <= pg_res_q;
+              pg_bytes_q <= bnd_msz_q;
+              pg_ret_q   <= bnd_arr_q ? StBind2Set : StBindSet;
+              state_q    <= StPgReq;
+            end else if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              result_q <= err_of(ot_cpl_i.status);
+              state_q  <= StRep;
+            end else begin
+              state_q <= bnd_arr_q ? StBind2Set : StBindSet;
+            end
+          end
+          StBindSet: begin
+            // re-issue the single-bind SETBIND — moff recomputed from
+            // op_q, ent_q still holds the bound resource's entry
+            automatic int rs = lu_slot(op_q, 1);
+            automatic int ms = lu_slot(op_q, 2);
+            automatic int os = data_slot(op_q);
+            otr_q <= '{op: APU_OBJTAB_OP_SETBIND,
+                       id: {32'h0, hnd_q[rs]},
+                       kind: op_q.qkind[rs],
+                       mem_id: {32'h0, hnd_q[ms]},
+                       offset: os < 0 ? 64'h0 : op_q.q[os],
+                       size: ent_q.size,
+                       ctx: ctx_i, default: '0};
+            ot_ret_q <= StRetCpl;
+            state_q  <= StOtReq;
           end
           StBind2SetC: begin
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
@@ -2385,7 +2690,12 @@ module g6lc_apu_vnfront
                   (ent_q.state & (APU_CB_INVALID | APU_CB_PENDING)) != 0 ||
                   (op_q.cmd_type ==
                    APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT &&
-                   op_q.imm[2] > 32'd128)) begin
+                   op_q.imm[2] > 32'd128) ||
+                  // G1c: maxVertexInputBindings = 4; more bindings
+                  // cannot be recorded into the arena stream
+                  (op_q.cmd_type ==
+                   APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_EXT &&
+                   op_q.imm[1] > 32'd4)) begin
                 // §7b: pValues over 128 B joins the INVALID path
                 result_q <= APU_VK_ERROR_UNKNOWN;
                 otr_q    <= '{op: APU_OBJTAB_OP_SETSTATE,
@@ -2408,7 +2718,13 @@ module g6lc_apu_vnfront
                 // ahead of the verbatim dynamic-offset words
                 pay_bind_q <= op_q.cmd_type ==
                               APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT;
-                pay_nset_q <= 16'(op_q.imm[2]);
+                // G1c: BindVB streams nbind resolved buffer handles
+                // then the verbatim u64 offset words
+                pay_vb_q   <= op_q.cmd_type ==
+                              APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_EXT;
+                pay_nset_q <= 16'(op_q.cmd_type ==
+                                  APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_EXT
+                                  ? op_q.imm[1] : op_q.imm[2]);
                 pay_pbnd_q <=
                     16'(op_q.imm[2] > 32'd4 - op_q.imm[1]
                         ? 32'd4 - op_q.imm[1] : op_q.imm[2]) << 1;
@@ -2419,6 +2735,10 @@ module g6lc_apu_vnfront
                              ? 32'd4 - op_q.imm[1] : op_q.imm[2])
                           + (op_q.imm[3] > 32'd64
                              ? 32'd64 : op_q.imm[3]))
+                    : op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_EXT
+                      // resolved handle word + u64 offset per binding
+                    ? 16'(op_q.imm[1] * 32'd3)
                     : op_q.cmd_type ==
                       APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT ||
                       // §12.3 C/5a+5b: Xfer operand payloads (copy
@@ -2438,7 +2758,24 @@ module g6lc_apu_vnfront
                       op_q.cmd_type ==
                       APU_VN_TYPE_VK_CMD_COPY_IMAGE_EXT ||
                       op_q.cmd_type ==
-                      APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT
+                      APU_VN_TYPE_VK_CMD_CLEAR_COLOR_IMAGE_EXT ||
+                      // G1c: dynamic-state + render-pass keeps stream
+                      // verbatim (viewport 6w/vp, scissor 4w/sc,
+                      // BeginRP 9+4w/clearval; BindIndexBuffer's u64
+                      // offset is 2 kept words)
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_SET_VIEWPORT_EXT ||
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_SET_SCISSOR_EXT ||
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT ||
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_2_EXT ||
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_BIND_INDEX_BUFFER_EXT ||
+                      // G2a: the four float blendConstants words
+                      op_q.cmd_type ==
+                      APU_VN_TYPE_VK_CMD_SET_BLEND_CONSTANTS_EXT
                       ? 16'(op_q.pay_words) : 16'h0;
                 res_i_q <= '0;
                 rhi_q   <= '0;
@@ -2484,6 +2821,18 @@ module g6lc_apu_vnfront
                 blob_ret_q  <= StElemRec;
                 blob_done_q <= StRep;
                 state_q     <= StBlobRd;
+              end else if (op_q.cmd_type ==
+                           APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT ||
+                           op_q.cmd_type ==
+                           APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_2_EXT) begin
+                // G1c: the staged keeps lead with {renderPass id,
+                // framebuffer id} — both resolve into record
+                // handles[0..1] so the executor re-checks them at
+                // submit like every other operand
+                brp_i_q   <= 1'b0;
+                stg_i_q   <= '0;
+                stg_ret_q <= StBrpIdLo;
+                state_q   <= StStgRd;
               end else begin
                 state_q <= StRecApp;
               end
@@ -3211,6 +3560,7 @@ module g6lc_apu_vnfront
               upd_elok_q <= 1'b0;
               upd_eb_q   <= '0;
               upd_esz_q  <= '0;
+              upd_mh_q   <= '0;
               upd_rec_q  <= {7'h0, rsv_base_q} +
                             ((32'(rw_off_q) + upd_arr_q +
                               32'(ent_j_q)) << 5);
@@ -3248,15 +3598,16 @@ module g6lc_apu_vnfront
                          ((32'(rw_off_q) + upd_arr_q +
                            32'(ent_j_q)) << 5);
             if (ot_cpl_i.status != APU_OBJTAB_OK ||
-                ot_cpl_i.entry.bind_mem_slot == APU_OBJTAB_SLOT_NONE) begin
+                ot_cpl_i.entry.bind_mem[15:0] == APU_OBJTAB_SLOT_NONE) begin
               upd_elok_q <= 1'b0;
               state_q    <= StUpdWr0;
             end else begin
-              ud_mslot_q <= ot_cpl_i.entry.bind_mem_slot;
+              ud_mslot_q <= ot_cpl_i.entry.bind_mem[15:0];
+              ud_mgen_q  <= ot_cpl_i.entry.bind_mem[31:16];
               upd_eb_q   <= ot_cpl_i.entry.bind_offset[31:0];
               upd_esz_q  <= ot_cpl_i.entry.size[31:0];
               otr_q    <= '{op: APU_OBJTAB_OP_READSLOT,
-                           id: {48'h0, ot_cpl_i.entry.bind_mem_slot},
+                           id: {48'h0, ot_cpl_i.entry.bind_mem[15:0]},
                            kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
                            default: '0};
               ot_ret_q <= StUpdMemCpl;
@@ -3265,15 +3616,21 @@ module g6lc_apu_vnfront
           end
           StUpdMemCpl: begin
             // buffer {bind_offset,size} in upd_eb/upd_esz, memory in
-            // ot_cpl_i: aperture address = mem_base + bind_off +
-            // info.offset; visible range = info.range (VK_WHOLE_SIZE
-            // -> buf.size - info.offset), bounded by the buffer extent
+            // ot_cpl_i: §12.3 3d-d record carries the memory handle +
+            // offset, no aperture base — the LSU resolves the current
+            // base at record-fetch time.  Visible range = info.range
+            // (VK_WHOLE_SIZE -> buf.size - info.offset), bounded by
+            // the buffer extent
             automatic logic [63:0] rng_eff =
                 upd_rng_q == 64'hFFFF_FFFF_FFFF_FFFF
                 ? 64'(upd_esz_q) - upd_off_q : upd_rng_q;
             if (ot_cpl_i.status != APU_OBJTAB_OK ||
                 ot_cpl_i.entry.kind !=
                     6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
+                // the generation the bind recorded must still be the
+                // slot's live entry — a recycled slot is a dead
+                // resource, never the next occupant
+                ot_cpl_i.entry.gen != ud_mgen_q ||
                 // §12.3 C: unbacked memory (type-1 not yet MAP_BLOB'd)
                 // must fail the record, not fabricate a base
                 ot_cpl_i.entry.aux[63:32] == APU_MEM_UNBACKED ||
@@ -3284,8 +3641,9 @@ module g6lc_apu_vnfront
               upd_elok_q <= 1'b0;
             end else begin
               upd_elok_q <= 1'b1;
-              upd_eb_q   <= 32'(64'(ot_cpl_i.entry.aux[63:32]) +
-                                64'(upd_eb_q) + upd_off_q);
+              // record +0 = mem{gen,slot}, +28 = bind_off + info.off
+              upd_mh_q   <= {ud_mgen_q, ud_mslot_q};
+              upd_eb_q   <= upd_eb_q + 32'(upd_off_q);
               upd_esz_q  <= rng_eff[31:0];
             end
             state_q <= StUpdWr0;
@@ -3316,6 +3674,7 @@ module g6lc_apu_vnfront
             upd_eb_q   <= '0;
             upd_esz_q  <= '0;
             upd_iw_q   <= '0;
+            upd_mh_q   <= '0;
             upd_rec_q  <= {7'h0, rsv_base_q} +
                           ((32'(rw_off_q) + upd_arr_q +
                             32'(ent_j_q)) << 5);
@@ -3359,11 +3718,15 @@ module g6lc_apu_vnfront
                 upd_type_q[7:0] == 8'd3 ? 10'h008 : 10'h004;
             if (ot_cpl_i.status != APU_OBJTAB_OK ||
                 ot_cpl_i.entry.kind != 6'(APU_VN_KIND_VK_IMAGE) ||
-                ot_cpl_i.entry.bind_mem_slot ==
+                ot_cpl_i.entry.bind_mem[15:0] ==
                     APU_OBJTAB_SLOT_NONE ||
                 (usage & need) != need) begin
               state_q <= StUpdWr0;
             end else begin
+              // §12.3 3d-d: keep the bound {slot,gen} for the record's
+              // memory handle (checked again at ImgMC after the walk)
+              ud_mslot_q <= ot_cpl_i.entry.bind_mem[15:0];
+              ud_mgen_q  <= ot_cpl_i.entry.bind_mem[31:16];
               imw_m_q   <= '0;
               imw_nm_q  <= 5'(ot_cpl_i.entry.aux[44:40]);
               imw_tgt_q <= {1'b0, upd_vw_q[31:28]};
@@ -3385,7 +3748,7 @@ module g6lc_apu_vnfront
                          imw_off_q;
             upd_esz_q <= 32'(upd_vw_q[55:46]) * imw_lay_q - imw_off_q;
             otr_q    <= '{op: APU_OBJTAB_OP_READSLOT,
-                         id: {48'h0, ot_cpl_i.entry.bind_mem_slot},
+                         id: {48'h0, ot_cpl_i.entry.bind_mem[15:0]},
                          kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
                          default: '0};
             ot_ret_q <= StUpdImgMC;
@@ -3393,16 +3756,18 @@ module g6lc_apu_vnfront
           end
           StUpdImgMC: begin
             // memory entry: unbacked type-1 backing fails the record
-            // truthfully (§12.3 C); else fold in the aperture base and
-            // assemble the record's image words
+            // truthfully (§12.3 C), and the bound generation must still
+            // own the slot (3d-d); upd_eb_q stays the resource offset —
+            // the record carries the memory handle, not a base
             if (ot_cpl_i.status != APU_OBJTAB_OK ||
                 ot_cpl_i.entry.kind !=
                     6'(APU_VN_KIND_VK_DEVICE_MEMORY) ||
+                ot_cpl_i.entry.gen != ud_mgen_q ||
                 ot_cpl_i.entry.aux[63:32] == APU_MEM_UNBACKED) begin
               upd_elok_q <= 1'b0;
             end else begin
               upd_elok_q <= 1'b1;
-              upd_eb_q   <= upd_eb_q + ot_cpl_i.entry.aux[63:32];
+              upd_mh_q   <= {ud_mgen_q, ud_mslot_q};
               // +8 word: {w16, kind8} — flags written from elok at Wr1
               upd_iw_q[0] <= {imw_wm_q, 8'h0, upd_type_q[7:0]};
               // +12 word: {{dim,mips}8, fmt8, h16}
@@ -3437,12 +3802,13 @@ module g6lc_apu_vnfront
             end
             state_q <= StUpdWr0;
           end
-          // record beats: {size,base} then {flags,kind} at [15:8]
+          // record beats: §12.3 3d-d +0 = mem{gen,slot} +4 = size,
+          // then {flags,kind} at [15:8]
           StUpdWr0: begin
             ap_we_q    <= 1'b1;
             ap_addr_q  <= upd_rec_q;
             ap_wdata_q <= {upd_elok_q ? upd_esz_q : 32'h0,
-                           upd_elok_q ? upd_eb_q : 32'h0};
+                           upd_elok_q ? upd_mh_q : 32'h0};
             ap_wstrb_q <= 8'hFF;
             ap_ret_q   <= StUpdWr1;
             state_q    <= StApReq;
@@ -3464,8 +3830,19 @@ module g6lc_apu_vnfront
               ap_wdata_q <= {32'h0, 16'h0, 7'h0, upd_elok_q,
                              upd_type_q[7:0]};
               ap_wstrb_q <= 8'h03;
-              ap_ret_q   <= StUpdElemCk;
+              ap_ret_q   <= StUpdWrO;
             end
+            state_q    <= StApReq;
+          end
+          StUpdWrO: begin
+            // buffer/other-kind record bytes 24..31: {off[31:0], 0} —
+            // the resource offset the LSU adds to the resolved memory
+            // base (3d-d); image records fold it into the Wr3 beat
+            ap_we_q    <= 1'b1;
+            ap_addr_q  <= upd_rec_q + 32'd24;
+            ap_wdata_q <= {upd_elok_q ? upd_eb_q : 32'h0, 32'h0};
+            ap_wstrb_q <= 8'hFF;
+            ap_ret_q   <= StUpdElemCk;
             state_q    <= StApReq;
           end
           StUpdWr2: begin
@@ -3478,10 +3855,11 @@ module g6lc_apu_vnfront
             state_q    <= StApReq;
           end
           StUpdWr3: begin
-            // image record bytes 24..31: sampler w1 + reserved zero
+            // image record bytes 24..31: sampler w1 + §12.3 3d-d
+            // +28 = the view's first-subresource offset in the memory
             ap_we_q    <= 1'b1;
             ap_addr_q  <= upd_rec_q + 32'd24;
-            ap_wdata_q <= {32'h0, upd_iw_q[4]};
+            ap_wdata_q <= {upd_elok_q ? upd_eb_q : 32'h0, upd_iw_q[4]};
             ap_wstrb_q <= 8'hFF;
             ap_ret_q   <= StUpdElemCk;
             state_q    <= StApReq;
@@ -3680,7 +4058,19 @@ module g6lc_apu_vnfront
           // id resolves through ObjTab, ndyn rides the set's aux) then
           // streams the verbatim dynamic-offset words
           StPayProd: begin
-            if (pay_bind_q && pay_send_q < pay_pbnd_q) begin
+            if (pay_vb_q && pay_send_q < pay_nset_q) begin
+              // G1c: buffer-handle word — staged buffer id for
+              // binding b sits at words 2b/2b+1
+              stg_i_q   <= StgBits'(pay_send_q << 1);
+              stg_ret_q <= StPayResLo;
+              state_q   <= StStgRd;
+            end else if (pay_vb_q) begin
+              // u64 offset words follow the staged id block
+              stg_i_q   <= StgBits'((pay_nset_q << 1) +
+                                    (pay_send_q - pay_nset_q));
+              stg_ret_q <= StPayCapW;
+              state_q   <= StStgRd;
+            end else if (pay_bind_q && pay_send_q < pay_pbnd_q) begin
               if (!pay_send_q[0]) begin
                 // even send index = handle word: staged set id for
                 // set s sits at words 2s/2s+1 — send == 2s here
@@ -3712,7 +4102,9 @@ module g6lc_apu_vnfront
           StPayResHi: begin
             otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
                          id: APU_VN_ID_TAG | {stg_word_q, lay_lo_q},
-                         kind: 6'(APU_VN_KIND_VK_DESCRIPTOR_SET),
+                         kind: pay_vb_q
+                               ? 6'(APU_VN_KIND_VK_BUFFER)
+                               : 6'(APU_VN_KIND_VK_DESCRIPTOR_SET),
                          ctx: ctx_i, default: '0};
             ot_ret_q <= StPayResCpl;
             state_q  <= StOtReq;
@@ -3894,9 +4286,469 @@ module g6lc_apu_vnfront
           // staged payload: 5 words per element {module id(2),
           // spec presence(1), layout id(2)} at staging offset 5*i
           StPipeH0: begin
-            stg_i_q   <= StgBits'({2'b0, blob_i_q} * 3'd5);
-            stg_ret_q <= StPipeH1;
+            if (pre_gp_q && blob_i_q != 5'd0) begin
+              // G1c v1: graphics elements are variable-length in the
+              // staged stream; only element 0 parses — later elements
+              // echo VK_NULL_HANDLE with the first error latched
+              state_q <= StPipeFail;
+            end else if (pre_gp_q) begin
+              // G1c: graphics element — the staged keep words parse
+              // in vk.xml decode order from offset 0 (the whole
+              // staged block is the element's create-info fields;
+              // blob_i_q selects only the out id)
+              gp_ph_q  <= '0;
+              gp_stg_q <= '0;
+              gp_refs_q <= '0;
+              gp_st_q  <= 1'b0;
+              gp_dte_q <= 1'b0; gp_dwr_q <= 1'b0; gp_sten_q <= 1'b0;
+              gp_dcmp_q <= '0; gp_natt_q <= '0; gp_bcdyn_q <= 1'b0;
+              gp_ndyn_q <= '0;
+              gp_bnd_q <= '0; gp_atr_q <= '0;
+              // G2a: absent per-attachment blend state defaults to
+              // {en=0, mask=4'hF} — a NULL pColorBlendState still
+              // writes every component
+              gp_blend_q <= '{4{32'h7800_0000}};
+              gp_bconst_q <= '0;
+              state_q  <= StGpRd;
+            end else begin
+              stg_i_q   <= StgBits'({2'b0, blob_i_q} * 3'd5);
+              stg_ret_q <= StPipeH1;
+              state_q   <= StStgRd;
+            end
+          end
+          // ---- vkCreateGraphicsPipelines element ----------------
+          // staged words (keep order = vk.xml decode order):
+          //   0 stageCount; 1 stage0; 2-3 module0 id; 4 stage1;
+          //   5-6 module1 id; 7 pVertexInputState pres; 8 nbind;
+          //   per binding {binding, stride, inputRate};
+          //   nattr; per attr {location, binding, format, offset};
+          //   pInputAssemblyState pres; topology;
+          //   pRasterizationState pres; cullMode; frontFace;
+          //   pDepthStencilState pres; {depthTest, depthWrite,
+          //   compareOp, stencilTest} when present;
+          //   pColorBlendState pres; attachmentCount; the eight
+          //   per-attachment fields; blendConstants (4w);
+          //   pDynamicState pres; dynamicStateCount; the state ids;
+          //   layout id (2w)
+          StGpRd: begin
+            stg_i_q   <= StgBits'(gp_stg_q);
+            stg_ret_q <= StGpCap;
             state_q   <= StStgRd;
+          end
+          StGpCap: begin
+            gp_stg_q <= gp_stg_q + 8'd1;
+            case (gp_ph_q)
+              5'd0: begin  // stageCount: exactly {VS, FS}
+                if (stg_word_q != 32'd2) state_q <= StPipeFail;
+                else begin gp_ph_q <= 5'd1; state_q <= StGpRd; end
+              end
+              5'd1: begin  // stage0 = VERTEX (0x01)
+                if (stg_word_q != 32'd1) state_q <= StPipeFail;
+                else begin gp_ph_q <= 5'd2; state_q <= StGpRd; end
+              end
+              5'd2: begin
+                gp_mod0_q[31:0] <= stg_word_q;
+                gp_ph_q <= 5'd3; state_q <= StGpRd;
+              end
+              5'd3: begin
+                gp_mod0_q[63:32] <= stg_word_q;
+                gp_ph_q <= 5'd4; state_q <= StGpRd;
+              end
+              5'd4: begin  // stage1 = FRAGMENT (0x10)
+                if (stg_word_q != 32'h10) state_q <= StPipeFail;
+                else begin gp_ph_q <= 5'd5; state_q <= StGpRd; end
+              end
+              5'd5: begin
+                gp_mod1_q[31:0] <= stg_word_q;
+                gp_ph_q <= 5'd6; state_q <= StGpRd;
+              end
+              5'd6: begin
+                gp_mod1_q[63:32] <= stg_word_q;
+                gp_ph_q <= 5'd7; state_q <= StGpRd;
+              end
+              5'd7: begin  // pVertexInputState presence
+                if (stg_word_q == 32'h0) state_q <= StPipeFail;
+                else begin gp_ph_q <= 5'd8; state_q <= StGpRd; end
+              end
+              5'd8: begin  // vertexBindingDescriptionCount (1..4)
+                if (stg_word_q == 32'h0 || stg_word_q > 32'd4)
+                  state_q <= StPipeFail;
+                else begin
+                  gp_nbind_q <= 4'(stg_word_q);
+                  gp_i_q     <= '0;
+                  gp_ph_q    <= 5'd9;
+                  state_q    <= StGpRd;
+                end
+              end
+              5'd9: begin  // binding index (<4)
+                if (stg_word_q > 32'd3) state_q <= StPipeFail;
+                else begin
+                  gp_bnd_q[gp_i_q[1:0]][20]    <= 1'b1;
+                  gp_bnd_q[gp_i_q[1:0]][19:16] <= stg_word_q[3:0];
+                  gp_ph_q <= 5'd10; state_q <= StGpRd;
+                end
+              end
+              5'd10: begin // stride
+                gp_bnd_q[gp_i_q[1:0]][15:0] <= stg_word_q[15:0];
+                gp_ph_q <= 5'd11; state_q <= StGpRd;
+              end
+              6'd11: begin // inputRate: VERTEX(0)/INSTANCE(1)
+                if (stg_word_q > 32'd1) begin
+                  state_q <= StPipeFail;
+                end else begin
+                  gp_bnd_q[gp_i_q[1:0]][21] <= stg_word_q[0];
+                  gp_i_q  <= gp_i_q + 4'd1;
+                  gp_ph_q <= (gp_i_q + 4'd1 >= gp_nbind_q)
+                             ? 6'd12 : 6'd9;
+                  state_q <= StGpRd;
+                end
+              end
+              5'd12: begin // vertexAttributeDescriptionCount (1..8)
+                if (stg_word_q == 32'h0 || stg_word_q > 32'd8)
+                  state_q <= StPipeFail;
+                else begin
+                  gp_nattr_q <= stg_word_q[3:0];
+                  gp_i_q     <= '0;
+                  gp_ph_q    <= 5'd13;
+                  state_q    <= StGpRd;
+                end
+              end
+              5'd13: begin // location (<8)
+                if (stg_word_q > 32'd7) state_q <= StPipeFail;
+                else begin
+                  gp_atr_q[gp_i_q[2:0]][31]    <= 1'b1;
+                  gp_atr_q[gp_i_q[2:0]][26:24] <= stg_word_q[2:0];
+                  gp_ph_q <= 5'd14; state_q <= StGpRd;
+                end
+              end
+              5'd14: begin // binding (<4)
+                if (stg_word_q > 32'd3) state_q <= StPipeFail;
+                else begin
+                  gp_atr_q[gp_i_q[2:0]][21:20] <= stg_word_q[1:0];
+                  gp_ph_q <= 5'd15; state_q <= StGpRd;
+                end
+              end
+              5'd15: begin // format
+                if (!f_vattr_ok(stg_word_q)) state_q <= StPipeFail;
+                else begin
+                  gp_atr_q[gp_i_q[2:0]][19:12] <= stg_word_q[7:0];
+                  gp_ph_q <= 5'd16; state_q <= StGpRd;
+                end
+              end
+              5'd16: begin // offset (<2048)
+                if (stg_word_q > 32'd2047) begin
+                  state_q <= StPipeFail;
+                end else begin
+                  gp_atr_q[gp_i_q[2:0]][11:0] <= stg_word_q[11:0];
+                  gp_i_q  <= gp_i_q + 4'd1;
+                  gp_ph_q <= (gp_i_q + 4'd1 >= gp_nattr_q)
+                             ? 5'd17 : 5'd13;
+                  state_q <= StGpRd;
+                end
+              end
+              5'd17: begin // pInputAssemblyState presence
+                if (stg_word_q == 32'h0) state_q <= StPipeFail;
+                else begin gp_ph_q <= 5'd18; state_q <= StGpRd; end
+              end
+              6'd18: begin // topology: TRIANGLE_LIST/STRIP/FAN
+                if (stg_word_q != 32'd3 && stg_word_q != 32'd4 &&
+                    stg_word_q != 32'd5)
+                  state_q <= StPipeFail;
+                else begin
+                  gp_top_q <= stg_word_q[7:0];
+                  gp_ph_q  <= 6'd19; state_q <= StGpRd;
+                end
+              end
+              5'd19: begin // pRasterizationState presence
+                if (stg_word_q == 32'h0) state_q <= StPipeFail;
+                else begin gp_ph_q <= 5'd20; state_q <= StGpRd; end
+              end
+              5'd20: begin // cullMode (FRONT|BACK bits only)
+                if (stg_word_q > 32'd3) state_q <= StPipeFail;
+                else begin
+                  gp_cull_q <= stg_word_q[1:0];
+                  gp_ph_q   <= 5'd21; state_q <= StGpRd;
+                end
+              end
+              6'd21: begin // frontFace (CCW=1)
+                if (stg_word_q > 32'd1) state_q <= StPipeFail;
+                else begin
+                  // VkFrontFace is CCW=0/CW=1; the ObjPay bit is the
+                  // semantic front_ccw flag (1 = counter-clockwise)
+                  gp_ff_q <= !stg_word_q[0];
+                  gp_ph_q <= 6'd22; state_q <= StGpRd;
+                end
+              end
+              6'd22: begin // pDepthStencilState presence (optional)
+                gp_ph_q <= (stg_word_q == 32'h0) ? 6'd27 : 6'd23;
+                state_q <= StGpRd;
+              end
+              6'd23: begin // depthTestEnable
+                gp_dte_q <= |stg_word_q;
+                gp_ph_q  <= 6'd24; state_q <= StGpRd;
+              end
+              6'd24: begin // depthWriteEnable
+                gp_dwr_q <= |stg_word_q;
+                gp_ph_q  <= 6'd25; state_q <= StGpRd;
+              end
+              6'd25: begin // depthCompareOp (NEVER..ALWAYS 0..7)
+                if (stg_word_q > 32'd7) state_q <= StPipeFail;
+                else begin
+                  gp_dcmp_q <= stg_word_q[2:0];
+                  gp_ph_q   <= 6'd26; state_q <= StGpRd;
+                end
+              end
+              6'd26: begin // stencilTestEnable must be 0 in v1
+                if (stg_word_q != 32'h0) state_q <= StPipeFail;
+                else begin gp_ph_q <= 6'd27; state_q <= StGpRd; end
+              end
+              6'd27: begin // pColorBlendState presence (optional)
+                gp_ph_q <= (stg_word_q == 32'h0) ? 6'd41 : 6'd28;
+                state_q <= StGpRd;
+              end
+              6'd28: begin // attachmentCount (0..4)
+                if (stg_word_q > 32'd4) begin
+                  state_q <= StPipeFail;
+                end else begin
+                  gp_natt_q <= stg_word_q[2:0];
+                  gp_i_q    <= '0;
+                  gp_ph_q   <= (stg_word_q == 32'h0) ? 6'd37 : 6'd29;
+                  state_q   <= StGpRd;
+                end
+              end
+              // per-attachment {en, srcC, dstC, opC, srcA, dstA,
+              // opA, mask} -> gp_blend_q packed as apu_rast_blend_t
+              6'd29: begin // blendEnable
+                gp_blend_q[gp_i_q[1:0]][0] <= |stg_word_q;
+                gp_ph_q <= 6'd30; state_q <= StGpRd;
+              end
+              6'd30: begin // srcColorBlendFactor (0..14)
+                if (stg_word_q > 32'd14) state_q <= StPipeFail;
+                else begin
+                  gp_blend_q[gp_i_q[1:0]][5:1] <= stg_word_q[4:0];
+                  gp_ph_q <= 6'd31; state_q <= StGpRd;
+                end
+              end
+              6'd31: begin // dstColorBlendFactor
+                if (stg_word_q > 32'd14) state_q <= StPipeFail;
+                else begin
+                  gp_blend_q[gp_i_q[1:0]][10:6] <= stg_word_q[4:0];
+                  gp_ph_q <= 6'd32; state_q <= StGpRd;
+                end
+              end
+              6'd32: begin // colorBlendOp (0..4)
+                if (stg_word_q > 32'd4) state_q <= StPipeFail;
+                else begin
+                  gp_blend_q[gp_i_q[1:0]][13:11] <= stg_word_q[2:0];
+                  gp_ph_q <= 6'd33; state_q <= StGpRd;
+                end
+              end
+              6'd33: begin // srcAlphaBlendFactor
+                if (stg_word_q > 32'd14) state_q <= StPipeFail;
+                else begin
+                  gp_blend_q[gp_i_q[1:0]][18:14] <= stg_word_q[4:0];
+                  gp_ph_q <= 6'd34; state_q <= StGpRd;
+                end
+              end
+              6'd34: begin // dstAlphaBlendFactor
+                if (stg_word_q > 32'd14) state_q <= StPipeFail;
+                else begin
+                  gp_blend_q[gp_i_q[1:0]][23:19] <= stg_word_q[4:0];
+                  gp_ph_q <= 6'd35; state_q <= StGpRd;
+                end
+              end
+              6'd35: begin // alphaBlendOp
+                if (stg_word_q > 32'd4) state_q <= StPipeFail;
+                else begin
+                  gp_blend_q[gp_i_q[1:0]][26:24] <= stg_word_q[2:0];
+                  gp_ph_q <= 6'd36; state_q <= StGpRd;
+                end
+              end
+              6'd36: begin // colorWriteMask (RGBA bits)
+                if (stg_word_q > 32'd15) state_q <= StPipeFail;
+                else begin
+                  gp_blend_q[gp_i_q[1:0]][30:27] <= stg_word_q[3:0];
+                  gp_i_q  <= gp_i_q + 4'd1;
+                  gp_ph_q <= (gp_i_q + 4'd1 >= 4'(gp_natt_q))
+                             ? 6'd37 : 6'd29;
+                  state_q <= StGpRd;
+                end
+              end
+              6'd37, 6'd38, 6'd39, 6'd40: begin // blendConstants[0..3]
+                gp_bconst_q[gp_ph_q - 6'd37] <= stg_word_q;
+                gp_ph_q <= gp_ph_q + 6'd1;
+                state_q <= StGpRd;
+              end
+              6'd41: begin // pDynamicState presence (optional)
+                gp_ph_q <= (stg_word_q == 32'h0) ? 6'd44 : 6'd42;
+                state_q <= StGpRd;
+              end
+              6'd42: begin // dynamicStateCount
+                gp_ndyn_q <= stg_word_q[7:0];
+                gp_i_q    <= '0;
+                gp_ph_q   <= (stg_word_q == 32'h0) ? 6'd44 : 6'd43;
+                state_q   <= StGpRd;
+              end
+              6'd43: begin // dynamic state ids; BLEND_CONSTANTS = 4
+                if (stg_word_q == 32'd4) gp_bcdyn_q <= 1'b1;
+                gp_i_q  <= gp_i_q + 4'd1;
+                gp_ph_q <= (gp_i_q + 4'd1 >= 4'(gp_ndyn_q))
+                           ? 6'd44 : 6'd43;
+                state_q <= StGpRd;
+              end
+              6'd44: begin // layout id lo
+                pl_layid_q[31:0] <= stg_word_q;
+                gp_ph_q <= 6'd45; state_q <= StGpRd;
+              end
+              default: begin // 6'd45: layout id hi -> resolve VS module
+                pl_layid_q[63:32] <= stg_word_q;
+                otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                             id: APU_VN_ID_TAG | gp_mod0_q,
+                             kind: 6'(APU_VN_KIND_VK_SHADER_MODULE),
+                             ctx: ctx_i, default: '0};
+                ot_ret_q <= StGpModC;
+                state_q  <= StOtReq;
+              end
+            endcase
+          end
+          // module LOOKUP completion -> stage commit loop (StShCommit
+          // pulses {slot,nwords}; the completion lands at StShCWait)
+          StGpModL: begin
+            otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                         id: APU_VN_ID_TAG |
+                             (gp_st_q ? gp_mod1_q : gp_mod0_q),
+                         kind: 6'(APU_VN_KIND_VK_SHADER_MODULE),
+                         ctx: ctx_i, default: '0};
+            ot_ret_q <= StGpModC;
+            state_q  <= StOtReq;
+          end
+          StGpModC: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              state_q <= StPipeFail;
+            end else begin
+              sh_slot_q <= ot_cpl_i.entry.aux[2:0];
+              sh_nw_q   <= ot_cpl_i.entry.aux[31:16];
+              state_q   <= StShCommit;
+            end
+          end
+          // REF success -> next stage, then the pipeline-layout lookup
+          StGpRefC: begin
+            if (!sm_ok_q) begin
+              state_q <= StPipeFail;
+            end else begin
+              gp_refs_q <= gp_refs_q + 2'd1;
+              if (!gp_st_q) begin
+                gp_st_q <= 1'b1;
+                state_q <= StGpModL;
+              end else begin
+                otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
+                             id: APU_VN_ID_TAG | pl_layid_q,
+                             kind: 6'(APU_VN_KIND_VK_PIPELINE_LAYOUT),
+                             ctx: ctx_i, default: '0};
+                ot_ret_q <= StGpLayC;
+                state_q  <= StOtReq;
+              end
+            end
+          end
+          StGpLayC: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              state_q <= StPipeFail;
+            end else begin
+              pl_layh_q <= ot_cpl_i.handle;
+              // 22-word ObjPay state block for the draw assembly
+              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC, words: 32'd22,
+                           default: '0};
+              op_ret_q <= StGpAlcC;
+              state_q  <= StOpReq;
+            end
+          end
+          StGpAlcC: begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
+              state_q <= StPipeFail;
+            end else begin
+              op_base_q <= 16'(op_cpl_i.base);
+              pay_i_q   <= '0;
+              state_q   <= StGpPayW;
+            end
+          end
+          StGpPayW: begin
+            opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
+                         addr: {16'h0, op_base_q} + {16'h0, pay_i_q},
+                         wdata: gp_pay_w(pay_i_q[4:0]), default: '0};
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] vnf gpayw[%0d] @%04x = %08x (fsm=%02x top=%02x na=%0d nb=%0d cull=%0d ff=%0d) t=%0t",
+                     pay_i_q, op_base_q + pay_i_q, gp_pay_w(pay_i_q[4:0]),
+                     gp_fsm_q, gp_top_q, gp_nattr_q, gp_nbind_q,
+                     gp_cull_q, gp_ff_q, $time);
+`endif
+            op_ret_q <= StGpPayWd;
+            state_q  <= StOpReq;
+          end
+          StGpPayWd: begin
+            if (pay_i_q + 16'd1 >= 16'd22) begin
+              // ObjTab ALLOC the pipeline object (id = this element's
+              // out id); aux writes follow on the completion
+              otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
+                         id: blob_id_q,
+                         kind: act_q.obj_kind,
+                         parent_id: act_q.parent_qslot ==
+                                    APU_VN_QSLOT_NONE
+                                    ? 64'h0
+                                    : {32'h0,
+                                       hnd_q[int'(act_q.parent_qslot)]},
+                         ctx: ctx_i, default: '0};
+              ot_ret_q <= StGpObjC;
+              state_q  <= StOtReq;
+            end else begin
+              pay_i_q <= pay_i_q + 16'd1;
+              state_q <= StGpPayW;
+            end
+          end
+          StGpObjC: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              // no object: free the ObjPay extent; the refs unwind at
+              // StPipeFail
+              opr_q    <= '{op: APU_OBJPAY_OP_FREE,
+                           addr: {16'h0, op_base_q},
+                           words: 32'd22, default: '0};
+              op_ret_q <= StGpUnr;
+              state_q  <= StOpReq;
+            end else begin
+              hnd_pay_q    <= ot_cpl_i.handle;
+              // aux[31:0] = {ObjPay base[15:0], 9'h0, gfx=1[6],
+              //              fs_slot[5:3], vs_slot[2:0]}
+              auxlo_val_q  <= {op_base_q[15:0], 9'h0, 1'b1,
+                               gp_fs_q, gp_vs_q};
+              auxlo_mask_q <= 32'hFFFF_FFFF;
+              auxlo_ret_q  <= StGpAuxH;
+              state_q      <= StAuxLo;
+            end
+          end
+          StGpAuxH: begin
+            // aux[63:32] = pipeline-layout handle {gen,slot} — the
+            // compute convention the dispatch chain already reads
+            auxhi_val_q <= pl_layh_q;
+            auxhi_ret_q <= StPipeAuxHiC;
+            state_q     <= StAuxSet;
+          end
+          // unwind ShaderCore refs taken by this element (the ObjPay
+          // extent, if any, was already freed at StGpObjC)
+          StGpUnr: begin
+            if (gp_refs_q == 2'd0) begin
+              if (!pl_errv_q) begin
+                pl_errv_q <= 1'b1;
+                result_q  <= APU_VK_ERROR_UNKNOWN;
+              end
+              rep_null_mask_q[blob_i_q] <= 1'b1;
+              blob_i_q <= blob_i_q + 5'd1;
+              state_q  <= StBlobRd;
+            end else begin
+              sm_op_q   <= APU_SH_SM_UNREF;
+              sm_slot_q <= gp_refs_q == 2'd2 ? gp_fs_q : gp_vs_q;
+              gp_refs_q <= gp_refs_q - 2'd1;
+              sm_ret_q  <= StGpUnr;
+              state_q   <= StSmReq;
+            end
           end
           StPipeH1: begin
             pl_modid_q[31:0] <= stg_word_q;
@@ -3964,6 +4816,31 @@ module g6lc_apu_vnfront
             shc_ok_q <= sh_c_done_pl_i.ok;
             if (!sh_c_done_pl_i.ok) begin
               state_q <= StPipeFail;
+            end else if (pre_gp_q) begin
+              // G1c: the commit payload carries the parsed entry —
+              // the VS module must report execution-model VERTEX,
+              // the FS module FRAGMENT (its Input-location mask is
+              // what the raster interpolates)
+              if (!gp_st_q) begin
+                if (sh_c_done_pl_i.entry.em != APU_SH_EM_VERTEX) begin
+                  state_q <= StPipeFail;
+                end else begin
+                  gp_vs_q   <= sh_slot_q;
+                  sm_op_q   <= APU_SH_SM_REF;
+                  sm_ret_q  <= StGpRefC;
+                  state_q   <= StSmReq;
+                end
+              end else begin
+                if (sh_c_done_pl_i.entry.em != APU_SH_EM_FRAGMENT) begin
+                  state_q <= StPipeFail;
+                end else begin
+                  gp_fs_q   <= sh_slot_q;
+                  gp_fsm_q  <= sh_c_done_pl_i.entry.in_mask;
+                  sm_op_q   <= APU_SH_SM_REF;
+                  sm_ret_q  <= StGpRefC;
+                  state_q   <= StSmReq;
+                end
+              end
             end else begin
               // commit ok: the pipeline holds a slot reference
               sm_op_q   <= APU_SH_SM_REF;
@@ -4021,25 +4898,60 @@ module g6lc_apu_vnfront
             blob_i_q <= blob_i_q + 5'd1;
             state_q  <= StBlobRd;
           end
-          // failed element: first error + VK_NULL_HANDLE echo
+          // failed element: first error + VK_NULL_HANDLE echo; a
+          // graphics element unwinds the ShaderCore refs it already
+          // took first (StPipeFail re-enters via sm_ret until 0)
           StPipeFail: begin
-            if (!pl_errv_q) begin
-              pl_errv_q <= 1'b1;
-              result_q  <= APU_VK_ERROR_UNKNOWN;
+            if (pre_gp_q && gp_refs_q != 2'd0) begin
+              sm_op_q   <= APU_SH_SM_UNREF;
+              sm_slot_q <= gp_refs_q == 2'd2 ? gp_fs_q : gp_vs_q;
+              gp_refs_q <= gp_refs_q - 2'd1;
+              sm_ret_q  <= StPipeFail;
+              state_q   <= StSmReq;
+            end else begin
+              if (!pl_errv_q) begin
+                pl_errv_q <= 1'b1;
+                result_q  <= APU_VK_ERROR_UNKNOWN;
+              end
+              rep_null_mask_q[blob_i_q] <= 1'b1;
+              blob_i_q <= blob_i_q + 5'd1;
+              state_q  <= StBlobRd;
             end
-            rep_null_mask_q[blob_i_q] <= 1'b1;
-            blob_i_q <= blob_i_q + 5'd1;
-            state_q  <= StBlobRd;
           end
 
           // ---- §7b/5a-ii: retire continuation after sm UNREF ----------
+          // G1c: a graphics pipeline (ret_gp_q) drops both stage refs:
+          // ret_sm_q[2:0] held the VS slot, ret_fs_q the FS slot.
           StRetSm: begin
+            if (ret_gp_q) begin
+              sm_op_q   <= APU_SH_SM_UNREF;
+              sm_slot_q <= ret_fs_q;
+              sm_ret_q  <= StRetSmF;
+              state_q   <= StSmReq;
+              ret_gp_q  <= 1'b0;
+            end else begin
+              otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
+                           id: APU_VN_ID_TAG | op_q.q[
+                               role_slot(op_q, APU_VN_ROLE_RETIRE)],
+                           kind: act_q.obj_kind, default: '0};
+              ot_ret_q <= StRetCpl;
+              state_q  <= StOtReq;
+            end
+          end
+          StRetSmF: begin
             otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
                          id: APU_VN_ID_TAG | op_q.q[
                              role_slot(op_q, APU_VN_ROLE_RETIRE)],
                          kind: act_q.obj_kind, default: '0};
             ot_ret_q <= StRetCpl;
             state_q  <= StOtReq;
+          end
+          // G1c retire tail: ObjPay extent freed (sm_slot_q still
+          // holds the VS slot) -> UNREF VS, StRetSm does FS + RETIRE
+          StRetUnrV: begin
+            sm_op_q   <= APU_SH_SM_UNREF;
+            sm_ret_q  <= StRetSm;
+            state_q   <= StSmReq;
           end
 
           // ---- §12.3 C/5b: image create validation + mip walk ---------
@@ -4067,7 +4979,24 @@ module g6lc_apu_vnfront
                          op_q.imm[7] < 32'd1 ||
                          op_q.imm[7] > 32'd256 ||         // maxImageArrayLayers
                          op_q.imm[10] == 32'h0 ||
-                         (op_q.imm[10] & ~32'hF) != 32'h0 // usage ⊆ TS|TD|S|ST
+                         // usage ⊆ TS|TD|S|ST|CA|DSA (0x3F); CA only
+                         // on the four color-attachment formats, DSA
+                         // only on the two depth formats (G2a)
+                         (op_q.imm[10] & ~32'h3F) != 32'h0 ||
+                         ((op_q.imm[10] & 32'h10) != 32'h0 &&
+                          f_img_fmt(op_q.imm[2]) !=
+                              8'(APU_IMG_FMT_R8G8B8A8_UNORM) &&
+                          f_img_fmt(op_q.imm[2]) !=
+                              8'(APU_IMG_FMT_R8G8B8A8_SRGB) &&
+                          f_img_fmt(op_q.imm[2]) !=
+                              8'(APU_IMG_FMT_B8G8R8A8_UNORM) &&
+                          f_img_fmt(op_q.imm[2]) !=
+                              8'(APU_IMG_FMT_B8G8R8A8_SRGB)) ||
+                         ((op_q.imm[10] & 32'h20) != 32'h0 &&
+                          f_img_fmt(op_q.imm[2]) !=
+                              8'(APU_IMG_FMT_D32_SFLOAT) &&
+                          f_img_fmt(op_q.imm[2]) !=
+                              8'(APU_IMG_FMT_D16_UNORM))
                         ) begin
               result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;
               state_q  <= StRep;
@@ -4133,8 +5062,14 @@ module g6lc_apu_vnfront
                 ? 32'(imips) - op_q.imm[8] : op_q.imm[9];
             automatic logic [31:0] ac = op_q.imm[11] == 32'hFFFF_FFFF
                 ? 32'(ilays) - op_q.imm[10] : op_q.imm[11];
+            // G2a: the view aspect is COLOR on color formats and
+            // DEPTH on the two depth formats
+            automatic logic        asp_ok =
+                (ent_q.aux[39:32] == 8'(APU_IMG_FMT_D32_SFLOAT) ||
+                 ent_q.aux[39:32] == 8'(APU_IMG_FMT_D16_UNORM))
+                ? op_q.imm[7] == 32'd2 : op_q.imm[7] == 32'd1;
             if (op_q.imm[1] != 32'd1 && op_q.imm[1] != 32'd5 ||
-                op_q.imm[7] != 32'd1 ||
+                !asp_ok ||
                 op_q.imm[3] > 32'd6 || op_q.imm[4] > 32'd6 ||
                 op_q.imm[5] > 32'd6 || op_q.imm[6] > 32'd6) begin
               result_q <= APU_VK_ERROR_FEATURE_NOT_PRESENT;

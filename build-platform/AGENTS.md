@@ -182,6 +182,24 @@ and supports an internal `--remote` flag to switch between `g6q.py` and
    `requiresSubmodule` (e.g. `"riscv-dv"`), `requiresUvm`, `optional`.
 2. Reference its id in `tests.defaultSuites` to include it in the default run.
 
+`TestSuite.args` optionally supplies a string argv array to the script (no shell
+concatenation; non-string/NUL arguments are rejected). The optional host-only
+`apu-profile-audit` suite uses `run-apu-regress.sh --stages profile`. It is a bounded
+read-only capability check, currently expected to fail on the experimental profile,
+not an RTL or CTS qualification. Run `bun build-platform/src/cli/index.ts test --suite
+apu-profile-audit` from the repository root. APU RTL stages must run wholly through the
+remote gateway on isolated sources; the old aggregate script's partial `--remote`
+behavior is refused. The optional `apu-remote-leaf` suite (`execution: "remote-proxy"`,
+outside `defaultSuites`) wraps `verif/tb/apu/run-apu-remote-leaf.sh`, which calls
+`testharness_proxy.py apu-leaf <repo> --stages ${APU_LEAF_STAGES:-unit,top,soc,bridge,synth}`
+with a `${APU_LEAF_TIMEOUT:-21600}` second poll budget: the git-visible APU source closure
+plus generated oracle inputs is pushed to an isolated remote snapshot, sha256-verified, run
+detached on the pinned toolchain and pulled to `remote-runs/apu-leaf-<tag>/` with a
+`leaf-result.json` verdict (0 pass / 1 fail / 4 incomplete; identity mismatch is always
+incomplete). It is selected-stage evidence, not strict qualification: no evidence-identity
+record is emitted for `G6LC_QUALIFICATION_IDENTITY`. Selected-stage JSON summaries are not
+strict build manifests.
+
 Both `bun run src/cli/index.ts test` and `bun test` discover suites from config — no code
 change needed. Preflight (`tools` / `requiresSubmodule` / `requiresUvm`) decides
 whether the suite runs or is skipped-with-reason, so it self-integrates into

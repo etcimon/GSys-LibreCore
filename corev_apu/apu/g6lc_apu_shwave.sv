@@ -33,6 +33,8 @@
 // output off with no datapath.
 
 module g6lc_apu_shwave
+  import g6lc_apu_vn_pkg::*;
+  import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_sh_pkg::*;
 #(
   parameter bit          Enable        = 1'b0,
@@ -94,7 +96,19 @@ module g6lc_apu_shwave
   input  logic         mem_ready_i,
   input  logic         mem_rvalid_i,
   input  logic [63:0]  mem_rdata_i,
-  input  logic         mem_err_i
+  input  logic         mem_err_i,
+  // §12.3 3d-d: descriptor records carry a memory handle {gen,slot},
+  // not an absolute base — on a record-cache miss the LSU resolves the
+  // memory's CURRENT base through a direct-slot ObjTab read (vgtop's
+  // 5th, lowest-priority requester).  A dead, generation-mismatched,
+  // or unbacked memory resolves to the null record, so relocation and
+  // memory free/reuse can never strand a record.
+  output logic            ot_req_valid_o,
+  input  logic            ot_req_ready_i,
+  output apu_objtab_req_t ot_req_o,
+  input  logic            ot_cpl_valid_i,
+  output logic            ot_cpl_ready_o,
+  input  apu_objtab_cpl_t ot_cpl_i
 );
   if (!Enable) begin : gen_off
     assign busy_o = 1'b0;   assign done_o = 1'b0;
@@ -107,6 +121,8 @@ module g6lc_apu_shwave
     assign mem_re_o = 1'b0; assign mem_we_o = 1'b0;
     assign mem_addr_o = '0; assign mem_wdata_o = '0;
     assign mem_wstrb_o = '0;
+    assign ot_req_valid_o = 1'b0; assign ot_req_o = '0;
+    assign ot_cpl_ready_o = 1'b0;
     logic unused;
     assign unused = clk_i | rst_ni | testmode_i | disp_i |
                     (|disp_pl_i) | (|desc_i) | (|push_n_i) |
@@ -114,7 +130,9 @@ module g6lc_apu_shwave
                     (|const_data_i) | (|memb_data_i) | (|rm_data_i) |
                     (|init_data_i) | (|blk_data_i) | (|phi_data_i) |
                     (|entry_data_i) | (|mem_rdata_i) | mem_ready_i |
-                    mem_rvalid_i | mem_err_i | MatHelperEn;
+                    mem_rvalid_i | mem_err_i |
+                    ot_req_ready_i | ot_cpl_valid_i | (|ot_cpl_i) |
+                    MatHelperEn;
   end else begin : gen_on
     localparam int unsigned LAN  = ShaderLanes;
     localparam int unsigned VEC  = ShaderVec;
@@ -181,12 +199,18 @@ module g6lc_apu_shwave
       // record cache -> four-beat aperture fetch) shared by the LSU
       // and OpArrayLength, plus the post-resolve bounds-check point
       W_DS0, W_DS1, W_DS2, W_DS3, W_DS4, W_DS5, W_DS6, W_DS7, W_DS8,
+      // §12.3 3d-d: record memory-handle resolution — ObjTab READSLOT
+      // request (W_DS9) and completion/resolve (W_DSA)
+      W_DS9, W_DSA,
       W_LSC,
       // §12.3 C/5b texture path: image ops serialize lanes through a
       // record fetch (DS path), a per-mip layout walk, then a texel
       // loop over the dispatch-scoped texture cache (W_TXF* fill).
       W_TX0, W_TX1, W_TX2, W_TX3, W_TX4,
       W_TXM,                           // mip-layout walk iterator
+      // G2b implicit-LOD: quad-lane derivative chain producing λ
+      W_TXL0, W_TXL1, W_TXL2, W_TXL3, W_TXL4, W_TXL5, W_TXL6, W_TXL7,
+      W_TXL8, W_TXL9, W_TXLA, W_TXLB, W_TXLC,
       W_TXC0, W_TXC1, W_TXC2, W_TXC3,  // sampled-coord compute
       W_TXC4, W_TXC5, W_TXC6,
       W_TXB,                           // fetch/read/write bounds+addr
@@ -206,6 +230,28 @@ module g6lc_apu_shwave
     logic [2:0]   slot_q;
     logic [15:0]  gx_q, gy_q, gz_q;
     logic [31:0]  wid_q;
+    // graphics wave work (G1a): WORK_VS/FS arrive as dispatches whose
+    // work_id is the pseudo-ctype and whose imm words carry the record
+    // batch; lane l of wave w is record index w*LAN + l
+    logic [1:0]   gfx_q;              // APU_SH_GFX_*
+    logic [31:0]  gcnt_q;             // imm[0]: record count
+    logic [31:0]  in_base_q;          // imm[1]: input-record base (aperture byte addr)
+    logic [31:0]  out_base_q;         // imm[2]: output-record base
+    logic [31:0]  vbase_q;            // imm[3]: first vertex index
+    logic [31:0]  inst_q;             // imm[4]: instance index
+    // G2b: FS waves carry the primitive's front-facing bit in
+    // imm[3].0 (vbase is a VS-only field); FrontFacing reads it
+    logic         frontf_q;
+    // G2b: quad-lane derivative remap state — dla/dlb select the
+    // source lanes for the minuend/subtrahend of a derivative job,
+    // dva_q picks which operand slot they read (0 for OpDPdx-family,
+    // 1 for the texcoord operand of implicit-LOD)
+    logic [2:0]   dla_q, dlb_q;
+    logic [1:0]   dva_q;
+    wire  [31:0]  gfx_istr = (gfx_q == APU_SH_GFX_VS)
+                           ? 32'(APU_SH_ATTR_STRIDE) : 32'(APU_SH_VARY_STRIDE);
+    wire  [31:0]  gfx_ostr = (gfx_q == APU_SH_GFX_VS)
+                           ? 32'(APU_SH_VARY_STRIDE) : 32'(APU_SH_ATTR_STRIDE);
     // F5: desc_i is NOT latched — cmdexec holds desc_o stable from
     // dispatch until work_done (StDsDone blocks on work_done_i), so a
     // second ~5.3 kbit copy here would be dead area
@@ -410,7 +456,7 @@ module g6lc_apu_shwave
     logic [5:0]   xq_q;
     logic [4:0]   xop_q;          // ext inst number / job op
     logic [1:0]   jmode_q;        // 0 fma-vec, 1 dsq, 2 cvt, 3 nc
-    logic [5:0]   ja_q, jb_q, jc_q; // {cmode[1:0], src[3:0]}
+    logic [6:0]   ja_q, jb_q, jc_q; // {cmode[1:0], src[4:0]}
     logic [1:0]   jdst_q;         // 0 wb, 1 t0, 2 t1, 3 t2
     vt_t          t0_q, t1_q, t2_q;
     logic [2:0]   tc_q;           // iterating comp for serial units
@@ -446,6 +492,7 @@ module g6lc_apu_shwave
     logic [63:0]  ls_bind_q;
     logic [31:0]  ls_bsz_q;
     logic         ls_bok_q;
+    logic         ls_rec_q;           // graphics record access (no DS resolve)
     logic [63:0]  ls_addr_q;
     // counters / faults
     logic [31:0]  insns_q, robust_q;
@@ -483,6 +530,7 @@ module g6lc_apu_shwave
     wire [15:0] iw_idx    = init_data_i[15:0];
     wire [3:0]  iw_sc     = init_data_i[19:16];
     wire [7:0]  iw_bi     = init_data_i[27:20];
+    wire [3:0]  iw_fl     = init_data_i[31:28];   // APU_SH_VF_*
     wire [7:0]  iw_set    = init_data_i[39:32];
     wire [7:0]  iw_bd     = init_data_i[47:40];
     wire [15:0] iw_off    = init_data_i[63:48];
@@ -490,6 +538,7 @@ module g6lc_apu_shwave
     wire [15:0] mb_mst    = memb_data_i[31:16];
     // member row: {14'h0, ty[9:0], flags[7:0], mstride[15:0], off[15:0]}
     wire [9:0]  mb_ty     = memb_data_i[49:40];
+    wire [7:0]  mb_fl     = memb_data_i[39:32];   // APU_SH_MF_*
     wire [14:0] blk_pc    = blk_data_i[14:0];
     wire        blk_ok    = blk_data_i[15];
 
@@ -501,12 +550,13 @@ module g6lc_apu_shwave
     endfunction
     function automatic logic f_has_rty(input logic [15:0] o);
       unique case (o)
-        12,61,65,66,68,79,80,81,82,84,86,88,95,98,100,103,104,106,
+        12,61,65,66,68,79,80,81,82,84,86,87,88,95,98,100,103,104,106,
         109,110,111,112,124,126,127,128,
         129,130,131,132,133,134,135,136,137,138,139,142,143,144,145,
         146,147,148,164,165,166,167,168,169,170,171,172,173,174,175,
         176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,
-        191,194,195,196,197,198,199,200,245:
+        191,194,195,196,197,198,199,200,
+        207,208,209,210,211,212,213,214,215,245:
           f_has_rty = 1'b1;
         default: f_has_rty = 1'b0;
       endcase
@@ -526,6 +576,9 @@ module g6lc_apu_shwave
         99:      f_nva = 3'd3;              // ImageWrite: img,coord,texel
         95:      f_nva = (wc > 6) ? 3'd3 : 3'd2;  // Fetch: img,coord[,lod]
         88:      f_nva = 3'd3;              // SampleExplicitLod + Lod op
+        87:      f_nva = 3'd2;              // SampleImplicitLod: img,coord
+        207,208,209,210,211,212,213,214,215:
+               f_nva = 3'd1;              // G2b derivative ops: 1 operand
         86:      f_nva = 3'd2;              // SampledImage: img,smp
         103:     f_nva = 3'd2;              // QuerySizeLod: img,lod
         0,54,56,59,224,225,245,246,247,248,249,253,255:
@@ -578,6 +631,16 @@ module g6lc_apu_shwave
             0: f_bi = {24'h0, lx_q}; 1: f_bi = {24'h0, ly_q};
             2: f_bi = {24'h0, lz_q}; default: f_bi = 0; endcase
           APU_SH_BI_LINDEX: f_bi = (c == 0) ? inv : 0;
+          // graphics builtins — VS Input VertexIndex/InstanceIndex are
+          // read from record slot 8 at the LSU (G2a); the f_bi arms
+          // remain as the compatibility path for callers that still
+          // evaluate them without a record context
+          APU_SH_BI_VERTEXINDEX:   f_bi = (c == 0) ? vbase_q + inv : 0;
+          APU_SH_BI_INSTANCEINDEX: f_bi = (c == 0) ? inst_q : 0;
+          // G2b: front-facing rides FS work imm[3].0 (per-primitive
+          // flush in rast keeps it constant for the whole batch)
+          APU_SH_BI_FRONTFACING:   f_bi = (c == 0)
+                                          ? {31'h0, frontf_q} : 0;
           default: f_bi = 0;
         endcase
       end
@@ -630,7 +693,7 @@ module g6lc_apu_shwave
                                        input logic [7:0] k);
       unique case (o)
         16'd95:               f_tx_kind = k == 8'd1 || k == 8'd2;
-        16'd88:               f_tx_kind = k == 8'd1 || k == 8'd2;
+        16'd87, 16'd88:       f_tx_kind = k == 8'd1 || k == 8'd2;
         16'd98:               f_tx_kind = k == 8'd2 || k == 8'd3;
         16'd99:               f_tx_kind = k == 8'd3;
         16'd103, 16'd104, 16'd106:
@@ -766,27 +829,49 @@ module g6lc_apu_shwave
         f_swz = (w == 3'd0) ? 3'(3 + c) : w;
       end
     endfunction
-    // unit operand source: {cmode[1:0], src[3:0]} → 32-bit operand
-    localparam logic [3:0] S_V0 = 0, S_V1 = 1, S_V2 = 2, S_V3 = 3,
+    // unit operand source: {cmode[1:0], src[4:0]} → 32-bit operand
+    localparam logic [4:0] S_V0 = 0, S_V1 = 1, S_V2 = 2, S_V3 = 3,
                          S_T0 = 4, S_T1 = 5, S_T2 = 6,
                          S_ONE = 7, S_TWO = 8, S_THREE = 9,
                          S_NEG2 = 10, S_ZERO = 11, S_HALF = 12,
                          S_MA = 13, S_MB = 14,         // §7c mat cols
-                         S_TX = 15;                    // 5b tex staging
-    function automatic logic [31:0] f_src(input logic [5:0] s,
+                         S_TX = 15,                    // 5b tex staging
+                         S_VDA = 16, S_VDB = 17,       // G2b quad-lane
+                         S_AT0 = 18, S_AT1 = 19,       // |t0|,|t1|
+                         S_N127 = 20;                  // -127.0f
+    // quad-lane remap for derivative ops (G2b): quads are lanes
+    // {4k..4k+3} of a wave; sel = 0 self, 1 l|1, 2 l&~1, 3 l|2,
+    // 4 l&~2, 5 quad base, 6 base+1, 7 base+2
+    function automatic logic [3:0] f_dl(input logic [3:0] l,
+                                        input logic [2:0] s);
+      logic [3:0] q;
+      begin
+        q = l & 4'hC;
+        unique case (s)
+          3'd1:    f_dl = l | 4'd1;
+          3'd2:    f_dl = l & 4'hE;
+          3'd3:    f_dl = l | 4'd2;
+          3'd4:    f_dl = l & 4'hD;
+          3'd5:    f_dl = q;
+          3'd6:    f_dl = q | 4'd1;
+          default: f_dl = q | 4'd2;
+        endcase
+      end
+    endfunction
+    function automatic logic [31:0] f_src(input logic [6:0] s,
                                           input logic [3:0] l,
                                           input logic [2:0] c);
       logic [2:0] cc;
       begin
-        unique case (s[5:4])
+        unique case (s[6:5])
           2'd1: cc = 3'd0;                    // broadcast comp0
           2'd2: cc = jrev_q ? 3'(ncomp_q - 3'd1 - {2'b0, tc_q})
                             : {2'b0, tc_q};   // iterate comp (rev for dot)
-          2'd3: cc = {1'b0, ((s[3:0] == S_V0 || s[3:0] == S_MA)
+          2'd3: cc = {1'b0, ((s[4:0] == S_V0 || s[4:0] == S_MA)
                              ? ca_q : cb_q)};
           default: cc = c;                    // per-unit comp
         endcase
-        unique case (s[3:0])
+        unique case (s[4:0])
           S_V0:    f_src = va_q[0][l][cc];
           S_V1:    f_src = va_q[1][l][cc];
           S_V2:    f_src = va_q[2][l][cc];
@@ -797,6 +882,15 @@ module g6lc_apu_shwave
           S_MA:    f_src = ma_q[l][cc];
           S_MB:    f_src = mb_q[l][cc];
           S_TX:    f_src = txfa_q[cc];
+          // G2b: quad-lane derivative operands read the remapped lane
+          // of operand slot dva_q; an inactive source lane reads 0
+          S_VDA:   f_src = act_w[f_dl(l, dla_q)]
+                           ? va_q[dva_q][f_dl(l, dla_q)][cc] : 32'h0;
+          S_VDB:   f_src = act_w[f_dl(l, dlb_q)]
+                           ? va_q[dva_q][f_dl(l, dlb_q)][cc] : 32'h0;
+          S_AT0:   f_src = {1'b0, t0_q[l][cc][30:0]};
+          S_AT1:   f_src = {1'b0, t1_q[l][cc][30:0]};
+          S_N127:  f_src = 32'hC2FE_0000;
           S_ONE:   f_src = 32'h3F80_0000;
           S_TWO:   f_src = 32'h4000_0000;
           S_THREE: f_src = 32'h4040_0000;
@@ -808,7 +902,7 @@ module g6lc_apu_shwave
     endfunction
     // unit job descriptor: jmode 0=fma-vec,1=dsq,2=cvt,3=nc
     task automatic jset(input logic [1:0] jm, input logic [4:0] xo,
-                        input logic [5:0] a, b, c,
+                        input logic [6:0] a, b, c,
                         input logic [1:0] dst, input logic dot,
                         input st_e ret, input logic uccc = 1'b0,
                         input logic rev = 1'b0);
@@ -1280,7 +1374,7 @@ module g6lc_apu_shwave
           rf_addr = {wave_q, iw_idx[RI-1:0]};
           for (int l = 0; l < LAN; l++) begin
             rf_wdata[l*128 +: 32]      = {16'h0, iw_off};
-            rf_wdata[l*128 + 32 +: 32] = {4'h0, iw_bd, iw_set,
+            rf_wdata[l*128 + 32 +: 32] = {iw_fl, iw_bd, iw_set,
                                           iw_bi, iw_sc};
             rf_wdata[l*128 + 64 +: 32] = '0;
             rf_wdata[l*128 + 96 +: 32] = '0;
@@ -1396,10 +1490,20 @@ module g6lc_apu_shwave
     end
 
     wire ls_mem = (ls_sc_q == APU_SH_SC_UNIFORM) ||
-                  (ls_sc_q == APU_SH_SC_SBUF);
+                  (ls_sc_q == APU_SH_SC_SBUF) || ls_rec_q;
     // F5: W_DS1/3/5/7 issue the four descriptor-record beats
     wire dsc_mem = (st_q == W_DS1) || (st_q == W_DS3) ||
                    (st_q == W_DS5) || (st_q == W_DS7);
+    // §12.3 3d-d: record memory-handle resolve — the READSLOT request
+    // is built from the just-fetched record (dsc_rec_q) and held until
+    // the arbitrated ObjTab accepts; the completion is consumed in
+    // W_DSA only
+    assign ot_req_valid_o = st_q == W_DS9;
+    assign ot_req_o = '{op: APU_OBJTAB_OP_READSLOT,
+                       id: {48'h0, dsc_rec_q[15:0]},
+                       kind: 6'(APU_VN_KIND_VK_DEVICE_MEMORY),
+                       default: '0};
+    assign ot_cpl_ready_o = st_q == W_DSA;
     // 5b: W_TXF0 streams a texture-cache line fill; W_TXW0/W_TXW1 are
     // the image-store beats (wstrb narrows sub-8B texels)
     wire txr_mem = (st_q == W_TXF0);
@@ -1634,6 +1738,10 @@ module g6lc_apu_shwave
       if (!rst_ni) begin
         st_q <= W_IDLE; ret_q <= W_EX;
         slot_q <= '0; gx_q <= '0; gy_q <= '0; gz_q <= '0; wid_q <= '0;
+        gfx_q <= APU_SH_GFX_NONE; gcnt_q <= '0;
+        in_base_q <= '0; out_base_q <= '0;
+        vbase_q <= '0; inst_q <= '0;
+        frontf_q <= 1'b0; dla_q <= '0; dlb_q <= '0; dva_q <= '0;
         push_n_q <= '0;
         dc_v_q <= '0; dc_vic_q <= '0;
         dsc_set_q <= '0; dsc_bd_q <= '0; dsc_idx_q <= '0;
@@ -1721,6 +1829,7 @@ module g6lc_apu_shwave
         ls_lane_q <= '0; ls_comp_q <= '0; ls_off_q <= '0;
         ls_sc_q <= '0; ls_bi_q <= '0; ls_store_q <= '0;
         ls_bind_q <= '0; ls_bsz_q <= '0; ls_bok_q <= '0;
+        ls_rec_q <= 1'b0;
         ls_addr_q <= '0;
         insns_q <= '0; robust_q <= '0; wait_q <= '0;
         done_code_q <= '0; fl_pc_q <= '0; fl_wave_q <= '0;
@@ -1759,6 +1868,16 @@ module g6lc_apu_shwave
             slot_q <= disp_pl_i.slot;
             gx_q <= disp_pl_i.gx; gy_q <= disp_pl_i.gy;
             gz_q <= disp_pl_i.gz; wid_q <= disp_pl_i.work_id;
+            // graphics wave work: the pseudo-ctype rides in work_id
+            gfx_q <= (disp_pl_i.work_id == APU_SH_WORK_VS) ? APU_SH_GFX_VS
+                   : (disp_pl_i.work_id == APU_SH_WORK_FS) ? APU_SH_GFX_FS
+                                                         : APU_SH_GFX_NONE;
+            gcnt_q     <= disp_pl_i.imm[31:0];
+            in_base_q  <= disp_pl_i.imm[63:32];
+            out_base_q <= disp_pl_i.imm[95:64];
+            vbase_q    <= disp_pl_i.imm[127:96];
+            inst_q     <= disp_pl_i.imm[159:128];
+            frontf_q   <= disp_pl_i.imm[96];   // imm[3].0 (FS)
             push_n_q <= push_n_i;
             // F5: desc_i stays live (cmdexec holds it through
             // work_done); the record cache is dispatch-scoped, and
@@ -1781,17 +1900,23 @@ module g6lc_apu_shwave
             lx_q <= entry_data_i[39:32]; ly_q <= entry_data_i[47:40];
             lz_q <= entry_data_i[55:48]; ninit_q <= entry_data_i[63:56];
             escratch_q <= entry_data_i[79:64];
-            tot_q <= 32'(entry_data_i[39:32]) *
-                     32'(entry_data_i[47:40]) *
-                     32'(entry_data_i[55:48]);
+            // graphics wave work: tot = the record count; the lanes of
+            // wave w are records w*LAN .. w*LAN+LAN-1
+            tot_q <= (gfx_q != APU_SH_GFX_NONE) ? gcnt_q
+                     : 32'(entry_data_i[39:32]) *
+                       32'(entry_data_i[47:40]) *
+                       32'(entry_data_i[55:48]);
             // waves per workgroup, capped at the RF depth; local sizes
             // beyond LAN*MaxWaves invocations are a config violation.
-            nwaves_q <=
-              ((32'(entry_data_i[39:32]) * 32'(entry_data_i[47:40]) *
-                32'(entry_data_i[55:48]) + LAN - 1) / LAN > MaxWaves)
-              ? 8'(MaxWaves)
-              : 8'((32'(entry_data_i[39:32]) * 32'(entry_data_i[47:40]) *
-                    32'(entry_data_i[55:48]) + LAN - 1) / LAN);
+            nwaves_q <= (gfx_q != APU_SH_GFX_NONE)
+              ? (((gcnt_q + LAN - 1) / LAN > MaxWaves)
+                 ? 8'(MaxWaves)
+                 : 8'((gcnt_q + LAN - 1) / LAN))
+              : ((32'(entry_data_i[39:32]) * 32'(entry_data_i[47:40]) *
+                  32'(entry_data_i[55:48]) + LAN - 1) / LAN > MaxWaves)
+                ? 8'(MaxWaves)
+                : 8'((32'(entry_data_i[39:32]) * 32'(entry_data_i[47:40]) *
+                      32'(entry_data_i[55:48]) + LAN - 1) / LAN);
             wfin_q <= '0; wbar_q <= '0; wave_q <= '0;
             init_i_q <= '0;
             st_q <= W_IW0;
@@ -2023,58 +2148,58 @@ module g6lc_apu_shwave
                   jset(0, 5'd3, {2'd2, S_T1}, {2'd0, S_ONE},
                        {2'd0, S_T0}, 0, 1, W_WB, 1'b0, 1'b1);
               endcase
-              136: jset(1, 5'd0, {2'd0, S_V0}, {2'd0, S_V1}, 6'h0,
+              136: jset(1, 5'd0, {2'd0, S_V0}, {2'd0, S_V1}, 7'h0,
                         0, 0, W_WB);                          // FDiv
               // converts: {mod,rnd,i2f}; F2I uses RTZ, I2F RNE,
               // mod=1 selects the UNSIGNED int side (fpnew_cast
               // convention: int_sign = msb & ~op_mod)
               109: jset(2, {1'b1, fpnew_pkg::RTZ[2:0], 1'b0},
-                        {2'd0, S_V0}, 6'h0, 6'h0, 0, 0, W_WB);  // FToU
+                        {2'd0, S_V0}, 7'h0, 7'h0, 0, 0, W_WB);  // FToU
               110: jset(2, {1'b0, fpnew_pkg::RTZ[2:0], 1'b0},
-                        {2'd0, S_V0}, 6'h0, 6'h0, 0, 0, W_WB);  // FToS
+                        {2'd0, S_V0}, 7'h0, 7'h0, 0, 0, W_WB);  // FToS
               111: jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
-                        {2'd0, S_V0}, 6'h0, 6'h0, 0, 0, W_WB);  // SToF
+                        {2'd0, S_V0}, 7'h0, 7'h0, 0, 0, W_WB);  // SToF
               112: jset(2, {1'b1, fpnew_pkg::RNE[2:0], 1'b1},
-                        {2'd0, S_V0}, 6'h0, 6'h0, 0, 0, W_WB);  // UToF
+                        {2'd0, S_V0}, 7'h0, 7'h0, 0, 0, W_WB);  // UToF
               // fp compares via noncomp CMP (180..191);
               // rnd selects predicate (RNE=LE, RTZ=LT, RDN=EQ),
               // mod inverts; FUnord* map to the same predicates
               // (EQ's NaN→mod rule gives FUNE's NaN→true for free)
               180: jset(3, {1'b0, fpnew_pkg::RDN[2:0], 1'b0},
-                        {2'd0, S_V0}, {2'd0, S_V1}, 6'h0, 0, 0,
+                        {2'd0, S_V0}, {2'd0, S_V1}, 7'h0, 0, 0,
                         W_WB);                                // FOE
               181: jset(3, {1'b0, fpnew_pkg::RDN[2:0], 1'b0},
-                        {2'd0, S_V0}, {2'd0, S_V1}, 6'h0, 0, 0,
+                        {2'd0, S_V0}, {2'd0, S_V1}, 7'h0, 0, 0,
                         W_WB);                                // FUE
               182: jset(3, {1'b1, fpnew_pkg::RDN[2:0], 1'b0},
-                        {2'd0, S_V0}, {2'd0, S_V1}, 6'h0, 0, 0,
+                        {2'd0, S_V0}, {2'd0, S_V1}, 7'h0, 0, 0,
                         W_WB);                                // FONE
               183: jset(3, {1'b1, fpnew_pkg::RDN[2:0], 1'b0},
-                        {2'd0, S_V0}, {2'd0, S_V1}, 6'h0, 0, 0,
+                        {2'd0, S_V0}, {2'd0, S_V1}, 7'h0, 0, 0,
                         W_WB);                                // FUNE
               184: jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b0},
-                        {2'd0, S_V0}, {2'd0, S_V1}, 6'h0, 0, 0,
+                        {2'd0, S_V0}, {2'd0, S_V1}, 7'h0, 0, 0,
                         W_WB);                                // FOLT
               185: jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b0},
-                        {2'd0, S_V0}, {2'd0, S_V1}, 6'h0, 0, 0,
+                        {2'd0, S_V0}, {2'd0, S_V1}, 7'h0, 0, 0,
                         W_WB);                                // FULT
               186: jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b0},
-                        {2'd0, S_V1}, {2'd0, S_V0}, 6'h0, 0, 0,
+                        {2'd0, S_V1}, {2'd0, S_V0}, 7'h0, 0, 0,
                         W_WB);                                // FOGT
               187: jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b0},
-                        {2'd0, S_V1}, {2'd0, S_V0}, 6'h0, 0, 0,
+                        {2'd0, S_V1}, {2'd0, S_V0}, 7'h0, 0, 0,
                         W_WB);                                // FUGT
               188: jset(3, {1'b0, fpnew_pkg::RNE[2:0], 1'b0},
-                        {2'd0, S_V0}, {2'd0, S_V1}, 6'h0, 0, 0,
+                        {2'd0, S_V0}, {2'd0, S_V1}, 7'h0, 0, 0,
                         W_WB);                                // FOLE
               189: jset(3, {1'b0, fpnew_pkg::RNE[2:0], 1'b0},
-                        {2'd0, S_V0}, {2'd0, S_V1}, 6'h0, 0, 0,
+                        {2'd0, S_V0}, {2'd0, S_V1}, 7'h0, 0, 0,
                         W_WB);                                // FULE
               190: jset(3, {1'b0, fpnew_pkg::RNE[2:0], 1'b0},
-                        {2'd0, S_V1}, {2'd0, S_V0}, 6'h0, 0, 0,
+                        {2'd0, S_V1}, {2'd0, S_V0}, 7'h0, 0, 0,
                         W_WB);                                // FOGE
               191: jset(3, {1'b0, fpnew_pkg::RNE[2:0], 1'b0},
-                        {2'd0, S_V1}, {2'd0, S_V0}, 6'h0, 0, 0,
+                        {2'd0, S_V1}, {2'd0, S_V0}, 7'h0, 0, 0,
                         W_WB);                                // FUGE
               // integer div/rem/mod (shared per-lane divider)
               134,135,137,138,139: begin
@@ -2086,10 +2211,56 @@ module g6lc_apu_shwave
                 tc_q <= '0; ret_q <= W_WB; st_q <= W_IDIV;
               end
               // §12.3 C/5b: image/sampler ops — SampledImage (86),
-              // SampleExplicitLod (88), ImageFetch (95), ImageRead
-              // (98), ImageWrite (99), OpImage (100), QuerySizeLod
-              // (103), QuerySize (104), QueryLevels (106)
-              86,88,95,98,99,100,103,104,106: st_q <= W_TX0;
+              // SampleImplicitLod (87, G2b), SampleExplicitLod (88),
+              // ImageFetch (95), ImageRead (98), ImageWrite (99),
+              // OpImage (100), QuerySizeLod (103), QuerySize (104),
+              // QueryLevels (106)
+              86,87,88,95,98,99,100,103,104,106: st_q <= W_TX0;
+              // G2b derivative ops: quad = lanes {4k..4k+3}.
+              // Fine: dPdx(l)=v[l|1]-v[l&~1], dPdy(l)=v[l|2]-v[l&~2];
+              // coarse and the non-suffixed forms broadcast the
+              // lane-0-based pair (q+1-q / q+2-q).  dla/dlb pick the
+              // remap, dva=0 reads the single operand slot.
+              207,213: begin                    // DPdx / DPdxCoarse
+                dva_q <= '0; dla_q <= 3'd6; dlb_q <= 3'd5;
+                jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_VDA},
+                     {2'd0, S_VDB}, 0, 0, W_WB);
+              end
+              210: begin                        // DPdxFine
+                dva_q <= '0; dla_q <= 3'd1; dlb_q <= 3'd2;
+                jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_VDA},
+                     {2'd0, S_VDB}, 0, 0, W_WB);
+              end
+              208,214: begin                    // DPdy / DPdyCoarse
+                dva_q <= '0; dla_q <= 3'd7; dlb_q <= 3'd5;
+                jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_VDA},
+                     {2'd0, S_VDB}, 0, 0, W_WB);
+              end
+              211: begin                        // DPdyFine
+                dva_q <= '0; dla_q <= 3'd3; dlb_q <= 3'd4;
+                jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_VDA},
+                     {2'd0, S_VDB}, 0, 0, W_WB);
+              end
+              // Fwidth = |dPdx| + |dPdy|: dx into t0, dy into t1,
+              // then the |a|+|b| add (209 nonsuffix = coarse)
+              209,212,215: unique case (xq_q)
+                0: begin
+                  dva_q <= '0;
+                  {dla_q, dlb_q} <= (opc_q == 16'd212)
+                                    ? {3'd1, 3'd2} : {3'd6, 3'd5};
+                  jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_VDA},
+                       {2'd0, S_VDB}, 1, 0, W_XCNT);
+                end
+                1: begin
+                  {dla_q, dlb_q} <= (opc_q == 16'd212)
+                                    ? {3'd3, 3'd4} : {3'd7, 3'd5};
+                  jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_VDA},
+                       {2'd0, S_VDB}, 2, 0, W_XCNT);
+                end
+                default:
+                  jset(0, 5'd0, {2'd0, S_ZERO}, {2'd0, S_AT0},
+                       {2'd0, S_AT1}, 0, 0, W_WB);
+              endcase
               // memory / pointer ops
               61,62: begin
                 ls_store_q <= (opc_q == 62);
@@ -2229,20 +2400,20 @@ module g6lc_apu_shwave
                       // negative inputs must survive to the guard
                       unique case (xnum_q)
                         8: jset(2, {1'b0, fpnew_pkg::RDN[2:0], 1'b0},
-                                {2'd0, S_V0}, 6'h0, 6'h0, 1, 0, W_XCNT);
+                                {2'd0, S_V0}, 7'h0, 7'h0, 1, 0, W_XCNT);
                         9: jset(2, {1'b0, fpnew_pkg::RUP[2:0], 1'b0},
-                                {2'd0, S_V0}, 6'h0, 6'h0, 1, 0, W_XCNT);
+                                {2'd0, S_V0}, 7'h0, 7'h0, 1, 0, W_XCNT);
                         3: jset(2, {1'b0, fpnew_pkg::RTZ[2:0], 1'b0},
-                                {2'd0, S_V0}, 6'h0, 6'h0, 1, 0, W_XCNT);
+                                {2'd0, S_V0}, 7'h0, 7'h0, 1, 0, W_XCNT);
                         1: jset(2, {1'b0, fpnew_pkg::RMM[2:0], 1'b0},
-                                {2'd0, S_V0}, 6'h0, 6'h0, 1, 0, W_XCNT);
+                                {2'd0, S_V0}, 7'h0, 7'h0, 1, 0, W_XCNT);
                         default:
                           jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b0},
-                               {2'd0, S_V0}, 6'h0, 6'h0, 1, 0, W_XCNT);
+                               {2'd0, S_V0}, 7'h0, 7'h0, 1, 0, W_XCNT);
                       endcase
                     end
                     1: jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
-                            {2'd0, S_T0}, 6'h0, 6'h0, 2, 0, W_XCNT);
+                            {2'd0, S_T0}, 7'h0, 7'h0, 2, 0, W_XCNT);
                     default: begin
                       // |x| >= 2^31 (exp >= 158) or NaN → integral
                       for (int l = 0; l < LAN; l++)
@@ -2256,9 +2427,9 @@ module g6lc_apu_shwave
                   endcase
                   10: unique case (xq_q)           // Fract = x - floor(x)
                     0: jset(2, {1'b0, fpnew_pkg::RDN[2:0], 1'b0},
-                            {2'd0, S_V0}, 6'h0, 6'h0, 1, 0, W_XCNT);
+                            {2'd0, S_V0}, 7'h0, 7'h0, 1, 0, W_XCNT);
                     1: jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
-                            {2'd0, S_T0}, 6'h0, 6'h0, 2, 0, W_XCNT);
+                            {2'd0, S_T0}, 7'h0, 7'h0, 2, 0, W_XCNT);
                     2: begin
                       for (int l = 0; l < LAN; l++)
                         for (int c = 0; c < VEC; c++)
@@ -2272,29 +2443,29 @@ module g6lc_apu_shwave
                       jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_V0},
                            {2'd0, S_T1}, 0, 0, W_WB);
                   endcase
-                  31: jset(1, 5'd1, {2'd0, S_V0}, 6'h0, 6'h0, 0, 0,
+                  31: jset(1, 5'd1, {2'd0, S_V0}, 7'h0, 7'h0, 0, 0,
                            W_WB);                               // Sqrt
                   32: unique case (xq_q)                         // IvtSqrt
-                    0: jset(1, 5'd1, {2'd0, S_V0}, 6'h0, 6'h0, 1, 0,
+                    0: jset(1, 5'd1, {2'd0, S_V0}, 7'h0, 7'h0, 1, 0,
                             W_XCNT);
                     default:
-                      jset(1, 5'd0, {2'd0, S_ONE}, {2'd0, S_T0}, 6'h0,
+                      jset(1, 5'd0, {2'd0, S_ONE}, {2'd0, S_T0}, 7'h0,
                            0, 0, W_WB);
                   endcase
                   // fpnew_noncomp MINMAX: rnd RNE=MIN, RTZ=MAX
                   37: jset(3, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
-                           {2'd0, S_V0}, {2'd0, S_V1}, 6'h0, 0, 0,
+                           {2'd0, S_V0}, {2'd0, S_V1}, 7'h0, 0, 0,
                            W_WB);                                // FMin
                   40: jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b1},
-                           {2'd0, S_V0}, {2'd0, S_V1}, 6'h0, 0, 0,
+                           {2'd0, S_V0}, {2'd0, S_V1}, 7'h0, 0, 0,
                            W_WB);                                // FMax
                   43: unique case (xq_q)                         // FClamp
                     0: jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b1},  // max
-                            {2'd0, S_V0}, {2'd0, S_V1}, 6'h0, 1, 0,
+                            {2'd0, S_V0}, {2'd0, S_V1}, 7'h0, 1, 0,
                             W_XCNT);
                     default:
                       jset(3, {1'b0, 3'b000, 1'b1},                // min
-                           {2'd0, S_T0}, {2'd0, S_V2}, 6'h0, 0, 0,
+                           {2'd0, S_T0}, {2'd0, S_V2}, 7'h0, 0, 0,
                            W_WB);
                   endcase
                   46: unique case (xq_q)                         // FMix
@@ -2312,7 +2483,7 @@ module g6lc_apu_shwave
                   endcase
                   48: unique case (xq_q)                         // Step
                     0: jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b0},
-                            {2'd0, S_V1}, {2'd0, S_V0}, 6'h0, 1, 0,
+                            {2'd0, S_V1}, {2'd0, S_V0}, 7'h0, 1, 0,
                             W_XCNT);                             // x<edge
                     default: begin
                       wb_q <= int_alu; st_q <= W_WB;             // 0/1.0
@@ -2326,13 +2497,13 @@ module g6lc_apu_shwave
                             {2'd0, S_V0}, 1, 0, W_XCNT);         // x-e0 → t0
                     1: jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_V1},
                             {2'd0, S_V0}, 2, 0, W_XCNT);         // e1-e0 → t1
-                    2: jset(1, 5'd0, {2'd0, S_T0}, {2'd0, S_T1}, 6'h0,
+                    2: jset(1, 5'd0, {2'd0, S_T0}, {2'd0, S_T1}, 7'h0,
                             1, 0, W_XCNT);                       // t → t0
                     3: jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b1},
-                            {2'd0, S_T0}, {2'd0, S_ZERO}, 6'h0, 2, 0,
+                            {2'd0, S_T0}, {2'd0, S_ZERO}, 7'h0, 2, 0,
                             W_XCNT);                             // max(t,0) → t1
                     4: jset(3, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
-                            {2'd0, S_T1}, {2'd0, S_ONE}, 6'h0, 2, 0,
+                            {2'd0, S_T1}, {2'd0, S_ONE}, 7'h0, 2, 0,
                             W_XCNT);                             // min(t,1) → t1
                     5: jset(0, 5'd2, {2'd0, S_NEG2}, {2'd0, S_T1},
                             {2'd0, S_ZERO}, 3, 0, W_XCNT);       // -2t → t2
@@ -2361,7 +2532,7 @@ module g6lc_apu_shwave
                     1: jset(0, 5'd3, {2'd2, S_T1}, {2'd0, S_ONE},
                             {2'd0, S_T0}, 1, 1, W_XCNT, 1'b0, 1'b1);
                     default:
-                      jset(1, 5'd1, {2'd0, S_T0}, 6'h0, 6'h0, 0, 0,
+                      jset(1, 5'd1, {2'd0, S_T0}, 7'h0, 7'h0, 0, 0,
                            W_WB);
                   endcase
                   67: unique case (xq_q)                         // Distance
@@ -2375,7 +2546,7 @@ module g6lc_apu_shwave
                     2: jset(0, 5'd3, {2'd2, S_T1}, {2'd0, S_ONE},
                             {2'd0, S_T0}, 1, 1, W_XCNT, 1'b0, 1'b1);
                     default:
-                      jset(1, 5'd1, {2'd0, S_T0}, 6'h0, 6'h0, 0, 0,
+                      jset(1, 5'd1, {2'd0, S_T0}, 7'h0, 7'h0, 0, 0,
                            W_WB);
                   endcase
                   68: unique case (xq_q)                         // Cross
@@ -2413,10 +2584,10 @@ module g6lc_apu_shwave
                     end
                     1: jset(0, 5'd3, {2'd2, S_T1}, {2'd0, S_ONE},
                             {2'd0, S_T0}, 1, 1, W_XCNT, 1'b0, 1'b1);
-                    2: jset(1, 5'd1, {2'd0, S_T0}, 6'h0, 6'h0, 1, 0,
+                    2: jset(1, 5'd1, {2'd0, S_T0}, 7'h0, 7'h0, 1, 0,
                             W_XCNT);                             // √dot
                     3: jset(1, 5'd0, {2'd0, S_ONE}, {2'd0, S_T0},
-                            6'h0, 1, 0, W_XCNT);                 // 1/√dot
+                            7'h0, 1, 0, W_XCNT);                 // 1/√dot
                     default: begin
                       ncomp_q <= 4'(ot_comps_q);
                       jset(0, 5'd2, {2'd0, S_V0}, {2'd1, S_T0},
@@ -2747,8 +2918,14 @@ module g6lc_apu_shwave
           end
           W_CHM0: st_q <= W_CHM1;
           W_CHM1: begin
-            for (int l = 0; l < LAN; l++)
+            for (int l = 0; l < LAN; l++) begin
               poff_q[l][0] <= poff_q[l][0] + {16'h0, mb_off};
+              // dropped member (PointSize/Clip/CullDistance): the
+              // chained pointer carries the drop flag; the LSU ignores
+              // its stores and reads it back as zero
+              if (mb_fl[6])      // APU_SH_MF_DROP bit of the member fl
+                poff_q[l][1][31:28] <= APU_SH_VF_DROP;
+            end
             cmstride_q <= mb_mst;
             cty_q <= mb_ty;
             if (ck_q + 1 >= wc_q - 4) st_q <= W_CHFIN;
@@ -2829,8 +3006,53 @@ module g6lc_apu_shwave
             ls_off_q <= o32;
             ls_sc_q  <= tg[3:0];
             ls_bi_q  <= tg[11:4];
+            ls_rec_q <= 1'b0;
             if (!act_w[ls_lane_q[2:0]]) st_q <= W_LSA;
-            else if (tg[3:0] == APU_SH_SC_INPUT) begin
+            else if (tg[31:28] == APU_SH_VF_DROP) begin
+              // dropped variable/member (PointSize/Clip/CullDistance):
+              // stores ignored, loads return zero
+              if (!ls_store_q)
+                wb_q[ls_lane_q[2:0]][ls_wc] <= '0;
+              st_q <= W_LSA;
+            end else if ((gfx_q != APU_SH_GFX_NONE) &&
+                         (tg[31:28] == APU_SH_VF_REC) &&
+                         (tg[3:0] == APU_SH_SC_INPUT ||
+                          tg[3:0] == APU_SH_SC_OUTPUT)) begin
+              // graphics record access: base + inv*stride + off on the
+              // aperture port; W_LSC bounds-checks against the batch
+              // extent count*stride and issues the access
+              ls_rec_q <= 1'b1;
+              ls_bok_q <= 1'b1;
+              if (tg[3:0] == APU_SH_SC_INPUT) begin
+                ls_bind_q <= {32'h0, in_base_q};
+                ls_off_q  <= (32'(wave_q) * LAN + 32'(ls_lane_q)) *
+                             gfx_istr + o32;
+                ls_bsz_q  <= gcnt_q * gfx_istr;
+              end else begin
+                ls_bind_q <= {32'h0, out_base_q};
+                ls_off_q  <= (32'(wave_q) * LAN + 32'(ls_lane_q)) *
+                             gfx_ostr + o32;
+                ls_bsz_q  <= gcnt_q * gfx_ostr;
+              end
+              st_q <= W_LSC;
+            end else if (tg[3:0] == APU_SH_SC_INPUT &&
+                         gfx_q == APU_SH_GFX_VS &&
+                         (tg[11:4] == 8'(APU_SH_BI_VERTEXINDEX) ||
+                          tg[11:4] == 8'(APU_SH_BI_INSTANCEINDEX))) begin
+              // G2a: slot 8 of the VS-in record is the source of truth
+              // for VertexIndex/InstanceIndex ({vi, ii, 0, 0} at +128)
+              // — the work imm words stay for compatibility but are no
+              // longer read for these builtins.
+              ls_rec_q <= 1'b1;
+              ls_bok_q <= 1'b1;
+              ls_bind_q <= {32'h0, in_base_q};
+              ls_off_q  <= (32'(wave_q) * LAN + 32'(ls_lane_q)) *
+                           gfx_istr + 32'd128 +
+                           (tg[11:4] == 8'(APU_SH_BI_INSTANCEINDEX)
+                            ? 32'd4 : 32'd0);
+              ls_bsz_q  <= gcnt_q * gfx_istr;
+              st_q <= W_LSC;
+            end else if (tg[3:0] == APU_SH_SC_INPUT) begin
               // builtin vec component comes from the pointer byte
               // offset (scalar extracts load .y/.z too), not from the
               // output component cursor
@@ -2951,14 +3173,75 @@ module g6lc_apu_shwave
             if (mem_rvalid_i) begin
               logic [255:0] val;
               logic [7:0]   kind, flags;
-              logic [31:0]  base, size;
+              logic [31:0]  memh, size;
               val = {mem_err_i ? 64'h0 : mem_rdata_i,
                      dsc_rec_q[191:0]};
-              base  = val[31:0];
+              memh  = val[31:0];
               size  = val[63:32];
               kind  = val[71:64];
               flags = val[79:72];
-              // fill the record cache (round-robin victim)
+              if (!dsc_err_q && !mem_err_i && flags[0] &&
+                  kind != 8'd0 && memh != 32'h0) begin
+                // §12.3 3d-d: +0 names a memory {gen,slot}, not a
+                // base — resolve the CURRENT base through ObjTab
+                // before the record enters the cache
+                dsc_rec_q <= val;
+                if (tx_full_q) tx_rec_q <= val;
+                st_q <= W_DS9;
+              end else begin
+                // no memory to resolve (sampler-only kind 0, a null
+                // record) or the fetch faulted: a faulted / handleless
+                // memory record is nulled by clearing flags[0] — the
+                // base word itself is never trusted again
+                if (dsc_err_q || mem_err_i ||
+                    (flags[0] && kind != 8'd0 && memh == 32'h0))
+                  val[79:72] = 8'h0;
+                // fill the record cache (round-robin victim)
+                dc_v_q[dc_vic_q]   <= 1'b1;
+                dc_key_q[dc_vic_q] <= {dsc_idx_q, dsc_bd_q,
+                                       dsc_set_q[1:0]};
+                dc_val_q[dc_vic_q] <= val;
+                dc_vic_q           <= dc_vic_q == 3'(APU_DESC_CACHE-1)
+                                      ? 3'h0 : dc_vic_q + 3'h1;
+                dsc_rec_q <= val;
+                if (tx_full_q) tx_rec_q <= val;
+                ls_bind_q <= val[31:0] +
+                             f_doff(dsc_set_q[1:0], dsc_row_q,
+                                    dsc_idx_q);
+                ls_bsz_q  <= size;
+                ls_bok_q  <= val[72] && f_buf_kind(kind);
+                st_q <= dret_q;
+              end
+            end
+          end
+          // READSLOT for the record's memory handle (combinational
+          // request above); held until the arbitrated port accepts
+          W_DS9: if (ot_req_ready_i) st_q <= W_DSA;
+          W_DSA: begin
+            if (ot_cpl_valid_i) begin
+              logic [255:0] val;
+              logic [63:0]  msz, moff;
+              logic         ok;
+              val  = dsc_rec_q;
+              msz  = ot_cpl_i.entry.size;
+              moff = 64'(dsc_rec_q[255:224]);   // record +28 offset
+              // live && the generation the record names && still a
+              // DEVICE_MEMORY (READSLOT's kind check covers kind) &&
+              // backed && the resource window fits the extent
+              ok = ot_cpl_i.status == APU_OBJTAB_OK &&
+                   ot_cpl_i.entry.gen == dsc_rec_q[31:16] &&
+                   ot_cpl_i.entry.aux[63:32] != APU_MEM_UNBACKED &&
+                   moff <= msz &&
+                   64'(val[63:32]) <= msz - moff;
+              if (ok)
+                // resolved absolute base = mem base + resource offset
+                val[31:0] = ot_cpl_i.entry.aux[63:32] +
+                            dsc_rec_q[255:224];
+              else
+                // dead/recycled/unbacked/out-of-extent: the null
+                // record (robust zero / dropped store downstream)
+                val[79:72] = 8'h0;
+              // cache the RESOLVED record — +0 now carries the base
               dc_v_q[dc_vic_q]   <= 1'b1;
               dc_key_q[dc_vic_q] <= {dsc_idx_q, dsc_bd_q,
                                      dsc_set_q[1:0]};
@@ -2967,11 +3250,11 @@ module g6lc_apu_shwave
                                     ? 3'h0 : dc_vic_q + 3'h1;
               dsc_rec_q <= val;
               if (tx_full_q) tx_rec_q <= val;
-              ls_bind_q <= base + f_doff(dsc_set_q[1:0], dsc_row_q,
-                                         dsc_idx_q);
-              ls_bsz_q  <= size;
-              ls_bok_q  <= !dsc_err_q && !mem_err_i &&
-                           flags[0] && f_buf_kind(kind);
+              ls_bind_q <= val[31:0] +
+                           f_doff(dsc_set_q[1:0], dsc_row_q,
+                                  dsc_idx_q);
+              ls_bsz_q  <= val[63:32];
+              ls_bok_q  <= val[72] && f_buf_kind(val[71:64]);
               st_q <= dret_q;
             end
           end
@@ -3010,8 +3293,12 @@ module g6lc_apu_shwave
                 tx_1lane_q <= 1'b1;     // unit jobs for ls_lane only
                 wbm_q <= 4'b1111;
                 // operand-mask legality: only Lod (0x2) is decoded;
-                // 95 may omit it entirely, 88 requires it
-                if ((opc_q == 16'd95 &&
+                // 95 may omit it entirely, 88 requires it; 87 takes
+                // no image operands in v1 (proj/dref forms refused in
+                // shmod; Bias comes from the sampler record)
+                if ((opc_q == 16'd87 && wc_q > 16'd5 &&
+                     ops_q[4] != 32'h0) ||
+                    (opc_q == 16'd95 &&
                      wc_q > 16'd6 && (ops_q[4] & ~32'h2) != 0) ||
                     (opc_q == 16'd88 &&
                      (wc_q < 16'd7 || (ops_q[4] & ~32'h2) != 0 ||
@@ -3061,7 +3348,7 @@ module g6lc_apu_shwave
               done_code_q <= APU_SH_DONE_FAULT;
               fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};
               st_q <= W_DONE;
-            end else if (opc_q == 16'd88 &&
+            end else if ((opc_q == 16'd88 || opc_q == 16'd87) &&
                          va_q[0][ls_lane_q[2:0]][1][31]) begin
               // OpSampledImage-merged: fetch the sampler record too
               tx_full_q <= 1'b0;      // keep the image record
@@ -3070,7 +3357,7 @@ module g6lc_apu_shwave
               dsc_idx_q <= va_q[0][ls_lane_q[2:0]][0][15:0];
               dret_q    <= W_TX3;
               st_q      <= W_DS0;
-            end else if (opc_q == 16'd88 &&
+            end else if ((opc_q == 16'd88 || opc_q == 16'd87) &&
                          tx_rec_q[71:64] != 8'd1) begin
               // sampled-image without a bound sampler: cannot sample
               done_code_q <= APU_SH_DONE_FAULT;
@@ -3140,6 +3427,9 @@ module g6lc_apu_shwave
                 16'd88: begin              // SampleExplicitLod
                   st_q <= W_TXC0;          // lod+coords via fp units
                 end
+                16'd87: begin              // SampleImplicitLod (G2b)
+                  st_q <= W_TXL0;          // λ from quad-lane derivs
+                end
                 default: begin             // 95 fetch / 98 read / 99 wr
                   lod = (opc_q == 16'd95 && wc_q > 16'd6)
                         ? va_q[2][ls_lane_q[2:0]][0][4:0] : 5'h0;
@@ -3185,13 +3475,80 @@ module g6lc_apu_shwave
               st_q <= tx_mret_q;
             end
           end
+          // ---- implicit-LOD λ (op87, G2b) --------------------------
+          // Per quad-lane derivatives of the texcoords, scaled by the
+          // mip-0 dims: ρ² = max((du·w)²+(dv·h)² over x, same over y),
+          // λ = ½·log2(ρ²).  log2 uses the linear-mantissa
+          // approximation log2(x) ≈ exp(x) + (mant(x) − 1), max error
+          // ~0.086 — documented in the module header; the bias and
+          // min/max-lod clamps happen on the shared W_TXC path.
+          W_TXL0: begin                  // {w,h} -> f32 in t2
+            txfa_q[0] <= {16'h0, tx_rec_q[95:80]};
+            txfa_q[1] <= {16'h0, tx_rec_q[111:96]};
+            ncomp_q <= 4'd2;
+            jset(2, {1'b1, fpnew_pkg::RNE[2:0], 1'b1},
+                 {2'd0, S_TX}, 7'h0, 7'h0, 3, 0, W_TXL1);
+          end
+          W_TXL1: begin                  // t0 = {du/dx, dv/dx}
+            dva_q <= 2'd1; dla_q <= 3'd1; dlb_q <= 3'd2;
+            ncomp_q <= 4'd2;
+            jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_VDA},
+                 {2'd0, S_VDB}, 1, 0, W_TXL2);
+          end
+          W_TXL2: begin                  // t1 = {du/dy, dv/dy}
+            dla_q <= 3'd3; dlb_q <= 3'd4;
+            ncomp_q <= 4'd2;
+            jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_VDA},
+                 {2'd0, S_VDB}, 2, 0, W_TXL3);
+          end
+          W_TXL3:                        // t0 *= {w,h}
+            jset(0, 5'd2, {2'd0, S_T0}, {2'd0, S_T2},
+                 {2'd0, S_ZERO}, 1, 0, W_TXL4);
+          W_TXL4:                        // t1 *= {w,h}
+            jset(0, 5'd2, {2'd0, S_T1}, {2'd0, S_T2},
+                 {2'd0, S_ZERO}, 2, 0, W_TXL5);
+          W_TXL5:                        // t2[0] = dx² (dot t0·t0)
+            jset(0, 5'd3, {2'd2, S_T0}, {2'd2, S_T0},
+                 {2'd0, S_T0}, 3, 1, W_TXL6);
+          W_TXL6:                        // t1[0] = dy² (dot t1·t1)
+            jset(0, 5'd3, {2'd2, S_T1}, {2'd2, S_T1},
+                 {2'd0, S_T0}, 2, 1, W_TXL7);
+          W_TXL7: begin                  // t0[0] = max(dx²,dy²) = ρ²
+            ncomp_q <= 4'd1;
+            jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b1},
+                 {2'd0, S_T2}, {2'd0, S_T1}, 7'h0, 1, 0, W_TXL8);
+          end
+          W_TXL8: begin                  // e = exponent(ρ²) -> f32
+            txfa_q[0] <= {24'h0, t0_q[ls_lane_q[2:0]][0][30:23]};
+            ncomp_q <= 4'd1;
+            jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
+                 {2'd0, S_TX}, 7'h0, 7'h0, 3, 0, W_TXL9);
+          end
+          W_TXL9:                        // t2 = e + (-127) = true exp
+            jset(0, 5'd0, {2'd0, S_ZERO}, {2'd0, S_T2},
+                 {2'd0, S_N127}, 3, 0, W_TXLA);
+          W_TXLA: begin                  // t2 = mant_f + (e - 127)
+            txfa_q[0] <= {1'b0, 8'd127,
+                          t0_q[ls_lane_q[2:0]][0][22:0]};
+            jset(0, 5'd3, {2'd1, S_TX}, {2'd1, S_ONE},
+                 {2'd0, S_T2}, 3, 0, W_TXLB);
+          end
+          W_TXLB:                        // t2 = λ0 - 1
+            jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_T2},
+                 {2'd0, S_ONE}, 3, 0, W_TXLC);
+          W_TXLC:                        // t0 = λ0 * 0.5 = λ
+            jset(0, 5'd2, {2'd0, S_T2}, {2'd0, S_HALF},
+                 {2'd0, S_ZERO}, 1, 0, W_TXC0);
           // ---- sampled-coordinate compute (op88) ---------------------
           // lod*16 (fp job) -> F2I -> +bias, clamp [minLod,maxLod] and
           // mip range -> {m0,m1,fw}; dims -> fp scale; coords -> 8.8
           // fixed per mip; then the gather build wraps indices per
           // address mode.
           W_TXC0: begin
-            txfa_q[0] <= va_q[2][ls_lane_q[2:0]][0];   // lod fp32
+            // op87: λ (already computed) replaces the explicit lod
+            txfa_q[0] <= (opc_q == 16'd87)
+                         ? t0_q[ls_lane_q[2:0]][0]
+                         : va_q[2][ls_lane_q[2:0]][0];
             t0_q[ls_lane_q[2:0]][0] <= 32'h4180_0000;  // 16.0f
             // t1 comp1 stages the fp32 array coordinate; W_TXC1's F2I
             // converts both comps (lod*16 -> int, coord.z -> layer)
@@ -3204,7 +3561,7 @@ module g6lc_apu_shwave
           W_TXC1: begin
             ncomp_q <= 4'd2;
             jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b0},
-                 {2'd0, S_T1}, 6'h0, 6'h0, 3, 0, W_TXC2);
+                 {2'd0, S_T1}, 7'h0, 7'h0, 3, 0, W_TXC2);
           end
           W_TXC2: begin
             logic signed [11:0] le, bs;
@@ -3214,9 +3571,12 @@ module g6lc_apu_shwave
                                 : 12'({4'h0, tx_smp_q[55:48]});
             mn44 = tx_smp_q[39:32];
             mx44 = tx_smp_q[47:40];
-            le   = 12'(t2_q[ls_lane_q[2:0]][0]) + bs;
-            if (le < 12'({4'h0, mn44})) le = 12'({4'h0, mn44});
-            if (le > 12'({4'h0, mx44})) le = 12'({4'h0, mx44});
+            // λ·16 (and the bias) are signed: keep the clamp compares
+            // signed or a negative λ wraps to a huge positive and
+            // clamps to maxLod instead of 0
+            le   = 12'($signed(t2_q[ls_lane_q[2:0]][0])) + bs;
+            if (le < $signed({4'h0, mn44})) le = $signed({4'h0, mn44});
+            if (le > $signed({4'h0, mx44})) le = $signed({4'h0, mx44});
             if (le < 0) le = 0;
             // array layer = RNE(coord.z), converted by the W_TXC1 F2I
             // comp1 (W_TXC5's F2I would overwrite t2 later)
@@ -3256,7 +3616,7 @@ module g6lc_apu_shwave
                                                   : 32'h0; // -128|0
             ncomp_q <= 4'd4;
             jset(2, {1'b1, fpnew_pkg::RNE[2:0], 1'b1},   // I2F (unsigned)
-                 {2'd0, S_TX}, 6'h0, 6'h0, 1, 0, W_TXC4);
+                 {2'd0, S_TX}, 7'h0, 7'h0, 1, 0, W_TXC4);
           end
           W_TXC4: begin
             // q = u*w - 0.5 (linear) / u*w (nearest), per mip pair
@@ -3270,7 +3630,7 @@ module g6lc_apu_shwave
           end
           W_TXC5:                                 // q -> s8.8 ints
             jset(2, {1'b0, fpnew_pkg::RDN[2:0], 1'b0},
-                 {2'd0, S_T1}, 6'h0, 6'h0, 3, 0, W_TXC6);
+                 {2'd0, S_T1}, 7'h0, 7'h0, 3, 0, W_TXC6);
           W_TXC6: begin
             // build the gather list.  linear: t2 = {su0,sv0,su1,sv1}
             // s8.8; nearest: plain integer pixel indices.
@@ -3582,7 +3942,7 @@ module g6lc_apu_shwave
                                 : 9'd256 - {1'b0, tx_fw_q})};
               ncomp_q <= 4'd1;
               jset(2, {1'b1, fpnew_pkg::RNE[2:0], 1'b1},
-                   {2'd1, S_TX}, 6'h0, 6'h0, 1, 0, W_TXA2);
+                   {2'd1, S_TX}, 7'h0, 7'h0, 1, 0, W_TXA2);
             end else begin
               // fixed-point u16 path: acc_mip[c] += (wu*wv) * ch16
               logic [32:0] pr;
@@ -3661,7 +4021,7 @@ module g6lc_apu_shwave
               end
               ncomp_q <= 4'd4;
               jset(2, {1'b1, fpnew_pkg::RNE[2:0], 1'b1},
-                   {2'd0, S_TX}, 6'h0, 6'h0, 1, 0, W_TXR1);
+                   {2'd0, S_TX}, 7'h0, 7'h0, 1, 0, W_TXR1);
             end
           end
           W_TXR1: begin
@@ -3720,7 +4080,7 @@ module g6lc_apu_shwave
             tx_se_lo_q <= '0;
             tx_se_hi_q <= 8'd255;
             jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b0},
-                 {2'd0, S_T0}, 6'h0, 6'h0, 2, 0, W_TXE2);
+                 {2'd0, S_T0}, 7'h0, 7'h0, 2, 0, W_TXE2);
           end
           W_TXE2: begin
             // per channel: UNORM clamps the fp-int; sRGB channels
@@ -4360,6 +4720,7 @@ endmodule
 
 // Thin fixture for the yosys Enable=0/1 screens (generic flow).
 module g6lc_apu_shwave_fixture
+  import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_sh_pkg::*;
 #(
   parameter bit          Enable        = 1'b0,
@@ -4414,7 +4775,13 @@ module g6lc_apu_shwave_fixture
   input  logic         mem_ready_i,
   input  logic         mem_rvalid_i,
   input  logic [63:0]  mem_rdata_i,
-  input  logic         mem_err_i
+  input  logic         mem_err_i,
+  output logic            ot_req_valid_o,
+  input  logic            ot_req_ready_i,
+  output apu_objtab_req_t ot_req_o,
+  input  logic            ot_cpl_valid_i,
+  output logic            ot_cpl_ready_o,
+  input  apu_objtab_cpl_t ot_cpl_i
 );
   g6lc_apu_shwave #(.Enable(Enable), .ShaderLanes(ShaderLanes),
       .ShaderVec(ShaderVec), .ShaderRegs(ShaderRegs),

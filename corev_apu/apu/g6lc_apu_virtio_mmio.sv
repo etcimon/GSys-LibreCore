@@ -87,6 +87,10 @@ module g6lc_apu_virtio_mmio
         |=> $stable(vq_q[q].desc) && $stable(vq_q[q].avail) &&
             $stable(vq_q[q].used) && $stable(vq_q[q].num));
   end
+  // a backend device reset stalls the reg bus: no access may be
+  // acknowledged while the reset is pending
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      reset_pending_q |-> !rvalid_o);
   // pragma translate_on
 
   apu_vq_state_t vq_q [NumQueues];
@@ -116,10 +120,18 @@ module g6lc_apu_virtio_mmio
 
   assign req_write = req_i && we_i && (wstrb_i == 4'hf) &&
                      (addr_i[1:0] == 2'b00) && !reset_pending_q && rst_ni;
-  assign req_read = req_i && !we_i && (addr_i[1:0] == 2'b00);
+  // reset_pending_q stalls every access (write side via req_write,
+  // read side here): the reg-bus protocol holds req until rvalid, so
+  // the device reset is synchronous from the driver's point of view —
+  // stock virtio-mmio writes status=0 and immediately continues the
+  // feature negotiation without polling; silently dropping those
+  // writes would lose FEATURES_OK and surface status 0x40
+  // (DEVICE_NEEDS_RESET) on the next status read.
+  assign req_read = req_i && !we_i && (addr_i[1:0] == 2'b00) &&
+                    !reset_pending_q;
   assign stop_read_wait = req_read && addr_i == AddrWidth'(VREG_QUEUE_READY) &&
                           qsel_valid && stop_pending_q[qsel_idx];
-  assign rvalid_o = req_i && !stop_read_wait;
+  assign rvalid_o = req_i && !stop_read_wait && !reset_pending_q;
   assign error_o = req_i && ((addr_i[1:0] != 2'b00) ||
                             (we_i && (wstrb_i != 4'hf)));
   assign rdata_o = rvalid_o ? read_data : 32'h0;

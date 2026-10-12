@@ -74,7 +74,11 @@ ue_cneg_badfmt_1 ue_cneg_viewoob_1 ue_cneg_kindmix_1 \
 ue_cneg_xfer_img_oob_1 ue_cneg_unnorm_1 \
 ue_cpos_clear_rgba8_1 ue_cpos_clear_r32f_1 ue_cpos_clear_r32u_1 \
 ue_cpos_clear_srgb_1 ue_cpos_clear_rgba16f_1 \
-ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1"
+ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1 \
+ue_cpos_rb_mapafter_1 ue_cpos_ubo_bindfirst_1 \
+ue_cpos_evict_1 ue_cpos_reloc_hold_1 \
+ue_cneg_evict_full_1 ue_cneg_bind_full_1 ue_cneg_stale_mem_1 \
+ue_gpos_tri_1"
 NEGATIVES="neg_next_loop neg_desc_oob neg_buf_oob neg_aperture \
 neg_used_oob neg_reset neg_cursor neg_batch neg_flush neg_qdrop \
 neg_resp_oob neg_worksink0 epoch_reuse"
