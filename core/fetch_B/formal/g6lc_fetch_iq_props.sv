@@ -98,6 +98,7 @@ module g6lc_fetch_iq_props #(
     logic            ckpt_v;    // T21
     logic [7:0]      ckpt_idx;  // T21
     logic            is_call;   // T21
+    logic            is_ret;    // T23
   } bp_sbe_t;
 
   typedef struct packed {
@@ -138,7 +139,7 @@ module g6lc_fetch_iq_props #(
       .ready_o(ready_a), .consumed_o(consumed_a),
       .exception_i, .exception_addr_i, .exception_gpaddr_i,
       .exception_tinst_i, .exception_gva_i, .predict_address_i, .cf_type_i,
-      .ckpt_v_i('0), .ckpt_idx_i('0), .is_call_i('0),
+      .ckpt_v_i('0), .ckpt_idx_i('0), .is_call_i('0), .is_return_i('0),
       .replay_o(replay_a), .replay_addr_o(replay_addr_a),
       .fetch_entry_o(entry_a), .fetch_entry_valid_o(entry_v_a),
       .fetch_entry_ready_i
@@ -150,7 +151,7 @@ module g6lc_fetch_iq_props #(
       .ready_o(ready_b), .consumed_o(consumed_b),
       .exception_i, .exception_addr_i, .exception_gpaddr_i,
       .exception_tinst_i, .exception_gva_i, .predict_address_i, .cf_type_i,
-      .ckpt_v_i('0), .ckpt_idx_i('0), .is_call_i('0),
+      .ckpt_v_i('0), .ckpt_idx_i('0), .is_call_i('0), .is_return_i('0),
       .replay_o(replay_b), .replay_addr_o(replay_addr_b),
       .fetch_entry_o(entry_b), .fetch_entry_valid_o(entry_v_b),
       .fetch_entry_ready_i

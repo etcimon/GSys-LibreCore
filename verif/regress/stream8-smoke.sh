@@ -193,7 +193,7 @@ if [[ "$LIVE_RTL" == "1" ]]; then
       "$harness" +max-cycles="$maxc" +time_out="$maxc" +debug_disable \
         +tohost_addr="0x${th}" "$elf" >"$vlog" 2>&1
       set -e
-      if grep -q SUCCESS "$vlog"; then
+      if grep -qE 'SUCCESS.*cycles$' "$vlog"; then  # a cycle-budget exit carries a suffix (rc 120): not a pass
         log "  PASS live RTL $name"
         live_pass=$((live_pass + 1))
       else

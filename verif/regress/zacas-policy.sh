@@ -98,7 +98,7 @@ run_veri() {
   "$harness" +max-cycles="$MAX_CYCLES" +time_out="$MAX_CYCLES" +debug_disable \
     +tohost_addr="0x${th}" "$elf" >"$logf" 2>&1
   set -e
-  grep -q 'SUCCESS' "$logf"
+  grep -qE 'SUCCESS.*cycles$' "$logf"  # a cycle-budget exit carries a suffix (and rc 120): not a pass
 }
 
 # ---- B. AMOCAS.Q odd-reg illegal on RTL ----

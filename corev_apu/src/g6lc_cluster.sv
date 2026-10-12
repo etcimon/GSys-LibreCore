@@ -727,6 +727,50 @@ module g6lc_cluster
       .drain_done_o ()
   );
 
+  //pragma translate_off
+  // T23/T24 `+incl_trace`: the per-core invalidation bus while an inclusive
+  // victim drain is pending. mc_l3_evict_inclusion (24+ same-set lines, a
+  // second core live, COH_FILTERED server) wedges the evicting core's store
+  // behind an L3 victim whose back-invalidation never completes; this names,
+  // once per cycle inside the drain and at most INCL_TRACE_MAX lines, which
+  // source holds each core's bus (hub > inclusive > cmo), whether the core's
+  // adapter is ready, and the drain's done mask -- the blocked party, not a
+  // guess. `[incl] final` always prints the drain census.
+  if (INCL) begin : gen_incl_trace
+    bit incl_trace;
+    int unsigned incl_trace_max, incl_lines;
+    longint unsigned incl_drains, incl_drain_cyc, incl_drain_max, incl_cur;
+    initial begin
+      incl_trace = $test$plusargs("incl_trace");
+      incl_trace_max = 2000;
+      void'($value$plusargs("incl_trace_max=%0d", incl_trace_max));
+      incl_lines = 0; incl_drains = 0; incl_drain_cyc = 0; incl_drain_max = 0; incl_cur = 0;
+    end
+    always @(posedge clk_i) begin
+      if (rst_ni && i_incl_inv.gen_on.pend_q) begin
+        incl_drain_cyc++; incl_cur++;
+        if (incl_cur > incl_drain_max) incl_drain_max = incl_cur;
+        if (incl_trace && incl_lines < incl_trace_max) begin
+          incl_lines++;
+          for (int c = 0; c < NC; c++) begin
+            $display("[incl] addr=%h done=%b core%0d src=%s ready=%0d l1_v=%0d l1_rdy=%0d hubv=%0d cmov=%0d evict_v=%0d",
+                     i_incl_inv.gen_on.addr_q, i_incl_inv.gen_on.done_q, c,
+                     inv_hub[c].valid ? "hub" : inv_incl[c].valid ? "incl" : inv_cmo[c].valid ? "cmo" : "-",
+                     inv_core_ready[c], l1_inv_valid[c], l1_inv_ready[c], inv_hub[c].valid,
+                     inv_cmo[c].valid, evict_v);
+          end
+        end
+      end else begin
+        if (incl_cur != 0) incl_drains++;
+        incl_cur = 0;
+      end
+    end
+    final
+      $display("[incl] final drains=%0d drain_cycles=%0d longest=%0d pending_at_end=%0d",
+               incl_drains, incl_drain_cyc, incl_drain_max, i_incl_inv.gen_on.pend_q);
+  end
+  //pragma translate_on
+
   // --------------------
   // T9a eWT CMO engine + L1 broadcaster
   // --------------------

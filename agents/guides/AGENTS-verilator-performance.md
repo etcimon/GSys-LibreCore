@@ -718,9 +718,15 @@ Decision (fork, after the pin): all six passes are **opt-in** (`-fsoa -fprio -fw
 `V3Soa` XRef fix and the `VERILATOR_FNO` knob are in, the eight new `test_regress` cases
 pass their flag explicitly. What stays on by default — hash-map `V3DupFinder` (still
 `sameTree`-checked, earliest insert wins), `V3Param` maps, the MTask predecessor
-bitmask — is exact on the single core; the server MT4 A/B for the bitmask
-(`ooocoh-t22g-server-wt2-mt4-build` vs `…t21t-server-nogate-mt4-build2`, same RTL,
-300 k-cycle OpenSBI segment, per-core RVFI) is the remaining owed measurement.
+bitmask — is exact on the single core (s11 268,344 Ir/cycle vs 268,345: identical
+code) and on the server: `ooocoh-t22g-server-wt2-mt4-build` vs
+`…t21t-server-nogate-mt4-build2` (same RTL and `.vlt`, 300 k-cycle 8-hart OpenSBI
+segment, alternating, builder at load 3–5) **2,246 / 2,071 vs 2,122 / 2,239 cycles/s,
+per-core RVFI byte-identical** — the bitmask wait is neutral within the run-to-run
+noise of a loaded host (the earlier idle-host figure for this pair was ≈ 3,100). It
+stays: one atomic load and an AND per wait instead of a yield loop is the right
+primitive for the finer partitions of lever 1, it just does not move the current
+54-MTask partition.
 
 ### 7.3 What the claimed structures would need to become real
 
@@ -735,3 +741,73 @@ without the O(table) shadow copy (per-element NBA commit list, not a full copy).
 a new pass with its own exactness battery, and its gain is still bounded by the 1 MB/cycle
 fetch footprint analysis of §6 — the honest expectation is the "×1–2 unproven" of §6.3,
 not the 1.5–2× quoted in the summary.
+
+### 7.4 Footprint attribution and the rolled-loop experiment (2026-10-12)
+
+Where the 133 MB of generated C++ (88.5 MB fast path, 7.05 MB compiled text) of
+`g6lc64_ooo` comes from, measured on `ooocoh-t22g-ooo-def5-build` by instance scope of
+the first signal on each generated line (`t21/q-fp3.sh`, `q-fp4.sh`, `q-fp6.sh`):
+
+| scope | MB | what it is |
+|---|---:|---|
+| `_nba_sequent__TOP__1` (one function) | 32.6 | every `always_ff` of the core plus the comb logic that depends only on flops, straight-line |
+| `issue_stage_i/gen_full_ooo/i_ooo_dispatch` | 16.5 | the IQ: `q_wake`/`q_chain` ready logic 4.5 MB (DEPTH × NR_SB_ENTRIES `ooo_age_older` copies, DEPTH × NR_WB wake compares), `older_q/older_d/rank` 3.5 MB (DEPTH² age matrix per port) |
+| `ex_stage_i/lsu_i` | 7.8 | `i_pmp_data_if` 2.4 + `gen_mmu` 2.2 (PMP NAPOT checks and the `pmp_entry.sv:63/93` assertion loops: 16 entries × 54 address bits × 3 checkers; 1,512 `VL_STOP_MT` copies), store buffer queues 0.8 |
+| `i_axi_xbar` | 5.3 | per-port/per-slave muxing |
+| `fpu_gen` | 2.8 | fpnew per-lane logic |
+| cache subsystem | 3.6 | 352–408 unrolled `__Vdlyvset/lsb/dim/val` array-NBA slots |
+
+Per-RTL-line attribution is not available: 5.008 emits no `// at file:line` decoration
+(only `$display` sites carry one). The template census of the 32.6 MB function (strip
+numbers, count repeats) shows the duplication directly: the top 45 statement shapes are
+26 % of it and they are per-entry copies (`older_q[k]` × 1,074, PMP `pmpaddr_q` tests ×
+1,254, assertion blocks × 1,512, …).
+
+**Cost-aware unrolling** (`--unroll-roll-narrow N`, `--unroll-roll-min-trips T`, fork
+`V3Unroll::rolledBodyIsCheap`): a loop stays rolled when trips × body nodes > N, every
+dynamic part-select in the body is ≤ 64 bits, it touches no `split_var` variable and its
+array NBAs are one-dimensional. Array NBAs inside a loop kept this way go through a new
+**per-element commit queue** in `V3Delayed` (`rewriteLoopQueue`: per array and loop a
+queue of (index, mask, value) sized trips × statements, pushed in the body, drained in
+the NBA region in push order, closed at loop exit so later NBAs to the array commit after
+it) — this replaces the O(table) shadow copy of `63c0953ce` and is the "per-element NBA
+commit" of §7.3. Measured, `g6lc64_ooo`, s11, all RVFI-exact:
+
+| variant | loops kept rolled | text | Ir/cycle | I1 miss/cycle | spin (loaded host, alternating) |
+|---|---:|---:|---:|---:|---|
+| default (all unrolled) | 0 | 7.05 MB | 267,200 | 18,715 | 19.8 k / 16.6 k |
+| `--unroll-roll-narrow 1000` | 359 | 5.77 MB (−18 %) | 363,763 (+36 %) | 17,573 (−6 %) | 17.5 k / 19.7 k |
+| `--unroll-roll-narrow 300` | 516 | 5.64 MB (−20 %) | 375,101 (+40 %) | 17,206 (−8 %) | — |
+
+The footprint falls as intended but the instruction count rises faster than the misses
+fall: an unrolled iteration lets V3Const/V3Gate fold its constant index (one word test,
+dead `o != e` branches gone), a rolled one computes the word and shift and runs every
+branch. Within the noise of a host at load 19 the wall clock is unchanged. So rolling is
+not a lever on this model either — the §6 reading stands: the 1 MB/cycle is the design's
+logic, executed every cycle, not loop copies. Both knobs stay opt-in (default off); the
+commit queue is the correct mechanism whenever a loop with array NBAs is kept rolled for
+any reason (it also retires the BLKLOOPINIT limitation for such loops; exact with 38
+queues active at threshold 1, and `t_soa_array` now takes it). Min-trips 16 instead of 4
+changes nothing (337 loops, 363,456 Ir, 17,510 misses).
+
+Two more footprint items from the census, measured the same way:
+
+- **PMP assertion loops** (`pmp_entry.sv:63/93`, the G6LC NAPOT canonical check: 16
+  entries × 54 bits × 3 checkers, 1,512 `VL_STOP` blocks): rewritten sim-only as a
+  `$countones` trailing-ones count and one mask compare. Text 7.05 → 6.33 MB (−10 %),
+  **Ir +2.2 %, I1 misses +2 %** — the per-bit `if`s were cheap and mostly skipped, the
+  word form is not cheaper. **Reverted** (no simulation gain, and RTL edits need a
+  physical reason).
+- **Constant tables** (fork `589bb8c7c`): the 64-bit merge cap on adjacent part-select
+  drivers (the fix for the quadratic concat chain) also kept common_cells' lzc
+  `assign index_lut[j] = j` from folding into one constant — 8,719 runtime references in
+  the model. Constant parts now merge at any width (V3Const `replaceAssignMultiSel`, DFG
+  `canonicalizePacked`): references 8,719 → 0, text −0.6 %, Ir −0.1 %. Kept (default on,
+  exact): correct, free, invisible on the clock.
+
+Net of the tangent: every footprint mechanism §7.3 asked for now exists (rolled scans,
+per-element NBA commit, constant tables; field-level SoA remains unbuilt because the
+whole-entry reads make it a rewrite, not a lowering) and none of them moves the wall
+clock on this core, because what the core executes per cycle is its logic, not its
+code copies. The §6.3 "×1–2 unproven" for footprint is now "measured ≈ ×1.0"; the
+levers that remain are the structural ones of §6.1 (per-core skip, partition).

@@ -243,6 +243,7 @@ package build_config_pkg;
     cfg.BPIndirectEntries = CVA6Cfg.BPIndirectEntries;
     cfg.BPStatCorEn = CVA6Cfg.BPStatCorEn;
     cfg.BPCkptDepth = CVA6Cfg.BPCkptDepth;
+    cfg.BPBaseHash = CVA6Cfg.BPBaseHash;
     // FSE S1: BP checkpoints must cover the speculative window.
     if (CVA6Cfg.DeepSpecEn) begin
       if (cfg.BPCkptDepth == 0 || cfg.BPCkptDepth < cfg.NR_SB_ENTRIES)

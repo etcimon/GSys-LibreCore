@@ -1,0 +1,43 @@
+# T23 prediction-time checkpoint buffer formal (bounded) -- the T21 own-entry
+# identity of `core/frontend/g6lc_bp_ckpt.sv` against an independent model:
+# a tag returns its own snapshot until its own resolve, a restore from it or an
+# older entry, or a bank drop; reclaimed tags read dead; span-based occupancy;
+# a restore leaves exactly the older entries. The fetch_B tasks elaborate the
+# frontend with BPCkptDepth 0, so this is the buffer's only formal gate.
+#
+# Run: sby -f core/frontend/formal/g6lc_bp_ckpt.sby
+# Bounded PASS is not an unbounded proof; cover reports reachability of wrap,
+# full, a restore reclaiming three entries, a stale-tag pop and clear_restore.
+
+[tasks]
+bmc
+cover
+
+[options]
+bmc: mode bmc
+cover: mode cover
+bmc: depth 14
+cover: depth 18
+
+[engines]
+# abc bmc3 is far faster than the SMT engines on this bit-level cone (the
+# model's position arithmetic); smtbmc is raced for the counter-example trace.
+bmc: abc bmc3
+bmc: smtbmc --unroll z3
+cover: smtbmc --unroll z3
+
+[script]
+read_slang --std 1800-2017 --top g6lc_bp_ckpt_props -DFORMAL \
+    g6lc64_smt2_config_pkg.sv config_pkg.sv riscv_pkg.sv ariane_pkg.sv \
+    cf_math_pkg.sv lzc.sv g6lc_bp_ckpt.sv g6lc_bp_ckpt_props.sv
+prep -top g6lc_bp_ckpt_props
+
+[files]
+../../include/g6lc64_smt2_config_pkg.sv
+../../include/config_pkg.sv
+../../include/riscv_pkg.sv
+../../include/ariane_pkg.sv
+../../../vendor/pulp-platform/common_cells/src/cf_math_pkg.sv
+../../../vendor/pulp-platform/common_cells/src/lzc.sv
+../g6lc_bp_ckpt.sv
+g6lc_bp_ckpt_props.sv

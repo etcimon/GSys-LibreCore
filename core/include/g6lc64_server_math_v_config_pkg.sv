@@ -164,6 +164,7 @@ package cva6_config_pkg;
       // Hang-7 pair with RAS=2. Ckpt=0 diagnostic (s4-v-ckpt0-minis)
       // same stock HANG @40000 ld ra@e0 as ckpt=16 — not the hang.
       BPCkptDepth: unsigned'(16),
+      BPBaseHash: bit'(0),
       DmBaseAddress: 64'h0,
       TvalEn: bit'(CVA6ConfigTvalEn),
       DirectVecOnly: bit'(0),

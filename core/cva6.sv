@@ -45,6 +45,11 @@ module cva6
       logic                    ckpt_v;
       logic [7:0]              ckpt_idx;
       logic                    is_call;
+      // T23 (2a): decoded return. The frontend classifies a return the RAS
+      // cannot predict as NoCF (no pop, no redirect) instead of Return with a
+      // zero target; the branch unit then resolves it like any unpredicted
+      // jalr but must not train the BTB/ITTAGE with a return target.
+      logic                    is_ret;
     },
 
     parameter type exception_t = struct packed {
@@ -4941,26 +4946,58 @@ module cva6
   // T20b: `+fe_trace` / `+fe_lo` / `+fe_hi` are aliases of `+win_trace` /
   // `+win_lo` / `+win_hi`; `+fe_core=N` restricts the probe to core N
   // (hart_id_i / NrHarts; default -1 = every core).
+  // T23: `+fe_core=boot +fe_boot_pc=<hex>` restricts it to the core that
+  // first commits the given PC -- a cold-boot-only site (OpenSBI's
+  // `generic_early_init`, read from the firmware's `nm`), so the window sits
+  // on the boot core's own clock whichever hart wins the cold-boot lottery
+  // (hart 0 / 1 / 6 across T21c/g2/i on the same firmware). The window
+  // bounds stay core-local cycles; the boot core is simply the only core
+  // whose probe arms.
   // Read-only, sim-only (hierarchical reads into i_frontend / the IQ).
-  bit win_trace;
+  bit win_trace, win_boot_mode, win_boot_hit;
   int unsigned win_lo, win_hi, win_cycle;
   int win_hart, win_core;
+  logic [63:0] win_boot_pc;
+  string win_core_str;
   initial begin
     win_trace = $test$plusargs("win_trace") || $test$plusargs("fe_trace");
     win_lo = 38760000;
     win_hi = 38780000;
     win_hart = -1;
     win_core = -1;
+    win_boot_mode = 1'b0;
+    win_boot_hit = 1'b0;
+    win_boot_pc = '0;
     void'($value$plusargs("win_lo=%0d", win_lo));
     void'($value$plusargs("win_hi=%0d", win_hi));
     void'($value$plusargs("fe_lo=%0d", win_lo));
     void'($value$plusargs("fe_hi=%0d", win_hi));
     void'($value$plusargs("win_hart=%0d", win_hart));
-    void'($value$plusargs("fe_core=%0d", win_core));
+    if ($value$plusargs("fe_core=%s", win_core_str)) begin
+      if (win_core_str == "boot") begin
+        win_boot_mode = 1'b1;
+        if (!$value$plusargs("fe_boot_pc=%h", win_boot_pc))
+          $display("[win] +fe_core=boot without +fe_boot_pc=<hex>: the window will never arm");
+      end else begin
+        void'($value$plusargs("fe_core=%0d", win_core));
+      end
+    end
   end
   always @(posedge clk_i) begin
     if (!rst_ni) win_cycle = 0;
     else win_cycle = win_cycle + 1;
+  end
+  // Boot-core detection: the first retirement of the cold-boot PC on this core.
+  always @(posedge clk_i) begin
+    if (win_boot_mode && !win_boot_hit && rst_ni) begin
+      for (int p = 0; p < CVA6Cfg.NrCommitPorts; p++) begin
+        if (commit_ack[p] && commit_instr_id_commit[p].pc == win_boot_pc[CVA6Cfg.VLEN-1:0]) begin
+          win_boot_hit = 1'b1;
+          $display("[win] boot core: hart_id=%0d commits fe_boot_pc=%h at local cycle %0d",
+                   int'(hart_id_i[7:0]), win_boot_pc, win_cycle);
+        end
+      end
+    end
   end
 `ifdef G6LC_FETCH_B
   if (CVA6Cfg.FtqDepth != 0) begin : gen_win_trace
@@ -4970,7 +5007,8 @@ module cva6
     assign win_ghart = int'(hart_id_i[7:0]) + int'(smt_active_hart);
     assign win_on = win_trace && rst_ni && win_cycle >= win_lo && win_cycle <= win_hi &&
                     (win_hart < 0 || win_ghart == win_hart) &&
-                    (win_core < 0 || (int'(hart_id_i[7:0]) / int'(WIN_NH)) == win_core);
+                    (win_core < 0 || (int'(hart_id_i[7:0]) / int'(WIN_NH)) == win_core) &&
+                    (!win_boot_mode || win_boot_hit);
     assign win_cf_hold_q = i_frontend.gen_ftq.cf_hold_q;
     always @(posedge clk_i) begin
       if (win_on) begin
@@ -5299,6 +5337,58 @@ module cva6
                  int'(hart_id_i[7:0]) / int'(CK_NH), ck_allocs, ck_pops, ck_pop_mismatch, ck_pop_dead,
                  ck_restores, ck_restore_mismatch, ck_restore_dropped, ck_refused, ck_clears,
                  ck_res_br, ck_res_ret, ck_res_jmp, ck_misp_br, ck_misp_ret, ck_misp_jmp);
+
+      // T23 (plan 1b, measure before building): `+ind_stats` -- does the ITTAGE
+      // fold already separate an indirect jump's targets? Per resolved JumpR
+      // pc: resolves, target changes (the target differs from the previous
+      // resolve of this pc: an upper bound on what any single-entry predictor
+      // can miss), fold conflicts (the update fold seen before for this pc,
+      // with a different target: what the current index cannot separate), and
+      // distinct folds. conflicts ~ changes means the direction-history fold
+      // carries no separating information and a PATH fold is the next thing
+      // to try; conflicts << changes means the fold separates and the loss is
+      // capacity/training. The fold is the one the update hashes with
+      // (folded_src[0]: the checkpointed ghist when the entry is live).
+      // `[ind] final` prints every pc with >= 8 resolves and >= 1 conflict.
+      bit ind_stats;
+      initial ind_stats = $test$plusargs("ind_stats");
+      int unsigned ind_res [longint];
+      int unsigned ind_tchg [longint];
+      int unsigned ind_fconf [longint];
+      int unsigned ind_nfold [longint];
+      longint ind_last_tgt [longint];
+      longint ind_fold_tgt [longint];  // key {pc, fold} -> last target
+      longint ind_pc, ind_key, ind_tgt;
+      always @(posedge clk_i) begin
+        if (rst_ni && ind_stats && resolved_branch.valid &&
+            resolved_branch.cf_type == ariane_pkg::JumpR) begin
+          ind_pc  = longint'(resolved_branch.pc);
+          ind_tgt = longint'(resolved_branch.target_address);
+          ind_key = (ind_pc << 8) ^ longint'(i_frontend.gen_tage_lite.i_bp_top.folded_src[0]);
+          if (!ind_res.exists(ind_pc)) begin
+            ind_res[ind_pc] = 0; ind_tchg[ind_pc] = 0; ind_fconf[ind_pc] = 0; ind_nfold[ind_pc] = 0;
+            ind_last_tgt[ind_pc] = ind_tgt;
+          end
+          ind_res[ind_pc]++;
+          if (ind_last_tgt[ind_pc] != ind_tgt) ind_tchg[ind_pc]++;
+          ind_last_tgt[ind_pc] = ind_tgt;
+          if (ind_fold_tgt.exists(ind_key)) begin
+            if (ind_fold_tgt[ind_key] != ind_tgt) ind_fconf[ind_pc]++;
+          end else begin
+            ind_nfold[ind_pc]++;
+          end
+          ind_fold_tgt[ind_key] = ind_tgt;
+        end
+      end
+      final begin
+        if (ind_stats) begin
+          foreach (ind_res[p]) begin
+            if (ind_res[p] >= 8 && ind_fconf[p] != 0)
+              $display("[ind] final core=%0d pc=%h resolves=%0d target_changes=%0d fold_conflicts=%0d folds=%0d",
+                       int'(hart_id_i[7:0]) / int'(CK_NH), p, ind_res[p], ind_tchg[p], ind_fconf[p], ind_nfold[p]);
+          end
+        end
+      end
     end
   end
 `endif

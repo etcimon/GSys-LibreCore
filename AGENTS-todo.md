@@ -925,10 +925,12 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `ooocoh-t21c-server-osbi-48M` PASS strictDual at 33,978,590 cycles (T20
   38,988,173, −12.9 %), witnesses 0, traps 0, `[ckpt] final` clean on all
   cores, returns mispredicted 0.9 %.** Plan T21c verdict.
-- [ ] **Frontend hardening: an unpredicted return travels as `cf = Return`
-  with `predict_address = 0` and is caught at resolve only because 0 is
-  never the target.** Make it `NoCF` (fetch falls through consistently) or
-  carry a `predicted` bit; the T21 RAS leaf pins the current contract.
+- [x] **Frontend hardening (closed 2026-10-12, T23 2a): an unpredicted
+  return travelled as `cf = Return` with `predict_address = 0` and was caught
+  at resolve only because 0 is never the target.** Now `NoCF` at fetch (no
+  pop, no redirect) with `branchpredict_sbe_t.is_ret` keeping the BTB
+  untrained at resolve; cycle-identical on the probes / FP suite / wprp. See
+  the T23 plan-items row.
 - [x] **T21d (2026-10-10): the corrector was the `bltu` culprit (BPCHAIN:
   `tage t=1 | sc t=0`); rows are now tagged.** The 24-cycle penalty is the
   cancelled run walking out through two commit ports; a bulk drop (25 → 7
@@ -1068,11 +1070,92 @@ prerequisite for this work under the existing dual license. No licensing policy 
   targets and are refused 13,800 times). **Decision:** all six passes opt-in
   (excluded from `-O<n>`), their eight `test_regress` cases pass with the
   explicit flags; defaults of the corrected compiler reproduce `wt9` exactly
-  (hybrid class 10,226, s11 `de4f42cfe7cb`). Still owed: the server MT4 A/B
-  for the always-on MTask bitmask (`ooocoh-t22g-server-wt2-mt4-build` vs the
-  `wt` no-gate model, 300 k segment, per-core RVFI), and the guide §7.3 list
-  of what a real SoA would need (field-level tables, whole-array rewrites,
-  per-element NBA commit) before any footprint gain can be claimed.
+  (hybrid class 10,226, s11 `de4f42cfe7cb`). Server MT4 A/B for the
+  always-on MTask bitmask (`ooocoh-t22g-server-wt2-mt4-build` vs the `wt`
+  no-gate model, 300 k segment, alternating on a loaded builder): 2,246 /
+  2,071 vs 2,122 / 2,239 cycles/s, per-core RVFI byte-identical — neutral,
+  kept. Guide §7.3 lists what a real SoA would need (field-level tables,
+  whole-array rewrites, per-element NBA commit) before any footprint gain
+  can be claimed.
+- [~] **T23 plan items (2026-10-12): 1a hashed base row, 2a NoCF return,
+  5 infra.** *1a* `CVA6Cfg.BPBaseHash` (34 packages, default 0): the TAGE
+  base-table row XORs the next `BASE_IDX_W` PC bits into the direct row
+  (`g6lc_bp_tage.base_row_of`, predict and update paths, one XOR level on a
+  registered index); `tb_g6lc_review_tage` scenario 5 pins it (direct table
+  aliases `0x1000`/`0x1020`, hashed table keeps them apart; 16/16 audit-tage
+  cases incl. negatives); server A/B build `ooocoh-t23a-server-hash-mt4-build`
+  (BPBaseHash 1) vs the `wt2` control, 720 K + P2 windows owed. *2a* a
+  return the RAS cannot predict is classified `NoCF` (no pop, no redirect)
+  instead of `Return` with `predict_address 0`; `branchpredict_sbe_t.is_ret`
+  (+1 bit through the IQ entry and the fetch_B formal copies) keeps the
+  branch unit from training the BTB with the return target; the resolve
+  stays `NoCF` so no RAS re-pop and no BTB update. `ras_empty_zero` is now a
+  RAS property, not a frontend contract. Evidence on `g6lc64_ooo` (fork
+  `wt2` defaults, runtime `83b7f47b…`): s11/wprp RVFI byte-identical, 11
+  probes + FP suite 22/22 Spike-exact with the T21 cycle counts, fetch leaves
+  (5 IQ geometries + restore pos/mut) pass. *5a* the harness returns **120**
+  on a cycle-budget exit (`g6lc_tb.cpp`); `run_opensbi_source_review.py`
+  classifies 120 as `timeout` / `cycle-budget`, the soak script names it,
+  the six suite scripts that grepped `SUCCESS` after a `+max-cycles` run
+  anchor on `cycles$` (the capped banner carries a suffix). *5b*
+  `+fe_core=boot +fe_boot_pc=<hex>` arms the fe window only on the core
+  that first commits the cold-boot PC (`generic_early_init` from the
+  firmware `nm`), so the window follows the boot-core lottery. *5c*
+  `core/frontend/formal/g6lc_bp_ckpt.sby` (bmc 14 / cover 18, abc bmc3 +
+  z3): the buffer's own-entry identity against an independent position
+  model (C1 live snapshot, C2 dead after reclaim, C3 span occupancy incl.
+  all-or-nothing allocation, C4 restore leaves exactly the older entries):
+  **bmc 14 PASS (abc bmc3, 7 min 38 s on the builder), cover PASS with all
+  six points reached** (full, wrap, three-entry restore, stale-tag pop,
+  tracked pop, `clear_restore_o`) — registered in `formalTasks`
+  (`build-platform/src/config/defaults.ts`). The builder's formal toolchain
+  has no yices (z3 only); the sby races abc bmc3 with `smtbmc --unroll z3`.
+  *Parked with a measurement owed:* 1b ITTAGE path fold — all eight folds are
+  rotations of the same architectural 24-bit GHR, so a path register would
+  carry new information only where equal direction histories reach the
+  `jr` by different call paths; a sim-only conflict probe (same ghist →
+  several targets at `fdt_next_tag+0x74`) decides before the ckpt is
+  widened. 1c GHR 24→48 is a config A/B queued behind the hash build.
+  *720 K window (hash vs ctl, `q-ab-t21d.sh`):* boot-hart retirements
+  275,257 vs 275,615 (−0.13 %), `fdt_next_node` first 252,716 vs 252,457 —
+  neutral to slightly negative in P1. *P2 window (`q-p2analysis-t21i.sh`,
+  3.53 M global, boot core local 2.24 M → 3.33 M):* ctl **CPI 1.0440**
+  (1,088,659 cycles / 1,042,797 retirements — identical to T21i on the
+  `wt2` compiler) vs hash **CPI 1.0486** (1,087,271 / 1,036,913), boot-core
+  mispredict restores 3,033 vs 2,724: the XOR fold moves the alias set and
+  nets **+0.4 % CPI worse**. `fdt_next_tag+0x74 jr` unchanged (582 vs 595
+  slow edges of ~2,040: 29 %, the ITTAGE item). **Verdict: `BPBaseHash`
+  stays 0 everywhere (seam kept, leaf kept, not adopted).**
+- [ ] **T24 — `COH_FILTERED` server: L3 victim back-invalidation wedges a
+  store once a set overflows while a second core is live (found
+  2026-10-12 by the T23 directed program, item 4).** `mc_l3_evict_inclusion.S`
+  (new; hart 0 churns EVICT_LINES lines one L2/L3 way apart = one set, read
+  then written, then writes the line a peer cached) on
+  `ooocoh-t22g-server-wt2-mt4-build` (T21i RTL, gate off): **24 and 48 same-set
+  lines hang** — hart 0's `sd` to the ~17th+ line never retires (the load
+  before it did), the peer spins to its bound, the run hits the wall budget;
+  **16 lines pass, 8 pass, 4 pass**; the peer never reading the line
+  (`-DPEER_NO_READ`) still hangs; a different set per line (`EVICT_STRIDE
+  0x40040`) passes; **hart 0 alone (`mini_l2set_stride.S`, new, mask 0001,
+  peers clock-held) passes 48 lines**; **`g6lc64_ooo_int2_l3` (`COH_OOO`, 2
+  cores, 1 MiB 16-way L3) passes 24 and 48 lines and the inclusion check**.
+  Threshold = the L3's 16 ways: the first L3 victim with a live second core
+  never finishes its drain. `g6lc_l3_inclusive_inv` waits for every core's
+  `inv_ready` (hub > inclusive > cmo priority, `inv_incl_ready[c] =
+  inv_core_ready[c] && !inv_hub[c].valid`); each core's acceptance is the
+  one-entry `g6lc_inval_retain` that injects into the HPDcache read-response
+  path when no real response is valid — the blocked party is not yet named.
+  Owed: a server build with the new `+incl_trace` probe (`g6lc_cluster.sv
+  gen_incl_trace`: per-core bus owner / ready / l1 handshake / drain done mask
+  while a drain is pending, `[incl] final` census; lint clean on the server)
+  run on `mc_l3_evict_inclusion.S -DEVICT_LINES=24`, then the fix. Until
+  then the server's `COH_FILTERED` is **not** Linux-ready: an L3 set overflow
+  is routine under a kernel, never reached by the 33 M-cycle OpenSBI boot.
+  The other two directed programs pass on the same model:
+  `mc_multi_writer_line.S` (4 cores × 1,500 plain RMW on one line + 6,000
+  `amoadd.d` on one word; 83,356 cycles; negative arm fails as expected) and
+  `mc_cbo_contended.S` (3 writers × 1,500 under a `cbo.clean`/`cbo.flush` loop
+  from hart 0; 22,568 cycles). Driver `t21/coh-t23.sh`.
 - [x] **T20 closed (2026-10-09): first strict 8-hart `g6lc64_ooo_server`
   OpenSBI boot — PASS 38,988,173 cycles** (`ooocoh-t20-final-server-osbi-48M`,
   `strictDualPassed`, force 0, `[hpd-phantom]`/`[hpd-zombie]`/`[misp-hart]` 0,
@@ -1088,8 +1171,9 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `mc_lrsc_set_zombie`, `mc_wrongpath_window`, `mc_force_kill_miss`.
   Regression on HEAD: all drained anchors byte-identical to T17, FP suite
   + probes Spike-exact, formal/leaves/lint/synth at baseline. Plan T20.
-- [ ] **Server still opt-in after T20.** Owed: `COH_FILTERED` breadth
-  (multi-writer lines, CBO under contention, L3 eviction/inclusion), a
+- [ ] **Server still opt-in after T20.** Owed: `COH_FILTERED` breadth —
+  **now run (T23 item 4): multi-writer lines and CBO under contention pass,
+  L3 eviction/inclusion HANGS (T24 row: a design change IS needed)** — a
   Linux-class boot on a faster host (780 cyc/s on the builder), the full
   `check -assert`, and a boot-performance pass (FDT phases ≈8 M cycles
   each, drain bubbles at `SmtFetchQuantum 4`).
@@ -1134,11 +1218,13 @@ prerequisite for this work under the existing dual license. No licensing policy 
 - [x] **AI `ai_illegal_when_off` / `mini_ai_dual_issue` trap-loops** were a
   test-side `mtvec` alignment bug (`trap_vec` after a 2-byte `c.j`); fixed
   with `.balign 4` — both SUCCESS. `ai-chain14` 36/36 modulo this fix.
-- [ ] **I4dp 200 M "server green" is stale.** The `g6lc64_ooo_server`
-  harness `tohost=0` at the 200 M cap (row below, ≈line 10277) predates
-  `252c698e8`; the model could not be built between then and FP-3. Current
-  evidence is the 6 M-cycle boot in plan T12; re-establish the 200 M run on
-  a faster host or FPGA before citing it.
+- [x] **I4dp 200 M "server green" retired (2026-10-12).** The
+  `g6lc64_ooo_server` harness `tohost=0` at the 200 M cap (row below, ≈line
+  10277) predated `252c698e8` and was a cycle-budget exit, not a verdict
+  (the harness now returns 120 for those). The evidence of record is the
+  strict 8-hart OpenSBI boot `ooocoh-t21i-server-osbi-48M` PASS at
+  33,001,884 cycles (T21e row); a longer run belongs to the Linux-class boot
+  item of the "server still opt-in" row, on a faster host.
 - [x] **T13 (2026-10-02): mixed-residency restart PC fixed** — the PC bank
   now banks the switch-out frontier under `SmtDrainedHandoff=0` (retirements
   of an inactive hart no longer move it), the frontier is instruction-

@@ -2384,3 +2384,32 @@ contract (`REVIEW_RTL_TAGE`, 5 positives + 5 negatives); the positional RTL fail
 window BPCHAIN census (`t21/q-bpchain-t21e.py`) and the site table (`q-p2site-t21e.py`) are the
 system-level readout; the RAS forensics script (`q-ras-forensics-t21e.py`) classifies mispredicted
 returns from the `[win] RAS` probe.
+
+## T23 witnesses (2026-10-12)
+
+`tb_g6lc_review_tage` scenario 5 (`TAGE_BASE_HASH`, `REVIEW_RTL_TAGE`, now 6 positives + 6 negatives):
+two branches that share the direct base-table row window and differ only above it (`0x1000` vs
+`0x1020`) alias in the direct table and are kept apart by the `BPBaseHash` fold (third DUT instance
+with `BPBaseHash 1`). `core/frontend/formal/g6lc_bp_ckpt.sby` (bmc 14 / cover 18): the prediction-time
+checkpoint buffer's own-entry identity against an independent position model — a tag returns its own
+ghist until its resolve, a restore from it or an older live entry, or a bank drop (C1); a reclaimed tag
+reads dead until the slot is reallocated under a new epoch (C2); `empty_o`/`full_o`/allocation follow
+the span (holes included) and allocation is all-or-nothing whenever the slots fit (C3); a restore
+leaves exactly the older entries (C4); covers: full, wrap, a three-entry restore, a stale-tag pop,
+`clear_restore_o`. NoCF return (2a): no new witness — the contract moved from "0 is never a target" to
+the `is_ret` bit; `ras_empty_zero` stays as the RAS property; the 11 frozen probes, FP suite 22/22 and
+`ooo_wrongpath_replay` are cycle-identical to T21i on `g6lc64_ooo`, the fetch leaves (5 IQ geometries,
+restore pos/mut) pass. Harness: a cycle-budget exit now returns 120 (`g6lc_tb.cpp`), classified
+`timeout`/`cycle-budget` by `run_opensbi_source_review.py` (unit test `source_outcome(120, …)`), and
+the suite scripts that grep `SUCCESS` after `+max-cycles` anchor on `cycles$`.
+
+## T23 directed `COH_FILTERED` programs (2026-10-12)
+
+`verif/tests/custom/multicore/mc_multi_writer_line.S` (four cores plain-RMW their own dword of one
+line, then `amoadd.d` one word; PASS on the T21i server model, negative arm fails),
+`mc_cbo_contended.S` (three writers under a `cbo.clean`/`cbo.flush` loop from hart 0; PASS),
+`mc_l3_evict_inclusion.S` (same-set churn one L2/L3 way apart, then a remote write to a line the
+peer cached; **HANGS at 24+ lines with a live peer on the server, passes on `g6lc64_ooo_int2_l3`** —
+T24), `mini_l2set_stride.S` (the single-hart arm of the same churn; PASS). Driver
+`build-platform/workspace/build/n1d-remote/t21/coh-t23.sh` (`t17/directed.sh` route, hart masks
+1111 / 0011 / 1001).

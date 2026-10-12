@@ -170,6 +170,7 @@ package cva6_config_pkg;
       BPIndirectEntries: unsigned'(128),
       BPStatCorEn: bit'(1),
       BPCkptDepth: unsigned'(64),
+      BPBaseHash: bit'(0),
       DmBaseAddress: 64'h0,
       TvalEn: bit'(CVA6ConfigTvalEn),
       DirectVecOnly: bit'(0),

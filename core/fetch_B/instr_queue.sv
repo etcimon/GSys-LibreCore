@@ -70,6 +70,7 @@ module instr_queue
     input logic [CVA6Cfg.INSTR_PER_FETCH-1:0] ckpt_v_i,
     input logic [CVA6Cfg.INSTR_PER_FETCH-1:0][7:0] ckpt_idx_i,
     input logic [CVA6Cfg.INSTR_PER_FETCH-1:0] is_call_i,
+    input logic [CVA6Cfg.INSTR_PER_FETCH-1:0] is_return_i,
     // Replay instruction because one of the FIFO was full - FRONTEND
     output logic replay_o,
     // Address at which to replay the fetch - FRONTEND
@@ -109,6 +110,7 @@ module instr_queue
     logic                            ckpt_v;     // T21: BP checkpoint allocated for this CF
     logic [7:0]                      ckpt_idx;   // T21: its index
     logic                            is_call;    // T21: decoded call (RAS push at fetch)
+    logic                            is_ret;     // T23: decoded return (RAS pop at fetch when predicted)
     ariane_pkg::frontend_exception_t ex;         // exception happened
     logic [CVA6Cfg.VLEN-1:0]         ex_vaddr;   // lower VLEN bits of tval for exception
     logic [CVA6Cfg.GPLEN-1:0]        ex_gpaddr;  // lower GPLEN bits of tval2 for exception
@@ -274,6 +276,7 @@ module instr_queue
       instr_data_in[f].ckpt_v = ckpt_v_i[s];
       instr_data_in[f].ckpt_idx = ckpt_idx_i[s];
       instr_data_in[f].is_call = is_call_i[s];
+      instr_data_in[f].is_ret = is_return_i[s];
       // an exception holds for the whole fetch packet
       instr_data_in[f].ex = exception_i;
       instr_data_in[f].ex_vaddr = exception_addr_i;
@@ -376,6 +379,7 @@ module instr_queue
           fetch_entry_o[p].branch_predict.ckpt_v = instr_data_out[f].ckpt_v;
           fetch_entry_o[p].branch_predict.ckpt_idx = instr_data_out[f].ckpt_idx;
           fetch_entry_o[p].branch_predict.is_call = instr_data_out[f].is_call;
+          fetch_entry_o[p].branch_predict.is_ret = instr_data_out[f].is_ret;
           fetch_entry_o[p].hart_id = instr_data_out[f].hart;
         end
       end

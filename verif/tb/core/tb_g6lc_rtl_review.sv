@@ -2768,6 +2768,18 @@ module tb_g6lc_review_tage;
     .clk_i(clk),.rst_ni(rst_n),.flush_i(flush),.debug_mode_i(debug_mode),.vpc_i(vpc),
     .folded_i(folded[0]),.folded_update_i(folded_upd[0]),
     .btb_update_i(btb_upd),.btb_prediction_o(btb_pred));
+  // Third DUT (T23): same tables with BPBaseHash=1. Scenario 5 pins the hashed
+  // base row: 8 rows x 2 columns, row window pc[4:2], fold window pc[7:5].
+  function automatic config_pkg::cva6_cfg_t configuration_hash();
+    config_pkg::cva6_cfg_t c=configuration();c.BPBaseHash=1;return c;
+  endfunction
+  localparam config_pkg::cva6_cfg_t CH=configuration_hash();
+  bht_prediction_t [1:0] prediction_h;
+  logic hv_h,ht_h;
+  g6lc_bp_tage #(.CVA6Cfg(CH),.bht_update_t(update_t),.NR_ENTRIES(16),.NR_TABLES(2),.TABLE_ENTRIES(8),.TAG_BITS(4),.GHIST_LEN(8)) dut_h(
+    .clk_i(clk),.rst_ni(rst_n),.flush_bp_i(flush),.debug_mode_i(debug_mode),.vpc_i(vpc),.ghist_i('0),
+    .folded_i(folded),.folded_update_i(folded_upd),
+    .bht_update_i(update),.bht_prediction_o(prediction_h),.hist_update_valid_o(hv_h),.hist_update_taken_o(ht_h));
   task automatic tick;clk=1;#2;clk=0;#2;endtask
   task automatic upd(input logic [31:0] pc,input bit tk);
     update='{valid:1'b1,pc:pc,taken:tk};tick();update='0;tick();
@@ -2865,6 +2877,28 @@ module tb_g6lc_review_tage;
           if(prediction[0].taken)$fatal(1,"TAGE_COLUMN_UNALIGNED0");
           vpc=32'h1004;#2;
           if(!prediction[1].taken || prediction[0].taken)$fatal(1,"TAGE_COLUMN_ALIGNED");
+        end
+      end
+      // T23 hashed base row: pc 0x1000 and 0x1020 share the direct row window
+      // (pc[4:2]=0, column 0) and differ only in the fold window (pc[7:5]=0/1),
+      // the shape of the T21i P2 alias pair. Train 0x1000 taken, then 0x1020
+      // not-taken three times. The direct table (dut) lets the second branch
+      // overwrite the first (alias); the hashed table (dut_h) keeps them in
+      // rows 0 and 1 and predicts each by its own history. Tagged lookups are
+      // forced to miss so the base decides.
+      5:begin
+        upd(32'h1000,1'b1);upd(32'h1000,1'b1);
+        upd(32'h1020,1'b0);upd(32'h1020,1'b0);upd(32'h1020,1'b0);
+        folded[0]=8'h07;folded[1]=8'h07;
+        vpc=32'h1000;#2;
+        if(negative) begin
+          if(prediction_h[0].taken)$fatal(1,"TAGE_BASE_HASH");
+        end else begin
+          if(prediction[0].taken)$fatal(1,"TAGE_BASE_HASH_DIRECT_ALIAS");
+          if(!prediction_h[0].taken)$fatal(1,"TAGE_BASE_HASH");
+          vpc=32'h1020;#2;
+          if(prediction_h[0].taken)$fatal(1,"TAGE_BASE_HASH_B");
+          if(prediction[0].taken)$fatal(1,"TAGE_BASE_HASH_DIRECT_B");
         end
       end
       default:$fatal(1,"TAGE_SCENARIO");

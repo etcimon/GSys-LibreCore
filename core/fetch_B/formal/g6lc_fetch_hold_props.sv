@@ -121,6 +121,7 @@ module g6lc_fetch_hold_props #(
     logic            ckpt_v;    // T21
     logic [7:0]      ckpt_idx;  // T21
     logic            is_call;   // T21
+    logic            is_ret;    // T23
   } bp_sbe_t;
 
   typedef struct packed {

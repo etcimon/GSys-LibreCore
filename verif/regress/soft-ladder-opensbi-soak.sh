@@ -199,8 +199,8 @@ rc=$?
 set -e
 
 if [[ "$rc" -ne 0 ]]; then
-  if [[ "$rc" -eq 124 || "$rc" -eq 137 ]]; then
-    log "CLASSIFY=TIMEOUT fetch=${FETCH} rc=$rc (harness did not finish cleanly)"
+  if [[ "$rc" -eq 124 || "$rc" -eq 137 || "$rc" -eq 120 ]]; then
+    log "CLASSIFY=TIMEOUT fetch=${FETCH} rc=$rc (harness did not finish cleanly; 120 = cycle budget reached)"
   else
     log "CLASSIFY=FAIL fetch=${FETCH} rc=$rc (harness failed)"
   fi

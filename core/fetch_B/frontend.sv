@@ -404,11 +404,18 @@ module frontend
           taken_rvc_cf[i] = rvc_jump[i];
           cf_type[i] = ariane_pkg::Jump;
         end
-        // return: only alter the RAS if we actually consumed the instruction
+        // return: only alter the RAS if we actually consumed the instruction.
+        // T23 (2a): a return the RAS cannot predict stays NoCF -- no pop, no
+        // redirect, and the branch unit resolves it as an unpredicted jalr
+        // (is_ret keeps it out of the BTB). Before, it travelled as Return
+        // with predict_address 0 and was caught at resolve only because 0 is
+        // never a target (ras_empty_zero pinned the RAS side of that contract).
         4'b0100: begin
-          ras_pop = ras_predict.valid & instr_queue_consumed[i];
-          predict_address = ras_predict.ra;
-          cf_type[i] = ariane_pkg::Return;
+          if (ras_predict.valid) begin
+            ras_pop = instr_queue_consumed[i];
+            predict_address = ras_predict.ra;
+            cf_type[i] = ariane_pkg::Return;
+          end
         end
         // branch prediction: dynamic if we have it, else static on the sign of
         // the immediate
@@ -450,14 +457,11 @@ module frontend
     end
   end
 
-  // A prediction is only valid if we saw a control flow, and for a return only if
-  // the RAS holds a valid address.
+  // A prediction is only valid if we saw a control flow (a Return is only
+  // classified when the RAS holds a valid address, see cf_select).
   always_comb begin : bp_valid_reduce
     bp_valid = 1'b0;
-    for (int i = 0; i < NrInstr; i++) begin
-      bp_valid |= ((cf_type[i] != NoCF) & (cf_type[i] != Return))
-                  | ((cf_type[i] == Return) & ras_predict.valid);
-    end
+    for (int i = 0; i < NrInstr; i++) bp_valid |= (cf_type[i] != NoCF);
   end
 
   // I19: act on a prediction only if the target is fetchable. Resolve is unfiltered.
@@ -1425,6 +1429,7 @@ module frontend
       .ckpt_v_i           (ckpt_slot_v),
       .ckpt_idx_i         (ckpt_slot_idx),
       .is_call_i          (is_call),
+      .is_return_i        (is_return),
       .valid_i            (instruction_valid),     // from re-aligner
       .leftover_complete_i(serving_unaligned),
       .consumed_o         (instr_queue_consumed),

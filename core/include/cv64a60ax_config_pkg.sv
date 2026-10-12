@@ -108,6 +108,7 @@ localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
       BPIndirectEntries: unsigned'(0),
       BPStatCorEn: bit'(0),
       BPCkptDepth: unsigned'(0),
+      BPBaseHash: bit'(0),
    DmBaseAddress: 64'h300_0000,
    TvalEn: bit'(1),
    DirectVecOnly: bit'(0),

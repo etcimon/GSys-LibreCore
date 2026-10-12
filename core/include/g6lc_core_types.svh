@@ -50,6 +50,7 @@
   logic                    ckpt_v;                                             \
   logic [7:0]              ckpt_idx;                                           \
   logic                    is_call;                                            \
+  logic                    is_ret;                                             \
 }
 
 // Exception (cva6.sv `exception_t`).

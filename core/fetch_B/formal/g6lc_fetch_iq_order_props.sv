@@ -78,6 +78,7 @@ module g6lc_fetch_iq_order_props #(
     logic            ckpt_v;    // T21
     logic [7:0]      ckpt_idx;  // T21
     logic            is_call;   // T21
+    logic            is_ret;    // T23
   } bp_sbe_t;
 
   typedef struct packed {
@@ -127,7 +128,7 @@ module g6lc_fetch_iq_order_props #(
       .ready_o, .consumed_o,
       .exception_i, .exception_addr_i, .exception_gpaddr_i,
       .exception_tinst_i, .exception_gva_i, .predict_address_i, .cf_type_i,
-      .ckpt_v_i('0), .ckpt_idx_i('0), .is_call_i('0),
+      .ckpt_v_i('0), .ckpt_idx_i('0), .is_call_i('0), .is_return_i('0),
       .replay_o, .replay_addr_o,
       .fetch_entry_o, .fetch_entry_valid_o, .fetch_entry_ready_i
   );

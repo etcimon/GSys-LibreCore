@@ -625,6 +625,7 @@ package config_pkg;
     int unsigned BPIndirectEntries;   // ITTAGE entries (0 or power-of-two)
     bit          BPStatCorEn;         // statistical corrector
     int unsigned BPCkptDepth;         // prediction checkpoint FIFO depth (U4/U5)
+    bit          BPBaseHash;          // T23: XOR-fold the next row-width PC bits into the TAGE base-table row (de-aliases far-apart PCs at equal cost)
     // MMU instruction TLB entries
     int unsigned InstrTlbEntries;
     // MMU data TLB entries
@@ -854,6 +855,7 @@ package config_pkg;
     int unsigned BPIndirectEntries;
     bit          BPStatCorEn;
     int unsigned BPCkptDepth;
+    bit          BPBaseHash;
     int unsigned InstrTlbEntries;
     int unsigned DataTlbEntries;
     bit unsigned UseSharedTlb;

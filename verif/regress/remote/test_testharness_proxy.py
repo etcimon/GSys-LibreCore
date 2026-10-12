@@ -560,6 +560,8 @@ class SourceModelProvenanceTests(unittest.TestCase):
         self.assertEqual(source_outcome(0, '*** SUCCESS *** (tohost = 0) after 999 cycles', True, 1000), 'pass')
         self.assertEqual(source_outcome(0, '*** SUCCESS *** (tohost = 0) after 999 cycles', False, 1000), 'incomplete')
         self.assertEqual(source_outcome(124, '', False, 1000), 'timeout')
+        self.assertEqual(source_outcome(120, '*** SUCCESS *** (tohost = 0) after 1000 cycles [cycle budget reached: no tohost verdict]', True, 1000), 'timeout')
+        self.assertEqual(source_outcome(120, '*** SUCCESS *** (tohost = 0) after 500 cycles [cycle budget reached: no tohost verdict]', True, 1000), 'timeout')
         self.assertEqual(source_outcome(-6, '%Error', False, 1000), 'error')
 
 

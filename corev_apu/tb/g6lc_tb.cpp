@@ -211,6 +211,10 @@ static const char *verilog_plusargs[] = {
     // translate_off): mismatch / dead / refused events inside the fe window;
     // the [ckpt] final census prints regardless. Same allowlist rule as above.
     "ckpt_trace",
+    // T23 indirect-fold conflict census (core/cva6.sv gen_ckpt_trace `[ind] final`)
+    "ind_stats",
+    // T24 inclusive-victim drain probe (corev_apu/src/g6lc_cluster.sv gen_incl_trace)
+    "incl_trace", "incl_trace_max",
     // AI island per-job PMU record (corev_apu/ai_island/g6lc_ai_island_top.sv,
     // translate_off): one AI_JOB line per completed descriptor, harvested by
     // verif/regress/ai-matrix-veri.sh AI_MATRIX_BENCH=1.
@@ -1957,6 +1961,12 @@ done_processing:
     // M >= cap as a timeout themselves); the suffix makes the raw line honest.
     fprintf(stderr, "%s *** SUCCESS *** (tohost = 0) after %ld cycles [cycle budget reached: no tohost verdict]\n",
             htif_argv[1], main_time);
+    // T23: so does the return code -- 120 (the `timeout` wrapper owns 124-127,
+    // the testbench's [mc_verdict] HELD verdict is exit_o code 125, HTIF
+    // codes are small) so a caller that only looks at rc cannot read a capped
+    // run as a pass. Window and segment runs that stop at the cap on purpose
+    // expect 120.
+    ret = 120;
   } else {
     // Ended on a tohost/exit handshake reporting success (HTIF exit code 0,
     // i.e. the guest wrote tohost = 1); the banner reports the exit code.

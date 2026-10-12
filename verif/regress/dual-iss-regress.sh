@@ -136,7 +136,7 @@ veri_tohost_pass() {
     +tohost_addr="0x${th}" "$elf" >"$log" 2>&1
   local rc=$?
   set -e
-  if grep -q 'SUCCESS' "$log"; then
+  if grep -qE 'SUCCESS.*cycles$' "$log"; then  # a cycle-budget exit carries a suffix (rc 120): not a pass
     return 0
   fi
   return 1

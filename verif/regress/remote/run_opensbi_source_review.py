@@ -139,6 +139,11 @@ def source_outcome(rc, text, passed, cap):
     status, value, cycles = verdicts[0]
     if status == 'FAILED' or int(value, 16 if value.startswith('0x') else 10):
         return 'fail'
+    # T23: the harness returns 120 on a cycle-budget exit (g6lc_tb.cpp); that is
+    # the timeout verdict whether or not the banner's cycle count reached the cap
+    # the caller believes in (the harness cap is the authoritative one).
+    if rc == 120:
+        return 'timeout'
     if rc != 0:
         return 'error'
     if int(cycles) >= cap:
@@ -223,6 +228,8 @@ def termination_path(rc, text, cap):
         return 'assertion-$stop'
     if rc == 124:
         return 'wall-budget'
+    if rc == 120:
+        return 'cycle-budget'
     if '[rvfi_tracer] INFO: Simulation terminated' in text:
         return 'tracer'
     cycles = re.search(r'after ([0-9]+) cycles', text)

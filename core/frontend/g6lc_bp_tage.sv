@@ -54,6 +54,25 @@ module g6lc_bp_tage
 
   base_entry_t [NR_ROWS-1:0][CVA6Cfg.INSTR_PER_FETCH-1:0] base_d, base_q;
   logic [CVA6Cfg.VLEN-1:0] slot_pc [CVA6Cfg.INSTR_PER_FETCH];
+
+  // Base-table row of a PC. Direct: the BASE_IDX_W bits above the column bits.
+  // BPBaseHash (T23): XOR the next BASE_IDX_W bits in, so two branches whose PCs
+  // agree in the index window but differ above it (the T21i P2 alias pair at
+  // row 751, `fdt_ro_probe_+0xfa` vs `fdt_get_property_by_offset_+0x18`) land in
+  // different rows. Same function on the predict and the update path, one XOR
+  // level on the row index (timing-neutral: the row register follows). When the
+  // PC is too narrow for a second window the fold degenerates to the direct row.
+  localparam int unsigned BASE_LO = OFFSET + COL_BITS;
+  localparam bit BASE_HASH_FOLD = CVA6Cfg.BPBaseHash && (BASE_LO + 2*BASE_IDX_W <= CVA6Cfg.VLEN);
+  // Second window base; aliases the first window when the fold is off so the
+  // part-select is always in range (the XOR is then dropped, not applied twice).
+  localparam int unsigned BASE_HI = BASE_HASH_FOLD ? BASE_LO + BASE_IDX_W : BASE_LO;
+  function automatic logic [BASE_IDX_W-1:0] base_row_of(input logic [CVA6Cfg.VLEN-1:0] pc);
+    logic [BASE_IDX_W-1:0] row;
+    row = pc[BASE_LO +: BASE_IDX_W];
+    if (BASE_HASH_FOLD) row = row ^ pc[BASE_HI +: BASE_IDX_W];
+    return row;
+  endfunction
   logic [BASE_IDX_W-1:0] base_row_i  [CVA6Cfg.INSTR_PER_FETCH];
   logic [SLOT_W-1:0]     base_col_i  [CVA6Cfg.INSTR_PER_FETCH];
   logic [BASE_IDX_W-1:0] base_update_index;
@@ -73,19 +92,19 @@ module g6lc_bp_tage
       assign slot_pc[i] = {vpc_i[CVA6Cfg.VLEN-1:OFFSET+COL_BITS], COL_BITS'(i), {OFFSET{1'b0}}};
     end
     if (COL_BITS == 0) begin : gen_nocol
-      assign base_row_i[i] = slot_pc[i][OFFSET +: BASE_IDX_W];
+      assign base_row_i[i] = base_row_of(slot_pc[i]);
       assign base_col_i[i] = '0;
     end else begin : gen_col
-      assign base_row_i[i] = slot_pc[i][OFFSET+COL_BITS +: BASE_IDX_W];
+      assign base_row_i[i] = base_row_of(slot_pc[i]);
       assign base_col_i[i] = slot_pc[i][OFFSET +: COL_BITS];
     end
   end
 
   if (COL_BITS == 0) begin : gen_upd_nocol
-    assign base_update_index = bht_update_i.pc[OFFSET +: BASE_IDX_W];
+    assign base_update_index = base_row_of(bht_update_i.pc);
     assign update_row        = '0;
   end else begin : gen_upd_col
-    assign base_update_index = bht_update_i.pc[OFFSET+COL_BITS +: BASE_IDX_W];
+    assign base_update_index = base_row_of(bht_update_i.pc);
     assign update_row        = bht_update_i.pc[OFFSET +: COL_BITS];
   end
 

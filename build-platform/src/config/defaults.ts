@@ -1691,6 +1691,11 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       "core/fetch_B/formal/g6lc_fetch_align.sby",
       "core/fetch_B/formal/g6lc_fetch_order.sby",
       "core/fetch_B/formal/g6lc_fetch_redirect.sby",
+      // T23: the prediction-time checkpoint buffer (g6lc_bp_ckpt) as a unit --
+      // own-entry identity against an independent position model (bmc 14 /
+      // cover 18, abc bmc3 + z3). The fetch_B tasks elaborate BPCkptDepth 0,
+      // so this is the buffer's only formal gate.
+      "core/frontend/formal/g6lc_bp_ckpt.sby",
       // SMT-facing fetch contracts: I4/R1 packet provenance, I8 commit-hart
       // filter, I10 switch progress. `en.restore` / `en_smt` are free inputs,
       // so one run proves both the T=1 and T>1 envelopes.

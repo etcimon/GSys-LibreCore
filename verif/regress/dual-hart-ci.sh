@@ -260,7 +260,7 @@ if [[ "${LIVE:-0}" == "1" ]]; then
     "$harness" +max-cycles=200000 +time_out=200000 +debug_disable \
       +tohost_addr="0x${th}" "$PARK_ELF" >"$vlog" 2>&1
     set -e
-    if grep -q SUCCESS "$vlog"; then
+    if grep -qE 'SUCCESS.*cycles$' "$vlog"; then
       log "  PASS live smt_dual_park on $harness"
       PASS=$((PASS + 1))
     else
@@ -282,7 +282,7 @@ if [[ "${LIVE:-0}" == "1" ]]; then
     "$harness" +max-cycles=500000 +time_out=500000 +debug_disable \
       +tohost_addr="0x${tha}" "$ACTIVE_ELF" >"$vloga" 2>&1
     set -e
-    if grep -q SUCCESS "$vloga"; then
+    if grep -qE 'SUCCESS.*cycles$' "$vloga"; then
       log "  PASS live smt_peer_tohost on $harness"
       PASS=$((PASS + 1))
       # Dual-active: dual-ready burn then WFI yield (hard when LIVE)
@@ -298,7 +298,7 @@ if [[ "${LIVE:-0}" == "1" ]]; then
         "$harness" +max-cycles=300000 +time_out=300000 +debug_disable \
           +tohost_addr="0x${thd}" "$DA_ELF" >"$vlogd" 2>&1
         set -e
-        if grep -q SUCCESS "$vlogd"; then
+        if grep -qE 'SUCCESS.*cycles$' "$vlogd"; then
           log "  PASS live smt_dual_active on $harness"
           PASS=$((PASS + 1))
           # Pure no-WFI concurrent dual-ready (first-act exclusive greened)
@@ -314,7 +314,7 @@ if [[ "${LIVE:-0}" == "1" ]]; then
             "$harness" +max-cycles=1500000 +time_out=1500000 +debug_disable \
               +tohost_addr="0x${thc}" "$DC_ELF" >"$vlogc" 2>&1
             set -e
-            if grep -q SUCCESS "$vlogc"; then
+            if grep -qE 'SUCCESS.*cycles$' "$vlogc"; then
               log "  PASS live smt_dual_concurrent on $harness"
               PASS=$((PASS + 1))
               # Dual-WFI without software IPI (timer MTIP wake)
@@ -330,7 +330,7 @@ if [[ "${LIVE:-0}" == "1" ]]; then
                 "$harness" +max-cycles=500000 +time_out=500000 +debug_disable \
                   +tohost_addr="0x${thw}" "$DW_ELF" >"$vlogw" 2>&1
                 set -e
-                if grep -q SUCCESS "$vlogw"; then
+                if grep -qE 'SUCCESS.*cycles$' "$vlogw"; then
                   log "  PASS live smt_dual_wfi_timer on $harness"
                   PASS=$((PASS + 1))
                 else

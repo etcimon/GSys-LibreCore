@@ -121,8 +121,10 @@ module branch_unit #(
               || target_address != branch_predict_i.predict_address)) begin
         resolved_branch_o.is_mispredict = 1'b1;
         resolved_branch_o.ckpt_restore  = 1'b1;
-        // update BTB only if this wasn't a return
-        if (branch_predict_i.cf != ariane_pkg::Return)
+        // update BTB only if this wasn't a return (predicted: cf == Return;
+        // unpredicted, T23: NoCF with is_ret -- resolves like an unpredicted
+        // jalr, cf_type stays NoCF so neither BTB nor RAS re-pop is touched)
+        if (branch_predict_i.cf != ariane_pkg::Return && !branch_predict_i.is_ret)
           resolved_branch_o.cf_type = ariane_pkg::JumpR;
       end
       // JAL is decoded as CTRL_FLOW with default op=ADD (no JAL fu_op).
