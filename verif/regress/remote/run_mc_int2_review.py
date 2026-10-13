@@ -216,7 +216,7 @@ def main():
     if os.environ.get('REVIEW_MC_REBUILD') == '1' or not model.exists():
         rc = bash(f'export VERILATOR_ROOT={runtime}; '
                   f'SOFT_LADDER_VERLIB={verlib} SOFT_LADDER_BUILD_TARGET={target} '
-                  f'SOFT_LADDER_VERILATOR_THREADS=1 SOFT_LADDER_BUILD_JOBS=8 bash verif/regress/soft-ladder-build-harness.sh B',
+                  f'SOFT_LADDER_VERILATOR_THREADS=1 SOFT_LADDER_BUILD_PGO=0 SOFT_LADDER_BUILD_JOBS=8 bash verif/regress/soft-ladder-build-harness.sh B',
                   out / 'build.log', repo, timeout=4 * 3600)
         manifest['buildRc'] = rc
         (out / 'manifest.json').write_text(json.dumps(manifest, indent=2))
@@ -749,7 +749,7 @@ end
     driver.write_text(text.replace(old, '    "mc_visibility", "mc_vis_from", "mc_vis_until", "mc_vis_stuck",\n' + old))
     cmd = (f'export VERILATOR_ROOT={runtime} SOFT_LADDER_VERLIB={model} '
            f'SOFT_LADDER_BUILD_TARGET={target} SOFT_LADDER_VERILATOR_THREADS=1 '
-           'SOFT_LADDER_BUILD_JOBS=8; bash verif/regress/soft-ladder-build-harness.sh B')
+           'SOFT_LADDER_BUILD_PGO=0 SOFT_LADDER_BUILD_JOBS=8; bash verif/regress/soft-ladder-build-harness.sh B')
     rc = bash(cmd, out / 'build.log', repo, 3600)
     assert rc == 0, 'visibility build'
     dependencies = '\n'.join(p.read_text(errors='replace') for p in model.glob('*.d'))
@@ -1085,7 +1085,7 @@ def boot_initial_review():
               for p in (repo / base).rglob('*') if p.is_file() and p.suffix in ('.sv', '.svh')}
     command = (f'export VERILATOR_ROOT={runtime} SOFT_LADDER_VERLIB={model} '
                'SOFT_LADDER_BUILD_TARGET=g6lc64_ooo_int2 SOFT_LADDER_VERILATOR_THREADS=12 '
-               'SOFT_LADDER_BUILD_JOBS=8; bash verif/regress/soft-ladder-build-harness.sh B')
+               'SOFT_LADDER_BUILD_PGO=0 SOFT_LADDER_BUILD_JOBS=8; bash verif/regress/soft-ladder-build-harness.sh B')
     rc = bash(command, out / 'build.log', repo, 3600)
     assert rc == 0, 'initial-edge full-model build'
     for name, digest in inputs.items():
@@ -1319,7 +1319,7 @@ def build_only_review():
                f'SOFT_LADDER_BUILD_OBJCACHE={objcache} SOFT_LADDER_BUILD_CCACHE_DIR={ccdir} '
                f'SOFT_LADDER_BUILD_LINKER={linker} '
                f"SOFT_LADDER_BUILD_VLT_ARGS='{vlt_args}'; "
-               'bash verif/regress/soft-ladder-build-harness.sh B')
+               'SOFT_LADDER_BUILD_PGO=0; bash verif/regress/soft-ladder-build-harness.sh B')
     rc = bash(command, out / 'build.log', repo, 3600)
     assert rc == 0, f'build-only model build failed for {target}'
     for rel, entry in sources.items():

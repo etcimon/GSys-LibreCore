@@ -15,6 +15,15 @@
 # Usage:
 #   bash verif/regress/soft-ladder-build-harness.sh legacy
 #   bash verif/regress/soft-ladder-build-harness.sh B
+#
+# Build of record (2026-10-13, agents/guides/AGENTS-verilator-performance.md §7.4a):
+#   SOFT_LADDER_VERILATOR_FLAVOUR=g6lc  the tools/verilator fork (default; pinned = upstream v5.008)
+#   SOFT_LADDER_BUILD_SPLIT_VLT=1       build-platform/scripts/verilator-split-loops.vlt (default on for g6lc)
+#   SOFT_LADDER_BUILD_OPT=-O2           OPT_FAST/OPT_SLOW/OPT_GLOBAL for the generated C++ (default -O2)
+#   SOFT_LADDER_BUILD_PGO=1             instrument -> train -> -fprofile-use (default on)
+#   SOFT_LADDER_BUILD_PGO_TRAIN=<elf>   training workload (default: ooo_fp_ooo.S compiled here)
+#   SOFT_LADDER_BUILD_PGO_CYCLES=200000 cycle cap of each training run
+#   SOFT_LADDER_VERILATOR_THREADS=4     model threads (default 4; the review runners pass 1)
 #   SOFT_LADDER_VERLIB=work-ver-smt2-fw64-legacy bash ... legacy
 #   SOFT_LADDER_BUILD_TARGET=g6lc64_smt2 bash ... legacy
 #   SOFT_LADDER_BUILD_CLEAN=1 bash ... legacy     # wipe Mdir first (slow, full rebuild)
@@ -183,7 +192,7 @@ if [[ -z "${VLT_HOME:-}" && -z "${VERILATOR_ROOT:-}" && "$VLT_FLAVOUR" == "g6lc"
   fi
 fi
 VLT_HOME="${VLT_HOME:-$PINNED_HOME}"
-log "verilator flavour: $VLT_FLAVOUR home=$VLT_HOME"
+log "verilator flavour: $VLT_FLAVOUR home=$VLT_HOME root=${VERILATOR_ROOT:-$VLT_HOME/share/verilator}"
 
 for p in "$RISCV/bin" "$SPIKE_INSTALL_DIR/lib" "$VLT_HOME/bin/verilator"; do
   [[ -e "$p" ]] || { log "missing build dependency: $p"; exit 1; }
@@ -198,6 +207,31 @@ SPLIT_VLT_ON="${SOFT_LADDER_BUILD_SPLIT_VLT:-$([[ "$VLT_FLAVOUR" == g6lc ]] && e
 if [[ "$SPLIT_VLT_ON" == "1" && -f "$SPLIT_VLT_FILE" ]] && [[ " $BUILD_VLT_ARGS " != *"verilator-split-loops.vlt"* ]]; then
   BUILD_VLT_ARGS="$SPLIT_VLT_FILE $BUILD_VLT_ARGS"
   log "split-loops .vlt: on ($SPLIT_VLT_FILE)"
+fi
+
+# --- C++ optimisation level and profile-guided optimisation ----------------
+# verilated.mk compiles the generated C++ at -Os unless OPT_FAST/OPT_SLOW/
+# OPT_GLOBAL are overridden; the measured recipe is -O2 (SOFT_LADDER_BUILD_OPT).
+# PGO (SOFT_LADDER_BUILD_PGO, default 1) is the largest single-thread lever
+# measured on these models (guide §4b.1: ×3.5 on the single-core spin, the
+# server from 2,673 to 3,379 cycles/s): phase 1 builds instrumented
+# (-fprofile-generate), the model runs a training workload (default: the
+# in-repo ooo_fp_ooo.S probe compiled here, plus one run to the cycle cap so
+# the idle/spin paths are profiled; SOFT_LADDER_BUILD_PGO_TRAIN=<elf> overrides,
+# SOFT_LADDER_BUILD_PGO_CYCLES the cap), phase 2 recompiles the same generated
+# sources with -fprofile-use. Layout only: a PGO model retires the same RVFI
+# stream as the plain one (every battery in the guide was run on PGO models).
+BUILD_OPT="${SOFT_LADDER_BUILD_OPT:--O2}"
+export MAKEFLAGS="${MAKEFLAGS:-} OPT_FAST=$BUILD_OPT OPT_SLOW=$BUILD_OPT OPT_GLOBAL=$BUILD_OPT"
+log "C++ opt: $BUILD_OPT (OPT_FAST/OPT_SLOW/OPT_GLOBAL)"
+PGO="${SOFT_LADDER_BUILD_PGO:-1}"
+PGO_DIR="$VERLIB_DIR/pgo"
+BASE_CXXFLAGS="$BUILD_CXXFLAGS"; BASE_LDFLAGS="$BUILD_LDFLAGS"
+if [[ "$PGO" == "1" ]]; then
+  mkdir -p "$PGO_DIR"
+  BUILD_CXXFLAGS="$BUILD_CXXFLAGS -fprofile-generate=$PGO_DIR -fprofile-update=atomic"
+  BUILD_LDFLAGS="$BUILD_LDFLAGS -fprofile-generate=$PGO_DIR"
+  log "PGO phase 1: instrumented build (profiles -> $PGO_DIR)"
 fi
 
 # Verilator 5.008 does not know -Wno-SIDEEFFECT; the Makefile passes it on some
@@ -329,7 +363,12 @@ if [[ -n "${SOFT_LADDER_OVERLAY:-}" ]]; then
   log "overlay flist=$FLIST fields=$SOFT_LADDER_OVERLAY"
 fi
 
-VTHREADS="${SOFT_LADDER_VERILATOR_THREADS:-$( (command -v nproc >/dev/null && nproc) || echo 4)}"
+# Model threads: 4 by default -- the measured point for the 8-hart server
+# (guide §4b.2: 4 threads deliver 1.9-2.0x, the partition is synchronisation-
+# bound, so more threads on this host were not a win); the review runners pass
+# 1 explicitly (their qualification compare requires a single-thread model).
+# '$(nproc)' is still accepted and evaluated here.
+VTHREADS="${SOFT_LADDER_VERILATOR_THREADS:-4}"
 if [[ "$VTHREADS" == "$(nproc)" ]] || [[ "$VTHREADS" == "\$(nproc)" ]]; then
   VTHREADS=$( (command -v nproc >/dev/null && nproc) || echo 4)
 fi
@@ -400,7 +439,64 @@ if [[ ! -x "$VERLIB_DIR/Variane_testharness" ]]; then
   exit 1
 fi
 
-log "BUILD OK flavour=$FETCH harness=$VERLIB_DIR/Variane_testharness warnings=$warnings errors=$errors"
+if [[ "$PGO" == "1" ]]; then
+  # --- PGO phase 1b: training run(s) with the instrumented model -----------
+  TRAIN_DIR="$VERLIB_DIR/pgo-train"; mkdir -p "$TRAIN_DIR"
+  TRAIN_ELF="${SOFT_LADDER_BUILD_PGO_TRAIN:-}"
+  if [[ -z "$TRAIN_ELF" ]]; then
+    # The s11 FP probe: FP + OoO + memory paths of one hart; the other harts
+    # park in crt.S (an SMT/multi-core model still exercises its uncore).
+    GCC="$RISCV/bin/riscv-none-elf-gcc"; COMMON="$ROOT/verif/tests/custom/common"
+    if "$GCC" -march=rv64imafdc_zicsr_zifencei -mabi=lp64d -static -mcmodel=medany -fvisibility=hidden \
+         -nostdlib -nostartfiles -I"$ROOT/verif/tests/custom/env" -I"$COMMON" -T "$COMMON/link_verilator.ld" \
+         "$ROOT/verif/tests/custom/ooo/ooo_fp_ooo.S" "$COMMON/syscalls.c" "$COMMON/crt.S" \
+         -o "$TRAIN_DIR/train.elf" > "$TRAIN_DIR/gcc.log" 2>&1; then
+      TRAIN_ELF="$TRAIN_DIR/train.elf"
+    else
+      log "PGO: training ELF did not compile (see $TRAIN_DIR/gcc.log); phase 2 runs without a profile"
+    fi
+  fi
+  TRAIN_CYC="${SOFT_LADDER_BUILD_PGO_CYCLES:-200000}"
+  if [[ -n "$TRAIN_ELF" && -f "$TRAIN_ELF" ]]; then
+    TOHOST=$("$RISCV/bin/riscv-none-elf-nm" "$TRAIN_ELF" 2>/dev/null | awk '$3=="tohost"{print "0x"$1}' | head -1)
+    TOHOST="${TOHOST:-0x0000000080001000}"
+    log "PGO training: $TRAIN_ELF (tohost $TOHOST, cap $TRAIN_CYC cycles) x2"
+    ( cd "$TRAIN_DIR" && \
+      "$VERLIB_DIR/Variane_testharness" --seed=1 +max-cycles=$TRAIN_CYC +time_out=$TRAIN_CYC +debug_disable +quiet_axi \
+        +tohost_addr=$TOHOST "$TRAIN_ELF" > train1.log 2>&1; \
+      "$VERLIB_DIR/Variane_testharness" --seed=1 +max-cycles=$TRAIN_CYC +time_out=$TRAIN_CYC +debug_disable +quiet_axi \
+        +tohost_addr=0x0000000080000008 "$TRAIN_ELF" > train2.log 2>&1 ) || true
+    log "PGO profiles: $(ls "$PGO_DIR" 2>/dev/null | wc -l) files"
+  fi
+  # --- PGO phase 2: same generated sources, -fprofile-use ------------------
+  PGO_USE="-fprofile-use=$PGO_DIR -fprofile-correction -fprofile-partial-training -Wno-missing-profile -Wno-coverage-mismatch"
+  log "PGO phase 2: $BUILD_OPT $PGO_USE"
+  ( cd "$VERLIB_DIR" || exit 1
+    # The .mk carries the phase-1 CXXFLAGS/LDFLAGS: strip the instrumentation there.
+    sed -i "s# -fprofile-generate=$PGO_DIR -fprofile-update=atomic##g; s# -fprofile-generate=$PGO_DIR##g" Variane_testharness.mk
+    rm -f ./*.o Variane_testharness
+    unset MAKEFLAGS
+    P2="OPT_FAST=$BUILD_OPT $PGO_USE"
+    # The __Syms unit (tens of MB, no hot code) at -O2 with a profile runs for
+    # hours on the server model: compile it at -O1 first, make then skips it.
+    make -n -f Variane_testharness.mk VERILATOR_ROOT="$VERILATOR_ROOT" "OPT_FAST=$BUILD_OPT $PGO_USE" \
+      "OPT_SLOW=$BUILD_OPT $PGO_USE" "OPT_GLOBAL=$BUILD_OPT $PGO_USE" CXX="$CXX" CC="$CC" OBJCACHE="$OBJCACHE" \
+      CXXFLAGS="$BASE_CXXFLAGS" Variane_testharness__Syms.o 2>/dev/null | grep -- "-c -o Variane_testharness__Syms.o" \
+      | sed -E 's/ -O[0-9s] / -O1 /g' > syms-pgo-cmd.sh
+    [[ -s syms-pgo-cmd.sh ]] && { bash syms-pgo-cmd.sh > syms-pgo.log 2>&1 || true; }
+    make -f Variane_testharness.mk -j "$JOBS" VERILATOR_ROOT="$VERILATOR_ROOT" "OPT_FAST=$BUILD_OPT $PGO_USE" \
+      "OPT_SLOW=$BUILD_OPT $PGO_USE" "OPT_GLOBAL=$BUILD_OPT $PGO_USE" CXX="$CXX" CC="$CC" OBJCACHE="$OBJCACHE" \
+      LINK="$LINK" CXXFLAGS="$BASE_CXXFLAGS" LDFLAGS="$BASE_LDFLAGS" > pgo-phase2.log 2>&1 )
+  rc=$?
+  if [[ $rc -ne 0 || ! -x "$VERLIB_DIR/Variane_testharness" ]]; then
+    log "PGO phase 2 FAIL rc=$rc -- last 40 lines of $VERLIB_DIR/pgo-phase2.log"
+    tail -n 40 "$VERLIB_DIR/pgo-phase2.log"
+    exit 1
+  fi
+  log "PGO phase 2 OK ($(ls "$PGO_DIR" 2>/dev/null | wc -l) profiles applied)"
+fi
+
+log "BUILD OK flavour=$FETCH harness=$VERLIB_DIR/Variane_testharness warnings=$warnings errors=$errors pgo=$PGO opt=$BUILD_OPT threads=$VTHREADS"
 if [[ $warnings -gt 0 ]]; then
   log "--- warning summary (total $warnings) ---"
   grep -hE "%Warning|Warning" "$BUILD_LOG" | sed -E 's#^%Warning-##' >"$BUILD_LOG.warnings"

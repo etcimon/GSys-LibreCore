@@ -381,6 +381,12 @@ script adopts it and the step is a no-op.
     8-hart server model runs 3,100+ cycles/s (guide §7.5) where the pinned build runs ~2,100.
     `childEnv` exports `VLT_HOME` and `SOFT_LADDER_VERILATOR_FLAVOUR` so
     `verif/regress/soft-ladder-build-harness.sh` follows the configured flavour.
+    The `build` command runs that harness by default (`simulation.verilator.recipe:
+    "harness"`, with `pgo: true`, `splitVlt: true`, `opt: "-O2"`, `threads: 0` = 4), so
+    a local model carries the same measured recipe as the builder's — fork compiler,
+    split-loops `.vlt`, `-O2`, profile-guided optimisation on the in-repo training probe
+    (guide §4b.1: ×3.5 spin, server 2,673 → 3,379 cycles/s). `build --make` /
+    `recipe: "make"` is the plain `make verilate`; `--no-pgo` skips the profile round.
   - **`pinned`** → `workspace/tooling/verilator-<pin>` (pin: `toolchain.versions.verilator`,
     v5.008): the upstream tag + patches, the qualification cross-check; CI's lint lane selects it
     in its `.config.local.ts` overlay. **The installed tool is always the pinned tag PLUS every

@@ -234,10 +234,40 @@ export interface VerilatorOptions {
   trace: boolean;
   /** Trace format when tracing is enabled. */
   traceFormat: "fst" | "vcd";
-  /** Worker threads for the verilated model (0 = auto). */
+  /**
+   * Worker threads for the verilated model (0 = auto). Auto is 4: the measured
+   * point for the 8-hart server (guide §4b.2 — the partition is
+   * synchronisation-bound, more threads on the 12-thread builder did not pay).
+   */
   threads: number;
   /** Enable --timing (needed by some testbenches). */
   timing: boolean;
+  /**
+   * How `build` produces the model.
+   * - `harness` (default): `verif/regress/soft-ladder-build-harness.sh`, the
+   *   build of record — flavour-resolved Verilator, the split-loops `.vlt`,
+   *   `-O2`, PGO (below), bootrom regeneration, ccache/mold when present.
+   * - `make`: the repo Makefile's `make verilate` as before (upstream recipe:
+   *   `-Os`, no split controls, no PGO). Also the fallback when no bash is found.
+   */
+  recipe: "harness" | "make";
+  /**
+   * Profile-guided optimisation of the generated C++ (harness recipe): build
+   * instrumented, run the in-repo training probe, recompile with the profile.
+   * Layout only — the RVFI stream is unchanged; measured ×3.5 on the
+   * single-core spin and 2,673 → 3,379 cycles/s on the server (guide §4b.1).
+   * Roughly doubles the C++ compile time.
+   */
+  pgo: boolean;
+  /**
+   * Pass `build-platform/scripts/verilator-split-loops.vlt` (the `split_var`
+   * controls that remove the false combinational loops; guide §4b). On for the
+   * g6lc flavour; the pinned compiler refuses most entries, so the harness
+   * leaves it off there regardless.
+   */
+  splitVlt: boolean;
+  /** C++ optimisation level for the generated model (OPT_FAST/SLOW/GLOBAL). */
+  opt: string;
 }
 
 export interface SimulationConfig {

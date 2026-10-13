@@ -21,6 +21,14 @@ test("config resolves and validates", async () => {
   }
 });
 
+test("the simulation build of record is the harness recipe with split .vlt, -O2 and PGO", async () => {
+  const { config } = await loadConfig();
+  expect(config.simulation.verilator.recipe).toBe("harness");
+  expect(config.simulation.verilator.pgo).toBe(true);
+  expect(config.simulation.verilator.splitVlt).toBe(true);
+  expect(config.simulation.verilator.opt).toBe("-O2");
+});
+
 test("the g6lc Verilator fork is the default flavour and names its own prefix", async () => {
   const { config, repoRoot } = await loadConfig();
   expect(config.toolchain.verilatorFlavour).toBe("g6lc");

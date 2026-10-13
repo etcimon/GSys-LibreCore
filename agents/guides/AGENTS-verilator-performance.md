@@ -829,11 +829,19 @@ levers that remain are the structural ones of §6.1 (per-core skip, partition).
 
 The flat server model of the §7.5 table's left column — fork compiler (`tools/verilator`
 gitlink), `build-platform/scripts/verilator-split-loops.vlt`, `--threads 4`, `-O2`,
-**3,131 / 3,109 cycles/s** on the 300 k boot segment — is now the default build:
-`toolchain.verilatorFlavour: "g6lc"` in the build platform, `SOFT_LADDER_VERILATOR_FLAVOUR=g6lc`
-and the split-loops `.vlt` on by default in `verif/regress/soft-ladder-build-harness.sh`, the
-fork runtime in the review runners' qualified set (`runtimeFlavour: g6lc-fork@<pin>`), and the
-T16/T21 drivers' `T16_VLT_ROOT` / `T16_SPLIT_VLT` defaults. The pinned upstream v5.008 stays as
+**3,131 / 3,109 cycles/s** on the 300 k boot segment, **3,379 with C++ PGO** (§4b.2) — is now
+the default build, every measured win of §4–§4b included and nothing that measured zero:
+`toolchain.verilatorFlavour: "g6lc"` and `simulation.verilator: {recipe: harness, pgo: true,
+splitVlt: true, opt: "-O2", threads: 4}` in the build platform (`./build.sh build` runs the
+harness), `SOFT_LADDER_VERILATOR_FLAVOUR=g6lc`, the split-loops `.vlt`, `SOFT_LADDER_BUILD_OPT=-O2`
+and `SOFT_LADDER_BUILD_PGO=1` (instrumented build → the in-repo `ooo_fp_ooo.S` probe run to
+completion and to the cycle cap → `-fprofile-use`, `__Syms` at `-O1`) on by default in
+`verif/regress/soft-ladder-build-harness.sh`, the fork runtime in the review runners' qualified
+set (`runtimeFlavour: g6lc-fork@<pin>`), and the T16/T21 drivers' `T16_VLT_ROOT` /
+`T16_SPLIT_VLT` defaults (`T16_PGO=1` keeps the drivers' boot-segment-trained PGO and turns the
+harness round off). Not in the default because they measured nothing: Verilator's `--prof-pgo`
+`profile.vlt` re-partition, the hierarchical core, the sleep gate as a simulation lever, and
+the §7 opt-in passes. The pinned upstream v5.008 stays as
 `pinned` for cross-checks (~2,100 cycles/s on the same model) and as the fallback when no fork
 prefix is installed. Rules that follow from §7: an exactness run (RVFI per core on the segment,
 the probe battery) accompanies every fork bump; the opt-in passes (`-fsoa`, `-fprio`, `-fwake`,

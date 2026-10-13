@@ -73,6 +73,18 @@ Profile `full` also runs mini + H-edge on an existing Variane harness when prese
 | `smoke-tests-cv64a6_*.sh` | `smoke-cv64a6` | mixed | imafdc | compliance subset | baseline | Upstream-style smoke |
 | `dv-riscv-*.sh` | `riscv-tests` / arch / compliance | mixed | imafdc | arch | ISA | Long CI |
 
+`soft-ladder-build-harness.sh` is the **Verilator build of record** (every `work-ver-*` model
+above, the builder's T16/T21 drivers and `./build.sh build` go through it). Its defaults are the
+measured recipe of `agents/guides/AGENTS-verilator-performance.md` §7.4a and nothing that
+measured zero: the `g6lc` fork compiler (`SOFT_LADDER_VERILATOR_FLAVOUR`, `pinned` = upstream
+v5.008 for cross-checks), `build-platform/scripts/verilator-split-loops.vlt`
+(`SOFT_LADDER_BUILD_SPLIT_VLT`), `-O2` for the generated C++ (`SOFT_LADDER_BUILD_OPT`), **PGO on**
+(`SOFT_LADDER_BUILD_PGO=1`: instrumented build → the in-repo `ooo/ooo_fp_ooo.S` probe run to
+completion and to the cycle cap → `-fprofile-use`; layout only, same RVFI stream; set
+`SOFT_LADDER_BUILD_PGO_TRAIN=<elf>` for a workload-specific profile), 4 model threads
+(`SOFT_LADDER_VERILATOR_THREADS`; the review runners pass 1). Qualification cross-check rebuilds
+inside the review runners set `SOFT_LADDER_BUILD_PGO=0` and the pinned `VERILATOR_ROOT`.
+
 Install helpers (`install-spike.sh`, `install-verilator.sh`, …) and `common-riscv-tools.sh` are **tooling**, not functional gates.
 
 ---
@@ -91,6 +103,7 @@ Install helpers (`install-spike.sh`, `install-verilator.sh`, …) and `common-ri
 | `STABILITY_PROFILE` | `stability-regress` | `artifact` \| `spike` (default) \| `full` |
 | `STABILITY_SKIP_*` | `stability-regress` | Skip individual legs (`HEDGE`, `SPO_SPIKE`, `MINI`, `SOAK`) |
 | `OUT_DIR` | spike paths | Prefer Linux `/tmp/...` on WSL+NTFS trees |
+| `SOFT_LADDER_VERILATOR_FLAVOUR` / `SOFT_LADDER_BUILD_SPLIT_VLT` / `SOFT_LADDER_BUILD_OPT` / `SOFT_LADDER_BUILD_PGO[_TRAIN,_CYCLES]` / `SOFT_LADDER_VERILATOR_THREADS` | `soft-ladder-build-harness` | Build of record knobs (defaults `g6lc` / 1 / `-O2` / 1 / 4); see §3 |
 
 ---
 

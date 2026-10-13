@@ -200,7 +200,7 @@ def integration_review(data, out):
                 assert digest(runtime/'include/verilated_funcs.h')=='dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
                 closed=closure(repo)
                 model=leg/'model'
-                command=['bash','-c','. /opt/testharness/env.sh; export VERILATOR_ROOT="$3" CVA6_REPO_DIR="$1" SOFT_LADDER_VERLIB="$2" SOFT_LADDER_VERILATOR_THREADS=1 SOFT_LADDER_BUILD_TARGET=g6lc64_stream8 SOFT_LADDER_BUILD_JOBS=4; bash verif/regress/soft-ladder-build-harness.sh B','l2-size',str(repo),str(model),str(runtime)]
+                command=['bash','-c','. /opt/testharness/env.sh; export VERILATOR_ROOT="$3" CVA6_REPO_DIR="$1" SOFT_LADDER_VERLIB="$2" SOFT_LADDER_VERILATOR_THREADS=1 SOFT_LADDER_BUILD_PGO=0 SOFT_LADDER_BUILD_TARGET=g6lc64_stream8 SOFT_LADDER_BUILD_JOBS=4; bash verif/regress/soft-ladder-build-harness.sh B','l2-size',str(repo),str(model),str(runtime)]
                 with (result/'build.log').open('w') as log:
                     p=subprocess.run(command,cwd=repo,stdout=log,stderr=subprocess.STDOUT,timeout=900)
                 assert p.returncode==0 and closure(repo)==closed, 'stream build/source identity'

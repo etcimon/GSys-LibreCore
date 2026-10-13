@@ -52,11 +52,37 @@ build and regression flow from a single top-level `.config.ts`.
   cross-check and the fallback the harness takes (with a log line) when no fork prefix exists.
   CI's lint gate pins this flavour in its `.config.local.ts` overlay because the fork commit must be
   reachable (submodule or `etcimon/verilator`) — pushing the gitlink is part of a fork bump.
-- Knobs: `SOFT_LADDER_BUILD_SPLIT_VLT=0|1` (default on for `g6lc`, off for `pinned` — the upstream
-  compiler refuses most entries), `SOFT_LADDER_VERILATOR_THREADS` (default `nproc`; the measured
-  server builds use 4), `VLT_HOME` / `VERILATOR_ROOT` (explicit prefix, always wins). The
-  hierarchical core (`SOFT_LADDER_BUILD_DEFINES=G6LC_CORE_HB`) stays opt-in: exact and a third
-  faster to build, 2.1× slower to run (guide §7.5).
+- **PGO is on by default** (`SOFT_LADDER_BUILD_PGO=1`; `simulation.verilator.pgo`): the harness
+  builds the generated C++ instrumented (`-fprofile-generate`), compiles the in-repo training
+  probe (`verif/tests/custom/ooo/ooo_fp_ooo.S` with `common/crt.S`, `syscalls.c`,
+  `link_verilator.ld`), runs it once to completion and once to the cycle cap (idle/spin paths),
+  then recompiles the same sources with `-fprofile-use -fprofile-correction
+  -fprofile-partial-training` (`__Syms` at `-O1` first — it carries no hot code and takes hours at
+  `-O2` with a profile on the server). Layout only: every battery in the guide was run on PGO
+  models and they retire the same RVFI stream; measured ×3.5 on the single-core spin and 2,673 →
+  3,379 cycles/s on the server (guide §4b.1–4b.2). It roughly doubles the C++ compile time;
+  `SOFT_LADDER_BUILD_PGO=0` / `build --no-pgo` skips it, `SOFT_LADDER_BUILD_PGO_TRAIN=<elf>` and
+  `SOFT_LADDER_BUILD_PGO_CYCLES` change the workload.
+- **`-O2`** (`SOFT_LADDER_BUILD_OPT`; `simulation.verilator.opt`) overrides `verilated.mk`'s
+  `OPT_FAST = -Os` for the generated C++ (the PGO recipe was measured at `-O2`).
+- **4 model threads** by default (`SOFT_LADDER_VERILATOR_THREADS`; `simulation.verilator.threads`,
+  0 = this default): the measured point for the 8-hart server — the partition is
+  synchronisation-bound (1.9–2.0× of 4), more threads did not pay (guide §4b.2). The review
+  runners pass 1: their qualification compare needs a single-thread model.
+- **`./build.sh build` uses the harness** (`simulation.verilator.recipe: "harness"`), so a local
+  build gets the same flavour / split `.vlt` / `-O2` / PGO as the builder; `--make` (or
+  `recipe: "make"`) is the plain `make verilate` upstream path (`-Os`, no controls, no PGO) and
+  the fallback when no bash is available. With `--elf` the built `work-ver/Variane_testharness`
+  runs the ELF.
+- Other knobs: `SOFT_LADDER_BUILD_SPLIT_VLT=0|1` (default on for `g6lc`, off for `pinned` — the
+  upstream compiler refuses most entries), `VLT_HOME` / `VERILATOR_ROOT` (explicit prefix, always
+  wins). The hierarchical core (`SOFT_LADDER_BUILD_DEFINES=G6LC_CORE_HB`) stays opt-in: exact and
+  a third faster to build, 2.1× slower to run (guide §7.5). Verilator's own `--prof-pgo`
+  (`profile.vlt` MTask re-partition) measured no gain and is **not** part of the default (§4b.2).
+- **Qualification cross-check builds stay pinned, single-thread, no PGO**: the review runners'
+  internal rebuilds (`run_mc_int2_review.py`, `run_checked_work_review.py`,
+  `run_l2_size_review.py`) set `SOFT_LADDER_BUILD_PGO=0` and `VERILATOR_ROOT=<pinned runtime>`
+  explicitly; their timeouts are sized for that build.
 
 ## Standing agent workflow — probe → install → diag → verify
 

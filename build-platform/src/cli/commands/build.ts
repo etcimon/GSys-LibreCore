@@ -6,10 +6,13 @@
 // Uses workspace discovery (size+mtime manifests) so a second `build` with
 // unchanged RTL inputs is a no-op. Pass --force to rebuild anyway.
 
+import { join } from "node:path";
+
 import { requireContext, type Command } from "../command.ts";
 import { flagBool, flagString } from "../args.ts";
 import { childEnv } from "../../context.ts";
 import { hasBinary, run } from "../../platform/exec.ts";
+import { resolveBashBinary, runBashScript } from "../../platform/shell.ts";
 import { applyFromTimingFlags } from "../../tooling/timings.ts";
 import { ensureWorkspace } from "../../workspace/layout.ts";
 import {
@@ -34,12 +37,15 @@ export const buildCommand: Command = {
   name: "build",
   summary: "Build the RTL simulation model (Verilator on the open-source path).",
   usage:
-    "bun run src/cli/index.ts build [--iss <sim>] [--elf <path>] [--force] [--from-timing DIR] [--use-emit] [--dry-run]",
+    "bun run src/cli/index.ts build [--iss <sim>] [--elf <path>] [--force] [--make] [--no-pgo] [--from-timing DIR] [--use-emit] [--dry-run]",
   details:
-    "Drives the repo Makefile with the managed toolchain environment. With no\n" +
-    "--elf it verilates the model (`make verilate`); with --elf it also runs the\n" +
-    "model (`make sim-verilator`). Non-Verilator simulators are detect-only in\n" +
-    "this pass.\n" +
+    "Builds the model with the build of record (simulation.verilator.recipe =\n" +
+    "harness): verif/regress/soft-ladder-build-harness.sh with the configured\n" +
+    "Verilator flavour (g6lc fork by default), the split-loops .vlt, -O2 and\n" +
+    "PGO (instrument -> in-repo training probe -> -fprofile-use). --make (or\n" +
+    "recipe: make) drives the plain repo Makefile (`make verilate`) instead;\n" +
+    "--no-pgo skips the profile round. With --elf the built model runs the ELF.\n" +
+    "Non-Verilator simulators are detect-only in this pass.\n" +
     "Incremental: fingerprints core RTL + flists under workspace/.cache/manifests\n" +
     "and skips verilate when inputs are unchanged. Use --force to rebuild.\n" +
     "\n" +
@@ -122,22 +128,51 @@ export const buildCommand: Command = {
       }
     }
 
-    const target = elf ? "sim-verilator" : "verilate";
-    const makeArgs = [target, `target=${config.soc.coreConfig}`];
-    if (elf) makeArgs.push(`elf_file=${elf}`);
-
     const env = childEnv(ctx, ft.env);
-    if (ctx.dryRun) {
-      logger.info(`[dry-run] make ${makeArgs.join(" ")}  (cwd: ${repoRoot})`);
-      return 0;
+    const vopts = config.simulation.verilator;
+    const bash = resolveBashBinary();
+    let recipe: "harness" | "make" = flagBool(args.flags, "make") ? "make" : vopts.recipe;
+    if (recipe === "harness" && !bash) {
+      logger.warn("no bash found for the harness recipe; falling back to `make verilate`");
+      recipe = "make";
     }
+    const pgo = flagBool(args.flags, "no-pgo") ? false : vopts.pgo;
+    const verlib = join(repoRoot, "work-ver");
 
-    const result = await run("make", makeArgs, {
-      cwd: repoRoot,
-      env,
-      logger,
-      allowFailure: true,
-    });
+    let result;
+    if (recipe === "harness") {
+      // The build of record: flavour, split .vlt, -O2, PGO all resolved by the
+      // harness from this environment (childEnv carries VLT_HOME and the flavour).
+      const harnessEnv: Record<string, string> = {
+        ...env,
+        SOFT_LADDER_BUILD_TARGET: config.soc.coreConfig,
+        SOFT_LADDER_VERLIB: verlib,
+        SOFT_LADDER_VERILATOR_THREADS: vopts.threads > 0 ? String(vopts.threads) : "4",
+        SOFT_LADDER_BUILD_PGO: pgo ? "1" : "0",
+        SOFT_LADDER_BUILD_SPLIT_VLT: vopts.splitVlt ? "1" : "0",
+        SOFT_LADDER_BUILD_OPT: vopts.opt,
+        ...(vopts.trace ? (vopts.traceFormat === "vcd" ? { SOFT_LADDER_BUILD_TRACE_FAST: "1" } : { SOFT_LADDER_BUILD_TRACE_COMPACT: "1" }) : {}),
+      };
+      const script = "verif/regress/soft-ladder-build-harness.sh";
+      if (ctx.dryRun) {
+        logger.info(`[dry-run] ${script} B  (target ${config.soc.coreConfig}, pgo=${pgo}, split=${vopts.splitVlt}, opt=${vopts.opt}, threads=${harnessEnv.SOFT_LADDER_VERILATOR_THREADS}; cwd: ${repoRoot})`);
+        if (elf) logger.info(`[dry-run] ${verlib}/Variane_testharness ${elf}`);
+        return 0;
+      }
+      result = await runBashScript(script, ["B"], { cwd: repoRoot, env: harnessEnv, logger, allowFailure: true });
+      if (result.ok && elf) {
+        result = await run(join(verlib, "Variane_testharness"), [elf], { cwd: repoRoot, env, logger, allowFailure: true });
+      }
+    } else {
+      const target = elf ? "sim-verilator" : "verilate";
+      const makeArgs = [target, `target=${config.soc.coreConfig}`];
+      if (elf) makeArgs.push(`elf_file=${elf}`);
+      if (ctx.dryRun) {
+        logger.info(`[dry-run] make ${makeArgs.join(" ")}  (cwd: ${repoRoot})`);
+        return 0;
+      }
+      result = await run("make", makeArgs, { cwd: repoRoot, env, logger, allowFailure: true });
+    }
     if (result.ok) {
       logger.success(`Build finished in ${(result.durationMs / 1000).toFixed(1)}s`);
       // Commit fingerprints only after a successful pure verilate.

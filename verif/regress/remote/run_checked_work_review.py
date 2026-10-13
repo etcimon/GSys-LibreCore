@@ -145,7 +145,7 @@ def cacheability_review():
         package = repo / 'core/include/g6lc64_stream8_config_pkg.sv'
         assert "L2RoundRobinEn: bit'(0)" in package.read_text()
         manifest = closure(repo)
-        command = ['bash', '-c', '. /opt/testharness/env.sh; export VERILATOR_ROOT="$3" CVA6_REPO_DIR="$1" SOFT_LADDER_VERLIB="$2" SOFT_LADDER_VERILATOR_THREADS=1 SOFT_LADDER_BUILD_TARGET=g6lc64_stream8 SOFT_LADDER_BUILD_JOBS=4; bash verif/regress/soft-ladder-build-harness.sh B', 'cacheability', str(repo), str(model), str(runtime)]
+        command = ['bash', '-c', '. /opt/testharness/env.sh; export VERILATOR_ROOT="$3" CVA6_REPO_DIR="$1" SOFT_LADDER_VERLIB="$2" SOFT_LADDER_VERILATOR_THREADS=1 SOFT_LADDER_BUILD_PGO=0 SOFT_LADDER_BUILD_TARGET=g6lc64_stream8 SOFT_LADDER_BUILD_JOBS=4; bash verif/regress/soft-ladder-build-harness.sh B', 'cacheability', str(repo), str(model), str(runtime)]
         with (out / (policy + '-build.log')).open('w') as log:
             build = subprocess.run(command, cwd=repo, stdout=log, stderr=subprocess.STDOUT, timeout=900)
         assert build.returncode == 0, 'cacheability model build failed: ' + policy
@@ -442,7 +442,7 @@ def locality_icache_review():
         for name in ['core/cva6.sv', 'core/cache_subsystem/g6lc_icache.sv']:
             sources[name] = digest(repo / name)
         model = root / 'model'
-        command = ['bash', '-c', '. /opt/testharness/env.sh; export VERILATOR_ROOT="$3" CVA6_REPO_DIR="$1" SOFT_LADDER_VERLIB="$2" SOFT_LADDER_VERILATOR_THREADS=1 SOFT_LADDER_BUILD_TARGET=g6lc64_stream8 SOFT_LADDER_BUILD_JOBS=4; bash verif/regress/soft-ladder-build-harness.sh B', 'icache-observer', str(repo), str(model), str(runtime)]
+        command = ['bash', '-c', '. /opt/testharness/env.sh; export VERILATOR_ROOT="$3" CVA6_REPO_DIR="$1" SOFT_LADDER_VERLIB="$2" SOFT_LADDER_VERILATOR_THREADS=1 SOFT_LADDER_BUILD_PGO=0 SOFT_LADDER_BUILD_TARGET=g6lc64_stream8 SOFT_LADDER_BUILD_JOBS=4; bash verif/regress/soft-ladder-build-harness.sh B', 'icache-observer', str(repo), str(model), str(runtime)]
         with (out / 'build.log').open('w') as log:
             built = subprocess.run(command, cwd=repo, stdout=log, stderr=subprocess.STDOUT, timeout=900)
         assert built.returncode == 0
