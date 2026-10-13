@@ -118,6 +118,27 @@ if [ "$rc" -ne 0 ]; then
   echo "SIM-BINDFULL rc=$rc despite PASS"
   exit 1
 fi
+# W3.5 cb-arena arm: CbBufs=16 exhaustion replies OOM on the 17th
+# vkAllocateCommandBuffers and a submit on the phantom handle replies
+# VK_ERROR_UNKNOWN with no executor push (regenerate with
+# vn_golden.py --cbfull-session ue_sm5_cbfull 1).  Reuses the
+# default-geometry sim binary.
+set +e
+(cd "$ROOT/verif/tb/apu" && stdbuf -o0 -e0 \
+  "$OUT/sim/tb_g6lc_apu_vnfront" +ses=ue_sm5_cbfull) \
+  > "$OUT/sim-cbfull.log" 2>&1
+rc=$?
+set -e
+echo "SIM-CBFULL rc=$rc"
+cat "$OUT/sim-cbfull.log"
+if ! grep -q '^PASS tb_g6lc_apu_vnfront ' "$OUT/sim-cbfull.log"; then
+  echo "SIM-CBFULL FAILED"
+  exit 1
+fi
+if [ "$rc" -ne 0 ]; then
+  echo "SIM-CBFULL rc=$rc despite PASS"
+  exit 1
+fi
 if [ "${VNFRONT_SYNTH:-0}" != 1 ]; then
   exit 0
 fi

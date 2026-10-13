@@ -882,6 +882,11 @@ module g6lc_apu_vgctl
                   // extent — hold new submissions, drain the engines,
                   // then evict squatters and word-move it to the
                   // kernel's offset
+`ifdef G6LC_APU_DBG_LOST
+                  $display("[DBG] reloc start memh=%08x oldb=%08x K=%08x sz=%x t=%0t",
+                           map_memh_q, ot_cpl_i.entry.aux[63:32],
+                           auxv_q, map_size_q[31:0], $time);
+`endif
                   map_hold_q <= 1'b1;
                   map_dev_q  <= 1'b1;
                   map_oldb_q <= ot_cpl_i.entry.aux[63:32];
@@ -1207,6 +1212,16 @@ module g6lc_apu_vgctl
 
           // ---- response write into the first WRITE descriptor --------------
           StWrPrep: begin
+`ifdef G6LC_APU_DBG_LOST
+            if (map_hold_q)
+              $display("[DBG] reloc done rtype=%02x t=%0t", rtype_q, $time);
+            if (resp_ram[0] >= APU_VG_ERR_UNSPEC)
+              $display("[DBG] vgerr rtype=%02x resp=%08x trunc=%0d stage=%0d nd=%0d len=%x r7=%08x r8=%08x r9=%08x r10=%08x r11=%08x r12=%08x r13=%08x ctx=%x t=%0t",
+                       rtype_q, resp_ram[0], trunc_q, stage_q, ndesc_q,
+                       read_len_q, req_ram[7], req_ram[8], req_ram[9],
+                       req_ram[10], req_ram[11], req_ram[12], req_ram[13],
+                       rctx_q, $time);
+`endif
             // §12.3 3d-d: relocation over (success or refusal) —
             // release the submission hold
             map_hold_q <= 1'b0;
@@ -1259,6 +1274,10 @@ module g6lc_apu_vgctl
 
           // ---- completion ----------------------------------------------------
           StDone: begin
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] vgdone rtype=%02x flags=%08x used=%0d fid=%016x ring=%0d t=%0t",
+                     rtype_q, rflags_q, used_q, rfence_q, rring_q, $time);
+`endif
             if ((rflags_q & APU_VG_FLAG_FENCE) != 32'h0)
               state_q <= StFence;
             else                            state_q <= StIdle;

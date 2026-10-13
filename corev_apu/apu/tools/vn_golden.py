@@ -4352,6 +4352,64 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng,
         cmd('vkDestroyInstance', instance=P['inst'])
         return cmds, fm
 
+    if kind == 'cbfull':
+        # W3.5 wedge characterization: the command-buffer arena holds
+        # CB_BUFS=16 slots.  Slot 17's vkAllocateCommandBuffers reply
+        # carries OOM; a vkQueueSubmit still referencing the phantom
+        # handle resolves to VK_ERROR_UNKNOWN at StResCpl and pushes
+        # nothing to the executor — no fence is armed, matching the
+        # guest's fence-wait wedge signature.  The arm then frees the
+        # 16 slots and re-allocs to prove the arena drains.
+        P = {k: newid() for k in
+             ('inst', 'pd', 'dev', 'queue', 'cp', 'fen')}
+        cmd('vkCreateInstance', pInstance=P['inst'])
+        cmd('vkEnumeratePhysicalDevices', instance=P['inst'],
+            pPhysicalDeviceCount=1, pPhysicalDevices=[P['pd']])
+        cmd('vkCreateDevice', physicalDevice=P['pd'],
+            pCreateInfo=struct('VkDeviceCreateInfo'), pDevice=P['dev'])
+        cmd('vkGetDeviceQueue', device=P['dev'], queueFamilyIndex=0,
+            queueIndex=0, pQueue=P['queue'])
+        cmd('vkCreateCommandPool', device=P['dev'],
+            pCreateInfo=struct('VkCommandPoolCreateInfo',
+                               queueFamilyIndex=0),
+            pCommandPool=P['cp'])
+        cbs = [newid() for _ in range(17)]
+        for i in range(17):
+            cmd('vkAllocateCommandBuffers', device=P['dev'],
+                pAllocateInfo=struct('VkCommandBufferAllocateInfo',
+                                     commandPool=P['cp'], level=0,
+                                     commandBufferCount=1),
+                pCommandBuffers=[cbs[i]])
+        cmd('vkCreateFence', device=P['dev'],
+            pCreateInfo=struct('VkFenceCreateInfo', flags=0),
+            pFence=P['fen'])
+        cmd('vkQueueSubmit', queue=P['queue'], submitCount=1,
+            pSubmits=[struct('VkSubmitInfo', waitSemaphoreCount=0,
+                             pWaitSemaphores=[], pWaitDstStageMask=[],
+                             commandBufferCount=1,
+                             pCommandBuffers=[cbs[16]],
+                             signalSemaphoreCount=0,
+                             pSignalSemaphores=[])],
+            fence=P['fen'])
+        for i in range(16):
+            cmd('vkFreeCommandBuffers', device=P['dev'],
+                commandPool=P['cp'], commandBufferCount=1,
+                pCommandBuffers=[cbs[i]])
+        cmd('vkAllocateCommandBuffers', device=P['dev'],
+            pAllocateInfo=struct('VkCommandBufferAllocateInfo',
+                                 commandPool=P['cp'], level=0,
+                                 commandBufferCount=1),
+            pCommandBuffers=[cbs[16]])
+        cmd('vkFreeCommandBuffers', device=P['dev'],
+            commandPool=P['cp'], commandBufferCount=1,
+            pCommandBuffers=[cbs[16]])
+        cmd('vkDestroyCommandPool', device=P['dev'],
+            commandPool=P['cp'])
+        cmd('vkDestroyFence', device=P['dev'], fence=P['fen'])
+        cmd('vkDestroyDevice', device=P['dev'])
+        cmd('vkDestroyInstance', instance=P['inst'])
+        return cmds, fm
+
     # ---------------- positive session ------------------------------------
     cmd('vkCreateInstance', pInstance=I['inst'])
     cmd('vkEnumeratePhysicalDevices', instance=I['inst'],
@@ -5171,7 +5229,7 @@ class TransportModel:
         self.blobs = {}                   # res_id -> dict
         self.ctxs = {}                    # ctx_id -> dict
         self.rings = [None] * 4
-        self.ring_of = {}                 # handle -> slot
+        self.ring_of = {}                 # (ctx, handle) -> slot
         self.reply = None                 # {base_w, size, pos}
         self.rep_log = []                 # (ap_byte_off, words) per reply
         self.exec_log = []                # (name, out) per replying cmd
@@ -5350,7 +5408,7 @@ class TransportModel:
         for reuse without a kill."""
         for i, r in enumerate(self.rings):
             if r is not None and r['ctx'] == ctx:
-                del self.ring_of[r['handle']]
+                del self.ring_of[(ctx, r['handle'])]
                 self.rings[i] = None
 
     # ---- transport commands ------------------------------------------------
@@ -5408,7 +5466,7 @@ class TransportModel:
                 u64(f + 16), u64(f + 18), u64(f + 20))
             handle = u64(2)
             b = self.blob_of(rid)
-            if (b is None or handle in self.ring_of
+            if (b is None or (ctx, handle) in self.ring_of
                     or all(r is not None for r in self.rings)
                     or off + size > b['size']
                     or buf_s == 0 or (buf_s & (buf_s - 1))
@@ -5432,7 +5490,7 @@ class TransportModel:
                         base_w <= r['buf_base_w'] < win_hi or
                         (r['buf_base_w'] <= base_w <
                          r['buf_base_w'] + (r['buf_size'] >> 2))):
-                    del self.ring_of[r['handle']]
+                    del self.ring_of[(r['ctx'], r['handle'])]
                     self.rings[i] = None
             ring = {'slot': slot, 'handle': handle, 'rid': rid,
                     'ctx': ctx, 'idle_to': min(idle, IDLE_TO_MAX),
@@ -5446,18 +5504,18 @@ class TransportModel:
                     'extra_size': ext_s, 'fatal': False,
                     'idle_count': 0}
             self.rings[slot] = ring
-            self.ring_of[handle] = slot
+            self.ring_of[(ctx, handle)] = slot
             # device publishes ALIVE at create (head/tail already 0)
             self.ap[ring['status_base_w']] = RING_ALIVE
         elif name == 'vkDestroyRingMESA':
             handle = u64(2)
-            slot = self.ring_of.pop(handle, None)
+            slot = self.ring_of.pop((ctx, handle), None)
             if slot is None:
                 return True
             self.rings[slot] = None
         elif name == 'vkNotifyRingMESA':
             handle = u64(2)
-            slot = self.ring_of.get(handle)
+            slot = self.ring_of.get((ctx, handle))
             if slot is None:
                 return True
             r = self.rings[slot]
@@ -5465,7 +5523,7 @@ class TransportModel:
             r['idle_count'] = 0
         elif name == 'vkWriteRingExtraMESA':
             handle, off, val = u64(2), u64(4), w[6]
-            slot = self.ring_of.get(handle)
+            slot = self.ring_of.get((ctx, handle))
             if slot is None:
                 return True
             r = self.rings[slot]
@@ -5480,7 +5538,7 @@ class TransportModel:
                 return True            # model: never blocks in fixture
         elif name == 'vkWaitRingSeqnoMESA':
             handle, sq = u64(2), u64(4)
-            slot = self.ring_of.get(handle)
+            slot = self.ring_of.get((ctx, handle))
             if slot is None or self.rings[slot]['head'] < sq:
                 return True
         else:
@@ -6111,7 +6169,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                          'extraOffset': ring0_sz,
                          'extraSize': 0})
     assert not execbuf(rc, fence=0x11), 'ring0 create failed in model'
-    r0 = tm.rings[tm.ring_of[RING0_H]]
+    r0 = tm.rings[tm.ring_of[(CTX_ID, RING0_H)]]
     ring_bind_guest(r0['slot'])
     tm.rep_cursor = 0
     W(TP_CHECK, CK_STATUS, r0['slot'], 0)
@@ -8058,7 +8116,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                   'extraOffset': ring0_sz,
                                   'extraSize': 0})
             assert not execbuf(rc5, ctx=CTX5), 'ctx5 ring create failed'
-            rB = tm.rings[tm.ring_of[RING0B_H]]
+            rB = tm.rings[tm.ring_of[(CTX5, RING0B_H)]]
             ring_bind_guest(rB['slot'])
             r = rB
             W(TP_CHECK, CK_STATUS, rB['slot'], 0)
@@ -8367,10 +8425,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             return struct.unpack('<I', struct.pack('<f', f))[0]
 
         spvd = G.TOOLS / 'shader' / 'corpus'
+        is_blend = 'blend' in gfx
+        # vs_pos3/fs_vcol forward the vertex alpha into FS out; the
+        # passthru/flat pair forces a=1 and cannot see a blend
         vs_spv = [w[0] for w in struct.iter_unpack(
-            '<I', (spvd / 'vs_passthru.spv').read_bytes())]
+            '<I', (spvd / ('vs_pos3.spv' if is_blend
+                          else 'vs_passthru.spv')).read_bytes())]
         fs_spv = [w[0] for w in struct.iter_unpack(
-            '<I', (spvd / 'fs_flat.spv').read_bytes())]
+            '<I', (spvd / ('fs_vcol.spv' if is_blend
+                          else 'fs_flat.spv')).read_bytes())]
         X = {k: 0x4000_0000_1000 + i * 0x1000_0001 for i, k in enumerate(
             ('inst', 'pd', 'dev', 'queue', 'imem', 'img', 'view', 'rp',
              'fb', 'sm_vs', 'sm_fs', 'pl', 'gp', 'vmem', 'vb', 'rmem',
@@ -8383,7 +8446,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         TRI = [(-0.5, -0.5, 0.5, 1.0),
                (0.0, 0.5, 0.5, 1.0),
                (0.5, -0.5, 0.5, 1.0)]
-        COL = (0.2, 0.4, 0.6, 1.0)
+        # ue_gpos_blend_1: same triangle, alpha 0.75 over a grey clear
+        # with SRC_ALPHA/ONE_MINUS_SRC_ALPHA on every channel — the
+        # first end-to-end pColorBlendState coverage (ue_gpos_tri_1
+        # sends pColorBlendState=None).
+        COL = (1.0, 0.0, 0.0, 0.75) if is_blend else (0.2, 0.4, 0.6, 1.0)
         # vertex stride 24: {RG32 pos @0, RGBA32 col @8}
         vb_words = []
         for (vx_, vy_, _vz, _vw) in TRI:
@@ -8395,8 +8462,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # cull BACK (2).  Only coverage matters — the FS colour is flat
         cov = gfx_tri_coverage(TRI, VP, SC, CW, CH,
                                front_ccw=1, cull=2)
-        tri_w = (51 | (102 << 8) | (153 << 16) | (255 << 24))
-        clr_w = 0xFF00_0000              # clear (0,0,0,1) RGBA8
+        if is_blend:
+            # clear (0.2,0.2,0.2,1); out = src*0.75 + dst*0.25 ->
+            # r=0.8->204, g=b=0.05->13, a=0.8125->207 (all off the
+            # UNORM rounding boundary); R|G<<8|B<<16|A<<24
+            tri_w = (204 | (13 << 8) | (13 << 16) | (207 << 24))
+            clr_w = 0xFF33_3333
+        else:
+            tri_w = (51 | (102 << 8) | (153 << 16) | (255 << 24))
+            clr_w = 0xFF00_0000          # clear (0,0,0,1) RGBA8
         exp_img = [tri_w if (w % CW, w // CW) in cov else clr_w
                    for w in range(CW * CH)]
         # evidence: ascii-art coverage map + a few sampled rows go to
@@ -8560,7 +8634,22 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         depthBiasSlopeFactor=f32b(0.0),
                         lineWidth=f32b(1.0)),
                     pMultisampleState=None, pDepthStencilState=None,
-                    pColorBlendState=None,
+                    pColorBlendState=(
+                        st('VkPipelineColorBlendStateCreateInfo',
+                           flags=0, logicOpEnable=0, logicOp=0,
+                           attachmentCount=1,
+                           pAttachments=[st(
+                               'VkPipelineColorBlendAttachmentState',
+                               blendEnable=1,
+                               srcColorBlendFactor=6,   # SRC_ALPHA
+                               dstColorBlendFactor=7,   # ONE_MINUS_SRC_ALPHA
+                               colorBlendOp=0,          # ADD
+                               srcAlphaBlendFactor=6,
+                               dstAlphaBlendFactor=7,
+                               alphaBlendOp=0,
+                               colorWriteMask=0xF)],
+                           blendConstants=[0, 0, 0, 0])
+                        if is_blend else None),
                     pDynamicState=st('VkPipelineDynamicStateCreateInfo',
                         flags=0, dynamicStateCount=2,
                         pDynamicStates=[0, 1]),
@@ -8636,7 +8725,10 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     clearValueCount=1,
                     pClearValues=[st('VkClearValue',
                         color=st('VkClearColorValue',
-                                 uint32=[0, 0, 0, f32b(1.0)]))]),
+                                 uint32=[f32b(0.2) if is_blend else 0,
+                                         f32b(0.2) if is_blend else 0,
+                                         f32b(0.2) if is_blend else 0,
+                                         f32b(1.0)]))]),
                 contents=0)),
             ('vkCmdBindPipeline', dict(
                 commandBuffer=X['cb'], pipelineBindPoint=0,
@@ -8977,7 +9069,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'extraOffset': RING_BUF_OFF + 4096,
                           'extraSize': 256})
     assert not execbuf(rc1), 'ring1 create failed'
-    r1 = tm.rings[tm.ring_of[RING1_H]]
+    r1 = tm.rings[tm.ring_of[(CTX_ID, RING1_H)]]
     ring_bind_guest(r1['slot'])
 
     note('B: session through ring0, batches wrap the 4 KiB buffer')
@@ -9166,7 +9258,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
     dr1 = vk('vkDestroyRingMESA', ring=RING1_H)
     assert not execbuf(dr1), 'ring1 destroy failed'
     assert not execbuf(rc2), 'ring2 create failed'
-    r2 = tm.rings[tm.ring_of[RING2_H]]
+    r2 = tm.rings[tm.ring_of[(CTX_ID, RING2_H)]]
     ring_bind_guest(r2['slot'])
     W(TP_CHECK, CK_STATUS, r2['slot'], 0)
     rec(EK_STATUS, r2['slot'], RING_ALIVE)
@@ -9207,7 +9299,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                           'extraOffset': RING_BUF_OFF + 4096,
                           'extraSize': 256})
     assert not execbuf(rc3), 'ring3 create failed'
-    r3 = tm.rings[tm.ring_of[RING3_H]]
+    r3 = tm.rings[tm.ring_of[(CTX_ID, RING3_H)]]
     ring_bind_guest(r3['slot'])
     # exec blob holds a nested ExecuteCommandStreamsMESA command
     nested = vk('vkExecuteCommandStreamsMESA',
@@ -9319,6 +9411,13 @@ def main():
                     help='§12.3 3d-d bind-time ALLOC_HI-FULL arm: two '
                          'guest-window-filling binds succeed, the '
                          'third fails VK_ERROR_OUT_OF_DEVICE_MEMORY')
+    ap.add_argument('--cbfull-session', nargs=2,
+                    metavar=('NAME', 'SEED'),
+                    help='CbBufs=16 exhaustion arm: the 17th '
+                         'vkAllocateCommandBuffers fails OOM and a '
+                         'submit referencing the phantom handle '
+                         'replies VK_ERROR_UNKNOWN with no executor '
+                         'push (no fence armed)')
     ap.add_argument('--paywords', type=int, default=512,
                     help='ObjPay word count modelled by --payfull-session')
     ap.add_argument('--transport', nargs=2, metavar=('NAME', 'SEED'))
@@ -9626,6 +9725,20 @@ def main():
         insts = write_session(name, cmds, fm)
         nerr = sum(1 for c in cmds if c['out']['result'] != VK_OK)
         print('wrote %s bindfull session to %s: %d commands, '
+              '%d non-OK' % (name, VEC_DIR, len(cmds), nerr))
+        return 0
+
+    if args.cbfull_session:
+        name, seed = args.cbfull_session
+        rng = random.Random(int(seed))
+        gen = ArgGen(model, rng)
+        rep_sim = ReplySim(model, asm)
+        VEC_DIR.mkdir(parents=True, exist_ok=True)
+        cmds, fm = build_session(model, asm, sim, rep_sim, enc, gen,
+                                 rng, kind='cbfull')
+        insts = write_session(name, cmds, fm)
+        nerr = sum(1 for c in cmds if c['out']['result'] != VK_OK)
+        print('wrote %s cbfull session to %s: %d commands, '
               '%d non-OK' % (name, VEC_DIR, len(cmds), nerr))
         return 0
 

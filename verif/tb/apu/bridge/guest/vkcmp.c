@@ -354,6 +354,10 @@ static void submit_cb(vkdev *d, VkCommandBuffer cb)
     chk(vkWaitForFences(d->dev, 1, &f, VK_TRUE, UINT64_MAX),
         "fence wait");
     vkDestroyFence(d->dev, f, NULL);
+    /* the device keeps only CbBufs(16) command-buffer slots — hand the
+       slot back once the submission completes (same W3.5 residency
+       bound as the 8 shader-module slots below) */
+    vkFreeCommandBuffers(d->dev, d->cpool, 1, &cb);
 }
 
 /* submit + readback into out (NPX*4 bytes) */
@@ -385,6 +389,7 @@ static void frame_end(vkdev *d, obj_t *o, uint8_t *out)
     memcpy(out, p, NPX * 4);
     vkUnmapMemory(d->dev, o->rbm);
     vkDestroyFence(d->dev, f, NULL);
+    vkFreeCommandBuffers(d->dev, d->cpool, 1, &o->cb);
 }
 
 static void mk_rp_fb(vkdev *d, obj_t *o, VkFormat cfmt, int depth)
@@ -445,6 +450,12 @@ static void scene_gradient(vkdev *d, const spv_t *spv, uint8_t *out,
     vkCmdBindVertexBuffers(o.cb, 0, 1, &o.vb, &off);
     vkCmdDraw(o.cb, 3, 1, 0, 0);
     frame_end(d, &o, out);
+    /* the device keeps only 8 shader-module slots — release the
+       pipeline's refs and the module objects per scene (Venus
+       forwards these in-order on the primary ring) */
+    vkDestroyPipeline(d->dev, o.pipe, NULL);
+    vkDestroyShaderModule(d->dev, g.vs, NULL);
+    vkDestroyShaderModule(d->dev, g.fs, NULL);
 }
 
 /* scene 2: two overlapping triangles + D32 depth, LESS, near second */
@@ -499,6 +510,12 @@ static void scene_depth(vkdev *d, const spv_t *spv, uint8_t *out)
     vkCmdBindVertexBuffers(o.cb, 0, 1, &o.vb, &off);
     vkCmdDraw(o.cb, 6, 1, 0, 0);
     frame_end(d, &o, out);
+    /* the device keeps only 8 shader-module slots — release the
+       pipeline's refs and the module objects per scene (Venus
+       forwards these in-order on the primary ring) */
+    vkDestroyPipeline(d->dev, o.pipe, NULL);
+    vkDestroyShaderModule(d->dev, g.vs, NULL);
+    vkDestroyShaderModule(d->dev, g.fs, NULL);
 }
 
 /* scene 3: three SRC_ALPHA-blended quads over a clear colour */
@@ -556,6 +573,12 @@ static void scene_blend(vkdev *d, const spv_t *spv, uint8_t *out)
     vkCmdBindVertexBuffers(o.cb, 0, 1, &o.vb, &off);
     vkCmdDraw(o.cb, 18, 1, 0, 0);
     frame_end(d, &o, out);
+    /* the device keeps only 8 shader-module slots — release the
+       pipeline's refs and the module objects per scene (Venus
+       forwards these in-order on the primary ring) */
+    vkDestroyPipeline(d->dev, o.pipe, NULL);
+    vkDestroyShaderModule(d->dev, g.vs, NULL);
+    vkDestroyShaderModule(d->dev, g.fs, NULL);
 }
 
 /* scene 4: UINT16 indexed quad x4 instances, instance-rate colour */
@@ -608,6 +631,12 @@ static void scene_indexed(vkdev *d, const spv_t *spv, uint8_t *out)
     vkCmdBindIndexBuffer(o.cb, o.ib, 0, VK_INDEX_TYPE_UINT16);
     vkCmdDrawIndexed(o.cb, 6, 4, 0, 0, 0);
     frame_end(d, &o, out);
+    /* the device keeps only 8 shader-module slots — release the
+       pipeline's refs and the module objects per scene (Venus
+       forwards these in-order on the primary ring) */
+    vkDestroyPipeline(d->dev, o.pipe, NULL);
+    vkDestroyShaderModule(d->dev, g.vs, NULL);
+    vkDestroyShaderModule(d->dev, g.fs, NULL);
 }
 
 /* scene 5: 4-mip 8x8 texture, implicit LOD ramps mips 0->3 across x */
@@ -739,6 +768,12 @@ static void scene_tex(vkdev *d, const spv_t *spv, uint8_t *out)
     vkCmdBindVertexBuffers(o.cb, 0, 1, &o.vb, &off);
     vkCmdDraw(o.cb, 6, 1, 0, 0);
     frame_end(d, &o, out);
+    /* the device keeps only 8 shader-module slots — release the
+       pipeline's refs and the module objects per scene (Venus
+       forwards these in-order on the primary ring) */
+    vkDestroyPipeline(d->dev, o.pipe, NULL);
+    vkDestroyShaderModule(d->dev, g.vs, NULL);
+    vkDestroyShaderModule(d->dev, g.fs, NULL);
 }
 
 /* scene 6: one vertex behind the camera (w<0), gradient colour */
@@ -779,6 +814,12 @@ static void scene_clip(vkdev *d, const spv_t *spv, uint8_t *out)
     vkCmdBindVertexBuffers(o.cb, 0, 1, &o.vb, &off);
     vkCmdDraw(o.cb, 3, 1, 0, 0);
     frame_end(d, &o, out);
+    /* the device keeps only 8 shader-module slots — release the
+       pipeline's refs and the module objects per scene (Venus
+       forwards these in-order on the primary ring) */
+    vkDestroyPipeline(d->dev, o.pipe, NULL);
+    vkDestroyShaderModule(d->dev, g.vs, NULL);
+    vkDestroyShaderModule(d->dev, g.fs, NULL);
 }
 
 /* scene 8: derivatives — fwidth(uv)*8 | dFdx(c.r)*4+0.5 */
@@ -837,6 +878,12 @@ static void scene_derivs(vkdev *d, const spv_t *spv, uint8_t *out)
     vkCmdBindVertexBuffers(o.cb, 0, 3, vbs, offs);
     vkCmdDraw(o.cb, 6, 1, 0, 0);
     frame_end(d, &o, out);
+    /* the device keeps only 8 shader-module slots — release the
+       pipeline's refs and the module objects per scene (Venus
+       forwards these in-order on the primary ring) */
+    vkDestroyPipeline(d->dev, o.pipe, NULL);
+    vkDestroyShaderModule(d->dev, g.vs, NULL);
+    vkDestroyShaderModule(d->dev, g.fs, NULL);
 }
 
 /* ---------------- compare + report ------------------------------- */

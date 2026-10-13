@@ -775,6 +775,10 @@ module g6lc_apu_cmdexec
         flost_q <= flost_q & ~fence_clr_i;
         // submit FIFO push
         if (submit_valid_i && submit_ready_o) begin
+`ifdef G6LC_APU_DBG_LOST
+          $display("[DBG] submit fidx=%0d nb=%0d t=%0t",
+                   submit_i.fence_idx, submit_i.nbufs, $time);
+`endif
           fifo_q[fifo_tail_q[1:0]] <= submit_i;
           fifo_tail_q <= fifo_tail_q + 3'd1;
           fifo_n_q    <= fifo_n_q + 3'd1;
@@ -1889,7 +1893,7 @@ module g6lc_apu_cmdexec
                 end
                 5'd14, 5'd15, 5'd16, 5'd17: begin
                   // per-attachment blend state, apu_rast_blend_t layout
-                  rd_q.blend[dr_pi_q[1:0]] <=
+                  rd_q.blend[2'(dr_pi_q - 5'd14)] <=
                       apu_rast_blend_t'(op_cpl_i.rdata);
                 end
                 default: begin
@@ -1990,6 +1994,10 @@ module g6lc_apu_cmdexec
           end
 
           StDone: begin
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] subdone fidx=%0d lost=%0d seq=%0d t=%0t",
+                     cur_q.fence_idx, lost_q, done_seq_q, $time);
+`endif
             done_seq_q <= done_seq_q + 16'h1;
             if (cur_q.fence_idx != FENCE_NONE &&
                 cur_q.fence_idx < 5'(Fences)) begin
@@ -2011,10 +2019,16 @@ module g6lc_apu_cmdexec
     logic        dbg_lost_q;
     logic [7:0]  dbg_state_q;
     logic [31:0] dbg_ctype_q;
+    logic [7:0]  dbg_otst_q;
+    logic [31:0] dbg_othnd_q, dbg_otrid_q;
+    logic [63:0] dbg_otaux_q;
+    logic [2:0]  dbg_hi_q;
     always_ff @(posedge clk_i) begin
       if (lost_q && !dbg_lost_q)
-        $display("[DBG] cmdexec lost: state=%0d ctype=%08x wdcode=%0d t=%0t",
-                 dbg_state_q, dbg_ctype_q, work_done_pl_i.code, $time);
+        $display("[DBG] cmdexec lost: state=%0d ctype=%08x wdcode=%0d otst=%0d othnd=%08x otid=%08x otaux=%016x hi=%0d t=%0t",
+                 dbg_state_q, dbg_ctype_q, work_done_pl_i.code,
+                 dbg_otst_q, dbg_othnd_q, dbg_otrid_q, dbg_otaux_q,
+                 dbg_hi_q, $time);
       if (work_done_i && work_done_pl_i.code != 8'(APU_SH_DONE_OK))
         $display("[DBG] cmdexec work fault: code=%0d outst=%0d wid=%08x t=%0t",
                  work_done_pl_i.code, outst_q, work_done_pl_i.work_id, $time);
@@ -2040,6 +2054,11 @@ module g6lc_apu_cmdexec
       dbg_lost_q  <= lost_q;
       dbg_state_q <= 8'(state_q);
       dbg_ctype_q <= rec_q.ctype;
+      dbg_otst_q  <= ot_cpl_i.status;
+      dbg_othnd_q <= ot_cpl_i.handle;
+      dbg_otrid_q <= ot_req_o.id;
+      dbg_otaux_q <= ot_cpl_i.entry.aux;
+      dbg_hi_q    <= h_i_q;
     end
 `endif
   end

@@ -441,6 +441,51 @@ module tb_g6lc_apu_vnpump;
     32'h00000000, 32'h00000080, 32'h00000000, 32'h000000c0,
     32'h00000000, 32'h00000800, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000};
+  // CRING_X4: ring=0x200 res=102 — same handle as the ctx5 CRING_REUSE
+  //   ring but issued under ctx 4 into a different window: Venus ring
+  //   handles are per-context, so this must coexist with ctx5's 0x200
+  localparam logic [31:0] CRING_X4 [35] = '{
+    32'h000000bc, 32'h00000000, 32'h00000200, 32'h00000000,
+    32'h00000001, 32'h00000000, 32'h3ba0a600, 32'h00000001,
+    32'h00000000, 32'h3ba0a606, 32'h00000000, 32'h00000000,
+    32'h000003e8, 32'h00000000, 32'h00000066, 32'h00000000,
+    32'h00000000, 32'h000008d0, 32'h00000000, 32'h00000004,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000040,
+    32'h00000000, 32'h00000080, 32'h00000000, 32'h000000c0,
+    32'h00000000, 32'h00000800, 32'h00000000, 32'h000008c0,
+    32'h00000000, 32'h00000010, 32'h00000000};
+  // DESTROY2 ring=0x200 — the colliding handle
+  localparam logic [31:0] DESTROY2 [4] = '{
+    32'h000000bd, 32'h00000000, 32'h00000200, 32'h00000000};
+  // WAITR2 ring=0x200 seq=24 — colliding-handle seqno wait
+  localparam logic [31:0] WAITR2 [6] = '{
+    32'h000000fd, 32'h00000000, 32'h00000200, 32'h00000000,
+    32'h00000018, 32'h00000000};
+  // WAITR_HI ring=0x200 seq=136 — wait parked ahead of the ring head
+  localparam logic [31:0] WAITR_HI [6] = '{
+    32'h000000fd, 32'h00000000, 32'h00000200, 32'h00000000,
+    32'h00000088, 32'h00000000};
+  // EXEC24: stream {res=103, off=0, size=24} — inner is one SUBVQ7
+  localparam logic [31:0] EXEC24 [18] = '{
+    32'h000000b4, 32'h00000000, 32'h00000001, 32'h00000001,
+    32'h00000000, 32'h00000067, 32'h00000000, 32'h00000000,
+    32'h00000018, 32'h00000000, 32'h00000001, 32'h00000000,
+    32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
+    32'h00000000, 32'h00000000};
+  // WAITR_B ring=0x400 seq=8 — cross-ring seqno wait
+  localparam logic [31:0] WAITR_B [6] = '{
+    32'h000000fd, 32'h00000000, 32'h00000400, 32'h00000000,
+    32'h00000008, 32'h00000000};
+  // WAITR_FAR ring=0x400 seq=0x1000 — never satisfiable while parked
+  localparam logic [31:0] WAITR_FAR [6] = '{
+    32'h000000fd, 32'h00000000, 32'h00000400, 32'h00000000,
+    32'h00001000, 32'h00000000};
+  // WAITVQ11 seq=11 / SUBVQ11 ring=0x100 seq=11
+  localparam logic [31:0] WAITVQ11 [4] = '{
+    32'h000000fc, 32'h00000000, 32'h0000000b, 32'h00000000};
+  localparam logic [31:0] SUBVQ11 [6] = '{
+    32'h000000fb, 32'h00000000, 32'h00000100, 32'h00000000,
+    32'h0000000b, 32'h00000000};
   // CRING_BADSZ: bufferSize=2000 (not a power of two)
   localparam logic [31:0] CRING_BADSZ [35] = '{
     32'h000000bc, 32'h00000000, 32'h00000200, 32'h00000000,
@@ -791,6 +836,177 @@ module tb_g6lc_apu_vnpump;
     ring_put(R0_BASE + 48, 0, wq, R0_BASE + 16, 24);
     wait_ap(R0_BASE, 32'd24, "T18 ctx5 head advances");
     check(apm[R0_BASE + 32] == ST_ALIVE, "T18 status stays ALIVE");
+
+    // ---- T19: cross-context handle collision (§12.3 ring fix) --------
+    // Slot 0 holds ctx5's ring handle=0x200.  Ring handles are
+    // per-context (Mesa's per-process ring counter), so ctx4 records
+    // addressing 0x200 must never touch ctx5's ring — the guest-wedge
+    // tombstone where one process's teardown killed the next one's ring.
+    // ctx4 destroys a handle it does not own: must fault (miss), and
+    // ctx5's ring must survive
+    wq = {};
+    for (int i = 0; i < 4; i++) wq.push_back(DESTROY2[i]);
+    xs_goc(wq, 8'd4, 1'b1, "T19 foreign destroy faults");
+    cases++;
+    check(ring_active[0] == 1'b1, "T19 ctx5 ring survives foreign destroy");
+    // a seqno wait addressed at a handle ctx4 does not own must fault,
+    // not park the stream on the wrong ring's head (the guest wedge:
+    // WaitRingSeqno resolving a stale same-handle ring froze the pump)
+    wq = {};
+    for (int i = 0; i < 6; i++) wq.push_back(WAITR2[i]);
+    xs_goc(wq, 8'd4, 1'b1, "T19 foreign seqno wait faults");
+    // ctx4 creates its own ring with the same handle on a different
+    // window — per-context handles must allow it (no cross-ctx dup)
+    wq = {};
+    for (int i = 0; i < 35; i++) wq.push_back(CRING_X4[i]);
+    xs_goc(wq, 8'd4, 1'b0, "T19 ctx4 create same handle");
+    cases++;
+    check(ring_active[1] == 1'b1, "T19 ctx4 ring live");
+    check(apm[R1_BASE + 32] == ST_ALIVE, "T19 ctx4 ring status ALIVE");
+    // ctx4 destroys its own 0x200 — kills slot 1, leaves ctx5's slot 0
+    wq = {};
+    for (int i = 0; i < 4; i++) wq.push_back(DESTROY2[i]);
+    xs_goc(wq, 8'd4, 1'b0, "T19 ctx4 destroy own handle");
+    cases++;
+    check(ring_active[1] == 1'b0, "T19 ctx4 ring destroyed");
+    check(ring_active[0] == 1'b1, "T19 ctx5 ring still live");
+    // and ctx5's ring still consumes: submit+wait pair advances head
+    wq = {};
+    for (int i = 0; i < 6; i++) wq.push_back(SUBVQ7[i]);
+    for (int i = 0; i < 4; i++) wq.push_back(WAITVQ7[i]);
+    ring_put(R0_BASE + 48, 24, wq, R0_BASE + 16, 24 + 40);
+    wait_ap(R0_BASE, 32'd64, "T19 ctx5 head advances post-collision");
+    check(apm[R0_BASE + 32] == ST_ALIVE, "T19 ctx5 status stays ALIVE");
+
+    // ---- T20a–d: park/resume seqno waits ------------------------------
+    // The guest wedge: a seqno wait reached while the waited-on head
+    // is behind the target must NOT spin — the single pump FSM is the
+    // engine that polls the waited ring's tail, so spinning starves
+    // its own resolution.  The wait parks the stream stack into
+    // park_q (ring streams get ring_q[].parked so the poll skips
+    // them) and the FSM goes back to polling; the resume scan in
+    // StIdle/StPollGap re-arms the stream when the seqno lands (or
+    // faults it when the waited ring dies).  All ring execution stays
+    // at depth 0 — a parked drain must never run ring records inside
+    // the exec-window slot, where ExecuteCommandStreams is fatal.
+    // ctx5's ring (slot 0, handle 0x200) sits at head=tail=64.
+
+    // ---- T20a: vq stream waits ring0; ring0's data is an exec window
+    // The discriminating case against nesting the drain: pending ring
+    // data containing ExecuteCommandStreams must run as an ordinary
+    // depth-0 ring stream (inner window at depth 1), not be pushed
+    // into the exec slot itself.
+    for (int i = 0; i < 6; i++) apm[EX_BASE + i] = SUBVQ7[i];
+    for (int i = 0; i < 8; i++) gmem[GXW + i] = 32'h0;
+    for (int i = 0; i < 6; i++) gmem[GXW + 8 + i] = WAITR_HI[i];
+    xs_d[0] = '{addr: GXBUF, len: 32'd56,
+                write: 1'b0, default: '0};
+    xs_d[1] = '0; xs_d[2] = '0; xs_d[3] = '0;
+    xs_n = 4'd1; xs_off = 32'd32;
+    xs_bytes = 32'd24; xs_ctx = 8'd5;
+    begin
+      automatic int unsigned s0 = xs_seen;
+      automatic int unsigned a0 = xs_acc;
+      automatic int unsigned t;
+      cases++;
+      @(negedge clk);
+      xs_v = 1'b1;
+      t = 0;
+      while (xs_acc == a0 && t < TMO) begin @(posedge clk); t++; end
+      check(t < TMO, "T20a wait stream accepted");
+      @(negedge clk);
+      xs_v = 1'b0;
+      // let the wait record reach the pump and park on it
+      repeat (512) @(posedge clk);
+      check(apm[R0_BASE] == 32'd64, "T20a head parked at 64");
+      check(xs_rdy == 1'b0, "T20a parked execbuf blocks xs_ready");
+      // the ring data lands mid-wait: one EXEC24 record -> head 136
+      wq = {};
+      for (int i = 0; i < 18; i++) wq.push_back(EXEC24[i]);
+      ring_put(R0_BASE + 48, 64, wq, R0_BASE + 16, 136);
+      wait_ap(R0_BASE, 32'd136,
+              "T20a ring drained its exec window through the wait");
+      $display("T20a diag: ring0 status=%08x head=%0d",
+               apm[R0_BASE + 32], apm[R0_BASE]);
+      check((apm[R0_BASE + 32] & APU_VNRING_FATAL) == 0,
+            "T20a ring not FATAL (no nested-depth fatal)");
+      t = 0;
+      while (xs_seen == s0 && t < TMO) begin @(posedge clk); t++; end
+      check(t < TMO, "T20a parked wait resolves, stream retires");
+      check(!xs_fault, "T20a wait stream clean");
+      t = 0;
+      while (!xs_rdy && t < TMO) begin @(posedge clk); t++; end
+      check(t < TMO, "T20a pump back to idle");
+    end
+
+    // ---- T20b: ring0 waits ring1 (cross-ring); ring1 data lands late
+    // the R1 window was recycled by earlier tests — re-init its
+    // control block like a guest mapping a fresh ring
+    apm[R1_BASE]      = 32'd0;
+    apm[R1_BASE + 16] = 32'd0;
+    wq = {};
+    for (int i = 0; i < 35; i++) wq.push_back(CRING1[i]);
+    xs_goc(wq, 8'd5, 1'b0, "T20b create ring1 ctx5");
+    cases++;
+    check(ring_active[1] == 1'b1, "T20b ring1 active");
+    wq = {};
+    for (int i = 0; i < 6; i++) wq.push_back(WAITR_B[i]);
+    ring_put(R0_BASE + 48, 136, wq, R0_BASE + 16, 160);
+    repeat (512) @(posedge clk);
+    cases++;
+    check(apm[R0_BASE] == 32'd136,
+          "T20b ring0 parked: wait record unpublished");
+    // ring1's data lands later — the park scan sees head >= 8
+    wq = {};
+    for (int i = 0; i < 4; i++) wq.push_back(WAITVQ7[i]);
+    ring_put(R1_BASE + 48, 0, wq, R1_BASE + 16, 16);
+    wait_ap(R1_BASE, 32'd16, "T20b ring1 consumed");
+    wait_ap(R0_BASE, 32'd160,
+            "T20b ring0 resumed, head publishes after wait");
+    check((apm[R0_BASE + 32] & APU_VNRING_FATAL) == 0,
+          "T20b ring0 not FATAL");
+
+    // ---- T20c: ring0 waits a virtqueue seqno supplied by an execbuf
+    wq = {};
+    for (int i = 0; i < 4; i++) wq.push_back(WAITVQ11[i]);
+    ring_put(R0_BASE + 48, 160, wq, R0_BASE + 16, 176);
+    repeat (512) @(posedge clk);
+    cases++;
+    check(apm[R0_BASE] == 32'd160,
+          "T20c ring0 parked on vq seqno");
+    wq = {};
+    for (int i = 0; i < 6; i++) wq.push_back(SUBVQ11[i]);
+    xs_goc(wq, 8'd5, 1'b0, "T20c execbuf submits vq seqno");
+    wait_ap(R0_BASE, 32'd176, "T20c ring0 resumed on vq seqno");
+    check((apm[R0_BASE + 32] & APU_VNRING_FATAL) == 0,
+          "T20c ring0 not FATAL");
+
+    // ---- T20d: waited ring destroyed while parked -> fault path ----
+    wq = {};
+    for (int i = 0; i < 6; i++) wq.push_back(WAITR_FAR[i]);
+    ring_put(R0_BASE + 48, 176, wq, R0_BASE + 16, 200);
+    repeat (512) @(posedge clk);
+    cases++;
+    check(apm[R0_BASE] == 32'd176,
+          "T20d ring0 parked on unsatisfiable seqno");
+    wq = {};
+    for (int i = 0; i < 4; i++) wq.push_back(DESTROY1[i]);
+    xs_goc(wq, 8'd5, 1'b0, "T20d destroy waited ring");
+    // the fault write ORs FATAL into the current status — the ring may
+    // already carry IDLE — so match on the bit, not the whole word
+    begin
+      automatic int unsigned t = 0;
+      cases++;
+      while ((apm[R0_BASE + 32] & APU_VNRING_FATAL) == 0 && t < TMO)
+        begin @(posedge clk); t++; end
+      check(t < TMO,
+            "T20d parked wait resumes into the fault path");
+    end
+    check(ring_active[0] == 1'b0, "T20d ring0 FATAL");
+    // nothing else wedged: the pump still accepts and retires work
+    wq = {};
+    for (int i = 0; i < 4; i++) wq.push_back(WAITVQ7[i]);
+    xs_goc(wq, 8'd5, 1'b0, "T20d pump still services execbufs");
 
     if (errors == 0)
       $display("PASS tb_g6lc_apu_vnpump cases=%0d checks=%0d cycles=%0d",

@@ -31,6 +31,9 @@
 //   case 10 thin triangle: partially covered 2x2 quads — only
 //           covered pixels may be written (helper lanes never reach
 //           the ROP), exact coverage
+//   case 11 SRC_ALPHA/ONE_MINUS_SRC_ALPHA on colour AND alpha with
+//           full write mask — the vkcmp blend_layers configuration:
+//           dst alpha is consumed and overwritten by the blend
 module tb_g6lc_apu_rast;
   import g6lc_apu_mp_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
@@ -1092,6 +1095,55 @@ module tb_g6lc_apu_rast;
         end
       $display("RAST_INFO case10 cov=%0d", ncov10);
     end
+
+    // ================= case 11: full-RGBA alpha blend ============
+    cases++;
+    // vkcmp blend_layers shape: SRC_ALPHA/ONE_MINUS_SRC_ALPHA on both
+    // colour and alpha, ADD, mask 0xF — dst alpha participates in the
+    // blend and is overwritten (case 6 kept it via RGB-only mask)
+    // clear (0.2,0.2,0.2,0.4) -> bytes {51,51,51,102}
+    d = mk_clear();
+    d.clear_color[0] = 32'h3E4CCCCD;
+    d.clear_color[1] = 32'h3E4CCCCD;
+    d.clear_color[2] = 32'h3E4CCCCD;
+    d.clear_color[3] = 32'h3ECCCCCD;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    // flat src (1.0, 0.0, 0.0, 0.5); a = 0.5*0.5 + 0.4*0.5 = 0.45 -> 115
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    // same screen-space triangle as case 6 — ref_xi/ref_yi still hold
+    // case 10's sliver without this
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    d = mk_draw();
+    d.blend[0] = '{en: 1'b1,
+                  src_c: APU_RAST_BF_SRC_ALPHA,
+                  dst_c: APU_RAST_BF_OM_SRC_ALPHA,
+                  op_c:  APU_RAST_BO_ADD,
+                  src_a: APU_RAST_BF_SRC_ALPHA,
+                  dst_a: APU_RAST_BF_OM_SRC_ALPHA,
+                  op_a:  APU_RAST_BO_ADD,
+                  mask:  4'hF,
+                  pad:   '0};
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case11 code=%0d", w_dpl.code));
+    // inside: r=0.6->153, g=b=0.1->26, a=0.45->~115 (RGBA {a,b,g,r})
+    ex = {8'd115, 8'd26, 8'd26, 8'd153};
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        got = fbpx(x, y);
+        if (ref_px(x, y) == 32'hFFFF_FFFF) begin
+          if (got != 32'h66333333)
+            fail($sformatf("case11 out px(%0d,%0d)=%08x expclr", x, y, got));
+        end else if (px_bad(got, ex, 2))
+          fail($sformatf("case11 px(%0d,%0d)=%08x exp~%08x",
+                         x, y, got, ex));
+      end
 
     // ---- report ---------------------------------------------------------
     if (fails == 0)

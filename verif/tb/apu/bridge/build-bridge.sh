@@ -36,12 +36,16 @@ WNO="-Wall -Wno-fatal -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND \
 -Wno-IMPLICIT -Wno-VARHIDDEN -Wno-LITENDIAN -Wno-PINMISSING \
 -Wno-CASEINCOMPLETE -Wno-UNSIGNED -Wno-style"
 
+DBGDEF=()
+if [ -n "${G6LC_APU_DBG_LOST:-}" ]; then DBGDEF=(-DG6LC_APU_DBG_LOST); fi
+if [ -n "${G6LC_APU_DBG_TRACE:-}" ]; then DBGDEF+=(-DG6LC_APU_DEBUG); fi
+
 build_one() { # name, extra-verilator-args
   local name="$1"; shift
   t0=$SECONDS
   if ! "$VERILATOR" --cc --exe --build --assert -j "$(nproc)" \
       -O2 -CFLAGS "-O2 -I$OUT" --trace-fst \
-      $WNO "${VLTS[@]}" \
+      $WNO "${VLTS[@]}" "${DBGDEF[@]}" \
       -f "$ROOT/corev_apu/apu/Flist.apu_soc" \
       "$BR/tb_g6lc_apu_bridge.sv" "$BR/bridge_main.cpp" \
       --top-module tb_g6lc_apu_bridge "$@" \

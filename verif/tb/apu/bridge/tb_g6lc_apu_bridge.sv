@@ -391,6 +391,27 @@ module tb_g6lc_apu_bridge
                           .i_sh.gen_on.i_wave.gen_on.st_q;
     wire [7:0]  wv_ret  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
                           .i_sh.gen_on.i_wave.gen_on.ret_q;
+    // drain/hold interlock + pump/apmem snapshot (sel 55..57): whether
+    // vgctl parks on the relocation drain while an engine parks on its
+    // own wait — the kernel D-state signature needs all four busy bits
+    wire [7:0]  vg_st   = {2'b0,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_ctl.gen_on.state_q};
+    wire [7:0]  vg_int  = {5'b0,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.vc_hold,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.drain_idle,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_ctl.gen_on.map_hold_q};
+    wire [7:0]  eng_b   = {4'b0,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.rs_busy,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.xfer_busy_o,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.sh_busy,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.ex_idle};
+    wire [7:0]  pu_st   = {1'b0,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_pump.gen_on.depth_q,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_pump.gen_on.state_q};
+    wire [7:0]  pu_pol  = {6'b0,
+        i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_pump.gen_on.poll_q};
+    wire [7:0]  mp_os   = {7'b0,
+        i_dut.gen_venus.i_vgsys.gen_on.i_mem.gen_on.out_q};
     wire [63:0] fr_ot_id = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
                            .i_pump.gen_on.i_fr.gen_on.otr_q.id;
     wire [63:0] fr_ot_par = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
@@ -453,7 +474,9 @@ module tb_g6lc_apu_bridge
     wire [31:0] pu_ff   = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
                           .i_pump.gen_on.fr_fault;
     always_ff @(posedge clk_i) begin
-      if (pu_state != pu_prev_q && pu_state == 6'd25)
+      // NB numeric state compares: hierarchical enum-member refs crash
+      // the tool.  StFatal=27 (ordinals shift if the enum grows).
+      if (pu_state != pu_prev_q && pu_state == 6'd27)
         $display("[f5pu] FATAL prev=%0d ct0=%08x ct1=%08x rs0=%0d rs1=%0d ring=%0d pos=%08x byt=%08x dep=%0d df=%08x ff=%08x",
                  pu_prev_q, pu_ct0, pu_ct1, pu_rs0, pu_rs1, pu_ring,
                  pu_pos, pu_byt, pu_dep, pu_df, pu_ff);
@@ -467,6 +490,7 @@ module tb_g6lc_apu_bridge
     logic [31:0] pu_h_q[4];
     logic [7:0]  pu_rfl_q;
     logic        pu_s0lv_q, pu_s1lv_q;
+    logic [6+32+64+64+32+32-1:0] pu_ex_q;
     always_ff @(posedge clk_i) begin
       if (!pu_s0lv_q && `_PU.st_q[0].live)
         $display("[f5pu2] S0NEW rs=%0d knd=%0d rng=%0d bh=%08x bw=%08x pos=%08x byt=%08x hd0=%08x",
@@ -491,15 +515,40 @@ module tb_g6lc_apu_bridge
                    r, pu_h_q[r], `_PU.ring_q[r].head, `_PU.state_q);
         if ({`_PU.ring_q[r].fatal, `_PU.ring_q[r].live} !=
             pu_rfl_q[2*r +: 2])
-          $display("[f5pu2] RING r%0d live=%0d fatal=%0d st=%0d",
+          $display("[f5pu2] RING r%0d live=%0d fatal=%0d st=%0d hnd=%016x rctx=%x ckill=%0d ckid=%x thnd=%016x ctype=%08x sctx=%x",
                    r, `_PU.ring_q[r].live, `_PU.ring_q[r].fatal,
-                   `_PU.state_q);
+                   `_PU.state_q, `_PU.ring_q[r].handle,
+                   `_PU.ring_q[r].ctx, `_PU.ctx_kill_valid_i,
+                   `_PU.ctx_kill_id_i, `_PU.t_hnd_q,
+                   `_PU.cmd_type_q[`_PU.depth_q],
+                   `_PU.st_q[`_PU.depth_q].ctx);
         pu_h_q[r]            <= `_PU.ring_q[r].head;
         pu_rfl_q[2*r +: 2]   <= {`_PU.ring_q[r].fatal,
                                 `_PU.ring_q[r].live};
       end
       pu_s0lv_q <= `_PU.st_q[0].live;
       pu_s1lv_q <= `_PU.st_q[1].live;
+      // ring-record decode + wait resolution: which ctx's stream
+      // executed which handle-addressed record (cross-ctx handle
+      // collisions show sctx != the matched ring's ctx).
+      // NB numeric state compares: hierarchical enum-member refs
+      // (``_PU.StTrDo) crash Verilator. StTrDo=12, StWaitR=19.
+      // Print only on change: a parked wait would otherwise emit one
+      // line per cycle and drown the log.
+      if ((`_PU.state_q == 6'd12 || `_PU.state_q == 6'd19) &&
+          {`_PU.state_q, `_PU.cmd_type_q[`_PU.depth_q],
+           `_PU.t_hnd_q, `_PU.t_val_q,
+           `_PU.ring_q[0].head, `_PU.ring_q[1].head} != pu_ex_q)
+        $display("[f5pu2] EXEC st=%0d ctype=%08x thnd=%016x tval=%016x sctx=%x r0={h=%016x c=%x lv=%0d hd=%x} r1={h=%016x c=%x lv=%0d hd=%x}",
+                 `_PU.state_q, `_PU.cmd_type_q[`_PU.depth_q],
+                 `_PU.t_hnd_q, `_PU.t_val_q, `_PU.st_q[`_PU.depth_q].ctx,
+                 `_PU.ring_q[0].handle, `_PU.ring_q[0].ctx,
+                 `_PU.ring_q[0].live, `_PU.ring_q[0].head,
+                 `_PU.ring_q[1].handle, `_PU.ring_q[1].ctx,
+                 `_PU.ring_q[1].live, `_PU.ring_q[1].head);
+      pu_ex_q <= {`_PU.state_q, `_PU.cmd_type_q[`_PU.depth_q],
+                  `_PU.t_hnd_q, `_PU.t_val_q,
+                  `_PU.ring_q[0].head, `_PU.ring_q[1].head};
     end
 
     // [f5wx]: 5b image-path trace — work issue (dispatch/xfer with the
@@ -661,6 +710,9 @@ module tb_g6lc_apu_bridge
         8'd52:   dbg_rdata_o = {48'h0, ex_st};
         8'd53:   dbg_rdata_o = {56'h0, wv_st};
         8'd54:   dbg_rdata_o = {56'h0, wv_ret};
+        8'd55:   dbg_rdata_o = {48'h0, vg_int, vg_st};
+        8'd56:   dbg_rdata_o = {40'h0, pu_pol, pu_st, eng_b};
+        8'd57:   dbg_rdata_o = {56'h0, mp_os};
         default: begin
           if (dbg_sel_i >= 8'd16 && dbg_sel_i < 8'd20)
             dbg_rdata_o = 64'(r_head[dbg_sel_i[1:0]]);

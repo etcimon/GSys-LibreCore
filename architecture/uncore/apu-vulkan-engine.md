@@ -124,10 +124,36 @@ sys-venus (all 4,096 readback words), the pinned-toolchain leaves `apu-leaf-2026
 `…20261012T005107…` are green across all 26 suites including the Enable=0/1 synth screen of rast
 (146,474 cells, 15,584 FFs, no latch), and the stock-guest leaf `…20261012T010726…` passes both
 arms with **`G6LC_VKTRI_PASS covered=512 maxdiff=0`** — stock Mesa Venus drawing a gradient
-triangle on the RTL, pixel-exact against an in-guest C model of the rast op sequence. v1
-limits (rast header): no clipping, depth/stencil/blend/MSAA, one attachment, list/strip only,
-dynamic viewport/scissor only, indexed `gl_VertexIndex` unsupported, UNORM8 RGBA/BGRA only. The
-compute-only profile audit findings dropped from 19 to 7 intentional limits.
+triangle on the RTL, pixel-exact against an in-guest C model of the rast op sequence. G1 v1
+limits (since lifted by G2, below): no clipping, depth/stencil/blend/MSAA, one attachment,
+list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsupported, UNORM8
+RGBA/BGRA only. The compute-only profile audit findings dropped from 19 to 7 intentional limits.
+
+**Milestone G2 (2026-10-13) — eight-scene stock-guest oracle.** G2a added BGRA/sRGB attachments
+(`APU_SRGB_ENC`), colorWriteMask, per-attachment blending (15 factors / 5 ops / constants), up to
+4 colour attachments, D32/D16 depth with early-Z and depth clear, indexed (UINT16/32,
+vertexOffset) and instanced draws with instance-rate attributes, fans; G2b added clip-space
+Sutherland–Hodgman clipping (near/far/w/guard band) with fan triangulation, 2×2 quad scan with
+helper lanes, FrontFacing, DPdx/DPdy/Fwidth (fine/coarse) and `OpImageSampleImplicitLod`; G2c
+added the guest oracle `vkcmp.c` — the same eight scenes (gradient, depth, blend layers,
+indexed+instanced, mip-nearest texture, near clip, sRGB, derivatives) rendered on Venus→RTL and
+on the guest's own llvmpipe and compared per channel. Defects it exposed and their directed
+vectors are itemised in `AGENTS-todo.md` (G2c row): rast varying/winding swap, the vgtop
+serialized completion queue, cmdexec late-completion skip, the virtio-mmio reset-ack stall,
+per-context ring handles and park/resume of seqno waits in vnpump, vqwalk post-notify reread, a
+double-rounded mip λ, and two guest-test resource leaks that the 8-module / 16-command-buffer
+device limits turned into Venus phantom handles. **Evidence:** pinned-toolchain RTL leaf
+`apu-leaf-20261013T110427-ccf9e8adf9d7` **27/27 PASS** (identity `ee1c14cc…`; vnpump 185 incl.
+T19/T20a–d, cva6-venus 488, rast 11,271, synth-rast Enable=1 197,959 cells / 19,693 FFs no latch)
+and guest leaf `…20261013T133000-33942903cd89` **PASS both arms** on the same RTL closure (the
+snapshot identity differs only by two foreign non-APU files): venus arm
+`G6LC_VKCOMPUTE/VKDESCARR/VKMEM/VKIMAGE/VKTRI_PASS` + **`G6LC_VKCMP_PASS scenes=8`** (maxdiff ≤ 1
+on every scene, 0 on gradient/mip/derivs; 4.5–32.7 s per scene on Venus vs 5.7–22.8 s on
+llvmpipe under TCG), venusoff arm `GUEST-PASS`. Still smoke/milestone evidence: no CTS, no
+conformance, no throughput claim. Remaining G2-era limits (rast header): no stencil, no
+FragDepth/late-Z, no discard, no points/lines, primitive restart ignored, strips/fans within
+one batch, one subpass with identity colour references, no MSAA, single viewport, one memory
+word / one float op in flight.
 
 **Sequence:** consolidate evidence/contracts and qualify 3d-d → complete memory/synchronization
 and the common shader pipeline → raster/ROP and scalable VM/cache → matrix/RT/mesh/advanced

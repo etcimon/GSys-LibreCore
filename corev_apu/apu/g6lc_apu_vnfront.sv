@@ -3600,6 +3600,11 @@ module g6lc_apu_vnfront
             if (ot_cpl_i.status != APU_OBJTAB_OK ||
                 ot_cpl_i.entry.bind_mem[15:0] == APU_OBJTAB_SLOT_NONE) begin
               upd_elok_q <= 1'b0;
+`ifdef G6LC_APU_DBG_LOST
+              $display("[DBG] upd-buffail set=%08x buf=%016x st=%0d bmem=%08x t=%0t",
+                       rsv_hnd_q, upd_buf_q, ot_cpl_i.status,
+                       ot_cpl_i.entry.bind_mem, $time);
+`endif
               state_q    <= StUpdWr0;
             end else begin
               ud_mslot_q <= ot_cpl_i.entry.bind_mem[15:0];
@@ -3639,6 +3644,15 @@ module g6lc_apu_vnfront
                 64'(upd_eb_q) + upd_off_q + rng_eff >
                     ot_cpl_i.entry.size) begin
               upd_elok_q <= 1'b0;
+`ifdef G6LC_APU_DBG_LOST
+              $display("[DBG] upd-memfail set=%08x buf=%016x st=%0d kind=%0d gen=%0d!=%0d unb=%0d maux=%016x eb=%x off=%x rng=%x esz=%x msz=%x t=%0t",
+                       rsv_hnd_q, upd_buf_q, ot_cpl_i.status,
+                       ot_cpl_i.entry.kind, ot_cpl_i.entry.gen,
+                       ud_mgen_q,
+                       ot_cpl_i.entry.aux[63:32] == APU_MEM_UNBACKED,
+                       ot_cpl_i.entry.aux, upd_eb_q, upd_off_q,
+                       rng_eff, upd_esz_q, ot_cpl_i.entry.size, $time);
+`endif
             end else begin
               upd_elok_q <= 1'b1;
               // record +0 = mem{gen,slot}, +28 = bind_off + info.off
@@ -3870,8 +3884,13 @@ module g6lc_apu_vnfront
             // truthfully fatal at dispatch)
             if (!upd_elok_q &&
                 (is_buf_typ(upd_type_q[7:0]) ||
-                 is_img_typ(upd_type_q[7:0])))
+                 is_img_typ(upd_type_q[7:0]))) begin
               upd_pois_q <= 1'b1;
+`ifdef G6LC_APU_DBG_LOST
+              $display("[DBG] upd-poison set=%08x el=%0d type=%08x img=%0d t=%0t",
+                       rsv_hnd_q, ent_j_q, upd_type_q, upd_img_q, $time);
+`endif
+            end
             ent_j_q <= ent_j_q + 16'd1;
             state_q <= StUpdInfo;
           end
@@ -5175,6 +5194,11 @@ module g6lc_apu_vnfront
           end
           StRepKick: state_q <= StRepWait;
           StRepWait: if (rep_done) begin
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] rep ctype=%08x result=%08x imm0=%08x sub={fidx=%0d nb=%0d} t=%0t",
+                     op_q.cmd_type, result_q, op_q.imm[0],
+                     sub_q.fence_idx, sub_q.nbufs, $time);
+`endif
             rep_words_q <= rep_n;
             fault_q     <= {3'b0, rep_fault};
             state_q     <= StDone;

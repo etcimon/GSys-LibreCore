@@ -851,7 +851,10 @@ class Model:
             lod_in = self.ilod(pc, ops[3], meta['w'], meta['h'])
         else:
             lod_in = va[2][0]
-        le = s32(f2i(ffma(lod_in, 0x41800000, 0), False, 'RNE'))
+        # lod q4.4 is floored, not RNE — W_TXC2's own +0.5 round is the
+        # mip-nearest decision, so a second RNE here double-rounds and
+        # tips boundary lods one mip early (vkcmp tex_mip_nearest).
+        le = s32(f2i(ffma(lod_in, 0x41800000, 0), False, 'RDN'))
         le += -bias if (smp >> 56) & 1 else bias
         le = min(max(le, min44), max44)
         le = max(le, 0)

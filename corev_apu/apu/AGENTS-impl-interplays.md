@@ -3736,7 +3736,7 @@ mandatory MatrixEn, custom descriptors, UIO daemon or game plugin. HDMI remains
 a separate consumer of a completed common surface. `ApuOff`, all graphics gates
 and `FeatureVirgl` legality are unchanged by this source-review increment.
 
-## 16. Engine arborescence (live, 3c-ii + 5a xfer + F5 descriptors + 3d-c roll-up + 5b images)
+## 16. Engine arborescence (live, 3c-ii + 5a xfer + F5 descriptors + 3d-c roll-up + 5b images + G1/G2 raster)
 
 ```text
 ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus; WorkSink=0]
@@ -3762,7 +3762,8 @@ ApuSys (g6lc_apu_sys)                       [VenusEn: gen_venus; WorkSink=0]
                 --> WaveEngine (shwave)
             --> Xfer (xfer)
                 --> DmaRead/DmaWrite checked pair                         AXI xfer
-        --> MemoryPort (apmem)            5 x apu_mp fixed-priority arbiter AXI apmem
+            --> Raster (rast)             gather / setup / clip / scan / ROP  mp RAST
+        --> MemoryPort (apmem)            6 x apu_mp fixed-priority arbiter AXI apmem
         --> DmaJoin (tdma)                a=apmem, b=xfer ==> one AXI4 master
     ==> guest RAM window {DmaWindowBase, DmaWindowBytes} / aperture {APU_SHM_BASE, APU_SHM_BYTES}
 
@@ -3770,15 +3771,49 @@ Dataflow (not structural children):
     VirtqueueWalker <-> VenusTop          chain_* / held cpl handshake
     ControlQueue <-> ObjTab / PageAllocator
     RingPump.Front <-> ObjTab / ObjPay / CmdRec / CmdExec
-    CmdExec <-> ShaderCore | Xfer         held work and completion
+    CmdExec --> ShaderCore | Xfer | Raster   held work (dispatch | xfer-class | draw-class + rd_o)
+    Raster <-> ShaderCore                 VS/FS wave batches on the shared work port
+                                          (raster waves win; desc/push sidebands come
+                                          from the raster's latched copies while a
+                                          raster wave is in flight; gfx dones route back
+                                          to Raster by work_id = APU_SH_WORK_VS/FS)
+    Raster --> PageAllocator              one-time private scratch, lowest priority
+    {ShaderCore, Xfer, Raster, external} ==> DoneQueue ==> CmdExec
+                                          serialized completions, one work_done per
+                                          cycle (depth 2^ceil(log2(MaxWaves+4)))
     ShaderCore <-> ObjTab                 READSLOT, 5th requester (3d-d)
     ModuleScanner <-> WaveEngine          table read ports, not instantiation
     ControlQueue ==> CmdExec              hold_i while relocation drains (3d-d)
+    VirtioMmio ==> bus                    accesses stall (no ready) while a backend
+                                          reset is pending; the stock virtio_mmio
+                                          driver never polls status after reset
     response bytes ==> used element ==> used.idx ==> ISR
 
-The 3d-d edges above describe existing working-tree changes, not a new qualified
-integration result. Draw work is still refused by the production WorkSink=0 path
-until a real graphics engine consumes it; decoded commands do not render pixels.
+The 3d-d edges were qualified on the isolated pinned-toolchain leaf
+(apu-leaf-20261011T035154..., engine doc 12.3). Draw-class records (vkCmdDraw,
+vkCmdDrawIndexed, in-pass vkCmdClearAttachments) now route to the raster engine
+instead of the refused work sink; stock Mesa Venus draws a pixel-exact triangle on the
+RTL (G1d guest leaf apu-leaf-20261012T010726...). Two completion-path defects were found
+by the G2c tests and fixed (2026-10-12, commit 24fc71912): the merged
+sh_done | xf_done | rs_done | work_done_i pulse collapsed coincident completions into
+one outst_q decrement (StDrain livelock, fence never signalled -- the vkimage/vkcmp
+wedge), replaced by the DoneQueue; and StDsDone consumed any completion, so an older
+record's done arriving late advanced a dispatch early -- it now skips the dones owed to
+older outstanding work (conservative: a dispatch also waits for older xfers; a non-OK
+code on any done still sets lost_q). The virtio-mmio stall closes a third: writes
+during a pending backend reset were acknowledged and dropped, which stock Linux reported
+as "virtio: device refuses features: 40" (bounded by a 1,023-cycle watchdog so a
+firmware-less transport cannot wedge the reg bus). Two RingPump contracts were corrected
+by the G2c guest traces (2026-10-13): ring handles are per-context (ring_of(h, ctx) --
+Mesa's ring id is a per-process counter, so a DestroyRing/WaitRingSeqno from one context
+must never reach another context's same-handle ring), and WaitRingSeqno/WaitVirtqueueSeqno
+never block the FSM: an unsatisfied wait parks the stream's window stack in
+park_q[Rings+1] (parked rings are skipped by the poll and publish no head; xs_active stays
+asserted while the virtqueue stream is parked), the idle/poll-gap scan resumes it at the
+next record once head/vq_seqno reaches the target, and ctx-kill drops the entry. Rings
+therefore always execute at depth 0 with ExecuteCommandStreams nested at depth 1 -- a
+nested-window drain of the waited ring was rejected because ExecuteCommandStreams at
+depth 1 is fatal.
 
 Descriptor-memory path (F5): pool/set backing pages vgpages ALLOC_PRIV ->
 vnfront bump-allocates set tables and writes 32-byte records through
@@ -3874,7 +3909,7 @@ counts bounded by the shared ObjTab (vn_device_profile.toml).
 | Waiting on | Phase | Exit |
 |---|---|---|
 | Full-SoC Linux (3d-a bare-metal probe and 3d-b stock-stack RTL-in-the-loop landed: §11 rows 3d-a/3d-b, `architecture/uncore/apu-venus-command-trace.md`) | B | stock Ubuntu on the Variane testharness itself (R3b program): same `vulkaninfo`/dispatch under real caches and the non-coherent DMA contract (`zicbom`/`svpbmt`, no `dma-coherent`) |
-| ~~Sampler~~ / raster (Xfer landed §11 5a; compute sampler+images landed §11 5b — `W_TX*` texture path in the tree above) | C | blits, implicit-lod/derivative ops (need fragment derivatives), TBDR raster + ROP into `tc_sram` tiles; G0/A5 via Zink |
+| ~~Sampler~~ / raster (Xfer landed §11 5a; compute sampler+images landed §11 5b — `W_TX*` texture path in the tree above; G1/G2 raster landed 2026-10-11/12: VS/FS waves, clip, quads/derivatives/implicit LOD, blend, D32/D16 early-Z, indexed/instanced, BGRA/sRGB) | C | blits/resolves, MSAA, stencil, discard/`gl_FragDepth`/late-Z, dynamic rendering, TBDR + ROP into `tc_sram` tiles (today the ROP writes the image in memory directly); G0/A5 via Zink |
 | Descriptor/memory model (F5 and 5b landed; 3d-d is existing working-tree work) | C | source-matched relocation/lifetime proof; order-independent layout compatibility with collision-safe comparison; bindless/update-after-bind and scalable descriptor caching |
 | `shwave` 1 IPC + `ShaderCores` | D | per-wave throughput 1 IPC; multi-core dispatch via the cluster pattern; `DramChannels` by profile |
 | virtio-pci endpoint function (F4) | D | five virtio-pci capabilities + shared-memory capability over a BAR into the aperture |

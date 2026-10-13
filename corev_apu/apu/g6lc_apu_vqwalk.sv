@@ -513,6 +513,13 @@ module g6lc_apu_vqwalk
                   idx_snap_q <= rd_u16;
                   if (rd_u16 != last_avail_q[cur_q])
                     state_q <= StHead;
+                  else if (notify_i[cur_q])
+                    // a kick landed while this read was in flight:
+                    // its avail-ring writes may post-date this sample,
+                    // so the pending is consumed but one more read —
+                    // issued strictly after the notify edge — must
+                    // decide idle vs new work
+                    state_q <= StDrain;
                   else
                     state_q <= StIdle;
                 end

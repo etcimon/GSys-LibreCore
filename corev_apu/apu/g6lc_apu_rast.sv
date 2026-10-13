@@ -2735,9 +2735,56 @@ module g6lc_apu_rast
       if (sh_done_i && sh_done_pl_i.code != APU_SH_DONE_OK)
         $display("[DBG] rast sh wave fault: st=%0d code=%0d wid=%08x t=%0t",
                  st_q, sh_done_pl_i.code, sh_done_pl_i.work_id, $time);
+      // blend decode evidence: dump the draw record's attachment-0
+      // blend state on work accept (guest blend_layers mismatch)
+      if (st_q == S_IDLE && work_valid_i &&
+          rd_i.op == APU_RAST_OP_DRAW)
+        $display("[DBG] rast draw blend0={en=%0d sc=%0d dc=%0d oc=%0d sa=%0d da=%0d oa=%0d mask=%x} cav=%x t=%0t",
+                 rd_i.blend[0].en, rd_i.blend[0].src_c,
+                 rd_i.blend[0].dst_c, rd_i.blend[0].op_c,
+                 rd_i.blend[0].src_a, rd_i.blend[0].dst_a,
+                 rd_i.blend[0].op_a, rd_i.blend[0].mask,
+                 rd_i.ca_valid, $time);
       dbg_st_q <= 8'(st_q);
     end
 `endif
+
+    // pragma translate_off
+    // F5 wedge hunt invariants:
+    //  - S_MPW consumes a response only while mp_acked_q is set, so a
+    //    response arriving the same cycle as (or before) request
+    //    acceptance would be dropped and the FSM would wait forever
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        mp_rsp_valid_i |-> mp_acked_q);
+    //  - fpnew ops issue only from S_FPW and their single-cycle
+    //    out_valid must be observed there; an out arriving in any
+    //    other state is lost the same way
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        (fma_iv || dq_iv || cv_iv) |-> st_q == S_FPW);
+    assert property (@(posedge clk_i) disable iff (!rst_ni)
+        (fma_ov || dq_ov || cv_ov) |-> st_q == S_FPW);
+    // wedge watchdog: non-idle states are all bounded waits — print
+    // once when a state parks far past any legal latency so a guest
+    // freeze names its FSM instead of hanging silently
+    logic [23:0] dbg_wd_q;
+    st_e         dbg_wd_st_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        dbg_wd_q    <= '0;
+        dbg_wd_st_q <= S_IDLE;
+      end else begin
+        if (st_q != dbg_wd_st_q) begin
+          dbg_wd_q    <= '0;
+          dbg_wd_st_q <= st_q;
+        end else if (st_q != S_IDLE && !(&dbg_wd_q)) begin
+          dbg_wd_q <= dbg_wd_q + 24'd1;
+        end
+        if (dbg_wd_q == 24'h7ffffe && st_q != S_IDLE)
+          $display("[DBG] rast WATCHDOG: st_q=%0d parked mp_acked=%0d fp_iss=%0d ret=%0d fret=%0d t=%0t",
+                   st_q, mp_acked_q, fp_iss_q, mp_ret_q, fp_ret_q, $time);
+      end
+    end
+    // pragma translate_on
   end
 endmodule
 

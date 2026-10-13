@@ -98,6 +98,11 @@ module g6lc_apu_virtio_mmio
   logic [NumQueues-1:0] stop_pending_q, queue_reset_pending_q;
   logic [7:0] status_q;
   logic needs_reset_q, reset_pending_q;
+  // bounded wait for the backend reset ack: the stall exists to cover
+  // backend latency (vgsys apmem flush + eng_rst_n, tens of cycles), but a
+  // device must never wedge the reg bus on a control-plane ack that may
+  // never come (backend-less transports with no firmware agent).
+  logic [9:0] rst_wait_q;
   logic [63:0] driver_features_q;
   logic [31:0] device_features_sel_q, driver_features_sel_q, queue_sel_q;
   logic [1:0] irq_status_q;
@@ -126,7 +131,9 @@ module g6lc_apu_virtio_mmio
   // stock virtio-mmio writes status=0 and immediately continues the
   // feature negotiation without polling; silently dropping those
   // writes would lose FEATURES_OK and surface status 0x40
-  // (DEVICE_NEEDS_RESET) on the next status read.
+  // (DEVICE_NEEDS_RESET) on the next status read. The stall is bounded
+  // by rst_wait_q: a device must not wedge the bus when no backend
+  // ever acks (e.g. transport-only configs without a firmware agent).
   assign req_read = req_i && !we_i && (addr_i[1:0] == 2'b00) &&
                     !reset_pending_q;
   assign stop_read_wait = req_read && addr_i == AddrWidth'(VREG_QUEUE_READY) &&
@@ -314,6 +321,7 @@ module g6lc_apu_virtio_mmio
       stop_pending_q <= '0;
       queue_reset_pending_q <= '0;
       reset_pending_q <= 1'b0;
+      rst_wait_q <= '0;
       status_q <= '0;
       needs_reset_q <= 1'b0;
       driver_features_q <= '0;
@@ -332,9 +340,11 @@ module g6lc_apu_virtio_mmio
       fw_reset_pulse_o <= dev_reset;
       if (dev_reset) begin
         reset_pending_q <= 1'b1;
+        rst_wait_q <= '0;
         notify_pending_q <= '0;
       end else if (reset_pending_q) begin
-        if (fw_reset_ack_i) begin
+        rst_wait_q <= rst_wait_q + 10'd1;
+        if (fw_reset_ack_i || &rst_wait_q) begin
           for (int q = 0; q < NumQueues; q++) vq_q[q] <= '0;
           notify_pending_q <= '0;
           stop_pending_q <= '0;

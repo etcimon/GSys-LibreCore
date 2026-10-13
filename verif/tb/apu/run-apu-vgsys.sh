@@ -84,7 +84,7 @@ ue_cneg_evict_full_1 ue_cneg_bind_full_1 ue_cneg_stale_mem_1 \
 ue_gpos_tri_1"
 NEGATIVES="neg_next_loop neg_desc_oob neg_buf_oob neg_aperture \
 neg_used_oob neg_reset neg_cursor neg_batch neg_flush neg_qdrop \
-neg_resp_oob neg_worksink0 epoch_reuse"
+neg_drainkick neg_resp_oob neg_worksink0 epoch_reuse"
 
 cfail=0
 : > "$OUT/sessions.log"

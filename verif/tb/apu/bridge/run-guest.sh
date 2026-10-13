@@ -86,7 +86,7 @@ provision() {
       xorrisofs -quiet -V CIDATA -r -o "$GUEST_CACHE/cidata.img" \
         "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
         "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
-        "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" \
+        "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" "$GUEST/vkping.c" \
         "$GUEST/expected.json" \
         "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv" \
         "$CORPUS/vs_passthru.spv" "$CORPUS/fs_color.spv" \
@@ -102,7 +102,7 @@ provision() {
       cidata_src="$(mktemp -d)"
       cp "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
         "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
-        "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" \
+        "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" "$GUEST/vkping.c" \
         "$GUEST/expected.json" \
         "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv" \
         "$CORPUS/vs_passthru.spv" "$CORPUS/fs_color.spv" \
@@ -139,7 +139,7 @@ if [ -f "$GUEST_CACHE/cidata.img" ] && \
   xorrisofs -quiet -V CIDATA -r -o "$GUEST_CACHE/cidata.img" \
     "$GUEST/cloud-init/user-data" "$GUEST/cloud-init/meta-data" \
     "$GUEST/vkcompute.c" "$GUEST/vkdescarr.c" "$GUEST/vkmem.c" \
-    "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" \
+    "$GUEST/vkimage.c" "$GUEST/vktri.c" "$GUEST/vkcmp.c" "$GUEST/vkping.c" \
     "$GUEST/expected.json" \
     "$CORPUS/bufcopy.spv" "$CORPUS/descarr.spv" "$CORPUS/vkimage.spv" \
     "$CORPUS/vs_passthru.spv" "$CORPUS/fs_color.spv" \

@@ -211,7 +211,7 @@ module g6lc_apu_shwave
       // G2b implicit-LOD: quad-lane derivative chain producing λ
       W_TXL0, W_TXL1, W_TXL2, W_TXL3, W_TXL4, W_TXL5, W_TXL6, W_TXL7,
       W_TXL8, W_TXL9, W_TXLA, W_TXLB, W_TXLC,
-      W_TXC0, W_TXC1, W_TXC2, W_TXC3,  // sampled-coord compute
+      W_TXC0, W_TXC1, W_TXC1B, W_TXC2, W_TXC3,  // sampled-coord compute
       W_TXC4, W_TXC5, W_TXC6,
       W_TXB,                           // fetch/read/write bounds+addr
       W_TXT0, W_TXP, W_TXT1, W_TXT2,   // texel fetch: addr/probe/words
@@ -3561,6 +3561,16 @@ module g6lc_apu_shwave
           W_TXC1: begin
             ncomp_q <= 4'd2;
             jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b0},
+                 {2'd0, S_T1}, 7'h0, 7'h0, 3, 0, W_TXC1B);
+          end
+          W_TXC1B: begin
+            // lod comp wants floor, not RNE: W_TXC2's own +0.5 round
+            // is the mip-nearest decision, so the RNE above
+            // double-rounds and tips boundary lods one mip early
+            // (vkcmp tex_mip_nearest).  The array layer in comp1
+            // keeps its RNE result from W_TXC1.
+            ncomp_q <= 4'd1;
+            jset(2, {1'b0, fpnew_pkg::RDN[2:0], 1'b0},
                  {2'd0, S_T1}, 7'h0, 7'h0, 3, 0, W_TXC2);
           end
           W_TXC2: begin

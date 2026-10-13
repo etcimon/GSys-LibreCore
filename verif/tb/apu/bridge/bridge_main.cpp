@@ -177,6 +177,7 @@ struct DmaReply { uint8_t err; std::vector<uint8_t> bytes; };
 static std::unordered_map<uint16_t, DmaReply> dma_replies;
 static std::unordered_map<uint16_t, std::pair<uint64_t, uint32_t>> rd_track;
 static bool dbg = false;
+static bool dbg_dma = false;   // per-beat DMA prints: G6LC_APU_DEBUG_DMA
 
 static int prev_irq = 0;
 
@@ -242,7 +243,7 @@ static void on_frame(uint8_t type, uint8_t flags, uint16_t seq,
     DmaReply r; r.err = pl[0];
     r.bytes.assign(pl + 1, pl + plen);
     dma_replies[seq] = std::move(r);
-    if (dbg && rd_track.count(seq)) {
+    if (dbg_dma && rd_track.count(seq)) {
       auto t = rd_track[seq];
       fprintf(stderr, "[dbg] DMA_RD %016lx+%lu:", (unsigned long)t.first,
               (unsigned long)t.second);
@@ -384,7 +385,7 @@ static void issue_dma_rd() {
   rd_track[rd_seq] = {base, (uint32_t)len};
   send_frame(T_DMA_RD, rd_seq, pl.data(), pl.size());
   st_dma_rd++; st_dma_rd_bytes += len;
-  if (dbg) fprintf(stderr, "[dbg] DMA_RD req %016lx+%lu\n",
+  if (dbg_dma) fprintf(stderr, "[dbg] DMA_RD req %016lx+%lu\n",
                    (unsigned long)base, (unsigned long)len);
   if (!in_window(base) || !in_window(base + len - 1)) {
     st_oob++;
@@ -420,7 +421,7 @@ static void issue_dma_wr() {
   send_frame(T_DMA_WR, wr_seq, pl.data(), pl.size());
   st_dma_wr++; st_dma_wr_bytes += len;
   wr_sent = true;
-  if (dbg) {
+  if (dbg_dma) {
     fprintf(stderr, "[dbg] DMA_WR %016lx+%lu:", (unsigned long)base,
             (unsigned long)len);
     for (size_t i = 0; i < len && i < 48; i += 4) {
@@ -537,10 +538,12 @@ static void stats() {
     uint32_t flg = dbg_read(DBG_BASE + 3 * 8);
     uint32_t vgp = dbg_read(DBG_BASE + 6 * 8);
     uint32_t frst = dbg_read(DBG_BASE + 32 * 8);
+    uint32_t frs  = dbg_read(DBG_BASE + 32 * 8 + 4);
     fprintf(stderr,
-      "[dbg] otl=%u flg=%x vgp=%u fr=%x "
+      "[dbg] otl=%u flg=%x vgp=%u fr=%x frs=%x cmd=%08x imm0=%08x "
       "rh=[%08x %08x %08x %08x] rs=[%08x %08x %08x %08x]\n",
-      otl, flg, vgp, frst,
+      otl, flg, vgp, frst, frs,
+      dbg_read(DBG_BASE + 33 * 8), dbg_read(DBG_BASE + 34 * 8),
       dbg_read(DBG_BASE + 16 * 8), dbg_read(DBG_BASE + 17 * 8),
       dbg_read(DBG_BASE + 18 * 8), dbg_read(DBG_BASE + 19 * 8),
       dbg_read(DBG_BASE + 20 * 8), dbg_read(DBG_BASE + 21 * 8),
@@ -556,6 +559,21 @@ static void stats() {
       dbg_read(DBG_BASE + 50 * 8 + 4), dbg_read(DBG_BASE + 50 * 8),
       dbg_read(DBG_BASE + 51 * 8), dbg_read(DBG_BASE + 52 * 8),
       dbg_read(DBG_BASE + 53 * 8), dbg_read(DBG_BASE + 54 * 8));
+    // drain/hold interlock + pump/apmem: whether vgctl parks on the
+    // relocation drain while an engine parks on its own wait
+    uint64_t vgs = dbg_read(DBG_BASE + 55 * 8);
+    uint64_t pus = dbg_read(DBG_BASE + 56 * 8);
+    // sel55 = {vgctl state[5:0]} | {mhold,drain_idle,vc_hold}<<8
+    // sel56 = {ex_idle,sh,xf,rs} | {pump state,depth}<<8 | poll<<16
+    fprintf(stderr,
+      "[dbg] ctl st=%02x vhold=%x drain=%x mhold=%x "
+      "eng={ex_idle=%x sh=%x xf=%x rs=%x} pump st=%02x poll=%x mpos=%x\n",
+      (unsigned)(vgs & 0x3f), (unsigned)((vgs >> 10) & 1),
+      (unsigned)((vgs >> 9) & 1), (unsigned)((vgs >> 8) & 1),
+      (unsigned)(pus & 1), (unsigned)((pus >> 1) & 1),
+      (unsigned)((pus >> 2) & 1), (unsigned)((pus >> 3) & 1),
+      (unsigned)((pus >> 8) & 0x7f), (unsigned)((pus >> 16) & 3),
+      (unsigned)(dbg_read(DBG_BASE + 57 * 8) & 0xff));
   }
 }
 
@@ -564,6 +582,7 @@ static void on_sig(int) { running = false; }
 int main(int argc, char** argv) {
   Verilated::commandArgs(argc, argv);
   dbg = getenv("G6LC_APU_DEBUG") != nullptr;
+  dbg_dma = getenv("G6LC_APU_DEBUG_DMA") != nullptr;
   const char* sock = getenv("G6LC_APU_RTL_SOCK");
   if (!sock) sock = "/tmp/g6lc-apu-rtl.sock";
   const char* trace = nullptr;

@@ -191,9 +191,80 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
   rast 10 cases / 9,223 checks (clip case exact vs a double-precision reference, sliver
   case exact), rast synth 197,882 cells / 19,692 FFs no latch, shwave 308/42,897,
   shmod/shcore/vgtop/vgsys unchanged.
-- [ ] G2c — guest `vkcmp.c`: eight scenes rendered on Venus and on the guest's llvmpipe and
+- [x] G2c — guest `vkcmp.c`: eight scenes rendered on Venus and on the guest's llvmpipe and
   compared (gradient, depth, blend layers, indexed+instanced, mip-nearest texture,
   near-clip, sRGB, derivatives); pinned-toolchain RTL leaf + guest leaf as the G2 gate.
+  **In progress (2026-10-12, commit `24fc71912`).** `vkcmp.c` (8 scenes, per-scene
+  tolerance and wall time, `G6LC_VKCMP_PASS scenes=K`), `drive_guest.py`/`run-guest.sh`
+  wiring, bridge debug taps (sel 48–54, `G6LC_APU_DEBUG` only). Defects the new tests
+  exposed, all fixed with a discriminating directed case (negative run captured, then
+  positive): (1) rast varyings were not swapped with the winding normalization (`vsw_q`;
+  rast 11 cases / 10,247 checks); (2) vgtop merged `sh|xf|rs|ext` done pulses so two
+  coincident completions became one `outst_q` decrement — StDrain livelock, the
+  vkimage/vkcmp wedge — replaced by a serialized done queue (depth
+  `2^clog2(MaxWaves+4)`, occupancy assertion; `ue_donecol_1` fires the TB-sink done on
+  the cycle `xf_done` rises: merge → `chain completion timeout`, queue → PASS; vgtop 37
+  cases / 963 checks, 78 sessions both jitter steps); (3) cmdexec `StDsDone` consumed any
+  completion, so an older record's late done advanced a dispatch early (black FB in
+  `ue_gpos_tri_1` once dones were serialized) — `dsd_skip_q` skips the dones owed to
+  older outstanding work (conservative; non-OK codes still set `lost_q`); (4) virtio-mmio
+  acknowledged and dropped writes while a backend reset was pending, which stock Linux
+  (`vm_reset` never polls) reported as `virtio: device refuses features: 40` — accesses
+  now stall until the backend acks, bounded by a 1,023-cycle watchdog so a firmware-less
+  transport can never wedge the bus (`tb_g6lc_apu_virtio_mmio` delayed-ack arm: unfixed
+  `got 0x40 want 0x0b`, fixed 4,243 checks; cva6-venus both arms PASS). Local 5.020 gates
+  green (vgtop/vgsys/sys-venus/cmdexec/rast/shwave/vnfront/virtio-mmio/cva6-venus), 5.008
+  lint clean. Three further guest wedges were then traced one at a time with the
+  bridge FSM heartbeat (each nondeterministic in which submission dropped, each a
+  different mechanism): (5) `vnpump` looked rings up by handle only — Venus ring handles
+  are per-context (Mesa's ring id is a per-process counter), so one test process's
+  `DestroyRing`/`WaitRingSeqno` addressed the next process's same-handle ring and
+  tombstoned it (`ring_of(h, ctx)`; T19 negative → `PASS cases=48`); (6) `StWaitR`
+  parked the single pump FSM on a ring head that only that FSM can advance
+  (`WaitRingSeqno` for a not-yet-consumed seqno self-deadlocked the pump; freeze
+  snapshot `pump st=StWaitR, head 0x9ae8 < target 0xa5f8`) — the first attempt ran the
+  waited ring as a nested window and was rejected because `ExecuteCommandStreams` at
+  depth 1 is fatal (Venus uses it for every indirect stream); the retained design parks
+  the waiting stream (`park_q[Rings+1]`: stack snapshot + wait kind/ring/seqno, parked
+  rings skipped by the poll, `xs_active` held while the vq stream is parked, resume scan
+  from idle/poll-gap, backoff clamped while anything is parked, ctx-kill drops the entry)
+  and covers `StWaitVq` too — T20a (vq waits on a ring whose pending data contains an
+  ExecuteCommandStreams window), T20b (cross-ring), T20c (vq-seqno wait), T20d (waited
+  ring destroyed while parked) → `PASS tb_g6lc_apu_vnpump cases=62 checks=185`;
+  (7) the last wedge was **test-side**: `vkcmp.c` leaked command buffers and shader
+  modules/pipelines per scene; the 17th `vkAllocateCommandBuffers` correctly returns
+  `VK_ERROR_OUT_OF_HOST_MEMORY` (`0xFFFFFFFE`, `CbBufs=16`) and the 9th module exhausts
+  the 8 ShaderCore slots, but Mesa's asynchronous Venus creates hide both from the
+  application, so every later record referencing the phantom handle (including the
+  `vkQueueSubmit`) replied `VK_ERROR_UNKNOWN` and no fence was armed — directed arm
+  `ue_sm5_cbfull` (OOM on the 17th alloc, UNKNOWN on the phantom submit, arena drains;
+  vnfront 46 cases / 337 checks); the test now frees per scene. The small fixed slot
+  counts are a real device gap (plan W3.5 residency virtualization), not a correctness
+  bug. Also found by scene 4: mip-nearest `λ` was double-rounded (`W_TXC1` RNE then the
+  +0.5 nearest round; one quad early at λ=39.82) — `W_TXC1B` re-converts component 0
+  RDN, `spirv_model.py` mirrors it; the blend scene exposed a stale TB reference, not an
+  RTL fault (rast case 11 = the exact `blend_layers` factors, DUT exact). **Local stock
+  guest (2026-10-13, Verilator 5.020 bridge): `G6LC_VKCMP_PASS scenes=8` (every scene
+  maxdiff ≤ 1), `G6LC_VKCOMPUTE/VKDESCARR/VKMEM/VKIMAGE/VKTRI_PASS`, `GUEST-PASS` both
+  arms, no wedge.** **Pinned-toolchain gate (2026-10-13): RTL leaf
+  `apu-leaf-20261013T110427-ccf9e8adf9d7` 27/27 PASS** (identity `ee1c14cc…`, Verilator
+  5.008 / Yosys 0.68 / xpack gcc 14.2.0; vnpump 185, vnfront 2,837 incl. `cbfull`, rast
+  11,271, cva6-venus 488, vgtop 243,894, vgsys 160,306, sys-venus 66,682, synth-rast
+  Enable=1 197,959 cells / 19,693 FFs no latch) and **guest leaf
+  `apu-leaf-20261013T133000-33942903cd89` PASS both arms** on the same RTL closure (snapshot
+  identity differs only by `core/ooo/AGENTS-ooo-plan.md` and
+  `verif/regress/soft-ladder-build-harness.sh`, neither in the APU closure): venus arm
+  `G6LC_VKCOMPUTE_PASS`, `G6LC_VKDESCARR_PASS`, `G6LC_VKMEM_PASS`, `G6LC_VKIMAGE_PASS`,
+  `G6LC_VKTRI_PASS covered=512 maxdiff=0`, **`G6LC_VKCMP_PASS scenes=8`** (maxdiff 0/1/1/1/
+  0/1/1/0, bad=0; Venus 4.5–32.7 s per scene vs llvmpipe 5.7–22.8 s under TCG), `GUEST-PASS`;
+  venusoff `GUEST-PASS` (4,723 s). The earlier `apu-leaf-20261013T082616` 26/27 failed only
+  `cva6-venus` on a foreign `core/cva6.sv` side-effect increment that Verilator 5.008 rejects
+  (rewritten by its owner in `248a3db8e`). Known residuals carried to G3: the vnpump park
+  holds later execbuffers while a vq stream is parked (a guest that awaits that stream's
+  own later `SubmitVirtqueueSeqno` from a ring would deadlock — not a Mesa 25.2.8 pattern,
+  unproven in general); the virtio-mmio reset-ack watchdog is a fixed 1,023 cycles; the
+  `G6LC_APU_DBG_LOST` `$display` taps in vgctl/vnfront are `ifdef`-gated rather than
+  `translate_off`-fenced. Smoke/milestone evidence only — not CTS, not conformance.
 
 ## APU stock-runtime reference consolidation (2026-10-01)
 
@@ -955,6 +1026,92 @@ prerequisite for this work under the existing dual license. No licensing policy 
   {tos,cnt,top} snapshot (9 of 11 corrupted cells at depth 2); about 0.2 % of
   the T21c boot. Options: top-3 snapshot (~24.6 kbit/core) or a bounded
   push undo-log replayed at restore (~1 kbit). Plan T21e.
+- [~] **Causal execution cache (2026-10-13, compiler-only continuation).**
+  `tools/verilator/src/V3ClkSkip.cpp` replaces function-prologue/group-wide
+  assumptions with contiguous point-of-use guards and a compile-time writer-to-reader
+  invalidation index, including competing output writers. Untracked inputs compare
+  exactly; unsafe outputs/effects, timing and MT models retain the original path.
+  Existing `-fclock-skip` stays opt-in; no rbtree runtime dispatch or probabilistic
+  prediction is introduced. The previous §7.1 miscompile remains historical evidence,
+  not a speedup. Compiler/leaf diagnostics are local WSL and isolated; the remote
+  builder was oversubscribed at both preflights. Results/limits: performance guide §8.
+  **Local evidence:** the original cache fails the new parent/child witness at cycle 7;
+  repaired/cache-off, non-inlined, public, MT-fallback, initial-edge and ASan/UBSan
+  variants pass 42 seeded leaf runs. Synthetic 32-lane A/B: sparse **3.863×**, dense
+  **0.969×**; eval Ir/cycle −53.9% / +4.5%. Whole scalar stores filter unchanged
+  writebacks; cold settle is not cached. No full-core gain or I-cache gain is claimed.
+  **Owed:** proxy full-model RVFI/probe/FP/anchor equivalence, additional language-effect
+  coverage and matched real-model Ir/I1/cycles/s before any promotion. Local artifacts:
+  `build-platform/workspace/build/vlt-causal-20261013/`. A further 10× is not reached;
+  it requires >90% net runtime removal, including work outside this prototype's scope.
+  **Continuation (same day, guide §9):** bit-range-aware subscriptions — a cached group
+  now subscribes only to writers overlapping the slice it reads (constant `AstSel`
+  chains; dynamic index widens to whole variable). Packed-bank fixture: before, caching
+  was 0.90× of no-cache; after, **3.73×** sparse / 0.88× dense (12 alternating runs,
+  checksums identical). Extended fixture exposed a **pre-existing runtime overflow** in
+  `_vl_insert_WI/WW` (`verilated_funcs.h`): a wide partial write with `hbit >= rbits`
+  wrote past the array into the next struct member; reproduced with the cache *off* and by
+  a guarded-buffer test in `t_math_imm2.cpp`; clamped. Runtime header hash is now
+  `d49a56d2…` — models built on the earlier fork header need re-identification. 42-run
+  leaf matrix green on corrected runtime; HEAD cache still fails cycle 7 on it.
+  **Real-model pass (guide §9.5–9.6, proxy tags `causal-ab-ooo-20261013b`/`…d`):**
+  private builder prefix `verilator-v5.008-g6lc-causal` from pin + working-tree patch;
+  `g6lc64_ooo` single-thread, no PGO, tree `90d99b70c`. **Header fix validated on the
+  core:** ctl model retires s11 in 10,941 cycles with RVFI `de4f42cfe7cb…` (the pinned
+  reference hash), wprp 10,311 cycles; Ir/cycle 874,598 / 1,083,951 (no PGO, not §7.5
+  comparable). First cache attempt was refused model-wide by the DPI-text guard; the
+  `VarXRef` case was dead code (V3LinkDot rewrites XRefs to scoped VarRefs) and was
+  removed; opaque-text handling is now per variable. Second attempt caches the core:
+  13,099 groups, 6.18M invalidation edges, +18% DepSet code, C++ compile 81 s → >20 min.
+  **Decision: `-fclock-skip` stays opt-in** (dense core; MT models refused, so the idle
+  server cores it could help are out of reach). Harvested figures:
+  `build-platform/workspace/build/vlt-causal-20261013/remote/causal-ab-ooo-20261013d/`.
+  **Upstream `test_regress` subset (133 tests, fork build via `stage_regress.sh`): 126
+  pass / 2 skip / 4 pre-existing fails** — `t_math_repl_bad`, `t_math_repl2_bad`
+  (`V3Number`/`V3Width` internal error after the expected error), `t_select_bad_tri`
+  (`toUInt with 4-state`), `t_select_lhs_oob` (SELRANGE emitted); all reproduce with
+  the HEAD-`V3ClkSkip` baseline compiler, i.e. fork-tree error-recovery defects outside
+  this change set — **open item for the fork**, not fixed here.
+  `t_clock_skip.pl` now sets `$Self->{sim_time}=12000` and passes `--vlt`/`--vltmt`.
+  **Real-model verdict (run `…d`, guide §9.7):** cache model exact (both RVFI hashes
+  identical) but Ir/cycle **+10.3%**, I1 misses **+33%**, compile 36 min. Opt-in stays.
+- [~] **Host ISA + word-vector SIMD kernels (2026-10-13, guide §10).** Profile of the
+  real core: trigger-bit tests 21.6% Ir / 54% of data reads; hot CAMs are unrolled
+  scalar compares on *packed* struct arrays (no contiguous lanes → no vector seek
+  without a layout pass; not implemented, bounded by ≤6% Ir). Implemented: portable
+  vector-extension kernels in `include/verilated_funcs.h` (copy/zero via constant-size
+  memmove/memset, elementwise and/or/xor/not, eq/changexor/redor accumulate, funnel
+  shifts for insert/shiftr/sel middle words; scalar fallback and aliasing path kept)
+  — header hash now `ad914f2b…`; `t_simd_wide.{v,cpp,pl}` cross-checks all kernels vs
+  the scalar loops at 4/8/16 words, scalar, ASan. `SOFT_LADDER_BUILD_MARCH` with
+  default `x86-64-v3` for the g6lc flavour (pinned flavour stays baseline). Measured
+  on `g6lc64_ooo` (same compiler, RVFI identical on s11+wprp): `-march` alone Ir/cycle
+  **874,598 → 424,291 (−51.5%)**, I1 −39%; kernels on top **→ 393,302 (−7.3%)**.
+  **Second sweep (guide §10.5):** every remaining word loop in the runtime routed
+  through the kernels (trigger vector, `VlWide`/`VlUnpacked` change detection with a
+  bitwise-comparable trait, signed extends/shifts, parity, `popcnt` builtin) — all
+  neutral on the core — plus **`-ftrigger-words`** (`V3Clock`): region guards over
+  one trigger vector become one `wordAny(word, mask)` per 64-bit word (14,366 bit
+  tests → 2,565 word tests on `g6lc64_ooo`). Isolated control via
+  `VERILATOR_FNO=trigger-words`: Ir/cycle **393,335 → 362,616 (−7.8%)**, I1 −7.3%,
+  RVFI identical. Cumulative this tree: **874,598 → 362,616 Ir/cycle (−58.5%)**.
+  On at -O1+; headers now `e900ec45…` (funcs) / `60e279f8…` (types).
+  **Owed:** quiet-builder cycles/s spins; re-take the §7.5 PGO rows at `x86-64-v3`;
+  FP suite / 11 probes with the current headers through `run_ooo_fp_review.py`.
+- [~] **Yosys `opt_merge` subscriber index (2026-10-13, guide §9.2).** Transfer of the
+  write-side-invalidation discipline: `wire_cells` removal was a linear `std::remove` per
+  wire per removed cell; now indexed swap-remove with position repair, and the index is
+  built lazily on the first actual merge. Fixtures (`YOSYS_MAX_THREADS=1`, median of 12):
+  32k duplicates **4.91×**, 8k no-merge **1.45×**, 256 chains 1.11×; RTLIL byte-identical.
+  `tests/opt/opt_merge_*.ys` × threads {1,2,4} = 18 pass incl. new 512-cell `equiv_opt`
+  chain; `gtest-kernel` 115/115. **Broader run on a full-component build (minus
+  ABC/slang, guide §9.5):** whole `tests/opt` directory 88/96; the 8 failures reproduce
+  byte-for-byte with HEAD's `opt_merge.cc` object linked into the same binary
+  (`yosys-before-full`) — `opt_expr_{and,or,xor,xnor}` and `opt_share_cat_multiuser`
+  `sat -verify` proofs, `opt_share_cat`/`opt_balance_tree` selection asserts (fork-tree,
+  pre-existing, **open item**), `opt_lut` needs `synth_ice40`/ABC. `check_wide_and_loop.ys`
+  passes; `gtest-opt` 12/12. Default-on (no flag exists). **Owed:** LibreCore `synth`
+  smoke on the proxy (needs slang; builder shared with MT4 census runs all day).
 - [ ] **Simulation speed program (2026-10-11, `agents/guides/AGENTS-verilator-performance.md`
   §4a/§4b) — experimental, uncommitted fork working tree in `tools/verilator`.**
   Pinned-compiler findings: the "review-private" 5.008 runtime is patched
@@ -1213,7 +1370,7 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `amoadd.d` on one word; 83,356 cycles; negative arm fails as expected) and
   `mc_cbo_contended.S` (3 writers × 1,500 under a `cbo.clean`/`cbo.flush` loop
   from hart 0; 22,568 cycles). Driver `t21/coh-t23.sh`.
-- [ ] **T25 — Verilator fork miscompiles `g6lc64_ooo_int2_l3` (found
+- [x] **T25 — Verilator fork miscompiles `g6lc64_ooo_int2_l3` (found
   2026-10-12 building the T24 2-core repro).** With the split-loops `.vlt`,
   the fork emits 12 statements that write `commit_ack & ~retire_hart`
   logic of the SMT pc bank into the FPU's `inp_pipe_ready__BRA__0__KET__[0U]`

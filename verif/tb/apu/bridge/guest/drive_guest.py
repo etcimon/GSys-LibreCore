@@ -342,10 +342,16 @@ def main():
                 timeout=30)
         con.run("dpkg -l | grep -E 'mesa|vulkan|linux-image'", timeout=60)
 
-        t_vk = time.time()
-        con.run("vulkaninfo --summary 2>&1 | tee /root/vulkaninfo-summary.txt | tail -60",
-                timeout=900)
-        print(f"VULKANINFO_WALL_SECONDS={time.time()-t_vk:.1f}", flush=True)
+        # G6LC_ONLY: comma-separated test subset (debug repro aid).
+        # Also gates the vulkaninfo probe so focused runs skip its
+        # ~10-minute enumeration on the debug bridge.
+        only = {t.strip() for t in
+                os.environ.get("G6LC_ONLY", "").split(",") if t.strip()}
+        if not only or "vulkaninfo" in only:
+            t_vk = time.time()
+            con.run("vulkaninfo --summary 2>&1 | tee /root/vulkaninfo-summary.txt | tail -60",
+                    timeout=900)
+            print(f"VULKANINFO_WALL_SECONDS={time.time()-t_vk:.1f}", flush=True)
 
         # pull cidata files into rootfs — find the seed by fs label;
         # virtio-blk enumeration order varies between runs
@@ -356,7 +362,7 @@ def main():
                 "done; "
                 "cp /mnt/cidata/vkcompute.c /mnt/cidata/vkdescarr.c "
                 "/mnt/cidata/vkmem.c /mnt/cidata/vkimage.c "
-                "/mnt/cidata/vktri.c /mnt/cidata/vkcmp.c "
+                "/mnt/cidata/vktri.c /mnt/cidata/vkcmp.c /mnt/cidata/vkping.c "
                 "/mnt/cidata/bufcopy.spv /mnt/cidata/descarr.spv "
                 "/mnt/cidata/vkimage.spv "
                 "/mnt/cidata/vs_passthru.spv /mnt/cidata/fs_color.spv "
@@ -385,50 +391,121 @@ def main():
                              "build-essential libvulkan-dev", timeout=1800)
                 print(f"[drive] apt install2 rc={rc}", flush=True)
 
-            rc = con.run("cd /root && gcc -O2 -o vkcompute vkcompute.c -lvulkan "
-                         "&& ./vkcompute bufcopy.spv", timeout=1200)
-            print(f"[drive] vkcompute rc={rc}", flush=True)
-            fail |= (rc != 0)
-            rc = con.run("cd /root && gcc -O2 -o vkdescarr vkdescarr.c -lvulkan "
-                         "&& ./vkdescarr descarr.spv", timeout=1200)
-            print(f"[drive] vkdescarr rc={rc}", flush=True)
-            fail |= (rc != 0)
-            rc = con.run("cd /root && gcc -O2 -o vkmem vkmem.c -lvulkan "
-                         "&& ./vkmem bufcopy.spv", timeout=1200)
-            print(f"[drive] vkmem rc={rc}", flush=True)
-            fail |= (rc != 0)
+            if not only or "vkcompute" in only:
+                rc = con.run("cd /root && gcc -O2 -o vkcompute vkcompute.c "
+                             "-lvulkan && ./vkcompute bufcopy.spv",
+                             timeout=1200)
+                print(f"[drive] vkcompute rc={rc}", flush=True)
+                fail |= (rc != 0)
+            if not only or "vkdescarr" in only:
+                rc = con.run("cd /root && gcc -O2 -o vkdescarr vkdescarr.c "
+                             "-lvulkan && ./vkdescarr descarr.spv",
+                             timeout=1200)
+                print(f"[drive] vkdescarr rc={rc}", flush=True)
+                fail |= (rc != 0)
+            if not only or "vkmem" in only:
+                rc = con.run("cd /root && gcc -O2 -o vkmem vkmem.c -lvulkan "
+                             "&& ./vkmem bufcopy.spv", timeout=1200)
+                print(f"[drive] vkmem rc={rc}", flush=True)
+                fail |= (rc != 0)
             # §12.3 C/5b: images + samplers + Xfer image copies on the
             # stock path (textureLod bilinear edge/repeat into an
             # rgba32f storage image, CopyImageToBuffer readback).
-            rc = con.run("cd /root && gcc -O2 -o vkimage vkimage.c -lvulkan "
-                         "-lm && ./vkimage vkimage.spv", timeout=1200)
-            print(f"[drive] vkimage rc={rc}", flush=True)
-            fail |= (rc != 0)
+            if not only or "vkimage" in only:
+                if os.environ.get("G6LC_WEDGE_DUMP"):
+                    # wedge forensics: run vkimage in background; if it
+                    # outlives the watchdog, dump every thread's kernel
+                    # stack + ps wchan + sysrq-w before killing it.
+                    rc = con.run(
+                        "cd /root && gcc -O2 -o vkimage vkimage.c "
+                        "-lvulkan -lm && "
+                        "( ./vkimage vkimage.spv & p=$!; n=0; "
+                        "while kill -0 $p 2>/dev/null && [ $n -lt 60 ]; "
+                        "do sleep 5; n=$((n+1)); done; "
+                        "if kill -0 $p 2>/dev/null; then "
+                        "echo ===WEDGE-DUMP===; "
+                        "head -6 /proc/$p/status; "
+                        "for t in /proc/$p/task/*/stack; do "
+                        "echo -- $t; cat $t; done; "
+                        "ps -e -o pid,comm,stat,wchan:40 | head -30; "
+                        "echo w > /proc/sysrq-trigger; sleep 1; "
+                        "dmesg | tail -50; "
+                        "kill -9 $p; exit 99; "
+                        "else wait $p; exit $?; fi )",
+                        timeout=1200)
+                else:
+                    rc = con.run("cd /root && gcc -O2 -o vkimage vkimage.c "
+                                 "-lvulkan -lm && ./vkimage vkimage.spv",
+                                 timeout=1200)
+                print(f"[drive] vkimage rc={rc}", flush=True)
+                fail |= (rc != 0)
+            # wedge forensics: vkping loops the full per-process
+            # instance/device/ring/blob lifecycle; a stall detector
+            # dumps the wedged process's kernel stacks when an
+            # iteration stops producing output.
+            if only and "vkloop" in only:
+                rc = con.run(
+                    "cd /root && gcc -O2 -o vkping vkping.c -lvulkan || "
+                    "exit 2; : > /tmp/vkping.log; "
+                    "( for i in $(seq 1 40); do ./vkping $i || exit 1; "
+                    "done > /tmp/vkping.log 2>&1 ) & L=$!; "
+                    "n=0; c=0; "
+                    "while kill -0 $L 2>/dev/null && [ $n -lt 240 ]; do "
+                    "sleep 5; n=$((n+1)); "
+                    "c2=$(wc -l < /tmp/vkping.log); "
+                    "if [ \"$c2\" != \"$c\" ]; then c=$c2; n=0; fi; "
+                    "if [ $n -ge 12 ]; then break; fi; done; "
+                    "if kill -0 $L 2>/dev/null; then "
+                    "echo ===WEDGE-DUMP===; "
+                    "tail -5 /tmp/vkping.log; "
+                    "pgrep -a vkping; P=$(pgrep -n vkping); "
+                    "head -6 /proc/$P/status; "
+                    "for t in /proc/$P/task/*/stack; do "
+                    "echo -- $t; cat $t; done; "
+                    "ps -e -o pid,comm,stat,wchan:40 | head -30; "
+                    "echo w > /proc/sysrq-trigger; sleep 1; "
+                    "dmesg | tail -60; "
+                    "kill -9 $L $(pgrep vkping) 2>/dev/null; exit 99; "
+                    "else cat /tmp/vkping.log | tail -5; wait $L; "
+                    "exit $?; fi",
+                    timeout=1500)
+                print(f"[drive] vkloop rc={rc}", flush=True)
+                fail |= (rc != 0)
             # G1d: the first stock-guest triangle — vs_passthru + fs_color
             # through a real render pass; the C reference rasterizer
             # mirrors g6lc_apu_rast.sv's op sequence (-ffp-contract=off
             # keeps it honest at single precision).
-            rc = con.run("cd /root && gcc -O2 -ffp-contract=off "
-                         "-fexcess-precision=standard -o vktri vktri.c "
-                         "-lvulkan -lm && ./vktri vs_passthru.spv "
-                         "fs_color.spv", timeout=1200)
-            print(f"[drive] vktri rc={rc}", flush=True)
-            fail |= (rc != 0)
+            if not only or "vktri" in only:
+                rc = con.run("cd /root && gcc -O2 -ffp-contract=off "
+                             "-fexcess-precision=standard -o vktri vktri.c "
+                             "-lvulkan -lm && ./vktri vs_passthru.spv "
+                             "fs_color.spv", timeout=1200)
+                print(f"[drive] vktri rc={rc}", flush=True)
+                fail |= (rc != 0)
             # G2c: the broad oracle — the same 8 scenes rendered on
             # Venus and on Mesa llvmpipe (lavapipe ICD in the same
             # guest), readback compared per channel.  Venus can take
             # tens of seconds per scene.
-            vkenv = os.environ.get("G6LC_VKCMP_ENV", "")
-            rc = con.run("cd /root && gcc -O2 -ffp-contract=off "
-                         "-fexcess-precision=standard -o vkcmp vkcmp.c "
-                         "-lvulkan -lm && " + vkenv +
-                         " ./vkcmp vs_passthru.spv "
-                         "fs_color.spv vs_pc.spv fs_vcol.spv "
-                         "vs_pos3.spv vs_inst.spv vs_tex.spv fs_mip.spv "
-                         "vs_clip.spv vs_uvc.spv fs_deriv2.spv",
-                         timeout=3600)
-            print(f"[drive] vkcmp rc={rc}", flush=True)
-            fail |= (rc != 0)
+            if not only or "vkcmp" in only:
+                vkenv = os.environ.get("G6LC_VKCMP_ENV", "")
+                rc = con.run("cd /root && gcc -O2 -ffp-contract=off "
+                             "-fexcess-precision=standard -o vkcmp vkcmp.c "
+                             "-lvulkan -lm && " + vkenv +
+                             " ./vkcmp vs_passthru.spv "
+                             "fs_color.spv vs_pc.spv fs_vcol.spv "
+                             "vs_pos3.spv vs_inst.spv vs_tex.spv fs_mip.spv "
+                             "vs_clip.spv vs_uvc.spv fs_deriv2.spv",
+                             timeout=int(os.environ.get(
+                                 "G6LC_VKCMP_TIMEOUT", "5400")))
+                print(f"[drive] vkcmp rc={rc}", flush=True)
+                fail |= (rc != 0)
+                # VKCMP_DUMP leaves vkcmp_s*_*.bin in guest /root —
+                # pull them back over the console as base64 so the
+                # host can diff venus vs llvmpipe pixels
+                if "VKCMP_DUMP" in vkenv:
+                    con.run("cd /root && for f in vkcmp_s*.bin; do "
+                            "echo B64DUMP:$f; base64 $f; "
+                            "echo B64END; done", timeout=300)
 
         # post-mortem: dump the whole aperture window from QEMU RAM
         try:

@@ -225,6 +225,7 @@ module g6lc_apu_vnpump
       logic [31:0] extra_size;
       logic [31:0] idle_to;
       logic [31:0] idle_cnt;
+      logic        parked;        // stream is parked on a seqno wait
     } ring_t;
     ring_t ring_q [Rings];
     logic [63:0] vq_seqno_q;
@@ -244,6 +245,47 @@ module g6lc_apu_vnpump
     stream_t st_q [2];
     logic        depth_q;
     logic        fatal_stream_q;
+
+    // Parked streams: a seqno wait that cannot yet be satisfied is
+    // lifted out of the FSM entirely so the poll loop keeps running —
+    // the same FSM must advance the waited ring's head (or see the
+    // next SubmitVirtqueueSeqno) and spinning it deadlocked the guest.
+    // One entry per stream id: ring slots 0..Rings-1 for ring streams,
+    // Rings for the execbuffer stream.  On resume the saved stack is
+    // restored and the wait state re-runs: satisfied -> StNext (pos
+    // had not been advanced past the record), dead ring -> the
+    // ring_of miss -> StFatal.
+    typedef struct packed {
+      logic        live;
+      logic        is_vq;         // 1 = WaitVirtqueueSeqno
+      stream_t     st0;
+      stream_t     st1;
+      logic        depth;
+      logic [1:0]  wring;         // waited ring slot (is_vq == 0)
+      logic [63:0] seqno;
+    } park_t;
+    park_t park_q [Rings+1];
+
+    // resume scan — resumable when the wait condition holds, or
+    // (ring wait) when the waited ring is gone so the fault path runs
+    logic park_take;
+    int   park_idx;
+    logic park_any;
+    always_comb begin
+      park_take = 1'b0; park_idx = 0; park_any = 1'b0;
+      for (int i = 0; i <= Rings; i++) begin
+        park_any |= park_q[i].live;
+        if (park_q[i].live &&
+            (park_q[i].is_vq
+               ? (vq_seqno_q >= park_q[i].seqno)
+               : (!ring_q[park_q[i].wring].live ||
+                  64'({32'h0, ring_q[park_q[i].wring].head}) >=
+                  park_q[i].seqno))) begin
+          park_take = 1'b1;
+          park_idx  = i;
+        end
+      end
+    end
 
     // execbuffer desc table (guest read-space walk)
     apu_vg_desc_t [APU_VG_MAX_DESC-1:0] xs_d_q;
@@ -428,7 +470,8 @@ module g6lc_apu_vnpump
                                             : (32'(cs_addr) << 2));
 
     assign pump_re = (state_q == StPollFire &&
-                      ring_q[poll_q].live && !ring_q[poll_q].fatal) ||
+                      ring_q[poll_q].live && !ring_q[poll_q].fatal &&
+                      !ring_q[poll_q].parked) ||
                      ((state_q == StTrFire) && !cs_via_gm);
     assign pump_gm = (state_q == StTrFire) && cs_via_gm;
     assign pump_we = (state_q == StApWr)   || (state_q == StIdleWr) ||
@@ -573,10 +616,15 @@ module g6lc_apu_vnpump
     // completed sweep that found no work deasserts busy_o exactly
     // where the un-paced loop used to pass through StIdle
     assign busy_o = state_q != StIdle && state_q != StPollGap;
-    assign xs_ready_o = state_q == StIdle && rst_ni;
+    // a parked execbuffer stream keeps vgctl waiting (xs_active) and
+    // parks claim the execbuffer slot: a second in-flight vq stream
+    // would collide with the saved stack on resume
+    assign xs_ready_o = state_q == StIdle && rst_ni &&
+                        !park_q[Rings].live;
     assign xs_done_o = state_q == StXsDone;
     assign xs_fault_o = fatal_stream_q;
-    assign xs_active_o = st_q[0].live && st_q[0].kind == SK_LIN_GM;
+    assign xs_active_o = (st_q[0].live && st_q[0].kind == SK_LIN_GM) ||
+                         park_q[Rings].live;
     for (genvar g = 0; g < Rings; g++) begin : g_ring_obs
       assign ring_active_o[g] = ring_q[g].live && !ring_q[g].fatal;
       // aperture status image: {ALIVE,FATAL,IDLE} (bit2/bit1/bit0)
@@ -586,10 +634,16 @@ module g6lc_apu_vnpump
       assign ring_extra_w_o[g] = ring_q[g].extra_w;
     end
 
-    // ring lookup by handle / first free slot (fixture sized)
-    function automatic int ring_of(input logic [63:0] h);
+    // ring lookup by (ctx, handle) / first free slot (fixture sized):
+    // Venus ring handles are per-context — Mesa's ring id is a
+    // per-process counter, so two contexts legitimately hold the same
+    // handle; a handle-addressed record must only ever reach the ring
+    // its own context owns
+    function automatic int ring_of(input logic [63:0] h,
+                                   input logic [7:0] ctx);
       for (int i = 0; i < Rings; i++)
-        if (ring_q[i].live && ring_q[i].handle == h) return i;
+        if (ring_q[i].live && ring_q[i].handle == h &&
+            ring_q[i].ctx == ctx) return i;
       return -1;
     endfunction
     function automatic int ring_free();
@@ -625,6 +679,7 @@ module g6lc_apu_vnpump
       if (!rst_ni) begin
         state_q <= StIdle;
         for (int i = 0; i < Rings; i++) ring_q[i] <= '{default: '0};
+        for (int i = 0; i <= Rings; i++) park_q[i] <= '{default: '0};
         st_q[0] <= '{default: '0}; st_q[1] <= '{default: '0};
         depth_q <= 1'b0; fatal_stream_q <= 1'b0;
         for (int i = 0; i < APU_VG_MAX_DESC; i++)
@@ -674,12 +729,34 @@ module g6lc_apu_vnpump
             if (st_q[i].live && st_q[i].ring_stream &&
                 st_q[i].ctx == ctx_kill_id_i)
               st_q[i].ring_stream <= 1'b0;
+          // parked streams of the dead ctx die with it — their rings
+          // are already being tombstoned above
+          for (int i = 0; i <= Rings; i++)
+            if (park_q[i].live &&
+                park_q[i].st0.ctx == ctx_kill_id_i)
+              park_q[i].live <= 1'b0;
         end
 
         unique case (state_q)
           // ------------------------------------------------------------
           StIdle: begin
-            if (xs_valid_i) begin
+            if (park_take) begin
+              // a parked stream's wait resolved — restore its stack
+              // and re-decode the record (pos was never advanced past
+              // it): t_hnd_q/t_val_q/tbuf/cmd_words_q have been reused
+              // by other streams, so the wait state must re-stage its
+              // operands.  A satisfied wait then takes StNext; a dead
+              // waited ring takes the same ring_of-miss StFatal the
+              // original execution would have
+              st_q[0] <= park_q[park_idx].st0;
+              st_q[1] <= park_q[park_idx].st1;
+              depth_q <= park_q[park_idx].depth;
+              if (park_q[park_idx].st0.ring_stream)
+                ring_q[park_q[park_idx].st0.ring].parked <= 1'b0;
+              park_q[park_idx].live <= 1'b0;
+              fatal_stream_q <= 1'b0;
+              state_q <= StDecFire;
+            end else if (xs_valid_i) begin
               gap_q <= '0; gap_cnt_q <= '0;   // new work: no backoff
               xs_d_q <= xs_desc_i;
               xs_n_q <= xs_ndesc_i;
@@ -699,8 +776,11 @@ module g6lc_apu_vnpump
 
           // ---- idle poll loop ----------------------------------------------
           StPollFire: begin
-            // mp request on ring_q[poll_q].tail_w while in this state
-            if (ring_q[poll_q].live && !ring_q[poll_q].fatal) begin
+            // mp request on ring_q[poll_q].tail_w while in this state;
+            // parked rings hold their in-flight window in park_q and
+            // must not be re-polled (head/pos would desync)
+            if (ring_q[poll_q].live && !ring_q[poll_q].fatal &&
+                !ring_q[poll_q].parked) begin
               if (mp_ready_i && src == OW_PRD)
                 state_q <= StPollCap;
             end else if (poll_q == 2'(Rings - 1))
@@ -766,7 +846,16 @@ module g6lc_apu_vnpump
           // PollGapMax and start the next sweep.  An execbuf push
           // aborts the wait immediately
           StPollGap: begin
-            if (xs_valid_i) begin
+            if (park_take) begin
+              st_q[0] <= park_q[park_idx].st0;
+              st_q[1] <= park_q[park_idx].st1;
+              depth_q <= park_q[park_idx].depth;
+              if (park_q[park_idx].st0.ring_stream)
+                ring_q[park_q[park_idx].st0.ring].parked <= 1'b0;
+              park_q[park_idx].live <= 1'b0;
+              fatal_stream_q <= 1'b0;
+              state_q <= StDecFire;
+            end else if (xs_valid_i) begin
               gap_q <= '0; gap_cnt_q <= '0;
               state_q <= StIdle;
             end else if (gap_cnt_q + 9'd1 <
@@ -774,9 +863,12 @@ module g6lc_apu_vnpump
               gap_cnt_q <= gap_cnt_q + 9'd1;
             end else begin
               gap_cnt_q <= '0;
-              gap_q     <= (gap_q == 9'd0)               ? 9'd2 :
-                           (gap_q >= 9'(PollGapMax / 2)) ? 9'(PollGapMax)
-                                                        : {gap_q[7:0], 1'b0};
+              // a parked wait must not starve behind the backoff —
+              // cap the gap at the base while any entry is parked
+              gap_q     <= park_any                        ? 9'd0 :
+                           (gap_q == 9'd0)                 ? 9'd2 :
+                           (gap_q >= 9'(PollGapMax / 2))   ? 9'(PollGapMax)
+                                                          : {gap_q[7:0], 1'b0};
               poll_q    <= '0;
               state_q   <= StPollFire;
             end
@@ -916,32 +1008,32 @@ module g6lc_apu_vnpump
           StTrDo: begin
             unique case (cmd_type_q[depth_q])
               32'hBD: begin // DestroyRing
-                if (ring_of(t_hnd_q) < 0) state_q <= StFatal;
+                if (ring_of(t_hnd_q, st_q[depth_q].ctx) < 0) state_q <= StFatal;
                 else begin
-                  ring_q[ring_of(t_hnd_q)].live <= 1'b0;
+                  ring_q[ring_of(t_hnd_q, st_q[depth_q].ctx)].live <= 1'b0;
                   state_q <= StNext;
                 end
               end
               32'hBE: begin // NotifyRing: clear IDLE (|= ~IDLE)
-                if (ring_of(t_hnd_q) < 0) state_q <= StFatal;
+                if (ring_of(t_hnd_q, st_q[depth_q].ctx) < 0) state_q <= StFatal;
                 else begin
-                  ring_q[ring_of(t_hnd_q)].idle_cnt <= '0;
-                  ring_q[ring_of(t_hnd_q)].idle <= 1'b0;
+                  ring_q[ring_of(t_hnd_q, st_q[depth_q].ctx)].idle_cnt <= '0;
+                  ring_q[ring_of(t_hnd_q, st_q[depth_q].ctx)].idle <= 1'b0;
                   gap_q <= '0; gap_cnt_q <= '0;
-                  wr_addr_q <= ring_q[ring_of(t_hnd_q)].status_w;
+                  wr_addr_q <= ring_q[ring_of(t_hnd_q, st_q[depth_q].ctx)].status_w;
                   wr_data_q <= APU_VNRING_ALIVE |
-                               (ring_q[ring_of(t_hnd_q)].fatal
+                               (ring_q[ring_of(t_hnd_q, st_q[depth_q].ctx)].fatal
                                 ? APU_VNRING_FATAL : 32'h0);
                   state_q <= StApWr;
                 end
               end
               32'hBF: begin // WriteRingExtra
-                if (ring_of(t_hnd_q) < 0) state_q <= StFatal;
+                if (ring_of(t_hnd_q, st_q[depth_q].ctx) < 0) state_q <= StFatal;
                 else if (t_off64_q + 64'd4 >
-                         64'(ring_q[ring_of(t_hnd_q)].extra_size))
+                         64'(ring_q[ring_of(t_hnd_q, st_q[depth_q].ctx)].extra_size))
                   state_q <= StFatal;
                 else begin
-                  wr_addr_q <= ring_q[ring_of(t_hnd_q)].extra_w +
+                  wr_addr_q <= ring_q[ring_of(t_hnd_q, st_q[depth_q].ctx)].extra_w +
                                APU_VG_AP_WORD_W'(t_off64_q >> 2);
                   wr_data_q <= 32'(t_val_q);
                   state_q <= StApWr;
@@ -1009,7 +1101,7 @@ module g6lc_apu_vnpump
                 // f = 9+4cn: off@11, size@13, idle@15, head@17,
                 // tail@19, stat@21, buf@23, bufSz@25, extra@27, exSz@29
                 if (t_hnd_q == 64'h0 || ring_free() < 0 ||
-                    ring_of(t_hnd_q) >= 0 ||
+                    ring_of(t_hnd_q, st_q[depth_q].ctx) >= 0 ||
                     {tbuf[depth_q][12 + 4 * cmd_cn_q[depth_q]],
                      tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]]} +
                     {tbuf[depth_q][14 + 4 * cmd_cn_q[depth_q]],
@@ -1072,7 +1164,7 @@ module g6lc_apu_vnpump
                                 IdleToMax)
                                ? IdleToMax
                                : tbuf[depth_q][15 + 4 * cmd_cn_q[depth_q]],
-                      idle_cnt: '0};
+                      idle_cnt: '0, parked: 1'b0};
                   wr_addr_q <= blob_base_w_q +
                         APU_VG_AP_WORD_W'(tbuf[depth_q][11 + 4 * cmd_cn_q[depth_q]] >> 2) +
                         APU_VG_AP_WORD_W'(tbuf[depth_q][21 + 4 * cmd_cn_q[depth_q]] >> 2);
@@ -1101,13 +1193,51 @@ module g6lc_apu_vnpump
 
           // ---- seqno waits (re-checked every cycle) ---------------------------
           StWaitVq: begin
-            if ({tbuf[depth_q][3], tbuf[depth_q][2]} <= vq_seqno_q) state_q <= StNext;
+            if ({tbuf[depth_q][3], tbuf[depth_q][2]} <= vq_seqno_q)
+              state_q <= StNext;
+            else begin
+              // park and free the FSM — a later SubmitVirtqueueSeqno on
+              // another stream is what satisfies this wait
+              park_q[st_q[0].kind == SK_RING ? int'(st_q[0].ring)
+                                             : Rings] <=
+                '{live: 1'b1, is_vq: 1'b1, st0: st_q[0], st1: st_q[1],
+                  depth: depth_q, wring: '0,
+                  seqno: {tbuf[depth_q][3], tbuf[depth_q][2]}};
+              if (st_q[0].ring_stream)
+                ring_q[st_q[0].ring].parked <= 1'b1;
+              st_q[0].live <= 1'b0;
+              st_q[1].live <= 1'b0;
+              depth_q <= 1'b0;
+              poll_q <= '0; gap_q <= '0; gap_cnt_q <= '0;
+              state_q <= StPollFire;
+            end
           end
           StWaitR: begin
-            if (ring_of(t_hnd_q) < 0) state_q <= StFatal;
-            else if (64'({32'h0, ring_q[ring_of(t_hnd_q)].head})
+            if (ring_of(t_hnd_q, st_q[depth_q].ctx) < 0)
+              state_q <= StFatal;
+            else if (64'({32'h0,
+                          ring_q[ring_of(t_hnd_q, st_q[depth_q].ctx)].head})
                      >= t_val_q)
               state_q <= StNext;
+            else begin
+              // park and free the FSM — the ring poll that advances
+              // the waited head is this same FSM; spinning here
+              // deadlocked the guest (a ring waiting on its own
+              // future seqno simply parks forever: guest bug)
+              park_q[st_q[0].kind == SK_RING ? int'(st_q[0].ring)
+                                             : Rings] <=
+                '{live: 1'b1, is_vq: 1'b0, st0: st_q[0], st1: st_q[1],
+                  depth: depth_q,
+                  wring: 2'(ring_of(t_hnd_q, st_q[depth_q].ctx)),
+                  seqno: t_val_q};
+              if (st_q[0].ring_stream)
+                ring_q[st_q[0].ring].parked <= 1'b1;
+              st_q[0].live <= 1'b0;
+              st_q[1].live <= 1'b0;
+              depth_q <= 1'b0;
+              poll_q <= '0; gap_q <= '0; gap_cnt_q <= '0;
+              state_q <= StPollFire;
+            end
           end
 
           // ---- aperture write commit / ring head store --------------------------

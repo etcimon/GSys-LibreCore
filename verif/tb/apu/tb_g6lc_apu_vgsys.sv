@@ -1349,6 +1349,76 @@ module tb_g6lc_apu_vgsys;
     check_axi_bal();
   endtask
 
+  // drain-window kick loss (guest fence-wait wedge): the walker's
+  // drain re-read of avail.idx is in flight when the guest commits the
+  // next submission's ring entry + idx and kicks QUEUE_NOTIFY.  The
+  // in-flight read samples pre-write memory; the StDrainW response
+  // consumes the pending notify anyway and the walker goes idle —
+  // the submission sits in the ring unwalked forever.  Injection is
+  // cycle-exact: the writes land after the AXI model latched the drain
+  // read's data (r_vld on the avail.idx word) but before the response
+  // reaches the walker, exactly the guest-side ordering on hardware.
+  task automatic neg_drainkick();
+    int unsigned t, nc0;
+    logic [63:0] aaddr;
+    axi_rd_dly = 40;   // hold the drain R 40 cycles: a roomy window
+    // chain A: one read desc + one write desc (same shape as neg_qdrop)
+    put_desc(0, 0, GB + 32'h21400, 32'd32, VF_NEXT, 16'd1);
+    put_desc(0, 1, GB + 32'h21500, 32'd40, VF_WRITE, 16'h0);
+    for (int i = 0; i < 8; i++)
+      gw(32'h21400 + 32'(4 * i), (i == 0) ? 32'h0108 : 32'h0);
+    // chain B, parked: walked only if the in-flight-window kick lands
+    put_desc(0, 2, GB + 32'h21400, 32'd32, VF_NEXT, 16'd3);
+    put_desc(0, 3, GB + 32'h21500, 32'd40, VF_WRITE, 16'h0);
+    push_avail(0, 0);
+    do_notify(0);
+    wait_used(0);
+    check_used_img(0, 0, u_len_s);
+    // phase 1: the walker enters the drain re-read of avail.idx —
+    // raise the doorbell while the read is genuinely in flight
+    t = 0;
+    while (i_dut.gen_on.i_vq.gen_on.state_q != 5'd19 && t < 5_000_000) begin
+      @(negedge clk); t++;
+    end
+    check(t < 5_000_000, "drainkick: drain re-read in flight");
+    $display("[dk] drain in flight at t=%0d vqst=%0d", cycles,
+             i_dut.gen_on.i_vq.gen_on.state_q);
+    notify[0] = 1'b1;
+    // phase 2: wait for the slave's data latch on the avail.idx word,
+    // then commit B's writes — sampled by no read of this flight,
+    // exactly the guest-side write->kick ordering on hardware
+    aaddr = (GB + qavail(0)) & ~64'h7;
+    t = 0;
+    while (!(r_vld && r_addr == aaddr) && t < 5_000_000) begin
+      @(negedge clk); t++;
+    end
+    check(t < 5_000_000,
+          "drainkick: drain re-read data latch observed");
+    $display("[dk] latch seen at t=%0d vqst=%0d", cycles,
+             i_dut.gen_on.i_vq.gen_on.state_q);
+    push_avail(0, 2);
+    // phase 3: at the drain response the pending notify is consumed.
+    // Drop the level on the same negedge that sees the clear pulse —
+    // virtio_mmio's notify_pending clears on that very edge, so the
+    // walker's StIdle re-acquire check must already see it gone (a
+    // level held any longer would mask the lost kick in this TB).
+    t = 0;
+    while (!(d_nclr[0]) && t < 100_000) begin
+      @(negedge clk); t++;
+    end
+    check(t < 100_000, "drainkick: kick consumed by the walker");
+    $display("[dk] kick consumed at t=%0d vqst=%0d", cycles,
+             i_dut.gen_on.i_vq.gen_on.state_q);
+    notify[0] = 1'b0;
+    // B must still be walked and published: anything else is the wedge
+    wait_used(0);
+    $display("[dk] used for B at t=%0d len=%0d", cycles, u_len_s);
+    check(u_len_s == 32'd72,
+          $sformatf("drainkick used len got=%0d exp=72", u_len_s));
+    check_used_img(0, 2, u_len_s);
+    check_axi_bal();
+  endtask
+
   // response write outside the guest window (review R4): the vgctl
   // write errs -> sticky mem_fault -> bus_fault_o, no AXI beat to that
   // address (the window assert fires first otherwise), and the used
@@ -1758,6 +1828,9 @@ module tb_g6lc_apu_vgsys;
     end else if (vname == "neg_qdrop") begin
       vq_init(APU_VG_SHM_BYTES);
       neg_qdrop();
+    end else if (vname == "neg_drainkick") begin
+      vq_init(APU_VG_SHM_BYTES);
+      neg_drainkick();
     end else if (vname == "neg_resp_oob") begin
       vq_init(APU_VG_SHM_BYTES);
       neg_resp_oob();
