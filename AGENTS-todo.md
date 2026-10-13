@@ -1200,9 +1200,10 @@ prerequisite for this work under the existing dual license. No licensing policy 
   cycle-identical on the 11 probes, the FP suite 22/22 and wprp; the 300 k
   boot segment retires the same multiset per core as the pre-fix model
   (cores 1–3 byte-identical, core 0 one 14-instruction SMT interleave
-  shift). Commit `268403e9d`. Owed: the strict 8-hart OpenSBI boot on the
-  fixed server (cycle count vs T21i's 33,001,884) before the server row
-  cites it. Why only here: the inversion needs a
+  shift). Commit `268403e9d`. Strict 8-hart OpenSBI boot on the fixed
+  server: **SUCCESS 32,866,650 cycles** (T21i 33,001,884;
+  `ooocoh-t25-server-hpgo-osbi-48M`, the default-build model — T25 row).
+  Why only here: the inversion needs a
   store whose data depends on a load slower than the *next* iterations'
   loads — the inclusive L3's first victim drain on the 4-core server is
   the first workload that produced it; the 2-core config and the
@@ -1285,8 +1286,15 @@ prerequisite for this work under the existing dual license. No licensing policy 
   cycle-identical, `qualified=True`; server
   `ooocoh-t25-server-hpgo-mt4-build2` **3,044 → 6,612 / 6,593 cycles/s
   (×2.2)** on the 300 k boot segment, per-core RVFI identical to the
-  no-PGO model (376 profiles). The T24-owed strict 8-hart boot runs on this
-  model (`ooocoh-t25-server-hpgo-osbi-48M`, in flight).
+  no-PGO model (376 profiles). **The T24-owed strict 8-hart OpenSBI boot on
+  this model (`ooocoh-t25-server-hpgo-osbi-48M`, canonical flow, `+smt_stats`):
+  SUCCESS tohost 0 after 32,866,650 cycles** (T21i pinned reference
+  33,001,884: −0.4 %, the store age-order fix and the T22/T23 predictor
+  changes), `[hpd-phantom] 0` / `[hpd-zombie] 0` on every core, no forced
+  progress, `runtimeQualified: true, runtimeFlavour: g6lc-fork@453031b66`;
+  ≈ 1 h 45 min wall with RVFI tracing on (the detached launcher leaves
+  `results.json` at `incomplete`; the verdict is `trial/run.log`, as for the
+  T21t runs).
 - [~] **Hierarchical core (`G6LC_CORE_HB`, 2026-10-12): the structural
   lever of guide §6.1 as a build.** `corev_apu/src/g6lc_core_hb{,_pkg}.sv`
   close the core's parameterisation over the target package (hier blocks
@@ -1341,7 +1349,7 @@ prerequisite for this work under the existing dual license. No licensing policy 
   **run (T23 item 4): multi-writer lines and CBO under contention pass; L3
   eviction/inclusion hung and exposed the T24 OoO store-issue deadlock,
   fixed in `g6lc_iq` (24/48 lines and peer 6 pass on the fixed server;
-  strict boot re-run owed)** — a
+  strict 8-hart boot SUCCESS 32,866,650 cycles on the default-build model)** — a
   Linux-class boot on a faster host (780 cyc/s on the builder), the full
   `check -assert`, and a boot-performance pass (FDT phases ≈8 M cycles
   each, drain bubbles at `SmtFetchQuantum 4`).
