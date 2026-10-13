@@ -1256,8 +1256,37 @@ prerequisite for this work under the existing dual license. No licensing policy 
   reason. Regression `test_regress/t/t_split_var_late_decl` (declaration
   after use + generate-block declaration, 2 arrays split, simulates) passes;
   `g6lc64_ooo_int2_l3` with the full split list verilates with **0** bad
-  statements. Validation of the fork bump in flight (ooo probe battery,
-  server segment).
+  statements. **Closed (fork `453031b66`, main `ceeff995c`):** the
+  `g6lc64_ooo_int2_l3` FILTERED+inclusive model now builds with the fork and
+  the full split list and passes `mc_l3_evict_inclusion` at 24 lines in
+  **2,170 cycles, the pinned model's count**; on `g6lc64_ooo` the fork +
+  split `.vlt` build (`ooocoh-t25-ooo-fork-build`) is Spike-exact and
+  cycle-identical on the 11 probes, the FP suite 22/22 and wprp, now with
+  `qualified=True` (the fork runtime is in the runners' qualified set).
+  Fork regressions on the builder: `t_split_var_late_decl`, `t_split_var_0`
+  (restored), `t_split_var_3_wreal`, `t_mem_*`, `t_unroll_*`, `t_gate_basic`,
+  `t_param_module`, `t_alw_split`, `t_array_rev` pass; `t_split_var_1_bad`'s
+  golden follows the de-begun names. **This fork + the split-loops `.vlt`
+  is now the default build** (`toolchain.verilatorFlavour: g6lc`,
+  `SOFT_LADDER_VERILATOR_FLAVOUR`, the T16 drivers' `T16_VLT_ROOT` /
+  `T16_SPLIT_VLT` defaults, builder prefix
+  `/opt/testharness/toolchains/verilator-v5.008-g6lc` → the `wt2` build);
+  `pinned` keeps the upstream v5.008 for cross-checks (AGENTS-build.md
+  "Verilator of record", guide §7.4a). **PGO, `-O2` and 4 threads are
+  harness defaults too (main `60b13ed36`, `82967f84f`):**
+  `SOFT_LADDER_BUILD_PGO=1` instruments, trains on the in-repo `ooo_fp_ooo.S`
+  probe (compiled by the harness, one run to completion + one to the cycle
+  cap) and recompiles with `-fprofile-use` (slow classes at `-O1` — the
+  instrumented 30 MB `__Syms` unit at `-O2` OOM-killed cc1plus on the
+  server); `./build.sh build` runs the harness (`simulation.verilator:
+  {recipe: harness, pgo, splitVlt, opt}`), the review runners' pinned
+  cross-check rebuilds opt out. Measured: `g6lc64_ooo` 15.0 k → 19.4 k
+  cycles/s on the 200 k spin (+30 %), probes/FP/wprp Spike-exact and
+  cycle-identical, `qualified=True`; server
+  `ooocoh-t25-server-hpgo-mt4-build2` **3,044 → 6,612 / 6,593 cycles/s
+  (×2.2)** on the 300 k boot segment, per-core RVFI identical to the
+  no-PGO model (376 profiles). The T24-owed strict 8-hart boot runs on this
+  model (`ooocoh-t25-server-hpgo-osbi-48M`, in flight).
 - [~] **Hierarchical core (`G6LC_CORE_HB`, 2026-10-12): the structural
   lever of guide §6.1 as a build.** `corev_apu/src/g6lc_core_hb{,_pkg}.sv`
   close the core's parameterisation over the target package (hier blocks

@@ -841,7 +841,27 @@ set (`runtimeFlavour: g6lc-fork@<pin>`), and the T16/T21 drivers' `T16_VLT_ROOT`
 `T16_SPLIT_VLT` defaults (`T16_PGO=1` keeps the drivers' boot-segment-trained PGO and turns the
 harness round off). Not in the default because they measured nothing: Verilator's `--prof-pgo`
 `profile.vlt` re-partition, the hierarchical core, the sleep gate as a simulation lever, and
-the §7 opt-in passes. The pinned upstream v5.008 stays as
+the §7 opt-in passes.
+
+**Measured with the complete default set** (`ooocoh-t25-server-hpgo-mt4-build2` = fork
+`453031b66`, split `.vlt`, `-O2`/slow `-O1`, harness PGO on the `ooo_fp_ooo` probe — 376
+profiles, MT4; 300 k boot segment, idle host, alternating, same RTL as the two comparison
+models):
+
+| model | cycles/s | user time | per-core RVFI |
+|---|---:|---:|---|
+| `t23j` reference (fork, split, no PGO, pre-T24 RTL) | 3,132 / 3,084 | 362 s | d509318c e3a792fa 02596841 29e8fc13 |
+| `t25-fork` (same, T24 RTL, no PGO) | 3,044 / 2,974 | 373 s | 54555abf e3a792fa 02596841 29e8fc13 |
+| **`t25-hpgo` (the default)** | **6,612 / 6,593** | **160 s** | 54555abf e3a792fa 02596841 29e8fc13 |
+
+**×2.2 from the harness PGO round alone**, 2.3× less CPU, traces identical to the no-PGO model
+of the same RTL (core 0 differs from `t23j` only by the T24 store-order fix's 14-instruction SMT
+interleave shift). Against the pinned upstream build of the T21 era (924 cycles/s on this
+segment) the default is now ×7.1. Single core (`g6lc64_ooo`, 200 k spin, same probe-trained
+PGO): 15.0 k → 19.4 k cycles/s (+30 %), 11 probes / FP suite / wprp Spike-exact and
+cycle-identical. The harness PGO on the server is also better than the T21 driver's
+boot-segment-trained PGO model (3,379): the probe exercises the OoO/FP/LSU paths every core
+shares, and the training is deterministic and in-repo. The pinned upstream v5.008 stays as
 `pinned` for cross-checks (~2,100 cycles/s on the same model) and as the fallback when no fork
 prefix is installed. Rules that follow from §7: an exactness run (RVFI per core on the segment,
 the probe battery) accompanies every fork bump; the opt-in passes (`-fsoa`, `-fprio`, `-fwake`,

@@ -42,8 +42,9 @@ build and regression flow from a single top-level `.config.ts`.
   `VERILATOR_ROOT=<prefix>/runtime`). `verif/regress/soft-ladder-build-harness.sh` resolves that
   prefix itself and adds `build-platform/scripts/verilator-split-loops.vlt` (the `split_var`
   controls) by default for this flavour. Measured on the 8-hart `g6lc64_ooo_server` 300 k boot
-  segment, MT4, `-O2`: **3,131 / 3,109 cycles/s** (guide §7.5 table) against ~2,100 for the pinned
-  upstream build of the same RTL; RVFI per core identical. The review runners
+  segment, MT4, `-O2`: **3,131 / 3,109 cycles/s** without PGO, **6,612 / 6,593 with the default
+  PGO round** (guide §7.4a) against ~2,100 for the pinned upstream build of the same RTL; RVFI per
+  core identical. The review runners
   (`run_ooo_fp_review.py`, `run_mc_int2_review.py`, `run_opensbi_source_review.py`) treat this
   runtime as **qualified** (keyed by the sha256 of its `include/verilated_funcs.h` at the gitlink;
   a fork bump that touches that header must update their `qualified` tables) and record
@@ -59,8 +60,9 @@ build and regression flow from a single top-level `.config.ts`.
   then recompiles the same sources with `-fprofile-use -fprofile-correction
   -fprofile-partial-training` (`__Syms` at `-O1` first — it carries no hot code and takes hours at
   `-O2` with a profile on the server). Layout only: every battery in the guide was run on PGO
-  models and they retire the same RVFI stream; measured ×3.5 on the single-core spin and 2,673 →
-  3,379 cycles/s on the server (guide §4b.1–4b.2). It roughly doubles the C++ compile time;
+  models and they retire the same RVFI stream; measured with this exact default on the 300 k
+  server boot segment **3,044 → 6,612 cycles/s (×2.2, 2.3× less CPU, per-core RVFI identical)**
+  and +30 % on the single-core spin (guide §7.4a). It roughly doubles the C++ compile time;
   `SOFT_LADDER_BUILD_PGO=0` / `build --no-pgo` skips it, `SOFT_LADDER_BUILD_PGO_TRAIN=<elf>` and
   `SOFT_LADDER_BUILD_PGO_CYCLES` change the workload.
 - **`-O2`** (`SOFT_LADDER_BUILD_OPT`; `simulation.verilator.opt`) overrides `verilated.mk`'s
