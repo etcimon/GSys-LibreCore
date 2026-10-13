@@ -19,7 +19,8 @@
 # Build of record (2026-10-13, agents/guides/AGENTS-verilator-performance.md §7.4a):
 #   SOFT_LADDER_VERILATOR_FLAVOUR=g6lc  the tools/verilator fork (default; pinned = upstream v5.008)
 #   SOFT_LADDER_BUILD_SPLIT_VLT=1       build-platform/scripts/verilator-split-loops.vlt (default on for g6lc)
-#   SOFT_LADDER_BUILD_OPT=-O2           OPT_FAST/OPT_SLOW/OPT_GLOBAL for the generated C++ (default -O2)
+#   SOFT_LADDER_BUILD_OPT=-O2           OPT_FAST/OPT_GLOBAL for the generated C++ (default -O2)
+#   SOFT_LADDER_BUILD_OPT_SLOW=-O1      OPT_SLOW (default -O1 with PGO, else = OPT; __Syms/init code is not hot)
 #   SOFT_LADDER_BUILD_PGO=1             instrument -> train -> -fprofile-use (default on)
 #   SOFT_LADDER_BUILD_PGO_TRAIN=<elf>   training workload (default: ooo_fp_ooo.S compiled here)
 #   SOFT_LADDER_BUILD_PGO_CYCLES=200000 cycle cap of each training run
@@ -222,9 +223,13 @@ fi
 # sources with -fprofile-use. Layout only: a PGO model retires the same RVFI
 # stream as the plain one (every battery in the guide was run on PGO models).
 BUILD_OPT="${SOFT_LADDER_BUILD_OPT:--O2}"
-export MAKEFLAGS="${MAKEFLAGS:-} OPT_FAST=$BUILD_OPT OPT_SLOW=$BUILD_OPT OPT_GLOBAL=$BUILD_OPT"
-log "C++ opt: $BUILD_OPT (OPT_FAST/OPT_SLOW/OPT_GLOBAL)"
 PGO="${SOFT_LADDER_BUILD_PGO:-1}"
+# The slow classes (VM_*_SLOW: __Syms -- 30 MB on the server -- init and settle
+# code) carry no hot code; instrumented at -O2 the __Syms unit exhausts memory
+# (cc1plus killed on a 125 GB host), so they compile at -O1 whenever PGO is on.
+BUILD_OPT_SLOW="${SOFT_LADDER_BUILD_OPT_SLOW:-$([[ "$PGO" == 1 ]] && echo -O1 || echo "$BUILD_OPT")}"
+export MAKEFLAGS="${MAKEFLAGS:-} OPT_FAST=$BUILD_OPT OPT_SLOW=$BUILD_OPT_SLOW OPT_GLOBAL=$BUILD_OPT"
+log "C++ opt: fast/global $BUILD_OPT slow $BUILD_OPT_SLOW"
 PGO_DIR="$VERLIB_DIR/pgo"
 BASE_CXXFLAGS="$BUILD_CXXFLAGS"; BASE_LDFLAGS="$BUILD_LDFLAGS"
 if [[ "$PGO" == "1" ]]; then
@@ -476,16 +481,10 @@ if [[ "$PGO" == "1" ]]; then
     sed -i "s# -fprofile-generate=$PGO_DIR -fprofile-update=atomic##g; s# -fprofile-generate=$PGO_DIR##g" Variane_testharness.mk
     rm -f ./*.o Variane_testharness
     unset MAKEFLAGS
-    P2="OPT_FAST=$BUILD_OPT $PGO_USE"
-    # The __Syms unit (tens of MB, no hot code) at -O2 with a profile runs for
-    # hours on the server model: compile it at -O1 first, make then skips it.
-    make -n -f Variane_testharness.mk VERILATOR_ROOT="$VERILATOR_ROOT" "OPT_FAST=$BUILD_OPT $PGO_USE" \
-      "OPT_SLOW=$BUILD_OPT $PGO_USE" "OPT_GLOBAL=$BUILD_OPT $PGO_USE" CXX="$CXX" CC="$CC" OBJCACHE="$OBJCACHE" \
-      CXXFLAGS="$BASE_CXXFLAGS" Variane_testharness__Syms.o 2>/dev/null | grep -- "-c -o Variane_testharness__Syms.o" \
-      | sed -E 's/ -O[0-9s] / -O1 /g' > syms-pgo-cmd.sh
-    [[ -s syms-pgo-cmd.sh ]] && { bash syms-pgo-cmd.sh > syms-pgo.log 2>&1 || true; }
+    # Slow classes stay at $BUILD_OPT_SLOW (-O1): with a profile the __Syms unit
+    # at -O2 runs for hours on the server model and carries no hot code.
     make -f Variane_testharness.mk -j "$JOBS" VERILATOR_ROOT="$VERILATOR_ROOT" "OPT_FAST=$BUILD_OPT $PGO_USE" \
-      "OPT_SLOW=$BUILD_OPT $PGO_USE" "OPT_GLOBAL=$BUILD_OPT $PGO_USE" CXX="$CXX" CC="$CC" OBJCACHE="$OBJCACHE" \
+      "OPT_SLOW=$BUILD_OPT_SLOW $PGO_USE" "OPT_GLOBAL=$BUILD_OPT $PGO_USE" CXX="$CXX" CC="$CC" OBJCACHE="$OBJCACHE" \
       LINK="$LINK" CXXFLAGS="$BASE_CXXFLAGS" LDFLAGS="$BASE_LDFLAGS" > pgo-phase2.log 2>&1 )
   rc=$?
   if [[ $rc -ne 0 || ! -x "$VERLIB_DIR/Variane_testharness" ]]; then
