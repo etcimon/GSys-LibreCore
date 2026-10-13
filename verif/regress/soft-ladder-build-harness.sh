@@ -328,6 +328,7 @@ set +e
 make -s verilate \
   verilator="verilator --no-timing -Wno-MODDUP -j $JOBS $BUILD_VLT_ARGS" \
   target="$TARGET" \
+  defines="${SOFT_LADDER_BUILD_DEFINES:-}" \
   ver-library="$VERLIB_DIR" \
   flist="$FLIST" \
   verilator_threads="$VTHREADS" \

@@ -824,3 +824,40 @@ whole-entry reads make it a rewrite, not a lowering) and none of them moves the 
 clock on this core, because what the core executes per cycle is its logic, not its
 code copies. The §6.3 "×1–2 unproven" for footprint is now "measured ≈ ×1.0"; the
 levers that remain are the structural ones of §6.1 (per-core skip, partition).
+
+### 7.5 The hierarchical core, measured (2026-10-12)
+
+Lever 1 of §6.1 as Verilator offers it: the core as a `hier_block`
+(`corev_apu/src/g6lc_core_hb.sv`, closed over the target package because hier blocks take
+no type/struct parameters; `verilator_config.vlt`; `+define+G6LC_CORE_HB`;
+`--hierarchical`). Three fork defects stood in the way and are fixed (`adb3dfcf9`,
+`819db5b8d`): the child re-parsed every `-f` line with a `${VAR}` (verbatim-vs-substituted
+compare in `allArgsStringForHierBlock`) and `-Wno-MODDUP` then deleted package copies
+under live import pointers; the runtime dir lacked `bin/verilator` for the child make;
+V3Reloop appended `__Vilp` after its first use when the merged copies sit in `_eval`'s
+`initsp` (the `__Vsampled` copies). The testbench reaches a core's public internals through
+`Verilated::hierModelFind` (the wrapper registers each child under its `%m` scope).
+
+| | flat (`t23j`) | hierarchical (`t24h` build6) |
+|---|---:|---:|
+| build (4–5 jobs, verilate + compile) | 52 min | **33 min** |
+| C++ files / text | 377 / 86.9 MB | **99 / 25.8 MB** |
+| `mc_multi_writer_line` | 83,356 cycles | 83,356 cycles |
+| 300 k boot segment, per-core RVFI | d509318c e3a792fa 02596841 29e8fc13 | identical |
+| 300 k boot segment, MT4, alternating | 3,131 / 3,109 cycles/s | **1,467 / 1,477** |
+| user time | 362 s | 790 s |
+
+Exact, three times smaller, a third faster to build — and 2.1× slower to run, with 2.2×
+the CPU work. The reason is the primitive, not the partition: a `--lib-create` child is
+driven by a wrapper whose `always @*` calls `combo_update` (a full child `eval()`) on any
+input change and whose `always @(posedge clk or negedge clk)` calls `seq_update` on both
+edges, so a core's combinational region runs two to three times per cycle where the flat
+schedule ran it once, and the DPI marshals every port each call. Nor would a gated core
+rest: `rtc_time_i` (the mtime counter) is an input of every core and changes every cycle,
+so the input-change check fires regardless of the clock. The per-instance skip that §6.1
+wants is therefore not reachable through hierarchical Verilation; it needs an
+instance-partitioned scheduler inside one model (per-instance trigger sets and eval
+functions, called from the top eval under a liveness test), which is a new V3Sched/V3Order
+feature, not a flag. The hierarchical build stays available as an opt-in for its build-time
+and exactness properties.
+

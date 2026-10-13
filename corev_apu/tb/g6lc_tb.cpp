@@ -42,12 +42,49 @@
 // Define CVA6_PROBE_NO_L2 without gen_l2; CVA6_PROBE_NO_CORE1 without core1.
 // G6LC_CVA6_C0/C1 select the Verilator core-wrapper path via token pasting:
 // Ara/RVV builds use gen_acc, non-RVV builds use gen_std. See ariane.sv.
+// G6LC_CORE_ROOT(c): the object that owns core c's public internals. Flat
+// builds: the top model's root. Hierarchical builds (G6LC_CORE_HB, Verilator
+// --hierarchical with corev_apu/src/g6lc_core_hb.sv as the hier block): the
+// child model the --lib-create wrapper instantiated for that core, found through
+// the fork's Verilated::hierModelFind registry by its %m scope; its own root
+// carries the same member names below the wrapper.
+#if defined(G6LC_CORE_HB)
+#include "Vg6lc_core_hb.h"
+#include "Vg6lc_core_hb___024root.h"
+static Vg6lc_core_hb___024root* g6lc_core_root(int c) {
+  static Vg6lc_core_hb___024root* roots[8] = {nullptr};
+  if (c < 0 || c >= 8) return nullptr;
+  if (!roots[c]) {
+    // %m of the wrapper instance; Verilator may or may not prefix the top scope
+    char scope[96];
+    Vg6lc_core_hb* m = nullptr;
+    for (const char* pfx : {"", "TOP."}) {
+      snprintf(scope, sizeof scope, "%sariane_testharness.i_cluster.gen_core[%d].i_ariane", pfx, c);
+      m = static_cast<Vg6lc_core_hb*>(Verilated::hierModelFind(scope));
+      if (m) break;
+    }
+    if (!m) { fprintf(stderr, "g6lc_tb: no hierarchical core model for %s\n", scope); abort(); }
+    roots[c] = m->rootp;
+  }
+  return roots[c];
+}
+#define G6LC_CORE_ROOT(c) g6lc_core_root(c)
+#if defined(G6LC_CVA6_GEN_ACC)
+#define G6LC_CVA6_C0(path) g6lc_core_hb__DOT__i_ariane__DOT__gen_acc__DOT__i_cva6##__DOT__##path
+#define G6LC_CVA6_C1(path) g6lc_core_hb__DOT__i_ariane__DOT__gen_acc__DOT__i_cva6##__DOT__##path
+#else
+#define G6LC_CVA6_C0(path) g6lc_core_hb__DOT__i_ariane__DOT__gen_std__DOT__i_cva6##__DOT__##path
+#define G6LC_CVA6_C1(path) g6lc_core_hb__DOT__i_ariane__DOT__gen_std__DOT__i_cva6##__DOT__##path
+#endif
+#else
+#define G6LC_CORE_ROOT(c) (top->rootp)
 #if defined(G6LC_CVA6_GEN_ACC)
 #define G6LC_CVA6_C0(path) ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_acc__DOT__i_cva6##__DOT__##path
 #define G6LC_CVA6_C1(path) ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__1__KET____DOT__i_ariane__DOT__gen_acc__DOT__i_cva6##__DOT__##path
 #else
 #define G6LC_CVA6_C0(path) ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__0__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6##__DOT__##path
 #define G6LC_CVA6_C1(path) ariane_testharness__DOT__i_cluster__DOT__gen_core__BRA__1__KET____DOT__i_ariane__DOT__gen_std__DOT__i_cva6##__DOT__##path
+#endif
 #endif
 // SMT hierarchy flavor: NrHarts>1 builds the banked CSR/RF wrappers and the
 // g6lc_thread_select gen_smt block; NrHarts==1 collapses to the gen_single*
@@ -714,13 +751,13 @@ done_processing:
 #endif
     if (metrics_sidecar) {
 #if (VERILATOR_VERSION_INTEGER >= 5000000)
-      unsigned cack0 = (unsigned)top->rootp->G6LC_CVA6_C0(commit_ack);
-      unsigned cdrop0 = (unsigned)top->rootp->G6LC_CVA6_C0(commit_drop_id_commit);
+      unsigned cack0 = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(commit_ack);
+      unsigned cdrop0 = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(commit_drop_id_commit);
       metrics_retired[0] += (uint64_t)__builtin_popcount(cack0 & ~cdrop0);
       metrics_dropped[0] += (uint64_t)__builtin_popcount(cack0 & cdrop0);
 #if defined(G6LC_TB_CLUSTER)
-      unsigned cack1 = (unsigned)top->rootp->G6LC_CVA6_C1(commit_ack);
-      unsigned cdrop1 = (unsigned)top->rootp->G6LC_CVA6_C1(commit_drop_id_commit);
+      unsigned cack1 = (unsigned)G6LC_CORE_ROOT(1)->G6LC_CVA6_C1(commit_ack);
+      unsigned cdrop1 = (unsigned)G6LC_CORE_ROOT(1)->G6LC_CVA6_C1(commit_drop_id_commit);
       metrics_retired[1] += (uint64_t)__builtin_popcount(cack1 & ~cdrop1);
       metrics_dropped[1] += (uint64_t)__builtin_popcount(cack1 & cdrop1);
 #endif
@@ -731,8 +768,8 @@ done_processing:
       static int saw_nonzero_npc = 0;
       static int logged_zero_npc = 0;
 #if (VERILATOR_VERSION_INTEGER >= 5000000)
-      uint64_t npc_now = (uint64_t)top->rootp->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
-      unsigned act_now = (unsigned)G6LC_TB_H1(top->rootp->G6LC_CVA6_C0(i_smt_thread_select__DOT__gen_smt__DOT__active_q));
+      uint64_t npc_now = (uint64_t)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
+      unsigned act_now = (unsigned)G6LC_TB_H1(G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(i_smt_thread_select__DOT__gen_smt__DOT__active_q));
       if (npc_now != 0) saw_nonzero_npc = 1;
       if (saw_nonzero_npc && npc_now == 0 && !logged_zero_npc) {
         logged_zero_npc = 1;
@@ -817,12 +854,12 @@ done_processing:
 #if (VERILATOR_VERSION_INTEGER >= 5000000)
       if (main_time < 64) {
         auto gpr0 = [&](int n) -> uint64_t {
-          const auto &rf = top->rootp->G6LC_TB_RF(G6LC_CVA6_C0, 0);
+          const auto &rf = G6LC_CORE_ROOT(0)->G6LC_TB_RF(G6LC_CVA6_C0, 0);
           return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
         };
-        uint64_t npc = (uint64_t)top->rootp->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
-        uint64_t mepc0 = (uint64_t)top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mepc_q);
-        uint64_t mcause0 = (uint64_t)top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mcause_q);
+        uint64_t npc = (uint64_t)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
+        uint64_t mepc0 = (uint64_t)G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mepc_q);
+        uint64_t mcause0 = (uint64_t)G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mcause_q);
         std::cerr << std::hex << "[boot] t=" << main_time << " npc=0x" << npc
                   << " mepc=0x" << mepc0 << " mcause=" << mcause0
                   << " s0=0x" << gpr0(8) << " a5=0x" << gpr0(15)
@@ -838,13 +875,13 @@ done_processing:
           return v;
         };
 #if (VERILATOR_VERSION_INTEGER >= 5000000)
-        uint64_t npc = (uint64_t)top->rootp->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
-        uint64_t mepc0 = (uint64_t)top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mepc_q);
-        uint64_t mcause0 = (uint64_t)top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mcause_q);
-        uint64_t mepc1 = (uint64_t)G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 1, mepc_q));
-        uint64_t mcause1 = (uint64_t)G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 1, mcause_q));
-        unsigned wfi0 = (unsigned)top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, wfi_q);
-        unsigned wfi1 = (unsigned)G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 1, wfi_q));
+        uint64_t npc = (uint64_t)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
+        uint64_t mepc0 = (uint64_t)G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mepc_q);
+        uint64_t mcause0 = (uint64_t)G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mcause_q);
+        uint64_t mepc1 = (uint64_t)G6LC_TB_H1(G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 1, mepc_q));
+        uint64_t mcause1 = (uint64_t)G6LC_TB_H1(G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 1, mcause_q));
+        unsigned wfi0 = (unsigned)G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, wfi_q);
+        unsigned wfi1 = (unsigned)G6LC_TB_H1(G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 1, wfi_q));
         uint64_t cpc = 0;
         uint64_t cpc1 = 0;
         unsigned cack = 0;
@@ -858,8 +895,8 @@ done_processing:
           // padded slice from lo then hits bp.predict_address (shared
           // address-FIFO head, e.g. 0x80012888) before sbe.pc (0x80012990).
           // Derive sbe_w from mem_q: 16 × {issued,cancelled,fpr,sbe}.
-          const auto &ci = top->rootp->G6LC_CVA6_C0(issue_stage_i__DOT____Vcellout__i_scoreboard__commit_instr_o);
-          const auto &mq_w = top->rootp->G6LC_CVA6_C0(
+          const auto &ci = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(issue_stage_i__DOT____Vcellout__i_scoreboard__commit_instr_o);
+          const auto &mq_w = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               issue_stage_i__DOT__i_scoreboard__DOT__mem_q);
           int mwords_w = (int)(sizeof(mq_w) / sizeof(mq_w[0]));
           int sbe_w = (mwords_w * 32) / 16 - 3;
@@ -876,16 +913,16 @@ done_processing:
           };
           cpc = port_pc(0);
           cpc1 = port_pc(1);
-          cack = (unsigned)top->rootp->G6LC_CVA6_C0(commit_ack);
-          cdrop = (unsigned)top->rootp->G6LC_CVA6_C0(commit_drop_id_commit);
+          cack = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(commit_ack);
+          cdrop = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(commit_drop_id_commit);
         }
         auto gpr = [&](unsigned hart, int n) -> uint64_t {
           if (hart == 0) {
-            const auto &rf = top->rootp->G6LC_TB_RF(G6LC_CVA6_C0, 0);
+            const auto &rf = G6LC_CORE_ROOT(0)->G6LC_TB_RF(G6LC_CVA6_C0, 0);
             return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
           }
 #if defined(G6LC_TB_BANKED)
-          const auto &rf = top->rootp->G6LC_TB_RF(G6LC_CVA6_C0, 1);
+          const auto &rf = G6LC_CORE_ROOT(0)->G6LC_TB_RF(G6LC_CVA6_C0, 1);
           return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
 #else
           return 0;
@@ -913,14 +950,14 @@ done_processing:
         static int idsb_logs = 0;
         if (trace_on && main_time >= 103000 && main_time <= 180000 &&
             idsb_logs < 250) {
-          unsigned flu = (unsigned)top->rootp->G6LC_CVA6_C0(flush_unissued_instr_ctrl_id);
-          unsigned fif = (unsigned)top->rootp->G6LC_CVA6_C0(flush_ctrl_if);
-          unsigned fid = (unsigned)top->rootp->G6LC_CVA6_C0(flush_ctrl_id);
-          unsigned fex = (unsigned)top->rootp->G6LC_CVA6_C0(flush_ctrl_ex);
-          unsigned dv = (unsigned)top->rootp->G6LC_CVA6_C0(issue_entry_valid_id_issue);
-          unsigned dack = (unsigned)top->rootp->G6LC_CVA6_C0(issue_instr_issue_id);
-          const auto &ie = top->rootp->G6LC_CVA6_C0(issue_entry_id_issue);
-          const auto &mq_id = top->rootp->G6LC_CVA6_C0(
+          unsigned flu = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(flush_unissued_instr_ctrl_id);
+          unsigned fif = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(flush_ctrl_if);
+          unsigned fid = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(flush_ctrl_id);
+          unsigned fex = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(flush_ctrl_ex);
+          unsigned dv = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(issue_entry_valid_id_issue);
+          unsigned dack = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(issue_instr_issue_id);
+          const auto &ie = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(issue_entry_id_issue);
+          const auto &mq_id = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               issue_stage_i__DOT__i_scoreboard__DOT__mem_q);
           int sbe_id = (int)(sizeof(mq_id) / sizeof(mq_id[0])) * 32 / 16 - 3;
           auto ibits64 = [&](int base) -> uint64_t {
@@ -936,10 +973,10 @@ done_processing:
           };
           uint64_t ipc0 = id_pc(0);
           uint64_t ipc1 = id_pc(1);
-          uint64_t pcex = (uint64_t)top->rootp->G6LC_CVA6_C0(pc_id_ex);
-          unsigned iptr = (unsigned)top->rootp->G6LC_CVA6_C0(
+          uint64_t pcex = (uint64_t)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(pc_id_ex);
+          unsigned iptr = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               issue_stage_i__DOT__i_scoreboard__DOT__issue_pointer_q);
-          unsigned cptr = (unsigned)top->rootp->G6LC_CVA6_C0(
+          unsigned cptr = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               issue_stage_i__DOT__i_scoreboard__DOT__commit_pointer_q);
           auto in_tail_pc = [](uint64_t pc) -> bool {
             uint64_t p = pc & 0xffffffffULL;
@@ -964,7 +1001,7 @@ done_processing:
           // Per-slot sbe.pc: sb_mem_t is {issued,cancelled,fpr,sbe} with
           // sbe.pc at the sbe MSB. Slot index is the trans_id. Do not scan
           // the whole entry (jal bp.predict_address is 12888 too).
-          const auto &mq = top->rootp->G6LC_CVA6_C0(
+          const auto &mq = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               issue_stage_i__DOT__i_scoreboard__DOT__mem_q);
           int mwords = (int)(sizeof(mq) / sizeof(mq[0]));
           int nent = 16;
@@ -1024,28 +1061,28 @@ done_processing:
 #if 0  // G6LC_FETCH_B debug signals are not in the verilated public interface; re-enable after adding /* verilator public */ to the wires.
         if (trace_on && ((main_time >= 103000 && main_time <= 180000) ||
                          (main_time >= 2448000 && main_time <= 2453000))) {
-          unsigned fifk = (unsigned)top->rootp->G6LC_CVA6_C0(flush_ctrl_if);
-          unsigned repl = (unsigned)top->rootp->G6LC_CVA6_C0(
+          unsigned fifk = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(flush_ctrl_if);
+          unsigned repl = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               i_frontend__DOT__replay);
-          unsigned k1 = (unsigned)top->rootp->G6LC_CVA6_C0(
+          unsigned k1 = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               i_frontend__DOT__kill_s1);
-          unsigned k2 = (unsigned)top->rootp->G6LC_CVA6_C0(
+          unsigned k2 = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               i_frontend__DOT__kill_s2);
-          unsigned bpf = (unsigned)top->rootp->G6LC_CVA6_C0(
+          unsigned bpf = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               i_frontend__DOT__bp_fire);
-          unsigned pend = (unsigned)top->rootp->G6LC_CVA6_C0(
+          unsigned pend = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               i_frontend__DOT__leftover_pending);
-          unsigned lov = (unsigned)top->rootp->G6LC_CVA6_C0(
+          unsigned lov = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               i_frontend__DOT__leftover_valid);
-          unsigned qfull = (unsigned)top->rootp->G6LC_CVA6_C0(
+          unsigned qfull = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               i_frontend__DOT__i_instr_queue__DOT__instr_queue_full);
-          uint64_t knpc = (uint64_t)top->rootp->G6LC_CVA6_C0(
+          uint64_t knpc = (uint64_t)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               i_frontend__DOT__npc_q);
-          uint64_t kvaddr = (uint64_t)top->rootp->G6LC_CVA6_C0(
+          uint64_t kvaddr = (uint64_t)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               i_frontend__DOT__icache_vaddr_q);
-          uint64_t btgt = (uint64_t)top->rootp->G6LC_CVA6_C0(
+          uint64_t btgt = (uint64_t)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               i_frontend__DOT__bp_tgt_q);
-          uint64_t lpc = (uint64_t)top->rootp->G6LC_CVA6_C0(
+          uint64_t lpc = (uint64_t)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
               i_frontend__DOT__leftover_pc);
           unsigned misp = k1 && !repl && !fifk;
           uint64_t knpc32 = knpc & 0xffffffffULL;
@@ -1154,15 +1191,15 @@ done_processing:
               // Ports (load_paddr_i, st_fwd_*) are not public in the
               // Verilator v5.008 model. Internals g1ao_hold_* are.
               // g1ao_hold_* only survive DCE when SuperscalarEn && NrHarts>1.
-              unsigned hv = (unsigned)G6LC_TB_LEGACY_HOLD(top->rootp->G6LC_CVA6_C0(
+              unsigned hv = (unsigned)G6LC_TB_LEGACY_HOLD(G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
                   ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_v_q));
-              unsigned hh = (unsigned)G6LC_TB_LEGACY_HOLD(top->rootp->G6LC_CVA6_C0(
+              unsigned hh = (unsigned)G6LC_TB_LEGACY_HOLD(G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
                   ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_hit));
-              unsigned hbe = (unsigned)G6LC_TB_LEGACY_HOLD(top->rootp->G6LC_CVA6_C0(
+              unsigned hbe = (unsigned)G6LC_TB_LEGACY_HOLD(G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
                   ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_be_q));
-              uint64_t hpa = (uint64_t)G6LC_TB_LEGACY_HOLD(top->rootp->G6LC_CVA6_C0(
+              uint64_t hpa = (uint64_t)G6LC_TB_LEGACY_HOLD(G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
                   ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_pa_q));
-              uint64_t hdata = (uint64_t)G6LC_TB_LEGACY_HOLD(top->rootp->G6LC_CVA6_C0(
+              uint64_t hdata = (uint64_t)G6LC_TB_LEGACY_HOLD(G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
                   ex_stage_i__DOT__lsu_i__DOT__i_store_unit__DOT__store_buffer_i__DOT__g1ao_hold_data_q));
               bool in_win = (cack & 1u) && g6lc_in_win(cpc, r.lo, r.hi);
               uint64_t filt = r.off;
@@ -1194,13 +1231,13 @@ done_processing:
               r.last_hold_data = hdata;
 #ifdef G6LC_TRACE_WT_WBUFFER
             } else if (r.kind == G6LC_LOG_WRACK && have_wrack) {
-              unsigned wreq = (unsigned)top->rootp->G6LC_CVA6_C0(
+              unsigned wreq = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
                   gen_cache_wt__DOT__i_cache_subsystem__DOT__i_wt_dcache__DOT__wr_req);
-              unsigned wack = (unsigned)top->rootp->G6LC_CVA6_C0(
+              unsigned wack = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
                   gen_cache_wt__DOT__i_cache_subsystem__DOT__i_wt_dcache__DOT__wr_ack);
-              unsigned wbe = (unsigned)top->rootp->G6LC_CVA6_C0(
+              unsigned wbe = (unsigned)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
                   gen_cache_wt__DOT__i_cache_subsystem__DOT__i_wt_dcache__DOT__wr_data_be);
-              uint64_t wdata = (uint64_t)top->rootp->G6LC_CVA6_C0(
+              uint64_t wdata = (uint64_t)G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(
                   gen_cache_wt__DOT__i_cache_subsystem__DOT__i_wt_dcache__DOT__wr_data);
               bool live = wreq != 0;
               bool chg = wreq != r.last_wr_req || wack != r.last_wr_ack ||
@@ -1280,7 +1317,7 @@ done_processing:
       static int path0_logs = 0;
       static int mentry_logs = 0;
       static int alias_logs = 0;
-      const auto &ci_ev = top->rootp->G6LC_CVA6_C0(issue_stage_i__DOT____Vcellout__i_scoreboard__commit_instr_o);
+      const auto &ci_ev = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(issue_stage_i__DOT____Vcellout__i_scoreboard__commit_instr_o);
       int words_ev = (int)(sizeof(ci_ev) / sizeof(ci_ev[0]));
       int W_ev = (words_ev * 32) / 2;
       int pc0_ev = W_ev - 64;
@@ -1288,9 +1325,9 @@ done_processing:
       for (int i = 0; i < 64; i++)
         if ((ci_ev[(pc0_ev + i) / 32] >> ((pc0_ev + i) % 32)) & 1u)
           cpc_ev |= (uint64_t)1 << i;
-      auto cack_ev = top->rootp->G6LC_CVA6_C0(commit_ack);
+      auto cack_ev = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(commit_ack);
       // SMT banked RF: hart0 bank (gen_single_bank removed)
-      const auto &rf_ev = top->rootp
+      const auto &rf_ev = G6LC_CORE_ROOT(0)
           ->G6LC_TB_RF(G6LC_CVA6_C0, 0);
       auto ge = [&](int n) -> uint64_t {
         return (uint64_t)rf_ev[2 * n] | ((uint64_t)rf_ev[2 * n + 1] << 32);
@@ -1326,7 +1363,7 @@ done_processing:
         mentry_logs++;
       }
       // One-shot when we first see alias memchr active (npc in loop + ra)
-      auto npc_ev = top->rootp->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
+      auto npc_ev = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
       uint64_t np = (uint64_t)npc_ev;
       if (alias_logs < 5 && ra_ev == 0x80013818ULL &&
           np >= 0x80004c4aULL && np < 0x80004c80ULL &&
@@ -1392,7 +1429,7 @@ done_processing:
       // misp[6], taken[5], cf[4:2], hart[1], ckpt_restore[0].
       // branchpredict_sbe: cf[66:64], predict_address[63:0].
       static int retex_logs = 0;
-      auto &rb = top->rootp
+      auto &rb = G6LC_CORE_ROOT(0)
           ->G6LC_CVA6_C0(ex_stage_i__DOT____Vcellout__branch_unit_i__resolved_branch_o);
       auto rb_bit = [&](int b) -> unsigned {
         return (rb[b / 32] >> (b % 32)) & 1u;
@@ -1410,11 +1447,11 @@ done_processing:
       unsigned rb_taken = rb_bit(5);
       unsigned rb_cf = (unsigned)rb_bits(2, 3);
       unsigned rb_ckpt = rb_bit(0);
-      auto bv_q = top->rootp
+      auto bv_q = G6LC_CORE_ROOT(0)
           ->G6LC_CVA6_C0(issue_stage_i__DOT__i_issue_read_operands__DOT__branch_valid_q);
-      auto pc_ex = (uint64_t)top->rootp
+      auto pc_ex = (uint64_t)G6LC_CORE_ROOT(0)
           ->G6LC_CVA6_C0(pc_id_ex);
-      auto &bpv = top->rootp
+      auto &bpv = G6LC_CORE_ROOT(0)
           ->G6LC_CVA6_C0(issue_stage_i__DOT____Vcellout__i_issue_read_operands__branch_predict_o);
       // predict_address is low 64 of 67-bit sbe
       uint64_t bp_pred = (uint64_t)bpv[0] | (((uint64_t)bpv[1] & 0xffffffffULL) << 32);
@@ -1466,24 +1503,24 @@ done_processing:
          // Hang-7: gap between path0 success (~130k) and alias memchr (~136k)
          (main_time >= 130000 && main_time <= 140000 && (main_time % 200) == 0))) {
 #if (VERILATOR_VERSION_INTEGER >= 5000000)
-      auto npc0 = top->rootp->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
+      auto npc0 = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
 #if !defined(CVA6_PROBE_NO_CORE1)
-      auto npc1 = top->rootp->G6LC_CVA6_C1(i_frontend__DOT__npc_q);
+      auto npc1 = G6LC_CORE_ROOT(1)->G6LC_CVA6_C1(i_frontend__DOT__npc_q);
 #else
       uint64_t npc1 = 0;
 #endif
       // Hang-4: instr_queue stores realign PC per FIFO word; sequential pc_q is
       // no longer on the output path (Verilator DCE). Probe issue-port0 address
       // from packed fetch_entry_o (see fetch_entry_t: address near head).
-      const auto &fe0 = top->rootp->G6LC_CVA6_C0(i_frontend__DOT____Vcellout__i_instr_queue__fetch_entry_o);
+      const auto &fe0 = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(i_frontend__DOT____Vcellout__i_instr_queue__fetch_entry_o);
       // Dual-issue pack: port0 in low bits. address is VLEN at a stable offset;
       // fall back to npc if layout shifts. Bits [63:0] commonly hold address
       // when address is the first wide field after instruction in some packs —
       // use commit-adjacent npc as reliable IQ progress proxy.
       uint64_t pc_iq0 = (uint64_t)npc0;
-      auto ic0 = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__state_q);
+      auto ic0 = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__state_q);
 #if !defined(CVA6_PROBE_NO_CORE1)
-      auto ic1 = top->rootp->G6LC_CVA6_C1(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__state_q);
+      auto ic1 = G6LC_CORE_ROOT(1)->G6LC_CVA6_C1(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__state_q);
 #else
       unsigned ic1 = 0;
 #endif
@@ -1505,11 +1542,11 @@ done_processing:
 #endif
       auto rom_req = top->rootp->ariane_testharness__DOT__rom_req;
       auto rom_axi_st = top->rootp->ariane_testharness__DOT__i_axi2rom__DOT__state_q;
-      auto pend0 = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__genblk1__DOT__i_axi_arbiter__DOT__icache_miss_pending_q);
-      auto ar0 = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__genblk1__DOT__i_axi_arbiter__DOT____Vcellout__i_hpdcache_mem_to_axi_read__axi_ar_valid_o);
+      auto pend0 = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__genblk1__DOT__i_axi_arbiter__DOT__icache_miss_pending_q);
+      auto ar0 = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__genblk1__DOT__i_axi_arbiter__DOT____Vcellout__i_hpdcache_mem_to_axi_read__axi_ar_valid_o);
 #if !defined(CVA6_PROBE_NO_CORE1)
-      auto pend1 = top->rootp->G6LC_CVA6_C1(gen_cache_hpd__DOT__i_cache_subsystem__DOT__genblk1__DOT__i_axi_arbiter__DOT__icache_miss_pending_q);
-      auto ar1 = top->rootp->G6LC_CVA6_C1(gen_cache_hpd__DOT__i_cache_subsystem__DOT__genblk1__DOT__i_axi_arbiter__DOT____Vcellout__i_hpdcache_mem_to_axi_read__axi_ar_valid_o);
+      auto pend1 = G6LC_CORE_ROOT(1)->G6LC_CVA6_C1(gen_cache_hpd__DOT__i_cache_subsystem__DOT__genblk1__DOT__i_axi_arbiter__DOT__icache_miss_pending_q);
+      auto ar1 = G6LC_CORE_ROOT(1)->G6LC_CVA6_C1(gen_cache_hpd__DOT__i_cache_subsystem__DOT__genblk1__DOT__i_axi_arbiter__DOT____Vcellout__i_hpdcache_mem_to_axi_read__axi_ar_valid_o);
 #else
       unsigned pend1 = 0, ar1 = 0;
 #endif
@@ -1528,21 +1565,21 @@ done_processing:
       auto amos_r = top->rootp->ariane_testharness__DOT__i_axi_riscv_atomics__DOT__i_atomics__DOT__i_amos__DOT__r_state_q;
       auto lrsc_r = top->rootp->ariane_testharness__DOT__i_axi_riscv_atomics__DOT__i_atomics__DOT__i_lrsc__DOT__r_state_q;
       // Hang-3: post-fence.i _reset_regs stall (I$ idle/hit, a2m IDLE)
-      auto fence_ia = top->rootp->G6LC_CVA6_C0(controller_i__DOT__fence_i_active_q);
-      auto no_st = top->rootp->G6LC_CVA6_C0(no_st_pending_commit);
-      auto wbuf_e = top->rootp->G6LC_CVA6_C0(dcache_commit_wbuffer_empty);
-      auto cack = top->rootp->G6LC_CVA6_C0(commit_ack);
-      auto iss_ptr = top->rootp->G6LC_CVA6_C0(issue_stage_i__DOT__i_scoreboard__DOT__issue_pointer_q);
-      auto cmt_ptr = top->rootp->G6LC_CVA6_C0(issue_stage_i__DOT__i_scoreboard__DOT__commit_pointer_q);
-      auto epc = top->rootp->G6LC_CVA6_C0(epc_commit_pcgen);
-      auto mepc = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mepc_q);
-      auto mcause = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mcause_q);
-      auto mtval = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mtval_q);
-      auto wfi = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, wfi_q);
-      auto flush_if = top->rootp->G6LC_CVA6_C0(flush_ctrl_if);
-      auto iq_full = top->rootp->G6LC_CVA6_C0(i_frontend__DOT__i_instr_queue__DOT__instr_queue_full);
-      auto iq_rdy = top->rootp->G6LC_CVA6_C0(i_frontend__DOT__instr_queue_ready);
-      const auto &ci = top->rootp->G6LC_CVA6_C0(issue_stage_i__DOT____Vcellout__i_scoreboard__commit_instr_o);
+      auto fence_ia = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(controller_i__DOT__fence_i_active_q);
+      auto no_st = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(no_st_pending_commit);
+      auto wbuf_e = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(dcache_commit_wbuffer_empty);
+      auto cack = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(commit_ack);
+      auto iss_ptr = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(issue_stage_i__DOT__i_scoreboard__DOT__issue_pointer_q);
+      auto cmt_ptr = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(issue_stage_i__DOT__i_scoreboard__DOT__commit_pointer_q);
+      auto epc = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(epc_commit_pcgen);
+      auto mepc = G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mepc_q);
+      auto mcause = G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mcause_q);
+      auto mtval = G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mtval_q);
+      auto wfi = G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, wfi_q);
+      auto flush_if = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(flush_ctrl_if);
+      auto iq_full = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(i_frontend__DOT__i_instr_queue__DOT__instr_queue_full);
+      auto iq_rdy = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(i_frontend__DOT__instr_queue_ready);
+      const auto &ci = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(issue_stage_i__DOT____Vcellout__i_scoreboard__commit_instr_o);
       int words_c = (int)(sizeof(ci) / sizeof(ci[0]));
       int W_c = (words_c * 32) / 2;
       int pc0_c = W_c - 64;
@@ -1551,14 +1588,14 @@ done_processing:
         if ((ci[(pc0_c + i) / 32] >> ((pc0_c + i) % 32)) & 1u)
           cmt_pc |= (uint64_t)1 << i;
       // MMU / I$ miss path (second hang: ic=READ + a2m=READ orphan)
-      auto en_tr = top->rootp->G6LC_CVA6_C0(enable_translation_csr_ex);
-      auto en_gtr = top->rootp->G6LC_CVA6_C0(enable_g_translation_csr_ex);
-      auto itlb_hit = top->rootp->G6LC_CVA6_C0(ex_stage_i__DOT__lsu_i__DOT__gen_mmu__DOT__i_cva6_mmu__DOT__itlb_lu_hit);
-      auto stlb_miss = top->rootp->G6LC_CVA6_C0(ex_stage_i__DOT__lsu_i__DOT__gen_mmu__DOT__i_cva6_mmu__DOT__shared_tlb_miss);
-      auto ptw_st = top->rootp->G6LC_CVA6_C0(ex_stage_i__DOT__lsu_i__DOT__gen_mmu__DOT__i_cva6_mmu__DOT__i_ptw__DOT__state_q);
-      auto ic_hit = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__cl_hit);
-      auto ic_inv = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__inv_q);
-      auto ic_en = top->rootp->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__cache_en_q);
+      auto en_tr = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(enable_translation_csr_ex);
+      auto en_gtr = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(enable_g_translation_csr_ex);
+      auto itlb_hit = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(ex_stage_i__DOT__lsu_i__DOT__gen_mmu__DOT__i_cva6_mmu__DOT__itlb_lu_hit);
+      auto stlb_miss = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(ex_stage_i__DOT__lsu_i__DOT__gen_mmu__DOT__i_cva6_mmu__DOT__shared_tlb_miss);
+      auto ptw_st = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(ex_stage_i__DOT__lsu_i__DOT__gen_mmu__DOT__i_cva6_mmu__DOT__i_ptw__DOT__state_q);
+      auto ic_hit = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__cl_hit);
+      auto ic_inv = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__inv_q);
+      auto ic_en = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(gen_cache_hpd__DOT__i_cache_subsystem__DOT__i_g6lc_icache__DOT__cache_en_q);
       auto a2m_addr = top->rootp->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_axi2mem__DOT__req_addr_q;
       // ax_req_q: packed {id, addr, len, size, burst}
       const auto &a2m_ax = top->rootp->ariane_testharness__DOT__i_dram_backend__DOT__gen_sim_axi__DOT__i_axi2mem__DOT__ax_req_q;
@@ -1643,7 +1680,7 @@ done_processing:
 
         // GPR snapshot: RF mem is [32][64] packed → VlWide word n = bit/32.
         // xN lives at bits [64*N +: 64] → words 2*N, 2*N+1 (LE).
-        const auto &rf = top->rootp
+        const auto &rf = G6LC_CORE_ROOT(0)
             ->G6LC_TB_RF(G6LC_CVA6_C0, 0);
         auto gpr = [&](int n) -> uint64_t {
           return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
@@ -1770,18 +1807,18 @@ done_processing:
     // R3a hang state: live NPC + per-hart CSR/RF (smt2 = 1 core × 2 banks).
     // I4o: npc0=0x32e is _start_warm hart-id scan; mepc=0 is a separate illegal.
     {
-      auto npc0 = top->rootp->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
-      auto mepc0 = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mepc_q);
-      auto mtvec = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mtvec_q);
-      auto mcause0 = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mcause_q);
-      auto wfi0 = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, wfi_q);
-      auto mepc1 = G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 1, mepc_q));
-      auto mcause1 = G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 1, mcause_q));
-      auto wfi1 = G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 1, wfi_q));
-      auto active = G6LC_TB_H1(top->rootp->G6LC_CVA6_C0(i_smt_thread_select__DOT__gen_smt__DOT__active_q));
-      const auto &rf0 = top->rootp->G6LC_TB_RF(G6LC_CVA6_C0, 0);
+      auto npc0 = G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(i_frontend__DOT__npc_q);
+      auto mepc0 = G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mepc_q);
+      auto mtvec = G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mtvec_q);
+      auto mcause0 = G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mcause_q);
+      auto wfi0 = G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, wfi_q);
+      auto mepc1 = G6LC_TB_H1(G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 1, mepc_q));
+      auto mcause1 = G6LC_TB_H1(G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 1, mcause_q));
+      auto wfi1 = G6LC_TB_H1(G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 1, wfi_q));
+      auto active = G6LC_TB_H1(G6LC_CORE_ROOT(0)->G6LC_CVA6_C0(i_smt_thread_select__DOT__gen_smt__DOT__active_q));
+      const auto &rf0 = G6LC_CORE_ROOT(0)->G6LC_TB_RF(G6LC_CVA6_C0, 0);
 #if defined(G6LC_TB_BANKED)
-      const auto &rf1 = top->rootp->G6LC_TB_RF(G6LC_CVA6_C0, 1);
+      const auto &rf1 = G6LC_CORE_ROOT(0)->G6LC_TB_RF(G6LC_CVA6_C0, 1);
 #endif
       auto gpr64 = [](const auto &rf, int n) -> uint64_t {
         return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);
@@ -1789,7 +1826,7 @@ done_processing:
       uint64_t ra0 = gpr64(rf0, 1), ra1 = G6LC_TB_H1(gpr64(rf1, 1));
       uint64_t sp0 = gpr64(rf0, 2), sp1 = G6LC_TB_H1(gpr64(rf1, 2));
       uint64_t s00 = gpr64(rf0, 8), s01 = G6LC_TB_H1(gpr64(rf1, 8));
-      auto mtval0 = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mtval_q);
+      auto mtval0 = G6LC_CORE_ROOT(0)->G6LC_TB_CSR(G6LC_CVA6_C0, 0, mtval_q);
       uint64_t t00 = gpr64(rf0, 5), t01 = G6LC_TB_H1(gpr64(rf1, 5));
       uint64_t t10 = gpr64(rf0, 6), t11 = G6LC_TB_H1(gpr64(rf1, 6));
       uint64_t t20 = gpr64(rf0, 7), t21 = G6LC_TB_H1(gpr64(rf1, 7));
@@ -1823,17 +1860,17 @@ done_processing:
     // G6LC_CVA6_GEN_ACC is Makefile-only for server_math_v (smt2 stays C0).
 #if defined(G6LC_CVA6_GEN_ACC)
     {
-      auto npc0 = top->rootp->G6LC_CVA6_C1(i_frontend__DOT__npc_q);
-      auto mepc0 = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C1, 0, mepc_q);
-      auto mcause0 = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C1, 0, mcause_q);
-      auto wfi0 = top->rootp->G6LC_TB_CSR(G6LC_CVA6_C1, 0, wfi_q);
-      auto mepc1 = G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C1, 1, mepc_q));
-      auto mcause1 = G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C1, 1, mcause_q));
-      auto wfi1 = G6LC_TB_H1(top->rootp->G6LC_TB_CSR(G6LC_CVA6_C1, 1, wfi_q));
-      auto active = G6LC_TB_H1(top->rootp->G6LC_CVA6_C1(i_smt_thread_select__DOT__gen_smt__DOT__active_q));
-      const auto &rf0 = top->rootp->G6LC_TB_RF(G6LC_CVA6_C1, 0);
+      auto npc0 = G6LC_CORE_ROOT(1)->G6LC_CVA6_C1(i_frontend__DOT__npc_q);
+      auto mepc0 = G6LC_CORE_ROOT(1)->G6LC_TB_CSR(G6LC_CVA6_C1, 0, mepc_q);
+      auto mcause0 = G6LC_CORE_ROOT(1)->G6LC_TB_CSR(G6LC_CVA6_C1, 0, mcause_q);
+      auto wfi0 = G6LC_CORE_ROOT(1)->G6LC_TB_CSR(G6LC_CVA6_C1, 0, wfi_q);
+      auto mepc1 = G6LC_TB_H1(G6LC_CORE_ROOT(1)->G6LC_TB_CSR(G6LC_CVA6_C1, 1, mepc_q));
+      auto mcause1 = G6LC_TB_H1(G6LC_CORE_ROOT(1)->G6LC_TB_CSR(G6LC_CVA6_C1, 1, mcause_q));
+      auto wfi1 = G6LC_TB_H1(G6LC_CORE_ROOT(1)->G6LC_TB_CSR(G6LC_CVA6_C1, 1, wfi_q));
+      auto active = G6LC_TB_H1(G6LC_CORE_ROOT(1)->G6LC_CVA6_C1(i_smt_thread_select__DOT__gen_smt__DOT__active_q));
+      const auto &rf0 = G6LC_CORE_ROOT(1)->G6LC_TB_RF(G6LC_CVA6_C1, 0);
 #if defined(G6LC_TB_BANKED)
-      const auto &rf1 = top->rootp->G6LC_TB_RF(G6LC_CVA6_C1, 1);
+      const auto &rf1 = G6LC_CORE_ROOT(1)->G6LC_TB_RF(G6LC_CVA6_C1, 1);
 #endif
       auto gpr64 = [](const auto &rf, int n) -> uint64_t {
         return (uint64_t)rf[2 * n] | ((uint64_t)rf[2 * n + 1] << 32);

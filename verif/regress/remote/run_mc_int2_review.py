@@ -29,7 +29,11 @@ import shutil
 import subprocess
 import tarfile
 from pathlib import Path
-from yosys_bin import yosys_bin
+try:
+    from yosys_bin import yosys_bin
+except ImportError:  # pushed alone by the directed drivers (t17/directed.sh): synth is not on that path
+    def yosys_bin():
+        return os.environ.get('YOSYS') or 'yosys'
 
 # REVIEW_MC_MARCH/REVIEW_MC_MABI override the ISA/ABI for directed tests that
 # need extensions beyond the integer baseline (mc_fp_smt.S needs rv64...d).

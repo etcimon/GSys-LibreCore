@@ -1125,7 +1125,20 @@ prerequisite for this work under the existing dual license. No licensing policy 
   mispredict restores 3,033 vs 2,724: the XOR fold moves the alias set and
   nets **+0.4 % CPI worse**. `fdt_next_tag+0x74 jr` unchanged (582 vs 595
   slow edges of ~2,040: 29 %, the ITTAGE item). **Verdict: `BPBaseHash`
-  stays 0 everywhere (seam kept, leaf kept, not adopted).**
+  stays 0 everywhere (seam kept, leaf kept, not adopted).** *1c (GHR 24 →
+  48, measured on top of the hash, `ooocoh-t23d-server-ghr48-p2win`):* P2
+  CPI **1.0459** (1,073,643 / 1,026,483), boot-core restores 2,765 — between
+  the hash (1.0486) and the direct baseline (1.0440); the `jr` slow edges
+  510 / 2,011 (25 % vs 29 %). A longer direction history recovers part of
+  the hash loss and does not beat the 24-bit direct table; a GHR-48-only
+  arm would be the fair test and its ceiling is ≈ 0.3 % P2 — parked.
+  *1b census (`+ind_stats`, same run):* `fdt_next_tag+0x74` on the boot
+  core: 2,011 resolves, **565 target changes, 276 fold conflicts, 75
+  distinct folds** — half of the target changes happen under an identical
+  48-bit direction history, i.e. the fold cannot separate them and a PATH
+  fold (caller PC bits) could; the ceiling is ≈ 276 mispredicts ≈ 0.65 % of
+  P2 at this site alone. That is the measured case for the path register
+  (+ checkpoint widening) — a follow-up, not landed here.
 - [ ] **T24 — `COH_FILTERED` server: L3 victim back-invalidation wedges a
   store once a set overflows while a second core is live (found
   2026-10-12 by the T23 directed program, item 4).** `mc_l3_evict_inclusion.S`
@@ -1145,17 +1158,114 @@ prerequisite for this work under the existing dual license. No licensing policy 
   inv_core_ready[c] && !inv_hub[c].valid`); each core's acceptance is the
   one-entry `g6lc_inval_retain` that injects into the HPDcache read-response
   path when no real response is valid — the blocked party is not yet named.
-  Owed: a server build with the new `+incl_trace` probe (`g6lc_cluster.sv
-  gen_incl_trace`: per-core bus owner / ready / l1 handshake / drain done mask
-  while a drain is pending, `[incl] final` census; lint clean on the server)
-  run on `mc_l3_evict_inclusion.S -DEVICT_LINES=24`, then the fix. Until
-  then the server's `COH_FILTERED` is **not** Linux-ready: an L3 set overflow
-  is routine under a kernel, never reached by the 33 M-cycle OpenSBI boot.
+  *Diagnosis so far (2026-10-12, later):* the `+incl_trace` run on
+  `ooocoh-t23j-server-incl-mt4-build` **exonerates the inclusive engine** —
+  5 drains, 1 cycle each, every core `ready=1`, `pending_at_end=0`; the hub
+  holds no AW at the end (`[coh-stall]`), and the `+smt_stats` L2 census
+  (`[l2-stall] l2-age`) shows **both the L2 and the L3 idle** (`state_q`
+  S_IDLE, no slave or master valid, last request `0x808c0000` = the 16th
+  same-set line). So the `sd` that never retires never leaves the core: the
+  wedge is inside the core's write path (HPDcache write-through / store
+  buffer after the 6 injected invalidations core 0 received), not in the
+  uncore. **It is RTL, not the compiler:** the pinned-compiler T21i server
+  model (`ooocoh-t21i-server-mt4-build`) hangs identically at 24 lines; a
+  2-core `COH_FILTERED` + `L3InclusiveEn` overlay of `g6lc64_ooo_int2_l3`
+  (1 MiB L3, pinned compiler, `ooocoh-t24d-int2l3f-pin-build`) **passes 16
+  and 24 lines with the inclusion check** — the trigger needs the 4-core /
+  4 MiB server geometry. **Root cause (FST trace of the pinned server
+  model, `ooocoh-t24i-server-pin-fst-mt4-build`, read with
+  `t21/vcd_scan.py` / `iq_decode.py`): not coherence at all — an OoO
+  store-issue deadlock.** Hart 0's `sd` (tid 0x21, data = the `ld t1` of
+  the same iteration, tid 0x1f) waits in the IQ (entry 3, `rs2_rdy=0`,
+  `prs2=76`) while that load takes the slow L3-victim path; the loads of
+  the next two iterations return first (cycles 1565, 1588), their `sd`s
+  (tids 0x27, 0x33) issue at 1601 / 1603 and fill **both slots of the
+  store unit's speculative queue** (`speculative_status_cnt_q`=2, depth 2).
+  The old load returns at 1631, the old store becomes ready (`rdy=111` by
+  1640) and is granted on port 0 every cycle, but `issue_read_operands`
+  never acks it: the store unit is not ready (queue full), and the queue
+  is freed only by commit, which is in order and blocked on this very
+  store at the ROB head → `sb_full` at 1635, nothing retires, the harness
+  times out. The LSQ hold-to-commit reservation protects the LSQ, not the
+  store unit's queue. **Fix (`core/ooo/g6lc_iq.sv`): stores issue in age
+  order among stores** — `is_st && older_st_iq` joins the ready gate (the
+  CSR age gate's shape, one DEPTH-wide AND-OR per entry off the existing
+  age matrix; no throughput lost, the queue drains in program order
+  anyway). Leaf `verif/tb/core/tb_g6lc_iq_store_age.sv` +
+  `run-iq-store-age.sh`: positive 10 checks, `+oracle_negative` fails,
+  `+define+G6LC_MUT_ST_NOAGE` caught at `IQ_ST_AGE`. Pinned server
+  (`ooocoh-t24k-server-stord-mt4-build`) and ooo
+  (`ooocoh-t24k-ooo-stord-build`) rebuilds in flight for the 24/48-line
+  repro, the probe battery (cycle counts may move: stores no longer pass
+  each other) and the 300 k segment. Why only here: the inversion needs a
+  store whose data depends on a load slower than the *next* iterations'
+  loads — the inclusive L3's first victim drain on the 4-core server is
+  the first workload that produced it; the 2-core config and the
+  single-hart churn never reorder those loads.
   The other two directed programs pass on the same model:
   `mc_multi_writer_line.S` (4 cores × 1,500 plain RMW on one line + 6,000
   `amoadd.d` on one word; 83,356 cycles; negative arm fails as expected) and
   `mc_cbo_contended.S` (3 writers × 1,500 under a `cbo.clean`/`cbo.flush` loop
   from hart 0; 22,568 cycles). Driver `t21/coh-t23.sh`.
+- [ ] **T25 — Verilator fork miscompiles `g6lc64_ooo_int2_l3` (found
+  2026-10-12 building the T24 2-core repro).** With the split-loops `.vlt`,
+  the fork emits 12 statements that write `commit_ack & ~retire_hart`
+  logic of the SMT pc bank into the FPU's `inp_pipe_ready__BRA__0__KET__[0U]`
+  (a 1-bit split element indexed as a word) — g++ rejects them, so the model
+  does not build; on `g6lc64_ooo` and the server the same compiler is
+  RVFI-exact, so the corruption is config-shaped. Bisected by compiler
+  (`t21/q-bisect-i2.sh`, verilate-only): pinned 0 · `2d418315f` 0 ·
+  **`ec4d3cd12` 12** · `83d24ed6e` 12 · `b596e96c9` 12 · HEAD 12. Inside
+  `ec4d3cd12`, disabling the run-time element-read mux (`VLT_NODYN`, wt8)
+  changes nothing → the culprit is the **SplitVar move** (after
+  `dearrayAll`/`linkDotArrayed`/`debeginAll` + the early unroll), i.e. a
+  stale node pointer in the collected `RefsInModule` sets once SplitVar runs
+  on the de-begun tree — **not confirmed**: a liveness check on every
+  collected SEL/VARREF before use (fork `819db5b8d`) finds none stale, so
+  the corruption is a logic error of the split on that tree, not a dangling
+  pointer. Moving the unroll+split block back to upstream's position
+  (before `dearrayAll`) or between `linkDotArrayed` and `debeginAll` is
+  not possible as is: an unroll before debegin clones unnamed begin
+  blocks and their `automatic` locals into duplicate declarations
+  (`unnamedblk6.unnamedblk7.fmt`, 50+ errors) — the unroll would need to
+  uniquify cloned block names first. Owed: a reduced reproducer and the
+  fix; until then every fork-built model is qualified only by its own RVFI
+  exactness (ooo, server: exact) and `int2_l3` stays on the pinned compiler.
+- [~] **Hierarchical core (`G6LC_CORE_HB`, 2026-10-12): the structural
+  lever of guide §6.1 as a build.** `corev_apu/src/g6lc_core_hb{,_pkg}.sv`
+  close the core's parameterisation over the target package (hier blocks
+  take no type/struct parameters), `verilator_config.vlt` marks it
+  `hier_block`, `g6lc_cluster.sv` selects it under `` `G6LC_CORE_HB ``,
+  the Makefile adds `--hierarchical` + the child include dir on that
+  define (`soft-ladder-build-harness.sh` passes `defines=` from
+  `SOFT_LADDER_BUILD_DEFINES`), and `g6lc_tb.cpp` reaches the cores'
+  internals through `G6LC_CORE_ROOT(c)` = the child model the wrapper
+  registered (fork `adb3dfcf9`: `Verilated::hierModelRegister/Find`).
+  Two fork defects fixed on the way (`adb3dfcf9`): the child re-parsed
+  every `-f` file whose line used a `${VAR}` (verbatim-vs-substituted
+  compare), so `-Wno-MODDUP` deleted the second package copies under live
+  import pointers (LinkDot segfault — now a named internal error); the
+  runtime dir needs `bin/verilator` (perl) for the child make. Server HB
+  build in flight (`ooocoh-t24h-server-hb-mt4-build5`): child library
+  verilated (46 C++ files for the whole core, once), top verilated, C++
+  compiling. **Measured (`ooocoh-t24h-server-hb-mt4-build6`, fork
+  `819db5b8d` with the V3Reloop initsp fix it needed):** builds in 33 min
+  (flat 52), 99 C++ files (flat 377), text 25.8 MB (flat 86.9), and it is
+  **exact** — `mc_multi_writer_line` at the flat model's 83,356 cycles,
+  300 k boot segment per-core RVFI byte-identical — but **2.1× slower**:
+  1,467 / 1,477 vs 3,131 / 3,109 cycles/s alternating, user time 790 s
+  vs 363 s. The cost is the `--lib-create` evaluation model itself: the
+  wrapper calls `combo_update` (a full child `eval`) on *any* input change
+  and `seq_update` on both clock edges, so each core's comb region runs
+  two to three times per cycle instead of once in the flat schedule, and
+  the inputs never rest — `rtc_time_i` changes every cycle, so a gated
+  (`CoreSleepGate`) core would still be evaluated every cycle. **Verdict:**
+  the hierarchical core stays as an opt-in build (`T16_DEFINES=G6LC_CORE_HB`)
+  for what it proves — compile time and an exact per-core library — not as
+  a speed lever; the per-instance skip of guide §6.1 needs a native
+  instance-partitioned scheduler inside one model, which Verilator does
+  not have (the DPI boundary is the wrong primitive). Recorded in guide
+  §7.5.
 - [x] **T20 closed (2026-10-09): first strict 8-hart `g6lc64_ooo_server`
   OpenSBI boot — PASS 38,988,173 cycles** (`ooocoh-t20-final-server-osbi-48M`,
   `strictDualPassed`, force 0, `[hpd-phantom]`/`[hpd-zombie]`/`[misp-hart]` 0,

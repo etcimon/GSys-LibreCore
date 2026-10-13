@@ -192,6 +192,8 @@ src :=  $(if $(spike-tandem),verif/tb/core/uvma_core_cntrl_pkg.sv)              
         $(if $(spike-tandem),corev_apu/tb/common/spike.sv)                           \
         core/cva6_rvfi.sv                                                            \
         corev_apu/src/ariane.sv                                                      \
+        corev_apu/src/g6lc_core_hb_pkg.sv                                            \
+        corev_apu/src/g6lc_core_hb.sv                                                \
         corev_apu/src/g6lc_ara_attach.sv                                             \
         corev_apu/src/g6lc_axi_2to1_mux.sv                                           \
         corev_apu/coherence/g6lc_coherence_pkg.sv                                    \
@@ -812,9 +814,10 @@ verilate_command := $(verilator) --no-timing verilator_config.vlt $(verilator_as
                     $(if $(TRACE_COMPACT), --trace-fst $(VL_INC_DIR)/verilated_fst_c.cpp)                        \
                     $(if $(TRACE_FAST), --trace $(VL_INC_DIR)/verilated_vcd_c.cpp)                               \
                     -LDFLAGS "-L$(RISCV)/lib -L$(SPIKE_INSTALL_DIR)/lib -Wl,-rpath,$(RISCV)/lib -Wl,-rpath,$(SPIKE_INSTALL_DIR)/lib -lfesvr -lriscv -ldisasm -lyaml-cpp $(if $(PROFILE), -g -pg,) -lpthread $(if $(TRACE_COMPACT), -lz,)" \
-                    -CFLAGS "$(CFLAGS)$(if $(PROFILE), -g -pg,) -DVL_DEBUG -I$(SPIKE_INSTALL_DIR)$(if $(or $(findstring G6LC_HAVE_LITEDRAM,$(defines)),$(findstring G6LC_AI_DRAM_CLASS1,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_2,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_4,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_8,$(defines))), -DG6LC_HAVE_LITEDRAM,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_2,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_2,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_4,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_4,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_8,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_8,)$(if $(findstring G6LC_AI_DRAM_WIDE_CH,$(defines)), -DG6LC_AI_DRAM_WIDE_CH,)" \
+                    -CFLAGS "$(CFLAGS)$(if $(PROFILE), -g -pg,) -DVL_DEBUG -I$(SPIKE_INSTALL_DIR)$(if $(or $(findstring G6LC_HAVE_LITEDRAM,$(defines)),$(findstring G6LC_AI_DRAM_CLASS1,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_2,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_4,$(defines)),$(findstring G6LC_AI_DRAM_CHANS_8,$(defines))), -DG6LC_HAVE_LITEDRAM,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_2,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_2,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_4,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_4,)$(if $(findstring G6LC_AI_DRAM_SIM_CHANS_8,$(defines)), -DG6LC_AI_DRAM_SIM_CHANS_8,)$(if $(findstring G6LC_AI_DRAM_WIDE_CH,$(defines)), -DG6LC_AI_DRAM_WIDE_CH,)$(if $(findstring G6LC_CORE_HB,$(defines)), -DG6LC_CORE_HB -I$(ver-library)/Vg6lc_core_hb,)" \
                     $(if $(SPIKE_TANDEM), +define+SPIKE_TANDEM, )                                                \
                     --cc --vpi                                                                                   \
+                    $(if $(findstring G6LC_CORE_HB,$(defines)), --hierarchical,)                                 \
                     $(list_incdir) --top-module ariane_testharness                                               \
                     --threads-dpi none                                                                           \
                     --Mdir $(ver-library) -O3                                                                    \

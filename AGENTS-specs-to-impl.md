@@ -1264,3 +1264,9 @@ Evidence: plan T21c / T21d (`t21/T21-FOLLOWUP-REPORT.md`, `t21/T21D-REPORT.md`).
   `BPIndirectEntries 128` (base alias period 256 B -> 2 KB).
 - `core/store_buffer.sv`: `ooo_no_younger_forward` asserts a visible (older) source per forwarded byte.
 Evidence: plan T21e (`t21/T21E-REPORT.md`).
+
+## T24 — store issue age order (2026-10-12)
+
+| Requirement | Implementation | Evidence |
+|---|---|---|
+| A store at the ROB head must always be able to issue: the store unit's speculative queue (freed only by in-order commit) must never be filled by younger stores | `core/ooo/g6lc_iq.sv` ready gate `!(is_st && older_st_iq)` — a store is issuable only when no older store is still in the IQ (age matrix `older_q`), the CSR age gate's shape | `verif/tb/core/tb_g6lc_iq_store_age.sv` (positive / oracle-negative / `G6LC_MUT_ST_NOAGE`); system witness `mc_l3_evict_inclusion.S` 24 lines on the 4-core server (hung before, FST trace `prof-t24fst`) |

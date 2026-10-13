@@ -47,3 +47,7 @@ lint_off -file "*rv_tracer.sv"
 lint_off -file "*te_priority.sv"
 lint_off -file "*te_resync_counter.sv"
 lint_off -rule SYMRSVDWORD -file "*/corev_apu/src/ariane.sv"
+
+// G6LC: the per-core unit of hierarchical Verilation (corev_apu/src/g6lc_core_hb.sv).
+// Ignored without --hierarchical; with it, every core instance shares one child library.
+hier_block -module "g6lc_core_hb"

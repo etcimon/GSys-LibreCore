@@ -2413,3 +2413,7 @@ peer cached; **HANGS at 24+ lines with a live peer on the server, passes on `g6l
 T24), `mini_l2set_stride.S` (the single-hart arm of the same churn; PASS). Driver
 `build-platform/workspace/build/n1d-remote/t21/coh-t23.sh` (`t17/directed.sh` route, hart masks
 1111 / 0011 / 1001).
+
+## T24 store age-order leaf (2026-10-12)
+
+`verif/tb/core/run-iq-store-age.sh` → `tb_g6lc_iq_store_age.sv`: S1 an older not-ready store holds a younger ready store but not a younger ALU op; S2 the older store issues first once its tag arrives, the younger the cycle after; S3 a younger ready load is not held (that is the `st_unresolved` gate). Positive 10 checks, `+oracle_negative` must fail, `+define+G6LC_MUT_ST_NOAGE` must fail `IQ_ST_AGE`. The system-level witness is `mc_l3_evict_inclusion.S -DEVICT_LINES=24` on `g6lc64_ooo_server` (T24).

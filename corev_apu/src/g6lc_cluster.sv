@@ -315,12 +315,23 @@ module g6lc_cluster
     end else begin : gen_boot_feed
       assign core_clk[c] = clk_i;
     end
+`ifdef G6LC_CORE_HB
+    // Hierarchical-Verilation build: the core is the closed wrapper
+    // g6lc_core_hb (one child library shared by every instance; see its
+    // header). Its configuration is the target package's; the cluster's must
+    // be the same one.
+    if (CVA6Cfg != g6lc_core_hb_pkg::Cfg) begin : gen_hb_cfg_mismatch
+      $error("g6lc_cluster: G6LC_CORE_HB needs CVA6Cfg == cva6_config_pkg's configuration");
+    end
+    g6lc_core_hb i_ariane (
+`else
     ariane #(
         .CVA6Cfg       (CVA6Cfg),
         .rvfi_probes_t (rvfi_probes_t),
         .noc_req_t     (axi_req_t),
         .noc_resp_t    (axi_resp_t)
     ) i_ariane (
+`endif
         .clk_i            (core_clk[c]),
         .rst_ni,
         .boot_addr_i      (PerCoreBoot ? boot_addr_core_i[c] : boot_addr_i),

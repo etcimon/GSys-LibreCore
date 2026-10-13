@@ -218,6 +218,8 @@ module g6lc_iq
       automatic logic older_unresolved_st;
       automatic logic older_csr_iq;
       automatic logic is_csr;
+      automatic logic is_st;
+      automatic logic older_st_iq;
       automatic logic is_amo;
       automatic logic is_cvxif;
       // rs3 participates only when the entry actually has an FP third source;
@@ -251,6 +253,29 @@ module g6lc_iq
       // side effects are global). Plain CSR accesses are covered by the
       // dual-entry csr_buffer's credit in issue_read_operands instead.
       is_csr = (q_chain[e].sbe.fu == CSR);
+      // T24 (2026-10-12): stores issue in age order among stores. The store
+      // unit's speculative queue is a small in-order structure that is freed
+      // only by commit, and commit is in-order through the ROB: two younger
+      // stores whose data was ready first (their loads completed ahead of an
+      // older load that waited on an L3 victim drain) issued, filled both
+      // slots, and the older store at the ROB head could never issue -- a
+      // priority-inversion deadlock the LSQ hold-to-commit reservation does
+      // not cover (it protects the LSQ, not the store unit). Witness:
+      // mc_l3_evict_inclusion.S, 24 same-set lines on the 4-core server, hart
+      // 0's sd stuck behind two speculative entries. Stores gain nothing from
+      // issuing out of order among themselves (the queue drains in program
+      // order), so the gate costs no throughput; it is the CSR age gate's
+      // shape, one DEPTH-wide AND-OR per entry off the existing age matrix.
+`ifdef G6LC_MUT_ST_NOAGE
+      is_st = 1'b0;      // review mutation: the rule is dropped
+`else
+      is_st = (q_chain[e].sbe.fu == STORE);
+`endif
+      older_st_iq = 1'b0;
+      for (int unsigned o = 0; o < DEPTH; o++)
+        if (q_chain[o].valid && q_chain[o].sbe.fu == STORE &&
+            (o != e) && older_q[o][e])
+          older_st_iq = 1'b1;
       // N1d (T10g): CSR ops issue strictly in IQ age order, not just behind
       // the csr_buffer's credit. The buffer's two entries are freed only by
       // a commit, and commit is in-order — a younger CSR claiming a credit
@@ -295,6 +320,7 @@ module g6lc_iq
           !(is_ld && (mem_stall_i ||
                       (older_unresolved_st && !q_chain[e].may_bypass))) &&
           !(is_csr && older_csr_iq) &&
+          !(is_st && older_st_iq) &&
           !(is_csr &&
             !(q_chain[e].sbe.op inside {CSR_READ, CSR_WRITE, CSR_SET, CSR_CLEAR}) &&
             (q_chain[e].sbe.trans_id != commit_ptr_i)) &&
