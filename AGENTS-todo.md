@@ -1193,11 +1193,16 @@ prerequisite for this work under the existing dual license. No licensing policy 
   age matrix; no throughput lost, the queue drains in program order
   anyway). Leaf `verif/tb/core/tb_g6lc_iq_store_age.sv` +
   `run-iq-store-age.sh`: positive 10 checks, `+oracle_negative` fails,
-  `+define+G6LC_MUT_ST_NOAGE` caught at `IQ_ST_AGE`. Pinned server
-  (`ooocoh-t24k-server-stord-mt4-build`) and ooo
-  (`ooocoh-t24k-ooo-stord-build`) rebuilds in flight for the 24/48-line
-  repro, the probe battery (cycle counts may move: stores no longer pass
-  each other) and the 300 k segment. Why only here: the inversion needs a
+  `+define+G6LC_MUT_ST_NOAGE` caught at `IQ_ST_AGE`. **Validated:** pinned server
+  `ooocoh-t24k-server-stord-mt4-build` passes `mc_l3_evict_inclusion` at
+  24 lines (2,169 cycles), 48 lines (2,866) and on peer 6 (2,169), negative
+  arms fail as expected; `ooocoh-t24k-ooo-stord-build` is Spike-exact and
+  cycle-identical on the 11 probes, the FP suite 22/22 and wprp; the 300 k
+  boot segment retires the same multiset per core as the pre-fix model
+  (cores 1–3 byte-identical, core 0 one 14-instruction SMT interleave
+  shift). Commit `268403e9d`. Owed: the strict 8-hart OpenSBI boot on the
+  fixed server (cycle count vs T21i's 33,001,884) before the server row
+  cites it. Why only here: the inversion needs a
   store whose data depends on a load slower than the *next* iterations'
   loads — the inclusive L3's first victim drain on the 4-core server is
   the first workload that produced it; the 2-core config and the
@@ -1282,8 +1287,10 @@ prerequisite for this work under the existing dual license. No licensing policy 
   Regression on HEAD: all drained anchors byte-identical to T17, FP suite
   + probes Spike-exact, formal/leaves/lint/synth at baseline. Plan T20.
 - [ ] **Server still opt-in after T20.** Owed: `COH_FILTERED` breadth —
-  **now run (T23 item 4): multi-writer lines and CBO under contention pass,
-  L3 eviction/inclusion HANGS (T24 row: a design change IS needed)** — a
+  **run (T23 item 4): multi-writer lines and CBO under contention pass; L3
+  eviction/inclusion hung and exposed the T24 OoO store-issue deadlock,
+  fixed in `g6lc_iq` (24/48 lines and peer 6 pass on the fixed server;
+  strict boot re-run owed)** — a
   Linux-class boot on a faster host (780 cyc/s on the builder), the full
   `check -assert`, and a boot-performance pass (FDT phases ≈8 M cycles
   each, drain bubbles at `SmtFetchQuantum 4`).
