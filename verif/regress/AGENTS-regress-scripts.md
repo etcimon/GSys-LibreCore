@@ -82,8 +82,12 @@ v5.008 for cross-checks), `build-platform/scripts/verilator-split-loops.vlt`
 (`SOFT_LADDER_BUILD_PGO=1`: instrumented build → the in-repo `ooo/ooo_fp_ooo.S` probe run to
 completion and to the cycle cap → `-fprofile-use`; layout only, same RVFI stream; set
 `SOFT_LADDER_BUILD_PGO_TRAIN=<elf>` for a workload-specific profile), 4 model threads
-(`SOFT_LADDER_VERILATOR_THREADS`; the review runners pass 1). Qualification cross-check rebuilds
-inside the review runners set `SOFT_LADDER_BUILD_PGO=0` and the pinned `VERILATOR_ROOT`.
+(`SOFT_LADDER_VERILATOR_THREADS`; the review runners pass 1), and since guide §10 the host ISA
+`x86-64-v3` for the `g6lc` flavour on an AVX2+BMI2 host (`SOFT_LADDER_BUILD_MARCH`; `none` =
+baseline, `native` = build host; the pinned flavour stays at baseline). Qualification
+cross-check rebuilds inside the review runners set `SOFT_LADDER_BUILD_PGO=0` and the pinned
+`VERILATOR_ROOT`. The fork runtime header at the current pin (`e900ec45…`) is not yet in the
+runners' `qualified` tables — see `AGENTS-build.md`.
 
 Install helpers (`install-spike.sh`, `install-verilator.sh`, …) and `common-riscv-tools.sh` are **tooling**, not functional gates.
 
@@ -103,7 +107,7 @@ Install helpers (`install-spike.sh`, `install-verilator.sh`, …) and `common-ri
 | `STABILITY_PROFILE` | `stability-regress` | `artifact` \| `spike` (default) \| `full` |
 | `STABILITY_SKIP_*` | `stability-regress` | Skip individual legs (`HEDGE`, `SPO_SPIKE`, `MINI`, `SOAK`) |
 | `OUT_DIR` | spike paths | Prefer Linux `/tmp/...` on WSL+NTFS trees |
-| `SOFT_LADDER_VERILATOR_FLAVOUR` / `SOFT_LADDER_BUILD_SPLIT_VLT` / `SOFT_LADDER_BUILD_OPT` / `SOFT_LADDER_BUILD_PGO[_TRAIN,_CYCLES]` / `SOFT_LADDER_VERILATOR_THREADS` | `soft-ladder-build-harness` | Build of record knobs (defaults `g6lc` / 1 / `-O2` / 1 / 4); see §3 |
+| `SOFT_LADDER_VERILATOR_FLAVOUR` / `SOFT_LADDER_BUILD_SPLIT_VLT` / `SOFT_LADDER_BUILD_OPT` / `SOFT_LADDER_BUILD_PGO[_TRAIN,_CYCLES]` / `SOFT_LADDER_VERILATOR_THREADS` / `SOFT_LADDER_BUILD_MARCH` | `soft-ladder-build-harness` | Build of record knobs (defaults `g6lc` / 1 / `-O2` / 1 / 4 / `x86-64-v3` on AVX2 hosts for `g6lc`, else `none`); see §3 |
 
 ---
 

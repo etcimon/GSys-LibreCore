@@ -71,6 +71,28 @@ build and regression flow from a single top-level `.config.ts`.
   (`SOFT_LADDER_BUILD_OPT_SLOW`): at `-O2` that unit alone takes 30+ min, two overlapping server
   builds OOM-killed cc1plus on the 125 GB builder (instrumented or not), and with a profile it runs
   for hours for nothing; the RVFI stream does not depend on it.
+- **Host ISA `x86-64-v3` by default for `g6lc`** (`SOFT_LADDER_BUILD_MARCH`;
+  `simulation.verilator.march`, `auto` = this rule): the harness appends `-march=x86-64-v3`
+  (AVX2+BMI2, every 2013+ x86) to the generated C++ when the build host has `avx2`+`bmi2`; the
+  pinned flavour stays at baseline so the qualification reference recipe is unchanged. Measured on
+  `g6lc64_ooo`, same tree, RVFI byte-identical on the s11 and wrong-path probes (guide §10.4,
+  §10.6): host instructions per cycle **874,598 → 424,291 (−51 %)** from the ISA floor alone,
+  I1 misses −39 %; the single-core spin **3,571 → 16,644 cycles/s** before PGO. `native` binds
+  the model to the build host (AVX-512 on the builder; `-DVL_SIMD_PREFER_512` in
+  `SOFT_LADDER_BUILD_CXXFLAGS` for 16-word kernels), `none` is the pre-§10 recipe. A model built
+  with this default must run on an AVX2 host.
+- **Fork compiler defaults at the current pin** (on at `-O1`+, `-fno-…` / `VERILATOR_FNO=…` to
+  disable): `-ftrigger-words` (region guards over one trigger vector become one
+  `wordAny(word, mask)` per 64-bit word; −7.8 % Ir/cycle on `g6lc64_ooo`, guide §10.5) and
+  `-ffield-split`; the runtime headers carry the word-vector kernels of guide §10.2 (SSE2/AVX2/
+  AVX-512 by `-march`, `VL_DISABLE_SIMD` for scalar) and the `_vl_insert_WI/WW` bounds fix of
+  guide §9.4. `-fclock-skip` stays **opt-in** (exact but +10 % Ir on the dense core, §9.7).
+  **Runtime qualification status:** the fork header at this pin (`include/verilated_funcs.h`
+  sha256 `e900ec45…`) is **not yet in the review runners' `qualified` tables** (they still list
+  `g6lc-fork@453031b66` = `83b7f47b…`); the two probes retire the reference RVFI stream, but the
+  11-probe / FP-suite / anchor battery has not been re-run on it, so the runners treat it as
+  experimental until `REVIEW_EXPERIMENTAL_RUNTIME_SHA256` declares it or the battery passes and
+  the tables are updated (owed, `AGENTS-todo.md`).
 - **4 model threads** by default (`SOFT_LADDER_VERILATOR_THREADS`; `simulation.verilator.threads`,
   0 = this default): the measured point for the 8-hart server — the partition is
   synchronisation-bound (1.9–2.0× of 4), more threads did not pay (guide §4b.2). The review

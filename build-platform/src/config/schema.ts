@@ -268,6 +268,16 @@ export interface VerilatorOptions {
   splitVlt: boolean;
   /** C++ optimisation level for the generated model (OPT_FAST/SLOW/GLOBAL). */
   opt: string;
+  /**
+   * Host ISA for the generated C++ (`-march=<value>`, harness recipe;
+   * `SOFT_LADDER_BUILD_MARCH`). `auto` lets the harness decide: `x86-64-v3`
+   * (AVX2+BMI2, every 2013+ x86) for the g6lc flavour on a host that has it,
+   * baseline otherwise. Measured on g6lc64_ooo (guide §10): −51% host
+   * instructions per cycle from the ISA floor alone, RVFI identical; the fork
+   * runtime's word-vector kernels take 256-bit chunks there. `native` binds the
+   * model to the build host; `none` is the pre-§10 baseline recipe.
+   */
+  march: string;
 }
 
 export interface SimulationConfig {

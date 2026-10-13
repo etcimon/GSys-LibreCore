@@ -131,13 +131,15 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       traceFormat: "fst",
       threads: 0,
       timing: false,
-      // The build of record (agents/guides/AGENTS-verilator-performance.md §7.4a):
-      // harness recipe, split-loops .vlt, -O2, PGO. Each is a measured win on
-      // the LibreCore models; `recipe: "make"` is the plain upstream path.
+      // The build of record (agents/guides/AGENTS-verilator-performance.md §7.4a,
+      // §10): harness recipe, split-loops .vlt, -O2, PGO, host ISA x86-64-v3 where
+      // the host has it. Each is a measured win on the LibreCore models;
+      // `recipe: "make"` is the plain upstream path.
       recipe: "harness",
       pgo: true,
       splitVlt: true,
       opt: "-O2",
+      march: "auto",
     },
   },
 

@@ -91,7 +91,7 @@ fi
 # --- Verilator structure counters -----------------------------------------------------------
 S=$(ls "$MODEL_DIR"/*__stats.txt 2>/dev/null | head -1)
 if [[ -n "$S" ]]; then
-  grep -E "expand limited|expand wides|size of class: hybrid|Suppressed UNOPTFLAT|concat assigns lowered|concat leaves lowered|Split packed variables" "$S" \
+  grep -E "expand limited|expand wides|size of class: hybrid|Suppressed UNOPTFLAT|concat assigns lowered|concat leaves lowered|Split packed variables|Trigger word tests|Trigger bits merged|Clock skip" "$S" \
     | sed 's/  */ /g' | tee "$OUT/stats.txt"
 fi
 sha=$(sha256sum "$MODEL" | cut -c1-16)

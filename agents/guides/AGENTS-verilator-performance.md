@@ -905,3 +905,539 @@ functions, called from the top eval under a liveness test), which is a new V3Sch
 feature, not a flag. The hierarchical build stays available as an opt-in for its build-time
 and exactness properties.
 
+## 8. Causal execution-cache review (2026-10-13; experimental, not promoted)
+
+This continuation preserves the negative results in §6.2 and §7.1; it does not treat
+those passes as successful prior work. The relevant tree is `tools/verilator`, not
+`tools/verilate`. The fork compiles ASTs into scheduled C++; the simulation is not
+walking an AST red-black tree each cycle. A runtime red-black tree would introduce
+pointer chasing and ordered lookup into an instruction-fetch-bound path. The useful
+part of the proposal is instead a **compile-time writer-to-consumer dependency index**
+whose runtime representation is direct validity-bit stores and guarded contiguous
+execution groups. There is no learned-path completeness assumption or hash-only hit.
+
+### 8.1 Implemented contract under the existing `-fclock-skip` opt-in
+
+`V3ClkSkip.cpp` now separates consecutive runs of statements even when they belong to
+the same inlined instance. A guard executes immediately before its run, not in the
+function prologue. The run's read set includes every branch's dependencies; only a
+preceding whole-variable assignment inside that same run discharges a live-in read.
+Read-before-write feedback is refused. Thus a parent/child/parent ordering stays in
+that order and has three independent validity decisions.
+
+A whole-model assignment index connects every supported internal writer to the
+cached groups that consume its variable. It also invalidates a group's retained
+outputs when another group/function writes them. Whole, partial, and dynamic-index
+stores invalidate conservatively at variable granularity. Whole packed scalar stores
+up to 64 bits capture the old value, execute the original RHS exactly once, then
+invalidate only on an actual change. Partial/dynamic/wide stores retain unconditional
+invalidation. This sacrifices some hits rather than risking a false clean bit.
+The pass runs after `V3Clock` and lifetime/NBA alias cleanup, so its writer index refers
+to the resulting storage, and emits instrumentation in deterministic source traversal
+order. External/untracked inputs retain exact packed-value comparisons and snapshots at the
+execution site. Public/forced/DPI-written or otherwise untracked outputs, impure
+operations, non-packed data and feedback are not cached. First-use validity is reset
+explicitly by `_eval_static`, independent of randomized initialization. Cache state
+is per model, not process-global, and normal sensitivity/convergence logic remains
+responsible for scheduling; invalidation itself never fabricates a sensitivity event.
+
+Threaded models, timing-enabled models, opaque raw-C statement models and models
+with residual hierarchical `AstVarXRef` references take the original scheduler without
+caching. The latter is a fail-closed guard against the missed-XRef class of defect in
+§7.1. Cold settle functions are not cached: invalidating their never-reused entries
+would add hot-path work with no cycles/s benefit. No cross-thread atomicity or delayed-event proof
+is claimed. The existing flag remains excluded from `-O<n>` and from the production
+build recipe. This is an initial conservative implementation, not a replacement for
+all scheduler scans, and not a full-model qualification.
+
+### 8.2 Performance hypothesis and falsification gate
+
+If `p` is the fraction of original runtime actually removed and `h` is the added
+invalidation/guard overhead as a fraction of original runtime, the best-case speedup
+is `1 / (1 - p + h)`. A further 10× requires **p - h >= 0.9**. Removing only the
+~4.5% trigger evaluation share in §6 cannot deliver that; even eliminating it entirely
+would yield about 1.047×. A cache must skip the payload logic, not just its dispatch.
+The evidence to collect is guard coverage/hit rate, emitted invalidation volume,
+Ir/cycle, I1 misses/cycle and cycles/s on the same design/workload/compiler recipe.
+Dense writes can make this implementation slower. A sparse synthetic win, if any,
+is not a boot-model win or a 100%-scenario proof.
+
+### 8.3 Evidence and integration limits
+
+The initial remote preflight found 12 logical CPUs, ~102 GiB available RAM, load ~16
+and more than 12 active compiler/synthesis workers. No additional full-model job was
+launched and no unrelated job was killed. Compiler/leaf work is an explicitly local
+WSL diagnostic in `build-platform/workspace/build/vlt-causal-20261013/`; it does not
+replace the proxy-only LibreCore battery. Final results for this experiment are
+recorded below when available. Earlier artifacts and unsuccessful runs are retained.
+
+Licensing review: repository contributor/policy/tier configs are present; the existing
+Verilator files stay tier U with their LGPL/Artistic or CC0 notices unchanged. This
+change is by Etienne Cimon and makes no new RTL license claim or link-set change.
+The root-documented `diag run licensing` command currently reports `Unknown: licensing`;
+notice preservation and the scoped diff therefore require a manual check. No licensing
+policy was changed. RTL timing, synthesis, DFT, ISA/config/DTS and RISC-V spec-map changes
+are not applicable: this pass changes compiler scheduling and its own regression only.
+
+### 8.4 Local result — useful sparsity gain, not 10× or full-core evidence
+
+The extended `test_regress/t/t_clock_skip.v` runs 1,000 cycles with parent/child/parent
+propagation, unchanged intervals, gated clocks, 128-bit state and both constant and
+dynamic partial writes. With gate/DFG folding disabled to retain the dependency
+boundaries, the original `V3ClkSkip.cpp` from fork HEAD `453031b66` fails at **cycle 7**
+(`64e70b38` instead of `36306bbc`). Cache-disabled control and the repaired cache pass.
+This is a reproduced negative witness for §7.1, not just a test that happened to pass.
+
+Local diagnostic matrix (`leaf_review.py` in the artifact directory): six randomized
+initialization seeds each (`1,2,3,42,123,2147483647`), all passing for the repaired
+cache, cache-off control, non-inlined hierarchy, `--public-flat-rw` fallback,
+`--threads 2` fallback, default optimizations with `--x-initial-edge`, and the cached
+model under AddressSanitizer + UndefinedBehaviorSanitizer. These are **42 leaf runs**,
+not the full upstream Verilator suite. `--debug-check` was enabled while generating
+models; the Perl test driver is syntax-clean, but local models were built by the
+isolated diagnostic harness rather than the upstream Perl/make driver. The original
+negative is retained in `closed-old/`. The first public-model diagnostic failed to
+compile because the diagnostic's C++ command omitted `include/vltstd`/DPI runtime;
+`closed-public/` supplies those dependencies and passes. Failed artifacts were not
+overwritten. An external-input synthetic case exercises 64 exact input comparisons
+and passes its independent C++ reference checks.
+
+Synthetic fixture (`cache_bench.py`): 32 lanes, each with a gated register and 32
+rotate/multiply/add rounds; one lane written per cycle (sparse) versus every lane
+written per cycle (dense), shared side state changed every 1,024 cycles. No PGO.
+The C++ reference checks every output for the first 2,048 cycles; full-run checksums
+also match (diagnostic checksums, not architectural trace qualification). This is a
+mechanism test, **not LibreCore RTL**. GCC `-O2`, local WSL; 1,000,000 cycles per run,
+control/cache/cache/control repeated twice, with no other diagnostic compilation
+running during these timed alternations. `bench-measurements.json` records individual
+runs and binary hashes; generated-model records also carry compiler hashes.
+
+| activity | control median time | cache median time | cycles/s ratio | eval Ir/cycle, control → cache |
+|---|---:|---:|---:|---:|
+| sparse | 0.797159 s | 0.206355 s | **3.863×** | 5,726.27 → 2,641.73 (−53.9%) |
+| dense | 0.779771 s | 0.804958 s | **0.969×** (3.1% slower) | 5,822.17 → 6,082.41 (+4.5%) |
+
+Ir uses Valgrind 3.22 callgrind over 20,000 cycles, collection restricted to
+`*eval_step*`. Both models fit the simulated instruction cache (494/693 total I1
+misses, effectively cold misses only); **this does not demonstrate a reduction of
+the core's 1 MB/cycle instruction-fetch footprint**. The compiler reports 32 cached
+execution groups and 1,216 static invalidation edges for the final synthetic model;
+that edge count includes cold initialization stores, not just per-cycle work.
+Unconditional invalidation was first tried and measured much less useful; the scalar
+change filter avoids invalidation from unchanged writebacks. Filtering/cold-settle
+experiments and their raw results remain in separate artifact subdirectories.
+
+Reproduction artifacts: `build-platform/workspace/build/vlt-causal-20261013/` contains
+`leaf_review.py`, `cache_bench.py`, `measure_bench.py`, the HEAD source archive and
+`build_baseline.py`, generated C++, logs, JSON identities and callgrind output.
+The compiler was built out-of-tree using CMake/Ninja with `FLEX_INCLUDE=/usr/include`,
+`-DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS_RELEASE=-O1`, target `verilator_bin`,
+`--parallel 4`; generated models use `-O2`. The persistent regression entry is
+`tools/verilator/test_regress/t/t_clock_skip.pl` (`--vlt` and `--vltmt` on a configured
+fork build). No managed compiler prefix or qualification runtime was replaced.
+After the final residual-XRef fallback and formatting review, the compiler was rebuilt
+(SHA256 `4cba16d61a1de3ff697785ce1a03605751bd4da5ff4a6ba4cd8cbd55b023367a`).
+`verify_emission.py` regenerated all seven leaf variants plus the three synthetic
+models: **all 135 generated C++/header files were byte-identical** to the tested
+versions (`emission-check.json`). This ties the final source to those local results
+without relabelling a different generated model as tested.
+
+**Decision:** retain as an opt-in prototype, not a production speedup. A further 10×
+has not been reached. The documented dominant `_nba_sequent` work is deliberately
+outside this pass; skipping that requires a separate state-transition/idempotence
+contract, not assuming that a clock edge is irrelevant. The remote preflight was
+repeated and still found load ~18 on 12 CPUs with >12 active compiler/synthesis
+workers. Full-model proxy RVFI/probe/FP/anchor equivalence, coverage of additional
+language effects and a matched real-model Ir/I1/cycles/s comparison remain open.
+
+## 9. Mechanism transfer: Verilator cache lessons → Yosys passes, and back (2026-10-13)
+
+### 9.1 What transfers and what does not
+
+The Verilator work's reusable lesson is not "a cache" but a discipline: **know every writer
+of a value, index consumers by what they read, invalidate at the write, never scan to find
+out what changed**. Yosys is a compiler, not a cycle simulator, so the hot structure is
+different (fixed-point pass loops over RTLIL, not per-cycle eval), but the same costs recur:
+
+| Verilator mechanism measured | Yosys analogue | Status |
+|---|---|---|
+| Write-side invalidation of consumers (§8.1) | `opt_merge` already rehashes only cells that read a redirected wire (fork `216f5d12a`) | present before this pass |
+| Trigger vectors scanned linearly (§2.3) | `wire_cells` subscriber lists scanned linearly on every cell removal (`std::remove`) | **fixed here** — indexed swap-remove |
+| Change-filtered stores (§8.1) | hashing only when the design actually changed; `did_something` loop in `opt.cc` | present |
+| Deferred bookkeeping until first use | subscriber index built before knowing if any duplicate exists | **fixed here** — built lazily on first merge |
+| Memoising combinational cones (§6.2, refuted) | caching `SigMap` canonical chunks across passes | **not attempted** — `rebuild_canon` is already per-pass and the invalidation surface is `module->connect`, which every pass calls |
+| Instance-partitioned scheduling (§7.5) | per-module parallelism | already present in `opt_merge`/`opt_clean` thread pools |
+
+The red-black-tree framing from the original prompt does not map onto either tool: Yosys
+already uses hashed `dict`/`pool` (O(1) expected) for every index touched here, and an
+ordered tree would add pointer chasing with no ordering requirement to exploit.
+
+### 9.2 `opt_merge` subscriber index — implemented and measured
+
+`passes/opt/opt_merge.cc`: `wire_cells` keeps `std::vector<Cell*>` per wire; `cell_wires`
+now stores `dict<Wire*, int>` holding each cell's **position** in every subscriber vector.
+`unwatch(cell)` swaps the last element into the removed slot, repairs the moved cell's
+stored index, and erases the wire entry when empty — O(wires-of-cell) instead of
+O(wires × subscribers). The index is populated only once the first duplicate round
+actually finds a merge (`pending_wire_uses`), so a design with no duplicates never builds
+it. Results are byte-identical RTLIL across every fixture and every thread count.
+
+Measured (`measure_merge.py`, local WSL, `YOSYS_MAX_THREADS=1`, `--perffile` `opt_merge`
+pass time, 6 alternating pairs per fixture, median; binaries `yosys-before` =
+fork HEAD `38b04c05a`, `yosys` = this change, SHA256 `2b4955af…`):
+
+| fixture | before (ms) | after (ms) | speedup |
+|---|---:|---:|---:|
+| 32,000 identical `$and` → 1 | 468.2 | 95.3 | **4.91×** |
+| 8,000 distinct `$and` (no merge) | 8.15 | 5.61 | **1.45×** |
+| 256 × 8-deep chains → 8 (multi-round) | 8.22 | 7.43 | 1.11× |
+
+A `pool<Cell*>` variant was tried first: it helped the dense-duplicate case but was
+slower on the no-merge case because of hashing cost on every `watch`; the indexed vector
+superseded it. These are synthetic fixtures, not the LibreCore `synth` smoke; the server
+synth path spends most of its time elsewhere (§4 Yosys-fork notes), so this is a pass
+hygiene win, not a flow-level speedup claim.
+
+Verification: `tests/opt/opt_merge_*.ys` (6 files) × `YOSYS_MAX_THREADS ∈ {1,2,4}` = 18
+runs pass, including `equiv_opt -assert` on the new 512-cell chain fixture added to
+`opt_merge_chain.ys`; `gtest-kernel` 115/115 pass. The local build is component-
+restricted (no ABC/slang/`logger`), so `tests/various/check_wide_and_loop.ys` could not
+run here — it is an earlier uncommitted test and is not evidence from this pass.
+
+### 9.3 Back to Verilator: bit-range-aware invalidation for sparse activity
+
+The transfer back is the same precision argument. §8.1 subscribed a cached group to
+**every** writer of a variable it reads. A 1024-bit packed bank where each of 32 lanes
+reads its own 32-bit slot therefore invalidated all 32 readers on any lane's write —
+measured as the cache being **10% slower than no cache** on that shape (`range-before`).
+`V3ClkSkip.cpp` now carries a `BitRange` per read and per writer (constant `AstSel`
+chains folded; a dynamic index widens to the whole variable), and `subscribe` skips
+writers whose range is disjoint from the group's read range (stat
+`Clock skip disjoint subscriptions`). Change-filtering also extends to constant partial
+stores up to 64 bits.
+
+Measured (`measure_range.py`, 1,000,000 cycles, 12 alternating runs, median,
+`REVIEW_AGGREGATE=1` fixture, all three models checksum-identical):
+
+| activity | control (no cache) | before (variable-granular) | after (range-aware) | after vs control | after vs before |
+|---|---:|---:|---:|---:|---:|
+| sparse (1 lane/cycle) | 0.775 s | 0.858 s | **0.208 s** | **3.73×** | 4.13× |
+| dense (32 lanes/cycle) | 0.815 s | 0.900 s | 0.924 s | 0.88× | 0.97× |
+
+Static edge count on the fixture: 2,208 → 1,216 invalidation edges; 992 disjoint
+subscriptions skipped. The dense penalty (−12%) is unchanged in kind from §8.4 and is
+the honest cost of write-side bookkeeping when everything changes every cycle.
+
+### 9.4 A pre-existing runtime defect the fixture exposed
+
+Extending `t_clock_skip.v` with a 192-bit bank and a dynamic 8-bit indexed write
+(`state[idx*3 +: 8]`) made the **cache-disabled control** fail at cycle 269. The cause is
+not the cache: `_vl_insert_WI`/`_vl_insert_WW` in `include/verilated_funcs.h` clamp
+only via `cleanmask` when the write ends inside the top word, so a write whose
+`hbit >= rbits` with `lbit` still in range wrote into `iowp[hword]` **past the array**
+(here, into the next struct member). The `V3Unknown` bound guard (`__Vlvbound`) only
+excludes indices whose *lsb* is out of range. Fix: clamp `hbit` to `rbits-1` and return
+early when `lbit >= rbits`. A guarded-buffer test in `t_math_imm2.cpp` (8 widths × 10
+array sizes × every lsb including past-the-end) fails before and passes after, also
+under ASan/UBSan. This is the same defect family as the `VL_CONSTHI_W_*X` overflow in
+§4a and changes the runtime header hash (`d49a56d2…`); any model built against the
+previous fork header should be re-identified. Reset-value randomisation made this
+reproduce in the default seed only; the six-seed matrix is what caught it.
+
+After the fix, the full leaf matrix on the extended fixture passes: cache/control/
+public/MT-fallback/non-inlined/`--x-initial-edge`/ASan — 7 variants × 6 seeds = 42
+runs; HEAD `V3ClkSkip.cpp` still fails at cycle 7 on the same fixture
+(`slices-old-fixed`). `verify_emission.py` confirms all 9 final models' generated
+C++ (151 files) are byte-identical to what was tested with compiler `e5b48210…`.
+
+### 9.5 Real-model qualification pass (2026-10-13, builder at load 6–11)
+
+The builder dropped to load ~6 later in the day, so the owed full-model evidence was
+collected through the proxy with the throughput rules of §0.8 (private compiler prefix,
+single-thread models, 6 compile jobs sized against the live MT4 census runs, nothing
+killed; `remote_causal_ab.py`, run tags `causal-ab-ooo-20261013b` and `…d`). Compiler:
+the fork pin `453031b66` plus this working tree's patch, built on the builder into
+`/opt/testharness/toolchains/verilator-v5.008-g6lc-causal` (runtime header
+`d49a56d2…`, the same hash as the local tree). Models: `g6lc64_ooo`, remote tree
+`90d99b70c`, `--threads 1`, split `.vlt` on, no PGO, `-O2`.
+
+**Runtime header fix is behaviour-preserving on the real core.** The `ctl` model
+(`-fno-clock-skip`, i.e. header change only) retires the s11 probe in **10,941 cycles
+with RVFI SHA256 `de4f42cfe7cb…`** — the reference hash this guide has carried since the
+pinned 5.008 compiler (§4a) — and the wrong-path-replay probe in 10,311 cycles with a
+stable trace (`b1632a101ff3…`). Ir/cycle (callgrind, eval only, no PGO): s11 874,598,
+wprp 1,083,951; I1 misses/cycle 50,758 / 64,415. These are the first real-core numbers
+on this tree's RTL and are **not** comparable to the PGO rows in §7.5.
+
+**First attempt refused the model.** Run `…b` built the cache model and the pass
+reported `Clock skip unsupported model 1`: the §8 fail-closed guard refused any model
+containing `AstCStmt`/`AstUCFunc`/`AstVarXRef`, and the testharness has DPI marshalling
+text (`SimJTAG`, `read_elf`, …). Reading `V3LinkDot.cpp:2954` showed the `VarXRef`
+case was dead code: every hierarchical reference is rewritten into a scoped `AstVarRef`
+at scope creation, so the §7.1 "probe into i_frontend" class is an ordinary indexed read
+by the time this pass runs. The guard was narrowed to per-variable untracking: every
+variable referenced under a `CStmt`/`CExpr`/`UCFunc` is untracked (exact compare if
+read, refused as a cached output), and only threads/timing remain model-wide, each now
+named in the stats. `t_clock_skip.v` gained a non-inlined scope with hierarchical probes
+into it and asserts that no model-wide refusal fires; it passes under the upstream
+driver in `--vlt` (cache active) and `--vltmt` (threads → refused) with
+`$Self->{sim_time} = 12000` (the default 1100 timed out the 1,000-cycle fixture).
+
+**Second attempt (`…d`) caches the real core — and shows the dense-activity shape.**
+Stats on `g6lc64_ooo`: 730 scopes, 13,099 execution groups, **6,181,042 invalidation
+edges** after 4,931,510 disjoint subscriptions were skipped, 50,939 change-filtered
+stores, 11 external compares, 57,267 validity/shadow members in the root class. The
+`DepSet` sources grew from 4.33 MB (ctl) to 5.13 MB (+18%), and the C++ compile went
+from 81 s to over 20 min with 2.8 GB `cc1plus` peaks. On a core where §4b.2 names
+instruction-fetch bandwidth as the bottleneck, +18% hot code is the predicted loss
+regardless of what the Ir/cycle row says; exactness and Ir/cycle for `…d` are recorded
+in `remote/causal-ab-ooo-20261013d/results.json` when the run completes (see
+`AGENTS-todo.md` for the harvested figures).
+
+**Breadth evidence collected while the builder worked (local WSL, staged
+`VERILATOR_ROOT` from the CMake build via `stage_regress.sh`):** 133 upstream
+`test_regress` tests in the math / select / split-var / SoA / prio / wake / table /
+concat / assign families → **126 pass, 5 fail, 2 skip** (no coroutines, no `vcddiff`).
+Four failures (`t_math_repl_bad`, `t_math_repl2_bad`, `t_select_bad_tri`,
+`t_select_lhs_oob`) reproduce identically with the HEAD-`V3ClkSkip.cpp` baseline
+compiler: they are `V3Width`/`V3Number` internal errors on the error-recovery path of
+lint-only `*_bad` tests and a SELRANGE emission difference — pre-existing in the fork
+tree, outside this change set, logged in `AGENTS-todo.md`. The fifth was the
+`sim_time` default above, fixed. Yosys: a full-component build (minus ABC/slang, which
+are not installed locally) ran the whole `tests/opt` directory: **88/96 pass**; the 8
+failures reproduce byte-for-byte with HEAD's `opt_merge.cc` object linked into the
+same binary (`yosys-before-full`), so they are pre-existing (`sat -verify` proofs in
+`opt_expr_*`, two `opt_share`/`opt_balance_tree` selection asserts, one missing
+`synth_ice40` component). `check_wide_and_loop.ys` passes on the full build;
+`gtest-opt` 12/12.
+
+### 9.6 Default status, per change
+
+| change | default? | why |
+|---|---|---|
+| `_vl_insert_WI/WW` clamp (runtime header) | **yes** — it is a correctness fix with no opt-in surface | real-core s11 trace identical to the pinned reference; guarded-buffer test; 126-test subset |
+| `opt_merge` indexed subscribers | **yes** — no flag exists; byte-identical RTLIL on every fixture and every `tests/opt` script | 4.9×/1.45×/1.11× on fixtures; LibreCore `synth` smoke still owed |
+| `-fclock-skip` range-aware cache | **no** — stays opt-in | 3.7× on the sparse fixture, but the real OoO core is dense: +18% generated hot code, 6.2M invalidation stores, 0.88× on the dense fixture. Default-on would need a model where idle scopes dominate (the server's idle cores — but MT models are refused) |
+
+### 9.7 Real-model verdict on the causal cache (run `…d`, harvested)
+
+The cache model (13,099 groups, 6.18M invalidation edges) is **exact** — s11 and wprp
+RVFI hashes identical to `ctl` — and **slower**: Ir/cycle 874,598 → **964,976
+(+10.3%)**, I1 misses/cycle 50,758 → **67,747 (+33%)**, the 10.9k-cycle probe 9.4 s →
+11.3 s wall, C++ compile 81 s → 36 min. That is the dense-activity shape of §8.4/§9.3
+on the real core, measured. `-fclock-skip` stays opt-in; §9.6's table stands.
+
+### 9.8 Still owed
+
+LibreCore `synth` smoke for `opt_merge` on the proxy (no slang locally). FP suite,
+wrong-path replay through the review runner, and the 11 frozen probes with the new
+header via the normal `run_ooo_fp_review.py` path, not just the two probes above.
+Cross-thread invalidation design before the cache can see the server model's idle
+cores, which is the only real-model shape where §9.3's sparse gain could apply. A
+further 10× on the core model is not reached and is not claimed.
+
+## 10. Host ISA and word-vector (SIMD) kernels (2026-10-13)
+
+### 10.1 Where SIMD applies, from the real-core profile
+
+`callgrind_annotate` on the `ctl` s11 run (non-PGO, `-O2`, baseline x86-64) puts
+21.6% of eval instructions and **54% of all data reads** in
+`VlTriggerVec<324>::BitRef::operator bool()` — the per-region trigger-bit tests of
+`eval_act`/`eval_nba` (916 + 1,542 `.at()` tests per pass over 1,084 guarded calls),
+then `eval_act` body 18.7%, `eval_nba` 8.5%, `VL_ASSIGN_W` 5.4%, trigger evaluation
+4.6%, and the largest single comb function 2.7%. The two hot comb functions that
+could be read structurally are CAMs: the scoreboard forwarding compare
+(`act_comb__TOP__185`: 955 unrolled scalar compares against `rd`, zero loops, zero
+wide ops) and the LSQ/ROB match (`act_comb__TOP__343`: 597 compares). Their operands
+are **packed** arrays of structs (`iq_entry_t [DEPTH-1:0] q_q` in `g6lc_iq.sv`), so
+each compared field is a bit-extract at a ~100-bit stride from one `VlWide` — the
+layout a vector compare needs (contiguous narrow elements) is exactly what `V3Soa` /
+`split_var` produce and the stock layout does not. Three consequences:
+
+1. **The generated code was compiled for SSE2.** The harness passed no `-march`;
+   the builder is a Zen 4 (AVX-512) and the CI floor is AVX2. Everything below
+   starts there.
+2. **A compiler-side "seek" lowering** (N compares of `arr[i] == key` → one
+   `vpcmpeq`+`movemask`) is sound only after a layout pass; on this tree it would
+   gather at a 100-bit stride and lose. It is not implemented; it is the next step
+   *after* `-fsoa` is qualified, and it is bounded by the ≤6% of Ir those CAMs hold.
+3. **The trigger-bit scan is not a SIMD problem** (324 bits = 11 words; the cost is
+   2,458 single-bit tests per pass, not the word ops). It wants an inverted
+   dispatch in `V3Sched`, a scheduler change outside this pass.
+
+### 10.2 Implemented: word-vector kernels in `verilated_funcs.h`
+
+Portable GCC/Clang vector extension (no intrinsics headers), width chosen by the
+`-march` the model is compiled with — 16 words with AVX-512 when
+`VL_SIMD_PREFER_512` is set, 8 with AVX2, 4 with SSE2/NEON, scalar under
+`VL_DISABLE_SIMD`/`VL_PORTABLE_ONLY`. Unaligned chunks via `memcpy` load/store, scalar
+tails, and the original loop retained as the aliasing path. Routed through it:
+`VL_ASSIGN_W`/`VL_EXTEND_W*`/`VL_ZERO_W`/`VL_CLEAN_WW` and the copy+zero prologues of
+every `VL_CONCAT_W*` and aligned `VL_SHIFTL/R_WWI` (constant-size `memmove`/`memset`,
+which the compiler expands to the widest moves it has), `VL_AND/OR/XOR/NOT_W`
+(elementwise, aliasing-safe), `VL_EQ_W`/`VL_CHANGEXOR_W`/`VL_REDOR_W` (vector
+OR-of-XOR accumulate, no `memcmp` call below 64 words), and the **funnel** kernel
+`dst[t] = (src[t] >> a) | (src[t+1] << b)` for the middle words of `_vl_insert_WW`,
+`VL_SHIFTR_WWI` and `VL_SEL_WWII` — used only when source and destination are
+disjoint, with the boundary words still written by the original masked code.
+
+Correctness evidence: `test_regress/t/t_simd_wide.cpp` cross-checks every kernel
+against the pre-SIMD scalar loops for 70 widths × 3 seeds (elementwise with in-place
+aliasing, eq/changexor/redor including single-bit differences in each word, extend,
+every shift amount, a select grid, an insert grid with the `rbits` clamp, concat).
+Passes at 4 words (SSE2), 8 (AVX2), 16 (AVX-512 on the builder), scalar, and under
+ASan/UBSan at 8 and 16. The 115-test upstream subset (math/select/concat/assign/
+split-var/SoA families) passes with the same 4 pre-existing failures as before.
+Runtime header hash is now `ad914f2b…` (was `d49a56d2…` after §9.4).
+
+### 10.3 Implemented: `SOFT_LADDER_BUILD_MARCH` (default `x86-64-v3` for g6lc)
+
+`verif/regress/soft-ladder-build-harness.sh` appends `-march=<value>` to the
+generated C++ flags. Default for the g6lc flavour on an x86-64 host with AVX2+BMI2 is
+`x86-64-v3`; `native` opts into the build host's full ISA; `none` is the baseline
+recipe and stays the pinned flavour's default so the qualification reference recipe
+is untouched.
+
+### 10.4 Measured on `g6lc64_ooo` (proxy tag `simd-ab-ooo-20261013b`)
+
+Same compiler binary for all rows; `-O2`, no PGO, `--threads 1`, tree `90d99b70c`.
+Callgrind rows are eval-only, deterministic; the s11 wall includes ~5 s of startup
+and is only a sanity row (builder shared with an MT4 census run, spins skipped).
+
+| model | header | `-march` | Ir/cycle | I1 miss/cycle | .text | s11 wall | RVFI |
+|---|---|---|---:|---:|---:|---:|---|
+| ctl | `d49a56d2` | none | 874,598 | 50,758 | 4.47 MB | 9.40 s | `de4f42cf…` |
+| ctl-march | `d49a56d2` | x86-64-v3 | **424,291** (−51.5%) | **31,092** (−39%) | 5.66 MB | 8.88 s | identical |
+| simd-march | `ad914f2b` | x86-64-v3 | **393,302** (−7.3% vs ctl-march) | 31,220 | 5.69 MB | 7.37 s | identical |
+| simd-v4 | `ad914f2b` | znver4 + 512 | n/a (valgrind 3.23 has no AVX-512) | — | 5.61 MB | 7.25 s | identical |
+
+Reading: the ISA floor is the large lever — BMI2 `shrx`/`bzhi` collapse the
+shift-and-mask bit extracts the generated code is made of, and the compiler's own
+vectoriser takes the constant-size copies — and it halves the instruction stream
+with the RVFI stream byte-identical on both probes. The kernels add a further 7% on
+top of it. `.text` grows 27% yet I1 misses fall 39%: fewer instructions fetched
+outweighs the larger image. The spin-based cycles/s row is owed when the builder is
+quiet; the §7.5 PGO numbers were all taken at baseline ISA and should be re-taken
+with `x86-64-v3` before any of them is quoted as current.
+
+### 10.5 Second sweep: the rest of the runtime, and the trigger guards (same day)
+
+A pass over every word loop left in `verilated_funcs.h` / `verilated_types.h`:
+
+| item | what changed | result |
+|---|---|---|
+| `VlTriggerVec::any/set/andNot` | word-vector kernels over the 64-bit words viewed as `EData` | neutral on the core (11 words) |
+| `VlWide::operator!=`, `VlUnpacked::neq` | vector OR-of-XOR / `memcmp` for bitwise-comparable element types (`VlIsBitwiseComparable`: integers, `VlWide`, nested unpacked; **not** `double`) | neutral; change-detection paths |
+| `VL_EXTENDS_W*`, `VL_SHIFTRS_WWI`, `VL_COND_WIWW`, `VL_REDXOR_W` | sign fills via `memset`, funnel middle words, copy, vector parity | neutral |
+| `VL_COUNTONES_I/Q` | `__builtin_popcount` under `__POPCNT__` (the x86-64-v3 floor has it) | one instruction instead of 12 |
+| **`-ftrigger-words`** (`V3Clock::createSenseEquation`) | a region guard `at(a) | at(b) | …` over one trigger vector becomes one `wordAny(word, mask)` per 64-bit word touched; single bits keep `at()`; `VlTriggerVec::wordAny` is the one-load-one-test runtime side | **−7.8% Ir/cycle** |
+
+Measured on `g6lc64_ooo` (proxy tags `tw-ab-ooo-20261013` / `…-off`; same compiler
+`3e622e33…`, same headers `e900ec45…`/`60e279f8…`, `-march=x86-64-v3`, no PGO; the
+off control through `VERILATOR_FNO=trigger-words` because the harness appends `-O3`
+after the user flags, §7.3):
+
+| guards | `at()` emitted | `wordAny` emitted | Ir/cycle | I1 miss/cycle | D reads/cycle | .text | RVFI |
+|---|---:|---:|---:|---:|---:|---:|---|
+| one test per bit (off) | 20,653 | 0 | 393,335 | 31,169 | 130,167 | 5.69 MB | `de4f42cf…` / `b1632a10…` |
+| word masks (on, default) | 3,722 | 2,565 | **362,616** | **28,905** | **121,173** | 5.52 MB | identical |
+
+14,366 bit tests folded into 2,565 word tests. The off row also shows the kernel
+changes of this sweep are neutral on their own (393,335 vs §10.4's 393,302): the gain
+is the guard shape, exactly where §10.1's profile put the cost. Cumulative on this
+tree since §10.4's baseline: **874,598 → 362,616 Ir/cycle (−58.5%)**, I1 misses
+50,758 → 28,905 (−43%), RVFI byte-identical on both probes at every step.
+`-ftrigger-words` is on at `-O1` and above (`-fno-trigger-words` /
+`VERILATOR_FNO=trigger-words` to disable); `t_clock_skip.pl` asserts the stat and
+`t_simd_wide.cpp` cross-checks `wordAny` against the bit tests.
+
+### 10.6 Wall clock on a quiet builder (spins, proxy tag `spins-ooo-20261013c`)
+
+The builder dropped to load 1 (only the §11 callgrind thread beside it), so the owed
+spin rows were taken: the guide's steady-state metric (220k-cycle spin minus the
+20k-cycle startup run, s11 ELF with a non-matching tohost), 6 alternating runs per
+model, median. Same tree, same compiler lineage, `-O2`, **no PGO**, `--threads 1`.
+
+| model | recipe | cycles/s | vs baseline |
+|---|---|---:|---:|
+| ctl | old header, baseline x86-64 | 3,571 | 1.00× |
+| ctl-march | old header, `-march=x86-64-v3` | 16,644 | 4.66× |
+| simd-march | §10.2 kernels, `-march=x86-64-v3` | 17,029 | 4.77× |
+| tw-off | §10.5 kernels, `VERILATOR_FNO=trigger-words` | 16,898 | 4.73× |
+| **tw** | §10.5 kernels + `-ftrigger-words` (today's default) | **17,927** | **5.02×** |
+
+Spread within a model is ±1.5%. Startup is ~6.5 s on every row, which is why the
+10.9k-cycle s11 probe (9.3 s → 7.0 s wall) could not resolve these ratios. The spin
+is the idle-loop path and gains far more than the s11 mix's instruction count did
+(−58% Ir): the baseline's worst code shape sits on exactly that path. A longer
+*mixed* workload (OpenSBI boot on this target) is the next measurement owed before
+the 5× is quoted as general; the PGO recipe of §4b.1 has not yet been combined with
+`x86-64-v3` either.
+
+### 10.7 Not done, deliberately
+
+No intrinsics in the compiler proper (`V3EmitC`), no CAM lowering (§10.1 item 2), no
+AVX-512 default (Intel downclocking and no profiler support; opt-in via
+`VL_SIMD_PREFER_512`). The remaining 3,722 single-bit `at()` tests are bits alone in
+their word; folding across words would need the inverted dispatch of §10.1 item 3. The
+MT build path and the pinned-flavour recipe are unchanged.
+
+## 11. The same question for Yosys (2026-10-13)
+
+### 11.1 Profile first
+
+`perf` is disabled for users on the builder (`perf_event_paranoid=4`), so the fork-built
+formal yosys (`c30457480`, with `read_slang`) ran under callgrind on `cva6` for
+`cv32a65x` with instrumentation switched on at `hierarchy` (slang's elaboration is not
+the kernel under study), `proc; opt_clean; stat`; proxy tags `yosys-prof-cv32-20261013`
+(still running at the time of writing; harvest with `pull --tag`) and the mid-run dumps.
+Self cost after `hierarchy` + most of `proc` (358 G instructions):
+
+| function | self Ir |
+|---|---:|
+| `SigMapView::apply(SigSpec&)` | **34.0%** |
+| `dict<SigBit,int>::operator[]` | 11.1% |
+| `dict<SigBit,pool<Cell*>>::operator[]` | 10.9% |
+| `ProcDlatchPass::execute` | 9.0% |
+| `SigMap::add` | 5.0% |
+| `proc_dlatch_db_t::fixup_muxes`, `ProcRom/Init/Arst` | 2.5–2.7% each |
+| malloc/free | ~6% |
+
+So 56% of the proc phase is SigMap / hash-table traffic keyed by `SigBit` — latency-bound
+pointer chasing, not a vector shape — and the server smoke's own `Time spent` row
+(`prof-synth-stat-server-h`: 39% `opt_clean`, 37% `opt_expr`) says the same about the
+rest. `kernel/sigtools.h` is being reworked in this tree (`touched_wires`, range
+aliases) and was left alone. The one byte-parallel shape in the path is the four-state
+constant arithmetic under `opt_expr`'s `replace_const_cells` (11% inclusive in the
+second dump) and the `is_fully_*` predicates every pass calls.
+
+### 11.2 Implemented: `kernel/stateops.h`
+
+Byte-vector kernels over `RTLIL::State` arrays (one byte per bit), same portable
+vector-extension idiom as §10.2, 32-byte blocks under AVX2, 16 under SSE2/NEON,
+`YOSYS_NO_SIMD` for scalar: `all_in(p, n, c0, c1)` behind `Const::is_fully_zero/ones/
+def/undef/undef_x_only` and the `SigSpec` counterparts; `logic(op, …)` and
+`logic_not` behind `const_and/or/xor/xnor/not` (two-state lanes take the bitwise
+result, a controlling 0/1 wins, anything else is `Sx` — the exact per-bit definitions,
+which were one indirect call per bit). `Const` gained one read-only accessor
+(`bit_data()`); nothing else in the Const API moved. Test `tests/unit/kernel/
+stateopsTest.cc`: every (a, b) state pair in every lane position (vector body at all
+alignments and the scalar tail), random vectors with in-place aliasing, every
+predicate, and the public entry points including extension/truncation and signed
+padding — against the former per-bit code as oracle. `gtest-kernel` 119/119,
+`tests/opt` 88/96 and `tests/various` 151/164 with the **same** failure sets as the
+pre-change binary (ABC/`synth_ice40`/`sat -verify` environment items), `opt_merge`
+battery 18/18 byte-identical.
+
+Micro-benchmark (`bench_stateops.cc`, local SSE2 build, ns per call, kernel vs its own
+scalar path): `const_and` 35–97 ns vs 46–139 ns (1.3–1.45×), `const_not` 1.4×, three
+predicates 1.3–1.5×, across 8–1024 bits; the floor is the `Const` copies in
+`extend_u0`. **Design-level effect is not claimed**: it is bounded by the ≤11% share
+above, and a synth-smoke A/B needs the slang-enabled fork build on the proxy (owed).
+
+### 11.3 Not done
+
+No SIMD in `SigMap`/`dict` (not a vector problem; in-flight work in this tree), no
+change to `hashlib`, no AVX-512 path (the formal build has no `-march` either; the
+kernels follow whatever ISA that build is given).
+

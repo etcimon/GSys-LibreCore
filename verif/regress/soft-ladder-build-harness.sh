@@ -210,6 +210,32 @@ if [[ "$SPLIT_VLT_ON" == "1" && -f "$SPLIT_VLT_FILE" ]] && [[ " $BUILD_VLT_ARGS 
   log "split-loops .vlt: on ($SPLIT_VLT_FILE)"
 fi
 
+# --- Host ISA for the generated C++ (SOFT_LADDER_BUILD_MARCH) ----------------
+# Default for the g6lc flavour on an x86-64 host with AVX2: `x86-64-v3`
+# (AVX2+BMI2, every 2013+ x86), measured on g6lc64_ooo at -51% host
+# instructions and -39% I1 misses per cycle with an identical RVFI stream
+# (performance guide §10); the fork runtime's word-vector kernels take 256-bit
+# chunks there. `native` binds the model to the build host (AVX-512 on the
+# builder; add -DVL_SIMD_PREFER_512 through SOFT_LADDER_BUILD_CXXFLAGS for
+# 16-word kernels); `none` is the baseline x86-64 recipe of every measurement
+# before §10 and stays the pinned flavour's default so the qualification
+# reference recipe is unchanged. Models are built and run on the same host
+# here; one copied to another machine must match its ISA.
+if [[ -z "${SOFT_LADDER_BUILD_MARCH:-}" ]]; then
+  if [[ "$VLT_FLAVOUR" == g6lc && "$(uname -m)" == x86_64 ]] \
+     && grep -qw avx2 /proc/cpuinfo 2>/dev/null && grep -qw bmi2 /proc/cpuinfo 2>/dev/null; then
+    BUILD_MARCH="x86-64-v3"
+  else
+    BUILD_MARCH="none"
+  fi
+else
+  BUILD_MARCH="$SOFT_LADDER_BUILD_MARCH"
+fi
+if [[ "$BUILD_MARCH" != "none" ]]; then
+  BUILD_CXXFLAGS="${BUILD_CXXFLAGS} -march=${BUILD_MARCH}"
+fi
+log "host ISA: march=${BUILD_MARCH}"
+
 # --- C++ optimisation level and profile-guided optimisation ----------------
 # verilated.mk compiles the generated C++ at -Os unless OPT_FAST/OPT_SLOW/
 # OPT_GLOBAL are overridden; the measured recipe is -O2 (SOFT_LADDER_BUILD_OPT).
@@ -230,7 +256,7 @@ PGO="${SOFT_LADDER_BUILD_PGO:-1}"
 # 125 GB builder (instrumented or not); the RVFI stream does not depend on it.
 BUILD_OPT_SLOW="${SOFT_LADDER_BUILD_OPT_SLOW:--O1}"
 export MAKEFLAGS="${MAKEFLAGS:-} OPT_FAST=$BUILD_OPT OPT_SLOW=$BUILD_OPT_SLOW OPT_GLOBAL=$BUILD_OPT"
-log "C++ opt: fast/global $BUILD_OPT slow $BUILD_OPT_SLOW"
+log "C++ opt: fast/global $BUILD_OPT slow $BUILD_OPT_SLOW march=${BUILD_MARCH:-none}"
 PGO_DIR="$VERLIB_DIR/pgo"
 BASE_CXXFLAGS="$BUILD_CXXFLAGS"; BASE_LDFLAGS="$BUILD_LDFLAGS"
 if [[ "$PGO" == "1" ]]; then

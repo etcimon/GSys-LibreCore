@@ -151,11 +151,14 @@ export const buildCommand: Command = {
         SOFT_LADDER_BUILD_PGO: pgo ? "1" : "0",
         SOFT_LADDER_BUILD_SPLIT_VLT: vopts.splitVlt ? "1" : "0",
         SOFT_LADDER_BUILD_OPT: vopts.opt,
+        // `auto` leaves the host-ISA choice to the harness (x86-64-v3 on AVX2 hosts
+        // for the g6lc flavour, baseline otherwise).
+        ...(vopts.march && vopts.march !== "auto" ? { SOFT_LADDER_BUILD_MARCH: vopts.march } : {}),
         ...(vopts.trace ? (vopts.traceFormat === "vcd" ? { SOFT_LADDER_BUILD_TRACE_FAST: "1" } : { SOFT_LADDER_BUILD_TRACE_COMPACT: "1" }) : {}),
       };
       const script = "verif/regress/soft-ladder-build-harness.sh";
       if (ctx.dryRun) {
-        logger.info(`[dry-run] ${script} B  (target ${config.soc.coreConfig}, pgo=${pgo}, split=${vopts.splitVlt}, opt=${vopts.opt}, threads=${harnessEnv.SOFT_LADDER_VERILATOR_THREADS}; cwd: ${repoRoot})`);
+        logger.info(`[dry-run] ${script} B  (target ${config.soc.coreConfig}, pgo=${pgo}, split=${vopts.splitVlt}, opt=${vopts.opt}, march=${vopts.march ?? "auto"}, threads=${harnessEnv.SOFT_LADDER_VERILATOR_THREADS}; cwd: ${repoRoot})`);
         if (elf) logger.info(`[dry-run] ${verlib}/Variane_testharness ${elf}`);
         return 0;
       }

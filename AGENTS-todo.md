@@ -1096,8 +1096,31 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `VERILATOR_FNO=trigger-words`: Ir/cycle **393,335 → 362,616 (−7.8%)**, I1 −7.3%,
   RVFI identical. Cumulative this tree: **874,598 → 362,616 Ir/cycle (−58.5%)**.
   On at -O1+; headers now `e900ec45…` (funcs) / `60e279f8…` (types).
-  **Owed:** quiet-builder cycles/s spins; re-take the §7.5 PGO rows at `x86-64-v3`;
-  FP suite / 11 probes with the current headers through `run_ooo_fp_review.py`.
+  **Quiet-builder spins taken (guide §10.6, tag `spins-ooo-20261013c`, no PGO):**
+  baseline 3,571 → `-march` 16,644 → kernels 17,029 → +word guards **17,927
+  cycles/s (5.02×)**, ±1.5% spread, RVFI identical. Spin = idle-loop path; a longer
+  mixed workload (OpenSBI boot on g6lc64_ooo) and PGO × `x86-64-v3` are owed before
+  5× is quoted as general. FP suite / 11 probes with the current headers through
+  `run_ooo_fp_review.py` still owed.
+  **Pin bump (this commit):** `tools/verilator` and `tools/yosys` gitlinks advanced to the
+  commits carrying §9–§11; harness default `SOFT_LADDER_BUILD_MARCH=x86-64-v3` for `g6lc`
+  (`simulation.verilator.march: "auto"`), `-ftrigger-words` on at -O1+. **Gate:** the fork
+  runtime header at the new pin (`e900ec45…`) is *not* in the review runners' `qualified`
+  tables (`run_ooo_fp_review.py`, `run_mc_int2_review.py`, `run_opensbi_source_review.py`
+  still key `g6lc-fork@453031b66` = `83b7f47b…`); runners refuse it unless
+  `REVIEW_EXPERIMENTAL_RUNTIME_SHA256` declares it. Re-run the 11-probe / FP-suite /
+  anchor battery on the rebuilt builder prefix, then add the hash as
+  `g6lc-fork@<new pin>` — not before.
+- [~] **Yosys byte-vector kernels (2026-10-13, guide §11).** callgrind on `cva6`/
+  `cv32a65x` (`perf` is disabled for users on the builder): proc phase is 56% SigMap +
+  `dict<SigBit>` traffic (user's in-flight `sigtools.h` work; untouched), `opt_expr`
+  const folding ≤11%. Implemented `kernel/stateops.h`: 4-state lane kernels behind
+  `const_and/or/xor/xnor/not` and `is_fully_*` (Const + SigSpec), one `Const::bit_data()`
+  accessor; `stateopsTest.cc` oracle = former per-bit code (every pair × every lane).
+  `gtest-kernel` 119/119; `tests/opt`/`tests/various`/`opt_merge` battery unchanged vs
+  pre-change binary. Micro-bench 1.3–1.5× per call. **Design-level A/B not claimed**;
+  owed with the slang-enabled fork on the proxy. Final profile: `pull --tag
+  yosys-prof-cv32-20261013` when the callgrind run ends.
 - [~] **Yosys `opt_merge` subscriber index (2026-10-13, guide §9.2).** Transfer of the
   write-side-invalidation discipline: `wire_cells` removal was a linear `std::remove` per
   wire per removed cell; now indexed swap-remove with position repair, and the index is
