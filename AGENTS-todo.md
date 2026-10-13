@@ -1121,6 +1121,26 @@ prerequisite for this work under the existing dual license. No licensing policy 
   pre-change binary. Micro-bench 1.3–1.5× per call. **Design-level A/B not claimed**;
   owed with the slang-enabled fork on the proxy. Final profile: `pull --tag
   yosys-prof-cv32-20261013` when the callgrind run ends.
+  **Second sweep (guide §11.3, uncommitted in `tools/yosys`):** every remaining
+  `State` loop in `calc.cc`/`rtlil.cc`/`bitpattern.h` — `const_shift_worker` was a
+  `BigInteger` per output bit, now int64 offset + one `memcpy` (**41,701 → 299 ns at
+  1024 bits**, 549 → 292 at 8); reductions as one `summarize()` scan; `$eq` block scan,
+  `$eqx` memcmp; `const_mux`/`bweqx`/`bwmux` lanes; `BitPatternPool::match`. Oracle
+  tests incl. the original BigInteger worker on 2,000 random shifts (huge/signed/undef
+  amounts); `gtest-kernel` 122/122; `tests/opt`/`tests/various`/`opt_merge` battery
+  unchanged. `-march=x86-64-v3` for yosys itself measured at −4…−9 % pass time, wall
+  within noise → **not adopted** (hash-bound code; §11.5).
+  **SigMap / hashlib (guide §11.4, uncommitted in `tools/yosys`):** the alias chain
+  had no path compression — 31 hops/bit on a chain fixture, every hop a dict lookup +
+  binary search per bit. `apply(SigSpec&)` now walks spans (worklist; single-bit,
+  origin-wire and hop-budget cases replayed per bit → bit-identical, oracle test
+  `SpanWalkMatchesPerBitLoop`); union-find keys in a dense per-wire index
+  (`SigBitIdict`, `mfp<>` gained a store parameter); `dict`/`pool` bucket by
+  multiply-high instead of `% prime`. Fixtures: `check` 3.4× / `opt_clean` 1.9× on
+  wide chains, ~1.1–1.3× on the adversarial fragmenting one; outputs byte-identical;
+  `gtest-kernel` 123/123; `tests/opt`/`various`/`opt_merge` unchanged. Owed: re-take
+  the `cv32a65x` callgrind on this binary (slang build on the proxy) and the LibreCore
+  synth smoke before any pin bump of this change.
 - [~] **Yosys `opt_merge` subscriber index (2026-10-13, guide §9.2).** Transfer of the
   write-side-invalidation discipline: `wire_cells` removal was a linear `std::remove` per
   wire per removed cell; now indexed swap-remove with position repair, and the index is

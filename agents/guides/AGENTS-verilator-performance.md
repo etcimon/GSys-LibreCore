@@ -1435,9 +1435,109 @@ predicates 1.3–1.5×, across 8–1024 bits; the floor is the `Const` copies in
 `extend_u0`. **Design-level effect is not claimed**: it is bounded by the ≤11% share
 above, and a synth-smoke A/B needs the slang-enabled fork build on the proxy (owed).
 
-### 11.3 Not done
+### 11.3 Second sweep over the remaining `State` loops (same day)
 
-No SIMD in `SigMap`/`dict` (not a vector problem; in-flight work in this tree), no
-change to `hashlib`, no AVX-512 path (the formal build has no `-march` either; the
-kernels follow whatever ISA that build is given).
+Everything else in `kernel/calc.cc`, `rtlil.cc` and `bitpattern.h` that walks a
+`std::vector<RTLIL::State>` was read; the vector-shaped ones went through
+`stateops.h`, each with an oracle test against the former code:
+
+| site | before | now |
+|---|---|---|
+| `const_shl/shr/sshl/sshr/shift/shiftx` (`const_shift_worker`) | a `BigInteger` constructed and compared **per output bit** | int64 offset, one `memcpy` of the in-range span, two fills; amounts beyond both widths (or beyond a machine word) handled by two `BigInteger` compares |
+| `const_reduce_and/or/xor/xnor/bool` | sequential fold through a function pointer | one `summarize()` scan (any 0 / any 1 / any other / parity) |
+| `const_eq/ne` | per-bit loop with early exit | `eq_status()` block scan |
+| `const_eqx/nex` | per-bit loop | `memcmp` |
+| `const_mux` (undefined select), `const_bweqx`, `const_bwmux` | per-bit `set()` | lane kernels |
+| `BitPatternPool::match` (proc_mux / opt_muxtree cubes) | per-bit loop | `cubes_match()` block scan |
+
+`stateopsTest.cc` grew to 7 tests / 122 in `gtest-kernel`: reductions and `$eq` with
+every state in every lane and parity across block boundaries; the shift worker against
+the **original BigInteger implementation** on 2,000 random cases (small, around-width,
+2^69 and signed-negative amounts, undefined select bits, every public entry point);
+the mux family and the pool through its API. `tests/opt` and `tests/various` failure
+sets identical to the pre-change binary; `opt_merge` battery 18/18 byte-identical.
+
+Micro-benchmark, same binary lineage, `afaf65697`'s `calc.cc` object vs now (ns per
+call, local SSE2 build): `const_shr` **549 → 292 (8 bits), 2,959 → 296 (64),
+41,701 → 299 (1024 bits, 140×)**; `const_eq + const_reduce_or` 107 → 89 (8), 386 → 81
+(64), 2,655 → 223 (1024). The elementwise rows did not move (same kernel on both
+sides). Design-level share remains bounded by the `opt_expr`/`ConstEval` fraction of
+§11.1 and is not claimed; `$shiftx` from part-select lowering and parameter arithmetic
+are where the shift row shows up.
+
+### 11.4 Into SigMap and the hash tables (same day, uncommitted in `tools/yosys`)
+
+The 56 % of §11.1 was read at the mechanism level before deciding what a vector unit
+could do for it. Three things were found; only one was a SIMD shape, and it was not
+the one that mattered.
+
+**(a) The alias chain had no path compression.** `SigMapView::apply(SigBit&)` hops
+through the alias ranges one bit at a time: each hop is a `dict<Wire*>` lookup plus a
+binary search, and a chain of partial connections (`w3[..] <- w2[..] <- w1[..] <- in`,
+each a chunk alias) makes every bit of a wide port pay the whole chain; unlike the
+union-find there is nothing to compress. The probe (`probe_sigmap.cc`) on a 400-wire ×
+256-bit chain fixture: **31.4 hops per bit**, `database.size() == 0` — every
+connection had gone into the alias ranges. Bits that one alias covers all land in one
+span of its image, so `apply(SigSpec&)` now walks **spans**: a worklist of
+(wire, offset, width, output position, depth); each hop is taken once per run of
+bits; spans no alias covers take the union-find step per bit; a single-bit span, a
+single-bit chunk, an image back on the origin wire (where the per-bit loop's cycle rule
+decides) and the 4096-hop budget are replayed by the per-bit loop, so the result is
+bit-for-bit the old one. Oracle test `SpanWalkMatchesPerBitLoop`: 60 random modules
+(whole, partial, reversed, constant, two-source and self-referencing connections, deep
+chains) × 40 multi-chunk queries, every bit compared against `apply(SigBit&)`. It
+caught one real bug on the way (a replay that passed the same object as `bit` and
+`origin`).
+
+**(b) The union-find key store hashed every (wire, offset).** `idict<SigBit>` is now
+`SigBitIdict`: a dense per-wire `std::vector<int>` of entry indices (one `dict<Wire*>`
+lookup per wire, an array read per bit, insertion-order indices exactly as before;
+constants keep a small hash). `mfp<>` took a third template parameter for the store.
+This is what makes the uncovered spans above one lookup per *span*.
+
+**(c) The bucket division.** `dict`/`pool::do_hash` did `hash % prime` — an integer
+division on every lookup of every table in Yosys. Now Lemire's multiply-high
+(`hash_bucket`); which bucket a key lands in is unobservable (iteration walks the entry
+vector), so outputs are unchanged. This is arithmetic, not SIMD, and it is the only
+part of the hash tables that was instruction-bound: the rest is one dependent cache
+miss per probe, which a wider register does not shorten.
+
+Measured (`check; opt_clean; opt_expr` on the fixtures, same source otherwise, outputs
+byte-identical, two runs each):
+
+| fixture | pass | before (ms) | now (ms) |
+|---|---|---:|---:|
+| 400 × 256, chains of partial aliases | `check` | 435–490 | **133** (3.4×) |
+| | `opt_clean` | 151–157 | **79–82** (1.9×) |
+| 2000 × 64, deep chains, random cuts (adversarial fragmentation) | `check` | 4,279–5,624 | 3,467–3,591 (~1.3×) |
+| | `opt_clean` | 1,208–1,601 | 1,134–1,259 (~1.1×) |
+
+The second fixture is the honest floor: random cuts fragment spans to single bits
+after a few hops, where the walk degenerates to the per-bit loop plus bookkeeping; the
+single-bit shortcuts are what keep it from losing. `gtest-kernel` 123/123;
+`tests/opt`, `tests/various` and the `opt_merge` battery unchanged (see below). The
+`cva6`/`cv32a65x` profile of §11.1 has not been re-taken on this binary (owed with the
+slang build on the proxy).
+
+**What SIMD could still do here, and was not done:** the uncovered-span loop reads
+contiguous `idx[pos]` and could test eight for `-1` at once with a compare+movemask,
+and the roots' `parents[]` could be gathered (`vpgatherdd`) — but the per-bit work
+there is one array read and one `SigBit` store, so the gain is bounded by a few
+percent of a path that just lost its hops; it is not where the next factor is.
+
+### 11.5 Not done
+
+No SIMD in the hash probing itself (one dependent miss per probe; a Swiss-table tag
+group would need a second index beside the ordered entry vector to keep iteration
+order and RTLIL byte-identity — possible, not measured, not started), no change to
+`Const::hash_into` (a different hash would reorder `dict` iteration and with it RTLIL
+output — byte-identity is the test oracle here), no AVX-512 path. **`-march` for Yosys
+itself, measured and not adopted:** two builds of
+the same source and component set (`yosys-march-base` / `yosys-march-v3`,
+`-DCMAKE_CXX_FLAGS=-march=x86-64-v3`), 12 alternating runs per fixture, outputs
+byte-identical: `opt_merge` pass time −4 % to −9 % (108 → 100 ms on the 32k-duplicate
+fixture), process wall within ±5 % (noise). Hash-table and pointer-bound code does not
+have Verilator's shift-and-mask shape, so unlike §10.3 the ISA floor is not a lever
+here; `install-formal.sh` / `install-yosys-g6lc.sh` keep the compiler's default ISA,
+and the `stateops` kernels run at 16 bytes (SSE2) in those builds.
 
