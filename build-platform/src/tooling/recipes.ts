@@ -110,10 +110,11 @@ export async function installVerilator(
   const ossRoot = findOssCadVerilatorRoot(paths.tooling);
   const adoptFrom = process.env.VERILATOR_ADOPT_FROM ?? ossRoot ?? "";
   const tag = config.toolchain.versions.verilator;
+  const flavour = config.toolchain.verilatorFlavour;
 
   if (options.dryRun) {
     const how = host.os === "windows" ? "wsl -e bash" : "bash";
-    logger.info(`[dry-run] ${how} ${scriptRel} tag=${tag} patches=verif/regress/verilator-*.patch (→ ${tools.verilator})`);
+    logger.info(`[dry-run] ${how} ${scriptRel} flavour=${flavour} tag=${tag} patches=verif/regress/verilator-*.patch (→ ${tools.verilator})`);
     if (adoptFrom) logger.info(`[dry-run]   adopt candidate (only if patched): ${adoptFrom}`);
     return already("verilator", "dry-run");
   }
@@ -138,12 +139,13 @@ export async function installVerilator(
     const scriptWsl = await windowsPathToWsl(scriptAbs);
     const adoptWsl = adoptFrom ? await windowsPathToWsl(adoptFrom) : "";
 
-    logger.info(`Verilator ${tag}: building patched tool under WSL → ${tools.verilator}`);
+    logger.info(`Verilator ${flavour === "g6lc" ? "g6lc fork (tools/verilator)" : tag}: building patched tool under WSL → ${tools.verilator}`);
     const shellCmd = [
       "set -euo pipefail",
       `export CVA6_REPO_DIR=${JSON.stringify(repoWsl)}`,
       `export VERILATOR_INSTALL_DIR=${JSON.stringify(installWsl)}`,
       `export VERILATOR_TAG=${JSON.stringify(tag)}`,
+      `export VERILATOR_FLAVOUR=${JSON.stringify(flavour)}`,
       `export NUM_JOBS=${JSON.stringify(jobs)}`,
       `export VERILATOR_FORCE=${JSON.stringify(forceFlag)}`,
       adoptWsl ? `export VERILATOR_ADOPT_FROM=${JSON.stringify(adoptWsl)}` : "true",
@@ -188,7 +190,8 @@ export async function installVerilator(
     CVA6_REPO_DIR: repoRoot,
     VERILATOR_INSTALL_DIR: tools.verilator,
     VERILATOR_TAG: tag,
-    VERILATOR_BUILD_DIR: join(paths.cache, `verilator-build-${tag}`),
+    VERILATOR_FLAVOUR: flavour,
+    VERILATOR_BUILD_DIR: join(paths.cache, `verilator-build-${flavour === "g6lc" ? "g6lc" : tag}`),
     NUM_JOBS: jobs,
     VERILATOR_FORCE: forceFlag,
     ...(adoptFrom ? { VERILATOR_ADOPT_FROM: adoptFrom } : {}),

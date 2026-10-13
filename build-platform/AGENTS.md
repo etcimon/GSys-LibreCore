@@ -31,8 +31,13 @@ Preserve these in every change (they are why the platform is reliable):
    `workspace/` (gitignored). Never write outside the repo or into global dirs.
    Deletions are confined to `workspace/` **plus explicit allowlisted leaves**
    (`clean sim` → repo-root `work-ver/`; `clean svt` → `sv-timing/target` and
-   package out/cache; `clean svt-tools` → `sv-timing/.tools`). Never walk the
-   whole repo or touch `core/` / crates / NDA PDK.
+   package out/cache; `clean svt-tools` → `sv-timing/.tools`; and the
+   `workspace.clean` leaves: `clean traces|runs` → `remote-runs/<tag>` (never
+   `builds/`), `clean repo-cache` → repo-root `.cache/*`, `clean regen` → the
+   listed regenerable build dirs). Repo-level selection applies holds — active
+   (< `activeAgeDays`), cited (tag referenced by a tracked file = evidence),
+   newest `keepRunsPerFamily` — lifted only by `--include-active|--include-cited`.
+   Never walk the whole repo or touch `core/` / crates / NDA PDK.
 4. **Cross-platform by construction.** No OS-specific assumptions outside
    `src/platform/`. Use `platform/os.ts`, `platform/exec.ts`, `platform/shell.ts`
    for anything that touches the host.
@@ -364,9 +369,22 @@ script adopts it and the step is a no-op.
 - **spike**: Linux native or Windows via WSL (`build-platform/scripts/install-spike.sh`);
   Cygwin unsupported. Installs Linux ELF under `workspace/tooling/spike`; adopts
   `~/tools/spike` when present. Run on Windows with `wsl …/tooling/spike/bin/spike`.
-- **verilator**: Linux native or Windows via WSL (`build-platform/scripts/install-verilator.sh`)
-  → `workspace/tooling/verilator-<pin>` (pin: `toolchain.versions.verilator`, v5.008). **The
-  installed tool is always the pinned tag PLUS every `verif/regress/verilator-*.patch`**: the
+- **verilator**: Linux native or Windows via WSL (`build-platform/scripts/install-verilator.sh`).
+  Two flavours, `toolchain.verilatorFlavour` (schema `VerilatorFlavour`, env `VERILATOR_FLAVOUR`):
+  - **`g6lc` (default since 2026-10-13)** → `workspace/tooling/verilator-g6lc`: the LibreCore
+    fork pinned as the submodule `tools/verilator` (the gitlink is the version of record, the same
+    rule as `tools/yosys`; `VERILATOR_PIN` overrides, the fork remote is the source when the
+    submodule is absent). It carries every `verif/regress` patch as a commit, so the patch step
+    verifies instead of applies, and the same `verify_prefix` check passes. A `<prefix>/runtime`
+    dir (headers + `bin/verilator_bin` + the perl driver) is the `VERILATOR_ROOT` the build
+    harness points at. This is the simulation build of record: with the split-loops `.vlt` the
+    8-hart server model runs 3,100+ cycles/s (guide §7.5) where the pinned build runs ~2,100.
+    `childEnv` exports `VLT_HOME` and `SOFT_LADDER_VERILATOR_FLAVOUR` so
+    `verif/regress/soft-ladder-build-harness.sh` follows the configured flavour.
+  - **`pinned`** → `workspace/tooling/verilator-<pin>` (pin: `toolchain.versions.verilator`,
+    v5.008): the upstream tag + patches, the qualification cross-check; CI's lint lane selects it
+    in its `.config.local.ts` overlay. **The installed tool is always the pinned tag PLUS every
+    `verif/regress/verilator-*.patch`**: the
   script applies each patch with `git apply --check` (a patch that does not apply is a hard
   error, unlike the upstream `verif/regress/install-verilator.sh` whose `git apply || true`
   silently builds a stock tool), skips Verilator's own `make test`, and after `make install`

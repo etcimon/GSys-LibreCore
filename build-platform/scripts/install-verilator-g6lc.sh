@@ -39,5 +39,7 @@ RT="$PREFIX/runtime"; rm -rf "$RT"; mkdir -p "$RT"
 cp -a "$PREFIX/share/verilator/." "$RT/"
 mkdir -p "$RT/bin"; cp -f "$PREFIX/bin/verilator_bin" "$RT/bin/verilator_bin"
 cp -f "$PREFIX/bin/verilator_bin_dbg" "$RT/bin/verilator_bin_dbg" 2>/dev/null || true
+# The perl driver too: a hierarchical build's child make runs $VERILATOR_ROOT/bin/verilator.
+cp -f "$PREFIX/bin/verilator" "$RT/bin/verilator"
 echo "[vlt-g6lc] runtime dir $RT (fork headers + fork verilator_bin); pinned runtime: $PINNED_RUNTIME"
 echo "[vlt-g6lc] installed at $PREFIX"

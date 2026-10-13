@@ -825,6 +825,22 @@ clock on this core, because what the core executes per cycle is its logic, not i
 code copies. The §6.3 "×1–2 unproven" for footprint is now "measured ≈ ×1.0"; the
 levers that remain are the structural ones of §6.1 (per-core skip, partition).
 
+### 7.4a The build of record (2026-10-13)
+
+The flat server model of the §7.5 table's left column — fork compiler (`tools/verilator`
+gitlink), `build-platform/scripts/verilator-split-loops.vlt`, `--threads 4`, `-O2`,
+**3,131 / 3,109 cycles/s** on the 300 k boot segment — is now the default build:
+`toolchain.verilatorFlavour: "g6lc"` in the build platform, `SOFT_LADDER_VERILATOR_FLAVOUR=g6lc`
+and the split-loops `.vlt` on by default in `verif/regress/soft-ladder-build-harness.sh`, the
+fork runtime in the review runners' qualified set (`runtimeFlavour: g6lc-fork@<pin>`), and the
+T16/T21 drivers' `T16_VLT_ROOT` / `T16_SPLIT_VLT` defaults. The pinned upstream v5.008 stays as
+`pinned` for cross-checks (~2,100 cycles/s on the same model) and as the fallback when no fork
+prefix is installed. Rules that follow from §7: an exactness run (RVFI per core on the segment,
+the probe battery) accompanies every fork bump; the opt-in passes (`-fsoa`, `-fprio`, `-fwake`,
+`-fdirty`, `-fclk-skip`, `-fsplit-plan`, `--unroll-roll-narrow`) stay off; a config that the
+fork miscompiles is built with `pinned` until fixed (T25 was the one such case, see
+`AGENTS-todo.md`).
+
 ### 7.5 The hierarchical core, measured (2026-10-12)
 
 Lever 1 of §6.1 as Verilator offers it: the core as a `hier_block`

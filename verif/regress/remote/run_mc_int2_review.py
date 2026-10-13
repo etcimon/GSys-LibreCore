@@ -504,15 +504,27 @@ def visibility_review():
     seed = Path(parent['sourceRoot']) if 'sourceRoot' in parent else Path(parent['model']).parent.parent / 'repo'
     for name, digest in parent['sources'].items():
         assert sha(seed / name) == (digest if isinstance(digest, str) else digest['reviewSha256']), name
-    runtime = Path('/opt/testharness/runs/review-private-runtime-20260915/runtime')
     runtime_header = parent.get('runtimeHeader') or parent['recipe']['runtimeHeader']
-    # The parent model's runtime: the qualified private runtime, or a declared
-    # experimental one (REVIEW_EXPERIMENTAL_RUNTIME_SHA256, comma-separated hashes of
-    # verilated_funcs.h; the tools/verilator fork). Experimental runs are recorded with
-    # runtimeQualified=false and are never qualification evidence.
+    # The parent model's runtime: a qualified one (the private upstream 5.008 runtime, or
+    # since 2026-10-13 the LibreCore fork pinned as tools/verilator -- the default build
+    # flavour -- keyed by the sha256 of verilated_funcs.h at the gitlink), or a declared
+    # experimental one (REVIEW_EXPERIMENTAL_RUNTIME_SHA256, comma-separated hashes).
+    # Experimental runs are recorded with runtimeQualified=false and are never
+    # qualification evidence.
+    qualified = {
+        'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166': 'pinned-v5.008',
+        '83b7f47b08b54d045f34fa18f5600aceffe9f186ae71fa937a53eeae0ca6624a': 'g6lc-fork@453031b66',
+    }
     declared = {h.strip() for h in os.environ.get('REVIEW_EXPERIMENTAL_RUNTIME_SHA256', '').split(',') if h.strip()}
-    runtime_qualified = sha(runtime / 'include/verilated_funcs.h') == runtime_header
+    runtime_qualified = runtime_header in qualified
     assert runtime_qualified or runtime_header in declared, 'parent model runtime is neither qualified nor declared'
+    # The visibility rebuild uses the parent's runtime: the pinned one by header hash,
+    # else the fork prefix of install-verilator-g6lc.sh (REVIEW_MC_RUNTIME overrides).
+    pinned = Path('/opt/testharness/runs/review-private-runtime-20260915/runtime')
+    fork = Path('/opt/testharness/toolchains/verilator-v5.008-g6lc/runtime')
+    runtime = Path(os.environ['REVIEW_MC_RUNTIME']) if os.environ.get('REVIEW_MC_RUNTIME') else (
+        pinned if sha(pinned / 'include/verilated_funcs.h') == runtime_header else fork)
+    assert sha(runtime / 'include/verilated_funcs.h') == runtime_header, f'no runtime dir with header {runtime_header[:12]} (set REVIEW_MC_RUNTIME)'
     if not runtime_qualified:
         print('[mc-review] EXPERIMENTAL parent runtime (declared): retirement evidence only', flush=True)
     target = parent.get('target', 'g6lc64_ooo_int2')
@@ -745,7 +757,8 @@ end
     exe = model / 'Variane_testharness'
     manifest = {'parent': str(parent_path), 'model': str(exe), 'modelSha256': sha(exe),
                 'sourceRoot': str(repo), 'observers': changes, 'driverSha256': sha(driver),
-                'runtimeHeader': runtime_header, 'target': target, 'build': cmd}
+                'runtimeHeader': runtime_header, 'runtimeQualified': runtime_qualified,
+                'runtimeFlavour': qualified.get(runtime_header, 'experimental'), 'target': target, 'build': cmd}
     (out / 'manifest.json').write_text(json.dumps(manifest, indent=2))
     if os.environ.get('REVIEW_MC_VISIBILITY_BUILD_ONLY') == '1':
         return 0

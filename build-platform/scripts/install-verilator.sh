@@ -20,10 +20,24 @@
 #   The source, tag and patch set are otherwise identical, so the tool that
 #   comes out is the same one the regress scripts expect (VERILATOR_INSTALL_DIR).
 #
+# Flavours (VERILATOR_FLAVOUR, default g6lc — the build of record since 2026-10-13):
+#   g6lc    the LibreCore fork pinned as the submodule tools/verilator (etcimon/verilator,
+#           branch g6lc, v5.008 + the compiler work in agents/guides/AGENTS-verilator-
+#           performance.md): the source is that checkout (or VERILATOR_REPO=the fork URL
+#           when the submodule is absent) at the gitlink commit, built into
+#           <prefix>/verilator-g6lc. It already carries every verif/regress patch as a
+#           commit, so the patch step verifies instead of applies. This is the compiler
+#           the server model runs 3,100+ cycles/s with (fork + split-loops .vlt);
+#           the pinned upstream build runs the same model at ~2,100.
+#   pinned  the upstream tag + the verif/regress/verilator-*.patch set, as before: the
+#           qualification reference and the fallback when the fork cannot be built.
+#
 # Environment:
 #   VERILATOR_INSTALL_DIR  install prefix (required for managed installs)
-#   VERILATOR_TAG          git tag to build (default: v5.008 — the platform pin)
-#   VERILATOR_REPO         git remote (default: https://github.com/verilator/verilator.git)
+#   VERILATOR_FLAVOUR      g6lc (default) | pinned
+#   VERILATOR_TAG          git tag to build (default: v5.008 — the platform pin; flavour pinned)
+#   VERILATOR_PIN          fork commit to build (default: the tools/verilator gitlink; flavour g6lc)
+#   VERILATOR_REPO         git remote (default: upstream for pinned, the fork for g6lc)
 #   VERILATOR_BUILD_DIR    source/build dir (default: $HOME/.cache/g6lc-verilator/<tag>)
 #   VERILATOR_PATCH_DIR    directory holding verilator-*.patch (default: <repo>/verif/regress)
 #   NUM_JOBS               parallel make jobs (default: nproc)
@@ -48,20 +62,36 @@ NUM_JOBS="${NUM_JOBS:-$(nproc 2>/dev/null || sysctl -n hw.ncpu 2>/dev/null || ec
 VERILATOR_FORCE="${VERILATOR_FORCE:-0}"
 VERILATOR_SKIP_DEPS="${VERILATOR_SKIP_DEPS:-0}"
 VERILATOR_TAG="${VERILATOR_TAG:-v5.008}"
-VERILATOR_REPO="${VERILATOR_REPO:-https://github.com/verilator/verilator.git}"
+VERILATOR_FLAVOUR="${VERILATOR_FLAVOUR:-g6lc}"
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="${CVA6_REPO_DIR:-$(cd "${SCRIPT_DIR}/../.." && pwd)}"
 PATCH_DIR="${VERILATOR_PATCH_DIR:-${REPO_ROOT}/verif/regress}"
-[[ -n "${VERILATOR_INSTALL_DIR:-}" ]] || VERILATOR_INSTALL_DIR="${REPO_ROOT}/build-platform/workspace/tooling/verilator-${VERILATOR_TAG}"
-BUILD_DIR="${VERILATOR_BUILD_DIR:-$HOME/.cache/g6lc-verilator/${VERILATOR_TAG}}"
+case "${VERILATOR_FLAVOUR}" in
+  g6lc)
+    FORK_SRC="${REPO_ROOT}/tools/verilator"
+    VERILATOR_PIN="${VERILATOR_PIN:-$(git -C "${REPO_ROOT}" ls-tree HEAD tools/verilator 2>/dev/null | awk '{print $3}')}"
+    [[ -n "${VERILATOR_PIN}" ]] || die "flavour g6lc: no tools/verilator gitlink and no VERILATOR_PIN"
+    if [[ -f "${FORK_SRC}/src/V3Const.cpp" && -e "${FORK_SRC}/.git" ]]; then
+      VERILATOR_REPO="${VERILATOR_REPO:-${FORK_SRC}}"
+    else
+      VERILATOR_REPO="${VERILATOR_REPO:-https://github.com/etcimon/verilator.git}"
+    fi
+    DIR_TAG="g6lc"; CHECKOUT="${VERILATOR_PIN}" ;;
+  pinned)
+    VERILATOR_REPO="${VERILATOR_REPO:-https://github.com/verilator/verilator.git}"
+    DIR_TAG="${VERILATOR_TAG}"; CHECKOUT="${VERILATOR_TAG}" ;;
+  *) die "unknown VERILATOR_FLAVOUR '${VERILATOR_FLAVOUR}' (g6lc|pinned)" ;;
+esac
+[[ -n "${VERILATOR_INSTALL_DIR:-}" ]] || VERILATOR_INSTALL_DIR="${REPO_ROOT}/build-platform/workspace/tooling/verilator-${DIR_TAG}"
+BUILD_DIR="${VERILATOR_BUILD_DIR:-$HOME/.cache/g6lc-verilator/${DIR_TAG}}"
 
 # The upstream variable collides with Verilator's own build.
 unset VERILATOR_ROOT || true
 
 shopt -s nullglob
 PATCHES=("${PATCH_DIR}"/verilator-*.patch)
-log "tag=${VERILATOR_TAG} prefix=${VERILATOR_INSTALL_DIR} patches=${#PATCHES[@]}"
+log "flavour=${VERILATOR_FLAVOUR} source=${VERILATOR_REPO} @ ${CHECKOUT} prefix=${VERILATOR_INSTALL_DIR} patches=${#PATCHES[@]}"
 for p in "${PATCHES[@]}"; do log "  patch: ${p}"; done
 
 # --- verification: does an installed prefix carry every patch? --------------
@@ -153,24 +183,44 @@ for c in git autoconf flex bison make g++; do
   command -v "$c" >/dev/null 2>&1 || die "required command not found: $c"
 done
 
-# --- source at the pinned tag -------------------------------------------------
+# --- source at the pin ----------------------------------------------------------
 mkdir -p "$(dirname "${BUILD_DIR}")"
-if [[ -d "${BUILD_DIR}/.git" ]]; then
-  log "reusing source in ${BUILD_DIR}"
-  git -C "${BUILD_DIR}" fetch --depth 1 origin "refs/tags/${VERILATOR_TAG}:refs/tags/${VERILATOR_TAG}" 2>/dev/null || true
-  git -C "${BUILD_DIR}" reset -q --hard "${VERILATOR_TAG}"
+if [[ "${VERILATOR_FLAVOUR}" == "g6lc" ]]; then
+  # The fork: a full clone (a commit, not a tag, is checked out), from the local
+  # submodule when it is populated so an offline builder needs no network.
+  if [[ -d "${BUILD_DIR}/.git" ]]; then
+    log "reusing source in ${BUILD_DIR}"
+    git -C "${BUILD_DIR}" fetch --quiet "${VERILATOR_REPO}" g6lc 2>/dev/null       || git -C "${BUILD_DIR}" fetch --quiet "${VERILATOR_REPO}" 2>/dev/null || true
+  else
+    rm -rf "${BUILD_DIR}"
+    log "clone ${VERILATOR_REPO} → ${BUILD_DIR}"
+    git clone --quiet "${VERILATOR_REPO}" "${BUILD_DIR}"
+  fi
+  git -C "${BUILD_DIR}" checkout --quiet --force "${CHECKOUT}"     || { git -C "${BUILD_DIR}" fetch --quiet "${VERILATOR_REPO}" "${CHECKOUT}" && git -C "${BUILD_DIR}" checkout --quiet --force FETCH_HEAD; }     || die "fork commit ${CHECKOUT} not found in ${VERILATOR_REPO}"
   git -C "${BUILD_DIR}" clean -qfdx
+  log "fork source $(git -C "${BUILD_DIR}" rev-parse --short HEAD) $(git -C "${BUILD_DIR}" log -1 --format=%s | cut -c1-70)"
 else
-  rm -rf "${BUILD_DIR}"
-  log "clone ${VERILATOR_REPO} @ ${VERILATOR_TAG} → ${BUILD_DIR}"
-  git clone --quiet --branch "${VERILATOR_TAG}" --depth 1 "${VERILATOR_REPO}" "${BUILD_DIR}"
+  if [[ -d "${BUILD_DIR}/.git" ]]; then
+    log "reusing source in ${BUILD_DIR}"
+    git -C "${BUILD_DIR}" fetch --depth 1 origin "refs/tags/${VERILATOR_TAG}:refs/tags/${VERILATOR_TAG}" 2>/dev/null || true
+    git -C "${BUILD_DIR}" reset -q --hard "${VERILATOR_TAG}"
+    git -C "${BUILD_DIR}" clean -qfdx
+  else
+    rm -rf "${BUILD_DIR}"
+    log "clone ${VERILATOR_REPO} @ ${VERILATOR_TAG} → ${BUILD_DIR}"
+    git clone --quiet --branch "${VERILATOR_TAG}" --depth 1 "${VERILATOR_REPO}" "${BUILD_DIR}"
+  fi
 fi
 cd "${BUILD_DIR}"
 
-# --- custom fixes: every patch must apply --------------------------------------
+# --- custom fixes: every patch must apply (pinned) or already be in the tree (g6lc) ---
 for p in "${PATCHES[@]}"; do
+  if git apply --check --reverse "${p}" >/dev/null 2>&1; then
+    log "already in tree: $(basename "${p}")"
+    continue
+  fi
   log "apply $(basename "${p}")"
-  git apply --check --verbose "${p}" || die "patch does not apply cleanly to ${VERILATOR_TAG}: ${p}"
+  git apply --check --verbose "${p}" || die "patch does not apply cleanly to ${CHECKOUT}: ${p}"
   git apply --verbose "${p}"
 done
 if [[ ${#PATCHES[@]} -gt 0 ]]; then
@@ -188,4 +238,10 @@ rm -rf "${VERILATOR_INSTALL_DIR:?}"
 make install
 
 verify_prefix "${VERILATOR_INSTALL_DIR}" || die "installed Verilator failed patch verification"
-log "installed: ${VERILATOR_INSTALL_DIR}/bin/verilator_bin"
+# VERILATOR_ROOT-style runtime dir (headers + bin/verilator_bin + the perl driver): the
+# layout the build drivers point VERILATOR_ROOT at, and a hierarchical child make needs
+# bin/verilator in it.
+RT="${VERILATOR_INSTALL_DIR}/runtime"; rm -rf "${RT}"; mkdir -p "${RT}/bin"
+cp -a "${VERILATOR_INSTALL_DIR}/share/verilator/." "${RT}/"
+cp -f "${VERILATOR_INSTALL_DIR}/bin/verilator_bin" "${VERILATOR_INSTALL_DIR}/bin/verilator" "${RT}/bin/"
+log "installed: ${VERILATOR_INSTALL_DIR}/bin/verilator_bin (flavour ${VERILATOR_FLAVOUR}; runtime dir ${RT})"

@@ -115,9 +115,9 @@ BUILD_CXXFLAGS="${SOFT_LADDER_BUILD_CXXFLAGS:-}"
 if [[ "$FETCH" == "B" ]]; then
   BUILD_CXXFLAGS="-DG6LC_FETCH_B ${BUILD_CXXFLAGS}"
 fi
-# Opt-in extra Verilator arguments, default none. Used to pin a reviewed
-# compiler control (e.g. a split_var .vlt) to one candidate build without
-# changing the default build policy or any repository waiver.
+# Extra Verilator arguments (SOFT_LADDER_BUILD_VLT_ARGS, default none) pin a
+# reviewed compiler control to one candidate build. The split-loops .vlt is
+# handled separately below: it is the default control of the g6lc flavour.
 BUILD_VLT_ARGS="${SOFT_LADDER_BUILD_VLT_ARGS:-}"
 [[ -n "$BUILD_VLT_ARGS" ]] && log "extra verilator args: $BUILD_VLT_ARGS"
 LINKER="${SOFT_LADDER_BUILD_LINKER:-}"
@@ -160,11 +160,45 @@ fi
 [[ -n "$BUILD_LDFLAGS" ]] && log "extra LDFLAGS: $BUILD_LDFLAGS"
 [[ -n "$BUILD_CXXFLAGS" ]] && log "extra CXXFLAGS: $BUILD_CXXFLAGS"
 
-VLT_HOME="${VLT_HOME:-/root/tools/verilator-v5.008}"
+# --- Verilator flavour -------------------------------------------------------
+# g6lc (default since 2026-10-13): the LibreCore fork pinned as the submodule
+# tools/verilator (build-platform/scripts/install-verilator.sh VERILATOR_FLAVOUR=g6lc,
+# or the builder prefix of install-verilator-g6lc.sh) with the split-loops .vlt
+# (build-platform/scripts/verilator-split-loops.vlt) as its compiler control:
+# the server model at 3,100+ cycles/s (guide §7.5 table). pinned: the upstream
+# v5.008 + patches, ~2,100 cycles/s on the same model, the qualification
+# reference. An explicit VLT_HOME / VERILATOR_ROOT always wins; otherwise the
+# flavour picks the first prefix that exists, and falls back to pinned with a
+# log line when the fork is not installed.
+VLT_FLAVOUR="${SOFT_LADDER_VERILATOR_FLAVOUR:-g6lc}"
+PINNED_HOME="/root/tools/verilator-v5.008"
+if [[ -z "${VLT_HOME:-}" && -z "${VERILATOR_ROOT:-}" && "$VLT_FLAVOUR" == "g6lc" ]]; then
+  for cand in "$ROOT/build-platform/workspace/tooling/verilator-g6lc"               "${VERILATOR_INSTALL_DIR:-}"               /opt/testharness/toolchains/verilator-v5.008-g6lc; do
+    [[ -n "$cand" && -x "$cand/bin/verilator" && -d "$cand/runtime" ]] || continue
+    VLT_HOME="$cand"; export VERILATOR_ROOT="$cand/runtime"; break
+  done
+  if [[ -z "${VLT_HOME:-}" ]]; then
+    log "verilator flavour g6lc requested but no fork prefix found (tools install verilator); falling back to pinned"
+    VLT_FLAVOUR="pinned"
+  fi
+fi
+VLT_HOME="${VLT_HOME:-$PINNED_HOME}"
+log "verilator flavour: $VLT_FLAVOUR home=$VLT_HOME"
 
 for p in "$RISCV/bin" "$SPIKE_INSTALL_DIR/lib" "$VLT_HOME/bin/verilator"; do
   [[ -e "$p" ]] || { log "missing build dependency: $p"; exit 1; }
 done
+
+# The split-loops .vlt (split_var controls that keep the issue/LSU/cache scans
+# as straight bit vectors) is the g6lc flavour's default compiler control; the
+# pinned compiler refuses most of its entries, so it stays off there.
+# SOFT_LADDER_BUILD_SPLIT_VLT=0|1 overrides.
+SPLIT_VLT_FILE="$ROOT/build-platform/scripts/verilator-split-loops.vlt"
+SPLIT_VLT_ON="${SOFT_LADDER_BUILD_SPLIT_VLT:-$([[ "$VLT_FLAVOUR" == g6lc ]] && echo 1 || echo 0)}"
+if [[ "$SPLIT_VLT_ON" == "1" && -f "$SPLIT_VLT_FILE" ]] && [[ " $BUILD_VLT_ARGS " != *"verilator-split-loops.vlt"* ]]; then
+  BUILD_VLT_ARGS="$SPLIT_VLT_FILE $BUILD_VLT_ARGS"
+  log "split-loops .vlt: on ($SPLIT_VLT_FILE)"
+fi
 
 # Verilator 5.008 does not know -Wno-SIDEEFFECT; the Makefile passes it on some
 # targets. Wrap the binary to strip it (same shim as rebuild-baseline.sh).

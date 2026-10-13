@@ -36,17 +36,25 @@ def sha(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-# The qualified private 5.008 runtime (verilated_funcs.h). Qualification evidence
-# requires it. A performance-experiment model built against another runtime (the
-# tools/verilator fork) can be reviewed only when its runtime header hash is declared
-# in REVIEW_EXPERIMENTAL_RUNTIME_SHA256 (comma-separated); the record then carries
-# runtimeQualified=false so it can never be mistaken for qualification evidence.
-QUALIFIED_RUNTIME_SHA256 = 'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
+# Qualified runtimes (sha256 of include/verilated_funcs.h -> label). Qualification
+# evidence requires one of them: the private upstream 5.008 runtime, and since
+# 2026-10-13 the LibreCore fork pinned as the submodule tools/verilator (the default
+# build flavour, agents/guides/AGENTS-verilator-performance.md §7.5) -- its runtime
+# header hash is that file's at the gitlink, so a fork bump that touches
+# verilated_funcs.h must update this table. Any other runtime can be reviewed only
+# when declared in REVIEW_EXPERIMENTAL_RUNTIME_SHA256 (comma-separated); the record
+# then carries runtimeQualified=false so it can never be mistaken for qualification
+# evidence.
+QUALIFIED_RUNTIMES = {
+    'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166': 'pinned-v5.008',
+    '83b7f47b08b54d045f34fa18f5600aceffe9f186ae71fa937a53eeae0ca6624a': 'g6lc-fork@453031b66',
+}
+QUALIFIED_RUNTIME_SHA256 = next(iter(QUALIFIED_RUNTIMES))  # the pinned reference
 
 
 def accepted_runtime_hashes() -> set:
     declared = os.environ.get('REVIEW_EXPERIMENTAL_RUNTIME_SHA256', '')
-    return {QUALIFIED_RUNTIME_SHA256} | {h.strip() for h in declared.split(',') if h.strip()}
+    return set(QUALIFIED_RUNTIMES) | {h.strip() for h in declared.split(',') if h.strip()}
 
 
 def run_outcome(returncode: int, text: str, cycle_cap: int) -> str:
@@ -307,11 +315,13 @@ def main() -> int:
     runtime_hashes = {p: sha(Path(p)) for p in sorted(runtime_headers)}
     if not runtime_hashes or not set(runtime_hashes.values()) <= accepted_runtime_hashes():
         raise RuntimeError('review model does not use the qualified private runtime')
-    runtime_qualified = set(runtime_hashes.values()) == {QUALIFIED_RUNTIME_SHA256}
+    runtime_qualified = (len(set(runtime_hashes.values())) == 1
+                         and set(runtime_hashes.values()) <= set(QUALIFIED_RUNTIMES))
     record = {'label': label, 'test': test, 'stage': stage,
               'modelSha256': sha(model), 'model': str(model),
               'modelInputsSha256': sha(model_inputs), 'runtimeHeaders': runtime_hashes,
-              'runtimeQualified': runtime_qualified}
+              'runtimeQualified': runtime_qualified,
+              'runtimeFlavour': QUALIFIED_RUNTIMES.get(next(iter(runtime_hashes.values())), 'experimental')}
     if not runtime_qualified:
         record['runtimeExperimental'] = sorted(set(runtime_hashes.values()))
         print('[fp-review] EXPERIMENTAL runtime (declared via REVIEW_EXPERIMENTAL_RUNTIME_SHA256): '

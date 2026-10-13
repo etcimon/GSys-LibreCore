@@ -172,10 +172,18 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends autoconf bison flex help2man libfl-dev libfl2 zlib1g-dev
 
+      # The lint gate stays on the pinned upstream flavour: the default flavour is
+      # the g6lc fork (tools/verilator gitlink, the simulation build of record),
+      # whose commit must be reachable from the submodule or the fork remote.
       - name: tools install verilator (pinned + patched)
         env:
           VERILATOR_SKIP_DEPS: "1"
-        run: ./build.sh tools install verilator
+          VERILATOR_FLAVOUR: pinned
+        run: |
+          cat > build-platform/.config.local.ts <<'EOF'
+          export default { toolchain: { verilatorFlavour: "pinned" } };
+          EOF
+          ./build.sh tools install verilator
 
       - name: Save pinned Verilator
         if: steps.cache-verilator.outputs.cache-hit != 'true'
@@ -201,7 +209,7 @@ jobs:
         run: |
           cat > build-platform/.config.local.ts <<'EOF'
           // CI overlay: lint/elab tools come from the managed pinned Verilator prefix.
-          export default { verify: { suite: { root: "verilator-v5.008", version: "v5.008" } } };
+          export default { toolchain: { verilatorFlavour: "pinned" }, verify: { suite: { root: "verilator-v5.008", version: "v5.008" } } };
           EOF
           ./build.sh diag status
 

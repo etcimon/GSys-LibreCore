@@ -41,7 +41,14 @@ export function toolLocations(
   os: HostOS,
 ): ToolLocations {
   const t = paths.tooling;
-  const verilator = join(t, `verilator-${config.toolchain.versions.verilator}`);
+  // Flavour-named prefix: the fork is pinned by the tools/verilator gitlink,
+  // not by the upstream tag, so its prefix is verilator-g6lc.
+  const verilator = join(
+    t,
+    config.toolchain.verilatorFlavour === "g6lc"
+      ? "verilator-g6lc"
+      : `verilator-${config.toolchain.versions.verilator}`,
+  );
   const iverilog = join(t, `iverilog-${config.toolchain.versions.iverilog}`);
   const spike = join(t, "spike");
   const riscv = join(t, "riscv");

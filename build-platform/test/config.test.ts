@@ -8,6 +8,8 @@ import { expect, test } from "bun:test";
 import { loadConfig } from "../src/config/load.ts";
 import { deepMerge } from "../src/util/object.ts";
 import { DEFAULT_SYNTH_PASSES, resolveSynthTop } from "../src/tooling/eda.ts";
+import { toolLocations } from "../src/tooling/locations.ts";
+import { resolveWorkspacePaths } from "../src/workspace/layout.ts";
 
 test("config resolves and validates", async () => {
   const { config, repoRoot } = await loadConfig();
@@ -17,6 +19,17 @@ test("config resolves and validates", async () => {
   for (const id of config.tests.defaultSuites) {
     expect(config.tests.suites.some((s) => s.id === id)).toBe(true);
   }
+});
+
+test("the g6lc Verilator fork is the default flavour and names its own prefix", async () => {
+  const { config, repoRoot } = await loadConfig();
+  expect(config.toolchain.verilatorFlavour).toBe("g6lc");
+  const ws = resolveWorkspacePaths(repoRoot, config);
+  expect(toolLocations(ws, config, "linux").verilator.endsWith("verilator-g6lc")).toBe(true);
+  const pinned = { ...config, toolchain: { ...config.toolchain, verilatorFlavour: "pinned" as const } };
+  expect(
+    toolLocations(ws, pinned, "linux").verilator.endsWith(`verilator-${config.toolchain.versions.verilator}`),
+  ).toBe(true);
 });
 
 test("SI policy validation compartments stay optional", async () => {
@@ -39,6 +52,16 @@ test("SI native evaluation and scalar floating gates stay optional", async () =>
     expect(suite?.tools).toEqual([]);
     expect(config.tests.defaultSuites).not.toContain(id);
   }
+});
+
+test("apu-remote-leaf is an optional remote-proxy suite outside defaultSuites", async () => {
+  const { config } = await loadConfig();
+  const suite = config.tests.suites.find((s) => s.id === "apu-remote-leaf");
+  expect(suite).toBeDefined();
+  expect(suite?.script).toBe("verif/tb/apu/run-apu-remote-leaf.sh");
+  expect(suite?.optional).toBe(true);
+  expect(suite?.execution).toBe("remote-proxy");
+  expect(config.tests.defaultSuites).not.toContain("apu-remote-leaf");
 });
 
 test("deepMerge overrides scalars and arrays but merges objects", () => {

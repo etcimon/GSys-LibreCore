@@ -129,6 +129,10 @@ export function childEnv(
     RISCV: tools.riscv,
     CVA6_REPO_DIR: host.os === "windows" ? repoRoot.replace(/\\/g, "/") : repoRoot,
     VERILATOR_INSTALL_DIR: verilatorInstallDir,
+    // The soft-ladder build harness reads VLT_HOME (prefix) and the flavour; the
+    // default flavour (g6lc fork + split-loops .vlt) is the 3,100+ cycles/s build.
+    VLT_HOME: verilatorInstallDir,
+    SOFT_LADDER_VERILATOR_FLAVOUR: config.toolchain.verilatorFlavour,
     // OSS CAD / Verilator perl wrapper honors VERILATOR_ROOT when set.
     ...(existsSync(join(verilatorInstallDir, "share", "verilator"))
       ? { VERILATOR_ROOT: join(verilatorInstallDir, "share", "verilator") }

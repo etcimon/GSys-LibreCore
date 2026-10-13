@@ -31,6 +31,33 @@ build and regression flow from a single top-level `.config.ts`.
   - **Lifecycle plan:** `architecture/build-platform-workspace-lifecycle.md`
 - **Human docs:** `docs/website/` pages under Build Platform + sv-timing mirror this surface.
 
+## Verilator of record (since 2026-10-13): the g6lc fork, split-loops `.vlt`, multi-threaded
+
+- **Default flavour `g6lc`** (`toolchain.verilatorFlavour` in `.config.ts`, env
+  `SOFT_LADDER_VERILATOR_FLAVOUR`, installer `VERILATOR_FLAVOUR`): the LibreCore fork pinned
+  as the submodule `tools/verilator` (v5.008 + the compiler work recorded in
+  `agents/guides/AGENTS-verilator-performance.md` §7), built by
+  `./build.sh tools install verilator` into `workspace/tooling/verilator-g6lc` (builder prefix:
+  `build-platform/scripts/install-verilator-g6lc.sh` → `/opt/testharness/toolchains/verilator-v5.008-g6lc`,
+  `VERILATOR_ROOT=<prefix>/runtime`). `verif/regress/soft-ladder-build-harness.sh` resolves that
+  prefix itself and adds `build-platform/scripts/verilator-split-loops.vlt` (the `split_var`
+  controls) by default for this flavour. Measured on the 8-hart `g6lc64_ooo_server` 300 k boot
+  segment, MT4, `-O2`: **3,131 / 3,109 cycles/s** (guide §7.5 table) against ~2,100 for the pinned
+  upstream build of the same RTL; RVFI per core identical. The review runners
+  (`run_ooo_fp_review.py`, `run_mc_int2_review.py`, `run_opensbi_source_review.py`) treat this
+  runtime as **qualified** (keyed by the sha256 of its `include/verilated_funcs.h` at the gitlink;
+  a fork bump that touches that header must update their `qualified` tables) and record
+  `runtimeFlavour`.
+- **`pinned`**: the upstream `v5.008` tag + `verif/regress/verilator-*.patch`, the qualification
+  cross-check and the fallback the harness takes (with a log line) when no fork prefix exists.
+  CI's lint gate pins this flavour in its `.config.local.ts` overlay because the fork commit must be
+  reachable (submodule or `etcimon/verilator`) — pushing the gitlink is part of a fork bump.
+- Knobs: `SOFT_LADDER_BUILD_SPLIT_VLT=0|1` (default on for `g6lc`, off for `pinned` — the upstream
+  compiler refuses most entries), `SOFT_LADDER_VERILATOR_THREADS` (default `nproc`; the measured
+  server builds use 4), `VLT_HOME` / `VERILATOR_ROOT` (explicit prefix, always wins). The
+  hierarchical core (`SOFT_LADDER_BUILD_DEFINES=G6LC_CORE_HB`) stays opt-in: exact and a third
+  faster to build, 2.1× slower to run (guide §7.5).
+
 ## Standing agent workflow — probe → install → diag → verify
 
 Use this order on a new host, after a toolchain change, or before a residual
@@ -238,7 +265,9 @@ Design rules the workflow follows:
   (`vendor/ara/upstream`, `g6lc_qemu/linux-dist/*` — ~2.6 GB, 21 nested submodules, ~4 of the
   ~6 minutes) are `update = none` in `.gitmodules`, so recursive inits skip them and the explicit
   syncs (`vendor sync`, `linux-dist/init-submodules.sh`) pass `--checkout` (see `AGENTS-vendor.md` §4.1).
-- **The gate's Verilator is the pinned v5.008 with the repo's custom fixes.** Ubuntu's `verilator`
+- **The lint gate's Verilator is the pinned v5.008 with the repo's custom fixes** (the overlay sets
+  `toolchain.verilatorFlavour: "pinned"`; the simulation build of record is the g6lc fork, see
+  "Verilator of record" above). Ubuntu's `verilator`
   5.020 lints the core packages but segfaults on the cluster lint top (`g6lc_ooo_int2*`, `*_l3`),
   and any stock tool lacks `verif/regress/verilator-*.patch`. CI therefore runs
   `./build.sh tools install verilator` — the platform recipe

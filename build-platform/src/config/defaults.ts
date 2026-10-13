@@ -23,6 +23,25 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
     buildDir: "build",
     toolingDir: "tooling",
     cacheDir: ".cache",
+    clean: {
+      remoteRunsDir: "remote-runs",
+      // `builds/*.manifest.json` are referenced by qualification entries below.
+      remoteRunsProtect: ["builds"],
+      traceSuffixes: [".dasm", ".traces", ".vcd", ".fst", ".fsdb"],
+      activeAgeDays: 3,
+      keepRunsPerFamily: 2,
+      repoCacheDir: ".cache",
+      regenerableDirs: [
+        "g6lc_qemu/target",
+        "g6lc_bios/target",
+        "ai-tensor/target",
+        "mbgen/target",
+        "quantum_ai/intuition_synthetics/target",
+        "mbgen/mbsim/MbgenSim/Intermediate/Build",
+        "docs/website/.next",
+      ],
+      citationExtensions: [".md", ".mdx", ".json", ".ts", ".py", ".sh", ".toml", ".txt"],
+    },
   },
 
   soc: {
@@ -78,7 +97,12 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
         "config/gen_from_riscv_config/requirements.txt",
       ],
     },
+    // The fork (tools/verilator gitlink) is the build of record; "pinned" keeps
+    // the upstream v5.008 + patches for qualification cross-checks.
+    verilatorFlavour: "g6lc",
     versions: {
+      // Upstream base of both flavours; the g6lc flavour's exact source is the
+      // tools/verilator gitlink (install-verilator.sh VERILATOR_PIN).
       verilator: "v5.008",
       spike: "vendored",
       iverilog: "v12_0",

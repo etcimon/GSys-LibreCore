@@ -339,16 +339,23 @@ def main():
         raise RuntimeError('excluded source input')
     dependencies = '\n'.join(p.read_text(errors='replace') for p in model.parent.glob('*.d'))
     headers = set(re.findall(r'\S+/include/verilated_funcs\.h', dependencies))
-    # Qualification evidence requires the qualified private runtime. A model built against
-    # a declared experimental runtime (REVIEW_EXPERIMENTAL_RUNTIME_SHA256, comma-separated
-    # header hashes; the tools/verilator fork) is accepted with runtimeQualified=false in
-    # the provenance, so its boot can never be filed as qualification evidence.
-    qualified_sha = 'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166'
+    # Qualification evidence requires a qualified runtime: the private upstream 5.008
+    # runtime, or (since 2026-10-13, the default build flavour) the LibreCore fork pinned
+    # as the submodule tools/verilator -- keyed by the sha256 of its verilated_funcs.h at
+    # the gitlink. A model built against a declared experimental runtime
+    # (REVIEW_EXPERIMENTAL_RUNTIME_SHA256, comma-separated header hashes) is accepted with
+    # runtimeQualified=false in the provenance, so its boot can never be filed as
+    # qualification evidence.
+    qualified = {
+        'dfbc2c4aa3c1065d4465027c893c9677de10da4cfe7fb152e485eb32b8125166': 'pinned-v5.008',
+        '83b7f47b08b54d045f34fa18f5600aceffe9f186ae71fa937a53eeae0ca6624a': 'g6lc-fork@453031b66',
+    }
     declared = {h.strip() for h in os.environ.get('REVIEW_EXPERIMENTAL_RUNTIME_SHA256', '').split(',') if h.strip()}
     header_hashes = {sha(Path(p)) for p in headers}
-    if not headers or not header_hashes <= ({qualified_sha} | declared):
+    if not headers or not header_hashes <= (set(qualified) | declared):
         raise RuntimeError('unqualified model runtime')
-    provenance['runtimeQualified'] = header_hashes == {qualified_sha}
+    provenance['runtimeQualified'] = len(header_hashes) == 1 and header_hashes <= set(qualified)
+    provenance['runtimeFlavour'] = qualified.get(next(iter(header_hashes)), 'experimental')
     if not provenance['runtimeQualified']:
         provenance['runtimeExperimental'] = sorted(header_hashes)
         print('[t18] EXPERIMENTAL model runtime (declared): performance/retirement evidence only',

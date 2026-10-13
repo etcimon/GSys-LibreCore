@@ -200,10 +200,24 @@ export interface FormalConfig {
   remoteHost?: string | null;
 }
 
+/**
+ * Which Verilator the platform builds and runs.
+ * - `g6lc` (default since 2026-10-13): the LibreCore fork pinned as the
+ *   submodule `tools/verilator` (v5.008 + the compiler work recorded in
+ *   `agents/guides/AGENTS-verilator-performance.md`), installed under
+ *   `workspace/tooling/verilator-g6lc`. With the split-loops `.vlt` it runs the
+ *   8-hart server model at 3,100+ cycles/s where the upstream build runs ~2,100.
+ * - `pinned`: the upstream `versions.verilator` tag + `verif/regress/verilator-*.patch`,
+ *   the qualification reference and the fallback when the fork cannot be built.
+ */
+export type VerilatorFlavour = "g6lc" | "pinned";
+
 export interface ToolchainConfig {
   riscvGcc: RiscvGccConfig;
   python: PythonConfig;
   versions: ToolVersions;
+  /** See VerilatorFlavour. */
+  verilatorFlavour: VerilatorFlavour;
   /**
    * Preferred package manager per OS. `undefined` lets the platform pick the
    * first available manager it detects on the host.
@@ -851,6 +865,31 @@ export interface WorkspaceConfig {
   toolingDir: string;
   /** Cache subdirectory for downloads and change-detection manifests. */
   cacheDir: string;
+  /** Repo-level space reclamation (`clean traces|runs|repo-cache|regen`). */
+  clean: CleanConfig;
+}
+
+/**
+ * Allowlisted repo-level clean leaves outside `workspace/`. Every path is
+ * repo-relative; selection rules live in `workspace/clean.ts`.
+ */
+export interface CleanConfig {
+  /** Where remote-proxy pulls land (`<dir>/<tag>/...`). */
+  remoteRunsDir: string;
+  /** Children of `remoteRunsDir` never touched (e.g. `builds` manifests the config references). */
+  remoteRunsProtect: string[];
+  /** File-name suffixes of bulky, re-derivable trace dumps inside a run (`clean traces`). */
+  traceSuffixes: string[];
+  /** Runs / cache children modified more recently than this are treated as active and never selected. */
+  activeAgeDays: number;
+  /** `clean runs`: newest N runs kept per tag family (tag minus `-rN` / timestamp suffix). */
+  keepRunsPerFamily: number;
+  /** Repo-root scratch cache (`clean repo-cache`). */
+  repoCacheDir: string;
+  /** Regenerable build outputs (Cargo targets, UE intermediates, Next.js) for `clean regen`. */
+  regenerableDirs: string[];
+  /** Tracked-file extensions scanned for run-tag citations; cited runs are evidence and kept. */
+  citationExtensions: string[];
 }
 
 export interface MetaConfig {

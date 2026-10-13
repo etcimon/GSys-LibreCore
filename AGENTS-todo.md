@@ -1233,9 +1233,31 @@ prerequisite for this work under the existing dual license. No licensing policy 
   not possible as is: an unroll before debegin clones unnamed begin
   blocks and their `automatic` locals into duplicate declarations
   (`unnamedblk6.unnamedblk7.fmt`, 50+ errors) — the unroll would need to
-  uniquify cloned block names first. Owed: a reduced reproducer and the
-  fix; until then every fork-built model is qualified only by its own RVFI
-  exactness (ooo, server: exact) and `int2_l3` stays on the pinned compiler.
+  uniquify cloned block names first. **Root cause (2026-10-13, split-list
+  bisect `t21/q-bisect-vlt{,2}.sh` to the pair `fpnew_cast_multi.inp_pipe_ready`
+  + `g6lc_smt_csr_bank.commit_ack_g`, then `--debug-check`):** V3Broken
+  names it — the `assign commit_ack_g[h][p]` VarRefs point at a **deleted**
+  AstVar. `SplitUnpackedVarVisitor::tryAdd` silently drops a reference to a
+  variable that is not yet *registered*, and registration happens in
+  `visit(AstVar)`; `commit_ack_g` is declared inside the generate block
+  `gen_banked`, which `debeginAll` hoists to the **end** of the module, so
+  with SplitVar now after debegin the four assigns are visited before the
+  declaration, dropped, the array is split on the two pin references only
+  and deleted, and the four dangling VarRefs later inherit whatever AstVar
+  reuses that memory — the FPU's `inp_pipe_ready__BRA__0__KET__` piece when
+  that entry is also in the list (hence the pair). Upstream has the same
+  latent drop for any declaration-after-use. **Fix (fork): the unpacked
+  visitor pre-registers every module-level candidate before visiting
+  references** (`registerCandidate`, `m_registered`); and
+  `V3Begin::debeginAll` runs again right after the split, because the split
+  wraps one-statement always bodies in `__VsplitVarBlk` begins that upstream
+  flattened by splitting first — `t_split_var_0` failed on the fork since
+  `ec4d3cd12` with "Module/etc never assigned a symbol entry?" for that
+  reason. Regression `test_regress/t/t_split_var_late_decl` (declaration
+  after use + generate-block declaration, 2 arrays split, simulates) passes;
+  `g6lc64_ooo_int2_l3` with the full split list verilates with **0** bad
+  statements. Validation of the fork bump in flight (ooo probe battery,
+  server segment).
 - [~] **Hierarchical core (`G6LC_CORE_HB`, 2026-10-12): the structural
   lever of guide §6.1 as a build.** `corev_apu/src/g6lc_core_hb{,_pkg}.sv`
   close the core's parameterisation over the target package (hier blocks
