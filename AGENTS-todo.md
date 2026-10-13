@@ -1490,9 +1490,19 @@ prerequisite for this work under the existing dual license. No licensing policy 
   32768 Hz of the qualification DTS would put a scheduler tick every 1.3 k
   cycles). Model of record = the harness default with the fork HEAD
   compiler (`-hd1` = `f7fa71520`, published as the builder's default prefix),
-  split `.vlt`, `-O2`/`-O1` slow, `x86-64-v3`, **PGO**, MT4:
-  `ooocoh-t27-server-default-mt4-build2` (build1 failed on a stale overlay
-  copy of `cva6.sv`). Idle-CPU flag: `-fclock-skip` refuses MT models and
+  split `.vlt`, `-O2`/`-O1` slow, `x86-64-v3`, **PGO**, MT4. **Fork HEAD
+  regression found on the way:** the `f7fa71520` compiler fails the server
+  verilation — `Can't find definition of 'nline' in dotted signal
+  'gen_cache_hpd…hpdcache_rtab_i.nline'` (`core/cva6.sv:4835`, the
+  `[hpd-rtab]` probe; `nline` is `hpdcache_nline_t [N-1:0] nline` in
+  `hpdcache_rtab.sv:190`, a packed array of a parameter type) followed by an
+  internal fault; `453031b66` compiles it. The §9/§10 real-core runs were
+  `g6lc64_ooo` (WT cache, no `gen_cache_hpd`), so the HPDCACHE targets never
+  met the new linker; the builder's default prefix is back on `-wt2`
+  (`453031b66`) until the fork fix, and the boot model of record is that
+  compiler + `x86-64-v3` + PGO (`ooocoh-t27-server-default-mt4-build3`;
+  build1 failed on a stale overlay copy of `cva6.sv`, build2 on the fork
+  regression). Idle-CPU flag: `-fclock-skip` refuses MT models and
   is slower on the dense core — not a boot lever; recorded with the
   sleep-gate (+4 %) and hierarchical (2.1× slower) results in S4.1. Owed:
   the 300 k-segment cycles/s of the new model, the detached L1 run

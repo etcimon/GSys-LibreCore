@@ -435,13 +435,16 @@ guest second 50 M cycles; `rdinit=/init` has no sleeps. The ELF is 67 MB (the in
 `G6LC_LINUX_SHELL` appears in the UART text (`t21/q-linux-boot.sh`, detached, `+rvfi_notrace
 +smt_progress`, optional `+stall_census` for the per-2 M-cycle attribution of the kernel phases).
 
-**Model of record**: the harness default — fork `f7fa71520` (builder prefix
-`verilator-v5.008-g6lc` → `-hd1`, header `e900ec45…`, `-ftrigger-words`), split `.vlt`,
-`-O2`/slow `-O1`, `-march=x86-64-v3`, **PGO on the in-repo probe**, MT4
-(`ooocoh-t27-server-default-mt4-build2`). Its 300 k-segment cycles/s against the 6,612 of the
-453031b66 + PGO model is the first number to take when it lands (the x86-64-v3 + trigger-word
-compiler gave ×5 on the single-core spin without PGO; nothing has yet combined it with PGO or
-measured it on the server).
+**Model of record**: the harness default with the `453031b66` compiler (`-wt2`, the builder's
+default prefix again), split `.vlt`, `-O2`/slow `-O1`, `-march=x86-64-v3`, **PGO on the in-repo
+probe**, MT4 (`ooocoh-t27-server-default-mt4-build3`). The fork HEAD `f7fa71520` compiler
+(`-hd1`/`-causal`, `-ftrigger-words`, SIMD headers) does **not** verilate the server: `Can't find
+definition of 'nline' in dotted signal …hpdcache_rtab_i.nline` (`cva6.sv:4835`, the `[hpd-rtab]`
+probe into `hpdcache_nline_t [N-1:0] nline`) then an internal fault — the §9/§10 runs were all
+`g6lc64_ooo` (no HPDCACHE), so the regression is new to this target class and is logged in
+`AGENTS-todo.md` T27. The model's 300 k-segment cycles/s against the 6,612 of the same compiler
+with PGO at baseline ISA is the first number to take when it lands (x86-64-v3 alone gave ×4.7 on
+the single-core spin without PGO).
 
 **The idle-CPU flag question.** Three mechanisms exist and none is a Linux-boot lever yet:
 `CoreSleepGate` (RTL clock gate, on in the server package: +4 % net on the 8-hart boot —
