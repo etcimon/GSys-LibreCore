@@ -1524,9 +1524,16 @@ prerequisite for this work under the existing dual license. No licensing policy 
   build1 failed on a stale overlay copy of `cva6.sv`, build2 on the fork
   regression). Idle-CPU flag: `-fclock-skip` refuses MT models and
   is slower on the dense core — not a boot lever; recorded with the
-  sleep-gate (+4 %) and hierarchical (2.1× slower) results in S4.1. Owed:
-  the 300 k-segment cycles/s of the new model, the detached L1 run
-  (`t21/q-linux-boot.sh`), the Spike/HTIF sanity, then `maxcpus=8` (L1b) and
+  sleep-gate (+4 %) and hierarchical (2.1× slower) results in S4.1. Model
+  of record measured: **6,837 / 6,870 cycles/s** on the 300 k segment vs
+  6,413 / 6,598 for baseline-ISA + PGO (+5 %; the single-core ×4.7 of
+  x86-64-v3 does not carry to the synchronisation-bound MT4 server), RVFI
+  identical. **L1 boot launched** detached
+  (`linux-boot-l1-ooocoh-t27-server-default-mt4-build3`, 1.5 G-cycle cap;
+  `t21/q-linux-st.sh` for status; success = `G6LC_LINUX_SHELL` in the UART
+  text). Owed: the L1 verdict, the Spike/HTIF sanity (this Spike has no
+  ns16550; OpenSBI's HTIF driver needs the ELF `tohost`/`fromhost` via the
+  node's `reg`, still silent — unresolved), then `maxcpus=8` (L1b) and
   busybox init (L2).
 - [~] **T26 — OoO core + L2/L3 bottleneck map, measured; the aggregated
   update plan (2026-10-13).** Guide of record:

@@ -442,9 +442,14 @@ probe**, MT4 (`ooocoh-t27-server-default-mt4-build3`). The fork HEAD `f7fa71520`
 definition of 'nline' in dotted signal …hpdcache_rtab_i.nline` (`cva6.sv:4835`, the `[hpd-rtab]`
 probe into `hpdcache_nline_t [N-1:0] nline`) then an internal fault — the §9/§10 runs were all
 `g6lc64_ooo` (no HPDCACHE), so the regression is new to this target class and is logged in
-`AGENTS-todo.md` T27. The model's 300 k-segment cycles/s against the 6,612 of the same compiler
-with PGO at baseline ISA is the first number to take when it lands (x86-64-v3 alone gave ×4.7 on
-the single-core spin without PGO).
+`AGENTS-todo.md` T27. Measured on the 300 k segment, alternating on a quiet builder, per-core
+RVFI identical: baseline-ISA + PGO 6,413 / 6,598 → **x86-64-v3 + PGO 6,837 / 6,870 cycles/s
+(+5 %)**. The ×4.7 the ISA floor gave on the single-core spin does not carry to the MT4 server
+boot segment: PGO had already taken the layout gain and the partition is synchronisation-bound
+(guide §4b.2), so the L1 budget stands at ≈ 10 h for 0.25 G cycles. **L1 launched** (2026-10-13
+≈ 23:30 builder time): `linux-boot-l1-ooocoh-t27-server-default-mt4-build3`, `+max-cycles 1.5 G`,
+`+rvfi_notrace +smt_progress`; status `t21/q-linux-st.sh` (the 67 MB ELF preload alone takes
+minutes before the first UART byte).
 
 **The idle-CPU flag question.** Three mechanisms exist and none is a Linux-boot lever yet:
 `CoreSleepGate` (RTL clock gate, on in the server package: +4 % net on the 8-hart boot —
