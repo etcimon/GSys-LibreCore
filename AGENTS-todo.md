@@ -1475,6 +1475,29 @@ prerequisite for this work under the existing dual license. No licensing policy 
   ≈ 1 h 45 min wall with RVFI tracing on (the detached launcher leaves
   `results.json` at `incomplete`; the verdict is `trial/run.log`, as for the
   T21t runs).
+- [~] **T27 — RTL OpenWrt (Linux 6.6.93) boot on `g6lc64_ooo_server`:
+  budget measured, payload built, model of record building (2026-10-13).**
+  Plan and numbers: `architecture/multi-threading/linux-boot-scale.md` S4.1.
+  QEMU `-icount` budget: kernel init → `/init` **636 M instructions** (≈ 480 M
+  of it the built-in xz initramfs unpack), busybox shell +1 M, full procd
+  **≈ 10.9 G** (≈ 20 days at 6.6 k cycles/s — out of reach); L1 = kernel +
+  busybox shell with an **uncompressed external initramfs** ≈ 0.2 G
+  instructions ≈ 10 h at 6.6 k cycles/s, less with the new compiler.
+  Payload `linux-payload-l1/fw_payload_linux.elf` on the builder: OpenSBI
+  v1.5 generic + OpenWrt `Image` + 842 KB busybox/musl newc initrd at
+  `0x84000000` + `ariane-ooo-server-linux.dts` (`rdinit=/init maxcpus=1`,
+  **`timebase-frequency` 12.5 MHz** — the TB's mtime tick is 4 cycles, so the
+  32768 Hz of the qualification DTS would put a scheduler tick every 1.3 k
+  cycles). Model of record = the harness default with the fork HEAD
+  compiler (`-hd1` = `f7fa71520`, published as the builder's default prefix),
+  split `.vlt`, `-O2`/`-O1` slow, `x86-64-v3`, **PGO**, MT4:
+  `ooocoh-t27-server-default-mt4-build2` (build1 failed on a stale overlay
+  copy of `cva6.sv`). Idle-CPU flag: `-fclock-skip` refuses MT models and
+  is slower on the dense core — not a boot lever; recorded with the
+  sleep-gate (+4 %) and hierarchical (2.1× slower) results in S4.1. Owed:
+  the 300 k-segment cycles/s of the new model, the detached L1 run
+  (`t21/q-linux-boot.sh`), the Spike/HTIF sanity, then `maxcpus=8` (L1b) and
+  busybox init (L2).
 - [~] **T26 — OoO core + L2/L3 bottleneck map, measured; the aggregated
   update plan (2026-10-13).** Guide of record:
   `agents/guides/AGENTS-ooo-memory-performance.md`. Instruments landed

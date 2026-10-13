@@ -396,6 +396,82 @@ This is how “works with `g6lc64_server_math_v` in line with current Linux boot
 capabilities” is kept: Image/VRF/cpuinfo land on `_v` first; smt2 copies the
 **software** path once FDT is honest.
 
+#### S4.1 — RTL OpenWrt boot on `g6lc64_ooo_server` (2026-10-13): budget, payload, run plan
+
+**Budget, measured** (QEMU 10 `virt`, `-icount shift=0` so printk timestamps count
+executed instructions; the OpenWrt 24.10.2 / Linux 6.6.93 `sifiveu` kernel from
+`/opt/testharness/cache/openwrt`, `rv64,v=false,h=false`, scripts
+`t21/q-qemu-insn.sh`, `q-qemu-insn4.sh`):
+
+| stage | marker | instructions |
+|---|---|---:|
+| kernel init → `Run /init` (`Image-initramfs`, 26 MB with the built-in xz rootfs) | `[0.636]` | **636 M**, of which ≈ 480 M is the initramfs unpack (the two gaps `+0.200` before `io scheduler` and `+0.281` before `Freeing unused kernel`) and 56 M the unaligned-access speed probe |
+| → busybox `sh` (`rdinit=/bin/sh`) | prompt | + ≈ 1 M |
+| → full procd / OpenWrt init to "Please press Enter" | `/proc/stat` user 9.82 s + sys 1.11 s | **≈ 10.9 G** (smp 1) |
+
+At the server's measured 6.6 k cycles/s (MT4, PGO) and IPC ≈ 0.9 on the boot hart, the full
+procd boot is ≈ 20 days — out of reach on this host; the kernel-to-shell stage is ≈ 1 day with
+the built-in rootfs and **≈ 10 h with an external uncompressed initramfs** (the unpack is
+the cost, not the kernel). The staging is therefore L1 kernel + busybox shell, L2 busybox
+`init`/getty, L3 procd (needs a 10× faster simulator or a multi-day budget).
+
+**Payload of record for L1** (`t21/q-linux-payload.sh`, builder run `linux-payload-l1`):
+OpenSBI v1.5 generic `FW_PAYLOAD` from the review runner's patched tree
+(`OPENSBI_ALLOW_NO_PIE=y`, `PLATFORM_RISCV_ISA=rv64imafdc_zicsr_zifencei`,
+`FW_TEXT_START=0x80000000`, `FW_PAYLOAD_OFFSET=0x200000`); payload = the OpenWrt `Image`
+(19.7 MB, no built-in rootfs) at `0x80200000` + an **uncompressed newc initramfs** (busybox +
+musl `ld-musl-riscv64.so.1`/`libc.so`/`libgcc_s`, 842 KB, `/init` mounts proc/sys/dev, prints
+`G6LC_LINUX_INIT_UP`, `/proc/cpuinfo`, `/proc/stat`, then `G6LC_LINUX_SHELL` and execs `sh`)
+at `0x84000000`; DTS `ariane-ooo-server-linux.dts` = the server DTS with `linux,initrd-start/end`,
+`bootargs = console=ttyS0,115200 earlycon=uart8250,mmio,0x10000000,115200n8 maxcpus=1 nokaslr
+rdinit=/init loglevel=7` and **`timebase-frequency = <12500000>`**. The timebase change is
+not optional: `g6lc_tb.cpp` toggles `rtc_i` every 2 cycles (a 4-cycle mtime tick), so the
+qualification DTS's 32768 Hz makes one guest second = 131 k cycles — a HZ=100 scheduler tick
+every 1.3 k cycles and RCU stall timeouts every 2.7 M cycles would dominate a kernel boot. At
+12.5 MHz (the physical tick at the DTS's 50 MHz `clock-frequency`) a tick is 500 k cycles, a
+guest second 50 M cycles; `rdinit=/init` has no sleeps. The ELF is 67 MB (the initrd sits at
++62 MB of the payload image; the TB preload pays for the zero gap once). `tohost` stays at
+`0x80041730` for the harness; Linux never writes it, so the run ends on `+max-cycles` or when
+`G6LC_LINUX_SHELL` appears in the UART text (`t21/q-linux-boot.sh`, detached, `+rvfi_notrace
++smt_progress`, optional `+stall_census` for the per-2 M-cycle attribution of the kernel phases).
+
+**Model of record**: the harness default — fork `f7fa71520` (builder prefix
+`verilator-v5.008-g6lc` → `-hd1`, header `e900ec45…`, `-ftrigger-words`), split `.vlt`,
+`-O2`/slow `-O1`, `-march=x86-64-v3`, **PGO on the in-repo probe**, MT4
+(`ooocoh-t27-server-default-mt4-build2`). Its 300 k-segment cycles/s against the 6,612 of the
+453031b66 + PGO model is the first number to take when it lands (the x86-64-v3 + trigger-word
+compiler gave ×5 on the single-core spin without PGO; nothing has yet combined it with PGO or
+measured it on the server).
+
+**The idle-CPU flag question.** Three mechanisms exist and none is a Linux-boot lever yet:
+`CoreSleepGate` (RTL clock gate, on in the server package: +4 % net on the 8-hart boot —
+gated cores' combinational functions still run every cycle, guide §6.1); `-fclock-skip` (the
+causal execution cache, guide §8–9: 3.9× on a sparse fixture, **+10 % Ir / +33 % I1 misses on
+the dense single core, and MT models are refused** — it cannot be applied to the MT4 server
+model, and a `--threads 1` server model runs ≈ 3× slower than MT4 before any cache gain); the
+hierarchical core (exact, 2.1× slower). The only shape where the cache could pay is the
+single-thread server during the long WFI phase of a `maxcpus=1` boot; that is a measurement
+(two `--threads 1` server builds, ctl and `-fclock-skip`, on a parked-phase segment) worth
+one experiment after L1 boots, not something to enable for the boot itself. The structural
+lever remains guide §6.1 lever 1/2 (an instance-partitioned scheduler inside one model).
+
+**Stability watch-list for L1** (what Linux exercises that the OpenSBI batteries do not): Sv39
+page-table walks under out-of-order issue with wrong-path loads (T20's class — a speculative
+PTW must not fault or allocate visibly), `sfence.vma` with ASIDs, `satp` switches at every
+`execve`/context switch, user-mode traps (`ecall`, page faults, misaligned emulation by
+OpenSBI — the 56 M-instruction unaligned-speed probe hits it hard), FP context save/restore
+(`mstatus.FS` dirty tracking under OoO), Sstc timer interrupts arriving while the OoO window
+is full, the 8250 console path (the driver polls LSR: ≈ 4.3 k cycles per character at 115200
+on a 50 MHz UART clock — `loglevel=7` costs ≈ 50 M cycles of log; `loglevel=4` for the record
+runs), and the harness `MC_GAP_LIMIT=5000` retirement-gap classification (exit code only, no
+kill; a Linux hart legitimately exceeds it, so the exit code is not the verdict — the UART
+markers are). `maxcpus=8` (SMP bring-up through SBI HSM, IPIs, TLB shootdown, LR/SC contention
+under 8 harts) is L1b after L1.
+
+**Owed**: an ISS sanity of the same payload (Spike needs the HTIF console variant — this
+Spike has no built-in ns16550 device: DTS with `ucb,htif0`, `earlycon=sbi keep_bootcon`), the
+L1 run itself, then L1b/L2.
+
 ### S5 — SMT2 `RVH` (smt2 feature not present)
 
 Package bit + DTS `h` on both threads. Fetch: L4 pass-through only (no fake
