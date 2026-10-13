@@ -252,6 +252,8 @@ static const char *verilog_plusargs[] = {
     "ind_stats",
     // T24 inclusive-victim drain probe (corev_apu/src/g6lc_cluster.sv gen_incl_trace)
     "incl_trace", "incl_trace_max",
+    // T26 retire-stall / memory-level-parallelism census (core/cva6.sv gen_stall_census)
+    "stall_census",
     // AI island per-job PMU record (corev_apu/ai_island/g6lc_ai_island_top.sv,
     // translate_off): one AI_JOB line per completed descriptor, harvested by
     // verif/regress/ai-matrix-veri.sh AI_MATRIX_BENCH=1.

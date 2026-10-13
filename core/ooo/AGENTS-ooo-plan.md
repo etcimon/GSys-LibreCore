@@ -4502,3 +4502,11 @@ returns / 3,614 (0.9 %, unchanged — the RAS residual). Harvest:
 `t21/osbi-harvest-t21i-48M.out`. This is the server profile's number;
 the remaining P2 edges (taken `beqz +0x7a`, three-target `jr a5`, the
 entry-751 base alias, the RAS blind spot) are the next predictor pass.
+
+## T26 — measured bottleneck map of the OoO core + L2/L3 and the aggregated update plan (2026-10-13)
+
+Recorded in `agents/guides/AGENTS-ooo-memory-performance.md` (instruments `+stall_census`,
+`[mc_hub]`, `-GDramLatency`, per-module `stat`; the latency-0 vs latency-120 census of the boot
+core; the ranked update list: write-back L2 / early-B trackers, hub W-order FIFO, non-blocking
+L2/L3 engine, I-side latency tolerance, SMT policy without the drain tax, IQ O(DEPTH)
+formulations, scoreboard/ROB consolidation, TLB geometry). `AGENTS-todo.md` T26 carries the status.

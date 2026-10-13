@@ -20,7 +20,7 @@
 #   SOFT_LADDER_VERILATOR_FLAVOUR=g6lc  the tools/verilator fork (default; pinned = upstream v5.008)
 #   SOFT_LADDER_BUILD_SPLIT_VLT=1       build-platform/scripts/verilator-split-loops.vlt (default on for g6lc)
 #   SOFT_LADDER_BUILD_OPT=-O2           OPT_FAST/OPT_GLOBAL for the generated C++ (default -O2)
-#   SOFT_LADDER_BUILD_OPT_SLOW=-O1      OPT_SLOW (default -O1 with PGO, else = OPT; __Syms/init code is not hot)
+#   SOFT_LADDER_BUILD_OPT_SLOW=-O1      OPT_SLOW (default -O1; __Syms/init code is not hot, -O2 costs 30+ min and memory)
 #   SOFT_LADDER_BUILD_PGO=1             instrument -> train -> -fprofile-use (default on)
 #   SOFT_LADDER_BUILD_PGO_TRAIN=<elf>   training workload (default: ooo_fp_ooo.S compiled here)
 #   SOFT_LADDER_BUILD_PGO_CYCLES=200000 cycle cap of each training run
@@ -225,9 +225,10 @@ fi
 BUILD_OPT="${SOFT_LADDER_BUILD_OPT:--O2}"
 PGO="${SOFT_LADDER_BUILD_PGO:-1}"
 # The slow classes (VM_*_SLOW: __Syms -- 30 MB on the server -- init and settle
-# code) carry no hot code; instrumented at -O2 the __Syms unit exhausts memory
-# (cc1plus killed on a 125 GB host), so they compile at -O1 whenever PGO is on.
-BUILD_OPT_SLOW="${SOFT_LADDER_BUILD_OPT_SLOW:-$([[ "$PGO" == 1 ]] && echo -O1 || echo "$BUILD_OPT")}"
+# code) carry no hot code and always compile at -O1: at -O2 that unit alone
+# takes 30+ min and two overlapping server builds OOM-killed cc1plus on the
+# 125 GB builder (instrumented or not); the RVFI stream does not depend on it.
+BUILD_OPT_SLOW="${SOFT_LADDER_BUILD_OPT_SLOW:--O1}"
 export MAKEFLAGS="${MAKEFLAGS:-} OPT_FAST=$BUILD_OPT OPT_SLOW=$BUILD_OPT_SLOW OPT_GLOBAL=$BUILD_OPT"
 log "C++ opt: fast/global $BUILD_OPT slow $BUILD_OPT_SLOW"
 PGO_DIR="$VERLIB_DIR/pgo"

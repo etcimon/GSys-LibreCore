@@ -67,9 +67,10 @@ build and regression flow from a single top-level `.config.ts`.
   `SOFT_LADDER_BUILD_PGO_CYCLES` change the workload.
 - **`-O2`** (`SOFT_LADDER_BUILD_OPT`; `simulation.verilator.opt`) overrides `verilated.mk`'s
   `OPT_FAST = -Os` for the generated C++ (the PGO recipe was measured at `-O2`). The slow classes
-  (`VM_*_SLOW`: the 30 MB `__Syms` unit, init/settle code — no hot code) compile at `-O1` whenever
-  PGO is on (`SOFT_LADDER_BUILD_OPT_SLOW`): instrumented at `-O2` that unit exhausts the memory of a
-  125 GB host, and with a profile it runs for hours for nothing.
+  (`VM_*_SLOW`: the 30 MB `__Syms` unit, init/settle code — no hot code) always compile at `-O1`
+  (`SOFT_LADDER_BUILD_OPT_SLOW`): at `-O2` that unit alone takes 30+ min, two overlapping server
+  builds OOM-killed cc1plus on the 125 GB builder (instrumented or not), and with a profile it runs
+  for hours for nothing; the RVFI stream does not depend on it.
 - **4 model threads** by default (`SOFT_LADDER_VERILATOR_THREADS`; `simulation.verilator.threads`,
   0 = this default): the measured point for the 8-hart server — the partition is
   synchronisation-bound (1.9–2.0× of 4), more threads did not pay (guide §4b.2). The review

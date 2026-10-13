@@ -1866,6 +1866,14 @@ module ariane_testharness #(
                    mc_cnt_hub_aw_hold_slot, mc_cnt_hub_aw_hold_other;
   // T9h/M5: L2 prefetcher pulses.
   int unsigned mc_cnt_l2_pf_issue, mc_cnt_l2_pf_useful, mc_cnt_l2_pf_drop;
+  // T26: hub_aw_hold_other split by blocker (sim-only hierarchical reads of the
+  // hub's gen_cluster state): W data of the previous AW still in flight
+  // (w_busy), invalidation-retention admission, mem-side !aw_ready, or an RR
+  // loss to another core; plus the AW/W fire counts (store-path throughput).
+  int unsigned mc_cnt_hub_aw_wbusy, mc_cnt_hub_aw_inv, mc_cnt_hub_aw_mem, mc_cnt_hub_aw_rr,
+               mc_cnt_hub_aw_fire, mc_cnt_hub_ar_fire;
+  logic mc_hub_aw_wbusy_obs, mc_hub_aw_inv_obs, mc_hub_aw_mem_obs, mc_hub_aw_rr_obs,
+        mc_hub_aw_fire_obs, mc_hub_ar_fire_obs, mc_hub_aw_anyheld;
   logic mc_l2_pf_issue_obs, mc_l2_pf_useful_obs, mc_l2_pf_drop_obs;
   logic mc_l2_hit_obs, mc_l2_bypass_obs, mc_l2_selfinv_obs, mc_l3_selfinv_obs,
         mc_l2_wupd_obs, mc_l3_wupd_obs,
@@ -1920,11 +1928,35 @@ module ariane_testharness #(
     // T10c/N4: actual AW holds at a core port, split by blocker.
     assign mc_hub_aw_hold_slot_obs  = i_cluster.gen_hub.i_hub.hub_aw_hold_slot_o;
     assign mc_hub_aw_hold_other_obs = i_cluster.gen_hub.i_hub.hub_aw_hold_other_o;
+    always_comb begin
+      mc_hub_aw_anyheld = 1'b0;
+      for (int c = 0; c < CVA6Cfg.NrCores; c++)
+        if (i_cluster.gen_hub.i_hub.core_req_i[c].aw_valid &&
+            !i_cluster.gen_hub.i_hub.core_resp_o[c].aw_ready)
+          mc_hub_aw_anyheld = 1'b1;
+    end
+    assign mc_hub_aw_wbusy_obs = mc_hub_aw_anyheld && i_cluster.gen_hub.i_hub.gen_cluster.w_busy_q;
+    assign mc_hub_aw_inv_obs   = mc_hub_aw_anyheld && !i_cluster.gen_hub.i_hub.gen_cluster.w_busy_q &&
+                                 i_cluster.gen_hub.i_hub.gen_cluster.inv_pend_valid_q &&
+                                 !i_cluster.gen_hub.i_hub.gen_cluster.aw_grant;
+    assign mc_hub_aw_mem_obs   = mc_hub_aw_anyheld && i_cluster.gen_hub.i_hub.gen_cluster.aw_grant &&
+                                 !i_cluster.gen_hub.i_hub.mem_resp_i.aw_ready;
+    assign mc_hub_aw_rr_obs    = mc_hub_aw_anyheld && i_cluster.gen_hub.i_hub.gen_cluster.aw_grant &&
+                                 i_cluster.gen_hub.i_hub.mem_resp_i.aw_ready;
+    assign mc_hub_aw_fire_obs  = i_cluster.gen_hub.i_hub.gen_cluster.aw_fire;
+    assign mc_hub_ar_fire_obs  = i_cluster.gen_hub.i_hub.gen_cluster.ar_fire;
   end else begin : gen_mc_hub_nosc
     assign mc_hub_aw_sc_obs = 1'b0;
     assign mc_hub_ar_obs   = 1'b0;
     assign mc_hub_aw_hold_slot_obs  = 1'b0;
     assign mc_hub_aw_hold_other_obs = 1'b0;
+    assign mc_hub_aw_anyheld = 1'b0;
+    assign mc_hub_aw_wbusy_obs = 1'b0;
+    assign mc_hub_aw_inv_obs = 1'b0;
+    assign mc_hub_aw_mem_obs = 1'b0;
+    assign mc_hub_aw_rr_obs = 1'b0;
+    assign mc_hub_aw_fire_obs = 1'b0;
+    assign mc_hub_ar_fire_obs = 1'b0;
   end
   if (CVA6Cfg.L3En) begin : gen_mc_cache_l3
     assign mc_l3_selfinv_obs = i_cluster.gen_l3.i_l3.l3_selfinv_hit_o;
@@ -1953,6 +1985,12 @@ module ariane_testharness #(
       mc_cnt_hub_ar_hold <= mc_cnt_hub_ar_hold + mc_hub_ar_obs;
       mc_cnt_hub_aw_hold_slot <= mc_cnt_hub_aw_hold_slot + mc_hub_aw_hold_slot_obs;
       mc_cnt_hub_aw_hold_other <= mc_cnt_hub_aw_hold_other + mc_hub_aw_hold_other_obs;
+      mc_cnt_hub_aw_wbusy <= mc_cnt_hub_aw_wbusy + mc_hub_aw_wbusy_obs;
+      mc_cnt_hub_aw_inv   <= mc_cnt_hub_aw_inv + mc_hub_aw_inv_obs;
+      mc_cnt_hub_aw_mem   <= mc_cnt_hub_aw_mem + mc_hub_aw_mem_obs;
+      mc_cnt_hub_aw_rr    <= mc_cnt_hub_aw_rr + mc_hub_aw_rr_obs;
+      mc_cnt_hub_aw_fire  <= mc_cnt_hub_aw_fire + mc_hub_aw_fire_obs;
+      mc_cnt_hub_ar_fire  <= mc_cnt_hub_ar_fire + mc_hub_ar_fire_obs;
       mc_cnt_l2_posted <= mc_cnt_l2_posted + mc_l2_posted_obs;
       mc_cnt_l2_rdtrk <= mc_cnt_l2_rdtrk + mc_l2_rdtrk_obs;
       mc_cnt_l2_pf_issue <= mc_cnt_l2_pf_issue + mc_l2_pf_issue_obs;
@@ -1973,6 +2011,8 @@ module ariane_testharness #(
       mc_cnt_l2_hold_r1 <= '0;
       mc_cnt_l2_hold_r1_wu <= '0;
       mc_cnt_l2_hold_r2 <= '0;
+      mc_cnt_hub_aw_wbusy <= '0; mc_cnt_hub_aw_inv <= '0; mc_cnt_hub_aw_mem <= '0;
+      mc_cnt_hub_aw_rr <= '0; mc_cnt_hub_aw_fire <= '0; mc_cnt_hub_ar_fire <= '0;
       mc_cnt_hub_aw_sc <= '0;
       mc_cnt_hub_ar_hold <= '0;
       mc_cnt_hub_aw_hold_slot <= '0;
@@ -2164,6 +2204,9 @@ module ariane_testharness #(
              mc_cnt_l2_hold_r2, mc_cnt_hub_aw_sc, mc_cnt_hub_ar_hold,
              mc_cnt_hub_aw_hold_slot, mc_cnt_hub_aw_hold_other, DramLatency,
              mc_cnt_l2_pf_issue, mc_cnt_l2_pf_useful, mc_cnt_l2_pf_drop);
+    $display("*** [mc_hub] aw_fire=%0d ar_fire=%0d aw_hold_other split: wbusy=%0d inv_adm=%0d mem_nready=%0d rr_loss=%0d",
+             mc_cnt_hub_aw_fire, mc_cnt_hub_ar_fire, mc_cnt_hub_aw_wbusy, mc_cnt_hub_aw_inv,
+             mc_cnt_hub_aw_mem, mc_cnt_hub_aw_rr);
   end
   //pragma translate_on
 

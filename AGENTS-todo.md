@@ -1295,6 +1295,45 @@ prerequisite for this work under the existing dual license. No licensing policy 
   ≈ 1 h 45 min wall with RVFI tracing on (the detached launcher leaves
   `results.json` at `incomplete`; the verdict is `trial/run.log`, as for the
   T21t runs).
+- [~] **T26 — OoO core + L2/L3 bottleneck map, measured; the aggregated
+  update plan (2026-10-13).** Guide of record:
+  `agents/guides/AGENTS-ooo-memory-performance.md`. Instruments landed
+  (sim-only, lint-clean on server + ooo): `+stall_census` in `core/cva6.sv`
+  (per head hart: retired by unit class, `empty` / `notissued` (head still
+  in the IQ) / `inflight` / `held` buckets, L1 misses, dcache req→grant,
+  MSHR occupancy histogram, `mshr_full`/`rtab_full`/`wbuf_full`/`ldbuf_full`),
+  `[mc_hub]` in `ariane_testharness.sv` (hub `aw_hold_other` split: `wbusy` /
+  `inv_adm` / `mem_nready` / `rr_loss`, AW/AR fires), `-GDramLatency=N`
+  census models, per-module yosys `stat` (`--best-effort-hierarchy`).
+  **Measured, boot core, first 2 M cycles:** IPC 0.40 at DRAM latency 0 →
+  **0.10 at 120**; at 120 `empty` 996 k (50 %, I-fetch to DRAM, FDIP
+  distance 2, no usable prefetcher — the server prefetcher sits below the
+  L3), `inflight ld` 526 k, hub `aw_hold_other` 893 k of which **`wbusy`
+  892.7 k = 71 hold cycles per store**: the write-through-to-DRAM path
+  (hub one W at a time, 4 AW slots, L2/L3 single-transaction FSMs with
+  4-deep posted-write trackers held until the DRAM B) caps the cluster at
+  one store per ≈ 160 cycles, fills the wbuf (40 k cycles), replays loads
+  (`rtab_full` 15.7 k) and makes every drained SMT switch wait for stores
+  (`wait_st` 975 k; drain 83 % of the window, 2.9 % of the full boot at
+  latency 0). L1D MSHR depth/replay table and branch prediction (≈ 4 % of
+  the boot) are not first-order. **Area** (generic cells, 306,676): IQ
+  68.7 k (22 %: 48×64 `ooo_age_older` store-age gate, 48×20-tag wake CAM,
+  48² age matrix), scoreboard 28.3 k + ROB 7.6 k (both on the OoO path),
+  rename 28.1 k, LSQ 21.3 k, I/D TLB 22.3 k, 4 decoders 14 k, AES 9.1 k;
+  OoO backend ≈ 60 % of the core. **Plan (ranked, guide §4):** 1 write-back
+  L2 (1a interim: early B + 32-deep trackers + 16 hub slots), 2 hub W-order
+  FIFO, 3 non-blocking L2/L3 engine (read pipeline / write path split), 4
+  I-side latency tolerance (FDIP distance, L2 prefetch on I misses, server
+  prefetcher above the L3 or deleted), 5 SMT policy without the drain tax,
+  6 IQ O(DEPTH) formulations (store sequence numbers, ready-bit wake-up;
+  −11 % core estimated, IPC-neutral), 7 scoreboard/ROB consolidation, 8
+  16-entry L1 TLBs over the shared TLB, 9 AES optional. Next step: 1a, then
+  re-census at latency 120. Owed instrumentation (guide §5): `empty` split
+  (I$ miss vs redirect), dispatch-stall split (IQ/ROB/LSQ/free-list), TLB
+  misses, L2/L3 engine state occupancy; the full-boot census at latency 0
+  is detached (`prof-census-ooocoh-t26-server-census-mt4-build3-full`).
+  Harness: slow classes now always `-O1` (two concurrent server builds
+  OOM-killed the `-O2` `__Syms` compile).
 - [~] **Hierarchical core (`G6LC_CORE_HB`, 2026-10-12): the structural
   lever of guide §6.1 as a build.** `corev_apu/src/g6lc_core_hb{,_pkg}.sv`
   close the core's parameterisation over the target package (hier blocks

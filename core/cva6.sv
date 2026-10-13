@@ -2366,6 +2366,139 @@ module cva6
     end
   end
 `endif
+
+  // T26 (+stall_census): retire-stall attribution for the OoO core. Every
+  // cycle port 0 retires nothing is charged to ONE bucket from the head's
+  // state -- scoreboard empty (frontend), head not issued (operands / IQ),
+  // head in flight (memory / FP / MUL latency), head valid but held (store
+  // buffer, exception, CSR, halt) -- plus the L1 memory-level-parallelism
+  // picture (MSHR occupancy histogram, MSHR/wbuf/load-buffer full cycles,
+  // misses issued). Prints [stall-census] every 2 M cycles and at final,
+  // per head hart. Sim-only, off unless +stall_census; nothing here feeds
+  // the design. The per-fu split names the unit class of the head
+  // (ld/st/alu/br/mul/csr/fpu), which is what decides between a memory
+  // lever (non-blocking depth, prefetch), a frontend lever and a latency
+  // lever -- the measurement the guide asks for before any large update.
+  if (CVA6Cfg.OoOEn) begin : gen_stall_census
+    localparam int unsigned SCNH = CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts;
+    localparam int unsigned SCNP = CVA6Cfg.NrCommitPorts;
+    bit sc_en;
+    longint unsigned sc_cyc, sc_last_print;
+    longint unsigned sc_ret[SCNH], sc_ack_cyc[SCNH], sc_ack_full[SCNH];
+    longint unsigned sc_empty[SCNH], sc_empty_flush[SCNH];
+    longint unsigned sc_ni[SCNH][8], sc_if[SCNH][8];   // not-issued / in-flight by class
+    longint unsigned sc_rc[SCNH][8];                   // retired by class (per-op head-wait = if/rc)
+    longint unsigned sc_vw_st[SCNH], sc_vw_ex[SCNH], sc_vw_csr[SCNH], sc_vw_halt[SCNH], sc_vw_oth[SCNH];
+    longint unsigned sc_flush, sc_mshr_hist[6], sc_mshr_full, sc_wbuf_full, sc_ldbuf_full, sc_dmiss, sc_dc_req, sc_dc_gnt, sc_rtab_full;
+    function automatic int unsigned sc_class(input ariane_pkg::fu_t fu);
+      case (fu)
+        ariane_pkg::LOAD: return 0;
+        ariane_pkg::STORE: return 1;
+        ariane_pkg::ALU: return 2;
+        ariane_pkg::CTRL_FLOW: return 3;
+        ariane_pkg::MULT: return 4;
+        ariane_pkg::CSR: return 5;
+        ariane_pkg::FPU, ariane_pkg::FPU_VEC: return 6;
+        default: return 7;
+      endcase
+    endfunction
+    function automatic void sc_print(input string why);
+      for (int h = 0; h < SCNH; h++) begin
+        $display("[stall-census] %s cyc=%0d hart=%0d ret=%0d ack_cyc=%0d ack_full=%0d ipc=%.3f | retired ld=%0d st=%0d alu=%0d br=%0d mul=%0d csr=%0d fpu=%0d oth=%0d | empty=%0d (flush %0d) | notissued ld=%0d st=%0d alu=%0d br=%0d mul=%0d csr=%0d fpu=%0d oth=%0d | inflight ld=%0d st=%0d alu=%0d br=%0d mul=%0d csr=%0d fpu=%0d oth=%0d | held st_sb=%0d ex=%0d csr=%0d halt=%0d oth=%0d",
+                 why, sc_cyc, h, sc_ret[h], sc_ack_cyc[h], sc_ack_full[h],
+                 sc_cyc > 0 ? real'(sc_ret[h]) / real'(sc_cyc) : 0.0,
+                 sc_rc[h][0], sc_rc[h][1], sc_rc[h][2], sc_rc[h][3], sc_rc[h][4], sc_rc[h][5], sc_rc[h][6], sc_rc[h][7],
+                 sc_empty[h], sc_empty_flush[h],
+                 sc_ni[h][0], sc_ni[h][1], sc_ni[h][2], sc_ni[h][3], sc_ni[h][4], sc_ni[h][5], sc_ni[h][6], sc_ni[h][7],
+                 sc_if[h][0], sc_if[h][1], sc_if[h][2], sc_if[h][3], sc_if[h][4], sc_if[h][5], sc_if[h][6], sc_if[h][7],
+                 sc_vw_st[h], sc_vw_ex[h], sc_vw_csr[h], sc_vw_halt[h], sc_vw_oth[h]);
+      end
+      $display("[stall-census] %s cyc=%0d mem: flush_cyc=%0d dmiss=%0d dc_req=%0d dc_gnt=%0d mshr_occ{0,1,2-3,4-7,8-15,16+}={%0d,%0d,%0d,%0d,%0d,%0d} mshr_full=%0d rtab_full=%0d wbuf_full=%0d ldbuf_full=%0d",
+               why, sc_cyc, sc_flush, sc_dmiss, sc_dc_req, sc_dc_gnt,
+               sc_mshr_hist[0], sc_mshr_hist[1], sc_mshr_hist[2], sc_mshr_hist[3], sc_mshr_hist[4], sc_mshr_hist[5],
+               sc_mshr_full, sc_rtab_full, sc_wbuf_full, sc_ldbuf_full);
+    endfunction
+    initial begin
+      sc_en = $test$plusargs("stall_census");
+      sc_cyc = 0; sc_last_print = 0; sc_flush = 0; sc_mshr_full = 0; sc_wbuf_full = 0; sc_ldbuf_full = 0;
+      sc_dmiss = 0; sc_dc_req = 0; sc_dc_gnt = 0; sc_rtab_full = 0;
+      for (int i = 0; i < 6; i++) sc_mshr_hist[i] = 0;
+      for (int h = 0; h < SCNH; h++) begin
+        sc_ret[h] = 0; sc_ack_cyc[h] = 0; sc_ack_full[h] = 0; sc_empty[h] = 0; sc_empty_flush[h] = 0;
+        sc_vw_st[h] = 0; sc_vw_ex[h] = 0; sc_vw_csr[h] = 0; sc_vw_halt[h] = 0; sc_vw_oth[h] = 0;
+        for (int c = 0; c < 8; c++) begin sc_ni[h][c] = 0; sc_if[h][c] = 0; sc_rc[h][c] = 0; end
+      end
+    end
+    always @(posedge clk_i) begin
+      if (rst_ni && sc_en) begin
+        automatic int unsigned hs, hh, cls, nack;
+        automatic bit anyack, in_iq;
+        sc_cyc++;
+        nack = 0; anyack = 0;
+        for (int p = 0; p < SCNP; p++)
+          if (commit_ack[p]) begin
+            nack++; anyack = 1;
+            hh = int'(commit_instr_id_commit[p].hart_id) < SCNH ? int'(commit_instr_id_commit[p].hart_id) : 0;
+            sc_ret[hh]++;
+            cls = sc_class(commit_instr_id_commit[p].fu);
+            sc_rc[hh][cls]++;
+          end
+        if (flush_ctrl_ex) sc_flush++;
+        hs = int'(issue_stage_i.i_scoreboard.commit_sel_slot[0]);
+        hh = int'(commit_instr_id_commit[0].hart_id) < SCNH ? int'(commit_instr_id_commit[0].hart_id) : 0;
+        if (anyack) begin
+          sc_ack_cyc[hh]++;
+          if (nack == SCNP) sc_ack_full[hh]++;
+        end else if (smt_sb_empty) begin
+          hh = int'(smt_active_hart) < SCNH ? int'(smt_active_hart) : 0;
+          if (flush_ctrl_if || flush_ctrl_ex) sc_empty_flush[hh]++; else sc_empty[hh]++;
+        end else begin
+          // "not issued" = the head still sits in the issue queue (its
+          // trans_id is a live IQ entry): operands not ready or no port.
+          in_iq = !issue_stage_i.i_scoreboard.mem_q[hs].issued;
+          for (int e = 0; e < issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.DEPTH; e++)
+            if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].valid &&
+                int'(issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].sbe.trans_id) == int'(hs))
+              in_iq = 1'b1;
+          cls = sc_class(commit_instr_id_commit[0].fu);
+          if (in_iq) sc_ni[hh][cls]++;
+          else if (!commit_instr_id_commit[0].valid) sc_if[hh][cls]++;
+          else if (commit_instr_id_commit[0].ex.valid) sc_vw_ex[hh]++;
+          else if (commit_instr_id_commit[0].fu == ariane_pkg::STORE && !lsu_commit_ready_ex_commit) sc_vw_st[hh]++;
+          else if (commit_instr_id_commit[0].fu == ariane_pkg::CSR) sc_vw_csr[hh]++;
+          else if (halt_ctrl) sc_vw_halt[hh]++;
+          else sc_vw_oth[hh]++;
+        end
+        if (ex_stage_i.lsu_i.i_load_unit.ldbuf_full) sc_ldbuf_full++;
+        if (sc_cyc - sc_last_print >= 64'd2_000_000) begin
+          sc_last_print = sc_cyc;
+          sc_print("periodic");
+        end
+      end
+    end
+    if (CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WT ||
+        CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WB ||
+        CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WT_WB) begin : gen_sc_hpd
+      always @(posedge clk_i) begin
+        if (rst_ni && sc_en) begin
+          automatic int unsigned occ;
+          occ = $countones(gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.hpdcache_mshr_i.mshr_valid_q);
+          sc_mshr_hist[occ == 0 ? 0 : occ == 1 ? 1 : occ < 4 ? 2 : occ < 8 ? 3 : occ < 16 ? 4 : 5]++;
+          if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mshr_full_o) sc_mshr_full++;
+          if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.rtab_full) sc_rtab_full++;
+          if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.gen_wbuf.hpdcache_wbuf_i.full_o) sc_wbuf_full++;
+          if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mem_req_valid_o &&
+              gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_miss_handler_i.mem_req_ready_i) sc_dmiss++;
+          if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.core_req_valid_i) sc_dc_req++;
+          if (gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.core_req_valid_i &&
+              gen_cache_hpd.i_cache_subsystem.i_dcache.i_hpdcache.hpdcache_ctrl_i.core_req_ready_o) sc_dc_gnt++;
+        end
+      end
+    end
+    final begin
+      if (sc_en) sc_print("final");
+    end
+  end
   //pragma translate_on
 
   // U5 full OoO lives in issue_stage (cva6_ooo_dispatch) when OoOEn=1.
