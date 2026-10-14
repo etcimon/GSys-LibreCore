@@ -1544,8 +1544,14 @@ prerequisite for this work under the existing dual license. No licensing policy 
   dies at cycle 886 on the same property on the pre-fix model (the Linux
   shape in a 900-cycle test), **passes Spike-exact (55 retirements) on the
   fixed model, negative fails as required** (`ooocoh-t27-m38-*`). Model
-  `…-build4` (4-core) and `…-server1-pgo-build2` (1-core) rebuilding with
-  the fix; L1 run 2 follows.
+  `…-build4` (4-core, built) and `…-server1-pgo-build2` (1-core, PGO
+  phase 2 — one 5 GB `DepSet` unit compiles for over an hour under
+  `-fprofile-use`) carry the fix. **L1 run 2 launched** on build4
+  (`linux-boot-l1r2-ooocoh-t27-server-default-mt4-build4`, 1.5 G cap;
+  ≈ 33.6 M cycles to `satp`, then ≈ 0.2 G cycles of kernel init ≈ 8 h at
+  6.8 k cycles/s). Next on server1: `q-linux-boot.sh MODEL=…server1-pgo-build2
+  PAYLOAD=l1s1 TAG=l1s1` (L1, ≈ 1–2 h) and `PAYLOAD=l3s1 TAG=l3s1` (L3,
+  ≈ 8–10 h) side by side.
   **Userland budget for L3** (S4.2, QEMU `-icount`): stock procd ≥ 10.9 G
   busy and still burning after the prompt; with `hotplug.json` cut to
   `makedev`, failsafe wait off and `rcS` trimmed to boot/system/sysctl/log/
