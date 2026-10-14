@@ -564,6 +564,30 @@ class keeps L1 (`linux-boot-l1s1b-…` on server1 at ≈ 4.5 k cycles/s, ≈ 15 
 4-core at 6.8 k) for the cache/coherence qualification of the kernel path, and its L3 waits for
 the loop work above.
 
+#### S4.4 — Console plumbing that cost two blind runs (2026-10-14)
+
+Run 2 on the 4-core and the first server1 run showed **no UART text for five hours** although
+both were alive. Two causes, both now fixed in `q-linux-payload.sh` / `q-linux-boot.sh`:
+
+1. `earlycon=uart8250,mmio,0x10000000,115200n8` makes the 8250 *early* console reprogram the
+   divisor assuming the PC `uartclk` of 1.8432 MHz → divisor 1 → **3.125 Mbaud** on this SoC's
+   50 MHz UART clock, which the testharness `uart_bus` (fixed 115200) cannot decode; OpenSBI had
+   programmed 27 from the DT `clock-frequency`. The payloads now use **`earlycon=sbi`** (the
+   kernel's early text goes through OpenSBI's console at OpenSBI's divisor) and `console=ttyS0,115200`
+   (the real 8250 driver derives the divisor from the DT clock, so it stays decodable).
+2. The model's stdout is block-buffered when redirected; the OpenSBI banner (≈ 3.5 KB) sits
+   below the buffer size, so nothing appeared until exit. The launcher now runs the model under
+   `stdbuf -oL` and with `+stall_census` (a line every 2 M cycles — a heartbeat with the per-hart
+   retirement/IPC/cache counters for free).
+
+With that, the first light: on `g6lc64_ooo_server1` **OpenSBI prints at ≈ 2 M cycles** (vs 33 M
+on the 8-hart server — the hart count is the OpenSBI cost), hart 1 parks after 302 k retirements,
+hart 0 runs on at IPC 0.82. One more cost to budget: at 115200 baud on a 50 MHz UART clock a
+character is **≈ 4,340 cycles** of LSR polling (OpenSBI's console driver and the 8250 console both
+poll), so OpenSBI's ≈ 2.5 KB of banner and platform info are ≈ 10 M cycles and a `loglevel=7`
+kernel log (≈ 20 KB) ≈ 87 M cycles — `loglevel=4` for record runs, or a `uart_bus` baud parameter
+exposed as a plusarg if the console ever becomes the long pole.
+
 ### S5 — SMT2 `RVH` (smt2 feature not present)
 
 Package bit + DTS `h` on both threads. Fetch: L4 pass-through only (no fake
