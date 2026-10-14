@@ -2385,7 +2385,7 @@ module cva6
   if (CVA6Cfg.OoOEn) begin : gen_stall_census
     localparam int unsigned SCNH = CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts;
     localparam int unsigned SCNP = CVA6Cfg.NrCommitPorts;
-    bit sc_en;
+    bit sc_en, sc_lu_trace;
     longint unsigned sc_cyc, sc_last_print;
     longint unsigned sc_ret[SCNH], sc_ack_cyc[SCNH], sc_ack_full[SCNH];
     longint unsigned sc_empty[SCNH], sc_empty_flush[SCNH];
@@ -2393,6 +2393,8 @@ module cva6
     longint unsigned sc_rc[SCNH][8];                   // retired by class (per-op head-wait = if/rc)
     longint unsigned sc_vw_st[SCNH], sc_vw_ex[SCNH], sc_vw_csr[SCNH], sc_vw_halt[SCNH], sc_vw_oth[SCNH];
     longint unsigned sc_flush, sc_mshr_hist[6], sc_mshr_full, sc_wbuf_full, sc_ldbuf_full, sc_dmiss, sc_dc_req, sc_dc_gnt, sc_rtab_full;
+    // T33/T34: load-unit replays (parked load handed back) and LSQ violations, for the oops correlation
+    longint unsigned sc_lu_replay, sc_mem_viol;
     function automatic int unsigned sc_class(input ariane_pkg::fu_t fu);
       case (fu)
         ariane_pkg::LOAD: return 0;
@@ -2416,15 +2418,16 @@ module cva6
                  sc_if[h][0], sc_if[h][1], sc_if[h][2], sc_if[h][3], sc_if[h][4], sc_if[h][5], sc_if[h][6], sc_if[h][7],
                  sc_vw_st[h], sc_vw_ex[h], sc_vw_csr[h], sc_vw_halt[h], sc_vw_oth[h]);
       end
-      $display("[stall-census] %s cyc=%0d mem: flush_cyc=%0d dmiss=%0d dc_req=%0d dc_gnt=%0d mshr_occ{0,1,2-3,4-7,8-15,16+}={%0d,%0d,%0d,%0d,%0d,%0d} mshr_full=%0d rtab_full=%0d wbuf_full=%0d ldbuf_full=%0d",
+      $display("[stall-census] %s cyc=%0d mem: flush_cyc=%0d dmiss=%0d dc_req=%0d dc_gnt=%0d mshr_occ{0,1,2-3,4-7,8-15,16+}={%0d,%0d,%0d,%0d,%0d,%0d} mshr_full=%0d rtab_full=%0d wbuf_full=%0d ldbuf_full=%0d lu_replay=%0d mem_viol=%0d",
                why, sc_cyc, sc_flush, sc_dmiss, sc_dc_req, sc_dc_gnt,
                sc_mshr_hist[0], sc_mshr_hist[1], sc_mshr_hist[2], sc_mshr_hist[3], sc_mshr_hist[4], sc_mshr_hist[5],
-               sc_mshr_full, sc_rtab_full, sc_wbuf_full, sc_ldbuf_full);
+               sc_mshr_full, sc_rtab_full, sc_wbuf_full, sc_ldbuf_full, sc_lu_replay, sc_mem_viol);
     endfunction
     initial begin
       sc_en = $test$plusargs("stall_census");
+      sc_lu_trace = $test$plusargs("lu_replay_trace");
       sc_cyc = 0; sc_last_print = 0; sc_flush = 0; sc_mshr_full = 0; sc_wbuf_full = 0; sc_ldbuf_full = 0;
-      sc_dmiss = 0; sc_dc_req = 0; sc_dc_gnt = 0; sc_rtab_full = 0;
+      sc_dmiss = 0; sc_dc_req = 0; sc_dc_gnt = 0; sc_rtab_full = 0; sc_lu_replay = 0; sc_mem_viol = 0;
       for (int i = 0; i < 6; i++) sc_mshr_hist[i] = 0;
       for (int h = 0; h < SCNH; h++) begin
         sc_ret[h] = 0; sc_ack_cyc[h] = 0; sc_ack_full[h] = 0; sc_empty[h] = 0; sc_empty_flush[h] = 0;
@@ -2437,6 +2440,15 @@ module cva6
         automatic int unsigned hs, hh, cls, nack;
         automatic bit anyack, in_iq;
         sc_cyc++;
+        if (ex_stage_i.lsu_i.i_load_unit.lu_replay_o) begin
+          sc_lu_replay++;
+          if (sc_lu_trace)
+            $display("[lu-replay] cyc=%0d tid=%0d pc=%h vaddr=%h", sc_cyc,
+                     ex_stage_i.lsu_i.i_load_unit.lu_replay_id_o,
+                     issue_stage_i.i_scoreboard.mem_q[ex_stage_i.lsu_i.i_load_unit.lu_replay_id_o].sbe.pc,
+                     ex_stage_i.lsu_i.i_load_unit.lsu_ctrl_i.vaddr);
+        end
+        if (issue_stage_i.i_scoreboard.lu_replay_i || issue_stage_i.i_scoreboard.mem_violation_i) sc_mem_viol++;
         nack = 0; anyack = 0;
         for (int p = 0; p < SCNP; p++)
           if (commit_ack[p]) begin
