@@ -1363,6 +1363,57 @@ main:
   li   t0, 0x1111111133333333
   bne  a1, t0, fail_t2
 
+#elif STAGE == 50
+  # T34 hunt: WT dcache ACK-before-check stress. 64 doubleword stores to a
+  # 512-byte region (8 lines), each interleaved with loads from another
+  # region so the wbuffer's tag-check port is contended and the write-through
+  # ACK can return before the check; then every word is read back through the
+  # cache (no fence). A lost or half-applied fixup shows as a wrong word.
+  la   s2, .Lt34_region
+  la   s3, .Lt34_other
+  li   s4, 0
+  li   s5, 64
+.Lt34_loop:
+  slli t0, s4, 3
+  add  t1, s2, t0                  # &region[i]
+  li   t2, 0x0101010101010101
+  mul  t3, t2, s4                  # value i*0x0101.. (distinct, both halves nonzero for i>0)
+  addi t3, t3, 0x5a5
+  sd   t3, 0(t1)
+  andi t4, s4, 0x3f
+  slli t4, t4, 3
+  add  t5, s3, t4
+  ld   t6, 0(t5)                   # contention loads
+  ld   t6, 64(t5)
+  ld   t6, 128(t5)
+  addi s4, s4, 1
+  bne  s4, s5, .Lt34_loop
+  # read back
+  li   s4, 0
+.Lt34_chk:
+  slli t0, s4, 3
+  add  t1, s2, t0
+  ld   t3, 0(t1)
+  li   t2, 0x0101010101010101
+  mul  t4, t2, s4
+  addi t4, t4, 0x5a5
+#ifdef MEM_ORDER_NEGATIVE
+  xori t4, t4, 1
+#endif
+  bne  t3, t4, fail_t2
+  addi s4, s4, 1
+  bne  s4, s5, .Lt34_chk
+  j    .Lt34_done
+  .section .data
+  .balign 64
+.Lt34_region:
+  .space 512
+  .balign 64
+.Lt34_other:
+  .space 1024
+  .text
+.Lt34_done:
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".

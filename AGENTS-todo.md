@@ -1603,9 +1603,21 @@ prerequisite for this work under the existing dual license. No licensing policy 
   (`linux-boot-l1s1d-ooocoh-t33-server1-final-pgo-build`, no WT wbuffer):
   if it passes the same points the WT dcache is confirmed as the remaining
   defect class; the 4-core `ooocoh-t33-server-final-mt4-build` is built for
-  the same comparison. If depth 8 does not cure it, the next instrument is
-  a store/load value trace of the faulting address (`+smt_mem_watch`-style
-  on `0x…cgroups` / the device_node) rather than an FST.
+  the same comparison. **Depth-8 result: not a cure, a timing shift.** On
+  `ooocoh-t34-ooo-fix8-pgo-build` the L3 run passed its old `of_irq_init`
+  point and reached 0.586 s (`DMA: preallocated … pools`), while the L1 run
+  died *earlier* (0.426 s, right after `futex hash table`): `epc 0x0, ra
+  0x0, cause 0xc` — a call through a function pointer read as 0 in PID 1.
+  Three victims, three places, all "a stored value read back as 0 / half
+  0" ≈ 100 M cycles in; stages 39–50 (50 = a 64-store × contention-load
+  ACK-before-check stress) stay Spike-exact on both depths. The WT dcache
+  write path (SL-W fixup data/byte-enable, or the write buffer) remains the
+  prime suspect, the T33 replay the second (it is new and the oopses all
+  postdate it — the census now counts `lu_replay`/`mem_viol` per period
+  and `+lu_replay_trace` prints each one, model
+  `ooocoh-t34-ooo-fix8b-pgo-build`). The HPDCACHE single-core run
+  (`l1s1d`, no WT wbuffer, same LSU/T33) is the discriminator between the
+  two: at `SLUB:` (34 M cycles) when this was written, ≈ 7 k cycles/s.
 - [ ] **T33 — the T32 residual: a partially covered younger load parked in
   `WAIT_PAGE_OFFSET` on a speculative store held the load unit against the
   head load; the load unit now hands it back (2026-10-14).** On the T32
