@@ -1597,6 +1597,22 @@ prerequisite for this work under the existing dual license. No licensing policy 
   ≈ 1 h 45 min wall with RVFI tracing on (the detached launcher leaves
   `results.json` at `incomplete`; the verdict is `trial/run.log`, as for the
   T21t runs).
+- [ ] **T35 — `g6lc64_ooo_server1` (HPDCACHE, T28–T33): `ooo_spec_entry_live`
+  assertion at cycle 76,935,847 (0.6 s guest, after `futex hash table`)
+  (2026-10-14).** `store_buffer.sv:1054` — speculative-queue entry 0 holds
+  tid 19 whose scoreboard slot is not live ("hold-to-commit credit
+  accounting leaked"). First time Linux reached this far on the HPDCACHE
+  single core (it passed the 0.426 s point where the ooo died, so the WT
+  wbuffer class is confirmed as ooo-only). Suspects: the T33 load-unit
+  replay (new; a cancelled+replay load's commit-time flush may leave a
+  younger speculative store's STQ entry behind if that flush path differs
+  from the mispredict flush the STQ handles), or a pre-existing leak
+  exposed by the kernel. Next: rerun on a model with the census counters
+  (`lu_replay=`/`mem_viol=` per period) and `+lu_replay_trace`, and an
+  `+ld_trace`-style window at 76.93 M cycles; a directed stage with a
+  replayed load followed by a speculative store is the likely
+  reproducer. The 4-core `ooocoh-t33-server-final-mt4-build` shares the
+  LSU and would hit it too.
 - [ ] **T34 — two kernel oopses with T28–T33 in, both the shape of a stale or
   half-written load value (2026-10-14).** On `ooocoh-t33-ooo-replay2-pgo-build`
   (depth-2 fixup queue) Linux now runs through `init_IRQ`, timekeeping
@@ -1646,13 +1662,41 @@ prerequisite for this work under the existing dual license. No licensing policy 
   as 0 (one as its low half): the shape of a **stale cached line** whose
   write-through reached memory while the line update was lost, i.e. the
   SL-W fixup/void path itself rather than its depth. Next instrument if
-  server1 clears 0.5 s: an FST of the fixup path on the current config
-  (`ulimit -s unlimited`) around a `fixup_push` that is followed by no
-  `wr_req` to the same set, or a sim-only check in `wt_dcache_wbuffer.sv`
-  that every ACKed entry either hit-updated the line, was fixed up, or
-  invalidated it (assert on the fourth case). Both ooo Linux runs are
-  stopped; the 4-core MT4 run was stopped too (≈ 1 k cycles/s under the
-  other sims — run it alone).
+  server1 clears 0.5 s: … (superseded — see the root cause below). Both
+  ooo Linux runs were stopped; the 4-core MT4 run too (≈ 1 k cycles/s under
+  the other sims — run it alone).
+  **Root cause (2026-10-14, same day).** Instrument: `verif/regress/
+  rvfi_memcheck.py`, a program-order memory oracle over the single-hart
+  RVFI trace (expected load value = last retired store's bytes, ELF image
+  elsewhere; kernel image and linear map folded onto PAs). Over the
+  110 M-cycle depth-8 trace it reports **exactly one** stored-byte
+  mismatch (the other 20 are the code-patching alias, `image/zero`
+  source): `memblock`'s region-swap loop (`ld`/`sd` at
+  `0xffffffff802aebd8/ebde`) stores `0x80040000` to PA `0x81522d98` at
+  c=6,704,293 and the same `ld` reads `0x80000000` 129 cycles later —
+  the memblock state is corrupted from then on (OpenSBI's reserved
+  region is later handed out, hence the random late victims). FST
+  `prof-t34fst` on the depth-8 trace model (same RTL): wbuffer entry 0 is
+  **evicted at 6,704,323 while a tag check for it is in flight**
+  (`check_ptr_q1 = 0` that cycle), **re-allocated to the new store at
+  6,704,325**, and the in-flight result (`rd_hit_oh_q = 0x20`, the OLD
+  word's line in way 5) is applied to the new occupant at 6,704,325
+  (`checked = 1`, `tocheck` cleared); the ACK-time write at 6,704,330 goes
+  to `idx 0xd9 off 0x8 way 5` — the wrong way — so the real line keeps
+  `0x80000000` and a line in way 5 takes eight stray bytes.
+  `wt_dcache_wbuffer.sv` applied `check_en_q1` results to whatever valid
+  word sat at `check_ptr_q1`. **Fix (`58ba3d26b`):** `check_wtag_d/q/q1`
+  carried beside `check_ptr`; `check_same_q1` (same word still in the
+  slot) gates the result apply, the ACK-time write that consumes the
+  in-flight result, `check_wr`, and the fixup-candidate exclusions. The
+  fixup-queue depth was never the cause (2 vs 8 only moved the timing);
+  T28 was the depth-0 face of the same class. Verification:
+  `ooocoh-t34-ooo-wbfix-pgo-build` — frozen battery Spike-exact and
+  qualified (s11 10,965 cycles); the oracle run over 110 M cycles
+  (`memcheck-wbfix-110m`) and L1 (`linux-boot-l1ooo-ooocoh-t34-ooo-wbfix-
+  pgo-build`) are in flight. Stage 51 (store-pair sweep) is registered but
+  does not force the race; the oracle is the witness. The server packages
+  (HPDCACHE) do not have this path.
 - [ ] **T33 — the T32 residual: a partially covered younger load parked in
   `WAIT_PAGE_OFFSET` on a speculative store held the load unit against the
   head load; the load unit now hands it back (2026-10-14).** On the T32
