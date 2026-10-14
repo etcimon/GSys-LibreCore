@@ -141,6 +141,13 @@ in each family file's inventory. Every group now has a file (2026-10-14: 27 file
 families are folded as shown). The ledger reports every group as `not-run` until its first
 submission-shaped run; `STATUS` lines in the cards are copied from it.
 
+## Limits ledger
+
+`limits-ledger.md`: every `VkPhysicalDeviceLimits` field the CTS found below the minimum
+(39 at CTS-0), with the actual value, the 1.0/1.1 and 1.4 minima, the owning mechanism card
+and its class (mechanism / verify / profile-only) — a value is raised only with its
+mechanism and a vector that exercises the maximum.
+
 ## Performance, area and scalability
 
 `performance-area-scalability.md` defines the program that follows the cards: admissibility of a
