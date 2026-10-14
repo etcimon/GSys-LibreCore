@@ -1547,21 +1547,42 @@ prerequisite for this work under the existing dual license. No licensing policy 
   packages right after the expected `0x80201050/1048` fetch faults), the
   kernel's early trap path hits OpenSBI (`_trap_handler` at 0x800003d8) and
   parks. The same first data fault preceded the 4-core run-1 assertion and
-  the server1 frontend-empty hang, so this is one frontend/control-flow
-  defect at the VA switch, not three. Candidates: the restart PC after the
-  `csrw stvec`/`sscratch` serialising flush in the callee landing on the
-  caller's `pc+8` (a frontier/`gen_switch_tail`-class restart), a RAS/BTB
-  alias between the physical and virtual images of the same code (low 20
-  PC bits identical), or the jal's taken resolution lost at the first
-  virtual fetch. Next: `ooocoh-t28-ooo-slw-fst-build` (building), FST of
-  cycles ≈ 5,580,500–5,582,000 of `linux-payload-l1ooo` (the `jal` is a few
-  hundred cycles after the `[mmu-ife]` pair at t = 5,580,62x), read the
-  frontend (`i_frontend` npc/predict/RAS), the branch unit resolution and
-  the controller flush/restart PC for the jal at `0xffffffff80001146`; then
-  a directed `ooo_mem_min` stage (MMU on, `jal` to a `csrw stvec; ret`
-  callee immediately after the `satp` write) and the fix. Linux on RTL is
-  blocked on this on all packages; the 4-core `l1r3` run will show the same
-  fault when OpenSBI finishes (≈ 33 M cycles).
+  the server1 frontend-empty hang, so this is one frontend defect, not
+  three. **Cycle-level mechanism (`+fe_trace`, `prof-t29win`, cycles
+  5,580,636–5,580,802 of `linux-payload-l1ooo` on
+  `ooocoh-t28-ooo-slw-pgo-build`):** the `ret` at `…1064` (right after
+  `sfence.vma`) is predicted from a **physical-era RAS/BTB entry**
+  (`pred=0x80201000`, RAS `top=0x80201146`), resolves twice (first
+  resolution `outranked=1` by the fence's commit flush, re-issued, then
+  `misp=1 tgt=…1146`), the redirect fetches `va=…1146` (window `1140`, the
+  jal's first half only, `cons=0000`) then `va=…1148` (`una=1 lopc=…1146`):
+  the realigned window presents **slot0 = the jal (`cf=2`, `pred=…10b4`
+  from the instruction scan, `bht v=0`) and slot1 = the `auipc` at `…114a`
+  with `cons=0`** (correctly dropped behind a taken branch); the FTQ entry
+  pushed in that cycle carries `tgt=…10b4` but **`taken=0`**, `bp_pend`
+  still holds the ret's `…1146`, **no `REQ va=…10b4` is ever issued**, the
+  sequential prefetches `…1150/1158/1160` are consumed, the jal is issued
+  and resolves `taken=1 tgt=…10b4 misp=0` (prediction == resolution, so
+  nothing recovers), and `…114e` commits next. So: a predicted-taken
+  control-flow instruction completed from the unaligned leftover of a
+  redirect's first window does not update `npc`/the FTQ taken bit when a
+  mispredict redirect to that same address is still pending — the branch
+  is "predicted" to the right target and fetch never goes there. Directed
+  shapes that **pass** Spike-exact on the same model (`ooo_mem_min` stages
+  43–45, registered): the straddling jal reached sequentially; as the
+  target of a mispredicted `ret`; the same with `sfence.vma` before the
+  `ret`. The boot adds the first-virtual-fetch PTW (136 cycles on the
+  `…1064` window) and the physical-era RAS alias; the next reproducer
+  should put the straddling jal behind a `ret` whose RAS entry is stale
+  AND whose fetch misses the ITLB (an `sfence.vma`-after-`satp` sequence
+  like stage 38's MPRV setup but with fetch translation on). Fix locus:
+  `core/frontend/frontend.sv` (fetch_B) — the leftover-completed
+  instruction's `bp_valid`/FTQ `taken` while `bp_pend_q` is set
+  (`q-t29-win.sh` prints the whole window). Linux on RTL is blocked on this
+  on all packages; the FST trace build of the fixed ooo
+  (`ooocoh-t28-ooo-slw-fst-build`) segfaults at start (trace + fixup queue —
+  a Verilator trace issue to look at separately; the `+fe_trace` window is
+  the working instrument).
 - [ ] **T28 — `g6lc64_ooo` (WT dcache, 1 hart) violates a same-hart RAW
   through memory in OpenSBI's FDT walk; Linux cannot start there yet
   (2026-10-14).** The L1/L3 payloads built for the single core

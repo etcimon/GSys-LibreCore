@@ -986,6 +986,124 @@ main:
   ret
 .Lraw3_done:
 
+#elif STAGE == 43
+  # T29: a 4-byte `jal` that STRADDLES two 8-byte fetch windows (offset 6 of an
+  # aligned block). On the Linux boot the kernel's `jal .Lsetup_trap_vector` at
+  # 0x...1146 was predicted taken (cf=2, target from the instruction scan, no
+  # BHT entry) and resolved taken with no mispredict, yet the fetch stream never
+  # redirected: the next window (…1150) was consumed, the instruction after the
+  # jal in its own window was dropped as "behind a taken branch", and the callee
+  # never ran. First encounter (cold predictors), as on the boot.
+  li   t0, 0
+  li   t1, 0
+  li   t2, 0
+  .balign 8
+  c.nop
+  c.nop
+  c.nop                          # 6 bytes: the jal starts at offset 6
+  .option push
+  .option norvc
+  jal  ra, .Lstraddle_callee     # bytes 6..9: half in this window, half in the next
+  .option pop
+  addi t1, t1, 1                 # the instruction after the jal: must run exactly once
+  addi t2, t2, 1
+  li   t3, 7
+#ifdef MEM_ORDER_NEGATIVE
+  xori t3, t3, 1
+#endif
+  bne  t0, t3, fail_t0           # callee skipped
+  li   t3, 1
+  bne  t1, t3, fail_t2           # instruction after the jal skipped / repeated
+  bne  t2, t3, fail_t2
+  j    .Lstraddle_done
+  .balign 8
+.Lstraddle_callee:
+  li   t0, 7
+  ret
+.Lstraddle_done:
+
+#elif STAGE == 44
+  # Stage 43 reached the straddling jal sequentially. On the boot it was the
+  # TARGET of a `ret` (relocate_enable_mmu returning to 0x...1146): the first
+  # fetch window starts at the jal's own address and holds only its first
+  # half, the next window completes it. Same shape here: a `ret` lands on the
+  # straddling jal.
+  li   t0, 0
+  li   t1, 0
+  li   t2, 0
+  jal  ra, .Lstr2_leaf           # the leaf returns onto the straddling jal
+  .balign 8
+  c.nop
+  c.nop
+  c.nop
+  .option push
+  .option norvc
+.Lstr2_jal:
+  jal  ra, .Lstr2_callee         # offset 6: the ret above lands exactly here
+  .option pop
+  addi t1, t1, 1
+  addi t2, t2, 1
+  li   t3, 7
+#ifdef MEM_ORDER_NEGATIVE
+  xori t3, t3, 1
+#endif
+  bne  t0, t3, fail_t0
+  li   t3, 1
+  bne  t1, t3, fail_t2
+  bne  t2, t3, fail_t2
+  j    .Lstr2_done
+  .balign 8
+.Lstr2_leaf:
+  la   ra, .Lstr2_jal
+  ret
+  .balign 8
+.Lstr2_callee:
+  li   t0, 7
+  ret
+.Lstr2_done:
+
+#elif STAGE == 45
+  # Stage 44 plus the boot's last ingredient: the leaf executes a serialising
+  # `sfence.vma` right before the (mispredicted) `ret` that lands on the
+  # straddling jal — relocate_enable_mmu's `sfence.vma; ret`. The window trace
+  # of the boot shows the ret resolved twice (the first resolution outranked by
+  # the fence's commit flush), a pending redirect to the ret's target still
+  # live when the jal's own taken prediction fired, and the jal's redirect lost.
+  li   t0, 0
+  li   t1, 0
+  li   t2, 0
+  jal  ra, .Lstr3_leaf
+  .balign 8
+  c.nop
+  c.nop
+  c.nop
+  .option push
+  .option norvc
+.Lstr3_jal:
+  jal  ra, .Lstr3_callee
+  .option pop
+  addi t1, t1, 1
+  addi t2, t2, 1
+  li   t3, 7
+#ifdef MEM_ORDER_NEGATIVE
+  xori t3, t3, 1
+#endif
+  bne  t0, t3, fail_t0
+  li   t3, 1
+  bne  t1, t3, fail_t2
+  bne  t2, t3, fail_t2
+  j    .Lstr3_done
+  .balign 8
+.Lstr3_leaf:
+  la   ra, .Lstr3_jal
+  sfence.vma
+  ret
+  .balign 8
+.Lstr3_callee:
+  li   t0, 7
+  ret
+.Lstr3_done:
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".
