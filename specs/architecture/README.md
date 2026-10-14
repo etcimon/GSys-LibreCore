@@ -141,6 +141,14 @@ in each family file's inventory. Every group now has a file (2026-10-14: 27 file
 families are folded as shown). The ledger reports every group as `not-run` until its first
 submission-shaped run; `STATUS` lines in the cards are copied from it.
 
+## Performance, area and scalability
+
+`performance-area-scalability.md` defines the program that follows the cards: admissibility of a
+throughput change (ledger diff empty incl. the fails-if-removed controls, Gate 1 across
+geometries, no `FORBIDS` crossed, identical checked work), the counters (W1.5), the frozen
+baseline on checked work (W1.6), the knob table per card, and the scaling order behind the
+CTS fence.
+
 ## Cross-cutting pattern cards (apply to every file)
 
 ```text
