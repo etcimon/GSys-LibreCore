@@ -11,15 +11,23 @@
 // inputRate (instance-rate attributes are indexed by the absolute
 // instance index), issues an APU_SH_WORK_VS batch per ≤
 // APU_RAST_VS_BATCH vertices on the ShaderCore work port, then
-// scan-converts each primitive against the VS output records: w≤0
-// vertices are skipped (no clipping in v1), NDC+viewport transform
-// to 16.8 fixed point, signed-area cull/front-face handling, a
-// scissor-clamped bounding box, and a top-left-rule point sample at
-// each pixel center.  Triangle list/strip/fan topologies; indexed
+// scan-converts each primitive against the VS output records: a
+// clip-space Sutherland–Hodgman clipper cuts each primitive against
+// the six frustum planes (w≤0 vertices are regenerated, not
+// dropped), NDC+viewport transform to 16.8 fixed point,
+// signed-area cull/front-face handling, a scissor-clamped bounding
+// box, and a top-left-rule point sample at each pixel center.
+// Triangle list/strip/fan topologies; indexed
 // draws fetch UINT16/UINT32 indices (OOB → index 0 + robust) and
 // gl_VertexIndex = index + vertexOffset.  With a depth attachment,
 // early-Z tests (and optionally writes) the interpolated z before
-// the fragment enters the FS batch.  Fragments accumulate into FS
+// the fragment enters the FS batch — unless the FS module flags
+// fs_late (writes FragDepth or contains kill/demote), in which
+// case the depth test+write moves to the ROP and sources z from
+// FS-out record slot 8 (APU_SH_FSOUT_BI: word0 FragDepth when the
+// module declares builtin 22, else the interpolated z; word1 bit0
+// is the shader discard flag, which suppresses colour AND depth
+// writes).  Fragments accumulate into FS
 // input records (FragCoord at slot 0, the fs_in_mask locations
 // perspective-corrected) and flush in APU_SH_WORK_FS batches of ≤
 // APU_RAST_FS_BATCH; the ROP then processes every valid color
@@ -55,10 +63,10 @@
 // Review checklist: always_ff/always_comb split, async active-low
 // reset, no latches, Enable=0 constant-zero netlist.
 //
-// Known v1 limits: no clipping (w≤0 prims skipped), no stencil, no
-// FragDepth output (shmod rejects FS modules declaring builtin 22),
-// subpass color reference l → attachment l (identity), primitive
-// restart ignored, strips and fans must fit one vertex batch,
+// Known limits: no stencil, no points/lines (triangle topologies
+// only), primitive restart ignored, strips and fans must fit one
+// vertex batch, subpass color reference l → attachment l
+// (identity), no MSAA, single viewport, no depth clamp/bias,
 // area/edge values are shifted into int32 for the float λ path (the
 // exact inside test stays 64-bit), scissor offsets are unsigned.
 module g6lc_apu_rast
@@ -199,7 +207,9 @@ module g6lc_apu_rast
       S_F_PY2, S_F_LNEXT,
       S_FLUSH, S_FS_WAIT,
       S_ROP_R0, S_ROP_R1, S_ROP_R2,
-      S_ROP_DRD, S_ROP_DI, S_ROP_DM, S_ROP_DS,
+      S_ROP_F8, S_ROP_LRD, S_ROP_LDI, S_ROP_LDM,
+      S_ROP_LC, S_ROP_LWR,
+      S_ROP_DI, S_ROP_DM, S_ROP_DS,
       S_BL_SAT, S_BL_MM,
       S_BL_F1, S_BL_F1B, S_BL_F2, S_BL_F2B,
       S_BL_M1, S_BL_M2, S_BL_OP, S_BL_ST,
@@ -498,6 +508,9 @@ module g6lc_apu_rast
     // fragment tables (flops, v1 — see header note)
     logic [31:0]  fsxy_q [FSB];             // {py[15:0], px[15:0]}
     logic         fs_help_q [FSB];          // G2b helper-lane flags
+    logic [31:0]  fsz_q  [FSB];             // interpolated z (G3a-i late-Z source)
+    logic [31:0]  lz_q;                     // late-Z candidate (slot8 word0 or fsz)
+    logic         lzdone_q;                 // current fragment's late step ran
     logic [31:0]  var_q [3][8][4];          // [vert][loc][comp] cache
     logic [7:0]   varm_q;                   // locs fetched this prim
     // G2b quad scan: (sx_q,sy_q) is the even-aligned 2x2 block base,
@@ -788,6 +801,10 @@ module g6lc_apu_rast
     wire [31:0] zc_w = fz_q[31] ? 32'h0
                        : (f_f32_lt(32'h3F800000, fz_q) ? 32'h3F800000
                           : fz_q);
+    // late-Z clamps the ROP depth source the same way (G3a-i)
+    wire [31:0] lzc_w = lz_q[31] ? 32'h0
+                        : (f_f32_lt(32'h3F800000, lz_q) ? 32'h3F800000
+                           : lz_q);
     // blend-state field selects for the comp under the blend cursor
     wire [4:0] bsf_w = (c_q[1:0] == 2'd3) ? dr_q.blend[at_q].src_a
                                         : dr_q.blend[at_q].src_c;
@@ -847,8 +864,9 @@ module g6lc_apu_rast
         bx0_q <= '0; bx1_q <= '0; by0_q <= '0; by1_q <= '0;
         sx_q <= '0; sy_q <= '0; p_q <= '0; f_q <= '0; nf_q <= '0;
         rs_q <= '0; fz_q <= '0; lc_q <= '0;
+        lz_q <= '0; lzdone_q <= 1'b0;
         for (int i = 0; i < FSB; i++) begin
-          fsxy_q[i] <= '0; fs_help_q[i] <= 1'b0;
+          fsxy_q[i] <= '0; fs_help_q[i] <= 1'b0; fsz_q[i] <= '0;
         end
         for (int v = 0; v < 3; v++)
           for (int l = 0; l < 8; l++)
@@ -1073,6 +1091,7 @@ module g6lc_apu_rast
               nv_q <= 6'((dr_q.vertex_count - bat_q >= 32'(VSB))
                          ? VSB : dr_q.vertex_count - bat_q);
             j_q <= '0;
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
             $display("[DBG] rast batch nv=%0d vb0={b=%08x s=%08x st=%0d} a0={v=%0d b=%0d f=%0d o=%0d} a1={v=%0d b=%0d f=%0d o=%0d} t=%0t",
                      dr_q.vertex_count - bat_q, dr_q.vb_base[0],
@@ -1082,6 +1101,7 @@ module g6lc_apu_rast
                      dr_q.attr[1].valid, dr_q.attr[1].binding,
                      dr_q.attr[1].fmt, dr_q.attr[1].offset, $time);
 `endif
+// pragma translate_on
             st_q <= S_GA_ISET;
           end
           S_GA_ISET: begin
@@ -1324,6 +1344,7 @@ module g6lc_apu_rast
             end
           end
           S_PR_W: begin
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
             $display("[DBG] rast prim p=%0d pos0=%08x %08x %08x %08x pos1=%08x %08x %08x %08x pos2=%08x %08x %08x %08x t=%0t",
                      p_q, pos_q[0][0], pos_q[0][1], pos_q[0][2],
@@ -1331,6 +1352,7 @@ module g6lc_apu_rast
                      pos_q[1][3], pos_q[2][0], pos_q[2][1], pos_q[2][2],
                      pos_q[2][3], $time);
 `endif
+// pragma translate_on
             // G2b: evaluate outcodes instead of the w<=0 skip.  gw =
             // 4096*w per vertex (guard band), then S_OC decides
             // trivial-reject / trivial-accept / clip.  Fan tris of an
@@ -1928,12 +1950,14 @@ module g6lc_apu_rast
           end
           // -- area, cull, top-left, bbox, rcp_area --------------------------
           S_PR_AREA: begin
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
             $display("[DBG] rast area=%0d (%016x) front=%0d cull=%0d ff=%0d xy=(%0d,%0d)(%0d,%0d)(%0d,%0d) t=%0t",
                      area_q, area_q, front_w, dr_q.cull, dr_q.front_ccw,
                      32'(vxi_q[0]), 32'(vyi_q[0]), 32'(vxi_q[1]),
                      32'(vyi_q[1]), 32'(vxi_q[2]), 32'(vyi_q[2]), $time);
 `endif
+// pragma translate_on
             // front = (signed area > 0) == front_ccw, evaluated on the
             // PRE-swap area; cull[0]=FRONT, cull[1]=BACK.  G2b: the
             // face/cull decision is taken once on the clipped
@@ -2002,11 +2026,13 @@ module g6lc_apu_rast
             st_q <= S_PR_BBX;
           end
           S_PR_BBX: begin
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
             $display("[DBG] rast bbox empty=%0d x=[%0d,%0d] y=[%0d,%0d] sc=%0d,%0d %0dx%0d t=%0t",
                      bbox_empty, blo_x, bhi_x, blo_y, bhi_y,
                      dr_q.sc_x, dr_q.sc_y, dr_q.sc_w, dr_q.sc_h, $time);
 `endif
+// pragma translate_on
             if (bbox_empty) begin
               t_pd();
               st_q <= S_PR_I0;
@@ -2207,8 +2233,9 @@ module g6lc_apu_rast
           S_F_PY2: begin
             conv_q[1] <= fp_res_q;               // py+0.5
             // helpers skip early-Z entirely (G2b); so do draws with
-            // no depth attachment
-            st_q <= (!dr_q.da_valid || help_q) ? S_F_W0
+            // no depth attachment; G3a-i fs_late draws defer the test
+            // to the ROP (slot-8 FragDepth / discard must be known)
+            st_q <= (!dr_q.da_valid || help_q || dr_q.fs_late) ? S_F_W0
                     : dr_q.depth_test ? S_DZ_RD
                     : dr_q.depth_write ? S_DZ_WR
                     : S_F_W0;
@@ -2312,6 +2339,7 @@ module g6lc_apu_rast
               // batch-full flush can only split between blocks
               fsxy_q[f_q]   <= {py_q, px_q};
               fs_help_q[f_q] <= help_q;
+              fsz_q[f_q]    <= fz_q;
               lane_q <= lane_q + 2'd1;
               if ({1'b0, f_q} + 7'd1 == 7'(FSB)) begin
                 nf_q <= {1'b0, f_q} + 7'd1; f_q <= '0;
@@ -2384,11 +2412,13 @@ module g6lc_apu_rast
           end
           // ---- FS batch flush ----------------------------------------------
           S_FLUSH: begin
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
             if (!shv_q)
               $display("[DBG] rast flush: nf=%0d ret=%0d t=%0t",
                        nf_q, flr_q, $time);
 `endif
+// pragma translate_on
             sh_ctype_o <= APU_SH_WORK_FS;
             sh_slot_o <= dr_q.fs_slot;
             sh_imm_o[0] <= {25'h0, nf_q};
@@ -2398,7 +2428,15 @@ module g6lc_apu_rast
             // FrontFacing builtin; constant for the whole batch
             // because the scan flushes at every primitive boundary
             sh_imm_o[3] <= {31'h0, front_q}; sh_imm_o[4] <= '0;
-            sh_imm_o[5] <= '0; sh_imm_o[6] <= '0; sh_imm_o[7] <= '0;
+            // imm[5]/imm[6] = per-record helper-lane mask (bits
+            // [223:160] of the dispatch payload — the wave engine
+            // suppresses helper side effects: atomics, image writes,
+            // device-memory stores)
+            for (int i = 0; i < 32; i++) begin
+              sh_imm_o[5][i] <= fs_help_q[i];
+              sh_imm_o[6][i] <= fs_help_q[i + 32];
+            end
+            sh_imm_o[7] <= '0;
             shv_q <= 1'b1;
             if (shv_q && sh_work_ready_i) begin
               shv_q <= 1'b0;
@@ -2414,7 +2452,7 @@ module g6lc_apu_rast
                 st_q <= S_FIN_BAD;
               end else begin
                 robust_q <= robust_q + shdp_q.robust;
-                r_q <= '0; at_q <= '0;
+                r_q <= '0; at_q <= '0; lzdone_q <= 1'b0;
                 st_q <= S_ROP_R0;
               end
             end
@@ -2425,16 +2463,27 @@ module g6lc_apu_rast
             if (fs_help_q[r_q]) begin
               // helper invocation: it only exists to complete the
               // derivative quad — never let it reach a pixel write
-              at_q <= '0;
+              at_q <= '0; lzdone_q <= 1'b0;
               if ({1'b0, r_q} + 7'd1 >= nf_q) st_q <= flr_q;
               else begin
                 r_q <= r_q + 6'd1;
                 st_q <= S_ROP_R0;
               end
+            end else if (dr_q.fs_late && !lzdone_q) begin
+              // G3a-i: read FS-out record slot 8 (word0 FragDepth,
+              // word1 flags bit0 discard) before any attachment work
+              mp_we_q <= 1'b0;
+              mp_addr_q <= {32'h0, fso_q} +
+                           {26'h0, r_q} * 64'(ASTR) +
+                           64'(APU_SH_FSOUT_BI * 16);
+              mp_data_q <= '0; mp_strb_q <= '0;
+              mp_ret_q <= S_ROP_F8;
+              mp_acked_q <= 1'b0;
+              st_q <= S_MPW;
             end else if (!dr_q.ca_valid[at_q]) begin
               // skip an absent attachment; at 3 the fragment is done
               if (at_q == 2'd3) begin
-                at_q <= '0;
+                at_q <= '0; lzdone_q <= 1'b0;
                 if ({1'b0, r_q} + 7'd1 >= nf_q) st_q <= flr_q;
                 else begin
                   r_q <= r_q + 6'd1;
@@ -2481,6 +2530,97 @@ module g6lc_apu_rast
               mp_acked_q <= 1'b0;
               st_q <= S_MPW;
             end
+          end
+          // ---- G3a-i late-Z: slot-8 flags/FragDepth, then the ----
+          // depth test+write that fs_late deferred from early-Z ----
+          S_ROP_F8: begin
+            if (mp_res_q[32]) begin
+              // discard flag: no colour, no depth — next fragment
+              at_q <= '0; lzdone_q <= 1'b0;
+              if ({1'b0, r_q} + 7'd1 >= nf_q) st_q <= flr_q;
+              else begin
+                r_q <= r_q + 6'd1;
+                st_q <= S_ROP_R0;
+              end
+            end else begin
+              lz_q <= dr_q.fs_fdepth ? mp_res_q[31:0] : fsz_q[r_q];
+              if (dr_q.da_valid &&
+                  (dr_q.depth_test || dr_q.depth_write))
+                st_q <= S_ROP_LRD;
+              else begin
+                lzdone_q <= 1'b1;
+                st_q <= S_ROP_R0;
+              end
+            end
+          end
+          S_ROP_LRD: begin
+            mp_we_q <= 1'b0;
+            mp_addr_q <= {32'h0, dr_q.da.base} +
+                         64'(fr_py) * 64'(dpitch_w) +
+                         64'((32'(fr_px) *
+                              (dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
+                               ? 32'd2 : 32'd4)) & ~64'd7);
+            mp_data_q <= '0; mp_strb_q <= '0;
+            mp_ret_q <= S_ROP_LDI;
+            mp_acked_q <= 1'b0;
+            st_q <= S_MPW;
+          end
+          S_ROP_LDI: begin
+            if (dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)) begin
+              fp_kind_q <= 2'd2; fp_o_q <= 2'd0; fp_mod_q <= 1'b1;
+              fp_a_q <= {16'h0, mp_res_q[16*fr_px[1:0] +: 16]};
+              fp_ret_q <= S_ROP_LDM;
+              st_q <= S_FPS;
+            end else begin
+              dz_q <= mp_res_q[32*fr_px[0] +: 32];
+              st_q <= S_ROP_LC;
+            end
+          end
+          S_ROP_LDM: begin
+            fp_kind_q <= 2'd0; fp_o_q <= 2'd2; fp_mod_q <= 1'b0;
+            fp_a_q <= fp_res_q;
+            fp_b_q <= 32'h38008001;              // *1/65535
+            fp_ret_q <= S_ROP_LC;
+            st_q <= S_FPS;
+          end
+          S_ROP_LC: begin
+            if (dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM))
+              dz_q <= fp_res_q;
+            if (!f_dcmp(dr_q.depth_op, lzc_w,
+                        dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
+                        ? fp_res_q : dz_q)) begin
+              // late-Z fail: neither colour nor depth — next fragment
+              at_q <= '0; lzdone_q <= 1'b0;
+              if ({1'b0, r_q} + 7'd1 >= nf_q) st_q <= flr_q;
+              else begin
+                r_q <= r_q + 6'd1;
+                st_q <= S_ROP_R0;
+              end
+            end else if (dr_q.depth_write) begin
+              lzdone_q <= 1'b1;
+              st_q <= S_ROP_LWR;
+            end else begin
+              lzdone_q <= 1'b1;
+              st_q <= S_ROP_R0;
+            end
+          end
+          S_ROP_LWR: begin
+            mp_we_q <= 1'b1;
+            mp_addr_q <= {32'h0, dr_q.da.base} +
+                         64'(fr_py) * 64'(dpitch_w) +
+                         64'((32'(fr_px) *
+                              (dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
+                               ? 32'd2 : 32'd4)) & ~64'd7);
+            mp_data_q <=
+              dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
+              ? {4{f_f32_u16(lzc_w)}} : {2{lzc_w}};
+            mp_strb_q <=
+              dr_q.da.fmt == 8'(APU_IMG_FMT_D16_UNORM)
+              ? 8'h03 << {fr_px[1:0], 1'b0}
+              : 8'h0F << {fr_px[0], 2'b00};
+            mp_ret_q <= S_ROP_R0;
+            mp_acked_q <= 1'b0;
+            st_q <= S_MPW;
           end
           // dst decode: UNORM byte -> I2F *1/255; sRGB -> LUT16 -> I2F
           // *1/65535 (alpha stays on the linear byte path)
@@ -2632,7 +2772,7 @@ module g6lc_apu_rast
           end
           S_ROP_NX: begin
             if (at_q == 2'd3) begin
-              at_q <= '0;
+              at_q <= '0; lzdone_q <= 1'b0;
               if ({1'b0, r_q} + 7'd1 >= nf_q) st_q <= flr_q;
               else begin
                 r_q <= r_q + 6'd1;
@@ -2722,6 +2862,7 @@ module g6lc_apu_rast
       end
     end
 
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
     // debug probe: which state reaches S_FIN_BAD + the shader code
     // when a VS/FS wave fails (temporary G1c bring-up aid)
@@ -2748,6 +2889,7 @@ module g6lc_apu_rast
       dbg_st_q <= 8'(st_q);
     end
 `endif
+// pragma translate_on
 
     // pragma translate_off
     // F5 wedge hunt invariants:

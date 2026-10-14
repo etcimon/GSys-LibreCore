@@ -93,7 +93,8 @@ provision() {
         "$CORPUS/vs_pc.spv" "$CORPUS/fs_vcol.spv" "$CORPUS/vs_pos3.spv" \
         "$CORPUS/vs_inst.spv" "$CORPUS/vs_tex.spv" "$CORPUS/fs_mip.spv" \
         "$CORPUS/vs_clip.spv" "$CORPUS/vs_uvc.spv" \
-        "$CORPUS/fs_deriv2.spv"
+        "$CORPUS/fs_deriv2.spv" \
+        "$CORPUS/fs_scene8.spv"
     else
       # NoCloud only requires a filesystem labelled CIDATA; on hosts
       # without xorrisofs/genisoimage an ext image serves the same seed
@@ -110,6 +111,7 @@ provision() {
         "$CORPUS/vs_inst.spv" "$CORPUS/vs_tex.spv" "$CORPUS/fs_mip.spv" \
         "$CORPUS/vs_clip.spv" "$CORPUS/vs_uvc.spv" \
         "$CORPUS/fs_deriv2.spv" \
+        "$CORPUS/fs_scene8.spv" \
         "$cidata_src/"
       truncate -s 16M "$GUEST_CACHE/cidata.img"
       mke2fs -q -t ext4 -L CIDATA -d "$cidata_src" \
@@ -146,7 +148,8 @@ if [ -f "$GUEST_CACHE/cidata.img" ] && \
     "$CORPUS/vs_pc.spv" "$CORPUS/fs_vcol.spv" "$CORPUS/vs_pos3.spv" \
     "$CORPUS/vs_inst.spv" "$CORPUS/vs_tex.spv" "$CORPUS/fs_mip.spv" \
     "$CORPUS/vs_clip.spv" "$CORPUS/vs_uvc.spv" \
-    "$CORPUS/fs_deriv2.spv"
+    "$CORPUS/fs_deriv2.spv" \
+        "$CORPUS/fs_scene8.spv"
 fi
 
 need_build=0

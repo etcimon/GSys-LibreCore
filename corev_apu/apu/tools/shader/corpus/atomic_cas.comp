@@ -1,0 +1,20 @@
+#version 460
+// G3a-i atomics: a compare-exchange loop that is order-insensitive —
+// every lane bumps cell 0 once (final value = lane count no matter
+// the arbitration order), and per-lane cells exercise Exchange /
+// Min / And / Xor.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) buffer Src { uint src[]; };
+layout(set = 0, binding = 1) buffer Dst { uint dst[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint a = src[i];
+    uint cur;
+    do {
+        cur = dst[0];
+    } while (atomicCompSwap(dst[0], cur, cur + 1u) != cur);
+    dst[8 + i]  = atomicExchange(dst[8 + i], a);
+    dst[16 + i] = atomicMin(dst[16 + i], src[i + 16]);
+    dst[24 + i] = atomicAnd(dst[24 + i], a | 0xF0F0F0F0u);
+    dst[32 + i] = atomicXor(dst[32 + i], a);
+}

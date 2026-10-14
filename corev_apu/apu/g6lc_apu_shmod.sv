@@ -42,7 +42,11 @@ module g6lc_apu_shmod
   parameter int unsigned ShaderRegs    = 256,
   parameter int unsigned ShaderWords   = 2048,
   parameter int unsigned ShaderMembers = 256,
-  parameter int unsigned ShaderInit    = 128
+  parameter int unsigned ShaderInit    = 128,
+  // G3a-i: function table bound (OpFunction bodies beyond the entry)
+  // and the param-index table bound per function
+  parameter int unsigned MaxFuncs      = 16,
+  parameter int unsigned MaxParams     = 8
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,
@@ -82,6 +86,13 @@ module g6lc_apu_shmod
   output logic [31:0]  blk_data_o,
   input  logic [9:0]   phi_id_i,
   output logic [159:0] phi_data_o,
+  // G3a-i: func row {npar[31:28], pbase[27:16], off[15:0]} keyed by
+  // function id; param row {rows[11:8], rf[7:0]} keyed by the
+  // function's param base + ordinal
+  input  logic [9:0]   func_id_i,
+  output logic [31:0]  func_data_o,
+  input  logic [9:0]   parm_id_i,
+  output logic [15:0]  parm_data_o,
   output logic [127:0] entry_data_o
 );
   if (!Enable) begin : gen_off
@@ -92,6 +103,7 @@ module g6lc_apu_shmod
     assign decor_data_o = '0;  assign var_data_o = '0;
     assign rm_data_o = '0;     assign init_data_o = '0;
     assign blk_data_o = '0;    assign phi_data_o = '0;
+    assign func_data_o = '0;   assign parm_data_o = '0;
     assign entry_data_o = '0;
     logic unused;
     assign unused = clk_i | rst_ni | testmode_i | wr_en_i |
@@ -101,7 +113,7 @@ module g6lc_apu_shmod
                     (|prog_addr_i) | (|type_id_i) | (|const_id_i) |
                     (|memb_id_i) | (|decor_id_i) | (|var_id_i) |
                     (|rm_id_i) | (|init_id_i) | (|blk_id_i) |
-                    (|phi_id_i);
+                    (|phi_id_i) | (|func_id_i) | (|parm_id_i);
   end else begin : gen_on
     localparam int unsigned SW  = $clog2(ShaderSlots);
     localparam int unsigned PW  = $clog2(ShaderSlots * ShaderWords);
@@ -113,6 +125,8 @@ module g6lc_apu_shmod
     localparam int unsigned MDN = 64;   // pending member-decor window
     localparam int unsigned BRN = 48;   // queued branch targets
     localparam int unsigned CFD = 8;    // commit loop-nesting bound (CfDepth)
+    localparam int unsigned PTW = $clog2(MaxFuncs * MaxParams);
+    localparam int unsigned CLN = BRN;  // queued call targets
 
     // ---- table SRAM port signals ---------------------------------------
     logic                  pr_req, pr_we;
@@ -148,6 +162,13 @@ module g6lc_apu_shmod
     logic                  ph_req, ph_we;
     logic [IW+SW-1:0]      ph_addr;
     logic [159:0]          ph_wdata, ph_rdata;
+    // G3a-i: function table (per id) + param RF-index table
+    logic                  fu_req, fu_we;
+    logic [IW+SW-1:0]      fu_addr;
+    logic [31:0]           fu_wdata, fu_rdata;
+    logic                  pt_req, pt_we;
+    logic [SW+PTW-1:0]     pt_addr;
+    logic [15:0]           pt_wdata, pt_rdata;
 
     // ---- FSM state ------------------------------------------------------
     typedef enum logic [4:0] {
@@ -167,7 +188,22 @@ module g6lc_apu_shmod
     logic [15:0] entry_off_q;
     logic [9:0]  glsl_id_q, elem_q;
     logic        entry_seen_q, in_func_q;
-    logic [15:0] esize_q, stride_q, sz_q, voff_q;
+    // G3a-i multi-function scan state: entry function id, running
+    // function {id, offset, param count, param-table base}, fn_head
+    // marks the OpFunctionParameter window (before the first label),
+    // is_par marks an OpFunctionParameter ride through S_RES
+    logic [15:0] ent_fn_q, fn_at_q, fn_id_q;
+    logic [4:0]  fn_cnt_q, fn_par_q;
+    logic [PTW-1:0] fn_pb_q;
+    logic        fn_head_q, is_par_q;
+    // G3a-i: FS late-Z flags for the entry record
+    logic        fs_late_q, fs_fdepth_q;
+    // queued OpFunctionCall targets — existence-checked at S_BRC
+    // (a call's target may be defined later in the module)
+    logic [15:0] cl_at_q [CLN];
+    logic [9:0]  cl_id_q [CLN];
+    logic [5:0]  cl_n_q;
+    logic [15:0] esize_q, stride_q, sz_q, voff_q, nat_off_q;
     logic [511:0] crow_q;
     logic [4:0]   cn_q, cn_i_q;
     // member-decor window
@@ -199,6 +235,12 @@ module g6lc_apu_shmod
     logic [9:0]  dw_rm_id_q, dw_bk_id_q, dw_ph_id_q;
     logic [31:0] dw_rm_w_q, dw_bk_w_q;
     logic [159:0] dw_ph_w_q;
+    // G3a-i: deferred function-row and param-row writes
+    logic        dw_fn_q, dw_pt_q;
+    logic [9:0]  dw_fn_id_q;
+    logic [31:0] dw_fn_w_q;
+    logic [PTW-1:0] dw_pt_id_q;
+    logic [15:0]    dw_pt_w_q;
     // fault
     logic [7:0]  fl_code_q;
     logic [15:0] fl_opc_q, fl_word_q;
@@ -240,13 +282,25 @@ module g6lc_apu_shmod
       mdv_bi  = md_found_s ? md_bi_q[md_hit_s]  : 7'h7F;
     end
 
+    // G3a-i: members without an Offset decoration take the natural
+    // packed layout — a running total of the preceding members' sizes
+    // (carry/borrow structs carry no decorations).
+    wire [15:0] moff_w = md_found_s ? mdv_off : nat_off_q;
+
     // ---- opcode predicates -------------------------------------------
     function automatic logic is_accepted(input logic [15:0] o);
       unique case (o)
-        0,3,4,5,6,7,8,11,12,14,15,16,17,19,20,21,22,23,24,25,26,27,28,29,
-        30,32,33,
-        41,42,43,44,46,48,49,50,51,52,54,56,59,61,62,65,66,68,71,72,
-        79,80,81,82,84,
+        // G3a-i adds: 1 Undef, 55 FunctionParameter, 57 FunctionCall,
+        // 77/78 dynamic vector ops, 83 CopyObject, 140/141 FRem/FMod,
+        // 149-152 carry/borrow/extended mul, 154-157 Any/All/IsNan/
+        // IsInf, the FUnord* compares (181..191 odd), 201-205
+        // bitfield/reverse/count, 227-242 atomics, 252 Kill,
+        // 254 ReturnValue, 4416 TerminateInvocation, 5380 Demote,
+        // 5381 IsHelper (all fragment-only where S_OP says so)
+        0,1,3,4,5,6,7,8,10,11,12,14,15,16,17,19,20,21,22,23,24,25,26,27,
+        28,29,30,32,33,
+        41,42,43,44,46,48,49,50,51,52,54,55,56,57,59,61,62,65,66,68,71,72,
+        77,78,79,80,81,82,83,84,
         // §12.3 C/5b image ops — OpImageSampleImplicitLod (87, G2b)
         // is fragment-only; the projected/depth-ref implicit forms
         // (89..93) stay refused through the default arm.  The G2b
@@ -254,26 +308,35 @@ module g6lc_apu_shmod
         // both are gated on the execution model in S_OP.
         86,87,88,95,98,99,100,103,104,106,
         109,110,111,112,124,126,127,128,129,130,131,132,
-        133,134,135,136,137,138,139,142,143,144,145,146,147,148,
+        133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,
+        149,150,151,152,154,155,156,157,
         164,165,166,167,168,169,
-        170,171,172,173,174,175,176,177,178,179,180,182,183,184,186,
-        188,190,194,195,196,197,198,199,200,
+        170,171,172,173,174,175,176,177,178,179,180,181,182,183,184,185,
+        186,187,188,189,190,191,194,195,196,197,198,199,200,
+        201,202,203,204,205,
         207,208,209,210,211,212,213,214,215,
-        224,225,245,246,247,248,249,250,251,253,255:
+        224,225,227,228,229,230,232,233,234,235,236,237,238,239,240,241,
+        242,245,246,247,248,249,250,251,252,253,254,255,
+        16'd4416, 16'd5380, 16'd5381:
           is_accepted = 1'b1;
         default: is_accepted = 1'b0;
       endcase
     endfunction
     function automatic logic has_result(input logic [15:0] o);
       unique case (o)
-        61,65,66,68,79,80,81,82,84,
+        1,                                    // OpUndef
+        61,65,66,68,77,78,79,80,81,82,83,84,
         86,87,88,95,98,100,103,104,106,
         109,110,111,112,124,126,127,128,129,
-        130,131,132,133,134,135,136,137,138,139,142,143,144,145,146,
-        147,148,164,165,166,
-        167,168,169,170,171,172,173,174,175,176,177,178,179,180,182,
-        183,184,186,188,190,194,195,196,197,198,199,200,
-        207,208,209,210,211,212,213,214,215,245:
+        130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,
+        146,147,148,149,150,151,152,154,155,156,157,164,165,166,
+        167,168,169,170,171,172,173,174,175,176,177,178,179,180,181,182,
+        183,184,185,186,187,188,189,190,191,194,195,196,197,198,199,200,
+        201,202,203,204,205,
+        207,208,209,210,211,212,213,214,215,245,
+        // G3a-i atomics (227 load, 229 xchg, 230 cmpxchg, 232..242 RMW;
+        // 228 store has no result id)
+        227,229,230,232,233,234,235,236,237,238,239,240,241,242:
           has_result = 1'b1;
         default: has_result = 1'b0;
       endcase
@@ -292,8 +355,13 @@ module g6lc_apu_shmod
     endfunction
     function automatic logic is_ext450(input logic [15:0] n);
       unique case (n)
-        1,2,3,4,5,6,7,8,9,10,31,32,37,38,39,40,41,42,43,44,45,46,48,
-        49,50,66,67,68,69: is_ext450 = 1'b1;
+        1,2,3,4,5,6,7,8,9,10,
+        // G3a-i: determinant/inverse, modf/frexp/ldexp, the pack and
+        // unpack family, faceforward/reflect/refract, the integer
+        // find-msb/lsb ops, and the N-prefixed min/max/clamp
+        31,32,33,34,35,36,37,38,39,40,41,42,43,44,45,46,48,
+        49,50,51,52,53,54,55,56,57,58,60,61,62,63,64,
+        66,67,68,69,70,71,72,73,74,75,79,80,81: is_ext450 = 1'b1;
         default: is_ext450 = 1'b0;
       endcase
     endfunction
@@ -322,7 +390,9 @@ module g6lc_apu_shmod
     // checked per variable in S_VRB (compute keeps 24..29 only)
     function automatic logic is_bi_ok(input logic [15:0] b);
       unique case (b)
-        0,1,3,4,15,17,24,25,26,27,28,29,42,43: is_bi_ok = 1'b1;
+        // G3a-i: 22 = FragDepth (FS Output → record slot 8 word 0);
+        // 23 = HelperInvocation (FS Input → f_bi hlp|dead per lane)
+        0,1,3,4,15,17,22,23,24,25,26,27,28,29,42,43: is_bi_ok = 1'b1;
         default: is_bi_ok = 1'b0;
       endcase
     endfunction
@@ -378,6 +448,15 @@ module g6lc_apu_shmod
         if (k < (wc_q - 3) >> 1 && tg_is_lc(ops_q[3+2*k][9:0]))
           mf = 1'b1;
       return mf;
+    endfunction
+    // register rows a result of the type row in hand occupies: matrix
+    // → one row per column, otherwise ceil(size/16) (clamped ≥1 so a
+    // degenerate VOID/0-size type still owns a slot)
+    function automatic logic [15:0] res_rows();
+      logic [15:0] r;
+      r = (ty_kind == APU_SH_TK_MAT) ? 16'(ty_cols)
+                                     : 16'((32'(ty_size) + 15) >> 4);
+      return (r == 0) ? 16'd1 : r;
     endfunction
     // OpPhi table row: word0 = pair count, word(1+k) = {parent, value}
     function automatic logic [159:0] phi_pack();
@@ -445,6 +524,8 @@ module g6lc_apu_shmod
       in_req = 1'b0; in_we = 1'b0; in_addr = '0; in_wdata = '0;
       en_req = 1'b0; en_we = 1'b0; en_addr = '0; en_wdata = '0;
       ph_req = 1'b0; ph_we = 1'b0; ph_addr = '0; ph_wdata = '0;
+      fu_req = 1'b0; fu_we = 1'b0; fu_addr = '0; fu_wdata = '0;
+      pt_req = 1'b0; pt_we = 1'b0; pt_addr = '0; pt_wdata = '0;
       if (!busy_q) begin
         if (wr_en_i) begin
           pr_req = 1'b1; pr_we = 1'b1;
@@ -464,6 +545,8 @@ module g6lc_apu_shmod
         in_req = 1'b1; in_addr = {rd_slot_i, init_id_i[INW-1:0]};
         en_req = 1'b1; en_addr = rd_slot_i;
         ph_req = 1'b1; ph_addr = {rd_slot_i, phi_id_i};
+        fu_req = 1'b1; fu_addr = {rd_slot_i, func_id_i};
+        pt_req = 1'b1; pt_addr = {rd_slot_i, parm_id_i[PTW-1:0]};
       end else begin
         if (dw_rm_q) begin
           rm_req = 1'b1; rm_we = 1'b1;
@@ -476,6 +559,14 @@ module g6lc_apu_shmod
         if (dw_ph_q) begin
           ph_req = 1'b1; ph_we = 1'b1;
           ph_addr = {slot_q, dw_ph_id_q}; ph_wdata = dw_ph_w_q;
+        end
+        if (dw_fn_q) begin
+          fu_req = 1'b1; fu_we = 1'b1;
+          fu_addr = {slot_q, dw_fn_id_q}; fu_wdata = dw_fn_w_q;
+        end
+        if (dw_pt_q) begin
+          pt_req = 1'b1; pt_we = 1'b1;
+          pt_addr = {slot_q, dw_pt_id_q}; pt_wdata = dw_pt_w_q;
         end
         unique case (st_q)
           S_CLR: begin
@@ -494,6 +585,11 @@ module g6lc_apu_shmod
               in_addr = {slot_q, clr_q[INW-1:0]};
             end
             ph_req = 1'b1; ph_we = 1'b1; ph_addr = {slot_q, clr_q};
+            fu_req = 1'b1; fu_we = 1'b1; fu_addr = {slot_q, clr_q};
+            if (clr_q < 10'(MaxFuncs * MaxParams)) begin
+              pt_req = 1'b1; pt_we = 1'b1;
+              pt_addr = {slot_q, clr_q[PTW-1:0]};
+            end
           end
           S_HDR: begin
             pr_req = (i_q < 5); pr_addr = {slot_q, PW'(i_q)};
@@ -635,7 +731,7 @@ module g6lc_apu_shmod
                   mb_req = 1'b1; mb_we = 1'b1;
                   mb_addr = {slot_q, MW'(n_memb_q + (ph_q >> 1))};
                   mb_wdata = {14'h0, ops_q[1 + (ph_q >> 1)][9:0],
-                              mdv_fl, mdv_ms, mdv_off};
+                              mdv_fl, mdv_ms, moff_w};
                 end
                 if (ph_q == 6'(2 * (wc_q - 2))) begin
                   ty_req = 1'b1; ty_we = 1'b1;
@@ -650,9 +746,14 @@ module g6lc_apu_shmod
                 end
               end
               33: begin
-                if (ph_q == 0) begin
-                  ty_req = 1'b1; ty_addr = {slot_q, ops_q[1][9:0]};
-                end else if (ph_q == 2) begin
+                // G3a-i: OpTypeFunction %id %ret %param... — every
+                // operand is a type id; the row is TK_FUNC and the
+                // operand types are checked declared (kind != NONE),
+                // not restricted to a void return.
+                if (!ph_q[0] && (ph_q >> 1) < 6'(wc_q - 2)) begin
+                  ty_req = 1'b1;
+                  ty_addr = {slot_q, ops_q[1 + (ph_q >> 1)][9:0]};
+                end else if (ph_q == 6'(2 * (wc_q - 2))) begin
                   ty_req = 1'b1; ty_we = 1'b1;
                   ty_addr = {slot_q, ops_q[0][9:0]};
                   ty_wdata = mk_type(APU_SH_TK_FUNC, 0, 0, 0, 0, 0,
@@ -750,8 +851,13 @@ module g6lc_apu_shmod
             endcase
           end
           S_BRC: begin
-            bk_req = (ph_q < 6'(br_n_q));
-            bk_addr = {slot_q, br_tg_q[ph_q[5:0]]};
+            if (ph_q < 6'(br_n_q)) begin
+              bk_req = 1'b1;
+              bk_addr = {slot_q, br_tg_q[ph_q[5:0]]};
+            end else if (ph_q < 6'(br_n_q) + 6'(cl_n_q)) begin
+              fu_req = 1'b1;
+              fu_addr = {slot_q, cl_id_q[ph_q - 6'(br_n_q)]};
+            end
           end
           S_RES: begin
             // read the result type row: matrix results occupy one regmap
@@ -762,7 +868,10 @@ module g6lc_apu_shmod
             en_req = 1'b1; en_we = 1'b1; en_addr = slot_q;
             // graphics stages carry lx=ly=lz=1 plus the execution
             // model and Location masks in the record's spare halves
-            en_wdata = {em_q, 12'h0, slab_q,
+            // word3 pad carries the G3a-i FS flags: [27] fs_late
+            // (FragDepth write or kill/demote → rast runs late-Z),
+            // [26] fs_fdepth (builtin 22 declared → slot-8 word0 live)
+            en_wdata = {em_q, fs_late_q, fs_fdepth_q, 10'h0, slab_q,
                         out_mask_q, in_mask_q, scratch_q,
                         8'(n_init_q), ent_lz, ent_ly, ent_lx,
                         n_regs_q, entry_off_q};
@@ -812,6 +921,14 @@ module g6lc_apu_shmod
               .NumPorts(1)) i_phi (
       .clk_i, .rst_ni, .req_i(ph_req), .we_i(ph_we), .addr_i(ph_addr),
       .wdata_i(ph_wdata), .be_i('1), .rdata_o(ph_rdata));
+    tc_sram #(.NumWords(ShaderSlots*ShaderIds), .DataWidth(32),
+              .NumPorts(1)) i_func (
+      .clk_i, .rst_ni, .req_i(fu_req), .we_i(fu_we), .addr_i(fu_addr),
+      .wdata_i(fu_wdata), .be_i(4'hF), .rdata_o(fu_rdata));
+    tc_sram #(.NumWords(ShaderSlots*MaxFuncs*MaxParams),
+              .DataWidth(16), .NumPorts(1)) i_parm (
+      .clk_i, .rst_ni, .req_i(pt_req), .we_i(pt_we), .addr_i(pt_addr),
+      .wdata_i(pt_wdata), .be_i(2'h3), .rdata_o(pt_rdata));
     tc_sram #(.NumWords(ShaderSlots), .DataWidth(128), .NumPorts(1))
       i_entry (
       .clk_i, .rst_ni, .req_i(en_req), .we_i(en_we), .addr_i(en_addr),
@@ -827,6 +944,8 @@ module g6lc_apu_shmod
     assign init_data_o  = in_rdata;
     assign blk_data_o   = bk_rdata;
     assign phi_data_o   = ph_rdata;
+    assign func_data_o  = fu_rdata;
+    assign parm_data_o  = pt_rdata;
     assign entry_data_o = en_rdata;
 
     integer t;
@@ -842,10 +961,19 @@ module g6lc_apu_shmod
         lz_q <= '0; entry_off_q <= '0; glsl_id_q <= '0; elem_q <= '0;
         entry_seen_q <= 1'b0; in_func_q <= 1'b0;
         esize_q <= '0; stride_q <= '0; sz_q <= '0; voff_q <= '0;
+        nat_off_q <= '0;
         crow_q <= '0; cn_q <= '0; cn_i_q <= '0;
         dw_rm_q <= 1'b0; dw_bk_q <= 1'b0; dw_ph_q <= 1'b0;
         dw_rm_id_q <= '0; dw_bk_id_q <= '0; dw_ph_id_q <= '0;
         dw_rm_w_q <= '0; dw_bk_w_q <= '0; dw_ph_w_q <= '0;
+        dw_fn_q <= 1'b0; dw_pt_q <= 1'b0;
+        dw_fn_id_q <= '0; dw_fn_w_q <= '0;
+        dw_pt_id_q <= '0; dw_pt_w_q <= '0;
+        ent_fn_q <= '0; fn_at_q <= '0; fn_id_q <= '0;
+        fn_cnt_q <= '0; fn_par_q <= '0; fn_pb_q <= '0;
+        fn_head_q <= 1'b0; is_par_q <= 1'b0;
+        fs_late_q <= 1'b0; fs_fdepth_q <= 1'b0;
+        cl_n_q <= '0;
         md_n_q <= '0; br_n_q <= '0; mp_q <= 1'b0; lp_n_q <= '0;
         for (t = 0; t < OPB; t++) ops_q[t] <= '0;
         for (t = 0; t < MDN; t++) begin
@@ -860,6 +988,7 @@ module g6lc_apu_shmod
       end else begin
         done_o <= 1'b0;
         dw_rm_q <= 1'b0; dw_bk_q <= 1'b0; dw_ph_q <= 1'b0;
+        dw_fn_q <= 1'b0; dw_pt_q <= 1'b0;
         if (st_q == S_MDC) begin
           if (md_found_d) begin
             if (ops_q[2] == 35) md_off_q[md_hit_d] <= ops_q[3][15:0];
@@ -903,6 +1032,10 @@ module g6lc_apu_shmod
               mp_q <= 1'b0; lp_n_q <= '0;
               sz_q <= '0; cn_q <= '0;
               em_q <= APU_SH_EM_GLCOMPUTE;
+              ent_fn_q <= '0; fn_cnt_q <= '0; fn_par_q <= '0;
+              fn_pb_q <= '0; fn_head_q <= 1'b0; is_par_q <= 1'b0;
+              fs_late_q <= 1'b0; fs_fdepth_q <= 1'b0;
+              cl_n_q <= '0;
               in_mask_q <= '0; out_mask_q <= '0; sbi_q <= 1'b0;
               live_q[commit_pl_i.slot] <= 1'b0;
               if (commit_pl_i.nwords < 5) begin
@@ -993,9 +1126,10 @@ module g6lc_apu_shmod
                 // §12.3 C/5b: Capability Shader (1), ImageQuery (50)
                 // and G2b DerivativeControl (51 — enables the Fine/
                 // Coarse derivative ops this module accepts for
-                // fragment execution models)
+                // fragment execution models); G3a-i adds
+                // DemoteToHelperInvocation (5379)
                 if (ops_q[0] != 32'd1 && ops_q[0] != 32'd50 &&
-                    ops_q[0] != 32'd51) begin
+                    ops_q[0] != 32'd51 && ops_q[0] != 32'd5379) begin
                   fl_code_q <= APU_SH_FAULT_CAP; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else begin
@@ -1026,12 +1160,18 @@ module g6lc_apu_shmod
                 end else begin
                   entry_seen_q <= 1'b1;
                   em_q <= ops_q[0][3:0];
+                  ent_fn_q <= ops_q[1][15:0];
                   at_q <= at_q + wc_q; st_q <= S_IW;
                 end
               end
               16: begin
-                if (ops_q[1] == 7) begin
-                  // OriginUpperLeft (fragment) — accepted, ignored
+                // OriginUpperLeft (7, fragment) — accepted, ignored;
+                // G3a-i depth modes DepthReplacing(12)/DepthGreater(14)/
+                // DepthLess(15)/DepthUnchanged(16) are advisory here:
+                // fs_late already forces the late path, so accept them
+                // as no-ops
+                if (ops_q[1] == 7 || ops_q[1] == 12 || ops_q[1] == 14 ||
+                    ops_q[1] == 15 || ops_q[1] == 16) begin
                   at_q <= at_q + wc_q; st_q <= S_IW;
                 end else if (ops_q[1] != 17) begin
                   fl_code_q <= APU_SH_FAULT_EXECMODE;
@@ -1173,6 +1313,7 @@ module g6lc_apu_shmod
                 end else begin
                   dw_bk_q <= 1'b1; dw_bk_id_q <= ops_q[0][9:0];
                   dw_bk_w_q <= {16'h0, 1'b1, at_q[14:0]};
+                  fn_head_q <= 1'b0;   // param window closed
                   // reaching a loop merge label closes the innermost
                   // open loop (commit-time nesting depth tracking)
                   if (lp_n_q != 0 &&
@@ -1244,17 +1385,100 @@ module g6lc_apu_shmod
                 fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
               end
               54: begin
+                // G3a-i: multiple OpFunction bodies — each occupies a
+                // function-table row {npar, pbase, off}; entry_off is
+                // the row whose id the OpEntryPoint named
                 if (in_func_q) begin
                   fl_code_q <= APU_SH_FAULT_WORDS; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else if (fn_cnt_q >= 5'(MaxFuncs)) begin
+                  fl_code_q <= APU_SH_FAULT_FUNC; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else begin
-                  in_func_q <= 1'b1; entry_off_q <= at_q;
+                  in_func_q <= 1'b1; fn_head_q <= 1'b1;
+                  fn_par_q <= '0;
+                  fn_at_q  <= at_q; fn_id_q <= ops_q[1][15:0];
+                  fn_pb_q  <= PTW'(fn_cnt_q) << $clog2(MaxParams);
+                  fn_cnt_q <= fn_cnt_q + 5'd1;
+                  if (ops_q[1][15:0] == ent_fn_q)
+                    entry_off_q <= at_q;
                   at_q <= at_q + wc_q; st_q <= S_IW;
                 end
               end
+              55: begin
+                // OpFunctionParameter — only inside the function head
+                // (before its first label); the result register rides
+                // S_RES and the param table records its RF row so the
+                // wave can copy arguments in
+                if (!in_func_q || !fn_head_q ||
+                    fn_par_q >= 5'(MaxParams)) begin
+                  fl_code_q <= APU_SH_FAULT_FUNC; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else if (!id_ok0 || !id_ok1) begin
+                  fl_code_q <= APU_SH_FAULT_BOUND; fl_word_q <= at_q;
+                  fail_q <= 1'b1; st_q <= S_DONE;
+                end else begin
+                  is_par_q <= 1'b1;
+                  ph_q <= '0; st_q <= S_RES;
+                end
+              end
               56: begin
-                in_func_q <= 1'b0;
-                at_q <= at_q + wc_q; st_q <= S_IW;
+                // OpFunctionEnd — publishes the function row
+                if (!in_func_q) begin
+                  fl_code_q <= APU_SH_FAULT_WORDS; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else begin
+                  in_func_q <= 1'b0;
+                  dw_fn_q <= 1'b1; dw_fn_id_q <= fn_id_q[9:0];
+                  dw_fn_w_q <= {fn_par_q[3:0], 12'(fn_pb_q),
+                                fn_at_q[15:0]};
+                  at_q <= at_q + wc_q; st_q <= S_IW;
+                end
+              end
+              57: begin
+                // OpFunctionCall — result + target id; the target's
+                // function-table row is existence-checked at S_BRC
+                // (forward definitions are legal)
+                if (!in_func_q) begin
+                  fl_code_q <= APU_SH_FAULT_OPCODE; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else if (cl_n_q >= 6'(CLN)) begin
+                  fl_code_q <= APU_SH_FAULT_FUNC; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else if (!id_ok1 || ops_q[2] >= 32'(ShaderIds)) begin
+                  fl_code_q <= APU_SH_FAULT_BOUND; fl_word_q <= at_q;
+                  fail_q <= 1'b1; st_q <= S_DONE;
+                end else begin
+                  cl_at_q[cl_n_q] <= at_q;
+                  cl_id_q[cl_n_q] <= ops_q[2][9:0];
+                  cl_n_q <= cl_n_q + 1;
+                  ph_q <= '0; st_q <= S_RES;
+                end
+              end
+              254: begin
+                if (!in_func_q) begin
+                  fl_code_q <= APU_SH_FAULT_OPCODE; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else begin
+                  at_q <= at_q + wc_q; st_q <= S_IW;
+                end
+              end
+              // G3a-i: kill/demote family — fragment-only; arms fs_late
+              252, 4416, 5380, 5381: begin
+                if (em_q != APU_SH_EM_FRAGMENT) begin
+                  fl_code_q <= APU_SH_FAULT_OPCODE; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end else if (opc_q == 16'd5381 && !id_ok1) begin
+                  fl_code_q <= APU_SH_FAULT_BOUND; fl_word_q <= at_q;
+                  fail_q <= 1'b1; st_q <= S_DONE;
+                end else begin
+                  if (opc_q != 16'd5381) fs_late_q <= 1'b1;
+                  if (opc_q == 16'd5381) begin
+                    ph_q <= '0; st_q <= S_RES;
+                  end else begin
+                    at_q <= at_q + wc_q; st_q <= S_IW;
+                  end
+                end
               end
               59: begin
                 if (wc_q > 4) begin
@@ -1533,8 +1757,9 @@ module g6lc_apu_shmod
                   end else begin
                     if ((ph_q >> 1) == 0)
                       sbi_q <= (mdv_bi != 7'h7F);
-                    if (mdv_off + ty_size > sz_q)
-                      sz_q <= mdv_off + ty_size;
+                    if (moff_w + ty_size > sz_q)
+                      sz_q <= moff_w + ty_size;
+                    nat_off_q <= moff_w + ty_size;
                     ph_q <= ph_q + 1;
                   end
                 end else if (ph_q == 6'(2 * (wc_q - 2)) + 1) begin
@@ -1546,7 +1771,7 @@ module g6lc_apu_shmod
                   // ph0: start the struct-size max-accumulation clean —
                   // sz_q may still hold a preceding OpTypeArray length.
                   if (ph_q == 0) begin
-                    sz_q <= '0; sbi_q <= 1'b0;
+                    sz_q <= '0; sbi_q <= 1'b0; nat_off_q <= '0;
                   end
                   ph_q <= ph_q + 1;
                 end
@@ -1577,25 +1802,22 @@ module g6lc_apu_shmod
                 endcase
               end
               33: begin
-                unique case (ph_q)
-                  0: begin
-                    if (wc_q != 3 || ops_q[1] >= 32'(ShaderIds)) begin
-                      fl_code_q <= APU_SH_FAULT_TYPE;
-                      fl_opc_q <= opc_q; fl_word_q <= at_q;
-                      fail_q <= 1'b1; st_q <= S_DONE;
-                    end else ph_q <= 1;
-                  end
-                  1: begin
-                    if (ty_kind != APU_SH_TK_VOID) begin
-                      fl_code_q <= APU_SH_FAULT_TYPE;
-                      fl_opc_q <= opc_q; fl_word_q <= at_q;
-                      fail_q <= 1'b1; st_q <= S_DONE;
-                    end else ph_q <= 2;
-                  end
-                  default: begin
-                    at_q <= at_q + wc_q; st_q <= S_IW;
-                  end
-                endcase
+                // G3a-i: OpTypeFunction %id %ret %param... — two
+                // phases per operand (even reads the type row, odd
+                // checks bound + declared); operands live at
+                // ops_q[1..wc-2].
+                if (ph_q[0] && (ph_q >> 1) < 6'(wc_q - 2)) begin
+                  if (ops_q[1 + (ph_q >> 1)] >= 32'(ShaderIds) ||
+                      ty_kind == APU_SH_TK_NONE) begin
+                    fl_code_q <= APU_SH_FAULT_FWDREF;
+                    fl_opc_q <= opc_q; fl_word_q <= at_q;
+                    fail_q <= 1'b1; st_q <= S_DONE;
+                  end else ph_q <= ph_q + 1;
+                end else if (ph_q == 6'(2 * (wc_q - 2)) + 1) begin
+                  at_q <= at_q + wc_q; st_q <= S_IW;
+                end else begin
+                  ph_q <= ph_q + 1;
+                end
               end
               default: begin
                 at_q <= at_q + wc_q; st_q <= S_IW;
@@ -1835,12 +2057,14 @@ module g6lc_apu_shmod
                           end
                         end
                         // Fragment Input: FragCoord -> slot 0;
-                        // FrontFacing keeps f_bi; Location l -> 16*(1+l)
+                        // FrontFacing/HelperInvocation keep f_bi;
+                        // Location l -> 16*(1+l)
                         {1'b1, APU_SH_SC_INPUT}: begin
                           if (vrb_has_bi) begin
                             if (vrb_bi == APU_SH_BI_FRAGCOORD)
                               vfl_q <= APU_SH_VF_REC;
-                            else if (vrb_bi != APU_SH_BI_FRONTFACING) begin
+                            else if (vrb_bi != APU_SH_BI_FRONTFACING &&
+                                     vrb_bi != APU_SH_BI_HELPER) begin
                               fl_code_q <= APU_SH_FAULT_VAR;
                               fl_opc_q <= opc_q; fl_word_q <= at_q;
                               fail_q <= 1'b1; st_q <= S_DONE;
@@ -1855,11 +2079,23 @@ module g6lc_apu_shmod
                             in_mask_q[vrb_loc[2:0]] <= 1'b1;
                           end
                         end
-                        // Fragment Output: Location l -> 16*l; no
-                        // builtins
+                        // Fragment Output: Location l -> 16*l;
+                        // G3a-i: builtin 22 (FragDepth) -> slot-8
+                        // word0 of the record and arms the FS late-Z
+                        // flags; other builtins still rejected
                         default: begin
-                          if (vrb_has_bi || !vrb_has_loc ||
-                              vrb_loc > 7) begin
+                          if (vrb_has_bi) begin
+                            if (vrb_bi == APU_SH_BI_FRAGDEPTH) begin
+                              voff_q <= 16'(APU_SH_FSOUT_BI * 16);
+                              vfl_q  <= APU_SH_VF_REC;
+                              fs_fdepth_q <= 1'b1;
+                              fs_late_q   <= 1'b1;
+                            end else begin
+                              fl_code_q <= APU_SH_FAULT_VAR;
+                              fl_opc_q <= opc_q; fl_word_q <= at_q;
+                              fail_q <= 1'b1; st_q <= S_DONE;
+                            end
+                          end else if (!vrb_has_loc || vrb_loc > 7) begin
                             fl_code_q <= APU_SH_FAULT_VAR;
                             fl_opc_q <= opc_q; fl_word_q <= at_q;
                             fail_q <= 1'b1; st_q <= S_DONE;
@@ -1894,19 +2130,34 @@ module g6lc_apu_shmod
           end
           // ---- result-id register allocation --------------------------
           // one extra state so the result type row is in hand: matrix
-          // results reserve one regmap slot per column.
+          // results reserve one regmap slot per column, struct results
+          // ceil(size/16) rows (G3a-i generalized the row count to
+          // cover call/parameter struct values)
           S_RES: begin
             if (ph_q == 0) begin
               ph_q <= 1;
-            end else if (n_regs_q + ((ty_kind == APU_SH_TK_MAT) ?
-                            16'(ty_cols) : 16'd1) > 16'(ShaderRegs)) begin
-              fl_code_q <= APU_SH_FAULT_REGS; fl_word_q <= at_q;
+            end else if (opc_q == 16'd57 &&
+                         ty_kind == APU_SH_TK_VOID) begin
+              // void OpFunctionCall — no result register
+              at_q <= at_q + wc_q; st_q <= S_IW;
+            end else if (n_regs_q + res_rows() > 16'(ShaderRegs)) begin
+              fl_code_q <= is_par_q ? APU_SH_FAULT_FUNC
+                                    : APU_SH_FAULT_REGS;
+              fl_word_q <= at_q;
               fail_q <= 1'b1; st_q <= S_DONE;
             end else begin
               dw_rm_q <= 1'b1; dw_rm_id_q <= ops_q[1][9:0];
               dw_rm_w_q <= {2'b00, 4'h0, ops_q[0][9:0], n_regs_q};
-              n_regs_q <= n_regs_q + ((ty_kind == APU_SH_TK_MAT) ?
-                                      16'(ty_cols) : 16'd1);
+              if (is_par_q) begin
+                // param-table row: {value rows, first RF index} — the
+                // wave copies the call args into these registers
+                dw_pt_q <= 1'b1;
+                dw_pt_id_q <= fn_pb_q + PTW'(fn_par_q);
+                dw_pt_w_q <= {4'h0, 4'(res_rows()), 8'(n_regs_q)};
+                fn_par_q <= fn_par_q + 5'd1;
+                is_par_q <= 1'b0;
+              end
+              n_regs_q <= n_regs_q + res_rows();
               if (opc_q == 245) begin
                 dw_ph_q <= 1'b1; dw_ph_id_q <= ops_q[1][9:0];
                 dw_ph_w_q <= phi_pack();
@@ -1914,19 +2165,29 @@ module g6lc_apu_shmod
               at_q <= at_q + wc_q; st_q <= S_IW;
             end
           end
-          // ---- queued branch-target existence check ------------------
+          // ---- queued branch-target + call-target existence check ----
           // (targets may be backward edges to a loop continue block, so
-          // only the label-existence bit is verified)
+          // only the label-existence bit is verified; a call target is
+          // verified by a nonzero function-table row — undefined calls
+          // fault APU_SH_FAULT_FUNC)
           S_BRC: begin
             if (ph_q != 0) begin
-              if (!bk_rdata[15]) begin
-                fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= 249;
-                fl_word_q <= br_at_q[ph_q - 1];
-                fail_q <= 1'b1; st_q <= S_DONE;
+              if (ph_q - 1 < 6'(br_n_q)) begin
+                if (!bk_rdata[15]) begin
+                  fl_code_q <= APU_SH_FAULT_BRANCH; fl_opc_q <= 249;
+                  fl_word_q <= br_at_q[ph_q - 1];
+                  fail_q <= 1'b1; st_q <= S_DONE;
+                end
+              end else begin
+                if (fu_rdata[15:0] == 16'h0) begin
+                  fl_code_q <= APU_SH_FAULT_FUNC; fl_opc_q <= 57;
+                  fl_word_q <= cl_at_q[ph_q - 1 - 6'(br_n_q)];
+                  fail_q <= 1'b1; st_q <= S_DONE;
+                end
               end
             end
             if (st_q != S_DONE) begin
-              if (ph_q == 6'(br_n_q)) st_q <= S_ENT;
+              if (ph_q == 6'(br_n_q) + 6'(cl_n_q)) st_q <= S_ENT;
               else ph_q <= ph_q + 1;
             end
           end
@@ -1948,6 +2209,8 @@ module g6lc_apu_shmod
             done_pl_o.entry.em <= em_q;
             done_pl_o.entry.in_mask <= in_mask_q;
             done_pl_o.entry.out_mask <= out_mask_q;
+            done_pl_o.entry.fs_late <= fs_late_q;
+            done_pl_o.entry.fs_fdepth <= fs_fdepth_q;
             done_pl_o.n_regs <= n_regs_q;
             done_pl_o.n_vars <= n_init_q;
             st_q <= S_IDLE;
@@ -1960,6 +2223,7 @@ module g6lc_apu_shmod
     logic unused_tm;
     assign unused_tm = testmode_i | (|live_q) | (|w0_q) |
                        (|mb_rdata) | (|in_rdata) | (|va_rdata) |
+                       (|fu_rdata) | (|pt_rdata) |
                        (|ty_storage);
   end
 endmodule
@@ -1975,7 +2239,11 @@ module g6lc_apu_shmod_fixture
   parameter int unsigned ShaderRegs    = 256,
   parameter int unsigned ShaderWords   = 2048,
   parameter int unsigned ShaderMembers = 256,
-  parameter int unsigned ShaderInit    = 128
+  parameter int unsigned ShaderInit    = 128,
+  // G3a-i: function table bound (OpFunction bodies beyond the entry)
+  // and the param-index table bound per function
+  parameter int unsigned MaxFuncs      = 16,
+  parameter int unsigned MaxParams     = 8
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,
@@ -2012,6 +2280,13 @@ module g6lc_apu_shmod_fixture
   output logic [31:0]  blk_data_o,
   input  logic [9:0]   phi_id_i,
   output logic [159:0] phi_data_o,
+  // G3a-i: func row {npar[31:28], pbase[27:16], off[15:0]} keyed by
+  // function id; param row {rows[11:8], rf[7:0]} keyed by the
+  // function's param base + ordinal
+  input  logic [9:0]   func_id_i,
+  output logic [31:0]  func_data_o,
+  input  logic [9:0]   parm_id_i,
+  output logic [15:0]  parm_data_o,
   output logic [127:0] entry_data_o
 );
   g6lc_apu_shmod #(.Enable(Enable), .ShaderSlots(ShaderSlots),

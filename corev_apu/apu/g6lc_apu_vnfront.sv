@@ -549,6 +549,8 @@ module g6lc_apu_vnfront
     logic [1:0]          gp_refs_q;   // ShaderCore refs held
     logic [2:0]          gp_vs_q, gp_fs_q;
     logic [7:0]          gp_fsm_q;    // FS entry.in_mask
+    logic                gp_late_q;   // FS entry.fs_late (G3a-i late-Z)
+    logic                gp_fdep_q;   // FS entry.fs_fdepth (writes FragDepth)
     logic [3:0]          gp_nbind_q;
     logic [3:0]          gp_nattr_q;
     logic [3:0]          gp_i_q;      // binding/attr/attach/dyn cursor
@@ -738,7 +740,8 @@ module g6lc_apu_vnfront
     endfunction
     // G2a: graphics-pipeline ObjPay state word i (22 words):
     //   w0 = {fs_in_mask[31:24], topology[23:16], nattr[15:12],
-    //         nbind[11:8], 4'h0, cull[3:2], front_ccw[1], 1'b1}
+    //         nbind[11:8], 2'b0, fs_fdepth[5], fs_late[4],
+    //         cull[3:2], front_ccw[1], 1'b1}
     //   w1+b = {10'h0, rate[21], valid[20], binding[19:16], stride[15:0]}
     //   w5+a = {valid[31], loc[26:24], binding[21:20], fmt[19:12],
     //           offset[11:0]}
@@ -753,7 +756,7 @@ module g6lc_apu_vnfront
     function automatic logic [31:0] gp_pay_w(input logic [4:0] i);
       if (i == 5'd0)
         return {gp_fsm_q, gp_top_q, gp_nattr_q, gp_nbind_q,
-                4'h0, gp_cull_q, gp_ff_q, 1'b1};
+                2'b0, gp_fdep_q, gp_late_q, gp_cull_q, gp_ff_q, 1'b1};
       if (i < 5'd5)
         return {10'h0, gp_bnd_q[i - 5'd1]};
       if (i < 5'd13)
@@ -1047,6 +1050,7 @@ module g6lc_apu_vnfront
         gp_mod0_q <= '0; gp_mod1_q <= '0;
         gp_st_q <= 1'b0; gp_refs_q <= '0;
         gp_vs_q <= '0; gp_fs_q <= '0; gp_fsm_q <= '0;
+        gp_late_q <= 1'b0; gp_fdep_q <= 1'b0;
         gp_nbind_q <= '0; gp_nattr_q <= '0; gp_i_q <= '0;
         gp_top_q <= '0; gp_cull_q <= '0; gp_ff_q <= 1'b0;
         gp_bnd_q <= '0; gp_atr_q <= '0;
@@ -1411,11 +1415,13 @@ module g6lc_apu_vnfront
                 endcase
               end
               APU_VN_ACT_ALLOC: begin
+// pragma translate_off
 `ifdef VNFRONT_TRACE
                 $display("ALLOC kind=%0d new=%0d ct=%0d",
                          act_q.obj_kind, role_slot(op_q, APU_VN_ROLE_NEW),
                          op_q.cmd_type);
 `endif
+// pragma translate_on
                 if (role_slot(op_q, APU_VN_ROLE_NEW) >= 0) begin
                   // §7b: layout objects park a payload extent first —
                   // an ObjPay FULL means the object is never created
@@ -3600,11 +3606,13 @@ module g6lc_apu_vnfront
             if (ot_cpl_i.status != APU_OBJTAB_OK ||
                 ot_cpl_i.entry.bind_mem[15:0] == APU_OBJTAB_SLOT_NONE) begin
               upd_elok_q <= 1'b0;
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
               $display("[DBG] upd-buffail set=%08x buf=%016x st=%0d bmem=%08x t=%0t",
                        rsv_hnd_q, upd_buf_q, ot_cpl_i.status,
                        ot_cpl_i.entry.bind_mem, $time);
 `endif
+// pragma translate_on
               state_q    <= StUpdWr0;
             end else begin
               ud_mslot_q <= ot_cpl_i.entry.bind_mem[15:0];
@@ -3644,6 +3652,7 @@ module g6lc_apu_vnfront
                 64'(upd_eb_q) + upd_off_q + rng_eff >
                     ot_cpl_i.entry.size) begin
               upd_elok_q <= 1'b0;
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
               $display("[DBG] upd-memfail set=%08x buf=%016x st=%0d kind=%0d gen=%0d!=%0d unb=%0d maux=%016x eb=%x off=%x rng=%x esz=%x msz=%x t=%0t",
                        rsv_hnd_q, upd_buf_q, ot_cpl_i.status,
@@ -3653,6 +3662,7 @@ module g6lc_apu_vnfront
                        ot_cpl_i.entry.aux, upd_eb_q, upd_off_q,
                        rng_eff, upd_esz_q, ot_cpl_i.entry.size, $time);
 `endif
+// pragma translate_on
             end else begin
               upd_elok_q <= 1'b1;
               // record +0 = mem{gen,slot}, +28 = bind_off + info.off
@@ -3886,10 +3896,12 @@ module g6lc_apu_vnfront
                 (is_buf_typ(upd_type_q[7:0]) ||
                  is_img_typ(upd_type_q[7:0]))) begin
               upd_pois_q <= 1'b1;
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
               $display("[DBG] upd-poison set=%08x el=%0d type=%08x img=%0d t=%0t",
                        rsv_hnd_q, ent_j_q, upd_type_q, upd_img_q, $time);
 `endif
+// pragma translate_on
             end
             ent_j_q <= ent_j_q + 16'd1;
             state_q <= StUpdInfo;
@@ -4694,12 +4706,14 @@ module g6lc_apu_vnfront
             opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
                          addr: {16'h0, op_base_q} + {16'h0, pay_i_q},
                          wdata: gp_pay_w(pay_i_q[4:0]), default: '0};
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
             $display("[DBG] vnf gpayw[%0d] @%04x = %08x (fsm=%02x top=%02x na=%0d nb=%0d cull=%0d ff=%0d) t=%0t",
                      pay_i_q, op_base_q + pay_i_q, gp_pay_w(pay_i_q[4:0]),
                      gp_fsm_q, gp_top_q, gp_nattr_q, gp_nbind_q,
                      gp_cull_q, gp_ff_q, $time);
 `endif
+// pragma translate_on
             op_ret_q <= StGpPayWd;
             state_q  <= StOpReq;
           end
@@ -4855,6 +4869,8 @@ module g6lc_apu_vnfront
                 end else begin
                   gp_fs_q   <= sh_slot_q;
                   gp_fsm_q  <= sh_c_done_pl_i.entry.in_mask;
+                  gp_late_q <= sh_c_done_pl_i.entry.fs_late;
+                  gp_fdep_q <= sh_c_done_pl_i.entry.fs_fdepth;
                   sm_op_q   <= APU_SH_SM_REF;
                   sm_ret_q  <= StGpRefC;
                   state_q   <= StSmReq;
@@ -4977,11 +4993,13 @@ module g6lc_apu_vnfront
           // imm: 1=imageType 2=format 3=w 4=h 5=depth 6=mipLevels
           //      7=arrayLayers 8=samples 9=tiling 10=usage 11=sharing
           StImgCk: begin
+// pragma translate_off
 `ifdef VNFRONT_TRACE
             $display("IMGCK type=%0d fmt=%0d w=%0d h=%0d mips=%0d lay=%0d",
                      op_q.imm[1], op_q.imm[2], op_q.imm[3], op_q.imm[4],
                      op_q.imm[6], op_q.imm[7]);
 `endif
+// pragma translate_on
             if (f_img_fmt(op_q.imm[2]) == APU_IMG_FMT_NONE) begin
               result_q <= APU_VK_ERROR_FORMAT_NOT_SUPPORTED;
               state_q  <= StRep;
@@ -5194,11 +5212,13 @@ module g6lc_apu_vnfront
           end
           StRepKick: state_q <= StRepWait;
           StRepWait: if (rep_done) begin
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
             $display("[DBG] rep ctype=%08x result=%08x imm0=%08x sub={fidx=%0d nb=%0d} t=%0t",
                      op_q.cmd_type, result_q, op_q.imm[0],
                      sub_q.fence_idx, sub_q.nbufs, $time);
 `endif
+// pragma translate_on
             rep_words_q <= rep_n;
             fault_q     <= {3'b0, rep_fault};
             state_q     <= StDone;

@@ -1,0 +1,32 @@
+#version 460
+// G3a-i pack/unpack + Modf/Frexp/Ldexp round trips.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) buffer Src { float src[]; };
+layout(set = 0, binding = 1) buffer Dst { uint dst[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    vec4 a = vec4(src[i], src[i + 8], src[i + 16], src[i + 24]);
+    vec2 b = vec2(src[i + 32], src[i + 40]);
+    uint o = i * 12u;
+    dst[o + 0u]  = packUnorm4x8(clamp(a, 0.0, 1.0));
+    dst[o + 1u]  = packSnorm4x8(clamp(a * 4.0 - 2.0, -1.0, 1.0));
+    dst[o + 2u]  = packUnorm2x16(clamp(b, 0.0, 1.0));
+    dst[o + 3u]  = packSnorm2x16(clamp(b * 2.0 - 1.0, -1.0, 1.0));
+    dst[o + 4u]  = packHalf2x16(b * 0.001);
+    float ip;
+    float fr = modf(a.x, ip);
+    int ex;
+    float m = frexp(a.y, ex);
+    dst[o + 5u]  = packHalf2x16(vec2(fr, ip));
+    dst[o + 6u]  = floatBitsToUint(m);
+    dst[o + 7u]  = uint(ex) & 0xFFu;
+    dst[o + 8u]  = floatBitsToUint(ldexp(m, ex));
+    vec2 s2 = unpackSnorm2x16(dst[o + 3u]);
+    vec2 u2 = unpackUnorm2x16(dst[o + 2u]);
+    vec2 h2 = unpackHalf2x16(dst[o + 4u]);
+    vec4 su4 = unpackSnorm4x8(dst[o + 1u]);
+    vec4 uu4 = unpackUnorm4x8(dst[o + 0u]);
+    dst[o + 9u]  = floatBitsToUint(s2.x + u2.x + h2.x + su4.x + uu4.x);
+    dst[o + 10u] = floatBitsToUint(s2.y + u2.y + h2.y + su4.y + uu4.y);
+    dst[o + 11u] = floatBitsToUint(uu4.z + su4.z + uu4.w + su4.w);
+}

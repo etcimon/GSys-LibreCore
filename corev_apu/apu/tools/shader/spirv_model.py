@@ -77,6 +77,7 @@ TK = spirv_scan.TK
 SCRATCH_WORDS = 256        # ScratchBytes=1024 / 4
 SLAB_WORDS = 4096          # SlabBytes=16384 / 4
 LAN = 8                    # ShaderLanes
+CALLDEPTH = 8              # g6lc_apu_shwave CallDepth (call stack)
 
 # storage-class / builtin ids (must match g6lc_apu_sh_pkg)
 SC_INPUT = SC['INPUT']
@@ -95,6 +96,7 @@ BI_LID = 27
 BI_GID = 28
 BI_LINDEX = 29
 BI_FRONTFACING = 17
+BI_HELPER = 23
 BI_VERTEXINDEX = 42
 BI_INSTANCEINDEX = 43
 
@@ -430,6 +432,36 @@ def f32_f16(f):
     return s | (r & 0x7FFF)
 
 
+def ldexp(w, e):
+    """Ldexp — x * 2**e by exponent-field arithmetic (bit-exact,
+    denormal-aware; mirrors the W_EX ldexp comb block)."""
+    s = w & 0x80000000
+    ex = (w >> 23) & 0xFF
+    m = w & 0x7FFFFF
+    if ex == 0xFF or (ex == 0 and m == 0):
+        return w                              # inf/nan/zero pass
+    if ex == 0:                               # denormal: normalize
+        clz = 23 - m.bit_length()
+        m = (m << (clz + 1)) & 0x7FFFFF
+        ex = 1 - clz
+    ne = ex + s32(e)
+    if ne >= 255:
+        return s | 0x7F800000
+    if ne <= 0:                               # underflow: denormal RNE
+        fmn = 0x800000 | m
+        sh = 1 - ne
+        if sh >= 25:
+            return s
+        r = fmn >> sh
+        rem = fmn & ((1 << sh) - 1)
+        if rem > (1 << (sh - 1)) or \
+                (rem == (1 << (sh - 1)) and r & 1):
+            r += 1
+        # r <= 0x800000: carry folds into the exp field = min normal
+        return s | r
+    return s | (ne << 23) | m
+
+
 def twrap(i, n, m):
     """f_twrap — returns (border, coord).  REPEAT=0 MIRRORED=1
     CLAMP_TO_EDGE=2 CLAMP_TO_BORDER=3."""
@@ -543,6 +575,7 @@ class Model:
         self.gfx = GFX_NONE
         self.gcnt = self.vbase = self.inst = 0
         self.in_base = self.out_base = 0
+        self.ghelp = 0            # G3a-i: per-record helper-lane mask
         if self.flags & 4:
             (stage, self.gcnt, self.in_base, self.out_base,
              self.vbase, self.inst, nin) = words[p:p + 7]
@@ -551,6 +584,9 @@ class Model:
             for i in range(nin):
                 self.mem[(self.in_base >> 2) + i] = words[p + i]
             p += nin
+            # {help_lo, help_hi} — helper bits per record index
+            self.ghelp = words[p] | (words[p + 1] << 32)
+            p += 2
         # memory-resident descriptor model: binding rows (per-set
         # element cursor in 32B record units) + the records themselves.
         self.drows = {}                        # (set,bd) -> row dict
@@ -585,6 +621,10 @@ class Model:
         self.sc = spirv_scan.Scanner(self.spv)
         self.sc.scan()
         self.lx, self.ly, self.lz = self.sc.localsize
+        # G3a-i: FS late-Z arm — the slot-8 tail write only runs for
+        # modules with kills/demotes or a FragDepth output (mirrors
+        # shmod's entry word3 bit and shwave's fslate gate)
+        self.fs_late = bool(self.sc.has_kill or self.sc.wr_fdepth)
         self.robust = 0
         self.wclass = {}                       # word addr -> 'f'/'i'
         self.slab = None
@@ -723,10 +763,20 @@ class Model:
                   for c in range(4)]
         return ch, fc
 
+    def helper(self):
+        """helper-invocation bit for the current lane (dispatch ghelp
+        mask): the lane executes fully — it feeds quad derivatives —
+        but its device-visible side effects (atomics, image writes,
+        UNIFORM/SBUF/WORKGROUP stores) are suppressed, exactly like a
+        demoted lane; private/function/out-record state still updates."""
+        return (self.ghelp >> self.inv) & 1
+
     def img_op(self, pc, opc, wc, ops, va, rty, rid, ncomp):
         """the whole W_TX* sequence for one invocation; returns the
         next pc or 'ret' (on a device-lost fault)."""
         nxt = pc + wc
+        if opc == 99 and (self.dead or self.helper()):
+            return nxt                     # dead/helper: no image store
         # W_TX0 operand-mask legality (only Lod 0x2 is decoded); 87
         # takes no image operands in v1 (Bias rides the sampler record)
         if (opc == 95 and wc > 6 and (ops[4] & ~0x2) != 0) or \
@@ -1089,6 +1139,10 @@ class Model:
             # G2b: FS waves carry the primitive's front-facing bit in
             # the work record's vbase field (imm[3].0)
             return (self.vbase & 1) if c == 0 else 0
+        if bi == BI_HELPER:
+            # gl_HelperInvocation — same as OpIsHelperInvocationEXT
+            return ((self.ghelp >> self.inv) & 1) | int(self.dead) \
+                if c == 0 else 0
         return 0
 
     # -- LSU -----------------------------------------------------------
@@ -1209,6 +1263,46 @@ class Model:
             return t['cols'], self.sc.types[t['elem']]['comps']
         return 1, self.ncomps(tid)
 
+    # ---- G3a-i Determinant / MatrixInverse (cofactor expansion;
+    # each op is an fmul/fadd/fsub — the RTL jset chain mirrors this
+    # exact expression tree) ----------------------------------------
+    def detn(self, m):
+        """m = column-major [col][row] square matrix -> fp32 det."""
+        n = len(m)
+        if n == 1:
+            return m[0][0]
+        if n == 2:
+            return fsub(fmul(m[0][0], m[1][1]), fmul(m[0][1], m[1][0]))
+        acc = fmul(m[0][0], self.minor_rc(m, 0, 0))
+        for j in range(1, n):
+            t = fmul(m[j][0], self.minor_rc(m, 0, j))
+            acc = fsub(acc, t) if j & 1 else fadd(acc, t)
+        return acc
+
+    def minor_rc(self, m, row, col):
+        """det of m minus `row`/`col` (column-major in/out)."""
+        n = len(m)
+        mm = [[m[c][r] for c in range(n) if c != col]
+              for r in range(n) if r != row]
+        cols = [[mm[r][c] for r in range(n - 1)]
+                for c in range(n - 1)]
+        return self.detn(cols)
+
+    def matinv(self, m):
+        """adj/det: inverse[r][i] = Cofactor(i,r)/det — column-major."""
+        n = len(m)
+        inv = fdiv(0x3F800000, self.detn(m))
+        cols = []
+        for i in range(n):
+            col = []
+            for r in range(n):
+                cof = self.minor_rc(m, i, r)
+                if (i + r) & 1:
+                    cof ^= 0x80000000
+                col.append(fmul(cof, inv))
+            cols.append(col)
+        return cols
+
     @staticmethod
     def dotfold(m):
         """products then right-leaning FMADD fold — OpDot semantics,
@@ -1246,9 +1340,27 @@ class Model:
                 for j in range(comps):
                     dst[j] = vec[c * comps + j] & 0xFFFFFFFF
             return
+        if t.get('kind') == TK['STRUCT']:
+            # G3a-i struct results (IAddCarry, ModfStruct, ...): the
+            # flat word image packs 4 words per RF row
+            nw = self.sc.nwords(r[2])
+            for j in range(min(nw, len(vec))):
+                self.rf[r[1] + j // 4][j % 4] = vec[j] & 0xFFFFFFFF
+            return
         dst = self.rf[r[1]]
         for c in range(min(ncomp, 4)):
             dst[c] = vec[c] & 0xFFFFFFFF
+
+    def flatv(self, iid):
+        """flat word image of id's register value (multi-row aware —
+        matrix columns then struct members pack consecutively)."""
+        r = self.sc.regmap.get(iid)
+        if r is None:
+            return [0]
+        if r[0] == 1:
+            return list(self.sc.consts.get(iid, [0]))
+        n = self.sc.nwords(r[2])
+        return [self.rf[r[1] + k // 4][k % 4] for k in range(n)]
 
     # -- quad-lane operand values (G2b derivatives) -----------------------
     # The model steps graphics invocations one instruction at a time in
@@ -1267,6 +1379,40 @@ class Model:
             cw = self.sc.consts.get(iid, [0])
             return [cw[c] if c < len(cw) else cw[0] for c in range(4)]
         return list(self.ivs[inv]['rf'][idx])
+
+    def pull_to(self, pc, iid, inv):
+        """run quad-mate inv forward until it records at (pc, iid) —
+        a lane on the longer side of a divergent merge (e.g. demote's
+        extra block) is instruction-behind its quad, so regv_for()
+        would read its not-yet-loaded register; the wave parks lanes
+        at the merge and all quad mates arrive at the op together, so
+        pull the straggler to it and replay its at-pc value."""
+        save = (self.wave, self.lane, self.inv, self.rf, self.scratch,
+                self.stack, self.dead, self.cur_lbl, self.prev_lbl,
+                self.cur_pc)
+        guard = 0
+        while guard < (1 << 22):
+            s = self.ivs[inv]
+            if s['done'] or s['bwait']:
+                break
+            if inv in self.dvals.get((pc, iid), {}):
+                break
+            self.run_inv(inv, single=True)
+            guard += 1
+        (self.wave, self.lane, self.inv, self.rf, self.scratch,
+         self.stack, self.dead, self.cur_lbl, self.prev_lbl,
+         self.cur_pc) = save
+
+    def qpull(self, pc, iid):
+        """pull every live quad lane of the current invocation that has
+        not yet recorded at (pc, iid) — merge-park emulation."""
+        q = self.lane & ~3
+        for s in range(q, q + 4):
+            peer = self.wave * LAN + s
+            if (peer != self.inv and peer < len(self.ivs)
+                    and not self.ivs[peer]['done']
+                    and peer not in self.dvals.get((pc, iid), {})):
+                self.pull_to(pc, iid, peer)
 
     def dpeer(self, pc, iid, inv):
         """operand iid's value as invocation inv sees it at pc."""
@@ -1289,6 +1435,7 @@ class Model:
         q = l & ~3
         base = self.wave * LAN
         self.dvals.setdefault((pc, iid), {})[self.inv] = self.regv(iid)
+        self.qpull(pc, iid)
         v = [self.dpeer(pc, iid, base + s) for s in range(q, q + 4)]
 
         def pair(sa, sb):
@@ -1320,6 +1467,7 @@ class Model:
         q = l & ~3
         base = self.wave * LAN
         self.dvals.setdefault((pc, iid), {})[self.inv] = self.regv(iid)
+        self.qpull(pc, iid)
         v = [self.dpeer(pc, iid, base + s) for s in range(q, q + 4)]
         li = l & 3
         wf = i2f(w0, True)
@@ -1542,6 +1690,143 @@ class Model:
                 t = ffma(m[c], 0x3F800000, t)
             r = fdiv(0x3F800000, fsqrt(t))
             return [fmul(va[0][c], r) for c in range(4)]
+        # ---- G3a-i -------------------------------------------------
+        if xnum in (33, 34):                  # Determinant/Inverse
+            nc, nc2 = self.matshape(vt[0])
+            m = [va[0][i * nc2:(i + 1) * nc2] for i in range(nc)]
+            if xnum == 33:
+                return [self.detn(m), 0, 0, 0]
+            return [w for col in self.matinv(m) for w in col]
+        if xnum == 35 or xnum == 36:          # Modf / ModfStruct
+            # Modf: [fr0..3, ip0..3], caller stores wb[4+c] to the ptr.
+            # ModfStruct: flat {frac(nc), integ(nc)} member order.
+            fr = []
+            ip = []
+            for c in range(4):
+                i = f2i(va[0][c], False, 'RTZ')
+                f = i2f(i, False)
+                ip.append(va[0][c] if (isnan(va[0][c]) or
+                                       ((va[0][c] >> 23) & 0xFF) >= 158)
+                          else f)
+                fr.append(fsub(va[0][c], ip[c]))
+            if xnum == 36:
+                nc = self.ncomps(vt[0])
+                return fr[:nc] + ip[:nc]
+            return fr + ip
+        if xnum == 51 or xnum == 52:          # Frexp / FrexpStruct
+            out = []
+            for c in range(4):
+                w = va[0][c]
+                ex = (w >> 23) & 0xFF
+                if ex == 0 or ex == 0xFF:     # zero/denorm/inf/nan
+                    out.append([w, 0])
+                    continue
+                out.append([(w & 0x807FFFFF) | 0x3F000000,
+                            ex - 126])
+            if xnum == 52:
+                nc = self.ncomps(vt[0])
+                return [o[0] for o in out][:nc] + \
+                    [o[1] for o in out][:nc]
+            return [o[0] for o in out] + [o[1] for o in out]
+        if xnum == 53:                        # Ldexp
+            return [ldexp(va[0][c], va[1][c]) for c in range(4)]
+        if xnum in (54, 55, 56, 57):          # Pack{S,U}norm{4x8,2x16}
+            # clamp then *scale then round-to-nearest-even
+            sc_, lo_, nb = {54: (0x42FE0000, 0xBF800000, 8),
+                            55: (0x437F0000, 0, 8),
+                            56: (0x46FFFE00, 0xBF800000, 16),
+                            57: (0x477FFF00, 0, 16)}[xnum]
+            nc = 32 // nb                  # 4x8 -> 4, 2x16 -> 2
+            r = 0
+            for c in range(nc):
+                t = fp_minmax(va[0][c], lo_, True)
+                t = fp_minmax(t, 0x3F800000, False)
+                u = f2i(fmul(t, sc_), False, 'RNE')
+                r |= (u & ((1 << nb) - 1)) << (nb * c)
+            return [r, 0, 0, 0]
+        if xnum == 58:                        # PackHalf2x16
+            return [f32_f16(va[0][0]) | (f32_f16(va[0][1]) << 16),
+                    0, 0, 0]
+        if xnum in (60, 61, 62, 63, 64):      # Unpack*
+            if xnum == 62:
+                return [f16_f32(va[0][0] & 0xFFFF),
+                        f16_f32((va[0][0] >> 16) & 0xFFFF), 0, 0]
+            nb = 16 if xnum in (60, 61) else 8
+            sc_ = {60: 0x46FFFE00, 61: 0x477FFF00,
+                   63: 0x42FE0000, 64: 0x437F0000}[xnum]
+            nc = 32 // nb                  # 2x16 -> 2, 4x8 -> 4
+            sgd = xnum in (60, 63)
+            out = []
+            for c in range(nc):
+                u = (va[0][0] >> (nb * c)) & ((1 << nb) - 1)
+                if sgd and u & (1 << (nb - 1)):
+                    u -= 1 << nb
+                t = fdiv(i2f(u & 0xFFFFFFFF, False), sc_)
+                if sgd:
+                    t = fp_minmax(t, 0xBF800000, True)
+                    t = fp_minmax(t, 0x3F800000, False)
+                out.append(t)
+            return out + [0] * (4 - nc)
+        if xnum == 73:                        # FindILsb
+            return [u32((x & -x).bit_length() - 1) if x else 0xFFFFFFFF
+                    for x in va[0]]
+        if xnum == 75:                        # FindUMsb
+            return [u32(x.bit_length() - 1) if x else 0xFFFFFFFF
+                    for x in va[0]]
+        if xnum == 74:                        # FindSMsb
+            def _smsb(x):
+                if x == 0 or x == 0xFFFFFFFF:
+                    return 0xFFFFFFFF
+                v = (~x & 0xFFFFFFFF) if x & 0x80000000 else x
+                return v.bit_length() - 1
+            return [u32(_smsb(x)) for x in va[0]]
+        if xnum == 70:                        # FaceForward
+            nc = self.ncomps(vt[0])
+            m = [fmul(va[1][c], va[2][c]) for c in range(nc)]
+            t = fmul(m[nc - 1], 0x3F800000)
+            for c in range(nc - 2, -1, -1):
+                t = ffma(m[c], 0x3F800000, t)
+            neg = fp_cmp(t, 0, 'RTZ', False)      # d < 0
+            return [va[0][c] if neg else va[0][c] ^ 0x80000000
+                    for c in range(4)]
+        if xnum == 71:                        # Reflect = I - 2(N.I)N
+            nc = self.ncomps(vt[0])
+            m = [fmul(va[0][c], va[1][c]) for c in range(nc)]
+            t = fmul(m[nc - 1], 0x3F800000)
+            for c in range(nc - 2, -1, -1):
+                t = ffma(m[c], 0x3F800000, t)
+            t2 = fmul(0x40000000, t)
+            return [ffma(va[1][c] ^ 0x80000000, t2, va[0][c])
+                    for c in range(4)]
+        if xnum == 72:                        # Refract
+            nc = self.ncomps(vt[0])
+            m = [fmul(va[0][c], va[1][c]) for c in range(nc)]
+            t = fmul(m[nc - 1], 0x3F800000)
+            for c in range(nc - 2, -1, -1):
+                t = ffma(m[c], 0x3F800000, t)
+            d2 = fmul(t, t)
+            e2 = fmul(va[2][0], va[2][0])
+            t0 = fsub(0x3F800000, d2)
+            k = ffma(e2 ^ 0x80000000, t0, 0x3F800000)
+            if fp_cmp(k, 0, 'RTZ', False):        # k < 0 -> 0
+                return [0, 0, 0, 0]
+            co = fadd(fmul(va[2][0], t), fsqrt(k))
+            return [fsub(fmul(va[2][0], va[0][c]),
+                         fmul(co, va[1][c])) for c in range(4)]
+        if xnum in (79, 80):                  # NMin / NMax (NaN prop)
+            mx = xnum == 80
+            return [0x7FC00000 if isnan(va[0][c]) or isnan(va[1][c])
+                    else fp_minmax(va[0][c], va[1][c], mx)
+                    for c in range(4)]
+        if xnum == 81:                        # NClamp = NMin(NMax(x,lo),hi)
+            out = []
+            for c in range(4):
+                t = 0x7FC00000 if isnan(va[0][c]) or isnan(va[1][c]) \
+                    else fp_minmax(va[0][c], va[1][c], True)
+                t = 0x7FC00000 if isnan(t) or isnan(va[2][c]) \
+                    else fp_minmax(t, va[2][c], False)
+                out.append(t)
+            return out
         raise self.FaultX(xnum)
 
     class FaultX(Exception):
@@ -1597,6 +1882,12 @@ class Model:
                 return ops[5] if 5 < len(ops) else 0
             if opc == 12:
                 return ops[4 + k] if 4 + k < len(ops) else 0
+            if opc == 228:                    # AtomicStore: ptr, val
+                return (ops[0], ops[3])[k]
+            if opc == 230:                    # CAS: ptr, val, cmp
+                return (ops[2], ops[5], ops[6])[k]
+            if opc in self.ATOMOPS:           # ptr, [val]
+                return ops[2] if k == 0 else ops[5]
             return ops[2 + k] if 2 + k < len(ops) else 0
         nva = self.nva(opc, wc)
         va = [self.regv(opid(k)) for k in range(nva)] + \
@@ -1604,13 +1895,65 @@ class Model:
         vt = [self.regt(opid(k)) for k in range(nva)] + \
              [0] * (4 - nva)
 
-        if opc in (0, 54, 59):                # Nop Function Variable
+        if opc in (0, 54, 55, 59):            # Nop Function Param Var
             return pc + wc
         if opc == 248:                        # Label — track cur block
             self.cur_lbl = ops[0]
             return pc + wc
+        if opc == 57:                         # FunctionCall — push frame
+            f = self.sc.funcs[ops[2]]
+            if len(self.stack) >= CALLDEPTH:
+                self.fault = 'CALLDEPTH'
+                return 'ret'
+            for i, (pid, _pt) in enumerate(f['params']):
+                aid = ops[3 + i] if 3 + i < len(ops) else 0
+                pd = self.sc.regmap.get(pid)
+                ad = self.sc.regmap.get(aid)
+                if pd is None or ad is None or pd[0] == 1:
+                    continue
+                # copy the argument's RF row(s) into the callee's
+                # param row — the param's type decides the row count
+                nr = self.sc.reg_rows(_pt)
+                if ad[0] == 1:
+                    cw = self.sc.consts.get(aid, [0])
+                    for k in range(nr):
+                        self.rf[pd[1] + k] = \
+                            [cw[4 * k + c] if 4 * k + c < len(cw)
+                             else 0 for c in range(4)]
+                else:
+                    for k in range(nr):
+                        self.rf[pd[1] + k] = list(self.rf[ad[1] + k])
+            self.stack.append(dict(ret=pc + wc, rid=rid, rty=rty,
+                                   prev=self.prev_lbl,
+                                   cur=self.cur_lbl))
+            return f['off']
         if opc in (56, 253):                  # FunctionEnd / Return
+            if self.stack:
+                fr = self.stack.pop()
+                self.prev_lbl, self.cur_lbl = fr['prev'], fr['cur']
+                return fr['ret']
             return 'ret'
+        if opc == 254:                        # ReturnValue — callee pop
+            if self.stack:
+                fr = self.stack.pop()
+                if self.sc.types.get(fr['rty'],
+                                     {}).get('kind') != TK['VOID']:
+                    self.setres(fr['rid'], self.flatv(ops[0]),
+                                self.sc.nwords(fr['rty']))
+                self.prev_lbl, self.cur_lbl = fr['prev'], fr['cur']
+                return fr['ret']
+            return 'ret'
+        if opc in (252, 4416):                # Kill / Terminate
+            self.dead = True
+            self.ivs[self.inv]['killed'] = True
+            return 'ret'
+        if opc == 5380:                       # Demote — dead, keeps run
+            self.dead = True
+            return pc + wc
+        if opc == 5381:                       # IsHelperInvocationEXT
+            h = ((self.ghelp >> self.inv) & 1) | int(self.dead)
+            self.setres(rid, [h, 0, 0, 0], 1)
+            return pc + wc
         if opc in (246, 247, 225):            # LoopMerge SelectionMerge
             return pc + wc                    # MemoryBarrier (no-op)
         if opc == 224:                        # ControlBarrier — phase edge
@@ -1672,6 +2015,15 @@ class Model:
             self.setres(rid, wb, ncomp)
             return pc + wc
         if opc == 62:                         # Store
+            if (self.dead or self.helper()) and \
+                    (va[0][1] & 0xF) in \
+                    (SC_UNIFORM, SC_SBUF, SC_WORKGROUP):
+                # dead/helper lane: device-visible stores suppressed;
+                # Function/Private/Output storage stays live — demoted
+                # lanes keep their per-invocation state for quad
+                # derivatives; killed lanes never reach here ('ret'
+                # at the kill site)
+                return pc + wc
             ncs = self.ncomps(vt[1])          # stored value words
             cls = self.classof(vt[1])
             if self.sc.types.get(vt[1], {}).get('kind') == TK['MAT']:
@@ -1749,6 +2101,25 @@ class Model:
                     self.setres(rid, [col[ops[4] & 3], 0, 0, 0], 1)
                 else:
                     self.setres(rid, (col + [0, 0, 0, 0])[:4], ncomp)
+            elif t0.get('kind') == TK['STRUCT']:
+                # walk literals through member offsets then sub-index
+                off, tid = 0, vt[0]
+                for lit in ops[3:]:
+                    t = self.sc.types.get(tid, {})
+                    if t.get('kind') == TK['STRUCT']:
+                        m = self.sc.members[
+                            self.sc.member_base.get(tid, 0) + lit]
+                        off += m['offset'] // 4
+                        tid = m['type']
+                    elif t.get('kind') in (TK['VEC'], TK['ARR']):
+                        off += lit * self.sc.nwords(t['elem'])
+                        tid = t['elem']
+                    else:
+                        off += lit
+                fl = self.flatv(opid(0))
+                nw = self.sc.nwords(rty)
+                self.setres(rid, (fl[off:off + nw] + [0] * nw)[:nw],
+                            nw)
             else:
                 self.setres(rid, [va[0][ops[3] & 3], 0, 0, 0], 1)
             return pc + wc
@@ -1811,7 +2182,92 @@ class Model:
         # per-component ALU ops
         wb = [0, 0, 0, 0]
         if opc == 12:                         # ExtInst
+            if ops[3] in (33, 34):
+                # matrix operand: flatten the column RF rows
+                va = list(va)
+                va[0] = [w for col in self.matv(ops[4]) for w in col]
             wb = self.x_ext(ops[3], va, vt)
+            if ops[3] in (35, 51) and not (
+                    (self.dead or self.helper()) and
+                    (va[1][1] & 0xF) in
+                    (SC_UNIFORM, SC_SBUF, SC_WORKGROUP)):
+                # Modf/Frexp: integer part / exponent words live at
+                # wb[4+c] — store per component to the pointer operand
+                ptr = va[1]
+                for c in range(ncomp):
+                    self.lsu(ptr[0], ptr[1], ptr[2], c, True,
+                             wb[4 + c], 'i')
+            self.setres(rid, wb,
+                        self.sc.nwords(rty)
+                        if self.sc.types.get(rty, {}).get('kind')
+                        == TK['STRUCT'] else ncomp)
+            return pc + wc
+        # ---- G3a-i atomics: lane-serial RMW through the LSU ---------
+        if opc == 228 or opc in self.ATOMOPS:
+            if self.dead or self.helper():
+                # dead/helper lane: the RMW is a side effect — result
+                # register still written (0), memory untouched
+                if opc != 228:
+                    self.setres(rid, [0, 0, 0, 0], 1)
+                return pc + wc
+            ptr = va[0]
+            r0 = self.robust
+            old = self.lsu(ptr[0], ptr[1], ptr[2], 0, False, 0, 'i')
+            if self.robust != r0:             # OOB: returns 0, no write
+                if opc != 228:
+                    self.setres(rid, [0, 0, 0, 0], 1)
+                return pc + wc
+            old = 0 if old is None else old
+            val = va[1][0] if opc not in (227, 232, 233) else 0
+            new = self.atomic_op(opc, old, val,
+                                 va[2][0] if opc == 230 else 0)
+            if opc != 227:                    # AtomicLoad never writes
+                self.lsu(ptr[0], ptr[1], ptr[2], 0, True, new, 'i')
+            if opc != 228:
+                self.setres(rid, [old, 0, 0, 0], 1)
+            return pc + wc
+        # ---- FRem/FMod: fdiv -> trunc/floor int -> reconstruct -----
+        if opc in (140, 141):
+            rnd = 'RTZ' if opc == 140 else 'RDN'
+            for c in range(4):
+                q = fdiv(va[0][c], va[1][c])
+                t = i2f(f2i(q, False, rnd), False)
+                wb[c] = fsub(va[0][c], fmul(va[1][c], t))
+            self.setres(rid, wb, ncomp)
+            return pc + wc
+        # ---- carry/borrow/extended-mul: struct {lo, hi} results ----
+        if opc in (149, 150, 151, 152):
+            wb = [0] * 8
+            for c in range(4):
+                x, y = va[0][c], va[1][c]
+                if opc == 149:
+                    r = u32(x + y)
+                    wb[2 * c] = r
+                    wb[2 * c + 1] = int(r < x)
+                elif opc == 150:
+                    wb[2 * c] = u32(x - y)
+                    wb[2 * c + 1] = int(x < y)
+                elif opc == 151:
+                    p = x * y
+                    wb[2 * c] = u32(p)
+                    wb[2 * c + 1] = u32(p >> 32)
+                else:
+                    p = s32(x) * s32(y)
+                    wb[2 * c] = u32(p)
+                    wb[2 * c + 1] = u32(p >> 32)
+            self.setres(rid, wb, 8)
+            return pc + wc
+        if opc == 77:                         # VectorExtractDynamic
+            self.setres(rid, [va[0][va[1][0] & 3], 0, 0, 0], 1)
+            return pc + wc
+        if opc == 78:                         # VectorInsertDynamic
+            wb = list(va[0])
+            wb[va[2][0] & 3] = va[1][0]
+            self.setres(rid, wb, ncomp)
+            return pc + wc
+        if opc == 83 or opc == 1:             # CopyObject / Undef
+            self.setres(rid, va[0] if opc == 83 else [0] * 4, ncomp)
+            return pc + wc
         elif opc in self.INTOPS:
             wb = self.intop(opc, va, vt)
         elif opc in (129, 131, 133):          # FAdd FSub FMul
@@ -1867,18 +2323,57 @@ class Model:
     INTOPS = frozenset((126, 127, 128, 130, 132, 164, 165, 166, 167,
                         168, 169, 170, 171, 172, 173, 174, 175, 176,
                         177, 178, 179, 194, 195, 196, 197, 198, 199,
-                        200))
-    HAS_RTY = frozenset((12, 61, 65, 66, 68, 79, 80, 81, 82, 84, 86,
-                         87, 88, 95, 98, 100, 103, 104, 106,
-                         109, 110, 111, 112, 124, 126, 127, 128, 129,
-                         130, 131, 132, 133, 134, 135, 136, 137, 138,
-                         139, 142, 143, 144, 145, 146, 147,
-                         148, 164, 165, 166, 167, 168, 169, 170, 171,
+                        200, 154, 155, 156, 157, 201, 202, 203, 204,
+                        205))
+    # 32-bit atomics over StorageBuffer/Workgroup — lane-serial RMW
+    ATOMOPS = frozenset((227, 229, 230, 232, 233, 234, 235, 236, 237,
+                         238, 239, 240, 241, 242))
+    HAS_RTY = frozenset((1, 12, 57, 61, 65, 66, 68, 77, 78, 79, 80, 81,
+                         82, 83, 84, 86, 87, 88, 95, 98, 100, 103, 104,
+                         106, 109, 110, 111, 112, 124, 126, 127, 128,
+                         129, 130, 131, 132, 133, 134, 135, 136, 137,
+                         138, 139, 140, 141, 142, 143, 144, 145, 146,
+                         147, 148, 149, 150, 151, 152, 154, 155, 156,
+                         157, 164, 165, 166, 167, 168, 169, 170, 171,
                          172, 173, 174, 175, 176, 177, 178, 179, 180,
                          181, 182, 183, 184, 185, 186, 187, 188, 189,
                          190, 191, 194, 195, 196, 197, 198, 199, 200,
+                         201, 202, 203, 204, 205,
                          207, 208, 209, 210, 211, 212, 213, 214, 215,
-                         245))
+                         227, 229, 230, 232, 233, 234, 235, 236, 237,
+                         238, 239, 240, 241, 242, 245, 5381))
+
+    @staticmethod
+    def atomic_op(opc, old, val, cmpv):
+        """RMW function — 32-bit; mirrored in shwave's W_EX atomic
+        datapath."""
+        if opc == 227 or opc == 228 or opc == 229:
+            return u32(val)                        # load/xchg/store
+        if opc == 230:
+            return u32(val) if old == cmpv else u32(old)
+        if opc == 232:
+            return u32(old + 1)
+        if opc == 233:
+            return u32(old - 1)
+        if opc == 234:
+            return u32(old + val)
+        if opc == 235:
+            return u32(old - val)
+        if opc == 236:
+            return u32(min(s32(old), s32(val)))
+        if opc == 237:
+            return u32(min(old, val))
+        if opc == 238:
+            return u32(max(s32(old), s32(val)))
+        if opc == 239:
+            return u32(max(old, val))
+        if opc == 240:
+            return old & val
+        if opc == 241:
+            return old | val
+        if opc == 242:
+            return old ^ val
+        return u32(old)
 
     @staticmethod
     def nva(opc, wc):
@@ -1889,20 +2384,31 @@ class Model:
             return min(4, wc - 3)
         if opc == 169:
             return 3
+        if opc == 78 or opc == 230:
+            return 3
         if opc == 82:
             return 2
+        if opc == 201:
+            return 4
+        if opc in (202, 203):
+            return 3
         if opc == 12:
             return 3 if wc > 8 else (wc - 5 if wc > 5 else 0)
+        if opc == 228:
+            return 2                          # ptr, value
+        if opc == 227 or opc in (232, 233):
+            return 1                          # ptr
         if opc == 99:
             return 3                          # img, coord, texel
         if opc == 95:
             return 3 if wc > 6 else 2         # img, coord[, lod]
         if opc in (87, 88, 103):
             return 3 if opc == 88 else 2
-        if opc in (61, 65, 66, 68, 81, 84, 109, 110, 111, 112, 124, 126,
-                   127, 168, 200):
+        if opc in (61, 65, 66, 68, 81, 83, 84, 109, 110, 111, 112,
+                   124, 126, 127, 154, 155, 156, 157, 168, 200, 204,
+                   205):
             return 1
-        if opc in (54, 56, 248, 249, 253):
+        if opc in (54, 55, 56, 248, 249, 252, 253, 254, 4416, 5380):
             return 0
         if opc in (0, 224, 225, 245, 246, 247, 250, 251, 255):
             return 0
@@ -1949,6 +2455,36 @@ class Model:
                 out[c] = x & y
             elif opc == 200:
                 out[c] = u32(~x)
+            elif opc == 201:                  # BitFieldInsert
+                off, cnt = va[2][c] & 31, va[3][c] & 31
+                if cnt == 0:
+                    out[c] = x
+                else:
+                    m = ((1 << cnt) - 1) << off
+                    out[c] = (x & ~m | (y << off) & m) & 0xFFFFFFFF
+            elif opc == 202:                  # BitFieldSExtract
+                off, cnt = va[1][c] & 31, va[2][c] & 31
+                out[c] = 0 if cnt == 0 else \
+                    u32(s32(x << (32 - off - cnt) & 0xFFFFFFFF)
+                        >> (32 - cnt))
+            elif opc == 203:                  # BitFieldUExtract
+                off, cnt = va[1][c] & 31, va[2][c] & 31
+                out[c] = 0 if cnt == 0 else (x >> off) & \
+                    ((1 << cnt) - 1)
+            elif opc == 204:                  # BitReverse
+                out[c] = int('{:032b}'.format(x)[::-1], 2)
+            elif opc == 205:                  # BitCount
+                out[c] = bin(x).count('1')
+            elif opc == 154:                  # Any
+                out[c] = int(any(bool(a[j])
+                                 for j in range(self.ncomps(vt[0]))))
+            elif opc == 155:                  # All
+                out[c] = int(all(bool(a[j])
+                                 for j in range(self.ncomps(vt[0]))))
+            elif opc == 156:                  # IsNan
+                out[c] = int((x & 0x7FFFFFFF) > 0x7F800000)
+            elif opc == 157:                  # IsInf
+                out[c] = int((x & 0x7FFFFFFF) == 0x7F800000)
             elif opc == 170:
                 out[c] = int(x == y)
             elif opc == 171:
@@ -2000,7 +2536,8 @@ class Model:
             rf[idx] = [off, tag, 0, 0]
         return dict(rf=rf, scratch=[0] * self.sc_w,
                     pc=self.sc.entry_off, cur_lbl=0, prev_lbl=0,
-                    done=False, bwait=False, steps=0)
+                    done=False, bwait=False, steps=0,
+                    stack=[], dead=False, killed=False)
 
     def run_inv(self, i, single=False):
         """run invocation i until it ends or waits at a barrier; with
@@ -2010,6 +2547,8 @@ class Model:
         self.wave, self.lane = i // LAN, i % LAN
         self.inv = i
         self.rf, self.scratch = s['rf'], s['scratch']
+        self.stack = s['stack']
+        self.dead = s['dead']
         self.cur_lbl, self.prev_lbl = s['cur_lbl'], s['prev_lbl']
         while True:
             self.cur_pc = s['pc']
@@ -2025,7 +2564,18 @@ class Model:
             s['pc'] = npc
             if single:
                 break
+        s['dead'] = self.dead
         s['cur_lbl'], s['prev_lbl'] = self.cur_lbl, self.prev_lbl
+        if s['done'] and self.gfx == GFX_FS and self.fs_late:
+            # G3a-i FS-out record slot 8: {FragDepth(word0, shader-
+            # stored), flags(bit0 discarded), SampleMask, 0} — the
+            # wave writes words 1-3 at wave end for every lane of an
+            # fs_late module, helpers included
+            base = self.out_base + self.inv * ATTR_STRIDE
+            fl = 1 if (s['dead'] or s['killed']) else 0
+            self.mwrite(base + 132, fl, 'i')
+            self.mwrite(base + 136, 0xFFFFFFFF, 'i')
+            self.mwrite(base + 140, 0, 'i')
 
     def run(self):
         """whole dispatch: workgroups x-fastest (W_EOW order); within a

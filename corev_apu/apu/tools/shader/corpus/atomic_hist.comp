@@ -1,0 +1,21 @@
+#version 460
+// G3a-i atomics: an SSBO histogram + a Workgroup counter; local size
+// 32 spreads the workgroup over four waves so the slab RMW actually
+// contends.
+layout(local_size_x = 32) in;
+layout(set = 0, binding = 0) buffer Src { uint src[]; };
+layout(set = 0, binding = 1) buffer Dst { uint dst[]; };
+shared uint wgcount;
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint v = src[i];
+    atomicAdd(dst[v & 3u], 1u);
+    atomicMax(dst[4 + (v & 3u)], v);
+    if (gl_LocalInvocationIndex == 0u) wgcount = 0u;
+    barrier();
+    atomicAdd(wgcount, v & 7u);
+    barrier();
+    if (gl_LocalInvocationIndex == 1u)
+        atomicAdd(dst[8], wgcount);
+    dst[16 + i] = atomicOr(dst[16 + i], v | 0x80000000u);
+}

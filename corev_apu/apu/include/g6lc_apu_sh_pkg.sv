@@ -28,6 +28,9 @@ package g6lc_apu_sh_pkg;
   localparam logic [7:0] APU_SH_FAULT_FWDREF    = 8'd18;
   localparam logic [7:0] APU_SH_FAULT_SPEC      = 8'd19;
   localparam logic [7:0] APU_SH_FAULT_BRANCH    = 8'd20;
+  // G3a-i: function table overflow, param count overflow, call to an
+  // undefined function id, or param rows beyond the register file
+  localparam logic [7:0] APU_SH_FAULT_FUNC      = 8'd21;
 
   // ---- work/dispatch completion codes ------------------------------
   localparam logic [7:0] APU_SH_DONE_OK          = 8'd0;
@@ -84,8 +87,17 @@ package g6lc_apu_sh_pkg;
   localparam logic [6:0] APU_SH_BI_CULLDIST      = 7'd4;   // dropped region
   localparam logic [6:0] APU_SH_BI_FRAGCOORD     = 7'd15;  // FS Input, record slot 0 = {x+.5, y+.5, z, 1/w}
   localparam logic [6:0] APU_SH_BI_FRONTFACING   = 7'd17;  // FS Input builtin value (v1: 1)
+  localparam logic [6:0] APU_SH_BI_HELPER        = 7'd23;  // FS Input builtin = hlp|dead per lane
   localparam logic [6:0] APU_SH_BI_VERTEXINDEX   = 7'd42;  // VS Input builtin = VS-in record slot 8 word 0
   localparam logic [6:0] APU_SH_BI_INSTANCEINDEX = 7'd43;  // VS Input builtin = VS-in record slot 8 word 1
+  localparam logic [6:0] APU_SH_BI_FRAGDEPTH     = 7'd22;  // FS Output builtin -> FS-out record slot 8 word 0
+  // G3a-i FS-out record slot 8 (record byte offset 16*FSOUT_BI=128):
+  //   word0 = FragDepth (f32; shader-stored via the builtin path)
+  //   word1 = flags: bit0 discarded (OpKill/Terminate/demote)
+  //   word2 = SampleMask — 0xFFFFFFFF (single-sample default)
+  //   word3 = 0
+  localparam int unsigned APU_SH_FSOUT_BI      = 8;
+  localparam logic [31:0] APU_SH_FSO_DISCARD   = 32'h0000_0001;
   // varying/attribute records, 16 B per location, fixed stride:
   //   VS-in  record (per vertex):   attribute Location l at 16*l            stride APU_SH_ATTR_STRIDE = 16*APU_SH_VARY_LOCS
   //   VS-out record (per vertex):   Position at 0, Location l at 16*(1+l)  stride APU_SH_VARY_STRIDE = 16*(1+APU_SH_VARY_LOCS)
@@ -245,6 +257,12 @@ package g6lc_apu_sh_pkg;
     logic [3:0]  em;
     logic [7:0]  in_mask;
     logic [7:0]  out_mask;
+    // G3a-i: entry.word3[27] — the FS module writes FragDepth or
+    // contains kill/terminate/demote → late-Z
+    logic        fs_late;
+    // G3a-i: entry.word3[26] — the FS module declares builtin 22 on an
+    // Output (slot-8 word0 carries a shader-written FragDepth)
+    logic        fs_fdepth;
   } apu_sh_entry_t;
 
   // ---- commit request/completion ------------------------------------
@@ -322,7 +340,11 @@ package g6lc_apu_sh_pkg;
     APU_SH_TBL_REGMAP = 4'd6,   // 1 word/id
     APU_SH_TBL_INIT   = 4'd7,   // 2 words/entry
     APU_SH_TBL_ENTRY  = 4'd8,   // 4 words (entry record)
-    APU_SH_TBL_BLOCK  = 4'd9    // 1 word/label id -> pc + valid
+    APU_SH_TBL_BLOCK  = 4'd9,   // 1 word/label id -> pc + valid
+    // G3a-i: function table (per function id) + param RF-index table
+    APU_SH_TBL_FUNC   = 4'd10,  // 2 words: {off16,nparam4,pbase12}
+                              //          + param-id list
+    APU_SH_TBL_PARAM  = 4'd11   // 1 word: param pbase+k -> rf row
   } apu_sh_tbl_e;
 
 endpackage

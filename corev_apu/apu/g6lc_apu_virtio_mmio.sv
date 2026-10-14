@@ -15,7 +15,12 @@ module g6lc_apu_virtio_mmio
   import g6lc_apu_pkg::*;
 #(
     parameter apu_cfg_t     ApuCfg   = ApuP1Transport,
-    parameter int unsigned  AddrWidth = 16
+    parameter int unsigned  AddrWidth = 16,
+    // reset-ack watchdog: a stuck/absent backend must not wedge the
+    // guest bus — the device-side reset completes (queues quiesced,
+    // status cleared) 2**ResetAckWaitLog2 cycles after dev_reset if
+    // fw_reset_ack_i never arrives
+    parameter int unsigned  ResetAckWaitLog2 = 10
 ) (
     input  logic        clk_i,
     input  logic        rst_ni,
@@ -102,7 +107,7 @@ module g6lc_apu_virtio_mmio
   // backend latency (vgsys apmem flush + eng_rst_n, tens of cycles), but a
   // device must never wedge the reg bus on a control-plane ack that may
   // never come (backend-less transports with no firmware agent).
-  logic [9:0] rst_wait_q;
+  logic [ResetAckWaitLog2-1:0] rst_wait_q;
   logic [63:0] driver_features_q;
   logic [31:0] device_features_sel_q, driver_features_sel_q, queue_sel_q;
   logic [1:0] irq_status_q;
@@ -343,7 +348,7 @@ module g6lc_apu_virtio_mmio
         rst_wait_q <= '0;
         notify_pending_q <= '0;
       end else if (reset_pending_q) begin
-        rst_wait_q <= rst_wait_q + 10'd1;
+        rst_wait_q <= rst_wait_q + ResetAckWaitLog2'(1);
         if (fw_reset_ack_i || &rst_wait_q) begin
           for (int q = 0; q < NumQueues; q++) vq_q[q] <= '0;
           notify_pending_q <= '0;

@@ -31,6 +31,11 @@
 // storage space, comp1 = tag {flags[3:0], binding[7:0], set[7:0],
 // builtin[7:0], storage[3:0]}, comps 2-3 = 0.  Enable=0 ties every
 // output off with no datapath.
+//
+// Determinant/MatrixInverse run a stored-program micro-sequence read
+// from DM_PROG in include/g6lc_apu_dmprog.svh — a generated file
+// (tools/shader/gen_dmprog.py; `gen_dmprog.py --check` is the
+// run-apu-regress.sh `dmprog` freshness suite).
 
 module g6lc_apu_shwave
   import g6lc_apu_vn_pkg::*;
@@ -52,6 +57,7 @@ module g6lc_apu_shwave
   parameter int unsigned ShaderBudget  = 32'h0010_0000,
   parameter int unsigned WaitBound     = 32'd4096,
   parameter int unsigned CfDepth       = 8,
+  parameter int unsigned CallDepth     = 8,     // G3a-i call-stack bound
   parameter bit          MatHelperEn   = 1'b0   // §8 — unused in 4b
 ) (
   input  logic         clk_i,
@@ -84,6 +90,13 @@ module g6lc_apu_shwave
   input  logic [31:0]  blk_data_i,
   output logic [9:0]   phi_id_o,
   input  logic [159:0] phi_data_i,
+  // G3a-i: function table row per OpFunction id {nparams[31:28],
+  // param-table base [27:16], OpFunction word offset [15:0]}; the
+  // param table holds {4'h0, value-rows[11:8], rf row[7:0]} per param
+  output logic [9:0]   func_id_o,
+  input  logic [31:0]  func_data_i,
+  output logic [9:0]   parm_id_o,
+  input  logic [15:0]  parm_data_i,
   input  logic [127:0] entry_data_i,
   // guest memory word port (64-bit): request held until mem_ready_i,
   // exactly one mem_rvalid_i response per request (writes included,
@@ -118,6 +131,7 @@ module g6lc_apu_shwave
     assign memb_id_o = '0;  assign rm_id_o = '0;
     assign init_id_o = '0;  assign blk_id_o = '0;
     assign phi_id_o = '0;
+    assign func_id_o = '0;  assign parm_id_o = '0;
     assign mem_re_o = 1'b0; assign mem_we_o = 1'b0;
     assign mem_addr_o = '0; assign mem_wdata_o = '0;
     assign mem_wstrb_o = '0;
@@ -129,6 +143,7 @@ module g6lc_apu_shwave
                     (|push_i) | (|prog_data_i) | (|type_data_i) |
                     (|const_data_i) | (|memb_data_i) | (|rm_data_i) |
                     (|init_data_i) | (|blk_data_i) | (|phi_data_i) |
+                    (|func_data_i) | (|parm_data_i) |
                     (|entry_data_i) | (|mem_rdata_i) | mem_ready_i |
                     mem_rvalid_i | mem_err_i |
                     ot_req_ready_i | ot_cpl_valid_i | (|ot_cpl_i) |
@@ -222,7 +237,21 @@ module g6lc_apu_shwave
       W_TXN,                           // next lane / wave done
       W_TXW0, W_TXW1,                  // image store beats
       W_TXE0, W_TXE1, W_TXE2,          // store encode + sRGB search
-      W_TXQ                            // query results
+      W_TXQ,                           // query results
+      // G3a-i: OpFunctionCall — func row fetch, param copy loop,
+      // frame push
+      W_FN0, W_FN1, W_FN2, W_FN3, W_FN4, W_FN5, W_FN6,
+      // OpReturnValue value copy + commit; kill/demote frame drain pop
+      W_FR0, W_FR1, W_FRC, W_FRP,
+      // FS-out record slot 8 tail write (flags/SampleMask words)
+      W_F8A, W_F8B,
+      // atomic RMW (sbuf: W_LSC -> W_ATR -> W_ATC -> W_ATW; WG:
+      // W_ATS0 -> W_ATS1); both resume at W_LSA
+      W_ATR, W_ATC, W_ATW, W_ATS0, W_ATS1,
+      W_WB2,                           // second result row (149-152)
+      // Determinant/MatrixInverse micro-program (DM_PROG): operand
+      // column staging, step issue, step retire, result-row flush
+      W_DM0, W_DM1, W_DMS, W_DMN, W_DMF
     } st_e;
     st_e st_q, ret_q;
 
@@ -389,6 +418,75 @@ module g6lc_apu_shwave
     logic [15:0]  wsw_q;              // scheduler wave switches
     logic [15:0]  nbar_q;             // OpControlBarrier executions
     logic [15:0]  nmem_q;             // OpMemoryBarrier executions
+    // ---- G3a-i: call stack, dead lanes, atomics, det/inv ----------
+    // Per-wave call frame stack (parameter CallDepth).  A frame says
+    // which lanes are still inside the callee (cfln) and which have
+    // already returned or been killed out of it (cfdn) — a lane in
+    // cfdn resumes at cfret once cfln drains.  Divergent calls run the
+    // callee with the caller's lane mask; lanes parked on the merge
+    // label stay in the cf entries (same rule as a divergent branch).
+    localparam int unsigned CLD = (CallDepth > 0) ? CallDepth : 1;
+    logic [15:0]  cfret_q [MaxWaves][CLD];   // return word offset
+    logic [RI-1:0] cres_q [MaxWaves][CLD];   // result RF row base
+    logic [3:0]   cresn_q [MaxWaves][CLD];   // result row count
+    logic [9:0]   cclbl_q [MaxWaves][CLD];   // caller block label
+    logic [LAN-1:0] cfln_q [MaxWaves][CLD];  // lanes inside callee
+    logic [LAN-1:0] cfdn_q [MaxWaves][CLD];  // lanes done with callee
+    logic [3:0]   ccfn_q  [MaxWaves][CLD];   // cf depth at push: the
+                                           // unwind scan never descends
+                                           // below the top frame's mark
+    logic [4:0]   csp_q   [MaxWaves];        // call-stack depth
+    // dead lanes: killed/demoted — registers keep feeding quad
+    // derivatives, but stores/image-writes/atomics/record writes are
+    // suppressed; a killed lane also leaves the active mask (it joins
+    // the top frame's cfdn when inside a callee, else exits the wave)
+    logic [LAN-1:0] dead_q  [MaxWaves];
+    // FS helper-lane mask from the dispatch record (imm[5],imm[6]):
+    // record r of the batch is a helper iff ghelp_q[r]
+    logic [63:0]  ghelp_q;
+    wire  [LAN-1:0] hlp_w;             // helper bit per current lane
+    assign hlp_w = ghelp_q[RL'(wave_q)*LAN +: LAN];
+    // OpFunctionCall cursor state
+    logic [31:0]  frow_q;              // latched func table row
+    logic [3:0]   fpk_q;               // param cursor
+    logic [3:0]   fkr_q;               // param row copy cursor
+    logic [15:0]  fpr_q;               // latched param table row
+    logic [RI-1:0] faidx_q;            // arg rf row base
+    logic [1:0]   fatag_q;             // arg tag (const/reg)
+    // atomic op bookkeeping
+    logic         ls_atom_q;           // in-flight LSU pass is an atomic
+    logic         ls_dyn_q;            // reserved: dynamic-indexed store
+    logic         ls_ps_q;             // pointer rides va1 (not va0):
+                                       // ext ops that store via a ptr
+    logic         ls_tsrc_q;           // store data = t1 (Modf/Frexp)
+    logic         ls_wbb_q;            // store tail still commits wb
+    logic [15:0]  at_op_q;             // opcode of in-flight atomic
+    logic [31:0]  at_old_q;            // fetched old word
+    logic [31:0]  at_new_q;            // RMW result being written back
+    // call result shape (latched at W_TY1 — the frame records it so
+    // OpReturnValue copies the right row count into the caller's reg)
+    logic [15:0]  rsz_q;               // result type byte size
+    logic [3:0]   resn_q;              // result RF row count
+    // DM (Determinant/MatrixInverse) micro-program: DM_PROG steps are
+    // {fop[1:0], sa{mode,sel}, ca, sb{mode,sel}, cb, dst} executed as
+    // scalar fp jobs (comp 0 of every lane); matrix operand columns
+    // stage in t0/t1/t2/ma, temps in dtm, inverse elements in dres.
+    vt_t          dtm_q [4];           // 16 temps, comp k&3 of dtm[k>>2]
+    vt_t          dres_q[4];           // inverse result columns
+    logic [8:0]   dmp_q;               // program counter
+    logic [2:0]   dmcol_q;             // column fetch/flush cursor
+    logic         jneg_q;              // negate fma operand a this job
+    logic [1:0]   jca_q, jcb_q, jcc_q; // per-slot comp for cmode==3
+    logic [3:0]   jdtx_q;              // dtm/dres index for jdst 4/5
+    // FS slot-8 tail write lane/word cursors + data
+    logic [3:0]   f8l_q;
+    logic [4:0]   f8b_q;               // byte offset within slot 8
+    logic [31:0]  f8d_q;               // word being written
+    logic         fslate_q;            // entry fs_late (gates the F8 tail)
+    // second result row flag (struct {lo,hi} results + ext ops that
+    // split their answer across two RF rows)
+    logic         wb2_q;
+    logic         dmph_q;              // DM phase: 0 stage, 1 flush
     // instruction state
     logic [15:0]  opc_q, wc_q;
     logic [31:0]  ops_q [OPB];
@@ -457,7 +555,7 @@ module g6lc_apu_shwave
     logic [4:0]   xop_q;          // ext inst number / job op
     logic [1:0]   jmode_q;        // 0 fma-vec, 1 dsq, 2 cvt, 3 nc
     logic [6:0]   ja_q, jb_q, jc_q; // {cmode[1:0], src[4:0]}
-    logic [1:0]   jdst_q;         // 0 wb, 1 t0, 2 t1, 3 t2
+    logic [2:0]   jdst_q;         // 0 wb, 1 t0, 2 t1, 3 t2, 4 dtm, 5 dres
     vt_t          t0_q, t1_q, t2_q;
     logic [2:0]   tc_q;           // iterating comp for serial units
     logic         jdot_q;         // fma dot-product mode
@@ -503,7 +601,7 @@ module g6lc_apu_shwave
     logic [9:0]   oty_id_q, cmb_q;
     logic [15:0]  al_sz_q, al_off_q, al_st_q;
     logic [6:0]   xnum_q;
-    logic [1:0]   ca_q, cb_q, ccc_q;
+    logic [1:0]   ccc_q;
     // int divider (per lane)
     logic [31:0]  dv_d_q [LAN], dv_q_q [LAN], dv_r_q [LAN];
     logic         dv_as_q [LAN], dv_bs_q [LAN];
@@ -556,7 +654,14 @@ module g6lc_apu_shwave
         146,147,148,164,165,166,167,168,169,170,171,172,173,174,175,
         176,177,178,179,180,181,182,183,184,185,186,187,188,189,190,
         191,194,195,196,197,198,199,200,
-        207,208,209,210,211,212,213,214,215,245:
+        207,208,209,210,211,212,213,214,215,245,
+        // G3a-i: Undef, dynamic vec ops, Carry/Borrow/MulExtended,
+        // Any/All/IsNan/IsInf, FRem/FMod, bitfield family, atomics
+        // (227-242 minus Store), FunctionCall, IsHelperInvocationEXT
+        1,77,78,83,140,141,149,150,151,152,154,155,156,157,
+        201,202,203,204,205,
+        227,229,230,232,233,234,235,236,237,238,239,240,241,242,
+        57,5381:
           f_has_rty = 1'b1;
         default: f_has_rty = 1'b0;
       endcase
@@ -581,7 +686,18 @@ module g6lc_apu_shwave
                f_nva = 3'd1;              // G2b derivative ops: 1 operand
         86:      f_nva = 3'd2;              // SampledImage: img,smp
         103:     f_nva = 3'd2;              // QuerySizeLod: img,lod
-        0,54,56,59,224,225,245,246,247,248,249,253,255:
+        // G3a-i
+        78:      f_nva = 3'd3;              // VectorInsertDynamic
+        201:     f_nva = 3'd4;              // BitFieldInsert
+        202,203: f_nva = 3'd3;              // BitField(S|U)Extract
+        83,154,155,156,157,204,205:
+                 f_nva = 3'd1;
+        227:     f_nva = 3'd1;              // AtomicLoad: ptr
+        230:     f_nva = 3'd3;              // CompExchange: ptr,val,cmp
+        228,229,232,233,234,235,236,237,238,239,240,241,242:
+                 f_nva = 3'd2;              // atomic: ptr,value
+        0,54,56,59,224,225,245,246,247,248,249,253,255,
+        1,57,252,254,4416,5380,5381:
                  f_nva = 3'd0;
         default: f_nva = 3'd2;
       endcase
@@ -594,6 +710,11 @@ module g6lc_apu_shwave
       else if (o == 95 || o == 88)      // operand mask word at oq[4]
         f_opid = (k == 0) ? oq[2] : (k == 1) ? oq[3] : oq[5];
       else if (o == 12)                 f_opid = oq[4 + k];
+      else if (o == 228)                // AtomicStore: ptr,scope,sem,val
+        f_opid = (k == 0) ? oq[0] : oq[3];
+      else if (o >= 227 && o <= 242)    // atomic: ptr, scope, sem,
+        f_opid = (k == 0) ? oq[2]       // value[, cmp]
+               : (k == 1) ? oq[5] : oq[6];
       else                              f_opid = oq[2 + k];
     endfunction
     function automatic logic [9:0] f_opid10(input logic [15:0] o,
@@ -641,6 +762,12 @@ module g6lc_apu_shwave
           // flush in rast keeps it constant for the whole batch)
           APU_SH_BI_FRONTFACING:   f_bi = (c == 0)
                                           ? {31'h0, frontf_q} : 0;
+          // G3a-i: gl_HelperInvocation — same value OpIsHelperInvocationEXT
+          // returns (helper bit or demoted/killed lane)
+          APU_SH_BI_HELPER:        f_bi = (c == 0)
+                                          ? {31'h0, hlp_w[l] |
+                                                    dead_q[wave_q][l]}
+                                          : 0;
           default: f_bi = 0;
         endcase
       end
@@ -838,7 +965,16 @@ module g6lc_apu_shwave
                          S_TX = 15,                    // 5b tex staging
                          S_VDA = 16, S_VDB = 17,       // G2b quad-lane
                          S_AT0 = 18, S_AT1 = 19,       // |t0|,|t1|
-                         S_N127 = 20;                  // -127.0f
+                         S_N127 = 20,                  // -127.0f
+                         S_DT0 = 21, S_DT1 = 22,       // G3a-i det temps
+                         S_DT2 = 23, S_DT3 = 24,
+                         S_DR0 = 25, S_DR1 = 26,       // G3a-i inv cols
+                         S_DR2 = 27, S_DR3 = 28,
+                         S_XK = 29,                    // xk_q literal
+                         S_NEG1 = 30;                  // -1.0f
+    // xk_q: per-extinst literal operand (pack scale factors, etc.),
+    // latched at dispatch before the microsequence runs
+    logic [31:0]  xk_q;
     // quad-lane remap for derivative ops (G2b): quads are lanes
     // {4k..4k+3} of a wave; sel = 0 self, 1 l|1, 2 l&~1, 3 l|2,
     // 4 l&~2, 5 quad base, 6 base+1, 7 base+2
@@ -860,15 +996,15 @@ module g6lc_apu_shwave
     endfunction
     function automatic logic [31:0] f_src(input logic [6:0] s,
                                           input logic [3:0] l,
-                                          input logic [2:0] c);
+                                          input logic [2:0] c,
+                                          input logic [1:0] ci = 0);
       logic [2:0] cc;
       begin
         unique case (s[6:5])
           2'd1: cc = 3'd0;                    // broadcast comp0
           2'd2: cc = jrev_q ? 3'(ncomp_q - 3'd1 - {2'b0, tc_q})
                             : {2'b0, tc_q};   // iterate comp (rev for dot)
-          2'd3: cc = {1'b0, ((s[4:0] == S_V0 || s[4:0] == S_MA)
-                             ? ca_q : cb_q)};
+          2'd3: cc = {1'b0, ci};              // G3a-i: per-slot comp
           default: cc = c;                    // per-unit comp
         endcase
         unique case (s[4:0])
@@ -881,6 +1017,14 @@ module g6lc_apu_shwave
           S_T2:    f_src = t2_q[l][cc];
           S_MA:    f_src = ma_q[l][cc];
           S_MB:    f_src = mb_q[l][cc];
+          S_DT0:   f_src = dtm_q[0][l][cc];
+          S_DT1:   f_src = dtm_q[1][l][cc];
+          S_DT2:   f_src = dtm_q[2][l][cc];
+          S_DT3:   f_src = dtm_q[3][l][cc];
+          S_DR0:   f_src = dres_q[0][l][cc];
+          S_DR1:   f_src = dres_q[1][l][cc];
+          S_DR2:   f_src = dres_q[2][l][cc];
+          S_DR3:   f_src = dres_q[3][l][cc];
           S_TX:    f_src = txfa_q[cc];
           // G2b: quad-lane derivative operands read the remapped lane
           // of operand slot dva_q; an inactive source lane reads 0
@@ -896,19 +1040,26 @@ module g6lc_apu_shwave
           S_THREE: f_src = 32'h4040_0000;
           S_NEG2:  f_src = 32'hC000_0000;
           S_HALF:  f_src = 32'h3F00_0000;
+          S_NEG1:  f_src = 32'hBF80_0000;
+          S_XK:    f_src = xk_q;
           default: f_src = 32'h0;
         endcase
       end
     endfunction
-    // unit job descriptor: jmode 0=fma-vec,1=dsq,2=cvt,3=nc
+    // unit job descriptor: jmode 0=fma-vec,1=dsq,2=cvt,3=nc;
+    // ac/bc/cc2 = per-slot comp for cmode==3 operands (G3a-i)
     task automatic jset(input logic [1:0] jm, input logic [4:0] xo,
                         input logic [6:0] a, b, c,
-                        input logic [1:0] dst, input logic dot,
+                        input logic [2:0] dst, input logic dot,
                         input st_e ret, input logic uccc = 1'b0,
-                        input logic rev = 1'b0);
+                        input logic rev = 1'b0,
+                        input logic [1:0] ac = 0, bc = 0, cc2 = 0,
+                        input logic neg = 1'b0, input logic [3:0] dx = 0);
       jmode_q <= jm; xop_q <= xo; ja_q <= a; jb_q <= b; jc_q <= c;
       jdst_q <= dst; jdot_q <= dot; tc_q <= '0; ret_q <= ret;
       jucc_q <= uccc; jrev_q <= rev;
+      jca_q <= ac; jcb_q <= bc; jcc_q <= cc2; jneg_q <= neg;
+      jdtx_q <= dx;
       fu_got_q <= '0; fu_dn_q <= '0;
       dq_got_q <= '0; dq_dn_q <= '0;
       cv_got_q <= '0; cv_dn_q <= '0;
@@ -917,14 +1068,18 @@ module g6lc_apu_shwave
               : (jm == 2) ? W_CVT0 : W_NC0;
     endtask
 
-    // write unit result into dst register for lane l comp c
-    task automatic jstore(input logic [1:0] dst, input logic [3:0] l,
+    // write unit result into dst register for lane l comp c;
+    // G3a-i dsts 4/5 write the DM temp/result banks at jdtx_q
+    // ({reg[3:2],comp[1:0]}) — the comp arg is ignored for those
+    task automatic jstore(input logic [2:0] dst, input logic [3:0] l,
                           input logic [2:0] c, input logic [31:0] v);
       unique case (dst)
-        2'd0: wb_q[l][c] <= v;
-        2'd1: t0_q[l][c] <= v;
-        2'd2: t1_q[l][c] <= v;
-        default: t2_q[l][c] <= v;
+        3'd0: wb_q[l][c] <= v;
+        3'd1: t0_q[l][c] <= v;
+        3'd2: t1_q[l][c] <= v;
+        3'd3: t2_q[l][c] <= v;
+        3'd4: dtm_q[jdtx_q[3:2]][l][jdtx_q[1:0]] <= v;
+        default: dres_q[jdtx_q[3:2]][l][jdtx_q[1:0]] <= v;
       endcase
     endtask
 
@@ -986,9 +1141,10 @@ module g6lc_apu_shwave
           for (int l = 0; l < LAN; l++)
             for (int c = 0; c < VEC; c++) begin
               if (c < ncomp_q) begin
-                fma_ops[l][c][0] = f_src(ja_q, 4'(l), 3'(c));
-                fma_ops[l][c][1] = f_src(jb_q, 4'(l), 3'(c));
-                fma_ops[l][c][2] = f_src(jc_q, 4'(l), 3'(c));
+                fma_ops[l][c][0] = f_src(ja_q, 4'(l), 3'(c), jca_q)
+                                   ^ {jneg_q, 31'h0};
+                fma_ops[l][c][1] = f_src(jb_q, 4'(l), 3'(c), jcb_q);
+                fma_ops[l][c][2] = f_src(jc_q, 4'(l), 3'(c), jcc_q);
                 fma_iv[l][c] = (st_q == W_FU0) && (act_w[l]) &&
                                !fu_got_q[l][c] &&
                                (jdot_q ? (c == 0) : 1'b1) &&
@@ -1000,8 +1156,8 @@ module g6lc_apu_shwave
         2'd1: begin                              // divsqrt, comp tc
           dq_op = xop_q[0] ? fpnew_pkg::SQRT : fpnew_pkg::DIV;
           for (int l = 0; l < LAN; l++) begin
-            dq_ops[l][0] = f_src(ja_q, 4'(l), tc_q);
-            dq_ops[l][1] = f_src(jb_q, 4'(l), tc_q);
+            dq_ops[l][0] = f_src(ja_q, 4'(l), tc_q, jca_q);
+            dq_ops[l][1] = f_src(jb_q, 4'(l), tc_q, jcb_q);
             dq_iv[l] = (st_q == W_DQ0) && (act_w[l]) && !dq_got_q[l] &&
                        (!tx_1lane_q || 4'(l) == {1'b0, ls_lane_q[2:0]});
           end
@@ -1011,7 +1167,7 @@ module g6lc_apu_shwave
           cv_rnd = fpnew_pkg::roundmode_e'(xop_q[3:1]);
           cv_mod = xop_q[4];
           for (int l = 0; l < LAN; l++) begin
-            cv_ops[l] = f_src(ja_q, 4'(l), tc_q);
+            cv_ops[l] = f_src(ja_q, 4'(l), tc_q, jca_q);
             cv_iv[l] = (st_q == W_CVT0) && (act_w[l]) && !cv_got_q[l] &&
                        (!tx_1lane_q || 4'(l) == {1'b0, ls_lane_q[2:0]});
           end
@@ -1021,8 +1177,8 @@ module g6lc_apu_shwave
           nc_rnd = fpnew_pkg::roundmode_e'(xop_q[3:1]);
           nc_mod = xop_q[4];
           for (int l = 0; l < LAN; l++) begin
-            nc_ops[l][0] = f_src(ja_q, 4'(l), tc_q);
-            nc_ops[l][1] = f_src(jb_q, 4'(l), tc_q);
+            nc_ops[l][0] = f_src(ja_q, 4'(l), tc_q, jca_q);
+            nc_ops[l][1] = f_src(jb_q, 4'(l), tc_q, jcb_q);
             nc_iv[l] = (st_q == W_NC0) && (act_w[l]) && !nc_got_q[l] &&
                        (!tx_1lane_q || 4'(l) == {1'b0, ls_lane_q[2:0]});
           end
@@ -1167,7 +1323,7 @@ module g6lc_apu_shwave
 
     // ---- shmod read port addresses ------------------------------------------
     logic [15:0] pa_w;
-    logic [9:0]  ty_w, rm_w, mb_w;
+    logic [9:0]  ty_w, rm_w, mb_w, fn_w, pt_w;
     logic [9:0]  cty2_q, al_ty2_q;
     // OpPhi pair decode (combinational; used by W_PH1 and the rm port)
     wire [4:0]   ph_npi = phr_q[4:0];
@@ -1177,10 +1333,19 @@ module g6lc_apu_shwave
     always_comb begin
       pa_w = pc_q[wave_q];
       if (st_q == W_LD0) pa_w = pc_q[wave_q] + {10'h0, vk_q} + 1;
-      ty_w = '0; rm_w = '0; mb_w = '0;
+      ty_w = '0; rm_w = '0; mb_w = '0; fn_w = '0; pt_w = '0;
       unique case (st_q)
         W_TY0:  ty_w = ops_q[0][9:0];
         W_OT0:  ty_w = oty_id_q;
+        W_FN0:  begin                            // callee row + result rm
+          fn_w = ops_q[2][9:0];
+          rm_w = ops_q[1][9:0];
+        end
+        W_FN2:  begin                            // param row + arg rm
+          pt_w = 10'(frow_q[27:16] + 12'(fpk_q));
+          rm_w = (3 + 32'(fpk_q) < OPB) ? ops_q[3 + fpk_q][9:0] : '0;
+        end
+        W_FR0:  rm_w = ops_q[0][9:0];            // return value id
         W_CC0:  ty_w = vty_q[vk_q[1:0]];
         W_CM0:  ty_w = vty_q[vk_q[1:0]];
         W_MS0:  ty_w = vty_q[0];
@@ -1208,6 +1373,8 @@ module g6lc_apu_shwave
     assign const_id_o  = (st_q == W_PH2) ? phv_c[9:0] : res_id_q;
     assign memb_id_o   = mb_w;
     assign rm_id_o     = rm_w;
+    assign func_id_o   = fn_w;
+    assign parm_id_o   = pt_w;
     assign init_id_o   = init_i_q[9:0];
     assign blk_id_o    = (st_q == W_CF0 && cf_jok) ? cf_jmp
                                                  : ops_q[0][9:0];
@@ -1215,6 +1382,7 @@ module g6lc_apu_shwave
 
     // ---- integer combinational ALU ------------------------------------------
     vt_t int_alu;
+    vt_t int_alu2;                   // G3a-i: second result row
     always_comb begin
       int_alu = '0;
       unique case (opc_q)
@@ -1293,6 +1461,98 @@ module g6lc_apu_shwave
                int_alu[l][c] =
                  (|va_q[0][l][(ot_comps_q > 1) ? c[1:0] : 2'd0])
                  ? va_q[1][l][c] : va_q[2][l][c];
+        // ---- G3a-i scalar/vector misc --------------------------------
+        1,83:  for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+                 int_alu[l][c] = (opc_q == 1) ? 32'h0 : va_q[0][l][c];
+        // OpVectorExtractDynamic: comp index = va1[l][0] (&3 wrap)
+        77:    for (int l = 0; l < LAN; l++)
+                 int_alu[l][0] = va_q[0][l][va_q[1][l][0][1:0]];
+        // OpVectorInsertDynamic: index = va2[l][0] (&3), value = va1
+        78:    for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+                 int_alu[l][c] = (c[1:0] == va_q[2][l][0][1:0])
+                               ? va_q[1][l][0] : va_q[0][l][c];
+        // OpIAddCarry / OpISubBorrow / Op{U,S}MulExtended: struct
+        // result = flat interleaved {lo,hi} word pairs per input comp
+        // (model order) — comps 0/1 → row 0 via int_alu, comps 2/3 →
+        // row 1 via int_alu2 (W_WB2 writes it)
+        149,150,151,152:
+          for (int l = 0; l < LAN; l++) for (int c = 0; c < 4; c++) begin
+            logic [63:0] p;
+            logic [31:0] lo, hi;
+            if (opc_q == 151) begin
+              p = {32'h0, va_q[0][l][c >> 1]} *
+                  {32'h0, va_q[1][l][c >> 1]};
+              lo = p[31:0]; hi = p[63:32];
+            end else if (opc_q == 152) begin
+              p = 64'($signed(va_q[0][l][c >> 1]) *
+                      $signed(va_q[1][l][c >> 1]));
+              lo = p[31:0]; hi = p[63:32];
+            end else begin
+              p = (opc_q == 149)
+                  ? 64'({1'b0, va_q[0][l][c >> 1]} +
+                        {1'b0, va_q[1][l][c >> 1]})
+                  : 64'({1'b0, va_q[0][l][c >> 1]} -
+                        {1'b0, va_q[1][l][c >> 1]});
+              lo = p[31:0];
+              hi = (opc_q == 149)
+                   ? 32'(p[32])
+                   : 32'(va_q[0][l][c >> 1] < va_q[1][l][c >> 1]);
+            end
+            int_alu[l][c] = c[0] ? hi : lo;
+          end
+        154:   for (int l = 0; l < LAN; l++) begin   // OpAny (comp0)
+                 int_alu[l][0] = {31'h0,
+                   (|va_q[0][l][0]) | (ot_comps_q > 1 && |va_q[0][l][1]) |
+                   (ot_comps_q > 2 && |va_q[0][l][2]) |
+                   (ot_comps_q > 3 && |va_q[0][l][3])};
+               end
+        155:   for (int l = 0; l < LAN; l++) begin   // OpAll (comp0)
+                 int_alu[l][0] = {31'h0,
+                   (|va_q[0][l][0]) & (ot_comps_q < 2 || |va_q[0][l][1]) &
+                   (ot_comps_q < 3 || |va_q[0][l][2]) &
+                   (ot_comps_q < 4 || |va_q[0][l][3])};
+               end
+        156:   for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+                 int_alu[l][c] = {31'h0, f_nan(va_q[0][l][c])};
+        157:   for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+                 int_alu[l][c] = {31'h0,
+                   va_q[0][l][c][30:23] == 8'hFF &&
+                   va_q[0][l][c][22:0] == 0};
+        // OpBitFieldInsert(base,ins,off,cnt): off/cnt are scalars,
+        // base/insert per-comp
+        201:   for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+               begin
+                 logic [31:0] msk;
+                 msk = (va_q[3][l][0] >= 32) ? 32'hFFFF_FFFF :
+                       ((32'h1 << va_q[3][l][0][4:0]) - 1)
+                         << va_q[2][l][0][4:0];
+                 int_alu[l][c] = (va_q[0][l][c] & ~msk) |
+                                 ((va_q[1][l][c] << va_q[2][l][0][4:0])
+                                  & msk);
+               end
+        202:   for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+               begin                                   // SExtract
+                 logic [31:0] r;
+                 r = (va_q[2][l][0] == 0) ? 32'h0 :
+                     (va_q[0][l][c] >> va_q[1][l][0][4:0]) &
+                     ((va_q[2][l][0] >= 32) ? 32'hFFFF_FFFF
+                      : (32'h1 << va_q[2][l][0][4:0]) - 1);
+                 int_alu[l][c] = (va_q[2][l][0] < 32 &&
+                                  va_q[2][l][0] != 0 &&
+                                  r[va_q[2][l][0][4:0] - 1])
+                   ? r | ~((32'h1 << va_q[2][l][0][4:0]) - 1) : r;
+               end
+        203:   for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+               int_alu[l][c] =                          // UExtract
+                   (va_q[2][l][0] == 0) ? 32'h0 :
+                   (va_q[0][l][c] >> va_q[1][l][0][4:0]) &
+                   ((va_q[2][l][0] >= 32) ? 32'hFFFF_FFFF
+                    : (32'h1 << va_q[2][l][0][4:0]) - 1);
+        204:   for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+                 for (int b = 0; b < 32; b++)           // BitReverse
+                   int_alu[l][c][b] = va_q[0][l][c][31 - b];
+        205:   for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+                 int_alu[l][c] = 32'($countones(va_q[0][l][c]));
         // GLSL.std.450 logic-only ops (xnum_q = extinst number)
         12: unique case (xnum_q)
           4:  for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
@@ -1337,11 +1597,214 @@ module g6lc_apu_shwave
           48: for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
                 int_alu[l][c] = t0_q[l][c] ? 32'h0 : 32'h3F80_0000;
                                                        // step: 0 if x<edge
+          // FindILsb / FindUMsb / FindSMsb (per comp)
+          73: for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+              begin
+                int_alu[l][c] = 32'hFFFF_FFFF;
+                for (int b = 0; b < 32; b++)
+                  if (va_q[0][l][c][b] && int_alu[l][c] == 32'hFFFF_FFFF)
+                    int_alu[l][c] = 32'(b);
+              end
+          75: for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+              begin
+                int_alu[l][c] = 32'hFFFF_FFFF;
+                for (int b = 31; b >= 0; b--)
+                  if (va_q[0][l][c][b] && int_alu[l][c] == 32'hFFFF_FFFF)
+                    int_alu[l][c] = 32'(b);
+              end
+          74: for (int l = 0; l < LAN; l++) for (int c = 0; c < VEC; c++)
+              begin
+                logic [31:0] x;
+                x = va_q[0][l][c];
+                if (x == 0 || x == 32'hFFFF_FFFF)
+                  int_alu[l][c] = 32'hFFFF_FFFF;
+                else begin
+                  logic [31:0] v;
+                  v = x[31] ? ~x : x;
+                  int_alu[l][c] = 32'hFFFF_FFFF;
+                  for (int b = 31; b >= 0; b--)
+                    if (v[b] && int_alu[l][c] == 32'hFFFF_FFFF)
+                      int_alu[l][c] = 32'(b);
+                end
+              end
           default: ;
         endcase
         default: ;
       endcase
     end
+
+    // G3a-i: second-row results for the two-word struct ops and the
+    // integer extended results (OpIAddCarry carry, OpISubBorrow borrow,
+    // OpUMulExtended hi, OpSMulExtended hi).
+    always_comb begin
+      int_alu2 = '0;
+      unique case (opc_q)
+        // 149-152 row 1 = interleaved {lo,hi} pairs for source comps
+        // 2 and 3 (model order, see the int_alu arm)
+        149,150,151,152:
+          for (int l = 0; l < LAN; l++) for (int c = 0; c < 4; c++) begin
+            logic [63:0] p;
+            logic [31:0] lo, hi;
+            if (opc_q == 151) begin
+              p = {32'h0, va_q[0][l][(c >> 1) + 2]} *
+                  {32'h0, va_q[1][l][(c >> 1) + 2]};
+              lo = p[31:0]; hi = p[63:32];
+            end else if (opc_q == 152) begin
+              p = 64'($signed(va_q[0][l][(c >> 1) + 2]) *
+                      $signed(va_q[1][l][(c >> 1) + 2]));
+              lo = p[31:0]; hi = p[63:32];
+            end else begin
+              p = (opc_q == 149)
+                  ? 64'({1'b0, va_q[0][l][(c >> 1) + 2]} +
+                        {1'b0, va_q[1][l][(c >> 1) + 2]})
+                  : 64'({1'b0, va_q[0][l][(c >> 1) + 2]} -
+                        {1'b0, va_q[1][l][(c >> 1) + 2]});
+              lo = p[31:0];
+              hi = (opc_q == 149)
+                   ? 32'(p[32])
+                   : 32'(va_q[0][l][(c >> 1) + 2] <
+                         va_q[1][l][(c >> 1) + 2]);
+            end
+            int_alu2[l][c] = c[0] ? hi : lo;
+          end
+        // ExtInst struct results (ModfStruct/FrexpStruct): row 1 holds
+        // the ipart/exp member, staged in t2 during the microsequence;
+        // member1 starts at flat word m0 = member0's comp count, so a
+        // straddling member (m0 < 4, rsz > 16) enters row 1 shifted.
+        12: for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < 4; c++)
+                int_alu2[l][c] =
+                  (c + 4 - 4'(f_nc(ot_comps_q)) < 4)
+                    ? t2_q[l][c + 4 - 4'(f_nc(ot_comps_q))] : 32'h0;
+        default: for (int l = 0; l < LAN; l++)
+                   int_alu2[l] = wb_q[l];
+      endcase
+    end
+
+    // G3a-i: 32-bit integer atomic combinational ALU.  a = old memory
+    // word (sb_rdata on the workgroup path, mem_rdata_i slice on the
+    // SSBO path), b = operand word (va_q[1][lane][0]), c = CAS
+    // comparator (va_q[2][lane][0]).  Atomicity is structural: one LSU,
+    // one outstanding access, and wave_q changes only in W_SCHED —
+    // i.e. between instructions — so the W_AT*/W_LS1 sequence can
+    // never be split by a wave switch.
+    function automatic logic [31:0] f_atomic(
+        input logic [15:0] op, input logic [31:0] a,
+        input logic [31:0] b, input logic [31:0] c);
+      unique case (op)
+        16'd227: f_atomic = a;                        // Load
+        16'd228: f_atomic = b;                        // Store
+        16'd229: f_atomic = b;                        // Exchange
+        16'd230: f_atomic = (a == c) ? b : a;         // CompareExchange
+        16'd232: f_atomic = a + 32'd1;                // IIncrement
+        16'd233: f_atomic = a - 32'd1;                // IDecrement
+        16'd234: f_atomic = a + b;                    // IAdd
+        16'd235: f_atomic = a - b;                    // ISub
+        16'd236: f_atomic = ($signed(a) < $signed(b)) ? a : b;
+        16'd237: f_atomic = (a < b) ? a : b;
+        16'd238: f_atomic = ($signed(a) < $signed(b)) ? b : a;
+        16'd239: f_atomic = (a < b) ? b : a;
+        16'd240: f_atomic = a & b;
+        16'd241: f_atomic = a | b;
+        16'd242: f_atomic = a ^ b;
+        default: f_atomic = a;
+      endcase
+    endfunction
+    wire [31:0] atb_w = va_q[1][ls_lane_q[2:0]][0];
+    wire [31:0] atc_w = va_q[2][ls_lane_q[2:0]][0];
+    wire [31:0] atomic_alu = (st_q == W_ATC)
+        ? f_atomic(at_op_q,
+                   mem_rdata_i[32'(ls_addr_q[2]) * 32 +: 32],
+                   atb_w, atc_w)
+        : f_atomic(at_op_q,
+                   (ls_sc_q == APU_SH_SC_WORKGROUP) ? sb_rdata
+                                                    : sc_rdata,
+                   atb_w, atc_w);
+
+    // ---- G3a-i f32<->f16 and ldexp (bit-exact ports of the model) ----
+    function automatic logic [31:0] f_ldexp(input logic [31:0] w,
+                                            input logic [31:0] e);
+      logic        s;
+      logic [7:0]  ex;
+      logic [22:0] m;
+      logic signed [31:0] ne;
+      logic [23:0] fmn;
+      logic [31:0] r, rem, half;
+      logic [5:0]  sh;
+      logic [4:0]  clz;
+      begin
+        s = w[31]; ex = w[30:23]; m = w[22:0];
+        if (ex == 8'hFF || (ex == 0 && m == 0))
+          f_ldexp = w;                          // inf/nan/zero pass
+        else begin
+          if (ex == 0) begin                    // denormal: normalize
+            clz = 5'd0;
+            for (int i = 22; i >= 0; i--)
+              if (!m[i] && clz == 5'(22 - i)) clz = clz + 1;
+            m  = (m << (clz + 1)) & 23'h7FFFFF;
+            ne = 32'sd1 - $signed({27'h0, clz}) + $signed(e);
+          end else
+            ne = $signed({24'h0, ex}) + $signed(e);
+          if (ne >= 255)
+            f_ldexp = {s, 8'hFF, 23'h0};
+          else if (ne <= 0) begin               // underflow: denorm RNE
+            fmn = {1'b1, m};
+            sh  = 6'(1 - ne);
+            if (sh >= 25) f_ldexp = {s, 31'h0};
+            else begin
+              r    = {8'h0, fmn} >> sh;
+              rem  = {8'h0, fmn} & ((32'h1 << sh) - 1);
+              half = 32'h1 << (sh - 1);
+              if (rem > half || (rem == half && r[0])) r = r + 1;
+              f_ldexp = {s, r[30:0]};           // carry folds into exp
+            end
+          end else
+            f_ldexp = {s, ne[7:0], m};
+        end
+      end
+    endfunction
+
+    // ---- G3a-i DM micro-program (Determinant / MatrixInverse) --------
+    // DM_PROG is generated by tools/shader/gen_dmprog.py and mirrors
+    // spirv_model.py's detn()/matinv() cofactor expansion op-for-op.
+    // The operand matrix is staged column-by-column into dtm_q
+    // (element m[c][r] = flat id c*4+r) before the program runs.
+`include "g6lc_apu_dmprog.svh"
+    wire [29:0] dmi = DM_PROG[dmp_q[8:0]];
+    wire [4:0]  dm_op  = dmi[29:25];
+    wire [6:0]  dm_dd  = dmi[24:18];
+    wire [5:0]  dm_sa  = dmi[17:12], dm_sb = dmi[11:6],
+                dm_sc  = dmi[5:0];
+    // source id → unit operand spec {cmode=3 (per-slot comp), sel}
+    function automatic logic [6:0] dm_ssel(input logic [5:0] id);
+      if (id < 6'd16)       dm_ssel = {2'd3, 5'(S_DT0) + 5'(id[3:2])};
+      else if (id < 6'd28)  dm_ssel = {2'd3, 5'(S_T0) + 5'((id-6'd16)>>2)};
+      else if (id < 6'd44)  dm_ssel = {2'd3, 5'(S_DR0) + 5'((id-6'd28)>>2)};
+      else if (id == 6'd60) dm_ssel = {2'd3, S_ONE};
+      else                  dm_ssel = {2'd3, S_ZERO};
+    endfunction
+    // source comp index (per-slot comp arg) — flat id bits [1:0]
+    function automatic logic [1:0] dm_ci(input logic [5:0] id);
+      dm_ci = (id < 6'd44) ? id[1:0] : 2'd0;
+    endfunction
+    // destination id → {jdst, jdtx/ccc}
+    wire [2:0] dm_jdst = (dm_dd < 7'd16) ? 3'd4 :
+                         (dm_dd < 7'd28) ? 3'(3'd1 + 3'((dm_dd - 7'd16) >> 2)) :
+                         (dm_dd < 7'd44) ? 3'd5 : 3'd0;
+    wire [3:0] dm_jdtx = (dm_dd < 7'd16) ? dm_dd[3:0] :
+                         (dm_dd < 7'd44) ? 4'(dm_dd - 7'd28) : 4'h0;
+    // DM op → unit job: MUL/MULN/FMA/FMAN on the fma unit, DIV on the
+    // divsqrt unit; MOV lowers to ADD(a, 0.0); ADD/SUB use b±c
+    wire [4:0]  dm_xo  = (dm_op == 5'd1 || dm_op == 5'd2) ? 5'd2 :
+                         (dm_op == 5'd3 || dm_op == 5'd8 ||
+                          dm_op == 5'd7) ? 5'd0 :         // DIV: xop[0]=0
+                         (dm_op == 5'd4) ? 5'd1 : 5'd3;
+    wire        dm_neg = (dm_op == 5'd2) || (dm_op == 5'd6);
+    wire [6:0]  dm_sa_w = dm_ssel(dm_sa);
+    wire [6:0]  dm_sb_w = (dm_op == 5'd8) ? dm_ssel(dm_sa)
+                                        : dm_ssel(dm_sb);
+    wire [6:0]  dm_sc_w = (dm_op == 5'd8) ? {2'd3, S_ZERO}
+                                        : dm_ssel(dm_sc);
 
     // stored/loaded word for the current (lane,word) cursor: matrix
     // operands read/write column rows (rf or the latched const row)
@@ -1355,7 +1818,9 @@ module g6lc_apu_shwave
     // in the mat path and must not be used for addressing
     wire [8:0]  ls_flw = {4'h0, lrc_q} * {6'h0, ls_ccn} + {6'h0, lcc_q};
     wire [31:0] ls_wd = !ls_mat_q
-                      ? va_q[1][ls_lane_q[2:0]][ls_comp_q[1:0]]
+                      ? (ls_tsrc_q
+                         ? t1_q[ls_lane_q[2:0]][ls_comp_q[1:0]]
+                         : va_q[1][ls_lane_q[2:0]][ls_comp_q[1:0]])
                       : (otag_q[1] == APU_SH_RT_CONST)
                         ? ocst_q[1][32*({23'h0, ls_flw}) +: 32]
                         : ma_q[ls_lane_q[2:0]][lcc_q];
@@ -1466,16 +1931,105 @@ module g6lc_apu_shwave
             for (int c = 0; c < VEC; c++)
               if (act_w[l] && wbm_q[c]) rf_be[l*16 + c*4 +: 4] = 4'hF;
         end
+        W_WB2: begin                       // struct result: second row
+          rf_req = 1'b1; rf_we = 1'b1;
+          rf_addr = {wave_q, wreg_q + RI'(1)};
+          rf_wdata = int_alu2;
+          for (int l = 0; l < LAN; l++)
+            if (act_w[l]) rf_be[l*16 +: 4] = 4'hF;
+        end
+        W_FN4: begin                       // call: arg row source read
+          if (fatag_q != APU_SH_RT_CONST) begin
+            rf_req = 1'b1;
+            rf_addr = {wave_q, faidx_q + RI'(fkr_q)};
+          end
+        end
+        W_FN5: begin                       // call: param row write
+          rf_req = 1'b1; rf_we = 1'b1;
+          rf_addr = {wave_q, fpr_q[RI-1:0] + RI'(fkr_q)};
+          // W_FN4's rf read lands this cycle; a const arg was fetched
+          // via const_id_o (= res_id_q) through the same window
+          rf_wdata = fatag_q == APU_SH_RT_CONST ? const_data_i[127:0]
+                                                : rf_rdata;
+          for (int l = 0; l < LAN; l++)
+            if (act_w[l]) rf_be[l*16 +: 16] = '1;
+        end
+        W_FR1: begin                       // return-value row source read
+          if (((fkr_q == 0) ? rm_tag : fatag_q) != APU_SH_RT_CONST) begin
+            rf_req = 1'b1;
+            rf_addr = {wave_q, RI'(fkr_q) +
+                       (fkr_q == 0 ? rm_idx[RI-1:0] : faidx_q)};
+          end
+        end
+        W_FRC: begin                       // return-value row write
+          rf_req = 1'b1; rf_we = 1'b1;
+          rf_addr = {wave_q, fpr_q[RI-1:0] + RI'(fkr_q)};
+          rf_wdata = fatag_q == APU_SH_RT_CONST ? const_data_i[127:0]
+                                                : rf_rdata;
+          for (int l = 0; l < LAN; l++)
+            if (act_w[l]) rf_be[l*16 +: 16] = '1;
+        end
+        W_ATS0: begin                      // WG/scratch atomic read
+          if (ls_sc_q == APU_SH_SC_WORKGROUP) begin
+            if (ls_off_q < 32'(SlabBytes)) sb_req = 1'b1;
+            sb_addr = SLWA'(ls_off_q >> 2);
+          end else begin
+            if ((ls_off_q >> 2) < SCW &&
+                ls_off_q < {16'h0, escratch_q}) sc_req = 1'b1;
+            sc_addr = SDW'((32'(wave_q) * LAN + ls_lane_q) * SCW +
+                           (ls_off_q >> 2));
+          end
+        end
+        W_ATS1: begin                      // WG/scratch atomic write
+          if (ls_sc_q == APU_SH_SC_WORKGROUP) begin
+            if (ls_off_q < 32'(SlabBytes)) begin
+              sb_req = 1'b1;
+              sb_we  = (at_op_q != 16'd227);   // AtomicLoad: no write
+            end
+            sb_addr = SLWA'(ls_off_q >> 2);
+            sb_wdata = atomic_alu; sb_be = 4'hF;
+          end else begin
+            if ((ls_off_q >> 2) < SCW &&
+                ls_off_q < {16'h0, escratch_q}) begin
+              sc_req = 1'b1;
+              sc_we  = (at_op_q != 16'd227);
+            end
+            sc_addr = SDW'((32'(wave_q) * LAN + ls_lane_q) * SCW +
+                           (ls_off_q >> 2));
+            sc_wdata = atomic_alu; sc_be = 4'hF;
+          end
+        end
+        W_DM0: begin                       // DM: operand column stage
+          if (!dmph_q && otag_q[0] != APU_SH_RT_CONST) begin
+            rf_req = 1'b1;
+            rf_addr = {wave_q, oidx_q[0] + RI'(dmcol_q)};
+          end
+        end
+        W_DMF: begin                       // DM: flush result column
+          rf_req = 1'b1; rf_we = 1'b1;
+          rf_addr = {wave_q, wreg_q + RI'(dmcol_q)};
+          rf_wdata = wb_q;
+          for (int l = 0; l < LAN; l++)
+            for (int c = 0; c < VEC; c++)
+              if (act_w[l] && c < rcomps_q)
+                rf_be[l*16 + c*4 +: 4] = 4'hF;
+        end
         W_SSB: begin
           if (ls_sc_q == APU_SH_SC_WORKGROUP) begin
             sb_req = 1'b1;
             sb_we = ls_store_q && act_w[ls_lane_q[2:0]] &&
+                    !dead_q[wave_q][ls_lane_q[2:0]] &&
+                    !hlp_w[ls_lane_q[2:0]] &&
                     ((ls_off_q >> 2) < SLW);
             sb_addr = SLWA'(ls_off_q >> 2);
             sb_wdata = ls_wd;
             sb_be = 4'hF;
           end else begin
             sc_req = 1'b1;
+            // Function/Private stores are never suppressed — dead lanes
+            // that still execute are demoted helpers, and Vulkan keeps
+            // their private state (and Output records) live for quad
+            // derivatives; killed lanes left act_w at the kill site.
             sc_we = ls_store_q && act_w[ls_lane_q[2:0]] &&
                     ((ls_off_q >> 2) < SCW) &&
                     (ls_off_q < {16'h0, escratch_q});
@@ -1508,20 +2062,37 @@ module g6lc_apu_shwave
     // the image-store beats (wstrb narrows sub-8B texels)
     wire txr_mem = (st_q == W_TXF0);
     wire txw_mem = (st_q == W_TXW0);
+    // G3a-i: SSBO atomic read-modify-write and the FS-out slot-8 tail beats
+    wire atr_mem = (st_q == W_ATR) || (st_q == W_ATW);
+    wire f8_mem  = (st_q == W_F8A) || (st_q == W_F8B);
     assign mem_re_o    = ((st_q == W_LS1) && ls_mem && !ls_store_q &&
-                          ls_bok_q) || dsc_mem || txr_mem;
+                          ls_bok_q) || (st_q == W_ATR) ||
+                         dsc_mem || txr_mem;
+    // dead/helper lanes lose device-memory stores but keep Output
+    // record stores (per-invocation stream; rast drops them via the
+    // slot-8 discard flag for demoted, helpers are never drawn)
     assign mem_we_o    = ((st_q == W_LS1) && ls_mem && ls_store_q &&
-                          ls_bok_q && act_w[ls_lane_q[2:0]]) ||
-                         txw_mem;
+                          ls_bok_q && act_w[ls_lane_q[2:0]] &&
+                          (!(dead_q[wave_q][ls_lane_q[2:0]] ||
+                             hlp_w[ls_lane_q[2:0]]) || ls_rec_q)) ||
+                         (st_q == W_ATW) || f8_mem || txw_mem;
+    wire [63:0] f8a_w  = ls_addr_q + {59'h0, f8b_q};
     assign mem_addr_o  = dsc_mem ? dsc_addr_q :
                          txr_mem ? txc_addr_q :
+                         f8_mem  ? (f8a_w & ~64'h7) :
                          txw_mem ? ({32'h0, tx_ta_q} & ~64'h7) :
                                    (ls_addr_q & ~64'h7);
-    assign mem_wdata_o = txw_mem ? (tx_stb_q[63:0] <<
+    assign mem_wdata_o = f8_mem ? (f8a_w[2] ? {f8d_q, 32'h0}
+                                           : {32'h0, f8d_q}) :
+                         txw_mem ? (tx_stb_q[63:0] <<
                                     {tx_ta_q[2:0], 3'b000}) :
+                         (st_q == W_ATW)
+                           ? (ls_addr_q[2] ? {at_new_q, 32'h0}
+                                           : {32'h0, at_new_q}) :
                          ls_addr_q[2] ? {ls_wd, 32'h0}
                                       : {32'h0, ls_wd};
-    assign mem_wstrb_o = txw_mem ? tx_wbe_q :
+    assign mem_wstrb_o = f8_mem ? (f8a_w[2] ? 8'hF0 : 8'h0F) :
+                         txw_mem ? tx_wbe_q :
                          ls_addr_q[2] ? 8'hF0 : 8'h0F;
 
     // =========================================================================
@@ -1540,7 +2111,12 @@ module g6lc_apu_shwave
     logic [LAN-1:0] cf_nr [CFD];
     logic [LAN-1:0] cf_np [CFD];
     logic [LAN-1:0] cf_nx [CFD];
-    logic           cf_adv, cf_fin, cf_flt;
+    logic           cf_adv, cf_fin, cf_flt, cf_ret;
+    // unwind floor: inside a callee the reconvergence entries at or
+    // above the pushed frame's marker belong to the caller — the scan
+    // never descends below it (drain → frame pop, not wave finish)
+    wire  [3:0]     cf_floor = (csp_q[wave_q] == 0) ? 4'h0
+                             : ccfn_q[wave_q][csp_q[wave_q] - 5'd1];
     logic [9:0]     ctg_w [LAN];
 
     // pending-lane rule on stack entry e: compute the lowest pending
@@ -1574,7 +2150,7 @@ module g6lc_apu_shwave
         cf_nx[e] = cfx_q[wave_q][e];
       end
       cf_jmp = '0; cf_jok = 1'b0; cf_adv = 1'b0;
-      cf_fin = 1'b0; cf_flt = 1'b0;
+      cf_fin = 1'b0; cf_flt = 1'b0; cf_ret = 1'b0;
       he = -1; stay = '0; park = '0; same = 1'b0; un = 1'b0;
       hit = 1'b0; fnd_t = 1'b0; tg0 = '0;
       for (int l = 0; l < LAN; l++) ctg_w[l] = ctgt_q[wave_q][l];
@@ -1630,13 +2206,26 @@ module g6lc_apu_shwave
             end
           end
           16'd247, 16'd224, 16'd225: cf_adv = 1'b1;
-          // ---- OpReturn / OpFunctionEnd: scrub returning lanes -------
-          16'd253, 16'd56: begin
-            for (int e = 0; e < CFD; e++) begin
-              cf_nr[e] = cf_nr[e] & ~act_w;
-              cf_np[e] = cf_np[e] & ~act_w;
-              cf_nx[e] = cf_nx[e] & ~act_w;
-            end
+          // ---- OpReturn/OpReturnValue / OpFunctionEnd / OpKill /
+          // OpTerminateInvocation: the active lanes leave the current
+          // execution context — scrub them out of every reconvergence
+          // entry.  Return lanes re-enter via the call-frame pop;
+          // killed lanes re-enter dead at the frame pop (or stay dead
+          // at depth 0).
+          16'd253, 16'd254, 16'd56, 16'd252, 16'd4416: begin
+            for (int e = 0; e < CFD; e++)
+              // returns inside a callee scrub the leaving lanes out
+              // of callee-side entries only: the lanes resume at the
+              // frame's cfret and must keep their parked slots in the
+              // caller's entries below the floor (an early-arrived
+              // lane's merge-resume slot is nr[he]).  Kills scrub
+              // everywhere — dead lanes resume nowhere.
+              if (e >= 32'(cf_floor) || opc_q == 16'd252 ||
+                  opc_q == 16'd4416) begin
+                cf_nr[e] = cf_nr[e] & ~act_w;
+                cf_np[e] = cf_np[e] & ~act_w;
+                cf_nx[e] = cf_nx[e] & ~act_w;
+              end
             cf_nact = '0;                           // → unwind below
           end
           // ---- branches ----------------------------------------------
@@ -1708,10 +2297,13 @@ module g6lc_apu_shwave
           default: cf_flt = 1'b1;
         endcase
         // ---- unwind: empty act mask → first entry with work ----------
+        // Inside a callee the scan bottoms out at the frame's marker:
+        // a full drain of callee-side entries pops the frame (cf_ret)
+        // instead of finishing the wave.
         if (!cf_adv && !cf_jok && !cf_flt && cf_nact == '0) begin
           un = 1'b1;
           for (int e = CFD-1; e >= 0; e--) begin
-            if (un && e < cf_nn) begin
+            if (un && e < cf_nn && e >= 32'(cf_floor)) begin
               if (cf_np[e] != '0) begin
                 cf_pick(e, pk_grp, pk_t0);
                 cf_np[e] = cf_np[e] & ~pk_grp;
@@ -1724,9 +2316,15 @@ module g6lc_apu_shwave
                 cf_nact = cf_nr[e]; cf_jmp = cf_nm[e];
                 cf_jok = 1'b1; cf_nn = 4'(e); un = 1'b0;
               end else cf_nn = 4'(e);              // empty → pop, unwind
+            end else if (un && e < 32'(cf_floor)) begin
+              // below the floor: still pop bookkeeping for any stale
+              // entries but never resume them inside the callee
             end
           end
-          if (un) cf_fin = 1'b1;
+          if (un) begin
+            if (csp_q[wave_q] != 0) cf_ret = 1'b1;
+            else                    cf_fin = 1'b1;
+          end
         end
       end
     end
@@ -1848,6 +2446,28 @@ module g6lc_apu_shwave
         nc_got_q <= '0; nc_dn_q <= '0;
         fuact_q <= '0; dqact_q <= '0; cvact_q <= '0; ncact_q <= '0;
         ot_elem_q <= '0; al_ty_q <= '0;
+        // G3a-i: call stack / dead lanes / FS tail / DM microprogram
+        for (int w = 0; w < MaxWaves; w++) begin
+          csp_q[w] <= '0; dead_q[w] <= '0;
+          for (int d = 0; d < CLD; d++) begin
+            cfret_q[w][d] <= '0; cres_q[w][d] <= '0;
+            cresn_q[w][d] <= '0; cclbl_q[w][d] <= '0;
+            cfln_q[w][d] <= '0; cfdn_q[w][d] <= '0;
+            ccfn_q[w][d] <= '0;
+          end
+        end
+        ghelp_q <= '0; frow_q <= '0; fpk_q <= '0; fkr_q <= '0;
+        fpr_q <= '0; fatag_q <= '0; faidx_q <= '0;
+        resn_q <= '0; rsz_q <= '0;
+        f8l_q <= '0; f8b_q <= '0; f8d_q <= '0; fslate_q <= 1'b0;
+        at_old_q <= '0; at_new_q <= '0; at_op_q <= '0;
+        dmph_q <= '0; dmcol_q <= '0; dmp_q <= '0;
+        for (int k = 0; k < 4; k++) begin
+          dtm_q[k] <= '0; dres_q[k] <= '0;
+        end
+        ls_ps_q <= '0; ls_tsrc_q <= '0; ls_wbb_q <= '0;
+        ls_atom_q <= '0; ls_mat_q <= '0; ls_dyn_q <= '0;
+        wb2_q <= '0; xk_q <= '0;
         done_o <= 1'b0;
       end else begin
         done_o <= 1'b0;
@@ -1878,6 +2498,7 @@ module g6lc_apu_shwave
             vbase_q    <= disp_pl_i.imm[127:96];
             inst_q     <= disp_pl_i.imm[159:128];
             frontf_q   <= disp_pl_i.imm[96];   // imm[3].0 (FS)
+            ghelp_q    <= disp_pl_i.imm[223:160];  // imm[5:6] helper mask
             push_n_q <= push_n_i;
             // F5: desc_i stays live (cmdexec holds it through
             // work_done); the record cache is dispatch-scoped, and
@@ -1900,6 +2521,7 @@ module g6lc_apu_shwave
             lx_q <= entry_data_i[39:32]; ly_q <= entry_data_i[47:40];
             lz_q <= entry_data_i[55:48]; ninit_q <= entry_data_i[63:56];
             escratch_q <= entry_data_i[79:64];
+            fslate_q <= entry_data_i[123];  // FS late-Z: slot-8 tail writes
             // graphics wave work: tot = the record count; the lanes of
             // wave w are records w*LAN .. w*LAN+LAN-1
             tot_q <= (gfx_q != APU_SH_GFX_NONE) ? gcnt_q
@@ -1953,6 +2575,11 @@ module g6lc_apu_shwave
                 cprev_q[wave_q][l] <= '0;
                 ctgt_q[wave_q][l]  <= '0;
               end
+              // call stack + dead-lane state are per-dispatch too: a
+              // faulted previous wave (DONE_FAULT leaves csp mid-push)
+              // must not leak into this one
+              csp_q[wave_q]   <= '0;
+              dead_q[wave_q]  <= '0;
               clbl_q[wave_q]  <= '0;
               cfn_q[wave_q]   <= '0;
               wsel_q[wave_q]  <= 1'b0;
@@ -2006,7 +2633,10 @@ module g6lc_apu_shwave
             if (f_has_rty(opc_q)) st_q <= W_TY0;
             else begin
               ncomp_q <= 4'd1;
-              st_q <= (f_nva(opc_q, wc_q) != 0) ? W_RMI : W_EX;
+              // nva==0 result ops (OpUndef) still need the W_RW0
+              // result-row lookup — skipping it leaves wreg_q stale
+              // and W_WB clobbers the previous instruction's row.
+              st_q <= (f_nva(opc_q, wc_q) != 0) ? W_RMI : W_RW0;
             end
           end
           W_TY0: st_q <= W_TY1;
@@ -2014,9 +2644,10 @@ module g6lc_apu_shwave
             rkind_q <= ty_kind; rcomps_q <= ty_comps;
             rcols_q <= ty_cols;
             relem_q <= ty_elem;
+            rsz_q   <= ty_size;
             ncomp_q <= 4'(f_nc(ty_comps));
             vk_q <= '0;
-            st_q <= (nva_q != 0) ? W_RMI : W_EX;
+            st_q <= (nva_q != 0) ? W_RMI : W_RW0;
           end
           W_OT0: st_q <= W_OT1;
           W_OT1: begin
@@ -2099,8 +2730,12 @@ module g6lc_apu_shwave
                    end
               12:  begin
                 xnum_q <= ops_q[3][6:0];
+                // operand-0 shape needed: matrix ops (33/34) and the
+                // vector-geometry family (66,67,69,70,71,72)
                 if (ops_q[3][6:0] == 66 || ops_q[3][6:0] == 67 ||
-                    ops_q[3][6:0] == 69) begin
+                    ops_q[3][6:0] == 69 || ops_q[3][6:0] == 70 ||
+                    ops_q[3][6:0] == 71 || ops_q[3][6:0] == 72 ||
+                    ops_q[3][6:0] == 33 || ops_q[3][6:0] == 34) begin
                   oty_id_q <= vty_q[0]; st_q <= W_OT0;
                 end else st_q <= W_EX;
               end
@@ -2264,6 +2899,8 @@ module g6lc_apu_shwave
               // memory / pointer ops
               61,62: begin
                 ls_store_q <= (opc_q == 62);
+                ls_atom_q <= 1'b0; ls_ps_q <= 1'b0;
+                ls_tsrc_q <= 1'b0; ls_wbb_q <= 1'b0;
                 ls_lane_q <= '0; ls_comp_q <= '0;
                 lcc_q <= '0; lrc_q <= '0;
                 // matrix results/operands walk columns as RF rows
@@ -2359,8 +2996,86 @@ module g6lc_apu_shwave
                   wb_q[l][ops_q[4][1:0]] <= va_q[0][l][0];
                 st_q <= W_WB;
               end
+              // -------------------- G3a-i ---------------------------
+              1:   begin wb_q <= '0;      st_q <= W_WB; end  // Undef
+              83:  begin wb_q <= va_q[0]; st_q <= W_WB; end  // CopyObj
+              // Any/All/IsNan/IsInf + the bitfield family — int_alu
+              154,155,156,157,201,202,203,204,205:
+                   begin wb_q <= int_alu; st_q <= W_WB; end
+              // {lo,hi} struct results pack flat-interleaved word
+              // pairs (4/row): a 2-word scalar result needs comps 0-1
+              // of row 0 — wbm must cover rsz/4 flat words, and the
+              // second row (comps 2/3 pairs in int_alu2) is written
+              // only when the result image actually spans two rows.
+              149,150,151,152: begin
+                wb_q <= int_alu;
+                wb2_q <= (rsz_q > 16'd16);
+                wbm_q <= (rsz_q > 16'd16) ? 4'hF
+                       : 4'((4'b1 << (rsz_q >> 2)) - 1);
+                st_q <= W_WB;
+              end
+              77:  begin                       // VectorExtractDynamic
+                for (int l = 0; l < LAN; l++)
+                  wb_q[l][0] <= va_q[0][l][va_q[1][l][0][1:0]];
+                st_q <= W_WB;
+              end
+              78:  begin                       // VectorInsertDynamic
+                for (int l = 0; l < LAN; l++)
+                  for (int c = 0; c < VEC; c++)
+                    wb_q[l][c] <=
+                      (c == 32'(va_q[2][l][0][1:0])) ? va_q[1][l][0]
+                                                     : va_q[0][l][c];
+                st_q <= W_WB;
+              end
+              // FRem/FMod: q = a/b (div), q' = i2f(f2i(q, RTZ|RDN)),
+              // r = a - q'*b — mirrors the model's fdiv→int→fsub order
+              140,141: unique case (xq_q)
+                0: jset(1, 5'd0, {2'd0, S_V0}, {2'd0, S_V1}, 7'h0,
+                        1, 0, W_XCNT);
+                1: jset(2, {1'b0, (opc_q == 16'd140)
+                             ? fpnew_pkg::RTZ[2:0]
+                             : fpnew_pkg::RDN[2:0], 1'b0},
+                        {2'd0, S_T0}, 7'h0, 7'h0, 2, 0, W_XCNT);
+                2: jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
+                        {2'd0, S_T1}, 7'h0, 7'h0, 2, 0, W_XCNT);
+                3: jset(0, 5'd2, {2'd0, S_V1}, {2'd0, S_T1},
+                        {2'd0, S_ZERO}, 2, 0, W_XCNT);
+                default:
+                  jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_V0},
+                       {2'd0, S_T1}, 0, 0, W_WB);
+              endcase
+              // ---- G3a-i atomics: lane-serial RMW through the LSU ---
+              // W_LS0 resolves the pointer word's storage class;
+              // SSBO goes through the descriptor path + W_ATx RMW,
+              // Workgroup through W_ATSx on the slab port.
+              227,228,229,230,232,233,234,235,236,237,238,239,240,
+              241,242: begin
+                at_op_q <= opc_q;
+                ls_store_q <= (opc_q == 16'd228);   // AtomicStore only
+                ls_atom_q <= 1'b1;
+                ls_ps_q <= 1'b0; ls_tsrc_q <= 1'b0; ls_wbb_q <= 1'b0;
+                ls_mat_q <= 1'b0; ls_dyn_q <= 1'b0;
+                lcc_q <= '0; lrc_q <= '0;
+                ncomp_q <= 5'd1;                    // one word/lane
+                ls_comp_q <= '0; ls_lane_q <= '0;
+                st_q <= W_LS0;
+              end
+              // DemoteToHelper: dead lane — keeps executing (registers
+              // feed quad derivatives), side effects suppressed
+              5380: begin
+                dead_q[wave_q] <= dead_q[wave_q] | act_w;
+                st_q <= W_NEXT;
+              end
+              5381: begin                          // IsHelperInvocation
+                for (int l = 0; l < LAN; l++)
+                  wb_q[l][0] <= {31'h0, hlp_w[l] | dead_q[wave_q][l]};
+                st_q <= W_WB;
+              end
+              57:  st_q <= W_FN0;                  // OpFunctionCall
+              254: st_q <= W_FR0;                  // OpReturnValue
               // §7c flow — evaluated by the reconvergence engine
-              246,247,248,249,250,251,253,56,255: st_q <= W_CF0;
+              246,247,248,249,250,251,253,56,255,252,4416:
+                   st_q <= W_CF0;
               224: begin                           // OpControlBarrier:
                 wbar_q[wave_q] <= 1'b1;            // wave parks; the
                 nbar_q <= nbar_q + 1;              // scheduler releases
@@ -2382,10 +3097,12 @@ module g6lc_apu_shwave
               84,143,144,145,146,147: begin
                 mi_q <= '0; mph_q <= '0; st_q <= W_MS0;
               end
-              // Function/Nop/Variable — the W_IW init walk already
-              // wrote every variable's pointer register, so OpVariable in
-              // the body only advances the program counter.
-              54,59,0: st_q <= W_NEXT;
+              // Function/Parameter/Nop/Variable — the W_IW init walk
+              // already wrote every variable's pointer register, so
+              // OpVariable in the body only advances the program
+              // counter; the callee's OpFunction preamble and its
+              // parameter records are just pc advances.
+              54,55,59,0: st_q <= W_NEXT;
               // GLSL.std.450 — xnum_q = ext inst, xq_q = step
               12: begin
                 unique case (xnum_q)
@@ -2551,25 +3268,31 @@ module g6lc_apu_shwave
                   endcase
                   68: unique case (xq_q)                         // Cross
                     // t0 = {a1b2, a2b0, a0b1}; t1 = {a2b1, a0b2, a1b0}
-                    0: begin ca_q <= 1; cb_q <= 2; ccc_q <= 0;
+                    0: begin ccc_q <= 0;
                       ncomp_q <= 4'd1;
                       jset(0, 5'd2, {2'd3, S_V0}, {2'd3, S_V1},
-                           {2'd0, S_ZERO}, 1, 0, W_XCNT, 1'b1); end
-                    1: begin ca_q <= 2; cb_q <= 0; ccc_q <= 1;
+                           {2'd0, S_ZERO}, 1, 0, W_XCNT, 1'b1, 1'b0,
+                           2'd1, 2'd2); end
+                    1: begin ccc_q <= 1;
                       jset(0, 5'd2, {2'd3, S_V0}, {2'd3, S_V1},
-                           {2'd0, S_ZERO}, 1, 0, W_XCNT, 1'b1); end
-                    2: begin ca_q <= 0; cb_q <= 1; ccc_q <= 2;
+                           {2'd0, S_ZERO}, 1, 0, W_XCNT, 1'b1, 1'b0,
+                           2'd2, 2'd0); end
+                    2: begin ccc_q <= 2;
                       jset(0, 5'd2, {2'd3, S_V0}, {2'd3, S_V1},
-                           {2'd0, S_ZERO}, 1, 0, W_XCNT, 1'b1); end
-                    3: begin ca_q <= 2; cb_q <= 1; ccc_q <= 0;
+                           {2'd0, S_ZERO}, 1, 0, W_XCNT, 1'b1, 1'b0,
+                           2'd0, 2'd1); end
+                    3: begin ccc_q <= 0;
                       jset(0, 5'd2, {2'd3, S_V0}, {2'd3, S_V1},
-                           {2'd0, S_ZERO}, 2, 0, W_XCNT, 1'b1); end
-                    4: begin ca_q <= 0; cb_q <= 2; ccc_q <= 1;
+                           {2'd0, S_ZERO}, 2, 0, W_XCNT, 1'b1, 1'b0,
+                           2'd2, 2'd1); end
+                    4: begin ccc_q <= 1;
                       jset(0, 5'd2, {2'd3, S_V0}, {2'd3, S_V1},
-                           {2'd0, S_ZERO}, 2, 0, W_XCNT, 1'b1); end
-                    5: begin ca_q <= 1; cb_q <= 0; ccc_q <= 2;
+                           {2'd0, S_ZERO}, 2, 0, W_XCNT, 1'b1, 1'b0,
+                           2'd0, 2'd2); end
+                    5: begin ccc_q <= 2;
                       jset(0, 5'd2, {2'd3, S_V0}, {2'd3, S_V1},
-                           {2'd0, S_ZERO}, 2, 0, W_XCNT, 1'b1); end
+                           {2'd0, S_ZERO}, 2, 0, W_XCNT, 1'b1, 1'b0,
+                           2'd1, 2'd0); end
                     default: begin
                       ncomp_q <= 4'd3;
                       jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_T0},
@@ -2592,6 +3315,410 @@ module g6lc_apu_shwave
                       ncomp_q <= 4'(ot_comps_q);
                       jset(0, 5'd2, {2'd0, S_V0}, {2'd1, S_T0},
                            {2'd0, S_ZERO}, 0, 0, W_WB);
+                    end
+                  endcase
+                  // ---- G3a-i --------------------------------------
+                  // Determinant / MatrixInverse: operand matrix staged
+                  // into dtm_q (W_DM0/1), then the generated cofactor
+                  // micro-program DM_PROG runs on the scalar units;
+                  // inverse columns flush from dres_q via W_DMF.
+                  33, 34: begin
+                    dmph_q <= 1'b0; dmcol_q <= '0;
+                    if (ot_cols_q == 0 || ot_cols_q > 3'd4) begin
+                      done_code_q <= APU_SH_DONE_FAULT;
+                      fl_pc_q <= pc_q[wave_q];
+                      fl_wave_q <= {8'h0, wave_q};
+                      st_q <= W_DONE;
+                    end else if (ot_cols_q == 3'd1) begin
+                      if (xnum_q == 7'd33) begin     // mat1: det = m00
+                        for (int l = 0; l < LAN; l++)
+                          wb_q[l][0] <= va_q[0][l][0];
+                        st_q <= W_WB;
+                      end else begin               // inv = 1/m00
+                        ncomp_q <= 5'd1;
+                        jset(1, 5'd0, {2'd1, S_ONE}, {2'd1, S_V0},
+                             7'h0, 0, 0, W_WB);
+                      end
+                    end else begin
+                      unique case ({xnum_q == 7'd34, ot_cols_q[1:0]})
+                        3'b000:  dmp_q <= 9'(DM_DET4);
+                        3'b010:  dmp_q <= 9'(DM_DET2);
+                        3'b011:  dmp_q <= 9'(DM_DET3);
+                        3'b110:  dmp_q <= 9'(DM_INV2);
+                        3'b111:  dmp_q <= 9'(DM_INV3);
+                        default: dmp_q <= 9'(DM_INV4);   // 3'b100
+                      endcase
+                      st_q <= W_DM0;
+                    end
+                  end
+                  // Modf: frac → wb result, ipart → *va1 (LSU, t1)
+                  35: unique case (xq_q)
+                    0: jset(2, {1'b0, fpnew_pkg::RTZ[2:0], 1'b0},
+                            {2'd0, S_V0}, 7'h0, 7'h0, 1, 0, W_XCNT);
+                    1: jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
+                            {2'd0, S_T0}, 7'h0, 7'h0, 2, 0, W_XCNT);
+                    2: begin                      // ip → t1
+                      for (int l = 0; l < LAN; l++)
+                        for (int c = 0; c < VEC; c++)
+                          t1_q[l][c] <=
+                            (f_nan(va_q[0][l][c]) ||
+                             va_q[0][l][c][30:23] >= 8'd158)
+                            ? va_q[0][l][c] : t1_q[l][c];
+                      st_q <= W_XCNT;
+                    end
+                    3: jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_V0},
+                            {2'd0, S_T1}, 0, 0, W_XCNT);   // fr → wb
+                    default: begin                 // store ip = t1
+                      ls_store_q <= 1'b1; ls_ps_q <= 1'b1;
+                      ls_tsrc_q <= 1'b1; ls_wbb_q <= 1'b1;
+                      ls_atom_q <= 1'b0; ls_mat_q <= 1'b0;
+                      ls_dyn_q <= 1'b0;
+                      ls_lane_q <= '0; ls_comp_q <= '0;
+                      st_q <= W_LS0;
+                    end
+                  endcase
+                  // ModfStruct: flat {frac(nc), ipart(nc)} rows
+                  36: unique case (xq_q)
+                    0: jset(2, {1'b0, fpnew_pkg::RTZ[2:0], 1'b0},
+                            {2'd0, S_V0}, 7'h0, 7'h0, 1, 0, W_XCNT);
+                    1: jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
+                            {2'd0, S_T0}, 7'h0, 7'h0, 2, 0, W_XCNT);
+                    2: begin
+                      for (int l = 0; l < LAN; l++)
+                        for (int c = 0; c < VEC; c++) begin
+                          t1_q[l][c] <=
+                            (f_nan(va_q[0][l][c]) ||
+                             va_q[0][l][c][30:23] >= 8'd158)
+                            ? va_q[0][l][c] : t1_q[l][c];
+                          t2_q[l][c] <= t1_q[l][c];
+                        end
+                      st_q <= W_XCNT;
+                    end
+                    3: begin
+                      for (int l = 0; l < LAN; l++)
+                        for (int c = 0; c < VEC; c++)
+                          t2_q[l][c] <=
+                            (f_nan(va_q[0][l][c]) ||
+                             va_q[0][l][c][30:23] >= 8'd158)
+                            ? va_q[0][l][c] : t1_q[l][c];
+                      jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_V0},
+                           {2'd0, S_T1}, 0, 0, W_XCNT);    // fr → wb
+                    end
+                    // member1 packs flat at word offset m0 = member0's
+                    // comp count; when the struct image fits one row
+                    // it merges into wb_q here, else row+1 via wb2.
+                    default: begin
+                      if (rsz_q <= 16'd16)
+                        for (int l = 0; l < LAN; l++)
+                          for (int c = 0; c < VEC; c++)
+                            if (5'(f_nc(ot_comps_q)) + 5'(c) < 5'd4)
+                              wb_q[l][f_nc(ot_comps_q) + c] <=
+                                t2_q[l][c];
+                      wb2_q <= (rsz_q > 16'd16);
+                      wbm_q <= (rsz_q > 16'd16) ? 4'hF
+                             : 4'((4'b1 << (rsz_q >> 2)) - 1);
+                      st_q <= W_WB;
+                    end
+                  endcase
+                  // Frexp: frac → wb, exp → *va1 (int bits, LSU t1)
+                  51: unique case (xq_q)
+                    0: begin
+                      for (int l = 0; l < LAN; l++)
+                        for (int c = 0; c < VEC; c++) begin
+                          logic [7:0] ex;
+                          ex = va_q[0][l][c][30:23];
+                          t0_q[l][c] <= (ex == 0 || ex == 8'hFF)
+                            ? va_q[0][l][c]
+                            : (va_q[0][l][c] & 32'h807F_FFFF) |
+                              32'h3F00_0000;
+                          t1_q[l][c] <= (ex == 0 || ex == 8'hFF)
+                            ? 32'h0 : {24'h0, ex} - 32'd126;
+                        end
+                      st_q <= W_XCNT;
+                    end
+                    1: begin                      // frac → wb
+                      wb_q <= t0_q;
+                      ls_store_q <= 1'b1; ls_ps_q <= 1'b1;
+                      ls_tsrc_q <= 1'b1; ls_wbb_q <= 1'b1;
+                      ls_atom_q <= 1'b0; ls_mat_q <= 1'b0;
+                      ls_dyn_q <= 1'b0;
+                      ls_lane_q <= '0; ls_comp_q <= '0;
+                      st_q <= W_LS0;
+                    end
+                    default: st_q <= W_LS0;       // unreachable
+                  endcase
+                  // FrexpStruct: flat {frac(nc), exp(nc)} rows
+                  52: unique case (xq_q)
+                    0: begin
+                      for (int l = 0; l < LAN; l++)
+                        for (int c = 0; c < VEC; c++) begin
+                          logic [7:0] ex;
+                          ex = va_q[0][l][c][30:23];
+                          wb_q[l][c]  <= (ex == 0 || ex == 8'hFF)
+                            ? va_q[0][l][c]
+                            : (va_q[0][l][c] & 32'h807F_FFFF) |
+                              32'h3F00_0000;
+                          t2_q[l][c] <= (ex == 0 || ex == 8'hFF)
+                            ? 32'h0 : {24'h0, ex} - 32'd126;
+                        end
+                      st_q <= W_XCNT;
+                    end
+                    // member1 packs flat at word offset m0 = member0's
+                    // comp count; when the struct image fits one row
+                    // it merges into wb_q here, else row+1 via wb2.
+                    default: begin
+                      if (rsz_q <= 16'd16)
+                        for (int l = 0; l < LAN; l++)
+                          for (int c = 0; c < VEC; c++)
+                            if (5'(f_nc(ot_comps_q)) + 5'(c) < 5'd4)
+                              wb_q[l][f_nc(ot_comps_q) + c] <=
+                                t2_q[l][c];
+                      wb2_q <= (rsz_q > 16'd16);
+                      wbm_q <= (rsz_q > 16'd16) ? 4'hF
+                             : 4'((4'b1 << (rsz_q >> 2)) - 1);
+                      st_q <= W_WB;
+                    end
+                  endcase
+                  53: begin                        // Ldexp (comb)
+                    for (int l = 0; l < LAN; l++)
+                      for (int c = 0; c < VEC; c++)
+                        wb_q[l][c] <= f_ldexp(va_q[0][l][c],
+                                              va_q[1][l][c]);
+                    st_q <= W_WB;
+                  end
+                  // Pack{S,U}norm{4x8,2x16} / PackHalf2x16:
+                  // clamp → *scale → f2i(RNE) → field fold
+                  54, 55, 56, 57: unique case (xq_q)
+                    0: begin
+                      ncomp_q <= (xnum_q < 7'd56) ? 5'd4 : 5'd2;
+                      xk_q <= (xnum_q == 7'd54) ? 32'h42FE_0000 :
+                              (xnum_q == 7'd55) ? 32'h437F_0000 :
+                              (xnum_q == 7'd56) ? 32'h46FF_FE00
+                                                : 32'h477F_FF00;
+                      jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b1},
+                           {2'd0, S_V0},
+                           (xnum_q == 7'd54 || xnum_q == 7'd56)
+                             ? {2'd0, S_NEG1} : {2'd0, S_ZERO},
+                           7'h0, 1, 0, W_XCNT);         // max(x,lo)
+                    end
+                    1: jset(3, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
+                            {2'd0, S_T0}, {2'd0, S_ONE}, 7'h0,
+                            1, 0, W_XCNT);              // min(t,1)
+                    2: jset(0, 5'd2, {2'd0, S_T0}, {2'd0, S_XK},
+                            {2'd0, S_ZERO}, 1, 0, W_XCNT); // *scale
+                    3: jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b0},
+                            {2'd0, S_T0}, 7'h0, 7'h0, 1, 0, W_XCNT);
+                    default: begin                   // fold fields
+                      for (int l = 0; l < LAN; l++) begin
+                        logic [31:0] pk;
+                        pk = '0;
+                        for (int c = 0; c < 4; c++)
+                          if (c < ncomp_q)
+                            pk |= (t0_q[l][c] &
+                                   ((xnum_q < 7'd56) ? 32'hFF
+                                                     : 32'hFFFF))
+                                  << ((xnum_q < 7'd56) ? 8*c : 16*c);
+                        wb_q[l][0] <= pk;
+                      end
+                      st_q <= W_WB;
+                    end
+                  endcase
+                  58: begin                        // PackHalf2x16
+                    for (int l = 0; l < LAN; l++) begin
+                      logic [31:0] pk;
+                      pk = {16'(f_f32_f16(va_q[0][l][1])),
+                            f_f32_f16(va_q[0][l][0])};
+                      wb_q[l][0] <= pk;
+                    end
+                    st_q <= W_WB;
+                  end
+                  // UnpackSnorm/Unorm2x16,4x8 / UnpackHalf2x16
+                  62: begin
+                    for (int l = 0; l < LAN; l++) begin
+                      logic [31:0] u0, u1;
+                      u0 = f_f16_f32(va_q[0][l][0][15:0]);
+                      u1 = f_f16_f32(va_q[0][l][0][31:16]);
+                      wb_q[l][0] <= u0;
+                      wb_q[l][1] <= u1;
+                    end
+                    st_q <= W_WB;
+                  end
+                  60, 61, 63, 64: unique case (xq_q)
+                    0: begin                       // extract + sext
+                      ncomp_q <= (xnum_q == 7'd60 ||
+                                  xnum_q == 7'd61) ? 5'd2 : 5'd4;
+                      xk_q <= (xnum_q == 7'd60) ? 32'h46FF_FE00 :
+                              (xnum_q == 7'd61) ? 32'h477F_FF00 :
+                              (xnum_q == 7'd63) ? 32'h42FE_0000
+                                                : 32'h437F_0000;
+                      for (int l = 0; l < LAN; l++)
+                        for (int c = 0; c < VEC; c++) begin
+                          logic [31:0] u;
+                          u = (xnum_q == 7'd60 || xnum_q == 7'd61)
+                              ? (va_q[0][l][0] >> (16 * c)) &
+                                32'hFFFF
+                              : (va_q[0][l][0] >> (8 * c)) & 32'hFF;
+                          if (xnum_q == 7'd60 || xnum_q == 7'd63) begin
+                            if (xnum_q == 7'd60 && u[15])
+                              u |= 32'hFFFF_0000;
+                            if (xnum_q == 7'd63 && u[7])
+                              u |= 32'hFFFF_FF00;
+                          end
+                          t0_q[l][c] <= u;
+                        end
+                      st_q <= W_XCNT;
+                    end
+                    1: jset(2, {(xnum_q == 7'd61 || xnum_q == 7'd64),
+                               fpnew_pkg::RNE[2:0], 1'b1},
+                            {2'd0, S_T0}, 7'h0, 7'h0, 1, 0, W_XCNT);
+                    2: jset(1, 5'd0, {2'd0, S_T0}, {2'd0, S_XK},
+                            7'h0, 1, 0, W_XCNT);      // /scale → t0
+                    3: begin
+                      if (xnum_q == 7'd60 || xnum_q == 7'd63)
+                        jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b1},
+                             {2'd0, S_T0}, {2'd0, S_NEG1}, 7'h0,
+                             1, 0, W_XCNT);           // max(t,-1)
+                      else begin
+                        wb_q <= t0_q; st_q <= W_WB;
+                      end
+                    end
+                    4: jset(3, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
+                            {2'd0, S_T0}, {2'd0, S_ONE}, 7'h0,
+                            1, 0, W_XCNT);              // min(t,1)
+                    default: begin wb_q <= t0_q; st_q <= W_WB; end
+                  endcase
+                  // FaceForward(N,I,Nref) = (dot(Nref,I) < 0) ? N : -N
+                  70: unique case (xq_q)
+                    0: begin
+                      ncomp_q <= 4'(ot_comps_q);
+                      jset(0, 5'd2, {2'd0, S_V1}, {2'd0, S_V2},
+                           {2'd0, S_ZERO}, 2, 0, W_XCNT);  // m_c → t1
+                    end
+                    1: jset(0, 5'd3, {2'd2, S_T1}, {2'd0, S_ONE},
+                            {2'd0, S_T0}, 1, 1, W_XCNT, 1'b0, 1'b1);
+                    2: begin
+                      ncomp_q <= 5'd1;
+                      jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b0},
+                           {2'd0, S_T0}, {2'd0, S_ZERO}, 7'h0,
+                           0, 0, W_XCNT);          // d<0 → wb[0]
+                    end
+                    default: begin
+                      for (int l = 0; l < LAN; l++)
+                        for (int c = 0; c < VEC; c++)
+                          wb_q[l][c] <= (wb_q[l][0] != 0)
+                                        ? va_q[0][l][c]
+                                        : va_q[0][l][c] ^ 32'h8000_0000;
+                      st_q <= W_WB;
+                    end
+                  endcase
+                  // Reflect(I,N) = I - 2*dot(I,N)*N
+                  71: unique case (xq_q)
+                    0: begin
+                      ncomp_q <= 4'(ot_comps_q);
+                      jset(0, 5'd2, {2'd0, S_V0}, {2'd0, S_V1},
+                           {2'd0, S_ZERO}, 2, 0, W_XCNT);  // m_c → t1
+                    end
+                    1: jset(0, 5'd3, {2'd2, S_T1}, {2'd0, S_ONE},
+                            {2'd0, S_T0}, 1, 1, W_XCNT, 1'b0, 1'b1);
+                    2: begin
+                      ncomp_q <= 5'd1;
+                      jset(0, 5'd2, {2'd1, S_TWO}, {2'd1, S_T0},
+                           {2'd1, S_ZERO}, 3, 0, W_XCNT);  // 2d → t2
+                    end
+                    default: begin
+                      ncomp_q <= 4'(ot_comps_q);
+                      jset(0, 5'd3, {2'd0, S_V1}, {2'd1, S_T2},
+                           {2'd0, S_V0}, 0, 0, W_WB, 1'b0, 1'b0,
+                           2'd0, 2'd0, 2'd0, 1'b1);   // I - N*2d
+                    end
+                  endcase
+                  // Refract(I,N,eta): k = 1 - e²(1-d²); k<0 → 0;
+                  // r = e·I - (e·d + √k)·N
+                  72: unique case (xq_q)
+                    0: begin
+                      ncomp_q <= 4'(ot_comps_q);
+                      jset(0, 5'd2, {2'd0, S_V0}, {2'd0, S_V1},
+                           {2'd0, S_ZERO}, 2, 0, W_XCNT);  // m_c → t1
+                    end
+                    1: jset(0, 5'd3, {2'd2, S_T1}, {2'd0, S_ONE},
+                            {2'd0, S_T0}, 1, 1, W_XCNT, 1'b0, 1'b1);
+                    2: begin                            // d² → t1
+                      ncomp_q <= 5'd1;
+                      jset(0, 5'd2, {2'd0, S_T0}, {2'd0, S_T0},
+                           {2'd0, S_ZERO}, 2, 0, W_XCNT);
+                    end
+                    3: jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_ONE},
+                            {2'd0, S_T1}, 3, 0, W_XCNT);  // 1-d² → t2
+                    4: jset(0, 5'd2, {2'd1, S_V2}, {2'd1, S_V2},
+                            {2'd1, S_ZERO}, 2, 0, W_XCNT);  // e² → t1
+                    5: jset(0, 5'd3, {2'd0, S_T1}, {2'd0, S_T2},
+                            {2'd0, S_ONE}, 3, 0, W_XCNT,
+                            1'b0, 1'b0, 2'd0, 2'd0, 2'd0, 1'b1);
+                                                        // k=1-e²t2 → t2
+                    6: jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b0},
+                            {2'd0, S_T2}, {2'd0, S_ZERO}, 7'h0,
+                            0, 0, W_XCNT);          // k<0 → wb[0]
+                    7: jset(1, 5'd1, {2'd0, S_T2}, 7'h0, 7'h0,
+                            2, 0, W_XCNT);              // √k → t1
+                    8: jset(0, 5'd2, {2'd1, S_V2}, {2'd1, S_T0},
+                            {2'd1, S_ZERO}, 3, 0, W_XCNT);  // e·d → t2
+                    9: jset(0, 5'd0, {2'd0, S_ZERO}, {2'd0, S_T2},
+                            {2'd0, S_T1}, 3, 0, W_XCNT);   // co → t2
+                    10: begin                         // e·I → t1
+                      ncomp_q <= 4'(ot_comps_q);
+                      jset(0, 5'd2, {2'd1, S_V2}, {2'd0, S_V0},
+                           {2'd0, S_ZERO}, 2, 0, W_XCNT);
+                    end
+                    11: jset(0, 5'd2, {2'd1, S_T2}, {2'd0, S_V1},
+                             {2'd0, S_ZERO}, 1, 0, W_XCNT); // co·N → t0
+                    12: jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_T1},
+                             {2'd0, S_T0}, 3, 0, W_XCNT);  // r → t2
+                    default: begin
+                      for (int l = 0; l < LAN; l++)
+                        for (int c = 0; c < VEC; c++)
+                          wb_q[l][c] <= (wb_q[l][0] != 0)
+                                        ? 32'h0 : t2_q[l][c];
+                      st_q <= W_WB;
+                    end
+                  endcase
+                  // FindILsb / FindSMsb / FindUMsb (int, comb)
+                  73, 74, 75: begin
+                    wb_q <= int_alu; st_q <= W_WB;
+                  end
+                  // NMin / NMax: fpnew MINMAX but NaN → canonical qNaN
+                  79, 80: unique case (xq_q)
+                    0: jset(3, {1'b0, (xnum_q == 7'd80)
+                                 ? fpnew_pkg::RTZ[2:0]
+                                 : fpnew_pkg::RNE[2:0], 1'b1},
+                            {2'd0, S_V0}, {2'd0, S_V1}, 7'h0,
+                            1, 0, W_XCNT);
+                    default: begin
+                      for (int l = 0; l < LAN; l++)
+                        for (int c = 0; c < VEC; c++)
+                          wb_q[l][c] <=
+                            (f_nan(va_q[0][l][c]) ||
+                             f_nan(va_q[1][l][c]))
+                            ? 32'h7FC0_0000 : t0_q[l][c];
+                      st_q <= W_WB;
+                    end
+                  endcase
+                  // NClamp = NMin(NMax(x,lo),hi) with qNaN on any NaN
+                  81: unique case (xq_q)
+                    0: jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b1},
+                            {2'd0, S_V0}, {2'd0, S_V1}, 7'h0,
+                            1, 0, W_XCNT);               // max → t0
+                    1: jset(3, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
+                            {2'd0, S_T0}, {2'd0, S_V2}, 7'h0,
+                            2, 0, W_XCNT);               // min → t1
+                    default: begin
+                      for (int l = 0; l < LAN; l++)
+                        for (int c = 0; c < VEC; c++)
+                          wb_q[l][c] <=
+                            (f_nan(va_q[0][l][c]) ||
+                             f_nan(va_q[1][l][c]) ||
+                             f_nan(va_q[2][l][c]))
+                            ? 32'h7FC0_0000 : t1_q[l][c];
+                      st_q <= W_WB;
                     end
                   endcase
                   default: begin
@@ -2706,7 +3833,8 @@ module g6lc_apu_shwave
               for (int l = 0; l < LAN; l++)
                 if (act_w[l] &&
                     (!tx_1lane_q || 4'(l) == {1'b0, ls_lane_q[2:0]}))
-                  jstore(jdst_q, 4'(l), tc_q,
+                  jstore(jdst_q, 4'(l),
+                             3'(jucc_q ? {1'b0, ccc_q} : 3'(tc_q)),
                          dq_ov[l] ? dq_res[l] : dq_rc_q[l]);
               if (tc_q + 1 >= ncomp_q) st_q <= ret_q;
               else begin
@@ -2743,7 +3871,8 @@ module g6lc_apu_shwave
               for (int l = 0; l < LAN; l++)
                 if (act_w[l] &&
                     (!tx_1lane_q || 4'(l) == {1'b0, ls_lane_q[2:0]}))
-                  jstore(jdst_q, 4'(l), tc_q,
+                  jstore(jdst_q, 4'(l),
+                             3'(jucc_q ? {1'b0, ccc_q} : 3'(tc_q)),
                          cv_ov[l] ? cv_res[l] : cv_rc_q[l]);
               if (tc_q + 1 >= ncomp_q) st_q <= ret_q;
               else begin
@@ -2780,7 +3909,8 @@ module g6lc_apu_shwave
               for (int l = 0; l < LAN; l++)
                 if (act_w[l] &&
                     (!tx_1lane_q || 4'(l) == {1'b0, ls_lane_q[2:0]}))
-                  jstore(jdst_q, 4'(l), tc_q,
+                  jstore(jdst_q, 4'(l),
+                             3'(jucc_q ? {1'b0, ccc_q} : 3'(tc_q)),
                          xop_q[0]
                            ? (nc_ov[l] ? nc_res[l] : nc_rc_q[l])
                            : {31'h0, (nc_ov[l] ? nc_res[l][0]
@@ -3000,15 +4130,31 @@ module g6lc_apu_shwave
           // W_LSA advances the (lane,comp) cursor.
           W_LS0: begin
             logic [31:0] o32, tg;
-            o32 = va_q[0][ls_lane_q[2:0]][0] +
+            // ls_ps_q (ext pointer stores: Modf/Frexp) puts the pointer
+            // word in operand slot 1 instead of 0
+            o32 = va_q[ls_ps_q][ls_lane_q[2:0]][0] +
                   {21'h0, (ls_mat_q ? ls_flw : ls_comp_q), 2'b00};
-            tg  = va_q[0][ls_lane_q[2:0]][1];
+            tg  = va_q[ls_ps_q][ls_lane_q[2:0]][1];
             ls_off_q <= o32;
             ls_sc_q  <= tg[3:0];
             ls_bi_q  <= tg[11:4];
             ls_rec_q <= 1'b0;
             if (!act_w[ls_lane_q[2:0]]) st_q <= W_LSA;
-            else if (tg[31:28] == APU_SH_VF_DROP) begin
+            else if (ls_atom_q && (dead_q[wave_q][ls_lane_q[2:0]] ||
+                                   hlp_w[ls_lane_q[2:0]])) begin
+              // dead/helper lanes do no atomic writes; result ops get 0
+              if (!ls_store_q) wb_q[ls_lane_q[2:0]][0] <= '0;
+              st_q <= W_LSA;
+            end else if ((dead_q[wave_q][ls_lane_q[2:0]] ||
+                          hlp_w[ls_lane_q[2:0]]) && ls_store_q &&
+                         (tg[3:0] == APU_SH_SC_UNIFORM ||
+                          tg[3:0] == APU_SH_SC_SBUF ||
+                          tg[3:0] == APU_SH_SC_WORKGROUP)) begin
+              // dead/helper lane: device-visible stores suppressed
+              // with no robust accounting; private/function/out-record
+              // stores still proceed (mirrors the model's store gate)
+              st_q <= W_LSA;
+            end else if (tg[31:28] == APU_SH_VF_DROP) begin
               // dropped variable/member (PointSize/Clip/CullDistance):
               // stores ignored, loads return zero
               if (!ls_store_q)
@@ -3076,13 +4222,13 @@ module g6lc_apu_shwave
               // fetch -> bounds check at W_LSC
               dsc_set_q <= tg[19:12];
               dsc_bd_q  <= tg[27:20];
-              dsc_idx_q <= va_q[0][ls_lane_q[2:0]][2][15:0];
+              dsc_idx_q <= va_q[ls_ps_q][ls_lane_q[2:0]][2][15:0];
               dret_q    <= W_LSC;
               st_q      <= W_DS0;
             end else if (tg[3:0] == APU_SH_SC_WORKGROUP ||
                          tg[3:0] == APU_SH_SC_FUNCTION ||
                          tg[3:0] == APU_SH_SC_PRIVATE) begin
-              st_q <= W_SSB;
+              st_q <= ls_atom_q ? W_ATS0 : W_SSB;
             end else begin
               robust_q <= robust_q + 1;
               if (!ls_store_q)
@@ -3318,7 +4464,12 @@ module g6lc_apu_shwave
           W_TX1: begin
             logic [31:0] tg;
             tg = va_q[0][ls_lane_q[2:0]][1];
-            if (!act_w[ls_lane_q[2:0]]) begin
+            if (!act_w[ls_lane_q[2:0]] ||
+                (opc_q == 16'd99 &&
+                 (dead_q[wave_q][ls_lane_q[2:0]] ||
+                  hlp_w[ls_lane_q[2:0]]))) begin
+              // !act: zero the lane result; dead and helper lanes
+              // additionally drop image writes (side-effect suppress)
               for (int c = 0; c < VEC; c++)
                 wb_q[ls_lane_q[2:0]][c] <= '0;
               if (ls_lane_q + 1 < LAN) begin
@@ -4198,7 +5349,7 @@ module g6lc_apu_shwave
               st_q <= W_LSA;
             end else begin
               ls_addr_q <= ls_bind_q + {32'h0, ls_off_q};
-              st_q <= W_LS1;
+              st_q <= ls_atom_q ? W_ATR : W_LS1;
             end
           end
           // mem_re_o/mem_we_o hold until mem_ready_i; a masked-out
@@ -4213,7 +5364,9 @@ module g6lc_apu_shwave
           W_LS2: begin
             if (mem_rvalid_i) begin
               if (mem_err_i) robust_q <= robust_q + 1;
-              if (!ls_store_q)
+              // atomics latch the old word in W_ATC — the write
+              // response carries no data, don't overwrite it
+              if (!ls_store_q && !ls_atom_q)
                 wb_q[ls_lane_q[2:0]][ls_wc] <=
                   mem_err_i ? 32'h0 :
                   ls_addr_q[2] ? mem_rdata_i[63:32]
@@ -4252,7 +5405,7 @@ module g6lc_apu_shwave
                 st_q <= W_LS0;
               end else begin
                 ls_comp_q <= '0; ls_lane_q <= '0;
-                st_q <= ls_store_q ? W_NEXT : W_WB;
+                st_q <= (ls_store_q && !ls_wbb_q) ? W_NEXT : W_WB;
               end
             end else begin
               // matrix access — (column, lane, comp) order: the RF row
@@ -4292,8 +5445,236 @@ module g6lc_apu_shwave
             ma_q <= rf_rdata;
             st_q <= W_LS0;
           end
+          // ---------------- G3a-i: OpFunctionCall ---------------------
+          // The func row packs {nparams[31:28], param-table base
+          // [27:16], first-block word offset [15:0]}; param row p at
+          // parm base+p holds {4'h0, value-rows[11:8], rf row[7:0]}.
+          // Arg rows are copied into the param's registers; pointer
+          // params copy verbatim (the pointer word is just data).
+          W_FN0: begin                          // func row read issued
+            fpk_q <= '0; st_q <= W_FN1;
+          end
+          W_FN1: begin
+            frow_q <= func_data_i;
+            wreg_q <= rm_idx[RI-1:0];           // call result RF row
+            // result RF row count for the frame (mat=cols, struct=
+            // ceil(size/16), else 1)
+            resn_q <= (rkind_q == APU_SH_TK_MAT) ? 4'(rcols_q)
+                    : (rkind_q == APU_SH_TK_STRUCT)
+                      ? 4'((32'(rsz_q) + 15) >> 4) : 4'd1;
+            if (func_data_i == '0 ||                 // undefined callee
+                csp_q[wave_q] >= 5'(CLD)) begin      // stack overflow
+              done_code_q <= APU_SH_DONE_FAULT;
+              fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};
+              st_q <= W_DONE;
+            end else st_q <= W_FN2;
+          end
+          // param loop: parm row + the argument's regmap row are read
+          // together (W_FN2 drives parm_id_o and rm_id_o)
+          W_FN2: begin
+            res_id_q <= ops_q[3 + fpk_q][9:0];   // const-fetch id
+            fkr_q <= '0;
+            st_q <= (fpk_q >= frow_q[31:28]) ? W_FN6 : W_FN3;
+          end
+          W_FN3: begin                    // parm row + arg rm arrived
+            fpr_q   <= parm_data_i;
+            fatag_q <= rm_tag;
+            faidx_q <= rm_idx[RI-1:0];
+            st_q <= W_FN4;
+          end
+          W_FN4: st_q <= W_FN5;           // arg row read issued (port)
+          W_FN5: begin                    // param row written (port)
+            fkr_q <= fkr_q + 1;
+            if ({1'b0, fkr_q} + 1 < {1'b0, fpr_q[11:8]})
+              st_q <= W_FN4;
+            else begin
+              fpk_q <= fpk_q + 1; st_q <= W_FN2;
+            end
+          end
+          // push the frame: return pc, result reg, caller label, the
+          // lanes entering (cfln) and the done-with-callee mask (cfdn)
+          W_FN6: begin
+            cfret_q[wave_q][csp_q[wave_q][4:0]] <=
+              pc_q[wave_q] + {6'h0, wc_q};
+            cres_q[wave_q][csp_q[wave_q][4:0]]  <= wreg_q;
+            cresn_q[wave_q][csp_q[wave_q][4:0]] <= resn_q;
+            cclbl_q[wave_q][csp_q[wave_q][4:0]] <= clbl_q[wave_q];
+            cfln_q[wave_q][csp_q[wave_q][4:0]]  <= act_w;
+            cfdn_q[wave_q][csp_q[wave_q][4:0]]  <= '0;
+            ccfn_q[wave_q][csp_q[wave_q][4:0]]  <= cfn_q[wave_q];
+            csp_q[wave_q]  <= csp_q[wave_q] + 1;
+            pc_q[wave_q]   <= frow_q[15:0];
+            insns_q <= insns_q + 1;
+            if (insns_q + 1 > ShaderBudget) begin
+              done_code_q <= APU_SH_DONE_BUDGET;
+              fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};
+              st_q <= W_DONE;
+            end else st_q <= W_SCHED;
+          end
+          // ---------------- G3a-i: OpReturnValue ---------------------
+          // value-id rm row read (W_FR0), then per-row copy into the
+          // frame's result register; W_FRC retires into the cf engine
+          // which scrubs the returning lanes like a plain OpReturn
+          W_FR0: begin
+            res_id_q <= ops_q[0][9:0];
+            fkr_q    <= '0;
+            fpr_q    <= 16'(cres_q[wave_q][csp_q[wave_q] - 5'd1]);
+            st_q <= W_FR1;
+          end
+          W_FR1: begin                    // value rm row arrived
+            if (fkr_q == 0) begin
+              fatag_q <= rm_tag;
+              faidx_q <= rm_idx[RI-1:0];
+            end
+            st_q <= W_FRC;                // source read issued (port)
+          end
+          W_FRC: begin                    // result row written (port)
+            fkr_q <= fkr_q + 1;
+            if ({1'b0, fkr_q} + 1 <
+                {1'b0, cresn_q[wave_q][csp_q[wave_q] - 5'd1]})
+              st_q <= W_FR1;
+            else st_q <= W_CF0;           // return bookkeeping path
+          end
+          // ----------------- G3a-i: SSBO atomic RMW -------------------
+          // One lane's RMW at a time; the FSM cannot switch waves
+          // outside W_SCHED so the read->write window is indivisible.
+          W_ATR: begin                    // read issued (port)
+            if (mem_ready_i) st_q <= W_ATC;
+          end
+          W_ATC: begin
+            if (mem_rvalid_i) begin
+              if (mem_err_i) begin
+                robust_q <= robust_q + 1;
+                if (!ls_store_q) wb_q[ls_lane_q[2:0]][0] <= '0;
+                st_q <= W_LSA;
+              end else begin
+                at_old_q <= ls_addr_q[2] ? mem_rdata_i[63:32]
+                                         : mem_rdata_i[31:0];
+                at_new_q <= atomic_alu;
+                if (!ls_store_q)
+                  wb_q[ls_lane_q[2:0]][0] <=
+                    ls_addr_q[2] ? mem_rdata_i[63:32]
+                                 : mem_rdata_i[31:0];
+                // AtomicLoad is read-only — skip the RMW write
+                st_q <= (at_op_q == 16'd227) ? W_LSA : W_ATW;
+              end
+            end
+          end
+          W_ATW: begin                    // RMW write issued (port)
+            if (mem_ready_i) st_q <= W_LS2;      // write response wait
+          end
+          // workgroup/scratch atomic: slab read in W_ATS0, RMW write
+          // + old-word capture in W_ATS1 (no response handshake)
+          W_ATS0: st_q <= W_ATS1;
+          W_ATS1: begin
+            if ((ls_sc_q == APU_SH_SC_WORKGROUP &&
+                 ls_off_q >= 32'(SlabBytes)) ||
+                (ls_sc_q != APU_SH_SC_WORKGROUP &&
+                 ((ls_off_q >> 2) >= SCW ||
+                  ls_off_q >= {16'h0, escratch_q}))) begin
+              robust_q <= robust_q + 1;
+              if (!ls_store_q) wb_q[ls_lane_q[2:0]][0] <= '0;
+            end else if (!ls_store_q)
+              wb_q[ls_lane_q[2:0]][0] <=
+                (ls_sc_q == APU_SH_SC_WORKGROUP) ? sb_rdata : sc_rdata;
+            st_q <= W_LSA;
+          end
+          // ----------------- G3a-i: FS-out slot 8 tail ----------------
+          // Every started lane writes flags/SampleMask/zero words of
+          // the builtin-output slot (word0 FragDepth is written by the
+          // shader's own record store).  f8d/f8b carry the pending
+          // word; W_F8A/W_F8B alternate single-word writes.
+          W_F8A, W_F8B: begin
+            if (mem_ready_i) begin
+              // write order word2 → word3 → word1: the flags word is
+              // staged (below) at least one cycle after wave finish so
+              // a kill that retires the wave's last lane in the same
+              // edge still lands in dead_q before it is sampled.
+              if (f8b_q == 5'd8) begin
+                f8b_q <= 5'd12; f8d_q <= '0;
+              end else if (f8b_q == 5'd12) begin
+                f8b_q <= 5'd4;
+                f8d_q <= {31'h0, dead_q[wave_q][f8l_q]};
+              end else if (32'(wave_q) * LAN + {28'h0, f8l_q} + 1 >=
+                           tot_q || f8l_q + 1 >= LAN) begin
+                // word1 done and no more lanes → the wave retires
+                wfin_q[wave_q] <= 1'b1;
+                st_q <= W_SCHED;
+              end else begin
+                // word1 done — advance to the next lane's slot-8
+                f8l_q <= f8l_q + 1;
+                ls_addr_q <= out_base_q +
+                  (32'(wave_q) * LAN + 32'(f8l_q) + 1) * gfx_ostr +
+                  32'(APU_SH_FSOUT_BI * 16);
+                f8b_q <= 5'd8;
+                f8d_q <= 32'hFFFF_FFFF;
+              end
+              if (!(f8b_q == 5'd4 &&
+                    (32'(wave_q) * LAN + {28'h0, f8l_q} + 1 >= tot_q ||
+                     f8l_q + 1 >= LAN)))
+                st_q <= (st_q == W_F8A) ? W_F8B : W_F8A;
+            end
+          end
+          // ---------------- G3a-i: Determinant/MatrixInverse ---------
+          // Operand matrix columns stage into dtm_q (flat element id
+          // c*4+r — column-major matches the RF row-per-column layout
+          // and the const flat layout), then DM_PROG runs as scalar
+          // per-lane fp jobs through the shared units.
+          W_DM0: begin
+            if (dmph_q) begin                // flush: dres col → wb
+              wb_q <= dres_q[dmcol_q];
+              st_q <= W_DMF;
+            end else st_q <= W_DM1;          // operand col read issued
+          end
+          W_DM1: begin                       // stage column dmcol
+            for (int l = 0; l < LAN; l++)
+              for (int r = 0; r < 4; r++)
+                if (r < ot_comps_q)
+                  dtm_q[dmcol_q[1:0]][l][r[1:0]] <=
+                    (otag_q[0] == APU_SH_RT_CONST)
+                      ? ocst_q[0][32 * ({26'h0, dmcol_q} *
+                                        {2'b0, ot_comps_q} + r) +: 32]
+                      : rf_rdata[l*128 + r*32 +: 32];
+            if (dmcol_q + 1 < ot_cols_q) begin
+              dmcol_q <= dmcol_q + 1; st_q <= W_DM0;
+            end else begin
+              dmcol_q <= '0; st_q <= W_DMS;
+            end
+          end
+          // micro-program step issue; HALT retires (det → wb via the
+          // program's MOV; inverse → flush phase)
+          W_DMS: begin
+            if (dm_op == 5'd0) begin         // HALT
+              dmph_q <= 1'b1;
+              if (xnum_q == 33) st_q <= W_WB;
+              else begin dmcol_q <= '0; st_q <= W_DM0; end
+            end else begin
+              ncomp_q <= 5'd1;               // scalar jobs, comp 0
+              // temps/elems carry their bank comp in the dest id —
+              // jstore's comp arg would be the scalar-loop tc_q (0),
+              // so route it through the jucc/ccc override.
+              ccc_q <= dm_dd[1:0];
+              jset((dm_op == 5'd7) ? 2'd1 : 2'd0,
+                   dm_xo,
+                   dm_sa_w, dm_sb_w, dm_sc_w,
+                   dm_jdst, 1'b0, W_DMN, 1'b1, 1'b0,
+                   dm_ci(dm_sa),
+                   dm_ci((dm_op == 5'd8) ? dm_sa : dm_sb),
+                   dm_ci(dm_sc),
+                   dm_neg, dm_jdtx);
+            end
+          end
+          W_DMN: begin
+            dmp_q <= dmp_q + 1; st_q <= W_DMS;
+          end
+          W_DMF: begin                       // result column written
+            if (dmcol_q + 1 < rcols_q) begin
+              dmcol_q <= dmcol_q + 1; st_q <= W_DM0;
+            end else st_q <= W_NEXT;
+          end
+          W_WB2: st_q <= W_NEXT;            // second row written (port)
           W_WB: begin
-            st_q <= W_NEXT;
+            st_q <= wb2_q ? W_WB2 : W_NEXT;
           end
           // ---------------------------------------------------- φ ----
           // OpPhi: pick the pair whose parent == cprev (§7c).  The phi
@@ -4371,6 +5752,12 @@ module g6lc_apu_shwave
             end
             if (opc_q == 16'd248)                // block label arrives
               clbl_q[wave_q] <= ops_q[0][9:0];
+            if (opc_q == 16'd252 || opc_q == 16'd4416)
+              // Kill / TerminateInvocation: the leaving lanes are dead —
+              // registers still feed quad derivatives, all side
+              // effects suppressed (stores, atomics, image writes,
+              // FS-out colour/depth — via the slot-8 discard flag)
+              dead_q[wave_q] <= dead_q[wave_q] | act_w;
             if (opc_q == 16'd249 || opc_q == 16'd250 ||
                 opc_q == 16'd251) begin
               wsel_q[wave_q] <= 1'b0;
@@ -4385,10 +5772,57 @@ module g6lc_apu_shwave
               fl_pc_q <= pc_q[wave_q];
               fl_wave_q <= {8'h0, wave_q};
               st_q <= W_DONE;
+            end else if (cf_ret) begin
+              // callee drained — pop the top frame and resume the
+              // lanes that took the call at the return pc; their
+              // previous-block label is the block that held the call
+              insns_q <= insns_q + 1;
+              csp_q[wave_q]  <= csp_q[wave_q] - 5'd1;
+              cmask_q[wave_q] <=
+                cfln_q[wave_q][csp_q[wave_q] - 5'd1] &
+                ~dead_q[wave_q];
+              pc_q[wave_q]   <= cfret_q[wave_q][csp_q[wave_q] - 5'd1];
+              clbl_q[wave_q] <= cclbl_q[wave_q][csp_q[wave_q] - 5'd1];
+              for (int l = 0; l < LAN; l++)
+                if (cfln_q[wave_q][csp_q[wave_q] - 5'd1][l] &&
+                    !dead_q[wave_q][l])
+                  cprev_q[wave_q][l] <=
+                    cclbl_q[wave_q][csp_q[wave_q] - 5'd1];
+              if ((cfln_q[wave_q][csp_q[wave_q] - 5'd1] &
+                   ~dead_q[wave_q]) == '0) begin
+                // every lane that entered the callee died inside it —
+                // the pop above is committed (mask = 0) and W_CF0 is
+                // re-entered so cf_eng continues the unwind below the
+                // new floor, exactly like an OpReturn with an empty
+                // mask: parked caller entries resume first, a deeper
+                // drain pops the next frame, and cf_fin — the only
+                // place the F8 tail / wfin may start — fires solely at
+                // depth 0 with nothing parked.
+                st_q <= W_CF0;
+              end else if (insns_q + 1 > ShaderBudget) begin
+                done_code_q <= APU_SH_DONE_BUDGET;
+                fl_pc_q <= pc_q[wave_q];
+                fl_wave_q <= {8'h0, wave_q};
+                st_q <= W_DONE;
+              end else st_q <= W_SCHED;
             end else if (cf_fin) begin
               insns_q <= insns_q + 1;
-              wfin_q[wave_q] <= 1'b1;
-              st_q <= W_SCHED;
+              if (gfx_q == APU_SH_GFX_FS && fslate_q &&
+                  32'(wave_q) * LAN < tot_q) begin
+                // FS wave end: write the per-lane builtin-output slot
+                // (flags word1 / SampleMask word2 / word3=0; word0 is
+                // the shader's own FragDepth record store)
+                f8l_q <= '0;
+                ls_addr_q <= out_base_q +
+                  32'(wave_q) * LAN * gfx_ostr +
+                  32'(APU_SH_FSOUT_BI * 16);
+                f8b_q <= 5'd8;
+                f8d_q <= 32'hFFFF_FFFF;
+                st_q <= W_F8A;
+              end else begin
+                wfin_q[wave_q] <= 1'b1;
+                st_q <= W_SCHED;
+              end
             end else if (cf_jok) begin
               insns_q <= insns_q + 1;
               st_q <= W_CF1;
@@ -4485,9 +5919,10 @@ module g6lc_apu_shwave
                             (ty_kind == APU_SH_TK_MAT ||
                              ty_kind == APU_SH_TK_VEC))
                            ? f_nc(ty_comps) : 3'd1;
-                cb_q <= mi_q; ncomp_q <= 5'(mac_q);
+                ncomp_q <= 5'(mac_q);
                 jset(0, 5'd2, {2'd0, S_V0}, {2'd3, S_V1},
-                     {2'd0, S_ZERO}, 0, 0, W_MWB);
+                     {2'd0, S_ZERO}, 0, 0, W_MWB, 1'b0, 1'b0,
+                     2'd0, mi_q[1:0]);
               end
             endcase
           end
@@ -4533,13 +5968,13 @@ module g6lc_apu_shwave
                   mph_q <= 1;
                 end
                 1: begin                         // product col_k * s_k
-                  ncomp_q <= 5'(mrr_q); cb_q <= mk_q;
+                  ncomp_q <= 5'(mrr_q);
                   mph_q <= (mk_q == mkd_q - 3'd1) ? 3'd2 : 3'd3;
                   jset(0, 5'd2, {2'd0, S_MA},
                        {2'd3, (opc_q == 146) ? S_MB : S_V1},
                        {2'd0, S_ZERO},
-                       (mk_q == mkd_q - 3'd1) ? 2'd1 : 2'd2,
-                       0, W_MSQ);
+                       (mk_q == mkd_q - 3'd1) ? 3'd1 : 3'd2,
+                       0, W_MSQ, 1'b0, 1'b0, 2'd0, mk_q[1:0]);
                 end
                 2, 4: begin                      // acc updated / seeded
                   if (mk_q == 0) begin
@@ -4746,7 +6181,8 @@ module g6lc_apu_shwave_fixture
   parameter int unsigned ScratchBytes  = 1024,
   parameter int unsigned SlabBytes     = 16384,
   parameter int unsigned ShaderBudget  = 32'h0010_0000,
-  parameter int unsigned WaitBound     = 32'd4096
+  parameter int unsigned WaitBound     = 32'd4096,
+  parameter int unsigned CallDepth     = 8
 ) (
   input  logic         clk_i,
   input  logic         rst_ni,
@@ -4776,6 +6212,10 @@ module g6lc_apu_shwave_fixture
   input  logic [31:0]  blk_data_i,
   output logic [9:0]   phi_id_o,
   input  logic [159:0] phi_data_i,
+  output logic [9:0]   func_id_o,
+  input  logic [31:0]  func_data_i,
+  output logic [9:0]   parm_id_o,
+  input  logic [15:0]  parm_data_i,
   input  logic [127:0] entry_data_i,
   output logic         mem_re_o,
   output logic         mem_we_o,
@@ -4799,6 +6239,7 @@ module g6lc_apu_shwave_fixture
       .ShaderSlots(ShaderSlots), .ShaderWords(ShaderWords),
       .ShaderInit(ShaderInit), .ShaderMembers(ShaderMembers),
       .ScratchBytes(ScratchBytes), .SlabBytes(SlabBytes),
-      .ShaderBudget(ShaderBudget), .WaitBound(WaitBound)
+      .ShaderBudget(ShaderBudget), .WaitBound(WaitBound),
+      .CallDepth(CallDepth)
     ) i_dut (.*);
 endmodule

@@ -1,0 +1,39 @@
+#version 460
+// G3a-i integer/bit family: carry/borrow, extended mul, bitfield
+// ops, bit reverse/count, findLSB/MSB, dynamic vector access,
+// any/all/isnan/isinf.
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) buffer Src { uint src[]; };
+layout(set = 0, binding = 1) buffer Dst { uint dst[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint a = src[i], b = src[i + 32u];
+    int  sa = int(a), sb = int(b);
+    uint carry, borr, hi, lom;
+    uint lo  = uaddCarry(a, b, carry);
+    uint dif = usubBorrow(a, b, borr);
+    umulExtended(a, b, hi, lom);
+    int  his, los;
+    imulExtended(sa, sb, his, los);
+    uvec4 v = uvec4(a, b, lo, dif);
+    uint idx = a % 4u;
+    uint ex  = v[idx];
+    v[idx] = b;
+    uint o = i * 12u;
+    dst[o + 0u]  = lo + carry;
+    dst[o + 1u]  = dif + borr;
+    dst[o + 2u]  = hi;
+    dst[o + 3u]  = lom;
+    dst[o + 4u]  = uint(his);
+    dst[o + 5u]  = uint(los);
+    dst[o + 6u]  = bitfieldInsert(a, b, int(i & 7u), 11);
+    dst[o + 7u]  = uint(bitfieldExtract(sa, 3, 17));
+    dst[o + 8u]  = bitfieldExtract(a, 5, 13);
+    dst[o + 9u]  = bitfieldReverse(a);
+    dst[o + 10u] = uint(bitCount(a)) + uint(findLSB(b | 1u)) +
+                   uint(findMSB(a | 1u)) + ex;
+    bvec2 cmp = bvec2(a > b, sa < 0);
+    dst[o + 11u] = (all(cmp) ? 1u : 0u) + (any(cmp) ? 2u : 0u)
+                 + (isnan(float(a) * 0.0) ? 4u : 0u)
+                 + (isinf(float(b)) ? 8u : 0u) + v[0];
+}

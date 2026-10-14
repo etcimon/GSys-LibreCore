@@ -265,13 +265,49 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
   unproven in general); the virtio-mmio reset-ack watchdog is a fixed 1,023 cycles; the
   `G6LC_APU_DBG_LOST` `$display` taps in vgctl/vnfront are `ifdef`-gated rather than
   `translate_off`-fenced. Smoke/milestone evidence only — not CTS, not conformance.
-- [~] G3a-i — real-content shader control flow and fragment semantics (functions
-  `OpFunctionCall`/`OpReturnValue`, discard/demote, FragDepth + late-Z via FS-out slot 8,
-  32-bit atomics, bit/pack/integer ops, `vkcmp` scene 8). In progress 2026-10-13/14: the
-  full ShaderWave corpus is green locally (`cases=342 checks=48108 maxulp=1 oum=0`) after
-  two defects in the new determinant/inverse micro-program engine were root-caused (case
-  label for `cols=4` matrices, DIV decoded as SQRT); shmod/rast/vgsys gates, 5.008 lint,
-  synth screens and the local `scenes=9` guest run are still owed before review.
+- [x] G3a-i — **real-content shader control flow and fragment semantics (2026-10-14).**
+  Non-inlined functions (`OpFunctionParameter/FunctionCall/ReturnValue`: shmod function +
+  param tables `MaxFuncs=16`/`MaxParams=8`, fault `APU_SH_FAULT_FUNC=21`; shwave per-wave
+  call stack `CallDepth=8` with lane-masked frames, reconvergence floor and
+  overflow → `DONE_FAULT`); discard (`OpKill`/`OpTerminateInvocation`/
+  `OpDemoteToHelperInvocation`/`OpIsHelperInvocationEXT`, builtin 23) with dead-lane
+  side-effect suppression; FragDepth (builtin 22) + late-Z: FS-out record **slot 8**
+  (`APU_SH_FSOUT_BI`: word0 FragDepth, word1 bit0 discarded, word2 SampleMask, word3 0),
+  entry flags `fs_late`/`fs_fdepth` plumbed shmod → vnfront pipeline word0[5:4] → cmdexec
+  → `apu_rast_draw_t` → rast ROP late depth test/write (`S_ROP_F8/LRD/LC/LWR`); 32-bit
+  atomics 227–242 as lane-serial RMW on the single LSU (`W_AT*`, workgroup/scratch
+  `W_ATS*`); bit/integer/misc ops (Undef, CopyObject, dynamic vector ops, carry/borrow/
+  extended mul, Any/All/IsNan/IsInf, FRem/FMod, FUnord compares, bitfield/reverse/count)
+  and GLSL.std.450 Determinant/MatrixInverse (generated cofactor micro-program
+  `include/g6lc_apu_dmprog.svh` from `tools/shader/gen_dmprog.py`, `--check` freshness
+  suite `dmprog` in the runner), Modf/Frexp(+Struct)/Ldexp, the pack/unpack family
+  (f16 converters bit-exact with the model), FaceForward/Reflect/Refract, Find*sb,
+  NMin/NMax/NClamp. Hygiene: rast header limits current, DBG taps `translate_off`-fenced,
+  `virtio_mmio` `ResetAckWaitLog2` parameter. **Defects found:** by the guest oracle —
+  scene 8's atomic counter read 2108 vs llvmpipe 2048 because rast computed the helper
+  mask but never packed it into `imm[5:6]` and shwave never gated helper side effects
+  (now `suppressed(lane,sc) = (dead|helper) ∧ sc ∈ {UNIFORM,SBUF,WORKGROUP}` for stores,
+  `(dead|helper)` for atomics/image writes); by review — demoted lanes lost
+  Function/Private/Output stores in RTL *and* model (spec: helpers keep exactly those
+  classes; `fs_demote_deriv` negative→positive), and an all-dead callee return finished
+  the wave while sibling lanes were parked in caller-side reconvergence entries
+  (`fs_kill_fn`, `fn_divret` negative→positive); plus two DM-engine decode slips (the
+  `cols=4` case label, DIV issued as SQRT) and a `W_RW0` skip for result-bearing
+  zero-operand ops. **Evidence (local 5.020, final RTL):** shwave **349 cases / 49,514
+  checks, maxulp=1 (math450 only), oum=0**; shmod 109 / 1,998,352; shcore 11 / 18,799;
+  rast 14 / 14,444 (discard checkerboard; late-Z negative capture with `fs_late=0` then
+  positive); vgtop all sessions incl. `ue_donecol_1`; vgsys `ue_gpos_tri_1` exact +
+  11 negative arms; vnfront 46 / 337; cmdexec 7 / 31; virtio-mmio 4,243 both arms; 5.008
+  lint `LINT_RC=0` on shmod/shwave/shcore/rast/cmdexec/vnfront/vgctl/vnpump/virtio_mmio;
+  synth rast Enable=0 inert / Enable=1 **206,847 cells / 22,013 FFs no latch** (+8,888 /
+  +2,085 vs G2c for late-Z), shwave Enable=0 inert (Enable=1 small screen still running
+  at record time — number owed; compare against 4b-opt 1,060,264 / 56,124). **Local stock
+  guest (`.cache/apu-guest/out-final/`): `G6LC_VKCMP_PASS scenes=9`** (scene 8 =
+  function call + checkerboard discard + FragDepth over a second triangle + SSBO
+  `atomicAdd`, maxdiff 1, **counter 2048 = 2048**), all earlier markers, `GUEST-PASS` both
+  arms. Vector churn: every `.tab` gained the `F` row; no pre-existing expectation changed
+  (two mutant `.out.bin` lavapipe byproducts were restored from HEAD — they are not
+  consumed by the TB). Pinned-toolchain leaves deferred to the G3 milestone.
 - [ ] **CTS track (2026-10-14) — the Khronos Vulkan CTS becomes the acceptance oracle.**
   Source of record `specs/VK-GL-CTS` (lazy, shallow, `update = none`) pinned to
   `vulkan-cts-1.4.6.2` = `f6a29701220f34dd1407513bfe80d74ca7b392ce`; must-pass index

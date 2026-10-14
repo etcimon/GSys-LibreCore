@@ -155,6 +155,21 @@ FragDepth/late-Z, no discard, no points/lines, primitive restart ignored, strips
 one batch, one subpass with identity colour references, no MSAA, single viewport, one memory
 word / one float op in flight.
 
+**G3a-i (2026-10-14) — real-content shader control flow and fragment semantics.** The
+ShaderCore now executes non-inlined functions (shmod function/param tables, a per-wave
+call stack with lane-masked frames and a reconvergence floor; `CallDepth` parameter),
+discard/demote with the Vulkan helper-invocation rule (dead or helper lanes keep
+Function/Private/Output stores and lose UNIFORM/StorageBuffer/Workgroup stores, atomics and
+image writes; the raster engine packs its 2×2 helper mask into the FS dispatch), FragDepth
+through FS-out record slot 8 with the depth test moved into the ROP when the module writes
+depth or may discard (`fs_late`), 32-bit atomics as lane-serial read-modify-write on the
+single LSU, the integer/bitfield/pack/geometry GLSL.std.450 families and a generated
+Determinant/MatrixInverse micro-program (`gen_dmprog.py` → `g6lc_apu_dmprog.svh`,
+freshness-checked by the runner). Evidence and the defects it surfaced (helper-mask
+packing found by the guest oracle's atomic counter; demote store classes and all-dead
+callee return found in review) are itemised in `AGENTS-todo.md`; the stock guest now
+passes nine `vkcmp` scenes. Transcendentals and shadow/proj/gather sampling are G3a-ii.
+
 **Sequence:** consolidate evidence/contracts and qualify 3d-d → complete memory/synchronization
 and the common shader pipeline → raster/ROP and scalable VM/cache → matrix/RT/mesh/advanced
 geometry and scheduling → full core/extension CTS, UE/CS2 and physical release. Transport

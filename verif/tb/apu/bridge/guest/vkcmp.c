@@ -42,12 +42,13 @@ enum {
     S_VCLIP,  /* vs_clip     — scene 6    */
     S_VUVC,   /* vs_uvc      — scene 8    */
     S_FDERIV, /* fs_deriv2   — scene 8    */
+    S_FS8,    /* fs_scene8   — scene 9    */
     S_N
 };
 static const char *spv_dflt[S_N] = {
     "vs_passthru.spv", "fs_color.spv", "vs_pc.spv", "fs_vcol.spv",
     "vs_pos3.spv", "vs_inst.spv", "vs_tex.spv", "fs_mip.spv",
-    "vs_clip.spv", "vs_uvc.spv", "fs_deriv2.spv"};
+    "vs_clip.spv", "vs_uvc.spv", "fs_deriv2.spv", "fs_scene8.spv"};
 
 typedef struct {
     uint32_t *w;
@@ -886,6 +887,142 @@ static void scene_derivs(vkdev *d, const spv_t *spv, uint8_t *out)
     vkDestroyShaderModule(d->dev, g.fs, NULL);
 }
 
+/* scene 9: FS helper calls + checkerboard discard + gl_FragDepth
+   (late-Z) + an SSBO atomic counter, read back and compared between
+   devices.  Two draws sharing the render pass / depth buffer:
+     draw 1  quad of two tris, vcol.b=0 -> FragDepth 0.3 on kept
+             pixels; the position checkerboard discard leaves navy
+             clear cells whose depth stays at 1.0.
+     draw 2  one green tri through vs_pos3+fs_vcol (no discard, no
+             FS depth write) at interpolated z=0.4.  It loses to the
+             quad's FragDepth 0.3 on kept pixels but wins the holes
+             -> green only inside the discarded cells.  If a device
+             wrongly used the quad's interpolated z=0.5 as its
+             stored depth, the 0.4 tri would cover the quad's kept
+             pixels too, so late-Z is discriminated by the image.
+   The FS increments ctr.cnt once per non-discarded fragment of
+   draw 1; the two devices must count identically. */
+static void scene_f8(vkdev *d, const spv_t *spv, uint8_t *out,
+                     uint32_t *cnt)
+{
+    /* pos.xy + col rgba, stride 24 — wound like scene 0 (negative
+       framebuffer shoelace = CCW front under CULL_MODE_BACK) */
+    static const float verts[6][6] = {
+        {-1.2f, -1.2f, 0.85f, 0.15f, 0.00f, 1.0f},
+        {-1.2f,  1.9f, 0.85f, 0.15f, 0.00f, 1.0f},
+        { 1.9f, -1.2f, 0.85f, 0.15f, 0.00f, 1.0f},
+        { 1.9f, -1.2f, 0.85f, 0.15f, 0.00f, 1.0f},
+        {-1.2f,  1.9f, 0.85f, 0.15f, 0.00f, 1.0f},
+        { 1.9f,  1.9f, 0.85f, 0.15f, 0.00f, 1.0f}};
+    /* pos.xyz + col rgba, stride 28; z=0.4 sits between the quad's
+       FragDepth 0.3 and its interp-z fallback 0.5 */
+    static const float verts2[3][7] = {
+        {-0.4f, -0.4f, 0.4f, 0.10f, 0.90f, 0.10f, 1.0f},
+        { 0.0f,  0.6f, 0.4f, 0.10f, 0.90f, 0.10f, 1.0f},
+        { 0.5f, -0.3f, 0.4f, 0.10f, 0.90f, 0.10f, 1.0f}};
+    obj_t o = {0};
+    mkimg(d, VK_FORMAT_R8G8B8A8_UNORM, W, H, 1,
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+          VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &o.cimg, &o.cmem);
+    o.cview = mkview(d, o.cimg, VK_FORMAT_R8G8B8A8_UNORM,
+                     VK_IMAGE_ASPECT_COLOR_BIT, 1);
+    mkimg(d, VK_FORMAT_D32_SFLOAT, W, H, 1,
+          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT,
+          &o.dimg, &o.dmem);
+    o.dview = mkview(d, o.dimg, VK_FORMAT_D32_SFLOAT,
+                     VK_IMAGE_ASPECT_DEPTH_BIT, 1);
+    mk_rp_fb(d, &o, VK_FORMAT_R8G8B8A8_UNORM, 1);
+    /* SSBO counter at set0/binding0 (fragmentStoresAndAtomics) */
+    VkDescriptorSetLayoutBinding lb = {
+        0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1,
+        VK_SHADER_STAGE_FRAGMENT_BIT, NULL};
+    VkDescriptorSetLayoutCreateInfo dlci = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0,
+        1, &lb};
+    chk(vkCreateDescriptorSetLayout(d->dev, &dlci, NULL, &o.dsl),
+        "dslayout");
+    VkDescriptorPoolSize psz = {
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1};
+    VkDescriptorPoolCreateInfo pci = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 1,
+        1, &psz};
+    chk(vkCreateDescriptorPool(d->dev, &pci, NULL, &o.pool), "dpool");
+    VkDescriptorSetAllocateInfo dsai = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, o.pool,
+        1, &o.dsl};
+    chk(vkAllocateDescriptorSets(d->dev, &dsai, &o.dset), "dset alloc");
+    mkbuf(d, 16, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, &o.vb2, &o.vb2m);
+    {
+        uint32_t z[4] = {0, 0, 0, 0};
+        upload(d, o.vb2m, z, sizeof(z));
+    }
+    VkDescriptorBufferInfo dbi = {o.vb2, 0, 16};
+    VkWriteDescriptorSet wds = {
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, o.dset, 0, 0, 1,
+        VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &dbi, NULL};
+    vkUpdateDescriptorSets(d->dev, 1, &wds, 0, NULL);
+    mk_pl(d, &o, o.dsl);
+    gp_t g = {0};
+    g.vs = mksm(d, &spv[S_VPAS]);  g.fs = mksm(d, &spv[S_FS8]);
+    g.binds[0] = (VkVertexInputBindingDescription){
+        0, 24, VK_VERTEX_INPUT_RATE_VERTEX};
+    g.atts[0] = (VkVertexInputAttributeDescription){
+        0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
+    g.atts[1] = (VkVertexInputAttributeDescription){
+        1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 8};
+    g.nbind = 1;  g.natt = 2;
+    g.topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    g.depth = 1;  g.wmask = 0xF;  g.layout = o.pl;  g.rp = o.rp;
+    o.pipe = mkgp(d, &g);
+    /* draw 2 pipeline: plain vs_pos3 -> fs_vcol, interpolated z */
+    gp_t g2 = g;
+    g2.vs = mksm(d, &spv[S_VPOS3]);  g2.fs = mksm(d, &spv[S_FVCOL]);
+    g2.binds[0] = (VkVertexInputBindingDescription){
+        0, 28, VK_VERTEX_INPUT_RATE_VERTEX};
+    g2.atts[0] = (VkVertexInputAttributeDescription){
+        0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0};
+    g2.atts[1] = (VkVertexInputAttributeDescription){
+        1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 12};
+    VkPipeline pipe2 = mkgp(d, &g2);
+    mkbuf(d, sizeof(verts), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+          &o.vb, &o.vbm);
+    upload(d, o.vbm, verts, sizeof(verts));
+    mkbuf(d, sizeof(verts2), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+          &o.stage, &o.stagem);
+    upload(d, o.stagem, verts2, sizeof(verts2));
+    mkbuf(d, NPX * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &o.rb, &o.rbm);
+    VkClearValue clrs[2] = {
+        {{{0.05f, 0.05f, 0.15f, 1.0f}}},
+        {{{0}}}};
+    clrs[1].depthStencil.depth = 1.0f;
+    clrs[1].depthStencil.stencil = 0;
+    frame_begin(d, &o, clrs, 2);
+    vkCmdBindDescriptorSets(o.cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            o.pl, 0, 1, &o.dset, 0, NULL);
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(o.cb, 0, 1, &o.vb, &off);
+    vkCmdDraw(o.cb, 6, 1, 0, 0);
+    vkCmdBindPipeline(o.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe2);
+    vkCmdBindVertexBuffers(o.cb, 0, 1, &o.stage, &off);
+    vkCmdDraw(o.cb, 3, 1, 0, 0);
+    frame_end(d, &o, out);
+    void *cp;
+    chk(vkMapMemory(d->dev, o.vb2m, 0, 16, 0, &cp), "ctr map");
+    *cnt = *(const uint32_t *)cp;
+    vkUnmapMemory(d->dev, o.vb2m);
+    /* the device keeps only 8 shader-module slots — release the
+       pipeline's refs and the module objects per scene (Venus
+       forwards these in-order on the primary ring) */
+    vkDestroyPipeline(d->dev, o.pipe, NULL);
+    vkDestroyPipeline(d->dev, pipe2, NULL);
+    vkDestroyShaderModule(d->dev, g.vs, NULL);
+    vkDestroyShaderModule(d->dev, g.fs, NULL);
+    vkDestroyShaderModule(d->dev, g2.vs, NULL);
+    vkDestroyShaderModule(d->dev, g2.fs, NULL);
+    vkDestroyDescriptorPool(d->dev, o.pool, NULL);
+    vkDestroyDescriptorSetLayout(d->dev, o.dsl, NULL);
+}
+
 /* ---------------- compare + report ------------------------------- */
 
 static int compare(const uint8_t *a, const uint8_t *b, int tol,
@@ -998,6 +1135,9 @@ int main(int argc, char **argv)
             VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, NULL, 0, 0, 1,
             &prio};
         VkPhysicalDeviceFeatures en = {0};
+        /* scene 8 does an FS SSBO atomicAdd — without this feature the
+           store is undefined and both sides read 0 (vacuous compare) */
+        en.fragmentStoresAndAtomics = VK_TRUE;
         VkDeviceCreateInfo dci = {VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO,
             NULL, 0, 1, &qci, 0, NULL, 0, NULL, &en};
         chk(vkCreateDevice(d->pd, &dci, NULL, &d->dev), "vkCreateDevice");
@@ -1009,7 +1149,7 @@ int main(int argc, char **argv)
     }
 
     /* name, tolerance (LSB), budget (fraction of NPX) */
-    struct { const char *name; int tol; float budget; } sc[8] = {
+    struct { const char *name; int tol; float budget; } sc[9] = {
         {"tri_gradient",       2, 0.005f},
         {"depth_less",         2, 0.005f},
         {"blend_layers",       2, 0.010f},
@@ -1018,13 +1158,15 @@ int main(int argc, char **argv)
         {"clip_near",          3, 0.020f},
         {"srgb_gradient",      2, 0.005f},
         {"derivs",             2, 0.010f},
+        {"f8_latez_atomic",    2, 0.030f},
     };
     static uint8_t va[NPX * 4], la[NPX * 4];
     const char *only = getenv("VKCMP_ONLY");
     int npass = 0, nrun = 0;
-    for (int k = 0; k < 8; k++) {
+    for (int k = 0; k < 9; k++) {
         if (only && atoi(only) != k) continue;
         nrun++;
+        uint32_t cv = 0, cl = 0;
         double t0 = wall();
         printf("SCENE %d %s venus...\n", k, sc[k].name);
         fflush(stdout);
@@ -1039,6 +1181,7 @@ int main(int argc, char **argv)
         case 6: scene_gradient(&venus, spv, va,
                                VK_FORMAT_B8G8R8A8_SRGB); break;
         case 7: scene_derivs(&venus, spv, va); break;
+        case 8: scene_f8(&venus, spv, va, &cv); break;
         }
         double t1 = wall();
         printf("SCENE %d llvmpipe...\n", k);
@@ -1054,6 +1197,7 @@ int main(int argc, char **argv)
         case 6: scene_gradient(&lava, spv, la,
                                VK_FORMAT_B8G8R8A8_SRGB); break;
         case 7: scene_derivs(&lava, spv, la); break;
+        case 8: scene_f8(&lava, spv, la, &cl); break;
         }
         double t2 = wall();
         if (getenv("VKCMP_DUMP")) {
@@ -1070,6 +1214,12 @@ int main(int argc, char **argv)
         int bad = compare(va, la, sc[k].tol, &maxd, map);
         double pct = 100.0 * bad / NPX;
         int pass = bad <= (int)(NPX * sc[k].budget);
+        if (k == 8) {
+            int cpass = cv == cl;
+            printf("  atomic ctr venus=%u llvmpipe=%u -> %s\n",
+                   cv, cl, cpass ? "PASS" : "FAIL");
+            pass = pass && cpass;
+        }
         printf("SCENE %d %s venus=%.1fs llvmpipe=%.1fs maxdiff=%d "
                "bad=%d/4096 (%.2f%%) -> %s\n", k, sc[k].name,
                t1 - t0, t2 - t1, maxd, bad, pct,

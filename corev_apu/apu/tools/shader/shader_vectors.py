@@ -336,6 +336,42 @@ DESC = {
         img_bind(0, 0, dict(w=4, h=4, fmt=2, mips=2), kind=1),
         img_bind(0, 1, dict(w=4, h=2, fmt=10), kind=3),
         (0, 2, 32, 1, 7 << 16)]),
+    # ---- G3a-i corpus ------------------------------------------------
+    # fn_call: value-param + inout pointer-param helpers, a depth-3
+    # chain, and a two-site early return — OpFunctionCall through the
+    # wave call stack (CallDepth=8).
+    'fn_call':      dict(groups=(1, 1, 1), fmt='i', push=0,
+                         bindings=[(0, 0, 64, 0), (0, 1, 32, 1)]),
+    # atomic_hist: LocalSize 32 → four waves share the Workgroup slab
+    # counter; the SSBO histogram/max cells + the per-invocation Or
+    # cells are the deterministic RMW targets.  mut=False: a flipped
+    # index op would move atomicMax onto a histogram cell shared with
+    # atomicAdd, and add/max ordering across waves is not commutative.
+    'atomic_hist':  dict(groups=(2, 1, 1), fmt='i', push=0,
+                         mut=False,
+                         bindings=[(0, 0, 64, 0), (0, 1, 96, 1)]),
+    # atomic_cas: order-insensitive CAS bump of cell 0 plus per-lane
+    # Exchange/Min/And/Xor cells.
+    'atomic_cas':   dict(groups=(1, 1, 1), fmt='i', push=0,
+                         bindings=[(0, 0, 48, 0), (0, 1, 48, 1)]),
+    # bitops: carry/borrow, extended mul, bitfield insert/extract,
+    # reverse/count, FindLsb/Msb, any/all/isnan/isinf.
+    'bitops':       dict(groups=(1, 1, 1), fmt='i', push=0,
+                         bindings=[(0, 0, 64, 0), (0, 1, 96, 1)]),
+    # packops: pack/unpack round trips (snorm/unorm/half) + Modf /
+    # Frexp / Ldexp — the f16 steps pin the RNE converter.
+    'packops':      dict(groups=(1, 1, 1), fmt='f', push=0,
+                         bindings=[(0, 0, 48, 0), (0, 1, 96, 1)]),
+    # dynvec: hand-assembled — OpVectorExtractDynamic/InsertDynamic +
+    # OpUndef/OpCopyObject (glslang lowers indexed vectors through
+    # Function temporaries instead).
+    'dynvec':       dict(groups=(1, 1, 1), fmt='i', push=0,
+                         bindings=[(0, 0, 32, 0), (0, 1, 32, 1)]),
+    # fn_divret: callee takes an early `return v` under divergence
+    # while sibling lanes are parked at the caller merge — the
+    # non-kill variant of the all-dead callee unwind.
+    'fn_divret':    dict(groups=(1, 1, 1), fmt='i', push=0,
+                         bindings=[(0, 0, 64, 0), (0, 1, 32, 1)]),
 }
 SEEDS = [1, 2, 3]
 
@@ -539,7 +575,8 @@ def run_oracle(spv_path, desc_json, out_bin):
 
 
 def emit(name, seed, spv_words, desc, inputs, expect_fault=(0, 0),
-         mutated=False, oracle_out=None, model_cache=None):
+         mutated=False, oracle_out=None, model_cache=None,
+         expect_done=None):
     """writes <name>_<seed>.{hex,exp,desc.json,init bin files}
 
     The .exp robust field and the trailing MODEL/CLASS sections come
@@ -586,7 +623,8 @@ def emit(name, seed, spv_words, desc, inputs, expect_fault=(0, 0),
     robust = mrob
 
     expw = [expect_fault[0], expect_fault[1], robust,
-            0 if expect_fault[0] else 1, len(bindings)]
+            (0 if expect_fault[0] else 1) if expect_done is None
+            else expect_done, len(bindings)]
     for i, b in enumerate(bindings):
         st, bd, w, o = b[:4]
         expw += [bd, w * 4, ADDR0 + i * 0x1000, o]
@@ -599,6 +637,25 @@ def emit(name, seed, spv_words, desc, inputs, expect_fault=(0, 0),
             off += w
         expw += mwords
         expw += cwords
+    elif expect_done == 2:
+        # G3a-i runtime-fault arm (CallDepth overflow): the model
+        # stops the faulting invocation at the same instruction, so
+        # bindings it never stored hold their preload image — Gate-1
+        # compares against exactly that.  The oracle section repeats
+        # the model words (there is no lavapipe run for a fault arm).
+        outs = _m.outputs()
+        ocls = _m.out_classes()
+        ow = []
+        cc = []
+        for i, b in enumerate(bindings):
+            st, bd, w, o = b[:4]
+            if o:
+                ow += [v & 0xFFFFFFFF
+                       for v in outs.get(
+                           i, pack_floats(inputs[i], desc['fmt']))]
+                cc += [CLSMAP[c]
+                       for c in ocls.get(i, ['i'] * w)]
+        expw += ow + ow + cc
     expw += SENT
     open(base + '.exp', 'w').write('\n'.join(words_to_hex(expw)) + '\n')
 
@@ -738,6 +795,33 @@ GFX = {
                                                     mm=0, au=2,
                                                     av=2,
                                                     maxl=2.0))]),
+    # ---- G3a-i graphics corpus -------------------------------------
+    # fs_fncall: the fn_call helper family in an FS (value params,
+    # inout pointer param, depth-3 chain, early return).
+    'fs_fncall':   dict(stage=4, count=16, vbase=0, inst=0),
+    # fs_kill: checkerboard discard on FragCoord — lanes 8..15 of the
+    # batch die (x>=8), slot-8 flags mark them.
+    'fs_kill':     dict(stage=4, count=16, vbase=0, inst=0),
+    # geomops: FaceForward/Reflect/Refract/Determinant/MatrixInverse
+    # over the vcol input.
+    'geomops':     dict(stage=4, count=16, vbase=0, inst=0),
+    # atomic_frag: FS with an SSBO atomic counter + max
+    # (fragmentStoresAndAtomics); count stays inside the binding.
+    # Lanes 2,5,9,11 are helper invocations (partial-quad fills as
+    # rast marks them): their atomic adds are suppressed, their
+    # out-records still land.
+    'atomic_frag': dict(stage=4, count=16, vbase=0, inst=0,
+                       help=(1 << 2) | (1 << 5) | (1 << 9) | (1 << 11),
+                       binds=[(0, 0, 8, 1, 7 << 16)]),
+    # fs_demote_deriv: odd-x lanes demote then round-trip v through a
+    # Function-storage local; dFdxFine(v) in the survivors needs the
+    # demoted lane's private store — helper rules keep Function/
+    # Private/Output storage live.
+    'fs_demote_deriv': dict(stage=4, count=16, vbase=0, inst=0),
+    # fs_kill_fn: odd-x lanes call a discarding callee and die while
+    # even-x lanes are parked at the caller merge — the all-dead
+    # callee frame pop must resume the parked lanes, not finish.
+    'fs_kill_fn':  dict(stage=4, count=16, vbase=0, inst=0),
 }
 GFX_SEEDS = [1]
 
@@ -846,6 +930,11 @@ def emit_gfx(name, seed, spv_words, g):
     hexw += [g['stage'], g['count'], GFXIN, GFXOUT,
              g['vbase'], g['inst'], len(in_words)]
     hexw += in_words
+    # G3a-i: per-record helper-lane mask {lo, hi} — FS waves read it
+    # from dispatch imm[6:7] (quads rasterized from degenerate
+    # coverage mark helper lanes here)
+    hlp = g.get('help', 0)
+    hexw += [hlp & 0xFFFFFFFF, (hlp >> 32) & 0xFFFFFFFF]
     hexw += SENT
     open(base + '.hex', 'w').write('\n'.join(words_to_hex(hexw)) + '\n')
 
@@ -935,9 +1024,15 @@ def main():
                 out_bin = base + '.out.bin'
                 r = run_oracle(spv, base + '.desc.json', out_bin)
                 if r.returncode != 0:
-                    print('%s_%d: oracle failed: %s' %
+                    # oracle cannot run this module (e.g. lavapipe
+                    # rejects OpVectorExtractDynamic): keep Gate-1
+                    # coverage by folding the model image in.
+                    print('%s_%d: oracle failed: %s — ORACLE section '
+                          'carries model words' %
                           (name, seed, r.stderr.strip()))
-                    return 1
+                    emit(name, seed, words, desc, inputs,
+                         oracle_out=mc[1], model_cache=mc)
+                    continue
                 data = open(out_bin, 'rb').read()
                 owords = list(struct.unpack('<%dI' % (len(data) // 4),
                                             data))
@@ -953,8 +1048,12 @@ def main():
         # DIFFER from the unmutated oracle output at identical inputs.
         # .exp carries the UNMUTATED oracle words; the TB asserts
         # not-all-equal for output bindings.  The generator verifies
-        # the mutation is observable through lavapipe.
-        muts = mutate(words)
+        # the mutation is observable through lavapipe.  Shaders with
+        # cross-bin atomics are opted out: an arithmetic mutation can
+        # move a second atomic onto another atomic's cell, and
+        # max/add vs add/max order is not commutative — the mutant is
+        # then not bit-reproducible against the sequential model.
+        muts = mutate(words) if desc.get('mut', True) else []
         mwords = None
         if muts:
             inputs = gen_inputs(desc, 7)
@@ -1033,9 +1132,12 @@ def main():
                 out_bin = base + '.out.bin'
                 r = run_oracle(ospv, base + '.desc.json', out_bin)
                 if r.returncode != 0:
-                    print('%s_opt_%d: oracle failed: %s' %
+                    print('%s_opt_%d: oracle failed: %s — ORACLE '
+                          'section carries model words' %
                           (name, seed, r.stderr.strip()))
-                    return 1
+                    emit(name + '_opt', seed, words, desc, inputs,
+                         oracle_out=mc[1], model_cache=mc)
+                    continue
                 data = open(out_bin, 'rb').read()
                 owords = list(struct.unpack('<%dI' % (len(data) // 4),
                                             data))
@@ -1046,6 +1148,18 @@ def main():
                           % (name, seed))
                 emit(name + '_opt', seed, words, desc, inputs,
                      oracle_out=o2, model_cache=mc)
+    # ---- G3a-i: CallDepth overflow arm -------------------------------
+    # fn_deep's static depth-10 chain exceeds the wave call stack
+    # (CallDepth=8): every wave faults at the same OpFunctionCall
+    # before any store, so the out binding keeps its preload image.
+    # Single vector — no mut/bad/seed arms.
+    deep_desc = dict(groups=(1, 1, 1), fmt='i', push=0,
+                     bindings=[(0, 0, 64, 0), (0, 1, 32, 1)])
+    deep_words = read_spv(os.path.join(CORPUS, 'fn_deep.spv'))
+    spirv_scan.Scanner(deep_words).scan()
+    base, _ = emit('fn_deep', 0, deep_words, deep_desc,
+                   gen_inputs(deep_desc, 7), expect_done=2)
+    summary.append(base)
     print('wrote %d cases to %s' % (len(summary), OUT))
     return 0
 

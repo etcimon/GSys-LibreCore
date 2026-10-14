@@ -46,8 +46,13 @@ MAX_LOCAL = 64
 FAULT = dict(NONE=0, MAGIC=1, VERSION=2, CAP=3, MEMMODEL=4, ENTRY=5,
              EXECMODE=6, LOCALSIZE=7, OPCODE=8, TYPE=9, DECOR=10,
              CONST=11, VAR=12, STORAGE=13, BOUND=14, REGS=15,
-             TWO_ENTRY=16, WORDS=17, FWDREF=18, SPEC=19, BRANCH=20)
+             TWO_ENTRY=16, WORDS=17, FWDREF=18, SPEC=19, BRANCH=20,
+             FUNC=21)
 FAULT_NAME = {v: k for k, v in FAULT.items()}
+
+# G3a-i: function table geometry (must match shmod MaxFuncs/MaxParams)
+MAX_FUNCS = 16                 # OpFunction bodies per module
+MAX_PARAMS = 8                 # OpFunctionParameter per function
 
 # ---- type kinds (must match APU_SH_TK_*) ---------------------------
 TK = dict(NONE=0, VOID=1, BOOL=2, INT=3, FLOAT=4, VEC=5, MAT=6,
@@ -75,8 +80,9 @@ EM = dict(VERTEX=0, FRAGMENT=4, GLCOMPUTE=5)
 # the gl_PerVertex members; FragCoord/FrontFacing are FS inputs;
 # VertexIndex/InstanceIndex are VS inputs
 BI_GFX = dict(POSITION=0, POINTSIZE=1, CLIPDIST=3, CULLDIST=4,
-              FRAGCOORD=15, FRONTFACING=17, VERTEXINDEX=42,
-              INSTANCEINDEX=43)
+              FRAGCOORD=15, FRONTFACING=17, HELPERINVOCATION=23,
+              FRAGDEPTH=22,
+              VERTEXINDEX=42, INSTANCEINDEX=43)
 BI_GFX_IDS = set(BI_GFX.values())
 BI_GFX_DROP = {BI_GFX['POINTSIZE'], BI_GFX['CLIPDIST'],
                BI_GFX['CULLDIST']}
@@ -121,7 +127,7 @@ DEC_MBR_OK = {DEC['RelaxedPrecision'], DEC['RowMajor'], DEC['ColMajor'],
               DEC['NonReadable'], DEC['NoContraction'], DEC['SpecId'],
               DEC['Builtin']}
 
-CAP_OK = {1, 50, 51}   # Shader + ImageQuery + DerivativeControl (G2b)
+CAP_OK = {1, 50, 51, 5379}  # + DemoteToHelperInvocation (G3a-i)
 EXEC_MODE_OK = {17}    # LocalSize (OriginUpperLeft=7 handled inline)
 MEM_OK = (0, 1)        # Logical GLSL450
 ENTRY_MODEL_OK = set(EM.values())   # Vertex/Fragment/GLCompute
@@ -130,7 +136,7 @@ ENTRY_MODEL_OK = set(EM.values())   # Vertex/Fragment/GLCompute
 # 1.4.309.0): the 4a execution subset plus header/type/decor
 OP = dict(
     Nop=0, Source=3, SourceExtension=4, Name=5, MemberName=6,
-    String=7, Line=8,
+    String=7, Line=8, Extension=10,
     ExtInstImport=11, ExtInst=12, MemoryModel=14, EntryPoint=15,
     ExecutionMode=16, Capability=17,
     TypeVoid=19, TypeBool=20, TypeInt=21, TypeFloat=22, TypeVector=23,
@@ -148,11 +154,17 @@ OP = dict(
     ImageSampleExplicitLod=88,
     ImageFetch=95, ImageRead=98, ImageWrite=99, Image=100,
     ImageQuerySizeLod=103, ImageQuerySize=104, ImageQueryLevels=106,
-    Function=54, FunctionEnd=56, Variable=59, Load=61, Store=62,
+    Function=54, FunctionParameter=55, FunctionEnd=56,
+    FunctionCall=57, Variable=59, Load=61, Store=62,
     AccessChain=65, InBoundsAccessChain=66, ArrayLength=68,
     Decorate=71, MemberDecorate=72,
     VectorShuffle=79, CompositeConstruct=80, CompositeExtract=81,
     CompositeInsert=82, Transpose=84,
+    # G3a-i: misc/value ops
+    Undef=1, VectorExtractDynamic=77, VectorInsertDynamic=78,
+    CopyObject=83, FRem=140, FMod=141,
+    IAddCarry=149, ISubBorrow=150, UMulExtended=151, SMulExtended=152,
+    Any=154, All=155, IsNan=156, IsInf=157,
     ConvertFToU=109, ConvertFToS=110, ConvertSToF=111,
     ConvertUToF=112, Bitcast=124,
     SNegate=126, FNegate=127, IAdd=128, FAdd=129, ISub=130, FSub=131,
@@ -167,12 +179,22 @@ OP = dict(
     IEqual=170, INotEqual=171, UGreaterThan=172, SGreaterThan=173,
     UGreaterThanEqual=174, SGreaterThanEqual=175, ULessThan=176,
     SLessThan=177, ULessThanEqual=178, SLessThanEqual=179,
-    FOrdEqual=180, FOrdNotEqual=182, FUnordNotEqual=183,
-    FOrdLessThan=184, FOrdGreaterThan=186, FOrdLessThanEqual=188,
-    FOrdGreaterThanEqual=190,
+    FOrdEqual=180, FUnordEqual=181, FOrdNotEqual=182,
+    FUnordNotEqual=183, FOrdLessThan=184, FUnordLessThan=185,
+    FOrdGreaterThan=186, FUnordGreaterThan=187,
+    FOrdLessThanEqual=188, FUnordLessThanEqual=189,
+    FOrdGreaterThanEqual=190, FUnordGreaterThanEqual=191,
     ShiftRightLogical=194, ShiftRightArithmetic=195,
     ShiftLeftLogical=196, BitwiseOr=197, BitwiseXor=198,
     BitwiseAnd=199, Not=200,
+    BitFieldInsert=201, BitFieldSExtract=202, BitFieldUExtract=203,
+    BitReverse=204, BitCount=205,
+    # G3a-i: 32-bit atomics (lane-serial read-modify-write)
+    AtomicLoad=227, AtomicStore=228, AtomicExchange=229,
+    AtomicCompareExchange=230, AtomicIIncrement=232,
+    AtomicIDecrement=233, AtomicIAdd=234, AtomicISub=235,
+    AtomicSMin=236, AtomicUMin=237, AtomicSMax=238, AtomicUMax=239,
+    AtomicAnd=240, AtomicOr=241, AtomicXor=242,
     # G2b derivative family — fragment-only (FRAG_ONLY); quads are
     # lanes {4k..4k+3} of a wave
     DPdx=207, DPdy=208, Fwidth=209,
@@ -181,9 +203,11 @@ OP = dict(
     ControlBarrier=224, MemoryBarrier=225,
     Phi=245, LoopMerge=246, SelectionMerge=247,
     Label=248, Branch=249, BranchConditional=250, Switch=251,
-    Return=253, Unreachable=255,
-    # OpKill (252) and OpReturnValue (254) are deliberately absent:
-    # they fault OPCODE at commit.
+    Kill=252, Return=253, ReturnValue=254, Unreachable=255,
+    # G3a-i fragment termination / helper ops (SPV_EXT_terminator /
+    # demote; all FRAG_ONLY)
+    TerminateInvocation=4416, DemoteToHelperInvocation=5380,
+    IsHelperInvocationEXT=5381,
 )
 
 ACCEPT = set(OP.values())
@@ -191,17 +215,29 @@ ACCEPT = set(OP.values())
 # opcodes legal only inside a Fragment-execution-model module: the
 # implicit-LOD sample (87) needs quad derivatives that VS/compute
 # waves never form, and 207-215 *are* quad derivatives
-FRAG_ONLY = {87, 207, 208, 209, 210, 211, 212, 213, 214, 215}
+FRAG_ONLY = {87, 207, 208, 209, 210, 211, 212, 213, 214, 215,
+             252, 4416, 5380, 5381}
 
 # instruction word bound for ops that stage all operand words
-STAGE_BOUND = {245, 224, 225, 246, 247, 250, 251, 84,
+STAGE_BOUND = {57, 245, 224, 225, 246, 247, 250, 251, 84,
                143, 144, 145, 146, 147, 255}
 
 # GLSL.std.450 extinst numbers accepted in 4a (extinst grammar vulkan-
 # sdk-1.4.309.0); everything else faults at commit.
 EXT450 = dict(Round=1, RoundEven=2, Trunc=3, FAbs=4, SAbs=5, FSign=6,
               SSign=7, Floor=8, Ceil=9, Fract=10, Sqrt=31,
-              InverseSqrt=32, FMin=37, UMin=38, SMin=39, FMax=40,
+              InverseSqrt=32,
+              # G3a-i: determinant/inverse, modf/frexp family, fp16 and
+              # fixed-point pack pairs, geometry ops, bit scans, NaN-
+              # propagating min/max/clamp
+              Determinant=33, MatrixInverse=34, Modf=35, ModfStruct=36,
+              Frexp=51, FrexpStruct=52, Ldexp=53, PackSnorm4x8=54,
+              PackUnorm4x8=55, PackSnorm2x16=56, PackUnorm2x16=57,
+              PackHalf2x16=58, UnpackSnorm2x16=60, UnpackUnorm2x16=61,
+              UnpackHalf2x16=62, UnpackSnorm4x8=63, UnpackUnorm4x8=64,
+              FaceForward=70, Reflect=71, Refract=72, FindILsb=73,
+              FindSMsb=74, FindUMsb=75, NMin=79, NMax=80, NClamp=81,
+              FMin=37, UMin=38, SMin=39, FMax=40,
               UMax=41, SMax=42, FClamp=43, UClamp=44, SClamp=45,
               FMix=46, Step=48, SmoothStep=49, Fma=50, Length=66,
               Distance=67, Cross=68, Normalize=69)
@@ -251,6 +287,14 @@ class Scanner:
         self.saw_function_end = False
         self.glsl_id = None
         self.entry_off = 0
+        # G3a-i: function table + deferred call-target check
+        self.funcs = {}        # func id -> dict(off, rty, params, pbase)
+        self.forder = []       # function ids in scan order (table idx)
+        self.cur_func = 0
+        self.fn_head = False   # between OpFunction and first OpLabel
+        self.calls = []        # (word off, callee func id)
+        self.has_kill = False  # kill/terminate/demote present
+        self.wr_fdepth = False # module writes FragDepth (FS Output)
 
     # -- helpers -----------------------------------------------------
     # regmap row: {tag[31:30], aux[29:26] (const word count),
@@ -271,10 +315,52 @@ class Scanner:
             t = self.types.get(tid)
             if t is not None and t['kind'] == TK['MAT']:
                 n = t['cols']
+            elif t is not None and t['kind'] == TK['STRUCT']:
+                # G3a-i struct-typed results (IAddCarry / ModfStruct /
+                # FrexpStruct): flat word image, 4 words per RF row
+                n = (self.struct_words(tid) + 3) // 4
             if self.n_regs + n > SHADER_REGS:
                 raise Fault(FAULT['REGS'], 0, 0)
             self.regmap[iid] = (0, self.n_regs, tid, aux)
             self.n_regs += n
+
+    def nwords(self, tid):
+        """flat 32-bit words of a value of type tid."""
+        t = self.types.get(tid, {})
+        k = t.get('kind')
+        if k == TK['VEC']:
+            return t['comps']
+        if k == TK['MAT']:
+            return t['cols'] * self.types.get(t['elem'],
+                                              {'comps': 1})['comps']
+        if k == TK['STRUCT']:
+            return self.struct_words(tid)
+        if k == TK['ARRAY']:
+            return t.get('length', 0) * self.nwords(t['elem'])
+        return 1
+
+    def struct_words(self, tid):
+        """word extent of a struct-typed value (member offsets + each
+        member's flat word count)."""
+        t = self.types.get(tid, {})
+        if t.get('kind') != TK['STRUCT']:
+            return 0
+        mb = self.member_base.get(tid, 0)
+        top = 0
+        for i in range(t['nmemb']):
+            m = self.members[mb + i]
+            top = max(top, m['offset'] // 4 + self.nwords(m['type']))
+        return top
+
+    def reg_rows(self, tid):
+        """RF rows a value of type tid occupies (mat=cols, struct=
+        ceil(words/4), everything else 1) — the reg() row count."""
+        t = self.types.get(tid, {})
+        if t.get('kind') == TK['MAT']:
+            return t['cols']
+        if t.get('kind') == TK['STRUCT']:
+            return (self.struct_words(tid) + 3) // 4
+        return 1
 
     def decor_of(self, iid):
         return self.decor.get(iid, {})
@@ -417,13 +503,19 @@ class Scanner:
             if has_bi and (bis[0] != BI_GFX['POSITION'] or
                            any(b not in BI_GFX_DROP for b in bis[1:])):
                 raise Fault(FAULT['DECOR'], opc, at)
+            # members without an Offset decoration take the natural
+            # packed layout (each member at the running size total) —
+            # carry/borrow structs never carry decorations
+            noff = 0
             for i, mt in enumerate(ops):
                 if mt not in self.types:
                     raise Fault(FAULT['FWDREF'], opc, at)
                 d = self.mdecor.get((rid, i), {})
-                self.members.append(dict(type=mt, offset=d.get('offset', 0),
+                mo = d.get('offset', noff)
+                self.members.append(dict(type=mt, offset=mo,
                                          mstride=d.get('mstride', 0),
                                          flags=d.get('flags', 0)))
+                noff = mo + self.nwords(mt) * 4
             t = dict(kind=TK['STRUCT'], sign=0, comps=0, cols=0,
                      storage=0, elem=0, nmemb=len(ops), length=0,
                      size=0, stride=0, has_bi=has_bi)
@@ -437,9 +529,12 @@ class Scanner:
                      storage=sc, elem=elem, nmemb=0, length=0,
                      size=16, stride=0)
         elif opc == OP['TypeFunction']:
-            if len(ops) != 1 or \
-               self.types.get(ops[0], {}).get('kind') != TK['VOID']:
-                raise Fault(FAULT['TYPE'], opc, at)
+            # G3a-i: non-void returns and parameter lists are legal —
+            # the function-type row only needs to exist (the call site
+            # carries its own result type)
+            for pt in ops:
+                if pt not in self.types:
+                    raise Fault(FAULT['FWDREF'], opc, at)
             t = dict(kind=TK['FUNC'], sign=0, comps=0, cols=0,
                      storage=0, elem=0, nmemb=0, length=0,
                      size=0, stride=0)
@@ -564,7 +659,8 @@ class Scanner:
                     if bi is not None:
                         if bi == BI_GFX['FRAGCOORD']:
                             rec = True           # record slot 0
-                        elif bi != BI_GFX['FRONTFACING']:
+                        elif bi not in (BI_GFX['FRONTFACING'],
+                                        BI_GFX['HELPERINVOCATION']):
                             raise Fault(FAULT['VAR'], OP['Variable'], at)
                     elif loc is None or loc > VARY_LOCS - 1:
                         raise Fault(FAULT['VAR'], OP['Variable'], at)
@@ -573,12 +669,25 @@ class Scanner:
                         rec = True
                         self.in_mask |= 1 << loc
                 else:                            # FS Output
-                    if bi is not None or loc is None or \
-                            loc > VARY_LOCS - 1:
+                    if bi is not None:
+                        # G3a-i: FragDepth lands in record slot 8
+                        # word 0 (APU_SH_FSOUT_BI); any other builtin
+                        # is refused
+                        if bi == BI_GFX['FRAGDEPTH'] and \
+                                et is not None and \
+                                et['kind'] == TK['FLOAT']:
+                            off = 16 * VARY_LOCS
+                            rec = True
+                            self.wr_fdepth = True
+                        else:
+                            raise Fault(FAULT['VAR'], OP['Variable'],
+                                        at)
+                    elif loc is None or loc > VARY_LOCS - 1:
                         raise Fault(FAULT['VAR'], OP['Variable'], at)
-                    off = 16 * loc
-                    rec = True
-                    self.out_mask |= 1 << loc
+                    else:
+                        off = 16 * loc
+                        rec = True
+                        self.out_mask |= 1 << loc
             fl = (VF_REC if rec else 0) | (VF_DROP if drop else 0)
         elif bi is not None:
             # builtin decorations have no meaning off the interface in
@@ -638,9 +747,16 @@ class Scanner:
             raise Fault(FAULT['ENTRY'], 0, 0)
         if self.in_function:
             raise Fault(FAULT['WORDS'], 0, len(w) - 1)
+        if self.entry['func'] not in self.funcs:
+            raise Fault(FAULT['ENTRY'], 0, 0)
         for at, tgt in self.branches:
             if tgt not in self.labels:
                 raise Fault(FAULT['BRANCH'], 249, at)
+        # deferred OpFunctionCall targets (callee bodies may follow the
+        # caller — a forward reference is legal module order)
+        for at, fid in self.calls:
+            if fid not in self.funcs:
+                raise Fault(FAULT['FUNC'], 57, at)
         return self
 
     # -- handlers -----------------------------------------------------
@@ -665,7 +781,10 @@ class Scanner:
         self.entry = dict(func=ops[1], name_bytes=ops[2:])
 
     def h_16(self, opc, ops, at):       # OpExecutionMode
-        if ops[1] == 7:                 # OriginUpperLeft (FS): ignore
+        if ops[1] in (7, 12, 14, 15, 16):
+            # OriginUpperLeft / DepthReplacing / DepthGreater /
+            # DepthLess / DepthUnchanged — accepted no-ops (G3a-i:
+            # fs_late comes from the module content, not the mode)
             return
         if ops[1] != 17:                # LocalSize
             raise Fault(FAULT['EXECMODE'], opc, at)
@@ -685,10 +804,7 @@ class Scanner:
             d['set'] = ops[2]
         elif dec == DEC['Builtin']:
             if ops[2] not in BUILTIN_OK:
-                # G2a: FragDepth (22) is a recognised graphics builtin
-                # the engine cannot honour — FAULT_VAR, not DECOR
-                raise Fault(FAULT['VAR'] if ops[2] == 22
-                            else FAULT['DECOR'], opc, at)
+                raise Fault(FAULT['DECOR'], opc, at)
             d['builtin'] = ops[2]
             # marker bit (0 is a legal builtin id, so the field alone
             # cannot distinguish "Position" from "undecorated")
@@ -784,15 +900,55 @@ class Scanner:
     def h_54(self, opc, ops, at):       # OpFunction
         if self.in_function:
             raise Fault(FAULT['WORDS'], opc, at)
+        if len(self.forder) >= MAX_FUNCS:
+            raise Fault(FAULT['FUNC'], opc, at)
         self.in_function = True
+        self.fn_head = True             # params legal until first label
         self.func_result = ops[1]       # function ids are not RF regs
-        self.entry_off = at
+        self.cur_func = ops[1]
+        self.funcs[ops[1]] = dict(off=at, rty=ops[0], params=[])
+        self.forder.append(ops[1])
+        if self.entry is not None and ops[1] == self.entry['func']:
+            self.entry_off = at
+
+    def h_55(self, opc, ops, at):       # OpFunctionParameter rty rid
+        if not self.in_function or not self.fn_head:
+            raise Fault(FAULT['FUNC'], opc, at)
+        f = self.funcs[self.cur_func]
+        if len(f['params']) >= MAX_PARAMS:
+            raise Fault(FAULT['FUNC'], opc, at)
+        f['params'].append((ops[1], ops[0]))
+        self.reg(ops[1], tid=ops[0])
+        if len(f['params']) == 1:
+            f['pbase'] = self.regmap[ops[1]][1]
 
     def h_56(self, opc, ops, at):       # OpFunctionEnd
         self.in_function = False
+        self.fn_head = False
+        self.cur_func = 0
+
+    def h_57(self, opc, ops, at):       # OpFunctionCall rty rid f a*
+        if not self.in_function:
+            raise Fault(FAULT['FUNC'], opc, at)
+        # the callee may be declared later in the module — the
+        # existence check is deferred to the post-scan pass
+        self.calls.append((at, ops[2]))
+        if self.types.get(ops[0], {}).get('kind') != TK['VOID']:
+            self.reg(ops[1], tid=ops[0])
+
+    def h_254(self, opc, ops, at):      # OpReturnValue v
+        if not self.in_function:
+            raise Fault(FAULT['WORDS'], opc, at)
+
+    def h_252(self, opc, ops, at):      # OpKill — sets the late flag
+        self.has_kill = True
+
+    h_4416 = h_252                      # OpTerminateInvocation
+    h_5380 = h_252                      # OpDemoteToHelperInvocation
 
     def h_248(self, opc, ops, at):      # OpLabel — block table
         self.labels[ops[0]] = at
+        self.fn_head = False
         # scan-order pop: a label equal to an open loop's merge target
         # leaves that loop scope (and anything nested inside it)
         while self.loops and self.loops[-1][0] == ops[0]:
@@ -870,10 +1026,21 @@ class Scanner:
                # G2b: implicit LOD + quad-derivative result registers
                87, 207, 208, 209, 210, 211, 212, 213, 214, 215,
                # §12.3 C/5b: image ops with a result register
-               86, 88, 95, 98, 100, 103, 104, 106]:
+               86, 88, 95, 98, 100, 103, 104, 106,
+               # G3a-i: undef/copy, dynamic vector ops, fp/int
+               # remainder + carry/borrow/wide-mul struct results,
+               # reductions, fp tests, unordered compares, bitfield ops
+               1, 77, 78, 83, 140, 141, 149, 150, 151, 152, 154, 155,
+               156, 157, 181, 185, 187, 189, 191,
+               201, 202, 203, 204, 205,
+               # G3a-i: atomics with a result (AtomicStore has none),
+               # helper-invocation query
+               227, 229, 230, 232, 233, 234, 235, 236, 237, 238, 239,
+               240, 241, 242, 5381]:
         exec('h_%d = h_result' % _o)
 
     h_99 = h_noresult                        # OpImageWrite
+    h_228 = h_noresult                       # OpAtomicStore
 
     # ---- table emit --------------------------------------------------
     def type_words(self, tid):
@@ -973,12 +1140,18 @@ class Scanner:
         # spare half-words (w2[31:16] = {out,in}_mask, w3[31:28] = em)
         lx, ly, lz = self.localsize if self.em == EM['GLCOMPUTE'] \
             else (1, 1, 1)
+        # G3a-i FS sideband: w3[27] = fs_late (kills or FragDepth → the
+        # rasterizer defers the depth test), w3[26] = writes FragDepth
+        # (shmod en_wdata packs {em[31:28], late[27], fdepth[26],
+        # pad[25:16], slab[15:0]})
+        fs_late = 1 if (self.wr_fdepth or self.has_kill) else 0
         return [w32((self.entry_off & 0xFFFF) | (self.n_regs << 16)),
                 w32(lx | (ly << 8) | (lz << 16) |
                     (len(self.init) << 24)),
                 w32(self.scratch | (self.in_mask << 16) |
                     (self.out_mask << 24)),
-                w32(self.slab | (self.em << 28))]
+                w32(self.slab | (fs_late << 27) | (self.wr_fdepth << 26)
+                    | (self.em << 28))]
 
     def emit_tab(self, path):
         """flat list of (table, addr, word) triples the TB compares."""
@@ -999,6 +1172,22 @@ class Scanner:
         for i in range(len(self.members)):
             for j, v in enumerate(self.member_words(i)):
                 lines.append('M %d %d %08x' % (i, j, v))
+        # G3a-i function table: F <fid> 0 = the function row keyed by
+        # function id {nparams[31:28], param-table base[27:16],
+        # OpFunction word off[15:0]} — the table base is the function
+        # ordinal * MAX_PARAMS (shmod's fn_pb).  Q <pbase+ord> 0 =
+        # param row {4'h0, value-rows[11:8], first RF row[7:0]}.
+        for fi, fid in enumerate(self.forder):
+            f = self.funcs[fid]
+            pbase = fi * MAX_PARAMS
+            lines.append('F %d 0 %08x' %
+                         (fid, w32((len(f['params']) << 28) |
+                                   (pbase << 16) | f['off'])))
+            for p, (pid, pt) in enumerate(f['params']):
+                lines.append('Q %d 0 %08x' %
+                             (pbase + p,
+                              w32((self.reg_rows(pt) << 8) |
+                                  (self.regmap[pid][1] & 0xFF))))
         for i in range(len(self.init)):
             for j, v in enumerate(self.init_words(i)):
                 lines.append('I %d %d %08x' % (i, j, v))

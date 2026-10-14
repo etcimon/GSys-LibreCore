@@ -45,6 +45,8 @@ package g6lc_apu_rast_pkg;
     apu_rast_op_e      op;
     logic [2:0]        vs_slot, fs_slot;
     logic [7:0]        fs_in_mask;           // FS Input locations to interpolate (entry.in_mask of the FS module)
+    logic              fs_late;              // FS writes FragDepth or may kill/demote -> late-Z in the ROP
+    logic              fs_fdepth;            // FS declares FragDepth out -> slot8 word0 is the depth source
     logic [7:0]        topology;             // VkPrimitiveTopology: 3 LIST, 4 STRIP, 5 FAN (others → UNSUPPORTED)
     logic [1:0]        cull;                 // VkCullModeFlags bit0 FRONT bit1 BACK
     logic              front_ccw;            // VK_FRONT_FACE_COUNTER_CLOCKWISE

@@ -1,0 +1,75 @@
+; dynvec.spvasm — G3a-i coverage for OpVectorExtractDynamic (77),
+; OpVectorInsertDynamic (78), OpUndef (1) and OpCopyObject (83):
+; glslang lowers variable-indexed vector access through a Function
+; temporary (OpAccessChain), so the dynamic vector ops never appear
+; in compiled output.  Assembled with `spirv-as --target-env
+; vulkan1.1`.  dst[i] = vec[idx] + vec2[1], vec = src[{i,i+8,i+16,
+; i+24}], vec2 = vec with component idx replaced by src[i+8].
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gid
+               OpExecutionMode %main LocalSize 8 1 1
+               OpDecorate %gid BuiltIn GlobalInvocationId
+               OpDecorate %rta ArrayStride 4
+               OpDecorate %In Block
+               OpMemberDecorate %In 0 Offset 0
+               OpMemberDecorate %In 0 NonWritable
+               OpDecorate %vin Binding 0
+               OpDecorate %vin DescriptorSet 0
+               OpDecorate %rtb ArrayStride 4
+               OpDecorate %Out Block
+               OpMemberDecorate %Out 0 Offset 0
+               OpMemberDecorate %Out 0 NonReadable
+               OpDecorate %vout Binding 1
+               OpDecorate %vout DescriptorSet 0
+       %void = OpTypeVoid
+       %fnty = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+        %int = OpTypeInt 32 1
+      %v3uint = OpTypeVector %uint 3
+      %v4uint = OpTypeVector %uint 4
+  %ptr_in_v3 = OpTypePointer Input %v3uint
+        %gid = OpVariable %ptr_in_v3 Input
+        %rta = OpTypeRuntimeArray %uint
+         %In = OpTypeStruct %rta
+  %ptr_sb_in = OpTypePointer StorageBuffer %In
+        %vin = OpVariable %ptr_sb_in StorageBuffer
+        %rtb = OpTypeRuntimeArray %uint
+        %Out = OpTypeStruct %rtb
+ %ptr_sb_out = OpTypePointer StorageBuffer %Out
+       %vout = OpVariable %ptr_sb_out StorageBuffer
+  %ptr_sb_u = OpTypePointer StorageBuffer %uint
+        %i0 = OpConstant %int 0
+        %c4 = OpConstant %uint 4
+        %c8 = OpConstant %uint 8
+       %c16 = OpConstant %uint 16
+       %c24 = OpConstant %uint 24
+       %main = OpFunction %void None %fnty
+        %lbl = OpLabel
+         %pg = OpLoad %v3uint %gid
+          %i = OpCompositeExtract %uint %pg 0
+        %pa0 = OpAccessChain %ptr_sb_u %vin %i0 %i
+          %a = OpLoad %uint %pa0
+         %i8 = OpIAdd %uint %i %c8
+        %pa1 = OpAccessChain %ptr_sb_u %vin %i0 %i8
+          %b = OpLoad %uint %pa1
+        %i16 = OpIAdd %uint %i %c16
+        %pa2 = OpAccessChain %ptr_sb_u %vin %i0 %i16
+          %c = OpLoad %uint %pa2
+        %i24 = OpIAdd %uint %i %c24
+        %pa3 = OpAccessChain %ptr_sb_u %vin %i0 %i24
+          %d = OpLoad %uint %pa3
+         %ud = OpUndef %uint
+          %v = OpCompositeConstruct %v4uint %a %b %c %d
+         %vc = OpCopyObject %v4uint %v
+        %idx = OpUMod %uint %a %c4
+         %el = OpVectorExtractDynamic %uint %vc %idx
+        %v2 = OpVectorInsertDynamic %v4uint %vc %ud %idx
+        %e2 = OpVectorInsertDynamic %v4uint %v2 %b %idx
+        %e1 = OpCompositeExtract %uint %e2 1
+        %sum = OpIAdd %uint %el %e1
+        %po = OpAccessChain %ptr_sb_u %vout %i0 %i
+               OpStore %po %sum
+               OpReturn
+               OpFunctionEnd

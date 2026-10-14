@@ -129,6 +129,10 @@ module tb_g6lc_apu_rast;
   int unsigned sh_i;
   int unsigned sh_n;
   logic        sh_pos4 = 1'b0;   // 1: VS Position := loc0 verbatim
+  int          sh_f8 = 0;        // FS stub slot-8 mode: 0=none,
+                                 // 1=checkerboard discard, 2=FragDepth
+  logic [31:0] sh_f8z = '0;      // FragDepth value for mode 2
+  bit          dbg_f8 = 1'b0;
 
   assign shr = shst == SH_IDLE;
   always_ff @(posedge clk or negedge rst_n) begin
@@ -182,6 +186,29 @@ module tb_g6lc_apu_rast;
             for (int c = 0; c < 4; c++)
               i_mem.apm[apix((ob + f*144 + 4*c) >> 2)] <=
                 i_mem.apm[apix((ib + f*144 + 16 + 4*c) >> 2)];
+            // G3a-i slot-8 tail: word0 FragDepth, word1 discard flag,
+            // word2 sample mask (all-ones), word3 = 0 — same layout
+            // shwave's W_F8A/W_F8B emit.  FragCoord = fs_in slot0
+            // {px+.5, py+.5, z, w}: the mode-1 checkerboard discards
+            // ((px/8)+(py/8))&1 pixels like the vkcmp scene-8 FS.
+            if (sh_f8 != 0) begin
+              automatic int pxi, pyi;
+              automatic logic [31:0] fx, fy, fl;
+              fx = i_mem.apm[apix((ib + f*144 + 0) >> 2)];
+              fy = i_mem.apm[apix((ib + f*144 + 4) >> 2)];
+              pxi = f32f(fx); pyi = f32f(fy);
+              fl = (sh_f8 == 1 &&
+                    (((pxi >> 3) + (pyi >> 3)) & 1) != 0)
+                   ? 32'd1 : 32'd0;
+              if (dbg_f8 && sh_f8 != 0)
+                $display("[F8] f=%0d fx=%08x fy=%08x px=%0d py=%0d fl=%0d",
+                         f, fx, fy, pxi, pyi, fl[0]);
+              i_mem.apm[apix((ob + f*144 + 128) >> 2)] <= sh_f8z;
+              i_mem.apm[apix((ob + f*144 + 132) >> 2)] <= fl;
+              i_mem.apm[apix((ob + f*144 + 136) >> 2)] <=
+                32'hFFFFFFFF;
+              i_mem.apm[apix((ob + f*144 + 140) >> 2)] <= 32'h0;
+            end
           end
           if (sh_i + 1 >= sh_n) shst <= SH_DONE;
           else sh_i <= sh_i + 1;
@@ -219,6 +246,17 @@ module tb_g6lc_apu_rast;
   // depth word (D32) at pixel
   function automatic logic [31:0] dbpx(input int x, input int y);
     return i_mem.apm[apw_i(DB + y*FBP + x*4)];
+  endfunction
+
+  // floor() of a non-negative f32 bit pattern (pixel coords are
+  // exact .5 values well below 2^23)
+  function automatic int f32f(input logic [31:0] w);
+    int e; longint m;
+    e = int'(w[30:23]);
+    if (w[31] || e < 127) return 0;
+    m = (longint'(1) << 23) | longint'(w[22:0]);
+    if (e - 127 >= 31) return 32'h7FFFFFFF;
+    return int'((m << (e - 127)) >> 23);
   endfunction
 
   // fp32 -> 12-bit linear index (mirror of the DUT's f_f32_u12, used
@@ -1144,6 +1182,223 @@ module tb_g6lc_apu_rast;
           fail($sformatf("case11 px(%0d,%0d)=%08x exp~%08x",
                          x, y, got, ex));
       end
+
+    // ============ case 12: FS slot-8 discard checkerboard =========
+    cases++;
+    // clear to opaque mid-grey; then a big covering triangle whose FS
+    // stub writes slot8 word1 = ((px/8)+(py/8))&1 — discarded pixels
+    // must keep the clear colour.  fs_late routes the fragment through
+    // the ROP slot-8 read even with no depth attachment.
+    d = mk_clear();
+    d.clear_color[0] = 32'h3F000000;   // 0.5 -> 128
+    d.clear_color[1] = 32'h3F000000;
+    d.clear_color[2] = 32'h3F000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    // cover the whole 32x32 target: clip tri (-1.5,-1.5),(2.5,-1.5),
+    // (-1.5,2.5) -> screen (-8,-8),(56,-8),(-8,56)
+    put_vert(0, 32'hBFC00000, 32'hBFC00000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h40200000, 32'hBFC00000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBFC00000, 32'h40200000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    sh_f8 = 1;
+    if ($test$plusargs("dbg_f8")) dbg_f8 = 1'b1;
+    d = mk_draw();
+    d.fs_late = 1'b1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    sh_f8 = 0; dbg_f8 = 1'b0;
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case12 code=%0d", w_dpl.code));
+    // kept pixels are flat red (1.0,0,0,1) -> FF0000FF in {a,b,g,r};
+    // the hypotenuse x+y=48 leaves the bottom-right corner uncovered
+    // (pixel centre covered iff px+py <= 47) — those stay clear grey.
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        got = fbpx(x, y);
+        if (x + y > 47 || (((x >> 3) + (y >> 3)) & 1) != 0) begin
+          if (got != 32'hFF808080)
+            fail($sformatf("case12 keep-clr px(%0d,%0d)=%08x expclr",
+                           x, y, got));
+        end else if (px_bad(got, 32'hFF0000FF, 1))
+          fail($sformatf("case12 px(%0d,%0d)=%08x exp~FF0000FF",
+                         x, y, got));
+      end
+
+    // ============ case 13: FragDepth late-Z ========================
+    // three passes over the same geometry:
+    //  A normal draw lays depth 0.5 / red.
+    //  B (fs_late, fs_fdepth): interpolated z = 0.4 passes an early-Z
+    //    LESS test but the written FragDepth 0.7 fails vs 0.5 — colour
+    //    and depth must both stay at A's values.  A negative capture
+    //    with fs_late forced 0 first documents the hazard: B's z wins
+    //    early-Z and the pixel wrongly turns green (checked, not
+    //    failed).
+    //  C (fs_late, fs_fdepth): written FragDepth 0.3 passes — colour
+    //    turns blue and depth reads 0.3.
+    cases++;
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = '0;
+    d.op = APU_RAST_OP_CLEAR;
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.clear_color[0] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    // A: red, interpolated z = 0.5 (attr1.w steers Position.z)
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    ref_xi = '{512, 7168, 1536}; ref_yi = '{512, 1536, 7680};
+    d = mk_draw();
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.depth_test = 1'b1; d.depth_write = 1'b1; d.depth_op = 3'd1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case13 A code=%0d", w_dpl.code));
+    // B-negative: fs_late forced 0 — interpolated z 0.4 beats 0.5,
+    // FragDepth 0.7 is ignored: pixel goes green, depth 0.4.  This is
+    // the observable hazard late-Z exists to prevent.
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3E99999A);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3E99999A);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3E99999A);
+    sh_f8 = 2; sh_f8z = 32'h3F333333;   // FragDepth 0.7 (ignored here)
+    d.vertex_count = 3;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    sh_f8 = 0;
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case13 Bneg code=%0d", w_dpl.code));
+    begin
+      automatic int nbad = 0;
+      for (int y = 0; y < 32; y++)
+        for (int x = 0; x < 32; x++)
+          if (ref_px(x, y) != 32'hFFFF_FFFF) begin
+            checks += 2;
+            // negative arm MUST show the wrong result: green, z=0.3;
+            // a pixel still holding A's red(0.5) = 0x800000FF means
+            // the hazard is absent
+            if (fbpx(x, y) == 32'h800000FF &&
+                int'(dbpx(x, y)) - int'(32'h3F000000) > -2 &&
+                int'(dbpx(x, y)) - int'(32'h3F000000) < 2)
+              nbad++;
+          end
+      checks++;
+      if (nbad == 0)
+        $display("case13 negative-capture: fs_late=0 draw wrongly won on every covered px — hazard confirmed");
+      else
+        $display("case13 negative-capture: %0d covered px kept A values — fs_late=0 hazard absent!", nbad);
+    end
+    // re-establish A
+    d = mk_clear();
+    d.clear_color[0] = 32'h00000000;
+    d.clear_color[1] = 32'h00000000;
+    d.clear_color[2] = 32'h00000000;
+    d.clear_color[3] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    d = '0;
+    d.op = APU_RAST_OP_CLEAR;
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.clear_color[0] = 32'h3F800000;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F000000);
+    d = mk_draw();
+    d.da = '{base: DB, size: 32'h1000, w: 16'd32, h: 16'd32,
+             fmt: 8'(APU_IMG_FMT_D32_SFLOAT), mips: 5'd1,
+             layers: 10'd1, layer_bytes: 32'h1000};
+    d.da_valid = 1'b1;
+    d.depth_test = 1'b1; d.depth_write = 1'b1; d.depth_op = 3'd1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case13 A2 code=%0d", w_dpl.code));
+    // B-positive: same draw with fs_late+fs_fdepth — FragDepth 0.7
+    // fails LESS vs 0.5: colour stays red, depth stays 0.5
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3E99999A);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3E99999A);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3E99999A);
+    sh_f8 = 2; sh_f8z = 32'h3F333333;
+    d.vertex_count = 3;
+    d.fs_late = 1'b1; d.fs_fdepth = 1'b1;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    sh_f8 = 0;
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case13 B code=%0d", w_dpl.code));
+    // B must have been fully suppressed: A's flat red (1,0,0,0.5) =
+    // 0x800000FF and depth 0.5 everywhere covered
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++)
+        if (ref_px(x, y) != 32'hFFFF_FFFF) begin
+          checks += 2;
+          got = fbpx(x, y);
+          if (px_bad(got, 32'h800000FF, 1))
+            fail($sformatf("case13B px(%0d,%0d)=%08x exp 800000FF",
+                           x, y, got));
+          got = dbpx(x, y);
+          begin
+            automatic int dv = int'(got) - int'(32'h3F000000);
+            if (dv < -2 || dv > 2)
+              fail($sformatf("case13B dep(%0d,%0d)=%08x exp~3F000000",
+                             x, y, got));
+          end
+        end
+    // C: FragDepth 0.3 passes — blue wins, depth 0.3
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h00000000, 32'h00000000, 32'h3F800000, 32'h3E99999A);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h00000000, 32'h00000000, 32'h3F800000, 32'h3E99999A);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h00000000, 32'h00000000, 32'h3F800000, 32'h3E99999A);
+    sh_f8 = 2; sh_f8z = 32'h3E99999A;   // FragDepth 0.3
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    sh_f8 = 0;
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case13 C code=%0d", w_dpl.code));
+    // after B+C: covered pixels show C's blue (a=0.3 -> byte 0x4D)
+    // and depth 0.3; the B pass proved suppression by leaving A's
+    // state in place for C to beat.  (C's FragDepth 0.3 < 0.5 passes.)
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++)
+        if (ref_px(x, y) != 32'hFFFF_FFFF) begin
+          checks += 2;
+          got = fbpx(x, y);
+          if (px_bad(got, 32'h4DFF0000, 2))   // C's blue a=0.3
+            fail($sformatf("case13 px(%0d,%0d)=%08x exp 4DFF0000",
+                           x, y, got));
+          got = dbpx(x, y);
+          begin
+            automatic int dv = int'(got) - int'(32'h3E99999A);
+            if (dv < -2 || dv > 2)
+              fail($sformatf("case13 dep(%0d,%0d)=%08x exp~3E99999A",
+                             x, y, got));
+          end
+        end
 
     // ---- report ---------------------------------------------------------
     if (fails == 0)

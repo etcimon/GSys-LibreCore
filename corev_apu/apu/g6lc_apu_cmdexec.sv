@@ -775,10 +775,12 @@ module g6lc_apu_cmdexec
         flost_q <= flost_q & ~fence_clr_i;
         // submit FIFO push
         if (submit_valid_i && submit_ready_o) begin
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
           $display("[DBG] submit fidx=%0d nb=%0d t=%0t",
                    submit_i.fence_idx, submit_i.nbufs, $time);
 `endif
+// pragma translate_on
           fifo_q[fifo_tail_q[1:0]] <= submit_i;
           fifo_tail_q <= fifo_tail_q + 3'd1;
           fifo_n_q    <= fifo_n_q + 3'd1;
@@ -1422,12 +1424,14 @@ module g6lc_apu_cmdexec
           end
           // issue on the shcore work port; wait work_done
           StDsIssue: begin
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
             $display("[DBG] dsissue ctype=%08x rd_vb={b=%08x s=%08x st=%0d} a0v=%0d vs=%0d fs=%0d t=%0t",
                      rec_q.ctype, rd_q.vb_base[0], rd_q.vb_size[0],
                      rd_q.vb_stride[0], rd_q.attr[0].valid,
                      rd_q.vs_slot, rd_q.fs_slot, $time);
 `endif
+// pragma translate_on
             if (work_ready_i) begin
               // work_done_i pulses are unordered across engines: the
               // next outst_q completions retire older works (a
@@ -1851,6 +1855,8 @@ module g6lc_apu_cmdexec
                   rd_q.topology   <= op_cpl_i.rdata[23:16];
                   rd_q.cull       <= op_cpl_i.rdata[3:2];
                   rd_q.front_ccw  <= op_cpl_i.rdata[1];
+                  rd_q.fs_fdepth  <= op_cpl_i.rdata[5];
+                  rd_q.fs_late    <= op_cpl_i.rdata[4];
                 end
                 5'd1, 5'd2, 5'd3, 5'd4: begin
                   // key by the description's Vk binding number — rast
@@ -1865,11 +1871,13 @@ module g6lc_apu_cmdexec
                     rd_q.vb_rate[op_cpl_i.rdata[17:16]] <=
                         op_cpl_i.rdata[21];
                   end
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
                   $display("[DBG] gpaybind i=%0d rd=%08x idx=%0d t=%0t",
                            dr_pi_q, op_cpl_i.rdata, op_cpl_i.rdata[17:16],
                            $time);
 `endif
+// pragma translate_on
                 end
                 5'd5, 5'd6, 5'd7, 5'd8,
                 5'd9, 5'd10, 5'd11, 5'd12: begin
@@ -1916,11 +1924,13 @@ module g6lc_apu_cmdexec
           end
           // next valid vertex binding -> shared buffer resolver
           StDrVbN: begin
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
             $display("[DBG] drvb n bq=%0d mask=%04x vbh=%08x stride0=%0d t=%0t",
                      dr_bq, dr_vbmask_q, vb_hnd_q[dr_bq[1:0]],
                      rd_q.vb_stride[0], $time);
 `endif
+// pragma translate_on
             if (dr_bq == 3'd4) begin
               state_q <= StDrIbN;
             end else if (dr_vbmask_q[dr_bq[1:0]] &&
@@ -1994,10 +2004,12 @@ module g6lc_apu_cmdexec
           end
 
           StDone: begin
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
             $display("[DBG] subdone fidx=%0d lost=%0d seq=%0d t=%0t",
                      cur_q.fence_idx, lost_q, done_seq_q, $time);
 `endif
+// pragma translate_on
             done_seq_q <= done_seq_q + 16'h1;
             if (cur_q.fence_idx != FENCE_NONE &&
                 cur_q.fence_idx < 5'(Fences)) begin
@@ -2013,6 +2025,7 @@ module g6lc_apu_cmdexec
       end
     end
 
+// pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
     // debug probe: report the record/state that loses a submission and
     // any non-OK work completion (temporary G1c bring-up aid)
@@ -2061,6 +2074,7 @@ module g6lc_apu_cmdexec
       dbg_hi_q    <= h_i_q;
     end
 `endif
+// pragma translate_on
   end
 endmodule
 

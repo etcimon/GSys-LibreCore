@@ -1,0 +1,21 @@
+#version 460
+// G3a-i: a callee takes an early `return v` under divergence while
+// sibling lanes are parked at the caller merge — the non-kill variant
+// of the all-dead callee unwind (early-return lanes land in cfdn and
+// resume once the in-callee mask drains).
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) buffer Src { uint src[]; };
+layout(set = 0, binding = 1) buffer Dst { uint dst[]; };
+
+uint bump(uint x) {
+    if ((x & 1u) == 0u) return x + 100u;
+    return x * 3u;
+}
+
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    uint v;
+    if ((i & 1u) == 1u) v = bump(src[i]);
+    else                v = src[i] * 5u;
+    dst[i] = v + 7u;
+}

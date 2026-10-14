@@ -132,6 +132,10 @@ module g6lc_apu_shcore
     logic [31:0]  prog_data;
     logic [9:0]   type_id, const_id, memb_id, rm_id, init_id, blk_id;
     logic [9:0]   phi_id;
+    // G3a-i: function/param table read fabric
+    logic [9:0]   func_id, parm_id;
+    logic [31:0]  func_data;
+    logic [15:0]  parm_data;
     logic [95:0]  type_data;
     logic [511:0] const_data;
     logic [63:0]  memb_data, init_data;
@@ -288,6 +292,8 @@ module g6lc_apu_shcore
       .init_id_i(init_id), .init_data_o(init_data),
       .blk_id_i(blk_id), .blk_data_o(blk_data),
       .phi_id_i(phi_id), .phi_data_o(phi_data),
+      .func_id_i(func_id), .func_data_o(func_data),
+      .parm_id_i(parm_id), .parm_data_o(parm_data),
       .entry_data_o(entry_data)
     );
 
@@ -313,6 +319,8 @@ module g6lc_apu_shcore
       .init_id_o(init_id), .init_data_i(init_data),
       .blk_id_o(blk_id), .blk_data_i(blk_data),
       .phi_id_o(phi_id), .phi_data_i(phi_data),
+      .func_id_o(func_id), .func_data_i(func_data),
+      .parm_id_o(parm_id), .parm_data_i(parm_data),
       .entry_data_i(entry_data),
       .mem_re_o, .mem_we_o, .mem_addr_o, .mem_wdata_o,
       .mem_wstrb_o, .mem_ready_i, .mem_rvalid_i, .mem_rdata_i,
