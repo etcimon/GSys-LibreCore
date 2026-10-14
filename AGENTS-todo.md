@@ -1529,6 +1529,34 @@ prerequisite for this work under the existing dual license. No licensing policy 
   ≈ 1 h 45 min wall with RVFI tracing on (the detached launcher leaves
   `results.json` at `incomplete`; the verdict is `trial/run.log`, as for the
   T21t runs).
+- [ ] **T28 — `g6lc64_ooo` (WT dcache, 1 hart) violates a same-hart RAW
+  through memory in OpenSBI's FDT walk; Linux cannot start there yet
+  (2026-10-14).** The L1/L3 payloads built for the single core
+  (`linux-payload-l1ooo`/`l3ooo`, `ariane.dts` + generated `chosen`) end in
+  `fw_platform_init+0x286` (OpenSBI's `fail:` `wfi`) after 29 k / 57 k
+  retirements with no console, on `ooocoh-t27-ooo-ldfix-pgo-build`; the same
+  ELF boots on the server packages. **Spike lockstep** (`t21/q-spike-lockstep.sh`,
+  `linux-lockstep-l1s1`, PC-indexed): first divergence at retirement 6,544;
+  the first differing value is retirement 6,537, `lw a0,-20(s0)` at
+  `0x80012b06` (`fdt_check_prop_offset_`) from `0x80046e4c`: **Spike 0x18, RTL
+  0xfffffff5** — the slot's previous content (`-FDT_ERR_BADSTRUCTURE`, stored
+  by the earlier call at `0x800129ca`), although both traces show the
+  younger store `sw s1,0(s3)` at `0x80012a24` (`fdt_next_tag`) writing 0x18
+  to that address 14 retirements earlier (7 stack pops, `ret`, `li`, `bne`
+  in between). So the load neither forwarded from nor waited for an older
+  in-flight store to the same word; the WT store-buffer path is the suspect
+  (the HPDCACHE packages pass this point). Directed shapes that **pass**
+  Spike-exact on the same model (`ooo_mem_min` stages 39–42, registered):
+  sub-word loads over a fresh store; the exact callee-store/ret/reload
+  sequence; two in-flight stores to the same word with late older data; the
+  same with a mispredicted late branch and a wrong-path store between the
+  store and the load. The trigger therefore needs the boot's context
+  (`[ckpt] restores=266` in the window; the `jr a5` jump-table dispatch at
+  `0x800129e8`). Next: `--trace-fst` build of `g6lc64_ooo`, trace the
+  window around retirement 6,520–6,540 of `linux-payload-l1s1` (the T24
+  method), read the store buffer / forwarding state at the `lw`; then the
+  minimal stage and the fix. Until then Linux L1/L2/L3 runs stay on the
+  server packages (`l1r2` 4-core, `l1s1` server1 in flight).
 - [~] **T27 — RTL OpenWrt (Linux 6.6.93) boot on `g6lc64_ooo_server`:
   budget measured, payload built, model of record building (2026-10-13).**
   Plan and numbers: `architecture/multi-threading/linux-boot-scale.md` S4.1.

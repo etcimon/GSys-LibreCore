@@ -804,6 +804,188 @@ main:
   .text
 .Lvm_done:
 
+#elif STAGE == 39
+  # Sub-word loads forwarded from a wider, still-speculative store (T27: on
+  # g6lc64_ooo OpenSBI's fw_platform_init ends in its fail-wfi while scanning
+  # the just-copied FDT with sbi_memchr — byte loads over fresh doubleword
+  # stores — where the same payload boots on the server packages). Each byte,
+  # halfword and word of a freshly stored doubleword must read back exactly,
+  # with no fence between the store and the loads.
+  li   t0, 0x1122334455667788
+  sd   t0, 0(sp)
+  lbu  t1, 0(sp)
+  lbu  t2, 1(sp)
+  lbu  t3, 2(sp)
+  lbu  t4, 3(sp)
+  lbu  t5, 4(sp)
+  lbu  t6, 5(sp)
+  lbu  a1, 6(sp)
+  lbu  a2, 7(sp)
+  lhu  a3, 2(sp)
+  lwu  a4, 4(sp)
+  lh   a5, 6(sp)
+  li   a6, 0x88
+#ifdef MEM_ORDER_NEGATIVE
+  xori a6, a6, 1
+#endif
+  bne  t1, a6, fail_t2
+  li   a6, 0x77
+  bne  t2, a6, fail_t2
+  li   a6, 0x66
+  bne  t3, a6, fail_t2
+  li   a6, 0x55
+  bne  t4, a6, fail_t2
+  li   a6, 0x44
+  bne  t5, a6, fail_t2
+  li   a6, 0x33
+  bne  t6, a6, fail_t2
+  li   a6, 0x22
+  bne  a1, a6, fail_t2
+  li   a6, 0x11
+  bne  a2, a6, fail_t2
+  li   a6, 0x5566
+  bne  a3, a6, fail_t2
+  li   a6, 0x11223344
+  bne  a4, a6, fail_t2
+  li   a6, 0x1122
+  bne  a5, a6, fail_t2
+  # the same scan over a byte store that partially overlays the doubleword
+  li   a6, 0xAB
+  sb   a6, 3(sp)
+  lwu  a7, 0(sp)
+  li   a6, 0xAB667788
+  bne  a7, a6, fail_t2
+  lbu  a7, 3(sp)
+  li   a6, 0xAB
+  bne  a7, a6, fail_t2
+
+#elif STAGE == 40
+  # T27 Linux-boot divergence on g6lc64_ooo, in its exact shape (OpenSBI
+  # fdt_next_tag -> fdt_check_prop_offset_): a callee stores a 32-bit result
+  # through a pointer into the CALLER's frame (`sw s1, 0(s3)` where s3 =
+  # &slot), pops seven callee-saved registers off its own frame, returns, and
+  # the caller reloads the slot (`lw a0, -20(s0)`) after a compare/branch. On
+  # the boot the RTL load returned the slot's PREVIOUS content (-11) while
+  # Spike returned the store's (0x18) — a same-hart RAW through memory across
+  # a `ret`, 14 instructions apart. The slot is pre-loaded with the stale
+  # value so a missed forward is visible as that value.
+  li   t0, -11
+  sw   t0, -20(sp)               # the slot's previous content (the earlier call's error code)
+  fence rw, rw
+  addi s3, sp, -20               # &slot, the pointer the callee stores through
+  jal  ra, .Lraw_callee
+  li   t0, 3
+  bne  t0, t0, fail              # the caller's compare/branch between ret and the load (not taken)
+  lw   a0, -20(sp)
+  li   t0, 0x18
+#ifdef MEM_ORDER_NEGATIVE
+  xori t0, t0, 1
+#endif
+  bne  a0, t0, fail_t2
+  j    .Lraw_done
+  .balign 4
+.Lraw_callee:
+  addi sp, sp, -64
+  sd   ra, 56(sp)
+  sd   s0, 48(sp)
+  sd   s1, 40(sp)
+  sd   s2, 32(sp)
+  sd   s4, 16(sp)
+  sd   s5, 8(sp)
+  li   s1, 0x15
+  addiw s1, s1, 3                # 0x18, computed just before the store (late data)
+  andi s1, s1, -4
+  sw   s1, 0(s3)                 # the RAW producer: into the caller's slot
+  ld   s1, 40(sp)
+  li   s2, 9
+  ld   ra, 56(sp)
+  ld   s0, 48(sp)
+  ld   s4, 16(sp)
+  ld   s5, 8(sp)
+  mv   a0, s2
+  ld   s2, 32(sp)
+  addi sp, sp, 64
+  ret
+.Lraw_done:
+
+#elif STAGE == 41
+  # Two in-flight stores to the SAME word (the boot's -11 then 0x18 into the
+  # fdt offset slot, 90 instructions apart with a call between), no fence, then
+  # the load: forwarding must pick the YOUNGEST older store. The first store's
+  # data is delayed so it is still unresolved when the second store and the
+  # load issue; the earlier stages cover one store or fenced pairs only.
+  li   t1, 0x7fffffffffffffff
+  li   t2, 3
+  divu t3, t1, t2
+  andi t3, t3, 0
+  addi t4, t3, -11
+  sw   t4, -20(sp)               # older store, data late (-11)
+  addi s3, sp, -20
+  jal  ra, .Lraw2_callee         # younger store (0x18) through the pointer, in a callee
+  lw   a0, -20(sp)
+  li   t0, 0x18
+#ifdef MEM_ORDER_NEGATIVE
+  xori t0, t0, 1
+#endif
+  bne  a0, t0, fail_t2
+  j    .Lraw2_done
+  .balign 4
+.Lraw2_callee:
+  addi sp, sp, -32
+  sd   ra, 24(sp)
+  sd   s1, 16(sp)
+  li   s1, 0x15
+  addiw s1, s1, 3
+  andi s1, s1, -4
+  sw   s1, 0(s3)
+  ld   s1, 16(sp)
+  ld   ra, 24(sp)
+  addi sp, sp, 32
+  ret
+.Lraw2_done:
+
+#elif STAGE == 42
+  # Stage 41 plus a MISPREDICTED branch between the younger store and the load
+  # (the boot has an indirect jump-table dispatch and `beqz` in fdt_next_tag,
+  # and the checkpoint census shows restores around the divergence): the
+  # branch resolves late (divu-fed), is first-time taken against the static
+  # not-taken prediction, so the recovery happens with the 0x18 store already
+  # issued and still in flight. The load after the recovery must still
+  # forward from that store, not read the slot's old content.
+  li   t1, 0x7fffffffffffffff
+  li   t2, 3
+  divu t3, t1, t2
+  andi t3, t3, 0                 # 0, late
+  addi t4, t3, -11
+  sw   t4, -20(sp)               # older store (-11), data late
+  addi s3, sp, -20
+  jal  ra, .Lraw3_callee
+  lw   a0, -20(sp)
+  li   t0, 0x18
+#ifdef MEM_ORDER_NEGATIVE
+  xori t0, t0, 1
+#endif
+  bne  a0, t0, fail_t2
+  j    .Lraw3_done
+  .balign 4
+.Lraw3_callee:
+  addi sp, sp, -32
+  sd   ra, 24(sp)
+  sd   s1, 16(sp)
+  li   s1, 0x15
+  addiw s1, s1, 3
+  andi s1, s1, -4
+  sw   s1, 0(s3)                 # younger store (0x18)
+  beqz t3, 1f                    # late-resolving, taken: mispredict + recovery after the store issued
+  li   s1, 0x7
+  sw   s1, 0(s3)                 # wrong-path store, must leave no trace
+1:
+  ld   s1, 16(sp)
+  ld   ra, 24(sp)
+  addi sp, sp, 32
+  ret
+.Lraw3_done:
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".
