@@ -535,6 +535,35 @@ scheduling for the 7 idle harts) — the only ones with a >1.5× shape on the 4-
 none exists yet. Not levers (measured): `-fclock-skip` (slower, MT refused), the hierarchical
 core (2.1× slower), `profile.vlt`, `x86-64-v3` beyond +5 %.
 
+#### S4.3 — The 1-core server package is not at the single-core rate; where the server class's cycles go (2026-10-14)
+
+`g6lc64_ooo_server1` (server core, L2/L3, hub identity, SMT2; `--threads 1`, `x86-64-v3`,
+PGO, `ooocoh-t27-server1-pgo-build2`) is functional — the s11 FP probe passes Spike-exact
+(5,263 retirements, runtime qualified, `ooocoh-t27-server1-s11`) — but runs the 220 k-cycle
+spin at **4,170–4,862 cycles/s**, not the ≈ 56 k of `g6lc64_ooo`. The generated model says
+why: fast `DepSet` text 337 MB vs 137 MB (`g6lc64_ooo`) vs 1,169 MB (4-core server), binary
+24 MB vs 7.7 MB vs 84 MB, and the scheduler's **hybrid class 26,534 vs 10,253 vs 92,696** with
+the same split `.vlt` applied (`split=2`). The server-class core (HPDCACHE, SMT2 CSR bank, L2/L3,
+server prefetcher) carries 2.6× the hybrid logic of the WT single core and roughly 3× its code,
+and the extra act passes multiply the extra code — the same mechanism §4b measured (2.2 → 1.05
+passes per step was the ooo's big win). `--report-unoptflat` on server1 with the current control
+file (`t21/q-unoptflat-s1.sh`, `vlt_autosplit.py`): **46 loops remain** (i_csr 7, i_frontend 6,
+lsu 3, hpdcache 3, axi demux 3, atomics 2, hpdcache_ctrl 2, prefetcher 2, l3, iq, shared TLB,
+lrsc), 798 split candidates, 10 new `split_var` entries proposed (`axi_mux slv_aw_chans` 70
+loops, `axi_demux mst_b_chans` 42, `hpdcache_ctrl st1_req_addr` 20, `gpio_req` 14,
+`g6lc_bp_tage slot_pc`/`hit`, `hpdcache miss_mshr_check_nline`, `refill_core_rsp`,
+`wbuf write_tag`; one generated `__VsplitVar_*` name to drop). That is the next Verilator lever
+for the server class, with a measured shape (the ooo's split work was ×2 on the wall clock); the
+loops `split_var` cannot break (CSR bank, frontend) are RTL-side false loops to restructure.
+
+Consequence for the boot plan: the day-scale L2/L3 software bring-up moves to **`g6lc64_ooo`**
+(WT dcache, 1 hart, ≈ 55 k cycles/s): L1 ≈ 1–2 h, L3 ≈ 8 h. Payloads `linux-payload-l1ooo` /
+`-l3ooo` (`ariane.dts` + a generated `chosen` node, `maxcpus=1`); runs
+`linux-boot-l1ooo-…` / `linux-boot-l3ooo-…` on `ooocoh-t27-ooo-ldfix-pgo-build`. The server
+class keeps L1 (`linux-boot-l1s1b-…` on server1 at ≈ 4.5 k cycles/s, ≈ 15 h; `l1r2` on the
+4-core at 6.8 k) for the cache/coherence qualification of the kernel path, and its L3 waits for
+the loop work above.
+
 ### S5 — SMT2 `RVH` (smt2 feature not present)
 
 Package bit + DTS `h` on both threads. Fetch: L4 pass-through only (no fake

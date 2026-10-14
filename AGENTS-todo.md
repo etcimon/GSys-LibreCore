@@ -1583,9 +1583,16 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `-fprofile-use`) carry the fix. **L1 run 2 launched** on build4
   (`linux-boot-l1r2-ooocoh-t27-server-default-mt4-build4`, 1.5 G cap;
   ≈ 33.6 M cycles to `satp`, then ≈ 0.2 G cycles of kernel init ≈ 8 h at
-  6.8 k cycles/s). Next on server1: `q-linux-boot.sh MODEL=…server1-pgo-build2
-  PAYLOAD=l1s1 TAG=l1s1` (L1, ≈ 1–2 h) and `PAYLOAD=l3s1 TAG=l3s1` (L3,
-  ≈ 8–10 h) side by side.
+  6.8 k cycles/s). **server1 measured (S4.3):** functional (s11 Spike-exact,
+  5,263 retirements, qualified) but **4.2–4.9 k cycles/s** — hybrid class
+  26,534 vs the ooo's 10,253 with the same split `.vlt`, 3× the generated
+  code; 46 UNOPTFLAT loops remain (csr 7, frontend 6, lsu/hpdcache/axi …),
+  10 new `split_var` candidates proposed by `vlt_autosplit.py` — the next
+  Verilator lever for the server class. Day-scale L2/L3 therefore runs on
+  `g6lc64_ooo` (≈ 55 k cycles/s): `linux-boot-l1ooo-…`/`l3ooo-…` launched
+  on `ooocoh-t27-ooo-ldfix-pgo-build` (`ariane.dts` + generated `chosen`);
+  server1 keeps L1 (`l1s1b`, ≈ 15 h; the first `l1s1` process vanished
+  without a `time` record — cause unknown, relaunched); `l3s1` stopped.
   **Userland budget for L3** (S4.2, QEMU `-icount`): stock procd ≥ 10.9 G
   busy and still burning after the prompt; with `hotplug.json` cut to
   `makedev`, failsafe wait off and `rcS` trimmed to boot/system/sysctl/log/
