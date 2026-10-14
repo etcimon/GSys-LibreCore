@@ -347,6 +347,82 @@ context in bounded time. Handle `{gen[15:0], slot}`; `gen` wraps past 0, so a st
 after 65,535 reuses of one slot still misses. Parent `refcnt` keeps a DEVICE alive while
 its BUFFERs exist (Vulkan validity, enforced in hardware rather than trusted).
 
+### 5a. Residency virtualization — ObjTab-V, PayMem, module and record caches (increment G3b; design of record 2026-10-14)
+
+**Why.** `dEQP-VK.api.object_management.max_concurrent.<kind>` creates
+`DEFAULT_MAX_CONCURRENT_OBJECTS = 16 384` live objects of one kind and fails on any creation
+error (`specs/architecture/cts-api.md` API-L2); UE/Zink keep thousands of pipelines and
+command buffers per frame; G2c showed that Mesa's asynchronous path turns our refusals into
+phantom handles. 256 ObjTab slots, 8 module slots, 16 command buffers and a flop/SRAM
+payload store are therefore correctness gaps (pattern CTS-P2), not tuning. The fix keeps
+every **port contract** of §5/§6/§7b (`ot_*`, `op_*`, `cr_*`, `sm_*`) so vnfront, cmdexec,
+vnpump and the ShaderCore are unchanged clients, and moves the *backing* to device-private
+DRAM with on-chip caches.
+
+- **ObjTab-V.** Entries become 64-byte records in a private DRAM region `objmem`
+  (`ObjEntries`, default 2¹⁶ = 4 MiB; legal 2⁸…2²⁰): `{live, kind, ctx, gen[15:0], state,
+  parent, refcnt, pins, bind {mem entry, offset}, size, aux, pay {base, words}, ctx_next}`.
+  The id directory is an open-addressing hash table in DRAM (`2×ObjEntries` 8-byte buckets
+  `{id_tag[47:0], entry[15:0]}`, linear probe ≤ 8, tombstones on retire). On chip: a
+  **directory cache** (`DirCacheSets × 4 ways`, default 256 sets, keyed by the Fibonacci
+  hash of the 64-bit id, holding `{id, entry}`) and an **entry cache** (`EntCacheLines`,
+  default 64 × 64 B, write-back, dirty bits per line) in `tc_sram`; the free list is a
+  per-kind DRAM stack with its top 32 entries cached, generations stay in the entry.
+  `RESET_CTX` walks the context's `ctx_next` list (O(live objects of that context)), not the
+  table; the walk is interruptible per entry so other contexts' rings keep moving (vnpump
+  park). Handles stay `{gen, entry[15:0]}` (the `slot` field widens from 8 to
+  `clog2(ObjEntries)` bits — the only visible type change, in `g6lc_apu_objtab_pkg`).
+- **PayMem.** Object payloads (pipeline state, layouts, render passes, framebuffers,
+  samplers, query pools, shader modules, command-buffer records and payload arenas) live
+  in a private DRAM region (`PayMemBytes`, default 64 MiB) managed by a segregated
+  free-list allocator (size classes 64 B … 1 MiB, buddy coalescing within a class page;
+  the allocator's metadata is itself in `objmem`-style records with an SRAM head cache).
+  `op_*` requests (ALLOC/FREE/READ/WRITE extents) are served through a small **payload
+  cache** (`PayCacheLines`, default 32 × 64 B, write-back) — vnfront's record/replay of
+  pipeline words is sequential and small, so this is enough.
+- **Shader modules.** `vkCreateShaderModule` stores the SPIR-V words *and the scan result*
+  (§7b tables: regmap, blocks, functions/params, member rows, entry list) in PayMem — the
+  scan runs once at creation on a scratch slot and its tables are written back as a
+  "scanned image". The `ShaderSlots` (default 8) SRAM slots become an **LRU residency
+  cache** keyed by module entry: a dispatch/draw whose pipeline references a non-resident
+  module triggers a fill (one DMA of the scanned image into a victim slot, through the
+  vgtop-arbitrated mp port), then proceeds; the slot manager's `sm_*` port gains `FILL`
+  and reports `BUSY` while filling. Pipelines reference modules by entry (+ spec-constant
+  table, COMPUTE-L1), so two pipelines over one module share the residency.
+- **Command buffers.** `cmdrec`'s per-buffer arena (records + payload) becomes a PayMem
+  extent per command buffer (grown in 4 KiB chunks as recording appends; the pool owns a
+  chunk list for `vkResetCommandPool`/trim). Recording goes through a write-combining
+  buffer (one 64-B line); execution streams records through a **record prefetch FIFO**
+  (`RecFifoDepth`, default 8 records) — the submit-time executor is sequential, so a
+  stream fetch hides DRAM latency. `CbBufs` disappears as a limit (the pool's extent is
+  the limit); secondary command buffers (API-L4) are an `EXECUTE` record that pushes the
+  current stream position and streams the callee's extent (one level).
+- **Descriptor sets** already live in aperture memory (§12.3 F5); descriptor pools gain a
+  real free list for `FREE_DESCRIPTOR_SET_BIT` (API-L6) over their record range.
+- **Ordering and lifetime.** Every cache is write-back with explicit write-back points:
+  before a `RETIRE` completes (so a later `ALLOC` of the same entry starts clean), before
+  `RESET_CTX` walks, and before any DMA from PayMem into a slot (module fill reads must
+  see the creation-time writes — flush the payload cache lines of that extent first). The
+  relocation interlock (`map_hold`, 3d-d) extends to PayMem/objmem: they are private
+  (never relocated), but a module fill in flight pins its slot and its extent. Generation
+  checks stay in the entry; the directory cache never serves an entry without the entry
+  check (RT-P2: identity precedes correlation).
+- **Area.** The 256-entry flop/SRAM table and the 8 full-size module slots are replaced by
+  caches whose sizes are parameters; the default configuration is *smaller* on chip than
+  today's (directory 256×4×12 B ≈ 12 KiB + entry cache 4 KiB + payload cache 2 KiB + the
+  same 8 module slots) and unbounded in live objects up to `ObjEntries`/`PayMemBytes`.
+  Enable=0 elaborates none of it.
+- **Verification.** Engine vectors (vgsys/vnfront level): 20 000 `vkCreateBuffer` live then
+  destroy (directory probe chains, entry-cache thrash), 16 384 shader modules + pipelines
+  with dispatches that cycle through more modules than slots (fill correctness, LRU), a
+  command buffer with 100 000 records (chunk growth, prefetch), `RESET_CTX` with dirty
+  caches and a fill in flight, FREE_DESCRIPTOR_SET re-allocation to capacity, secondary
+  execute nesting; the model side is the existing Python object model with the entry
+  count raised. Acceptance: `dEQP-VK.api.object_management.{single,multiple_*,
+  max_concurrent}.*`, `api.command_buffers.*`, `api.descriptor_pool.*`,
+  `api.descriptor_set.*`, `api.pipeline.*` (CTS-1), plus the G2c guest scenes unchanged.
+  Synthesis screens as always (Enable=0 inert; Enable=1 cells/FFs/latches vs today).
+
 ### 4b. Reply builder `g6lc_apu_vnrep` (interface of record, increment 3)
 
 Runs `APU_VN_REPLY_ROM` from `APU_VN_REPLY_ENTRY[op.reply_prog]` and writes words into
