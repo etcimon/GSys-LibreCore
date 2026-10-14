@@ -270,6 +270,13 @@ testlist:
     gcc_opts: "-DSTAGE=47 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
     description: "Doubleword and word loads over bursts of in-flight byte/halfword/word stores (eight sb then sh+sw; an older late-data sd under younger sb/sh) return the youngest byte-wise data (T31: the WT dcache fixup queue overflowed at depth 2 and the load read the pre-sh/sw line — Linux printk's printf_spec bitfields)"
 
+  - test: ooo_store_forward_through_translation
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=48 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Data accesses translated (MPRV, Sv39 high alias VA != PA): a late-address head load, a younger store to a stack slot and a youngest load of that slot -- the load must forward from the speculative store; with a virtual STQ key it parks in WAIT_PAGE_OFFSET behind a store that cannot commit and the core deadlocks (T32: Linux sched_clock_noinstr on every package)"
+
   - test: ooo_load_misaligned_shared_target
     iterations: 1
     <<: *common_test_config

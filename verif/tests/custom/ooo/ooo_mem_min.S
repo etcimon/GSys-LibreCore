@@ -1261,6 +1261,79 @@ main:
   li   t3, 0xEEDD
   bne  t2, t3, fail_t2
 
+#elif STAGE == 48
+  # T32: store-to-load forwarding THROUGH TRANSLATION with VA != PA (Linux:
+  # kernel VAs 0xffffffff8..., physical 0x8...). Data accesses go through
+  # satp with MPRV (MPP=S) at a high Sv39 alias of the stack
+  # (0xffffffffc0000000 -> 0x80000000). Shape of the boot deadlock
+  # (sched_clock_noinstr): the HEAD load's address arrives late (divu chain);
+  # a younger store to a stack slot and a still-younger load of the same slot
+  # issue first. That load must forward from the speculative store (VA key vs
+  # PA key); if it instead parks in WAIT_PAGE_OFFSET until the store drains,
+  # the store cannot commit behind the unretired head load and the LU is held
+  # -- the run times out. Spike: trivially correct.
+  csrr s1, mtvec
+  la   t0, .Lvm3_handler
+  csrw mtvec, t0
+  la   t1, .Lvm3_pt
+  li   t2, (0x80000 << 10) | 0xCF
+  sd   t2, 16(t1)                      # VPN2 = 2 (identity)
+  li   t3, 2048
+  add  t3, t3, t1
+  sd   t2, 2040(t3)                    # VPN2 = 0x1ff (high alias)
+  srli t1, t1, 12
+  li   t2, 8
+  slli t2, t2, 60
+  or   t1, t1, t2
+  csrw satp, t1
+  sfence.vma
+  li   t0, -1
+  srli t0, t0, 10
+  csrw pmpaddr0, t0
+  li   t0, 0x0F
+  csrw pmpcfg0, t0
+  # the alias of this frame
+  li   t5, 0x80000000
+  sub  a0, sp, t5
+  li   t5, 0xffffffffc0000000
+  add  a0, a0, t5                      # a0 = alias(sp)
+  li   t0, 0x5a5a5a5a5a5a5a5a
+  sd   t0, 0(sp)                       # the head load's slot, physical write
+  sd   zero, 40(sp)
+  fence rw, rw
+  li   t0, (1 << 17) | (1 << 11)       # MPRV | MPP = S: data translated
+  csrs mstatus, t0
+  li   t1, 0x7fffffffffffffff
+  li   t2, 3
+  divu t3, t1, t2
+  andi t3, t3, 0                       # 0, late
+  add  t4, a0, t3                      # head load address, late
+  ld   t5, 0(t4)                       # HEAD load (through the alias)
+  li   t6, 0x1234567890abcdef
+  sd   t6, 40(a0)                      # younger store through the alias (speculative behind the head)
+  ld   a1, 40(a0)                      # youngest: must forward from the store above
+  li   t0, (1 << 17) | (3 << 11)
+  csrc mstatus, t0                     # MPRV off
+  csrw satp, zero
+  sfence.vma
+  li   t0, 0x5a5a5a5a5a5a5a5a
+#ifdef MEM_ORDER_NEGATIVE
+  xori t0, t0, 1
+#endif
+  bne  t5, t0, fail_t2
+  bne  a1, t6, fail_t2
+  csrw mtvec, s1
+  j    .Lvm3_done
+  .balign 4
+.Lvm3_handler:
+  j    fail_trap_cause                 # no trap is expected
+  .section .data
+  .balign 4096
+.Lvm3_pt:
+  .space 4096
+  .text
+.Lvm3_done:
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".

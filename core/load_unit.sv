@@ -247,7 +247,34 @@ module load_unit
   // idle/store vaddrs to STQ (false page-offset match + sticky + forward).
   // P4 c.lw then waited ~200k and retired leftover data (a5=0x010dfeec).
   assign load_paddr_valid_o = valid_i;
-  assign load_paddr_o = CVA6Cfg.PLEN'(lsu_ctrl_i.vaddr);
+  // T32: under translation the STQ holds PHYSICAL store addresses, so a
+  // virtual key never forwards (pa_eq misses) while the [11:0] interlock
+  // still matches -- every stack RAW waits for the STQ to drain, and a
+  // younger load parked in WAIT_PAGE_OFFSET on an older *speculative* store
+  // deadlocks the older load at the LU input (Linux sched_clock_noinstr:
+  // prologue sd ra,40(sp) / epilogue ld ra,40(sp) ahead of the head ld).
+  // The key is the load's own translation: taken from the shared MMU port
+  // only in a cycle this unit drives translation_req_o (then dtlb_ppn_i is
+  // this load's PPN, not a store's), and held while the same load stays at
+  // the LU head. Bare mode: ppn == vaddr[PLEN-1:12], the key is unchanged.
+  logic                    load_pa_v_q;
+  logic [CVA6Cfg.PLEN-1:0] load_pa_q, load_pa_now;
+  logic                    load_pa_now_v;
+  assign load_pa_now_v = valid_i && translation_req_o && dtlb_hit_i;
+  assign load_pa_now   = CVA6Cfg.PLEN'({dtlb_ppn_i, lsu_ctrl_i.vaddr[11:0]});
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      load_pa_v_q <= 1'b0;
+      load_pa_q   <= '0;
+    end else if (flush_i || !valid_i || pop_ld_o) begin
+      load_pa_v_q <= 1'b0;
+    end else if (load_pa_now_v) begin
+      load_pa_v_q <= 1'b1;
+      load_pa_q   <= load_pa_now;
+    end
+  end
+  assign load_paddr_o = load_pa_now_v ? load_pa_now :
+                        load_pa_v_q   ? load_pa_q   : CVA6Cfg.PLEN'(lsu_ctrl_i.vaddr);
   assign load_trans_id_o = lsu_ctrl_i.trans_id;
   assign load_hart_o = lsu_ctrl_i.hart;
   // feed-through the virtual address for VA translation
