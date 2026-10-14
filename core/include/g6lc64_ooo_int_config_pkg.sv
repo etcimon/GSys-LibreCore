@@ -86,7 +86,11 @@ package cva6_config_pkg;
   // walk read a stack word 13 cycles after the store buffer handed its store
   // to the dcache and got the line's previous content (fw_platform_init
   // fail-wfi, Spike lockstep at retirement 6,537; prof-t28fst).
-  localparam CVA6ConfigWtDcacheFixupDepth = 2;
+  // T34 (2026-10-14): the depth-2 queue's full-queue fallback is the prime
+  // suspect for the two stale-read kernel oopses seen with T28-T33 in (a NULL
+  // task->cgroups at 1 s, a half-written device_node pointer in of_irq_init);
+  // the queue is the wbuffer depth so every in-flight write-through is fixed up.
+  localparam CVA6ConfigWtDcacheFixupDepth = 8;
   localparam CVA6ConfigWtDcacheFixupVoidKeepEn = 1'b0;
 
   localparam CVA6ConfigNrScoreboardEntries = 32;

@@ -1577,6 +1577,35 @@ prerequisite for this work under the existing dual license. No licensing policy 
   ≈ 1 h 45 min wall with RVFI tracing on (the detached launcher leaves
   `results.json` at `incomplete`; the verdict is `trial/run.log`, as for the
   T21t runs).
+- [ ] **T34 — two kernel oopses with T28–T33 in, both the shape of a stale or
+  half-written load value (2026-10-14).** On `ooocoh-t33-ooo-replay2-pgo-build`
+  (depth-2 fixup queue) Linux now runs through `init_IRQ`, timekeeping
+  (`Calibrating delay loop (skipped) … 25.00 BogoMIPS (lpj=125000)`, the
+  12.5 MHz timebase), `printk: bootconsole [sbi0] disabled` (ttyS0 took
+  over), `futex`, `NET`, the unaligned-access probe (`unaligned accesses are
+  slow`), `SCSI`, `usbcore`, `pps_core`, `PTP`, `EDAC MC` — ≈ 185 M
+  instructions, 1.01 s guest — then **L1**: `Unable to handle kernel NULL
+  pointer dereference at 0x10`, `cpuacct_charge+0xc` ← `update_curr` ←
+  `dequeue_entity` ← `__schedule` in `rcu_sched` (PID 15): `ld a4,1936(a0)`
+  (`tsk->cgroups`) returned 0 for a live kthread. **L3** (same model,
+  OpenWrt initrd, `maxcpus=1`): early, in `init_IRQ` → `of_irq_init` →
+  `__of_device_is_compatible+0x6c`: `s2 = 0x000000000fffc2f8` where
+  `a0 = 0xffffffd80fffc218` — a 64-bit pointer with its upper half zero,
+  `ld a0,0(s2)` faults (`cause 0xd`). Both are rare-event stale/half-value
+  reads ≈ 100 M cycles in, not deterministic forwarding bugs (stages 39–49
+  Spike-exact), which fits the WT dcache ACK-before-check class with the
+  depth-2 queue's full-queue fallback. Discriminators launched: (1)
+  `ooocoh-t34-ooo-fix8-pgo-build` (`WtDcacheFixupDepth 8` = the wbuffer
+  depth, config committed) — rerun L3 then L1 on it (`t21/q-linux-boot.sh
+  MODEL=ooocoh-t34-ooo-fix8-pgo-build PAYLOAD=l3ooo TAG=l3ooo` /
+  `PAYLOAD=l1ooo`); the L3 oops is ≈ 60–130 M cycles in, so the verdict
+  comes within ≈ 2 h; (2) **L1 on the HPDCACHE single core** with T28–T33
+  (`linux-boot-l1s1d-ooocoh-t33-server1-final-pgo-build`, no WT wbuffer):
+  if it passes the same points the WT dcache is confirmed as the remaining
+  defect class; the 4-core `ooocoh-t33-server-final-mt4-build` is built for
+  the same comparison. If depth 8 does not cure it, the next instrument is
+  a store/load value trace of the faulting address (`+smt_mem_watch`-style
+  on `0x…cgroups` / the device_node) rather than an FST.
 - [ ] **T33 — the T32 residual: a partially covered younger load parked in
   `WAIT_PAGE_OFFSET` on a speculative store held the load unit against the
   head load; the load unit now hands it back (2026-10-14).** On the T32
