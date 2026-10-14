@@ -117,8 +117,14 @@ def main():
     loads = stores = amos = skipped = 0
     mism = 0
     unknown = 0
+    retire = 0
+    lineno = 0
     with open(trace, 'r', errors='replace') as f:
         for line in f:
+            lineno += 1
+            if line.startswith('core'):
+                retire += 1
+                continue
             if not (line and line[0] in '0123' and line[1] == ' '):
                 continue
             t = line.split()
@@ -151,7 +157,7 @@ def main():
                 skipped += 1
                 continue
             if watch is not None and addr <= watch < addr + max(size, 1):
-                print(f"  watch retire {n}: pc=0x{pc:x} insn=0x{insn:x} {kind}{size} addr=0x{addr:x} rd={rdval} wdata={wdata} model_before=0x{mem.read(addr, size):x}")
+                print(f"  watch memop {n} retire {retire}: pc=0x{pc:x} insn=0x{insn:x} {kind}{size} addr=0x{addr:x} rd={rdval} wdata={wdata} model_before=0x{mem.read(addr, size):x}")
             if kind in ('L', 'LR', 'A'):
                 if rdval is None:
                     skipped += 1
@@ -174,7 +180,7 @@ def main():
                         if src != 'stored':
                             unknown += 1
                         if report_all or mism <= 20:
-                            print(f"MISMATCH #{mism} at retire {n}: pc=0x{pc:x} insn=0x{insn:08x} {kind}{size} addr=0x{addr:x} got=0x{got_full:x} exp=0x{exp_full:x} src={src}")
+                            print(f"MISMATCH #{mism} memop {n} retire {retire} line {lineno}: pc=0x{pc:x} insn=0x{insn:08x} {kind}{size} addr=0x{addr:x} got=0x{got_full:x} exp=0x{exp_full:x} src={src}")
                     loads += 1
                 if kind == 'A' and wdata is not None:
                     mem.write(addr, size, wdata)
