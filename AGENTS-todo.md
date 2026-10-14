@@ -1565,6 +1565,30 @@ prerequisite for this work under the existing dual license. No licensing policy 
   ≈ 1 h 45 min wall with RVFI tracing on (the detached launcher leaves
   `results.json` at `incomplete`; the verdict is `trial/run.log`, as for the
   T21t runs).
+- [ ] **T31 — the STQ forward / page-offset interlock matched byte-exact; a
+  load over younger narrow stores inside its lane read the stale line
+  (2026-10-14).** With T28–T30 in, `g6lc64_ooo` boots OpenSBI and the kernel
+  prints through `earlycon=sbi` (`linux-probe-l1ooo-trace`, 12 M cycles,
+  8.97 M retired, 1,762 SBI ecalls: `Initmem setup node 0`, `SBI HSM
+  extension detected`, `riscv: base ISA extensions acdfim`, `percpu:
+  Embedded 17 pages/cpu`) — but the numbers in the lines are wrong
+  (`[00000.     0]`, `mem 2147483648-0x…8fffffff`: printk's `printf_spec`
+  bitfield struct is built with byte/halfword stores and read whole).
+  `ooo_mem_min` stage 47 (`ooo_wide_load_over_narrow_stores`): eight `sb`
+  then `ld` passes; **`sh +2`, `sw +4`, then `ld` returns the pre-sh/sw
+  doubleword (exit 3)**, unchanged at `WtDcacheFixupDepth 8`, so not T28.
+  FST `prof-t31fst` (the ooo trace model): the `sh` (c=875) and `sw` (c=883)
+  sit in the speculative queue when the `ld` arrives (c=884); no
+  `st_fwd`, no `page_offset_matches`, the load completes from the cache at
+  c=889 with the old bytes. Cause: `store_buffer.sv` `pa_eq` was `a == b`
+  and the interlock compared `address[11:0] == page_offset_i` — byte-exact,
+  so stores at other byte offsets of the load's lane were invisible to both
+  the forward merge and the stall (upstream compares `[11:3]`). Fix: lane
+  granularity (`LANE_W = clog2(XLEN/8)`) for `pa_eq`/`po_eq`; the merge is
+  be-masked. Verification owed on `ooocoh-t31-ooo-final-pgo-build`
+  (`ooocoh-t31-ooo-lane-pgo-build` carries the fix at depth 8 for the first
+  check): stage 47 pass Spike-exact, stages 4/20/32–46 + s11 + wprp
+  unchanged, then the kernel probe's printk numbers and the L1/L3 runs.
 - [ ] **T30 — the testharness preloaded only 16 MiB of the ELF into the
   256 MiB DRAM model (2026-10-14).** `g6lc_tb.cpp` `mem_size = 0xFFFFFF`
   capped the bulk and per-PHDR copies; a Linux `fw_payload` is one PHDR at
