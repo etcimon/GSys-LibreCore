@@ -588,7 +588,7 @@ poll), so OpenSBI's ≈ 2.5 KB of banner and platform info are ≈ 10 M cycles a
 kernel log (≈ 20 KB) ≈ 87 M cycles — `loglevel=4` for record runs, or a `uart_bus` baud parameter
 exposed as a plusarg if the console ever becomes the long pole.
 
-#### S4.5 — Six defects between OpenSBI and `SLUB:` on `g6lc64_ooo` (2026-10-14)
+#### S4.5 — Seven defects between OpenSBI and the initcalls on `g6lc64_ooo` (2026-10-14)
 
 Each was found by the Linux payload, pinned to a cycle with an instrument that already existed
 or was added for it, reproduced by a directed `ooo_mem_min` stage, fixed, and re-verified with
@@ -603,6 +603,7 @@ T28–T32 carry the evidence; the stages are registered in `testlist_ooo_l3.yaml
 | T31 | printk prints `[00000.     0]` and decimals for `%llx` | STQ forward/interlock matched **byte-exact**: narrow stores at +2/+4 of a load's lane invisible | lane granularity (`[PLEN-1:3]`, `[11:3]`) | FST `prof-t31fst`; stage 47 (58 vs 101 → 101/101) |
 | T32 | retirement stops at `percpu:` (`notissued ld` 16.9 M cycles) | STQ key = load **vaddr** vs physical store keys → **no forwarding under Sv39**; a younger covered load parked in `WAIT_PAGE_OFFSET` on a speculative store held the LU against the head load | key = the load's own translation, sampled on its `translation_req_o` + DTLB hit, held at the LU head | `+ld_trace`; stage 48 (2 M-cycle deadlock → 82/82 in 1,100 cycles) |
 | T33 | retirement stops again at 78 M cycles after `SLUB:` (same `notissued ld` signature) | a younger load with **partial** coverage cannot forward, parks in `WAIT_PAGE_OFFSET` on a speculative store and holds the LU against the head load | load unit hands the parked load back after a 64-cycle dwell when the match is speculative-only; scoreboard cancels + refetches at commit | stage 49 (2 M-cycle deadlock → 53/53 in 1,007 cycles) |
+| T34 | random late oopses (NULL `cgroups`, half-written pointer, NULL function pointer, vmap rb node) at 0.4–1.4 s | WT wbuffer applied a tag-check result to whatever word sat at `check_ptr` two cycles later; a slot ACKed, freed and re-allocated inside the check window inherited the old word's `hit_oh`, its line write went to the wrong way, the real line stayed stale — first victim `memblock`'s region swap at 6.7 M cycles, which later hands out OpenSBI's reserved RAM | `check_wtag` carried beside `check_ptr`; results apply only to the same word | `rvfi_memcheck.py` over the 110 M-cycle trace (one stored-byte mismatch); FST `prof-t34fst` |
 
 After T32 the kernel reaches `Memory: 235940K/262144K available (6519K kernel code, 4879K rwdata,
 4096K rodata, 2143K init, 329K bss, 26204K reserved…)` at ≈ 20 M cycles with 16.3 M retired
@@ -616,8 +617,10 @@ two L3 runs before that was understood. With T33 the kernel runs into the initca
 timebase), `printk: bootconsole [sbi0] disabled` (ttyS0 live), `futex`, `NET`, the unaligned-access
 probe, `SCSI`, `usbcore`, `PTP`, `EDAC` — ≈ 185 M instructions, 1.01 s guest at ≈ 260 M cycles — and
 then two stale/half-value oopses (T34: `cpuacct_charge` NULL `cgroups` in `rcu_sched`; a device_node
-pointer with its upper half zero in `of_irq_init`). The WT dcache fixup-queue depth (2 → 8) and the
-HPDCACHE server1 run are the discriminators in flight.
+pointer with its upper half zero in `of_irq_init`). The fixup-queue depth was a red herring (2 → 8 only moved the failures); the program-order
+memory oracle (`verif/regress/rvfi_memcheck.py`, no ISS needed) found the single wrong load in
+110 M cycles and the FST of that window gave T34's mechanism. The HPDCACHE single core passed the
+ooo's failure points and stopped at 0.6 s on a store-buffer liveness assertion (T35).
 
 ### S5 — SMT2 `RVH` (smt2 feature not present)
 
