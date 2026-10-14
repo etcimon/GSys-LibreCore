@@ -844,8 +844,11 @@ cycle 886 on the sim-only `load_unit.sv` property `misaligned_entry_excepts`, th
 (`linux-boot-l1-ooocoh-t27-server-default-mt4-build3`); the property is relaxed to accept
 the translation abort (a kill with no completion in `ABORT_TRANSACTION`/`_NI`/`WAIT_FLUSH`)
 and `misaligned_entry_no_data` keeps the data-retirement half. `MEM_ORDER_NEGATIVE` flips the
-expected trap count. Positive/negative results on the fixed model are recorded in
-`AGENTS-todo.md` T27 when `ooocoh-t27-ooo-ldfix-pgo-build` lands.
+expected trap count. On the fixed model (`ooocoh-t27-ooo-ldfix-pgo-build`, `453031b66`
++ PGO, runtime qualified): positive **pass**, 55 retirements, Spike-exact; negative
+**fail** as required (52 retirements, Spike-exact — the RTL takes exactly the one trap
+Spike takes). Runs `ooocoh-t27-m38-fixed` / `…-neg`; the pre-fix witness is
+`ooocoh-t27-m38-oldassert`.
 
 ## Historical misaligned-load tests (2026-09-20)
 

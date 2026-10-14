@@ -1538,8 +1538,14 @@ prerequisite for this work under the existing dual license. No licensing policy 
   kernel's unaligned-access probe: a misaligned load that misses the DTLB
   after its grant is aborted and re-issued, and the property demanded the
   exception in the next cycle (bare-metal shape). Property relaxed to accept
-  the translation abort (`misaligned_entry_no_data` still forbids data);
-  directed leaf owed; model `…-build4` rebuilding, L1 run 2 follows.
+  the translation abort (`misaligned_entry_no_data` still forbids data).
+  **Directed leaf landed:** `ooo_mem_min.S` stage38 =
+  `ooo_load_misaligned_vm_cold_dtlb` (Sv39 through `MPRV`, cold DTLB) —
+  dies at cycle 886 on the same property on the pre-fix model (the Linux
+  shape in a 900-cycle test), **passes Spike-exact (55 retirements) on the
+  fixed model, negative fails as required** (`ooocoh-t27-m38-*`). Model
+  `…-build4` (4-core) and `…-server1-pgo-build2` (1-core) rebuilding with
+  the fix; L1 run 2 follows.
   **Userland budget for L3** (S4.2, QEMU `-icount`): stock procd ≥ 10.9 G
   busy and still burning after the prompt; with `hotplug.json` cut to
   `makedev`, failsafe wait off and `rcS` trimmed to boot/system/sysctl/log/
