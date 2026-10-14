@@ -1692,9 +1692,14 @@ prerequisite for this work under the existing dual license. No licensing policy 
   fixup-queue depth was never the cause (2 vs 8 only moved the timing);
   T28 was the depth-0 face of the same class. Verification:
   `ooocoh-t34-ooo-wbfix-pgo-build` — frozen battery Spike-exact and
-  qualified (s11 10,965 cycles); the oracle run over 110 M cycles
-  (`memcheck-wbfix-110m`) and L1 (`linux-boot-l1ooo-ooocoh-t34-ooo-wbfix-
-  pgo-build`) are in flight. Stage 51 (store-pair sweep) is registered but
+  qualified (s11 10,965 cycles); **the oracle over the 110 M-cycle trace
+  of the fixed model reports 0 stored-byte mismatches** (23 `image/zero`
+  = the code-patching alias, as before); **L1 on the fixed model runs
+  past both earlier oops points** (0.426 s / 0.457 s) with no `OVERLAP
+  DETECTED` (the depth-8 run had it): `SCSI subsystem initialized`,
+  `usbcore` at 0.956 s / 130 M cycles and still retiring
+  (`linux-boot-l1ooo-ooocoh-t34-ooo-wbfix-pgo-build`, marker
+  `G6LC_LINUX_SHELL`). Stage 51 (store-pair sweep) is registered but
   does not force the race; the oracle is the witness. The server packages
   (HPDCACHE) do not have this path.
 - [ ] **T33 — the T32 residual: a partially covered younger load parked in
