@@ -588,6 +588,30 @@ poll), so OpenSBI's ≈ 2.5 KB of banner and platform info are ≈ 10 M cycles a
 kernel log (≈ 20 KB) ≈ 87 M cycles — `loglevel=4` for record runs, or a `uart_bus` baud parameter
 exposed as a plusarg if the console ever becomes the long pole.
 
+#### S4.5 — Five defects between OpenSBI and `Memory: … available` on `g6lc64_ooo` (2026-10-14)
+
+Each was found by the Linux payload, pinned to a cycle with an instrument that already existed
+or was added for it, reproduced by a directed `ooo_mem_min` stage, fixed, and re-verified with
+the frozen probe battery Spike-exact (s11 trace `de4f42cfe7cb`, 10,969 cycles). `AGENTS-todo.md`
+T28–T32 carry the evidence; the stages are registered in `testlist_ooo_l3.yaml`.
+
+| # | symptom on the boot | mechanism | fix | witness |
+|---|---|---|---|---|
+| T28 | OpenSBI's FDT walk reads a stack word 13 cycles after storing it and gets the previous value; `fw_platform_init` fails | WT dcache "ACK-before-check" (SL-W) live: `WtDcacheFixupDepth 0` on the OoO WT packages | depth 2 / `VoidKeepEn 0` as on smt2 | FST `prof-t28fst`; stages 39–42 bound the shape |
+| T29 | the `jal .Lsetup_trap_vector` after `relocate_enable_mmu` retires, its callee never does, `tp` stays physical, first `sd` faults | `predict_fetchable` applied the **physical** PMA execute-region test to a **virtual** predicted target → `bp_fire` low, prediction kept, no recovery | filter only under bare fetch (`fetch_translation_en_i`) | `+fe_trace` window; stage 46 (fail 63 vs 73 → pass) |
+| T30 | `init_task.stack` reads 0 → store to VA 0 → trap-entry loop | the TB preloaded 16 MiB of a 67 MB `fw_payload` | preload the whole 256 MiB model (`+preload_bytes=`) | `xxd` of the Image vs the load |
+| T31 | printk prints `[00000.     0]` and decimals for `%llx` | STQ forward/interlock matched **byte-exact**: narrow stores at +2/+4 of a load's lane invisible | lane granularity (`[PLEN-1:3]`, `[11:3]`) | FST `prof-t31fst`; stage 47 (58 vs 101 → 101/101) |
+| T32 | retirement stops at `percpu:` (`notissued ld` 16.9 M cycles) | STQ key = load **vaddr** vs physical store keys → **no forwarding under Sv39**; a younger covered load parked in `WAIT_PAGE_OFFSET` on a speculative store held the LU against the head load | key = the load's own translation, sampled on its `translation_req_o` + DTLB hit, held at the LU head | `+ld_trace`; stage 48 (2 M-cycle deadlock → 82/82 in 1,100 cycles) |
+
+After T32 the kernel reaches `Memory: 235940K/262144K available (6519K kernel code, 4879K rwdata,
+4096K rodata, 2143K init, 329K bss, 26204K reserved…)` at ≈ 20 M cycles with 16.3 M retired
+(IPC 0.82) and keeps retiring (`linux-boot-l1ooo-ooocoh-t32-ooo-pa-pgo-build`). None of the five
+was visible to the bare-metal probe battery: three need translation with VA ≠ PA (T29, T31's
+trigger, T32), one needs a 16 MiB+ payload (T30), one a specific write-through/ACK timing (T28).
+The directed stages now carry those preconditions. Residual liveness hazard (T32 row): a younger
+load with *partial* coverage still parks in `WAIT_PAGE_OFFSET` and can hold the LU against an
+older load; the structural fix is an IQ-side gate or an LU replay.
+
 ### S5 — SMT2 `RVH` (smt2 feature not present)
 
 Package bit + DTS `h` on both threads. Fetch: L4 pass-through only (no fake
