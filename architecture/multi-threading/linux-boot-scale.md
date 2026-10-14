@@ -506,14 +506,22 @@ built-in rootfs; busy = user+sys from `/proc/stat` at the login prompt):
 | `hotplug.json` reduced to `makedev` rules, failsafe wait off | 0.64 G | 1.08 G | — | ≈ 13.6 G busy at the second sample: the full service set keeps running |
 | + `rcS` trimmed to boot/system/sysctl/log/ubus | 0.64 G | 1.08 G | **5.0 G** (login on ttyS0 reached) | +9 G in the next 10 host-seconds — a CPU-bound daemon (`urngd` is the suspect) |
 
-So "L3 = procd up with a login" is **≈ 5 G instructions with the trims above**, and the
-remaining 1.1 G preinit (`/lib/preinit` hooks, `mount_root`, `kmodloader`) and the post-login
-burners are the next cuts (drop `S00urngd`, `kmodloader` with no modules, the preinit hooks that
-only matter on flash). A fully trimmed procd boot of ≈ 2 G is plausible; busybox `init` (L2) is
-< 1 G. Against that: OpenSBI's 33 M cycles are fixed per boot, and at the measured 6.8 k cycles/s
-the 4-core server does 5 G instructions in ≈ 9 days — so L3 on the 4-core model needs the
-cycles/s levers below or the 1-core server-class configuration (same core, L2/L3, hub identity),
-which runs at the single-core rate (≈ 56 k cycles/s with PGO, §10.8): 5 G ≈ 1 day, 2 G ≈ 10 h.
+Two corrections from the follow-up runs (`t21/q-qemu-l3.sh`, the exact RTL initrd under QEMU):
+the "post-login burner" was an `-icount` artefact — with `sleep=off` an idle guest warps virtual
+time by thousands of seconds per host-second, so periodic daemons (`odhcpd`, `netifd`, `dropbear`)
+accumulated user time against an inflated clock; and the `rcS` replacement never ran because
+OpenWrt 24.10 has **no `/etc/init.d/rcS` file** — procd runs `/etc/rc.d/S*` natively — so the
+service trim has to be the symlink set. **The L3 payload of record** (`q-linux-payload.sh
+ROOTFS_KIND=openwrt`: the whole `root-sifiveu` as a 21.8 MB uncompressed initrd, `hotplug.json` =
+device nodes only, `pi_preinit_no_failsafe`, `rc.d` = boot/system/sysctl/log/done, no modules,
+`rdinit=/sbin/init`, `ttyS0` askfirst, `G6LC_LINUX_SHELL` from a profile.d hook) boots under QEMU
+to procd + ubusd + logd + a root shell on ttyS0 at **1.20 G busy instructions** (user 0.52 s +
+sys 0.68 s; kernel 0.31 G of it with the uncompressed unpack) plus **2.5 guest-seconds of idle**
+(ubus/procd waits) — 127 M cycles at the 12.5 MHz declared timebase, which a lower declared rate
+(2–4 MHz) would shrink if the idle share matters. No background CPU use afterwards. So L3 is
+≈ 1.3–1.5 G cycles: ≈ 2.3 days on the 4-core model at 6.8 k cycles/s, **≈ 8–10 h on the 1-core
+server package** at the single-core rate (§10.8: 56 k cycles/s with PGO on `g6lc64_ooo`; the
+L2/L3 slice costs a little more). OpenSBI's fixed cost drops with the hart count as well.
 
 **Cycles/s levers, ordered by what is measured:** (1) the 1-core server package for L2/L3 (×8 vs
 the 4-core model, no simulator work); (2) workload trims above (×2–5 on the userland);

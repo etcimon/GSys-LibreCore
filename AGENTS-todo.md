@@ -1543,8 +1543,14 @@ prerequisite for this work under the existing dual license. No licensing policy 
   **Userland budget for L3** (S4.2, QEMU `-icount`): stock procd ≥ 10.9 G
   busy and still burning after the prompt; with `hotplug.json` cut to
   `makedev`, failsafe wait off and `rcS` trimmed to boot/system/sysctl/log/
-  ubus the login prompt is at **5.0 G**; preinit 1.1 G and a post-login
-  CPU burner (`urngd`) are the next cuts. **Spin re-base (guide §10.8):**
+  ubus the login prompt is at **5.0 G**; corrected by the exact-initrd runs:
+  the "burner" was the `-icount` idle warp, `rcS` is a procd built-in (trim
+  the `rc.d` symlinks instead) — **the L3 payload of record (whole trimmed
+  OpenWrt rootfs as a 21.8 MB uncompressed initrd) boots to procd + ubusd +
+  logd + a ttyS0 shell at 1.20 G busy instructions + 2.5 guest-seconds idle**
+  (S4.2): ≈ 8–10 h on the 1-core package, ≈ 2.3 days on the 4-core model.
+  Payloads built: `linux-payload-{l1,l1s1,l3,l3s1}/fw_payload_linux.elf`
+  (`s1` = `ariane-ooo-server1.dts`). **Spin re-base (guide §10.8):**
   the §10.4–10.6 models were built without the split `.vlt` (hybrid 49,158);
   on a split, PGO'd single core, `x86-64-v3` and the HEAD kernels/word guards
   are worth ≈ 0–5 % (52.0 k → 52.7 k → 54.4 k cycles/s), not 5×. The 1-core
