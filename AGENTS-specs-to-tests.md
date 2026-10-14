@@ -827,6 +827,24 @@ exit 126, the I4dp boot's shape; the fixed model passes both. Runs via
 `REVIEW_MC_DIRECTED_TOHOST_ADDR=auto` (the regions push `tohost` past `0x80001000`);
 masks `01` (2 harts), `11` (int2_l3, `-DMC_ICS_NHARTS=4`), `1111` (server, 8 harts).
 
+## Predicted-taken branch with a virtual target (2026-10-14, T29)
+
+`ooo_mem_min.S` stage46 is registered as `ooo_jal_predicted_taken_virtual_target`
+(`testlist_ooo_l3.yaml`). Spec anchors: Part II `#sec:sv39` (the fetch address is a
+virtual address once `satp.MODE != Bare` below M-mode) and `#sec:pma` (PMA checks
+apply to **physical** addresses). The fetch_B frontend filtered predictions with the
+physical execute-region test (`predict_fetchable`), so a first-encounter
+predicted-taken `jal` whose target is a kernel virtual address never redirected fetch
+while the IQ carried the prediction; the branch resolved as predicted and the callee was
+skipped (Linux: `jal .Lsetup_trap_vector` right after `relocate_enable_mmu`). The test
+builds an Sv39 level-2 table (identity gigapage for `0x80000000` and the same gigapage at
+`0xffffffffc0000000`), opens a TOR PMP entry, `mret`s into S-mode at the high alias, runs a
+straddling `jal` (offset 6 of its window) and returns to M-mode by `ecall`; it checks the
+callee ran and the instruction after the `jal` ran exactly once. Pre-fix: exit 2, RTL 63
+vs Spike 73 retirements; post-fix: pass, 342/342 PCs identical. Stages 43–45 (the same
+`jal` reached sequentially, after a mispredicted `ret`, after `sfence.vma; ret`) pass on
+both and bound the shape. Filter now applies to bare fetch only (`fetch_translation_en_i`).
+
 ## Misaligned load under translation with a cold DTLB (2026-10-14, T27)
 
 `ooo_mem_min.S` stage38 is registered as `ooo_load_misaligned_vm_cold_dtlb`

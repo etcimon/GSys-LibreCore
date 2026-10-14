@@ -1565,7 +1565,21 @@ prerequisite for this work under the existing dual license. No licensing policy 
   ≈ 1 h 45 min wall with RVFI tracing on (the detached launcher leaves
   `results.json` at `incomplete`; the verdict is `trial/run.log`, as for the
   T21t runs).
-- [ ] **T29 — Linux dies at the first call after `relocate_enable_mmu` on
+- [ ] **T30 — the testharness preloaded only 16 MiB of the ELF into the
+  256 MiB DRAM model (2026-10-14).** `g6lc_tb.cpp` `mem_size = 0xFFFFFF`
+  capped the bulk and per-PHDR copies; a Linux `fw_payload` is one PHDR at
+  `0x80000000` whose kernel `.data`/`.init` sit past `0x80ffffff`, so
+  `init_task.stack` (PA `0x8140eb78`, Image offset `0x120eb78` =
+  `0xffffffff81200000` in the file) read **0** and `start_kernel`'s
+  `set_task_stack_end_magic` stored to VA 0 → 938 recursive
+  `handle_exception` entries (`[ptw-err] vaddr=0/0x18` every 1.5 k cycles,
+  no console). Found on the T29-fixed `g6lc64_ooo` probe
+  (`linux-probe-l1ooo-trace`, 8 M cycles, 6.17 M retired). The window is
+  now the whole model (`+preload_bytes=<n>` overrides, allowlisted).
+  Rebuilding `ooocoh-t30-ooo-fix-pgo-build` / `…-server1-fix-pgo-build`
+  (frontend fix + TB fix); the 4-core follows. Owed: the kernel probe on
+  the rebuilt ooo, then L1/L3 runs.
+- [x] **T29 — Linux dies at the first call after `relocate_enable_mmu` on
   every package: the `jal` retires, its callee and the following `auipc`
   never do, execution resumes at `pc+8` with the stale physical `tp`
   (2026-10-14).** With T28 fixed, `g6lc64_ooo` boots OpenSBI (`eth,ariane-bare`,
@@ -1618,7 +1632,29 @@ prerequisite for this work under the existing dual license. No licensing policy 
   on all packages; the FST trace build of the fixed ooo
   (`ooocoh-t28-ooo-slw-fst-build`) segfaults at start (trace + fixup queue —
   a Verilator trace issue to look at separately; the `+fe_trace` window is
-  the working instrument).
+  the working instrument). **Root cause and fix (same day):**
+  `g6lc_fetch_pkg::predict_fetchable` = `is_inside_execute_regions(target)`
+  — the **physical** PMA execute-region test applied to the **virtual**
+  predicted target; `bp_fire = bp_valid && predict_fetchable && cf_consumed`
+  stayed low for every first-encounter predicted-taken branch whose target
+  is a kernel VA, the IQ still carried the prediction, the branch resolved
+  as predicted (no recovery), fetch streamed on sequentially and the
+  instruction after the branch in its window was dropped. Fix: the filter
+  applies to bare fetch only — new frontend input `fetch_translation_en_i`
+  (`enable_translation_csr_ex | enable_g_translation_csr_ex`), all three
+  fetch flavours' packages take `translation_en`; formal/TB instantiations
+  tie it low. **Directed reproducer** `ooo_mem_min` stage 46 =
+  `ooo_jal_predicted_taken_virtual_target` (Sv39 table with the identity
+  gigapage and a `0xffffffffc0000000` alias, `mret` into S-mode at the
+  alias, first-encounter straddling `jal`, `ecall` back): pre-fix **fail,
+  exit 2 (callee skipped), RTL 63 vs Spike 73 retirements**
+  (`ooocoh-t29-m46-prefix4`); on `ooocoh-t29-ooo-fix-pgo-build` **pass,
+  full RVFI/Spike PC streams identical (342/342)** (the runner's ROI
+  counter shows 74 vs 73 around the S-mode ecall/mret — a window-count
+  artefact, not a divergence); stages 38/44/45 unchanged Spike-exact. On
+  the fixed model the kernel takes the call, `tp = 0xffffffff8120eb40`,
+  and runs into `start_kernel` — where T30 (the 16 MiB preload) is the
+  next stop. Commit `7c4e3ada1`.
 - [ ] **T28 — `g6lc64_ooo` (WT dcache, 1 hart) violates a same-hart RAW
   through memory in OpenSBI's FDT walk; Linux cannot start there yet
   (2026-10-14).** The L1/L3 payloads built for the single core
