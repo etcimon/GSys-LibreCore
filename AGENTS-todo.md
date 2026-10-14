@@ -1529,6 +1529,39 @@ prerequisite for this work under the existing dual license. No licensing policy 
   ≈ 1 h 45 min wall with RVFI tracing on (the detached launcher leaves
   `results.json` at `incomplete`; the verdict is `trial/run.log`, as for the
   T21t runs).
+- [ ] **T29 — Linux dies at the first call after `relocate_enable_mmu` on
+  every package: the `jal` retires, its callee and the following `auipc`
+  never do, execution resumes at `pc+8` with the stale physical `tp`
+  (2026-10-14).** With T28 fixed, `g6lc64_ooo` boots OpenSBI (`eth,ariane-bare`,
+  Domain0 next 0x80200000) and starts the kernel; 4.76 M instructions later
+  (`linux-probe-l1ooo-trace`, 6 M cycles, `ooocoh-t28-ooo-slw-pgo-build`)
+  the hart parks in `.Lsecondary_park` (`wfi` at `0xffffffff800010c8`).
+  Retirement stream at the MMU switch (RVFI, unfiltered): `…1064 ret` (from
+  `relocate_enable_mmu`) → `…1146 jal 0x…10b4` (`.Lsetup_trap_vector`;
+  rd = ra = 0x…114a, correct) → **next retirement `…114e addi tp,tp,-1546`
+  with `tp = 0x8140e536`** — the four callee instructions (`auipc`, `addi`,
+  `csrw stvec`, `csrw sscratch`, `ret`) and the `auipc tp` at `…114a` never
+  retire, and `tp` is the pre-MMU physical `init_task` (0x8140eb40 − 1546)
+  instead of 0xffffffff8120eb40. The first `sd` through `tp` then page-faults
+  (`[ptw-err] vaddr=0x8140e556 instr=0`, the line seen on all three
+  packages right after the expected `0x80201050/1048` fetch faults), the
+  kernel's early trap path hits OpenSBI (`_trap_handler` at 0x800003d8) and
+  parks. The same first data fault preceded the 4-core run-1 assertion and
+  the server1 frontend-empty hang, so this is one frontend/control-flow
+  defect at the VA switch, not three. Candidates: the restart PC after the
+  `csrw stvec`/`sscratch` serialising flush in the callee landing on the
+  caller's `pc+8` (a frontier/`gen_switch_tail`-class restart), a RAS/BTB
+  alias between the physical and virtual images of the same code (low 20
+  PC bits identical), or the jal's taken resolution lost at the first
+  virtual fetch. Next: `ooocoh-t28-ooo-slw-fst-build` (building), FST of
+  cycles ≈ 5,580,500–5,582,000 of `linux-payload-l1ooo` (the `jal` is a few
+  hundred cycles after the `[mmu-ife]` pair at t = 5,580,62x), read the
+  frontend (`i_frontend` npc/predict/RAS), the branch unit resolution and
+  the controller flush/restart PC for the jal at `0xffffffff80001146`; then
+  a directed `ooo_mem_min` stage (MMU on, `jal` to a `csrw stvec; ret`
+  callee immediately after the `satp` write) and the fix. Linux on RTL is
+  blocked on this on all packages; the 4-core `l1r3` run will show the same
+  fault when OpenSBI finishes (≈ 33 M cycles).
 - [ ] **T28 — `g6lc64_ooo` (WT dcache, 1 hart) violates a same-hart RAW
   through memory in OpenSBI's FDT walk; Linux cannot start there yet
   (2026-10-14).** The L1/L3 payloads built for the single core
