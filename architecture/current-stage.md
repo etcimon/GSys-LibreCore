@@ -22,6 +22,16 @@ x86 Ubuntu UE/CS2 first, no custom runtime, and official uptake of missing gener
 Venus support. Performance/area is a Pareto-study gate, not an AI-TOPS/FPS estimate.
 All graphics material below is historical except explicitly dated successor records.
 
+**Graphics current, 2026-10-14:** milestone G2 is committed (`11131ebbe`) — stock Mesa
+Venus renders eight raster scenes on the RTL within 1 LSB of llvmpipe on the pinned
+leaves (`apu-leaf-20261013T110427` 27/27, `…T133000` both guest arms); 3d-d is
+qualified by those same leaves. Still smoke/milestone evidence. The acceptance oracle is
+now the Khronos Vulkan CTS pinned as `specs/VK-GL-CTS` (`vulkan-cts-1.4.6.2`): gate
+ladder CTS-0…CTS-5 and the must-pass → engine map are in `uncore/apu-vulkan-engine.md`
+§13; the remaining pipeline work (G3a shader ISA, G3b residency, G3c mandatory fixed
+function, G3d sampler generality, then throughput/1.3+/WSI) is listed in
+`uncore/apu-graphics.md` "Current continuation (2026-10-14)". No CTS result exists yet.
+
 **Historical graphics override, 2026-10-01:** the long graphics rows below are historical
 fixture censuses, not current qualification or authoritative tracked/untracked
 labels. Pinned UE 5.8.3 and two official Ubuntu kernel references are now local,

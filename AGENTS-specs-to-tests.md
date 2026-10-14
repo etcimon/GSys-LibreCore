@@ -1906,6 +1906,22 @@ replays the two-session `ue_probe_bufcopy_1` oracle instead of the fresh-device
 change. Oracle freshness versus `shader_vectors.py`/`vn_golden.py` is not checked by the leaf,
 and the guest stage requires a remote QEMU carrying the `g6lc-g6lc64_stream8` machine.
 
+2026-10-14: the **Khronos Vulkan CTS is the test source of record for the APU's Vulkan
+behaviour** from here on — `specs/VK-GL-CTS` (lazy, shallow, `update = none`) pinned to
+`vulkan-cts-1.4.6.2` = `f6a29701220f34dd1407513bfe80d74ca7b392ce`. Spec-to-test mapping
+for the device therefore reads: Vulkan 1.4 spec clause → must-pass group
+`external/vulkancts/mustpass/main/vk-default/<group>.txt` → test module
+`external/vulkancts/modules/vulkan/<module>/` → engine (`architecture/uncore/apu-vulkan-engine.md`
+§13.2). Runs use the README's mandatory flags (`--deqp-caselist-file`, `--deqp-log-images=disable`,
+`--deqp-log-shader-sources=disable`, `--deqp-vk-device-id`, optional `--deqp-fraction=I,N` with
+the mandatory per-fraction list) and retain `TestResults.qpa`; results are rendered into the
+generated `architecture/uncore/apu-cts-ledger.md` by `corev_apu/apu/tools/cts_ledger.py`.
+`Pass`/`NotSupported` (truthfully unadvertised) are acceptable, `QualityWarning` is tracked,
+anything else is a classified defect. The self-authored `vktri.c`/`vkcmp.c` llvmpipe oracles
+remain forensics, and the generated vector suites remain the engine-level gates for fault
+paths, device limits and transport that the CTS cannot reach. No CTS result exists yet for
+this device (gate CTS-0 open).
+
 `verif/tb/apu/run-virtio-mmio.sh` consumes `corev_apu/apu/Flist.apu` and runs
 `tb_g6lc_apu_virtio_mmio.sv` through the remote testharness proxy. Virtio 1.3 CSD01
 sections 2.1/2.6/4.2.2 are the register/status/split-queue references. The test first

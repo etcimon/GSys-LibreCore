@@ -161,6 +161,9 @@ geometry and scheduling → full core/extension CTS, UE/CS2 and physical release
 and generic upstream gaps proceed in parallel; shared shader/memory contracts precede dependent
 engines. Optional hardware gates remain default-off, but the full release profile must enable
 and prove every promised feature. G0/A5 remains the unchanged Zink/Venus readback regression.
+**Acceptance oracle from 2026-10-14 is the Vulkan CTS** (§13: `specs/VK-GL-CTS` pinned at
+`vulkan-cts-1.4.6.2`, must-pass groups mapped to engines, gate ladder CTS-0…CTS-5); the G3
+increments each carry a named must-pass caselist, and Zink/UE/CS2 sit behind CTS-2+.
 
 ## 1. Review of the catalog structure (what this consolidates)
 
@@ -935,6 +938,11 @@ rectangle, not a limit. `Xfer` handles copies/clears/blits and MSAA resolve.
   Enable=0 must synthesize to no cells.
 - **Golden before RTL**: the Python golden model is validated against Mesa's vendored
   generated headers (regenerate at the pin, diff) before RTL consumes it.
+- **CTS caselist per increment** (2026-10-14, §13): every increment names the must-pass
+  subset it must move (from `specs/VK-GL-CTS` `mustpass/main/vk-default/`), runs it on the
+  stock guest with the README's mandatory flags, and reports the ledger delta. Self-authored
+  scenes and vectors remain for forensics and for behaviour the CTS cannot reach (fault
+  paths, device limits, transport), never as the acceptance oracle.
 - **No catalog growth in the engines**: a new command is a command-set line + regenerate;
   a new object kind is a profile line; a new shader opcode is a ShaderCore change with
   its own metamorphic test.
@@ -1082,3 +1090,109 @@ supply them; the complete external-sync/WSI and physical transport gates remain 
 | Catalog leaves, `bru/qbn/qtb`, doorbell stacks, their `*En` fields | frozen; deletion only with explicit cleanup approval (plan §3) |
 | `tdma` testharness join | replaced by the real xbar master (A1) |
 | HDMI simplefb leaf | consumer only; WSI comes from virtio-gpu scanout |
+
+## 13. Conformance program — VK-GL-CTS as the acceptance oracle (2026-10-14)
+
+The G1/G2 oracles were self-authored (`vktri.c`, `vkcmp.c` against the guest's llvmpipe);
+they found every G2c defect but only test what we thought of. From here the **Khronos
+Vulkan CTS** is the acceptance oracle for every increment and the must-pass lists are the
+obligation set. The plan (`plan-96c6986262437fe2.md`, "Conformance oracle") owns the gate
+ladder and the group → workstream matrix; this section owns the architecture of the run.
+
+### 13.1 Source of record
+
+`specs/VK-GL-CTS` — lazy, shallow, `update = none` (as `specs/venus-protocol` and
+`specs/UnrealEngine`) — pinned to tag **`vulkan-cts-1.4.6.2`** =
+`f6a29701220f34dd1407513bfe80d74ca7b392ce` (2026-08-14). Next candidate
+`vulkan-cts-1.4.7.0` = `e272471311301a35aae6364def1a3f5ea35215f7` (2026-10-08) once it
+clears the 7-day rule and its `VK_KHR_opacity_micromap` / `VK_EXT_primitive_restart_index`
+tests are wanted. Inside the pin:
+
+- `external/vulkancts/modules/vulkan/<module>/` — one directory per `dEQP-VK.<module>`
+  (`api binding_model clipping compute conditional_rendering cooperative_vector data_graph
+  descriptor_indexing device_generated_commands device_group draw dynamic_state fragment_ops
+  fragment_shader_interlock fragment_shading_rate geometry image image_processing
+  imageless_framebuffer memory memory_model mesh_shader modifiers multiview pipeline
+  postmortem protected_memory query_pool rasterization ray_query ray_tracing reconvergence
+  renderpass robustness sc shader_object shaderexecutor shaderrender sparse_resources
+  spirv_assembly ssbo subgroups synchronization tensor tessellation texture
+  transform_feedback ubo video wsi ycbcr`).
+- `external/vulkancts/mustpass/main/vk-default.txt` — the index of per-group caselists
+  under `mustpass/main/vk-default/<group>.txt` (nested for `image/`, `pipeline/monolithic/`,
+  `pipeline/shader-object-unlinked-spirv/`, `shader-object/`);
+  `vk-fraction-mandatory-tests.txt` (must be in every fraction); `waivers.xml` (Khronos-granted,
+  vendor-scoped — never ours to extend); `scripts/build_mustpass.py` (never run by us — the
+  checked-in lists are consumed as-is).
+- `external/vulkancts/README.md` — the binding run and submission contract (13.3).
+
+### 13.2 What each engine group must satisfy (must-pass group → this design)
+
+| Must-pass group(s) | Engines of record here | Note |
+|---|---|---|
+| `api`, `info`, `memory`, `binding-model`, `ubo`, `ssbo`, `robustness`, `descriptor-indexing` | `vnfront`/`objtab`/`objpay`/`vgpages`/`cmdrec`/`cmdexec`, descriptor records (§12.1 F5), two-heap memory (3d-c) | residency virtualization (G3b) is the gate: fixed slot counts become `Fail`/`Crash` here |
+| `compute`, `glsl`, `spirv-assembly`, `subgroups`, `reconvergence`, `memory-model`, `graphicsfuzz` | `shmod`/`shwave`/`shcore` (§7) | G3a ISA closure, then flexible subgroups and the banked/pipelined core (W3) |
+| `pipeline/*`, `draw`, `rasterization`, `clipping`, `depth`, `fragment-operations`, `renderpasses`, `dynamic-state`, `imageless-framebuffer`, `query-pool`, `texture`, `image/*`, `ycbcr`, `conditional-rendering`, `transform-feedback` | `rast` (§9), `xfer`, the sampler in `shwave`, attachment state in `cmdexec` | G3c mandatory fixed function (points/lines/restart/stencil/subpasses/secondary/indirect/queries/MSAA 4) and G3d sampler generality |
+| `synchronization`, `synchronization2`, `device-group`, `protected-memory`, `sparse-resources`, `drm-format-modifiers` | `cmdexec` fences/semaphores (W2), VM/sparse (W5), modifiers (W9) | |
+| `geometry`, `tessellation`, `multiview`, `mesh-shader`, `fragment-shading-rate`, `fragment-shader-interlock`, `fragment-shading-barycentric`, `dgc` | W8 engines | |
+| `ray-query`, `ray-tracing-pipeline` | W7 ray engine | |
+| `cooperative-vector`, `compute.cooperative_matrix` | W6 MatHelper (§8) | |
+| `wsi` | W9 virtio-pci + scanout/dma-buf | x86-64 first |
+| `video`, `tensor`, `data-graph`, `image-processing` | none | optional features, `NotSupported` by truthful absence |
+
+### 13.3 Run contract and result semantics
+
+Every recorded run uses exactly the README's mandatory flags — `--deqp-caselist-file=…`
+`--deqp-log-images=disable` `--deqp-log-shader-sources=disable` — plus
+`--deqp-vk-device-id=<N>` (the guest enumerates llvmpipe as well; the drive script derives N
+from `vulkaninfo` and asserts the device name), optionally `--deqp-fraction=I,N` (N ≤ 16)
+with `--deqp-fraction-mandatory-caselist-file=…`, `--deqp-log-filename`,
+`--deqp-log-flush=disable`, `--deqp-shadercache=disable`. Nothing else. The CTS tree is
+built clean at the pin; `git status`/`git log` are captured beside the logs; the only
+permitted source changes are under `framework/platform` (none expected — the Linux
+no-WSI platform is standard) and upstream-merged test bugfixes. Internal runs are therefore
+submission-shaped from the first `TestResults.qpa`.
+
+`Pass` and `NotSupported` are the acceptable outcomes, and `NotSupported` is honest only
+when the required feature/extension/format is truthfully absent from the generated profile
+(`vn_device_profile.toml` → `vn_pkg`): advertising a capability pulls its tests into the
+obligation set. `QualityWarning` is tracked and reviewed. `Fail`, `Crash`, `Timeout`,
+`InternalError`, `ResourceError` are defects to be classified (device / transport / guest
+environment), never re-labelled. We write no waivers, patch no tests, and never run a
+caselist that silently drops a must-pass group — a group we cannot run yet is `not-run`.
+
+### 13.4 Harness composition (extends the existing guest gate; no parallel system)
+
+1. **Build once per pin.** `verif/tb/apu/bridge/guest/cts/` builds `deqp-vk` from
+   `specs/VK-GL-CTS` inside the pinned stock riscv64 guest (`external/fetch_sources.py`
+   fetches the pinned glslang / SPIRV-Tools / SPIRV-Headers / Amber / … revisions — a
+   network step whose results are hashed); the binary + data tree is cached as a tarball
+   keyed by `{CTS commit, guest image sha256, guest toolchain}` under `.cache/` and on the
+   remote `apu-qemu-*` machine. RTL-only changes never rebuild it.
+2. **Run per caselist.** `drive_guest.py` takes a caselist (a must-pass subset for an
+   increment, or a fraction), selects the Venus device id, runs with the contract flags and
+   pulls `TestResults.qpa` back as evidence. Chunks are sized to the RTL throughput so one
+   boot carries many tests; independent chunks/fractions run as parallel bridge+QEMU pairs
+   within the measured remote budget (this is where "aggregated opportunistic testing"
+   becomes concrete).
+3. **Ledger.** `corev_apu/apu/tools/cts_ledger.py` parses `.qpa` into `cts-results.json`
+   (per test: result, group, duration, leaf tag, CTS commit, `deqp-vk` sha256, profile hash,
+   Mesa/kernel versions) and renders `architecture/uncore/apu-cts-ledger.md` — generated,
+   never hand-edited — with per-group counts of pass / not-supported / quality-warning /
+   fail / crash / timeout / not-run, the owner from 13.2 and the last evidence tag.
+4. **Per-increment rule.** Every G/W increment names its CTS caselist in its brief and
+   reports the before/after ledger delta; `vkcmp` llvmpipe scenes remain for pixel-diff
+   forensics only.
+
+### 13.5 Gate ladder (caselists from the pin's `vk-default/`)
+
+| Gate | Entry | Caselists | Exit |
+|---|---|---|---|
+| CTS-0 | now | `deqp-vk` built at the pin in the guest; `info.*`, `api.smoke.*`, `api.device_init.*`, `api.object_management.single.*` | first submission-shaped `.qpa` on Venus→RTL, every outcome classified |
+| CTS-1 | G3a + G3b | `api.*` (object management, command buffers, buffer/image requirements, copy_and_blit core, descriptor set, fill/update buffer), `memory.*`, `compute.basic.*`, `compute.builtin_var.*`, `ubo.*`, `ssbo.*`, `binding_model.*` | W2/W3 acceptance without a self-authored oracle |
+| CTS-2 | G3c + G3d | `pipeline.monolithic.{blend,depth,stencil,input_assembly,vertex_input,sampler,image,image_view,push_constant,spec_constant,timestamp,render_to_image,framebuffer_attachment,multisample}`, `draw.*`, `rasterization.*`, `clipping.*`, `renderpasses.*`, `fragment_operations.*`, `texture.*`, `image.*`, `query_pool.*`, `dynamic_state.*`, `glsl.*` | W4 acceptance; Zink's minimum list becomes satisfiable |
+| CTS-3 | W3 scalability + W5 | `subgroups.*`, `reconvergence.*`, `memory_model.*`, `robustness.*`, `descriptor_indexing.*`, `synchronization*.*`, `sparse_resources.*`, `spirv_assembly.*`, `graphicsfuzz.*` | shader/memory semantics closed under concurrency |
+| CTS-4 | W6–W8 | `ray_query.*`, `ray_tracing_pipeline.*`, `mesh_shader.*`, `fragment_shading_rate.*`, `fragment_shader_interlock.*`, `fragment_shading_barycentric.*`, `dgc.*`, `geometry.*`, `tessellation.*`, `multiview.*`, `compute.cooperative_matrix.*`, `cooperative_vector.*` | every requested advanced feature stock-visible and CTS-clean |
+| CTS-5 | W9/W10 | `wsi.*` on x86-64 virtio-pci; the complete `vk-default.txt` in ≤ 16 fractions with the mandatory per-fraction tests, on the release profile, with `waivers.xml` | the internal full pass that precedes any Khronos submission — not a conformance claim by itself |
+
+Status 2026-10-14: `specs/VK-GL-CTS` registration in progress; CTS-0 not started; no CTS
+result of any kind exists yet for this device.

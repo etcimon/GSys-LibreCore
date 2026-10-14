@@ -161,3 +161,8 @@
 	path = tools/yosys
 	url = https://github.com/etcimon/yosys.git
 	branch = g6lc
+[submodule "specs/VK-GL-CTS"]
+	path = specs/VK-GL-CTS
+	url = https://github.com/KhronosGroup/VK-GL-CTS.git
+	update = none
+	shallow = true

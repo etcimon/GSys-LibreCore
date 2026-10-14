@@ -23,6 +23,37 @@ and catalog below retain historical observations, not today's reachability or ve
 - G0/A5 is retained through stock Zink/Venus after Zink's own requirements are met;
   G1 common surface, G2 present, CTS, UE/CS2 and physical qualification remain distinct.
 
+## Current continuation (2026-10-14) — graphics pipeline state and the CTS oracle
+
+- **Landed (milestone G2, commit `11131ebbe`):** VS/FS as ShaderCore waves over fixed-stride
+  records, `g6lc_apu_rast` (clipping, cull, scissor, top-left scan, perspective-correct
+  varyings, 2×2 quads with helper lanes, early-Z on D32/D16, up to four UNORM/sRGB colour
+  attachments with blend/write masks, indexed/instanced draws, fans), derivatives and
+  implicit-LOD trilinear sampling. Stock Mesa Venus on the RTL matches the guest's llvmpipe
+  within 1 LSB on eight scenes (`G6LC_VKCMP_PASS scenes=8`, pinned leaves
+  `apu-leaf-20261013T110427` 27/27 + `…T133000` both guest arms). Smoke/milestone evidence
+  only.
+- **Remaining, in execution order** (`apu-vulkan-engine.md` §13 and the plan's gate ladder):
+  G3a shader ISA for real programs (functions, discard, FragDepth/late-Z, atomics, bit/pack
+  ops → SFU transcendentals, shadow/proj/gather/query-LOD sampling); G3b residency
+  virtualization (8 module slots / 16 command buffers / 4 sets become caches, not limits);
+  G3c mandatory fixed function (points/lines, primitive restart, multi-batch strips, stencil,
+  depth bias, input attachments/subpasses, secondary command buffers, indirect draw,
+  clear/blit/resolve, occlusion/timestamp queries, MSAA 4×); G3d sampler generality
+  (cube/3D, compare, gather, BC1–7); then the measured throughput redesign (the rast is a
+  one-op-in-flight micro-sequencer with a single `Enable` knob), Vulkan 1.3/1.4 feature
+  delta, WSI/virtio-pci.
+- **Acceptance oracle is now the Khronos Vulkan CTS**, pinned as `specs/VK-GL-CTS`
+  (`vulkan-cts-1.4.6.2`, `f6a29701…`): must-pass groups under
+  `external/vulkancts/mustpass/main/vk-default/` map to engines in
+  `apu-vulkan-engine.md` §13.2; gates CTS-0 (`info`/`api.smoke` on Venus→RTL) → CTS-5
+  (complete `vk-default.txt` on the release profile). Zink's documented minimum (GL 2.1
+  needs `logicOp`, `fillModeNonSolid`, `alphaToOne`, `shaderClipDistance`, maintenance1/5,
+  create_renderpass2, imageless_framebuffer, timeline_semaphore, custom border colours,
+  provoking vertex, all six `VK_EXT_line_rasterization` modes, swapchain_mutable_format,
+  border_color_swizzle, descriptor_update_template, scalar block layout) places G0/A5 behind
+  CTS-2, not before it. No CTS result exists yet for this device.
+
 ## Historical consolidation snapshot (2026-10-01)
 
 This review supersedes historical ownership labels and the old single-scene-only

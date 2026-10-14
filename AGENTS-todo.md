@@ -265,6 +265,40 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
   unproven in general); the virtio-mmio reset-ack watchdog is a fixed 1,023 cycles; the
   `G6LC_APU_DBG_LOST` `$display` taps in vgctl/vnfront are `ifdef`-gated rather than
   `translate_off`-fenced. Smoke/milestone evidence only — not CTS, not conformance.
+- [~] G3a-i — real-content shader control flow and fragment semantics (functions
+  `OpFunctionCall`/`OpReturnValue`, discard/demote, FragDepth + late-Z via FS-out slot 8,
+  32-bit atomics, bit/pack/integer ops, `vkcmp` scene 8). In progress 2026-10-13/14: the
+  full ShaderWave corpus is green locally (`cases=342 checks=48108 maxulp=1 oum=0`) after
+  two defects in the new determinant/inverse micro-program engine were root-caused (case
+  label for `cols=4` matrices, DIV decoded as SQRT); shmod/rast/vgsys gates, 5.008 lint,
+  synth screens and the local `scenes=9` guest run are still owed before review.
+- [ ] **CTS track (2026-10-14) — the Khronos Vulkan CTS becomes the acceptance oracle.**
+  Source of record `specs/VK-GL-CTS` (lazy, shallow, `update = none`) pinned to
+  `vulkan-cts-1.4.6.2` = `f6a29701220f34dd1407513bfe80d74ca7b392ce`; must-pass index
+  `external/vulkancts/mustpass/main/vk-default.txt` → `vk-default/<group>.txt`, modules under
+  `external/vulkancts/modules/vulkan/<module>/`, run/submission contract in
+  `external/vulkancts/README.md`. Design: `architecture/uncore/apu-vulkan-engine.md` §13
+  (group → engine map, run contract, result semantics, harness, gate ladder); plan
+  `plan-96c6986262437fe2.md` "Conformance oracle" (group → workstream matrix, gates
+  CTS-0…CTS-5, per-increment caselist rule).
+  - [x] Registration (2026-10-14): `.gitmodules` section (`update = none`, `shallow =
+    true`) + gitlink `160000 f6a29701…`; `describe --tags --exact-match` =
+    `vulkan-cts-1.4.6.2`, child tree clean, ordinary `submodule update` skips it; 1.7 GB
+    shallow checkout; `mustpass/main/vk-default.txt` sha256
+    `b689703bdc65a04764db3b9a8f6fe872b3fe94d0df68d78f6da6e5a06cfa9ed4`, 98 caselist paths,
+    ≈ 3.25 M test-case lines across `vk-default/**/*.txt` (`wsi.txt` 35,481, `ycbcr.txt`
+    62,333 alone). `fetch_sources.py` not run; nothing built.
+  - [ ] CTS-0: `verif/tb/apu/bridge/guest/cts/` builds `deqp-vk` at the pin inside the
+    stock riscv64 guest (one-time per pin; `fetch_sources.py` revisions hashed; tarball
+    cached by `{CTS commit, image sha256, toolchain}`); `drive_guest.py` runs
+    `dEQP-VK.info.*`, `api.smoke.*`, `api.device_init.*`, `api.object_management.single.*`
+    with the mandatory flags and the Venus `--deqp-vk-device-id`; first `TestResults.qpa`
+    retained; `corev_apu/apu/tools/cts_ledger.py` renders the generated
+    `architecture/uncore/apu-cts-ledger.md`. Every outcome classified; no waivers, no test
+    patches.
+  - [ ] CTS-1 (after G3a + G3b), CTS-2 (after G3c + G3d), CTS-3, CTS-4, CTS-5 per the
+    ladder; each G/W increment from G3a-ii on names its caselist and reports the ledger
+    delta. `vkcmp`/llvmpipe scenes stay as pixel-diff forensics only.
 
 ## APU stock-runtime reference consolidation (2026-10-01)
 
