@@ -1577,6 +1577,35 @@ prerequisite for this work under the existing dual license. No licensing policy 
   ≈ 1 h 45 min wall with RVFI tracing on (the detached launcher leaves
   `results.json` at `incomplete`; the verdict is `trial/run.log`, as for the
   T21t runs).
+- [ ] **T33 — the T32 residual: a partially covered younger load parked in
+  `WAIT_PAGE_OFFSET` on a speculative store held the load unit against the
+  head load; the load unit now hands it back (2026-10-14).** On the T32
+  model Linux stopped again at 78–80 M cycles right after `SLUB:`
+  (`ret` flat at 69,722,144; census `notissued ld` +16 M cycles — the T32
+  signature). Stage 49 (`ooo_partial_forward_no_lu_hold`: late-address head
+  load, younger `sw` to the low word of a slot, youngest `ld` of the whole
+  slot, bare mode) reproduces it: **2 M-cycle deadlock, exit 126** on
+  `ooocoh-t32-ooo-pa-pgo-build`; `+ld_trace` shows LU `st=3` holding the
+  youngest load (tid 11) with the head load (tid 7, `issued=1`) at the LU
+  input. Fix: `store_buffer.sv` exports `page_offset_spec_only_o` (live
+  match from the speculative queue only, no committed entry in the lane,
+  D$ wbuffer empty — the sticky flags re-arm from the live match itself,
+  so they cannot serve as the drain indicator; the first cut used them and
+  never fired); `load_unit.sv` counts the WAIT_PAGE_OFFSET dwell and at 64
+  cycles with spec-only pops the load and raises `lu_replay_o`/`id`; the
+  scoreboard marks it `cancelled+replay+valid` exactly like an LSQ
+  `mem_violation`, so commit flushes and refetches it from its PC once the
+  store has committed. OoO-only; plumbed LSU → ex_stage → cva6 →
+  issue_stage; TBs tie the ports. **Verified on
+  `ooocoh-t33-ooo-replay2-pgo-build`:** stage 49 **pass Spike-exact 53/53 in
+  1,007 cycles**, stages 47/48 unchanged, frozen battery (s11 + m04/m20/
+  m32–m37 + ilp/dep) Spike-exact and qualified, s11 10,969 cycles. L1
+  relaunched on it (`linux-boot-l1ooo-ooocoh-t33-ooo-replay2-pgo-build`);
+  the server packages rebuild from HEAD with T28–T33 and the TB preload
+  fix (`ooocoh-t33-server1-final-pgo-build`, `ooocoh-t33-server-final-mt4-build`).
+  Also closed on the way: the trace-model segfault is a stack overflow in
+  the unsplit `eval_initial` (`ulimit -s unlimited`, guide §9.9). Commit
+  `e9eb21737`.
 - [ ] **T32 — no store-to-load forwarding under translation (PA store key vs
   VA load key) → a younger load parked in `WAIT_PAGE_OFFSET` on a speculative
   store deadlocked the head load (2026-10-14).** With T28–T31 the kernel

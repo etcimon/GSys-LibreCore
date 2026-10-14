@@ -844,6 +844,19 @@ a stack slot and a youngest load of the slot — the load must forward from the 
 1,100 cycles). Both shapes came straight from the Linux boot (`printf_spec` bitfields,
 `sched_clock_noinstr`'s prologue/epilogue pair).
 
+## Load-unit liveness under a speculative store match (2026-10-14, T33)
+
+`ooo_mem_min.S` stage 49 is registered as `ooo_partial_forward_no_lu_hold`
+(`testlist_ooo_l3.yaml`). Spec anchor: Part I `#sec:rvwmo` (progress — every instruction
+eventually retires; the memory model allows a load to be re-executed as long as the value it
+retires with respects the load value axiom). Shape: a late-address head load, a younger word
+store into the low half of a stack slot, and a youngest doubleword load of that slot; the last
+load cannot be forwarded (partial coverage) and parks on a store that cannot commit before
+the head retires. Pre-fix the load unit was held and the core deadlocked (2 M-cycle cap, exit
+126); post-fix the load unit hands the parked load back after a 64-cycle dwell and the
+scoreboard refetches it at commit — pass Spike-exact 53/53 in 1,007 cycles. Stage 48 (full
+coverage, translation) must still pass by forwarding, not by replay.
+
 ## Predicted-taken branch with a virtual target (2026-10-14, T29)
 
 `ooo_mem_min.S` stage46 is registered as `ooo_jal_predicted_taken_virtual_target`
