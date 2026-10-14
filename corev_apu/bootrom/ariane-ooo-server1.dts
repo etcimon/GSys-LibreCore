@@ -1,0 +1,150 @@
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+// Copyright (c) 2026 Etienne Cimon
+//
+// OoO server DTS for g6lc64_ooo_server1_config_pkg (NrCores=1, NrHarts=2) -- T27 Linux L2/L3 envelope.
+//
+// Topology: 1 physical core, 2 SMT threads = 2 logical harts.
+// CLINT/PLIC scale to all harts; PLIC target count must cover M+S per hart.
+//
+// Validate: .\build-platform\scripts\validate-cva6-dts.ps1
+//           bash verif/regress/smt-linux-boot-path.sh
+
+/dts-v1/;
+
+/ {
+  #address-cells = <2>;
+  #size-cells = <2>;
+  compatible = "eth,ariane-bare-dev";
+  model = "eth,ariane-ooo-server";
+
+  chosen {
+    stdout-path = "/soc/uart@10000000:115200";
+    bootargs = "console=ttyS0,115200 earlycon=uart8250,mmio,0x10000000,115200n8 maxcpus=2 root=/dev/ram rw";
+  };
+
+  cpus {
+    #address-cells = <1>;
+    #size-cells = <0>;
+    timebase-frequency = <32768>;
+
+    CPU0: cpu@0 {
+      device_type = "cpu";
+      compatible = "riscv";
+      reg = <0>;
+      status = "okay";
+      clock-frequency = <50000000>;
+      riscv,isa = "rv64imafdc_h_zba_zbb_zbs_zicbom_zicboz_zacas_zicond_zcb_zicsr_zifencei_zicntr_zihpm_zkn_sstc_sscofpmf_zihintpause_svpbmt_zawrs";
+      riscv,isa-base = "rv64i";
+      riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "h", "b", "zicntr", "zicsr", "zifencei", "zihpm", "zba", "zbb", "zbs", "zcb", "zicond", "zicbom", "zicboz", "zicbop", "zacas", "zkn", "sstc", "sscofpmf", "zihintpause", "svpbmt", "zawrs";
+      mmu-type = "riscv,sv39";
+      tlb-split;
+      riscv,cboz-block-size = <64>;
+      riscv,cbom-block-size = <64>;
+      i-cache-block-size = <16>;
+      i-cache-size = <16384>;
+      d-cache-block-size = <16>;
+      d-cache-size = <32768>;
+
+      CPU0_intc: interrupt-controller {
+        #interrupt-cells = <1>;
+        interrupt-controller;
+        compatible = "riscv,cpu-intc";
+      };
+    };
+
+    CPU1: cpu@1 {
+      device_type = "cpu";
+      compatible = "riscv";
+      reg = <1>;
+      status = "okay";
+      clock-frequency = <50000000>;
+      riscv,isa = "rv64imafdc_h_zba_zbb_zbs_zicbom_zicboz_zacas_zicond_zcb_zicsr_zifencei_zicntr_zihpm_zkn_sstc_sscofpmf_zihintpause_svpbmt_zawrs";
+      riscv,isa-base = "rv64i";
+      riscv,isa-extensions = "i", "m", "a", "f", "d", "c", "h", "b", "zicntr", "zicsr", "zifencei", "zihpm", "zba", "zbb", "zbs", "zcb", "zicond", "zicbom", "zicboz", "zicbop", "zacas", "zkn", "sstc", "sscofpmf", "zihintpause", "svpbmt", "zawrs";
+      mmu-type = "riscv,sv39";
+      tlb-split;
+      riscv,cboz-block-size = <64>;
+      riscv,cbom-block-size = <64>;
+      i-cache-block-size = <16>;
+      i-cache-size = <16384>;
+      d-cache-block-size = <16>;
+      d-cache-size = <32768>;
+
+      CPU1_intc: interrupt-controller {
+        #interrupt-cells = <1>;
+        interrupt-controller;
+        compatible = "riscv,cpu-intc";
+      };
+    };
+
+
+    cpu-map {
+      cluster0 {
+        core0 {
+          thread0 {
+            cpu = <&CPU0>;
+          };
+          thread1 {
+            cpu = <&CPU1>;
+          };
+        };
+      };
+    };
+  };
+
+  memory@80000000 {
+    device_type = "memory";
+    reg = <0x0 0x80000000 0x0 0x10000000>;
+  };
+
+  soc {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    compatible = "simple-bus";
+    ranges;
+
+    // 2 harts × (MSIP=3, MTIP=7)
+    clint@2000000 {
+      compatible = "sifive,clint0", "riscv,clint0";
+      interrupts-extended =
+        <&CPU0_intc 3>, <&CPU0_intc 7>,
+        <&CPU1_intc 3>, <&CPU1_intc 7>;
+      reg = <0x0 0x2000000 0x0 0xc0000>;
+    };
+
+    // 2 harts × (M-ext=11, S-ext=9) — 4 PLIC contexts
+    PLIC0: interrupt-controller@c000000 {
+      compatible = "sifive,plic-1.0.0", "riscv,plic0";
+      #address-cells = <0>;
+      #interrupt-cells = <1>;
+      interrupt-controller;
+      interrupts-extended =
+        <&CPU0_intc 11>, <&CPU0_intc 9>,
+        <&CPU1_intc 11>, <&CPU1_intc 9>;
+      reg = <0x0 0xc000000 0x0 0x4000000>;
+      riscv,ndev = <30>;
+    };
+
+    uart@10000000 {
+      compatible = "ns16550a";
+      reg = <0x0 0x10000000 0x0 0x1000>;
+      clock-frequency = <50000000>;
+      current-speed = <115200>;
+      interrupt-parent = <&PLIC0>;
+      interrupts = <1>;
+      reg-shift = <2>;
+      reg-io-width = <4>;
+    };
+
+    // LibreCore APU guest window. status=disabled until testharness
+    // instantiates g6lc_apu_soc. PLIC source 9; firmware control at
+    // 0x40002000 is omitted so Linux cannot map it.
+    gpu@40001000 {
+      compatible = "virtio,mmio";
+      reg = <0x0 0x40001000 0x0 0x1000>;
+      interrupt-parent = <&PLIC0>;
+      interrupts = <9>;
+      status = "disabled";
+    };
+  };
+};

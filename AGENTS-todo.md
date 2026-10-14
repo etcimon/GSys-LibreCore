@@ -1550,8 +1550,17 @@ prerequisite for this work under the existing dual license. No licensing policy 
   are worth ≈ 0–5 % (52.0 k → 52.7 k → 54.4 k cycles/s), not 5×. The 1-core
   server-class package (≈ 56 k cycles/s) is the path to L2/L3 within a day;
   `--threads 8` (`ooocoh-t28-server-mt8-pgo-build`) is the one 4-core lever
-  being measured. Owed: L1 verdict, the Spike/HTIF sanity (still silent),
-  L1b `maxcpus=8`, L2 busybox init, the 1-core server package.
+  being measured. **1-core server package landed, lint-clean, not yet
+  built or booted:** `core/include/g6lc64_ooo_server1_config_pkg.sv` (the
+  server package with `NrCores: 1`; hub/snoop/inval fold to identity) and
+  `corev_apu/bootrom/ariane-ooo-server1.dts` (2 cpus, 2-hart CLINT/PLIC
+  contexts, `maxcpus=2`); `--lint-only` on the full model: 0 errors, the
+  server's 46 warnings. Next: `launch-t21s.sh … g6lc64_ooo_server1 … T16_VTHREADS=1`
+  (PGO default), the ooo probe battery on it, then the L1 payload rebuilt with
+  `ariane-ooo-server1.dts` (`q-linux-payload.sh` reads the server DTS — add a
+  `DTS=` knob) for the L2/L3 runs at the single-core rate. Owed: L1 verdict
+  on `…-build4`, the Spike/HTIF sanity (still silent), L1b `maxcpus=8`, L2
+  busybox init, L3 trimmed procd.
 - [~] **T26 — OoO core + L2/L3 bottleneck map, measured; the aggregated
   update plan (2026-10-13).** Guide of record:
   `agents/guides/AGENTS-ooo-memory-performance.md`. Instruments landed
