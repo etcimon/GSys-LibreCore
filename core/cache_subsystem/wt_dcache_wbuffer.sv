@@ -216,6 +216,17 @@ module wt_dcache_wbuffer
   logic [CVA6Cfg.DCACHE_TAG_WIDTH-1:0] rd_tag_d, rd_tag_q;
   logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] rd_hit_oh_d, rd_hit_oh_q;
   logic check_en_d, check_en_q, check_en_q1;
+  // T34: the word a tag check was issued for, carried beside check_ptr. A
+  // slot can be ACKed, freed and re-allocated to a new store inside the two
+  // cycles the check takes (write-through ACK in 1-2 cycles); without this
+  // the result (checked/hit_oh of the OLD word's line) landed on the NEW
+  // occupant, whose ACK-time write then went to another way or was skipped:
+  // the real line stayed stale and a line in the wrong way took the bytes
+  // (Linux memblock: sd 0x80040000 at c=6,704,293, ld 129 cycles later read
+  // 0x80000000; prof-t34fst). A result is applied only to the same word.
+  logic [$bits(wbuffer_q[0].wtag)-1:0] check_wtag_d, check_wtag_q, check_wtag_q1;
+  logic check_same_q1;
+  assign check_same_q1 = check_en_q1 && (wbuffer_q[check_ptr_q1].wtag == check_wtag_q1);
   logic full, dirty_rd_en, rdy;
   logic rtrn_empty, evict, evict_base;
   logic [CVA6Cfg.WtDcacheWbufDepth-1:0] ni_pending_d, ni_pending_q;
@@ -846,7 +857,7 @@ module wt_dcache_wbuffer
                  !tx_stat_q[rtrn_id].nc && !rtrn_inv && tx_stat_q[rtrn_id].vld &&
                  !rtrn_empty &&
                  !wbuffer_q[rtrn_ptr].checked &&
-                 !(check_en_q1 && (check_ptr_q1 == rtrn_ptr)) &&
+                 !(check_same_q1 && (check_ptr_q1 == rtrn_ptr)) &&
                  !(VoidKeepEn && !wbuffer_d[rtrn_ptr].checked &&
                    (wr_paddr[31:12] == VoidKeepTag)) &&
                  fixup_full && !fixup_match;
@@ -891,7 +902,7 @@ module wt_dcache_wbuffer
           wr_data_o     = wbuffer_q[rtrn_ptr].data;
           wr_user_o     = wbuffer_q[rtrn_ptr].user;
           wr_req_o      = wbuffer_q[rtrn_ptr].hit_oh;
-        end else if (!rtrn_inv && !check_wr && check_en_q1 && (check_ptr_q1 == rtrn_ptr) &&
+        end else if (!rtrn_inv && !check_wr && check_same_q1 && (check_ptr_q1 == rtrn_ptr) &&
                      (|ack_be) && (|rd_hit_oh_q)) begin
           ack_wr_sel    = 1'b1;
           ack_wr_active = 1'b1;
@@ -1000,6 +1011,7 @@ module wt_dcache_wbuffer
   assign rd_idx_o     = (|tocheck) ? rd_paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] : fixup_rd_idx;
   assign rd_off_o     = (|tocheck) ? rd_paddr[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0] : fixup_rd_off;
   assign check_en_d   = (|tocheck) & rd_ack_i;
+  assign check_wtag_d = wbuffer_check_mux.wtag;
 
   // cache update port
   assign rtrn_ptr = tx_stat_q[rtrn_id].ptr;
@@ -1012,7 +1024,7 @@ module wt_dcache_wbuffer
   assign wr_paddr_check = {
     {CVA6Cfg.XLEN_ALIGN_BYTES{1'b0}}, wbuffer_q[check_ptr_q1].wtag << CVA6Cfg.XLEN_ALIGN_BYTES
   };
-  assign check_wr = check_en_q1 && void_keep_q[check_ptr_q1] &&
+  assign check_wr = check_same_q1 && void_keep_q[check_ptr_q1] &&
                     (|wbuffer_q[check_ptr_q1].valid) && (|rd_hit_oh_q);
   // Cache word write port is driven by the priority mux in p_tx_stat.
 
@@ -1148,7 +1160,7 @@ module wt_dcache_wbuffer
     fixup_user_push     = '0;
 
     // TAG lookup returns, mark corresponding word
-    if (check_en_q1) begin
+    if (check_same_q1) begin
       if (|wbuffer_q[check_ptr_q1].valid) begin
         wbuffer_d[check_ptr_q1].checked = 1'b1;
         wbuffer_d[check_ptr_q1].hit_oh  = rd_hit_oh_q;
@@ -1190,7 +1202,7 @@ module wt_dcache_wbuffer
                     !tx_stat_q[rtrn_id].nc && !rtrn_inv && tx_stat_q[rtrn_id].vld && (|ack_be) &&
                     (fixup_match ||
                      (!(wbuffer_q[rtrn_ptr].checked && (|wbuffer_q[rtrn_ptr].hit_oh)) &&
-                      !(check_en_q1 && (check_ptr_q1 == rtrn_ptr)) &&
+                      !(check_same_q1 && (check_ptr_q1 == rtrn_ptr)) &&
                       !(VoidKeepEn && !wbuffer_d[rtrn_ptr].checked &&
                         (wr_paddr[31:12] == VoidKeepTag)))) &&
                     (!fixup_full || fixup_match);
@@ -1288,6 +1300,8 @@ module wt_dcache_wbuffer
       check_ptr_q1 <= '0;
       check_en_q   <= '0;
       check_en_q1  <= '0;
+      check_wtag_q <= '0;
+      check_wtag_q1 <= '0;
       rd_tag_q     <= '0;
       rd_hit_oh_q  <= '0;
       wr_cl_vld_q  <= '0;
@@ -1302,6 +1316,8 @@ module wt_dcache_wbuffer
       check_ptr_q1 <= check_ptr_q;
       check_en_q   <= check_en_d;
       check_en_q1  <= check_en_q;
+      check_wtag_q <= check_wtag_d;
+      check_wtag_q1 <= check_wtag_q;
       rd_tag_q     <= rd_tag_d;
       rd_hit_oh_q  <= rd_hit_oh_d;
       wr_cl_vld_q  <= wr_cl_vld_d;

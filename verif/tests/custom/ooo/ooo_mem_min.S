@@ -1414,6 +1414,68 @@ main:
   .text
 .Lt34_done:
 
+#elif STAGE == 51
+  # T34: WT wbuffer tag-check pointer reuse. A write-through ACK can free a
+  # wbuffer slot and a new store re-allocate it while the slot's tag check
+  # (two cycles) is still in flight; the result (checked/hit_oh of the OLD
+  # word's line) must not land on the new occupant. Sweep: pairs of stores to
+  # two distinct cached lines with 0..7 cycles between them, both lines warm
+  # in the cache, then read both back through the cache (no fence); 256 pairs.
+  la   s2, .Lt34b_a
+  la   s3, .Lt34b_b
+  # warm both regions (16 lines each) into the L1
+  li   t0, 0
+.Lt34b_warm:
+  slli t1, t0, 6
+  add  t2, s2, t1
+  ld   zero, 0(t2)
+  add  t2, s3, t1
+  ld   zero, 0(t2)
+  addi t0, t0, 1
+  li   t1, 16
+  bne  t0, t1, .Lt34b_warm
+  li   s4, 0
+  li   s5, 256
+.Lt34b_loop:
+  andi t0, s4, 0xf
+  slli t1, t0, 6                   # line k
+  add  t2, s2, t1
+  add  t3, s3, t1
+  andi t4, s4, 0x38                # 8-byte word within the line: (k>>3)&7
+  add  t2, t2, t4
+  add  t3, t3, t4
+  addi t5, s4, 0x100               # value A = 0x100+k
+  slli t6, s4, 8
+  addi t6, t6, 0x55                # value B = k<<8 | 0x55
+  sd   t5, 0(t2)                   # store A
+  andi a0, s4, 7                   # 0..7 filler ops between the stores
+  beqz a0, .Lt34b_sb
+.Lt34b_fill:
+  addi a1, a1, 1
+  addi a0, a0, -1
+  bnez a0, .Lt34b_fill
+.Lt34b_sb:
+  sd   t6, 0(t3)                   # store B (re-uses the freed slot if the ACK was fast)
+  ld   a2, 0(t3)
+  ld   a3, 0(t2)
+#ifdef MEM_ORDER_NEGATIVE
+  xori t6, t6, 1
+#endif
+  bne  a2, t6, fail_t2
+  bne  a3, t5, fail_t2
+  addi s4, s4, 1
+  bne  s4, s5, .Lt34b_loop
+  j    .Lt34b_done
+  .section .data
+  .balign 64
+.Lt34b_a:
+  .space 1024
+  .balign 64
+.Lt34b_b:
+  .space 1024
+  .text
+.Lt34b_done:
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".

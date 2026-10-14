@@ -291,6 +291,13 @@ testlist:
     gcc_opts: "-DSTAGE=50 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
     description: "64 doubleword stores over 8 lines, each interleaved with three loads from another region (tag-port contention), read back without a fence: every word must be the stored value (T34 hunt; passes on both fixup depths — the Linux stale-value oopses need more than this shape)"
 
+  - test: ooo_wt_wbuffer_slot_reuse_sweep
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=51 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "256 store pairs to two warm lines with 0..7 cycles between them, read back through the cache: targets the WT wbuffer tag-check pointer-reuse race (T34). Passes on the unfixed model too -- the race needs the ACK to return inside the check's two cycles, which this sweep does not force; the program-order oracle over the Linux trace is the witness"
+
   - test: ooo_load_misaligned_shared_target
     iterations: 1
     <<: *common_test_config
