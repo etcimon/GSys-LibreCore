@@ -827,6 +827,23 @@ exit 126, the I4dp boot's shape; the fixed model passes both. Runs via
 `REVIEW_MC_DIRECTED_TOHOST_ADDR=auto` (the regions push `tohost` past `0x80001000`);
 masks `01` (2 harts), `11` (int2_l3, `-DMC_ICS_NHARTS=4`), `1111` (server, 8 harts).
 
+## Store-to-load forwarding: lane granularity and translation (2026-10-14, T31/T32)
+
+`ooo_mem_min.S` stages 47 and 48 are registered as `ooo_wide_load_over_narrow_stores` and
+`ooo_store_forward_through_translation` (`testlist_ooo_l3.yaml`). Spec anchors: Part I
+`#sec:rvwmo` / `#sec:memory-model` (a load returns the value of the latest store to each byte
+in program order — "load value axiom"), Part II `#sec:sv39` (data accesses are translated once
+`satp.MODE != Bare` or `mstatus.MPRV = 1`). Stage 47: a doubleword load over eight in-flight byte
+stores, then over a halfword and a word at +2/+4 of the same lane, then an older late-data `sd`
+under younger `sb`/`sh` — every byte must come from its youngest older store (pre-fix: byte-exact
+STQ matching missed the +2/+4 stores, exit 3, RTL 58 vs Spike 101; post-fix 101/101). Stage 48:
+`MPRV` data translation at an Sv39 alias with VA ≠ PA, a late-address head load, a younger store to
+a stack slot and a youngest load of the slot — the load must forward from the speculative store
+(pre-fix: the virtual STQ key never matched the physical store key, the load parked in
+`WAIT_PAGE_OFFSET` behind a store that could not commit, 2 M-cycle deadlock; post-fix 82/82 in
+1,100 cycles). Both shapes came straight from the Linux boot (`printf_spec` bitfields,
+`sched_clock_noinstr`'s prologue/epilogue pair).
+
 ## Predicted-taken branch with a virtual target (2026-10-14, T29)
 
 `ooo_mem_min.S` stage46 is registered as `ooo_jal_predicted_taken_virtual_target`
