@@ -1577,6 +1577,42 @@ prerequisite for this work under the existing dual license. No licensing policy 
   ≈ 1 h 45 min wall with RVFI tracing on (the detached launcher leaves
   `results.json` at `incomplete`; the verdict is `trial/run.log`, as for the
   T21t runs).
+- [ ] **T32 — no store-to-load forwarding under translation (PA store key vs
+  VA load key) → a younger load parked in `WAIT_PAGE_OFFSET` on a speculative
+  store deadlocked the head load (2026-10-14).** With T28–T31 the kernel
+  stopped retiring at 8.97 M instructions (`percpu:` printed; census
+  `notissued ld = 16.9 M cycles`). `+ld_trace` at cycle 12,000,000 of the
+  `l1ooo` payload: LU `st=3` (WAIT_PAGE_OFFSET) holding tid 29 = the
+  epilogue `ld ra,40(sp)` of `sched_clock_noinstr` with key
+  `0xffffff81203a78` (the **virtual** address, PLEN-truncated), SB head =
+  tid 23 `ld a4,24(s1)` (`0xffffffff80658ed6`) `issued=1` waiting at the LU
+  input. `load_unit.sv` fed `load_paddr_o = PLEN'(vaddr)` (R3a: the shared
+  MMU port's `dtlb_ppn` could belong to a store), so under Sv39 `pa_eq`
+  never matched the STQ's physical keys — **no forwarding at all with the
+  MMU on** — while the `[11:0]` interlock still matched, so every covered
+  stack RAW waited for the STQ to drain; here the matching store (prologue
+  `sd ra,40(sp)`) was speculative behind the unretired head load → the LU
+  never freed → deadlock. Fix: the key is the load's own translation —
+  `{dtlb_ppn_i, vaddr[11:0]}` sampled only in a cycle this unit drives
+  `translation_req_o` with a DTLB hit (then the port carries this load's
+  PPN), held in `load_pa_q` while the load stays at the LU head, cleared on
+  pop/flush; bare mode unchanged. **Stage 48 =
+  `ooo_store_forward_through_translation`** (MPRV data translation at an
+  Sv39 high alias, late-address head load, younger `sd` + youngest `ld` of
+  the slot): pre-fix **deadlock (2 M-cycle cap, exit 126)**; on
+  `ooocoh-t32-ooo-pa-pgo-build` **pass Spike-exact 82/82 in 1,100 cycles**;
+  stages 38/41/46/47 unchanged. Kernel probe on the fixed model: past
+  `percpu` to `Zone ranges: DMA32 [mem 0x80000000-0x8fffffff]`, 15.8 M
+  retired at ≈ 22 M cycles and still retiring (`linux-probe-l1ooo-trace`).
+  **L1/L3 relaunched on it** (`linux-boot-l1ooo-…` /
+  `linux-boot-l3ooo-…-ooocoh-t32-ooo-pa-pgo-build`). Owed: the frozen
+  battery on the T32 model for the exactness record; the server packages
+  need this fix too (rebuild after `ooocoh-t31-server*-final` finish, or
+  reuse them only for non-Linux work). Residual liveness hazard noted: a
+  younger load with *partial* coverage still parks in WAIT_PAGE_OFFSET and
+  can hold the LU against an older load — the IQ-side gate (do not issue a
+  load whose lane matches an older speculative store ahead of older loads)
+  or an LU replay is the structural fix.
 - [ ] **T31 — the STQ forward / page-offset interlock matched byte-exact; a
   load over younger narrow stores inside its lane read the stale line
   (2026-10-14).** With T28–T30 in, `g6lc64_ooo` boots OpenSBI and the kernel
