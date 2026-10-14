@@ -612,7 +612,12 @@ trigger, T32), one needs a 16 MiB+ payload (T30), one a specific write-through/A
 The directed stages now carry those preconditions. The residual liveness hazard noted under T32 (partial coverage) surfaced 60 M cycles later
 and is T33 (the load-unit replay). Each Linux model also held ≈ 28 GB of RSS until the TB's
 bulk preload was limited to the PHDR's real extent (7.6 GB after); the OOM killer had taken
-two L3 runs before that was understood.
+two L3 runs before that was understood. With T33 the kernel runs into the initcalls: timekeeping (`25.00 BogoMIPS (lpj=125000)` — the 12.5 MHz
+timebase), `printk: bootconsole [sbi0] disabled` (ttyS0 live), `futex`, `NET`, the unaligned-access
+probe, `SCSI`, `usbcore`, `PTP`, `EDAC` — ≈ 185 M instructions, 1.01 s guest at ≈ 260 M cycles — and
+then two stale/half-value oopses (T34: `cpuacct_charge` NULL `cgroups` in `rcu_sched`; a device_node
+pointer with its upper half zero in `of_irq_init`). The WT dcache fixup-queue depth (2 → 8) and the
+HPDCACHE server1 run are the discriminators in flight.
 
 ### S5 — SMT2 `RVH` (smt2 feature not present)
 
