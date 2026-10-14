@@ -73,8 +73,13 @@ package cva6_config_pkg;
   localparam CVA6ConfigMemTidWidth = 2;
 
   localparam CVA6ConfigWtDcacheWbufDepth = 8;
-  localparam CVA6ConfigWtDcacheFixupDepth = 0;
-  localparam CVA6ConfigWtDcacheFixupVoidKeepEn = 1'b1;
+  // T28 (2026-10-14): the SL-W post-ACK fixup queue is ON here as on smt2.
+  // With depth 0 the L1-stale class is live on this WT package: OpenSBI's FDT
+  // walk read a stack word 13 cycles after the store buffer handed its store
+  // to the dcache and got the line's previous content (fw_platform_init
+  // fail-wfi, Spike lockstep at retirement 6,537; prof-t28fst).
+  localparam CVA6ConfigWtDcacheFixupDepth = 2;
+  localparam CVA6ConfigWtDcacheFixupVoidKeepEn = 1'b0;
 
   localparam CVA6ConfigNrScoreboardEntries = 32;
 

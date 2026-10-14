@@ -1552,11 +1552,26 @@ prerequisite for this work under the existing dual license. No licensing policy 
   same with a mispredicted late branch and a wrong-path store between the
   store and the load. The trigger therefore needs the boot's context
   (`[ckpt] restores=266` in the window; the `jr a5` jump-table dispatch at
-  `0x800129e8`). Next: `--trace-fst` build of `g6lc64_ooo`, trace the
-  window around retirement 6,520–6,540 of `linux-payload-l1s1` (the T24
-  method), read the store buffer / forwarding state at the `lw`; then the
-  minimal stage and the fix. Until then Linux L1/L2/L3 runs stay on the
-  server packages (`l1r2` 4-core, `l1s1` server1 in flight).
+  `0x800129e8`). **Root cause from the FST (`prof-t28fst`, cycles 12,633–
+  12,650 of the `l1s1` payload on `ooocoh-t28-ooo-fst-build`): the SL-W
+  "D$ ACK-before-check" L1-stale class, live because `g6lc64_ooo` /
+  `g6lc64_ooo_int` carried `WtDcacheFixupDepth = 0`.** The store leaves
+  the store buffer at 12,637 (`SB.commit_status_cnt 1→0`); the WT wbuffer
+  allocates it (`dirty`, `tocheck`), issues the write-through
+  (`miss_req/ack` same cycle) and a tag read; the memory ACK returns at
+  12,641 (`miss_rtrn_vld`) **before** the tag check runs (12,643,
+  `check_en_q` with `rd_vld_bits=1`), the entry is retired without a
+  `wr_req` to the data array, and the `lw` at 12,649 hits the stale line
+  (`result_o = 0xfffffffffffffff5` at 12,650). `g6lc64_smt2` already ran
+  with the post-ACK fixup queue (`WtDcacheFixupDepth 2`, `VoidKeepEn 0`);
+  the two OoO WT packages now carry the same (the SL-W row's "never
+  propagated to the OoO packages, which could not reach simulation to
+  expose it" is closed by this). Verification owed on
+  `ooocoh-t28-ooo-slw-pgo-build` (building): the OpenSBI FDT walk past
+  `fw_platform_init`, the frozen probe battery (s11, m04/m20/m32–m42,
+  wprp) Spike-exact, then L1/L3 on `g6lc64_ooo` (`linux-payload-l1ooo` /
+  `-l3ooo`, `earlycon=sbi`). The HPDCACHE server packages were never
+  exposed (no WT wbuffer).
 - [~] **T27 — RTL OpenWrt (Linux 6.6.93) boot on `g6lc64_ooo_server`:
   budget measured, payload built, model of record building (2026-10-13).**
   Plan and numbers: `architecture/multi-threading/linux-boot-scale.md` S4.1.
