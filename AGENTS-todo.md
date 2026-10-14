@@ -1531,10 +1531,27 @@ prerequisite for this work under the existing dual license. No licensing policy 
   identical. **L1 boot launched** detached
   (`linux-boot-l1-ooocoh-t27-server-default-mt4-build3`, 1.5 G-cycle cap;
   `t21/q-linux-st.sh` for status; success = `G6LC_LINUX_SHELL` in the UART
-  text). Owed: the L1 verdict, the Spike/HTIF sanity (this Spike has no
-  ns16550; OpenSBI's HTIF driver needs the ELF `tohost`/`fromhost` via the
-  node's `reg`, still silent — unresolved), then `maxcpus=8` (L1b) and
-  busybox init (L2).
+  text). **L1 run 1 (2026-10-14):** OpenSBI took the first ≈ 33 M cycles,
+  the kernel reached `satp` (the `relocate_enable_mmu` stvec trap at
+  `0x80201050` is expected) at 33.61 M, then the sim-only
+  `load_unit.sv` `misaligned_entry_excepts` assertion stopped the run on the
+  kernel's unaligned-access probe: a misaligned load that misses the DTLB
+  after its grant is aborted and re-issued, and the property demanded the
+  exception in the next cycle (bare-metal shape). Property relaxed to accept
+  the translation abort (`misaligned_entry_no_data` still forbids data);
+  directed leaf owed; model `…-build4` rebuilding, L1 run 2 follows.
+  **Userland budget for L3** (S4.2, QEMU `-icount`): stock procd ≥ 10.9 G
+  busy and still burning after the prompt; with `hotplug.json` cut to
+  `makedev`, failsafe wait off and `rcS` trimmed to boot/system/sysctl/log/
+  ubus the login prompt is at **5.0 G**; preinit 1.1 G and a post-login
+  CPU burner (`urngd`) are the next cuts. **Spin re-base (guide §10.8):**
+  the §10.4–10.6 models were built without the split `.vlt` (hybrid 49,158);
+  on a split, PGO'd single core, `x86-64-v3` and the HEAD kernels/word guards
+  are worth ≈ 0–5 % (52.0 k → 52.7 k → 54.4 k cycles/s), not 5×. The 1-core
+  server-class package (≈ 56 k cycles/s) is the path to L2/L3 within a day;
+  `--threads 8` (`ooocoh-t28-server-mt8-pgo-build`) is the one 4-core lever
+  being measured. Owed: L1 verdict, the Spike/HTIF sanity (still silent),
+  L1b `maxcpus=8`, L2 busybox init, the 1-core server package.
 - [~] **T26 — OoO core + L2/L3 bottleneck map, measured; the aggregated
   update plan (2026-10-13).** Guide of record:
   `agents/guides/AGENTS-ooo-memory-performance.md`. Instruments landed

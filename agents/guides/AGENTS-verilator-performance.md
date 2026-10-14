@@ -1382,6 +1382,42 @@ AVX-512 default (Intel downclocking and no profiler support; opt-in via
 their word; folding across words would need the inverted dispatch of §10.1 item 3. The
 MT build path and the pinned-flavour recipe are unchanged.
 
+### 10.8 Re-base: the §10.4–10.6 models were built without the split `.vlt` (2026-10-14)
+
+The §10.6 ratios did not reappear on the server (`x86-64-v3` + PGO: 6,413/6,598 →
+6,837/6,870 cycles/s, +5 %, §7.4a/T27), so the single-core rows were re-measured in one
+session next to the T16-built models of the same compiler commit (`t21/q-spins-rebase.sh`,
+s11 ELF, 20 k/220 k-cycle subtraction, `--threads 1`; the first table on a quiet builder, the
+second at load ≈ 4–5 with two server builds running — best of two reps):
+
+| model | split `.vlt` in `__verFiles.dat` | hybrid class | PGO | cycles/s |
+|---|---|---:|---|---:|
+| §10 `ctl` (`453031b66` + working tree, baseline ISA) | **no** | 49,158 | no | 3,561 |
+| §10 `ctl-march` | no | 49,158 | no | 16,664 |
+| §10 `tw` (kernels + word guards + march) | no | 49,158 | no | 17,908 |
+| **T25 fork** (`453031b66`, split, baseline ISA) | yes | 10,253 | no | **28,940 / 29,303** |
+| **T25 fork + PGO** | yes | 10,253 | yes | **56,120 / 55,736** |
+| T28 `453031b66` + split + `x86-64-v3` + PGO | yes | 10,253 | yes | 52,669 (loaded host) |
+| T28 HEAD `f7fa71520` (`-hd1`) + split + `x86-64-v3` + PGO | yes | 5,975 | yes | 54,438 (loaded host) |
+
+Every §10 model has `split=0` in its `Variane_testharness__verFiles.dat` and the unsplit
+hybrid class (49,158 ≈ the pinned compiler's 47,285), although `remote_causal_ab.py` /
+`remote_simd_ab.py` set `SOFT_LADDER_BUILD_SPLIT_VLT=1`; their `SplitVar, Split packed
+variables 208` (vs 137 with the control file) says an automatic split ran instead. That is the
+regressed baseline behind the 874,598 Ir/cycle of §9.5 (vs 267,200 in §7.2 for the split fork)
+and the 3,561 cycles/s: the design ran with the 2.2 act passes per step of §4b. The ISA floor and
+the kernels mostly recovered that regression — the absolute best §10 row (17.9 k) is below the
+split no-PGO model of the same compiler (29 k) and 3× below the PGO one (56 k). On a correctly
+built, PGO'd single core, `x86-64-v3` and the HEAD compiler's kernels/word guards are worth
+**≈ 0–5 %** (52.0 k → 52.7 k → 54.4 k, within the loaded-host noise), the same order as the
+server's +5 %. The §10.4/10.5 Ir and I1 reductions are real for the unsplit model but should
+not be quoted as gains over the build of record until re-taken on a split build; §10.3's
+`x86-64-v3` default stands (free, exact), the 5.02× does not. The HEAD compiler's smaller hybrid
+class (5,975) is a scheduler improvement to keep once its HPDCACHE regression (T27 `nline`) is
+fixed. Methodological note for the next sweep: record `split`/`hybrid`/`--threads` from the Mdir
+in every A/B row, and let the spin script fail loudly when `Wall clock time passed` is not found
+(`spins.json` carried `cycles_per_s: 0` for every §10.6 row; the table was derived by hand).
+
 ## 11. The same question for Yosys (2026-10-13)
 
 ### 11.1 Profile first

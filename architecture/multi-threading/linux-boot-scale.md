@@ -480,6 +480,53 @@ under 8 harts) is L1b after L1.
 Spike has no built-in ns16550 device: DTS with `ucb,htif0`, `earlycon=sbi keep_bootcon`), the
 L1 run itself, then L1b/L2.
 
+#### S4.2 — First L1 run, the userland budget for L3, and the cycles/s levers that remain (2026-10-14)
+
+**L1 run 1** (`linux-boot-l1-ooocoh-t27-server-default-mt4-build3`, 6.5 k cycles/s): OpenSBI
+occupied the first **≈ 33 M cycles** (the same as the strict 8-hart boot — its FDT phases are a
+fixed cost Linux inherits), hart 2 (OpenSBI's lottery) then ran the kernel: `[mmu-ife]`/`[ptw-err]`
+at `0x80201050` with `cause=12` and a zero level-0 PTE is the **expected** `relocate_enable_mmu`
+trap (Linux writes `satp` with `stvec` at the virtual alias so the stale physical fetch faults
+into the virtual map), so the kernel reached virtual memory at 33.61 M cycles. 500 cycles later
+the run died on the sim-only `load_unit.sv` assertion `misaligned_entry_excepts` (core 1): the
+kernel's first misaligned loads (the `check_unaligned_access` probe) met a **DTLB miss after the
+grant** — the request is aborted (kill, no completion), the walk runs and the re-issued load
+delivers the exception; the property demanded the exception completion in the very next cycle,
+which is the bare-metal shape. The property now accepts the translation abort
+(`ABORT_TRANSACTION`/`_NI`/`WAIT_FLUSH` with a kill and no `valid_o`); `misaligned_entry_no_data`
+still forbids data retirement. Owed: a directed misaligned-load-under-TLB-miss leaf. Model
+rebuilt as `…-build4`; L1 run 2 follows it.
+
+**Userland budget under QEMU `-icount`** (`t21/q-qemu-trim.sh`; an overlay initrd on top of the
+built-in rootfs; busy = user+sys from `/proc/stat` at the login prompt):
+
+| variant | kernel → `/init` | `Console is alive` → `procd: - early -` | busy at prompt | after the prompt |
+|---|---:|---:|---:|---|
+| stock OpenWrt (procd, all `rc.d` services, coldplug) | 0.64 G | 4.16 G (coldplug: one `hotplug-call` shell per uevent) | ≥ 10.9 G | still burning (services, `urngd` jitter entropy) |
+| `hotplug.json` reduced to `makedev` rules, failsafe wait off | 0.64 G | 1.08 G | — | ≈ 13.6 G busy at the second sample: the full service set keeps running |
+| + `rcS` trimmed to boot/system/sysctl/log/ubus | 0.64 G | 1.08 G | **5.0 G** (login on ttyS0 reached) | +9 G in the next 10 host-seconds — a CPU-bound daemon (`urngd` is the suspect) |
+
+So "L3 = procd up with a login" is **≈ 5 G instructions with the trims above**, and the
+remaining 1.1 G preinit (`/lib/preinit` hooks, `mount_root`, `kmodloader`) and the post-login
+burners are the next cuts (drop `S00urngd`, `kmodloader` with no modules, the preinit hooks that
+only matter on flash). A fully trimmed procd boot of ≈ 2 G is plausible; busybox `init` (L2) is
+< 1 G. Against that: OpenSBI's 33 M cycles are fixed per boot, and at the measured 6.8 k cycles/s
+the 4-core server does 5 G instructions in ≈ 9 days — so L3 on the 4-core model needs the
+cycles/s levers below or the 1-core server-class configuration (same core, L2/L3, hub identity),
+which runs at the single-core rate (≈ 56 k cycles/s with PGO, §10.8): 5 G ≈ 1 day, 2 G ≈ 10 h.
+
+**Cycles/s levers, ordered by what is measured:** (1) the 1-core server package for L2/L3 (×8 vs
+the 4-core model, no simulator work); (2) workload trims above (×2–5 on the userland);
+(3) `--threads 8` on the 12-thread builder (never measured; `ooocoh-t28-server-mt8-pgo-build`
+building); (4) PGO training on a boot segment instead of the probe for the boot model (the
+T21 recipe; +?); (5) `-DVL_DEBUG` off for record runs (the Makefile hard-codes it; a
+`CXXFLAGS` `-U` loses to the later `-D`, so it needs a Makefile knob — unmeasured, §2.4 lists it);
+(6) the HEAD compiler once the `nline` regression is fixed (hybrid class 10,253 → 5,975, ≈ +3 %
+measured on the single core with PGO); (7) the structural levers of guide §6.1 (per-instance
+scheduling for the 7 idle harts) — the only ones with a >1.5× shape on the 4-core model, and
+none exists yet. Not levers (measured): `-fclock-skip` (slower, MT refused), the hierarchical
+core (2.1× slower), `profile.vlt`, `x86-64-v3` beyond +5 %.
+
 ### S5 — SMT2 `RVH` (smt2 feature not present)
 
 Package bit + DTS `h` on both threads. Fetch: L4 pass-through only (no fake

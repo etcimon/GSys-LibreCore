@@ -856,11 +856,19 @@ module load_unit
   // misaligned offset in the load buffer is legal. The contract is precise
   // delivery: the entry completes once, with the misaligned exception, and its
   // data return is killed rather than retired. The killed request is answered
-  // by the data cache with a dummy rvalid in the kill cycle.
+  // by the data cache with a dummy rvalid in the kill cycle. Under address
+  // translation the grant can precede a DTLB miss (T27, the Linux unaligned-
+  // access probe right after satp was written): the request is then aborted
+  // with a kill and no completion, the walk runs, and the re-issued load
+  // delivers the exception -- so the cycle after the grant is either the
+  // exception completion or the translation abort; misaligned_entry_no_data
+  // keeps the "never retires data" half in both cases.
   misaligned_entry_excepts :
   assert property (@(posedge clk_i) disable iff (~rst_ni)
       ldbuf_w && offset_misaligned(ldbuf_wdata.operation, ldbuf_wdata.address_offset)
-      |=> valid_o && ex_o.valid && ex_o.cause == riscv::LD_ADDR_MISALIGNED && req_port_o.kill_req)
+      |=> (valid_o && ex_o.valid && ex_o.cause == riscv::LD_ADDR_MISALIGNED && req_port_o.kill_req) ||
+          (req_port_o.kill_req && !valid_o &&
+           (state_q == ABORT_TRANSACTION || state_q == ABORT_TRANSACTION_NI || state_q == WAIT_FLUSH)))
   else $error("misaligned load buffer entry did not complete with LD_ADDR_MISALIGNED and a killed request");
   misaligned_entry_no_data :
   assert property (@(posedge clk_i) disable iff (~rst_ni)
