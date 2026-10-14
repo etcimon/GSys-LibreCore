@@ -1334,6 +1334,35 @@ main:
   .text
 .Lvm3_done:
 
+#elif STAGE == 49
+  # T33: stage 48 with PARTIAL coverage -- the younger store writes only the
+  # low word of the slot the youngest load reads as a doubleword. Forwarding
+  # cannot complete the load, so it parks in WAIT_PAGE_OFFSET on a store that
+  # is speculative behind the late-address head load; without the load-unit
+  # replay the unit is held and the core deadlocks. Bare mode (VA == PA) is
+  # enough to show it. Spike: trivially correct.
+  li   t0, 0x5a5a5a5a5a5a5a5a
+  sd   t0, 0(sp)
+  li   t0, 0x1111111122222222
+  sd   t0, 40(sp)
+  fence rw, rw
+  li   t1, 0x7fffffffffffffff
+  li   t2, 3
+  divu t3, t1, t2
+  andi t3, t3, 0                       # 0, late
+  add  t4, sp, t3                      # head load address, late
+  ld   t5, 0(t4)                       # HEAD load
+  li   t6, 0x33333333
+  sw   t6, 40(sp)                      # younger store, low word only (speculative behind the head)
+  ld   a1, 40(sp)                      # youngest: partially covered -> cannot forward
+  li   t0, 0x5a5a5a5a5a5a5a5a
+#ifdef MEM_ORDER_NEGATIVE
+  xori t0, t0, 1
+#endif
+  bne  t5, t0, fail_t2
+  li   t0, 0x1111111133333333
+  bne  a1, t0, fail_t2
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".

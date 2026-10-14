@@ -918,6 +918,8 @@ module cva6
   logic [1:0] mem_phys_valid, mem_mod_valid;
   logic [1:0][CVA6Cfg.PLEN-1:0] mem_phys_addr, mem_mod_addr;
   logic [1:0][CVA6Cfg.TRANS_ID_BITS-1:0] mem_phys_id;
+  logic                                 mem_lu_replay;
+  logic [CVA6Cfg.TRANS_ID_BITS-1:0]     mem_lu_replay_id;
   logic [1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] mem_phys_hart;
   logic [1:0][1:0] mem_phys_size;
   logic inval_apply_valid;
@@ -2598,6 +2600,7 @@ module cva6
       .rst_ni,
       .phys_valid_i(mem_phys_valid), .phys_addr_i(mem_phys_addr), .phys_id_i(mem_phys_id),
       .phys_hart_i(mem_phys_hart), .phys_size_i(mem_phys_size),
+      .lu_replay_i(mem_lu_replay), .lu_replay_id_i(mem_lu_replay_id),
       .mod_valid_i(mem_mod_valid), .mod_addr_i(mem_mod_addr),
       .sb_full_o               (sb_full),
       .sb_empty_o              (smt_sb_empty),
@@ -2771,6 +2774,7 @@ module cva6
       .rst_ni(rst_ni),
       .phys_valid_o(mem_phys_valid), .phys_addr_o(mem_phys_addr), .phys_id_o(mem_phys_id),
       .phys_hart_o(mem_phys_hart), .phys_size_o(mem_phys_size),
+      .lu_replay_o(mem_lu_replay), .lu_replay_id_o(mem_lu_replay_id),
       .debug_mode_i(debug_mode),
       .flush_i(flush_ctrl_ex),
       .cancelled_mask_i(sb_cancelled_mask),

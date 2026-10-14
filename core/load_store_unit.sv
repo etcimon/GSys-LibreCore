@@ -41,6 +41,9 @@ module load_store_unit
     output logic [1:0][CVA6Cfg.TRANS_ID_BITS-1:0] phys_id_o,
     output logic [1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] phys_hart_o,
     output logic [1:0][1:0] phys_size_o,
+    // T33: load unit gives a parked load back for a commit-time refetch
+    output logic lu_replay_o,
+    output logic [CVA6Cfg.TRANS_ID_BITS-1:0] lu_replay_id_o,
     // TO_BE_COMPLETED - TO_BE_COMPLETED
     input logic flush_i,
     // FSE S4: SB cancelled TIDs for younger-only LSU recovery
@@ -282,6 +285,7 @@ module load_store_unit
 
   logic [                     11:0] page_offset;
   logic                             page_offset_matches;
+  logic                             page_offset_spec_only;
   logic [         CVA6Cfg.PLEN-1:0] load_paddr;
   logic                             load_paddr_valid;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] load_trans_id;
@@ -663,6 +667,7 @@ module load_store_unit
       .head_phys_pending_i,
       .dcache_wbuffer_empty_i,
       .page_offset_matches_o(page_offset_matches),
+      .page_offset_spec_only_o(page_offset_spec_only),
       .st_fwd_valid_o       (st_fwd_valid),
       .st_fwd_data_o        (st_fwd_data),
       .st_fwd_be_o          (st_fwd_be),
@@ -717,6 +722,9 @@ module load_store_unit
       .phys_valid_o(phys_valid_o[0]), .phys_addr_o(phys_addr_o[0]),
       .phys_id_o(phys_id_o[0]), .phys_hart_o(phys_hart_o[0]), .phys_size_o(phys_size_o[0]),
       .page_offset_matches_i(page_offset_matches),
+      .page_offset_spec_only_i(page_offset_spec_only),
+      .lu_replay_o,
+      .lu_replay_id_o,
       .store_buffer_empty_i (store_buffer_empty),
       .no_st_pending_i      (no_st_pending_o),
       .st_fwd_valid_i       (st_fwd_valid),

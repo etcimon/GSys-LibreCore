@@ -107,7 +107,7 @@ module tb_g6lc_review_fp_lifetime;
   scoreboard #(.CVA6Cfg(C),.bp_resolve_t(bp_t),.exception_t(exception_t),
     .scoreboard_entry_t(sbe_t),.forwarding_t(fwd_t),.writeback_t(wb_t),.rs3_len_t(logic[63:0])) sb(
     .clk_i(clk),.rst_ni(rst_n),.sb_full_o(sb_full),.sb_empty_o(sb_empty),.spec_cancel_o(),
-    .cancelled_mask_o(cancel),.sb_live_o(),.mem_violation_i(1'b0),.mem_violation_id_i('0),
+    .cancelled_mask_o(cancel),.sb_live_o(),.mem_violation_i(1'b0),.mem_violation_id_i('0),.lu_replay_i(1'b0),.lu_replay_id_i('0),
     .phys_pending_i('0),.phys_replay_i('0),.phys_mod_i(1'b0),
     .flush_unissued_instr_i(flush_unissued),.flush_i(flush_id),
     .x_transaction_accepted_i(1'b0),.x_issue_writeback_i(1'b0),.x_id_i('0),
@@ -280,7 +280,7 @@ module tb_g6lc_review_load_cancel;
     .translation_req_o(),.vaddr_o(),.tinst_o(),.hs_ld_st_inst_o(),.hlvx_inst_o(),
     .paddr_i(translated_pa),.ex_i(ex_in),.ex_ptw_i(ex_ptw),.dtlb_hit_i(dtlb_hit),.dtlb_ppn_i('0),
     .page_offset_o(),.load_paddr_o(),.load_paddr_valid_o(),.load_trans_id_o(),.load_hart_o(),
-    .page_offset_matches_i(match_page),.store_buffer_empty_i(1'b0),.no_st_pending_i(nsp),
+    .page_offset_matches_i(match_page),.page_offset_spec_only_i(1'b0),.lu_replay_o(),.lu_replay_id_o(),.store_buffer_empty_i(1'b0),.no_st_pending_i(nsp),
     .st_fwd_valid_i(fwd_valid),.st_fwd_data_i(64'h12345666),.st_fwd_be_i(8'hff),
     .commit_tran_id_i('0),.req_port_i(resp),.req_port_o(req),
     .dcache_wbuffer_not_ni_i(1'b1),.dcache_wbuffer_empty_i(1'b0)
@@ -3484,7 +3484,7 @@ module tb_g6lc_review_store_recovery;
     .load_trans_id_i(load_tid),.commit_trans_id_i(commit_tid),
     .oldest_live_tid_i(commit_tid),.head_phys_pending_i(head_pending),
     .load_hart_i(load_hart),.st_hart_i(st_hart),
-    .dcache_wbuffer_empty_i(1'b1),.page_offset_matches_o(pom),.st_fwd_valid_o(fwd),
+    .dcache_wbuffer_empty_i(1'b1),.page_offset_matches_o(pom),.page_offset_spec_only_o(),.st_fwd_valid_o(fwd),
     .st_fwd_data_o(fwd_data),.st_fwd_be_o(fwd_be),.commit_i(commit),
     .commit_ready_o(commit_ready),.ready_o(ready),.valid_i(valid),.valid_without_flush_i(valid),
     .paddr_i(address),.trans_id_i(tid),.rvfi_mem_paddr_o(),.data_i(data),.be_i(8'hff),
@@ -3763,7 +3763,7 @@ module tb_g6lc_review_commit;
       .scoreboard_entry_t(scoreboard_entry_t),.forwarding_t(forwarding_t),
       .writeback_t(writeback_t),.rs3_len_t(rs3_len_t)) dut (
     .clk_i(clk),.rst_ni(rst_n),.sb_full_o(sb_full),.sb_empty_o(),.spec_cancel_o(spec_cancel),
-    .cancelled_mask_o(cancelled_mask),.sb_live_o(),.mem_violation_i(1'b0),.mem_violation_id_i('0),
+    .cancelled_mask_o(cancelled_mask),.sb_live_o(),.mem_violation_i(1'b0),.mem_violation_id_i('0),.lu_replay_i(1'b0),.lu_replay_id_i('0),
     .phys_pending_i('0),.phys_replay_i('0),.phys_mod_i(1'b0),
     .flush_unissued_instr_i(flush_unissued),
     .flush_i(flush),.x_transaction_accepted_i(1'b0),.x_issue_writeback_i(1'b0),
@@ -4348,7 +4348,7 @@ module tb_g6lc_review_sbhead;
       .scoreboard_entry_t(scoreboard_entry_t),.forwarding_t(forwarding_t),
       .writeback_t(writeback_t),.rs3_len_t(rs3_len_t)) dut (
     .clk_i(clk),.rst_ni(rst_n),.sb_full_o(),.sb_empty_o(),.spec_cancel_o(),
-    .cancelled_mask_o(),.sb_live_o(),.mem_violation_i(1'b0),.mem_violation_id_i('0),
+    .cancelled_mask_o(),.sb_live_o(),.mem_violation_i(1'b0),.mem_violation_id_i('0),.lu_replay_i(1'b0),.lu_replay_id_i('0),
     .phys_pending_i('0),.phys_replay_i('0),.phys_mod_i(1'b0),
     .flush_unissued_instr_i(flush_unissued),
     .flush_i(flush),.x_transaction_accepted_i(1'b0),.x_issue_writeback_i(1'b0),

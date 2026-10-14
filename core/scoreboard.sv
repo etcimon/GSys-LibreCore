@@ -45,6 +45,10 @@ module scoreboard #(
     // resolved later - OoO only, tied low in order.
     input  logic                                          mem_violation_i,
     input  logic              [CVA6Cfg.TRANS_ID_BITS-1:0] mem_violation_id_i,
+    // T33: load unit hands back a load parked on a speculative store - same
+    // cancel + commit-time refetch as a violation. OoO only.
+    input  logic                                          lu_replay_i,
+    input  logic              [CVA6Cfg.TRANS_ID_BITS-1:0] lu_replay_id_i,
     input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] phys_pending_i,
     input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] phys_replay_i,
     input logic phys_mod_i,
@@ -622,6 +626,13 @@ module scoreboard #(
       mem_n[mem_violation_id_i].cancelled = 1'b1;
       mem_n[mem_violation_id_i].replay    = 1'b1;
       mem_n[mem_violation_id_i].sbe.valid = 1'b1;
+    end
+    if (CVA6Cfg.OoOEn && lu_replay_i && mem_q[lu_replay_id_i].issued &&
+        mem_q[lu_replay_id_i].sbe.fu == ariane_pkg::LOAD &&
+        !(mem_n[lu_replay_id_i].cancelled && !mem_n[lu_replay_id_i].replay)) begin
+      mem_n[lu_replay_id_i].cancelled = 1'b1;
+      mem_n[lu_replay_id_i].replay    = 1'b1;
+      mem_n[lu_replay_id_i].sbe.valid = 1'b1;
     end
     if (CVA6Cfg.CohPolicy == config_pkg::COH_OOO) begin
       for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin

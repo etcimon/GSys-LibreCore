@@ -87,6 +87,12 @@ module load_unit
     output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] load_hart_o,
     // Indicates if the page offset matches a store unit entry - STORE_UNIT
     input logic page_offset_matches_i,
+    // T33: that match is against the speculative STQ only - STORE_UNIT
+    input logic page_offset_spec_only_i,
+    // T33: give the parked load back to the scoreboard (cancel + commit-time
+    // refetch, the LSQ mem_violation path) so an older load can use the unit
+    output logic lu_replay_o,
+    output logic [CVA6Cfg.TRANS_ID_BITS-1:0] lu_replay_id_o,
     // Store buffer is empty - STORE_UNIT
     input logic store_buffer_empty_i,
     // Committed store queue is empty (only speculative, hence younger, stores
@@ -346,6 +352,20 @@ module load_unit
 
   // Pulse: load completed from STQ forward this cycle (no D$ request)
   logic st_fwd_done;
+  // T33: WAIT_PAGE_OFFSET dwell counter; replay only under OoO (the cancel +
+  // commit-time refetch path exists there) and only for a speculative-only
+  // match -- a committed/draining store finishes on its own.
+  localparam int unsigned WPO_REPLAY_AFTER = 64;
+  logic [7:0] wpo_cnt_q;
+  logic       lu_replay_fire;
+  assign lu_replay_fire = CVA6Cfg.OoOEn && page_offset_spec_only_i &&
+                          (wpo_cnt_q >= 8'(WPO_REPLAY_AFTER));
+  assign lu_replay_id_o = lsu_ctrl_i.trans_id;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) wpo_cnt_q <= '0;
+    else if (state_q != WAIT_PAGE_OFFSET || flush_i) wpo_cnt_q <= '0;
+    else if (wpo_cnt_q != 8'hFF) wpo_cnt_q <= wpo_cnt_q + 8'd1;
+  end
   logic cancelled_request;
   assign cancelled_request = CVA6Cfg.OoOEn && valid_i &&
       (lsu_ctrl_i.is_speculative_load_miss || cancelled_mask_i[lsu_ctrl_i.trans_id]);
@@ -366,6 +386,7 @@ module load_unit
     req_port_o.data_be   = lsu_ctrl_i.be;
     req_port_o.data_size = extract_transfer_size(lsu_ctrl_i.operation);
     pop_ld_o             = 1'b0;
+    lu_replay_o          = 1'b0;
     st_fwd_done          = 1'b0;
 
     // In IDLE and SEND_TAG states, this unit can accept a new load request
@@ -430,6 +451,15 @@ module load_unit
           state_d     = IDLE;
           pop_ld_o    = 1'b1;
           st_fwd_done = 1'b1;
+        end else if (st_pipeline_busy && lu_replay_fire) begin
+          // T33: the only store in the way is speculative and has not left in
+          // WPO_REPLAY_AFTER cycles -- it is waiting on retirement, possibly on
+          // an older load queued behind this one. Hand this load back: the
+          // scoreboard cancels it and refetches from its PC at commit, by which
+          // time the store has committed. Linux sched_clock_noinstr deadlock.
+          state_d     = IDLE;
+          pop_ld_o    = 1'b1;
+          lu_replay_o = 1'b1;
         end else if (st_pipeline_busy) begin
           // hold until STQ + D$ wbuffer drain
           state_d = WAIT_PAGE_OFFSET;

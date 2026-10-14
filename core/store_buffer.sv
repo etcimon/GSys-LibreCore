@@ -66,6 +66,12 @@ module store_buffer
     // STQ→wbuffer handoff so post-return loads of *nextoffset see the store.
     input  logic                    dcache_wbuffer_empty_i,
     output logic         page_offset_matches_o, // hazard: stall load until STQ drains / forward
+    // T33: the live match comes from the SPECULATIVE queue only (no committed
+    // entry, no sticky drain window). Such a store can only leave after every
+    // older instruction retires, so a load parked on it in WAIT_PAGE_OFFSET
+    // must not hold the load unit against an older load -- the load unit
+    // replays it instead (see load_unit.sv).
+    output logic         page_offset_spec_only_o,
     // R3a: store→load data forward (byte-merge, oldest→youngest). When a load's
     // BE is fully covered, the load unit may complete without a D$ request.
     output logic                              st_fwd_valid_o,
@@ -598,6 +604,7 @@ module store_buffer
   logic                    page_offset_sticky_v_q;
   logic                    page_offset_sticky_po_v_q;  // [11:0]-only sticky
   logic [11:0]             page_offset_sticky_po_q;
+  logic                    po_commit_match, po_spec_match;
   // G1ao: last live STQ forward, replayed to the next same-PA load.
   logic                          g1ao_hold_v_q, g1ao_hold_hit;
   logic [CVA6Cfg.PLEN-1:0]       g1ao_hold_pa_q;
@@ -639,6 +646,8 @@ module store_buffer
     // when store queue holds paddr form. Forward remains full-PA only.
     // cont.11 false-alias FDT vs stack is still open (next_tag tag=9).
     page_offset_matches_now = 1'b0;
+    po_commit_match = 1'b0;
+    po_spec_match   = 1'b0;
 
     for (int unsigned i = 0; i < DEPTH_COMMIT; i++) begin
       if (commit_queue_q[i].valid &&
@@ -648,6 +657,7 @@ module store_buffer
             ((commit_queue_q[i].address[11:0] >> CBOZ_OFF_W) ==
              (page_offset_i >> CBOZ_OFF_W))))) begin
         page_offset_matches_now = 1'b1;
+        po_commit_match = 1'b1;
         break;
       end
     end
@@ -664,6 +674,7 @@ module store_buffer
             ((speculative_queue_q[i].address[11:0] >> CBOZ_OFF_W) ==
              (page_offset_i >> CBOZ_OFF_W))))) begin
         page_offset_matches_now = 1'b1;
+        po_spec_match = 1'b1;
         break;
       end
     end
@@ -672,6 +683,7 @@ module store_buffer
          (CVA6Cfg.RVZiCboz && cbo_op_i == ariane_pkg::CBO_ZERO &&
           ((paddr_i[11:0] >> CBOZ_OFF_W) == (page_offset_i >> CBOZ_OFF_W))))) begin
       page_offset_matches_now = 1'b1;
+      po_spec_match = 1'b1;
     end
 
     // G1m: interlock only for a live load (load_paddr_valid). Idle/store
@@ -683,6 +695,12 @@ module store_buffer
           pa_eq(page_offset_sticky_pa_q, load_paddr_i)) ||
          (LEGACY_SMT_KEEP &&
           g1ao_hold_v_q && pa_eq(g1ao_hold_pa_q, load_paddr_i)));
+    // The sticky flags re-arm from the live match itself (`page_offset_matches_now`
+    // branch below), so they cannot tell a draining store from this one; the
+    // drain window is bounded by the D$ wbuffer instead: speculative-only means
+    // no committed entry in the lane and nothing left in the wbuffer.
+    page_offset_spec_only_o = load_paddr_valid_i && po_spec_match && !po_commit_match &&
+        dcache_wbuffer_empty_i;
   end
 
   // Forward only on full paddr match (never on [11:0] alone).

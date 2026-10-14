@@ -277,6 +277,13 @@ testlist:
     gcc_opts: "-DSTAGE=48 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
     description: "Data accesses translated (MPRV, Sv39 high alias VA != PA): a late-address head load, a younger store to a stack slot and a youngest load of that slot -- the load must forward from the speculative store; with a virtual STQ key it parks in WAIT_PAGE_OFFSET behind a store that cannot commit and the core deadlocks (T32: Linux sched_clock_noinstr on every package)"
 
+  - test: ooo_partial_forward_no_lu_hold
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=49 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "A late-address head load, a younger word store and a youngest doubleword load of the same slot (partial coverage, no forward): the load parked in WAIT_PAGE_OFFSET on the speculative store must be handed back to the scoreboard instead of holding the load unit against the head (T33; pre-fix 2 M-cycle deadlock)"
+
   - test: ooo_load_misaligned_shared_target
     iterations: 1
     <<: *common_test_config

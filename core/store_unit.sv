@@ -106,6 +106,8 @@ module store_unit
     input logic dcache_wbuffer_empty_i,
     // Address check result - load_unit
     output logic page_offset_matches_o,
+    // T33: the match is speculative-only (load_unit replays instead of holding)
+    output logic page_offset_spec_only_o,
     // R3a: STQ store→load data forward - load_unit
     output logic                        st_fwd_valid_o,
     output logic [CVA6Cfg.XLEN-1:0]     st_fwd_data_o,
@@ -428,6 +430,7 @@ module store_unit
       .st_hart_i            (st_hart_q),
       .dcache_wbuffer_empty_i,
       .page_offset_matches_o,
+      .page_offset_spec_only_o,
       .st_fwd_valid_o,
       .st_fwd_data_o,
       .st_fwd_be_o,

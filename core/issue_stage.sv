@@ -39,6 +39,8 @@ module issue_stage
     input logic [1:0][CVA6Cfg.TRANS_ID_BITS-1:0] phys_id_i,
     input logic [1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] phys_hart_i,
     input logic [1:0][1:0] phys_size_i,
+    input logic lu_replay_i,
+    input logic [CVA6Cfg.TRANS_ID_BITS-1:0] lu_replay_id_i,
     input logic [1:0] mod_valid_i,
     input logic [1:0][CVA6Cfg.PLEN-1:0] mod_addr_i,
     // Is scoreboard full - PERF_COUNTERS
@@ -306,6 +308,8 @@ module issue_stage
       .phys_pending_i(phys_pending), .phys_replay_i(phys_replay), .phys_mod_i(|mod_valid_i),
       .mem_violation_i         (mem_violation),
       .mem_violation_id_i      (mem_violation_id),
+      .lu_replay_i,
+      .lu_replay_id_i,
       .flush_unissued_instr_i,
       .flush_i,
       .x_transaction_accepted_i(x_transaction_accepted_iro_sb),

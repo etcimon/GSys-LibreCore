@@ -44,6 +44,8 @@ module ex_stage
     output logic [1:0][CVA6Cfg.TRANS_ID_BITS-1:0] phys_id_o,
     output logic [1:0][$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] phys_hart_o,
     output logic [1:0][1:0] phys_size_o,
+    output logic lu_replay_o,
+    output logic [CVA6Cfg.TRANS_ID_BITS-1:0] lu_replay_id_o,
     // Fetch flush request - CONTROLLER
     input logic flush_i,
     // FSE S4: younger-only LSU cancel (from scoreboard)
@@ -667,6 +669,7 @@ module ex_stage
       .clk_i,
       .rst_ni,
       .phys_valid_o, .phys_addr_o, .phys_id_o, .phys_hart_o, .phys_size_o,
+      .lu_replay_o, .lu_replay_id_o,
       .flush_i,
       .cancelled_mask_i,
       .sb_live_i,
