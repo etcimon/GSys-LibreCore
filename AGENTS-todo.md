@@ -1617,7 +1617,22 @@ prerequisite for this work under the existing dual license. No licensing policy 
   and `+lu_replay_trace` prints each one, model
   `ooocoh-t34-ooo-fix8b-pgo-build`). The HPDCACHE single-core run
   (`l1s1d`, no WT wbuffer, same LSU/T33) is the discriminator between the
-  two: at `SLUB:` (34 M cycles) when this was written, ≈ 7 k cycles/s.
+  two: at `pid_max` (42 M cycles, 0.016 s guest) when this was written,
+  ≈ 4–7 k cycles/s; the ooo failures start at ≈ 0.42 s guest, so its
+  verdict is ≈ 3 h away (`t21/q-final4.sh`). The depth-8 L3 run later died
+  too, at 1.39 s in `kthreadd` → `copy_process` → `alloc_vmap_area+0x196`
+  (`badaddr 0x2e`, a vmap rb-tree node pointer read as 0). Four victims
+  now, all kernel-heap pointers that were stored long before and read back
+  as 0 (one as its low half): the shape of a **stale cached line** whose
+  write-through reached memory while the line update was lost, i.e. the
+  SL-W fixup/void path itself rather than its depth. Next instrument if
+  server1 clears 0.5 s: an FST of the fixup path on the current config
+  (`ulimit -s unlimited`) around a `fixup_push` that is followed by no
+  `wr_req` to the same set, or a sim-only check in `wt_dcache_wbuffer.sv`
+  that every ACKed entry either hit-updated the line, was fixed up, or
+  invalidated it (assert on the fourth case). Both ooo Linux runs are
+  stopped; the 4-core MT4 run was stopped too (≈ 1 k cycles/s under the
+  other sims — run it alone).
 - [ ] **T33 — the T32 residual: a partially covered younger load parked in
   `WAIT_PAGE_OFFSET` on a speculative store held the load unit against the
   head load; the load unit now hands it back (2026-10-14).** On the T32
