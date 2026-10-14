@@ -1585,11 +1585,23 @@ prerequisite for this work under the existing dual license. No licensing policy 
   so stores at other byte offsets of the load's lane were invisible to both
   the forward merge and the stall (upstream compares `[11:3]`). Fix: lane
   granularity (`LANE_W = clog2(XLEN/8)`) for `pa_eq`/`po_eq`; the merge is
-  be-masked. Verification owed on `ooocoh-t31-ooo-final-pgo-build`
-  (`ooocoh-t31-ooo-lane-pgo-build` carries the fix at depth 8 for the first
-  check): stage 47 pass Spike-exact, stages 4/20/32–46 + s11 + wprp
-  unchanged, then the kernel probe's printk numbers and the L1/L3 runs.
-- [ ] **T30 — the testharness preloaded only 16 MiB of the ELF into the
+  be-masked. **Verified on `ooocoh-t31-ooo-final-pgo-build`** (`453031b66`,
+  split, `x86-64-v3`, PGO; T28 depth 2 + T29 + T30 + T31): stage 47 **pass
+  Spike-exact 101/101** (pre-fix model: fail exit 3, 58 vs 101); stages
+  39/41/46 unchanged. **Linux 6.6.93 now prints correctly on
+  `g6lc64_ooo`:** `Linux version 6.6.93 (ubuntu@calltorch)…`, `Machine
+  model: eth,ariane-bare`, `SBI specification v2.0`, `SBI TIME/IPI/RFENCE
+  extension detected`, `earlycon: sbi0`, `printk: bootconsole [sbi0]
+  enabled`, `OF: reserved mem …`, `percpu: Embedded 17 pages/cpu` at
+  12 M cycles / 8.97 M retired (`linux-probe-l1ooo-trace`). **L1 (busybox)
+  and L3 (trimmed procd) launched on it** (`linux-boot-l1ooo-…` /
+  `linux-boot-l3ooo-…-ooocoh-t31-ooo-final-pgo-build`, `stdbuf -oL`,
+  `+stall_census`); the server packages rebuild with all four fixes
+  (`ooocoh-t31-server1-final-pgo-build`, `ooocoh-t31-server-final-mt4-build`).
+  Owed: the frozen battery (s11, m04/m20/m32–m37, wprp, FP suite) on the
+  final ooo model for the exactness record, the L1/L3 verdicts, then the
+  server runs.
+- [x] **T30 — the testharness preloaded only 16 MiB of the ELF into the
   256 MiB DRAM model (2026-10-14).** `g6lc_tb.cpp` `mem_size = 0xFFFFFF`
   capped the bulk and per-PHDR copies; a Linux `fw_payload` is one PHDR at
   `0x80000000` whose kernel `.data`/`.init` sit past `0x80ffffff`, so
