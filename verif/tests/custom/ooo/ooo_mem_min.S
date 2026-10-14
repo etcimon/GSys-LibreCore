@@ -1227,8 +1227,8 @@ main:
   xori t3, t3, 1
 #endif
   bne  t2, t3, fail_t2
-  # a halfword and a word over the previous bytes, then the doubleword and a
-  # word that straddles the two newer stores
+  # a halfword and a word over the previous bytes, then the doubleword and
+  # each narrow store read back on its own
   li   t1, 0xB1B0
   sh   t1, 2(sp)
   li   t1, 0xC3C2C1C0
@@ -1236,8 +1236,11 @@ main:
   ld   t2, 0(sp)
   li   t3, 0xC3C2C1C0B1B0A1A0
   bne  t2, t3, fail_t2
-  lwu  t2, 2(sp)
-  li   t3, 0xC1C0B1B0
+  lhu  t2, 2(sp)                 # the halfword store alone
+  li   t3, 0xB1B0
+  bne  t2, t3, fail_t2
+  lwu  t2, 4(sp)                 # the word store alone
+  li   t3, 0xC3C2C1C0
   bne  t2, t3, fail_t2
   # older wide store still in flight (late data) under younger narrow stores
   li   t1, 0x7fffffffffffffff
