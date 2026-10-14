@@ -728,6 +728,82 @@ main:
   bne  t2, t0, fail_t2
   bne  t4, t3, fail_t2
 
+#elif STAGE == 38
+  # Stage 32 under address translation with a COLD DTLB (T27: the first thing
+  # Linux does after `satp` is the unaligned-access probe). Sv39 is switched on
+  # for data accesses only through mstatus.MPRV with MPP=S (fetch stays M-mode
+  # physical), one identity gigapage covers the program and the stack, and the
+  # misaligned `lw` is the first access to that page. The load is granted, the
+  # DTLB misses, the request is aborted, the walk fills the TLB, the re-issued
+  # load delivers LD_ADDR_MISALIGNED exactly once, with mepc on the load and no
+  # write of rd. The bare-metal next-cycle shape of the load_unit assertion was
+  # the property this stage distinguishes from the architectural contract.
+  csrr s1, mtvec
+  la   t0, .Lvm_handler
+  csrw mtvec, t0
+  # level-2 table: entry 2 = 0x80000000..0xBFFFFFFF, leaf, V|R|W|X|A|D
+  la   t1, .Lvm_pt
+  li   t2, (0x80000 << 10) | 0xCF
+  sd   t2, 16(t1)
+  srli t1, t1, 12
+  li   t2, 8
+  slli t2, t2, 60
+  or   t1, t1, t2
+  csrw satp, t1
+  sfence.vma
+  # S-mode data accesses (and the walk) need a matching PMP entry once any
+  # entry is implemented: one TOR region over the whole address space, RWX.
+  li   t0, -1
+  srli t0, t0, 10
+  csrw pmpaddr0, t0
+  li   t0, 0x0F
+  csrw pmpcfg0, t0
+  li   a4, 0
+  li   a5, 0x55
+  li   t0, (1 << 17) | (1 << 11)       # MPRV | MPP = S
+  csrs mstatus, t0
+  .option push
+  .option norvc
+.Lvm_load:
+  lw   a5, 6(sp)
+  .option pop
+  li   t0, (1 << 17) | (3 << 11)
+  csrc mstatus, t0                      # MPRV off, MPP cleared
+  csrw satp, zero
+  sfence.vma
+  li   t0, 1
+#ifdef MEM_ORDER_NEGATIVE
+  xori t0, t0, 1
+#endif
+  bne  a4, t0, fail_trap_count
+  li   t0, 0x55
+  bne  a5, t0, fail_trap_wrote_rd
+  csrw mtvec, s1
+  j    .Lvm_done
+  .balign 4
+.Lvm_handler:
+  csrr t6, mcause
+  li   t5, 4
+  bne  t6, t5, fail_trap_cause
+  csrr t4, mtval
+  beqz t4, .Lvm_tval_absent
+  addi t5, sp, 6
+  bne  t4, t5, fail_trap_tval
+.Lvm_tval_absent:
+  csrr t5, mepc
+  la   t6, .Lvm_load
+  bne  t5, t6, fail_trap_mepc
+  addi a4, a4, 1
+  addi t5, t5, 4
+  csrw mepc, t5
+  mret
+  .section .data
+  .balign 4096
+.Lvm_pt:
+  .space 4096
+  .text
+.Lvm_done:
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".

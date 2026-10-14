@@ -827,6 +827,26 @@ exit 126, the I4dp boot's shape; the fixed model passes both. Runs via
 `REVIEW_MC_DIRECTED_TOHOST_ADDR=auto` (the regions push `tohost` past `0x80001000`);
 masks `01` (2 harts), `11` (int2_l3, `-DMC_ICS_NHARTS=4`), `1111` (server, 8 harts).
 
+## Misaligned load under translation with a cold DTLB (2026-10-14, T27)
+
+`ooo_mem_min.S` stage38 is registered as `ooo_load_misaligned_vm_cold_dtlb`
+(`testlist_ooo_l3.yaml`). It switches Sv39 on for data accesses only
+(`mstatus.MPRV` with `MPP=S`, one identity gigapage leaf, a TOR PMP entry over the
+whole space so S-mode accesses and the walk are permitted) and makes the misaligned `lw`
+the first touch of its page, which is what the Linux kernel's unaligned-access probe does
+right after `satp` is written (spec: Part II `#sec:sv39`, `#sec:translation`, exception
+priority `#sec:exception-priority`; the misaligned check precedes the walk's result). The
+contract is stage32's — `mcause=4`, `mepc` on the load, `mtval` when reported, exactly one
+trap, destination unwritten — with the load unit's own grant-abort-walk-reissue sequence
+underneath. Witness: on the pre-fix model (`ooocoh-t25-ooo-hpgo-build`) the stage dies at
+cycle 886 on the sim-only `load_unit.sv` property `misaligned_entry_excepts`, the same
+`$stop` that ended the first RTL Linux boot at 33.6 M cycles
+(`linux-boot-l1-ooocoh-t27-server-default-mt4-build3`); the property is relaxed to accept
+the translation abort (a kill with no completion in `ABORT_TRANSACTION`/`_NI`/`WAIT_FLUSH`)
+and `misaligned_entry_no_data` keeps the data-retirement half. `MEM_ORDER_NEGATIVE` flips the
+expected trap count. Positive/negative results on the fixed model are recorded in
+`AGENTS-todo.md` T27 when `ooocoh-t27-ooo-ldfix-pgo-build` lands.
+
 ## Historical misaligned-load tests (2026-09-20)
 
 `ooo_mem_min.S` stages32/33 are registered as `ooo_load_misaligned_trap` and

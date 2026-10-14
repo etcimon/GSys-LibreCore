@@ -200,6 +200,13 @@ testlist:
     gcc_opts: "-DSTAGE=33 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
     description: "The misaligned load is reached only on the taken path, so a wrong-path fetch of it must not produce an architectural trap"
 
+  - test: ooo_load_misaligned_vm_cold_dtlb
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=38 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "A misaligned load under Sv39 (MPRV data translation) whose first touch misses the DTLB is aborted, walked, re-issued and still raises LD_ADDR_MISALIGNED exactly once with the destination unwritten (T27: the Linux unaligned-access probe after satp)"
+
   - test: ooo_load_misaligned_shared_target
     iterations: 1
     <<: *common_test_config
