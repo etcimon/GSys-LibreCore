@@ -1261,5 +1261,21 @@ caselist that silently drops a must-pass group — a group we cannot run yet is 
 | CTS-4 | W6–W8 | `ray_query.*`, `ray_tracing_pipeline.*`, `mesh_shader.*`, `fragment_shading_rate.*`, `fragment_shader_interlock.*`, `fragment_shading_barycentric.*`, `dgc.*`, `geometry.*`, `tessellation.*`, `multiview.*`, `compute.cooperative_matrix.*`, `cooperative_vector.*` | every requested advanced feature stock-visible and CTS-clean |
 | CTS-5 | W9/W10 | `wsi.*` on x86-64 virtio-pci; the complete `vk-default.txt` in ≤ 16 fractions with the mandatory per-fraction tests, on the release profile, with `waivers.xml` | the internal full pass that precedes any Khronos submission — not a conformance claim by itself |
 
-Status 2026-10-14: `specs/VK-GL-CTS` registration in progress; CTS-0 not started; no CTS
-result of any kind exists yet for this device.
+### 13.6 The decomposition: `specs/architecture/`
+
+Each must-pass family is broken down in `specs/architecture/cts-<family>.md` (index and
+method in `specs/architecture/README.md`) into **LOGIC** cards (the spec claim, the CTS
+source, the owning mechanism of this design, preconditions, forbidden shortcuts, the exact
+must-pass check, cost, status from the ledger) and **EXCEPTION** cards (error results,
+`NotSupported` by truthful absence, undefined-behaviour latitude, device limits), with an
+implementation-order heuristics table and a performance/area/scalability note bounded by
+the cards' `FORBIDS`. The notation adapts `AGENTS-rt-learning-philosophy-AGI.md` (cards,
+segment cards, ordinal heuristics) read through `AGENTS-coding-philosophy.md`. Three
+cross-cutting pattern cards govern every file: *advertisement is obligation*, *limits are
+architecture*, *reorder, never drop*. RTL increments from G3a-ii on cite the cards they
+move and name their must-pass caselist from them.
+
+Status 2026-10-14: `specs/VK-GL-CTS` registered (`b528f6d3f`); 27 decomposition files cover
+all 98 lists (`986dfe21d`); CTS-0 harness built (host llvmpipe control: 297 Pass / 11
+NotSupported of 308), riscv64 `deqp-vk` cross-build in flight; no CTS result on the device
+yet.

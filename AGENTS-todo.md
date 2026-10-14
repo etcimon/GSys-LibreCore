@@ -324,9 +324,21 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
     `b689703bdc65a04764db3b9a8f6fe872b3fe94d0df68d78f6da6e5a06cfa9ed4`, 98 caselist paths,
     ≈ 3.25 M test-case lines across `vk-default/**/*.txt` (`wsi.txt` 35,481, `ycbcr.txt`
     62,333 alone). `fetch_sources.py` not run; nothing built.
-  - [ ] CTS-0: `verif/tb/apu/bridge/guest/cts/` builds `deqp-vk` at the pin inside the
-    stock riscv64 guest (one-time per pin; `fetch_sources.py` revisions hashed; tarball
-    cached by `{CTS commit, image sha256, toolchain}`); `drive_guest.py` runs
+  - [x] **Decomposition (2026-10-14, `986dfe21d`):** `specs/architecture/` — 27 files
+    covering all 98 must-pass lists in `vk-default.txt` order, each with the inventory
+    rendered by `cts_ledger.py tree`, LOGIC/EXCEPTION cards (notation from
+    `AGENTS-rt-learning-philosophy-AGI.md` through `AGENTS-coding-philosophy.md`),
+    ordinal implementation-order heuristics, segment cards (info/api) and a
+    performance/area/scalability note; `README.md` carries the method, the index and
+    the three pattern cards. Sequencing findings recorded in the plan ("Decomposition
+    of record"). Owed: per-sub-group source extraction (test files, `checkSupport`
+    requirements, constants) to tighten the SOURCE/REQUIRES lines — mechanical,
+    queued after CTS-0.
+  - [~] CTS-0: `verif/tb/apu/bridge/guest/cts/` cross-builds `deqp-vk` for riscv64 on
+    the host (Bootlin toolchain, `fetch_sources.py` revisions recorded in
+    `.cache/cts/fetch-revisions.txt`; host x86 control build: **297 Pass / 11
+    NotSupported of 308** on llvmpipe — harness and caselist validated); CTSDATA
+    virtio-blk transport; `drive_guest.py` runs
     `dEQP-VK.info.*`, `api.smoke.*`, `api.device_init.*`, `api.object_management.single.*`
     with the mandatory flags and the Venus `--deqp-vk-device-id`; first `TestResults.qpa`
     retained; `corev_apu/apu/tools/cts_ledger.py` renders the generated
