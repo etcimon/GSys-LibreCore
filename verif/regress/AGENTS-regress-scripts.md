@@ -189,3 +189,19 @@ Never dual-ISS-golden AMOCAS; vector golden is live Ara when misa.V is set.
 | software/zacas/README.md | (policy) | Spike never golden; Q deferred |
 
 AMOCAS.Q remains unimplemented (decoder illegal). CAS.D dual-word = HPDCache local RMW.
+
+## Program-order memory oracle over an RVFI trace — `rvfi_memcheck.py` (2026-10-14, T34)
+
+`verif/regress/rvfi_memcheck.py <trace_rvfi_hart_00.dasm> <payload.elf> [--max=N] [--all]
+[--watch=0xADDR]` replays the retired loads and stores of a **single-hart** RVFI trace against
+a byte-granular memory model seeded from the ELF's PT_LOAD segments (zero elsewhere): every
+retired load must return the last retired store's bytes (program order), AMOs are checked as
+loads then applied, `sc` applies on success only, MMIO (below DRAM) is skipped. It needs no
+ISS — it is the tool for "a stored value read back wrong" classes where Spike cannot run the
+platform (Linux on the testharness UART). ~1 M memory operations per 2 s. First use: on the
+T32-era depth-2 `g6lc64_ooo` probe trace it named a stale `lw` inside OpenSBI (retire 1,272,815,
+`0x80009fec` read 0xfa after `0x8000a11a` stored 0xf9 to `0x8004211c` 27 retirements earlier);
+the same 2 M-cycle window on the depth-8 and T33 models is clean, so the race is timing-bound
+and the oracle is run over the full kernel boot trace to find the first wrong value
+(`t21/q-memcheck-bg.sh`). Limits: one hart (no coherence), no DMA, `cbo.zero` not modelled
+(flagged as `image/zero`-source mismatches if it ever appears).
