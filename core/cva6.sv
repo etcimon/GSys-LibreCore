@@ -1118,6 +1118,7 @@ module cva6
       .flush_i            (flush_ctrl_if),
       .halt_i             (halt_ctrl),
       .halt_frontend_i    (halt_frontend),
+      .fetch_translation_en_i (enable_translation_csr_ex | enable_g_translation_csr_ex),
       .set_pc_commit_i    (set_pc_ctrl_pcgen),
 `ifdef G6LC_FETCH_B
       .commit_hart_i      (whart_commit_id[0]),

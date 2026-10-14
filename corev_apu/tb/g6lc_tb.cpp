@@ -156,6 +156,9 @@ static const char *verilog_plusargs[] = {
     // +rvfi_notrace (corev_apu/tb/rvfi_tracer.sv): skip the per-instruction
     // trace writes on kernel-boot-length runs; tohost detection stays on.
     "rvfi_notrace",
+    // +preload_bytes=<n>: DRAM preload window override (default: the whole 256 MiB
+    // model; see the preload loop below). Allowlisted for the same reason.
+    "preload_bytes",
     // I1-at-supply oracle (core/id_stage.sv). Must be allowlisted or the arg
     // parser hands it to HTIF, which rejects it and the run dies before the
     // checker ever arms -- a silent-oracle failure mode, since a rejected plusarg
@@ -634,7 +637,23 @@ done_processing:
   //    exact PHDR addresses for read_section_void — read whole section then copy.
   const uint64_t dram_base = 0x80000000ULL;
   const uint64_t dram_user = 0x84000000ULL;
-  size_t mem_size = 0xFFFFFF;
+  // T29/T30: the preload window is the whole DRAM model (NUM_WORDS = 2**25 x 8 B =
+  // 256 MiB, ariane_soc::DRAMLength), not the historical 16 MiB. A Linux
+  // fw_payload (OpenSBI + a 20 MB Image + an initrd at +64 MB) is one PHDR at
+  // 0x80000000; with the 16 MiB cap everything past 0x80ffffff stayed zero --
+  // init_task.stack read 0 (kernel .data at +19 MB) and the kernel looped in its
+  // trap entry. fesvr clamps the copy to the section's real size, so small ELFs
+  // cost nothing more. +preload_bytes=<n> overrides (bounded by the model).
+  size_t mem_size = 0x10000000;
+  {
+    const char *pb = nullptr;
+    for (int i = 1; i < argc; i++)
+      if (std::strncmp(argv[i], "+preload_bytes=", 15) == 0) pb = argv[i] + 15;
+    if (pb) {
+      const unsigned long long v = std::strtoull(pb, nullptr, 0);
+      if (v > 0 && v <= 0x10000000ULL) mem_size = (size_t)v;
+    }
+  }
   bool bulk_done = false;
   while (get_section(&addr, &len)) {
     if (!bulk_done && addr == (long long)dram_base) {

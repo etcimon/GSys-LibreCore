@@ -1104,6 +1104,97 @@ main:
   ret
 .Lstr3_done:
 
+#elif STAGE == 46
+  # T29 in its real shape: a predicted-taken jal fetched through INSTRUCTION
+  # translation at a virtual address OUTSIDE the physical execute regions. Sv39
+  # level-2 table: entry 2 = identity gigapage for 0x80000000 (the test's own
+  # PA alias, M-mode stays untranslated anyway), entry 0x1ff = the same physical
+  # gigapage at VA 0xffffffffc0000000 (Linux-like high alias). The test enters
+  # S-mode at the high alias, where the first `jal` is predicted taken from the
+  # instruction scan with a target the PMA filter calls "not fetchable" — on
+  # the pre-fix frontend bp_fire stays low, the callee never runs and the
+  # instruction after the jal is dropped. Back to M-mode through ecall.
+  csrr s1, mtvec
+  la   t0, .Lvm2_mhandler
+  csrw mtvec, t0
+  la   t1, .Lvm2_pt
+  li   t2, (0x80000 << 10) | 0xCF
+  sd   t2, 16(t1)                      # VPN2 = 2
+  li   t3, 2048
+  add  t3, t3, t1
+  sd   t2, 2040(t3)                    # VPN2 = 0x1ff (offset 4088)
+  srli t3, t1, 12
+  li   t2, 8
+  slli t2, t2, 60
+  or   t3, t3, t2
+  csrw satp, t3
+  sfence.vma
+  li   t0, -1
+  srli t0, t0, 10
+  csrw pmpaddr0, t0
+  li   t0, 0x0F
+  csrw pmpcfg0, t0
+  li   t0, 0
+  li   t1, 0
+  li   t2, 0
+  # S-mode entry at the high alias of .Lvm2_s_entry
+  la   t4, .Lvm2_s_entry
+  li   t5, 0x80000000
+  sub  t4, t4, t5
+  li   t5, 0xffffffffc0000000
+  add  t4, t4, t5
+  csrw mepc, t4
+  li   t5, (3 << 11)
+  csrc mstatus, t5
+  li   t5, (1 << 11)                   # MPP = S
+  csrs mstatus, t5
+  mret
+  .balign 8
+.Lvm2_s_entry:
+  c.nop
+  c.nop
+  c.nop
+  .option push
+  .option norvc
+  jal  ra, .Lvm2_callee                # offset 6 of its window, first encounter, VA target
+  .option pop
+  addi t1, t1, 1
+  addi t2, t2, 1
+  ecall                                # back to M-mode (cause 9)
+.Lvm2_after:
+  li   t3, 7
+#ifdef MEM_ORDER_NEGATIVE
+  xori t3, t3, 1
+#endif
+  bne  t0, t3, fail_t0                 # callee skipped
+  li   t3, 1
+  bne  t1, t3, fail_t2                 # instruction after the jal dropped
+  bne  t2, t3, fail_t2
+  csrw satp, zero
+  sfence.vma
+  csrw mtvec, s1
+  j    .Lvm2_done
+  .balign 8
+.Lvm2_callee:
+  li   t0, 7
+  ret
+  .balign 4
+.Lvm2_mhandler:
+  csrr t6, mcause
+  li   t5, 9                           # ecall from S
+  bne  t6, t5, fail_trap_cause
+  la   t5, .Lvm2_after                 # resume in M-mode at the physical alias
+  csrw mepc, t5
+  li   t5, (3 << 11)
+  csrs mstatus, t5                     # MPP = M
+  mret
+  .section .data
+  .balign 4096
+.Lvm2_pt:
+  .space 4096
+  .text
+.Lvm2_done:
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".

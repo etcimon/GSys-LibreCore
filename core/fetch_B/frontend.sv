@@ -46,6 +46,9 @@ module frontend
     input logic halt_i,
     // Halt frontend - CONTROLLER (in the case of fence_i to avoid fetching an old instruction)
     input logic halt_frontend_i,
+    // T29: instruction translation active (satp mode != bare below M, or
+    // G-stage) -- predicted targets are virtual, the PMA filter does not apply
+    input logic fetch_translation_en_i,
     // Set COMMIT PC as next PC requested by FENCE, CSR side-effect and Accelerate port - CONTROLLER
     input logic set_pc_commit_i,
     // Hart of the committing instruction — PC_COMMIT only if it matches smt_hart_i
@@ -478,7 +481,7 @@ module frontend
   end
   logic bp_fire;
   assign bp_fire = bp_valid
-      && g6lc_fetch_pkg::predict_fetchable(CVA6Cfg, 64'(predict_address))
+      && g6lc_fetch_pkg::predict_fetchable(CVA6Cfg, 64'(predict_address), fetch_translation_en_i)
       && g6lc_fetch_pkg::cf_consumed(cf_v8, cf_t8, cf_c8);
 
   // T19 (defect 1): hart-qualify the redirect under MIXED residency only. With

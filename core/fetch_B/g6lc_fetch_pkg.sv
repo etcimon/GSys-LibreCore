@@ -372,11 +372,19 @@ package g6lc_fetch_pkg;
 
   // I19 / I21: prediction may be suppressed if the target is not fetchable.
   // Never call on resolve (I11). Uses PMA execute regions (identity map).
+  // T29: the regions are PHYSICAL. With instruction translation on the
+  // predicted target is a virtual address (Linux: 0xffffffff8...), the
+  // region test says 'not fetchable', bp_fire stays low, the IQ still carries
+  // the prediction, the branch resolves as predicted and fetch never goes to
+  // the target -- the kernel's first call after relocate_enable_mmu lost its
+  // callee on every package. Under translation the MMU/I$ fault path owns
+  // fetchability; the filter applies to bare (physical) fetch only.
   function automatic logic predict_fetchable(
       input cva6_cfg_t cfg,
-      input logic [63:0] target
+      input logic [63:0] target,
+      input logic translation_en
   );
-    predict_fetchable = is_inside_execute_regions(cfg, target);
+    predict_fetchable = translation_en ? 1'b1 : is_inside_execute_regions(cfg, target);
   endfunction
 
   // L4: redirect only if IQ accepted a CF slot. ras_push/ras_pop already

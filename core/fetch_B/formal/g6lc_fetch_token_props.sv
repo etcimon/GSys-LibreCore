@@ -184,6 +184,7 @@ module g6lc_fetch_token_props #(
       .flush_i,
       .halt_i,
       .halt_frontend_i (1'b0),
+      .fetch_translation_en_i (1'b0),
       .set_pc_commit_i,
       .commit_hart_i   ('0),
       .pc_commit_i,

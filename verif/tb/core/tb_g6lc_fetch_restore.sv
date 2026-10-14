@@ -133,7 +133,7 @@ module tb_g6lc_fetch_restore;
   frontend #(.CVA6Cfg(C), .bp_resolve_t(bpr_t), .fetch_entry_t(entry_t),
              .icache_dreq_t(idreq_t), .icache_drsp_t(idrsp_t)) dut (
     .clk_i(clk), .rst_ni(rst_n), .boot_addr_i(64'h0),
-    .flush_bp_i(1'b0), .flush_i(1'b0), .halt_i(1'b0), .halt_frontend_i(1'b0),
+    .flush_bp_i(1'b0), .flush_i(1'b0), .halt_i(1'b0), .halt_frontend_i(1'b0), .fetch_translation_en_i(1'b0),
     .set_pc_commit_i(1'b0), .commit_hart_i('0), .pc_commit_i('0),
     .mem_replay_pc_i(1'b0), .ex_valid_i(1'b0), .resolved_branch_i(rb),
     .eret_i(1'b0), .epc_i('0), .trap_vector_base_i('0),
