@@ -1236,6 +1236,18 @@ Cross-thread invalidation design before the cache can see the server model's idl
 cores, which is the only real-model shape where §9.3's sparse gain could apply. A
 further 10× on the core model is not reached and is not claimed.
 
+### 9.9 Trace (`--trace-fst`) models segfault at start unless the stack is unlimited (2026-10-14)
+
+`SOFT_LADDER_BUILD_TRACE_COMPACT=1` models of the OoO core (`ooocoh-t28-ooo-slw-fst-build`,
+any package with the SL-W fixup queue) died with `SIGSEGV` in
+`Variane_testharness___024root___eval_initial__TOP` before the first cycle, with or without
+`--fst=`. `gdb` shows a plain stack overflow: the T16 flow builds with `-output-split-cfuncs 0`,
+so the trace model's `eval_initial` is one function whose frame exceeds the default 8 MB stack.
+`ulimit -s unlimited` before the run fixes it (the FST then dumps normally); the run scripts
+(`t21/q-t29-fst.sh`) carry it. The alternative is to leave `-output-split-cfuncs` at its
+default for trace builds — not measured for speed, and trace models are never the model of
+record, so the ulimit is the recorded workaround.
+
 ## 10. Host ISA and word-vector (SIMD) kernels (2026-10-13)
 
 ### 10.1 Where SIMD applies, from the real-core profile
