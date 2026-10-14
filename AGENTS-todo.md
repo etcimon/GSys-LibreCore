@@ -1604,11 +1604,19 @@ prerequisite for this work under the existing dual license. No licensing policy 
   stages 38/41/46/47 unchanged. Kernel probe on the fixed model: past
   `percpu` to `Zone ranges: DMA32 [mem 0x80000000-0x8fffffff]`, 15.8 M
   retired at ≈ 22 M cycles and still retiring (`linux-probe-l1ooo-trace`).
-  **L1/L3 relaunched on it** (`linux-boot-l1ooo-…` /
-  `linux-boot-l3ooo-…-ooocoh-t32-ooo-pa-pgo-build`). Owed: the frozen
-  battery on the T32 model for the exactness record; the server packages
-  need this fix too (rebuild after `ooocoh-t31-server*-final` finish, or
-  reuse them only for non-Linux work). Residual liveness hazard noted: a
+  **L1 relaunched on it** (`linux-boot-l1ooo-ooocoh-t32-ooo-pa-pgo-build`,
+  detached): `SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=1, Nodes=1` at
+  ≈ 82 M cycles / 69.7 M retired, ≈ 35 k cycles/s, still retiring —
+  success marker `G6LC_LINUX_SHELL` (`t21/q-l1now.sh` for status). The L3
+  run was OOM-killed twice (each Linux model held ≈ 28 GB RSS: the bulk
+  preload read the whole 256 MiB window through fesvr's sparse hexwriter
+  map — fixed in `g6lc_tb.cpp` to read the PHDR's real extent, `ac5e5606c`;
+  models built before it still cost 28 GB, so run one Linux model at a time
+  on them). Frozen battery on the T32 model: s11 + m04/m20/m32–m37 + ilp/dep
+  Spike-exact, qualified, s11 10,969 cycles. The server packages still lack
+  T32 (`ooocoh-t31-server1-final-pgo-build` / `…-server-final-mt4-build`
+  were launched before it) — rebuild from HEAD before any Linux run on
+  them. Residual liveness hazard noted: a
   younger load with *partial* coverage still parks in WAIT_PAGE_OFFSET and
   can hold the LU against an older load — the IQ-side gate (do not issue a
   load whose lane matches an older speculative store ahead of older loads)
