@@ -657,7 +657,15 @@ done_processing:
   bool bulk_done = false;
   while (get_section(&addr, &len)) {
     if (!bulk_done && addr == (long long)dram_base) {
-      read_section_void(addr, (void *)MEM, mem_size);
+      // Read the PHDR's real extent, not the whole window: fesvr's hexwriter
+      // memif is a sparse map that materialises a node per chunk touched, so a
+      // 256 MiB read of a 66 MB payload cost ~28 GB of RSS (two Linux models
+      // were OOM-killed on the 125 GB builder).
+      {
+        size_t n = (size_t)len;
+        if (n == 0 || n > mem_size) n = mem_size;
+        read_section_void(addr, (void *)MEM, n);
+      }
       bulk_done = true;
     } else if (len > 0) {
       const uint64_t a = (uint64_t)addr;
