@@ -124,6 +124,23 @@ LOGIC API-L2 · Every object kind has a complete lifetime at scale
               records and descriptor storage live in device-private memory with on-chip
               slots as caches, so the limit on live objects is the arena, not a count.
               Generation wrap and slot recycling safe against ABA (W2.3).
+              **Sizing from the source (vktApiObjectManagementTests.cpp @ f6a29701):**
+              `max_concurrent` creates `min(hardCountLimit, platform-safe count)` objects
+              *simultaneously* and any creation failure fails the test (no OOM tolerance
+              in that pattern) — hard limits `DEFAULT_MAX_CONCURRENT_OBJECTS = 16 384`
+              (buffers, buffer views, images, image views, samplers, shader modules,
+              pipeline layouts, descriptor set layouts, render passes, graphics and
+              compute pipelines, descriptor pools and sets, framebuffers, command pools
+              and buffers, device memory), `MAX_CONCURRENT_QUERY_POOLS = 8192`,
+              `MAX_CONCURRENT_PIPELINE_CACHES = 128`, `MAX_CONCURRENT_SYNC_PRIMITIVES =
+              100`, `MAX_CONCURRENT_DEVICES/INSTANCES = 32`; the platform-safe count on
+              the Linux platform divides the host memory budget by the per-object host
+              allocation (small under Venus), so the hard limits are what we must meet.
+              The multithreaded patterns create `getCreateCount<Object>() = 100` per
+              thread (20 for devices/instances) across `numSlots = 100` slots. Therefore
+              G3b's ObjTab/ObjPay/module/command-buffer storage must hold **≥ 16 384 live
+              objects of each kind at once** — a DRAM-resident object table with an SRAM
+              directory/cache, not a bigger flop or SRAM table (256 slots today).
   FORBIDS     Counting a truthful VK_ERROR_OUT_OF_HOST_MEMORY on the 17th command buffer
               as "working as designed" for this group (CTS-P2); special-casing the test's
               object counts.
