@@ -1,0 +1,230 @@
+/* SPDX-License-Identifier: MIT
+ * g6lc-g6lc64_stream8 device tree with a second RAM bank at 0xa0000000.
+ * Decompile of the machine blob (g6lc-g6lc64_stream8-dtb.c) plus the
+ * memory@a0000000 node; @DRAM2_SIZE@ is substituted by drive_guest.py
+ * with (G6LC_GUEST_MEM - 224) MiB when -m exceeds the low bank, then
+ * compiled here with dtc and passed via -dtb.
+ */
+/dts-v1/;
+
+/ {
+	#address-cells = <0x02>;
+	#size-cells = <0x02>;
+	compatible = "g6lc,g6lc64_stream8";
+	model = "GSys LibreCore g6lc64_stream8";
+
+	chosen {
+		bootargs = "console=ttyS0,115200 earlycon=uart8250,mmio,0x10000000,115200n8 maxcpus=2 root=/dev/ram rw";
+		stdout-path = "/soc/uart@10000000:115200";
+	};
+
+	cpus {
+		#address-cells = <0x01>;
+		#size-cells = <0x00>;
+		timebase-frequency = <0x8000>;
+
+		cpu@0 {
+			compatible = "riscv";
+			d-cache-block-size = <0x10>;
+			d-cache-size = <0x8000>;
+			device_type = "cpu";
+			i-cache-block-size = <0x10>;
+			i-cache-size = <0x4000>;
+			mmu-type = "riscv,sv39";
+			phandle = <0x04>;
+			reg = <0x00>;
+			riscv,cbom-block-size = <0x40>;
+			riscv,cboz-block-size = <0x40>;
+			riscv,isa = "rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas";
+			riscv,isa-base = "rv64i";
+			riscv,isa-extensions = "a\0b\0c\0d\0f\0h\0i\0m\0s\0sscofpmf\0sstc\0svnapot\0svpbmt\0zacas\0zawrs\0zba\0zbb\0zbs\0zcb\0zicbom\0zicbop\0zicboz\0zicntr\0zicond\0zicsr\0zifencei\0zihintpause\0zihpm\0zkn";
+			status = "okay";
+			tlb-split;
+
+			interrupt-controller {
+				#interrupt-cells = <0x01>;
+				compatible = "riscv,cpu-intc";
+				interrupt-controller;
+				phandle = <0x02>;
+			};
+		};
+
+		cpu@1 {
+			compatible = "riscv";
+			d-cache-block-size = <0x10>;
+			d-cache-size = <0x8000>;
+			device_type = "cpu";
+			i-cache-block-size = <0x10>;
+			i-cache-size = <0x4000>;
+			mmu-type = "riscv,sv39";
+			phandle = <0x05>;
+			reg = <0x01>;
+			riscv,cbom-block-size = <0x40>;
+			riscv,cboz-block-size = <0x40>;
+			riscv,isa = "rv64imafdc_zba_zbb_zbs_zicbom_zicboz_zacas";
+			riscv,isa-base = "rv64i";
+			riscv,isa-extensions = "a\0b\0c\0d\0f\0h\0i\0m\0s\0sscofpmf\0sstc\0svnapot\0svpbmt\0zacas\0zawrs\0zba\0zbb\0zbs\0zcb\0zicbom\0zicbop\0zicboz\0zicntr\0zicond\0zicsr\0zifencei\0zihintpause\0zihpm\0zkn";
+			status = "okay";
+			tlb-split;
+
+			interrupt-controller {
+				#interrupt-cells = <0x01>;
+				compatible = "riscv,cpu-intc";
+				interrupt-controller;
+				phandle = <0x03>;
+			};
+		};
+
+		cpu-map {
+
+			cluster0 {
+
+				core0 {
+					cpu = <0x04>;
+				};
+
+				core1 {
+					cpu = <0x05>;
+				};
+			};
+		};
+	};
+
+	memory@80000000 {
+		device_type = "memory";
+		reg = <0x00 0x80000000 0x00 0x2000000>;
+	};
+
+	memory@84000000 {
+		device_type = "memory";
+		reg = <0x00 0x84000000 0x00 0xc000000>;
+	};
+
+	memory@a0000000 {
+		device_type = "memory";
+		reg = <0x00 0xa0000000 0x00 @DRAM2_SIZE@>;
+	};
+
+	soc {
+		#address-cells = <0x02>;
+		#size-cells = <0x02>;
+		compatible = "simple-bus";
+		ranges;
+
+		interrupt-controller@c000000 {
+			#address-cells = <0x00>;
+			#interrupt-cells = <0x01>;
+			#size-cells = <0x00>;
+			compatible = "sifive,plic-1.0.0";
+			interrupt-controller;
+			interrupts-extended = <0x02 0x0b 0x02 0x09 0x03 0x0b 0x03 0x09>;
+			phandle = <0x01>;
+			reg = <0x00 0xc000000 0x00 0x4000000>;
+			riscv,ndev = <0x1e>;
+		};
+
+		clint@2000000 {
+			compatible = "sifive,clint0";
+			interrupts-extended = <0x02 0x03 0x02 0x07 0x03 0x03 0x03 0x07>;
+			reg = <0x00 0x2000000 0x00 0xc0000>;
+		};
+
+		uart@10000000 {
+			clock-frequency = <0x2faf080>;
+			compatible = "ns16550a";
+			current-speed = <0x1c200>;
+			interrupt-parent = <0x01>;
+			interrupts = <0x01>;
+			reg = <0x00 0x10000000 0x00 0x1000>;
+			reg-io-width = <0x04>;
+			reg-shift = <0x02>;
+		};
+
+		timer@18000000 {
+			compatible = "pulp,apb_timer";
+			reg = <0x00 0x18000000 0x00 0x0c>;
+		};
+
+		l2-cache@1f000000 {
+			compatible = "cache";
+			reg = <0x00 0x1f000000 0x00 0x1000>;
+		};
+
+		gpu@40001000 {
+			compatible = "virtio,mmio";
+			interrupt-parent = <0x01>;
+			interrupts = <0x09>;
+			reg = <0x00 0x40001000 0x00 0x1000>;
+		};
+
+		virtio0@90000000 {
+			compatible = "virtio,mmio";
+			dma-coherent;
+			interrupt-parent = <0x01>;
+			interrupts = <0x0a>;
+			reg = <0x00 0x90000000 0x00 0x1000>;
+		};
+
+		virtio1@90001000 {
+			compatible = "virtio,mmio";
+			dma-coherent;
+			interrupt-parent = <0x01>;
+			interrupts = <0x0b>;
+			reg = <0x00 0x90001000 0x00 0x1000>;
+		};
+
+		virtio2@90002000 {
+			compatible = "virtio,mmio";
+			dma-coherent;
+			interrupt-parent = <0x01>;
+			interrupts = <0x0c>;
+			reg = <0x00 0x90002000 0x00 0x1000>;
+		};
+
+		virtio3@90003000 {
+			compatible = "virtio,mmio";
+			dma-coherent;
+			interrupt-parent = <0x01>;
+			interrupts = <0x0d>;
+			reg = <0x00 0x90003000 0x00 0x1000>;
+		};
+
+		virtio4@90004000 {
+			compatible = "virtio,mmio";
+			dma-coherent;
+			interrupt-parent = <0x01>;
+			interrupts = <0x0e>;
+			reg = <0x00 0x90004000 0x00 0x1000>;
+		};
+
+		virtio5@90005000 {
+			compatible = "virtio,mmio";
+			dma-coherent;
+			interrupt-parent = <0x01>;
+			interrupts = <0x0f>;
+			reg = <0x00 0x90005000 0x00 0x1000>;
+		};
+
+		virtio6@90006000 {
+			compatible = "virtio,mmio";
+			dma-coherent;
+			interrupt-parent = <0x01>;
+			interrupts = <0x10>;
+			reg = <0x00 0x90006000 0x00 0x1000>;
+		};
+
+		virtio7@90007000 {
+			compatible = "virtio,mmio";
+			dma-coherent;
+			interrupt-parent = <0x01>;
+			interrupts = <0x11>;
+			reg = <0x00 0x90007000 0x00 0x1000>;
+		};
+	};
+
+	pmu {
+		compatible = "riscv,pmu";
+		interrupts-extended = <0x02 0x0d 0x03 0x0d>;
+		riscv,event-to-mhpmcounters = <0x01 0x01 0x01 0x02 0x02 0x02>;
+	};
+};

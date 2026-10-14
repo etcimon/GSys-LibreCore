@@ -178,6 +178,7 @@ static std::unordered_map<uint16_t, DmaReply> dma_replies;
 static std::unordered_map<uint16_t, std::pair<uint64_t, uint32_t>> rd_track;
 static bool dbg = false;
 static bool dbg_dma = false;   // per-beat DMA prints: G6LC_APU_DEBUG_DMA
+static bool dbg_mmio = false;  // per-frame MMIO prints: G6LC_APU_DEBUG_MMIO
 
 static int prev_irq = 0;
 
@@ -229,6 +230,7 @@ static void on_frame(uint8_t type, uint8_t flags, uint16_t seq,
       return;
     }
     mmio_q.push_back({seq, false, off, 0, 0});
+    if (dbg_mmio) fprintf(stderr, "[dbg] MMIO_RD off %04x seq %u\n", off, seq);
     break;
   }
   case T_MMIO_WR: {
@@ -236,6 +238,7 @@ static void on_frame(uint8_t type, uint8_t flags, uint16_t seq,
     uint32_t off = pl[0] | (pl[1] << 8) | (pl[2] << 16) | ((uint32_t)pl[3] << 24);
     uint32_t d = pl[4] | (pl[5] << 8) | (pl[6] << 16) | ((uint32_t)pl[7] << 24);
     mmio_q.push_back({seq, true, off, d, pl[8]});
+    if (dbg_mmio) fprintf(stderr, "[dbg] MMIO_WR off %04x = %08x seq %u\n", off, d, seq);
     break;
   }
   case T_DMA_RD_R: {
@@ -583,6 +586,7 @@ int main(int argc, char** argv) {
   Verilated::commandArgs(argc, argv);
   dbg = getenv("G6LC_APU_DEBUG") != nullptr;
   dbg_dma = getenv("G6LC_APU_DEBUG_DMA") != nullptr;
+  dbg_mmio = getenv("G6LC_APU_DEBUG_MMIO") != nullptr;
   const char* sock = getenv("G6LC_APU_RTL_SOCK");
   if (!sock) sock = "/tmp/g6lc-apu-rtl.sock";
   const char* trace = nullptr;

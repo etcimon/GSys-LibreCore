@@ -144,13 +144,41 @@ SEGMENT CTS-0/info
                   vn_device_profile.toml at ab296cfda.
   CONTRACT        info.* self-validate; device_mandatory_features is the only case whose
                   outcome depends on an unimplemented mechanism (hypothesis INFO-L2).
-  OBSERVATIONS    none yet (build in flight).
-  HYPOTHESES      H1 all pass except device_mandatory_features (multiview);
-                  H2 additional failures from limits the audit already flags.
-  DISCRIMINATOR   the .qpa text of each failing case names the feature/limit.
-  RESULT          pending.
-  LIMITS          One guest configuration; llvmpipe control run proves the harness only.
-  NEXT ARTIFACT   ledger row `info`; W1 ledger entry for the version decision.
+  OBSERVATIONS    Run `cts0-2026-10-14` (deqp-vk `c1078a2d`, `vulkan_headless` target, guest
+                  2 GiB, profile `98968f8b`): info 21 run — 17 Pass, 2 NotSupported
+                  (`device_memory_budget`: EXT absent; `device_group_peer_memory_features`:
+                  one device — both identical on host llvmpipe), 2 Fail:
+                  `device_mandatory_features` = "Mandatory feature multiview not
+                  supported"; `device_properties` = 39 limit validations below the 1.0/1.1
+                  minima (maxImageDimension1D/3D/Cube = 0, maxTexelBufferElements = 0,
+                  maxStorageBufferRange 16 MiB < 128 MiB, maxMemoryAllocationCount 64 <
+                  4096, maxSamplerAllocationCount 64 < 4000, maxPerStageResources 16 <
+                  128, maxDescriptorSet* 16 < 72…96, maxVertexInputAttributes 8 /
+                  Bindings 4 < 16, maxComputeWorkGroupCount 0, *SampleCounts without 4,
+                  discreteQueuePriorities 0 < 2, texel-offset/alignment fields 0).
+                  An earlier run at 16:28 that showed 297/308 was the guest's **llvmpipe**:
+                  the Venus PD was absent (DMA window did not cover the 2 GiB second bank)
+                  and the device-id fell back to 1 — discarded; the harness now fails
+                  closed when no Venus PD is found (RT-P1: validate the instrument).
+  HYPOTHESES      H1 confirmed by the source: Mesa Venus (`vn_physical_device.c`)
+                  advertises `KHR_multiview`, `KHR_shader_draw_parameters`,
+                  `KHR_variable_pointers`, `KHR_device_group`, … unconditionally for any
+                  renderer ≥ VN_MIN_RENDERER_VERSION (1.1), so the CTS requires
+                  `multiview = true` from us; H2 confirmed (39 limits).
+  DISCRIMINATOR   done — the .qpa names each feature/limit.
+  RESULT          INFO-L2 → multiview is an obligation now (MV-L1 promoted to G3c:
+                  view loop + layered attachments + ViewIndex); INFO-L1 → each of the 39
+                  limits maps to a card: G3b residency (allocation/sampler/descriptor
+                  counts, per-stage resources), G3d (1D/3D/cube dims, texel buffers),
+                  G3c (sample counts 1|4, vertex attributes/bindings 16), pure-profile
+                  truth fixes where the mechanism already exists (discreteQueuePriorities,
+                  texel offsets, alignments, maxComputeWorkGroupCount from the dispatch
+                  field width, maxStorageBufferRange from the LSU address width) — each
+                  raised only with its mechanism verified.
+  LIMITS          One guest configuration; 1.1 obligations only (the 1.2+ families are
+                  not yet in the list).
+  NEXT ARTIFACT   ledger row `info` (2 fail); the W1 limits table with mechanism per
+                  limit; MV-L1 in the G3c brief.
 ```
 
 ## Performance / area / scalability

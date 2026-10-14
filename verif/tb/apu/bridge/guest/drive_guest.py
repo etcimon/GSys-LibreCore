@@ -41,6 +41,15 @@ IMG = f"{CACHE}/ubuntu-24.04.5-preinstalled-server-riscv64.img"
 CIDATA = f"{CACHE}/cidata.img"
 KERNEL = f"{CACHE}/vmlinuz"
 SWAP = f"{CACHE}/swap.raw"
+CTS_CACHE = os.environ.get("G6LC_CTS_CACHE", f"{ROOT}/.cache/cts")
+CTSDATA = os.environ.get("G6LC_CTSDATA", f"{CTS_CACHE}/ctsdata.img")
+# Usable guest RAM in MiB.  The machine's low bank always supplies
+# 224 MiB (256 MiB DRAM minus the 32 MiB APU aperture); -m above that
+# adds a second bank at 0xa0000000 and needs the matching DTB (see
+# g6lc-g6lc64_stream8.dts).  224 keeps the legacy embedded-DTB map.
+GUEST_MEM_MIB = int(os.environ.get("G6LC_GUEST_MEM", "224"))
+DRAM2_BASE = 0xA0000000
+LOW_USABLE_MIB = 224
 SOCKDIR = os.environ.get("G6LC_SOCKDIR", "/tmp/g6lc-apu-sock")
 SOCK = f"{SOCKDIR}/rtl.sock"
 CONSOLE = f"{SOCKDIR}/console.sock"
@@ -117,7 +126,10 @@ def main():
         print(f"FATAL: bridge server {server_bin} missing — run "
               f"APU_BRIDGE_OUT={BRIDGE_OUT} verif/tb/apu/bridge/build-bridge.sh")
         return 2
-    for f in (IMG, CIDATA, KERNEL, SWAP):
+    required = [IMG, CIDATA, KERNEL]
+    if not os.environ.get("G6LC_CTS"):
+        required.append(SWAP)
+    for f in required:
         if not os.path.exists(f):
             print(f"FATAL: {f} missing — run run-guest.sh (provisioning)")
             return 2
@@ -142,27 +154,46 @@ def main():
         time.sleep(0.25)
 
     env = dict(os.environ, G6LC_APU_RTL_SOCK=SOCK)
+    # -m N = N MiB usable guest RAM; >224 MiB instantiates the second
+    # bank in the machine and needs the extended DTB (memory@a0000000).
+    dtb_arg = []
+    if GUEST_MEM_MIB > LOW_USABLE_MIB:
+        dram2_bytes = (GUEST_MEM_MIB - LOW_USABLE_MIB) << 20
+        dts = open(f"{GUEST_DIR}/g6lc-g6lc64_stream8.dts").read()
+        dtb = f"{CACHE}/g6lc-mem{GUEST_MEM_MIB}.dtb"
+        stamp = f"{CACHE}/g6lc-mem{GUEST_MEM_MIB}.dts"
+        if not os.path.exists(dtb):
+            open(stamp, "w").write(
+                dts.replace("@DRAM2_SIZE@", f"0x{dram2_bytes:x}"))
+            subprocess.run(["dtc", "-I", "dts", "-O", "dtb",
+                            "-o", dtb, stamp], check=True)
+        dtb_arg = ["-dtb", dtb]
+        print(f"[drive] guest RAM {GUEST_MEM_MIB} MiB usable "
+              f"(+{dram2_bytes >> 20} MiB bank at 0x{DRAM2_BASE:x})",
+              flush=True)
     qemu_cmd = [
         QEMU, "-L", QLIB,
         "-machine", "g6lc-g6lc64_stream8",
         "-cpu", "g6lc-g6lc64_stream8",
-        "-m", "512",
+        "-m", str(GUEST_MEM_MIB),
         "-smp", "2",
         "-bios", "default",
         "-kernel", KERNEL,
-        # No -initrd: the g6lc machine hardcodes dram_size=256 MiB and
-        # loads the kernel above the 32 MiB aperture hole, so a 75 MiB
-        # initrd cannot fit before the DTB ("No enough memory to place
-        # DTB after kernel/initrd").  virtio_blk/virtio_mmio/ext4 are
+        *dtb_arg,
+        # No -initrd: the g6lc machine loads the kernel above the
+        # 32 MiB aperture hole, so a 75 MiB initrd cannot fit before
+        # the DTB ("No enough memory to place DTB after kernel/
+        # initrd").  virtio_blk/virtio_mmio/ext4 are
         # built-in (config-7.0.0-31: =y), so the rootfs mounts direct.
         "-append", "root=PARTUUID=362560d2-8002-4ede-a939-37232b94afa1 "
                     "rw console=ttyS0 "
                     "systemd.unit=multi-user.target "
                     "systemd.mask=systemd-resolved.service "
                     "systemd.mask=systemd-networkd-wait-online.service "
-                    # 224 MiB usable RAM post-aperture: keep cloud-init
-                    # (sets the ubuntu password) but shed the heavy
-                    # nonessential units that OOM the boot.
+                    # Low-RAM guests (224 MiB usable post-aperture)
+                    # need cloud-init (sets the ubuntu password) but
+                    # shed the heavy nonessential units that OOM the
+                    # boot; harmless at higher -m.
                     "systemd.mask=apport.service "
                     "systemd.mask=ModemManager.service "
                     "systemd.mask=snapd.service "
@@ -186,8 +217,26 @@ def main():
         "-device", "virtio-blk-device,drive=hd0",
         "-drive", f"file={CIDATA},format=raw,if=none,id=cd0,readonly=on",
         "-device", "virtio-blk-device,drive=cd0",
-        "-drive", f"file={SWAP},format=raw,if=none,id=sw0,cache=writeback",
-        "-device", "virtio-blk-device,drive=sw0",
+    ]
+    # Swap exists to keep 224 MiB guests alive during apt; CTS runs at
+    # >=2 GiB must not depend on it.
+    swap_attached = not os.environ.get("G6LC_CTS")
+    if swap_attached:
+        qemu_cmd += [
+            "-drive", f"file={SWAP},format=raw,if=none,id=sw0,"
+                      "cache=writeback",
+            "-device", "virtio-blk-device,drive=sw0",
+        ]
+    if os.environ.get("G6LC_CTS"):
+        # CTS-0: deqp-vk + data + caselist on an ext4 image; mounted rw
+        # in the guest so results are written back to it, then pulled
+        # host-side with debugfs after QEMU exits.
+        qemu_cmd += [
+            "-drive", f"file={CTSDATA},format=raw,if=none,id=cts0,"
+                      "cache=unsafe",
+            "-device", "virtio-blk-device,drive=cts0",
+        ]
+    qemu_cmd += [
         "-netdev", "user,id=n0",
         "-device", "virtio-net-device,netdev=n0",
         "-device", "virtio-rng-device",
@@ -195,6 +244,7 @@ def main():
         "-serial", f"unix:{CONSOLE},server,nowait",
         "-monitor", f"unix:{MON},server,nowait",
     ]
+    qemu_cmd += os.environ.get("G6LC_QEMU_EXTRA", "").split()
     qemu_log = open(f"{args.out}/qemu-stderr-{mode}.log", "wb")
     qemu = subprocess.Popen(qemu_cmd, env=env, stdout=qemu_log, stderr=qemu_log)
 
@@ -283,16 +333,18 @@ def main():
         con.run("ping -c1 -W10 10.0.2.3 && ping -c1 -W10 ports.ubuntu.com",
                 timeout=90)
 
-        # 256 MiB DRAM OOMs during apt — a dedicated virtio-blk swap
+        # Low-DRAM guests OOM during apt — a dedicated virtio-blk swap
         # device (whole disk, no fs indirection).  Find it by size:
         # 768 MiB == 1572864 512B sectors.  bootcmd in user-data already
         # swapon'd it on later seeds; only mkswap when it is not active
         # yet (mkswap on a live swap would rewrite its signature).
-        con.run("swapon --show | grep -q . || "
-                "for d in /sys/block/vd*; do "
-                "  if [ \"$(cat $d/size)\" = 1572864 ]; then "
-                "    mkswap /dev/${d##*/} && swapon /dev/${d##*/}; "
-                "  fi; done; free -m", timeout=300)
+        # Skipped when the swap disk was not attached (CTS).
+        if swap_attached:
+            con.run("swapon --show | grep -q . || "
+                    "for d in /sys/block/vd*; do "
+                    "  if [ \"$(cat $d/size)\" = 1572864 ]; then "
+                    "    mkswap /dev/${d##*/} && swapon /dev/${d##*/}; "
+                    "  fi; done; free -m", timeout=300)
 
         # grow the rootfs into the expanded image + drop stale swapfile
         con.run("rootdev=$(findmnt -n -o SOURCE /); "
@@ -506,6 +558,81 @@ def main():
                     con.run("cd /root && for f in vkcmp_s*.bin; do "
                             "echo B64DUMP:$f; base64 $f; "
                             "echo B64END; done", timeout=300)
+            # CTS-0: run the pinned caselist on the Venus device with
+            # the deqp-vk shipped on the CTSDATA image.  Results are
+            # written back onto the image (/results/) and pulled
+            # host-side in the finally block once QEMU is down.
+            if os.environ.get("G6LC_CTS") and \
+                    (not only or "cts" in only):
+                caselist = os.environ.get(
+                    "G6LC_CTS_CASELIST",
+                    "caselists/cts0-info-smoke.txt")
+                # case count for the marker: read the caselist out of
+                # the image host-side.  The guest may hold it mounted
+                # rw, but the caselist is static content written at
+                # image creation — a read-only debugfs open is safe.
+                r = subprocess.run(
+                    ["debugfs", "-R", f"cat /{caselist}", CTSDATA],
+                    capture_output=True, text=True)
+                ctscases = (str(len(r.stdout.splitlines()))
+                            if r.returncode == 0 else "?")
+                rc = con.run(
+                    "mkdir -p /mnt/ctsdata && "
+                    "cdev=$(blkid -t LABEL=CTSDATA -o device | head -1); "
+                    "echo ctsdev=$cdev; "
+                    "mount $cdev /mnt/ctsdata && "
+                    "mkdir -p /mnt/ctsdata/results && "
+                    "DEVID=$(vulkaninfo --summary 2>/dev/null | awk '"
+                    "/^GPU[0-9]+:/{g++} "
+                    "/deviceName/ && /Venus/{print g; exit}'); "
+                    "echo G6LC_CTS_DEVID=${DEVID:-none}; "
+                    "vulkaninfo --summary 2>/dev/null | "
+                    "awk '/deviceName/{print; exit}'",
+                    timeout=900)
+                print(f"[drive] cts mount/enum rc={rc}", flush=True)
+                fail |= (rc != 0)
+                if rc == 0:
+                    # assert the Venus device is the one selected; the
+                    # deqp run log must name it (implementation info).
+                    rc = con.run(
+                        "cd /mnt/ctsdata && "
+                        "DEVID=$(vulkaninfo --summary 2>/dev/null | awk '"
+                        "/^GPU[0-9]+:/{g++} "
+                        "/deviceName/ && /Venus/{print g; exit}'); "
+                        "echo running deqp-vk device-id=${DEVID:-none}; "
+                        "[ -n \"$DEVID\" ] || { echo 'FAIL: no Venus "
+                        "physical device for CTS' >&2; false; } && "
+                        "set -o pipefail; "
+                        "./deqp-vk "
+                        f"--deqp-caselist-file={caselist} "
+                        "--deqp-log-images=disable "
+                        "--deqp-log-shader-sources=disable "
+                        "--deqp-vk-device-id=$DEVID "
+                        "--deqp-log-filename=/mnt/ctsdata/results/"
+                        "TestResults.qpa "
+                        "--deqp-log-flush=disable "
+                        "--deqp-shadercache=disable "
+                        "--deqp-archive-dir=/mnt/ctsdata "
+                        "2>&1 | tail -25",
+                        timeout=int(os.environ.get(
+                            "G6LC_CTS_TIMEOUT", "14400")))
+                    if rc is None:
+                        # con.run timeout — possible wedge; leave rc
+                        # visible, mark the guest run failed.
+                        print("G6LC_CTS_RUN cases=? rc=timeout",
+                              flush=True)
+                        fail = True
+                    else:
+                        print(f"G6LC_CTS_RUN cases={ctscases} rc={rc}",
+                              flush=True)
+                        fail |= (rc != 0)
+                    con.run(
+                        "cd /root; "
+                        "cp /root/vulkaninfo-summary.txt "
+                        "/mnt/ctsdata/results/ 2>/dev/null; "
+                        "dmesg > /mnt/ctsdata/results/dmesg.txt; "
+                        "sync; umount /mnt/ctsdata; echo CTS_SYNCED",
+                        timeout=120)
 
         # post-mortem: dump the whole aperture window from QEMU RAM
         try:
@@ -553,6 +680,22 @@ def main():
             server.wait(timeout=10)
         except subprocess.TimeoutExpired:
             server.kill()
+        # QEMU is down; the CTSDATA image is closed — pull the deqp
+        # results out of it unprivileged with debugfs.
+        if os.environ.get("G6LC_CTS") and not args.venusoff and \
+                os.path.exists(CTSDATA):
+            for src, dst in (("/results/TestResults.qpa",
+                              "cts-TestResults.qpa"),
+                             ("/results/vulkaninfo-summary.txt",
+                              "cts-vulkaninfo-summary.txt"),
+                             ("/results/dmesg.txt", "cts-dmesg.txt")):
+                r = subprocess.run(
+                    ["debugfs", "-R", f"dump {src} {args.out}/{dst}",
+                     CTSDATA],
+                    capture_output=True, text=True)
+                print(f"[drive] cts pull {src}: "
+                      f"{'ok' if r.returncode == 0 else r.stderr.strip()}",
+                      flush=True)
         serial_log.close()
         server_log.close()
         qemu_log.close()

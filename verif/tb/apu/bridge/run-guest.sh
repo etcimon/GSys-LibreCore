@@ -156,7 +156,7 @@ need_build=0
 if [ ! -x "$APU_BRIDGE_OUT/obj_venus/apu_bridge" ] || \
    [ ! -x "$APU_BRIDGE_OUT/obj_venusoff/apu_bridge" ]; then
   need_build=1
-elif find "$ROOT/corev_apu/apu" "$ROOT/verif/tb/apu/bridge" \
+elif find "$ROOT/corev_apu/apu" "$ROOT/corev_apu/include" "$ROOT/verif/tb/apu/bridge" \
         "$ROOT/core/include" \
         "$ROOT/software/apu-venus-probe/tools" \
         "$ROOT/vendor/pulp-platform/tech_cells_generic" \
@@ -170,6 +170,26 @@ fi
 if [ "$need_build" = 1 ]; then
   echo "[guest] building bridge server -> $APU_BRIDGE_OUT"
   "$ROOT/verif/tb/apu/bridge/build-bridge.sh" | tail -5
+fi
+
+# Guest RAM in MiB (usable; the machine adds a second bank above the
+# peripheral window for >224).  deqp-vk OOMs in 224 MiB, so CTS gets
+# 2 GiB by default; override with G6LC_GUEST_MEM.
+if [ -z "${G6LC_GUEST_MEM:-}" ] && [ -n "${G6LC_CTS:-}" ]; then
+  G6LC_GUEST_MEM=2048
+fi
+[ -n "${G6LC_GUEST_MEM:-}" ] && export G6LC_GUEST_MEM
+
+# CTS-0 opt-in: attach the CTSDATA ext4 image (deqp-vk + data +
+# caselist) to both QEMU arms; the cts stage itself runs on the venus
+# arm only.  Build it once with guest/cts/build-deqp.sh.
+if [ -n "${G6LC_CTS:-}" ]; then
+  CTS_IMG="$ROOT/.cache/cts/ctsdata.img"
+  if [ ! -f "$CTS_IMG" ]; then
+    echo "[guest] G6LC_CTS=1 but $CTS_IMG missing — run " \
+         "verif/tb/apu/bridge/guest/cts/build-deqp.sh" >&2
+    exit 2
+  fi
 fi
 
 rc_all=0

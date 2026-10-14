@@ -1352,6 +1352,14 @@ architecture*, *reorder, never drop*. RTL increments from G3a-ii on cite the car
 move and name their must-pass caselist from them.
 
 Status 2026-10-14: `specs/VK-GL-CTS` registered (`b528f6d3f`); 27 decomposition files cover
-all 98 lists (`986dfe21d`); CTS-0 harness built (host llvmpipe control: 297 Pass / 11
-NotSupported of 308), riscv64 `deqp-vk` cross-build in flight; no CTS result on the device
-yet.
+all 98 lists (`986dfe21d`); **CTS-0 ran on the device** (run `cts0-2026-10-14`, RTL
+`ab296cfda`, deqp-vk `c1078a2d` built with `vulkan_headless`, guest 2 GiB): 36 of 308 run —
+27 Pass, 2 honest NotSupported, 6 Fail (`info.device_properties` 39 below-minimum limits,
+`info.device_mandatory_features` multiview, the four `api.smoke.*` triangles under the
+exact-colour compare), 1 ResourceError (`create_multiple_devices`, 5 devices) that aborted
+the session with 272 cases unrun. Host llvmpipe control 297/11/0. The generated ledger is
+`apu-cts-ledger.md`; the classification and consequences are in `specs/architecture/
+cts-info.md` and `cts-api.md` (segment cards). Two facts settled from the sources: Venus
+exposes `KHR_multiview` for every 1.1 renderer (multiview is an obligation → G3c), and the
+CTS ends the session on an exhaustion error (device/context/allocation counts are CTS-1
+preconditions → G3b, §5a).

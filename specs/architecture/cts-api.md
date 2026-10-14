@@ -351,6 +351,11 @@ EXCEPTION API-X2 · Exhaustion of device-private storage
   CHECK       ue_sm5_cbfull, ue_cneg_evict_full_1, ue_cneg_bind_full_1 (engine);
               api.object_management.max_concurrent.* (CTS-1).
   FORBIDS     Silently reusing a live slot; waiving max_concurrent.
+  OBSERVED    CTS-0: `create_multiple_devices.basic` (5 devices) → OUT_OF_HOST_MEMORY on
+              queueWaitIdle → the CTS **aborts the whole session** on a ResourceError —
+              an exhaustion result is not "spec-legal and harmless" in the CTS: it ends
+              the run. Contexts/devices ≥ 32 and allocation counts ≥ 4096 are therefore
+              preconditions of CTS-1, not polish.
 
 EXCEPTION API-X3 · NotSupported by truthful absence (api sub-groups)
   CONDITION   Tests of extensions/versions we do not advertise at 1.1:
@@ -407,15 +412,34 @@ SEGMENT CTS-0/api
   CONTRACT        single.* must pass for every object kind we can create at all; the
                   smoke triangles must match the reference images (api.smoke.triangle,
                   asm_triangle); create_sampler/create_shader are pure object paths.
-  OBSERVATIONS    none yet.
-  HYPOTHESES      H1 smoke.* pass (G2 raster + G3a-i shaders); H2 single.* fails for
-                  kinds we refuse (sparse, 1D/3D images, cube views, events? query pools)
-                  — each failure names a card above or in cts-image.md.
-  DISCRIMINATOR   the per-case .qpa message (VkResult or image diff).
-  RESULT          pending.
-  LIMITS          one guest; llvmpipe control validates the harness not the device.
-  NEXT ARTIFACT   ledger row `api`; CTS-1 caselist (select on the passing families +
-                  the first failing one per card).
+  OBSERVATIONS    Run `cts0-2026-10-14`: api 15 run of 287 selected — 10 Pass
+                  (device_init.create_instance_*, create_device.basic, …), 4 Fail
+                  (`smoke.triangle`, `smoke.asm_triangle`, `smoke.asm_triangle_no_opname`,
+                  `smoke.unused_resolve_attachment`: "Image comparison failed: allowed
+                  position deviation (1,1,0), color threshold (0,0,0,0)"), 1
+                  ResourceError (`device_init.create_multiple_devices.basic`:
+                  `queueWaitIdle → VK_ERROR_OUT_OF_HOST_MEMORY` with NUM_DEVICES = 5),
+                  which **aborted the session** — 272 cases (object_management.single.*,
+                  the rest of device_init) never ran.
+  HYPOTHESES      H1 refuted: the smoke triangles differ from the CTS reference under an
+                  exact-colour / 1-pixel-shift compare although vkcmp scene 0 matched
+                  llvmpipe at maxdiff 0 → the delta is in what the smoke tests do that
+                  scene 0 does not (clear-then-draw into R8G8B8A8, the reference
+                  rasterizer's rounding of the UNORM encode, edge rule at the shared
+                  edge, the unused-resolve attachment path) — image diff pending.
+                  H3 (new): the device-count abort is the context/ring count (≥ 5
+                  concurrent VkDevices → per-device Venus rings/contexts) and the
+                  64-allocation count — a limit, not a leak.
+  DISCRIMINATOR   smoke: rerun the four cases with `--deqp-log-images=enable` (dev run,
+                  not submission-shaped) and diff result vs reference per pixel; devices:
+                  the ring/context counter at the fifth vkCreateDevice.
+  RESULT          Session-abort first: contexts/devices ≥ 32 and the allocation counts
+                  (G3b, API-L2/API-X2) before anything else in `api` can be measured;
+                  smoke exactness is a G3c raster item (RAST-L2 shared-edge/encode
+                  audit).
+  LIMITS          one guest; 15 of 287 api cases observed.
+  NEXT ARTIFACT   ledger row `api` (4 fail / 1 other); image diffs of the four smoke
+                  cases; G3b brief with the 16 384 / 32-device numbers.
 ```
 
 ## Performance / area / scalability

@@ -334,11 +334,31 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
     of record"). Owed: per-sub-group source extraction (test files, `checkSupport`
     requirements, constants) to tighten the SOURCE/REQUIRES lines — mechanical,
     queued after CTS-0.
-  - [~] CTS-0: `verif/tb/apu/bridge/guest/cts/` cross-builds `deqp-vk` for riscv64 on
-    the host (Bootlin toolchain, `fetch_sources.py` revisions recorded in
-    `.cache/cts/fetch-revisions.txt`; host x86 control build: **297 Pass / 11
-    NotSupported of 308** on llvmpipe — harness and caselist validated); CTSDATA
-    virtio-blk transport; `drive_guest.py` runs
+  - [x] **CTS-0 ran on the device (2026-10-14, run `cts0-2026-10-14`).**
+    `verif/tb/apu/bridge/guest/cts/` cross-builds `deqp-vk` for riscv64 on the host
+    (Bootlin `riscv64-lp64d--glibc--stable-2024.05-1` sha256 `78e16f3d…`,
+    `-DDEQP_TARGET=vulkan_headless` — `default` falls to the Null platform without X11
+    headers in the sysroot; `fetch_sources.py` revisions recorded; deqp-vk sha256
+    `c1078a2d…`), CTSDATA virtio-blk transport, `G6LC_GUEST_MEM=2048` (deqp-vk is
+    OOM-killed at the old 224 MiB), the ApuVenus DMA window widened to cover the
+    second DRAM bank, nonzero stage rc → `GUEST-FAIL`, and the Venus PD must be found
+    or the stage fails (a 16:28 run that showed 297/308 was the guest's llvmpipe —
+    discarded). Host x86 control: 297 Pass / 11 NotSupported of 308 on llvmpipe.
+    **Device (RTL `ab296cfda`, Venus arm): 36 run — 27 Pass, 2 NotSupported (honest:
+    memory_budget EXT absent, one-device group), 6 Fail, 1 ResourceError; 272 not
+    run because `api.device_init.create_multiple_devices.basic` (5 VkDevices) hit
+    `OUT_OF_HOST_MEMORY` and the CTS aborts the session on a ResourceError.** Fails:
+    `info.device_properties` (39 limits below the 1.0/1.1 minima — listed in
+    `specs/architecture/cts-info.md`), `info.device_mandatory_features` ("multiview"
+    — Venus advertises `KHR_multiview` for every 1.1 renderer, so MV-L1 is promoted
+    to G3c), the four `api.smoke.*` triangles (exact-colour/1-px compare against the
+    CTS reference — image diff owed; vkcmp scene 0 is pixel-identical to llvmpipe, so
+    the delta is in the clear/encode/edge path). Ledger:
+    `architecture/uncore/apu-cts-ledger.md`; artefacts `.cache/cts/runs/cts0-2026-10-14/`,
+    `.cache/apu-guest/out-cts0-r3/`. Consequences: G3b (residency, contexts ≥ 32,
+    allocation counts ≥ 4096, the 16 384-object sizing from the source) precedes any
+    further `api` measurement; smoke exactness joins G3c (RAST-L2).
+  - [ ] (superseded by the row above) CTS-0 original brief: `drive_guest.py` runs
     `dEQP-VK.info.*`, `api.smoke.*`, `api.device_init.*`, `api.object_management.single.*`
     with the mandatory flags and the Venus `--deqp-vk-device-id`; first `TestResults.qpa`
     retained; `corev_apu/apu/tools/cts_ledger.py` renders the generated

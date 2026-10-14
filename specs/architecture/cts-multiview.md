@@ -1,11 +1,14 @@
 # `multiview` — single-pass multi-view rendering (694 cases) — **mandatory at Vulkan 1.1**
 
 Source: `specs/VK-GL-CTS` @ `f6a29701`; must-pass `vk-default/multiview.txt`; tests in
-`external/vulkancts/modules/vulkan/multiview/vktMultiViewRenderTests.cpp`. Owner W8
-(plan feature "single-pass multiview") — but the `multiview` feature itself is **required
-by Vulkan 1.1** (INFO-L2 hypothesis to be confirmed by `info.device_mandatory_features`
-at CTS-0), so this group is also on the version ladder. Gate CTS-2 if the 1.1 claim is kept,
-otherwise CTS-4.
+`external/vulkancts/modules/vulkan/multiview/vktMultiViewRenderTests.cpp`. Owner **G3c**
+(promoted from W8 on 2026-10-14): CTS-0 `info.device_mandatory_features` failed with
+"Mandatory feature multiview not supported", and the source settles why — Mesa Venus
+(`vn_physical_device.c`) exposes `VK_KHR_multiview` (with `KHR_shader_draw_parameters`,
+`KHR_variable_pointers`, `KHR_device_group`, `KHR_16bit_storage`, `KHR_sampler_ycbcr_
+conversion`, …) **unconditionally** for any renderer ≥ `VN_MIN_RENDERER_VERSION` (1.1), and
+refuses renderers below 1.1 — so on the stock path `multiview` is an obligation of this
+device, not a ladder item. Gate CTS-2 (MV-L1); the geometry/tessellation variants stay W8.
 
 ## Inventory
 
