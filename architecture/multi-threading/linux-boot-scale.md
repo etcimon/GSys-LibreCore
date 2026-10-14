@@ -588,7 +588,7 @@ poll), so OpenSBI's ≈ 2.5 KB of banner and platform info are ≈ 10 M cycles a
 kernel log (≈ 20 KB) ≈ 87 M cycles — `loglevel=4` for record runs, or a `uart_bus` baud parameter
 exposed as a plusarg if the console ever becomes the long pole.
 
-#### S4.5 — Five defects between OpenSBI and `Memory: … available` on `g6lc64_ooo` (2026-10-14)
+#### S4.5 — Six defects between OpenSBI and `SLUB:` on `g6lc64_ooo` (2026-10-14)
 
 Each was found by the Linux payload, pinned to a cycle with an instrument that already existed
 or was added for it, reproduced by a directed `ooo_mem_min` stage, fixed, and re-verified with
@@ -602,15 +602,17 @@ T28–T32 carry the evidence; the stages are registered in `testlist_ooo_l3.yaml
 | T30 | `init_task.stack` reads 0 → store to VA 0 → trap-entry loop | the TB preloaded 16 MiB of a 67 MB `fw_payload` | preload the whole 256 MiB model (`+preload_bytes=`) | `xxd` of the Image vs the load |
 | T31 | printk prints `[00000.     0]` and decimals for `%llx` | STQ forward/interlock matched **byte-exact**: narrow stores at +2/+4 of a load's lane invisible | lane granularity (`[PLEN-1:3]`, `[11:3]`) | FST `prof-t31fst`; stage 47 (58 vs 101 → 101/101) |
 | T32 | retirement stops at `percpu:` (`notissued ld` 16.9 M cycles) | STQ key = load **vaddr** vs physical store keys → **no forwarding under Sv39**; a younger covered load parked in `WAIT_PAGE_OFFSET` on a speculative store held the LU against the head load | key = the load's own translation, sampled on its `translation_req_o` + DTLB hit, held at the LU head | `+ld_trace`; stage 48 (2 M-cycle deadlock → 82/82 in 1,100 cycles) |
+| T33 | retirement stops again at 78 M cycles after `SLUB:` (same `notissued ld` signature) | a younger load with **partial** coverage cannot forward, parks in `WAIT_PAGE_OFFSET` on a speculative store and holds the LU against the head load | load unit hands the parked load back after a 64-cycle dwell when the match is speculative-only; scoreboard cancels + refetches at commit | stage 49 (2 M-cycle deadlock → 53/53 in 1,007 cycles) |
 
 After T32 the kernel reaches `Memory: 235940K/262144K available (6519K kernel code, 4879K rwdata,
 4096K rodata, 2143K init, 329K bss, 26204K reserved…)` at ≈ 20 M cycles with 16.3 M retired
 (IPC 0.82) and keeps retiring (`linux-boot-l1ooo-ooocoh-t32-ooo-pa-pgo-build`). None of the five
 was visible to the bare-metal probe battery: three need translation with VA ≠ PA (T29, T31's
 trigger, T32), one needs a 16 MiB+ payload (T30), one a specific write-through/ACK timing (T28).
-The directed stages now carry those preconditions. Residual liveness hazard (T32 row): a younger
-load with *partial* coverage still parks in `WAIT_PAGE_OFFSET` and can hold the LU against an
-older load; the structural fix is an IQ-side gate or an LU replay.
+The directed stages now carry those preconditions. The residual liveness hazard noted under T32 (partial coverage) surfaced 60 M cycles later
+and is T33 (the load-unit replay). Each Linux model also held ≈ 28 GB of RSS until the TB's
+bulk preload was limited to the PHDR's real extent (7.6 GB after); the OOM killer had taken
+two L3 runs before that was understood.
 
 ### S5 — SMT2 `RVH` (smt2 feature not present)
 
