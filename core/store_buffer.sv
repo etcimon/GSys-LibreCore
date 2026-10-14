@@ -604,10 +604,22 @@ module store_buffer
   logic [CVA6Cfg.XLEN-1:0]       g1ao_hold_data_q;
   logic [(CVA6Cfg.XLEN/8)-1:0]   g1ao_hold_be_q, st_fwd_live_be;
 
-  // Exact paddr equality helper
+  // Paddr equality at the data-lane granularity (XLEN/8 bytes). The STQ
+  // forward and the page-offset interlock below must see every store whose
+  // bytes fall inside the load's lane, not only a store at the load's own
+  // byte address: byte-exact matching let a doubleword load pass two
+  // younger-than-nothing/older-than-the-load narrow stores at +2/+4 of its
+  // lane with neither forward nor stall and read the stale line (T31,
+  // ooo_mem_min stage 47; Linux printk's printf_spec bitfields on
+  // g6lc64_ooo). Lanes are be-masked, so a lane match forwards exactly the
+  // written bytes; a lane-crossing access is split or trapped before here.
+  localparam int unsigned LANE_W = $clog2(CVA6Cfg.XLEN / 8);
   function automatic logic pa_eq(input logic [CVA6Cfg.PLEN-1:0] a,
                                  input logic [CVA6Cfg.PLEN-1:0] b);
-    return a == b;
+    return a[CVA6Cfg.PLEN-1:LANE_W] == b[CVA6Cfg.PLEN-1:LANE_W];
+  endfunction
+  function automatic logic po_eq(input logic [11:0] a, input logic [11:0] b);
+    return a[11:LANE_W] == b[11:LANE_W];
   endfunction
 
   // U7c: a cbo.zero entry's coverage is its whole cache line (the stored
@@ -630,7 +642,7 @@ module store_buffer
 
     for (int unsigned i = 0; i < DEPTH_COMMIT; i++) begin
       if (commit_queue_q[i].valid &&
-          ((commit_queue_q[i].address[11:0] == page_offset_i) ||
+          (po_eq(commit_queue_q[i].address[11:0], page_offset_i) ||
            (CVA6Cfg.RVZiCboz &&
             commit_queue_q[i].cbo_op == ariane_pkg::CBO_ZERO &&
             ((commit_queue_q[i].address[11:0] >> CBOZ_OFF_W) ==
@@ -646,7 +658,7 @@ module store_buffer
       if (!spec_stall_futile &&
           speculative_queue_q[i].valid &&
           spec_visible(speculative_queue_q[i].trans_id) &&
-          ((speculative_queue_q[i].address[11:0] == page_offset_i) ||
+          (po_eq(speculative_queue_q[i].address[11:0], page_offset_i) ||
            (CVA6Cfg.RVZiCboz &&
             speculative_queue_q[i].cbo_op == ariane_pkg::CBO_ZERO &&
             ((speculative_queue_q[i].address[11:0] >> CBOZ_OFF_W) ==
@@ -656,7 +668,7 @@ module store_buffer
       end
     end
     if (!spec_stall_futile && valid_without_flush_i && spec_visible(trans_id_i) &&
-        ((paddr_i[11:0] == page_offset_i) ||
+        (po_eq(paddr_i[11:0], page_offset_i) ||
          (CVA6Cfg.RVZiCboz && cbo_op_i == ariane_pkg::CBO_ZERO &&
           ((paddr_i[11:0] >> CBOZ_OFF_W) == (page_offset_i >> CBOZ_OFF_W))))) begin
       page_offset_matches_now = 1'b1;
@@ -666,7 +678,7 @@ module store_buffer
     // heads were matching their own [11:0] and arming sticky.
     page_offset_matches_o = load_paddr_valid_i &&
         (page_offset_matches_now ||
-         (page_offset_sticky_po_v_q && (page_offset_sticky_po_q == page_offset_i)) ||
+         (page_offset_sticky_po_v_q && po_eq(page_offset_sticky_po_q, page_offset_i)) ||
          (page_offset_sticky_v_q &&
           pa_eq(page_offset_sticky_pa_q, load_paddr_i)) ||
          (LEGACY_SMT_KEEP &&

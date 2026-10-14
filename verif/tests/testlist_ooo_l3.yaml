@@ -263,6 +263,13 @@ testlist:
     gcc_opts: "-DSTAGE=46 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
     description: "S-mode at a high Sv39 alias (0xffffffffc0000000 -> 0x80000000): a first-encounter predicted-taken jal whose virtual target lies outside the physical execute regions must redirect fetch (T29: the PMA predict filter applied to virtual targets lost the kernel's first call after relocate_enable_mmu)"
 
+  - test: ooo_wide_load_over_narrow_stores
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=47 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Doubleword and word loads over bursts of in-flight byte/halfword/word stores (eight sb then sh+sw; an older late-data sd under younger sb/sh) return the youngest byte-wise data (T31: the WT dcache fixup queue overflowed at depth 2 and the load read the pre-sh/sw line — Linux printk's printf_spec bitfields)"
+
   - test: ooo_load_misaligned_shared_target
     iterations: 1
     <<: *common_test_config

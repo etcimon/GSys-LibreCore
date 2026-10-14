@@ -1195,6 +1195,69 @@ main:
   .text
 .Lvm2_done:
 
+#elif STAGE == 47
+  # T31 candidate (Linux printk on g6lc64_ooo prints `[00000.     0]` and a
+  # decimal where `%llx` was asked: printf_spec is a 64-bit bitfield struct
+  # that format_decode builds with byte/halfword stores and number() reads
+  # whole). Wide loads over several in-flight NARROW stores: the forward must
+  # merge every younger-than-nothing/older-than-the-load byte, in age order.
+  li   t0, 0x1122334455667788
+  sd   t0, 0(sp)
+  fence rw, rw
+  # eight byte stores, then the doubleword load (all eight forwarded)
+  li   t1, 0xA0
+  sb   t1, 0(sp)
+  li   t1, 0xA1
+  sb   t1, 1(sp)
+  li   t1, 0xA2
+  sb   t1, 2(sp)
+  li   t1, 0xA3
+  sb   t1, 3(sp)
+  li   t1, 0xA4
+  sb   t1, 4(sp)
+  li   t1, 0xA5
+  sb   t1, 5(sp)
+  li   t1, 0xA6
+  sb   t1, 6(sp)
+  li   t1, 0xA7
+  sb   t1, 7(sp)
+  ld   t2, 0(sp)
+  li   t3, 0xA7A6A5A4A3A2A1A0
+#ifdef MEM_ORDER_NEGATIVE
+  xori t3, t3, 1
+#endif
+  bne  t2, t3, fail_t2
+  # a halfword and a word over the previous bytes, then the doubleword and a
+  # word that straddles the two newer stores
+  li   t1, 0xB1B0
+  sh   t1, 2(sp)
+  li   t1, 0xC3C2C1C0
+  sw   t1, 4(sp)
+  ld   t2, 0(sp)
+  li   t3, 0xC3C2C1C0B1B0A1A0
+  bne  t2, t3, fail_t2
+  lwu  t2, 2(sp)
+  li   t3, 0xC1C0B1B0
+  bne  t2, t3, fail_t2
+  # older wide store still in flight (late data) under younger narrow stores
+  li   t1, 0x7fffffffffffffff
+  li   t4, 3
+  divu t5, t1, t4
+  andi t5, t5, 0
+  li   t1, 0xDDDDDDDDDDDDDDDD
+  add  t1, t1, t5
+  sd   t1, 8(sp)                 # older, data late
+  li   t1, 0xEE
+  sb   t1, 9(sp)                 # younger byte inside it
+  li   t1, 0xFFFF
+  sh   t1, 14(sp)                # younger halfword inside it
+  ld   t2, 8(sp)
+  li   t3, 0xFFFFDDDDDDDDEEDD
+  bne  t2, t3, fail_t2
+  lhu  t2, 8(sp)
+  li   t3, 0xEEDD
+  bne  t2, t3, fail_t2
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".
