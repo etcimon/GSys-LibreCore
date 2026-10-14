@@ -906,6 +906,58 @@ The scanner's block table (label → pc, already built) is the only metadata nee
   interpreter, so it executes lanes independently — the test is that lockstep execution
   reproduces independent-lane results).
 
+### 7d. Transcendental micro-sequences and the texture-op completion (increment G3a-ii; design of record 2026-10-14)
+
+Real fragment programs need `exp/log/pow/sin/cos/tan/atan…` and the shadow/projective/
+gather/query-LOD sampling forms; none of these exist yet (G3a-i stopped at the
+integer/bitfield/pack/geometry families). The design keeps the §7a discipline — every
+float op is sequenced through the existing fpnew FMA/DIV-SQRT/CAST units, the Python model
+mirrors the sequence op-for-op so Gate 1 stays bit-exact — and uses the Vulkan precision
+table (spec appendix "Precision and Operation of SPIR-V Instructions", single precision) as
+the Gate-2/CTS acceptance, not a blanket ULP:
+
+| Op | Required | Method (one shared table of f32 constants, generated once for RTL and model) |
+|---|---|---|
+| `exp2(x)` | 3 + 2·|x| ULP | clamp to [−150, 128]; `n = floor(x)` (RDN cast), `f = x − n ∈ [0,1)`; degree-6 minimax `p(f) ≈ 2^f` (Horner, 6 FMAs, rel. error < 2⁻²³); result = `ldexp(p, n)` with the two-step scale for `n < −126` (denormal results) |
+| `exp(x)` | inherited | `exp2(x · log2e)` — the product is one FMUL (its rounding is what "inherited" permits) |
+| `log2(x)` | 3 ULP outside [0.5, 2]; abs < 2⁻²¹ inside | `x = 2^e·m`, `m ∈ [1,2)` (denormals normalized first); if `m > √2` then `m /= 2, e += 1` so `m ∈ [√2/2, √2)`; `t = (m−1)/(m+1)` (one FDIV); `log2 m = 2·log2e·(t + t³/3 + t⁵/5 + t⁷/7 + t⁹/9)` as an odd degree-9 polynomial in `t`; result `e + log2 m`. Inside [0.5, 2] the exponent term is −1/0 and the polynomial's absolute error (< 1e-7) meets 2⁻²¹; `x ≤ 0 → NaN/−Inf`, `+Inf → +Inf` |
+| `log(x)` | inherited | `log2(x) · ln2` |
+| `pow(x, y)` | inherited from `exp2(y·log2 x)` | literally that, with the GLSL special cases first: `x < 0 → NaN`; `x = 0: y > 0 → 0, y < 0 → +Inf, y = 0 → 1`; `x = 1 → 1` |
+| `sin/cos(x)` | abs ≤ 2⁻¹¹ on [−π, π] | Cody–Waite: `k = rne(x · 2/π)`, `r = ((x − k·C1) − k·C2) − k·C3` with `C1+C2+C3 = π/2` split into three f32 pieces (each step one FMA, exact for |k| < 2¹⁰), quadrant `q = k mod 4`; `sin r ≈ r + r³·(s1 + r²·(s2 + r²·(s3 + r²·s4)))`, `cos r ≈ 1 + r²·(c1 + r²·(c2 + r²·(c3 + r²·c4)))`; select/negate by `q`. Accuracy inside [−π, π] is ~1e-7, far inside the bound; outside it degrades with |x| as the spec allows |
+| `tan` | inherited | `sin/cos` (one FDIV) |
+| `atan(y/x)`, `atan(x)` | 4096 ULP | `a = |x|`; if `a > 1`: `a' = 1/a` (FDIV) and flag; odd degree-11 minimax on [0, 1] (error ~1e-6); `atan = flag ? π/2 − p : p`, sign restored; `atan2` adds the quadrant rules (`x < 0`: `± π − …`; `x = 0`: `± π/2`; both 0 → 0) |
+| `asin`, `acos` | inherited | `atan2(x, √(1−x²))`, `atan2(√(1−x²), x)` — as the spec defines them |
+| `sinh/cosh/tanh/asinh/acosh/atanh` | inherited | the spec's own formulas over `exp`/`log`/`sqrt` |
+
+`tools/shader/gen_sfu_tables.py` fits the polynomials (Chebyshev-node least squares is
+enough at these degrees; `numpy` only), checks each against a double-precision reference
+over ≥ 10⁶ points and asserts the budget, and emits **both** `include/g6lc_apu_sfu_pkg.sv`
+and `tools/shader/sfu_tables.py` from the same arrays (the sRGB-LUT pattern: one source,
+RTL and model cannot drift; the runner's freshness suite covers it like `dmprog`). Each op
+is one `xq_q` micro-sequence in `shwave` (`jset` steps on the three unit kinds, scratch in
+`t0..t2`), per lane per component as today. Gate 1: model bit-exact. Gate 2: lavapipe
+within the table's per-op bound (the generator records the bound beside the coefficients;
+the TB reads it — no hand-typed tolerances). **Acceptance: `dEQP-VK.glsl.builtin.precision.
+<op>.{highp,mediump}.{scalar,vec2,vec3,vec4,vec5}`** from the pinned must-pass for every
+op above plus the already-implemented `fma/sqrt/inversesqrt/mod/fract/…` rows — the CTS
+implements the same table as an interval checker, which retires the self-authored
+tolerance question for good.
+
+Texture completion in the same increment: `OpImageSampleDrefImplicitLod`/`DrefExplicitLod`
+(89/90: sampler compare op from the record's sampler words, D16/D32 depth texels, per-texel
+`ref OP depth → 0/1` **before** the bilinear/trilinear weights = PCF), `OpImageSampleProj*`
+(91–94: divide `s,t[,r]` and the Dref by the last coordinate component first, then the
+plain path), `OpImageGather`/`OpImageDrefGather` (96/97: the four texels of the bilinear
+footprint, component `c` or the compare result, in the spec's `(i0,j1),(i1,j1),(i1,j0),
+(i0,j0)` order, `ConstOffset` honoured, no filtering), `OpImageQueryLod` (105: the clamped
+and unclamped λ the implicit path already computes). The profile's format table gains
+`SAMPLED_IMAGE` (and `SAMPLED_IMAGE_FILTER_LINEAR` where the compare path supports it) for
+`D16_UNORM`/`D32_SFLOAT` so shadow maps are legal; `D24_UNORM_S8_UINT` stays unsupported
+until stencil (G3c). Acceptance: `dEQP-VK.texture.shadow.*` (2D, linear/nearest, the
+compare ops), `dEQP-VK.glsl.texture_functions.{texture,textureproj,texturelod,texturegrad,
+texelfetch,query}.*` subsets for the implemented sampler kinds, and
+`dEQP-VK.glsl.texture_gather.basic.2d.*`.
+
 ## 8. MatHelper — AI island arithmetic behind a graphics-owned port
 
 `MatHelperEn` is currently a placeholder: no helper is instantiated. Candidate reuse is
