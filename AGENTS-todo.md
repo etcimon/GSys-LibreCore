@@ -1612,9 +1612,10 @@ prerequisite for this work under the existing dual license. No licensing policy 
   no console). Found on the T29-fixed `g6lc64_ooo` probe
   (`linux-probe-l1ooo-trace`, 8 M cycles, 6.17 M retired). The window is
   now the whole model (`+preload_bytes=<n>` overrides, allowlisted).
-  Rebuilding `ooocoh-t30-ooo-fix-pgo-build` / `…-server1-fix-pgo-build`
-  (frontend fix + TB fix); the 4-core follows. Owed: the kernel probe on
-  the rebuilt ooo, then L1/L3 runs.
+  On `ooocoh-t30-ooo-fix-pgo-build` the kernel ran into `start_kernel`
+  (no more VA-0 faults) and printed through `earlycon=sbi` — with garbled
+  numbers, which became T31. Closed by the preload change; `+preload_bytes=`
+  is allowlisted.
 - [x] **T29 — Linux dies at the first call after `relocate_enable_mmu` on
   every package: the `jal` retires, its callee and the following `auipc`
   never do, execution resumes at `pc+8` with the stale physical `tp`
