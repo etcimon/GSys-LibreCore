@@ -40,7 +40,9 @@ For every corpus shader x every seeded input set this emits
                        (0 = integer/bool → Gate 2 bit-exact,
                         1 = float → Gate 2 <= 2 ULP,
                         2 = unorm-sampled float → |d| <= 0.005,
-                        3 = packed unorm byte lanes → +-1 per byte)
+                        3 = packed unorm byte lanes → +-1 per byte,
+                        4|(op<<8) = sfu op index (xnum-13) → bound
+                        from g6lc_apu_sfu_pkg.APU_SFU_BND_*)
   sentinel: FFFFFFFF FFFFFFFF
   Commit-fault cases carry no oracle/model/class sections.
 
@@ -87,7 +89,8 @@ def smp_words(s):
         return max(0, min(255, int(round(float(x) * 16))))
     w0 = (s.get('mag', 0) | s.get('min', 0) << 2 | s.get('mm', 0) << 4 |
           s.get('au', 0) << 5 | s.get('av', 0) << 8 |
-          s.get('aw', 0) << 11 | s.get('bc', 0) << 14)
+          s.get('aw', 0) << 11 | s.get('bc', 0) << 14 |
+          s.get('cmo', 0) << 17 | s.get('cen', 0) << 20)
     w1 = (q44(s.get('minl', 0.0)) | q44(s.get('maxl', 0.0)) << 8 |
           ((q44(abs(s.get('bias', 0.0))) |
             (0x100 if s.get('bias', 0.0) < 0 else 0)) << 16))
@@ -175,6 +178,157 @@ def img_init(spec, seed):
 
 # VkFormat enum for each device format id (img_fmts.VK2D inverted).
 IMG_VKFMT = (9, 16, 37, 43, 44, 50, 97, 100, 103, 109, 98, 107)
+
+
+def _lin(a, b, n=32):
+    return [a + (b - a) * i / (n - 1) for i in range(n)]
+
+
+_P = 3.141592653589793
+_INF = float('inf')
+_NINF = float('-inf')
+_NAN = float('nan')
+
+# §7d sfu_* src records — 8 component lists (32 values each):
+# src[i] = (a.x,a.y,a.z,a.w), src[i+32] = (b.x,b.y,b.z,b.w).
+SFU_IN = {
+    'sfu_exp': (
+        [_lin(-20.0, 10.0),                      # a.x -> exp
+         _lin(-140.0, 127.5),                    # a.y -> exp2
+         [0.0, 1.0, -1.0, 2.0, -2.0, 88.0, 88.7, 89.0, -87.3, -100.0,
+          -103.0, -104.0, _INF, _NINF, _NAN, 1e-30, -1e-30, 86.0, 87.0,
+          2.5, -2.5, 3.7, -3.7, 0.5, -0.5, 10.0, -10.0, 50.0, -50.0,
+          70.0, -70.0, 87.5],                    # a.z -> exp (specials)
+         _lin(-0.5, 0.5)],                       # a.w -> exp2
+        [_lin(-90.0, 5.0),                       # b.x -> exp
+         [0.0, -1.0, 1.0, 2.0, -126.0, -127.0, -128.0, -140.0, -149.0,
+          -150.0, -151.0, 127.0, 127.5, 128.0, 129.0, _INF, _NINF,
+          _NAN, -0.5, 0.5, -10.0, 10.0, -50.0, 50.0, -20.0, 20.0,
+          -149.9, 32.0, 64.0, -64.0, -100.0, 4.0],  # b.y -> exp2
+         _lin(-3.0, 3.0),                        # b.z -> exp
+         _lin(-160.0, -110.0)]),                 # b.w -> exp2
+    'sfu_log': (
+        [_lin(0.5, 2.0),                         # a.x -> log (band)
+         _lin(0.5, 2.0),                         # a.y -> log2 (band)
+         [1.0, 2.0, 2.7182817459106445, 0.5, 0.25, 1e-38, 1e-45, _INF,
+          0.0, -1.0, -0.5, _NAN, 1e-30, 5.0, 0.1, 100.0, 1000.0, 0.75,
+          1.25, 1.5, 1.75, 0.999, 1.001, 4.0, 8.0, 16.0, 32.0, 0.2,
+          0.05, 1e-20, 1e20, 64.0],              # a.z -> log (specials)
+         _lin(0.25, 4.0)],                       # a.w -> log2
+        [[10.0 ** (-6 + 12 * i / 31) for i in range(32)],  # b.x log
+         [1.0, 0.5, 0.25, 2.0, 4.0, 8.0, 0.0, -1.0, _INF, _NAN, 1e-45,
+          1e-38, 0.75, 1.5, 3.0, 6.0, 10.0, 100.0, 1e3, 1e6, 1e-3,
+          1e-6, 0.999, 1.001, 0.501, 1.999, 7.0, 15.0, 31.0, 63.0,
+          127.0, 255.0],                         # b.y -> log2
+         _lin(0.01, 100.0),                      # b.z -> log
+         _lin(0.01, 1000.0)]),                   # b.w -> log2
+    'sfu_pow': (
+        [[2.0, 0.5, 4.0, 1.5, 0.0, 0.0, 0.0, 1.0, 1.0, -2.0, -2.0,
+          1e30, 1e-30, _INF, 2.0, _NAN, -1.0, 2.0, 0.25, 10.0, 2.0,
+          0.5, 3.0, 1e-3, -0.0, -0.0, -0.0, _INF, _INF, 1.0000001,
+          2.5, 0.75],                            # a.x base
+         _lin(0.1, 16.0),                        # a.y base
+         _lin(0.05, 8.0),                        # a.z base
+         [0.0, 1.0, -1.0, -2.5, 1e-38, 1e20, 0.999, 1.001, 7.0, 11.0,
+          0.1, 0.2, 0.3, 0.7, 0.8, 0.9, 1.1, 1.2, 5.5, 9.9, 100.0,
+          1e4, 1e-4, _INF, _NAN, -3.0, -0.5, 0.5, 2.0, 4.0, 6.0, 8.0]],  # a.w
+        [[3.0, 0.5, -2.0, 7.0, 1.0, 0.0, -1.0, 0.0, 5.0, 2.0, 0.5,
+          0.5, 2.0, 2.0, _INF, 1.0, _NAN, -1.0, -0.5, -8.0, -20.0,
+          64.0, -150.0, 0.0, 10.0, 1.0, -1.0, 0.0, -1.0, 0.0, 1e7,
+          0.3, 1.5],                             # b.x exponent
+         _lin(-5.0, 5.0),                        # b.y exponent
+         _lin(-3.0, 3.0),                        # b.z exponent
+         [0.5, -0.5, 0.0, 2.0, -2.0, 10.0, -10.0, 1.0, -1.0, 3.0,
+          -3.0, 0.25, -0.25, 1e-3, -1e-3, 20.0, -20.0, 100.0, -100.0,
+          _INF, _NINF, _NAN, 0.0, 0.0, 4.0, -4.0, 6.0, -6.0, 8.0,
+          -8.0, 0.75, -0.75]]),                  # b.w exponent
+    'sfu_trig': (
+        [_lin(-4.0 * _P, 4.0 * _P),              # a.x -> sin
+         _lin(-4.0 * _P, 4.0 * _P),              # a.y -> cos
+         _lin(-1.5, 1.5),                        # a.z -> tan (poles)
+         [0.0, _P / 2, -_P / 2, _P, -_P, 2 * _P, -2 * _P, 1.5 * _P,
+          -1.5 * _P, 1e6, -1e6, _INF, _NINF, _NAN, 1e-30, -1e-30,
+          _P / 4, -_P / 4, _P / 6, -_P / 6, _P / 3, -_P / 3, 1e-4,
+          -1e-4, 3 * _P, -3 * _P, 4 * _P, -4 * _P, 0.1, -0.1, 5.0,
+          -5.0]],                                # a.w -> cos
+        [[0.0, _P / 6, _P / 4, _P / 3, _P / 2, -_P / 6, -_P / 4,
+          -_P / 3, -_P / 2, _P, -_P, 2 * _P, 1e-30, 1e20, -1e20, _INF,
+          _NINF, _NAN, 100.0, -100.0, 1000.0, 0.1, -0.1, 3.14159,
+          -3.14159, 6.28, -6.28, 12.56, -12.56, 50.0, -50.0, 5.0],
+         _lin(-1.55, 1.55),                      # b.y -> tan
+         _lin(0.0, 2.0 * _P),                    # b.z -> cos(b.z+b.w)
+         [0.0] * 32]),                           # b.w -> cos arg 0
+    'sfu_atrig': (
+        [_lin(-1.0, 1.0),                        # a.x -> asin
+         _lin(-1.0, 1.0),                        # a.y -> acos
+         _lin(-10.0, 10.0),                      # a.z -> atan
+         [0.0, -0.0, 0.0, -0.0, 1.0, -1.0, 1.0, -1.0, 1e30, -1e30,
+          _INF, _NINF, 0.5, -0.5, 0.7, -0.7, 2.0, -2.0, 100.0, -100.0,
+          0.0, 1.0, -1.0, 0.5, -0.5, 3.0, -3.0, 1e-3, -1e-3, 0.9,
+          -0.9, 0.1]],                           # a.w -> atan2 y
+        [[1.0, 1.0, -1.0, -1.0, 1.0, 1.0, -1.0, -1.0, 1.0, -1.0, 1.0,
+          -1.0, 1.0, -1.0, 1.0, -1.0, 0.0, 0.0, _INF, _NINF, _NAN,
+          2.0, 0.5, -0.5, 0.7, -0.7, 1e30, -1e30, 0.3, -0.3, 4.0,
+          -4.0],                                 # b.x -> atan2 x
+         [-1.0, 1.0, 0.0, 1.5, -1.5, _NAN, _INF, _NINF, 0.5, -0.5,
+          0.999, -0.999, 0.0001, -0.0001, 0.7071, -0.7071, 0.866,
+          -0.866, 1.000001, -1.000001, 1e-10, -1e-10, 2.0, -2.0, 0.3,
+          -0.3, 0.99, -0.99, 0.6, -0.6, 0.4, -0.4],   # b.y -> asin
+         [-1.0, 1.0, 0.0, 1.5, -1.5, _NAN, _INF, _NINF, 0.5, -0.5,
+          0.999, -0.999, 0.0001, -0.0001, 0.7071, -0.7071, 0.866,
+          -0.866, 1.000001, -1.000001, 1e-10, -1e-10, 2.0, -2.0, 0.3,
+          -0.3, 0.99, -0.99, 0.6, -0.6, 0.4, -0.4],   # b.z -> acos
+         [0.0, 1.0, -1.0, _INF, _NINF, _NAN, 1e20, -1e20, 1e-20,
+          -1e-20, 0.5, -0.5, 2.0, -2.0, 100.0, -100.0, 1e6, -1e6,
+          0.001, -0.001, 45.0, -45.0, 0.7854, -0.7854, 3.0, -3.0,
+          7.7, -7.7, 1e-8, -1e-8, 0.9, -0.9]]),    # b.w -> atan
+    'sfu_hyper': (
+        [_lin(-10.0, 10.0),                      # a.x -> sinh
+         _lin(-10.0, 10.0),                      # a.y -> cosh
+         _lin(-10.0, 10.0),                      # a.z -> tanh
+         _lin(-1e4, 1e4)],                       # a.w -> asinh
+        [[1.0, 1.0001, 2.0, 5.0, 10.0, 1e3, 1e6, 0.5, 0.0, -1.0, _NAN,
+          _INF, 1.5, 1.2, 1.8, 3.0, 100.0, 1e4, 1e5, 0.99, 0.9, 0.8,
+          1.00001, 1.1, 1.3, 1.7, 2.5, 7.0, 20.0, 50.0, 1e2, 1.9],
+         [-0.99, 0.99, -1.0, 1.0, -1.5, 1.5, _NAN, 0.0, 0.5, -0.5,
+          0.9, -0.9, 0.999, -0.999, 0.1, -0.1, 0.75, -0.75, 1.0,
+          -1.0, 2.0, -2.0, _INF, _NINF, 0.3, -0.3, 0.6, -0.6, 0.99,
+          -0.99, 0.05, -0.05],                   # b.y -> atanh
+         [0.0, -0.0, 1.0, -1.0, 88.0, 89.0, -88.0, -89.0, _INF,
+          _NINF, _NAN, 10.0, -10.0, 50.0, -50.0, 5.0, -5.0, 0.5,
+          -0.5, 2.0, -2.0, 20.0, -20.0, 30.0, -30.0, 87.0, -87.0,
+          87.5, -87.5, 1e-10, -1e-10, 0.1],      # b.z -> sinh
+         [0.0, 1.0, -1.0, 88.0, 89.0, -88.0, -89.0, _INF, _NINF, _NAN,
+          10.0, -10.0, 50.0, -50.0, 5.0, -5.0, 0.5, -0.5, 2.0, -2.0,
+          20.0, -20.0, 30.0, -30.0, 87.0, -87.0, 87.5, -87.5, 1e-10,
+          0.1, -0.1, 100.0]]),                   # b.w -> cosh
+}
+
+
+def sfu_in(name, bi, w):
+    """sfu_* input hook for gen_inputs — binding 0 gets the domain-
+    spanning record table; any other binding gets zeros."""
+    if bi != 0:
+        return [0.0] * w
+    a, b = SFU_IN[name]
+    flat = []
+    for i in range(32):
+        flat += [a[0][i], a[1][i], a[2][i], a[3][i]]
+    for i in range(32):
+        flat += [b[0][i], b[1][i], b[2][i], b[3][i]]
+    return flat
+
+
+# per-shader Gate-2 op map: out-binding index -> per-word op index
+# (GLSL.std.450 xnum - 13); encoded in the class word as 4|(op<<8).
+SFU_OPS = {
+    'sfu_exp':    [14, 16] * 4,
+    'sfu_log':    [15, 17] * 4,
+    'sfu_pow':    [13] * 8,
+    'sfu_trig':   [0, 1, 2, 0, 1, 2, 0, 1],
+    'sfu_atrig':  [3, 4, 5, 12, 3, 4, 5, 12],
+    'sfu_hyper':  [6, 7, 8, 9, 10, 11, 6, 7],
+}
 
 
 # per-shader case description:
@@ -372,21 +526,52 @@ DESC = {
     # non-kill variant of the all-dead callee unwind.
     'fn_divret':    dict(groups=(1, 1, 1), fmt='i', push=0,
                          bindings=[(0, 0, 64, 0), (0, 1, 32, 1)]),
+    # ---- G3a-ii §7d SFU corpus --------------------------------------
+    # One shader per op family; sfu_in feeds domain-spanning inputs
+    # incl. specials and SFU_OPS maps every output word to its op
+    # index (xnum-13) for the class-4 Gate-2 bound compare.
+    'sfu_exp':    dict(groups=(4, 1, 1), fmt='f', push=0,
+                       infn=lambda s, bi, w: sfu_in('sfu_exp', bi, w),
+                       sfuops={1: SFU_OPS['sfu_exp'] * 32},
+                       bindings=[(0, 0, 256, 0), (0, 1, 256, 1)]),
+    'sfu_log':    dict(groups=(4, 1, 1), fmt='f', push=0,
+                       infn=lambda s, bi, w: sfu_in('sfu_log', bi, w),
+                       sfuops={1: SFU_OPS['sfu_log'] * 32},
+                       bindings=[(0, 0, 256, 0), (0, 1, 256, 1)]),
+    'sfu_pow':    dict(groups=(4, 1, 1), fmt='f', push=0,
+                       infn=lambda s, bi, w: sfu_in('sfu_pow', bi, w),
+                       sfuops={1: SFU_OPS['sfu_pow'] * 32},
+                       bindings=[(0, 0, 256, 0), (0, 1, 256, 1)]),
+    'sfu_trig':   dict(groups=(4, 1, 1), fmt='f', push=0,
+                       infn=lambda s, bi, w: sfu_in('sfu_trig', bi, w),
+                       sfuops={1: SFU_OPS['sfu_trig'] * 32},
+                       bindings=[(0, 0, 256, 0), (0, 1, 256, 1)]),
+    'sfu_atrig':  dict(groups=(4, 1, 1), fmt='f', push=0,
+                       infn=lambda s, bi, w: sfu_in('sfu_atrig', bi, w),
+                       sfuops={1: SFU_OPS['sfu_atrig'] * 32},
+                       bindings=[(0, 0, 256, 0), (0, 1, 256, 1)]),
+    'sfu_hyper':  dict(groups=(4, 1, 1), fmt='f', push=0,
+                       infn=lambda s, bi, w: sfu_in('sfu_hyper', bi, w),
+                       sfuops={1: SFU_OPS['sfu_hyper'] * 32},
+                       bindings=[(0, 0, 256, 0), (0, 1, 256, 1)]),
 }
 SEEDS = [1, 2, 3]
 
 sys.path.insert(0, HERE)
 import spirv_scan  # noqa: E402
 import spirv_model  # noqa: E402
+import sfu_tables  # noqa: E402
 
 
 CLSMAP = {'i': 0, 'f': 1, 'u': 2, 'p': 3}
 
 
-def model_run(hexw, bindings, ucls=False):
+def model_run(hexw, bindings, ucls=False, sfuops=None):
     """run spirv_model on a dispatch record; returns
     (robust, model_words_by_out_binding, class_words_by_out_binding,
-    the Model).  Raises spirv_scan.Fault if the module can't commit."""
+    the Model).  Raises spirv_scan.Fault if the module can't commit.
+    sfuops: per-output-word dict {binding_idx: [opidx, ...]} — encodes
+    class 4|(opidx<<8) so the TB compares against APU_SFU_BND_*."""
     m = spirv_model.Model(list(hexw))
     m.run()
     outs = m.outputs()
@@ -397,11 +582,14 @@ def model_run(hexw, bindings, ucls=False):
         if o:
             mw += outs.get(i, [0] * w)
             cc = list(cls.get(i, ['i'] * w))
-            if ucls and not (len(b) > 5):
-                # unorm-sampled floats in the SSBO compare against
-                # lavapipe with the §12.3 1/255-class tolerance
-                cc = ['u' if c == 'f' else c for c in cc]
-            cw += [CLSMAP[c] for c in cc]
+            if sfuops and i in sfuops:
+                cw += [4 | (op << 8) for op in sfuops[i]]
+            else:
+                if ucls and not (len(b) > 5):
+                    # unorm-sampled floats in the SSBO compare against
+                    # lavapipe with the §12.3 1/255-class tolerance
+                    cc = ['u' if c == 'f' else c for c in cc]
+                cw += [CLSMAP[c] for c in cc]
     return m.robust, mw, cw, m
 
 
@@ -421,11 +609,15 @@ def gen_inputs(desc, seed):
     rng = random.Random(seed * 7919 +
                         sum(x[2] for x in desc['bindings']))
     outs = []
-    for b in desc['bindings']:
+    for bi, b in enumerate(desc['bindings']):
         if len(b) > 5:
             outs.append(img_init(img_spec(b[5], seed), seed))
             continue
         w = b[2]
+        infn = desc.get('infn')
+        if infn is not None:
+            outs.append(infn(seed, bi, w))
+            continue
         if desc['fmt'] == 'f':
             outs.append([struct.unpack('<f', struct.pack(
                 '<f', rng.uniform(-64.0, 64.0)))[0]
@@ -617,7 +809,8 @@ def emit(name, seed, spv_words, desc, inputs, expect_fault=(0, 0),
         mrob, mwords, cwords, _m = model_cache
     elif not expect_fault[0]:
         mrob, mwords, cwords, _m = model_run(
-            hexw, bindings, ucls=desc.get('ucls', False))
+            hexw, bindings, ucls=desc.get('ucls', False),
+            sfuops=desc.get('sfuops'))
     else:
         mrob, mwords, cwords, _m = 0, None, None, None
     robust = mrob
@@ -717,13 +910,31 @@ def ulpd(a, b):
     return abs(a - b)
 
 
+# SFU op-index order (xnum - 13) — mirrors gen_sfu_tables' emission
+# of APU_SFU_BND_E20/APU_SFU_BND_ABS.
+SFU_OP_ORDER = ('sin', 'cos', 'tan', 'asin', 'acos', 'atan', 'sinh',
+                'cosh', 'tanh', 'asinh', 'acosh', 'atanh', 'atan2',
+                'pow', 'exp', 'log', 'exp2', 'log2')
+
+
+def sfu_bound(op):
+    """('a', abs) for absolute-error bounds (a positive bound < 1.0),
+    else ('u', ulp) — same encoding rule the generator uses for the
+    APU_SFU_BND_E20/BND_ABS package arrays."""
+    b = sfu_tables.BOUNDS[SFU_OP_ORDER[op]]
+    return ('a', b) if 0 < b < 1 else ('u', b)
+
+
 def oracle_image(owords, mc, desc):
     """Gate-2-aware oracle comparison: the model's full post-dispatch
     buffer image vs lavapipe's dump, with int words bit-exact and
     float words within 2 ULP (the .exp class section's rule).  Returns
     the oracle word list to fold into .exp, or the model image when
     the oracle strays beyond Gate-2 tolerance (e.g. UB descriptor-
-    array OOB under lavapipe)."""
+    array OOB under lavapipe).  For sfuops-described bindings the
+    check is per-word against the op's generated bound and only the
+    out-of-bound words fall back to the model image, so lavapipe
+    keeps Gate-2 coverage wherever it is inside the budget."""
     bindings = desc['bindings']
     if mc[3] is None:
         return owords
@@ -738,7 +949,9 @@ def oracle_image(owords, mc, desc):
         return mfull
     mcls = m.out_classes()
     ucls = desc.get('ucls', False)
+    sfuops = desc.get('sfuops')
     bad = False
+    ow = list(owords)
     off = 0
     for i, b in enumerate(bindings):
         st, bd, w, o = b[:4]
@@ -750,7 +963,18 @@ def oracle_image(owords, mc, desc):
                 cls = mcls[i][k]
             if ucls and len(b) <= 5 and cls == 'f':
                 cls = 'u'
-            if cls == 'f':
+            if o and sfuops and i in sfuops and k < len(sfuops[i]):
+                kind, bv = sfu_bound(sfuops[i][k])
+                if kind == 'a':
+                    ok = xo == xm or abs(
+                        struct.unpack('<f', struct.pack('<I', xm))[0] -
+                        struct.unpack('<f', struct.pack('<I', xo))[0]
+                    ) <= bv
+                else:
+                    ok = ulpd(xm, xo) <= bv
+                if not ok:
+                    ow[off + k] = xm
+            elif cls == 'f':
                 if ulpd(xm, xo) > 2:
                     bad = True
             elif cls == 'u':
@@ -766,7 +990,9 @@ def oracle_image(owords, mc, desc):
             elif xm != xo:
                 bad = True
         off += w
-    return mfull if bad else owords
+    if bad:
+        return mfull
+    return ow
 
 
 # ---- G1a graphics wave work (Vertex/Fragment records) ----------------
@@ -822,6 +1048,36 @@ GFX = {
     # even-x lanes are parked at the caller merge — the all-dead
     # callee frame pop must resume the parked lanes, not finish.
     'fs_kill_fn':  dict(stage=4, count=16, vbase=0, inst=0),
+    # ---- G3a-ii §7d texture corpus ----------------------------------
+    # fs_tex_shadow: D16_UNORM depth map + compareEnable/LESS_OR_EQUAL
+    # LINEAR sampler — dref implicit (89) / explicit (90),
+    # proj-dref (93) and dref-gather (97).
+    'fs_tex_shadow': dict(stage=4, count=16, vbase=0, inst=0,
+                         binds=[img_bind(
+                             0, 0, dict(w=4, h=4, fmt=13), kind=1,
+                             smp=dict(mag=1, min=1, mm=0, au=2, av=2,
+                                      cen=1, cmo=3))]),
+    # fs_tex_proj: textureProj implicit (91) / explicit (92) + a plain
+    # sample (87) on a colour map.
+    'fs_tex_proj':   dict(stage=4, count=16, vbase=0, inst=0,
+                         binds=[img_bind(
+                             0, 0, dict(w=4, h=4, fmt=2), kind=1,
+                             smp=dict(mag=1, min=1, mm=0,
+                                      au=2, av=2))]),
+    # fs_tex_gather: OpImageGather (96) comp 0/1 + ConstOffset (1,0).
+    'fs_tex_gather': dict(stage=4, count=16, vbase=0, inst=0,
+                         binds=[img_bind(
+                             0, 0, dict(w=4, h=4, fmt=2), kind=1,
+                             smp=dict(mag=0, min=0, mm=0,
+                                      au=2, av=2))]),
+    # fs_tex_qlod: OpImageQueryLod (105) — clamped + unclamped λ on a
+    # 4-mip texture.
+    'fs_tex_qlod':   dict(stage=4, count=16, vbase=0, inst=0,
+                         binds=[img_bind(
+                             0, 0, dict(w=4, h=4, fmt=2, mips=4),
+                             kind=1,
+                             smp=dict(mag=1, min=1, mm=1, au=2, av=2,
+                                      maxl=3.0))]),
 }
 GFX_SEEDS = [1]
 
@@ -862,6 +1118,64 @@ def gfx_inputs(name, g, seed):
             lx, ly, q = i & 1, (i >> 1) & 1, i >> 2
             du = (0.5, 0.125, 0.0, 0.0625)[q]
             dv = (0.0, 0.0, 0.5, 0.125)[q]
+            rec = [0] * (spirv_model.VARY_STRIDE // 4)
+            rec[0] = f2b_w(i + 0.5)
+            rec[1] = f2b_w(0.5)
+            rec[2] = f2b_w(0.0)
+            rec[3] = f2b_w(1.0)
+            rec[4] = f2b_w(0.25 + lx * du)
+            rec[5] = f2b_w(0.25 + ly * dv + (0.25 if q == 2 else 0.0))
+            w += rec
+        return w
+    if name == 'fs_tex_shadow':
+        # vcol = {u, v, dref, proj-divisor}: uv across the 4x4 D16
+        # depth map, ref sweeping 0..1 so the LESS_OR_EQUAL PCF mixes
+        # pass/fail, divisor varies the projected lookup.
+        for i in range(g['count']):
+            rec = [0] * (spirv_model.VARY_STRIDE // 4)
+            rec[0] = f2b_w(i + 0.5)
+            rec[1] = f2b_w(0.5)
+            rec[2] = f2b_w(0.0)
+            rec[3] = f2b_w(1.0)
+            rec[4] = f2b_w(0.08 + (i % 4) * 0.22)
+            rec[5] = f2b_w(0.08 + ((i // 4) % 4) * 0.22)
+            rec[6] = f2b_w(0.1 + (i * 0.37) % 0.9)
+            rec[7] = f2b_w(1.0 + (i % 3) * 0.5)
+            w += rec
+        return w
+    if name == 'fs_tex_proj':
+        # vcol = {u_num, v_num, divisor}: divisors {0.5,1,2,4} give
+        # effective uvs inside/outside [0,1] (CLAMP_TO_EDGE).
+        for i in range(g['count']):
+            rec = [0] * (spirv_model.VARY_STRIDE // 4)
+            rec[0] = f2b_w(i + 0.5)
+            rec[1] = f2b_w(0.5)
+            rec[2] = f2b_w(0.0)
+            rec[3] = f2b_w(1.0)
+            rec[4] = f2b_w(0.25 + (i % 4) * 0.5)
+            rec[5] = f2b_w(0.20 + ((i // 4) % 4) * 0.3)
+            rec[6] = f2b_w((0.5, 1.0, 2.0, 4.0)[i % 4])
+            w += rec
+        return w
+    if name == 'fs_tex_gather':
+        # vcol.xy = uv spread over the 4x4 colour map.
+        for i in range(g['count']):
+            rec = [0] * (spirv_model.VARY_STRIDE // 4)
+            rec[0] = f2b_w(i + 0.5)
+            rec[1] = f2b_w(0.5)
+            rec[2] = f2b_w(0.0)
+            rec[3] = f2b_w(1.0)
+            rec[4] = f2b_w(0.1 + (i * 0.23) % 0.85)
+            rec[5] = f2b_w(0.1 + (i * 0.31) % 0.85)
+            w += rec
+        return w
+    if name == 'fs_tex_qlod':
+        # like fs_tex_implicit: per-quad derivative magnitudes so the
+        # lambda spread covers several mips of the 4-mip map.
+        for i in range(g['count']):
+            lx, ly, q = i & 1, (i >> 1) & 1, i >> 2
+            du = (0.75, 0.25, 0.0, 0.125)[q]
+            dv = (0.0, 0.0, 0.75, 0.25)[q]
             rec = [0] * (spirv_model.VARY_STRIDE // 4)
             rec[0] = f2b_w(i + 0.5)
             rec[1] = f2b_w(0.5)

@@ -301,12 +301,12 @@ module g6lc_apu_shmod
         28,29,30,32,33,
         41,42,43,44,46,48,49,50,51,52,54,55,56,57,59,61,62,65,66,68,71,72,
         77,78,79,80,81,82,83,84,
-        // §12.3 C/5b image ops — OpImageSampleImplicitLod (87, G2b)
-        // is fragment-only; the projected/depth-ref implicit forms
-        // (89..93) stay refused through the default arm.  The G2b
-        // derivative family (207-215) is likewise fragment-only —
-        // both are gated on the execution model in S_OP.
-        86,87,88,95,98,99,100,103,104,106,
+        // §12.3 C/5b image ops — the implicit-lod forms (87,89,91,93,
+        // 105) are fragment-only, gated on the execution model in
+        // S_OP; 90/92/94 (explicit) and the gathers (96,97) run in any
+        // model.  Undecoded operand-mask bits still fault in the wave
+        // engine (W_TX0).
+        86,87,88,89,90,91,92,93,94,95,96,97,98,99,100,103,104,105,106,
         109,110,111,112,124,126,127,128,129,130,131,132,
         133,134,135,136,137,138,139,140,141,142,143,144,145,146,147,148,
         149,150,151,152,154,155,156,157,
@@ -326,7 +326,7 @@ module g6lc_apu_shmod
       unique case (o)
         1,                                    // OpUndef
         61,65,66,68,77,78,79,80,81,82,83,84,
-        86,87,88,95,98,100,103,104,106,
+        86,87,88,89,90,91,92,93,94,95,96,97,98,100,103,104,105,106,
         109,110,111,112,124,126,127,128,129,
         130,131,132,133,134,135,136,137,138,139,140,141,142,143,144,145,
         146,147,148,149,150,151,152,154,155,156,157,164,165,166,
@@ -356,6 +356,9 @@ module g6lc_apu_shmod
     function automatic logic is_ext450(input logic [15:0] n);
       unique case (n)
         1,2,3,4,5,6,7,8,9,10,
+        // G3a-ii: §7d SFU transcendentals and hyperbolics
+        // (Sin..Atanh + Atan2, Pow, Exp, Log, Exp2, Log2)
+        13,14,15,16,17,18,19,20,21,22,23,24,25,26,27,28,29,30,
         // G3a-i: determinant/inverse, modf/frexp/ldexp, the pack and
         // unpack family, faceforward/reflect/refract, the integer
         // find-msb/lsb ops, and the N-prefixed min/max/clamp
@@ -1502,10 +1505,11 @@ module g6lc_apu_shmod
                   ph_q <= '0; st_q <= S_VRB;
                 end
               end
-              // G2b: fragment-only opcodes — OpImageSampleImplicitLod
-              // (87) needs quad derivatives and the 207-215 family
-              // produces them; neither exists in VS/compute waves
-              87,207,208,209,210,211,212,213,214,215: begin
+              // fragment-only opcodes — the implicit-lod samples
+              // (87/89/91/93) and QueryLod (105) need quad derivatives
+              // and the 207-215 family produces them; neither exists
+              // in VS/compute waves
+              87,89,91,93,105,207,208,209,210,211,212,213,214,215: begin
                 if (em_q != APU_SH_EM_FRAGMENT) begin
                   fl_code_q <= APU_SH_FAULT_OPCODE;
                   fl_opc_q <= opc_q; fl_word_q <= at_q;

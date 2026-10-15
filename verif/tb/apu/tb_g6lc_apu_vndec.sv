@@ -13,15 +13,15 @@
 //   58..61: blob{off,words} x2  62: pres  63..70: chain
 //   71: chain_n  72: obj_kind  73: reply_prog  74: words
 //   75: fault  76: fault_word  77: fault_val  78: pay_len
-//   79..334: expected pay_valid_o/pay_data_o stream (pay_len words)
+//   79..590: expected pay_valid_o/pay_data_o stream (pay_len words)
 // Terminated by a {FFFFFFFF,FFFFFFFF} sentinel in the base/len slots.
 module tb_g6lc_apu_vndec;
   import g6lc_apu_vn_pkg::*;
 
-  localparam int REC_W = 335;
+  localparam int REC_W = 591;
   localparam int EXP_BASE = 65536;
   localparam int PAY_OFF = 79;
-  localparam int PAY_MAX = 256;
+  localparam int PAY_MAX = 512;
 
   logic clk = 0, rst_ni = 0;
   logic start = 0, busy, done;
@@ -34,7 +34,7 @@ module tb_g6lc_apu_vndec;
   logic off_busy, off_done, off_re, off_pv; logic [15:0] off_addr;
   logic [31:0] off_pd;
 
-  logic [31:0] cs [0:1048575];
+  logic [31:0] cs [0:4194303];
   // captured payload stream for the in-flight decode
   logic [31:0] pay_buf [0:PAY_MAX+63];
   int pay_i = 0;

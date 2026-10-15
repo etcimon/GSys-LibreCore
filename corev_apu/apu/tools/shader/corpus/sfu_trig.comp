@@ -1,0 +1,16 @@
+#version 460
+// §7d SFU smoke — sin/cos/tan: Cody-Waite argument reduction across
+// +-4pi, exact multiples of pi/2, zero, a huge argument (reduction
+// stress), +-inf -> NaN.  a = src[i], b = src[i+32].
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) buffer Src { vec4 src[]; };
+layout(set = 0, binding = 1) buffer Dst { vec4 dst[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    vec4 a = src[i];
+    vec4 b = src[i + 32u];
+    uint o = i * 2u;
+    dst[o + 0u] = vec4(sin(a.x), cos(a.y), tan(a.z), sin(b.x));
+    dst[o + 1u] = vec4(cos(a.w), tan(b.y), sin(a.x + a.z),
+                       cos(b.z + b.w));
+}

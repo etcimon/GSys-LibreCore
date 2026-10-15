@@ -218,8 +218,8 @@ EXCEPTION GLSL-X3 · Graphicsfuzz
 | Heuristic | Trigger | Priority | Smallest useful action | Reject / defer when |
 |---|---|---:|---|---|
 | GLSL-H1 Operators in compute | CTS-1 | high | run operator/conversions/matrix/indexing/loops/switch compute variants; fix the accept set per failure | — |
-| GLSL-H2 Precision table | G3a-ii | high | the §7d SFU with the CTS family as acceptance | — |
-| GLSL-H3 Texture functions by kind | G3a-ii/G3d | high | sampler2D/2DArray first, then shadow/proj/grad, then 3D/cube | the format matrix (cts-texture.md) blocks a kind |
+| GLSL-H2 Precision table | G3a-ii | high | the §7d SFU with the CTS family as acceptance — **RTL landed 2026-10-15** (shwave vectors `sfumax=5` over all SFU ops); the `cts-g3aii-precision.txt` run (115 cases) was killed externally before producing a QPA and is owed | — |
+| GLSL-H3 Texture functions by kind | G3a-ii/G3d | high | sampler2D/2DArray first, then shadow/proj/grad, then 3D/cube — **shadow/proj/gather/query-LOD landed 2026-10-15** (fragment + compute); the `*_compute` variants are NotSupported honestly (no exclusive compute queue); `*_vertex` variants hang the engine (open defect, G3a-ii row in `AGENTS-todo.md`) | the format matrix (cts-texture.md) blocks a kind |
 | GLSL-H4 Linkage/Component | W4.1 | medium | Component packing in the records | — |
 | GLSL-H5 64-bit/16-bit types | plan E pin | later | int64 + atomics first (CS2), fp16 storage next | before the workload pin says so |
 

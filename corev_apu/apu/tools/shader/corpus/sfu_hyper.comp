@@ -1,0 +1,15 @@
+#version 460
+// §7d SFU smoke — hyperbolics: sinh/cosh/tanh over +-inf and +-0,
+// asinh over +-wide, acosh on [1,+inf) (x<1 -> NaN), atanh on (-1,1)
+// (|x|>=1 -> NaN/+-inf edges).  a = src[i], b = src[i+32].
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) buffer Src { vec4 src[]; };
+layout(set = 0, binding = 1) buffer Dst { vec4 dst[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    vec4 a = src[i];
+    vec4 b = src[i + 32u];
+    uint o = i * 2u;
+    dst[o + 0u] = vec4(sinh(a.x), cosh(a.y), tanh(a.z), asinh(a.w));
+    dst[o + 1u] = vec4(acosh(b.x), atanh(b.y), sinh(b.z), cosh(b.w));
+}

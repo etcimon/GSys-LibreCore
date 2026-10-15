@@ -228,6 +228,12 @@ module g6lc_apu_shwave
       W_TXL8, W_TXL9, W_TXLA, W_TXLB, W_TXLC,
       W_TXC0, W_TXC1, W_TXC1B, W_TXC2, W_TXC3,  // sampled-coord compute
       W_TXC4, W_TXC5, W_TXC6,
+      // G3a-ii texture completion: projected-sample divide (wave-wide
+      // preamble), dref clamp/quantize, gather u16->fp result jobs,
+      // QueryLod result jobs
+      W_TXJ0, W_TXJ1, W_TXS0, W_TXS1, W_TXS2,
+      W_TXG0, W_TXG1,
+      W_TXQ0, W_TXQ1,
       W_TXB,                           // fetch/read/write bounds+addr
       W_TXT0, W_TXP, W_TXT1, W_TXT2,   // texel fetch: addr/probe/words
       W_TXF0, W_TXF1,                  // 64B cache line fill
@@ -388,6 +394,17 @@ module g6lc_apu_shwave
     logic         tx_issr_q;          // sRGB format
     logic         tx_isf16_q;         // fp16 channels
     logic [4:0]   tx_nch_q;           // channel count (1/2/4)
+    // G3a-ii: dref/proj/gather/qlod sub-op flags + operands
+    logic         tx_dref_q;          // compare sample/gather
+    logic         tx_gath_q;          // 4-texel footprint, no filter
+    logic         tx_qlod_q;          // OpImageQueryLod
+    logic         tx_cen_q;           // sampler compareEnable
+    logic [2:0]   tx_cmp_q;           // sampler compareOp
+    logic [7:0]   tx_msk_q;           // image-operands mask word
+    logic         tx_rdy_q;           // dref quantize done this lane
+    logic [2:0]   tx_osl_q;           // ConstOffset operand slot (0=none)
+    logic [15:0]  tx_r16_q;           // Dref quantized to u16 (UNORM)
+    logic [31:0]  tx_qraw_q;          // unclamped λ (QueryLod)
     // entry record
     logic [15:0]  eoff_q, escratch_q;
     logic [7:0]   lx_q, ly_q, lz_q, ninit_q;
@@ -498,16 +515,17 @@ module g6lc_apu_shwave
     logic [2:0]   ot_comps_q;
     logic [3:0]   ot_kind_q;
     logic [2:0]   ot_cols_q;
-    // operand values / types
-    vt_t          va_q [4];
-    logic [9:0]   vty_q [4];
-    logic [1:0]   otag_q [4];         // operand regmap tag (const/reg)
-    logic [RI-1:0] oidx_q [4];        // operand RF row base
-    logic [511:0] ocst_q [4];         // operand constant row
+    // operand values / types — G3a-ii: 6 slots (OpImageDrefGather
+    // with Lod+ConstOffset carries six operand ids)
+    vt_t          va_q [6];
+    logic [9:0]   vty_q [6];
+    logic [1:0]   otag_q [6];         // operand regmap tag (const/reg)
+    logic [RI-1:0] oidx_q [6];        // operand RF row base
+    logic [511:0] ocst_q [6];         // operand constant row
     logic [2:0]   nva_q;
     logic [5:0]   vk_q;
     logic [9:0]   res_id_q;
-    logic [1:0]   res_slot_q;
+    logic [2:0]   res_slot_q;
     logic [RI-1:0] ridx_q;            // reg idx captured at W_RMC (operand)
     logic [3:0]   raux_q;             // rm_aux captured at W_RMC
     logic [RI-1:0] ir_idx_q;          // same for chain-index resolve
@@ -601,6 +619,15 @@ module g6lc_apu_shwave
     logic [9:0]   oty_id_q, cmb_q;
     logic [15:0]  al_sz_q, al_off_q, al_st_q;
     logic [6:0]   xnum_q;
+    // §7d SFU micro-sequence state: xsub_q selects a shared core
+    // (1=exp2, 2=log2, 3=atan, 4=trig; 63=the per-xnum epilogue);
+    // xcall_q + xret_q/xret_st_q implement call/return for the
+    // Pow/Sinh/Cosh/Tanh wrappers and the implicit-LOD λ call from
+    // W_TXL8.  Cleared per instruction at W_NEXT.
+    logic [5:0]   xsub_q;
+    logic [4:0]   xret_q;
+    st_e          xret_st_q;
+    logic         xcall_q;
     logic [1:0]   ccc_q;
     // int divider (per lane)
     logic [31:0]  dv_d_q [LAN], dv_q_q [LAN], dv_r_q [LAN];
@@ -643,6 +670,33 @@ module g6lc_apu_shwave
     function automatic logic f_nan(input logic [31:0] w);
       f_nan = (w[30:23] == 8'hFF) && (w[22:0] != 0);
     endfunction
+    function automatic logic f_inf(input logic [31:0] w);
+      f_inf = (w[30:23] == 8'hFF) && (w[22:0] == 0);
+    endfunction
+    // §7d SFU coefficient block base for the current context: a running
+    // core (xsub 1..4) uses its own block; wrapper steps and the
+    // xnum-keyed epilogue (xsub 0/63) use the op's xnum block.
+    function automatic int unsigned f_sfu_base();
+      unique case (xsub_q)
+        6'd1:  f_sfu_base = g6lc_apu_sfu_pkg::APU_SFU_EXP2_BASE;
+        6'd2:  f_sfu_base = g6lc_apu_sfu_pkg::APU_SFU_LOG2_BASE;
+        6'd3:  f_sfu_base = g6lc_apu_sfu_pkg::APU_SFU_ATAN_BASE;
+        6'd4:  f_sfu_base = g6lc_apu_sfu_pkg::APU_SFU_TRIG_BASE;
+        default: unique case (xnum_q)
+          7'd17: f_sfu_base = g6lc_apu_sfu_pkg::APU_SFU_ACOS_BASE;
+          7'd19: f_sfu_base = g6lc_apu_sfu_pkg::APU_SFU_SINH_BASE;
+          7'd20: f_sfu_base = g6lc_apu_sfu_pkg::APU_SFU_COSH_BASE;
+          7'd21: f_sfu_base = g6lc_apu_sfu_pkg::APU_SFU_TANH_BASE;
+          7'd22: f_sfu_base = g6lc_apu_sfu_pkg::APU_SFU_ASINH_BASE;
+          7'd23: f_sfu_base = g6lc_apu_sfu_pkg::APU_SFU_ACOSH_BASE;
+          7'd24: f_sfu_base = g6lc_apu_sfu_pkg::APU_SFU_ATANH_BASE;
+          7'd25: f_sfu_base = g6lc_apu_sfu_pkg::APU_SFU_ATAN2_BASE;
+          7'd27: f_sfu_base = g6lc_apu_sfu_pkg::APU_SFU_EXP_BASE;
+          7'd28: f_sfu_base = g6lc_apu_sfu_pkg::APU_SFU_LOG_BASE;
+          default: f_sfu_base = 0;
+        endcase
+      endcase
+    endfunction
     function automatic logic [2:0] f_nc(input logic [2:0] c);
       f_nc = (c == 0) ? 3'd1 : c;
     endfunction
@@ -661,13 +715,16 @@ module g6lc_apu_shwave
         1,77,78,83,140,141,149,150,151,152,154,155,156,157,
         201,202,203,204,205,
         227,229,230,232,233,234,235,236,237,238,239,240,241,242,
+        // G3a-ii: Dref/proj samples, gathers, QueryLod
+        89,90,91,92,93,94,96,97,105,
         57,5381:
           f_has_rty = 1'b1;
         default: f_has_rty = 1'b0;
       endcase
     endfunction
     function automatic logic [2:0] f_nva(input logic [15:0] o,
-                                         input logic [15:0] wc);
+                                         input logic [15:0] wc,
+                                         input logic [31:0] oq [OPB]);
       unique case (o)
         62:      f_nva = 3'd2;
         80:      f_nva = (wc > 7) ? 3'd4 : 3'(wc - 3);
@@ -682,6 +739,19 @@ module g6lc_apu_shwave
         95:      f_nva = (wc > 6) ? 3'd3 : 3'd2;  // Fetch: img,coord[,lod]
         88:      f_nva = 3'd3;              // SampleExplicitLod + Lod op
         87:      f_nva = 3'd2;              // SampleImplicitLod: img,coord
+        // G3a-ii: operand counts grow with the image-operands mask
+        // (Lod and/or ConstOffset ids trail the mask word)
+        89:      f_nva = (wc > 7 && (oq[5] & 32'h8) != 0) ? 3'd4 : 3'd3;
+        90:      f_nva = (wc > 8 && (oq[5] & 32'h8) != 0) ? 3'd5 : 3'd4;
+        91:      f_nva = (wc > 5 && (oq[4] & 32'h8) != 0) ? 3'd3 : 3'd2;
+        92:      f_nva = (wc > 6 && (oq[4] & 32'h8) != 0) ? 3'd4 : 3'd3;
+        93:      f_nva = (wc > 6 && (oq[5] & 32'h8) != 0) ? 3'd4 : 3'd3;
+        94:      f_nva = (wc > 8 && (oq[5] & 32'h8) != 0) ? 3'd5 : 3'd4;
+        // gather/dref-gather: img,coord,comp|dref + trailing
+        // Lod/ConstOffset ids after the mask word at oq[5]
+        96,97:   f_nva = 3'(3'd3 + ((wc > 6) ? {2'b0, oq[5][3]} +
+                                             {2'b0, oq[5][1]} : 4'd0));
+        105:     f_nva = 3'd2;              // QueryLod: img,coord
         207,208,209,210,211,212,213,214,215:
                f_nva = 3'd1;              // G2b derivative ops: 1 operand
         86:      f_nva = 3'd2;              // SampledImage: img,smp
@@ -709,6 +779,19 @@ module g6lc_apu_shwave
       else if (o == 250 || o == 251)    f_opid = oq[k];
       else if (o == 95 || o == 88)      // operand mask word at oq[4]
         f_opid = (k == 0) ? oq[2] : (k == 1) ? oq[3] : oq[5];
+      else if (o == 90 || o == 94)      // mask at oq[5], lod/offset trail
+        f_opid = (k < 3) ? oq[2 + k] : oq[k + 3];
+      else if (o == 92)                 // mask at oq[4], lod[,off] trail
+        f_opid = (k < 2) ? oq[2 + k] : oq[k + 3];
+      else if (o == 91)                 // optional ConstOffset at oq[5]
+        f_opid = (k < 2) ? oq[2 + k] : oq[k + 3];
+      // mask at oq[5]; trailing Lod/ConstOffset ids at oq[6..7]
+      // (96 gather: comp is oq[4]; 97 dref-gather: dref is oq[4] —
+      // per the grammar it has no Component operand)
+      else if (o == 89 || o == 93 || o == 96 || o == 97)
+        f_opid = (k < 3) ? oq[2 + k] : oq[k + 3];
+      else if (o == 105)                // QueryLod: img,coord
+        f_opid = oq[2 + k];
       else if (o == 12)                 f_opid = oq[4 + k];
       else if (o == 228)                // AtomicStore: ptr,scope,sem,val
         f_opid = (k == 0) ? oq[0] : oq[3];
@@ -820,13 +903,25 @@ module g6lc_apu_shwave
                                        input logic [7:0] k);
       unique case (o)
         16'd95:               f_tx_kind = k == 8'd1 || k == 8'd2;
-        16'd87, 16'd88:       f_tx_kind = k == 8'd1 || k == 8'd2;
+        // G3a-ii: sampled/dref/proj/gather/query-lod all need a
+        // combined or sampled-with-sampler record
+        16'd87, 16'd88, 16'd89, 16'd90, 16'd91, 16'd92, 16'd93,
+        16'd94, 16'd96, 16'd97, 16'd105:
+                              f_tx_kind = k == 8'd1 || k == 8'd2;
         16'd98:               f_tx_kind = k == 8'd2 || k == 8'd3;
         16'd99:               f_tx_kind = k == 8'd3;
         16'd103, 16'd104, 16'd106:
                               f_tx_kind = k <= 8'd3;
         default:              f_tx_kind = 1'b0;
       endcase
+    endfunction
+    // ops that consume the sampler record (filters, bias, lod clamps,
+    // address modes, compareEnable/Op — G3a-ii added the dref, proj,
+    // gather and query-lod forms)
+    function automatic logic f_tx_smp(input logic [15:0] o);
+      f_tx_smp = (o == 16'd87 || o == 16'd88 ||
+                  (o >= 16'd89 && o <= 16'd94) ||
+                  o == 16'd96 || o == 16'd97 || o == 16'd105);
     endfunction
     // address-mode wrap: returns {border, coord[15:0]}; REPEAT=0,
     // MIRRORED_REPEAT=1, CLAMP_TO_EDGE=2, CLAMP_TO_BORDER=3
@@ -857,6 +952,48 @@ module g6lc_apu_shwave
             f_twrap = (i < 0 || i >= $signed({16'h0, n}))
                       ? {1'b1, 16'h0} : {1'b0, 16'(i)};
           end
+        endcase
+      end
+    endfunction
+    // VkCompareOp on two integer depths (ref vs texel): 0 NEVER,
+    // 1 LESS, 2 EQUAL, 3 LESS_OR_EQUAL, 4 GREATER, 5 NOT_EQUAL,
+    // 6 GREATER_OR_EQUAL, 7 ALWAYS — the comparison is ref OP texel
+    function automatic logic f_dcmp(input logic [15:0] r,
+                                    input logic [15:0] t,
+                                    input logic [2:0] op);
+      unique case (op)
+        3'd0:    f_dcmp = 1'b0;
+        3'd1:    f_dcmp = r <  t;
+        3'd2:    f_dcmp = r == t;
+        3'd3:    f_dcmp = r <= t;
+        3'd4:    f_dcmp = r >  t;
+        3'd5:    f_dcmp = r != t;
+        3'd6:    f_dcmp = r >= t;
+        default: f_dcmp = 1'b1;
+      endcase
+    endfunction
+    // fp32 compare of the same predicate set (ref vs texel); NaN is
+    // unordered — ordered predicates fail, NE succeeds (the fpnew CMP
+    // NaN convention used by the 180..191 family)
+    function automatic logic f_fcmp32(input logic [31:0] r,
+                                      input logic [31:0] t,
+                                      input logic [2:0] op);
+      logic unr, eq, lt;
+      begin
+        unr = f_nan(r) || f_nan(t);
+        eq  = ~unr & ((r == t) | ((r[30:0] == 0) & (t[30:0] == 0)));
+        lt  = ~unr & ~eq &
+              (r[31] != t[31] ? r[31]
+                              : ((r[30:0] < t[30:0]) ^ r[31]));
+        unique case (op)
+          3'd0:    f_fcmp32 = 1'b0;
+          3'd1:    f_fcmp32 = lt;
+          3'd2:    f_fcmp32 = eq;
+          3'd3:    f_fcmp32 = lt | eq;
+          3'd4:    f_fcmp32 = ~unr & ~lt & ~eq;
+          3'd5:    f_fcmp32 = ~eq;
+          3'd6:    f_fcmp32 = ~unr & ~lt;
+          default: f_fcmp32 = 1'b1;
         endcase
       end
     endfunction
@@ -971,7 +1108,8 @@ module g6lc_apu_shwave
                          S_DR0 = 25, S_DR1 = 26,       // G3a-i inv cols
                          S_DR2 = 27, S_DR3 = 28,
                          S_XK = 29,                    // xk_q literal
-                         S_NEG1 = 30;                  // -1.0f
+                         S_NEG1 = 30,                  // -1.0f
+                         S_SFC = 31;                   // §7d SFU coef[base+dx]
     // xk_q: per-extinst literal operand (pack scale factors, etc.),
     // latched at dispatch before the microsequence runs
     logic [31:0]  xk_q;
@@ -1042,6 +1180,11 @@ module g6lc_apu_shwave
           S_HALF:  f_src = 32'h3F00_0000;
           S_NEG1:  f_src = 32'hBF80_0000;
           S_XK:    f_src = xk_q;
+          // §7d: SFU coefficient ROM (generated g6lc_apu_sfu_pkg); the
+          // block base comes from the running core (xsub 1..4) or, in
+          // wrapper/epilogue context, from the op's own xnum block.
+          S_SFC:   f_src = g6lc_apu_sfu_pkg::APU_SFU_COEF
+                           [f_sfu_base() + 9'(jdtx_q)];
           default: f_src = 32'h0;
         endcase
       end
@@ -1080,6 +1223,347 @@ module g6lc_apu_shwave
         3'd3: t2_q[l][c] <= v;
         3'd4: dtm_q[jdtx_q[3:2]][l][jdtx_q[1:0]] <= v;
         default: dres_q[jdtx_q[3:2]][l][jdtx_q[1:0]] <= v;
+      endcase
+    endtask
+
+    // ---------------------------------------------------------------
+    // §7d SFU micro-sequences (GLSL.std.450 13..30 + implicit-LOD λ).
+    // Four shared cores run over the existing FMA/DIV-SQRT/CAST/NC
+    // units with t0..t2 scratch; dres banks carry context words:
+    //   xsub 1  exp2:  va0=x  → t0 = 2^x      (clamp [-150,128],
+    //                  denormal result via two-step 2^n scale)
+    //   xsub 2  log2:  va0=x  → t0 = log2(x)  (dres1=override or the
+    //                  all-ones sentinel, dres2[0]=denormal flag,
+    //                  dres3=unbiased exponent int)
+    //   xsub 3  atan:  va0=z  → t0 = atan(z) signed (dres3[0]=|z|>1)
+    //   xsub 4  trig:  va0=x  → t0=sin, t1=cos, quadrant-folded
+    //                  (dres0=k int, dres1[0]=nan|inf, va1=r²)
+    //   xsub 63: epilogue keyed on xnum_q (tan div, acos/atan2 quadrant
+    //            repair, pow special rules, ln2 scale …)
+    // A core must preserve va1 when xcall_q (Pow keeps y live); va2/va3
+    // are free scratch.  xcall_q=1 returns to the wrapper's step xret_q
+    // in state xret_st_q; =0 tail-chains into the epilogue.
+    // Coefficients: APU_SFU_COEF via S_SFC — generated by
+    // tools/shader/gen_sfu_tables.py, mirrored op-for-op by
+    // tools/shader/sfu_tables.py (Gate-1 model).
+    task automatic sfu_exit();
+      if (xcall_q) begin
+        xsub_q  <= 6'd0; xcall_q <= 1'b0;
+        xq_q    <= {1'b0, xret_q}; st_q <= xret_st_q;
+      end else begin
+        xsub_q <= 6'd63; xq_q <= '0; st_q <= W_EX;
+      end
+    endtask
+
+    task automatic sfu_step();
+      if (xsub_q == 6'd63) begin
+        // ---------------- per-op epilogues (xnum-keyed) --------------
+        unique case (xnum_q)
+          7'd14: begin wb_q <= t1_q; st_q <= W_WB; end      // Cos
+          7'd15: jset(1, 5'd0, {2'd0, S_T0}, {2'd0, S_T1}, 7'h0, 0,
+                      0, W_WB);                           // Tan
+          7'd17: unique case (xq_q)                       // Acos +π|x<0
+            0: begin
+              for (int l = 0; l < LAN; l++)
+                for (int c = 0; c < VEC; c++)
+                  t1_q[l][c] <= dres_q[0][l][c][31] ? 32'h4049_0FDB
+                                                     : 32'h0;
+              st_q <= W_XCNT;
+            end
+            default:
+              jset(0, 5'd0, 7'h0, {2'd0, S_T0}, {2'd0, S_T1}, 0, 0,
+                   W_WB);
+          endcase
+          7'd25: unique case (xq_q)                       // Atan2 quad
+            0: begin
+              for (int l = 0; l < LAN; l++)
+                for (int c = 0; c < VEC; c++) begin
+                  t1_q[l][c] <= va_q[1][l][c][31]
+                                ? (dres_q[0][l][c][31]
+                                   ? 32'hC049_0FDB : 32'h4049_0FDB)
+                                : 32'h0;
+                  dres_q[1][l][c] <= t0_q[l][c];
+                  dres_q[2][l][c] <= {31'h0, f_nan(t0_q[l][c])};
+                end
+              st_q <= W_XCNT;
+            end
+            1: jset(0, 5'd0, 7'h0, {2'd0, S_T0}, {2'd0, S_T1}, 1, 0,
+                    W_XCNT);                             // r += off
+            default: begin
+              // x >= 0: the model selects r unchanged (an fadd
+              // would map -0 + +0 -> +0); x < 0: r +- pi.
+              for (int l = 0; l < LAN; l++)
+                for (int c = 0; c < VEC; c++)
+                  wb_q[l][c] <= dres_q[2][l][c][0]
+                                ? ((f_nan(dres_q[0][l][c]) ||
+                                    f_nan(va_q[1][l][c]))
+                                   ? 32'h7FC0_0000 : 32'h0)
+                                : (va_q[1][l][c][31]
+                                   ? t0_q[l][c] : dres_q[1][l][c]);
+              st_q <= W_WB;
+            end
+          endcase
+          7'd26: begin                                    // Pow rules
+            for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < VEC; c++) begin
+                logic [31:0] xv, yv, r;
+                xv = dres_q[0][l][c]; yv = va_q[1][l][c];
+                r = t0_q[l][c];
+                if (xv[30:0] == 31'h0)
+                  r = (yv[30:0] == 31'h0) ? 32'h3F80_0000
+                      : yv[31]            ? 32'h7F80_0000
+                                          : 32'h0;
+                if (xv == 32'h3F80_0000) r = 32'h3F80_0000;
+                if (xv[31] && (xv[30:0] != 31'h0)) r = 32'h7FC0_0000;
+                if (f_nan(xv) || f_nan(yv))      r = 32'h7FC0_0000;
+                wb_q[l][c] <= r;
+              end
+            st_q <= W_WB;
+          end
+          // Log/Asinh/Acosh scale by ln2, Atanh by ½ln2 (SFC slot 0)
+          7'd28, 7'd22, 7'd23, 7'd24:
+            jset(0, 5'd2, {2'd0, S_T0}, {2'd0, S_SFC}, 7'h0, 0, 0,
+                 W_WB, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0, 4'd0);
+          default: begin wb_q <= t0_q; st_q <= W_WB; end
+        endcase
+      end else unique case (xsub_q)
+        // -------------------- exp2 core (xsub 1) ---------------------
+        6'd1: unique case (xq_q)
+          0: jset(3, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
+                  {2'd0, S_V0}, {2'd0, S_SFC}, 7'h0, 1, 0, W_XCNT,
+                  1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0, 4'd7);  // min 128
+          1: jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b1},
+                  {2'd0, S_T0}, {2'd0, S_SFC}, 7'h0, 1, 0, W_XCNT,
+                  1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0, 4'd8);  // max −150
+          2: jset(2, {1'b0, fpnew_pkg::RDN[2:0], 1'b0},
+                  {2'd0, S_T0}, 7'h0, 7'h0, 2, 0, W_XCNT);  // n=floor
+          3: jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
+                  {2'd0, S_T1}, 7'h0, 7'h0, 3, 0, W_XCNT);  // nf=i2f
+          4: jset(0, 5'd1, 7'h0, {2'd0, S_T0}, {2'd0, S_T2}, 1, 0,
+                  W_XCNT);                                  // f=x−nf
+          5: jset(0, 5'd2, {2'd0, S_SFC}, {2'd0, S_ONE}, 7'h0, 3, 0,
+                  W_XCNT, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0,
+                  4'd0);                                    // p = c6
+          6,7,8,9,10,11:
+            jset(0, 5'd3, {2'd0, S_T2}, {2'd0, S_T0}, {2'd0, S_SFC},
+                 3, 0, W_XCNT, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0,
+                 4'(xq_q - 6'd5));                          // p·f + ck
+          12: begin                       // ldexp: 2^n = 2^a·2^b split
+            for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < VEC; c++) begin
+                logic signed [31:0] ni, na, nb;
+                ni = $signed(t1_q[l][c]);
+                na = (ni < -32'sd126) ? -32'sd126 : ni;
+                nb = ni - na;
+                t0_q[l][c] <= 32'((na + 32'sd127)) << 23;
+                t1_q[l][c] <= 32'((nb + 32'sd127)) << 23;
+              end
+            st_q <= W_XCNT;
+          end
+          13: jset(0, 5'd2, {2'd0, S_T2}, {2'd0, S_T0}, 7'h0, 3, 0,
+                   W_XCNT);                                 // p·2^a
+          14: jset(0, 5'd2, {2'd0, S_T2}, {2'd0, S_T1}, 7'h0, 1, 0,
+                   W_XCNT);                                 // ·2^b → t0
+          default: begin
+            for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < VEC; c++)
+                t0_q[l][c] <= f_nan(va_q[0][l][c])
+                              ? 32'h7FC0_0000 : t0_q[l][c];
+            sfu_exit();
+          end
+        endcase
+        // -------------------- log2 core (xsub 2) ---------------------
+        6'd2: unique case (xq_q)
+          0: begin                        // classify + denorm scale
+            for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < VEC; c++) begin
+                logic [31:0] xv;
+                logic        dn;
+                xv = va_q[0][l][c];
+                dn = (xv[30:23] == 8'h0) && (xv[22:0] != 23'h0);
+                dres_q[2][l][c] <= {31'h0, dn};
+                dres_q[1][l][c] <=
+                    f_nan(xv)              ? 32'h7FC0_0000
+                  : (xv[30:0] == 31'h0)    ? 32'hFF80_0000   // ±0 → −inf
+                  : xv[31]                 ? 32'h7FC0_0000   // x<0 → NaN
+                  : (xv[30:23] == 8'hFF)   ? 32'h7F80_0000   // +inf
+                                           : 32'hFFFF_FFFF;  // sentinel
+                t2_q[l][c] <= dn ? 32'h4B80_0000 : 32'h3F80_0000;
+              end
+            st_q <= W_XCNT;
+          end
+          1: jset(0, 5'd2, {2'd0, S_V0}, {2'd0, S_T2}, 7'h0, 1, 0,
+                  W_XCNT);                                  // y=x·2^24?
+          2: begin                        // exponent / mantissa split
+            for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < VEC; c++) begin
+                logic [31:0] mm;
+                logic        ge;
+                mm = {1'b0, 8'd127, t0_q[l][c][22:0]};
+                ge = (mm > 32'h3FB5_04F3);                  // > sqrt(2)
+                t0_q[l][c] <= mm - (ge ? 32'h0080_0000 : 32'h0);
+                dres_q[3][l][c] <=
+                  32'($signed({2'b00, t0_q[l][c][30:23]})
+                      - 10'sd127
+                      - (dres_q[2][l][c][0] ? 10'sd24 : 10'sd0)
+                      + (ge ? 10'sd1 : 10'sd0));
+              end
+            st_q <= W_XCNT;
+          end
+          3: jset(0, 5'd1, 7'h0, {2'd0, S_T0}, {2'd0, S_ONE}, 3, 0,
+                  W_XCNT);                                  // m−1 → t2
+          4: jset(0, 5'd0, 7'h0, {2'd0, S_T0}, {2'd0, S_ONE}, 1, 0,
+                  W_XCNT);                                  // m+1 → t0
+          5: jset(1, 5'd0, {2'd0, S_T2}, {2'd0, S_T0}, 7'h0, 3, 0,
+                  W_XCNT);                                  // t → t2
+          6: jset(0, 5'd2, {2'd0, S_T2}, {2'd0, S_T2}, 7'h0, 1, 0,
+                  W_XCNT);                                  // t² → t0
+          7: jset(0, 5'd2, {2'd0, S_SFC}, {2'd0, S_ONE}, 7'h0, 2, 0,
+                  W_XCNT, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0,
+                  4'd0);                                    // h = c9
+          8,9,10,11:
+            jset(0, 5'd3, {2'd0, S_T1}, {2'd0, S_T0}, {2'd0, S_SFC},
+                 2, 0, W_XCNT, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0,
+                 4'(xq_q - 6'd7));                          // h·t² + ck
+          12: jset(0, 5'd2, {2'd0, S_T1}, {2'd0, S_T2}, 7'h0, 3, 0,
+                   W_XCNT);                                 // p = h·t
+          13: jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
+                   {2'd0, S_DR3}, 7'h0, 7'h0, 2, 0, W_XCNT); // ef → t1
+          14: jset(0, 5'd0, 7'h0, {2'd0, S_T2}, {2'd0, S_T1}, 1, 0,
+                   W_XCNT);                                 // p+ef → t0
+          default: begin
+            for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < VEC; c++)
+                if (dres_q[1][l][c] != 32'hFFFF_FFFF)
+                  t0_q[l][c] <= dres_q[1][l][c];
+            sfu_exit();
+          end
+        endcase
+        // -------------------- atan core (xsub 3) ---------------------
+        6'd3: unique case (xq_q)
+          0: begin                        // a=|z|, flag=|z|>1
+            for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < VEC; c++) begin
+                t0_q[l][c]    <= {1'b0, va_q[0][l][c][30:0]};
+                dres_q[3][l][c] <=
+                  {31'h0, (va_q[0][l][c][30:0] > 31'h3F80_0000)};
+              end
+            st_q <= W_XCNT;
+          end
+          1: jset(1, 5'd0, {2'd0, S_ONE}, {2'd0, S_T0}, 7'h0, 2, 0,
+                  W_XCNT);                                  // 1/a → t1
+          2: begin
+            for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < VEC; c++)
+                if (dres_q[3][l][c][0]) t0_q[l][c] <= t1_q[l][c];
+            st_q <= W_XCNT;
+          end
+          3: jset(0, 5'd2, {2'd0, S_T0}, {2'd0, S_T0}, 7'h0, 3, 0,
+                  W_XCNT);                                  // t²
+          4: jset(0, 5'd2, {2'd0, S_SFC}, {2'd0, S_ONE}, 7'h0, 2, 0,
+                  W_XCNT, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0,
+                  4'd0);                                    // h = h11
+          5,6,7,8,9:
+            jset(0, 5'd3, {2'd0, S_T1}, {2'd0, S_T2}, {2'd0, S_SFC},
+                 2, 0, W_XCNT, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0,
+                 4'(xq_q - 6'd4));                          // h·t² + ck
+          10: jset(0, 5'd2, {2'd0, S_T0}, {2'd0, S_T1}, 7'h0, 1, 0,
+                   W_XCNT);                                 // p = a·h
+          11: jset(0, 5'd3, {2'd0, S_T0}, {2'd0, S_ONE},
+                   {2'd0, S_SFC}, 3, 0, W_XCNT,
+                   1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b1,
+                   4'd6);                                   // π/2 − p
+          default: begin                    // range select + sign
+            for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < VEC; c++)
+                t0_q[l][c] <=
+                  (dres_q[3][l][c][0] ? t2_q[l][c] : t0_q[l][c])
+                  ^ {va_q[0][l][c][31], 31'b0};
+            sfu_exit();
+          end
+        endcase
+        // -------------------- trig core (xsub 4) ---------------------
+        // sin and cos of va0 land in t0/t1; Cody–Waite k·π/2 reduction
+        // (CW1..CW3) then two deg-4-in-r² polynomials and a k&3
+        // quadrant select.  va1 carries kf then r²; va0 is untouched.
+        6'd4: unique case (xq_q)
+          0: jset(0, 5'd2, {2'd0, S_V0}, {2'd0, S_SFC}, 7'h0, 1, 0,
+                  W_XCNT, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0,
+                  4'd13);                                   // x·2/π
+          1: jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b0},
+                  {2'd0, S_T0}, 7'h0, 7'h0, 2, 0, W_XCNT);  // k
+          2: jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
+                  {2'd0, S_T1}, 7'h0, 7'h0, 3, 0, W_XCNT);  // kf
+          3: begin
+            for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < VEC; c++) begin
+                dres_q[0][l][c] <= t1_q[l][c];              // k
+                va_q[1][l][c]   <= t2_q[l][c];              // kf
+                dres_q[1][l][c] <= {31'h0, f_nan(va_q[0][l][c])
+                                          | f_inf(va_q[0][l][c])};
+              end
+            st_q <= W_XCNT;
+          end
+          // Cody–Waite r = ((x − kf·C1) − kf·C2) − kf·C3, each a fused
+          // negate-multiply-add (model fman — single rounding)
+          4: jset(0, 5'd3, {2'd0, S_T2}, {2'd0, S_SFC}, {2'd0, S_V0},
+                  1, 0, W_XCNT, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b1,
+                  4'd10);                                   // x−kf·C1
+          5: jset(0, 5'd3, {2'd0, S_T2}, {2'd0, S_SFC}, {2'd0, S_T0},
+                  1, 0, W_XCNT, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b1,
+                  4'd11);                                   // −kf·C2
+          6: jset(0, 5'd3, {2'd0, S_T2}, {2'd0, S_SFC}, {2'd0, S_T0},
+                  1, 0, W_XCNT, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b1,
+                  4'd12);                                   // −kf·C3
+          7: jset(0, 5'd2, {2'd0, S_T0}, {2'd0, S_T0}, 7'h0, 3, 0,
+                  W_XCNT);                                  // r²
+          8: begin
+            va_q[1] <= t2_q;                                // r² stash
+            st_q <= W_XCNT;
+          end
+          9: jset(0, 5'd2, {2'd0, S_SFC}, {2'd0, S_ONE}, 7'h0, 2, 0,
+                  W_XCNT, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0,
+                  4'd0);                                    // S = s4
+          10,11,12,13:
+            jset(0, 5'd3, {2'd0, S_T1}, {2'd0, S_T2}, {2'd0, S_SFC},
+                 2, 0, W_XCNT, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0,
+                 4'(xq_q - 6'd9));                          // S·r² + ck
+          14: jset(0, 5'd2, {2'd0, S_T0}, {2'd0, S_T2}, 7'h0, 3, 0,
+                   W_XCNT);                                 // r³
+          15: jset(0, 5'd3, {2'd0, S_T2}, {2'd0, S_T1}, {2'd0, S_T0},
+                   2, 0, W_XCNT);                           // sin_r
+          16: jset(0, 5'd2, {2'd0, S_SFC}, {2'd0, S_ONE}, 7'h0, 3, 0,
+                   W_XCNT, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0,
+                   4'd5);                                   // C = c4
+          17,18,19,20:
+            jset(0, 5'd3, {2'd0, S_T2}, {2'd0, S_V1}, {2'd0, S_SFC},
+                 3, 0, W_XCNT, 1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0,
+                 4'(xq_q - 6'd11));                         // C·r² + ck
+          21: jset(0, 5'd3, {2'd0, S_V1}, {2'd0, S_T2},
+                   {2'd0, S_ONE}, 3, 0, W_XCNT);            // cos_r
+          default: begin                    // k&3 quadrant select
+            for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < VEC; c++) begin
+                logic [1:0]  qq;
+                logic [31:0] so, co;
+                qq = dres_q[0][l][c][1:0];
+                unique case (qq)
+                  2'd0:    begin so = t1_q[l][c];
+                                 co = t2_q[l][c]; end
+                  2'd1:    begin so = t2_q[l][c];
+                                 co = t1_q[l][c] ^ 32'h8000_0000; end
+                  2'd2:    begin so = t1_q[l][c] ^ 32'h8000_0000;
+                                 co = t2_q[l][c] ^ 32'h8000_0000; end
+                  default: begin so = t2_q[l][c] ^ 32'h8000_0000;
+                                 co = t1_q[l][c]; end
+                endcase
+                t0_q[l][c] <= dres_q[1][l][c][0] ? 32'h7FC0_0000 : so;
+                t1_q[l][c] <= dres_q[1][l][c][0] ? 32'h7FC0_0000 : co;
+              end
+            sfu_exit();
+          end
+        endcase
+        default: sfu_exit();
       endcase
     endtask
 
@@ -2421,6 +2905,7 @@ module g6lc_apu_shwave
         cmstride_q <= '0; cty2_q <= '0;
         wb_q <= '0; wbm_q <= '0; wreg_q <= '0;
         xq_q <= '0; xop_q <= '0; jmode_q <= '0;
+        xsub_q <= '0; xcall_q <= '0; xret_q <= '0; xret_st_q <= W_EX;
         ja_q <= '0; jb_q <= '0; jc_q <= '0; jdst_q <= '0;
         t0_q <= '0; t1_q <= '0; t2_q <= '0; tc_q <= '0; jdot_q <= '0;
         jrev_q <= '0;
@@ -2629,14 +3114,14 @@ module g6lc_apu_shwave
           end
           // ------------------------------ result-type / operand resolve
           W_TY0A: begin
-            nva_q <= f_nva(opc_q, wc_q);
+            nva_q <= f_nva(opc_q, wc_q, ops_q);
             if (f_has_rty(opc_q)) st_q <= W_TY0;
             else begin
               ncomp_q <= 4'd1;
               // nva==0 result ops (OpUndef) still need the W_RW0
               // result-row lookup — skipping it leaves wreg_q stale
               // and W_WB clobbers the previous instruction's row.
-              st_q <= (f_nva(opc_q, wc_q) != 0) ? W_RMI : W_RW0;
+              st_q <= (f_nva(opc_q, wc_q, ops_q) != 0) ? W_RMI : W_RW0;
             end
           end
           W_TY0: st_q <= W_TY1;
@@ -2666,7 +3151,7 @@ module g6lc_apu_shwave
               vk_q <= '0; st_q <= W_RW0;
             end else begin
               res_id_q <= f_opid10(opc_q, vk_q, ops_q);
-              res_slot_q <= vk_q[1:0];
+              res_slot_q <= vk_q[2:0];
               st_q <= W_RMC;
             end
           end
@@ -2704,7 +3189,7 @@ module g6lc_apu_shwave
             for (int l = 0; l < LAN; l++)
               for (int c = 0; c < VEC; c++)
                 if (c < f_nc(ty_comps))
-                  wb_q[l][ccp_q + c] <= va_q[vk_q[1:0]][l][c];
+                  wb_q[l][ccp_q + c] <= va_q[vk_q[2:0]][l][c];
             ccp_q <= ccp_q + f_nc(ty_comps);
             vk_q <= vk_q + 1;
             st_q <= (vk_q + 1 >= nva_q) ? W_WB : W_CC0;
@@ -2716,6 +3201,10 @@ module g6lc_apu_shwave
               81:  begin oty_id_q <= vty_q[0]; st_q <= W_OT0; end
               142,148,169:
                    begin oty_id_q <= vty_q[0]; st_q <= W_OT0; end
+              // G3a-ii: proj-sample ops need the coordinate operand's
+              // vector width — the divisor is its last component
+              91,92,93,94:
+                   begin oty_id_q <= vty_q[1]; st_q <= W_OT0; end
               65,66: begin
                 // chain: pointer's pointee type = elem of its PTR type
                 oty_id_q <= vty_q[0]; st_q <= W_OT0;
@@ -2746,8 +3235,19 @@ module g6lc_apu_shwave
           W_EX: begin
             // wb mask = result comps; ExtInst micro-steps re-enter W_EX
             // via W_XCNT with ncomp_q repurposed for the step's element
-            // count, so only latch it on the first entry (xq==0)
-            if (xq_q == 0) wbm_q <= 4'((4'b1 << ncomp_q) - 1);
+            // count, so only latch it on the first entry (xq==0) —
+            // and never on an xcall re-entry (the texture λ path calls
+            // the SFU log2 core through W_EX with xq=0/ncomp=1, which
+            // would otherwise collapse the sample result's wbm to
+            // comp0 and drop comps 1-3 of the written-back vec4)
+            if (xq_q == 0 && !xcall_q)
+              wbm_q <= 4'((4'b1 << ncomp_q) - 1);
+            // §7d: while an SFU micro-sequence core or epilogue owns
+            // the wave, sfu_step() takes precedence over the opcode
+            // dispatch (it is re-entered from W_XCNT between unit jobs
+            // exactly like the extinst step arms).
+            if (xsub_q != 6'd0) sfu_step();
+            else
             unique case (opc_q)
               // combinational integer/bool/bitcast/select ops
               124,126,127,128,130,132,164,165,166,167,168,169,170,171,
@@ -2850,7 +3350,10 @@ module g6lc_apu_shwave
               // ImageFetch (95), ImageRead (98), ImageWrite (99),
               // OpImage (100), QuerySizeLod (103), QuerySize (104),
               // QueryLevels (106)
-              86,87,88,95,98,99,100,103,104,106: st_q <= W_TX0;
+              // G3a-ii: projected forms divide the coord first
+              91,92,93,94: st_q <= W_TXJ0;
+              86,87,88,89,90,95,96,97,98,99,100,103,104,105,106:
+                           st_q <= W_TX0;
               // G2b derivative ops: quad = lanes {4k..4k+3}.
               // Fine: dPdx(l)=v[l|1]-v[l&~1], dPdy(l)=v[l|2]-v[l&~2];
               // coarse and the non-suffixed forms broadcast the
@@ -3721,6 +4224,173 @@ module g6lc_apu_shwave
                       st_q <= W_WB;
                     end
                   endcase
+                  // ---- §7d SFU extinst (GLSL.std.450 13..30) --------
+                  // Wrappers stage their argument in va0 then tail-
+                  // chain into a shared core (xsub 1..4) or call it
+                  // (xcall/xret); the xsub=63 epilogue applies the
+                  // per-op fixup.  Coefs via S_SFC/dx.
+                  13, 14, 15: begin                        // Sin/Cos/Tan
+                    xsub_q <= 6'd4; xq_q <= '0; st_q <= W_EX;
+                  end
+                  18: begin                                // Atan
+                    xsub_q <= 6'd3; xq_q <= '0; st_q <= W_EX;
+                  end
+                  29: begin                                // Exp2
+                    xsub_q <= 6'd1; xq_q <= '0; st_q <= W_EX;
+                  end
+                  30, 28: begin                            // Log2/Log
+                    xsub_q <= 6'd2; xq_q <= '0; st_q <= W_EX;
+                  end
+                  27: unique case (xq_q)                   // Exp
+                    0: jset(0, 5'd2, {2'd0, S_V0}, {2'd0, S_SFC},
+                            7'h0, 1, 0, W_XCNT,
+                            1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0,
+                            4'd0);                         // x·log2e
+                    default: begin
+                      va_q[0] <= t0_q;
+                      xsub_q <= 6'd1; xq_q <= '0; st_q <= W_EX;
+                    end
+                  endcase
+                  16: unique case (xq_q)                   // Asin
+                    0: jset(0, 5'd3, {2'd0, S_V0}, {2'd0, S_V0},
+                            {2'd0, S_ONE}, 1, 0, W_XCNT,
+                            1'b0, 1'b0, 2'b0, 2'b0, 2'b0,
+                            1'b1, 4'd0);                     // 1−x²
+                    1: jset(1, 5'd1, {2'd0, S_T0}, 7'h0, 7'h0, 1, 0,
+                            W_XCNT);                         // sqrt
+                    2: jset(1, 5'd0, {2'd0, S_V0}, {2'd0, S_T0},
+                            7'h0, 1, 0, W_XCNT);             // x/s
+                    default: begin
+                      va_q[0] <= t0_q;
+                      xsub_q <= 6'd3; xq_q <= '0; st_q <= W_EX;
+                    end
+                  endcase
+                  17: unique case (xq_q)                   // Acos
+                    0: begin
+                      dres_q[0] <= va_q[0];                  // stash x
+                      st_q <= W_XCNT;
+                    end
+                    1: jset(0, 5'd3, {2'd0, S_V0}, {2'd0, S_V0},
+                            {2'd0, S_ONE}, 1, 0, W_XCNT,
+                            1'b0, 1'b0, 2'b0, 2'b0, 2'b0,
+                            1'b1, 4'd0);                     // 1−x²
+                    2: jset(1, 5'd1, {2'd0, S_T0}, 7'h0, 7'h0, 1, 0,
+                            W_XCNT);                         // sqrt
+                    3: jset(1, 5'd0, {2'd0, S_T0}, {2'd0, S_V0},
+                            7'h0, 1, 0, W_XCNT);             // s/x
+                    default: begin
+                      va_q[0] <= t0_q;
+                      xsub_q <= 6'd3; xq_q <= '0; st_q <= W_EX;
+                    end
+                  endcase
+                  25: unique case (xq_q)                   // Atan2
+                    0: jset(1, 5'd0, {2'd0, S_V0}, {2'd0, S_V1},
+                            7'h0, 1, 0, W_XCNT);             // y/x
+                    default: begin
+                      dres_q[0] <= va_q[0];                  // stash y
+                      va_q[0] <= t0_q;                       // va0 = z
+                      xsub_q <= 6'd3; xq_q <= '0; st_q <= W_EX;
+                    end
+                  endcase
+                  26: unique case (xq_q)                   // Pow
+                    0: begin
+                      dres_q[0] <= va_q[0];                  // stash x
+                      xsub_q <= 6'd2; xcall_q <= 1'b1;
+                      xret_q <= 5'd1; xret_st_q <= W_EX;
+                      xq_q <= '0; st_q <= W_EX;
+                    end
+                    1: jset(0, 5'd2, {2'd0, S_T0}, {2'd0, S_V1},
+                            7'h0, 1, 0, W_XCNT);             // y·log2x
+                    default: begin
+                      va_q[0] <= t0_q;
+                      xsub_q <= 6'd1; xq_q <= '0; st_q <= W_EX;
+                    end
+                  endcase
+                  19, 20: unique case (xq_q)               // Sinh/Cosh
+                    0: jset(0, 5'd2, {2'd0, S_V0}, {2'd0, S_SFC},
+                           7'h0, 1, 0, W_XCNT,
+                           1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0,
+                           4'd0);                            // x·log2e
+                    1: begin
+                      va_q[0] <= t0_q;
+                      dres_q[0] <= t0_q;                 // stash x·log2e
+                      xsub_q <= 6'd1; xcall_q <= 1'b1;
+                      xret_q <= 5'd2; xret_st_q <= W_EX;
+                      xq_q <= '0; st_q <= W_EX;
+                    end
+                    2: begin
+                      va_q[1] <= t0_q;                       // e^x
+                      for (int l = 0; l < LAN; l++)
+                        for (int c = 0; c < VEC; c++)
+                          va_q[0][l][c] <=
+                            dres_q[0][l][c] ^ 32'h8000_0000; // −x·log2e
+                      xsub_q <= 6'd1; xcall_q <= 1'b1;
+                      xret_q <= 5'd3; xret_st_q <= W_EX;
+                      xq_q <= '0; st_q <= W_EX;
+                    end
+                    // e1 − e2 (sinh) / e1 + e2 (cosh) → t2
+                    3: jset(0, (xnum_q == 7'd19) ? 5'd1 : 5'd0,
+                            7'h0, {2'd0, S_V1}, {2'd0, S_T0}, 3, 0,
+                            W_XCNT);
+                    default:
+                      jset(0, 5'd2, {2'd0, S_T2}, {2'd0, S_HALF},
+                           7'h0, 0, 0, W_WB);                // ·½ → wb
+                  endcase
+                  21: unique case (xq_q)                   // Tanh
+                    0: jset(0, 5'd2, {2'd0, S_V0}, {2'd0, S_SFC},
+                            7'h0, 1, 0, W_XCNT,
+                            1'b0, 1'b0, 2'b0, 2'b0, 2'b0, 1'b0,
+                            4'd0);                           // 2x·log2e
+                    1: begin
+                      va_q[0] <= t0_q;
+                      xsub_q <= 6'd1; xcall_q <= 1'b1;
+                      xret_q <= 5'd2; xret_st_q <= W_EX;
+                      xq_q <= '0; st_q <= W_EX;
+                    end
+                    2: jset(0, 5'd1, 7'h0, {2'd0, S_T0},
+                            {2'd0, S_ONE}, 2, 0, W_XCNT);    // u−1 → t1
+                    3: jset(0, 5'd0, 7'h0, {2'd0, S_T0},
+                            {2'd0, S_ONE}, 3, 0, W_XCNT);    // u+1 → t2
+                    default:
+                      jset(1, 5'd0, {2'd0, S_T1}, {2'd0, S_T2},
+                           7'h0, 0, 0, W_WB);                // n/d → wb
+                  endcase
+                  22: unique case (xq_q)                   // Asinh
+                    0: jset(0, 5'd3, {2'd0, S_V0}, {2'd0, S_V0},
+                            {2'd0, S_ONE}, 1, 0, W_XCNT);    // x²+1
+                    1: jset(1, 5'd1, {2'd0, S_T0}, 7'h0, 7'h0, 1, 0,
+                            W_XCNT);                         // sqrt
+                    2: jset(0, 5'd0, 7'h0, {2'd0, S_T0},
+                            {2'd0, S_V0}, 1, 0, W_XCNT);     // s+x
+                    default: begin
+                      va_q[0] <= t0_q;
+                      xsub_q <= 6'd2; xq_q <= '0; st_q <= W_EX;
+                    end
+                  endcase
+                  23: unique case (xq_q)                   // Acosh
+                    0: jset(0, 5'd3, {2'd0, S_V0}, {2'd0, S_V0},
+                            {2'd0, S_NEG1}, 1, 0, W_XCNT);   // x²−1
+                    1: jset(1, 5'd1, {2'd0, S_T0}, 7'h0, 7'h0, 1, 0,
+                            W_XCNT);                         // sqrt
+                    2: jset(0, 5'd0, 7'h0, {2'd0, S_T0},
+                            {2'd0, S_V0}, 1, 0, W_XCNT);     // s+x
+                    default: begin
+                      va_q[0] <= t0_q;
+                      xsub_q <= 6'd2; xq_q <= '0; st_q <= W_EX;
+                    end
+                  endcase
+                  24: unique case (xq_q)                   // Atanh
+                    0: jset(0, 5'd0, 7'h0, {2'd0, S_ONE},
+                            {2'd0, S_V0}, 2, 0, W_XCNT);     // 1+x → t1
+                    1: jset(0, 5'd1, 7'h0, {2'd0, S_ONE},
+                            {2'd0, S_V0}, 3, 0, W_XCNT);     // 1−x → t2
+                    2: jset(1, 5'd0, {2'd0, S_T1}, {2'd0, S_T2},
+                            7'h0, 1, 0, W_XCNT);             // t1/t2
+                    default: begin
+                      va_q[0] <= t0_q;
+                      xsub_q <= 6'd2; xq_q <= '0; st_q <= W_EX;
+                    end
+                  endcase
                   default: begin
                     done_code_q <= APU_SH_DONE_FAULT;
                     fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};
@@ -4438,10 +5108,30 @@ module g6lc_apu_shwave
                 ls_lane_q <= '0; tx_full_q <= 1'b1;
                 tx_1lane_q <= 1'b1;     // unit jobs for ls_lane only
                 wbm_q <= 4'b1111;
-                // operand-mask legality: only Lod (0x2) is decoded;
-                // 95 may omit it entirely, 88 requires it; 87 takes
-                // no image operands in v1 (proj/dref forms refused in
-                // shmod; Bias comes from the sampler record)
+                tx_dref_q <= (opc_q == 16'd89 || opc_q == 16'd90 ||
+                              opc_q == 16'd93 || opc_q == 16'd94 ||
+                              opc_q == 16'd97);
+                tx_gath_q <= (opc_q == 16'd96 || opc_q == 16'd97);
+                tx_qlod_q <= (opc_q == 16'd105);
+                // image-operands mask position varies by operand count
+                tx_msk_q  <=
+                  8'((((opc_q == 16'd89 || opc_q == 16'd90 ||
+                        opc_q == 16'd93 || opc_q == 16'd94 ||
+                        opc_q == 16'd96 || opc_q == 16'd97) &&
+                       wc_q > 16'd6) ? ops_q[5] :
+                      ((opc_q == 16'd91 || opc_q == 16'd92) &&
+                       wc_q > 16'd5) ? ops_q[4] : 32'h0) & 32'hFF);
+                // ConstOffset operand slot: gathers fetch the trailing
+                // ids positionally (Lod before ConstOffset, both after
+                // the mask word); 0 marks "no offset operand"
+                tx_osl_q <=
+                  ((opc_q == 16'd96 || opc_q == 16'd97) &&
+                   wc_q > 16'd6 && (ops_q[5] & 32'h8) != 0)
+                      ? ((ops_q[5] & 32'h2) != 0 ? 3'd4 : 3'd3) : 3'd0;
+                // operand-mask legality: Lod (0x2) decoded on the
+                // explicit/sample forms, ConstOffset (0x8) on gathers;
+                // implicit forms take no image operands in v1 (Bias
+                // rides the sampler record)
                 if ((opc_q == 16'd87 && wc_q > 16'd5 &&
                      ops_q[4] != 32'h0) ||
                     (opc_q == 16'd95 &&
@@ -4452,7 +5142,25 @@ module g6lc_apu_shwave
                     (opc_q == 16'd98 && wc_q > 16'd5 &&
                      ops_q[4] != 32'h0) ||
                     (opc_q == 16'd99 && wc_q > 16'd4 &&
-                     ops_q[3] != 32'h0)) begin
+                     ops_q[3] != 32'h0) ||
+                    // G3a-ii: dref/proj implicit take no image operands
+                    ((opc_q == 16'd89 || opc_q == 16'd93) &&
+                     wc_q > 16'd6 && ops_q[5] != 32'h0) ||
+                    (opc_q == 16'd91 && wc_q > 16'd5 &&
+                     ops_q[4] != 32'h0) ||
+                    // explicit forms require Lod, allow +ConstOffset
+                    ((opc_q == 16'd90 || opc_q == 16'd94) &&
+                     (wc_q < 16'd8 || (ops_q[5] & ~32'hA) != 0 ||
+                      (ops_q[5] & 32'h2) == 0)) ||
+                    (opc_q == 16'd92 &&
+                     (wc_q < 16'd7 || (ops_q[4] & ~32'hA) != 0 ||
+                      (ops_q[4] & 32'h2) == 0)) ||
+                    // gathers: Lod and/or ConstOffset only
+                    ((opc_q == 16'd96 || opc_q == 16'd97) &&
+                     wc_q > 16'd6 && (ops_q[5] & ~32'hA) != 0) ||
+                    // QueryLod takes no image operands
+                    (opc_q == 16'd105 && wc_q > 16'd5 &&
+                     ops_q[4] != 32'h0)) begin
                   done_code_q <= APU_SH_DONE_FAULT;
                   fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};
                   st_q <= W_DONE;
@@ -4499,7 +5207,7 @@ module g6lc_apu_shwave
               done_code_q <= APU_SH_DONE_FAULT;
               fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};
               st_q <= W_DONE;
-            end else if ((opc_q == 16'd88 || opc_q == 16'd87) &&
+            end else if (f_tx_smp(opc_q) &&
                          va_q[0][ls_lane_q[2:0]][1][31]) begin
               // OpSampledImage-merged: fetch the sampler record too
               tx_full_q <= 1'b0;      // keep the image record
@@ -4508,7 +5216,7 @@ module g6lc_apu_shwave
               dsc_idx_q <= va_q[0][ls_lane_q[2:0]][0][15:0];
               dret_q    <= W_TX3;
               st_q      <= W_DS0;
-            end else if ((opc_q == 16'd88 || opc_q == 16'd87) &&
+            end else if (f_tx_smp(opc_q) &&
                          tx_rec_q[71:64] != 8'd1) begin
               // sampled-image without a bound sampler: cannot sample
               done_code_q <= APU_SH_DONE_FAULT;
@@ -4532,6 +5240,49 @@ module g6lc_apu_shwave
               st_q       <= W_TX4;
             end
           end
+          // ---- G3a-ii: projected-sample preamble ---------------------
+          // OpImageSampleProj*: the coordinate's last component divides
+          // comps 0..1 (u,v) before any sampling maths — wave-wide, once
+          // per instruction, before the per-lane record loop.  The
+          // divisor index is the coord's vector width minus one
+          // (ot_comps_q, read through W_OT0/W_OT1 from operand 1's
+          // type row).
+          W_TXJ0: begin
+            ncomp_q <= 4'd2;
+            jset(1, 5'd0, {2'd0, S_V1},
+                 {2'd3, S_V1}, 7'h0, 1, 0, W_TXJ1,
+                 1'b0, 1'b0, 2'b0, 2'(ot_comps_q - 3'd1));
+          end
+          W_TXJ1: begin                  // fold the quotient back
+            for (int l = 0; l < LAN; l++)
+              for (int c = 0; c < 2; c++)
+                va_q[1][l][c] <= t0_q[l][c];
+            st_q <= W_TX0;
+          end
+          // ---- G3a-ii: dref compare-operand quantize -------------------
+          // The UNORM compare runs in the integer domain: ref16 =
+          // RNE(clamp01(Dref) * 65535) — one pair of unit jobs per lane,
+          // before the lod path.  D32_SFLOAT compares in fp directly.
+          W_TXS0: begin
+            txfa_q[0] <= f_f01(va_q[2][ls_lane_q[2:0]][0]);
+            txfa_q[1] <= 32'h477F_FF00;   // 65535.0f
+            ncomp_q   <= 4'd1;
+            jset(0, 5'd2, {2'd0, S_TX}, {2'd3, S_TX},
+                 {2'd0, S_ZERO}, 1, 0, W_TXS1,
+                 1'b0, 1'b0, 2'b0, 2'd1);
+          end
+          W_TXS1:                        // ref16 = f2i(t0)
+            jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b0},
+                 {2'd0, S_T0}, 7'h0, 7'h0, 2, 0, W_TXS2);
+          W_TXS2: begin
+            tx_r16_q <= t1_q[ls_lane_q[2:0]][0][15:0];
+            // continue: explicit-lod forms straight into the coordinate
+            // compute; implicit (and gather without a Lod operand)
+            // derive λ first
+            st_q <= ((opc_q == 16'd90 || opc_q == 16'd94) ||
+                     (opc_q == 16'd97 && tx_msk_q[1])) ? W_TXC0
+                                                       : W_TXL0;
+          end
           // ---- format decode + mip/lod setup -------------------------
           // walk targets: tx_mt_q = primary level, tx_mt1_q = second
           // (trilinear); 5'h1F marks an unused target.  The walk seeds
@@ -4552,6 +5303,8 @@ module g6lc_apu_shwave
             tx_ly_q    <= (tx_rec_q[125:124] == 2'd1)
                           ? 16'(va_q[1][ls_lane_q[2:0]][2]) : 16'h0;
             tx_bcol_q  <= {1'b0, tx_smp_q[16:14]};
+            tx_cen_q   <= tx_smp_q[20];           // compareEnable
+            tx_cmp_q   <= tx_smp_q[19:17];        // compareOp
             // fetch/read/write fold the mip weight to 1.0 — W_TXC2
             // sets a real fraction only for OpImageSampleExplicitLod
             tx_fw_q    <= '0;
@@ -4575,13 +5328,17 @@ module g6lc_apu_shwave
                   tx_mret_q <= W_TXQ;
                   st_q      <= W_TXM;
                 end
-                16'd88: begin              // SampleExplicitLod
-                  st_q <= W_TXC0;          // lod+coords via fp units
-                end
-                16'd87: begin              // SampleImplicitLod (G2b)
-                  st_q <= W_TXL0;          // λ from quad-lane derivs
-                end
-                default: begin             // 95 fetch / 98 read / 99 wr
+                // G3a-ii: dref ops quantize the compare reference once
+                // per lane (W_TXS0..S2) then continue into the lod path
+                16'd89, 16'd90, 16'd93, 16'd94, 16'd97:
+                  st_q <= W_TXS0;
+                // explicit-lod forms + gather-with-Lod take the direct
+                // coordinate compute; the other implicit forms derive
+                // λ from the quad-lane derivatives first
+                16'd88, 16'd92, 16'd96:
+                  st_q <= (opc_q == 16'd96 && !tx_msk_q[1])
+                          ? W_TXL0 : W_TXC0;
+                16'd95, 16'd98, 16'd99: begin    // fetch / read / write
                   lod = (opc_q == 16'd95 && wc_q > 16'd6)
                         ? va_q[2][ls_lane_q[2:0]][0][4:0] : 5'h0;
                   if (lod >= tx_rec_q[123:120]) begin
@@ -4597,6 +5354,8 @@ module g6lc_apu_shwave
                     st_q      <= W_TXM;
                   end
                 end
+                default:                   // 87/91/105 implicit λ
+                  st_q <= W_TXL0;
               endcase
             end
           end
@@ -4629,10 +5388,11 @@ module g6lc_apu_shwave
           // ---- implicit-LOD λ (op87, G2b) --------------------------
           // Per quad-lane derivatives of the texcoords, scaled by the
           // mip-0 dims: ρ² = max((du·w)²+(dv·h)² over x, same over y),
-          // λ = ½·log2(ρ²).  log2 uses the linear-mantissa
-          // approximation log2(x) ≈ exp(x) + (mant(x) − 1), max error
-          // ~0.086 — documented in the module header; the bias and
-          // min/max-lod clamps happen on the shared W_TXC path.
+          // λ = ½·log2(ρ²).  G3a-ii: log2 is the §7d SFU log2 core
+          // (deg-9 minimax in (m−1)/(m+1), 1-ulp class) — the earlier
+          // linear-mantissa approximation (max error ~0.086) is gone;
+          // the bias and min/max-lod clamps happen on the shared
+          // W_TXC path.
           W_TXL0: begin                  // {w,h} -> f32 in t2
             txfa_q[0] <= {16'h0, tx_rec_q[95:80]};
             txfa_q[1] <= {16'h0, tx_rec_q[111:96]};
@@ -4669,26 +5429,22 @@ module g6lc_apu_shwave
             jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b1},
                  {2'd0, S_T2}, {2'd0, S_T1}, 7'h0, 1, 0, W_TXL8);
           end
-          W_TXL8: begin                  // e = exponent(ρ²) -> f32
-            txfa_q[0] <= {24'h0, t0_q[ls_lane_q[2:0]][0][30:23]};
+          // §7d/TEX-H1: λ = ½·log2(ρ²) now uses the SFU log2 core
+          // (replaces the linear-mantissa approximation whose max error
+          // was ~0.086 λ); ρ² in t0[.][0] moves to va0, the core returns
+          // log2(ρ²) in t0[.][0] through xret_st_q and W_TXLC halves it.
+          W_TXL8: begin                  // call SFU log2(ρ²)
+            for (int l = 0; l < LAN; l++)
+              va_q[0][l][0] <= t0_q[l][0];
             ncomp_q <= 4'd1;
-            jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
-                 {2'd0, S_TX}, 7'h0, 7'h0, 3, 0, W_TXL9);
+            xsub_q <= 6'd2; xcall_q <= 1'b1;
+            xret_q <= '0; xret_st_q <= W_TXLC;
+            xq_q <= '0; st_q <= W_EX;
           end
-          W_TXL9:                        // t2 = e + (-127) = true exp
-            jset(0, 5'd0, {2'd0, S_ZERO}, {2'd0, S_T2},
-                 {2'd0, S_N127}, 3, 0, W_TXLA);
-          W_TXLA: begin                  // t2 = mant_f + (e - 127)
-            txfa_q[0] <= {1'b0, 8'd127,
-                          t0_q[ls_lane_q[2:0]][0][22:0]};
-            jset(0, 5'd3, {2'd1, S_TX}, {2'd1, S_ONE},
-                 {2'd0, S_T2}, 3, 0, W_TXLB);
-          end
-          W_TXLB:                        // t2 = λ0 - 1
-            jset(0, 5'd1, {2'd0, S_ZERO}, {2'd0, S_T2},
-                 {2'd0, S_ONE}, 3, 0, W_TXLC);
-          W_TXLC:                        // t0 = λ0 * 0.5 = λ
-            jset(0, 5'd2, {2'd0, S_T2}, {2'd0, S_HALF},
+          W_TXL9, W_TXLA, W_TXLB:        // (retired linear-mantissa λ)
+            st_q <= W_TXLC;
+          W_TXLC:                        // t0 = log2(ρ²) * 0.5 = λ
+            jset(0, 5'd2, {2'd0, S_T0}, {2'd0, S_HALF},
                  {2'd0, S_ZERO}, 1, 0, W_TXC0);
           // ---- sampled-coordinate compute (op88) ---------------------
           // lod*16 (fp job) -> F2I -> +bias, clamp [minLod,maxLod] and
@@ -4696,10 +5452,19 @@ module g6lc_apu_shwave
           // fixed per mip; then the gather build wraps indices per
           // address mode.
           W_TXC0: begin
-            // op87: λ (already computed) replaces the explicit lod
-            txfa_q[0] <= (opc_q == 16'd87)
-                         ? t0_q[ls_lane_q[2:0]][0]
-                         : va_q[2][ls_lane_q[2:0]][0];
+            // implicit forms (87/89/91/93/105 and gathers without a
+            // Lod operand) take the computed λ from t0; explicit forms
+            // read their lod operand (88/92 slot 2, 90/94/96 slot 3,
+            // 97 slot 4)
+            if (tx_qlod_q) tx_qraw_q <= t0_q[ls_lane_q[2:0]][0];
+            txfa_q[0] <=
+              (opc_q == 16'd87 || opc_q == 16'd89 || opc_q == 16'd91 ||
+               opc_q == 16'd93 || opc_q == 16'd105 ||
+               ((opc_q == 16'd96 || opc_q == 16'd97) && !tx_msk_q[1]))
+                ? t0_q[ls_lane_q[2:0]][0]
+                : va_q[(opc_q == 16'd88 || opc_q == 16'd92) ? 3'd2
+                                                           : 3'd3]
+                      [ls_lane_q[2:0]][0];
             t0_q[ls_lane_q[2:0]][0] <= 32'h4180_0000;  // 16.0f
             // t1 comp1 stages the fp32 array coordinate; W_TXC1's F2I
             // converts both comps (lod*16 -> int, coord.z -> layer)
@@ -4740,16 +5505,30 @@ module g6lc_apu_shwave
             if (le > $signed({4'h0, mx44})) le = $signed({4'h0, mx44});
             if (le < 0) le = 0;
             // array layer = RNE(coord.z), converted by the W_TXC1 F2I
-            // comp1 (W_TXC5's F2I would overwrite t2 later)
-            tx_ly_q   <= 16'(t2_q[ls_lane_q[2:0]][1]);
+            // comp1 (W_TXC5's F2I would overwrite t2 later);
+            // only a 2D-array image owns an array layer — on 2D/3D/
+            // cube records coord.z is the proj divisor or the depth
+            // reference, not a layer index (W_TX4 already cleared it)
+            if (tx_rec_q[125:124] == 2'd1)
+              tx_ly_q <= 16'(t2_q[ls_lane_q[2:0]][1]);
             tx_lode_q <= le[8:0];
-            // magnification when lod <= 0, else minification
-            tx_lin_q  <= (le > 12'sd0) ? tx_smp_q[3:2] != 2'd0
+            if (tx_qlod_q) begin
+              // OpImageQueryLod: {clamped, unclamped} — W_TXQ0 finishes
+              st_q <= W_TXQ0;
+            end else begin
+            // magnification when lod <= 0, else minification; gathers
+            // use the linear footprint math regardless of filter mode
+            tx_lin_q  <= tx_gath_q ? 1'b1 :
+                         (le > 12'sd0) ? tx_smp_q[3:2] != 2'd0
                                        : tx_smp_q[1:0] != 2'd0;
-            if (tx_smp_q[4]) begin              // mipmap LINEAR
+            if (tx_smp_q[4] && !tx_gath_q) begin   // mipmap LINEAR
               m0 = 5'(le >> 4);
               m1 = m0 + 5'd1;
               tx_fw_q <= {1'b0, le[3:0], 4'h0};
+            end else if (tx_gath_q) begin        // gather: mip floor
+              m0 = 5'(le >> 4);
+              m1 = m0;
+              tx_fw_q <= '0;
             end else begin                      // mipmap NEAREST
               m0 = 5'((le + 12'sd8) >> 4);
               m1 = m0;
@@ -4764,6 +5543,7 @@ module g6lc_apu_shwave
             tx_hm_q <= tx_rec_q[111:96];
             tx_mret_q <= W_TXC3;
             st_q <= W_TXM;
+            end
           end
           W_TXC3: begin
             // dims -> fp scale: LINEAR uses 8.8 fixed (w<<8),
@@ -4789,9 +5569,10 @@ module g6lc_apu_shwave
             jset(0, 5'd3, {2'd0, S_TX}, {2'd0, S_T0},
                  {2'd0, S_T2}, 2, 0, W_TXC5);
           end
-          W_TXC5:                                 // q -> s8.8 ints
+          W_TXC5: begin
             jset(2, {1'b0, fpnew_pkg::RDN[2:0], 1'b0},
                  {2'd0, S_T1}, 7'h0, 7'h0, 3, 0, W_TXC6);
+          end
           W_TXC6: begin
             // build the gather list.  linear: t2 = {su0,sv0,su1,sv1}
             // s8.8; nearest: plain integer pixel indices.
@@ -4804,12 +5585,44 @@ module g6lc_apu_shwave
             sv0 = t2_q[ls_lane_q[2:0]][1];
             su1 = t2_q[ls_lane_q[2:0]][2];
             sv1 = t2_q[ls_lane_q[2:0]][3];
+            // ConstOffset (gathers): integer texel shift in the s8.8
+            // domain, applied before the address-mode wrap
+            if (tx_osl_q != 3'd0) begin
+              su0 = su0 + ($signed(va_q[tx_osl_q]
+                                    [ls_lane_q[2:0]][0]) <<< 8);
+              sv0 = sv0 + ($signed(va_q[tx_osl_q]
+                                    [ls_lane_q[2:0]][1]) <<< 8);
+            end
             tx_gn_q <= '0; tx_gi_q <= '0;
             for (int c = 0; c < 4; c++) begin
               tx_acc_q[c]  <= '0; tx_acc1_q[c] <= '0;
               t2_q[ls_lane_q[2:0]][c] <= '0;    // fp acc reset
             end
-            if (tx_lin_q) begin
+            if (tx_gath_q) begin
+              // gather footprint: the linear corner texels of mip m0 in
+              // the SPIR-V result order (i0,j1),(i1,j1),(i1,j0),(i0,j0)
+              cu0 = f_twrap(su0 >>> 8, tx_w0_q, tx_smp_q[7:5]);
+              cu1 = f_twrap((su0 >>> 8) + 1, tx_w0_q, tx_smp_q[7:5]);
+              cv0 = f_twrap(sv0 >>> 8, tx_h0_q, tx_smp_q[10:8]);
+              cv1 = f_twrap((sv0 >>> 8) + 1, tx_h0_q, tx_smp_q[10:8]);
+              tx_gn_q <= 4'd4;
+              tx_gu_q[0] <= 32'(cu0[15:0]);      // (i0,j1) -> R
+              tx_gv_q[0] <= 32'(cv1[15:0]);
+              tx_gb_q[0] <= cu0[16] || cv1[16];
+              tx_gw_q[0] <= 17'd65536; tx_gm_q[0] <= '0;
+              tx_gu_q[1] <= 32'(cu1[15:0]);      // (i1,j1) -> G
+              tx_gv_q[1] <= 32'(cv1[15:0]);
+              tx_gb_q[1] <= cu1[16] || cv1[16];
+              tx_gw_q[1] <= 17'd65536; tx_gm_q[1] <= '0;
+              tx_gu_q[2] <= 32'(cu1[15:0]);      // (i1,j0) -> B
+              tx_gv_q[2] <= 32'(cv0[15:0]);
+              tx_gb_q[2] <= cu1[16] || cv0[16];
+              tx_gw_q[2] <= 17'd65536; tx_gm_q[2] <= '0;
+              tx_gu_q[3] <= 32'(cu0[15:0]);      // (i0,j0) -> A
+              tx_gv_q[3] <= 32'(cv0[15:0]);
+              tx_gb_q[3] <= cu0[16] || cv0[16];
+              tx_gw_q[3] <= 17'd65536; tx_gm_q[3] <= '0;
+            end else if (tx_lin_q) begin
               // mip0 axis wrap
               cu0 = f_twrap(su0 >>> 8, tx_w0_q, tx_smp_q[7:5]);
               cu1 = f_twrap((su0 >>> 8) + 1, tx_w0_q, tx_smp_q[7:5]);
@@ -5077,11 +5890,68 @@ module g6lc_apu_shwave
                   tx_fc_q[c] <= tdw[32 * c +: 32];
               end
             endcase
+            // G3a-ii dref: replace the decoded texel with the compare
+            // result — PCF = per-texel compare, then the same weight
+            // apply (linear/trilinear) as colour sampling
+            if (tx_dref_q) begin
+              logic cmp;
+              if (!tx_cen_q) begin
+                cmp = 1'b1;              // no compareOp -> pass
+              end else if (tx_isflt_q) begin
+                // SFLOAT depth (D32): fp32 compare, ref unclamped
+                cmp = f_fcmp32(va_q[2][ls_lane_q[2:0]][0],
+                               tx_brd_q ? f_bord32(tx_bcol_q[2:0], 3'd0)
+                                        : tdw[31:0], tx_cmp_q);
+              end else if (!tx_isint_q) begin
+                // UNORM depth (D16): ref pre-quantized to u16 (W_TXS*)
+                cmp = f_dcmp(tx_r16_q,
+                             tx_brd_q ? f_bord16(tx_bcol_q[2:0], 3'd0)
+                                      : tdw[15:0], tx_cmp_q);
+              end else begin
+                cmp = 1'b1;              // int formats: no compare
+              end
+              tx_fc_q[0] <= cmp ? 32'h3F80_0000 : 32'h0;
+              tx_fc_q[1] <= 32'h0; tx_fc_q[2] <= 32'h0;
+              tx_fc_q[3] <= 32'h0;
+            end
             st_q <= W_TXA;
           end
           // ---- accumulate ----------------------------------------------
           W_TXA: begin
-            if (tx_isint_q) begin
+            if (tx_gath_q) begin
+              // G3a-ii gather: point gi feeds result component gi
+              // (the spec-order footprint was built in W_TXC6); the
+              // component operand picks the texel channel through the
+              // view swizzle
+              logic [2:0] s;
+              s = f_swz(tx_rec_q[155:144],
+                        2'(va_q[2][ls_lane_q[2:0]][0]));
+              if (tx_dref_q) begin
+                wb_q[ls_lane_q[2:0]][tx_gi_q[1:0]] <= tx_fc_q[0];
+                tx_gi_q <= tx_gi_q + 4'd1;
+                st_q <= (tx_gi_q + 4'd1 >= tx_gn_q) ? W_TXN : W_TXT0;
+              end else if (tx_isint_q) begin
+                wb_q[ls_lane_q[2:0]][tx_gi_q[1:0]] <=
+                  s == 3'd1 ? 32'h0 : s == 3'd2 ? 32'd1
+                                              : tx_fc_q[s - 3'd3];
+                tx_gi_q <= tx_gi_q + 4'd1;
+                st_q <= (tx_gi_q + 4'd1 >= tx_gn_q) ? W_TXN : W_TXT0;
+              end else if (tx_isflt_q) begin
+                wb_q[ls_lane_q[2:0]][tx_gi_q[1:0]] <=
+                  s == 3'd1 ? 32'h0 : s == 3'd2 ? 32'h3F80_0000
+                                              : tx_fc_q[s - 3'd3];
+                tx_gi_q <= tx_gi_q + 4'd1;
+                st_q <= (tx_gi_q + 4'd1 >= tx_gn_q) ? W_TXN : W_TXT0;
+              end else begin
+                // UNORM/sRGB: ch16 -> fp32 normalize (W_TXG0 finishes)
+                txfa_q[0] <= s == 3'd1 ? 32'h0 :
+                             s == 3'd2 ? 32'd65535
+                                       : {16'h0, tx_ch_q[s - 3'd3]};
+                ncomp_q <= 4'd1;
+                jset(2, {1'b1, fpnew_pkg::RNE[2:0], 1'b1},
+                     {2'd0, S_TX}, 7'h0, 7'h0, 1, 0, W_TXG0);
+              end
+            end else if (tx_isint_q) begin
               // single-point raw result: swizzle into wb directly
               for (int c = 0; c < VEC; c++) begin
                 logic [2:0] s;
@@ -5091,9 +5961,10 @@ module g6lc_apu_shwave
                   s == 3'd2 ? 32'd1 : tx_fc_q[s - 3'd3];
               end
               st_q <= W_TXR0;
-            end else if (tx_isflt_q) begin
+            end else if (tx_isflt_q || tx_dref_q) begin
               // fp32 accumulate: stage texel into t1 row, then
-              // i2f(W)*2^-24 -> FMADD into the t2 row accumulator
+              // i2f(W)*2^-24 -> FMADD into the t2 row accumulator;
+              // dref ops ride this path with fc[0] = compare result
               for (int c = 0; c < VEC; c++)
                 t1_q[ls_lane_q[2:0]][c] <= tx_fc_q[c];
               txfa_q[0] <= {6'h0,
@@ -5145,6 +6016,14 @@ module g6lc_apu_shwave
               if (opc_q != 16'd99)
                 for (int c = 0; c < VEC; c++)
                   wb_q[ls_lane_q[2:0]][c] <= '0;
+              st_q <= W_TXN;
+            end else if (tx_dref_q) begin
+              // G3a-ii: dref sample result is the scalar compare
+              // fraction in accumulator comp0 (swizzle does not apply)
+              wb_q[ls_lane_q[2:0]][0] <= t2_q[ls_lane_q[2:0]][0];
+              wb_q[ls_lane_q[2:0]][1] <= 32'h0;
+              wb_q[ls_lane_q[2:0]][2] <= 32'h0;
+              wb_q[ls_lane_q[2:0]][3] <= 32'h0;
               st_q <= W_TXN;
             end else if (tx_isint_q) begin
               st_q <= W_TXN;           // wb written in W_TXA
@@ -5338,6 +6217,43 @@ module g6lc_apu_shwave
               end
             endcase
             st_q <= W_TXN;
+          end
+          // ---- G3a-ii tails ------------------------------------------
+          // W_TXG0/G1: gather UNORM channel normalize — t0 = i2f(ch16)
+          // already landed; scale by 1/65535 then write result comp
+          W_TXG0: begin
+            txfa_q[0] <= 32'h3780_0080;   // 1/65535
+            ncomp_q <= 4'd1;
+            jset(0, 5'd2, {2'd0, S_T0}, {2'd1, S_TX},
+                 {2'd0, S_ZERO}, 2, 0, W_TXG1);
+          end
+          W_TXG1: begin
+            wb_q[ls_lane_q[2:0]][tx_gi_q[1:0]] <=
+              t1_q[ls_lane_q[2:0]][0];
+            tx_gi_q <= tx_gi_q + 4'd1;
+            st_q <= (tx_gi_q + 4'd1 >= tx_gn_q) ? W_TXN : W_TXT0;
+          end
+          // W_TXQ0/Q1: OpImageQueryLod — comp0 = clamped λ (the q4.4
+          // `le` of W_TXC2 additionally clamped to the mip range),
+          // comp1 = the raw λ stashed in tx_qraw_q
+          W_TXQ0: begin
+            logic signed [11:0] lec;
+            lec = $signed({3'b0, tx_lode_q});
+            if (lec > 12'(tx_lvl_q - 5'd1) * 12'sd16)
+              lec = 12'(tx_lvl_q - 5'd1) * 12'sd16;
+            txfa_q[0] <= 32'(lec);        // int -> fp next
+            ncomp_q <= 4'd1;
+            jset(2, {1'b0, fpnew_pkg::RNE[2:0], 1'b1},
+                 {2'd0, S_TX}, 7'h0, 7'h0, 1, 0, W_TXQ1);
+          end
+          W_TXQ1: begin                  // λ_clamped = le * 2^-4
+            txfa_q[0] <= 32'h3D80_0000;   // 0.0625f
+            wb_q[ls_lane_q[2:0]][1] <= tx_qraw_q;
+            wb_q[ls_lane_q[2:0]][2] <= 32'h0;
+            wb_q[ls_lane_q[2:0]][3] <= 32'h0;
+            ncomp_q <= 4'd1;
+            jset(0, 5'd2, {2'd0, S_T0}, {2'd1, S_TX},
+                 {2'd0, S_ZERO}, 0, 0, W_TXN);   // -> wb[0]
           end
           // post-resolve bounds check for the resource access
           W_LSC: begin
@@ -6126,6 +7042,7 @@ module g6lc_apu_shwave
             pc_q[wave_q] <= pc_q[wave_q] + wc_q;
             insns_q <= insns_q + 1;
             xq_q <= '0;      // ExtInst step counter is per instruction
+            xsub_q <= '0; xcall_q <= '0;   // §7d SFU seq is per instr
             if (insns_q + 1 > ShaderBudget) begin
               done_code_q <= APU_SH_DONE_BUDGET;
               fl_pc_q <= pc_q[wave_q]; fl_wave_q <= {8'h0, wave_q};

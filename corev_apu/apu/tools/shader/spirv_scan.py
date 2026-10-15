@@ -147,13 +147,18 @@ OP = dict(
     ConstantComposite=44, ConstantNull=46,
     SpecConstantTrue=48, SpecConstantFalse=49, SpecConstant=50,
     SpecConstantComposite=51, SpecConstantOp=52,
-    # §12.3 C/5b image ops — OpImageSampleImplicitLod (87, G2b) is
-    # fragment-only (FRAG_ONLY below); the projected/depth-ref
-    # implicit forms (89..93) stay absent and fault OPCODE
+    # §12.3 C/5b image ops — the implicit-lod forms (87,89,91,93) and
+    # QueryLod (105) are fragment-only (FRAG_ONLY below); explicit
+    # (90,92,94) and gather (96,97) run in any model
     SampledImage=86, ImageSampleImplicitLod=87,
     ImageSampleExplicitLod=88,
-    ImageFetch=95, ImageRead=98, ImageWrite=99, Image=100,
-    ImageQuerySizeLod=103, ImageQuerySize=104, ImageQueryLevels=106,
+    ImageSampleDrefImplicitLod=89, ImageSampleDrefExplicitLod=90,
+    ImageSampleProjImplicitLod=91, ImageSampleProjExplicitLod=92,
+    ImageSampleProjDrefImplicitLod=93, ImageSampleProjDrefExplicitLod=94,
+    ImageFetch=95, ImageGather=96, ImageDrefGather=97,
+    ImageRead=98, ImageWrite=99, Image=100,
+    ImageQuerySizeLod=103, ImageQuerySize=104, ImageQueryLod=105,
+    ImageQueryLevels=106,
     Function=54, FunctionParameter=55, FunctionEnd=56,
     FunctionCall=57, Variable=59, Load=61, Store=62,
     AccessChain=65, InBoundsAccessChain=66, ArrayLength=68,
@@ -213,10 +218,11 @@ OP = dict(
 ACCEPT = set(OP.values())
 
 # opcodes legal only inside a Fragment-execution-model module: the
-# implicit-LOD sample (87) needs quad derivatives that VS/compute
-# waves never form, and 207-215 *are* quad derivatives
-FRAG_ONLY = {87, 207, 208, 209, 210, 211, 212, 213, 214, 215,
-             252, 4416, 5380, 5381}
+# implicit-LOD samples (87/89/91/93) and QueryLod (105) need quad
+# derivatives that VS/compute waves never form, and 207-215 *are*
+# quad derivatives
+FRAG_ONLY = {87, 89, 91, 93, 105, 207, 208, 209, 210, 211, 212, 213,
+             214, 215, 252, 4416, 5380, 5381}
 
 # instruction word bound for ops that stage all operand words
 STAGE_BOUND = {57, 245, 224, 225, 246, 247, 250, 251, 84,
@@ -227,6 +233,11 @@ STAGE_BOUND = {57, 245, 224, 225, 246, 247, 250, 251, 84,
 EXT450 = dict(Round=1, RoundEven=2, Trunc=3, FAbs=4, SAbs=5, FSign=6,
               SSign=7, Floor=8, Ceil=9, Fract=10, Sqrt=31,
               InverseSqrt=32,
+              # G3a-ii §7d SFU: transcendentals + hyperbolics via the
+              # generated g6lc_apu_sfu_pkg coefficient ROM
+              Sin=13, Cos=14, Tan=15, Asin=16, Acos=17, Atan=18,
+              Sinh=19, Cosh=20, Tanh=21, Asinh=22, Acosh=23, Atanh=24,
+              Atan2=25, Pow=26, Exp=27, Log=28, Exp2=29, Log2=30,
               # G3a-i: determinant/inverse, modf/frexp family, fp16 and
               # fixed-point pack pairs, geometry ops, bit scans, NaN-
               # propagating min/max/clamp
@@ -1027,6 +1038,8 @@ class Scanner:
                87, 207, 208, 209, 210, 211, 212, 213, 214, 215,
                # §12.3 C/5b: image ops with a result register
                86, 88, 95, 98, 100, 103, 104, 106,
+               # G3a-ii: dref/proj/gather/querylod results
+               89, 90, 91, 92, 93, 94, 96, 97, 105,
                # G3a-i: undef/copy, dynamic vector ops, fp/int
                # remainder + carry/borrow/wide-mul struct results,
                # reductions, fp tests, unordered compares, bitfield ops

@@ -43,11 +43,11 @@ VEC_DIR = REPO / 'verif' / 'tb' / 'apu' / 'vn_vectors'
 FAULT = {'NONE': 0, 'UNKNOWN_TYPE': 1, 'STYPE': 2, 'PNEXT': 3, 'FLAGS': 4,
          'BOUND': 5, 'HANDLE_ZERO': 6, 'LOOP': 7, 'ROM': 8}
 
-# fixed-width .exp record: 77 record words + 256-word payload region,
+# fixed-width .exp record: 77 record words + 512-word payload region,
 # layout documented in g6lc_apu_vn_tables.md
 # ("`.exp` expected-record format")
 EXP_WORDS = 77
-EXP_PAY = 256
+EXP_PAY = 512
 
 
 class Enc:
@@ -666,12 +666,16 @@ class ArgGen:
                     for b in vals.values():
                         v |= b
                 else:
-                    prefix = {'VkBufferUsageFlags': 'VK_BUFFER_USAGE_',
-                              'VkImageUsageFlags': 'VK_IMAGE_USAGE_'}[
-                        base.name]
-                    v = 0
-                    for p in mask.split('|'):
-                        v |= vals[prefix + p + '_BIT']
+                    try:
+                        v = int(mask, 0)
+                    except ValueError:
+                        prefix = {'VkBufferUsageFlags': 'VK_BUFFER_USAGE_',
+                                  'VkImageUsageFlags': 'VK_IMAGE_USAGE_',
+                                  'VkDescriptorBindingFlags':
+                                      'VK_DESCRIPTOR_BINDING_'}[base.name]
+                        v = 0
+                        for p in mask.split('|'):
+                            v |= vals[prefix + p + '_BIT']
                 return self.rng.randint(0, v) & v
         bits = n * 8
         return self.rng.getrandbits(min(bits, 32)) if n <= 4 else \
@@ -6550,7 +6554,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                             * (-1 if s1 & (1 << 24)
                                                else 1)),
                             anisotropyEnable=0, maxAnisotropy=0,
-                            compareEnable=0, compareOp=0,
+                            # record word0 [20:17] = {cmpEn, cmpOp}
+                            # (vnfront StSamCk); shadow samplers need
+                            # the real compare encoding for dref ops
+                            compareEnable=(s0 >> 20) & 1,
+                            compareOp=(s0 >> 17) & 7,
                             minLod=f32b((s1 & 0xFF) / 16.0),
                             maxLod=f32b(((s1 >> 8) & 0xFF) / 16.0),
                             borderColor=(s0 >> 14) & 7,

@@ -308,6 +308,48 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
   arms. Vector churn: every `.tab` gained the `F` row; no pre-existing expectation changed
   (two mutant `.out.bin` lavapipe byproducts were restored from HEAD — they are not
   consumed by the TB). Pinned-toolchain leaves deferred to the G3 milestone.
+- [~] G3a-ii — **SFU transcendentals + Dref/Proj/Gather/QueryLod sampling (2026-10-15;
+  RTL/model/vectors landed, CTS oracle incomplete).** §7d as designed: GLSL.std.450 13–30
+  (Sin…Atanh, Atan2, Pow, Exp, Log, Exp2, Log2) as shwave micro-sequences over fpnew with
+  four shared cores (`xsub` 1 exp2 / 2 log2 / 3 atan / 4 trig, 63 = per-op epilogue) and
+  `xcall/xret` call-return (Pow = log2→exp2, Sinh/Cosh = two exp2 calls, implicit-LOD λ
+  calls log2 from `W_TXL8`); coefficient ROM `include/g6lc_apu_sfu_pkg.sv` ←
+  `tools/shader/gen_sfu_tables.py`, model mirror `sfu_tables.py`, runner suite `shwave-sfu`
+  (`--check` freshness); `S_SFC` operand source. Texture ops 89–94/96/97/105 accepted
+  (shmod; implicit forms fragment-only), operand-count/mask legality per form
+  (`f_nva`/`f_opid` with the trailing Lod/ConstOffset ids, 6 operand slots), Dref
+  compare-before-weights (D16 u16 compare after RNE quantize `W_TXS0..2`, D32 fp32 compare,
+  border texels included), Proj divide preamble `W_TXJ0/1`, gather footprint in SPIR-V
+  result order with ConstOffset and mip floor, QueryLod {clamped, raw} `W_TXQ0/1`; layer
+  index only on 2D-array records. Profile: `mipmapPrecisionBits` 4 → 8 (λ via the log2
+  core), D16/D32 `SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR`, `chain_structs =
+  [VkDescriptorSetLayoutBindingFlagsCreateInfo]` with `VkDescriptorBindingFlags = "0"`
+  (array decoded element-wise through `FLAGS` at mask 0 — dEQP's layout builder chains it
+  on every `vkCreateDescriptorSetLayout`; refusing it wedged CTS), `VkImageFormatProperties`
+  word order fixed (`sampleCounts` precedes the 64-bit `maxResourceSize`), golden sampler
+  records now carry `compareEnable/compareOp`, `.exp` payload region 256 → 512 words
+  (`vn_golden.py`, `tb_g6lc_apu_vndec.sv` `REC_W=591`, generator doc). `ApuVenus`
+  `DmaWindowBytes` 8 GiB (both QEMU DRAM banks; `check_cfg` no longer demands a power-of-two
+  window — the hardware check is `addr-base<bytes`). Corpus: `sfu_{trig,atrig,exp,log,pow,
+  hyper}` compute + `_opt`, `fs_tex_{proj,gather,qlod,shadow}`, `vs/fs_shadowfog` (vkcmp
+  scene 10). **Evidence (local 5.020, tree as committed, `.cache/g3aii-gates/`):** shwave
+  **401 cases / 72,016 checks, maxulp=1, sfumax=5, oum=0** (sfumax is the vector-set
+  maximum over all SFU ops — the per-op check against the Vulkan precision table is the
+  CTS precision caselist, which has not completed); shcore 11 / 18,799; rast 14 / 14,444;
+  vndec **2,523 / 182,922** and vnfront 46 / 337 on the regenerated goldens; 5.008 lint
+  clean on shmod/shwave/vnfront; synth shwave Enable=1 small screen
+  (`.cache/g3a-gates/synth-final/shw-1s-rerun.log`, 4.6 h, 13 GB) **2,341,635 cells /
+  79,504 FFs, no latch** = **+121 % cells / +42 % FFs over 4b-opt** for G3a-i + G3a-ii
+  together (not split; first target of the perf/area program). Guest: scene 10
+  `f10_shadow_fog` **GUEST-PASS maxdiff=1 bad=0/4096**; CTS dev run `g3aii-2026-10-14`
+  (11 `glsl.texture_functions.*_compute`) all **NotSupported — honest** ("Exclusive
+  compute queue not supported": one universal queue family advertised). **Not run:** the
+  115-case `cts-g3aii-precision.txt` (bridge process killed externally ~95 min in, no
+  QPA — relaunch owed) and `cts-g3aii-texture.txt` (811). **Open defect (device):**
+  `texture.*.sampler2d_fixed_vertex` — a vertex-stage texture op never posts its fence
+  (descriptor pNext now decodes, ring drains, `fatal=0`), Mesa aborts in fence wait
+  (`rc=134` → `GUEST-FAIL`); fragment/compute texture paths pass; not yet root-caused to a
+  unit. Pinned-toolchain leaves deferred to the G3 milestone.
 - [ ] **CTS track (2026-10-14) — the Khronos Vulkan CTS becomes the acceptance oracle.**
   Source of record `specs/VK-GL-CTS` (lazy, shallow, `update = none`) pinned to
   `vulkan-cts-1.4.6.2` = `f6a29701220f34dd1407513bfe80d74ca7b392ce`; must-pass index

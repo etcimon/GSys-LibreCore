@@ -1,0 +1,18 @@
+#version 460
+// §7d SFU smoke — exp/exp2 over the whole domain incl. specials:
+// 0 -> 1, +-1, large positive (overflow -> +inf), large negative
+// (underflow -> denormal then 0), +inf, -inf, NaN.  Inputs are the
+// vector file's per-invocation src records; a = src[i], b = src[i+32].
+layout(local_size_x = 8) in;
+layout(set = 0, binding = 0) buffer Src { vec4 src[]; };
+layout(set = 0, binding = 1) buffer Dst { vec4 dst[]; };
+void main() {
+    uint i = gl_GlobalInvocationID.x;
+    vec4 a = src[i];
+    vec4 b = src[i + 32u];
+    uint o = i * 2u;
+    // 0: exp(a.x) exp2(a.y) exp(b.x) exp2(b.y)
+    dst[o + 0u] = vec4(exp(a.x), exp2(a.y), exp(b.x), exp2(b.y));
+    // 1: exp(a.z) exp2(a.w) exp(b.z) exp2(b.w)
+    dst[o + 1u] = vec4(exp(a.z), exp2(a.w), exp(b.z), exp2(b.w));
+}

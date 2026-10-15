@@ -7,7 +7,8 @@
 #
 # Build is keyed {CTS commit, toolchain sha256}: the riscv64 tree is
 # never rebuilt for RTL changes.  Heavy build trees live under
-# $CTS_BUILD_ROOT (default /root/cts — the repo .cache sits on DrvFs,
+# $CTS_BUILD_ROOT (default ${XDG_CACHE_HOME:-$HOME/.cache}/g6lc-cts-build —
+# a per-user cache outside the repo; the repo .cache sits on DrvFs,
 # which is too slow and too small for a full compile); packaged
 # artifacts land in .cache/cts/.
 #
@@ -25,7 +26,7 @@ CTS="$ROOT/specs/VK-GL-CTS"
 CTS_CACHE="$ROOT/.cache/cts"
 CTS_DIR="$ROOT/verif/tb/apu/bridge/guest/cts"
 CASELIST="$CTS_DIR/caselists/cts0-info-smoke.txt"
-BUILD_ROOT="${CTS_BUILD_ROOT:-/root/cts}"
+BUILD_ROOT="${CTS_BUILD_ROOT:-${XDG_CACHE_HOME:-$HOME/.cache}/g6lc-cts-build}"
 TC_DIR="$CTS_CACHE/toolchain/bootlin-2024.05-1"
 LEDGER="$ROOT/corev_apu/apu/tools/cts_ledger.py"
 
@@ -140,8 +141,8 @@ if [ "$DO_PKG" = 1 ]; then
   mkdir -p "$STAGE/caselists"
   cp "$DEQP_R" "$STAGE/deqp-vk"
   cp -a "$CTS/external/vulkancts/data/vulkan" "$STAGE/vulkan"
-  cp "$CASELIST" "$STAGE/caselists/"
-  tar -C "$STAGE" -cf - . | zstd -19 -T"$NPROC" -o "$TAR"
+  cp "$CTS_DIR/caselists/"*.txt "$STAGE/caselists/"
+  tar -C "$STAGE" -cf - . | zstd -f -19 -T"$NPROC" -o "$TAR"
   (cd "$CTS_CACHE" && sha256sum "deqp-riscv64-$CTS12.tar.zst" \
     > "deqp-riscv64-$CTS12.tar.zst.sha256")
   echo "[cts] packaged $TAR"

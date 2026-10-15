@@ -161,7 +161,7 @@ EXCEPTION TEX-X2 · Filtering precision latitude
 
 | Heuristic | Trigger | Priority | Smallest useful action | Reject / defer when |
 |---|---|---:|---|---|
-| TEX-H1 λ precision | before CTS-2 | high | replace the linear-mantissa log2 with the G3a-ii log2 (3 ULP) in the implicit-LOD path; advertise 8 mipmap bits truthfully | — |
+| TEX-H1 λ precision | before CTS-2 | high | **done G3a-ii (2026-10-15):** implicit-LOD λ = ½·log2(ρ²) through the §7d log2 core (`W_TXL8` xcall), `mipmapPrecisionBits = 8`; the discriminating check is `texture.mipmap.*` / `glsl.texture_functions.*` in CTS-2 — not yet run (the vertex-stage texture hang blocks the `*_vertex` variants) | — |
 | TEX-H2 2D matrix | CTS-2 | high | filtering.2d + mipmap.2d + shadow.2d | — |
 | TEX-H3 Cube/3D/array | G3d | high | layouts + seamless cube | — |
 | TEX-H4 BC family | G3d/UE | medium | decode-on-miss BC1–7 | mobile formats (skip) |

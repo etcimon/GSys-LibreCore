@@ -109,6 +109,8 @@ if has unit; then
   run_suite shmod    env APU_SHMOD_OUT="$OUT/shmod"     "$TB/run-apu-shmod.sh"
   run_suite dmprog   python3 -B \
     "$ROOT/corev_apu/apu/tools/shader/gen_dmprog.py" --check
+  run_suite shwave-sfu python3 -B \
+    "$ROOT/corev_apu/apu/tools/shader/gen_sfu_tables.py" --check
   run_suite shwave   env APU_SHWAVE_OUT="$OUT/shwave"   "$TB/run-apu-shwave.sh"
   run_suite shcore   env APU_SHCORE_OUT="$OUT/shcore"   "$TB/run-apu-shcore.sh"
 fi

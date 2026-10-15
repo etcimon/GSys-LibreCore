@@ -42,6 +42,7 @@ module tb_g6lc_apu_shwave;
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_sh_pkg::*;
+  import g6lc_apu_sfu_pkg::*;
 
   localparam int unsigned MAXW = 262144;   // hex/exp word buffers
   localparam int unsigned MEMW = 131072;   // 64-bit mem words (1 MiB)
@@ -768,7 +769,7 @@ module tb_g6lc_apu_shwave;
   // run one vector: commit, load buffers, dispatch, compare
   // 4b-opt: saved unopt output words for the unopt==opt bit-exact
   // check — uout[name idx][seed][word pos over out bindings].
-  logic [31:0] uout [38][4][2048];
+  logic [31:0] uout [51][4][2048];
   int          cur_nidx, cur_seed, ou_mism, ou_mism_t, ou_words;
   bit          is_opt;
 
@@ -788,7 +789,7 @@ module tb_g6lc_apu_shwave;
     apu_sh_cpl_t cpl;
     apu_sh_done_t dpl;
     int mut, diffs;
-    int cmax, cn1, cn2;
+    int cmax, cn1, cn2, smax;
     int wpos;
     int f0 = fails;
     for (int i = 0; i < MAXW; i++) begin
@@ -1028,7 +1029,8 @@ module tb_g6lc_apu_shwave;
     mbase = ebase + now;
     cbase = mbase + now;
 
-    diffs = 0; cmax = 0; cn1 = 0; cn2 = 0; wpos = 0; ou_mism = 0;
+    diffs = 0; cmax = 0; cn1 = 0; cn2 = 0; smax = 0; wpos = 0;
+    ou_mism = 0;
     for (int b = 0; b < ebuf[4]; b++) begin
       logic [31:0] sz, eo;
       logic [63:0] ad;
@@ -1094,6 +1096,50 @@ module tb_g6lc_apu_shwave;
                       "FAIL-G2p %s b%0d[%0d]@%x got=%08x orc=%08x",
                       file, b, w2, aa, got, xo);
                   break;
+                end
+              end
+            end else if (xc[3:0] == 4) begin
+              // §7d GLSL.std.450 SFU ops: class word = 4|(op<<8),
+              // op = xnum-13.  The bound comes from the generated
+              // g6lc_apu_sfu_pkg — no hand tolerances: a nonzero
+              // APU_SFU_BND_ABS[op] is an absolute-error bound
+              // (f32 bits); otherwise APU_SFU_BND_E20[op]/2^20 is
+              // the ULP bound.
+              int unsigned sop;
+              sop = xc >> 8;
+              if (APU_SFU_BND_ABS[sop] != 0) begin
+                real rg, ro, rd, rb;
+                rg = f32r(got);
+                ro = f32r(xo);
+                rb = f32r(APU_SFU_BND_ABS[sop]);
+                if (got === xo) rd = 0.0;
+                else if (got[30:23] == 8'hFF && got[22:0] != 0 &&
+                         xo[30:23] == 8'hFF && xo[22:0] != 0)
+                  rd = 0.0;                 // NaN==NaN
+                else if ((got[30:23] == 8'hFF && got[22:0] != 0) ||
+                         (xo[30:23] == 8'hFF && xo[22:0] != 0))
+                  rd = rb + 1.0;            // NaN vs number: fail
+                else begin
+                  rd = rg - ro;
+                  if (rd < 0.0) rd = -rd;
+                end
+                if (rd > rb) begin
+                  fails++;
+                  if (fails < 3000)
+                    $display(
+                      "FAIL-G2s %s b%0d[%0d]@%x got=%08x orc=%08x op=%0d d=%f bnd=%f",
+                      file, b, w2, aa, got, xo, sop, rd, rb);
+                end
+              end else begin
+                u = ulpd(got, xo);
+                if ((longint'(u) << 20) > APU_SFU_BND_E20[sop]) begin
+                  fails++;
+                  if (fails < 3000)
+                    $display(
+                      "FAIL-G2s %s b%0d[%0d]@%x got=%08x orc=%08x op=%0d ulp=%0d",
+                      file, b, w2, aa, got, xo, sop, u);
+                end else if (u > smax) begin
+                  smax = u;
                 end
               end
             end else begin                  // float: <=2 ULP
@@ -1188,8 +1234,8 @@ module tb_g6lc_apu_shwave;
       $display("FAIL %s multi-wave dispatch never switched waves", file);
     end
     if (!mut)
-      $display("ULP %s max=%0d ulp1=%0d ulp2=%0d", file, cmax,
-               cn1, cn2);
+      $display("ULP %s max=%0d ulp1=%0d ulp2=%0d sfumax=%0d", file,
+               cmax, cn1, cn2, smax);
     // +dbg_sc: per-case scratch slab and RF dump for bring-up debug
     if (dbg_sc) begin
       for (int w = 0; w < 128; w++)
@@ -1209,20 +1255,24 @@ module tb_g6lc_apu_shwave;
   endtask
 
   // G1a graphics wave work — no mut/bad/opt arms (single vector each)
-  string gfx_names [10] = '{"vs_passthru", "fs_color",
+  string gfx_names [14] = '{"vs_passthru", "fs_color",
                           "fs_deriv", "fs_tex_implicit",
                           // G3a-i: FS function calls, discard, GLSL.450
                           // geometry ops, FS SSBO atomics, demote
                           // private-store / all-dead callee unwind
                           "fs_fncall", "fs_kill", "geomops",
                           "atomic_frag", "fs_demote_deriv",
-                          "fs_kill_fn"};
+                          "fs_kill_fn",
+                          // G3a-ii §7d: Dref implicit/explicit + PCF,
+                          // Proj*, Gather/DrefGather, QueryLod
+                          "fs_tex_shadow", "fs_tex_proj",
+                          "fs_tex_gather", "fs_tex_qlod"};
 
   // G3a-i runtime-fault arms — single vector, DONE_FAULT expected
   // (fn_deep's depth-10 chain overflows the CallDepth=8 stack)
   string fault_names [1] = '{"fn_deep"};
 
-  string names [45] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [51] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
       "pushscale", "vec4arith",
@@ -1239,7 +1289,11 @@ module tb_g6lc_apu_shwave;
       // G3a-i: function calls, atomics, integer/bit ops, pack/unpack
       // + Modf/Frexp/Ldexp, dynamic vector ops
       "fn_call", "atomic_hist", "atomic_cas", "bitops", "packops",
-      "dynvec", "fn_divret"};
+      "dynvec", "fn_divret",
+      // G3a-ii §7d SFU corpus (class-4 Gate-2 op bounds from
+      // g6lc_apu_sfu_pkg)
+      "sfu_exp", "sfu_log", "sfu_pow", "sfu_trig", "sfu_atrig",
+      "sfu_hyper"};
 
   initial begin
     checks = 0; cases = 0; fails = 0; cyc = 0; dcyc = 0;

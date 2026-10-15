@@ -1,0 +1,1 @@
+dEQP-VK.glsl.builtin.precision.sin.highp.scalar

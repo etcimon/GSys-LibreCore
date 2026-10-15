@@ -27,6 +27,16 @@ zero_bodies = [
     "VkPhysicalDeviceDriverProperties",
 ]
 
+# Request-side chain nodes admitted on decode-side validation alone:
+# every member is a plain scalar or a FLAGS-masked word.
+# VkDescriptorSetLayoutBindingFlagsCreateInfo rides the pNext of every
+# vkCreateDescriptorSetLayout from dEQP's DescriptorSetLayoutBuilder —
+# refusing it wedges the whole CTS.  Its pBindingFlags elements decode
+# through FLAGS at mask 0: all VkDescriptorBindingFlags bits require
+# descriptor-indexing features the device does not advertise, so a
+# nonzero word is out-of-contract input and faults FAULT_FLAGS.
+chain_structs = ["VkDescriptorSetLayoutBindingFlagsCreateInfo"]
+
 [device]
 apiVersion = "1.1.0"
 driverVersion = 0
@@ -118,7 +128,10 @@ maxSamplerAllocationCount = 64
 maxMemoryAllocationCount = 64
 maxUniformBufferRange = 0x01000000
 maxStorageBufferRange = 0x01000000
-mipmapPrecisionBits = 4
+# G3a-ii: implicit-LOD λ uses the SFU log2 core (measured bound 1 ULP)
+# — the former linear-mantissa approximation (~0.086 λ error) is gone,
+# so the 8-bit-precision claim is now truthful
+mipmapPrecisionBits = 8
 subTexelPrecisionBits = 8
 # raster setup quantizes vertex positions to 16.8 fixed-point — the
 # advertised subpixel resolution of the rasterizer itself
@@ -184,10 +197,12 @@ R32G32B32_SFLOAT = { fb = "VERTEX_BUFFER", bpp = 12, comps = 3, flt = 1 }
 R32G32B32A32_SFLOAT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", fb = "VERTEX_BUFFER", bpp = 16, flt = 1 }
 R32_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 4, comps = 1, uint = 1 }
 R32G32B32A32_UINT = { f = "SAMPLED_IMAGE|STORAGE_IMAGE|TRANSFER_SRC|TRANSFER_DST", bpp = 16, uint = 1 }
-# depth formats: D32/D16 attach (G2a); D24 stays unwired
-D32_SFLOAT = { f = "DEPTH_STENCIL_ATTACHMENT|TRANSFER_SRC|TRANSFER_DST", bpp = 4, comps = 1, flt = 1 }
+# depth formats: D32/D16 attach (G2a) and sample (G3a-ii PCF: dref
+# sampling + LINEAR compare in the shwave texture pipe); D24 stays
+# unwired
+D32_SFLOAT = { f = "DEPTH_STENCIL_ATTACHMENT|SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST", bpp = 4, comps = 1, flt = 1 }
 D24_UNORM_S8_UINT = { f = "" }
-D16_UNORM = { f = "DEPTH_STENCIL_ATTACHMENT|TRANSFER_SRC|TRANSFER_DST", bpp = 2, comps = 1 }
+D16_UNORM = { f = "DEPTH_STENCIL_ATTACHMENT|SAMPLED_IMAGE|SAMPLED_IMAGE_FILTER_LINEAR|TRANSFER_SRC|TRANSFER_DST", bpp = 2, comps = 1 }
 
 [device_extensions]
 # vkEnumerateDeviceExtensionProperties elements.  In the Venus model the
@@ -241,6 +256,10 @@ fields = ["VkExportMemoryAllocateInfo.handleTypes",
 # format properties), so format/usage probes may ask any combination.
 VkBufferUsageFlags = "ALL"
 VkImageUsageFlags = "ALL"
+# Literal masks are allowed ("0" = no valid bit): every
+# VkDescriptorBindingFlags bit requires an unadvertised
+# descriptor-indexing feature, so only all-zero elements decode.
+VkDescriptorBindingFlags = "0"
 
 [capset_venus]
 # struct virgl_renderer_capset_venus (Mesa 26.0.8 src/virtio/virtio-gpu/

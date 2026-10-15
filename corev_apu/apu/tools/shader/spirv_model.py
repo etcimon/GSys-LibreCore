@@ -68,6 +68,7 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, HERE)
 import spirv_scan  # noqa: E402
 import srgb_lut    # noqa: E402  generated — mirrors g6lc_apu_srgb_pkg
+import sfu_tables  # noqa: E402  generated — mirrors g6lc_apu_sfu_pkg
 import img_fmts    # noqa: E402  generated — mirrors APU_VN_IMG_*
 
 SC = spirv_scan.SC
@@ -383,6 +384,9 @@ def u32(x):
 # descriptor-kind legality per opcode (f_tx_kind): 0 SAMPLER,
 # 1 COMBINED_IMAGE_SAMPLER, 2 SAMPLED_IMAGE, 3 STORAGE_IMAGE
 IMG_KIND_OK = {95: (1, 2), 87: (1, 2), 88: (1, 2), 98: (2, 3),
+               89: (1, 2), 90: (1, 2), 91: (1, 2), 92: (1, 2),
+               93: (1, 2), 94: (1, 2), 96: (1, 2), 97: (1, 2),
+               105: (1, 2),
                99: (3,),
                103: (0, 1, 2, 3), 104: (0, 1, 2, 3), 106: (0, 1, 2, 3)}
 
@@ -507,6 +511,26 @@ def f01(f):
     if (f >> 31) & 1 or isnan(f):
         return 0
     return 0x3F800000 if ((f >> 23) & 0xFF) >= 127 else f
+
+
+def f_dcmp(r, t, op):
+    """f_dcmp — integer u16 compare (VkCompareOp order) for D16 PCF."""
+    return (False, r < t, r == t, r <= t,
+            r > t, r != t, r >= t, True)[op & 7]
+
+
+def f_fcmp32(r, t, op):
+    """f_fcmp32 — fp32 compare (VkCompareOp order) for D32 PCF;
+    unordered (NaN) only satisfies NEQUAL/ALWAYS."""
+    unr = isnan(r) or isnan(t)
+    eq = (not unr) and \
+        (r == t or ((r & 0x7FFFFFFF) == 0 and (t & 0x7FFFFFFF) == 0))
+    lt = (not unr) and (not eq) and \
+        (bool(r >> 31) if (r >> 31) != (t >> 31)
+         else ((r & 0x7FFFFFFF) < (t & 0x7FFFFFFF)) ^ bool(r >> 31))
+    return (False, lt, eq, lt or eq,
+            (not unr) and (not lt) and (not eq),
+            not eq, (not unr) and (not lt), True)[op & 7]
 
 
 def swz_sel(s, c):
@@ -777,6 +801,14 @@ class Model:
         nxt = pc + wc
         if opc == 99 and (self.dead or self.helper()):
             return nxt                     # dead/helper: no image store
+        # W_TXJ0/J1: projected forms divide coord.xy by the last
+        # component wave-wide, before operand legality — the divided
+        # value is what the derivative lanes see too
+        if opc in (91, 92, 93, 94):
+            nc = self.ncomps(self.regt(ops[3]))
+            q = va[1][(nc - 1) & 3]
+            va[1] = [fdiv(va[1][0], q), fdiv(va[1][1], q),
+                     va[1][2], va[1][3]]
         # W_TX0 operand-mask legality (only Lod 0x2 is decoded); 87
         # takes no image operands in v1 (Bias rides the sampler record)
         if (opc == 95 and wc > 6 and (ops[4] & ~0x2) != 0) or \
@@ -784,7 +816,15 @@ class Model:
            (opc == 88 and (wc < 7 or (ops[4] & ~0x2) != 0 or
                            not (ops[4] & 0x2))) or \
            (opc == 98 and wc > 5 and ops[4] != 0) or \
-           (opc == 99 and wc > 4 and ops[3] != 0):
+           (opc == 99 and wc > 4 and ops[3] != 0) or \
+           (opc in (89, 93) and wc > 6 and ops[5] != 0) or \
+           (opc == 91 and wc > 5 and ops[4] != 0) or \
+           (opc in (90, 94) and (wc < 8 or (ops[5] & ~0xA) != 0 or
+                                 not (ops[5] & 0x2))) or \
+           (opc == 92 and (wc < 7 or (ops[4] & ~0xA) != 0 or
+                           not (ops[4] & 0x2))) or \
+           (opc in (96, 97) and wc > 6 and (ops[5] & ~0xA) != 0) or \
+           (opc == 105 and wc > 5 and ops[4] != 0):
             self.fault = 'IMGOPMASK'
             return 'ret'
         rec = self.img_rec(va[0])
@@ -796,7 +836,8 @@ class Model:
             self.fault = 'IMGKIND'
             return 'ret'
         smp = 0
-        if opc in (87, 88) and valid:
+        if opc in (87, 88, 89, 90, 91, 92, 93, 94, 96, 97, 105) and \
+           valid:
             if va[0][1] & 0x80000000:
                 # merged OpSampledImage: fetch the SAMPLER record
                 sk = va[0][0]
@@ -889,7 +930,7 @@ class Model:
             return self.tx_finish(pts, ta, meta, rec, bcol,
                                   isint, isflt, issr, swz,
                                   rid, ncomp, wb, nxt, lvl)
-        # ---- OpImageSample{Implicit,Explicit}Lod (87/88) --------------
+        # ---- sampled/dref/proj/gather/query-lod (87-94,96,97,105) ----
         addrU = (smp >> 5) & 7
         addrV = (smp >> 8) & 7
         lin0 = ((smp >> 2) & 3) != 0              # min filter
@@ -897,10 +938,25 @@ class Model:
         min44 = (smp >> 32) & 0xFF
         max44 = (smp >> 40) & 0xFF
         bias = (smp >> 48) & 0xFF
-        if opc == 87:
-            lod_in = self.ilod(pc, ops[3], meta['w'], meta['h'])
+        cen = (smp >> 20) & 1                     # compareEnable
+        cmo = (smp >> 17) & 7                     # compareOp
+        gath = opc in (96, 97)
+        dref = opc in (89, 90, 93, 94, 97)
+        lodbit = gath and wc > 6 and (ops[5] & 0x2)
+        # λ: implicit forms (and operand-less gathers) derive it from
+        # the quad derivatives; explicit forms read their lod operand —
+        # slot 2 for 88/92, slot 3 for 90/94/96/97
+        implicit = opc in (87, 89, 91, 93, 105) or (gath and not lodbit)
+        if implicit:
+            lod_in = self.ilod_v(pc, ops[3], va[1], meta['w'], meta['h'])
         else:
-            lod_in = va[2][0]
+            lod_in = va[2][0] if opc in (88, 92) else va[3][0]
+        # G3a-ii dref: the compare ref is quantized to u16 once for
+        # UNORM depth (D16); D32_SFLOAT compares in fp directly
+        ref16 = 0
+        if dref:
+            ref16 = s32(f2i(fmul(f01(va[2][0]), 0x477FFF00),
+                            False, 'RNE')) & 0xFFFF
         # lod q4.4 is floored, not RNE — W_TXC2's own +0.5 round is the
         # mip-nearest decision, so a second RNE here double-rounds and
         # tips boundary lods one mip early (vkcmp tex_mip_nearest).
@@ -908,8 +964,18 @@ class Model:
         le += -bias if (smp >> 56) & 1 else bias
         le = min(max(le, min44), max44)
         le = max(le, 0)
-        lin = lin0 if le > 0 else mag0
-        if (smp >> 4) & 1:                        # mipmap LINEAR
+        if opc == 105:                            # QueryLod
+            # {λ clamped also to the mip range, λ unclamped}
+            lec = min(le, (lvl - 1) * 16)
+            wb[0] = fmul(i2f(lec, True), 0x3D800000)   # lec * 2^-4
+            wb[1] = lod_in
+            self.setres(rid, wb, ncomp)
+            return nxt
+        lin = True if gath else (lin0 if le > 0 else mag0)
+        if gath:                                  # gather: mip floor
+            m0 = m1 = le >> 4
+            fw = 0
+        elif (smp >> 4) & 1:                      # mipmap LINEAR
             m0, m1 = le >> 4, (le >> 4) + 1
             fw = (le & 0xF) << 4
         else:
@@ -938,9 +1004,27 @@ class Model:
                           False, 'RDN'))
             sv1 = s32(f2i(ffma(va[1][1], i2f(h1 << sc8, True), cst),
                           False, 'RDN'))
+        # ConstOffset (gathers): integer texel shift in the s8.8
+        # domain, applied before the address-mode wrap
+        if gath and wc > 6 and (ops[5] & 0x8):
+            osl = 4 if lodbit else 3
+            su0 = s32(su0 + (s32(va[osl][0]) << 8))
+            sv0 = s32(sv0 + (s32(va[osl][1]) << 8))
         # gather list: (u, v, weight, mip, border)
         pts = []
-        if lin:
+        if gath:
+            # SPIR-V result order (i0,j1),(i1,j1),(i1,j0),(i0,j0) —
+            # the linear corner texels of mip m0, unfiltered
+            iu0, iv0 = su0 >> 8, sv0 >> 8
+            cu0, u0 = twrap(iu0, w0, addrU)
+            cu1, u1 = twrap(iu0 + 1, w0, addrU)
+            cv0, v0 = twrap(iv0, h0, addrV)
+            cv1, v1 = twrap(iv0 + 1, h0, addrV)
+            pts = [(u0, v1, 65536, 0, bool(cu0 or cv1)),
+                   (u1, v1, 65536, 0, bool(cu1 or cv1)),
+                   (u1, v0, 65536, 0, bool(cu1 or cv0)),
+                   (u0, v0, 65536, 0, bool(cu0 or cv0))]
+        elif lin:
             fu0, fv0 = su0 & 0xFF, sv0 & 0xFF
             iu0, iv0 = su0 >> 8, sv0 >> 8
             for (du, dv, wu, wv, mi) in (
@@ -973,8 +1057,16 @@ class Model:
         mofs = (mof0, mof1)
         pits = (pit0, pit1)
         ta = None                                  # per-point ta
+        dref_ctx = (cen, cmo, va[2][0], ref16) if dref else None
+        if gath:
+            # component operand selects the gathered channel (op 96);
+            # dref-gather (97) collects the per-texel compare results
+            comp = (va[2][0] & 3) if opc == 96 else 0
+            return self.tx_gather(pts, mofs, pits, layb, ly, meta, rec,
+                                  bcol, dref_ctx, comp, rid, wb, nxt)
         return self.tx_finish_pts(pts, mofs, pits, layb, ly, meta, rec,
-                                  bcol, fw, tril, rid, ncomp, wb, nxt)
+                                  bcol, fw, tril, rid, ncomp, wb, nxt,
+                                  dref_ctx)
 
     def tx_texel(self, base, layb, ly, mof, pit, gu, gv, bpp):
         """byte list of the texel at (gu,gv) of mip/layer, or None."""
@@ -982,8 +1074,11 @@ class Model:
         return ta, [self.bread8(ta + i) for i in range(bpp)]
 
     def tx_finish_pts(self, pts, mofs, pits, layb, ly, meta, rec,
-                      bcol, fw, tril, rid, ncomp, wb, nxt):
-        """fetch/sample accumulate tail (W_TXT0/W_TXD/W_TXA/W_TXR0)."""
+                      bcol, fw, tril, rid, ncomp, wb, nxt, dref=None):
+        """fetch/sample accumulate tail (W_TXT0/W_TXD/W_TXA/W_TXR0).
+        dref = (cen, cmo, ref_fp, ref16) replaces each decoded texel by
+        the compare result — PCF = per-texel compare, then the same
+        bilinear/trilinear weighting as colour sampling."""
         attr = img_fmts.ATTR[meta['fmt'] & 15]
         bpp = img_fmts.BPP[meta['fmt'] & 15]
         isint = (attr >> 3) & 1
@@ -1000,13 +1095,32 @@ class Model:
                 brd = True
             by = [0] * 16 if brd else \
                 [self.bread8(ta + i) for i in range(bpp)]
-            ch, fc = self.tx_decode(meta, bcol, brd, by)
+            if dref is not None:
+                # compare on the raw texel bits — D16 u16 int domain,
+                # D32 fp domain; border colour substitutes first
+                cen, cmo, reff, ref16 = dref
+                tw = 0
+                for i, b in enumerate(by):
+                    tw |= b << (8 * i)
+                if not cen:
+                    cm = 1
+                elif isflt:
+                    cm = f_fcmp32(reff, bord32(bcol, 0) if brd else
+                                  tw & 0xFFFFFFFF, cmo)
+                elif not isint:
+                    cm = f_dcmp(ref16, bord16(bcol, 0) if brd else
+                                tw & 0xFFFF, cmo)
+                else:
+                    cm = 1                    # int fmts: no compare
+                ch, fc = [0] * 4, [0x3F800000 if cm else 0, 0, 0, 0]
+            else:
+                ch, fc = self.tx_decode(meta, bcol, brd, by)
             if isint:
                 for c in range(4):
                     s = swz_sel(meta['swz'], c)
                     wb[c] = 0 if s == 1 else \
                         (1 if s == 2 else fc[s - 3])
-            elif isflt:
+            elif isflt or dref is not None:
                 wi = gw * (fw if gm == 1 else 256 - fw)
                 wf = fmul(i2f(wi, True), 0x33800000)
                 for c in range(4):
@@ -1015,7 +1129,10 @@ class Model:
                 d = acc1 if gm == 1 else acc
                 for c in range(4):
                     d[c] = (d[c] + gw * ch[c]) & 0xFFFFFFFFFF
-        if isint:
+        if dref is not None:
+            # scalar compare fraction, no swizzle (W_TXR0 dref arm)
+            wb[0], wb[1], wb[2], wb[3] = facc[0], 0, 0, 0
+        elif isint:
             pass
         elif isflt:
             for c in range(4):
@@ -1036,6 +1153,58 @@ class Model:
                 x16 = 0 if s == 1 else (65535 if s == 2 else rr[s - 3])
                 wb[c] = fmul(i2f(x16, True), 0x37800080)
         self.setres(rid, wb, ncomp)
+        return nxt
+
+    def tx_gather(self, pts, mofs, pits, layb, ly, meta, rec, bcol,
+                  dref, comp, rid, wb, nxt):
+        """G3a-ii OpImageGather/DrefGather tail (W_TXA gather arm +
+        W_TXG0/G1): each footprint point feeds result component gi
+        (the spec order was built into pts); `comp` picks the channel
+        through the view swizzle — for dref-gather each point is the
+        per-texel compare result.  No filtering."""
+        attr = img_fmts.ATTR[meta['fmt'] & 15]
+        bpp = img_fmts.BPP[meta['fmt'] & 15]
+        isint = (attr >> 3) & 1
+        isflt = ((attr >> 4) | (attr >> 5)) & 1
+        base, size = rec[0], rec[1]
+        for gi, (gu, gv, gw, gm, gb) in enumerate(pts):
+            ta = base + ly * layb + mofs[gm] + gv * pits[gm] + gu * bpp
+            brd = gb
+            if not brd and ta + bpp > base + size:
+                self.robust += 1
+                brd = True
+            by = [0] * 16 if brd else \
+                [self.bread8(ta + i) for i in range(bpp)]
+            if dref is not None:
+                cen, cmo, reff, ref16 = dref
+                tw = 0
+                for i, b in enumerate(by):
+                    tw |= b << (8 * i)
+                if not cen:
+                    cm = 1
+                elif isflt:
+                    cm = f_fcmp32(reff, bord32(bcol, 0) if brd else
+                                  tw & 0xFFFFFFFF, cmo)
+                elif not isint:
+                    cm = f_dcmp(ref16, bord16(bcol, 0) if brd else
+                                tw & 0xFFFF, cmo)
+                else:
+                    cm = 1
+                wb[gi] = 0x3F800000 if cm else 0
+                continue
+            ch, fc = self.tx_decode(meta, bcol, brd, by)
+            s = swz_sel(meta['swz'], comp)
+            if isint:
+                wb[gi] = 0 if s == 1 else \
+                    (1 if s == 2 else fc[s - 3])
+            elif isflt:
+                wb[gi] = 0 if s == 1 else \
+                    (0x3F800000 if s == 2 else fc[s - 3])
+            else:
+                # UNORM/sRGB: ch16 -> fp32 normalize (W_TXG0/G1)
+                x16 = 0 if s == 1 else (65535 if s == 2 else ch[s - 3])
+                wb[gi] = fmul(i2f(x16, True), 0x37800080)
+        self.setres(rid, wb, 4)
         return nxt
 
     def tx_finish(self, pts, ta, meta, rec, bcol, isint, isflt, issr,
@@ -1458,15 +1627,21 @@ class Model:
                 for c in range(4)]
 
     def ilod(self, pc, iid, w0, h0):
-        """OpImageSampleImplicitLod λ for the current lane: quad-lane
-        fine derivatives of the texcoord scaled by mip-0 dims —
-        rho2 = max(dx2, dy2), lam = 0.5*log2(rho2).
-        log2 uses the RTL's linear-mantissa approximation
-        log2(x) = exp(x) + (mant(x) - 1) (max err ~0.086)."""
+        return self.ilod_v(pc, iid, self.regv(iid), w0, h0)
+
+    def ilod_v(self, pc, iid, cval, w0, h0):
+        """implicit-LOD λ for the current lane: quad-lane fine
+        derivatives of the texcoord scaled by mip-0 dims —
+        rho2 = max(dx2, dy2), lam = 0.5*log2(rho2).  cval is this lane's
+        coordinate value — the projected forms pass the post-division
+        coord (W_TXJ1 folds it back into va[1] wave-wide before the
+        derivative reads, so siblings divide too).
+        §7d/TEX-H1: log2 is the SFU core sequence (the old linear-
+        mantissa approximation had ~0.086 λ max error)."""
         l = self.lane
         q = l & ~3
         base = self.wave * LAN
-        self.dvals.setdefault((pc, iid), {})[self.inv] = self.regv(iid)
+        self.dvals.setdefault((pc, iid), {})[self.inv] = cval
         self.qpull(pc, iid)
         v = [self.dpeer(pc, iid, base + s) for s in range(q, q + 4)]
         li = l & 3
@@ -1479,10 +1654,9 @@ class Model:
         dx2 = ffma(bx, bx, fmul(ax, ax))
         dy2 = ffma(by, by, fmul(ay, ay))
         rho2 = fp_minmax(dx2, dy2, True)
-        e = fadd(i2f((rho2 >> 23) & 0xFF, True), 0xC2FE0000)
-        mant = 0x3F800000 | (rho2 & 0x7FFFFF)
-        l0 = ffma(mant, 0x3F800000, e)
-        return fmul(fsub(l0, 0x3F800000), 0x3F000000)
+        # W_TXL8/W_TXLC: SFU log2 core then *0.5
+        lg = sfu_tables.sfu_eval(30, [[rho2, 0, 0, 0]])
+        return fmul(lg[0], 0x3F000000)
 
     # -- per-lane value for a chain index operand -------------------------
     def idxval(self, iid):
@@ -1827,6 +2001,12 @@ class Model:
                     else fp_minmax(t, va[2][c], False)
                 out.append(t)
             return out
+        # ---- G3a-ii §7d SFU transcendentals/hyperbolics ---------------
+        # Bit-exact mirror of the g6lc_apu_shwave xsub cores + epilogue:
+        # the sequences live in sfu_tables.py, generated by
+        # gen_sfu_tables.py from the same source as g6lc_apu_sfu_pkg.sv.
+        if xnum in sfu_tables.SFU_FUNCS:
+            return sfu_tables.sfu_eval(xnum, va)
         raise self.FaultX(xnum)
 
     class FaultX(Exception):
@@ -1880,6 +2060,25 @@ class Model:
                 if k == 1:
                     return ops[3]
                 return ops[5] if 5 < len(ops) else 0
+            # G3a-ii: dref/proj/gather operand positions (mask word
+            # splits the id list; Lod/ConstOffset ids trail it)
+            if opc in (90, 94):               # mask at [5]
+                return ops[2 + k] if k < 3 else \
+                    (ops[k + 3] if k + 3 < len(ops) else 0)
+            if opc == 92:                     # mask at [4]
+                return ops[2 + k] if k < 2 else \
+                    (ops[k + 3] if k + 3 < len(ops) else 0)
+            if opc == 91:
+                return ops[2 + k] if k < 2 else \
+                    (ops[k + 3] if k + 3 < len(ops) else 0)
+            # 89/93/96/97: mask at [5], trailing Lod/ConstOffset at
+            # [6..7] (97 DrefGather has no Component operand per the
+            # grammar — dref is ops[4])
+            if opc in (89, 93, 96, 97):
+                return ops[2 + k] if k < 3 else \
+                    (ops[k + 3] if k + 3 < len(ops) else 0)
+            if opc == 105:
+                return ops[2 + k] if 2 + k < len(ops) else 0
             if opc == 12:
                 return ops[4 + k] if 4 + k < len(ops) else 0
             if opc == 228:                    # AtomicStore: ptr, val
@@ -1889,11 +2088,11 @@ class Model:
             if opc in self.ATOMOPS:           # ptr, [val]
                 return ops[2] if k == 0 else ops[5]
             return ops[2 + k] if 2 + k < len(ops) else 0
-        nva = self.nva(opc, wc)
+        nva = self.nva(opc, wc, ops)
         va = [self.regv(opid(k)) for k in range(nva)] + \
-             [[0] * 4] * (4 - nva)
+             [[0] * 4] * (6 - nva)
         vt = [self.regt(opid(k)) for k in range(nva)] + \
-             [0] * (4 - nva)
+             [0] * (6 - nva)
 
         if opc in (0, 54, 55, 59):            # Nop Function Param Var
             return pc + wc
@@ -1996,7 +2195,8 @@ class Model:
                 wb = [0, va[0][1] & 0x7FFFFFFF, va[0][2], 0]
             self.setres(rid, wb, 4)
             return pc + wc
-        if opc in (87, 88, 95, 98, 99, 103, 104, 106):
+        if opc in (87, 88, 89, 90, 91, 92, 93, 94, 95, 96, 97, 98, 99,
+                   103, 104, 105, 106):
             return self.img_op(pc, opc, wc, ops, va, rty, rid, ncomp)
         if opc in (207, 208, 209, 210, 211, 212, 213, 214, 215):
             self.setres(rid, self.deriv(pc, opc, ops[2]), ncomp)
@@ -2329,7 +2529,8 @@ class Model:
     ATOMOPS = frozenset((227, 229, 230, 232, 233, 234, 235, 236, 237,
                          238, 239, 240, 241, 242))
     HAS_RTY = frozenset((1, 12, 57, 61, 65, 66, 68, 77, 78, 79, 80, 81,
-                         82, 83, 84, 86, 87, 88, 95, 98, 100, 103, 104,
+                         82, 83, 84, 86, 87, 88, 89, 90, 91, 92, 93, 94,
+                         95, 96, 97, 98, 100, 103, 104, 105,
                          106, 109, 110, 111, 112, 124, 126, 127, 128,
                          129, 130, 131, 132, 133, 134, 135, 136, 137,
                          138, 139, 140, 141, 142, 143, 144, 145, 146,
@@ -2376,8 +2577,9 @@ class Model:
         return u32(old)
 
     @staticmethod
-    def nva(opc, wc):
-        """f_nva() — operand count per opcode."""
+    def nva(opc, wc, ops):
+        """f_nva() — operand count per opcode (mask-aware for the
+        G3a-ii image ops: Lod/ConstOffset ids trail the mask word)."""
         if opc == 62:
             return 2
         if opc == 80:
@@ -2404,6 +2606,24 @@ class Model:
             return 3 if wc > 6 else 2         # img, coord[, lod]
         if opc in (87, 88, 103):
             return 3 if opc == 88 else 2
+        # G3a-ii
+        if opc == 89:
+            return 4 if (wc > 7 and (ops[5] & 8)) else 3
+        if opc == 90:
+            return 5 if (wc > 8 and (ops[5] & 8)) else 4
+        if opc == 91:
+            return 3 if (wc > 5 and (ops[4] & 8)) else 2
+        if opc == 92:
+            return 4 if (wc > 6 and (ops[4] & 8)) else 3
+        if opc == 93:
+            return 4 if (wc > 6 and (ops[5] & 8)) else 3
+        if opc == 94:
+            return 5 if (wc > 8 and (ops[5] & 8)) else 4
+        if opc in (96, 97):
+            return 3 + (((ops[5] >> 3) & 1) + ((ops[5] >> 1) & 1)
+                        if wc > 6 else 0)
+        if opc == 105:
+            return 2
         if opc in (61, 65, 66, 68, 81, 83, 84, 109, 110, 111, 112,
                    124, 126, 127, 154, 155, 156, 157, 168, 200, 204,
                    205):

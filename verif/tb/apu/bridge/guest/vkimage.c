@@ -114,6 +114,8 @@ int main(int argc, char **argv)
     printf("D32_SFLOAT features %x %x %x\n", fp.linearTilingFeatures,
            fp.optimalTilingFeatures, fp.bufferFeatures);
     const VkFormatFeatureFlags want_d32 =
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+        VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
         VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT |
         VK_FORMAT_FEATURE_TRANSFER_SRC_BIT |
         VK_FORMAT_FEATURE_TRANSFER_DST_BIT;

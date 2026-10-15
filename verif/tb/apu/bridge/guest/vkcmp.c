@@ -43,12 +43,15 @@ enum {
     S_VUVC,   /* vs_uvc      — scene 8    */
     S_FDERIV, /* fs_deriv2   — scene 8    */
     S_FS8,    /* fs_scene8   — scene 9    */
+    S_VSHF,   /* vs_shadowfog — scene 10 */
+    S_FSHF,   /* fs_shadowfog — scene 10 */
     S_N
 };
 static const char *spv_dflt[S_N] = {
     "vs_passthru.spv", "fs_color.spv", "vs_pc.spv", "fs_vcol.spv",
     "vs_pos3.spv", "vs_inst.spv", "vs_tex.spv", "fs_mip.spv",
-    "vs_clip.spv", "vs_uvc.spv", "fs_deriv2.spv", "fs_scene8.spv"};
+    "vs_clip.spv", "vs_uvc.spv", "fs_deriv2.spv", "fs_scene8.spv",
+    "vs_shadowfog.spv", "fs_shadowfog.spv"};
 
 typedef struct {
     uint32_t *w;
@@ -1023,6 +1026,273 @@ static void scene_f8(vkdev *d, const spv_t *spv, uint8_t *out,
     vkDestroyDescriptorSetLayout(d->dev, o.dsl, NULL);
 }
 
+/* scene 10: f10_shadow_fog — a shadow-mapped lit quad.
+   pass A: an occluder triangle is drawn into a 64x64 D16 depth map
+   (colour attachment is a don't-care scratch; the map is cleared to
+   1.0, the occluder lands at z=0.45).
+   pass B: a fullscreen quad shades through fs_shadowfog — the map is
+   sampled through sampler2DShadow with a LINEAR compare sampler
+   (compareEnable/LESS_OR_EQUAL -> the record's {cmpEn,cmpOp} bits),
+   textureProj (projective dref, w tilts across the quad), textureLod
+   dref at lod 0, textureGather + textureProj on a 16x16 colour map,
+   exp(-d) fog and a sin band. */
+static void scene_shadowfog(vkdev *d, const spv_t *spv, uint8_t *out)
+{
+    /* occluder: covers the right half of the map at z=0.45 (wound like
+       the other scenes so back-face cull keeps it) */
+    static const float occ[3][7] = {
+        { 0.15f, -1.4f, 0.45f, 0, 0, 0, 0},
+        { 0.15f,  1.4f, 0.45f, 0, 0, 0, 0},
+        { 1.6f,   0.0f, 0.45f, 0, 0, 0, 0}};
+    /* fullscreen quad: pos.xy | {su,sv,ref,w} | {u,v,fogd,0};
+       su/sv/ref are pre-multiplied by a per-vertex w that tilts
+       1.0 -> 1.25 across x so the projective divide is real work */
+    static const float quad[6][10] = {
+        {-1.0f, -1.0f, 0.0f,  0.0f,  0.5f, 1.00f, 0,0, 0.00f, 0},
+        { 1.0f,  1.0f, 1.25f, 1.25f, 0.625f, 1.25f, 0,0, 1.00f, 0},
+        { 1.0f, -1.0f, 1.25f, 0.0f,  0.625f, 1.25f, 0,0, 0.70f, 0},
+        {-1.0f, -1.0f, 0.0f,  0.0f,  0.5f, 1.00f, 0,0, 0.00f, 0},
+        {-1.0f,  1.0f, 0.0f,  1.00f, 0.5f, 1.00f, 0,0, 0.70f, 0},
+        { 1.0f,  1.0f, 1.25f, 1.25f, 0.625f, 1.25f, 0,0, 1.00f, 0}};
+    /* 16x16 2-colour checker */
+    uint8_t texd[16 * 16 * 4];
+    for (int y = 0; y < 16; y++)
+        for (int x = 0; x < 16; x++) {
+            uint8_t *p = texd + (y * 16 + x) * 4;
+            int c = ((x >> 2) ^ (y >> 2)) & 1;
+            p[0] = c ? 235 : 60;  p[1] = c ? 180 : 140;
+            p[2] = c ? 60 : 235;  p[3] = 255;
+        }
+    obj_t o = {0};
+    mkimg(d, VK_FORMAT_R8G8B8A8_UNORM, W, H, 1,
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+          VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &o.cimg, &o.cmem);
+    o.cview = mkview(d, o.cimg, VK_FORMAT_R8G8B8A8_UNORM,
+                     VK_IMAGE_ASPECT_COLOR_BIT, 1);
+    /* D16 shadow map: depth-attach + sampled */
+    mkimg(d, VK_FORMAT_D16_UNORM, W, H, 1,
+          VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT |
+          VK_IMAGE_USAGE_SAMPLED_BIT, &o.dimg, &o.dmem);
+    o.dview = mkview(d, o.dimg, VK_FORMAT_D16_UNORM,
+                     VK_IMAGE_ASPECT_DEPTH_BIT, 1);
+    mkimg(d, VK_FORMAT_R8G8B8A8_UNORM, 16, 16, 1,
+          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+          &o.tex, &o.texm);
+    o.tv = mkview(d, o.tex, VK_FORMAT_R8G8B8A8_UNORM,
+                  VK_IMAGE_ASPECT_COLOR_BIT, 1);
+    /* pass-A render pass: colour + D16 depth (STORE so it can be
+       read back as a texture) */
+    VkAttachmentDescription ads[2] = {
+        {0, VK_FORMAT_R8G8B8A8_UNORM, VK_SAMPLE_COUNT_1_BIT,
+         VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_STORE,
+         VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE,
+         VK_IMAGE_LAYOUT_UNDEFINED,
+         VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL},
+        {0, VK_FORMAT_D16_UNORM, VK_SAMPLE_COUNT_1_BIT,
+         VK_ATTACHMENT_LOAD_OP_CLEAR, VK_ATTACHMENT_STORE_OP_STORE,
+         VK_ATTACHMENT_LOAD_OP_DONT_CARE, VK_ATTACHMENT_STORE_OP_DONT_CARE,
+         VK_IMAGE_LAYOUT_UNDEFINED,
+         VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL}};
+    VkAttachmentReference cref = {0,
+        VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL};
+    VkAttachmentReference dref = {1,
+        VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL};
+    VkSubpassDescription spa = {0, VK_PIPELINE_BIND_POINT_GRAPHICS,
+        0, NULL, 1, &cref, NULL, &dref, 0, NULL};
+    VkRenderPassCreateInfo rpca = {
+        VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO, NULL, 0, 2, ads,
+        1, &spa, 0, NULL};
+    VkRenderPass rpa;
+    chk(vkCreateRenderPass(d->dev, &rpca, NULL, &rpa), "rp depth");
+    VkImageView atts[2] = {o.cview, o.dview};
+    VkFramebufferCreateInfo fba = {
+        VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, NULL, 0, rpa, 2,
+        atts, W, H, 1};
+    VkFramebuffer fba_h;
+    chk(vkCreateFramebuffer(d->dev, &fba, NULL, &fba_h), "fb depth");
+    /* samplers: shadow (LINEAR + compare) and colour (LINEAR) */
+    VkSamplerCreateInfo scs = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        NULL, 0, VK_FILTER_LINEAR, VK_FILTER_LINEAR,
+        VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        0.0f, VK_FALSE, 1.0f, VK_TRUE, VK_COMPARE_OP_LESS_OR_EQUAL,
+        0.0f, 0.0f, VK_BORDER_COLOR_FLOAT_OPAQUE_WHITE, VK_FALSE};
+    chk(vkCreateSampler(d->dev, &scs, NULL, &o.samp), "shadow sampler");
+    VkSampler csamp;
+    VkSamplerCreateInfo scc = scs;
+    scc.compareEnable = VK_FALSE;
+    scc.compareOp = VK_COMPARE_OP_NEVER;
+    chk(vkCreateSampler(d->dev, &scc, NULL, &csamp), "colour sampler");
+    /* descriptors: set0/binding0 shadow, set0/binding1 colour */
+    VkDescriptorSetLayoutBinding lbs[2] = {
+        {0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+         VK_SHADER_STAGE_FRAGMENT_BIT, NULL},
+        {1, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+         VK_SHADER_STAGE_FRAGMENT_BIT, NULL}};
+    VkDescriptorSetLayoutCreateInfo dlci = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0,
+        2, lbs};
+    chk(vkCreateDescriptorSetLayout(d->dev, &dlci, NULL, &o.dsl),
+        "dslayout");
+    VkDescriptorPoolSize psz = {
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 2};
+    VkDescriptorPoolCreateInfo pci = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 1,
+        1, &psz};
+    chk(vkCreateDescriptorPool(d->dev, &pci, NULL, &o.pool), "dpool");
+    VkDescriptorSetAllocateInfo dsai = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, o.pool,
+        1, &o.dsl};
+    chk(vkAllocateDescriptorSets(d->dev, &dsai, &o.dset), "dset alloc");
+    VkDescriptorImageInfo dii[2] = {
+        {o.samp, o.dview, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL},
+        {csamp,  o.tv,   VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL}};
+    VkWriteDescriptorSet wds[2] = {
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, o.dset, 0, 0, 1,
+         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &dii[0], NULL, NULL},
+        {VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, o.dset, 1, 0, 1,
+         VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &dii[1], NULL, NULL}};
+    vkUpdateDescriptorSets(d->dev, 2, wds, 0, NULL);
+    /* pass-B render pass: colour only (existing mkrp) */
+    o.rp = mkrp(d, VK_FORMAT_R8G8B8A8_UNORM, 0);
+    VkFramebufferCreateInfo fbb = {
+        VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, NULL, 0, o.rp, 1,
+        &o.cview, W, H, 1};
+    chk(vkCreateFramebuffer(d->dev, &fbb, NULL, &o.fb), "fb lit");
+    mk_pl(d, &o, o.dsl);
+    /* pipelines */
+    gp_t ga = {0};
+    ga.vs = mksm(d, &spv[S_VPOS3]);  ga.fs = mksm(d, &spv[S_FVCOL]);
+    ga.binds[0] = (VkVertexInputBindingDescription){
+        0, 28, VK_VERTEX_INPUT_RATE_VERTEX};
+    ga.atts[0] = (VkVertexInputAttributeDescription){
+        0, 0, VK_FORMAT_R32G32B32_SFLOAT, 0};
+    ga.atts[1] = (VkVertexInputAttributeDescription){
+        1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 12};
+    ga.nbind = 1;  ga.natt = 2;
+    ga.topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    ga.depth = 1;  ga.wmask = 0xF;  ga.layout = o.pl;  ga.rp = rpa;
+    VkPipeline pa = mkgp(d, &ga);
+    gp_t gb = {0};
+    gb.vs = mksm(d, &spv[S_VSHF]);  gb.fs = mksm(d, &spv[S_FSHF]);
+    gb.binds[0] = (VkVertexInputBindingDescription){
+        0, 40, VK_VERTEX_INPUT_RATE_VERTEX};
+    gb.atts[0] = (VkVertexInputAttributeDescription){
+        0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
+    gb.atts[1] = (VkVertexInputAttributeDescription){
+        1, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 8};
+    gb.atts[2] = (VkVertexInputAttributeDescription){
+        2, 0, VK_FORMAT_R32G32B32A32_SFLOAT, 24};
+    gb.nbind = 1;  gb.natt = 3;
+    gb.topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    gb.wmask = 0xF;  gb.layout = o.pl;  gb.rp = o.rp;
+    o.pipe = mkgp(d, &gb);
+    /* buffers */
+    mkbuf(d, sizeof(occ), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+          &o.vb2, &o.vb2m);
+    upload(d, o.vb2m, occ, sizeof(occ));
+    mkbuf(d, sizeof(quad), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+          &o.vb, &o.vbm);
+    upload(d, o.vbm, quad, sizeof(quad));
+    mkbuf(d, sizeof(texd), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+          &o.stage, &o.stagem);
+    upload(d, o.stagem, texd, sizeof(texd));
+    mkbuf(d, NPX * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &o.rb, &o.rbm);
+    /* colour-map upload in its own submission (scene-5 pattern) */
+    VkCommandBufferAllocateInfo cbai = {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, d->cpool,
+        VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
+    chk(vkAllocateCommandBuffers(d->dev, &cbai, &o.cb), "cmdbuf");
+    VkCommandBufferBeginInfo bbi = {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL,
+        VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
+    chk(vkBeginCommandBuffer(o.cb, &bbi), "begin cb");
+    barrier_img(o.cb, o.tex, VK_IMAGE_ASPECT_COLOR_BIT, 1,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkBufferImageCopy reg = {0, 0, 0,
+        {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {16, 16, 1}};
+    vkCmdCopyBufferToImage(o.cb, o.stage, o.tex,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &reg);
+    barrier_img(o.cb, o.tex, VK_IMAGE_ASPECT_COLOR_BIT, 1,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    submit_cb(d, o.cb);
+    /* one submission: depth pass -> map barrier -> lit pass ->
+       readback (frame_end tail does the copy + submit) */
+    chk(vkAllocateCommandBuffers(d->dev, &cbai, &o.cb), "cmdbuf2");
+    chk(vkBeginCommandBuffer(o.cb, &bbi), "begin cb2");
+    barrier_img(o.cb, o.cimg, VK_IMAGE_ASPECT_COLOR_BIT, 1,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL, 0,
+                VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+    barrier_img(o.cb, o.dimg, VK_IMAGE_ASPECT_DEPTH_BIT, 1,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL, 0,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_EARLY_FRAGMENT_TESTS_BIT);
+    VkClearValue clra[2] = {
+        {{{0, 0, 0, 0}}},
+        {{{0}}}};
+    clra[1].depthStencil.depth = 1.0f;
+    VkRenderPassBeginInfo rba = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        NULL, rpa, fba_h, {{0, 0}, {W, H}}, 2, clra};
+    vkCmdBeginRenderPass(o.cb, &rba, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(o.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pa);
+    VkViewport vp = {0.0f, 0.0f, (float)W, (float)H, 0.0f, 1.0f};
+    vkCmdSetViewport(o.cb, 0, 1, &vp);
+    VkRect2D sc = {{0, 0}, {W, H}};
+    vkCmdSetScissor(o.cb, 0, 1, &sc);
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(o.cb, 0, 1, &o.vb2, &off);
+    vkCmdDraw(o.cb, 3, 1, 0, 0);
+    vkCmdEndRenderPass(o.cb);
+    barrier_img(o.cb, o.dimg, VK_IMAGE_ASPECT_DEPTH_BIT, 1,
+                VK_IMAGE_LAYOUT_DEPTH_STENCIL_ATTACHMENT_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT,
+                VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_LATE_FRAGMENT_TESTS_BIT,
+                VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT);
+    VkClearValue clrb = {{{0.02f, 0.02f, 0.05f, 1.0f}}};
+    VkRenderPassBeginInfo rbb = {VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO,
+        NULL, o.rp, o.fb, {{0, 0}, {W, H}}, 1, &clrb};
+    vkCmdBeginRenderPass(o.cb, &rbb, VK_SUBPASS_CONTENTS_INLINE);
+    vkCmdBindPipeline(o.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, o.pipe);
+    vkCmdSetViewport(o.cb, 0, 1, &vp);
+    vkCmdSetScissor(o.cb, 0, 1, &sc);
+    vkCmdBindDescriptorSets(o.cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                          o.pl, 0, 1, &o.dset, 0, NULL);
+    vkCmdBindVertexBuffers(o.cb, 0, 1, &o.vb, &off);
+    vkCmdDraw(o.cb, 6, 1, 0, 0);
+    frame_end(d, &o, out);
+    /* the device keeps only 8 shader-module slots — release the
+       pipelines' refs and the module objects per scene */
+    vkDestroyPipeline(d->dev, pa, NULL);
+    vkDestroyPipeline(d->dev, o.pipe, NULL);
+    vkDestroyShaderModule(d->dev, ga.vs, NULL);
+    vkDestroyShaderModule(d->dev, ga.fs, NULL);
+    vkDestroyShaderModule(d->dev, gb.vs, NULL);
+    vkDestroyShaderModule(d->dev, gb.fs, NULL);
+    vkDestroyDescriptorPool(d->dev, o.pool, NULL);
+    vkDestroyDescriptorSetLayout(d->dev, o.dsl, NULL);
+    vkDestroyRenderPass(d->dev, rpa, NULL);
+    vkDestroyFramebuffer(d->dev, fba_h, NULL);
+    vkDestroySampler(d->dev, csamp, NULL);
+}
+
 /* ---------------- compare + report ------------------------------- */
 
 static int compare(const uint8_t *a, const uint8_t *b, int tol,
@@ -1149,7 +1419,7 @@ int main(int argc, char **argv)
     }
 
     /* name, tolerance (LSB), budget (fraction of NPX) */
-    struct { const char *name; int tol; float budget; } sc[9] = {
+    struct { const char *name; int tol; float budget; } sc[10] = {
         {"tri_gradient",       2, 0.005f},
         {"depth_less",         2, 0.005f},
         {"blend_layers",       2, 0.010f},
@@ -1159,12 +1429,23 @@ int main(int argc, char **argv)
         {"srgb_gradient",      2, 0.005f},
         {"derivs",             2, 0.010f},
         {"f8_latez_atomic",    2, 0.030f},
+        {"f10_shadow_fog",     4, 0.050f},
     };
     static uint8_t va[NPX * 4], la[NPX * 4];
+    /* VKCMP_ONLY: single index or comma list ("8,9") */
     const char *only = getenv("VKCMP_ONLY");
     int npass = 0, nrun = 0;
-    for (int k = 0; k < 9; k++) {
-        if (only && atoi(only) != k) continue;
+    for (int k = 0; k < 10; k++) {
+        if (only) {
+            const char *p = only;
+            int hit = 0;
+            while (*p && !hit) {
+                hit = (atoi(p) == k);
+                while (*p && *p != ',') p++;
+                if (*p == ',') p++;
+            }
+            if (!hit) continue;
+        }
         nrun++;
         uint32_t cv = 0, cl = 0;
         double t0 = wall();
@@ -1182,6 +1463,7 @@ int main(int argc, char **argv)
                                VK_FORMAT_B8G8R8A8_SRGB); break;
         case 7: scene_derivs(&venus, spv, va); break;
         case 8: scene_f8(&venus, spv, va, &cv); break;
+        case 9: scene_shadowfog(&venus, spv, va); break;
         }
         double t1 = wall();
         printf("SCENE %d llvmpipe...\n", k);
@@ -1198,6 +1480,7 @@ int main(int argc, char **argv)
                                VK_FORMAT_B8G8R8A8_SRGB); break;
         case 7: scene_derivs(&lava, spv, la); break;
         case 8: scene_f8(&lava, spv, la, &cl); break;
+        case 9: scene_shadowfog(&lava, spv, la); break;
         }
         double t2 = wall();
         if (getenv("VKCMP_DUMP")) {

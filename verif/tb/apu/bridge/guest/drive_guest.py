@@ -423,6 +423,7 @@ def main():
                 "/mnt/cidata/vs_tex.spv /mnt/cidata/fs_mip.spv "
                 "/mnt/cidata/vs_clip.spv /mnt/cidata/vs_uvc.spv "
                 "/mnt/cidata/fs_deriv2.spv /mnt/cidata/fs_scene8.spv "
+                "/mnt/cidata/vs_shadowfog.spv /mnt/cidata/fs_shadowfog.spv "
                 "/mnt/cidata/expected.json /root/ && ls -la /root/",
                 timeout=60)
 
@@ -546,7 +547,8 @@ def main():
                              " ./vkcmp vs_passthru.spv "
                              "fs_color.spv vs_pc.spv fs_vcol.spv "
                              "vs_pos3.spv vs_inst.spv vs_tex.spv fs_mip.spv "
-                             "vs_clip.spv vs_uvc.spv fs_deriv2.spv fs_scene8.spv",
+                             "vs_clip.spv vs_uvc.spv fs_deriv2.spv fs_scene8.spv "
+                             "vs_shadowfog.spv fs_shadowfog.spv",
                              timeout=int(os.environ.get(
                                  "G6LC_VKCMP_TIMEOUT", "5400")))
                 print(f"[drive] vkcmp rc={rc}", flush=True)
@@ -567,6 +569,12 @@ def main():
                 caselist = os.environ.get(
                     "G6LC_CTS_CASELIST",
                     "caselists/cts0-info-smoke.txt")
+                logimgs = os.environ.get("G6LC_CTS_LOG_IMAGES",
+                                         "disable")
+                logshd = os.environ.get("G6LC_CTS_LOG_SHADERS",
+                                        "disable")
+                logflush = os.environ.get("G6LC_CTS_LOG_FLUSH",
+                                          "disable")
                 # case count for the marker: read the caselist out of
                 # the image host-side.  The guest may hold it mounted
                 # rw, but the caselist is static content written at
@@ -605,12 +613,12 @@ def main():
                         "set -o pipefail; "
                         "./deqp-vk "
                         f"--deqp-caselist-file={caselist} "
-                        "--deqp-log-images=disable "
-                        "--deqp-log-shader-sources=disable "
+                        f"--deqp-log-images={logimgs} "
+                        f"--deqp-log-shader-sources={logshd} "
                         "--deqp-vk-device-id=$DEVID "
                         "--deqp-log-filename=/mnt/ctsdata/results/"
                         "TestResults.qpa "
-                        "--deqp-log-flush=disable "
+                        f"--deqp-log-flush={logflush} "
                         "--deqp-shadercache=disable "
                         "--deqp-archive-dir=/mnt/ctsdata "
                         "2>&1 | tail -25",

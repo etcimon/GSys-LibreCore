@@ -42,7 +42,8 @@ inside the stock riscv64 guest, against the Verilator bridge RTL.
   `mkfs.ext4 -d` — unprivileged.
 - Build key: `{CTS commit, toolchain sha256}`; never rebuilt for RTL
   changes.  Build trees live under `CTS_BUILD_ROOT` (default
-  `/root/cts` — the repo `.cache` is on DrvFs).
+  `${XDG_CACHE_HOME:-$HOME/.cache}/g6lc-cts-build` — a per-user cache;
+  the repo `.cache` is on DrvFs and is too slow for a full compile).
 
 ## Run
 

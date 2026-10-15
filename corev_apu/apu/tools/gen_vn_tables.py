@@ -119,7 +119,8 @@ DISCARD7 = 0x7F
 Q_SCRATCH, PRES_SCRATCH = 7, 7
 
 # bitmask typedefs that carry a profile flag mask
-MASKED_FLAGS = ('VkBufferUsageFlags', 'VkImageUsageFlags')
+MASKED_FLAGS = ('VkBufferUsageFlags', 'VkImageUsageFlags',
+                'VkDescriptorBindingFlags')
 
 
 class Unfit(Exception):
@@ -269,6 +270,13 @@ class Model:
                if v.name not in ('sType', 'pNext')]
         if mem and all(v.ty.base.name == 'VkBool32' for v in mem):
             return True
+        # profile 'chain_structs': request-side nodes admitted on the
+        # strength of decode-side validation alone — every member is a
+        # plain scalar or a FLAGS-masked element word (e.g.
+        # VkDescriptorSetLayoutBindingFlagsCreateInfo, whose
+        # VkDescriptorBindingFlags array decodes against mask 0).
+        if nty.name in self.profile.get('chain_structs', []):
+            return True
         return nty.name in self.profile.get('zero_bodies', [])
 
     def const(self, val):
@@ -363,8 +371,14 @@ class Model:
             for v in vals.values():
                 mask |= v
             return self.const(mask)
+        try:
+            return self.const(int(masks[base.name], 0))
+        except ValueError:
+            pass
         prefix = {'VkBufferUsageFlags': 'VK_BUFFER_USAGE_',
-                  'VkImageUsageFlags': 'VK_IMAGE_USAGE_'}[base.name]
+                  'VkImageUsageFlags': 'VK_IMAGE_USAGE_',
+                  'VkDescriptorBindingFlags':
+                      'VK_DESCRIPTOR_BINDING_'}[base.name]
         mask = 0
         for part in masks[base.name].split('|'):
             key = prefix + part + '_BIT'
@@ -563,6 +577,22 @@ class Model:
                 if not scope:
                     self.blob_map[name] = slot
                 return
+            # masked bitmask array: ARRAY + per-element FLAGS(mask) +
+            # ENDARR — decode validates each element word against the
+            # profile mask (VkDescriptorSetLayoutBindingFlagsCreateInfo.
+            # pBindingFlags at mask 0: every flag bit requires a
+            # descriptor-indexing feature the device does not advertise)
+            if cat == base.BITMASK:
+                fmc = self.flag_mask_const(base)
+                if fmc is not None:
+                    cnt = self.cnt_slot(scope)
+                    self.emit('ARRAY', cnt,
+                              self.arr_meta_idx(
+                                  self.array_bound(base, name)), name)
+                    self.emit('FLAGS', DISCARD, fmc, name + '[]')
+                    self.emit('ENDARR')
+                    self.cnt_endarr()
+                    return
             # scalar/blob array: raw recording
             if var.is_blob() or var.has_c_string() or cat in (
                     base.DEFAULT, base.BASETYPE, base.ENUM, base.BITMASK,
@@ -1537,11 +1567,13 @@ class Model:
         ip = self.profile.get('image_format_props', {})
         d2 = int(lim.get('maxImageDimension2D', 4096))
         sz = int(ip.get('maxResourceSize', 0))
+        # VkImageFormatProperties field order: extent, mipLevels,
+        # arrayLayers, sampleCounts, then 64-bit maxResourceSize.
         return [d2, d2, 1,
                 int(ip.get('maxMipLevels', 1)),
                 int(ip.get('maxArrayLayers', 1)),
-                sz & 0xFFFFFFFF, (sz >> 32) & 0xFFFFFFFF,
-                int(ip.get('sampleCounts', 1))]
+                int(ip.get('sampleCounts', 1)),
+                sz & 0xFFFFFFFF, (sz >> 32) & 0xFFFFFFFF]
 
     # ---- driver ---------------------------------------------------------------
 
@@ -2007,10 +2039,10 @@ def emit_md(model, asm, unfit):
     A('## `.exp` expected-record format')
     A('')
     A('`verif/tb/apu/vn_vectors/*.exp` is `$readmemh`-able: one 32-bit '
-      'hex word per line, **335 words per instance**: a 2-word header '
+      'hex word per line, **591 words per instance**: a 2-word header '
       '`{cs_base, cs_len}` (word offset of the instance\'s type word in '
       '`.hex`, and its word length), a fixed 77-word `apu_vn_op_t` '
-      'record, and a fixed 256-word payload region:')
+      'record, and a fixed 512-word payload region:')
     A('')
     A('| word | field |')
     A('|---|---|')

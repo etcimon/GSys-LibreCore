@@ -2480,7 +2480,12 @@ package g6lc_apu_cfg_pkg;
       DmaReadMaxBytes:    unsigned'(65536),
       DmaReadBurstBeats:  unsigned'(16),
       DmaWindowBase:      64'h8000_0000,
-      DmaWindowBytes:     64'h1000_0000,
+      // 8 GiB guest-PA span: the QEMU machine adds a second DRAM
+      // bank at 0xa0000000 for -m > 224 MiB; a 2 GiB guest places
+      // rings and buffers past the 4 GiB line, so the window must
+      // cover the hole (0x90000000-0xa0000000) as well as both
+      // banks.  Non-power-of-two is fine: apmem does addr-base<bytes.
+      DmaWindowBytes:     64'h2_0000_0000,
       SgEn:               1'b0,
       SgMaxEntries:       unsigned'(64),
       SgMaxTransferBytes: unsigned'(1048576),
@@ -4972,7 +4977,12 @@ package g6lc_apu_cfg_pkg;
     if (cfg.DmaReadEn || cfg.DmaWriteEn || cfg.MaxResources != 0 ||
         cfg.VenusEn) begin
       if (cfg.DmaCoherent) return 1'b0;
-      if (!addr_aligned(cfg.DmaWindowBase, cfg.DmaWindowBytes)) return 1'b0;
+      // The hardware check is pure addr-base<bytes arithmetic; power-of-two
+      // alignment would forbid the split-bank guest map (low bank at
+      // 0x80000000, dram2 above 4 GiB on larger QEMU guests).
+      if (cfg.DmaWindowBytes == 64'd0 ||
+          cfg.DmaWindowBase + cfg.DmaWindowBytes < cfg.DmaWindowBase)
+        return 1'b0;
       if (apu_ranges_overlap(cfg.DmaWindowBase, cfg.DmaWindowBytes,
                              cfg.MmioBase, cfg.MmioLength) ||
           apu_ranges_overlap(cfg.DmaWindowBase, cfg.DmaWindowBytes,

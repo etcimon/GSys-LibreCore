@@ -1,0 +1,2 @@
+dEQP-VK.api.smoke.triangle
+dEQP-VK.api.smoke.unused_resolve_attachment
