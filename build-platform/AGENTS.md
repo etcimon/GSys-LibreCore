@@ -357,21 +357,47 @@ bun run src/cli/index.ts setup --install --profile dual-hart
 - **Gate-level STA of the RTL — `timings sta-rtl`** (`tooling/rtlTiming.ts`):
   Yosys (managed formal build) reads the target's flattened manifest, `synth
   -flatten`s the synth top (`verify.synthTopByTarget`), maps it with
-  `dfflibmap` + `abc -liberty`, then the fork's `openroad` runs
+  `dfflibmap` + `abc -liberty`, then the fork runs
   `scripts/openroad-timing.tcl` (`OR_THREADS` = `toolchain.openroad.threads`,
   every core by default; `OR_REPORT_DIR` → `reports/paths-{max,min}.rpt`,
-  `summary.txt`) against a generated SDC (one clock on `--clock-port`, default
-  `clk_i`, at `--target-mhz`, default `soc.targetFrequencyMHz`; I/O delays at
-  20 % of the period). Liberty: `--liberty`, `physicalDesign.pdk.liberty`,
-  `CVA6_LIBERTY`, else the fork's study library for `--platform` (default
-  `soc.process`: `nangate45` / `sky130hd` / `sky130hs` / `asap7`) — study
-  numbers rank paths, they are not sign-off. `--remote` runs the two steps as
-  one proxy script on the builder (`sync` first; `REMOTE_OPENROAD`,
+  `summary.txt`; `STA_RESULT` line) against a generated SDC (one clock on
+  `--clock-port`, default `clk_i`, at `--target-mhz`, default
+  `soc.targetFrequencyMHz`; I/O delays at 20 % of the period). The fork's
+  `sta` is preferred — it links from the liberty alone; `openroad`'s
+  `link_design` is ODB-backed and needs `OR_LEF` (tech + std-cell LEF,
+  ORD-2010 otherwise), which the platform table supplies (`platformLefs`,
+  from the fork's `test/<platform>.vars`). Liberty: `--liberty`,
+  `physicalDesign.pdk.liberty`, `CVA6_LIBERTY`, else the fork's study library
+  for `--platform` (default `soc.process`: `nangate45` / `sky130hd` /
+  `sky130hs`; asap7 is gzip'd, which yosys cannot read) — study numbers rank
+  paths, they are not sign-off. `--remote` runs the two steps as one proxy
+  script on the builder (`sync` first; `REMOTE_OPENROAD`,
   `REMOTE_OPENROAD_SRC` in `eda.ts`), building the fork there when the prefix
   is missing (`-march`/PGO from the config, `nproc` jobs; `--rebuild-openroad`
   forces), classifying from `RESULT`/`STA_RESULT` lines, never from the SSH
   exit code. `timings sta-handoff` (package-driven S0–S2/S4) resolves the same
-  managed fork first (`resolveStaTool`), then a PATH `sta`/`openroad`.
+  managed fork first (`resolveStaTool`: `sta`, then `openroad`), then PATH.
+
+- **sv-timing before STA — `sta-rtl --fo4 N`** (`runSvtPrepass`): runs
+  `timings correct --all-modules --allow-latency --emit` on the target's flist
+  at the structural budget, turned into the clock sv-timing derives it from
+  (`targetMhzForFo4Budget` in `tooling/timings.ts`, the inverse of
+  `TimingTarget::new`: 10 FO4 = 4000 MHz at `fo4_ps` 20 / margin 0.2), with
+  `-O3`, `--opt-max-stages-per-region ⌈128/N⌉` (8…16) and the real-feed emit
+  (`--real-cut-feeds --emit-balance-mux-rtl`), then synthesizes the corrected
+  tree through the `writeFlatManifest` `emitFlist` overlay (the explicit form
+  of `CVA6_TIMINGS_USE_EMIT`). `--from-timing <pkg>` reuses an existing emit;
+  `--svt-args "..."` appends raw dials (the arg parser accepts a quoted
+  dash-leading value for value flags — `takesValue`). The emit lives under
+  `workspace/build/sta-rtl/<target>/svt/`, which the proxy `sync` ships
+  (`SYNC_INCLUDE`; `*.sqlite` excluded) so `--remote` synthesizes it too.
+  `timings compile|correct|area` gained the same knob (`--budget-fo4`/`--fo4`,
+  plus `--fo4-ps` `--budget-margin` `--opt-level` `--svt-args` forwarded on
+  `correct`), run the CLI with `svt.py run --release`, and no longer pass
+  `--cache` to `correct` (analyze-only; the CLI exited 2 before). Measured on
+  `g6lc64_ooo` at 10 FO4: see `AGENTS-build.md` — 32 BalanceMux rewrites,
+  failing endpoints 389 → 353, worst path 31.0 FO4 unchanged; the T3
+  multi-cycle relocations the tool proposes are manual.
 
 #### 4.6.2a Running the formal gate
 

@@ -20,8 +20,13 @@
 `--file` / `--files-from`, `--incdir`, `--define`, `--modules` or `--all-modules`,
 `--target-mhz`, `--fo4-ps`, `--package-mode off|packages`, `--param-map`, `--assume-xlen`,
 `--multi-cycle-modules`, `--refuse-path-prefix`, `--refuse-instance-types`,
-`--cache` (SQLite IR path; CRC-32C design hit on re-analyze), `--json-out`,
-**`--out-dir`** / `--emit-dir` (corrected project tree).
+`--cache` (SQLite IR path; CRC-32C design hit on re-analyze — **`analyze`/`area` only**;
+`correct` has the `--opt-cache-mode` dial instead and rejects `--cache`), `--json-out`,
+**`--out-dir`** / `--emit-dir` (corrected project tree), `-O`/`--opt-level` + the
+`--opt-*` dials on `analyze` and `correct`.
+
+`tools/svt.py run --release -- <cli args>` selects the release profile (compiled once);
+hosts analyzing a whole core use it, the package's own tests stay debug.
 
 ### Portable `--files-from` (package-owned)
 
@@ -123,6 +128,16 @@ bun run src/cli/index.ts timings flist --target cv64a6_imafdc_sv39
 bun run src/cli/index.ts timings compile --modules alu -o workspace/build/sv-timing/alu-pack --target-mhz 1250
 bun run src/cli/index.ts timings analyze --modules alu --target-mhz 1250
 bun run src/cli/index.ts timings correct --modules alu --allow-latency --emit
+# Budget as the knob: 10 FO4 = 4000 MHz at fo4_ps 20 / margin 0.2 (targetMhzForFo4Budget);
+# raw dials through --svt-args. Whole-core measurement 2026-10-15 (g6lc64_ooo, 264 files,
+# 234 modules, 10,858 paths): -O3, 13 stages/region, real-feed emit → 483 edits (451
+# annotate, 32 balancemux), failing endpoints 389 → 353, worst path 31.0 FO4 unchanged
+# (raw 97.5), max ≈ 1290 MHz; InsertReg refused on the P10 handshake-locked cones, 407
+# relocation cards of which the T3 multi-cycle options are manual.
+bun run src/cli/index.ts timings correct --target g6lc64_ooo --all-modules --budget-fo4 10 \
+  --allow-latency --emit --opt-level 3 \
+  --svt-args "--opt-max-stages-per-region 13 --real-cut-feeds --emit-balance-mux-rtl" \
+  -o workspace/build/sv-timing/ooo-fo4-10-O3
 bun run src/cli/index.ts timings validate --from-timing workspace/build/sv-timing/alu-pack
 bun run src/cli/index.ts timings summary --from-timing workspace/build/sv-timing/alu-pack
 bun run src/cli/index.ts test sv-timing-smoke --from-timing workspace/build/sv-timing/alu-pack

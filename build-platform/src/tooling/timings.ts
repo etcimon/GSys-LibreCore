@@ -772,12 +772,50 @@ export function buildSvTimingAnalyzeArgs(opts: {
   return args;
 }
 
+/** sv-timing defaults for the structural budget (`--fo4-ps`, `--budget-margin`). */
+export const SVT_DEFAULT_FO4_PS = 20;
+export const SVT_DEFAULT_BUDGET_MARGIN = 0.2;
+
+/**
+ * The structural budget sv-timing derives from a clock target
+ * (`TimingTarget::new`): `budget_fo4 = (1000/target_mhz × 1000 / fo4_ps) × (1 − margin)`.
+ */
+export function fo4BudgetFor(
+  targetMhz: number,
+  fo4Ps = SVT_DEFAULT_FO4_PS,
+  margin = SVT_DEFAULT_BUDGET_MARGIN,
+): number {
+  const periodNs = targetMhz > 0 ? 1000 / targetMhz : 1;
+  return (periodNs * 1000) / Math.max(fo4Ps, 1e-9) * (1 - margin);
+}
+
+/**
+ * The clock target that makes sv-timing's budget exactly `budgetFo4` — the
+ * inverse of `fo4BudgetFor`, so `--budget-fo4 10` is one knob instead of a
+ * target-mhz the operator has to back out by hand (10 FO4 at 20 ps and a 0.2
+ * margin is 4000 MHz). `fo4_ps` is a process input, not a knob: quote it with
+ * every number (sv-timing AGENTS.md §3.2.1).
+ */
+export function targetMhzForFo4Budget(
+  budgetFo4: number,
+  fo4Ps = SVT_DEFAULT_FO4_PS,
+  margin = SVT_DEFAULT_BUDGET_MARGIN,
+): number {
+  if (!(budgetFo4 > 0) || !(margin < 1)) return NaN;
+  const periodNs = (budgetFo4 * fo4Ps) / 1000 / (1 - margin);
+  return 1000 / periodNs;
+}
+
 /** Build argv for the sv-timing CLI (correct + optional emit). Does not spawn. */
 export function buildSvTimingCorrectArgs(opts: {
   portableFlist: string;
   modules?: string[];
   allModules?: boolean;
   targetMhz?: number;
+  fo4Ps?: number;
+  budgetMargin?: number;
+  /** `-O0..-O3`, `-Os`, `-Oz` preset (`--opt-level`). */
+  optLevel?: string;
   allowLatency?: boolean;
   assumeClk?: boolean;
   emit?: boolean;
@@ -787,6 +825,12 @@ export function buildSvTimingCorrectArgs(opts: {
   paramMap?: string;
   assumeXlen?: number;
   packageMode?: "off" | "packages";
+  /**
+   * Raw sv-timing `correct` arguments appended last (`--svt-args`), for the
+   * dials and emit options this adapter does not name: `--opt-max-stages-per-region`,
+   * `--opt-cut-strategy`, `--real-cut-feeds`, `--emit-balance-mux-rtl`, ...
+   */
+  extraArgs?: string[];
 }): string[] {
   const args = ["correct", "--files-from", opts.portableFlist];
   if (opts.allModules) {
@@ -797,11 +841,20 @@ export function buildSvTimingCorrectArgs(opts: {
   if (opts.targetMhz !== undefined) {
     args.push("--target-mhz", String(opts.targetMhz));
   }
+  if (opts.fo4Ps !== undefined) {
+    args.push("--fo4-ps", String(opts.fo4Ps));
+  }
+  if (opts.budgetMargin !== undefined) {
+    args.push("--budget-margin", String(opts.budgetMargin));
+  }
+  if (opts.optLevel) args.push("--opt-level", opts.optLevel);
   if (opts.allowLatency) args.push("--allow-latency");
   if (opts.assumeClk) args.push("--assume-clk");
   if (opts.emit) args.push("--emit");
   if (opts.outDir) args.push("--out-dir", opts.outDir);
-  if (opts.cache) args.push("--cache", opts.cache);
+  // `--cache` is analyze-only in the sv-timing CLI (`correct` has the
+  // `--opt-cache-mode` dial instead); passing it made every host `correct`
+  // exit 2 at argument parsing. The option is kept for the stamp/layout.
   if (opts.jsonOut) args.push("--json-out", opts.jsonOut);
   if (opts.paramMap) {
     args.push("--param-map", opts.paramMap);
@@ -812,7 +865,13 @@ export function buildSvTimingCorrectArgs(opts: {
   if (opts.packageMode) {
     args.push("--package-mode", opts.packageMode);
   }
+  if (opts.extraArgs?.length) args.push(...opts.extraArgs);
   return args;
+}
+
+/** Split a `--svt-args "..."` string on whitespace (no shell quoting needed for dials). */
+export function splitSvtArgs(raw: string | undefined): string[] {
+  return (raw ?? "").split(/\s+/).map((t) => t.trim()).filter(Boolean);
 }
 
 /**
@@ -988,6 +1047,14 @@ export function resolveHostPython(): string[] {
 export function buildSvtRunCommand(
   ctx: PlatformContext,
   cliArgs: string[],
+  opts: {
+    /**
+     * `cargo run --release`: the real-RTL analyze/correct of a whole core is
+     * an order of magnitude faster than the debug profile the package's own
+     * tests use. The first call compiles the release binary once.
+     */
+    release?: boolean;
+  } = {},
 ): { cwd: string; argv: string[] } | null {
   const root = resolveSvTimingRoot(ctx);
   if (!root) return null;
@@ -995,7 +1062,7 @@ export function buildSvtRunCommand(
   const svt = join(root, "tools", "svt.py");
   return {
     cwd: root,
-    argv: [...py, svt, "run", "--", ...cliArgs],
+    argv: [...py, svt, "run", ...(opts.release ? ["--release"] : []), "--", ...cliArgs],
   };
 }
 

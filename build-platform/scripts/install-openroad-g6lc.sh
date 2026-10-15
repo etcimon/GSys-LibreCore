@@ -3,9 +3,11 @@
 # Copyright (c) 2026 Etienne Cimon
 #
 # Build the OpenROAD fork pinned as tools/openroad (etcimon/OpenROAD, branch
-# g6lc) into a toolchain prefix. The binary is for static timing
-# (openroad-timing.tcl / report_checks), not a full place-and-route install
-# of every optional third party. GUI is off.
+# g6lc) into a toolchain prefix: `openroad` plus OpenSTA's `sta` (the same
+# fork timing core; links a netlist from the liberty alone, where openroad's
+# link_design needs a technology LEF). For static timing (openroad-timing.tcl
+# / report_checks), not a full place-and-route install of every optional
+# third party. GUI is off.
 #
 # Invoked by tooling/recipes.ts installOpenroad (`tools install openroad`,
 # natively on Linux/macOS, under WSL on Windows) and by hand on the builder.
@@ -149,7 +151,7 @@ if [[ "$PGO" == "1" ]]; then
   log "PGO phase 1/3: instrumented build -> $PGO_DIR"
   mapfile -t GEN < <(flags "$ISA_FLAG -fprofile-generate=$PGO_DIR -fprofile-update=prefer-atomic")
   configure "${GEN[@]}" -DCMAKE_C_COMPILER_LAUNCHER= -DCMAKE_CXX_COMPILER_LAUNCHER=
-  cmake --build "$BUILD_DIR" -j "$JOBS" --target openroad
+  cmake --build "$BUILD_DIR" -j "$JOBS" --target openroad sta
 
   log "PGO phase 2/3: training on test/aes_nangate45.tcl"
   TRAIN_RESULTS="$(mktemp -d "${TMPDIR:-/tmp}/openroad-pgo-train.XXXXXX")"
@@ -160,21 +162,28 @@ if [[ "$PGO" == "1" ]]; then
     # The test SDC calls set_all_input_output_delays from flow_helpers.tcl.
     printf 'source %s/flow_helpers.tcl\nsource %s/aes_nangate45.sdc\n' "$SRC/test" "$SRC/test" \
       > "$TRAIN_RESULTS/aes_timing.sdc"
-    OR_LIBERTY=Nangate45/Nangate45_typ.lib OR_VERILOG=aes_nangate45.v OR_SDC="$TRAIN_RESULTS/aes_timing.sdc" \
+    OR_LEF="Nangate45/Nangate45_tech.lef Nangate45/Nangate45_stdcell.lef" \
+      OR_LIBERTY=Nangate45/Nangate45_typ.lib OR_VERILOG=aes_nangate45.v OR_SDC="$TRAIN_RESULTS/aes_timing.sdc" \
       OR_TOP=aes_cipher_top \
       "$BUILD_DIR/bin/openroad" -no_init -exit "$REPO/build-platform/scripts/openroad-timing.tcl" \
       > "$TRAIN_RESULTS/aes_timing.log" 2>&1
+    # The same report through the fork's sta binary (liberty-only link),
+    # the path `timings sta-rtl` / `sta-handoff` take on a bare netlist.
+    OR_LIBERTY=Nangate45/Nangate45_typ.lib OR_VERILOG=aes_nangate45.v \
+      OR_SDC="$TRAIN_RESULTS/aes_timing.sdc" OR_TOP=aes_cipher_top \
+      "$BUILD_DIR/src/sta/sta" -exit "$REPO/build-platform/scripts/openroad-timing.tcl" \
+      > "$TRAIN_RESULTS/aes_timing_sta.log" 2>&1
   )
   log "training wrote $(find "$PGO_DIR" -name '*.gcda' | wc -l) profiles ($TRAIN_RESULTS)"
 
   log "PGO phase 3/3: optimized build"
   mapfile -t USE < <(flags "$ISA_FLAG -fprofile-use=$PGO_DIR -fprofile-partial-training -fprofile-correction -Wno-missing-profile")
   configure "${USE[@]}" -DCMAKE_C_COMPILER_LAUNCHER= -DCMAKE_CXX_COMPILER_LAUNCHER=
-  cmake --build "$BUILD_DIR" -j "$JOBS" --target openroad
+  cmake --build "$BUILD_DIR" -j "$JOBS" --target openroad sta
 else
   mapfile -t PLAIN < <(flags "$ISA_FLAG")
   configure "${PLAIN[@]}"
-  cmake --build "$BUILD_DIR" -j "$JOBS" --target openroad
+  cmake --build "$BUILD_DIR" -j "$JOBS" --target openroad sta
 fi
 cmake --install "$BUILD_DIR"
 "$PREFIX/bin/openroad" -version

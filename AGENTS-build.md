@@ -166,19 +166,44 @@ Concrete examples:
 **Gate-level STA of the LibreCore RTL (`timings sta-rtl`).** Yosys (the managed formal build,
 integrated slang) reads the target's flattened manifest (`core/` + `corev_apu/`), `synth
 -flatten`s the synth top (`verify.synthTopByTarget`, default `cva6`), maps it onto a liberty
-with `dfflibmap` + `abc`, and the fork's `openroad` runs `build-platform/scripts/openroad-timing.tcl`
-on the netlist (`set_thread_count` = `toolchain.openroad.threads`, every core by default) against
-a generated SDC: one clock on `--clock-port` (default `clk_i`) at `--target-mhz` (default
-`soc.targetFrequencyMHz`), I/O delays at 20 % of the period. The liberty is `--liberty` /
+with `dfflibmap` + `abc`, and the fork runs `build-platform/scripts/openroad-timing.tcl` on the
+netlist against a generated SDC: one clock on `--clock-port` (default `clk_i`) at `--target-mhz`
+(default `soc.targetFrequencyMHz`), I/O delays at 20 % of the period. The fork's **`sta`**
+binary is preferred (it links from the liberty alone); its `openroad` binary needs the
+platform LEF (`OR_LEF`; `link_design` is ODB-backed, ORD-2010 otherwise) and gets
+`set_thread_count` = `toolchain.openroad.threads`. The liberty is `--liberty` /
 `physicalDesign.pdk.liberty` / `CVA6_LIBERTY`, else the fork's free study library for
-`--platform` (default `soc.process`: `nangate45`, `sky130hd`, `sky130hs`, `asap7`) — a study
-library ranks paths, it is not sign-off. `--remote` runs both steps as one script on
-`ovh_calltorch` through the testharness proxy (`sync` first), building the fork prefix there
-when it is missing (`install-openroad-g6lc.sh`, `OPENROAD_SRC=/opt/testharness/src/openroad-g6lc`
-at the local gitlink, `-march`/PGO from the config, `nproc` jobs; `--rebuild-openroad` forces it)
-and reporting `wns_max`/`tns_max`/`wns_min`/`tns_min` plus `reports/paths-{max,min}.rpt`.
-Structural FO4 from `sv-timing` remains the screening layer; `timings sta-handoff` is the
-package-driven path (S0–S2/S4) and now prefers the same managed fork over a PATH `sta`.
+`--platform` (default `soc.process`: `nangate45`, `sky130hd`, `sky130hs`, per the fork's
+`test/<platform>.vars`) — a study library ranks paths, it is not sign-off. `--remote` runs
+both steps as one script on `ovh_calltorch` through the testharness proxy (`sync` first),
+building the fork prefix there when it is missing (`install-openroad-g6lc.sh`,
+`OPENROAD_SRC=/opt/testharness/src/openroad-g6lc` at the local gitlink, `-march`/PGO from the
+config, `nproc` jobs; `--rebuild-openroad` forces it) and reporting
+`wns_max`/`tns_max`/`wns_min`/`tns_min` plus `reports/paths-{max,min}.rpt`.
+`timings sta-handoff` is the package-driven path (S0–S2/S4) and resolves the same managed fork
+(`sta`, then `openroad`) before a PATH `sta`.
+
+**sv-timing first (`--fo4 N` / `--budget-fo4 N`).** `sta-rtl --fo4 10` runs the structural
+pass before synthesis: `timings correct --all-modules --allow-latency --emit` on the target's
+flist at the budget — turned into the clock sv-timing derives it from
+(`targetMhzForFo4Budget`: 10 FO4 = 4000 MHz at `fo4_ps` 20, margin 0.2; `fo4_ps` is a process
+input, quote it with every number) — with `-O3`, `--opt-max-stages-per-region ⌈128/N⌉`
+(8…16) and the real-feed emit (`--real-cut-feeds --emit-balance-mux-rtl`; the lean sidecar
+feeds inserted registers with zero, which yosys would sweep away), then synthesizes the
+corrected tree (`writeFlatManifest` emit overlay; `--from-timing <pkg>` reuses an existing
+emit; `--svt-args "..."` appends raw dials). The emit under
+`build-platform/workspace/build/sta-rtl/` is part of the proxy `sync`, so `--remote` sees it.
+The same knob is on `timings compile|correct|area` (`--budget-fo4`, `--fo4-ps`,
+`--budget-margin`, `--opt-level`, `--svt-args`), which now forward `--fo4-ps`/`--budget-margin`
+on `correct` and no longer pass `--cache` to it (analyze-only in the CLI; `correct` exited 2
+at argument parsing before). **Measured on `g6lc64_ooo` at 10 FO4** (264 files, 234 modules,
+10,858 paths, ~2 min release build): `-O2` → 451 annotate edits, nothing structural;
+`-O3` + 13 stages + real-feed emit → 483 edits (451 annotate, 32 balancemux), failing endpoints
+389 → 353, worst path 31.0 FO4 unchanged (97.5 raw before `path_class`), max ≈ 1290 MHz.
+`InsertReg` is refused on the P10 handshake-locked cones (`instr_queue`, `stream_arbiter`,
+`alu` dense control), and the 407 relocation cards' T3 multi-cycle options are manual — the
+package's own "remaining gap to 10 FO4" (`sv-timing/ALGORITHMS-EXPERTS.md`). sv-timing is
+usable beforehand in one flag; it does not by itself bring this core to 10 FO4.
 
 | Layer | Command | Role |
 |-------|---------|------|

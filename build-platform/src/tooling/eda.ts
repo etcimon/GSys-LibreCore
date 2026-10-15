@@ -358,6 +358,12 @@ export interface ManifestOverride {
   outSubdir?: string;
   /** Tag used in the output filename (default: target). */
   outTag?: string;
+  /**
+   * Corrected-emit flist (`svt_corrected.f`) whose `*__svt.sv` files replace
+   * the matching live sources — the explicit form of the
+   * `CVA6_TIMINGS_USE_EMIT` / `CVA6_TIMINGS_EMIT_FLIST` environment overlay.
+   */
+  emitFlist?: string;
 }
 
 /** Flatten the configured manifest for a target and write the command file. */
@@ -432,8 +438,9 @@ export function writeFlatManifest(
   // Runtime-stability R8: when timings --use-emit set env, replace live RTL
   // paths with matching corrected/*__svt.sv from CVA6_TIMINGS_EMIT_FLIST.
   let emitReplaced = 0;
-  const emitFlist = process.env.CVA6_TIMINGS_EMIT_FLIST;
+  const emitFlist = override.emitFlist ?? process.env.CVA6_TIMINGS_EMIT_FLIST;
   const useEmit =
+    override.emitFlist !== undefined ||
     process.env.CVA6_TIMINGS_USE_EMIT === "1" ||
     process.env.CVA6_TIMINGS_USE_EMIT === "true";
   if (useEmit && emitFlist && existsSync(emitFlist)) {

@@ -42,10 +42,13 @@ import {
   buildSvTimingAreaArgs,
   buildSvTimingCorrectArgs,
   buildSvtRunCommand,
+  fo4BudgetFor,
   formatTimingsDashboardLines,
   resolveSvTimingRoot,
   resolveTimingsOutputDir,
+  splitSvtArgs,
   summarizeTimingsPackage,
+  targetMhzForFo4Budget,
   timingsRepoEnv,
   type TimingsOutputLayout,
   validateTimingsOutDir,
@@ -108,6 +111,14 @@ async function runAnalyzeOrCorrect(
     : undefined;
   const targetMhz = flagStr(flags, "target-mhz");
   const fo4Ps = flagStr(flags, "fo4-ps");
+  // `--budget-fo4 N` (alias `--fo4 N`): the structural budget itself, turned
+  // into the target-mhz sv-timing derives it from (fo4_ps / margin aware).
+  const budgetFo4Raw = flagStr(flags, "budget-fo4") ?? flagStr(flags, "fo4");
+  const budgetFo4 =
+    budgetFo4Raw != null && Number.isFinite(Number(budgetFo4Raw)) && Number(budgetFo4Raw) > 0
+      ? Number(budgetFo4Raw)
+      : undefined;
+  const optLevel = flagStr(flags, "opt-level");
   const jsonOutOverride = flagStr(flags, "json-out");
   const outputSpec = flagOutput(flags);
   const flistOverride = flagStr(flags, "flist");
@@ -220,8 +231,21 @@ async function runAnalyzeOrCorrect(
   logger.info(`output   : ${layout.dir}`);
   logger.info(`portable : ${portable.portablePath} (${portable.files.length} files)`);
 
-  const mhz = targetMhz != null ? Number(targetMhz) : ctx.config.soc.targetFrequencyMHz;
   const fo4 = fo4Ps != null ? Number(fo4Ps) : undefined;
+  const mhz =
+    budgetFo4 != null
+      ? targetMhzForFo4Budget(budgetFo4, fo4, budgetMargin)
+      : targetMhz != null
+        ? Number(targetMhz)
+        : ctx.config.soc.targetFrequencyMHz;
+  logger.info(
+    `budget   : ${fo4BudgetFor(mhz, fo4, budgetMargin).toFixed(1)} FO4 ` +
+      `(target ${mhz.toFixed(0)} MHz, fo4_ps=${fo4 ?? 20}, margin=${budgetMargin ?? 0.2}` +
+      `${budgetFo4 != null ? `; from --budget-fo4 ${budgetFo4}` : ""}) — structural, not STA`,
+  );
+  if (budgetFo4 != null && targetMhz != null) {
+    logger.warn(`--budget-fo4 ${budgetFo4} overrides --target-mhz ${targetMhz}`);
+  }
 
   let paramMapPath = paramMapFlag;
   if (!paramMapPath && autoParamMap) {
@@ -277,6 +301,10 @@ async function runAnalyzeOrCorrect(
           modules,
           allModules,
           targetMhz: mhz,
+          fo4Ps: fo4,
+          budgetMargin,
+          optLevel,
+          extraArgs: splitSvtArgs(flagStr(flags, "svt-args")),
           allowLatency,
           assumeClk,
           emit,
@@ -288,7 +316,7 @@ async function runAnalyzeOrCorrect(
           packageMode: packageMode ?? "packages",
         });
 
-  const cmd = buildSvtRunCommand(ctx, cliArgs);
+  const cmd = buildSvtRunCommand(ctx, cliArgs, { release: true });
   if (!cmd) {
     logger.error("failed to build svt run command");
     return 1;
@@ -440,6 +468,9 @@ export const timingsCommand: Command = {
     "  timings analyze    same as compile (alias; prefers --output over ad-hoc --json-out)\n" +
     "  timings area       structural area into <output>/area-report.json (same cache; no rewrite)\n" +
     "  timings correct    correct (+ optional --emit into <output>/corrected)\n" +
+    "                     --budget-fo4 N | --fo4 N  structural budget (10 = 4000 MHz at fo4_ps 20,\n" +
+    "                     margin 0.2); --fo4-ps --budget-margin --opt-level forwarded;\n" +
+    "                     --svt-args \"--opt-max-stages-per-region 12 --real-cut-feeds\" raw dials\n" +
     "  timings validate   structural check of a precompile out-dir (--from-timing)\n" +
     "  timings summary    soak dashboard from analyze.json (alias: dashboard)\n" +
     "  timings sta-handoff  S0–S2 OpenSTA handoff from --from-timing (--try-tools)\n" +
@@ -447,6 +478,11 @@ export const timingsCommand: Command = {
     "                     onto a liberty, the tools/openroad fork reports (openroad-timing.tcl);\n" +
     "                     --target --top --liberty|--platform --clock-port --target-mhz --threads\n" +
     "                     --remote (builder: -march/PGO fork build when absent, nproc threads)\n" +
+    "                     --fo4 N|--budget-fo4 N  sv-timing correct --emit first at N FO4 (10 = the\n" +
+    "                     deep-pipeline target; fo4_ps 20, margin 0.2 → 4000 MHz) and synthesize\n" +
+    "                     the corrected emit; --from-timing <pkg> reuses an existing emit\n" +
+    "                     --map-recipe lean|synth  yosys lowering before dfflibmap/abc (lean skips\n" +
+    "                     the asymptotic opt_merge/check passes a whole core hits)\n" +
     "  timings correlate  FO4 dashboard + optional --bench id metrics JSON\n" +
     "  timings fo4-golden check|write  S3b FO4 golden vs analyze.json\n" +
     "  timings retune-propose  S3b-lab: correlate.json → retune-proposal.md (never edits fo4-v1)\n" +
@@ -470,11 +506,13 @@ export const timingsCommand: Command = {
     "bun run src/cli/index.ts timings analyze --modules alu --output out/t1",
     "bun run src/cli/index.ts timings area --modules alu --output out/t1",
     "bun run src/cli/index.ts timings correct --modules alu --allow-latency --emit -o out/t1",
+    "bun run src/cli/index.ts timings correct --all-modules --budget-fo4 10 --allow-latency --emit -o workspace/build/sv-timing/ooo-fo4-10 --target g6lc64_ooo",
     "bun run src/cli/index.ts timings validate --from-timing out/t1",
     "bun run src/cli/index.ts timings summary --from-timing out/t1",
     "bun run src/cli/index.ts timings sta-handoff --from-timing out/t1 --try-tools",
     "bun run src/cli/index.ts timings sta-rtl --target g6lc64_ooo --platform nangate45",
     "bun run src/cli/index.ts timings sta-rtl --target g6lc64_ooo_server --remote --target-mhz 1250",
+    "bun run src/cli/index.ts timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --remote",
     "bun run src/cli/index.ts timings lab-run --try-tools",
     "bun run src/cli/index.ts timings retune-propose",
     "bun run src/cli/index.ts timings retune-propose --from-handoff workspace/build/sta-handoff/lab-run",
@@ -745,6 +783,13 @@ export const timingsCommand: Command = {
 
     if (sub === "sta-rtl") {
       const or = ctx.config.toolchain.openroad;
+      // --fo4 N / --budget-fo4 N: sv-timing correct --emit first, at that budget.
+      const staFo4Raw = flagStr(args.flags, "budget-fo4") ?? flagStr(args.flags, "fo4");
+      const staFo4 = staFo4Raw != null && Number(staFo4Raw) > 0 ? Number(staFo4Raw) : undefined;
+      const staFo4PsRaw = flagStr(args.flags, "fo4-ps");
+      const staFo4Ps = staFo4PsRaw != null && Number(staFo4PsRaw) > 0 ? Number(staFo4PsRaw) : undefined;
+      const staMarginRaw = flagStr(args.flags, "budget-margin");
+      const staMargin = staMarginRaw != null && Number.isFinite(Number(staMarginRaw)) ? Number(staMarginRaw) : undefined;
       const threadsFlag = flagStr(args.flags, "threads");
       if (threadsFlag != null) or.threads = Number(threadsFlag);
       const mhzFlag = flagStr(args.flags, "target-mhz");
@@ -758,6 +803,13 @@ export const timingsCommand: Command = {
         remote: flagBool(args.flags, "remote"),
         rebuildOpenroad: flagBool(args.flags, "rebuild-openroad"),
         outDir: outputSpec,
+        fo4Budget: staFo4,
+        fo4Ps: staFo4Ps,
+        budgetMargin: staMargin,
+        svtOptLevel: flagStr(args.flags, "opt-level"),
+        svtExtraArgs: splitSvtArgs(flagStr(args.flags, "svt-args")),
+        fromTiming,
+        mapRecipe: flagStr(args.flags, "map-recipe") === "synth" ? "synth" : "lean",
       });
       if (asJson) {
         logger.raw(JSON.stringify(result, null, 2) + "\n");
@@ -767,6 +819,13 @@ export const timingsCommand: Command = {
       logger.info(`out-dir  : ${result.outDir}`);
       logger.info(`liberty  : ${result.liberty}`);
       logger.info(`threads  : ${or.threads > 0 ? or.threads : `${hostCores()} (every core)`}  march=${or.march} pgo=${or.pgo}`);
+      if (result.fo4Budget != null || result.emitFlist) {
+        logger.info(
+          `sv-timing: budget ${result.fo4Budget ?? "—"} FO4` +
+            `${result.svtTargetMhz != null ? ` (${result.svtTargetMhz.toFixed(0)} MHz, fo4_ps=${staFo4Ps ?? 20}, margin=${staMargin ?? 0.2})` : ""}` +
+            `${result.emitFlist ? `; synthesized emit ${result.emitFlist}` : "; live RTL"}`,
+        );
+      }
       for (const st of result.stages) {
         const line = `  [${st.status}] ${st.id}: ${st.detail}`;
         if (st.status === "fail") logger.error(line);

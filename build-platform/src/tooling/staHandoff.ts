@@ -271,7 +271,10 @@ function managedOpenroadBinary(ctx: PlatformContext, name: "openroad" | "sta"): 
 }
 
 export function resolveStaTool(ctx: PlatformContext): StaTool | null {
-  const managed = managedOpenroadBinary(ctx, "openroad") ?? managedOpenroadBinary(ctx, "sta");
+  // `sta` first: it links a netlist from the liberty alone, where openroad's
+  // link_design builds an ODB database and refuses without a technology LEF
+  // (ORD-2010). Both are the fork's timing core.
+  const managed = managedOpenroadBinary(ctx, "sta") ?? managedOpenroadBinary(ctx, "openroad");
   if (managed) return managed;
   const sta = which("sta") ?? which("opensta") ?? (hasBinary("sta") ? "sta" : hasBinary("opensta") ? "opensta" : null);
   if (sta) return { bin: sta, kind: "opensta", viaWsl: false, source: "path" };

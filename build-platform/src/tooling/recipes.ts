@@ -486,9 +486,9 @@ export async function installFormal(
   };
 }
 
-/** True when the managed OpenROAD prefix has the `openroad` binary (Linux ELF under WSL). */
+/** True when the managed OpenROAD prefix has both fork binaries (Linux ELFs under WSL). */
 export function isOpenroadInstalled(openroadBin: string): boolean {
-  return existsSync(join(openroadBin, "openroad"));
+  return existsSync(join(openroadBin, "openroad")) && existsSync(join(openroadBin, "sta"));
 }
 
 /**

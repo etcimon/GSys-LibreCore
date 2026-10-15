@@ -342,9 +342,16 @@ def cmd_check(root: Path, env: dict[str, str], rest: list[str]) -> None:
 
 def cmd_run(root: Path, env: dict[str, str], rest: list[str]) -> None:
     c = need_cargo(root)
+    # `run --release -- <cli args>`: hosts analyzing a whole core ask for the
+    # release profile (compiled once, then reused); package tests stay debug.
+    profile: list[str] = []
+    while rest and rest[0] in ("--release", "--debug"):
+        if rest[0] == "--release":
+            profile = ["--release"]
+        rest = rest[1:]
     if rest and rest[0] == "--":
         rest = rest[1:]
-    run([str(c), "run", "-p", "sv-timing-cli", "--", *rest], cwd=root, env=env, check=True)
+    run([str(c), "run", *profile, "-p", "sv-timing-cli", "--", *rest], cwd=root, env=env, check=True)
 
 
 def cmd_clean(root: Path, env: dict[str, str], rest: list[str]) -> None:

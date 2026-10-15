@@ -45,6 +45,16 @@ import {
   writeFlatManifest,
 } from "./eda.ts";
 import { resolveStaTool, staThreadCount, type StaTool } from "./staHandoff.ts";
+import {
+  buildSvTimingCorrectArgs,
+  buildSvtRunCommand,
+  fo4BudgetFor,
+  targetMhzForFo4Budget,
+  timingsRepoEnv,
+  validateTimingsOutDir,
+  writeHostParamMap,
+  writeVerifyPortableFlist,
+} from "./timings.ts";
 
 export interface RtlTimingOptions {
   /** Config-package target (default soc.coreConfig). */
@@ -65,6 +75,30 @@ export interface RtlTimingOptions {
   rebuildOpenroad?: boolean;
   /** Output root (default workspace/build/sta-rtl/<target>). */
   outDir?: string;
+  /**
+   * Run sv-timing first: `correct --all-modules --emit --allow-latency` on the
+   * target's flist at this structural budget (FO4 per stage), and synthesize
+   * the corrected emit instead of the live RTL. 10 is the deep-pipeline
+   * target the package documents (sv-timing AGENTS.md §3.2.1: 4000 MHz at
+   * fo4_ps 20, margin 0.2). Review-only emit — never merged into core/.
+   */
+  fo4Budget?: number;
+  /** Process FO4 in ps for the budget (default 20; quote it with every number). */
+  fo4Ps?: number;
+  /** Budget margin 0..1 (default 0.2). */
+  budgetMargin?: number;
+  /**
+   * sv-timing `--opt-level` preset for the pre-pass. Default `3` when a budget
+   * is given: multi-cut `pipeline_region` with `budget-fit` cuts is the only
+   * preset that can take a 97 FO4 path to 10 (`-O2` places one register).
+   */
+  svtOptLevel?: string;
+  /** Raw sv-timing `correct` arguments appended after the adapter's (`--svt-args`). */
+  svtExtraArgs?: string[];
+  /** Reuse an existing `timings correct --emit` package instead of running the pre-pass. */
+  fromTiming?: string;
+  /** Yosys lowering before the liberty map: `lean` (default) or Yosys's full `synth`. */
+  mapRecipe?: "lean" | "synth";
 }
 
 export interface RtlTimingResult {
@@ -73,6 +107,11 @@ export interface RtlTimingResult {
   target: string;
   top: string;
   liberty: string;
+  /** Corrected-emit flist the synthesis used, when the sv-timing pre-pass ran. */
+  emitFlist?: string;
+  /** Structural budget of the pre-pass (FO4) and the clock it maps to. */
+  fo4Budget?: number;
+  svtTargetMhz?: number;
   stages: { id: string; status: "pass" | "skip" | "fail"; detail: string }[];
   /** Parsed from the STA_RESULT line of openroad-timing.tcl. */
   wnsMax?: number;
@@ -81,19 +120,38 @@ export interface RtlTimingResult {
   tnsMin?: number;
 }
 
-/** Fork test platforms that ship a free study liberty. */
-const PLATFORM_LIBERTY: Record<string, string> = {
-  nangate45: "Nangate45/Nangate45_typ.lib",
-  sky130hd: "sky130hd/sky130_fd_sc_hd__tt_025C_1v80.lib",
-  sky130hs: "sky130hs/sky130_fd_sc_hs__tt_025C_1v80.lib",
-  asap7: "asap7/asap7sc7p5t_AO_RVT_FF_nldm_211120.lib.gz",
+/**
+ * Fork test platforms that ship a free study library, as `test/<platform>.vars`
+ * names them: the typical-corner liberty yosys maps onto, and the technology +
+ * standard-cell LEF the `openroad` binary needs to link (`sta` does not).
+ * asap7 is left out: its libraries are gzip'd, which yosys cannot read.
+ */
+const PLATFORM_FILES: Record<string, { lib: string; lefs: string[] }> = {
+  nangate45: {
+    lib: "Nangate45/Nangate45_typ.lib",
+    lefs: ["Nangate45/Nangate45_tech.lef", "Nangate45/Nangate45_stdcell.lef"],
+  },
+  sky130hd: {
+    lib: "sky130hd/sky130hd_tt.lib",
+    lefs: ["sky130hd/sky130hd.tlef", "sky130hd/sky130hd_std_cell.lef"],
+  },
+  sky130hs: {
+    lib: "sky130hs/sky130hs_tt.lib",
+    lefs: ["sky130hs/sky130hs.tlef", "sky130hs/sky130hs_std_cell.lef"],
+  },
 };
 
 /** Study-liberty path inside a fork checkout for a platform, or null. */
 export function platformLiberty(platform: string | undefined): string | null {
   if (!platform) return null;
-  const rel = PLATFORM_LIBERTY[platform.toLowerCase()];
+  const rel = PLATFORM_FILES[platform.toLowerCase()]?.lib;
   return rel ? `test/${rel}` : null;
+}
+
+/** LEF paths inside a fork checkout for a platform (tech first), or []. */
+export function platformLefs(platform: string | undefined): string[] {
+  if (!platform) return [];
+  return (PLATFORM_FILES[platform.toLowerCase()]?.lefs ?? []).map((r) => `test/${r}`);
 }
 
 /**
@@ -105,25 +163,35 @@ export function platformLiberty(platform: string | undefined): string | null {
 export function resolveTimingLiberty(
   ctx: PlatformContext,
   opts: { liberty?: string; platform?: string },
-): { path: string; source: "explicit" | "pdk" | "env" | "platform"; forkRel?: string } | null {
+): {
+  path: string;
+  source: "explicit" | "pdk" | "env" | "platform";
+  forkRel?: string;
+  /** Technology + std-cell LEF for the openroad binary (platform source only). */
+  lefs: string[];
+  lefForkRels: string[];
+} | null {
+  const platform = (opts.platform ?? ctx.config.soc.process ?? "").toLowerCase();
+  const lefForkRels = platformLefs(platform);
+  const lefs = lefForkRels.map((r) => join(ctx.repoRoot, "tools", "openroad", r));
   if (opts.liberty) {
     const p = isAbsolute(opts.liberty) ? opts.liberty : join(ctx.repoRoot, opts.liberty);
-    if (existsSync(p)) return { path: p, source: "explicit" };
+    if (existsSync(p)) return { path: p, source: "explicit", lefs, lefForkRels };
   }
   const pdk = ctx.config.physicalDesign?.pdk as { liberty?: string } | undefined;
   if (pdk?.liberty) {
     const p = isAbsolute(pdk.liberty) ? pdk.liberty : join(ctx.repoRoot, pdk.liberty);
-    if (existsSync(p)) return { path: p, source: "pdk" };
+    if (existsSync(p)) return { path: p, source: "pdk", lefs, lefForkRels };
   }
   if (process.env.CVA6_LIBERTY && existsSync(process.env.CVA6_LIBERTY)) {
-    return { path: process.env.CVA6_LIBERTY, source: "env" };
+    return { path: process.env.CVA6_LIBERTY, source: "env", lefs, lefForkRels };
   }
-  const rel = platformLiberty(opts.platform ?? ctx.config.soc.process);
+  const rel = platformLiberty(platform);
   if (rel) {
     const p = join(ctx.repoRoot, "tools", "openroad", rel);
     // The remote route reads it from the builder's fork checkout even when the
     // local submodule is not populated.
-    return { path: p, source: "platform", forkRel: rel };
+    return { path: p, source: "platform", forkRel: rel, lefs, lefForkRels };
   }
   return null;
 }
@@ -141,7 +209,19 @@ export function buildClockSdc(opts: { clockPort: string; targetMhz: number; top:
   ].join("\n");
 }
 
-/** Yosys script: slang read of the manifest, synth, liberty mapping, netlist. */
+/**
+ * Yosys script: slang read of the manifest, generic lowering, liberty mapping,
+ * netlist. Two recipes:
+ *
+ * - `lean` (default): `proc; flatten; opt_clean; wreduce; alumacc; memory;
+ *   techmap` then `dfflibmap` + `abc -liberty`. No `opt`/`opt_merge`, `share`,
+ *   `fsm` or `check`: on a whole core those are the asymptotic passes
+ *   (`opt_merge` was measured at ~11 merges/min from ~273k cells; `check`
+ *   after `flatten` ran past an hour on g6lc64_ooo), and none of them changes
+ *   what STA measures — abc restructures the logic anyway.
+ * - `synth`: Yosys's full `synth -flatten` before the mapping (slower, the
+ *   netlist Yosys would hand a real flow).
+ */
 export function buildMapScript(opts: {
   manifest: string;
   top: string;
@@ -149,7 +229,24 @@ export function buildMapScript(opts: {
   netlist: string;
   defines: string[];
   slangArgs: string[];
+  recipe?: "lean" | "synth";
 }): string {
+  const lowering =
+    (opts.recipe ?? "lean") === "synth"
+      ? [`synth -top ${opts.top} -flatten`]
+      : [
+          "proc",
+          "flatten",
+          "opt_clean",
+          "wreduce",
+          "alumacc",
+          "opt_clean",
+          "memory -nomap",
+          "memory_map",
+          "opt_clean",
+          "techmap",
+          "opt_clean",
+        ];
   return [
     [
       "read_slang -f",
@@ -160,10 +257,9 @@ export function buildMapScript(opts: {
       ...opts.slangArgs,
     ].join(" "),
     `hierarchy -check -top ${opts.top}`,
-    // Generic synthesis, then the technology mapping STA needs: flops onto the
-    // liberty's cells, logic through abc with liberty areas/delays. `-flatten`
-    // keeps one timing graph for the fork's report.
-    `synth -top ${opts.top} -flatten`,
+    ...lowering,
+    // The technology mapping STA needs: flops onto the liberty's cells, logic
+    // through abc with liberty areas/delays; one flat timing graph.
     `dfflibmap -liberty ${opts.liberty}`,
     `abc -liberty ${opts.liberty}`,
     "opt_clean -purge",
@@ -186,6 +282,135 @@ function marchValue(ctx: PlatformContext): string {
   return ctx.config.toolchain.openroad.march;
 }
 
+/** Outcome of the optional sv-timing pre-pass. */
+interface SvtPrepass {
+  stage: RtlTimingResult["stages"][number];
+  /** `svt_corrected.f` to overlay on the manifest, when the pass emitted. */
+  emitFlist?: string;
+  targetMhz?: number;
+}
+
+/**
+ * sv-timing before synthesis: correct the target's RTL to `fo4Budget` and
+ * emit the corrected tree under `<outDir>/svt/corrected`. The budget is turned
+ * into the clock target sv-timing derives it from (`targetMhzForFo4Budget`),
+ * so `--fo4 10` means budget_fo4 = 10.0 exactly for the given fo4_ps/margin.
+ * With `fromTiming`, an existing `timings correct --emit` package is reused.
+ */
+async function runSvtPrepass(
+  ctx: PlatformContext,
+  opts: RtlTimingOptions,
+  outDir: string,
+): Promise<SvtPrepass> {
+  const fo4Ps = opts.fo4Ps ?? 20;
+  const margin = opts.budgetMargin ?? 0.2;
+  if (opts.fromTiming) {
+    const v = validateTimingsOutDir(ctx, { fromTiming: opts.fromTiming, requireEmit: true });
+    if (!v.ok || !v.correctedFlist) {
+      return {
+        stage: {
+          id: "s0-svt-correct",
+          status: "fail",
+          detail: `--from-timing ${opts.fromTiming}: ${v.issues.map((i) => i.message).join("; ") || "no corrected emit"}`,
+        },
+      };
+    }
+    return {
+      stage: { id: "s0-svt-correct", status: "pass", detail: `reusing emit ${posixPath(v.correctedFlist)}` },
+      emitFlist: v.correctedFlist,
+    };
+  }
+  const budget = opts.fo4Budget;
+  if (budget === undefined) {
+    return { stage: { id: "s0-svt-correct", status: "skip", detail: "no --fo4 budget; live RTL" } };
+  }
+  const targetMhz = targetMhzForFo4Budget(budget, fo4Ps, margin);
+  if (!Number.isFinite(targetMhz)) {
+    return { stage: { id: "s0-svt-correct", status: "fail", detail: `bad budget ${budget} FO4 (fo4_ps ${fo4Ps}, margin ${margin})` } };
+  }
+  const svtDir = join(outDir, "svt");
+  mkdirSync(svtDir, { recursive: true });
+  let env: Record<string, string>;
+  try {
+    env = { ...timingsRepoEnv(ctx, opts.target), ...edaEnv(ctx, edaPaths(ctx), opts.target) };
+  } catch {
+    env = timingsRepoEnv(ctx, opts.target);
+  }
+  const portable = writeVerifyPortableFlist(ctx, env, opts.target, {
+    tag: `sta-rtl-${opts.target}`,
+    outPath: posixPath(join(svtDir, "portable.f")),
+  });
+  const paramMap = writeHostParamMap(ctx, {
+    outPath: posixPath(join(svtDir, "param-map.json")),
+    xlen: ctx.config.soc.xlen as number | undefined,
+  });
+  const correctedDir = posixPath(join(svtDir, "corrected"));
+  // Defaults that make the budget reachable and the emit synthesizable:
+  // -O3 (multi-cut, budget-fit), enough stages per region for the deepest
+  // cone the core shows (~100 FO4) at this budget, and the real-feed emit
+  // (the lean sidecar feeds inserted registers with zero, which yosys would
+  // sweep away before STA ever saw a stage). Every one is overridable
+  // through --svt-args, which is appended last.
+  const extra = opts.svtExtraArgs ?? [];
+  const has = (flag: string) => extra.includes(flag);
+  const defaults: string[] = [];
+  if (!has("--opt-max-stages-per-region")) {
+    defaults.push("--opt-max-stages-per-region", String(Math.min(16, Math.max(8, Math.ceil(128 / budget)))));
+  }
+  if (!has("--real-cut-feeds")) defaults.push("--real-cut-feeds");
+  if (!has("--emit-balance-mux-rtl")) defaults.push("--emit-balance-mux-rtl");
+  const args = buildSvTimingCorrectArgs({
+    portableFlist: portable.portablePath,
+    allModules: true,
+    targetMhz,
+    fo4Ps,
+    budgetMargin: margin,
+    optLevel: opts.svtOptLevel ?? "3",
+    allowLatency: true,
+    emit: true,
+    outDir: correctedDir,
+    jsonOut: posixPath(join(svtDir, "correct.json")),
+    cache: posixPath(join(svtDir, "ir.sqlite")),
+    paramMap,
+    assumeXlen: ctx.config.soc.xlen as number | undefined,
+    packageMode: "packages",
+    extraArgs: [...defaults, ...extra],
+  });
+  const cmd = buildSvtRunCommand(ctx, args, { release: true });
+  if (!cmd) {
+    return { stage: { id: "s0-svt-correct", status: "fail", detail: "sv-timing package not found at repo root" } };
+  }
+  const budgetNote = `${fo4BudgetFor(targetMhz, fo4Ps, margin).toFixed(1)} FO4 (target ${targetMhz.toFixed(0)} MHz, fo4_ps=${fo4Ps}, margin=${margin})`;
+  ctx.logger.info(`sta-rtl: sv-timing correct --all-modules --emit at ${budgetNote}`);
+  ctx.logger.info(`+ ${cmd.argv.join(" ")}`);
+  if (ctx.dryRun) {
+    return { stage: { id: "s0-svt-correct", status: "skip", detail: `dry-run ${budgetNote}` }, targetMhz };
+  }
+  const res = await run(cmd.argv[0]!, cmd.argv.slice(1), {
+    cwd: cmd.cwd,
+    allowFailure: true,
+    stdio: "capture",
+    env: { ...process.env, ...env, RUST_MIN_STACK: process.env.RUST_MIN_STACK ?? "16777216" } as Record<string, string>,
+    logger: ctx.logger,
+  });
+  writeFileSync(join(svtDir, "correct.log"), `exit=${res.code}\n${res.stdout}\n${res.stderr}\n`, "utf8");
+  const emitFlist = join(correctedDir, "svt_corrected.f");
+  if (!res.ok) {
+    return { stage: { id: "s0-svt-correct", status: "fail", detail: `sv-timing correct exit ${res.code} (svt/correct.log)` }, targetMhz };
+  }
+  if (!existsSync(emitFlist)) {
+    // Nothing to rewrite at this budget (or every candidate was refused): the
+    // live RTL is the corrected RTL. Report it rather than failing.
+    return { stage: { id: "s0-svt-correct", status: "pass", detail: `${budgetNote}: no emitted rewrites; live RTL` }, targetMhz };
+  }
+  const replaced = readFileSync(emitFlist, "utf8").split(/\r?\n/).filter((l) => /__svt\.(sv|v|svh)$/i.test(l.trim())).length;
+  return {
+    stage: { id: "s0-svt-correct", status: "pass", detail: `${budgetNote}: ${replaced} corrected file(s) → ${posixPath(emitFlist)}` },
+    emitFlist: posixPath(emitFlist),
+    targetMhz,
+  };
+}
+
 async function toolPath(tool: StaTool, p: string): Promise<string> {
   return tool.viaWsl ? windowsPathToWsl(p) : posixPath(p);
 }
@@ -196,16 +421,24 @@ async function runLocal(
   opts: RtlTimingOptions,
   top: string,
   liberty: string,
+  lefs: string[],
   outDir: string,
+  pre: SvtPrepass,
 ): Promise<RtlTimingResult> {
-  const stages: RtlTimingResult["stages"] = [];
+  const stages: RtlTimingResult["stages"] = [pre.stage];
   const paths = edaPaths(ctx);
   const netlist = join(outDir, "netlist.v");
   const sdc = join(outDir, "clock.sdc");
   writeFileSync(sdc, buildClockSdc({ clockPort: opts.clockPort, targetMhz: opts.targetMhz, top }), "utf8");
 
-  const manifest = writeFlatManifest(ctx, paths, opts.target, { outSubdir: "sta-rtl", outTag: opts.target });
-  const result: RtlTimingResult = { ok: false, outDir: posixPath(outDir), target: opts.target, top, liberty: posixPath(liberty), stages };
+  const manifest = writeFlatManifest(ctx, paths, opts.target, {
+    outSubdir: "sta-rtl", outTag: opts.target, emitFlist: pre.emitFlist,
+  });
+  const result: RtlTimingResult = {
+    ok: false, outDir: posixPath(outDir), target: opts.target, top, liberty: posixPath(liberty), stages,
+    emitFlist: pre.emitFlist, fo4Budget: opts.fo4Budget, svtTargetMhz: pre.targetMhz,
+  };
+  if (pre.stage.status === "fail") return result;
 
   if (!existsSync(paths.yosys)) {
     stages.push({ id: "s1-yosys-map", status: "skip", detail: "yosys missing: tools install formal" });
@@ -226,6 +459,7 @@ async function runLocal(
     netlist: await p(netlist),
     defines: ctx.config.verify.synthDefines,
     slangArgs: ctx.config.verify.synthSlangArgsByTarget[opts.target] ?? [],
+    recipe: opts.mapRecipe,
   });
   const synthLog = join(outDir, "synth.log");
   let synth;
@@ -254,7 +488,16 @@ async function runLocal(
   const threads = staThreadCount(ctx);
   const tcl = join(ctx.repoRoot, "build-platform", "scripts", "openroad-timing.tcl");
   const reportDir = join(outDir, "reports");
+  // openroad's link_design needs the technology; sta links from the liberty.
+  const lefsPresent = lefs.filter((l) => existsSync(l));
+  if (staTool.kind === "openroad" && lefsPresent.length === 0) {
+    stages.push({ id: "s2-openroad-sta", status: "fail", detail: `the openroad binary needs LEF to link (ORD-2010): use --platform nangate45|sky130hd|sky130hs, or install the fork's sta (tools install openroad --force)` });
+    return result;
+  }
+  const lefsForTool: string[] = [];
+  for (const l of lefsPresent) lefsForTool.push(await p(l));
   const envPairs = [
+    ...(staTool.kind === "openroad" ? [`OR_LEF=${JSON.stringify(lefsForTool.join(" "))}`] : []),
     `OR_LIBERTY=${JSON.stringify(await p(liberty))}`,
     `OR_VERILOG=${JSON.stringify(await p(netlist))}`,
     `OR_SDC=${JSON.stringify(await p(sdc))}`,
@@ -304,12 +547,32 @@ async function runRemote(
   top: string,
   libertyLocal: string,
   libertyForkRel: string | undefined,
+  lefForkRels: string[],
   outDir: string,
+  pre: SvtPrepass,
 ): Promise<RtlTimingResult> {
-  const stages: RtlTimingResult["stages"] = [];
-  const result: RtlTimingResult = { ok: false, outDir: posixPath(outDir), target: opts.target, top, liberty: posixPath(libertyLocal), stages };
+  const stages: RtlTimingResult["stages"] = [pre.stage];
+  const result: RtlTimingResult = {
+    ok: false, outDir: posixPath(outDir), target: opts.target, top, liberty: posixPath(libertyLocal), stages,
+    emitFlist: pre.emitFlist, fo4Budget: opts.fo4Budget, svtTargetMhz: pre.targetMhz,
+  };
+  if (pre.stage.status === "fail") return result;
   const paths = edaPaths(ctx);
-  const manifest = writeFlatManifest(ctx, paths, opts.target, { outSubdir: "sta-rtl", outTag: opts.target });
+  // The corrected emit must reach the builder: `sync` ships
+  // build-platform/workspace/build/sta-rtl/ (testharness_proxy.py
+  // SYNC_INCLUDE), so an emit under this out-dir rewrites to the remote
+  // checkout like any repo file; one elsewhere cannot be used remotely.
+  if (pre.emitFlist && !posixPath(pre.emitFlist).toLowerCase().startsWith(posixPath(join(ctx.paths.build, "sta-rtl")).toLowerCase())) {
+    stages.push({
+      id: "s0-manifest",
+      status: "fail",
+      detail: `remote route needs the emit under ${posixPath(join(ctx.paths.build, "sta-rtl"))} (synced); got ${pre.emitFlist} — drop --from-timing and let --fo4 run the pre-pass here`,
+    });
+    return result;
+  }
+  const manifest = writeFlatManifest(ctx, paths, opts.target, {
+    outSubdir: "sta-rtl", outTag: opts.target, emitFlist: pre.emitFlist,
+  });
   let flist: string;
   try {
     flist = toRemotePaths(readFileSync(manifest.path, "utf8"), ctx.repoRoot).replace(/\r/g, "");
@@ -325,6 +588,7 @@ async function runRemote(
   const libRemote = libertyForkRel
     ? `${REMOTE_OPENROAD_SRC}/${libertyForkRel}`
     : toRemotePaths(posixPath(libertyLocal), ctx.repoRoot);
+  const lefRemote = lefForkRels.map((r) => `${REMOTE_OPENROAD_SRC}/${r}`).join(" ");
   const or = ctx.config.toolchain.openroad;
   const threads = or.threads > 0 ? String(or.threads) : "$(nproc)";
   const pin = gitlink(ctx, "tools/openroad") ?? "";
@@ -335,6 +599,7 @@ async function runRemote(
     netlist: "$RUN/netlist.v",
     defines: ctx.config.verify.synthDefines,
     slangArgs: ctx.config.verify.synthSlangArgsByTarget[opts.target] ?? [],
+    recipe: opts.mapRecipe,
   });
 
   const lines = [
@@ -359,6 +624,10 @@ async function runRemote(
     '  if [ "$rc" != 0 ]; then echo "RESULT_TOOLCHAIN fail openroad"; exit 3; fi',
     "fi",
     '[ -f "$OR/openroad-env.sh" ] && . "$OR/openroad-env.sh"',
+    // The fork's sta links from the liberty alone; openroad needs the LEF.
+    'STA="$OR/bin/sta"; STA_ARGS="-exit"; if [ ! -x "$STA" ]; then STA="$OR/bin/openroad"; STA_ARGS="-no_init -exit"; fi',
+    `LEF=${JSON.stringify(lefRemote)}`,
+    'if [ "$STA" = "$OR/bin/openroad" ] && [ -z "$LEF" ]; then echo "RESULT_TOOLCHAIN fail lef"; exit 3; fi',
     `cat > "$RUN/${opts.target}.f" <<'G6LC_FLIST_EOF'`,
     flist,
     "G6LC_FLIST_EOF",
@@ -371,8 +640,8 @@ async function runRemote(
     'rc=$?; echo "SYNTH rc=$rc"; grep -E "SYNTH_MEASURE|Number of cells|Chip area" "$RUN/synth.log" | tail -4',
     'if [ "$rc" != 0 ] || [ ! -s "$RUN/netlist.v" ]; then echo "RESULT fail synth"; echo LOGSTART; tail -40 "$RUN/synth.log"; echo LOGEND; exit 1; fi',
     `echo "STA start $(date -u +%FT%TZ) threads=${threads}"`,
-    `OR_LIBERTY="$LIB" OR_VERILOG="$RUN/netlist.v" OR_SDC="$RUN/clock.sdc" OR_TOP=${JSON.stringify(top)} OR_THREADS=${threads} OR_REPORT_DIR="$RUN/reports" \\`,
-    '  /usr/bin/time -f "STA_MEASURE maxrss_kb=%M elapsed_s=%e" "$OR/bin/openroad" -no_init -exit "$REPO/build-platform/scripts/openroad-timing.tcl" > "$RUN/sta.log" 2>&1',
+    `OR_LEF="$LEF" OR_LIBERTY="$LIB" OR_VERILOG="$RUN/netlist.v" OR_SDC="$RUN/clock.sdc" OR_TOP=${JSON.stringify(top)} OR_THREADS=${threads} OR_REPORT_DIR="$RUN/reports" \\`,
+    '  /usr/bin/time -f "STA_MEASURE maxrss_kb=%M elapsed_s=%e" "$STA" $STA_ARGS "$REPO/build-platform/scripts/openroad-timing.tcl" > "$RUN/sta.log" 2>&1',
     'rc=$?; echo "STA rc=$rc"; grep -E "STA_RESULT|STA_MEASURE" "$RUN/sta.log"',
     'echo LOGSTART; tail -80 "$RUN/sta.log"; echo LOGEND',
     'echo "RESULT $rc"',
@@ -396,6 +665,10 @@ async function runRemote(
   }
   if (/RESULT_TOOLCHAIN fail liberty/.test(res.text)) {
     stages.push({ id: "s0-liberty", status: "fail", detail: `liberty not on the builder: ${libRemote}` });
+    return result;
+  }
+  if (/RESULT_TOOLCHAIN fail lef/.test(res.text)) {
+    stages.push({ id: "s2-openroad-sta", status: "fail", detail: "builder has only the openroad binary and no platform LEF: use --platform, or rebuild the fork prefix (--rebuild-openroad) to get sta" });
     return result;
   }
   if (/RESULT_TOOLCHAIN fail openroad/.test(res.text)) {
@@ -458,14 +731,17 @@ export async function runRtlTiming(ctx: PlatformContext, opts: RtlTimingOptions)
       stages: [{ id: "s0-liberty", status: "fail", detail: "no liberty: --liberty, physicalDesign.pdk.liberty, CVA6_LIBERTY, or --platform nangate45|sky130hd|sky130hs|asap7" }],
     };
   }
-  if (opts.remote) return runRemote(ctx, opts, top, lib.path, lib.forkRel, outDir);
-  if (!existsSync(lib.path)) {
+  if (!opts.remote && !existsSync(lib.path)) {
     return {
       ok: false, outDir: posixPath(outDir), target: opts.target, top, liberty: posixPath(lib.path),
       stages: [{ id: "s0-liberty", status: "fail", detail: `${lib.path} missing (populate tools/openroad: git submodule update --init tools/openroad, or run --remote)` }],
     };
   }
-  return runLocal(ctx, opts, top, lib.path, outDir);
+  // sv-timing runs here on both routes: the package is a host tool and the
+  // emit is synced to the builder with the rest of the workspace sta-rtl tree.
+  const pre = await runSvtPrepass(ctx, opts, outDir);
+  if (opts.remote) return runRemote(ctx, opts, top, lib.path, lib.forkRel, lib.lefForkRels, outDir, pre);
+  return runLocal(ctx, opts, top, lib.path, lib.lefs, outDir, pre);
 }
 
 /** Host core count, for the help text and dry-run lines. */

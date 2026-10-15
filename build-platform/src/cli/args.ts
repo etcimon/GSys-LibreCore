@@ -79,6 +79,12 @@ const VALUE_FLAGS = new Set([
   "platform",
   "clock-port",
   "threads",
+  // sv-timing structural budget (timings compile|correct|area|sta-rtl)
+  "budget-fo4",
+  "fo4",
+  "opt-level",
+  "svt-args",
+  "map-recipe",
   // tensor multi-phase / board path / narrow HARD surface (diag-like)
   "impl",
   "backend",
@@ -123,6 +129,16 @@ const SHORT_ALIASES: Record<string, string> = {
   o: "output",
 };
 
+/**
+ * Whether the token after a value flag is its value. A token starting with
+ * `-` is normally the next flag — except a quoted pass-through string such as
+ * `--svt-args "--opt-max-stages-per-region 13 --real-cut-feeds"`, which no
+ * flag name can be (flag names carry no whitespace).
+ */
+function takesValue(next: string): boolean {
+  return !next.startsWith("-") || /\s/.test(next);
+}
+
 export function parseArgs(argv: string[]): ParsedArgs {
   const positionals: string[] = [];
   const flags: Record<string, FlagValue> = {};
@@ -145,7 +161,7 @@ export function parseArgs(argv: string[]): ParsedArgs {
       const eq = body.indexOf("=");
       if (eq >= 0) {
         flags[body.slice(0, eq)] = body.slice(eq + 1);
-      } else if (VALUE_FLAGS.has(body) && i + 1 < argv.length && !argv[i + 1]!.startsWith("-")) {
+      } else if (VALUE_FLAGS.has(body) && i + 1 < argv.length && takesValue(argv[i + 1]!)) {
         flags[body] = argv[++i]!;
       } else {
         flags[body] = true;

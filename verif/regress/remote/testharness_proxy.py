@@ -116,6 +116,11 @@ SYNC_INCLUDE = [
     # frontend, plus SymbiYosys) on the builder, so `verify --formal
     # --formal-remote` can put the solver work on the machine with the cores.
     "build-platform/scripts/",
+    # `timings sta-rtl --remote --fo4 N`: the sv-timing corrected emit the
+    # builder synthesizes instead of the live RTL lives under this workspace
+    # tree (gitignored, but part of the sync; the rest of workspace/build is
+    # excluded below).
+    "build-platform/workspace/build/sta-rtl/",
     "software/smt2-linux/scripts/build-opensbi-smt2.sh",
     "software/smt2-linux/soft-ladder/mk_plat_skip.py",
     "software/smt2-linux/soft-ladder/rebuild_held_from_pin.sh",
@@ -140,6 +145,7 @@ SYNC_EXCLUDE = [
     "*.log",
     "__pycache__/",
     "*.elf",
+    "*.sqlite",
     "build-platform/workspace/build/",
     "docs/",
     "specs/",
