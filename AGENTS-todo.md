@@ -1716,7 +1716,33 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `zstd` copy of the trace is kept for `--watch`/`--stop-retire` replays) —
   `linux-boot-l3orc-ooocoh-t36-ooo-canon-pgo-build/oracle.log`, ≈ 5 h to
   the oops. The first `src=stored` mismatch names the load and the window
-  for the FST. Housekeeping found on the way: three sim-only per-commit
+  for the FST. **Oracle result (the whole L3 run, 487 M retirements, 79.8 M
+  loads / 53.0 M stores checked): 3 stored-byte mismatches**, all values
+  "from nowhere": #24 retire 163,079,975 `c.ld a5,0(s1)` (work->data,
+  PA `0x8fc6afc0`) got `0x100000`, expected `0x800` — the last writers
+  were AMOs 94 k retirements earlier, no store of `0x100000` anywhere in
+  the preceding 500 k lines; #25 retire 399,896,097 `lw` of a blake2s
+  state word on the VMAP stack got `0x0`, expected `0x5be0cd19`
+  (BLAKE2s IV[7]); #26 retire 399,898,511 `lw` got `0x40`, expected `0x0`.
+  **The cycle anchor** (`+smt_mem_watch=8fc6afc0` on the same model, run
+  `linux-boot-l3watch-…`): the stale `c.ld` looked the STQ up at cycles
+  201,581,843/854 with `st_fwd_valid=0`, **no store at that PA** was
+  offered, committed or drained between 199 M and 202 M, and **no wbuffer
+  word write** landed in line index 0xfc with `0x100000` in 201.0–201.6 M
+  — the value came neither from forwarding, nor from a store, nor from the
+  wbuffer. **That is the T35 mechanism's other face:** a store cancelled
+  while waiting for its translation is pushed late AND writes back
+  (`valid_o`, `result_o = lsu_ctrl_i.data` — the *store's data*) under its
+  old tid; when that tid has been re-allocated to a LOAD still waiting for
+  its data, the scoreboard (`wt_valid_i && mem_q[tid].issued`) completes
+  the load with the dead store's data. `0x100000`, `0x0`, `0x40` are store
+  operands, not memory contents. Same class, same fix (T35 / t38); the
+  L1 run with the fixed initrd hit the assertion form of it at cycle
+  460,435,800 on the ooo. FST window 201.40–201.58 M on
+  `ooocoh-t37-ooo-fst-build` (`prof-t37fst`, in flight) to show the stray
+  `valid_o` into the load's tid; verdict run `l3orc2` on the t38 ooo with
+  the live oracle (must pass 701 M cycles with 0 stored mismatches).
+  Housekeeping found on the way: three sim-only per-commit
   trace files were written unconditionally on every run (`trace_hart_0.dasm`
   33 GB, `iti.traces` 15.5 GB, `encaps.traces` per 760 M cycles — 190 GB
   across the T33/T36 run dirs); gated behind `+core_notrace` (cva6.sv mock
@@ -1785,13 +1811,26 @@ prerequisite for this work under the existing dual license. No licensing policy 
   review mutation `G6LC_MUT_STQ_NO_STICKY_CANCEL` (pre-fix: mask at push
   time only) fails `STQ_CANCELLED_NOT_PUSHED` with `pushes=1 (tid 3) wbs=1
   (tid 3)`. Lint clean (`g6lc64_ooo`, `g6lc64_ooo_server1`). Builds
-  `ooocoh-t38-server1-pgo-build` / `ooocoh-t38-ooo-pgo-build` (ovl-t38);
-  the verification is the server1 L1 past 76,935,847 and the frozen
-  battery on the ooo. The earlier flush-pointer finding stands as a
-  hardening (its leaf `run-stq-flush-ptr.sh`, the `spec_ptr_consistent`
-  invariant): the window shows it was not the trigger here, and
-  `ooocoh-t37-server1-pgo-build` (`l1s1h`, pointer fix only) is left
-  running as the negative control — it should stop at the identical cycle.
+  `ooocoh-t38-server1-pgo-build` / `ooocoh-t38-ooo-pgo-build` (ovl-t38).
+  **Verification so far:** the negative control held — `l1s1h`
+  (`ooocoh-t37-server1-pgo-build`, pointer fix only) stopped at the
+  **identical cycle 76,935,847**; and the same assertion then fired on the
+  **single-hart ooo**: L1 with the fixed initrd
+  (`linux-boot-l1fix-ooocoh-t36-ooo-canon-pgo-build`) ran through `Run
+  /init` (7.498 s) and stopped at cycle **460,435,800** with
+  `ooo_spec_entry_live` entry 0 tid 4 — the mechanism is not SMT-specific,
+  the SMT switch only made the first instance land on a free slot instead
+  of a re-allocated one. On `ooocoh-t38-ooo-pgo-build` the frozen battery
+  is Spike-exact and qualified (s11 **10,953** cycles — 12 fewer than the
+  T36 model's 10,965: a cancelled store now releases the translation port
+  the cycle its cancel is visible; m04/m20/m32–m37, ilp 665, dep 616) and
+  stages 38 (55/55), 46 (74 vs 73, the known window artefact), 47
+  (101/101), 48 (82/82), 49 (53/53), 52 (115/115) pass. In flight:
+  `l1s1i` (server1 L1, must pass 76,935,847), `l1fix2` (ooo L1, shell
+  marker), `l3orc2` (ooo L3 with the live oracle — T37's verdict). The
+  earlier flush-pointer finding stands as a hardening (its leaf
+  `run-stq-flush-ptr.sh`, the `spec_ptr_consistent` invariant): the window
+  shows it was not the trigger here.
   Still owed from the source reading: the forced drain's latched restart
   PC (`head_pc_i` at the decision cycle) can name an instruction that
   commits in the same cycle on the absolute leg (`drain_forced_d` drops the
