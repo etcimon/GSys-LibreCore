@@ -1314,8 +1314,27 @@ impl ExprStagePlan {
     /// Named blocks are unique per plan (derived from `top_wire` / first stage wire) so
     /// multi-arm BalanceMux snippets in one module do not collide under Verilator.
     pub fn to_sv_fragment(&self, top_wire: Option<&str>, data_width: u32) -> String {
+        self.to_sv_fragment_typed(top_wire, data_width, None)
+    }
+
+    /// [`Self::to_sv_fragment`] with the top wire typed after the assignment it
+    /// replaces: `var type(<lhs>) top;` and `top = type(<lhs>)'(<expr>);`.
+    ///
+    /// The staging wires hold sub-expressions in the assignment's context width
+    /// and stay `logic [w-1:0]`; only the value that flows back into the origin
+    /// LHS must carry the LHS type — an enum (`instruction_o.fu`, `imm_select`)
+    /// or a packed struct has no implicit conversion from a vector, and the
+    /// origin line becomes `lhs = top` verbatim. `lhs_type_of` is the LHS text;
+    /// it must be visible at module scope (the caller checks block-local names).
+    pub fn to_sv_fragment_typed(
+        &self,
+        top_wire: Option<&str>,
+        data_width: u32,
+        lhs_type_of: Option<&str>,
+    ) -> String {
         // Never emit [0-1:0] / [1-1:0] — default to 64 when width unknown.
         let w = if data_width < 2 { 64 } else { data_width };
+        let lhs_ty = lhs_type_of.map(str::trim).filter(|t| !t.is_empty());
         // Unique begin label: prefer top wire, else first staged wire.
         let block = top_wire
             .map(|t| format!("{t}_stage"))
@@ -1328,7 +1347,10 @@ impl ExprStagePlan {
         }
         if let Some(tw) = top_wire {
             if !self.wires.iter().any(|(n, _)| n == tw) {
-                b.push_str(&format!("  logic [{w}-1:0] {tw};\n"));
+                match lhs_ty {
+                    Some(ty) => b.push_str(&format!("  var type({ty}) {tw};\n")),
+                    None => b.push_str(&format!("  logic [{w}-1:0] {tw};\n")),
+                }
             }
         }
         b.push_str(&format!("  always_comb begin : {block}\n"));
@@ -1336,7 +1358,10 @@ impl ExprStagePlan {
             b.push_str(&format!("    {name} = {rhs};\n"));
         }
         if let Some(tw) = top_wire {
-            b.push_str(&format!("    {tw} = {};\n", self.top_emit));
+            match lhs_ty {
+                Some(ty) => b.push_str(&format!("    {tw} = type({ty})'({});\n", self.top_emit)),
+                None => b.push_str(&format!("    {tw} = {};\n", self.top_emit)),
+            }
         }
         b.push_str("  end\n");
         b
@@ -3345,6 +3370,29 @@ mod tests {
         );
         assert!(mul.has_atomic_over_budget(&base, 32.0));
         assert!(!Expr::parse("a + b").has_atomic_over_budget(&base, 32.0));
+    }
+
+    #[test]
+    fn typed_stage_fragment_declares_top_as_lhs_type_and_casts() {
+        // decoder shape: the staged select feeds an enum LHS (`instruction_o.fu`);
+        // the top wire takes the LHS type and the expression is cast into it.
+        let e = Expr::parse("(a << b) | (a >> c)");
+        let plan = e.stage_for_balance_mux("svt_bm_").expect("stage");
+        let frag = plan.to_sv_fragment_typed(Some("svt_bm_top"), 64, Some("instruction_o.fu"));
+        assert!(
+            frag.contains("var type(instruction_o.fu) svt_bm_top;"),
+            "{frag}"
+        );
+        assert!(
+            frag.contains("svt_bm_top = type(instruction_o.fu)'("),
+            "{frag}"
+        );
+        // Staging wires keep the context width.
+        assert!(frag.contains("logic [64-1:0] svt_bm_0;"), "{frag}");
+        // Without an LHS the legacy vector declaration stays.
+        let plain = plan.to_sv_fragment(Some("svt_bm_top"), 64);
+        assert!(plain.contains("logic [64-1:0] svt_bm_top;"), "{plain}");
+        assert!(!plain.contains("type("), "{plain}");
     }
 
     #[test]

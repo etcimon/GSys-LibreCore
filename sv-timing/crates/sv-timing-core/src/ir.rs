@@ -495,6 +495,11 @@ pub struct DeclSite {
     pub unpacked_text: String,
     /// Source locus.
     pub loc: SourceLoc,
+    /// Declared inside a `begin … end` block, a function/task body, a generate
+    /// block, or as a `for` loop variable — not visible at module scope, so an
+    /// emitted module-level wire or `type()` operand may not name it.
+    #[serde(default)]
+    pub block_local: bool,
 }
 
 /// ANSI/non-ANSI port summary for typed / parameterized ports.
@@ -656,6 +661,70 @@ impl TimingModule {
             })
             .map(|g| g.genvar.clone())
             .collect()
+    }
+
+    /// Names that are **not** visible at module scope: block-local declarations
+    /// (`DeclSite::block_local`) and every generate / procedural `for` loop
+    /// variable. An emitted module-level wire, a hoisted `always_comb`, or a
+    /// `type(<expr>)` operand that names one of these does not elaborate.
+    pub fn block_local_names(&self) -> std::collections::BTreeSet<String> {
+        let mut out: std::collections::BTreeSet<String> = self
+            .decls
+            .iter()
+            .filter(|d| d.block_local)
+            .map(|d| d.name.clone())
+            .collect();
+        for g in &self.gen_loops {
+            if !g.genvar.is_empty() {
+                out.insert(g.genvar.clone());
+            }
+        }
+        out
+    }
+
+    /// Root identifier of an expression leaf: `a.b[3]` → `a`; `pkg::X` stays
+    /// package-scoped (always visible) and yields `None`.
+    pub fn root_ident(name: &str) -> Option<&str> {
+        if name.contains("::") {
+            return None;
+        }
+        let root = name
+            .split(['.', '['])
+            .next()
+            .unwrap_or(name)
+            .trim();
+        (!root.is_empty()).then_some(root)
+    }
+
+    /// True when `text` (an expression or an LHS) references a name that is not
+    /// visible at module scope, so it cannot be hoisted into a module-level
+    /// snippet. Unknown names are allowed: enum labels and parameters imported
+    /// from packages are not declared in the module.
+    pub fn text_refs_block_local(
+        &self,
+        text: &str,
+        block_local: &std::collections::BTreeSet<String>,
+    ) -> bool {
+        if block_local.is_empty() {
+            return false;
+        }
+        let expr = crate::expr::Expr::parse(text);
+        let mut hit = false;
+        expr.walk_idents(&mut |name| {
+            if let Some(root) = Self::root_ident(name) {
+                if block_local.contains(root) {
+                    hit = true;
+                }
+            }
+        });
+        if hit {
+            return true;
+        }
+        // The expression parser folds what it cannot read into opaque leaves;
+        // scan the raw text too so a block-local name never slips through.
+        text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+            .filter(|t| !t.is_empty())
+            .any(|tok| block_local.contains(tok))
     }
 }
 

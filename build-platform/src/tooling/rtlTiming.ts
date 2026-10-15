@@ -24,7 +24,7 @@
 // platform matching soc.process (nangate45 / sky130hd / sky130hs / asap7).
 // Numbers from a study library rank paths; they are not sign-off.
 
-import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
 import type { PlatformContext } from "../context.ts";
@@ -288,6 +288,8 @@ interface SvtPrepass {
   /** `svt_corrected.f` to overlay on the manifest, when the pass emitted. */
   emitFlist?: string;
   targetMhz?: number;
+  /** Effective budget (flag, else physicalDesign.structural). */
+  budget?: number;
 }
 
 /**
@@ -302,8 +304,9 @@ async function runSvtPrepass(
   opts: RtlTimingOptions,
   outDir: string,
 ): Promise<SvtPrepass> {
-  const fo4Ps = opts.fo4Ps ?? 20;
-  const margin = opts.budgetMargin ?? 0.2;
+  const cfgEarly = ctx.config.physicalDesign?.structural;
+  const fo4Ps = opts.fo4Ps ?? cfgEarly?.fo4Ps ?? 20;
+  const margin = opts.budgetMargin ?? cfgEarly?.budgetMargin ?? 0.2;
   if (opts.fromTiming) {
     const v = validateTimingsOutDir(ctx, { fromTiming: opts.fromTiming, requireEmit: true });
     if (!v.ok || !v.correctedFlist) {
@@ -320,13 +323,14 @@ async function runSvtPrepass(
       emitFlist: v.correctedFlist,
     };
   }
-  const budget = opts.fo4Budget;
-  if (budget === undefined) {
-    return { stage: { id: "s0-svt-correct", status: "skip", detail: "no --fo4 budget; live RTL" } };
+  const cfg = ctx.config.physicalDesign?.structural;
+  const budget = opts.fo4Budget ?? cfg?.fo4Budget ?? 0;
+  if (!(budget > 0)) {
+    return { stage: { id: "s0-svt-correct", status: "skip", detail: "--fo4 0: no sv-timing pass; live RTL" } };
   }
   const targetMhz = targetMhzForFo4Budget(budget, fo4Ps, margin);
   if (!Number.isFinite(targetMhz)) {
-    return { stage: { id: "s0-svt-correct", status: "fail", detail: `bad budget ${budget} FO4 (fo4_ps ${fo4Ps}, margin ${margin})` } };
+    return { stage: { id: "s0-svt-correct", status: "fail", detail: `bad budget ${budget} FO4 (fo4_ps ${fo4Ps}, margin ${margin})` }, budget };
   }
   const svtDir = join(outDir, "svt");
   mkdirSync(svtDir, { recursive: true });
@@ -345,6 +349,9 @@ async function runSvtPrepass(
     xlen: ctx.config.soc.xlen as number | undefined,
   });
   const correctedDir = posixPath(join(svtDir, "corrected"));
+  // The emitter only writes files it touched; a stale emit from an earlier
+  // run with other options would otherwise survive.
+  rmSync(correctedDir, { recursive: true, force: true });
   // Defaults that make the budget reachable: -O3 (multi-cut, budget-fit) and
   // enough stages per region for the deepest cone the core shows (~100 FO4)
   // at this budget. The structural emit options stay opt-in through
@@ -355,7 +362,8 @@ async function runSvtPrepass(
   // the tree does not elaborate (sv-timing/AGENTS-todo.md 2026-10-15). Without
   // them the emit is the annotated live RTL. Every default is overridable
   // there (appended last).
-  const extra = opts.svtExtraArgs ?? [];
+  // physicalDesign.structural.svtArgs first, the command line's --svt-args after.
+  const extra = [...(cfg?.svtArgs ?? []), ...(opts.svtExtraArgs ?? [])];
   const has = (flag: string) => extra.includes(flag);
   const defaults: string[] = [];
   if (!has("--opt-max-stages-per-region")) {
@@ -367,7 +375,7 @@ async function runSvtPrepass(
     targetMhz,
     fo4Ps,
     budgetMargin: margin,
-    optLevel: opts.svtOptLevel ?? "3",
+    optLevel: opts.svtOptLevel ?? cfg?.optLevel ?? "3",
     allowLatency: true,
     emit: true,
     outDir: correctedDir,
@@ -386,7 +394,7 @@ async function runSvtPrepass(
   ctx.logger.info(`sta-rtl: sv-timing correct --all-modules --emit at ${budgetNote}`);
   ctx.logger.info(`+ ${cmd.argv.join(" ")}`);
   if (ctx.dryRun) {
-    return { stage: { id: "s0-svt-correct", status: "skip", detail: `dry-run ${budgetNote}` }, targetMhz };
+    return { stage: { id: "s0-svt-correct", status: "skip", detail: `dry-run ${budgetNote}` }, targetMhz, budget };
   }
   const res = await run(cmd.argv[0]!, cmd.argv.slice(1), {
     cwd: cmd.cwd,
@@ -398,18 +406,19 @@ async function runSvtPrepass(
   writeFileSync(join(svtDir, "correct.log"), `exit=${res.code}\n${res.stdout}\n${res.stderr}\n`, "utf8");
   const emitFlist = join(correctedDir, "svt_corrected.f");
   if (!res.ok) {
-    return { stage: { id: "s0-svt-correct", status: "fail", detail: `sv-timing correct exit ${res.code} (svt/correct.log)` }, targetMhz };
+    return { stage: { id: "s0-svt-correct", status: "fail", detail: `sv-timing correct exit ${res.code} (svt/correct.log)` }, targetMhz, budget };
   }
   if (!existsSync(emitFlist)) {
     // Nothing to rewrite at this budget (or every candidate was refused): the
     // live RTL is the corrected RTL. Report it rather than failing.
-    return { stage: { id: "s0-svt-correct", status: "pass", detail: `${budgetNote}: no emitted rewrites; live RTL` }, targetMhz };
+    return { stage: { id: "s0-svt-correct", status: "pass", detail: `${budgetNote}: no emitted rewrites; live RTL` }, targetMhz, budget };
   }
   const replaced = readFileSync(emitFlist, "utf8").split(/\r?\n/).filter((l) => /__svt\.(sv|v|svh)$/i.test(l.trim())).length;
   return {
     stage: { id: "s0-svt-correct", status: "pass", detail: `${budgetNote}: ${replaced} corrected file(s) → ${posixPath(emitFlist)}` },
     emitFlist: posixPath(emitFlist),
     targetMhz,
+    budget,
   };
 }
 
@@ -438,7 +447,7 @@ async function runLocal(
   });
   const result: RtlTimingResult = {
     ok: false, outDir: posixPath(outDir), target: opts.target, top, liberty: posixPath(liberty), stages,
-    emitFlist: pre.emitFlist, fo4Budget: opts.fo4Budget, svtTargetMhz: pre.targetMhz,
+    emitFlist: pre.emitFlist, fo4Budget: pre.budget, svtTargetMhz: pre.targetMhz,
   };
   if (pre.stage.status === "fail") return result;
 
@@ -556,7 +565,7 @@ async function runRemote(
   const stages: RtlTimingResult["stages"] = [pre.stage];
   const result: RtlTimingResult = {
     ok: false, outDir: posixPath(outDir), target: opts.target, top, liberty: posixPath(libertyLocal), stages,
-    emitFlist: pre.emitFlist, fo4Budget: opts.fo4Budget, svtTargetMhz: pre.targetMhz,
+    emitFlist: pre.emitFlist, fo4Budget: pre.budget, svtTargetMhz: pre.targetMhz,
   };
   if (pre.stage.status === "fail") return result;
   const paths = edaPaths(ctx);

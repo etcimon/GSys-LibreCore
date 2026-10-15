@@ -187,12 +187,16 @@ config, `nproc` jobs; `--rebuild-openroad` forces it) and reporting
 pass before synthesis: `timings correct --all-modules --allow-latency --emit` on the target's
 flist at the budget — turned into the clock sv-timing derives it from
 (`targetMhzForFo4Budget`: 10 FO4 = 4000 MHz at `fo4_ps` 20, margin 0.2; `fo4_ps` is a process
-input, quote it with every number) — with `-O3`, `--opt-max-stages-per-region ⌈128/N⌉`
-(8…16) and the real-feed emit (`--real-cut-feeds --emit-balance-mux-rtl`; the lean sidecar
-feeds inserted registers with zero, which yosys would sweep away), then synthesizes the
-corrected tree (`writeFlatManifest` emit overlay; `--from-timing <pkg>` reuses an existing
-emit; `--svt-args "..."` appends raw dials). The emit under
-`build-platform/workspace/build/sta-rtl/` is part of the proxy `sync`, so `--remote` sees it.
+input, quote it with every number) — with `-O3` and `--opt-max-stages-per-region ⌈128/N⌉`
+(8…16), then synthesizes the emitted tree (`writeFlatManifest` emit overlay; `--from-timing
+<pkg>` reuses an existing emit; `--svt-args "..."` appends raw dials; `--map-recipe lean|synth`
+picks the yosys lowering — `lean` skips the `opt_merge`/`check` passes that ran past an hour
+on the whole core). The structural emit options stay opt-in (`--svt-args "--real-cut-feeds
+--emit-balance-mux-rtl"`): on `g6lc64_ooo` the BalanceMux RHS rewrite they produce hoists
+block-local names and declares XLEN-wide staging wires for enum/struct LHS, so the tree does
+not elaborate (two package defects, `sv-timing/AGENTS-todo.md` 2026-10-15); without them the
+emit is the annotated live RTL. The emit under `build-platform/workspace/build/sta-rtl/` is
+part of the proxy `sync`, so `--remote` sees it.
 The same knob is on `timings compile|correct|area` (`--budget-fo4`, `--fo4-ps`,
 `--budget-margin`, `--opt-level`, `--svt-args`), which now forward `--fo4-ps`/`--budget-margin`
 on `correct` and no longer pass `--cache` to it (analyze-only in the CLI; `correct` exited 2

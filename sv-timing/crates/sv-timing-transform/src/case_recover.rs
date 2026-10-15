@@ -219,7 +219,10 @@ pub fn recover_exclusive_case(
         return None;
     }
     // Prefer arms that have labels for one-hot
-    let labeled = arms.iter().filter(|a| !a.labels.is_empty() && !a.is_default).count();
+    let labeled = arms
+        .iter()
+        .filter(|a| !a.labels.is_empty() && !a.is_default)
+        .count();
     if labeled < 3 {
         return None;
     }
@@ -325,7 +328,11 @@ pub fn emit_onehot_or_tree(
     path_id: u32,
     data_width: u32,
 ) -> Option<String> {
-    let w = if data_width < 2 { 64 } else { data_width.min(128) };
+    let w = if data_width < 2 {
+        64
+    } else {
+        data_width.min(128)
+    };
     let mut labeled: Vec<&RecoveredCaseArm> = recovered
         .arms
         .iter()
@@ -362,9 +369,7 @@ pub fn emit_onehot_or_tree(
         sel,
         usable.len()
     ));
-    b.push_str(
-        "  // Parallel arm eval + balanced OR reduction (unique-case / one-hot style).\n",
-    );
+    b.push_str("  // Parallel arm eval + balanced OR reduction (unique-case / one-hot style).\n");
 
     // Arm wires
     for (i, _) in usable.iter().enumerate() {
@@ -375,7 +380,11 @@ pub fn emit_onehot_or_tree(
     let mut level_count = usable.len();
     let mut or_names: Vec<Vec<String>> = Vec::new();
     // level 0 = arms
-    or_names.push((0..usable.len()).map(|i| format!("{prefix}_a{i}")).collect());
+    or_names.push(
+        (0..usable.len())
+            .map(|i| format!("{prefix}_a{i}"))
+            .collect(),
+    );
     let mut lvl = 0usize;
     while level_count > 1 {
         lvl += 1;
@@ -395,16 +404,23 @@ pub fn emit_onehot_or_tree(
         .and_then(|v| v.first())
         .cloned()
         .unwrap_or_else(|| format!("{prefix}_a0"));
-    b.push_str(&format!("  logic [{w}-1:0] {prefix}_top;\n"));
+    // `_top` flows back into every arm's origin line (`lhs = _top`), so it
+    // carries the LHS type: an enum or packed-struct LHS has no implicit
+    // conversion from the `logic [w-1:0]` OR tree.
+    let lhs_ty = recovered.lhs.trim();
+    let typed = !lhs_ty.is_empty() && !lhs_ty.contains('=');
+    if typed {
+        b.push_str(&format!("  var type({lhs_ty}) {prefix}_top;\n"));
+    } else {
+        b.push_str(&format!("  logic [{w}-1:0] {prefix}_top;\n"));
+    }
 
     // Arm eval
     b.push_str(&format!("  always_comb begin : {prefix}_arms\n"));
     for (i, arm) in usable.iter().enumerate() {
         let cond = labels_to_compare(sel, &arm.labels);
         let rhs = paren_if_needed_rhs(&arm.rhs);
-        b.push_str(&format!(
-            "    {prefix}_a{i} = ({cond}) ? {rhs} : '0;\n"
-        ));
+        b.push_str(&format!("    {prefix}_a{i} = ({cond}) ? {rhs} : '0;\n"));
     }
     b.push_str("  end\n");
 
@@ -423,7 +439,11 @@ pub fn emit_onehot_or_tree(
             }
         }
     }
-    b.push_str(&format!("    {prefix}_top = {top};\n"));
+    if typed {
+        b.push_str(&format!("    {prefix}_top = type({lhs_ty})'({top});\n"));
+    } else {
+        b.push_str(&format!("    {prefix}_top = {top};\n"));
+    }
     b.push_str("  end\n");
     b.push_str(&format!(
         "  // exclusive lhs `{}` ← `{prefix}_top` (origin arms rewritten when wire-up enabled)\n",
@@ -565,7 +585,10 @@ fn extract_paren_from_lines(lines: &[String], case_line_idx: usize) -> Option<St
 
 fn is_zero_init(rhs: &str) -> bool {
     let t = rhs.trim().trim_end_matches(';').trim();
-    matches!(t, "'0" | "0" | "'b0" | "1'b0" | "{default: '0}" | "{default:'0}")
+    matches!(
+        t,
+        "'0" | "0" | "'b0" | "1'b0" | "{default: '0}" | "{default:'0}"
+    )
 }
 
 fn rhs_safe_for_onehot(rhs: &str) -> bool {
@@ -736,6 +759,9 @@ mod tests {
             file: "alu.sv".into(),
             arms,
         };
-        assert!(onehot_wire_checks(&rec).is_ok(), "mixed $clog2 should not fail");
+        assert!(
+            onehot_wire_checks(&rec).is_ok(),
+            "mixed $clog2 should not fail"
+        );
     }
 }

@@ -127,6 +127,18 @@ pub struct DenseEmitOptions {
     /// **Default false** (R12d): credit-only review comments — snippets often
     /// reference mid-module/enum nets illegal at early inject.
     pub emit_balance_mux_rtl: bool,
+    /// Identifier tokens of the module header (ports, parameters), so a pipe
+    /// declaration hoisted to the top of the module knows which `type(<lhs>)`
+    /// operands are already declared there. Empty when built without source.
+    #[doc(hidden)]
+    pub header_ident_tokens: Vec<String>,
+}
+
+impl DenseEmitOptions {
+    /// Header identifier tokens as a set (see `header_ident_tokens`).
+    pub fn header_idents(&self) -> std::collections::BTreeSet<&str> {
+        self.header_ident_tokens.iter().map(String::as_str).collect()
+    }
 }
 
 impl Default for DenseEmitOptions {
@@ -141,8 +153,77 @@ impl Default for DenseEmitOptions {
             density_scaffold: false,
             real_cut_feeds: false,
             emit_balance_mux_rtl: false,
+            header_ident_tokens: Vec::new(),
         }
     }
+}
+
+/// `[start, end)` of the module header in comment-masked text: from the
+/// `module` keyword to the `;` that ends the port list. Package imports in
+/// the header (`module aes import ariane_pkg::*; import aes_pkg::*; #(…) (…);`)
+/// carry their own `;` and are skipped; parentheses (`#(…)`, the port list)
+/// are balanced, so a `;` inside a parameter default does not end the header.
+pub fn module_header_span(masked: &str) -> Option<(usize, usize)> {
+    let bytes = masked.as_bytes();
+    let is_ident = |b: u8| b.is_ascii_alphanumeric() || b == b'_' || b == b'$';
+    let mut start = None;
+    let mut i = 0usize;
+    while i + 6 <= bytes.len() {
+        if &bytes[i..i + 6] == b"module"
+            && (i == 0 || !is_ident(bytes[i - 1]))
+            && (i + 6 == bytes.len() || !is_ident(bytes[i + 6]))
+        {
+            start = Some(i);
+            break;
+        }
+        i += 1;
+    }
+    let start = start?;
+    let mut depth = 0i32;
+    let mut i = start + 6;
+    while i < bytes.len() {
+        let b = bytes[i];
+        if depth == 0
+            && bytes[i..].starts_with(b"import")
+            && !is_ident(bytes[i.saturating_sub(1)])
+            && bytes.get(i + 6).is_some_and(|c| !is_ident(*c))
+        {
+            // `import pkg::*;` — skip to its own `;`.
+            let Some(semi) = masked[i..].find(';') else {
+                return None;
+            };
+            i += semi + 1;
+            continue;
+        }
+        match b {
+            b'(' => depth += 1,
+            b')' => depth -= 1,
+            b';' if depth == 0 => return Some((start, i)),
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Identifier tokens of the module header: from the `module` keyword to the
+/// `;` that ends the port list (comments and strings ignored). A superset of
+/// the port names — directions and type names are in it too, harmless for the
+/// "is this LHS already declared at the top?" question it answers.
+pub fn header_ident_tokens(source: &str) -> Vec<String> {
+    let masked = crate::masked_syntax(source);
+    let Some((start, end)) = module_header_span(&masked) else {
+        return Vec::new();
+    };
+    let header = &masked[start..end];
+    let mut out: Vec<String> = header
+        .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
+        .filter(|t| !t.is_empty() && !t.chars().next().is_some_and(|c| c.is_ascii_digit()))
+        .map(str::to_string)
+        .collect();
+    out.sort();
+    out.dedup();
+    out
 }
 
 /// Infer clk/rst names from original source (ports or free nets).
@@ -174,6 +255,7 @@ pub fn dense_options_from_source(source: &str) -> DenseEmitOptions {
     } else {
         opts.rst_n.clear();
     }
+    opts.header_ident_tokens = header_ident_tokens(source);
     opts
 }
 
@@ -203,6 +285,9 @@ pub fn dense_autocorrect_block(trace: &EditTrace, opts: &DenseEmitOptions) -> St
 ///   Injected before `endmodule` so cut feeds may reference mid-module nets.
 #[derive(Debug, Clone, Default)]
 pub struct EmitBlocks {
+    /// Pipe declarations that must precede a procedural origin rewrite:
+    /// injected right after the module header (see `dense_pipe_block`).
+    pub top: String,
     /// Inject before first always/assign.
     pub early: String,
     /// Inject before `endmodule`.
@@ -263,6 +348,7 @@ pub fn emit_blocks_for_trace_src(
     // the module's first process (gemm `pe_float_en` is declared in between).
     let mut snippets: Vec<&str> = Vec::new();
     let mut bm_at_origin: Vec<(String, String)> = Vec::new();
+    let mut top = String::new();
     for r in &trace.records {
         if let Some(s) = r.emit_snippet.as_ref() {
             if s.trim().is_empty() {
@@ -298,17 +384,23 @@ pub fn emit_blocks_for_trace_src(
     let late = if pipe.is_empty() && splits.is_empty() {
         String::new()
     } else {
-        dense_pipe_block(opts, cuts, &pipe, &splits, &credit_only, snippets.is_empty())
+        let (late, decl_jobs) =
+            dense_pipe_block(opts, cuts, &pipe, &splits, &credit_only, snippets.is_empty());
+        for (_, d) in decl_jobs {
+            top.push_str(&d);
+        }
+        late
     };
 
     // No structural content at all → empty.
-    if early.is_empty() && late.is_empty() && bm_at_origin.is_empty() {
+    if early.is_empty() && late.is_empty() && bm_at_origin.is_empty() && top.is_empty() {
         return EmitBlocks::default();
     }
     // Pipe-only: early empty, late dense.
     // BalanceMux-only: early block, late empty.
     // Both: early BalanceMux + late dense (snippets not duplicated in dense).
     EmitBlocks {
+        top,
         early,
         late,
         bm_at_origin,
@@ -345,10 +437,7 @@ pub fn dense_autocorrect_block_with_cuts(
 ///
 /// Snippets that reference free genvars / loop indices are demoted to comments
 /// (R12) — they were staged from generate bodies and are illegal at module scope.
-fn balance_mux_or_credit_block(
-    snippets: &[&str],
-    credit_only: &[&EditRecord],
-) -> String {
+fn balance_mux_or_credit_block(snippets: &[&str], credit_only: &[&EditRecord]) -> String {
     let mut safe: Vec<&str> = Vec::new();
     let mut unsafe_n = 0u32;
     for s in snippets {
@@ -398,6 +487,14 @@ fn balance_mux_or_credit_block(
 }
 
 /// InsertReg / SplitAssign lean/scaffold dense pipe (late inject, before endmodule).
+///
+/// With real cut feeds the origin lines read the pipes (`lhs = pipe;`) and SV
+/// requires a variable to be declared before that reference, so the pipe
+/// declarations come back separately as `(pipe_name, decl)` jobs for
+/// `inject_bm_snippets_at_origin` — they land before the enclosing process of
+/// the first origin line, where the LHS they are typed after is in scope. The
+/// feeds and the capture stage stay in the late block (R11: feeds may read
+/// mid-module nets). Lean emit keeps every declaration in the late block.
 fn dense_pipe_block(
     opts: &DenseEmitOptions,
     cuts: &[CutAssign],
@@ -405,19 +502,54 @@ fn dense_pipe_block(
     splits: &[&EditRecord],
     credit_only: &[&EditRecord],
     note_credit_only: bool,
-) -> String {
+) -> (String, Vec<(String, String)>) {
+    let mut decl_jobs: Vec<(String, String)> = Vec::new();
+    let header_idents = opts.header_idents();
     // Map pipe stage name → feed expression from cut list
     let mut feed_by_pipe: std::collections::BTreeMap<String, String> =
         std::collections::BTreeMap::new();
+    // … and → the origin LHS, which types the pipe when it is a plain name
+    // path: the origin line becomes `lhs = <pipe>`, and an enum / packed
+    // struct LHS has no implicit conversion from `logic [SVT_DATA_W-1:0]`.
+    let mut lhs_by_pipe: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     for c in cuts {
         feed_by_pipe.insert(c.pipe_name.clone(), c.rhs.clone());
+        if let Some(l) = simple_type_operand(&c.lhs) {
+            lhs_by_pipe.insert(c.pipe_name.clone(), l.to_string());
+        }
     }
+    // A declaration hoisted to the origin cannot read the late block's
+    // SVT_DATA_W localparam, so it spells the width out.
+    let width_lit = opts.data_width.max(1);
+    // A hoisted declaration sits right after the module header, so `type(lhs)`
+    // may only name a port there (a module variable is declared later).
+    let pipe_decl = |name: &str, suffix: &str, comment: &str, hoisted: bool| -> String {
+        let typed = lhs_by_pipe.get(name).filter(|l| {
+            !hoisted || header_idents.contains(l.split('.').next().unwrap_or(l))
+        });
+        match typed {
+            Some(l) => format!("  var type({l}) {name}{suffix}; // {comment}\n"),
+            None if hoisted => {
+                format!("  logic [{width_lit}-1:0] {name}{suffix}; // {comment}\n")
+            }
+            None => format!("  logic [SVT_DATA_W-1:0] {name}{suffix}; // {comment}\n"),
+        }
+    };
+    // The late block's typed feed / reset must agree with the declaration.
+    let typed_in_late = |name: &str| -> Option<&String> {
+        lhs_by_pipe.get(name).filter(|l| {
+            !opts.real_cut_feeds || header_idents.contains(l.split('.').next().unwrap_or(l))
+        })
+    };
 
     let seq = has_seq_clock(opts);
     let mut b = String::new();
     b.push_str("\n  // BEGIN sv-timing auto-correct (dense emit)\n");
     if !cuts.is_empty() {
-        b.push_str("  // RHS rewrite: cut feeds use origin expressions; origin lines sample regs\n");
+        b.push_str(
+            "  // RHS rewrite: cut feeds use origin expressions; origin lines sample regs\n",
+        );
         b.push_str(
             "  // Placement: before endmodule so feeds may reference mid-module nets (R11).\n",
         );
@@ -463,8 +595,21 @@ fn dense_pipe_block(
             .clone()
             .unwrap_or_else(|| format!("svt_pipe_p{}", i + 1));
         stage_names.push(name.clone());
-        b.push_str(&format!("  logic [SVT_DATA_W-1:0] {name}_c; // comb feed\n"));
-        b.push_str(&format!("  logic [SVT_DATA_W-1:0] {name};   // staged value\n"));
+        // Real feeds: the rewritten origin reads the pipe wherever it is — a
+        // procedural `lhs = pipe;` in its always block, an or-reduce prep in a
+        // continuous assign, an emit extra — all above this late block, so
+        // every pipe is declared at the top of the module. Lean emit reads
+        // nothing and keeps the declarations here.
+        let hoist = opts.real_cut_feeds;
+        if hoist {
+            let mut d = format!("  // pipe declarations (InsertReg #{}: {})\n", r.id, name);
+            d.push_str(&pipe_decl(&name, "_c", "comb feed", true));
+            d.push_str(&pipe_decl(&name, "", "staged value", true));
+            decl_jobs.push((name.clone(), d));
+        } else {
+            b.push_str(&pipe_decl(&name, "_c", "comb feed", false));
+            b.push_str(&pipe_decl(&name, "", "staged value", false));
+        }
     }
     let mut split_names: Vec<String> = Vec::new();
     for (i, r) in splits.iter().enumerate() {
@@ -525,23 +670,36 @@ fn dense_pipe_block(
                 && !refs_peer
                 && !refs_auto;
             if use_real {
-                b.push_str(&format!(
-                    "  assign {name}_c = ({rhs}); // cut feed (origin rhs)\n"
-                ));
+                match typed_in_late(name) {
+                    Some(l) => b.push_str(&format!(
+                        "  assign {name}_c = type({l})'(({rhs})); // cut feed (origin rhs)\n"
+                    )),
+                    None => b.push_str(&format!(
+                        "  assign {name}_c = ({rhs}); // cut feed (origin rhs)\n"
+                    )),
+                }
             } else if i == 0 {
-                b.push_str(&format!(
-                    "  assign {name}_c = svt_zero; // cut feed (lean zero / unsafe rhs)\n"
-                ));
+                match typed_in_late(name) {
+                    Some(l) => b.push_str(&format!(
+                        "  assign {name}_c = type({l})'(svt_zero); // cut feed (lean zero / unsafe rhs)\n"
+                    )),
+                    None => b.push_str(&format!(
+                        "  assign {name}_c = svt_zero; // cut feed (lean zero / unsafe rhs)\n"
+                    )),
+                }
             } else {
                 let prev = &stage_names[i - 1];
-                b.push_str(&format!(
-                    "  assign {name}_c = {prev}; // lean chain\n"
-                ));
+                b.push_str(&format!("  assign {name}_c = {prev}; // lean chain\n"));
             }
         } else if i == 0 {
-            b.push_str(&format!(
-                "  assign {name}_c = svt_zero; // cut feed (unresolved)\n"
-            ));
+            match typed_in_late(name) {
+                Some(l) => b.push_str(&format!(
+                    "  assign {name}_c = type({l})'(svt_zero); // cut feed (unresolved)\n"
+                )),
+                None => b.push_str(&format!(
+                    "  assign {name}_c = svt_zero; // cut feed (unresolved)\n"
+                )),
+            }
         } else {
             let prev = &stage_names[i - 1];
             b.push_str(&format!("  assign {name}_c = {prev};\n"));
@@ -593,18 +751,25 @@ fn dense_pipe_block(
     // --- sequential stages OR comb-only staging when no clock in module ---
     if !stage_names.is_empty() {
         if seq {
-            b.push_str("  // --- sequential stages (posedge+negedge, named begin : svt_pipe_ff) ---\n");
+            b.push_str(
+                "  // --- sequential stages (posedge+negedge, named begin : svt_pipe_ff) ---\n",
+            );
             b.push_str(&format!(
                 "  always_ff @(posedge {} or negedge {}) begin : svt_pipe_ff\n",
                 opts.clk, opts.rst_n
             ));
             b.push_str(&format!("    if (!{}) begin : svt_rst\n", opts.rst_n));
             for name in &stage_names {
-                b.push_str(&format!("      {name} <= '0;\n"));
+                match typed_in_late(name) {
+                    Some(l) => b.push_str(&format!("      {name} <= type({l})'('0);\n")),
+                    None => b.push_str(&format!("      {name} <= '0;\n")),
+                }
             }
             b.push_str("    end else begin : svt_capture\n");
             for name in &stage_names {
-                if scaffold {
+                // A typed pipe takes the direct capture: svt_pipe_mux is
+                // logic-vector typed.
+                if scaffold && typed_in_late(name).is_none() {
                     b.push_str(&format!(
                         "      {name} <= svt_pipe_mux(svt_en_q, {name}_c, {name});\n"
                     ));
@@ -619,7 +784,7 @@ fn dense_pipe_block(
             b.push_str("  // --- comb-only staging (named begin : svt_comb_stage) ---\n");
             b.push_str("  always_comb begin : svt_comb_stage\n");
             for name in &stage_names {
-                if scaffold {
+                if scaffold && typed_in_late(name).is_none() {
                     b.push_str(&format!(
                         "    {name} = svt_pipe_mux(svt_en_q, {name}_c, svt_zero);\n"
                     ));
@@ -656,19 +821,15 @@ fn dense_pipe_block(
     }
 
     b.push_str("  // END sv-timing auto-correct (dense emit)\n");
-    b
+    (b, decl_jobs)
 }
 
 /// Review-only block for BalanceMux / RebalanceAssoc / Annotate (no RTL rewrite yet).
 fn credit_only_review_block(records: &[&EditRecord]) -> String {
     let mut b = String::new();
     b.push_str("\n  // BEGIN sv-timing auto-correct (review-only credit)\n");
-    b.push_str(
-        "  // Latency-neutral FO4 screening credit — not a structural RTL rewrite.\n",
-    );
-    b.push_str(
-        "  // Human: balance exclusive select tree / reassoc hot arm; do not auto-merge.\n",
-    );
+    b.push_str("  // Latency-neutral FO4 screening credit — not a structural RTL rewrite.\n");
+    b.push_str("  // Human: balance exclusive select tree / reassoc hot arm; do not auto-merge.\n");
     for r in records {
         b.push_str(&origin_comment(&r.origin, Some(r.id)));
         let kind = match r.kind {
@@ -695,6 +856,22 @@ pub use crate::rhs::{has_free_gen_index, line_inside_generate};
 
 fn rhs_has_free_loop_index(rhs: &str) -> bool {
     has_free_gen_index(rhs)
+}
+
+/// The LHS as a `type(…)` operand when it is a plain name path (`a`, `a.b.c`):
+/// no selects, casts or concatenations, so the operand is unambiguous and
+/// module-visible wherever the pipe block lands.
+pub fn simple_type_operand(lhs: &str) -> Option<&str> {
+    let t = lhs.trim();
+    if t.is_empty() {
+        return None;
+    }
+    let ok = t.split('.').all(|seg| {
+        let mut chars = seg.chars();
+        matches!(chars.next(), Some(c) if c.is_ascii_alphabetic() || c == '_')
+            && chars.all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+    });
+    ok.then_some(t)
 }
 
 /// Generate-scoped localparams commonly used in FPU / multi-format cones.
@@ -773,9 +950,10 @@ pub fn min_density_score_for_trace(trace: &EditTrace) -> u32 {
     }
     // Snippet-only BalanceMux: modest density (always_comb + assigns + wires)
     if has_snippet
-        && !trace.records.iter().any(|r| {
-            matches!(r.kind, EditKind::InsertReg | EditKind::SplitAssign)
-        })
+        && !trace
+            .records
+            .iter()
+            .any(|r| matches!(r.kind, EditKind::InsertReg | EditKind::SplitAssign))
     {
         return 4;
     }
@@ -930,7 +1108,10 @@ mod tests {
             !block.contains("SVT_PIPE_STAGES"),
             "must not inject dummy pipe scaffold: {block}"
         );
-        assert!(!block.contains("always_comb"), "credit-only: no shell always");
+        assert!(
+            !block.contains("always_comb"),
+            "credit-only: no shell always"
+        );
         assert_eq!(min_density_score_for_trace(&tr), 0);
         let d = DensityReport::from_sv_fragment(&block);
         assert_eq!(d.score(), 0, "comment-only dens={d:?}");
@@ -980,7 +1161,10 @@ mod tests {
         opts.density_scaffold = true;
         opts.reorder_locals = true;
         let block = dense_autocorrect_block(&tr, &opts);
-        assert!(!block.contains("always_ff"), "comb-only must not emit always_ff");
+        assert!(
+            !block.contains("always_ff"),
+            "comb-only must not emit always_ff"
+        );
         assert!(block.contains("always_comb"));
         assert!(block.contains("SVT_COMB_ONLY"));
         assert!(block.contains('?'));
@@ -998,6 +1182,32 @@ mod tests {
         let opts = dense_options_from_source(src);
         assert!(opts.clk.is_empty());
         assert!(opts.rst_n.is_empty());
+    }
+
+    #[test]
+    fn module_header_span_skips_imports_and_balances_parens() {
+        // aes: `module aes import ariane_pkg::*; import aes_pkg::*; #(...) (...);`
+        let src = "// header
+module aes
+  import ariane_pkg::*;
+  import aes_pkg::*;
+#(
+  parameter int W = 8, // note; here
+  parameter type T = logic [W-1:0]
+) (
+  input  logic clk_i,
+  output T    y_o
+);
+  logic [7:0] mid;
+endmodule
+";
+        let masked = crate::masked_syntax(src);
+        let (start, end) = module_header_span(&masked).expect("header");
+        assert_eq!(&src[start..start + 6], "module");
+        assert_eq!(&src[end - 1..=end], ");", "header ends at the port list `);`");
+        let toks = header_ident_tokens(src);
+        assert!(toks.iter().any(|t| t == "y_o") && toks.iter().any(|t| t == "clk_i"));
+        assert!(!toks.iter().any(|t| t == "mid"), "body names are not header names");
     }
 
     #[test]

@@ -53,7 +53,10 @@ pub fn parse_assign_line(line: &str) -> Option<(String, String, bool)> {
         || lower.starts_with("localparam")
     {
         // Continuous assign: `assign lhs = rhs;`
-        if let Some(rest) = t.strip_prefix("assign ").or_else(|| t.strip_prefix("assign\t")) {
+        if let Some(rest) = t
+            .strip_prefix("assign ")
+            .or_else(|| t.strip_prefix("assign\t"))
+        {
             return parse_lhs_rhs(rest.trim(), false);
         }
         return None;
@@ -141,7 +144,8 @@ fn sanitize_lhs(lhs: &str) -> Option<String> {
         return None;
     }
     // Reject control keywords / statements glued into LHS
-    let first = l.split(|c: char| c == '.' || c == '[' || c == ' ' || c == '(')
+    let first = l
+        .split(|c: char| c == '.' || c == '[' || c == ' ' || c == '(')
         .next()
         .unwrap_or("");
     let fl = first.to_ascii_lowercase();
@@ -226,7 +230,9 @@ pub fn rhs_structurally_complete(rhs: &str) -> bool {
     // Empty false arm: after last ternary `:`, only whitespace / closing parens.
     if let Some(pos) = last_tern_colon {
         let after = rhs[pos + 1..].trim();
-        let only_closers = after.chars().all(|c| c == ')' || c == '}' || c.is_whitespace());
+        let only_closers = after
+            .chars()
+            .all(|c| c == ')' || c == '}' || c.is_whitespace());
         if after.is_empty() || only_closers {
             return false;
         }
@@ -310,7 +316,11 @@ fn rhs_is_comma_assign_list(rhs: &str) -> bool {
 }
 
 /// Recover assignment spanning multiple lines (case label on one line, body on next).
-pub fn parse_assign_multiline(source: &str, start_line_1based: u32, max_extra: u32) -> Option<(String, String, bool, u32)> {
+pub fn parse_assign_multiline(
+    source: &str,
+    start_line_1based: u32,
+    max_extra: u32,
+) -> Option<(String, String, bool, u32)> {
     // Returns (lhs, rhs, nba, end_line)
     let mut acc = String::new();
     let mut end = start_line_1based;
@@ -440,10 +450,7 @@ fn split_once_op(s: &str, op: &str) -> Option<(String, String)> {
 }
 
 fn trim_semi(s: &str) -> String {
-    s.trim()
-        .trim_end_matches(';')
-        .trim()
-        .to_string()
+    s.trim().trim_end_matches(';').trim().to_string()
 }
 
 fn strip_line_comment(line: &str) -> &str {
@@ -476,9 +483,7 @@ pub fn line_inside_generate(source: &str, line: u32) -> bool {
         let ln = (i + 1) as u32;
         let t = strip_line_comment(raw).trim();
         let lower = t.to_ascii_lowercase();
-        if lower == "generate"
-            || lower.starts_with("generate ")
-            || lower.starts_with("generate\t")
+        if lower == "generate" || lower.starts_with("generate ") || lower.starts_with("generate\t")
         {
             depth += 1;
         }
@@ -720,26 +725,64 @@ pub fn snippet_refs_late_declared_local(
             }
             if matches!(
                 id,
-                "logic" | "wire" | "reg" | "assign" | "always_comb" | "always_ff" | "begin"
-                    | "end" | "if" | "else" | "input" | "output" | "module" | "parameter"
-                    | "localparam" | "signed" | "unsigned" | "int" | "bit"
+                "logic"
+                    | "wire"
+                    | "reg"
+                    | "assign"
+                    | "always_comb"
+                    | "always_ff"
+                    | "begin"
+                    | "end"
+                    | "if"
+                    | "else"
+                    | "input"
+                    | "output"
+                    | "module"
+                    | "parameter"
+                    | "localparam"
+                    | "signed"
+                    | "unsigned"
+                    | "int"
+                    | "bit"
             ) {
                 continue;
             }
-            // Find first logic/wire/reg decl of this ident
+            // Find the first declaration of this ident: module-level
+            // `logic/wire/reg`, a block-local `automatic …` / `var …`, or a
+            // `for (int h = …)` loop variable. A block-local or loop variable
+            // is never visible at the inject site, whatever its line.
             let mut off = 0usize;
             for line in source.lines() {
                 let t = line.trim();
-                if (t.starts_with("logic ") || t.starts_with("wire ") || t.starts_with("reg "))
-                    && t.contains(id)
-                {
-                    let toks: Vec<&str> = t
-                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                        .filter(|s| !s.is_empty())
-                        .collect();
-                    if toks.iter().any(|tok| *tok == id) && off >= inject_off {
-                        return true;
+                let toks: Vec<&str> = t
+                    .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .filter(|s| !s.is_empty())
+                    .collect();
+                if !toks.iter().any(|tok| *tok == id) {
+                    off += line.len() + 1;
+                    continue;
+                }
+                let module_decl =
+                    t.starts_with("logic ") || t.starts_with("wire ") || t.starts_with("reg ");
+                let block_decl = t.starts_with("automatic ") || t.starts_with("var ");
+                let loop_var = t.starts_with("for ")
+                    || t.starts_with("for(")
+                    || t.contains(" for (")
+                    || t.contains(" for(");
+                if block_decl {
+                    return true;
+                }
+                if loop_var {
+                    // `for (int unsigned h = 0; …)`: the declared index is the
+                    // identifier right before the first `=`.
+                    if let Some(head) = t.split('=').next() {
+                        if head.split_whitespace().last() == Some(id) {
+                            return true;
+                        }
                     }
+                }
+                if module_decl && off >= inject_off {
+                    return true;
                 }
                 off += line.len() + 1;
             }
@@ -838,11 +881,8 @@ pub fn cut_assigns_from_source_ex(
         let origin_line = r.origin.start_line;
         let origin_in_gen = line_inside_generate(source, origin_line);
         if origin_line > 0 && !origin_in_gen && !claimed_lines.contains(&origin_line) {
-            if let Some((lhs, rhs, nba, end)) =
-                parse_assign_multiline(source, origin_line, 8)
-            {
-                let lhs_ok =
-                    !has_free_gen_index(&lhs) && lhs_is_module_level_net(source, &lhs);
+            if let Some((lhs, rhs, nba, end)) = parse_assign_multiline(source, origin_line, 8) {
+                let lhs_ok = !has_free_gen_index(&lhs) && lhs_is_module_level_net(source, &lhs);
                 if rhs_structurally_complete(&rhs)
                     && !rhs_is_comma_assign_list(&rhs)
                     && lhs_ok
@@ -878,9 +918,7 @@ pub fn cut_assigns_from_source_ex(
                 if claimed_lines.contains(&line_no) || line_inside_generate(source, line_no) {
                     continue;
                 }
-                let Some((lhs, rhs, nba, end)) =
-                    parse_assign_multiline(source, line_no, 8)
-                else {
+                let Some((lhs, rhs, nba, end)) = parse_assign_multiline(source, line_no, 8) else {
                     continue;
                 };
                 if !rhs_structurally_complete(&rhs) || rhs_is_comma_assign_list(&rhs) {
@@ -1016,7 +1054,10 @@ fn named_generate_if_blocks(source: &str) -> Vec<(u32, u32, String)> {
                 let mut name: Option<String> = None;
                 if j + 2 < toks.len() && toks[j + 1] == ":" {
                     let n = &toks[j + 2];
-                    if n.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_') {
+                    if n.chars()
+                        .next()
+                        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    {
                         name = Some(n.clone());
                     }
                 }
@@ -1263,7 +1304,8 @@ pub fn sibling_span_extra_cuts(source: &str, cuts: &[CutAssign]) -> Vec<CutAssig
         b_span.cmp(&a_span).then(a.0.cmp(&b.0))
     });
 
-    let mut pipe_by_lhs: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
+    let mut pipe_by_lhs: std::collections::BTreeMap<String, String> =
+        std::collections::BTreeMap::new();
     for c in &seeds {
         pipe_by_lhs.insert(lhs_base_ident(&c.lhs).to_string(), c.pipe_name.clone());
     }
@@ -1276,12 +1318,7 @@ pub fn sibling_span_extra_cuts(source: &str, cuts: &[CutAssign]) -> Vec<CutAssig
         let mut pipe = format!("pipe_svt_sib_{}_{}", sanitize_pipe_ident(&base), line);
         let mut n = 2u32;
         while used_pipes.contains(&pipe) {
-            pipe = format!(
-                "pipe_svt_sib_{}_{}_{}",
-                sanitize_pipe_ident(&base),
-                line,
-                n
-            );
+            pipe = format!("pipe_svt_sib_{}_{}_{}", sanitize_pipe_ident(&base), line, n);
             n += 1;
         }
         used_pipes.insert(pipe.clone());
@@ -1507,12 +1544,7 @@ pub fn remainder_sandwich_extra_cuts(source: &str, cuts: &[CutAssign]) -> Vec<Cu
         let mut pipe = format!("pipe_svt_rem_{}_{}", sanitize_pipe_ident(&lhs), line);
         let mut n = 2u32;
         while used_pipes.contains(&pipe) {
-            pipe = format!(
-                "pipe_svt_rem_{}_{}_{}",
-                sanitize_pipe_ident(&lhs),
-                line,
-                n
-            );
+            pipe = format!("pipe_svt_rem_{}_{}_{}", sanitize_pipe_ident(&lhs), line, n);
             n += 1;
         }
         used_pipes.insert(pipe.clone());
@@ -1573,7 +1605,12 @@ fn is_unary_or_bar(b: &[u8], i: usize) -> bool {
         if ch == '|' && k > 0 && b[k - 1] == b'|' {
             return true;
         }
-        if ch.is_ascii_alphanumeric() || ch == '_' || ch == ')' || ch == ']' || ch == '}' || ch == '\''
+        if ch.is_ascii_alphanumeric()
+            || ch == '_'
+            || ch == ')'
+            || ch == ']'
+            || ch == '}'
+            || ch == '\''
         {
             return false;
         }
@@ -1629,7 +1666,10 @@ fn unary_or_reduces(rhs: &str) -> Vec<(usize, usize, String)> {
 pub fn or_reduce_prep_cuts(
     source: &str,
     cuts: &[CutAssign],
-) -> (Vec<CutAssign>, std::collections::BTreeMap<u32, (String, String)>) {
+) -> (
+    Vec<CutAssign>,
+    std::collections::BTreeMap<u32, (String, String)>,
+) {
     const ASSIGN_CAP: usize = 4;
     let mut preps = Vec::new();
     let mut rewrites: std::collections::BTreeMap<u32, (String, String)> =
@@ -1669,10 +1709,9 @@ pub fn or_reduce_prep_cuts(
         if reduces.len() < 2 && count_bool_binops(&rhs) < 2 {
             continue;
         }
-        if reduces
-            .iter()
-            .any(|(_, _, ident)| !lhs_is_module_level_net(source, ident) || has_free_gen_index(ident))
-        {
+        if reduces.iter().any(|(_, _, ident)| {
+            !lhs_is_module_level_net(source, ident) || has_free_gen_index(ident)
+        }) {
             continue;
         }
         let mut new_rhs = rhs.clone();
@@ -1681,12 +1720,7 @@ pub fn or_reduce_prep_cuts(
             let mut pipe = format!("pipe_svt_red_{}_{}", sanitize_pipe_ident(ident), ln);
             let mut n = 2u32;
             while used.contains(&pipe) {
-                pipe = format!(
-                    "pipe_svt_red_{}_{}_{}",
-                    sanitize_pipe_ident(ident),
-                    ln,
-                    n
-                );
+                pipe = format!("pipe_svt_red_{}_{}_{}", sanitize_pipe_ident(ident), ln, n);
                 n += 1;
             }
             used.insert(pipe.clone());
@@ -1711,7 +1745,9 @@ pub fn or_reduce_prep_cuts(
         }
         rewrites.insert(ln, (lhs, new_rhs));
         for n in ln + 1..=end.max(ln) {
-            rewrites.entry(n).or_insert_with(|| (String::new(), String::new()));
+            rewrites
+                .entry(n)
+                .or_insert_with(|| (String::new(), String::new()));
         }
     }
     (preps, rewrites)
@@ -1818,8 +1854,7 @@ pub fn rewrite_origin_assigns(source: &str, cuts: &[CutAssign]) -> String {
             // 3131 origin is `always_ff` :1859). Unsafe control tails (bare
             // `if`/`for` on the same line, generate index) keep the origin.
             let t = strip_line_comment(line).trim();
-            let line_is_assign_kw =
-                t.starts_with("assign ") || t.starts_with("assign\t");
+            let line_is_assign_kw = t.starts_with("assign ") || t.starts_with("assign\t");
             if !cut.continuous && !line_is_assign_kw {
                 let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
                 if line_no == cut.line {
@@ -1864,10 +1899,7 @@ pub fn rewrite_origin_assigns(source: &str, cuts: &[CutAssign]) -> String {
                 }
                 continue;
             }
-            let indent: String = line
-                .chars()
-                .take_while(|c| c.is_whitespace())
-                .collect();
+            let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
             if line_no == cut.line {
                 // If this was the sole statement of an `if/else` without `begin`,
                 // leave a null statement so the control construct stays legal.
@@ -2008,10 +2040,7 @@ pub fn rewrite_origin_assigns(source: &str, cuts: &[CutAssign]) -> String {
 pub fn rewrite_origin_rhs_replaces(source: &str, trace: &EditTrace) -> String {
     let mut replaces: Vec<(u32, u32, String, u32)> = Vec::new(); // start, end, new_rhs, edit_id
     for r in &trace.records {
-        if !matches!(
-            r.kind,
-            EditKind::BalanceMux | EditKind::RebalanceAssoc
-        ) {
+        if !matches!(r.kind, EditKind::BalanceMux | EditKind::RebalanceAssoc) {
             continue;
         }
         // R12: only rewrite origin when a **safe** structural snippet will be
@@ -2085,8 +2114,7 @@ pub fn rewrite_origin_rhs_replaces(source: &str, trace: &EditTrace) -> String {
                 } else {
                     *start
                 };
-                if let Some((lhs, _old_rhs, nba, _)) =
-                    parse_assign_multiline(source, body_start, 6)
+                if let Some((lhs, _old_rhs, nba, _)) = parse_assign_multiline(source, body_start, 6)
                 {
                     let op = if nba { "<=" } else { "=" };
                     let case_prefix = case_item_label_prefix(line);
@@ -2297,6 +2325,46 @@ mod tests {
     }
 
     #[test]
+    fn late_declared_local_catches_automatic_and_loop_variables() {
+        // perf_counters: `automatic logic brh` inside a for-in-always_comb, `h`
+        // its loop variable. Neither may appear in a module-scope snippet,
+        // whatever the inject line; a module-level `logic ev` declared before
+        // the process is fine.
+        let source =
+            "module m(input logic [3:0] hid, input logic [1:0] x, output logic [1:0] y);\n\
+                      logic [1:0] ev;\n\
+                      always_comb begin\n\
+                        for (int unsigned h = 0; h < 2; h++) begin\n\
+                          automatic logic brh = (hid == 4'(h));\n\
+                          ev[h] = x[h] & brh;\n\
+                        end\n\
+                      end\n\
+                      assign y = ev;\n\
+                      endmodule\n";
+        let inject_at = 3; // before the always_comb
+        assert!(snippet_refs_late_declared_local(
+            source,
+            "svt_bm_1 = &brh;",
+            inject_at
+        ));
+        assert!(snippet_refs_late_declared_local(
+            source,
+            "svt_bm_1 = ev[h];",
+            inject_at
+        ));
+        assert!(!snippet_refs_late_declared_local(
+            source,
+            "svt_bm_1 = x[1] & ev[0];",
+            inject_at
+        ));
+        assert!(!balance_mux_snippet_safe(
+            source,
+            "  always_comb begin\n    svt_bm_1 = &brh;\n  end\n",
+            6
+        ));
+    }
+
+    #[test]
     fn balance_mux_rhs_rewrite_keeps_assign_keyword() {
         let src = r#"module te (
     input logic [7:0] keep_bits_i,
@@ -2338,7 +2406,10 @@ endmodule
     #[test]
     fn case_item_label_prefix_preserved() {
         let p = case_item_label_prefix("        ADDW, SUBW: result_o = adder_result;");
-        assert!(p.contains("ADDW") && p.contains("SUBW") && p.contains(':'), "p={p}");
+        assert!(
+            p.contains("ADDW") && p.contains("SUBW") && p.contains(':'),
+            "p={p}"
+        );
         assert!(case_item_label_prefix("        result_o = x;").is_empty());
     }
 
@@ -2349,7 +2420,8 @@ endmodule
         assert_eq!(l, "result_o");
         assert_eq!(r, "operand_a & ~bit_indx");
         assert!(!nba);
-        let (l, r, _) = parse_assign_line("        ADD, SUB, ADDUW: result_o = adder_result;").unwrap();
+        let (l, r, _) =
+            parse_assign_line("        ADD, SUB, ADDUW: result_o = adder_result;").unwrap();
         assert_eq!(l, "result_o");
         assert_eq!(r, "adder_result");
         // Sink must never look like case labels
@@ -2393,9 +2465,7 @@ endmodule
 
     #[test]
     fn trailing_binary_op_incomplete() {
-        assert!(!rhs_structurally_complete(
-            "{1'b0,total_qt_rt_30[28:4]} +"
-        ));
+        assert!(!rhs_structurally_complete("{1'b0,total_qt_rt_30[28:4]} +"));
         assert!(!rhs_structurally_complete(
             "((ex3_rst_eq_1) ? {3'b0,{23{1'b1}}} : {1'b0,total_qt_rt_30[28:4]} +)"
         ));
@@ -2407,7 +2477,8 @@ endmodule
     #[test]
     fn empty_false_arm_multiline_ternary_incomplete() {
         // exp_backoff mask_d after 2 of 3 lines — must keep scanning for mask_q.
-        let partial = "(clr_i) ? '0 : (set_i) ? {{(WIDTH-MaxExp){1'b0}},mask_q[MaxExp-2:0], 1'b1} :";
+        let partial =
+            "(clr_i) ? '0 : (set_i) ? {{(WIDTH-MaxExp){1'b0}},mask_q[MaxExp-2:0], 1'b1} :";
         assert!(
             !rhs_structurally_complete(partial),
             "empty false arm must be incomplete"
@@ -2764,10 +2835,7 @@ endmodule
             let t = l.trim();
             !t.starts_with("//") && t.starts_with("idx_is_d =") && !t.starts_with("assign")
         });
-        assert!(
-            !bare,
-            "illegal module-scope blocking assign:\n{rewritten}"
-        );
+        assert!(!bare, "illegal module-scope blocking assign:\n{rewritten}");
         assert!(
             rewritten.contains("moved idx_is_d"),
             "expected origin rewrite:\n{rewritten}"
@@ -2847,11 +2915,7 @@ endmodule
         let src = include_str!("../../../fixtures/auto_correct/deep_add_chain.sv");
         let mut tr = EditTrace::new();
         // Origins on consecutive assign lines → two exclusive claims
-        for (id, line, name) in [
-            (0u32, 16u32, "p0"),
-            (1, 17, "p1"),
-            (2, 18, "p2"),
-        ] {
+        for (id, line, name) in [(0u32, 16u32, "p0"), (1, 17, "p1"), (2, 18, "p2")] {
             tr.record_edit(EditRecord {
                 id,
                 kind: EditKind::InsertReg,
@@ -2922,7 +2986,10 @@ endmodule
             let t = l.trim();
             t.starts_with("assign c_span") && t.contains("<<") && !t.starts_with("//")
         });
-        assert!(!live_mul, "twin generate left a live c_span mul:\n{rewritten}");
+        assert!(
+            !live_mul,
+            "twin generate left a live c_span mul:\n{rewritten}"
+        );
         assert!(
             rewritten.contains("twin moved c_span"),
             "expected twin origin rewrite:\n{rewritten}"
@@ -3000,10 +3067,9 @@ endmodule
         });
         assert!(!live_b, "b_span combo left live:\n{rewritten}");
         assert!(
-            extras.iter().any(|c| rewritten.contains(&format!(
-                "assign b_span = {}",
-                c.pipe_name
-            ))),
+            extras
+                .iter()
+                .any(|c| rewritten.contains(&format!("assign b_span = {}", c.pipe_name))),
             "b_span must sample its own pipe:\n{rewritten}"
         );
         assert!(
@@ -3093,9 +3159,9 @@ endmodule
             "expected prep extra for p_q * q_q, extras={extras:?}"
         );
         let prep = prep.unwrap();
-        let tail = extras.iter().find(|c| {
-            c.line == 0 && c.lhs.is_empty() && c.rhs.trim() == "k_bytes"
-        });
+        let tail = extras
+            .iter()
+            .find(|c| c.line == 0 && c.lhs.is_empty() && c.rhs.trim() == "k_bytes");
         assert!(
             tail.is_some(),
             "expected tail sample extra for k_bytes, extras={extras:?}"
@@ -3129,10 +3195,7 @@ endmodule
             .expect("b") as u32
             + 1;
         let mut tr = EditTrace::new();
-        for (id, line, name) in [
-            (0u32, line_a, "pipe_svt_p1"),
-            (1u32, line_b, "pipe_svt_p2"),
-        ] {
+        for (id, line, name) in [(0u32, line_a, "pipe_svt_p1"), (1u32, line_b, "pipe_svt_p2")] {
             tr.record_edit(EditRecord {
                 id,
                 kind: EditKind::InsertReg,
@@ -3193,11 +3256,7 @@ module amo_comma (
            sum =  ld_data + st_data;
 endmodule
 "#;
-        let line = src
-            .lines()
-            .position(|l| l.contains("sgt ="))
-            .expect("sgt") as u32
-            + 1;
+        let line = src.lines().position(|l| l.contains("sgt =")).expect("sgt") as u32 + 1;
         let mut tr = EditTrace::new();
         tr.record_edit(EditRecord {
             id: 0,
@@ -3351,7 +3410,11 @@ endmodule
             .filter(|c| c.pipe_name.contains("pipe_svt_red_"))
             .map(|c| c.rhs.as_str())
             .collect();
-        assert_eq!(reds, vec!["|tocheck"], "mixed AND cone: {reds:?} extras={extras:?}");
+        assert_eq!(
+            reds,
+            vec!["|tocheck"],
+            "mixed AND cone: {reds:?} extras={extras:?}"
+        );
         let rewritten = rewrite_origin_assigns(src, &cuts);
         assert!(
             rewritten.contains("or-reduce preps for req"),
@@ -3370,7 +3433,10 @@ endmodule
             let t = l.trim();
             t.starts_with("assign miss_req_o") && t.contains("pipe_svt_red") && !t.starts_with("//")
         });
-        assert!(!live_port, "must not extra-cycle _o handshake:\n{rewritten}");
+        assert!(
+            !live_port,
+            "must not extra-cycle _o handshake:\n{rewritten}"
+        );
     }
 
     #[test]
@@ -3421,7 +3487,9 @@ endmodule
             .map(|c| c.rhs.as_str())
             .collect();
         assert!(
-            !reds.iter().any(|r| r.contains("inv_en") || r.contains("flush_en") || r.contains("cache_wren")),
+            !reds.iter().any(|r| r.contains("inv_en")
+                || r.contains("flush_en")
+                || r.contains("cache_wren")),
             "bitwise | must not become or-reduce: {reds:?}"
         );
         assert_eq!(reds, vec!["|tocheck"], "only unary |tocheck: {reds:?}");

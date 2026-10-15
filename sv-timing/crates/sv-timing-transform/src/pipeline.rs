@@ -47,10 +47,7 @@ pub struct CutPlan {
 ///
 /// Returns `true` when the path was expanded (nodes rewritten). No-op when the
 /// path already has multiple nodes or total is already under budget.
-pub fn expand_expr_spine_for_path(
-    ctx: &mut PassContext,
-    path_id: PathId,
-) -> TransformResult<bool> {
+pub fn expand_expr_spine_for_path(ctx: &mut PassContext, path_id: PathId) -> TransformResult<bool> {
     let budget = ctx.design.target.budget_fo4;
     let path_idx = ctx
         .design
@@ -77,9 +74,7 @@ pub fn expand_expr_spine_for_path(
             {
                 continue;
             }
-            if n.fo4_cost > budget + 1e-9
-                && best.map(|(_, c)| n.fo4_cost > c).unwrap_or(true)
-            {
+            if n.fo4_cost > budget + 1e-9 && best.map(|(_, c)| n.fo4_cost > c).unwrap_or(true) {
                 best = Some((id, n.fo4_cost));
             }
         }
@@ -112,12 +107,7 @@ pub fn expand_expr_spine_for_path(
             .as_ref()
             .map(|ex| ex.critical_spine_ops_latticed(&base, &seed))
             .unwrap_or_default();
-        (
-            n.fo4_cost.max(0.0),
-            n.loc.clone(),
-            n.op_class,
-            spine,
-        )
+        (n.fo4_cost.max(0.0), n.loc.clone(), n.op_class, spine)
     };
     // Prefer real expression spine when multi-op. Use **spine sum** (not node
     // fo4_cost): addr-scale rewrites can understate node FO4 while spine still
@@ -146,10 +136,7 @@ pub fn expand_expr_spine_for_path(
     if total_node <= budget + 1e-9 {
         return Ok(false);
     }
-    if matches!(
-        op_class,
-        Some(OperatorClass::Mul | OperatorClass::DivRem)
-    ) {
+    if matches!(op_class, Some(OperatorClass::Mul | OperatorClass::DivRem)) {
         return Ok(false);
     }
     // Synthetic half-split: prep + residual root so multi-cut can land ≤ budget.
@@ -328,6 +315,35 @@ pub fn select_pipeline_cuts(
         }
     };
 
+    // The pipe register is a module-level net typed and fed from the cut
+    // node's assignment: an LHS or RHS naming a block-local (a generate-for
+    // body's `logic same_hart`, a genvar, an `automatic`) has no module-scope
+    // pipe that is right for every iteration — refuse the cut (raw_checker
+    // `gen_same_rd`, instr_scan). Lean emit never reads the origin, but the
+    // cut is booked as FO4 either way, so refuse at the source.
+    if let Some(path) = ctx.design.paths.iter().find(|p| p.id == opportunity.path_id) {
+        if let Some(module) = ctx.design.modules.get(&path.module) {
+            let block_local = module.block_local_names();
+            if !block_local.is_empty() {
+                for cut in &cuts {
+                    if let Some(n) = module.nodes.get(&cut.after_node) {
+                        let hit = [n.lhs.as_deref(), n.rhs.as_deref()]
+                            .into_iter()
+                            .flatten()
+                            .any(|t| module.text_refs_block_local(t, &block_local));
+                        if hit {
+                            return Err(TransformError::InvalidOpportunity(format!(
+                                "cut after node {} names a block-local ({})",
+                                cut.after_node,
+                                n.lhs.as_deref().unwrap_or("?")
+                            )));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     Ok(CutPlan {
         cuts,
         gate,
@@ -335,11 +351,7 @@ pub fn select_pipeline_cuts(
     })
 }
 
-fn origin_for_node(
-    ctx: &PassContext,
-    path_id: PathId,
-    after_node: NodeId,
-) -> Option<SourceLoc> {
+fn origin_for_node(ctx: &PassContext, path_id: PathId, after_node: NodeId) -> Option<SourceLoc> {
     ctx.design
         .paths
         .iter()
@@ -376,10 +388,7 @@ pub fn schedule_pipeline_cuts(
     }
     // Path-class cache/measure: exclusive-case and atomic paths use other tools.
     if path.path_class.discourages_insert_reg()
-        && !matches!(
-            path.path_class,
-            sv_timing_core::PathClassKind::UnderBudget
-        )
+        && !matches!(path.path_class, sv_timing_core::PathClassKind::UnderBudget)
     {
         return Err(TransformError::InvalidOpportunity(format!(
             "path class {:?} discourages InsertReg ({})",
@@ -426,7 +435,8 @@ pub fn schedule_pipeline_cuts(
                 "atomic over-budget node {after} fo4≈{total:.1} > budget {budget_fo4:.1} (need multi-cycle or microarch)"
             )));
         }
-        let origin = origin_for_node(ctx, path_id, after).unwrap_or_else(|| path.primary_loc.clone());
+        let origin =
+            origin_for_node(ctx, path_id, after).unwrap_or_else(|| path.primary_loc.clone());
         return Ok(vec![CutPoint {
             path_id,
             after_node: after,
@@ -498,8 +508,8 @@ pub fn schedule_pipeline_cuts(
                 let after = path.nodes[i];
                 let left: f64 = costs[..=i].iter().sum();
                 let right: f64 = costs[i + 1..].iter().sum();
-                let origin =
-                    origin_for_node(ctx, path_id, after).unwrap_or_else(|| path.primary_loc.clone());
+                let origin = origin_for_node(ctx, path_id, after)
+                    .unwrap_or_else(|| path.primary_loc.clone());
                 cuts.push(CutPoint {
                     path_id,
                     after_node: after,
@@ -777,8 +787,7 @@ fn rewire_path_at_cut(
         ctx.design.paths[path_idx].nodes = left;
         ctx.design.paths[path_idx].end = PathEndpoint::RegData { cell: sig_id };
         ctx.design.paths[path_idx].total_fo4 = left_fo4;
-        ctx.design.paths[path_idx].slack_fo4 =
-            ctx.design.target.budget_fo4 - left_fo4;
+        ctx.design.paths[path_idx].slack_fo4 = ctx.design.target.budget_fo4 - left_fo4;
         // Residual comb after pipe as a new path (pipe → original capture).
         if !right.is_empty() {
             let right_fo4 = sum_nodes(&right);
@@ -851,7 +860,9 @@ pub fn split_assign(
     let (_id, name) = ctx.names.alloc_signal(
         &ctx.active_module_name,
         stem,
-        sv_timing_core::SignalNameTag::SplitWire { index: ctx.trace.records.len() as u32 },
+        sv_timing_core::SignalNameTag::SplitWire {
+            index: ctx.trace.records.len() as u32,
+        },
         origin.clone(),
     );
 
@@ -1104,159 +1115,190 @@ pub fn balance_mux_on_path(
 
     // A) Hot-arm expression staging (origin rewrite)
     {
-    let path_node_order: Vec<NodeId> = {
-        let path = ctx.design.paths.iter().find(|p| p.id == path_id);
-        let module = ctx
-            .design
-            .modules
-            .values()
-            .find(|m| m.name == ctx.active_module_name);
-        let mut ids = path.map(|p| p.nodes.clone()).unwrap_or_default();
-        // Sort by fo4 descending; put requested hot_node first.
-        if let Some(m) = module {
-            ids.sort_by(|a, b| {
-                let fa = m.nodes.get(a).map(|n| n.fo4_cost).unwrap_or(0.0);
-                let fb = m.nodes.get(b).map(|n| n.fo4_cost).unwrap_or(0.0);
-                fb.partial_cmp(&fa)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
-        }
-        if let Some(pos) = ids.iter().position(|id| *id == hot_node) {
-            ids.remove(pos);
-            ids.insert(0, hot_node);
-        } else {
-            ids.insert(0, hot_node);
-        }
-        ids
-    };
-
-    // Exclusive residual benefits from staging several deep arms (prep + hot result).
-    // Tight budgets (≤18 FO4, ~2.2 GHz @ fo4_ps=20 margin 0.2) need more arms staged
-    // so residual max_arm + log-mux can land under budget.
-    let tight = budget <= 18.0;
-    let max_stage_arms: usize = match path.path_class {
-        PathClassKind::ExclusiveCaseMux | PathClassKind::ExclusiveIfChain => {
-            if tight {
-                5
-            } else {
-                3
-            }
-        }
-        PathClassKind::IndependentLhsBundle | PathClassKind::DenseControlCone => {
-            if tight {
-                4
-            } else {
-                2
-            }
-        }
-        _ => 1,
-    };
-    if let Some(module) = ctx
-        .design
-        .modules
-        .values_mut()
-        .find(|m| m.name == ctx.active_module_name)
-    {
-        let mut staged_n = 0usize;
-        let mut stage_frags: Vec<String> = Vec::new();
-        let mut best_node_after = 0.0_f64;
-        for cand in path_node_order {
-            if staged_n >= max_stage_arms {
-                break;
-            }
-            let Some(n) = module.nodes.get_mut(&cand) else {
-                continue;
-            };
-            // Prefer rebalanced form as staging input; fall back to original tree
-            // when rebalance shallow-outs stage_for_balance_mux.
-            let raw_ex = n.rhs_expr.clone().or_else(|| {
-                n.rhs.as_ref().and_then(|s| {
-                    let p = sv_timing_core::Expr::parse(s);
-                    if p.op_node_count() > 0 {
-                        Some(p)
-                    } else {
-                        None
-                    }
-                })
-            });
-            let Some(raw_ex) = raw_ex else {
-                continue;
-            };
-            let rebal = raw_ex.rebalance_associative();
-            let candidates = [rebal, raw_ex];
-            let mut staged_ok = false;
-            for ex in &candidates {
-            let before_c = ex.fo4_critical_cost(&base);
-            // Skip shallow arms — only stage when critical FO4 is meaningful.
-            // Independent-LHS bundles often have mid-size field assigns (~2–4 FO4);
-            // lower the floor under tight budgets so stage still fires.
-            let stage_min = if tight { 2.0 } else { 3.0 };
-            if before_c < stage_min {
-                continue;
-            }
-            let prefix = format!("svt_bm_p{path_id}_n{cand}_");
-            let Some(plan) = ex.stage_for_balance_mux(&prefix) else {
-                continue;
-            };
-            let top_name = format!("svt_bm_top_p{path_id}_n{cand}");
-            let after_c = plan.top.fo4_critical_cost(&base);
-            if after_c > before_c + 1e-9 || plan.wires.is_empty() {
-                continue;
-            }
-            let width = if n.width_defaulted || n.width < 2 {
-                64
-            } else {
-                n.width.min(128)
-            };
-            let frag = plan.to_sv_fragment(Some(&top_name), width);
-            n.rhs = Some(top_name.clone());
-            n.rhs_expr = Some(sv_timing_core::Expr::Ident {
-                name: top_name.clone(),
-            });
-            // Stage aggressively toward budget: floor at ~40% of pre-stage (tight)
-            // or ~45% otherwise so residual max_arm + mux can close ≤16 FO4 @ 2.5 GHz.
-            let floor_frac = if budget <= 18.0 { 0.40 } else { 0.45 };
-            let staged = after_c.max(before_c * floor_frac);
-            n.fo4_cost = staged;
-            // Keep staged residual FO4 across remeasure (rhs may still re-inflate).
-            n.fo4_locked = true;
-            best_node_after = best_node_after.max(staged);
-            stage_frags.push(frag);
-            if staged_n == 0 {
-                emit_rhs = Some(top_name.clone());
-                rewrite_origin = n.loc.clone();
-                rewrite_node = cand;
-                new_name = Some(top_name);
-            } else {
-                emit_rhs_extras.push(crate::edit::EmitRhsRewrite {
-                    origin: n.loc.clone(),
-                    emit_rhs: top_name,
+        let path_node_order: Vec<NodeId> = {
+            let path = ctx.design.paths.iter().find(|p| p.id == path_id);
+            let module = ctx
+                .design
+                .modules
+                .values()
+                .find(|m| m.name == ctx.active_module_name);
+            let mut ids = path.map(|p| p.nodes.clone()).unwrap_or_default();
+            // Sort by fo4 descending; put requested hot_node first.
+            if let Some(m) = module {
+                ids.sort_by(|a, b| {
+                    let fa = m.nodes.get(a).map(|n| n.fo4_cost).unwrap_or(0.0);
+                    let fb = m.nodes.get(b).map(|n| n.fo4_cost).unwrap_or(0.0);
+                    fb.partial_cmp(&fa).unwrap_or(std::cmp::Ordering::Equal)
                 });
             }
-            staged_n += 1;
-            staged_ok = true;
-            break; // next cand after one successful plan for this node
-            } // end for ex candidates
-            let _ = staged_ok;
-        }
-        if staged_n > 0 {
-            let mut combined = String::new();
-            for f in &stage_frags {
-                combined.push_str(f);
-                if !f.ends_with('\n') {
-                    combined.push('\n');
+            if let Some(pos) = ids.iter().position(|id| *id == hot_node) {
+                ids.remove(pos);
+                ids.insert(0, hot_node);
+            } else {
+                ids.insert(0, hot_node);
+            }
+            ids
+        };
+
+        // Exclusive residual benefits from staging several deep arms (prep + hot result).
+        // Tight budgets (≤18 FO4, ~2.2 GHz @ fo4_ps=20 margin 0.2) need more arms staged
+        // so residual max_arm + log-mux can land under budget.
+        let tight = budget <= 18.0;
+        let max_stage_arms: usize = match path.path_class {
+            PathClassKind::ExclusiveCaseMux | PathClassKind::ExclusiveIfChain => {
+                if tight {
+                    5
+                } else {
+                    3
                 }
             }
-            emit_snippet = Some(combined);
-            // Path residual proxy: max staged arm FO4 (exclusive residual uses this later).
-            structural_after = Some(best_node_after);
-            rewrite_kind = if staged_n > 1 {
-                "stage_hot_arms"
-            } else {
-                "stage_hot_arm"
-            };
+            PathClassKind::IndependentLhsBundle | PathClassKind::DenseControlCone => {
+                if tight {
+                    4
+                } else {
+                    2
+                }
+            }
+            _ => 1,
+        };
+        if let Some(module) = ctx
+            .design
+            .modules
+            .values_mut()
+            .find(|m| m.name == ctx.active_module_name)
+        {
+            // The staging block is emitted at module scope: an arm or LHS that
+            // names a block-local (`automatic logic brh` inside `for … always_comb`,
+            // a loop variable, a generate-local) cannot be hoisted there.
+            let block_local = module.block_local_names();
+            let mut staged_n = 0usize;
+            let mut stage_frags: Vec<String> = Vec::new();
+            let mut best_node_after = 0.0_f64;
+            for cand in path_node_order {
+                if staged_n >= max_stage_arms {
+                    break;
+                }
+                let hoistable = module
+                    .nodes
+                    .get(&cand)
+                    .map(|n| {
+                        let rhs_ok = n
+                            .rhs
+                            .as_deref()
+                            .map(|r| !module.text_refs_block_local(r, &block_local))
+                            .unwrap_or(true);
+                        let lhs_ok = n
+                            .lhs
+                            .as_deref()
+                            .map(|l| !module.text_refs_block_local(l, &block_local))
+                            .unwrap_or(true);
+                        rhs_ok && lhs_ok
+                    })
+                    .unwrap_or(false);
+                if !hoistable {
+                    continue;
+                }
+                let Some(n) = module.nodes.get_mut(&cand) else {
+                    continue;
+                };
+                // Prefer rebalanced form as staging input; fall back to original tree
+                // when rebalance shallow-outs stage_for_balance_mux.
+                let raw_ex = n.rhs_expr.clone().or_else(|| {
+                    n.rhs.as_ref().and_then(|s| {
+                        let p = sv_timing_core::Expr::parse(s);
+                        if p.op_node_count() > 0 {
+                            Some(p)
+                        } else {
+                            None
+                        }
+                    })
+                });
+                let Some(raw_ex) = raw_ex else {
+                    continue;
+                };
+                let rebal = raw_ex.rebalance_associative();
+                let candidates = [rebal, raw_ex];
+                let mut staged_ok = false;
+                for ex in &candidates {
+                    let before_c = ex.fo4_critical_cost(&base);
+                    // Skip shallow arms — only stage when critical FO4 is meaningful.
+                    // Independent-LHS bundles often have mid-size field assigns (~2–4 FO4);
+                    // lower the floor under tight budgets so stage still fires.
+                    let stage_min = if tight { 2.0 } else { 3.0 };
+                    if before_c < stage_min {
+                        continue;
+                    }
+                    let prefix = format!("svt_bm_p{path_id}_n{cand}_");
+                    let Some(plan) = ex.stage_for_balance_mux(&prefix) else {
+                        continue;
+                    };
+                    let top_name = format!("svt_bm_top_p{path_id}_n{cand}");
+                    let after_c = plan.top.fo4_critical_cost(&base);
+                    if after_c > before_c + 1e-9 || plan.wires.is_empty() {
+                        continue;
+                    }
+                    let width = if n.width_defaulted || n.width < 2 {
+                        64
+                    } else {
+                        n.width.min(128)
+                    };
+                    // The top wire takes the LHS type (`var type(lhs)` + cast): the
+                    // origin line becomes `lhs = top`, and an enum/struct LHS has no
+                    // implicit conversion from `logic [w-1:0]` (decoder `fu_t`).
+                    let lhs_text = n
+                        .lhs
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|l| !l.is_empty() && !l.contains("<=") && !l.contains('='));
+                    let frag = plan.to_sv_fragment_typed(Some(&top_name), width, lhs_text);
+                    n.rhs = Some(top_name.clone());
+                    n.rhs_expr = Some(sv_timing_core::Expr::Ident {
+                        name: top_name.clone(),
+                    });
+                    // Stage aggressively toward budget: floor at ~40% of pre-stage (tight)
+                    // or ~45% otherwise so residual max_arm + mux can close ≤16 FO4 @ 2.5 GHz.
+                    let floor_frac = if budget <= 18.0 { 0.40 } else { 0.45 };
+                    let staged = after_c.max(before_c * floor_frac);
+                    n.fo4_cost = staged;
+                    // Keep staged residual FO4 across remeasure (rhs may still re-inflate).
+                    n.fo4_locked = true;
+                    best_node_after = best_node_after.max(staged);
+                    stage_frags.push(frag);
+                    if staged_n == 0 {
+                        emit_rhs = Some(top_name.clone());
+                        rewrite_origin = n.loc.clone();
+                        rewrite_node = cand;
+                        new_name = Some(top_name);
+                    } else {
+                        emit_rhs_extras.push(crate::edit::EmitRhsRewrite {
+                            origin: n.loc.clone(),
+                            emit_rhs: top_name,
+                        });
+                    }
+                    staged_n += 1;
+                    staged_ok = true;
+                    break; // next cand after one successful plan for this node
+                } // end for ex candidates
+                let _ = staged_ok;
+            }
+            if staged_n > 0 {
+                let mut combined = String::new();
+                for f in &stage_frags {
+                    combined.push_str(f);
+                    if !f.ends_with('\n') {
+                        combined.push('\n');
+                    }
+                }
+                emit_snippet = Some(combined);
+                // Path residual proxy: max staged arm FO4 (exclusive residual uses this later).
+                structural_after = Some(best_node_after);
+                rewrite_kind = if staged_n > 1 {
+                    "stage_hot_arms"
+                } else {
+                    "stage_hot_arm"
+                };
+            }
         }
-    }
     } // end A) hot-arm stage
 
     // B) One-hot hierarchical select tree:
@@ -1310,8 +1352,19 @@ pub fn balance_mux_on_path(
                             }
                         })
                         .unwrap_or(64);
+                    // The tree is emitted at module scope: selector, LHS and
+                    // every arm must be module-visible (no block-locals).
+                    let block_local = module.block_local_names();
+                    let scope_ok = !module.text_refs_block_local(&rec.selector, &block_local)
+                        && !module.text_refs_block_local(&rec.lhs, &block_local)
+                        && rec
+                            .arms
+                            .iter()
+                            .all(|a| !module.text_refs_block_local(&a.rhs, &block_local));
                     // Enum/default safety before functional exclusive-LHS wire-up.
-                    if let Err(_why) = crate::case_recover::onehot_wire_checks(&rec) {
+                    if !scope_ok {
+                        // A block-local name in the cone — fall through to credit.
+                    } else if let Err(_why) = crate::case_recover::onehot_wire_checks(&rec) {
                         // Not enough safe arms / bad selector — fall through to credit.
                     } else if let Some(frag) =
                         crate::case_recover::emit_onehot_or_tree(&rec, path_id, width)
@@ -1375,11 +1428,8 @@ pub fn balance_mux_on_path(
                             emit_snippet = Some(combined);
                             rewrite_kind = "stage_hot_arm+onehot_or_tree";
                             // Prefer better (lower) of stage residual estimate and one-hot.
-                            structural_after = Some(
-                                structural_after
-                                    .map(|s| s.min(est))
-                                    .unwrap_or(est),
-                            );
+                            structural_after =
+                                Some(structural_after.map(|s| s.min(est)).unwrap_or(est));
                         } else {
                             emit_snippet = Some(frag);
                             rewrite_kind = "onehot_or_tree";
@@ -1438,8 +1488,7 @@ pub fn balance_mux_on_path(
             .and_then(|m| estimate_balance_path_residual(m, &path_nodes, path.path_class, &model));
         let need = (fo4_before - budget).max(0.0);
         // Strong structural weight after multi-arm stage (was 0.35 — too weak for 2 GHz).
-        let from_struct =
-            (fo4_before - (fo4_before - sa).max(0.0) * 0.80).min(fo4_before - 0.5);
+        let from_struct = (fo4_before - (fo4_before - sa).max(0.0) * 0.80).min(fo4_before - 0.5);
         let credit = (fo4_before * 0.18).min(need + 0.75).max(0.0);
         let with_credit = (fo4_before - credit).max(budget * 0.35);
         let blended = from_struct.min(with_credit).min(fo4_before - 0.5);
@@ -1512,9 +1561,7 @@ pub fn balance_mux_on_path(
         ));
     }
 
-    let note = format!(
-        "balance_mux {rewrite_kind} path {path_id} {fo4_before:.1}->{fo4_after:.1}"
-    );
+    let note = format!("balance_mux {rewrite_kind} path {path_id} {fo4_before:.1}->{fo4_after:.1}");
     if let Some(path) = ctx.design.paths.iter_mut().find(|p| p.id == path_id) {
         path.total_fo4 = fo4_after;
         path.slack_fo4 = budget - fo4_after;
@@ -1545,25 +1592,21 @@ pub fn balance_mux_on_path(
             .paths
             .iter()
             .find(|p| p.id == path_id)
-            .map(|p| {
-                format!(
-                    "balmux|{}|{}",
-                    ctx.active_module_name,
-                    p.nodes.len()
-                )
-            })
+            .map(|p| format!("balmux|{}|{}", ctx.active_module_name, p.nodes.len()))
             .unwrap_or_default();
-        ctx.design.path_exceptions.push(sv_timing_core::PathException {
-            path_id,
-            module_name: ctx.active_module_name.clone(),
-            path_class: path_class_for_balance(ctx, path_id),
-            raw_fo4: raw_for_hint.max(fo4_before),
-            adjusted_fo4: fo4_after,
-            confidence: 0.8,
-            evidence: note.clone(),
-            attempted: Vec::new(),
-            signature: sig,
-        });
+        ctx.design
+            .path_exceptions
+            .push(sv_timing_core::PathException {
+                path_id,
+                module_name: ctx.active_module_name.clone(),
+                path_class: path_class_for_balance(ctx, path_id),
+                raw_fo4: raw_for_hint.max(fo4_before),
+                adjusted_fo4: fo4_after,
+                confidence: 0.8,
+                evidence: note.clone(),
+                attempted: Vec::new(),
+                signature: sig,
+            });
     }
 
     let rec = EditRecord {
@@ -1590,10 +1633,7 @@ pub fn balance_mux_on_path(
     Ok(rec)
 }
 
-fn path_class_for_balance(
-    ctx: &PassContext,
-    path_id: PathId,
-) -> sv_timing_core::PathClassKind {
+fn path_class_for_balance(ctx: &PassContext, path_id: PathId) -> sv_timing_core::PathClassKind {
     ctx.design
         .paths
         .iter()
@@ -1617,10 +1657,7 @@ fn estimate_balance_path_residual(
         };
         if let Some(lhs) = n.lhs.as_ref().map(|s| s.trim().to_string()) {
             if !lhs.is_empty() {
-                by_lhs
-                    .entry(lhs)
-                    .or_default()
-                    .push(n.fo4_cost.max(0.0));
+                by_lhs.entry(lhs).or_default().push(n.fo4_cost.max(0.0));
             }
         }
     }
@@ -1682,10 +1719,10 @@ fn estimate_balance_path_residual(
 mod tests {
     use super::*;
     use crate::pass::PassPolicy;
+    use std::collections::BTreeMap;
     use sv_timing_core::ir::{TimingDesign, TimingPath, TimingTarget};
     use sv_timing_core::loc::OriginKind;
     use sv_timing_core::naming::NameTable;
-    use std::collections::BTreeMap;
 
     fn loc() -> SourceLoc {
         SourceLoc {
@@ -1725,7 +1762,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -1751,14 +1788,8 @@ mod tests {
             },
         );
         design.module_names.insert("m".into(), 0);
-        let start = PathEndpoint::InputPort {
-            module: 0,
-            port: 0,
-        };
-        let end = PathEndpoint::OutputPort {
-            module: 0,
-            port: 1,
-        };
+        let start = PathEndpoint::InputPort { module: 0, port: 0 };
+        let end = PathEndpoint::OutputPort { module: 0, port: 1 };
         design.paths.push(TimingPath {
             id: 0,
             region_id: 0,
@@ -1840,8 +1871,17 @@ mod tests {
         ctx.measure();
         // Original path truncated → lower total FO4 on worst remaining segments
         assert!(ctx.design.paths.len() >= 1);
-        let max_nodes = ctx.design.paths.iter().map(|p| p.nodes.len()).max().unwrap();
-        assert!(max_nodes < 4, "path should be split, max segment {max_nodes}");
+        let max_nodes = ctx
+            .design
+            .paths
+            .iter()
+            .map(|p| p.nodes.len())
+            .max()
+            .unwrap();
+        assert!(
+            max_nodes < 4,
+            "path should be split, max segment {max_nodes}"
+        );
         // Budget multi-cut may insert more than one reg in a single plan.
         assert!(!ctx.trace.records.is_empty());
         assert_eq!(ctx.trace.records.len(), plan.cuts.len());
@@ -1876,7 +1916,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -1902,14 +1942,8 @@ mod tests {
             },
         );
         design.module_names.insert("m".into(), 0);
-        let start = PathEndpoint::InputPort {
-            module: 0,
-            port: 0,
-        };
-        let end = PathEndpoint::OutputPort {
-            module: 0,
-            port: 1,
-        };
+        let start = PathEndpoint::InputPort { module: 0, port: 0 };
+        let end = PathEndpoint::OutputPort { module: 0, port: 1 };
         design.paths.push(TimingPath {
             id: 7,
             region_id: 0,
@@ -1976,7 +2010,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -2002,14 +2036,8 @@ mod tests {
             },
         );
         design.module_names.insert("m".into(), 0);
-        let start = PathEndpoint::InputPort {
-            module: 0,
-            port: 0,
-        };
-        let end = PathEndpoint::OutputPort {
-            module: 0,
-            port: 1,
-        };
+        let start = PathEndpoint::InputPort { module: 0, port: 0 };
+        let end = PathEndpoint::OutputPort { module: 0, port: 1 };
         design.paths.push(TimingPath {
             id: 0,
             region_id: 0,
@@ -2151,7 +2179,14 @@ mod tests {
         );
         // Root keeps mul-only FO4 (56 default)
         let root = path.nodes.last().copied().unwrap();
-        let root_n = ctx.design.modules.get(&0).unwrap().nodes.get(&root).unwrap();
+        let root_n = ctx
+            .design
+            .modules
+            .get(&0)
+            .unwrap()
+            .nodes
+            .get(&root)
+            .unwrap();
         assert!(
             root_n.fo4_cost <= 60.0 && root_n.fo4_cost >= 50.0,
             "root mul cost={}",
@@ -2238,10 +2273,7 @@ mod tests {
         policy.allow_latency = true;
         let ctx = PassContext::new(design, NameTable::new(), policy);
         let err = schedule_pipeline_cuts(&ctx, 3, 32.0, 4);
-        assert!(
-            err.is_err(),
-            "atomic mul over budget must refuse InsertReg"
-        );
+        assert!(err.is_err(), "atomic mul over budget must refuse InsertReg");
     }
 
     #[test]
@@ -2345,12 +2377,9 @@ mod tests {
         insert_register(&mut ctx, &plan).unwrap();
         let capture = PathEndpoint::RegData { cell: 1 };
         assert!(
-            ctx.design
-                .paths
-                .iter()
-                .any(|p| p.end == capture
-                    && matches!(p.start, PathEndpoint::RegData { .. })
-                    && p.path_kind == sv_timing_core::PathKind::RegToReg),
+            ctx.design.paths.iter().any(|p| p.end == capture
+                && matches!(p.start, PathEndpoint::RegData { .. })
+                && p.path_kind == sv_timing_core::PathKind::RegToReg),
             "residual after InsertReg must keep the original capture (RegToReg), paths={:?}",
             ctx.design
                 .paths
@@ -2362,10 +2391,10 @@ mod tests {
                 .collect::<Vec<_>>()
         );
         assert!(
-            !ctx.design.paths.iter().any(|p| matches!(
-                p.end,
-                PathEndpoint::OutputPort { .. }
-            )),
+            !ctx.design
+                .paths
+                .iter()
+                .any(|p| matches!(p.end, PathEndpoint::OutputPort { .. })),
             "dummy OutputPort residual would drop exception_policy"
         );
     }
@@ -2450,7 +2479,10 @@ mod tests {
         let mut ctx = PassContext::new(design, NameTable::new(), policy);
         ctx.active_module_name = "m".into();
         let expanded = expand_expr_spine_for_path(&mut ctx, 7).unwrap();
-        assert!(expanded, "fat non-atomic node on a 3-node path must half-split");
+        assert!(
+            expanded,
+            "fat non-atomic node on a 3-node path must half-split"
+        );
         let path = ctx.design.paths.iter().find(|p| p.id == 7).unwrap();
         assert!(
             path.nodes.len() >= 4,
@@ -2526,7 +2558,10 @@ mod tests {
         assert!(rec.fo4_after.unwrap() <= rec.fo4_before.unwrap() + 1e-9);
         // Reject second rebalance when no further benefit
         let again = rebalance_associative_node(&mut ctx, 0, loc(), Some(0));
-        assert!(again.is_err(), "second rebalance should not claim improvement");
+        assert!(
+            again.is_err(),
+            "second rebalance should not claim improvement"
+        );
     }
 
     #[test]
@@ -2567,7 +2602,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: None,
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -2622,19 +2657,28 @@ mod tests {
         let rec = balance_mux_on_path(&mut ctx, 41, 0, loc()).unwrap();
         assert_eq!(rec.kind, EditKind::BalanceMux);
         assert!(
-            rec.emit_snippet.as_ref().map(|s| s.contains("always_comb")).unwrap_or(false),
+            rec.emit_snippet
+                .as_ref()
+                .map(|s| s.contains("always_comb"))
+                .unwrap_or(false),
             "expected real staging snippet: {:?}",
             rec.emit_snippet
         );
         assert!(
-            rec.emit_rhs.as_ref().map(|s| s.starts_with("svt_bm_top")).unwrap_or(false),
+            rec.emit_rhs
+                .as_ref()
+                .map(|s| s.starts_with("svt_bm_top"))
+                .unwrap_or(false),
             "emit_rhs={:?}",
             rec.emit_rhs
         );
         assert!(rec.rationale.contains("stage_hot_arm"), "{}", rec.rationale);
         let n = ctx.design.modules.get(&0).unwrap().nodes.get(&0).unwrap();
         assert!(
-            n.rhs.as_ref().map(|s| s.starts_with("svt_bm_top")).unwrap_or(false),
+            n.rhs
+                .as_ref()
+                .map(|s| s.starts_with("svt_bm_top"))
+                .unwrap_or(false),
             "node rhs={:?}",
             n.rhs
         );
@@ -2688,7 +2732,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: Some("op_i".into()),
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -2758,7 +2802,12 @@ mod tests {
                 rec.rationale
             );
             assert!(
-                !rec.emit_rhs_extras.is_empty() || rec.emit_rhs.as_ref().map(|s| s.contains("svt_bm_oh")).unwrap_or(false),
+                !rec.emit_rhs_extras.is_empty()
+                    || rec
+                        .emit_rhs
+                        .as_ref()
+                        .map(|s| s.contains("svt_bm_oh"))
+                        .unwrap_or(false),
                 "expected exclusive LHS wire-up"
             );
         }
@@ -2803,7 +2852,7 @@ mod tests {
                     case_is_default: false,
                     case_selector: Some("op_i".into()),
                     fo4_locked: false,
-                assign_kind: Default::default(),
+                    assign_kind: Default::default(),
                 },
             );
         }
@@ -2906,7 +2955,10 @@ mod tests {
         );
         let snip = rec.emit_snippet.as_deref().unwrap_or("");
         assert!(snip.contains(top), "snippet missing top");
-        assert!(snip.contains("op_i") && snip.contains("ADD"), "enum compares: {snip}");
+        assert!(
+            snip.contains("op_i") && snip.contains("ADD"),
+            "enum compares: {snip}"
+        );
     }
 
     #[test]

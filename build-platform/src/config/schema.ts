@@ -620,12 +620,43 @@ export interface MotherboardConfig {
 // Physical design
 // ---------------------------------------------------------------------------
 
+/**
+ * The sv-timing structural pass of record, run on the RTL before gate-level
+ * STA (`timings sta-rtl`; `--fo4 N` overrides, `--fo4 0` skips). The budget is
+ * FO4 per stage; sv-timing derives it from a clock target, so the host turns
+ * it back into that clock (`targetMhzForFo4Budget`: 10 FO4 at `fo4Ps` 20 and
+ * margin 0.2 is 4000 MHz). `fo4Ps` is a process input — quote it with every
+ * number (sv-timing AGENTS.md §3.2.1). Measured on g6lc64_ooo 2026-10-15 at
+ * these settings: 32 BalanceMux rewrites, failing endpoints 389 → 381, worst
+ * path 31.0 FO4 unchanged; the T3 multi-cycle relocations stay manual.
+ */
+export interface StructuralTimingConfig {
+  /** Structural budget in FO4 per stage; 0 = no sv-timing pass (live RTL). */
+  fo4Budget: number;
+  /** Process FO4 in ps behind the budget. */
+  fo4Ps: number;
+  /** Budget margin 0..1. */
+  budgetMargin: number;
+  /** sv-timing `--opt-level` preset (`0`..`3`, `s`, `z`); `3` is the only multi-cut one. */
+  optLevel: string;
+  /**
+   * Raw sv-timing `correct` arguments appended to the pre-pass. The emit
+   * options stay here, not in code: `--real-cut-feeds` turns the BalanceMux
+   * edits into the origin RHS rewrite (typed `type(<lhs>)` wires, block-local
+   * arms refused since 2026-10-15); `--emit-balance-mux-rtl` adds the one-hot
+   * snippets. `timings sta-rtl --svt-args` appends after these.
+   */
+  svtArgs: string[];
+}
+
 export interface PhysicalDesignConfig {
   flow: PhysicalDesignFlow;
   /** PDK descriptor; only required for real PnR flows. */
   pdk?: { name: string; root?: string; source?: AcquisitionMethod };
   /** Extra TCL/constraint files layered on top of pd/synth. */
   constraintFiles: string[];
+  /** See StructuralTimingConfig. */
+  structural: StructuralTimingConfig;
 }
 
 // ---------------------------------------------------------------------------

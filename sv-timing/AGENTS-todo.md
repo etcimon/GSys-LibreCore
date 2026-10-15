@@ -13,33 +13,98 @@ the whole `g6lc64_ooo` core (264 files), and the structural BalanceMux RTL emit 
 elaboration in two ways — both package defects, both reproducible with
 `correct … --emit --emit-balance-mux-rtl` at `--target-mhz 4000` on `core/`:
 
-- [ ] **Scope.** The arm staging hoists an arm expression to module scope while it
-      references a block-local: `core/perf_counters.sv:241` declares
-      `automatic logic brh = …` inside a `for` in an `always_comb`; the emit writes
-      `svt_bm_p3430_n12618_1 = &brh;` in a new module-level `always_comb`
-      (`perf_counters__svt.sv:243`, also `act`). Either refuse the rewrite when the arm
-      references automatic/loop-scoped names, or stage inside the originating block.
-- [ ] **Type.** The staging wires are declared `logic [64-1:0]` (XLEN from the param
-      map) whatever the LHS type: `instruction_o.fu = svt_bm_top_p2691_n9446` and
-      `imm_select = …` in `decoder__svt.sv:932/1201/1912` fail with "no implicit
-      conversion from logic[63:0] to fu_t / enum". Declare the top wire with the LHS's
-      type (`type(<lhs>)` or the resolved declared type) or cast on assignment.
-- [x] Host side: neither `--real-cut-feeds` (it is what turns the 32 `balancemux` edits
-      into the origin RHS rewrite — without it the same `-O3` run emits 451 `annotate`
-      edits only) nor `--emit-balance-mux-rtl` is in the host's default pre-pass until
-      both are fixed; the annotated passthrough emit elaborates (it is the live RTL).
-      `--svt-args "--real-cut-feeds --emit-balance-mux-rtl"` opts in.
+- [x] **Scope** (fixed 2026-10-15). The arm staging hoisted an arm expression to module
+      scope while it referenced a block-local: `core/perf_counters.sv:241` declares
+      `automatic logic brh = …` inside a `for` in an `always_comb`; the emit wrote
+      `svt_bm_p3430_n12618_1 = &brh;` in a new module-level `always_comb`. Now
+      `DeclSite::block_local` (lower: names declared under `SeqBlock` /
+      `FunctionDeclaration` / `TaskDeclaration` / `GenerateBlock`, plus every
+      `ForVariableDeclaration` as its own site), `TimingModule::block_local_names` /
+      `text_refs_block_local`, and the BalanceMux stage (A) and one-hot tree (B) in
+      `pipeline.rs` refuse a candidate whose RHS, LHS, selector or arm names one. The
+      emit-side textual guard (`rhs.rs::snippet_refs_late_declared_local`) also
+      recognises `automatic …` / `var …` declarations and `for (… h = …)` loop variables.
+- [x] **Type** (fixed 2026-10-15). The top wire that flows back into the origin LHS is
+      declared `var type(<lhs>) top;` and assigned `top = type(<lhs>)'(<expr>);`
+      (`ExprStagePlan::to_sv_fragment_typed`, one-hot `_top` in `case_recover.rs`); the
+      staging wires keep the context width. InsertReg pipes with a plain name-path LHS
+      get the same (`dense.rs::simple_type_operand`: `var type(lhs) pipe{,_c}`, reset
+      `type(lhs)'('0)`, feed `type(lhs)'((rhs))`). slang (yosys `read_slang`) and the
+      vendored sv-parser accept both forms; `decoder__svt.sv` now reads
+      `var type(instruction_o.fu) svt_bm_top_p2691_n9446;`.
+- [x] **Declaration order** (fixed 2026-10-15, surfaced once InsertReg emitted for real).
+      The dense pipe block is injected before `endmodule` (R11, so feeds can read
+      mid-module nets), but with real feeds the origin lines read the pipes far above
+      it — a procedural `we_fpr_o = pipe_svt_p1_54;` (commit_stage), an or-reduce prep
+      in a continuous assign (`wr_cl_inv = pipe_svt_red_wr_cl_we_302 & …`, wt_dcache),
+      an emit extra — and SV reads a variable only after its declaration ("used before
+      its declaration", slang). Under `real_cut_feeds` every pipe pair is now declared
+      right after the module header (`EmitBlocks::top`, `inject_after_module_header`,
+      `dense::module_header_span` skips header `import pkg::*;` and balances `#(…)`/
+      port parens — `module aes import ariane_pkg::*; …` put the block between the two
+      imports before that); `type(<lhs>)` is used there only when the LHS root is a
+      header identifier (a port), else the vector width. Feeds, reset and capture stay
+      late. A first attempt keyed the declarations on the marker's first use
+      (`inject_bm_snippets_at_origin`) and split the emitter's own `// … via pipe` comment
+      in two — the marker search now runs on comment-masked text and never splits a
+      line (`enclosing_process_byte_for_marker`).
+- [x] **Generate-local cut** (fixed 2026-10-15). `select_pipeline_cuts` refuses a cut
+      whose node LHS/RHS names a block-local (raw_checker `gen_same_rd` `logic
+      same_hart`; wt_dcache `wire cmo_req` under `if (CVA6Cfg.RVZiCbom)` — nets inside
+      `SeqBlock`/`GenerateBlock`/function/task now get a `block_local` DeclSite too,
+      from their `NetDeclaration`, not from `NetIdentifier`s, which also match an
+      `assign` LHS). `line_inside_generate` only knew the `generate` keyword;
+      keyword-less generate-for/if is the LibreCore style.
+- [x] **Gate.** The 31.0 FO4 `instr_queue` chain (and 46 other refusals) was not a
+      structural leaf: `apply_work_item` returned `incomplete_gate` — `resolve_gate`
+      finds no default clock/edge and `--assume-clk` was not set. The monorepo soak
+      profile has `assume_clk = true`; the host pre-pass now passes it (every LibreCore
+      module gates on `posedge clk_i` / `negedge rst_ni`). With it the same run places
+      **82 InsertReg** + 32 BalanceMux: failing endpoints 389 → 333, worst 31.0 → 23.5
+      FO4 (`scoreboard.reg1/D`), max ≈ 1290 → 1702 MHz. Still owed: infer the gate
+      from the module's own `always_ff` so `--assume-clk` is not needed.
+- [x] Host side: `--real-cut-feeds --assume-clk` are now in the host's default pre-pass
+      (`physicalDesign.structural.svtArgs`); `--emit-balance-mux-rtl` stays opt-in via
+      `--svt-args` until its one-hot tree is validated on the core.
 - [ ] Add the two shapes to `verif-regress` (automatic-in-loop arm; enum/struct-typed
-      LHS) so the pyslang lint catches them in-package.
+      LHS) so the pyslang lint catches them in-package. Unit tests pin them for now:
+      `lower::decl_sites_flag_block_locals_and_loop_variables`,
+      `expr::typed_stage_fragment_declares_top_as_lhs_type_and_casts`,
+      `rhs::late_declared_local_catches_automatic_and_loop_variables`,
+      `lib::cut_feed_references_mid_module_net_after_decl` (typed pipe).
 
 Measured on `g6lc64_ooo` at 10 FO4 (4000 MHz, fo4_ps 20, margin 0.2; release build,
 ~2 min): `-O2` → 451 edits, all `annotate`; `-O3` + 13 stages + real-feed +
 balance-mux RTL → 483 edits (451 annotate, 32 balancemux), failing endpoints 389 → 353,
 worst path **31.0 FO4 unchanged** (`instr_queue.reg0/CP → reg1/D`; 97.5 raw), max ≈
-1290 MHz. `InsertReg` refused on the P10 handshake-locked cones; 407 relocation cards,
-the T3 multi-cycle options manual. Host adapter fixes landed alongside: `correct` no
-longer receives `--cache` (analyze-only; exit 2 before), `svt.py run --release`,
-`--budget-fo4` → `--target-mhz` through `TimingTarget::new`'s inverse.
+1290 MHz — those 32 edits did not elaborate (above). After the fixes, same dials:
+483 edits, 8 files with typed staging, failing 381, elaborates. With `--assume-clk`
+added: 565 edits (451 annotate, 82 insertreg, 32 balancemux), failing 333, worst 23.5,
+max ≈ 1702 MHz. 407 relocation cards, the T3 multi-cycle options manual. Host adapter
+fixes landed alongside: `correct` no longer receives `--cache` (analyze-only; exit 2
+before), `svt.py run --release`, `--budget-fo4` → `--target-mhz` through
+`TimingTarget::new`'s inverse.
+
+### The over-budget trial (`pass_strategy::OverBudgetTrial`, same day) — evaluation
+
+`trial_for_path` chooses one tool per over-budget path (Leave / RefuseRegister /
+BalanceField / CriticalChain / BalanceThenRegister); `apply_work_item` and the
+worklist honour it; `trial_matches_over_budget_shapes` pins the 31 FO4 chain, the 97.5
+multi-cycle leave, the P10 refusal, the dense-cone balance-only rule and the atomic
+multiply leave. What the trace of the real run adds:
+
+- The register the trial allows on the chain only lands once the gate resolves; the
+  trial was not the blocker, `incomplete_gate` was. "A path still above 10 FO4 is a fat
+  operator, a real handshake, or a multi-cycle tag" therefore holds only *after*
+  `--assume-clk` (or gate inference) — before it, every chain was a fourth leaf.
+- Two more leaves exist by construction: a `BalanceField` cone whose balance cannot
+  reach the budget (`alu.in0 → out0` dense control, 29 → 28.8 FO4), and a
+  `CriticalChain` whose cut is refused downstream of the trial (`cleanliness_set`, 41 of
+  the 42 remaining refusals; `cut_schedule`; the per-module cap). The post-emit worst,
+  `scoreboard.reg1/D` 23.5, is one of these, not one of the three named leaves.
+- `RefuseRegister` keys on the `class_note` text ("P10 handshake", "indexed restore").
+  It is deterministic (A27 writes the note) but a detector predicate would be the
+  honest coupling; left as is.
 
 ## 2026-09-09 — delay-v21 leftover measurement (general)
 

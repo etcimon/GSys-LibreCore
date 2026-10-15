@@ -240,14 +240,8 @@ impl PassContext {
         ]);
         if let Some(plan) = &self.relocation {
             fields.insert("reloc_cards".into(), json!(plan.summary.cards));
-            fields.insert(
-                "reloc_t3_only".into(),
-                json!(plan.summary.t3_only_cards),
-            );
-            fields.insert(
-                "reloc_by_pattern".into(),
-                json!(plan.summary.by_pattern),
-            );
+            fields.insert("reloc_t3_only".into(), json!(plan.summary.t3_only_cards));
+            fields.insert("reloc_by_pattern".into(), json!(plan.summary.by_pattern));
         }
         self.log_algo("measure", fields);
     }
@@ -329,7 +323,10 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
             ("allow_latency", json!(ctx.policy.allow_latency)),
             ("emit_structural", json!(ctx.policy.emit_structural)),
             ("opt", json!(ctx.policy.opt.summary())),
-            ("allow_modules", json!(ctx.policy.correct_allow_modules.len())),
+            (
+                "allow_modules",
+                json!(ctx.policy.correct_allow_modules.len()),
+            ),
         ]),
     );
     ctx.measure();
@@ -480,8 +477,8 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
                     // Resilient datapath may still carry a P10 class_note from
                     // sharing an always_ff with a status pulse (gemm 144-node).
                     // Exception policy decides; admits_insert_reg is the default.
-                    let resilient = exception_policy(&ctx.design, path)
-                        .is_some_and(|e| e.admit_insert_reg);
+                    let resilient =
+                        exception_policy(&ctx.design, path).is_some_and(|e| e.admit_insert_reg);
                     if !resilient && !admits_insert_reg(path) {
                         return None;
                     }
@@ -497,8 +494,7 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
                         if path_span_lhs_all_cut(&ctx.design, path, cut) {
                             return None;
                         }
-                        if extra_uncut_span && !s4_sibling_span_pending(&ctx.design, path)
-                        {
+                        if extra_uncut_span && !s4_sibling_span_pending(&ctx.design, path) {
                             return None;
                         }
                         if opp.kind != OpportunityKind::InsertReg {
@@ -595,10 +591,7 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
             stage_s4 = true;
             stage_passes = 0;
             flat_streak = 0;
-            ctx.log_algo(
-                "stage.s4",
-                AlgoTrace::kv([("reason", json!("s3_empty"))]),
-            );
+            ctx.log_algo("stage.s4", AlgoTrace::kv([("reason", json!("s3_empty"))]));
             continue;
         }
         if ctx.algo_trace.is_enabled() {
@@ -617,10 +610,7 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
                 .collect();
             ctx.log_algo(
                 "worklist",
-                AlgoTrace::kv([
-                    ("items", json!(work.len())),
-                    ("preview", json!(preview)),
-                ]),
+                AlgoTrace::kv([("items", json!(work.len())), ("preview", json!(preview))]),
             );
         }
 
@@ -786,7 +776,10 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
                     ("fo4_before", json!(fo4_before)),
                     ("fo4_after", json!(fo4_after)),
                     ("edit_kind", json!(apply_kind)),
-                    ("opp", json!(item.opportunity.as_ref().map(|o| format!("{:?}", o.kind)))),
+                    (
+                        "opp",
+                        json!(item.opportunity.as_ref().map(|o| format!("{:?}", o.kind))),
+                    ),
                     ("reason", json!(refuse_reason)),
                 ]),
             );
@@ -803,8 +796,7 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
             if apply_kind.as_deref() == Some("insertreg") {
                 if let Some(m) = module_name.as_ref() {
                     *ctx.insert_reg_by_module.entry(m.clone()).or_insert(0) += 1;
-                    if let Some(path) = ctx.design.paths.iter().find(|p| p.id == item.path_id)
-                    {
+                    if let Some(path) = ctx.design.paths.iter().find(|p| p.id == item.path_id) {
                         let names = span_family_lhs_on_path(&ctx.design, path);
                         if !names.is_empty() {
                             cut_span_lhs.entry(m.clone()).or_default().extend(names);
@@ -918,10 +910,7 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
                 s4_sibling_span_pending(&ctx.design, p)
                     && !path_span_lhs_all_cut(&ctx.design, p, cut)
             });
-            if stage_s4
-                && sibling_extra < SIBLING_EXTRA_CAP
-                && ctx.policy.emit_structural
-                && uncut
+            if stage_s4 && sibling_extra < SIBLING_EXTRA_CAP && ctx.policy.emit_structural && uncut
             {
                 sibling_extra += 1;
                 extra_uncut_span = true;
@@ -957,7 +946,11 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
         }
     }
     // PASS-STRATEGY S5: T3 asks (P8 deep datapath / P9 iterative) — report only.
-    let t3 = ctx.relocation.as_ref().map(|r| r.summary.t3_only_cards).unwrap_or(0);
+    let t3 = ctx
+        .relocation
+        .as_ref()
+        .map(|r| r.summary.t3_only_cards)
+        .unwrap_or(0);
     let p8 = ctx
         .design
         .paths
@@ -1066,8 +1059,7 @@ fn apply_work_item(
 
     let insert_preferred =
         reloc_id.contains("insert_reg") || opp.kind == OpportunityKind::InsertReg;
-    let balance_preferred =
-        reloc_id.contains("balance") || opp.kind == OpportunityKind::BalanceMux;
+    let balance_preferred = reloc_id.contains("balance") || opp.kind == OpportunityKind::BalanceMux;
     let admit_ex = ctx
         .design
         .paths
@@ -1084,6 +1076,15 @@ fn apply_work_item(
         return Ok((false, Some("lean_emit_no_origin_rewrite")));
     }
 
+    // Pattern trial. Multi-cycle and atomic leaves are not cut. A handshake
+    // takes no register. A dense cone or independent bundle is balance-only.
+    if let Some(path) = ctx.design.paths.iter().find(|p| p.id == opp.path_id) {
+        let trial = sv_timing_core::pass_strategy::trial_for_path(path);
+        if !sv_timing_core::pass_strategy::trial_allows(trial, opp.kind) {
+            return Ok((false, Some("trial_disallows_kind")));
+        }
+    }
+
     // 0) PrepStage from relocation (atomic / deep expr) — before anything else.
     let prep_requested = !insert_preferred
         && (reloc_id.contains("prep_stage")
@@ -1098,8 +1099,7 @@ fn apply_work_item(
                         "relocation {reloc_id} prep_stage expand_expr_spine path {} (latency-neutral)",
                         opp.path_id
                     );
-                } else if let Some(path) =
-                    ctx.design.paths.iter_mut().find(|p| p.id == opp.path_id)
+                } else if let Some(path) = ctx.design.paths.iter_mut().find(|p| p.id == opp.path_id)
                 {
                     let note = format!(
                         "relocation {reloc_id} prep_stage spine expand; {}",
@@ -1125,12 +1125,8 @@ fn apply_work_item(
     // 1) BalanceMux first on exclusive/bundle residuals. Full-core evidence:
     // rebalance_associative can "succeed" (depth −1) and consume the apply slot
     // while leaving exclusive residual ~46 FO4 — starving stage/onehot.
-    if !did
-        && !insert_preferred
-        && (balance_preferred || exclusive_shape)
-    {
-        if crate::pipeline::balance_mux_on_path(ctx, opp.path_id, node, origin.clone()).is_ok()
-        {
+    if !did && !insert_preferred && (balance_preferred || exclusive_shape) {
+        if crate::pipeline::balance_mux_on_path(ctx, opp.path_id, node, origin.clone()).is_ok() {
             did = true;
             if let Some(last) = ctx.trace.records.last_mut() {
                 if !reloc_id.is_empty() {
@@ -1142,13 +1138,8 @@ fn apply_work_item(
     // 2) Associative rebalance (plain cones / BalanceMux miss).
     if !did
         && !insert_preferred
-        && crate::pipeline::rebalance_associative_node(
-            ctx,
-            node,
-            origin.clone(),
-            Some(opp.path_id),
-        )
-        .is_ok()
+        && crate::pipeline::rebalance_associative_node(ctx, node, origin.clone(), Some(opp.path_id))
+            .is_ok()
     {
         did = true;
         if let Some(last) = ctx.trace.records.last_mut() {
@@ -1208,8 +1199,7 @@ fn apply_work_item(
                     did = true;
                     if let Some(last) = ctx.trace.records.last_mut() {
                         if !reloc_id.is_empty() {
-                            last.rationale =
-                                format!("relocation {reloc_id}; {}", last.rationale);
+                            last.rationale = format!("relocation {reloc_id}; {}", last.rationale);
                         }
                     }
                 }
@@ -1246,10 +1236,10 @@ fn apply_work_item(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::path::PathBuf;
     use sv_timing_core::{
         analyze_files, default_fo4_v1_embedded, LowerOptions, ParseOptions, TimingTarget,
     };
-    use std::path::PathBuf;
 
     #[test]
     fn correct_from_analyze_deep_add_chain() {
@@ -1277,13 +1267,23 @@ mod tests {
         let mut ctx = PassContext::new(out.design, out.names, policy);
         ctx.assume_clk = true;
         ctx.cost_model = default_fo4_v1_embedded();
-        let before = ctx.design.paths.iter().map(|p| p.total_fo4).fold(0.0, f64::max);
+        let before = ctx
+            .design
+            .paths
+            .iter()
+            .map(|p| p.total_fo4)
+            .fold(0.0, f64::max);
         let ctx = run_correct_passes(ctx).expect("correct");
         assert!(
             !ctx.trace.records.is_empty(),
             "expected at least one edit on over-budget design"
         );
-        let after = ctx.design.paths.iter().map(|p| p.total_fo4).fold(0.0, f64::max);
+        let after = ctx
+            .design
+            .paths
+            .iter()
+            .map(|p| p.total_fo4)
+            .fold(0.0, f64::max);
         // After split, no segment should exceed the original full-path FO4.
         assert!(after <= before + 1e-6, "before={before} after={after}");
     }
@@ -1308,10 +1308,7 @@ mod tests {
         policy.correct_allow_modules = vec!["deep_add_chain".into()];
         policy.allow_latency = true;
         policy.max_passes = 2;
-        let dir = std::env::temp_dir().join(format!(
-            "svt-pass-trace-{}",
-            std::process::id()
-        ));
+        let dir = std::env::temp_dir().join(format!("svt-pass-trace-{}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         let logp = dir.join("algo-trace.jsonl");
         let tracer = AlgoTrace::to_file(&logp).expect("trace file");
@@ -1322,7 +1319,10 @@ mod tests {
         let text = std::fs::read_to_string(&logp).expect("read trace");
         assert!(text.contains("\"kind\":\"run.start\""), "{text}");
         assert!(text.contains("\"kind\":\"measure\""), "{text}");
-        assert!(text.contains("\"kind\":\"run.end\"") || text.contains("\"kind\":\"run.stop\""), "{text}");
+        assert!(
+            text.contains("\"kind\":\"run.end\"") || text.contains("\"kind\":\"run.stop\""),
+            "{text}"
+        );
         assert!(
             text.contains("refuse_by_reason") || text.contains("\"kind\":\"run.stop\""),
             "PASS-STRATEGY §6.4: run.end should count refuses: {text}"
@@ -1363,9 +1363,7 @@ mod tests {
             .trace
             .records
             .iter()
-            .filter(|r| {
-                !matches!(r.kind, crate::edit::EditKind::Annotate)
-            })
+            .filter(|r| !matches!(r.kind, crate::edit::EditKind::Annotate))
             .map(|r| format!("{:?}", r.kind))
             .collect();
         assert!(

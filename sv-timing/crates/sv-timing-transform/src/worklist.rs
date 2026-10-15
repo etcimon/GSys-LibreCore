@@ -91,6 +91,15 @@ pub fn order_worklist_with_plan(
                 // Primary single-cycle failing paths (large plain / exclusive / bundle).
                 if let Some(p) = primary_by_id.get(&card.path_id).copied() {
                     if !p.multi_cycle {
+                        let trial = sv_timing_core::pass_strategy::trial_for_path(p);
+                        if matches!(
+                            trial,
+                            sv_timing_core::pass_strategy::OverBudgetTrial::Leave
+                                | sv_timing_core::pass_strategy::OverBudgetTrial::RefuseRegister
+                        ) {
+                            seen.insert(p.id);
+                            continue;
+                        }
                         let (opportunity, opt_id) =
                             pick_opportunity_for_card(card, p, opportunities);
                         if opportunity.is_none()
@@ -140,8 +149,7 @@ pub fn order_worklist_with_plan(
                     ) {
                         continue;
                     }
-                    let (opportunity, opt_id) =
-                        pick_opportunity_for_card(card, p, opportunities);
+                    let (opportunity, opt_id) = pick_opportunity_for_card(card, p, opportunities);
                     if opportunity.is_none() {
                         continue;
                     }
@@ -227,7 +235,9 @@ pub fn order_worklist_with_plan(
         let n = soft_atomic_prep.len() as f64;
         ((n.sqrt().ceil() as usize).max(2)).min(cap / 4).max(1)
     };
-    let primary_cap = cap.saturating_sub(prep_slots).max(policy.max_items.min(cap));
+    let primary_cap = cap
+        .saturating_sub(prep_slots)
+        .max(policy.max_items.min(cap));
     items.truncate(primary_cap);
     let room = cap.saturating_sub(items.len());
     items.extend(soft_atomic_prep.into_iter().take(room));
@@ -239,10 +249,26 @@ fn pick_opportunity_for_card(
     path: &TimingPath,
     opportunities: &[Opportunity],
 ) -> (Option<Opportunity>, Option<String>) {
-    for opt in &card.options {
-        if !opt.auto_correct {
-            continue;
-        }
+    let trial = sv_timing_core::pass_strategy::trial_for_path(path);
+    let prefer_reg = sv_timing_core::pass_strategy::trial_prefers_register(path);
+    let mut options: Vec<_> = card
+        .options
+        .iter()
+        .filter(|opt| opt.auto_correct)
+        .filter(|opt| {
+            relocation_to_opportunity_kind(opt.kind)
+                .is_some_and(|kind| sv_timing_core::pass_strategy::trial_allows(trial, kind))
+        })
+        .collect();
+    if prefer_reg {
+        options.sort_by_key(|opt| {
+            !matches!(
+                relocation_to_opportunity_kind(opt.kind),
+                Some(OpportunityKind::InsertReg)
+            )
+        });
+    }
+    for opt in options {
         let Some(want) = relocation_to_opportunity_kind(opt.kind) else {
             continue;
         };
@@ -261,10 +287,7 @@ fn pick_opportunity_for_card(
             estimated_fo4_before: path.total_fo4,
             estimated_fo4_after: opt.expected_fo4_after,
             loc: path.primary_loc.clone(),
-            rationale: format!(
-                "relocation {} → {:?} (synthesized from plan)",
-                opt.id, want
-            ),
+            rationale: format!("relocation {} → {:?} (synthesized from plan)", opt.id, want),
             requires_clock_in_scope: matches!(want, OpportunityKind::InsertReg),
             changes_latency: matches!(want, OpportunityKind::InsertReg),
         };
@@ -277,13 +300,26 @@ fn pick_opportunity_for_card(
 }
 
 fn pick_opportunity_default(p: &TimingPath, opportunities: &[Opportunity]) -> Option<Opportunity> {
+    let trial = sv_timing_core::pass_strategy::trial_for_path(p);
+    let prefer_reg = sv_timing_core::pass_strategy::trial_prefers_register(p);
     opportunities
         .iter()
         .filter(|o| o.path_id == p.id)
-        .min_by_key(|o| match o.kind {
-            OpportunityKind::BalanceMux => 0u8,
-            OpportunityKind::SplitAssign => 1,
-            OpportunityKind::InsertReg => 2,
+        .filter(|o| sv_timing_core::pass_strategy::trial_allows(trial, o.kind))
+        .min_by_key(|o| {
+            if prefer_reg {
+                match o.kind {
+                    OpportunityKind::InsertReg => 0u8,
+                    OpportunityKind::BalanceMux => 1,
+                    OpportunityKind::SplitAssign => 2,
+                }
+            } else {
+                match o.kind {
+                    OpportunityKind::BalanceMux => 0u8,
+                    OpportunityKind::SplitAssign => 1,
+                    OpportunityKind::InsertReg => 2,
+                }
+            }
         })
         .cloned()
 }
@@ -303,24 +339,18 @@ fn path_to_item(p: &TimingPath, opportunities: &[Opportunity]) -> WorkItem {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
     use sv_timing_core::ir::PathEndpoint;
-    use sv_timing_core::loc::{OriginKind, SourceLoc};
     use sv_timing_core::ir::{IrNode, OperatorClass, PathKind, TimingModule};
+    use sv_timing_core::loc::{OriginKind, SourceLoc};
     use sv_timing_core::{
         build_relocation_plan, classify_and_adjust_paths, CostModel, PathClassKind, TimingDesign,
         TimingTarget,
     };
-    use std::collections::BTreeMap;
 
     fn path(id: PathId, slack: f64, file: &str, line: u32) -> TimingPath {
-        let start = PathEndpoint::InputPort {
-            module: 0,
-            port: 0,
-        };
-        let end = PathEndpoint::OutputPort {
-            module: 0,
-            port: 1,
-        };
+        let start = PathEndpoint::InputPort { module: 0, port: 0 };
+        let end = PathEndpoint::OutputPort { module: 0, port: 1 };
         TimingPath {
             id,
             region_id: 0,
@@ -431,12 +461,8 @@ mod tests {
             multi_cycle: vec![],
         };
         let opps = sv_timing_core::suggest_opportunities(&design);
-        let work = order_worklist_with_plan(
-            &ranked,
-            &opps,
-            &WorklistPolicy::default(),
-            Some(&plan),
-        );
+        let work =
+            order_worklist_with_plan(&ranked, &opps, &WorklistPolicy::default(), Some(&plan));
         assert!(!work.is_empty());
         let w = &work[0];
         assert_eq!(w.path_id, 41);

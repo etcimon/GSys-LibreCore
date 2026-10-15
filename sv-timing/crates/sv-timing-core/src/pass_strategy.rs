@@ -806,6 +806,70 @@ pub fn path_has_indexed_restore(design: &TimingDesign, path: &TimingPath) -> boo
     false
 }
 
+/// Which structural tool may run on one over-budget path.
+///
+/// Derived from the P1–P10 catalog and the g6lc64_ooo paths that stay over
+/// a 10 FO4 budget. Lean emit still refuses every structural edit; this only
+/// chooses the tool once origin rewrite is on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OverBudgetTrial {
+    /// Multi-cycle, a single atomic operator, or already at budget.
+    Leave,
+    /// Real handshake or indexed restore. No register and no mux rewrite.
+    RefuseRegister,
+    /// Dense cone or independent left-hand sides. Balance the fat field only.
+    BalanceField,
+    /// Plain register-to-register chain. Budget-fit register on the makespan.
+    CriticalChain,
+    /// In-to-out or register-to-output. Balance first, then one register.
+    BalanceThenRegister,
+}
+
+/// Trial for `path`. Handshake notes and multi-cycle tags win over class.
+pub fn trial_for_path(path: &TimingPath) -> OverBudgetTrial {
+    if path.slack_fo4 >= -1e-9 {
+        return OverBudgetTrial::Leave;
+    }
+    if path.multi_cycle || path.path_class == PathClassKind::MultiCycleTagged {
+        return OverBudgetTrial::Leave;
+    }
+    if path.path_class == PathClassKind::AtomicOverBudget && path.nodes.len() <= 1 {
+        return OverBudgetTrial::Leave;
+    }
+    let note = path.class_note.as_deref().unwrap_or("");
+    if note.contains("P10 handshake") || note.contains("indexed restore") {
+        return OverBudgetTrial::RefuseRegister;
+    }
+    if path.path_class == PathClassKind::DenseControlCone
+        || path.path_class == PathClassKind::IndependentLhsBundle
+    {
+        return OverBudgetTrial::BalanceField;
+    }
+    if path.path_kind == PathKind::RegToReg && path.nodes.len() > 1 {
+        return OverBudgetTrial::CriticalChain;
+    }
+    OverBudgetTrial::BalanceThenRegister
+}
+
+/// Whether this opportunity kind is legal for the trial.
+pub fn trial_allows(trial: OverBudgetTrial, kind: crate::ir::OpportunityKind) -> bool {
+    use crate::ir::OpportunityKind::*;
+    match trial {
+        OverBudgetTrial::Leave | OverBudgetTrial::RefuseRegister => false,
+        OverBudgetTrial::BalanceField => matches!(kind, BalanceMux | SplitAssign),
+        OverBudgetTrial::CriticalChain | OverBudgetTrial::BalanceThenRegister => true,
+    }
+}
+
+/// Deep plain chain (at least twice the budget). One balance does not close it.
+pub fn trial_prefers_register(path: &TimingPath) -> bool {
+    if !matches!(trial_for_path(path), OverBudgetTrial::CriticalChain) {
+        return false;
+    }
+    let budget = path.total_fo4 + path.slack_fo4;
+    budget > 1e-9 && path.total_fo4 + 1e-9 >= 2.0 * budget
+}
+
 /// Latency-neutral kinds run in S3 (before any InsertReg).
 pub fn is_latency_neutral_kind(kind: crate::ir::OpportunityKind) -> bool {
     matches!(
@@ -866,6 +930,58 @@ mod tests {
         p.nodes = vec![0, 1];
         p.multi_cycle = true;
         assert!(!is_shallow_over_budget(&p, budget));
+    }
+
+    #[test]
+    fn trial_matches_over_budget_shapes() {
+        let mut p = plain_regtoreg(31.0, 12, 10.0);
+        assert_eq!(trial_for_path(&p), OverBudgetTrial::CriticalChain);
+        assert!(trial_prefers_register(&p));
+        p.total_fo4 = 14.5;
+        p.slack_fo4 = -4.5;
+        assert!(trial_allows(
+            trial_for_path(&p),
+            crate::ir::OpportunityKind::InsertReg
+        ));
+        assert!(!trial_prefers_register(&p));
+
+        p.multi_cycle = true;
+        p.path_class = PathClassKind::MultiCycleTagged;
+        p.total_fo4 = 97.5;
+        p.slack_fo4 = -87.5;
+        assert_eq!(trial_for_path(&p), OverBudgetTrial::Leave);
+
+        p.multi_cycle = false;
+        p.path_class = PathClassKind::Plain;
+        p.total_fo4 = 23.5;
+        p.slack_fo4 = -13.5;
+        p.class_note = Some("P10 handshake lock (same-edge pulse+index)".into());
+        assert_eq!(trial_for_path(&p), OverBudgetTrial::RefuseRegister);
+        assert!(!trial_allows(
+            OverBudgetTrial::RefuseRegister,
+            crate::ir::OpportunityKind::InsertReg
+        ));
+
+        p.class_note = None;
+        p.path_class = PathClassKind::DenseControlCone;
+        p.path_kind = PathKind::InToOut;
+        p.total_fo4 = 29.0;
+        p.slack_fo4 = -19.0;
+        assert_eq!(trial_for_path(&p), OverBudgetTrial::BalanceField);
+        assert!(!trial_allows(
+            OverBudgetTrial::BalanceField,
+            crate::ir::OpportunityKind::InsertReg
+        ));
+        assert!(trial_allows(
+            OverBudgetTrial::BalanceField,
+            crate::ir::OpportunityKind::BalanceMux
+        ));
+
+        p.path_class = PathClassKind::AtomicOverBudget;
+        p.nodes = vec![0];
+        p.total_fo4 = 56.0;
+        p.slack_fo4 = -46.0;
+        assert_eq!(trial_for_path(&p), OverBudgetTrial::Leave);
     }
 
     fn plain_regtoreg(fo4: f64, nodes: u32, budget: f64) -> TimingPath {

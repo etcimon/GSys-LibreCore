@@ -383,12 +383,17 @@ bun run src/cli/index.ts setup --install --profile dual-hart
   at the structural budget, turned into the clock sv-timing derives it from
   (`targetMhzForFo4Budget` in `tooling/timings.ts`, the inverse of
   `TimingTarget::new`: 10 FO4 = 4000 MHz at `fo4_ps` 20 / margin 0.2), with
-  `-O3`, `--opt-max-stages-per-region ⌈128/N⌉` (8…16) and the real-feed emit
-  (`--real-cut-feeds --emit-balance-mux-rtl`), then synthesizes the corrected
-  tree through the `writeFlatManifest` `emitFlist` overlay (the explicit form
-  of `CVA6_TIMINGS_USE_EMIT`). `--from-timing <pkg>` reuses an existing emit;
-  `--svt-args "..."` appends raw dials (the arg parser accepts a quoted
-  dash-leading value for value flags — `takesValue`). The emit lives under
+  `-O3` and `--opt-max-stages-per-region ⌈128/N⌉` (8…16), then synthesizes
+  the emitted tree through the `writeFlatManifest` `emitFlist` overlay (the
+  explicit form of `CVA6_TIMINGS_USE_EMIT`) with the `lean` yosys lowering
+  (`--map-recipe synth` for Yosys's full `synth`; `opt_merge`/`check` on the
+  flattened core ran past an hour). The structural emit options
+  (`--real-cut-feeds`, `--emit-balance-mux-rtl`) are opt-in through
+  `--svt-args` until the two emit defects in `sv-timing/AGENTS-todo.md`
+  (2026-10-15: block-local hoist, XLEN-wide staging wire for enum LHS) are
+  fixed — without them the emit is the annotated live RTL. `--from-timing
+  <pkg>` reuses an existing emit; `--svt-args "..."` appends raw dials (the
+  arg parser accepts a quoted dash-leading value — `takesValue`). The emit lives under
   `workspace/build/sta-rtl/<target>/svt/`, which the proxy `sync` ships
   (`SYNC_INCLUDE`; `*.sqlite` excluded) so `--remote` synthesizes it too.
   `timings compile|correct|area` gained the same knob (`--budget-fo4`/`--fo4`,

@@ -13,9 +13,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sv_timing_core::{
-    parse_paths, CoreError, CoreResult, ParseOptions, SourceLoc, TimingDesign,
-};
+use sv_timing_core::{parse_paths, CoreError, CoreResult, ParseOptions, SourceLoc, TimingDesign};
 use sv_timing_transform::{EditKind, EditRecord, EditTrace};
 
 pub mod dense;
@@ -34,10 +32,10 @@ pub use project::{
     ProjectEmitOptions, ProjectEmitResult, ProjectLayout,
 };
 pub use rhs::{
-    cut_assigns_from_source, has_free_gen_index, line_inside_generate, parse_assign_line,
-    all_emit_extra_cuts, primary_feed_expr, remainder_sandwich_extra_cuts,
-    rewrite_origin_assigns, rewrite_origin_rhs_replaces, sibling_span_extra_cuts,
-    sink_assigns_sv, unresolved_insert_regs, CutAssign,
+    all_emit_extra_cuts, cut_assigns_from_source, has_free_gen_index, line_inside_generate,
+    parse_assign_line, primary_feed_expr, remainder_sandwich_extra_cuts, rewrite_origin_assigns,
+    rewrite_origin_rhs_replaces, sibling_span_extra_cuts, sink_assigns_sv, unresolved_insert_regs,
+    CutAssign,
 };
 pub use synth::{synthesize_module, synthesize_module_with, SynthOptions};
 
@@ -255,8 +253,7 @@ pub fn apply_edits_to_source_dense(
         cuts
     } else {
         // Drop continuous flag so sink_assigns_sv emits nothing.
-        cuts
-            .into_iter()
+        cuts.into_iter()
             .map(|mut c| {
                 c.continuous = false;
                 c.line = 0; // no origin rewrite path
@@ -310,13 +307,13 @@ pub fn apply_edits_to_source_dense(
         emit_trace_owned = Some(t);
     }
     let emit_trace = emit_trace_owned.as_ref().unwrap_or(trace);
-    let blocks =
-        dense::emit_blocks_for_trace_src(emit_trace, dense, &cuts_for_dense, Some(source));
+    let blocks = dense::emit_blocks_for_trace_src(emit_trace, dense, &cuts_for_dense, Some(source));
     let header = machine_header(&policy.tool, &policy.run_id);
     // Dual inject (R11):
     // - early: factorize comments / first-process-safe review
     // - origin process: BalanceMux RTL (after mid-module decls; gemm pe_float_en)
     // - late: dense pipe before endmodule (cut feeds may reference mid-module nets)
+    let rewritten = inject_after_module_header(&rewritten, &blocks.top);
     let rewritten = inject_before_first_process(&rewritten, &blocks.early);
     let rewritten = inject_bm_snippets_at_origin(&rewritten, &blocks.bm_at_origin);
     let rewritten = inject_before_endmodule(&rewritten, &blocks.late);
@@ -329,17 +326,21 @@ pub fn apply_edits_to_source_dense(
     out
 }
 
-fn masked_syntax(source: &str) -> String {
+pub(crate) fn masked_syntax(source: &str) -> String {
     let bytes = source.as_bytes();
     let mut masked = bytes.to_vec();
     let mut i = 0;
     while i < bytes.len() {
         let start = i;
         if bytes[i..].starts_with(b"//") {
-            while i < bytes.len() && bytes[i] != b'\n' { i += 1; }
+            while i < bytes.len() && bytes[i] != b'\n' {
+                i += 1;
+            }
         } else if bytes[i..].starts_with(b"/*") {
             i += 2;
-            while i < bytes.len() && !bytes[i..].starts_with(b"*/") { i += 1; }
+            while i < bytes.len() && !bytes[i..].starts_with(b"*/") {
+                i += 1;
+            }
             i = (i + 2).min(bytes.len());
         } else if bytes[i] == b'"' {
             i += 1;
@@ -354,13 +355,17 @@ fn masked_syntax(source: &str) -> String {
                 }
             }
         } else if bytes[i] == b'\\' {
-            while i < bytes.len() && !bytes[i].is_ascii_whitespace() { i += 1; }
+            while i < bytes.len() && !bytes[i].is_ascii_whitespace() {
+                i += 1;
+            }
         } else {
             i += 1;
             continue;
         }
         for ch in &mut masked[start..i] {
-            if *ch != b'\n' && *ch != b'\r' { *ch = b' '; }
+            if *ch != b'\n' && *ch != b'\r' {
+                *ch = b' ';
+            }
         }
     }
     String::from_utf8(masked).expect("mask preserves source UTF-8")
@@ -373,6 +378,33 @@ fn keyword_positions<'a>(text: &'a str, key: &'a str) -> impl Iterator<Item = us
         let after = text.as_bytes().get(i + key.len());
         (!before.is_some_and(ident) && !after.is_some_and(ident)).then_some(i)
     })
+}
+
+/// Insert `block` right after the module header (the `;` closing the port
+/// list): the one place every module-level reference below can see, and where
+/// `type(<port>)` is already resolvable. Pipe declarations for procedural
+/// origin rewrites land here (commit_stage read `pipe_svt_p1_54` 440 lines
+/// above the late block). Falls back to pre-first-process placement.
+fn inject_after_module_header(source: &str, block: &str) -> String {
+    if block.trim().is_empty() {
+        return source.to_string();
+    }
+    let masked = masked_syntax(source);
+    let Some((_, header_end)) = dense::module_header_span(&masked) else {
+        return inject_before_first_process(source, block);
+    };
+    let at = header_end + 1;
+    let mut out = String::with_capacity(source.len() + block.len() + 64);
+    out.push_str(&source[..at]);
+    out.push('\n');
+    out.push_str("  // BEGIN sv-timing auto-correct (pipe declarations)\n");
+    out.push_str(block);
+    if !block.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("  // END sv-timing auto-correct (pipe declarations)\n");
+    out.push_str(&source[at..]);
+    out
 }
 
 /// Insert `block` before the first procedural/continuous process in the module body.
@@ -492,7 +524,13 @@ fn ident_boundary(b: u8) -> bool {
 
 /// Byte offset of the `always_*` / `assign` line that contains `marker`.
 fn enclosing_process_byte_for_marker(source: &str, marker: &str) -> Option<usize> {
-    let bytes = source.as_bytes();
+    // Search the comment-/string-masked text: the InsertReg emitter leaves a
+    // `// sv-timing: cut #N moved lhs <- (rhs) via <pipe>` comment above the
+    // origin line, and matching the marker there injected a block into the
+    // middle of that comment (raw_checker). Same length as `source`, so the
+    // offsets carry over.
+    let masked = masked_syntax(source);
+    let bytes = masked.as_bytes();
     let m = marker.as_bytes();
     if m.is_empty() {
         return None;
@@ -512,11 +550,19 @@ fn enclosing_process_byte_for_marker(source: &str, marker: &str) -> Option<usize
     }
     let pos = hit?;
     let mut i = pos;
+    // Never split a line: when no process keyword is found walking back, the
+    // injection point is the start of the marker's own line.
+    let mut marker_line_start = pos;
+    while marker_line_start > 0 && bytes[marker_line_start - 1] != b'\n' {
+        marker_line_start -= 1;
+    }
     loop {
         while i > 0 && bytes[i - 1] != b'\n' {
             i -= 1;
         }
-        let rest = &source[i..];
+        // Keywords are read from the masked text too (a commented-out
+        // `// always_comb` is not a process).
+        let rest = &masked[i..];
         let t = rest.trim_start();
         let lower = t.to_ascii_lowercase();
         if lower.starts_with("always_comb")
@@ -531,7 +577,7 @@ fn enclosing_process_byte_for_marker(source: &str, marker: &str) -> Option<usize
             return Some(i);
         }
         if i == 0 {
-            return Some(pos);
+            return Some(marker_line_start);
         }
         i -= 1;
         while i > 0 && bytes[i - 1] != b'\n' {
@@ -653,8 +699,7 @@ pub struct IntegrityReport {
 
 /// True when the emit text carries an auto-correct region (edited, not pure passthrough).
 fn is_edited_emit_text(text: &str) -> bool {
-    text.contains("BEGIN sv-timing auto-correct")
-        || text.contains("sv-timing auto-correct")
+    text.contains("BEGIN sv-timing auto-correct") || text.contains("sv-timing auto-correct")
 }
 
 /// Classify solo reparse failure as host **context** (defines/includes) vs syntax.
@@ -746,9 +791,7 @@ pub fn integrity_reparse_ex(
             return report;
         }
         Err(e) => {
-            report
-                .messages
-                .push(format!("joint reparse failed: {e}"));
+            report.messages.push(format!("joint reparse failed: {e}"));
         }
     }
 
@@ -786,9 +829,7 @@ pub fn integrity_reparse_ex(
                     .unwrap_or(name.as_str());
                 if is_context_only_parse_error(&msg) {
                     context_only += 1;
-                    report
-                        .messages
-                        .push(format!("solo context {fname}: {msg}"));
+                    report.messages.push(format!("solo context {fname}: {msg}"));
                     continue;
                 }
                 // Pre-existing: original source also fails solo → not emit damage.
@@ -797,13 +838,10 @@ pub fn integrity_reparse_ex(
                     if let Some(orig) = map.get(name).or_else(|| {
                         // Match by basename when keys differ slightly.
                         map.iter()
-                            .find(|(k, _)| {
-                                Path::new(k).file_name() == Path::new(name).file_name()
-                            })
+                            .find(|(k, _)| Path::new(k).file_name() == Path::new(name).file_name())
                             .map(|(_, v)| v)
                     }) {
-                        if orig.is_file()
-                            && parse_paths(std::slice::from_ref(orig), &solo).is_err()
+                        if orig.is_file() && parse_paths(std::slice::from_ref(orig), &solo).is_err()
                         {
                             preexisting = true;
                         }
@@ -816,9 +854,7 @@ pub fn integrity_reparse_ex(
                     ));
                 } else {
                     hard_fail += 1;
-                    report
-                        .messages
-                        .push(format!("solo syntax {fname}: {msg}"));
+                    report.messages.push(format!("solo syntax {fname}: {msg}"));
                 }
             }
         }
@@ -853,7 +889,8 @@ pub fn integrity_lint_external(tree: &EmitTree) -> IntegrityReport {
         ..Default::default()
     };
     if std::env::var_os("SV_TIMING_LINT").is_none() {
-        r.messages.push("lint skipped (SV_TIMING_LINT not set)".into());
+        r.messages
+            .push("lint skipped (SV_TIMING_LINT not set)".into());
         return r;
     }
     r.lint_ran = true;
@@ -873,7 +910,8 @@ pub fn integrity_sim_external(tree: &EmitTree) -> IntegrityReport {
         ..Default::default()
     };
     if std::env::var_os("SV_TIMING_SIM").is_none() {
-        r.messages.push("sim skipped (SV_TIMING_SIM not set)".into());
+        r.messages
+            .push("sim skipped (SV_TIMING_SIM not set)".into());
         return r;
     }
     r.sim_ran = true;
@@ -913,7 +951,10 @@ mod tests {
             let block = "wire injected_wire;\n";
             let emitted = inject_before_first_process(&src, block);
             assert!(emitted.contains(decoy), "decoy corrupted: {emitted}");
-            assert!(emitted.contains("wire injected_wire;\nalways_comb"), "wrong insertion: {emitted}");
+            assert!(
+                emitted.contains("wire injected_wire;\nalways_comb"),
+                "wrong insertion: {emitted}"
+            );
             assert_eq!(emitted.replacen(block, "", 1), src);
         }
     }
@@ -988,7 +1029,11 @@ mod tests {
     fn emit_tree_preserves_insertion_order() {
         let mut tree = EmitTree::new();
         tree.add_file("z_mod.sv", FileRole::Module, "module z; endmodule\n".into());
-        tree.add_file("a_pkg.sv", FileRole::Package, "package a; endpackage\n".into());
+        tree.add_file(
+            "a_pkg.sv",
+            FileRole::Package,
+            "package a; endpackage\n".into(),
+        );
         tree.add_file("m_mid.sv", FileRole::Module, "module m; endmodule\n".into());
         let keys = tree.ordered_keys();
         assert_eq!(
@@ -1042,10 +1087,14 @@ mod tests {
         // Lean densify is always_ff-only when clk/rst present (no density_scaffold).
         assert!(text.contains("endmodule"));
         // Dense pipe is late: after original always_comb body, before endmodule.
-        let dense_pos = text.find("// BEGIN sv-timing auto-correct (dense emit)").expect("dense");
+        let dense_pos = text
+            .find("// BEGIN sv-timing auto-correct (dense emit)")
+            .expect("dense");
         let end_pos = text.rfind("endmodule").expect("endmodule");
         assert!(dense_pos < end_pos, "dense must be before endmodule");
-        let body_pos = text.find("always_comb begin").expect("original always_comb");
+        let body_pos = text
+            .find("always_comb begin")
+            .expect("original always_comb");
         assert!(
             dense_pos > body_pos,
             "InsertReg dense must inject after mid-module processes (R11)"
@@ -1066,9 +1115,8 @@ mod tests {
         );
         // Opt-in real feeds for continuous mid-module fixture is covered by
         // cut_feed_references_mid_module_net_after_decl.
-        let dens = DensityReport::from_sv_fragment(
-            text.split("BEGIN sv-timing").nth(1).unwrap_or(&text),
-        );
+        let dens =
+            DensityReport::from_sv_fragment(text.split("BEGIN sv-timing").nth(1).unwrap_or(&text));
         assert!(dens.score() >= min_density_score_for_edits(1));
         let mut tree = EmitTree::new();
         tree.add_file("deep_add_chain__svt.sv", FileRole::Module, text);
@@ -1137,6 +1185,74 @@ mod tests {
     /// Cut feed RHS uses a net declared *after* the first process — early inject
     /// would fail Verilator "used before its declaration"; late inject must win.
     #[test]
+    fn procedural_cut_declares_pipe_after_module_header() {
+        // commit_stage shape: the origin is a blocking assign inside an
+        // always_comb that stays in place as `lhs = pipe;`, far above the late
+        // block. The pipe must be declared before that read — after the module
+        // header, typed after the (port) LHS — while the feed and capture stay
+        // late.
+        let src = r#"// Copyright (c) 2026 Etienne Cimon
+// SPDX-License-Identifier: MIT
+module proc_cut (
+    input  logic       clk_i,
+    input  logic       rst_ni,
+    input  logic [7:0] a_i,
+    input  logic [7:0] b_i,
+    output logic [7:0] y_o
+);
+  logic [7:0] mid;
+  always_comb begin
+    mid = a_i & b_i;
+    y_o = mid ^ a_i;
+  end
+endmodule
+"#;
+        let mut trace = EditTrace::new();
+        // Line 13: y_o = mid ^ a_i;
+        trace.record_edit(EditRecord {
+            id: 7,
+            kind: EditKind::InsertReg,
+            origin: SourceLoc {
+                file: "proc_cut.sv".into(),
+                start_line: 13,
+                start_col: 1,
+                end_line: 13,
+                end_col: 1,
+                byte_start: 0,
+                byte_end: 0,
+                origin: OriginKind::UserFile,
+            },
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(20.0),
+            fo4_after: Some(10.0),
+            rationale: "procedural cut".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        let mut dense = dense_options_from_source(src);
+        dense.real_cut_feeds = true;
+        let text = apply_edits_to_source_dense(src, &trace, &EmitPolicy::default(), &dense);
+        let header_end = text.find(");").expect("port list end");
+        let decl_at = text
+            .find("var type(y_o) pipe_svt_p1;")
+            .expect("typed pipe decl (y_o is a port)\n{text}");
+        let use_at = text.find("y_o = pipe_svt_p1;").expect("procedural origin rewrite");
+        let first_proc = text.find("always_comb").expect("first process");
+        assert!(
+            header_end < decl_at && decl_at < first_proc && first_proc < use_at,
+            "decl after header, before the always_comb that reads it: header={header_end} decl={decl_at} proc={first_proc} use={use_at}\n{text}"
+        );
+        assert!(text.contains("assign pipe_svt_p1_c = type(y_o)'((mid ^ a_i));"), "{text}");
+        let mut tree = EmitTree::new();
+        tree.add_file("proc_cut__svt.sv", FileRole::Module, text);
+        let report = integrity_reparse(&tree, &ParseOptions::default());
+        assert_valid_sv_bundle(&report).expect("reparse proc_cut");
+    }
+
+    #[test]
     fn cut_feed_references_mid_module_net_after_decl() {
         let src = r#"// Copyright (c) 2026 Etienne Cimon
 // SPDX-License-Identifier: MIT
@@ -1188,6 +1304,26 @@ endmodule
         let decl = text
             .find("logic [7:0] rounded_abs")
             .expect("rounded_abs decl");
+        // `cast_result` is a module variable, not a port: a pipe declared at
+        // the top of the module (where every origin read can see it) cannot
+        // name it in `type(...)` yet, so the vector form stays and the feed is
+        // untyped. Ports get `var type(<port>)` (see
+        // procedural_cut_declares_pipe_after_module_header).
+        assert!(text.contains("logic [64-1:0] pipe_svt_p1_c;"), "{text}");
+        assert!(text.contains("logic [64-1:0] pipe_svt_p1;"), "{text}");
+        assert!(text.contains("pipe_svt_p1 <= '0;"), "{text}");
+        // SV reads a variable only after its declaration: the pipe is declared
+        // before the rewritten origin line that samples it (commit_stage had
+        // `we_fpr_o = pipe_svt_p1_54;` 440 lines above the late block).
+        let decl_at = text.find("logic [64-1:0] pipe_svt_p1;").expect("pipe decl");
+        let use_at = text
+            .find("assign cast_result = pipe_svt_p1;")
+            .expect("origin line rewritten to sample the pipe");
+        assert!(
+            decl_at < use_at,
+            "pipe declared before its origin use; decl={decl_at} use={use_at}
+{text}"
+        );
         let feed = text
             .find("assign pipe_svt_p1_c = (rounded_abs ^ early)")
             .expect("cut feed with mid-module nets");
@@ -1583,12 +1719,11 @@ endmodule
     /// The IR cut must land in emitted SV as a FO4 drop, not only as a sidecar.
     #[test]
     fn gemm_span_correct_emit_reanalyze_drops_fo4() {
+        use std::path::PathBuf;
         use sv_timing_core::{
-            analyze_files, default_fo4_v1_embedded, frequency_closure, LowerOptions,
-            TimingTarget,
+            analyze_files, default_fo4_v1_embedded, frequency_closure, LowerOptions, TimingTarget,
         };
         use sv_timing_transform::{run_correct_passes, PassContext, PassPolicy};
-        use std::path::PathBuf;
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/auto_correct/gemm_span.sv");
@@ -1623,11 +1758,14 @@ endmodule
                 )
             })
             .collect();
-        let sol = out
-            .design
-            .module_cleanliness
-            .get("gemm_span")
-            .map(|s| format!("set={} C={:.3} pass={}", s.chosen.as_str(), s.cleanliness, s.timing_pass));
+        let sol = out.design.module_cleanliness.get("gemm_span").map(|s| {
+            format!(
+                "set={} C={:.3} pass={}",
+                s.chosen.as_str(),
+                s.cleanliness,
+                s.timing_pass
+            )
+        });
         let before = out
             .design
             .paths
@@ -1698,7 +1836,11 @@ endmodule
             .map(|p| {
                 format!(
                     "id={} fo4={:.1} nodes={} class={:?} mc={}",
-                    p.id, p.total_fo4, p.nodes.len(), p.path_class, p.multi_cycle
+                    p.id,
+                    p.total_fo4,
+                    p.nodes.len(),
+                    p.path_class,
+                    p.multi_cycle
                 )
             })
             .collect();
@@ -1715,11 +1857,11 @@ endmodule
     /// resilient exception still admits S4 InsertReg (audit-gemm-rcf hole).
     #[test]
     fn mixed_resilient_exception_admits_insert_reg() {
+        use std::path::PathBuf;
         use sv_timing_core::{
             analyze_files, default_fo4_v1_embedded, exception_policy, LowerOptions, TimingTarget,
         };
         use sv_timing_transform::{run_correct_passes, EditKind, PassContext, PassPolicy};
-        use std::path::PathBuf;
 
         let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../fixtures/auto_correct/mixed_resilient.sv");

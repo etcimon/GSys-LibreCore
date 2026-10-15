@@ -1110,7 +1110,73 @@ where
     T: IntoIterator<Item = RefNode<'a>>,
 {
     let mut out = Vec::new();
+    // Pass 1: names declared below module scope. `root` is a flat walk, so a
+    // declaration inside a `begin … end`, a function/task body or a generate
+    // block is visited again here from its enclosing construct; the emit side
+    // must not hoist a reference to one of these to module level
+    // (perf_counters `automatic logic brh` inside `for … always_comb`).
+    let mut block_local: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
+    // Block-local nets have no DataDeclaration site; they get one below.
+    let mut local_nets: Vec<(String, SourceLoc)> = Vec::new();
+    let mut nested: Vec<RefNode<'a>> = Vec::new();
     for node in root {
+        nested.push(node.clone());
+        let inner: Vec<RefNode<'a>> = match &node {
+            RefNode::SeqBlock(b) => (*b).into_iter().collect(),
+            RefNode::FunctionDeclaration(f) => (*f).into_iter().collect(),
+            RefNode::TaskDeclaration(t) => (*t).into_iter().collect(),
+            RefNode::GenerateBlock(g) => (*g).into_iter().collect(),
+            RefNode::ForVariableDeclaration(fv) => (*fv).into_iter().collect(),
+            _ => continue,
+        };
+        // Every declared name inside the construct: `VariableIdentifier`
+        // (data declarations, loop variables — declaration sites only) and the
+        // nets of a `NetDeclaration` (`wire cmo_req = …` inside a generate-if;
+        // a bare `NetIdentifier` would also match an `assign` LHS reference).
+        for n in inner {
+            match n {
+                RefNode::VariableIdentifier(id) => {
+                    if let Some(name) = identifier_str(tree, RefNode::VariableIdentifier(id)) {
+                        block_local.insert(name);
+                    }
+                }
+                RefNode::NetDeclaration(nd) => {
+                    let loc = first_locate_loc(tree, li, path_str, nd);
+                    for d in nd {
+                        if let RefNode::NetIdentifier(id) = d {
+                            if let Some(name) = identifier_str(tree, RefNode::NetIdentifier(id))
+                            {
+                                block_local.insert(name.clone());
+                                local_nets.push((name, loc.clone()));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    // Pass 2: the declaration sites, flagged against pass 1. A `for` loop
+    // variable is a declaration site too (type `int`/`genvar`, no packed dims).
+    for node in nested {
+        if let RefNode::ForVariableDeclaration(fv) = &node {
+            let loc = first_locate_loc(tree, li, path_str, *fv);
+            for child in *fv {
+                if let RefNode::VariableIdentifier(id) = child {
+                    if let Some(name) = identifier_str(tree, RefNode::VariableIdentifier(id)) {
+                        out.push(DeclSite {
+                            name,
+                            type_name: "int".to_string(),
+                            packed_text: String::new(),
+                            unpacked_text: String::new(),
+                            loc: loc.clone(),
+                            block_local: true,
+                        });
+                    }
+                }
+            }
+            continue;
+        }
         let RefNode::DataDeclaration(decl) = node else {
             continue;
         };
@@ -1160,12 +1226,26 @@ where
         let packed = packed_dimension_text(bytes, data_type).unwrap_or_default();
         let unpacked = unpacked_dimension_text(bytes, assignments);
         for name in names {
+            let is_local = block_local.contains(&name);
             out.push(DeclSite {
                 name,
                 type_name: type_name.clone(),
                 packed_text: packed.clone(),
                 unpacked_text: unpacked.clone(),
                 loc: loc.clone(),
+                block_local: is_local,
+            });
+        }
+    }
+    for (name, loc) in local_nets {
+        if !out.iter().any(|d| d.name == name && d.block_local) {
+            out.push(DeclSite {
+                name,
+                type_name: "wire".to_string(),
+                packed_text: String::new(),
+                unpacked_text: String::new(),
+                loc,
+                block_local: true,
             });
         }
     }
@@ -2516,6 +2596,58 @@ mod tests {
             &LowerOptions::default(),
         )
         .expect("lower inline source")
+    }
+
+    #[test]
+    fn decl_sites_flag_block_locals_and_loop_variables() {
+        // perf_counters shape: `automatic logic brh` inside `for … always_comb`,
+        // `h` the loop variable; wt_dcache shape: `wire cmo_req` under a
+        // generate-if. `ev`, `gated` and `y` are module-level. An emitted
+        // module-scope snippet may name the latter three only.
+        let text = concat!(
+            "module origin_test(input logic [1:0] x, input logic [3:0] hid, output logic [1:0] y);\n",
+            "logic [1:0] ev;\n",
+            "logic gated;\n",
+            "always_comb begin\n",
+            "  ev = '0;\n",
+            "  for (int unsigned h = 0; h < 2; h++) begin\n",
+            "    automatic logic brh = (hid == 4'(h));\n",
+            "    ev[h] = x[h] & brh;\n",
+            "  end\n",
+            "end\n",
+            "if (1) begin : gen_cmo\n",
+            "  wire cmo_req = x[0] & hid[0];\n",
+            "  assign gated = cmo_req;\n",
+            "end\n",
+            "assign y = ev;\n",
+            "endmodule\n",
+        );
+        let out = analyze_inline_source(text);
+        let module = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "origin_test")
+            .unwrap();
+        let local = |name: &str| {
+            module
+                .decls
+                .iter()
+                .find(|d| d.name == name)
+                .map(|d| d.block_local)
+        };
+        assert_eq!(local("brh"), Some(true), "automatic inside the block is local");
+        assert_eq!(local("h"), Some(true), "for loop variable is local");
+        assert_eq!(local("ev"), Some(false), "module-level variable is visible");
+        let set = module.block_local_names();
+        assert!(set.contains("brh") && set.contains("h") && !set.contains("ev"), "{set:?}");
+        assert!(set.contains("cmo_req"), "generate-local net: {set:?}");
+        assert!(!set.contains("gated"), "{set:?}");
+        assert!(module.text_refs_block_local("&brh", &set));
+        assert!(module.text_refs_block_local("ev[h]", &set));
+        assert!(module.text_refs_block_local("a && !cmo_req", &set));
+        assert!(!module.text_refs_block_local("x[1] & ev[0]", &set));
+        assert!(!module.text_refs_block_local("pkg::BRH", &set));
     }
 
     #[test]

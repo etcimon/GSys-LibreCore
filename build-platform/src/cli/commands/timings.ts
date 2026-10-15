@@ -478,8 +478,9 @@ export const timingsCommand: Command = {
     "                     onto a liberty, the tools/openroad fork reports (openroad-timing.tcl);\n" +
     "                     --target --top --liberty|--platform --clock-port --target-mhz --threads\n" +
     "                     --remote (builder: -march/PGO fork build when absent, nproc threads)\n" +
-    "                     --fo4 N|--budget-fo4 N  sv-timing correct --emit first at N FO4 (10 = the\n" +
-    "                     deep-pipeline target; fo4_ps 20, margin 0.2 → 4000 MHz) and synthesize\n" +
+    "                     --fo4 N|--budget-fo4 N  sv-timing correct --emit first at N FO4 (default\n" +
+    "                     physicalDesign.structural.fo4Budget = 10; --fo4 0 = live RTL;\n" +
+    "                     fo4_ps 20, margin 0.2 → 4000 MHz) and synthesize\n" +
     "                     the corrected emit; --from-timing <pkg> reuses an existing emit\n" +
     "                     --map-recipe lean|synth  yosys lowering before dfflibmap/abc (lean skips\n" +
     "                     the asymptotic opt_merge/check passes a whole core hits)\n" +
@@ -785,7 +786,8 @@ export const timingsCommand: Command = {
       const or = ctx.config.toolchain.openroad;
       // --fo4 N / --budget-fo4 N: sv-timing correct --emit first, at that budget.
       const staFo4Raw = flagStr(args.flags, "budget-fo4") ?? flagStr(args.flags, "fo4");
-      const staFo4 = staFo4Raw != null && Number(staFo4Raw) > 0 ? Number(staFo4Raw) : undefined;
+      // `--fo4 0` is an explicit "live RTL"; absent → physicalDesign.structural.
+      const staFo4 = staFo4Raw != null && Number.isFinite(Number(staFo4Raw)) ? Number(staFo4Raw) : undefined;
       const staFo4PsRaw = flagStr(args.flags, "fo4-ps");
       const staFo4Ps = staFo4PsRaw != null && Number(staFo4PsRaw) > 0 ? Number(staFo4PsRaw) : undefined;
       const staMarginRaw = flagStr(args.flags, "budget-margin");
