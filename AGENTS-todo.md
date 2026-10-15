@@ -1597,6 +1597,22 @@ prerequisite for this work under the existing dual license. No licensing policy 
   ≈ 1 h 45 min wall with RVFI tracing on (the detached launcher leaves
   `results.json` at `incomplete`; the verdict is `trial/run.log`, as for the
   T21t runs).
+- [ ] **T36 — with T34 fixed, L1 on `g6lc64_ooo` reaches `Freeing initrd
+  memory: 820K` (1.997 s guest, ≈ 205 M cycles) and oopses at 2.14 s in
+  `jent_memaccess` (jitter-entropy init) with a **store page fault on the
+  init task's VMAP stack** (`badaddr 0xffffffc80000bb18`, `sp 0x…baf0`,
+  `cause 0xf`) (2026-10-14).** No `[ptw-err]` for that address, so the
+  fault came from a DTLB entry / a re-walk whose PTE read back invalid, and
+  `vmalloc_fault` (regular loads through the dcache) agreed — the shape of
+  a stale cached page-table line (the PTW and the kernel both read page
+  tables through the WT dcache). The kernel is now past every earlier
+  point: `Unpacking initramfs…`, `squashfs`, `jffs2`, `Freeing initrd`.
+  Instrument in flight: the program-order oracle over a 215 M-cycle trace
+  of the same model (`memcheck-wbfix-215m`, ≈ 2 h + a 20 GB trace); its
+  first stored-byte mismatch names the stale load (page-table pages are
+  reached through the linear map, which the oracle folds). Then an FST of
+  that window on the depth-8 trace model rebuilt with the T34 fix
+  (`ooocoh-t34-ooo-fst8-build` predates it — rebuild as `fst9`).
 - [ ] **T35 — `g6lc64_ooo_server1` (HPDCACHE, T28–T33): `ooo_spec_entry_live`
   assertion at cycle 76,935,847 (0.6 s guest, after `futex hash table`)
   (2026-10-14).** `store_buffer.sv:1054` — speculative-queue entry 0 holds
