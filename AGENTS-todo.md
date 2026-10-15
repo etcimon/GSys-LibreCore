@@ -1613,6 +1613,34 @@ prerequisite for this work under the existing dual license. No licensing policy 
   reached through the linear map, which the oracle folds). Then an FST of
   that window on the depth-8 trace model rebuilt with the T34 fix
   (`ooocoh-t34-ooo-fst8-build` predates it — rebuild as `fst9`).
+  **Root cause (no FST needed).** The oracle over the 215 M-cycle trace:
+  **0 stored-byte mismatches** — every load returned the right value —
+  yet the trace has `STORE_PAGE_FAULT exception @ 0xffffffff80287f6a`
+  (`sd a5,-24(s0)`) with loads from the same page (`bb10`, `bb08`,
+  `baf8`) retiring correctly just before. The oracle's new `--walk`
+  (Sv39 walk over the program-order memory at the fault retire): leaf PTE
+  `0x8185d058 = 0x2061dce7` (**V R W G A D**), written once at retire
+  86,009,055 and never again (`--watch` history) — so the DTLB hit path
+  faulted a valid, writable, dirty entry. `cva6_mmu.sv` computed
+  `canonical_addr_check` from `lsu_req_i`/`lsu_vaddr_i` (the request being
+  looked up **now**) inside the `dtlb_hit_q && lsu_req_q` branch that
+  checks the **previous** request — the next request's canonical check was
+  charged to the current one. jent is built `-O0`; its `slli` of
+  `memlocation` leaves the non-canonical intermediate `0x0000053100000000`
+  in `a5`, which a speculative load used as an address one cycle after the
+  store's translation. Kernel threads have no `mm` on riscv64 and 64-bit
+  has no `vmalloc_fault`, so the spurious fault went to `no_context` →
+  oops (same PC/VA in L1 and L3). **Fix (`6e58a0d56`):** evaluate on
+  `lsu_req_q`/`lsu_vaddr_q` with `chk_en_ld_st_translation`. **Stage 52 =
+  `ooo_canonical_check_stage_alignment`** (MPRV data translation, store to
+  a warm writable page, cold mispredicted branch whose wrong path loads
+  from `0x0000053100000000`): pre-fix `STORE_PAGE_FAULT` on the store
+  (exit 4, RTL 39 vs Spike 115); on `ooocoh-t36-ooo-canon-pgo-build`
+  **pass Spike-exact 115/115**; stages 38/46/48 and the frozen battery
+  (s11 10,965 cycles, m04/m20/m32–m37) unchanged and qualified. L1 and L3
+  relaunched on it; `ooocoh-t36-server1-canon-pgo-build` builds for the
+  HPDCACHE side (the MMU is shared — the same spurious fault can hit any
+  package with a speculative LSU).
 - [ ] **T35 — `g6lc64_ooo_server1` (HPDCACHE, T28–T33): `ooo_spec_entry_live`
   assertion at cycle 76,935,847 (0.6 s guest, after `futex hash table`)
   (2026-10-14).** `store_buffer.sv:1054` — speculative-queue entry 0 holds
@@ -1628,7 +1656,18 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `+ld_trace`-style window at 76.93 M cycles; a directed stage with a
   replayed load followed by a speculative store is the likely
   reproducer. The 4-core `ooocoh-t33-server-final-mt4-build` shares the
-  LSU and would hit it too.
+  LSU and would hit it too. **Reproduced at the identical cycle**
+  (76,935,847) on `ooocoh-t35-server1-pgo-build` (census: `lu_replay=4`,
+  `mem_viol=9145` by 76 M — few replays). Note server1 is **SMT2** (the
+  boot brings up 2 CPUs), so the STQ runs with hart ownership /
+  `LEGACY_SMT_KEEP` compaction — a different flush path than the ooo,
+  which never hit the assertion. Instrument: `+stq_trace` (+`stq_lo`/
+  `stq_hi`) in `store_buffer.sv` (pushes, commits, cancels, flushes, every
+  entry whose scoreboard slot is dead) — model `ooocoh-t35i-server1-pgo-
+  build` (T35 RTL + the trace, pre-T36 MMU so the cycle reproduces) to run
+  with `+stq_trace +stq_lo=76935000 +stq_hi=76935850 +fe_trace
+  +fe_lo=76935000 +fe_hi=76935850`; in parallel the T36-fixed server1 L1
+  tells whether a spurious store fault (T36) feeds the leak.
 - [ ] **T34 — two kernel oopses with T28–T33 in, both the shape of a stale or
   half-written load value (2026-10-14).** On `ooocoh-t33-ooo-replay2-pgo-build`
   (depth-2 fixup queue) Linux now runs through `init_IRQ`, timekeeping

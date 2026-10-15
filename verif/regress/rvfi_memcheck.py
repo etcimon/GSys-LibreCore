@@ -16,6 +16,27 @@ import struct
 import sys
 
 DRAM_LO, DRAM_HI = 0x80000000, 0x90000000
+# Linux/Sv39 static windows (single kernel, no KASLR): the kernel image and the
+# linear map are folded onto their physical addresses so a store through one
+# alias is seen by a load through the other; every other virtual address
+# (vmalloc, fixmap, user) is its own key -- never-stored bytes there read as 0
+# and a mismatch against them is reported as image/zero-source (vmalloc pages
+# are not zeroed by the allocator, so those are hints, not evidence).
+KIMG_VA, KIMG_PA, KIMG_LEN = 0xffffffff80000000, 0x80200000, 0x40000000
+LINEAR_VA, LINEAR_PA, LINEAR_LEN = 0xffffffd800000000, 0x80000000, 0x10000000
+VA_FLOOR = 0xffffffc000000000
+
+
+def fold(addr):
+    if KIMG_VA <= addr < KIMG_VA + KIMG_LEN:
+        return addr - KIMG_VA + KIMG_PA, 'pa'
+    if LINEAR_VA <= addr < LINEAR_VA + LINEAR_LEN:
+        return addr - LINEAR_VA + LINEAR_PA, 'pa'
+    if DRAM_LO <= addr < DRAM_HI:
+        return addr, 'pa'
+    if addr >= VA_FLOOR:
+        return addr, 'va'
+    return addr, 'mmio'
 
 
 def load_elf(path):
@@ -108,9 +129,17 @@ def main():
             maxn = int(a.split('=')[1])
     report_all = '--all' in sys.argv
     watch = None
+    stop_retire = None
+    walks = []
     for a in sys.argv[1:]:
         if a.startswith('--watch='):
             watch = int(a.split('=')[1], 16)
+        elif a.startswith('--stop-retire='):
+            stop_retire = int(a.split('=')[1])
+        elif a.startswith('--walk='):
+            # --walk=VA:ROOTPPN  Sv39 walk over the model memory at --stop-retire
+            va, root = a.split('=')[1].split(':')
+            walks.append((int(va, 16), int(root, 16)))
     trace, elf = args[0], args[1]
     mem = Mem(load_elf(elf))
     n = 0
@@ -124,6 +153,8 @@ def main():
             lineno += 1
             if line.startswith('core'):
                 retire += 1
+                if stop_retire is not None and retire >= stop_retire:
+                    break
                 continue
             if not (line and line[0] in '0123' and line[1] == ' '):
                 continue
@@ -153,7 +184,8 @@ def main():
                     except (ValueError, IndexError):
                         rdval = None
                     break
-            if not (DRAM_LO <= addr < DRAM_HI):
+            addr, space = fold(addr)
+            if space == 'mmio':
                 skipped += 1
                 continue
             if watch is not None and addr <= watch < addr + max(size, 1):
@@ -162,6 +194,9 @@ def main():
                 if rdval is None:
                     skipped += 1
                 else:
+                    if space == 'va' and not any((addr + i) in mem.stored for i in range(size)):
+                        loads += 1
+                        continue   # never-stored vmalloc/user bytes: no oracle value
                     exp = mem.read(addr, size)
                     got = rdval & ((1 << (8 * size)) - 1) if size < 8 else rdval
                     if signed and size < 8 and (exp >> (8 * size - 1)) & 1:
@@ -193,6 +228,19 @@ def main():
                 if wdata is not None and rdval == 0:
                     mem.write(addr, size, wdata)
                     stores += 1
+    for va, root in walks:
+        pt = root << 12
+        print(f"walk VA=0x{va:x} root=0x{pt:x} at retire {retire}:")
+        for lvl in (2, 1, 0):
+            idx = (va >> (12 + 9 * lvl)) & 0x1ff
+            pa = pt + idx * 8
+            pte = mem.read(pa, 8)
+            src = 'stored' if any((pa + i) in mem.stored for i in range(8)) else 'image/zero'
+            flags = ''.join(c if (pte >> b) & 1 else '-' for b, c in enumerate('VRWXUGAD'))
+            print(f"  L{lvl} idx=0x{idx:x} pte@0x{pa:x} = 0x{pte:016x} [{flags}] ppn=0x{pte >> 10:x} ({src})")
+            if not pte & 1 or pte & 0xe:
+                break
+            pt = (pte >> 10) << 12
     print(f"checked loads={loads} stores={stores} amos={amos} skipped(mmio/no-rd)={skipped} mismatches={mism} (of which image/zero-source={unknown})")
 
 
