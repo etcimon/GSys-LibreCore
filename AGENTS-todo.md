@@ -1708,6 +1708,23 @@ prerequisite for this work under the existing dual license. No licensing policy 
   (`linux-boot-l1fix-ooocoh-t36-ooo-canon-pgo-build`, cap 950 M cycles).
   L3 on the same model reached **9.39 s guest (≈ 701 M cycles)** and died
   in a different class — T37.
+- [ ] **T39 — server1 (HPDCACHE, SMT2, t38) L1 past the T35 point oopses at
+  1.267 s guest: `insert_header+0x9c` (`__register_sysctl_table` from
+  `eventpoll_init`) NULL pointer dereference at `0x50`, PID 1 (2026-10-15).**
+  First time the server class ran past 0.6 s (`linux-boot-l1s1i-…`,
+  stop at ≈ 108 M cycles). The ooo passes this initcall (it reaches
+  7.5 s), so the class is server-specific: the DT has 2 cpu nodes and
+  the kernel's built-in cmdline appends `maxcpus=2`, so this is a real
+  2-hart SMT boot (`smp: Brought up 1 node, 2 CPUs`) on HPDCACHE —
+  cross-hart visibility (same-hart-only speculative forwarding, the
+  drained-handoff switch) or the HPDCACHE path are the suspects.
+  Discriminator in flight: `l1s1u` — the same model with `cpu@1`
+  `status = "disabled"` in the DT (`q-linux-payload.sh ONE_HART=1`), so
+  OpenSBI parks hart 1 and Linux is single-hart on the HPDCACHE package,
+  with the live oracle attached (`+rvfi_cycle_stamp`). Pass → the defect
+  needs the second hart (SMT interaction); fail → the oracle names the
+  load on the HPDCACHE single core. The 4-core `l1r4` (t38, `maxcpus=1`
+  but 8 cpu nodes) runs in parallel.
 - [ ] **T37 — L3 on the T36 ooo: `kworker/u2:0` (`async_run_entry_fn`)
   oopses in `__memset` called from `blake2s_final+0x36` with a store page
   fault at `0xffffffc80005c000` — the guard page above the task's VMAP
