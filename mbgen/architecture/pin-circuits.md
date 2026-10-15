@@ -5,7 +5,7 @@
 | **Title** | Pin-specific circuits, under-board solders, and a catalog-backed live sim for mbgen |
 | **Author** | mbgen architecture |
 | **Date** | 2026-10-09 |
-| **Status** | v1 complete (uncommitted, rev 6) |
+| **Status** | v1 complete, on `E:\cva6` master (`df9aff1`). Live-sim notes: `architecture/live-sim.md`, `architecture/progress.md`. |
 | **Scope** | Architectural update to the existing independent builder at `E:\cva6\mbgen` and its ingest into `corev-mb`. Not a greenfield CAD product. Board outlines (ITX/ATX/PCIe card) are a separate layer from pin/path/library simulation (`architecture/board-types.md`). |
 
 ---
@@ -986,9 +986,9 @@ PR 1b, PR 2, and PR 5 can proceed in parallel with PR 3/4. PR 6 can land on exe-
 
 ---
 
-## v1 complete (uncommitted)
+## v1 complete
 
-The PR 1–10 plan plus the post-plan live-sim UI are in the working tree and **not committed**. Cargo tests: 72 mbcore + 7 mbcore_c + 20 mbcompiler. Counts drift as tests land.
+The PR 1–10 plan plus the post-plan live-sim UI landed on `E:\cva6` `master` (`df9aff1`). Cargo tests at that commit: 72 mbcore + 7 mbcore_c + 21 mbcompiler. Counts drift as tests land. Continuing notes: `architecture/live-sim.md`, `architecture/build.md`, `architecture/progress.md`.
 
 Post-plan (same tree): `Gesture::SetOutline` / board combo with `current` row; sit datums on `Template`; property sheet (PackageCard combo, firmware witness, CEM/SATA contracts, interface combo; empty sheet still shows board-level fields); palette drop/Add/Copy select the new part; first-open thumbs that recapture after SetOutline; Add/Drop recaptures that role's thumb from the live mesh; palettes find the board via `FindLive` (editor world or Play); quiet GAP / SOCKET GAP badges; `mb_anchors` snap ticks; `errors.json`; 256 KiB gesture cap; DLL under-root load; `mbgen open` prefers UE 5.8; solder maps from `scene()` AABBs with outline aspect (ATX 512×410) and 1 mm lands; SetOutline reimports silk after clearing meshes and GC; compile keeps the editable preview; missing name plaques paint then rebuild; F / SetOutline / BeginPlay / Play `StartPlay` frame the orbit on the PCB centre (`GNavPivot` starts at the origin; GameMode reuses the placed board); name plaques face that overview look-from; SOCKET GAP badges and path strips sit on the live PCB faces; product close-ups aim from `scene.json` bodies and skip missing parts; `ProbeVisibility` / `FrameViewport` use the PCB AABB; `MSlot_solder_mask` facing uses `(N·up)^2` so the graph compiles on SM5; Python startup uses editor subsystems instead of `EditorLevelLibrary`; solder-mask silk courtyards are labeled roles only (`gbe_magjack`, `rtc_battery`), open-field pads every sixth 32-pixel cell; mesh extras and the processor window key off `role` (`usb_c` stays a hatch); IO shield windows follow live jack poses and stay off when `window_h_um` is 0; Mini-ITX mounting holes stamp only on a 170 mm PCB; `sodimm` / `wifi_m2` / `dp` / `dc_jack` / `pcie_cem` share mesh extras with their sibling roles (CEM is a gold strip, not a named pinout); CATIA nav (right-drag orbit around pick, wheel zoom-to-cursor with Roll=0, left-drag empty look-in-place pinned on a **mathematical** rest plane 1.5× the PCB at z=bottom — no desk mesh; `ZOOM_RATIO=1.04`, default mouse sens 0.25); top-right chrome + `Saved/mbgen.sqlite` undo/save/copy; Properties X/Y from board 0,0 in the Settings unit; undo/redo keep the camera; right-click without drag Turns the part under the cursor.
 

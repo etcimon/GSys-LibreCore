@@ -1,6 +1,6 @@
 # mbsim
 
-The Unreal editor project lives in this cva6 tree at `mbgen/mbsim/MbgenSim`. It is generated. It is not authored by hand.
+The Unreal editor project lives in this cva6 tree at `mbgen/mbsim/MbgenSim`. It is generated. It is not authored by hand. Architecture and how to continue: `../architecture/README.md`.
 
 ```text
 mbgen open

@@ -5,7 +5,7 @@
 | **Title** | Board form-factors independent of pin, path, and library simulation |
 | **Author** | mbgen architecture |
 | **Date** | 2026-10-09 |
-| **Status** | v1 complete (uncommitted) |
+| **Status** | v1 complete, on `E:\cva6` master (`df9aff1`) |
 | **Parent** | `architecture/pin-circuits.md` |
 
 ---
