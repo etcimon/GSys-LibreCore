@@ -857,6 +857,25 @@ the head retires. Pre-fix the load unit was held and the core deadlocked (2 M-cy
 scoreboard refetches it at commit — pass Spike-exact 53/53 in 1,007 cycles. Stage 48 (full
 coverage, translation) must still pass by forwarding, not by replay.
 
+## Speculative store queue: flush coinciding with a commit (2026-10-15, T35)
+
+`verif/tb/core/run-stq-flush-ptr.sh` → `tb_g6lc_stq_flush_ptr.sv`, a `store_buffer` unit leaf in
+the OoO shape (`OoOEn`, `SpeculativeSb`, 1 hart; `cbo_t`/dcache request types rebuilt from
+`cva6.sv`'s). Spec anchor: Part I `#sec:rvwmo` (every store that commits reaches memory exactly
+once; a store that never committed must not). S1: two stores queued, then `commit_i` of the head
+and `flush_i` in the same cycle — the committed store must be in the commit queue, the
+speculative queue empty **with its pointers agreeing with the count** (`STQ_PTR_AGREE`, the
+RTL's `spec_ptr_consistent` invariant); S2: the next arrival must be the head, carrying its own
+tid and address (`STQ_HEAD_IS_ARRIVAL`, `STQ_NO_GHOST` — the `ooo_spec_entry_live` condition);
+S3: committing it hands its own address to the commit queue. Positive 9 checks;
+`+oracle_negative` must fail; `+define+G6LC_MUT_STQ_FLUSH_WP_Q` (the pre-fix
+`write_pointer_n = read_pointer_q`) fails `STQ_PTR_AGREE` right after the flush cycle
+(`cnt=0 rp=1 wp=0`). The system witness is the server1 Linux L1 past cycle 76,935,847
+(`+stq_trace` window on `ooocoh-t35i-server1-pgo-build`). A testbench note: with Verilator 5.020
+`--timing` the DUT state must be sampled once per tick into TB copies — reading it only through
+hierarchical references inside the checks changed the commit-queue pop's evaluation order
+(entry popped without a grant); the leaf does so in `tick`.
+
 ## Predicted-taken branch with a virtual target (2026-10-14, T29)
 
 `ooo_mem_min.S` stage46 is registered as `ooo_jal_predicted_taken_virtual_target`

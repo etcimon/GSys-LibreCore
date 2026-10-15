@@ -466,7 +466,13 @@ module store_buffer
       // commit are the SMT ones (the forced drain's registered pulse); the
       // in-order flushes are all raised by the committing port-0 instruction
       // itself, so there this is the same value as before.
+`ifdef G6LC_MUT_STQ_FLUSH_WP_Q
+      // Review mutation (T35): the pre-fix write pointer; the leaf
+      // tb_g6lc_stq_flush_ptr must fail STQ_PTR_AGREE / STQ_HEAD_IS_ARRIVAL.
+      speculative_write_pointer_n = speculative_read_pointer_q;
+`else
       speculative_write_pointer_n = speculative_read_pointer_n;
+`endif
       speculative_status_cnt_n = 'b0;
     end
 
