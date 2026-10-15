@@ -298,6 +298,13 @@ testlist:
     gcc_opts: "-DSTAGE=51 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
     description: "256 store pairs to two warm lines with 0..7 cycles between them, read back through the cache: targets the WT wbuffer tag-check pointer-reuse race (T34). Passes on the unfixed model too -- the race needs the ACK to return inside the check's two cycles, which this sweep does not force; the program-order oracle over the Linux trace is the witness"
 
+  - test: ooo_canonical_check_stage_alignment
+    iterations: 1
+    <<: *common_test_config
+    asm_tests: <path_var>/custom/ooo/ooo_mem_min.S
+    gcc_opts: "-DSTAGE=52 -static -mcmodel=medany -fvisibility=hidden -nostdlib -nostartfiles ../tests/custom/common/syscalls.c ../tests/custom/common/crt.S -I../tests/custom/env -I../tests/custom/common"
+    description: "Data translation on (MPRV): a store to a warm writable page followed by a mispredicted branch whose wrong path loads from a non-canonical pointer -- the store must not take a page fault (T36: the MMU charged the next request's canonical check to the current one; Linux jent_memaccess oops on the VMAP stack)"
+
   - test: ooo_load_misaligned_shared_target
     iterations: 1
     <<: *common_test_config

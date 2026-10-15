@@ -1476,6 +1476,68 @@ main:
   .text
 .Lt34b_done:
 
+#elif STAGE == 52
+  # T36: the MMU's canonical-address check must apply to the request whose
+  # DTLB result is being examined, not to the next one in the pipe. Data
+  # translation on (MPRV, MPP=S, Sv39 identity gigapage); each unrolled copy
+  # issues a store to a warm, writable page, then a late-resolving taken
+  # branch (cold, predicted not-taken) whose wrong path loads from a
+  # NON-CANONICAL pointer (the jent_memaccess shape: 0x0000053100000000).
+  # Pre-fix the wrong-path load's canonical check, one cycle behind the
+  # store's translation, became a STORE_PAGE_FAULT on the store. Spike: no
+  # trap at all.
+  csrr s1, mtvec
+  la   t0, .Lnc_handler
+  csrw mtvec, t0
+  la   t1, .Lnc_pt
+  li   t2, (0x80000 << 10) | 0xCF
+  sd   t2, 16(t1)                      # VPN2 = 2: identity gigapage, RWX AD
+  srli t1, t1, 12
+  li   t2, 8
+  slli t2, t2, 60
+  or   t1, t1, t2
+  csrw satp, t1
+  sfence.vma
+  li   t0, -1
+  srli t0, t0, 10
+  csrw pmpaddr0, t0
+  li   t0, 0x0F
+  csrw pmpcfg0, t0
+  li   t0, (1 << 17) | (1 << 11)       # MPRV | MPP = S: data translated
+  csrs mstatus, t0
+  ld   zero, -24(sp)                   # warm the DTLB for the stack page
+  li   s4, 0x0000053100000000          # non-canonical (bit 40 set, bit 38 clear)
+  li   s5, 0x7fffffffffffffff
+  li   s6, 3
+  .rept 24
+  divu t3, s5, s6                      # late, nonzero
+  sd   s4, -24(sp)                     # the store: valid, writable, DTLB hit
+  bnez t3, 1f                          # taken; cold -> predicted not-taken
+  ld   t0, 0(s4)                       # wrong path: non-canonical load right behind the store
+  ld   t0, 8(s4)
+1:
+  .endr
+  li   t0, (1 << 17) | (3 << 11)
+  csrc mstatus, t0                     # MPRV off
+  csrw satp, zero
+  sfence.vma
+  ld   t0, -24(sp)
+#ifdef MEM_ORDER_NEGATIVE
+  xori t0, t0, 1
+#endif
+  bne  t0, s4, fail_t2
+  csrw mtvec, s1
+  j    .Lnc_done
+  .balign 4
+.Lnc_handler:
+  j    fail_trap_cause                 # no trap is expected
+  .section .data
+  .balign 4096
+.Lnc_pt:
+  .space 4096
+  .text
+.Lnc_done:
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".

@@ -635,8 +635,16 @@ module cva6_mmu
     misaligned_ex_n.valid = misaligned_ex_i.valid & lsu_req_i;
 
     // we work with SV39 or SV32, so if VM is enabled, check that all bits [CVA6Cfg.VLEN-1:CVA6Cfg.SV-1] are equal to bit [CVA6Cfg.SV]
-    canonical_addr_check = (lsu_req_i && en_ld_st_translation_i &&
-           !((&lsu_vaddr_i[CVA6Cfg.VLEN-1:CVA6Cfg.SV-1]) == 1'b1 || (|lsu_vaddr_i[CVA6Cfg.VLEN-1:CVA6Cfg.SV-1]) == 1'b0));
+    // T36: the check belongs to the request whose DTLB result is examined
+    // this cycle (the _q stage below), not to the request being looked up
+    // now. Evaluated on lsu_vaddr_i it charged the NEXT request's address to
+    // the current one: with out-of-order issue a wrong-path load carrying a
+    // non-canonical pointer, translated the cycle after a store, turned that
+    // store into a STORE_PAGE_FAULT on a valid, writable page (Linux
+    // jent_memaccess: sd to the VMAP stack, PTE VRW-GAD, no PTW error;
+    // ooo_mem_min stage 52).
+    canonical_addr_check = (lsu_req_q && chk_en_ld_st_translation &&
+           !((&lsu_vaddr_q[CVA6Cfg.VLEN-1:CVA6Cfg.SV-1]) == 1'b1 || (|lsu_vaddr_q[CVA6Cfg.VLEN-1:CVA6Cfg.SV-1]) == 1'b0));
 
     // Check if the User flag is set, then we may only access it in supervisor mode
     // if SUM is enabled
