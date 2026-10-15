@@ -1076,6 +1076,46 @@ module store_buffer
                     '0))
   else $error("[Commit Queue] cbo.zero commit entry is not line-aligned");
   //pragma translate_on
+  //pragma translate_off
+  // T35 instrument (+stq_trace, window +stq_lo/+stq_hi in cycles since reset):
+  // speculative-queue pushes, commits, cancels, flushes, and every valid
+  // entry whose scoreboard slot is no longer live (the ooo_spec_entry_live
+  // condition), so the cycle the reservation leaks is visible with its cause.
+  bit stq_trace;
+  longint unsigned stq_lo, stq_hi, stq_cyc;
+  initial begin
+    stq_trace = $test$plusargs("stq_trace");
+    stq_lo = 0;
+    stq_hi = 64'hFFFF_FFFF_FFFF_FFFF;
+    void'($value$plusargs("stq_lo=%d", stq_lo));
+    void'($value$plusargs("stq_hi=%d", stq_hi));
+  end
+  always @(posedge clk_i) begin
+    if (!rst_ni) stq_cyc = 0;
+    else stq_cyc = stq_cyc + 1;
+    if (stq_trace && rst_ni && stq_cyc >= stq_lo && stq_cyc <= stq_hi) begin
+      if (valid_i || valid_without_flush_i)
+        $display("[stq] c=%0d PUSH v=%b vwf=%b tid=%0d hart=%0d pa=%h canc=%b flush=%b ready=%b scnt=%0d ccnt=%0d",
+                 stq_cyc, valid_i, valid_without_flush_i, trans_id_i, st_hart_i, paddr_i,
+                 cancelled_mask_i[trans_id_i], flush_i, ready_o,
+                 speculative_status_cnt_q, commit_status_cnt_q);
+      if (commit_i)
+        $display("[stq] c=%0d COMMIT tid=%0d hart=%0d ready=%b", stq_cyc,
+                 speculative_queue_q[speculative_read_pointer_q].trans_id,
+                 speculative_queue_q[speculative_read_pointer_q].hart, commit_ready_o);
+      if (|cancelled_mask_i)
+        $display("[stq] c=%0d CANCEL mask=%h flush=%b", stq_cyc, cancelled_mask_i, flush_i);
+      if (flush_i)
+        $display("[stq] c=%0d FLUSH scnt=%0d", stq_cyc, speculative_status_cnt_q);
+      for (int unsigned i = 0; i < DEPTH_SPEC; i++)
+        if (speculative_queue_q[i].valid && !sb_live_i[speculative_queue_q[i].trans_id])
+          $display("[stq] c=%0d DEAD entry=%0d tid=%0d hart=%0d pa=%h fk=%b", stq_cyc, i,
+                   speculative_queue_q[i].trans_id, speculative_queue_q[i].hart,
+                   speculative_queue_q[i].address, speculative_queue_q[i].fwd_keep);
+    end
+  end
+  //pragma translate_on
+
 endmodule
 
 

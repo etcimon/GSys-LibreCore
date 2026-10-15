@@ -259,6 +259,8 @@ static const char *verilog_plusargs[] = {
     "stall_census",
     // T33/T34: per-event line for load-unit replays (core/cva6.sv census block)
     "lu_replay_trace",
+    // T35: store-buffer speculative-queue event trace (core/store_buffer.sv)
+    "stq_trace", "stq_lo", "stq_hi",
     // AI island per-job PMU record (corev_apu/ai_island/g6lc_ai_island_top.sv,
     // translate_off): one AI_JOB line per completed descriptor, harvested by
     // verif/regress/ai-matrix-veri.sh AI_MATRIX_BENCH=1.
