@@ -345,20 +345,22 @@ async function runSvtPrepass(
     xlen: ctx.config.soc.xlen as number | undefined,
   });
   const correctedDir = posixPath(join(svtDir, "corrected"));
-  // Defaults that make the budget reachable and the emit synthesizable:
-  // -O3 (multi-cut, budget-fit), enough stages per region for the deepest
-  // cone the core shows (~100 FO4) at this budget, and the real-feed emit
-  // (the lean sidecar feeds inserted registers with zero, which yosys would
-  // sweep away before STA ever saw a stage). Every one is overridable
-  // through --svt-args, which is appended last.
+  // Defaults that make the budget reachable: -O3 (multi-cut, budget-fit) and
+  // enough stages per region for the deepest cone the core shows (~100 FO4)
+  // at this budget. The structural emit options stay opt-in through
+  // --svt-args: `--real-cut-feeds` (origin RHS rewrite; also what makes a
+  // register cut real rather than the zero-fed sidecar yosys sweeps away) and
+  // `--emit-balance-mux-rtl` — on g6lc64_ooo the BalanceMux rewrite they emit
+  // hoists block-local names and takes XLEN width whatever the LHS type, so
+  // the tree does not elaborate (sv-timing/AGENTS-todo.md 2026-10-15). Without
+  // them the emit is the annotated live RTL. Every default is overridable
+  // there (appended last).
   const extra = opts.svtExtraArgs ?? [];
   const has = (flag: string) => extra.includes(flag);
   const defaults: string[] = [];
   if (!has("--opt-max-stages-per-region")) {
     defaults.push("--opt-max-stages-per-region", String(Math.min(16, Math.max(8, Math.ceil(128 / budget)))));
   }
-  if (!has("--real-cut-feeds")) defaults.push("--real-cut-feeds");
-  if (!has("--emit-balance-mux-rtl")) defaults.push("--emit-balance-mux-rtl");
   const args = buildSvTimingCorrectArgs({
     portableFlist: portable.portablePath,
     allModules: true,

@@ -3,6 +3,44 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## 2026-10-15 — host STA consumer: `--emit-balance-mux-rtl` does not elaborate on the core
+
+The monorepo host now runs this package *before* gate-level STA
+(`timings sta-rtl --fo4 N`: `correct --all-modules --allow-latency --emit -O3
+--opt-max-stages-per-region ⌈128/N⌉ --real-cut-feeds`, then yosys `read_slang` of the
+emitted tree). The emit is therefore consumed by a real frontend for the first time on
+the whole `g6lc64_ooo` core (264 files), and the structural BalanceMux RTL emit fails
+elaboration in two ways — both package defects, both reproducible with
+`correct … --emit --emit-balance-mux-rtl` at `--target-mhz 4000` on `core/`:
+
+- [ ] **Scope.** The arm staging hoists an arm expression to module scope while it
+      references a block-local: `core/perf_counters.sv:241` declares
+      `automatic logic brh = …` inside a `for` in an `always_comb`; the emit writes
+      `svt_bm_p3430_n12618_1 = &brh;` in a new module-level `always_comb`
+      (`perf_counters__svt.sv:243`, also `act`). Either refuse the rewrite when the arm
+      references automatic/loop-scoped names, or stage inside the originating block.
+- [ ] **Type.** The staging wires are declared `logic [64-1:0]` (XLEN from the param
+      map) whatever the LHS type: `instruction_o.fu = svt_bm_top_p2691_n9446` and
+      `imm_select = …` in `decoder__svt.sv:932/1201/1912` fail with "no implicit
+      conversion from logic[63:0] to fu_t / enum". Declare the top wire with the LHS's
+      type (`type(<lhs>)` or the resolved declared type) or cast on assignment.
+- [x] Host side: neither `--real-cut-feeds` (it is what turns the 32 `balancemux` edits
+      into the origin RHS rewrite — without it the same `-O3` run emits 451 `annotate`
+      edits only) nor `--emit-balance-mux-rtl` is in the host's default pre-pass until
+      both are fixed; the annotated passthrough emit elaborates (it is the live RTL).
+      `--svt-args "--real-cut-feeds --emit-balance-mux-rtl"` opts in.
+- [ ] Add the two shapes to `verif-regress` (automatic-in-loop arm; enum/struct-typed
+      LHS) so the pyslang lint catches them in-package.
+
+Measured on `g6lc64_ooo` at 10 FO4 (4000 MHz, fo4_ps 20, margin 0.2; release build,
+~2 min): `-O2` → 451 edits, all `annotate`; `-O3` + 13 stages + real-feed +
+balance-mux RTL → 483 edits (451 annotate, 32 balancemux), failing endpoints 389 → 353,
+worst path **31.0 FO4 unchanged** (`instr_queue.reg0/CP → reg1/D`; 97.5 raw), max ≈
+1290 MHz. `InsertReg` refused on the P10 handshake-locked cones; 407 relocation cards,
+the T3 multi-cycle options manual. Host adapter fixes landed alongside: `correct` no
+longer receives `--cache` (analyze-only; exit 2 before), `svt.py run --release`,
+`--budget-fo4` → `--target-mhz` through `TimingTarget::new`'s inverse.
+
 ## 2026-09-09 — delay-v21 leftover measurement (general)
 
 Derived from v42 leftover-specific proper changes, host-agnostic:
