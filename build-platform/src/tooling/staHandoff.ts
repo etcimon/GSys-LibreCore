@@ -21,6 +21,8 @@ import { dirname, isAbsolute, join } from "node:path";
 
 import type { PlatformContext } from "../context.ts";
 import { hasBinary, run, which } from "../platform/exec.ts";
+import { getHostInfo } from "../platform/os.ts";
+import { hasWsl, windowsPathToWsl, wslCommand } from "../platform/wsl.ts";
 import {
   resolveFromTimingDir,
   summarizeTimingsPackage,
@@ -241,8 +243,97 @@ function resolveLiberty(ctx: PlatformContext, override?: string): string | null 
   return null;
 }
 
-function resolveOpenStaBin(): string | null {
-  return which("sta") ?? which("opensta") ?? (hasBinary("sta") ? "sta" : hasBinary("opensta") ? "opensta" : null);
+/**
+ * The STA engine the handoff drives: `openroad` or OpenSTA's `sta`.
+ *
+ * Resolution order puts the managed tools/openroad fork first — it is the
+ * timing tool of record (`tools install openroad`), and on Windows it is a
+ * Linux ELF under workspace/tooling that must be run through WSL, which is
+ * why the record carries `viaWsl`. A bare `sta`/`opensta`/`openroad` on PATH
+ * is the fallback, as before.
+ */
+export interface StaTool {
+  bin: string;
+  kind: "openroad" | "opensta";
+  viaWsl: boolean;
+  /** Where the binary came from, for the stage detail line. */
+  source: "managed" | "path";
+}
+
+/** The managed fork's binary of that name, when installed and runnable here. */
+function managedOpenroadBinary(ctx: PlatformContext, name: "openroad" | "sta"): StaTool | null {
+  const binDir = ctx.tools?.openroadBin;
+  if (!binDir) return null;
+  const viaWsl = ctx.host?.os === "windows";
+  const bin = join(binDir, name);
+  if (!existsSync(bin) || (viaWsl && !hasWsl())) return null;
+  return { bin, kind: name === "openroad" ? "openroad" : "opensta", viaWsl, source: "managed" };
+}
+
+export function resolveStaTool(ctx: PlatformContext): StaTool | null {
+  const managed = managedOpenroadBinary(ctx, "openroad") ?? managedOpenroadBinary(ctx, "sta");
+  if (managed) return managed;
+  const sta = which("sta") ?? which("opensta") ?? (hasBinary("sta") ? "sta" : hasBinary("opensta") ? "opensta" : null);
+  if (sta) return { bin: sta, kind: "opensta", viaWsl: false, source: "path" };
+  const openroad = which("openroad");
+  if (openroad) return { bin: openroad, kind: "openroad", viaWsl: false, source: "path" };
+  return null;
+}
+
+/** The `openroad` binary for the physical (S4) steps: managed fork, else PATH. */
+export function resolveOpenroadTool(ctx: PlatformContext): StaTool | null {
+  const managed = managedOpenroadBinary(ctx, "openroad");
+  if (managed) return managed;
+  const openroad = which("openroad");
+  if (openroad) return { bin: openroad, kind: "openroad", viaWsl: false, source: "path" };
+  return null;
+}
+
+/** STA worker threads: `toolchain.openroad.threads`, 0 = every host core. */
+export function staThreadCount(ctx: PlatformContext): number {
+  const configured = ctx.config?.toolchain?.openroad?.threads ?? 0;
+  return configured > 0 ? configured : Math.max(1, getHostInfo().cpuCount);
+}
+
+/** A path as the STA binary will see it: `/mnt/<drive>/...` through WSL. */
+async function staToolPath(tool: StaTool, p: string): Promise<string> {
+  return tool.viaWsl ? windowsPathToWsl(p) : posixPath(p);
+}
+
+/**
+ * Run one Tcl script with the STA tool. `openroad` gets `-no_init` so a user
+ * ~/.openroad never changes a handoff report; both tools take `-exit`.
+ */
+async function runStaTool(
+  ctx: PlatformContext,
+  tool: StaTool,
+  tclPath: string,
+  cwd: string,
+): Promise<{ ok: boolean; code: number; stdout: string; stderr: string }> {
+  const args = tool.kind === "openroad" ? ["-no_init", "-exit"] : ["-exit"];
+  if (tool.viaWsl) {
+    const binWsl = await windowsPathToWsl(tool.bin);
+    const tclWsl = await windowsPathToWsl(tclPath);
+    const cwdWsl = await windowsPathToWsl(cwd);
+    // The managed prefix ships openroad-env.sh (dependency lib dirs).
+    const envWsl = await windowsPathToWsl(join(ctx.tools.openroad, "openroad-env.sh"));
+    const cmd =
+      `[ -f ${JSON.stringify(envWsl)} ] && . ${JSON.stringify(envWsl)}; ` +
+      `cd ${JSON.stringify(cwdWsl)} && ${JSON.stringify(binWsl)} ${args.join(" ")} ${JSON.stringify(tclWsl)}`;
+    const res = await run("wsl", wslCommand(cmd), { cwd, stdio: "capture", allowFailure: true });
+    return { ok: res.ok, code: res.code ?? -1, stdout: res.stdout, stderr: res.stderr };
+  }
+  const envFile = ctx.tools?.openroad ? join(ctx.tools.openroad, "openroad-env.sh") : "";
+  if (tool.source === "managed" && envFile && existsSync(envFile) && hasBinary("bash")) {
+    const res = await run(
+      "bash",
+      ["-lc", `. ${JSON.stringify(envFile)}; cd ${JSON.stringify(cwd)} && ${JSON.stringify(tool.bin)} ${args.join(" ")} ${JSON.stringify(tclPath)}`],
+      { cwd, stdio: "capture", allowFailure: true },
+    );
+    return { ok: res.ok, code: res.code ?? -1, stdout: res.stdout, stderr: res.stderr };
+  }
+  const res = await run(tool.bin, [...args, tclPath], { cwd, stdio: "capture", allowFailure: true });
+  return { ok: res.ok, code: res.code ?? -1, stdout: res.stdout, stderr: res.stderr };
 }
 
 /** Best-effort parse of OpenSTA path report for start/end + slack. */
@@ -436,15 +527,18 @@ async function runYosysSynthSmoke(
   };
 }
 
-async function runOpenStaSmoke(opts: {
-  netlist: string;
-  sdc: string;
-  liberty: string;
-  openstaDir: string;
-  staBin: string;
-  top: string;
-  dryRun?: boolean;
-}): Promise<{
+async function runOpenStaSmoke(
+  ctx: PlatformContext,
+  opts: {
+    netlist: string;
+    sdc: string;
+    liberty: string;
+    openstaDir: string;
+    tool: StaTool;
+    top: string;
+    dryRun?: boolean;
+  },
+): Promise<{
   status: "pass" | "skip" | "fail";
   detail: string;
   report?: string;
@@ -454,18 +548,30 @@ async function runOpenStaSmoke(opts: {
   const tclPath = join(opts.openstaDir, "run.tcl");
   const reportPath = join(opts.openstaDir, `paths-${randomUUID()}.rpt`);
   const wnsPath = join(opts.openstaDir, "wns.txt");
+  const minReportPath = join(opts.openstaDir, "paths-min.rpt");
   const logPath = join(opts.openstaDir, "opensta.log");
+  const tool = opts.tool;
+  const threads = staThreadCount(ctx);
+  const p = (x: string) => staToolPath(tool, x);
 
-  // Generic OpenSTA script — liberty must match netlist tech
+  // Same report shape as build-platform/scripts/openroad-timing.tcl, with the
+  // max paths captured to a file for the correlate step. Liberty must match the
+  // netlist technology. The whole-core thread count is the one knob the
+  // search parallelises on (endpoints); Yosys before it is single-threaded.
   const tcl = [
     `# Generated by build-platform timings sta-handoff S2 — not sign-off`,
-    `read_liberty ${posixPath(opts.liberty)}`,
-    `read_verilog ${posixPath(opts.netlist)}`,
+    `# tool: ${tool.kind} (${tool.source}${tool.viaWsl ? ", via wsl" : ""}), ${threads} thread(s)`,
+    `set_thread_count ${threads}`,
+    `read_liberty ${await p(opts.liberty)}`,
+    `read_verilog ${await p(opts.netlist)}`,
     `link_design ${opts.top}`,
-    `read_sdc ${posixPath(opts.sdc)}`,
-    `report_checks -path_delay max -fields {slew cap input_pins nets} -format full_clock_expanded -group_count 20 > ${posixPath(reportPath)}`,
-    `report_wns > ${posixPath(wnsPath)}`,
+    `read_sdc ${await p(opts.sdc)}`,
+    `report_checks -path_delay max -fields {slew cap input_pins nets} -format full_clock_expanded -group_count 20 > ${await p(reportPath)}`,
+    `report_checks -path_delay min -fields {slew cap input_pins} -digits 3 > ${await p(minReportPath)}`,
+    `report_wns > ${await p(wnsPath)}`,
     `report_tns`,
+    `report_worst_slack -max`,
+    `report_worst_slack -min`,
     "exit",
     "",
   ].join("\n");
@@ -474,15 +580,11 @@ async function runOpenStaSmoke(opts: {
   if (opts.dryRun) {
     return {
       status: "skip",
-      detail: `dry-run ${opts.staBin} -exit run.tcl`,
+      detail: `dry-run ${tool.bin} -exit run.tcl (${threads} threads)`,
     };
   }
 
-  const result = await run(opts.staBin, ["-exit", tclPath], {
-    cwd: opts.openstaDir,
-    stdio: "capture",
-    allowFailure: true,
-  });
+  const result = await runStaTool(ctx, tool, tclPath, opts.openstaDir);
   writeFileSync(
     logPath,
     `exit=${result.code}\n${result.stdout}\n${result.stderr}\n`,
@@ -492,7 +594,7 @@ async function runOpenStaSmoke(opts: {
   if (!result.ok) {
     return {
       status: "fail",
-      detail: `opensta exit ${result.code} (see opensta.log); check liberty vs netlist`,
+      detail: `${tool.kind} exit ${result.code} (see opensta.log); check liberty vs netlist`,
     };
   }
   if (/^\s*Error(?:\s|:)/im.test(`${result.stdout}\n${result.stderr}`)) {
@@ -520,7 +622,7 @@ async function runOpenStaSmoke(opts: {
   writeFileSync(publishedReport, reportText, "utf8");
   return {
     status: "pass",
-    detail: `paths.rpt (${staRows.length} parsed path blocks)`,
+    detail: `paths.rpt (${staRows.length} parsed path blocks; ${tool.kind} ${tool.source}, ${threads} threads)`,
     report: posixPath(publishedReport),
     staRows,
   };
@@ -660,7 +762,7 @@ export async function runStaHandoff(
     if (synth.netlist) netlistPath = synth.netlist;
 
     const liberty = resolveLiberty(ctx, opts.liberty);
-    const staBin = resolveOpenStaBin();
+    const staTool = resolveStaTool(ctx);
     if (!netlistPath) {
       stages.push({
         id: "s2-opensta",
@@ -690,19 +792,19 @@ export async function runStaHandoff(
         ].join("\n"),
         "utf8",
       );
-    } else if (!staBin) {
+    } else if (!staTool) {
       stages.push({
         id: "s2-opensta",
         status: "skip",
-        detail: "opensta/sta not on PATH (soft-skip)",
+        detail: "no STA tool: run `tools install openroad` (tools/openroad fork) or put sta/openroad on PATH",
       });
     } else {
-      const sta = await runOpenStaSmoke({
+      const sta = await runOpenStaSmoke(ctx, {
         netlist: netlistPath,
         sdc: sdcPath,
         liberty,
         openstaDir,
-        staBin,
+        tool: staTool,
         top,
         dryRun: ctx.dryRun,
       });
@@ -719,16 +821,18 @@ export async function runStaHandoff(
 
     // S4: write OpenROAD floorplan TCL when netlist exists; run only if openroad + try
     const openroadDir = join(resolvedOut, "openroad");
+    const orTool = resolveOpenroadTool(ctx);
     if (netlistPath) {
       mkdirSync(openroadDir, { recursive: true });
       const orTcl = join(openroadDir, "floorplan.tcl");
+      const netlistForTool = orTool ? await staToolPath(orTool, netlistPath) : netlistPath;
       writeFileSync(
         orTcl,
         [
           "# OpenROAD floorplan smoke — study path only, not tape-out",
           `# netlist: ${netlistPath}`,
           "# Provide LEF/lib via lab scripts; this is a scaffold.",
-          `read_verilog ${netlistPath}`,
+          `read_verilog ${netlistForTool}`,
           `link_design ${top}`,
           "initialize_floorplan -die_area {0 0 100 100} -core_area {10 10 90 90}",
           "# place_pins / global_placement require tech LEF — soft lab step",
@@ -737,14 +841,9 @@ export async function runStaHandoff(
         ].join("\n"),
         "utf8",
       );
-      const orBin = which("openroad");
-      if (orBin && !ctx.dryRun) {
+      if (orTool && !ctx.dryRun) {
         const orLog = join(openroadDir, "openroad.log");
-        const orResult = await run(orBin, ["-exit", orTcl], {
-          cwd: openroadDir,
-          stdio: "capture",
-          allowFailure: true,
-        });
+        const orResult = await runStaTool(ctx, orTool, orTcl, openroadDir);
         writeFileSync(
           orLog,
           `exit=${orResult.code}\n${orResult.stdout}\n${orResult.stderr}\n`,
@@ -754,10 +853,10 @@ export async function runStaHandoff(
           id: "s4-openroad",
           status: orResult.ok ? "pass" : "fail",
           detail: orResult.ok
-            ? "floorplan.tcl ran (study)"
+            ? `floorplan.tcl ran (study; ${orTool.source} openroad)`
             : `openroad exit ${orResult.code} (often missing LEF — see openroad.log)`,
         });
-      } else if (orBin && ctx.dryRun) {
+      } else if (orTool && ctx.dryRun) {
         stages.push({
           id: "s4-openroad",
           status: "skip",
@@ -767,10 +866,10 @@ export async function runStaHandoff(
         stages.push({
           id: "s4-openroad",
           status: "skip",
-          detail: "floorplan.tcl written; openroad not on PATH",
+          detail: "floorplan.tcl written; no openroad (tools install openroad)",
         });
       }
-    } else if (hasBinary("openroad")) {
+    } else if (orTool) {
       stages.push({
         id: "s4-openroad",
         status: "skip",
@@ -780,7 +879,7 @@ export async function runStaHandoff(
       stages.push({
         id: "s4-openroad",
         status: "skip",
-        detail: "openroad not on PATH",
+        detail: "no openroad (tools install openroad)",
       });
     }
   } else {

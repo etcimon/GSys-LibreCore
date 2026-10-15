@@ -30,6 +30,9 @@ export interface ToolLocations {
   /** Bounded-formal toolchain (Yosys with integrated slang + SymbiYosys). */
   formal: string;
   formalBin: string;
+  /** OpenROAD fork (sign-off STA: `openroad` + `sta`), pinned by tools/openroad. */
+  openroad: string;
+  openroadBin: string;
   /** Python venv bin/Scripts dir. */
   pythonVenvBin: string;
 }
@@ -57,6 +60,8 @@ export function toolLocations(
   // yosys + sby pair (sby's Python support modules live under the same
   // share/yosys tree as the yosys that executes them).
   const formal = join(t, "formal");
+  // Flavour-named like verilator-g6lc: the pin is the tools/openroad gitlink.
+  const openroad = join(t, `openroad-${config.toolchain.openroad.flavour}`);
   const pythonVenvBin = join(
     paths.pythonVenv,
     os === "windows" ? "Scripts" : "bin",
@@ -74,6 +79,8 @@ export function toolLocations(
     dtc,
     formal,
     formalBin: join(formal, "bin"),
+    openroad,
+    openroadBin: join(openroad, "bin"),
     pythonVenvBin,
   };
 }

@@ -19,6 +19,7 @@ const RECIPE_FOR: Record<ManagedTool, string> = {
   spike: "spike",
   iverilog: "iverilog",
   formal: "formal",
+  openroad: "openroad",
 };
 
 export function missingManagedTools(ctx: PlatformContext, tools: ManagedTool[]): ManagedTool[] {

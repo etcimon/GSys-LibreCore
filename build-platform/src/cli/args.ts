@@ -75,6 +75,10 @@ const VALUE_FLAGS = new Set([
   "top",
   "golden",
   "inject-sta-fixture",
+  // timings sta-rtl (gate-level STA with the tools/openroad fork)
+  "platform",
+  "clock-port",
+  "threads",
   // tensor multi-phase / board path / narrow HARD surface (diag-like)
   "impl",
   "backend",

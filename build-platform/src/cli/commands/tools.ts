@@ -38,6 +38,8 @@ export const toolsCommand: Command = {
     "  tools install all          sim + dual-hart\n" +
     "  tools install riscv-gcc    single recipe\n" +
     "  tools install spike        Spike ISS (Linux native; Windows via WSL)\n" +
+    "  tools install timing       formal Yosys + the tools/openroad fork (sign-off STA)\n" +
+    "  tools install openroad     OpenROAD fork only (-march floor + PGO per toolchain.openroad)\n" +
     "\n" +
     "Profiles map to recipes in tooling/installProfiles.ts. OpenSBI uses\n" +
     "software/smt2-linux/scripts/build-opensbi-smt2.{ps1,sh} (Windows: Cygwin make\n" +
@@ -73,7 +75,7 @@ export const toolsCommand: Command = {
           logger.info(`                   recipes: ${p.recipeIds.join(", ")}`);
         }
         logger.info("");
-        logger.info("Recipes: riscv-gcc | verilator | spike | iverilog | opensbi-smt2 | u-boot-src | edk2-src");
+        logger.info("Recipes: riscv-gcc | verilator | spike | iverilog | formal | openroad | opensbi-smt2 | u-boot-src | edk2-src");
         logger.info("Example: bun run src/cli/index.ts tools install dual-hart");
         return 0;
       }
@@ -134,6 +136,18 @@ export const toolsCommand: Command = {
         version: config.toolchain.versions.iverilog,
         binDir: tools.iverilogBin,
         bin: `iverilog${host.exeSuffix}`,
+      },
+      {
+        id: "formal",
+        version: `tools/yosys (${config.toolchain.versions.yosys ?? "main"})`,
+        binDir: tools.formalBin,
+        bin: "yosys",
+      },
+      {
+        id: "openroad",
+        version: `tools/openroad (${config.toolchain.openroad.flavour})`,
+        binDir: tools.openroadBin,
+        bin: "openroad",
       },
       {
         id: "python-venv",

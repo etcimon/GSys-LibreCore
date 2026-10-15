@@ -50,7 +50,13 @@ export type Simulator =
   | "vivado";
 
 /** Open-source tools the platform installs into workspace/tooling. */
-export type ManagedTool = "riscv-gcc" | "verilator" | "spike" | "iverilog" | "formal";
+export type ManagedTool =
+  | "riscv-gcc"
+  | "verilator"
+  | "spike"
+  | "iverilog"
+  | "formal"
+  | "openroad";
 
 /** Physical-design / synthesis back-ends. */
 export type PhysicalDesignFlow =
@@ -212,12 +218,67 @@ export interface FormalConfig {
  */
 export type VerilatorFlavour = "g6lc" | "pinned";
 
+/**
+ * Host ISA for a managed tool's own C++ (`-march=<value>`), the same vocabulary
+ * as `simulation.verilator.march`: `auto` picks `x86-64-v3` (AVX2 + BMI2) on
+ * an x86 host that has it and the compiler default elsewhere; `native` binds
+ * the binary to the build host; `none` is the compiler default.
+ */
+export type HostIsaLevel = "auto" | "native" | "x86-64-v3" | "none";
+
+/**
+ * The OpenROAD the platform builds and runs for sign-off static timing: the
+ * LibreCore fork pinned as the submodule `tools/openroad` (etcimon/OpenROAD,
+ * branch `g6lc`), whose timing cuts leave every flow metric identical to the
+ * upstream base (`tools/openroad/AGENTS-openroad/architecture/OPPORTUNITIES.md`,
+ * "Flow-metric parity"). Installed under `workspace/tooling/openroad-g6lc` by
+ * `build-platform/scripts/install-openroad-g6lc.sh`; on Windows it is a Linux
+ * build driven through WSL, like Spike and the formal stack.
+ */
+export interface OpenroadConfig {
+  /** Only the fork today; the field exists so an upstream pin can be added. */
+  flavour: "g6lc";
+  /**
+   * `-march` for the OpenROAD build (`OPENROAD_MARCH`). The fork's Steiner
+   * table decoder and ABC's word simulator carry AVX2 paths that need the
+   * `x86-64-v3` floor; `auto` selects it when the host has it.
+   */
+  march: HostIsaLevel;
+  /**
+   * Two-phase GCC profile-guided build (`OPENROAD_PGO=1`): instrumented build,
+   * training on `tools/openroad/test/aes_nangate45.tcl` plus a gate-level
+   * `report_checks` run, then the optimised rebuild. Both phases are full
+   * builds, so this roughly doubles install time. Measured on the g6lc tip:
+   * `repair_design` 4.30 → 3.53 s, CTS + `repair_timing` 38.9 → 29.3 s, every
+   * metric and timing value unchanged.
+   */
+  pgo: boolean;
+  /** Build jobs (`cmake --build -j`); 0 = every host core. */
+  jobs: number;
+  /**
+   * STA worker threads for the timing reports (`set_thread_count`); 0 = every
+   * host core. OpenSTA's search parallelises over endpoints, so a whole-core
+   * `report_checks` scales with cores where the single-threaded Yosys synth
+   * that precedes it does not.
+   */
+  threads: number;
+  /**
+   * Extra cmake `-D` arguments (`OPENROAD_CMAKE_ARGS`), for a host whose
+   * OpenROAD dependencies live in a private prefix. Empty = let the install
+   * script detect `/opt/openroad-deps` (the builder's layout) and otherwise use
+   * system packages.
+   */
+  cmakeArgs: string[];
+}
+
 export interface ToolchainConfig {
   riscvGcc: RiscvGccConfig;
   python: PythonConfig;
   versions: ToolVersions;
   /** See VerilatorFlavour. */
   verilatorFlavour: VerilatorFlavour;
+  /** See OpenroadConfig. */
+  openroad: OpenroadConfig;
   /**
    * Preferred package manager per OS. `undefined` lets the platform pick the
    * first available manager it detects on the host.

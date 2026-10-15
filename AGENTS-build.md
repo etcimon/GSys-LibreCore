@@ -49,6 +49,21 @@ build and regression flow from a single top-level `.config.ts`.
   runtime as **qualified** (keyed by the sha256 of its `include/verilated_funcs.h` at the gitlink;
   a fork bump that touches that header must update their `qualified` tables) and record
   `runtimeFlavour`.
+- **OpenROAD of record: the g6lc fork `tools/openroad`** (etcimon/OpenROAD, branch `g6lc`;
+  nested pins `src/sta` = etcimon/OpenSTA, `third-party/abc` = etcimon/abc). Same shape as the
+  Verilator fork: `./build.sh tools install openroad` (or the `timing` profile = formal Yosys +
+  openroad) runs `build-platform/scripts/install-openroad-g6lc.sh`, which `git submodule
+  update --init --depth 1`s the gitlink and its two nested submodules (clones the fork when the
+  repo is not a checkout), builds with `-march` per `toolchain.openroad.march` (`auto` →
+  `x86-64-v3` where the host has AVX2+BMI2; the fork's Steiner decoder and ABC word simulator
+  carry AVX2 paths), `JOBS` = every core, and `OPENROAD_PGO=1` by default (two full builds,
+  trained on the fork's `test/aes_nangate45.tcl`), into `workspace/tooling/openroad-g6lc`
+  (builder prefix `/opt/testharness/toolchains/openroad-g6lc`; Windows builds through WSL).
+  Every flow metric of the fork is identical to upstream `9b7414e`
+  (`tools/openroad/AGENTS-openroad/architecture/OPPORTUNITIES.md` "Flow-metric parity"); the
+  two `aes_*` metric-limit misses the fork's regression reports are reproduced by unmodified
+  upstream in this toolchain. PGO: `repair_design` 4.30 → 3.53 s, CTS + `repair_timing`
+  38.9 → 29.3 s, results unchanged.
 - **`pinned`**: the upstream `v5.008` tag + `verif/regress/verilator-*.patch`, the qualification
   cross-check and the fallback the harness takes (with a log line) when no fork prefix exists.
   CI's lint gate pins this flavour in its `.config.local.ts` overlay because the fork commit must be
@@ -120,12 +135,13 @@ suite (sim / dual-hart / R3). Full detail: `AGENTS-build-platform.md` +
 
 ```text
 1. probe / doctor     — what is missing? (never installs)
-2. tools install …    — provision the right profile (sim | dual-hart | spike | all)
+2. tools install …    — provision the right profile (sim | dual-hart | spike | timing | all)
    or setup --install --profile …
 3. probe install      — re-check; follow any remaining OS-package / WSL hints
 4. diag status|run    — compartmentalized checks (per-test Verilator configs)
 5. verify / test      — AGENTS.md §0.2 gate and/or regression suites
    optional: timings compile -o <dir> → test --from-timing <dir>
+   gate-level STA: timings sta-rtl --target <cfg> [--platform nangate45|sky130hd] [--remote]
    free space: clean status | clean timings | clean svt | clean svt-tools --yes
 ```
 
@@ -142,7 +158,27 @@ Concrete examples:
 ./build.sh clean rust-target --dry-run   # alias for svt
 ./build.sh clean svt-tools --yes         # sv-timing/.tools (re-run package setup after)
 ./build.sh verify --lint
+./build.sh tools install timing          # formal Yosys + tools/openroad fork (-march, PGO)
+./build.sh timings sta-rtl --target g6lc64_ooo --platform nangate45          # yosys map + openroad STA, here
+./build.sh timings sta-rtl --target g6lc64_ooo_server --remote --target-mhz 1250  # same two steps on the builder
 ```
+
+**Gate-level STA of the LibreCore RTL (`timings sta-rtl`).** Yosys (the managed formal build,
+integrated slang) reads the target's flattened manifest (`core/` + `corev_apu/`), `synth
+-flatten`s the synth top (`verify.synthTopByTarget`, default `cva6`), maps it onto a liberty
+with `dfflibmap` + `abc`, and the fork's `openroad` runs `build-platform/scripts/openroad-timing.tcl`
+on the netlist (`set_thread_count` = `toolchain.openroad.threads`, every core by default) against
+a generated SDC: one clock on `--clock-port` (default `clk_i`) at `--target-mhz` (default
+`soc.targetFrequencyMHz`), I/O delays at 20 % of the period. The liberty is `--liberty` /
+`physicalDesign.pdk.liberty` / `CVA6_LIBERTY`, else the fork's free study library for
+`--platform` (default `soc.process`: `nangate45`, `sky130hd`, `sky130hs`, `asap7`) — a study
+library ranks paths, it is not sign-off. `--remote` runs both steps as one script on
+`ovh_calltorch` through the testharness proxy (`sync` first), building the fork prefix there
+when it is missing (`install-openroad-g6lc.sh`, `OPENROAD_SRC=/opt/testharness/src/openroad-g6lc`
+at the local gitlink, `-march`/PGO from the config, `nproc` jobs; `--rebuild-openroad` forces it)
+and reporting `wns_max`/`tns_max`/`wns_min`/`tns_min` plus `reports/paths-{max,min}.rpt`.
+Structural FO4 from `sv-timing` remains the screening layer; `timings sta-handoff` is the
+package-driven path (S0–S2/S4) and now prefers the same managed fork over a PATH `sta`.
 
 | Layer | Command | Role |
 |-------|---------|------|
@@ -151,6 +187,7 @@ Concrete examples:
 | Install | `tools install` / `setup --install` | Profiles / recipes |
 | Focused gate | `diag run` | Per-compartment Verilator surfaces |
 | Structural FO4 | `timings compile\|validate\|sta-handoff` | Precompile package (`--output` / monorepo-soak packages) |
+| Gate-level STA | `timings sta-rtl [--remote]` | Yosys liberty map + `tools/openroad` fork report (study liberty unless yours) |
 | Package FO4 soak | `cd sv-timing && python tools/svt.py monorepo-soak` | Sparse real RTL; package-first (philosophy §2.8) |
 | Full gate | `verify` | Lint / formal / sim / synth |
 | Free space | `clean` | Purpose + age + stamp filters; **`svt` / `svt-tools`** for package Cargo |

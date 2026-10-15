@@ -114,6 +114,21 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       // core/include/config_pkg.sv -- it rejects `ai_cfg_t'(0)`.
       yosys: "main",
       sby: "main",
+      // Fallback clone ref when tools/openroad is absent; the pin of record is
+      // that submodule's gitlink (install-openroad-g6lc.sh OPENROAD_PIN).
+      openroad: "g6lc",
+    },
+    // Sign-off STA: the tools/openroad fork, built like the Verilator model
+    // (host ISA floor + PGO) — both are layout-only and leave every flow
+    // metric identical (OPPORTUNITIES.md "Flow-metric parity" / "Profile-guided
+    // build"). pgo doubles the install time; set false for a quick first build.
+    openroad: {
+      flavour: "g6lc",
+      march: "auto",
+      pgo: true,
+      jobs: 0,
+      threads: 0,
+      cmakeArgs: [],
     },
     packageManager: {
       windows: "chocolatey",

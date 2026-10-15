@@ -517,9 +517,11 @@ function capabilityPresent(
     case "opensbi-smt2":
       return m("opensbi-smt2") || r("smt2-fw_payload");
     case "yosys":
-      return u("yosys");
+      return u("yosys") || m("formal");
     case "sby":
-      return u("sby");
+      return u("sby") || m("formal");
+    case "openroad":
+      return m("openroad") || u("openroad");
     case "slang":
       return u("slang");
     case "workspace":
@@ -686,6 +688,13 @@ function buildCommandMatrix(
       install: "Install yosys (oss-cad-suite) on PATH",
     },
     {
+      command: "timings sta-rtl",
+      summary: "Gate-level STA of a target (yosys map + tools/openroad fork; --remote needs no local tools)",
+      needs: ["bun", "yosys", "openroad"],
+      required: ["bun"],
+      install: "tools install timing  |  timings sta-rtl --remote",
+    },
+    {
       command: "test --open-source",
       summary: "Open-source verif/regress suites",
       needs: ["bun", "bash", "python", "riscv-gcc", "verilator", "spike"],
@@ -804,6 +813,9 @@ function buildInstallActions(
       cmds.push("bun run src/cli/index.ts tools install dual-hart");
     }
     if (ids.has("spike")) cmds.push("bun run src/cli/index.ts tools install spike");
+    if (ids.has("formal") || ids.has("openroad")) {
+      cmds.push("bun run src/cli/index.ts tools install timing  # formal yosys + tools/openroad fork");
+    }
     if (ids.size >= 3) cmds.push("bun run src/cli/index.ts tools install all");
     if (ids.has("python-venv")) {
       cmds.push("bun run src/cli/index.ts setup --install --profile sim");
@@ -1040,6 +1052,22 @@ export async function gatherProbeReport(
       path: join(repoRoot, "build-platform/workspace/smt2-linux"),
       versionHint: opensbiInstalled ? "fw_payload.elf present" : null,
       installHint: "tools install dual-hart  |  tools install opensbi",
+    },
+    {
+      id: "formal",
+      pin: `tools/yosys (${config.toolchain.versions.yosys ?? "main"})`,
+      installed: existsSync(join(tools.formalBin, "yosys")) && existsSync(join(tools.formalBin, "sby")),
+      path: tools.formalBin,
+      versionHint: null,
+      installHint: "tools install formal  # Linux native / Windows via WSL",
+    },
+    {
+      id: "openroad",
+      pin: `tools/openroad (${config.toolchain.openroad.flavour}, march=${config.toolchain.openroad.march}, pgo=${config.toolchain.openroad.pgo})`,
+      installed: existsSync(join(tools.openroadBin, "openroad")),
+      path: tools.openroadBin,
+      versionHint: null,
+      installHint: "tools install openroad  |  tools install timing  # Linux native / Windows via WSL",
     },
   ];
 

@@ -177,6 +177,22 @@ and supports an internal `--remote` flag to switch between `g6q.py` and
 6. If the tool gates a residual path, add a capability to the `probe` command
    matrix (`tooling/probe.ts` `buildCommandMatrix`) and an install playbook
    entry in `buildInstallActions` so `probe install` stays accurate.
+7. Add the id to `ManagedTool` (`schema.ts`), `hasManagedTool` (`tests/runner.ts`),
+   `RECIPE_FOR` (`tooling/offerInstall.ts`), the `tools` list and the `probe`
+   managed-tool rows.
+
+Worked example — `openroad` (2026-10-15): `locations.ts` `openroad-g6lc`;
+`toolchain.openroad` (`flavour`, `march`, `pgo`, `jobs`, `threads`, `cmakeArgs`)
+in `schema.ts` + `defaults.ts`; `recipes.ts` `installOpenroad` → WSL on
+Windows / native elsewhere, env `OPENROAD_PREFIX` `OPENROAD_BUILD_DIR`
+`OPENROAD_PGO` `OPENROAD_MARCH` `OPENROAD_CMAKE_ARGS` `JOBS` into
+`scripts/install-openroad-g6lc.sh`, which does the submodule fetching itself
+(`git submodule update --init --depth 1 tools/openroad`, then `src/sta` +
+`third-party/abc`; a clone of the fork when the repo is not a checkout);
+profiles `timing` (`formal` + `openroad`) and `all`; `childEnv` prepends the
+prefix and exports `OPENROAD_EXE`; `staHandoff.ts` `resolveStaTool` prefers
+the managed fork (`openroad`, then `sta`) over PATH; `rtlTiming.ts` +
+`timings sta-rtl` is the consumer (below).
 
 ### 4.4 Add a regression/test suite
 1. Add a `TestSuite` entry to `defaults.ts` `tests.suites` (or `.config.ts`) with:
@@ -286,6 +302,7 @@ bun run src/cli/index.ts tools install dual-hart    # riscv-gcc + OpenSBI SMT2
 bun run src/cli/index.ts tools install sim          # open-source sim path
 bun run src/cli/index.ts tools install spike        # Spike (Linux / WSL)
 bun run src/cli/index.ts tools install formal       # Yosys>=0.67 + SymbiYosys
+bun run src/cli/index.ts tools install timing       # formal + tools/openroad fork (-march, PGO)
 bun run src/cli/index.ts tools install all
 bun run src/cli/index.ts setup --install --profile dual-hart
 ```
@@ -296,8 +313,9 @@ bun run src/cli/index.ts setup --install --profile dual-hart
 | `dual-hart` | riscv-gcc, opensbi-smt2 | `software/smt2-linux/scripts/build-opensbi-smt2.{ps1,sh}` |
 | `opensbi` | opensbi-smt2 | Firmware only |
 | `formal` | formal | Bounded-proof toolchain for `verify --formal` |
-| `all` | sim + opensbi-smt2 + formal | Full residual stack |
-| single recipe | `riscv-gcc` \| `verilator` \| `spike` \| `iverilog` \| `opensbi-smt2` \| `formal` | `tools install <id>` |
+| `timing` | formal, openroad | Gate-level STA: `timings sta-rtl` / `sta-handoff` (two full builds with PGO on) |
+| `all` | sim + opensbi-smt2 + formal + openroad | Full residual stack |
+| single recipe | `riscv-gcc` \| `verilator` \| `spike` \| `iverilog` \| `opensbi-smt2` \| `formal` \| `openroad` | `tools install <id>` |
 
 - **formal**: source-builds **Yosys (>= v0.67)** with the *integrated* sv-elab/slang
   frontend, plus SymbiYosys, into `workspace/tooling/formal`
@@ -315,20 +333,45 @@ bun run src/cli/index.ts setup --install --profile dual-hart
   `TOK_USER_TYPE`) and rejects package-to-package `import`. Below v0.67 there is
   no `read_slang` at all.
 
-- **OpenROAD timing**: the fork is the submodule `tools/openroad` (etcimon/OpenROAD,
-  branch `g6lc`). It is not a `tools install` recipe and it does not replace
-  sv-timing FO4. Sign-off reports go through
-  `scripts/install-openroad-g6lc.sh` and `scripts/openroad-timing.tcl`
-  (`report_checks` on a liberty, a gate-level netlist, and an SDC). The fork
-  asks STA once per pin arrival, skips an empty parasitic update, and checks
-  only driver pins in `check_sanity`. Repair, rebuffer ranking, and endpoint
-  collection propagate required times once per pass and then read the slack
-  stored on each vertex. The fork's flow metrics are identical to upstream's
-  at the pinned base (`tools/openroad/AGENTS-openroad/architecture/OPPORTUNITIES.md`,
-  "Flow-metric parity"). `OPENROAD_PGO=1` makes the install a two-phase GCC
-  profile-guided build trained on `test/aes_nangate45.tcl` (same results,
-  `repair_timing` ~25% faster); `OPENROAD_CMAKE_ARGS` passes `-D` hints for a
-  private dependency prefix such as `/opt/openroad-deps`.
+- **OpenROAD timing** (`tools install openroad`, profile `timing` = `formal` +
+  `openroad`): the fork is the submodule `tools/openroad` (etcimon/OpenROAD,
+  branch `g6lc`; nested `src/sta` = etcimon/OpenSTA, `third-party/abc` =
+  etcimon/abc), built by `scripts/install-openroad-g6lc.sh` into
+  `workspace/tooling/openroad-g6lc` (`openroad` + `sta`; builder prefix
+  `/opt/testharness/toolchains/openroad-g6lc`; Windows builds through WSL like
+  Spike/formal). The script fetches the gitlink and its two nested submodules
+  itself (shallow), builds with `-march` from `toolchain.openroad.march`
+  (`auto` → `x86-64-v3` on a host with AVX2+BMI2 — the fork's Steiner decoder
+  and ABC's word simulator carry AVX2 paths), `JOBS` = every core, and a
+  two-phase GCC PGO round (`toolchain.openroad.pgo`, default on; trained on
+  `test/aes_nangate45.tcl` + a gate-level `report_checks`; both phases are full
+  builds). `toolchain.openroad.cmakeArgs` / `OPENROAD_CMAKE_ARGS` pass `-D`
+  hints for a private dependency prefix; `/opt/openroad-deps` is detected.
+  It does not replace sv-timing FO4. The fork asks STA once per pin arrival,
+  skips an empty parasitic update, checks only driver pins in `check_sanity`,
+  propagates required times once per pass in repair / rebuffer ranking /
+  endpoint collection, and its flow metrics are identical to upstream's at the
+  pinned base (`tools/openroad/AGENTS-openroad/architecture/OPPORTUNITIES.md`,
+  "Flow-metric parity"; PGO numbers under "Profile-guided build").
+
+- **Gate-level STA of the RTL — `timings sta-rtl`** (`tooling/rtlTiming.ts`):
+  Yosys (managed formal build) reads the target's flattened manifest, `synth
+  -flatten`s the synth top (`verify.synthTopByTarget`), maps it with
+  `dfflibmap` + `abc -liberty`, then the fork's `openroad` runs
+  `scripts/openroad-timing.tcl` (`OR_THREADS` = `toolchain.openroad.threads`,
+  every core by default; `OR_REPORT_DIR` → `reports/paths-{max,min}.rpt`,
+  `summary.txt`) against a generated SDC (one clock on `--clock-port`, default
+  `clk_i`, at `--target-mhz`, default `soc.targetFrequencyMHz`; I/O delays at
+  20 % of the period). Liberty: `--liberty`, `physicalDesign.pdk.liberty`,
+  `CVA6_LIBERTY`, else the fork's study library for `--platform` (default
+  `soc.process`: `nangate45` / `sky130hd` / `sky130hs` / `asap7`) — study
+  numbers rank paths, they are not sign-off. `--remote` runs the two steps as
+  one proxy script on the builder (`sync` first; `REMOTE_OPENROAD`,
+  `REMOTE_OPENROAD_SRC` in `eda.ts`), building the fork there when the prefix
+  is missing (`-march`/PGO from the config, `nproc` jobs; `--rebuild-openroad`
+  forces), classifying from `RESULT`/`STA_RESULT` lines, never from the SSH
+  exit code. `timings sta-handoff` (package-driven S0–S2/S4) resolves the same
+  managed fork first (`resolveStaTool`), then a PATH `sta`/`openroad`.
 
 #### 4.6.2a Running the formal gate
 

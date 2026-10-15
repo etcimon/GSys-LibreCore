@@ -900,8 +900,12 @@ export async function formalTask(
 }
 
 /** Remote layout used by verif/regress/remote/testharness_proxy.py. */
-const REMOTE_REPO = "/opt/testharness/repo";
-const REMOTE_FORMAL = "/opt/testharness/toolchains/formal";
+export const REMOTE_REPO = "/opt/testharness/repo";
+export const REMOTE_FORMAL = "/opt/testharness/toolchains/formal";
+/** The builder's OpenROAD prefix (install-openroad-g6lc.sh default). */
+export const REMOTE_OPENROAD = "/opt/testharness/toolchains/openroad-g6lc";
+/** The builder's checkout of the fork, kept beside repo/ (not part of sync). */
+export const REMOTE_OPENROAD_SRC = "/opt/testharness/src/openroad-g6lc";
 const REMOTE_VERILATOR = "/opt/testharness/toolchains/verilator-v5.008/bin";
 
 /**
@@ -909,7 +913,7 @@ const REMOTE_VERILATOR = "/opt/testharness/toolchains/verilator-v5.008/bin";
  * files inside the builder's checkout. The flattened flist is written with
  * absolute paths, which is right locally and meaningless remotely.
  */
-function toRemotePaths(text: string, repoRoot: string): string {
+export function toRemotePaths(text: string, repoRoot: string): string {
   const local = posixPath(repoRoot);
   // A Windows root differs only in drive-letter case between callers.
   const pattern = local.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -921,7 +925,7 @@ function toRemotePaths(text: string, repoRoot: string): string {
  * wrapper, which owns the SSH ControlMaster and the key passphrase (this
  * function never handles a credential). Shared by the formal and lint routes.
  */
-async function runRemoteScript(
+export async function runRemoteScript(
   ctx: PlatformContext,
   script: string,
   opts: { name: string; budgetSeconds: number; sync: boolean },

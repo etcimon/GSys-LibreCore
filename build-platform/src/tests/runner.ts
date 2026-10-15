@@ -276,6 +276,10 @@ export function hasManagedTool(ctx: PlatformContext, tool: ManagedTool): boolean
         hasBinary("riscv32-unknown-elf-gcc")
       );
     }
+    case "openroad":
+      // Managed OpenROAD is a Linux build (via WSL on Windows); PATH is the
+      // fallback, as for the formal stack.
+      return existsSync(join(tools.openroadBin, "openroad")) || hasBinary("openroad");
   }
 }
 

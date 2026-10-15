@@ -486,6 +486,140 @@ export async function installFormal(
   };
 }
 
+/** True when the managed OpenROAD prefix has the `openroad` binary (Linux ELF under WSL). */
+export function isOpenroadInstalled(openroadBin: string): boolean {
+  return existsSync(join(openroadBin, "openroad"));
+}
+
+/**
+ * Resolve the `-march` the OpenROAD build gets from `toolchain.openroad.march`
+ * (install-openroad-g6lc.sh OPENROAD_MARCH). `auto` is decided by the script on
+ * the build host, since under WSL the compiler runs there, not here.
+ */
+export function openroadMarchFlag(march: string): string {
+  return march === "auto" ? "auto" : march;
+}
+
+/**
+ * OpenROAD fork for sign-off STA: the submodule tools/openroad (etcimon/OpenROAD,
+ * branch g6lc) into workspace/tooling/openroad-g6lc.
+ *
+ * Host rules mirror the formal stack:
+ * - **Linux / macOS**: `build-platform/scripts/install-openroad-g6lc.sh` natively.
+ * - **Windows**: never native. The same script runs under **WSL** and installs
+ *   Linux binaries into the managed prefix (`openroad` + `sta`).
+ *
+ * The script fetches what the build needs: the `tools/openroad` gitlink through
+ * `git submodule update --init` (a clone of the fork when the repo is not a git
+ * checkout), then the nested `src/sta` and `third-party/abc` submodules. Build
+ * flags come from `toolchain.openroad`: `-march` (AVX2 floor by default), PGO
+ * (two full builds), jobs. The build itself never touches the repo RTL.
+ */
+export async function installOpenroad(
+  ctx: PlatformContext,
+  options: RecipeOptions = {},
+): Promise<RecipeResult> {
+  const { logger, repoRoot, tools, host, config, paths } = ctx;
+
+  if (!options.force && isOpenroadInstalled(tools.openroadBin)) {
+    return already("openroad", "already installed");
+  }
+
+  const scriptRel = "build-platform/scripts/install-openroad-g6lc.sh";
+  const scriptAbs = join(repoRoot, scriptRel);
+  if (!existsSync(scriptAbs)) {
+    return { id: "openroad", ok: false, skipped: false, reason: `${scriptRel} missing` };
+  }
+
+  const or = config.toolchain.openroad;
+  const jobs = String(or.jobs > 0 ? or.jobs : recommendedJobs() + 1);
+  const pgo = or.pgo ? "1" : "0";
+  const march = openroadMarchFlag(or.march);
+  const cmakeArgs = or.cmakeArgs.join(" ");
+  const fallbackRef = config.toolchain.versions.openroad ?? "g6lc";
+  const summary = `march=${march} pgo=${pgo} jobs=${jobs}`;
+
+  if (options.dryRun) {
+    const via = host.os === "windows" ? "wsl -e bash" : "bash";
+    logger.info(`[dry-run] ${via} ${scriptRel} (tools/openroad pin, ${summary} → ${tools.openroad})`);
+    return already("openroad", "dry-run");
+  }
+
+  // --- Windows: build under WSL into the managed prefix --------------------
+  if (host.os === "windows") {
+    if (!hasBinary("wsl")) {
+      logger.warn(
+        "OpenROAD requires WSL on Windows (a Linux CMake/Ninja build). " +
+          "Install WSL, then re-run: bun run src/cli/index.ts tools install openroad",
+      );
+      return { id: "openroad", ok: false, skipped: true, reason: "windows: wsl required for openroad" };
+    }
+    const installWsl = await windowsPathToWsl(tools.openroad);
+    const scriptWsl = await windowsPathToWsl(scriptAbs);
+    const repoWsl = await windowsPathToWsl(repoRoot);
+    // Build under the WSL home, never on /mnt: DrvFs is slow for a ~3000-step
+    // ninja build and the PGO phases compile the tree twice.
+    const shellCmd = [
+      "set -euo pipefail",
+      `export REPO_ROOT=${JSON.stringify(repoWsl)}`,
+      `export OPENROAD_PREFIX=${JSON.stringify(installWsl)}`,
+      'export OPENROAD_BUILD_DIR="$HOME/.cache/g6lc-openroad/build"',
+      `export OPENROAD_PGO=${pgo}`,
+      `export OPENROAD_MARCH=${JSON.stringify(march)}`,
+      `export OPENROAD_FORK_REF=${JSON.stringify(fallbackRef)}`,
+      `export OPENROAD_CMAKE_ARGS=${JSON.stringify(cmakeArgs)}`,
+      `export JOBS=${jobs}`,
+      `bash ${JSON.stringify(scriptWsl)}`,
+    ].join("; ");
+
+    logger.info(`OpenROAD fork: building under WSL → ${tools.openroad} (${summary})`);
+    const res = await run("wsl", ["-e", "bash", "-lc", shellCmd], {
+      cwd: repoRoot,
+      logger,
+      allowFailure: true,
+      stdio: "both",
+    });
+    const ok = res.ok && isOpenroadInstalled(tools.openroadBin);
+    return {
+      id: "openroad",
+      ok,
+      skipped: false,
+      reason: ok
+        ? `${tools.openroadBin}/{openroad,sta} (Linux ELF; run via wsl; ${summary})`
+        : `WSL openroad install failed (exit ${res.code}); needs cmake>=3.24, ninja, g++>=11, swig, tcl-dev, boost, eigen3, spdlog, or-tools in WSL (tools/openroad/etc/DependencyInstaller.sh)`,
+    };
+  }
+
+  // --- Linux / macOS native -------------------------------------------------
+  if (!hasBinary("bash")) {
+    return { id: "openroad", ok: false, skipped: true, reason: "bash not found" };
+  }
+  const env = childEnv(ctx, {
+    REPO_ROOT: repoRoot,
+    OPENROAD_PREFIX: tools.openroad,
+    OPENROAD_BUILD_DIR: join(paths.cache, "openroad-build"),
+    OPENROAD_PGO: pgo,
+    OPENROAD_MARCH: march,
+    OPENROAD_FORK_REF: fallbackRef,
+    OPENROAD_CMAKE_ARGS: cmakeArgs,
+    JOBS: jobs,
+  });
+  logger.info(`OpenROAD fork: building tools/openroad natively → ${tools.openroad} (${summary})`);
+  const res = await runBashScript(scriptRel, [], {
+    cwd: repoRoot,
+    env,
+    logger,
+    allowFailure: true,
+  });
+  const ok = res.ok && isOpenroadInstalled(tools.openroadBin);
+  return {
+    id: "openroad",
+    ok,
+    skipped: false,
+    reason: ok ? `${tools.openroadBin}/{openroad,sta} (${summary})` : `openroad install failed (exit ${res.code})`,
+  };
+}
+
 /** Icarus Verilog: delegate to the OS package manager (brew/apt install). */
 export async function installIcarus(
   ctx: PlatformContext,

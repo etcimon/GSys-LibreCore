@@ -13,6 +13,7 @@ import { assessSimPreflight } from "./simPreflight.ts";
 import { inventoryFo4Model, fo4RetuneChecklist } from "./fo4Inventory.ts";
 import { resolveSvTimingRoot } from "./timings.ts";
 import { posixPath } from "./eda.ts";
+import { resolveStaTool } from "./staHandoff.ts";
 
 export interface TimingsDoctorReport {
   ok: boolean;
@@ -24,6 +25,8 @@ export interface TimingsDoctorReport {
     yosys: boolean;
     opensta: boolean;
     openroad: boolean;
+    /** The STA engine sta-handoff would run: managed tools/openroad fork or PATH. */
+    sta: string | null;
     liberty: string | null;
   };
   sim: ReturnType<typeof assessSimPreflight>;
@@ -62,14 +65,18 @@ export function assessTimingsDoctor(ctx: PlatformContext): TimingsDoctorReport {
 
   const bash = resolveBashBinary();
   const liberty = resolveLibertyEnv();
-  const yosys = hasBinary("yosys");
-  const opensta = hasBinary("sta") || hasBinary("opensta");
-  const openroad = hasBinary("openroad");
+  const yosys = hasBinary("yosys") || existsSync(join(ctx.tools.formalBin, "yosys"));
+  const staTool = resolveStaTool(ctx);
+  const opensta = staTool?.kind === "opensta" || hasBinary("sta") || hasBinary("opensta");
+  const openroad = staTool?.kind === "openroad" || hasBinary("openroad");
+  const sta = staTool
+    ? `${staTool.kind} (${staTool.source}${staTool.viaWsl ? ", via wsl" : ""}): ${posixPath(staTool.bin)}`
+    : null;
 
   if (!svt) hints.push("Clone/check out sv-timing at repo root");
   if (!liberty) hints.push("Set CVA6_LIBERTY for OpenSTA S2 (optional)");
-  if (!yosys) hints.push("Install OSS CAD suite / yosys for S1 synth smoke");
-  if (!opensta) hints.push("Install OpenSTA (sta) for S2 path reports");
+  if (!yosys) hints.push("Install yosys for S1 synth smoke: tools install formal");
+  if (!staTool) hints.push("Install the STA engine for S2 path reports: tools install openroad (tools/openroad fork)");
   if (!lastLab) hints.push("Run: timings lab-run  (offline S0 + soft S1–S4)");
 
   const fo4 = inventoryFo4Model(ctx);
@@ -91,6 +98,7 @@ export function assessTimingsDoctor(ctx: PlatformContext): TimingsDoctorReport {
       yosys,
       opensta,
       openroad,
+      sta,
       liberty,
     },
     sim,

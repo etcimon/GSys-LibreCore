@@ -265,7 +265,8 @@ HARD catalog `architecture/ai-matrix/hard-tests.md`).
 | Package gateways `remote` / `g6q` / `g6b` / `tensor` | **done** (spawn-only) |
 | CI lanes through `./build.sh` (GitHub + GitLab, §5.1) | **done**; BIOS regress lane residual |
 | Windows VS Build Tools provisioning | **planned** |
-| PnR / OpenROAD / OpenSTA synth (S1–S4) | **planned** — `architecture/build-platform-opensta-from-timing.md` |
+| Gate-level STA with the `tools/openroad` fork (`tools install openroad\|timing`, `timings sta-rtl [--remote]`) | **done** — yosys liberty map + `openroad-timing.tcl`; study liberties from the fork's `test/` platforms; builder route builds the fork with `-march`/PGO |
+| PnR / OpenROAD place-and-route (S4b, LEF) | **planned** — `architecture/build-platform-opensta-from-timing.md` |
 | Dual-ISS Spike+Verilator polish | **done** (suite `dual-iss-regress` tohost golden) |
 | R3b Linux Image gate | **done** (suite `r3b-linux-image`; Image still external) |
 | CRT `mc-spo-veri` | **imafdc 9/9** + **server_math L2 9/9** + **stream8 9/9** (DeepSpec STQ; Verilator 5.008); dual-hart-ci host residual green |
@@ -337,13 +338,17 @@ Maps: `AGENTS-specs-to-impl.md` · `AGENTS-specs-to-tests.md` · `AGENTS-specs-c
 | S3b host FO4 golden check | done |
 | S3b-lab **retune-propose** (review-only; never edits fo4-v1) | done |
 | S4a OpenROAD floorplan.tcl scaffold | done |
+| Managed `openroad` recipe (tools/openroad fork, submodule init, `-march`, PGO) + `sta-rtl` local/remote | done |
 | doctor / lab-run / lab-report / CI asserts | done |
 
 ### Still open (lab PD or residual)
 
 1. **S3b-lab (package edit)** — retune `sv-timing` FO4 table from **real** STA using `retune-proposal.md`
-   (host propose + fixture guard done; gate `s9-lab-gate`).
-2. **S4b OpenROAD + LEF** — open-PDK/NDA tech under `pd/pdk/` (scaffold already).
+   (host propose + fixture guard done; gate `s9-lab-gate`). The real STA is now one command
+   away: `timings sta-rtl --target <cfg> --platform nangate45 [--remote]` (study liberty).
+2. **S4b OpenROAD + LEF** — open-PDK/NDA tech under `pd/pdk/` (scaffold already); the fork
+   binary and its `test/<platform>` LEF/lib sets are installed, the floorplan step still needs
+   a real die/LEF plan.
 3. **Full `verify --sim` on Windows CI** — preflight + Git-Bash prefer done; needs riscv-gcc/verilator (+ WSL spike).
 4. **CI residuals** — BIOS `bios-regress` `http_standalone_frames`; GitLab BIOS wasm-opt `try_table` probe; `svt.py check` hygiene (rustfmt drift, KD0 fixture strings) still informational.
 5. ~~AMOCAS.Q~~ **done** · ~~stream8 residual~~ **done** (CRT 9/9 + H 3/3 + stability stream8 6/6) · dual-hart-ci residual soft lint/R3 skip when host-skewed · R3b Image (soft-skip gate) · dual-ISS · OpenSBI/Ara live still lab-optional.

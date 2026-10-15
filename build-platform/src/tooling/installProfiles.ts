@@ -29,6 +29,7 @@ import {
   installFormal,
   installIcarus,
   installOpenSourceSimTools,
+  installOpenroad,
   installRiscvGcc,
   installSpike,
   installUbootSrc,
@@ -42,6 +43,7 @@ export type InstallProfileId =
   | "dual-hart"
   | "opensbi"
   | "formal"
+  | "timing"
   | "all"
   | "open-source-sim";
 
@@ -83,10 +85,16 @@ export const INSTALL_PROFILES: InstallProfile[] = [
     recipeIds: ["formal"],
   },
   {
+    id: "timing",
+    summary:
+      "Sign-off STA: the tools/openroad fork (openroad + sta, -march floor + PGO, WSL on Windows) plus the formal Yosys that maps the netlist",
+    recipeIds: ["formal", "openroad"],
+  },
+  {
     id: "all",
     summary:
-      "sim + dual-hart + formal (full residual stack for suites, R3a and verify --formal)",
-    recipeIds: ["riscv-gcc", "verilator", "spike", "iverilog", "opensbi-smt2", "formal"],
+      "sim + dual-hart + formal + openroad (full residual stack for suites, R3a, verify --formal and timings sta-handoff)",
+    recipeIds: ["riscv-gcc", "verilator", "spike", "iverilog", "opensbi-smt2", "formal", "openroad"],
   },
 ];
 
@@ -198,6 +206,8 @@ export async function installRecipeById(
       return installIcarus(ctx, options);
     case "formal":
       return installFormal(ctx, options);
+    case "openroad":
+      return installOpenroad(ctx, options);
     case "opensbi-smt2":
     case "opensbi":
       return installOpensbiSmt2(ctx, options);
@@ -234,7 +244,9 @@ export async function installProfile(
   if (profile.id === "all") {
     const sim = await installOpenSourceSimTools(ctx, options);
     const opensbi = await installOpensbiSmt2(ctx, options);
-    return [...sim, opensbi];
+    const formal = await installFormal(ctx, options);
+    const openroad = await installOpenroad(ctx, options);
+    return [...sim, opensbi, formal, openroad];
   }
 
   const results: RecipeResult[] = [];

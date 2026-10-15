@@ -30,6 +30,7 @@ import {
 import { writeLabReport } from "../../tooling/labReport.ts";
 import { assessTimingsDoctor } from "../../tooling/timingsDoctor.ts";
 import { proposeFo4Retune } from "../../tooling/retunePropose.ts";
+import { hostCores, runRtlTiming } from "../../tooling/rtlTiming.ts";
 import {
   buildBenchCorrelation,
   materializeStaSmokePackage,
@@ -427,7 +428,7 @@ export const timingsCommand: Command = {
   summary:
     "Host adapter for sv-timing: compile/analyze/correct to --output, validate --from-timing.",
   usage:
-    "bun run src/cli/index.ts timings [status|doctor|flist|compile|analyze|area|correct|validate|summary|dashboard|sta-handoff|correlate|fo4-golden|retune-propose|parse-bench-log|lab-run] [options…]",
+    "bun run src/cli/index.ts timings [status|doctor|flist|compile|analyze|area|correct|validate|summary|dashboard|sta-handoff|sta-rtl|correlate|fo4-golden|retune-propose|parse-bench-log|lab-run] [options…]",
   details:
     "Prepares monorepo flists for the independent sv-timing package and spawns\n" +
     "its CLI via `python tools/svt.py run -- …`. Never links monorepo code into\n" +
@@ -442,6 +443,10 @@ export const timingsCommand: Command = {
     "  timings validate   structural check of a precompile out-dir (--from-timing)\n" +
     "  timings summary    soak dashboard from analyze.json (alias: dashboard)\n" +
     "  timings sta-handoff  S0–S2 OpenSTA handoff from --from-timing (--try-tools)\n" +
+    "  timings sta-rtl    gate-level STA of a config-package target: yosys maps core/+corev_apu/\n" +
+    "                     onto a liberty, the tools/openroad fork reports (openroad-timing.tcl);\n" +
+    "                     --target --top --liberty|--platform --clock-port --target-mhz --threads\n" +
+    "                     --remote (builder: -march/PGO fork build when absent, nproc threads)\n" +
     "  timings correlate  FO4 dashboard + optional --bench id metrics JSON\n" +
     "  timings fo4-golden check|write  S3b FO4 golden vs analyze.json\n" +
     "  timings retune-propose  S3b-lab: correlate.json → retune-proposal.md (never edits fo4-v1)\n" +
@@ -468,6 +473,8 @@ export const timingsCommand: Command = {
     "bun run src/cli/index.ts timings validate --from-timing out/t1",
     "bun run src/cli/index.ts timings summary --from-timing out/t1",
     "bun run src/cli/index.ts timings sta-handoff --from-timing out/t1 --try-tools",
+    "bun run src/cli/index.ts timings sta-rtl --target g6lc64_ooo --platform nangate45",
+    "bun run src/cli/index.ts timings sta-rtl --target g6lc64_ooo_server --remote --target-mhz 1250",
     "bun run src/cli/index.ts timings lab-run --try-tools",
     "bun run src/cli/index.ts timings retune-propose",
     "bun run src/cli/index.ts timings retune-propose --from-handoff workspace/build/sta-handoff/lab-run",
@@ -733,6 +740,42 @@ export const timingsCommand: Command = {
       logger.info(
         "Plan: architecture/build-platform-opensta-from-timing.md (S1 synth → S2 OpenSTA)",
       );
+      return result.ok ? 0 : 1;
+    }
+
+    if (sub === "sta-rtl") {
+      const or = ctx.config.toolchain.openroad;
+      const threadsFlag = flagStr(args.flags, "threads");
+      if (threadsFlag != null) or.threads = Number(threadsFlag);
+      const mhzFlag = flagStr(args.flags, "target-mhz");
+      const result = await runRtlTiming(ctx, {
+        target,
+        top: flagStr(args.flags, "top"),
+        liberty: flagStr(args.flags, "liberty"),
+        platform: flagStr(args.flags, "platform"),
+        clockPort: flagStr(args.flags, "clock-port") ?? "clk_i",
+        targetMhz: mhzFlag != null ? Number(mhzFlag) : ctx.config.soc.targetFrequencyMHz,
+        remote: flagBool(args.flags, "remote"),
+        rebuildOpenroad: flagBool(args.flags, "rebuild-openroad"),
+        outDir: outputSpec,
+      });
+      if (asJson) {
+        logger.raw(JSON.stringify(result, null, 2) + "\n");
+        return result.ok ? 0 : 1;
+      }
+      logger.heading(`Gate-level STA: ${result.target} -> ${result.top} (study liberty unless yours; not sign-off)`);
+      logger.info(`out-dir  : ${result.outDir}`);
+      logger.info(`liberty  : ${result.liberty}`);
+      logger.info(`threads  : ${or.threads > 0 ? or.threads : `${hostCores()} (every core)`}  march=${or.march} pgo=${or.pgo}`);
+      for (const st of result.stages) {
+        const line = `  [${st.status}] ${st.id}: ${st.detail}`;
+        if (st.status === "fail") logger.error(line);
+        else if (st.status === "pass") logger.success(line);
+        else logger.info(line);
+      }
+      if (result.ok) {
+        logger.success(`wns_max ${result.wnsMax} ns  tns_max ${result.tnsMax} ns  wns_min ${result.wnsMin} ns  tns_min ${result.tnsMin} ns`);
+      }
       return result.ok ? 0 : 1;
     }
 

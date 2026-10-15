@@ -116,6 +116,7 @@ export function childEnv(
     tools.spikeBin,
     tools.iverilogBin,
     tools.formalBin,
+    tools.openroadBin,
     tools.pythonVenvBin,
   ];
   const currentPath = process.env.PATH ?? process.env.Path ?? "";
@@ -141,6 +142,11 @@ export function childEnv(
     // Managed Yosys is the tools/yosys pin (install-formal.sh / install-yosys-g6lc.sh).
     ...(existsSync(join(tools.formalBin, "yosys"))
       ? { YOSYS: join(tools.formalBin, "yosys") }
+      : {}),
+    // Managed OpenROAD is the tools/openroad pin (install-openroad-g6lc.sh);
+    // OPENROAD_EXE is what tools/openroad/test/regression reads.
+    ...(existsSync(join(tools.openroadBin, "openroad"))
+      ? { OPENROAD_EXE: join(tools.openroadBin, "openroad") }
       : {}),
     TARGET_CFG: config.soc.coreConfig,
     NUM_JOBS: String(recommendedJobs()),
