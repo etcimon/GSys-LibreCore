@@ -392,6 +392,11 @@ class Sim:
                     raise FaultErr(FAULT['BOUND'], r.pos - 2,
                                    cnt & 0xFFFFFFFF)
                 rec['cnt'][a] = cnt
+                if keep:
+                    # §7b: KEEP on ARRAY stages the element count so a
+                    # possibly-absent struct array is visible to the
+                    # staged-payload parse (pViewports/pScissors).
+                    rec['pay'].append(cnt & 0xFFFFFFFF)
                 if cnt == 0:
                     # skip the element program: scan to matching ENDARR
                     depth = 1
@@ -1964,12 +1969,16 @@ class FrontModel:
         decode order (stageCount, {stage,module}*stageCount,
         pVertexInput presence, nbind + {binding,stride,inputRate},
         nattr + {loc,binding,fmt,offset}, pIA presence + topology,
+        pViewportState presence + viewportCount + pViewports ARRAY
+        count + six VkViewport floats + scissorCount + pScissors
+        ARRAY count + four VkRect2D ints — the ARRAY keeps stage 0
+        when the pointers are NULL, i.e. dynamic viewport/scissor,
         pRS presence + cullMode + frontFace, pDepthStencilState
         presence + {dte,dwr,dcmp,sten}, pColorBlendState presence +
         attachmentCount + per-attachment
         {en,srcC,dstC,opC,srcA,dstA,opA,mask} + blendConstants(4w),
         pDynamicState presence + count + ids, layout id).  Success
-        allocs the object, parks the 34-word ObjPay state block and
+        allocs the object, parks the 44-word ObjPay state block and
         sets aux = {pay_base[31:16], gfx[6], fs[5:3], vs[2:0]} +
         {layout gen,slot} in the hi word.  -> True on success; on
         failure the first error is latched into out['result']."""
@@ -2017,6 +2026,32 @@ class FrontModel:
         topo = nx()
         if topo not in (3, 4, 5):            # LIST/STRIP/FAN
             return fail()
+        # static viewport/scissor: pViewportState pres, viewportCount,
+        # pViewports ARRAY count (0 when NULL — dynamic state), the
+        # six VkViewport floats, scissorCount, pScissors ARRAY count,
+        # the four VkRect2D ints.  Record w34..43 bake the values;
+        # w25[17:16] mark them valid only when the matching dynamic
+        # state is absent.
+        vp = [0] * 6
+        scw = [0] * 4
+        vpa = spa = 0
+        if nx() != 0:                        # pViewportState pres
+            if nx() != 1:                    # viewportCount (maxVps=1)
+                return fail()
+            nv = nx()
+            if nv > 1:
+                return fail()
+            if nv:
+                vpa = 1
+                vp = [nx() for _ in range(6)]
+            if nx() != 1:                    # scissorCount
+                return fail()
+            nsc = nx()
+            if nsc > 1:
+                return fail()
+            if nsc:
+                spa = 1
+                scw = [nx() for _ in range(4)]
         if nx() == 0:                        # pRasterizationState
             return fail()
         cull = nx()
@@ -2059,13 +2094,19 @@ class FrontModel:
             for _a in range(4):
                 bconst[_a] = nx()
         # G2a: optional dynamic state — BLEND_CONSTANTS(4) marks the
-        # constants dynamic
-        bcdyn = 0
+        # constants dynamic; VIEWPORT(0)/SCISSOR(1) clear the static
+        # bake flags for the record
+        bcdyn = vpdyn = scdyn = 0
         if nx() != 0:                        # pDynamicState presence
             ndyn = nx()
             for _a in range(ndyn):
-                if nx() == 4:
+                w = nx()
+                if w == 4:
                     bcdyn = 1
+                elif w == 0:
+                    vpdyn = 1
+                elif w == 1:
+                    scdyn = 1
         lid = nx() | (nx() << 32)            # pipeline layout id
         # StGpShk: VS commit em==VERTEX, FS commit em==FRAGMENT, refs
         refs = []
@@ -2094,13 +2135,13 @@ class FrontModel:
             for sl in reversed(refs):
                 self.sm_unref(sl)
             return fail()
-        pbase = self.pay_alloc(34)
+        pbase = self.pay_alloc(44)
         st, h, s = (0, 0, 0)
         if pbase is not None:
             st, h, s = self.alloc(idv, KIND['VkPipeline'], par)
         if pbase is None or st != 'OK':
             if pbase is not None:
-                self.pay_free(pbase, 34)
+                self.pay_free(pbase, 44)
             for sl in reversed(refs):
                 self.sm_unref(sl)
             return fail()
@@ -2124,15 +2165,18 @@ class FrontModel:
                              (fmt << 12) | (off & 0xFFF))
             else:
                 words.append(0)
-        # w25: {natt[14:12], sten[8]=0, dcmp[6:4], bcdyn[2], dwr[1],
-        #       dte[0]}
-        words.append(((natt & 7) << 12) | ((dcmp & 7) << 4) |
+        # w25: {sc_static[17], vp_static[16], natt[14:12], sten[8]=0,
+        #       dcmp[6:4], bcdyn[2], dwr[1], dte[0]}
+        words.append(((spa and not scdyn) << 17) |
+                     ((vpa and not vpdyn) << 16) |
+                     ((natt & 7) << 12) | ((dcmp & 7) << 4) |
                      (bcdyn << 2) | (dwr << 1) | dte)
         for i in range(4):
             # absent state defaults to {en=0, mask=0xF} like the RTL
             words.append(blends[i] if i < natt else 0x78000000)
         for i in range(4):
             words.append(bconst[i])
+        words += vp + scw                   # w34..43
         for i, w in enumerate(words):
             self.pay[pbase + i] = w
             out['payw'].append((pbase + i, w))
@@ -2851,10 +2895,10 @@ class FrontModel:
                 if e['kind'] == KIND['VkPipeline'] and \
                         (e['aux'] >> 6) & 1:
                     # G1c/G2a: a graphics pipeline drops the FS ref
-                    # too and frees the 34-word ObjPay block at
+                    # too and frees the 44-word ObjPay block at
                     # aux[31:16]
                     self.sm_unref((e['aux'] >> 3) & 7)
-                    self.pay_free((e['aux'] >> 16) & 0xFFFF, 34)
+                    self.pay_free((e['aux'] >> 16) & 0xFFFF, 44)
             elif e['kind'] == KIND['VkDeviceMemory']:
                 # §12.3 C: an unbacked extent frees nothing
                 if (e['aux'] >> 32) & 0xFFFFFFFF != UNBACKED:
@@ -3771,10 +3815,10 @@ class FrontModel:
                     self.sm_unref(aux_full & 7)
                     if (aux_full >> 6) & 1:
                         # G1c/G2a: graphics pipeline — drop the FS ref
-                        # and free the 34-word ObjPay block at
+                        # and free the 44-word ObjPay block at
                         # aux[31:16]
                         self.sm_unref((aux_full >> 3) & 7)
-                        self.pay_free((aux_full >> 16) & 0xFFFF, 34)
+                        self.pay_free((aux_full >> 16) & 0xFFFF, 44)
                 elif obj_kind == KIND['VkDeviceMemory']:
                     # §12.3 C: an unbacked memory frees nothing
                     if (aux_full >> 32) & 0xFFFFFFFF != UNBACKED:
@@ -8440,6 +8484,12 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         spvd = G.TOOLS / 'shader' / 'corpus'
         is_blend = 'blend' in gfx
         is_wide = 'vbwide' in gfx
+        # statvp: pipeline carries a static pViewportState and the
+        # command buffer emits NO SetViewport/SetScissor — coverage must
+        # come from the ObjPay-baked viewport/scissor (the CTS
+        # makeGraphicsPipeline shape: populated viewports vector, no
+        # VK_DYNAMIC_STATE_* entries)
+        is_statvp = 'statvp' in gfx
         # vs_pos3/fs_vcol forward the vertex alpha into FS out; the
         # passthru/flat pair forces a=1 and cannot see a blend
         vs_spv = [w[0] for w in struct.iter_unpack(
@@ -8653,7 +8703,25 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     pInputAssemblyState=st(
                         'VkPipelineInputAssemblyStateCreateInfo',
                         flags=0, topology=3, primitiveRestartEnable=0),
-                    pTessellationState=None, pViewportState=None,
+                    pTessellationState=None,
+                    pViewportState=(
+                        st('VkPipelineViewportStateCreateInfo',
+                           flags=0, viewportCount=1,
+                           pViewports=[st(
+                               'VkViewport',
+                               x=f32b(VP[0]), y=f32b(VP[1]),
+                               width=f32b(VP[2]), height=f32b(VP[3]),
+                               minDepth=f32b(VP[4]),
+                               maxDepth=f32b(VP[5]))],
+                           scissorCount=1,
+                           pScissors=[st(
+                               'VkRect2D',
+                               offset=st('VkOffset2D',
+                                         x=SC[0], y=SC[1]),
+                               extent=st('VkExtent2D',
+                                         width=SC[2],
+                                         height=SC[3]))])
+                        if is_statvp else None),
                     pRasterizationState=st(
                         'VkPipelineRasterizationStateCreateInfo',
                         flags=0, depthClampEnable=0,
@@ -8680,9 +8748,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                colorWriteMask=0xF)],
                            blendConstants=[0, 0, 0, 0])
                         if is_blend else None),
-                    pDynamicState=st('VkPipelineDynamicStateCreateInfo',
-                        flags=0, dynamicStateCount=2,
-                        pDynamicStates=[0, 1]),
+                    pDynamicState=(
+                        None if is_statvp else
+                        st('VkPipelineDynamicStateCreateInfo',
+                           flags=0, dynamicStateCount=2,
+                           pDynamicStates=[0, 1])),
                     layout=X['pl'], renderPass=X['rp'], subpass=0,
                     basePipelineHandle=0, basePipelineIndex=0)],
                 pPipelines=[X['gp']])),
@@ -8785,6 +8855,9 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 pBuffers=([X['vb'], X['vb'], X['vb'], X['vb'], X['vb2']]
                           if is_wide else [X['vb']]),
                 pOffsets=[0] * 5 if is_wide else [0])),
+        ] + ([] if is_statvp else [
+            # statvp emits no SetViewport/SetScissor — coverage must
+            # come from the pipeline-baked state
             ('vkCmdSetViewport', dict(
                 commandBuffer=X['cb'], firstViewport=0, viewportCount=1,
                 pViewports=[st('VkViewport', x=f32b(0.0), y=f32b(0.0),
@@ -8795,6 +8868,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 pScissors=[st('VkRect2D',
                     offset=st('VkOffset2D', x=0, y=0),
                     extent=st('VkExtent2D', width=CW, height=CH))])),
+        ]) + [
             ('vkCmdDraw', dict(
                 commandBuffer=X['cb'], vertexCount=3, instanceCount=1,
                 firstVertex=0, firstInstance=0)),

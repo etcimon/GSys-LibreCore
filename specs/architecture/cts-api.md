@@ -433,13 +433,28 @@ SEGMENT CTS-0/api
   DISCRIMINATOR   smoke: rerun the four cases with `--deqp-log-images=enable` (dev run,
                   not submission-shaped) and diff result vs reference per pixel; devices:
                   the ring/context counter at the fifth vkCreateDevice.
-  RESULT          Session-abort first: contexts/devices ≥ 32 and the allocation counts
-                  (G3b, API-L2/API-X2) before anything else in `api` can be measured;
-                  smoke exactness is a G3c raster item (RAST-L2 shared-edge/encode
-                  audit).
-  LIMITS          one guest; 15 of 287 api cases observed.
-  NEXT ARTIFACT   ledger row `api` (4 fail / 1 other); image diffs of the four smoke
-                  cases; G3b brief with the 16 384 / 32-device numbers.
+  RESULT          (2026-10-15) The image diff refuted every H1 mechanism: the result
+                  image was the **clear colour everywhere** (x 64..191, y 64..190 differ
+                  = the whole triangle), not an edge or encode delta. Cause: the CTS
+                  `makeGraphicsPipeline` bakes a **static** `pViewportState` (populated
+                  `pViewports`/`pScissors`, no `VK_DYNAMIC_STATE_*`), while the device
+                  honoured only the streamed `vkCmdSetViewport/Scissor` shadows — every
+                  self-authored `vkcmp` scene used dynamic viewport, so the gap was
+                  invisible to the own oracle (RT-H6: a favourable proxy). Fix: the
+                  pipeline create parses `pViewportState` (ARRAY keep now stages the
+                  element count so a NULL `pViewports` is distinguishable from dynamic),
+                  bakes `VkViewport`/`VkRect2D` into pipeline ObjPay w34..43 with
+                  `w25[17:16]` static flags, and the draw assembly overrides the shadows
+                  from the record (`cmdexec` StDrPayCpl). Vector `ue_gpos_statvp_1`
+                  (vgsys + sys-venus) is the smoke-shaped counterexample. Post-fix dev run
+                  (`.cache/cts/smokeimg-statvp2/`): `smoke.triangle`, `asm_triangle` **Pass**.
+                  Session-abort stays first for `api`: contexts/devices and the allocation
+                  counts (G3b, API-L2/API-X2).
+  LIMITS          one guest; 15 of 287 api cases observed; the two remaining smoke
+                  cases (`asm_triangle_no_opname`, `unused_resolve_attachment`) re-run
+                  in CTS-1, not yet observed post-fix.
+  NEXT ARTIFACT   ledger row `api` re-rendered from a post-fix run; G3b-i (§5a
+                  implementation decisions) for the device-count abort.
 ```
 
 ## Performance / area / scalability

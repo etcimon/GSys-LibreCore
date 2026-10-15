@@ -331,7 +331,7 @@ module g6lc_apu_vnfront
       StRetSm, StRetSmF,
       // G1c: graphics-pipeline element — staged keep-word parse in
       // vk.xml decode order (StGpRd/StGpCap walk a phase counter),
-      // the VS/FS module commit loop, then the 34-word ObjPay state
+      // the VS/FS module commit loop, then the 44-word ObjPay state
       // block + the aux pair; StGpUnr unwinds taken ShaderCore refs
       // on failure, StGpFrC releases the ObjPay extent
       StGpRd, StGpCap, StGpModL, StGpModC, StGpRefC,
@@ -539,7 +539,7 @@ module g6lc_apu_vnfront
     // G1c: vkCreateGraphicsPipelines element state — the staged keep
     // words parse in vk.xml decode order behind phase counter
     // gp_ph_q; the VS then FS modules commit through the StShCommit
-    // loop (gp_st_q) and the packed 34-word state block lands in
+    // loop (gp_st_q) and the packed 44-word state block lands in
     // ObjPay (layout below at gp_pay_w).
     logic                pre_gp_q;    // elements are graphics pipes
     logic [5:0]          gp_ph_q;     // parse phase
@@ -568,6 +568,16 @@ module g6lc_apu_vnfront
     logic [3:0][31:0]    gp_bconst_q; // static blendConstants f32[4]
     logic                gp_bcdyn_q;  // BLEND_CONSTANTS in pDynamicStates
     logic [7:0]          gp_ndyn_q;   // dynamicStateCount
+    // static viewport/scissor: staged pViewportState keep words bake
+    // into ObjPay w34..43; the dynamicState ids decide whether the
+    // draw assembly takes the record or the streamed shadows
+    logic [5:0][31:0]    gp_vp_q;     // VkViewport {x,y,w,h,minz,maxz}
+    logic [3:0][31:0]    gp_sc_q;     // VkRect2D {x,y,w,h}
+    logic                gp_vpp_q;    // pViewportState present
+    logic                gp_vpa_q;    // pViewports element present
+    logic                gp_sca_q;    // pScissors element present
+    logic                gp_vpdyn_q;  // VIEWPORT in pDynamicStates
+    logic                gp_scdyn_q;  // SCISSOR in pDynamicStates
     logic [2:0]          ret_fs_q;    // pipeline retire: FS slot
     logic                ret_gp_q;    // pipeline retire: aux[6] graphics
     logic [31:0]         auxhi_val_q;  // generic SETAUXHI value
@@ -738,14 +748,15 @@ module g6lc_apu_vnfront
       return f == 32'd37 || f == 32'd100 || f == 32'd103 ||
              f == 32'd106 || f == 32'd109;
     endfunction
-    // G2a: graphics-pipeline ObjPay state word i (34 words):
+    // G2a: graphics-pipeline ObjPay state word i (44 words):
     //   w0 = {fs_in_mask[31:24], topology[23:16], nattr[15:12],
     //         nbind[11:7], 1'b0, fs_fdepth[5], fs_late[4],
     //         cull[3:2], front_ccw[1], 1'b1}
     //   w1+b = {10'h0, rate[21], valid[20], binding[19:16], stride[15:0]}
     //   w17+a = {valid[31], loc[26:24], binding[23:20], fmt[19:12],
     //            offset[11:0]}
-    //   w25 = {16'h0, 1'b0, nattach[14:12], 3'h0[11:9],
+    //   w25 = {14'h0, sc_static[17], vp_static[16], 1'b0,
+    //          nattach[14:12], 3'h0[11:9],
     //          stencilTest[8], 1'b0, compareOp[6:4], 1'b0, bc_dyn[2],
     //          depthWrite[1], depthTest[0]}
     //   w26+a = per-attachment VkPipelineColorBlendAttachmentState as
@@ -753,6 +764,12 @@ module g6lc_apu_vnfront
     //           dstA[23:19], srcA[18:14], opC[13:11], dstC[10:6],
     //           srcC[5:1], en[0]}
     //   w30+a = static blendConstants f32[4]
+    //   w34+a = static VkViewport f32[6] — valid when w25[16]: the
+    //           pipeline declared no VK_DYNAMIC_STATE_VIEWPORT and a
+    //           non-NULL pViewports, so the draw assembly takes these
+    //           instead of the streamed SetViewport shadow
+    //   w40+a = static VkRect2D i32[4] — valid when w25[17] (same rule
+    //           for VK_DYNAMIC_STATE_SCISSOR)
     function automatic logic [31:0] gp_pay_w(input logic [5:0] i);
       if (i == 6'd0)
         return {gp_fsm_q, gp_top_q, gp_nattr_q, gp_nbind_q,
@@ -762,11 +779,16 @@ module g6lc_apu_vnfront
       if (i < 6'd25)
         return gp_atr_q[3'(i - 6'd17)];
       if (i == 6'd25)
-        return {16'h0, 1'b0, gp_natt_q, 3'h0, gp_sten_q, 1'b0,
+        return {14'h0, gp_sca_q && !gp_scdyn_q, gp_vpa_q && !gp_vpdyn_q,
+                1'b0, gp_natt_q, 3'h0, gp_sten_q, 1'b0,
                 gp_dcmp_q, 1'b0, gp_bcdyn_q, gp_dwr_q, gp_dte_q};
       if (i < 6'd30)
         return gp_blend_q[2'(i - 6'd26)];
-      return gp_bconst_q[2'(i - 6'd30)];
+      if (i < 6'd34)
+        return gp_bconst_q[2'(i - 6'd30)];
+      if (i < 6'd40)
+        return gp_vp_q[3'(i - 6'd34)];
+      return gp_sc_q[2'(i - 6'd40)];
     endfunction
     // wire format -> device id, or 8'hFF unsupported
     function automatic logic [7:0] f_img_fmt(input logic [31:0] f);
@@ -1592,7 +1614,7 @@ module g6lc_apu_vnfront
                   // No ObjPay extent — the object keeps {slot,layout}
                   // in aux and failed elements echo VK_NULL_HANDLE.
                   // G1c: graphics elements take the staged keep-word
-                  // parse at StGpRd and DO park a 34-word ObjPay state
+                  // parse at StGpRd and DO park a 44-word ObjPay state
                   // block ({pay_base,gfx,fs,vs} in aux lo).
                   blob_sel_q  <= act_q.flags[1];
                   blob_i_q    <= '0;
@@ -2349,7 +2371,7 @@ module g6lc_apu_vnfront
                 state_q   <= StSmReq;
                 if (act_q.obj_kind == 6'(APU_VN_KIND_VK_PIPELINE) &&
                     ot_cpl_i.entry.aux[6]) begin
-                  // G1c/G2a: a graphics pipeline frees its 34-word
+                  // G1c/G2a: a graphics pipeline frees its 44-word
                   // ObjPay state block and drops BOTH stage refs — the
                   // FS slot waits behind ret_fs_q for StRetSm's second
                   // UNREF (StRetUnrV runs the VS one after the FREE)
@@ -2358,7 +2380,7 @@ module g6lc_apu_vnfront
                   opr_q    <= '{op: APU_OBJPAY_OP_FREE,
                                addr: {16'h0,
                                       ot_cpl_i.entry.aux[31:16]},
-                               words: 32'd34, default: '0};
+                               words: 32'd44, default: '0};
                   op_ret_q <= StRetUnrV;
                   state_q  <= StOpReq;
                 end
@@ -4336,6 +4358,9 @@ module g6lc_apu_vnfront
               gp_dte_q <= 1'b0; gp_dwr_q <= 1'b0; gp_sten_q <= 1'b0;
               gp_dcmp_q <= '0; gp_natt_q <= '0; gp_bcdyn_q <= 1'b0;
               gp_ndyn_q <= '0;
+              gp_vp_q <= '0; gp_sc_q <= '0;
+              gp_vpp_q <= 1'b0; gp_vpa_q <= 1'b0; gp_sca_q <= 1'b0;
+              gp_vpdyn_q <= 1'b0; gp_scdyn_q <= 1'b0;
               gp_bnd_q <= '0; gp_atr_q <= '0;
               // G2a: absent per-attachment blend state defaults to
               // {en=0, mask=4'hF} — a NULL pColorBlendState still
@@ -4356,6 +4381,11 @@ module g6lc_apu_vnfront
           //   per binding {binding, stride, inputRate};
           //   nattr; per attr {location, binding, format, offset};
           //   pInputAssemblyState pres; topology;
+          //   pViewportState pres; viewportCount; pViewports array
+          //   count (staged by the ARRAY keep — 0 when the pointer is
+          //   NULL, i.e. dynamic viewport); the six VkViewport floats;
+          //   scissorCount; pScissors array count; the four VkRect2D
+          //   ints;
           //   pRasterizationState pres; cullMode; frontFace;
           //   pDepthStencilState pres; {depthTest, depthWrite,
           //   compareOp, stencilTest} when present;
@@ -4489,8 +4519,56 @@ module g6lc_apu_vnfront
                   state_q <= StPipeFail;
                 else begin
                   gp_top_q <= stg_word_q[7:0];
-                  gp_ph_q  <= 6'd19; state_q <= StGpRd;
+                  gp_ph_q  <= 6'd46; state_q <= StGpRd;
                 end
+              end
+              // ---- static viewport/scissor (staged order: state pres,
+              // viewportCount, pViewports count, 6 VkViewport words,
+              // scissorCount, pScissors count, 4 VkRect2D words).  The
+              // array-count keeps are 0 when the pointers are NULL —
+              // legal only for the matching dynamic state.
+              6'd46: begin // pViewportState presence (optional)
+                gp_vpp_q <= (stg_word_q != 32'h0);
+                gp_ph_q  <= (stg_word_q == 32'h0) ? 6'd19 : 6'd47;
+                state_q  <= StGpRd;
+              end
+              6'd47: begin // viewportCount == maxViewports (1)
+                if (stg_word_q != 32'd1) state_q <= StPipeFail;
+                else begin gp_ph_q <= 6'd48; state_q <= StGpRd; end
+              end
+              6'd48: begin // pViewports array count: absent -> dynamic
+                if (stg_word_q == 32'h0) begin
+                  gp_ph_q <= 6'd55; state_q <= StGpRd;
+                end else if (stg_word_q != 32'd1) begin
+                  state_q <= StPipeFail;
+                end else begin
+                  gp_vpa_q <= 1'b1;
+                  gp_ph_q  <= 6'd49; state_q <= StGpRd;
+                end
+              end
+              6'd49, 6'd50, 6'd51, 6'd52, 6'd53, 6'd54: begin
+                gp_vp_q[3'(gp_ph_q - 6'd49)] <= stg_word_q;
+                gp_ph_q <= (gp_ph_q == 6'd54) ? 6'd55 : gp_ph_q + 6'd1;
+                state_q <= StGpRd;
+              end
+              6'd55: begin // scissorCount == maxViewports (1)
+                if (stg_word_q != 32'd1) state_q <= StPipeFail;
+                else begin gp_ph_q <= 6'd56; state_q <= StGpRd; end
+              end
+              6'd56: begin // pScissors array count: absent -> dynamic
+                if (stg_word_q == 32'h0) begin
+                  gp_ph_q <= 6'd19; state_q <= StGpRd;
+                end else if (stg_word_q != 32'd1) begin
+                  state_q <= StPipeFail;
+                end else begin
+                  gp_sca_q <= 1'b1;
+                  gp_ph_q  <= 6'd57; state_q <= StGpRd;
+                end
+              end
+              6'd57, 6'd58, 6'd59, 6'd60: begin
+                gp_sc_q[2'(gp_ph_q - 6'd57)] <= stg_word_q;
+                gp_ph_q <= (gp_ph_q == 6'd60) ? 6'd19 : gp_ph_q + 6'd1;
+                state_q <= StGpRd;
               end
               5'd19: begin // pRasterizationState presence
                 if (stg_word_q == 32'h0) state_q <= StPipeFail;
@@ -4622,8 +4700,11 @@ module g6lc_apu_vnfront
                 gp_ph_q   <= (stg_word_q == 32'h0) ? 6'd44 : 6'd43;
                 state_q   <= StGpRd;
               end
-              6'd43: begin // dynamic state ids; BLEND_CONSTANTS = 4
+              6'd43: begin // dynamic state ids; BLEND_CONSTANTS = 4,
+                          // VIEWPORT = 0, SCISSOR = 1
                 if (stg_word_q == 32'd4) gp_bcdyn_q <= 1'b1;
+                if (stg_word_q == 32'd0) gp_vpdyn_q <= 1'b1;
+                if (stg_word_q == 32'd1) gp_scdyn_q <= 1'b1;
                 gp_i_q  <= gp_i_q + 4'd1;
                 gp_ph_q <= (gp_i_q + 4'd1 >= 4'(gp_ndyn_q))
                            ? 6'd44 : 6'd43;
@@ -4688,8 +4769,8 @@ module g6lc_apu_vnfront
               state_q <= StPipeFail;
             end else begin
               pl_layh_q <= ot_cpl_i.handle;
-              // 34-word ObjPay state block for the draw assembly
-              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC, words: 32'd34,
+              // 44-word ObjPay state block for the draw assembly
+              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC, words: 32'd44,
                            default: '0};
               op_ret_q <= StGpAlcC;
               state_q  <= StOpReq;
@@ -4720,7 +4801,7 @@ module g6lc_apu_vnfront
             state_q  <= StOpReq;
           end
           StGpPayWd: begin
-            if (pay_i_q + 16'd1 >= 16'd34) begin
+            if (pay_i_q + 16'd1 >= 16'd44) begin
               // ObjTab ALLOC the pipeline object (id = this element's
               // out id); aux writes follow on the completion
               otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
@@ -4745,7 +4826,7 @@ module g6lc_apu_vnfront
               // StPipeFail
               opr_q    <= '{op: APU_OBJPAY_OP_FREE,
                            addr: {16'h0, op_base_q},
-                           words: 32'd34, default: '0};
+                           words: 32'd44, default: '0};
               op_ret_q <= StGpUnr;
               state_q  <= StOpReq;
             end else begin

@@ -394,8 +394,20 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
     `specs/architecture/cts-info.md`), `info.device_mandatory_features` ("multiview"
     — Venus advertises `KHR_multiview` for every 1.1 renderer, so MV-L1 is promoted
     to G3c), the four `api.smoke.*` triangles (exact-colour/1-px compare against the
-    CTS reference — image diff owed; vkcmp scene 0 is pixel-identical to llvmpipe, so
-    the delta is in the clear/encode/edge path). Ledger:
+    CTS reference — **root-caused 2026-10-15 by the image diff: the result was the clear
+    colour, because the device honoured only dynamic `vkCmdSetViewport/Scissor` and
+    ignored the pipeline's static `pViewportState`; every vkcmp scene used dynamic
+    viewport, so the own oracle could not see it. Fixed: `vkCreateGraphicsPipelines`
+    parses `pViewportState` — the decoder's ARRAY keep now stages the element count so
+    a NULL `pViewports` (dynamic) is distinguishable — and bakes viewport/scissor into
+    pipeline ObjPay w34..43 (`w25[17:16]` static flags; block 34 → 44 words); cmdexec
+    overrides the streamed shadows from the record at the end of the ObjPay walk (with a
+    same-cycle bypass for w43). Vector `ue_gpos_statvp_1` added to vgsys/sys-venus.
+    Gates on the fixed tree: vndec 2,523 / 183,966, vnfront 179 / 2,222, cmdexec 7 / 31,
+    vgtop rc=0, vgsys 26 / 17,173 incl. statvp `maxulp=0`, sys-venus 27 sessions + 5
+    arms `cfail=0`, 5.008 lint clean (vndec/vnfront/cmdexec); guest dev run
+    `smoke.triangle` + `asm_triangle` **Pass** (`.cache/cts/smokeimg-statvp2/`); the
+    other two smoke cases re-run in CTS-1**). Ledger:
     `architecture/uncore/apu-cts-ledger.md`; artefacts `.cache/cts/runs/cts0-2026-10-14/`,
     `.cache/apu-guest/out-cts0-r3/`. Consequences: G3b (residency, contexts ≥ 32,
     allocation counts ≥ 4096, the 16 384-object sizing from the source) precedes any

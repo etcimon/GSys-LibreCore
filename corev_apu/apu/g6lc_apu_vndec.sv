@@ -226,18 +226,27 @@ module g6lc_apu_vndec
     // out-of-window read emits nothing — the fault arm wins anyway)
     logic cs_good;
     assign cs_good = cs_rvalid_i && !cs_err_i;
+    // ARRAY keep stages the element count once the count itself is
+    // proven in-bounds (a faulted count stages nothing, matching the
+    // golden sim's pay append ordering)
+    logic arr_cnt_ok;
+    assign arr_cnt_ok =
+        rom_b < APU_VN_ARRMETA_WORDS &&
+        {cs_rdata_i, tmp_q} <=
+            64'(APU_VN_ARRMETA[rom_b[APU_VN_ARRMETA_AW-1:0]]);
     assign pay_valid_o =
         (state_q == StW1 && keep_q && rom_op == O_U32 && cs_good) ||
         (state_q == StW2Hi && keep_q && cs_good &&
          (rom_op == O_U64 ||
           (rom_op == O_HANDLE && handle_ok) ||
-          rom_op == O_PTR)) ||
+          rom_op == O_PTR ||
+          (rom_op == O_ARRAY && arr_cnt_ok))) ||
         state_q == StW3 ||
         (state_q == StBPay && cs_good);
     assign pay_data_o =
         state_q == StW3 ? payw_q :
         (state_q == StW2Hi &&
-         rom_op inside {O_U64, O_HANDLE}) ? tmp_q :
+         rom_op inside {O_U64, O_HANDLE, O_ARRAY}) ? tmp_q :
         (state_q == StW2Hi && rom_op == O_PTR)
             ? 32'(|{cs_rdata_i, tmp_q}) : cs_rdata_i;
 
@@ -357,9 +366,12 @@ module g6lc_apu_vndec
 
         // ------------------------------------------------ micro-op dispatch
         StOp: begin
-          // KEEP lives in a[7] of keepable ops only
+          // KEEP lives in a[7] of keepable ops only (ARRAY keep stages
+          // the element count — a possibly-absent struct array is then
+          // visible to the staged-payload parse)
           keep_q <= rom_a[7] &&
-                    rom_op inside {O_U32, O_U64, O_HANDLE, O_PTR, O_BLOB};
+                    rom_op inside {O_U32, O_U64, O_HANDLE, O_PTR, O_BLOB,
+                                   O_ARRAY};
           if (mpc_q >= APU_VN_DEC_ROM_WORDS) begin
             rec_q.fault      <= APU_VN_FAULT_ROM;
             rec_q.fault_word <= pos_q;

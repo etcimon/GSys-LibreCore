@@ -1716,25 +1716,25 @@ package g6lc_apu_vn_pkg;
     48'h0600000001D6, // PNEXT a=0 b=0x1D6 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 patchControlPoints
-    48'h040700000013, // PTR a=7 b=0x13 pViewportState
+    48'h048700000013, // PTR a=7 b=0x13 pViewportState KEEP
     48'h05000000002E, // STYPE a=0 b=0x2E sType
     48'h0600000001D8, // PNEXT a=0 b=0x1D8 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
-    48'h017F00000000, // U32 a=127 b=0x0 viewportCount
-    48'h070100000002, // ARRAY a=1 b=0x2 pViewports
-    48'h017F00000000, // U32 a=127 b=0x0 x
-    48'h017F00000000, // U32 a=127 b=0x0 y
-    48'h017F00000000, // U32 a=127 b=0x0 width
-    48'h017F00000000, // U32 a=127 b=0x0 height
-    48'h017F00000000, // U32 a=127 b=0x0 minDepth
-    48'h017F00000000, // U32 a=127 b=0x0 maxDepth
+    48'h01FF00000000, // U32 a=127 b=0x0 viewportCount KEEP
+    48'h078100000002, // ARRAY a=1 b=0x2 pViewports KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 x KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 y KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 width KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 height KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 minDepth KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 maxDepth KEEP
     48'h080000000000, // ENDARR a=0 b=0x0 
-    48'h017F00000000, // U32 a=127 b=0x0 scissorCount
-    48'h070100000002, // ARRAY a=1 b=0x2 pScissors
-    48'h017F00000000, // U32 a=127 b=0x0 x
-    48'h017F00000000, // U32 a=127 b=0x0 y
-    48'h017F00000000, // U32 a=127 b=0x0 width
-    48'h017F00000000, // U32 a=127 b=0x0 height
+    48'h01FF00000000, // U32 a=127 b=0x0 scissorCount KEEP
+    48'h078100000002, // ARRAY a=1 b=0x2 pScissors KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 x KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 y KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 width KEEP
+    48'h01FF00000000, // U32 a=127 b=0x0 height KEEP
     48'h080000000000, // ENDARR a=0 b=0x0 
     48'h04870000000D, // PTR a=7 b=0xD pRasterizationState KEEP
     48'h05000000002F, // STYPE a=0 b=0x2F sType

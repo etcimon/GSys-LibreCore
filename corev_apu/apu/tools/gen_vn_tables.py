@@ -114,7 +114,11 @@ DISCARD = 0xFF
 # §7b generated payload capture: KEEP is a[7] of the ROM word on these
 # ops, so their discard marker is 0x7F and slot/role encodings may never
 # set bit 7 (asserted in emit()).
-KEEPABLE_OPS = ('U32', 'U64', 'HANDLE', 'BLOB', 'PTR')
+# KEEP on ARRAY stages the element-count word (the wire u64 truncated
+# to 32 bits) — it is how a struct array's presence becomes visible to
+# the staged-payload parse (vkCreateGraphicsPipelines' pViewports/
+# pScissors may legally be absent when the state is dynamic).
+KEEPABLE_OPS = ('U32', 'U64', 'HANDLE', 'BLOB', 'PTR', 'ARRAY')
 DISCARD7 = 0x7F
 Q_SCRATCH, PRES_SCRATCH = 7, 7
 
@@ -622,12 +626,12 @@ class Model:
                 if not scope:
                     self.blob_map[name] = slot
                 return
-            if keep:
-                raise Unfit('keep field %s names a struct array; keep '
-                            'its element fields' % self.keep_cur)
             cnt = self.cnt_slot(scope)
+            # §7b keep on a struct array stages the element-count word;
+            # the element fields keep on their own member paths.
             self.emit('ARRAY', cnt,
-                      self.arr_meta_idx(self.array_bound(base, name)), name)
+                      self.arr_meta_idx(self.array_bound(base, name)), name,
+                      keep)
             if not scope:
                 self.persist_cnt.append((cnt, name))
             self.arr_info.append(
@@ -2134,7 +2138,8 @@ def emit_md(model, asm, unfit):
     # ---- §7b payload layouts (generated from the keep-lists) ----------
     PAY_DESC = {'U32': 'u32', 'U64': 'u64 (2 words)',
                 'HANDLE': 'handle id (2 words)', 'PTR': 'presence (1 word)',
-                'BLOB': 'data words'}
+                'BLOB': 'data words',
+                'ARRAY': 'element count (1 word)'}
     keep_cmds = [n for n, i in model.cmd_info.items()
                  if i['keep_layout']]
     if keep_cmds:
@@ -2144,7 +2149,8 @@ def emit_md(model, asm, unfit):
           'stream their words on `pay_valid_o`/`pay_data_o` in decode '
           'order; `pay_words` counts them.  Keep semantics: `U32`/`U64` '
           'emit the value words, `HANDLE` emits the two id words '
-          '(unresolved), `PTR` emits the 0/1 presence word, `BLOB` emits '
+          '(unresolved), `PTR` emits the 0/1 presence word, `ARRAY` emits '
+          'the element count (1 word), `BLOB` emits '
           'its data words.  This layout is generated — RTL never '
           'hand-encodes it.')
         A('')

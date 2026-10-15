@@ -54,7 +54,7 @@ ue_cneg_unbacked_1 \
 ue_cpos_texfetch_1 ue_cpos_texlod_lin_1 ue_cpos_imgloadstore_1 \
 ue_cneg_badfmt_1 ue_cneg_xfer_img_oob_1 \
 ue_cpos_rb_mapafter_1 ue_cpos_ubo_bindfirst_1 \
-ue_gpos_tri_1 ue_gpos_vbwide_1"
+ue_gpos_tri_1 ue_gpos_vbwide_1 ue_gpos_statvp_1"
 ARMS="dev_reset q_reset venusoff worksink0 legality"
 
 cfail=0

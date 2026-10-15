@@ -162,7 +162,7 @@ module g6lc_apu_cmdexec
       StBrpFbReq, StBrpFbCpl, StBrpVwLo, StBrpVwLoC,
       StBrpVwHi, StBrpVwHiC, StBrpVwReq, StBrpVwCpl,
       StBrpIssue, StBrpClrN,
-      // G1c/G2a: draw assembly tail — 34-word pipeline-state ObjPay
+      // G1c/G2a: draw assembly tail — 44-word pipeline-state ObjPay
       // read, then per-binding buffer resolves through StXf* (mode VB/IB)
       StDrPay, StDrPayCpl, StDrVbN, StDrIbN
     } state_e;
@@ -257,7 +257,13 @@ module g6lc_apu_cmdexec
     logic [4:0]          dr_bq;           // vb binding resolve cursor
     logic [15:0]         dr_vbmask_q;     // valid binding bits (pipe w1..16)
     logic [5:0]          dr_pi_q;         // pipeline ObjPay read cursor
-    logic                dr_bcdyn_q;      // w13: BLEND_CONSTANTS dynamic
+    logic                dr_bcdyn_q;      // w25: BLEND_CONSTANTS dynamic
+    // w25[17:16] static-state flags + w34..43 baked viewport/scissor:
+    // when set they override the streamed SetViewport/SetScissor
+    // shadows at the end of the ObjPay walk
+    logic                dr_vpsta_q, dr_scsta_q;
+    logic [5:0][31:0]    dr_vp_q;
+    logic [3:0][31:0]    dr_sc_q;
     logic [15:0]         rd_gpay_q;       // pipeline ObjPay base (aux[31:16])
     logic [15:0]         brp_rpay_q;      // render-pass ObjPay base
     logic [15:0]         brp_rpw_q;       // render-pass ObjPay word count
@@ -664,7 +670,7 @@ module g6lc_apu_cmdexec
                              kind: 6'(APU_VN_KIND_VK_IMAGE_VIEW),
                              default: '0};
         end
-        // G1c: graphics-pipeline ObjPay — 34-word state block
+        // G1c: graphics-pipeline ObjPay — 44-word state block
         StDrPay: begin
           op_req_valid_o = 1'b1;
           op_req_o       = '{op: APU_OBJPAY_OP_READ,
@@ -752,6 +758,8 @@ module g6lc_apu_cmdexec
         xf_for_q    <= '0; xf_xoff_q <= '0;
         dr_bq       <= '0; dr_vbmask_q <= '0; dr_pi_q <= '0;
         dr_bcdyn_q  <= 1'b0;
+        dr_vpsta_q  <= 1'b0; dr_scsta_q <= 1'b0;
+        dr_vp_q     <= '0; dr_sc_q <= '0;
         rd_gpay_q   <= '0;
         brp_rpay_q  <= '0; brp_rpw_q <= '0; brp_fpay_q <= '0;
         brp_pi_q    <= '0; brp_ph_q <= '0;
@@ -1842,7 +1850,7 @@ module g6lc_apu_cmdexec
           end
 
           // ---- G1c/G2a: draw assembly tail -----------------------------
-          // 34-word graphics-pipeline ObjPay block -> rd_q
+          // 44-word graphics-pipeline ObjPay block -> rd_q
           StDrPay:  if (op_req_ready_i) state_q <= StDrPayCpl;
           StDrPayCpl: if (op_cpl_valid_i) begin
             if (op_cpl_i.status != APU_OBJPAY_OK) begin
@@ -1895,28 +1903,52 @@ module g6lc_apu_cmdexec
                       op_cpl_i.rdata[11:0];
                 end
                 6'd25: begin
-                  // G2a: depth state + dynamic-blend-constants flag
+                  // G2a: depth state + dynamic-blend-constants flag +
+                  // w25[17:16] static-viewport/scissor flags
                   rd_q.depth_test  <= op_cpl_i.rdata[0];
                   rd_q.depth_write <= op_cpl_i.rdata[1];
                   rd_q.depth_op    <= op_cpl_i.rdata[6:4];
                   dr_bcdyn_q       <= op_cpl_i.rdata[2];
+                  dr_vpsta_q       <= op_cpl_i.rdata[16];
+                  dr_scsta_q       <= op_cpl_i.rdata[17];
                 end
                 6'd26, 6'd27, 6'd28, 6'd29: begin
                   // per-attachment blend state, apu_rast_blend_t layout
                   rd_q.blend[2'(dr_pi_q - 6'd26)] <=
                       apu_rast_blend_t'(op_cpl_i.rdata);
                 end
-                default: begin
+                6'd30, 6'd31, 6'd32, 6'd33: begin
                   // w30..33: static blendConstants (dynamic ones are
                   // overlaid from bconst_q at the walk's end)
                   if (!dr_bcdyn_q)
                     rd_q.blend_const[2'(dr_pi_q - 6'd30)] <=
                         op_cpl_i.rdata;
                 end
+                6'd34, 6'd35, 6'd36, 6'd37, 6'd38, 6'd39:
+                  // w34..39: baked static VkViewport f32[6]
+                  dr_vp_q[3'(dr_pi_q - 6'd34)] <= op_cpl_i.rdata;
+                default:
+                  // w40..43: baked static VkRect2D i32[4]
+                  dr_sc_q[2'(dr_pi_q - 6'd40)] <= op_cpl_i.rdata;
               endcase
               dr_pi_q <= dr_pi_q + 6'd1;
-              if (dr_pi_q == 6'd33) begin
+              if (dr_pi_q == 6'd43) begin
                 if (dr_bcdyn_q) rd_q.blend_const <= bconst_q;
+                // static-state override: the pipeline baked viewport /
+                // scissor at create time (no matching dynamic state),
+                // so its ObjPay words replace the streamed shadows
+                if (dr_vpsta_q)
+                  rd_q.vp <= '{x: dr_vp_q[0], y: dr_vp_q[1],
+                               w: dr_vp_q[2], h: dr_vp_q[3],
+                               minz: dr_vp_q[4], maxz: dr_vp_q[5]};
+                if (dr_scsta_q) begin
+                  rd_q.sc_x <= dr_sc_q[0][15:0];
+                  rd_q.sc_y <= dr_sc_q[1][15:0];
+                  rd_q.sc_w <= dr_sc_q[2][15:0];
+                  // w43 lands this same completion — bypass the just-
+                  // written dr_sc_q[3] which still reads its old value
+                  rd_q.sc_h <= op_cpl_i.rdata[15:0];
+                end
                 dr_bq   <= '0;
                 state_q <= StDrVbN;
               end else begin

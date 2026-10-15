@@ -255,7 +255,7 @@ The harness compiles with WSL `/usr/bin/gcc` (the Windows host has no C toolchai
 
 ## Payload layouts
 
-KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words on `pay_valid_o`/`pay_data_o` in decode order; `pay_words` counts them.  Keep semantics: `U32`/`U64` emit the value words, `HANDLE` emits the two id words (unresolved), `PTR` emits the 0/1 presence word, `BLOB` emits its data words.  This layout is generated — RTL never hand-encodes it.
+KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words on `pay_valid_o`/`pay_data_o` in decode order; `pay_words` counts them.  Keep semantics: `U32`/`U64` emit the value words, `HANDLE` emits the two id words (unresolved), `PTR` emits the 0/1 presence word, `ARRAY` emits the element count (1 word), `BLOB` emits its data words.  This layout is generated — RTL never hand-encodes it.
 
 ### vkBindBufferMemory2 (type 138)
 
@@ -280,10 +280,12 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 
 ### vkCreateGraphicsPipelines (type 65)
 
-- per `pCreateInfos` element (element count = `createInfoCount`): `pCreateInfos.stageCount` u32, `pCreateInfos.pVertexInputState` presence (1 word), `pCreateInfos.vertexBindingDescriptionCount` u32, `pCreateInfos.vertexAttributeDescriptionCount` u32, `pCreateInfos.pInputAssemblyState` presence (1 word), `pCreateInfos.topology` u32, `pCreateInfos.pRasterizationState` presence (1 word), `pCreateInfos.cullMode` u32, `pCreateInfos.frontFace` u32, `pCreateInfos.pDepthStencilState` presence (1 word), `pCreateInfos.depthTestEnable` u32, `pCreateInfos.depthWriteEnable` u32, `pCreateInfos.depthCompareOp` u32, `pCreateInfos.stencilTestEnable` u32, `pCreateInfos.pColorBlendState` presence (1 word), `pCreateInfos.attachmentCount` u32, `pCreateInfos.blendConstants` data words, `pCreateInfos.pDynamicState` presence (1 word), `pCreateInfos.dynamicStateCount` u32, `pCreateInfos.pDynamicStates` data words, `pCreateInfos.layout` handle id (2 words)
+- per `pCreateInfos` element (element count = `createInfoCount`): `pCreateInfos.stageCount` u32, `pCreateInfos.pVertexInputState` presence (1 word), `pCreateInfos.vertexBindingDescriptionCount` u32, `pCreateInfos.vertexAttributeDescriptionCount` u32, `pCreateInfos.pInputAssemblyState` presence (1 word), `pCreateInfos.topology` u32, `pCreateInfos.pViewportState` presence (1 word), `pCreateInfos.viewportCount` u32, `pCreateInfos.pViewports` element count (1 word), `pCreateInfos.scissorCount` u32, `pCreateInfos.pScissors` element count (1 word), `pCreateInfos.pRasterizationState` presence (1 word), `pCreateInfos.cullMode` u32, `pCreateInfos.frontFace` u32, `pCreateInfos.pDepthStencilState` presence (1 word), `pCreateInfos.depthTestEnable` u32, `pCreateInfos.depthWriteEnable` u32, `pCreateInfos.depthCompareOp` u32, `pCreateInfos.stencilTestEnable` u32, `pCreateInfos.pColorBlendState` presence (1 word), `pCreateInfos.attachmentCount` u32, `pCreateInfos.blendConstants` data words, `pCreateInfos.pDynamicState` presence (1 word), `pCreateInfos.dynamicStateCount` u32, `pCreateInfos.pDynamicStates` data words, `pCreateInfos.layout` handle id (2 words)
 - per `pCreateInfos.pStages` element (element count = `stageCount`): `pCreateInfos.pStages.stage` u32, `pCreateInfos.pStages.module` handle id (2 words)
 - per `pCreateInfos.pVertexBindingDescriptions` element (element count = `vertexBindingDescriptionCount`): `pCreateInfos.pVertexBindingDescriptions.binding` u32, `pCreateInfos.pVertexBindingDescriptions.stride` u32, `pCreateInfos.pVertexBindingDescriptions.inputRate` u32
 - per `pCreateInfos.pVertexAttributeDescriptions` element (element count = `vertexAttributeDescriptionCount`): `pCreateInfos.pVertexAttributeDescriptions.location` u32, `pCreateInfos.pVertexAttributeDescriptions.binding` u32, `pCreateInfos.pVertexAttributeDescriptions.format` u32, `pCreateInfos.pVertexAttributeDescriptions.offset` u32
+- per `pCreateInfos.pViewports` element (element count = `viewportCount`): `pCreateInfos.pViewports.x` u32, `pCreateInfos.pViewports.y` u32, `pCreateInfos.pViewports.width` u32, `pCreateInfos.pViewports.height` u32, `pCreateInfos.pViewports.minDepth` u32, `pCreateInfos.pViewports.maxDepth` u32
+- per `pCreateInfos.pScissors` element (element count = `scissorCount`): `pCreateInfos.pScissors.offset.x` u32, `pCreateInfos.pScissors.offset.y` u32, `pCreateInfos.pScissors.extent.width` u32, `pCreateInfos.pScissors.extent.height` u32
 - per `pCreateInfos.pAttachments` element (element count = `attachmentCount`): `pCreateInfos.pAttachments.blendEnable` u32, `pCreateInfos.pAttachments.srcColorBlendFactor` u32, `pCreateInfos.pAttachments.dstColorBlendFactor` u32, `pCreateInfos.pAttachments.colorBlendOp` u32, `pCreateInfos.pAttachments.srcAlphaBlendFactor` u32, `pCreateInfos.pAttachments.dstAlphaBlendFactor` u32, `pCreateInfos.pAttachments.alphaBlendOp` u32, `pCreateInfos.pAttachments.colorWriteMask` u32
 
 ### vkCreateRenderPass (type 82)
@@ -1375,25 +1377,25 @@ KEEP-marked ROM ops (`a[7]` in the per-command tables below) stream their words 
 | PNEXT | 0 | 0x1D6 | pNext |
 | U32 | 127 | 0x0 | flags |
 | U32 | 127 | 0x0 | patchControlPoints |
-| PTR | 7 | 0x13 | pViewportState |
+| PTR | 7 | 0x13 | pViewportState **KEEP** |
 | STYPE | 0 | 0x2E | sType |
 | PNEXT | 0 | 0x1D8 | pNext |
 | U32 | 127 | 0x0 | flags |
-| U32 | 127 | 0x0 | viewportCount |
-| ARRAY | 1 | 0x2 | pViewports |
-| U32 | 127 | 0x0 | x |
-| U32 | 127 | 0x0 | y |
-| U32 | 127 | 0x0 | width |
-| U32 | 127 | 0x0 | height |
-| U32 | 127 | 0x0 | minDepth |
-| U32 | 127 | 0x0 | maxDepth |
+| U32 | 127 | 0x0 | viewportCount **KEEP** |
+| ARRAY | 1 | 0x2 | pViewports **KEEP** |
+| U32 | 127 | 0x0 | x **KEEP** |
+| U32 | 127 | 0x0 | y **KEEP** |
+| U32 | 127 | 0x0 | width **KEEP** |
+| U32 | 127 | 0x0 | height **KEEP** |
+| U32 | 127 | 0x0 | minDepth **KEEP** |
+| U32 | 127 | 0x0 | maxDepth **KEEP** |
 | ENDARR | 0 | 0x0 |  |
-| U32 | 127 | 0x0 | scissorCount |
-| ARRAY | 1 | 0x2 | pScissors |
-| U32 | 127 | 0x0 | x |
-| U32 | 127 | 0x0 | y |
-| U32 | 127 | 0x0 | width |
-| U32 | 127 | 0x0 | height |
+| U32 | 127 | 0x0 | scissorCount **KEEP** |
+| ARRAY | 1 | 0x2 | pScissors **KEEP** |
+| U32 | 127 | 0x0 | x **KEEP** |
+| U32 | 127 | 0x0 | y **KEEP** |
+| U32 | 127 | 0x0 | width **KEEP** |
+| U32 | 127 | 0x0 | height **KEEP** |
 | ENDARR | 0 | 0x0 |  |
 | PTR | 7 | 0xD | pRasterizationState **KEEP** |
 | STYPE | 0 | 0x2F | sType |

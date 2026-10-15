@@ -506,14 +506,20 @@ fields = ["uint32", "pRanges.aspectMask", "pRanges.baseMipLevel",
 # module id (2w)}, pVertexInputState presence, bindingCount, per
 # binding {binding, stride, inputRate}, attrCount, per attr
 # {location, binding, format, offset}, pInputAssemblyState presence,
-# topology, pRasterizationState presence, cullMode, frontFace,
+# topology, pViewportState presence + viewportCount +
+# pViewports presence + the six VkViewport floats +
+# scissorCount + pScissors presence + the four VkRect2D ints
+# (static viewport/scissor bake into the pipeline ObjPay; absent or
+# dynamic state leaves the record's flags clear), pRasterizationState
+# presence, cullMode, frontFace,
 # pDepthStencilState presence + its four enables/op,
 # pColorBlendState presence + attachmentCount + the eight fields per
 # attachment + the 4-word blendConstants blob, pDynamicState
 # presence + dynamicStateCount + the dynamicStates blob, then the
 # layout id (2w) — layout follows the state structs in the
 # create-info wire order.  Pointee members drop the pointer hop from
-# the path (pVertexInputState/pInputAssemblyState/pRasterizationState/
+# the path (pVertexInputState/pInputAssemblyState/pViewportState/
+# pViewports/pScissors/pRasterizationState/
 # pDepthStencilState/pColorBlendState/pDynamicState are transparent).
 fields = ["pCreateInfos.stageCount",
           "pCreateInfos.pStages.stage",
@@ -530,6 +536,21 @@ fields = ["pCreateInfos.stageCount",
           "pCreateInfos.pVertexAttributeDescriptions.offset",
           "pCreateInfos.pInputAssemblyState",
           "pCreateInfos.topology",
+          "pCreateInfos.pViewportState",
+          "pCreateInfos.viewportCount",
+          "pCreateInfos.pViewports",
+          "pCreateInfos.pViewports.x",
+          "pCreateInfos.pViewports.y",
+          "pCreateInfos.pViewports.width",
+          "pCreateInfos.pViewports.height",
+          "pCreateInfos.pViewports.minDepth",
+          "pCreateInfos.pViewports.maxDepth",
+          "pCreateInfos.scissorCount",
+          "pCreateInfos.pScissors",
+          "pCreateInfos.pScissors.offset.x",
+          "pCreateInfos.pScissors.offset.y",
+          "pCreateInfos.pScissors.extent.width",
+          "pCreateInfos.pScissors.extent.height",
           "pCreateInfos.pRasterizationState",
           "pCreateInfos.cullMode",
           "pCreateInfos.frontFace",
