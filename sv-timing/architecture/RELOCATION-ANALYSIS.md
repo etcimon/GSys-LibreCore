@@ -11,6 +11,14 @@
 
 ## 1. Problem
 
+Current admission evidence (2026-10-15): see `../ALGORITHMS-EXPERTS.md` Part LI.
+P10 prohibits an unproved extra register in a same-cycle contract; it does not
+prohibit a proved combinational implementation. Bounded constant-increment
+selection helped a two-port pointer but regressed four/eight-port mappings.
+Arithmetic transformations therefore need width/value-domain conditions and a
+mapped area/delay comparison, not only a lower projected FO4 value. Outstanding
+scope, gate and source-origin checks remain additional refusal categories.
+
 Structural FO4 screening ranks paths and drives auto-correct. After path classification
 (exclusive-case, independent-LHS, atomic), remaining **primary** failures are often
 **real cones** (hot exclusive arm, atomic mul). InsertReg mid-cuts on original line
@@ -250,4 +258,3 @@ Options sorted by `score` descending within each card.
 ---
 
 *Last updated: 2026-08-03 — P1 exclusive BalanceMux emit stack validated on sparse_ex.*
-

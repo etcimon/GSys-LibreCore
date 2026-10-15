@@ -44,7 +44,11 @@ pub const IR_VERSION: &str = "ir-v1";
 ///
 /// Reports must surface this so a number produced by one scheme is never compared
 /// with the other. See `architecture/OPTIMIZATION-LEVELS.md` §1.
-pub const MEASUREMENT_VERSION: &str = "delay-v25";
+///
+/// `delay-v26`: loop scope boundaries use original-source coordinates, like
+/// assignment nodes, after conditional preprocessing or macro expansion.
+/// This repairs constant attribution; it does not change synthesized logic.
+pub const MEASUREMENT_VERSION: &str = "delay-v26";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

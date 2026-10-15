@@ -626,9 +626,10 @@ export interface MotherboardConfig {
  * FO4 per stage; sv-timing derives it from a clock target, so the host turns
  * it back into that clock (`targetMhzForFo4Budget`: 10 FO4 at `fo4Ps` 20 and
  * margin 0.2 is 4000 MHz). `fo4Ps` is a process input — quote it with every
- * number (sv-timing AGENTS.md §3.2.1). Measured on g6lc64_ooo 2026-10-15 at
- * these settings: 32 BalanceMux rewrites, failing endpoints 389 → 381, worst
- * path 31.0 FO4 unchanged; the T3 multi-cycle relocations stay manual.
+ * number (sv-timing AGENTS.md §3.2.1). The frozen emitted g6lc64_ooo snapshot
+ * reports 21.5 FO4 / 349 failing paths under delay-v26. See ALGORITHMS-EXPERTS
+ * Part LI for provenance and mapped trials; this setting is not closure or
+ * functional-equivalence evidence.
  */
 export interface StructuralTimingConfig {
   /** Structural budget in FO4 per stage; 0 = no sv-timing pass (live RTL). */

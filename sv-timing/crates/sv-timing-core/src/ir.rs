@@ -653,11 +653,18 @@ pub struct TimingModule {
 impl TimingModule {
     /// Genvar names whose generate-loop span covers `loc` (elaboration, not runtime `i`).
     pub fn genvar_names_at(&self, loc: &SourceLoc) -> Vec<String> {
+        if loc.origin != crate::loc::OriginKind::UserFile {
+            return Vec::new();
+        }
         let b = loc.byte_start;
         self.gen_loops
             .iter()
             .filter(|g| {
-                g.loc.byte_end > g.loc.byte_start && b >= g.loc.byte_start && b < g.loc.byte_end
+                g.loc.origin == crate::loc::OriginKind::UserFile
+                    && g.loc.file == loc.file
+                    && g.loc.byte_end > g.loc.byte_start
+                    && b >= g.loc.byte_start
+                    && b < g.loc.byte_end
             })
             .map(|g| g.genvar.clone())
             .collect()

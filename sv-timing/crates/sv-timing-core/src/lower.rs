@@ -1383,13 +1383,7 @@ where
     let mut loops = Vec::new();
     for node in root {
         if let RefNode::LoopGenerateConstruct(lg) = node {
-            let loc = if let Some((s, e)) = locate_byte_span(lg) {
-                let mut sl = li.span(s, e, OriginKind::UserFile);
-                sl.file = path_str.to_string();
-                sl
-            } else {
-                first_locate_loc(tree, li, path_str, lg)
-            };
+            let loc = loop_source_span(tree, li, path_str, lg);
             let mut genvar = "i".to_string();
             let mut saw_own_genvar = false;
             let mut label: Option<String> = None;
@@ -1481,13 +1475,7 @@ where
         // always_comb `for (int unsigned w = 0; w < Cfg.N; w++)` unrolls;
         // `w` is elaboration-constant in each body copy (hpdcache_mshr hit_comb).
         if let RefNode::LoopStatementFor(lf) = node {
-            let loc = if let Some((s, e)) = locate_byte_span(lf) {
-                let mut sl = li.span(s, e, OriginKind::UserFile);
-                sl.file = path_str.to_string();
-                sl
-            } else {
-                first_locate_loc(tree, li, path_str, lf)
-            };
+            let loc = loop_source_span(tree, li, path_str, lf);
             let mut idx = String::new();
             let mut saw = false;
             let mut body_assign_count = 0u32;
@@ -1522,6 +1510,45 @@ where
         }
     }
     loops
+}
+
+/// Loop containment is compared with assignment locations in original-source
+/// coordinates. Parser byte offsets instead address preprocessed text: a
+/// removed `ifdef` or an expanded macro before a loop shifts that interval.
+/// Map both boundary tokens, rather than marking raw parser offsets UserFile.
+/// Unknown/include boundaries get an empty interval so they cannot certify a
+/// runtime identifier as a genvar by accidental numeric overlap.
+fn loop_source_span<'a, T>(
+    tree: &'a SyntaxTree,
+    li: &LineIndex,
+    path_str: &str,
+    root: T,
+) -> SourceLoc
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut first = None;
+    let mut last = None;
+    for node in root {
+        if let RefNode::Locate(loc) = node {
+            if loc.len > 0 {
+                first.get_or_insert(loc);
+                last = Some(loc);
+            }
+        }
+    }
+    if let (Some(first), Some(last)) = (first, last) {
+        if let (Some((fpath, start)), Some((lpath, stop))) =
+            (tree.get_origin(first), tree.get_origin(last))
+        {
+            if fpath == &li.path && lpath == &li.path && stop >= start {
+                return li.span(start as u32, (stop + last.len) as u32, OriginKind::UserFile);
+            }
+        }
+    }
+    let mut unknown = SourceLoc::file_start(path_str);
+    unknown.origin = OriginKind::Unknown;
+    unknown
 }
 
 fn collect_localparam_names_in<'a, T>(tree: &'a SyntaxTree, root: T) -> Vec<String>
@@ -2669,6 +2696,69 @@ mod tests {
         assert_eq!(node.op_class, Some(OperatorClass::DivRem));
         assert_eq!(node.loc.start_line, 6);
         assert!(text[node.loc.byte_start as usize..].starts_with('y'));
+    }
+
+    #[test]
+    fn loop_constant_scope_uses_original_coordinates_after_preprocessing() {
+        let body = concat!(
+            "module origin_test(input logic [31:0] a, k, output logic [31:0] y);\n",
+            "wire [31:0] row [0:1];\n",
+            "for (genvar k = 0; k < 2; k++) begin : cells\n",
+            "  assign row[k] = a + k;\n",
+            "end\n",
+            "assign y = a * k;\n",
+            "endmodule\n",
+        );
+        let source = format!("`ifdef REMOVED\n{}\n`endif\n{body}", "// padding\n".repeat(80));
+        for text in [body.to_string(), source] {
+            let out = analyze_inline_source(&text);
+            let m = out.design.modules.values().next().unwrap();
+            let inside = m
+                .nodes
+                .values()
+                .find(|n| n.lhs.as_deref() == Some("row[k]"))
+                .unwrap();
+            let outside = m
+                .nodes
+                .values()
+                .find(|n| n.lhs.as_deref() == Some("y"))
+                .unwrap();
+            assert_eq!(m.genvar_names_at(&inside.loc), vec!["k"]);
+            assert!(m.genvar_names_at(&outside.loc).is_empty());
+            let mut unresolved = inside.loc.clone();
+            unresolved.origin = OriginKind::IncludeExpanded;
+            assert!(m.genvar_names_at(&unresolved).is_empty());
+            let mut different_file = inside.loc.clone();
+            different_file.file = "other.sv".into();
+            assert!(m.genvar_names_at(&different_file).is_empty());
+            assert_eq!(inside.fo4_cost, CostModel::default().logic_bit);
+            assert_eq!(outside.fo4_cost, CostModel::default().mul);
+        }
+    }
+
+    #[test]
+    fn procedural_loop_scope_survives_macro_expansion_before_loop() {
+        let source = concat!(
+            "`define DECL wire padding_a; wire padding_b; wire padding_c;\n",
+            "module origin_test(input logic [31:0] a, output logic [31:0] y);\n",
+            "`DECL\n",
+            "always_comb begin\n",
+            "  y = '0;\n",
+            "  for (int k = 0; k < 2; k++) begin\n",
+            "    y = a + k;\n",
+            "  end\n",
+            "end\n",
+            "endmodule\n",
+        );
+        let out = analyze_inline_source(source);
+        let m = out.design.modules.values().next().unwrap();
+        let inside = m
+            .nodes
+            .values()
+            .find(|n| n.rhs.as_deref() == Some("a + k"))
+            .unwrap();
+        assert_eq!(m.genvar_names_at(&inside.loc), vec!["k"]);
+        assert_eq!(inside.fo4_cost, CostModel::default().logic_bit);
     }
 
     #[test]

@@ -112,7 +112,11 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
         let gen_spans: Vec<(u32, u32, String)> = module
             .gen_loops
             .iter()
-            .filter(|g| g.loc.byte_end > g.loc.byte_start)
+            .filter(|g| {
+                g.loc.origin == crate::loc::OriginKind::UserFile
+                    && g.loc.file == module.file
+                    && g.loc.byte_end > g.loc.byte_start
+            })
             .map(|g| (g.loc.byte_start, g.loc.byte_end, g.genvar.clone()))
             .collect();
         for node in module.nodes.values_mut() {
@@ -123,7 +127,11 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
             let mut seed = base_seed.clone();
             let b = node.loc.byte_start;
             for (s, e, gv) in &gen_spans {
-                if b >= *s && b < *e {
+                if node.loc.origin == crate::loc::OriginKind::UserFile
+                    && node.loc.file == module.file
+                    && b >= *s
+                    && b < *e
+                {
                     seed.add(gv.clone());
                 }
             }

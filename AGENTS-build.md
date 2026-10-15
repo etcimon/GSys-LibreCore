@@ -183,31 +183,46 @@ config, `nproc` jobs; `--rebuild-openroad` forces it) and reporting
 `timings sta-handoff` is the package-driven path (S0–S2/S4) and resolves the same managed fork
 (`sta`, then `openroad`) before a PATH `sta`.
 
-**sv-timing first (`--fo4 N` / `--budget-fo4 N`).** `sta-rtl --fo4 10` runs the structural
-pass before synthesis: `timings correct --all-modules --allow-latency --emit` on the target's
-flist at the budget — turned into the clock sv-timing derives it from
+**sv-timing first — on by default (`physicalDesign.structural`).** `timings sta-rtl` runs the
+structural pass before synthesis: `timings correct --all-modules --allow-latency --emit` on the
+target's flist at `fo4Budget` (10) — turned into the clock sv-timing derives it from
 (`targetMhzForFo4Budget`: 10 FO4 = 4000 MHz at `fo4_ps` 20, margin 0.2; `fo4_ps` is a process
-input, quote it with every number) — with `-O3` and `--opt-max-stages-per-region ⌈128/N⌉`
-(8…16), then synthesizes the emitted tree (`writeFlatManifest` emit overlay; `--from-timing
-<pkg>` reuses an existing emit; `--svt-args "..."` appends raw dials; `--map-recipe lean|synth`
-picks the yosys lowering — `lean` skips the `opt_merge`/`check` passes that ran past an hour
-on the whole core). The structural emit options stay opt-in (`--svt-args "--real-cut-feeds
---emit-balance-mux-rtl"`): on `g6lc64_ooo` the BalanceMux RHS rewrite they produce hoists
-block-local names and declares XLEN-wide staging wires for enum/struct LHS, so the tree does
-not elaborate (two package defects, `sv-timing/AGENTS-todo.md` 2026-10-15); without them the
-emit is the annotated live RTL. The emit under `build-platform/workspace/build/sta-rtl/` is
-part of the proxy `sync`, so `--remote` sees it.
-The same knob is on `timings compile|correct|area` (`--budget-fo4`, `--fo4-ps`,
-`--budget-margin`, `--opt-level`, `--svt-args`), which now forward `--fo4-ps`/`--budget-margin`
-on `correct` and no longer pass `--cache` to it (analyze-only in the CLI; `correct` exited 2
-at argument parsing before). **Measured on `g6lc64_ooo` at 10 FO4** (264 files, 234 modules,
-10,858 paths, ~2 min release build): `-O2` → 451 annotate edits, nothing structural;
-`-O3` + 13 stages + real-feed emit → 483 edits (451 annotate, 32 balancemux), failing endpoints
-389 → 353, worst path 31.0 FO4 unchanged (97.5 raw before `path_class`), max ≈ 1290 MHz.
-`InsertReg` is refused on the P10 handshake-locked cones (`instr_queue`, `stream_arbiter`,
-`alu` dense control), and the 407 relocation cards' T3 multi-cycle options are manual — the
-package's own "remaining gap to 10 FO4" (`sv-timing/ALGORITHMS-EXPERTS.md`). sv-timing is
-usable beforehand in one flag; it does not by itself bring this core to 10 FO4.
+input, quote it with every number) — with `optLevel` `3` and `svtArgs`
+`--opt-max-stages-per-region 13 --real-cut-feeds --assume-clk`, then synthesizes the emitted
+tree (`writeFlatManifest` emit overlay). `--fo4 N` overrides, `--fo4 0` runs the live RTL,
+`--from-timing <pkg>` reuses an existing emit, `--svt-args "..."` appends raw dials
+(`--emit-balance-mux-rtl` stays opt-in), `--map-recipe lean|synth` picks the yosys lowering
+(`lean` skips the `opt_merge`/`check` passes that ran past an hour on the whole core). The emit
+under `build-platform/workspace/build/sta-rtl/` is part of the proxy `sync`, so `--remote`
+synthesizes it too. The same knob is on `timings compile|correct|area` (`--budget-fo4`,
+`--fo4-ps`, `--budget-margin`, `--opt-level`, `--svt-args`), which forward
+`--fo4-ps`/`--budget-margin` on `correct` and no longer pass `--cache` to it (analyze-only in
+the CLI; `correct` exited 2 at argument parsing before).
+
+Why those three dials, measured on `g6lc64_ooo` at 10 FO4 (264 files, 234 modules, 10,858
+paths, ~2 min release build) on 2026-10-15: `-O2` → 451 annotate edits, nothing structural.
+`-O3` + 13 stages → 32 BalanceMux rewrites, but 47 of the 62 refusals were `incomplete_gate` —
+no default clock/edge resolved, so no register ever landed and the worst path stayed at
+31.0 FO4; `--assume-clk` (every LibreCore module gates on `posedge clk_i`/`negedge rst_ni`;
+the package's own soak default) lets the trial's `CriticalChain` registers land: **82 InsertReg
++ 32 BalanceMux, failing endpoints 389 → 333, worst 31.0 → 23.5 FO4 (`scoreboard.reg1/D`),
+max ≈ 1290 → 1702 MHz**. `--real-cut-feeds` is what turns those edits into the origin RHS
+rewrite yosys can see; its emit failed elaboration four ways on this core and the package fixes
+all four (`sv-timing/AGENTS-todo.md` 2026-10-15: block-local hoist, enum/struct LHS type, pipe
+declared after its first read, generate-local cut) — the fixed emit elaborates under
+`read_slang`. The residual above 10 FO4 is the package's documented gap
+(`sv-timing/ALGORITHMS-EXPERTS.md` Part VII): atomic operators, real handshakes (P10),
+multi-cycle tags, dense cones a balance cannot close, and cuts refused downstream of the trial
+(`cleanliness_set`); the 407 relocation cards' T3 multi-cycle options are manual.
+
+**Follow-up measurement, delay-v26 (2026-10-15).** The final scope-safe snapshot has
+33 InsertReg records and 351 failing paths under delay-v25; the 82/333 numbers above
+describe an earlier trial. A loop-origin coordinate fix remeasures the same emitted
+SV at **21.5 FO4** (349 failing paths), with the scoreboard cone 23.5 → 14.5:
+measurement correction, not a physical speedup. Small-cone SAT/STA found useful
+two-port constant-increment and width-4 FIFO-delta candidates, while carry-save and
+popcount-tree generalizations regressed. `sv-timing/ALGORITHMS-EXPERTS.md` Part LI
+records the actual source loci, conditions, area tradeoffs and next RTL work.
 
 | Layer | Command | Role |
 |-------|---------|------|

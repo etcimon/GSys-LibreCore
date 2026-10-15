@@ -1556,12 +1556,11 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
     constraintFiles: [],
     // sv-timing before STA, at the deep-pipeline budget the package documents
     // (10 FO4 = 4000 MHz at fo4_ps 20 / margin 0.2): -O3 multi-cut, 13 stages
-    // per region (a 97.5 FO4 cone at 10), the origin RHS rewrite emitted for
-    // real so yosys sees the structure, and `--assume-clk` (posedge clk_i /
-    // negedge rst_ni — every LibreCore module's gate): without it 47 of the 62
-    // refusals on g6lc64_ooo were `incomplete_gate`, no register was ever
-    // placed, and the worst path stayed at 31.0 FO4; with it 82 registers
-    // land, 389 → 333 failing endpoints, worst 23.5 FO4, max ≈ 1702 MHz.
+    // per region, origin RHS rewrites, and --assume-clk (clk_i / rst_ni).
+    // Assumed gate names do not prove a domain or legal data/control latency.
+    // The final frozen emitted snapshot reports 21.5 FO4 under delay-v26;
+    // ALGORITHMS-EXPERTS Part LI separates measurement fixes, candidate
+    // arithmetic improvements and the outstanding equivalence/STA work.
     // `timings sta-rtl --fo4 0` runs the live RTL instead;
     // `--emit-balance-mux-rtl` is opt-in via --svt-args.
     structural: {

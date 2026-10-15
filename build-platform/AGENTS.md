@@ -378,31 +378,38 @@ bun run src/cli/index.ts setup --install --profile dual-hart
   exit code. `timings sta-handoff` (package-driven S0–S2/S4) resolves the same
   managed fork first (`resolveStaTool`: `sta`, then `openroad`), then PATH.
 
-- **sv-timing before STA — `sta-rtl --fo4 N`** (`runSvtPrepass`): runs
-  `timings correct --all-modules --allow-latency --emit` on the target's flist
-  at the structural budget, turned into the clock sv-timing derives it from
-  (`targetMhzForFo4Budget` in `tooling/timings.ts`, the inverse of
-  `TimingTarget::new`: 10 FO4 = 4000 MHz at `fo4_ps` 20 / margin 0.2), with
-  `-O3` and `--opt-max-stages-per-region ⌈128/N⌉` (8…16), then synthesizes
-  the emitted tree through the `writeFlatManifest` `emitFlist` overlay (the
+- **sv-timing before STA — default on** (`runSvtPrepass`, config
+  `physicalDesign.structural`: `fo4Budget` 10, `fo4Ps` 20, `budgetMargin` 0.2,
+  `optLevel` 3, `svtArgs` `--opt-max-stages-per-region 13 --real-cut-feeds
+  --assume-clk`): runs `timings correct --all-modules --allow-latency --emit`
+  on the target's flist at the budget, turned into the clock sv-timing
+  derives it from (`targetMhzForFo4Budget` in `tooling/timings.ts`, the
+  inverse of `TimingTarget::new`: 10 FO4 = 4000 MHz), then synthesizes the
+  emitted tree through the `writeFlatManifest` `emitFlist` overlay (the
   explicit form of `CVA6_TIMINGS_USE_EMIT`) with the `lean` yosys lowering
-  (`--map-recipe synth` for Yosys's full `synth`; `opt_merge`/`check` on the
-  flattened core ran past an hour). The structural emit options
-  (`--real-cut-feeds`, `--emit-balance-mux-rtl`) are opt-in through
-  `--svt-args` until the two emit defects in `sv-timing/AGENTS-todo.md`
-  (2026-10-15: block-local hoist, XLEN-wide staging wire for enum LHS) are
-  fixed — without them the emit is the annotated live RTL. `--from-timing
-  <pkg>` reuses an existing emit; `--svt-args "..."` appends raw dials (the
-  arg parser accepts a quoted dash-leading value — `takesValue`). The emit lives under
+  (`--map-recipe synth` for Yosys's full `synth`). `--fo4 N` overrides,
+  `--fo4 0` is the live RTL, `--from-timing <pkg>` reuses an emit,
+  `--svt-args "..."` appends raw dials (the arg parser accepts a quoted
+  dash-leading value — `takesValue`); `--emit-balance-mux-rtl` stays opt-in.
+  The emitter only writes files it touched, so the pre-pass clears
+  `svt/corrected` first. The emit lives under
   `workspace/build/sta-rtl/<target>/svt/`, which the proxy `sync` ships
   (`SYNC_INCLUDE`; `*.sqlite` excluded) so `--remote` synthesizes it too.
   `timings compile|correct|area` gained the same knob (`--budget-fo4`/`--fo4`,
   plus `--fo4-ps` `--budget-margin` `--opt-level` `--svt-args` forwarded on
   `correct`), run the CLI with `svt.py run --release`, and no longer pass
   `--cache` to `correct` (analyze-only; the CLI exited 2 before). Measured on
-  `g6lc64_ooo` at 10 FO4: see `AGENTS-build.md` — 32 BalanceMux rewrites,
-  failing endpoints 389 → 353, worst path 31.0 FO4 unchanged; the T3
-  multi-cycle relocations the tool proposes are manual.
+  `g6lc64_ooo` at 10 FO4: see `AGENTS-build.md` — 82 InsertReg + 32
+  BalanceMux, failing endpoints 389 → 333, worst 31.0 → 23.5 FO4; the emit
+  elaborates after the four package fixes in `sv-timing/AGENTS-todo.md`.
+
+  Follow-up: the final scope-safe snapshot has 33 InsertReg records and 351
+  failing paths under delay-v25. Delay-v26 repairs preprocessed/original
+  coordinate mixing in loop containment: identical emitted SV reports 21.5
+  FO4 and 349 failing paths. This is measurement repair; small-cone SAT/STA
+  arithmetic trials and remaining RTL work are recorded in
+  `sv-timing/ALGORITHMS-EXPERTS.md` Part LI. The 10 FO4 setting remains a
+  target, not a closure claim.
 
 #### 4.6.2a Running the formal gate
 

@@ -3,6 +3,49 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## 2026-10-15 — residual tuning after the 23.5 FO4 report
+
+- [x] Frozen the emitted core and its report as
+  `build-platform/workspace/build/sv-timing/pointer-trial-20261015/`.
+  The final scope-safe baseline has **33** InsertReg records, not the earlier 82;
+  264 files / 234 modules / 11,008 paths; delay-v25 worst 23.5, 351 failing paths.
+- [x] Fixed loop-scope coordinate mismatch: `loop_source_span` maps CST boundaries
+  through `get_origin`; containment rejects unknown/include/different-file locations.
+  Two regressions cover removed conditionals and macro expansion before loops.
+  **delay-v26** re-analysis of identical RTL: scoreboard 23.5 → 14.5;
+  global worst **21.5 instr_queue**, 349 primary failing paths / 114 RegToReg.
+  This is measurement repair, not physical optimization.
+- [x] Added reproducible SAT + mapped STA trials in `tools/sum3_trial.py` and
+  `fixtures/auto_correct/sum3_carry_save.sv`: arbitrary three-word compression,
+  bounded commit-count selection, FIFO occupancy delta and popcount tree.
+  Fixed typical Nangate45 library, input/load constraints and binary-input proofs.
+  Full results, hashes and rejected generalizations: `ALGORITHMS-EXPERTS.md` Part LI.
+- [x] Two-port, 5-bit parallel increments: **0.247047 → 0.168715 ns**, area
+  **23.674 → 25.536 µm²**. Four/eight-port generalization regresses.
+  A review-only source candidate improves the scoreboard cone under delay-v26,
+  but global worst stays 21.5. Production RTL is unchanged.
+- [x] Depth-8 FIFO count (4 bits), decoded push/pop delta:
+  **0.236688 → 0.197105 ns**, area **19.418 → 23.940 µm²**.
+  Wider counts sometimes regress. Four-input popcount tree feeding a 16-bit
+  sequence counter regresses **0.540763 → 0.586791 ns**; do not promote it.
+- [x] Follow-up carry-select for the fetch sequence counter also failed the
+  timing test: four pushes / 16-bit pointer **0.540763 → 0.545673 ns**,
+  eight pushes **0.774759 → 0.886330 ns**. SAT passes, but no timing promotion.
+- [x] Residual reporter now selects validated emitted evidence and labels actual
+  work categories. Trace reporter retains refusal reasons and warns that its IR
+  path ids cannot be joined to post-emit ids.
+- [ ] Full-core ABC mapping / STA completion remains outstanding. At 22:46 UTC
+  the active job had reached ABC; there was no full-core STA result.
+- [ ] Before promoting either arithmetic candidate: verify all relevant config
+  shapes, X/Z behavior, sequential queue/retirement invariants and placed timing.
+  Parse-clean register insertion alone is not a valid speedup.
+- [ ] Next bottleneck: instr_queue push-mask popcount → 16-bit sequence addition.
+  Inspect mapped critical cells and input arrivals before another arithmetic
+  structure; keep FIFO push, consumed mask and pointer advance aligned.
+- [ ] Distinguish proven same-cycle arithmetic from general BalanceMux in P10
+  admission. `RefuseRegister` currently rejects every existing opportunity kind;
+  do not relax that gate to admit unproved structural or latency changes.
+
 ## 2026-10-15 — host STA consumer: `--emit-balance-mux-rtl` does not elaborate on the core
 
 The monorepo host now runs this package *before* gate-level STA
@@ -1695,4 +1738,3 @@ Sparse soak evidence: `MONOREPO-SOAK.md` / `FO4-ALGORITHM-UPGRADES.md`.
   `sv-timing correct` and monorepo soak (default lean).
 - Next: residual hard paths under richer emit if needed; live AMOCAS enable on
   configs that want Zacas (RVA + `RVZacas:1`).
-

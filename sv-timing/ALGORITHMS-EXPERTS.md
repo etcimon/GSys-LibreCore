@@ -16,7 +16,7 @@ does not mean a place-and-route path of 300 ps. It means: under `fo4-v1`, delay-
 path_class detector 24, and the current compose/classify/pass loop, this cone is the
 worst remaining single-cycle primary.
 
-**Standing numbers (current design state).**
+**Standing numbers (2026-10-15; current campaign in Part LI).**
 
 | Quantity | Value | Where it is computed |
 |---|---|---|
@@ -24,13 +24,15 @@ worst remaining single-cycle primary.
 | `fo4_ps` | 20 | process input, not a retune knob |
 | margin | 0.2 | same |
 | Budget \(B\) | **10 FO4** | \((1000/f_{\mathrm{MHz}})\times(1000/\mathrm{fo4\_ps})\times(1-m)\) |
-| Measurement | `delay-v25` | `crates/sv-timing-core/src/version.rs` |
+| Measurement | `delay-v26` | original-source loop scopes; `crates/sv-timing-core/src/version.rs` |
 | Path-class detector | **24** | `PATH_CLASS_DETECTOR_VERSION` in `path_class.rs` |
-| Quoted soak of record | `audit-remain-v50/` emit **15.0 P10 / 16.0 P10** | CLI `correct` + post_analyze; delay-v23 |
-| Latest soak | `audit-remain-v52/` delay-v25 integrity green | core **15.0 P10**; APU **22.0** axi2mem WRAP-beyond — **do not quote 22** over v50 16 P10 |
+| Current frozen emitted core | `pointer-trial-20261015/baseline-v26.json`: **21.5 FO4**, `instr_queue` | 264 files, 234 modules, 11,008 paths; 349 failing primary paths |
+| Previous reading of identical RTL | **23.5 FO4**, `scoreboard`, `delay-v25` | loop scope coordinate defect; a measurement correction, not a hardware speedup |
+| Historical soak of record | `audit-remain-v50/` emit **15.0 P10 / 16.0 P10** | older source closure, delay-v23; not the current core |
+| Historical later soak | `audit-remain-v52/` delay-v25 integrity green | older core **15.0 P10**; APU **22.0** axi2mem WRAP-beyond |
 | Historical | `audit-remain-v27/` 18.5 gemm span | VII.A/B/D/E later closed that headline |
 | Failed experiments | v25 general `(W)'(v)` 40.5; v28 S4-continue 30.5; v49 2-arg Mux tax gemm 15 | all **reverted** |
-| Remaining gap to \(B=10\) | **5 FO4** on core P10 trigger; APU floor 16 P10 inval_bus (or 22 wrap-beyond if quoted) | Part VII |
+| Remaining gap to \(B=10\) | **11.5 FO4** on current emitted core | Part LI; whole-core equivalence and mapped STA are not established |
 
 **How to read.** Read Part 0 once. Then read algorithms in pipeline order (I → VI) the
 first time. After that, jump by name: the table of contents is the algorithm index.
@@ -148,6 +150,7 @@ they are not A1–A49.
 102. [Part XLVIII Allowlist](#part-xlviii--allowlist-refuse-prefixes-module_allowed)
 103. [Part XLIX Ranking leftover counts](#part-xlix--ranking-primary-vs-all-kinds-leftover-counts)
 104. [Part L Maintenance contract](#part-l--maintenance-contract-sign-here)
+105. [Part LI Current 10-FO4 campaign](#part-li--current-10-fo4-campaign-2026-10-15)
 
 ---
 
@@ -3565,6 +3568,10 @@ over v50 16 P10. Do not InsertReg wrap-add. Do not revert M27 to hide it.
 
 # Part VII — Remaining gap to 10 FO4
 
+**Historical campaign:** the tables in this part describe v27–v52 artifacts.
+Use Part LI for the current source closure. A path class or a successful reparse
+does not prove a physical lower bound, equivalence, or readiness for RTL integration.
+
 This section **determines** the remaining gap from the algorithms above.
 It is not a wishlist. Each leftover is typed by class, P-id, lane, and
 which algorithm is allowed to touch it.
@@ -6511,3 +6518,190 @@ The remaining gap to ~10 FO4, determined from this theory:
 | + VII.F (do nothing on floor) | 16 P10 / 14 wrap / 56 T3 | RTL / T3 |
 
 **Campaign near-10 is VII.A+B+E(+C/D). Floor is not 10. Do not lengthen S4.**
+
+---
+
+# Part LI — Current 10-FO4 campaign (2026-10-15)
+
+## Evidence boundary and baseline
+
+The host runs `correct --all-modules --allow-latency --emit -O3
+--opt-max-stages-per-region 13 --real-cut-feeds --assume-clk` before mapping.
+`physicalDesign.structural.fo4Budget=10`, `fo4Ps=20`, `budgetMargin=0.2` encode
+4000 MHz **for structural analysis**; the STA clock is an independent constraint.
+The source of record for this comparison is the frozen emitted tree under
+`build-platform/workspace/build/sv-timing/pointer-trial-20261015/baseline/`.
+Its original `correct.json` SHA-256 is
+`144ec533ef5c2191fb6c4370d9bdd053cdb81e7225f6888e3f6d2629d669f322`.
+It contains 451 annotations, 33 InsertReg records and 32 BalanceMux records.
+The earlier 82-register/333-failing-path reading predates the generate-local cut
+refusals; it must not describe this snapshot.
+
+| Exact source | Measurement | Worst primary | Failing primary / RegToReg | Coverage |
+|---|---|---|---|---|
+| frozen baseline | delay-v25 | 23.5, scoreboard | 351 / 115 | 264 files, 234 modules, 11,008 paths |
+| same bytes | delay-v26 | 21.5, instr_queue | 349 / 114 | identical |
+| two-port pointer-selection candidate | delay-v26 | 21.5, instr_queue | 349 / 114 | identical |
+
+These are failing **paths**, not unique endpoints. Synthetic names such as
+`scoreboard.reg1/D` do not identify a physical STA pin.
+`production_validated=false` remains authoritative: reparse and Yosys elaboration
+do not verify data/control alignment after register insertion. In particular, the
+existing emit-side sibling/remainder/reduction extras must be checked against the
+same-cycle contract; generating a register outside the IR worklist is not proof of
+legal retiming.
+
+## A76 — Original-source loop containment (delay-v26)
+
+**Mechanism.** `collect_genvar_loops_in` recorded `Locate.offset` intervals from
+preprocessed text as `UserFile` positions. Assignment nodes already used
+`SyntaxTree::get_origin`. Removed conditional text or an expanded macro shifted
+one coordinate system relative to the other. The scoreboard's `k` could therefore
+be billed as a runtime operand in:
+
+```systemverilog
+for (genvar k = 1; k < NrCommitPorts; k++) begin
+  assign next[k] = flush ? '0 : pointer + W'(count) + W'(k);
+end
+```
+
+**Fix.** `lower.rs::loop_source_span` maps both loop boundary tokens back to the
+original file. Unresolved or include boundaries produce an empty, unknown span.
+`TimingModule::genvar_names_at` and `measure::attribute_costs` compare only
+same-file, original-source coordinates. Runtime identifiers outside the loop
+remain runtime, including a same-named input outside the loop's lexical scope.
+
+**Result.** With unchanged `fo4-v1`, the scoreboard cone falls from 23.5 to 14.5
+FO4 because `k` is recognized as an elaboration constant. No SV changes and no
+physical speedup are implied. The model still prices constant offsets coarsely;
+this fix is not a calibration of a constant adder to one physical gate.
+In the frozen 11,008-path comparison, 102 path costs change in either direction;
+some FPU paths rise by 1 FO4 when accidental constant attribution is removed.
+This is why measurement-version changes require re-analysis of the whole input
+closure, rather than adjusting only the headline path.
+
+**Tests.** `loop_constant_scope_uses_original_coordinates_after_preprocessing`
+covers a removed 80-line conditional prefix, inside/outside scope, and unresolved
+and different-file locations. `procedural_loop_scope_survives_macro_expansion_before_loop`
+covers an expanding macro before a procedural loop. The 170 core, 29 transform
+and 58 emit tests pass. `delay-v26` invalidates old measurement cache keys.
+
+## A77 — Bounded arithmetic selection versus carry-save compression
+
+**Concept.** A sum of three arbitrary words can use a 3:2 compressor:
+
+```systemverilog
+// All operands/results have the same unsigned width W.
+sum = (a ^ b ^ c) + (((a & b) | (a & c) | (b & c)) << 1);
+```
+
+The identity is modulo `2**W`. It replaces two carry-propagate additions with
+bitwise compression and one carry-propagate addition. It is not uniformly faster
+after mapping. The actual scoreboard has a much stronger constraint: `count` is
+0..2 in `g6lc64_ooo` and `k` is constant. Precomputing the three constant
+increments lets the count select the result in the same cycle:
+
+```systemverilog
+// Two-commit-port specialization, not a replacement for arbitrary port counts.
+// Offset0/1/2 are W-bit localparams k, k+1, k+2.
+- assign next[k] = flush ? '0 : pointer + W'(count) + W'(k);
++ assign next[k] = flush ? '0 :
++                  count == 0 ? pointer + Offset0 :
++                  count == 1 ? pointer + Offset1 :
++                               pointer + Offset2;
+```
+
+**Verification.** `fixtures/auto_correct/sum3_carry_save.sv` contains generic sums,
+the bounded commit-pointer shape, FIFO push/pop delta, and serial/tree popcount.
+`tools/sum3_trial.py` runs Yosys SAT on all binary inputs and then maps both sides
+with the same Liberty. It records source/library/binary hashes, proof logs,
+netlists, area and fresh STA reports. It uses the PGO OpenSTA binary installed
+from `tools/openroad`; no host project is imported into a package crate.
+The proof covers modular overflow and flush, but not X/Z equivalence or a
+sequentially transformed core.
+
+Mapped study: Nangate45 typical, virtual 1 ns clock, 0 ns input/output delays,
+0.01 ns input transition and 0.005 pF output load. No placement/parasitics.
+Yosys `c30457480`; fork STA binary SHA-256
+`e01ed911ddc6ef377c24777075c29918a9188ff3f6056f42c808685bee0ee5fa`.
+Artifacts: `/opt/testharness/work/svt-sum3-20261015/`.
+
+| Shape | Serial delay → candidate (ns) | Area before → after (µm²) | Decision |
+|---|---:|---:|---|
+| arbitrary 5-bit sum, carry-save | 0.321747 → 0.275936 | 45.220 → 46.550 | candidate only |
+| arbitrary 16-bit sum, carry-save | 0.713755 → 0.752442 | 174.230 → 184.604 | reject blanket rule |
+| 5-bit pointer, 2 commits, carry-save | 0.247047 → 0.292188 | 23.674 → 24.738 | reject for this shape |
+| 5-bit pointer, 2 commits, parallel increments | 0.247047 → 0.168715 | 23.674 → 25.536 | promising narrow specialization |
+| 6-bit pointer, 2 commits, parallel increments | 0.292386 → 0.230775 | 27.398 → 33.782 | area tradeoff |
+| 5-bit pointer, 4 commits, parallel increments | 0.372703 → 0.417343 | 34.846 → 64.106 | reject generalization |
+| 4-bit count + push − pop, decoded delta | 0.236688 → 0.197105 | 19.418 → 23.940 | candidate for depth-8 fixup queue |
+| 4 pushes + 16-bit pointer, balanced popcount | 0.540763 → 0.586791 | 55.594 → 59.850 | reject here |
+| 4 pushes + 16-bit pointer, carry-select upper increment | 0.540763 → 0.545673 | 55.594 → 55.594 | no timing win |
+| 8 pushes + 16-bit pointer, carry-select upper increment | 0.774759 → 0.886330 | 81.928 → 79.534 | reject for timing |
+
+SAT passed at widths 1/2/5/6/8/16 for generic sums, widths 5/6 and commit
+ports 1/2/4/8 for pointer selection, widths 1..6/8/16 for count delta,
+and widths 2/16 with 2/3/4/8 inputs for popcount. The carry-select follow-up also
+passed widths 2/16 with 1/3/4/8 inputs, including the narrow-width fallback.
+It splits the pointer at `ceil(log2(N))`, computes the low sum and both upper
+increments in parallel, then selects by the low carry. Correct algebra alone
+did not yield better mapped delay; the fixture retains this negative result.
+The four-input mapped reports explain why: both serial and carry-select have
+`push[0] → y[15]` as the critical chain through 11 cells
+(`XOR2, XNOR2, NOR2, AOI21, OAI21, NAND4, NOR2, AND4, AND4, NAND4, XNOR2`).
+The source-level carry-select structure was absorbed into nearly the same
+mapped carry chain. Mapping delay objectives, drive strengths and actual loads
+must be examined before assigning this rewrite a timing benefit.
+No trial changes production
+RTL, the cost table, inferred multi-cycle tags or SDC exceptions.
+
+**Full-source cross-check.** Replacing only the pointer expression in a review
+copy moves that cone from 14.5 to 12.5 FO4 in delay-v26; another scoreboard cone
+is 13.5. `instr_queue` remains the global worst at 21.5. Reading only delay-v25
+would incorrectly attribute the global 23.5→21.5 movement entirely to this
+rewrite. The physical leaf timing improvement above is independent evidence.
+Keep width casts and constant evaluation explicit: an opaque expression's
+fallback cost must never be accepted as an optimization win.
+
+## What requires further SystemVerilog work
+
+| Current emitted primary | Live source/concept | Next admissible work |
+|---|---|---|
+| instr_queue 21.5 / 20.5 | `core/fetch_B/instr_queue.sv:257–264`: popcount(push_instr_fifo) → sequence/ring pointer addition | resolve actual widths and model loop accumulation; tree popcount and carry-select trials did not improve mapped timing; inspect the mapped critical chain before another rewrite |
+| wt_dcache_wbuffer 20.0 | `core/cache_subsystem/wt_dcache_wbuffer.sv:651`: count + allocate − pop | decoded delta can preserve simultaneous push/pop; measured width-4 leaf is promising, but reset/queue invariants and whole-block equivalence remain |
+| wt_dcache_wbuffer 19.5 | same file, `fixup_rd_req` around line 452: state/valid/dead/refill checks plus tocheck reduction and check enables | combinational factoring/shared decode; do not independently register a request predicate |
+| trigger_module 15.0 | indexed CSR trigger access | preserve index/write-enable alignment; evaluate decoder/read mux structure |
+| scoreboard 14.5 / 13.5 | `core/scoreboard.sv:783–808`: commit count and pointer offsets | bounded parallel increments for two-port configurations, with a retained generic fallback and integration verification |
+
+The "fat operator, handshake, or multi-cycle tag" conclusion is not exhaustive.
+Missing gate information, scope/origin refusal, field-balance residuals, incomplete
+width/elaboration knowledge and measurement defects are additional outcomes.
+`--assume-clk` supplies names; it does not prove a clock/reset domain or legal latency.
+P10 refuses automatic register insertion; it does not forbid an independently
+proved same-cycle arithmetic rewrite.
+The current `trial_allows(RefuseRegister, kind)` conservatively rejects **all**
+existing opportunity kinds. A future automatic constant-increment specialization
+needs its own width/domain/equivalence admission; simply enabling existing
+BalanceMux or InsertReg on P10 would bypass that distinction.
+
+## Reproduction and reporting
+
+```bash
+python tools/fo4_report.py /path/to/correct.json --residuals --top 12
+python tools/algo_trace_report.py /path/to/algo-trace.jsonl --json
+python tools/sum3_trial.py --yosys /prefix/bin/yosys --sta /prefix/bin/sta \
+  --liberty /pdk/typ.lib --out /workspace/pointer --commit-ports 2 --widths 5 6
+python tools/sum3_trial.py --yosys /prefix/bin/yosys --sta /prefix/bin/sta \
+  --liberty /pdk/typ.lib --out /workspace/delta --count-delta --widths 4
+```
+
+`fo4_report` now selects validated emitted re-analysis from `correct.json`;
+failed/incomplete emit is INCONCLUSIVE and cannot fall back to `post_closure`.
+The residual table keeps I/O and multi-cycle counts visible and ranks RegToReg
+loci first. `algo_trace_report` prints actual refusal reasons. Integer path ids
+from transform IR must not be joined to post-emit ids.
+
+At the 2026-10-15 22:46 UTC observation the full-core remote job had elaborated and
+reached ABC mapping (about 51 GiB Yosys RSS, 10 GiB ABC RSS). No completed full-core
+STA report existed. Its eventual result must be bound to that run's input snapshot;
+the small-cone STA results above do not substitute for it.

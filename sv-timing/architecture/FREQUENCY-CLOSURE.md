@@ -2,6 +2,22 @@
 
 Structural (not STA) frequency closure for the precompiler loop.
 
+## Current campaign (2026-10-15, delay-v26)
+
+The frozen scope-safe emitted core has 264 files, 234 modules and 11,008 paths.
+The same SV measures 23.5 FO4 under delay-v25 and **21.5 FO4 under delay-v26**,
+with 351 → 349 failing primary paths. The old scoreboard headline used mismatched
+preprocessed loop bounds and original-source assignment offsets; correcting the
+genvar scope lowers that cone to 14.5. This is not a hardware timing improvement.
+
+The remaining worst is `instr_queue` (push popcount → pointer/sequence update).
+Same-cycle, two-port scoreboard selection and width-4 FIFO delta candidates have
+SAT proofs and better small-cone Nangate45 mapped timing, but neither establishes
+whole-core equivalence or closure. Carry-save and balanced-popcount variants also
+produced mapped regressions despite their attractive source-level structure.
+Exact evidence and reproduction commands: `../ALGORITHMS-EXPERTS.md` Part LI.
+Earlier tables below are historical measurements on other input sets.
+
 Handoff to real STA tools (SDC seeds, artifact mapping, workflow): [`STA-HANDOFF.md`](STA-HANDOFF.md).
 
 ## Model

@@ -17,6 +17,7 @@ Disclaimer: structural FO4 estimates, not STA sign-off.
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import os
 import sys
@@ -30,6 +31,76 @@ def load(path: str) -> dict[str, Any]:
 
 def module_names(rep: dict[str, Any]) -> dict[int, str]:
     return {int(m["id"]): m.get("name", f"<id {m['id']}>") for m in rep.get("modules", [])}
+
+
+def analysis_evidence(rep: dict[str, Any]) -> tuple[dict[str, Any], str]:
+    """Use emitted re-analysis for correct.json; never fall back to IR credit."""
+    if not any(k in rep for k in ("post_analyze", "post_closure", "dry_run")):
+        return rep, "direct analyze report (source provenance supplied by caller)"
+    if rep.get("dry_run") is not False or rep.get("post_analyze_valid") is not True:
+        raise ValueError("INCONCLUSIVE: correction has no validated emitted re-analysis")
+    integrity = rep.get("integrity") or {}
+    if any(integrity.get(k) is not True for k in ("joint_ok", "reparse_ok", "structural_ok")):
+        raise ValueError("INCONCLUSIVE: emitted project integrity is incomplete")
+    post = rep.get("post_analyze")
+    if not isinstance(post, dict) or not post.get("paths") or post.get("skipped_files"):
+        raise ValueError("INCONCLUSIVE: emitted re-analysis is missing paths or skipped files")
+    return post, "emitted re-analysis (parse/structure checked; not functional equivalence)"
+
+
+def residual_action(path: dict[str, Any]) -> str:
+    """A work category, not a proof that an automatic transformation is legal."""
+    note = path.get("class_note") or ""
+    cls = path.get("path_class")
+    if path.get("multi_cycle") or cls == "multi_cycle_tagged":
+        return "validate multi-cycle contract"
+    if "P10 handshake" in note or "indexed restore" in note:
+        return "preserve same-cycle protocol; evaluate combinational rewrite"
+    if cls == "atomic_over_budget":
+        return "operator implementation/width review"
+    if cls in ("dense_control_cone", "independent_lhs_bundle"):
+        return "balance field with scope/type/equivalence checks"
+    return "inspect gate, dependencies, origin and cut refusals"
+
+
+def residual_summary(rep: dict[str, Any], top: int) -> dict[str, Any]:
+    """Rank like frequency_closure: RegToReg first, with separate I/O and MC counts.
+
+    Locations are retained verbatim. Do not join a pre-transform trace to these
+    paths by integer id: post-emit analysis allocates a new set of ids.
+    """
+    names = module_names(rep)
+    paths = rep.get("paths", [])
+    failing = [p for p in paths if float(p.get("slack_fo4", 0)) < 0]
+    primary = [p for p in failing if not p.get("multi_cycle")]
+    ranked = sorted(primary, key=lambda p: (
+        p.get("path_kind") != "regtoreg", -float(p.get("total_fo4", 0)), p["path_id"]
+    ))
+    # A composed graph may repeat a locus for several captures. Keep its worst
+    # representative, but report path counts rather than calling them endpoints.
+    loci: dict[tuple, dict] = {}
+    for p in ranked:
+        loc = p.get("primary_loc") or {}
+        key = (p["module_id"], str(loc.get("file")).replace("\\", "/"),
+               loc.get("start_line"), p.get("path_kind"))
+        if key not in loci:
+            loci[key] = {
+                "module": names.get(p["module_id"], "?"),
+                "path_id": p["path_id"], "fo4": p["total_fo4"],
+                "path_kind": p.get("path_kind"), "path_class": p.get("path_class"),
+                "location": loc, "class_note": p.get("class_note"),
+                "next_action": residual_action(p), "paths_at_locus": 0,
+            }
+        loci[key]["paths_at_locus"] += 1
+    return {
+        "failing_primary_paths": len(primary),
+        "failing_regtoreg_paths": sum(p.get("path_kind") == "regtoreg" for p in primary),
+        "failing_io_paths": sum(p.get("path_kind") != "regtoreg" for p in primary),
+        "failing_multi_cycle_paths": sum(bool(p.get("multi_cycle")) for p in failing),
+        "work_categories": dict(Counter(residual_action(p) for p in primary)),
+        "worst_loci": list(loci.values())[:top],
+        "note": "categories are work items, not exhaustive physical lower bounds",
+    }
 
 
 def loc_str(path: dict[str, Any]) -> str:
@@ -110,16 +181,23 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--top", type=int, default=15, help="rows per table (default 15)")
     ap.add_argument("--kind", default=None, help="filter paths by path_kind")
     ap.add_argument("--module", default=None, help="only paths in this module")
+    ap.add_argument("--residuals", action="store_true", help="rank over-budget source loci and next work")
+    ap.add_argument("--json", action="store_true", help="emit the residual worklist as JSON")
     args = ap.parse_args(argv)
 
     try:
-        rep = load(args.report)
-    except (OSError, json.JSONDecodeError) as e:
+        rep, evidence = analysis_evidence(load(args.report))
+    except (OSError, ValueError) as e:
         print(f"error: cannot read {args.report}: {e}", file=sys.stderr)
         return 2
 
+    if args.residuals or args.json:
+        summary = {"evidence": evidence, **residual_summary(rep, args.top)}
+        print(json.dumps(summary, indent=2))
+        return 0
     names = module_names(rep)
     print(rep.get("banner", "sv-timing"))
+    print(f"evidence: {evidence}")
     print_scope(rep)
     print()
     print_closure(rep)
