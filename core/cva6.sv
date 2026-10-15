@@ -3793,9 +3793,13 @@ module cva6
 
   int f;
   logic [63:0] cycles;
+  // +core_notrace: keep the file (empty) but skip the per-commit writes; see
+  // corev_apu/tb/g6lc_tb.cpp for the plusarg allowlist entry.
+  bit core_trace_en;
 
   initial begin
     string fn;
+    core_trace_en = !$test$plusargs("core_notrace");
     $sformat(fn, "trace_hart_%0.0f.dasm", hart_id_i);
     f = $fopen(fn, "w");
   end
@@ -3814,7 +3818,7 @@ module cva6
           default: ;  // Do nothing
         endcase
       end
-      for (int i = 0; i < CVA6Cfg.NrCommitPorts; i++) begin
+      if (core_trace_en) for (int i = 0; i < CVA6Cfg.NrCommitPorts; i++) begin
         if (commit_ack[i] && !commit_instr_id_commit[i].ex.valid) begin
           $fwrite(f, "%d 0x%0h %s (0x%h) DASM(%h)\n", cycles, commit_instr_id_commit[i].pc, mode,
                   commit_instr_id_commit[i].ex.tval[31:0], commit_instr_id_commit[i].ex.tval[31:0]);

@@ -205,3 +205,18 @@ the same 2 M-cycle window on the depth-8 and T33 models is clean, so the race is
 and the oracle is run over the full kernel boot trace to find the first wrong value
 (`t21/q-memcheck-bg.sh`). Limits: one hart (no coherence), no DMA, `cbo.zero` not modelled
 (flagged as `image/zero`-source mismatches if it ever appears).
+
+**Live mode (2026-10-15, T37).** A 700 M-cycle boot trace is ~45 GB, so the oracle can also be
+fed through a FIFO while the model runs: in the run directory `mkfifo trace_rvfi_hart_00.dasm`,
+start `cat trace_rvfi_hart_00.dasm | tee >(zstd -1 -T2 -q -o trace_rvfi.dasm.zst) | python3 -u
+rvfi_memcheck.py /dev/stdin payload.elf --progress=5000000 > oracle.log`, then the model
+*without* `+rvfi_notrace` (the tracer's `$fopen` blocks until the reader is there). Every
+`src=stored` mismatch is printed and flushed as it happens, `progress` lines every N
+retirements, and the zstd copy (≈ 2 bytes per retirement on OpenSBI's loops, more on the kernel)
+keeps `--watch`/`--stop-retire`/`--walk` replays possible afterwards. The memory model holds
+stored bytes in 4 KiB pages (data + known bitmap) instead of a per-byte dict, so a whole Linux
+boot stays around 1 GB of RSS; the oracle runs at roughly the model's pace (~20–25 k
+retirements/s), the FIFO throttles the model if it does not. Launch recipe:
+`t21/q-t37-launch.sh`. The other three sim-only per-commit trace files (`trace_hart_0.dasm`,
+`iti.traces`, `encaps.traces`) are gated by `+core_notrace` on models built after
+2026-10-15; on older models symlink the three names to `/dev/null` before launching.

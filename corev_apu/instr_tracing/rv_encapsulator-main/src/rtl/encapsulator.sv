@@ -12,6 +12,7 @@
 // Author:  Umberto Laghi
 // Contact: umberto.laghi2@unibo.it
 // Github:  @ubolakes
+// Modified by: Etienne Cimon (+core_notrace gate on the sim-only encaps.traces writes)
 
 /* ENCAPSULATOR */
 /*
@@ -36,7 +37,9 @@ module encapsulator (
 );
   // pragma translate_off
   int f;
+  bit core_trace_en;  // +core_notrace skips the per-packet writes (corev_apu/tb/g6lc_tb.cpp)
   initial begin
+    core_trace_en = !$test$plusargs("core_notrace");
     f = $fopen("encaps.traces", "w");
   end
   final $fclose(f);
@@ -64,7 +67,7 @@ always_comb begin
 end
 // pragma translate_off
 always_ff @(posedge clk_i) begin
-    if (valid_o) begin
+    if (valid_o && core_trace_en) begin
         $fwrite(
         f,
         "%h\n",encap_fifo_entry_o);

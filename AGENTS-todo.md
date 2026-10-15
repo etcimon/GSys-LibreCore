@@ -1682,7 +1682,48 @@ prerequisite for this work under the existing dual license. No licensing policy 
   (s11 10,965 cycles, m04/m20/m32–m37) unchanged and qualified. L1 and L3
   relaunched on it; `ooocoh-t36-server1-canon-pgo-build` builds for the
   HPDCACHE side (the MMU is shared — the same spurious fault can hit any
-  package with a speculative LSU).
+  package with a speculative LSU). **Verified on the boot (2026-10-15):**
+  L1 on `ooocoh-t36-ooo-canon-pgo-build` runs through the old 2.14 s
+  fault, the jent init, `clk: Disabling unused clocks`, `Freeing unused
+  kernel image (initmem) memory: 2140K` and **`Run /init as init process`
+  at 7.488 s guest (≈ 748 M cycles, 504 M retired)** — the kernel boot is
+  complete; what stopped it was the payload: `/init` (OpenWrt's dynamic
+  busybox) died in the loader, `Error loading shared library libgcc_s.so.1
+  … Error relocating /init: __bswapdi2`, exit 0x7f00 → `Attempted to kill
+  init!`. OpenWrt keeps `libgcc_s.so.1` in `/lib`; `q-linux-payload.sh`
+  copied it from `/usr/lib` (silently, `2>/dev/null`). Fixed (copy from
+  `/lib`, hard check), `linux-payload-l1ooo` rebuilt, L1 relaunched
+  (`linux-boot-l1fix-ooocoh-t36-ooo-canon-pgo-build`, cap 950 M cycles).
+  L3 on the same model reached **9.39 s guest (≈ 701 M cycles)** and died
+  in a different class — T37.
+- [ ] **T37 — L3 on the T36 ooo: `kworker/u2:0` (`async_run_entry_fn`)
+  oopses in `__memset` called from `blake2s_final+0x36` with a store page
+  fault at `0xffffffc80005c000` — the guard page above the task's VMAP
+  stack (`sp 0x…5b6b0`) (2026-10-15).** The registers decode it:
+  `a2 = 0x00000000ffffffd8` is the memset length = `BLAKE2S_BLOCK_SIZE -
+  state->buflen` computed in u32 with **`buflen = 104`**; `blake2s_update`
+  cannot leave `buflen > 64`, so the `lw` of `state->buflen` in
+  `blake2s_final` returned a value the program never stored there (the
+  state is a stack local, zeroed by `memset` in `blake2s_init` a few
+  hundred instructions earlier). A same-hart store→load mismatch again —
+  the class the program-order oracle catches — but on the T34-fixed
+  wbuffer and after 490 M retirements, i.e. a rarer trigger than T28/T34.
+  L1 did not hit it in 511 M retirements (different initrd, different
+  timing). Instrument running: the L3 boot repeated on the same model with
+  the RVFI trace through a FIFO into the oracle **live** (`rvfi_memcheck.py`
+  now holds the stored bytes in 4 KiB pages, prints every `stored`
+  mismatch as it happens and a `progress` line per 5 M retirements; a
+  `zstd` copy of the trace is kept for `--watch`/`--stop-retire` replays) —
+  `linux-boot-l3orc-ooocoh-t36-ooo-canon-pgo-build/oracle.log`, ≈ 5 h to
+  the oops. The first `src=stored` mismatch names the load and the window
+  for the FST. Housekeeping found on the way: three sim-only per-commit
+  trace files were written unconditionally on every run (`trace_hart_0.dasm`
+  33 GB, `iti.traces` 15.5 GB, `encaps.traces` per 760 M cycles — 190 GB
+  across the T33/T36 run dirs); gated behind `+core_notrace` (cva6.sv mock
+  tracer, `cva6_iti`, `encapsulator`; allowlisted in `g6lc_tb.cpp`),
+  independent of `+rvfi_notrace` so the oracle keeps its trace. Until the
+  models are rebuilt the run scripts symlink the three names to
+  `/dev/null`.
 - [ ] **T35 — `g6lc64_ooo_server1` (HPDCACHE, T28–T33): `ooo_spec_entry_live`
   assertion at cycle 76,935,847 (0.6 s guest, after `futex hash table`)
   (2026-10-14).** `store_buffer.sv:1054` — speculative-queue entry 0 holds
@@ -1709,7 +1750,42 @@ prerequisite for this work under the existing dual license. No licensing policy 
   build` (T35 RTL + the trace, pre-T36 MMU so the cycle reproduces) to run
   with `+stq_trace +stq_lo=76935000 +stq_hi=76935850 +fe_trace
   +fe_lo=76935000 +fe_hi=76935850`; in parallel the T36-fixed server1 L1
-  tells whether a spurious store fault (T36) feeds the leak.
+  tells whether a spurious store fault (T36) feeds the leak. **The T36-fixed
+  server1 (`l1s1f`) reproduces at the identical cycle 76,935,847** — T36
+  does not feed it. **Candidate mechanism from the source (2026-10-15),
+  to be confirmed by the `+stq_trace` window (`l1s1g`, lo 76.70 M):** the
+  speculative queue's flush path set `speculative_write_pointer_n =
+  speculative_read_pointer_q` while a same-cycle `commit_i` had already
+  moved `speculative_read_pointer_n` to `_q + 1` (count 0, pointers one
+  apart). The next arrival is written at the write pointer — one slot
+  *behind* the head — and the OoO program-order rewrite, which snapshots
+  `[read_pointer_n, read_pointer_n + count)`, then copies the **stale slot
+  at the head** (an old store's tid/address/data) into position 0 and
+  re-validates it, while the real arrival is dropped. That is exactly a
+  valid entry whose scoreboard slot is not live — and, had the assertion
+  not stopped the run, a committed ghost store plus a lost real store. The
+  only flush sources that can coincide with a store commit are the SMT
+  ones: the N1c forced drain decides at cycle N (`!commit_i` for the WFI /
+  relative legs, not for the absolute one) and fires `flush_ex` through
+  the registered pulse at N+1, when the store at the commit head is free
+  to commit (`smt_drain_safe` checks `no_st_pending_commit` — the commit
+  queue and wbuffer — not the speculative head). In-order flushes are all
+  raised by the committing port-0 instruction itself and never coincide,
+  which is why `g6lc64_ooo` (1 hart) never hit it in 760 M cycles. **Fix:**
+  `speculative_write_pointer_n = speculative_read_pointer_n` on flush
+  (same value as before whenever no commit coincides), plus the invariant
+  assertion `spec_ptr_consistent` (`wp − rp ≡ count mod DEPTH`), which
+  fires in the flush cycle itself rather than at the later ghost. Lint
+  clean (`g6lc64_ooo`, `g6lc64_ooo_server1`). Build
+  `ooocoh-t37-server1-pgo-build` (ovl-t37: the fix, the assertion,
+  `+core_notrace`) in flight; the verification is the server1 L1 past
+  76,935,847 and the 4-core server rebuilt from the same tree. Owed
+  alongside: whether the forced drain's latched restart PC (`head_pc_i` at
+  the decision cycle) can name an instruction that commits in the pulse
+  cycle (the absolute leg allows a commit at N as well) — a
+  double-execution hazard independent of the queue pointers; the trace
+  window shows whether a `COMMIT` and a `FLUSH` share the cycle before
+  the `DEAD` entry.
 - [ ] **T34 — two kernel oopses with T28–T33 in, both the shape of a stale or
   half-written load value (2026-10-14).** On `ooocoh-t33-ooo-replay2-pgo-build`
   (depth-2 fixup queue) Linux now runs through `init_IRQ`, timekeeping

@@ -457,7 +457,16 @@ module store_buffer
       // SI / no G1ah: evict all speculative stores
       for (int unsigned i = 0; i < DEPTH_SPEC; i++) speculative_queue_n[i].valid = 1'b0;
 
-      speculative_write_pointer_n = speculative_read_pointer_q;
+      // T35: the pointers must agree after the flush. A commit_i in the flush
+      // cycle advanced speculative_read_pointer_n past _q; leaving the write
+      // pointer at _q put the next arrival one slot behind the head, and under
+      // OoO the program-order rewrite (above) then re-validated the stale slot
+      // at the head -- an entry whose scoreboard slot was no longer live -- and
+      // dropped the arrival. The flush sources that can coincide with a store
+      // commit are the SMT ones (the forced drain's registered pulse); the
+      // in-order flushes are all raised by the committing port-0 instruction
+      // itself, so there this is the same value as before.
+      speculative_write_pointer_n = speculative_read_pointer_n;
       speculative_status_cnt_n = 'b0;
     end
 
@@ -1045,6 +1054,16 @@ module store_buffer
   // scoreboard slot that is still issued/live. A reservation outliving its
   // slot (or never backed by one) means the hold-to-commit credit accounting
   // leaked.
+  // T35: the pointer pair and the status count describe one queue. The flush
+  // path used to leave write = read_q while a same-cycle commit moved read to
+  // read_q + 1 (count 0), and the next arrival then landed behind the head.
+  spec_ptr_consistent :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+                   ($clog2(DEPTH_SPEC)'(speculative_write_pointer_q - speculative_read_pointer_q) ==
+                    $clog2(DEPTH_SPEC)'(speculative_status_cnt_q)))
+  else $error("[Speculative Queue] pointers rp=%0d wp=%0d disagree with count %0d",
+              speculative_read_pointer_q, speculative_write_pointer_q, speculative_status_cnt_q);
+
   if (CVA6Cfg.OoOEn) begin : gen_sb_live_assert
     for (genvar i = 0; i < DEPTH_SPEC; i++) begin : gen_spec_entry_live
       ooo_spec_entry_live :

@@ -11,6 +11,12 @@ DMA, DRAM only (MMIO/CLINT loads are skipped).  AMOs are checked as loads and
 then applied as stores; sc applies only on success (rd == 0).
 
 usage: rvfi_memcheck.py <trace_rvfi_hart_00.dasm> <fw_payload.elf> [--max N] [--all]
+       [--watch=HEXADDR] [--stop-retire=N] [--walk=VA:ROOTPPN] [--progress=N]
+
+The trace path may be a FIFO: `mkfifo trace_rvfi_hart_00.dasm` in the run
+directory, start the oracle (python3 -u ... --progress=10000000), then the
+simulator -- the oracle then runs live against a kernel boot without the trace
+ever touching the disk (tee into zstd on the way if a replayable copy is wanted).
 """
 import struct
 import sys
@@ -58,9 +64,13 @@ def load_elf(path):
 
 
 class Mem:
+    """Stored bytes live in 4 KiB pages (data + known bitmap) instead of a
+    per-byte dict: a Linux boot stores ~10^8 distinct bytes, which is ~10 GB as
+    dict entries and ~1 GB as pages, and the live (FIFO-fed) oracle has to hold
+    that for the whole run."""
     def __init__(self, segs):
         self.segs = segs
-        self.stored = {}            # byte addr -> value
+        self.pages = {}             # page number -> (bytearray data, bytearray known)
 
     def init_byte(self, a):
         for base, data in self.segs:
@@ -68,18 +78,32 @@ class Mem:
                 return data[a - base]
         return 0
 
+    def known(self, a):
+        p = self.pages.get(a >> 12)
+        return p is not None and p[1][a & 0xFFF] != 0
+
+    def any_known(self, a, n):
+        return any(self.known(a + i) for i in range(n))
+
     def read(self, a, n):
         v = 0
         for i in range(n):
-            b = self.stored.get(a + i)
-            if b is None:
-                b = self.init_byte(a + i)
+            p = self.pages.get((a + i) >> 12)
+            o = (a + i) & 0xFFF
+            b = p[0][o] if p is not None and p[1][o] else self.init_byte(a + i)
             v |= b << (8 * i)
         return v
 
     def write(self, a, n, v):
         for i in range(n):
-            self.stored[a + i] = (v >> (8 * i)) & 0xFF
+            pn = (a + i) >> 12
+            p = self.pages.get(pn)
+            if p is None:
+                p = (bytearray(4096), bytearray(4096))
+                self.pages[pn] = p
+            o = (a + i) & 0xFFF
+            p[0][o] = (v >> (8 * i)) & 0xFF
+            p[1][o] = 1
 
 
 def decode(insn):
@@ -130,12 +154,16 @@ def main():
     report_all = '--all' in sys.argv
     watch = None
     stop_retire = None
+    progress = 0
     walks = []
     for a in sys.argv[1:]:
         if a.startswith('--watch='):
             watch = int(a.split('=')[1], 16)
         elif a.startswith('--stop-retire='):
             stop_retire = int(a.split('=')[1])
+        elif a.startswith('--progress='):
+            # live (FIFO-fed) runs: one flushed status line every N retirements
+            progress = int(a.split('=')[1])
         elif a.startswith('--walk='):
             # --walk=VA:ROOTPPN  Sv39 walk over the model memory at --stop-retire
             va, root = a.split('=')[1].split(':')
@@ -155,8 +183,10 @@ def main():
                 retire += 1
                 if stop_retire is not None and retire >= stop_retire:
                     break
+                if progress and retire % progress == 0:
+                    print(f"progress retire={retire} loads={loads} stores={stores} mismatches={mism} stored-mismatches={mism - unknown} pages={len(mem.pages)}", flush=True)
                 continue
-            if not (line and line[0] in '0123' and line[1] == ' '):
+            if not (line and line[0] in '0123' and line[1] == ' ') or ' mem ' not in line:
                 continue
             t = line.split()
             if len(t) < 3 or 'mem' not in t:
@@ -194,7 +224,7 @@ def main():
                 if rdval is None:
                     skipped += 1
                 else:
-                    if space == 'va' and not any((addr + i) in mem.stored for i in range(size)):
+                    if space == 'va' and not mem.any_known(addr, size):
                         loads += 1
                         continue   # never-stored vmalloc/user bytes: no oracle value
                     exp = mem.read(addr, size)
@@ -210,12 +240,12 @@ def main():
                         ok = got_full == exp
                     if not ok:
                         # distinguish never-stored (image/zero) from stored bytes
-                        src = 'stored' if any((addr + i) in mem.stored for i in range(size)) else 'image/zero'
+                        src = 'stored' if mem.any_known(addr, size) else 'image/zero'
                         mism += 1
                         if src != 'stored':
                             unknown += 1
-                        if report_all or mism <= 20:
-                            print(f"MISMATCH #{mism} memop {n} retire {retire} line {lineno}: pc=0x{pc:x} insn=0x{insn:08x} {kind}{size} addr=0x{addr:x} got=0x{got_full:x} exp=0x{exp_full:x} src={src}")
+                        if report_all or mism <= 20 or src == 'stored':
+                            print(f"MISMATCH #{mism} memop {n} retire {retire} line {lineno}: pc=0x{pc:x} insn=0x{insn:08x} {kind}{size} addr=0x{addr:x} got=0x{got_full:x} exp=0x{exp_full:x} src={src}", flush=True)
                     loads += 1
                 if kind == 'A' and wdata is not None:
                     mem.write(addr, size, wdata)
@@ -235,7 +265,7 @@ def main():
             idx = (va >> (12 + 9 * lvl)) & 0x1ff
             pa = pt + idx * 8
             pte = mem.read(pa, 8)
-            src = 'stored' if any((pa + i) in mem.stored for i in range(8)) else 'image/zero'
+            src = 'stored' if mem.any_known(pa, 8) else 'image/zero'
             flags = ''.join(c if (pte >> b) & 1 else '-' for b, c in enumerate('VRWXUGAD'))
             print(f"  L{lvl} idx=0x{idx:x} pte@0x{pa:x} = 0x{pte:016x} [{flags}] ppn=0x{pte >> 10:x} ({src})")
             if not pte & 1 or pte & 0xe:

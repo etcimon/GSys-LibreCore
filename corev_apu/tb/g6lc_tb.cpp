@@ -156,6 +156,13 @@ static const char *verilog_plusargs[] = {
     // +rvfi_notrace (corev_apu/tb/rvfi_tracer.sv): skip the per-instruction
     // trace writes on kernel-boot-length runs; tohost detection stays on.
     "rvfi_notrace",
+    // +core_notrace: skip the other three per-instruction trace files that are
+    // written unconditionally in translate_off blocks -- the mock dasm tracer
+    // (core/cva6.sv trace_hart_N.dasm), the ITI (iti.traces) and the
+    // encapsulator (encaps.traces): 48 GB and a few % of host time over a
+    // 760 M-cycle Linux boot. Independent of +rvfi_notrace so the RVFI trace
+    // alone can be kept for the program-order memory oracle.
+    "core_notrace",
     // +preload_bytes=<n>: DRAM preload window override (default: the whole 256 MiB
     // model; see the preload loop below). Allowlisted for the same reason.
     "preload_bytes",

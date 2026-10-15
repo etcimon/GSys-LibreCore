@@ -5,6 +5,7 @@
 // Contributors: 
 // Darshak Sheladiya, SYSGO GmbH
 // Umberto Laghi, UNIBO
+// Modified by: Etienne Cimon (+core_notrace gate on the sim-only iti.traces writes)
 
 // For reference : See Section 4.2 Instruction Trace Interface from Efficient Trace for RISC-V v2.0 (may 5 2022)
 // iti stand for Instruction Trace Interface, changing because tip (Trace Ingress Port) and "type" are too similar creating confusion 
@@ -30,7 +31,9 @@ module cva6_iti #(
 
   // pragma translate_off
   int f;
+  bit core_trace_en;  // +core_notrace skips the per-packet writes (corev_apu/tb/g6lc_tb.cpp)
   initial begin
+    core_trace_en = !$test$plusargs("core_notrace");
     f = $fopen("iti.traces", "w");
     $fwrite(f, "itype_0,cause,tval,priv,iaddr_0,context,ctype,iretire_0,ilastsize_0\n");
   end
@@ -201,7 +204,7 @@ module cva6_iti #(
     end
     //pragma translate_off
     for (int i = 0; i < CVA6Cfg.NrCommitPorts; i++) begin
-      if (itt_out[i].valid) begin
+      if (itt_out[i].valid && core_trace_en) begin
         $fwrite(f, "%d,%0d,%0d,%d,%h,0,0,%0d,%0d\n", itt_out[i].itype, itt_out[i].cause,
                 itt_out[i].tval, itt_out[i].priv, itt_out[i].iaddr, itt_out[i].iretire,
                 itt_out[i].ilastsize);
