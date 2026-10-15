@@ -323,7 +323,12 @@ bun run src/cli/index.ts setup --install --profile dual-hart
   asks STA once per pin arrival, skips an empty parasitic update, and checks
   only driver pins in `check_sanity`. Repair, rebuffer ranking, and endpoint
   collection propagate required times once per pass and then read the slack
-  stored on each vertex.
+  stored on each vertex. The fork's flow metrics are identical to upstream's
+  at the pinned base (`tools/openroad/AGENTS-openroad/architecture/OPPORTUNITIES.md`,
+  "Flow-metric parity"). `OPENROAD_PGO=1` makes the install a two-phase GCC
+  profile-guided build trained on `test/aes_nangate45.tcl` (same results,
+  `repair_timing` ~25% faster); `OPENROAD_CMAKE_ARGS` passes `-D` hints for a
+  private dependency prefix such as `/opt/openroad-deps`.
 
 #### 4.6.2a Running the formal gate
 
