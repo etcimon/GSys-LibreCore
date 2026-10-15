@@ -628,7 +628,7 @@ ooo's failure points and stopped at 0.6 s on a store-buffer liveness assertion (
 |---|---|---|---|---|
 | T36 | L1 at 2.14 s: store page fault on the init task's VMAP stack in `jent_memaccess`, no PTW error, PTE valid | the MMU evaluated `canonical_addr_check` on the request being looked up (`lsu_vaddr_i`) inside the branch that applies the *previous* request's DTLB result; a wrong-path load with a non-canonical pointer one cycle behind a store faulted the store | check on `lsu_req_q`/`lsu_vaddr_q` | oracle `--walk`/`--watch` (PTE VRWGAD, written once); stage 52 (39 vs 115 → 115/115) |
 | — | L1 at 7.49 s: `Run /init as init process` → `Attempted to kill init! exitcode=0x7f00` | payload: OpenWrt's busybox is dynamic and `libgcc_s.so.1` lives in `/lib`; the initrd script copied it from `/usr/lib` (silently) | `q-linux-payload.sh` copies from `/lib` with a hard check | loader text on the console: `Error loading shared library libgcc_s.so.1 … __bswapdi2` |
-| T37 | L3 at 9.39 s: `kworker/u2:0` oops in `__memset` from `blake2s_final`, store fault at the VMAP-stack guard page | `a2 = 0xffffffd8` = `64 − buflen` with `buflen = 104`: the `lw` of `state->buflen` returned a value never stored (a same-hart store→load mismatch, rarer than T28/T34 — 490 M retirements in) | open — live oracle on the repeated L3 run names the load | `linux-boot-l3orc-…/oracle.log` |
+| T37 | L3 at 9.39 s: `kworker/u2:0` oops in `__memset` from `blake2s_final`, store fault at the VMAP-stack guard page | `a2 = 0xffffffd8` = `64 − buflen` with `buflen = 104`: the `lw` of `state->buflen` returned a value never stored. The live oracle over the whole run (487 M retirements) found **3** such loads, each returning a *store operand* that no store, forward or wbuffer write ever put at that address (`0x100000`, `0x0`, `0x40` — `+smt_mem_watch` at the first PA: no store offered/committed/drained, STQ lookup `valid=0`) — **the stray-writeback face of T35**: the late `valid_o` of a cancelled store (`result_o = lsu_ctrl_i.data`) completes a LOAD that now owns the tid | same as T35 (t38) | oracle `linux-boot-l3orc-…/oracle.log` (3 stored mismatches); the ooo L1 with the fixed initrd then stopped on the assertion form at 460,435,800; verdict `l3orc2` on the t38 ooo (owed) |
 | T35 | server1 (SMT2) at 0.6 s: speculative-queue entry with a dead scoreboard tid | a hart-1 store sat in the store unit's `WAIT_TRANSLATION` (PTW) through a younger-cancel wave (its tid named by the mask for 9 cycles, then commit-dropped) and the drained SMT switch; the only cancel check on the store path was the mask **at push time**, so when the walk completed the store was pushed under a tid whose slot was free — or, single-hart, re-allocated: a ghost store plus a writeback into another instruction. The load path has the sticky `ldbuf_flushed` bit for this window; the store path had none | `lsu_bypass` marks cancelled stores sticky; `store_unit` consumes/drops them without translation, push or writeback | `+stq_trace`/`+smt_sched_trace` window 76.70–76.94 M (`PUSH tid=19 hart=1` at 76,935,833, 28 cycles after the switch, 14 before the stop); leaf `run-stq-cancel-ptw.sh`; server1 L1 past 76,935,847 on `ooocoh-t38-server1-pgo-build` (owed). A flush-path pointer hazard found on the way (`wp = rp_q` with a same-cycle commit) is fixed and witnessed separately (`run-stq-flush-ptr.sh`, `spec_ptr_consistent`) but was not the trigger |
 
 The L1 run that reached `/init` is the first complete kernel boot on the OoO core: 748 M cycles,
@@ -640,6 +640,16 @@ written on every run regardless of `+rvfi_notrace` — 48 GB per boot, 190 GB ac
 dirs; they are now behind `+core_notrace`; (2) with the oracle fed live through a FIFO the L3 run
 costs no trace storage (a zstd copy is kept, ≈ 9 bytes per retirement) and the model runs at the
 oracle's pace (≈ 27 k cycles/s on the loaded host vs ≈ 37 k free).
+
+Method note for T35/T37: the root cause was reached without an FST. The `+stq_trace` event window
+(pushes/commits/cancels/flushes with cycles) put the stale push 28 cycles after an SMT switch and
+44 cycles after its tid's cancel bit cleared, which named the store unit's `WAIT_TRANSLATION` as
+the only place a store can wait that long; the oracle's three "value from nowhere" loads plus the
+address watch (no store, no forward, no wbuffer write at that PA) excluded every memory-side path
+and left the writeback port; the leaf `tb_g6lc_stq_cancel_ptw` then reproduced the push and the
+writeback in 78 cycles with the pre-fix shape. On the t38 ooo the frozen battery and stages
+38/46–52 are Spike-exact (s11 10,953 cycles, 12 fewer than before: a cancelled store now releases
+the translation port the cycle its cancel is visible).
 
 ### S5 — SMT2 `RVH` (smt2 feature not present)
 
