@@ -1837,9 +1837,14 @@ prerequisite for this work under the existing dual license. No licensing policy 
   T36 model's 10,965: a cancelled store now releases the translation port
   the cycle its cancel is visible; m04/m20/m32–m37, ilp 665, dep 616) and
   stages 38 (55/55), 46 (74 vs 73, the known window artefact), 47
-  (101/101), 48 (82/82), 49 (53/53), 52 (115/115) pass. In flight:
-  `l1s1i` (server1 L1, must pass 76,935,847), `l1fix2` (ooo L1, shell
-  marker), `l3orc2` (ooo L3 with the live oracle — T37's verdict). The
+  (101/101), 48 (82/82), 49 (53/53), 52 (115/115) pass. **System witness
+  landed: `l1s1i` (server1 L1 on the t38 model) is past 84 M cycles with
+  no assertion — through the old 76,935,847 stop, `smp: Bringing up
+  secondary CPUs`, the unaligned-access probe at 0.91 s guest.** The ooo
+  L3 with the live oracle (`l3orc2`) is past retire 255 M with **0 stored
+  mismatches** (the T36 model's first stray value was at retire 163 M);
+  `l1fix2` (ooo L1, shell marker) past 326 M cycles; the 4-core
+  `ooocoh-t38-server-mt4-build` is built and its L1 (`l1r4`) launched. The
   earlier flush-pointer finding stands as a hardening (its leaf
   `run-stq-flush-ptr.sh`, the `spec_ptr_consistent` invariant): the window
   shows it was not the trigger here.
