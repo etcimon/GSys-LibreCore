@@ -1776,7 +1776,12 @@ prerequisite for this work under the existing dual license. No licensing policy 
   (same value as before whenever no commit coincides), plus the invariant
   assertion `spec_ptr_consistent` (`wp − rp ≡ count mod DEPTH`), which
   fires in the flush cycle itself rather than at the later ghost. Lint
-  clean (`g6lc64_ooo`, `g6lc64_ooo_server1`). Build
+  clean (`g6lc64_ooo`, `g6lc64_ooo_server1`). **Leaf**
+  `verif/tb/core/run-stq-flush-ptr.sh` → `tb_g6lc_stq_flush_ptr.sv`
+  (store_buffer in the OoO shape; commit + flush in one cycle, then an
+  arrival): positive 9 checks, `+oracle_negative` fails, the review
+  mutation `G6LC_MUT_STQ_FLUSH_WP_Q` (pre-fix write pointer) fails
+  `STQ_PTR_AGREE` with `cnt=0 rp=1 wp=0` right after the flush cycle. Build
   `ooocoh-t37-server1-pgo-build` (ovl-t37: the fix, the assertion,
   `+core_notrace`) in flight; the verification is the server1 L1 past
   76,935,847 and the 4-core server rebuilt from the same tree. Owed

@@ -45,9 +45,14 @@ module rvfi_tracer #(
   // trace writes (3-6 $fwrite per retired instruction, i.e. ~100 GB and a sizeable share
   // of the host time over a kernel-boot-length run). Default: tracing on (unchanged).
   bit trace_en;
+  // +rvfi_cycle_stamp: append " @<cycle>" to each "core" line so a retirement
+  // named by the program-order oracle (rvfi_memcheck.py, retire index) maps to
+  // a cycle for an FST window. Opt-in: the default line stays spike-dasm-exact.
+  bit cycle_stamp;
   initial begin
     TOHOST_ADDR = '0;
     trace_en = !$test$plusargs("rvfi_notrace");
+    cycle_stamp = $test$plusargs("rvfi_cycle_stamp");
     f = $fopen($sformatf("trace_rvfi_hart_%h.dasm", HART_ID), "w");
     // Default 40M: rv64ui-v-* vm_boot page-table memset on WT-dcache configs
     // needs ~12–18M cycles (run-to-run variance); the historical 2M default
@@ -133,13 +138,15 @@ module rvfi_tracer #(
         end else begin
         // Instruction information
         if (rvfi_i[i].intr[2]) begin
-           $fwrite(f, "core   INTERRUPT 0: 0x%h (0x%h) DASM(%h)\n",
+           $fwrite(f, "core   INTERRUPT 0: 0x%h (0x%h) DASM(%h)",
              pc64, rvfi_i[i].insn, rvfi_i[i].insn);
         end
         else begin
-           $fwrite(f, "core   0: 0x%h (0x%h) DASM(%h)\n",
+           $fwrite(f, "core   0: 0x%h (0x%h) DASM(%h)",
              pc64, rvfi_i[i].insn, rvfi_i[i].insn);
         end
+        if (cycle_stamp) $fwrite(f, " @%0d", cycles);
+        $fwrite(f, "\n");
         // Destination register information
         if (rvfi_i[i].insn[1:0] != 2'b11) begin
           $fwrite(f, "%h 0x%h (0x%h)",

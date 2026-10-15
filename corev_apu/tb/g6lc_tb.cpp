@@ -163,6 +163,9 @@ static const char *verilog_plusargs[] = {
     // 760 M-cycle Linux boot. Independent of +rvfi_notrace so the RVFI trace
     // alone can be kept for the program-order memory oracle.
     "core_notrace",
+    // +rvfi_cycle_stamp (rvfi_tracer.sv): " @<cycle>" on each core line, so a
+    // retirement the memory oracle names maps to an FST window.
+    "rvfi_cycle_stamp",
     // +preload_bytes=<n>: DRAM preload window override (default: the whole 256 MiB
     // model; see the preload loop below). Allowlisted for the same reason.
     "preload_bytes",
