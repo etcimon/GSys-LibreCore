@@ -622,6 +622,25 @@ memory oracle (`verif/regress/rvfi_memcheck.py`, no ISS needed) found the single
 110 M cycles and the FST of that window gave T34's mechanism. The HPDCACHE single core passed the
 ooo's failure points and stopped at 0.6 s on a store-buffer liveness assertion (T35).
 
+#### S4.6 — The kernel boots to `/init`; what is left is the payload and two rarer classes (2026-10-15)
+
+| # | symptom on the boot | mechanism | fix | witness |
+|---|---|---|---|---|
+| T36 | L1 at 2.14 s: store page fault on the init task's VMAP stack in `jent_memaccess`, no PTW error, PTE valid | the MMU evaluated `canonical_addr_check` on the request being looked up (`lsu_vaddr_i`) inside the branch that applies the *previous* request's DTLB result; a wrong-path load with a non-canonical pointer one cycle behind a store faulted the store | check on `lsu_req_q`/`lsu_vaddr_q` | oracle `--walk`/`--watch` (PTE VRWGAD, written once); stage 52 (39 vs 115 → 115/115) |
+| — | L1 at 7.49 s: `Run /init as init process` → `Attempted to kill init! exitcode=0x7f00` | payload: OpenWrt's busybox is dynamic and `libgcc_s.so.1` lives in `/lib`; the initrd script copied it from `/usr/lib` (silently) | `q-linux-payload.sh` copies from `/lib` with a hard check | loader text on the console: `Error loading shared library libgcc_s.so.1 … __bswapdi2` |
+| T37 | L3 at 9.39 s: `kworker/u2:0` oops in `__memset` from `blake2s_final`, store fault at the VMAP-stack guard page | `a2 = 0xffffffd8` = `64 − buflen` with `buflen = 104`: the `lw` of `state->buflen` returned a value never stored (a same-hart store→load mismatch, rarer than T28/T34 — 490 M retirements in) | open — live oracle on the repeated L3 run names the load | `linux-boot-l3orc-…/oracle.log` |
+| T35 | server1 (SMT2) at 0.6 s: speculative-queue entry with a dead scoreboard tid | **candidate:** flush with a same-cycle commit left `wp = rp_q` while `rp_n = rp_q + 1`; the next arrival landed behind the head and the OoO rewrite re-validated the stale head slot (and dropped the arrival). Only SMT flush sources (the forced drain's registered pulse) can coincide with a store commit | `wp_n = rp_n` on flush; `spec_ptr_consistent` invariant | `+stq_trace`/`+smt_sched_trace` window at 76.70–76.94 M (in flight); server1 L1 past 76,935,847 on `ooocoh-t37-server1-pgo-build` |
+
+The L1 run that reached `/init` is the first complete kernel boot on the OoO core: 748 M cycles,
+504 M retired (IPC 0.67 over the boot), 7.49 guest seconds, every initcall through
+`clk: Disabling unused clocks` and `Freeing unused kernel image (initmem)`. The 2.0 → 6.8 s stretch
+is the jitter-entropy init and the deferred probes, not a stall. Two measurement notes: (1) the
+three sim-only per-commit trace files (`trace_hart_0.dasm`, `iti.traces`, `encaps.traces`) were
+written on every run regardless of `+rvfi_notrace` — 48 GB per boot, 190 GB across the T33/T36 run
+dirs; they are now behind `+core_notrace`; (2) with the oracle fed live through a FIFO the L3 run
+costs no trace storage (a zstd copy is kept, ≈ 9 bytes per retirement) and the model runs at the
+oracle's pace (≈ 27 k cycles/s on the loaded host vs ≈ 37 k free).
+
 ### S5 — SMT2 `RVH` (smt2 feature not present)
 
 Package bit + DTS `h` on both threads. Fetch: L4 pass-through only (no fake
