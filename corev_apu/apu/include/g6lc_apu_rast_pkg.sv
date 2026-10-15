@@ -39,7 +39,7 @@ package g6lc_apu_rast_pkg;
     logic [4:0]  src_c;                      // [5:1]  srcColorBlendFactor
     logic        en;                         // [0]    blendEnable
   } apu_rast_blend_t;
-  typedef struct packed { logic [2:0] loc; logic [1:0] binding; logic [7:0] fmt; logic [11:0] offset; logic valid; } apu_rast_attr_t;
+  typedef struct packed { logic [2:0] loc; logic [3:0] binding; logic [7:0] fmt; logic [11:0] offset; logic valid; } apu_rast_attr_t;
   typedef struct packed { logic [31:0] x, y, w, h, minz, maxz; } apu_rast_vp_t;   // f32 bit patterns (VkViewport)
   typedef struct packed {
     apu_rast_op_e      op;
@@ -51,10 +51,10 @@ package g6lc_apu_rast_pkg;
     logic [1:0]        cull;                 // VkCullModeFlags bit0 FRONT bit1 BACK
     logic              front_ccw;            // VK_FRONT_FACE_COUNTER_CLOCKWISE
     apu_rast_attr_t [7:0] attr;
-    logic [3:0][31:0]  vb_base;              // aperture byte base (mem base + bind off + cmd offset)
-    logic [3:0][31:0]  vb_size;              // bytes readable from vb_base (robust: OOB attribute reads as 0)
-    logic [3:0][15:0]  vb_stride;
-    logic [3:0]        vb_rate;              // per-binding inputRate: bit b = INSTANCE (index by inst, not vertex)
+    logic [15:0][31:0] vb_base;              // aperture byte base (mem base + bind off + cmd offset)
+    logic [15:0][31:0] vb_size;              // bytes readable from vb_base (robust: OOB attribute reads as 0)
+    logic [15:0][15:0] vb_stride;
+    logic [15:0]       vb_rate;              // per-binding inputRate: bit b = INSTANCE (index by inst, not vertex)
     logic [31:0]       ib_base, ib_size;
     logic [1:0]        ib_type;              // 0 none (vkCmdDraw), 1 UINT16, 2 UINT32
     apu_rast_vp_t      vp;                   // dynamic viewport (f32)

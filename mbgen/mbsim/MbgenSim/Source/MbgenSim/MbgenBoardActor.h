@@ -2,6 +2,7 @@
 #include "CoreMinimal.h"
 #include "Dom/JsonValue.h"
 #include "GameFramework/Actor.h"
+#include "MbgenNav.h"
 #include "MbgenBoardActor.generated.h"
 
 class UProceduralMeshComponent;
@@ -34,11 +35,16 @@ public:
     void ToggleBottomView();
     bool RunTool(const FString& Args, FString& StdOut);
     bool BoardPlaneUm(const FVector& WorldOrigin, const FVector& WorldDir, int64& OutXUm, int64& OutYUm) const;
-    void PlaceSelectedAtRay(const FVector& WorldOrigin, const FVector& WorldDir);
+    /* bFinal: the mouse-up sample; bypasses the 10 Hz gate so a drag ends under the cursor. */
+    void PlaceSelectedAtRay(const FVector& WorldOrigin, const FVector& WorldDir, bool bFinal = false);
     void NudgeSelectedOnPlane(int32 AlongX, int32 AlongY, bool bFine);
     void TurnSelected();
     bool HitWorldOnBoard(const FVector& WorldOrigin, const FVector& WorldDir, FVector& OutWorld) const;
     bool HitDeskWorld(const FVector& WorldOrigin, const FVector& WorldDir, FVector& OutWorld) const;
+    /* Finite rest plane in world units for the shared nav law (FMbgenNav). */
+    bool NavDeskWorld(FMbgenNavDesk& OutDesk) const;
+    /* Empty-click nav pivot: desk hit inside the pad, else on-ray at the last focus depth. */
+    FVector NavPickPivotWorld(const FVector& WorldOrigin, const FVector& WorldDir, const FVector& LastPivot) const;
     void DropRoleAtRay(const FString& RoleId, const FVector& WorldOrigin, const FVector& WorldDir);
     void DeleteSelected();
     void PaintAnchors();

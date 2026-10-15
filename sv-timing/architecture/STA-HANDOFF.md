@@ -53,6 +53,12 @@ Use **sv-timing** when:
 - Screening multi-file projects before long synth/STA loops.
 - Proposing **InsertReg** / **SplitAssign** candidates with source locations.
 
+The OpenROAD binary for that sign-off report is the monorepo submodule
+`tools/openroad` (fork `etcimon/OpenROAD`, branch `g6lc`), installed by
+`build-platform/scripts/install-openroad-g6lc.sh` and driven by
+`build-platform/scripts/openroad-timing.tcl`. `specs/OpenSTA` stays reference
+material. The package CLI still does not call it.
+
 Open **STA** when:
 
 - You need a **tape-out / sign-off** slack number.

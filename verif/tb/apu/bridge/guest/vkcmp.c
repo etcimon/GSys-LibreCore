@@ -45,13 +45,14 @@ enum {
     S_FS8,    /* fs_scene8   — scene 9    */
     S_VSHF,   /* vs_shadowfog — scene 10 */
     S_FSHF,   /* fs_shadowfog — scene 10 */
+    S_VTEXLOD,/* vs_texlod   — scene 11 */
     S_N
 };
 static const char *spv_dflt[S_N] = {
     "vs_passthru.spv", "fs_color.spv", "vs_pc.spv", "fs_vcol.spv",
     "vs_pos3.spv", "vs_inst.spv", "vs_tex.spv", "fs_mip.spv",
     "vs_clip.spv", "vs_uvc.spv", "fs_deriv2.spv", "fs_scene8.spv",
-    "vs_shadowfog.spv", "fs_shadowfog.spv"};
+    "vs_shadowfog.spv", "fs_shadowfog.spv", "vs_texlod.spv"};
 
 typedef struct {
     uint32_t *w;
@@ -994,25 +995,42 @@ static void scene_f8(vkdev *d, const spv_t *spv, uint8_t *out,
           &o.stage, &o.stagem);
     upload(d, o.stagem, verts2, sizeof(verts2));
     mkbuf(d, NPX * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &o.rb, &o.rbm);
-    VkClearValue clrs[2] = {
-        {{{0.05f, 0.05f, 0.15f, 1.0f}}},
-        {{{0}}}};
-    clrs[1].depthStencil.depth = 1.0f;
-    clrs[1].depthStencil.stencil = 0;
-    frame_begin(d, &o, clrs, 2);
-    vkCmdBindDescriptorSets(o.cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
-                            o.pl, 0, 1, &o.dset, 0, NULL);
-    VkDeviceSize off = 0;
-    vkCmdBindVertexBuffers(o.cb, 0, 1, &o.vb, &off);
-    vkCmdDraw(o.cb, 6, 1, 0, 0);
-    vkCmdBindPipeline(o.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe2);
-    vkCmdBindVertexBuffers(o.cb, 0, 1, &o.stage, &off);
-    vkCmdDraw(o.cb, 3, 1, 0, 0);
-    frame_end(d, &o, out);
-    void *cp;
-    chk(vkMapMemory(d->dev, o.vb2m, 0, 16, 0, &cp), "ctr map");
-    *cnt = *(const uint32_t *)cp;
-    vkUnmapMemory(d->dev, o.vb2m);
+    /* VKCMP_S8_NODRAW: create/destroy all objects but submit no draws —
+       splits a lifecycle leak from an execution leak (scene-9 probe).
+       VKCMP_S8_NODRAW1 skips the first draw (FragDepth/atomic/discard
+       FS), VKCMP_S8_NODRAW2 skips the mid-pass pipeline switch and the
+       second draw. */
+    const int nodraw = getenv("VKCMP_S8_NODRAW") != NULL;
+    const int nodraw1 = getenv("VKCMP_S8_NODRAW1") != NULL;
+    const int nodraw2 = getenv("VKCMP_S8_NODRAW2") != NULL;
+    if (!nodraw && !(nodraw1 && nodraw2)) {
+        VkClearValue clrs[2] = {
+            {{{0.05f, 0.05f, 0.15f, 1.0f}}},
+            {{{0}}}};
+        clrs[1].depthStencil.depth = 1.0f;
+        clrs[1].depthStencil.stencil = 0;
+        frame_begin(d, &o, clrs, 2);
+        vkCmdBindDescriptorSets(o.cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                                o.pl, 0, 1, &o.dset, 0, NULL);
+        VkDeviceSize off = 0;
+        if (!nodraw1) {
+            vkCmdBindVertexBuffers(o.cb, 0, 1, &o.vb, &off);
+            vkCmdDraw(o.cb, 6, 1, 0, 0);
+        }
+        if (!nodraw2) {
+            vkCmdBindPipeline(o.cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pipe2);
+            vkCmdBindVertexBuffers(o.cb, 0, 1, &o.stage, &off);
+            vkCmdDraw(o.cb, 3, 1, 0, 0);
+        }
+        frame_end(d, &o, out);
+        void *cp;
+        chk(vkMapMemory(d->dev, o.vb2m, 0, 16, 0, &cp), "ctr map");
+        *cnt = *(const uint32_t *)cp;
+        vkUnmapMemory(d->dev, o.vb2m);
+    } else {
+        memset(out, 0, NPX * 4);
+        if (cnt) *cnt = 0;
+    }
     /* the device keeps only 8 shader-module slots — release the
        pipeline's refs and the module objects per scene (Venus
        forwards these in-order on the primary ring) */
@@ -1024,6 +1042,142 @@ static void scene_f8(vkdev *d, const spv_t *spv, uint8_t *out,
     vkDestroyShaderModule(d->dev, g2.fs, NULL);
     vkDestroyDescriptorPool(d->dev, o.pool, NULL);
     vkDestroyDescriptorSetLayout(d->dev, o.dsl, NULL);
+}
+
+/* scene 10 (idx 10): vs_texlod — the vertex stage samples a 4x4 texture with
+   textureLod (glslang emits OpImageSampleExplicitLod Lod=0, the same
+   opcode shape as dEQP texture.*_vertex).  Six vertices only, so the
+   draw completes quickly: an end-to-end proof that VS texturing
+   works, separated from the CTS case's ~50k-vertex throughput
+   problem. */
+static void scene_vstex(vkdev *d, const spv_t *spv, uint8_t *out)
+{
+    /* pos.xy | uv — fullscreen quad, uv spans 0..1 */
+    static const float verts[6][4] = {
+        {-1.0f, -1.0f, 0.0f, 0.0f}, { 1.0f,  1.0f, 1.0f, 1.0f},
+        { 1.0f, -1.0f, 1.0f, 0.0f},
+        {-1.0f, -1.0f, 0.0f, 0.0f}, {-1.0f,  1.0f, 0.0f, 1.0f},
+        { 1.0f,  1.0f, 1.0f, 1.0f}};
+    /* 4x4 texels, all distinct (i-major gradient) so a wrong fetch is
+       obvious in the diff */
+    static uint8_t texdata[4 * 4 * 4];
+    for (int j = 0; j < 4; j++)
+        for (int i = 0; i < 4; i++) {
+            uint8_t *t = texdata + (j * 4 + i) * 4;
+            t[0] = (uint8_t)(32 + i * 64);
+            t[1] = (uint8_t)(32 + j * 64);
+            t[2] = (uint8_t)(16 + (i + j) * 28);
+            t[3] = 255;
+        }
+    obj_t o = {0};
+    mkimg(d, VK_FORMAT_R8G8B8A8_UNORM, W, H, 1,
+          VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+          VK_IMAGE_USAGE_TRANSFER_SRC_BIT, &o.cimg, &o.cmem);
+    o.cview = mkview(d, o.cimg, VK_FORMAT_R8G8B8A8_UNORM,
+                     VK_IMAGE_ASPECT_COLOR_BIT, 1);
+    mkimg(d, VK_FORMAT_R8G8B8A8_UNORM, 4, 4, 1,
+          VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT,
+          &o.tex, &o.texm);
+    o.tv = mkview(d, o.tex, VK_FORMAT_R8G8B8A8_UNORM,
+                  VK_IMAGE_ASPECT_COLOR_BIT, 1);
+    VkSamplerCreateInfo sci = {VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO,
+        NULL, 0, VK_FILTER_NEAREST, VK_FILTER_NEAREST,
+        VK_SAMPLER_MIPMAP_MODE_NEAREST,
+        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE,
+        0.0f, VK_FALSE, 1.0f, VK_FALSE, VK_COMPARE_OP_NEVER,
+        0.0f, 0.0f, VK_BORDER_COLOR_FLOAT_TRANSPARENT_BLACK, VK_FALSE};
+    chk(vkCreateSampler(d->dev, &sci, NULL, &o.samp), "sampler");
+    /* the VS sees the sampler — the set stageFlags carry VERTEX */
+    VkDescriptorSetLayoutBinding lb = {
+        0, VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1,
+        VK_SHADER_STAGE_VERTEX_BIT, NULL};
+    VkDescriptorSetLayoutCreateInfo dlci = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, NULL, 0,
+        1, &lb};
+    chk(vkCreateDescriptorSetLayout(d->dev, &dlci, NULL, &o.dsl),
+        "dslayout");
+    VkDescriptorPoolSize psz = {
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 1};
+    VkDescriptorPoolCreateInfo pci = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, NULL, 0, 1,
+        1, &psz};
+    chk(vkCreateDescriptorPool(d->dev, &pci, NULL, &o.pool), "dpool");
+    VkDescriptorSetAllocateInfo dsai = {
+        VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO, NULL, o.pool,
+        1, &o.dsl};
+    chk(vkAllocateDescriptorSets(d->dev, &dsai, &o.dset), "dset alloc");
+    VkDescriptorImageInfo dii = {
+        o.samp, o.tv, VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL};
+    VkWriteDescriptorSet wr = {
+        VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, o.dset, 0, 0, 1,
+        VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, &dii, NULL, NULL};
+    vkUpdateDescriptorSets(d->dev, 1, &wr, 0, NULL);
+    mk_rp_fb(d, &o, VK_FORMAT_R8G8B8A8_UNORM, 0);
+    mk_pl(d, &o, o.dsl);
+    gp_t g = {0};
+    g.vs = mksm(d, &spv[S_VTEXLOD]);  g.fs = mksm(d, &spv[S_FVCOL]);
+    g.binds[0] = (VkVertexInputBindingDescription){
+        0, 16, VK_VERTEX_INPUT_RATE_VERTEX};
+    g.atts[0] = (VkVertexInputAttributeDescription){
+        0, 0, VK_FORMAT_R32G32_SFLOAT, 0};
+    g.atts[1] = (VkVertexInputAttributeDescription){
+        1, 0, VK_FORMAT_R32G32_SFLOAT, 8};
+    g.nbind = 1;  g.natt = 2;
+    g.topo = VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
+    g.wmask = 0xF;  g.layout = o.pl;  g.rp = o.rp;
+    o.pipe = mkgp(d, &g);
+    mkbuf(d, sizeof(verts), VK_BUFFER_USAGE_VERTEX_BUFFER_BIT,
+          &o.vb, &o.vbm);
+    upload(d, o.vbm, verts, sizeof(verts));
+    mkbuf(d, sizeof(texdata), VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+          &o.stage, &o.stagem);
+    upload(d, o.stagem, texdata, sizeof(texdata));
+    mkbuf(d, NPX * 4, VK_BUFFER_USAGE_TRANSFER_DST_BIT, &o.rb, &o.rbm);
+    /* texture upload in its own submission so a stall localizes */
+    VkCommandBufferAllocateInfo cbai = {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO, NULL, d->cpool,
+        VK_COMMAND_BUFFER_LEVEL_PRIMARY, 1};
+    chk(vkAllocateCommandBuffers(d->dev, &cbai, &o.cb), "cmdbuf");
+    VkCommandBufferBeginInfo bbi = {
+        VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO, NULL,
+        VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT, NULL};
+    chk(vkBeginCommandBuffer(o.cb, &bbi), "begin cb");
+    barrier_img(o.cb, o.tex, VK_IMAGE_ASPECT_COLOR_BIT, 1,
+                VK_IMAGE_LAYOUT_UNDEFINED,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 0,
+                VK_ACCESS_TRANSFER_WRITE_BIT,
+                VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT);
+    VkBufferImageCopy reg = {0, 0, 0,
+        {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {0, 0, 0}, {4, 4, 1}};
+    vkCmdCopyBufferToImage(o.cb, o.stage, o.tex,
+                           VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                           1, &reg);
+    barrier_img(o.cb, o.tex, VK_IMAGE_ASPECT_COLOR_BIT, 1,
+                VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL,
+                VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL,
+                VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_SHADER_READ_BIT,
+                VK_PIPELINE_STAGE_TRANSFER_BIT,
+                VK_PIPELINE_STAGE_VERTEX_SHADER_BIT);
+    vkEndCommandBuffer(o.cb);
+    submit_cb(d, o.cb);
+    VkClearValue clr = {{{0.0f, 0.0f, 0.0f, 1.0f}}};
+    frame_begin(d, &o, &clr, 1);
+    vkCmdBindDescriptorSets(o.cb, VK_PIPELINE_BIND_POINT_GRAPHICS,
+                            o.pl, 0, 1, &o.dset, 0, NULL);
+    VkDeviceSize off = 0;
+    vkCmdBindVertexBuffers(o.cb, 0, 1, &o.vb, &off);
+    vkCmdDraw(o.cb, 6, 1, 0, 0);
+    frame_end(d, &o, out);
+    /* release per-scene refs (8 shader-module slots) */
+    vkDestroyPipeline(d->dev, o.pipe, NULL);
+    vkDestroyShaderModule(d->dev, g.vs, NULL);
+    vkDestroyShaderModule(d->dev, g.fs, NULL);
+    vkDestroyDescriptorPool(d->dev, o.pool, NULL);
+    vkDestroyDescriptorSetLayout(d->dev, o.dsl, NULL);
+    vkDestroySampler(d->dev, o.samp, NULL);
 }
 
 /* scene 10: f10_shadow_fog — a shadow-mapped lit quad.
@@ -1419,7 +1573,7 @@ int main(int argc, char **argv)
     }
 
     /* name, tolerance (LSB), budget (fraction of NPX) */
-    struct { const char *name; int tol; float budget; } sc[10] = {
+    struct { const char *name; int tol; float budget; } sc[11] = {
         {"tri_gradient",       2, 0.005f},
         {"depth_less",         2, 0.005f},
         {"blend_layers",       2, 0.010f},
@@ -1430,12 +1584,13 @@ int main(int argc, char **argv)
         {"derivs",             2, 0.010f},
         {"f8_latez_atomic",    2, 0.030f},
         {"f10_shadow_fog",     4, 0.050f},
+        {"vs_texlod",          4, 0.050f},
     };
     static uint8_t va[NPX * 4], la[NPX * 4];
     /* VKCMP_ONLY: single index or comma list ("8,9") */
     const char *only = getenv("VKCMP_ONLY");
     int npass = 0, nrun = 0;
-    for (int k = 0; k < 10; k++) {
+    for (int k = 0; k < 11; k++) {
         if (only) {
             const char *p = only;
             int hit = 0;
@@ -1464,6 +1619,7 @@ int main(int argc, char **argv)
         case 7: scene_derivs(&venus, spv, va); break;
         case 8: scene_f8(&venus, spv, va, &cv); break;
         case 9: scene_shadowfog(&venus, spv, va); break;
+        case 10: scene_vstex(&venus, spv, va); break;
         }
         double t1 = wall();
         printf("SCENE %d llvmpipe...\n", k);
@@ -1481,6 +1637,7 @@ int main(int argc, char **argv)
         case 7: scene_derivs(&lava, spv, la); break;
         case 8: scene_f8(&lava, spv, la, &cl); break;
         case 9: scene_shadowfog(&lava, spv, la); break;
+        case 10: scene_vstex(&lava, spv, la); break;
         }
         double t2 = wall();
         if (getenv("VKCMP_DUMP")) {

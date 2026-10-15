@@ -68,7 +68,7 @@ void AMbgenPlayerController::OrbitPressed()
     bOrbit = true;
     bOrbitMoved = false;
     OrbitDownPos = FSlateApplication::Get().GetCursorPos();
-    FVector Origin, Dir, Hit;
+    FVector Origin, Dir;
     AMbgenOrbitPawn* Orbit = Cast<AMbgenOrbitPawn>(GetPawn());
     if (!Orbit) { return; }
     if (DeprojectMousePositionToWorld(Origin, Dir))
@@ -83,9 +83,11 @@ void AMbgenPlayerController::OrbitPressed()
             }
             Orbit->OrbitAbout(Trace.ImpactPoint);
         }
-        else if (AMbgenBoardActor* B = Board(); B && B->HitDeskWorld(Origin, Dir, Hit))
+        else if (AMbgenBoardActor* B = Board())
         {
-            Orbit->OrbitAbout(Hit);
+            // Same law as the editor viewport: desk hit inside the pad, else
+            // a point on the cursor ray at the last focus depth. Never the rim.
+            Orbit->OrbitAbout(B->NavPickPivotWorld(Origin, Dir, Orbit->Pivot()));
         }
     }
 }
@@ -103,7 +105,7 @@ void AMbgenPlayerController::ZoomToward(float Notches)
 {
     AMbgenOrbitPawn* Orbit = Cast<AMbgenOrbitPawn>(GetPawn());
     if (!Orbit) { return; }
-    FVector Origin, Dir, Hit;
+    FVector Origin, Dir;
     if (DeprojectMousePositionToWorld(Origin, Dir))
     {
         FHitResult Trace;
@@ -112,9 +114,9 @@ void AMbgenPlayerController::ZoomToward(float Notches)
             Orbit->AddZoomToward(Trace.ImpactPoint, Notches);
             return;
         }
-        if (AMbgenBoardActor* B = Board(); B && B->HitDeskWorld(Origin, Dir, Hit))
+        if (AMbgenBoardActor* B = Board())
         {
-            Orbit->AddZoomToward(Hit, Notches);
+            Orbit->AddZoomToward(B->NavPickPivotWorld(Origin, Dir, Orbit->Pivot()), Notches);
             return;
         }
     }
@@ -151,7 +153,13 @@ void AMbgenPlayerController::PlaceReleased()
     }
     if (bWasPlace)
     {
-        if (AMbgenBoardActor* B = Board()) { B->FinishPlaceDrag(); }
+        if (AMbgenBoardActor* B = Board())
+        {
+            // Flush the release sample past the 10 Hz gate, then rebuild once.
+            FVector Origin, Dir;
+            if (DeprojectMousePositionToWorld(Origin, Dir)) { B->PlaceSelectedAtRay(Origin, Dir, true); }
+            B->FinishPlaceDrag();
+        }
     }
 }
 void AMbgenPlayerController::DeletePressed() { if (AMbgenBoardActor* B = Board()) { B->DeleteSelected(); } }
@@ -217,6 +225,14 @@ void AMbgenPlayerController::SelectUnderCursor()
     if (!GetHitResultUnderCursor(ECC_Visibility, false, Hit))
     {
         bLookDrag = true;
+        // Look-in-place keeps the camera; the pivot moves to the pick so a
+        // following orbit/wheel is about what the user clicked, not stale.
+        FVector Origin, Dir;
+        AMbgenOrbitPawn* Orbit = Cast<AMbgenOrbitPawn>(GetPawn());
+        if (Orbit && DeprojectMousePositionToWorld(Origin, Dir))
+        {
+            if (AMbgenBoardActor* B = Board()) { Orbit->SetPivot(B->NavPickPivotWorld(Origin, Dir, Orbit->Pivot())); }
+        }
         return;
     }
     if (UPrimitiveComponent* Prim = Hit.GetComponent())

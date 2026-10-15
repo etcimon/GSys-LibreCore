@@ -446,6 +446,15 @@ export function generateBoardPackage(spec: BoardSpec): string {
     if (i.phy) lines.push(`  localparam string MbIf_${tok}_Phy = "${i.phy.replace(/"/g, "'")}";`);
   }
   lines.push("");
+  const gaps = (spec as BoardSpec & { gaps?: { id?: string; role?: string }[] }).gaps;
+  if (Array.isArray(gaps) && gaps.length > 0) {
+    lines.push("  // --- Deferred features recorded by mb ingest. Not instances. ---");
+    for (const g of gaps) {
+      const id = g.id || g.role || "gap";
+      lines.push(`  localparam bit MbGap_${toUpper(String(id))} = 1'b1;`);
+    }
+    lines.push("");
+  }
   const ai = resolveAiBoard(spec);
   if (ai) {
     lines.push(generateAiBoardPackageParams(ai));
@@ -676,13 +685,13 @@ export async function scaffoldBoard(
     created.push(paths.specFile);
   }
   if (spec.skidl === "custom" && !existsSync(paths.designFile)) {
-    await writeFile(paths.designFile, starterDesignPy(boardid), "utf8");
+    await writeFile(paths.designFile, customDesignPy(boardid), "utf8");
     created.push(paths.designFile);
   }
   return { created, spec, dryRun: false };
 }
 
-function starterDesignPy(boardid: string): string {
+export function customDesignPy(boardid: string): string {
   return [
     "# Copyright (c) 2026 Etienne Cimon",
     "# SPDX-License-Identifier: MIT",

@@ -442,6 +442,46 @@ DRAM with on-chip caches.
   max_concurrent}.*`, `api.command_buffers.*`, `api.descriptor_pool.*`,
   `api.descriptor_set.*`, `api.pipeline.*` (CTS-1), plus the G2c guest scenes unchanged.
   Synthesis screens as always (Enable=0 inert; Enable=1 cells/FFs/latches vs today).
+- **Implementation decisions (2026-10-15), staged G3b-i/ii/iii.**
+  - *Backing store.* There is no DRAM the device owns outside the SHM aperture
+    (`APU_SHM_BASE` = `0x8200_0000`, a `reserved-memory` carve of the guest's low DRAM bank
+    that the bridge and the g6lc_qemu FDT derive from the constant). `objmem` and PayMem
+    therefore live in the aperture: `APU_SHM_BYTES` grows 32 → **128 MiB**; the vgpages bitmap
+    keeps managing only the first 32 MiB (24 MiB guest-visible + 8 MiB `ALLOC_PRIV` arena —
+    `APU_VG_MANAGED_BYTES`, new, replaces the derived `SHM_BYTES/PAGES` page size so the
+    bitmap does not grow); the upper 96 MiB is a **static carve**: `objmem` (entries
+    `ObjEntries × 64 B` + directory `2·ObjEntries × 8 B`; 1.25 MiB at 2¹⁶) then PayMem
+    (`PayMemBytes`, default 16 MiB), both as `ApuCfg`/vgtop parameters with `check_cfg`
+    asserting the carve fits. `SHM_LEN` published to the guest stays 24 MiB. On a real SoC the
+    same constants name the APU's DRAM carve-out. `APU_VG_AP_WORD_W` widens with the aperture.
+  - *Handles and parking stay as they are.* `{gen[15:0], slot[15:0]}` already carries a
+    16-bit index, so `ObjEntries` is legal in 2⁸…2¹⁶ (not 2²⁰ as first written) and
+    `apu_objtab_entry_t` does not change. Payload parking keeps `aux[63:32] = {base[15:0],
+    words[15:0]}` with **`base` in 64-word chunk units** (`PayChunkWords = 64`): 2¹⁶ chunks ×
+    256 B = the 16 MiB PayMem; `words ≤ 65 535` (256 KiB per payload — BOUNDS at ALLOC
+    otherwise; shader modules and command buffers get their own length words in PayMem in
+    G3b-ii/iii). The `op_*` request/completion types already carry 32-bit `addr/base/words`,
+    so the only client change is the `<< 6` at the un-parking sites in vnfront/cmdexec.
+  - *Caches.* Directory cache `DirCacheSets × 4` (default 256 × 4, `{id[63:0], entry[15:0]}`,
+    Fibonacci hash of the id), entry cache `EntCacheLines × 64 B` (default 64, write-back),
+    payload cache `PayCacheLines × 64 B` (default 32, write-back), per-kind free stacks in
+    `objmem` with a 32-entry SRAM top. All through one new `apu_mp` requester each on the
+    aperture domain (dom=1), arbitrated by `apmem` like the existing engines. Write-back
+    points exactly as listed under *Ordering and lifetime*; a directory-cache hit never
+    completes a LOOKUP without the entry's `live/kind/gen` check.
+  - *Stages.* **G3b-i** ObjTab-V + PayMem (ObjPay-V) behind the unchanged `ot_*`/`op_*` ports,
+    the aperture growth, `RESET_CTX` by `ctx_next` walk; acceptance `api.object_management.
+    {single,multiple_*,max_concurrent}.*` for every kind that is not a shader module,
+    pipeline or command buffer, `api.device_init.create_multiple_devices.*` (API-X4: find
+    the actual limiter — contexts, queues or objects — and lift it through this mechanism,
+    never by a bare constant). **G3b-ii** shader modules in PayMem with the scanned image, the
+    `ShaderSlots` LRU residency cache (`sm_*` FILL/BUSY), pipelines keyed by {module entry,
+    spec data}; acceptance `max_concurrent.{shader_module,*pipeline*}`, `api.pipeline.*`,
+    `compute.basic.*`. **G3b-iii** command buffers as PayMem chunk lists with the record
+    prefetch FIFO, secondary command buffers (`EXECUTE`), pool reset/trim, descriptor-pool
+    free list (`FREE_DESCRIPTOR_SET_BIT`), `DispatchIndirect`/`DispatchBase`; acceptance
+    `api.command_buffers.*`, `api.descriptor_pool.*`, `api.descriptor_set.*`,
+    `compute.indirect_dispatch.*`, `compute.device_group.*` (dispatch base).
 
 ### 4b. Reply builder `g6lc_apu_vnrep` (interface of record, increment 3)
 

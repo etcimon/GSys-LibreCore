@@ -28,6 +28,7 @@ const VALUE_FLAGS = new Set([
   "profile",
   // motherboard (`mb`) flow
   "board",
+  "from",
   "add",
   "query",
   "phy",
@@ -38,6 +39,7 @@ const VALUE_FLAGS = new Set([
   "core",
   "xlen",
   "tool",
+  "kind",
   // technology optimization (`tech`) flow
   "tech",
   "pdk",

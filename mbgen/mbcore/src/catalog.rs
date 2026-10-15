@@ -1,7 +1,14 @@
 //! Config packages the processor window may offer, and the vendor row each
 //! role asks for. A package is the unit of choice. Bits are not toggled here.
+//!
+//! Package facts are **not typed here**: they are a view over the generated
+//! `CoreProfile`s (`profile.rs`, `mbcore/data/profiles.json`), which are read
+//! from `core/include/*_config_pkg.sv`. Only qualified profiles are offered.
+
+use std::sync::OnceLock;
 
 use crate::pack::PackError;
+use crate::profile::{profiles, CoreProfile};
 use crate::template::{role, Design, Placement, Port};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -17,50 +24,59 @@ pub struct PackageCard {
     pub l3: bool,
     pub ai: bool,
     pub axi_bits: u32,
+    /// Preview-only decap-count heuristic. Not a measured current and never a
+    /// production decoupling input (a rail plan comes from part requirements).
     pub core_ua: i64,
+    /// The generated profile this card projects.
+    pub profile: &'static CoreProfile,
 }
 
+/// Qualified profiles, as cards, in profile order.
 pub fn packages() -> &'static [PackageCard] {
-    &PACKAGES
+    static CACHE: OnceLock<Vec<PackageCard>> = OnceLock::new();
+    CACHE.get_or_init(|| profiles().iter().filter(|p| p.is_qualified()).map(card).collect())
 }
 
 pub fn package(id: &str) -> Option<&'static PackageCard> {
-    PACKAGES.iter().find(|p| p.id == id)
+    packages().iter().find(|p| p.id == id)
 }
 
-const PACKAGES: &[PackageCard] = &[
-    card("cv64a6_imafdc_sv39", "baseline", "rv64imafdc", 64, 1, 1, false, false, false, false, 64, 250_000),
-    card("g6lc64_ai", "ai", "rv64imafdc", 64, 1, 1, false, false, false, true, 64, 2_000_000),
-    card("g6lc64_smt2_ai", "ai", "rv64imafdc", 64, 1, 2, false, false, false, true, 64, 2_000_000),
-    card("g6lc64_smt2", "smt", "rv64imafdc", 64, 1, 2, false, true, false, false, 64, 400_000),
-    card("g6lc64_smt2_l3", "smt", "rv64imafdc", 64, 1, 2, false, true, true, false, 64, 500_000),
-    card("g6lc64_ooo_int", "ooo", "rv64imac", 64, 1, 1, true, true, false, false, 64, 400_000),
-    card("g6lc64_ooo_int2", "ooo", "rv64imac", 64, 2, 1, true, true, false, false, 64, 700_000),
-    card("g6lc64_ooo_int2_l3", "ooo", "rv64imac", 64, 2, 1, true, true, true, false, 64, 800_000),
-    card("g6lc64_smt2_ooo_int", "ooo", "rv64imac", 64, 1, 2, true, true, false, false, 64, 500_000),
-    card("g6lc64_ooo_server", "ooo", "rv64imac", 64, 4, 1, true, true, true, false, 64, 1_200_000),
-    card("g6lc64_stream8", "stream", "rv64imafdc", 64, 1, 1, false, true, false, false, 128, 400_000),
-    card("g6lc64_stream8_l3", "stream", "rv64imafdc", 64, 1, 1, false, true, true, false, 128, 500_000),
-    card("g6lc64_server_math", "server", "rv64imafdc", 64, 1, 1, false, true, false, false, 64, 400_000),
-    card("g6lc64_server_math_l3", "server", "rv64imafdc", 64, 1, 1, false, true, true, false, 64, 500_000),
-    card("g6lc64_server_math_v", "server", "rv64imafdcv", 64, 1, 1, false, true, false, false, 64, 600_000),
-];
+fn card(p: &'static CoreProfile) -> PackageCard {
+    PackageCard {
+        id: &p.id,
+        group: &p.group,
+        isa: &p.isa,
+        xlen: p.xlen,
+        cores: p.cores,
+        threads: p.threads,
+        ooo: p.ooo,
+        l2: p.l2,
+        l3: p.l3,
+        ai: p.ai,
+        axi_bits: p.axi_bits,
+        core_ua: preview_decap_heuristic_ua(p),
+        profile: p,
+    }
+}
 
-const fn card(
-    id: &'static str,
-    group: &'static str,
-    isa: &'static str,
-    xlen: u32,
-    cores: u32,
-    threads: u32,
-    ooo: bool,
-    l2: bool,
-    l3: bool,
-    ai: bool,
-    axi_bits: u32,
-    core_ua: i64,
-) -> PackageCard {
-    PackageCard { id, group, isa, xlen, cores, threads, ooo, l2, l3, ai, axi_bits, core_ua }
+/// Preview decap budget. Scales with what the profile has, so a profile that
+/// appears on disk tomorrow gets a sensible preview without a table edit. It
+/// is labelled as a heuristic everywhere it is consumed.
+fn preview_decap_heuristic_ua(p: &CoreProfile) -> i64 {
+    let mut ua: i64 = 250_000 * i64::from(p.cores.max(1)) * i64::from(p.threads.max(1)).min(2);
+    if p.l2 {
+        ua += 100_000;
+    }
+    if p.l3 {
+        ua += 100_000;
+    }
+    if p.ooo {
+        ua += 100_000;
+    }
+    if p.ai {
+        ua += 1_000_000;
+    }
+    ua
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

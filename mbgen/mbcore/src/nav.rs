@@ -174,6 +174,39 @@ pub fn orbit_around(pivot: Vec3, cam: Vec3, yaw_deg: f64, pitch_deg: f64) -> Vec
     pivot.sub(f.scale(dist))
 }
 
+/// Where the ray meets the rest plane, if it does so in front of the camera.
+fn plane_hit(desk: Desk, origin: Vec3, dir: Vec3) -> Option<Vec3> {
+    let d = dir.norm();
+    if d.z.abs() <= 1e-8 {
+        return None;
+    }
+    let t = (desk.z - origin.z) / d.z;
+    if t <= 0.0 {
+        return None;
+    }
+    Some(origin.add(d.scale(t)))
+}
+
+fn inside_desk(desk: Desk, p: Vec3) -> bool {
+    p.x >= desk.cx - desk.hx && p.x <= desk.cx + desk.hx && p.y >= desk.cy - desk.hy && p.y <= desk.cy + desk.hy
+}
+
+/// Orbit / dolly pivot for an empty click. Never a clamped rim corner.
+///
+/// 1. The cursor ray meets the rest plane inside the finite desk: that hit.
+/// 2. Otherwise a point **on the cursor ray** at the last useful focus depth
+///    (`|last - cam|`, clamped to the navigation distance range), so the pivot
+///    stays under the cursor instead of jumping to the desk edge.
+pub fn pick_nav_pivot(desk: Desk, cam: Vec3, dir: Vec3, last: Vec3) -> Vec3 {
+    if let Some(p) = plane_hit(desk, cam, dir) {
+        if inside_desk(desk, p) {
+            return p;
+        }
+    }
+    let depth = last.sub(cam).length().clamp(MIN_DIST, MAX_DIST);
+    cam.add(dir.norm().scale(depth))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -259,6 +292,48 @@ mod tests {
         let (next_cam, _) = look_in_place_pose(cam, hit.sub(cam).norm(), 20.0, -12.0);
         assert!(almost_vec(next_cam, cam, 1e-9));
         assert!(almost(next_cam.sub(hit).length(), d_hit, 1e-9));
+    }
+
+    #[test]
+    fn empty_click_off_the_pad_never_lands_on_a_rim_corner() {
+        // Recorded navdiag is in world centimetres: the 17 cm board at 20x is 340,
+        // centre 170, desk 1.5x => corners at -85 / 425 (cursor_desk in the log).
+        let desk = desk_from_board(340.0, 340.0, 0.0);
+        let cam = Vec3::new(392.6, 1.0, 185.2);
+        let last = Vec3::new(170.0, 170.0, 1.6);
+        // The recorded cursor ray that produced cursor_desk = (-85, 425, 0).
+        let far = Vec3::new(-85.0, 425.0, 0.0);
+        let dir = Vec3::new(-700.0, 900.0, -20.0).norm();
+        let clamped = hit_desk(desk, cam, dir);
+        assert!(almost_vec(clamped, far, 1e-6), "fixture must reproduce the rim clamp {clamped:?}");
+        let pivot = pick_nav_pivot(desk, cam, dir, last);
+        assert!(!almost_vec(pivot, far, 1e-6), "pivot still clamps to the rim corner");
+        let along = pivot.sub(cam).norm().dot(dir);
+        assert!(almost(along, 1.0, 1e-9), "pivot left the cursor ray");
+        assert!(almost(pivot.sub(cam).length(), last.sub(cam).length(), 1e-6));
+    }
+
+    #[test]
+    fn empty_click_on_the_pad_uses_the_plane_hit() {
+        let desk = desk_from_board(340.0, 340.0, 0.0);
+        let cam = Vec3::new(392.6, 1.0, 185.2);
+        let target = Vec3::new(120.0, 140.0, 0.0);
+        let dir = target.sub(cam).norm();
+        let pivot = pick_nav_pivot(desk, cam, dir, Vec3::new(0.0, 0.0, 0.0));
+        assert!(almost_vec(pivot, target, 1e-6));
+    }
+
+    #[test]
+    fn a_ray_that_misses_the_plane_keeps_the_focus_depth() {
+        let desk = desk_from_board(340.0, 340.0, 0.0);
+        let cam = Vec3::new(392.6, 1.0, 185.2);
+        let last = Vec3::new(170.0, 170.0, 1.6);
+        let up = Vec3::new(-0.5, 0.2, 0.9).norm();
+        let pivot = pick_nav_pivot(desk, cam, up, last);
+        assert!(almost(pivot.sub(cam).length(), last.sub(cam).length(), 1e-6));
+        assert!(pivot.sub(cam).length() <= MAX_DIST);
+        let parallel = pick_nav_pivot(desk, cam, Vec3::new(1.0, 0.0, 0.0), last);
+        assert!(almost(parallel.sub(cam).length(), last.sub(cam).length(), 1e-6));
     }
 
     #[test]

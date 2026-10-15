@@ -13,9 +13,13 @@ cargo rustc -p mbcore_c -- -C panic=abort
 
 Incremental `Access is denied (os error 5)` under `target/debug/incremental` is expected while Unreal holds `mbcore_c.dll`. Stop `UnrealEditor` whose command line contains `MbgenSim.uproject` before relinking the DLL or running UBT.
 
-Last recorded `cargo test --workspace`: 72 mbcore + 7 mbcore_c + 21 mbcompiler (counts drift). Nav: `cargo test -p mbcore --lib nav`. Dual-source: `cargo test -p mbcompiler catia` / `navdiag`.
+Last recorded `cargo test --workspace`: 89 mbcore + 9 mbcore_c + 23 mbcompiler (counts drift). Nav: `cargo test -p mbcore --lib nav`. Dual-source: `cargo test -p mbcompiler catia` / `navdiag`. Profiles vs `core/include`: `cargo test -p mbcore committed_profiles_agree_with_core_include` (skips in a standalone checkout).
 
-CLI: `preview`, `compile`, `scene`, `anchors`, `library`, `package`, `build`, `open`, `mini-itx`, `textures`. `mbgen open` prefers a path containing `UE_5.8` (test `open_prefers_ue_5_8_over_5_4`). Missing-editor help says Engine 5.8.
+CLI: `preview`, `compile`, `scene`, `anchors`, `library`, `profiles`, `package`, `build`, `open`, `mini-itx`, `textures`. `mbgen open` prefers a path containing `UE_5.8` (test `open_prefers_ue_5_8_over_5_4`). Missing-editor help says Engine 5.8.
+
+`mbgen profiles --core-include ../core/include --out mbcore/data/profiles.json` regenerates the processor profiles from the SystemVerilog config packages (reads `config_pkg.sv` for shared constants). Run it after any `core/include/*_config_pkg.sv` change; the mbcore test above fails until the committed file matches. Unresolved fields are printed and keep that profile out of the processor window.
+
+`mbcore_c` ABI is versioned (`MBCORE_C_ABI_VERSION`, `mb_abi_version()`). The Unreal nav helper (`MbgenNav.cpp`) binds `mb_nav_*`; an older DLL logs `mbgen nav=local (reduced …)` — rebuild the DLL (editor stopped) and relaunch.
 
 `mbgen textures --design FILE --out DIR` writes only `T_SolderMask` / `T_SolderData` / `T_SolderNormal` from live `scene()` AABBs.
 
@@ -35,6 +39,7 @@ Launch:
 Ready markers (log):
 
 - `mbgen dll=mbcore_c`
+- `mbgen nav=mbcore_c`
 - `mbgen PBR materials ready`
 - `mbgen frame` (Mini-ITX: `170 170 2`)
 - `mbgen product sections=22`

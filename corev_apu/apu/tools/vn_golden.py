@@ -1969,7 +1969,7 @@ class FrontModel:
         attachmentCount + per-attachment
         {en,srcC,dstC,opC,srcA,dstA,opA,mask} + blendConstants(4w),
         pDynamicState presence + count + ids, layout id).  Success
-        allocs the object, parks the 22-word ObjPay state block and
+        allocs the object, parks the 34-word ObjPay state block and
         sets aux = {pay_base[31:16], gfx[6], fs[5:3], vs[2:0]} +
         {layout gen,slot} in the hi word.  -> True on success; on
         failure the first error is latched into out['result']."""
@@ -1994,12 +1994,12 @@ class FrontModel:
         if nx() == 0:                        # pVertexInputState
             return fail()
         nb = nx()
-        if nb == 0 or nb > 4:
+        if nb == 0 or nb > 16:
             return fail()
         bnds = []
         for _i in range(nb):
             b, stw, rate = nx(), nx(), nx()
-            if b > 3 or rate > 1:            # G2a: INSTANCE rate ok
+            if b > 15 or rate > 1:           # G2a: INSTANCE rate ok
                 return fail()
             bnds.append((b, stw, rate))
         na = nx()
@@ -2008,7 +2008,7 @@ class FrontModel:
         atrs = []
         for _i in range(na):
             loc, b, fmt, off = nx(), nx(), nx(), nx()
-            if loc > 7 or b > 3 or off > 2047 or fmt not in (
+            if loc > 7 or b > 15 or off > 2047 or fmt not in (
                     37, 100, 103, 106, 109):
                 return fail()
             atrs.append((loc, b, fmt, off))
@@ -2070,6 +2070,7 @@ class FrontModel:
         # StGpShk: VS commit em==VERTEX, FS commit em==FRAGMENT, refs
         refs = []
         vs = fs = fsm = None
+        fdep = flate = 0
         for em, mod in ((0, m0), (4, m1)):
             mst, _ms, me = self.resolve(mod, KIND['VkShaderModule'])
             sc = None
@@ -2086,27 +2087,30 @@ class FrontModel:
             else:
                 fs = me['aux'] & 7
                 fsm = sc.in_mask
+                fdep = 1 if sc.wr_fdepth else 0
+                flate = 1 if (sc.wr_fdepth or sc.has_kill) else 0
         lst, ls, le = self.resolve(lid, KIND['VkPipelineLayout'])
         if lst != 'OK':
             for sl in reversed(refs):
                 self.sm_unref(sl)
             return fail()
-        pbase = self.pay_alloc(22)
+        pbase = self.pay_alloc(34)
         st, h, s = (0, 0, 0)
         if pbase is not None:
             st, h, s = self.alloc(idv, KIND['VkPipeline'], par)
         if pbase is None or st != 'OK':
             if pbase is not None:
-                self.pay_free(pbase, 22)
+                self.pay_free(pbase, 34)
             for sl in reversed(refs):
                 self.sm_unref(sl)
             return fail()
         # word0 bit1 is the semantic front_ccw flag (1 = CCW); the
         # staged keep word is the raw VkFrontFace enum (CCW=0, CW=1)
         words = [((fsm & 0xFF) << 24) | ((topo & 0xFF) << 16) |
-                 ((na & 0xF) << 12) | ((nb & 0xF) << 8) |
+                 ((na & 0xF) << 12) | ((nb & 0x1F) << 7) |
+                 (fdep << 5) | (flate << 4) |
                  ((cull & 3) << 2) | (((ff & 1) ^ 1) << 1) | 1]
-        for i in range(4):
+        for i in range(16):
             if i < nb:
                 b, stw, rate = bnds[i]
                 words.append(((rate & 1) << 21) | (1 << 20) |
@@ -2120,7 +2124,7 @@ class FrontModel:
                              (fmt << 12) | (off & 0xFFF))
             else:
                 words.append(0)
-        # w13: {natt[14:12], sten[8]=0, dcmp[6:4], bcdyn[2], dwr[1],
+        # w25: {natt[14:12], sten[8]=0, dcmp[6:4], bcdyn[2], dwr[1],
         #       dte[0]}
         words.append(((natt & 7) << 12) | ((dcmp & 7) << 4) |
                      (bcdyn << 2) | (dwr << 1) | dte)
@@ -2592,7 +2596,7 @@ class FrontModel:
         dset = [0] * 4
         # G1c: draw-state mirror — vertex-buffer handles, index
         # buffer, active color attachment
-        vbs = [0] * 4
+        vbs = [0] * 16
         ib = 0
         ca_ok = False
         # G1c: work-port sequence incl. internal render-pass CLEAR
@@ -2711,9 +2715,9 @@ class FrontModel:
                     # the shared buffer-operand resolver; indexed
                     # draws resolve the index buffer the same way
                     pb = (pe['aux'] >> 16) & 0xFFFF
-                    for b in range(4):
+                    for b in range(16):
                         bw = self.pay.get(pb + 1 + b, 0)
-                        bnd = (bw >> 16) & 3
+                        bnd = (bw >> 16) & 0xF
                         if (bw >> 20) & 1 and vbs[bnd] and \
                                 self._xfer_extent(
                                     vbs[bnd], KIND['VkBuffer']) is None:
@@ -2808,7 +2812,7 @@ class FrontModel:
                 abase = r['imm'][7] & 0xFFFF
                 fbnd = r['imm'][0] & 0xFFFF
                 nbind = r['imm'][1] & 0xFFFF
-                for i in range(min(nbind, 4 - fbnd)):
+                for i in range(min(nbind, 16 - fbnd)):
                     vbs[fbnd + i] = self.pay_arena[aux].get(
                         abase + i, 0)
             elif ct == T.get('vkCmdBindIndexBuffer', -1):
@@ -2847,10 +2851,10 @@ class FrontModel:
                 if e['kind'] == KIND['VkPipeline'] and \
                         (e['aux'] >> 6) & 1:
                     # G1c/G2a: a graphics pipeline drops the FS ref
-                    # too and frees the 22-word ObjPay block at
+                    # too and frees the 34-word ObjPay block at
                     # aux[31:16]
                     self.sm_unref((e['aux'] >> 3) & 7)
-                    self.pay_free((e['aux'] >> 16) & 0xFFFF, 22)
+                    self.pay_free((e['aux'] >> 16) & 0xFFFF, 34)
             elif e['kind'] == KIND['VkDeviceMemory']:
                 # §12.3 C: an unbacked extent frees nothing
                 if (e['aux'] >> 32) & 0xFFFFFFFF != UNBACKED:
@@ -3767,10 +3771,10 @@ class FrontModel:
                     self.sm_unref(aux_full & 7)
                     if (aux_full >> 6) & 1:
                         # G1c/G2a: graphics pipeline — drop the FS ref
-                        # and free the 22-word ObjPay block at
+                        # and free the 34-word ObjPay block at
                         # aux[31:16]
                         self.sm_unref((aux_full >> 3) & 7)
-                        self.pay_free((aux_full >> 16) & 0xFFFF, 22)
+                        self.pay_free((aux_full >> 16) & 0xFFFF, 34)
                 elif obj_kind == KIND['VkDeviceMemory']:
                     # §12.3 C: an unbacked memory frees nothing
                     if (aux_full >> 32) & 0xFFFFFFFF != UNBACKED:
@@ -3885,7 +3889,8 @@ class FrontModel:
                         (ct == session['T']['vkCmdPushConstants']
                          and rec['imm'][2] > 128) or \
                         (ct == session['T'].get('vkCmdBindVertexBuffers')
-                         and rec['imm'][1] > 4):
+                         and (rec['imm'][0] & 0xFFFF) +
+                             (rec['imm'][1] & 0xFFFF) > 16):
                     out['result'] = VK_ERR_UNKNOWN
                     self.setstate(hnd[cb_q], 0xF, CB_INV)
                 else:
@@ -8434,18 +8439,19 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
 
         spvd = G.TOOLS / 'shader' / 'corpus'
         is_blend = 'blend' in gfx
+        is_wide = 'vbwide' in gfx
         # vs_pos3/fs_vcol forward the vertex alpha into FS out; the
         # passthru/flat pair forces a=1 and cannot see a blend
         vs_spv = [w[0] for w in struct.iter_unpack(
-            '<I', (spvd / ('vs_pos3.spv' if is_blend
+            '<I', (spvd / ('vs_pos3.spv' if is_blend or is_wide
                           else 'vs_passthru.spv')).read_bytes())]
         fs_spv = [w[0] for w in struct.iter_unpack(
-            '<I', (spvd / ('fs_vcol.spv' if is_blend
+            '<I', (spvd / ('fs_vcol.spv' if is_blend or is_wide
                           else 'fs_flat.spv')).read_bytes())]
         X = {k: 0x4000_0000_1000 + i * 0x1000_0001 for i, k in enumerate(
             ('inst', 'pd', 'dev', 'queue', 'imem', 'img', 'view', 'rp',
-             'fb', 'sm_vs', 'sm_fs', 'pl', 'gp', 'vmem', 'vb', 'rmem',
-             'rb', 'cp', 'cb', 'fen'))}
+             'fb', 'sm_vs', 'sm_fs', 'pl', 'gp', 'vmem', 'vb', 'vb2',
+             'rmem', 'rb', 'cp', 'cb', 'fen'))}
         RES_BLOB0 = 200
 
         CW = CH = 64                     # color attachment extent
@@ -8460,10 +8466,18 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         # sends pColorBlendState=None).
         COL = (1.0, 0.0, 0.0, 0.75) if is_blend else (0.2, 0.4, 0.6, 1.0)
         # vertex stride 24: {RG32 pos @0, RGBA32 col @8}
+        # vbwide: same attributes split across two buffers — binding 0
+        # is positions only (stride 8) and the colour attribute rides
+        # binding 4 (stride 16); bindings 1..3 are bound but unused
         vb_words = []
+        vb2_words = []
         for (vx_, vy_, _vz, _vw) in TRI:
-            vb_words += [f32b(vx_), f32b(vy_)]
-            vb_words += [f32b(c) for c in COL]
+            if is_wide:
+                vb_words += [f32b(vx_), f32b(vy_)]
+                vb2_words += [f32b(c) for c in COL]
+            else:
+                vb_words += [f32b(vx_), f32b(vy_)]
+                vb_words += [f32b(c) for c in COL]
         VP = (0.0, 0.0, 64.0, 64.0, 0.0, 1.0)
         SC = (0, 0, 64, 64)
         # frontFace = CCW(0) -> the ObjPay word carries front_ccw = 1;
@@ -8616,18 +8630,26 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                            pName='main', pSpecializationInfo=None)],
                     pVertexInputState=st(
                         'VkPipelineVertexInputStateCreateInfo',
-                        flags=0, vertexBindingDescriptionCount=1,
-                        pVertexBindingDescriptions=[st(
-                            'VkVertexInputBindingDescription',
-                            binding=0, stride=24, inputRate=0)],
+                        flags=0,
+                        vertexBindingDescriptionCount=5 if is_wide
+                        else 1,
+                        pVertexBindingDescriptions=(
+                            [st('VkVertexInputBindingDescription',
+                                binding=b, stride=(8 if b < 4 else 16),
+                                inputRate=0) for b in range(5)]
+                            if is_wide else
+                            [st('VkVertexInputBindingDescription',
+                                binding=0, stride=24, inputRate=0)]),
                         vertexAttributeDescriptionCount=2,
                         pVertexAttributeDescriptions=[
                             st('VkVertexInputAttributeDescription',
                                location=0, binding=0, format=103,
                                offset=0),
                             st('VkVertexInputAttributeDescription',
-                               location=1, binding=0, format=109,
-                               offset=8)]),
+                               location=1,
+                               binding=4 if is_wide else 0,
+                               format=109,
+                               offset=0 if is_wide else 8)]),
                     pInputAssemblyState=st(
                         'VkPipelineInputAssemblyStateCreateInfo',
                         flags=0, topology=3, primitiveRestartEnable=0),
@@ -8702,13 +8724,29 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
         ]
         note("B'' segment A1: device, image+view, rp+fb, modules, "
              'layout, graphics pipeline, vb+rb, cmdpool, fence')
+        # vbwide: a second vertex buffer for the binding-4 attribute
+        if is_wide:
+            seg_a1 += [
+                ('vkCreateBuffer', dict(
+                    device=X['dev'],
+                    pCreateInfo=st('VkBufferCreateInfo', size=48,
+                                   usage=0x80, sharingMode=0,
+                                   queueFamilyIndexCount=0,
+                                   pQueueFamilyIndices=[]),
+                    pBuffer=X['vb2'])),
+                ('vkBindBufferMemory', dict(
+                    device=X['dev'], buffer=X['vb2'], memory=X['vmem'],
+                    memoryOffset=0x800)),
+            ]
         run_batches(compile_cmds(seg_a1))
 
         # blob+map the three memories; guest posts the vertex data at
-        # the vb's mapped offset
+        # the vb's mapped offset (vbwide: vb2 words at vmem+0x800)
         for rid, mem, init in (
                 (RES_BLOB0, X['imem'], None),
-                (RES_BLOB0 + 1, X['vmem'], vb_words),
+                (RES_BLOB0 + 1, X['vmem'],
+                 vb_words + ([0] * ((0x800 - 4 * len(vb_words)) // 4) +
+                             vb2_words if is_wide else [])),
                 (RES_BLOB0 + 2, X['rmem'], None)):
             base_b = create_blob_mem(
                 rid, 0x10000 if mem == X['imem']
@@ -8742,8 +8780,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 commandBuffer=X['cb'], pipelineBindPoint=0,
                 pipeline=X['gp'])),
             ('vkCmdBindVertexBuffers', dict(
-                commandBuffer=X['cb'], firstBinding=0, bindingCount=1,
-                pBuffers=[X['vb']], pOffsets=[0])),
+                commandBuffer=X['cb'], firstBinding=0,
+                bindingCount=5 if is_wide else 1,
+                pBuffers=([X['vb'], X['vb'], X['vb'], X['vb'], X['vb2']]
+                          if is_wide else [X['vb']]),
+                pOffsets=[0] * 5 if is_wide else [0])),
             ('vkCmdSetViewport', dict(
                 commandBuffer=X['cb'], firstViewport=0, viewportCount=1,
                 pViewports=[st('VkViewport', x=f32b(0.0), y=f32b(0.0),

@@ -15,6 +15,8 @@ import {
 import { rm } from "node:fs/promises";
 import { isAbsolute, join, normalize, resolve, sep } from "node:path";
 
+import { DEFAULT_CONFIG } from "../config/defaults.ts";
+import type { CleanConfig } from "../config/schema.ts";
 import type { PlatformContext } from "../context.ts";
 import type { WorkspacePaths } from "./layout.ts";
 
@@ -41,6 +43,14 @@ export type CleanPurpose =
   | "svt"
   /** Contained rustup/cargo under `sv-timing/.tools` (re-setup needed). */
   | "svt-tools"
+  /** Trace dumps (`.dasm`/`.traces`/waves) inside stale, uncited remote runs; logs + results kept. */
+  | "traces"
+  /** Whole remote runs superseded within their tag family (stale, uncited, not newest-N). */
+  | "runs"
+  /** Stale children of the repo-root scratch `.cache/`. */
+  | "repo-cache"
+  /** Regenerable build outputs (Cargo targets, UE intermediates, Next.js) not used recently. */
+  | "regen"
   | "workspace";
 
 export const CLEAN_PURPOSES: CleanPurpose[] = [
@@ -60,6 +70,10 @@ export const CLEAN_PURPOSES: CleanPurpose[] = [
   "sim",
   "svt",
   "svt-tools",
+  "traces",
+  "runs",
+  "repo-cache",
+  "regen",
   "workspace",
 ];
 
@@ -69,7 +83,18 @@ export const CLEAN_REQUIRES_YES: ReadonlySet<CleanPurpose> = new Set([
   "firmware",
   "sim",
   "svt-tools",
+  "traces",
+  "runs",
+  "repo-cache",
   "workspace",
+]);
+
+/** Purposes whose inventory needs the (slower) repo-level scan. */
+export const REPO_DATA_PURPOSES: ReadonlySet<CleanPurpose> = new Set([
+  "traces",
+  "runs",
+  "repo-cache",
+  "regen",
 ]);
 
 export interface CleanTarget {
@@ -86,7 +111,19 @@ export interface CleanTarget {
   /** Needs --yes for non-dry-run delete. */
   requiresYes: boolean;
   /** Root class for allowlist checks. */
-  rootKind: "workspace" | "repo-sim" | "repo-pkg";
+  rootKind: "workspace" | "repo-sim" | "repo-pkg" | "repo-data";
+  /** When set, only these files are removed (the target dir itself stays). */
+  files?: string[];
+  /**
+   * Why the target is kept by default: `active` (modified within
+   * `activeAgeDays`), `cited` (run tag referenced by a tracked file — evidence),
+   * `kept` (newest-N of its tag family). Lifted by --include-active / --include-cited.
+   */
+  hold?: "active" | "cited" | "kept";
+  /** Selectable children (aggregate repo-data targets); status shows the parent. */
+  parts?: CleanTarget[];
+  /** Extra status text (counts / holds). */
+  detail?: string;
 }
 
 export interface CleanSelectFilters {
@@ -105,6 +142,238 @@ export interface CleanSelectFilters {
    *   successful stamp and select older packages for deletion
    */
   execution?: CleanExecutionFilter;
+  /** Lift the `active` hold (recently modified runs / caches / build dirs). */
+  includeActive?: boolean;
+  /** Lift the `cited` and `kept` holds (evidence runs, newest-N per family). */
+  includeCited?: boolean;
+}
+
+/** Resolved repo-level clean config (tolerates partial test contexts). */
+export function cleanConfigOf(ctx: Pick<PlatformContext, "config">): CleanConfig {
+  return { ...DEFAULT_CONFIG.workspace.clean, ...(ctx.config?.workspace?.clean ?? {}) };
+}
+
+/**
+ * Tag family for `clean runs`: strip a trailing `-rN` repeat counter, a
+ * `-YYYYMMDDTHHMMSS[Z]-<hash>` stamp, or an `-old`/`-new` marker.
+ */
+export function runFamily(tag: string): string {
+  return tag
+    .replace(/-\d{8}T\d{6}Z?-[0-9a-f]{6,}$/i, "")
+    .replace(/-r\d+$/i, "")
+    .replace(/-(old|new)$/i, "");
+}
+
+/**
+ * Run tags referenced by any of `files` (tracked docs/code). A cited run is
+ * evidence for a recorded result, so it is kept by default.
+ */
+export function collectCitedTags(
+  repoRoot: string,
+  files: string[],
+  tags: string[],
+  extensions: string[],
+  maxBytes = 4 * 1024 * 1024,
+): Set<string> {
+  const want = new Set(tags);
+  const cited = new Set<string>();
+  const exts = extensions.map((e) => e.toLowerCase());
+  for (const rel of files) {
+    if (cited.size === want.size) break;
+    const lower = rel.toLowerCase();
+    if (!exts.some((e) => lower.endsWith(e))) continue;
+    const abs = join(repoRoot, rel);
+    let text: string;
+    try {
+      if (statSync(abs).size > maxBytes) continue;
+      text = readFileSync(abs, "utf8");
+    } catch {
+      continue;
+    }
+    for (const tok of text.match(/[A-Za-z0-9][A-Za-z0-9._-]{4,}/g) ?? []) {
+      if (want.has(tok)) cited.add(tok);
+    }
+  }
+  return cited;
+}
+
+function dirChildren(dir: string): string[] {
+  try {
+    return readdirSync(dir).filter((n) => {
+      try {
+        return lstatSync(join(dir, n)).isDirectory();
+      } catch {
+        return false;
+      }
+    });
+  } catch {
+    return [];
+  }
+}
+
+/** Trace files (by suffix) under `dir`, with total bytes. Never follows symlinks. */
+function findTraceFiles(dir: string, suffixes: string[]): { files: string[]; bytes: number } {
+  const files: string[] = [];
+  let bytes = 0;
+  const walk = (p: string): void => {
+    let names: string[];
+    try {
+      names = readdirSync(p);
+    } catch {
+      return;
+    }
+    for (const n of names) {
+      const c = join(p, n);
+      let st;
+      try {
+        st = lstatSync(c);
+      } catch {
+        continue;
+      }
+      if (st.isDirectory()) walk(c);
+      else if (st.isFile() && suffixes.some((s) => n.toLowerCase().endsWith(s))) {
+        files.push(c);
+        bytes += st.size;
+      }
+    }
+  };
+  walk(dir);
+  return { files, bytes };
+}
+
+function aggregate(
+  purpose: CleanPurpose,
+  path: string,
+  label: string,
+  parts: CleanTarget[],
+  what: string,
+): CleanTarget {
+  const free = parts.filter((p) => !p.hold);
+  const n = (h: CleanTarget["hold"]) => parts.filter((p) => p.hold === h).length;
+  const holds = [
+    n("cited") ? `${n("cited")} cited` : "",
+    n("kept") ? `${n("kept")} newest-kept` : "",
+    n("active") ? `${n("active")} active` : "",
+  ].filter(Boolean);
+  return {
+    purpose,
+    path,
+    label,
+    present: existsSync(path),
+    bytes: free.reduce((a, p) => a + p.bytes, 0),
+    mtimeMs: parts.reduce<number | null>((a, p) => (p.mtimeMs == null ? a : Math.max(a ?? 0, p.mtimeMs)), null),
+    requiresYes: CLEAN_REQUIRES_YES.has(purpose),
+    rootKind: "repo-data",
+    parts,
+    detail: `reclaimable: ${free.length}/${parts.length} ${what}` + (holds.length ? `; held: ${holds.join(", ")}` : ""),
+  };
+}
+
+/**
+ * Repo-level targets outside `workspace/`: remote-run traces and superseded
+ * runs, the repo-root scratch cache, and regenerable build outputs. Holds mark
+ * what is still useful (active, cited as evidence, newest per family).
+ */
+export function listRepoDataTargets(
+  repoRoot: string,
+  cfg: CleanConfig,
+  citedTags: Set<string>,
+  now = Date.now(),
+): CleanTarget[] {
+  const activeMs = cfg.activeAgeDays * 86_400_000;
+  const isActive = (m: number | null) => m != null && now - m < activeMs;
+  const out: CleanTarget[] = [];
+
+  const runsRoot = join(repoRoot, cfg.remoteRunsDir);
+  const protect = new Set(cfg.remoteRunsProtect.map((p) => p.toLowerCase()));
+  const runs = dirChildren(runsRoot)
+    .filter((t) => !protect.has(t.toLowerCase()))
+    .map((tag) => {
+      const path = join(runsRoot, tag);
+      const m = measurePath(path);
+      return { tag, path, ...m };
+    });
+
+  const traceParts: CleanTarget[] = [];
+  for (const r of runs) {
+    const tr = findTraceFiles(r.path, cfg.traceSuffixes);
+    if (tr.files.length === 0) continue;
+    traceParts.push({
+      purpose: "traces",
+      path: r.path,
+      label: `${cfg.remoteRunsDir}/${r.tag} (traces)`,
+      present: true,
+      bytes: tr.bytes,
+      mtimeMs: r.mtimeMs,
+      requiresYes: true,
+      rootKind: "repo-data",
+      files: tr.files,
+      hold: isActive(r.mtimeMs) ? "active" : citedTags.has(r.tag) ? "cited" : undefined,
+    });
+  }
+  out.push(aggregate("traces", runsRoot, `${cfg.remoteRunsDir} traces`, traceParts, "runs"));
+
+  const families = new Map<string, typeof runs>();
+  for (const r of runs) {
+    const f = runFamily(r.tag);
+    families.set(f, [...(families.get(f) ?? []), r]);
+  }
+  const runParts: CleanTarget[] = [];
+  for (const members of families.values()) {
+    members.sort((a, b) => (b.mtimeMs ?? 0) - (a.mtimeMs ?? 0));
+    members.forEach((r, i) => {
+      runParts.push({
+        purpose: "runs",
+        path: r.path,
+        label: `${cfg.remoteRunsDir}/${r.tag}`,
+        present: true,
+        bytes: r.bytes,
+        mtimeMs: r.mtimeMs,
+        requiresYes: true,
+        rootKind: "repo-data",
+        hold: isActive(r.mtimeMs)
+          ? "active"
+          : citedTags.has(r.tag)
+            ? "cited"
+            : i < cfg.keepRunsPerFamily
+              ? "kept"
+              : undefined,
+      });
+    });
+  }
+  out.push(aggregate("runs", runsRoot, `${cfg.remoteRunsDir} superseded`, runParts, "runs"));
+
+  const cacheRoot = join(repoRoot, cfg.repoCacheDir);
+  const cacheParts: CleanTarget[] = [];
+  let cacheNames: string[] = [];
+  try {
+    cacheNames = readdirSync(cacheRoot);
+  } catch {
+    // absent
+  }
+  for (const n of cacheNames) {
+    const path = join(cacheRoot, n);
+    const m = measurePath(path);
+    cacheParts.push({
+      purpose: "repo-cache",
+      path,
+      label: `${cfg.repoCacheDir}/${n}`,
+      present: true,
+      bytes: m.bytes,
+      mtimeMs: m.mtimeMs,
+      requiresYes: true,
+      rootKind: "repo-data",
+      hold: isActive(m.mtimeMs) ? "active" : undefined,
+    });
+  }
+  out.push(aggregate("repo-cache", cacheRoot, `${cfg.repoCacheDir} (repo root)`, cacheParts, "entries"));
+
+  for (const rel of cfg.regenerableDirs) {
+    const t = targetOf("regen", join(repoRoot, rel), rel, "repo-pkg");
+    if (t.present && isActive(t.mtimeMs)) t.hold = "active";
+    out.push(t);
+  }
+  return out;
 }
 
 /** Read host timings/suite stamp.json if present. */
@@ -285,7 +554,11 @@ function targetOf(
  */
 export function listCleanTargets(
   ctx: PlatformContext,
-  opts: { repoSimOutDirs?: string[] } = {},
+  opts: {
+    repoSimOutDirs?: string[];
+    /** Include the repo-level purposes (traces/runs/repo-cache/regen); walks remote runs. */
+    repoData?: { citedTags: Set<string>; now?: number };
+  } = {},
 ): CleanTarget[] {
   const paths = ctx.paths;
   const simDirs = opts.repoSimOutDirs ?? ["work-ver"];
@@ -327,6 +600,11 @@ export function listCleanTargets(
     ),
     targetOf("svt-tools", join(svtRoot, ".tools"), "sv-timing/.tools", "repo-pkg"),
   );
+  if (opts.repoData) {
+    out.push(
+      ...listRepoDataTargets(ctx.repoRoot, cleanConfigOf(ctx), opts.repoData.citedTags, opts.repoData.now),
+    );
+  }
   return out;
 }
 
@@ -335,8 +613,16 @@ export function cleanAllowRoots(
   paths: WorkspacePaths,
   repoRoot: string,
   repoSimOutDirs: string[] = ["work-ver"],
+  clean?: CleanConfig,
 ): string[] {
   const roots = [paths.root];
+  if (clean) {
+    roots.push(
+      join(repoRoot, clean.remoteRunsDir),
+      join(repoRoot, clean.repoCacheDir),
+      ...clean.regenerableDirs.map((d) => join(repoRoot, d)),
+    );
+  }
   for (const rel of repoSimOutDirs) {
     const abs = isAbsolute(rel) ? rel : join(repoRoot, rel);
     // Allow the sim dir itself (may not exist yet).
@@ -377,7 +663,9 @@ function expandChildrenIfNeeded(
     t.purpose === "sim" ||
     t.purpose === "firmware" ||
     t.purpose === "svt" ||
-    t.purpose === "svt-tools"
+    t.purpose === "svt-tools" ||
+    t.purpose === "regen" ||
+    t.parts != null
   ) {
     return [t];
   }
@@ -446,7 +734,24 @@ export function selectCleanTargets(
       continue;
     }
 
-    let candidates = expandChildrenIfNeeded(base, filters);
+    let candidates = base.parts ?? expandChildrenIfNeeded(base, filters);
+    candidates = candidates.filter((c) => {
+      const lifted =
+        c.hold == null ||
+        (c.hold === "active" && filters.includeActive) ||
+        ((c.hold === "cited" || c.hold === "kept") && filters.includeCited);
+      if (!lifted) {
+        skipped.push({
+          purpose: c.purpose,
+          path: c.path,
+          label: c.label,
+          status: "skipped-filter",
+          detail: `held (${c.hold})`,
+          bytes: c.bytes,
+        });
+      }
+      return lifted;
+    });
 
     // --execution last: among expanded children with successful stamps, keep
     // the newest (do not delete it); select older packages.
@@ -590,6 +895,11 @@ export function purposesFromSubcommand(sub: string): CleanPurpose[] | null {
   if (s === "svt-tools" || s === "sv-timing-tools" || s === "rust-tools") {
     return ["svt-tools"];
   }
+  if (s === "remote-traces") return ["traces"];
+  if (s === "remote-runs") return ["runs"];
+  if (s === "regenerable") return ["regen"];
+  // Everything stale and reclaimable at repo level, holds still apply.
+  if (s === "stale") return ["traces", "runs", "repo-cache", "regen"];
   if ((CLEAN_PURPOSES as string[]).includes(s)) return [s as CleanPurpose];
   // Legacy flags handled in command, not here.
   return null;
@@ -645,6 +955,34 @@ export async function removeCleanTargets(
         status: "would-remove",
         bytes: t.bytes,
       });
+      continue;
+    }
+    if (t.files) {
+      const outside = t.files.filter((f) => !isPathAllowed(f, opts.allowRoots));
+      if (outside.length > 0) {
+        results.push({
+          purpose: t.purpose,
+          path: t.path,
+          label: t.label,
+          status: "refused",
+          detail: `${outside.length} file(s) outside allowlist`,
+          bytes: t.bytes,
+        });
+        continue;
+      }
+      try {
+        for (const f of t.files) await rm(f, { force: true });
+        results.push({ purpose: t.purpose, path: t.path, label: t.label, status: "removed", bytes: t.bytes });
+      } catch (e) {
+        results.push({
+          purpose: t.purpose,
+          path: t.path,
+          label: t.label,
+          status: "refused",
+          detail: e instanceof Error ? e.message : String(e),
+          bytes: t.bytes,
+        });
+      }
       continue;
     }
     try {

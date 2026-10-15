@@ -1,5 +1,6 @@
 #include "MbgenBoardActor.h"
 #include "MbgenSettings.h"
+#include "MbgenNav.h"
 #include "mbcore_c.h"
 #include "ProceduralMeshComponent.h"
 #include "Materials/MaterialInstanceDynamic.h"
@@ -167,9 +168,11 @@ bool AMbgenBoardActor::BoardPlaneUm(const FVector& WorldOrigin, const FVector& W
     return true;
 }
 
-void AMbgenBoardActor::PlaceSelectedAtRay(const FVector& WorldOrigin, const FVector& WorldDir)
+void AMbgenBoardActor::PlaceSelectedAtRay(const FVector& WorldOrigin, const FVector& WorldDir, bool bFinal)
 {
-    if (!IsEditablePart(SelectedId) || ShouldThrottlePlace())
+    // The release sample is never dropped by the 10 Hz gate: a drag must end
+    // where the cursor is, not where the last accepted throttled sample was.
+    if (!IsEditablePart(SelectedId) || (!bFinal && ShouldThrottlePlace()))
     {
         return;
     }
@@ -210,6 +213,32 @@ bool AMbgenBoardActor::HitWorldOnBoard(const FVector& WorldOrigin, const FVector
     const FVector Local(float(XUm) * 0.0001f, float(YUm) * 0.0001f, PcbTopCm());
     OutWorld = GetActorTransform().TransformPosition(Local);
     return true;
+}
+
+bool AMbgenBoardActor::NavDeskWorld(FMbgenNavDesk& OutDesk) const
+{
+    // Finite rest plane in WORLD units, so the shared nav law sees the same
+    // numbers the editor viewport and the Play camera report. The actor is a
+    // uniform scale + translation; half-extents scale with it.
+    const FVector* Pcb = BodyCentersCm.Find(TEXT("pcb"));
+    const FVector* Sz = BodySizesCm.Find(TEXT("pcb"));
+    if (!Pcb || !Sz) { return false; }
+    const FTransform Xform = GetActorTransform();
+    const FVector Centre = Xform.TransformPosition(FVector(Pcb->X, Pcb->Y, PcbBotCm()));
+    const FVector Half = Xform.TransformVector(FVector(Sz->X * 0.5f, Sz->Y * 0.5f, 0.f)).GetAbs();
+    const FMbgenNavDesk Desk = FMbgenNav::Desk(Half.X * 2.0, Half.Y * 2.0, Centre.Z);
+    OutDesk = Desk;
+    // Desk() centres on the board origin; re-centre on the actual board centre.
+    OutDesk.V[0] = Centre.X;
+    OutDesk.V[1] = Centre.Y;
+    return true;
+}
+
+FVector AMbgenBoardActor::NavPickPivotWorld(const FVector& WorldOrigin, const FVector& WorldDir, const FVector& LastPivot) const
+{
+    FMbgenNavDesk Desk;
+    if (!NavDeskWorld(Desk)) { return LastPivot; }
+    return FMbgenNav::PickPivot(Desk, WorldOrigin, WorldDir, LastPivot);
 }
 
 bool AMbgenBoardActor::HitDeskWorld(const FVector& WorldOrigin, const FVector& WorldDir, FVector& OutWorld) const
@@ -628,7 +657,7 @@ void AMbgenBoardActor::FrameOrbit()
     {
         for (TActorIterator<AMbgenOrbitPawn> It(WorldPtr); It; ++It)
         {
-            It->SetActorLocation(World);
+            It->FrameOn(World);
         }
     }
     UE_LOG(LogTemp, Display, TEXT("mbgen frame %.0f %.0f %.0f"), World.X, World.Y, World.Z);
@@ -1763,6 +1792,7 @@ void AMbgenBoardActor::CloseCore()
         ((CloseFn)FnClose)((mb_session*)CoreSession);
     }
     CoreSession = nullptr;
+    FMbgenNav::Unbind();
     if (DllHandle)
     {
         FPlatformProcess::FreeDllHandle(DllHandle);
@@ -1855,6 +1885,7 @@ void AMbgenBoardActor::EnsureCore()
         return;
     }
     bDllOk = true;
+    FMbgenNav::BindFromDll(DllHandle);
     LogDll(TEXT("mbcore_c"));
 }
 

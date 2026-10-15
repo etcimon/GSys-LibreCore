@@ -53,6 +53,8 @@ pub fn build(cfg: &BuilderConfig, repo: &Path) -> Result<Design, String> {
     write(&root.join("Source/MbgenSim/MbgenGameMode.cpp"), MODE_CPP)?;
     write(&root.join("Source/MbgenSim/MbgenOrbitPawn.h"), PAWN_H)?;
     write(&root.join("Source/MbgenSim/MbgenOrbitPawn.cpp"), PAWN_CPP)?;
+    write(&root.join("Source/MbgenSim/MbgenNav.h"), NAV_H)?;
+    write(&root.join("Source/MbgenSim/MbgenNav.cpp"), NAV_CPP)?;
     write(&root.join("Source/MbgenSim/MbgenPlayerController.h"), PC_H)?;
     write(&root.join("Source/MbgenSim/MbgenPlayerController.cpp"), PC_CPP)?;
     write(&root.join("Source/MbgenSim/MbgenPackageWidget.h"), WIDGET_H)?;
@@ -247,6 +249,8 @@ const MODE_H: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenGam
 const MODE_CPP: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenGameMode.cpp");
 const PAWN_H: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenOrbitPawn.h");
 const PAWN_CPP: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenOrbitPawn.cpp");
+const NAV_H: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenNav.h");
+const NAV_CPP: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenNav.cpp");
 
 const PC_H: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenPlayerController.h");
 const PC_CPP: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenPlayerController.cpp");
@@ -288,30 +292,68 @@ mod catia_nav_source_tests {
         assert!(ACTOR_CPP.contains("bool AMbgenBoardActor::HitDeskWorld"));
         assert!(!ACTOR_CPP.contains("TEXT(\"desk\")"));
         assert!(ACTOR_H.contains("HitDeskWorld"));
-        assert!(BRIDGE_CPP.contains("Board->HitDeskWorld"));
+        // Navigation picks go through the shared law; HitDeskWorld is only the
+        // DiagnoseNav report of where the old clamp would have landed.
+        assert!(ACTOR_CPP.contains("FVector AMbgenBoardActor::NavPickPivotWorld"));
+        assert!(BRIDGE_CPP.contains("Board->NavPickPivotWorld(Cursor.GetOrigin(), Cursor.GetDirection(), GNavPivot)"));
+        assert!(!BRIDGE_CPP.contains("if (Board->HitDeskWorld(Cursor.GetOrigin(), Cursor.GetDirection(), World)) { return World; }"));
         assert!(BRIDGE_CPP.contains("GNavPivot = PickNavPivot(Client)"));
-        assert!(PC_CPP.contains("HitDeskWorld"));
+        assert!(PC_CPP.contains("B->NavPickPivotWorld(Origin, Dir, Orbit->Pivot())"));
+        assert!(!PC_CPP.contains("HitDeskWorld"));
         assert_eq!(mbcore::DESK_PAD, 1.5);
+    }
+
+    #[test]
+    fn one_navigation_law_for_both_hosts() {
+        // Every camera motion in both hosts is an FMbgenNav call, and FMbgenNav
+        // binds the mbcore_c mb_nav_* exports that mbcore's nav.rs implements.
+        for sym in ["mb_nav_desk", "mb_nav_pick_pivot", "mb_nav_orbit", "mb_nav_look", "mb_nav_zoom_toward", "mb_nav_zoom_distance"] {
+            assert!(NAV_CPP.contains(&format!("TEXT(\"{sym}\")")), "{sym} not bound");
+            assert!(MBCORE_C_H.contains(sym), "{sym} not in header");
+        }
+        assert!(NAV_CPP.contains("mbgen nav=mbcore_c"));
+        assert!(NAV_CPP.contains("mbgen nav=local (reduced"));
+        assert!(ACTOR_CPP.contains("FMbgenNav::BindFromDll(DllHandle)"));
+        assert!(ACTOR_CPP.contains("FMbgenNav::Unbind()"));
+        for call in ["FMbgenNav::Look(", "FMbgenNav::Orbit(", "FMbgenNav::ZoomToward("] {
+            assert!(BRIDGE_CPP.contains(call), "editor lacks {call}");
+            assert!(PAWN_CPP.contains(call), "pawn lacks {call}");
+        }
+        // The pawn no longer carries its own rigid pivot-camera model.
+        assert!(!PAWN_CPP.contains("PlaceCamera"));
+        assert!(!PAWN_CPP.contains("RotateAngleAxis"));
+        assert!(!BRIDGE_CPP.contains("RotateAngleAxis"));
     }
 
     #[test]
     fn empty_look_pins_the_camera() {
         assert!(BRIDGE_CPP.contains("Client->ToggleOrbitCamera(false)"));
         assert!(BRIDGE_CPP.contains("static void PinView(FLevelEditorViewportClient* Client, const FVector& Cam, const FRotator& Rot, const FVector& LookAt)"));
-        assert!(PAWN_CPP.contains("const FVector PinnedFwd = FRotator(Pitch, Yaw, 0.f).Vector()"));
-        assert!(PAWN_CPP.contains("SetActorLocation(Cam + PinnedFwd * Distance)"));
         assert!(BRIDGE_CPP.contains("PinView(Client, Cam, Next, GNavPivot)"));
+        // Pawn look: forward changes, camera location is reused unchanged.
+        assert!(PAWN_CPP.contains("Pose(CameraLocation(), Fwd)"));
+        // A click on empty space picks a pivot but never runs the diagnostic sweep.
+        assert!(!BRIDGE_CPP.contains("GNavPivot = PickNavPivot(Client);\n            FMbgenEditorBridge::DiagnoseNav();"));
+        assert!(PC_CPP.contains("Orbit->SetPivot(B->NavPickPivotWorld(Origin, Dir, Orbit->Pivot()))"));
     }
 
     #[test]
-    fn wheel_dolly_keeps_view_rotation() {
+    fn wheel_dolly_keeps_view_rotation_and_moves_the_pivot_to_the_pick() {
         assert!(BRIDGE_CPP.contains("Keep.Roll = 0.f"));
         assert!(BRIDGE_CPP.contains("PinView(Client, NewLoc, Keep, Hit)"));
-        assert!(PAWN_CPP.contains("const FVector LookDir = FRotator(Pitch, Yaw, 0.f).Vector()"));
-        assert!(PAWN_CPP.contains("SetActorLocation(NewCam + LookDir * Distance)"));
-        assert!(PAWN_CPP.contains("Camera->SetRelativeRotation(Rot)"));
-        assert!(!PAWN_CPP.contains("(WorldHit - NewCam).Rotation()"));
-        assert!(!PAWN_CPP.contains("(-Camera->GetRelativeLocation()).Rotation()"));
+        assert!(BRIDGE_CPP.contains("GNavPivot = Hit;"));
+        // Pawn: same law — dolly along the pick ray, keep rotation, pivot = pick.
+        assert!(PAWN_CPP.contains("OrbitPivot = WorldHit;"));
+        assert!(PAWN_CPP.contains("Pose(Cam, Forward());"));
+        assert!(!PAWN_CPP.contains("SetActorLocation(NewCam + LookDir * Distance)"));
+    }
+
+    #[test]
+    fn a_drag_ends_under_the_cursor() {
+        assert!(ACTOR_H.contains("bool bFinal = false"));
+        assert!(ACTOR_CPP.contains("(!bFinal && ShouldThrottlePlace())"));
+        assert!(BRIDGE_CPP.contains("Board->PlaceSelectedAtRay(Cursor.GetOrigin(), Cursor.GetDirection(), true);"));
+        assert!(PC_CPP.contains("B->PlaceSelectedAtRay(Origin, Dir, true);"));
     }
 
     #[test]

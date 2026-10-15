@@ -6,11 +6,18 @@
 // Plan: architecture/build-platform-workspace-lifecycle.md
 // Only deletes under allowlisted roots (workspace + optional work-ver).
 
+import { readdirSync } from "node:fs";
+import { join } from "node:path";
+
 import { flagBool, flagString } from "../args.ts";
 import { requireContext, type Command } from "../command.ts";
+import { capture } from "../../platform/exec.ts";
 import {
   cleanAllowRoots,
+  cleanConfigOf,
+  collectCitedTags,
   CLEAN_PURPOSES,
+  REPO_DATA_PURPOSES,
   formatAge,
   formatBytes,
   listCleanTargets,
@@ -25,6 +32,19 @@ import {
 } from "../../workspace/clean.ts";
 
 const REPO_SIM_DIRS = ["work-ver"];
+
+/** Remote-run tags cited by tracked files (evidence); empty when git is unavailable. */
+async function citedRunTags(repoRoot: string, runsDir: string, exts: string[]): Promise<Set<string>> {
+  let tags: string[];
+  try {
+    tags = readdirSync(join(repoRoot, runsDir));
+  } catch {
+    return new Set();
+  }
+  const listing = await capture("git", ["ls-files", "-z"], { cwd: repoRoot });
+  const files = listing.split("\0").filter((f) => f && !f.startsWith("vendor/"));
+  return collectCitedTags(repoRoot, files, tags, exts);
+}
 
 function printStatus(
   targets: CleanTarget[],
@@ -46,6 +66,8 @@ function printStatus(
             age: formatAge(t.mtimeMs, now),
             requiresYes: t.requiresYes,
             rootKind: t.rootKind,
+            hold: t.hold,
+            detail: t.detail,
           })),
           totalBytes: targets.reduce((a, t) => a + t.bytes, 0),
         },
@@ -63,8 +85,9 @@ function printStatus(
     const age = t.present ? formatAge(t.mtimeMs, now).padStart(5) : "    —";
     const mark = t.present ? " " : "!";
     const yes = t.requiresYes ? " [--yes]" : "";
+    const extra = t.detail ? `  (${t.detail})` : t.hold ? `  (held: ${t.hold})` : "";
     logger.info(
-      `  ${mark}${t.purpose.padEnd(pw)}  ${size}  age ${age}  ${t.label.padEnd(lw)}${yes}`,
+      `  ${mark}${t.purpose.padEnd(pw)}  ${size}  age ${age}  ${t.label.padEnd(lw)}${yes}${extra}`,
     );
   }
   const total = targets.filter((t) => t.purpose !== "workspace" && t.purpose !== "build")
@@ -79,8 +102,10 @@ function printStatus(
       `   leaf sum*: ${formatBytes(total)}`,
   );
   logger.info("  *leaf sum excludes build/workspace parents (may double-count).");
+  logger.info("  traces/runs/repo-cache sizes are reclaimable bytes after holds (active, cited, newest-kept).");
   logger.info("");
   logger.info("Remove: clean <purpose> [--older-than 7d] [--dry-run] [--yes]");
+  logger.info("        clean stale --dry-run     (traces + runs + repo-cache + regen, holds applied)");
   logger.info(`Purposes: ${CLEAN_PURPOSES.join(" | ")}`);
 }
 
@@ -89,7 +114,7 @@ export const cleanCommand: Command = {
   summary:
     "Remove workspace build/cache artifacts by purpose (and opt-in sim outs).",
   usage:
-    "bun run src/cli/index.ts clean [status|build|diag|verify|formal|timings|cache|manifests|downloads|man|dts|tooling|firmware|sim|svt|svt-tools|rust-target|all] [--older-than Nd|Nh|Nm] [--execution all|last|failed|ok] [--target T] [--compartment C] [--tooling] [--cache] [--all] [--yes] [--json] [--dry-run]",
+    "bun run src/cli/index.ts clean [status|build|diag|verify|formal|timings|cache|manifests|downloads|man|dts|tooling|firmware|sim|svt|svt-tools|rust-target|traces|runs|repo-cache|regen|stale|all] [--older-than Nd|Nh|Nm] [--execution all|last|failed|ok] [--target T] [--compartment C] [--include-active] [--include-cited] [--tooling] [--cache] [--all] [--yes] [--json] [--dry-run]",
   details:
     "Frees space from managed outputs (diag/verify/formal/timings caches, etc.).\n" +
     "Bare `clean` (no subcommand) removes workspace/build only (compat).\n" +
@@ -105,6 +130,19 @@ export const cleanCommand: Command = {
     "  svt | rust-target   package Cargo dir sv-timing/target (+ .sv-timing-out/cache)\n" +
     "  svt-tools         sv-timing/.tools contained rustup/cargo (requires --yes)\n" +
     "  all               entire workspace root (requires --yes; use --tooling legacy ok)\n" +
+    "\n" +
+    "Repo-level (workspace.clean in .config.ts; holds keep what is still useful):\n" +
+    "  traces            .dasm/.traces/wave dumps inside remote-runs/<tag>; logs,\n" +
+    "                    results and summaries stay (requires --yes)\n" +
+    "  runs              whole remote runs superseded in their tag family (tag minus\n" +
+    "                    -rN / timestamp); newest keepRunsPerFamily kept (requires --yes)\n" +
+    "  repo-cache        stale children of the repo-root .cache/ (requires --yes)\n" +
+    "  regen             regenerable build outputs (Cargo targets, UE Intermediate,\n" +
+    "                    Next.js .next) not used recently\n" +
+    "  stale             all four above\n" +
+    "  Holds: active (modified < activeAgeDays), cited (run tag referenced by a\n" +
+    "  tracked file = evidence), kept (newest-N per family). remote-runs/builds is\n" +
+    "  never touched. --include-active / --include-cited lift holds.\n" +
     "\n" +
     "Filters:\n" +
     "  --older-than 7d|12h|30m   only remove trees older than the duration\n" +
@@ -129,6 +167,10 @@ export const cleanCommand: Command = {
     "bun run src/cli/index.ts clean svt-tools --yes",
     "bun run src/cli/index.ts clean sim --yes",
     "bun run src/cli/index.ts clean tooling --yes",
+    "bun run src/cli/index.ts clean stale --dry-run",
+    "bun run src/cli/index.ts clean traces --older-than 7d --yes",
+    "bun run src/cli/index.ts clean runs --dry-run",
+    "bun run src/cli/index.ts clean regen",
     "bun run src/cli/index.ts clean all --yes",
   ],
   needsContext: true,
@@ -169,11 +211,28 @@ export const cleanCommand: Command = {
       olderThanMs = parsed;
     }
 
-    const inventory = listCleanTargets(ctx, { repoSimOutDirs: REPO_SIM_DIRS });
-    const allowRoots = cleanAllowRoots(paths, ctx.repoRoot, REPO_SIM_DIRS);
-
+    const includeActive = flagBool(args.flags, "include-active");
+    const includeCited = flagBool(args.flags, "include-cited");
     const subRaw = args.positionals[0];
     const sub = subRaw?.toLowerCase();
+
+    // The repo-level scan (remote-runs walk + citation grep of tracked files)
+    // only runs for status or when a repo-level purpose is requested.
+    const cleanCfg = cleanConfigOf(ctx);
+    const wantsRepoData =
+      sub === "status" ||
+      sub === "list" ||
+      sub === "ls" ||
+      args.positionals.some((p) =>
+        (purposesFromSubcommand(p) ?? []).some((x) => REPO_DATA_PURPOSES.has(x)),
+      );
+    const repoData = wantsRepoData
+      ? {
+          citedTags: await citedRunTags(ctx.repoRoot, cleanCfg.remoteRunsDir, cleanCfg.citationExtensions),
+        }
+      : undefined;
+    const inventory = listCleanTargets(ctx, { repoSimOutDirs: REPO_SIM_DIRS, repoData });
+    const allowRoots = cleanAllowRoots(paths, ctx.repoRoot, REPO_SIM_DIRS, cleanCfg);
 
     // status / list
     if (sub === "status" || sub === "list" || sub === "ls") {
@@ -230,6 +289,8 @@ export const cleanCommand: Command = {
       target: targetFilter,
       compartment,
       execution,
+      includeActive,
+      includeCited,
     });
 
     if (asJson && dryRun) {

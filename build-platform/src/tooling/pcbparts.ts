@@ -42,6 +42,42 @@ export type PcbPartsTool =
   | "cse_get_kicad"
   | "get_design_rules";
 
+/** Distributor kinds recorded in corev-mb `interfaces.py` `_KIND_DISTRIBUTOR`. */
+export const DISTRIBUTOR_PINOUT_LCSC: Record<string, string> = {
+  pcie_slot: "C426228",
+  sata: "C7500843",
+  dimm: "C5889263",
+  nvme_m2: "C52766533",
+  front_panel: "C492422",
+};
+
+export interface FreezePin {
+  number: string;
+  name: string;
+}
+
+/** Names only. Missing EasyEDA / stub / empty → null (caller writes no file). */
+export function freezePinsFromPinout(data: unknown): FreezePin[] | null {
+  if (!data || typeof data !== "object" || Array.isArray(data)) return null;
+  const rec = data as Record<string, unknown>;
+  if (typeof rec.error === "string") return null;
+  if (!Array.isArray(rec.pins) || rec.pins.length === 0) return null;
+  const pins: FreezePin[] = [];
+  for (const row of rec.pins) {
+    if (!row || typeof row !== "object") continue;
+    const pin = row as Record<string, unknown>;
+    const number = String(pin.number ?? "").trim();
+    const name = String(pin.name ?? "").trim();
+    if (!number || !name) continue;
+    pins.push({ number, name });
+  }
+  return pins.length ? pins : null;
+}
+
+export function freezeContentHash(pins: FreezePin[]): string {
+  return createHash("sha256").update(JSON.stringify(pins)).digest("hex");
+}
+
 export const PCBPARTS_TOOLS: readonly PcbPartsTool[] = [
   "jlc_search",
   "jlc_stock_check",

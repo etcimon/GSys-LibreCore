@@ -3,6 +3,7 @@
 #if WITH_EDITOR
 
 #include "MbgenBoardActor.h"
+#include "MbgenNav.h"
 #include "MbgenPackageWidget.h"
 #include "MbgenLibraryWidget.h"
 #include "MbgenOutlineWidget.h"
@@ -261,16 +262,12 @@ static void PinView(FLevelEditorViewportClient* Client, const FVector& Cam, cons
 
 static void LookViewport(FLevelEditorViewportClient* Client, const FVector2D& Delta)
 {
+    // Camera stays put; the shared law yaws about world Z and pitches about
+    // the post-yaw camera right (mbcore nav::look_in_place).
     const FVector Cam = Client->GetViewLocation();
-    const FRotator Rot = Client->GetViewRotation();
-    const FRotationMatrix M(Rot);
-    FVector Forward = Rot.Vector();
-    const FVector Right = M.GetUnitAxis(EAxis::Y);
     const float S = FMbgenStore::MouseSens();
-    Forward = Forward.RotateAngleAxis(Delta.X * 0.12f * S, FVector::UpVector);
-    Forward = Forward.RotateAngleAxis(-Delta.Y * 0.10f * S, Right);
-    Forward.Normalize();
-    const FRotator Next = LevelLook(Forward.Rotation());
+    const FVector Forward = FMbgenNav::Look(Client->GetViewRotation().Vector(), Delta.X * 0.12 * S, -Delta.Y * 0.10 * S);
+    const FRotator Next = FMbgenNav::LevelLook(Forward);
     PinView(Client, Cam, Next, GNavPivot);
     Client->Invalidate();
     if (AMbgenBoardActor* Board = FindBoard()) { Board->UpdateBottomView(Cam); }
@@ -286,9 +283,10 @@ static FVector PickNavPivot(FLevelEditorViewportClient* Client)
     }
     if (Client && Board)
     {
+        // Shared law: desk hit inside the pad, else on the cursor ray at the
+        // last focus depth. Never a clamped rim corner (progress.md leftover).
         const FViewportCursorLocation Cursor = Client->GetCursorWorldLocationFromMousePos();
-        FVector World;
-        if (Board->HitDeskWorld(Cursor.GetOrigin(), Cursor.GetDirection(), World)) { return World; }
+        return Board->NavPickPivotWorld(Cursor.GetOrigin(), Cursor.GetDirection(), GNavPivot);
     }
     return GNavPivot;
 }
@@ -408,10 +406,7 @@ static void DollyViewport(FLevelEditorViewportClient* Client, float Notches)
     const FVector Loc = Client->GetViewLocation();
     FRotator Keep = Client->GetViewRotation();
     Keep.Roll = 0.f;
-    FVector Rel = Loc - Hit;
-    const float Dist = FMath::Max(Rel.Size(), 1.f);
-    const float NewDist = FMbgenStore::ZoomDistance(Dist, Notches);
-    const FVector NewLoc = Hit + Rel.GetSafeNormal() * NewDist;
+    const FVector NewLoc = FMbgenNav::ZoomToward(Loc, Hit, Notches, FMbgenStore::MouseSens());
     GNavPivot = Hit;
     PinView(Client, NewLoc, Keep, Hit);
     Client->Invalidate();
@@ -469,7 +464,18 @@ bool FMbgenEditorInput::HandleMouseButtonUpEvent(FSlateApplication&, const FPoin
         }
         if (bWasPlace)
         {
-            if (AMbgenBoardActor* Board = FindBoard()) { Board->FinishPlaceDrag(); }
+            if (AMbgenBoardActor* Board = FindBoard())
+            {
+                // Flush the release sample past the 10 Hz gate, then rebuild once.
+                TSharedPtr<SLevelViewport> Viewport = ActiveLevelViewport();
+                if (Viewport.IsValid())
+                {
+                    FLevelEditorViewportClient& Client = Viewport->GetLevelViewportClient();
+                    const FViewportCursorLocation Cursor = Client.GetCursorWorldLocationFromMousePos();
+                    Board->PlaceSelectedAtRay(Cursor.GetOrigin(), Cursor.GetDirection(), true);
+                }
+                Board->FinishPlaceDrag();
+            }
         }
     }
     return false;
@@ -518,15 +524,10 @@ bool FMbgenEditorInput::HandleMouseMoveEvent(FSlateApplication&, const FPointerE
     const FVector Loc = Client->GetViewLocation();
     if (bOrbit)
     {
-        FVector Offset = Loc - GNavPivot;
-        const float Dist = FMath::Max(Offset.Size(), 1.f);
-        FRotator Rot = Offset.Rotation();
         const float S = FMbgenStore::MouseSens();
-        Rot.Yaw += Delta.X * 0.12f * S;
-        Rot.Pitch = FMath::Clamp(Rot.Pitch - Delta.Y * 0.10f * S, -85.f, 85.f);
-        Rot.Roll = 0.f;
-        const FVector NewLoc = GNavPivot + Rot.Vector() * Dist;
-        const FRotator Look = LevelLook((GNavPivot - NewLoc).Rotation());
+        FVector Fwd;
+        const FVector NewLoc = FMbgenNav::Orbit(GNavPivot, Loc, Delta.X * 0.12 * S, -Delta.Y * 0.10 * S, Fwd);
+        const FRotator Look = FMbgenNav::LevelLook(Fwd);
         PinView(Client, NewLoc, Look, GNavPivot);
         Client->Invalidate();
         if (AMbgenBoardActor* Board = FindBoard()) { Board->UpdateBottomView(NewLoc); }
@@ -578,10 +579,11 @@ bool FMbgenEditorInput::HandleMouseButtonDownEvent(FSlateApplication&, const FPo
     if (!TraceViewport(Hit) || !HitIsEditablePart(Hit))
     {
         bLookDrag = true;
+        // DiagnoseNav is a CallInEditor command, not a side effect of a click:
+        // its synthetic sweep mutates the camera and must never run on input.
         if (FLevelEditorViewportClient* Client = PerspectiveClient())
         {
             GNavPivot = PickNavPivot(Client);
-            FMbgenEditorBridge::DiagnoseNav();
         }
         return true;
     }

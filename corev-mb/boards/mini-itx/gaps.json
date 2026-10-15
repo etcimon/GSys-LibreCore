@@ -1,0 +1,26 @@
+[
+  {
+    "defer": true,
+    "id": "usb0",
+    "note": "USB host controller is not in the vendor catalog",
+    "role": "usb_stack"
+  },
+  {
+    "defer": true,
+    "id": "usb1",
+    "note": "USB host controller is not in the vendor catalog",
+    "role": "usb_stack"
+  },
+  {
+    "defer": true,
+    "id": "esd_usb0",
+    "note": "USB host controller is not in the vendor catalog",
+    "role": "esd"
+  },
+  {
+    "defer": true,
+    "id": "esd_usb1",
+    "note": "USB host controller is not in the vendor catalog",
+    "role": "esd"
+  }
+]

@@ -79,8 +79,7 @@ fn add(design: &mut Design, role_id: &str) -> Result<(), PackError> {
     let role = role(role_id).ok_or_else(|| PackError {
         reason: format!("unknown role {role_id}"),
     })?;
-    let n = design.ports.iter().filter(|p| p.role == role.id).count() + 1;
-    let id = format!("{}{n}", role.id);
+    let id = design.allocate_id(role.id);
     let order = design.placements.iter().map(|p| p.order).max().unwrap_or(0) + 1;
     design.ports.push(Port {
         id: id.clone(),
@@ -131,8 +130,7 @@ fn copy(design: &mut Design, id: &str) -> Result<(), PackError> {
             reason: format!("no part {id}"),
         })?
         .clone();
-    let n = design.ports.iter().filter(|p| p.role == port.role).count() + 1;
-    let new_id = format!("{}{n}", port.role);
+    let new_id = design.allocate_id(&port.role);
     let order = place.order + 1;
     for later in &mut design.placements {
         if later.order >= order {
@@ -485,6 +483,58 @@ mod tests {
             }
             current = next.design;
         }
+    }
+
+    #[test]
+    fn a_deleted_identity_is_never_reused() {
+        let design = Design::mini_itx().unwrap();
+        let first = preview(&design, &Gesture::Add { role: "decap".into() });
+        assert!(first.applied, "{:?}", first.reason);
+        let id_a = first.design.ports.iter().find(|p| p.role == "decap").unwrap().id.clone();
+        let deleted = preview(&first.design, &Gesture::Delete { id: id_a.clone() });
+        assert!(deleted.applied, "{:?}", deleted.reason);
+        assert!(deleted.design.ports.iter().all(|p| p.id != id_a));
+        let second = preview(&deleted.design, &Gesture::Add { role: "decap".into() });
+        assert!(second.applied, "{:?}", second.reason);
+        let id_b = second.design.ports.iter().find(|p| p.role == "decap").unwrap().id.clone();
+        assert_ne!(id_a, id_b, "a deleted id came back");
+        let json = serde_json::to_string(&second.design).unwrap();
+        let reloaded: Design = serde_json::from_str(&json).unwrap();
+        let third = preview(&reloaded, &Gesture::Add { role: "decap".into() });
+        let ids: Vec<_> = third.design.ports.iter().filter(|p| p.role == "decap").map(|p| p.id.clone()).collect();
+        assert_eq!(ids.len(), 2);
+        assert!(ids.iter().all(|id| *id != id_a), "reload resurrected {id_a}");
+    }
+
+    #[test]
+    fn copy_ids_do_not_collide_with_existing_parts() {
+        let design = Design::mini_itx().unwrap();
+        let mut current = design;
+        for _ in 0..3 {
+            let next = preview(&current, &Gesture::Copy { id: "usb0".into() });
+            if !next.applied {
+                break;
+            }
+            current = next.design;
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        for port in &current.ports {
+            assert!(seen.insert(port.id.clone()), "duplicate id {}", port.id);
+        }
+    }
+
+    #[test]
+    fn a_v1_document_loads_and_migrates_without_losing_parts() {
+        let mut v1 = serde_json::to_value(Design::mini_itx().unwrap()).unwrap();
+        v1.as_object_mut().unwrap().remove("schema_version");
+        v1.as_object_mut().unwrap().remove("id_seq");
+        let mut loaded: Design = serde_json::from_value(v1).unwrap();
+        assert_eq!(loaded.schema_version, 1);
+        let parts = loaded.ports.len();
+        loaded.migrate();
+        assert_eq!(loaded.schema_version, crate::template::DESIGN_SCHEMA_VERSION);
+        assert_eq!(loaded.ports.len(), parts);
+        assert_eq!(loaded.template().unwrap().id, "mini-itx");
     }
 
     #[test]

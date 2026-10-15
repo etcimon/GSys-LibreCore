@@ -315,6 +315,16 @@ bun run src/cli/index.ts setup --install --profile dual-hart
   `TOK_USER_TYPE`) and rejects package-to-package `import`. Below v0.67 there is
   no `read_slang` at all.
 
+- **OpenROAD timing**: the fork is the submodule `tools/openroad` (etcimon/OpenROAD,
+  branch `g6lc`). It is not a `tools install` recipe and it does not replace
+  sv-timing FO4. Sign-off reports go through
+  `scripts/install-openroad-g6lc.sh` and `scripts/openroad-timing.tcl`
+  (`report_checks` on a liberty, a gate-level netlist, and an SDC). The fork
+  asks STA once per pin arrival, skips an empty parasitic update, and checks
+  only driver pins in `check_sanity`. Repair, rebuffer ranking, and endpoint
+  collection propagate required times once per pass and then read the slack
+  stored on each vertex.
+
 #### 4.6.2a Running the formal gate
 
 ```

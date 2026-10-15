@@ -12,6 +12,7 @@
 //   design <id>             Run the SKiDL schematic (custom boards only): ERC + netlist/BOM.
 //   expand <id> --add ...   Add interfaces (e.g. usb_host:2,pcie_x1:1) and (optionally) query PHYs.
 //   parts --query "..."     One-off pcbparts.dev search (network-gated by --online).
+//   parts --freeze-pinout   Copy cache pin names into mbgen/mbcore/data (no XY).
 //   test [id]               Report/verify the tandem core+board feature set; --run drives the build.
 //
 // One board is active at a time. `select` writes the gitignored overlay
@@ -19,16 +20,23 @@
 // board. Nothing hits the network or a flist implicitly.
 
 import { existsSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import { isAbsolute, join } from "node:path";
 
 import { flagBool, flagString } from "../args.ts";
 import { requireContext, type Command } from "../command.ts";
 import { childEnv, type PlatformContext } from "../../context.ts";
 import { hasBinary, run } from "../../platform/exec.ts";
-import { createPcbPartsClient, type PcbPartsTool } from "../../tooling/pcbparts.ts";
+import {
+  createPcbPartsClient,
+  DISTRIBUTOR_PINOUT_LCSC,
+  freezeContentHash,
+  freezePinsFromPinout,
+  type PcbPartsTool,
+} from "../../tooling/pcbparts.ts";
 import { checkoutStatuses, syncControllers } from "../../tooling/vendor.ts";
 import { aiCoreHints, resolveAiBoard } from "../../tooling/ai-board.ts";
+import { checkIngestCore } from "../../tooling/coreProfile.ts";
 import {
   BoardSpecError,
   boardPaths,
@@ -38,6 +46,7 @@ import {
   loadBoardSpec,
   requiredControllerIds,
   scaffoldBoard,
+  customDesignPy,
   writeGeneratedArtifacts,
   writeOverlay,
   type BoardClass,
@@ -48,7 +57,7 @@ export const mbCommand: Command = {
   name: "mb",
   summary: "Select / create / design a motherboard (corev-mb) and adapt core + corev_apu to it.",
   usage:
-    "bun run src/cli/index.ts mb [list|select|check|create|design|expand|parts|test] [id] [--board <id>] [--online] [--fix] [--add <spec>] [--query <q>] [--dry-run] [--json]",
+    "bun run src/cli/index.ts mb [list|select|check|create|design|expand|parts|test|ingest] [id] [--board <id>] [--from <platform.json>] [--sync] [--online] [--fix] [--add <spec>] [--query <q>] [--dry-run] [--json]",
   details:
     "A board is described by corev-mb/boards/<id>/board.json and a development\n" +
     "architectural target under corev-mb/architecture/<id>/. `mb select <id>` is a\n" +
@@ -65,6 +74,7 @@ export const mbCommand: Command = {
     "bun run src/cli/index.ts mb create ai-card --ai --class custom",
     "bun run src/cli/index.ts mb expand my-board --add usb_host:2,pcie_x1:1 --online",
     "bun run src/cli/index.ts mb parts --query 'gigabit ethernet rgmii phy' --online",
+    "bun run src/cli/index.ts mb parts --freeze-pinout",
     "bun run src/cli/index.ts mb test genesys2",
   ],
   needsContext: true,
@@ -93,9 +103,11 @@ export const mbCommand: Command = {
           return await cmdParts(ctx, args.flags, rest);
         case "test":
           return await cmdTest(ctx, resolveId(ctx, rest, args.flags, true), args.flags);
+        case "ingest":
+          return await cmdIngest(ctx, args.flags);
         default:
           logger.error(`Unknown mb subcommand '${sub}'.`);
-          logger.info("Use one of: list, select, check, create, design, expand, parts, test.");
+          logger.info("Use one of: list, select, check, create, design, expand, parts, test, ingest.");
           return 1;
       }
     } catch (err) {
@@ -115,6 +127,73 @@ export const mbCommand: Command = {
 
 class MbUsageError extends Error {}
 
+/** Copy an mbgen platform.json into corev-mb and generate the board package. */
+async function cmdIngest(ctx: PlatformContext, flags: Record<string, string | boolean>): Promise<number> {
+  const { logger } = ctx;
+  const fromFlag = flagString(flags, "from");
+  if (!fromFlag) throw new MbUsageError("mb ingest needs --from <platform.json> from mbgen compile.");
+  const from = isAbsolute(fromFlag) ? fromFlag : join(ctx.repoRoot, fromFlag);
+  const raw = JSON.parse(await readFile(from, "utf8")) as Record<string, unknown>;
+  const boardid = flagString(flags, "board") ?? (typeof raw.boardid === "string" ? raw.boardid : "");
+  if (!boardid) throw new MbUsageError("platform.json has no boardid. Pass --board <id>.");
+  raw.boardid = boardid;
+  const core = raw.core as { config?: string } | undefined;
+  const config = core?.config ?? "";
+  const pkgPath = join(ctx.repoRoot, "core", "include", `${config}_config_pkg.sv`);
+  if (!existsSync(pkgPath)) {
+    logger.error(`Refusing ingest: core.config '${config}' is not ${pkgPath}.`);
+    return 1;
+  }
+  // Existence is not agreement: the board's hart count and the package hash
+  // must match the file we just located, or BIOS/Linux learn the mismatch.
+  const coreCheck = checkIngestCore((core ?? {}) as Record<string, unknown>, await readFile(pkgPath, "utf8"));
+  if (coreCheck.issues.length > 0) {
+    logger.error(`Refusing ingest: platform.json core block disagrees with ${pkgPath}:`);
+    for (const issue of coreCheck.issues) logger.error(`  - ${issue}`);
+    return 1;
+  }
+  if (coreCheck.mode === "legacy") {
+    logger.warn("legacy platform.json (no core.harts / core.source): topology not verified against the config package.");
+  }
+  const paths = boardPaths(ctx, boardid);
+  const dry = ctx.dryRun || flagBool(flags, "dry-run");
+  const gaps = Array.isArray(raw.gaps) ? raw.gaps : [];
+  if (dry) {
+    logger.info(`[dry-run] would write ${paths.specFile}`);
+    logger.info(`[dry-run] would write ${join(paths.boardDir, "gaps.json")} (${gaps.length} gaps)`);
+    logger.info("[dry-run] would generate the board package");
+  } else {
+    await mkdir(paths.boardDir, { recursive: true });
+    await writeFile(paths.specFile, JSON.stringify(raw, null, 2) + "\n", "utf8");
+    await writeFile(join(paths.boardDir, "gaps.json"), JSON.stringify(gaps, null, 2) + "\n", "utf8");
+    if (raw.skidl === "custom" && !existsSync(join(paths.boardDir, "design.py"))) {
+      await writeFile(join(paths.boardDir, "design.py"), customDesignPy(boardid), "utf8");
+      logger.info(`wrote ${join(paths.boardDir, "design.py")}`);
+    }
+    const spec = await loadBoardSpec(ctx, boardid);
+    const gen = await writeGeneratedArtifacts(ctx, spec);
+    logger.info(`wrote ${paths.specFile}`);
+    logger.info(`wrote ${join(paths.boardDir, "gaps.json")}`);
+    logger.info(`wrote ${gen.packageFile}`);
+  }
+  if (flagBool(flags, "sync")) {
+    const requested = ((raw.apu as { controllers?: { id?: string }[] } | undefined)?.controllers ?? [])
+      .map((c) => c.id)
+      .filter((id): id is string => typeof id === "string");
+    const known = requested.filter((id) => ctx.config.vendor.controllers.some((c) => c.id === id));
+    for (const id of requested) {
+      if (!known.includes(id)) logger.warn(`not in the vendor catalog, not fetched: ${id}`);
+    }
+    if (known.length > 0) {
+      const results = await syncControllers(ctx, { ids: known, dryRun: dry });
+      for (const r of results) logger.info(`  ${r.id} ${r.ok ? "ok" : "FAIL"}${r.reason ? ` (${r.reason})` : ""}`);
+    }
+  } else {
+    logger.info("vendor sync skipped (pass --sync to fetch catalog ids)");
+  }
+  return 0;
+}
+
 /** Resolve a board id from positional/--board/activeBoard. */
 function resolveId(
   ctx: PlatformContext,
@@ -132,6 +211,25 @@ function resolveId(
 }
 
 /** Absolute pcbparts cache dir (workspace-relative unless absolute). */
+/** Python and TS clients hash cache keys differently; scan by LCSC on a miss. */
+async function findCachedPinout(cacheDir: string, lcsc: string): Promise<unknown | null> {
+  if (!existsSync(cacheDir)) return null;
+  for (const name of await readdir(cacheDir)) {
+    if (!name.startsWith("jlc_get_pinout-") || !name.endsWith(".json")) continue;
+    try {
+      const data = JSON.parse(await readFile(join(cacheDir, name), "utf8")) as {
+        lcsc?: string;
+        error?: string;
+      };
+      if (data.lcsc === lcsc) return data;
+      if (typeof data.error === "string" && data.error.includes(lcsc)) return data;
+    } catch {
+      /* skip unreadable cache files */
+    }
+  }
+  return null;
+}
+
 function pcbCacheDir(ctx: PlatformContext): string {
   const spec = ctx.config.motherboard.pcbParts.cacheDir;
   return isAbsolute(spec) ? spec : join(ctx.paths.root, spec);
@@ -514,11 +612,14 @@ async function cmdParts(
   rest: string[],
 ): Promise<number> {
   const { logger } = ctx;
+  if (flagBool(flags, "freeze-pinout")) {
+    return cmdFreezePinout(ctx, flags);
+  }
   const query = flagString(flags, "query") ?? rest.join(" ");
   const toolFlag = flagString(flags, "tool") as PcbPartsTool | undefined;
   const online = flagBool(flags, "online");
   if (!query && !toolFlag) {
-    logger.error("`mb parts` needs --query \"...\" (or --tool <name>).");
+    logger.error("`mb parts` needs --query \"...\" (or --tool <name> or --freeze-pinout).");
     return 1;
   }
   const client = createPcbPartsClient(
@@ -538,6 +639,69 @@ async function cmdParts(
   if (res.data !== null) logger.raw(JSON.stringify(res.data, null, 2) + "\n");
   else if (!online) logger.info("Pass --online to query pcbparts.dev (results are then cached).");
   return res.ok ? 0 : 1;
+}
+
+async function cmdFreezePinout(
+  ctx: PlatformContext,
+  flags: Record<string, string | boolean>,
+): Promise<number> {
+  const { logger } = ctx;
+  const online = flagBool(flags, "online");
+  const kindFlag = flagString(flags, "kind");
+  const outDir = flagString(flags, "out") ?? join(ctx.repoRoot, "mbgen", "mbcore", "data");
+  const kinds = kindFlag ? [kindFlag] : Object.keys(DISTRIBUTOR_PINOUT_LCSC);
+  const client = createPcbPartsClient(
+    {
+      url: ctx.config.motherboard.pcbParts.mcpUrl,
+      timeoutMs: ctx.config.motherboard.pcbParts.timeoutMs,
+      retries: ctx.config.motherboard.pcbParts.retries,
+      cacheDir: pcbCacheDir(ctx),
+    },
+    logger,
+    online,
+  );
+  await mkdir(outDir, { recursive: true });
+  let wrote = 0;
+  for (const kind of kinds) {
+    const lcsc = DISTRIBUTOR_PINOUT_LCSC[kind];
+    if (!lcsc) {
+      logger.error(`unknown distributor kind '${kind}'`);
+      return 1;
+    }
+    const res = await client.jlcGetPinout({ lcsc });
+    let data = res.data;
+    let source = res.source;
+    if (source === "stub" || data == null) {
+      const scanned = await findCachedPinout(pcbCacheDir(ctx), lcsc);
+      if (scanned !== null) {
+        data = scanned;
+        source = "cache";
+      }
+    }
+    logger.info(`${kind} ${lcsc} source=${source}${res.note ? ` note=${res.note}` : ""}`);
+    if (source === "stub") {
+      logger.info(`  stub cache — not writing ${kind}.json`);
+      continue;
+    }
+    const pins = freezePinsFromPinout(data);
+    if (!pins) {
+      logger.info(`  no EasyEDA names — not writing ${kind}.json`);
+      continue;
+    }
+    const body = {
+      role: kind,
+      lcsc,
+      source,
+      hash: freezeContentHash(pins),
+      pins,
+    };
+    const path = join(outDir, `${kind}.json`);
+    await writeFile(path, JSON.stringify(body, null, 2) + "\n", "utf8");
+    logger.info(`  wrote ${path} pins=${pins.length}`);
+    wrote += 1;
+  }
+  logger.info(`freeze-pinout wrote ${wrote} file(s) under ${outDir}`);
+  return 0;
 }
 
 // ---------------------------------------------------------------------------

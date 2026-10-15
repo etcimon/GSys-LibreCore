@@ -1005,6 +1005,14 @@ GFXBIND = 0x60000      # texture binding base (gfx vectors)
 GFX = {
     # 8 vertices: pos@loc0, col@loc1 -> vcol(loc0) + gl_Position
     'vs_passthru': dict(stage=0, count=8, vbase=3, inst=0),
+    # vs_texlod: G3a-ii vertex-stage texture — OpImageSampleExplicitLod
+    # Lod=0 (the dEQP texture.*_vertex shape); set0/binding0 combined
+    # sampler on a 4x4 colour map, NEAREST/CLAMP.
+    'vs_texlod':   dict(stage=0, count=8, vbase=3, inst=0,
+                       binds=[img_bind(0, 0, dict(w=4, h=4, fmt=2),
+                                       kind=1,
+                                       smp=dict(mag=0, min=0, mm=0,
+                                                au=2, av=2))]),
     # 16 fragments: FragCoord + vcol(loc0) -> o(loc0)
     'fs_color':    dict(stage=4, count=16, vbase=0, inst=0),
     # 16 fragments in 4 quads: linear loc-0 varyings exercise

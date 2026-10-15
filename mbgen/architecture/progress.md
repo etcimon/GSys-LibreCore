@@ -1,6 +1,10 @@
 # Progress
 
-How to continue this tree without a Grok session. Hunt remaining **real** live-sim bugs. Do not re-plan pin-circuits. Do not invent deferred pinouts.
+How to continue this tree without a Grok session. Hunt remaining **real** live-sim bugs. Do not invent deferred pinouts.
+
+> **2026-10-15:** the "do not re-plan pin-circuits" rule is superseded by the approved successor
+> plan — see `board-workspace.md`. v1 notes below stay as history. The "next leftover" rim clamp is
+> **resolved** (`nav::pick_nav_pivot`, shared through `mb_nav_pick_pivot` to both hosts).
 
 ## Landed (`E:\cva6` master `df9aff1`)
 
@@ -26,11 +30,11 @@ From `pin-circuits.md`:
 
 ## Next leftover (in scope)
 
-- Empty-click rest-plane **rim**: cursor off the PCB clamps to the 1.5× pad corner; look then aims at that corner (FOV 90 makes the board leave the centre fast). Options: pick along camera forward when the cursor is off-pad, or lower editor FOV toward the product 55° shots. Measure with DiagnoseNav (`cursor_rim`, `look_moved`).
-- `HitWorldOnBoard` remains an unbounded PCB-top plane for **Place** (mbcore still rejects off-board). Nav must keep using `HitDeskWorld`.
+- ~~Empty-click rest-plane **rim**~~ — resolved: the pivot is the desk hit when inside the pad, else a point **on the cursor ray** at the last focus depth (`mbcore::pick_nav_pivot`). The old clamp survives only as the `desk=` / `cursor=` columns of DiagnoseNav, which now runs only as a CallInEditor command (never on a click).
+- `HitWorldOnBoard` remains an unbounded PCB-top plane for **Place** (mbcore still rejects off-board). Nav uses `NavPickPivotWorld`, not `HitDeskWorld`.
 - Dual-source: keep `mbcompiler/src/unreal.rs` `include_str!` in lockstep with live C++/Python.
 - After C++: stop the editor, `cargo test --workspace`, UBT, relaunch, wait for `mbgen dll=mbcore_c` and `mbgen frame`.
 
 ## Verify a change
 
-See `build.md`. Mini-ITX happy path: `mbgen dll=mbcore_c`, `mbgen frame 170 170 2`, product sections=22, placed sections=144, `mbgen board capture wrote`, DiagnoseNav `recede=0` `look_moved=0`.
+See `build.md`. Mini-ITX happy path: `mbgen dll=mbcore_c`, `mbgen nav=mbcore_c`, `mbgen frame 170 170 2`, product sections=22, placed sections=144, `mbgen board capture wrote`, DiagnoseNav (command) `recede=0` `look_moved=0`. A `mbgen nav=local (reduced …)` line means the DLL predates ABI v2 — rebuild it.

@@ -34,6 +34,7 @@ fn run() -> Result<(), String> {
         "anchors" => anchors_cmd(&mut args),
         "package" => package_cmd(&mut args),
         "library" => library_cmd(&mut args),
+        "profiles" => profiles_cmd(&mut args),
         "textures" => textures_cmd(&mut args),
         "build" => build_cmd(&mut args),
         "open" => open_cmd(&mut args),
@@ -49,6 +50,7 @@ fn run() -> Result<(), String> {
             eprintln!("mbgen anchors --design FILE --out anchors.json");
             eprintln!("mbgen package --design FILE --package ID --out FILE");
             eprintln!("mbgen library --out library.json");
+            eprintln!("mbgen profiles --core-include DIR --out mbcore/data/profiles.json [--prefix core/include/]");
             eprintln!("mbgen textures --design FILE --out DIR");
             eprintln!("mbgen build --config builder.json");
             eprintln!("mbgen open [--project UPROJECT]");
@@ -105,6 +107,27 @@ fn package_cmd(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     if !result.applied {
         eprintln!("{}", result.reason.clone().unwrap_or_else(|| "rejected".into()));
+    }
+    Ok(())
+}
+
+/// Regenerate `mbcore/data/profiles.json` from the SystemVerilog config
+/// packages. The committed file is what the processor window offers; a
+/// `cargo test` in mbcore fails when it drifts from `core/include`.
+fn profiles_cmd(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = flags(args)?;
+    let dir = PathBuf::from(flags.get("--core-include").ok_or("--core-include is required")?);
+    let out = flags.get("--out").ok_or("--out is required")?;
+    let prefix = flags.get("--prefix").cloned().unwrap_or_else(|| "core/include/".into());
+    let profiles = mbcore::generate_from_dir(&dir, &prefix).map_err(|e| format!("{}: {e}", dir.display()))?;
+    if profiles.is_empty() {
+        return Err(format!("no *_config_pkg.sv targets under {}", dir.display()));
+    }
+    fs::write(out, mbcore::profiles_json(&profiles)).map_err(|e| e.to_string())?;
+    let qualified = profiles.iter().filter(|p| p.is_qualified()).count();
+    println!("{out}: {} profiles, {qualified} qualified", profiles.len());
+    for p in profiles.iter().filter(|p| !p.is_qualified()) {
+        eprintln!("unresolved {}: {}", p.id, p.unresolved.join(", "));
     }
     Ok(())
 }

@@ -1,7 +1,0 @@
-{
-  "schema": "g6lc-libwasm-status/v1",
-  "available": true,
-  "status": "stale",
-  "reason": "Error: stale libwasm provenance: source/runtime/toolchain/ABI mismatch",
-  "scope": "component-shell preview and particle state; Asyncify build path landed; not full Svelte CSS/reactivity/tree or D await/catch host driver"
-}

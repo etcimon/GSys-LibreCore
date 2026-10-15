@@ -1,82 +1,101 @@
 #include "MbgenOrbitPawn.h"
 #include "Camera/CameraComponent.h"
+#include "MbgenNav.h"
 #include "MbgenStore.h"
 
 AMbgenOrbitPawn::AMbgenOrbitPawn()
 {
-    Pivot = CreateDefaultSubobject<USceneComponent>(TEXT("Pivot"));
-    RootComponent = Pivot;
+    Root = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
+    RootComponent = Root;
     Camera = CreateDefaultSubobject<UCameraComponent>(TEXT("Camera"));
-    Camera->SetupAttachment(Pivot);
-    PlaceCamera();
+    Camera->SetupAttachment(Root);
+    // Camera sits at the actor; the actor location IS the camera location.
+    const FRotator Rot(Pitch, Yaw, 0.f);
+    SetActorLocation(OrbitPivot - Rot.Vector() * Distance);
+    Camera->SetRelativeLocation(FVector::ZeroVector);
+    Camera->SetRelativeRotation(Rot);
+}
+
+FVector AMbgenOrbitPawn::CameraLocation() const
+{
+    return GetActorLocation();
+}
+
+FVector AMbgenOrbitPawn::Forward() const
+{
+    return FRotator(Pitch, Yaw, 0.f).Vector();
+}
+
+void AMbgenOrbitPawn::Pose(const FVector& CamLoc, const FVector& ForwardDir)
+{
+    const FRotator Rot = FMbgenNav::LevelLook(ForwardDir);
+    Yaw = Rot.Yaw;
+    Pitch = Rot.Pitch;
+    SetActorLocation(CamLoc);
+    Camera->SetRelativeLocation(FVector::ZeroVector);
+    Camera->SetRelativeRotation(Rot);
 }
 
 void AMbgenOrbitPawn::AddOrbit(float YawDelta, float PitchDelta)
 {
     const float S = FMbgenStore::MouseSens();
-    Yaw += YawDelta * S;
-    Pitch = FMath::Clamp(Pitch + PitchDelta * S, -85.f, 85.f);
-    PlaceCamera();
+    FVector Fwd;
+    const FVector Cam = FMbgenNav::Orbit(OrbitPivot, CameraLocation(), YawDelta * S, PitchDelta * S, Fwd);
+    Pose(Cam, Fwd);
 }
 
 void AMbgenOrbitPawn::AddPan(float RightDelta, float UpDelta)
 {
+    // Editor pan law (grab-and-drag): camera moves against the cursor along
+    // camera right, with it along camera up for a screen-down delta; the step
+    // scales with distance to the pivot; camera and pivot move together.
+    // UpDelta is screen-down-positive (the controller passes -MouseY).
     const FRotationMatrix M(FRotator(Pitch, Yaw, 0.f));
-    const float Step = FMath::Max(Distance, 30.f) * 0.0022f * FMbgenStore::MouseSens();
-    AddActorWorldOffset(M.GetUnitAxis(EAxis::Y) * RightDelta * Step + M.GetUnitAxis(EAxis::Z) * UpDelta * Step);
+    const float Step = FMath::Max((CameraLocation() - OrbitPivot).Size(), 20.f) * 0.0011f * FMbgenStore::MouseSens();
+    const FVector Move = M.GetUnitAxis(EAxis::Y) * -RightDelta * Step + M.GetUnitAxis(EAxis::Z) * UpDelta * Step;
+    OrbitPivot += Move;
+    Pose(CameraLocation() + Move, Forward());
 }
 
 void AMbgenOrbitPawn::AddZoom(float Notches)
 {
-    Distance = FMbgenStore::ZoomDistance(Distance, Notches);
-    PlaceCamera();
+    AddZoomToward(OrbitPivot, Notches);
 }
 
 void AMbgenOrbitPawn::OrbitAbout(const FVector& WorldPivot)
 {
-    const FVector Cam = Camera->GetComponentLocation();
-    SetActorLocation(WorldPivot);
-    const FVector Rel = Cam - WorldPivot;
-    Distance = FMath::Clamp(Rel.Size(), 20.f, 8000.f);
-    const FRotator Look = (WorldPivot - Cam).Rotation();
-    Yaw = Look.Yaw;
-    Pitch = FMath::Clamp(Look.Pitch, -85.f, 85.f);
-    PlaceCamera();
+    OrbitPivot = WorldPivot;
+    const FVector Cam = CameraLocation();
+    const FVector Toward = (OrbitPivot - Cam).GetSafeNormal(1e-6, Forward());
+    Pose(Cam, Toward);
+}
+
+void AMbgenOrbitPawn::SetPivot(const FVector& WorldPivot)
+{
+    OrbitPivot = WorldPivot;
 }
 
 void AMbgenOrbitPawn::AddZoomToward(const FVector& WorldHit, float Notches)
 {
-    const FVector Cam = Camera->GetComponentLocation();
-    const FVector LookDir = FRotator(Pitch, Yaw, 0.f).Vector();
-    FVector Rel = Cam - WorldHit;
-    const float Dist = FMath::Max(Rel.Size(), 1.f);
-    const float NewDist = FMbgenStore::ZoomDistance(Dist, Notches);
-    const FVector NewCam = WorldHit + Rel.GetSafeNormal() * NewDist;
-    SetActorLocation(NewCam + LookDir * Distance);
-    PlaceCamera();
+    const FVector Cam = FMbgenNav::ZoomToward(CameraLocation(), WorldHit, Notches, FMbgenStore::MouseSens());
+    OrbitPivot = WorldHit;
+    Pose(Cam, Forward());
 }
 
 void AMbgenOrbitPawn::AddLook(float YawDelta, float PitchDelta)
 {
-    const FVector Cam = Camera->GetComponentLocation();
-    const FRotationMatrix M(FRotator(Pitch, Yaw, 0.f));
-    FVector Forward = M.GetUnitAxis(EAxis::X);
-    const FVector Right = M.GetUnitAxis(EAxis::Y);
     const float S = FMbgenStore::MouseSens();
-    Forward = Forward.RotateAngleAxis(YawDelta * S, FVector::UpVector);
-    Forward = Forward.RotateAngleAxis(PitchDelta * S, Right);
-    Forward.Normalize();
-    const FRotator Look = Forward.Rotation();
-    Yaw = Look.Yaw;
-    Pitch = FMath::Clamp(Look.Pitch, -85.f, 85.f);
-    const FVector PinnedFwd = FRotator(Pitch, Yaw, 0.f).Vector();
-    SetActorLocation(Cam + PinnedFwd * Distance);
-    PlaceCamera();
+    const FVector Fwd = FMbgenNav::Look(Forward(), YawDelta * S, PitchDelta * S);
+    Pose(CameraLocation(), Fwd);
 }
 
-void AMbgenOrbitPawn::PlaceCamera()
+void AMbgenOrbitPawn::FrameOn(const FVector& WorldPivot)
 {
-    const FRotator Rot(Pitch, Yaw, 0.f);
-    Camera->SetRelativeLocation(Rot.Vector() * -Distance);
-    Camera->SetRelativeRotation(Rot);
+    OrbitPivot = WorldPivot;
+    const FVector Cam = CameraLocation();
+    float Dist = (Cam - OrbitPivot).Size();
+    if (Dist < 12.f) { Dist = Distance; }
+    const FVector Dir = (Cam - OrbitPivot).GetSafeNormal(1e-6, -Forward());
+    const FVector NewCam = OrbitPivot + Dir * Dist;
+    Pose(NewCam, (OrbitPivot - NewCam).GetSafeNormal());
 }

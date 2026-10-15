@@ -1,18 +1,46 @@
 //! C ABI for a live mbgen session. JSON in and out. `panic = abort` on this crate.
 
 use std::ffi::{CStr, CString};
-use std::os::raw::{c_char, c_int};
+use std::os::raw::{c_char, c_int, c_uint, c_ulonglong};
 use std::ptr;
 
-use mbcore::{anchors, library_export, preview, route, scene, Design, Gesture, NetClass, RouteResult};
+use mbcore::{
+    anchors, library_export, look_in_place, orbit_around, pick_nav_pivot, preview, route, scene,
+    zoom_distance, zoom_toward, Design, Desk, Gesture, NavVec3, NetClass, PreviewResult, RouteResult,
+};
+use serde::Serialize;
+
+/// Bump the major when a message shape or function signature changes.
+/// Mirrored by `MBCORE_C_ABI_VERSION` in `include/mbcore_c.h`.
+pub const ABI_VERSION: c_uint = 2;
 
 #[allow(non_camel_case_types)]
 pub struct mb_session {
     design: Design,
     last_part: Option<String>,
+    /// Bumps once per applied gesture. Zero for a freshly opened session.
+    revision: u64,
 }
 
 type Session = mb_session;
+
+/// `PreviewResult` plus the revision the session is at after this call.
+#[derive(Serialize)]
+struct ApplyResult {
+    #[serde(flatten)]
+    preview: PreviewResult,
+    revision: u64,
+}
+
+/// `RouteResult` plus the revision it was computed against and whether it is
+/// a filtered (dirty) view, so a host cannot mistake a subset for the whole.
+#[derive(Serialize)]
+struct RouteMessage {
+    #[serde(flatten)]
+    route: RouteResult,
+    revision: u64,
+    dirty_only: bool,
+}
 
 fn err_json(msg: &str) -> *mut c_char {
     to_cstr(&format!("{{\"error\":{}}}", serde_json::to_string(msg).unwrap_or_else(|_| "\"error\"".into())))
@@ -100,6 +128,7 @@ pub unsafe extern "C" fn mb_session_open(design_json: *const c_char) -> *mut Ses
     Box::into_raw(Box::new(Session {
         design,
         last_part: None,
+        revision: 0,
     }))
 }
 
@@ -108,6 +137,19 @@ pub unsafe extern "C" fn mb_session_close(session: *mut Session) {
     if !session.is_null() {
         drop(Box::from_raw(session));
     }
+}
+
+#[no_mangle]
+pub extern "C" fn mb_abi_version() -> c_uint {
+    ABI_VERSION
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mb_session_revision(session: *const Session) -> c_ulonglong {
+    if session.is_null() {
+        return 0;
+    }
+    (*session).revision
 }
 
 #[no_mangle]
@@ -130,8 +172,12 @@ pub unsafe extern "C" fn mb_apply(session: *mut Session, gesture_json: *const c_
     if result.applied {
         sess.last_part = new_port_id(&before, &result.design).or_else(|| gesture_id(&gesture));
         sess.design = result.design.clone();
+        sess.revision += 1;
     }
-    json_ptr(&result)
+    json_ptr(&ApplyResult {
+        preview: result,
+        revision: sess.revision,
+    })
 }
 
 #[no_mangle]
@@ -147,10 +193,131 @@ pub unsafe extern "C" fn mb_route(session: *mut Session, dirty_only: c_int) -> *
             } else {
                 full
             };
-            json_ptr(&out)
+            json_ptr(&RouteMessage {
+                route: out,
+                revision: sess.revision,
+                dirty_only: dirty_only != 0,
+            })
         }
         Err(err) => err_json(&err.reason),
     }
+}
+
+// ---- Navigation laws -------------------------------------------------------
+
+unsafe fn vec3(p: *const f64) -> Option<NavVec3> {
+    if p.is_null() {
+        return None;
+    }
+    Some(NavVec3::new(*p, *p.add(1), *p.add(2)))
+}
+
+unsafe fn put3(out: *mut f64, v: NavVec3) {
+    *out = v.x;
+    *out.add(1) = v.y;
+    *out.add(2) = v.z;
+}
+
+unsafe fn desk(p: *const f64) -> Option<Desk> {
+    if p.is_null() {
+        return None;
+    }
+    Some(Desk {
+        cx: *p,
+        cy: *p.add(1),
+        z: *p.add(2),
+        hx: *p.add(3),
+        hy: *p.add(4),
+    })
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mb_nav_desk(board_w_cm: f64, board_d_cm: f64, z_cm: f64, out_desk5: *mut f64) -> c_int {
+    if out_desk5.is_null() {
+        return 1;
+    }
+    let d = mbcore::desk_from_board(board_w_cm, board_d_cm, z_cm);
+    *out_desk5 = d.cx;
+    *out_desk5.add(1) = d.cy;
+    *out_desk5.add(2) = d.z;
+    *out_desk5.add(3) = d.hx;
+    *out_desk5.add(4) = d.hy;
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mb_nav_pick_pivot(
+    desk5: *const f64,
+    cam3: *const f64,
+    dir3: *const f64,
+    last_pivot3: *const f64,
+    out_pivot3: *mut f64,
+) -> c_int {
+    let (Some(d), Some(cam), Some(dir), Some(last)) = (desk(desk5), vec3(cam3), vec3(dir3), vec3(last_pivot3)) else {
+        return 1;
+    };
+    if out_pivot3.is_null() {
+        return 1;
+    }
+    put3(out_pivot3, pick_nav_pivot(d, cam, dir, last));
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mb_nav_orbit(
+    pivot3: *const f64,
+    cam3: *const f64,
+    yaw_deg: f64,
+    pitch_deg: f64,
+    out_cam3: *mut f64,
+    out_forward3: *mut f64,
+) -> c_int {
+    let (Some(pivot), Some(cam)) = (vec3(pivot3), vec3(cam3)) else {
+        return 1;
+    };
+    if out_cam3.is_null() || out_forward3.is_null() {
+        return 1;
+    }
+    let next = orbit_around(pivot, cam, yaw_deg, pitch_deg);
+    let forward = pivot.sub(next).norm();
+    put3(out_cam3, next);
+    put3(out_forward3, forward);
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mb_nav_look(forward3: *const f64, yaw_deg: f64, pitch_deg: f64, out_forward3: *mut f64) -> c_int {
+    let Some(f) = vec3(forward3) else {
+        return 1;
+    };
+    if out_forward3.is_null() {
+        return 1;
+    }
+    put3(out_forward3, look_in_place(f, yaw_deg, pitch_deg));
+    0
+}
+
+#[no_mangle]
+pub unsafe extern "C" fn mb_nav_zoom_toward(
+    cam3: *const f64,
+    hit3: *const f64,
+    notches: f64,
+    sens: f64,
+    out_cam3: *mut f64,
+) -> c_int {
+    let (Some(cam), Some(hit)) = (vec3(cam3), vec3(hit3)) else {
+        return 1;
+    };
+    if out_cam3.is_null() {
+        return 1;
+    }
+    put3(out_cam3, zoom_toward(cam, hit, notches, sens));
+    0
+}
+
+#[no_mangle]
+pub extern "C" fn mb_nav_zoom_distance(dist: f64, notches: f64, sens: f64) -> f64 {
+    zoom_distance(dist, notches, sens)
 }
 
 #[no_mangle]
@@ -307,6 +474,65 @@ mod tests {
             let dirty = take(mb_route(sess, 1));
             assert!(dirty["nets"].as_array().unwrap().iter().any(|n| n["id"] == "GND"));
             mb_session_close(sess);
+        }
+    }
+
+    #[test]
+    fn revision_bumps_only_on_applied_gestures_and_rides_every_result() {
+        unsafe {
+            let sess = open_mini();
+            assert_eq!(mb_abi_version(), ABI_VERSION);
+            assert_eq!(mb_session_revision(sess), 0);
+            let bad = cstring(r#"{"op":"teleport"}"#);
+            let rejected = take(mb_apply(sess, bad.as_ptr()));
+            assert_eq!(rejected["applied"], false);
+            assert_eq!(rejected["revision"], 0);
+            assert_eq!(mb_session_revision(sess), 0);
+            let g = cstring(r#"{"op":"nudge","id":"usb0","delta_um":1000}"#);
+            let ok = take(mb_apply(sess, g.as_ptr()));
+            assert_eq!(ok["applied"], true);
+            assert_eq!(ok["revision"], 1);
+            assert_eq!(mb_session_revision(sess), 1);
+            let full = take(mb_route(sess, 0));
+            assert_eq!(full["revision"], 1);
+            assert_eq!(full["dirty_only"], false);
+            let dirty = take(mb_route(sess, 1));
+            assert_eq!(dirty["dirty_only"], true);
+            mb_session_close(sess);
+            assert_eq!(mb_session_revision(ptr::null()), 0);
+        }
+    }
+
+    #[test]
+    fn nav_abi_matches_the_rust_laws_and_rejects_null() {
+        unsafe {
+            let mut desk5 = [0.0f64; 5];
+            assert_eq!(mb_nav_desk(340.0, 340.0, 0.0, desk5.as_mut_ptr()), 0);
+            assert_eq!(desk5, [170.0, 170.0, 0.0, 255.0, 255.0]);
+            let cam = [392.6, 1.0, 185.2];
+            let last = [170.0, 170.0, 1.6];
+            let v = NavVec3::new(-700.0, 900.0, -20.0).norm();
+            let dir = [v.x, v.y, v.z];
+            let mut pivot = [0.0f64; 3];
+            assert_eq!(mb_nav_pick_pivot(desk5.as_ptr(), cam.as_ptr(), dir.as_ptr(), last.as_ptr(), pivot.as_mut_ptr()), 0);
+            assert!((pivot[0] - (-85.0)).abs() > 1.0 || (pivot[1] - 425.0).abs() > 1.0, "rim corner leaked through the ABI");
+            let expect = pick_nav_pivot(mbcore::desk_from_board(340.0, 340.0, 0.0), NavVec3::new(392.6, 1.0, 185.2), v, NavVec3::new(170.0, 170.0, 1.6));
+            assert!((pivot[0] - expect.x).abs() < 1e-9 && (pivot[1] - expect.y).abs() < 1e-9 && (pivot[2] - expect.z).abs() < 1e-9);
+            let mut out_cam = [0.0f64; 3];
+            let mut out_fwd = [0.0f64; 3];
+            assert_eq!(mb_nav_orbit(last.as_ptr(), cam.as_ptr(), 25.0, -10.0, out_cam.as_mut_ptr(), out_fwd.as_mut_ptr()), 0);
+            let d0 = NavVec3::new(392.6, 1.0, 185.2).sub(NavVec3::new(170.0, 170.0, 1.6)).length();
+            let d1 = NavVec3::new(out_cam[0], out_cam[1], out_cam[2]).sub(NavVec3::new(170.0, 170.0, 1.6)).length();
+            assert!((d0 - d1).abs() < 1e-6);
+            let mut zoomed = [0.0f64; 3];
+            assert_eq!(mb_nav_zoom_toward(cam.as_ptr(), last.as_ptr(), 1.0, 0.25, zoomed.as_mut_ptr()), 0);
+            let dz = NavVec3::new(zoomed[0], zoomed[1], zoomed[2]).sub(NavVec3::new(170.0, 170.0, 1.6)).length();
+            assert!((dz - mb_nav_zoom_distance(d0, 1.0, 0.25)).abs() < 1e-6);
+            let mut fwd = [0.0f64; 3];
+            assert_eq!(mb_nav_look([0.0, 1.0, 0.0].as_ptr(), 90.0, 0.0, fwd.as_mut_ptr()), 0);
+            assert!(fwd[2].abs() < 1e-9);
+            assert_eq!(mb_nav_pick_pivot(ptr::null(), cam.as_ptr(), dir.as_ptr(), last.as_ptr(), pivot.as_mut_ptr()), 1);
+            assert_eq!(mb_nav_orbit(last.as_ptr(), cam.as_ptr(), 0.0, 0.0, ptr::null_mut(), out_fwd.as_mut_ptr()), 1);
         }
     }
 

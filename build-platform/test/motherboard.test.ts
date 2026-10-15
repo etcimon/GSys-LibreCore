@@ -17,7 +17,12 @@ import { validateConfig } from "../src/config/load.ts";
 import { mbCommand } from "../src/cli/commands/mb.ts";
 import type { PlatformContext } from "../src/context.ts";
 import { Logger } from "../src/util/log.ts";
-import { PcbPartsClient, PCBPARTS_TOOLS } from "../src/tooling/pcbparts.ts";
+import {
+  PcbPartsClient,
+  PCBPARTS_TOOLS,
+  freezeContentHash,
+  freezePinsFromPinout,
+} from "../src/tooling/pcbparts.ts";
 import {
   boardPaths,
   checkCompatibility,
@@ -338,6 +343,27 @@ describe("pcbparts client (offline paths)", () => {
     expect(res.source).toBe("stub");
     expect(res.ok).toBe(true);
     expect(res.data).toBeNull();
+  });
+
+  test("freezePinsFromPinout keeps names and drops invented XY", () => {
+    const pins = freezePinsFromPinout({
+      lcsc: "C7500843",
+      pins: [
+        { number: "1", name: "1", dx_um: 100 },
+        { number: "4", name: "4" },
+      ],
+    });
+    expect(pins).toEqual([
+      { number: "1", name: "1" },
+      { number: "4", name: "4" },
+    ]);
+    expect(freezeContentHash(pins!)).toHaveLength(64);
+  });
+
+  test("freezePinsFromPinout skips stub errors and empty lists", () => {
+    expect(freezePinsFromPinout({ error: "No EasyEDA symbol available for C5889263" })).toBeNull();
+    expect(freezePinsFromPinout({ pins: [] })).toBeNull();
+    expect(freezePinsFromPinout(null)).toBeNull();
   });
 });
 

@@ -162,7 +162,7 @@ module g6lc_apu_cmdexec
       StBrpFbReq, StBrpFbCpl, StBrpVwLo, StBrpVwLoC,
       StBrpVwHi, StBrpVwHiC, StBrpVwReq, StBrpVwCpl,
       StBrpIssue, StBrpClrN,
-      // G1c/G2a: draw assembly tail — 22-word pipeline-state ObjPay
+      // G1c/G2a: draw assembly tail — 34-word pipeline-state ObjPay
       // read, then per-binding buffer resolves through StXf* (mode VB/IB)
       StDrPay, StDrPayCpl, StDrVbN, StDrIbN
     } state_e;
@@ -182,7 +182,7 @@ module g6lc_apu_cmdexec
     logic [6:0]          pay_n_q;       // §7b arena reads left
     logic                pay_push_q;    // walk feeds the push shadow
     logic [5:0]          pay_dst_q;     // push shadow word offset
-    logic [2:0]          pay_nset_q;    // bind walk: sets in the call
+    logic [4:0]          pay_nset_q;    // bind walk: sets/bindings in the call
     logic [3:0][4:0]     pay_dnb_q;     // bind walk: ndyn per set
                                         // (call order)
     logic [3:0]          pinned_q;      // per-buffer pin success
@@ -231,8 +231,8 @@ module g6lc_apu_cmdexec
     apu_xfer_img_t       xf_img0_q, xf_img1_q;
     // G1c: graphics executor state — the raster gets these via rd_o,
     // not the work snapshot (the work record stays compute-shaped)
-    logic [3:0][31:0]    vb_hnd_q;        // bound vb {gen,slot}
-    logic [3:0][31:0]    vb_off_q;        // vkCmdBindVertexBuffers offset
+    logic [15:0][31:0]   vb_hnd_q;        // bound vb {gen,slot}
+    logic [15:0][31:0]   vb_off_q;        // vkCmdBindVertexBuffers offset
     logic [31:0]         ib_hnd_q;
     logic [31:0]         ib_off_q;
     logic [1:0]          ib_type_q;       // 1 UINT16, 2 UINT32
@@ -254,9 +254,9 @@ module g6lc_apu_cmdexec
     // binding dr_bq, 2 index buffer, 3 attachment image (READSLOT)
     logic [1:0]          xf_for_q;
     logic [31:0]         xf_xoff_q;       // operand extra offset
-    logic [2:0]          dr_bq;           // vb binding resolve cursor
-    logic [3:0]          dr_vbmask_q;     // valid binding bits (pipe w1..4)
-    logic [4:0]          dr_pi_q;         // pipeline ObjPay read cursor
+    logic [4:0]          dr_bq;           // vb binding resolve cursor
+    logic [15:0]         dr_vbmask_q;     // valid binding bits (pipe w1..16)
+    logic [5:0]          dr_pi_q;         // pipeline ObjPay read cursor
     logic                dr_bcdyn_q;      // w13: BLEND_CONSTANTS dynamic
     logic [15:0]         rd_gpay_q;       // pipeline ObjPay base (aux[31:16])
     logic [15:0]         brp_rpay_q;      // render-pass ObjPay base
@@ -576,7 +576,7 @@ module g6lc_apu_cmdexec
             ot_req_o     = '{op: APU_OBJTAB_OP_LOOKUP,
                              id: {32'h0,
                                   xf_for_q == 2'd1
-                                      ? vb_hnd_q[dr_bq[1:0]] :
+                                      ? vb_hnd_q[dr_bq[3:0]] :
                                   xf_for_q == 2'd2
                                       ? ib_hnd_q :
                                         rec_q.handle[xf_hsel]},
@@ -664,7 +664,7 @@ module g6lc_apu_cmdexec
                              kind: 6'(APU_VN_KIND_VK_IMAGE_VIEW),
                              default: '0};
         end
-        // G1c: graphics-pipeline ObjPay — 13-word state block
+        // G1c: graphics-pipeline ObjPay — 34-word state block
         StDrPay: begin
           op_req_valid_o = 1'b1;
           op_req_o       = '{op: APU_OBJPAY_OP_READ,
@@ -899,14 +899,14 @@ module g6lc_apu_cmdexec
                 // < 4 GiB).  The lo/hi test is on the RELATIVE index:
                 // nbind odd shifts the absolute parity.
                 if (32'(pay_i_q) < pay_nset_q) begin
-                  if (rec_q.imm[0] + 32'(pay_i_q) < 32'd4)
-                    vb_hnd_q[2'(rec_q.imm[0] + 32'(pay_i_q))] <=
+                  if (rec_q.imm[0] + 32'(pay_i_q) < 32'd16)
+                    vb_hnd_q[4'(rec_q.imm[0] + 32'(pay_i_q))] <=
                         cr_cpl_i.pdata;
                 end else if (pay_i_q[0] == pay_nset_q[0] &&
                              rec_q.imm[0] +
                                  32'((pay_i_q - 7'(pay_nset_q)) >> 1) <
-                                 32'd4) begin
-                  vb_off_q[2'(rec_q.imm[0] +
+                                 32'd16) begin
+                  vb_off_q[4'(rec_q.imm[0] +
                               32'((pay_i_q - 7'(pay_nset_q)) >> 1))] <=
                       cr_cpl_i.pdata;
                 end
@@ -996,7 +996,7 @@ module g6lc_apu_cmdexec
                     pay_bind_q <= 1'b1;
                     pay_dnb_q  <= '0;
                     pay_nset_q <=
-                      3'(rec_q.imm[1] < 32'd4
+                      5'(rec_q.imm[1] < 32'd4
                          ? (rec_q.imm[2] < 32'd4 - rec_q.imm[1]
                             ? rec_q.imm[2] : 32'd4 - rec_q.imm[1])
                          : 32'd0);
@@ -1019,7 +1019,7 @@ module g6lc_apu_cmdexec
                     pay_vb_q   <= 1'b1;
                     pay_ret_q  <= StNextBuf;
                     pay_i_q    <= '0;
-                    pay_nset_q <= 3'(rec_q.imm[1]);
+                    pay_nset_q <= 5'(rec_q.imm[1]);
                     pay_n_q    <= 7'(rec_q.imm[1] * 32'd3);
                   end
                   APU_VN_TYPE_VK_CMD_BIND_INDEX_BUFFER_EXT: begin
@@ -1480,7 +1480,7 @@ module g6lc_apu_cmdexec
               xf_bs_q <= ot_cpl_i.entry.size;
               // G1c: vertex/index buffer operands carry the recorded
               // bind offset on top of the resource bind_offset
-              xf_xoff_q <= xf_for_q == 2'd1 ? vb_off_q[dr_bq[1:0]] :
+              xf_xoff_q <= xf_for_q == 2'd1 ? vb_off_q[dr_bq[3:0]] :
                            xf_for_q == 2'd2 ? ib_off_q : 32'h0;
               if (xf_for_q == 2'd3) begin
                 // attachment image: layout fields land in the
@@ -1548,10 +1548,10 @@ module g6lc_apu_cmdexec
               if (xf_for_q == 2'd1) begin
                 // G1c: bound vertex buffer — aperture base += the
                 // recorded bind offset; effective bytes shrink alike
-                rd_q.vb_base[dr_bq] <= xb + xf_xoff_q;
-                rd_q.vb_size[dr_bq] <= xs > xf_xoff_q
+                rd_q.vb_base[dr_bq[3:0]] <= xb + xf_xoff_q;
+                rd_q.vb_size[dr_bq[3:0]] <= xs > xf_xoff_q
                                        ? xs - xf_xoff_q : 32'h0;
-                dr_bq   <= dr_bq + 2'd1;
+                dr_bq   <= dr_bq + 5'd1;
                 state_q <= StDrVbN;
               end else if (xf_for_q == 2'd2) begin
                 // G1c: bound index buffer
@@ -1842,7 +1842,7 @@ module g6lc_apu_cmdexec
           end
 
           // ---- G1c/G2a: draw assembly tail -----------------------------
-          // 22-word graphics-pipeline ObjPay block -> rd_q
+          // 34-word graphics-pipeline ObjPay block -> rd_q
           StDrPay:  if (op_req_ready_i) state_q <= StDrPayCpl;
           StDrPayCpl: if (op_cpl_valid_i) begin
             if (op_cpl_i.status != APU_OBJPAY_OK) begin
@@ -1850,7 +1850,7 @@ module g6lc_apu_cmdexec
               state_q <= StUnpReq;
             end else begin
               case (dr_pi_q)
-                5'd0: begin
+                6'd0: begin
                   rd_q.fs_in_mask <= op_cpl_i.rdata[31:24];
                   rd_q.topology   <= op_cpl_i.rdata[23:16];
                   rd_q.cull       <= op_cpl_i.rdata[3:2];
@@ -1858,62 +1858,64 @@ module g6lc_apu_cmdexec
                   rd_q.fs_fdepth  <= op_cpl_i.rdata[5];
                   rd_q.fs_late    <= op_cpl_i.rdata[4];
                 end
-                5'd1, 5'd2, 5'd3, 5'd4: begin
+                6'd1, 6'd2, 6'd3, 6'd4, 6'd5, 6'd6, 6'd7, 6'd8,
+                6'd9, 6'd10, 6'd11, 6'd12, 6'd13, 6'd14, 6'd15,
+                6'd16: begin
                   // key by the description's Vk binding number — rast
                   // selects vb_* with attr.binding, not the table index.
                   // Invalid entries carry binding 0 — they must not
                   // clobber a valid entry that already claimed it
                   if (op_cpl_i.rdata[20]) begin
-                    dr_vbmask_q[op_cpl_i.rdata[17:16]] <= 1'b1;
-                    rd_q.vb_stride[op_cpl_i.rdata[17:16]] <=
+                    dr_vbmask_q[op_cpl_i.rdata[19:16]] <= 1'b1;
+                    rd_q.vb_stride[op_cpl_i.rdata[19:16]] <=
                         op_cpl_i.rdata[15:0];
                     // G2a: binding word bit 21 = inputRate INSTANCE
-                    rd_q.vb_rate[op_cpl_i.rdata[17:16]] <=
+                    rd_q.vb_rate[op_cpl_i.rdata[19:16]] <=
                         op_cpl_i.rdata[21];
                   end
 // pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
                   $display("[DBG] gpaybind i=%0d rd=%08x idx=%0d t=%0t",
-                           dr_pi_q, op_cpl_i.rdata, op_cpl_i.rdata[17:16],
+                           dr_pi_q, op_cpl_i.rdata, op_cpl_i.rdata[19:16],
                            $time);
 `endif
 // pragma translate_on
                 end
-                5'd5, 5'd6, 5'd7, 5'd8,
-                5'd9, 5'd10, 5'd11, 5'd12: begin
-                  rd_q.attr[dr_pi_q[3:0] - 4'd5].valid   <=
+                6'd17, 6'd18, 6'd19, 6'd20,
+                6'd21, 6'd22, 6'd23, 6'd24: begin
+                  rd_q.attr[3'(dr_pi_q - 6'd17)].valid   <=
                       op_cpl_i.rdata[31];
-                  rd_q.attr[dr_pi_q[3:0] - 4'd5].loc     <=
+                  rd_q.attr[3'(dr_pi_q - 6'd17)].loc     <=
                       op_cpl_i.rdata[26:24];
-                  rd_q.attr[dr_pi_q[3:0] - 4'd5].binding <=
-                      op_cpl_i.rdata[21:20];
-                  rd_q.attr[dr_pi_q[3:0] - 4'd5].fmt     <=
+                  rd_q.attr[3'(dr_pi_q - 6'd17)].binding <=
+                      op_cpl_i.rdata[23:20];
+                  rd_q.attr[3'(dr_pi_q - 6'd17)].fmt     <=
                       op_cpl_i.rdata[19:12];
-                  rd_q.attr[dr_pi_q[3:0] - 4'd5].offset  <=
+                  rd_q.attr[3'(dr_pi_q - 6'd17)].offset  <=
                       op_cpl_i.rdata[11:0];
                 end
-                5'd13: begin
+                6'd25: begin
                   // G2a: depth state + dynamic-blend-constants flag
                   rd_q.depth_test  <= op_cpl_i.rdata[0];
                   rd_q.depth_write <= op_cpl_i.rdata[1];
                   rd_q.depth_op    <= op_cpl_i.rdata[6:4];
                   dr_bcdyn_q       <= op_cpl_i.rdata[2];
                 end
-                5'd14, 5'd15, 5'd16, 5'd17: begin
+                6'd26, 6'd27, 6'd28, 6'd29: begin
                   // per-attachment blend state, apu_rast_blend_t layout
-                  rd_q.blend[2'(dr_pi_q - 5'd14)] <=
+                  rd_q.blend[2'(dr_pi_q - 6'd26)] <=
                       apu_rast_blend_t'(op_cpl_i.rdata);
                 end
                 default: begin
-                  // w18..21: static blendConstants (dynamic ones are
+                  // w30..33: static blendConstants (dynamic ones are
                   // overlaid from bconst_q at the walk's end)
                   if (!dr_bcdyn_q)
-                    rd_q.blend_const[2'(dr_pi_q - 5'd18)] <=
+                    rd_q.blend_const[2'(dr_pi_q - 6'd30)] <=
                         op_cpl_i.rdata;
                 end
               endcase
-              dr_pi_q <= dr_pi_q + 5'd1;
-              if (dr_pi_q == 5'd21) begin
+              dr_pi_q <= dr_pi_q + 6'd1;
+              if (dr_pi_q == 6'd33) begin
                 if (dr_bcdyn_q) rd_q.blend_const <= bconst_q;
                 dr_bq   <= '0;
                 state_q <= StDrVbN;
@@ -1927,18 +1929,18 @@ module g6lc_apu_cmdexec
 // pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
             $display("[DBG] drvb n bq=%0d mask=%04x vbh=%08x stride0=%0d t=%0t",
-                     dr_bq, dr_vbmask_q, vb_hnd_q[dr_bq[1:0]],
+                     dr_bq, dr_vbmask_q, vb_hnd_q[dr_bq[3:0]],
                      rd_q.vb_stride[0], $time);
 `endif
 // pragma translate_on
-            if (dr_bq == 3'd4) begin
+            if (dr_bq == 5'd16) begin
               state_q <= StDrIbN;
-            end else if (dr_vbmask_q[dr_bq[1:0]] &&
-                         vb_hnd_q[dr_bq[1:0]] != 32'h0) begin
+            end else if (dr_vbmask_q[dr_bq[3:0]] &&
+                         vb_hnd_q[dr_bq[3:0]] != 32'h0) begin
               xf_for_q <= 2'd1;
               state_q  <= StXfBufReq;
             end else begin
-              dr_bq   <= dr_bq + 3'd1;
+              dr_bq   <= dr_bq + 5'd1;
               state_q <= StDrVbN;
             end
           end

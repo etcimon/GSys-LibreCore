@@ -78,7 +78,7 @@ def build_board(boardid: str) -> int:
     except Exception as exc:  # noqa: BLE001
         print(f"[corev-mb] netlist generation skipped: {exc}")
 
-    _write_bom(spec, out_dir / f"{boardid}_bom.json")
+    _write_bom(spec, out_dir / f"{boardid}_bom.json", parts)
     return 0 if report.ok else 1
 
 
@@ -98,14 +98,38 @@ def _attempt_fixes(spec: dict[str, Any], messages: list[str]) -> None:
         print(f"[corev-mb]   {phy.get('ref')}: alternatives for {mpn} -> source={res.source} ok={res.ok}")
 
 
-def _write_bom(spec: dict[str, Any], path: Path) -> None:
+def _write_bom(spec: dict[str, Any], path: Path, parts: dict[str, Any] | None = None) -> None:
+    parts = parts or {}
+    rows = []
+    core = spec.get("core") if isinstance(spec.get("core"), dict) else {}
+    rows.append({
+        "id": "soc",
+        "domain": "core",
+        "kind": "soc",
+        "footprint": "",
+        "mpn": "",
+        "lcsc": "",
+        "config": core.get("config", ""),
+    })
+    for iface in spec.get("interfaces", []):
+        ident = str(iface.get("id") or "")
+        part = parts.get(ident)
+        fields = getattr(part, "fields", {}) if part is not None else {}
+        rows.append({
+            "id": ident,
+            "domain": iface.get("domain"),
+            "kind": iface.get("kind"),
+            "footprint": getattr(part, "footprint", "") if part is not None else "",
+            "mpn": fields.get("MPN", "") if isinstance(fields, dict) else "",
+            "lcsc": fields.get("LCSC", "") if isinstance(fields, dict) else "",
+            "config": "",
+            "pin_count": getattr(part, "mb_pin_count", 0) if part is not None else 0,
+            "pins": getattr(part, "mb_pins", []) if part is not None else [],
+        })
     bom = {
         "board": spec.get("boardid"),
         "phys": spec.get("phys", []),
-        "interfaces": [
-            {"id": i.get("id"), "domain": i.get("domain"), "kind": i.get("kind"), "phy": i.get("phy")}
-            for i in spec.get("interfaces", [])
-        ],
+        "interfaces": rows,
     }
     path.write_text(json.dumps(bom, indent=2))
     print(f"[corev-mb] wrote BOM: {path}")

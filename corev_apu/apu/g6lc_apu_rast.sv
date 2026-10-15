@@ -759,7 +759,7 @@ module g6lc_apu_rast
     wire              bbox_empty = bhi_x < blo_x || bhi_y < blo_y;
     // current attribute fields
     wire [7:0]  a_fmt = dr_q.attr[a_q].fmt;
-    wire [1:0]  a_bnd = dr_q.attr[a_q].binding;
+    wire [3:0]  a_bnd = dr_q.attr[a_q].binding;
     wire [31:0] a_off = 32'({18'h0, dr_q.attr[a_q].offset});
     wire        attr_ok = dr_q.attr[a_q].valid && f_asz(a_fmt) != 5'd0;
     // gather-range bounds check (signed: a negative vertex index must

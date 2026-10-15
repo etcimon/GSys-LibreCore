@@ -1,0 +1,11 @@
+dEQP-VK.glsl.texture_functions.texture.sampler2d_fixed_compute
+dEQP-VK.glsl.texture_functions.texture.sampler2d_float_compute
+dEQP-VK.glsl.texture_functions.texture.sampler2darray_fixed_compute
+dEQP-VK.glsl.texture_functions.texture.sampler2darray_float_compute
+dEQP-VK.glsl.texture_functions.texture.sampler2darrayshadow_compute
+dEQP-VK.glsl.texture_functions.texture.sampler2dshadow_compute
+dEQP-VK.glsl.texture_functions.textureproj.sampler2d_vec3_fixed_compute
+dEQP-VK.glsl.texture_functions.textureproj.sampler2d_vec3_float_compute
+dEQP-VK.glsl.texture_functions.textureproj.sampler2d_vec4_fixed_compute
+dEQP-VK.glsl.texture_functions.textureproj.sampler2d_vec4_float_compute
+dEQP-VK.glsl.texture_functions.textureproj.sampler2dshadow_compute

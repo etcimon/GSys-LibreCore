@@ -1255,7 +1255,9 @@ module tb_g6lc_apu_shwave;
   endtask
 
   // G1a graphics wave work — no mut/bad/opt arms (single vector each)
-  string gfx_names [14] = '{"vs_passthru", "fs_color",
+  string gfx_names [15] = '{"vs_passthru",
+                          // G3a-ii: vertex-stage ExplicitLod sample
+                          "vs_texlod", "fs_color",
                           "fs_deriv", "fs_tex_implicit",
                           // G3a-i: FS function calls, discard, GLSL.450
                           // geometry ops, FS SSBO atomics, demote

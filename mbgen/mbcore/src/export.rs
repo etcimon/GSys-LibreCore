@@ -98,8 +98,12 @@ pub fn compile(design: &Design) -> Result<Bundle, PackError> {
         "core": {
             "config": card.id,
             "xlen": card.xlen,
-            "extensions": card.isa.trim_start_matches("rv64").chars().map(|c| c.to_string()).collect::<Vec<_>>(),
+            "extensions": isa_letters(card.isa),
             "isaString": card.isa,
+            // Topology and provenance read from the config package, so `mb ingest`
+            // can refuse a board whose numbers no longer match core/include.
+            "harts": { "count": card.profile.harts, "cores": card.cores, "threads": card.threads },
+            "source": { "path": card.profile.source.path, "sha256": card.profile.source.sha256 },
         },
         "apu": {
             "axiDataWidth": card.axi_bits,
@@ -116,7 +120,8 @@ pub fn compile(design: &Design) -> Result<Bundle, PackError> {
         "product": built.settings.product,
         "isa": isa_json(card),
         "memory": { "dram_base": "0x80000000", "dram_len": "0x40000000", "text_offset": "0x200000" },
-        "harts": { "count": card.cores * card.threads, "cores": card.cores, "threads": card.threads },
+        "harts": { "count": card.profile.harts, "cores": card.cores, "threads": card.threads },
+        "source": { "config": card.id, "path": card.profile.source.path, "sha256": card.profile.source.sha256 },
         "entry": { "hotkey": built.settings.hotkey, "timeout_ms": built.settings.timeout_ms },
         "core": { "ooo": card.ooo },
         "connectors": { "uncore": ["uart", "spi"] },
@@ -178,6 +183,12 @@ fn push(design: &mut Design, id: &str, role_id: &str) -> Result<(), PackError> {
         y_um: None,
     });
     Ok(())
+}
+
+/// Single-letter extension tokens after the `rv32`/`rv64` base.
+fn isa_letters(isa: &str) -> Vec<String> {
+    let body = isa.strip_prefix("rv64").or_else(|| isa.strip_prefix("rv32")).unwrap_or(isa);
+    body.chars().filter(|c| c.is_ascii_alphabetic()).map(|c| c.to_string()).collect()
 }
 
 fn isa_json(card: &crate::catalog::PackageCard) -> Value {
@@ -251,7 +262,7 @@ fn skidl_py(design: &Design) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::catalog::apply_package;
+    use crate::catalog::{apply_package, packages};
     use crate::scene::scene;
     use crate::template::Design;
 
@@ -292,15 +303,45 @@ mod tests {
         assert_eq!(bundle.firmware["entry"]["timeout_ms"], 2000);
         assert_eq!(bundle.firmware["product"], "desktop");
         assert_eq!(bundle.firmware["isa"]["xlen"], 64);
-        assert_eq!(bundle.firmware["isa"]["march"], "rv64imafdc");
+        // The ISA string is read from the config package, not typed here.
+        let baseline = crate::profile::profile("cv64a6_imafdc_sv39").unwrap();
+        assert_eq!(bundle.firmware["isa"]["march"], baseline.isa);
+        for letter in ["i", "m", "a", "f", "d", "c"] {
+            assert!(baseline.isa.contains(letter), "{} lacks {letter}", baseline.isa);
+        }
         assert_eq!(bundle.firmware["isa"]["mmu"], "sv39");
         assert_eq!(bundle.firmware["isa"]["extensions"]["d"], "live");
         let ooo = compile(&apply_package(&design, "g6lc64_ooo_int").unwrap()).unwrap();
-        assert_eq!(ooo.firmware["isa"]["march"], "rv64imac");
+        assert_eq!(ooo.firmware["isa"]["march"], crate::profile::profile("g6lc64_ooo_int").unwrap().isa);
         assert!(ooo.firmware["isa"].get("mmu").is_none());
         assert_eq!(ooo.firmware["core"]["ooo"], true);
         assert!(bundle.skidl_py.contains("Net('GND')"));
         assert!(bundle.scene.as_array().unwrap().iter().any(|b| b["id"] == "pcb"));
+    }
+
+    #[test]
+    fn exported_hart_count_is_the_config_package_topology_with_provenance() {
+        // The literal table used to say ooo_server = 4 harts; the RTL has 4 x 2.
+        let design = apply_package(&Design::mini_itx().unwrap(), "g6lc64_ooo_server").unwrap();
+        let bundle = compile(&design).unwrap();
+        let p = crate::profile::profile("g6lc64_ooo_server").unwrap();
+        assert_eq!((p.cores, p.threads), (4, 2));
+        assert_eq!(bundle.firmware["harts"]["count"], 8);
+        assert_eq!(bundle.firmware["harts"]["cores"], 4);
+        assert_eq!(bundle.firmware["harts"]["threads"], 2);
+        assert_eq!(bundle.platform["core"]["harts"]["count"], 8);
+        assert_eq!(bundle.platform["core"]["config"], "g6lc64_ooo_server");
+        assert_eq!(bundle.platform["core"]["source"]["path"], "core/include/g6lc64_ooo_server_config_pkg.sv");
+        assert_eq!(bundle.platform["core"]["source"]["sha256"].as_str().unwrap().len(), 64);
+        assert_eq!(bundle.firmware["source"]["sha256"], bundle.platform["core"]["source"]["sha256"]);
+        assert_eq!(bundle.platform["core"]["isaString"], p.isa);
+    }
+
+    #[test]
+    fn only_qualified_profiles_are_offered_and_an_unknown_one_is_refused() {
+        assert!(packages().iter().all(|c| c.profile.is_qualified()));
+        assert!(packages().len() >= 15);
+        assert!(apply_package(&Design::mini_itx().unwrap(), "g6lc64_not_a_profile").is_err());
     }
 
     #[test]

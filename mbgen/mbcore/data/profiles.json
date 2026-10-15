@@ -1,0 +1,633 @@
+{
+  "schema_version": 1,
+  "generated_by": "mbgen profiles (mbcore::profile)",
+  "profiles": [
+    {
+      "id": "cv32a60x",
+      "group": "baseline",
+      "isa": "rv32imcb",
+      "xlen": 32,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": false,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/cv32a60x_config_pkg.sv",
+        "sha256": "e8ea4cf0d115cc38e2ff4123b30d29d90a5fe9bcfbc6c790f4872ca17b3a3c81"
+      }
+    },
+    {
+      "id": "cv32a65x",
+      "group": "baseline",
+      "isa": "rv32imcb",
+      "xlen": 32,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": false,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/cv32a65x_config_pkg.sv",
+        "sha256": "0ae132451bb05e126981e95f628eb765e2c518c41bff9345ccc5fb17da663325"
+      }
+    },
+    {
+      "id": "cv32a6_ima_sv32_fpga",
+      "group": "baseline",
+      "isa": "rv32ima",
+      "xlen": 32,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": false,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/cv32a6_ima_sv32_fpga_config_pkg.sv",
+        "sha256": "55932732a4d8b84bb048e05d52fd62cff4d02f5cdca311cbb86555b3bdfd3f1d"
+      }
+    },
+    {
+      "id": "cv32a6_imac_sv32",
+      "group": "baseline",
+      "isa": "rv32imacb",
+      "xlen": 32,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": false,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/cv32a6_imac_sv32_config_pkg.sv",
+        "sha256": "09b75322da2b8846888257def1b138092c886d69c37053982786201fb109f1d6"
+      }
+    },
+    {
+      "id": "cv64a60ax",
+      "group": "baseline",
+      "isa": "rv64imafdcb",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": false,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 128,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/cv64a60ax_config_pkg.sv",
+        "sha256": "aa0e03a9ff713627d78001a17f1f4019404f290074a27cd08d69c90dcb97d67d"
+      }
+    },
+    {
+      "id": "cv64a6_imafdc_sv39",
+      "group": "baseline",
+      "isa": "rv64imafdcb",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": false,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/cv64a6_imafdc_sv39_config_pkg.sv",
+        "sha256": "ce66f0dd3875dbb590c678ecbf543a3cd8de80d7d9b9d7df2903b0203235fb97"
+      }
+    },
+    {
+      "id": "cv64a6_imafdc_sv39_hpdcache",
+      "group": "baseline",
+      "isa": "rv64imafdcb",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": false,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/cv64a6_imafdc_sv39_hpdcache_config_pkg.sv",
+        "sha256": "120077b08aaca4bbc2c4da6a819a93fea369a1677659979a5ee325791444ad10"
+      }
+    },
+    {
+      "id": "cv64a6_imafdc_sv39_hpdcache_wb",
+      "group": "baseline",
+      "isa": "rv64imafdcb",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": false,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv",
+        "sha256": "fe104b9becb6549fb258deab181db8bed7174aae9488f68c41171d8038ef24d2"
+      }
+    },
+    {
+      "id": "cv64a6_imafdc_sv39_openpiton",
+      "group": "baseline",
+      "isa": "rv64imafdc",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": false,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/cv64a6_imafdc_sv39_openpiton_config_pkg.sv",
+        "sha256": "acd11ce015321fee1d174886f3e55d021024b3011fd4861f96e2bb46aed735a9"
+      }
+    },
+    {
+      "id": "cv64a6_imafdc_sv39_wb",
+      "group": "baseline",
+      "isa": "rv64imafdcb",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": false,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/cv64a6_imafdc_sv39_wb_config_pkg.sv",
+        "sha256": "b32daef2ab885c891c30e6da6f1bb9becf79c6a04722cd745ccb3b953e9ca3b1"
+      }
+    },
+    {
+      "id": "cv64a6_imafdch_sv39",
+      "group": "baseline",
+      "isa": "rv64imafdcbh",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": false,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/cv64a6_imafdch_sv39_config_pkg.sv",
+        "sha256": "33a5c79942b700834bc07ed339281340e1d00ce79fa1ba161d0e7dac651a97ae"
+      }
+    },
+    {
+      "id": "cv64a6_imafdch_sv39_wb",
+      "group": "baseline",
+      "isa": "rv64imafdcbh",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": false,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/cv64a6_imafdch_sv39_wb_config_pkg.sv",
+        "sha256": "6546813df22a6591f5a14f5de14db8a1c523d6b2b61944b56bfc9de32e2c4615"
+      }
+    },
+    {
+      "id": "cv64a6_imafdcv_sv39",
+      "group": "baseline",
+      "isa": "rv64imafdcv",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": false,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/cv64a6_imafdcv_sv39_config_pkg.sv",
+        "sha256": "7fd918a8d76febaa4eec6632cecded7a47fe275f2bfcdb3815f2627b03fcc7f8"
+      }
+    },
+    {
+      "id": "cv64a6_spec_deep",
+      "group": "baseline",
+      "isa": "rv64imafdcb",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": false,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/cv64a6_spec_deep_config_pkg.sv",
+        "sha256": "0a4a28d3c7a3d304c45acd313186e5b1bd2a0f043e8c11bf3e765b140622d004"
+      }
+    },
+    {
+      "id": "g6lc64_ai",
+      "group": "ai",
+      "isa": "rv64imafdcbh",
+      "xlen": 64,
+      "cores": 2,
+      "threads": 1,
+      "harts": 2,
+      "ooo": false,
+      "l2": true,
+      "l3": false,
+      "ai": true,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_ai_config_pkg.sv",
+        "sha256": "28866c27a59b95508d6b30d87bd1ff4bfd3244b18316add0a6b2df42bd8dc03a"
+      }
+    },
+    {
+      "id": "g6lc64_ooo",
+      "group": "ooo",
+      "isa": "rv64imafdcb",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": true,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_ooo_config_pkg.sv",
+        "sha256": "2ed92516dc00df7137a14cc544fe4c13ae34173fbd1248a7d0cc3b2d8f4f4825"
+      }
+    },
+    {
+      "id": "g6lc64_ooo_int2",
+      "group": "ooo",
+      "isa": "rv64imacb",
+      "xlen": 64,
+      "cores": 2,
+      "threads": 2,
+      "harts": 4,
+      "ooo": true,
+      "l2": true,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_ooo_int2_config_pkg.sv",
+        "sha256": "c4de5619e30bcb94abcc5ab0a182f173125b5c57301fedfe487e7c630a60cac0"
+      }
+    },
+    {
+      "id": "g6lc64_ooo_int2_l3_ai",
+      "group": "ai",
+      "isa": "rv64imafdcb",
+      "xlen": 64,
+      "cores": 2,
+      "threads": 2,
+      "harts": 4,
+      "ooo": true,
+      "l2": true,
+      "l3": true,
+      "ai": true,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_ooo_int2_l3_ai_config_pkg.sv",
+        "sha256": "b52dbf245efc217040b0830e2b03bbea88656cf16021beffb101b604d20aba27"
+      }
+    },
+    {
+      "id": "g6lc64_ooo_int2_l3",
+      "group": "ooo",
+      "isa": "rv64imafdcb",
+      "xlen": 64,
+      "cores": 2,
+      "threads": 2,
+      "harts": 4,
+      "ooo": true,
+      "l2": true,
+      "l3": true,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_ooo_int2_l3_config_pkg.sv",
+        "sha256": "bb8ac6034cf0728836f78234feacea3e9c9c02ba89620ce21a765f622045c634"
+      }
+    },
+    {
+      "id": "g6lc64_ooo_int",
+      "group": "ooo",
+      "isa": "rv64imacb",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 1,
+      "harts": 1,
+      "ooo": true,
+      "l2": false,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_ooo_int_config_pkg.sv",
+        "sha256": "cacc0619c48526e3b3835c7eaead5d366910de2188312686a065fb99897e4f3b"
+      }
+    },
+    {
+      "id": "g6lc64_ooo_server1",
+      "group": "ooo",
+      "isa": "rv64imafdcbh",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 2,
+      "harts": 2,
+      "ooo": true,
+      "l2": true,
+      "l3": true,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_ooo_server1_config_pkg.sv",
+        "sha256": "63167f5d523592d9b0f5a2ca62d49e6b1417a18c595a2eaedf347264bf5b083d"
+      }
+    },
+    {
+      "id": "g6lc64_ooo_server",
+      "group": "ooo",
+      "isa": "rv64imafdcbh",
+      "xlen": 64,
+      "cores": 4,
+      "threads": 2,
+      "harts": 8,
+      "ooo": true,
+      "l2": true,
+      "l3": true,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_ooo_server_config_pkg.sv",
+        "sha256": "5bdd129ec16b7810875435c86adca5194024037b495278f953935bdc91cab82d"
+      }
+    },
+    {
+      "id": "g6lc64_server_math",
+      "group": "server",
+      "isa": "rv64imafdcbh",
+      "xlen": 64,
+      "cores": 2,
+      "threads": 1,
+      "harts": 2,
+      "ooo": false,
+      "l2": true,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_server_math_config_pkg.sv",
+        "sha256": "f8e9bf124cad8ec6d69cb00a991144b83abadb15cd79de6c0aea5320436de2ed"
+      }
+    },
+    {
+      "id": "g6lc64_server_math_l3",
+      "group": "server",
+      "isa": "rv64imafdcbh",
+      "xlen": 64,
+      "cores": 2,
+      "threads": 1,
+      "harts": 2,
+      "ooo": false,
+      "l2": true,
+      "l3": true,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_server_math_l3_config_pkg.sv",
+        "sha256": "aae6547891e731ceaa1f577b1dbd19a0af53baca060837cde4394bb57f53b614"
+      }
+    },
+    {
+      "id": "g6lc64_server_math_v",
+      "group": "server",
+      "isa": "rv64imafdcbvh",
+      "xlen": 64,
+      "cores": 2,
+      "threads": 2,
+      "harts": 4,
+      "ooo": false,
+      "l2": true,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_server_math_v_config_pkg.sv",
+        "sha256": "7b1baf2a7160b44f2f57839795d7f7fac6c0584a63c9a732e331bc51b2f49851"
+      }
+    },
+    {
+      "id": "g6lc64_smt2_ai",
+      "group": "ai",
+      "isa": "rv64imafdcb",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 2,
+      "harts": 2,
+      "ooo": false,
+      "l2": true,
+      "l3": false,
+      "ai": true,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_smt2_ai_config_pkg.sv",
+        "sha256": "aa6d8bb688904dc1fe49f4c5842d88816be916e4b90f98b35b06e0a942d48d0e"
+      }
+    },
+    {
+      "id": "g6lc64_smt2",
+      "group": "smt",
+      "isa": "rv64imafdcb",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 2,
+      "harts": 2,
+      "ooo": false,
+      "l2": true,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_smt2_config_pkg.sv",
+        "sha256": "733a793b3e6806ad392b3e28755ebf2264b7f725a1640dfd6e17bc78d6b675fc"
+      }
+    },
+    {
+      "id": "g6lc64_smt2_l3",
+      "group": "smt",
+      "isa": "rv64imafdcb",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 2,
+      "harts": 2,
+      "ooo": false,
+      "l2": true,
+      "l3": true,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_smt2_l3_config_pkg.sv",
+        "sha256": "41f25acc241b8abd28cd66f46775bcd93f862b852e04a7b7fc9edd857ea4e617"
+      }
+    },
+    {
+      "id": "g6lc64_smt2_ooo_int_ai",
+      "group": "ai",
+      "isa": "rv64imacb",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 2,
+      "harts": 2,
+      "ooo": true,
+      "l2": true,
+      "l3": false,
+      "ai": true,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_smt2_ooo_int_ai_config_pkg.sv",
+        "sha256": "9cc8f8478458e51b8617b00ec295c5eb3da0d5bd589096c55395019379eb672b"
+      }
+    },
+    {
+      "id": "g6lc64_smt2_ooo_int",
+      "group": "ooo",
+      "isa": "rv64imacb",
+      "xlen": 64,
+      "cores": 1,
+      "threads": 2,
+      "harts": 2,
+      "ooo": true,
+      "l2": true,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_smt2_ooo_int_config_pkg.sv",
+        "sha256": "76ba3985914337edbcb1eed578fc4c6b326ce703587099813723670b4c2411de"
+      }
+    },
+    {
+      "id": "g6lc64_stream8",
+      "group": "stream",
+      "isa": "rv64imafdcbh",
+      "xlen": 64,
+      "cores": 2,
+      "threads": 1,
+      "harts": 2,
+      "ooo": false,
+      "l2": true,
+      "l3": false,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_stream8_config_pkg.sv",
+        "sha256": "05bb1b06ce89cc15f7304226eb0363db02a37049249b12132d4b70b6781e8871"
+      }
+    },
+    {
+      "id": "g6lc64_stream8_l3_ai",
+      "group": "ai",
+      "isa": "rv64imafdcbh",
+      "xlen": 64,
+      "cores": 2,
+      "threads": 1,
+      "harts": 2,
+      "ooo": false,
+      "l2": true,
+      "l3": true,
+      "ai": true,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_stream8_l3_ai_config_pkg.sv",
+        "sha256": "877dd6dad8147af8058b8d0f9253faf4c0a4fd8306458a569f7dd6e76d8becb4"
+      }
+    },
+    {
+      "id": "g6lc64_stream8_l3",
+      "group": "stream",
+      "isa": "rv64imafdcbh",
+      "xlen": 64,
+      "cores": 2,
+      "threads": 1,
+      "harts": 2,
+      "ooo": false,
+      "l2": true,
+      "l3": true,
+      "ai": false,
+      "axi_bits": 64,
+      "status": "qualified",
+      "source": {
+        "path": "core/include/g6lc64_stream8_l3_config_pkg.sv",
+        "sha256": "09d677d7b99df436459902502892549f59d68be685b6d61c6b20b64f77ce5809"
+      }
+    }
+  ]
+}

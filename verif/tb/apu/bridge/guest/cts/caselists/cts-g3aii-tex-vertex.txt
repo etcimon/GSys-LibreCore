@@ -1,0 +1,11 @@
+dEQP-VK.glsl.texture_functions.texture.sampler2d_fixed_vertex
+dEQP-VK.glsl.texture_functions.texture.sampler2d_float_vertex
+dEQP-VK.glsl.texture_functions.texture.sampler2darray_fixed_vertex
+dEQP-VK.glsl.texture_functions.texture.sampler2darray_float_vertex
+dEQP-VK.glsl.texture_functions.texture.sampler2darrayshadow_vertex
+dEQP-VK.glsl.texture_functions.texture.sampler2dshadow_vertex
+dEQP-VK.glsl.texture_functions.textureproj.sampler2d_vec3_fixed_vertex
+dEQP-VK.glsl.texture_functions.textureproj.sampler2d_vec3_float_vertex
+dEQP-VK.glsl.texture_functions.textureproj.sampler2d_vec4_fixed_vertex
+dEQP-VK.glsl.texture_functions.textureproj.sampler2d_vec4_float_vertex
+dEQP-VK.glsl.texture_functions.textureproj.sampler2dshadow_vertex

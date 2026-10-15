@@ -331,7 +331,7 @@ module g6lc_apu_vnfront
       StRetSm, StRetSmF,
       // G1c: graphics-pipeline element — staged keep-word parse in
       // vk.xml decode order (StGpRd/StGpCap walk a phase counter),
-      // the VS/FS module commit loop, then the 13-word ObjPay state
+      // the VS/FS module commit loop, then the 34-word ObjPay state
       // block + the aux pair; StGpUnr unwinds taken ShaderCore refs
       // on failure, StGpFrC releases the ObjPay extent
       StGpRd, StGpCap, StGpModL, StGpModC, StGpRefC,
@@ -539,7 +539,7 @@ module g6lc_apu_vnfront
     // G1c: vkCreateGraphicsPipelines element state — the staged keep
     // words parse in vk.xml decode order behind phase counter
     // gp_ph_q; the VS then FS modules commit through the StShCommit
-    // loop (gp_st_q) and the packed 13-word state block lands in
+    // loop (gp_st_q) and the packed 34-word state block lands in
     // ObjPay (layout below at gp_pay_w).
     logic                pre_gp_q;    // elements are graphics pipes
     logic [5:0]          gp_ph_q;     // parse phase
@@ -551,14 +551,14 @@ module g6lc_apu_vnfront
     logic [7:0]          gp_fsm_q;    // FS entry.in_mask
     logic                gp_late_q;   // FS entry.fs_late (G3a-i late-Z)
     logic                gp_fdep_q;   // FS entry.fs_fdepth (writes FragDepth)
-    logic [3:0]          gp_nbind_q;
+    logic [4:0]          gp_nbind_q;
     logic [3:0]          gp_nattr_q;
-    logic [3:0]          gp_i_q;      // binding/attr/attach/dyn cursor
+    logic [4:0]          gp_i_q;      // binding/attr/attach/dyn cursor
     logic [7:0]          gp_top_q;    // VkPrimitiveTopology
     logic [1:0]          gp_cull_q;   // VkCullModeFlags
     logic                gp_ff_q;     // VK_FRONT_FACE_COUNTER_CLOCKWISE
-    logic [3:0][21:0]    gp_bnd_q;    // {rate[21], valid[20], binding[19:16], stride[15:0]}
-    logic [7:0][31:0]    gp_atr_q;    // {valid[31], loc[26:24], binding[21:20],
+    logic [15:0][21:0]   gp_bnd_q;    // {rate[21], valid[20], binding[19:16], stride[15:0]}
+    logic [7:0][31:0]    gp_atr_q;    // {valid[31], loc[26:24], binding[23:20],
                                     //   fmt[19:12], offset[11:0]}
     // G2a: depth/stencil + per-attachment blend + constants
     logic                gp_dte_q, gp_dwr_q, gp_sten_q;
@@ -738,35 +738,35 @@ module g6lc_apu_vnfront
       return f == 32'd37 || f == 32'd100 || f == 32'd103 ||
              f == 32'd106 || f == 32'd109;
     endfunction
-    // G2a: graphics-pipeline ObjPay state word i (22 words):
+    // G2a: graphics-pipeline ObjPay state word i (34 words):
     //   w0 = {fs_in_mask[31:24], topology[23:16], nattr[15:12],
-    //         nbind[11:8], 2'b0, fs_fdepth[5], fs_late[4],
+    //         nbind[11:7], 1'b0, fs_fdepth[5], fs_late[4],
     //         cull[3:2], front_ccw[1], 1'b1}
     //   w1+b = {10'h0, rate[21], valid[20], binding[19:16], stride[15:0]}
-    //   w5+a = {valid[31], loc[26:24], binding[21:20], fmt[19:12],
-    //           offset[11:0]}
-    //   w13 = {16'h0, 1'b0, nattach[14:12], 3'h0[11:9],
+    //   w17+a = {valid[31], loc[26:24], binding[23:20], fmt[19:12],
+    //            offset[11:0]}
+    //   w25 = {16'h0, 1'b0, nattach[14:12], 3'h0[11:9],
     //          stencilTest[8], 1'b0, compareOp[6:4], 1'b0, bc_dyn[2],
     //          depthWrite[1], depthTest[0]}
-    //   w14+a = per-attachment VkPipelineColorBlendAttachmentState as
+    //   w26+a = per-attachment VkPipelineColorBlendAttachmentState as
     //           apu_rast_blend_t: {pad[31], mask[30:27], opA[26:24],
     //           dstA[23:19], srcA[18:14], opC[13:11], dstC[10:6],
     //           srcC[5:1], en[0]}
-    //   w18+a = static blendConstants f32[4]
-    function automatic logic [31:0] gp_pay_w(input logic [4:0] i);
-      if (i == 5'd0)
+    //   w30+a = static blendConstants f32[4]
+    function automatic logic [31:0] gp_pay_w(input logic [5:0] i);
+      if (i == 6'd0)
         return {gp_fsm_q, gp_top_q, gp_nattr_q, gp_nbind_q,
-                2'b0, gp_fdep_q, gp_late_q, gp_cull_q, gp_ff_q, 1'b1};
-      if (i < 5'd5)
-        return {10'h0, gp_bnd_q[i - 5'd1]};
-      if (i < 5'd13)
-        return gp_atr_q[i - 5'd5];
-      if (i == 5'd13)
+                1'b0, gp_fdep_q, gp_late_q, gp_cull_q, gp_ff_q, 1'b1};
+      if (i < 6'd17)
+        return {10'h0, gp_bnd_q[4'(i - 6'd1)]};
+      if (i < 6'd25)
+        return gp_atr_q[3'(i - 6'd17)];
+      if (i == 6'd25)
         return {16'h0, 1'b0, gp_natt_q, 3'h0, gp_sten_q, 1'b0,
                 gp_dcmp_q, 1'b0, gp_bcdyn_q, gp_dwr_q, gp_dte_q};
-      if (i < 5'd18)
-        return gp_blend_q[i - 5'd14];
-      return gp_bconst_q[i - 5'd18];
+      if (i < 6'd30)
+        return gp_blend_q[2'(i - 6'd26)];
+      return gp_bconst_q[2'(i - 6'd30)];
     endfunction
     // wire format -> device id, or 8'hFF unsupported
     function automatic logic [7:0] f_img_fmt(input logic [31:0] f);
@@ -1592,7 +1592,7 @@ module g6lc_apu_vnfront
                   // No ObjPay extent — the object keeps {slot,layout}
                   // in aux and failed elements echo VK_NULL_HANDLE.
                   // G1c: graphics elements take the staged keep-word
-                  // parse at StGpRd and DO park a 13-word ObjPay state
+                  // parse at StGpRd and DO park a 34-word ObjPay state
                   // block ({pay_base,gfx,fs,vs} in aux lo).
                   blob_sel_q  <= act_q.flags[1];
                   blob_i_q    <= '0;
@@ -2349,7 +2349,7 @@ module g6lc_apu_vnfront
                 state_q   <= StSmReq;
                 if (act_q.obj_kind == 6'(APU_VN_KIND_VK_PIPELINE) &&
                     ot_cpl_i.entry.aux[6]) begin
-                  // G1c/G2a: a graphics pipeline frees its 22-word
+                  // G1c/G2a: a graphics pipeline frees its 34-word
                   // ObjPay state block and drops BOTH stage refs — the
                   // FS slot waits behind ret_fs_q for StRetSm's second
                   // UNREF (StRetUnrV runs the VS one after the FREE)
@@ -2358,7 +2358,7 @@ module g6lc_apu_vnfront
                   opr_q    <= '{op: APU_OBJPAY_OP_FREE,
                                addr: {16'h0,
                                       ot_cpl_i.entry.aux[31:16]},
-                               words: 32'd22, default: '0};
+                               words: 32'd34, default: '0};
                   op_ret_q <= StRetUnrV;
                   state_q  <= StOpReq;
                 end
@@ -2697,11 +2697,13 @@ module g6lc_apu_vnfront
                   (op_q.cmd_type ==
                    APU_VN_TYPE_VK_CMD_PUSH_CONSTANTS_EXT &&
                    op_q.imm[2] > 32'd128) ||
-                  // G1c: maxVertexInputBindings = 4; more bindings
-                  // cannot be recorded into the arena stream
+                  // G1c: maxVertexInputBindings = 16; a call whose
+                  // [firstBinding, firstBinding+bindingCount) range
+                  // exceeds the 16-slot binding table cannot be
+                  // recorded into the arena stream
                   (op_q.cmd_type ==
                    APU_VN_TYPE_VK_CMD_BIND_VERTEX_BUFFERS_EXT &&
-                   op_q.imm[1] > 32'd4)) begin
+                   op_q.imm[0] + op_q.imm[1] > 32'd16)) begin
                 // §7b: pValues over 128 B joins the INVALID path
                 result_q <= APU_VK_ERROR_UNKNOWN;
                 otr_q    <= '{op: APU_OBJTAB_OP_SETSTATE,
@@ -4401,35 +4403,35 @@ module g6lc_apu_vnfront
                 if (stg_word_q == 32'h0) state_q <= StPipeFail;
                 else begin gp_ph_q <= 5'd8; state_q <= StGpRd; end
               end
-              5'd8: begin  // vertexBindingDescriptionCount (1..4)
-                if (stg_word_q == 32'h0 || stg_word_q > 32'd4)
+              5'd8: begin  // vertexBindingDescriptionCount (1..16)
+                if (stg_word_q == 32'h0 || stg_word_q > 32'd16)
                   state_q <= StPipeFail;
                 else begin
-                  gp_nbind_q <= 4'(stg_word_q);
+                  gp_nbind_q <= 5'(stg_word_q);
                   gp_i_q     <= '0;
                   gp_ph_q    <= 5'd9;
                   state_q    <= StGpRd;
                 end
               end
-              5'd9: begin  // binding index (<4)
-                if (stg_word_q > 32'd3) state_q <= StPipeFail;
+              5'd9: begin  // binding index (<16)
+                if (stg_word_q > 32'd15) state_q <= StPipeFail;
                 else begin
-                  gp_bnd_q[gp_i_q[1:0]][20]    <= 1'b1;
-                  gp_bnd_q[gp_i_q[1:0]][19:16] <= stg_word_q[3:0];
+                  gp_bnd_q[gp_i_q[3:0]][20]    <= 1'b1;
+                  gp_bnd_q[gp_i_q[3:0]][19:16] <= stg_word_q[3:0];
                   gp_ph_q <= 5'd10; state_q <= StGpRd;
                 end
               end
               5'd10: begin // stride
-                gp_bnd_q[gp_i_q[1:0]][15:0] <= stg_word_q[15:0];
+                gp_bnd_q[gp_i_q[3:0]][15:0] <= stg_word_q[15:0];
                 gp_ph_q <= 5'd11; state_q <= StGpRd;
               end
               6'd11: begin // inputRate: VERTEX(0)/INSTANCE(1)
                 if (stg_word_q > 32'd1) begin
                   state_q <= StPipeFail;
                 end else begin
-                  gp_bnd_q[gp_i_q[1:0]][21] <= stg_word_q[0];
-                  gp_i_q  <= gp_i_q + 4'd1;
-                  gp_ph_q <= (gp_i_q + 4'd1 >= gp_nbind_q)
+                  gp_bnd_q[gp_i_q[3:0]][21] <= stg_word_q[0];
+                  gp_i_q  <= gp_i_q + 5'd1;
+                  gp_ph_q <= (gp_i_q + 5'd1 >= gp_nbind_q)
                              ? 6'd12 : 6'd9;
                   state_q <= StGpRd;
                 end
@@ -4452,10 +4454,10 @@ module g6lc_apu_vnfront
                   gp_ph_q <= 5'd14; state_q <= StGpRd;
                 end
               end
-              5'd14: begin // binding (<4)
-                if (stg_word_q > 32'd3) state_q <= StPipeFail;
+              5'd14: begin // binding (<16)
+                if (stg_word_q > 32'd15) state_q <= StPipeFail;
                 else begin
-                  gp_atr_q[gp_i_q[2:0]][21:20] <= stg_word_q[1:0];
+                  gp_atr_q[gp_i_q[2:0]][23:20] <= stg_word_q[3:0];
                   gp_ph_q <= 5'd15; state_q <= StGpRd;
                 end
               end
@@ -4471,8 +4473,8 @@ module g6lc_apu_vnfront
                   state_q <= StPipeFail;
                 end else begin
                   gp_atr_q[gp_i_q[2:0]][11:0] <= stg_word_q[11:0];
-                  gp_i_q  <= gp_i_q + 4'd1;
-                  gp_ph_q <= (gp_i_q + 4'd1 >= gp_nattr_q)
+                  gp_i_q  <= gp_i_q + 5'd1;
+                  gp_ph_q <= (gp_i_q + 5'd1 >= gp_nattr_q)
                              ? 5'd17 : 5'd13;
                   state_q <= StGpRd;
                 end
@@ -4686,8 +4688,8 @@ module g6lc_apu_vnfront
               state_q <= StPipeFail;
             end else begin
               pl_layh_q <= ot_cpl_i.handle;
-              // 22-word ObjPay state block for the draw assembly
-              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC, words: 32'd22,
+              // 34-word ObjPay state block for the draw assembly
+              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC, words: 32'd34,
                            default: '0};
               op_ret_q <= StGpAlcC;
               state_q  <= StOpReq;
@@ -4705,11 +4707,11 @@ module g6lc_apu_vnfront
           StGpPayW: begin
             opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
                          addr: {16'h0, op_base_q} + {16'h0, pay_i_q},
-                         wdata: gp_pay_w(pay_i_q[4:0]), default: '0};
+                         wdata: gp_pay_w(pay_i_q[5:0]), default: '0};
 // pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
             $display("[DBG] vnf gpayw[%0d] @%04x = %08x (fsm=%02x top=%02x na=%0d nb=%0d cull=%0d ff=%0d) t=%0t",
-                     pay_i_q, op_base_q + pay_i_q, gp_pay_w(pay_i_q[4:0]),
+                     pay_i_q, op_base_q + pay_i_q, gp_pay_w(pay_i_q[5:0]),
                      gp_fsm_q, gp_top_q, gp_nattr_q, gp_nbind_q,
                      gp_cull_q, gp_ff_q, $time);
 `endif
@@ -4718,7 +4720,7 @@ module g6lc_apu_vnfront
             state_q  <= StOpReq;
           end
           StGpPayWd: begin
-            if (pay_i_q + 16'd1 >= 16'd22) begin
+            if (pay_i_q + 16'd1 >= 16'd34) begin
               // ObjTab ALLOC the pipeline object (id = this element's
               // out id); aux writes follow on the completion
               otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
@@ -4743,7 +4745,7 @@ module g6lc_apu_vnfront
               // StPipeFail
               opr_q    <= '{op: APU_OBJPAY_OP_FREE,
                            addr: {16'h0, op_base_q},
-                           words: 32'd22, default: '0};
+                           words: 32'd34, default: '0};
               op_ret_q <= StGpUnr;
               state_q  <= StOpReq;
             end else begin

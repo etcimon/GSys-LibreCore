@@ -1,6 +1,8 @@
 //! Mini-ITX is the first outline. Edges are datums. Roles name a body size
 //! and which edge they belong on. A template does not name a chip package.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::pack::{pack_edge, PackError, SpanPart};
@@ -386,15 +388,60 @@ pub struct Placement {
     pub y_um: Option<i64>,
 }
 
+/// Current authoring-document schema. Loaders accept documents without the
+/// field (schema 1) and migrate them in memory; writers always emit it.
+pub const DESIGN_SCHEMA_VERSION: u32 = 2;
+
+fn default_schema_version() -> u32 {
+    1
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Design {
+    /// Schema the document was written with. Absent in v1 files.
+    #[serde(default = "default_schema_version")]
+    pub schema_version: u32,
     pub template_id: String,
     pub settings: Settings,
     pub ports: Vec<Port>,
     pub placements: Vec<Placement>,
+    /// Next free numeric suffix per role. A deleted identity is never handed
+    /// out again within a document; the counter only grows. Absent in v1
+    /// files, in which case the first allocation scans existing ids.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub id_seq: BTreeMap<String, u32>,
 }
 
 impl Design {
+    /// Allocate a fresh part id for `role_id`. Monotonic per role and unique
+    /// across every id currently in the document, regardless of role.
+    pub fn allocate_id(&mut self, role_id: &str) -> String {
+        let scanned = self
+            .ports
+            .iter()
+            .filter(|p| p.role == role_id)
+            .filter_map(|p| p.id.strip_prefix(role_id).and_then(|s| s.parse::<u32>().ok()))
+            .map(|n| n + 1)
+            .max()
+            .unwrap_or(1);
+        let mut next = (*self.id_seq.get(role_id).unwrap_or(&0)).max(scanned);
+        loop {
+            let candidate = format!("{role_id}{next}");
+            next += 1;
+            if !self.ports.iter().any(|p| p.id == candidate) {
+                self.id_seq.insert(role_id.to_string(), next);
+                return candidate;
+            }
+        }
+    }
+
+    /// Bring a loaded document to the current schema. Idempotent.
+    pub fn migrate(&mut self) {
+        if self.schema_version < DESIGN_SCHEMA_VERSION {
+            self.schema_version = DESIGN_SCHEMA_VERSION;
+        }
+    }
+
     /// A packed Mini-ITX with the usual first parts. The slot bracket is pinned.
     pub fn mini_itx() -> Result<Self, PackError> {
         Self::from_template("mini-itx")
@@ -435,10 +482,12 @@ impl Design {
             }
         }
         let mut design = Design {
+            schema_version: DESIGN_SCHEMA_VERSION,
             template_id: template.id.clone(),
             settings: Settings::new("cv64a6_imafdc_sv39", template.gap_um),
             ports: Vec::new(),
             placements: Vec::new(),
+            id_seq: BTreeMap::new(),
         };
         for (i, (id, role_id, pinned, s, width)) in specs.iter().enumerate() {
             design.ports.push(Port {
@@ -466,8 +515,10 @@ impl Design {
         let template = pcie_card();
         let cem = role("pcie_cem").expect("pcie_cem");
         let mut design = Design {
+            schema_version: DESIGN_SCHEMA_VERSION,
             template_id: template.id.clone(),
             settings: Settings::new("cv64a6_imafdc_sv39", template.gap_um),
+            id_seq: BTreeMap::new(),
             ports: vec![Port {
                 id: "cem0".into(),
                 role: cem.id.into(),

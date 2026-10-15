@@ -52,6 +52,8 @@ Bender.lock
 !/tools/g6lc_submodule_forks.py
 # The pinned Verilator fork (submodule etcimon/verilator, branch g6lc)
 !/tools/verilator
+# The pinned OpenROAD fork (submodule etcimon/OpenROAD, branch g6lc)
+!/tools/openroad
 /util/toolchain-builder/src/
 /util/toolchain-builder/build/
 # Both following lines are needed to list contents of ISA manual build dir.
