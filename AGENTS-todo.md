@@ -1752,45 +1752,56 @@ prerequisite for this work under the existing dual license. No licensing policy 
   +fe_lo=76935000 +fe_hi=76935850`; in parallel the T36-fixed server1 L1
   tells whether a spurious store fault (T36) feeds the leak. **The T36-fixed
   server1 (`l1s1f`) reproduces at the identical cycle 76,935,847** — T36
-  does not feed it. **Candidate mechanism from the source (2026-10-15),
-  to be confirmed by the `+stq_trace` window (`l1s1g`, lo 76.70 M):** the
-  speculative queue's flush path set `speculative_write_pointer_n =
-  speculative_read_pointer_q` while a same-cycle `commit_i` had already
-  moved `speculative_read_pointer_n` to `_q + 1` (count 0, pointers one
-  apart). The next arrival is written at the write pointer — one slot
-  *behind* the head — and the OoO program-order rewrite, which snapshots
-  `[read_pointer_n, read_pointer_n + count)`, then copies the **stale slot
-  at the head** (an old store's tid/address/data) into position 0 and
-  re-validates it, while the real arrival is dropped. That is exactly a
-  valid entry whose scoreboard slot is not live — and, had the assertion
-  not stopped the run, a committed ghost store plus a lost real store. The
-  only flush sources that can coincide with a store commit are the SMT
-  ones: the N1c forced drain decides at cycle N (`!commit_i` for the WFI /
-  relative legs, not for the absolute one) and fires `flush_ex` through
-  the registered pulse at N+1, when the store at the commit head is free
-  to commit (`smt_drain_safe` checks `no_st_pending_commit` — the commit
-  queue and wbuffer — not the speculative head). In-order flushes are all
-  raised by the committing port-0 instruction itself and never coincide,
-  which is why `g6lc64_ooo` (1 hart) never hit it in 760 M cycles. **Fix:**
-  `speculative_write_pointer_n = speculative_read_pointer_n` on flush
-  (same value as before whenever no commit coincides), plus the invariant
-  assertion `spec_ptr_consistent` (`wp − rp ≡ count mod DEPTH`), which
-  fires in the flush cycle itself rather than at the later ghost. Lint
-  clean (`g6lc64_ooo`, `g6lc64_ooo_server1`). **Leaf**
-  `verif/tb/core/run-stq-flush-ptr.sh` → `tb_g6lc_stq_flush_ptr.sv`
-  (store_buffer in the OoO shape; commit + flush in one cycle, then an
-  arrival): positive 9 checks, `+oracle_negative` fails, the review
-  mutation `G6LC_MUT_STQ_FLUSH_WP_Q` (pre-fix write pointer) fails
-  `STQ_PTR_AGREE` with `cnt=0 rp=1 wp=0` right after the flush cycle. Build
-  `ooocoh-t37-server1-pgo-build` (ovl-t37: the fix, the assertion,
-  `+core_notrace`) in flight; the verification is the server1 L1 past
-  76,935,847 and the 4-core server rebuilt from the same tree. Owed
-  alongside: whether the forced drain's latched restart PC (`head_pc_i` at
-  the decision cycle) can name an instruction that commits in the pulse
-  cycle (the absolute leg allows a commit at N as well) — a
-  double-execution hazard independent of the queue pointers; the trace
-  window shows whether a `COMMIT` and a `FLUSH` share the cycle before
-  the `DEAD` entry.
+  does not feed it. **Root cause from the `+stq_trace`/`+smt_sched_trace`
+  window (`l1s1g`, 76.70–76.94 M, 2026-10-15):** hart 1 pushes stores tid
+  11 and 13 at 76,935,772/773; a younger-cancel wave follows
+  (`CANCEL mask=ff00000003ffffff` at 76,935,784, the bits then clearing one
+  per cycle through 76,935,804 as the cancelled entries are
+  commit-dropped — tid 19's bit is set 76,935,790–798); the drained
+  handoff **switches to hart 0 at 76,935,805** (`forced=0`, so no forced
+  drain and no `COMMIT`+`FLUSH` coincidence — every `FLUSH` in the window
+  has `scnt=0`); and at **76,935,833 a `PUSH tid=19 hart=1`** arrives with
+  the queue empty, 14 cycles before the stop. That store had been sitting
+  in the store unit's `WAIT_TRANSLATION` (DTLB miss → PTW) through the whole
+  cancel wave and the switch: the only cancellation check on the store
+  path was `cancelled_mask_i[trans_id]` **at push time**, and the mask
+  names a tid only until its entry is commit-dropped. The push therefore
+  landed under a tid whose slot was already free — the assertion — and,
+  had the slot been re-allocated by then (the single-hart case), under
+  another instruction's tid: a ghost store committing with that
+  instruction plus a `valid_o` writeback into it. The load path already
+  carries the sticky `ldbuf_flushed` bit for exactly this window; the
+  store path did not. **Fix:** `lsu_bypass` marks a cancelled STORE/AMO
+  entry sticky (the `is_speculative_load_miss` field the load path uses),
+  and `store_unit` consumes a cancelled head without translation, push or
+  writeback in `IDLE`/`VALID_STORE`, and drops a waiting one in
+  `WAIT_TRANSLATION`/`WAIT_STORE_READY` the cycle the cancellation is
+  visible (`pop_st_o`, back to `IDLE`, translation request released — the
+  flush shape). **Leaf** `verif/tb/core/run-stq-cancel-ptw.sh` →
+  `tb_g6lc_stq_cancel_ptw.sv` (bypass + store unit, bench-driven DTLB):
+  cancelled-during-PTW store → no push, no writeback, consumed; the live
+  shape pushes once; a cancelled store queued behind a waiting one is
+  dropped at the head — positive 9 checks, `+oracle_negative` fails, the
+  review mutation `G6LC_MUT_STQ_NO_STICKY_CANCEL` (pre-fix: mask at push
+  time only) fails `STQ_CANCELLED_NOT_PUSHED` with `pushes=1 (tid 3) wbs=1
+  (tid 3)`. Lint clean (`g6lc64_ooo`, `g6lc64_ooo_server1`). Builds
+  `ooocoh-t38-server1-pgo-build` / `ooocoh-t38-ooo-pgo-build` (ovl-t38);
+  the verification is the server1 L1 past 76,935,847 and the frozen
+  battery on the ooo. The earlier flush-pointer finding stands as a
+  hardening (its leaf `run-stq-flush-ptr.sh`, the `spec_ptr_consistent`
+  invariant): the window shows it was not the trigger here, and
+  `ooocoh-t37-server1-pgo-build` (`l1s1h`, pointer fix only) is left
+  running as the negative control — it should stop at the identical cycle.
+  Still owed from the source reading: the forced drain's latched restart
+  PC (`head_pc_i` at the decision cycle) can name an instruction that
+  commits in the same cycle on the absolute leg (`drain_forced_d` drops the
+  forced state on a *pulse*-cycle commit but not on a decision-cycle one)
+  — a double-execution hazard to witness separately; `smt_drain_safe` also
+  does not see a store still in the store unit, which is how the switch
+  above happened with tid 19's translation in flight (harmless once the
+  cancelled store is dropped; a *live* store cannot be in that position
+  under the drained handoff because its entry keeps the scoreboard
+  non-empty).
 - [ ] **T34 — two kernel oopses with T28–T33 in, both the shape of a stale or
   half-written load value (2026-10-14).** On `ooocoh-t33-ooo-replay2-pgo-build`
   (depth-2 fixup queue) Linux now runs through `init_IRQ`, timekeeping

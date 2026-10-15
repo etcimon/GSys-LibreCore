@@ -205,6 +205,25 @@ module store_unit
   assign tinst_o         = CVA6Cfg.RVH ? lsu_ctrl_i.tinst : '0;  // transformed instruction
   assign trans_id_o      = trans_id_q;  // transaction id from previous cycle
 
+  // T35: the request at the bypass head has been cancelled (younger-cancel).
+  // The scoreboard mask names a tid only until the cancelled entry is
+  // commit-dropped, so the bypass carries a sticky mark for stores (the same
+  // field the load path uses); a store held in WAIT_TRANSLATION (PTW) or
+  // WAIT_STORE_READY past that window must be dropped here, not pushed later
+  // into the speculative queue under a tid whose slot is free or re-allocated
+  // (server1 Linux: hart-1 store tid 19, cancelled at 76,935,790, PTW done at
+  // 76,935,833, pushed after the SMT switch — the ooo_spec_entry_live stop).
+  // The load unit's equivalent is the sticky ldbuf_flushed bit.
+  logic st_cancelled;
+`ifdef G6LC_MUT_STQ_NO_STICKY_CANCEL
+  // Review mutation (T35): the pre-fix shape — the mask is consulted at push
+  // time only; tb_g6lc_stq_cancel_ptw must fail STQ_CANCELLED_NOT_PUSHED.
+  assign st_cancelled = 1'b0;
+`else
+  assign st_cancelled = CVA6Cfg.OoOEn && valid_i &&
+                        (lsu_ctrl_i.is_speculative_load_miss || cancelled_mask_i[lsu_ctrl_i.trans_id]);
+`endif
+
   always_comb begin : store_control
     translation_req_o      = 1'b0;
     valid_o                = 1'b0;
@@ -219,7 +238,11 @@ module store_unit
     case (state_q)
       // we got a valid store
       IDLE: begin
-        if (valid_i) begin
+        if (st_cancelled) begin
+          // T35: a cancelled store at the head is consumed without a
+          // translation, a push or a writeback (its slot may already be gone)
+          pop_st_o = 1'b1;
+        end else if (valid_i) begin
           state_d = VALID_STORE;
           translation_req_o = 1'b1;
           pop_st_o = 1'b1;
@@ -245,7 +268,11 @@ module store_unit
         st_valid_without_flush = 1'b1;
 
         // we have another request and its not an AMO (the AMO buffer only has depth 1)
-        if ((valid_i && CVA6Cfg.RVA && !instr_is_amo) || (valid_i && !CVA6Cfg.RVA)) begin
+        if (st_cancelled) begin
+          // T35: the next request is a cancelled store — consume it, back to idle
+          pop_st_o = 1'b1;
+          state_d  = IDLE;
+        end else if ((valid_i && CVA6Cfg.RVA && !instr_is_amo) || (valid_i && !CVA6Cfg.RVA)) begin
 
           translation_req_o = 1'b1;
           state_d = VALID_STORE;
@@ -271,7 +298,12 @@ module store_unit
         // keep the translation request high
         translation_req_o = 1'b1;
 
-        if (st_ready && dtlb_hit_i) begin
+        if (st_cancelled) begin
+          // T35: the waiting store was cancelled meanwhile — drop it as a flush would
+          translation_req_o = 1'b0;
+          pop_st_o          = 1'b1;
+          state_d           = IDLE;
+        end else if (st_ready && dtlb_hit_i) begin
           state_d = IDLE;
         end
       end
@@ -283,7 +315,12 @@ module store_unit
         if (state_q == WAIT_TRANSLATION && CVA6Cfg.MmuPresent) begin
           translation_req_o = 1'b1;
 
-          if (dtlb_hit_i) begin
+          if (st_cancelled) begin
+            // T35: cancelled while waiting for the PTW — drop it as a flush would
+            translation_req_o = 1'b0;
+            pop_st_o          = 1'b1;
+            state_d           = IDLE;
+          end else if (dtlb_hit_i) begin
             state_d = IDLE;
           end
         end

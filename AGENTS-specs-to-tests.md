@@ -857,7 +857,27 @@ the head retires. Pre-fix the load unit was held and the core deadlocked (2 M-cy
 scoreboard refetches it at commit — pass Spike-exact 53/53 in 1,007 cycles. Stage 48 (full
 coverage, translation) must still pass by forwarding, not by replay.
 
-## Speculative store queue: flush coinciding with a commit (2026-10-15, T35)
+## A store cancelled during its translation must be dropped, not pushed (2026-10-15, T35)
+
+`verif/tb/core/run-stq-cancel-ptw.sh` → `tb_g6lc_stq_cancel_ptw.sv`: `lsu_bypass` + `store_unit`
+(with its `store_buffer`/`amo_buffer`) in the OoO shape, the MMU replaced by `dtlb_hit_i`/`paddr_i`
+driven from the bench. Spec anchor: Part I `#sec:rvwmo` (a store that does not retire must not
+become visible — not to forwarding, not to memory). The mechanism is the `+stq_trace` window of
+the server1 boot: the scoreboard's cancelled mask names a tid only until the cancelled entry is
+commit-dropped, while a store in `WAIT_TRANSLATION` outlives that window behind a PTW; the store
+unit then pushed it when the walk completed, under a tid whose slot was free (the
+`ooo_spec_entry_live` stop) or re-allocated (a ghost store that would commit with the new
+occupant, plus a writeback into it). S1: store tid 3 misses the DTLB, is cancelled for three
+cycles, the mask clears, the translation completes 8 cycles later → **no push, no writeback,
+request consumed** (`STQ_CANCELLED_NOT_PUSHED`, `STQ_CANCELLED_NO_WB`, `STQ_CANCELLED_POPPED`);
+S2: the same shape uncancelled → pushed and written back once (`STQ_LIVE_PUSHED`, `STQ_LIVE_WB`);
+S3: a store queued behind a waiting one in the bypass and cancelled meanwhile is dropped when it
+reaches the head (`STQ_QUEUED_CANCEL_DROPPED`). Positive 9 checks; `+oracle_negative` must fail;
+`+define+G6LC_MUT_STQ_NO_STICKY_CANCEL` (mask consulted at push time only, the pre-fix shape)
+fails `STQ_CANCELLED_NOT_PUSHED` with `pushes=1 (tid 3) wbs=1 (tid 3)` — the ghost. The system
+witness is the server1 Linux L1 past cycle 76,935,847 on `ooocoh-t38-server1-pgo-build`.
+
+## Speculative store queue: flush coinciding with a commit (2026-10-15, T35 hardening)
 
 `verif/tb/core/run-stq-flush-ptr.sh` → `tb_g6lc_stq_flush_ptr.sv`, a `store_buffer` unit leaf in
 the OoO shape (`OoOEn`, `SpeculativeSb`, 1 hart; `cbo_t`/dcache request types rebuilt from
