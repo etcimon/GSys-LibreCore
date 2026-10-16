@@ -1788,10 +1788,50 @@ prerequisite for this work under the existing dual license. No licensing policy 
   (U-mode loads/stores and the kernel's SUM accesses) with a cache dropped
   on `sfence.vma`, and keeps that state per hart (`core <h>:` is now
   printed by the tracer — `rvfi_hart_o`/`commit_instr_hart` through the
-  probes, `rvfi_instr_t` untouched). Offline pass over the L3 trace
-  (`oracle_user.log`) and the L1 `cat` trace (`l1tr`) in flight: the first
-  `stored` mismatch in a user process or in the mm structures names the
-  defect.
+  probes, `rvfi_instr_t` untouched). **Oracle results:** the L1 `cat`-crash
+  trace (364 M retirements to the shell) has **0 stored mismatches with
+  user space folded** — the segfault is not a wrong memory value. **The
+  trace itself names it:** `ld a4, 1400(a4)` at `0x3f95efda1c` with
+  `a4 = 0x3f95f16a18` (a valid libc data address, `auipc` two
+  instructions earlier) takes `LOAD_PAGE_FAULT`; the kernel's trap entry
+  then reads **`csrr s3, stval` → `0x0000000000000000`** (`sepc`
+  `0x3f95efda1c`, `scause 13`). `do_page_fault` looks up address 0, finds
+  no VMA and sends SIGSEGV with `si_addr = 0` — every user crash in L1 and
+  L3 is "`at 0x0000000000000000`". **Mechanism (candidate):** under the
+  OoO younger-cancel a cancelled load's page-table walk keeps going (no
+  flush), and `cva6_mmu` raised a PTW fault to whatever requester was
+  registered (`ptw_active && !walking_instr`), with `tval = update_vaddr`
+  = the dead walk's address (a wrong-path pointer, 0 here); the live
+  user load waiting in `WAIT_TRANSLATION` behind it took that fault.
+  **Fix:** the PTW-fault branch reports only when the walk is for the
+  registered requester's page (`update_vaddr[VLEN-1:12] ==
+  lsu_vaddr_q[VLEN-1:12]`); a foreign walk's fault is dropped and the
+  requester's own walk follows (`G6LC_MUT_MMU_PTW_FOREIGN` = pre-fix).
+  Stage 55 (page-fault tval under Sv39: unmapped VPN2, invalid leaf,
+  MPP = U permission fault, MPP = U invalid leaf) passes 106/106 on the
+  pre-fix model — tval is right whenever the walk is the requester's own;
+  stage 56 (a wrong-path load through an invalid leaf cancelled mid-walk,
+  then a live load behind it) passes pre-fix too, so the Linux timing is
+  not yet reproduced in a leaf. Builds `ooocoh-t46m-ooo-pgo-build`
+  (pre-fix + `+mmu_trace`: the window 477,251,150–300 of the L1 trace
+  run shows the walk/requester pairing) and `ooocoh-t46-ooo-pgo-build`
+  (fix) for the L1/L3 verdicts.
+- [ ] **T43 — L3 on t42: an `amoor.d.aq` (0x800 → 0x801) then, 53 cycles
+  later, `amoswap.d.rl zero` (→ 0x800) on a workqueue `work->data`
+  (PA `0x8fc8e380`); the `c.ld` 866 cycles after the swap reads 0x801,
+  and so does every later read (2026-10-16).** From the user-space-aware
+  oracle over the L3 trace (20 stored mismatches in 660 M retirements,
+  first at retire 489,004,871): the swap's value never became visible —
+  neither to the line's refill (the next access to the line is a miss, so
+  memory held 0x801) nor afterwards. Stage 54 (the AMO pair with the
+  boot's spacing, bare mode) passes 48/48 Spike-exact. Watch run
+  `l3watch3` on `ooocoh-t45-ooo-pgo-build` (`+smt_mem_watch=8fc8e380`,
+  with the new missunit prints `wt_amo_req`/`wt_amo_ack`/`wt_inv`/
+  `wt_refill`) to cycle 713.9 M in flight (≈ 6 h). The later mismatches
+  (#49–#64: a VMAP-stack `lw` reading `0xc0` for `0x81` repeatedly, the
+  kernel stack of `cat` reading `0x10000`/`0x69000` for pointers →
+  the `load_elf_binary` oops) are probably T42's consequences but are
+  not yet attributed.
 - [ ] **T39 — server1 (HPDCACHE, SMT2, t38) L1 past the T35 point oopses at
   1.267 s guest: `insert_header+0x9c` (`__register_sysctl_table` from
   `eventpoll_init`) NULL pointer dereference at `0x50`, PID 1 (2026-10-15).**
