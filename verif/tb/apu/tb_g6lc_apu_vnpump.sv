@@ -26,11 +26,16 @@
 //   RES_RING1 rid 102 -> page 6  (word 6144) size  8192
 // Ring geometry: head@0 tail@64 status@128 buffer@192.
 
-module tb_g6lc_apu_vnpump;
+// AliveTickLog2=12 (~4096 cycles) exercises the ring ALIVE heartbeat
+// inside a unit sim; silicon keeps the module default 20 (~1 ms).
+module tb_g6lc_apu_vnpump
+  #(parameter int unsigned Rings = 16,
+    parameter int unsigned AliveTickLog2 = 12);
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_objpay_pkg::*;
+  import g6lc_apu_mp_pkg::*;
   import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_vgpages_pkg::*;
@@ -96,15 +101,19 @@ module tb_g6lc_apu_vnpump;
   logic [15:0]     ex_fclr;
 
   logic        busy;
-  logic [3:0]       ring_active;
-  logic [3:0][31:0] ring_status;
-  logic [3:0][31:0] ring_head;
-  logic [3:0][APU_VG_AP_WORD_W-1:0] ring_extra;
+  // G3b-i / API-X4: ring-table geometry parameterized -- the
+  // directed multi-ring arm needs Rings>=6 (default 16 covers the
+  // create_multiple_devices=5 lift; -GRings=N rebuilds sweep it).
+  logic [Rings-1:0]       ring_active;
+  logic [Rings-1:0][31:0] ring_status;
+  logic [Rings-1:0][31:0] ring_head;
+  logic [Rings-1:0][APU_VG_AP_WORD_W-1:0] ring_extra;
   // ctx-kill pulse (vgctl CTX_DESTROY)
   logic        ctx_kill_v;
   logic [7:0]  ctx_kill_id;
 
-  g6lc_apu_vnpump #(.Enable(1'b1), .Rings(4)) dut (
+  g6lc_apu_vnpump #(.Enable(1'b1), .Rings(Rings),
+                    .AliveTickLog2(AliveTickLog2)) dut (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .xs_valid_i(xs_v), .xs_ready_o(xs_rdy),
     .xs_desc_i(xs_d), .xs_ndesc_i(xs_n), .xs_off_i(xs_off),
@@ -139,6 +148,7 @@ module tb_g6lc_apu_vnpump;
     .ex_submit_o(ex_s),
     .ex_done_seq_i(16'h0), .ex_fence_signaled_i(16'h0),
     .ex_fence_lost_i(16'h0), .ex_fence_clr_o(ex_fclr),
+    .ex_fence_fail_o(),
     .ctx_kill_valid_i(ctx_kill_v), .ctx_kill_id_i(ctx_kill_id),
     .busy_o(busy),
     .ring_active_o(ring_active), .ring_status_o(ring_status),
@@ -155,7 +165,7 @@ module tb_g6lc_apu_vnpump;
   apu_vgpages_req_t z_pgreq;
   logic [3:0]       z_ract;
   logic [3:0][31:0] z_rstat, z_rhead;
-  g6lc_apu_vnpump #(.Enable(1'b0), .Rings(4)) dut_off (
+  g6lc_apu_vnpump #(.Enable(1'b0), .Rings(Rings)) dut_off (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .xs_valid_i(1'b1), .xs_ready_o(z_rdy),
     .xs_desc_i('{default: '0}), .xs_ndesc_i(4'd1), .xs_off_i(32'h0),
@@ -183,17 +193,58 @@ module tb_g6lc_apu_vnpump;
     .ex_submit_valid_o(z_exsv), .ex_submit_ready_i(1'b1),
     .ex_submit_o(),
     .ex_done_seq_i(16'h0), .ex_fence_signaled_i(16'h0),
-    .ex_fence_lost_i(16'h0), .ex_fence_clr_o(),
+    .ex_fence_lost_i(16'h0), .ex_fence_clr_o(), .ex_fence_fail_o(),
     .ctx_kill_valid_i(1'b0), .ctx_kill_id_i(8'h0),
     .busy_o(z_busy),
     .ring_active_o(z_ract), .ring_status_o(z_rstat),
     .ring_head_o(z_rhead), .ring_extra_w_o());
 
-  g6lc_apu_objtab #(.Enable(1'b1), .Slots(64)) i_tab (
+  // ---- objmem plumbing (ObjTab-V DRAM backing) --------------------
+  localparam int unsigned ObjEntries = 256;
+  localparam int unsigned PayMemB    = 64 * 1024;
+  logic         omt_v, omt_r, omt_rv;
+  apu_omt_req_t omt_req;
+  apu_omt_rsp_t omt_rsp;
+  logic         ompr_r, ompr_rv;
+  apu_omp_rsp_t ompr_rsp;
+  logic         mmp_v, mmp_r, mmp_rv;
+  apu_mp_req_t  mmp_req;
+  apu_mp_rsp_t  mmp_rsp;
+
+  g6lc_apu_objtab #(.Enable(1'b1), .ObjEntries(ObjEntries)) i_tab (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(ot_v), .req_ready_o(ot_r), .req_i(ot_req),
     .cpl_valid_o(ot_cv), .cpl_ready_i(ot_cr), .cpl_o(ot_cpl),
-    .live_o());
+    .live_o(),
+    .omt_req_valid_o(omt_v), .omt_req_ready_i(omt_r),
+    .omt_req_o(omt_req),
+    .omt_rsp_valid_i(omt_rv), .omt_rsp_i(omt_rsp));
+
+  g6lc_apu_objmem #(.Enable(1'b1), .ObjEntries(ObjEntries),
+                    .PayMemBytes(PayMemB),
+                    .DirCacheSets(16), .EntCacheLines(8),
+                    .PayCacheLines(4)) i_omm (
+    .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
+    .omt_req_valid_i(omt_v), .omt_req_ready_o(omt_r),
+    .omt_req_i(omt_req),
+    .omt_rsp_valid_o(omt_rv), .omt_rsp_o(omt_rsp),
+    .omp_req_valid_i(1'b0), .omp_req_ready_o(ompr_r),
+    .omp_req_i(apu_omp_req_t'(0)),
+    .omp_rsp_valid_o(ompr_rv), .omp_rsp_o(ompr_rsp),
+    .mp_req_valid_o(mmp_v), .mp_req_ready_i(mmp_r),
+    .mp_req_o(mmp_req),
+    .mp_rsp_valid_i(mmp_rv), .mp_rsp_i(mmp_rsp));
+
+  // objmem's own aperture responder over the static carve window
+  tb_apu_mp_mem #(.N(1), .GMW(1), .APW(0),
+                  .PWB(32'(APU_OBJMEM_OFF >> 2)),
+                  .PPW(32'((apu_objmem_pay_off(ObjEntries) +
+                            64'(PayMemB) - APU_OBJMEM_OFF) >> 2) +
+                        64))
+      i_omem (
+    .clk_i(clk), .rst_ni(rst_ni),
+    .req_valid_i(mmp_v), .req_ready_o(mmp_r), .req_i('{mmp_req}),
+    .rsp_valid_o(mmp_rv), .rsp_o('{mmp_rsp}));
 
   assign ot_v   = seeding ? s_ot_v   : d_ot_v;
   assign ot_req = seeding ? s_ot_req : d_ot_req;
@@ -1007,6 +1058,75 @@ module tb_g6lc_apu_vnpump;
     wq = {};
     for (int i = 0; i < 4; i++) wq.push_back(WAITVQ7[i]);
     xs_goc(wq, 8'd5, 1'b0, "T20d pump still services execbufs");
+
+    // ---- T21: API-X4 — six live CreateRings at once --------------------
+    // create_multiple_devices needs >=5 concurrent rings; this arm
+    // holds six slots live together (all earlier rings are retired by
+    // T20d).  Gated on the Rings parameter so -GRings=4 sweeps keep
+    // their own coverage.
+    if (Rings >= 6) begin
+      seeding = 1'b1;
+      for (int r = 0; r < 6; r++)
+        seed_blob(32'(110 + r), 16 + r, 64'd4096);
+      seeding = 1'b0;
+      repeat (4) @(posedge clk);
+      for (int r = 0; r < 6; r++) begin
+        automatic int unsigned rb = (16 + r) * 1024;
+        apm[rb]      = 32'd0;
+        apm[rb + 16] = 32'd0;
+        wq = {};
+        for (int i = 0; i < 35; i++) wq.push_back(CRING0[i]);
+        wq[2]  = 32'h500 + 32'(r) * 32'h100;   // ring handle
+        wq[14] = 32'(110 + r);                  // bound resource
+        xs_go(wq, 1'b0, $sformatf("T21 create ring r%0d", r));
+        cases++;
+        check(apm[rb + 32] == ST_ALIVE,
+              $sformatf("T21 ring r%0d status ALIVE", r));
+      end
+      cases++;
+      check($countones(ring_active) == 6,
+            "T21 six rings live concurrently");
+      for (int r = 0; r < 6; r++) begin
+        wq = {};
+        for (int i = 0; i < 4; i++) wq.push_back(DESTROY0[i]);
+        wq[2] = 32'h500 + 32'(r) * 32'h100;
+        xs_go(wq, 1'b0, $sformatf("T21 destroy ring r%0d", r));
+      end
+      cases++;
+      check(ring_active == '0, "T21 all rings retired");
+    end
+
+    // ---- T22: parked ring keeps IDLE through the alive refresh ----
+    // The Mesa watchdog clears ALIVE while it waits; the heartbeat
+    // (and the parked-ring refresh) must re-assert it WITHOUT dropping
+    // a published IDLE bit — a bare-ALIVE write makes the guest skip
+    // the NotifyRing the pump is waiting for.
+    apm[R1_BASE]      = 32'd0;   // head  (guest re-inits the control)
+    apm[R1_BASE + 16] = 32'd0;   // tail
+    wq = {};
+    for (int i = 0; i < 35; i++) wq.push_back(CRING1[i]);
+    xs_go(wq, 1'b0, "T22 create ring1 (idleTo=4)");
+    wait_ap(R1_BASE + 32, ST_IDLE, "T22 IDLE published");
+    // park the ring's stream on an unreachable seqno; the ring stays
+    // live+idle-published while its stream sits in park_q
+    wq = {};
+    for (int i = 0; i < 6; i++) wq.push_back(WAITR_FAR[i]);
+    ring_put(R1_BASE + 48, 0, wq, R1_BASE + 16, 24);
+    repeat (64) @(posedge clk);          // let the park settle
+    // guest role: clear ALIVE while waiting (the watchdog protocol)
+    apm[R1_BASE + 32] = APU_VNRING_IDLE;
+    // the next refresh must restore ALIVE *and* keep IDLE — a bare
+    // ALIVE write would leave the word at ST_ALIVE and time out here
+    wait_ap(R1_BASE + 32, ST_IDLE,
+            "T22 refresh re-asserts ALIVE, keeps IDLE");
+    cases++;
+    check(ring_active != '0, "T22 parked ring still live");
+    // at AliveTickLog2=12 one heartbeat tick is guaranteed inside a
+    // 4300-cycle window; IDLE must still be set after it
+    repeat (4300) @(posedge clk);
+    cases++;
+    check(apm[R1_BASE + 32] == ST_IDLE,
+          "T22 IDLE survives heartbeat tick");
 
     if (errors == 0)
       $display("PASS tb_g6lc_apu_vnpump cases=%0d checks=%0d cycles=%0d",

@@ -27,14 +27,23 @@ package g6lc_apu_vg_pkg;
   // aperture allocator carves into pages.  Must equal the
   // virtio-mmio ShmEn SHM id 1 (HOST_VISIBLE) window published by
   // g6lc_apu_virtio_mmio (APU_SHM_BASE/APU_SHM_BYTES); kept local so
-  // the vg engines do not depend on g6lc_apu_pkg.  The guest kernel's
-  // shm drm_mm packs MAP_BLOB offsets at guest-page (4 KiB) density, so
-  // the allocator bitmap tracks 4 KiB pages — 8192 flops for 32 MiB.
+  // the vg engines do not depend on g6lc_apu_pkg.
+  // G3b-i (§5a "Implementation decisions (2026-10-15)"): the aperture
+  // grew 32 -> 128 MiB; the vgpages bitmap manages only the first
+  // APU_VG_MANAGED_BYTES (guest window + 8 MiB ALLOC_PRIV arena) at
+  // 4 KiB page density while the upper region is the static
+  // objmem/PayMem carve the bitmap never hands out.
+  // §5a revision 2026-10-16 (API-X4): the guest window grew
+  // 24 -> 64 MiB and managed 32 -> 72 MiB — five concurrent Venus
+  // devices pin ~57 MiB of MAPPABLE blob extents, which a 24 MiB
+  // window could not hold (guest drm_mm ENOSPC before any virtio
+  // request).  APU_VG_AP_WORD_W widens with the aperture.
   localparam logic [63:0] APU_VG_SHM_BASE  = 64'h8200_0000;
-  localparam logic [63:0] APU_VG_SHM_BYTES = 64'h0200_0000;
-  localparam int unsigned APU_VG_PAGES     = 8192;
+  localparam logic [63:0] APU_VG_SHM_BYTES = 64'h0800_0000;
+  localparam logic [63:0] APU_VG_MANAGED_BYTES = 64'h0480_0000;
+  localparam int unsigned APU_VG_PAGES     = 18432;
   localparam int unsigned APU_VG_PAGE_BYTES =
-      32'(APU_VG_SHM_BYTES / APU_VG_PAGES);
+      32'(APU_VG_MANAGED_BYTES / APU_VG_PAGES);
   // §12.3 F5: the guest kernel's shm drm_mm owns MAP_BLOB placement
   // over the whole advertised window and cannot see the device bitmap —
   // a device-internal allocation in the guest range collides at
@@ -43,7 +52,7 @@ package g6lc_apu_vg_pkg;
   // reports only APU_VG_GUEST_BYTES so the kernel's allocator can
   // never select it.  APU_VG_GUEST_BYTES must equal the SHM_LEN VREG
   // published by g6lc_apu_virtio_mmio (APU_SHM_GUEST_BYTES).
-  localparam logic [63:0] APU_VG_GUEST_BYTES = 64'h0180_0000;  // 24 MiB
+  localparam logic [63:0] APU_VG_GUEST_BYTES = 64'h0400_0000;  // 64 MiB
   localparam int unsigned APU_VG_GUEST_PAGES =
       32'(APU_VG_GUEST_BYTES / APU_VG_PAGE_BYTES);
   localparam int unsigned APU_VG_PRIV_PAGES  =
@@ -95,5 +104,11 @@ package g6lc_apu_vg_pkg;
   // as a {gen,slot} handle, so transport resource/context ids (small
   // u32s) must be tagged into the directory-id space before lookup.
   localparam logic [63:0] APU_VG_ID_TAG = 64'h0000_0001_0000_0000;
+  // Context ids live in their own tag subspace: the guest kernel draws
+  // ctx ids and blob resource ids from separate dense allocators, so
+  // ctx N aliasing a live blob rid N must not collide in the CLAIM
+  // directory (CTS max_concurrent.instance hit DUP -> VG_ERR_CID).
+  // (0x0002 is APU_VN_ID_TAG, the Vulkan client-object space.)
+  localparam logic [63:0] APU_VG_CTX_TAG = 64'h0000_0003_0000_0000;
 
 endpackage

@@ -214,6 +214,12 @@ module g6lc_apu_vnfront
   input  logic [Fences-1:0]  ex_fence_signaled_i,
   input  logic [Fences-1:0]  ex_fence_lost_i,
   output logic [Fences-1:0]  ex_fence_clr_o,
+  // §7b exception contract: a QueueSubmit that fails before reaching
+  // the executor still completes the fence it carried — cmdexec
+  // marks the slot signaled+lost so vkWaitForFences returns
+  // DEVICE_LOST instead of polling an unarmed fence forever
+  // (the CTS texture wedges were exactly this hang).
+  output logic [Fences-1:0]  ex_fence_fail_o,
   // completion
   output logic               busy_o,
   output logic               done_o,
@@ -242,7 +248,7 @@ module g6lc_apu_vnfront
     assign ap_addr_o = '0;    assign ap_wdata_o = '0;
     assign ap_wstrb_o = '0;
     assign ex_submit_valid_o = 1'b0; assign ex_submit_o = '0;
-    assign ex_fence_clr_o = '0;
+    assign ex_fence_clr_o = '0;   assign ex_fence_fail_o = '0;
     assign busy_o = 1'b0;         assign done_o = 1'b0;
     assign result_o = '0;         assign rep_words_o = '0;
     assign fault_o = '0;
@@ -385,14 +391,15 @@ module g6lc_apu_vnfront
     logic [StgBits-1:0]  stg_i_q;      // staged read cursor
     logic [31:0]         stg_word_q;   // captured staged word
 
-    logic [15:0]         op_base_q;    // held ObjPay extent {base,words}
+    logic [31:0]         op_base_q;    // held ObjPay extent {base,words}
     logic [15:0]         op_words_q;
     logic [15:0]         pay_i_q;      // objpay write cursor
     logic [1:0]          prepend_n_q;  // count words prepended to payload
     logic [31:0]         prepend_w_q [2];
     logic [31:0]         hnd_pay_q;    // object {gen,slot} for aux writes
     logic                payf_q;       // retire frees a payload extent
-    logic [15:0]         payf_base_q, payf_words_q;
+    logic [31:0]         payf_base_q;
+    logic [15:0]         payf_words_q;
     logic [31:0]         auxlo_val_q, auxlo_mask_q; // SETAUX operand
     logic [31:0]         stv_val_q, stv_mask_q;     // SETSTATE operand
 
@@ -429,7 +436,7 @@ module g6lc_apu_vnfront
     logic [15:0]         ds_layb_q, ds_layw_q; // layout payload extent
     logic [15:0]         ds_sbyt_q;    // layout set-table byte extent
     logic [15:0]         ds_ndyn_q;    // layout dynamic count
-    logic [24:0]         ds_sbase_q;   // allocated set-table base
+    logic [24:0]         ds_sbase_q;   // set-table base (word index)
     logic [15:0]         ds_z_i_q;     // record-zeroing beat cursor
     logic [15:0]         ds_z_n_q;     // record-zeroing beat count
     apu_objtab_entry_t   ds_pent_q;    // pool entry sampled at alloc
@@ -438,11 +445,11 @@ module g6lc_apu_vnfront
     // §12.3 F5: resolve-descriptor-set subroutine (rsv_*) — LOOKUP set,
     // READSLOT pool (epoch), READSLOT layout → rsv_ok/dead/base/nbind
     logic [31:0]         rsv_hnd_q;    // resolved set {gen,slot}
-    logic [24:0]         rsv_base_q;   // set_table_base
+    logic [24:0]         rsv_base_q;   // set_table_base (word index)
     logic [63:0]         rsv_layh_q;   // set's layout {gen,slot}
     logic [31:0]         rsv_phnd_q;   // set's pool {gen,slot}
     logic [15:0]         rsv_ep_q;     // set's pool epoch
-    logic [15:0]         rsv_layb_q;   // layout payload base
+    logic [31:0]         rsv_layb_q;   // layout payload base (words)
     logic [15:0]         rsv_nbnd_q;   // layout binding count
     logic                rsv_ok_q, rsv_dead_q;
 
@@ -480,7 +487,7 @@ module g6lc_apu_vnfront
     logic [15:0]         cp_i_q;       // copy index
     logic [63:0]         cp_src_q, cp_dsid_q; // src/dst set ids
     logic [31:0]         cp_sb_q, cp_sa_q, cp_db_q, cp_da_q, cp_n_q;
-    logic [24:0]         cp_sbase_q, cp_dbase_q;
+    logic [24:0]         cp_sbase_q, cp_dbase_q;  // word indices
     logic [19:0]         cp_soff_q, cp_doff_q;
     logic [15:0]         cp_scnt_q, cp_dcnt2_q;
     logic [3:0]          cp_b_q;       // 8-byte beat cursor
@@ -617,6 +624,13 @@ module g6lc_apu_vnfront
     logic [Fences-1:0]   fmask_q;
     logic                wall_q;
     logic [15:0]         pushed_q;
+    // §7b exception contract: set while a QueueSubmit carrying a
+    // fence is in flight; cleared when the submit record reaches
+    // the executor (the executor then owns the fence's signal) or
+    // when the command replies, at which point an armed fence is
+    // failed through ex_fence_fail_o.  Covers every failure exit
+    // between the two points, present and future.
+    logic                sub_armed_q;
 
     logic [CbBufs-1:0]   cb_alloc_q;
     logic [31:0]         cb_pool_q [CbBufs];
@@ -1090,8 +1104,11 @@ module g6lc_apu_vnfront
         end
         exec_w_q <= '0;
         ex_fence_clr_o <= '0;
+        ex_fence_fail_o <= '0;
+        sub_armed_q  <= 1'b0;
       end else begin
         ex_fence_clr_o <= '0;
+        ex_fence_fail_o <= '0;
         // decoder KEEP stream → staging SRAM (any state while the
         // decoder runs); overflow is reported at decode done
         if (dec_pay_v) begin
@@ -1724,6 +1741,8 @@ module g6lc_apu_vnfront
                                  ent_q.aux[7:0] < 8'(Fences))
                                 ? 5'(ent_q.aux[7:0]) : FENCE_NONE,
                                 nbufs: '0, crec: '0, chndl: '0};
+                sub_armed_q <= (fs >= 0 &&
+                                ent_q.aux[7:0] < 8'(Fences));
                 blob_ret_q  <= StElemSub;
                 blob_done_q <= StSubPush;
                 state_q     <= StBlobRd;
@@ -1915,7 +1934,7 @@ module g6lc_apu_vnfront
               if (is_pay_kind(act_q.obj_kind)) begin
                 // object not created: release the payload extent
                 opr_q    <= '{op: APU_OBJPAY_OP_FREE,
-                              addr: {16'h0, op_base_q},
+                              addr: op_base_q,
                               words: {16'h0, op_words_q},
                               default: '0};
                 op_ret_q <= StRep;
@@ -2029,11 +2048,14 @@ module g6lc_apu_vnfront
               end
             end else if (is_pay_kind(act_q.obj_kind)) begin
               // §7b: copy staging -> ObjPay, then SETAUXHI
-              // {base,words}; §12.3 F5: the descriptor-set-layout's
+              // {base>>6,words} — §5a G3b-i: the parked base is a
+              // CHUNK index (64-word chunks) so 2^16 chunks reach the
+              // full 16 MiB PayMem; unpark sites <<6 back to words;
+              // §12.3 F5: the descriptor-set-layout's
               // row table is already written — auxhi, then the
               // {ndyn,set_bytes} aux half
               hnd_pay_q   <= ot_cpl_i.handle;
-              auxhi_val_q <= {op_base_q, op_words_q};
+              auxhi_val_q <= {16'(op_base_q >> 6), op_words_q};
               if (act_q.obj_kind ==
                   6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT)) begin
                 auxhi_ret_q <= StDslAuxL;
@@ -2287,7 +2309,8 @@ module g6lc_apu_vnfront
                               ot_cpl_i.entry.aux[7:0] < 8'(CbBufs);
               // §7b: payload kinds free their ObjPay extent on retire
               payf_q       <= is_pay_kind(act_q.obj_kind);
-              payf_base_q  <= ot_cpl_i.entry.aux[63:48];
+              // §5a: parked payload base is a 64-word chunk index
+              payf_base_q  <= 32'(ot_cpl_i.entry.aux[63:48]) << 6;
               payf_words_q <= ot_cpl_i.entry.aux[47:32];
               otr_q    <= '{op: APU_OBJTAB_OP_RETIRE, id: blob_id_q,
                            kind: act_q.obj_kind, default: '0};
@@ -2303,7 +2326,7 @@ module g6lc_apu_vnfront
               if (aux_free_v_q) aux_free_v_q <= 1'b0;
               payf_q <= 1'b0;
               opr_q    <= '{op: APU_OBJPAY_OP_FREE,
-                            addr: {16'h0, payf_base_q},
+                            addr: payf_base_q,
                             words: {16'h0, payf_words_q}, default: '0};
               op_ret_q <= StElemRetPay;
               state_q  <= StOpReq;
@@ -2341,7 +2364,8 @@ module g6lc_apu_vnfront
                                ? 8'(Fences) : 8'(CbBufs));
               // §7b: payload kinds free their ObjPay extent on retire
               payf_q       <= is_pay_kind(act_q.obj_kind);
-              payf_base_q  <= ot_cpl_i.entry.aux[63:48];
+              // §5a: parked payload base is a 64-word chunk index
+              payf_base_q  <= 32'(ot_cpl_i.entry.aux[63:48]) << 6;
               payf_words_q <= ot_cpl_i.entry.aux[47:32];
               if (act_q.obj_kind ==
                   6'(APU_VN_KIND_VK_DEVICE_MEMORY)) begin
@@ -2378,8 +2402,8 @@ module g6lc_apu_vnfront
                   ret_gp_q <= 1'b1;
                   ret_fs_q <= ot_cpl_i.entry.aux[5:3];
                   opr_q    <= '{op: APU_OBJPAY_OP_FREE,
-                               addr: {16'h0,
-                                      ot_cpl_i.entry.aux[31:16]},
+                               addr: 32'(ot_cpl_i.entry.aux[31:16])
+                                      << 6,
                                words: 32'd44, default: '0};
                   op_ret_q <= StRetUnrV;
                   state_q  <= StOpReq;
@@ -2437,7 +2461,7 @@ module g6lc_apu_vnfront
               if (payf_q && payf_words_q != 16'h0) begin
                 payf_q <= 1'b0;
                 opr_q    <= '{op: APU_OBJPAY_OP_FREE,
-                              addr: {16'h0, payf_base_q},
+                              addr: payf_base_q,
                               words: {16'h0, payf_words_q},
                               default: '0};
                 op_ret_q <= StRep;
@@ -2900,7 +2924,7 @@ module g6lc_apu_vnfront
               result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
               state_q  <= StRep;
             end else begin
-              op_base_q <= 16'(op_cpl_i.base);
+              op_base_q <= op_cpl_i.base;
               if (act_q.obj_kind == 6'(APU_VN_KIND_VK_PIPELINE)) begin
                 // pipeline payload: copy now, attach at first element
                 pay_i_q    <= '0;
@@ -2911,7 +2935,7 @@ module g6lc_apu_vnfront
                 // §12.3 F5: header {pad,nbind}, then binding rows are
                 // built from the staged {bind,type,cnt,flags} words
                 opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
-                              addr: {16'h0, 16'(op_cpl_i.base)},
+                              addr: op_cpl_i.base,
                               wdata: {16'h0, 16'(op_q.imm[1])},
                               default: '0};
                 op_ret_q <= StDslHdrC;
@@ -2929,8 +2953,7 @@ module g6lc_apu_vnfront
               state_q <= pay_done_q;
             end else if (pay_i_q < {14'h0, prepend_n_q}) begin
               opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
-                            addr: {16'h0, op_base_q} +
-                                  {16'h0, pay_i_q},
+                            addr: op_base_q + 32'(pay_i_q),
                             wdata: prepend_w_q[pay_i_q[0]],
                             default: '0};
               op_ret_q <= StPayNext;
@@ -2943,8 +2966,7 @@ module g6lc_apu_vnfront
           end
           StPayWr: begin
             opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
-                          addr: {16'h0, op_base_q} +
-                                {16'h0, pay_i_q},
+                          addr: op_base_q + 32'(pay_i_q),
                           wdata: stg_word_q, default: '0};
             op_ret_q <= StPayNext;
             state_q  <= StOpReq;
@@ -3148,7 +3170,7 @@ module g6lc_apu_vnfront
                   (20'(dsl_recs_q) + 20'(dsl_c_q) > 20'd2047);
               if (bad) begin
                 opr_q    <= '{op: APU_OBJPAY_OP_FREE,
-                             addr: {16'h0, op_base_q},
+                             addr: op_base_q,
                              words: {16'h0, op_words_q},
                              default: '0};
                 op_ret_q <= StRep;
@@ -3162,7 +3184,7 @@ module g6lc_apu_vnfront
           end
           StDslWr: begin
             opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
-                         addr: {16'h0, op_base_q} + 32'd1 +
+                         addr: op_base_q + 32'd1 +
                                (32'(dsl_i_q) << 1) + 32'(dsl_k_q),
                          wdata: dsl_k_q == 1'b0
                                 ? {dsl_b_q, dsl_t_q, dsl_c_q}
@@ -3290,8 +3312,8 @@ module g6lc_apu_vnfront
               state_q  <= StBlobRd;
             end else begin
               ds_pent_q  <= ot_cpl_i.entry;
-              ds_sbase_q <= 25'(ot_cpl_i.entry.aux[31:0] +
-                                 (ot_cpl_i.entry.aux[43:32] << 5));
+              ds_sbase_q <= 25'((ot_cpl_i.entry.aux[31:0] +
+                                 (ot_cpl_i.entry.aux[43:32] << 5)) >> 2);
               state_q    <= StDSetObj;
             end
           end
@@ -3319,7 +3341,7 @@ module g6lc_apu_vnfront
               state_q  <= StBlobRd;
             end else begin
               // aux[63:32] = layout {gen,slot},
-              // aux[31:0]  = {poison=0, ndyn[5:0], set_base[24:0]}
+              // aux[31:0]  = {poison=0, ndyn[5:0], set_base_w[24:0]}
               hnd_pay_q    <= ot_cpl_i.handle;
               auxlo_val_q  <= {1'b0, ds_ndyn_q[5:0], ds_sbase_q};
               auxlo_mask_q <= 32'hFFFF_FFFF;
@@ -3347,7 +3369,7 @@ module g6lc_apu_vnfront
               state_q <= StDSetBump;
             end else begin
               ap_we_q    <= 1'b1;
-              ap_addr_q  <= {7'h0, ds_sbase_q};
+              ap_addr_q  <= {5'h0, ds_sbase_q, 2'b00};
               ap_wdata_q <= '0;
               ap_wstrb_q <= 8'hFF;
               ap_ret_q   <= StDSetZeroC;
@@ -3430,7 +3452,8 @@ module g6lc_apu_vnfront
                             6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT) &&
                             ot_cpl_i.handle == rsv_layh_q);
             rsv_layb_q <= ot_cpl_i.status == APU_OBJTAB_OK
-                          ? ot_cpl_i.entry.aux[63:48] : 16'h0;
+                          ? 32'(ot_cpl_i.entry.aux[63:48]) << 6
+                          : 32'h0;
             rsv_nbnd_q <= ot_cpl_i.status == APU_OBJTAB_OK
                           ? (ot_cpl_i.entry.aux[47:32] - 16'd1) >> 1
                           : 16'h0;
@@ -3446,7 +3469,7 @@ module g6lc_apu_vnfront
               state_q <= row_ret_q;
             end else begin
               opr_q    <= '{op: APU_OBJPAY_OP_READ,
-                           addr: {16'h0, rsv_layb_q} + 32'd1 +
+                           addr: rsv_layb_q + 32'd1 +
                                  (32'(rw_i_q) << 1),
                            default: '0};
               op_ret_q <= StRowW0C;
@@ -3461,7 +3484,7 @@ module g6lc_apu_vnfront
               rw_cnt_q <= op_cpl_i.rdata[15:0];
               rw_typ_q <= op_cpl_i.rdata[23:16];
               opr_q    <= '{op: APU_OBJPAY_OP_READ,
-                           addr: {16'h0, rsv_layb_q} + 32'd2 +
+                           addr: rsv_layb_q + 32'd2 +
                                  (32'(rw_i_q) << 1),
                            default: '0};
               op_ret_q <= StRowW1C;
@@ -3591,7 +3614,7 @@ module g6lc_apu_vnfront
               upd_eb_q   <= '0;
               upd_esz_q  <= '0;
               upd_mh_q   <= '0;
-              upd_rec_q  <= {7'h0, rsv_base_q} +
+              upd_rec_q  <= {5'h0, rsv_base_q, 2'b00} +
                             ((32'(rw_off_q) + upd_arr_q +
                               32'(ent_j_q)) << 5);
               state_q    <= StUpdWr0;
@@ -3624,7 +3647,7 @@ module g6lc_apu_vnfront
             state_q  <= StOtReq;
           end
           StUpdBufCpl: begin
-            upd_rec_q <= {7'h0, rsv_base_q} +
+            upd_rec_q <= {5'h0, rsv_base_q, 2'b00} +
                          ((32'(rw_off_q) + upd_arr_q +
                            32'(ent_j_q)) << 5);
             if (ot_cpl_i.status != APU_OBJTAB_OK ||
@@ -3723,7 +3746,7 @@ module g6lc_apu_vnfront
             upd_esz_q  <= '0;
             upd_iw_q   <= '0;
             upd_mh_q   <= '0;
-            upd_rec_q  <= {7'h0, rsv_base_q} +
+            upd_rec_q  <= {5'h0, rsv_base_q, 2'b00} +
                           ((32'(rw_off_q) + upd_arr_q +
                             32'(ent_j_q)) << 5);
             if (upd_type_q[7:0] == 8'd0) begin
@@ -4048,7 +4071,7 @@ module g6lc_apu_vnfront
               ent_j_q   <= '0;
               cp_b_q    <= '0;
               ap_we_q   <= 1'b0;
-              ap_addr_q <= {7'h0, cp_sbase_q} +
+              ap_addr_q <= {5'h0, cp_sbase_q, 2'b00} +
                            ((32'(cp_soff_q) + cp_sa_q) << 5);
               ap_ret_q  <= StUpdCpRC;
               state_q   <= StApReq;
@@ -4060,7 +4083,7 @@ module g6lc_apu_vnfront
           // read beat done -> write it to the dst record
           StUpdCpRC: begin
             ap_we_q    <= 1'b1;
-            ap_addr_q  <= {7'h0, cp_dbase_q} +
+            ap_addr_q  <= {5'h0, cp_dbase_q, 2'b00} +
                           ((32'(cp_doff_q) + cp_da_q +
                             32'(ent_j_q)) << 5) +
                           {28'h0, cp_b_q} * 32'd8;
@@ -4078,7 +4101,7 @@ module g6lc_apu_vnfront
                 ent_j_q   <= ent_j_q + 16'd1;
                 cp_b_q    <= '0;
                 ap_we_q   <= 1'b0;
-                ap_addr_q <= {7'h0, cp_sbase_q} +
+                ap_addr_q <= {5'h0, cp_sbase_q, 2'b00} +
                              ((32'(cp_soff_q) + cp_sa_q +
                                32'(ent_j_q) + 32'd1) << 5);
                 ap_ret_q  <= StUpdCpRC;
@@ -4087,7 +4110,7 @@ module g6lc_apu_vnfront
             end else begin
               cp_b_q    <= cp_b_q + 4'd1;
               ap_we_q   <= 1'b0;
-              ap_addr_q <= {7'h0, cp_sbase_q} +
+              ap_addr_q <= {5'h0, cp_sbase_q, 2'b00} +
                            ((32'(cp_soff_q) + cp_sa_q +
                              32'(ent_j_q)) << 5) +
                            {26'h0, cp_b_q + 4'd1} * 32'd8;
@@ -4198,6 +4221,7 @@ module g6lc_apu_vnfront
               state_q  <= StRep;
             end else if (ex_submit_ready_i) begin
               pushed_q <= pushed_q + 16'h1;
+              sub_armed_q <= 1'b0;
               are_i_q  <= '0;
               state_q  <= StSubState;
             end
@@ -4780,14 +4804,14 @@ module g6lc_apu_vnfront
             if (op_cpl_i.status != APU_OBJPAY_OK) begin
               state_q <= StPipeFail;
             end else begin
-              op_base_q <= 16'(op_cpl_i.base);
+              op_base_q <= op_cpl_i.base;
               pay_i_q   <= '0;
               state_q   <= StGpPayW;
             end
           end
           StGpPayW: begin
             opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
-                         addr: {16'h0, op_base_q} + {16'h0, pay_i_q},
+                         addr: op_base_q + 32'(pay_i_q),
                          wdata: gp_pay_w(pay_i_q[5:0]), default: '0};
 // pragma translate_off
 `ifdef G6LC_APU_DBG_LOST
@@ -4825,7 +4849,7 @@ module g6lc_apu_vnfront
               // no object: free the ObjPay extent; the refs unwind at
               // StPipeFail
               opr_q    <= '{op: APU_OBJPAY_OP_FREE,
-                           addr: {16'h0, op_base_q},
+                           addr: op_base_q,
                            words: 32'd44, default: '0};
               op_ret_q <= StGpUnr;
               state_q  <= StOpReq;
@@ -4833,7 +4857,7 @@ module g6lc_apu_vnfront
               hnd_pay_q    <= ot_cpl_i.handle;
               // aux[31:0] = {ObjPay base[15:0], 9'h0, gfx=1[6],
               //              fs_slot[5:3], vs_slot[2:0]}
-              auxlo_val_q  <= {op_base_q[15:0], 9'h0, 1'b1,
+              auxlo_val_q  <= {16'(op_base_q[31:6]), 9'h0, 1'b1,
                                gp_fs_q, gp_vs_q};
               auxlo_mask_q <= 32'hFFFF_FFFF;
               auxlo_ret_q  <= StGpAuxH;
@@ -5307,7 +5331,19 @@ module g6lc_apu_vnfront
             state_q     <= StDone;
           end
 
-          StDone:  state_q <= StIdle;
+          StDone: begin
+            // §7b exception contract: a submit that carried a fence
+            // and never reached the executor fails the fence as the
+            // command retires — the reply already carries the
+            // VkResult; the fence completes DEVICE_LOST so the
+            // guest's vkWaitForFences terminates instead of hanging
+            if (sub_armed_q) begin
+              ex_fence_fail_o[
+                sub_q.fence_idx[$clog2(Fences)-1:0]] <= 1'b1;
+              sub_armed_q <= 1'b0;
+            end
+            state_q <= StIdle;
+          end
           default: state_q <= StIdle;
         endcase
       end
@@ -5405,6 +5441,7 @@ module g6lc_apu_vnfront_fixture
   input  logic [Fences-1:0]  ex_fence_signaled_i,
   input  logic [Fences-1:0]  ex_fence_lost_i,
   output logic [Fences-1:0]  ex_fence_clr_o,
+  output logic [Fences-1:0]  ex_fence_fail_o,
   output logic               busy_o,
   output logic               done_o,
   output logic [31:0]        result_o,

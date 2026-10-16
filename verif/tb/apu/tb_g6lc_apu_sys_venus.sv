@@ -90,12 +90,20 @@ module tb_g6lc_apu_sys_venus;
   localparam int unsigned ABW    = PWB;
   localparam int unsigned PPW    =
       APU_VG_PRIV_PAGES * (APU_VG_PAGE_BYTES / 4);
-  localparam int unsigned APWT   = ABW + PPW;
+  // objmem static carve at APU_OBJMEM_OFF: entry records +
+  // directory + free stack + magic + PayMem, dense in a third window;
+  // geometry mirrors the g6lc_apu_sys hardwired vgsys defaults
+  localparam int unsigned OBW    = 32'(APU_OBJMEM_OFF >> 2);
+  localparam int unsigned OPW    =
+      32'((apu_objmem_pay_off(65536) + 64'd16 * 1024 * 1024 -
+           APU_OBJMEM_OFF) >> 2);
+  localparam int unsigned APWT   = ABW + PPW + OPW;
   // first-fit keeps every session low; an index past the dense model
   // is a tape/model bug — never wrap
   function automatic int unsigned apix(input int unsigned w);
     if (w < ABW) return w;
     if (w >= PWB && w < PWB + PPW) return ABW + (w - PWB);
+    if (w >= OBW && w < OBW + OPW) return ABW + PPW + (w - OBW);
     $fatal(1, "aperture word %0d past dense model", w);
     return 0;
   endfunction
@@ -204,9 +212,9 @@ module tb_g6lc_apu_sys_venus;
   wire        wch_r     = i_venus.i_dut.gen_venus.i_vgsys.gen_on.vw_chain_rdy;
   wire [15:0] flost     =
       i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_exec.gen_on.flost_q;
-  wire [3:0][31:0] r_status = i_venus.i_dut.gen_venus.i_vgsys.ring_status_o;
-  wire [3:0][31:0] r_head   = i_venus.i_dut.gen_venus.i_vgsys.ring_head_o;
-  wire [3:0][APU_VG_AP_WORD_W-1:0] r_extra  = i_venus.i_dut.gen_venus.i_vgsys.ring_extra_w_o;
+  wire [15:0][31:0] r_status = i_venus.i_dut.gen_venus.i_vgsys.ring_status_o;
+  wire [15:0][31:0] r_head   = i_venus.i_dut.gen_venus.i_vgsys.ring_head_o;
+  wire [15:0][APU_VG_AP_WORD_W-1:0] r_extra  = i_venus.i_dut.gen_venus.i_vgsys.ring_extra_w_o;
 
   // ---- tape / expected stores ------------------------------------------
   logic [31:0] tape [TAPEW];
@@ -871,7 +879,8 @@ module tb_g6lc_apu_sys_venus;
           int unsigned rg = ntap(), ad = ntap(),
                        eh = ntap(), tmo = ntap();
           int unsigned t = 0;
-          while (apm[apix((ad >> 2))] != eh && t < tmo) begin
+          int unsigned wix = apix(ad >> 2);
+          while (apm[wix] != eh && t < tmo) begin
             @(posedge clk); t++;
           end
           check(apm[apix((ad >> 2))] == eh,
@@ -889,7 +898,8 @@ module tb_g6lc_apu_sys_venus;
           int unsigned rg = ntap(), ad = ntap(), mask = ntap(),
                        want = ntap(), tmo = ntap();
           int unsigned t = 0;
-          while (((apm[apix((ad >> 2))] & mask) != want) && t < tmo)
+          int unsigned wix = apix(ad >> 2);
+          while (((apm[wix] & mask) != want) && t < tmo)
             begin @(posedge clk); t++; end
           check((apm[apix((ad >> 2))] & mask) == want,
                 $sformatf("WAIT_IDLE ring%0d status=%08x mask=%0d want=%0d",
@@ -1020,7 +1030,7 @@ module tb_g6lc_apu_sys_venus;
     end
     // teardown
     check(i_venus.i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on.i_pay.gen_on
-          .free_q === '0,
+          .used_q === 0,
           "objpay chunks drained");
   endtask
 

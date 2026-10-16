@@ -81,7 +81,13 @@ ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1 \
 ue_cpos_rb_mapafter_1 ue_cpos_ubo_bindfirst_1 \
 ue_cpos_evict_1 ue_cpos_reloc_hold_1 \
 ue_cneg_evict_full_1 ue_cneg_bind_full_1 ue_cneg_stale_mem_1 \
-ue_gpos_tri_1 ue_gpos_vbwide_1 ue_gpos_statvp_1"
+ue_gpos_tri_1 ue_gpos_vbwide_1 ue_gpos_statvp_1 ue_cpos_maxconc_1"
+# G3b-i: the *full* negatives also run on a small-geometry build of
+# the same RTL (ObjEntries=256, 256 KiB PayMem) so the FULL paths
+# stay covered while the default geometry is the big one
+SMALL_SESSIONS="ue_cneg_bind_full_1 ue_cneg_evict_full_1"
+SMALL_OBJ=256
+SMALL_PAY=262144
 NEGATIVES="neg_next_loop neg_desc_oob neg_buf_oob neg_aperture \
 neg_used_oob neg_reset neg_cursor neg_batch neg_flush neg_qdrop \
 neg_drainkick neg_resp_oob neg_worksink0 epoch_reuse"
@@ -132,6 +138,48 @@ if [ "${VGSYS_NONEG:-0}" != 1 ]; then
   echo "NEGATIVE ARMS OK (11 arms)"
 fi
 
+# ---- G3b-i small-geometry arm -------------------------------------------
+# Same RTL at ObjEntries=256 / 256 KiB PayMem so the *full* negatives
+# exercise the FULL paths on a small table while the default stays big.
+if [ "${VGSYS_SMALL:-1}" = 1 ]; then
+  if ! "$VERILATOR" --binary --timing --assert -Wall -j "$(nproc)" \
+    -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC \
+    -Wno-BLKSEQ \
+    -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY \
+    "${VLTS[@]}" \
+    -f "$ROOT/corev_apu/apu/Flist.apu_vgsys" \
+    "$ROOT/verif/tb/apu/tb_g6lc_apu_vgsys.sv" \
+    --top-module tb_g6lc_apu_vgsys \
+    -GObjEntries="$SMALL_OBJ" -GPayMemBytes="$SMALL_PAY" \
+    -Mdir "$OUT/sim-small" -o tb_g6lc_apu_vgsys \
+    > "$OUT/build-small.log" 2>&1; then
+    echo "VERILATOR BUILD FAILED (small)"
+    tail -n 80 "$OUT/build-small.log"
+    exit 1
+  fi
+  echo "VERILATOR BUILD OK (small ObjEntries=$SMALL_OBJ PayMemBytes=$SMALL_PAY)"
+  sfail=0
+  for v in $SMALL_SESSIONS; do
+    set +e
+    (cd "$ROOT/verif/tb/apu" && \
+     stdbuf -o0 -e0 "$OUT/sim-small/tb_g6lc_apu_vgsys" +vec="$v") \
+      > "$OUT/small-$v.log" 2>&1
+    vrc=$?
+    set -e
+    grep -E '^(PASS|FAIL)' "$OUT/small-$v.log" \
+      | sed "s/^/[small $v] /"
+    if ! grep -q '^PASS tb_g6lc_apu_vgsys ' "$OUT/small-$v.log" \
+       || [ "$vrc" -ne 0 ]; then
+      sfail=1
+    fi
+  done
+  if [ "$sfail" -ne 0 ]; then
+    echo "SMALL-GEOMETRY ARMS FAILED"
+    exit 1
+  fi
+  echo "SMALL-GEOMETRY ARMS OK"
+fi
+
 if [ "${VGSYS_SYNTH:-0}" != 1 ]; then
   exit 0
 fi
@@ -158,7 +206,7 @@ echo "SYNTH OK Enable=0"
 # small screen (same -G set as the vgtop screen); the default-geometry
 # ShaderCore screen is skipped as in run-apu-vgtop.sh
 cat > "$OUT/vgsys-synth-small.ys" <<EOF
-read_slang --unroll-limit 8192 -f $ROOT/corev_apu/apu/Flist.apu_vgsys --top g6lc_apu_vgsys_fixture -GEnable=1 -GRings=1 -GFences=4 -GPayWords=512 -GShaderRegs=16 -GMaxWaves=1 -GSlabBytes=1024 -GScratchBytes=64 -GShaderSlots=2 -GShaderIds=64 -GShaderWords=64 -GShaderMembers=16 -GShaderInit=8
+read_slang --unroll-limit 8192 -f $ROOT/corev_apu/apu/Flist.apu_vgsys --top g6lc_apu_vgsys_fixture -GEnable=1 -GRings=1 -GFences=4 -GPayWords=512 -GShaderRegs=16 -GMaxWaves=1 -GSlabBytes=1024 -GScratchBytes=64 -GShaderSlots=2 -GShaderIds=64 -GShaderWords=64 -GShaderMembers=16 -GShaderInit=8 -GObjEntries=256 -GPayMemBytes=16384
 hierarchy -top g6lc_apu_vgsys_fixture
 flatten
 proc

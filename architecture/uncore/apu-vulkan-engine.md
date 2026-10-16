@@ -447,13 +447,22 @@ DRAM with on-chip caches.
     (`APU_SHM_BASE` = `0x8200_0000`, a `reserved-memory` carve of the guest's low DRAM bank
     that the bridge and the g6lc_qemu FDT derive from the constant). `objmem` and PayMem
     therefore live in the aperture: `APU_SHM_BYTES` grows 32 → **128 MiB**; the vgpages bitmap
-    keeps managing only the first 32 MiB (24 MiB guest-visible + 8 MiB `ALLOC_PRIV` arena —
+    keeps managing only the first 72 MiB (guest-visible + 8 MiB `ALLOC_PRIV` arena —
     `APU_VG_MANAGED_BYTES`, new, replaces the derived `SHM_BYTES/PAGES` page size so the
-    bitmap does not grow); the upper 96 MiB is a **static carve**: `objmem` (entries
+    bitmap does not grow); the upper 56 MiB is a **static carve**: `objmem` (entries
     `ObjEntries × 64 B` + directory `2·ObjEntries × 8 B`; 1.25 MiB at 2¹⁶) then PayMem
     (`PayMemBytes`, default 16 MiB), both as `ApuCfg`/vgtop parameters with `check_cfg`
-    asserting the carve fits. `SHM_LEN` published to the guest stays 24 MiB. On a real SoC the
+    asserting the carve fits. On a real SoC the
     same constants name the APU's DRAM carve-out. `APU_VG_AP_WORD_W` widens with the aperture.
+    **Revision 2026-10-16 (API-X4):** `SHM_LEN` was pinned at 24 MiB, but that proved wrong in
+    practice — `api.device_init.create_multiple_devices.basic` keeps five Venus devices live
+    concurrently and each pins ~9.3 MiB of `MAPPABLE` blob extents (transport ring + the
+    8 MiB Mesa cs pool); ~57 MiB total cannot fit a 24 MiB window, and the guest kernel's
+    shm `drm_mm` returns `ENOMEM` *before* any virtio request reaches the device (zero
+    `vgerr` under `G6LC_APU_DBG_LOST`). `APU_SHM_GUEST_BYTES`/`APU_VG_GUEST_BYTES` therefore
+    grow to **64 MiB** (managed 72 MiB, `APU_VG_PAGES` 18432, carve base moves to 72 MiB);
+    the resource behind the growth is the aperture DRAM itself plus the `tc_sram` bitmap —
+    no interface or mechanism change.
   - *Handles and parking stay as they are.* `{gen[15:0], slot[15:0]}` already carries a
     16-bit index, so `ObjEntries` is legal in 2⁸…2¹⁶ (not 2²⁰ as first written) and
     `apu_objtab_entry_t` does not change. Payload parking keeps `aux[63:32] = {base[15:0],
@@ -474,10 +483,18 @@ DRAM with on-chip caches.
     {single,multiple_*,max_concurrent}.*` for every kind that is not a shader module,
     pipeline or command buffer, `api.device_init.create_multiple_devices.*` (API-X4: find
     the actual limiter — contexts, queues or objects — and lift it through this mechanism,
-    never by a bare constant). **G3b-ii** shader modules in PayMem with the scanned image, the
-    `ShaderSlots` LRU residency cache (`sm_*` FILL/BUSY), pipelines keyed by {module entry,
-    spec data}; acceptance `max_concurrent.{shader_module,*pipeline*}`, `api.pipeline.*`,
-    `compute.basic.*`. **G3b-iii** command buffers as PayMem chunk lists with the record
+    never by a bare constant). **G3b-ii** shader modules in PayMem, the `ShaderSlots` LRU
+    residency cache (`sm_*` FILL/BUSY), pipelines keyed by module entry; acceptance
+    `max_concurrent.{shader_module,*pipeline*}`, `api.pipeline.*`, `compute.basic.*`.
+    *Decision (2026-10-16):* PayMem holds the **SPIR-V words only**, not the scanned image — a
+    slot's tables (program 2 048 w, type/const/decor/var/regmap/block/phi rows indexed by id up
+    to `ShaderIds`, ≈ 130 KiB per slot) are sparse-by-id and would cost 16 384 × 130 KiB; a
+    fill **re-runs the shmod commit scan** into the victim slot from the stored words (the scan
+    is 2–5 phases per word, ≈ 10 k cycles for a 2 048-word module — far below the DRAM traffic
+    of a table restore). Creation still scans once (validation and early fault, then the slot
+    is a cache line, not a reservation). Specialization constants (COMPUTE-L1) are a later
+    card: until then the residency key is the module entry alone and a pipeline carries no
+    spec data. **G3b-iii** command buffers as PayMem chunk lists with the record
     prefetch FIFO, secondary command buffers (`EXECUTE`), pool reset/trim, descriptor-pool
     free list (`FREE_DESCRIPTOR_SET_BIT`), `DispatchIndirect`/`DispatchBase`; acceptance
     `api.command_buffers.*`, `api.descriptor_pool.*`, `api.descriptor_set.*`,

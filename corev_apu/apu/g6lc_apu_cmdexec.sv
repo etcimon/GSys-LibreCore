@@ -80,6 +80,11 @@ module g6lc_apu_cmdexec
   output logic [Fences-1:0]  fence_signaled_o,
   output logic [Fences-1:0]  fence_lost_o,
   input  logic [Fences-1:0]  fence_clr_i,
+  // §7b exception contract: vnfront pulses a fence's bit when the
+  // submit that carried it failed before reaching the executor —
+  // the slot goes signaled+lost so the guest's vkWaitForFences
+  // terminates (DEVICE_LOST) instead of waiting on an unarmed fence
+  input  logic [Fences-1:0]  fence_fail_i,
   // §12.3 3d-d: vgctl relocation hold — while high the executor
   // dequeues and issues no NEW submission; an in-flight submission
   // runs to completion.  idle_o = nothing in flight (FSM at rest and
@@ -122,7 +127,7 @@ module g6lc_apu_cmdexec
                     ot_req_ready_i | ot_cpl_valid_i | (|ot_cpl_i) |
                     op_req_ready_i | op_cpl_valid_i | (|op_cpl_i) |
                     work_ready_i | work_done_i | (|work_done_pl_i) |
-                    (|fence_clr_i) | (|submit_i);
+                    (|fence_clr_i) | (|submit_i) | (|fence_fail_i);
   end else begin : gen_on
     localparam int unsigned Fifo = 4;
     localparam logic [4:0]   FENCE_NONE = 5'd31;
@@ -197,7 +202,7 @@ module g6lc_apu_cmdexec
     logic [1:0]          ds_set_q;      // set index 0..3
     logic [15:0]         ds_pl_q;       // pipeline-layout slot
     logic [15:0]         ds_plg_q;      // pipeline-layout generation
-    logic [15:0]         ds_plpay_q;    // pipeline-layout pay base
+    logic [31:0]         ds_plpay_q;    // pipeline-layout pay base
     logic [15:0]         ds_plw_q;      // pipeline-layout pay words
     logic [63:0]         ds_slid_q;     // setLayout client id
     logic [31:0]         ds_slo_q;      // setLayout objectpay base
@@ -264,10 +269,10 @@ module g6lc_apu_cmdexec
     logic                dr_vpsta_q, dr_scsta_q;
     logic [5:0][31:0]    dr_vp_q;
     logic [3:0][31:0]    dr_sc_q;
-    logic [15:0]         rd_gpay_q;       // pipeline ObjPay base (aux[31:16])
-    logic [15:0]         brp_rpay_q;      // render-pass ObjPay base
+    logic [31:0]         rd_gpay_q;       // pipeline ObjPay base (aux[31:16])
+    logic [31:0]         brp_rpay_q;      // render-pass ObjPay base
     logic [15:0]         brp_rpw_q;       // render-pass ObjPay word count
-    logic [15:0]         brp_fpay_q;      // framebuffer ObjPay base
+    logic [31:0]         brp_fpay_q;      // framebuffer ObjPay base
     logic [4:0]          brp_pi_q;        // rp ObjPay word cursor
     logic [2:0]          brp_ph_q;        // rp parse phase
     logic [2:0]          brp_att_q;       // attachmentCount (1..5)
@@ -510,14 +515,14 @@ module g6lc_apu_cmdexec
         StDsSlRd: begin
           op_req_valid_o = 1'b1;
           op_req_o       = '{op: APU_OBJPAY_OP_READ,
-                             addr: {16'h0, ds_plpay_q} + 32'd2 +
+                             addr: ds_plpay_q + 32'd2 +
                                    (32'(ds_set_q) << 1),
                              default: '0};
         end
         StDsSlHi: begin
           op_req_valid_o = 1'b1;
           op_req_o       = '{op: APU_OBJPAY_OP_READ,
-                             addr: {16'h0, ds_plpay_q} + 32'd3 +
+                             addr: ds_plpay_q + 32'd3 +
                                    (32'(ds_set_q) << 1),
                              default: '0};
         end
@@ -635,7 +640,7 @@ module g6lc_apu_cmdexec
           // colour refs×C, depth ref}
           op_req_valid_o = 1'b1;
           op_req_o       = '{op: APU_OBJPAY_OP_READ,
-                             addr: {16'h0, brp_rpay_q} + 32'(brp_pi_q),
+                             addr: brp_rpay_q + 32'(brp_pi_q),
                              default: '0};
         end
         StBrpFbReq: begin
@@ -651,14 +656,14 @@ module g6lc_apu_cmdexec
         StBrpVwLo: begin
           op_req_valid_o = 1'b1;
           op_req_o       = '{op: APU_OBJPAY_OP_READ,
-                             addr: {16'h0, brp_fpay_q} + 32'd3 +
+                             addr: brp_fpay_q + 32'd3 +
                                    32'({brp_ak_q, 1'b0}),
                              default: '0};
         end
         StBrpVwHi: begin
           op_req_valid_o = 1'b1;
           op_req_o       = '{op: APU_OBJPAY_OP_READ,
-                             addr: {16'h0, brp_fpay_q} + 32'd4 +
+                             addr: brp_fpay_q + 32'd4 +
                                    32'({brp_ak_q, 1'b0}),
                              default: '0};
         end
@@ -674,7 +679,7 @@ module g6lc_apu_cmdexec
         StDrPay: begin
           op_req_valid_o = 1'b1;
           op_req_o       = '{op: APU_OBJPAY_OP_READ,
-                             addr: {16'h0, rd_gpay_q} +
+                             addr: rd_gpay_q +
                                    32'(dr_pi_q),
                              default: '0};
         end
@@ -781,6 +786,11 @@ module g6lc_apu_cmdexec
         // fence clear mask (vkResetFences)
         fsig_q  <= fsig_q & ~fence_clr_i;
         flost_q <= flost_q & ~fence_clr_i;
+        // §7b exception contract: a submit that vnfront rejected
+        // never reaches the FIFO below — pulse its fence signaled +
+        // lost here so the guest wait terminates DEVICE_LOST
+        fsig_q  <= (fsig_q & ~fence_clr_i) | fence_fail_i;
+        flost_q <= (flost_q & ~fence_clr_i) | fence_fail_i;
         // submit FIFO push
         if (submit_valid_i && submit_ready_o) begin
 // pragma translate_off
@@ -1255,7 +1265,8 @@ module g6lc_apu_cmdexec
               // gfx[6], fs_slot[5:3], vs_slot[2:0]}
               rd_q.vs_slot  <= ot_cpl_i.entry.aux[2:0];
               rd_q.fs_slot  <= ot_cpl_i.entry.aux[5:3];
-              rd_gpay_q     <= ot_cpl_i.entry.aux[31:16];
+              // §5a: parked payload base is a 64-word chunk index
+              rd_gpay_q     <= 32'(ot_cpl_i.entry.aux[31:16]) << 6;
               dr_vbmask_q   <= '0;
               dr_pi_q       <= '0;
               desc_q    <= '0;
@@ -1274,7 +1285,8 @@ module g6lc_apu_cmdexec
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
             end else begin
-              ds_plpay_q <= ot_cpl_i.entry.aux[63:48];
+              // §5a: parked payload base is a 64-word chunk index
+              ds_plpay_q <= 32'(ot_cpl_i.entry.aux[63:48]) << 6;
               ds_plw_q   <= ot_cpl_i.entry.aux[47:32];
               ds_set_q   <= '0;
               state_q    <= StDsSetCk;
@@ -1332,7 +1344,8 @@ module g6lc_apu_cmdexec
               state_q <= StUnpReq;
             end else begin
               ds_slh_q <= ot_cpl_i.handle;
-              ds_slo_q <= {16'h0, ot_cpl_i.entry.aux[63:48]};
+              // §5a: parked payload base is a 64-word chunk index
+              ds_slo_q <= 32'(ot_cpl_i.entry.aux[63:48]) << 6;
               ds_slw_q <= ot_cpl_i.entry.aux[47:32];
               // §12.3 F5-d: content hash minted at create — the
               // compatibility key against the set's own layout
@@ -1350,7 +1363,7 @@ module g6lc_apu_cmdexec
               state_q <= StUnpReq;
             end else begin
               desc_q.set_base[ds_set_q] <=
-                  {7'h0, ot_cpl_i.entry.aux[24:0]};
+                  {5'h0, ot_cpl_i.entry.aux[24:0], 2'b00};
               desc_q.dyn_off[ds_set_q]  <= snap_q.dyn[ds_set_q];
               ds_sdsl_q  <= ot_cpl_i.entry.aux[47:32];
               ds_sdg_q   <= ot_cpl_i.entry.aux[63:48];
@@ -1634,7 +1647,8 @@ module g6lc_apu_cmdexec
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
             end else begin
-              brp_rpay_q <= ot_cpl_i.entry.aux[63:48];
+              // §5a: parked payload base is a 64-word chunk index
+              brp_rpay_q <= 32'(ot_cpl_i.entry.aux[63:48]) << 6;
               brp_rpw_q  <= ot_cpl_i.entry.aux[47:32];
               brp_pi_q   <= '0;
               brp_ph_q   <= '0;
@@ -1744,7 +1758,8 @@ module g6lc_apu_cmdexec
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
             end else begin
-              brp_fpay_q <= ot_cpl_i.entry.aux[63:48];
+              // §5a: parked payload base is a 64-word chunk index
+              brp_fpay_q <= 32'(ot_cpl_i.entry.aux[63:48]) << 6;
               brp_ak_q   <= '0;
               state_q    <= StBrpVwLo;
             end
@@ -2160,6 +2175,7 @@ module g6lc_apu_cmdexec_fixture
   output logic [Fences-1:0]  fence_signaled_o,
   output logic [Fences-1:0]  fence_lost_o,
   input  logic [Fences-1:0]  fence_clr_i,
+  input  logic [Fences-1:0]  fence_fail_i,
   output apu_xfer_desc_t     xf_o,
   output apu_rast_draw_t     rd_o,
   input  logic               hold_i,

@@ -36,7 +36,9 @@
 // ISR), ring head/status through the pump's observability ports,
 // reply bytes in the aperture, and ObjTab live count after teardown.
 
-module tb_g6lc_apu_vgtop;
+module tb_g6lc_apu_vgtop
+#(parameter int unsigned ObjEntries  = 65536,
+  parameter int unsigned PayMemBytes = 16 * 1024 * 1024);
   import g6lc_apu_mp_pkg::*;
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
@@ -45,7 +47,7 @@ module tb_g6lc_apu_vgtop;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_vnfront_pkg::*;
 
-  localparam int unsigned Rings   = 4;
+  localparam int unsigned Rings   = 16;
   localparam int unsigned GMW     = 32'h40000;   // 1 MiB guest RAM
   // §12.3 F5-c: dense model spans the whole guest window — lazy type-1
   // blobs (memsplit) can first-fit above the low MiB
@@ -55,16 +57,24 @@ module tb_g6lc_apu_vgtop;
   // the dense model covers it in [APW, APW+PPW) of i_mem.apm
   localparam int unsigned PPW     =
       APU_VG_PRIV_PAGES * (APU_VG_PAGE_BYTES / 4);
+  // objmem static carve at APU_OBJMEM_OFF: entry records +
+  // directory + free stack + magic + PayMem, dense in a third window
+  localparam int unsigned OBW     = 32'(APU_OBJMEM_OFF >> 2);
+  localparam int unsigned OPW     =
+      32'((apu_objmem_pay_off(ObjEntries) + 64'(PayMemBytes) -
+           APU_OBJMEM_OFF) >> 2);
+  localparam int unsigned APWT    = APW + PPW + OPW;
   // first-fit allocation keeps every session in the dense range; an
   // index past it is a tape/model bug — never wrap
   function automatic int unsigned apix(input int unsigned w);
     if (w < APW) return w;
     if (w >= PWB && w < PWB + PPW) return APW + (w - PWB);
+    if (w >= OBW && w < OBW + OPW) return APW + PPW + (w - OBW);
     $fatal(1, "aperture word %0d past dense model", w);
     return 0;
   endfunction
   localparam int unsigned TAPEW   = 32'h100000;
-  localparam int unsigned EXPW    = 32'h8000;
+  localparam int unsigned EXPW    = 32'h40000;
   localparam int unsigned MAXCYC  = 300_000_000;
 
   logic clk = 0, rst_ni = 0;
@@ -78,9 +88,9 @@ module tb_g6lc_apu_vgtop;
   logic            cpl_v;
   logic            vg_mf;
   logic [31:0]     cpl_len;
-  logic [3:0]      mp_rv, mp_rr, mp_rsv;
-  apu_mp_req_t [3:0] mp_req;
-  apu_mp_rsp_t [3:0] mp_rsp;
+  logic [4:0]      mp_rv, mp_rr, mp_rsv;
+  apu_mp_req_t [4:0] mp_req;
+  apu_mp_rsp_t [4:0] mp_rsp;
   logic            w_v, w_done;
   logic            w_r;
   apu_cmdexec_work_t w_o;
@@ -98,7 +108,9 @@ module tb_g6lc_apu_vgtop;
   logic            dot_cv;
   apu_objtab_cpl_t dot_cpl;
 
-  g6lc_apu_vgtop #(.Enable(1'b1), .Rings(Rings)) i_dut (
+  g6lc_apu_vgtop #(.Enable(1'b1), .Rings(Rings),
+                    .ObjEntries(ObjEntries),
+                    .PayMemBytes(PayMemBytes)) i_dut (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .chain_valid_i(ch_v), .chain_ready_o(ch_r),
     .chain_id_i(ch_id), .chain_n_i(ch_n), .chain_desc_i(ch_d),
@@ -123,8 +135,15 @@ module tb_g6lc_apu_vgtop;
     .xf_flush_i(1'b0), .xfer_busy_o(xf_busy));
 
   // shared memory model: mp ports 0..3 -> {guest, aperture} backing
-  tb_apu_mp_mem #(.N(4), .GMW(GMW), .APW(APW),
-                  .PWB(PWB), .PPW(PPW)) i_mem (
+  // vgtop port order {CTL,PUMP,SH,RAST,OBJ} — five requesters; the
+  // private arena and the objmem carve are contiguous (PWB+PPW==OBW)
+  // so one PPW+OPW window covers both
+  // port 4 is the ObjMem requester: its entry/directory/payload
+  // writes into the static carve are internal traffic, exempt from
+  // the guest-visible APGUARD allow-list
+  tb_apu_mp_mem #(.N(5), .GMW(GMW), .APW(APW),
+                  .PWB(PWB), .PPW(PPW + OPW),
+                  .GUARD_SKIP(5'b10000)) i_mem (
     .clk_i(clk), .rst_ni(rst_ni),
     .req_valid_i(mp_rv), .req_ready_o(mp_rr), .req_i(mp_req),
     .rsp_valid_o(mp_rsv), .rsp_o(mp_rsp));
@@ -529,7 +548,7 @@ module tb_g6lc_apu_vgtop;
           // 1-cycle port did — wait generously rather than one cycle
           int unsigned iw;
           iw = 0;
-          while (vg_busy && iw < 100000) @(posedge clk) iw++;
+          while (vg_busy && iw < 4000000) @(posedge clk) iw++;
         end
         check(!vg_busy, "vgtop idle after completion");
         // fence record if requested: {8, flo, fhi, ring_idx}
@@ -586,7 +605,8 @@ module tb_g6lc_apu_vgtop;
           int unsigned rg = ntap(), ad = ntap(),
                        eh = ntap(), tmo = ntap();
           int unsigned t = 0;
-          while (i_mem.apm[apix((ad >> 2))] != eh && t < tmo) begin
+          int unsigned wix = apix(ad >> 2);
+          while (i_mem.apm[wix] != eh && t < tmo) begin
             @(posedge clk); t++;
           end
           if (i_mem.apm[apix((ad >> 2))] != eh)
@@ -608,7 +628,8 @@ module tb_g6lc_apu_vgtop;
           int unsigned rg = ntap(), ad = ntap(), mask = ntap(),
                        want = ntap(), tmo = ntap();
           int unsigned t = 0;
-          while (((i_mem.apm[apix((ad >> 2))] & mask) != want) && t < tmo) begin
+          int unsigned wix = apix(ad >> 2);
+          while (((i_mem.apm[wix] & mask) != want) && t < tmo) begin
             @(posedge clk); t++;
           end
           check((i_mem.apm[apix((ad >> 2))] & mask) == want,
@@ -768,7 +789,7 @@ module tb_g6lc_apu_vgtop;
 
     // teardown: ObjTab live count and the allocated-page count are
     // checked by the last CK_LIVE; ObjPay chunks must all be freed too
-    check(i_dut.gen_on.i_pay.gen_on.free_q === '0,
+    check(i_dut.gen_on.i_pay.gen_on.used_q === 0,
           "objpay chunks drained");
     // ue_donecol_1: the held EXECUTE_COMMANDS completion collided with
     // the CopyBuffer's xf_done — the queue must have delivered BOTH to

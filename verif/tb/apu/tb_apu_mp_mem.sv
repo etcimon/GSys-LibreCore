@@ -23,7 +23,12 @@ module tb_apu_mp_mem
   // device-private arena; the dense model covers [0,APW) plus that
   // range, addressed through the compressed apix() view
   parameter int unsigned PWB = 0,
-  parameter int unsigned PPW = 0
+  parameter int unsigned PPW = 0,
+  // §5a-ii: the aperture-write allow-list polices guest-visible
+  // traffic only; a requester whose port carries internal
+  // infrastructure writes (ObjMem's entry/directory/payload traffic
+  // into the static carve) is exempt via its bit here
+  parameter logic [N-1:0]    GUARD_SKIP = '0
 ) (
   input  logic               clk_i,
   input  logic               rst_ni,
@@ -41,7 +46,7 @@ module tb_apu_mp_mem
   // compressed aperture index: [0,APW) is the dense low window and
   // [APW,APW+PPW) maps the device-private arena [PWB,PWB+PPW)
   function automatic int unsigned apix(input int unsigned w);
-    if (w < APW) return w;
+    if (APW != 0 && w < APW) return w;
     if (w >= PWB && w < PWB + PPW) return APW + (w - PWB);
     $fatal(1, "aperture word %0d past dense model", w);
     return 0;
@@ -70,6 +75,9 @@ module tb_apu_mp_mem
   initial begin
     lat_min = 1; lat_max = 1; rdy_pct = 100;
     guard_on = 1'b0; guard_n = 0;
+    for (int gi = 0; gi < GUARD_MAX; gi++) begin
+      guard_lo[gi] = '0; guard_hi[gi] = '0;
+    end
     void'($value$plusargs("mp_lat_min=%d", lat_min));
     void'($value$plusargs("mp_lat_max=%d", lat_max));
     void'($value$plusargs("mp_ready_pct=%d", rdy_pct));
@@ -129,7 +137,7 @@ module tb_apu_mp_mem
                   // first-fit keeps every session low — a genuine
                   // over-run is a tape/model bug, never wrap it
                   if (rq_q[p].dom) begin
-                    if (!guard_ok(64'(byt)))
+                    if (!GUARD_SKIP[p] && !guard_ok(64'(byt)))
                       $fatal(1, "APGUARD: aperture write outside allow-list off=%0x d=%02x",
                              byt, rq_q[p].wdata[b*8 +: 8]);
                     apm[apix(byt >> 2)][8*(byt[1:0]) +: 8] <=

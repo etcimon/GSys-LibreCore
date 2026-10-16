@@ -7,6 +7,16 @@
 // address single payload words.
 package g6lc_apu_objpay_pkg;
 
+  // §5a G3b-i: the payload arena is chunked at 64 words (256 B) and
+  // object aux fields park an extent's base in CHUNK units —
+  // aux[63:32] = {base>>6 [15:0], words[15:0]} — so 2^16 chunks reach
+  // the full 16 MiB PayMem.  Every unpark site shifts the chunk base
+  // back to a word address by APU_OBJPAY_CHUNK_SHIFT.
+  localparam int unsigned APU_OBJPAY_CHUNK_WORDS = 64;
+  localparam int unsigned APU_OBJPAY_CHUNK_SHIFT = 6;
+  // ALLOC refuses words above the parked 16-bit words field.
+  localparam int unsigned APU_OBJPAY_MAX_WORDS   = 65535;
+
   typedef enum logic [2:0] {
     APU_OBJPAY_OP_ALLOC = 3'd0,
     APU_OBJPAY_OP_FREE  = 3'd1,

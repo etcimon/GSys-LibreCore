@@ -44,9 +44,18 @@ module g6lc_apu_vgsys
 #(
   parameter bit          Enable = 1'b0,
   // vgtop geometry, passed through
-  parameter int unsigned Rings  = 4,
+  parameter int unsigned Rings  = 64,
   parameter int unsigned Fences = 16,
-  parameter int unsigned PayWords = 16384,
+  // ring ALIVE watchdog refresh period: 2**AliveTickLog2 cycles
+  parameter int unsigned AliveTickLog2 = 20,
+  parameter int unsigned CrPayWords    = 1024,
+  // §5a G3b-i objmem carve geometry, passed through
+  parameter int unsigned ObjEntries    = 65536,
+  parameter int unsigned ObjMaxCtx     = 32,
+  parameter int unsigned PayMemBytes   = 16 * 1024 * 1024,
+  parameter int unsigned DirCacheSets  = 256,
+  parameter int unsigned EntCacheLines = 64,
+  parameter int unsigned PayCacheLines = 32,
   parameter int unsigned VgPages      = APU_VG_PAGES,
   parameter int unsigned VgPageBytes  = APU_VG_PAGE_BYTES,
   parameter int unsigned VgGuestPages = APU_VG_GUEST_PAGES,
@@ -277,11 +286,36 @@ module g6lc_apu_vgsys
     end
 
     // ---- engine composition ------------------------------------------
-    // vgtop mp[0..3] map onto apmem ports CTL=2, PUMP=3, SH=4,
-    // RAST=5 (lowest priority).
+    // vgtop mp[0..4] map onto apmem requesters {CTL=2, PUMP=4, SH=5,
+    // RAST=6, OBJ=3}: [0..3] are the engines (packed slice
+    // RAST:PUMP), [4] is the objmem requester.
+    logic [4:0]        vgt_mp_req_v, vgt_mp_req_rdy, vgt_mp_rsp_v;
+    apu_mp_req_t [4:0] vgt_mp_req;
+    apu_mp_rsp_t [4:0] vgt_mp_rsp;
+    assign {mp_req_valid[APU_MP_OBJ],
+            mp_req_valid[APU_MP_RAST:APU_MP_PUMP],
+            mp_req_valid[APU_MP_CTL]} = vgt_mp_req_v;
+    assign {vgt_mp_req_rdy[4],
+            vgt_mp_req_rdy[3:1],
+            vgt_mp_req_rdy[0]} = {mp_req_ready[APU_MP_OBJ],
+                                  mp_req_ready[APU_MP_RAST:APU_MP_PUMP],
+                                  mp_req_ready[APU_MP_CTL]};
+    assign {mp_req[APU_MP_OBJ], mp_req[APU_MP_RAST:APU_MP_PUMP],
+            mp_req[APU_MP_CTL]} = vgt_mp_req;
+    assign {vgt_mp_rsp_v[4], vgt_mp_rsp_v[3:1], vgt_mp_rsp_v[0]} =
+        {mp_rsp_valid[APU_MP_OBJ],
+         mp_rsp_valid[APU_MP_RAST:APU_MP_PUMP],
+         mp_rsp_valid[APU_MP_CTL]};
+    assign {vgt_mp_rsp[4], vgt_mp_rsp[3:1], vgt_mp_rsp[0]} =
+        {mp_rsp[APU_MP_OBJ], mp_rsp[APU_MP_RAST:APU_MP_PUMP],
+         mp_rsp[APU_MP_CTL]};
     g6lc_apu_vgtop #(
       .Enable(1'b1), .Rings(Rings), .Fences(Fences),
-      .PayWords(PayWords), .VgPages(VgPages), .VgPageBytes(VgPageBytes),
+      .AliveTickLog2(AliveTickLog2), .CrPayWords(CrPayWords),
+      .ObjEntries(ObjEntries), .ObjMaxCtx(ObjMaxCtx),
+      .PayMemBytes(PayMemBytes), .DirCacheSets(DirCacheSets),
+      .EntCacheLines(EntCacheLines), .PayCacheLines(PayCacheLines),
+      .VgPages(VgPages), .VgPageBytes(VgPageBytes),
       .VgGuestPages(VgGuestPages),
       .ShaderRegs(ShaderRegs), .MaxWaves(MaxWaves),
       .ShaderIds(ShaderIds), .ShaderSlots(ShaderSlots),
@@ -295,11 +329,11 @@ module g6lc_apu_vgsys
       .chain_desc_i(vw_chain_desc),
       .cpl_valid_o(vg_cpl_v), .cpl_ready_i(vw_cpl_rdy),
       .cpl_len_o(vg_cpl_len), .mem_fault_o(vg_fault),
-      .mp_req_valid_o(mp_req_valid[APU_MP_RAST:APU_MP_CTL]),
-      .mp_req_ready_i(mp_req_ready[APU_MP_RAST:APU_MP_CTL]),
-      .mp_req_o(mp_req[APU_MP_RAST:APU_MP_CTL]),
-      .mp_rsp_valid_i(mp_rsp_valid[APU_MP_RAST:APU_MP_CTL]),
-      .mp_rsp_i(mp_rsp[APU_MP_RAST:APU_MP_CTL]),
+      .mp_req_valid_o(vgt_mp_req_v),
+      .mp_req_ready_i(vgt_mp_req_rdy),
+      .mp_req_o(vgt_mp_req),
+      .mp_rsp_valid_i(vgt_mp_rsp_v),
+      .mp_rsp_i(vgt_mp_rsp),
       .work_valid_o(ws_v), .work_ready_i(ws_rdy),
       .work_o(ws_work),
       .work_done_i(ws_done), .work_done_pl_i(ws_done_pl),
@@ -384,9 +418,17 @@ module g6lc_apu_vgsys_fixture
   import g6lc_apu_vgpages_pkg::*;
 #(
   parameter bit          Enable = 1'b0,
-  parameter int unsigned Rings  = 4,
+  parameter int unsigned Rings  = 64,
   parameter int unsigned Fences = 16,
-  parameter int unsigned PayWords = 16384,
+  // ring ALIVE watchdog refresh period: 2**AliveTickLog2 cycles
+  parameter int unsigned AliveTickLog2 = 20,
+  parameter int unsigned CrPayWords    = 1024,
+  parameter int unsigned ObjEntries    = 65536,
+  parameter int unsigned ObjMaxCtx     = 32,
+  parameter int unsigned PayMemBytes   = 16 * 1024 * 1024,
+  parameter int unsigned DirCacheSets  = 256,
+  parameter int unsigned EntCacheLines = 64,
+  parameter int unsigned PayCacheLines = 32,
   parameter int unsigned VgPages      = APU_VG_PAGES,
   parameter int unsigned VgPageBytes  = APU_VG_PAGE_BYTES,
   parameter int unsigned VgGuestPages = APU_VG_GUEST_PAGES,
@@ -449,7 +491,11 @@ module g6lc_apu_vgsys_fixture
 );
   g6lc_apu_vgsys #(
     .Enable(Enable), .Rings(Rings), .Fences(Fences),
-    .PayWords(PayWords), .VgPages(VgPages), .VgPageBytes(VgPageBytes),
+    .AliveTickLog2(AliveTickLog2), .CrPayWords(CrPayWords),
+    .ObjEntries(ObjEntries), .ObjMaxCtx(ObjMaxCtx),
+    .PayMemBytes(PayMemBytes), .DirCacheSets(DirCacheSets),
+    .EntCacheLines(EntCacheLines), .PayCacheLines(PayCacheLines),
+    .VgPages(VgPages), .VgPageBytes(VgPageBytes),
     .VgGuestPages(VgGuestPages),
     .ShaderRegs(ShaderRegs), .MaxWaves(MaxWaves),
     .ShaderIds(ShaderIds), .ShaderSlots(ShaderSlots),

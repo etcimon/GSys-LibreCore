@@ -89,8 +89,13 @@ ue_cpos_clear_srgb_1 ue_cpos_clear_rgba16f_1 \
 ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1 \
 ue_cpos_rb_mapafter_1 ue_cpos_ubo_bindfirst_1 \
 ue_cpos_evict_1 ue_cpos_reloc_hold_1 \
-ue_cneg_evict_full_1 ue_cneg_bind_full_1 ue_cneg_stale_mem_1 \
-ue_donecol_1"
+ue_cneg_stale_mem_1 ue_donecol_1 ue_cpos_maxconc_1"
+# G3b-i: the *full* negatives run on a small-geometry build of the
+# same RTL (ObjEntries=256, 256 KiB PayMem) so the FULL paths stay
+# covered while the default geometry is the big one.
+SMALL_SESSIONS="ue_cneg_bind_full_1 ue_cneg_evict_full_1"
+SMALL_OBJ=256
+SMALL_PAY=262144
 
 run_step() {
   local step="$1"; shift
@@ -145,6 +150,50 @@ fi
 if [ "${VGTOP_STEP:-0}" != "1" ]; then
   run_step 2 +mp_lat_min=1 +mp_lat_max=20 +mp_ready_pct=60
 fi
+
+# ---- G3b-i small-geometry arm -------------------------------------------
+# Same RTL at ObjEntries=256 / 256 KiB PayMem so the *full* negatives
+# exercise the FULL paths on a small table while the default stays big.
+if [ "${VGTOP_SMALL:-1}" = 1 ]; then
+  if ! "$VERILATOR" --binary --timing --assert -Wall -j "$(nproc)" \
+    -Wno-TIMESCALEMOD -Wno-UNUSED -Wno-WIDTHEXPAND -Wno-WIDTHTRUNC \
+    -Wno-BLKSEQ \
+    -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY \
+    "${VLTS[@]}" \
+    -f "$ROOT/corev_apu/apu/Flist.apu_vgtop" \
+    "$ROOT/verif/tb/apu/tb_apu_mp_mem.sv" \
+    "$ROOT/verif/tb/apu/tb_g6lc_apu_vgtop.sv" \
+    --top-module tb_g6lc_apu_vgtop \
+    -GObjEntries="$SMALL_OBJ" -GPayMemBytes="$SMALL_PAY" \
+    -Mdir "$OUT/sim-small" -o tb_g6lc_apu_vgtop \
+    > "$OUT/build-small.log" 2>&1; then
+    echo "VERILATOR BUILD FAILED (small)"
+    tail -n 80 "$OUT/build-small.log"
+    exit 1
+  fi
+  echo "VERILATOR BUILD OK (small ObjEntries=$SMALL_OBJ PayMemBytes=$SMALL_PAY)"
+  sfail=0
+  for v in $SMALL_SESSIONS; do
+    set +e
+    (cd "$ROOT/verif/tb/apu" && \
+     stdbuf -o0 -e0 "$OUT/sim-small/tb_g6lc_apu_vgtop" +vec="$v") \
+      > "$OUT/small-$v.log" 2>&1
+    vrc=$?
+    set -e
+    grep -E '^(PASS-COMPUTE|PASS|FAIL)' "$OUT/small-$v.log" \
+      | sed "s/^/[small $v] /"
+    if ! grep -q '^PASS tb_g6lc_apu_vgtop ' "$OUT/small-$v.log" \
+       || [ "$vrc" -ne 0 ]; then
+      sfail=1
+    fi
+  done
+  if [ "$sfail" -ne 0 ]; then
+    echo "SMALL-GEOMETRY ARMS FAILED"
+    exit 1
+  fi
+  echo "SMALL-GEOMETRY ARMS OK"
+fi
+
 if [ "${VGTOP_SYNTH:-0}" != 1 ]; then
   exit 0
 fi
@@ -200,7 +249,7 @@ else
 fi
 # §7b small screen: exposes logic apart from the ObjPay/CS/shader SRAMs
 cat > "$OUT/vgtop-synth-small.ys" <<EOF
-read_slang --unroll-limit 8192 -f $ROOT/corev_apu/apu/Flist.apu_vgtop --top g6lc_apu_vgtop_fixture -GEnable=1 -GRings=1 -GFences=4 -GPayWords=512 -GShaderRegs=16 -GMaxWaves=1 -GSlabBytes=1024 -GScratchBytes=64 -GShaderSlots=2 -GShaderIds=64 -GShaderWords=64 -GShaderMembers=16 -GShaderInit=8
+read_slang --unroll-limit 8192 -f $ROOT/corev_apu/apu/Flist.apu_vgtop --top g6lc_apu_vgtop_fixture -GEnable=1 -GRings=1 -GFences=4 -GPayWords=512 -GShaderRegs=16 -GMaxWaves=1 -GSlabBytes=1024 -GScratchBytes=64 -GShaderSlots=2 -GShaderIds=64 -GShaderWords=64 -GShaderMembers=16 -GShaderInit=8 -GObjEntries=256 -GPayMemBytes=16384
 hierarchy -top g6lc_apu_vgtop_fixture
 flatten
 proc

@@ -43,7 +43,8 @@ package g6lc_apu_vnfront_pkg;
   //               epoch are dead at dispatch
   // DESCRIPTOR_SET entry:
   //   aux[31:0]   {poison[31], ndyn[30:25], set_base[24:0]} —
-  //               aperture byte base of the set's record table
+  //               aperture WORD index (byte>>2) of the set's record
+  //               table — 32 B-aligned stores only; covers 128 MiB
   //   aux[63:32]  layout handle {gen,slot} minted at allocate time
   //   size[31:0]  pool handle {gen,slot} (destroy/reset detection)
   //   state[15:0] pool epoch sampled at allocate time

@@ -16,7 +16,9 @@
 // (+vec=neg_*) cover the §6c exit list.  Tape ops identical to
 // tb_g6lc_apu_vgtop (see its header).
 
-module tb_g6lc_apu_vgsys;
+module tb_g6lc_apu_vgsys
+#(parameter int unsigned ObjEntries  = 65536,
+  parameter int unsigned PayMemBytes = 16 * 1024 * 1024);
   import g6lc_apu_bus_pkg::*;
   import g6lc_apu_mp_pkg::*;
   import g6lc_apu_vn_pkg::*;
@@ -26,7 +28,7 @@ module tb_g6lc_apu_vgsys;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_sh_pkg::*;
 
-  localparam int unsigned Rings  = 4;
+  localparam int unsigned Rings  = 16;
   localparam logic [63:0] GB     = 64'h8000_0000;   // guest window
   localparam int unsigned GBW    = 32'h40000;       // 1 MiB / 4 B
   localparam logic [63:0] AB     = APU_VG_SHM_BASE; // aperture window
@@ -37,16 +39,23 @@ module tb_g6lc_apu_vgsys;
   localparam int unsigned ABW    = PWB;
   localparam int unsigned PPW    =
       APU_VG_PRIV_PAGES * (APU_VG_PAGE_BYTES / 4);
-  localparam int unsigned APWT   = ABW + PPW;
+  // objmem static carve at APU_VG_MANAGED_BYTES: entries +
+  // directory + free stack + magic + PayMem, dense in the third window
+  localparam int unsigned OBW    = 32'(APU_OBJMEM_OFF >> 2);
+  localparam int unsigned OPW    =
+      32'((apu_objmem_pay_off(ObjEntries) + 64'(PayMemBytes) -
+           APU_OBJMEM_OFF) >> 2);
+  localparam int unsigned APWT   = ABW + PPW + OPW;
   // first-fit keeps every session low; an index past the dense model
   // is a tape/model bug — never wrap
   function automatic int unsigned apix(input int unsigned w);
     if (w < ABW) return w;
     if (w >= PWB && w < PWB + PPW) return ABW + (w - PWB);
+    if (w >= OBW && w < OBW + OPW) return ABW + PPW + (w - OBW);
     $fatal(1, "aperture word %0d past dense model", w);
     return 0;
   endfunction
-  localparam int unsigned TAPEW  = 32'h20000;
+  localparam int unsigned TAPEW  = 32'h100000;
   localparam int unsigned EXPW   = 32'h40000;
   localparam int unsigned MAXCYC = 20_000_000;
 
@@ -125,11 +134,14 @@ module tb_g6lc_apu_vgsys;
   wire [31:0] vgp_used =
       ws_arm_q ? i_ws0.gen_on.i_top.gen_on.i_vgp.gen_on.used_q
                : i_dut.gen_on.i_top.gen_on.i_vgp.gen_on.used_q;
-  wire [255:0] pay_free =
-      ws_arm_q ? i_ws0.gen_on.i_top.gen_on.i_pay.gen_on.free_q
-               : i_dut.gen_on.i_top.gen_on.i_pay.gen_on.free_q;
+  // ObjPay-V: allocated-chunk counter replaces the flop free bitmap
+  wire [31:0] pay_free =
+      ws_arm_q ? i_ws0.gen_on.i_top.gen_on.i_pay.gen_on.used_q
+               : i_dut.gen_on.i_top.gen_on.i_pay.gen_on.used_q;
 
-  g6lc_apu_vgsys #(.Enable(1'b1), .Rings(Rings)) i_dut (
+  g6lc_apu_vgsys #(.Enable(1'b1), .Rings(Rings),
+                    .ObjEntries(ObjEntries),
+                    .PayMemBytes(PayMemBytes)) i_dut (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .vq0_i(vq0), .vq1_i(vq1),
     .queue_enable_i(ws_arm_q ? 2'b00 : qen),
@@ -173,7 +185,9 @@ module tb_g6lc_apu_vgsys;
   apu_cmdexec_work_t w_wo;
   apu_objtab_cpl_t w_dotcpl;
 
-  g6lc_apu_vgsys #(.Enable(1'b1), .Rings(Rings), .WorkSink(1'b0)) i_ws0 (
+  g6lc_apu_vgsys #(.Enable(1'b1), .Rings(Rings), .WorkSink(1'b0),
+                    .ObjEntries(ObjEntries),
+                    .PayMemBytes(PayMemBytes)) i_ws0 (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .vq0_i(vq0), .vq1_i(vq1),
     .queue_enable_i(ws_arm_q ? qen : 2'b00),
@@ -362,6 +376,10 @@ module tb_g6lc_apu_vgsys;
         automatic logic ok = 1'b0;
         for (int gi = 0; gi < guard_n; gi++)
           if (o >= guard_lo[gi] && o < guard_hi[gi]) ok = 1'b1;
+        // ObjMem's entry/directory/payload writes into the static
+        // carve are internal traffic — the allow-list polices
+        // guest-visible extents only (no tape range ever lists it)
+        if (o >= 64'(OBW) * 4 && o < 64'(OBW + OPW) * 4) ok = 1'b1;
         if (!ok)
           $fatal(1, "APGUARD: aperture write outside allow-list off=%010x d=%02x", o, d);
       end
@@ -1309,6 +1327,18 @@ module tb_g6lc_apu_vgsys;
   // the queue's counters at 0.
   task automatic neg_qdrop();
     int unsigned t;
+    // §5a G3b-i: ObjMem's cold-boot init (magic read + dir sweep +
+    // epoch write) shares the guest AXI port, so its beats pollute
+    // this arm's "exactly one AR, zero R" invariant.  Wait for the
+    // ot engine to finish init (omt_req_ready_o == ot_q == OT_IDLE),
+    // let the port drain, then restart the beat counters on a quiet
+    // bus so only the walker's traffic is counted.
+    t = 0;
+    while (!i_dut.gen_on.i_top.gen_on.i_objmem.gen_on.omt_req_ready_o &&
+           t < 5_000_000) begin @(posedge clk); t++; end
+    check(t < 5_000_000, "neg_qdrop: objmem init drained");
+    repeat (8) @(posedge clk);
+    aw_n = 0; w_n = 0; b_n = 0; ar_n = 0; r_n = 0; ar_beats = 0;
     // the slave accepts the avail.idx AR then holds R back for 40
     // cycles, so the queue can be dropped with a response genuinely
     // in flight (walker parked in StIdxW with mp_pend set)
@@ -1705,7 +1735,10 @@ module tb_g6lc_apu_vgsys;
     t = 0;
     forever begin
       @(negedge clk); t++;
-      if (t > 100000) begin
+      // the first dbg op after reset is held behind the objmem init
+      // sweep (2*ObjEntries dir writes ~ 10^6 cycles), so the budget
+      // must cover a full init, not just an op
+      if (t > 4000000) begin
         check(1'b0, "epoch ot_op cpl timeout");
         break;
       end

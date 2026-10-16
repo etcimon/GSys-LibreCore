@@ -1442,14 +1442,15 @@ AUXRET_KINDS = ('VkShaderModule', 'VkPipeline', 'VkDeviceMemory',
                 'VkDescriptorPool')
 SH_SLOTS = 8
 # aperture allocator geometry == APU_VG_PAGES / APU_VG_PAGE_BYTES
-# (g6lc_apu_vg_pkg.sv): 8192 x 4 KiB pages over the 32 MiB SHM window —
-# the guest kernel packs MAP_BLOB offsets at 4 KiB density
-VGP_PAGES = 8192
+# (g6lc_apu_vg_pkg.sv): 18432 x 4 KiB pages over the 72 MiB managed
+# window — the guest kernel packs MAP_BLOB offsets at 4 KiB density
+VGP_PAGES = 18432
 VGP_PAGE = 4096
 # §12.3 F5: APU_VG_GUEST_BYTES — guest-mappable span (SHM_LEN); the
 # pages above it are the device-private arena (ALLOC_PRIV) the kernel's
-# shm drm_mm can never select
-VGP_GUEST_BYTES = 0x01800000
+# shm drm_mm can never select.  64 MiB (§5a revision 2026-10-16 —
+# five Venus devices pin ~57 MiB of MAPPABLE blobs)
+VGP_GUEST_BYTES = 0x04000000
 VGP_GUEST_PAGES = VGP_GUEST_BYTES // VGP_PAGE
 
 # §12.3 C: APU_MEM_UNBACKED — a type-1 (host-visible) VkDeviceMemory's
@@ -1715,10 +1716,12 @@ class FrontModel:
     CB_BUFS = 16
     FENCES = 16
 
-    def __init__(self, model, asm, pay_words=PAY_WORDS):
+    def __init__(self, model, asm, pay_words=PAY_WORDS, slots=None):
         self.m = model
         self.asm = asm
         self.pay_words = pay_words
+        if slots is not None:
+            self.SLOTS = slots
         self.reset()
 
     def reset(self):
@@ -1727,6 +1730,14 @@ class FrontModel:
         self.idmap = {}
         self.live_cnt = 0
         self.ctx = 0
+        # ObjTab-V mirror: free slots come from a LIFO stack
+        # (objmem POP/PUSH) falling back to a never-used bump cursor;
+        # ctxorder tracks each context's live slots oldest->newest so
+        # RESET_CTX / RETIRE_KIDS push frees in the RTL's
+        # newest-first walk order
+        self.freestk = []
+        self.bump = 0
+        self.ctxorder = {}
         self.cb_alloc = [0] * self.CB_BUFS
         self.cb_pool = [0] * self.CB_BUFS
         self.cb_hnd = [0] * self.CB_BUFS
@@ -1798,8 +1809,12 @@ class FrontModel:
     def alloc(self, idv, kind, parent_h):
         if idv in self.idmap and self.ent[self.idmap[idv]] is not None:
             return 'DUP', 0, -1
-        slot = next((i for i, e in enumerate(self.ent) if e is None), -1)
-        if slot < 0:
+        if self.freestk:
+            slot = self.freestk.pop()
+        elif self.bump < self.SLOTS:
+            slot = self.bump
+            self.bump += 1
+        else:
             return 'FULL', 0, -1
         par = -1
         if parent_h:
@@ -1818,9 +1833,21 @@ class FrontModel:
                           'bind_off': 0}
         self.idmap[idv] = slot
         self.live_cnt += 1
+        self.ctxorder.setdefault(self.ctx, []).append(slot)
         if par >= 0:
             self.ent[par]['refcnt'] += 1
         return 'OK', (g << 16) | slot, slot
+
+    def _free_slot(self, s, e):
+        """Retire bookkeeping shared by retire/reset_ctx/retire_kids:
+        unlink the ctx list and push the slot to the free stack."""
+        self.ent[s] = None
+        self.idmap.pop(e['id'], None)
+        self.live_cnt -= 1
+        cl = self.ctxorder.get(e['ctx'])
+        if cl is not None and s in cl:
+            cl.remove(s)
+        self.freestk.append(s)
 
     def retire(self, idv, kind):
         st, s, e = self.resolve(idv, kind)
@@ -1832,9 +1859,7 @@ class FrontModel:
             return 'BUSY_CHILDREN', s
         if e['parent'] >= 0 and self.ent[e['parent']] is not None:
             self.ent[e['parent']]['refcnt'] -= 1
-        self.ent[s] = None
-        self.idmap.pop(e['id'], None)
-        self.live_cnt -= 1
+        self._free_slot(s, e)
         return 'OK', s
 
     def retire_kids(self, h, kind):
@@ -1847,12 +1872,20 @@ class FrontModel:
         s = h & 0xFFFF
         if s >= self.SLOTS:
             return 'MISS', 0
+        # RTL walks the parent's ctx list newest->oldest filtering on
+        # parent_slot; a dead parent still kills by its ctx's list
+        pe = self.ent[s]
+        ctxn = pe['ctx'] if pe is not None else self.ctx
         n = 0
+        for i in list(self.ctxorder.get(ctxn, []))[::-1]:
+            c = self.ent[i]
+            if c is not None and c['parent'] == s:
+                self._free_slot(i, c)
+                n += 1
+        # kids outside the walk (defensive: ctx mismatch)
         for i, c in enumerate(self.ent):
             if c is not None and c['parent'] == s:
-                self.ent[i] = None
-                self.idmap.pop(c['id'], None)
-                self.live_cnt -= 1
+                self._free_slot(i, c)
                 n += 1
         e = self.ent[s]
         if e is not None:
@@ -1875,7 +1908,7 @@ class FrontModel:
 
     # ---- §7b: ObjPay mirror -------------------------------------------------
     def setauxhi(self, h, value32):
-        """aux[63:32] = {base[15:0], words[15:0]}."""
+        """aux[63:32] = {base_chunk[15:0], words[15:0]} (base>>6)."""
         st, s, e = self.resolve(h, 0)
         if st != 'OK':
             return st, s
@@ -1917,7 +1950,7 @@ class FrontModel:
         w = (e['aux'] >> 32) & 0xFFFF
         b = (e['aux'] >> 48) & 0xFFFF
         if w:
-            self.pay_free(b, w)
+            self.pay_free(b << 6, w)
 
     def arena_append(self, cbuf, words):
         """cmdrec payload arena bump-alloc -> base or None (PAY_FULL)."""
@@ -2181,7 +2214,7 @@ class FrontModel:
             self.pay[pbase + i] = w
             out['payw'].append((pbase + i, w))
         self.setaux(h, 0xFFFF_FFFF,
-                    ((pbase & 0xFFFF) << 16) | (1 << 6) |
+                    (((pbase >> 6) & 0xFFFF) << 16) | (1 << 6) |
                     (fs << 3) | vs)
         self.setauxhi(h, (le['gen'] << 16) | ls)
         return True
@@ -2283,7 +2316,7 @@ class FrontModel:
         ObjPay row table (word0 = nbind header)."""
         if le is None:
             return []
-        base = (le['aux'] >> 48) & 0xFFFF
+        base = ((le['aux'] >> 48) & 0xFFFF) << 6
         nbind = (((le['aux'] >> 32) & 0xFFFF) - 1) >> 1
         rows = []
         for j in range(nbind):
@@ -2704,7 +2737,7 @@ class FrontModel:
                         ple['kind'] != KIND['VkPipelineLayout'] or
                         ple['gen'] != plg):
                     return True
-                plpay = (ple['aux'] >> 48) & 0xFFFF
+                plpay = ((ple['aux'] >> 48) & 0xFFFF) << 6
                 plw = (ple['aux'] >> 32) & 0xFFFF
                 for s in range(4):
                     if rep_dbg:
@@ -2758,7 +2791,7 @@ class FrontModel:
                     # a recorded vertex-buffer handle resolves through
                     # the shared buffer-operand resolver; indexed
                     # draws resolve the index buffer the same way
-                    pb = (pe['aux'] >> 16) & 0xFFFF
+                    pb = ((pe['aux'] >> 16) & 0xFFFF) << 6
                     for b in range(16):
                         bw = self.pay.get(pb + 1 + b, 0)
                         bnd = (bw >> 16) & 0xF
@@ -2790,7 +2823,7 @@ class FrontModel:
                     return True
                 # rp ObjPay: {A, {fmt,loadOp,storeOp}*A, subpassCount,
                 # C, cref*C, [dref]}
-                rp_pay = (rpe['aux'] >> 48) & 0xFFFF
+                rp_pay = ((rpe['aux'] >> 48) & 0xFFFF) << 6
                 rp_w = (rpe['aux'] >> 32) & 0xFFFF
                 na_ = self.pay.get(rp_pay, 0)
                 if na_ == 0 or na_ > 5:
@@ -2812,7 +2845,7 @@ class FrontModel:
                 if dref != 0xFFFFFFFF and dref >= na_:
                     return True
                 # resolve every attachment's view -> image -> memory
-                fb_pay = (fbe['aux'] >> 48) & 0xFFFF
+                fb_pay = ((fbe['aux'] >> 48) & 0xFFFF) << 6
                 for k in range(na_):
                     vid = (self.pay.get(fb_pay + 3 + 2 * k, 0) |
                            (self.pay.get(fb_pay + 4 + 2 * k, 0) << 32))
@@ -2879,10 +2912,13 @@ class FrontModel:
         return False
 
     def reset_ctx(self, ctx=0):
-        """-> (retired, pinned remaining)."""
+        """-> (retired, pinned remaining).  Walks the ctx list
+        newest->oldest like the RTL RESET_CTX arm; each retired slot
+        lands on the free stack in that order."""
         ret = pin = 0
         pk = tuple(KIND[k] for k in PAY_KINDS)
-        for s, e in enumerate(self.ent):
+        for s in list(self.ctxorder.get(ctx, []))[::-1]:
+            e = self.ent[s]
             if e is None or e['ctx'] != ctx:
                 continue
             if e['pins']:
@@ -2898,7 +2934,8 @@ class FrontModel:
                     # too and frees the 44-word ObjPay block at
                     # aux[31:16]
                     self.sm_unref((e['aux'] >> 3) & 7)
-                    self.pay_free((e['aux'] >> 16) & 0xFFFF, 44)
+                    self.pay_free(((e['aux'] >> 16) & 0xFFFF) << 6,
+                                  44)
             elif e['kind'] == KIND['VkDeviceMemory']:
                 # §12.3 C: an unbacked extent frees nothing
                 if (e['aux'] >> 32) & 0xFFFFFFFF != UNBACKED:
@@ -2908,11 +2945,9 @@ class FrontModel:
                 # §12.3 F5: pool record store pages at aux[31:0]
                 self.pg_free(e['aux'] & 0xFFFFFFFF, e['size'])
             if e['kind'] in pk and (e['aux'] >> 32):
-                self.pay_free((e['aux'] >> 48) & 0xFFFF,
+                self.pay_free(((e['aux'] >> 48) & 0xFFFF) << 6,
                               (e['aux'] >> 32) & 0xFFFF)
-            self.ent[s] = None
-            self.idmap.pop(e['id'], None)
-            self.live_cnt -= 1
+            self._free_slot(s, e)
             ret += 1
         return ret, pin
 
@@ -3017,7 +3052,7 @@ class FrontModel:
                         out['result'] = VK_ERR_UNKNOWN
                         break
                     dead, le = self.dset_dead(de)
-                    sbase = de['aux'] & 0x1FFFFFF
+                    sbase = (de['aux'] & 0x1FFFFFF) << 2
                     pois = 0
                     stride = self._upd_stride(dtype)
                     if dead:
@@ -3073,8 +3108,8 @@ class FrontModel:
                     if bad:
                         dde['aux'] |= 0x80000000
                         continue
-                    so = se['aux'] & 0x1FFFFFF
-                    do = dde['aux'] & 0x1FFFFFF
+                    so = (se['aux'] & 0x1FFFFFF) << 2
+                    do = (dde['aux'] & 0x1FFFFFF) << 2
                     for j in range(cn & 0xFFFF):
                         ra = so + ((srow['off'] + sa + j) << 5)
                         wa = do + ((drow['off'] + da + j) << 5)
@@ -3286,7 +3321,7 @@ class FrontModel:
                                     out['result'] = self._err(st)
                                 else:
                                     self.setauxhi(h,
-                                                  (pbase << 16) | nw)
+                                                  ((pbase >> 6) << 16) | nw)
                                     self.setaux(h, 0xFFFFFFFF,
                                                 (dn << 16) |
                                                 ((off << 5) & 0xFFFF))
@@ -3347,7 +3382,7 @@ class FrontModel:
                                 w &= 0xFFFFFFFF
                                 self.pay[pbase + i] = w
                                 out['payw'].append((pbase + i, w))
-                            self.setauxhi(h, (pbase << 16) | nw)
+                            self.setauxhi(h, ((pbase >> 6) << 16) | nw)
                 elif obj_kind == KIND['VkShaderModule']:
                     # §7b/5a-ii: sm ALLOC -> stream blob[0] (pCode) into
                     # the slot's staging -> ObjTab ALLOC ->
@@ -3573,7 +3608,7 @@ class FrontModel:
                                 w &= 0xFFFFFFFF
                                 self.pay[pbase + i] = w
                                 out['payw'].append((pbase + i, w))
-                            self.setauxhi(h, (pbase << 16) | nw)
+                            self.setauxhi(h, ((pbase >> 6) << 16) | nw)
                 else:
                     st, h, slot = self.alloc(rec['q'][new], obj_kind, par)
                     if st != 'OK':
@@ -3657,7 +3692,7 @@ class FrontModel:
                         se['size'] = ph & 0xFFFFFFFF
                         self.setaux(h, 0xFFFFFFFF,
                                     ((ndyn & 0x3F) << 25) |
-                                    (sbase & 0x1FFFFFF))
+                                    ((sbase >> 2) & 0x1FFFFFF))
                         self.setauxhi(h, layh)
                         self.setstate(h, 0xFFFF, pe['state'] & 0xFFFF)
                         for k in range(sbyt >> 2):
@@ -3795,7 +3830,7 @@ class FrontModel:
                         out['result'] = VK_ERR_UNKNOWN
                         break
                     pay_w = (e['aux'] >> 32) & 0xFFFF
-                    pay_b = (e['aux'] >> 48) & 0xFFFF
+                    pay_b = ((e['aux'] >> 48) & 0xFFFF) << 6
                 st, s = self.retire(idv, obj_kind)
                 if st != 'OK':
                     out['result'] = self._err(st)
@@ -3818,7 +3853,9 @@ class FrontModel:
                         # and free the 44-word ObjPay block at
                         # aux[31:16]
                         self.sm_unref((aux_full >> 3) & 7)
-                        self.pay_free((aux_full >> 16) & 0xFFFF, 44)
+                        self.pay_free(
+                            ((aux_full >> 16) & 0xFFFF) << 6,
+                            44)
                 elif obj_kind == KIND['VkDeviceMemory']:
                     # §12.3 C: an unbacked memory frees nothing
                     if (aux_full >> 32) & 0xFFFFFFFF != UNBACKED:
@@ -4106,6 +4143,14 @@ class FrontModel:
                     # the TB must not retire them out from under the
                     # front (deterministic PINNED arm)
                     self.work_hold = True
+            # §7b exception contract: a submit rejected before it
+            # reaches the executor still completes the fence it
+            # carried — vnfront pulses ex_fence_fail and cmdexec
+            # marks the slot signaled+lost, so the guest's fence
+            # wait returns DEVICE_LOST instead of hanging
+            if out['result'] != VK_OK and fslot >= 0:
+                self.fence_sig |= 1 << fslot
+                self.fence_lost |= 1 << fslot
             # (work list also covers pins for the pinned-destroy arm)
 
         elif cls == 'WAIT':
@@ -4410,9 +4455,11 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng,
         # CB_BUFS=16 slots.  Slot 17's vkAllocateCommandBuffers reply
         # carries OOM; a vkQueueSubmit still referencing the phantom
         # handle resolves to VK_ERROR_UNKNOWN at StResCpl and pushes
-        # nothing to the executor — no fence is armed, matching the
-        # guest's fence-wait wedge signature.  The arm then frees the
-        # 16 slots and re-allocs to prove the arena drains.
+        # nothing to the executor — the §7b exception contract then
+        # completes the submit's fence DEVICE_LOST (previously the
+        # fence simply never armed — the guest's fence-wait wedge).
+        # vkGetFenceStatus proves the lost edge lands; the arm then
+        # frees the 16 slots and re-allocs to prove the arena drains.
         P = {k: newid() for k in
              ('inst', 'pd', 'dev', 'queue', 'cp', 'fen')}
         cmd('vkCreateInstance', pInstance=P['inst'])
@@ -4444,6 +4491,9 @@ def build_session(model, asm, sim, rep_sim, enc, gen, rng,
                              signalSemaphoreCount=0,
                              pSignalSemaphores=[])],
             fence=P['fen'])
+        # §7b exception contract: the rejected submit completes the
+        # fence it carried — status is DEVICE_LOST, not NOT_READY
+        cmd('vkGetFenceStatus', device=P['dev'], fence=P['fen'])
         for i in range(16):
             cmd('vkFreeCommandBuffers', device=P['dev'],
                 commandPool=P['cp'], commandBufferCount=1,
@@ -5124,10 +5174,30 @@ VG_BLOB_MAPPABLE     = 0x01
 # ownership); the ctx entry is tagged with its own ctx so RESET_CTX
 # sweeps it too.
 VG_ID_TAG            = 0x0000_0001_0000_0000
-KIND_VIRTIO_CTX      = 26      # APU_VN_KIND_APU_VIRTIO_CTX
-KIND_BLOB_SHMEM      = 27      # APU_VN_KIND_APU_BLOB_SHMEM
+# ctx entries tag into their own subspace (kernel ctx ids and blob
+# rids come from separate dense allocators — same tag space DUPs;
+# 0x0002 is APU_VN_ID_TAG, the client-object space)
+VG_CTX_TAG           = 0x0000_0003_0000_0000
+
+# Kind ids are vk.xml-ordered in the generated pkg and shift whenever a
+# command-set addition introduces a new handle kind — parse them, do not
+# hardcode.
+def _pkg_kind(name):
+    tag = 'APU_VN_KIND_%s' % name
+    pkg = (REPO / 'corev_apu' / 'apu' / 'include'
+           / 'g6lc_apu_vn_pkg.sv').read_text()
+    for ln in pkg.splitlines():
+        f = ln.split('//')[0].strip()
+        if f.startswith(tag + ' '):
+            return int(f.split('=')[1].strip().rstrip(','))
+    raise AssertionError(tag + ' not in g6lc_apu_vn_pkg.sv')
+
+KIND_VIRTIO_CTX      = _pkg_kind('APU_VIRTIO_CTX')
+KIND_BLOB_SHMEM      = _pkg_kind('APU_BLOB_SHMEM')
 VG_MAP_WC            = 0x03
 VG_CAPSET_VENUS      = 4
+# ring-table geometry must track g6lc_apu_vnpump Rings (default 64)
+VN_RINGS             = 64
 
 
 def _check_uapi():
@@ -5226,7 +5296,7 @@ RING_ALIVE = 4
 # (APU_SHM_BYTES in g6lc_apu_pkg.sv — sized for stock Mesa's shmem pools)
 APU_SHM_BASE = 0x82000000
 AP_PAGE      = VGP_PAGE
-AP_WORDS     = 0x800000         # 32 MiB / 4
+AP_WORDS     = VGP_PAGES * VGP_PAGE // 4  # managed window / 4 (72 MiB)
 
 # guest RAM layout for the script
 GREQ  = 0x00004000              # request payload scratch (reused)
@@ -5281,7 +5351,9 @@ class TransportModel:
         self.gmem = {}
         self.blobs = {}                   # res_id -> dict
         self.ctxs = {}                    # ctx_id -> dict
-        self.rings = [None] * 4
+        # ring slots mirror vnpump Rings (default 64): a vector that
+        # exceeds the table must see the same CreateRing fault as RTL
+        self.rings = [None] * VN_RINGS
         self.ring_of = {}                 # (ctx, handle) -> slot
         self.reply = None                 # {base_w, size, pos}
         self.rep_log = []                 # (ap_byte_off, words) per reply
@@ -5786,7 +5858,8 @@ def load_shvec(name):
 
 
 def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
-                    vec=None, variant='', carry=None, gfx=None):
+                    vec=None, variant='', carry=None, gfx=None,
+                    obj_slots=None):
     """Build the §6b guest-script tape + .exp records.
 
     Returns (tape_words, exp_records, doc).  The tape is a self-
@@ -5802,9 +5875,13 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
     (vgtop/vgsys run each session on a fresh DUT — no carry)."""
     tm = TransportModel(model, asm, sim, rep_sim)
     tm.rep_log = []
-    fm = FrontModel(model, asm)
-    if carry is not None and carry.get('gens') is not None:
-        fm.gens = list(carry['gens'])
+    fm = FrontModel(model, asm, slots=obj_slots)
+    if carry is not None:
+        if carry.get('gens') is not None:
+            fm.gens = list(carry['gens'])
+        if carry.get('freestk') is not None:
+            fm.freestk = list(carry['freestk'])
+            fm.bump = carry['bump']
     # §7b/5a-ii: device-memory page allocations share the aperture
     # allocator with vgctl blobs (one g6lc_apu_vgpages instance)
     fm.ap = tm
@@ -5879,7 +5956,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
             # §12.3 3d-d: vgctl's ctx/blob ObjTab entries — mirrored so
             # {gen,slot} record handles match the device's slot map
             if ty == VG_CTX_CREATE:
-                st, _h, s = fm.alloc(VG_ID_TAG | ctx, KIND_VIRTIO_CTX, 0)
+                st, _h, s = fm.alloc(VG_CTX_TAG | ctx, KIND_VIRTIO_CTX, 0)
                 assert st == 'OK', st
                 fm.ent[s]['ctx'] = ctx
             elif ty == VG_RESOURCE_CREATE_BLOB:
@@ -7739,7 +7816,7 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         dsi, KIND['VkDescriptorSet'])
                     if dst_ != 'OK':
                         continue
-                    sbase = dse['aux'] & 0x1FFFFFF
+                    sbase = (dse['aux'] & 0x1FFFFFF) << 2
                     lsl = (dse['aux'] >> 32) & 0xFFFF
                     sbyt = fm.ent[lsl]['aux'] & 0xFFFF
                     W(TP_CHECK, CK_APR, sbyt // 4, sbase)
@@ -7988,6 +8065,32 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                     ('vkDestroyDescriptorPool', dict(
                         device=V['dev'], descriptorPool=V['dp'] + 2)),
                 ]))
+                check_live()
+
+            if variant == 'maxconc':
+                # G3b-i: 4096 vkCreateBuffer objects live at once —
+                # the ObjTab-V virtualization target — then all
+                # destroyed (free-stack reuse exercised by teardown).
+                # Needs --objslots >= 4096 + the session's own entries.
+                MC_N = 4096
+                seg_mc = []
+                for i in range(MC_N):
+                    seg_mc.append(('vkCreateBuffer', dict(
+                        device=V['dev'],
+                        pCreateInfo=st('VkBufferCreateInfo', size=256,
+                                       usage=0x3, sharingMode=0,
+                                       queueFamilyIndexCount=0,
+                                       pQueueFamilyIndices=[]),
+                        pBuffer=0x5F00_0000_1000 + i * 0x1000_0001)))
+                note("B' maxconc: 4096 live VkBuffer objects")
+                run_batches(compile_cmds(seg_mc))
+                check_live()
+                seg_mc = [('vkDestroyBuffer', dict(
+                    device=V['dev'],
+                    buffer=0x5F00_0000_1000 + i * 0x1000_0001))
+                    for i in range(MC_N)]
+                note("B' maxconc: destroy 4096")
+                run_batches(compile_cmds(seg_mc))
                 check_live()
 
             # ---- segment C: reverse-order teardown -------------------- #
@@ -9491,6 +9594,8 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
     assert len(tm.exec_log) == len(rep_q),         'reply pairing: %d != %d' % (len(tm.exec_log), len(rep_q))
     if carry is not None:
         carry['gens'] = list(fm.gens)
+        carry['freestk'] = list(fm.freestk)
+        carry['bump'] = fm.bump
     return tape, exp, doc
 
 
@@ -9541,6 +9646,10 @@ def main():
                          'submit referencing the phantom handle '
                          'replies VK_ERROR_UNKNOWN with no executor '
                          'push (no fence armed)')
+    ap.add_argument('--objslots', type=int, default=None,
+                    help='FrontModel ObjTab capacity (default 256); '
+                         'raise to the RTL ObjEntries parameter for '
+                         'maxconc')
     ap.add_argument('--paywords', type=int, default=512,
                     help='ObjPay word count modelled by --payfull-session')
     ap.add_argument('--transport', nargs=2, metavar=('NAME', 'SEED'))
@@ -9903,7 +10012,8 @@ def main():
         vec = load_shvec(shvec)
         tape, exp, doc = build_transport(model, asm, sim, rep_sim, enc,
                                          gen, rng, vec=vec,
-                                         variant=args.variant)
+                                         variant=args.variant,
+                                         obj_slots=args.objslots)
         write_transport(name, tape, exp, doc)
         return 0
 

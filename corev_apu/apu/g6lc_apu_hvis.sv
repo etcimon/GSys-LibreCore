@@ -54,7 +54,8 @@ module g6lc_apu_hvis
           unique case (req_i.op)
             APU_HVIS_BLOB: begin
               if (blob_q || req_i.resource_id == 32'd0 ||
-                  req_i.size == 64'd0 || req_i.size > APU_SHM_BYTES ||
+                  req_i.size == 64'd0 ||
+                  req_i.size > APU_SHM_MANAGED_BYTES ||
                   req_i.size[11:0] != 12'd0 ||
                   req_i.blob_mem != APU_BLOB_MEM_HOST3D ||
                   req_i.blob_flags != APU_BLOB_FLAG_MAPPABLE) begin
@@ -70,8 +71,9 @@ module g6lc_apu_hvis
             end
             APU_HVIS_MAP: begin
               if (!blob_q || req_i.map_offset[11:0] != 12'd0 ||
-                  req_i.map_offset >= APU_SHM_BYTES ||
-                  hvis_q.size > APU_SHM_BYTES - req_i.map_offset) begin
+                  req_i.map_offset >= APU_SHM_MANAGED_BYTES ||
+                  hvis_q.size > APU_SHM_MANAGED_BYTES -
+                                   req_i.map_offset) begin
                 cpl_q.status <= APU_HVIS_FAULT;
               end else begin
                 hvis_q.map_offset <= req_i.map_offset;

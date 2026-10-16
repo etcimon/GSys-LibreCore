@@ -12,6 +12,8 @@ module tb_g6lc_apu_vgctl;
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_vg_pkg::*;
   import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
+  import g6lc_apu_mp_pkg::*;
   import g6lc_apu_vgpages_pkg::*;
 
   localparam int unsigned GMW = 32'h40000;
@@ -80,11 +82,52 @@ module tb_g6lc_apu_vgctl;
     .busy_o(busy), .done_o(dn), .used_len_o(used_len),
     .fence_done_o(f_dn), .fence_id_o(f_id), .fence_ring_o(f_ring));
 
-  g6lc_apu_objtab #(.Enable(1'b1)) i_tab (
+  // ---- objmem plumbing (ObjTab-V DRAM backing) --------------------
+  localparam int unsigned ObjEntries = 256;
+  localparam int unsigned PayMemB    = 64 * 1024;
+  logic         omt_v, omt_r, omt_rv;
+  apu_omt_req_t omt_req;
+  apu_omt_rsp_t omt_rsp;
+  logic         ompr_r, ompr_rv;
+  apu_omp_rsp_t ompr_rsp;
+  logic         mmp_v, mmp_r, mmp_rv;
+  apu_mp_req_t  mmp_req;
+  apu_mp_rsp_t  mmp_rsp;
+
+  g6lc_apu_objtab #(.Enable(1'b1), .ObjEntries(ObjEntries)) i_tab (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(ot_v), .req_ready_o(ot_r), .req_i(ot_req),
     .cpl_valid_o(ot_cv), .cpl_ready_i(ot_cr), .cpl_o(ot_cpl),
-    .live_o());
+    .live_o(),
+    .omt_req_valid_o(omt_v), .omt_req_ready_i(omt_r),
+    .omt_req_o(omt_req),
+    .omt_rsp_valid_i(omt_rv), .omt_rsp_i(omt_rsp));
+
+  g6lc_apu_objmem #(.Enable(1'b1), .ObjEntries(ObjEntries),
+                    .PayMemBytes(PayMemB),
+                    .DirCacheSets(16), .EntCacheLines(8),
+                    .PayCacheLines(4)) i_omm (
+    .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
+    .omt_req_valid_i(omt_v), .omt_req_ready_o(omt_r),
+    .omt_req_i(omt_req),
+    .omt_rsp_valid_o(omt_rv), .omt_rsp_o(omt_rsp),
+    .omp_req_valid_i(1'b0), .omp_req_ready_o(ompr_r),
+    .omp_req_i(apu_omp_req_t'(0)),
+    .omp_rsp_valid_o(ompr_rv), .omp_rsp_o(ompr_rsp),
+    .mp_req_valid_o(mmp_v), .mp_req_ready_i(mmp_r),
+    .mp_req_o(mmp_req),
+    .mp_rsp_valid_i(mmp_rv), .mp_rsp_i(mmp_rsp));
+
+  // objmem's own aperture responder over the static carve window
+  tb_apu_mp_mem #(.N(1), .GMW(1), .APW(0),
+                  .PWB(32'(APU_OBJMEM_OFF >> 2)),
+                  .PPW(32'((apu_objmem_pay_off(ObjEntries) +
+                            64'(PayMemB) - APU_OBJMEM_OFF) >> 2) +
+                        64))
+      i_omem (
+    .clk_i(clk), .rst_ni(rst_ni),
+    .req_valid_i(mmp_v), .req_ready_o(mmp_r), .req_i('{mmp_req}),
+    .rsp_valid_o(mmp_rv), .rsp_o('{mmp_rsp}));
 
   // §7b: the page allocator lives outside vgctl now
   logic            pg_v, pg_r, pg_cv, pg_cr;

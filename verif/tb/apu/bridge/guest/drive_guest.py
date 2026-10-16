@@ -44,12 +44,12 @@ SWAP = f"{CACHE}/swap.raw"
 CTS_CACHE = os.environ.get("G6LC_CTS_CACHE", f"{ROOT}/.cache/cts")
 CTSDATA = os.environ.get("G6LC_CTSDATA", f"{CTS_CACHE}/ctsdata.img")
 # Usable guest RAM in MiB.  The machine's low bank always supplies
-# 224 MiB (256 MiB DRAM minus the 32 MiB APU aperture); -m above that
-# adds a second bank at 0xa0000000 and needs the matching DTB (see
-# g6lc-g6lc64_stream8.dts).  224 keeps the legacy embedded-DTB map.
+# 128 MiB (256 MiB DRAM minus the 128 MiB APU aperture, G3b-i); -m above
+# that adds a second bank at 0xa0000000 and needs the matching DTB (see
+# g6lc-g6lc64_stream8.dts).  128 keeps the embedded-DTB map.
 GUEST_MEM_MIB = int(os.environ.get("G6LC_GUEST_MEM", "224"))
 DRAM2_BASE = 0xA0000000
-LOW_USABLE_MIB = 224
+LOW_USABLE_MIB = 128
 SOCKDIR = os.environ.get("G6LC_SOCKDIR", "/tmp/g6lc-apu-sock")
 SOCK = f"{SOCKDIR}/rtl.sock"
 CONSOLE = f"{SOCKDIR}/console.sock"
@@ -154,7 +154,7 @@ def main():
         time.sleep(0.25)
 
     env = dict(os.environ, G6LC_APU_RTL_SOCK=SOCK)
-    # -m N = N MiB usable guest RAM; >224 MiB instantiates the second
+    # -m N = N MiB usable guest RAM; >128 MiB instantiates the second
     # bank in the machine and needs the extended DTB (memory@a0000000).
     dtb_arg = []
     if GUEST_MEM_MIB > LOW_USABLE_MIB:
@@ -181,7 +181,7 @@ def main():
         "-kernel", KERNEL,
         *dtb_arg,
         # No -initrd: the g6lc machine loads the kernel above the
-        # 32 MiB aperture hole, so a 75 MiB initrd cannot fit before
+        # 128 MiB aperture hole, so a 75 MiB initrd cannot fit before
         # the DTB ("No enough memory to place DTB after kernel/
         # initrd").  virtio_blk/virtio_mmio/ext4 are
         # built-in (config-7.0.0-31: =y), so the rootfs mounts direct.
@@ -190,7 +190,7 @@ def main():
                     "systemd.unit=multi-user.target "
                     "systemd.mask=systemd-resolved.service "
                     "systemd.mask=systemd-networkd-wait-online.service "
-                    # Low-RAM guests (224 MiB usable post-aperture)
+                    # Low-RAM guests (128 MiB usable post-aperture)
                     # need cloud-init (sets the ubuntu password) but
                     # shed the heavy nonessential units that OOM the
                     # boot; harmless at higher -m.
@@ -218,7 +218,7 @@ def main():
         "-drive", f"file={CIDATA},format=raw,if=none,id=cd0,readonly=on",
         "-device", "virtio-blk-device,drive=cd0",
     ]
-    # Swap exists to keep 224 MiB guests alive during apt; CTS runs at
+    # Swap exists to keep small guests alive during apt; CTS runs at
     # >=2 GiB must not depend on it.
     swap_attached = not os.environ.get("G6LC_CTS")
     if swap_attached:

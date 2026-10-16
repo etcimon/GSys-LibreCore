@@ -49,9 +49,22 @@ module g6lc_apu_vnpump
   import g6lc_apu_vgpages_pkg::*;
 #(
   parameter bit          Enable  = 1'b0,
-  parameter int unsigned Rings   = 4,
+  // G3b-i API-X4: each Venus device/context claims ring slots through
+  // vkCreateRingMESA; Rings=4 capped the guest at two ring pairs, so
+  // the 5th vkCreateDevice's CreateRing went StFatal (the CTS-0
+  // multiple_devices OOM).  64 slots covers CTS max_concurrent (32
+  // instances × ring pair) with headroom — the descriptor/park state
+  // below is real flops, not a bare constant.
+  parameter int unsigned Rings   = 64,
   parameter int unsigned Streams = 4,   // max ExecuteCommandStreams n
-  parameter int unsigned TBUF    = 40   // transport arg stage words
+  parameter int unsigned TBUF    = 40,  // transport arg stage words
+  // Ring ALIVE heartbeat: the guest-side ring watchdog clears the
+  // ALIVE status bit on every wait iteration and aborts if the
+  // renderer never re-asserts it, so every live ring's status word is
+  // refreshed every 2**AliveTickLog2 cycles.  The default (~1 ms at
+  // a 1 GHz silicon clock) keeps the guest's ~100 ms-scale patience
+  // far away; simulation fixtures override to 12 (4096 cycles).
+  parameter int unsigned AliveTickLog2 = 20
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -136,6 +149,9 @@ module g6lc_apu_vnpump
   input  logic [15:0]        ex_fence_signaled_i,
   input  logic [15:0]        ex_fence_lost_i,
   output logic [15:0]        ex_fence_clr_o,
+  // §7b exception contract: vnfront's failed-submit fence pulse,
+  // routed to cmdexec fence_fail_i
+  output logic [15:0]        ex_fence_fail_o,
   // context kill (§12.3 5b-r2): registered pulse from vgctl's
   // CTX_DESTROY — retire the context's rings deterministically so a
   // later memory blob remapped at the same window never sees a dead
@@ -181,7 +197,7 @@ module g6lc_apu_vnpump
     assign pg_req_valid_o = 1'b0;  assign pg_req_o = '0;
     assign pg_cpl_ready_o = 1'b0;
     assign ex_submit_valid_o = 1'b0; assign ex_submit_o = '0;
-    assign ex_fence_clr_o = '0;
+    assign ex_fence_clr_o = '0;   assign ex_fence_fail_o = '0;
     assign busy_o = 1'b0;
     for (genvar g = 0; g < Rings; g++) begin : g_off_ring
       assign ring_active_o[g] = 1'b0;
@@ -231,10 +247,12 @@ module g6lc_apu_vnpump
     logic [63:0] vq_seqno_q;
 
     // ---- stream state (2-deep: outer + one exec window) ------------------
+    localparam int unsigned RIdxW = (Rings > 1) ? $clog2(Rings) : 1;
+
     typedef struct packed {
       logic        live;
       logic [1:0]  kind;          // SK_*
-      logic [1:0]  ring;          // ring slot when SK_RING
+      logic [RIdxW-1:0]  ring;    // ring slot when SK_RING
       logic [31:0] base_head;     // ring head at stream start (bytes)
       logic [APU_VG_AP_WORD_W-1:0] base_w;        // ap word base (SK_LIN_AP)
       logic [31:0] bytes;         // stream size in bytes
@@ -261,7 +279,7 @@ module g6lc_apu_vnpump
       stream_t     st0;
       stream_t     st1;
       logic        depth;
-      logic [1:0]  wring;         // waited ring slot (is_vq == 0)
+      logic [RIdxW-1:0] wring;    // waited ring slot (is_vq == 0)
       logic [63:0] seqno;
     } park_t;
     park_t park_q [Rings+1];
@@ -315,7 +333,7 @@ module g6lc_apu_vnpump
     logic [31:0] wr_data_q;
 
     // poll bookkeeping
-    logic [1:0]  poll_q;
+    logic [RIdxW-1:0]  poll_q;
     // §12.3 E: exponential poll backoff — an idle poll round (a full
     // sweep over the rings that found no new tail) waits `gap_q`
     // cycles before the next round; the gap doubles from 1 up to
@@ -412,6 +430,7 @@ module g6lc_apu_vnpump
       .ex_fence_signaled_i(ex_fence_signaled_i),
       .ex_fence_lost_i(ex_fence_lost_i),
       .ex_fence_clr_o(ex_fence_clr_o),
+      .ex_fence_fail_o(ex_fence_fail_o),
       .busy_o(fr_busy), .done_o(fr_done), .result_o(fr_result),
       .rep_words_o(fr_repn), .fault_o(fr_fault));
 
@@ -422,7 +441,7 @@ module g6lc_apu_vnpump
       StTrFire, StTrCap, StTrExec, StTrDo,
       StOtReq, StOtCpl, StOtDo, StCreate,
       StWinNext, StWaitVq, StWaitR,
-      StApWr, StHeadWr, StNext, StDecNext, StXsDone,
+      StApWr, StHeadWr, StStatWr, StNext, StDecNext, StXsDone,
       StFatal, StFatalWr, StFatalNext, StFatalWr2
     } state_e;
     state_e state_q;
@@ -475,8 +494,8 @@ module g6lc_apu_vnpump
                      ((state_q == StTrFire) && !cs_via_gm);
     assign pump_gm = (state_q == StTrFire) && cs_via_gm;
     assign pump_we = (state_q == StApWr)   || (state_q == StIdleWr) ||
-                     (state_q == StHeadWr) || (state_q == StFatalWr) ||
-                     (state_q == StFatalWr2);
+                     (state_q == StHeadWr) || (state_q == StStatWr) ||
+                     (state_q == StFatalWr) || (state_q == StFatalWr2);
     always_comb begin
       pump_addr = '0;
       unique case (state_q)
@@ -494,13 +513,49 @@ module g6lc_apu_vnpump
     // runs alone, pump write/read states run while it is idle) — but
     // a stall is always safe since every requester holds its request.
     typedef enum logic [2:0] {
-      OW_NONE, OW_PWR, OW_FRW, OW_FAP, OW_DEC, OW_FRD, OW_PRD
+      OW_NONE, OW_PWR, OW_FRW, OW_FAP, OW_DEC, OW_FRD, OW_PRD, OW_BWR
     } owner_e;
     owner_e src;
     owner_e rsp_owner_q;
     logic   rsp_hi_q;          // addr[2] of the accepted request
     logic [APU_VG_AP_WORD_W-1:0] fr_waddr;
     assign fr_waddr = rep_base_w_q + APU_VG_AP_WORD_W'(fr_raddr);
+
+    // ---- background ALIVE refresher ------------------------------------------
+    // The guest clears a ring's ALIVE bit while it waits (on a seqno
+    // or on ring space) and aborts if the renderer never re-asserts
+    // it.  The idle-poll and head-publish refreshes only fire while
+    // the poll loop or command stream advances; a single long command
+    // (an ObjTab sweep can take orders of magnitude longer than the
+    // guest's wait window) starves both.  Every AliveTick cycles all
+    // live rings get a bare ALIVE write through a low-priority owner.
+    localparam int unsigned AliveTick = 1 << AliveTickLog2;
+    logic [AliveTickLog2-1:0] alive_tk_q;
+    logic [Rings-1:0] alive_pend_q;
+    logic [RIdxW-1:0] bg_idx_q;
+    logic             bg_we;
+    logic [RIdxW-1:0] bg_idx;
+    logic [APU_VG_AP_WORD_W-1:0] bg_addr;
+    logic [31:0]      bg_data;
+    wire bg_done = mp_rvalid_i && rsp_owner_q == OW_BWR;
+    always_comb begin
+      bg_we   = 1'b0;
+      bg_idx  = '0;
+      bg_addr = '0;
+      // descending iteration leaves the lowest pending index selected
+      for (int i = Rings - 1; i >= 0; i--)
+        if (alive_pend_q[i] && ring_q[i].live && !ring_q[i].fatal &&
+            !(ctx_kill_valid_i && ring_q[i].ctx == ctx_kill_id_i)) begin
+          bg_we   = 1'b1;
+          bg_idx  = RIdxW'(i);
+          bg_addr = ring_q[i].status_w;
+        end
+      // never drop a published IDLE bit: a cleared IDLE makes the
+      // guest skip the NotifyRing the poll backoff relies on
+      bg_data = APU_VNRING_ALIVE |
+                (bg_we && ring_q[bg_idx].idle ? APU_VNRING_IDLE
+                                             : 32'h0);
+    end
     always_comb begin
       src         = OW_NONE;
       mp_req_o    = 1'b0;
@@ -537,6 +592,16 @@ module g6lc_apu_vnpump
         mp_addr_o  = {32'h0, fap_addr};
         mp_wdata_o = fap_wdata;
         mp_wstrb_o = fap_wstrb;
+      end else if (bg_we) begin
+        // ring ALIVE heartbeat write — sits ahead of the read streams
+        // so it still fires while the front is parked in a long op
+        src        = OW_BWR;
+        mp_req_o   = 1'b1;
+        mp_we_o    = 1'b1;
+        mp_dom_o   = 1'b1;
+        mp_addr_o  = {(62-APU_VG_AP_WORD_W)'(1'b0), bg_addr, 2'b00};
+        mp_wdata_o = {2{bg_data}};
+        mp_wstrb_o = bg_addr[0] ? 8'hF0 : 8'h0F;
       end else if (cs_re) begin
         src       = dec_re ? OW_DEC : OW_FRD;
         mp_req_o  = 1'b1;
@@ -679,7 +744,11 @@ module g6lc_apu_vnpump
       if (!rst_ni) begin
         state_q <= StIdle;
         for (int i = 0; i < Rings; i++) ring_q[i] <= '{default: '0};
-        for (int i = 0; i <= Rings; i++) park_q[i] <= '{default: '0};
+        // Rings+1 slots unrolls past Verilator's 64-iteration limit at
+        // Rings=64 (BLKLOOPINIT drops NBA in rolled loops): the exec
+        // stream slot is split out to keep the loop at Rings
+        for (int i = 0; i < Rings; i++) park_q[i] <= '{default: '0};
+        park_q[Rings] <= '{default: '0};
         st_q[0] <= '{default: '0}; st_q[1] <= '{default: '0};
         depth_q <= 1'b0; fatal_stream_q <= 1'b0;
         for (int i = 0; i < APU_VG_MAX_DESC; i++)
@@ -700,6 +769,7 @@ module g6lc_apu_vnpump
         poll_q <= '0; gap_q <= '0; gap_cnt_q <= '0;
         rsp_owner_q <= OW_NONE; rsp_hi_q <= 1'b0;
         dec_start_q <= 1'b0; fr_start_q <= 1'b0;
+        alive_tk_q <= '0; alive_pend_q <= '0; bg_idx_q <= '0;
       end else begin
         dec_start_q <= 1'b0;
         fr_start_q <= 1'b0;
@@ -710,7 +780,22 @@ module g6lc_apu_vnpump
         if (mp_req_o && mp_ready_i) begin
           rsp_owner_q <= src;
           rsp_hi_q    <= mp_addr_o[2];
+          if (src == OW_BWR) bg_idx_q <= bg_idx;
         end
+
+        // ring ALIVE heartbeat: every AliveTick cycles every live ring
+        // gets a pending write; a completed (or dead) ring clears its
+        // bit, a ring that dies while pending cancels the write — its
+        // aperture blob can already belong to another context
+        alive_tk_q <= alive_tk_q + AliveTickLog2'(1);
+        if (&alive_tk_q) begin
+          for (int i = 0; i < Rings; i++)
+            if (ring_q[i].live && !ring_q[i].fatal)
+              alive_pend_q[i] <= 1'b1;
+        end
+        for (int i = 0; i < Rings; i++)
+          if (!ring_q[i].live) alive_pend_q[i] <= 1'b0;
+        if (bg_done) alive_pend_q[bg_idx_q] <= 1'b0;
 
         // §12.3 5b-r2 CTX_DESTROY: retire every live ring of the dead
         // context with NO status write — the aperture window can be
@@ -731,10 +816,14 @@ module g6lc_apu_vnpump
               st_q[i].ring_stream <= 1'b0;
           // parked streams of the dead ctx die with it — their rings
           // are already being tombstoned above
-          for (int i = 0; i <= Rings; i++)
+          for (int i = 0; i < Rings; i++)
             if (park_q[i].live &&
                 park_q[i].st0.ctx == ctx_kill_id_i)
               park_q[i].live <= 1'b0;
+          // exec-stream park slot (loop split for the unroll limit)
+          if (park_q[Rings].live &&
+              park_q[Rings].st0.ctx == ctx_kill_id_i)
+            park_q[Rings].live <= 1'b0;
         end
 
         unique case (state_q)
@@ -761,7 +850,7 @@ module g6lc_apu_vnpump
               xs_d_q <= xs_desc_i;
               xs_n_q <= xs_ndesc_i;
               xs_boff_q <= xs_off_i;
-              st_q[0] <= '{live: 1'b1, kind: SK_LIN_GM, ring: 2'h0,
+              st_q[0] <= '{live: 1'b1, kind: SK_LIN_GM, ring: '0,
                            base_head: '0, base_w: '0,
                            bytes: xs_bytes_i, pos: '0,
                            ctx: xs_ctx_i, ring_stream: 1'b0};
@@ -783,10 +872,29 @@ module g6lc_apu_vnpump
                 !ring_q[poll_q].parked) begin
               if (mp_ready_i && src == OW_PRD)
                 state_q <= StPollCap;
-            end else if (poll_q == 2'(Rings - 1))
+            end else if (ring_q[poll_q].live && !ring_q[poll_q].fatal) begin
+              // parked on a seqno wait: the ring cannot be re-polled
+              // without desyncing head/pos, but a guest blocked on
+              // that wait still needs ALIVE re-asserted — refresh on
+              // the same idle_to cadence, without the IDLE bit
+              if (ring_q[poll_q].idle_cnt + 32'd1 >=
+                  ring_q[poll_q].idle_to) begin
+                ring_q[poll_q].idle_cnt <= '0;
+                wr_addr_q <= ring_q[poll_q].status_w;
+                wr_data_q <= APU_VNRING_ALIVE |
+                             (ring_q[poll_q].idle ? APU_VNRING_IDLE
+                                                  : 32'h0);
+                state_q   <= StIdleWr;
+              end else begin
+                ring_q[poll_q].idle_cnt <=
+                  ring_q[poll_q].idle_cnt + 32'd1;
+                if (poll_q == RIdxW'(Rings - 1)) state_q <= StPollGap;
+                else poll_q <= poll_q + RIdxW'(1);
+              end
+            end else if (poll_q == RIdxW'(Rings - 1))
               state_q <= StPollGap;   // idle round complete
             else
-              poll_q <= poll_q + 2'd1;
+              poll_q <= poll_q + RIdxW'(1);
           end
           StPollCap: begin
             if (pump_rd_done) begin
@@ -834,9 +942,9 @@ module g6lc_apu_vnpump
             end
           end
           StPollNext: begin
-            if (poll_q == 2'(Rings - 1)) state_q <= StPollGap;
+            if (poll_q == RIdxW'(Rings - 1)) state_q <= StPollGap;
             else begin
-              poll_q <= poll_q + 2'd1;
+              poll_q <= poll_q + RIdxW'(1);
               state_q <= StPollFire;
             end
           end
@@ -1228,7 +1336,7 @@ module g6lc_apu_vnpump
                                              : Rings] <=
                 '{live: 1'b1, is_vq: 1'b0, st0: st_q[0], st1: st_q[1],
                   depth: depth_q,
-                  wring: 2'(ring_of(t_hnd_q, st_q[depth_q].ctx)),
+                  wring: RIdxW'(ring_of(t_hnd_q, st_q[depth_q].ctx)),
                   seqno: t_val_q};
               if (st_q[0].ring_stream)
                 ring_q[st_q[0].ring].parked <= 1'b1;
@@ -1253,7 +1361,29 @@ module g6lc_apu_vnpump
                 // a head publish that misses the aperture kills the ring
                 ring_q[st_q[depth_q].ring].fatal <= 1'b1;
                 fatal_stream_q <= 1'b1;
+                state_q <= StDecNext;
+              end else if (st_q[depth_q].ring_stream &&
+                           ring_q[st_q[depth_q].ring].live) begin
+                // §6b liveness: the guest clears ALIVE in the ring's
+                // status word on every wait iteration and aborts if
+                // the renderer never re-asserts it.  An idle-only
+                // refresh never fires while the ring drains a large
+                // backlog — the CTS object_management floods observed
+                // it — so publish ALIVE alongside every consumed head.
+                wr_addr_q <= ring_q[st_q[depth_q].ring].status_w;
+                wr_data_q <= APU_VNRING_ALIVE |
+                             (ring_q[st_q[depth_q].ring].idle
+                              ? APU_VNRING_IDLE : 32'h0);
+                state_q <= StStatWr;
+              end else begin
+                state_q <= StDecNext;
               end
+            end
+          end
+
+          StStatWr: begin
+            if (pump_wr_done) begin
+              if (mp_err_i) fatal_stream_q <= 1'b1;
               state_q <= StDecNext;
             end
           end
@@ -1381,7 +1511,7 @@ module g6lc_apu_vnpump_fixture
   import g6lc_apu_vgpages_pkg::*;
 #(
   parameter bit          Enable  = 1'b0,
-  parameter int unsigned Rings   = 4,
+  parameter int unsigned Rings   = 64,
   parameter int unsigned Streams = 4,
   parameter int unsigned TBUF    = 40
 ) (
@@ -1454,6 +1584,7 @@ module g6lc_apu_vnpump_fixture
   input  logic [15:0]        ex_fence_signaled_i,
   input  logic [15:0]        ex_fence_lost_i,
   output logic [15:0]        ex_fence_clr_o,
+  output logic [15:0]        ex_fence_fail_o,
   input  logic            ctx_kill_valid_i,
   input  logic [7:0]      ctx_kill_id_i,
   output logic            busy_o,

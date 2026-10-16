@@ -18,10 +18,14 @@
 //   64'h0000_0002_0000_0000 | id   — Vulkan client object ids
 //                                    (vnfront, plus vgctl's memory-id
 //                                    lookups of DEVICE_MEMORY objects)
-//   64'h0000_0001_0000_0000 | id   — virtio-gpu resource/context ids
+//   64'h0000_0001_0000_0000 | id   — virtio-gpu resource ids
 //                                    (APU_VG_ID_TAG, g6lc_apu_vg_pkg)
-// Both are disjoint for client/resource ids below 2^32, which covers
-// every id the stock driver can mint.
+//   64'h0000_0003_0000_0000 | id   — virtio-gpu context ids
+//                                    (APU_VG_CTX_TAG, g6lc_apu_vg_pkg)
+// The three spaces are disjoint for client/resource/context ids below
+// 2^32 — needed because the guest kernel draws ctx ids and resource
+// ids from separate dense allocators (a live blob rid N must not
+// DUP-block CTX_CREATE for ctx N; CTS max_concurrent.instance).
 //
 // For RESET_CTX the completion `handle[15:0]` carries the number of
 // objects that remained pinned in the context.
@@ -157,5 +161,156 @@ package g6lc_apu_objtab_pkg;
     logic [31:0]        handle;   // {gen[15:0], slot[15:0]}; RESET_CTX: pinned count in [15:0]
     apu_objtab_entry_t  entry;
   } apu_objtab_cpl_t;
+
+  // ------------------------------------------------------------------
+  // §5a G3b-i: object memory (objmem) backing layout and the
+  // g6lc_apu_objtab/g6lc_apu_objpay <-> g6lc_apu_objmem interface.
+  //
+  // Carve (aperture-relative, above the vgpages-managed window):
+  //   [APU_OBJMEM_OFF, +ObjEntries*64)           entry records (64 B)
+  //   [dir_off,        +2*ObjEntries*8)          id directory buckets
+  //   [stk_off,        +ObjEntries*2)            global free stack
+  //   [pay_off,        +PayMemBytes)             ObjPay payload arena
+  // pay_off is the first 64 KiB boundary after the stack.  All of it
+  // sits under APU_VG_SHM_BYTES; vgtop/vgsys assert the fit.
+  localparam logic [63:0] APU_OBJMEM_OFF = 64'h0480_0000; // 72 MiB
+  // (above the 64 MiB guest window + 8 MiB private arena — §5a
+  //  revision 2026-10-16, API-X4 guest-window growth)
+
+  function automatic logic [63:0] apu_objmem_dir_off(
+      input int unsigned entries);
+    return APU_OBJMEM_OFF + 64'(entries) * 64'd64;
+  endfunction
+  function automatic logic [63:0] apu_objmem_stk_off(
+      input int unsigned entries);
+    return apu_objmem_dir_off(entries) + 64'(entries) * 64'd16;
+  endfunction
+  function automatic logic [63:0] apu_objmem_pay_off(
+      input int unsigned entries);
+    return (apu_objmem_stk_off(entries) + 64'(entries) * 64'd2 +
+            64'hFFFF) & ~64'hFFFF;
+  endfunction
+
+  // Entry record (64 B).  Word offsets (32-bit words, little-endian
+  // packing as stored):
+  //   w0  {pad[31:24], ctx[23:16], pins[15:8], pad[7],
+  //        kind[6:1], live[0]}
+  //   w1  {parent_slot[31:16], gen[15:0]}
+  //   w2  {pad[31:16], refcnt[15:0]}
+  //   w3  state[31:0]
+  //   w4  bind_mem[31:0]
+  //   w5  bind_offset[31:0]        w6  bind_offset[63:32]
+  //   w7  size[31:0]               w8  size[63:32]
+  //   w9  aux[31:0]                w10 aux[63:32]
+  //   w11 {ctx_prev[31:16],  ctx_next[15:0]}   per-context live list
+  //   w12 {kind_prev[31:16], kind_next[15:0]}  DEVICE_MEMORY list only
+  //   w13 id[31:0]                 w14 id[63:32]
+  //   w15 epoch[31:0]              objmem generation epoch
+  // `id` is stored in the entry so a directory probe hit is verified
+  // against the full 64-bit id (the 42-bit bucket tag is a hint) and a
+  // stale row — slot recycled under a different id — is detected by
+  // id mismatch rather than by a generation remembered in the row.
+  // `epoch` is stamped by objmem on every entry write; an entry whose
+  // epoch differs from the current one is dead (reset semantics).
+  typedef struct packed {
+    logic [31:0] epoch;                       // w15
+    logic [63:0] id;                          // w13..14
+    logic [15:0] kind_prev, kind_next;        // w12
+    logic [15:0] ctx_prev,  ctx_next;         // w11
+    logic [63:0] aux;                         // w9..10
+    logic [63:0] size;                        // w7..8
+    logic [63:0] bind_offset;                 // w5..6
+    logic [31:0] bind_mem;                    // w4
+    logic [31:0] state;                       // w3
+    logic [15:0] pad2, refcnt;                // w2
+    logic [15:0] parent_slot, gen;            // w1
+    logic [7:0]  pad0, ctx, pins;
+    logic        pad7;                        // w0 bit 7 spare
+    logic [5:0]  kind;
+    logic        live;                        // w0
+  } apu_objent_mem_t;
+  localparam int unsigned APU_OBJENT_W_ID_LO  = 13;
+  localparam int unsigned APU_OBJENT_W_ID_HI  = 14;
+  localparam int unsigned APU_OBJENT_W_CTXLK  = 11;
+  localparam int unsigned APU_OBJENT_W_KINDLK = 12;
+  localparam int unsigned APU_OBJENT_W_AUX_LO = 9;
+  localparam int unsigned APU_OBJENT_W_AUX_HI = 10;
+
+  // Directory bucket (8 B): {valid[63], tomb[62], epoch[61:59],
+  // pad[58], id_tag[57:16], entry[15:0]} with id_tag = id[41:0].  42 bits
+  // cover every id the driver can mint (client/resource ids < 2^34
+  // incl. the ns tags); the entry's stored id is the authoritative
+  // check.  epoch[2:0] segregates rows across resets (see objmem).
+  localparam int unsigned APU_OBJDIR_TAG_W = 42;
+
+  // objmem object-table service port (ot side).  One request in
+  // flight per client; exactly one rsp per request.
+  typedef enum logic [3:0] {
+    // directory id -> entry index (dir cache, then <=32-bucket
+    // probe with lazy tombstoning of id-stale rows); rsp {hit,entry,
+    // bucket}
+    APU_OMT_FIND   = 4'd0,
+    // ALLOC probe: rsp.status = DUP (entry)/CLAIM (bucket)/FULL;
+    // lazily tombstones stale rows like FIND
+    APU_OMT_CLAIM  = 4'd1,
+    // write dir row {valid,id,entry} at req.bucket; updates the dir
+    // cache
+    APU_OMT_DWR    = 4'd2,
+    // tombstone dir row at req.bucket; kills matching dir-cache way
+    APU_OMT_DTOMB  = 4'd3,
+    // entry cache access (line index = entry index)
+    APU_OMT_ERD    = 4'd4,   // rsp.rec = 64 B record
+    APU_OMT_EWR    = 4'd5,   // req.rec -> line, mark dirty
+    // write back the entry's line iff dirty (RETIRE write-back point)
+    APU_OMT_EWB    = 4'd6,
+    // write back all dirty entry lines (RESET_CTX write-back point)
+    APU_OMT_FLUSH  = 4'd7,
+    // global free stack: POP -> rsp {hit,entry} (flop top, DRAM
+    // refill, then the never-written bump region with gen=0);
+    // PUSH(req.entry)
+    APU_OMT_POP    = 4'd8,
+    APU_OMT_PUSH   = 4'd9
+  } apu_omt_op_e;
+
+  typedef enum logic [2:0] {
+    APU_OMT_OK    = 3'd0,   // generic success / FIND hit
+    APU_OMT_MISS  = 3'd1,   // FIND/CLAIM: no live entry (CLAIM: claim
+                            // granted — req.bucket carries it in rsp)
+    APU_OMT_DUP   = 3'd2,   // CLAIM: live entry already owns the id
+    APU_OMT_FULL  = 3'd3,   // CLAIM probe cap / POP empty
+    APU_OMT_ERR   = 3'd4    // mp beat error
+  } apu_omt_status_e;
+
+  typedef struct packed {
+    apu_omt_op_e     op;
+    logic [63:0]     id;        // FIND/CLAIM/DWR
+    logic [31:0]     bucket;    // DWR/DTOMB dir bucket index
+    logic [15:0]     entry;     // DWR/ERD/EWR/EWB/PUSH entry index
+    apu_objent_mem_t rec;       // EWR record
+  } apu_omt_req_t;
+
+  typedef struct packed {
+    apu_omt_status_e status;
+    logic [15:0]     entry;     // FIND/CLAIM hit / POP result
+    logic [31:0]     bucket;    // FIND/CLAIM probe landing bucket
+    logic            fresh;     // POP: entry from the bump region —
+                                // never written, gen treated as 0
+    apu_objent_mem_t rec;       // ERD record / FIND verified entry
+  } apu_omt_rsp_t;
+
+  // objmem payload service port (ObjPay side): one 64-B cache-line
+  // op per request through the payload cache; ObjPay does its own
+  // word extraction / merge.
+  typedef struct packed {
+    logic        dir;                 // 0 = dir0 entry region
+    logic [25:0] line_addr;           // 64-B line index
+    logic        we;
+    logic [511:0] wdata;
+  } apu_omp_req_t;
+
+  typedef struct packed {
+    logic        err;
+    logic [511:0] rdata;
+  } apu_omp_rsp_t;
 
 endpackage

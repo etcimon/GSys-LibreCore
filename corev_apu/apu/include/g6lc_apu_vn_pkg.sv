@@ -132,6 +132,11 @@ package g6lc_apu_vn_pkg;
   localparam int APU_VN_TYPE_VK_WAIT_FOR_FENCES_EXT = 39;
   localparam int APU_VN_TYPE_VK_CREATE_SEMAPHORE_EXT = 40;
   localparam int APU_VN_TYPE_VK_DESTROY_SEMAPHORE_EXT = 41;
+  localparam int APU_VN_TYPE_VK_CREATE_EVENT_EXT = 42;
+  localparam int APU_VN_TYPE_VK_DESTROY_EVENT_EXT = 43;
+  localparam int APU_VN_TYPE_VK_GET_EVENT_STATUS_EXT = 44;
+  localparam int APU_VN_TYPE_VK_SET_EVENT_EXT = 45;
+  localparam int APU_VN_TYPE_VK_RESET_EVENT_EXT = 46;
   localparam int APU_VN_TYPE_VK_CREATE_QUERY_POOL_EXT = 47;
   localparam int APU_VN_TYPE_VK_DESTROY_QUERY_POOL_EXT = 48;
   localparam int APU_VN_TYPE_VK_CMD_RESET_QUERY_POOL_EXT = 129;
@@ -177,9 +182,10 @@ package g6lc_apu_vn_pkg;
     APU_VN_KIND_VK_COMMAND_POOL = 22,
     APU_VN_KIND_VK_COMMAND_BUFFER = 23,
     APU_VN_KIND_VK_SEMAPHORE = 24,
-    APU_VN_KIND_VK_QUERY_POOL = 25,
-    APU_VN_KIND_APU_VIRTIO_CTX = 26,
-    APU_VN_KIND_APU_BLOB_SHMEM = 27
+    APU_VN_KIND_VK_EVENT = 25,
+    APU_VN_KIND_VK_QUERY_POOL = 26,
+    APU_VN_KIND_APU_VIRTIO_CTX = 27,
+    APU_VN_KIND_APU_BLOB_SHMEM = 28
   } apu_vn_kind_e;
 
   localparam int APU_VN_DEC_TYPE_MAX = 334;
@@ -194,9 +200,9 @@ package g6lc_apu_vn_pkg;
     16'h0462, 16'h0471, 16'h0448, 16'h0455,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h08AD,
     16'h08B7, 16'h08BC, 16'h08C0, 16'h08C3,
-    16'h08C9, 16'h08D3, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h08D8,
-    16'h08E5, 16'h08FD, 16'h0480, 16'h048F,
+    16'h08C9, 16'h08D3, 16'h08D8, 16'h08E2,
+    16'h08E7, 16'h08EA, 16'h08ED, 16'h08F0,
+    16'h08FD, 16'h0915, 16'h0480, 16'h048F,
     16'h0494, 16'h04A2, 16'h04A7, 16'h04BF,
     16'h04C4, 16'h04CC, 16'h04E2, 16'h0505,
     16'h0511, 16'h0544, 16'h0550, 16'hFFFF,
@@ -215,8 +221,8 @@ package g6lc_apu_vn_pkg;
     16'h07E8, 16'h07F2, 16'h0836, 16'h080C,
     16'h0821, 16'h0858, 16'h0852, 16'h085E,
     16'h086D, 16'h087C, 16'h088F, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'h07BF, 16'h08EF,
-    16'h08F4, 16'h08EA, 16'h08F8, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'h07BF, 16'h0907,
+    16'h090C, 16'h0902, 16'h0910, 16'hFFFF,
     16'h074C, 16'h078E, 16'h07B5, 16'h07B8,
     16'h08A9, 16'h031B, 16'h0467, 16'h0476,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h0323,
@@ -228,13 +234,11 @@ package g6lc_apu_vn_pkg;
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h0648,
     16'h07A0, 16'hFFFF, 16'h07BA, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'h0906, 16'h090B,
-    16'h090D, 16'hFFFF, 16'hFFFF, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'h091E, 16'h0923,
+    16'h0925, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'h091B, 16'h092C, 16'h092E, 16'h0932,
-    16'h0936, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
+    16'h0933, 16'h0944, 16'h0946, 16'h094A,
+    16'h094E, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
@@ -246,8 +250,10 @@ package g6lc_apu_vn_pkg;
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
-    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h093C,
-    16'h093F, 16'h0941, 16'hFFFF, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
+    16'hFFFF, 16'hFFFF, 16'hFFFF, 16'h0954,
+    16'h0957, 16'h0959, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
     16'hFFFF, 16'hFFFF, 16'hFFFF, 16'hFFFF,
@@ -270,7 +276,7 @@ package g6lc_apu_vn_pkg;
     16'hFFFF, 16'hFFFF, 16'hFFFF
   };
 
-  localparam int APU_VN_DEC_ROM_WORDS = 2372;
+  localparam int APU_VN_DEC_ROM_WORDS = 2396;
   localparam logic [47:0] APU_VN_DEC_ROM [0:APU_VN_DEC_ROM_WORDS-1] = '{
     48'h0F0000000000, // RET a=0 b=0x0 
     48'h0F0000000000, // RET a=0 b=0x0 
@@ -2537,51 +2543,75 @@ package g6lc_apu_vn_pkg;
     48'h0D0000000018, // OBJ a=0 b=0x18 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h040000000006, // PTR a=0 b=0x6 pCreateInfo
+    48'h040000000003, // PTR a=0 b=0x3 pCreateInfo
     48'h05000000004B, // STYPE a=0 b=0x4B sType
     48'h0600000001FF, // PNEXT a=0 b=0x1FF pNext
+    48'h010000000000, // U32 a=0 b=0x0 flags
+    48'h040100000000, // PTR a=1 b=0x0 pAllocator
+    48'h040200000001, // PTR a=2 b=0x1 pEvent
+    48'h030900000019, // HANDLE a=9 b=0x19 pEvent:NEW
+    48'h0D0000000019, // OBJ a=0 b=0x19 
+    48'h0E4400000000, // END a=68 b=0x0 
+    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
+    48'h030A00000019, // HANDLE a=10 b=0x19 event:RETIRE
+    48'h040000000000, // PTR a=0 b=0x0 pAllocator
+    48'h0D0000000019, // OBJ a=0 b=0x19 
+    48'h0E0000000000, // END a=0 b=0x0 
+    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
+    48'h030800000019, // HANDLE a=8 b=0x19 event:LOOKUP
+    48'h0E4500000000, // END a=69 b=0x0 
+    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
+    48'h030800000019, // HANDLE a=8 b=0x19 event:LOOKUP
+    48'h0E4600000000, // END a=70 b=0x0 
+    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
+    48'h030800000019, // HANDLE a=8 b=0x19 event:LOOKUP
+    48'h0E4700000000, // END a=71 b=0x0 
+    48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
+    48'h040000000006, // PTR a=0 b=0x6 pCreateInfo
+    48'h05000000004C, // STYPE a=0 b=0x4C sType
+    48'h060000000200, // PNEXT a=0 b=0x200 pNext
     48'h010000000000, // U32 a=0 b=0x0 flags
     48'h010100000000, // U32 a=1 b=0x0 queryType
     48'h010200000000, // U32 a=2 b=0x0 queryCount
     48'h010300000000, // U32 a=3 b=0x0 pipelineStatistics
     48'h040100000000, // PTR a=1 b=0x0 pAllocator
     48'h040200000001, // PTR a=2 b=0x1 pQueryPool
-    48'h030900000019, // HANDLE a=9 b=0x19 pQueryPool:NEW
-    48'h0D0000000019, // OBJ a=0 b=0x19 
-    48'h0E4400000000, // END a=68 b=0x0 
+    48'h03090000001A, // HANDLE a=9 b=0x1A pQueryPool:NEW
+    48'h0D000000001A, // OBJ a=0 b=0x1A 
+    48'h0E4800000000, // END a=72 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h030A00000019, // HANDLE a=10 b=0x19 queryPool:RETIRE
+    48'h030A0000001A, // HANDLE a=10 b=0x1A queryPool:RETIRE
     48'h040000000000, // PTR a=0 b=0x0 pAllocator
-    48'h0D0000000019, // OBJ a=0 b=0x19 
+    48'h0D000000001A, // OBJ a=0 b=0x1A 
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
-    48'h030800000019, // HANDLE a=8 b=0x19 queryPool:LOOKUP
+    48'h03080000001A, // HANDLE a=8 b=0x1A queryPool:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 firstQuery
     48'h010100000000, // U32 a=1 b=0x0 queryCount
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
-    48'h030800000019, // HANDLE a=8 b=0x19 queryPool:LOOKUP
+    48'h03080000001A, // HANDLE a=8 b=0x1A queryPool:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 query
     48'h010100000000, // U32 a=1 b=0x0 flags
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
-    48'h030800000019, // HANDLE a=8 b=0x19 queryPool:LOOKUP
+    48'h03080000001A, // HANDLE a=8 b=0x1A queryPool:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 query
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000017, // HANDLE a=0 b=0x17 commandBuffer:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 pipelineStage
-    48'h030800000019, // HANDLE a=8 b=0x19 queryPool:LOOKUP
+    48'h03080000001A, // HANDLE a=8 b=0x1A queryPool:LOOKUP
     48'h010100000000, // U32 a=1 b=0x0 query
     48'h0E0000000000, // END a=0 b=0x0 
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
-    48'h030800000019, // HANDLE a=8 b=0x19 queryPool:LOOKUP
+    48'h03080000001A, // HANDLE a=8 b=0x1A queryPool:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 firstQuery
     48'h010100000000, // U32 a=1 b=0x0 queryCount
     48'h020200000000, // U64 a=2 b=0x0 dataSize
     48'h090000000008, // BLOB a=0 b=0x8 pData
     48'h020300000000, // U64 a=3 b=0x0 stride
     48'h010200000000, // U32 a=2 b=0x0 flags
-    48'h0E4500000000, // END a=69 b=0x0 
+    48'h0E4900000000, // END a=73 b=0x0 
     48'h047F00000003, // PTR a=127 b=0x3 pStream
     48'h017F00000000, // U32 a=127 b=0x0 resourceId
     48'h027F00000000, // U64 a=127 b=0x0 offset
@@ -2605,8 +2635,8 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000, // END a=0 b=0x0 
     48'h027F00000000, // U64 a=127 b=0x0 ring
     48'h047F0000000E, // PTR a=127 b=0xE pCreateInfo
-    48'h05000000004C, // STYPE a=0 b=0x4C sType
-    48'h060000000200, // PNEXT a=0 b=0x200 pNext
+    48'h05000000004D, // STYPE a=0 b=0x4D sType
+    48'h060000000201, // PNEXT a=0 b=0x201 pNext
     48'h017F00000000, // U32 a=127 b=0x0 flags
     48'h017F00000000, // U32 a=127 b=0x0 resourceId
     48'h027F00000000, // U64 a=127 b=0x0 offset
@@ -2633,9 +2663,9 @@ package g6lc_apu_vn_pkg;
     48'h030000000003, // HANDLE a=0 b=0x3 device:LOOKUP
     48'h010000000000, // U32 a=0 b=0x0 resourceId
     48'h040000000002, // PTR a=0 b=0x2 pMemoryResourceProperties
-    48'h05000000004D, // STYPE a=0 b=0x4D sType
-    48'h060000000203, // PNEXT a=0 b=0x203 pNext
-    48'h0E4600000000, // END a=70 b=0x0 
+    48'h05000000004E, // STYPE a=0 b=0x4E sType
+    48'h060000000204, // PNEXT a=0 b=0x204 pNext
+    48'h0E4A00000000, // END a=74 b=0x0 
     48'h027F00000000, // U64 a=127 b=0x0 ring
     48'h027F00000000, // U64 a=127 b=0x0 seqno
     48'h0E0000000000, // END a=0 b=0x0 
@@ -2646,7 +2676,7 @@ package g6lc_apu_vn_pkg;
     48'h0E0000000000 // END a=0 b=0x0 
   };
 
-  localparam int APU_VN_REPLY_PROG_MAX = 70;
+  localparam int APU_VN_REPLY_PROG_MAX = 74;
   localparam logic [15:0] APU_VN_REPLY_ENTRY [0:APU_VN_REPLY_PROG_MAX] = '{
     16'hFFFF, 16'h0000, 16'h0005, 16'h000A,
     16'h0010, 16'h0016, 16'h0056, 16'h005C,
@@ -2665,10 +2695,11 @@ package g6lc_apu_vn_pkg;
     16'h02A8, 16'h02AB, 16'h02B0, 16'h02B3,
     16'h02B7, 16'h02BA, 16'h02BD, 16'h02C0,
     16'h02C5, 16'h02C8, 16'h02CB, 16'h02CE,
-    16'h02D3, 16'h02D8, 16'h02DF
+    16'h02D3, 16'h02D8, 16'h02DB, 16'h02DE,
+    16'h02E1, 16'h02E6, 16'h02ED
   };
 
-  localparam int APU_VN_REPLY_ROM_WORDS = 742;
+  localparam int APU_VN_REPLY_ROM_WORDS = 756;
   localparam logic [47:0] APU_VN_REPLY_ROM [0:APU_VN_REPLY_ROM_WORDS-1] = '{
     48'h010000000000, // RTYPE a=0 b=0x0 vkCreateInstance
     48'h020000000000, // RRESULT a=0 b=0x0 
@@ -3393,6 +3424,20 @@ package g6lc_apu_vn_pkg;
     48'h060200000001, // RPTR a=2 b=0x1 pSemaphore
     48'h050100000000, // RHANDLE a=1 b=0x0 pSemaphore
     48'h0B0000000000, // REND a=0 b=0x0 
+    48'h010000000000, // RTYPE a=0 b=0x0 vkCreateEvent
+    48'h020000000000, // RRESULT a=0 b=0x0 
+    48'h060200000001, // RPTR a=2 b=0x1 pEvent
+    48'h050100000000, // RHANDLE a=1 b=0x0 pEvent
+    48'h0B0000000000, // REND a=0 b=0x0 
+    48'h010000000000, // RTYPE a=0 b=0x0 vkGetEventStatus
+    48'h020000000000, // RRESULT a=0 b=0x0 
+    48'h0B0000000000, // REND a=0 b=0x0 
+    48'h010000000000, // RTYPE a=0 b=0x0 vkSetEvent
+    48'h020000000000, // RRESULT a=0 b=0x0 
+    48'h0B0000000000, // REND a=0 b=0x0 
+    48'h010000000000, // RTYPE a=0 b=0x0 vkResetEvent
+    48'h020000000000, // RRESULT a=0 b=0x0 
+    48'h0B0000000000, // REND a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkCreateQueryPool
     48'h020000000000, // RRESULT a=0 b=0x0 
     48'h060200000001, // RPTR a=2 b=0x1 pQueryPool
@@ -3402,19 +3447,19 @@ package g6lc_apu_vn_pkg;
     48'h020000000000, // RRESULT a=0 b=0x0 
     48'h0A0400000001, // REXBUF a=4 b=0x1 pData
     48'h0B0000000000, // REND a=0 b=0x0 
-    48'h080000000205, // RCHAIN a=0 b=0x205 VkMemoryResourceAllocationSizePropertiesMESA
+    48'h080000000206, // RCHAIN a=0 b=0x206 VkMemoryResourceAllocationSizePropertiesMESA
     48'h0D0400000002, // REXEC a=4 b=0x2 VkMemoryResourceAllocationSizePropertiesMESA
     48'h0C0000000000, // RRET a=0 b=0x0 
     48'h010000000000, // RTYPE a=0 b=0x0 vkGetMemoryResourcePropertiesMESA
     48'h020000000000, // RRESULT a=0 b=0x0 
     48'h060000000003, // RPTR a=0 b=0x3 pMemoryResourceProperties
-    48'h03030000004D, // RU32 a=3 b=0x4D sType
-    48'h080000000205, // RCHAIN a=0 b=0x205 pMemoryResourceProperties
+    48'h03030000004E, // RU32 a=3 b=0x4E sType
+    48'h080000000206, // RCHAIN a=0 b=0x206 pMemoryResourceProperties
     48'h0D0400000001, // REXEC a=4 b=0x1 VkMemoryResourcePropertiesMESA
     48'h0B0000000000 // REND a=0 b=0x0 
   };
 
-  localparam int APU_VN_CHAIN_WORDS = 519;
+  localparam int APU_VN_CHAIN_WORDS = 520;
   localparam logic [47:0] APU_VN_CHAIN [0:APU_VN_CHAIN_WORDS-1] = '{
     48'h0, // terminator
     48'h0, // terminator
@@ -3928,16 +3973,17 @@ package g6lc_apu_vn_pkg;
     48'h02F73B9BF6C8, // sType=1000077000 mpc=759
     48'h0, // terminator
     48'h0, // terminator
+    48'h0, // terminator
     48'h02F93BA0A606, // sType=1000384006 mpc=761
     48'h02FB3BA0A607, // sType=1000384007 mpc=763
     48'h0, // terminator
     48'h02FD3BA0A603, // sType=1000384003 mpc=765
     48'h0, // terminator
-    48'h02DC3BA0A603, // sType=1000384003 mpc=732
+    48'h02EA3BA0A603, // sType=1000384003 mpc=746
     48'h0 // terminator
   };
 
-  localparam int APU_VN_CONST_WORDS = 78;
+  localparam int APU_VN_CONST_WORDS = 79;
   localparam logic [31:0] APU_VN_CONST [0:APU_VN_CONST_WORDS-1] = '{
     32'h00000001, 32'h00000000, 32'h3B9BDB70, 32'h3B9BB079,
     32'h3B9BB078, 32'h3B9BB07E, 32'h3B9BB07D, 32'h3B9BB07A,
@@ -3957,8 +4003,8 @@ package g6lc_apu_vn_pkg;
     32'h00000022, 32'h00000023, 32'h00000024, 32'h00000027,
     32'h00000028, 32'h0000002A, 32'h00000029, 32'h0000002B,
     32'h3B9C73CD, 32'h3B9C73CE, 32'h0000002E, 32'h0000002C,
-    32'h0000002D, 32'h00000008, 32'h00000009, 32'h0000000B,
-    32'h3BA0A600, 32'h3BA0A601
+    32'h0000002D, 32'h00000008, 32'h00000009, 32'h0000000A,
+    32'h0000000B, 32'h3BA0A600, 32'h3BA0A601
   };
 
   localparam int APU_VN_ARRMETA_WORDS = 8;
@@ -3997,7 +4043,7 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00001000, 32'h00000000,
     32'h00000000, 32'h00000100, 32'h00000000, 32'h01000000,
-    32'h01000000, 32'h00000080, 32'h00000040, 32'h00000040,
+    32'h01000000, 32'h00000080, 32'h00001000, 32'h00000FA0,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000004, 32'h00000010, 32'h00000010, 32'h00000010,
     32'h00000010, 32'h00000010, 32'h00000000, 32'h00000010,
@@ -4217,7 +4263,7 @@ package g6lc_apu_vn_pkg;
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000002, 32'h00000010, 32'h00000000,
-    32'h00800000, 32'h00000000, 32'h00000001, 32'h01800000,
+    32'h00800000, 32'h00000000, 32'h00000001, 32'h04000000,
     32'h00000000, 32'h00000001, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
     32'h00000000, 32'h00000000, 32'h00000000, 32'h00000000,
@@ -4938,13 +4984,13 @@ package g6lc_apu_vn_pkg;
     24'hA00701, // WAIT kind=0 pq=0 cq=7 f=01
     24'h160701, // ALLOC kind=24 pq=0 cq=7 f=01
     24'h260700, // RETIRE kind=24 pq=0 cq=7 f=00
-    24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h000000, // unsupported
-    24'h000000, // unsupported
     24'h164701, // ALLOC kind=25 pq=0 cq=7 f=01
     24'h264700, // RETIRE kind=25 pq=0 cq=7 f=00
+    24'h000701, // UNSUPPORTED kind=0 pq=0 cq=7 f=01
+    24'h000701, // UNSUPPORTED kind=0 pq=0 cq=7 f=01
+    24'h000701, // UNSUPPORTED kind=0 pq=0 cq=7 f=01
+    24'h168701, // ALLOC kind=26 pq=0 cq=7 f=01
+    24'h268700, // RETIRE kind=26 pq=0 cq=7 f=00
     24'h000701, // UNSUPPORTED kind=0 pq=0 cq=7 f=01
     24'h11C701, // ALLOC kind=7 pq=0 cq=7 f=01
     24'h21C700, // RETIRE kind=7 pq=0 cq=7 f=00

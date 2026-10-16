@@ -206,7 +206,10 @@ module tb_g6lc_apu_bridge
   end
 
   g6lc_apu_sys #(
-    .ApuCfg(Cfg), .CoreCfg(venus_core())
+    .ApuCfg(Cfg), .CoreCfg(venus_core()),
+    // 4096-cycle ALIVE heartbeat (~2.7 s wall at the ~1.5 kHz bridge
+    // sim rate) so the Mesa ring watchdog sees refreshes
+    .AliveTickLog2(12)
   ) i_dut (
     .clk_i, .rst_ni, .testmode_i(1'b1),
     .guest_req_i(g_req), .guest_rsp_o(g_rsp),
@@ -237,13 +240,86 @@ module tb_g6lc_apu_bridge
     wire [31:0] fcnt    = i_dut.gen_venus.i_vgsys.fault_cnt_o;
     wire        vg_idle = i_dut.gen_venus.vg_idle;
     wire        rdone   = i_dut.gen_venus.i_vgsys.reset_done_o;
-    wire [3:0][31:0] r_status = i_dut.gen_venus.i_vgsys.ring_status_o;
-    wire [3:0][31:0] r_head   = i_dut.gen_venus.i_vgsys.ring_head_o;
-    wire [3:0][g6lc_apu_vg_pkg::APU_VG_AP_WORD_W-1:0] r_extra  = i_dut.gen_venus.i_vgsys.ring_extra_w_o;
+    // G3b-i / API-X4: ring tables are 64 deep now (dbg sel 16-27
+    // keeps its 4-ring window on rings 0-3; sel 58-60 expose the
+    // live/fatal masks for the whole table)
+    wire [63:0][31:0] r_status = i_dut.gen_venus.i_vgsys.ring_status_o;
+    wire [63:0][31:0] r_head   = i_dut.gen_venus.i_vgsys.ring_head_o;
+    wire [63:0][g6lc_apu_vg_pkg::APU_VG_AP_WORD_W-1:0] r_extra  = i_dut.gen_venus.i_vgsys.ring_extra_w_o;
+    // ring_status_o[g] = {29'h0, live, fatal, idle}
+    logic [63:0] r_live_m, r_fatal_m;
+    logic [6:0]  r_live_n;
+    always_comb begin
+      r_live_m = '0; r_fatal_m = '0; r_live_n = '0;
+      for (int i = 0; i < 64; i++) begin
+        r_live_m[i]  = r_status[i][2];
+        r_fatal_m[i] = r_status[i][1];
+        r_live_n    += 7'(r_status[i][2]);
+      end
+    end
     wire [31:0] vgp_used = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
                               .i_vgp.gen_on.used_q;
-    wire [255:0] pay_free = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
-                              .i_pay.gen_on.free_q;
+    // G3b-i: ObjPay's bitmap moved to SRAM; the observability count
+    // carries the same polarity (0 = drained at teardown)
+    wire [31:0] pay_used = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                              .i_pay.gen_on.used_q;
+
+    // G3b-i CTS-1 wedge diagnosis (sel 61..66): the objtab request
+    // handshake seen by vnfront, the vgtop grant owner, i_tab's
+    // protocol FSM, and objmem's ot/op engines + mp ownership — the
+    // DEADLOCK question is which of these is parked on which reply.
+    wire [5:0]  tab_st = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                         .i_tab.gen_on.state_q;
+    wire [2:0]  ot_og  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                         .og_q;
+    wire        ot_rv  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                         .ot_req_valid;
+    wire        ot_rr  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                         .ot_req_ready;
+    wire        ot_cv  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                         .ot_cpl_valid;
+    wire        ot_cr  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                         .ot_cpl_ready;
+    wire        om_rv  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                         .omt_req_v;
+    wire        om_rr  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                         .omt_req_rdy;
+    wire        om_sv  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                         .omt_rsp_v;
+    wire [5:0]  om_otq = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                         .i_objmem.gen_on.ot_q;
+    wire [3:0]  om_opq = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                         .i_objmem.gen_on.op_q;
+    wire [4:0]  om_mpf = {i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_objmem.gen_on.mp_busy_q,
+                          i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_objmem.gen_on.mp_ot_own_q,
+                          i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_objmem.gen_on.ot_mp_v,
+                          i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_objmem.gen_on.op_mp_v,
+                          i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_objmem.gen_on.mp_rsp_valid_i};
+    wire [31:0] om_mpa = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                         .i_objmem.gen_on.mp_req_o.addr[31:0];
+    wire [31:0] om_mpw = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                         .i_objmem.gen_on.mp_req_o.wdata[31:0];
+    wire [7:0]  om_otop = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_objmem.gen_on.ot_req_q.op;
+    wire [31:0] om_oid  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_objmem.gen_on.ot_req_q.id[31:0];
+    wire [7:0]  fr_otop = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_pump.gen_on.i_fr.gen_on.otr_q.op;
+    wire [63:0] fr_oid  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                          .i_pump.gen_on.i_fr.gen_on.otr_q.id;
+    wire [15:0] tab_walk = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_tab.gen_on.walk_q;
+    wire [15:0] tab_wrec = {i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_tab.gen_on.walk_rec_q.ctx,
+                            i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_tab.gen_on.walk_rec_q.live,
+                            i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                            .i_tab.gen_on.walk_rec_q.kind};
 
     // §12.3 3d-d: relocation cost — one [reloc] line per completed
     // DEVBACKED MAP_BLOB hold (drain + evictions + move + publish)
@@ -420,6 +496,11 @@ module tb_g6lc_apu_bridge
                             .i_pump.gen_on.i_fr.gen_on.otr_q.kind;
     wire [7:0]  fr_ctx   = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
                            .i_pump.gen_on.i_fr.gen_on.ctx_i;
+    // G3a-ii tex wedge: gp_ph_q names the keep-word parse phase at
+    // StPipeFail/StGpUnr so a rejected VkGraphicsPipelineCreateInfo
+    // field is visible without a full state trace.
+    wire [5:0]  fr_gpph  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_pump.gen_on.i_fr.gen_on.gp_ph_q;
 
 `ifdef G6LC_APU_DEBUG
     // F5 bring-up trace (-D G6LC_APU_DEBUG): command decode +
@@ -444,6 +525,11 @@ module tb_g6lc_apu_bridge
                  fr_ot_op, fr_ot_id, fr_ot_par, fr_ot_knd, fr_ctx);
       if (fr_ot_cv)
         $display("[f5ot] cpl st=%0d hnd=%08x", fr_ot_cst, fr_ot_ch);
+      // vkCreateGraphicsPipelines (cmd 65): every parse state hop, so a
+      // StPipeFail/StRep exit identifies the rejected keep-word phase.
+      if (fr_cmd == 32'd65 && fr_state != fr_prev_q)
+        $display("[f5gp] st=%0d ph=%0d res=%08x",
+                 fr_state, fr_gpph, fr_result);
       fr_prev_q <= fr_state;
       fr_pcmd_q <= fr_cmd;
     end
@@ -682,7 +768,7 @@ module tb_g6lc_apu_bridge
         8'd4:    dbg_rdata_o = f_id_q;
         8'd5:    dbg_rdata_o = 64'(f_ring_q);
         8'd6:    dbg_rdata_o = 64'(vgp_used);
-        8'd7:    dbg_rdata_o = 64'(|pay_free);   // 0 = chunks drained
+        8'd7:    dbg_rdata_o = 64'(pay_used);     // 0 = chunks drained
         // §12.3 3d-d: cumulative DEVBACKED relocation hold cycles
         8'd8:    dbg_rdata_o = 64'(vc_reloc);
         // F5 bring-up: vnfront descriptor-path state taps
@@ -713,6 +799,26 @@ module tb_g6lc_apu_bridge
         8'd55:   dbg_rdata_o = {48'h0, vg_int, vg_st};
         8'd56:   dbg_rdata_o = {40'h0, pu_pol, pu_st, eng_b};
         8'd57:   dbg_rdata_o = {56'h0, mp_os};
+        8'd58:   dbg_rdata_o = {57'h0, r_live_n};
+        8'd59:   dbg_rdata_o = r_live_m;
+        8'd60:   dbg_rdata_o = r_fatal_m;
+        // sel61: objtab handshake — {tab state[5:0], og[2:0], req v/r,
+        //        cpl v/r, omt req v/r, omt rsp v}
+        8'd61:   dbg_rdata_o = {40'h0, tab_st, 1'b0, ot_og,
+                                om_sv, om_rr, om_rv,
+                                ot_cr, ot_cv, ot_rr, ot_rv};
+        // sel62: objmem engines — {ot_q[5:0], op_q[3:0], mp flags
+        //        busy/own/otv/opv/rspv}
+        8'd62:   dbg_rdata_o = {46'h0, om_otq, om_opq, om_mpf,
+                                om_otop[3:0]};
+        // sel63/64: the mp beat objmem is driving (addr lo, wdata lo)
+        8'd63:   dbg_rdata_o = {32'h0, om_mpa};
+        8'd64:   dbg_rdata_o = {32'h0, om_mpw};
+        // sel65: i_tab walk pointer + walk record ctx/live/kind +
+        //        vnfront pending otr op
+        8'd65:   dbg_rdata_o = {16'h0, fr_otop, tab_wrec, tab_walk};
+        // sel66: vnfront pending otr id[63:0]
+        8'd66:   dbg_rdata_o = fr_oid;
         default: begin
           if (dbg_sel_i >= 8'd16 && dbg_sel_i < 8'd20)
             dbg_rdata_o = 64'(r_head[dbg_sel_i[1:0]]);

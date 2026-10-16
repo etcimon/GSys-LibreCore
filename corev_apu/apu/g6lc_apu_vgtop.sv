@@ -42,9 +42,25 @@ module g6lc_apu_vgtop
   import g6lc_apu_vgpages_pkg::*;
 #(
   parameter bit          Enable = 1'b0,
-  parameter int unsigned Rings  = 4,
+  parameter int unsigned Rings  = 64,
   parameter int unsigned Fences = 16,
-  parameter int unsigned PayWords = 16384,
+  // ring ALIVE watchdog refresh period: 2**AliveTickLog2 cycles
+  parameter int unsigned AliveTickLog2 = 20,
+  // cmdrec record-payload arena per command buffer, in 32-bit
+  // words.  The 256-word default overflowed on
+  // vkCmdCopyBufferToImage of a 4-layer mipmapped array image —
+  // 448 words of copy regions (dEQP texture.*_sampler2darray_*)
+  // hit PAY_FULL, the command buffer went INVALID and the guest
+  // hung waiting on a fence the failed submit never posted.
+  parameter int unsigned CrPayWords = 1024,
+  // §5a G3b-i ObjTab-V/ObjPay-V: entry table + payload arena in
+  // objmem (the static carve above the managed window)
+  parameter int unsigned ObjEntries    = 65536,
+  parameter int unsigned ObjMaxCtx     = 32,
+  parameter int unsigned PayMemBytes   = 16 * 1024 * 1024,
+  parameter int unsigned DirCacheSets  = 256,
+  parameter int unsigned EntCacheLines = 64,
+  parameter int unsigned PayCacheLines = 32,
   // §7b/5a-ii: aperture page allocator + ShaderCore geometry
   parameter int unsigned VgPages      = APU_VG_PAGES,
   parameter int unsigned VgPageBytes  = APU_VG_PAGE_BYTES,
@@ -81,14 +97,16 @@ module g6lc_apu_vgtop
   output logic [31:0]     cpl_len_o,       // truthful used len
   // shared memory ports (§6c apu_mp handshake): [0]=CTL (vgctl,
   // guest), [1]=PUMP (vnpump, aperture+guest), [2]=SH (shader LSU,
-  // aperture), [3]=RAST (raster gather/record/ROP, aperture).
+  // aperture), [3]=RAST (raster gather/record/ROP, aperture),
+  // [4]=OBJ (objmem: ObjTab/ObjPay backing, aperture) — mapped onto
+  // APU_MP_{CTL,PUMP,SH,RAST,OBJ} by vgsys.
   // Requests hold until mp_req_ready_i; one mp_rsp_valid_i
   // returns per accepted request, writes included.
-  output logic [3:0]         mp_req_valid_o,
-  input  logic [3:0]         mp_req_ready_i,
-  output apu_mp_req_t [3:0]  mp_req_o,
-  input  logic [3:0]         mp_rsp_valid_i,
-  input  apu_mp_rsp_t [3:0]  mp_rsp_i,
+  output logic [4:0]         mp_req_valid_o,
+  input  logic [4:0]         mp_req_ready_i,
+  output apu_mp_req_t [4:0]  mp_req_o,
+  input  logic [4:0]         mp_rsp_valid_i,
+  input  apu_mp_rsp_t [4:0]  mp_rsp_i,
   // command-executor work port (TB work sink; dispatch-class records
   // are consumed internally by the ShaderCore, §7b/5a-ii; Xfer-class
   // records — CopyBuffer/FillBuffer/UpdateBuffer — go to the xfer
@@ -153,7 +171,7 @@ module g6lc_apu_vgtop
                     (|chain_id_i) | (|chain_n_i) | cpl_ready_i |
                     (|mp_req_ready_i) | (|mp_rsp_valid_i) |
                     (|mp_rsp_i[0]) | (|mp_rsp_i[1]) | (|mp_rsp_i[2]) |
-                    (|mp_rsp_i[3]) |
+                    (|mp_rsp_i[3]) | (|mp_rsp_i[4]) |
                     work_ready_i | work_done_i | (|work_done_pl_i) |
                     (|xf_axi_rsp_i) | (|ap_base_i) | xf_flush_i |
                     dbg_ot_valid_i | dbg_ot_cpl_ready_i | (|dbg_ot_req_i) |
@@ -172,7 +190,7 @@ module g6lc_apu_vgtop
     apu_cmdrec_req_t cr_req;
     apu_cmdrec_cpl_t cr_cpl;
     logic [15:0]     ex_done_seq, ex_fence_sig, ex_fence_lost,
-                     ex_fence_clr;
+                     ex_fence_clr, ex_fence_fail;
     // §7b/5a-ii: shared ObjPay (front > exec) and vgpages (front > ctl)
     logic            op_req_valid, op_cpl_valid;
     logic            op_req_ready, op_cpl_ready;
@@ -287,7 +305,8 @@ module g6lc_apu_vgtop
     logic        vp_ex_v, vp_ex_rdy;
     apu_cmdexec_submit_t vp_ex_submit;
 
-    g6lc_apu_vnpump #(.Enable(1'b1), .Rings(Rings)) i_pump (
+    g6lc_apu_vnpump #(.Enable(1'b1), .Rings(Rings),
+                      .AliveTickLog2(AliveTickLog2)) i_pump (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .xs_valid_i(vc_xs_v), .xs_ready_o(vc_xs_rdy),
       .xs_desc_i(vc_xs_desc), .xs_ndesc_i(vc_xs_n),
@@ -330,6 +349,7 @@ module g6lc_apu_vgtop
       .ex_submit_o(vp_ex_submit),
       .ex_done_seq_i(ex_done_seq), .ex_fence_signaled_i(ex_fence_sig),
       .ex_fence_lost_i(ex_fence_lost), .ex_fence_clr_o(ex_fence_clr),
+      .ex_fence_fail_o(ex_fence_fail),
       .ctx_kill_valid_i(vc_ctx_kill_v), .ctx_kill_id_i(vc_ctx_kill_id),
             .busy_o(vp_busy),
       .ring_active_o(ring_active_o), .ring_status_o(ring_status_o),
@@ -417,14 +437,15 @@ module g6lc_apu_vgtop
       .push_n_o(ex_push_n), .push_o(ex_push),
       .done_seq_o(ex_done_seq),
       .fence_signaled_o(ex_fence_sig), .fence_lost_o(ex_fence_lost),
-      .fence_clr_i(ex_fence_clr),
+      .fence_clr_i(ex_fence_clr), .fence_fail_i(ex_fence_fail),
       // §12.3 3d-d: vgctl's relocation hold blocks new dequeues;
       // ex_idle reports nothing in flight for the drain wait
       .hold_i(vc_hold), .idle_o(ex_idle),
       .busy_o(ex_busy));
 
     // ---- cmdrec -----------------------------------------------------------------
-    g6lc_apu_cmdrec #(.Enable(1'b1)) i_rec (
+    g6lc_apu_cmdrec #(.Enable(1'b1),
+                      .PayWordsPerBuf(CrPayWords)) i_rec (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .req_valid_i(cr_req_valid), .req_ready_o(cr_req_ready),
       .req_i(cr_req),
@@ -433,16 +454,71 @@ module g6lc_apu_vgtop
       .pay_valid_i(vp_pay_v), .pay_data_i(vp_pay_d),
       .pay_ready_o(vp_pay_rdy));
 
+    // ---- objmem: ObjTab/ObjPay private DRAM backing -----------------------
+    // §5a G3b-i: entries, directory and free stack in the carve at
+    // APU_OBJMEM_BASE, payloads in the carve at
+    // APU_OBJMEM_PAY_OFF — both behind their caches, one apu_mp
+    // requester (port 4 here, APU_MP_OBJ in vgsys).
+    logic         omt_req_v, omt_req_rdy, omt_rsp_v;
+    apu_omt_req_t omt_req;
+    apu_omt_rsp_t omt_rsp;
+    logic         omp_req_v, omp_req_rdy, omp_rsp_v;
+    apu_omp_req_t omp_req;
+    apu_omp_rsp_t omp_rsp;
+
+    localparam int unsigned ObjPayByteOff =
+        int'(apu_objmem_pay_off(ObjEntries));
+
+`ifndef SYNTHESIS
+    // §5a carve legality: the object table + free stack + payload
+    // arena must fit inside the private carve above the managed window
+    // window (asserted at elaboration, before any gate runs)
+    initial begin
+      assert (ObjEntries >= 256 && ObjEntries <= 65536 &&
+              (ObjEntries & (ObjEntries - 1)) == 0)
+        else $fatal(1, "vgtop: ObjEntries %0d out of range/not pow2",
+                    ObjEntries);
+      assert (ObjMaxCtx >= 1 && ObjMaxCtx <= 32)
+        else $fatal(1, "vgtop: ObjMaxCtx %0d out of range", ObjMaxCtx);
+      assert (ObjPayByteOff + PayMemBytes <=
+              64'(g6lc_apu_pkg::APU_SHM_BYTES))
+        else $fatal(1, {"vgtop: objmem+pay carve overflows SHM ",
+                        "(%0d + %0d > %0d)"}, ObjPayByteOff,
+                    PayMemBytes, g6lc_apu_pkg::APU_SHM_BYTES);
+    end
+`endif
+
+    g6lc_apu_objmem #(
+        .Enable(1'b1), .ObjEntries(ObjEntries),
+        .DirCacheSets(DirCacheSets), .EntCacheLines(EntCacheLines),
+        .PayCacheLines(PayCacheLines)) i_objmem (
+      .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
+      .omt_req_valid_i(omt_req_v), .omt_req_ready_o(omt_req_rdy),
+      .omt_req_i(omt_req),
+      .omt_rsp_valid_o(omt_rsp_v), .omt_rsp_o(omt_rsp),
+      .omp_req_valid_i(omp_req_v), .omp_req_ready_o(omp_req_rdy),
+      .omp_req_i(omp_req),
+      .omp_rsp_valid_o(omp_rsp_v), .omp_rsp_o(omp_rsp),
+      .mp_req_valid_o(mp_req_valid_o[4]),
+      .mp_req_ready_i(mp_req_ready_i[4]),
+      .mp_req_o(mp_req_o[4]),
+      .mp_rsp_valid_i(mp_rsp_valid_i[4]),
+      .mp_rsp_i(mp_rsp_i[4]));
+
     // ---- objpay -------------------------------------------------------------------
     // §7b/5a-ii: two requesters — vnfront (inside the pump) has
     // priority over cmdexec's dispatch-assembly reads; the grant is
     // held until the completion is consumed (same scheme as ObjTab).
-    g6lc_apu_objpay #(.Enable(1'b1), .PayWords(PayWords)) i_pay (
+    g6lc_apu_objpay #(.Enable(1'b1),
+                      .PayMemBytes(PayMemBytes)) i_pay (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .req_valid_i(op_req_valid), .req_ready_o(op_req_ready),
       .req_i(op_req),
       .cpl_valid_o(op_cpl_valid), .cpl_ready_i(op_cpl_ready),
-      .cpl_o(op_cpl));
+      .cpl_o(op_cpl),
+      .omp_req_valid_o(omp_req_v), .omp_req_ready_i(omp_req_rdy),
+      .omp_req_o(omp_req),
+      .omp_rsp_valid_i(omp_rsp_v), .omp_rsp_i(omp_rsp));
 
     // §6c: vgctl's RESET_CTX reap frees join as a third, lowest-priority
     // requester
@@ -694,12 +770,18 @@ module g6lc_apu_vgtop
     assign drain_idle = ex_idle & ~sh_busy & ~xfer_busy_o & ~rs_busy;
 
     // ---- objtab -------------------------------------------------------------------
-    g6lc_apu_objtab #(.Enable(1'b1)) i_tab (
+    g6lc_apu_objtab #(.Enable(1'b1), .ObjEntries(ObjEntries),
+                      .MaxCtx(ObjMaxCtx),
+                      .KindListKind(APU_VN_KIND_VK_DEVICE_MEMORY))
+        i_tab (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .req_valid_i(ot_req_valid), .req_ready_o(ot_req_ready),
       .req_i(ot_req),
       .cpl_valid_o(ot_cpl_valid), .cpl_ready_i(ot_cpl_ready),
-      .cpl_o(ot_cpl), .live_o(objtab_live_o));
+      .cpl_o(ot_cpl), .live_o(objtab_live_o),
+      .omt_req_valid_o(omt_req_v), .omt_req_ready_i(omt_req_rdy),
+      .omt_req_o(omt_req),
+      .omt_rsp_valid_i(omt_rsp_v), .omt_rsp_i(omt_rsp));
 
     // ---- ObjTab arbitration: pump > cmdexec > vgctl > debug > shwave --------
     // §12.3 3d-d: shwave's record-handle READSLOTs are the lowest-
@@ -764,8 +846,9 @@ module g6lc_apu_vgtop
     // [2] SH: shader LSU, aperture-relative (dom=1)
     // [3] RAST: raster engine, aperture-relative (dom=1), the engine
     //     already drives a full apu_mp_req_t
-    assign mp_req_valid_o = {rs_mp_v, sh_mem_req | sh_mem_we, vp_mp_req,
-                             vc_mem_req};
+    // [4] OBJ is driven by i_objmem above
+    assign mp_req_valid_o[3:0] = {rs_mp_v, sh_mem_req | sh_mem_we,
+                                  vp_mp_req, vc_mem_req};
     assign mp_req_o[0] = '{dom: vc_mem_dom, we: vc_mem_we,
                           addr: vc_mem_addr, wdata: vc_mem_wdata,
                           wstrb: vc_mem_wstrb};
@@ -854,9 +937,17 @@ module g6lc_apu_vgtop_fixture
   import g6lc_apu_vgpages_pkg::*;
 #(
   parameter bit          Enable = 1'b0,
-  parameter int unsigned Rings  = 4,
+  parameter int unsigned Rings  = 64,
   parameter int unsigned Fences = 16,
-  parameter int unsigned PayWords = 16384,
+  // ring ALIVE watchdog refresh period: 2**AliveTickLog2 cycles
+  parameter int unsigned AliveTickLog2 = 20,
+  parameter int unsigned CrPayWords = 1024,
+  parameter int unsigned ObjEntries    = 65536,
+  parameter int unsigned ObjMaxCtx     = 32,
+  parameter int unsigned PayMemBytes   = 16 * 1024 * 1024,
+  parameter int unsigned DirCacheSets  = 256,
+  parameter int unsigned EntCacheLines = 64,
+  parameter int unsigned PayCacheLines = 32,
   parameter int unsigned VgPages      = APU_VG_PAGES,
   parameter int unsigned VgPageBytes  = APU_VG_PAGE_BYTES,
   parameter int unsigned VgGuestPages = APU_VG_GUEST_PAGES,
@@ -884,11 +975,11 @@ module g6lc_apu_vgtop_fixture
   input  logic            cpl_ready_i,
   output logic [31:0]     cpl_len_o,
   output logic            mem_fault_o,
-  output logic [3:0]         mp_req_valid_o,
-  input  logic [3:0]         mp_req_ready_i,
-  output apu_mp_req_t [3:0]  mp_req_o,
-  input  logic [3:0]         mp_rsp_valid_i,
-  input  apu_mp_rsp_t [3:0]  mp_rsp_i,
+  output logic [4:0]         mp_req_valid_o,
+  input  logic [4:0]         mp_req_ready_i,
+  output apu_mp_req_t [4:0]  mp_req_o,
+  input  logic [4:0]         mp_rsp_valid_i,
+  input  apu_mp_rsp_t [4:0]  mp_rsp_i,
   output logic               work_valid_o,
   input  logic               work_ready_i,
   output apu_cmdexec_work_t  work_o,
@@ -918,7 +1009,11 @@ module g6lc_apu_vgtop_fixture
 );
   g6lc_apu_vgtop #(
     .Enable(Enable), .Rings(Rings), .Fences(Fences),
-    .PayWords(PayWords), .VgPages(VgPages), .VgPageBytes(VgPageBytes),
+    .AliveTickLog2(AliveTickLog2), .CrPayWords(CrPayWords),
+    .ObjEntries(ObjEntries), .ObjMaxCtx(ObjMaxCtx),
+    .PayMemBytes(PayMemBytes), .DirCacheSets(DirCacheSets),
+    .EntCacheLines(EntCacheLines), .PayCacheLines(PayCacheLines),
+    .VgPages(VgPages), .VgPageBytes(VgPageBytes),
     .VgGuestPages(VgGuestPages),
     .ShaderRegs(ShaderRegs), .MaxWaves(MaxWaves),
     .ShaderIds(ShaderIds), .ShaderSlots(ShaderSlots),

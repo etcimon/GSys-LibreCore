@@ -11,13 +11,13 @@ differ because the release profile must meet them.
 
 | limit | actual | min (1.0/1.1) | 1.4 min | mechanism / owner | class |
 |---|---:|---:|---:|---|---|
-| `maxImageDimension1D` | 0 | 4096 | 4096 | 1D views (G3d, TEX-L1/IMG-L1) | mechanism |
-| `maxImageDimension3D` | 0 | 256 | 256 | 3D layouts + sampling (G3d) | mechanism |
+| `maxImageDimension1D` | 0 | 4096 | 4096 | 1D views (G3d, TEX-L1/IMG-L1) — CTS-1 `object_management.*.{image_1d, image_view_1d, image_view_1d_arr}` **Fail** (`vkCreateImage → FEATURE_NOT_PRESENT`, 12 cases in `out-g3bi-cts1-r4`): 1D images are core 1.0, the refusal is a conformance defect, not an honest NotSupported | mechanism |
+| `maxImageDimension3D` | 0 | 256 | 256 | 3D layouts + sampling (G3d) — CTS-1 `*.{image_3d, image_view_3d}` **Fail** (8 cases, same class) | mechanism |
 | `maxImageDimensionCube` | 0 | 4096 | 4096 | cube layouts + seamless sampling (G3d) | mechanism |
 | `maxTexelBufferElements` | 0 | 65536 | 65536 | texel buffers (API-L3 / TEXELBUF) | mechanism |
 | `maxStorageBufferRange` | 16 MiB | 128 MiB | 128 MiB | LSU record size/address width (W3) — likely profile-only once the record `size` field width is confirmed ≥ 2²⁷ | verify |
-| `maxMemoryAllocationCount` | 64 | 4096 | 4096 | ObjTab-V (§5a, G3b) | mechanism |
-| `maxSamplerAllocationCount` | 64 | 4000 | 4000 | ObjTab-V (G3b) | mechanism |
+| `maxMemoryAllocationCount` | 64 → **4096** (G3b-i, 2026-10-16) | 4096 | 4096 | ObjTab-V (§5a, G3b-i): aperture-backed `ObjEntries` = 2¹⁶; check = `api.object_management.max_concurrent.device_memory_*` Pass in `out-g3bi-cts1-r4` | done |
+| `maxSamplerAllocationCount` | 64 → **4000** (G3b-i) | 4000 | 4000 | ObjTab-V + ObjPay-V (sampler records in PayMem); check = `max_concurrent.sampler` Pass in `out-g3bi-cts1-r4` | done |
 | `bufferImageGranularity` | 0 | ≥ 1 (power of two, ≤ 131072) | same | profile-only: report the real granularity (page 4096 or 1) | profile-only |
 | `maxPerStageDescriptorInputAttachments` | 0 | 4 | 4 | input attachments (RP-L2) | mechanism |
 | `maxPerStageResources` | 16 | 128 | 128 | binding rows / records (BM-X2, G3b) | mechanism |

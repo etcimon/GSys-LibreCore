@@ -138,6 +138,18 @@ vkGetFenceStatus
 vkWaitForFences
 vkCreateSemaphore
 vkDestroySemaphore
+# 3d-b CTS-1: Mesa vn_CreateEvent/vn_SetEvent/vn_ResetEvent emit async wire
+# records even when the event uses a feedback slot (vn_queue.c), and
+# vn_GetEventStatus falls back to a sync call without one.  An unlisted
+# type id is an UNKNOWN_TYPE decode fault -> ring FATAL, so the event
+# family must at least decode.  Create/Destroy are real ObjTab objects;
+# Get/Set/Reset reply FEATURE_NOT_PRESENT (act UNSUPPORTED) — honest for
+# DEVICE_ONLY-flagged events, never reached on the feedback path.
+vkCreateEvent
+vkDestroyEvent
+vkGetEventStatus
+vkSetEvent
+vkResetEvent
 vkCreateQueryPool
 vkDestroyQueryPool
 vkCmdResetQueryPool

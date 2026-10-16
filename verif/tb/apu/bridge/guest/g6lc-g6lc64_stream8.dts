@@ -1,7 +1,9 @@
 /* SPDX-License-Identifier: MIT
  * g6lc-g6lc64_stream8 device tree with a second RAM bank at 0xa0000000.
  * Decompile of the machine blob (g6lc-g6lc64_stream8-dtb.c) plus the
- * memory@a0000000 node; @DRAM2_SIZE@ is substituted by drive_guest.py
+ * memory@a0000000 node; @DRAM2_SIZE@ is substituted by drive_guest.py.
+ * G3b-i: the aperture grew to 128 MiB, so the post-aperture
+ * node is memory@8a000000 and usable low RAM is 128 MiB.
  * with (G6LC_GUEST_MEM - 224) MiB when -m exceeds the low bank, then
  * compiled here with dtc and passed via -dtb.
  */
@@ -95,9 +97,9 @@
 		reg = <0x00 0x80000000 0x00 0x2000000>;
 	};
 
-	memory@84000000 {
+	memory@8a000000 {
 		device_type = "memory";
-		reg = <0x00 0x84000000 0x00 0xc000000>;
+		reg = <0x00 0x8a000000 0x00 0x6000000>;
 	};
 
 	memory@a0000000 {

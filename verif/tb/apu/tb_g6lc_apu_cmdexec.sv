@@ -17,9 +17,11 @@ module tb_g6lc_apu_cmdexec;
   import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_sh_pkg::*;
+  import g6lc_apu_mp_pkg::*;
 
   localparam int Fences = 16;
-  localparam int Slots  = 64;
+  localparam int unsigned ObjEntries = 256;
+  localparam int unsigned PayMemB    = 64 * 1024;
 
   logic clk = 0, rst_ni = 0;
   int errors = 0, checks = 0, cycles = 0, cases = 0;
@@ -39,7 +41,7 @@ module tb_g6lc_apu_cmdexec;
   apu_cmdexec_work_t  w_o;
   logic               w_done = 0;
   logic [15:0]        done_seq;
-  logic [Fences-1:0]  fsig, flost, fclr = '0;
+  logic [Fences-1:0]  fsig, flost, fclr = '0, ffail = '0;
   logic               osub_r, ow_v, oxcr_v, oxcr_cr, oxot_v, oxot_cr;
   logic [15:0]        odone;
   logic [Fences-1:0]  ofsig, oflost;
@@ -77,7 +79,7 @@ module tb_g6lc_apu_cmdexec;
     .push_n_o(dpushn), .push_o(dpush),
     .done_seq_o(done_seq),
     .fence_signaled_o(fsig), .fence_lost_o(flost),
-    .fence_clr_i(fclr), .xf_o(), .rd_o(),
+    .fence_clr_i(fclr), .fence_fail_i(ffail), .xf_o(), .rd_o(),
     .hold_i(hold), .idle_o(ce_idle), .busy_o());
   g6lc_apu_cmdexec_fixture #(.Enable(1'b0), .Fences(Fences)) i_off (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
@@ -94,7 +96,7 @@ module tb_g6lc_apu_cmdexec;
     .push_n_o(odpushn), .push_o(odpush),
     .done_seq_o(odone),
     .fence_signaled_o(ofsig), .fence_lost_o(oflost),
-    .fence_clr_i(fclr), .xf_o(), .rd_o(),
+    .fence_clr_i(fclr), .fence_fail_i(ffail), .xf_o(), .rd_o(),
     .hold_i(hold), .idle_o(), .busy_o());
 
   // ---- backend mux: TB setup vs executor ------------------------------
@@ -133,11 +135,50 @@ module tb_g6lc_apu_cmdexec;
     .cpl_valid_o(cr_cvld), .cpl_ready_i(cr_crdy), .cpl_o(cr_cpl),
     .pay_valid_i(tpay_v), .pay_data_i(tpay_d),
     .pay_ready_o(tpay_r));
-  g6lc_apu_objtab #(.Enable(1'b1), .Slots(Slots)) i_obj (
+  // ---- objmem plumbing (ObjTab-V DRAM backing) --------------------
+  logic         omt_v, omt_r, omt_rv;
+  apu_omt_req_t omt_req;
+  apu_omt_rsp_t omt_rsp;
+  logic         ompr_r, ompr_rv;
+  apu_omp_rsp_t ompr_rsp;
+  logic         mp_v, mp_r, mp_rv;
+  apu_mp_req_t  mp_req;
+  apu_mp_rsp_t  mp_rsp;
+
+  g6lc_apu_objtab #(.Enable(1'b1), .ObjEntries(ObjEntries)) i_obj (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(ot_vld), .req_ready_o(ot_rdy), .req_i(ot_req),
     .cpl_valid_o(ot_cvld), .cpl_ready_i(ot_crdy), .cpl_o(ot_cpl),
-    .live_o());
+    .live_o(),
+    .omt_req_valid_o(omt_v), .omt_req_ready_i(omt_r),
+    .omt_req_o(omt_req),
+    .omt_rsp_valid_i(omt_rv), .omt_rsp_i(omt_rsp));
+
+  g6lc_apu_objmem #(.Enable(1'b1), .ObjEntries(ObjEntries),
+                    .PayMemBytes(PayMemB),
+                    .DirCacheSets(16), .EntCacheLines(8),
+                    .PayCacheLines(4)) i_omm (
+    .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
+    .omt_req_valid_i(omt_v), .omt_req_ready_o(omt_r),
+    .omt_req_i(omt_req),
+    .omt_rsp_valid_o(omt_rv), .omt_rsp_o(omt_rsp),
+    .omp_req_valid_i(1'b0), .omp_req_ready_o(ompr_r),
+    .omp_req_i(apu_omp_req_t'(0)),
+    .omp_rsp_valid_o(ompr_rv), .omp_rsp_o(ompr_rsp),
+    .mp_req_valid_o(mp_v), .mp_req_ready_i(mp_r),
+    .mp_req_o(mp_req),
+    .mp_rsp_valid_i(mp_rv), .mp_rsp_i(mp_rsp));
+
+  // aperture responder over the static carve window only
+  tb_apu_mp_mem #(.N(1), .GMW(1), .APW(0),
+                  .PWB(32'(APU_OBJMEM_OFF >> 2)),
+                  .PPW(32'((apu_objmem_pay_off(ObjEntries) +
+                            64'(PayMemB) - APU_OBJMEM_OFF) >> 2) +
+                        64))
+      i_mem (
+    .clk_i(clk), .rst_ni(rst_ni),
+    .req_valid_i(mp_v), .req_ready_o(mp_r), .req_i('{mp_req}),
+    .rsp_valid_o(mp_rv), .rsp_o('{mp_rsp}));
 
   always #5 clk = ~clk;
   always @(posedge clk) cycles++;
@@ -465,6 +506,21 @@ module tb_g6lc_apu_cmdexec;
       check("bindds no lost", flost[4] === 1'b0);
       cases++;
     end
+
+    // ---- case 8: vnfront failed-submit fence pulse -----------------------
+    // §7b exception contract: when vnfront rejects a submit that
+    // carried a fence it pulses fence_fail_i; the slot goes
+    // signaled+lost immediately so the guest's fence wait returns
+    // DEVICE_LOST instead of hanging on an unarmed fence
+    ffail[5] = 1'b1;
+    @(negedge clk); ffail[5] = 1'b0;
+    @(negedge clk);
+    check("fail signaled", fsig[5] === 1'b1 && flost[5] === 1'b1);
+    fclr[5] = 1'b1;
+    @(negedge clk); fclr[5] = 1'b0;
+    @(negedge clk);
+    check("fail cleared", fsig[5] === 1'b0 && flost[5] === 1'b0);
+    cases++;
 
     $display("PASS tb_g6lc_apu_cmdexec cases=%0d checks=%0d cycles=%0d",
              cases, checks, cycles);

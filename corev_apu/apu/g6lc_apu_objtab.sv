@@ -1,52 +1,68 @@
 // Copyright 2026 Etienne Cimon
 // SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
-// Generational object table: driver 64-bit object ids -> generational
-// handles {gen[15:0], slot[15:0]}.
+// Generational object table (§5a G3b-i "ObjTab-V"): driver 64-bit
+// object ids -> generational handles {gen[15:0], entry[15:0]}.
 //
-// Storage (both tc_sram, retained for synthesis):
-//   - entry RAM  : Slots x apu_objtab_entry_t (one port)
-//   - directory  : 2*Slots buckets of {valid, tomb, id[63:0], slot[15:0]},
-//                  XOR-fold hash, linear probing capped at 8.
+// Storage moved out of the on-chip SRAMs of the original ObjTab and
+// into device-private DRAM ("objmem") behind g6lc_apu_objmem:
+//   - entries:    64-B records in objmem (entry cache in objmem)
+//   - directory:  8-B open-addressed buckets in objmem, Fibonacci
+//                 hash, linear probe capped at 32 (dir cache there)
+//   - free slots: global free stack in objmem + bump allocator
+//   - ctx list:   per-context doubly-linked live list through the
+//                 entry records; heads in flops: MaxCtx heads plus
+//                 one shared overflow head for ctx >= MaxCtx (a
+//                 RESET_CTX on an overflow ctx walks the shared list
+//                 and only kills its own ctx's entries)
+//   - kind list:  one global doubly-linked list for the payload-
+//                 carrying DEVICE_MEMORY kind (SCAN_OVL walks it)
 //
-// Semantics:
-//   - ALLOC probes the directory for a live bucket with the same id (DUP),
-//     else claims the first tombstone/never-used/dead-entry bucket found
-//     within 8 probes (FULL if none, even with free slots - by design)
-//     and the first dead slot (FULL if none).  The slot's stored gen is
-//     incremented, skipping 0 on wrap (first handle is gen 1).  A non-zero
-//     parent_id must resolve live (PARENT_MISS); its refcnt++ commits
-//     after the child entry.
-//   - LOOKUP/PIN/UNPIN/RETIRE/SETSTATE/SETBIND resolve `id`: high word
-//     non-zero -> directory id (MISS/KIND); high word zero -> {gen,slot}
-//     handle (stale gen or dead slot -> GEN, then KIND).  SETBIND's
-//     mem_id and ALLOC's parent_id resolve the same way; 0 = unbind/none.
-//   - RETIRE refuses while pins!=0 (PINNED) or refcnt!=0 (BUSY_CHILDREN),
-//     else clears live (gen persists), tombstones the directory bucket for
-//     id-addressed retires and decrements a live parent's refcnt.
-//   - RESET_CTX sweeps the entry RAM: unpinned slots of the context are
-//     retired (a live parent's refcnt is decremented), pinned ones
-//     counted; the count returns in cpl.handle[15:0].
-//   - Lazy tombstoning: a directory bucket left pointing at a dead slot
-//     (handle-addressed retire, RESET_CTX) is rewritten as a tombstone
-//     the next time a probe matches its tag, so retired ids never alias.
-//   - Driver ids are expected to have id[63:32] != 0 (opaque Venus ids);
-//     ids in handle form alias with handle addressing.
+// Semantics are IDENTICAL to the SRAM ObjTab on the ot_* port:
+//   - ALLOC probes the directory for a live entry with the same id
+//     (DUP), else claims the first tombstone/empty bucket found
+//     within 32 probes (FULL if none) and pops a free entry (FULL if
+//     none).  The entry's stored gen is incremented, skipping 0.
+//     A non-zero parent_id must resolve live (PARENT_MISS); its
+//     refcnt++ commits after the child entry.
+//   - LOOKUP/PIN/UNPIN/RETIRE/SETSTATE/SETBIND resolve `id`: high
+//     word non-zero -> directory id (MISS/KIND); high word zero ->
+//     {gen,slot} handle (stale gen or dead entry -> GEN, then KIND).
+//   - RETIRE refuses while pins!=0 (PINNED) or refcnt!=0
+//     (BUSY_CHILDREN), else clears live (gen persists), unlinks both
+//     lists, tombstones the directory row for id-addressed retires,
+//     pushes the entry to the free stack, writes the entry line
+//     back (OMT_EWB — the §5a write-back point) and decrements a
+//     live parent's refcnt.
+//   - RESET_CTX writes back all dirty entry lines (OMT_FLUSH — the
+//     §5a point) then walks the context's ctx_next list: unpinned
+//     entries of that ctx are retired (live parent's refcnt
+//     decremented, SWEEP stream emitted per entry), everything else
+//     stays linked; the pinned count returns in cpl.handle[15:0].
+//     The walk is interruptible per entry — it only advances
+//     between objmem round-trips and stalls on cpl_ready_i during
+//     SWEEP emits.
+//   - Lazy tombstoning lives in objmem's probe: rows whose entry is
+//     dead, re-idd or epoch-stale are rewritten as tombstones.
 //
-// Timing impact: resolution is serialized (one directory read per cycle,
-// <=8 probes, plus one entry read); every SRAM update is its own cycle on
-// the single ports.  Widest combinational cones: the first-dead-slot OR
-// tree over the live bitmap (Slots wide) and the 64-bit directory tag
-// compare.  RESET_CTX worst case ~4*Slots cycles.
+// Timing impact: every op is serialized across objmem round-trips
+// (DRAM latency); latency dominates throughput by design for the
+// vnfront/cmdexec clients.  Widest cones: the link-patch field
+// muxes and the SCAN_OVL overlap comparator.
 //
-// Review checklist: async active-low reset; no latches; single always_ff;
-// SRAMs behind tc_sram; Enable=0 elaborates no datapath; multi-cycle ops
-// behind ready/valid with one completion each.
+// Review checklist: async active-low reset; no latches; single
+// always_ff; no SRAMs here (objmem owns them); Enable=0 elaborates
+// no datapath; one completion per request.
 
 module g6lc_apu_objtab
   import g6lc_apu_objtab_pkg::*;
 #(
-  parameter bit          Enable = 1'b0,
-  parameter int unsigned Slots  = 256
+  parameter bit          Enable      = 1'b0,
+  parameter int unsigned ObjEntries  = 65536,
+  parameter int unsigned MaxCtx      = 32,
+  // kind linked into the global SCAN_OVL list — must equal
+  // g6lc_apu_vn_pkg::APU_VN_KIND_VK_DEVICE_MEMORY (kept a parameter
+  // so this module needs no vn_pkg dependency)
+  parameter int unsigned KindListKind = 8
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -57,234 +73,157 @@ module g6lc_apu_objtab
   output logic            cpl_valid_o,
   input  logic            cpl_ready_i,
   output apu_objtab_cpl_t cpl_o,
-  output logic [15:0]     live_o   // popcount of the live bitmap (§6b CK_LIVE)
+  output logic [15:0]     live_o,
+  // objmem service port
+  output logic            omt_req_valid_o,
+  input  logic            omt_req_ready_i,
+  output apu_omt_req_t    omt_req_o,
+  input  logic            omt_rsp_valid_i,
+  input  apu_omt_rsp_t    omt_rsp_i
 );
   if (!Enable) begin : gen_off
-    assign req_ready_o = 1'b0;
-    assign cpl_valid_o = 1'b0;
-    assign cpl_o       = '0;
-    assign live_o      = '0;
+    assign req_ready_o     = 1'b0;
+    assign cpl_valid_o     = 1'b0;
+    assign cpl_o           = '0;
+    assign live_o          = '0;
+    assign omt_req_valid_o = 1'b0;
+    assign omt_req_o       = '0;
     logic unused;
-    assign unused = clk_i | rst_ni | testmode_i | req_valid_i | cpl_ready_i |
-                    (|req_i);
+    assign unused = clk_i | rst_ni | testmode_i | req_valid_i |
+                    cpl_ready_i | omt_req_ready_i |
+                    omt_rsp_valid_i | (|req_i) | (|omt_rsp_i);
   end else begin : gen_on
-    localparam int unsigned SlotBits = $clog2(Slots);
-    localparam int unsigned DirWords = 2 * Slots;
-    localparam int unsigned DirBits  = $clog2(DirWords);
-    localparam int unsigned EntWidth = $bits(apu_objtab_entry_t);
-    // row = {valid, tomb, id[63:0], slot[15:0], gen[15:0]}: the row records
-    // the generation its slot carried at insert time.  RESET_CTX and
-    // handle-addressed RETIRE kill the entry but leave the row for lazy
-    // tombstoning; when the slot is recycled under a different id the
-    // entry's newer gen marks the row stale, so a probe for the old id
-    // tombstones it and keeps probing instead of resolving to a foreign
-    // live entry (DUP/KIND/wrong-object aliases).
-    localparam int unsigned DirWidth = 1 + 1 + 64 + 16 + 16;
+    localparam logic [15:0] LINK_NONE = 16'hFFFF;
+    // ctx_head has MaxCtx direct heads plus one overflow head at
+    // index MaxCtx shared by every ctx >= MaxCtx
+    localparam int unsigned NHEAD = MaxCtx + 1;
 
     typedef enum logic [1:0] { ResOk, ResMiss, ResGen, ResKind } res_e;
 
-    typedef enum logic [4:0] {
-      StInit, StIdle,
-      StResProbe, StResCmp, StResEntRd, StResEntCmp, StResTomb,
-      StAfter,
-      StRetEntWr, StRetTomb, StRetParRd, StRetParCap, StRetParWr,
-      StRetDone,
-      StBindMemRes,
-      StMutWr,
-      StAllocPar, StAllocSlot, StAllocGen, StAllocWrE, StAllocWrD,
-      StAllocParW,
-      StScanRd, StScanCmp, StScanWr, StScanParRd, StScanParCap,
-      StScanParWr, StScanEmit, StScanDone,
+    typedef enum logic [5:0] {
+      StIdle,
+      StOmReq, StOmWait,
+      StResHEnt, StResFEnt,
+      StAfter, StBindMemRes,
+      // ALLOC
+      StClmGot, StAllocPopPar, StAllocGen, StAllocGenRd,
+      StAllocWrE, StAllocCtxDo, StAllocCtxRd, StAllocCtxWr,
+      StAllocCtxHd, StAllocKindChk, StAllocKindRd, StAllocKindWr,
+      StAllocKindHd, StAllocDWr, StAllocParChk, StAllocParW,
+      // RETIRE
+      StRetKindChk, StRetKill, StRetPush, StRetWb,
+      StRetTomb, StRetParChk, StRetDone,
+      // unlink subroutine (prev/next of a dying entry, one list)
+      StUnlPr, StUnlPrW, StUnlNChk, StUnlNr, StUnlNrW,
+      // parent refcnt update subroutine
+      StParRd, StParWr,
+      // list walk (RESET_CTX / RETIRE_KIDS / SCAN_OVL)
+      StScanRdInit, StScanParInit,
+      StScanRd, StScanCmp,
+      StScanKeep, StScanKeepP, StScanKeepN,
+      StScanKill, StScanPush, StScanKind, StScanPar,
+      StScanEmitS, StScanEmit,
+      StScanDone, StScanTail, StScanFin,
       StCpl
     } state_e;
 
-    state_e state_q, res_ret_q;
-    apu_objtab_req_t req_q;
-    apu_objtab_cpl_t cpl_q;
-    logic [DirBits:0]   init_q;
+    state_e state_q, res_ret_q, om_ret_q, unl_ret_q, par_ret_q;
+    apu_objtab_req_t  req_q;
+    apu_objtab_cpl_t  cpl_q;
+    apu_omt_req_t     om_req_q;
+    apu_omt_rsp_t     om_rsp_q;
+
     // resolve subroutine registers
     logic [63:0]        res_id_q;
-    logic               res_hnd_q;    // handle-mode id allowed
-    logic               res_knd_q;    // enforce kind == req_q.kind
-    logic               res_alloc_q;  // ALLOC dup/reclaim mode
-    logic [3:0]         probe_q;
-    logic [DirBits-1:0] probe_base_q;
-    logic [DirBits-1:0] tomb_first_q;
-    logic               tomb_v_q;
+    logic               res_knd_q;
+    logic               res_nogen_q;
     res_e               res_st_q;
-    logic [DirBits-1:0] res_bucket_q;
-    logic               res_bkv_q;
-    logic [15:0]        res_rowgen_q; // gen recorded in the hit dir row
-    logic [DirBits-1:0] alloc_bucket_q; // claimed dir bucket, held across
-                                        // the parent resolve
     logic [15:0]        res_slot_q;
-    apu_objtab_entry_t  res_ent_q;
-    logic               res_hdl_q;    // resolution came via handle
-    logic               res_nogen_q;  // skip the generation check
-                                      // (READSLOT)
-    // operation working registers
+    apu_objent_mem_t    res_rec_q;
+    logic               res_hdl_q;
+
+    // op working registers
     logic [15:0]        hit_slot_q;
-    apu_objtab_entry_t  wr_ent_q;
+    apu_objent_mem_t    wr_rec_q;
     logic [15:0]        wr_slot_q;
-    apu_objtab_entry_t  par_ent_q;
+    apu_objent_mem_t    par_rec_q;
     logic [15:0]        par_slot_q;
-    logic [SlotBits:0]  scan_q;
-    // §12.3 F5-d: scan mode — 0 = RESET_CTX ctx sweep, 1 =
-    // RETIRE_KIDS parent sweep (id[15:0] = parent slot in rtk_slot_q;
-    // kills count into pinned_q, no SWEEP stream)
-    logic               scan_kids_q;
-    // §12.3 3d-d: SCAN_OVL mode — read-only overlap probe; first
-    // matching entry completes OK, no tombstones, no SWEEP stream
-    logic               scan_ovl_q;
+    logic [31:0]        alloc_bucket_q;
+    logic [15:0]        alloc_gen_q;
+    // unlink subroutine
+    apu_objent_mem_t    unl_rec_q;   // the dying entry's record
+    logic               unl_kind_q;  // 0 = ctx list, 1 = kind list
+    // list heads (MaxCtx direct + one overflow)
+    logic [15:0]        ctx_head_q [NHEAD];
+    logic [15:0]        mem_head_q;
+    // ctx walk
+    logic [15:0]        walk_q, walk_nxt_q;
+    apu_objent_mem_t    walk_rec_q;
+    logic [15:0]        keep_q;
+    apu_objent_mem_t    keep_rec_q;
+    logic               keep_v_q, head_set_q;
+    logic               scan_kids_q;   // RETIRE_KIDS filter mode
+    logic               scan_ovl_q;    // SCAN_OVL read-only mode
     logic [15:0]        rtk_slot_q;
-    logic               rtk_par_q;   // parent refcnt already zeroed
-    // RESET_CTX sweep: tombstoned entry + slot staged for the interim
-    // SWEEP completion so the caller can reclaim owned resources
-    apu_objtab_entry_t  swe_ent_q;
+    logic               rtk_par_q;
+    apu_objent_mem_t    swe_rec_q;
     logic [15:0]        swe_slot_q;
     logic [15:0]        pinned_q;
-    logic [Slots-1:0]   live_q;
-    assign live_o = 16'($countones(live_q));
+    logic [15:0]        live_q;
+    assign live_o = live_q;
 
-    // ---- SRAM ports --------------------------------------------------------
-    logic                  ent_req, ent_we;
-    logic [SlotBits-1:0]   ent_addr;
-    apu_objtab_entry_t     ent_wdata;
-    logic [EntWidth-1:0]   ent_rdata_raw;
-    apu_objtab_entry_t     ent_rdata_t;
-    logic                  dir_req, dir_we;
-    logic [DirBits-1:0]    dir_addr;
-    logic [DirWidth-1:0]   dir_wdata, dir_rdata;
+    // ---- objmem request plumbing -----------------------------------------
+    assign omt_req_valid_o = state_q == StOmReq;
+    assign omt_req_o       = om_req_q;
+    assign req_ready_o     = state_q == StIdle;
+    assign cpl_valid_o     = state_q == StCpl || state_q == StScanEmit;
+    assign cpl_o           = cpl_q;
 
-    tc_sram #(.NumWords(Slots), .DataWidth(EntWidth), .NumPorts(1),
-              .Latency(1), .SimInit("none")) i_entries (
-      .clk_i, .rst_ni, .req_i(ent_req), .we_i(ent_we), .addr_i(ent_addr),
-      .wdata_i(ent_wdata), .be_i('1), .rdata_o(ent_rdata_raw)
-    );
-    assign ent_rdata_t = apu_objtab_entry_t'(ent_rdata_raw);
-    tc_sram #(.NumWords(DirWords), .DataWidth(DirWidth), .NumPorts(1),
-              .Latency(1), .SimInit("none")) i_dir (
-      .clk_i, .rst_ni, .req_i(dir_req), .we_i(dir_we), .addr_i(dir_addr),
-      .wdata_i(dir_wdata), .be_i('1), .rdata_o(dir_rdata)
-    );
-
-    // Multiplicative (Fibonacci) hash of the 64-bit id down to
-    // DirBits.  Driver ids are sequential and structured — Mesa's
-    // dense object counters, the virtio resource ids, and tagged
-    // namespaces — so an XOR-fold lands them in consecutive buckets;
-    // a single run of 8 live buckets trips the probe cap and reports
-    // a spurious FULL.  Knuth's golden-ratio multiplier scatters
-    // sequential ids uniformly, making that unreachable in practice.
-    function automatic logic [DirBits-1:0] dir_hash(logic [63:0] id);
-      return DirBits'((id * 64'h9E37_79B9_7F4A_7C15) >>
-                      (64 - DirBits));
+    // ctx -> head index: ctx < MaxCtx -> ctx, else the shared
+    // overflow head
+    function automatic logic [$clog2(MaxCtx+1)-1:0] cidx(
+        logic [7:0] ctx);
+      return 32'(ctx) >= 32'(MaxCtx)
+             ? $clog2(MaxCtx+1)'(MaxCtx)
+             : $clog2(MaxCtx+1)'(ctx);
     endfunction
 
-    logic        bk_valid, bk_tomb;
-    logic [63:0] bk_id;
-    logic [15:0] bk_slot;
-    logic [15:0] bk_gen;
-    assign {bk_valid, bk_tomb, bk_id, bk_slot, bk_gen} = dir_rdata;
+    task automatic om_call(
+        input apu_omt_op_e op,
+        input logic [63:0]  id,
+        input logic [31:0]  bucket,
+        input logic [15:0]  entry,
+        input apu_objent_mem_t rec,
+        input state_e       ret);
+      om_req_q <= '{op: op, id: id, bucket: bucket, entry: entry,
+                    rec: rec};
+      om_ret_q <= ret;
+      state_q  <= StOmReq;
+    endtask
 
-    // first dead slot - wide OR tree (see header note)
-    logic [15:0] free_slot;
-    logic        free_v;
-    always_comb begin
-      free_v    = 1'b0;
-      free_slot = '0;
-      for (int i = Slots - 1; i >= 0; i--)
-        if (!live_q[i]) begin
-          free_v    = 1'b1;
-          free_slot = 16'(i);
+    task automatic res_start(
+        input logic [63:0] id,
+        input logic        hnd_en,
+        input logic        knd_en,
+        input logic        nogen,
+        input state_e      ret);
+      res_id_q    <= id;
+      res_knd_q   <= knd_en;
+      res_nogen_q <= nogen;
+      res_ret_q   <= ret;
+      res_hdl_q   <= hnd_en && id[63:32] == 32'h0 &&
+                     id[31:16] != 16'h0;
+      if (hnd_en && id[63:32] == 32'h0 && id[31:16] != 16'h0) begin
+        if (32'(id[15:0]) >= 32'(ObjEntries)) begin
+          res_st_q <= ResGen;
+          state_q  <= ret;
+        end else begin
+          om_call(APU_OMT_ERD, '0, '0, id[15:0], '0, StResHEnt);
         end
-    end
-
-    logic res_is_hnd;
-    assign res_is_hnd = res_hnd_q && (res_id_q[63:32] == 32'h0);
-
-    // ---- SRAM request steering ----------------------------------------------
-    always_comb begin
-      ent_req   = 1'b0; ent_we = 1'b0; ent_addr = '0; ent_wdata = '0;
-      dir_req   = 1'b0; dir_we = 1'b0; dir_addr = '0; dir_wdata = '0;
-      unique case (state_q)
-        StInit: begin
-          dir_req   = 1'b1;
-          dir_we    = 1'b1;
-          dir_addr  = init_q[DirBits-1:0];
-          dir_wdata = '0;
-          if (init_q < Slots) begin
-            ent_req   = 1'b1;
-            ent_we    = 1'b1;
-            ent_addr  = init_q[SlotBits-1:0];
-            ent_wdata = '0;
-          end
-        end
-        StResProbe: begin
-          dir_req  = 1'b1;
-          dir_addr = probe_base_q + DirBits'(probe_q);
-        end
-        StResEntRd: begin
-          ent_req  = 1'b1;
-          ent_addr = res_slot_q[SlotBits-1:0];
-        end
-        StResTomb, StRetTomb: begin
-          dir_req   = 1'b1;
-          dir_we    = 1'b1;
-          dir_addr  = res_bucket_q;
-          dir_wdata = {1'b0, 1'b1, res_id_q, 16'h0, 16'h0};
-        end
-        StRetEntWr, StMutWr: begin
-          ent_req   = 1'b1;
-          ent_we    = 1'b1;
-          ent_addr  = wr_slot_q[SlotBits-1:0];
-          ent_wdata = wr_ent_q;
-        end
-        StRetParRd, StScanParRd: begin
-          ent_req  = 1'b1;
-          ent_addr = par_slot_q[SlotBits-1:0];
-        end
-        // StRetParCap / StScanParCap: entry rdata settles here.
-        StRetParWr, StScanParWr, StAllocParW: begin
-          ent_req   = 1'b1;
-          ent_we    = 1'b1;
-          ent_addr  = par_slot_q[SlotBits-1:0];
-          ent_wdata = par_ent_q;
-        end
-        StAllocSlot: begin
-          ent_req  = 1'b1;
-          ent_addr = free_slot[SlotBits-1:0];
-        end
-        StAllocWrE: begin
-          ent_req   = 1'b1;
-          ent_we    = 1'b1;
-          ent_addr  = hit_slot_q[SlotBits-1:0];
-          ent_wdata = wr_ent_q;
-        end
-        StAllocWrD: begin
-          dir_req   = 1'b1;
-          dir_we    = 1'b1;
-          dir_addr  = alloc_bucket_q;
-          dir_wdata = {1'b1, 1'b0, req_q.id, hit_slot_q, wr_ent_q.gen};
-        end
-        StScanRd: begin
-          ent_req  = 1'b1;
-          ent_addr = scan_q[SlotBits-1:0];
-        end
-        StScanWr: begin
-          ent_req   = 1'b1;
-          ent_we    = 1'b1;
-          ent_addr  = scan_q[SlotBits-1:0];
-          ent_wdata = wr_ent_q;
-        end
-        default: ;
-      endcase
-    end
-
-    assign req_ready_o = state_q == StIdle;
-    // RESET_CTX streams one SWEEP completion per tombstoned entry
-    // (caller-side resource reclaim) before the final OK completion
-    assign cpl_valid_o = state_q == StCpl || state_q == StScanEmit;
-    assign cpl_o       = cpl_q;
+      end else begin
+        om_call(APU_OMT_FIND, id, '0, '0, '0, StResFEnt);
+      end
+    endtask
 
     function automatic logic [15:0] gen_next(logic [15:0] g);
       return g == 16'hFFFF ? 16'd1 : g + 16'd1;
@@ -299,202 +238,172 @@ module g6lc_apu_objtab
       endcase
     endfunction
 
-    // enter the resolve subroutine for `id` (dir probe unless handle form)
-    // - replicated at each call site: sets res_* registers and the state.
-    task automatic res_start(
-        input logic [63:0] id,
-        input logic        hnd_en,
-        input logic        knd_en,
-        input logic        alloc,
-        input state_e      ret);
-      res_id_q     <= id;
-      res_hnd_q    <= hnd_en;
-      res_nogen_q  <= 1'b0;
-      res_knd_q    <= knd_en;
-      res_alloc_q  <= alloc;
-      res_ret_q    <= ret;
-      probe_q      <= '0;
-      probe_base_q <= dir_hash(id);
-      tomb_v_q     <= 1'b0;
-      res_bkv_q    <= 1'b0;
-      // A {gen,slot} handle always has a nonzero gen — gen_next() never
-      // returns 0 — so a 48-bit-or-smaller id with gen==0 is a plain
-      // client id (Mesa numbers objects 1,2,3...), not a handle.
-      if (hnd_en && id[63:32] == 32'h0 && id[31:16] != 16'h0) begin
-        res_hdl_q <= 1'b1;
-        if (id[15:0] >= Slots) begin
-          res_st_q <= ResGen;
-          state_q  <= ret;
-        end else begin
-          res_slot_q <= id[15:0];
-          state_q    <= StResEntRd;
-        end
+    function automatic apu_objtab_entry_t ent_of(apu_objent_mem_t r);
+      return '{live: r.live, kind: r.kind, gen: r.gen,
+               parent_slot: r.parent_slot, refcnt: r.refcnt,
+               pins: r.pins, state: r.state, bind_mem: r.bind_mem,
+               bind_offset: r.bind_offset, size: r.size, aux: r.aux,
+               ctx: r.ctx};
+    endfunction
+
+    // field-patch helpers (avoid blocking writes on flops)
+    function automatic apu_objent_mem_t set_ctxprev(
+        apu_objent_mem_t r, logic [15:0] v);
+      r.ctx_prev = v; return r;
+    endfunction
+    function automatic apu_objent_mem_t set_ctxnext(
+        apu_objent_mem_t r, logic [15:0] v);
+      r.ctx_next = v; return r;
+    endfunction
+    function automatic apu_objent_mem_t set_kindprev(
+        apu_objent_mem_t r, logic [15:0] v);
+      r.kind_prev = v; return r;
+    endfunction
+    function automatic apu_objent_mem_t set_kindnext(
+        apu_objent_mem_t r, logic [15:0] v);
+      r.kind_next = v; return r;
+    endfunction
+    function automatic apu_objent_mem_t set_dead(apu_objent_mem_t r);
+      r.live = 1'b0; return r;
+    endfunction
+    function automatic apu_objent_mem_t set_ref(
+        apu_objent_mem_t r, logic [15:0] v);
+      r.refcnt = v; return r;
+    endfunction
+    function automatic apu_objent_mem_t set_aux(
+        apu_objent_mem_t r, logic [63:0] v);
+      r.aux = v; return r;
+    endfunction
+    function automatic apu_objent_mem_t set_state(
+        apu_objent_mem_t r, logic [31:0] v);
+      r.state = v; return r;
+    endfunction
+    function automatic apu_objent_mem_t set_pins(
+        apu_objent_mem_t r, logic [7:0] v);
+      r.pins = v; return r;
+    endfunction
+    function automatic apu_objent_mem_t set_bind(
+        apu_objent_mem_t r, logic [31:0] bm, logic [63:0] bo,
+        logic [63:0] sz);
+      r.bind_mem = bm; r.bind_offset = bo; r.size = sz; return r;
+    endfunction
+
+    wire logic [15:0] ctx_head_cur = ctx_head_q[cidx(req_q.ctx)];
+
+    // unlink unl_rec_q from list unl_kind_q; returns via unl_ret_q
+    task automatic unl_start(input apu_objent_mem_t rec,
+                             input logic kind_list,
+                             input state_e ret);
+      unl_rec_q  <= rec;
+      unl_kind_q <= kind_list;
+      unl_ret_q  <= ret;
+      if ((kind_list ? rec.kind_prev : rec.ctx_prev) != LINK_NONE) begin
+        state_q <= StUnlPr;
       end else begin
-        res_hdl_q <= 1'b0;
-        state_q   <= StResProbe;
+        if (kind_list) mem_head_q             <= rec.kind_next;
+        else           ctx_head_q[cidx(rec.ctx)] <= rec.ctx_next;
+        if ((kind_list ? rec.kind_next : rec.ctx_next) != LINK_NONE)
+          state_q <= StUnlNr;
+        else
+          state_q <= ret;
       end
     endtask
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
-        state_q <= StInit; res_ret_q <= StIdle;
-        swe_ent_q <= '0; swe_slot_q <= '0;
-        req_q <= '0; cpl_q <= '0; init_q <= '0;
-        res_id_q <= '0; res_hnd_q <= 1'b0; res_knd_q <= 1'b0;
-        res_alloc_q <= 1'b0; probe_q <= '0; probe_base_q <= '0;
-        tomb_first_q <= '0; tomb_v_q <= 1'b0;
-        res_st_q <= ResMiss; res_bucket_q <= '0; res_bkv_q <= 1'b0;
-        res_rowgen_q <= '0;
-        alloc_bucket_q <= '0;
-        res_slot_q <= '0; res_ent_q <= '0; res_hdl_q <= 1'b0;
-        res_nogen_q <= 1'b0;
-        hit_slot_q <= '0; wr_ent_q <= '0; wr_slot_q <= '0;
-        par_ent_q <= '0; par_slot_q <= '0;
-        scan_q <= '0; pinned_q <= '0; live_q <= '0;
-        scan_kids_q <= '0; scan_ovl_q <= '0;
-        rtk_slot_q <= '0; rtk_par_q <= '0;
+        state_q <= StIdle; res_ret_q <= StIdle; om_ret_q <= StIdle;
+        unl_ret_q <= StIdle; par_ret_q <= StIdle;
+        req_q <= '0; cpl_q <= '0; om_req_q <= '0; om_rsp_q <= '0;
+        res_id_q <= '0; res_knd_q <= 1'b0;
+        res_nogen_q <= 1'b0; res_st_q <= ResMiss; res_slot_q <= '0;
+        res_rec_q <= '0; res_hdl_q <= 1'b0;
+        hit_slot_q <= '0; wr_rec_q <= '0; wr_slot_q <= '0;
+        par_rec_q <= '0; par_slot_q <= '0;
+        alloc_bucket_q <= '0; alloc_gen_q <= '0;
+        unl_rec_q <= '0; unl_kind_q <= 1'b0;
+        mem_head_q <= LINK_NONE;
+        walk_q <= '0; walk_nxt_q <= '0; walk_rec_q <= '0;
+        keep_q <= '0; keep_rec_q <= '0; keep_v_q <= 1'b0;
+        head_set_q <= 1'b0;
+        scan_kids_q <= 1'b0; scan_ovl_q <= 1'b0;
+        rtk_slot_q <= '0; rtk_par_q <= 1'b0;
+        swe_rec_q <= '0; swe_slot_q <= '0; pinned_q <= '0;
+        live_q <= '0;
+        for (int c = 0; c < NHEAD; c++) ctx_head_q[c] <= LINK_NONE;
       end else begin
         unique case (state_q)
-        // ---------------- init sweep ----------------
-        StInit: begin
-          init_q <= init_q + 1'b1;
-          if (init_q == DirWords - 1) state_q <= StIdle;
+        // ---------------- objmem round-trip ------------------------------
+        StOmReq:  if (omt_req_ready_i) state_q <= StOmWait;
+        StOmWait: if (omt_rsp_valid_i) begin
+          om_rsp_q <= omt_rsp_i;
+          state_q  <= om_ret_q;
         end
 
-        // ---------------- request accept ----------------
+        // ---------------- request accept ---------------------------------
         StIdle: if (req_valid_i) begin
           req_q <= req_i;
           if (req_i.op == APU_OBJTAB_OP_RESET_CTX) begin
-            scan_q      <= '0;
-            pinned_q    <= '0;
+            // §5a write-back point: flush dirty entry lines before
+            // the ctx-list walk
             scan_kids_q <= 1'b0;
             scan_ovl_q  <= 1'b0;
-            state_q     <= StScanRd;
-          end else if (req_i.op == APU_OBJTAB_OP_SCAN_OVL) begin
-            // §12.3 3d-d: read-only slot sweep for MAP_BLOB eviction;
-            // req.kind filters (DEVICE_MEMORY), req.id[15:0] excludes
-            // the mapping memory itself
-            scan_q      <= '0;
             pinned_q    <= '0;
-            scan_kids_q <= 1'b0;
-            scan_ovl_q  <= 1'b1;
-            state_q     <= StScanRd;
+            om_call(APU_OMT_FLUSH, '0, '0, '0, '0, StScanRdInit);
+          end else if (req_i.op == APU_OBJTAB_OP_SCAN_OVL) begin
+            scan_ovl_q <= 1'b1;
+            walk_q     <= mem_head_q;
+            state_q    <= StScanRd;
           end else if (req_i.op == APU_OBJTAB_OP_RETIRE_KIDS) begin
-            // §12.3 F5-d: parent-slot sweep — kill every live child of
-            // id[15:0], then zero the parent's refcnt.  Children own
-            // nothing reachable by the sweep (descriptor sets live in
-            // their pool's arena), so there is no SWEEP stream.
-            if (req_i.id[15:0] >= 16'(Slots)) begin
+            if (32'(req_i.id[15:0]) >= 32'(ObjEntries)) begin
               cpl_q   <= '{status: APU_OBJTAB_MISS, handle: '0,
                            entry: '0};
               state_q <= StCpl;
             end else begin
-              scan_q      <= '0;
+              rtk_slot_q  <= req_i.id[15:0];
+              rtk_par_q   <= 1'b0;
               pinned_q    <= '0;
               scan_kids_q <= 1'b1;
               scan_ovl_q  <= 1'b0;
-              rtk_slot_q  <= req_i.id[15:0];
-              rtk_par_q   <= 1'b0;
-              state_q     <= StScanRd;
+              // the walk covers the parent's ctx list: read the
+              // parent for its ctx
+              om_call(APU_OMT_ERD, '0, '0, req_i.id[15:0], '0,
+                      StScanParInit);
             end
           end else if (req_i.op == APU_OBJTAB_OP_READSLOT) begin
-            // §7b/5a-ii: direct slot read, no generation check; a dead
-            // slot reports MISS (ResMiss -> APU_OBJTAB_MISS).  The kind
-            // check is enforced when the caller supplies a nonzero kind
-            // (dispatch requires kind == VkDeviceMemory).
             res_id_q    <= req_i.id;
-            res_hnd_q   <= 1'b0;
             res_nogen_q <= 1'b1;
             res_knd_q   <= req_i.kind != 6'h0;
-            res_alloc_q <= 1'b0;
             res_ret_q   <= StAfter;
             res_hdl_q   <= 1'b1;
-            if (req_i.id[15:0] >= 16'(Slots)) begin
+            if (32'(req_i.id[15:0]) >= 32'(ObjEntries)) begin
               res_st_q <= ResMiss;
               state_q  <= StAfter;
             end else begin
-              res_slot_q <= req_i.id[15:0];
-              state_q    <= StResEntRd;
+              om_call(APU_OMT_ERD, '0, '0, req_i.id[15:0], '0,
+                      StResHEnt);
             end
+          end else if (req_i.op == APU_OBJTAB_OP_ALLOC) begin
+            // CLAIM does the dup-probe + bucket claim in objmem
+            om_call(APU_OMT_CLAIM, req_i.id, '0, '0, '0, StClmGot);
           end else begin
-            // kind 0 is a wildcard exactly as for READSLOT: callers
-            // that do not carry the target kind (the pool/fence reset
-            // path SETSTATE) must not be rejected as KIND.
-            res_start(req_i.id,
-                      req_i.op != APU_OBJTAB_OP_ALLOC,
-                      req_i.op != APU_OBJTAB_OP_ALLOC &&
-                        req_i.kind != 6'h0,
-                      req_i.op == APU_OBJTAB_OP_ALLOC,
-                      StAfter);
+            // kind 0 is a wildcard exactly as for READSLOT
+            res_start(req_i.id, 1'b1,
+                      req_i.kind != 6'h0, 1'b0, StAfter);
           end
         end
 
-        // ---------------- resolve subroutine ----------------
-        StResProbe: state_q <= StResCmp;
-        StResCmp: begin
-          if (bk_valid && !bk_tomb && bk_id == res_id_q) begin
-            res_bucket_q <= probe_base_q + DirBits'(probe_q);
-            res_slot_q   <= bk_slot;
-            res_rowgen_q <= bk_gen;
-            state_q      <= StResEntRd;
-          end else if ((!bk_valid && !bk_tomb) || probe_q == 4'd7) begin
-            // absent: never-used bucket or probe cap (8 buckets max)
-            if (res_alloc_q) begin
-              if (tomb_v_q) begin
-                res_bucket_q <= tomb_first_q;
-                res_bkv_q    <= 1'b1;
-              end else if (bk_tomb || (!bk_valid && !bk_tomb)) begin
-                res_bucket_q <= probe_base_q + DirBits'(probe_q);
-                res_bkv_q    <= 1'b1;
-              end else begin
-                res_bkv_q <= 1'b0; // cap reached with no reusable bucket
-              end
-            end
-            res_st_q <= ResMiss;
+        // ---------------- resolve returns --------------------------------
+        StResHEnt: begin
+          // ERD of a handle-addressed slot (or READSLOT)
+          res_rec_q  <= om_rsp_q.rec;
+          res_slot_q <= res_id_q[15:0];
+          if (!om_rsp_q.rec.live ||
+              (!res_nogen_q &&
+               om_rsp_q.rec.gen != res_id_q[31:16])) begin
+            res_st_q <= res_nogen_q ? ResMiss : ResGen;
             state_q  <= res_ret_q;
-          end else begin
-            if (res_alloc_q && !tomb_v_q && bk_tomb) begin
-              tomb_v_q     <= 1'b1;
-              tomb_first_q <= probe_base_q + DirBits'(probe_q);
-            end
-            probe_q <= probe_q + 1'b1;
-            state_q <= StResProbe;
-          end
-        end
-        StResEntRd: state_q <= StResEntCmp;
-        StResEntCmp: begin
-          res_ent_q <= ent_rdata_t;
-          if (res_hdl_q) begin
-            if (!ent_rdata_t.live ||
-                (!res_nogen_q &&
-                 ent_rdata_t.gen != res_id_q[31:16])) begin
-              // READSLOT reports a dead slot as MISS, not GEN
-              res_st_q <= res_nogen_q ? ResMiss : ResGen;
-              state_q  <= res_ret_q;
-            end else if (res_knd_q && ent_rdata_t.kind != req_q.kind) begin
-              res_st_q <= ResKind;
-              state_q  <= res_ret_q;
-            end else begin
-              res_st_q <= ResOk;
-              state_q  <= res_ret_q;
-            end
-          end else if (!ent_rdata_t.live ||
-                       ent_rdata_t.gen != res_rowgen_q) begin
-            // stale row: the slot is dead or was recycled under a
-            // different id while this row stayed valid (RESET_CTX and
-            // handle-addressed RETIRE leave rows for lazy tombstoning).
-            // Tombstone the row and keep probing — a live duplicate may
-            // still sit deeper in the chain, so ALLOC must reach an
-            // empty bucket before it may reuse this one.
-            if (res_alloc_q && !tomb_v_q) begin
-              tomb_v_q     <= 1'b1;
-              tomb_first_q <= res_bucket_q;
-            end
-            state_q <= StResTomb;
-          end else if (res_alloc_q) begin
-            res_st_q <= ResOk;      // live same-id -> DUP for ALLOC
-            state_q  <= res_ret_q;
-          end else if (res_knd_q && ent_rdata_t.kind != req_q.kind) begin
+          end else if (res_knd_q &&
+                       om_rsp_q.rec.kind != req_q.kind) begin
             res_st_q <= ResKind;
             state_q  <= res_ret_q;
           end else begin
@@ -502,46 +411,168 @@ module g6lc_apu_objtab
             state_q  <= res_ret_q;
           end
         end
-        StResTomb: begin
-          // tombstone written this cycle; resume the probe past the
-          // stale row (probe_q still points at the bucket just hit)
-          if (probe_q == 4'd7) begin
-            if (res_alloc_q) begin
-              res_bucket_q <= tomb_first_q; // the stale row, or earlier tomb
-              res_bkv_q    <= 1'b1;
-            end
+        StResFEnt: begin
+          if (om_rsp_q.status != APU_OMT_OK) begin
             res_st_q <= ResMiss;
             state_q  <= res_ret_q;
           end else begin
-            probe_q <= probe_q + 1'b1;
-            state_q <= StResProbe;
+            res_rec_q  <= om_rsp_q.rec;
+            res_slot_q <= om_rsp_q.entry;
+            if (res_knd_q && om_rsp_q.rec.kind != req_q.kind) begin
+              res_st_q <= ResKind;
+              state_q  <= res_ret_q;
+            end else begin
+              res_st_q <= ResOk;
+              state_q  <= res_ret_q;
+            end
           end
         end
 
-        // ---------------- post-resolve dispatch ----------------
-        StAfter: begin
-          unique case (req_q.op)
-            APU_OBJTAB_OP_ALLOC: begin
-              if (res_st_q == ResOk) begin
-                cpl_q   <= '{status: APU_OBJTAB_DUP, handle: '0, entry: '0};
-                state_q <= StCpl;
-              end else if (!res_bkv_q) begin
-                cpl_q   <= '{status: APU_OBJTAB_FULL, handle: '0, entry: '0};
-                state_q <= StCpl;
-              end else if (req_q.parent_id != 64'h0) begin
-                alloc_bucket_q <= res_bucket_q;
-                res_start(req_q.parent_id, 1'b1, 1'b0, 1'b0, StAllocPar);
-              end else begin
-                alloc_bucket_q <= res_bucket_q;
-                par_slot_q     <= APU_OBJTAB_SLOT_NONE;
-                state_q        <= StAllocSlot;
+        // ---------------- ALLOC -------------------------------------------
+        StClmGot: begin
+          unique case (om_rsp_q.status)
+            APU_OMT_DUP: begin
+              cpl_q   <= '{status: APU_OBJTAB_DUP, handle: '0,
+                           entry: '0};
+              state_q <= StCpl;
+            end
+            APU_OMT_FULL: begin
+              cpl_q   <= '{status: APU_OBJTAB_FULL, handle: '0,
+                           entry: '0};
+              state_q <= StCpl;
+            end
+            default: begin
+              alloc_bucket_q <= om_rsp_q.bucket;
+              if (req_q.parent_id != 64'h0)
+                res_start(req_q.parent_id, 1'b1, 1'b0, 1'b0,
+                          StAllocPopPar);
+              else begin
+                par_slot_q <= APU_OBJTAB_SLOT_NONE;
+                om_call(APU_OMT_POP, '0, '0, '0, '0, StAllocGen);
               end
             end
+          endcase
+        end
+        StAllocPopPar: begin
+          if (res_st_q != ResOk) begin
+            cpl_q   <= '{status: APU_OBJTAB_PARENT_MISS, handle: '0,
+                         entry: '0};
+            state_q <= StCpl;
+          end else begin
+            par_slot_q <= res_slot_q;
+            par_rec_q  <= res_rec_q;
+            om_call(APU_OMT_POP, '0, '0, '0, '0, StAllocGen);
+          end
+        end
+        StAllocGen: begin
+          hit_slot_q <= om_rsp_q.entry;
+          if (om_rsp_q.status != APU_OMT_OK) begin
+            cpl_q   <= '{status: APU_OBJTAB_FULL, handle: '0,
+                         entry: '0};
+            state_q <= StCpl;
+          end else if (om_rsp_q.fresh) begin
+            alloc_gen_q <= 16'd1;
+            state_q     <= StAllocWrE;
+          end else begin
+            om_call(APU_OMT_ERD, '0, '0, om_rsp_q.entry, '0,
+                    StAllocGenRd);
+          end
+        end
+        StAllocGenRd: begin
+          alloc_gen_q <= gen_next(om_rsp_q.rec.gen);
+          state_q     <= StAllocWrE;
+        end
+        StAllocWrE: begin
+          wr_rec_q <= '{live: 1'b1, kind: req_q.kind,
+                        gen: alloc_gen_q,
+                        parent_slot: par_slot_q,
+                        refcnt: 16'h0, pins: 8'h0, state: 32'h0,
+                        bind_mem: {16'h0, APU_OBJTAB_SLOT_NONE},
+                        bind_offset: 64'h0, size: req_q.size,
+                        aux: req_q.offset, ctx: req_q.ctx,
+                        ctx_next: ctx_head_cur,
+                        ctx_prev: LINK_NONE,
+                        kind_next: req_q.kind == 6'(KindListKind)
+                                   ? mem_head_q : LINK_NONE,
+                        kind_prev: LINK_NONE,
+                        id: req_q.id, epoch: '0, pad2: '0,
+                        pad7: '0, pad0: '0};
+          state_q  <= StAllocCtxDo;
+        end
+        StAllocCtxDo: begin
+          // commit the new record first so the head patch below
+          // always sees a valid entry
+          om_call(APU_OMT_EWR, '0, '0, hit_slot_q, wr_rec_q,
+                  StAllocCtxRd);
+        end
+        StAllocCtxRd: begin
+          if (ctx_head_cur != LINK_NONE)
+            om_call(APU_OMT_ERD, '0, '0, ctx_head_cur, '0,
+                    StAllocCtxWr);
+          else begin
+            ctx_head_q[cidx(req_q.ctx)] <= hit_slot_q;
+            state_q <= StAllocKindChk;
+          end
+        end
+        StAllocCtxWr: begin
+          om_call(APU_OMT_EWR, '0, '0, ctx_head_cur,
+                  set_ctxprev(om_rsp_q.rec, hit_slot_q),
+                  StAllocCtxHd);
+        end
+        StAllocCtxHd: begin
+          ctx_head_q[cidx(req_q.ctx)] <= hit_slot_q;
+          state_q <= StAllocKindChk;
+        end
+        StAllocKindChk: begin
+          if (req_q.kind == 6'(KindListKind)) begin
+            if (mem_head_q != LINK_NONE)
+              om_call(APU_OMT_ERD, '0, '0, mem_head_q, '0,
+                      StAllocKindWr);
+            else begin
+              mem_head_q <= hit_slot_q;
+              state_q    <= StAllocDWr;
+            end
+          end else begin
+            state_q <= StAllocDWr;
+          end
+        end
+        StAllocKindWr: begin
+          om_call(APU_OMT_EWR, '0, '0, mem_head_q,
+                  set_kindprev(om_rsp_q.rec, hit_slot_q),
+                  StAllocKindHd);
+        end
+        StAllocKindHd: begin
+          mem_head_q <= hit_slot_q;
+          state_q    <= StAllocDWr;
+        end
+        StAllocDWr: begin
+          om_call(APU_OMT_DWR, req_q.id, alloc_bucket_q,
+                  hit_slot_q, '0, StAllocParChk);
+        end
+        StAllocParChk: begin
+          if (par_slot_q != APU_OBJTAB_SLOT_NONE)
+            om_call(APU_OMT_EWR, '0, '0, par_slot_q,
+                    set_ref(par_rec_q, par_rec_q.refcnt + 16'h1),
+                    StAllocParW);
+          else
+            state_q <= StAllocParW;
+        end
+        StAllocParW: begin
+          cpl_q   <= '{status: APU_OBJTAB_OK,
+                       handle: {alloc_gen_q, hit_slot_q},
+                       entry: ent_of(wr_rec_q)};
+          live_q  <= live_q == 16'hFFFF ? live_q : live_q + 16'd1;
+          state_q <= StCpl;
+        end
+
+        // ---------------- post-resolve dispatch --------------------------
+        StAfter: begin
+          unique case (req_q.op)
             APU_OBJTAB_OP_LOOKUP, APU_OBJTAB_OP_READSLOT: begin
               if (res_st_q == ResOk)
                 cpl_q <= '{status: APU_OBJTAB_OK,
-                           handle: {res_ent_q.gen, res_slot_q},
-                           entry: res_ent_q};
+                           handle: {res_rec_q.gen, res_slot_q},
+                           entry: ent_of(res_rec_q)};
               else
                 cpl_q <= '{status: res_status(res_st_q), handle: '0,
                            entry: '0};
@@ -552,20 +583,19 @@ module g6lc_apu_objtab
                 cpl_q   <= '{status: res_status(res_st_q), handle: '0,
                              entry: '0};
                 state_q <= StCpl;
-              end else if (res_ent_q.pins != 8'h0) begin
-                cpl_q   <= '{status: APU_OBJTAB_PINNED, handle: '0, entry: '0};
-                state_q <= StCpl;
-              end else if (res_ent_q.refcnt != 16'h0) begin
-                cpl_q   <= '{status: APU_OBJTAB_BUSY_CHILDREN, handle: '0,
+              end else if (res_rec_q.pins != 8'h0) begin
+                cpl_q   <= '{status: APU_OBJTAB_PINNED, handle: '0,
                              entry: '0};
                 state_q <= StCpl;
+              end else if (res_rec_q.refcnt != 16'h0) begin
+                cpl_q   <= '{status: APU_OBJTAB_BUSY_CHILDREN,
+                             handle: '0, entry: '0};
+                state_q <= StCpl;
               end else begin
-                wr_ent_q      <= res_ent_q;
-                wr_ent_q.live <= 1'b0;
-                wr_slot_q     <= res_slot_q;
-                hit_slot_q    <= res_slot_q;
-                par_slot_q    <= res_ent_q.parent_slot;
-                state_q       <= StRetEntWr;
+                hit_slot_q <= res_slot_q;
+                par_slot_q <= res_rec_q.parent_slot;
+                rtk_par_q  <= 1'b0;
+                unl_start(res_rec_q, 1'b0, StRetKindChk);
               end
             end
             APU_OBJTAB_OP_PIN, APU_OBJTAB_OP_UNPIN: begin
@@ -574,17 +604,17 @@ module g6lc_apu_objtab
                              entry: '0};
                 state_q <= StCpl;
               end else begin
-                wr_ent_q  <= res_ent_q;
-                wr_ent_q.pins <= req_q.op == APU_OBJTAB_OP_PIN
-                    ? (res_ent_q.pins == 8'hFF ? 8'hFF
-                                               : res_ent_q.pins + 8'h1)
-                    : (res_ent_q.pins == 8'h0  ? 8'h0
-                                               : res_ent_q.pins - 8'h1);
-                wr_slot_q <= res_slot_q;
-                cpl_q     <= '{status: APU_OBJTAB_OK,
-                               handle: {res_ent_q.gen, res_slot_q},
-                               entry: res_ent_q};
-                state_q   <= StMutWr;
+                cpl_q <= '{status: APU_OBJTAB_OK,
+                           handle: {res_rec_q.gen, res_slot_q},
+                           entry: ent_of(res_rec_q)};
+                om_call(APU_OMT_EWR, '0, '0, res_slot_q,
+                        set_pins(res_rec_q,
+                          req_q.op == APU_OBJTAB_OP_PIN
+                          ? (res_rec_q.pins == 8'hFF ? 8'hFF
+                             : res_rec_q.pins + 8'h1)
+                          : (res_rec_q.pins == 8'h0 ? 8'h0
+                             : res_rec_q.pins - 8'h1)),
+                        StCpl);
               end
             end
             APU_OBJTAB_OP_SETSTATE: begin
@@ -593,14 +623,14 @@ module g6lc_apu_objtab
                              entry: '0};
                 state_q <= StCpl;
               end else begin
-                wr_ent_q       <= res_ent_q;
-                wr_ent_q.state <= (res_ent_q.state & ~req_q.mask) |
-                                  (req_q.value & req_q.mask);
-                wr_slot_q      <= res_slot_q;
-                cpl_q          <= '{status: APU_OBJTAB_OK,
-                                    handle: {res_ent_q.gen, res_slot_q},
-                                    entry: res_ent_q};
-                state_q        <= StMutWr;
+                cpl_q <= '{status: APU_OBJTAB_OK,
+                           handle: {res_rec_q.gen, res_slot_q},
+                           entry: ent_of(res_rec_q)};
+                om_call(APU_OMT_EWR, '0, '0, res_slot_q,
+                        set_state(res_rec_q,
+                          (res_rec_q.state & ~req_q.mask) |
+                          (req_q.value & req_q.mask)),
+                        StCpl);
               end
             end
             APU_OBJTAB_OP_SETAUX, APU_OBJTAB_OP_SETAUXHI: begin
@@ -609,45 +639,40 @@ module g6lc_apu_objtab
                              entry: '0};
                 state_q <= StCpl;
               end else begin
-                wr_ent_q     <= res_ent_q;
-                if (req_q.op == APU_OBJTAB_OP_SETAUXHI)
-                  wr_ent_q.aux <= {((res_ent_q.aux[63:32] &
-                                     ~req_q.mask) |
-                                    (req_q.value & req_q.mask)),
-                                   res_ent_q.aux[31:0]};
-                else
-                  wr_ent_q.aux <= (res_ent_q.aux & ~64'(req_q.mask)) |
-                                  (64'(req_q.value) & 64'(req_q.mask));
-                wr_slot_q    <= res_slot_q;
-                cpl_q        <= '{status: APU_OBJTAB_OK,
-                                  handle: {res_ent_q.gen, res_slot_q},
-                                  entry: res_ent_q};
-                state_q      <= StMutWr;
+                cpl_q <= '{status: APU_OBJTAB_OK,
+                           handle: {res_rec_q.gen, res_slot_q},
+                           entry: ent_of(res_rec_q)};
+                om_call(APU_OMT_EWR, '0, '0, res_slot_q,
+                        set_aux(res_rec_q,
+                          req_q.op == APU_OBJTAB_OP_SETAUXHI
+                          ? {((res_rec_q.aux[63:32] & ~req_q.mask) |
+                              (req_q.value & req_q.mask)),
+                             res_rec_q.aux[31:0]}
+                          : (res_rec_q.aux & ~64'(req_q.mask)) |
+                            (64'(req_q.value) & 64'(req_q.mask))),
+                        StCpl);
               end
             end
             APU_OBJTAB_OP_SETAUXHI_CAS: begin
-              // §12.3 3d-d: atomic aux[63:32] publish — succeeds only
-              // while the base still equals the expected value; a
-              // racing publisher's base is reported back via CONFLICT
               if (res_st_q != ResOk) begin
                 cpl_q   <= '{status: res_status(res_st_q), handle: '0,
                              entry: '0};
                 state_q <= StCpl;
-              end else if (res_ent_q.aux[63:32] !=
+              end else if (res_rec_q.aux[63:32] !=
                            req_q.offset[31:0]) begin
                 cpl_q   <= '{status: APU_OBJTAB_CONFLICT,
-                             handle: {res_ent_q.gen, res_slot_q},
-                             entry: res_ent_q};
+                             handle: {res_rec_q.gen, res_slot_q},
+                             entry: ent_of(res_rec_q)};
                 state_q <= StCpl;
               end else begin
-                wr_ent_q      <= res_ent_q;
-                wr_ent_q.aux  <= {req_q.value,
-                                  res_ent_q.aux[31:0] | req_q.mask};
-                wr_slot_q     <= res_slot_q;
-                cpl_q         <= '{status: APU_OBJTAB_OK,
-                                   handle: {res_ent_q.gen, res_slot_q},
-                                   entry: res_ent_q};
-                state_q       <= StMutWr;
+                cpl_q <= '{status: APU_OBJTAB_OK,
+                           handle: {res_rec_q.gen, res_slot_q},
+                           entry: ent_of(res_rec_q)};
+                om_call(APU_OMT_EWR, '0, '0, res_slot_q,
+                        set_aux(res_rec_q,
+                          {req_q.value,
+                           res_rec_q.aux[31:0] | req_q.mask}),
+                        StCpl);
               end
             end
             APU_OBJTAB_OP_SETBIND: begin
@@ -655,255 +680,326 @@ module g6lc_apu_objtab
                 cpl_q   <= '{status: res_status(res_st_q), handle: '0,
                              entry: '0};
                 state_q <= StCpl;
+              end else if (req_q.mem_id == 64'h0) begin
+                cpl_q <= '{status: APU_OBJTAB_OK,
+                           handle: {res_rec_q.gen, res_slot_q},
+                           entry: ent_of(res_rec_q)};
+                om_call(APU_OMT_EWR, '0, '0, res_slot_q,
+                        set_bind(res_rec_q,
+                                 {16'h0, APU_OBJTAB_SLOT_NONE},
+                                 64'h0, 64'h0),
+                        StCpl);
               end else begin
-                wr_ent_q  <= res_ent_q;
+                wr_rec_q  <= res_rec_q;
                 wr_slot_q <= res_slot_q;
-                if (req_q.mem_id == 64'h0) begin
-                  wr_ent_q.bind_mem    <= {16'h0, APU_OBJTAB_SLOT_NONE};
-                  wr_ent_q.bind_offset <= 64'h0;
-                  wr_ent_q.size        <= 64'h0;
-                  cpl_q                  <= '{status: APU_OBJTAB_OK,
-                                               handle: {res_ent_q.gen,
-                                                        res_slot_q},
-                                               entry: res_ent_q};
-                  state_q                <= StMutWr;
-                end else begin
-                  res_start(req_q.mem_id, 1'b1, 1'b0, 1'b0, StBindMemRes);
-                end
+                res_start(req_q.mem_id, 1'b1, 1'b0, 1'b0,
+                          StBindMemRes);
               end
             end
             default: begin
-              cpl_q   <= '{status: APU_OBJTAB_MISS, handle: '0, entry: '0};
+              cpl_q   <= '{status: APU_OBJTAB_MISS, handle: '0,
+                           entry: '0};
               state_q <= StCpl;
             end
           endcase
         end
 
-        // ---------------- SETBIND memory resolved ----------------
         StBindMemRes: begin
           if (res_st_q != ResOk) begin
-            cpl_q   <= '{status: APU_OBJTAB_MISS, handle: '0, entry: '0};
-            state_q <= StCpl;
-          end else begin
-            // §12.3 3d-d: record the bound memory's generation too —
-            // a slot recycled after the bound memory died must not
-            // resolve as the bind's object at descriptor update /
-            // operand resolve time
-            wr_ent_q.bind_mem    <= {res_ent_q.gen, res_slot_q};
-            wr_ent_q.bind_offset <= req_q.offset;
-            wr_ent_q.size        <= req_q.size;
-            cpl_q                  <= '{status: APU_OBJTAB_OK,
-                                         handle: {wr_ent_q.gen, wr_slot_q},
-                                         entry: wr_ent_q};
-            state_q                <= StMutWr;
-          end
-        end
-
-        // ---------------- ALLOC tail ----------------
-        StAllocPar: begin
-          if (res_st_q != ResOk) begin
-            cpl_q   <= '{status: APU_OBJTAB_PARENT_MISS, handle: '0,
-                         entry: '0};
-            state_q <= StCpl;
-          end else begin
-            par_slot_q <= res_slot_q;
-            par_ent_q  <= res_ent_q;
-            state_q    <= StAllocSlot;
-          end
-        end
-        StAllocSlot: begin
-          // entry read of free_slot issued combinationally this cycle
-          if (!free_v) begin
-            cpl_q   <= '{status: APU_OBJTAB_FULL, handle: '0, entry: '0};
-            state_q <= StCpl;
-          end else begin
-            hit_slot_q <= free_slot;
-            state_q    <= StAllocGen;
-          end
-        end
-        StAllocGen: begin
-          wr_ent_q <= '{live: 1'b1, kind: req_q.kind,
-                        gen: gen_next(ent_rdata_t.gen),
-                        parent_slot: par_slot_q,
-                        refcnt: 16'h0, pins: 8'h0, state: 32'h0,
-                        bind_mem: {16'h0, APU_OBJTAB_SLOT_NONE},
-                        bind_offset: 64'h0, size: req_q.size,
-                        // §12.3 3d-d: req.offset is the entry's
-                        // initial aux — a DEVICE_MEMORY alloc passes
-                        // {UNBACKED,0} so the entry is born lazy and
-                        // no create→SETAUXHI window exists in which a
-                        // racing MAP_BLOB would read aux=0 as "backed
-                        // at base 0".  Callers that do not need an
-                        // initial aux pass offset=0.
-                        aux: req_q.offset, ctx: req_q.ctx};
-          state_q  <= StAllocWrE;
-        end
-        StAllocWrE: begin
-          live_q[hit_slot_q[SlotBits-1:0]] <= 1'b1;
-          state_q <= StAllocWrD;
-        end
-        StAllocWrD: begin
-          if (par_slot_q != APU_OBJTAB_SLOT_NONE) begin
-            par_ent_q.refcnt <= par_ent_q.refcnt == 16'hFFFF ? 16'hFFFF
-                                  : par_ent_q.refcnt + 16'h1;
-            state_q <= StAllocParW;
-          end else begin
-            cpl_q   <= '{status: APU_OBJTAB_OK,
-                         handle: {wr_ent_q.gen, hit_slot_q},
-                         entry: wr_ent_q};
-            state_q <= StCpl;
-          end
-        end
-        StAllocParW: begin
-          cpl_q   <= '{status: APU_OBJTAB_OK,
-                       handle: {wr_ent_q.gen, hit_slot_q},
-                       entry: wr_ent_q};
-          state_q <= StCpl;
-        end
-
-        // ---------------- RETIRE tail ----------------
-        StRetEntWr: begin
-          live_q[wr_slot_q[SlotBits-1:0]] <= 1'b0;
-          if (!res_hdl_q)      state_q <= StRetTomb;
-          else if (par_slot_q != APU_OBJTAB_SLOT_NONE) state_q <= StRetParRd;
-          else                 state_q <= StRetDone;
-        end
-        StRetTomb: begin
-          if (par_slot_q != APU_OBJTAB_SLOT_NONE) state_q <= StRetParRd;
-          else                 state_q <= StRetDone;
-        end
-        StRetParRd:  state_q <= StRetParCap;
-        StRetParCap: state_q <= StRetParWr;
-        StRetParWr:  state_q <= StRetDone;
-        StRetDone: begin
-          cpl_q   <= '{status: APU_OBJTAB_OK,
-                       handle: {res_ent_q.gen, hit_slot_q},
-                       entry: res_ent_q};
-          state_q <= StCpl;
-        end
-
-        // ---------------- simple mutator write ----------------
-        StMutWr: state_q <= StCpl;
-
-        // ---------------- RESET_CTX / RETIRE_KIDS sweep ------------
-        StScanRd: state_q <= StScanCmp;
-        StScanCmp: begin
-          if (scan_ovl_q) begin
-            // §12.3 3d-d: first live kind-matched DEVBACKED entry ≠
-            // the excluded slot whose extent overlaps the window —
-            // the candidate MAP_BLOB must evict
-            if (ent_rdata_t.live &&
-                ent_rdata_t.kind == req_q.kind &&
-                16'(scan_q) != req_q.id[15:0] &&
-                (ent_rdata_t.aux & APU_MEM_DEVBACKED) != 64'h0 &&
-                ent_rdata_t.aux[63:32] != APU_MEM_UNBACKED &&
-                64'(ent_rdata_t.aux[63:32]) < req_q.size &&
-                req_q.offset <
-                    64'(ent_rdata_t.aux[63:32]) + ent_rdata_t.size) begin
-              cpl_q   <= '{status: APU_OBJTAB_OK,
-                           handle: {ent_rdata_t.gen, 16'(scan_q)},
-                           entry: ent_rdata_t};
-              state_q <= StCpl;
-            end else begin
-              scan_q  <= scan_q + 1'b1;
-              state_q <= scan_q == Slots - 1 ? StScanDone : StScanRd;
-            end
-          end else if (ent_rdata_t.live &&
-              (scan_kids_q ? ent_rdata_t.parent_slot == rtk_slot_q
-                           : ent_rdata_t.ctx == req_q.ctx)) begin
-            if (!scan_kids_q && ent_rdata_t.pins != 8'h0) begin
-              pinned_q <= pinned_q + 16'h1;
-              scan_q   <= scan_q + 1'b1;
-              state_q  <= scan_q == Slots - 1 ? StScanDone : StScanRd;
-            end else begin
-              wr_ent_q      <= ent_rdata_t;
-              wr_ent_q.live <= 1'b0;
-              swe_ent_q     <= ent_rdata_t;
-              swe_slot_q    <= 16'(scan_q);
-              par_slot_q    <= ent_rdata_t.parent_slot;
-              state_q       <= StScanWr;
-            end
-          end else begin
-            scan_q  <= scan_q + 1'b1;
-            state_q <= scan_q == Slots - 1 ? StScanDone : StScanRd;
-          end
-        end
-        StScanWr: begin
-          live_q[scan_q[SlotBits-1:0]] <= 1'b0;
-          scan_q  <= scan_q + 1'b1;
-          if (scan_kids_q) begin
-            // §12.3 F5-d: count the kill, no SWEEP record, no per-child
-            // parent walk — the parent's refcnt is zeroed once at the
-            // end (StScanDone)
-            pinned_q <= pinned_q + 16'h1;
-            state_q  <= scan_q == Slots - 1 ? StScanDone : StScanRd;
-          end else begin
-            if (par_slot_q == APU_OBJTAB_SLOT_NONE)
-              cpl_q <= '{status: APU_OBJTAB_SWEEP,
-                         handle: {16'h0, swe_slot_q}, entry: swe_ent_q};
-            if (par_slot_q != APU_OBJTAB_SLOT_NONE) state_q <= StScanParRd;
-            else state_q <= StScanEmit;
-          end
-        end
-        StScanParRd:  state_q <= StScanParCap;
-        StScanParCap: state_q <= StScanParWr;
-        StScanParWr: begin
-          if (scan_kids_q) begin
-            // RETIRE_KIDS tail: refcnt write only, then the count cpl
-            state_q <= StScanDone;
-          end else begin
-            cpl_q   <= '{status: APU_OBJTAB_SWEEP,
-                         handle: {16'h0, swe_slot_q}, entry: swe_ent_q};
-            state_q <= StScanEmit;
-          end
-        end
-        // interim completion per tombstoned entry: the requester owns
-        // the reclaim (aperture/ObjPay extents, ShaderCore refs) that
-        // the bare sweep cannot reach; the stream ends at StScanDone's
-        // OK completion.  The scan stalls here while the caller is
-        // busy reaping (ot_cpl_ready_i backpressure).
-        StScanEmit: begin
-          // scan_q was already incremented in StScanWr
-          if (cpl_ready_i)
-            state_q <= scan_q == Slots ? StScanDone : StScanRd;
-        end
-        StScanDone: begin
-          if (scan_ovl_q) begin
-            // §12.3 3d-d: full sweep, no conflicting DEVBACKED extent
             cpl_q   <= '{status: APU_OBJTAB_MISS, handle: '0,
                          entry: '0};
             state_q <= StCpl;
-          end else if (scan_kids_q && !rtk_par_q) begin
+          end else begin
+            cpl_q <= '{status: APU_OBJTAB_OK,
+                       handle: {wr_rec_q.gen, wr_slot_q},
+                       entry: ent_of(wr_rec_q)};
+            om_call(APU_OMT_EWR, '0, '0, wr_slot_q,
+                    set_bind(wr_rec_q,
+                             {res_rec_q.gen, res_slot_q},
+                             req_q.offset, req_q.size),
+                    StCpl);
+          end
+        end
+
+        // ---------------- RETIRE ------------------------------------------
+        StRetKindChk: begin
+          if (res_rec_q.kind == 6'(KindListKind))
+            unl_start(res_rec_q, 1'b1, StRetKill);
+          else
+            state_q <= StRetKill;
+        end
+        StRetKill: begin
+          om_call(APU_OMT_EWR, '0, '0, hit_slot_q,
+                  set_dead(res_rec_q), StRetPush);
+        end
+        StRetPush: begin
+          live_q <= live_q - 16'd1;
+          om_call(APU_OMT_PUSH, '0, '0, hit_slot_q, '0, StRetWb);
+        end
+        StRetWb: begin
+          // §5a write-back point before the completion lands
+          om_call(APU_OMT_EWB, '0, '0, hit_slot_q, '0, StRetTomb);
+        end
+        StRetTomb: begin
+          if (!res_hdl_q)
+            om_call(APU_OMT_DTOMB, res_id_q, '0, '0, '0,
+                    StRetParChk);
+          else
+            state_q <= StRetParChk;
+        end
+        StRetParChk: begin
+          if (par_slot_q != APU_OBJTAB_SLOT_NONE) begin
+            par_ret_q <= StRetDone;
+            state_q   <= StParRd;
+          end else begin
+            state_q <= StRetDone;
+          end
+        end
+        StRetDone: begin
+          cpl_q   <= '{status: APU_OBJTAB_OK,
+                       handle: {res_rec_q.gen, hit_slot_q},
+                       entry: ent_of(res_rec_q)};
+          state_q <= StCpl;
+        end
+
+        // ---------------- unlink subroutine -------------------------------
+        StUnlPr: begin
+          om_call(APU_OMT_ERD, '0, '0,
+                  unl_kind_q ? unl_rec_q.kind_prev
+                             : unl_rec_q.ctx_prev,
+                  '0, StUnlPrW);
+        end
+        StUnlPrW: begin
+          om_call(APU_OMT_EWR, '0, '0,
+                  unl_kind_q ? unl_rec_q.kind_prev
+                             : unl_rec_q.ctx_prev,
+                  unl_kind_q
+                    ? set_kindnext(om_rsp_q.rec, unl_rec_q.kind_next)
+                    : set_ctxnext(om_rsp_q.rec, unl_rec_q.ctx_next),
+                  StUnlNChk);
+        end
+        StUnlNChk: begin
+          if ((unl_kind_q ? unl_rec_q.kind_next
+                         : unl_rec_q.ctx_next) != LINK_NONE)
+            state_q <= StUnlNr;
+          else
+            state_q <= unl_ret_q;
+        end
+        StUnlNr: begin
+          om_call(APU_OMT_ERD, '0, '0,
+                  unl_kind_q ? unl_rec_q.kind_next
+                             : unl_rec_q.ctx_next,
+                  '0, StUnlNrW);
+        end
+        StUnlNrW: begin
+          om_call(APU_OMT_EWR, '0, '0,
+                  unl_kind_q ? unl_rec_q.kind_next
+                             : unl_rec_q.ctx_next,
+                  unl_kind_q
+                    ? set_kindprev(om_rsp_q.rec, unl_rec_q.kind_prev)
+                    : set_ctxprev(om_rsp_q.rec, unl_rec_q.ctx_prev),
+                  unl_ret_q);
+        end
+
+        // ---------------- parent refcnt subroutine ------------------------
+        StParRd: begin
+          om_call(APU_OMT_ERD, '0, '0, par_slot_q, '0, StParWr);
+        end
+        StParWr: begin
+          om_call(APU_OMT_EWR, '0, '0, par_slot_q,
+                  set_ref(om_rsp_q.rec,
+                          rtk_par_q ? 16'h0 :
+                          (om_rsp_q.rec.refcnt == 16'h0
+                           ? 16'h0
+                           : om_rsp_q.rec.refcnt - 16'h1)),
+                  par_ret_q);
+        end
+
+        // ---------------- walk setup --------------------------------------
+        StScanRdInit: begin
+          walk_q     <= ctx_head_cur;
+          keep_v_q   <= 1'b0;
+          head_set_q <= 1'b0;
+          state_q    <= StScanRd;
+        end
+        StScanParInit: begin
+          // RETIRE_KIDS: parent record read — walk its ctx list.  A
+          // dead/never-written slot keeps a readable ctx field (erd
+          // masks only `live`), so an already-reaped or empty parent
+          // sweeps an empty list -> OK count 0, never MISS.
+          par_rec_q <= om_rsp_q.rec;
+          walk_q    <= ctx_head_q[cidx(om_rsp_q.rec.ctx)];
+          keep_v_q   <= 1'b0;
+          head_set_q <= 1'b0;
+          state_q    <= StScanRd;
+        end
+
+        // ---------------- ctx/kind-list walk ------------------------------
+        StScanRd: begin
+          if (walk_q == LINK_NONE) state_q <= StScanDone;
+          else
+            om_call(APU_OMT_ERD, '0, '0, walk_q, '0, StScanCmp);
+        end
+        StScanCmp: begin
+          walk_rec_q <= om_rsp_q.rec;
+          walk_nxt_q <= scan_ovl_q ? om_rsp_q.rec.kind_next
+                                   : om_rsp_q.rec.ctx_next;
+          if (scan_ovl_q) begin
+            // read-only overlap probe over the DEVICE_MEMORY list
+            if (om_rsp_q.rec.live &&
+                walk_q != req_q.id[15:0] &&
+                (om_rsp_q.rec.aux & APU_MEM_DEVBACKED) != 64'h0 &&
+                om_rsp_q.rec.aux[63:32] != APU_MEM_UNBACKED &&
+                64'(om_rsp_q.rec.aux[63:32]) < req_q.size &&
+                req_q.offset <
+                    64'(om_rsp_q.rec.aux[63:32]) +
+                    om_rsp_q.rec.size) begin
+              cpl_q   <= '{status: APU_OBJTAB_OK,
+                           handle: {om_rsp_q.rec.gen, walk_q},
+                           entry: ent_of(om_rsp_q.rec)};
+              state_q <= StCpl;
+            end else begin
+              walk_q  <= om_rsp_q.rec.kind_next;
+              state_q <= StScanRd;
+            end
+          end else if (!om_rsp_q.rec.live ||
+              (scan_kids_q &&
+               om_rsp_q.rec.parent_slot != rtk_slot_q) ||
+              (!scan_kids_q &&
+               om_rsp_q.rec.ctx != req_q.ctx)) begin
+            // survivor: dead node (shouldn't normally appear —
+            // links are maintained), a non-child, or a different
+            // ctx sharing the overflow head — keep it linked
+            state_q <= StScanKeep;
+          end else if (!scan_kids_q &&
+                      om_rsp_q.rec.pins != 8'h0) begin
+            pinned_q <= pinned_q + 16'h1;
+            state_q  <= StScanKeep;
+          end else begin
+            // kill: dead write, push, kind unlink, parent--
+            swe_rec_q  <= om_rsp_q.rec;
+            swe_slot_q <= walk_q;
+            state_q    <= StScanKill;
+          end
+        end
+        StScanKeep: begin
+          // survivor stays linked: patch its ctx_prev to the last
+          // keeper (or NONE) — the keeper's ctx_next is patched in
+          // StScanKeepP; first survivor becomes the head
+          if (!head_set_q) begin
+            head_set_q <= 1'b1;
+            ctx_head_q[cidx(scan_kids_q ? par_rec_q.ctx
+                                        : req_q.ctx)] <= walk_q;
+          end
+          if (walk_rec_q.ctx_prev !=
+              (keep_v_q ? keep_q : LINK_NONE))
+            om_call(APU_OMT_EWR, '0, '0, walk_q,
+                    set_ctxprev(walk_rec_q,
+                                keep_v_q ? keep_q : LINK_NONE),
+                    StScanKeepP);
+          else
+            state_q <= StScanKeepP;
+        end
+        StScanKeepP: begin
+          if (keep_v_q && keep_rec_q.ctx_next != walk_q)
+            om_call(APU_OMT_EWR, '0, '0, keep_q,
+                    set_ctxnext(keep_rec_q, walk_q),
+                    StScanKeepN);
+          else
+            state_q <= StScanKeepN;
+        end
+        StScanKeepN: begin
+          keep_v_q   <= 1'b1;
+          keep_q     <= walk_q;
+          keep_rec_q <= set_ctxprev(walk_rec_q,
+                                    keep_v_q ? keep_q : LINK_NONE);
+          walk_q     <= walk_nxt_q;
+          state_q    <= StScanRd;
+        end
+        StScanKill: begin
+          om_call(APU_OMT_EWR, '0, '0, walk_q,
+                  set_dead(walk_rec_q), StScanPush);
+        end
+        StScanPush: begin
+          live_q <= live_q - 16'd1;
+          om_call(APU_OMT_PUSH, '0, '0, walk_q, '0, StScanKind);
+        end
+        StScanKind: begin
+          if (swe_rec_q.kind == 6'(KindListKind))
+            unl_start(swe_rec_q, 1'b1, StScanPar);
+          else
+            state_q <= StScanPar;
+        end
+        StScanPar: begin
+          // parent refcnt-- unless the parent was already reaped
+          par_slot_q <= swe_rec_q.parent_slot;
+          if (swe_rec_q.parent_slot != APU_OBJTAB_SLOT_NONE) begin
+            rtk_par_q <= 1'b0;
+            par_ret_q <= StScanEmitS;
+            state_q   <= StParRd;
+          end else begin
+            state_q <= StScanEmitS;
+          end
+        end
+        StScanEmitS: begin
+          if (scan_kids_q) begin
+            pinned_q <= pinned_q + 16'h1;
+            walk_q   <= walk_nxt_q;
+            state_q  <= StScanRd;
+          end else begin
+            cpl_q   <= '{status: APU_OBJTAB_SWEEP,
+                         handle: {16'h0, swe_slot_q},
+                         entry: ent_of(swe_rec_q)};
+            state_q <= StScanEmit;
+          end
+        end
+        StScanEmit: begin
+          if (cpl_ready_i) begin
+            walk_q  <= walk_nxt_q;
+            state_q <= StScanRd;
+          end
+        end
+        StScanDone: begin
+          if (scan_ovl_q) begin
+            cpl_q   <= '{status: APU_OBJTAB_MISS, handle: '0,
+                         entry: '0};
+            state_q <= StCpl;
+          end else if (keep_v_q &&
+                       keep_rec_q.ctx_next != LINK_NONE) begin
+            // close the surviving list at its tail
+            om_call(APU_OMT_EWR, '0, '0, keep_q,
+                    set_ctxnext(keep_rec_q, LINK_NONE),
+                    StScanTail);
+          end else if (!head_set_q) begin
+            ctx_head_q[cidx(scan_kids_q ? par_rec_q.ctx
+                                        : req_q.ctx)] <= LINK_NONE;
+            state_q <= StScanTail;
+          end else begin
+            state_q <= StScanTail;
+          end
+        end
+        StScanTail: begin
+          if (scan_kids_q && !rtk_par_q) begin
             // zero the parent's refcnt once so its own RETIRE can
             // never stall on BUSY_CHILDREN
             rtk_par_q  <= 1'b1;
             par_slot_q <= rtk_slot_q;
-            state_q    <= StScanParRd;
+            par_ret_q  <= StScanFin;
+            state_q    <= StParRd;
           end else begin
-            // RESET_CTX: handle[15:0] = pinned count; RETIRE_KIDS:
-            // the number of children killed
-            cpl_q   <= '{status: APU_OBJTAB_OK,
-                         handle: {16'h0, pinned_q}, entry: '0};
-            state_q <= StCpl;
+            state_q <= StScanFin;
           end
         end
+        StScanFin: begin
+          cpl_q   <= '{status: APU_OBJTAB_OK,
+                       handle: {16'h0, pinned_q}, entry: '0};
+          state_q <= StCpl;
+        end
 
+        // ---------------- completion --------------------------------------
         StCpl: if (cpl_ready_i) state_q <= StIdle;
         default: state_q <= StIdle;
         endcase
-      // parent refcnt decrement staging: the *Cap state's entry data is
-      // consumed here so the *Wr state's combinational write drives the
-      // decremented value.
-      if (state_q == StRetParCap || state_q == StScanParCap) begin
-        par_ent_q        <= ent_rdata_t;
-        // RETIRE_KIDS zeroes the parent's refcnt wholesale (the sweep
-        // already killed every live child); RESET_CTX/RETIRE decrement
-        par_ent_q.refcnt <= state_q == StScanParCap && scan_kids_q
-                            ? 16'h0 :
-                            (ent_rdata_t.live && ent_rdata_t.refcnt != 16'h0
-                             ? ent_rdata_t.refcnt - 16'h1
-                             : ent_rdata_t.refcnt);
-      end
       end
     end
 
@@ -914,8 +1010,6 @@ module g6lc_apu_objtab
       req_q.op == APU_OBJTAB_OP_ALLOC |-> cpl_q.handle[31:16] != 16'h0);
     assert property (@(posedge clk_i) disable iff (!rst_ni)
       cpl_valid_o && !cpl_ready_i |=> cpl_valid_o && $stable(cpl_q));
-    // no two live slots may share a (kind,id): enforced by the ALLOC
-    // dup probe; the TB model + final SRAM sweep assert it globally.
 `endif
   end
 endmodule
@@ -923,7 +1017,10 @@ endmodule
 // enable-0 fixture for the synthesis screen
 module g6lc_apu_objtab_fixture
   import g6lc_apu_objtab_pkg::*;
-#(parameter bit Enable = 1'b0, parameter int unsigned Slots = 256) (
+#(parameter bit          Enable       = 1'b0,
+  parameter int unsigned ObjEntries   = 1024,
+  parameter int unsigned MaxCtx       = 8,
+  parameter int unsigned KindListKind = 8) (
   input  logic            clk_i,
   input  logic            rst_ni,
   input  logic            testmode_i,
@@ -933,7 +1030,14 @@ module g6lc_apu_objtab_fixture
   output logic            cpl_valid_o,
   input  logic            cpl_ready_i,
   output apu_objtab_cpl_t cpl_o,
-  output logic [15:0]     live_o
+  output logic [15:0]     live_o,
+  output logic            omt_req_valid_o,
+  input  logic            omt_req_ready_i,
+  output apu_omt_req_t    omt_req_o,
+  input  logic            omt_rsp_valid_i,
+  input  apu_omt_rsp_t    omt_rsp_i
 );
-  g6lc_apu_objtab #(.Enable(Enable), .Slots(Slots)) i_dut (.*);
+  g6lc_apu_objtab #(.Enable(Enable), .ObjEntries(ObjEntries),
+                    .MaxCtx(MaxCtx), .KindListKind(KindListKind))
+      i_dut (.*);
 endmodule

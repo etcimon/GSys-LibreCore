@@ -48,6 +48,7 @@ module tb_g6lc_apu_vnfront;
   import g6lc_apu_cmdrec_pkg::*;
   import g6lc_apu_objtab_pkg::*;
   import g6lc_apu_objpay_pkg::*;
+  import g6lc_apu_mp_pkg::*;
   import g6lc_apu_cmdexec_pkg::*;
   import g6lc_apu_sh_pkg::*;
   import g6lc_apu_vg_pkg::*;
@@ -60,7 +61,12 @@ module tb_g6lc_apu_vnfront;
   localparam int PAYW  = 16384;
   localparam int PayPerBuf = 256;
   localparam int Fences = 16;
-  localparam int Slots  = 256;
+  // ObjTab-V/ObjPay-V backing geometry: the ObjEntries=256 + 64 KiB
+  // PayMem defaults mirror the vn_golden SLOTS/PAY_WORDS model; the
+  // payfull arm overrides ObjPayWords at build time (-GObjPayWords=)
+  localparam int unsigned ObjEntries  = 256;
+  localparam int unsigned PayMemBytes = ObjPayWords * 4;
+  localparam int unsigned PayCacheL   = 32;
   localparam logic [15:0] REP_BASE = 16'h0800;
   localparam logic [15:0] REP_LEN  = 16'd352;
 
@@ -88,7 +94,7 @@ module tb_g6lc_apu_vnfront;
   logic               fsub_v, fsub_r;
   apu_cmdexec_submit_t fsub;
   logic [15:0]        f_dseq;
-  logic [Fences-1:0]  f_fsig, f_flost, f_fclr;
+  logic [Fences-1:0]  f_fsig, f_flost, f_fclr, f_ffail;
   // payload stream (front -> cmdrec) + objpay port
   logic               fpay_v, fpay_r;
   logic [31:0]        fpay_d;
@@ -174,6 +180,7 @@ module tb_g6lc_apu_vnfront;
     .ex_submit_o(fsub),
     .ex_done_seq_i(f_dseq), .ex_fence_signaled_i(f_fsig),
     .ex_fence_lost_i(f_flost), .ex_fence_clr_o(f_fclr),
+    .ex_fence_fail_o(f_ffail),
     .busy_o(f_busy), .done_o(f_done), .result_o(f_result),
     .rep_words_o(f_rwords), .fault_o(f_fault));
 
@@ -211,7 +218,7 @@ module tb_g6lc_apu_vnfront;
     .ex_submit_valid_o(o_subv), .ex_submit_ready_i(1'b0),
     .ex_submit_o(o_sub),
     .ex_done_seq_i('0), .ex_fence_signaled_i('0), .ex_fence_lost_i('0),
-    .ex_fence_clr_o(o_fclr),
+    .ex_fence_clr_o(o_fclr), .ex_fence_fail_o(),
     .busy_o(o_busy), .done_o(o_done), .result_o(o_result),
     .rep_words_o(o_rwords), .fault_o(o_fault));
 
@@ -247,7 +254,7 @@ module tb_g6lc_apu_vnfront;
     .push_n_o(xpush_n), .push_o(xpush),
     .done_seq_o(f_dseq),
     .fence_signaled_o(f_fsig), .fence_lost_o(f_flost),
-    .fence_clr_i(f_fclr), .xf_o(), .rd_o(),
+    .fence_clr_i(f_fclr), .fence_fail_i(f_ffail), .xf_o(), .rd_o(),
     .hold_i(1'b0), .idle_o(), .busy_o());
 
   // ---- shared backends with 4-master arbitration -----------------------
@@ -308,11 +315,27 @@ module tb_g6lc_apu_vnfront;
     else if (cr_take) begin cr_busy <= 1'b1; cr_own <= cr_sel; end
     else if (cr_cvld) cr_busy <= 1'b0;
 
-  g6lc_apu_objtab #(.Enable(1'b1), .Slots(Slots)) i_obj (
+  // ---- objmem plumbing (ObjTab-V/ObjPay-V DRAM backing) ----------
+  logic         omt_v, omt_r, omt_rv;
+  apu_omt_req_t omt_req;
+  apu_omt_rsp_t omt_rsp;
+  logic         omp_v, omp_r, omp_rv;
+  apu_omp_req_t omp_req;
+  apu_omp_rsp_t omp_rsp;
+  logic         mp_v, mp_r, mp_rv;
+  apu_mp_req_t  mp_req;
+  apu_mp_rsp_t  mp_rsp;
+  logic [15:0]  obj_live;
+
+  g6lc_apu_objtab #(.Enable(1'b1), .ObjEntries(ObjEntries),
+                    .MaxCtx(32)) i_obj (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(ot_vld), .req_ready_o(ot_rdy), .req_i(ot_req),
     .cpl_valid_o(ot_cvld), .cpl_ready_i(1'b1), .cpl_o(ot_cpl),
-    .live_o());
+    .live_o(obj_live),
+    .omt_req_valid_o(omt_v), .omt_req_ready_i(omt_r),
+    .omt_req_o(omt_req),
+    .omt_rsp_valid_i(omt_rv), .omt_rsp_i(omt_rsp));
   g6lc_apu_cmdrec #(.Enable(1'b1), .NumBufs(16), .RecsPerBuf(64))
   i_rec (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
@@ -341,10 +364,60 @@ module tb_g6lc_apu_vnfront;
     else if (op_take) begin op_busy <= 1'b1; op_own <= op_sel; end
     else if (op_cvld) op_busy <= 1'b0;
 
-  g6lc_apu_objpay #(.Enable(1'b1), .PayWords(ObjPayWords)) i_pay (
+  g6lc_apu_objpay #(.Enable(1'b1), .PayMemBytes(PayMemBytes)) i_pay (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .req_valid_i(op_vld), .req_ready_o(op_rdy), .req_i(op_req),
-    .cpl_valid_o(op_cvld), .cpl_ready_i(1'b1), .cpl_o(op_cpl));
+    .cpl_valid_o(op_cvld), .cpl_ready_i(1'b1), .cpl_o(op_cpl),
+    .omp_req_valid_o(omp_v), .omp_req_ready_i(omp_r),
+    .omp_req_o(omp_req),
+    .omp_rsp_valid_i(omp_rv), .omp_rsp_i(omp_rsp));
+
+  // objmem owns the ObjTab/ObjPay carve above the managed window
+  g6lc_apu_objmem #(.Enable(1'b1), .ObjEntries(ObjEntries),
+                    .PayMemBytes(PayMemBytes),
+                    .PayCacheLines(PayCacheL)) i_omm (
+    .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
+    .omt_req_valid_i(omt_v), .omt_req_ready_o(omt_r),
+    .omt_req_i(omt_req),
+    .omt_rsp_valid_o(omt_rv), .omt_rsp_o(omt_rsp),
+    .omp_req_valid_i(omp_v), .omp_req_ready_o(omp_r),
+    .omp_req_i(omp_req),
+    .omp_rsp_valid_o(omp_rv), .omp_rsp_o(omp_rsp),
+    .mp_req_valid_o(mp_v), .mp_req_ready_i(mp_r),
+    .mp_req_o(mp_req),
+    .mp_rsp_valid_i(mp_rv), .mp_rsp_i(mp_rsp));
+
+  // aperture responder over the static carve window only;
+  // +mp_lat_min/max=1..8 stress the engine round-trips
+  localparam logic [63:0] OM_PAY_OFF =
+      apu_objmem_pay_off(ObjEntries);
+  tb_apu_mp_mem #(.N(1), .GMW(1), .APW(0),
+                  .PWB(32'(g6lc_apu_objtab_pkg::APU_OBJMEM_OFF >> 2)),
+                  .PPW(32'((OM_PAY_OFF + 64'(PayMemBytes) -
+                            g6lc_apu_objtab_pkg::APU_OBJMEM_OFF) >> 2) +
+                        64))
+      i_mem (
+    .clk_i(clk), .rst_ni(rst_ni),
+    .req_valid_i(mp_v), .req_ready_o(mp_r), .req_i('{mp_req}),
+    .rsp_valid_o(mp_rv), .rsp_o('{mp_rsp}));
+
+  // ObjPay-V architectural read view: the write-merge buffer in
+  // objpay (a completed WRITE may still sit there), then objmem's
+  // write-back payload cache, then the DRAM carve (dense index = byte
+  // offset from the carve base in words, APW=0/PWB=OBJMEM_OFF>>2)
+  function automatic logic [31:0] pay_peek(input logic [31:0] waddr);
+    if (i_pay.gen_on.wb_v_q &&
+        i_pay.gen_on.wb_line_q == (waddr >> 4) &&
+        i_pay.gen_on.wb_bm_q[waddr & 15])
+      return i_pay.gen_on.wb_data_q[32 * (waddr & 15) +: 32];
+    for (int i = 0; i < PayCacheL; i++)
+      if (i_omm.gen_on.pc_vld_q[i] &&
+          i_omm.gen_on.pc_ln_q[i] ==
+            $bits(i_omm.gen_on.pc_ln_q[i])'(waddr >> 4))
+        return i_omm.gen_on.i_pc.sram[i][32 * (waddr & 15) +: 32];
+    return i_mem.apm[32'(OM_PAY_OFF >> 2) + waddr -
+                     32'(g6lc_apu_objtab_pkg::APU_OBJMEM_OFF >> 2)];
+  endfunction
 
   // §7b/5a-ii: real vgpages at the shipped geometry (front is the
   // only master in this TB); the guest/private split must match the
@@ -668,8 +741,8 @@ module tb_g6lc_apu_vnfront;
         check("norep", f_rwords === 16'h0);
       end
       check($sformatf("live %0d exp %0d",
-                      $countones(i_obj.gen_on.live_q), ev(rec, 6)),
-            $countones(i_obj.gen_on.live_q) === int'(ev(rec, 6)));
+                      obj_live, ev(rec, 6)),
+            obj_live === 16'(ev(rec, 6)));
       if ((fl & 32'd2) != 0) begin
         for (int i = 0; i < 16; i++)
           exp_rec[32 * i +: 32] = ev(rec, 8 + i);
@@ -690,7 +763,7 @@ module tb_g6lc_apu_vnfront;
           for (int i = 0; i < npw; i++) begin
             pw_addr = paym[payp];
             check($sformatf("objpay[%0d]", pw_addr),
-                  i_pay.gen_on.i_pay.sram[pw_addr] === paym[payp + 1]);
+                  pay_peek(pw_addr) === paym[payp + 1]);
             payp += 2;
           end
         end else if (paym[payp] == 32'd2) begin
@@ -730,10 +803,10 @@ module tb_g6lc_apu_vnfront;
     check("reset_ctx status", ot_cpl.status == APU_OBJTAB_OK);
     check("reset_ctx pinned==0", ot_cpl.handle[15:0] === 16'h0);
     repeat (4) @(negedge clk);
-    check("objtab empty", $countones(i_obj.gen_on.live_q) === 0);
+    check("objtab empty", obj_live === 16'h0);
     check("all work consumed", ew_head == ew_tail);
     check("objpay chunks drained",
-          i_pay.gen_on.free_q === '0);
+          i_pay.gen_on.used_q === 0);
 
     if (errors == 0)
       $display("PASS tb_g6lc_apu_vnfront cases=%0d checks=%0d cycles=%0d",

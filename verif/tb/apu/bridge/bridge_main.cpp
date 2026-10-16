@@ -80,6 +80,7 @@ static uint64_t st_irq = 0, st_oob = 0;
 
 // ---- socket --------------------------------------------------------------
 static int lfd = -1, cfd = -1;
+static bool bench_mode = false;   // --bench: no client, DMA still answers
 static std::vector<uint8_t> rxbuf;
 static uint16_t req_seq = 1;
 
@@ -319,10 +320,13 @@ static void drive_inputs() {
     top->g_awvalid_i = 0; top->g_wvalid_i = 0; top->g_bready_i = 0;
     top->g_arvalid_i = 0; top->g_rready_i = 0;
   }
-  // AXI4 slave
-  top->d_arready_i = !rd_open;
-  top->d_awready_i = !wr_aw;                  // one open write
-  top->d_wready_i  = !wr_sent;                // collect beats until sent
+  // AXI4 slave — no ready before a client attaches: send_frame drops
+  // frames when cfd<0, so a reset-time request (ObjMem's OT_INIT magic
+  // read) would otherwise launch, lose its frame, and wedge the engine.
+  const bool dma_up = bench_mode || cfd >= 0;
+  top->d_arready_i = dma_up && !rd_open;
+  top->d_awready_i = dma_up && !wr_aw;        // one open write
+  top->d_wready_i  = dma_up && !wr_sent;      // collect beats until sent
   top->d_bvalid_i  = wr_reply;                // hold until accepted
   top->d_bid_i     = wr_id;
   top->d_bresp_i   = wr_err ? 2 : 0;          // SLVERR : OKAY
@@ -577,6 +581,44 @@ static void stats() {
       (unsigned)((pus >> 2) & 1), (unsigned)((pus >> 3) & 1),
       (unsigned)((pus >> 8) & 0x7f), (unsigned)((pus >> 16) & 3),
       (unsigned)(dbg_read(DBG_BASE + 57 * 8) & 0xff));
+    // sel58..60: whole-table ring live count + live/fatal masks
+    // (API-X4 / max_concurrent diagnosis — 64 slots)
+    uint64_t rlv = dbg_read(DBG_BASE + 59 * 8) |
+                   ((uint64_t)dbg_read(DBG_BASE + 59 * 8 + 4) << 32);
+    uint64_t rft = dbg_read(DBG_BASE + 60 * 8) |
+                   ((uint64_t)dbg_read(DBG_BASE + 60 * 8 + 4) << 32);
+    fprintf(stderr,
+      "[dbg] rings live=%u mask=%016lx fatal=%016lx\n",
+      dbg_read(DBG_BASE + 58 * 8), (unsigned long)rlv,
+      (unsigned long)rft);
+    // sel61..66: objtab/objmem wedge state — who is parked on whom
+    uint64_t ot1 = dbg_read(DBG_BASE + 61 * 8) |
+                   ((uint64_t)dbg_read(DBG_BASE + 61 * 8 + 4) << 32);
+    uint64_t ot2 = dbg_read(DBG_BASE + 62 * 8) |
+                   ((uint64_t)dbg_read(DBG_BASE + 62 * 8 + 4) << 32);
+    uint64_t ot3 = dbg_read(DBG_BASE + 65 * 8) |
+                   ((uint64_t)dbg_read(DBG_BASE + 65 * 8 + 4) << 32);
+    uint64_t oid = dbg_read(DBG_BASE + 66 * 8) |
+                   ((uint64_t)dbg_read(DBG_BASE + 66 * 8 + 4) << 32);
+    fprintf(stderr,
+      "[dbg] ot tab_st=%02x og=%u rv=%u rr=%u cv=%u cr=%u "
+      "omt{rv=%u rr=%u sv=%u} om otq=%02x opq=%02x "
+      "mpf{bsy=%u own=%u otv=%u opv=%u rsp=%u} otop=%u "
+      "mpa=%08x mpw=%08x wrec=%04x walk=%04x frop=%u froid=%016lx\n",
+      (unsigned)((ot1 >> 11) & 0x3f), (unsigned)((ot1 >> 7) & 7),
+      (unsigned)(ot1 & 1), (unsigned)((ot1 >> 1) & 1),
+      (unsigned)((ot1 >> 2) & 1), (unsigned)((ot1 >> 3) & 1),
+      (unsigned)((ot1 >> 4) & 1), (unsigned)((ot1 >> 5) & 1),
+      (unsigned)((ot1 >> 6) & 1),
+      (unsigned)((ot2 >> 13) & 0x3f), (unsigned)((ot2 >> 9) & 0xf),
+      (unsigned)((ot2 >> 8) & 1), (unsigned)((ot2 >> 7) & 1),
+      (unsigned)((ot2 >> 6) & 1), (unsigned)((ot2 >> 5) & 1),
+      (unsigned)((ot2 >> 4) & 1),
+      (unsigned)(ot2 & 0xf),
+      (unsigned)(dbg_read(DBG_BASE + 63 * 8)),
+      (unsigned)(dbg_read(DBG_BASE + 64 * 8)),
+      (unsigned)((ot3 >> 16) & 0xffff), (unsigned)(ot3 & 0xffff),
+      (unsigned)((ot3 >> 32) & 0xff), (unsigned long)oid);
   }
 }
 
@@ -587,6 +629,9 @@ int main(int argc, char** argv) {
   dbg = getenv("G6LC_APU_DEBUG") != nullptr;
   dbg_dma = getenv("G6LC_APU_DEBUG_DMA") != nullptr;
   dbg_mmio = getenv("G6LC_APU_DEBUG_MMIO") != nullptr;
+  // finer wedge-snapshot cadence: ~64k sim cycles per stats() call
+  const uint64_t stats_mask =
+      getenv("G6LC_APU_DEBUG_FAST") ? 0xffffULL : 0x3fffffULL;
   const char* sock = getenv("G6LC_APU_RTL_SOCK");
   if (!sock) sock = "/tmp/g6lc-apu-rtl.sock";
   const char* trace = nullptr;
@@ -628,7 +673,8 @@ int main(int argc, char** argv) {
   }
   top->rst_ni = 1;
 
-  if (!bench) sock_listen(sock);
+  bench_mode = bench != 0;
+  if (!bench_mode) sock_listen(sock);
 
   auto t0 = std::chrono::steady_clock::now();
   uint64_t bench_start = 0;
@@ -645,7 +691,7 @@ int main(int argc, char** argv) {
     top->clk_i = 0;
     if (bench && cycles - bench_start >= bench) break;
     if (maxcyc && cycles >= maxcyc) break;
-    if (do_stats && (cycles & 0x3fffff) == 0) stats();
+    if ((do_stats || dbg) && (cycles & stats_mask) == 0) stats();
   }
   double sec = std::chrono::duration<double>(
       std::chrono::steady_clock::now() - t0).count();

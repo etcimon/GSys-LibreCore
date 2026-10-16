@@ -18,6 +18,9 @@ module g6lc_apu_sys
 #(
   parameter apu_cfg_t ApuCfg = ApuOff,
   parameter config_pkg::cva6_cfg_t CoreCfg = config_pkg::cva6_cfg_t'(0),
+  // Venus ring ALIVE watchdog refresh period: 2**AliveTickLog2 cycles
+  // (~1 ms at 1 GHz; sim fixtures override to 12)
+  parameter int unsigned AliveTickLog2 = 20,
   parameter type axi_req_t = apu_axi_req_t,
   parameter type axi_rsp_t = apu_axi_resp_t,
   parameter type dma_req_t = apu_dma_axi_req_t,
@@ -116,7 +119,8 @@ module g6lc_apu_sys
     logic                    vg_reset_done, vg_idle;
 
     g6lc_apu_vgsys #(
-      .Enable(1'b1), .WorkSink(1'b0), .ApuCfg(ApuCfg)
+      .Enable(1'b1), .WorkSink(1'b0), .ApuCfg(ApuCfg),
+      .AliveTickLog2(AliveTickLog2)
     ) i_vgsys (
       .clk_i, .rst_ni, .testmode_i,
       .vq0_i(vq_state_o[0]), .vq1_i(vq_state_o[1]),

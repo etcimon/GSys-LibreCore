@@ -121,11 +121,12 @@ lineWidthRange = [1.0, 1.0]
 # ignores anisotropy entirely (not advertised)
 maxSamplerLodBias = 15.0
 maxSamplerAnisotropy = 1.0
-# both allocation counts are bounded by the shared ObjTab entry table —
-# every live sampler/memory consumes one slot, and the table is sized
-# far below the spec's 4096 defaults
-maxSamplerAllocationCount = 64
-maxMemoryAllocationCount = 64
+# both allocation counts are bounded by the shared ObjTab-V entry
+# table — every live sampler/memory consumes one slot; the table is
+# aperture-backed (ObjEntries=65536) so the spec-minimum counts are
+# now truthful (byte exhaustion still returns OUT_OF_DEVICE_MEMORY)
+maxSamplerAllocationCount = 4000
+maxMemoryAllocationCount = 4096
 maxUniformBufferRange = 0x01000000
 maxStorageBufferRange = 0x01000000
 # G3a-ii: implicit-LOD λ uses the SFU log2 core (measured bound 1 ULP)
@@ -143,14 +144,14 @@ minMemoryMapAlignment = 4096
 # VkPhysicalDeviceMemoryProperties: two heaps (§12.3 C).
 #   heap 0 = the device-private arena (top 8 MiB of the SHM window);
 #            type 0 DEVICE_LOCAL allocations are eager ALLOC_PRIV there
-#   heap 1 = the guest-mappable span (SHM_LEN = 24 MiB);
+#   heap 1 = the guest-mappable span (SHM_LEN = 64 MiB);
 #            type 1 DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT is lazy at
 #            vkAllocateMemory and backed at first bind or map (§12.3
 #            3d-d): bind ALLOC_HI's a device-chosen extent (DEVBACKED);
 #            MAP_BLOB ALLOC_ATs the kernel offset, relocating the
 #            DEVBACKED extent when it differs
 heap0_size = 0x00800000
-heap1_size = 0x01800000
+heap1_size = 0x04000000
 type0_flags = "DEVICE_LOCAL"
 type0_heap = 0
 type1_flags = "DEVICE_LOCAL|HOST_VISIBLE|HOST_COHERENT"

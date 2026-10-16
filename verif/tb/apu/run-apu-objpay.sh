@@ -33,6 +33,7 @@ if ! "$VERILATOR" --binary --timing --assert -Wall \
   -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY \
   "${VLTS[@]}" \
   -f "$ROOT/corev_apu/apu/Flist.apu_objpay" \
+  "$ROOT/verif/tb/apu/tb_apu_mp_mem.sv" \
   "$ROOT/verif/tb/apu/tb_g6lc_apu_objpay.sv" \
   --top-module tb_g6lc_apu_objpay \
   -Mdir "$OUT/sim" -o tb_g6lc_apu_objpay \
@@ -63,7 +64,7 @@ fi
 # allocator logic is visible apart from the payload SRAM.
 for en in 0 1; do
   gp=""
-  if [ "$en" = 1 ]; then gp="-GPayWords=512"; fi
+  if [ "$en" = 1 ]; then gp="-GPayMemBytes=8192"; fi
   yp="read_slang -f $ROOT/corev_apu/apu/Flist.apu_objpay --top g6lc_apu_objpay_fixture -GEnable=$en $gp; hierarchy -top g6lc_apu_objpay_fixture; flatten; proc; opt; memory_collect; check -assert; stat; synth -top g6lc_apu_objpay_fixture -noabc; check -assert; stat; select -assert-none t:\$dlatch t:\$_DLATCH_*"
   if ! "$YOSYS" -Q -T -p "$yp" > "$OUT/synth-$en.log" 2>&1; then
     echo "SYNTH FAILED Enable=$en"

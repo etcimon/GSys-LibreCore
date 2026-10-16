@@ -61,16 +61,32 @@ package g6lc_apu_pkg;
   // VIRTIO_GPU_SHM_ID_HOST_VISIBLE. Length all-ones means the region is absent.
   localparam logic [31:0] APU_SHM_ID_HOST_VISIBLE = 32'd1;
   localparam logic [63:0] APU_SHM_BASE            = 64'h0000_0000_8200_0000;
-  // 32 MiB host-visible aperture (SHM id 1): stock Mesa Venus needs
-  // ~9.3 MiB of HOST3D blobs per instance (8 MiB cs + 1 MiB reply
-  // shmem pools + the 132 KiB ring) before any buffer objects.
-  localparam logic [63:0] APU_SHM_BYTES           = 64'h0000_0000_0200_0000;
+  // 128 MiB aperture (SHM id 1): the bottom 72 MiB is the managed
+  // window (64 MiB guest-advertised + 8 MiB APU_VGPAGES_OP_ALLOC_PRIV
+  // arena); the upper 56 MiB is the G3b-i static carve holding objmem
+  // (ObjTab-V entries + id directory + free stack) and PayMem
+  // (ObjPay-V payload arena) — §5a "Implementation decisions
+  // (2026-10-15)".  On a real SoC the same constant names the APU's
+  // DRAM carve-out; the bridge and the g6lc_qemu FDT re-derive from it.
+  localparam logic [63:0] APU_SHM_BYTES           = 64'h0000_0000_0800_0000;
   // §12.3 F5: the top 8 MiB is a device-private arena (descriptor-pool
   // record stores, APU_VGPAGES_OP_ALLOC_PRIV); the guest kernel's shm
   // drm_mm only spans the advertised SHM_LEN so internal allocations
   // can never collide with MAP_BLOB placement.  Must equal
   // g6lc_apu_vg_pkg::APU_VG_GUEST_BYTES.
-  localparam logic [63:0] APU_SHM_GUEST_BYTES     = 64'h0000_0000_0180_0000;
+  // G3b-i r2 (§5a revision 2026-10-16): the window grew 24 -> 64 MiB.
+  // API-X4 evidence (out-apix4-dbg): each live Venus device pins ~9.3
+  // MiB of MAPPABLE blobs (ring + cs pool); five concurrent devices
+  // plus the framework context need ~57 MiB, and the guest kernel's
+  // drm_mm fails the mmap before any virtio request reaches the
+  // device (zero vgerr under G6LC_APU_DBG_LOST).  The resource behind
+  // the growth is the aperture itself plus the tc_sram page bitmap.
+  localparam logic [63:0] APU_SHM_GUEST_BYTES     = 64'h0000_0000_0400_0000;
+  // The vgpages-managed window: guest pages + the 8 MiB ALLOC_PRIV
+  // arena.  MAP_BLOB legality bounds to this — the static carve above
+  // it is device-private and unreachable through guest-visible paths.
+  // Mirrors g6lc_apu_vg_pkg::APU_VG_MANAGED_BYTES.
+  localparam logic [63:0] APU_SHM_MANAGED_BYTES   = 64'h0000_0000_0480_0000;
   localparam logic [31:0] APU_BLOB_MEM_HOST3D     = 32'h0000_0002;
   localparam logic [31:0] APU_BLOB_FLAG_MAPPABLE  = 32'h0000_0001;
   localparam logic [31:0] APU_VGPU_CAPSET_VENUS   = 32'd4;

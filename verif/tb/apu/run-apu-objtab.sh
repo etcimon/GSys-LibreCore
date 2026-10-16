@@ -1,8 +1,11 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 # Generational object table (g6lc_apu_objtab) — directed + seeded-random
-# Verilator sim; OBJTAB_SYNTH=1 adds yosys Enable=0/1 screens with the
-# retained-memory assertion (two $mem: entries + directory).
+# Verilator sim; OBJTAB_SYNTH=1 adds yosys Enable=0/1 screens.  The
+# fixture wraps objtab alone (omt port out); its only arrays are the
+# per-ctx flop heads, so no $mem should survive memory_collect — the
+# directory/entry storage lives in objmem's tc_sram, screened at the
+# objmem level.
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 export CVA6_REPO_DIR="$ROOT"
@@ -33,6 +36,7 @@ if ! "$VERILATOR" --binary --timing --assert -Wall \
   -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY \
   "${VLTS[@]}" \
   -f "$ROOT/corev_apu/apu/Flist.apu_objtab" \
+  "$ROOT/verif/tb/apu/tb_apu_mp_mem.sv" \
   "$ROOT/verif/tb/apu/tb_g6lc_apu_objtab.sv" \
   --top-module tb_g6lc_apu_objtab \
   -Mdir "$OUT/sim" -o tb_g6lc_apu_objtab \
@@ -67,29 +71,52 @@ for en in 0 1; do
     exit 1
   fi
   echo "SYNTH OK Enable=$en"
+  # objmem screen: same Flist; small geometry keeps the screen cheap —
+  # Enable=0 must stay inert, Enable=1 must carry cells+FFs+no latches
+  gp="-GObjEntries=256 -GPayMemBytes=16384 -GDirCacheSets=16 -GEntCacheLines=8 -GPayCacheLines=4"
+  yp="read_slang -f $ROOT/corev_apu/apu/Flist.apu_objtab --top g6lc_apu_objmem_fixture -GEnable=$en $gp; hierarchy -top g6lc_apu_objmem_fixture; flatten; proc; opt; memory_collect; check -assert; stat; synth -top g6lc_apu_objmem_fixture -noabc; check -assert; stat; select -assert-none t:\$dlatch t:\$_DLATCH_*"
+  if ! "$YOSYS" -Q -T -p "$yp" > "$OUT/synth-om-$en.log" 2>&1; then
+    echo "SYNTH FAILED objmem Enable=$en"
+    tail -n 40 "$OUT/synth-om-$en.log"
+    exit 1
+  fi
+  echo "SYNTH OK objmem Enable=$en"
 done
 python3 - "$OUT" <<'PY'
 import re, sys, pathlib
 out = pathlib.Path(sys.argv[1])
 ok = True
 for en in (0, 1):
-    text = pathlib.Path(f"{out}/synth-{en}.log").read_text(errors="replace")
-    stats = re.split(r"\d+\. Printing statistics\.", text)
-    memblk = stats[1] if len(stats) > 2 else ""
-    gate = stats[-1]
-    mem = re.findall(r"^\s+(\d+)\s+(\$mem\S*)", memblk, re.M)
-    mem_n = sum(int(n) for n, _ in mem)
-    cells = re.search(r"Number of cells:\s+(\d+)", gate) or             re.search(r"^\s+(\d+) cells\b", gate, re.M)
-    ffs = sum(int(n) for n, _ in re.findall(r"^\s+(\d+)\s+(\$_DFF\w*)", gate, re.M))
-    probs = re.findall(r"Found and reported (\d+) problems\.", text)
-    need = 2 if en == 1 else 0
-    tag = "OK" if mem_n == need else "FAIL"
-    if mem_n != need:
-        ok = False
-    print(f"SYNTH Enable={en} cells={cells.group(1) if cells else '?'} "
-          f"ffs={ffs} problems={','.join(probs) or '0'} latch=none "
-          f"retained_mem={mem_n} ({';'.join(f'{n} {k}' for n,k in mem) or 'none'}) {tag}")
-print("RETAINED_MEM_ASSERT " + ("PASS" if ok else "FAIL"))
+    for name, fn in (("objtab", f"{out}/synth-{en}.log"),
+                     ("objmem", f"{out}/synth-om-{en}.log")):
+        text = pathlib.Path(fn).read_text(errors="replace")
+        stats = re.split(r"\d+\. Printing statistics\.", text)
+        memblk = stats[1] if len(stats) > 2 else ""
+        gate = stats[-1]
+        mem = re.findall(r"^\s+(\d+)\s+(\$mem\S*)", memblk, re.M)
+        mem_n = sum(int(n) for n, _ in mem)
+        cells = re.search(r"Number of cells:\s+(\d+)", gate) or \
+                re.search(r"^\s+(\d+) cells\b", gate, re.M)
+        ffs = sum(int(n) for n, _ in
+                  re.findall(r"^\s+(\d+)\s+(\$_DFF\w*)", gate, re.M))
+        probs = re.findall(r"Found and reported (\d+) problems\.", text)
+        # objtab holds no SRAM (omt port out).  objmem's caches are
+        # tc_sram cells; its flop free-stack top + dir tags may still
+        # infer small $mem — allowed, only the count is reported
+        need = 0 if name == "objtab" else None
+        tag = "OK" if need is None or mem_n == need else "FAIL"
+        if need is not None and mem_n != need:
+            ok = False
+        print(f"SYNTH {name} Enable={en} "
+              f"cells={cells.group(1) if cells else '?'} ffs={ffs} "
+              f"problems={','.join(probs) or '0'} latch=none "
+              f"retained_mem={mem_n} "
+              f"({';'.join(f'{n} {k}' for n,k in mem) or 'none'}) {tag}")
+        if (en == 0 and cells and int(cells.group(1)) != 0) or \
+           (en == 1 and cells and int(cells.group(1)) == 0):
+            ok = False
+            print(f"SYNTH {name} Enable={en} cell-count gate FAIL")
+print("SYNTH_ASSERT " + ("PASS" if ok else "FAIL"))
 sys.exit(0 if ok else 1)
 PY
 echo "OBJTAB_SUMMARY_DONE"

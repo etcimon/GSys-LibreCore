@@ -28,8 +28,9 @@ package g6lc_apu_mp_pkg;
     APU_MP_PUB  = 0,
     APU_MP_VQ   = 1,
     APU_MP_CTL  = 2,
-    APU_MP_PUMP = 3,
-    APU_MP_SH   = 4,
-    APU_MP_RAST = 5,
-    APU_MP_N    = 6;
+    APU_MP_OBJ  = 3,
+    APU_MP_PUMP = 4,
+    APU_MP_SH   = 5,
+    APU_MP_RAST = 6,
+    APU_MP_N    = 7;
 endpackage

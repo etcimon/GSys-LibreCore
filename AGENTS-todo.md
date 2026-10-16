@@ -350,6 +350,58 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
   (descriptor pNext now decodes, ring drains, `fatal=0`), Mesa aborts in fence wait
   (`rc=134` → `GUEST-FAIL`); fragment/compute texture paths pass; not yet root-caused to a
   unit. Pinned-toolchain leaves deferred to the G3 milestone.
+- [x] G3b-i — **residency virtualization: ObjTab-V + ObjPay-V in the aperture, API-X4
+  closed (2026-10-16).** §5a "Implementation decisions" as designed, with two evidence-driven
+  revisions recorded there: the aperture grows 32 → **128 MiB** (`APU_SHM_BYTES`) and the
+  guest-visible window 24 → **64 MiB** (`APU_SHM_GUEST_BYTES`/`APU_VG_GUEST_BYTES`, managed
+  72 MiB, `APU_VG_PAGES` 18432 in the existing `tc_sram` bitmap) because
+  `api.device_init.create_multiple_devices.basic` keeps five Venus devices live and each pins
+  ~9.3 MiB of MAPPABLE blobs — the guest `drm_mm` failed the mmap before any virtio request
+  (zero `vgerr`), so the limiter was the aperture itself, not an object count; and vnpump
+  `Rings` 4 → 64 (each device claims ring slots through `vkCreateRingMESA`; the 5th
+  `CreateRing` went `StFatal`). New `g6lc_apu_objmem.sv` owns the private carve above the
+  managed window (entries 64 B × `ObjEntries`=2¹⁶, 8 B directory buckets ×2, global free stack,
+  PayMem 16 MiB), the directory cache (256 × 4), entry cache (64 lines), payload cache (32
+  lines), flop free-stack top with a bump watermark, and **epoch reset semantics** (a magic
+  pair at the stack end stores the epoch; every row/record is valid only for its epoch, so a
+  reset empties the table lazily instead of zeroing 1.25 MiB; cold boot sweeps the directory
+  once). `g6lc_apu_objtab.sv` keeps every `ot_*` op's semantics (probe cap 8 → 32, entries
+  store the full 64-bit id as the authoritative check; per-context doubly-linked live lists
+  with `MaxCtx`=32 heads + one overflow head, a global DEVICE_MEMORY list for `SCAN_OVL`;
+  `RESET_CTX`/`RETIRE_KIDS` walk lists, not the table). `g6lc_apu_objpay.sv` keeps the `op_*`
+  types; bitmap in `tc_sram`, next-fit 64-bit-word scan, one-line write-merge buffer; parking
+  `aux[63:32] = {base>>6, words}` (chunk units, `<<6` at the unpark sites in vnfront/cmdexec).
+  One `APU_MP_OBJ` requester (`APU_MP_N` 7). `APU_VG_CTX_TAG` separates virtio context ids
+  from resource ids (a live blob rid N DUP-blocked `CTX_CREATE` for ctx N —
+  `max_concurrent.instance`). Events (`vkCreate/Destroy/Set/Reset/GetEventStatus`) joined the
+  command set. **Stock-protocol defect found by the CTS flood and fixed:** the Venus ring
+  watchdog (Mesa clears `ALIVE` while it waits and aborts "expired ring alive status") was
+  only re-asserted on ring create, `NotifyRing` and the idle poll — a long drain or a long
+  ObjTab walk never re-asserted it; vnpump now publishes `ALIVE` with every consumed head
+  (`StStatWr`), refreshes parked rings on the `idle_to` cadence, and runs a background
+  heartbeat every `2^AliveTickLog2` cycles (default 20 ≈ 1 ms at 1 GHz; bridge/fixture
+  override 12) that preserves a published `IDLE`. Profile: `maxMemoryAllocationCount` 4096,
+  `maxSamplerAllocationCount` 4000 (now backed), heap 1 = 64 MiB. **Evidence (local 5.020,
+  `.cache/g3b/live-gates*/`):** objtab 14 / 101,544 (maxconc 16,384 live, ctxwalk, ovl,
+  probe), objpay 6 / 3,005, vgpages 8 / 1,763 (65,536 pages), vgctl 15 / 75, vnfront 47 / 343,
+  cmdexec 8 / 33, vnpump 87 / 263, vgsys 33 / 1,064 incl. `ue_cpos_maxconc_1`, vgtop compute
+  arm 77 sessions step 1 OK (step 2 `mp_latency` sweep not recorded), shwave 402 / 72,309 on
+  the pre-texture manifest; **owed:** sys-venus and vndec on the landed tree (vndec launched at
+  record time), the live-tree 5.008 lint rerun (worktree lint was clean), the post-heartbeat
+  bridge `vkcmp` all-scenes rerun. **Guest (CTS-1 `cts1-objmgmt.txt`, run `out-g3bi-cts1-r4`,
+  pre-heartbeat-IDLE bridge): 131 run of 140 — 106 Pass / 20 Fail / 4 NotSupported / 9 not run
+  (`max_concurrent.{command_pool*, descriptor_pool*, descriptor_set*, framebuffer,
+  render_pass}` absent from the QPA — cause owed), no ring abort.** `create_multiple_devices.
+  basic` **Pass** (API-X4 closed); `max_concurrent.{buffer*, device_memory*, sampler, fence,
+  semaphore, event, query_pool, image_2d*, image_view_2d*, instance, device, …}` Pass. The 20
+  Fails are one class — `vkCreateImage → VK_ERROR_FEATURE_NOT_PRESENT` for `image_1d`,
+  `image_3d`, `image_view_1d`, `image_view_1d_arr`, `image_view_3d` in all four shapes: 1D/3D
+  images are core 1.0 and the device refuses them (limits-ledger `maxImageDimension1D/3D = 0`)
+  — mechanism gap, G3d (TEX-L1/IMG-L1), left Fail-visible. 4 NotSupported =
+  `image_view_cube_arr` (`imageCubeArray` unadvertised — honest). Ledger parse/render under
+  `g3bi-2026-10-16` owed. Earlier runs on the way: `out-g3bi-cts1-r3` died on an alive expiry
+  during a `descriptor_pool` space wait (the residual that motivated the heartbeat);
+  `out-g3bi-mctail3` 7/8 Pass with the abort gone.
 - [ ] **CTS track (2026-10-14) — the Khronos Vulkan CTS becomes the acceptance oracle.**
   Source of record `specs/VK-GL-CTS` (lazy, shallow, `update = none`) pinned to
   `vulkan-cts-1.4.6.2` = `f6a29701220f34dd1407513bfe80d74ca7b392ce`; must-pass index

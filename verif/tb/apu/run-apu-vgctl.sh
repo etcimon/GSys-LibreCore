@@ -36,8 +36,7 @@ if ! "$VERILATOR" --binary --timing --assert -Wall \
   -Wno-SYNCASYNCNET -Wno-DECLFILENAME -Wno-PINCONNECTEMPTY \
   "${VLTS[@]}" \
   -f "$ROOT/corev_apu/apu/Flist.apu_vgctl" \
-  "$ROOT/vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv" \
-  "$ROOT/corev_apu/apu/g6lc_apu_objtab.sv" \
+  "$ROOT/verif/tb/apu/tb_apu_mp_mem.sv" \
   "$ROOT/verif/tb/apu/tb_g6lc_apu_vgctl.sv" \
   --top-module tb_g6lc_apu_vgctl \
   -Mdir "$OUT/sim" -o tb_g6lc_apu_vgctl \

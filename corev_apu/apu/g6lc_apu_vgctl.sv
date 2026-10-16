@@ -413,7 +413,7 @@ module g6lc_apu_vgctl
         StOtReq: begin
           unique case (rtype_q)
             APU_VG_CTX_CREATE: ot_req_o = '{op: APU_OBJTAB_OP_ALLOC,
-                id: APU_VG_ID_TAG | {32'h0, rctx_q},
+                id: APU_VG_CTX_TAG | {32'h0, rctx_q},
                 kind: 6'(APU_VN_KIND_APU_VIRTIO_CTX),
                 ctx: 8'(rctx_q), default: '0};
             APU_VG_CTX_DESTROY: ot_req_o = '{op: APU_OBJTAB_OP_RESET_CTX,
@@ -452,9 +452,11 @@ module g6lc_apu_vgctl
     // ---- ObjPay / ShaderCore-slot reap ports ------------------------------
     assign op_req_valid_o = state_q == StReapOpReq;
     assign op_cpl_ready_o = state_q == StReapOpCpl;
-    // aux[63:32] = {base[15:0], words[15:0]} (vnfront parks it so)
+    // aux[63:32] = {base>>6[15:0], words[15:0]} — vnfront parks the
+    // ObjPay extent's chunk index; the FREE port takes the word
+    // address back, so the packed base unparks with <<6
     assign op_req_o = '{op: APU_OBJPAY_OP_FREE,
-                       addr: {16'h0, reap_aux_q[63:48]},
+                       addr: {16'h0, reap_aux_q[63:48]} << 6,
                        words: {16'h0, reap_aux_q[47:32]},
                        default: '0};
     assign sm_req_o    = state_q == StReapSmReq;
@@ -1051,6 +1053,14 @@ module g6lc_apu_vgctl
           StOtReq:  if (ot_req_ready_i) state_q <= StOtCpl;
           StOtCpl: begin
             if (ot_cpl_valid_i) begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+              if (ot_cpl_i.status != APU_OBJTAB_OK)
+                $display("[DBG] ot-fail rtype=%02x st=%0d id=%016x ctx=%x t=%0t",
+                         rtype_q, ot_cpl_i.status,
+                         64'h0, rctx_q, $time);
+`endif
+// pragma translate_on
               unique case (rtype_q)
                 APU_VG_CTX_CREATE,
                 APU_VG_MAP_BLOB,
