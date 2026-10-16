@@ -1653,21 +1653,20 @@ pub fn billed_binary_class(
     {
         return OperatorClass::Other;
     }
-    // `x + 1` / `x - 1'd1` is an increment, not a 10 FO4 carry-propagate add
-    // (axi2mem wrap staging: `len + 1` then `<< LOG` then `wrap +`).
+    // `x + 1` / `x - 1'd1` / `x + CONST` is an incrementer, not a 10 FO4
+    // carry-propagate add (axi2mem wrap staging: `len + 1` then `<< LOG` then
+    // `wrap +`) — but not a gate either: a constant addend leaves a prefix-AND
+    // carry chain, structurally the comparator's, so it is billed as Compare
+    // (4 at 32 bits, log2 width-scaled). Measured on Nangate45 (nf script):
+    // 16-bit `x + 1` 0.281 ns vs 16-bit `<` 0.296 ns. delay-v18..v31 billed
+    // it 1 FO4 at every width (delay-v32 correction).
     if matches!(op_class, OperatorClass::AddSub)
         && matches!(op, "+" | "-")
-        && is_unit_increment_operand(left, right)
+        && (is_unit_increment_operand(left, right)
+            || left.const_class(seed).is_const()
+            || right.const_class(seed).is_const())
     {
-        return OperatorClass::LogicBit;
-    }
-    // Const offset (`used_bits += te_pkg::XLEN + (address_off * 8)`): folding
-    // the constant does not insert a 10 FO4 CPA on the runtime spine.
-    if matches!(op_class, OperatorClass::AddSub)
-        && matches!(op, "+" | "-")
-        && (left.const_class(seed).is_const() || right.const_class(seed).is_const())
-    {
-        return OperatorClass::LogicBit;
+        return OperatorClass::Compare;
     }
     // `addr + (c ? 2 : 4)` / `pc + (compressed ? 'h2 : 'h4)`: both arms are
     // elaboration constants, so the add is a selected increment, not CPA+mux.
@@ -3255,7 +3254,8 @@ mod tests {
             }
         }
         // `+1` / `-1` are increments; `* 8` is a shift — not a 10+10 CPA.
-        assert_arithmetic_cost("(i + 1) * 8 - 1", OperatorClass::LogicBit, 3.0);
+        // `i + 1` is an incrementer (Compare class, 1.0 in this test table).
+        assert_arithmetic_cost("(i + 1) * 8 - 1", OperatorClass::Compare, 3.0);
         assert_arithmetic_cost("mem[i * 8]", OperatorClass::Other, 1.0);
     }
 

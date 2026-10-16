@@ -6921,7 +6921,9 @@ All numbers below are structural FO4 at **10 FO4 / 20 ps / margin 0.2** on
 | delay-v30 baseline | 75.0 (`fpnew_fma_multi`) | 677 | casts parsed: hidden fpnew exponent sums exposed (A84) |
 | delay-v31 baseline | 27.0 (`g6lc_bp_ckpt`) | 677 | multi-operand sums are CSA + one CPA (A85) |
 | delay-v31 + cfg snapshot, baseline | **22.0** | 700 | `TRANS_ID_BITS`/`NrHarts`/`INSTR_PER_FETCH` resolved (A86) |
-| delay-v31 + cfg snapshot, review | **21.0** (`fpnew_fma_multi`) | 696 | |
+| delay-v31 + cfg snapshot, review | 21.0 (`fpnew_fma_multi`) | 696 | `fpnew_fma_multi` is not instantiated in this config |
+| delay-v32 + cfg + elaborated widths, baseline (live modules) | **26.8** (`instr_queue`) | 521 | 126 file-list modules not in the elaborated design excluded (A89) |
+| delay-v32 + cfg + elaborated widths, review | **17.0** (`g6lc_bp_ckpt`) | 515 | precomputed step increments added to the review copy (A88) |
 
 The failing-path count went **up** with width scaling: a 64-bit add is 12 FO4
 at this table, so every single-cycle 64-bit adder path now misses a 10 FO4
@@ -6929,14 +6931,16 @@ budget. That is the physics of XLEN=64 at 4 GHz / 20 ps, not a regression, and
 it is the honest shape of the remaining gap: AGENTS.md §3.2.1 — `fo4_ps` is a
 process input (10 FO4 at 20 ps, 16.7 at 12 ps).
 
-Top remaining RegToReg cones (review tree, delay-v31 + snapshot):
-`fpnew_fma_multi` L396 21.0 and `fpnew_fma` L303 17.5 (exponent datapath at
-reference width: `EXP_WIDTH` comes from a package *function*, unresolved),
-`g6lc_bp_ckpt` L345 17.0 (a real 4-bit chain pop_diff → pop_dist → alloc_free
-→ head_d, 5.5+1+4+6.5), `frontend` L727 14.5 (64-bit branch-target adder
-behind a mux — a fat-operator leaf at XLEN=64), `instr_queue` L289 13.5
-(`NrFifo`/`IdxW` from `g6lc_fetch_pkg::geo(CVA6Cfg)`, unresolved), then a wall
-of 12.0–12.5 entries that are one 64-bit add or compare plus a mux.
+Top remaining live RegToReg cones (review tree, delay-v32 + cfg snapshot +
+elaborated widths; 1390 reg-to-reg paths, 155 failing, structural maximum
+≈ 2353 MHz): `g6lc_bp_ckpt` L345 17.0 (a real 4-bit chain pop_diff →
+pop_dist → alloc_free → head_d, 5.5+1+4+6.5), `fpnew_fma` L303 14.9 (exponent
+datapath, `EXP_WIDTH` from a package function — sized by the width map where
+the net survives), `frontend` L727/L614 14.5 (64-bit branch-target adder behind
+a mux — a fat-operator leaf at XLEN=64; and the slot-live chain),
+`wt_dcache_wbuffer` L623 13.5, `instr_queue` L658 13.0 (push-address select),
+then a wall of 12.0–12.5 entries that are one 64-bit add or compare plus a
+mux. The live baseline without the review edits reports 26.8 (`instr_queue`).
 
 ## A82 — Constant-span exclusion in origin coordinates (delay-v28)
 
@@ -7058,6 +7062,52 @@ memory in one process; the word-level design is ~12 GiB. Host changes:
   result parser rejects `1e39` no-path sentinels; a dry run is SKIP, not STA.
 
 The streamed live-RTL study is running under a 48 GiB cap in
-`~/.cache/g6lc-sta/g6lc64_ooo-streamed-20261016/`. No whole-core mapped STA
-number exists yet; when one does it anchors the model, it does not certify
+`~/.cache/g6lc-sta/g6lc64_ooo-streamed-20261016/`: phase A (word level) took
+699 s and 17.8 GiB and produced 461 specialized modules; phase B maps them one
+at a time (a large module can hold ABC for 20 minutes). No whole-core mapped
+STA number exists yet; when one does it anchors the model, it does not certify
 10 FO4.
+
+## A88 — Precomputed step increments (review candidate, instr_queue)
+
+`push_seq_d = push_seq_q + 16'(shamt)` and `idx_is_d = (idx_is_q + shamt) &
+IdxMask` sat at the end of the admission cone (cf-type compare → mask → valid →
+slot0 rotate → overflow → partial → `shamt` mux, 10.3 FO4) followed by a 16-bit
+add (8): 18.3 FO4, the live worst once widths were known. `shamt` is 0..NrFifo,
+so every candidate sum is a constant-offset increment of the *register* alone:
+
+```systemverilog
+for (genvar k = 0; k <= NrFifo; k++) begin : gen_step_cand
+  assign push_seq_cand[k] = push_seq_q + 16'(k);
+  assign idx_is_cand[k]   = (idx_is_q + fifo_idx_t'(k)) & IdxMask;
+end
+assign push_seq_d = push_seq_cand[shamt];
+assign idx_is_d   = idx_is_cand[shamt];
+```
+
+The increments leave the admission cone (they start at the clock edge); the
+cone ends in a 5:1 select. Exact modulo 2^W, same cycle, no state added; the
+cost is NrFifo+1 incrementers of W bits. This is the Part LI two-port pointer
+specialization (mapped 0.247 → 0.169 ns) applied to the sequence counter; it
+is a review copy, not a production edit, and it is the shape a `SelectIncrement`
+transform would emit automatically (`REG_q + X`, X a k-bit runtime step with
+k ≤ 3, REG_q a register): the next transform to implement.
+
+## A89 — Only instantiated modules decide a target's period
+
+A file list carries every module a *family* of configurations can use. With
+an elaborated width map present, `frequency_closure` counts only the modules
+the elaborator instantiated and lists the others as `uninstantiated_modules`
+(126 on `g6lc64_ooo`: `fpnew_fma_multi`, the C910 `pa_fdsu_*` divider, the
+generic RAM models, …). `fpnew_fma_multi`'s 21.0 was the headline for a module
+this target does not build. Paths of dead modules are still analyzed and
+listed; they no longer set `worst_path_fo4`, `closes` or the failing counts.
+
+## A90 — Incrementers are not gates (delay-v32)
+
+`x + 1` and `x + CONST` were billed 1 FO4 at every width since delay-v18
+("folding the constant inserts no CPA"). A constant addend still leaves a
+prefix-AND carry chain — structurally the comparator's: measured 16-bit
+`x + 1` 0.281 ns against 16-bit `<` 0.296 ns (nf script). They are now billed
+as Compare (4 at 32 bits, log2 width-scaled, context width when no relational
+operand exists). The 64-bit counters in the core moved from 1 to 4.8 FO4.

@@ -390,7 +390,8 @@ export function streamedPhaseBShell(opts: { runDir: string; liberty: string; yos
     `echo "read_rtlil ${opts.runDir}/wordlevel.il" >> "${opts.runDir}/phaseB.ys"`,
     `n=0`,
     `grep -E '^  ' "${opts.runDir}/modules.txt" | sed 's/^  //' | while IFS= read -r m; do`,
-    `  f=$(printf '%s' "$m" | tr -c 'A-Za-z0-9_.-' '_')`,
+    // slang's specialized names run past NAME_MAX; the index keeps them unique.
+    `  f=$(printf '%s' "$m" | tr -c 'A-Za-z0-9_.-' '_' | cut -c1-96)`,
     `  n=$((n+1))`,
     `  printf 'select %s\ntechmap\nopt_clean\ndfflibmap -liberty %s\n%s\nopt_clean -purge\nstat -liberty %s\nwrite_verilog -selected -noattr -noexpr %s/mapped/%04d_%s.v\nselect -clear\ndelete %s\n' "$m" "${opts.liberty}" ${JSON.stringify(abc)} "${opts.liberty}" "${opts.runDir}" "$n" "$f" "$m" >> "${opts.runDir}/phaseB.ys"`,
     `done`,

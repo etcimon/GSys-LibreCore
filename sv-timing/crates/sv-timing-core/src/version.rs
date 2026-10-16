@@ -67,7 +67,11 @@ pub const IR_VERSION: &str = "ir-v1";
 /// `delay-v31`: an N-operand `+`/`-` tree costs one CPA plus 1.5 FO4 per
 /// extra operand (carry-save reduction, `CSA_LEVEL_LOGIC_BITS`), not N-1
 /// serial CPAs; measured 0.617/0.726/0.901 ns for 2/3/5 operands at 32 bits.
-pub const MEASUREMENT_VERSION: &str = "delay-v31";
+/// `delay-v32`: `x ± Const` (including `± 1`) is an incrementer billed as
+/// Compare (prefix-AND carry chain, log2 width-scaled), not a 1 FO4 gate;
+/// `frequency_closure` counts only modules the elaborated width map
+/// instantiates and lists the rest as `uninstantiated_modules`.
+pub const MEASUREMENT_VERSION: &str = "delay-v32";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

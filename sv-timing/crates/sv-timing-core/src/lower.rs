@@ -2992,7 +2992,9 @@ mod tests {
             let mut different_file = inside.loc.clone();
             different_file.file = "other.sv".into();
             assert!(m.genvar_names_at(&different_file).is_empty());
-            assert_eq!(inside.fo4_cost, CostModel::default().logic_bit);
+            // `a + k` with genvar `k`: a constant-offset incrementer (Compare
+            // class, delay-v32), not the 10 FO4 CPA and not a 1 FO4 gate.
+            assert_eq!(inside.fo4_cost, CostModel::default().compare);
             assert_eq!(outside.fo4_cost, CostModel::default().mul);
         }
     }
@@ -3019,7 +3021,7 @@ mod tests {
             .find(|n| n.rhs.as_deref() == Some("a + k"))
             .unwrap();
         assert_eq!(m.genvar_names_at(&inside.loc), vec!["k"]);
-        assert_eq!(inside.fo4_cost, CostModel::default().logic_bit);
+        assert_eq!(inside.fo4_cost, CostModel::default().compare, "incrementer class");
     }
 
     #[test]

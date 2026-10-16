@@ -64,7 +64,16 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   analyze/correct, `WidthResolver` fallback for packed signals the source
   cannot size; streamed `sta-rtl` produces and pulls it. Whole-core map still
   pending (phase A re-run word-level only after a techmap OOM).
-- [ ] Whole-core mapped STA: streamed run in progress; none finished yet.
+- [x] delay-v32: `x ± Const` incrementers are Compare class (log2 scaled), not
+  1 FO4; `frequency_closure` excludes modules the elaborated design does not
+  instantiate (`uninstantiated_modules`, 126 on g6lc64_ooo).
+- [x] Review candidate A88 (precomputed step increments) removes instr_queue's
+  18.3/15.3 cones; live board worst RegToReg 17.0 (`g6lc_bp_ckpt`), 155/1390
+  failing, structural max ≈ 2353 MHz. Live baseline without review edits: 26.8.
+- [ ] `SelectIncrement` transform (`REG_q + k-bit step` → precomputed candidates
+  + select) so A88 is automatic and emitted, with SAT equivalence on fixtures.
+- [ ] Whole-core mapped STA: streamed phase B in progress (461 modules, one
+  large module holds ABC for ~20 min); none finished yet.
 - [ ] 10 FO4 completion: the residual is 64-bit adders/compares (12 FO4 at
   this table) plus a few real narrow chains (`g6lc_bp_ckpt` 17, `instr_queue`
   13.5). Closure at XLEN=64 needs either `fo4_ps` ≤ 16 or multi-cycle/pipelined

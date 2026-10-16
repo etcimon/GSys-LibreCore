@@ -121,6 +121,9 @@ SYNC_INCLUDE = [
     # tree (gitignored, but part of the sync; the rest of workspace/build is
     # excluded below).
     "build-platform/workspace/build/sta-rtl/",
+    # `timings sta-rtl --remote --map-recipe streamed`: the builder turns the
+    # word-level RTLIL into sv-timing's elaborated width map with this tool.
+    "sv-timing/tools/rtlil_width_map.py",
     "software/smt2-linux/scripts/build-opensbi-smt2.sh",
     "software/smt2-linux/soft-ladder/mk_plat_skip.py",
     "software/smt2-linux/soft-ladder/rebuild_held_from_pin.sh",

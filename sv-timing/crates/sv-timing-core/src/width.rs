@@ -65,10 +65,13 @@ pub struct NodeWidths {
 }
 
 impl NodeWidths {
-    /// Width to scale `class` with.
+    /// Width to scale `class` with. A Compare-billed incrementer (`x + 1`,
+    /// `billed_binary_class`) has no relational operands; it spans the
+    /// arithmetic context, so Compare falls back to `arith` when no relational
+    /// operand was seen.
     pub fn for_class(&self, class: OperatorClass) -> Option<u32> {
         match class {
-            OperatorClass::Compare => self.compare,
+            OperatorClass::Compare => self.compare.or(self.arith),
             OperatorClass::AddSub
             | OperatorClass::ShiftVar
             | OperatorClass::Mul

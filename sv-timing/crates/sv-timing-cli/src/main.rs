@@ -933,6 +933,7 @@ fn design_to_analyze_json(
             "reg_to_reg_paths": closure.reg_to_reg_paths,
             "intoout_failing": closure.intoout_failing,
             "regtoreg_failing": closure.regtoreg_failing,
+            "uninstantiated_modules": closure.uninstantiated_modules,
         },
         "pass_plan": {
             "abort_correct": design.pass_plan.abort_correct,

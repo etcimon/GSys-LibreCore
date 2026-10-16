@@ -659,32 +659,57 @@ pub struct FrequencyClosure {
     /// Failing flop-to-flop paths used for `closes`.
     #[serde(default)]
     pub regtoreg_failing: usize,
+    /// Modules in the file list that the elaborated design (`--width-map`)
+    /// does not instantiate; their paths are excluded above. Empty without a map.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub uninstantiated_modules: Vec<String>,
 }
 
 /// Compute frequency-closure report from ranked paths.
+///
+/// With an elaborated width map (`design.width_map`), only modules the
+/// elaborator instantiated count: a file list carries every module a *family*
+/// of configs can use (`fpnew_fma_multi` is in the list and not in
+/// `g6lc64_ooo`), and a dead module's cone is not this target's period.
 pub fn frequency_closure(design: &TimingDesign) -> FrequencyClosure {
     let ranked = rank_paths_by_slack(&design.paths, &design.target);
-    let reg_to_reg = ranked
+    let mut uninstantiated: Vec<String> = Vec::new();
+    let live: Option<std::collections::BTreeSet<ModuleId>> = if design.width_map.is_empty() {
+        None
+    } else {
+        let mut set = std::collections::BTreeSet::new();
+        for (id, m) in &design.modules {
+            if design.width_map.contains_key(&m.name) {
+                set.insert(*id);
+            } else {
+                uninstantiated.push(m.name.clone());
+            }
+        }
+        Some(set)
+    };
+    let primary: Vec<&TimingPath> = ranked
         .primary
+        .iter()
+        .filter(|p| live.as_ref().is_none_or(|l| l.contains(&p.module)))
+        .collect();
+    let reg_to_reg = primary
         .iter()
         .filter(|p| p.path_kind == crate::ir::PathKind::RegToReg)
         .count();
-    let failing = ranked.primary.iter().filter(|p| p.slack_fo4 < 0.0).count();
-    let intoout_failing = ranked
-        .primary
+    let failing = primary.iter().filter(|p| p.slack_fo4 < 0.0).count();
+    let intoout_failing = primary
         .iter()
         .filter(|p| p.slack_fo4 < 0.0 && p.path_kind == crate::ir::PathKind::InToOut)
         .count();
-    let regtoreg_failing = ranked
-        .primary
+    let regtoreg_failing = primary
         .iter()
         .filter(|p| p.slack_fo4 < 0.0 && p.path_kind == crate::ir::PathKind::RegToReg)
         .count();
-    let worst = ranked
-        .primary
+    let worst = primary
         .iter()
         .find(|p| p.path_kind == crate::ir::PathKind::RegToReg)
-        .or_else(|| ranked.primary.first());
+        .or_else(|| primary.first())
+        .copied();
     FrequencyClosure {
         target_mhz: design.target.target_mhz,
         budget_fo4: design.target.budget_fo4,
@@ -711,6 +736,7 @@ pub fn frequency_closure(design: &TimingDesign) -> FrequencyClosure {
         reg_to_reg_paths: reg_to_reg,
         intoout_failing,
         regtoreg_failing,
+        uninstantiated_modules: uninstantiated,
     }
 }
 

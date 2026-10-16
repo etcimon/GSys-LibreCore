@@ -801,8 +801,8 @@ mod tests {
         assert!(!seed.looks_const("a"), "undriven ident must stay runtime");
         assert_eq!(
             crate::expr::Expr::parse("a + k_alias").dominant_op_class_latticed(&seed),
-            crate::ir::OperatorClass::LogicBit,
-            "const-offset add after auto-const"
+            crate::ir::OperatorClass::Compare,
+            "const-offset add after auto-const is an incrementer, not a CPA"
         );
     }
 

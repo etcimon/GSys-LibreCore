@@ -2,7 +2,16 @@
 
 Structural (not STA) frequency closure for the precompiler loop.
 
-## Current campaign (2026-10-16, delay-v31 + cfg snapshot)
+## Current campaign (2026-10-16, delay-v32 + cfg snapshot + elaborated widths)
+
+Latest: with incrementers billed as Compare (delay-v32), the elaborated
+width map (`--width-map`) and only instantiated modules counted, the review
+tree reports worst live RegToReg **17.0** (`g6lc_bp_ckpt`), 155 of 1390
+reg-to-reg paths failing, structural maximum ≈ 2353 MHz; the live baseline
+reports 26.8 (`instr_queue`). Details: `ALGORITHMS-EXPERTS.md` Part LIII
+(A88–A90).
+
+### Earlier on 2026-10-16 (delay-v31 + cfg snapshot)
 
 Measurement semantics moved four times on 2026-10-16 (`ALGORITHMS-EXPERTS.md`
 Part LIII): origin-coordinate constant spans (v28), width-scaled costs (v29),
