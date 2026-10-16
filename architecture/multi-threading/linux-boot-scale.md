@@ -643,6 +643,14 @@ dirs; they are now behind `+core_notrace`; (2) with the oracle fed live through 
 costs no trace storage (a zstd copy is kept, ≈ 9 bytes per retirement) and the model runs at the
 oracle's pace (≈ 27 k cycles/s on the loaded host vs ≈ 37 k free).
 
+**L1 verdict (2026-10-16, `ooocoh-t42-ooo-pgo-build`, T35+T37+T40 in):** `/init` runs — `uname -a`
+(`Linux (none) 6.6.93 #0 SMP … riscv64 GNU/Linux`), `cat /proc/cpuinfo`, `cat /proc/stat`, `free`,
+`G6LC_LINUX_SHELL`, the BusyBox ash prompt — at ≈ 8.0 s guest, 486 M cycles, 364 M retired
+(IPC 0.71), then WFI. The L3 run on the same model with the live oracle is past retire 361 M with
+0 stored-byte mismatches (through the blake2s point) and continuing towards procd. One userspace
+anomaly stays open (T42: `cat` segfaults in libc at a NULL pointer after the first cpuinfo block;
+the shell still comes up).
+
 Method note for T35/T37: the root cause was reached without an FST. The `+stq_trace` event window
 (pushes/commits/cancels/flushes with cycles) put the stale push 28 cycles after an SMT switch and
 44 cycles after its tid's cancel bit cleared, which named the store unit's `WAIT_TRANSLATION` as

@@ -1748,7 +1748,29 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `STQ_EX_VALID_STORE_NO_DOUBLE_POP` with `byp_cnt=3` — the dump's state.
   Lint clean. Build `ooocoh-t41-ooo-pgo-build` (ovl-t41 = t40 + the fix);
   verification: L1 to `G6LC_LINUX_SHELL`, frozen battery, stages 38/46–53;
-  the server1 shares the store unit (rebuild t41 after).
+  the server1 shares the store unit (rebuild t41 after). **Verified
+  (2026-10-16): `linux-boot-l1sh2-ooocoh-t42-ooo-pgo-build` — `/init`
+  runs `uname -a`, `cat /proc/cpuinfo`, `cat /proc/stat`, `free`, prints
+  `G6LC_LINUX_SHELL` and drops into the BusyBox ash prompt at ≈ 8.0 s
+  guest / 486 M cycles (364 M retired, IPC 0.71); the core then sits in
+  WFI (`halt=1` in the idle dump).** The first complete L1 on the OoO
+  core. Battery and stages 38/46–53 Spike-exact on t41 and t42. One
+  anomaly on the way → T42.
+- [ ] **T42 — L1 userspace: `cat /proc/cpuinfo` dies with `unhandled signal
+  11 … at 0x0 in libc.so` (`epc 0x3f95efda1c`, `badaddr 0`, cause 13 —
+  a load through a NULL pointer) at 7.90 s guest after printing the first
+  CPU block; the rest of `/init` (`cat /proc/stat`, `free`, the shell)
+  runs (2026-10-16).** First user-mode defect candidate; the oracle is
+  blind in user space (user VAs are process-local keys and the kernel
+  fills their pages through the linear map, so every user load of
+  kernel-written data reads as `image/zero`). Data run `l1tr` (L1 on t42
+  with the cycle-stamped RVFI kept, ≈ 5 h): the U-mode (`0 0x3f95ef…`)
+  retirements before the fault name the load that returned the NULL and
+  the stores to that VA in the same process window. Candidates: a user
+  COW/demand-paging store→load path (the T40 class exercised the same
+  faults), `sfence.vma`/ASID handling on `fork`+`exec`, or the payload's
+  musl/busybox itself (the single-hart server1 `l1s1v` and the L3 run
+  will say whether it is model-independent).
 - [ ] **T39 — server1 (HPDCACHE, SMT2, t38) L1 past the T35 point oopses at
   1.267 s guest: `insert_header+0x9c` (`__register_sysctl_table` from
   `eventpoll_init`) NULL pointer dereference at `0x50`, PID 1 (2026-10-15).**
@@ -1892,6 +1914,10 @@ prerequisite for this work under the existing dual license. No licensing policy 
   **fires it at cycle 97,365,899 of the L3 boot** — the drift is frequent
   and mostly harmless (the dropped word's line is usually absent or
   refetched), the blake2s instance at 428.67 M is the one that read back.
+  **Verified (2026-10-16): `l3orc3` (L3 on t42 with the live oracle) is
+  past retire 361 M — through the blake2s point (330.35 M) — with 0
+  stored-byte mismatches**, the kernel at 7.5 s guest where the T36/t38
+  runs had panicked at 9.39 s / 6.97 s; the run continues towards procd.
   Stage 53
   (`ooo_mem_min.S`, the copy-loop shape in bare mode) passes 153/153: the
   shape alone does not trigger it — the queue has to be full and the
