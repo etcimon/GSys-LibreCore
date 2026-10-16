@@ -7343,13 +7343,19 @@ typ, 0.25 ns clock, before A98/A99 → after:
 
 | module | before (ns / cells) | after (ns / cells) | note |
 |---|---:|---:|---|
-| g6lc_rename | 26.2 / 255 | 23.2 / 257 | `pick_free` scan ×2 ports — A100 rewrite not yet in this netlist |
+| g6lc_rename | 26.2 / 255 | 23.2 / 257 → **4.4 / 52** (run C) | `pick_free` scan ×2 ports → lowest-set-bit (A100) |
 | g6lc_rob | 15.4 / 211 | **2.6 / 35** | A99 free walk → hit vectors + find-first |
 | scoreboard | 10.9 / 125 | **5.2 / 54** | A98 cancel walk → window; next: the 54-cell commit-select cone |
-| g6lc_iq | 5.1 / 57 | 5.1 / 57 | slot-allocation scan (A100 rewrite pending in netlist) |
-| store_buffer | 5.1 / 50 | 5.1 / 50 | insertion-index running sum (A100 pending) |
-| frontend | 4.1 / 43 | 4.1 / 43 | next after A100 |
+| g6lc_iq | 5.1 / 57 | 6.2 / 47 (run C, plain-script fallback) | slot-allocation scan → lowest-set-bit (A100); cells 57 → 47 |
+| store_buffer | 5.1 / 50 | 5.4 / 49 (run C) | the insertion count was not its worst path; the dense rewrite's dynamic indexes are |
+| frontend | 4.1 / 43 | 4.1 / 43 | next: the `speculative_d` cone (20 structural in the emitted tree) |
 | instr_realign | 2.8 / 23 | 2.8 / 23 | the `cur` walk is a small-support cone synthesis flattens; 23 cells |
+
+Run C = the streamed mapping of the A98–A100 tree (`…-streamed-20261016c`);
+its whole-core fanout-insensitive `wns` is −45.0 ns (870 broadcast drivers
+disabled), the same order as run B: with rename's chain gone the remaining
+−45 ns is the composition of several modules' 40–55-cell cones across
+hierarchy, not one walk. The module board is the ranking to work from.
 
 Whole-core fanout-insensitive `wns` moved −79.7 → **−44.1 ns** with A98/A99
 alone (the remaining broadcast-free chain is rename's).

@@ -125,6 +125,9 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   0.91 ns / 723 µm² automatically; parallel sibling byte-identical;
   idempotent. Core: one more walk found (scoreboard gen_commit_count).
   Port-list width inheritance fixed (`input logic [31:0] a, b, c`).
+- [x] Run C module board (A100 netlist): rename 257 → 52 cells (23.2 → 4.4
+  ns), iq 57 → 47 cells, rob 35, scoreboard 54, store_buffer 49 (its worst
+  is the dense-rewrite dynamic indexing, not the count), frontend 43.
 - [ ] A101 next shapes: composed walks (ROB free-by-tid), walk-until-valid,
   one-hot if-chain muxes (invariant-tagged), loops inside functions.
 - [ ] Record the `if` a node sits under in the lowerer: (a) bill
