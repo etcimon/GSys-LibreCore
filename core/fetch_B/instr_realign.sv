@@ -56,6 +56,13 @@ module instr_realign
     output logic [CVA6Cfg.INSTR_PER_FETCH-1:0] valid_o,
     // Instruction address - FRONTEND
     output logic [CVA6Cfg.INSTR_PER_FETCH-1:0][CVA6Cfg.VLEN-1:0] addr_o,
+    // The same address as {base, byte offset}: addr_o[k] == base_o[k] +
+    // off_o[k] by construction (sv-timing A105). A consumer that adds an
+    // immediate to the slot address can form one three-operand sum
+    // (base + off + imm: a carry-save layer and one adder) instead of
+    // waiting for the realigner's adder and adding again.
+    output logic [CVA6Cfg.INSTR_PER_FETCH-1:0][CVA6Cfg.VLEN-1:0] base_o,
+    output logic [CVA6Cfg.INSTR_PER_FETCH-1:0][CVA6Cfg.VLEN-1:0] off_o,
     // Instruction - instr_scan&instr_queue
     output logic [CVA6Cfg.INSTR_PER_FETCH-1:0][31:0] instr_o
 );
@@ -126,6 +133,8 @@ module instr_realign
     valid_o       = '0;
     instr_o       = '0;
     addr_o        = '0;
+    base_o        = '0;
+    off_o         = '0;
     cur           = '0;
     nxt           = '0;
     tail          = 1'b0;
@@ -140,6 +149,7 @@ module instr_realign
       valid_o[0] = valid_i;
       instr_o[0] = {hw[0], carry_instr_q};
       addr_o[0]  = carry_addr_q;
+      base_o[0]  = carry_addr_q;
       cur        = CurW'(1);
     end
 
@@ -164,6 +174,8 @@ module instr_realign
             valid_o[k] = valid_i;
             instr_o[k] = {hi, lo};
             addr_o[k]  = slot_addr;
+            base_o[k]  = address_i;
+            off_o[k]   = {{(CVA6Cfg.VLEN - CurW - 1) {1'b0}}, cur, 1'b0};
             cur        = nxt;
           end
           // RVI fully contained in this block
@@ -171,6 +183,8 @@ module instr_realign
             valid_o[k] = valid_i;
             instr_o[k] = {hi, lo};
             addr_o[k]  = slot_addr;
+            base_o[k]  = address_i;
+            off_o[k]   = {{(CVA6Cfg.VLEN - CurW - 1) {1'b0}}, cur, 1'b0};
             cur        = cur + CurW'(2);
           end
           // RVI split at the block boundary: carry its lower half

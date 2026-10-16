@@ -1223,10 +1223,14 @@ fn statements_cost(
                 stmts.iter().filter(|st| !lhs_indexed_by(st, var)).collect();
             let per = statements_cost(&inner, widths, model, depth + 1);
             let levels = f64::from(trips.next_power_of_two().trailing_zeros().max(1));
+            // A linear update's copies are parallel except for the
+            // OR/AND/XOR tree that joins them: the body once plus a gate per
+            // tree level — not the body per level (the eight 64-bit
+            // compares of a window hit test run side by side).
             let own = if writes_unindexed.is_empty() {
                 per
             } else if writes_unindexed.iter().all(|st| is_linear_update(st)) {
-                per * levels
+                per + model.logic_bit * (levels - 1.0).max(0.0)
             } else {
                 per * f64::from(trips)
             };

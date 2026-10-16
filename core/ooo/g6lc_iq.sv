@@ -503,14 +503,34 @@ module g6lc_iq
     end
   end
 
-  // Live count of the resolved next state — an unconditional single-assignment
-  // block so the popcount cannot infer a latch. Written as $countones over
-  // the valid vector (a compressor tree), not a running sum (sv-timing A100).
-  logic [DEPTH-1:0] q_d_valid;
+  // Live count as a delta on the registered count (sv-timing A105): the
+  // popcount of the resolved next state sat behind the whole wake → select
+  // → dispatch cone (the netlist's deepest path through this module). The
+  // next valid set is (valid & ~cancelled) minus the acked grants plus the
+  // allocations, and the three sets are disjoint by construction — a grant
+  // needs a valid, uncancelled entry; an allocation needs a slot free after
+  // issue — so the popcount of the next state is the registered count minus
+  // the cancels, minus the acks, plus the allocations. Every operand is an
+  // early signal; the invariant `count_q == $countones(valid)` holds from
+  // reset and is asserted below.
+  logic [DEPTH-1:0] q_d_valid, cancel_hit;
   always_comb begin
-    for (int unsigned e = 0; e < DEPTH; e++) q_d_valid[e] = q_d[e].valid;
-    count_d = DW'($countones(q_d_valid));
+    for (int unsigned e = 0; e < DEPTH; e++) begin
+      q_d_valid[e]  = q_d[e].valid;
+      cancel_hit[e] = q_q[e].valid && cancelled_mask_i[q_q[e].sbe.trans_id];
+    end
+    count_d = flush_i ? '0
+            : count_q - DW'($countones(cancel_hit))
+                      - DW'($countones(issue_valid_o & issue_ack_i))
+                      + DW'($countones(disp_ack_o));
   end
+  //pragma translate_off
+  always_ff @(posedge clk_i) begin
+    if (rst_ni)
+      ooo_iq_count_is_popcount: assert (count_d == DW'($countones(q_d_valid)))
+        else $error("g6lc_iq: count_d %0d != popcount(q_d.valid) %0d", count_d, $countones(q_d_valid));
+  end
+  //pragma translate_on
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin

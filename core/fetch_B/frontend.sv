@@ -212,6 +212,11 @@ module frontend
   // re-aligned instruction and address (coming from cache - combinationally)
   logic [NrInstr-1:0][31:0] instr;
   logic [NrInstr-1:0][CVA6Cfg.VLEN-1:0] addr;
+  // addr[i] == addr_base[i] + addr_off[i] (instr_realign): the predictor's
+  // target and link adders take the two parts and the immediate as one
+  // three-operand sum (sv-timing A105) — the realigner's cursor add is no
+  // longer in series with the 64-bit target add.
+  logic [NrInstr-1:0][CVA6Cfg.VLEN-1:0] addr_base, addr_off;
   logic [NrInstr-1:0] instruction_valid_raw, instruction_valid;
   // BHT, BTB and RAS prediction
   bht_prediction_t [NrInstr-1:0] bht_prediction;
@@ -303,6 +308,8 @@ module frontend
       .data_i             (realigner_data),
       .valid_o            (instruction_valid_raw),
       .addr_o             (addr),
+      .base_o             (addr_base),
+      .off_o              (addr_off),
       .instr_o            (instr)
   );
 
@@ -439,11 +446,12 @@ module frontend
       // we actually consumed it
       if (is_call[i]) begin
         ras_push   = instr_queue_consumed[i];
-        ras_update = addr[i] + (rvc_call[i] ? 2 : 4);
+        ras_update = addr_base[i] + addr_off[i] + (rvc_call[i] ? 2 : 4);
       end
-      // calculate the jump target address
+      // calculate the jump target address: base + offset + immediate as one
+      // sum (equal to addr[i] + imm modulo 2^VLEN)
       if (taken_rvc_cf[i] || taken_rvi_cf[i]) begin
-        predict_address = addr[i] + (taken_rvc_cf[i] ? rvc_imm[i] : rvi_imm[i]);
+        predict_address = addr_base[i] + addr_off[i] + (taken_rvc_cf[i] ? rvc_imm[i] : rvi_imm[i]);
       end
     end
     // Leftover-complete RVI jal is slot0 at carry_pc. Later slots in the
@@ -454,9 +462,9 @@ module frontend
     if (serving_unaligned && instruction_valid[0] && rvi_jump[0]) begin
       cf_type[0] = ariane_pkg::Jump;
       taken_rvi_cf[0] = 1'b1;
-      predict_address = addr[0] + rvi_imm[0];
+      predict_address = addr_base[0] + addr_off[0] + rvi_imm[0];
       ras_push = rvi_call[0] && instr_queue_consumed[0];
-      if (rvi_call[0]) ras_update = addr[0] + 4;
+      if (rvi_call[0]) ras_update = addr_base[0] + addr_off[0] + 4;
     end
   end
 
