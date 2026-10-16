@@ -98,14 +98,14 @@ test("streamed recipe: phase A dumps RTLIL + module list, phase B maps and evict
   const withHash = streamedPhaseBShell({ runDir: "$RUN", liberty: "$LIB", yosysVar: "$YS", periodPs: 800, logVar: "$RUN/synth.log", pullTag: "sta-rtl-x", sourceSha256: "abc123" }).join("\n");
   expect(withHash).toContain('--source-sha256 "abc123" -o "/opt/testharness/runs/sta-rtl-x/output/width-map.json"');
   expect(b).toContain("&nf,-D,800");
-  expect(b).toContain('if run "abc -liberty $LIB -D 800"; then echo "$idx ok plain"');
-  expect(b).toContain('if run "abc -liberty $LIB -fast"; then echo "$idx ok fast"');
+  expect(b).toContain('if run "abc -liberty $LIB -D 800"; then echo "$sha" > "$out.sha"; echo "$idx ok plain"');
+  expect(b).toContain('if run "abc -liberty $LIB -fast"; then echo "$sha" > "$out.sha"; echo "$idx ok fast"');
   expect(b).toContain("SYNTH_STREAM_FALLBACK");
   expect(b).toContain('cat "$RUN/mapped/"*.v > "$RUN/netlist.v"');
   // A missing module list or an unmapped module is a synth failure, never a
   // silent partial netlist.
   expect(b).toContain('echo "RESULT fail synth"');
-  expect(b).toContain('if [ "$(ls "$RUN/mapped" | wc -l)" != "$(wc -l < "$RUN/il/modules.tsv")" ]');
+  expect(b).toContain('if [ "$(ls "$RUN/mapped"/*.v | wc -l)" != "$(wc -l < "$RUN/il/modules.tsv")" ]');
 });
 
 test("a width map whose source hash differs from the portable sources is refused", () => {
