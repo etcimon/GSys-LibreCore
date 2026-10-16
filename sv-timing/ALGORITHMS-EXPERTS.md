@@ -7776,6 +7776,43 @@ next state — `count_q + alloc − issued − cancelled` would not); the
 scoreboard commit select; `frontend` `accepted_target` (eight 64-bit
 compares under a window guard — a 6-bit tag compare would do).
 
+## A105 — Aggressive and exact: re-association across module boundaries, counts as deltas
+
+Two production restructures aimed at the netlist's own worst paths rather
+than the structural board's, each exact by arithmetic or by a stated
+invariant, each latency-neutral:
+
+1. **Frontend target add as one three-operand sum.** The module board's
+   worst `frontend` path (43 cells) ends at `bp_tgt_q` through
+   `predict_address = addr[i] + imm`, and `addr[i]` is itself the
+   realigner's `address_i + {cur, 1'b0}` — two 64-bit adders in series
+   across a module boundary. `instr_realign` now also exposes each slot's
+   address as `{base, byte offset}` (`addr_o == base_o + off_o` by
+   construction; the carried slot has `base = carry_addr_q, off = 0`), and
+   the frontend forms `base + off + imm` (and the RAS link `base + off +
+   2|4`) as one sum: yosys's `alumacc` builds a carry-save layer and one
+   adder — ~1.5 FO4 per extra operand (delay-v31) instead of a second
+   12 FO4 adder. Equal modulo 2^VLEN.
+2. **Issue-queue live count as a delta.** `count_d = $countones(q_d.valid)`
+   sat behind the whole wake → select → dispatch cone (the module's deepest
+   path after A104: `count_d → q_d → q_after_issue`). The next valid set is
+   `(valid & ~cancelled) − acked grants + allocations`, three sets disjoint
+   by construction (a grant needs a valid uncancelled entry; an allocation
+   needs a slot free after issue), so `count_d = count_q − popcount(cancel)
+   − popcount(acked) + popcount(alloc)`, every operand early; the
+   invariant `count_q == $countones(valid)` holds from reset and is
+   asserted in simulation (`ooo_iq_count_is_popcount`).
+
+Both elaborate in the whole core (slang, remote). Their netlist evidence is
+the next live remap; the structural board cannot show them (the frontend
+worst there is still the `accepted_target` function cost, the iq worst the
+dense-cone class), which is itself the point: at this depth the board ranks
+and the netlist decides.
+
+Model: a function loop that is a linear update (a flag set under a guard,
+an OR/XOR accumulate) costs its body once plus a gate per tree level — the
+eight 64-bit compares of a window hit test run side by side.
+
 ## A90 — Incrementers are not gates (delay-v32)
 
 `x + 1` and `x + CONST` were billed 1 FO4 at every width since delay-v18

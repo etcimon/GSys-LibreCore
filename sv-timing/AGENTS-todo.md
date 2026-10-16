@@ -147,13 +147,17 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   bodies cost at the call site (delay-v38: rename 19 → 34 vs 52 cells),
   runtime index depth, dead loops; g6lc_iq select/alloc edits (netlist
   6.21 → 4.40 ns at 46–47 cells: the wake/count cone is the deepest now).
-- [ ] A104 next: iq count from `count_q + alloc − issued − cancelled`
-  (exact by invariant; add `count_q == $countones(valid_q)` assert);
-  scoreboard commit select (54 cells, under-read 15.6); `frontend`
-  `accepted_target` 64-bit compares × 8 (tag compare); emitted-tree remap
-  with the compaction (in flight: `sta-rtl-emitted-a104.log`); dense-cone
-  class sums whole blocks (iq 54.9 vs 46 cells) — schedule the block's
-  def-use, not its statement list.
+- [x] A105: iq count as a delta (asserted invariant); frontend target /
+  link add as `base + off + imm` (realigner exposes base/off); linear-
+  update function loops cost once. Whole core elaborates.
+- [ ] A105 next: netlist evidence for A105 (live remap + module board);
+  scoreboard `mem_n` write-site chain (54 cells, under-read 15.6 — the
+  board's trace names only yosys internals; map the module with RTL
+  names kept (`keep` on `mem_n`) for one diagnostic run); the dense-cone
+  class (iq 55 vs 46–47 cells) — per-node arrival should be per input
+  (the wake compare does not wait for `slot`), not one latency per node;
+  the 64-bit single-cycle wall (csr timer compare, 12.0–12.5 add/compare
+  + mux) is the floor at 20 ps without a pipelined ALU / 2-cycle paths.
 - [ ] A103 next: rename (52 cells / 19 FO4) and scoreboard (54 / 15.6) still
   under-read — dynamic struct-array reads behind rotated indices
   (`mem_q[head_slot[h]]`, `commit_sel_slot`); perf_counters / TLB over-read
