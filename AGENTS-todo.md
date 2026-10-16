@@ -1708,6 +1708,25 @@ prerequisite for this work under the existing dual license. No licensing policy 
   (`linux-boot-l1fix-ooocoh-t36-ooo-canon-pgo-build`, cap 950 M cycles).
   L3 on the same model reached **9.39 s guest (≈ 701 M cycles)** and died
   in a different class — T37.
+- [ ] **T40 — ooo (t38) L1 with the fixed initrd runs `/init`
+  (`G6LC_LINUX_INIT_UP`, `uname -a` → `Linux (none) 6.6.93 #0 SMP … riscv64
+  GNU/Linux` on the console) and then stops retiring at ≈ 494 M cycles,
+  retire 355,900,290 (2026-10-15).** First userspace output on the OoO
+  core; the hang is in the busybox `/init` after `uname`. Census: the
+  head is a LOAD that never issues (`notissued ld` +2 M per 2 M cycles,
+  `inflight` flat, `empty` flat, no flush, `lu_replay`/`mem_viol` flat).
+  The IQ gates a load on operand readiness and the older-unresolved-store
+  mask only (`mem_stall_i` is tied off), and issue_read_operands refuses
+  the ack while `lsu_ready_i` is low — a non-draining LSU bypass or a
+  dead operand producer are the two candidates; whether the T35 drop path
+  (a cancelled store consumed without a writeback) is involved is open —
+  no model before t38 ever ran userspace. Instrument: `+hang_dump=N`
+  (`core/cva6.sv` census block): after N cycles without a commit ack it
+  dumps the scoreboard head, every IQ entry with its readiness/bypass
+  bits and `ready[e]`, the LSQ store/load entries, the LSU bypass
+  entries, store/load unit states and the STQ counts, three times
+  1000 cycles apart. Build `ooocoh-t39-ooo-pgo-build` (ovl-t39 = t38 +
+  the probe) in flight; run L1 with `+hang_dump=200000` to the hang.
 - [ ] **T39 — server1 (HPDCACHE, SMT2, t38) L1 past the T35 point oopses at
   1.267 s guest: `insert_header+0x9c` (`__register_sysctl_table` from
   `eventpoll_init`) NULL pointer dereference at `0x50`, PID 1 (2026-10-15).**
@@ -1765,12 +1784,32 @@ prerequisite for this work under the existing dual license. No licensing policy 
   old tid; when that tid has been re-allocated to a LOAD still waiting for
   its data, the scoreboard (`wt_valid_i && mem_q[tid].issued`) completes
   the load with the dead store's data. `0x100000`, `0x0`, `0x40` are store
-  operands, not memory contents. Same class, same fix (T35 / t38); the
-  L1 run with the fixed initrd hit the assertion form of it at cycle
-  460,435,800 on the ooo. FST window 201.40–201.58 M on
-  `ooocoh-t37-ooo-fst-build` (`prof-t37fst`, in flight) to show the stray
-  `valid_o` into the load's tid; verdict run `l3orc2` on the t38 ooo with
-  the live oracle (must pass 701 M cycles with 0 stored mismatches).
+  operands, not memory contents. **Verdict on the t38 ooo (`l3orc2`, live
+  oracle): the first mismatch (`0x100000`) is gone — it was the T35 class
+  — but the blake2s pair is not: the same two `lw`s (PCs
+  `0xffffffff802c08dc` / `0xffffffff802c065e`, same addresses, same wrong
+  values `0x0` / `0x40`) recur at retire 330,350,549 / 330,352,963 and the
+  L3 panics the same way at 6.97 s. So T37 proper is a second class.**
+  With `+rvfi_cycle_stamp` the trace gives the cycles: the IV copy loop
+  (`lw`/`sw` word pairs at `0x…657bfc`/`c00`) stores `0x5be0cd19` to the
+  state word `0x…5b60c` at **cycle 428,672,412** (its neighbour `0x…608`
+  at 428,672,405), `ret`, and the `lw` of `0x…5b60c` at **428,672,431 — 19
+  cycles later — returns 0**, the slot's previous content (zeroed by the
+  previous `memzero_explicit`), while the `lw` of `0x…608` a few
+  instructions later returns the right word. The second: `sw zero` to
+  `buflen` (`0x…5b750`) at retire 330,352,344, a correct `lw` 8
+  retirements later (forwarded), then the `lw` at 428,674,964 returns the
+  pre-store `0x40` → `buflen = 0x40 + 0x28 = 104` → the memset of
+  `64 − 104` bytes → the guard-page fault. Both are a 4-byte store to one
+  half of a dword whose other half was stored 7 cycles earlier, read back
+  stale once the store has left the forwarding path — the WT wbuffer /
+  data-array handoff again (T28/T34 family: ACK-before-check, check
+  pointer reuse), not forwarding (`st_fwd_valid=0` would be the
+  signature; the T36 `+smt_mem_watch` run at the first PA showed exactly
+  that). FST window **428,672,300–460 on `ooocoh-t38-ooo-fst-build`**
+  (`prof-t37bfst`, in flight, ≈ 6 h) for the wbuffer/data-array state of
+  that dword. The T35-class first instance: the ooo L1 with the fixed
+  initrd hit its assertion form at cycle 460,435,800 before t38.
   Housekeeping found on the way: three sim-only per-commit
   trace files were written unconditionally on every run (`trace_hart_0.dasm`
   33 GB, `iti.traces` 15.5 GB, `encaps.traces` per 760 M cycles — 190 GB
