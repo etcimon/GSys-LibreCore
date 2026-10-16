@@ -330,8 +330,15 @@ module csr_regfile
   logic        hstce_q, hstce_d;  // henvcfg.STCE
   logic        vstimecmp_hit_q, vstimecmp_hit_d;
   logic [63:0] guest_time;
+  // The guest time is a 64-bit add on the RTC input; the VS timer compare
+  // takes it one cycle later from a register (sv-timing A105): the add and
+  // the 64-bit compare no longer share a cycle. The RTC ticks far below the
+  // core clock, so the hit (already registered) arrives one core cycle
+  // later — invisible to the architectural timer contract; CSR reads keep
+  // the combinational `guest_time`.
+  logic [63:0] guest_time_q;
   assign guest_time = CVA6Cfg.RVH ? (rtc_time_i + htimedelta_q) : rtc_time_i;
-  assign vstimecmp_hit_d = (CVA6Cfg.SstcEn && CVA6Cfg.RVH) ? (guest_time >= vstimecmp_q)
+  assign vstimecmp_hit_d = (CVA6Cfg.SstcEn && CVA6Cfg.RVH) ? (guest_time_q >= vstimecmp_q)
                                                            : 1'b0;
 
   logic [CVA6Cfg.XLEN-1:0] stvec_q, stvec_d;
@@ -3272,6 +3279,7 @@ module csr_regfile
       vstimecmp_q     <= '0;
       hstce_q         <= 1'b0;
       vstimecmp_hit_q <= 1'b0;
+      guest_time_q    <= '0;
       htimedelta_q    <= '0;
       dcache_q        <= {{CVA6Cfg.XLEN - 1{1'b0}}, 1'b1};
       icache_q        <= {{CVA6Cfg.XLEN - 1{1'b0}}, 1'b1};
@@ -3413,6 +3421,7 @@ module csr_regfile
       vstimecmp_q     <= vstimecmp_d;
       hstce_q         <= hstce_d;
       vstimecmp_hit_q <= vstimecmp_hit_d;
+      guest_time_q    <= guest_time;
       htimedelta_q    <= htimedelta_d;
       dcache_q        <= dcache_d;
       icache_q        <= icache_d;

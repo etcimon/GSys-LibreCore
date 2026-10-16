@@ -815,11 +815,18 @@ module scoreboard #(
       assign commit_pointer_n[k] = (flush_i) ? '0 : reclaim_n + CVA6Cfg.TRANS_ID_BITS'(k);
     end
   end else begin : gen_commit_ptr
-    assign commit_pointer_n[0] = (flush_i) ? '0 : commit_pointer_q[0] + CVA6Cfg.TRANS_ID_BITS'(num_commit);
-    for (genvar k = 1; k < CVA6Cfg.NrCommitPorts; k++) begin : gen_commit_incr
-      assign commit_pointer_n[k] = (flush_i) ? '0 : commit_pointer_q[0] +
-                                   CVA6Cfg.TRANS_ID_BITS'(num_commit) +
-                                   CVA6Cfg.TRANS_ID_BITS'(k);
+    // Precomputed constant increments selected by the ack count (sv-timing
+    // A88/A105): `commit_pointer_q[0] + num_commit + k` was a popcount feeding
+    // an adder feeding the flush mux; `commit_pointer_q[0] + c` for every
+    // constant c in 0..NrCommitPorts+k is a bank of incrementers that start
+    // from the register, and the count only steers a select. Mapped
+    // Nangate45 at 5 bits: 0.247 → 0.169 ns (A88, SAT-exact).
+    for (genvar k = 0; k < CVA6Cfg.NrCommitPorts; k++) begin : gen_commit_incr
+      logic [CVA6Cfg.NrCommitPorts:0][CVA6Cfg.TRANS_ID_BITS-1:0] cand;
+      for (genvar c = 0; c <= CVA6Cfg.NrCommitPorts; c++) begin : gen_cand
+        assign cand[c] = commit_pointer_q[0] + CVA6Cfg.TRANS_ID_BITS'(c + k);
+      end
+      assign commit_pointer_n[k] = (flush_i) ? '0 : cand[num_commit];
     end
   end
 
