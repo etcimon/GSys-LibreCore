@@ -174,6 +174,37 @@ pub fn block_local_idents(source: &str) -> std::collections::BTreeSet<String> {
             first,
             "logic" | "bit" | "int" | "integer" | "reg" | "automatic" | "var"
         );
+        // `for (int p = 0; …)` / `for (genvar k …)`: the header variable is
+        // local to the loop — a module-scope feed cannot read it
+        // (`assign pipe_c = 64'(addr[p])`, frontend / cva6, A105).
+        if first == "for" {
+            if let Some(open) = t.find('(') {
+                let hdr = &t[open + 1..];
+                let hdr = hdr.split(';').next().unwrap_or("");
+                let mut ws = hdr.split_whitespace().peekable();
+                while let Some(w) = ws.next() {
+                    if matches!(w, "int" | "integer" | "genvar" | "logic" | "bit") {
+                        let name = ws
+                            .next()
+                            .map(|n| {
+                                if n == "unsigned" {
+                                    ws.next().unwrap_or("")
+                                } else {
+                                    n
+                                }
+                            })
+                            .unwrap_or("");
+                        let name: String = name
+                            .chars()
+                            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                            .collect();
+                        if !name.is_empty() {
+                            out.insert(name);
+                        }
+                    }
+                }
+            }
+        }
         // Inside a process the declaration sits after its `begin` (depth ≥ 1);
         // inside a function/task anywhere counts.
         if decl_kw && (in_fn || depth > 0) {
@@ -2437,6 +2468,27 @@ fn ident_set(text: &str) -> std::collections::BTreeSet<String> {
 ///
 /// Keeps the original LHS and operator (`=` / `<=`); replaces only the RHS text.
 /// Multi-line assigns: rewrites the first line and comments continuations.
+/// A line the origin RHS rewrite can rebuild as `{labels}{lhs} = {rhs};`: the
+/// assign parses, and the statement does not share its line with a leading
+/// `if (…)` / `else` (the rebuild would drop the guard).
+fn rhs_rewrite_line_ok(source: &str, line: u32) -> bool {
+    let Some(txt) = source_line(source, line) else {
+        return false;
+    };
+    let t = txt.trim_start();
+    let body = if is_case_label_only_line(txt) {
+        source_line(source, line + 1)
+            .map(str::trim_start)
+            .unwrap_or("")
+    } else {
+        t
+    };
+    if body.starts_with("if ") || body.starts_with("if(") || body.starts_with("else") {
+        return false;
+    }
+    parse_assign_multiline(source, line, 6).is_some()
+}
+
 /// Also applies [`EditRecord::emit_rhs_extras`] (exclusive one-hot multi-arm wire-up).
 pub fn rewrite_origin_rhs_replaces(source: &str, trace: &EditTrace) -> String {
     let mut replaces: Vec<(u32, u32, String, u32)> = Vec::new(); // start, end, new_rhs, edit_id
@@ -2469,21 +2521,35 @@ pub fn rewrite_origin_rhs_replaces(source: &str, trace: &EditTrace) -> String {
         if !has_safe_snippet && !pure_rhs_rewrite {
             continue;
         }
+        // All or nothing per record (A105): the snippet is injected at the
+        // marker of the record's *first* rewrite, so a first rewrite that
+        // cannot land (an `if (c) x = y;` one-liner the assign parser does
+        // not split, a line inside a generate) while an extra does leaves
+        // the extra reading an undeclared `_top` (g6lc_bp_statcor). Every
+        // target line must be a rewritable plain assign, else the whole
+        // record stays credit-only.
+        let mut targets: Vec<(u32, u32, String)> = Vec::new();
         if let Some(new_rhs) = r.emit_rhs.as_ref() {
             if r.origin.start_line != 0 {
                 let end = r.origin.end_line.max(r.origin.start_line);
-                replaces.push((r.origin.start_line, end, new_rhs.clone(), r.id));
+                targets.push((r.origin.start_line, end, new_rhs.clone()));
             }
         }
         for ex in &r.emit_rhs_extras {
             if ex.origin.start_line == 0 {
                 continue;
             }
-            if line_inside_generate(source, ex.origin.start_line) {
-                continue;
-            }
             let end = ex.origin.end_line.max(ex.origin.start_line);
-            replaces.push((ex.origin.start_line, end, ex.emit_rhs.clone(), r.id));
+            targets.push((ex.origin.start_line, end, ex.emit_rhs.clone()));
+        }
+        let all_rewritable = targets.iter().all(|(start, _, _)| {
+            !line_inside_generate(source, *start) && rhs_rewrite_line_ok(source, *start)
+        });
+        if !all_rewritable {
+            continue;
+        }
+        for (start, end, new_rhs) in targets {
+            replaces.push((start, end, new_rhs, r.id));
         }
     }
     if replaces.is_empty() {
