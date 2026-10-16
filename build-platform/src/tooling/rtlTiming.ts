@@ -150,7 +150,9 @@ export function freshWidthMap(mapPath: string, portablePath: string): string | u
   } catch {
     return undefined;
   }
-  if (!recorded) return posixPath(mapPath); // older map without the field: accepted
+  // A map without the field predates the check and cannot prove its tree:
+  // refused (the next streamed mapping records the hash).
+  if (!recorded) return undefined;
   return portableSourceHash(portablePath) === recorded ? posixPath(mapPath) : undefined;
 }
 

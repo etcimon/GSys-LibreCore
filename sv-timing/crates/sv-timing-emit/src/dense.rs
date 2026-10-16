@@ -661,23 +661,16 @@ fn dense_pipe_block(
             opts.enable
         ));
     }
-    // Lhs names claimed by other cuts — feeds must not read them (sinks are later).
-    let cut_lhs: std::collections::BTreeSet<&str> = cuts
-        .iter()
-        .filter(|c| !c.lhs.is_empty())
-        .map(|c| c.lhs.as_str())
-        .collect();
     for (i, name) in stage_names.iter().enumerate() {
         if let Some(rhs) = feed_by_pipe.get(name) {
             // R12d default: zero feeds (real_cut_feeds=false). Optional real path
             // still refuses generate/peer/automatic RHS.
+            // A feed reading another cut's LHS is real: that LHS samples its
+            // own stage now, so the read is the registered value (A102; the
+            // old refusal emitted the previous stage as a "lean chain" while
+            // the origin was rewritten — `t1 = reg(t0)` for `t0 + c_i`).
             let loopish = rhs_has_free_loop_index(rhs);
             let gen_local = rhs_has_generate_local_param(rhs);
-            let refs_peer = cut_lhs.iter().any(|l| {
-                let base = l.split('[').next().unwrap_or(l);
-                rhs.split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
-                    .any(|tok| tok == base || tok == *l)
-            });
             let refs_auto = rhs
                 .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
                 .filter(|t| !t.is_empty())
@@ -686,7 +679,6 @@ fn dense_pipe_block(
                 && crate::rhs::rhs_structurally_complete(rhs)
                 && !loopish
                 && !gen_local
-                && !refs_peer
                 && !refs_auto;
             if use_real {
                 match typed_in_late(name) {
@@ -875,7 +867,7 @@ fn credit_only_review_block(records: &[&EditRecord]) -> String {
 // Re-export scope-safety helpers for tests / external callers.
 pub use crate::rhs::{has_free_gen_index, line_inside_generate};
 
-fn rhs_has_free_loop_index(rhs: &str) -> bool {
+pub(crate) fn rhs_has_free_loop_index(rhs: &str) -> bool {
     has_free_gen_index(rhs)
 }
 
@@ -899,7 +891,7 @@ pub fn simple_type_operand(lhs: &str) -> Option<&str> {
 ///
 /// When cut feeds are hoisted to module end (R11), these names are no longer
 /// visible (they live inside `for (genvar fmt=…)` localparam scopes).
-fn rhs_has_generate_local_param(rhs: &str) -> bool {
+pub(crate) fn rhs_has_generate_local_param(rhs: &str) -> bool {
     let bytes = rhs.as_bytes();
     let mut i = 0usize;
     while i < bytes.len() {

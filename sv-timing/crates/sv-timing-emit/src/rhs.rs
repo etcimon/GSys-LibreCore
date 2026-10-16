@@ -1013,20 +1013,37 @@ pub fn cut_assigns_from_source(source: &str, trace: &EditTrace) -> Vec<CutAssign
     // the origin stays, the stage is fed zero: credit-only in effect, and the
     // emitted file elaborates (A102).
     let locals = block_local_idents(source);
-    if !locals.is_empty() {
-        for c in &mut cuts {
-            let names = ident_set(&c.rhs);
-            let lhs_root: String = c
-                .lhs
-                .chars()
-                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
-                .collect();
-            if names.iter().any(|n| locals.contains(n)) || locals.contains(&lhs_root) {
-                c.rhs = "'0".into();
-                c.line = 0;
-                c.end_line = 0;
-                c.continuous = false;
-            }
+    // One decision for feed and origin (A102). The dense block used to judge
+    // the feed on its own — free loop index, generate-local param, a peer
+    // cut's LHS, an automatic — and emit `svt_zero` or the previous stage
+    // ("lean chain") while the origin was still rewritten to sample the
+    // stage: `pmp_entry` `base = pipe` with the pipe fed zero (−26 % area,
+    // wrong logic). A cut whose feed cannot be real keeps its origin. A feed
+    // that reads another cut's LHS is a real feed: the peer's origin now
+    // samples its own stage, so the read sees the registered value — that is
+    // what a multi-stage cut of one cone means.
+    for c in &mut cuts {
+        if c.line == 0 {
+            continue;
+        }
+        let names = ident_set(&c.rhs);
+        let lhs_root: String = c
+            .lhs
+            .chars()
+            .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+            .collect();
+        let refs_local = names.iter().any(|n| locals.contains(n)) || locals.contains(&lhs_root);
+        let refs_auto = names.iter().any(|n| n.starts_with("temp_"));
+        let unsafe_feed = refs_local
+            || refs_auto
+            || !rhs_structurally_complete(&c.rhs)
+            || crate::dense::rhs_has_free_loop_index(&c.rhs)
+            || crate::dense::rhs_has_generate_local_param(&c.rhs);
+        if unsafe_feed {
+            c.rhs = "'0".into();
+            c.line = 0;
+            c.end_line = 0;
+            c.continuous = false;
         }
     }
     cuts

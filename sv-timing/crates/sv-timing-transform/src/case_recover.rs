@@ -294,19 +294,42 @@ pub fn onehot_wire_checks(recovered: &RecoveredExclusiveCase) -> Result<(), Stri
 /// Only **one-hot-safe** labeled arms (same filter as [`emit_onehot_or_tree`]) are
 /// rewritten so multi-line `$clog2` arms keep their original body (no orphan
 /// ternary continuations). Default empty bodies (`default: ;`) are left alone.
+/// The arms the one-hot tree carries — the single source of truth for both
+/// the tree (`emit_onehot_or_tree`) and the origin rewrites
+/// (`onehot_lhs_rewrites`). Labeled, non-default, RHS safe to hoist, the 16
+/// deepest by FO4. An arm outside this set keeps its own origin RHS: the tree
+/// is zero for its label, so rewriting it to `_top` would drop its logic
+/// (alu `result_o`: 27 labels rewritten onto a 13-arm tree — ADDW read 0;
+/// A102).
+pub fn onehot_usable_arms(recovered: &RecoveredExclusiveCase) -> Vec<&RecoveredCaseArm> {
+    let mut labeled: Vec<&RecoveredCaseArm> = recovered
+        .arms
+        .iter()
+        .filter(|a| !a.is_default && !a.labels.is_empty())
+        .collect();
+    labeled.sort_by(|a, b| {
+        b.fo4
+            .partial_cmp(&a.fo4)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    if labeled.len() > 16 {
+        labeled.truncate(16);
+    }
+    labeled
+        .into_iter()
+        .filter(|a| rhs_safe_for_onehot(&a.rhs))
+        .collect()
+}
+
+/// Origin rewrites for the one-hot tree: every arm the tree carries samples
+/// `top_name`; arms outside the tree are untouched.
 pub fn onehot_lhs_rewrites(
     recovered: &RecoveredExclusiveCase,
     nodes: &BTreeMap<NodeId, IrNode>,
     top_name: &str,
 ) -> Vec<(sv_timing_core::SourceLoc, String)> {
     let mut out = Vec::new();
-    for arm in &recovered.arms {
-        if arm.is_default || arm.labels.is_empty() {
-            continue;
-        }
-        if !rhs_safe_for_onehot(&arm.rhs) {
-            continue;
-        }
+    for arm in onehot_usable_arms(recovered) {
         if let Some(n) = nodes.get(&arm.node_id) {
             if n.loc.start_line == 0 {
                 continue;
@@ -333,28 +356,8 @@ pub fn emit_onehot_or_tree(
     } else {
         data_width.min(128)
     };
-    let mut labeled: Vec<&RecoveredCaseArm> = recovered
-        .arms
-        .iter()
-        .filter(|a| !a.is_default && !a.labels.is_empty())
-        .collect();
-    if labeled.len() < 3 {
-        return None;
-    }
-    // Cap arms for emit hygiene
-    labeled.sort_by(|a, b| {
-        b.fo4
-            .partial_cmp(&a.fo4)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    if labeled.len() > 16 {
-        labeled.truncate(16);
-    }
-    // Prefer simple RHS for safety (idents / simple expr without case labels)
-    let usable: Vec<&RecoveredCaseArm> = labeled
-        .into_iter()
-        .filter(|a| rhs_safe_for_onehot(&a.rhs))
-        .collect();
+    // The same arm set the origin rewrites use (`onehot_usable_arms`).
+    let usable = onehot_usable_arms(recovered);
     if usable.len() < 3 {
         return None;
     }
@@ -627,6 +630,91 @@ fn paren_if_needed_rhs(rhs: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A102: the arms the one-hot tree carries and the labels rewritten to
+    /// `_top` are the same set. 20 labeled arms, 3 with an RHS the tree cannot
+    /// hoist (`$clog2`, a nested `case`, too long): the tree takes the 16
+    /// deepest, drops the unsafe ones among them, and only those labels are
+    /// rewritten — every other label keeps its own RHS (the tree is zero for
+    /// it; rewriting it would read 0, as alu ADDW did).
+    #[test]
+    fn onehot_tree_arms_and_rewrites_are_the_same_set() {
+        let mut arms = Vec::new();
+        let mut nodes: BTreeMap<NodeId, IrNode> = BTreeMap::new();
+        for i in 0..20u32 {
+            let rhs = match i {
+                2 => "{{(W - $clog2(W)) {1'b0}}, cnt}".to_string(),
+                5 => "sel ? (case_x) : y".replace("case_x", "case_x"),
+                7 => format!("({})", "a + b + c + d + e + f + g + h + i + j + k + l + m + n + o + p + q + r + s + t + u + v + w + x + y + z + aa + bb + cc + dd + ee"),
+                _ => format!("op{i}_result"),
+            };
+            arms.push(RecoveredCaseArm {
+                node_id: i + 1,
+                labels: vec![format!("OP{i}")],
+                rhs,
+                fo4: 20.0 - f64::from(i) * 0.5,
+                line: 100 + i,
+                is_default: false,
+            });
+            let mut loc = sv_timing_core::SourceLoc::file_start("m.sv");
+            loc.start_line = 100 + i;
+            loc.end_line = 100 + i;
+            nodes.insert(
+                i + 1,
+                IrNode {
+                    id: i + 1,
+                    op_class: Some(sv_timing_core::OperatorClass::Other),
+                    width: 64,
+                    fo4_cost: 1.0,
+                    gate: None,
+                    loc,
+                    fans_in: vec![],
+                    fans_out: vec![],
+                    width_defaulted: true,
+                    reads_reg: false,
+                    lhs: Some("result_o".into()),
+                    rhs: None,
+                    lhs_expr: None,
+                    rhs_expr: None,
+                    case_labels: Vec::new(),
+                    case_is_default: false,
+                    case_selector: None,
+                    fo4_locked: false,
+                    assign_kind: Default::default(),
+                },
+            );
+        }
+        arms.push(RecoveredCaseArm {
+            node_id: 99,
+            labels: vec![],
+            rhs: "'0".into(),
+            fo4: 0.0,
+            line: 130,
+            is_default: true,
+        });
+        let rec = RecoveredExclusiveCase {
+            selector: "op".into(),
+            lhs: "result_o".into(),
+            arms,
+            file: "m.sv".into(),
+        };
+        let usable = onehot_usable_arms(&rec);
+        let used: Vec<u32> = usable.iter().map(|a| a.node_id).collect();
+        // 16 deepest = ids 1..=16; minus the three unsafe (ids 3, 6, 8) → 13
+        assert!(!used.contains(&3) && !used.contains(&6) && !used.contains(&8), "{used:?}");
+        assert_eq!(used.len(), 13, "{used:?}");
+        assert!(used.iter().all(|id| *id <= 16), "{used:?}");
+        let frag = emit_onehot_or_tree(&rec, 7, 64).expect("tree");
+        assert!(frag.contains(&format!("arms={}", used.len())), "{frag}");
+        let rewrites = onehot_lhs_rewrites(&rec, &nodes, "svt_bm_oh_p7_top");
+        let rewritten_lines: Vec<u32> = rewrites.iter().map(|(l, _)| l.start_line).collect();
+        let used_lines: Vec<u32> = usable.iter().map(|a| a.line).collect();
+        assert_eq!(rewritten_lines, used_lines, "rewrites must be exactly the tree's arms");
+        // Labels outside the tree (ids 17..20, the unsafe ones) are untouched.
+        for keep in [102u32, 105, 107, 116, 117, 118, 119] {
+            assert!(!rewritten_lines.contains(&keep), "line {keep} must keep its RHS: {rewritten_lines:?}");
+        }
+    }
 
     #[test]
     fn recover_labels_same_line() {

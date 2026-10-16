@@ -1670,6 +1670,67 @@ endmodule
     }
 
     /// `--real-cut-feeds` must rewrite a simple always_ff NBA (path 3131 shape).
+    /// A102: three cuts on one chained cone (`t0 = a+b; t1 = t0+c; t2 = t1+d`)
+    /// with real feeds. Each feed is the origin expression — a feed reading a
+    /// peer cut's LHS reads that peer's registered stage, which is what a
+    /// multi-stage cut means — never `svt_zero` or the previous stage, and
+    /// every origin samples its own stage. (The old emit zeroed the first
+    /// peer-reading feed and chained the rest while still rewriting the
+    /// origins: `t1 = reg(t0)`.)
+    #[test]
+    fn chained_cuts_feed_from_origin_expressions_not_lean_chain() {
+        let src = include_str!("../../../fixtures/auto_correct/deep_add_chain.sv");
+        let mut trace = EditTrace::new();
+        for (i, lhs) in ["t0", "t1", "t2"].iter().enumerate() {
+            let line = src
+                .lines()
+                .position(|l| l.trim_start().starts_with(&format!("{lhs} = ")))
+                .unwrap() as u32
+                + 1;
+            trace.record_edit(EditRecord {
+                id: 0,
+                kind: EditKind::InsertReg,
+                origin: SourceLoc {
+                    file: "deep_add_chain.sv".into(),
+                    start_line: line,
+                    start_col: 1,
+                    end_line: line,
+                    end_col: 1,
+                    byte_start: 0,
+                    byte_end: 0,
+                    origin: OriginKind::UserFile,
+                },
+                path_id: Some(0),
+                node_id: Some(i as u32 + 1),
+                new_name: Some(format!("pipe_svt_p{}", i + 1)),
+                fo4_before: Some(30.0),
+                fo4_after: Some(10.0),
+                rationale: "chain cut".into(),
+                emit_rhs: None,
+                emit_rhs_extras: Vec::new(),
+                emit_snippet: None,
+            });
+        }
+        let mut dense = dense_options_from_source(src);
+        dense.real_cut_feeds = true;
+        let text = apply_edits_to_source_dense(src, &trace, &EmitPolicy::default(), &dense);
+        assert!(!text.contains("lean chain"), "{text}");
+        assert!(!text.contains("unsafe rhs"), "{text}");
+        for (pipe, rhs) in [("pipe_svt_p1", "a_i + b_i"), ("pipe_svt_p2", "t0 + c_i"), ("pipe_svt_p3", "t1 + d_i")] {
+            assert!(
+                text.contains(&format!("assign {pipe}_c = ({rhs});")),
+                "feed `{pipe}` must be `{rhs}`:\n{text}"
+            );
+        }
+        for (lhs, pipe) in [("t0", "pipe_svt_p1"), ("t1", "pipe_svt_p2"), ("t2", "pipe_svt_p3")] {
+            assert!(text.contains(&format!("{lhs} = {pipe};")), "{lhs} must sample {pipe}:\n{text}");
+        }
+        let mut tree = EmitTree::new();
+        tree.add_file("deep_add_chain__svt.sv", FileRole::Module, text);
+        let report = integrity_reparse(&tree, &ParseOptions::default());
+        assert!(report.reparse_ok, "{report:?}");
+    }
+
     #[test]
     fn real_cut_feeds_rewrites_proc_nba_origin() {
         let src = include_str!("../../../fixtures/auto_correct/proc_nba_span.sv");

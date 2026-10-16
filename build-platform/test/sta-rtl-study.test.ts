@@ -116,9 +116,9 @@ test("a width map whose source hash differs from the portable sources is refused
   expect(freshWidthMap(map, portable)).toBeDefined();
   writeFileSync(src, "module a; logic x; endmodule\n");
   expect(freshWidthMap(map, portable)).toBeUndefined();
-  // A map without the field (older run) is still accepted.
+  // A map without the field (older run) cannot prove its tree: refused.
   writeFileSync(map, JSON.stringify({ modules: {} }));
-  expect(freshWidthMap(map, portable)).toBeDefined();
+  expect(freshWidthMap(map, portable)).toBeUndefined();
   rmSync(dir, { recursive: true, force: true });
 });
 
