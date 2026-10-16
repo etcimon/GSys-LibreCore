@@ -813,6 +813,7 @@ fn design_to_analyze_json(
                     sv_timing_core::OpportunityKind::InsertReg => "insert_reg",
                     sv_timing_core::OpportunityKind::SplitAssign => "split_assign",
                     sv_timing_core::OpportunityKind::BalanceMux => "balance_mux",
+                    sv_timing_core::OpportunityKind::SelectIncrement => "select_increment",
                 },
                 "path_id": o.path_id,
                 "estimated_fo4_before": o.estimated_fo4_before,
@@ -1253,7 +1254,12 @@ fn main() -> ExitCode {
                 target: TimingTarget::new(target_mhz, fo4_ps, budget_margin),
                 cost_model: load_fo4_v1_default(),
                 module_filter: module_filter.clone(),
-                param_map: match build_param_map_with_widths(param_map, cfg_snapshot, assume_xlen, width_map) {
+                param_map: match build_param_map_with_widths(
+                    param_map,
+                    cfg_snapshot,
+                    assume_xlen,
+                    width_map,
+                ) {
                     Ok(m) => m,
                     Err(e) => {
                         eprintln!("error: {e}");
@@ -1495,7 +1501,12 @@ fn main() -> ExitCode {
             // construct `ParamMap::new()` — an empty map — which meant it lowered the
             // emitted RTL without any of the `CVA6Cfg.*` values the real analysis had,
             // produced no paths, and then reported that as a closure verdict.
-            let base_param_map = match build_param_map_with_widths(param_map, cfg_snapshot, assume_xlen, width_map) {
+            let base_param_map = match build_param_map_with_widths(
+                param_map,
+                cfg_snapshot,
+                assume_xlen,
+                width_map,
+            ) {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("error: {e}");

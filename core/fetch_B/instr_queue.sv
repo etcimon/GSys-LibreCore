@@ -136,7 +136,11 @@ module instr_queue
   fifo_idx_t idx_is_d, idx_is_q;
   // O7p: shamt counts pushed FIFOs; it can be up to NrFifo, so it needs one
   // more bit than the binary FIFO index to avoid wrapping to 0 on a 4-wide push.
-  logic [3:0] shamt;
+  // Sized to that bound ($clog2(NrFifo+1)): the sequence/index increments it
+  // steps are precomputed per candidate step value (sv-timing SelectIncrement),
+  // so one spare bit would double the candidate array for nothing.
+  localparam int unsigned ShamtW = $clog2(NrFifo + 1);
+  logic [ShamtW-1:0] shamt;
   // O7o: global per-instruction push sequence. push_seq_q is the next number to
   // hand out; push_seq_d is the next value after this cycle's push. Reset on
   // queue flush so the small counter does not wrap in a long run.
@@ -254,9 +258,23 @@ module instr_queue
     end
   end
 
+  // The push count is decided before admission, not read off its result:
+  // fifo_pos sets one distinct bit per valid slot (ranks are distinct modulo
+  // NrFifo), slot0_pos is one-hot exactly when valid[0] holds, and lo_partial
+  // implies valid[0] (leftover_slot0_push). So popcount(push_instr_fifo) ==
+  // address_overflow ? 0 : lo_partial ? 1 : instr_overflow ? 0 : popcount(valid),
+  // and popcount(valid) starts at the head of the cone instead of its tail
+  // (18 → 10 structural FO4 into push_seq_d / idx_is_d). Exhaustively proved
+  // equal with Yosys SAT for NrFifo = 2, 4, 8:
+  // sv-timing/fixtures/auto_correct/instr_queue_shamt_equiv.sv.
   always_comb begin : gen_shamt
-    shamt = '0;
-    for (int unsigned i = 0; i < NrFifo; i++) shamt = shamt + {{3{1'b0}}, push_instr_fifo[i]};
+    logic [ShamtW-1:0] valid_count;
+    valid_count = '0;
+    for (int unsigned i = 0; i < NrFifo; i++) valid_count = valid_count + ShamtW'(valid[i]);
+    shamt = address_overflow ? '0
+          : lo_partial       ? ShamtW'(1)
+          : instr_overflow   ? '0
+          : valid_count;
   end
 
   assign idx_is_d = (idx_is_q + fifo_idx_t'(shamt)) & IdxMask;

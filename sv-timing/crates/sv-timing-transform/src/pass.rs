@@ -1122,6 +1122,33 @@ fn apply_work_item(
                 | sv_timing_core::PathClassKind::DenseControlCone
         )
     );
+    // 0b) SelectIncrement (A88): exact, latency-neutral, protocol-free. The
+    // opportunity names the `REG + step` node; the transform re-detects and
+    // refuses when the shape, scope or pricing no longer holds.
+    if !did && opp.kind == OpportunityKind::SelectIncrement {
+        match crate::pipeline::select_increment_on_node(ctx, opp.path_id, node, origin.clone()) {
+            Ok(_) => {
+                did = true;
+                if let Some(last) = ctx.trace.records.last_mut() {
+                    if !reloc_id.is_empty() {
+                        last.rationale = format!("relocation {reloc_id}; {}", last.rationale);
+                    }
+                }
+            }
+            Err(TransformError::InvalidOpportunity(detail)) => {
+                ctx.log_algo(
+                    "select_increment.refuse",
+                    AlgoTrace::kv([
+                        ("path_id", json!(opp.path_id)),
+                        ("module", json!(ctx.active_module_name)),
+                        ("detail", json!(detail)),
+                    ]),
+                );
+                return Ok((false, Some("select_increment_refused")));
+            }
+            Err(e) => return Err(e),
+        }
+    }
     // 1) BalanceMux first on exclusive/bundle residuals. Full-core evidence:
     // rebalance_associative can "succeed" (depth −1) and consume the apply slot
     // while leaving exclusive residual ~46 FO4 — starving stage/onehot.

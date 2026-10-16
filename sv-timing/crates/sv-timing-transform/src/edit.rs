@@ -20,6 +20,8 @@ pub enum EditKind {
     RebalanceAssoc,
     /// Exclusive mux / priority-select balance (latency-neutral).
     BalanceMux,
+    /// `REG + narrow step` → precomputed candidates + select (latency-neutral, exact).
+    SelectIncrement,
     /// Name expansion / declaration materialization.
     ExpandName,
     /// Annotation only.

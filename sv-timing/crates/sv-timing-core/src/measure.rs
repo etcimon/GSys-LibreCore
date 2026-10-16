@@ -1006,6 +1006,9 @@ fn module_looks_multi_cycle(name: &str) -> bool {
 pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
     use crate::path_class::PathClassKind;
     let mut out = Vec::new();
+    let model = CostModel::default();
+    // SelectIncrement (A88) needs widths and the module's register set.
+    let mut reg_cache: BTreeMap<ModuleId, std::collections::BTreeSet<String>> = BTreeMap::new();
     for path in &design.paths {
         if path.multi_cycle || path.slack_fo4 >= 0.0 {
             continue;
@@ -1034,6 +1037,54 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
                 | PathClassKind::DenseControlCone
         );
         let module = design.modules.get(&path.module);
+
+        // SelectIncrement: `REG + narrow step` at the end of a cone — exact,
+        // latency-neutral, the adder leaves the critical path (A88). Any class
+        // that reaches here may carry one; the detector prices the select.
+        if let Some(m) = module {
+            let regs = reg_cache
+                .entry(m.id)
+                .or_insert_with(|| crate::select_increment::register_roots(m));
+            if !regs.is_empty() {
+                let resolver = crate::width::WidthResolver::from_parts(
+                    &design.packages,
+                    &design.param_map_ints,
+                    &m.decls,
+                    &m.ports,
+                    &m.const_exprs,
+                    &m.typedef_texts,
+                    &m.package_imports,
+                    design.width_map.get(&m.name),
+                );
+                for id in &path.nodes {
+                    let Some(n) = m.nodes.get(id) else { continue };
+                    let Some(shape) =
+                        crate::select_increment::detect(m, n, regs, &resolver, &model)
+                    else {
+                        continue;
+                    };
+                    out.push(Opportunity {
+                        kind: OpportunityKind::SelectIncrement,
+                        path_id: path.id,
+                        insert_after: *id,
+                        estimated_fo4_before: path.total_fo4,
+                        estimated_fo4_after: (path.total_fo4 - shape.gain()).max(0.0),
+                        loc: n.loc.clone(),
+                        rationale: format!(
+                            "path {} select_increment on node {id}: `{}` = `{}` + `{}` ({} candidates, {} select level(s); no latency)",
+                            path.id,
+                            shape.lhs_text,
+                            shape.reg_text,
+                            shape.step_ident,
+                            shape.candidates(),
+                            shape.mux_levels()
+                        ),
+                        requires_clock_in_scope: false,
+                        changes_latency: false,
+                    });
+                }
+            }
+        }
 
         // BalanceMux: exclusive residual still over budget (hottest arm / select tree).
         if exclusive {

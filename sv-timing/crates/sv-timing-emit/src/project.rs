@@ -12,15 +12,11 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use sv_timing_core::{
-    write_filelist, CoreError, CoreResult, NameTable, SourceLoc, TimingDesign,
-};
+use sv_timing_core::{write_filelist, CoreError, CoreResult, NameTable, SourceLoc, TimingDesign};
 use sv_timing_transform::EditTrace;
 
 use crate::dense::dense_options_from_source;
-use crate::{
-    apply_edits_to_source_dense, machine_header, EmitPolicy, EmitTree, FileRole,
-};
+use crate::{apply_edits_to_source_dense, machine_header, EmitPolicy, EmitTree, FileRole};
 
 /// How relative paths are laid out under the emit root.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -132,7 +128,8 @@ pub fn edits_for_source(trace: &EditTrace, source_path: &Path) -> EditTrace {
             .map(|s| s.to_string_lossy().to_string())
             .unwrap_or_default();
         // Exact basename only (copro_alu.sv ≠ alu.sv).
-        let base_match = !src_base.is_empty() && origin_base == src_base
+        let base_match = !src_base.is_empty()
+            && origin_base == src_base
             && (of == origin_base || src_norm == src_base);
         // Full path: equality or path-suffix of the *full* normalized key
         // (e.g. `core/alu.sv` matches `/repo/core/alu.sv`), not bare basename.
@@ -153,10 +150,8 @@ pub fn infer_source_root(paths: &[PathBuf]) -> Option<PathBuf> {
     if paths.is_empty() {
         return None;
     }
-    let comps: Vec<Vec<std::path::Component>> = paths
-        .iter()
-        .map(|p| p.components().collect())
-        .collect();
+    let comps: Vec<Vec<std::path::Component>> =
+        paths.iter().map(|p| p.components().collect()).collect();
     if comps.len() == 1 {
         return paths[0].parent().map(|p| p.to_path_buf());
     }
@@ -291,11 +286,11 @@ pub fn synthesize_project(
         // Prefer a real IR-shaped module when callers pass origin-only names:
         // build a minimal TimingModule and run synthesize_module (full ports/always).
         let mut text = {
-            use sv_timing_core::{
-                ModulePort, RegionKind, TimingModule as Tm, CombRegion, GateInfo, EdgeKind,
-                ResetInfo, SourceLoc as Sl,
-            };
             use std::collections::BTreeMap;
+            use sv_timing_core::{
+                CombRegion, EdgeKind, GateInfo, ModulePort, RegionKind, ResetInfo, SourceLoc as Sl,
+                TimingModule as Tm,
+            };
             let loc = origin.clone().unwrap_or_else(|| Sl {
                 file: String::new(),
                 start_line: 1,
@@ -419,7 +414,10 @@ pub fn synthesize_project(
 }
 
 /// Collect new module names from a [`NameTable`] (allocated modules not in design inputs).
-pub fn new_modules_from_names(names: &NameTable, design: &TimingDesign) -> Vec<(String, Option<SourceLoc>)> {
+pub fn new_modules_from_names(
+    names: &NameTable,
+    design: &TimingDesign,
+) -> Vec<(String, Option<SourceLoc>)> {
     let existing: BTreeSet<String> = design.modules.values().map(|m| m.name.clone()).collect();
     // NameTable does not expose modules map publicly — use demangle is incomplete.
     // For now: no automatic pull; callers pass explicit new modules.
@@ -467,10 +465,7 @@ pub fn write_project_emit(
     }
 
     let written = write_emit_tree(&result.tree, &opts.out_dir)?;
-    result.written = written
-        .iter()
-        .map(|p| p.display().to_string())
-        .collect();
+    result.written = written.iter().map(|p| p.display().to_string()).collect();
 
     // Update emit_path on entries to real paths when possible
     let mut by_rel: BTreeMap<String, PathBuf> = BTreeMap::new();
@@ -627,20 +622,41 @@ mod tests {
         assert!(
             alu.records.is_empty(),
             "copro_alu must not densify alu: {:?}",
-            alu.records.iter().map(|r| &r.origin.file).collect::<Vec<_>>()
+            alu.records
+                .iter()
+                .map(|r| &r.origin.file)
+                .collect::<Vec<_>>()
         );
-        let copro = edits_for_source(&tr, Path::new("/mnt/e/cva6/core/cvxif_example/copro_alu.sv"));
+        let copro = edits_for_source(
+            &tr,
+            Path::new("/mnt/e/cva6/core/cvxif_example/copro_alu.sv"),
+        );
         assert_eq!(copro.records.len(), 1);
 
         let mut uncertain = tr.clone();
-        for origin in [OriginKind::ExpandedMacro, OriginKind::IncludeExpanded, OriginKind::Unknown] {
+        for origin in [
+            OriginKind::ExpandedMacro,
+            OriginKind::IncludeExpanded,
+            OriginKind::Unknown,
+        ] {
             uncertain.records[0].origin.origin = origin;
-            assert!(edits_for_source(&uncertain, Path::new("leaf.sv")).records.is_empty());
+            assert!(edits_for_source(&uncertain, Path::new("leaf.sv"))
+                .records
+                .is_empty());
         }
         let mut sibling = tr.clone();
         sibling.records[0].origin.file = "/proj/first/leaf.sv".into();
-        assert!(edits_for_source(&sibling, Path::new("/proj/second/leaf.sv")).records.is_empty());
-        assert_eq!(edits_for_source(&sibling, Path::new("/proj/first/leaf.sv")).records.len(), 1);
+        assert!(
+            edits_for_source(&sibling, Path::new("/proj/second/leaf.sv"))
+                .records
+                .is_empty()
+        );
+        assert_eq!(
+            edits_for_source(&sibling, Path::new("/proj/first/leaf.sv"))
+                .records
+                .len(),
+            1
+        );
     }
 
     #[test]
@@ -699,7 +715,10 @@ mod tests {
         assert!(result.filelist_path.is_some());
         assert!(result.manifest_path.is_some());
         assert!(result.entries.iter().any(|e| e.is_new));
-        assert!(result.entries.iter().any(|e| !e.is_new && e.edit_count >= 1));
+        assert!(result
+            .entries
+            .iter()
+            .any(|e| !e.is_new && e.edit_count >= 1));
         let fl = std::fs::read_to_string(result.filelist_path.as_ref().unwrap()).unwrap();
         assert!(fl.contains("__svt.sv") || fl.contains("leaf"));
         let gen = dir.join("generated").join("helper_svt_x0__svt.sv");

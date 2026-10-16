@@ -371,6 +371,9 @@ pub enum OpportunityKind {
     SplitAssign,
     /// Balance exclusive mux / priority select tree (latency-neutral).
     BalanceMux,
+    /// `REG + narrow step` → precomputed candidate increments + one select
+    /// (latency-neutral, exact; `select_increment` module, A88).
+    SelectIncrement,
 }
 
 /// Pipeline / rewrite opportunity.

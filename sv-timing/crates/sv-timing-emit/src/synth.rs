@@ -10,9 +10,7 @@
 //! and a short chain of intermediate nets sized from port widths when known.
 //! Enough for integrity reparse and for `generated/*__svt.sv` expansion.
 
-use sv_timing_core::{
-    EdgeKind, OperatorClass, RegionKind, TimingModule,
-};
+use sv_timing_core::{EdgeKind, OperatorClass, RegionKind, TimingModule};
 
 use crate::{machine_header, origin_comment, EmitPolicy};
 
@@ -65,11 +63,12 @@ pub fn synthesize_module_with(
                 .unwrap_or_else(|| "logic".into());
             param_parts.push(format!("  parameter type {} = {}", p.name, ty));
         } else {
-            let def = p
-                .default_expr
-                .clone()
-                .unwrap_or_else(|| "0".into());
-            param_parts.push(format!("  parameter int {} = {}", sanitize_id(&p.name), def));
+            let def = p.default_expr.clone().unwrap_or_else(|| "0".into());
+            param_parts.push(format!(
+                "  parameter int {} = {}",
+                sanitize_id(&p.name),
+                def
+            ));
         }
     }
     if !param_parts.is_empty() {
@@ -106,10 +105,7 @@ pub fn synthesize_module_with(
     // Genvar loops (structural shell)
     for (i, g) in module.gen_loops.iter().enumerate() {
         let bound = g.bound_hint.clone().unwrap_or_else(|| "1".into());
-        let label = g
-            .label
-            .clone()
-            .unwrap_or_else(|| format!("gen_loop_{i}"));
+        let label = g.label.clone().unwrap_or_else(|| format!("gen_loop_{i}"));
         s.push_str(&format!(
             "  // generate for ({gv} < {bound}) — body density={n}\n\
               generate\n\
@@ -159,10 +155,7 @@ pub fn synthesize_module_with(
         let Some(region) = module.regions.get(&rid) else {
             continue;
         };
-        let label = region
-            .label
-            .clone()
-            .unwrap_or_else(|| format!("r{rid}"));
+        let label = region.label.clone().unwrap_or_else(|| format!("r{rid}"));
         let label = sanitize_id(&label);
 
         // Declare intermediate nets for nodes in region
@@ -210,7 +203,9 @@ pub fn synthesize_module_with(
                         }
                         let net = format!("{label}_n{nid}");
                         let rhs = match prev {
-                            Some(ref p) => op_expr(module.nodes.get(nid).and_then(|n| n.op_class), p),
+                            Some(ref p) => {
+                                op_expr(module.nodes.get(nid).and_then(|n| n.op_class), p)
+                            }
                             None => "'0".to_string(),
                         };
                         s.push_str(&format!("  assign {net} = {rhs};\n"));
@@ -433,10 +428,7 @@ fn format_port(p: &sv_timing_core::ModulePort, default_width: u32) -> String {
         "input" | "output" | "inout" | "ref" => p.direction.as_str(),
         _ => "input",
     };
-    let ty = p
-        .type_name
-        .clone()
-        .unwrap_or_else(|| "logic".into());
+    let ty = p.type_name.clone().unwrap_or_else(|| "logic".into());
     let dims = p
         .packed_dims
         .clone()
@@ -517,10 +509,8 @@ fn sanitize_id(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sv_timing_core::{
-        analyze_files, LowerOptions, ParseOptions, TimingTarget,
-    };
     use std::path::PathBuf;
+    use sv_timing_core::{analyze_files, LowerOptions, ParseOptions, TimingTarget};
 
     fn fixture(rel: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -547,7 +537,10 @@ mod tests {
         let text = synthesize_module(m, &EmitPolicy::default());
         assert!(text.contains("module proj_leaf"), "{text}");
         assert!(text.contains("a_i"), "{text}");
-        assert!(text.contains("always_comb") || text.contains("assign "), "{text}");
+        assert!(
+            text.contains("always_comb") || text.contains("assign "),
+            "{text}"
+        );
         assert!(text.contains("endmodule"), "{text}");
         // Expression-accurate: recovered assign RHS should mention ports or +
         let has_expr = m.nodes.values().any(|n| {
@@ -555,7 +548,10 @@ mod tests {
                 .as_ref()
                 .map(|r| r.contains('+') || r.contains("a_i"))
                 .unwrap_or(false)
-                || n.lhs.as_ref().map(|l| l.contains("t0") || l.contains("y_o")).unwrap_or(false)
+                || n.lhs
+                    .as_ref()
+                    .map(|l| l.contains("t0") || l.contains("y_o"))
+                    .unwrap_or(false)
         });
         assert!(
             has_expr || text.contains('+'),

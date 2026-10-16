@@ -70,10 +70,29 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
 - [x] Review candidate A88 (precomputed step increments) removes instr_queue's
   18.3/15.3 cones; live board worst RegToReg 17.0 (`g6lc_bp_ckpt`), 155/1390
   failing, structural max ≈ 2353 MHz. Live baseline without review edits: 26.8.
-- [ ] `SelectIncrement` transform (`REG_q + k-bit step` → precomputed candidates
-  + select) so A88 is automatic and emitted, with SAT equivalence on fixtures.
-- [ ] Whole-core mapped STA: streamed phase B in progress (461 modules, one
-  large module holds ABC for ~20 min); none finished yet.
+- [x] `SelectIncrement` transform (A91): detector + pricing in core, real IR
+  rewrite in transform, emission via the BalanceMux origin-rewrite path,
+  planner priority (first pick; allowed under RefuseRegister); fixture 15.0 →
+  12.5, SAT-equivalent (12-step from reset, 6-step free state), Nangate45
+  slack 0.0552 → 0.0726 ns. delay-v33: runtime indexed select = one mux level.
+- [x] Production edit (A92): `instr_queue` counts `valid` before admission,
+  `shamt` sized `$clog2(NrFifo+1)`; exhaustive SAT for NrFifo 2/4/8; core
+  elaborates. Live `instr_queue` 24.3 → 18.3, emitted 15.8.
+- [x] Host (A93): portable flist carries the manifest `+define+` lines
+  (`G6LC_FETCH_B`) and `verify.synthDefines`; the measured design is the one
+  the flow synthesizes. Board: live worst 24.0 (`frontend speculative_d`).
+- [x] Host (A94): streamed phase B = one yosys process per module in parallel
+  (`rtlil_width_map.py --split-dir`, `map_one.sh`, ABC timeout fallbacks).
+- [ ] BalanceMux emits write-only `pipe_svt_red_*` feed flops (dead after
+  synthesis) that create phantom `regtoreg` endpoints in the structural
+  report (`frontend` L611 17.0): drop the extra-cut emission when no sink
+  samples the pipe.
+- [ ] `frontend speculative_d` 24.0: fold `|a || |b || |c` to one reduce
+  (exact; a RebalanceAssoc pattern), `is_jalr = iv & ~(iv & ret)` → `iv &
+  ~ret` (exact); `csr_regfile guest_time >= vstimecmp` 16.8: one-cycle timer
+  compare latency is an owner decision, not a transform.
+- [ ] Whole-core mapped STA: parallel phase B running (458/461 in 3 min, the
+  three large modules under the 30-min per-script timeout).
 - [ ] 10 FO4 completion: the residual is 64-bit adders/compares (12 FO4 at
   this table) plus a few real narrow chains (`g6lc_bp_ckpt` 17, `instr_queue`
   13.5). Closure at XLEN=64 needs either `fo4_ps` ≤ 16 or multi-cycle/pipelined

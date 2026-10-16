@@ -815,7 +815,9 @@ pub fn path_has_indexed_restore(design: &TimingDesign, path: &TimingPath) -> boo
 pub enum OverBudgetTrial {
     /// Multi-cycle, a single atomic operator, or already at budget.
     Leave,
-    /// Real handshake or indexed restore. No register and no mux rewrite.
+    /// Real handshake or indexed restore. No register and no mux rewrite;
+    /// an exact same-cycle rewrite of one arithmetic node (SelectIncrement)
+    /// changes neither protocol nor select structure and stays legal.
     RefuseRegister,
     /// Dense cone or independent left-hand sides. Balance the fat field only.
     BalanceField,
@@ -855,8 +857,9 @@ pub fn trial_for_path(path: &TimingPath) -> OverBudgetTrial {
 pub fn trial_allows(trial: OverBudgetTrial, kind: crate::ir::OpportunityKind) -> bool {
     use crate::ir::OpportunityKind::*;
     match trial {
-        OverBudgetTrial::Leave | OverBudgetTrial::RefuseRegister => false,
-        OverBudgetTrial::BalanceField => matches!(kind, BalanceMux | SplitAssign),
+        OverBudgetTrial::Leave => false,
+        OverBudgetTrial::RefuseRegister => matches!(kind, SelectIncrement),
+        OverBudgetTrial::BalanceField => matches!(kind, BalanceMux | SplitAssign | SelectIncrement),
         OverBudgetTrial::CriticalChain | OverBudgetTrial::BalanceThenRegister => true,
     }
 }
@@ -874,7 +877,9 @@ pub fn trial_prefers_register(path: &TimingPath) -> bool {
 pub fn is_latency_neutral_kind(kind: crate::ir::OpportunityKind) -> bool {
     matches!(
         kind,
-        crate::ir::OpportunityKind::BalanceMux | crate::ir::OpportunityKind::SplitAssign
+        crate::ir::OpportunityKind::BalanceMux
+            | crate::ir::OpportunityKind::SplitAssign
+            | crate::ir::OpportunityKind::SelectIncrement
     )
 }
 

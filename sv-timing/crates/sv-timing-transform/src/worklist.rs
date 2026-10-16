@@ -92,11 +92,18 @@ pub fn order_worklist_with_plan(
                 if let Some(p) = primary_by_id.get(&card.path_id).copied() {
                     if !p.multi_cycle {
                         let trial = sv_timing_core::pass_strategy::trial_for_path(p);
+                        // A refused-register path may still carry an exact
+                        // SelectIncrement (the only kind RefuseRegister allows).
+                        let exact_only = opportunities.iter().any(|o| {
+                            o.path_id == p.id
+                                && sv_timing_core::pass_strategy::trial_allows(trial, o.kind)
+                        });
                         if matches!(
                             trial,
                             sv_timing_core::pass_strategy::OverBudgetTrial::Leave
                                 | sv_timing_core::pass_strategy::OverBudgetTrial::RefuseRegister
-                        ) {
+                        ) && !exact_only
+                        {
                             seen.insert(p.id);
                             continue;
                         }
@@ -191,10 +198,19 @@ pub fn order_worklist_with_plan(
     // sort the suffix... Simpler: if plan used, don't re-sort entire list — card
     // order is intentional; sort only items after cards by slack.
     if plan.is_none() || !policy.use_relocation_plan {
+        let is_exact = |w: &WorkItem| {
+            w.opportunity
+                .as_ref()
+                .is_some_and(|o| o.kind == OpportunityKind::SelectIncrement)
+        };
         items.sort_by(|a, b| {
-            a.slack_fo4
-                .partial_cmp(&b.slack_fo4)
-                .unwrap_or(std::cmp::Ordering::Equal)
+            is_exact(b)
+                .cmp(&is_exact(a))
+                .then_with(|| {
+                    a.slack_fo4
+                        .partial_cmp(&b.slack_fo4)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
                 .then_with(|| a.file.cmp(&b.file))
                 .then_with(|| a.line.cmp(&b.line))
                 .then_with(|| a.path_id.cmp(&b.path_id))
@@ -211,10 +227,20 @@ pub fn order_worklist_with_plan(
                     .collect()
             })
             .unwrap_or_default();
+        // Exact SelectIncrement items lead regardless of card rank: they are
+        // local, latency-neutral and cheap, and a long worklist of bundle
+        // balances must not truncate them away (A88).
+        let is_exact = |w: &WorkItem| {
+            w.opportunity
+                .as_ref()
+                .is_some_and(|o| o.kind == OpportunityKind::SelectIncrement)
+        };
         items.sort_by(|a, b| {
             let ra = card_rank.get(&a.path_id).copied().unwrap_or(10_000);
             let rb = card_rank.get(&b.path_id).copied().unwrap_or(10_000);
-            ra.cmp(&rb)
+            is_exact(b)
+                .cmp(&is_exact(a))
+                .then_with(|| ra.cmp(&rb))
                 .then_with(|| {
                     a.slack_fo4
                         .partial_cmp(&b.slack_fo4)
@@ -250,6 +276,16 @@ fn pick_opportunity_for_card(
     opportunities: &[Opportunity],
 ) -> (Option<Opportunity>, Option<String>) {
     let trial = sv_timing_core::pass_strategy::trial_for_path(path);
+    // An exact SelectIncrement on this path outranks every card option: it
+    // removes the adder from the cone with no latency and no protocol change,
+    // so a register (or a balance) is tried only after it (A88).
+    if let Some(o) = opportunities.iter().find(|o| {
+        o.path_id == path.id
+            && o.kind == OpportunityKind::SelectIncrement
+            && sv_timing_core::pass_strategy::trial_allows(trial, o.kind)
+    }) {
+        return (Some(o.clone()), Some("t1_select_increment".into()));
+    }
     let prefer_reg = sv_timing_core::pass_strategy::trial_prefers_register(path);
     let mut options: Vec<_> = card
         .options
@@ -307,17 +343,21 @@ fn pick_opportunity_default(p: &TimingPath, opportunities: &[Opportunity]) -> Op
         .filter(|o| o.path_id == p.id)
         .filter(|o| sv_timing_core::pass_strategy::trial_allows(trial, o.kind))
         .min_by_key(|o| {
+            // An exact, latency-neutral SelectIncrement beats every other kind:
+            // it removes the adder from the cone without touching protocol.
             if prefer_reg {
                 match o.kind {
-                    OpportunityKind::InsertReg => 0u8,
-                    OpportunityKind::BalanceMux => 1,
-                    OpportunityKind::SplitAssign => 2,
+                    OpportunityKind::SelectIncrement => 0u8,
+                    OpportunityKind::InsertReg => 1,
+                    OpportunityKind::BalanceMux => 2,
+                    OpportunityKind::SplitAssign => 3,
                 }
             } else {
                 match o.kind {
-                    OpportunityKind::BalanceMux => 0u8,
-                    OpportunityKind::SplitAssign => 1,
-                    OpportunityKind::InsertReg => 2,
+                    OpportunityKind::SelectIncrement => 0u8,
+                    OpportunityKind::BalanceMux => 1,
+                    OpportunityKind::SplitAssign => 2,
+                    OpportunityKind::InsertReg => 3,
                 }
             }
         })

@@ -41,6 +41,7 @@ pub mod pass_strategy;
 pub mod path_class;
 pub mod ref_order;
 pub mod relocation;
+pub mod select_increment;
 pub mod version;
 pub mod width;
 

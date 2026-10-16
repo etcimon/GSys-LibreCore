@@ -73,6 +73,13 @@ The table records the original defect and where the fix now lives.
    (`w/32`) — measured multiply delay ratios 0.15/0.37/0.62/1.0 at 4/8/16/32
    bits sit between linear and log, and the quadratic form is area, not delay.
    Calibration and provenance: ALGORITHMS-EXPERTS Part LIII (A83).
+   delay-v33 adds one mux level per runtime indexed select (`arr[idx]`,
+   `v[idx +: W]`); constant selects remain wiring.
+
+   **Transform catalog addition (2026-10-16): `SelectIncrement`** — exact,
+   latency-neutral: `LHS = REG + step` (k-bit step, k ≤ 4) → `2^k`
+   precomputed increments of the register and one select. Opportunity kind,
+   planner priority and emission are described in ALGORITHMS-EXPERTS A91.
 
    Golden inputs for this rule live in `fixtures/measure/width_sensitive.sv`.
 3. **Real dataflow** — build a def-use map from the already-recovered `IrNode.lhs` /

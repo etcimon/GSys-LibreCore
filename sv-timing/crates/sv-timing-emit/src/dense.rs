@@ -137,7 +137,10 @@ pub struct DenseEmitOptions {
 impl DenseEmitOptions {
     /// Header identifier tokens as a set (see `header_ident_tokens`).
     pub fn header_idents(&self) -> std::collections::BTreeSet<&str> {
-        self.header_ident_tokens.iter().map(String::as_str).collect()
+        self.header_ident_tokens
+            .iter()
+            .map(String::as_str)
+            .collect()
     }
 }
 
@@ -337,7 +340,10 @@ pub fn emit_blocks_for_trace_src(
         .filter(|r| {
             matches!(
                 r.kind,
-                EditKind::BalanceMux | EditKind::RebalanceAssoc | EditKind::Annotate
+                EditKind::BalanceMux
+                    | EditKind::SelectIncrement
+                    | EditKind::RebalanceAssoc
+                    | EditKind::Annotate
             )
         })
         .collect();
@@ -384,8 +390,14 @@ pub fn emit_blocks_for_trace_src(
     let late = if pipe.is_empty() && splits.is_empty() {
         String::new()
     } else {
-        let (late, decl_jobs) =
-            dense_pipe_block(opts, cuts, &pipe, &splits, &credit_only, snippets.is_empty());
+        let (late, decl_jobs) = dense_pipe_block(
+            opts,
+            cuts,
+            &pipe,
+            &splits,
+            &credit_only,
+            snippets.is_empty(),
+        );
         for (_, d) in decl_jobs {
             top.push_str(&d);
         }
@@ -525,9 +537,9 @@ fn dense_pipe_block(
     // A hoisted declaration sits right after the module header, so `type(lhs)`
     // may only name a port there (a module variable is declared later).
     let pipe_decl = |name: &str, suffix: &str, comment: &str, hoisted: bool| -> String {
-        let typed = lhs_by_pipe.get(name).filter(|l| {
-            !hoisted || header_idents.contains(l.split('.').next().unwrap_or(l))
-        });
+        let typed = lhs_by_pipe
+            .get(name)
+            .filter(|l| !hoisted || header_idents.contains(l.split('.').next().unwrap_or(l)));
         match typed {
             Some(l) => format!("  var type({l}) {name}{suffix}; // {comment}\n"),
             None if hoisted => {
@@ -834,6 +846,7 @@ fn credit_only_review_block(records: &[&EditRecord]) -> String {
         b.push_str(&origin_comment(&r.origin, Some(r.id)));
         let kind = match r.kind {
             EditKind::BalanceMux => "balance_mux",
+            EditKind::SelectIncrement => "select_increment",
             EditKind::RebalanceAssoc => "rebalance_assoc",
             EditKind::Annotate => "annotate",
             _ => "credit",
@@ -1204,10 +1217,17 @@ endmodule
         let masked = crate::masked_syntax(src);
         let (start, end) = module_header_span(&masked).expect("header");
         assert_eq!(&src[start..start + 6], "module");
-        assert_eq!(&src[end - 1..=end], ");", "header ends at the port list `);`");
+        assert_eq!(
+            &src[end - 1..=end],
+            ");",
+            "header ends at the port list `);`"
+        );
         let toks = header_ident_tokens(src);
         assert!(toks.iter().any(|t| t == "y_o") && toks.iter().any(|t| t == "clk_i"));
-        assert!(!toks.iter().any(|t| t == "mid"), "body names are not header names");
+        assert!(
+            !toks.iter().any(|t| t == "mid"),
+            "body names are not header names"
+        );
     }
 
     #[test]

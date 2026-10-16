@@ -6923,7 +6923,9 @@ All numbers below are structural FO4 at **10 FO4 / 20 ps / margin 0.2** on
 | delay-v31 + cfg snapshot, baseline | **22.0** | 700 | `TRANS_ID_BITS`/`NrHarts`/`INSTR_PER_FETCH` resolved (A86) |
 | delay-v31 + cfg snapshot, review | 21.0 (`fpnew_fma_multi`) | 696 | `fpnew_fma_multi` is not instantiated in this config |
 | delay-v32 + cfg + elaborated widths, baseline (live modules) | **26.8** (`instr_queue`) | 521 | 126 file-list modules not in the elaborated design excluded (A89) |
-| delay-v32 + cfg + elaborated widths, review | **17.0** (`g6lc_bp_ckpt`) | 515 | precomputed step increments added to the review copy (A88) |
+| delay-v32 + cfg + elaborated widths, review | 17.0 (`g6lc_bp_ckpt`) | 515 | precomputed step increments added to the review copy (A88) |
+| delay-v33 + cfg + widths + manifest defines, live RTL (A92 edit) | **24.0** (`frontend`) | 564 | the B-path code is now what is measured (A93); runtime indexed selects cost a mux |
+| delay-v33 …, emitted latency-neutral (31 BalanceMux + 1 SelectIncrement) | **24.0** (`frontend`) | 528 | `instr_queue` 24.3 → 15.8 (A92 + A91) |
 
 The failing-path count went **up** with width scaling: a 64-bit add is 12 FO4
 at this table, so every single-cycle 64-bit adder path now misses a 10 FO4
@@ -7089,9 +7091,7 @@ The increments leave the admission cone (they start at the clock edge); the
 cone ends in a 5:1 select. Exact modulo 2^W, same cycle, no state added; the
 cost is NrFifo+1 incrementers of W bits. This is the Part LI two-port pointer
 specialization (mapped 0.247 → 0.169 ns) applied to the sequence counter; it
-is a review copy, not a production edit, and it is the shape a `SelectIncrement`
-transform would emit automatically (`REG_q + X`, X a k-bit runtime step with
-k ≤ 3, REG_q a register): the next transform to implement.
+was first a review copy; it is now the `SelectIncrement` transform (A91).
 
 ## A89 — Only instantiated modules decide a target's period
 
@@ -7102,6 +7102,101 @@ the elaborator instantiated and lists the others as `uninstantiated_modules`
 generic RAM models, …). `fpnew_fma_multi`'s 21.0 was the headline for a module
 this target does not build. Paths of dead modules are still analyzed and
 listed; they no longer set `worst_path_fo4`, `closes` or the failing counts.
+
+## A91 — `SelectIncrement`: the transform, end to end
+
+`sv-timing-core::select_increment` recognizes `LHS = REG + step` and
+`LHS = (REG + step) & MASK` on a continuous or `always_comb` assignment where
+`REG` is a register root (an `always_ff` non-blocking LHS, optionally
+`REG[CONST]`), `step` a bare module-scope identifier of resolved width
+`k ≤ 4` that is not itself a register, and the result is cheaper as a select:
+`fo4_after = ceil(k/2) × mux (+ logic_bit for the mask)` against the node's
+adder cost, with an area guard `2^k × W ≤ 512` bits. `suggest_opportunities`
+emits `OpportunityKind::SelectIncrement` on any failing path carrying the
+shape; the planner ranks it first (`pick_opportunity_for_card`, worklist
+order), and it is the one kind a `RefuseRegister` (P10 handshake) trial
+still allows — an exact same-cycle rewrite of one arithmetic node changes
+neither protocol nor select structure.
+
+The transform (`pipeline::select_increment_on_node`) is a real IR rewrite,
+not a credit: `2^k` candidate nodes `cand[j] = (REG + j) [& MASK]` join the
+node's region (register-fed, parallel), the origin node becomes the select
+(`cand[step]` for k ≤ 2, `step[k-1] ? cand[{1'b1, lo}] : cand[{1'b0, lo}]`
+for k = 3..4 so the structural model and the netlist agree on two levels),
+and the remeasure recomputes the def-use paths. Emission reuses the BalanceMux
+origin-rewrite machinery (`EditKind::SelectIncrement`): a module-scope
+`var type(LHS) cand [0:2^k-1]` plus `for (genvar …) assign cand[j] =
+type(LHS)'(…)`, injected before the origin process, and the origin RHS
+replaced — gated by the same structural-emit switch as BalanceMux RTL.
+
+Because an `arr[idx]` read was free in the model, the transform could have
+booked the whole adder as gain; delay-v33 bills a runtime indexed select as
+one mux level (constant indices stay wiring), which also corrects every
+`mem[idx]` in the core.
+
+Evidence: `fixtures/auto_correct/select_increment.sv` (a 16-bit sequence
+counter and a 2-bit ring index behind an admission cone) goes 15.0 → 12.5
+structural, the 2-bit index is correctly left alone; the emitted pair was
+proved equivalent with Yosys SAT (12-step miter from reset and 6-step from
+free state, both `SUCCESS`) and mapped on Nangate45 with the delay script:
+gold slack 0.0552 ns → gate 0.0726 ns at a 1 ns clock. Regression:
+`sv-timing-emit::tests::select_increment_fixture_emits_candidates_and_select`,
+`select_increment::tests`. On `g6lc64_ooo` the pre-pass applies it once
+(`instr_queue` `push_seq_d`, 8 candidates after A92 narrowed `shamt`).
+
+## A92 — Production edit: `instr_queue` counts before admission
+
+The live worst after A88–A90 was `instr_queue`'s `gen_shamt` — a serial
+popcount of `push_instr_fifo` at the *end* of the admission cone (cf-type
+compare → mask → valid → slot compaction → overflow → partial → push) feeding
+the 16-bit sequence add: 24.3 FO4. `popcount(push_instr_fifo)` equals
+`address_overflow ? 0 : lo_partial ? 1 : instr_overflow ? 0 :
+popcount(valid)` because `fifo_pos` sets one distinct bit per valid slot
+(ranks are distinct modulo NrFifo), `slot0_pos` is one-hot exactly when
+`valid[0]`, and `lo_partial` implies `valid[0]` (`leftover_slot0_push`).
+`core/fetch_B/instr_queue.sv` now counts `valid` at the head of the cone and
+lets the three admission outcomes select; `shamt` is sized `$clog2(NrFifo+1)`
+(3 bits for NrFifo = 4, so SelectIncrement builds 8 candidates, not 16).
+Exhaustively proved equal with `sat -verify` for NrFifo = 2, 4, 8
+(`fixtures/auto_correct/instr_queue_shamt_equiv.sv`, which copies the
+production cone verbatim); the whole core still elaborates (`hierarchy
+-check -top cva6`, 57 s). Live `instr_queue` RegToReg: 24.3 → 18.3; with the
+automatic SelectIncrement on the emitted tree: 15.8 (the admission cone
+itself is 10.3, the floor for anything that depends on `shamt`).
+
+## A93 — The measured design was not the synthesized design
+
+`writePortableTimingsFlist` dropped the manifest's `+define+` lines, so
+sv-timing read `core/Flist.cva6` without `G6LC_FETCH_B` (and without the
+synthesis defines) — the A-path code under `ifndef G6LC_FETCH_B` was measured
+and the B-path code was not. The portable flist now carries the manifest's
+defines plus `verify.synthDefines`. Board under the right preprocessing
+(delay-v33, cfg snapshot, elaborated widths, live modules): live RTL worst
+RegToReg **24.0** (`frontend` L1033 `speculative_d`), 191/1371 failing;
+emitted latency-neutral tree **24.0**, 194/1383 (the BalanceMux `pipe_svt_red_*`
+feed flops it emits are write-only — dead after synthesis, but they create
+phantom endpoints in the structural report; see AGENTS-todo).
+
+Remaining live RegToReg leaders, all real RTL: `frontend` `speculative_d`
+24.0 (`slot_live` 7.5 + `is_return`/`is_jalr` chain + an 8-op and/or spine
+whose `|is_branch || |is_return || |is_jalr` folds exactly to one 12-bit
+reduce), `csr_regfile` `guest_time`/`vstimecmp_hit_d` 16.8 (64-bit add then
+64-bit compare in one cycle — a timer compare that tolerates one cycle of
+latency, a decision for the owner), `frontend` `kill_drop`/`icache_take`
+16.5, `instr_queue` 15.8/15.3, `g6lc_bp_ckpt` 15.0, `fpnew_fma` 14.9.
+
+## A94 — Parallel per-module mapping on the builder
+
+The single-process phase B (map one module, `delete`, next) grew to 34 GiB
+RSS after 375 modules and spent 58 minutes in one ABC run (`g6lc_iq`, then
+`scoreboard`), blocking the rest. Phase B is now one yosys process per
+module: `rtlil_width_map.py --split-dir` writes every module of the phase-A
+RTLIL as its own file (header replicated, attributes travel with their
+module) and `xargs -P nproc/2` runs `map_one.sh` — `read_rtlil; techmap;
+dfflibmap; abc` with the delay script under `timeout`, falling back to the
+plain liberty script and then `abc -fast`, each module logging which script
+it got (`SYNTH_STREAM_FALLBACK`). 458 of 461 modules mapped in three minutes;
+the three large ones run concurrently under the 30-minute per-script timeout.
 
 ## A90 — Incrementers are not gates (delay-v32)
 

@@ -1239,13 +1239,18 @@ endmodule
         let decl_at = text
             .find("var type(y_o) pipe_svt_p1;")
             .expect("typed pipe decl (y_o is a port)\n{text}");
-        let use_at = text.find("y_o = pipe_svt_p1;").expect("procedural origin rewrite");
+        let use_at = text
+            .find("y_o = pipe_svt_p1;")
+            .expect("procedural origin rewrite");
         let first_proc = text.find("always_comb").expect("first process");
         assert!(
             header_end < decl_at && decl_at < first_proc && first_proc < use_at,
             "decl after header, before the always_comb that reads it: header={header_end} decl={decl_at} proc={first_proc} use={use_at}\n{text}"
         );
-        assert!(text.contains("assign pipe_svt_p1_c = type(y_o)'((mid ^ a_i));"), "{text}");
+        assert!(
+            text.contains("assign pipe_svt_p1_c = type(y_o)'((mid ^ a_i));"),
+            "{text}"
+        );
         let mut tree = EmitTree::new();
         tree.add_file("proc_cut__svt.sv", FileRole::Module, text);
         let report = integrity_reparse(&tree, &ParseOptions::default());
@@ -1926,6 +1931,126 @@ endmodule
                 .iter()
                 .any(|r| r.kind == EditKind::InsertReg),
             "resilient exception must InsertReg even if cleanliness is {set_label}; edits={kinds:?} allows_ir={allows_ir}"
+        );
+    }
+
+    /// A88 end to end: `seq_d = seq_q + 16'(step)` becomes eight precomputed
+    /// increments plus a two-level select in the emitted SV; the 2-bit ring
+    /// index (`idx_d`) is left alone because its adder is cheaper than a select.
+    /// Equivalence of this fixture pair was proved with Yosys SAT (12-step
+    /// miter from reset, 6-step from free state) and mapped on Nangate45:
+    /// gold slack 0.0552 ns -> gate 0.0726 ns at 1 ns (ALGORITHMS-EXPERTS A88).
+    #[test]
+    fn select_increment_fixture_emits_candidates_and_select() {
+        use sv_timing_core::{
+            analyze_files, default_fo4_v1_embedded, LowerOptions, ParseOptions, TimingTarget,
+        };
+        use sv_timing_transform::{run_correct_passes, PassContext, PassPolicy};
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/select_increment.sv");
+        let source = std::fs::read_to_string(&path).expect("fixture");
+        let mut lower = LowerOptions {
+            target: TimingTarget::new(4000.0, 20.0, 0.2),
+            cost_model: default_fo4_v1_embedded(),
+            module_filter: vec!["select_increment_fixture".into()],
+            ..Default::default()
+        };
+        lower.cost_model.id = "fo4-v1".into();
+        let out = analyze_files(&[path], &ParseOptions::default(), &lower).expect("analyze");
+        let before = out
+            .design
+            .paths
+            .iter()
+            .map(|p| p.total_fo4)
+            .fold(0.0, f64::max);
+        assert!(before >= 14.0, "fixture must start over budget: {before}");
+        let mut policy = PassPolicy::default();
+        policy.correct_enabled = true;
+        policy.correct_allow_modules = vec!["select_increment_fixture".into()];
+        policy.allow_latency = false;
+        policy.emit_structural = true;
+        policy.max_passes = 4;
+        let mut ctx = PassContext::new(out.design, out.names, policy);
+        ctx.cost_model = default_fo4_v1_embedded();
+        let ctx = run_correct_passes(ctx).expect("correct");
+        let sel: Vec<&EditRecord> = ctx
+            .trace
+            .records
+            .iter()
+            .filter(|r| r.kind == EditKind::SelectIncrement)
+            .collect();
+        assert_eq!(
+            sel.len(),
+            1,
+            "one SelectIncrement expected: {:?}",
+            ctx.trace
+                .records
+                .iter()
+                .map(|r| &r.kind)
+                .collect::<Vec<_>>()
+        );
+        let rec = sel[0];
+        assert_eq!(rec.new_name.as_deref(), Some("seq_d_svt_cand"));
+        assert!(
+            rec.rationale.contains("8 candidates, 2 select level(s)"),
+            "{}",
+            rec.rationale
+        );
+        // The IR now sees the adder off the cone: the measured worst path fell.
+        let after = ctx
+            .design
+            .paths
+            .iter()
+            .map(|p| p.total_fo4)
+            .fold(0.0, f64::max);
+        assert!(after + 2.0 <= before, "before={before} after={after}");
+        // Candidate nodes exist and read only the register.
+        let m = ctx
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "select_increment_fixture")
+            .unwrap();
+        let cands: Vec<_> = m
+            .nodes
+            .values()
+            .filter(|n| {
+                n.lhs
+                    .as_deref()
+                    .is_some_and(|l| l.starts_with("seq_d_svt_cand["))
+            })
+            .collect();
+        assert_eq!(cands.len(), 8);
+        assert!(cands
+            .iter()
+            .all(|n| n.rhs.as_deref().is_some_and(|r| r.starts_with("seq_q + "))));
+        // Emitted SV: typed candidate array, generate assigns, two-level select; idx_d untouched.
+        let mut dense = dense_options_from_source(&source);
+        dense.real_cut_feeds = true;
+        dense.emit_balance_mux_rtl = true;
+        let emitted =
+            apply_edits_to_source_dense(&source, &ctx.trace, &EmitPolicy::default(), &dense);
+        assert!(
+            emitted.contains("var type(seq_d) seq_d_svt_cand [0:7];"),
+            "{emitted}"
+        );
+        assert!(
+            emitted
+                .contains("for (genvar svt_j = 0; svt_j < 8; svt_j++) begin : gen_seq_d_svt_cand"),
+            "{emitted}"
+        );
+        assert!(
+            emitted.contains("assign seq_d_svt_cand[svt_j] = type(seq_d)'((seq_q + svt_j));"),
+            "{emitted}"
+        );
+        assert!(emitted.contains("assign seq_d = (step[2] ? seq_d_svt_cand[{1'b1, step[1:0]}] : seq_d_svt_cand[{1'b0, step[1:0]}]);"), "{emitted}");
+        assert!(
+            emitted.contains("assign idx_d = (idx_q + idx_t'(step)) & IdxMask;"),
+            "{emitted}"
+        );
+        assert!(
+            !emitted.contains("assign seq_d = seq_q + 16'(step);"),
+            "origin adder must be gone: {emitted}"
         );
     }
 }

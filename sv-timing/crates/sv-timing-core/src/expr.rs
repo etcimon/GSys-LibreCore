@@ -567,13 +567,28 @@ impl Expr {
                 if is_constant_range_select(index) {
                     return b.fo4_critical_cost_latticed(base, seed);
                 }
+                // delay-v33: a runtime index is a select — one 4:1 mux level
+                // (an `arr[idx]` read was free before, so a transform could
+                // move an adder behind an index and book the whole adder as
+                // gain). A constant index / constant `+:` base is wiring.
                 if let Some(base_idx) = indexed_part_select_base(index) {
-                    return b
+                    let inner = b
                         .fo4_critical_cost_latticed(base, seed)
                         .max(base_idx.fo4_critical_cost_latticed(base, seed));
+                    return if base_idx.const_class(seed).is_const() {
+                        inner
+                    } else {
+                        base(OperatorClass::Mux) + inner
+                    };
                 }
-                b.fo4_critical_cost_latticed(base, seed)
-                    .max(index.fo4_critical_cost_latticed(base, seed))
+                let inner = b
+                    .fo4_critical_cost_latticed(base, seed)
+                    .max(index.fo4_critical_cost_latticed(base, seed));
+                if index.const_class(seed).is_const() {
+                    inner
+                } else {
+                    base(OperatorClass::Mux) + inner
+                }
             }
             Expr::Call { name, args } => {
                 if is_elab_system_fn(name) && args.iter().all(|a| a.const_class(seed).is_const()) {
@@ -888,13 +903,18 @@ impl Expr {
                 if is_constant_range_select(index) {
                     return b.critical_spine_ops_latticed(base, seed);
                 }
+                let sel = indexed_part_select_base(index).unwrap_or(index.as_ref());
                 let bc = b.fo4_critical_cost_latticed(base, seed);
-                let ic = index.fo4_critical_cost_latticed(base, seed);
-                if bc >= ic {
+                let ic = sel.fo4_critical_cost_latticed(base, seed);
+                let mut s = if bc >= ic {
                     b.critical_spine_ops_latticed(base, seed)
                 } else {
-                    index.critical_spine_ops_latticed(base, seed)
+                    sel.critical_spine_ops_latticed(base, seed)
+                };
+                if !sel.const_class(seed).is_const() {
+                    s.push((OperatorClass::Mux, base(OperatorClass::Mux)));
                 }
+                s
             }
             Expr::Call { args, .. } => {
                 let mut s = args
@@ -1344,6 +1364,14 @@ impl Expr {
                 body.walk_ops(f);
             }
             Expr::Index { base, index } => {
+                // A non-constant select is a mux (delay-v33); `walk_ops` has
+                // no seed, so a fixed range or a literal index is the only
+                // wiring it can prove here (area view, upper bound).
+                if !is_constant_range_select(index)
+                    && !matches!(index.as_ref(), Expr::Literal { .. })
+                {
+                    f(OperatorClass::Mux);
+                }
                 base.walk_ops(f);
                 index.walk_ops(f);
             }
@@ -2659,7 +2687,7 @@ mod tests {
         // Mixed-case VpnLen is runtime under the heuristic seed (no module map):
         // a constant times a runtime value is a shift-add (one CPA), not an
         // array multiplier — and not free either.
-        let cast_w = Expr::parse("(CVA6Cfg.PtLevels + HYP_EXT) * VpnLen");
+        let cast_w = Expr::parse("(Cfg.PtLevels + HYP_EXT) * VpnLen");
         assert_eq!(cast_w.dominant_op_class(), OperatorClass::AddSub);
         let c = cast_w.fo4_critical_cost(&base);
         assert!(
@@ -2763,25 +2791,27 @@ mod tests {
     #[test]
     fn indexed_runtime_arithmetic_keeps_datapath_cost() {
         for (text, class, cost) in [
-            ("mem[a * b]", OperatorClass::Mul, 56.0),
-            ("mem[a / b]", OperatorClass::DivRem, 120.0),
-            ("mem[a % b]", OperatorClass::DivRem, 120.0),
-            ("mem[operand_a_i * operand_b_i]", OperatorClass::Mul, 56.0),
-            ("mem[(a + b) * (c + d)]", OperatorClass::Mul, 66.0),
-            ("mem[sel ? a / b : c * d]", OperatorClass::DivRem, 122.5),
-            ("mem[other[a * b]]", OperatorClass::Mul, 56.0),
-            ("mem[f(a / b)]", OperatorClass::DivRem, 121.0),
-            ("mem[{a * b, c / d}]", OperatorClass::DivRem, 121.0),
+            // delay-v33: the runtime index is a select — one mux level (2.5)
+            // on top of the index arithmetic.
+            ("mem[a * b]", OperatorClass::Mul, 58.5),
+            ("mem[a / b]", OperatorClass::DivRem, 122.5),
+            ("mem[a % b]", OperatorClass::DivRem, 122.5),
+            ("mem[operand_a_i * operand_b_i]", OperatorClass::Mul, 58.5),
+            ("mem[(a + b) * (c + d)]", OperatorClass::Mul, 68.5),
+            ("mem[sel ? a / b : c * d]", OperatorClass::DivRem, 125.0),
+            ("mem[other[a * b]]", OperatorClass::Mul, 61.0),
+            ("mem[f(a / b)]", OperatorClass::DivRem, 123.5),
+            ("mem[{a * b, c / d}]", OperatorClass::DivRem, 123.5),
             // NOTE: `mem[a / b : 0]` is deliberately absent. A fixed `[msb:lsb]` bound
             // must be a constant expression (IEEE 1800 §11.5.1), so that form is not a
             // runtime divider -- it is illegal RTL -- and billing it as one produced the
             // false 202.0 FO4 ptw path. Covered by
             // `fixed_part_select_bounds_are_elaboration_constants`.
-            ("(a * b)[i]", OperatorClass::Mul, 56.0),
+            ("(a * b)[i]", OperatorClass::Mul, 58.5),
             // WIDTH/8 is Const (P1); the runtime op is `* i`.
             // `(WIDTH / 8)` is Const; a constant coefficient on runtime `i`
             // is a shift-add CPA (delay-v30), still datapath, not an array.
-            ("mem[(WIDTH / 8) * i]", OperatorClass::AddSub, 10.0),
+            ("mem[(WIDTH / 8) * i]", OperatorClass::AddSub, 12.5),
         ] {
             assert_arithmetic_cost(text, class, cost);
         }
@@ -2888,8 +2918,8 @@ mod tests {
             Expr::parse("32'(a + b)").fo4_critical_cost(&arithmetic_base),
             10.0
         );
-        // csr_regfile pmpaddr read: a part-select bound inside a cast is not an adder.
-        let pmp = Expr::parse("CVA6Cfg.XLEN'({pmpaddr_q[pmpaddr_index][CVA6Cfg.PLEN-3:1], 1'b1})");
+        // CSR pmpaddr read: a part-select bound inside a cast is not an adder.
+        let pmp = Expr::parse("Cfg.XLEN'({pmpaddr_q[pmpaddr_index][Cfg.PLEN-3:1], 1'b1})");
         assert!(
             pmp.fo4_critical_cost(&arithmetic_base) < 4.0,
             "cast of a sliced concat billed as datapath: {} {pmp:?}",
@@ -3256,7 +3286,8 @@ mod tests {
         // `+1` / `-1` are increments; `* 8` is a shift — not a 10+10 CPA.
         // `i + 1` is an incrementer (Compare class, 1.0 in this test table).
         assert_arithmetic_cost("(i + 1) * 8 - 1", OperatorClass::Compare, 3.0);
-        assert_arithmetic_cost("mem[i * 8]", OperatorClass::Other, 1.0);
+        // `i * 8` is a shift (Other 1.0); the runtime index itself is a mux level.
+        assert_arithmetic_cost("mem[i * 8]", OperatorClass::Other, 3.5);
     }
 
     #[test]
@@ -3406,8 +3437,8 @@ mod tests {
         );
         assert_eq!(
             Expr::parse("mem[x -: 4]").fo4_critical_cost(&arithmetic_base),
-            0.0,
-            "ident bit-base -: width has no arithmetic"
+            2.5,
+            "ident bit-base -: width has no arithmetic, only the select (delay-v33)"
         );
 
         // The selected base is still measured through a constant slice.
@@ -3440,7 +3471,8 @@ mod tests {
         );
 
         assert_arithmetic_cost("(a * b)[7:0]", OperatorClass::Mul, 56.0);
-        assert_arithmetic_cost("mem[f(a / b)][7:0]", OperatorClass::DivRem, 121.0);
+        // The fixed outer range is wiring; the runtime inner index is one mux.
+        assert_arithmetic_cost("mem[f(a / b)][7:0]", OperatorClass::DivRem, 123.5);
     }
 
     #[test]
@@ -3448,8 +3480,8 @@ mod tests {
         for (text, class, cost) in [
             ("(a * b) * 8", OperatorClass::Mul, 57.0),
             ("8 * (a / b)", OperatorClass::DivRem, 121.0),
-            ("8 * mem[a % b]", OperatorClass::DivRem, 121.0),
-            ("mem[(a * b) * 8]", OperatorClass::Mul, 57.0),
+            ("8 * mem[a % b]", OperatorClass::DivRem, 123.5),
+            ("mem[(a * b) * 8]", OperatorClass::Mul, 59.5),
             ("a * 8 + b / c", OperatorClass::DivRem, 130.0),
         ] {
             assert_arithmetic_cost(text, class, cost);

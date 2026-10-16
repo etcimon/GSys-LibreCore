@@ -373,38 +373,78 @@ export function abcCommand(liberty: string, periodPs?: number): string {
 }
 
 /**
- * `streamed` phase B, as shell: build a yosys script that maps one module at
- * a time from the phase-A RTLIL and evicts it once its netlist is written, then
- * concatenates the per-module netlists. Module names come from phase A's
- * `ls` (two-space indented; slang's `name$hier.path` forms kept verbatim as
- * selections, sanitized only for the file name). Parents keep their child
- * instances as plain cell instantiations, so OpenSTA links the set as a
- * hierarchical netlist.
+ * `streamed` phase B, as shell: split the phase-A RTLIL into one file per
+ * module (`rtlil_width_map.py --split-dir`), map every module in its own
+ * yosys process (`xargs -P`), then concatenate the per-module netlists.
+ * Parents keep their child instances as plain cell instantiations, so
+ * OpenSTA links the set as a hierarchical netlist.
+ *
+ * One process per module bounds memory to the largest *module* (the earlier
+ * single-process form grew to 34 GiB after 375 modules), runs on every core,
+ * and lets a module whose delay-oriented ABC run (`&dch -f; &nf`) does not
+ * finish in `abcTimeoutS` fall back to the plain liberty script, then to
+ * `abc -fast` — the design still gets a netlist; the log says which modules
+ * took a fallback (`SYNTH_STREAM_FALLBACK`). Module names come from phase A's
+ * `ls`; slang's `name$hier.path` forms are kept as RTLIL names and sanitized
+ * only for file names (NAME_MAX).
  */
-export function streamedPhaseBShell(opts: { runDir: string; liberty: string; yosysVar: string; periodPs: number; logVar: string; pullTag: string }): string[] {
-  const abc = abcCommand(opts.liberty, opts.periodPs);
+export function streamedPhaseBShell(opts: {
+  runDir: string;
+  liberty: string;
+  yosysVar: string;
+  periodPs: number;
+  logVar: string;
+  pullTag: string;
+  /** Parallel module jobs (default: `nproc/2`, at least 2). */
+  jobs?: number;
+  /** Seconds before the delay-oriented ABC script is abandoned for a module. */
+  abcTimeoutS?: number;
+}): string[] {
+  // Inside map_one.sh the liberty is its own `$LIB` argument (the heredoc is
+  // quoted, so the outer script's variables do not reach it).
+  const abc = abcCommand("$LIB", opts.periodPs);
+  const abcPlain = `abc -liberty $LIB -D ${Math.round(opts.periodPs)}`;
+  const abcFast = `abc -liberty $LIB -fast`;
+  const jobs = opts.jobs && opts.jobs > 0 ? String(opts.jobs) : `$(( $(nproc) / 2 > 2 ? $(nproc) / 2 : 2 ))`;
+  const tmo = opts.abcTimeoutS && opts.abcTimeoutS > 0 ? opts.abcTimeoutS : 1800;
+  const R = opts.runDir;
+  const tool = `"$REPO/sv-timing/tools/rtlil_width_map.py"`;
   return [
-    `if [ ! -s "${opts.runDir}/modules.txt" ] || [ ! -s "${opts.runDir}/wordlevel.il" ]; then echo "RESULT fail synth"; echo LOGSTART; tail -40 "${opts.logVar}"; echo LOGEND; exit 1; fi`,
-    `mkdir -p "${opts.runDir}/mapped"; rm -f "${opts.runDir}/mapped/"*.v`,
-    `: > "${opts.runDir}/phaseB.ys"`,
-    `echo "read_rtlil ${opts.runDir}/wordlevel.il" >> "${opts.runDir}/phaseB.ys"`,
-    `n=0`,
-    `grep -E '^  ' "${opts.runDir}/modules.txt" | sed 's/^  //' | while IFS= read -r m; do`,
-    // slang's specialized names run past NAME_MAX; the index keeps them unique.
-    `  f=$(printf '%s' "$m" | tr -c 'A-Za-z0-9_.-' '_' | cut -c1-96)`,
-    `  n=$((n+1))`,
-    `  printf 'select %s\ntechmap\nopt_clean\ndfflibmap -liberty %s\n%s\nopt_clean -purge\nstat -liberty %s\nwrite_verilog -selected -noattr -noexpr %s/mapped/%04d_%s.v\nselect -clear\ndelete %s\n' "$m" "${opts.liberty}" ${JSON.stringify(abc)} "${opts.liberty}" "${opts.runDir}" "$n" "$f" "$m" >> "${opts.runDir}/phaseB.ys"`,
-    `done`,
-    `echo "SYNTH_STREAM modules=$(grep -c '^select ' "${opts.runDir}/phaseB.ys")"`,
-    `/usr/bin/time -f "SYNTH_MEASURE_B maxrss_kb=%M elapsed_s=%e" "${opts.yosysVar}" -s "${opts.runDir}/phaseB.ys" > "${opts.runDir}/synth-map.log" 2>&1`,
-    `rcb=$?; echo "SYNTH_B rc=$rcb"; grep -E "SYNTH_MEASURE_B" "${opts.runDir}/synth-map.log"`,
-    `if [ "$rcb" != 0 ]; then echo "RESULT fail synth"; echo LOGSTART; tail -40 "${opts.runDir}/synth-map.log"; echo LOGEND; exit 1; fi`,
-    `cat "${opts.runDir}/mapped/"*.v > "${opts.runDir}/netlist.v"`,
-    `grep -h "Chip area for module" "${opts.runDir}/synth-map.log" | awk '{s+=$NF} END {printf "SYNTH_STREAM_AREA total=%.3f\n", s}'`,
-    // Elaborated net widths for sv-timing's width inference, parked where the
-    // proxy's `pull --tag` reaches them.
-    `mkdir -p "/opt/testharness/runs/${opts.pullTag}/output"`,
-    `python3 "$REPO/sv-timing/tools/rtlil_width_map.py" "${opts.runDir}/wordlevel.il" -o "/opt/testharness/runs/${opts.pullTag}/output/width-map.json" && echo "WIDTH_MAP ok"`,
+    `if [ ! -s "${R}/modules.txt" ] || [ ! -s "${R}/wordlevel.il" ]; then echo "RESULT fail synth"; echo LOGSTART; tail -40 "${opts.logVar}"; echo LOGEND; exit 1; fi`,
+    `mkdir -p "${R}/mapped" "${R}/il" "${R}/maplog" "/opt/testharness/runs/${opts.pullTag}/output"; rm -f "${R}/mapped/"*.v "${R}/il/"*.il "${R}/maplog/"*`,
+    // One pass: per-module RTLIL for phase B + the elaborated width map for sv-timing.
+    `python3 ${tool} "${R}/wordlevel.il" --split-dir "${R}/il" -o "/opt/testharness/runs/${opts.pullTag}/output/width-map.json" && echo "WIDTH_MAP ok"`,
+    `if [ ! -s "${R}/il/modules.tsv" ]; then echo "RESULT fail synth"; echo LOGSTART; echo "rtlil split produced no modules"; echo LOGEND; exit 1; fi`,
+    `echo "SYNTH_STREAM modules=$(wc -l < "${R}/il/modules.tsv") jobs=${jobs} abc_timeout_s=${tmo}"`,
+    // map_one <index> <il file> : techmap + liberty map in a fresh process; the
+    // delay script first, the plain script, then -fast when ABC runs long.
+    `cat > "${R}/map_one.sh" <<'MAP_ONE'`,
+    `#!/usr/bin/env bash`,
+    `set -u`,
+    `R="$1"; YS="$2"; LIB="$3"; tmo="$4"; idx="$5"; il="$6"`,
+    `stem=$(basename "$il" .il)`,
+    `out="$R/mapped/$stem.v"; log="$R/maplog/$stem.log"`,
+    `run() { timeout "$tmo" "$YS" -q -p "read_rtlil $il; techmap; opt_clean; dfflibmap -liberty $LIB; $1; opt_clean -purge; tee -q -a $log stat -liberty $LIB; write_verilog -noattr -noexpr $out" >> "$log" 2>&1; }`,
+    `if run ${JSON.stringify(abc)}; then echo "$idx ok delay"; exit 0; fi`,
+    `rm -f "$out"; echo "fallback: plain" >> "$log"`,
+    `if run ${JSON.stringify(abcPlain)}; then echo "$idx ok plain"; exit 0; fi`,
+    `rm -f "$out"; echo "fallback: fast" >> "$log"`,
+    `if run ${JSON.stringify(abcFast)}; then echo "$idx ok fast"; exit 0; fi`,
+    `rm -f "$out"; echo "$idx FAIL"; exit 1`,
+    `MAP_ONE`,
+    `chmod +x "${R}/map_one.sh"`,
+    // The driver is its own file written with an *unquoted* heredoc, so the
+    // outer script's run dir / yosys / liberty expand now and the loop's own
+    // variables stay literal (a `bash -c '…'` child does not see them).
+    `cat > "${R}/map_all.sh" <<MAP_ALL`,
+    `cut -f1,2 "${R}/il/modules.tsv" | while IFS=\\$'\\t' read -r i f; do printf "%s\\0%s\\0" "\\$i" "${R}/il/\\$f"; done | xargs -0 -n 2 -P ${jobs} "${R}/map_one.sh" "${R}" "${opts.yosysVar}" "${opts.liberty}" ${tmo}`,
+    `MAP_ALL`,
+    `/usr/bin/time -f "SYNTH_MEASURE_B maxrss_kb=%M elapsed_s=%e" bash "${R}/map_all.sh" > "${R}/synth-map.log" 2>&1`,
+    `rcb=$?; echo "SYNTH_B rc=$rcb"; grep -E "SYNTH_MEASURE_B" "${R}/synth-map.log"`,
+    `echo "SYNTH_STREAM_FALLBACK plain=$(grep -c ' ok plain$' "${R}/synth-map.log") fast=$(grep -c ' ok fast$' "${R}/synth-map.log") fail=$(grep -c ' FAIL$' "${R}/synth-map.log")"`,
+    `if [ "$(ls "${R}/mapped" | wc -l)" != "$(wc -l < "${R}/il/modules.tsv")" ]; then echo "RESULT fail synth"; echo LOGSTART; grep ' FAIL$' "${R}/synth-map.log" | head -20; for f in $(grep ' FAIL$' "${R}/synth-map.log" | head -3 | cut -d' ' -f1); do tail -5 "${R}/maplog/$(cut -f2 "${R}/il/modules.tsv" | sed -n "${"$"}{f}p" | sed 's/\\.il$//').log"; done; echo LOGEND; exit 1; fi`,
+    `cat "${R}/mapped/"*.v > "${R}/netlist.v"`,
+    `grep -h "Chip area for module" "${R}/maplog/"*.log | awk '{s+=$NF} END {printf "SYNTH_STREAM_AREA total=%.3f\\n", s}'`,
   ];
 }
 
@@ -489,9 +529,12 @@ async function runSvtPrepass(
   } catch {
     env = timingsRepoEnv(ctx, opts.target);
   }
+  // Same preprocessing as the mapping (`-DSYNTHESIS -DHPDCACHE_ASSERT_OFF`):
+  // sv-timing must measure the design the flow synthesizes.
   const portable = writeVerifyPortableFlist(ctx, env, opts.target, {
     tag: `sta-rtl-${opts.target}`,
     outPath: posixPath(join(svtDir, "portable.f")),
+    defines: ctx.config.verify.synthDefines,
   });
   // Elaborated CVA6Cfg fields (yosys-slang probe) so sv-timing's width
   // inference sees TRANS_ID_BITS / NrHarts / INSTR_PER_FETCH / … instead of

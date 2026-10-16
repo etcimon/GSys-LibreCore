@@ -441,8 +441,13 @@ bun run src/cli/index.ts setup --install --profile dual-hart
   rtlil_width_map.py`), parks it under the proxy's `runs/sta-rtl-<target>/
   output/`, and the host pulls it (`pullRemoteOutput`) to `svt/width-map.json`;
   the next pre-pass passes `--width-map` so function-derived localparams
-  (`geo(CVA6Cfg).slots`) are sized by the elaborator. Tests:
-  `test/sta-rtl-study.test.ts`.
+  (`geo(CVA6Cfg).slots`) are sized by the elaborator. Phase B is one yosys
+  process per module in parallel (`rtlil_width_map.py --split-dir` splits the
+  phase-A RTLIL; `map_one.sh` runs the delay-oriented ABC under `timeout`,
+  then the plain liberty script, then `abc -fast`; `SYNTH_STREAM_FALLBACK`
+  reports which modules fell back). The portable sv-timing flist carries the
+  manifest's `+define+` lines and `verify.synthDefines`, so sv-timing measures
+  the design the flow synthesizes. Tests: `test/sta-rtl-study.test.ts`.
 
 #### 4.6.2a Running the formal gate
 

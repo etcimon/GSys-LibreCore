@@ -696,7 +696,13 @@ export function writePortableTimingsFlist(
     const a = absPosix(ctx.repoRoot, f);
     if (!files.includes(a)) files.push(a);
   }
-  const defines = [...(opts.defines ?? [])];
+  // The manifest's own `+define+` lines come first (Flist.cva6 carries
+  // `+define+G6LC_FETCH_B`; without it slang elaborates the A-path code and
+  // the measured design is not the one the flow builds), then the caller's.
+  const defines: string[] = [];
+  for (const d of [...flat.defines.map((d) => d.replace(/^\+define\+/, "")), ...(opts.defines ?? [])]) {
+    if (d && !defines.includes(d)) defines.push(d);
+  }
 
   const tag = opts.tag ?? "default";
   const outPath = opts.outPath
@@ -1008,7 +1014,7 @@ export function writeVerifyPortableFlist(
   ctx: PlatformContext,
   env: Record<string, string>,
   target: string,
-  override: { flist?: string; tag?: string; outPath?: string } = {},
+  override: { flist?: string; tag?: string; outPath?: string; defines?: string[] } = {},
 ): TimingsPortableFlist {
   const flistRel = override.flist ?? ctx.config.verify?.flist ?? "core/Flist.cva6";
   return writePortableTimingsFlist(ctx, {
@@ -1016,6 +1022,7 @@ export function writeVerifyPortableFlist(
     env,
     tag: override.tag ?? `verify-${target}`,
     outPath: override.outPath,
+    defines: override.defines,
   });
 }
 
@@ -1417,7 +1424,10 @@ export function portableFromFlatManifest(
     ? absPosix(ctx.repoRoot, opts.outPath)
     : posixPath(join(ctx.paths.build, "sv-timing", tag, "portable.f"));
   mkdirSync(dirname(outPath), { recursive: true });
-  const defines = opts.defines ?? [];
+  const defines: string[] = [];
+  for (const d of [...manifest.defines.map((d) => d.replace(/^\+define\+/, "")), ...(opts.defines ?? [])]) {
+    if (d && !defines.includes(d)) defines.push(d);
+  }
   const lines: string[] = [
     "# portable filelist for sv-timing — from FlatManifest",
     `# manifest=${manifest.path}`,

@@ -2,7 +2,17 @@
 
 Structural (not STA) frequency closure for the precompiler loop.
 
-## Current campaign (2026-10-16, delay-v32 + cfg snapshot + elaborated widths)
+## Current campaign (2026-10-16, delay-v33, manifest defines, SelectIncrement)
+
+Latest: the portable flist now carries `+define+G6LC_FETCH_B` and the
+synthesis defines (A93) — earlier boards measured the A-path code. Under the
+right preprocessing, with the `SelectIncrement` transform (A91) and the
+`instr_queue` production edit (A92): live RTL worst RegToReg **24.0**
+(`frontend speculative_d`), 191/1371 failing; emitted latency-neutral tree
+24.0, 194/1383; `instr_queue` 24.3 → 15.8. Details: `ALGORITHMS-EXPERTS.md`
+Part LIII (A91–A94).
+
+### Earlier on 2026-10-16 (delay-v32 + cfg snapshot + elaborated widths)
 
 Latest: with incrementers billed as Compare (delay-v32), the elaborated
 width map (`--width-map`) and only instantiated modules counted, the review

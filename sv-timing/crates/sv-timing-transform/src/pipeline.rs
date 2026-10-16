@@ -1708,6 +1708,189 @@ pub fn balance_mux_on_path(
     Ok(rec)
 }
 
+/// `SelectIncrement` (ALGORITHMS-EXPERTS A88): rewrite `LHS = REG + step`
+/// (optionally `& MASK`) into `2^k` precomputed candidate increments of the
+/// register and one select on `step`.
+///
+/// Real IR rewrite, no credit: the candidate assigns become nodes of the
+/// node's region (parallel, fed by the register only) and the origin node's
+/// RHS becomes the select, so the remeasure sees the adder off the `step`
+/// cone and bills the select as a mux level (delay-v33). Exact modulo 2^W for
+/// every `step` value — the array covers the declared width — same cycle, no
+/// state. Refused when the shape, scope or pricing does not hold.
+pub fn select_increment_on_node(
+    ctx: &mut PassContext,
+    path_id: PathId,
+    node_id: NodeId,
+    origin: SourceLoc,
+) -> TransformResult<EditRecord> {
+    use sv_timing_core::select_increment as si;
+    if !ctx.policy.module_allowed(&ctx.active_module_name) {
+        return Err(TransformError::ModuleNotAllowlisted(
+            ctx.active_module_name.clone(),
+        ));
+    }
+    let model = sv_timing_core::CostModel::default();
+    let module_id = ctx
+        .design
+        .modules
+        .values()
+        .find(|m| m.name == ctx.active_module_name)
+        .map(|m| m.id)
+        .ok_or_else(|| TransformError::InvalidOpportunity("module not found".into()))?;
+    let (shape, cand, select_text, snippet, region_id, first_new_id, node_loc) = {
+        let module = ctx.design.modules.get(&module_id).expect("module");
+        let node = module
+            .nodes
+            .get(&node_id)
+            .ok_or_else(|| TransformError::InvalidOpportunity(format!("node {node_id} missing")))?;
+        let regs = si::register_roots(module);
+        let resolver = sv_timing_core::width::WidthResolver::from_parts(
+            &ctx.design.packages,
+            &ctx.design.param_map_ints,
+            &module.decls,
+            &module.ports,
+            &module.const_exprs,
+            &module.typedef_texts,
+            &module.package_imports,
+            ctx.design.width_map.get(&module.name),
+        );
+        let shape = si::detect(module, node, &regs, &resolver, &model).ok_or_else(|| {
+            TransformError::InvalidOpportunity(format!(
+                "select_increment: node {node_id} is not `REG + narrow step` with a cheaper select"
+            ))
+        })?;
+        let lhs_root =
+            sv_timing_core::ir::TimingModule::root_ident(&shape.lhs_text).ok_or_else(|| {
+                TransformError::InvalidOpportunity("select_increment: lhs root".into())
+            })?;
+        let cand = format!("{lhs_root}_svt_cand");
+        if module.decls.iter().any(|d| d.name == cand)
+            || module.ports.iter().any(|p| p.name == cand)
+        {
+            return Err(TransformError::InvalidOpportunity(format!(
+                "select_increment: `{cand}` already declared"
+            )));
+        }
+        let snippet = si::candidate_snippet(&shape, &cand);
+        let block_local = module.block_local_names();
+        if module.text_refs_block_local(&snippet, &block_local) {
+            return Err(TransformError::InvalidOpportunity(format!(
+                "select_increment: `{}`/`{}`/`{}` names a block-local",
+                shape.lhs_text, shape.reg_text, shape.step_ident
+            )));
+        }
+        let select_text = si::select_rhs(&cand, &shape.step_ident, shape.step_bits);
+        let region_id = module
+            .regions
+            .values()
+            .find(|r| r.nodes.contains(&node_id))
+            .map(|r| r.id)
+            .ok_or_else(|| {
+                TransformError::InvalidOpportunity("select_increment: node has no region".into())
+            })?;
+        let first_new_id = module
+            .nodes
+            .keys()
+            .next_back()
+            .copied()
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| TransformError::InvalidOpportunity("node ids exhausted".into()))?;
+        (
+            shape,
+            cand,
+            select_text,
+            snippet,
+            region_id,
+            first_new_id,
+            node.loc.clone(),
+        )
+    };
+
+    let module = ctx.design.modules.get_mut(&module_id).expect("module");
+    let gate = module
+        .nodes
+        .get(&node_id)
+        .and_then(|n| n.gate.clone())
+        .unwrap_or_else(|| sv_timing_core::GateInfo {
+            is_comb: true,
+            ..Default::default()
+        });
+    let fo4_before = shape.fo4_before;
+    let mut new_ids = Vec::new();
+    for j in 0..shape.candidates() {
+        let id = first_new_id + j;
+        let sum = match &shape.mask_text {
+            Some(m) => format!("({} + {j}) & {m}", shape.reg_text),
+            None => format!("{} + {j}", shape.reg_text),
+        };
+        let lhs = format!("{cand}[{j}]");
+        module.nodes.insert(
+            id,
+            sv_timing_core::IrNode {
+                id,
+                op_class: Some(sv_timing_core::OperatorClass::AddSub),
+                width: shape.width.unwrap_or(1),
+                fo4_cost: 0.0,
+                gate: Some(gate.clone()),
+                loc: node_loc.clone(),
+                fans_in: Vec::new(),
+                fans_out: vec![node_id],
+                width_defaulted: shape.width.is_none(),
+                reads_reg: true,
+                lhs: Some(lhs.clone()),
+                rhs: Some(sum.clone()),
+                rhs_expr: Some(sv_timing_core::Expr::parse(&sum)),
+                lhs_expr: Some(sv_timing_core::Expr::parse(&lhs)),
+                case_labels: Vec::new(),
+                case_is_default: false,
+                case_selector: None,
+                fo4_locked: false,
+                assign_kind: sv_timing_core::ir::AssignKind::Continuous,
+            },
+        );
+        new_ids.push(id);
+    }
+    if let Some(region) = module.regions.get_mut(&region_id) {
+        region.nodes.extend(new_ids.iter().copied());
+    }
+    let node = module.nodes.get_mut(&node_id).expect("node");
+    node.rhs = Some(select_text.clone());
+    node.rhs_expr = Some(sv_timing_core::Expr::parse(&select_text));
+    node.op_class = Some(sv_timing_core::OperatorClass::Mux);
+    node.fans_in.extend(new_ids.iter().copied());
+    node.reads_reg = false;
+
+    // The origin assign is the cand declaration's type anchor: it must be the
+    // module-scope assignment the snippet rewrites (R12 scope checks on emit).
+    let rec = EditRecord {
+        id: 0,
+        kind: EditKind::SelectIncrement,
+        origin,
+        path_id: Some(path_id),
+        node_id: Some(node_id),
+        new_name: Some(cand.clone()),
+        fo4_before: Some(fo4_before),
+        fo4_after: Some(shape.fo4_after),
+        rationale: format!(
+            "select_increment path {path_id} node {node_id}: `{}` = `{}` + `{}` -> {} candidates, {} select level(s) {fo4_before:.1}->{:.1} on the node (latency-neutral, exact mod 2^W)",
+            shape.lhs_text,
+            shape.reg_text,
+            shape.step_ident,
+            shape.candidates(),
+            shape.mux_levels(),
+            shape.fo4_after
+        ),
+        emit_rhs: Some(select_text),
+        emit_rhs_extras: Vec::new(),
+        emit_snippet: Some(snippet),
+    };
+    ctx.trace.record_edit(rec.clone());
+    ctx.pending_ir_dirty = true;
+    Ok(rec)
+}
+
 fn path_class_for_balance(ctx: &PassContext, path_id: PathId) -> sv_timing_core::PathClassKind {
     ctx.design
         .paths

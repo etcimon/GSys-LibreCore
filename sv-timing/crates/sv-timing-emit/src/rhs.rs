@@ -2040,7 +2040,10 @@ pub fn rewrite_origin_assigns(source: &str, cuts: &[CutAssign]) -> String {
 pub fn rewrite_origin_rhs_replaces(source: &str, trace: &EditTrace) -> String {
     let mut replaces: Vec<(u32, u32, String, u32)> = Vec::new(); // start, end, new_rhs, edit_id
     for r in &trace.records {
-        if !matches!(r.kind, EditKind::BalanceMux | EditKind::RebalanceAssoc) {
+        if !matches!(
+            r.kind,
+            EditKind::BalanceMux | EditKind::SelectIncrement | EditKind::RebalanceAssoc
+        ) {
             continue;
         }
         // R12: only rewrite origin when a **safe** structural snippet will be

@@ -72,17 +72,28 @@ test("streamed recipe: phase A dumps RTLIL + module list, phase B maps and evict
   expect(a).toContain("write_rtlil $RUN/wordlevel.il");
   expect(a).toContain("tee -q -o $RUN/modules.txt ls");
   expect(a).not.toContain("abc -liberty");
-  const b = streamedPhaseBShell({ runDir: "$RUN", liberty: "$LIB", yosysVar: "$YS", periodPs: 800, logVar: "$RUN/synth.log", pullTag: "sta-rtl-x" }).join("\n");
-  expect(b).toContain("rtlil_width_map.py");
-  expect(b).toContain("/opt/testharness/runs/sta-rtl-x/output/width-map.json");
-  expect(b).toContain("read_rtlil $RUN/wordlevel.il");
-  for (const step of ["select %s", "techmap", "dfflibmap -liberty %s", "write_verilog -selected -noattr -noexpr", "select -clear", "delete %s"]) {
-    expect(b).toContain(step);
-  }
+  const b = streamedPhaseBShell({ runDir: "$RUN", liberty: "$LIB", yosysVar: "$YS", periodPs: 800, logVar: "$RUN/synth.log", pullTag: "sta-rtl-x", jobs: 6, abcTimeoutS: 900 }).join("\n");
+  // One pass over the RTLIL: per-module files for phase B + the width map.
+  expect(b).toContain('rtlil_width_map.py" "$RUN/wordlevel.il" --split-dir "$RUN/il" -o "/opt/testharness/runs/sta-rtl-x/output/width-map.json"');
+  // One yosys process per module, in parallel, with ABC fallbacks on timeout;
+  // the liberty travels as map_one.sh's own argument (quoted heredoc).
+  expect(b).toContain("xargs -0 -n 2 -P 6");
+  expect(b).toContain('"$RUN/map_one.sh" "$RUN" "$YS" "$LIB" 900');
+  // Driver file: outer variables expand at creation, loop variables stay literal.
+  expect(b).toContain('cat > "$RUN/map_all.sh" <<MAP_ALL');
+  expect(b).toContain(String.raw`while IFS=\$'\t' read -r i f; do printf "%s\0%s\0" "\$i" "$RUN/il/\$f"; done`);
+  expect(b).toContain('bash "$RUN/map_all.sh" > "$RUN/synth-map.log" 2>&1');
+  expect(b).toContain('R="$1"; YS="$2"; LIB="$3"; tmo="$4"; idx="$5"; il="$6"');
+  expect(b).toContain('timeout "$tmo" "$YS" -q -p "read_rtlil $il; techmap; opt_clean; dfflibmap -liberty $LIB;');
   expect(b).toContain("&nf,-D,800");
+  expect(b).toContain('if run "abc -liberty $LIB -D 800"; then echo "$idx ok plain"');
+  expect(b).toContain('if run "abc -liberty $LIB -fast"; then echo "$idx ok fast"');
+  expect(b).toContain("SYNTH_STREAM_FALLBACK");
   expect(b).toContain('cat "$RUN/mapped/"*.v > "$RUN/netlist.v"');
-  // A missing module list is a synth failure, never a silent empty netlist.
+  // A missing module list or an unmapped module is a synth failure, never a
+  // silent partial netlist.
   expect(b).toContain('echo "RESULT fail synth"');
+  expect(b).toContain('if [ "$(ls "$RUN/mapped" | wc -l)" != "$(wc -l < "$RUN/il/modules.tsv")" ]');
 });
 
 test("lean recipe keeps the single-process flat mapping", () => {
