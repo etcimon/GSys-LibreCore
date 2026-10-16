@@ -43,13 +43,13 @@ read_verilog $::env(OR_VERILOG)
 # Children are black boxes here (their own rows carry their depth).
 set ok 0
 if {[catch {set ok [link_design $top]} err] || !$ok} {
-  puts "ROW\t$top\t-\t-\t-\t-\tlink failed\t-\t-\t-"
+  puts "ROW\t$top\t-\t-\t-\t-\tlink failed\t-\t-\t-\t-\t-\t-"
   exit
 }
 set n [sta::network_instance_count]
 set clk_port [get_ports -quiet clk_i]
 if {$clk_port eq ""} {
-  puts "ROW\t$top\t$n\t-\t-\t-\t-\t-\t-\t-"
+  puts "ROW\t$top\t$n\t-\t-\t-\t-\t-\t-\t-\t-\t-\t-"
   exit
 }
 create_clock -name mclk -period $period $clk_port
@@ -102,13 +102,13 @@ if {[llength $any] > 0} {
 }
 set regs [all_registers]
 if {[llength $regs] == 0} {
-  puts "ROW\t$top\t$n\tclk_i\t-\t0\t-\t-\t$any_ns\t$disabled"
+  puts "ROW\t$top\t$n\tclk_i\t-\t0\t-\t-\t$any_ns\t$disabled\t-\t-\t-"
   exit
 }
 set r2r [find_timing_paths -path_delay max -group_path_count 1 -sort_by_slack \
            -from [all_registers -clock_pins] -to [all_registers -data_pins]]
 if {[llength $r2r] == 0} {
-  puts "ROW\t$top\t$n\tclk_i\t-\t0\t-\t-\t$any_ns\t$disabled"
+  puts "ROW\t$top\t$n\tclk_i\t-\t0\t-\t-\t$any_ns\t$disabled\t-\t-\t-"
   exit
 }
 set pe [lindex $r2r 0]
@@ -118,13 +118,48 @@ set cells 0
 set start "-"
 set endp "-"
 set first 1
+# The flop instances are yosys auto names (`_12988_`); the nets keep their
+# RTL names (`issue_pointer_q[3]`). Report the start flop's Q net and the
+# net driving the end flop's D pin so a row points at RTL registers, plus
+# the RTL-named nets along the path (a legible trace of the cone).
+set start_net "-"
+set end_net "-"
+set trace {}
+set driver_pins {}
 foreach pin [$path pins] {
   if {[$pin is_leaf] && ![$pin is_top_level_port]} {
     set inst [get_full_name [get_cells -of_objects $pin]]
     if {$first} { set start $inst; set first 0 }
     set endp $inst
-    if {[$pin is_driver]} { incr cells }
+    if {[$pin is_driver]} {
+      incr cells
+      lappend driver_pins $pin
+    }
   }
 }
-puts "ROW\t$top\t$n\tclk_i\t$delay\t$cells\t$start\t$endp\t$any_ns\t$disabled"
+proc rtl_net_of {pin} {
+  # `$path pins` yields raw Pin handles; go through the SDC collection API.
+  set p [get_pins -quiet [get_full_name $pin]]
+  if {[llength $p] == 0} { return "" }
+  set net [get_nets -quiet -of_objects $p]
+  if {[llength $net] == 0} { return "" }
+  set nm [get_full_name [lindex $net 0]]
+  # yosys auto nets are `_123_`; keep RTL names only
+  if {[regexp {^_[0-9]+_$} $nm]} { return "" }
+  return $nm
+}
+if {[llength $driver_pins] > 0} {
+  set start_net [rtl_net_of [lindex $driver_pins 0]]
+  if {$start_net eq ""} { set start_net "-" }
+  set last_pin [lindex [$path pins] end]
+  set en [rtl_net_of $last_pin]
+  if {$en eq ""} { set en [rtl_net_of [lindex $driver_pins end]] }
+  set end_net [expr {$en eq "" ? "-" : $en}]
+  foreach dp $driver_pins {
+    set nm [rtl_net_of $dp]
+    if {$nm ne "" && [lsearch -exact $trace $nm] < 0} { lappend trace $nm }
+  }
+}
+if {[llength $trace] > 12} { set trace [concat [lrange $trace 0 5] {...} [lrange $trace end-5 end]] }
+puts "ROW\t$top\t$n\tclk_i\t$delay\t$cells\t$start\t$endp\t$any_ns\t$disabled\t$start_net\t$end_net\t[join $trace { > }]"
 exit

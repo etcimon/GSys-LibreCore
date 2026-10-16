@@ -36,6 +36,8 @@ pub enum LoopWalkKind {
     CondCount,
     /// Pointer walk from `a` to `b` on a power-of-two ring.
     RingWalk,
+    /// Stream compaction: `for k: if (keep_k) { out[dst] = f(k); dst++ }`.
+    StreamCompact,
 }
 
 /// One detected walk with its exact replacement.
@@ -96,6 +98,10 @@ pub fn detect(
             continue;
         }
         if let Some(s) = ring_walk(idx, lp, &body, lo, n, widths, model) {
+            out.push(s);
+            continue;
+        }
+        if let Some(s) = stream_compact(idx, lp, &body, lo, n, widths, model) {
             out.push(s);
         }
     }
@@ -606,6 +612,265 @@ fn ring_walk(
     })
 }
 
+// ------------------------------------------------------------ StreamCompact
+
+/// Split a statement list text at top-level `;` (brackets, parens and
+/// `begin … end` blocks kept whole).
+fn split_statements(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let mut depth = 0i32;
+    let mut block = 0i32;
+    let mut cur = String::new();
+    let mut i = 0usize;
+    let b = text.as_bytes();
+    while i < b.len() {
+        let c = b[i] as char;
+        if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            while i < b.len() && ((b[i] as char).is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            let w = &text[start..i];
+            if w == "begin" {
+                block += 1;
+            } else if w == "end" {
+                block -= 1;
+                cur.push_str(w);
+                if block == 0 && depth == 0 {
+                    out.push(cur.trim().to_string());
+                    cur.clear();
+                }
+                continue;
+            }
+            cur.push_str(w);
+            continue;
+        }
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            _ => {}
+        }
+        if c == ';' && depth == 0 && block == 0 {
+            out.push(cur.trim().to_string());
+            cur.clear();
+        } else {
+            cur.push(c);
+        }
+        i += 1;
+    }
+    if !cur.trim().is_empty() {
+        out.push(cur.trim().to_string());
+    }
+    out.into_iter().filter(|s| !s.is_empty()).collect()
+}
+
+/// `if (COND) BODY` → `(COND, BODY)` for a statement whose body is the rest
+/// (a `begin … end` block has its delimiters stripped).
+fn split_if(stmt: &str) -> Option<(String, String)> {
+    let rest = stmt.trim().strip_prefix("if (")?;
+    let close = matching_paren(rest)?;
+    let cond = rest[..close].trim().to_string();
+    let body = rest[close + 1..].trim();
+    let body = body.strip_prefix("begin").map(str::trim).unwrap_or(body);
+    let body = body.strip_suffix("end").map(str::trim).unwrap_or(body);
+    Some((cond, body.to_string()))
+}
+
+/// Stream compaction. Loop body (after `for (k …)`), with optional outer
+/// guard and per-iteration temps:
+///
+/// ```text
+/// [if (G) begin]  [T = e(k); …]  if (C) begin  OUT1[dst] = R1; … OUTm[dst] = Rm;
+///                                               dst = dst + 1'b1; [cnt = cnt + 1'b1;] end  [end]
+/// ```
+///
+/// `dst` runs 0.. over the kept iterations, so `OUTi[dst] = Ri` is a gather:
+/// `keep[k] = G && C`, `pos[k] = $countones(keep[k-1:0])` (independent
+/// popcounts, log depth, not a running sum), and `OUTi[j] = Ri(k)` for the one
+/// `k` with `keep[k] && pos[k] == j`. `dst` and every count advance by
+/// `$countones(keep)`. Exact when `dst`/counts are not read in `G`, `T`, `C`,
+/// `Ri`, and no `OUTi` is read in the loop (the temps `T` are recomputed per
+/// `k` in the gather).
+fn stream_compact(
+    idx: usize,
+    lp: &GenerateLoop,
+    body: &str,
+    lo: u32,
+    n: u32,
+    widths: &WidthResolver<'_>,
+    model: &CostModel,
+) -> Option<LoopWalkShape> {
+    if lo != 0 || n > 64 {
+        return None;
+    }
+    let k = lp.genvar.as_str();
+    // optional outer guard
+    // An outer `if (G)` wraps the compaction when its body still holds an `if`.
+    let (outer, inner_text) = match split_if(body) {
+        Some((g, b)) if split_statements(&b).iter().any(|s| s.starts_with("if (")) => (Some(g), b),
+        _ => (None, body.to_string()),
+    };
+    let stmts = split_statements(&inner_text);
+    // prelude temps then one `if (C) begin … end`
+    let mut prelude: Vec<(String, String)> = Vec::new();
+    let mut compact: Option<(String, String)> = None;
+    for st in &stmts {
+        if st.starts_with("if (") {
+            if compact.is_some() {
+                return None; // two conditionals: not this shape
+            }
+            compact = Some(split_if(st)?);
+        } else if compact.is_none() {
+            let (l, r) = st.split_once('=')?;
+            let l = l.trim();
+            if !is_ident(l) || r.trim_start().starts_with('=') {
+                return None;
+            }
+            prelude.push((l.to_string(), r.trim().to_string()));
+        } else {
+            return None; // statements after the compaction block
+        }
+    }
+    let (cond, cbody) = compact?;
+    let cstmts = split_statements(&cbody);
+    let mut outs: Vec<(String, String, String)> = Vec::new(); // (out, index var, rhs)
+    let mut counts: Vec<String> = Vec::new();
+    for st in &cstmts {
+        let (l, r) = st.split_once('=')?;
+        let l = l.trim();
+        let r = r.trim();
+        if let Some(open) = l.find('[') {
+            let base = &l[..open];
+            let ix = l[open + 1..].strip_suffix(']')?.trim();
+            if !is_ident(base) || !is_ident(ix) {
+                return None;
+            }
+            outs.push((base.to_string(), ix.to_string(), r.to_string()));
+        } else if is_ident(l)
+            && (r == format!("{l} + 1'b1") || r == format!("{l} + 1") || r == format!("{l} + 1'd1"))
+        {
+            counts.push(l.to_string());
+        } else {
+            return None;
+        }
+    }
+    if outs.is_empty() || counts.is_empty() {
+        return None;
+    }
+    let dst = outs[0].1.clone();
+    if !outs.iter().all(|(_, ix, _)| *ix == dst) || !counts.contains(&dst) {
+        return None;
+    }
+    // Exactness: counts not read anywhere in the body; outputs not read.
+    let reads_any =
+        |text: &str, names: &[String]| idents(text).iter().any(|t| names.iter().any(|n| n == t));
+    let all_text = format!(
+        "{} {} {} {}",
+        outer.as_deref().unwrap_or(""),
+        prelude
+            .iter()
+            .map(|(_, r)| r.clone())
+            .collect::<Vec<_>>()
+            .join(" "),
+        cond,
+        outs.iter()
+            .map(|(_, _, r)| r.clone())
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    if reads_any(&all_text, &counts) {
+        return None;
+    }
+    let out_names: Vec<String> = outs.iter().map(|(o, _, _)| o.clone()).collect();
+    if reads_any(&all_text, &out_names) {
+        return None;
+    }
+    // the temps must not read the loop's outputs or counts either (covered) and
+    // prelude LHS must not be an output
+    if prelude
+        .iter()
+        .any(|(l, _)| out_names.contains(l) || counts.contains(l))
+    {
+        return None;
+    }
+    let w = declared_width(widths, &dst)?;
+    if (1u64 << w.min(63)) <= u64::from(n) {
+        return None; // dst cannot count to n
+    }
+    // `dst` must enter the loop at zero (the statement before the loop):
+    // the gather compares ranks with absolute slots.
+    let pre = normalize_ws(lp.pre_text.as_deref()?);
+    if !(pre.contains(&format!("{dst} = '0;")) || pre.contains(&format!("{dst} = 0;"))) {
+        return None;
+    }
+    let keep = format!("{dst}_svt_keep");
+    let pos = format!("{dst}_svt_pos");
+    let j = format!("{dst}_svt_j");
+    let kk = format!("{dst}_svt_k");
+    let pw = (n + 1).next_power_of_two().trailing_zeros().max(1); // bits for 0..=n
+    let prelude_text = |var: &str| -> String {
+        prelude
+            .iter()
+            .map(|(l, r)| format!("{l} = {}; ", replace_ident(r, k, var)))
+            .collect::<Vec<_>>()
+            .join("")
+    };
+    let full_cond = match &outer {
+        Some(g) => format!("({g}) && ({cond})"),
+        None => cond.clone(),
+    };
+    let mut rep = String::new();
+    rep.push_str(&format!("begin : {dst}_svt_compact\n"));
+    rep.push_str(&format!("  {keep} = '0;\n"));
+    rep.push_str(&format!(
+        "  for (int unsigned {kk} = 0; {kk} < {n}; {kk}++) begin {}{keep}[{kk}] = {}; end\n",
+        prelude_text(&kk),
+        replace_ident(&full_cond, k, &kk)
+    ));
+    rep.push_str(&format!(
+        "  for (int unsigned {kk} = 0; {kk} < {n}; {kk}++) {pos}[{kk}] = {pw}'($countones({keep} & (({n}'(1) << {kk}) - 1'b1)));\n"
+    ));
+    rep.push_str(&format!(
+        "  for (int unsigned {j} = 0; {j} < {n}; {j}++) for (int unsigned {kk} = 0; {kk} < {n}; {kk}++) begin {}if ({keep}[{kk}] && {pos}[{kk}] == {pw}'({j})) begin ",
+        prelude_text(&kk)
+    ));
+    for (o, _, r) in &outs {
+        rep.push_str(&format!("{o}[{j}] = {}; ", replace_ident(r, k, &kk)));
+    }
+    rep.push_str("end end\n");
+    for c in &counts {
+        rep.push_str(&format!("  {c} = {c} + {w}'($countones({keep}));\n"));
+    }
+    rep.push_str("end");
+    let decls = format!(
+        "  logic [{}:0] {keep};\n  logic [{}:0][{}:0] {pos};\n",
+        n - 1,
+        n - 1,
+        pw - 1
+    );
+    // keep: one guard level; pos: popcount tree; gather: compare + AND-OR over n
+    let levels = f64::from(n.next_power_of_two().trailing_zeros().max(1));
+    let fo4_after = model.logic_bit
+        + 1.5 * levels
+        + model.scaled_fo4(crate::OperatorClass::Compare, Some(pw))
+        + model.mux
+        + model.logic_bit * levels;
+    Some(LoopWalkShape {
+        kind: LoopWalkKind::StreamCompact,
+        loop_index: idx,
+        trips: n,
+        replacement: rep,
+        decls,
+        marker: keep,
+        carried: dst,
+        fo4_after,
+        rationale: format!(
+            "stream compaction over {n} slots ({} outputs) → keep vector, prefix popcounts, one-hot gather (exact)",
+            outs.len()
+        ),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -737,6 +1002,53 @@ end"
             .find(|m| m.name == "loop_walks_parallel")
             .expect("module");
         assert!(detect(par, &resolver_for(&out.design, par), &model).is_empty());
+    }
+
+    /// A103: the store buffer's cancel squash is a stream compaction — an
+    /// outer window guard, a per-iteration `src` temp, a keep condition, two
+    /// gathered outputs at `dst`, and two counts. Replacement: keep vector,
+    /// prefix popcounts, one-hot gather, counts advanced by the popcount.
+    #[test]
+    fn fixture_stream_compaction_is_detected_with_outer_guard_and_temps() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/stream_compact.sv");
+        let lower = crate::LowerOptions {
+            target: crate::TimingTarget::new(4000.0, 20.0, 0.2),
+            cost_model: crate::default_fo4_v1_embedded(),
+            ..Default::default()
+        };
+        let out = crate::analyze_files(&[path], &crate::ParseOptions::default(), &lower)
+            .expect("analyze");
+        let m = out.design.modules.values().next().expect("module");
+        let shapes = detect(m, &resolver_for(&out.design, m), &CostModel::default());
+        let sc = shapes
+            .iter()
+            .find(|s| s.kind == LoopWalkKind::StreamCompact)
+            .unwrap_or_else(|| panic!("no StreamCompact in {shapes:#?}"));
+        assert_eq!(sc.carried, "dst");
+        let r = &sc.replacement;
+        assert!(r.contains("dst_svt_keep[dst_svt_k] = (k < unsigned'(cnt_i)) && (valid_i[src] && !cancel_i[src]);".replace("k <", "dst_svt_k <").as_str()), "{r}");
+        assert!(r.contains("src = rd_ptr_i + $clog2(N)'(dst_svt_k);"), "{r}");
+        assert!(r.contains("dst_svt_pos[dst_svt_k] = 4'($countones(dst_svt_keep & ((8'(1) << dst_svt_k) - 1'b1)));"), "{r}");
+        assert!(r.contains("if (dst_svt_keep[dst_svt_k] && dst_svt_pos[dst_svt_k] == 4'(dst_svt_j)) begin a_addr[dst_svt_j] = addr_i[src]; a_data[dst_svt_j] = data_i[src]; end"), "{r}");
+        assert!(
+            r.contains("dst = dst + 4'($countones(dst_svt_keep));"),
+            "{r}"
+        );
+        assert!(
+            r.contains("live = live + 4'($countones(dst_svt_keep));"),
+            "{r}"
+        );
+        assert!(
+            sc.decls.contains("logic [7:0] dst_svt_keep;"),
+            "{}",
+            sc.decls
+        );
+        assert!(
+            sc.decls.contains("logic [7:0][3:0] dst_svt_pos;"),
+            "{}",
+            sc.decls
+        );
     }
 
     #[test]

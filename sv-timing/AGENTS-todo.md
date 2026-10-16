@@ -135,6 +135,20 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   fixed with tests (zero-fed stage + rewritten origin; one-hot tree labels ≠
   arms; stale width map). Resume cache keyed on RTLIL sha. Area rises only
   with InsertReg (flops); one-hot/LoopRewrite neutral-to-negative.
+- [x] A103 delay-v37: `if` guards and LHS indices are reads + a mux
+  (`TimingModule.guards`); field-granular, index-aware loop carry; guard-
+  only carry = one gate per copy; function names are not nets. Board goes
+  from blind (iq/lsq 0.0 reg→reg) to ±30 % of mapped cells in the OoO
+  modules; live worst 23.0 → 38.5 (store_buffer squash), 160 → 673 reg→reg
+  failing — the truth. StreamCompact (4th LoopRewrite shape) SAT-proved on
+  the fixture; Pareto at N = 8 (−4.5 % area, −3.6 % delay).
+- [ ] A103 next: rename (52 cells / 19 FO4) and scoreboard (54 / 15.6) still
+  under-read — dynamic struct-array reads behind rotated indices
+  (`mem_q[head_slot[h]]`, `commit_sel_slot`); perf_counters / TLB over-read
+  (dense control cones). Then the OoO control cones themselves: iq select
+  (47 cells), store_buffer squash (49), rename allocation (52), scoreboard
+  commit select (54) — microarchitecture (precomputed selects, one-cycle-
+  later counts), not latency-neutral rewrites.
 - [ ] A102 next: canonical ABC input order (sort by signal name before
   `abc`, or `abc -nocleanup` + sorted AIG) to cut the module-level noise
   floor; a latency-aware miter (unroll gold by the cut's stage count) so

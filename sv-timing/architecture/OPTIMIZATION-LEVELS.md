@@ -82,8 +82,14 @@ The table records the original defect and where the fix now lives.
 
    **Transform catalog addition (2026-10-16): `LoopRewrite`** — exact,
    latency-neutral: a serial loop walk (find-first scan, conditional count,
-   ring pointer walk) → its parallel form; lower depth and lower area at
-   once (ALGORITHMS-EXPERTS A101). Ranked with `SelectIncrement`.
+   ring pointer walk, stream compaction) → its parallel form; lower depth
+   and lower area at once (ALGORITHMS-EXPERTS A101, A103). Ranked with
+   `SelectIncrement`.
+
+   **Measurement (2026-10-16, delay-v37):** the `if` predicates an
+   assignment sits under and the index of a dynamically indexed LHS are
+   reads of the node and a mux on its path (`TimingModule.guards`); loop
+   carry is field-granular and index-aware (ALGORITHMS-EXPERTS A103).
 
    **Transform catalog addition (2026-10-16): `SelectIncrement`** — exact,
    latency-neutral: `LHS = REG + step` (k-bit step, k ≤ 4) → `2^k`

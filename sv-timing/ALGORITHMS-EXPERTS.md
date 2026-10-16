@@ -7584,6 +7584,96 @@ latency tree cannot be stated as a cycle-exact miter (latency moved);
 its evidence is the fixture proofs, the single-decision emit rules, and
 the area no longer dropping where logic was lost.
 
+## A103 — Guards (delay-v37): the structural board learns to see the OoO cones; StreamCompact
+
+### The blind spot the module board exposed
+
+With netlist cells per module in hand (A100/A102), the structural board could
+be calibrated module by module. It was not merely imprecise in the OoO
+modules — it was blind: `g6lc_iq` and `g6lc_lsq` had **no register-to-
+register path at all** (0.0 FO4) against 47 and 13 mapped cells;
+`scoreboard`, `g6lc_rename`, `store_buffer` read 3–5× fewer FO4 than cells.
+The lowerer never represented two things every OoO structure is made of:
+
+1. the **`if` an assignment sits under** — `if (issue_valid_o[g] && ack)
+   q_after[slot_entry[g]].valid = 0` reads the whole select cone (`grant`,
+   `slot_entry`) and the node had no fan-in from it;
+2. the **index of a dynamically indexed LHS** — `q[slot].f = …` decodes
+   `slot`.
+
+delay-v37 records both as the node's *guards* (`TimingModule.guards`,
+collected from the CST's `ConditionalStatement` body spans and the LHS
+bracket expressions). They are reads for the dataflow link and cost
+`max(rhs, guard) + mux` (one select level, `log2` per extra guard). A guard
+whose identifiers are all elaboration-time (a genvar index `row[k]`, a
+parameter `if (CVA6Cfg.RVA)`) costs nothing; a guard decided *above* the
+node's loop (`^`) is one select for all unrolled copies and is added after
+the trip multiplier.
+
+The first run then over-read by as much as it had under-read (iq 422,
+scoreboard 274), which named two more truths about unrolled loops:
+
+- **Field granularity.** `q_wake[e].rs1_rdy = 1` under `if (q_wake[e].rs1
+  == wb)` writes one member and reads another of the same struct array:
+  no dependence between iterations (yosys sees per-bit nets). Carry keys
+  are root + member chain with indices stripped.
+- **Index awareness.** `x[i].f` written and `x[i].g` read in one iteration
+  with the loop variable in both indices is one element: no carry.
+- **Carry through the guard alone** (`if (!placed && !v[i]) placed = 1`)
+  is one gate per copy (the `!placed` AND chain) with the body paid once;
+  through the RHS (`cid = cid + 1`) it repeats the body (A98).
+- A **function name is not a net**: `is_amo = … && ariane_pkg::is_amo(op)`
+  had read itself and become a 16-copy chain.
+
+### Calibration (live A100 tree, delay-v37 structural reg→reg worst vs run-C mapped cells)
+
+| module | structural FO4 | mapped cells | cells/FO4 |
+|---|---:|---:|---:|
+| g6lc_iq | 16.5 (select cone; 48.0 before the function-name fix) | 47 | 2.8 |
+| store_buffer | 38.5 (cancel squash compaction) | 49 | 1.3 |
+| instr_realign | 26.0 | 23 | 0.9 |
+| frontend | 23.0 | 43 | 1.9 |
+| wt_dcache_wbuffer | 18.6 | 21 | 1.1 |
+| instr_queue | 17.0 | 16 | 0.9 |
+| g6lc_rename | 19.0 | 52 | 2.7 |
+| scoreboard | 15.6 | 54 | 3.5 |
+| perf_counters | 34.7 | 13 | 0.4 |
+
+Where the board was blind it now reads within ±30 % (iq before the
+function fix, store_buffer, wbuffer, instr_queue, realign). rename and
+scoreboard still under-read (dynamic struct-array reads behind
+`commit_sel_slot`/`head_slot` rotations); perf_counters and the TLBs
+over-read (dense control cones the class model deflates in the netlist but
+not here). The live board under delay-v37: **worst 38.5 FO4
+(`store_buffer`), 1204 failing primary paths, 673 of 1628 reg→reg** —
+against 23.0 / 435 / 160 under delay-v36. The earlier number was the
+model's blindness, not the design's depth.
+
+### StreamCompact (fourth LoopRewrite shape)
+
+The store buffer's cancel squash — `for k: if (k < cnt) begin src = ptr + k;
+if (keep(src)) begin a[dst] = q[src]; …; dst++; live++; end end` — is a
+stream compaction: a conditional running count and a write at a running
+index, N incrementers and N demuxes in series. The exact parallel form:
+`keep[k]` (outer guard ∧ condition, with the per-iteration temps
+recomputed), `pos[k] = $countones(keep[k-1:0])` (independent popcounts, not
+a running sum), a one-hot gather `a[j] = q(k)` for the `k` with `keep[k] &&
+pos[k] == j`, and every count advanced by `$countones(keep)`. Exact when
+`dst` enters at zero (the statement before the loop), the counts and outputs
+are not read in the loop. Fixture `fixtures/auto_correct/stream_compact.sv`
+(N = 8): **SAT-proved** gold ≡ emitted (sequential miter, 2 steps, defined
+inputs); mapped Nangate45 1.91 → 1.84 ns, 15 → 15 cells, area 3456 → 3300
+µm² (−4.5 %). At N = 8 ABC already keeps the serial form at 15 cells — the
+structural 68.6 for it was an over-read (`dst + 1` billed as a full
+incrementer per copy); the shape pays off with N, and is Pareto at 8.
+
+What the honest board says about 10 FO4 now: the OoO cones (select,
+squash, rename allocation, scoreboard commit select) are 15–40 FO4 of
+*control* — guards and dynamic indexing — not arithmetic. They are not
+closable by the latency-neutral toolbox at 20 ps; they are microarchitecture
+(stationary queues, precomputed selects, one-cycle-later counts), and the
+board can now rank them truthfully.
+
 ## A90 — Incrementers are not gates (delay-v32)
 
 `x + 1` and `x + CONST` were billed 1 FO4 at every width since delay-v18

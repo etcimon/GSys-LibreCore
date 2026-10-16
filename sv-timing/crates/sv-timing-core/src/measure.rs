@@ -1002,11 +1002,28 @@ fn field_tokens(text: &str) -> Vec<String> {
                 }
             }
             let tok = text[start..i].to_string();
-            if looks_like_net(tok.split(['[', '.']).next().unwrap_or(&tok)) {
+            // `pkg::f(x)`: the function name is not a net (`is_amo =
+            // … ariane_pkg::is_amo(op)` read itself and became a 16-copy
+            // chain); a token followed by `(` is a call, one preceded by
+            // `::` is package-qualified.
+            let mut k = i;
+            while k < b.len() && (b[k] == b' ' || b[k] == 9) {
+                k += 1;
+            }
+            let is_call = k < b.len() && b[k] == b'(';
+            let pkg_qualified = start >= 2 && &b[start - 2..start] == b"::";
+            if !is_call
+                && !pkg_qualified
+                && looks_like_net(tok.split(['[', '.']).next().unwrap_or(&tok))
+            {
                 for inner in bracket_inners(&tok) {
                     out.extend(field_tokens(&inner));
                 }
                 out.push(tok);
+            } else if is_call || pkg_qualified {
+                for inner in bracket_inners(&tok) {
+                    out.extend(field_tokens(&inner));
+                }
             }
         } else if b[i].is_ascii_digit() {
             while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'\'' || b[i] == b'_') {
