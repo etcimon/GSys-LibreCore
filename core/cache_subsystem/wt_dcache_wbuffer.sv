@@ -1358,6 +1358,23 @@ module wt_dcache_wbuffer
         $display("[smt-flow] wt_check cycle=%0d ptr=%0d wtag=%h hit=%h valid=%h",
                  smt_wt_cycle, check_ptr_q1, wbuffer_q[check_ptr_q1].wtag,
                  rd_hit_oh_q, wbuffer_q[check_ptr_q1].valid);
+      // T37: the word's arrival (allocation or merge into a live entry) and the
+      // entry's byte state after it, and the fixup-queue push/retire of its bytes
+      if (wbuffer_wren && (!smt_wt_watch ||
+          {req_port_i.address_tag, req_port_i.address_index[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.XLEN_ALIGN_BYTES]} ==
+          smt_wt_address[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES]))
+        $display("[smt-flow] wt_alloc cycle=%0d ptr=%0d merge=%b be=%h data=%h | before: valid=%h dirty=%h txblock=%h checked=%b hit=%h | full=%b",
+                 smt_wt_cycle, wr_ptr, |wbuffer_hit_oh, req_port_i.data_be, req_port_i.data_wdata,
+                 wbuffer_q[wr_ptr].valid, wbuffer_q[wr_ptr].dirty, wbuffer_q[wr_ptr].txblock,
+                 wbuffer_q[wr_ptr].checked, wbuffer_q[wr_ptr].hit_oh, full);
+      if (fixup_push && (!smt_wt_watch ||
+          fixup_paddr_push[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES] == smt_wt_address[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES]))
+        $display("[smt-flow] wt_fixup_push cycle=%0d pa=%h be=%h data=%h full=%b match=%b",
+                 smt_wt_cycle, fixup_paddr_push, fixup_be_push, fixup_data_push, fixup_full, fixup_match);
+      if (fixup_wr_req && (!smt_wt_watch ||
+          {fixup_wr_idx, fixup_wr_off} == smt_wt_address[CVA6Cfg.DCACHE_INDEX_WIDTH-1:0]))
+        $display("[smt-flow] wt_fixup_wr cycle=%0d idx=%h off=%h ways=%h be=%h data=%h ack=%b",
+                 smt_wt_cycle, fixup_wr_idx, fixup_wr_off, fixup_wr_oh, fixup_wr_data_be, fixup_wr_data, fixup_wr_ack);
     end
   end
 `ifndef VERILATOR
