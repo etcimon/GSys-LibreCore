@@ -796,6 +796,40 @@ module wt_dcache_missunit
   ///////////////////////////////////////////////////////
 
   //pragma translate_off
+  // +smt_mem_watch=<PA>: the AMO / invalidation / refill side of the watched
+  // dword's line (the STQ, wbuffer and mem lookups print in their own units)
+  bit smt_mu_trace, smt_mu_watch;
+  logic [CVA6Cfg.PLEN-1:0] smt_mu_address;
+  int unsigned smt_mu_cycle = 0;
+  initial begin
+    smt_mu_watch = $value$plusargs("smt_mem_watch=%h", smt_mu_address);
+    smt_mu_trace = $test$plusargs("smt_flow_trace") || smt_mu_watch;
+  end
+  always @(posedge clk_i) begin
+    if (!rst_ni) smt_mu_cycle = 0;
+    else if (smt_mu_trace) begin
+      smt_mu_cycle++;
+      if (CVA6Cfg.RVA && mem_data_req_o && (mem_data_o.rtype == DCACHE_ATOMIC_REQ) && (!smt_mu_watch ||
+          (amo_req_i.operand_a[CVA6Cfg.PLEN-1:3] == smt_mu_address[CVA6Cfg.PLEN-1:3])))
+        $display("[smt-flow] wt_amo_req cycle=%0d op=%0d pa=%h data=%h size=%0d ack=%b state=%0d",
+                 smt_mu_cycle, amo_req_i.amo_op, amo_req_i.operand_a, amo_req_i.operand_b, amo_req_i.size,
+                 mem_data_ack_i, state_q);
+      if (CVA6Cfg.RVA && amo_ack && (!smt_mu_watch ||
+          (amo_req_i.operand_a[CVA6Cfg.PLEN-1:3] == smt_mu_address[CVA6Cfg.PLEN-1:3])))
+        $display("[smt-flow] wt_amo_ack cycle=%0d op=%0d pa=%h result=%h",
+                 smt_mu_cycle, amo_req_i.amo_op, amo_req_i.operand_a, amo_resp_o.result);
+      if (inv_vld && (!smt_mu_watch ||
+          mem_rtrn_i.inv.idx[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] ==
+          smt_mu_address[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH]))
+        $display("[smt-flow] wt_inv cycle=%0d idx=%h all=%b way=%0d ways=%h state=%0d",
+                 smt_mu_cycle, wr_cl_idx_o, inv_vld_all, mem_rtrn_i.inv.way, wr_cl_we_o, state_q);
+      if (cl_write_en && (!smt_mu_watch ||
+          mshr_q.paddr[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] ==
+          smt_mu_address[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH]))
+        $display("[smt-flow] wt_refill cycle=%0d idx=%h tag=%h way=%0d nc=%b data=%h",
+                 smt_mu_cycle, wr_cl_idx_o, wr_cl_tag_o, mshr_q.repl_way, mshr_q.nc, wr_cl_data_o);
+    end
+  end
 `ifndef VERILATOR
 
   read_tid :
