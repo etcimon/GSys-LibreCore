@@ -267,6 +267,8 @@ static const char *verilog_plusargs[] = {
     "incl_trace", "incl_trace_max",
     // T26 retire-stall / memory-level-parallelism census (core/cva6.sv gen_stall_census)
     "stall_census",
+    // +hang_dump=N (core/cva6.sv gen_stall_census): state dump after N cycles without a commit ack
+    "hang_dump",
     // T33/T34: per-event line for load-unit replays (core/cva6.sv census block)
     "lu_replay_trace",
     // T35: store-buffer speculative-queue event trace (core/store_buffer.sv)

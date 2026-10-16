@@ -2395,6 +2395,9 @@ module cva6
     longint unsigned sc_flush, sc_mshr_hist[6], sc_mshr_full, sc_wbuf_full, sc_ldbuf_full, sc_dmiss, sc_dc_req, sc_dc_gnt, sc_rtab_full;
     // T33/T34: load-unit replays (parked load handed back) and LSQ violations, for the oops correlation
     longint unsigned sc_lu_replay, sc_mem_viol;
+    // +hang_dump=N state (see below)
+    longint unsigned hd_at, hd_last_ack;
+    int unsigned hd_n;
     function automatic int unsigned sc_class(input ariane_pkg::fu_t fu);
       case (fu)
         ariane_pkg::LOAD: return 0;
@@ -2489,8 +2492,84 @@ module cva6
           sc_last_print = sc_cyc;
           sc_print("periodic");
         end
+        // +hang_dump=N: after N cycles without a commit ack, dump the state that
+        // decides whether the head can issue/complete (scoreboard head, IQ entries
+        // and their gates, LSQ store entries, LSU bypass/store/load units, STQ),
+        // then again every 1000 cycles, three times. For a boot that stops
+        // retiring where no probe window is known in advance.
+        if (anyack) hd_last_ack = sc_cyc;
+        if (hd_at != 0 && (sc_cyc - hd_last_ack) >= hd_at && hd_n < 3 &&
+            ((sc_cyc - hd_last_ack - hd_at) % 1000) == 0) begin
+          hd_n++;
+          hd_print();
+        end
       end
     end
+    initial begin
+      hd_at = 0; hd_last_ack = 0; hd_n = 0;
+      void'($value$plusargs("hang_dump=%d", hd_at));
+    end
+    function automatic void hd_print();
+      automatic int unsigned hs;
+      hs = int'(issue_stage_i.i_scoreboard.commit_sel_slot[0]);
+      $display("[hang] cyc=%0d since_ack=%0d sb_empty=%b flush_if=%b flush_ex=%b halt=%b lsu_ready=%b", sc_cyc, sc_cyc - hd_last_ack,
+               smt_sb_empty, flush_ctrl_if, flush_ctrl_ex, halt_ctrl, ex_stage_i.lsu_i.lsu_ready_o);
+      $display("[hang] SB head slot=%0d issued=%b valid=%b cancelled=%b replay=%b fu=%0d op=%0d pc=%h tid=%0d ex=%b | port0 valid=%b fu=%0d pc=%h ack=%b drop=%b | commit_ptr=%0d issue_ptr=%0d",
+               hs, issue_stage_i.i_scoreboard.mem_q[hs].issued, issue_stage_i.i_scoreboard.mem_q[hs].sbe.valid,
+               issue_stage_i.i_scoreboard.mem_q[hs].cancelled, issue_stage_i.i_scoreboard.mem_q[hs].replay,
+               issue_stage_i.i_scoreboard.mem_q[hs].sbe.fu, issue_stage_i.i_scoreboard.mem_q[hs].sbe.op,
+               issue_stage_i.i_scoreboard.mem_q[hs].sbe.pc, issue_stage_i.i_scoreboard.mem_q[hs].sbe.trans_id,
+               issue_stage_i.i_scoreboard.mem_q[hs].sbe.ex.valid,
+               commit_instr_id_commit[0].valid, commit_instr_id_commit[0].fu, commit_instr_id_commit[0].pc,
+               commit_ack[0], commit_drop_id_commit[0],
+               issue_stage_i.i_scoreboard.commit_pointer_q[0], issue_stage_i.i_scoreboard.issue_pointer_q);
+      for (int e = 0; e < issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.DEPTH; e++)
+        if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].valid)
+          $display("[hang] IQ[%0d] tid=%0d fu=%0d op=%0d pc=%h rs1=%b rs2=%b rs3=%b bypass=%b ready=%b prs1=%0d prs2=%0d", e,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].sbe.trans_id,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].sbe.fu,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].sbe.op,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].sbe.pc,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].rs1_rdy,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].rs2_rdy,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].rs3_rdy,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].may_bypass,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.ready[e],
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].prs1,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_iq.q_q[e].prs2);
+      $display("[hang] IQ issue_valid=%b issue_ack=%b st_unresolved=%h st_live=%h md_stall=%b stl_stall=%b",
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.iq_issue_valid, issue_stage_i.gen_full_ooo.i_ooo_dispatch.iq_issue_ack,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.st_unresolved_mask, issue_stage_i.gen_full_ooo.i_ooo_dispatch.st_live_mask,
+               issue_stage_i.gen_full_ooo.i_ooo_dispatch.md_stall, issue_stage_i.gen_full_ooo.i_ooo_dispatch.stl_stall);
+      for (int i = 0; i < issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ST_ENTRIES; i++)
+        if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.st_q[i].valid)
+          $display("[hang] LSQ st[%0d] id=%0d addr_v=%b data_v=%b addr=%h", i,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.st_q[i].id,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.st_q[i].addr_v,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.st_q[i].data_v,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.st_q[i].addr);
+      for (int i = 0; i < issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.LD_ENTRIES; i++)
+        if (issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ld_q[i].valid)
+          $display("[hang] LSQ ld[%0d] id=%0d addr_v=%b done=%b addr=%h", i,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ld_q[i].id,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ld_q[i].addr_v,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ld_q[i].done,
+                   issue_stage_i.gen_full_ooo.i_ooo_dispatch.i_lsq.ld_q[i].addr);
+      $display("[hang] LSU bypass cnt=%0d rp=%0d | e0 v=%b fu=%0d tid=%0d specmiss=%b | e1 v=%b fu=%0d tid=%0d specmiss=%b | SU state=%0d tid_q=%0d treq=%b dtlb_hit=%b st_ready=%b | LU state=%0d ldbuf_v=%b | STQ spec=%0d commit=%0d po_match=%b | amo_rdy=%b",
+               ex_stage_i.lsu_i.lsu_bypass_i.status_cnt_q, ex_stage_i.lsu_i.lsu_bypass_i.read_pointer_q,
+               ex_stage_i.lsu_i.lsu_bypass_i.mem_q[0].valid, ex_stage_i.lsu_i.lsu_bypass_i.mem_q[0].fu,
+               ex_stage_i.lsu_i.lsu_bypass_i.mem_q[0].trans_id, ex_stage_i.lsu_i.lsu_bypass_i.mem_q[0].is_speculative_load_miss,
+               ex_stage_i.lsu_i.lsu_bypass_i.mem_q[1].valid, ex_stage_i.lsu_i.lsu_bypass_i.mem_q[1].fu,
+               ex_stage_i.lsu_i.lsu_bypass_i.mem_q[1].trans_id, ex_stage_i.lsu_i.lsu_bypass_i.mem_q[1].is_speculative_load_miss,
+               ex_stage_i.lsu_i.i_store_unit.state_q, ex_stage_i.lsu_i.i_store_unit.trans_id_q,
+               ex_stage_i.lsu_i.i_store_unit.translation_req_o, ex_stage_i.lsu_i.i_store_unit.dtlb_hit_i,
+               ex_stage_i.lsu_i.i_store_unit.st_ready,
+               ex_stage_i.lsu_i.i_load_unit.state_q, ex_stage_i.lsu_i.i_load_unit.ldbuf_valid_q,
+               ex_stage_i.lsu_i.i_store_unit.store_buffer_i.speculative_status_cnt_q,
+               ex_stage_i.lsu_i.i_store_unit.store_buffer_i.commit_status_cnt_q,
+               ex_stage_i.lsu_i.i_store_unit.page_offset_matches_o,
+               ex_stage_i.lsu_i.i_store_unit.amo_buffer_ready);
+    endfunction
     if (CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WT ||
         CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WB ||
         CVA6Cfg.DCacheType == config_pkg::HPDCACHE_WT_WB) begin : gen_sc_hpd
