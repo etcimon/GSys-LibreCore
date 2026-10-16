@@ -74,7 +74,11 @@ pub const IR_VERSION: &str = "ir-v1";
 /// `delay-v33`: a runtime indexed select (`arr[idx]`, `v[idx +: W]`) costs one
 /// mux level; constant selects stay wiring. Needed so `SelectIncrement` cannot
 /// book the adder it moves behind an index as pure gain.
-pub const MEASUREMENT_VERSION: &str = "delay-v33";
+/// `delay-v34`: the expression grammar no longer splits `||`/`&&` (and
+/// `<<`, `==`, …) into a one-byte operator plus a unary reduction; logical
+/// joins are one LogicBit each. `rebalance_associative` folds
+/// `|a || |b || |c` into `|{a, b, c}` (exact).
+pub const MEASUREMENT_VERSION: &str = "delay-v34";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

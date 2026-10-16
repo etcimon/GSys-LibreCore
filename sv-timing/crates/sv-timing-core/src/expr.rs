@@ -1023,13 +1023,21 @@ impl Expr {
             } if Self::is_associative_binary_op(op) => {
                 let mut leaves = Vec::new();
                 flatten_assoc(op, self, &mut leaves);
+                // `|a || |b || |c` is `|{a, b, c}`; `&a && &b` is `&{a, b}`:
+                // several reductions joined by the matching logical/bitwise
+                // operator are one reduction of the concatenation (exact —
+                // every operand is already one bit, and `||`/`|` agree on
+                // one-bit values). One wide reduce tree replaces a reduce per
+                // operand plus a chain of joins (frontend `speculative_d`).
+                fold_reductions(op, &mut leaves);
+                if leaves.len() == 1 {
+                    return leaves.pop().expect("one leaf");
+                }
                 if leaves.len() <= 2 {
-                    return Expr::Binary {
-                        op: op.clone(),
-                        op_class: *op_class,
-                        left: Box::new(left.rebalance_associative()),
-                        right: Box::new(right.rebalance_associative()),
-                    };
+                    // Leaves are already rebalanced (flatten_assoc); a fold may
+                    // have reduced the chain to two, so build from the leaves.
+                    let _ = (left, right);
+                    return build_balanced_assoc(op, *op_class, &leaves);
                 }
                 build_width_aware_balanced_assoc(op, *op_class, &leaves)
             }
@@ -1469,6 +1477,41 @@ fn flatten_assoc(op: &str, e: &Expr, out: &mut Vec<Expr>) {
     }
 }
 
+/// Merge the unary-reduction leaves of an `||`/`|` (resp. `&&`/`&`) chain
+/// into one reduction of their concatenation (see `rebalance_associative`).
+/// Leaves that are not reductions of the matching kind stay in place; the
+/// merged reduction takes the position of the first merged leaf.
+fn fold_reductions(op: &str, leaves: &mut Vec<Expr>) {
+    let reduce_op = match op {
+        "||" | "|" => "|",
+        "&&" | "&" => "&",
+        _ => return,
+    };
+    let mut parts: Vec<Expr> = Vec::new();
+    let mut first: Option<usize> = None;
+    let mut keep: Vec<Expr> = Vec::new();
+    for leaf in leaves.iter() {
+        match leaf {
+            Expr::Unary { op: u, arg } if u == reduce_op => {
+                if first.is_none() {
+                    first = Some(keep.len());
+                }
+                parts.push(arg.as_ref().clone());
+            }
+            other => keep.push(other.clone()),
+        }
+    }
+    if parts.len() < 2 {
+        return;
+    }
+    let merged = Expr::Unary {
+        op: reduce_op.to_string(),
+        arg: Box::new(Expr::Concat { parts }),
+    };
+    keep.insert(first.unwrap_or(0), merged);
+    *leaves = keep;
+}
+
 /// Build a balanced binary tree from leaves with operator `op`.
 fn build_balanced_assoc(op: &str, op_class: OperatorClass, leaves: &[Expr]) -> Expr {
     assert!(!leaves.is_empty());
@@ -1814,6 +1857,14 @@ fn is_encoding_then_part(e: &Expr, seed: &ConstSeed) -> bool {
         _ => false,
     }
 }
+
+/// Every multi-byte operator the expression grammar knows; `match_op` refuses
+/// a shorter operator when one of these begins at the cursor and is not in
+/// the caller's own set.
+const LONGER_OPERATORS: &[&str] = &[
+    "<<<", ">>>", "===", "!==", "<->", "||", "&&", "<<", ">>", "==", "!=", "<=", ">=", "~^", "^~",
+    "~&", "~|", "**", "->", "+:", "-:", "::",
+];
 
 fn is_unit_increment_operand(left: &Expr, right: &Expr) -> bool {
     matches!(positive_literal_value(left), Some(1))
@@ -2359,8 +2410,19 @@ impl<'a> Parser<'a> {
                 {
                     continue;
                 }
-                // For single-char ops that start multi-char ops of higher precedence
-                // handled by sorted order within the set only.
+                // A precedence level only lists its own operators, so `|` at
+                // the bitwise-or level must not take the first byte of `||`
+                // (nor `<` of `<<`, `&` of `&&`, `=` of `==`, …): the longer
+                // operator belongs to another level. Before this guard
+                // `a || b` parsed as `a | (|b)` and every logical join was
+                // billed as a bitwise op plus a reduction (delay-v34).
+                let rest = &self.src[self.i..];
+                let longer_elsewhere = LONGER_OPERATORS.iter().any(|l| {
+                    l.len() > op.len() && rest.starts_with(l.as_bytes()) && !ops.contains(l)
+                });
+                if longer_elsewhere {
+                    continue;
+                }
                 self.i += b.len();
                 return Some(op.to_string());
             }
@@ -2632,6 +2694,60 @@ mod tests {
         assert_eq!(e2.dominant_op_class(), OperatorClass::AddSub, "{e2:?}");
         let e3 = Expr::parse("a /* / not div / */ + b");
         assert_eq!(e3.dominant_op_class(), OperatorClass::AddSub, "{e3:?}");
+    }
+
+    #[test]
+    fn or_of_reductions_folds_to_one_reduction() {
+        // The grammar must see `||`/`&&` as logical joins, not `|` + reduce.
+        assert_eq!(Expr::parse("a || b").emit(), "a || b");
+        assert_eq!(Expr::parse("a && !b").emit(), "a && !b");
+        assert_eq!(Expr::parse("a || |b").emit(), "a || |b");
+        assert_eq!(Expr::parse("x << 2").emit(), "x << 2");
+        assert_eq!(Expr::parse("a <= b").emit(), "a <= b");
+        // frontend `speculative_d`: `(a && !b || |x || |y || |z) && !f && !g`.
+        let e = Expr::parse(
+            "(spec_q && !res || |is_branch || |is_return || |is_jalr) && !flush_i && !smt",
+        );
+        let r = e.rebalance_associative();
+        let text = r.emit();
+        assert!(
+            text.contains("|{is_branch, is_return, is_jalr}"),
+            "reductions must merge into one concat reduce: {text}"
+        );
+        assert_eq!(
+            text.matches('|').count(),
+            2 + 1,
+            "one `||` join left, one `|` reduce: {text}"
+        );
+        assert_eq!(
+            text,
+            "((spec_q && !res) || |{is_branch, is_return, is_jalr}) && (!flush_i && !smt)"
+        );
+        let base = |c: OperatorClass| crate::measure::CostModel::default().base_fo4(c);
+        assert!(
+            r.fo4_critical_cost(&base) + 1.5 <= e.fo4_critical_cost(&base),
+            "{} -> {}",
+            e.fo4_critical_cost(&base),
+            r.fo4_critical_cost(&base)
+        );
+        // `&a && &b` folds too; a lone reduction or mixed kinds do not.
+        assert_eq!(
+            Expr::parse("&a && &b && c").rebalance_associative().emit(),
+            "&{a, b} && c"
+        );
+        assert_eq!(
+            Expr::parse("|a || &b").rebalance_associative().emit(),
+            "|a || &b"
+        );
+        assert_eq!(
+            Expr::parse("|a || b").rebalance_associative().emit(),
+            "|a || b"
+        );
+        // Bitwise chain with a wide operand: only the reductions merge.
+        assert_eq!(
+            Expr::parse("x | |a | |b").rebalance_associative().emit(),
+            "x | |{a, b}"
+        );
     }
 
     #[test]

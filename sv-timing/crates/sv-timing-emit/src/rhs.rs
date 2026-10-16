@@ -2032,6 +2032,41 @@ pub fn rewrite_origin_assigns(source: &str, cuts: &[CutAssign]) -> String {
     out
 }
 
+/// Identifiers of an expression text (keywords and sized literals excluded).
+fn ident_set(text: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let bytes = text.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        let c = bytes[i] as char;
+        if c.is_ascii_alphabetic() || c == '_' {
+            let start = i;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'_' || bytes[i] == b'$')
+            {
+                i += 1;
+            }
+            let word = &text[start..i];
+            // A sized literal base (`4'd1`) and the `'` before it are skipped by
+            // the digit branch; a `::` package prefix stays part of the name.
+            if i < bytes.len() && bytes[i] == b':' && bytes.get(i + 1) == Some(&b':') {
+                i += 2;
+                continue;
+            }
+            out.insert(word.to_string());
+        } else if c.is_ascii_digit() {
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || bytes[i] == b'\'' || bytes[i] == b'_')
+            {
+                i += 1;
+            }
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
 /// Rewrite origin assign RHS for BalanceMux / rebalance edits that carry `emit_rhs`.
 ///
 /// Keeps the original LHS and operator (`=` / `<=`); replaces only the RHS text.
@@ -2047,13 +2082,25 @@ pub fn rewrite_origin_rhs_replaces(source: &str, trace: &EditTrace) -> String {
             continue;
         }
         // R12: only rewrite origin when a **safe** structural snippet will be
-        // injected (same gate as dense early inject).
+        // injected (same gate as dense early inject). A pure RHS rebalance has
+        // no snippet: it is written when the origin is a module-scope assign
+        // outside any generate and the new RHS names exactly the identifiers
+        // the old one did (reassociation and the reduction fold add none) —
+        // before this, RebalanceAssoc booked IR FO4 the emitted file never had.
         let has_safe_snippet = r
             .emit_snippet
             .as_ref()
             .map(|s| balance_mux_snippet_safe(source, s, r.origin.start_line))
             .unwrap_or(false);
-        if !has_safe_snippet {
+        let pure_rhs_rewrite = r.kind == EditKind::RebalanceAssoc
+            && r.emit_snippet.is_none()
+            && r.origin.start_line != 0
+            && !line_inside_generate(source, r.origin.start_line)
+            && r.emit_rhs.as_ref().is_some_and(|new_rhs| {
+                parse_assign_multiline(source, r.origin.start_line, 6)
+                    .is_some_and(|(_, old_rhs, _, _)| ident_set(&old_rhs) == ident_set(new_rhs))
+            });
+        if !has_safe_snippet && !pure_rhs_rewrite {
             continue;
         }
         if let Some(new_rhs) = r.emit_rhs.as_ref() {

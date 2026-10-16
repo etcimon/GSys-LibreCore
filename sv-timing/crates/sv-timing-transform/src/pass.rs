@@ -291,6 +291,26 @@ impl PassContext {
     }
 }
 
+/// Worst actionable primary path FO4 and the actionable negative slack sum:
+/// paths whose over-budget trial is `Leave` (multi-cycle, atomic leaf, at
+/// budget) carry no work and must not decide whether a stage has converged.
+fn actionable_progress(ctx: &PassContext) -> (f64, f64) {
+    let mut worst = 0.0_f64;
+    let mut tns = 0.0_f64;
+    for p in &ctx.ranked.primary {
+        if sv_timing_core::pass_strategy::trial_for_path(p)
+            == sv_timing_core::pass_strategy::OverBudgetTrial::Leave
+        {
+            continue;
+        }
+        worst = worst.max(p.total_fo4);
+        if p.slack_fo4 < 0.0 {
+            tns -= p.slack_fo4;
+        }
+    }
+    (worst, tns)
+}
+
 /// Run bounded correct loop on an **already-analyzed** design.
 ///
 /// Per pass: measure → relocation plan → worklist (preferred_auto) →
@@ -419,14 +439,13 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
     // PASS-STRATEGY §5–§6: S3 latency-neutral to fixpoint, then S4 InsertReg.
     // Stop a stage after 2 consecutive passes with Δprimary < min_gain (the
     // audit-strict-v4 full_core run applied 192 edits while primary stayed flat).
+    // "Primary" is the worst *actionable* path plus the actionable negative
+    // slack: the global worst is often an atomic leaf (a 226 FO4 multiplier
+    // nothing may touch), and measuring on it declared a fixpoint after two
+    // passes while the planner had only reached one page of the worklist.
     let mut stage_s4 = false;
     let mut flat_streak = 0u32;
-    let mut last_primary = ctx
-        .ranked
-        .primary
-        .first()
-        .map(|p| p.total_fo4)
-        .unwrap_or(0.0);
+    let (mut last_primary, mut last_tns) = actionable_progress(&ctx);
     let min_gain = ctx.policy.opt.min_gain_fo4.max(0.5);
     // Uncut generate-if `*_span`/`*_end` after 2-flat (gemm a_span/b_span).
     // v29 re-cut c_span/c_end; skip those idents. Extra passes InsertReg only
@@ -505,7 +524,71 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
                     }
                     return None;
                 }
-                is_latency_neutral_kind(opp.kind).then_some(w)
+                if is_latency_neutral_kind(opp.kind) {
+                    return Some(w);
+                }
+                // S3: a card whose preferred tool is a register (plain cones)
+                // still gets its latency-neutral tries — rebalance over the
+                // chain, split, an exact select — instead of waiting for an S4
+                // that a no-latency run never enters (frontend `speculative_d`
+                // never reached the worklist before this).
+                let path = ctx.design.paths.iter().find(|p| p.id == w.path_id)?;
+                let neutral = ctx
+                    .design
+                    .opportunities
+                    .iter()
+                    .filter(|o| o.path_id == w.path_id && is_latency_neutral_kind(o.kind))
+                    .min_by_key(|o| match o.kind {
+                        OpportunityKind::SelectIncrement => 0u8,
+                        OpportunityKind::BalanceMux => 1,
+                        OpportunityKind::SplitAssign => 2,
+                        OpportunityKind::InsertReg => 3,
+                    })
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        let module = ctx.design.modules.get(&path.module);
+                        let hottest = path
+                            .nodes
+                            .iter()
+                            .filter(|id| {
+                                module.and_then(|m| m.nodes.get(id)).is_some_and(|n| {
+                                    n.loc.origin == sv_timing_core::OriginKind::UserFile
+                                })
+                            })
+                            .max_by(|a, b| {
+                                let fa = module
+                                    .and_then(|m| m.nodes.get(a))
+                                    .map(|n| n.fo4_cost)
+                                    .unwrap_or(0.0);
+                                let fb = module
+                                    .and_then(|m| m.nodes.get(b))
+                                    .map(|n| n.fo4_cost)
+                                    .unwrap_or(0.0);
+                                fa.partial_cmp(&fb).unwrap_or(std::cmp::Ordering::Equal)
+                            })
+                            .copied()
+                            .unwrap_or(0);
+                        Opportunity {
+                            kind: OpportunityKind::SplitAssign,
+                            path_id: path.id,
+                            insert_after: hottest,
+                            estimated_fo4_before: path.total_fo4,
+                            estimated_fo4_after: path.total_fo4,
+                            loc: module
+                                .and_then(|m| m.nodes.get(&hottest))
+                                .map(|n| n.loc.clone())
+                                .unwrap_or_else(|| path.primary_loc.clone()),
+                            rationale: format!(
+                                "path {} S3 latency-neutral trial on a register-preferring cone",
+                                path.id
+                            ),
+                            requires_clock_in_scope: false,
+                            changes_latency: false,
+                        }
+                    });
+                w.opportunity = Some(neutral);
+                w.relocation_option_id = Some("t1_neutral_trial".into());
+                Some(w)
             })
             .collect();
         if stage_s4 {
@@ -842,23 +925,20 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
         idle_streak = 0;
 
         ctx.measure();
-        let now_primary = ctx
-            .ranked
-            .primary
-            .first()
-            .map(|p| p.total_fo4)
-            .unwrap_or(0.0);
-        if (last_primary - now_primary).abs() < min_gain {
+        let (now_primary, now_tns) = actionable_progress(&ctx);
+        if (last_primary - now_primary).abs() < min_gain && (last_tns - now_tns).abs() < min_gain {
             flat_streak += 1;
         } else {
             flat_streak = 0;
             extra_uncut_span = false;
         }
         last_primary = now_primary;
+        last_tns = now_tns;
         ctx.log_algo(
             "measure",
             AlgoTrace::kv([
                 ("primary_fo4", json!(now_primary)),
+                ("actionable_tns_fo4", json!(now_tns)),
                 ("flat_streak", json!(flat_streak)),
                 ("stage_s4", json!(stage_s4)),
             ]),
@@ -1030,11 +1110,37 @@ fn apply_work_item(
     let Some(opp) = item.opportunity.clone() else {
         return Ok((false, Some("no_opportunity")));
     };
-    let origin = opp.loc.clone();
+    let mut origin = opp.loc.clone();
+    let mut node = opp.insert_after;
     if origin.origin != sv_timing_core::OriginKind::UserFile {
-        return Ok((false, Some("origin_not_user_file")));
+        // A register cut must sit exactly where the opportunity says; a
+        // latency-neutral rewrite may instead take the hottest node of the
+        // path that *is* in user source (frontend: the fat `slot_live` call
+        // lives in a conditional-compilation region, `speculative_d` does not).
+        let fallback = (opp.kind != OpportunityKind::InsertReg)
+            .then(|| {
+                let path = ctx.design.paths.iter().find(|p| p.id == opp.path_id)?;
+                let module = ctx.design.modules.get(&path.module)?;
+                path.nodes
+                    .iter()
+                    .filter_map(|id| module.nodes.get(id))
+                    .filter(|n| n.loc.origin == sv_timing_core::OriginKind::UserFile)
+                    .max_by(|a, b| {
+                        a.fo4_cost
+                            .partial_cmp(&b.fo4_cost)
+                            .unwrap_or(std::cmp::Ordering::Equal)
+                    })
+                    .map(|n| (n.id, n.loc.clone()))
+            })
+            .flatten();
+        match fallback {
+            Some((n, loc)) => {
+                node = n;
+                origin = loc;
+            }
+            None => return Ok((false, Some("origin_not_user_file"))),
+        }
     }
-    let node = opp.insert_after;
     let reloc_id = item.relocation_option_id.as_deref().unwrap_or("");
     let path_mc = ctx
         .design
@@ -1162,16 +1268,45 @@ fn apply_work_item(
             }
         }
     }
-    // 2) Associative rebalance (plain cones / BalanceMux miss).
-    if !did
-        && !insert_preferred
-        && crate::pipeline::rebalance_associative_node(ctx, node, origin.clone(), Some(opp.path_id))
+    // 2) Associative rebalance (plain cones / BalanceMux miss). The hot node
+    // first, then every other node of the path by FO4: the opportunity names
+    // the fattest expression, which is often a call, while the chain's
+    // and/or spine (frontend `speculative_d`) sits at the capture end.
+    if !did && !insert_preferred {
+        let mut order: Vec<(sv_timing_core::NodeId, sv_timing_core::SourceLoc)> =
+            vec![(node, origin.clone())];
+        if let Some(path) = ctx.design.paths.iter().find(|p| p.id == opp.path_id) {
+            if let Some(module) = ctx.design.modules.get(&path.module) {
+                let mut rest: Vec<&sv_timing_core::IrNode> = path
+                    .nodes
+                    .iter()
+                    .filter(|id| **id != node)
+                    .filter_map(|id| module.nodes.get(id))
+                    .collect();
+                rest.sort_by(|a, b| {
+                    b.fo4_cost
+                        .partial_cmp(&a.fo4_cost)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                order.extend(rest.into_iter().map(|n| (n.id, n.loc.clone())));
+            }
+        }
+        for (cand, cand_origin) in order {
+            if crate::pipeline::rebalance_associative_node(
+                ctx,
+                cand,
+                cand_origin,
+                Some(opp.path_id),
+            )
             .is_ok()
-    {
-        did = true;
-        if let Some(last) = ctx.trace.records.last_mut() {
-            if !reloc_id.is_empty() {
-                last.rationale = format!("relocation {reloc_id}; {}", last.rationale);
+            {
+                did = true;
+                if let Some(last) = ctx.trace.records.last_mut() {
+                    if !reloc_id.is_empty() {
+                        last.rationale = format!("relocation {reloc_id}; {}", last.rationale);
+                    }
+                }
+                break;
             }
         }
     }

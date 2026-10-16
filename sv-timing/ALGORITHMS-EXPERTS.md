@@ -6925,7 +6925,9 @@ All numbers below are structural FO4 at **10 FO4 / 20 ps / margin 0.2** on
 | delay-v32 + cfg + elaborated widths, baseline (live modules) | **26.8** (`instr_queue`) | 521 | 126 file-list modules not in the elaborated design excluded (A89) |
 | delay-v32 + cfg + elaborated widths, review | 17.0 (`g6lc_bp_ckpt`) | 515 | precomputed step increments added to the review copy (A88) |
 | delay-v33 + cfg + widths + manifest defines, live RTL (A92 edit) | **24.0** (`frontend`) | 564 | the B-path code is now what is measured (A93); runtime indexed selects cost a mux |
-| delay-v33 …, emitted latency-neutral (31 BalanceMux + 1 SelectIncrement) | **24.0** (`frontend`) | 528 | `instr_queue` 24.3 → 15.8 (A92 + A91) |
+| delay-v33 …, emitted latency-neutral (31 BalanceMux + 1 SelectIncrement) | 24.0 (`frontend`) | 528 | `instr_queue` 24.3 → 15.8 (A92 + A91) |
+| delay-v34 (`\|\|`/`&&` parsed as joins), live RTL | **23.0** (`frontend`) | 505 | every logical join had been billed as `\|` + a reduction (A95) |
+| delay-v34, emitted latency-neutral (303 BalanceMux + 29 RebalanceAssoc + 1 SelectIncrement, 22 passes) | **20.0** (`frontend`) | 465 | planner reaches plain cones in S3, rebalances write RTL (A96); joint reparse of 264 files ok |
 
 The failing-path count went **up** with width scaling: a 64-bit add is 12 FO4
 at this table, so every single-cycle 64-bit adder path now misses a 10 FO4
@@ -7197,6 +7199,65 @@ dfflibmap; abc` with the delay script under `timeout`, falling back to the
 plain liberty script and then `abc -fast`, each module logging which script
 it got (`SYNTH_STREAM_FALLBACK`). 458 of 461 modules mapped in three minutes;
 the three large ones run concurrently under the 30-minute per-script timeout.
+
+## A95 — The grammar split `||` into `|` plus a reduction (delay-v34)
+
+`match_op` at the bitwise-or precedence level listed only `|`, so `a || b`
+parsed as `a | (|b)` — every logical join in the core was a bitwise op plus a
+unary reduction (two LogicBit instead of one), and a rebalance emitted from
+such a tree would have printed `a | |b`, which is **not** `a || b` for a
+multi-bit `a`. `match_op` now refuses a shorter operator when a longer one of
+the grammar (`||`, `&&`, `<<`, `==`, …) begins at the cursor and belongs to
+another level. Live board 24.0 → 23.0, failing 564 → 505 on identical RTL.
+`rebalance_associative` also folds `|a || |b || |c` into `|{a, b, c}` and
+`&a && &b` into `&{a, b}` (exact: one-bit operands, one wide reduce tree
+instead of a reduce per operand plus a join chain); frontend `speculative_d`
+23.0 → 20.0.
+
+## A96 — Three planner defects that hid plain cones from S3
+
+1. **Fixpoint on an untouchable leaf.** The stop rule measured Δ of the
+   global worst primary path — a 226 FO4 multiplier nothing may touch — so
+   every pass was "flat" and S3 ended after two passes with one worklist page
+   done (32 edits). Progress is now measured on the worst *actionable* path
+   and the actionable negative-slack sum (`actionable_progress`): 22 passes,
+   333 edits on the same design.
+2. **Register-preferring cards dropped in S3.** A plain cone's card prefers
+   `t2_insert_reg`; the S3 filter kept only latency-neutral kinds, so plain
+   cones never got rebalance/split/select tries unless an S4 (which a
+   no-latency run never enters) came. S3 now substitutes the best
+   latency-neutral opportunity of the path, or synthesizes a trial on the
+   hottest user-source node (`t1_neutral_trial`).
+3. **Origin outside user source refused the whole path.** The hottest node
+   of frontend's cone (`slot_live`) sits in a conditional-compilation region;
+   `origin_not_user_file` refused the item. A latency-neutral rewrite now
+   falls back to the hottest user-source node of the path (a register cut
+   still must sit exactly where its opportunity says), and the associative
+   rebalance is tried on every node of the path by FO4, not only the hot one.
+
+`RebalanceAssoc` records carried `emit_rhs` but no snippet, and the origin
+rewrite required a safe snippet — so rebalances booked IR FO4 the emitted
+file never had. A pure RHS rebalance now rewrites its origin when the assign
+is outside any generate and the new RHS names exactly the identifiers of the
+old one (`ident_set`); the emitted `speculative_d` reads
+`((speculative_q && !resolution_for_active) || |{is_branch, is_return, is_jalr}) && (!flush_i && !smt_restore_flush)`.
+
+## A97 — First whole-core mapped STA (fanout-dominated; not a logic-depth number)
+
+The parallel phase B mapped all 461 modules (`g6lc_iq` and `scoreboard` took
+the plain-script fallback after the 30-minute delay-script timeout; 37 GiB
+peak across six jobs, 56 minutes): 1,201,204 instances, 1.98 mm² Nangate45,
+and OpenSTA linked the hierarchical netlist (38 s, 3.8 GiB) after the icache's
+`$aldff` (a reset to a non-constant value) was made synchronous for the study
+(`async2sync t:$aldff`). The reported `wns_max` is **−1446 ns** at a 0.8 ns
+clock — meaningless as logic depth: the worst path is a flush broadcast
+(`controller` NAND4 → 54 nF net → ROB flops) whose unbuffered 50k-fanout nets
+contribute 222 and 917 ns. Excluding the broadcast drivers found in the top
+300 paths iteratively (`set_false_path -through`, 11 nets) still leaves
+−678 ns: a mapped netlist needs `repair_design` buffering (OpenROAD, placed or
+per module) before its STA says anything about the datapath. Next: run the
+top modules' netlists through OpenROAD `repair_design` individually, or a
+fanout-insensitive report; the host flow now gets this far in one command.
 
 ## A90 — Incrementers are not gates (delay-v32)
 

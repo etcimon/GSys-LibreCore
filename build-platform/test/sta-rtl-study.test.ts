@@ -84,7 +84,10 @@ test("streamed recipe: phase A dumps RTLIL + module list, phase B maps and evict
   expect(b).toContain(String.raw`while IFS=\$'\t' read -r i f; do printf "%s\0%s\0" "\$i" "$RUN/il/\$f"; done`);
   expect(b).toContain('bash "$RUN/map_all.sh" > "$RUN/synth-map.log" 2>&1');
   expect(b).toContain('R="$1"; YS="$2"; LIB="$3"; tmo="$4"; idx="$5"; il="$6"');
-  expect(b).toContain('timeout "$tmo" "$YS" -q -p "read_rtlil $il; techmap; opt_clean; dfflibmap -liberty $LIB;');
+  expect(b).toContain('timeout "$tmo" "$YS" -q -p "read_rtlil $il; async2sync t:\\$aldff t:\\$aldffe; techmap; opt_clean; dfflibmap -liberty $LIB;');
+  // Reruns keep mapped modules; an unmappable flop type fails the step.
+  expect(b).toContain('if [ -s "$out" ]; then echo "$idx ok cached"; exit 0; fi');
+  expect(b).toContain("_ALDFF_");
   expect(b).toContain("&nf,-D,800");
   expect(b).toContain('if run "abc -liberty $LIB -D 800"; then echo "$idx ok plain"');
   expect(b).toContain('if run "abc -liberty $LIB -fast"; then echo "$idx ok fast"');

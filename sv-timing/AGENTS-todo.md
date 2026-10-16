@@ -91,8 +91,20 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   (exact; a RebalanceAssoc pattern), `is_jalr = iv & ~(iv & ret)` → `iv &
   ~ret` (exact); `csr_regfile guest_time >= vstimecmp` 16.8: one-cycle timer
   compare latency is an owner decision, not a transform.
-- [ ] Whole-core mapped STA: parallel phase B running (458/461 in 3 min, the
-  three large modules under the 30-min per-script timeout).
+- [x] delay-v34: `||`/`&&` parsed as joins (grammar `match_op` guard);
+  `|a || |b || |c` → `|{a,b,c}` fold; planner: actionable fixpoint, S3
+  neutral trials on register-preferring cards, user-source fallback;
+  RebalanceAssoc rewrites its origin RHS. Emitted live worst 23.0 → **20.0**
+  (frontend `speculative_d`), 465 failing, 333 edits, joint reparse ok.
+- [x] Whole-core mapped STA runs end to end (461 modules, 1.2 M instances,
+  1.98 mm², OpenSTA 38 s). The number (−1446 ns @ 0.8 ns) is unbuffered
+  broadcast fanout (flush: 54 nF nets), not logic depth (A97).
+- [ ] Buffer the mapped netlist before STA: OpenROAD `repair_design` on the
+  top modules' netlists (or placed whole core), or a fanout-insensitive
+  report; then anchor the structural model on the mapped per-module numbers.
+- [ ] `g6lc_iq` / `scoreboard` need > 30 min under the delay-oriented ABC
+  script; map them with the plain script or raise `abcTimeoutS` for a
+  delay-faithful netlist of the two largest modules.
 - [ ] 10 FO4 completion: the residual is 64-bit adders/compares (12 FO4 at
   this table) plus a few real narrow chains (`g6lc_bp_ckpt` 17, `instr_queue`
   13.5). Closure at XLEN=64 needs either `fo4_ps` ≤ 16 or multi-cycle/pipelined

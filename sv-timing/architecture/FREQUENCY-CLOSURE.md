@@ -2,7 +2,16 @@
 
 Structural (not STA) frequency closure for the precompiler loop.
 
-## Current campaign (2026-10-16, delay-v33, manifest defines, SelectIncrement)
+## Current campaign (2026-10-16, delay-v34, planner reaches plain cones)
+
+Latest: with `||`/`&&` parsed correctly (delay-v34), the reduction fold, and
+the planner fixes (A95–A96), the emitted latency-neutral tree reports worst
+live RegToReg **20.0** (`frontend speculative_d`, rebalanced in RTL),
+147/1381 reg-to-reg failing, structural 2.0 GHz; live RTL 23.0. The first
+whole-core mapped OpenSTA run completed (1.2 M instances) but is dominated by
+unbuffered broadcast fanout (A97) and is not yet a datapath number.
+
+### Earlier on 2026-10-16 (delay-v33, manifest defines, SelectIncrement)
 
 Latest: the portable flist now carries `+define+G6LC_FETCH_B` and the
 synthesis defines (A93) — earlier boards measured the A-path code. Under the

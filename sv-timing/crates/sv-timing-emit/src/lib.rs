@@ -2053,4 +2053,49 @@ endmodule
             "origin adder must be gone: {emitted}"
         );
     }
+
+    /// A pure RHS rebalance (no snippet) rewrites its origin assign when the
+    /// identifiers match exactly; a rewrite that drops an identifier does not.
+    #[test]
+    fn rebalance_assoc_rewrites_origin_without_a_snippet() {
+        let src = "module m (input logic a, b, c, d, e, output logic y, z);\n  assign y = a || |b || |c || |d;\n  assign z = a && e;\nendmodule\n";
+        let mk = |line: u32, rhs: &str| EditRecord {
+            id: 1,
+            kind: EditKind::RebalanceAssoc,
+            origin: SourceLoc {
+                file: "m.sv".into(),
+                start_line: line,
+                start_col: 1,
+                end_line: line,
+                end_col: 1,
+                byte_start: 0,
+                byte_end: 0,
+                origin: OriginKind::UserFile,
+            },
+            path_id: Some(0),
+            node_id: Some(0),
+            new_name: None,
+            fo4_before: Some(5.0),
+            fo4_after: Some(3.0),
+            rationale: "rebalance".into(),
+            emit_rhs: Some(rhs.into()),
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        };
+        let mut trace = EditTrace::new();
+        trace.record_edit(mk(2, "a || |{b, c, d}"));
+        let out = crate::rhs::rewrite_origin_rhs_replaces(src, &trace);
+        assert!(
+            out.contains(
+                "assign y = a || |{b, c, d}; // sv-timing: BalanceMux/rebalance #0 RHS rewrite"
+            ),
+            "{out}"
+        );
+        assert!(out.contains("assign z = a && e;"), "{out}");
+        // Dropping `e` is not a rebalance: refused, origin kept verbatim.
+        let mut bad = EditTrace::new();
+        bad.record_edit(mk(3, "a"));
+        let out2 = crate::rhs::rewrite_origin_rhs_replaces(src, &bad);
+        assert_eq!(out2, src);
+    }
 }

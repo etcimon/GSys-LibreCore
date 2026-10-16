@@ -445,7 +445,12 @@ bun run src/cli/index.ts setup --install --profile dual-hart
   process per module in parallel (`rtlil_width_map.py --split-dir` splits the
   phase-A RTLIL; `map_one.sh` runs the delay-oriented ABC under `timeout`,
   then the plain liberty script, then `abc -fast`; `SYNTH_STREAM_FALLBACK`
-  reports which modules fell back). The portable sv-timing flist carries the
+  reports which modules fell back; mapped modules are kept across reruns,
+  `SYNTH_FORCE=1` remaps; slang `$aldff` flops are made synchronous for the
+  study and any `_ALDFF_`/latch left in a netlist fails the step). The first
+  whole-core run (461 modules, 1.2 M instances) links and reports in 38 s;
+  its `wns` is unbuffered broadcast fanout until the netlist is repaired
+  (`repair_design`), see ALGORITHMS-EXPERTS A97. The portable sv-timing flist carries the
   manifest's `+define+` lines and `verify.synthDefines`, so sv-timing measures
   the design the flow synthesizes. Tests: `test/sta-rtl-study.test.ts`.
 
