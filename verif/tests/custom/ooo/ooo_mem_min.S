@@ -1538,6 +1538,76 @@ main:
   .text
 .Lnc_done:
 
+#elif STAGE == 53
+  # T37: the blake2s_init shape from the OpenWrt L3 boot on g6lc64_ooo. A
+  # 12-word copy loop (lw/addi/sw/addi/bne, one word every 7 cycles) writes
+  # the IV into a state block whose lines are cached and hold the previous
+  # (zeroed) contents; the loop returns and the caller reads words 8, 11 and
+  # 7 back within ~20 cycles. On the boot the LAST word written (0x…60c, the
+  # upper half of a dword whose lower half was stored 7 cycles earlier) read
+  # back as its pre-store value 19 cycles after the store while its
+  # neighbours were right (cycle-stamped RVFI trace, l3orc2). Spike: trivially
+  # correct. The block lives in .data so the lines are warm and valid before
+  # the copy (zero, read back, fence).
+  la   s2, .Lb2_state
+  la   s3, .Lb2_src
+  .set i, 0
+  .rept 16
+  sd   zero, i(s2)
+  .set i, i + 8
+  .endr
+  fence rw, rw
+  .set i, 0
+  .rept 16
+  ld   zero, i(s2)                     # lines valid in the data cache
+  .set i, i + 8
+  .endr
+  fence rw, rw
+  # the copy: 12 words, blake2s_init's memcpy(h, iv) + t/f, as compiled
+  mv   t4, s3
+  addi t5, s3, 48
+  mv   t6, s2
+.Lb2_copy:
+  lw   t1, 0(t4)
+  addi t4, t4, 4
+  sw   t1, 0(t6)
+  addi t6, t6, 4
+  bne  t4, t5, .Lb2_copy
+  jal  ra, .Lb2_ret                    # the callee returns, the caller reads
+.Lb2_ret:
+  lw   t2, 32(s2)                      # word 8
+  lw   t3, 32(s3)
+  bne  t2, t3, fail_t2
+  lwu  t2, 44(s2)                      # word 11: the last store, upper half of the dword
+  lwu  t3, 44(s3)
+#ifdef MEM_ORDER_NEGATIVE
+  xori t3, t3, 1
+#endif
+  bne  t2, t3, fail_t2
+  lw   t2, 28(s2)                      # word 7
+  lw   t3, 28(s3)
+  bne  t2, t3, fail_t2
+  # the whole block, word by word, once the stores have drained
+  fence rw, rw
+  .set i, 0
+  .rept 12
+  lwu  t2, i(s2)
+  lwu  t3, i(s3)
+  bne  t2, t3, fail_t2
+  .set i, i + 4
+  .endr
+  j    .Lb2_done
+  .section .data
+  .balign 64
+.Lb2_state:                            # the boot's layout: state at +0 (line-aligned), source 0xec above it
+  .space 0xec
+.Lb2_src:
+  .word 0x6b08e647, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a
+  .word 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19
+  .word 0x00000040, 0x00000000, 0xffffffff, 0x00000000
+  .text
+.Lb2_done:
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".
