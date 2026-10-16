@@ -342,6 +342,9 @@ struct OpExtract {
     case_is_default: bool,
     case_selector: Option<String>,
     assign_kind: AssignKind,
+    /// Predicates of the enclosing `if`s (within the block) and the index
+    /// expressions of a dynamically indexed LHS — reads and a mux (delay-v37).
+    guards: Vec<String>,
 }
 
 /// Intermediate region extract before IR materialization.
@@ -455,6 +458,7 @@ fn lower_file(
             const_exprs: collect_const_exprs_in(tree, scope.nodes.iter().cloned()),
             typedef_texts: collect_typedef_texts_in(tree, scope.nodes.iter().cloned()),
             config_branch: module_has_config_branch(scope.nodes.iter().cloned()),
+            guards: Default::default(),
             loc: mod_loc,
         };
         design.instances.extend(insts);
@@ -577,6 +581,9 @@ fn lower_file(
                         assign_kind: op.assign_kind,
                     },
                 );
+                if !op.guards.is_empty() {
+                    module.guards.insert(nid, op.guards.clone());
+                }
                 node_ids.push(nid);
                 prev = Some(nid);
             }
@@ -2027,6 +2034,7 @@ where
     T: IntoIterator<Item = RefNode<'a>>,
 {
     let nodes: Vec<RefNode<'a>> = root.into_iter().collect();
+    let nodes_for_guards: Vec<RefNode<'a>> = nodes.clone();
     let mut ops = Vec::new();
     let mut assigns: Vec<OpExtract> = Vec::new();
 
@@ -2056,6 +2064,7 @@ where
                     case_is_default: false,
                     case_selector: None,
                     assign_kind: AssignKind::Unknown,
+                    guards: Vec::new(),
                 });
             }
             RefNode::NetAssignment(na) => {
@@ -2100,6 +2109,59 @@ where
         }
     }
 
+    // delay-v37: `if` predicates enclosing each assign (by body span) and the
+    // LHS's dynamic index expressions are the assign's guards.
+    let loop_spans: Vec<SourceLoc> = nodes_for_guards
+        .iter()
+        .filter_map(|n| match n {
+            RefNode::LoopStatementFor(lf) => {
+                let sp = loop_source_span(tree, line_index, path_str, *lf);
+                (sp.origin == OriginKind::UserFile).then_some(sp)
+            }
+            _ => None,
+        })
+        .collect();
+    let guard_spans = collect_if_guard_spans(tree, line_index, path_str, bytes, nodes_for_guards);
+    for a in &mut assigns {
+        if a.loc.origin != OriginKind::UserFile {
+            continue;
+        }
+        // The innermost loop around the assign: a guard whose body contains
+        // that whole loop is decided once, above the unrolled copies, and is
+        // marked `^` so the trip multiplier does not scale it.
+        let inner_loop = loop_spans
+            .iter()
+            .filter(|l| {
+                l.file == a.loc.file
+                    && a.loc.byte_start >= l.byte_start
+                    && a.loc.byte_start < l.byte_end
+            })
+            .min_by_key(|l| l.byte_end - l.byte_start);
+        for (span, preds) in &guard_spans {
+            if span.file == a.loc.file
+                && a.loc.byte_start >= span.byte_start
+                && a.loc.byte_start < span.byte_end
+            {
+                let outer = inner_loop.is_some_and(|l| {
+                    span.byte_start <= l.byte_start && span.byte_end >= l.byte_end
+                });
+                for pr in preds {
+                    let g = if outer { format!("^{pr}") } else { pr.clone() };
+                    if !a.guards.contains(&g) {
+                        a.guards.push(g);
+                    }
+                }
+            }
+        }
+        if let Some(lhs) = a.lhs.as_deref() {
+            for ix in lhs_dynamic_indices(lhs) {
+                if !a.guards.contains(&ix) {
+                    a.guards.push(ix);
+                }
+            }
+        }
+    }
+
     // Merge CaseItem meta onto assigns by start_line (+ optional lhs match).
     if !case_meta.is_empty() {
         for a in &mut assigns {
@@ -2132,6 +2194,98 @@ where
         return assigns;
     }
     ops
+}
+
+/// `if (p0) S0 else if (p1) S1 else S2` → `(span(S0), [p0])`, `(span(S1),
+/// [p0, p1])`, `(span(S2), [p0, p1])`: an assign inside a body is guarded by
+/// every predicate decided on the way to it (the else branches read the same
+/// predicates). Nested conditionals contribute their own entries; the assign
+/// collects the union.
+fn collect_if_guard_spans<'a, T>(
+    tree: &'a SyntaxTree,
+    li: &LineIndex,
+    path_str: &str,
+    _bytes: &[u8],
+    root: T,
+) -> Vec<(SourceLoc, Vec<String>)>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut out = Vec::new();
+    for node in root {
+        if let RefNode::ConditionalStatement(cs) = node {
+            let mut preds: Vec<String> = Vec::new();
+            let p0 = node_text(tree, &cs.nodes.2.nodes.1).map(|t| t.trim().to_string());
+            if let Some(p) = p0 {
+                preds.push(p);
+            }
+            let span0 = loop_source_span(tree, li, path_str, &cs.nodes.3);
+            if span0.origin == OriginKind::UserFile {
+                out.push((span0, preds.clone()));
+            }
+            for (_, _, pred, body) in &cs.nodes.4 {
+                if let Some(p) = node_text(tree, &pred.nodes.1).map(|t| t.trim().to_string()) {
+                    preds.push(p);
+                }
+                let sp = loop_source_span(tree, li, path_str, body);
+                if sp.origin == OriginKind::UserFile {
+                    out.push((sp, preds.clone()));
+                }
+            }
+            if let Some((_, body)) = &cs.nodes.5 {
+                let sp = loop_source_span(tree, li, path_str, body);
+                if sp.origin == OriginKind::UserFile {
+                    out.push((sp, preds.clone()));
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Index expressions of an LHS that are not constants: `q[slot_entry[g]].valid`
+/// → `["slot_entry[g]"]`; `mask[cid]` → `["cid"]`; `x[3]`, `x[i]` with a
+/// genvar/loop var are constants to the unrolled logic and are skipped by the
+/// reader (they resolve to no net). Nested brackets are kept whole.
+fn lhs_dynamic_indices(lhs: &str) -> Vec<String> {
+    let b = lhs.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'[' {
+            let start = i + 1;
+            let mut depth = 1i32;
+            let mut j = start;
+            while j < b.len() && depth > 0 {
+                match b[j] {
+                    b'[' => depth += 1,
+                    b']' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            if depth == 0 {
+                let inner = lhs[start..j - 1].trim();
+                // part selects `[7:0]`, `[i+:8]` are constant bounds; a bare
+                // number is constant.
+                let constant = inner.is_empty()
+                    || inner.contains(':')
+                    || inner.contains("+:")
+                    || inner.contains("-:")
+                    || inner
+                        .chars()
+                        .all(|c| c.is_ascii_digit() || c == '\'' || c == '_');
+                if !constant && inner.chars().any(|c| c.is_ascii_alphabetic()) {
+                    out.push(inner.to_string());
+                }
+                i = j;
+                continue;
+            }
+            break;
+        }
+        i += 1;
+    }
+    out
 }
 
 /// Meta recovered from a CST CaseItem for assigns in its body.
@@ -2433,6 +2587,7 @@ where
         case_is_default: false,
         case_selector: None,
         assign_kind,
+        guards: Vec::new(),
     })
 }
 
@@ -3359,6 +3514,105 @@ mod tests {
             idx.fo4_cost >= 50.0,
             "runtime bit-select index under-counted {}",
             idx.fo4_cost
+        );
+    }
+
+    /// delay-v37 guards. The issue-queue shape: a select cone computes
+    /// `grant`/`slot`, and the queue's next state only depends on it through
+    /// `if (grant && ack) q_after[slot].valid = 0`. Without guards the
+    /// register-to-register path through the select never existed (g6lc_iq:
+    /// 0.0 FO4 structural vs 47 mapped cells). The guard is a read (the path
+    /// links) and a mux on the compare; a genvar index and a parameter `if`
+    /// are elaboration-time and cost nothing.
+    #[test]
+    fn if_guards_and_lhs_indices_are_reads_and_cost_a_mux() {
+        let text = concat!(
+            "module iqg #(parameter bit EN = 1'b1) (\n",
+            "    input logic clk_i, rst_ni, ack_i,\n",
+            "    input logic [3:0] rdy_i,\n",
+            "    output logic [3:0] valid_o\n",
+            ");\n",
+            "  logic [3:0] valid_q, valid_d, grant;\n",
+            "  logic [1:0] slot;\n",
+            "  logic any;\n",
+            "  wire [1:0] row [0:3];\n",
+            "  always_comb begin\n",
+            "    grant = valid_q & rdy_i & ~(valid_q & rdy_i) + 4'd1;\n",
+            "    slot = '0;\n",
+            "    for (int unsigned e = 0; e < 4; e++) if (grant[e]) slot = slot | 2'(e);\n",
+            "    any = |grant;\n",
+            "    valid_d = valid_q;\n",
+            "    if (any && ack_i) valid_d[slot] = 1'b0;\n",
+            "    if (EN) valid_d[0] = valid_d[0] | rdy_i[0];\n",
+            "  end\n",
+            "  for (genvar k = 0; k < 4; k++) begin : g\n",
+            "    assign row[k] = valid_q[k] ? 2'd1 : 2'd0;\n",
+            "  end\n",
+            "  always_ff @(posedge clk_i or negedge rst_ni) begin\n",
+            "    if (!rst_ni) valid_q <= '0; else valid_q <= valid_d;\n",
+            "  end\n",
+            "  assign valid_o = valid_q;\n",
+            "endmodule\n"
+        );
+        let out = analyze_inline_source(text);
+        let m = out.design.modules.values().next().unwrap();
+        let node_at = |lhs: &str| {
+            m.nodes
+                .values()
+                .find(|n| n.lhs.as_deref() == Some(lhs))
+                .unwrap_or_else(|| panic!("missing {lhs}"))
+        };
+        let guarded = node_at("valid_d[slot]");
+        let gs = m.guards.get(&guarded.id).expect("guards recorded");
+        assert!(gs.iter().any(|g| g == "any && ack_i"), "{gs:?}");
+        assert!(gs.iter().any(|g| g == "slot"), "{gs:?}");
+        // The guarded write reads the select cone: `slot`'s node is a fan-in.
+        let slot_node = m
+            .nodes
+            .values()
+            .filter(|n| n.lhs.as_deref() == Some("slot"))
+            .max_by_key(|n| n.loc.start_line)
+            .unwrap();
+        assert!(
+            guarded.fans_in.contains(&slot_node.id),
+            "guarded write must read `slot`: fans_in={:?}",
+            guarded.fans_in
+        );
+        // and costs a mux on top of the guard (the 1-bit guard itself is cheap).
+        let model = CostModel::default();
+        assert!(guarded.fo4_cost >= model.mux, "{}", guarded.fo4_cost);
+        // The register-to-register path now runs through the select cone.
+        let mid = m.id;
+        let worst = out
+            .design
+            .paths
+            .iter()
+            .filter(|p| p.module == mid && p.path_kind == crate::ir::PathKind::RegToReg)
+            .map(|p| p.total_fo4)
+            .fold(0.0, f64::max);
+        assert!(
+            worst > 5.0,
+            "select cone must be on the reg-to-reg path: {worst}"
+        );
+        // Elaboration-time guards cost nothing: `if (EN)` (parameter) and `row[k]` (genvar).
+        let en_guarded = node_at("valid_d[0]");
+        assert!(
+            m.guards
+                .get(&en_guarded.id)
+                .is_none_or(|g| g.iter().all(|x| x == "EN")),
+            "{:?}",
+            m.guards.get(&en_guarded.id)
+        );
+        assert!(
+            en_guarded.fo4_cost < model.mux + 1.0,
+            "{}",
+            en_guarded.fo4_cost
+        );
+        let row = node_at("row[k]");
+        assert!(
+            row.fo4_cost <= model.mux + 0.01,
+            "genvar index is a wire: {}",
+            row.fo4_cost
         );
     }
 

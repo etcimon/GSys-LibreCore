@@ -1086,6 +1086,7 @@ mod tests {
             const_exprs: Default::default(),
             typedef_texts: Default::default(),
             config_branch: false,
+            guards: Default::default(),
             loc: crate::loc::SourceLoc::file_start("lzc.sv"),
         };
         m.id = 0;
@@ -1147,6 +1148,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: crate::loc::SourceLoc::file_start("axi2mem.sv"),
             },
         );
@@ -1190,6 +1192,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: crate::loc::SourceLoc::file_start("policy.sv"),
             },
         );

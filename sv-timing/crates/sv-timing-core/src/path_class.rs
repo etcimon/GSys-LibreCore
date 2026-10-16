@@ -1376,6 +1376,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -1630,6 +1631,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -1767,6 +1769,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -1853,6 +1856,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -1940,6 +1944,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -2069,6 +2074,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -2184,6 +2190,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -2279,6 +2286,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -2391,6 +2399,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -2526,6 +2535,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -2646,6 +2656,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -2747,6 +2758,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -2832,6 +2844,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -2916,6 +2929,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -3007,6 +3021,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -3108,6 +3123,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -3246,6 +3262,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -3355,6 +3372,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -3465,6 +3483,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );
@@ -3584,6 +3603,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(),
             },
         );

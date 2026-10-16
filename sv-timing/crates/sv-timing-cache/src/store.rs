@@ -918,6 +918,7 @@ mod tests {
             const_exprs: Default::default(),
             typedef_texts: Default::default(),
             config_branch: false,
+            guards: Default::default(),
             loc: SourceLoc {
                 file: "m.sv".into(),
                 start_line: 1,

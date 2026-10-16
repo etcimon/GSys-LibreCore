@@ -494,6 +494,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: path(0, 0.0, "t.sv", 1).primary_loc.clone(),
             },
         );

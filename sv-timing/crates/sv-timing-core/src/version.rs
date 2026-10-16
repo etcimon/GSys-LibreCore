@@ -86,7 +86,13 @@ pub const IR_VERSION: &str = "ir-v1";
 /// the trip count — and the loop-walk rewrite (A101) offers their exact
 /// parallel form; a variable read only in a loop's `if` guard counts as
 /// loop-carried.
-pub const MEASUREMENT_VERSION: &str = "delay-v36";
+/// `delay-v37`: guards. The `if` predicates an assignment sits under and the
+/// index expressions of a dynamically indexed LHS are reads of the node (the
+/// issue queue's select cone reaches `q_d` through `if (grant) q[slot].valid
+/// = 0`) and cost a mux on the guard (compare + select level); the structural
+/// board had no register-to-register path at all through g6lc_iq / g6lc_lsq
+/// and 5× fewer cells than the netlist in scoreboard / rename / store_buffer.
+pub const MEASUREMENT_VERSION: &str = "delay-v37";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

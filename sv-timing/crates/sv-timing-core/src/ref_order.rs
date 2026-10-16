@@ -598,6 +598,7 @@ mod tests {
             const_exprs: Default::default(),
             typedef_texts: Default::default(),
             config_branch: false,
+            guards: Default::default(),
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0, 1]);
@@ -630,6 +631,7 @@ mod tests {
             const_exprs: Default::default(),
             typedef_texts: Default::default(),
             config_branch: false,
+            guards: Default::default(),
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0, 1]);
@@ -697,6 +699,7 @@ mod tests {
             const_exprs: Default::default(),
             typedef_texts: Default::default(),
             config_branch: false,
+            guards: Default::default(),
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0, 1]);
@@ -740,6 +743,7 @@ mod tests {
             const_exprs: Default::default(),
             typedef_texts: Default::default(),
             config_branch: false,
+            guards: Default::default(),
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0]);
@@ -788,6 +792,7 @@ mod tests {
             const_exprs: Default::default(),
             typedef_texts: Default::default(),
             config_branch: false,
+            guards: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -843,6 +848,7 @@ mod tests {
             const_exprs: Default::default(),
             typedef_texts: Default::default(),
             config_branch: false,
+            guards: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -897,6 +903,7 @@ mod tests {
             const_exprs: Default::default(),
             typedef_texts: Default::default(),
             config_branch: false,
+            guards: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -955,6 +962,7 @@ mod tests {
             const_exprs: Default::default(),
             typedef_texts: Default::default(),
             config_branch: false,
+            guards: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -1026,6 +1034,7 @@ mod tests {
             const_exprs: Default::default(),
             typedef_texts: Default::default(),
             config_branch: false,
+            guards: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();

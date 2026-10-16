@@ -1716,14 +1716,25 @@ endmodule
         let text = apply_edits_to_source_dense(src, &trace, &EmitPolicy::default(), &dense);
         assert!(!text.contains("lean chain"), "{text}");
         assert!(!text.contains("unsafe rhs"), "{text}");
-        for (pipe, rhs) in [("pipe_svt_p1", "a_i + b_i"), ("pipe_svt_p2", "t0 + c_i"), ("pipe_svt_p3", "t1 + d_i")] {
+        for (pipe, rhs) in [
+            ("pipe_svt_p1", "a_i + b_i"),
+            ("pipe_svt_p2", "t0 + c_i"),
+            ("pipe_svt_p3", "t1 + d_i"),
+        ] {
             assert!(
                 text.contains(&format!("assign {pipe}_c = ({rhs});")),
                 "feed `{pipe}` must be `{rhs}`:\n{text}"
             );
         }
-        for (lhs, pipe) in [("t0", "pipe_svt_p1"), ("t1", "pipe_svt_p2"), ("t2", "pipe_svt_p3")] {
-            assert!(text.contains(&format!("{lhs} = {pipe};")), "{lhs} must sample {pipe}:\n{text}");
+        for (lhs, pipe) in [
+            ("t0", "pipe_svt_p1"),
+            ("t1", "pipe_svt_p2"),
+            ("t2", "pipe_svt_p3"),
+        ] {
+            assert!(
+                text.contains(&format!("{lhs} = {pipe};")),
+                "{lhs} must sample {pipe}:\n{text}"
+            );
         }
         let mut tree = EmitTree::new();
         tree.add_file("deep_add_chain__svt.sv", FileRole::Module, text);
@@ -2251,8 +2262,11 @@ endmodule
         let after_walks = worst_of(&after.design, "loop_walks");
         let par_before = worst_of(&ctx.design, "loop_walks_parallel");
         let par_after = worst_of(&after.design, "loop_walks_parallel");
+        // The parallel forms keep a guard mux per level (delay-v37 bills the
+        // `if (low[i])` select and the outer `if (pick == 0)`); the serial
+        // walks were trips x body. At least 3x less.
         assert!(
-            after_walks < 25.0,
+            after_walks < before / 3.0,
             "emitted walks must be parallel: {before} -> {after_walks}"
         );
         assert!(

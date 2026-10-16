@@ -153,6 +153,25 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
         // constant costs 0. Give the scan's carried nodes a per-iteration floor
         // of a compare and a gate so the chain is on the board (A101).
         let scan_floor = find_first_floors(module, &widths, &model);
+        // delay-v37: a guarded assignment is a mux on its guards — the
+        // compare in `if (sel == 3'd5) y = a` and the one select level are
+        // on y's path, and a dynamically indexed LHS decodes its index.
+        // Only guards that read a signal: a genvar index or a parameter `if`
+        // is elaboration-time.
+        let guards_by_node: BTreeMap<NodeId, Vec<String>> = module
+            .guards
+            .iter()
+            .map(|(id, gs)| {
+                (
+                    *id,
+                    gs.iter()
+                        .filter(|g| widths.guard_is_live(g.strip_prefix('^').unwrap_or(g)))
+                        .cloned()
+                        .collect::<Vec<_>>(),
+                )
+            })
+            .filter(|(_, gs)| !gs.is_empty())
+            .collect();
         for node in module.nodes.values_mut() {
             // Spine expand / half-split lock residual segment FO4 across remeasure.
             if node.fo4_locked {
@@ -180,6 +199,62 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
                     seed.add(gv.clone());
                 }
             }
+            // Guard cost (delay-v37): the deepest predicate / index expression,
+            // width-scaled on its own operands, plus one select level and a
+            // log2 level per additional guard.
+            // A guard whose identifiers are all in the constant seed (the
+            // genvars in scope here) is elaboration-time: `row[k]` under
+            // `for (genvar k …)` is one wire, not a decoder.
+            // Inner guards (inside the node's loop, or no loop) scale with the
+            // trip count like the body; outer guards (`^`, the `if` wraps the
+            // loop) are one select added after it.
+            let (guard_cost, outer_guard_cost): (Option<f64>, Option<f64>) = {
+                let live: Vec<&String> = guards_by_node
+                    .get(&node.id)
+                    .map(|gs| {
+                        gs.iter()
+                            .filter(|g| {
+                                let ex = Expr::parse(g.strip_prefix('^').unwrap_or(g));
+                                let mut live = false;
+                                ex.walk_idents(&mut |s| {
+                                    let b = s.split(['[', '.']).next().unwrap_or(s);
+                                    if !b.is_empty() && !seed.names.contains(b) {
+                                        live = true;
+                                    }
+                                });
+                                live
+                            })
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let cost_of = |gs: &[&String]| -> Option<f64> {
+                    if gs.is_empty() {
+                        return None;
+                    }
+                    let mut worst = 0.0_f64;
+                    for g in gs {
+                        let ex = Expr::parse(g.strip_prefix('^').unwrap_or(g));
+                        if !ex.is_opaque() {
+                            let gw = widths.node_widths(None, Some(&ex));
+                            let gbase = |c: OperatorClass| model.scaled_fo4(c, gw.for_class(c));
+                            worst = worst.max(ex.fo4_critical_cost_latticed(&gbase, &seed));
+                        }
+                    }
+                    let levels = (gs.len() as f64).log2().ceil().max(0.0);
+                    Some(worst + model.logic_bit * levels)
+                };
+                let inner: Vec<&String> = live
+                    .iter()
+                    .copied()
+                    .filter(|g| !g.starts_with('^'))
+                    .collect();
+                let outer: Vec<&String> = live
+                    .iter()
+                    .copied()
+                    .filter(|g| g.starts_with('^'))
+                    .collect();
+                (cost_of(&inner), cost_of(&outer))
+            };
             if let Some(ref ex) = node.rhs_expr {
                 // A parsed tree is authoritative, including 0 FO4 (P1 lattice /
                 // LRM-constant part-selects). Falling back when `c == 0` re-billed
@@ -189,11 +264,17 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
                 if !ex.is_opaque() {
                     node.fo4_cost = ex.fo4_critical_cost_latticed(&base, &seed);
                     node.op_class = Some(ex.dominant_op_class_latticed(&seed));
+                    if let Some(gc) = guard_cost {
+                        node.fo4_cost = node.fo4_cost.max(gc) + model.mux;
+                    }
                     if let Some(floor) = scan_floor.get(&node.id) {
                         node.fo4_cost = node.fo4_cost.max(*floor);
                     }
-                    if let Some(trips) = carried.get(&node.id) {
-                        node.fo4_cost *= f64::from(*trips);
+                    if let Some(bill) = carried.get(&node.id) {
+                        node.fo4_cost = carry_cost(node.fo4_cost, bill, &model);
+                    }
+                    if let Some(oc) = outer_guard_cost {
+                        node.fo4_cost = node.fo4_cost.max(oc) + model.mux;
                     }
                     continue;
                 }
@@ -211,11 +292,17 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
                     node.fo4_cost = model.scaled_fo4(c, nw.for_class(c));
                 }
             }
+            if let Some(gc) = guard_cost {
+                node.fo4_cost = node.fo4_cost.max(gc) + model.mux;
+            }
             if let Some(floor) = scan_floor.get(&node.id) {
                 node.fo4_cost = node.fo4_cost.max(*floor);
             }
-            if let Some(trips) = carried.get(&node.id) {
-                node.fo4_cost *= f64::from(*trips);
+            if let Some(bill) = carried.get(&node.id) {
+                node.fo4_cost = carry_cost(node.fo4_cost, bill, &model);
+            }
+            if let Some(oc) = outer_guard_cost {
+                node.fo4_cost = node.fo4_cost.max(oc) + model.mux;
             }
         }
         for region in module.regions.values_mut() {
@@ -367,7 +454,7 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
         let Some(n) = module.nodes.get(&nid) else {
             continue;
         };
-        let reads: BTreeSet<_> = node_read_symbols(n)
+        let reads: BTreeSet<_> = node_read_symbols_with_guards(module, n)
             .into_iter()
             .map(|s| bindings.key(&s, &n.loc))
             .collect();
@@ -499,6 +586,32 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
         });
     }
     design.paths.extend(new_paths);
+}
+
+/// Reads of a node including its guards (delay-v37): the `if` predicates it
+/// sits under and the index expressions of its LHS. `if (grant[g])
+/// q[slot_entry[g]].valid = 0` reads `grant` and `slot_entry` — without them
+/// the select cone never reaches the queue's next state.
+fn node_read_symbols_with_guards(module: &TimingModule, n: &IrNode) -> BTreeSet<String> {
+    let mut out = node_read_symbols(n);
+    if let Some(gs) = module.guards.get(&n.id) {
+        for g in gs {
+            let g = g.strip_prefix('^').unwrap_or(g);
+            for tok in ident_tokens(g) {
+                let b = ident_base(&tok);
+                if !b.is_empty() && looks_like_net(&b) {
+                    out.insert(b);
+                }
+            }
+            Expr::parse(g).walk_idents(&mut |s| {
+                let b = ident_base(s);
+                if !b.is_empty() && looks_like_net(&b) {
+                    out.insert(b);
+                }
+            });
+        }
+    }
+    out
 }
 
 fn node_read_symbols(n: &IrNode) -> BTreeSet<String> {
@@ -695,11 +808,22 @@ pub struct FrequencyClosure {
 /// walk `cid = cid + 1` under `if (cid == ip) break` maps to a 436-cell
 /// chain). The multiplier is capped at 64; loops whose bound the width
 /// resolver cannot evaluate are left alone (unknown must not inflate).
+/// How a loop-carried node is billed (delay-v37).
+#[derive(Debug, Clone, Copy)]
+struct CarryBill {
+    /// Copies in series (trip count, or log2 for a balanced bitwise accumulate).
+    mult: u32,
+    /// The previous iteration's value enters only through the `if` guard
+    /// (`if (!placed && !v[i]) placed = 1`): the serial step is one gate per
+    /// iteration, the body's own cost is paid once.
+    via_guard_only: bool,
+}
+
 fn loop_carried_multipliers(
     module: &TimingModule,
     widths: &crate::width::WidthResolver<'_>,
-) -> BTreeMap<NodeId, u32> {
-    let mut out: BTreeMap<NodeId, u32> = BTreeMap::new();
+) -> BTreeMap<NodeId, CarryBill> {
+    let mut out: BTreeMap<NodeId, CarryBill> = BTreeMap::new();
     for lp in module.gen_loops.iter().filter(|g| g.procedural) {
         if lp.loc.origin != crate::loc::OriginKind::UserFile || lp.loc.byte_end <= lp.loc.byte_start
         {
@@ -728,43 +852,75 @@ fn loop_carried_multipliers(
         // previous iteration's value), or the first write reads itself.
         // A temp written then read inside one iteration (`rslot = base + i;
         // … mem_q[rslot]`) is not a chain.
-        let mut first_write: BTreeMap<&str, u32> = BTreeMap::new();
+        // Field granularity (delay-v37): `q_wake[e].rs1_rdy = 1` under
+        // `if (q_wake[e].rs1 == wb[w])` writes one member and reads another
+        // of the same struct array — no dependence between iterations (yosys
+        // sees per-bit nets). Keys are root + member chain with indices
+        // stripped (`q_wake.rs1_rdy`); a read of a prefix (`q_wake`,
+        // `q_wake.sbe`) or an extension of the written key depends on it.
+        let mut first_write: BTreeMap<String, (String, u32)> = BTreeMap::new();
         for n in &inside {
-            if let Some(root) = n.lhs.as_deref().and_then(TimingModule::root_ident) {
-                let e = first_write.entry(root).or_insert(n.loc.byte_start);
-                *e = (*e).min(n.loc.byte_start);
+            if let Some(lhs) = n.lhs.as_deref() {
+                let key = field_key(lhs);
+                let root = TimingModule::root_ident(lhs).unwrap_or("").to_string();
+                let e = first_write.entry(key).or_insert((root, n.loc.byte_start));
+                e.1 = e.1.min(n.loc.byte_start);
             }
         }
-        let mut carried_roots: BTreeSet<&str> = BTreeSet::new();
-        // A read inside the loop's `if` guard is a read the IR does not see:
-        // the loop text names it (`pick == '0`, `!found`).
-        if let Some(text) = lp.text.as_deref() {
-            for (root, _) in &first_write {
-                let guard_read = text.contains(&format!("{root} == '0"))
-                    || text.contains(&format!("{root} == 0"))
-                    || text.contains(&format!("!{root}"));
-                if guard_read && *root != lp.genvar {
-                    carried_roots.insert(root);
+        let dep = |read: &str, write: &str| -> bool {
+            read == write
+                || write.starts_with(&format!("{read}."))
+                || read.starts_with(&format!("{write}."))
+        };
+        // `x[i].f` written and `x[i].g` read in the same iteration touch one
+        // element: the loop variable in both first indices means no carry.
+        let genvar = lp.genvar.as_str();
+        let indexed_by_genvar = |tok: &str| -> bool {
+            bracket_inners(tok)
+                .first()
+                .is_some_and(|ix| ix.trim() == genvar)
+        };
+        let write_idx_genvar: BTreeMap<String, bool> = inside
+            .iter()
+            .filter_map(|n| {
+                n.lhs
+                    .as_deref()
+                    .map(|l| (field_key(l), indexed_by_genvar(l)))
+            })
+            .collect();
+        // key → the read was through the guard only (never the RHS)
+        let mut carried_keys: BTreeMap<String, bool> = BTreeMap::new();
+        for n in &inside {
+            let mut reads: Vec<(String, bool, String)> = Vec::new(); // (key, via_guard, token)
+            if let Some(rhs) = n.rhs.as_deref() {
+                for tok in field_tokens(rhs) {
+                    reads.push((field_key(&tok), false, tok));
                 }
             }
-        }
-        for n in &inside {
-            let reads: Vec<String> = node_read_symbols(n)
-                .into_iter()
-                .map(|s| ident_base(&s))
-                .collect();
-            for r in &reads {
-                let Some((root, fw)) = first_write.get_key_value(r.as_str()) else {
-                    continue;
-                };
-                if *root == lp.genvar {
-                    continue;
+            if let Some(gs) = module.guards.get(&n.id) {
+                for g in gs {
+                    for tok in field_tokens(g.strip_prefix('^').unwrap_or(g)) {
+                        reads.push((field_key(&tok), true, tok));
+                    }
                 }
-                let own_first_write = n.lhs.as_deref().and_then(TimingModule::root_ident)
-                    == Some(root)
-                    && n.loc.byte_start == *fw;
-                if n.loc.byte_start < *fw || own_first_write {
-                    carried_roots.insert(root);
+            }
+            let own_key = n.lhs.as_deref().map(field_key);
+            for (r, via_guard, tok) in &reads {
+                for (wkey, (root, fw)) in &first_write {
+                    if root == &lp.genvar || !dep(r, wkey) {
+                        continue;
+                    }
+                    if write_idx_genvar.get(wkey).copied().unwrap_or(false)
+                        && indexed_by_genvar(tok)
+                    {
+                        continue;
+                    }
+                    let own_first_write =
+                        own_key.as_deref() == Some(wkey.as_str()) && n.loc.byte_start == *fw;
+                    if n.loc.byte_start < *fw || own_first_write {
+                        let e = carried_keys.entry(wkey.clone()).or_insert(true);
+                        *e = *e && *via_guard;
+                    }
                 }
             }
         }
@@ -783,17 +939,81 @@ fn loop_carried_multipliers(
             let Some(root) = n.lhs.as_deref().and_then(TimingModule::root_ident) else {
                 continue;
             };
-            if !carried_roots.contains(root) {
+            let key = n.lhs.as_deref().map(field_key).unwrap_or_default();
+            let Some(&via_guard_only) = carried_keys.get(&key) else {
                 continue;
-            }
+            };
             let assoc = n.rhs_expr.as_ref().is_some_and(|e| {
                 matches!(e, crate::expr::Expr::Binary { op, left, right, .. }
                     if matches!(op.as_str(), "|" | "&" | "^" | "||" | "&&")
                         && (expr_root_is(left, root) || expr_root_is(right, root)))
             });
             let mult = if assoc { depth } else { trips };
-            let e = out.entry(n.id).or_insert(1);
-            *e = (*e).saturating_mul(mult).min(64);
+            let e = out.entry(n.id).or_insert(CarryBill {
+                mult: 1,
+                via_guard_only: true,
+            });
+            e.mult = e.mult.saturating_mul(mult).min(64);
+            e.via_guard_only = e.via_guard_only && via_guard_only;
+        }
+    }
+    out
+}
+
+/// Identifier references with their index/member text intact
+/// (`a[i].x + mem[k].sbe.valid` → `a[i].x`, `mem[k].sbe.valid`).
+fn field_tokens(text: &str) -> Vec<String> {
+    let mut out = Vec::new();
+    let b = text.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i].is_ascii_alphabetic() || b[i] == b'_' {
+            let start = i;
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                i += 1;
+            }
+            loop {
+                if i < b.len() && b[i] == b'[' {
+                    let mut depth = 0i32;
+                    while i < b.len() {
+                        match b[i] {
+                            b'[' => depth += 1,
+                            b']' => {
+                                depth -= 1;
+                                if depth == 0 {
+                                    i += 1;
+                                    break;
+                                }
+                            }
+                            _ => {}
+                        }
+                        i += 1;
+                    }
+                } else if i + 1 < b.len()
+                    && b[i] == b'.'
+                    && (b[i + 1].is_ascii_alphabetic() || b[i + 1] == b'_')
+                {
+                    i += 1;
+                    while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'_') {
+                        i += 1;
+                    }
+                } else {
+                    break;
+                }
+            }
+            let tok = text[start..i].to_string();
+            if looks_like_net(tok.split(['[', '.']).next().unwrap_or(&tok)) {
+                for inner in bracket_inners(&tok) {
+                    out.extend(field_tokens(&inner));
+                }
+                out.push(tok);
+            }
+        } else if b[i].is_ascii_digit() {
+            while i < b.len() && (b[i].is_ascii_alphanumeric() || b[i] == b'\'' || b[i] == b'_') {
+                i += 1;
+            }
+        } else {
+            i += 1;
         }
     }
     out
@@ -830,6 +1050,73 @@ fn find_first_floors(
                 out.insert(n.id, floor);
             }
         }
+    }
+    out
+}
+
+/// A carried node's cost: through the RHS, every copy repeats the body
+/// (`cid = cid + 1`: trips × body); through the guard alone, the serial step
+/// is one gate per copy (`if (!placed && …) placed = 1`: the `!placed` AND
+/// chain) and the body is paid once.
+fn carry_cost(body: f64, bill: &CarryBill, model: &CostModel) -> f64 {
+    if bill.via_guard_only {
+        body + model.logic_bit * f64::from(bill.mult.saturating_sub(1))
+    } else {
+        body * f64::from(bill.mult)
+    }
+}
+
+/// `q_wake[e].rs1_rdy` → `q_wake.rs1_rdy`: root and member chain, indices
+/// and part-selects stripped.
+fn field_key(text: &str) -> String {
+    let mut out = String::new();
+    let b = text.as_bytes();
+    let mut i = 0usize;
+    let mut depth = 0i32;
+    while i < b.len() {
+        let c = b[i];
+        match c {
+            b'[' => depth += 1,
+            b']' => depth -= 1,
+            _ if depth == 0 => {
+                if c.is_ascii_alphanumeric() || c == b'_' || c == b'.' || c == b'$' {
+                    out.push(c as char);
+                } else if !out.is_empty() {
+                    break;
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    out.trim_matches('.').to_string()
+}
+
+fn bracket_inners(tok: &str) -> Vec<String> {
+    let b = tok.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'[' {
+            let start = i + 1;
+            let mut depth = 1i32;
+            let mut j = start;
+            while j < b.len() && depth > 0 {
+                match b[j] {
+                    b'[' => depth += 1,
+                    b']' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            if depth == 0 {
+                out.push(tok[start..j - 1].to_string());
+                i = j;
+                continue;
+            }
+            break;
+        }
+        i += 1;
     }
     out
 }
@@ -1880,6 +2167,7 @@ mod tests {
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc(1),
             },
         );

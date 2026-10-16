@@ -237,6 +237,24 @@ impl<'a> WidthResolver<'a> {
         }
         None
     }
+    /// A guard (an `if` predicate or an LHS index) is live when it reads at
+    /// least one signal: a genvar index (`row[k]`), a parameter condition
+    /// (`if (CVA6Cfg.RVA)`) or a constant expression is elaboration-time and
+    /// costs nothing (delay-v37).
+    pub fn guard_is_live(&self, text: &str) -> bool {
+        if self.eval_text(text).is_some() {
+            return false;
+        }
+        let ex = Expr::parse(text);
+        let mut live = false;
+        ex.walk_idents(&mut |s| {
+            let base = s.split(['[', '.']).next().unwrap_or(s);
+            if !base.is_empty() && !self.is_const_name(base) {
+                live = true;
+            }
+        });
+        live
+    }
 
     /// Evaluate an elaboration-constant expression text.
     pub fn eval_text(&self, text: &str) -> Option<i64> {
@@ -435,7 +453,8 @@ impl<'a> WidthResolver<'a> {
     }
 
     /// Parameter / localparam / genvar / loop-variable names.
-    fn is_const_name(&self, name: &str) -> bool {
+    /// Parameters, localparams, genvars and unrolled loop variables.
+    pub fn is_const_name(&self, name: &str) -> bool {
         if self.const_exprs.contains_key(name) || self.param_ints.contains_key(name) {
             return true;
         }

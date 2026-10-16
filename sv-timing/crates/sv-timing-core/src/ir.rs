@@ -690,6 +690,17 @@ pub struct TimingModule {
     /// Area keeps both arms. Delay does not read this flag.
     #[serde(default)]
     pub config_branch: bool,
+    /// Guards of a node (delay-v37): the predicate texts of the `if`s the
+    /// assignment sits under within its block, plus the index expressions of
+    /// a dynamically indexed LHS (`q[slot].f = …`). They are reads of the
+    /// node — the select cone of an issue queue reaches `q_d` only through
+    /// `if (grant[g]) q[slot_entry[g]].valid = 0` — and they cost: a guarded
+    /// write is a mux on the guard. Empty for unguarded nodes. A guard
+    /// decided above the node's enclosing loop (the `if` wraps the whole
+    /// loop) is prefixed `^`: it is one select for all unrolled copies, so
+    /// the trip multiplier must not scale it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub guards: BTreeMap<NodeId, Vec<String>>,
     /// Source span of module header.
     pub loc: SourceLoc,
 }

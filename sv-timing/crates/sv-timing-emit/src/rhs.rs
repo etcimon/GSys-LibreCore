@@ -60,10 +60,39 @@ pub fn typed_sample(source: &str, lhs: &str, pipe: &str) -> String {
 /// type (`state_e state_d;`, `my_pkg::req_t req;`, `var type(x) y;`).
 pub fn lhs_has_user_type(source: &str, name: &str) -> bool {
     const BUILTIN: &[&str] = &[
-        "logic", "bit", "reg", "wire", "int", "integer", "byte", "shortint", "longint",
-        "genvar", "input", "output", "inout", "assign", "localparam", "parameter", "automatic",
-        "var", "unsigned", "signed", "if", "else", "for", "case", "always_comb", "always_ff",
-        "always", "typedef", "function", "task", "return", "begin", "end",
+        "logic",
+        "bit",
+        "reg",
+        "wire",
+        "int",
+        "integer",
+        "byte",
+        "shortint",
+        "longint",
+        "genvar",
+        "input",
+        "output",
+        "inout",
+        "assign",
+        "localparam",
+        "parameter",
+        "automatic",
+        "var",
+        "unsigned",
+        "signed",
+        "if",
+        "else",
+        "for",
+        "case",
+        "always_comb",
+        "always_ff",
+        "always",
+        "typedef",
+        "function",
+        "task",
+        "return",
+        "begin",
+        "end",
     ];
     let masked = crate::masked_syntax(source);
     for line in masked.lines() {
@@ -84,7 +113,10 @@ pub fn lhs_has_user_type(source: &str, name: &str) -> bool {
         if type_tok.is_empty() || BUILTIN.contains(&type_tok) || type_tok.starts_with('[') {
             continue;
         }
-        if !(type_tok.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        if !(type_tok
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
             && type_tok
                 .chars()
                 .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':'))
@@ -96,7 +128,7 @@ pub fn lhs_has_user_type(source: &str, name: &str) -> bool {
         let rest = rest.rsplit(']').next().unwrap_or(&rest).to_string();
         if rest
             .split(',')
-            .map(|n| n.trim().trim_end_matches(|c: char| c == '[' ))
+            .map(|n| n.trim().trim_end_matches(|c: char| c == '['))
             .any(|n| n.split('[').next().map(str::trim) == Some(name))
         {
             return true;
@@ -150,7 +182,14 @@ pub fn block_local_idents(source: &str) -> std::collections::BTreeSet<String> {
                 None => {
                     let mut rest = t;
                     for kw in [
-                        "automatic", "var", "logic", "bit", "int", "unsigned", "integer", "reg",
+                        "automatic",
+                        "var",
+                        "logic",
+                        "bit",
+                        "int",
+                        "unsigned",
+                        "integer",
+                        "reg",
                     ] {
                         rest = rest.trim_start().strip_prefix(kw).unwrap_or(rest);
                     }
@@ -3631,14 +3670,27 @@ endmodule
         let src = "module m (input logic clk_i, rst_ni, a, b, output logic [3:0] y_o);\n  typedef enum logic [1:0] {IDLE, RUN} state_e;\n  state_e state_d, state_q;\n  logic [3:0] plain_d;\n  always_comb begin\n    automatic logic [3:0] tmp;\n    tmp = {a, b, a, b};\n    state_d = a ? RUN : IDLE;\n    plain_d = tmp + 4'd1;\n  end\nendmodule\n";
         assert!(lhs_has_user_type(src, "state_d"));
         assert!(!lhs_has_user_type(src, "plain_d"));
-        assert_eq!(typed_sample(src, "state_d", "pipe_svt_p1"), "type(state_d)'(pipe_svt_p1)");
+        assert_eq!(
+            typed_sample(src, "state_d", "pipe_svt_p1"),
+            "type(state_d)'(pipe_svt_p1)"
+        );
         assert_eq!(typed_sample(src, "plain_d", "pipe_svt_p1"), "pipe_svt_p1");
-        assert_eq!(typed_sample(src, "state_d[0]", "pipe_svt_p1"), "pipe_svt_p1");
+        assert_eq!(
+            typed_sample(src, "state_d[0]", "pipe_svt_p1"),
+            "pipe_svt_p1"
+        );
         let locals = block_local_idents(src);
         assert!(locals.contains("tmp"), "{locals:?}");
-        assert!(!locals.contains("state_d") && !locals.contains("plain_d"), "{locals:?}");
+        assert!(
+            !locals.contains("state_d") && !locals.contains("plain_d"),
+            "{locals:?}"
+        );
         // A cut whose feed reads `tmp` is neutralised.
-        let line_plain = src.lines().position(|l| l.contains("plain_d = tmp")).unwrap() as u32 + 1;
+        let line_plain = src
+            .lines()
+            .position(|l| l.contains("plain_d = tmp"))
+            .unwrap() as u32
+            + 1;
         let mut tr = EditTrace::new();
         tr.record_edit(EditRecord {
             id: 0,
@@ -3656,7 +3708,11 @@ endmodule
         });
         let cuts = cut_assigns_from_source(src, &tr);
         assert_eq!(cuts.len(), 1);
-        assert_eq!(cuts[0].rhs, "'0", "block-local feed must be zeroed: {:?}", cuts[0]);
+        assert_eq!(
+            cuts[0].rhs, "'0",
+            "block-local feed must be zeroed: {:?}",
+            cuts[0]
+        );
         assert_eq!(cuts[0].line, 0, "origin must be kept");
         assert_eq!(rewrite_origin_assigns(src, &cuts), src);
     }

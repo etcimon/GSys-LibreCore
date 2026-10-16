@@ -352,6 +352,7 @@ pub fn synthesize_project(
                 const_exprs: Default::default(),
                 typedef_texts: Default::default(),
                 config_branch: false,
+                guards: Default::default(),
                 loc: loc.clone(),
             };
             tm.regions.insert(

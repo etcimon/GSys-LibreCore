@@ -363,6 +363,7 @@ mod tests {
             const_exprs: Default::default(),
             typedef_texts: Default::default(),
             config_branch: false,
+            guards: Default::default(),
             loc: SourceLoc::file_start("t.sv"),
         };
         let mut ff = node("seq_q", "seq_d", AssignKind::Nonblocking, 0.0);
