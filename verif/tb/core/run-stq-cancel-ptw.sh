@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
-# lsu_bypass + store_unit cancelled-store leaf (T35): positive, +oracle_negative (must fail), and the
-# G6LC_MUT_STQ_NO_STICKY_CANCEL mutation (mask consulted at push time only: must fail
-# STQ_CANCELLED_NOT_PUSHED).
+# lsu_bypass + store_unit leaf (T35 cancelled store, T40 exception double pop): positive, +oracle_negative
+# (must fail), the G6LC_MUT_STQ_NO_STICKY_CANCEL mutation (mask consulted at push time only: must fail
+# STQ_CANCELLED_NOT_PUSHED) and the G6LC_MUT_SU_EX_POP_ALWAYS mutation (unconditional exception pop:
+# must fail STQ_EX_VALID_STORE_NO_DOUBLE_POP).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
@@ -37,5 +38,8 @@ grep -q "STQ_\|ORACLE_NEGATIVE" "$OUT/neg.log" || { echo "FAIL oracle negative d
 build mut "+define+G6LC_MUT_STQ_NO_STICKY_CANCEL"
 "$OUT/mut/tb" > "$OUT/mut.log" 2>&1
 grep -q "STQ_CANCELLED_NOT_PUSHED\|scoreboard slot is not live" "$OUT/mut.log" || { echo "FAIL mutation G6LC_MUT_STQ_NO_STICKY_CANCEL not caught"; cat "$OUT/mut.log"; exit 1; }
+build mut2 "+define+G6LC_MUT_SU_EX_POP_ALWAYS"
+"$OUT/mut2/tb" > "$OUT/mut2.log" 2>&1
+grep -q "STQ_EX_VALID_STORE_NO_DOUBLE_POP" "$OUT/mut2.log" || { echo "FAIL mutation G6LC_MUT_SU_EX_POP_ALWAYS not caught"; cat "$OUT/mut2.log"; exit 1; }
 set -e
-echo "PASS run-stq-cancel-ptw (positive, oracle negative, no-sticky-cancel mutation caught)"
+echo "PASS run-stq-cancel-ptw (positive, oracle negative, no-sticky-cancel + exception-double-pop mutations caught)"

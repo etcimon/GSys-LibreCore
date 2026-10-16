@@ -333,7 +333,20 @@ module store_unit
     // we got an address translation exception (access rights, misaligned or page fault)
     if (ex_i.valid && (state_q != IDLE)) begin
       // the only difference is that we do not want to store this request
-      pop_st_o = 1'b1;
+      // T40: the request is still at the bypass head only while we wait for
+      // its translation or for the store buffer. In VALID_STORE it was popped
+      // by the accept the cycle before, and the unconditional pop here removed
+      // the NEXT request (lost: never executed) or, with the bypass empty,
+      // underflowed its counter (0 -> 3: lsu_ready low for good). In-order
+      // cores heal that through the flush every exception raises at commit;
+      // under the OoO younger-cancel a wrong-path store's exception raises no
+      // flush (user COW store fault behind a mispredict: the /init hang at
+      // 494 M cycles).
+`ifdef G6LC_MUT_SU_EX_POP_ALWAYS
+      pop_st_o = 1'b1;   // review mutation: the pre-fix shape
+`else
+      pop_st_o = (state_q == WAIT_TRANSLATION) || (state_q == WAIT_STORE_READY);
+`endif
       st_valid = 1'b0;
       state_d  = IDLE;
       valid_o  = 1'b1;

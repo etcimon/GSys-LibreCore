@@ -1725,8 +1725,30 @@ prerequisite for this work under the existing dual license. No licensing policy 
   dumps the scoreboard head, every IQ entry with its readiness/bypass
   bits and `ready[e]`, the LSQ store/load entries, the LSU bypass
   entries, store/load unit states and the STQ counts, three times
-  1000 cycles apart. Build `ooocoh-t39-ooo-pgo-build` (ovl-t39 = t38 +
-  the probe) in flight; run L1 with `+hang_dump=200000` to the hang.
+  1000 cycles apart. **Root cause (dump at cycle 471,718,116):**
+  `lsu_ready=0` with the LSU bypass at **`status_cnt=3` and both entries
+  invalid** — a 2-entry queue whose counter underflowed; the head (user
+  `ld` at `0x2e9e6`, tid 22, `ready=1`, `issue_valid=1`, `issue_ack=0`)
+  can never be acked. The underflow is upstream `store_unit.sv`'s
+  exception path: `if (ex_i.valid && state_q != IDLE) pop_st_o = 1` pops
+  unconditionally, but in `VALID_STORE` the request was already popped by
+  the accept one cycle earlier (IDLE/VALID_STORE accept → pop →
+  VALID_STORE; the MMU's exception for that translation lands in the
+  VALID_STORE cycle), so a DTLB-hit store fault (user COW/permission
+  fault) pops a second time — the NEXT request is silently lost, or with
+  the bypass empty the counter wraps 0 → 3. In-order CVA6 heals this
+  because every exception flushes at commit (bypass reset); under the OoO
+  younger-cancel a **wrong-path** user store fault (behind a mispredict)
+  raises no flush and the LSU is dead for good. **Fix:** the exception
+  pops only in `WAIT_TRANSLATION`/`WAIT_STORE_READY`, where the request is
+  still at the head. **Leaf:** `tb_g6lc_stq_cancel_ptw` S4/S5 (exception
+  in VALID_STORE → count 0, ready, written back, not pushed, LSU alive
+  after; exception in WAIT_TRANSLATION → popped once): 15 checks pass,
+  mutation `G6LC_MUT_SU_EX_POP_ALWAYS` fails
+  `STQ_EX_VALID_STORE_NO_DOUBLE_POP` with `byp_cnt=3` — the dump's state.
+  Lint clean. Build `ooocoh-t41-ooo-pgo-build` (ovl-t41 = t40 + the fix);
+  verification: L1 to `G6LC_LINUX_SHELL`, frozen battery, stages 38/46–53;
+  the server1 shares the store unit (rebuild t41 after).
 - [ ] **T39 — server1 (HPDCACHE, SMT2, t38) L1 past the T35 point oopses at
   1.267 s guest: `insert_header+0x9c` (`__register_sysctl_table` from
   `eventpoll_init`) NULL pointer dereference at `0x50`, PID 1 (2026-10-15).**

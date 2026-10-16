@@ -18,10 +18,19 @@
 // S2 store B (tid 5), never cancelled, same DTLB-miss shape -> pushed once,
 // written back once (STQ_LIVE_PUSHED); S3 store C (tid 7) queued behind B in
 // the bypass and cancelled while B waits -> dropped when it reaches the head
-// (STQ_QUEUED_CANCEL_DROPPED).
-// Mutation +define+G6LC_MUT_STQ_NO_STICKY_CANCEL removes the sticky marks
+// (STQ_QUEUED_CANCEL_DROPPED); S4 (T40) store D (tid 8) is accepted with a
+// DTLB hit and its translation exception arrives in VALID_STORE: the request
+// was popped by the accept, so the exception must not pop again (pre-fix the
+// bypass counter underflowed 0 -> 3 and lsu_ready stayed low -- the /init
+// hang at 494 M cycles -- or the NEXT request was silently lost)
+// (STQ_EX_VALID_STORE_NO_DOUBLE_POP, STQ_EX_WB_NOT_PUSHED, STQ_EX_LSU_ALIVE);
+// S5 the same exception in WAIT_TRANSLATION pops exactly once
+// (STQ_EX_WAIT_POPPED_ONCE).
+// Mutations: +define+G6LC_MUT_STQ_NO_STICKY_CANCEL removes the sticky marks
 // (mask checked at push time only, the pre-fix shape) and must fail
-// STQ_CANCELLED_NOT_PUSHED; +oracle_negative flips the verdict.
+// STQ_CANCELLED_NOT_PUSHED; +define+G6LC_MUT_SU_EX_POP_ALWAYS restores the
+// unconditional exception pop and must fail STQ_EX_VALID_STORE_NO_DOUBLE_POP;
+// +oracle_negative flips the verdict.
 module tb_g6lc_stq_cancel_ptw;
   import ariane_pkg::*;
   `include "g6lc_core_types.svh"
@@ -202,6 +211,32 @@ module tb_g6lc_stq_cancel_ptw;
     dtlb_hit = 1; paddr = 56'h0000_0010_0000_3000; tick(); tick(); tick(); tick(); tick();
     check(pushes == 2 && last_push_tid == 4'd6 && spec_cnt_s == 2, "STQ_QUEUED_CANCEL_DROPPED");
     check(byp_cnt_s == 0 && dut.state_q == 2'd0, "STQ_QUEUE_DRAINED");
+
+    // S4 (T40): store D (tid 8) hits the DTLB and is accepted (popped) in IDLE;
+    // its translation exception arrives in the VALID_STORE cycle. The request
+    // was already popped: the bypass must stay consistent (count 0, ready), the
+    // store is written back with the exception and not pushed.
+    dtlb_hit = 1;
+    offer_store(8, 64'h0000_0000_5000_0000);
+    check(dut.state_q == 2'd1 && byp_cnt_s == 0, "STQ_EX_ACCEPTED");
+    ex = '0; ex.valid = 1'b1; ex.cause = 64'd15; tick(); ex = '0;
+    tick(); tick();
+    check(byp_cnt_s == 0 && byp_ready && dut.state_q == 2'd0, "STQ_EX_VALID_STORE_NO_DOUBLE_POP");
+    check(pushes == 2 && wbs == 3 && last_wb_tid == 4'd8, "STQ_EX_WB_NOT_PUSHED");
+    // and the LSU still takes stores afterwards
+    offer_store(10, 64'h0000_0000_6000_0000);
+    tick(); tick(); tick();
+    check(pushes == 3 && last_push_tid == 4'd10, "STQ_EX_LSU_ALIVE");
+    // S5: the same exception while the request waits for its translation ->
+    // it is still at the head and must be popped exactly once
+    dtlb_hit = 0;
+    offer_store(12, 64'h0000_0000_7000_0000);
+    tick(); tick();
+    check(dut.state_q == 2'd2 && byp_cnt_s == 1, "STQ_EX_WAIT_ENTERED");
+    ex = '0; ex.valid = 1'b1; ex.cause = 64'd15; tick(); ex = '0;
+    tick(); tick();
+    check(byp_cnt_s == 0 && byp_ready && dut.state_q == 2'd0 && pushes == 3 && wbs == 5 && last_wb_tid == 4'd12,
+          "STQ_EX_WAIT_POPPED_ONCE");
 
     if (negative) $fatal(1, "ORACLE_NEGATIVE forced");
     $display("PASS tb_g6lc_stq_cancel_ptw checked=%0d", checked);
