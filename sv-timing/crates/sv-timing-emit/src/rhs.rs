@@ -2278,6 +2278,45 @@ pub fn rewrite_origin_assigns(source: &str, cuts: &[CutAssign]) -> String {
     out
 }
 
+/// 1-based line of the `end` that balances the `for` statement starting on
+/// `lines[start_idx]` (a single-statement loop ends at its `;`). Comments and
+/// preprocessor lines are skipped; the scan is bounded to 400 lines.
+fn loop_end_line(lines: &[&str], start_idx: usize) -> u32 {
+    let mut depth = 0i32;
+    let mut seen_begin = false;
+    for (k, raw) in lines.iter().enumerate().skip(start_idx).take(400) {
+        let line = raw.split("//").next().unwrap_or("");
+        if line.trim_start().starts_with('`') {
+            continue;
+        }
+        let words = line.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'));
+        for w in words {
+            match w {
+                "begin" | "fork" => {
+                    depth += 1;
+                    seen_begin = true;
+                }
+                "end" | "join" | "join_any" | "join_none" => depth -= 1,
+                _ => {}
+            }
+        }
+        if seen_begin && depth <= 0 {
+            return (k + 1) as u32;
+        }
+        if !seen_begin && k > start_idx && line.contains(';') {
+            return (k + 1) as u32;
+        }
+        if !seen_begin
+            && k == start_idx
+            && line.trim_end().ends_with(';')
+            && !line.contains("for (")
+        {
+            return (k + 1) as u32;
+        }
+    }
+    (start_idx + 1) as u32
+}
+
 /// Replace the source span of every `LoopRewrite` edit with its replacement
 /// statement. The replacement is fitted to the span's line count — joined
 /// onto fewer lines when longer, padded with comment lines when shorter — so
@@ -2313,7 +2352,12 @@ pub fn rewrite_loop_spans(source: &str, trace: &EditTrace) -> String {
         let line_no = (i + 1) as u32;
         if job < jobs.len() && jobs[job].0 == line_no {
             let (start, end, text, id) = &jobs[job];
-            let span = (*end - *start + 1) as usize;
+            // The origin span can stop short of the loop's real `end` when
+            // the loop body crosses an `ifdef` (the preprocessor's origin
+            // map for the tail is off by the dropped branch): the balanced
+            // `begin`/`end` scan from the `for` line is authoritative.
+            let end = (*end).max(loop_end_line(&lines, i));
+            let span = (end - *start + 1) as usize;
             let indent: String = lines[i].chars().take_while(|c| c.is_whitespace()).collect();
             let mut rep_lines: Vec<String> = text
                 .lines()

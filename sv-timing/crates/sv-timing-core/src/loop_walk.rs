@@ -38,6 +38,9 @@ pub enum LoopWalkKind {
     RingWalk,
     /// Stream compaction: `for k: if (keep_k) { out[dst] = f(k); dst++ }`.
     StreamCompact,
+    /// One-hot select: `for e: if (G[e]) { x = y(e); … }` with `G` asserted
+    /// one-hot by the module → AND-OR accumulate (invariant-tagged).
+    OneHotSelect,
 }
 
 /// One detected walk with its exact replacement.
@@ -103,7 +106,182 @@ pub fn detect(
         }
         if let Some(s) = stream_compact(idx, lp, &body, lo, n, widths, model) {
             out.push(s);
+            continue;
         }
+        if let Some(s) = one_hot_select(idx, lp, &body, lo, n, &module.onehot_facts, model) {
+            out.push(s);
+        }
+    }
+    out
+}
+
+// ------------------------------------------------------------- OneHotSelect
+
+/// `for e: if (G[e]) begin X1 = Y1(e); … Xm = Ym(e); end` where the module
+/// asserts `$onehot0(G)` (or `$onehot(G)`) and every `Xi` is set to zero
+/// before the loop: a priority chain of N muxes that is, by the design's own
+/// invariant, a one-hot select. Rewritten to the AND-OR accumulate
+/// `Xi = Xi | (G[e] ? Yi(e) : '0)` — log₂N depth, no priority — exact
+/// whenever the assertion holds (invariant-tagged; the rationale names it).
+/// `Xi` must be a plain name or indexed by something other than `e`, and no
+/// `Yi` may read an `Xj`.
+fn one_hot_select(
+    idx: usize,
+    lp: &GenerateLoop,
+    body: &str,
+    lo: u32,
+    n: u32,
+    facts: &[String],
+    model: &CostModel,
+) -> Option<LoopWalkShape> {
+    if facts.is_empty() {
+        return None;
+    }
+    let e = lp.genvar.as_str();
+    let (cond, cbody) = split_if(body)?;
+    // the guard is `<base>[e]`
+    let base = cond.trim().strip_suffix(&format!("[{e}]"))?.trim();
+    if base.is_empty() || base.contains("&&") || base.contains("||") || base.contains(' ') {
+        return None;
+    }
+    let base_norm: String = base.split_whitespace().collect();
+    if !facts.iter().any(|f| *f == base_norm) {
+        return None;
+    }
+    let stmts = split_statements(&cbody);
+    if stmts.is_empty() {
+        return None;
+    }
+    let mut assigns: Vec<(String, String)> = Vec::new();
+    for st in &stmts {
+        let (l, r) = st.split_once('=')?;
+        let l = l.trim();
+        let r = r.trim();
+        if r.starts_with('=') || l.ends_with('<') || l.ends_with('!') || l.ends_with('>') {
+            return None;
+        }
+        // LHS: ident, or ident[idx] with idx not the loop var
+        let root: String = l
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        // `ident` or `ident[...][...]`: nothing but bracket groups after the root
+        let mut rest = &l[root.len()..];
+        let mut ok = !root.is_empty();
+        while ok && !rest.is_empty() {
+            if !rest.starts_with('[') {
+                ok = false;
+                break;
+            }
+            let Some(close) = rest.find(']') else {
+                ok = false;
+                break;
+            };
+            rest = &rest[close + 1..];
+        }
+        if !ok {
+            return None;
+        }
+        if bracket_inners_text(l)
+            .iter()
+            .any(|ix| idents(ix).iter().any(|t| t == e))
+            || l.contains('.')
+        {
+            return None;
+        }
+        assigns.push((l.to_string(), r.to_string()));
+    }
+    let lhs_roots: Vec<String> = assigns
+        .iter()
+        .map(|(l, _)| {
+            l.chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                .collect()
+        })
+        .collect();
+    for (_, r) in &assigns {
+        if idents(r).iter().any(|t| lhs_roots.iter().any(|x| x == t)) {
+            return None;
+        }
+    }
+    // zero-init before the loop: `X = '0;` for the root (whole array) or the exact LHS
+    let pre = normalize_ws(lp.pre_text.as_deref()?);
+    for (l, _) in &assigns {
+        let root: String = l
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+            .collect();
+        let zero_whole =
+            pre.contains(&format!("{root} = '0;")) || pre.contains(&format!("{root} = 0;"));
+        let zero_exact = pre.contains(&format!("{l} = '0;")) || pre.contains(&format!("{l} = 0;"));
+        if !(zero_whole || zero_exact) {
+            return None;
+        }
+    }
+    let first = lhs_roots[0].clone();
+    let mut rep = String::new();
+    rep.push_str(&format!(
+        "begin : {first}_svt_ohs
+"
+    ));
+    rep.push_str(&format!(
+        "  for (int unsigned {e} = {lo}; {e} < {n}; {e}++) begin
+"
+    ));
+    for (l, r) in &assigns {
+        rep.push_str(&format!(
+            "    {l} = {l} | (({cond}) ? ({r}) : '0);
+"
+        ));
+    }
+    rep.push_str(
+        "  end
+end",
+    );
+    let levels = f64::from(n.next_power_of_two().trailing_zeros().max(1));
+    let fo4_after = model.mux + model.logic_bit * levels;
+    Some(LoopWalkShape {
+        kind: LoopWalkKind::OneHotSelect,
+        loop_index: idx,
+        trips: n - lo,
+        replacement: rep,
+        decls: String::new(),
+        marker: format!("{first}_svt_ohs"),
+        carried: first,
+        fo4_after,
+        rationale: format!(
+            "one-hot select over {} entries ({} outputs) → AND-OR accumulate; exact under the module's `$onehot0({base_norm})` assertion (invariant-tagged)",
+            n - lo,
+            assigns.len()
+        ),
+    })
+}
+
+fn bracket_inners_text(tok: &str) -> Vec<String> {
+    let b = tok.as_bytes();
+    let mut out = Vec::new();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'[' {
+            let start = i + 1;
+            let mut depth = 1i32;
+            let mut j = start;
+            while j < b.len() && depth > 0 {
+                match b[j] {
+                    b'[' => depth += 1,
+                    b']' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            if depth == 0 {
+                out.push(tok[start..j - 1].to_string());
+                i = j;
+                continue;
+            }
+            break;
+        }
+        i += 1;
     }
     out
 }
@@ -793,10 +971,14 @@ fn stream_compact(
     {
         return None;
     }
-    let w = declared_width(widths, &dst)?;
-    if (1u64 << w.min(63)) <= u64::from(n) {
-        return None; // dst cannot count to n
-    }
+    // `dst` is usually a block-local automatic the module-scope resolver does
+    // not see; the count update is cast to the bits of 0..=n and truncates on
+    // assignment exactly as the repeated `+ 1'b1` did (mod 2^width).
+    let pw_bits = (n + 1).next_power_of_two().trailing_zeros().max(1);
+    // The count is cast to at least the bits of 0..=n (a narrower resolved
+    // width would truncate the popcount itself); the assignment then wraps
+    // modulo the LHS width exactly as the repeated `+ 1'b1` did.
+    let w = declared_width(widths, &dst).unwrap_or(pw_bits).max(pw_bits);
     // `dst` must enter the loop at zero (the statement before the loop):
     // the gather compares ranks with absolute slots.
     let pre = normalize_ws(lp.pre_text.as_deref()?);
@@ -1048,6 +1230,55 @@ end"
             sc.decls.contains("logic [7:0][3:0] dst_svt_pos;"),
             "{}",
             sc.decls
+        );
+    }
+
+    /// A104: the issue-queue select under an asserted `$onehot0(grant_i[p])`
+    /// becomes an AND-OR accumulate; the priority select over `prio_i` (no
+    /// assertion) is left alone.
+    #[test]
+    fn fixture_onehot_select_fires_only_under_the_assertion() {
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/onehot_select.sv");
+        let lower = crate::LowerOptions {
+            target: crate::TimingTarget::new(4000.0, 20.0, 0.2),
+            cost_model: crate::default_fo4_v1_embedded(),
+            ..Default::default()
+        };
+        let out = crate::analyze_files(&[path], &crate::ParseOptions::default(), &lower)
+            .expect("analyze");
+        let m = out.design.modules.values().next().expect("module");
+        assert_eq!(
+            m.onehot_facts,
+            vec!["grant_i[p]".to_string()],
+            "{:?}",
+            m.onehot_facts
+        );
+        let shapes = detect(m, &resolver_for(&out.design, m), &CostModel::default());
+        let ohs: Vec<&LoopWalkShape> = shapes
+            .iter()
+            .filter(|s| s.kind == LoopWalkKind::OneHotSelect)
+            .collect();
+        assert_eq!(ohs.len(), 1, "{shapes:#?}");
+        let r = &ohs[0].replacement;
+        assert!(
+            r.contains("sbe_d[p] = sbe_d[p] | ((grant_i[p][e]) ? (q_i[e]) : '0);"),
+            "{r}"
+        );
+        assert!(
+            r.contains("slot_d[p] = slot_d[p] | ((grant_i[p][e]) ? ($clog2(N)'(e)) : '0);"),
+            "{r}"
+        );
+        assert!(
+            ohs[0].rationale.contains("$onehot0(grant_i[p])"),
+            "{}",
+            ohs[0].rationale
+        );
+        assert!(ohs[0].decls.is_empty());
+        // the prio loop has no fact: no OneHotSelect, and no other shape either
+        assert!(
+            shapes.iter().all(|s| s.kind == LoopWalkKind::OneHotSelect),
+            "{shapes:#?}"
         );
     }
 

@@ -701,6 +701,13 @@ pub struct TimingModule {
     /// the trip multiplier must not scale it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub guards: BTreeMap<NodeId, Vec<String>>,
+    /// Texts the module asserts one-hot: the arguments of every
+    /// `$onehot0(…)` / `$onehot(…)` in its source (`grant[p]`). A rewrite
+    /// that is exact only under a one-hot select (`OneHotSelect`) may fire
+    /// only when its guard's base is in this list — invariant-tagged, the
+    /// design's own assertion is the proof obligation (A104).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub onehot_facts: Vec<String>,
     /// Source span of module header.
     pub loc: SourceLoc,
 }

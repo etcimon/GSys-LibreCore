@@ -329,15 +329,18 @@ module g6lc_iq
     // The age matrix is a strict total order over the live entries
     // (ooo_iq_age_acyclic/ooo_iq_age_total below), so the cascade's
     // no-older match is unique per port.
+    // One-hot select (sv-timing A104): `grant[p]` is one-hot by the age
+    // matrix's total order (ooo_iq_rank_unique asserts $onehot0), so the
+    // per-port select is an AND-OR accumulate — log2(DEPTH) deep — instead
+    // of the DEPTH-deep priority chain a `for … if` is to synthesis. Exact
+    // under the assertion; the outputs are zero before the loop.
     for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
       issue_valid_o[p] = |grant[p];
       for (int unsigned e = 0; e < DEPTH; e++) begin
-        if (grant[p][e]) begin
-          issue_sbe_o[p]   = q_chain[e].sbe;
-          issue_orig_o[p]  = q_chain[e].orig;
-          issue_prd_o[p]   = q_chain[e].prd;
-          slot_entry[p]    = EW'(e);
-        end
+        issue_sbe_o[p]  = issue_sbe_o[p]  | (grant[p][e] ? q_chain[e].sbe  : '0);
+        issue_orig_o[p] = issue_orig_o[p] | (grant[p][e] ? q_chain[e].orig : '0);
+        issue_prd_o[p]  = issue_prd_o[p]  | (grant[p][e] ? q_chain[e].prd  : '0);
+        slot_entry[p]   = slot_entry[p]   | (grant[p][e] ? EW'(e) : '0);
       end
     end
     // Accepted issue does not wake retained entries; actual writeback does.
@@ -353,10 +356,15 @@ module g6lc_iq
   // so the in-order-issue behaviour is unchanged there; dropping the old
   // "stop scanning after a non-ack" rule only widens SELECTION, which is what
   // removes the ack from the combinational cone.
+  // The acked grant clears the entry directly from the one-hot (sv-timing
+  // A104): `q_after_issue[slot_entry[g]]` re-decoded the slot the select
+  // had just encoded; `issue_valid_o[g]` is `|grant[g]`, so the write under
+  // `grant[g][e] && issue_ack_i[g]` is the same write.
   always_comb begin
     q_after_issue = q_chain;
     for (int unsigned g = 0; g < CVA6Cfg.NrIssuePorts; g++)
-      if (issue_valid_o[g] && issue_ack_i[g]) q_after_issue[slot_entry[g]].valid = 1'b0;
+      for (int unsigned e = 0; e < DEPTH; e++)
+        if (grant[g][e] && issue_ack_i[g]) q_after_issue[e].valid = 1'b0;
   end
   for (genvar e = 0; e < DEPTH; e++) begin : gen_valid_after
     assign valid_after[e] = q_after_issue[e].valid;
@@ -385,21 +393,54 @@ module g6lc_iq
     alloc = '0;
     alloc_slot = '0;
     slot = 0;
-    // Lowest free slot per port as arithmetic (sv-timing A100): the scan
+    // Free slot per port as arithmetic (sv-timing A100/A104): the scan
     // `for e: if (free[e] && !alloc[p]) …` is a DEPTH-deep priority chain
     // synthesis keeps serial (the mapped netlist's worst path here, 57
     // cells). `free & (~free + 1)` isolates the lowest set bit with one
-    // incrementer; the index is an OR over a one-hot. Exact: an empty free
-    // vector allocates nothing and leaves alloc_slot at 0, as the scan did.
-    for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
-      if (disp_valid_i[p]) begin
-        automatic logic [DEPTH-1:0] lowest;
-        lowest   = free & (~free + 1'b1);
-        alloc[p] = |lowest;
+    // incrementer; the index is an OR over a one-hot. Port 0 takes the
+    // lowest free slot and port 1 the HIGHEST (the same isolate on the
+    // bit-reversed vector), both from the same `free`, so the second pick
+    // no longer waits for the first (A104: one incrementer off the chain).
+    // Port 1 is refused when fewer than two slots are free and port 0 is
+    // taking one (`free & (free - 1)` is "at least two set"). Which free
+    // slot a newcomer lands in is not architecturally visible — the queue is
+    // stationary and age is the explicit matrix below — so this is a
+    // placement policy, not a behaviour change. Ports beyond the second
+    // allocate serially from what remains, as before.
+    begin
+      automatic logic [DEPTH-1:0] lowest, highest, rev, rev_low, taken;
+      lowest  = free & (~free + 1'b1);
+      rev     = {<<{free}};
+      rev_low = rev & (~rev + 1'b1);
+      highest = {<<{rev_low}};
+      taken   = '0;
+      if (disp_valid_i[0]) begin
+        alloc[0] = |lowest;
         for (int unsigned e = 0; e < DEPTH; e++) begin
-          if (lowest[e]) alloc_slot[p] = alloc_slot[p] | EW'(e);
+          if (lowest[e]) alloc_slot[0] = alloc_slot[0] | EW'(e);
         end
-        free = free & ~lowest;
+        taken = taken | lowest;
+      end
+      if (CVA6Cfg.NrIssuePorts > 1 && disp_valid_i[1]) begin
+        alloc[1] = (|highest) && (!disp_valid_i[0] || (|(free & (free - 1'b1))));
+        if (alloc[1]) begin
+          for (int unsigned e = 0; e < DEPTH; e++) begin
+            if (highest[e]) alloc_slot[1] = alloc_slot[1] | EW'(e);
+          end
+          taken = taken | highest;
+        end
+      end
+      free = free & ~taken;
+      for (int unsigned p = 2; p < CVA6Cfg.NrIssuePorts; p++) begin
+        if (disp_valid_i[p]) begin
+          automatic logic [DEPTH-1:0] low_p;
+          low_p    = free & (~free + 1'b1);
+          alloc[p] = |low_p;
+          for (int unsigned e = 0; e < DEPTH; e++) begin
+            if (low_p[e]) alloc_slot[p] = alloc_slot[p] | EW'(e);
+          end
+          free = free & ~low_p;
+        end
       end
     end
     for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin

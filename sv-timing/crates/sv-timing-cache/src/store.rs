@@ -919,6 +919,7 @@ mod tests {
             typedef_texts: Default::default(),
             config_branch: false,
             guards: Default::default(),
+            onehot_facts: Default::default(),
             loc: SourceLoc {
                 file: "m.sv".into(),
                 start_line: 1,

@@ -459,6 +459,11 @@ fn lower_file(
             typedef_texts: collect_typedef_texts_in(tree, scope.nodes.iter().cloned()),
             config_branch: module_has_config_branch(scope.nodes.iter().cloned()),
             guards: Default::default(),
+            onehot_facts: collect_onehot_facts(
+                &file.bytes,
+                &scope.loc,
+                &scope_end_byte(tree, li, &path_str, scope.nodes.iter().cloned()),
+            ),
             loc: mod_loc,
         };
         design.instances.extend(insts);
@@ -1494,6 +1499,62 @@ fn tree_keyword_or_ident(tree: &SyntaxTree, node: RefNode<'_>) -> Option<String>
     None
 }
 
+/// Last origin byte of a module scope (its `endmodule`), for text scans.
+fn scope_end_byte<'a, T>(tree: &'a SyntaxTree, li: &LineIndex, path_str: &str, root: T) -> u32
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut end = 0u32;
+    for node in root {
+        if let RefNode::Locate(l) = node {
+            if let Some((p, start)) = tree.get_origin(l) {
+                if p == &li.path {
+                    end = end.max((start + l.len) as u32);
+                }
+            }
+        }
+    }
+    let _ = path_str;
+    end
+}
+
+/// Arguments of every `$onehot0(…)` / `$onehot(…)` in the module's source
+/// span, whitespace-normalized (`grant[p]`).
+fn collect_onehot_facts(bytes: &[u8], start: &SourceLoc, end: &u32) -> Vec<String> {
+    let lo = start.byte_start as usize;
+    let hi = (*end as usize).max(lo).min(bytes.len());
+    let text = String::from_utf8_lossy(&bytes[lo..hi]);
+    let mut out = Vec::new();
+    for key in ["$onehot0(", "$onehot("] {
+        let mut from = 0usize;
+        while let Some(i) = text[from..].find(key) {
+            let open = from + i + key.len();
+            let mut depth = 1i32;
+            let mut j = open;
+            let b = text.as_bytes();
+            while j < b.len() && depth > 0 {
+                match b[j] {
+                    b'(' => depth += 1,
+                    b')' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            if depth == 0 {
+                let arg: String = text[open..j - 1]
+                    .split_whitespace()
+                    .collect::<Vec<_>>()
+                    .join("");
+                if !arg.is_empty() && !out.contains(&arg) {
+                    out.push(arg);
+                }
+            }
+            from = j.max(open);
+        }
+    }
+    out
+}
+
 /// Source spans of function and task bodies in a scope.
 fn collect_function_spans_in<'a, T>(
     tree: &'a SyntaxTree,
@@ -1638,11 +1699,12 @@ where
                 node_text(tree, init)
                     .and_then(|t| t.rsplit_once('=').map(|(_, v)| v.trim().to_string()))
             });
-            // The loop's own text and the ~200 bytes before it (the walk's
-            // `cid = start;` seed) for the loop-walk detector.
+            // The loop's own text and the 4 KiB before it (the walk's `cid =
+            // start;` seed, a select's `out = '0` inits) for the loop-walk
+            // detector.
             let text = node_text(tree, lf);
             let pre_text = if loc.origin == OriginKind::UserFile && loc.byte_start > 0 {
-                let start = loc.byte_start.saturating_sub(200) as usize;
+                let start = loc.byte_start.saturating_sub(4096) as usize;
                 bytes
                     .get(start..loc.byte_start as usize)
                     .map(|b| String::from_utf8_lossy(b).into_owned())

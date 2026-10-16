@@ -153,6 +153,10 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
         // constant costs 0. Give the scan's carried nodes a per-iteration floor
         // of a compare and a gate so the chain is on the board (A101).
         let scan_floor = find_first_floors(module, &widths, &model);
+        // A procedural loop whose bound evaluates to zero trips (`for (p = 2;
+        // p < NrIssuePorts; …)` at two ports) is dead: its nodes are no
+        // logic at all (delay-v37).
+        let dead = dead_loop_nodes(module, &widths);
         // delay-v37: a guarded assignment is a mux on its guards — the
         // compare in `if (sel == 3'd5) y = a` and the one select level are
         // on y's path, and a dynamically indexed LHS decodes its index.
@@ -173,6 +177,10 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
             .filter(|(_, gs)| !gs.is_empty())
             .collect();
         for node in module.nodes.values_mut() {
+            if dead.contains(&node.id) {
+                node.fo4_cost = 0.0;
+                continue;
+            }
             // Spine expand / half-split lock residual segment FO4 across remeasure.
             if node.fo4_locked {
                 continue;
@@ -265,7 +273,8 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
                     node.fo4_cost = ex.fo4_critical_cost_latticed(&base, &seed);
                     node.op_class = Some(ex.dominant_op_class_latticed(&seed));
                     if let Some(gc) = guard_cost {
-                        node.fo4_cost = node.fo4_cost.max(gc) + model.mux;
+                        node.fo4_cost =
+                            node.fo4_cost.max(gc) + guard_level(&carried, node.id, &model);
                     }
                     if let Some(floor) = scan_floor.get(&node.id) {
                         node.fo4_cost = node.fo4_cost.max(*floor);
@@ -293,7 +302,7 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
                 }
             }
             if let Some(gc) = guard_cost {
-                node.fo4_cost = node.fo4_cost.max(gc) + model.mux;
+                node.fo4_cost = node.fo4_cost.max(gc) + guard_level(&carried, node.id, &model);
             }
             if let Some(floor) = scan_floor.get(&node.id) {
                 node.fo4_cost = node.fo4_cost.max(*floor);
@@ -817,6 +826,9 @@ struct CarryBill {
     /// (`if (!placed && !v[i]) placed = 1`): the serial step is one gate per
     /// iteration, the body's own cost is paid once.
     via_guard_only: bool,
+    /// A bitwise/logical self-accumulate (`x = x | v`): under a guard it is
+    /// `x | (g & v)` — the guard is one gate, not a select level.
+    assoc: bool,
 }
 
 fn loop_carried_multipliers(
@@ -952,9 +964,11 @@ fn loop_carried_multipliers(
             let e = out.entry(n.id).or_insert(CarryBill {
                 mult: 1,
                 via_guard_only: true,
+                assoc: true,
             });
             e.mult = e.mult.saturating_mul(mult).min(64);
             e.via_guard_only = e.via_guard_only && via_guard_only;
+            e.assoc = e.assoc && assoc;
         }
     }
     out
@@ -1069,6 +1083,45 @@ fn find_first_floors(
         }
     }
     out
+}
+
+/// Nodes inside procedural loops that unroll to zero iterations.
+fn dead_loop_nodes(
+    module: &TimingModule,
+    widths: &crate::width::WidthResolver<'_>,
+) -> BTreeSet<NodeId> {
+    let mut out = BTreeSet::new();
+    for lp in module.gen_loops.iter().filter(|g| g.procedural) {
+        if lp.loc.origin != crate::loc::OriginKind::UserFile || lp.loc.byte_end <= lp.loc.byte_start
+        {
+            continue;
+        }
+        let Some(cond) = lp.cond_text.as_deref() else {
+            continue;
+        };
+        if loop_trip_count(&lp.genvar, lp.init_text.as_deref(), cond, widths) != Some(0) {
+            continue;
+        }
+        for n in module.nodes.values() {
+            if n.loc.origin == crate::loc::OriginKind::UserFile
+                && n.loc.file == lp.loc.file
+                && n.loc.byte_start >= lp.loc.byte_start
+                && n.loc.byte_start < lp.loc.byte_end
+            {
+                out.insert(n.id);
+            }
+        }
+    }
+    out
+}
+
+/// The level a guard adds: a select (`mux`) for a plain guarded write, one
+/// gate (`logic_bit`) for a guarded bitwise self-accumulate (`x | (g & v)`).
+fn guard_level(carried: &BTreeMap<NodeId, CarryBill>, id: NodeId, model: &CostModel) -> f64 {
+    match carried.get(&id) {
+        Some(b) if b.assoc && !b.via_guard_only => model.logic_bit,
+        _ => model.mux,
+    }
 }
 
 /// A carried node's cost: through the RHS, every copy repeats the body
@@ -2185,6 +2238,7 @@ mod tests {
                 typedef_texts: Default::default(),
                 config_branch: false,
                 guards: Default::default(),
+                onehot_facts: Default::default(),
                 loc: loc(1),
             },
         );
