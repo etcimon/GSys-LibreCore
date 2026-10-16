@@ -16,7 +16,7 @@ does not mean a place-and-route path of 300 ps. It means: under `fo4-v1`, delay-
 path_class detector 24, and the current compose/classify/pass loop, this cone is the
 worst remaining single-cycle primary.
 
-**Standing numbers (2026-10-15; current campaign in Part LI).**
+**Frozen-snapshot numbers (2026-10-15; fresh development results in Part LII).**
 
 | Quantity | Value | Where it is computed |
 |---|---|---|
@@ -151,6 +151,8 @@ they are not A1–A49.
 103. [Part XLIX Ranking leftover counts](#part-xlix--ranking-primary-vs-all-kinds-leftover-counts)
 104. [Part L Maintenance contract](#part-l--maintenance-contract-sign-here)
 105. [Part LI Current 10-FO4 campaign](#part-li--current-10-fo4-campaign-2026-10-15)
+106. [Part LII Refusal rollback, lexical bindings and admission factoring](#part-lii--refusal-rollback-lexical-bindings-and-admission-factoring)
+107. [Part LIII Measurement truth: coordinates, widths, casts, multi-operand sums](#part-liii--measurement-truth-coordinates-widths-casts-multi-operand-sums)
 
 ---
 
@@ -6506,7 +6508,7 @@ If you change an algorithm, you owe:
 If you cannot write the SV ± diff, you do not yet understand the
 mutation and you must not land the patch.
 
-The remaining gap to ~10 FO4, determined from this theory:
+Historical campaign projection (audit-remain-v27, not measurement delay-v27):
 
 | After | Emit primary | Owner |
 |---|---|---|
@@ -6705,3 +6707,346 @@ At the 2026-10-15 22:46 UTC observation the full-core remote job had elaborated 
 reached ABC mapping (about 51 GiB Yosys RSS, 10 GiB ABC RSS). No completed full-core
 STA report existed. Its eventual result must be bound to that run's input snapshot;
 the small-cone STA results above do not substitute for it.
+
+---
+
+# Part LII — Refusal rollback, lexical bindings and admission factoring
+
+## Current status: 10 FO4 is not closed
+
+The 21.5 FO4 frozen emit in Part LI is still a valid measurement of those bytes.
+It is not the output of the corrected planner below. Fresh correction and review
+candidates at the unchanged **10 FO4 / 20 ps / margin 0.2** target give:
+
+| Input/output | Measurement | Worst RegToReg | All-primary worst | Failing primary |
+|---|---|---:|---:|---:|
+| fresh correction after rollback repair | delay-v26 | 31.0 | 31.0 | 369 |
+| fresh correction after lexical binding repair | delay-v27 | 31.0 | 31.0 | 413 |
+| review copy, admission-count factoring | delay-v27 | 20.0 | 30.0 | 412 |
+| plus FIFO delta decode and balanced request conjunction | delay-v27 | **16.5** | **30.0** | 411 |
+
+The fresh delay-v27 emit has 451 annotations, 32 BalanceMux records and 19
+InsertReg records; joint reparse and structural checks pass on 264 files.
+Artifacts are `build-platform/workspace/build/sv-timing/scope-trial-20261015/`
+and `queue-factoring-20261015/`. The latter contains **review copies**, not live
+RTL changes. There is no whole-core functional-equivalence or timing-closure claim.
+The all-primary maximum includes the `stream_arbiter` I/O cone; do not describe
+the RegToReg headline as the maximum over every single-cycle path.
+
+## A78 — A refused cut trial must not mutate the design
+
+`apply_work_item` previously expanded an expression spine before checking whether
+the register plan was admissible. Expansion changes the original node's cost/RHS,
+adds synthetic nodes and changes a path. A later gate/scope refusal left those
+mutations behind, influencing other paths sharing the node and subsequent cut
+selection despite there being no corresponding emitted edit.
+
+`pipeline::prepare_pipeline_cuts` now checks latency, allowlist and gate first,
+then saves only the selected path's existing nodes. A rejected plan restores the
+nodes, path and prior dirty flag and removes newly allocated ids. It does not clone
+the whole design. Accepted plans retain their expanded nodes for insertion.
+Tests cover an early missing-gate refusal, a later block-local refusal, preservation
+of already-pending work, and a successful plan. `cut.refuse_detail` trace events
+retain the actual failure text.
+
+The fresh `instr_queue` refusal is now explicit:
+`rank <- rank + 1'b1` is block-local. Hoisting a pipe feed from that point to
+module scope would be invalid. Do not work around the refusal by leaving its
+speculative IR in place or booking an unimplemented half-split.
+
+## A79 — Lexically distinct declarations are distinct timing signals
+
+The module-wide P5 definition map previously keyed locals by source spelling.
+Two independent `rank` variables in `instr_queue`'s slot-compaction and FIFO-data
+processes were connected. `DeclSite::scope` now stores the nearest mapped
+original-source scope; `ref_order::BindingIndex` constructs private keys for P5
+and procedural dependency edges. Module nets still connect processes, and a local
+shadow no longer replaces the module binding. IR source strings and emitted SV
+names do not change. Unresolved scopes remain conservative.
+
+The regression constructs two local `tmp` variables plus a global `tmp` multiply.
+Neither local consumer may inherit the global multiply or the other block's
+definition, while the intended global consumer must still see it. The cost/cache
+semantics are **delay-v27**. The scope guard also distinguishes `record.member`
+and `pkg::member` from a block-local variable named `member`.
+
+This repairs binding identity, not all dataflow modeling. Region lowering still
+creates conservative source-order fan-in edges, and loop elaboration/control
+dependencies need further work. Do not infer an immutable physical floor from
+the remaining report.
+
+## A80 — Move population counting before admission
+
+The actual queue cone contains more than `pointer + popcount(push)`. It compacts
+valid slots into circular FIFO positions, checks space, permits a leftover slot-zero
+exception, gates all pushes on address-space availability, and only then counts.
+For a power-of-two FIFO bank, compaction is injective and preserves population
+count. A partial admission accepts exactly one slot:
+
+```systemverilog
+// Original: count after compaction, overflow and partial-admission selection.
+step = popcount(pushed_mask);
+
+// Review candidate: precompute count and select after admission.
+count = popcount(valid);
+step = address_overflow ? 0 : partial ? 1 : overflow ? 0 : count;
+```
+
+`queue_count_trial` / `queue_count_miter` in
+`fixtures/auto_correct/sum3_carry_save.sv` prove both the count and next pointer
+for all binary masks, heads, full flags, leftover flags and address-overflow flags
+at **2/4/8 slots**. Helpers mirror the contract, not project package imports.
+No stage or architectural state is added. Four-state X/Z equivalence, one-slot
+geometry and full host integration remain separate gates.
+
+Nangate45 typical, identical STA constraints and timing-constrained ABC (`BUF_X1`,
+5 fF mapping load, `-D 250`); combinational study:
+
+| Slots, pointer width | Original → factored delay (ns) | Area (µm²) |
+|---|---:|---:|
+| 2, 16 | 0.644000 → 0.488837 | 84.854 → 76.608 |
+| 4, 16 | 1.059211 → **0.787434** | 183.274 → **152.950** |
+| 8, 16 | 1.631561 → 1.184044 | 427.728 → 387.296 |
+
+The four-slot result is a measured improvement in the relevant cone, rather than
+another isolated adder rewrite. It still misses 250 ps. The companion review
+change decodes `{allocate,pop}` into hold/increment/decrement for the write-buffer
+count (the Part LI width-4 proof), preserving simultaneous push/pop. Balancing
+the pure request conjunction changes its structural expression depth; no standalone
+physical gain is claimed for parentheses that a mapper may already balance.
+
+## A81 — Cached carry predicates: faster counters with explicit state cost
+
+`fixtures/auto_correct/bounded_step_counter.sv` implements a bounded-step counter
+transition, an inductive witness and a registered wrapper. For each segment
+boundary `b`, cached bit `F[b,d]` means:
+
+```text
+low_b(pointer) >= 2**b - d, for 1 <= d <= maximum_step.
+```
+
+It supplies the carry into a segment without propagating the new carry through
+the whole word. Next predicates use constant, possibly wrapping intervals:
+`(old_low + e) mod 2**b >= 2**b-d` iff old_low belongs to
+`[(-d-e) mod 2**b, (-1-e) mod 2**b]`.
+The proof assumes the current invariant and proves the next visible pointer and
+all next predicates for arbitrary pointer values, including wraparound. Flush
+proves the zero-reset base. The wrapper registers both states on the same
+`posedge clk_i` / `negedge rst_ni`; it introduces no visible cycle of latency.
+
+A four-input thermometer network avoids serial binary count decoding in predicate
+selection. Parameter-edge proofs cover widths 1/4/5/16/17 with 1/3/4/8 inputs,
+the wrapping case of 15 inputs at width 5, and 8-bit segment partial-word cases.
+
+| Registered 16-bit counter, 4 inputs | Required period (ns) | Total mapped area (µm²) | Extra state bits |
+|---|---:|---:|---:|
+| ordinary binary counter | 0.596693 | 179.284 | 0 |
+| cached thermometer, 4-bit segments | **0.450162** | **362.824** | 12 |
+| cached thermometer, 8-bit segments | 0.486596 | 254.562 | 4 |
+
+These include mapped register timing and area, but not placement/routing.
+Both candidates fail 250 ps. They are research implementations, not an automatic
+replacement for a core counter: reset, enables, scan observability and configuration
+integration remain obligations. A lower transition-only delay must not hide the
+cost or paths of predicate registers.
+
+## Efficient search and the completion gate
+
+`tools/sum3_trial.py` now supports named `--variants`, `--proof-only` parameter
+checks, `--abc-delay-ps`, `--abc-driving-cell`, `--cached-counter`,
+`--block-bits`, `--registered` and `--queue-count`. Every run retains inputs,
+driver, hashes, proofs and fresh reports. Screening is per width within the same
+run and keeps delay, area and redundant state as separate costs. Unknown area
+cannot establish dominance. Successful tool execution is separate from meeting
+the requested delay target.
+
+Do not repeat rejected source-only structures on the full core. Explicit late-carry
+and parallel-prefix adders did not beat the original; merely setting ABC `-D 250`
+without its constrained-mapping recipe had no effect. With that recipe, the original
+four-input popcount/counter cone improved 0.540763 → 0.438857 ns, at higher area.
+
+The host now stops `timings sta-rtl` before synthesis when a valid emitted report
+still misses the requested budget. `--allow-over-budget` or
+`physicalDesign.structural.allowOverBudget=true` explicitly requests a study and
+labels it as such. Missing/partial emitted evidence cannot use this bypass.
+Reusing a package checks the same gate. Dry runs preserve prior emitted artifacts.
+
+Next targets are the remaining queue/write-buffer 16.5 FO4 cones, indexed trigger
+access at 15, scoreboard count/select at 14.5, and the 12.5–13 FO4 selection cones.
+The current callback cannot legally pipeline a block-local loop accumulator on its
+own; packet data, admission, replay and consumed-mask alignment require a real
+interface-level transformation. Completion is still pending.
+
+The previous flat full-core mapping did **not** finish: the kernel OOM log records
+Yosys PID 3446654 killed at 2026-10-15 23:41:42 UTC, after roughly 6945 seconds
+with about 51 GiB resident memory. Its orphaned ABC process was cleaned up.
+No full-core STA result exists from that run. The host now offers
+`--map-recipe hierarchical`, using slang `--best-effort-hierarchy` and omitting
+flattening; a registered two-module fixture mapped successfully with both modules
+retained. Full-core use remains an explicit study, not evidence of 10 FO4 closure.
+
+The hierarchical smoke exposed another real handoff defect: the lean recipe did
+not run `opt_dff`, leaving slang's constant-asynchronous-load flops as
+`$_ALDFF_PN_`. STA treated those as black boxes and could print a finite-looking
+`1e39` slack with **no paths**. The recipe now normalizes flops before techmap;
+standalone STA links with `-no_black_boxes`, the timing Tcl requires a constrained
+maximum-delay path, and the host/trial parsers reject no-path infinity sentinels.
+The repaired hierarchical fixture produced real max/min timing reports. This is
+a flow-correctness repair, not a clock-frequency optimization.
+
+A new live-RTL hierarchical baseline study was launched under an explicit
+16 GiB maximum virtual-memory cap (also bounded by available host memory), in
+`~/.cache/g6lc-sta/g6lc64_ooo-hierarchical-20261016/`. It uses the PGO fork and
+cleans its own mapper process group on exit. It is separate from the 10 FO4
+candidate; neither a successful mapping nor a positive setup slack alone proves
+whole-core completion.
+
+---
+
+# Part LIII — Measurement truth: coordinates, widths, casts, multi-operand sums
+
+## Current status (2026-10-16): 10 FO4 is not closed; the board is now trustworthy
+
+Four measurement corrections (delay-v28 … delay-v31) and one host input (the
+elaborated `CVA6Cfg` snapshot) changed the report more than any transform did.
+All numbers below are structural FO4 at **10 FO4 / 20 ps / margin 0.2** on
+`g6lc64_ooo`; `baseline` is the live RTL, `review` the Part LII review copies
+(`instr_queue` admission factoring, `wt_dcache_wbuffer` delta decode).
+
+| Measurement | Worst RegToReg | Failing primary | Note |
+|---|---:|---:|---|
+| delay-v27 baseline | 31.0 (`instr_queue`) | 413 | three `rank` chain nodes at reference width |
+| delay-v28 baseline | 31.0 | 394 | `stream_arbiter` 30 FO4 wrapper artifact gone (A82) |
+| delay-v29 baseline | 22.0 | 771 | width scaling: narrow counters fall, 64-bit datapath rises to 12 (A83) |
+| delay-v30 baseline | 75.0 (`fpnew_fma_multi`) | 677 | casts parsed: hidden fpnew exponent sums exposed (A84) |
+| delay-v31 baseline | 27.0 (`g6lc_bp_ckpt`) | 677 | multi-operand sums are CSA + one CPA (A85) |
+| delay-v31 + cfg snapshot, baseline | **22.0** | 700 | `TRANS_ID_BITS`/`NrHarts`/`INSTR_PER_FETCH` resolved (A86) |
+| delay-v31 + cfg snapshot, review | **21.0** (`fpnew_fma_multi`) | 696 | |
+
+The failing-path count went **up** with width scaling: a 64-bit add is 12 FO4
+at this table, so every single-cycle 64-bit adder path now misses a 10 FO4
+budget. That is the physics of XLEN=64 at 4 GHz / 20 ps, not a regression, and
+it is the honest shape of the remaining gap: AGENTS.md §3.2.1 — `fo4_ps` is a
+process input (10 FO4 at 20 ps, 16.7 at 12 ps).
+
+Top remaining RegToReg cones (review tree, delay-v31 + snapshot):
+`fpnew_fma_multi` L396 21.0 and `fpnew_fma` L303 17.5 (exponent datapath at
+reference width: `EXP_WIDTH` comes from a package *function*, unresolved),
+`g6lc_bp_ckpt` L345 17.0 (a real 4-bit chain pop_diff → pop_dist → alloc_free
+→ head_d, 5.5+1+4+6.5), `frontend` L727 14.5 (64-bit branch-target adder
+behind a mux — a fat-operator leaf at XLEN=64), `instr_queue` L289 13.5
+(`NrFifo`/`IdxW` from `g6lc_fetch_pkg::geo(CVA6Cfg)`, unresolved), then a wall
+of 12.0–12.5 entries that are one 64-bit add or compare plus a mux.
+
+## A82 — Constant-span exclusion in origin coordinates (delay-v28)
+
+`lrm_constant_spans` (packed/unpacked dimensions, case labels, replication
+counts, generate headers, now also parameter/localparam/typedef declarations)
+compared raw parser offsets against operator locations already mapped to the
+original source. The two frames drift: the preprocessor shifts its output by
+22 bytes after `parameter ARBITER = "rr" // "rr" or "prio"` (a string default
+followed by a quoting comment), so every `[N_INP-1:0]` port range in
+`stream_arbiter` escaped the exclusion and the instance-only wrapper reported a
+30 FO4 "path" of three 10 FO4 adders. Spans are now mapped through
+`SyntaxTree::get_origin` like the operators (`origin_byte_span`), and every
+declaration text extraction (`packed_dimension_text`, parameter defaults,
+function bodies) reads `SyntaxTree::get_str` — the frame the offsets address —
+instead of slicing the original bytes. Regression:
+`lower::tests::port_dims_and_parameters_are_not_datapath_after_a_header_comment`
+(fails with raw spans: five phantom nodes).
+
+## A83 — Width inference and normalized scaling (delay-v29)
+
+`crate::width` implements OPTIMIZATION-LEVELS §1.1(2), which had been
+documented as built and was not: every node carried `width: 1,
+width_defaulted: true`, so a 3-bit FIFO pointer increment cost the whole 10 FO4
+budget and a 64-bit datapath add cost the same 10.
+
+Widths come from declarations (`DeclSite.packed_text`/`type_name`, ports'
+`dimension_text`), module and package typedefs (`typedef_texts`, enum base
+vectors), parameters/localparams (`const_exprs`, evaluated with the `Expr`
+parser: `+ - * / % ** << >> ?: $clog2`), imported-package constants and the
+host param-map (`param_map_ints`). Context (IEEE 1800 §11.6/§11.8): arithmetic
+at `max(LHS, operands)`, relational/equality at their operands (never the 1-bit
+LHS); constants and unrolled loop variables (`DeclSite.loop_var`) do not set a
+width. Unresolved stays at the reference width — an unknown is never cheaper.
+
+Scaling laws were **measured** on Nangate45 with the fork's `sta` and the
+structure-preserving ABC script (ratios to the 32-bit cell):
+
+| Class | Law | Measured w = 4 / 8 / 16 / 32 / 64 |
+|---|---|---|
+| `add_sub`, `compare`, `shift_var` | `log2(max(w,2)) / 5` | `<` 0.41/0.52/0.92/1.0/1.09; `<<` 0.45/0.68/0.81/1.0/1.19; law 0.4/0.6/0.8/1.0/1.2 |
+| `mul`, `div_rem` | `w / 32` | `*` 0.15/0.37/0.62/1.0 — the plan's `(w/32)²` is area-like, rejected |
+| everything else | 1 | `&` flat |
+
+Adders are log-depth only under the delay-oriented script (0.617/0.770 ns at
+32/64 bits); Yosys's default liberty script collapses the Brent–Kung `$lcu` to
+ripple (0.905/1.786 ns). The model assumes the former; a flow that produces
+ripple carries misses it — that is the flow's defect, fixed in the host (A87).
+
+## A84 — Casts are wiring; constant coefficients are shift-adds (delay-v30)
+
+`W'(e)`, `int'(e)`, `pkg::t'(e)`, `type(x)'(e)` and unsized `'(e)` are
+transparent: the inner expression is the datapath. The old parser only
+collapsed `W'(const|ident|ident±1)` and left every other cast unparsed, so the
+whole RHS fell to the string heuristic — which billed the `-` of a part-select
+bound inside `XLEN'({pmpaddr_q[i][PLEN-3:1], 1'b1})` as a 64-bit adder
+(csr_regfile 12 FO4 arms) and hid fpnew's exponent arithmetic entirely. The Mul
+worry that motivated the restriction (`int'(group_q)*6`) is handled where it
+belongs: `x * Const` is a shift-add CPA (`AddSub`), never free, never the
+56 FO4 array; `x * y` stays `Mul`. `x == '0` / `'1` fill-literal compares are
+reduce-detects. The exposed fpnew sums were real — and over-counted (A85).
+
+## A85 — Multi-operand sums are carry-save plus one CPA (delay-v31)
+
+`a + b + c - d + e` was billed as four serial CPAs (fpnew `exponent_product`:
+52.5 FO4). Synthesis (`alumacc`/`maccmap`) builds a 3:2 compressor tree and one
+final adder. Measured (nf script, Nangate45): 2/3/5 operands at 32 bits =
+0.617/0.726/0.901 ns — about 0.095 ns (~1.5 FO4) per extra operand,
+width-independent. `Expr::fo4_critical_cost_latticed` and the cut spine now
+flatten `+`/`-` trees: `AddSub(w) + 1.5 × (N − 2) + worst leaf`, constants
+folding into one operand, trees of two operands unchanged (`x + 1` is still an
+increment). `CSA_LEVEL_LOGIC_BITS` is the constant.
+
+## A86 — Elaborated `CVA6Cfg` snapshot (host)
+
+The host param-map carried XLEN only. `build_config_pkg::build_config` is a
+500-line function; rather than re-implement it, `tooling/cfgSnapshot.ts` has
+yosys-slang evaluate it: it parses `cva6_cfg_t` for its 222 `int`/`bit`
+fields, generates a probe module with one output per field declared
+`logic [CVA6Cfg.<Field>:0]`, elaborates the three config packages plus the
+probe, and reads each port's bit count from `write_json` (value = width − 1).
+`sta-rtl` merges the result into `svt/param-map.json` as `CVA6Cfg.<Field>` /
+`cva6_cfg.<Field>` (`svt/cfg-snapshot.json` keeps provenance). With it the
+scoreboard commit-pointer adds (5 bits) and `g6lc_bp_ckpt`'s span arithmetic
+(4 bits) resolve; `g6lc_fetch_pkg::geo(CVA6Cfg).slots`-style function-derived
+localparams and fpnew's `exp_bits()` widths do not — the next step is an
+elaborated per-module net-width sidecar (yosys `write_json` netnames after
+`read_slang`), which would close that class generally.
+
+## A87 — Whole-core mapping on the builder: what it took, what is still open
+
+Three whole-core mappings died before STA: flat `lean` (OOM-killed in ABC at
+51 GiB RSS), hierarchical (bad_alloc in `techmap` at 44 GiB under a 48 GiB cap),
+hierarchical with the SRAM study stub (bad_alloc in `opt_clean` at 48 GiB).
+The gate-level representation of this core does not fit the builder's free
+memory in one process; the word-level design is ~12 GiB. Host changes:
+
+- `scripts/tc_sram_timing_stub.sv` replaces the behavioural `tc_sram`
+  (`--no-sram-stub` keeps it): the macro boundary stays registered, no
+  flop-per-bit array. A study netlist, not a functional model.
+- `--map-recipe streamed`: phase A lowers to word level and dumps RTLIL plus the
+  module list; phase B maps one module at a time (`techmap; dfflibmap; abc;
+  write_verilog -selected; delete`) so only one gate-level module exists at a
+  time; OpenSTA links the per-module netlists hierarchically.
+- ABC runs the delay-oriented structure-preserving script with the clock period
+  (A83); the lean recipe runs `opt_dff` so slang's constant-async-load flops do
+  not reach STA as black boxes; `openroad-timing.tcl` links `-no_black_boxes`
+  for standalone `sta` and refuses a design without a constrained max path; the
+  result parser rejects `1e39` no-path sentinels; a dry run is SKIP, not STA.
+
+The streamed live-RTL study is running under a 48 GiB cap in
+`~/.cache/g6lc-sta/g6lc64_ooo-streamed-20261016/`. No whole-core mapped STA
+number exists yet; when one does it anchors the model, it does not certify
+10 FO4.

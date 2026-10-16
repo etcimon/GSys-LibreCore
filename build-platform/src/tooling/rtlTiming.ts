@@ -31,6 +31,7 @@ import type { PlatformContext } from "../context.ts";
 import { run } from "../platform/exec.ts";
 import { getHostInfo } from "../platform/os.ts";
 import { windowsPathToWsl, wslCommand } from "../platform/wsl.ts";
+import { snapshotCvaCfg } from "./cfgSnapshot.ts";
 import {
   REMOTE_FORMAL,
   REMOTE_OPENROAD,
@@ -98,11 +99,70 @@ export interface RtlTimingOptions {
   /** Reuse an existing `timings correct --emit` package instead of running the pre-pass. */
   fromTiming?: string;
   /** Yosys lowering before the liberty map: `lean` (default) or Yosys's full `synth`. */
-  mapRecipe?: "lean" | "synth";
+  mapRecipe?: "lean" | "hierarchical" | "streamed" | "synth";
+  /**
+   * Replace the behavioural `tc_sram` with `scripts/tc_sram_timing_stub.sv`
+   * (default true). The macro boundary stays registered; the flop-per-bit
+   * array that `memory_map` would build (48 KiB of caches → OOM on the
+   * builder) is gone. `--no-sram-stub` keeps the model.
+   */
+  sramStub?: boolean;
+  /** Permit mapping a valid emitted study that still misses the FO4 budget. */
+  allowOverBudget?: boolean;
+}
+
+/** Completion gate: no IR credit, incomplete report or skipped source can close. */
+export function checkFo4Completion(
+  report: any,
+  budget: number,
+  allowOverBudget = false,
+): { ok: boolean; detail: string } {
+  const post = report?.post_analyze;
+  const integrity = report?.integrity;
+  if (report?.dry_run !== false || report?.post_analyze_valid !== true ||
+      integrity?.joint_ok !== true || integrity?.reparse_ok !== true ||
+      integrity?.structural_ok !== true || !Array.isArray(post?.paths) ||
+      post.paths.length === 0 || post.skipped_files?.length) {
+    return { ok: false, detail: "INCONCLUSIVE: no complete, validated emitted analysis" };
+  }
+  const actual = post.budget_fo4;
+  if (!Number.isFinite(budget) || budget <= 0 || !Number.isFinite(actual) ||
+      Math.abs(actual - budget) > 1e-8) {
+    return { ok: false, detail: "emitted budget does not match the requested FO4 target" };
+  }
+  if (post.paths.some((p: any) => typeof p?.multi_cycle !== "boolean" ||
+      !Number.isFinite(p?.total_fo4) || p.total_fo4 < 0)) {
+    return { ok: false, detail: "INCONCLUSIVE: path classification/cost is missing" };
+  }
+  const primary = post.paths.filter((p: any) => p.multi_cycle === false);
+  if (primary.length === 0 || primary.some((p: any) => !Number.isFinite(p.total_fo4))) {
+    return { ok: false, detail: "INCONCLUSIVE: primary path coverage/cost is missing" };
+  }
+  const worst = primary.reduce((max: number, p: any) => Math.max(max, p.total_fo4), 0);
+  const failed = primary.filter((p: any) => p.total_fo4 > budget + 1e-8).length;
+  if (failed) {
+    return {
+      ok: allowOverBudget,
+      detail: `${allowOverBudget ? "STUDY" : "MISS"}: worst primary ${worst} FO4, ` +
+        `${failed} paths exceed ${budget}; ` +
+        (allowOverBudget ? "mapping explicitly requested despite the miss" :
+          "mapping stopped; --allow-over-budget enables an exploratory STA run"),
+    };
+  }
+  return { ok: true, detail: `emitted primary paths meet ${budget} FO4; functional/STA checks remain` };
+}
+
+function checkFo4Report(path: string, budget: number, allowOverBudget?: boolean) {
+  try {
+    return checkFo4Completion(JSON.parse(readFileSync(path, "utf8")), budget, allowOverBudget);
+  } catch {
+    return { ok: false, detail: `INCONCLUSIVE: missing or invalid emitted report ${path}` };
+  }
 }
 
 export interface RtlTimingResult {
   ok: boolean;
+  dryRun?: boolean;
   outDir: string;
   target: string;
   top: string;
@@ -217,8 +277,16 @@ export function buildClockSdc(opts: { clockPort: string; targetMhz: number; top:
  *   techmap` then `dfflibmap` + `abc -liberty`. No `opt`/`opt_merge`, `share`,
  *   `fsm` or `check`: on a whole core those are the asymptotic passes
  *   (`opt_merge` was measured at ~11 merges/min from ~273k cells; `check`
- *   after `flatten` ran past an hour on g6lc64_ooo), and none of them changes
- *   what STA measures — abc restructures the logic anyway.
+ *   after `flatten` ran past an hour on g6lc64_ooo). This is a study mapping;
+ *   optimization choices can change the resulting netlist and timing.
+ * - `hierarchical`: the same lowering without flatten, so repeated instances
+ *   do not form one huge ABC graph. Useful after a flat mapping exhausts memory.
+ * - `streamed`: hierarchical word-level lowering, then (remote route) every
+ *   module is mapped on its own and evicted from the design after its netlist
+ *   is written, so the gate-level representation never exists for the whole
+ *   core at once. Both flat and hierarchical whole-core mappings exhausted
+ *   the 128 GiB builder (51 GiB OOM-kill in ABC, 44/48 GiB bad_alloc in
+ *   techmap / opt_clean); the word-level design is ~12 GiB.
  * - `synth`: Yosys's full `synth -flatten` before the mapping (slower, the
  *   netlist Yosys would hand a real flow).
  */
@@ -229,14 +297,30 @@ export function buildMapScript(opts: {
   netlist: string;
   defines: string[];
   slangArgs: string[];
-  recipe?: "lean" | "synth";
+  recipe?: "lean" | "hierarchical" | "streamed" | "synth";
+  /**
+   * `streamed` phase A: stop after the word-level lowering, dump RTLIL and
+   * the module list here (phase B is generated by the remote shell).
+   */
+  streamDir?: string;
+  /**
+   * Clock period in ps for a delay-oriented ABC mapping. Yosys's default
+   * liberty script (`strash; dc2; dretime; … &nf {D}`) collapses the
+   * Brent-Kung `$lcu` carry trees into ripple depth before mapping: measured
+   * on Nangate45 a 32/64-bit add came out 0.905/1.786 ns, versus 0.617/0.770
+   * ns with the structure-preserving `&st; &dch -f; &nf -D` script below.
+   * A study that is supposed to see log-depth arithmetic needs the latter.
+   */
+  periodPs?: number;
 }): string {
+  const abc = abcCommand(opts.liberty, opts.periodPs);
+  const hier = opts.recipe === "hierarchical" || opts.recipe === "streamed";
   const lowering =
     (opts.recipe ?? "lean") === "synth"
       ? [`synth -top ${opts.top} -flatten`]
       : [
           "proc",
-          "flatten",
+          ...(hier ? [] : ["flatten"]),
           "opt_clean",
           "wreduce",
           "alumacc",
@@ -244,6 +328,7 @@ export function buildMapScript(opts: {
           "memory -nomap",
           "memory_map",
           "opt_clean",
+          "opt_dff",
           "techmap",
           "opt_clean",
         ];
@@ -253,19 +338,66 @@ export function buildMapScript(opts: {
       opts.manifest,
       `--top ${opts.top}`,
       "--single-unit",
+      ...(hier ? ["--best-effort-hierarchy"] : []),
       ...opts.defines.map((d) => `-D${d}`),
       ...opts.slangArgs,
     ].join(" "),
     `hierarchy -check -top ${opts.top}`,
     ...lowering,
-    // The technology mapping STA needs: flops onto the liberty's cells, logic
-    // through abc with liberty areas/delays; one flat timing graph.
-    `dfflibmap -liberty ${opts.liberty}`,
-    `abc -liberty ${opts.liberty}`,
-    "opt_clean -purge",
-    `stat -liberty ${opts.liberty}`,
-    `write_verilog -noattr -noexpr ${opts.netlist}`,
+    ...(opts.recipe === "streamed" && opts.streamDir
+      ? [
+          // Phase A ends here: word-level design + module list for phase B.
+          `write_rtlil ${opts.streamDir}/wordlevel.il`,
+          `tee -q -o ${opts.streamDir}/modules.txt ls`,
+        ]
+      : [
+          // The technology mapping STA needs: flops onto the liberty's cells, logic
+          // through abc with liberty areas/delays; one flat timing graph.
+          `dfflibmap -liberty ${opts.liberty}`,
+          abc,
+          "opt_clean -purge",
+          `stat -liberty ${opts.liberty}`,
+          `write_verilog -noattr -noexpr ${opts.netlist}`,
+        ]),
   ].join("; ");
+}
+
+/** Delay-oriented liberty mapping (see `periodPs` on `buildMapScript`). */
+export function abcCommand(liberty: string, periodPs?: number): string {
+  return periodPs && periodPs > 0
+    ? `abc -liberty ${liberty} -D ${Math.round(periodPs)} -script +&get,-n;&st;&dch,-f;&nf,-D,${Math.round(periodPs)};&put`
+    : `abc -liberty ${liberty}`;
+}
+
+/**
+ * `streamed` phase B, as shell: build a yosys script that maps one module at
+ * a time from the phase-A RTLIL and evicts it once its netlist is written, then
+ * concatenates the per-module netlists. Module names come from phase A's
+ * `ls` (two-space indented; slang's `name$hier.path` forms kept verbatim as
+ * selections, sanitized only for the file name). Parents keep their child
+ * instances as plain cell instantiations, so OpenSTA links the set as a
+ * hierarchical netlist.
+ */
+export function streamedPhaseBShell(opts: { runDir: string; liberty: string; yosysVar: string; periodPs: number; logVar: string }): string[] {
+  const abc = abcCommand(opts.liberty, opts.periodPs);
+  return [
+    `if [ ! -s "${opts.runDir}/modules.txt" ] || [ ! -s "${opts.runDir}/wordlevel.il" ]; then echo "RESULT fail synth"; echo LOGSTART; tail -40 "${opts.logVar}"; echo LOGEND; exit 1; fi`,
+    `mkdir -p "${opts.runDir}/mapped"; rm -f "${opts.runDir}/mapped/"*.v`,
+    `: > "${opts.runDir}/phaseB.ys"`,
+    `echo "read_rtlil ${opts.runDir}/wordlevel.il" >> "${opts.runDir}/phaseB.ys"`,
+    `n=0`,
+    `grep -E '^  ' "${opts.runDir}/modules.txt" | sed 's/^  //' | while IFS= read -r m; do`,
+    `  f=$(printf '%s' "$m" | tr -c 'A-Za-z0-9_.-' '_')`,
+    `  n=$((n+1))`,
+    `  printf 'select %s\ntechmap\nopt_clean\ndfflibmap -liberty %s\n%s\nopt_clean -purge\nstat -liberty %s\nwrite_verilog -selected -noattr -noexpr %s/mapped/%04d_%s.v\nselect -clear\ndelete %s\n' "$m" "${opts.liberty}" ${JSON.stringify(abc)} "${opts.liberty}" "${opts.runDir}" "$n" "$f" "$m" >> "${opts.runDir}/phaseB.ys"`,
+    `done`,
+    `echo "SYNTH_STREAM modules=$(grep -c '^select ' "${opts.runDir}/phaseB.ys")"`,
+    `/usr/bin/time -f "SYNTH_MEASURE_B maxrss_kb=%M elapsed_s=%e" "${opts.yosysVar}" -s "${opts.runDir}/phaseB.ys" > "${opts.runDir}/synth-map.log" 2>&1`,
+    `rcb=$?; echo "SYNTH_B rc=$rcb"; grep -E "SYNTH_MEASURE_B" "${opts.runDir}/synth-map.log"`,
+    `if [ "$rcb" != 0 ]; then echo "RESULT fail synth"; echo LOGSTART; tail -40 "${opts.runDir}/synth-map.log"; echo LOGEND; exit 1; fi`,
+    `cat "${opts.runDir}/mapped/"*.v > "${opts.runDir}/netlist.v"`,
+    `grep -h "Chip area for module" "${opts.runDir}/synth-map.log" | awk '{s+=$NF} END {printf "SYNTH_STREAM_AREA total=%.3f\n", s}'`,
+  ];
 }
 
 export function parseStaResult(text: string): Pick<RtlTimingResult, "wnsMax" | "tnsMax" | "wnsMin" | "tnsMin"> {
@@ -273,7 +405,8 @@ export function parseStaResult(text: string): Pick<RtlTimingResult, "wnsMax" | "
   if (!m) return {};
   const n = (s: string | undefined) => {
     const v = Number(s);
-    return Number.isFinite(v) ? v : undefined;
+    // OpenSTA's unconstrained/no-path infinity may be printed as finite 1e39.
+    return Number.isFinite(v) && Math.abs(v) < 1e30 ? v : undefined;
   };
   return { wnsMax: n(m[1]), tnsMax: n(m[2]), wnsMin: n(m[3]), tnsMin: n(m[4]) };
 }
@@ -318,14 +451,22 @@ async function runSvtPrepass(
         },
       };
     }
+    const budget = opts.fo4Budget ?? cfgEarly?.fo4Budget ?? 10;
+    const completion = checkFo4Report(
+      join(v.dir, "correct.json"), budget, opts.allowOverBudget ?? cfgEarly?.allowOverBudget,
+    );
+    if (!completion.ok) {
+      return { stage: { id: "s0-svt-correct", status: "fail", detail: completion.detail }, budget };
+    }
     return {
-      stage: { id: "s0-svt-correct", status: "pass", detail: `reusing emit ${posixPath(v.correctedFlist)}` },
+      stage: { id: "s0-svt-correct", status: "pass", detail: `${completion.detail}; reusing ${posixPath(v.correctedFlist)}` },
       emitFlist: v.correctedFlist,
+      budget,
     };
   }
   const cfg = ctx.config.physicalDesign?.structural;
   const budget = opts.fo4Budget ?? cfg?.fo4Budget ?? 0;
-  if (!(budget > 0)) {
+  if (budget === 0) {
     return { stage: { id: "s0-svt-correct", status: "skip", detail: "--fo4 0: no sv-timing pass; live RTL" } };
   }
   const targetMhz = targetMhzForFo4Budget(budget, fo4Ps, margin);
@@ -344,14 +485,28 @@ async function runSvtPrepass(
     tag: `sta-rtl-${opts.target}`,
     outPath: posixPath(join(svtDir, "portable.f")),
   });
+  // Elaborated CVA6Cfg fields (yosys-slang probe) so sv-timing's width
+  // inference sees TRANS_ID_BITS / NrHarts / INSTR_PER_FETCH / … instead of
+  // costing every cfg-dimensioned counter at the 32-bit reference width.
+  let cfgNote = "cfg snapshot unavailable (XLEN-only map)";
+  let cfgEntries: Record<string, number> = {};
+  try {
+    const snap = await snapshotCvaCfg(ctx, edaPaths(ctx), opts.target, svtDir);
+    if (snap) {
+      cfgEntries = snap.entries;
+      cfgNote = snap.detail;
+    }
+  } catch (e) {
+    cfgNote = `cfg snapshot skipped: ${e instanceof Error ? e.message : String(e)}`;
+  }
   const paramMap = writeHostParamMap(ctx, {
     outPath: posixPath(join(svtDir, "param-map.json")),
     xlen: ctx.config.soc.xlen as number | undefined,
+    extra: cfgEntries,
   });
   const correctedDir = posixPath(join(svtDir, "corrected"));
   // The emitter only writes files it touched; a stale emit from an earlier
   // run with other options would otherwise survive.
-  rmSync(correctedDir, { recursive: true, force: true });
   // Defaults that make the budget reachable: -O3 (multi-cut, budget-fit) and
   // enough stages per region for the deepest cone the core shows (~100 FO4)
   // at this budget. The structural emit options stay opt-in through
@@ -396,6 +551,8 @@ async function runSvtPrepass(
   if (ctx.dryRun) {
     return { stage: { id: "s0-svt-correct", status: "skip", detail: `dry-run ${budgetNote}` }, targetMhz, budget };
   }
+  rmSync(correctedDir, { recursive: true, force: true });
+  rmSync(join(svtDir, "correct.json"), { force: true });
   const res = await run(cmd.argv[0]!, cmd.argv.slice(1), {
     cwd: cmd.cwd,
     allowFailure: true,
@@ -408,14 +565,18 @@ async function runSvtPrepass(
   if (!res.ok) {
     return { stage: { id: "s0-svt-correct", status: "fail", detail: `sv-timing correct exit ${res.code} (svt/correct.log)` }, targetMhz, budget };
   }
+  const completion = checkFo4Report(
+    join(svtDir, "correct.json"), budget, opts.allowOverBudget ?? cfg?.allowOverBudget,
+  );
+  if (!completion.ok) {
+    return { stage: { id: "s0-svt-correct", status: "fail", detail: completion.detail }, targetMhz, budget };
+  }
   if (!existsSync(emitFlist)) {
-    // Nothing to rewrite at this budget (or every candidate was refused): the
-    // live RTL is the corrected RTL. Report it rather than failing.
-    return { stage: { id: "s0-svt-correct", status: "pass", detail: `${budgetNote}: no emitted rewrites; live RTL` }, targetMhz, budget };
+    return { stage: { id: "s0-svt-correct", status: "fail", detail: "no emitted filelist for the validated result" }, targetMhz, budget };
   }
   const replaced = readFileSync(emitFlist, "utf8").split(/\r?\n/).filter((l) => /__svt\.(sv|v|svh)$/i.test(l.trim())).length;
   return {
-    stage: { id: "s0-svt-correct", status: "pass", detail: `${budgetNote}: ${replaced} corrected file(s) → ${posixPath(emitFlist)}` },
+    stage: { id: "s0-svt-correct", status: "pass", detail: `${completion.detail}; ${replaced} files → ${posixPath(emitFlist)}; ${cfgNote}` },
     emitFlist: posixPath(emitFlist),
     targetMhz,
     budget,
@@ -444,6 +605,7 @@ async function runLocal(
 
   const manifest = writeFlatManifest(ctx, paths, opts.target, {
     outSubdir: "sta-rtl", outTag: opts.target, emitFlist: pre.emitFlist,
+    replaceFiles: sramStubSubstitution(ctx, opts),
   });
   const result: RtlTimingResult = {
     ok: false, outDir: posixPath(outDir), target: opts.target, top, liberty: posixPath(liberty), stages,
@@ -471,6 +633,7 @@ async function runLocal(
     defines: ctx.config.verify.synthDefines,
     slangArgs: ctx.config.verify.synthSlangArgsByTarget[opts.target] ?? [],
     recipe: opts.mapRecipe,
+    periodPs: 1e6 / opts.targetMhz,
   });
   const synthLog = join(outDir, "synth.log");
   let synth;
@@ -583,6 +746,7 @@ async function runRemote(
   }
   const manifest = writeFlatManifest(ctx, paths, opts.target, {
     outSubdir: "sta-rtl", outTag: opts.target, emitFlist: pre.emitFlist,
+    replaceFiles: sramStubSubstitution(ctx, opts),
   });
   let flist: string;
   try {
@@ -611,7 +775,12 @@ async function runRemote(
     defines: ctx.config.verify.synthDefines,
     slangArgs: ctx.config.verify.synthSlangArgsByTarget[opts.target] ?? [],
     recipe: opts.mapRecipe,
+    streamDir: "$RUN",
+    periodPs: 1e6 / opts.targetMhz,
   });
+  const phaseB = opts.mapRecipe === "streamed"
+    ? streamedPhaseBShell({ runDir: "$RUN", liberty: "$LIB", yosysVar: "$YS", periodPs: 1e6 / opts.targetMhz, logVar: "$RUN/synth.log" })
+    : [];
 
   const lines = [
     "set -u",
@@ -649,7 +818,9 @@ async function runRemote(
     `echo "SYNTH start $(date -u +%FT%TZ)"`,
     `/usr/bin/time -f "SYNTH_MEASURE maxrss_kb=%M elapsed_s=%e" "$YS" -p ${JSON.stringify(script)} > "$RUN/synth.log" 2>&1`,
     'rc=$?; echo "SYNTH rc=$rc"; grep -E "SYNTH_MEASURE|Number of cells|Chip area" "$RUN/synth.log" | tail -4',
-    'if [ "$rc" != 0 ] || [ ! -s "$RUN/netlist.v" ]; then echo "RESULT fail synth"; echo LOGSTART; tail -40 "$RUN/synth.log"; echo LOGEND; exit 1; fi',
+    'if [ "$rc" != 0 ]; then echo "RESULT fail synth"; echo LOGSTART; tail -40 "$RUN/synth.log"; echo LOGEND; exit 1; fi',
+    ...phaseB,
+    'if [ ! -s "$RUN/netlist.v" ]; then echo "RESULT fail synth"; echo LOGSTART; tail -40 "$RUN/synth.log"; echo LOGEND; exit 1; fi',
     `echo "STA start $(date -u +%FT%TZ) threads=${threads}"`,
     `OR_LEF="$LEF" OR_LIBERTY="$LIB" OR_VERILOG="$RUN/netlist.v" OR_SDC="$RUN/clock.sdc" OR_TOP=${JSON.stringify(top)} OR_THREADS=${threads} OR_REPORT_DIR="$RUN/reports" \\`,
     '  /usr/bin/time -f "STA_MEASURE maxrss_kb=%M elapsed_s=%e" "$STA" $STA_ARGS "$REPO/build-platform/scripts/openroad-timing.tcl" > "$RUN/sta.log" 2>&1',
@@ -665,6 +836,11 @@ async function runRemote(
     budgetSeconds: 4 * 3600,
     sync: true,
   });
+  if (ctx.dryRun) {
+    stages.push({ id: "s1-yosys-map", status: "skip", detail: "dry-run: remote mapping script generated" });
+    stages.push({ id: "s2-openroad-sta", status: "skip", detail: "dry-run: no STA execution or result" });
+    return { ...result, ok: true, dryRun: true };
+  }
   writeFileSync(join(outDir, "remote.log"), res.text, "utf8");
   if (res.error) {
     stages.push({ id: "remote", status: "fail", detail: res.error });
@@ -710,6 +886,16 @@ async function runRemote(
     detail: `wns_max ${parsed.wnsMax} tns_max ${parsed.tnsMax}${staM ? ` (${staM[2]} s, ${threads} threads)` : ""}`,
   });
   return { ...result, ...parsed, ok: true };
+}
+
+/** `tc_sram` → study stub (see scripts/tc_sram_timing_stub.sv), unless --no-sram-stub. */
+function sramStubSubstitution(ctx: PlatformContext, opts: RtlTimingOptions) {
+  if (opts.sramStub === false) return [];
+  return [{
+    match: /\/tech_cells_generic\/src\/rtl\/tc_sram\.sv$/i,
+    replacement: posixPath(join(ctx.repoRoot, "build-platform", "scripts", "tc_sram_timing_stub.sv")),
+    note: "SRAM macro boundary as registers; no flop-per-bit array (study netlist, not a functional model)",
+  }];
 }
 
 function gitlink(ctx: PlatformContext, path: string): string | null {

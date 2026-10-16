@@ -53,8 +53,15 @@ foreach lib $::env(OR_LIBERTY) {
   read_liberty $lib
 }
 read_verilog $::env(OR_VERILOG)
-link_design $::env(OR_TOP)
+if {$is_openroad} {
+  link_design $::env(OR_TOP)
+} else {
+  link_design -no_black_boxes $::env(OR_TOP)
+}
 read_sdc $::env(OR_SDC)
+if {[llength [find_timing_paths -path_delay max -group_path_count 1]] == 0} {
+  error "no constrained maximum-delay path; this is not a timing result"
+}
 
 report_checks -path_delay max -fields {slew cap input_pins} -digits 3 \
   -group_count $group_count

@@ -64,6 +64,16 @@ The table records the original defect and where the fix now lives.
    width is genuinely inferred, and `--assume-xlen` finally affects cost instead of only
    port-dim strings.
 
+   **2026-10-16 (delay-v29): implemented in `crate::width`** — `WidthResolver`
+   (declarations, typedefs, parameters/localparams, package constants, host
+   param-map), `CostModel::scaled_fo4`, `width_factor`. Arithmetic is costed at
+   `max(LHS, operands)`, compares at their operands; constants and loop
+   variables set no width; unresolved stays at the reference width. The laws
+   differ from the table above in one row: `mul`/`div_rem` scale **linearly**
+   (`w/32`) — measured multiply delay ratios 0.15/0.37/0.62/1.0 at 4/8/16/32
+   bits sit between linear and log, and the quadratic form is area, not delay.
+   Calibration and provenance: ALGORITHMS-EXPERTS Part LIII (A83).
+
    Golden inputs for this rule live in `fixtures/measure/width_sensitive.sv`.
 3. **Real dataflow** — build a def-use map from the already-recovered `IrNode.lhs` /
    `rhs_expr` identifiers, add IR edges only where an RHS reads a definition, then

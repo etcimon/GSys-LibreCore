@@ -24,6 +24,18 @@
 
 ## Current correctness audit: source origins and validation
 
+### Lexical binding delta (2026-10-15)
+
+P5 must distinguish block-local declarations with the same spelling in different
+processes. The `instr_queue` composed cone incorrectly connects `rank` from
+`gen_fifo_input` to a read of the different `rank` in the earlier slot-mapping
+process. Add optional original-source scope spans to declaration sites and resolve
+private def-use keys through those spans. Source expressions and emitted names
+remain unchanged. Unknown source scopes stay conservative; module-level nets
+must still connect processes, including when another block shadows their names.
+Regression coverage must cover independent locals, intentional global connections
+and shadowing. Measurement/cache version changes with this correction.
+
 Preprocessed token offsets must never index the original file buffer. Expression and
 case text come from the syntax tree's preprocessed text; editable anchors must map back
 through the parser's origin map. A macro expansion or unresolved include origin may be
@@ -639,7 +651,7 @@ pub fn line_report(design: &TimingDesign) -> Vec<LineCost>;
 | **Clock-aware `always_ff` scratch** | Every `always_ff` region **keeps** a sequential `ParallelScratch` (`ClockDomain`: name, edge, period_ns, budget \(B\)). Fill walks IR regions first so NBA-only processes are stored even without a `TimingPath`. Path overlay must not demote that board to combinational `schedule(path.nodes)`. Cycle bars are capturing edges of **that** clock. See `OPENSTA-CORRECTION-WORKFLOW.md`. |
 | **Module cleanliness** | After classification, each module explores a catalog of logical algorithm sets and solves \(\max C(s)=w_{ff}D_{ff}+w_{comb}D_{comb}-w_a A-w_t 1[\neg pass]\) over applicable \(s\), preferring timing-pass sets. Weights favour `always_ff` / `always_comb` density; InsertReg/multi-cut are high \(A\). See `cleanliness.rs`. |
 | **Path inside region** | Longest FO4-weighted operator chain from region inputs (ports, reg Q, opaque refs) to region outputs (NBA LHS, assign LHS, ports). **As built (P14):** paths are extracted from the **def-use DAG** (`measure::extract_paths`) and therefore span regions freely — one path per combinational sink, cost = DAG longest path, and a register terminates the cone (`IrNode::reads_reg` recovers the `reg→` startpoint). |
-| **Width** | Prefer declared LHS/RHS width; if unknown, use `--assume-xlen N` when set, else **1** for bit ops. Document when default applied (`width_defaulted: true`). Hosts may pass 64 for RV64. **As built (P14):** width comes from the LHS declaration (port dims verbatim from source, or a local `logic/wire/reg` decl) resolved through `--param-map` / `--assume-xlen` / module parameter defaults; unresolved ⇒ `width_defaulted` and costed at the **reference width 32**, so the published table values are unchanged. Scaling is normalized to that reference — see `OPTIMIZATION-LEVELS.md` §1.1(2). |
+| **Width** | Prefer declared LHS/RHS width; if unknown, use `--assume-xlen N` when set, else **1** for bit ops. Document when default applied (`width_defaulted: true`). Hosts may pass 64 for RV64. **As built (P14):** width comes from the LHS declaration (port dims verbatim from source, or a local `logic/wire/reg` decl) resolved through `--param-map` / `--assume-xlen` / module parameter defaults; unresolved ⇒ `width_defaulted` and costed at the **reference width 32**, so the published table values are unchanged. Scaling is normalized to that reference — see `OPTIMIZATION-LEVELS.md` §1.1(2). **Built 2026-10-16 (delay-v29, `crate::width`):** declarations, typedefs (incl. package and enum base), parameters/localparams evaluated with the `Expr` parser, package constants and the host param-map (`param_map_ints`); arithmetic at `max(LHS, operands)`, compares at their operands; constants and loop variables set no width. `mul`/`div_rem` scale linearly (measured), the rest as stated. |
 | **Enable gating** | Signals used only as `if (valid)` guards on NBA are recorded in `GateInfo.enable` and **do not** add Mul/Div FO4 on the data path when the model can separate control vs data; if inseparable, cost the full expression and tag `enable_merged: true`. |
 | **Multi-cycle** | Module attribute `// sv-timing: multi-cycle` **or** CLI `--multi-cycle-modules a,b` **or** heuristic: `always_ff` with explicit iteration counter handshake. Multi-cycle paths set `multi_cycle=true` and are **excluded from negative-slack ranking** (listed separately). Hosts tag their multi-cycle FUs. |
 | **False paths** | Not computed in v1; opaque boundaries stop the path. |

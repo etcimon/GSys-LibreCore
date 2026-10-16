@@ -224,6 +224,19 @@ two-port constant-increment and width-4 FIFO-delta candidates, while carry-save 
 popcount-tree generalizations regressed. `sv-timing/ALGORITHMS-EXPERTS.md` Part LI
 records the actual source loci, conditions, area tradeoffs and next RTL work.
 
+`sta-rtl` writes an elaborated `CVA6Cfg` snapshot (yosys-slang probe) into the
+sv-timing param-map, substitutes a registered study stub for `tc_sram`
+(`--no-sram-stub`), maps with a delay-oriented ABC script, and offers
+`--map-recipe streamed` for whole-core mapping within the builder's memory.
+sv-timing measurement is `delay-v31` (width-scaled, cast-transparent,
+carry-save sums); see `sv-timing/ALGORITHMS-EXPERTS.md` Part LIII.
+
+`sta-rtl` now stops before mapping if the emitted pre-pass misses its budget.
+`--allow-over-budget` (or `physicalDesign.structural.allowOverBudget=true`) is an
+explicit study override, not a closure result. Missing/incomplete evidence still
+fails. The latest planner corrections and review candidates are in
+`sv-timing/ALGORITHMS-EXPERTS.md` Part LII; they supersede earlier fresh-run claims.
+
 | Layer | Command | Role |
 |-------|---------|------|
 | Snapshot | `status` | SoC + provisioned flags |

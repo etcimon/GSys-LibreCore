@@ -2,7 +2,26 @@
 
 Structural (not STA) frequency closure for the precompiler loop.
 
-## Current campaign (2026-10-15, delay-v26)
+## Current campaign (2026-10-16, delay-v31 + cfg snapshot)
+
+Measurement semantics moved four times on 2026-10-16 (`ALGORITHMS-EXPERTS.md`
+Part LIII): origin-coordinate constant spans (v28), width-scaled costs (v29),
+transparent casts and shift-add constant multiplies (v30), carry-save
+multi-operand sums (v31), plus the host's elaborated `CVA6Cfg` snapshot. On
+`g6lc64_ooo` at 10 FO4 / 20 ps the live RTL now reports worst RegToReg
+**22.0** (`fpnew_fma_multi`, exponent widths unresolved) with 700 failing
+primary paths; the Part LII review tree reports **21.0** / 696. The failing
+count rose because a 64-bit add is 12 FO4 at this table — the honest shape of
+the XLEN=64 gap at 4 GHz / 20 ps. Every figure below this heading predates
+those corrections and is kept for provenance only.
+
+## Earlier campaign (2026-10-15, delay-v26)
+
+Follow-up: see `ALGORITHMS-EXPERTS.md` Part LII. The refusal-rollback repair changes
+fresh correction output; lexical binding correction is now delay-v27. Fresh emit
+reports 31.0 FO4, while reviewed admission-count/FIFO-delta candidates report
+16.5 RegToReg and 30.0 all-primary. None closes 10. The 21.5 figure below remains
+specific to the older frozen emitted tree.
 
 The frozen scope-safe emitted core has 264 files, 234 modules and 11,008 paths.
 The same SV measures 23.5 FO4 under delay-v25 and **21.5 FO4 under delay-v26**,

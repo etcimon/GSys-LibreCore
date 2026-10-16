@@ -3,6 +3,70 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## 2026-10-15 — continued closure work (not closed)
+
+- [x] Register-cut trials now preflight gates and roll back refused speculative
+  expansion without cloning the full design. Regression covers rollback and success.
+- [x] Private lexical binding keys prevent unrelated local variables in different
+  processes from becoming one P5 signal. Module-level shadowing remains connected
+  correctly; source expressions are unchanged. Measurement/cache version delay-v27.
+- [x] Scope guards distinguish fields/package names from same-spelled locals.
+  Refusal traces retain the failed node and its expression.
+- [x] Fresh correction: 264 files, joint/structural checks green, 19 InsertReg,
+  32 BalanceMux, 451 annotations; worst RegToReg 31.0, 413 failing primary paths.
+  The former frozen 21.5 reading is not this fresh planner output.
+- [x] Admission-count factoring has binary-input SAT proofs at 2/4/8 slots and
+  improves the four-slot mapped study 1.059211 → 0.787434 ns, area 183.274 → 152.950.
+  Review copy plus decoded FIFO delta and Boolean balancing reports RegToReg
+  16.5 FO4; all-primary maximum remains 30.0. No production RTL changed.
+- [x] Cached-carry transition invariant and registered wrapper proved/benchmarked:
+  0.596693 → 0.450162 ns for the 16-bit/four-input registered counter, with
+  12 extra state bits and area 179.284 → 362.824. Still misses 250 ps.
+- [x] Efficient screening: named variants, proof-only parameter edges, constrained
+  mapping, per-width timing/area/state frontiers, explicit target-miss reporting.
+- [x] Host budget gate stops before expensive mapping on a structural miss.
+  Explicit `--allow-over-budget` remains available for valid exploratory studies.
+- [ ] 10 FO4 completion: remaining queue/admission, write-buffer, trigger and
+  selector cones need verified transformations. No credit-only or illegal
+  block-local cut can establish closure.
+- [x] Diagnosed full-core mapping failure as a kernel OOM kill (Yosys, 23:41:42
+  UTC, about 51 GiB RSS); cleaned up its orphan ABC. Added a hierarchical study
+  recipe (`--best-effort-hierarchy`, no flatten) and checked it on a registered
+  two-module fixture. No completed full-core STA result.
+- [x] Fixed the study mapper's missing `opt_dff`: constant asynchronous-load
+  flops otherwise escaped into STA as black boxes. Strict linking, constrained-path
+  checks and infinity rejection now prevent a false `1e39` timing success.
+- [~] Hierarchical live-RTL baseline running in a separate directory under a
+  memory cap, using the PGO fork. This is a baseline study, not a closed candidate.
+
+Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
+
+## 2026-10-16 — measurement truth (delay-v28 … v31) and builder mapping
+
+- [x] delay-v28: LRM-constant spans compared in origin coordinates; declaration
+  texts read through `SyntaxTree::get_str`. `stream_arbiter` 30 FO4 wrapper
+  artifact gone (regression pins five phantom nodes with raw spans).
+- [x] delay-v29: width inference + normalized scaling (`crate::width`), laws
+  measured on Nangate45 (`add/compare/shift_var` log2, `mul/div` linear).
+- [x] delay-v30: casts transparent; `x * Const` is a shift-add CPA; `== '0`
+  reduce-detect. Exposed fpnew exponent sums previously hidden by casts.
+- [x] delay-v31: N-operand `+`/`-` = one CPA + 1.5 FO4 per extra operand
+  (measured 0.617/0.726/0.901 ns for 2/3/5 operands); cut spine mirrors it.
+- [x] Host: elaborated `CVA6Cfg` snapshot (222 fields via a yosys-slang probe)
+  merged into the sv-timing param-map; `analyze --ir-out` for path forensics.
+- [x] Host: `tc_sram` study stub, `--map-recipe streamed` (per-module map and
+  evict), delay-oriented ABC with the clock period, `opt_dff` before techmap.
+- [x] Board (review tree, delay-v31 + snapshot): worst RegToReg **21.0**
+  (`fpnew_fma_multi`, exponent widths unresolved), 696 failing primary paths —
+  the count rose with width scaling because a 64-bit add is 12 FO4 here.
+- [ ] Elaborated per-module net-width sidecar (yosys `write_json` netnames) so
+  function-derived localparams (`geo(CVA6Cfg).slots`, `exp_bits()`) resolve.
+- [ ] Whole-core mapped STA: streamed run in progress; none finished yet.
+- [ ] 10 FO4 completion: the residual is 64-bit adders/compares (12 FO4 at
+  this table) plus a few real narrow chains (`g6lc_bp_ckpt` 17, `instr_queue`
+  13.5). Closure at XLEN=64 needs either `fo4_ps` ≤ 16 or multi-cycle/pipelined
+  64-bit arithmetic — a microarchitecture decision, not a transform.
+
 ## 2026-10-15 — residual tuning after the 23.5 FO4 report
 
 - [x] Frozen the emitted core and its report as

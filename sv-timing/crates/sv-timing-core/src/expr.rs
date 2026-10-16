@@ -484,6 +484,34 @@ impl Expr {
                 left,
                 right,
             } => {
+                // delay-v31: an N-operand `+`/`-` tree is one carry-save
+                // reduction plus one CPA, not N-1 serial CPAs (synthesis
+                // `alumacc`/`maccmap` builds exactly that). Measured on
+                // Nangate45 (nf script, 32-bit): a+b 0.617 ns, a+b+c 0.726,
+                // a+b+c-d+e 0.901 — about 0.095 ns (~1.5 FO4 at 10 FO4 =
+                // 0.617 ns) per extra operand, width-independent. fpnew's
+                // `exponent_a + sub_a + exponent_b + sub_b - 2*bias + bias`
+                // was billed 52.5 as five serial adds.
+                if matches!(op.as_str(), "+" | "-") && *op_class == OperatorClass::AddSub {
+                    let mut leaves = Vec::new();
+                    flatten_addsub(self, &mut leaves);
+                    let runtime: Vec<&Expr> = leaves
+                        .iter()
+                        .copied()
+                        .filter(|l| !l.const_class(seed).is_const())
+                        .collect();
+                    // Every constant folds into one operand.
+                    let n = runtime.len() + usize::from(runtime.len() < leaves.len());
+                    if n >= 3 {
+                        let worst = runtime
+                            .iter()
+                            .map(|l| l.fo4_critical_cost_latticed(base, seed))
+                            .fold(0.0_f64, f64::max);
+                        return base(OperatorClass::AddSub)
+                            + CSA_LEVEL_LOGIC_BITS * base(OperatorClass::LogicBit) * (n - 2) as f64
+                            + worst;
+                    }
+                }
                 let billed = billed_binary_class(op, *op_class, left, right, seed);
                 base(billed)
                     + left
@@ -757,6 +785,36 @@ impl Expr {
             } => {
                 if left.const_class(seed).is_const() && right.const_class(seed).is_const() {
                     return Vec::new();
+                }
+                // Multi-operand `+`/`-`: worst leaf, one CSA entry, one CPA
+                // (mirrors `fo4_critical_cost_latticed`, delay-v31).
+                if matches!(op.as_str(), "+" | "-") && *op_class == OperatorClass::AddSub {
+                    let mut leaves = Vec::new();
+                    flatten_addsub(self, &mut leaves);
+                    let runtime: Vec<&Expr> = leaves
+                        .iter()
+                        .copied()
+                        .filter(|l| !l.const_class(seed).is_const())
+                        .collect();
+                    let n = runtime.len() + usize::from(runtime.len() < leaves.len());
+                    if n >= 3 {
+                        let mut best: Option<(&Expr, f64)> = None;
+                        for l in &runtime {
+                            let c = l.fo4_critical_cost_latticed(base, seed);
+                            if best.map_or(true, |(_, bc)| c > bc) {
+                                best = Some((l, c));
+                            }
+                        }
+                        let mut s = best
+                            .map(|(l, _)| l.critical_spine_ops_latticed(base, seed))
+                            .unwrap_or_default();
+                        s.push((
+                            OperatorClass::LogicBit,
+                            CSA_LEVEL_LOGIC_BITS * base(OperatorClass::LogicBit) * (n - 2) as f64,
+                        ));
+                        s.push((OperatorClass::AddSub, base(OperatorClass::AddSub)));
+                        return s;
+                    }
                 }
                 let lc = left.fo4_critical_cost_latticed(base, seed);
                 let rc = right.fo4_critical_cost_latticed(base, seed);
@@ -1572,12 +1630,20 @@ pub fn billed_binary_class(
         return OperatorClass::Other;
     }
     // `x * fmt_row_bytes(...)` / `elems * ai_fmt_bytes()` is a shift, not Mul.
-    // Do not use this to parse general `32'(expr)` (gemm v25 regression).
     if matches!(op_class, OperatorClass::Mul)
         && op == "*"
         && (is_fmt_scale_call(left) || is_fmt_scale_call(right))
     {
         return OperatorClass::ShiftConst;
+    }
+    // `x * K` with K an elaboration constant is a shift-add (CSD recoding of
+    // K: `x*6 = (x<<2)+(x<<1)`, one CPA), not a 56 FO4 partial-product array.
+    // `x * y` with both runtime stays Mul. Power-of-two K is handled above.
+    if matches!(op_class, OperatorClass::Mul)
+        && op == "*"
+        && (left.const_class(seed).is_const() || right.const_class(seed).is_const())
+    {
+        return OperatorClass::AddSub;
     }
     if matches!(op_class, OperatorClass::DivRem)
         && matches!(op, "/" | "%")
@@ -1614,7 +1680,10 @@ pub fn billed_binary_class(
     // (pe_dot `final_bfp_sum != MAXW'(0)`). `x != y` stays Compare.
     if matches!(op_class, OperatorClass::Compare)
         && matches!(op, "==" | "!=" | "===" | "!==")
-        && (is_zero_literal(left) || is_zero_literal(right))
+        && (is_zero_literal(left)
+            || is_zero_literal(right)
+            || is_fill_literal(left)
+            || is_fill_literal(right))
     {
         return OperatorClass::LogicBit;
     }
@@ -1717,75 +1786,48 @@ fn is_encoding_then_part(e: &Expr, seed: &ConstSeed) -> bool {
     }
 }
 
-fn is_bare_ident(e: &Expr) -> bool {
-    matches!(e, Expr::Ident { .. })
-}
-
-/// `ident ± 1` / `1 ± ident` (not `ident[sel] ± 1`, which is gemm `n_q[8:0]-1`).
-fn is_ident_unit_increment(e: &Expr) -> bool {
-    let Expr::Binary {
-        op, left, right, ..
-    } = e
-    else {
-        return false;
-    };
-    matches!(op.as_str(), "+" | "-")
-        && is_unit_increment_operand(left, right)
-        && (is_bare_ident(left) || is_bare_ident(right))
-}
-
-/// Inner of `W'(…)` that may collapse without reopening general `(W)'(expr)`.
-fn is_width_cast_collapsible(val: &Expr, seed: &ConstSeed) -> bool {
-    if val.const_class(seed).is_const() {
-        return true;
-    }
-    if is_bare_ident(val) {
-        return true;
-    }
-    is_ident_unit_increment(val)
-}
-
-/// IEEE 1800 type-name left of `'(…)`. Collapsing these exposes later `*`/`+`
-/// (`int'(group_q)*6` → Mul 56). Width names (`32`, `PLEN`, `IDX_W`) are not types.
-fn is_sv_type_cast_width(e: &Expr) -> bool {
-    let Expr::Ident { name } = e else {
-        return false;
-    };
-    let base = name
-        .rsplit("::")
-        .next()
-        .unwrap_or(name)
-        .rsplit('.')
-        .next()
-        .unwrap_or(name);
-    matches!(
-        base,
-        "int"
-            | "integer"
-            | "shortint"
-            | "longint"
-            | "byte"
-            | "bit"
-            | "logic"
-            | "reg"
-            | "wire"
-            | "unsigned"
-            | "signed"
-            | "time"
-            | "real"
-            | "shortreal"
-            | "string"
-            | "void"
-    )
-}
-
 fn is_unit_increment_operand(left: &Expr, right: &Expr) -> bool {
     matches!(positive_literal_value(left), Some(1))
         || matches!(positive_literal_value(right), Some(1))
 }
 
+/// One 3:2 compressor level per extra operand of a multi-operand add, in
+/// `logic_bit` units (two XOR levels; measured ~1.5 FO4, width-independent).
+pub const CSA_LEVEL_LOGIC_BITS: f64 = 1.5;
+
+/// Operand leaves of a `+`/`-` tree (the tree is flattened through AddSub
+/// binaries only; a nested `*`, `?:` or call is a leaf).
+fn flatten_addsub<'a>(e: &'a Expr, out: &mut Vec<&'a Expr>) {
+    match e {
+        Expr::Binary {
+            op,
+            op_class: OperatorClass::AddSub,
+            left,
+            right,
+        } if matches!(op.as_str(), "+" | "-") => {
+            flatten_addsub(left, out);
+            flatten_addsub(right, out);
+        }
+        _ => out.push(e),
+    }
+}
+
 fn is_zero_literal(e: &Expr) -> bool {
-    matches!(positive_literal_value(e), Some(0))
+    matches!(positive_literal_value(e), Some(0)) || is_fill_literal_of(e, '0')
+}
+
+/// Unsized fill literal `'0` / `'1` (IEEE 1800 §5.7.1): `x == '0` is an
+/// or-reduce, `x == '1` an and-reduce — neither is a magnitude compare.
+fn is_fill_literal(e: &Expr) -> bool {
+    is_fill_literal_of(e, '0') || is_fill_literal_of(e, '1')
+}
+
+fn is_fill_literal_of(e: &Expr, digit: char) -> bool {
+    let Expr::Literal { text } = e else {
+        return false;
+    };
+    let t = text.trim();
+    t.len() == 2 && t.starts_with('\'') && t.ends_with(digit)
 }
 
 /// `C << n` with C a constant power of two and n runtime (one-hot decoder).
@@ -2376,19 +2418,18 @@ impl<'a> Parser<'a> {
                     e = Expr::Call { name, args };
                 }
                 Some(b'\'') if self.src.get(self.i + 1) == Some(&b'(') => {
-                    // delay-v21: collapse `W'(const)` / `W'(ident)` / `W'(ident±1)`
-                    // (store_unit `PLEN'(LINE_B)`, snoop `IDX_W'(int'(rr)+1)`,
-                    // numeric `32'(LINE_B)`). Type-name casts (`int'(x)`) stay
-                    // unparsed — collapsing `int'(group_q)*6` re-exposes a Mul
-                    // (policy_subcode v43). General `(W)'(expr)` still
-                    // backtracks — delay-v19 gemm `32'(n_q[8:0]-1)*row`.
-                    if is_sv_type_cast_width(&e) {
-                        break;
-                    }
-                    match self.try_collapse_width_cast() {
-                        Some(val) => e = val,
-                        None => break,
-                    }
+                    // delay-v30: a cast `W'(expr)` / `int'(expr)` / `pkg::t'(expr)`
+                    // / `type(x)'(expr)` is zero-delay resizing or
+                    // reinterpretation — the inner expression is the datapath.
+                    // Earlier versions only collapsed `W'(const|ident|ident±1)`
+                    // and left every other cast unparsed; the whole RHS then
+                    // fell to the string heuristic, which billed the `-` of a
+                    // part-select bound inside `XLEN'({pmpaddr_q[i][PLEN-3:1],
+                    // 1'b1})` as a 64-bit adder (csr_regfile 12 FO4 arms).
+                    // The Mul-by-constant worry that motivated the restriction
+                    // (`int'(group_q)*6`) is handled where it belongs:
+                    // `billed_binary_class` bills `x * Const` as shift-add.
+                    e = self.parse_cast_inner()?;
                 }
                 _ => break,
             }
@@ -2396,25 +2437,16 @@ impl<'a> Parser<'a> {
         Some(e)
     }
 
-    /// `'(expr)` / consume `'(` after a width primary. Backtracks when the
-    /// inner tree is not a safe collapse (gemm `32'(index-1)*row`).
-    fn try_collapse_width_cast(&mut self) -> Option<Expr> {
-        let save = self.i;
+    /// Consume `'(expr)` and return the inner expression (the cast is wiring).
+    fn parse_cast_inner(&mut self) -> Option<Expr> {
         self.bump();
         self.bump();
-        match self.parse_expr() {
-            Some(val) if is_width_cast_collapsible(&val, &ConstSeed::heuristic()) => {
-                self.skip_ws();
-                if self.peek() == Some(b')') {
-                    self.bump();
-                }
-                Some(val)
-            }
-            _ => {
-                self.i = save;
-                None
-            }
+        let inner = self.parse_expr()?;
+        self.skip_ws();
+        if self.peek() == Some(b')') {
+            self.bump();
         }
+        Some(inner)
     }
 
     fn parse_primary(&mut self) -> Option<Expr> {
@@ -2430,8 +2462,8 @@ impl<'a> Parser<'a> {
                 Some(e)
             }
             b'{' => self.parse_concat_or_repl(),
-            // Unsized `'(1)` / `'(LINE_B)` — same collapse rules as `W'(…)`.
-            b'\'' if self.src.get(self.i + 1) == Some(&b'(') => self.try_collapse_width_cast(),
+            // Unsized `'(expr)` cast — same transparency as `W'(…)`.
+            b'\'' if self.src.get(self.i + 1) == Some(&b'(') => self.parse_cast_inner(),
             b'\'' | b'0'..=b'9' => self.parse_literal(),
             c if c == b'_' || c.is_ascii_alphabetic() || c == b'$' => {
                 self.parse_ident_or_call_name()
@@ -2623,10 +2655,13 @@ mod tests {
         let fma = Expr::parse("mantissa_a * mantissa_b");
         assert_eq!(fma.dominant_op_class(), OperatorClass::Mul);
         assert!(fma.fo4_critical_cost(&base) >= 56.0);
-        // Mixed-case VpnLen is runtime under the heuristic seed (no module map).
+        // Mixed-case VpnLen is runtime under the heuristic seed (no module map):
+        // a constant times a runtime value is a shift-add (one CPA), not an
+        // array multiplier — and not free either.
         let cast_w = Expr::parse("(CVA6Cfg.PtLevels + HYP_EXT) * VpnLen");
-        assert_eq!(cast_w.dominant_op_class(), OperatorClass::Mul);
-        assert!(cast_w.fo4_critical_cost(&base) >= 56.0);
+        assert_eq!(cast_w.dominant_op_class(), OperatorClass::AddSub);
+        let c = cast_w.fo4_critical_cost(&base);
+        assert!((10.0..56.0).contains(&c), "const*runtime is one CPA, got {c}");
         // Same expression is elaboration when VpnLen is a module localparam.
         let seeded = ConstSeed::from_names(["VpnLen", "PtLevels"]);
         assert_eq!(
@@ -2646,8 +2681,10 @@ mod tests {
         assert_ne!(pow.dominant_op_class(), OperatorClass::Mul);
         // Part-select bound arithmetic may use dynamic operands.
         let idx = Expr::parse("vaddr_q[(WIDTH / 8) * i]");
-        // WIDTH/8 is Const (P1); the remaining runtime op is `* i`.
-        assert_eq!(idx.dominant_op_class(), OperatorClass::Mul, "{idx:?}");
+        // WIDTH/8 is Const (P1); the remaining runtime op `* i` is a
+        // constant-coefficient multiply: shift-add, billed as one CPA.
+        assert_eq!(idx.dominant_op_class(), OperatorClass::AddSub, "{idx:?}");
+        assert!(idx.fo4_critical_cost(&base) >= 10.0, "{idx:?}");
     }
 
     fn arithmetic_base(c: OperatorClass) -> f64 {
@@ -2685,6 +2722,11 @@ mod tests {
 
     #[test]
     fn runtime_arithmetic_is_not_constant_by_identifier_name() {
+        // `Cfg.FIELD` is Const under the heuristic seed; VpnLen is runtime by
+        // name. Their product is not elaboration (0) — it is a shift-add CPA.
+        let mixed = Expr::parse("ExampleCfg.PtLevels * VpnLen");
+        assert_eq!(mixed.dominant_op_class(), OperatorClass::AddSub, "{mixed:?}");
+        assert!(mixed.fo4_critical_cost(&arithmetic_base) >= 10.0);
         for (left, right) in [
             ("a", "b"),
             ("x", "y"),
@@ -2692,7 +2734,6 @@ mod tests {
             ("A", "B"),
             ("count", "num_items"),
             ("cfg.a", "cfg.b"),
-            ("ExampleCfg.PtLevels", "VpnLen"),
             ("valid_count", "bit_width"),
             ("operand_a_i", "operand_b_i"),
             ("mantissa_a", "mantissa_b"),
@@ -2730,7 +2771,9 @@ mod tests {
             // `fixed_part_select_bounds_are_elaboration_constants`.
             ("(a * b)[i]", OperatorClass::Mul, 56.0),
             // WIDTH/8 is Const (P1); the runtime op is `* i`.
-            ("mem[(WIDTH / 8) * i]", OperatorClass::Mul, 56.0),
+            // `(WIDTH / 8)` is Const; a constant coefficient on runtime `i`
+            // is a shift-add CPA (delay-v30), still datapath, not an array.
+            ("mem[(WIDTH / 8) * i]", OperatorClass::AddSub, 10.0),
         ] {
             assert_arithmetic_cost(text, class, cost);
         }
@@ -2818,17 +2861,28 @@ mod tests {
             "width-cast 1 billed as add: {} {cast1:?}",
             cast1.fo4_critical_cost(&arithmetic_base)
         );
-        // Must not parse general `32'(expr)` (gemm `32'(n-1)*row+k` regression).
+        // General `32'(expr)` is transparent; the gemm `32'(n-1)*row+k` shape
+        // is still no Mul because `* fmt_row_bytes()` is a shift and `n-1` an
+        // increment.
         let gemm = Expr::parse("32'(n_q[8:0] - 9'd1) * fmt_row_bytes({16'd0, ldb_q}) + k_bytes");
         assert_ne!(
             gemm.dominant_op_class(),
             OperatorClass::Mul,
             "general width-cast must not expose inner mul: {gemm:?}"
         );
-        assert_ne!(
+        // A cast of an adder is an adder (delay-v30): zero-delay resize.
+        assert_eq!(
             Expr::parse("32'(a + b)").dominant_op_class(),
             OperatorClass::AddSub,
-            "32'(a+b) must not collapse to a+b"
+            "32'(a+b) is a+b"
+        );
+        assert_eq!(Expr::parse("32'(a + b)").fo4_critical_cost(&arithmetic_base), 10.0);
+        // csr_regfile pmpaddr read: a part-select bound inside a cast is not an adder.
+        let pmp = Expr::parse("CVA6Cfg.XLEN'({pmpaddr_q[pmpaddr_index][CVA6Cfg.PLEN-3:1], 1'b1})");
+        assert!(
+            pmp.fo4_critical_cost(&arithmetic_base) < 4.0,
+            "cast of a sliced concat billed as datapath: {} {pmp:?}",
+            pmp.fo4_critical_cost(&arithmetic_base)
         );
         let fmt = Expr::parse("fmt_row_bytes({16'd0, ldb_q})");
         assert!(
@@ -2902,24 +2956,41 @@ mod tests {
             OperatorClass::Mul,
             "index±1 width-cast must not collapse: {gemm:?}"
         );
-        assert_ne!(
+        assert_eq!(
             Expr::parse("32'(a + b)").dominant_op_class(),
             OperatorClass::AddSub,
-            "32'(a+b) must not collapse to a+b"
+            "32'(a+b) is a+b (delay-v30 transparent cast)"
         );
-        // Type-name casts stay unparsed so a later `* K` is not a datapath Mul
-        // (policy_subcode `GroupShapeLog2[int'(group_q)*6 +: 6]`).
+        // `x * K` (K constant) is a shift-add, so the type-cast index
+        // (policy_subcode `GroupShapeLog2[int'(group_q)*6 +: 6]`) is no Mul
+        // even though the cast is now parsed.
         let packed = Expr::parse("GroupShapeLog2[int'(group_q)*6 +: 6]");
         assert_ne!(
             packed.dominant_op_class(),
             OperatorClass::Mul,
             "int'(ident)*K index must not expose Mul: {packed:?}"
         );
-        assert_ne!(
+        assert_eq!(
+            Expr::parse("group_q * 6").dominant_op_class(),
+            OperatorClass::AddSub,
+            "constant multiplier is shift-add"
+        );
+        assert_eq!(Expr::parse("a * b").dominant_op_class(), OperatorClass::Mul);
+        // Two casts around an add are still one adder (delay-v30).
+        assert_eq!(
             Expr::parse("int'(r) + int'(c)").dominant_op_class(),
             OperatorClass::AddSub,
-            "int'(r)+int'(c) must not collapse to r+c"
+            "int'(r)+int'(c) is r+c"
         );
+        // Fill-literal compares are reduce-detects, not magnitude compares.
+        for text in ["be == '0", "be != '0", "mask == '1"] {
+            let e = Expr::parse(text);
+            assert!(
+                e.fo4_critical_cost(&arithmetic_base) <= 1.0,
+                "{text} billed as compare: {} {e:?}",
+                e.fo4_critical_cost(&arithmetic_base)
+            );
+        }
 
         // Const-condition mux is elaboration (pe_dot `i < CNT` / `WIDTH ?`).
         let gen = Expr::parse("WIDTH ? (a + b) : c");
@@ -3177,7 +3248,38 @@ mod tests {
     }
 
     #[test]
+    fn multi_operand_add_is_carry_save_plus_one_cpa() {
+        // Two operands: one CPA.
+        assert_eq!(Expr::parse("a + b").fo4_critical_cost(&arithmetic_base), 10.0);
+        // Three runtime operands: CPA + one 3:2 level.
+        assert_eq!(Expr::parse("a + b + c").fo4_critical_cost(&arithmetic_base), 11.5);
+        // fpnew exponent_product shape: six runtime operands (calls are leaves)
+        // plus constants folded into one — not 5 x 10 serial.
+        let e = Expr::parse(
+            "exponent_a + info_a.is_subnormal + exponent_b + info_b.is_subnormal - 2 * bias_src + bias_dst",
+        );
+        let c = e.fo4_critical_cost(&arithmetic_base);
+        assert!((16.0..=20.0).contains(&c), "6-operand sum should be CPA + 4 CSA levels, got {c} {e:?}");
+        // Constants fold: `a + b + 1 + 2` is still one CPA + one level.
+        assert_eq!(Expr::parse("a + b + 1 + 2").fo4_critical_cost(&arithmetic_base), 11.5);
+        // `x + 1` stays an increment (no flattening below three operands).
+        assert!(Expr::parse("x + 1").fo4_critical_cost(&arithmetic_base) < 4.0);
+        // A multiply inside the sum is a leaf whose cost adds to the CSA/CPA.
+        let m = Expr::parse("a * b + c + d").fo4_critical_cost(&arithmetic_base);
+        assert!(m >= 56.0 + 11.5 - 1e-9, "{m}");
+    }
+
+    #[test]
     fn unproven_scales_keep_arithmetic_cost() {
+        // Runtime × runtime is the array multiplier (T3 atomic over budget).
+        for text in ["a * (b + 1)", "(a + b) * (c + d)", "a[i] * b[j]"] {
+            let e = Expr::parse(text);
+            assert_eq!(e.dominant_op_class(), OperatorClass::Mul, "{text}: {e:?}");
+            assert!(e.fo4_critical_cost(&arithmetic_base) >= 56.0, "{text}");
+            assert!(e.has_atomic_over_budget(&arithmetic_base, 10.0), "{text}");
+        }
+        // A constant coefficient that is not a proven power of two is a
+        // shift-add: never the free shift, never the 56 FO4 array — one CPA.
         for text in [
             "a * 3",
             "a * 0",
@@ -3191,15 +3293,12 @@ mod tests {
             "a * 8'h100",
             "a * 0'd8",
             "a * 340282366920938463463374607431768211456",
-            "a * (b + 1)",
-            "(a + b) * (c + d)",
-            "a[i] * b[j]",
             "a * WIDTH",
         ] {
             let e = Expr::parse(text);
-            assert_eq!(e.dominant_op_class(), OperatorClass::Mul, "{text}: {e:?}");
-            assert!(e.fo4_critical_cost(&arithmetic_base) >= 56.0, "{text}");
-            assert!(e.has_atomic_over_budget(&arithmetic_base, 10.0), "{text}");
+            assert_eq!(e.dominant_op_class(), OperatorClass::AddSub, "{text}: {e:?}");
+            let c = e.fo4_critical_cost(&arithmetic_base);
+            assert!((10.0..56.0).contains(&c), "{text}: {c}");
         }
         // Runtime divisor stays a divider. Literal / Cfg divisor is delay-v14 scale.
         for text in ["8 / a", "8 % a", "a / 0", "a % 0"] {
@@ -3300,9 +3399,10 @@ mod tests {
             Expr::parse("{{(DataWidth/8-4){1'b0}}, 4'hF}").fo4_critical_cost(&arithmetic_base),
             0.0
         );
-        // Runtime * const (non power-of-two) stays a multiply. Runtime / const
+        // Runtime * const (non power-of-two) is a shift-add CPA. Runtime / const
         // divisor is a shift (delay-v14), not a 120 FO4 divider.
-        assert!(Expr::parse("a * WIDTH").fo4_critical_cost(&arithmetic_base) >= 56.0);
+        let aw = Expr::parse("a * WIDTH").fo4_critical_cost(&arithmetic_base);
+        assert!((10.0..56.0).contains(&aw), "{aw}");
         let cnt_half = Expr::parse("(cnt + 1) / 2");
         assert_ne!(cnt_half.dominant_op_class(), OperatorClass::DivRem);
         assert!(
@@ -3334,12 +3434,13 @@ mod tests {
             OperatorClass::AddSub => 10.0,
             _ => 1.0,
         };
-        // left-deep chain: sum = 3*10, critical = 3*10 (sequential) — equal
+        // left-deep chain: sum = 3*10; critical = one CPA + two 3:2 levels
+        // (delay-v31 carry-save), strictly below the serial sum.
         let e = Expr::parse("a + b + c + d");
         let sum = e.fo4_cost(&base);
         let crit = e.fo4_critical_cost(&base);
         assert!(crit <= sum + 1e-9, "crit={crit} sum={sum}");
-        assert!(crit >= 20.0, "crit={crit}"); // at least two adds deep
+        assert!(crit >= 10.0 + 2.0 * CSA_LEVEL_LOGIC_BITS - 1e-9, "crit={crit}");
     }
 
     #[test]

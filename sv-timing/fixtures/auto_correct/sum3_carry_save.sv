@@ -157,6 +157,37 @@ module popcount_step_trial #(
     assign y = low_sum[LOW_W]
         ? {upper_inc, low_sum[LOW_W-1:0]}
         : {pointer[W-1:LOW_W], low_sum[LOW_W-1:0]};
+  end else if (IMPL == 3 && W > LOW_W) begin : gen_late_carry
+    // Compute each upper propagate predicate from the old pointer in parallel.
+    // The late popcount carry enters only the last AND/XOR, not each prefix node.
+    wire [LOW_W:0] low_sum = {1'b0, pointer[LOW_W-1:0]} + (LOW_W+1)'(step);
+    assign y[LOW_W-1:0] = low_sum[LOW_W-1:0];
+    for (genvar i = LOW_W; i < W; i++) begin : bit_sum
+      if (i == LOW_W)
+        assign y[i] = pointer[i] ^ low_sum[LOW_W];
+      else
+        assign y[i] = pointer[i] ^ (low_sum[LOW_W] & (&pointer[i-1:LOW_W]));
+    end
+  end else if (IMPL == 4) begin : gen_prefix
+    // Parallel prefix carry network for the final addition. Each stage doubles
+    // the covered span; carries read only the previous stage.
+    localparam int unsigned LEVELS = $clog2(W);
+    wire [W-1:0] p [0:LEVELS];
+    wire [W-1:0] g [0:LEVELS];
+    assign p[0] = pointer ^ W'(step);
+    assign g[0] = pointer & W'(step);
+    for (genvar level = 0; level < LEVELS; level++) begin : level_sum
+      for (genvar i = 0; i < W; i++) begin : bit_sum
+        if (i >= (1 << level)) begin : combine
+          assign g[level+1][i] = g[level][i] | (p[level][i] & g[level][i-(1 << level)]);
+          assign p[level+1][i] = p[level][i] & p[level][i-(1 << level)];
+        end else begin : pass
+          assign g[level+1][i] = g[level][i];
+          assign p[level+1][i] = p[level][i];
+        end
+      end
+    end
+    assign y = p[0] ^ (g[LEVELS] << 1);
   end else begin : gen_final_add
     assign y = pointer + W'(step);
   end
@@ -192,4 +223,82 @@ module sum3_miter #(
   sum3_carry_save #(.W(W), .IMPL(1)) candidate_sum
       (.a(a), .b(b), .c(c), .flush(flush), .y(compressed));
   assign equal = serial == compressed;
+endmodule
+
+// Admission-count factoring for a power-of-two instruction FIFO bank.
+// valid already incorporates the first-taken-branch mask. Compaction preserves
+// its population count, and the leftover exception can accept only slot zero.
+module queue_count_trial #(
+    parameter int unsigned W = 16,
+    parameter int unsigned N = 4,
+    parameter bit IMPL = 0,
+    localparam int unsigned IW = $clog2(N),
+    localparam int unsigned CW = $clog2(N+1)
+) (
+    input logic [W-1:0] pointer,
+    input logic [IW-1:0] head,
+    input logic [N-1:0] valid, full,
+    input logic leftover, address_overflow,
+    output logic [CW-1:0] step,
+    output logic [W-1:0] y
+);
+  logic [N-1:0] desired;
+  logic [IW-1:0] rank, slot;
+  always_comb begin
+    desired = '0;
+    rank = '0;
+    slot = '0;
+    for (int s = 0; s < N; s++) begin
+      slot = head + rank;
+      if (valid[s]) begin
+        desired[slot] = 1'b1;
+        rank = rank + 1'b1;
+      end
+    end
+  end
+  wire [N-1:0] slot0 = N'(valid[0]) << head;
+  wire overflow = |(desired & full);
+  wire partial = leftover && valid[0] && !(|(slot0 & full)) && overflow;
+  wire [N-1:0] pushed = (partial ? slot0 : (desired & {N{!overflow}}))
+      & {N{!address_overflow}};
+  if (!IMPL) begin : gen_post_count
+    always_comb begin
+      step = '0;
+      for (int s = 0; s < N; s++) step = step + CW'(pushed[s]);
+    end
+  end else begin : gen_pre_count
+    logic [CW-1:0] count;
+    always_comb begin
+      count = '0;
+      for (int s = 0; s < N; s++)
+        if (valid[s]) count = count + 1'b1;
+    end
+    assign step = address_overflow ? '0 : partial ? CW'(1) : overflow ? '0 : count;
+  end
+  assign y = pointer + W'(step);
+endmodule
+
+module queue_count_miter #(
+    parameter int unsigned W = 16,
+    parameter int unsigned N = 4,
+    localparam int unsigned IW = $clog2(N),
+    localparam int unsigned CW = $clog2(N+1)
+) (
+    input logic [W-1:0] pointer,
+    input logic [IW-1:0] head,
+    input logic [N-1:0] valid, full,
+    input logic leftover, address_overflow,
+    output logic equal
+);
+  wire [W-1:0] reference_y, candidate_y;
+  wire [CW-1:0] reference_step, candidate_step;
+  queue_count_trial #(.W(W), .N(N), .IMPL(0)) reference_count
+      (.pointer(pointer), .head(head), .valid(valid), .full(full),
+       .leftover(leftover), .address_overflow(address_overflow),
+       .step(reference_step), .y(reference_y));
+  queue_count_trial #(.W(W), .N(N), .IMPL(1)) candidate_count
+      (.pointer(pointer), .head(head), .valid(valid), .full(full),
+       .leftover(leftover), .address_overflow(address_overflow),
+       .step(candidate_step), .y(candidate_y));
+  assign equal = (reference_step == candidate_step) && (reference_y == candidate_y);
 endmodule

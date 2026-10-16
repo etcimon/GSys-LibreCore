@@ -85,6 +85,7 @@ pub fn analyze_files(
 pub fn lower_unit(unit: &ParsedUnit, opts: &LowerOptions) -> CoreResult<AnalyzeOutput> {
     let mut design = TimingDesign::empty(opts.target.clone());
     design.param_map_keys = opts.param_map.keys();
+    design.param_map_ints = opts.param_map.int_entries();
     design.package_mode = opts.package_mode;
     let mut names = NameTable::new();
     let mut next_module: ModuleId = 0;
@@ -402,16 +403,9 @@ fn lower_file(
         let mid = *next_module;
         *next_module += 1;
 
-        let parameters =
-            collect_typed_parameters_in(tree, &file.bytes, scope.nodes.iter().cloned());
-        let ports = collect_module_ports_in(tree, &file.bytes, scope.nodes.iter().cloned());
-        let decls = collect_decl_sites(
-            tree,
-            li,
-            &path_str,
-            &file.bytes,
-            scope.nodes.iter().cloned(),
-        );
+        let parameters = collect_typed_parameters_in(tree, scope.nodes.iter().cloned());
+        let ports = collect_module_ports_in(tree, scope.nodes.iter().cloned());
+        let decls = collect_decl_sites(tree, li, &path_str, scope.nodes.iter().cloned());
         let gen_loops = collect_genvar_loops_in(tree, li, &path_str, scope.nodes.iter().cloned());
         let insts = collect_module_instances_in(
             tree,
@@ -441,6 +435,8 @@ fn lower_file(
             package_imports: collect_package_imports_in(tree, scope.nodes.iter().cloned()),
             instances: insts.clone(),
             decls,
+            const_exprs: collect_const_exprs_in(tree, scope.nodes.iter().cloned()),
+            typedef_texts: collect_typedef_texts_in(tree, scope.nodes.iter().cloned()),
             config_branch: module_has_config_branch(scope.nodes.iter().cloned()),
             loc: mod_loc,
         };
@@ -788,8 +784,61 @@ fn extract_package(
         functions: collect_function_names_in(tree, pkg),
         function_bodies: collect_function_bodies(tree, bytes, pkg),
         typedefs: collect_typedef_names_in(tree, pkg),
+        const_exprs: collect_const_exprs_in(tree, pkg),
+        typedef_texts: collect_typedef_texts_in(tree, pkg),
         loc,
     })
+}
+
+/// `parameter` / `localparam` assignments: name → value expression text
+/// (preprocessed frame, `SyntaxTree::get_str`). First declaration wins.
+fn collect_const_exprs_in<'a, T>(tree: &'a SyntaxTree, root: T) -> BTreeMap<String, String>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut out = BTreeMap::new();
+    for node in root {
+        if let RefNode::ParamAssignment(pa) = node {
+            let Some(name) = identifier_str(tree, RefNode::ParameterIdentifier(&pa.nodes.0)) else {
+                continue;
+            };
+            let Some((_, expr)) = pa.nodes.2.as_ref() else {
+                continue;
+            };
+            if let Some(text) = node_text(tree, expr) {
+                out.entry(name).or_insert(text);
+            }
+        }
+    }
+    out
+}
+
+/// `typedef <data_type> <name>;`: name → data-type text (`logic [IdxW-1:0]`,
+/// `enum logic [1:0] {…}`, `struct packed {…}`). Width inference reads the
+/// base vector type; struct bodies stay unresolved.
+fn collect_typedef_texts_in<'a, T>(tree: &'a SyntaxTree, root: T) -> BTreeMap<String, String>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut out = BTreeMap::new();
+    for node in root {
+        if let RefNode::TypeDeclarationDataType(td) = node {
+            let Some(name) = identifier_str(tree, RefNode::TypeIdentifier(&td.nodes.2)) else {
+                continue;
+            };
+            let mut text = node_text(tree, &td.nodes.1).unwrap_or_default();
+            for dim in &td.nodes.3 {
+                if let Some(d) = node_text(tree, dim) {
+                    text.push(' ');
+                    text.push_str(&d);
+                }
+            }
+            if !text.is_empty() {
+                out.entry(name).or_insert(text);
+            }
+        }
+    }
+    out
 }
 
 /// Typedef / struct type names under a package or module.
@@ -832,11 +881,7 @@ fn hierarchical_path(root: &str, member: &str) -> String {
 ///
 /// Scope pieces come from AST `PackageScope` / `ClassType` / type identifiers
 /// (anything that appears as the left of `::`), never a hard-coded package list.
-fn collect_typed_parameters_in<'a, T>(
-    tree: &'a SyntaxTree,
-    bytes: &[u8],
-    root: T,
-) -> Vec<TypedParameter>
+fn collect_typed_parameters_in<'a, T>(tree: &'a SyntaxTree, root: T) -> Vec<TypedParameter>
 where
     T: IntoIterator<Item = RefNode<'a>>,
 {
@@ -846,7 +891,7 @@ where
     for node in root {
         match node {
             RefNode::ParameterDeclarationParam(p) => {
-                let default_text = integer_after_eq(bytes, locate_byte_span(p));
+                let default_text = integer_after_eq(tree.get_str(p));
                 let mut param_ids: Vec<String> = Vec::new();
                 let mut type_ids: Vec<String> = Vec::new();
                 let mut default_ids: Vec<String> = Vec::new();
@@ -934,7 +979,7 @@ where
                 }
             }
             RefNode::ParameterDeclarationType(p) => {
-                let default_text = integer_after_eq(bytes, locate_byte_span(p));
+                let default_text = integer_after_eq(tree.get_str(p));
                 // parameter type T = default (default may be scope::type)
                 let mut names = Vec::new();
                 let mut default_tokens = Vec::new();
@@ -1021,9 +1066,13 @@ fn type_before_name(text: &str, var_name: &str) -> Option<String> {
     Some(candidate.to_string())
 }
 
-fn integer_after_eq(bytes: &[u8], span: Option<(u32, u32)>) -> Option<String> {
-    let (start, end) = span?;
-    let text = span_text(bytes, (start, end))?;
+/// Integer default after `=` in a parameter declaration. Reads the node's
+/// own (preprocessed) text through `SyntaxTree::get_str`: parser offsets
+/// address the preprocessed buffer, not the original bytes, and the two drift
+/// apart after a string literal followed by a quoting comment, an `ifdef`, or
+/// a macro (`stream_arbiter` shifts by 22 bytes after `ARBITER = "rr" // "rr"`).
+fn integer_after_eq(text: Option<&str>) -> Option<String> {
+    let text = text?.trim();
     let rhs = text.split_once('=')?.1;
     let rhs = rhs.trim().trim_end_matches([';', ',']).trim();
     if rhs.parse::<i64>().is_ok() {
@@ -1033,15 +1082,11 @@ fn integer_after_eq(bytes: &[u8], span: Option<(u32, u32)>) -> Option<String> {
     }
 }
 
-fn span_text(bytes: &[u8], span: (u32, u32)) -> Option<String> {
-    let start = span.0 as usize;
-    let end = span.1 as usize;
-    if end > bytes.len() || start > end {
-        return None;
-    }
-    let text = String::from_utf8_lossy(&bytes[start..end])
-        .trim()
-        .to_string();
+/// Trimmed preprocessed text of a CST node (`SyntaxTree::get_str`), the
+/// frame the parser's offsets actually address. Prefer this over slicing the
+/// original bytes at `locate_byte_span` offsets.
+fn node_text<'a, T: Into<sv_parser::RefNodes<'a>>>(tree: &SyntaxTree, node: T) -> Option<String> {
+    let text = tree.get_str(node)?.trim().to_string();
     if text.is_empty() {
         None
     } else {
@@ -1049,17 +1094,15 @@ fn span_text(bytes: &[u8], span: (u32, u32)) -> Option<String> {
     }
 }
 
-fn packed_dimension_text<'a, T>(bytes: &[u8], root: T) -> Option<String>
+fn packed_dimension_text<'a, T>(tree: &'a SyntaxTree, root: T) -> Option<String>
 where
     T: IntoIterator<Item = RefNode<'a>>,
 {
     let mut parts = Vec::new();
     for node in root {
         if let RefNode::PackedDimension(dim) = node {
-            if let Some(span) = locate_byte_span(dim) {
-                if let Some(text) = span_text(bytes, span) {
-                    parts.push(text);
-                }
+            if let Some(text) = node_text(tree, dim) {
+                parts.push(text);
             }
         }
     }
@@ -1070,17 +1113,15 @@ where
     }
 }
 
-fn unpacked_dimension_text<'a, T>(bytes: &[u8], root: T) -> String
+fn unpacked_dimension_text<'a, T>(tree: &'a SyntaxTree, root: T) -> String
 where
     T: IntoIterator<Item = RefNode<'a>>,
 {
     let mut parts = Vec::new();
     for node in root {
         if let RefNode::UnpackedDimension(dim) = node {
-            if let Some(span) = locate_byte_span(dim) {
-                if let Some(text) = span_text(bytes, span) {
-                    parts.push(text);
-                }
+            if let Some(text) = node_text(tree, dim) {
+                parts.push(text);
             }
         }
     }
@@ -1103,7 +1144,6 @@ fn collect_decl_sites<'a, T>(
     tree: &'a SyntaxTree,
     li: &LineIndex,
     path_str: &str,
-    bytes: &[u8],
     root: T,
 ) -> Vec<DeclSite>
 where
@@ -1118,9 +1158,26 @@ where
     let mut block_local: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // Block-local nets have no DataDeclaration site; they get one below.
     let mut local_nets: Vec<(String, SourceLoc)> = Vec::new();
+    let mut scopes = Vec::new();
+    let mut unresolved_scope = false;
     let mut nested: Vec<RefNode<'a>> = Vec::new();
     for node in root {
         nested.push(node.clone());
+        let scope = match &node {
+            RefNode::SeqBlock(b) => Some(loop_source_span(tree, li, path_str, *b)),
+            RefNode::GenerateBlock(b) => Some(loop_source_span(tree, li, path_str, *b)),
+            RefNode::FunctionDeclaration(b) => Some(loop_source_span(tree, li, path_str, *b)),
+            RefNode::TaskDeclaration(b) => Some(loop_source_span(tree, li, path_str, *b)),
+            RefNode::LoopStatementFor(b) => Some(loop_source_span(tree, li, path_str, *b)),
+            _ => None,
+        };
+        if let Some(scope) = scope {
+            if scope.origin == OriginKind::UserFile && scope.byte_end > scope.byte_start {
+                scopes.push(scope);
+            } else {
+                unresolved_scope = true;
+            }
+        }
         let inner: Vec<RefNode<'a>> = match &node {
             RefNode::SeqBlock(b) => (*b).into_iter().collect(),
             RefNode::FunctionDeclaration(f) => (*f).into_iter().collect(),
@@ -1171,6 +1228,8 @@ where
                             unpacked_text: String::new(),
                             loc: loc.clone(),
                             block_local: true,
+                            scope: None,
+                            loop_var: true,
                         });
                     }
                 }
@@ -1211,20 +1270,18 @@ where
                 }
             }
         }
-        if let Some(span) = locate_byte_span(var) {
-            if let Some(text) = span_text(bytes, span) {
-                if let Some(name) = names.first() {
-                    if let Some(found) = type_before_name(&text, name) {
-                        type_name = found;
-                    }
+        if let Some(text) = node_text(tree, var) {
+            if let Some(name) = names.first() {
+                if let Some(found) = type_before_name(&text, name) {
+                    type_name = found;
                 }
             }
         }
         if type_name.is_empty() {
             type_name = "logic".to_string();
         }
-        let packed = packed_dimension_text(bytes, data_type).unwrap_or_default();
-        let unpacked = unpacked_dimension_text(bytes, assignments);
+        let packed = packed_dimension_text(tree, data_type).unwrap_or_default();
+        let unpacked = unpacked_dimension_text(tree, assignments);
         for name in names {
             let is_local = block_local.contains(&name);
             out.push(DeclSite {
@@ -1234,11 +1291,13 @@ where
                 unpacked_text: unpacked.clone(),
                 loc: loc.clone(),
                 block_local: is_local,
+                scope: None,
+                loop_var: false,
             });
         }
     }
     for (name, loc) in local_nets {
-        if !out.iter().any(|d| d.name == name && d.block_local) {
+        if !out.iter().any(|d| d.name == name && d.loc == loc) {
             out.push(DeclSite {
                 name,
                 type_name: "wire".to_string(),
@@ -1246,14 +1305,28 @@ where
                 unpacked_text: String::new(),
                 loc,
                 block_local: true,
+                scope: None,
+                loop_var: false,
             });
+        }
+    }
+    for decl in &mut out {
+        if decl.loc.origin == OriginKind::UserFile {
+            decl.scope = scopes.iter()
+                .filter(|s| s.file == decl.loc.file
+                    && s.byte_start <= decl.loc.byte_start && decl.loc.byte_start < s.byte_end)
+                .min_by_key(|s| s.byte_end - s.byte_start)
+                .cloned();
+            // A module declaration must not inherit the block-local flag just
+            // because a different block declares a variable of the same name.
+            decl.block_local = decl.scope.is_some() || (unresolved_scope && decl.block_local);
         }
     }
     out
 }
 
 /// Port list: direction + type + optional hierarchical packed dims (`root.member`).
-fn collect_module_ports_in<'a, T>(tree: &'a SyntaxTree, bytes: &[u8], root: T) -> Vec<ModulePort>
+fn collect_module_ports_in<'a, T>(tree: &'a SyntaxTree, root: T) -> Vec<ModulePort>
 where
     T: IntoIterator<Item = RefNode<'a>>,
 {
@@ -1262,7 +1335,7 @@ where
 
     for node in root {
         if let RefNode::AnsiPortDeclaration(port) = node {
-            let dimension_text = packed_dimension_text(bytes, port);
+            let dimension_text = packed_dimension_text(tree, port);
             let mut direction = "unknown".to_string();
             let mut type_name: Option<String> = None;
             let mut name: Option<String> = None;
@@ -1597,20 +1670,18 @@ where
         if !seen.insert(name.clone()) {
             continue;
         }
-        let text = locate_byte_span(func)
-            .and_then(|span| span_text(bytes, span))
-            .unwrap_or_default();
+        let text = node_text(tree, func).unwrap_or_default();
         out.push(FunctionBody {
             name,
             return_expr: return_expr_text(&text).unwrap_or_default(),
-            return_dimension: return_dimension_text(bytes, func),
+            return_dimension: return_dimension_text(tree, func),
             constants: constants.clone(),
         });
     }
     out
 }
 
-fn return_dimension_text<'a, T>(bytes: &[u8], root: T) -> String
+fn return_dimension_text<'a, T>(tree: &'a SyntaxTree, root: T) -> String
 where
     T: IntoIterator<Item = RefNode<'a>>,
 {
@@ -1624,8 +1695,8 @@ where
                 }
             }
             RefNode::PackedDimension(dim) => {
-                if let Some((start, end)) = locate_byte_span(dim) {
-                    if let Some(text) = span_text(bytes, (start, end)) {
+                if let Some((start, _)) = locate_byte_span(dim) {
+                    if let Some(text) = node_text(tree, dim) {
                         dims.push((start, text));
                     }
                 }
@@ -1869,7 +1940,7 @@ where
     // IEEE 1800: packed/unpacked dimensions, case-item labels, fixed part-select
     // bounds, indexed-select widths, and replication counts are constant
     // expressions. Do not bill their `/` `*` `%` as datapath (PASS-STRATEGY P1).
-    let lrm_spans = lrm_constant_spans(nodes.iter().cloned());
+    let lrm_spans = lrm_constant_spans(tree, line_index, nodes.iter().cloned());
 
     for node in nodes {
         match node {
@@ -2290,33 +2361,48 @@ fn split_assign_text(text: &str) -> (Option<String>, Option<String>) {
 /// `te_priority.sv:139` billed 56 FO4 on `/*|| (` (`||` and `*` inside a block
 /// comment); `cva6_shared_tlb.sv:260` billed 136 FO4 on a trailing `//`
 /// continuation. Restricting the skip to slash tokens left those interiors live.
-fn lrm_constant_spans<'a, T>(root: T) -> Vec<(u32, u32)>
+///
+/// Spans are in **original-source** coordinates (through `get_origin`), the
+/// same frame `locate_to_source` gives operator tokens. Raw parser offsets
+/// address preprocessed text, which the preprocessor shifts (comments,
+/// `ifdef`, macros) — a header comment alone was enough to leave every
+/// `[N-1:0]` port range billed as a 10 FO4 adder in instance-only wrappers
+/// (`stream_arbiter`: three port dims → a 30 FO4 "path").
+fn lrm_constant_spans<'a, T>(tree: &'a SyntaxTree, li: &LineIndex, root: T) -> Vec<(u32, u32)>
 where
     T: IntoIterator<Item = RefNode<'a>>,
 {
     let mut out = Vec::new();
     for node in root {
         let span = match node {
-            RefNode::PackedDimension(x) => locate_byte_span(x),
-            RefNode::PackedDimensionRange(x) => locate_byte_span(x),
-            RefNode::UnpackedDimension(x) => locate_byte_span(x),
-            RefNode::UnpackedDimensionRange(x) => locate_byte_span(x),
-            RefNode::CaseItemExpression(x) => locate_byte_span(x),
+            RefNode::PackedDimension(x) => origin_byte_span(tree, li, x),
+            RefNode::PackedDimensionRange(x) => origin_byte_span(tree, li, x),
+            RefNode::UnpackedDimension(x) => origin_byte_span(tree, li, x),
+            RefNode::UnpackedDimensionRange(x) => origin_byte_span(tree, li, x),
+            RefNode::CaseItemExpression(x) => origin_byte_span(tree, li, x),
             // `[msb:lsb]` / constant `+:`/`-:` — both sides are constant expressions.
-            RefNode::ConstantRange(x) => locate_byte_span(x),
-            RefNode::ConstantIndexedRange(x) => locate_byte_span(x),
+            RefNode::ConstantRange(x) => origin_byte_span(tree, li, x),
+            RefNode::ConstantIndexedRange(x) => origin_byte_span(tree, li, x),
             // Indexed `[base +: width]` / `[base -: width]`: width only (base may be runtime).
-            RefNode::IndexedRange(x) => locate_byte_span(&x.nodes.2),
+            RefNode::IndexedRange(x) => origin_byte_span(tree, li, &x.nodes.2),
             // `{count{body}}`: count is LRM-constant; body may be datapath.
-            RefNode::MultipleConcatenation(x) => locate_byte_span(&x.nodes.0.nodes.1 .0),
-            RefNode::ConstantMultipleConcatenation(x) => locate_byte_span(&x.nodes.0.nodes.1 .0),
+            RefNode::MultipleConcatenation(x) => origin_byte_span(tree, li, &x.nodes.0.nodes.1 .0),
+            RefNode::ConstantMultipleConcatenation(x) => {
+                origin_byte_span(tree, li, &x.nodes.0.nodes.1 .0)
+            }
             // Generate-for header (init / condition / step) is elaboration-constant.
-            RefNode::GenvarInitialization(x) => locate_byte_span(x),
-            RefNode::GenvarExpression(x) => locate_byte_span(x),
-            RefNode::GenvarIteration(x) => locate_byte_span(x),
+            RefNode::GenvarInitialization(x) => origin_byte_span(tree, li, x),
+            RefNode::GenvarExpression(x) => origin_byte_span(tree, li, x),
+            RefNode::GenvarIteration(x) => origin_byte_span(tree, li, x),
             // if-generate / case-generate conditions, not the body.
-            RefNode::IfGenerateConstruct(x) => locate_byte_span(&x.nodes.1.nodes.1),
-            RefNode::CaseGenerateConstruct(x) => locate_byte_span(&x.nodes.1.nodes.1),
+            RefNode::IfGenerateConstruct(x) => origin_byte_span(tree, li, &x.nodes.1.nodes.1),
+            RefNode::CaseGenerateConstruct(x) => origin_byte_span(tree, li, &x.nodes.1.nodes.1),
+            // Parameter / localparam defaults and typedef bodies are elaboration
+            // constants (IEEE 1800-2017 §6.20, §6.18), never datapath.
+            RefNode::ParameterDeclaration(x) => origin_byte_span(tree, li, x),
+            RefNode::LocalParameterDeclaration(x) => origin_byte_span(tree, li, x),
+            RefNode::ParameterPortList(x) => origin_byte_span(tree, li, x),
+            RefNode::TypeDeclaration(x) => origin_byte_span(tree, li, x),
             _ => None,
         };
         if let Some(s) = span {
@@ -2324,6 +2410,32 @@ where
         }
     }
     out
+}
+
+/// First/last token of `root` mapped to original-source byte offsets. `None`
+/// when either boundary comes from an include or a macro (the caller then
+/// leaves the operator billed, the conservative direction).
+fn origin_byte_span<'a, T>(tree: &'a SyntaxTree, li: &LineIndex, root: T) -> Option<(u32, u32)>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut first = None;
+    let mut last = None;
+    for node in root {
+        if let RefNode::Locate(loc) = node {
+            if loc.len > 0 {
+                first.get_or_insert(loc);
+                last = Some(loc);
+            }
+        }
+    }
+    let (first, last) = (first?, last?);
+    let (fpath, start) = tree.get_origin(first)?;
+    let (lpath, stop) = tree.get_origin(last)?;
+    if fpath != &li.path || lpath != &li.path || stop < start {
+        return None;
+    }
+    Some((start as u32, (stop + last.len) as u32))
 }
 
 fn locate_byte_span<'a, T>(root: T) -> Option<(u32, u32)>
@@ -2675,6 +2787,13 @@ mod tests {
         assert!(module.text_refs_block_local("a && !cmo_req", &set));
         assert!(!module.text_refs_block_local("x[1] & ev[0]", &set));
         assert!(!module.text_refs_block_local("pkg::BRH", &set));
+        assert!(!module.text_refs_block_local("pkg::brh", &set));
+        assert!(!module.text_refs_block_local("request.brh", &set));
+        assert!(!module.text_refs_block_local("request . brh", &set));
+        assert!(module.text_refs_block_local("brh.member", &set));
+        assert!(module.text_refs_block_local("pkg::fn(brh)", &set));
+        assert!(module.text_refs_block_local("data[brh:0]", &set));
+        assert!(module.text_refs_block_local("brh'(data)", &set));
     }
 
     #[test]
@@ -2696,6 +2815,120 @@ mod tests {
         assert_eq!(node.op_class, Some(OperatorClass::DivRem));
         assert_eq!(node.loc.start_line, 6);
         assert!(text[node.loc.byte_start as usize..].starts_with('y'));
+    }
+
+    #[test]
+    fn port_dims_and_parameters_are_not_datapath_after_a_header_comment() {
+        // stream_arbiter shape: `[N-1:0]` port ranges, a localparam, and only
+        // an instance (no always/assign) behind a string-default parameter
+        // whose trailing comment quotes strings. The preprocessor shifts its
+        // output by 22 bytes after that line, so raw parser offsets no longer
+        // address the source: the fallback scan used to bill three 10 FO4
+        // adders for the port dims. Spans are compared in origin coordinates.
+        let text = concat!(
+            "// Copyright 2018 ETH Zurich and University of Bologna.\n",
+            "// Licensed under Solderpad 0.51; see the License for details.\n",
+            "module wrap #(parameter int unsigned N = 2, parameter int W = N * 8,\n",
+            "    parameter           ARBITER = \"rr\"    // \"rr\" or \"prio\"\n",
+            ") (\n",
+            "  input  logic [N-1:0]   valid_i,\n",
+            "  input  logic [W-1:0]   data_i [N-1:0],\n",
+            "  output logic [N-1:0]   ready_o,\n",
+            "  output logic [W/2-1:0] data_o\n",
+            ");\n",
+            "  localparam int unsigned IDX_W = (N > 1) ? $clog2(N) : 1;\n",
+            "  typedef logic [IDX_W-1:0] idx_t;\n",
+            "  leaf #(.N(N), .W(W)) i_leaf (.valid_i, .data_i, .ready_o, .data_o);\n",
+            "endmodule\n",
+            "module leaf #(parameter int unsigned N = 2, parameter int W = 16) (\n",
+            "  input  logic [N-1:0]   valid_i,\n",
+            "  input  logic [W-1:0]   data_i [N-1:0],\n",
+            "  output logic [N-1:0]   ready_o,\n",
+            "  output logic [W/2-1:0] data_o\n",
+            ");\n",
+            "  assign ready_o = valid_i;\n",
+            "  assign data_o = data_i[0][W/2-1:0] + data_i[1][W/2-1:0];\n",
+            "endmodule\n",
+        );
+        let out = analyze_inline_source(text);
+        let wrap = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "wrap")
+            .expect("wrap module");
+        assert!(
+            wrap.nodes.is_empty(),
+            "instance-only wrapper must have no datapath nodes, got {:?}",
+            wrap.nodes.values().map(|n| (&n.op_class, &n.loc.start_line)).collect::<Vec<_>>()
+        );
+        assert!(
+            !out.design.paths.iter().any(|p| p.module == wrap.id),
+            "no timing path may start in the wrapper's port/parameter constants"
+        );
+        let leaf = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "leaf")
+            .expect("leaf module");
+        // The leaf keeps its real adder: constant part-selects are not the datapath.
+        assert!(
+            leaf.nodes
+                .values()
+                .any(|n| n.op_class == Some(OperatorClass::AddSub)),
+            "leaf adder must still be lowered"
+        );
+    }
+
+    #[test]
+    fn composed_paths_respect_local_shadowing_and_keep_global_connections() {
+        let text = concat!(
+            "module origin_test(input logic clk, input logic [31:0] a,b,c,\n",
+            "output logic [31:0] y,z,outside,q);\n",
+            "logic [31:0] tmp;\n",
+            "assign tmp = a * b;\n",
+            "always_comb begin : first\n",
+            "  logic [31:0] tmp;\n",
+            "  tmp = a + b;\n",
+            "  y = tmp ^ c;\n",
+            "end\n",
+            "always_comb begin : second\n",
+            "  logic [31:0] tmp;\n",
+            "  tmp = a - c;\n",
+            "  z = tmp ^ b;\n",
+            "end\n",
+            "assign outside = tmp;\n",
+            "always_ff @(posedge clk) q <= y;\n",
+            "endmodule\n",
+        );
+        let out = analyze_inline_source(text);
+        let m = out.design.modules.values().next().unwrap();
+        let find = |rhs: &str| m.nodes.values().find(|n| n.rhs.as_deref() == Some(rhs)).unwrap();
+        let global = find("a * b");
+        let first = find("a + b");
+        let second = find("a - c");
+        let y = find("tmp ^ c");
+        let z = find("tmp ^ b");
+        let outside = m.nodes.values().find(|n| n.lhs.as_deref() == Some("outside")).unwrap();
+        assert!(y.fans_in.contains(&first.id));
+        assert!(!y.fans_in.contains(&second.id) && !y.fans_in.contains(&global.id));
+        assert!(z.fans_in.contains(&second.id));
+        assert!(!z.fans_in.contains(&first.id) && !z.fans_in.contains(&global.id));
+        assert!(outside.fans_in.contains(&global.id));
+        assert!(!outside.fans_in.contains(&second.id));
+        let declarations: Vec<_> = m.decls.iter().filter(|d| d.name == "tmp").collect();
+        assert_eq!(declarations.len(), 3);
+        assert_eq!(declarations.iter().filter(|d| d.block_local).count(), 2);
+        let nodes: Vec<_> = m.nodes.keys().copied().collect();
+        let tree = crate::ref_order::RefOrderTree::from_nodes(m, &nodes);
+        let linked = |from, to| tree.edges.iter().any(|e| {
+            nodes[e.from_stmt as usize] == from && nodes[e.to_stmt as usize] == to
+        });
+        assert!(linked(first.id, y.id));
+        assert!(linked(second.id, z.id));
+        assert!(linked(global.id, outside.id));
+        assert!(!linked(second.id, outside.id));
     }
 
     #[test]

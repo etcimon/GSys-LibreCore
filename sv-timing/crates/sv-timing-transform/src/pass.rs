@@ -18,7 +18,7 @@ use sv_timing_core::{
 };
 
 use crate::edit::EditTrace;
-use crate::pipeline::{insert_register, select_pipeline_cuts, split_assign};
+use crate::pipeline::{insert_register, prepare_pipeline_cuts, split_assign};
 use crate::worklist::{order_worklist_with_plan, WorklistPolicy};
 
 /// Transform error.
@@ -1192,8 +1192,7 @@ fn apply_work_item(
                 }
             });
         if let Some(ins_opp) = ins {
-            let _ = crate::pipeline::expand_expr_spine_for_path(ctx, ins_opp.path_id);
-            match select_pipeline_cuts(ctx, &ins_opp) {
+            match prepare_pipeline_cuts(ctx, &ins_opp) {
                 Ok(plan) => {
                     insert_register(ctx, &plan)?;
                     did = true;
@@ -1209,7 +1208,12 @@ fn apply_work_item(
                 Err(TransformError::LatencyNotAllowed) => {
                     return Ok((false, Some("latency_not_allowed")));
                 }
-                Err(TransformError::InvalidOpportunity(_)) => {
+                Err(TransformError::InvalidOpportunity(detail)) => {
+                    ctx.log_algo("cut.refuse_detail", AlgoTrace::kv([
+                        ("path_id", json!(ins_opp.path_id)),
+                        ("module", json!(ctx.active_module_name)),
+                        ("detail", json!(detail)),
+                    ]));
                     return Ok((false, Some("cut_schedule")));
                 }
                 Err(e) => return Err(e),

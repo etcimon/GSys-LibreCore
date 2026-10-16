@@ -442,6 +442,8 @@ mod tests {
                 package_imports: vec![],
                 instances: vec![],
                 decls: Vec::new(),
+                const_exprs: Default::default(),
+                typedef_texts: Default::default(),
                 config_branch: false,
                 loc: path(0, 0.0, "t.sv", 1).primary_loc.clone(),
             },

@@ -359,6 +359,12 @@ export interface ManifestOverride {
   /** Tag used in the output filename (default: target). */
   outTag?: string;
   /**
+   * File substitutions applied after the overlay: a live path matching the
+   * regex is replaced by the absolute replacement path (same position). Used
+   * by `timings sta-rtl` to swap the behavioural `tc_sram` for the study stub.
+   */
+  replaceFiles?: Array<{ match: RegExp; replacement: string; note: string }>;
+  /**
    * Corrected-emit flist (`svt_corrected.f`) whose `*__svt.sv` files replace
    * the matching live sources — the explicit form of the
    * `CVA6_TIMINGS_USE_EMIT` / `CVA6_TIMINGS_EMIT_FLIST` environment overlay.
@@ -450,6 +456,16 @@ export function writeFlatManifest(
     emitReplaced = over.replaced;
   }
 
+  const substituted: string[] = [];
+  for (const sub of override.replaceFiles ?? []) {
+    for (let i = 0; i < files.length; i++) {
+      if (sub.match.test(files[i] ?? "")) {
+        substituted.push(`// substituted ${files[i]} -> ${sub.replacement} (${sub.note})`);
+        files[i] = posixPath(sub.replacement);
+      }
+    }
+  }
+
   const outDir = join(ctx.paths.build, override.outSubdir ?? "verify");
   mkdirSync(outDir, { recursive: true });
   const tag = override.outTag ?? target;
@@ -461,6 +477,7 @@ export function writeFlatManifest(
           `// --use-emit overlay: ${emitReplaced} file(s) from ${emitFlist}`,
         ]
       : []),
+    ...substituted,
     ...incdirs.map((d) => `+incdir+${d}`),
     ...defines,
     ...files,

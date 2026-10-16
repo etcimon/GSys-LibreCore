@@ -42,6 +42,7 @@ pub mod path_class;
 pub mod ref_order;
 pub mod relocation;
 pub mod version;
+pub mod width;
 
 pub use algo_trace::{AlgoTrace, AlgoTraceEvent};
 pub use cleanliness::{

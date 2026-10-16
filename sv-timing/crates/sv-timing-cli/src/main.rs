@@ -216,6 +216,10 @@ enum Commands {
         /// JSONL algorithm trace (path_class / relocation / correct loop).
         #[arg(long = "trace-log")]
         trace_log: Option<PathBuf>,
+        /// Write the full timing IR (every node: lhs/rhs/width/fo4) as JSON.
+        /// Debug surface for path forensics with the real param-map.
+        #[arg(long = "ir-out")]
+        ir_out: Option<PathBuf>,
         /// Optimization level + dials (analysis dials apply here).
         #[command(flatten)]
         opt: OptArgs,
@@ -1175,6 +1179,7 @@ fn main() -> ExitCode {
             package_mode,
             allow_parse_errors,
             trace_log,
+            ir_out,
             opt,
         } => {
             let opt = match opt.resolve(None) {
@@ -1281,6 +1286,12 @@ fn main() -> ExitCode {
                         match write_analyze_algo_trace(tp, &out.design, target_mhz, fo4_ps) {
                             Ok(()) => println!("trace_log={}", tp.display()),
                             Err(e) => eprintln!("warning: --trace-log: {e}"),
+                        }
+                    }
+                    if let Some(ip) = &ir_out {
+                        match sv_timing_core::debug_export::debug_dump_ir_json(&out.design, ip) {
+                            Ok(()) => println!("ir_out={}", ip.display()),
+                            Err(e) => eprintln!("warning: --ir-out: {e}"),
                         }
                     }
                     if !out.skipped_files.is_empty() {

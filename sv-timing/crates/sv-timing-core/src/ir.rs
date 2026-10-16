@@ -500,6 +500,14 @@ pub struct DeclSite {
     /// emitted module-level wire or `type()` operand may not name it.
     #[serde(default)]
     pub block_local: bool,
+    /// Nearest lexical scope, in original-source coordinates. None for module
+    /// declarations or unresolved origins; unresolved bindings stay conservative.
+    #[serde(default)]
+    pub scope: Option<SourceLoc>,
+    /// `for (int i = …)` loop variable: unrolled at elaboration, so it is a
+    /// constant operand for width purposes (its `int` is not a 32-bit datapath).
+    #[serde(default)]
+    pub loop_var: bool,
 }
 
 /// ANSI/non-ANSI port summary for typed / parameterized ports.
@@ -642,6 +650,13 @@ pub struct TimingModule {
     /// Variable and net declarations. Empty when this lowerer saw none.
     #[serde(default)]
     pub decls: Vec<DeclSite>,
+    /// `parameter` / `localparam` name → default/value expression text
+    /// (preprocessed frame). Width inference evaluates `[N-1:0]` through it.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub const_exprs: BTreeMap<String, String>,
+    /// `typedef` name → data-type text (`logic [IdxW-1:0]`, `enum logic [1:0]`).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub typedef_texts: BTreeMap<String, String>,
     /// True when the module contains a procedural `if` or a generate-`if`.
     /// Area keeps both arms. Delay does not read this flag.
     #[serde(default)]
@@ -729,9 +744,33 @@ impl TimingModule {
         }
         // The expression parser folds what it cannot read into opaque leaves;
         // scan the raw text too so a block-local name never slips through.
-        text.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '$'))
-            .filter(|t| !t.is_empty())
-            .any(|tok| block_local.contains(tok))
+        let bytes = text.as_bytes();
+        let has_escaped_ident = text.contains('\\');
+        let mut i = 0;
+        while i < bytes.len() {
+            if bytes[i].is_ascii_alphabetic() || matches!(bytes[i], b'_' | b'$') {
+                let start = i;
+                i += 1;
+                while i < bytes.len()
+                    && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b'$'))
+                {
+                    i += 1;
+                }
+                let before = text[..start].trim_end();
+                let after = text[i..].trim_start();
+                // A member named `index` is not a local variable `index`.
+                // Retain the conservative scan for escaped identifiers.
+                let qualified = !has_escaped_ident
+                    && (before.ends_with('.') || before.ends_with("::")
+                        || after.starts_with("::"));
+                if !qualified && block_local.contains(&text[start..i]) {
+                    return true;
+                }
+            } else {
+                i += 1;
+            }
+        }
+        false
     }
 }
 
@@ -751,6 +790,12 @@ pub struct TimingPackage {
     pub function_bodies: Vec<FunctionBody>,
     /// Typedef / struct type names.
     pub typedefs: Vec<String>,
+    /// Package `parameter` / `localparam` name → expression text.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub const_exprs: BTreeMap<String, String>,
+    /// Package `typedef` name → data-type text.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub typedef_texts: BTreeMap<String, String>,
     /// Source span.
     pub loc: SourceLoc,
 }
@@ -777,6 +822,10 @@ pub struct TimingDesign {
     /// Keys present in the host param-map (values not re-exported by default).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub param_map_keys: Vec<String>,
+    /// Integer-valued host param-map entries (`CVA6Cfg.XLEN` → 64, `XLEN` → 64),
+    /// the width inference's outermost constant scope.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub param_map_ints: BTreeMap<String, i64>,
     /// True when package-mode denser surface was requested.
     #[serde(default)]
     pub package_mode: bool,
@@ -824,6 +873,7 @@ impl TimingDesign {
             opportunities: Vec::new(),
             target,
             param_map_keys: Vec::new(),
+            param_map_ints: BTreeMap::new(),
             package_mode: false,
             path_exceptions: Vec::new(),
             parallel_timing: BTreeMap::new(),

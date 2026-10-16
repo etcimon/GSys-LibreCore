@@ -7,6 +7,43 @@ import { afterAll, beforeAll, expect, spyOn, test } from "bun:test";
 import { existsSync, mkdirSync, rmSync, utimesSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { checkFo4Completion, parseStaResult } from "../src/tooling/rtlTiming.ts";
+
+test("STA no-path sentinels are not numeric timing evidence", () => {
+  const invalid = parseStaResult("STA_RESULT top=x wns_max=1e39 tns_max=0 wns_min=1e39 tns_min=0");
+  expect(invalid.wnsMax).toBeUndefined();
+  expect(invalid.wnsMin).toBeUndefined();
+  expect(parseStaResult("STA_RESULT top=x wns_max=-0.2 tns_max=-1 wns_min=0.1 tns_min=0").wnsMax).toBe(-0.2);
+});
+
+test("FO4 completion requires emitted evidence and all primary paths within budget", () => {
+  const report = {
+    dry_run: false,
+    post_analyze_valid: true,
+    integrity: { joint_ok: true, reparse_ok: true, structural_ok: true },
+    post_closure: { closes: true, worst_path_fo4: 9 },
+    post_analyze: {
+      budget_fo4: 10,
+      skipped_files: [],
+      paths: [
+        { multi_cycle: false, path_kind: "regtoreg", total_fo4: 10 },
+        { multi_cycle: false, path_kind: "intoout", total_fo4: 12 },
+        { multi_cycle: true, total_fo4: 97.5 },
+      ],
+    },
+  };
+  expect(checkFo4Completion(report, 10).ok).toBe(false);
+  const study = checkFo4Completion(report, 10, true);
+  expect(study.ok).toBe(true);
+  expect(study.detail).toContain("STUDY");
+  report.post_analyze.paths[1]!.total_fo4 = 9;
+  expect(checkFo4Completion(report, 10).ok).toBe(true);
+  report.post_analyze_valid = false;
+  expect(checkFo4Completion(report, 10, true).ok).toBe(false);
+  report.post_analyze_valid = true;
+  expect(checkFo4Completion(report, 8, true).ok).toBe(false);
+  expect(checkFo4Completion({}, 10).ok).toBe(false);
+});
 
 import {
   cleanAllowRoots,

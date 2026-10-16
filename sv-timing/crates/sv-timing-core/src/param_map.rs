@@ -95,6 +95,22 @@ impl ParamMap {
         self.entries.get(key)
     }
 
+    /// Every entry with an integer value (numbers, numeric strings, bools).
+    pub fn int_entries(&self) -> std::collections::BTreeMap<String, i64> {
+        self.entries
+            .iter()
+            .filter_map(|(k, v)| {
+                let n = match v {
+                    Value::Number(n) => n.as_i64(),
+                    Value::String(s) => s.trim().parse::<i64>().ok(),
+                    Value::Bool(b) => Some(i64::from(*b)),
+                    _ => None,
+                }?;
+                Some((k.clone(), n))
+            })
+            .collect()
+    }
+
     /// Resolve key as unsigned integer when possible.
     pub fn get_u32(&self, key: &str) -> Option<u32> {
         let v = self.get(key)?;

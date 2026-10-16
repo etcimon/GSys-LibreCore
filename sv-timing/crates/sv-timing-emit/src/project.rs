@@ -354,6 +354,8 @@ pub fn synthesize_project(
                 package_imports: Vec::new(),
                 instances: Vec::new(),
                 decls: Vec::new(),
+                const_exprs: Default::default(),
+                typedef_texts: Default::default(),
                 config_branch: false,
                 loc: loc.clone(),
             };

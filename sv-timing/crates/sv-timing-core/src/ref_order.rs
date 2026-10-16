@@ -24,6 +24,53 @@ pub fn ident_base(name: &str) -> String {
     name.split('[').next().unwrap_or(name).trim().to_string()
 }
 
+/// Lexical keys for def-use analysis. Source spelling is retained on IR nodes;
+/// these keys never enter emitted SystemVerilog. Build once per graph traversal.
+pub(crate) struct BindingIndex<'a> {
+    scopes: BTreeMap<&'a str, Vec<&'a crate::SourceLoc>>,
+}
+
+impl<'a> BindingIndex<'a> {
+    pub(crate) fn new(module: &'a TimingModule) -> Self {
+        let mut scopes: BTreeMap<&str, Vec<&crate::SourceLoc>> = BTreeMap::new();
+        for decl in &module.decls {
+            if let Some(scope) = &decl.scope {
+                if scope.origin == crate::OriginKind::UserFile {
+                    scopes.entry(&decl.name).or_default().push(scope);
+                }
+            }
+        }
+        for loop_info in &module.gen_loops {
+            if loop_info.loc.origin == crate::OriginKind::UserFile
+                && loop_info.loc.byte_end > loop_info.loc.byte_start
+            {
+                scopes.entry(&loop_info.genvar).or_default().push(&loop_info.loc);
+            }
+        }
+        for spans in scopes.values_mut() {
+            spans.sort_by_key(|s| s.byte_end - s.byte_start);
+            spans.dedup();
+        }
+        Self { scopes }
+    }
+
+    pub(crate) fn key(&self, name: &str, loc: &crate::SourceLoc) -> String {
+        if loc.origin == crate::OriginKind::UserFile {
+            if let Some(root) = TimingModule::root_ident(name) {
+                if let Some(spans) = self.scopes.get(root) {
+                    if let Some(scope) = spans.iter().find(|s| {
+                        s.file == loc.file && s.byte_start <= loc.byte_start
+                            && loc.byte_start < s.byte_end
+                    }) {
+                        return format!("{name}@{}:{}", scope.byte_start, scope.byte_end);
+                    }
+                }
+            }
+        }
+        name.to_string()
+    }
+}
+
 /// Per-variable reference counters in one procedural region.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct VarRefCount {
@@ -115,6 +162,7 @@ impl RefOrderTree {
     /// Build from IR nodes in **procedural (statement) order**.
     pub fn from_nodes(module: &TimingModule, nodes: &[NodeId]) -> Self {
         let param_names = param_name_set(module);
+        let bindings = BindingIndex::new(module);
         let mut tree = Self {
             procedural_ok: true,
             ..Self::default()
@@ -126,7 +174,8 @@ impl RefOrderTree {
             let Some(n) = module.nodes.get(&nid) else {
                 continue;
             };
-            let lhs = n.lhs.as_deref().map(ident_base).filter(|s| !s.is_empty());
+            let lhs = n.lhs.as_deref().map(ident_base).filter(|s| !s.is_empty())
+                .map(|s| bindings.key(&s, &n.loc));
 
             let mut reads: Vec<String> = Vec::new();
             if let Some(ref ex) = n.rhs_expr {
@@ -142,6 +191,9 @@ impl RefOrderTree {
                 );
             }
 
+            for r in &mut reads {
+                *r = bindings.key(r, &n.loc);
+            }
             for r in &reads {
                 let e = tree.vars.entry(r.clone()).or_default();
                 e.reads += 1;
@@ -535,6 +587,8 @@ mod tests {
             package_imports: vec![],
             instances: vec![],
             decls: Vec::new(),
+            const_exprs: Default::default(),
+            typedef_texts: Default::default(),
             config_branch: false,
             loc: loc(),
         };
@@ -565,6 +619,8 @@ mod tests {
             package_imports: vec![],
             instances: vec![],
             decls: Vec::new(),
+            const_exprs: Default::default(),
+            typedef_texts: Default::default(),
             config_branch: false,
             loc: loc(),
         };
@@ -630,6 +686,8 @@ mod tests {
             package_imports: vec![],
             instances: vec![],
             decls: Vec::new(),
+            const_exprs: Default::default(),
+            typedef_texts: Default::default(),
             config_branch: false,
             loc: loc(),
         };
@@ -671,6 +729,8 @@ mod tests {
             package_imports: vec![],
             instances: vec![],
             decls: Vec::new(),
+            const_exprs: Default::default(),
+            typedef_texts: Default::default(),
             config_branch: false,
             loc: loc(),
         };
@@ -717,6 +777,8 @@ mod tests {
             package_imports: vec![],
             instances: vec![],
             decls: Vec::new(),
+            const_exprs: Default::default(),
+            typedef_texts: Default::default(),
             config_branch: false,
             loc: loc(),
         };
@@ -770,6 +832,8 @@ mod tests {
             package_imports: vec![],
             instances: vec![],
             decls: Vec::new(),
+            const_exprs: Default::default(),
+            typedef_texts: Default::default(),
             config_branch: false,
             loc: loc(),
         };
@@ -822,6 +886,8 @@ mod tests {
             package_imports: vec![],
             instances: vec![],
             decls: Vec::new(),
+            const_exprs: Default::default(),
+            typedef_texts: Default::default(),
             config_branch: false,
             loc: loc(),
         };
@@ -878,6 +944,8 @@ mod tests {
             package_imports: vec![],
             instances: vec![],
             decls: Vec::new(),
+            const_exprs: Default::default(),
+            typedef_texts: Default::default(),
             config_branch: false,
             loc: loc(),
         };
@@ -947,6 +1015,8 @@ mod tests {
             package_imports: vec![],
             instances: vec![],
             decls: Vec::new(),
+            const_exprs: Default::default(),
+            typedef_texts: Default::default(),
             config_branch: false,
             loc: loc(),
         };

@@ -1558,12 +1558,13 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
     // (10 FO4 = 4000 MHz at fo4_ps 20 / margin 0.2): -O3 multi-cut, 13 stages
     // per region, origin RHS rewrites, and --assume-clk (clk_i / rst_ni).
     // Assumed gate names do not prove a domain or legal data/control latency.
-    // The final frozen emitted snapshot reports 21.5 FO4 under delay-v26;
-    // ALGORITHMS-EXPERTS Part LI separates measurement fixes, candidate
-    // arithmetic improvements and the outstanding equivalence/STA work.
+    // ALGORITHMS-EXPERTS Parts LI/LII separate frozen measurements, fresh
+    // planner results and experimental arithmetic. A budget miss stops
+    // mapping unless allowOverBudget is explicitly enabled for a study.
     // `timings sta-rtl --fo4 0` runs the live RTL instead;
     // `--emit-balance-mux-rtl` is opt-in via --svt-args.
     structural: {
+      allowOverBudget: false,
       fo4Budget: 10,
       fo4Ps: 20,
       budgetMargin: 0.2,

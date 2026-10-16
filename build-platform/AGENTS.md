@@ -411,6 +411,34 @@ bun run src/cli/index.ts setup --install --profile dual-hart
   `sv-timing/ALGORITHMS-EXPERTS.md` Part LI. The 10 FO4 setting remains a
   target, not a closure claim.
 
+  Completion gate: a miss now stops `sta-rtl` before synthesis. It requires a
+  fresh, validated emitted analysis with every primary path at the requested
+  budget; IR credit and partial reports cannot pass. For exploratory mapping,
+  use `--allow-over-budget` or `physicalDesign.structural.allowOverBudget=true`;
+  the result is labeled STUDY. Reused packages use the same gate. Current fresh
+  correction and review-only arithmetic candidates are recorded in
+  `sv-timing/ALGORITHMS-EXPERTS.md` Part LII; 10 FO4 is not yet closed.
+  `--map-recipe hierarchical` uses slang `--best-effort-hierarchy` and preserves
+  module boundaries through mapping to reduce the flat graph's memory pressure.
+  The flat full-core study was killed by the host OOM killer before STA.
+  Lean/hierarchical lowering includes `opt_dff` before techmap to normalize
+  constant asynchronous-load flops. Standalone STA uses `link_design
+  -no_black_boxes`; the Tcl requires a constrained path and the result parser
+  rejects infinity sentinels. A generated dry-run script is SKIP, not STA evidence.
+  `--map-recipe streamed` (remote) lowers to word level once, dumps RTLIL
+  and the module list, then maps one module at a time and evicts it — the
+  only recipe whose memory is bounded by the word-level design (~12 GiB)
+  rather than the whole gate-level core (51/44/48 GiB failures). ABC runs the
+  delay-oriented `&st; &dch -f; &nf -D <period>` script (Yosys's default
+  liberty script collapses carry trees to ripple: 0.905 vs 0.617 ns for a
+  32-bit add). `tc_sram` is replaced by `scripts/tc_sram_timing_stub.sv`
+  (registered macro boundary; `--no-sram-stub` keeps the model). The sv-timing
+  pre-pass writes `svt/cfg-snapshot.json` — the 222 elaborated `CVA6Cfg`
+  int/bit fields from a yosys-slang probe (`tooling/cfgSnapshot.ts`) — and
+  merges them into `svt/param-map.json`, so sv-timing's width inference
+  (delay-v29) resolves cfg-dimensioned counters. Tests:
+  `test/sta-rtl-study.test.ts`.
+
 #### 4.6.2a Running the formal gate
 
 ```

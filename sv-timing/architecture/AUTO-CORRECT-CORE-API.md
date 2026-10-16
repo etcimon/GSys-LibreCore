@@ -122,6 +122,7 @@ Unique, traceable names for expanded hierarchy, new regs, and split wires.
 | Function | Args | Description |
 |---|---|---|
 | `select_pipeline_cuts` | `&PassContext, Opportunity` → `Result<CutPlan>` | Validate clock/enable in scope; refuse incomplete `GateInfo`. |
+| `prepare_pipeline_cuts` | `&mut PassContext, Opportunity` → `Result<CutPlan>` | Preflight and try spine expansion; restore nodes/path/dirty state when cut selection refuses. Used by the pass driver. |
 | `insert_register` | `&mut PassContext, CutPlan` → `EditRecord` | Insert seq cell + wire rename; **always** latency-changing; requires allow-latency. |
 | `split_assign` | `&mut PassContext, NodeId` → `EditRecord` | Break deep assign into named wires (no latency change). |
 | `pipeline_region` | `&mut PassContext, RegionId, stages` → `Vec<EditRecord>` | Multi-cut pipeline of one region using `schedule_pipeline_cuts` + `insert_register`. |

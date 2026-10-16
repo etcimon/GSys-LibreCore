@@ -48,7 +48,26 @@ pub const IR_VERSION: &str = "ir-v1";
 /// `delay-v26`: loop scope boundaries use original-source coordinates, like
 /// assignment nodes, after conditional preprocessing or macro expansion.
 /// This repairs constant attribution; it does not change synthesized logic.
-pub const MEASUREMENT_VERSION: &str = "delay-v26";
+/// `delay-v27`: private def-use keys distinguish lexical block-local bindings.
+/// `delay-v28`: LRM-constant CST spans (dimensions, case labels, replication
+/// counts, generate headers, parameter/typedef declarations) are compared in
+/// original-source coordinates, like the operator tokens they must exclude.
+/// Before this the exclusion only held when no comment/`ifdef`/macro preceded
+/// the span; measurement correction, not an optimization gain.
+/// `delay-v29`: width-scaled operator costs (`crate::width`): `fo4-v1` values
+/// are the reference-width-32 cost; `add_sub`/`compare`/`shift_var` scale by
+/// `log2(max(w,2))/5`, `mul`/`div_rem` by `w/32`, floored at `logic_bit`.
+/// Widths come from declarations, typedefs, parameters, package constants and
+/// the host param-map; unresolved widths keep the reference cost. Declaration
+/// texts are read in the preprocessed frame (`SyntaxTree::get_str`).
+/// `delay-v30`: casts `W'(e)` / `type'(e)` / `pkg::t'(e)` are transparent
+/// (zero-delay resize), so a cast RHS is parsed instead of falling to the
+/// string heuristic; `x * Const` is a shift-add CPA (AddSub), not a 56 FO4
+/// array; `x == '0` / `'1` fill-literal compares are reduce-detects.
+/// `delay-v31`: an N-operand `+`/`-` tree costs one CPA plus 1.5 FO4 per
+/// extra operand (carry-save reduction, `CSA_LEVEL_LOGIC_BITS`), not N-1
+/// serial CPAs; measured 0.617/0.726/0.901 ns for 2/3/5 operands at 32 bits.
+pub const MEASUREMENT_VERSION: &str = "delay-v31";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

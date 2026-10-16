@@ -82,6 +82,18 @@ impl CostModel {
             OperatorClass::Other => self.other,
         }
     }
+
+    /// Reference-width cost scaled to `width` (`crate::width::width_factor`),
+    /// floored at `logic_bit`. `None` width = reference width (unchanged).
+    pub fn scaled_fo4(&self, class: OperatorClass, width: Option<u32>) -> f64 {
+        let base = self.base_fo4(class);
+        let scaled = base * crate::width::width_factor(class, width);
+        if width.is_some() {
+            scaled.max(self.logic_bit)
+        } else {
+            base
+        }
+    }
 }
 
 /// Attribute FO4 costs onto all nodes and regions; refresh path slack + max_freq.
@@ -92,7 +104,9 @@ impl CostModel {
 /// `op_class` base when no tree is present.
 pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
     design.versions.cost_model = model.id.clone();
-    let base = |c: OperatorClass| model.base_fo4(c);
+    // Width inference reads packages / param-map while nodes are mutated.
+    let packages = design.packages.clone();
+    let param_ints = design.param_map_ints.clone();
     let seeds: BTreeMap<crate::ir::ModuleId, ConstSeed> = design
         .modules
         .iter()
@@ -119,11 +133,31 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
             })
             .map(|g| (g.loc.byte_start, g.loc.byte_end, g.genvar.clone()))
             .collect();
+        let widths = crate::width::WidthResolver::from_parts(
+            &packages,
+            &param_ints,
+            &module.decls,
+            &module.ports,
+            &module.const_exprs,
+            &module.typedef_texts,
+            &module.package_imports,
+        );
         for node in module.nodes.values_mut() {
             // Spine expand / half-split lock residual segment FO4 across remeasure.
             if node.fo4_locked {
                 continue;
             }
+            // Width-scaled table (OPTIMIZATION-LEVELS §1.1(2)): arithmetic at
+            // max(LHS, operands), compares at their operands, unknown = ref.
+            let nw = widths.node_widths(node.lhs_expr.as_ref(), node.rhs_expr.as_ref());
+            if let Some(w) = nw.arith {
+                node.width = w;
+                node.width_defaulted = false;
+            } else {
+                node.width = 1;
+                node.width_defaulted = true;
+            }
+            let base = |c: OperatorClass| model.scaled_fo4(c, nw.for_class(c));
             let mut seed = base_seed.clone();
             let b = node.loc.byte_start;
             for (s, e, gv) in &gen_spans {
@@ -157,7 +191,7 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
                     node.fo4_cost = model.other * 2.0;
                     node.op_class = Some(OperatorClass::Other);
                 } else {
-                    node.fo4_cost = model.base_fo4(c);
+                    node.fo4_cost = model.scaled_fo4(c, nw.for_class(c));
                 }
             }
         }
@@ -248,6 +282,7 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
     let Some(module) = design.modules.get(&mid) else {
         return;
     };
+    let bindings = crate::ref_order::BindingIndex::new(module);
     let mut seq_lhs: BTreeSet<String> = BTreeSet::new();
     let mut seq_reads: BTreeSet<String> = BTreeSet::new();
     let mut comb_ids: BTreeSet<NodeId> = BTreeSet::new();
@@ -262,13 +297,13 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
                 RegionKind::AlwaysFf => {
                     if n.assign_kind.is_seq_def() {
                         if let Some(lhs) = n.lhs.as_deref() {
-                            let b = ident_base(lhs);
+                            let b = bindings.key(&ident_base(lhs), &n.loc);
                             if !b.is_empty() {
                                 seq_lhs.insert(b);
                             }
                         }
                         for s in node_read_symbols(n) {
-                            seq_reads.insert(s);
+                            seq_reads.insert(bindings.key(&s, &n.loc));
                         }
                     } else if n.assign_kind.is_comb_def() {
                         // Blocking temp in always_ff is combo, not a flop.
@@ -286,10 +321,12 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
     }
     let mut comb_defs: BTreeMap<String, NodeId> = BTreeMap::new();
     for &nid in &comb_ids {
-        if let Some(n) = module.nodes.get(&nid).and_then(|n| n.lhs.as_deref()) {
-            let b = ident_base(n);
-            if !b.is_empty() {
-                comb_defs.insert(b, nid);
+        if let Some(n) = module.nodes.get(&nid) {
+            if let Some(lhs) = &n.lhs {
+                let b = bindings.key(&ident_base(lhs), &n.loc);
+                if !b.is_empty() {
+                    comb_defs.insert(b, nid);
+                }
             }
         }
     }
@@ -307,7 +344,8 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
         let Some(n) = module.nodes.get(&nid) else {
             continue;
         };
-        let reads = node_read_symbols(n);
+        let reads: BTreeSet<_> = node_read_symbols(n).into_iter()
+            .map(|s| bindings.key(&s, &n.loc)).collect();
         let mut hits_seq = false;
         for r in &reads {
             if seq_lhs.contains(r) {
@@ -322,7 +360,8 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
         if hits_seq {
             reads_reg.push(nid);
         }
-        let lhs = n.lhs.as_deref().map(ident_base).unwrap_or_default();
+        let lhs = n.lhs.as_deref()
+            .map(|s| bindings.key(&ident_base(s), &n.loc)).unwrap_or_default();
         if !lhs.is_empty() && (seq_reads.contains(&lhs) || outputs.contains(&lhs)) {
             sinks.push(nid);
         }
@@ -331,6 +370,7 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
         return;
     }
 
+    drop(bindings);
     if let Some(module) = design.modules.get_mut(&mid) {
         for (src, dst) in &edges {
             if let Some(n) = module.nodes.get_mut(src) {
@@ -354,6 +394,7 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
     let Some(module) = design.modules.get(&mid) else {
         return;
     };
+    let bindings = crate::ref_order::BindingIndex::new(module);
     let existing: BTreeSet<Vec<NodeId>> = design
         .paths
         .iter()
@@ -374,8 +415,8 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
         let lhs = module
             .nodes
             .get(&sink)
-            .and_then(|n| n.lhs.as_deref())
-            .map(ident_base)
+            .and_then(|n| n.lhs.as_deref()
+                .map(|s| bindings.key(&ident_base(s), &n.loc)))
             .unwrap_or_default();
         let capture = seq_reads.contains(&lhs);
         let start = if launch {
@@ -1495,6 +1536,8 @@ mod tests {
                 package_imports: vec![],
                 instances: vec![],
                 decls: Vec::new(),
+                const_exprs: Default::default(),
+                typedef_texts: Default::default(),
                 config_branch: false,
                 loc: loc(1),
             },

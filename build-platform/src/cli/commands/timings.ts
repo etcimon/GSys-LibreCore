@@ -482,8 +482,12 @@ export const timingsCommand: Command = {
     "                     physicalDesign.structural.fo4Budget = 10; --fo4 0 = live RTL;\n" +
     "                     fo4_ps 20, margin 0.2 → 4000 MHz) and synthesize\n" +
     "                     the corrected emit; --from-timing <pkg> reuses an existing emit\n" +
-    "                     --map-recipe lean|synth  yosys lowering before dfflibmap/abc (lean skips\n" +
-    "                     the asymptotic opt_merge/check passes a whole core hits)\n" +
+    "                     a budget miss stops before mapping; --allow-over-budget requests a study\n" +
+    "                     --map-recipe lean|hierarchical|streamed|synth  yosys lowering; hierarchical\n" +
+    "                     keeps module boundaries; streamed (remote) maps one module at a time and\n" +
+    "                     evicts it, bounding memory to the word-level design\n" +
+    "                     --no-sram-stub  keep the behavioural tc_sram (default: registered macro\n" +
+    "                     boundary stub, scripts/tc_sram_timing_stub.sv; the flop-per-bit array OOMs)\n" +
     "  timings correlate  FO4 dashboard + optional --bench id metrics JSON\n" +
     "  timings fo4-golden check|write  S3b FO4 golden vs analyze.json\n" +
     "  timings retune-propose  S3b-lab: correlate.json → retune-proposal.md (never edits fo4-v1)\n" +
@@ -811,7 +815,10 @@ export const timingsCommand: Command = {
         svtOptLevel: flagStr(args.flags, "opt-level"),
         svtExtraArgs: splitSvtArgs(flagStr(args.flags, "svt-args")),
         fromTiming,
-        mapRecipe: flagStr(args.flags, "map-recipe") === "synth" ? "synth" : "lean",
+        mapRecipe: (["synth", "hierarchical", "streamed"] as const).find((r) => r === flagStr(args.flags, "map-recipe")) ?? "lean",
+        sramStub: args.flags["no-sram-stub"] === undefined ? undefined : !flagBool(args.flags, "no-sram-stub"),
+        allowOverBudget: args.flags["allow-over-budget"] === undefined
+          ? undefined : flagBool(args.flags, "allow-over-budget"),
       });
       if (asJson) {
         logger.raw(JSON.stringify(result, null, 2) + "\n");
@@ -825,7 +832,7 @@ export const timingsCommand: Command = {
         logger.info(
           `sv-timing: budget ${result.fo4Budget ?? "—"} FO4` +
             `${result.svtTargetMhz != null ? ` (${result.svtTargetMhz.toFixed(0)} MHz, fo4_ps=${staFo4Ps ?? 20}, margin=${staMargin ?? 0.2})` : ""}` +
-            `${result.emitFlist ? `; synthesized emit ${result.emitFlist}` : "; live RTL"}`,
+            `${result.emitFlist ? `; emitted package ${result.emitFlist}` : "; no emitted package selected for mapping"}`,
         );
       }
       for (const st of result.stages) {
@@ -834,7 +841,7 @@ export const timingsCommand: Command = {
         else if (st.status === "pass") logger.success(line);
         else logger.info(line);
       }
-      if (result.ok) {
+      if (result.ok && result.wnsMax !== undefined) {
         logger.success(`wns_max ${result.wnsMax} ns  tns_max ${result.tnsMax} ns  wns_min ${result.wnsMin} ns  tns_min ${result.tnsMin} ns`);
       }
       return result.ok ? 0 : 1;
