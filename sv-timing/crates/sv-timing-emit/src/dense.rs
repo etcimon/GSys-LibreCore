@@ -342,6 +342,7 @@ pub fn emit_blocks_for_trace_src(
                 r.kind,
                 EditKind::BalanceMux
                     | EditKind::SelectIncrement
+                    | EditKind::LoopRewrite
                     | EditKind::RebalanceAssoc
                     | EditKind::Annotate
             )
@@ -847,6 +848,7 @@ fn credit_only_review_block(records: &[&EditRecord]) -> String {
         let kind = match r.kind {
             EditKind::BalanceMux => "balance_mux",
             EditKind::SelectIncrement => "select_increment",
+            EditKind::LoopRewrite => "loop_rewrite",
             EditKind::RebalanceAssoc => "rebalance_assoc",
             EditKind::Annotate => "annotate",
             _ => "credit",

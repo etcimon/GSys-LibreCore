@@ -2042,6 +2042,82 @@ pub fn rewrite_origin_assigns(source: &str, cuts: &[CutAssign]) -> String {
     out
 }
 
+/// Replace the source span of every `LoopRewrite` edit with its replacement
+/// statement. The replacement is fitted to the span's line count — joined
+/// onto fewer lines when longer, padded with comment lines when shorter — so
+/// every other edit in the file keeps its line numbers. Spans inside a
+/// generate block are left alone (the module-scope vector could not serve
+/// them); such edits stay credit-only.
+pub fn rewrite_loop_spans(source: &str, trace: &EditTrace) -> String {
+    let mut jobs: Vec<(u32, u32, String, u32)> = trace
+        .records
+        .iter()
+        .filter(|r| r.kind == EditKind::LoopRewrite && r.origin.start_line != 0)
+        .filter(|r| !line_inside_generate(source, r.origin.start_line))
+        .filter_map(|r| {
+            r.emit_rhs.as_ref().map(|t| {
+                (
+                    r.origin.start_line,
+                    r.origin.end_line.max(r.origin.start_line),
+                    t.clone(),
+                    r.id,
+                )
+            })
+        })
+        .collect();
+    if jobs.is_empty() {
+        return source.to_string();
+    }
+    jobs.sort_by_key(|j| j.0);
+    let lines: Vec<&str> = source.lines().collect();
+    let mut out = String::with_capacity(source.len() + 256);
+    let mut i = 0usize;
+    let mut job = 0usize;
+    while i < lines.len() {
+        let line_no = (i + 1) as u32;
+        if job < jobs.len() && jobs[job].0 == line_no {
+            let (start, end, text, id) = &jobs[job];
+            let span = (*end - *start + 1) as usize;
+            let indent: String = lines[i].chars().take_while(|c| c.is_whitespace()).collect();
+            let mut rep_lines: Vec<String> = text
+                .lines()
+                .map(|l| format!("{indent}{}", l.trim_end()))
+                .collect();
+            rep_lines.insert(0, format!("{indent}// sv-timing: loop_rewrite #{id} (exact parallel form of the walk below)"));
+            if rep_lines.len() > span {
+                // Join the tail onto the last allowed line.
+                let head: Vec<String> = rep_lines[..span - 1].to_vec();
+                let tail = rep_lines[span - 1..]
+                    .iter()
+                    .map(|l| l.trim())
+                    .collect::<Vec<_>>()
+                    .join(" ");
+                rep_lines = head;
+                rep_lines.push(format!("{indent}{tail}"));
+            }
+            while rep_lines.len() < span {
+                rep_lines.push(format!(
+                    "{indent}// sv-timing: loop_rewrite #{id} (span kept)"
+                ));
+            }
+            for l in rep_lines {
+                out.push_str(&l);
+                out.push('\n');
+            }
+            i += span;
+            job += 1;
+            while job < jobs.len() && (jobs[job].0 as usize) <= i {
+                job += 1; // overlapping job (same loop twice): skip
+            }
+            continue;
+        }
+        out.push_str(lines[i]);
+        out.push('\n');
+        i += 1;
+    }
+    out
+}
+
 /// Identifiers of an expression text (keywords and sized literals excluded).
 fn ident_set(text: &str) -> std::collections::BTreeSet<String> {
     let mut out = std::collections::BTreeSet::new();

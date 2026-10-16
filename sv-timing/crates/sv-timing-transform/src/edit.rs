@@ -22,6 +22,8 @@ pub enum EditKind {
     BalanceMux,
     /// `REG + narrow step` → precomputed candidates + select (latency-neutral, exact).
     SelectIncrement,
+    /// Serial loop walk → exact parallel form (A101).
+    LoopRewrite,
     /// Name expansion / declaration materialization.
     ExpandName,
     /// Annotation only.

@@ -199,9 +199,12 @@ pub fn order_worklist_with_plan(
     // order is intentional; sort only items after cards by slack.
     if plan.is_none() || !policy.use_relocation_plan {
         let is_exact = |w: &WorkItem| {
-            w.opportunity
-                .as_ref()
-                .is_some_and(|o| o.kind == OpportunityKind::SelectIncrement)
+            w.opportunity.as_ref().is_some_and(|o| {
+                matches!(
+                    o.kind,
+                    OpportunityKind::SelectIncrement | OpportunityKind::LoopRewrite
+                )
+            })
         };
         items.sort_by(|a, b| {
             is_exact(b)
@@ -231,9 +234,12 @@ pub fn order_worklist_with_plan(
         // local, latency-neutral and cheap, and a long worklist of bundle
         // balances must not truncate them away (A88).
         let is_exact = |w: &WorkItem| {
-            w.opportunity
-                .as_ref()
-                .is_some_and(|o| o.kind == OpportunityKind::SelectIncrement)
+            w.opportunity.as_ref().is_some_and(|o| {
+                matches!(
+                    o.kind,
+                    OpportunityKind::SelectIncrement | OpportunityKind::LoopRewrite
+                )
+            })
         };
         items.sort_by(|a, b| {
             let ra = card_rank.get(&a.path_id).copied().unwrap_or(10_000);
@@ -281,7 +287,10 @@ fn pick_opportunity_for_card(
     // so a register (or a balance) is tried only after it (A88).
     if let Some(o) = opportunities.iter().find(|o| {
         o.path_id == path.id
-            && o.kind == OpportunityKind::SelectIncrement
+            && matches!(
+                o.kind,
+                OpportunityKind::SelectIncrement | OpportunityKind::LoopRewrite
+            )
             && sv_timing_core::pass_strategy::trial_allows(trial, o.kind)
     }) {
         return (Some(o.clone()), Some("t1_select_increment".into()));
@@ -347,14 +356,14 @@ fn pick_opportunity_default(p: &TimingPath, opportunities: &[Opportunity]) -> Op
             // it removes the adder from the cone without touching protocol.
             if prefer_reg {
                 match o.kind {
-                    OpportunityKind::SelectIncrement => 0u8,
+                    OpportunityKind::SelectIncrement | OpportunityKind::LoopRewrite => 0u8,
                     OpportunityKind::InsertReg => 1,
                     OpportunityKind::BalanceMux => 2,
                     OpportunityKind::SplitAssign => 3,
                 }
             } else {
                 match o.kind {
-                    OpportunityKind::SelectIncrement => 0u8,
+                    OpportunityKind::SelectIncrement | OpportunityKind::LoopRewrite => 0u8,
                     OpportunityKind::BalanceMux => 1,
                     OpportunityKind::SplitAssign => 2,
                     OpportunityKind::InsertReg => 3,

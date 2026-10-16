@@ -233,8 +233,11 @@ pub fn apply_edits_to_source_dense(
     // BalanceMux RHS rewrite **before** InsertReg: InsertReg injects a comment
     // line per cut and shifts later origin lines (`audit-remain-v22` rewrote
     // `stc_elem_q` instead of `dot_pending_q` at gemm :1859).
+    // LoopRewrite spans first (line counts preserved), then origin RHS
+    // rewrites; both are structural and opt in with the BalanceMux RTL knob.
     let after_bm = if dense.emit_balance_mux_rtl {
-        rewrite_origin_rhs_replaces(source, trace)
+        let after_loops = crate::rhs::rewrite_loop_spans(source, trace);
+        rewrite_origin_rhs_replaces(&after_loops, trace)
     } else {
         source.to_string()
     };
@@ -2052,6 +2055,168 @@ endmodule
             !emitted.contains("assign seq_d = seq_q + 16'(step);"),
             "origin adder must be gone: {emitted}"
         );
+    }
+
+    /// A101 end to end: the four serial walks of `loop_walks.sv` become their
+    /// exact parallel forms in the emitted SV (span replaced in place, module-
+    /// scope vectors declared before the process), re-analysis of the emitted
+    /// text drops the walk costs, and the already-parallel sibling module is
+    /// emitted byte-identical — low FO4 is not lost.
+    #[test]
+    fn loop_rewrite_fixture_emits_parallel_forms_and_spares_parallel_module() {
+        use sv_timing_core::{
+            analyze_files, default_fo4_v1_embedded, LowerOptions, ParseOptions, TimingTarget,
+        };
+        use sv_timing_transform::{run_correct_passes, PassContext, PassPolicy};
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/loop_walks.sv");
+        let source = std::fs::read_to_string(&path).expect("fixture");
+        let analyze = |p: std::path::PathBuf| {
+            let mut lower = LowerOptions {
+                target: TimingTarget::new(4000.0, 20.0, 0.2),
+                cost_model: default_fo4_v1_embedded(),
+                ..Default::default()
+            };
+            lower.cost_model.id = "fo4-v1".into();
+            analyze_files(&[p], &ParseOptions::default(), &lower).expect("analyze")
+        };
+        let out = analyze(path.clone());
+        let worst_of = |design: &sv_timing_core::TimingDesign, module: &str| {
+            let mid = design
+                .modules
+                .values()
+                .find(|m| m.name == module)
+                .map(|m| m.id)
+                .unwrap();
+            design
+                .paths
+                .iter()
+                .filter(|p| p.module == mid)
+                .map(|p| p.total_fo4)
+                .fold(0.0, f64::max)
+        };
+        let before = worst_of(&out.design, "loop_walks");
+        assert!(
+            before >= 50.0,
+            "the walks must be billed as chains first: {before}"
+        );
+        let mut policy = PassPolicy::default();
+        policy.correct_enabled = true;
+        policy.correct_allow_modules = vec!["loop_walks".into(), "loop_walks_parallel".into()];
+        policy.allow_latency = false;
+        policy.emit_structural = true;
+        policy.max_passes = 12;
+        let mut ctx = PassContext::new(out.design, out.names, policy);
+        ctx.cost_model = default_fo4_v1_embedded();
+        let trace_path = std::env::temp_dir().join("svt_loop_walks_trace.jsonl");
+        ctx.algo_trace = sv_timing_core::algo_trace::AlgoTrace::to_file(&trace_path).unwrap();
+        let ctx = run_correct_passes(ctx).expect("correct");
+        if std::env::var("SVT_LOOPWALK_DEBUG").is_ok() {
+            eprintln!(
+                "TRACE {}",
+                std::fs::read_to_string(&trace_path).unwrap_or_default()
+            );
+        }
+        let loops: Vec<&EditRecord> = ctx
+            .trace
+            .records
+            .iter()
+            .filter(|r| r.kind == EditKind::LoopRewrite)
+            .collect();
+        assert_eq!(
+            loops.len(),
+            4,
+            "four LoopRewrite edits expected: {:?}",
+            ctx.trace
+                .records
+                .iter()
+                .map(|r| (&r.kind, &r.rationale))
+                .collect::<Vec<_>>()
+        );
+        let mut dense = dense_options_from_source(&source);
+        dense.real_cut_feeds = true;
+        dense.emit_balance_mux_rtl = true;
+        let emitted =
+            apply_edits_to_source_dense(&source, &ctx.trace, &EmitPolicy::default(), &dense);
+        for needle in [
+            "pick_d_svt_low = free_i & ~32'((32'(1) << 1) - 1'b1);",
+            "pick_d = pick_d | 5'(i);",
+            "found_d_svt_low = hit_i & (~hit_i + 1'b1);",
+            "found_d = |found_d_svt_low;",
+            "cnt_d_svt_vec[k] = (ok_i[k] && hit_i[k]);",
+            "cnt_d = cnt_d + 5'($countones(cnt_d_svt_vec));",
+            "cid_svt_win[cid_svt_i] = ((after_i) != (ip_i))",
+            "logic [31:0] pick_d_svt_low;",
+            "logic [31:0] cid_svt_win;",
+        ] {
+            assert!(emitted.contains(needle), "missing `{needle}` in\n{emitted}");
+        }
+        // The walks themselves are gone from the emitted text.
+        assert!(
+            !emitted.contains("if (free_i[i] && pick_d == '0) pick_d = 5'(i);"),
+            "{emitted}"
+        );
+        assert!(!emitted.contains("if (cid == ip_i) break;"), "{emitted}");
+        // Every always_comb keeps its own `end`: the replaced span is the loop
+        // statement's lines only.
+        let body_start = emitted.find("module loop_walks (").unwrap();
+        let body_end = body_start + emitted[body_start..].find("endmodule").unwrap();
+        let body = &emitted[body_start..body_end];
+        assert_eq!(body.matches("always_comb begin").count(), 4, "{emitted}");
+        assert_eq!(
+            body.matches("\n  end\n").count() + body.matches("\n  end\r\n").count(),
+            5,
+            "{emitted}"
+        );
+        // The parallel module is untouched.
+        let par_src = source[source.find("module loop_walks_parallel").unwrap()..].to_string();
+        assert!(
+            emitted.contains(&par_src),
+            "parallel module must be byte-identical\n{emitted}"
+        );
+        // Re-analysis of the emitted text: the chain costs are gone and the
+        // sibling module did not get worse.
+        let tmp = std::env::temp_dir().join("svt_loop_walks_emitted.sv");
+        std::fs::write(&tmp, &emitted).unwrap();
+        let after = analyze(tmp.clone());
+        let after_walks = worst_of(&after.design, "loop_walks");
+        let par_before = worst_of(&ctx.design, "loop_walks_parallel");
+        let par_after = worst_of(&after.design, "loop_walks_parallel");
+        assert!(
+            after_walks < 25.0,
+            "emitted walks must be parallel: {before} -> {after_walks}"
+        );
+        assert!(
+            (par_before - par_after).abs() < 1e-6,
+            "{par_before} vs {par_after}"
+        );
+        // Idempotent: the emitted text offers no walk to rewrite (the pass
+        // cannot undo its own work or chase its own output).
+        assert!(
+            after
+                .design
+                .opportunities
+                .iter()
+                .all(|o| o.kind != sv_timing_core::OpportunityKind::LoopRewrite),
+            "{:?}",
+            after
+                .design
+                .opportunities
+                .iter()
+                .filter(|o| o.kind == sv_timing_core::OpportunityKind::LoopRewrite)
+                .map(|o| &o.rationale)
+                .collect::<Vec<_>>()
+        );
+        let report = integrity_reparse(
+            &{
+                let mut t = EmitTree::new();
+                t.add_file("loop_walks__svt.sv", FileRole::Module, emitted.clone());
+                t
+            },
+            &ParseOptions::default(),
+        );
+        assert!(report.reparse_ok, "emitted text must reparse: {report:?}");
+        let _ = std::fs::remove_file(tmp);
     }
 
     /// A pure RHS rebalance (no snippet) rewrites its origin assign when the

@@ -148,6 +148,11 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
         // reads (`cid = cid + 1`, `found |= hit[i]`, `rank++`) unrolls into a
         // chain of trip-count copies; one body copy is what the node measured.
         let carried = loop_carried_multipliers(module, &widths);
+        // delay-v36: a find-first scan's chain lives in its `if` guard
+        // (`v[i] && pick == 0`), which the lowerer does not bill; the picked
+        // constant costs 0. Give the scan's carried nodes a per-iteration floor
+        // of a compare and a gate so the chain is on the board (A101).
+        let scan_floor = find_first_floors(module, &widths, &model);
         for node in module.nodes.values_mut() {
             // Spine expand / half-split lock residual segment FO4 across remeasure.
             if node.fo4_locked {
@@ -184,6 +189,9 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
                 if !ex.is_opaque() {
                     node.fo4_cost = ex.fo4_critical_cost_latticed(&base, &seed);
                     node.op_class = Some(ex.dominant_op_class_latticed(&seed));
+                    if let Some(floor) = scan_floor.get(&node.id) {
+                        node.fo4_cost = node.fo4_cost.max(*floor);
+                    }
                     if let Some(trips) = carried.get(&node.id) {
                         node.fo4_cost *= f64::from(*trips);
                     }
@@ -202,6 +210,9 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
                 } else {
                     node.fo4_cost = model.scaled_fo4(c, nw.for_class(c));
                 }
+            }
+            if let Some(floor) = scan_floor.get(&node.id) {
+                node.fo4_cost = node.fo4_cost.max(*floor);
             }
             if let Some(trips) = carried.get(&node.id) {
                 node.fo4_cost *= f64::from(*trips);
@@ -725,6 +736,18 @@ fn loop_carried_multipliers(
             }
         }
         let mut carried_roots: BTreeSet<&str> = BTreeSet::new();
+        // A read inside the loop's `if` guard is a read the IR does not see:
+        // the loop text names it (`pick == '0`, `!found`).
+        if let Some(text) = lp.text.as_deref() {
+            for (root, _) in &first_write {
+                let guard_read = text.contains(&format!("{root} == '0"))
+                    || text.contains(&format!("{root} == 0"))
+                    || text.contains(&format!("!{root}"));
+                if guard_read && *root != lp.genvar {
+                    carried_roots.insert(root);
+                }
+            }
+        }
         for n in &inside {
             let reads: Vec<String> = node_read_symbols(n)
                 .into_iter()
@@ -771,6 +794,41 @@ fn loop_carried_multipliers(
             let mult = if assoc { depth } else { trips };
             let e = out.entry(n.id).or_insert(1);
             *e = (*e).saturating_mul(mult).min(64);
+        }
+    }
+    out
+}
+
+/// Per-iteration floor for the carried nodes of find-first scans: the guard
+/// (`v[i] && pick == 0` / `&& !found`) is a compare on the carried value and a
+/// gate, serial across iterations. `loop_carried_multipliers` then applies
+/// the trip count. Nodes assigning the scan's variables inside the loop.
+fn find_first_floors(
+    module: &TimingModule,
+    widths: &crate::width::WidthResolver<'_>,
+    model: &CostModel,
+) -> BTreeMap<NodeId, f64> {
+    let mut out = BTreeMap::new();
+    let shapes = crate::loop_walk::detect(module, widths, model);
+    for shape in shapes
+        .iter()
+        .filter(|s| s.kind == crate::loop_walk::LoopWalkKind::FindFirst)
+    {
+        let Some(lp) = module.gen_loops.get(shape.loop_index) else {
+            continue;
+        };
+        let floor = model.logic_bit * 2.0;
+        for n in module.nodes.values() {
+            let inside = n.loc.origin == crate::loc::OriginKind::UserFile
+                && n.loc.file == lp.loc.file
+                && n.loc.byte_start >= lp.loc.byte_start
+                && n.loc.byte_start < lp.loc.byte_end;
+            if !inside {
+                continue;
+            }
+            if n.lhs.as_deref().and_then(TimingModule::root_ident) == Some(shape.carried.as_str()) {
+                out.insert(n.id, floor);
+            }
         }
     }
     out
@@ -1156,6 +1214,7 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
     let model = CostModel::default();
     // SelectIncrement (A88) needs widths and the module's register set.
     let mut reg_cache: BTreeMap<ModuleId, std::collections::BTreeSet<String>> = BTreeMap::new();
+    let mut loop_shapes: BTreeMap<ModuleId, Vec<crate::loop_walk::LoopWalkShape>> = BTreeMap::new();
     for path in &design.paths {
         if path.multi_cycle || path.slack_fo4 >= 0.0 {
             continue;
@@ -1230,6 +1289,54 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
                         changes_latency: false,
                     });
                 }
+            }
+        }
+
+        // LoopRewrite (A101): a path through a serial loop walk gets the walk's
+        // exact parallel form offered first. The opportunity names a node of
+        // the path inside the loop; the transform re-detects the shape.
+        if let Some(m) = module {
+            let shapes = loop_shapes.entry(m.id).or_insert_with(|| {
+                let resolver = crate::width::WidthResolver::from_parts(
+                    &design.packages,
+                    &design.param_map_ints,
+                    &m.decls,
+                    &m.ports,
+                    &m.const_exprs,
+                    &m.typedef_texts,
+                    &m.package_imports,
+                    design.width_map.get(&m.name),
+                );
+                crate::loop_walk::detect(m, &resolver, &model)
+            });
+            for shape in shapes.iter() {
+                let Some(lp) = m.gen_loops.get(shape.loop_index) else {
+                    continue;
+                };
+                let inside = path.nodes.iter().find(|id| {
+                    m.nodes.get(id).is_some_and(|n| {
+                        n.loc.origin == crate::loc::OriginKind::UserFile
+                            && n.loc.file == lp.loc.file
+                            && n.loc.byte_start >= lp.loc.byte_start
+                            && n.loc.byte_start < lp.loc.byte_end
+                    })
+                });
+                let Some(node_id) = inside else {
+                    continue;
+                };
+                out.push(Opportunity {
+                    kind: OpportunityKind::LoopRewrite,
+                    path_id: path.id,
+                    insert_after: *node_id,
+                    estimated_fo4_before: path.total_fo4,
+                    estimated_fo4_after: (path.total_fo4 / f64::from(shape.trips.max(1))
+                        + shape.fo4_after)
+                        .max(0.0),
+                    loc: lp.loc.clone(),
+                    rationale: format!("path {} loop_rewrite: {}", path.id, shape.rationale),
+                    requires_clock_in_scope: false,
+                    changes_latency: false,
+                });
             }
         }
 

@@ -1891,6 +1891,132 @@ pub fn select_increment_on_node(
     Ok(rec)
 }
 
+/// `LoopRewrite` (ALGORITHMS-EXPERTS A101): the loop containing `node_id` is
+/// a serial walk with an exact parallel form. The IR credit is the shape's
+/// parallel cost on every loop-carried node of the loop (locked across
+/// remeasure — `attribute_costs` would re-apply the trip multiplier); the
+/// emitted file carries the replacement statement over the loop's span and a
+/// module-scope declaration for the vector it needs.
+pub fn loop_rewrite_on_node(
+    ctx: &mut PassContext,
+    path_id: PathId,
+    node_id: NodeId,
+) -> TransformResult<EditRecord> {
+    if !ctx.policy.module_allowed(&ctx.active_module_name) {
+        return Err(TransformError::ModuleNotAllowlisted(
+            ctx.active_module_name.clone(),
+        ));
+    }
+    let model = sv_timing_core::CostModel::default();
+    let module_id = ctx
+        .design
+        .modules
+        .values()
+        .find(|m| m.name == ctx.active_module_name)
+        .map(|m| m.id)
+        .ok_or_else(|| TransformError::InvalidOpportunity("module not found".into()))?;
+    let (shape, loop_loc, inside, before) =
+        {
+            let module = ctx.design.modules.get(&module_id).expect("module");
+            let node = module.nodes.get(&node_id).ok_or_else(|| {
+                TransformError::InvalidOpportunity(format!("node {node_id} missing"))
+            })?;
+            let resolver = sv_timing_core::width::WidthResolver::from_parts(
+                &ctx.design.packages,
+                &ctx.design.param_map_ints,
+                &module.decls,
+                &module.ports,
+                &module.const_exprs,
+                &module.typedef_texts,
+                &module.package_imports,
+                ctx.design.width_map.get(&module.name),
+            );
+            let shapes = sv_timing_core::loop_walk::detect(module, &resolver, &model);
+            let shape = shapes
+                .into_iter()
+                .find(|s| {
+                    module.gen_loops.get(s.loop_index).is_some_and(|lp| {
+                        lp.loc.file == node.loc.file
+                            && node.loc.byte_start >= lp.loc.byte_start
+                            && node.loc.byte_start < lp.loc.byte_end
+                    })
+                })
+                .ok_or_else(|| {
+                    TransformError::InvalidOpportunity(format!(
+                        "loop_rewrite: node {node_id} is not inside a rewritable walk"
+                    ))
+                })?;
+            let lp = &module.gen_loops[shape.loop_index];
+            if ctx.trace.records.iter().any(|r| {
+                r.kind == EditKind::LoopRewrite && r.origin.byte_start == lp.loc.byte_start
+            }) {
+                return Err(TransformError::InvalidOpportunity(
+                    "loop_rewrite: loop already rewritten".into(),
+                ));
+            }
+            if module.decls.iter().any(|d| d.name == shape.marker) {
+                return Err(TransformError::InvalidOpportunity(format!(
+                    "loop_rewrite: `{}` already declared",
+                    shape.marker
+                )));
+            }
+            let inside: Vec<NodeId> = module
+                .nodes
+                .values()
+                .filter(|n| {
+                    n.loc.file == lp.loc.file
+                        && n.loc.byte_start >= lp.loc.byte_start
+                        && n.loc.byte_start < lp.loc.byte_end
+                })
+                .map(|n| n.id)
+                .collect();
+            let before = inside
+                .iter()
+                .filter_map(|id| module.nodes.get(id))
+                .map(|n| n.fo4_cost)
+                .fold(0.0, f64::max);
+            // The span to replace is the loop statement's own lines: the parser
+            // span's exclusive end byte can sit on the next line (the process's
+            // `end`), so the end line comes from the loop text's line count.
+            let mut loop_loc = lp.loc.clone();
+            if let Some(text) = lp.text.as_deref() {
+                let lines = text.lines().count().max(1) as u32;
+                loop_loc.end_line = loop_loc.start_line + lines - 1;
+            }
+            (shape, loop_loc, inside, before)
+        };
+    let module = ctx.design.modules.get_mut(&module_id).expect("module");
+    // Credit: every node of the loop now costs at most one parallel form.
+    for id in &inside {
+        if let Some(n) = module.nodes.get_mut(id) {
+            if n.fo4_cost > shape.fo4_after {
+                n.fo4_cost = shape.fo4_after;
+            }
+            n.fo4_locked = true;
+        }
+    }
+    let rec = EditRecord {
+        id: 0,
+        kind: EditKind::LoopRewrite,
+        origin: loop_loc,
+        path_id: Some(path_id),
+        node_id: Some(node_id),
+        new_name: Some(shape.marker.clone()),
+        fo4_before: Some(before),
+        fo4_after: Some(shape.fo4_after),
+        rationale: format!(
+            "loop_rewrite path {path_id} `{}` {:?}: {} ({:.1} -> {:.1} on the loop's worst node; latency-neutral, exact)",
+            shape.carried, shape.kind, shape.rationale, before, shape.fo4_after
+        ),
+        emit_rhs: Some(shape.replacement.clone()),
+        emit_rhs_extras: Vec::new(),
+        emit_snippet: Some(shape.decls.clone()),
+    };
+    ctx.trace.record_edit(rec.clone());
+    ctx.pending_ir_dirty = true;
+    Ok(rec)
+}
+
 fn path_class_for_balance(ctx: &PassContext, path_id: PathId) -> sv_timing_core::PathClassKind {
     ctx.design
         .paths

@@ -7374,6 +7374,96 @@ distinction moot where it mattered. Whole core elaborates (slang) with all
 A98–A100 edits; functional validation deferred per campaign policy — the
 proofs cover the rewritten functions, not their callers' invariants.
 
+## A101 — From hand rewrites to a pass: `LoopRewrite` (delay-v36)
+
+### Why the walks were Pareto-dominated (area *and* depth)
+
+A98–A100 were written by hand; the question was whether what made them
+win generalises. It does, and the reason is structural, not lucky:
+
+- A serial walk unrolls into **N copies of its body**. The body of a
+  pointer walk is a decoder (`mem[cid]`, `mask[cid] = 1`) plus an increment
+  and a compare; the body of a find-first scan is a compare on the carried
+  value and a gate; the body of a running count is an incrementer. All N
+  copies are *live hardware* — synthesis cannot share them because each
+  depends on the previous — so area is N × body and depth is N × body.
+- The parallel form computes **one** verdict per element (a compare, an
+  AND, a bit of a one-hot) and combines them with a tree (OR-reduce,
+  popcount, lowest-set-bit isolate = one incrementer). Area is N × verdict
+  + tree, depth is verdict + log₂N. Verdict < body always (the body
+  *contains* the verdict), so both axes improve at once — there is no
+  area/delay trade to make.
+
+Measured on the fixture `fixtures/auto_correct/loop_walks.sv` (all four
+shapes in one module), Nangate45 typ, delay-oriented ABC, inputs ideal:
+
+| | gold (walks) | emitted by the pass | ratio |
+|---|---:|---:|---:|
+| worst path | **14.52 ns**, 142 cells | **0.91 ns**, 18 cells | 16× |
+| area | 7129 µm² | 723 µm² | 9.9× |
+
+and on the production modules (module board, A100): rob 211 → 35 cells,
+scoreboard 125 → 54 cells after the hand versions of the same forms.
+
+### The pass
+
+`sv-timing-core::loop_walk` detects three shapes on the loop's own source
+text (`GenerateLoop::text`/`pre_text`, captured at lowering; the lowerer
+does not represent `if` guards or `break`, and these are idioms with a
+regular surface), each with an exactness condition and a replacement:
+
+| shape | before | after | exact when |
+|---|---|---|---|
+| **FindFirst** | `for i: if (v[i] && pick == '0) pick = X'(i)`; or `if (v[i] && !found) begin found = 1; [pick = X'(i);] end` | `low = v & (~v + 1)` (bits below `lo` masked), `pick \|= X'(i)` for the one-hot, `found = \|low`, all under the original guard | `lo ≥ 1` for the `== 0` form (bit 0 would re-arm the scan); `v` at least N bits |
+| **CondCount** | `for i: if (COND) cnt = cnt + 1` | `vec[i] = COND; cnt = cnt + W'($countones(vec))` | `cnt` declared ≥ log₂(N+1) bits; COND reads `i`, not `cnt` |
+| **RingWalk** | `cid = a; for k < N: if (cid == b) break; BODY; cid = cid + 1` | `win[j] = (a != b) && (b > a ? j ∈ [a,b) : j ∉ [b,a))`; `if (win[j]) BODY[cid := W'(j)]`; `cid = b` | `N == 2**width(cid)`; BODY assigns neither `cid` nor anything `b` reads; no `break` in BODY |
+
+Each replacement is one statement fitted to the loop's line span (other
+edits in the file keep their line numbers) and declares its vector at
+module scope through the existing snippet path, injected before the
+enclosing process. Loops inside functions/tasks and inside generate blocks
+are left alone (a module-scope vector cannot serve them). The transform
+(`loop_rewrite_on_node`) credits the IR by locking the loop's nodes at the
+parallel cost; the planner ranks `LoopRewrite` with `SelectIncrement`
+(first, latency-neutral, allowed under `RefuseRegister`); emission is
+`rewrite_loop_spans` before the origin RHS rewrites.
+
+**Measurement (delay-v36).** A find-first's chain lives in its guard, which
+the IR does not bill (the picked constant costs 0) — the two scans in the
+fixture were under budget and invisible to the planner. The carried nodes of
+a detected FindFirst now carry a per-iteration floor of a compare and a gate,
+and a variable read only in a loop's `if` guard counts as loop-carried.
+
+**Low FO4 is not lost.** `loop_walks_parallel` (already in the parallel
+forms) is emitted byte-identical and re-analyses to the same cost; the
+emitted fixture offers no `LoopRewrite` opportunity (idempotent); the
+whole-core emitted board moved 394 → 393 failing with the worst unchanged
+(the production walks were already A98–A100; the pass found the one left,
+`gen_commit_count`). Whole-fixture sequential miter (gold vs emitted, 4
+steps from reset) runs on the builder with a 30-minute budget — the ring
+body's dynamic index makes it 1.5 M variables; the find-first/popcount
+forms are proved exhaustively at 32 bits (A100) and the window at 4/8/16
+(A98).
+
+### What it does not cover yet (next shapes, in order of evidence)
+
+1. **Composed walks** — the ROB free-by-tid (`for r: for i: if (match)
+   {valid[i] = 0; cnt--}`): hit vector per port + `$countones`, i.e.
+   CondCount with a body. Detect: inner loop assigns under a condition and
+   decrements the carried count.
+2. **Walk-until-valid with a dynamic index** (`while head != tail && !valid
+   [head]: head++`): a FindFirst over the rotated vector stopped at a
+   distance; the A99 re-anchor form.
+3. **One-hot `if` chains used as muxes** (`for e: if (grant[e]) out =
+   q[e]`): exact only under the one-hot invariant the design asserts; an
+   AND-OR mux with an assertion-tagged rationale.
+4. **Loops inside functions** (`pick_free`): a module-scope vector cannot
+   serve a function; the rewrite must stay inside the function body
+   (block-local vector — needs the slang scoping check the builder's slang
+   rejected for `rob_reanchor`).
+5. **Conditions as nodes** (the todo of A100): billing `if` guards generally
+   would make every scan visible without the shape-specific floor.
+
 ## A90 — Incrementers are not gates (delay-v32)
 
 `x + 1` and `x + CONST` were billed 1 FO4 at every width since delay-v18

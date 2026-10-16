@@ -858,8 +858,13 @@ pub fn trial_allows(trial: OverBudgetTrial, kind: crate::ir::OpportunityKind) ->
     use crate::ir::OpportunityKind::*;
     match trial {
         OverBudgetTrial::Leave => false,
-        OverBudgetTrial::RefuseRegister => matches!(kind, SelectIncrement),
-        OverBudgetTrial::BalanceField => matches!(kind, BalanceMux | SplitAssign | SelectIncrement),
+        OverBudgetTrial::RefuseRegister => matches!(kind, SelectIncrement | LoopRewrite),
+        OverBudgetTrial::BalanceField => {
+            matches!(
+                kind,
+                BalanceMux | SplitAssign | SelectIncrement | LoopRewrite
+            )
+        }
         OverBudgetTrial::CriticalChain | OverBudgetTrial::BalanceThenRegister => true,
     }
 }
@@ -880,6 +885,7 @@ pub fn is_latency_neutral_kind(kind: crate::ir::OpportunityKind) -> bool {
         crate::ir::OpportunityKind::BalanceMux
             | crate::ir::OpportunityKind::SplitAssign
             | crate::ir::OpportunityKind::SelectIncrement
+            | crate::ir::OpportunityKind::LoopRewrite
     )
 }
 

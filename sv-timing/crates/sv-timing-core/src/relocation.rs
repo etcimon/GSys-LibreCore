@@ -961,6 +961,7 @@ pub fn opportunity_to_relocation_kind(k: OpportunityKind) -> RelocationKind {
         OpportunityKind::BalanceMux => RelocationKind::BalanceMux,
         // Dashboards: a latency-neutral T1 rewrite, same bucket as BalanceMux.
         OpportunityKind::SelectIncrement => RelocationKind::BalanceMux,
+        OpportunityKind::LoopRewrite => RelocationKind::BalanceMux,
     }
 }
 

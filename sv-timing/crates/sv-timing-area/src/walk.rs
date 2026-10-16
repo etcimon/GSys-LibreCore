@@ -1893,6 +1893,9 @@ mod tests {
             procedural: false,
             init_text: None,
             cond_text: None,
+            text: None,
+            pre_text: None,
+            in_function: false,
         });
         parent.nodes.insert(1, node(1, add_expr()));
         design.modules.insert(0, parent);

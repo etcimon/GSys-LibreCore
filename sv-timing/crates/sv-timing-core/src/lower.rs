@@ -407,7 +407,23 @@ fn lower_file(
         let parameters = collect_typed_parameters_in(tree, scope.nodes.iter().cloned());
         let ports = collect_module_ports_in(tree, scope.nodes.iter().cloned());
         let decls = collect_decl_sites(tree, li, &path_str, scope.nodes.iter().cloned());
-        let gen_loops = collect_genvar_loops_in(tree, li, &path_str, scope.nodes.iter().cloned());
+        let fn_spans = collect_function_spans_in(tree, li, &path_str, scope.nodes.iter().cloned());
+        let mut gen_loops = collect_genvar_loops_in(
+            tree,
+            li,
+            &path_str,
+            &file.bytes,
+            scope.nodes.iter().cloned(),
+        );
+        for g in &mut gen_loops {
+            g.in_function = g.loc.origin == OriginKind::UserFile
+                && fn_spans.iter().any(|f| {
+                    f.origin == OriginKind::UserFile
+                        && f.file == g.loc.file
+                        && g.loc.byte_start >= f.byte_start
+                        && g.loc.byte_end <= f.byte_end
+                });
+        }
         let insts = collect_module_instances_in(
             tree,
             li,
@@ -1334,12 +1350,12 @@ fn collect_module_ports_in<'a, T>(tree: &'a SyntaxTree, root: T) -> Vec<ModulePo
 where
     T: IntoIterator<Item = RefNode<'a>>,
 {
-    let mut ports = Vec::new();
+    let mut ports: Vec<ModulePort> = Vec::new();
     let mut seen = std::collections::BTreeSet::new();
 
     for node in root {
         if let RefNode::AnsiPortDeclaration(port) = node {
-            let dimension_text = packed_dimension_text(tree, port);
+            let mut dimension_text = packed_dimension_text(tree, port);
             let mut direction = "unknown".to_string();
             let mut type_name: Option<String> = None;
             let mut name: Option<String> = None;
@@ -1416,6 +1432,30 @@ where
                 None
             };
 
+            // `input logic [31:0] a, b, c`: the grammar gives `b` and `c` their
+            // own AnsiPortDeclaration with no direction, type or dimension —
+            // they inherit the previous port's (IEEE 1800-2017 §23.2.2.3).
+            // Without this `b` and `c` were 1 bit wide to width inference.
+            let bare = direction == "unknown"
+                && type_name.is_none()
+                && dimension_text.is_none()
+                && dims.is_none();
+            if bare {
+                if let Some(prev) = ports.last() {
+                    direction = prev.direction.clone();
+                    type_name = prev.type_name.clone();
+                    dimension_text = prev.dimension_text.clone();
+                }
+            }
+            let (dims, uses_hierarchical) = if bare {
+                ports
+                    .last()
+                    .map(|p| (p.packed_dims.clone(), p.uses_hierarchical))
+                    .unwrap_or((dims, uses_hierarchical))
+            } else {
+                (dims, uses_hierarchical)
+            };
+
             if let Some(n) = name {
                 if seen.insert(n.clone()) {
                     ports.push(ModulePort {
@@ -1447,11 +1487,33 @@ fn tree_keyword_or_ident(tree: &SyntaxTree, node: RefNode<'_>) -> Option<String>
     None
 }
 
+/// Source spans of function and task bodies in a scope.
+fn collect_function_spans_in<'a, T>(
+    tree: &'a SyntaxTree,
+    li: &LineIndex,
+    path_str: &str,
+    root: T,
+) -> Vec<SourceLoc>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut out = Vec::new();
+    for node in root {
+        match node {
+            RefNode::FunctionDeclaration(f) => out.push(loop_source_span(tree, li, path_str, f)),
+            RefNode::TaskDeclaration(t) => out.push(loop_source_span(tree, li, path_str, t)),
+            _ => {}
+        }
+    }
+    out
+}
+
 /// `for (genvar i = 0; i < root.member; i++)` — bound via hierarchical `root.member`.
 fn collect_genvar_loops_in<'a, T>(
     tree: &'a SyntaxTree,
     li: &LineIndex,
     path_str: &str,
+    bytes: &[u8],
     root: T,
 ) -> Vec<GenerateLoop>
 where
@@ -1550,6 +1612,9 @@ where
                 procedural: false,
                 init_text: None,
                 cond_text: None,
+                text: None,
+                pre_text: None,
+                in_function: false,
             });
         }
         // always_comb `for (int unsigned w = 0; w < Cfg.N; w++)` unrolls;
@@ -1566,6 +1631,17 @@ where
                 node_text(tree, init)
                     .and_then(|t| t.rsplit_once('=').map(|(_, v)| v.trim().to_string()))
             });
+            // The loop's own text and the ~200 bytes before it (the walk's
+            // `cid = start;` seed) for the loop-walk detector.
+            let text = node_text(tree, lf);
+            let pre_text = if loc.origin == OriginKind::UserFile && loc.byte_start > 0 {
+                let start = loc.byte_start.saturating_sub(200) as usize;
+                bytes
+                    .get(start..loc.byte_start as usize)
+                    .map(|b| String::from_utf8_lossy(b).into_owned())
+            } else {
+                None
+            };
             for n in lf {
                 match n {
                     RefNode::VariableIdentifier(v) => {
@@ -1595,6 +1671,9 @@ where
                     procedural: true,
                     init_text,
                     cond_text,
+                    text,
+                    pre_text,
+                    in_function: false,
                 });
             }
         }

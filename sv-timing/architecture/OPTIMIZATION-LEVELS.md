@@ -80,6 +80,11 @@ The table records the original defect and where the fix now lives.
    for bitwise/logical self-accumulates — because synthesis keeps those
    chains serial (ALGORITHMS-EXPERTS A98).
 
+   **Transform catalog addition (2026-10-16): `LoopRewrite`** — exact,
+   latency-neutral: a serial loop walk (find-first scan, conditional count,
+   ring pointer walk) → its parallel form; lower depth and lower area at
+   once (ALGORITHMS-EXPERTS A101). Ranked with `SelectIncrement`.
+
    **Transform catalog addition (2026-10-16): `SelectIncrement`** — exact,
    latency-neutral: `LHS = REG + step` (k-bit step, k ≤ 4) → `2^k`
    precomputed increments of the register and one select. Opportunity kind,

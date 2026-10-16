@@ -81,7 +81,12 @@ pub const IR_VERSION: &str = "ir-v1";
 /// `delay-v35`: loop-carried accumulators of procedural `for` loops cost
 /// trip-count × one body copy (the unrolled serial chain synthesis builds;
 /// scoreboard `cid = cid + 1` range walk = a 436-cell netlist chain).
-pub const MEASUREMENT_VERSION: &str = "delay-v35";
+/// `delay-v36`: find-first scans (`for i: if (v[i] && pick == 0) pick = i`)
+/// are billed — the guard's compare and gate per iteration, serial across
+/// the trip count — and the loop-walk rewrite (A101) offers their exact
+/// parallel form; a variable read only in a loop's `if` guard counts as
+/// loop-carried.
+pub const MEASUREMENT_VERSION: &str = "delay-v36";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

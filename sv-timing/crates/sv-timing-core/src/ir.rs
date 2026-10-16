@@ -374,6 +374,9 @@ pub enum OpportunityKind {
     /// `REG + narrow step` → precomputed candidate increments + one select
     /// (latency-neutral, exact; `select_increment` module, A88).
     SelectIncrement,
+    /// A serial loop walk (find-first scan, conditional count, ring pointer
+    /// walk) → its exact parallel form (latency-neutral; `loop_walk`, A101).
+    LoopRewrite,
 }
 
 /// Pipeline / rewrite opportunity.
@@ -556,6 +559,18 @@ pub struct GenerateLoop {
     /// See `init_text`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cond_text: Option<String>,
+    /// Procedural loop: the loop statement's own source text (header + body)
+    /// and the statement text that precedes it in the block, for the
+    /// loop-walk shape detector (`loop_walk`). Not a delay input.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// See `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pre_text: Option<String>,
+    /// The loop sits inside a function or task body (a module-scope vector
+    /// cannot serve it; the loop-walk rewrite leaves it alone).
+    #[serde(default)]
+    pub in_function: bool,
 }
 
 /// Named port connection on a module instance (formal ↔ actual).

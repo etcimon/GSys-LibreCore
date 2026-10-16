@@ -539,7 +539,7 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
                     .iter()
                     .filter(|o| o.path_id == w.path_id && is_latency_neutral_kind(o.kind))
                     .min_by_key(|o| match o.kind {
-                        OpportunityKind::SelectIncrement => 0u8,
+                        OpportunityKind::SelectIncrement | OpportunityKind::LoopRewrite => 0u8,
                         OpportunityKind::BalanceMux => 1,
                         OpportunityKind::SplitAssign => 2,
                         OpportunityKind::InsertReg => 3,
@@ -1228,6 +1228,32 @@ fn apply_work_item(
                 | sv_timing_core::PathClassKind::DenseControlCone
         )
     );
+    // 0a) LoopRewrite (A101): a serial walk's exact parallel form. Nothing in
+    // the pipeline outranks it: lower depth and lower area at once.
+    if !did && opp.kind == OpportunityKind::LoopRewrite {
+        match crate::pipeline::loop_rewrite_on_node(ctx, opp.path_id, node) {
+            Ok(_) => {
+                did = true;
+                if let Some(last) = ctx.trace.records.last_mut() {
+                    if !reloc_id.is_empty() {
+                        last.rationale = format!("relocation {reloc_id}; {}", last.rationale);
+                    }
+                }
+            }
+            Err(TransformError::InvalidOpportunity(detail)) => {
+                ctx.log_algo(
+                    "loop_rewrite.refuse",
+                    AlgoTrace::kv([
+                        ("path_id", json!(opp.path_id)),
+                        ("module", json!(ctx.active_module_name)),
+                        ("detail", json!(detail)),
+                    ]),
+                );
+                return Ok((false, Some("loop_rewrite_refused")));
+            }
+            Err(e) => return Err(e),
+        }
+    }
     // 0b) SelectIncrement (A88): exact, latency-neutral, protocol-free. The
     // opportunity names the `REG + step` node; the transform re-detects and
     // refuses when the shape, scope or pricing no longer holds.

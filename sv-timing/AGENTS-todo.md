@@ -119,6 +119,14 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   store_buffer (insertion index) rewritten exactly; SAT-exhaustive at 16/32
   bits (`find_first_equiv.sv`). Core elaborates. Netlist confirmation of
   A100 (run C) and the scoreboard's remaining 54-cell cone are next.
+- [x] A101 `LoopRewrite` pass (delay-v36): FindFirst / CondCount / RingWalk
+  detected on loop text, exact replacements fitted to the loop span,
+  module-scope vectors via the snippet path; fixture 14.5 ns / 7129 µm² →
+  0.91 ns / 723 µm² automatically; parallel sibling byte-identical;
+  idempotent. Core: one more walk found (scoreboard gen_commit_count).
+  Port-list width inheritance fixed (`input logic [31:0] a, b, c`).
+- [ ] A101 next shapes: composed walks (ROB free-by-tid), walk-until-valid,
+  one-hot if-chain muxes (invariant-tagged), loops inside functions.
 - [ ] Record the `if` a node sits under in the lowerer: (a) bill
   `if (cond) x = const` chains, (b) let delay-v35 give unconditional
   `acc = acc + x` chains log depth (yosys `$macc` tree) and keep conditional

@@ -814,6 +814,7 @@ fn design_to_analyze_json(
                     sv_timing_core::OpportunityKind::SplitAssign => "split_assign",
                     sv_timing_core::OpportunityKind::BalanceMux => "balance_mux",
                     sv_timing_core::OpportunityKind::SelectIncrement => "select_increment",
+                    sv_timing_core::OpportunityKind::LoopRewrite => "loop_rewrite",
                 },
                 "path_id": o.path_id,
                 "estimated_fo4_before": o.estimated_fo4_before,

@@ -187,6 +187,7 @@ impl ModuleSolution {
             OpportunityKind::SplitAssign => spec.comb_split || spec.comb_exclusive,
             OpportunityKind::BalanceMux => spec.comb_exclusive || spec.ff_factor || spec.comb_split,
             OpportunityKind::SelectIncrement => spec.comb_exclusive || spec.comb_split,
+            OpportunityKind::LoopRewrite => spec.comb_exclusive || spec.comb_split,
         }
     }
 }

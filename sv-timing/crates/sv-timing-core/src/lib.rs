@@ -30,6 +30,7 @@ pub mod expr;
 pub mod filelist;
 pub mod ir;
 pub mod loc;
+pub mod loop_walk;
 pub mod lower;
 pub mod measure;
 pub mod naming;
