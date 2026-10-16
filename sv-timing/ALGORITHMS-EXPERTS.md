@@ -28,7 +28,7 @@ worst remaining single-cycle primary.
 | Automatic transforms | `LoopRewrite` (FindFirst, CondCount, RingWalk, StreamCompact), `SelectIncrement`, `BalanceMux` (one-hot, arm set = rewrite set), `RebalanceAssoc`, `SplitAssign`, `InsertReg` — exact or latency-labelled, area-neutral-or-better except InsertReg | A88–A103, `AGENTS-auto-correct.md` catalog |
 | Production RTL rewrites | instr_queue admission count (A92), scoreboard cancel window (A98), ROB free/re-anchor (A99), rename/iq/store_buffer find-first and popcount (A100) — SAT at fixture sizes; 8/32-entry miters inconclusive on budget | A92–A100 |
 | Mapping noise floor | ±1 % area, ±6 cells on identical RTLIL (autoidx-dependent ABC order) | A102 |
-| 10 FO4 | **not closed**; the ranked residual is the OoO control cones (47–54 cells) and the single-cycle 64-bit add/compare wall | A103 |
+| 10 FO4 | **not closed**; the ranked residual is the OoO control cones (43–54 cells) and the single-cycle 64-bit add/compare wall; delay-v38 adds function-body costing (rename 19 → 34 vs 52 cells) and A104's OneHotSelect / StreamCompact / iq edits — the netlist moved iq 6.2 → 4.4 ns at equal cells | A103, A104 |
 
 The route that produces these numbers is one host command (`AGENTS-build-platform.md` §7.1):
 `timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --allow-over-budget --remote --map-recipe streamed`,
@@ -7691,6 +7691,90 @@ squash, rename allocation, scoreboard commit select) are 15–40 FO4 of
 closable by the latency-neutral toolbox at 20 ps; they are microarchitecture
 (stationary queues, precomputed selects, one-cycle-later counts), and the
 board can now rank them truthfully.
+
+## A104 — Large passes on the truthful board: OneHotSelect, StreamCompact in production, function bodies (delay-v38)
+
+### What the board asked for
+
+With delay-v37 the ranked residual was the OoO control cones. Three moves,
+each a pass or a model truth rather than a hand edit, and one production
+edit that mirrors a pass:
+
+1. **OneHotSelect** (fifth `LoopRewrite` shape, invariant-tagged). `for e:
+   if (G[e]) begin x = y(e); … end` is a DEPTH-deep priority chain to
+   synthesis. When the module **asserts** `$onehot0(G)` (`TimingModule.
+   onehot_facts`, scanned from the source) and every output is zero before
+   the loop, the chain is the AND-OR accumulate `x = x | (G[e] ? y(e) :
+   '0)` — log₂N deep, exact whenever the assertion holds; the rationale
+   names the assertion, so the proof obligation is the design's own.
+   Fixture: the asserted grant select fires, the unasserted priority select
+   does not (`fixtures/auto_correct/onehot_select.sv`).
+2. **StreamCompact reaches the production store buffer.** Two defects stood
+   in the way: the count's resolved width (a block-local `automatic`) was
+   narrower than the popcount — the cast is now at least the bits of
+   `0..=n` and truncates on assignment exactly as the repeated `+ 1'b1`
+   did; and the emitter's span replacement stopped short of the loop's
+   `end` when the body crosses an `` `ifdef `` (the preprocessor's origin
+   map for the tail is off by the dropped branch — the tail was left
+   behind, a parse error). The span now ends at the balanced `begin`/`end`
+   scanned from the `for` line. `store_buffer` structural 38.5 → 23.3 in
+   the emitted module; reparse and joint integrity pass.
+3. **Function bodies cost at the call site** (delay-v38). A user function
+   was one gate: `pick_free(free_d)` — an incrementer over 64 entries and a
+   one-hot encode — cost 1 FO4, and `g6lc_rename` read 19 against 52 mapped
+   cells. `FunctionBody.body_text` is kept; the call pays an ASAP schedule
+   of the body's statements (independent statements overlap — the 64
+   `out[Perm[k]] = in[k]` of the LFSR permutation are wiring, which the
+   first serial-sum version billed at 41), loops by trip count: × 1 when
+   every write is indexed by the loop variable, × log₂ for a linear update
+   (`x = x | …`, `x = x ^ …`, a flag set under a guard, a shift-xor), ×
+   trips for an arithmetic carry; `case` bodies cost nothing. Also: a
+   runtime index selects among 2^k entries (⌈k/2⌉ 4:1 levels, not one), a
+   zero-trip loop is dead, a guard on a bitwise self-accumulate is one
+   gate.
+4. **`core/ooo/g6lc_iq.sv`** mirrors OneHotSelect on the issue select
+   (`ooo_iq_rank_unique` asserts the grant one-hot), clears the acked
+   entry straight from the grant (no `slot_entry` encode → decode), and
+   allocates port 1 at the **highest** free slot from the same `free`
+   vector as port 0's lowest — the second pick no longer waits for the
+   first (one incrementer off the chain; which free slot a newcomer lands
+   in is not architecturally visible: the queue is stationary and age is
+   the explicit matrix; ports beyond two stay serial). The whole core
+   elaborates.
+
+### What the netlist said (live remap, module board, Nangate45)
+
+| module | before (run C) | after A104 | reading |
+|---|---|---|---|
+| g6lc_iq | 6.21 ns / 47 cells | **4.40 ns / 46 cells** | the select cone was not the deepest: the worst path is now the wake → `q_d` → count cone at the same cell depth; the ns gain is largely fanout |
+| store_buffer, scoreboard, rename, frontend | 49 / 54 / 52 / 43 cells | unchanged (live tree) | the compaction is in the emitted tree only (in flight) |
+
+Calibration after delay-v38 (structural / cells): rename 34 / 52 (1.5),
+iq 54.9 / 46 (the dense-cone class sums a 63-node block; 0.9), frontend
+70.5 / 43 (the `accepted_target` compare loop still ~2× over), store_buffer
+38.5 / 49, scoreboard 15.6 / 54 (still under-read: the commit select).
+Live board: **worst 70.5 (`frontend`, a function-cost over-read), 1244
+failing primary, 692 of 1628 reg→reg.** The under-read list shrank to the
+scoreboard; the over-reads are now the model's, not the design's.
+
+### Reading it
+
+- A pass that is exact only under an invariant must carry the invariant's
+  proof obligation visibly: `onehot_facts` makes the design's assertion the
+  gate, and the rationale repeats it. Without the assertion the chain stays.
+- "Which cone is deepest" is the netlist's verdict, not the model's: the iq
+  select cone measured first on the structural board, and the netlist's
+  worst was the wake/count cone one cell shorter. The honest move after a
+  rewrite is the module board, every time.
+- Function-call costing was the last large blind spot of the OoO modules;
+  what remains is class deflation (dense cones summing whole blocks) and
+  the scoreboard's commit select.
+
+Open: emitted-tree remap with StreamCompact in the store buffer (in flight);
+the iq count cone (`count_d = $countones(q_d.valid)` depends on the full
+next state — `count_q + alloc − issued − cancelled` would not); the
+scoreboard commit select; `frontend` `accepted_target` (eight 64-bit
+compares under a window guard — a 6-bit tag compare would do).
 
 ## A90 — Incrementers are not gates (delay-v32)
 

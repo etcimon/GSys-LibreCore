@@ -142,6 +142,18 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   modules; live worst 23.0 → 38.5 (store_buffer squash), 160 → 673 reg→reg
   failing — the truth. StreamCompact (4th LoopRewrite shape) SAT-proved on
   the fixture; Pareto at N = 8 (−4.5 % area, −3.6 % delay).
+- [x] A104: OneHotSelect (invariant-tagged on `$onehot0`), StreamCompact on
+  the production store buffer (width cast, ifdef-crossing span), function
+  bodies cost at the call site (delay-v38: rename 19 → 34 vs 52 cells),
+  runtime index depth, dead loops; g6lc_iq select/alloc edits (netlist
+  6.21 → 4.40 ns at 46–47 cells: the wake/count cone is the deepest now).
+- [ ] A104 next: iq count from `count_q + alloc − issued − cancelled`
+  (exact by invariant; add `count_q == $countones(valid_q)` assert);
+  scoreboard commit select (54 cells, under-read 15.6); `frontend`
+  `accepted_target` 64-bit compares × 8 (tag compare); emitted-tree remap
+  with the compaction (in flight: `sta-rtl-emitted-a104.log`); dense-cone
+  class sums whole blocks (iq 54.9 vs 46 cells) — schedule the block's
+  def-use, not its statement list.
 - [ ] A103 next: rename (52 cells / 19 FO4) and scoreboard (54 / 15.6) still
   under-read — dynamic struct-array reads behind rotated indices
   (`mem_q[head_slot[h]]`, `commit_sel_slot`); perf_counters / TLB over-read
