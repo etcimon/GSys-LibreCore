@@ -681,6 +681,17 @@ module wt_dcache_wbuffer
         end
       end
 
+      //pragma translate_off
+      // T37 invariant: a fixup write or invalidation acts on the entry whose tag
+      // check produced fixup_hit_oh_q. Fires on the pre-fix shape
+      // (G6LC_MUT_FIXUP_SEL_DRIFT) the moment a bypass push lands under a pass.
+      fixup_pass_entry_stable :
+      assert property (@(posedge clk_i) disable iff (!rst_ni)
+          (fixup_wr_req || fixup_inv_req) |-> (fixup_bypass_valid_q == fixup_sel_bypass_q))
+      else $error("[l1 dcache wbuffer] fixup pass acting on an entry other than the one it tag-checked (bypass=%b sel=%b idx=%h way=%h)",
+                  fixup_bypass_valid_q, fixup_sel_bypass_q, paddr_cl_idx, fixup_hit_oh_q);
+      //pragma translate_on
+
       // Convert a fixup paddr to the wtag used by the cache readout mux.
       function automatic [CVA6Cfg.DCACHE_TAG_WIDTH+(CVA6Cfg.DCACHE_INDEX_WIDTH-CVA6Cfg.XLEN_ALIGN_BYTES)-1:0] fixup_wtag(input [CVA6Cfg.PLEN-1:0] paddr);
         fixup_wtag = {paddr[CVA6Cfg.DCACHE_INDEX_WIDTH+CVA6Cfg.DCACHE_TAG_WIDTH-1:CVA6Cfg.DCACHE_INDEX_WIDTH],
