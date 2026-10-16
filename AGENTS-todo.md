@@ -1774,9 +1774,16 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `+smt_sched_trace` 95–110 M, stop at 110 M; ≈ 6 h at 5 k cycles/s): the
   last hart-0 instructions before the oops name the load that returned
   the NULL `dir`, and the sched trace says whether a switch sits between
-  the store and the load — the input for a two-hart oracle (merge by
-  cycle stamp). The 4-core `l1r4` (t38, `maxcpus=1` but 8 cpu nodes) is
-  paused (`SIGSTOP`) to leave the host to the verdict runs.
+  the store and the load — the input for the two-hart oracle
+  (`rvfi_memcheck.py --merge=<hart-1 trace>`: both traces interleaved by
+  cycle stamp into one memory model, hart 0 first on a tie; shipped).
+  `l1s1j` stopped at 110 M **before** the oops: the console text sits
+  ahead of the census lines in the log (different stdout buffers), and
+  1 s guest ≈ 100 M cycles, so 1.267 s ≈ 127 M; the trajectory is
+  bit-identical to `l1s1i` (retire counts at 96–108 M equal). Relaunched
+  as `l1s1k` to 136 M (sched trace 118–136 M). The 4-core `l1r4` (t38,
+  `maxcpus=1` but 8 cpu nodes) is paused (`SIGSTOP`) to leave the host to
+  the verdict runs.
 - [ ] **T37 — L3 on the T36 ooo: `kworker/u2:0` (`async_run_entry_fn`)
   oopses in `__memset` called from `blake2s_final+0x36` with a store page
   fault at `0xffffffc80005c000` — the guard page above the task's VMAP
@@ -1877,7 +1884,15 @@ prerequisite for this work under the existing dual license. No licensing policy 
   refill / a fixup pass, both of which re-check) and is left as recorded
   behaviour. Lint clean; build `ooocoh-t42-ooo-pgo-build` (t41 + the fix);
   verdict: L3 with the live oracle past 701 M cycles with 0 stored
-  mismatches, L1 to the shell marker, battery + stages. Stage 53
+  mismatches, L1 to the shell marker, battery + stages (battery and
+  stages 38/46–53 Spike-exact on t42). **Invariant witness:**
+  `fixup_pass_entry_stable` (a fixup write/inval acts on the entry it
+  tag-checked) added in `gen_fixup_queue`; the model built with the
+  pre-fix shape (`ooocoh-t43m-ooo-pgo-build`, `+define+G6LC_MUT_FIXUP_SEL_DRIFT`)
+  **fires it at cycle 97,365,899 of the L3 boot** — the drift is frequent
+  and mostly harmless (the dropped word's line is usually absent or
+  refetched), the blake2s instance at 428.67 M is the one that read back.
+  Stage 53
   (`ooo_mem_min.S`, the copy-loop shape in bare mode) passes 153/153: the
   shape alone does not trigger it — the queue has to be full and the
   push has to land during the head's pass. The T35-class first instance:
