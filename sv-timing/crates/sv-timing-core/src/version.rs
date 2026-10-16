@@ -78,7 +78,10 @@ pub const IR_VERSION: &str = "ir-v1";
 /// `<<`, `==`, …) into a one-byte operator plus a unary reduction; logical
 /// joins are one LogicBit each. `rebalance_associative` folds
 /// `|a || |b || |c` into `|{a, b, c}` (exact).
-pub const MEASUREMENT_VERSION: &str = "delay-v34";
+/// `delay-v35`: loop-carried accumulators of procedural `for` loops cost
+/// trip-count × one body copy (the unrolled serial chain synthesis builds;
+/// scoreboard `cid = cid + 1` range walk = a 436-cell netlist chain).
+pub const MEASUREMENT_VERSION: &str = "delay-v35";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

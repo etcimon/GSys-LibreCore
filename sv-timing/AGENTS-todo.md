@@ -99,9 +99,28 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
 - [x] Whole-core mapped STA runs end to end (461 modules, 1.2 M instances,
   1.98 mm², OpenSTA 38 s). The number (−1446 ns @ 0.8 ns) is unbuffered
   broadcast fanout (flush: 54 nF nets), not logic depth (A97).
+- [x] Fanout-insensitive mapped report (`OR_IGNORE_FANOUT_ABOVE`, A98): the
+  whole-core netlist's worst path is a 436-cell loop-carried chain
+  (issue_read_operands → scoreboard → rob), not the datapath cones.
+- [x] delay-v35: loop-carried accumulators of procedural `for` loops cost
+  trip-count × body (bitwise accumulates log depth); the scoreboard and ROB
+  walks surfaced at 78.9 / 63.2 and were rewritten exactly (A98/A99: ring
+  membership vector; per-port hit popcount + find-first re-anchor). Fixture:
+  walk 14.7 ns / 144 cells → 0.78 ns / 12 cells (Nangate45). SAT: scoreboard
+  window N = 4/8/16 exhaustive, ROB whole-module 6-step at 4 entries; the
+  32-entry window and 8-entry ROB miters run with a time budget on the
+  builder. Live board back to 23.0 (frontend), 435 failing.
 - [ ] Buffer the mapped netlist before STA: OpenROAD `repair_design` on the
-  top modules' netlists (or placed whole core), or a fanout-insensitive
-  report; then anchor the structural model on the mapped per-module numbers.
+  top modules' netlists (or placed whole core); then anchor the structural
+  model on the mapped per-module numbers.
+- [ ] `if (cond) x = const` inside a loop carries its cost in the condition;
+  the lowerer bills no node for it (priority-pick loops such as
+  `if (!found && hit[k]) {found = 1; idx = k}` are under-measured).
+- [ ] Re-run the streamed whole-core mapping on the A98/A99 tree and the
+  fanout-insensitive report; the next chains the netlist names are the
+  next loop walks to rewrite (instr_realign `cur`, g6lc_bp_ckpt, cva6_tlb).
+- [ ] BalanceMux write-only `pipe_svt_red_*` feed flops: fixed — the reduce
+  prep now needs a real InsertReg cut (latency-neutral emits carry none).
 - [ ] `g6lc_iq` / `scoreboard` need > 30 min under the delay-oriented ABC
   script; map them with the plain script or raise `abcTimeoutS` for a
   delay-faithful netlist of the two largest modules.

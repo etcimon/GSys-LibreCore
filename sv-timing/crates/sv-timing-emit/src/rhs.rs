@@ -1773,8 +1773,14 @@ pub fn all_emit_extra_cuts(source: &str, cuts: &[CutAssign]) -> Vec<CutAssign> {
         }
         out.push(extra);
     }
-    let (preps, _) = or_reduce_prep_cuts(source, cuts);
-    out.extend(preps);
+    // The reduce prep registers a `|vec` (one more cycle on that term): it is
+    // part of an InsertReg run's dense block and must not appear in a
+    // latency-neutral emit, where it would be a write-only flop pair that
+    // synthesis drops and the structural report mistakes for a path end.
+    if cuts.iter().any(|c| c.line > 0) {
+        let (preps, _) = or_reduce_prep_cuts(source, cuts);
+        out.extend(preps);
+    }
     out
 }
 
@@ -1829,7 +1835,11 @@ pub fn rewrite_origin_assigns(source: &str, cuts: &[CutAssign]) -> String {
         }
     }
     let extras = all_emit_extra_cuts(source, cuts);
-    let (_, reduce_rw) = or_reduce_prep_cuts(source, cuts);
+    let (_, reduce_rw) = if cuts.iter().any(|c| c.line > 0) {
+        or_reduce_prep_cuts(source, cuts)
+    } else {
+        (Vec::new(), std::collections::BTreeMap::new())
+    };
     let mut sibling_line: std::collections::BTreeMap<u32, &CutAssign> =
         std::collections::BTreeMap::new();
     for extra in &extras {
@@ -3338,6 +3348,23 @@ endmodule
             !rewritten.contains("sgt = pipe_svt_p1"),
             "must not rewrite comma-list lvalue as pipe sample:\n{rewritten}"
         );
+    }
+
+    #[test]
+    fn or_reduce_prep_needs_a_real_register_cut() {
+        // A latency-neutral emit (no InsertReg cut) must not register any
+        // `|vec`: the prep pipes would be write-only flops (dead after
+        // synthesis) and phantom path ends in the structural report.
+        let src = "module m (input logic clk_i, rst_ni, f, output logic q);
+  logic d;
+  logic [3:0] a, b, c;
+  assign d = (q && !f || |a || |b || |c) && !f;
+  always_ff @(posedge clk_i or negedge rst_ni) if (!rst_ni) q <= 1'b0; else q <= d;
+endmodule
+";
+        let extras = all_emit_extra_cuts(src, &[]);
+        assert!(extras.is_empty(), "{extras:?}");
+        assert_eq!(rewrite_origin_assigns(src, &[]), src);
     }
 
     #[test]

@@ -6928,6 +6928,8 @@ All numbers below are structural FO4 at **10 FO4 / 20 ps / margin 0.2** on
 | delay-v33 …, emitted latency-neutral (31 BalanceMux + 1 SelectIncrement) | 24.0 (`frontend`) | 528 | `instr_queue` 24.3 → 15.8 (A92 + A91) |
 | delay-v34 (`\|\|`/`&&` parsed as joins), live RTL | **23.0** (`frontend`) | 505 | every logical join had been billed as `\|` + a reduction (A95) |
 | delay-v34, emitted latency-neutral (303 BalanceMux + 29 RebalanceAssoc + 1 SelectIncrement, 22 passes) | **20.0** (`frontend`) | 465 | planner reaches plain cones in S3, rebalances write RTL (A96); joint reparse of 264 files ok |
+| delay-v35 (loop-carried chains), live RTL before A98/A99 | 78.9 (`scoreboard` cancel walk), 63.2 (`g6lc_rob` free walk) | 681 | the chains the mapped netlist's 436-cell path is made of, visible structurally for the first time |
+| delay-v35, live RTL with A98 + A99 | **23.0** (`frontend`) | 435 | scoreboard worst 13.6, rob 11.3; the frontend cone is again the board's head |
 
 The failing-path count went **up** with width scaling: a 64-bit add is 12 FO4
 at this table, so every single-cycle 64-bit adder path now misses a 10 FO4
@@ -7258,6 +7260,73 @@ contribute 222 and 917 ns. Excluding the broadcast drivers found in the top
 per module) before its STA says anything about the datapath. Next: run the
 top modules' netlists through OpenROAD `repair_design` individually, or a
 fanout-insensitive report; the host flow now gets this far in one command.
+
+## A98 — Loop-carried chains: the model was blind to what the netlist is made of (delay-v35)
+
+The first whole-core mapped STA (A97) with broadcast nets excluded
+(`OR_IGNORE_FANOUT_ABOVE=256`: 873 driver cells disabled) reported a
+**436-cell** path `issue_read_operands → scoreboard → rob` (−79.7 ns at a
+0.8 ns clock): alternating NOR4/NAND4 each driving ~200 loads — the shape of
+an unrolled `for` whose body steps a pointer and decodes it. The structural
+model billed every such loop as **one** iteration: a procedural `for (int k…)`
+is elaboration-constant in `k`, and a body variable it also reads
+(`cid = cid + 1` under `if (cid == ip) break`) was costed once.
+
+Fixture measurement, Nangate45, delay-oriented ABC, 32 entries
+(`sb_walk`/`sb_window` in `fixtures/auto_correct/scoreboard_window_equiv.sv`):
+
+| shape | cells on path | path | area |
+|---|---:|---:|---:|
+| pointer walk with break (production before) | 144 | **14.7 ns** | 6773 µm² |
+| same, plain ABC script | 133 | 15.2 ns | 6914 µm² |
+| per-slot ring-interval membership (production after) | 12 | **0.78 ns** | 613 µm² |
+
+Synthesis does **not** fold `cid = cid + 1` across iterations (each step's
+carry waits for the previous sum) and does not re-associate the break chain.
+
+delay-v35 therefore bills loop-carried accumulators of procedural loops with
+a resolvable header (`k = A; k < N` through the width resolver's constant
+lattice — `CVA6Cfg.NR_SB_ENTRIES` from the cfg snapshot): a variable **read
+before any write of the same iteration**, or whose first write reads itself,
+is a chain; a temp written then read inside one iteration (`rslot = base +
+i; … mem_q[rslot]`) is not. Bitwise/logical self-accumulates (`any |= hit[k]`)
+are AND/OR trees ABC balances — `⌈log₂ N⌉` copies; arithmetic and
+compare/mux updates (`cid = cid + 1`, `idx = hit[k] ? k : idx`) cost `N`
+copies (cap 64). Unknown bounds leave the node alone. `if (cond) x = const`
+still carries its cost in the condition, which the lowerer does not bill
+(todo). Two production walks fell out of the board at once:
+
+- **scoreboard** — both younger-cancel walks (`mem_n[..].cancelled`, the
+  `cancelled_mask_o` mask) now test each slot's membership in the ring
+  interval `[after_flu_wb, issue_pointer[0])` from one `bmiss_window`
+  vector (two compares and a mux per slot). Exact for `NR_SB_ENTRIES ==
+  2**TRANS_ID_BITS`; empty interval ⇒ nothing, as the immediate break did.
+  Yosys SAT over all inputs for N = 4, 8, 16 (`sb_walk ≡ sb_window`); the
+  32-entry miter (1.5 M variables) runs with a time budget. Structural
+  78.9 → 13.6.
+
+## A99 — ROB free-by-tid and head re-anchor (delay-v35, exact)
+
+`g6lc_rob`: `for r: if ack[r]: for i: if (valid && tid match) {valid = 0;
+count_d = count_d - 1}` is a `NR_RETIRE × ROB_ENTRIES` chain of conditional
+decrements (structural 63.2 at 2 × 32); the head re-anchor `for i: if (head
+!= tail && !valid[head]) head++` is a 32-step walk with a dynamic index per
+step. After: per-port hit vectors (`free_hit[r]`, taken on the state port
+r−1 left so two ports naming one tid still free and count one) with `count_d
+-= $countones(free_hit[r])`; the re-anchor computes `stop[j] = valid[head +
+j] || (j == tail − head)`, isolates the lowest set bit (`stop & (~stop + 1)`,
+never empty) and OR-encodes it — a find-first without a priority chain.
+Exact for `ROB_ENTRIES == 2**ROB_W`. Proof: **whole-module sequential miter**
+of the pre-change RTL against the new one (Yosys SAT, 6 steps from reset) at
+`ROB_ENTRIES = 4`; the 8-entry miter runs with a time budget. Structural
+63.2 → 11.3. The whole core elaborates with both edits (slang, remote).
+
+Host: `openroad-timing.tcl` gained `OR_IGNORE_FANOUT_ABOVE=N` — the flat
+fanout checker (`set_max_fanout` + `report_check_types -max_fanout
+-violators`) names the broadcast nets, their leaf drivers are
+`set_disable_timing`'d, and the result is labelled a study
+(`STA_IGNORED_FANOUT …`). It is what let the chain show through; it is not a
+sign-off number.
 
 ## A90 — Incrementers are not gates (delay-v32)
 

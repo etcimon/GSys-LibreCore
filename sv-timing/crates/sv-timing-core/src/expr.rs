@@ -2482,6 +2482,32 @@ impl<'a> Parser<'a> {
                         index: Box::new(index),
                     };
                 }
+                Some(b'.')
+                    if matches!(e, Expr::Ident { .. } | Expr::Index { .. })
+                        && self
+                            .src
+                            .get(self.i + 1)
+                            .is_some_and(|c| c.is_ascii_alphabetic() || *c == b'_') =>
+                {
+                    // Member of an indexed struct element (`content_q[i].pte.ppn`):
+                    // the selected path is one identifier for costing, width
+                    // (root `content_q`) and emission. Before this the concat
+                    // around it fell to the string heuristic, which billed the
+                    // `-1` of its constant part-select bound as a 41-bit adder.
+                    self.bump();
+                    let start = self.i;
+                    while self.i < self.src.len()
+                        && (self.src[self.i].is_ascii_alphanumeric()
+                            || self.src[self.i] == b'_'
+                            || self.src[self.i] == b'$')
+                    {
+                        self.i += 1;
+                    }
+                    let member = String::from_utf8_lossy(&self.src[start..self.i]).into_owned();
+                    e = Expr::Ident {
+                        name: format!("{}.{member}", e.emit()),
+                    };
+                }
                 Some(b'(') if matches!(e, Expr::Ident { .. }) => {
                     // call: only when base is bare ident
                     let name = match &e {
@@ -2748,6 +2774,19 @@ mod tests {
             Expr::parse("x | |a | |b").rebalance_associative().emit(),
             "x | |{a, b}"
         );
+    }
+
+    #[test]
+    fn member_part_select_with_parenthesized_bound_inside_concat_is_wiring() {
+        // cva6_tlb: `{content_q[i].pte.ppn[(CVA6Cfg.GPPNW-1):0], lu_vaddr_i[11:0]}`
+        // was billed as a 41-bit adder (the `-1` of a constant bound) after the
+        // concat fell to the string heuristic.
+        let e = Expr::parse("{content_q[i].pte.ppn[(Cfg.GPPNW-1):0], lu_vaddr_i[11:0]}");
+        assert!(!e.is_opaque(), "{e:?}");
+        // Two fixed part-selects in a concat: only the concat (1.0 in this
+        // test table) — the `-1` of the bound is an elaboration constant.
+        assert_eq!(e.fo4_critical_cost(&arithmetic_base), 1.0, "{e:?}");
+        assert_eq!(e.dominant_op_class(), OperatorClass::Concat);
     }
 
     #[test]

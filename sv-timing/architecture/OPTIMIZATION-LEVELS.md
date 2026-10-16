@@ -74,7 +74,11 @@ The table records the original defect and where the fix now lives.
    bits sit between linear and log, and the quadratic form is area, not delay.
    Calibration and provenance: ALGORITHMS-EXPERTS Part LIII (A83).
    delay-v33 adds one mux level per runtime indexed select (`arr[idx]`,
-   `v[idx +: W]`); constant selects remain wiring.
+   `v[idx +: W]`); constant selects remain wiring. delay-v35 bills a
+   loop-carried accumulator of a procedural `for` (read before write in the
+   iteration, or a self-reading first write) trip-count × body — `⌈log₂ N⌉`
+   for bitwise/logical self-accumulates — because synthesis keeps those
+   chains serial (ALGORITHMS-EXPERTS A98).
 
    **Transform catalog addition (2026-10-16): `SelectIncrement`** — exact,
    latency-neutral: `LHS = REG + step` (k-bit step, k ≤ 4) → `2^k`

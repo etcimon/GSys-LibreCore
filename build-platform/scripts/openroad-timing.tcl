@@ -17,6 +17,16 @@
 #                   passes toolchain.openroad.threads)
 #   OR_GROUP_COUNT  paths per report_checks (default 20)
 #   OR_REPORT_DIR   also write paths-max.rpt / paths-min.rpt / summary.txt there
+#   OR_IGNORE_FANOUT_ABOVE
+#                   study knob: disable timing through the driver cells of
+#                   nets with more loads than this. A mapped netlist that has
+#                   not been through repair_design carries unbuffered
+#                   broadcast nets (reset, flush: tens of nF) whose delays
+#                   are placement artifacts, not logic depth; with them out
+#                   of the way the report ranks the datapath cones the
+#                   structural FO4 model estimates. The count of disabled
+#                   drivers is printed (STA_IGNORED_FANOUT) and the result is
+#                   labelled a study, never sign-off.
 #
 # Both binaries come from the tools/openroad fork
 # (build-platform/scripts/install-openroad-g6lc.sh installs openroad and sta).
@@ -59,6 +69,35 @@ if {$is_openroad} {
   link_design -no_black_boxes $::env(OR_TOP)
 }
 read_sdc $::env(OR_SDC)
+set ignored_fanout 0
+if {[info exists ::env(OR_IGNORE_FANOUT_ABOVE)] && $::env(OR_IGNORE_FANOUT_ABOVE) ne "" \
+    && $::env(OR_IGNORE_FANOUT_ABOVE) > 0} {
+  # The fanout check counts the flat (leaf) loads of each net — a hierarchical
+  # net's own pin list does not — so let the checker find the broadcast nets,
+  # then take their leaf driver cells out of the timing graph.
+  set lim $::env(OR_IGNORE_FANOUT_ABOVE)
+  set_max_fanout $lim [current_design]
+  set tmp [file join [file dirname $::env(OR_VERILOG)] "fanout-violators.rpt"]
+  report_check_types -max_fanout -violators > $tmp
+  set fh [open $tmp r]
+  set nets_over 0
+  while {[gets $fh line] >= 0} {
+    if {![string match "*(VIOLATED)*" $line]} continue
+    set name [lindex $line 0]
+    set pins [get_pins -quiet $name]
+    foreach drv $pins {
+      if {![$drv is_leaf]} continue
+      incr nets_over
+      set inst [get_cells -quiet -of_objects $drv]
+      if {$inst ne ""} {
+        set_disable_timing $inst
+        incr ignored_fanout
+      }
+    }
+  }
+  close $fh
+  puts "STA_IGNORED_FANOUT limit=$lim nets_over=$nets_over drivers_disabled=$ignored_fanout (study: broadcast nets excluded)"
+}
 if {[llength [find_timing_paths -path_delay max -group_path_count 1]] == 0} {
   error "no constrained maximum-delay path; this is not a timing result"
 }
@@ -89,4 +128,4 @@ if {[info exists ::env(OR_REPORT_DIR)] && $::env(OR_REPORT_DIR) ne ""} {
   puts $f "tns_min [sta::total_negative_slack -min]"
   close $f
 }
-puts "STA_RESULT top=$::env(OR_TOP) wns_max=[sta::worst_slack -max] tns_max=[sta::total_negative_slack -max] wns_min=[sta::worst_slack -min] tns_min=[sta::total_negative_slack -min]"
+puts "STA_RESULT top=$::env(OR_TOP) wns_max=[sta::worst_slack -max] tns_max=[sta::total_negative_slack -max] wns_min=[sta::worst_slack -min] tns_min=[sta::total_negative_slack -min] ignored_fanout_drivers=$ignored_fanout"

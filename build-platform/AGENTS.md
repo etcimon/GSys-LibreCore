@@ -450,7 +450,9 @@ bun run src/cli/index.ts setup --install --profile dual-hart
   study and any `_ALDFF_`/latch left in a netlist fails the step). The first
   whole-core run (461 modules, 1.2 M instances) links and reports in 38 s;
   its `wns` is unbuffered broadcast fanout until the netlist is repaired
-  (`repair_design`), see ALGORITHMS-EXPERTS A97. The portable sv-timing flist carries the
+  (`repair_design`), see ALGORITHMS-EXPERTS A97; `OR_IGNORE_FANOUT_ABOVE=N`
+  on `openroad-timing.tcl` disables the leaf drivers of nets with more than
+  N flat loads for a labelled logic-depth study (A98). The portable sv-timing flist carries the
   manifest's `+define+` lines and `verify.synthDefines`, so sv-timing measures
   the design the flow synthesizes. Tests: `test/sta-rtl-study.test.ts`.
 

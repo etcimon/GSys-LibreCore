@@ -144,6 +144,19 @@ module scoreboard #(
 
   logic bmiss;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] after_flu_wb;
+  // The mispredict's younger window as a membership vector: slot i lies on
+  // the ring interval [after_flu_wb, issue_pointer[0]). Both cancel walks
+  // (`mem_n[..].cancelled` below, `cancelled_mask_o`) used to step a pointer
+  // through the ring with a data-dependent break; synthesis keeps that walk
+  // serial — a NR_SB_ENTRIES-deep chain of increment/compare/decode (the
+  // mapped Nangate45 netlist: 144 cells, 14.7 ns at 32 entries) — whereas
+  // every slot's membership is two compares and a mux (12 cells, 0.78 ns,
+  // 11x less area). Exact for NR_SB_ENTRIES == 2**TRANS_ID_BITS (the ring the
+  // pointer arithmetic already assumes; `TRANS_ID_BITS = $clog2(NR_SB_ENTRIES)`):
+  // an empty interval (pointers equal) marks nothing, as the walk's immediate
+  // break did. SAT-proved against the walk for 8/16 entries
+  // (sv-timing/fixtures/auto_correct/scoreboard_window_equiv.sv).
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0] bmiss_window;
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] speculative_instrs;
 
   logic [CVA6Cfg.NrIssuePorts-1:0] num_issue;
@@ -414,11 +427,9 @@ module scoreboard #(
   initial sb_alloc_en = $test$plusargs("sb_alloc");
 //pragma translate_on
   always_comb begin : issue_fifo
-    automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] cid;
     // default assignment
     mem_n     = mem_q;
     num_issue = '0;
-    cid       = '0;
 
     // if we got an acknowledge from the issue stage, put this scoreboard entry in the queue
     for (int unsigned i = 0; i < CVA6Cfg.NrIssuePorts; i++) begin
@@ -546,15 +557,14 @@ module scoreboard #(
     // alone does not drop already-issued wrong-path ops (e.g. post-ret alias
     // jal); commit_drop of cancelled entries has no RF/LSU side-effects.
     if (bmiss) begin
-      cid = after_flu_wb;
-      for (int unsigned k = 0; k < CVA6Cfg.NR_SB_ENTRIES; k++) begin
-        if (cid == issue_pointer[0]) break;
+      for (int unsigned w = 0; w < CVA6Cfg.NR_SB_ENTRIES; w++) begin
+        if (!bmiss_window[w]) continue;
         // NrHarts==1 → hart_id always 0 → identity (cancel all younger).
         // T19: the same-hart filter is a MIXED-residency device; under the
         // drained handoff every live entry is the resident hart's, so a tag
         // mismatch could only spare a wrong-path entry (program order rules).
         if (CVA6Cfg.NrHarts <= 1 || CVA6Cfg.SmtDrainedHandoff ||
-            mem_q[cid].sbe.hart_id == resolved_branch_i.hart_id) begin
+            mem_q[w].sbe.hart_id == resolved_branch_i.hart_id) begin
           // Younger-cancel policy (soft-ladder iter-012 / hang-6–7 / R3a cont.5):
           //
           // Historical cont.5: *never* cancel LOAD — a cancelled ld s4 in
@@ -577,8 +587,8 @@ module scoreboard #(
           // I13: B cancels younger by program order only (FDT getprop
           // kept wrong-path LOADs of a0/s*). A keeps the exemption list.
 `ifdef G6LC_FETCH_B
-          mem_n[cid].cancelled = 1'b1;
-          mem_n[cid].sbe.valid = 1'b1;
+          mem_n[w].cancelled = 1'b1;
+          mem_n[w].sbe.valid = 1'b1;
           // T20 (defect A): a memory-order replay flagged on an entry that
           // the mispredict now cancels is a WRONG-PATH replay. The redirect
           // of the resolving branch is the only restart authority for the
@@ -587,30 +597,29 @@ module scoreboard #(
           // branch already redirected it (ooocoh-t19 hart 5: `beqz` taken ->
           // `atomic_raw_xchg_ulong+0x14..ret` retired). Drop the flag here;
           // the same-cycle violation below is gated on this clear.
-          mem_n[cid].replay    = 1'b0;
+          mem_n[w].replay    = 1'b0;
 `else
           if (!g6lc_sb_keep::keep(
                   CVA6Cfg,
-                  mem_q[cid].sbe.fu,
-                  mem_q[cid].sbe.op,
-                  mem_q[cid].sbe.rd[4:0],
-                  mem_q[cid].sbe.rs1[4:0],
-                  mem_q[cid].sbe.rs2[4:0],
-                  mem_q[cid].sbe.use_imm) &&
+                  mem_q[w].sbe.fu,
+                  mem_q[w].sbe.op,
+                  mem_q[w].sbe.rd[4:0],
+                  mem_q[w].sbe.rs1[4:0],
+                  mem_q[w].sbe.rs2[4:0],
+                  mem_q[w].sbe.use_imm) &&
               !g6lc_sb_keep::keep_prefix(
                   CVA6Cfg,
-                  mem_q[cid].sbe.fu,
-                  mem_q[cid].sbe.rd[4:0],
-                  64'(mem_q[cid].sbe.pc),
+                  mem_q[w].sbe.fu,
+                  mem_q[w].sbe.rd[4:0],
+                  64'(mem_q[w].sbe.pc),
                   64'(resolved_branch_i.pc),
                   resolved_branch_i.cf_type)) begin
-            mem_n[cid].cancelled = 1'b1;
-            mem_n[cid].sbe.valid = 1'b1;
-            mem_n[cid].replay    = 1'b0;  // T20 (defect A): see the FETCH_B arm
+            mem_n[w].cancelled = 1'b1;
+            mem_n[w].sbe.valid = 1'b1;
+            mem_n[w].replay    = 1'b0;  // T20 (defect A): see the FETCH_B arm
           end
 `endif
         end
-        cid = cid + 1'b1;
       end
     end
 
@@ -731,44 +740,51 @@ module scoreboard #(
   // ra/s2/s3 residue across multi-call FDT (next_tag 2nd entry, getprop).
   // The same-cycle mask must match that policy — previously it always skipped
   // LOAD, so ldbuf still completed wrong-path byte-loads before sticky latch.
+  always_comb begin : gen_bmiss_window
+    for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
+      automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] slot_i;
+      slot_i = CVA6Cfg.TRANS_ID_BITS'(i);
+      bmiss_window[i] = (after_flu_wb != issue_pointer[0]) &&
+          ((issue_pointer[0] > after_flu_wb)
+               ? (slot_i >= after_flu_wb && slot_i < issue_pointer[0])
+               : (slot_i >= after_flu_wb || slot_i < issue_pointer[0]));
+    end
+  end
+
   always_comb begin : gen_cancelled_mask
-    automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] cid;
     cancelled_mask_o = '0;
-    cid              = '0;
     for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
       cancelled_mask_o[i] = mem_q[i].cancelled;
     end
     if (bmiss) begin
-      cid = after_flu_wb;
-      for (int unsigned k = 0; k < CVA6Cfg.NR_SB_ENTRIES; k++) begin
-        if (cid == issue_pointer[0]) break;
+      for (int unsigned w = 0; w < CVA6Cfg.NR_SB_ENTRIES; w++) begin
+        if (!bmiss_window[w]) continue;
         if (CVA6Cfg.NrHarts <= 1 || CVA6Cfg.SmtDrainedHandoff ||
-            mem_q[cid].sbe.hart_id == resolved_branch_i.hart_id) begin
+            mem_q[w].sbe.hart_id == resolved_branch_i.hart_id) begin
           // EXTRACT E0: same keep as sequential cancel.
           // I13: B mask matches sequential cancel (no exemption list).
 `ifdef G6LC_FETCH_B
-          cancelled_mask_o[cid] = 1'b1;
+          cancelled_mask_o[w] = 1'b1;
 `else
           if (!g6lc_sb_keep::keep(
                   CVA6Cfg,
-                  mem_q[cid].sbe.fu,
-                  mem_q[cid].sbe.op,
-                  mem_q[cid].sbe.rd[4:0],
-                  mem_q[cid].sbe.rs1[4:0],
-                  mem_q[cid].sbe.rs2[4:0],
-                  mem_q[cid].sbe.use_imm) &&
+                  mem_q[w].sbe.fu,
+                  mem_q[w].sbe.op,
+                  mem_q[w].sbe.rd[4:0],
+                  mem_q[w].sbe.rs1[4:0],
+                  mem_q[w].sbe.rs2[4:0],
+                  mem_q[w].sbe.use_imm) &&
               !g6lc_sb_keep::keep_prefix(
                   CVA6Cfg,
-                  mem_q[cid].sbe.fu,
-                  mem_q[cid].sbe.rd[4:0],
-                  64'(mem_q[cid].sbe.pc),
+                  mem_q[w].sbe.fu,
+                  mem_q[w].sbe.rd[4:0],
+                  64'(mem_q[w].sbe.pc),
                   64'(resolved_branch_i.pc),
                   resolved_branch_i.cf_type)) begin
-            cancelled_mask_o[cid] = 1'b1;
+            cancelled_mask_o[w] = 1'b1;
           end
 `endif
         end
-        cid = cid + 1'b1;
       end
     end
   end

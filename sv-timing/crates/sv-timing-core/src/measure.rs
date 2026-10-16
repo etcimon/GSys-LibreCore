@@ -144,6 +144,10 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
             &module.package_imports,
             width_map.get(&module.name),
         );
+        // delay-v35: a procedural `for` whose body assigns a variable it also
+        // reads (`cid = cid + 1`, `found |= hit[i]`, `rank++`) unrolls into a
+        // chain of trip-count copies; one body copy is what the node measured.
+        let carried = loop_carried_multipliers(module, &widths);
         for node in module.nodes.values_mut() {
             // Spine expand / half-split lock residual segment FO4 across remeasure.
             if node.fo4_locked {
@@ -180,6 +184,9 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
                 if !ex.is_opaque() {
                     node.fo4_cost = ex.fo4_critical_cost_latticed(&base, &seed);
                     node.op_class = Some(ex.dominant_op_class_latticed(&seed));
+                    if let Some(trips) = carried.get(&node.id) {
+                        node.fo4_cost *= f64::from(*trips);
+                    }
                     continue;
                 }
             }
@@ -195,6 +202,9 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
                 } else {
                     node.fo4_cost = model.scaled_fo4(c, nw.for_class(c));
                 }
+            }
+            if let Some(trips) = carried.get(&node.id) {
+                node.fo4_cost *= f64::from(*trips);
             }
         }
         for region in module.regions.values_mut() {
@@ -663,6 +673,143 @@ pub struct FrequencyClosure {
     /// does not instantiate; their paths are excluded above. Empty without a map.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub uninstantiated_modules: Vec<String>,
+}
+
+/// Loop-carried accumulators of procedural `for` loops: node id → trip count.
+///
+/// For every procedural loop with a resolvable header (`k = A; k < N` /
+/// `k <= N`), a node inside the loop whose LHS root (not the loop variable)
+/// is also read by a node inside the same loop is one iteration of a serial
+/// chain that synthesis unrolls `N − A` times (the scoreboard cancel-range
+/// walk `cid = cid + 1` under `if (cid == ip) break` maps to a 436-cell
+/// chain). The multiplier is capped at 64; loops whose bound the width
+/// resolver cannot evaluate are left alone (unknown must not inflate).
+fn loop_carried_multipliers(
+    module: &TimingModule,
+    widths: &crate::width::WidthResolver<'_>,
+) -> BTreeMap<NodeId, u32> {
+    let mut out: BTreeMap<NodeId, u32> = BTreeMap::new();
+    for lp in module.gen_loops.iter().filter(|g| g.procedural) {
+        if lp.loc.origin != crate::loc::OriginKind::UserFile || lp.loc.byte_end <= lp.loc.byte_start
+        {
+            continue;
+        }
+        let Some(cond) = lp.cond_text.as_deref() else {
+            continue;
+        };
+        let Some(trips) = loop_trip_count(&lp.genvar, lp.init_text.as_deref(), cond, widths) else {
+            continue;
+        };
+        if trips <= 1 {
+            continue;
+        }
+        let inside: Vec<&IrNode> = module
+            .nodes
+            .values()
+            .filter(|n| {
+                n.loc.origin == crate::loc::OriginKind::UserFile
+                    && n.loc.file == lp.loc.file
+                    && n.loc.byte_start >= lp.loc.byte_start
+                    && n.loc.byte_start < lp.loc.byte_end
+            })
+            .collect();
+        // Loop-carried = read before any write of the same iteration (the
+        // previous iteration's value), or the first write reads itself.
+        // A temp written then read inside one iteration (`rslot = base + i;
+        // … mem_q[rslot]`) is not a chain.
+        let mut first_write: BTreeMap<&str, u32> = BTreeMap::new();
+        for n in &inside {
+            if let Some(root) = n.lhs.as_deref().and_then(TimingModule::root_ident) {
+                let e = first_write.entry(root).or_insert(n.loc.byte_start);
+                *e = (*e).min(n.loc.byte_start);
+            }
+        }
+        let mut carried_roots: BTreeSet<&str> = BTreeSet::new();
+        for n in &inside {
+            let reads: Vec<String> = node_read_symbols(n)
+                .into_iter()
+                .map(|s| ident_base(&s))
+                .collect();
+            for r in &reads {
+                let Some((root, fw)) = first_write.get_key_value(r.as_str()) else {
+                    continue;
+                };
+                if *root == lp.genvar {
+                    continue;
+                }
+                let own_first_write = n.lhs.as_deref().and_then(TimingModule::root_ident)
+                    == Some(root)
+                    && n.loc.byte_start == *fw;
+                if n.loc.byte_start < *fw || own_first_write {
+                    carried_roots.insert(root);
+                }
+            }
+        }
+        // A pure bitwise/logical self-accumulate (`acc = acc | x`, `any &&=
+        // hit`) is an AND/OR tree ABC balances to log depth. An arithmetic
+        // self-accumulate (`cid = cid + 1`, `cnt = cnt - y`) is not: each
+        // step's carry depends on the previous sum, and the mapped fixture of
+        // the scoreboard range walk kept all 32 steps serial under the
+        // delay-oriented script (144 cells, 14.7 ns). Any other loop-carried
+        // update (a compare/mux/priority chain such as `idx = hit[k] ? k :
+        // idx`) stays serial too and costs every iteration.
+        let depth = u32::try_from(usize::BITS - (trips as usize - 1).leading_zeros())
+            .unwrap_or(1)
+            .max(1);
+        for n in &inside {
+            let Some(root) = n.lhs.as_deref().and_then(TimingModule::root_ident) else {
+                continue;
+            };
+            if !carried_roots.contains(root) {
+                continue;
+            }
+            let assoc = n.rhs_expr.as_ref().is_some_and(|e| {
+                matches!(e, crate::expr::Expr::Binary { op, left, right, .. }
+                    if matches!(op.as_str(), "|" | "&" | "^" | "||" | "&&")
+                        && (expr_root_is(left, root) || expr_root_is(right, root)))
+            });
+            let mult = if assoc { depth } else { trips };
+            let e = out.entry(n.id).or_insert(1);
+            *e = (*e).saturating_mul(mult).min(64);
+        }
+    }
+    out
+}
+
+fn expr_root_is(e: &crate::expr::Expr, root: &str) -> bool {
+    match e {
+        crate::expr::Expr::Ident { name } => TimingModule::root_ident(name) == Some(root),
+        crate::expr::Expr::Index { base, .. } => expr_root_is(base, root),
+        _ => false,
+    }
+}
+
+/// `k = A; k < N` → `N − A` (`<=` → `N − A + 1`); `None` when either side
+/// does not evaluate to an elaboration constant.
+fn loop_trip_count(
+    var: &str,
+    init: Option<&str>,
+    cond: &str,
+    widths: &crate::width::WidthResolver<'_>,
+) -> Option<u32> {
+    let cond = cond.trim();
+    let (lhs, rhs, inclusive) = if let Some((l, r)) = cond.split_once("<=") {
+        (l, r, true)
+    } else if let Some((l, r)) = cond.split_once('<') {
+        (l, r, false)
+    } else {
+        return None;
+    };
+    if lhs.trim() != var {
+        return None;
+    }
+    let bound = widths.eval_text(rhs.trim())?;
+    let start = match init {
+        Some(t) => widths.eval_text(t.trim())?,
+        None => 0,
+    };
+    let n = bound - start + i64::from(inclusive);
+    (n > 0).then_some(u32::try_from(n).unwrap_or(u32::MAX))
 }
 
 /// Compute frequency-closure report from ranked paths.

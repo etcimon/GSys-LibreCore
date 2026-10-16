@@ -1547,6 +1547,9 @@ where
                 label,
                 loc,
                 body_assign_count,
+                procedural: false,
+                init_text: None,
+                cond_text: None,
             });
         }
         // always_comb `for (int unsigned w = 0; w < Cfg.N; w++)` unrolls;
@@ -1556,6 +1559,13 @@ where
             let mut idx = String::new();
             let mut saw = false;
             let mut body_assign_count = 0u32;
+            // Header texts for the trip count (`k = 0; k < N`).
+            let header = &lf.nodes.1.nodes.1;
+            let cond_text = header.2.as_ref().and_then(|c| node_text(tree, c));
+            let init_text = header.0.as_ref().and_then(|init| {
+                node_text(tree, init)
+                    .and_then(|t| t.rsplit_once('=').map(|(_, v)| v.trim().to_string()))
+            });
             for n in lf {
                 match n {
                     RefNode::VariableIdentifier(v) => {
@@ -1582,6 +1592,9 @@ where
                     label: None,
                     loc,
                     body_assign_count,
+                    procedural: true,
+                    init_text,
+                    cond_text,
                 });
             }
         }
@@ -2999,6 +3012,137 @@ mod tests {
         }
     }
 
+    /// delay-v35: the scoreboard cancel-range walk — a procedural `for` whose
+    /// body reads and re-assigns `cid` — unrolls into NR_SB_ENTRIES serial
+    /// copies; the structural cost of the loop-carried node is trip × body.
+    /// A body node that only reads the loop variable is one copy.
+    #[test]
+    fn loop_carried_accumulator_costs_trip_count_times_body() {
+        let text = concat!(
+            "module m (input logic [4:0] after_i, ip_i, input logic [31:0] ok_i,
+",
+            "          input logic bmiss_i, output logic [31:0] mask_o, output logic [31:0] copy_o);
+",
+            "  localparam int unsigned N = 32;
+",
+            "  always_comb begin
+",
+            "    logic [4:0] cid;
+",
+            "    mask_o = '0;
+",
+            "    cid = after_i;
+",
+            "    for (int unsigned k = 0; k < N; k++) begin
+",
+            "      if (cid == ip_i) break;
+",
+            "      if (ok_i[cid]) mask_o[cid] = 1'b1;
+",
+            "      cid = cid + 1'b1;
+",
+            "    end
+",
+            "    for (int unsigned i = 0; i < N; i++) copy_o[i] = ok_i[i] & bmiss_i;
+",
+            "  end
+",
+            "endmodule
+",
+        );
+        let out = analyze_inline_source(text);
+        let m = out.design.modules.values().next().unwrap();
+        let lp: Vec<_> = m.gen_loops.iter().filter(|g| g.procedural).collect();
+        assert_eq!(lp.len(), 2, "{:?}", m.gen_loops);
+        assert_eq!(lp[0].cond_text.as_deref(), Some("k < N"));
+        assert_eq!(lp[0].init_text.as_deref(), Some("0"));
+        let find = |lhs: &str, rhs_frag: &str| {
+            m.nodes
+                .values()
+                .find(|n| {
+                    n.lhs.as_deref() == Some(lhs)
+                        && n.rhs.as_deref().is_some_and(|r| r.contains(rhs_frag))
+                })
+                .unwrap_or_else(|| panic!("node {lhs} = …{rhs_frag}…"))
+        };
+        let step = find("cid", "cid + 1'b1");
+        let copy = find("copy_o[i]", "ok_i[i] & bmiss_i");
+        let model = CostModel::default();
+        // `cid + 1'b1` is a 5-bit incrementer (Compare class, log2-scaled);
+        // an arithmetic self-accumulate stays serial in the mapped netlist
+        // (scoreboard range walk: 32 steps, 144 cells, 14.7 ns), so the chain
+        // is 32 copies. The mask write it feeds is one copy and inherits the
+        // chain through the def-use path.
+        let one = model.scaled_fo4(OperatorClass::Compare, Some(5));
+        assert!(
+            (step.fo4_cost - 32.0 * one).abs() < 1e-6,
+            "arithmetic loop-carried step must cost trips × body: {} vs {}",
+            step.fo4_cost,
+            32.0 * one
+        );
+        // A bitwise self-accumulate is a balanced tree: log2(32) = 5 copies.
+        let text_or = concat!(
+            "module m3 (input logic [31:0] hit_i, output logic any_o);
+",
+            "  always_comb begin
+",
+            "    any_o = 1'b0;
+",
+            "    for (int unsigned k = 0; k < 32; k++) any_o = any_o | hit_i[k];
+",
+            "  end
+",
+            "endmodule
+",
+        );
+        let out3 = analyze_inline_source(text_or);
+        let m3 = out3.design.modules.values().next().unwrap();
+        let acc = m3
+            .nodes
+            .values()
+            .find(|n| n.rhs.as_deref() == Some("any_o | hit_i[k]"))
+            .expect("or accumulate");
+        assert!(
+            (acc.fo4_cost - 5.0 * model.logic_bit).abs() < 1e-6,
+            "{}",
+            acc.fo4_cost
+        );
+        // A non-associative loop-carried update (a priority mux chain) stays
+        // serial: trips × body. (`if (cond) x = const` carries its cost in the
+        // condition, which this model does not yet bill — see AGENTS-todo.)
+        let text2 = concat!(
+            "module m2 (input logic [31:0] hit_i, output logic [4:0] idx_o);
+",
+            "  always_comb begin
+",
+            "    idx_o = '0;
+",
+            "    for (int unsigned k = 0; k < 32; k++) idx_o = hit_i[k] ? 5'(k) : idx_o;
+",
+            "  end
+",
+            "endmodule
+",
+        );
+        let out2 = analyze_inline_source(text2);
+        let m2 = out2.design.modules.values().next().unwrap();
+        let pick = m2
+            .nodes
+            .values()
+            .find(|n| n.rhs.as_deref().is_some_and(|r| r.contains("hit_i[k] ?")))
+            .expect("priority pick inside the loop");
+        assert!(
+            (pick.fo4_cost - 32.0 * model.mux).abs() < 1e-6,
+            "serial priority chain must cost trips × mux: {}",
+            pick.fo4_cost
+        );
+        assert!(
+            (copy.fo4_cost - model.logic_bit).abs() < 1e-6,
+            "a body node that only reads the loop var is one copy: {}",
+            copy.fo4_cost
+        );
+    }
+
     #[test]
     fn procedural_loop_scope_survives_macro_expansion_before_loop() {
         let source = concat!(
@@ -3021,7 +3165,11 @@ mod tests {
             .find(|n| n.rhs.as_deref() == Some("a + k"))
             .unwrap();
         assert_eq!(m.genvar_names_at(&inside.loc), vec!["k"]);
-        assert_eq!(inside.fo4_cost, CostModel::default().compare, "incrementer class");
+        assert_eq!(
+            inside.fo4_cost,
+            CostModel::default().compare,
+            "incrementer class"
+        );
     }
 
     #[test]

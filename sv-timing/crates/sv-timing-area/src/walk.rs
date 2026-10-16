@@ -1890,6 +1890,9 @@ mod tests {
             label: None,
             loc: loc(),
             body_assign_count: 1,
+            procedural: false,
+            init_text: None,
+            cond_text: None,
         });
         parent.nodes.insert(1, node(1, add_expr()));
         design.modules.insert(0, parent);

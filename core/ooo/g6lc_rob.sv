@@ -55,6 +55,12 @@ module g6lc_rob #(
   rob_slot_t [ROB_ENTRIES-1:0] rob_q, rob_d;
   logic [ROB_W-1:0] head_q, head_d, tail_q, tail_d;
   logic [ROB_W:0]   count_q, count_d;
+  // Free-by-tid hit vectors per retire port and the head re-anchor scratch
+  // (driven only in the always_comb below; module-scope so every frontend
+  // scopes them the same way).
+  logic [NR_RETIRE-1:0][ROB_ENTRIES-1:0] free_hit;
+  logic [ROB_ENTRIES-1:0] rean_stop, rean_first;
+  logic [ROB_W-1:0]       rean_dist, rean_steps;
 
   assign full_o = (count_q > ROB_ENTRIES[ROB_W:0] - NR_ALLOC[ROB_W:0]);
   assign empty_o = (count_q == '0);
@@ -123,19 +129,45 @@ module g6lc_rob #(
     // T6b-4b: free by transaction id — under per-hart commit heads commit
     // order across harts need not match dispatch order; a positional head+r
     // free would evict the wrong slot and leak the acked one.
+    //
+    // Timing (sv-timing A99): the count is decremented by the popcount of
+    // each port's hit vector, not once per matching slot inside the slot
+    // loop — that form is a NR_RETIRE x ROB_ENTRIES chain of conditional
+    // decrements synthesis keeps serial (structural 63 FO4 at 2 x 32). Port
+    // r's hits are taken on the state port r-1 left, so two ports naming
+    // the same tid still free one slot and count one, as before.
+    free_hit = '0;
     for (int unsigned r = 0; r < NR_RETIRE; r++) begin
       if (retire_ack_i[r]) begin
         for (int unsigned i = 0; i < ROB_ENTRIES; i++) begin
-          if (rob_d[i].valid && (rob_d[i].tid == retire_tid_i[r])) begin
-            rob_d[i].valid = 1'b0;
-            count_d        = count_d - 1'b1;
-          end
+          free_hit[r][i] = rob_d[i].valid && (rob_d[i].tid == retire_tid_i[r]);
+        end
+        for (int unsigned i = 0; i < ROB_ENTRIES; i++) begin
+          if (free_hit[r][i]) rob_d[i].valid = 1'b0;
         end
       end
+      count_d = count_d - (ROB_W + 1)'($countones(free_hit[r]));
     end
-    // Re-anchor the report-only head on the oldest remaining entry.
-    for (int unsigned i = 0; i < ROB_ENTRIES; i++)
-      if ((head_d != tail_d) && !rob_d[head_d].valid) head_d = head_d + 1'b1;
+    // Re-anchor the report-only head on the oldest remaining entry: advance
+    // past the run of freed slots starting at head, never past tail. The
+    // step-until-valid walk (dynamic index per step) is the same chain shape;
+    // the run length is one find-first over the valid vector rotated to head,
+    // stopped at tail (`stop` marks the first valid slot or the tail itself,
+    // so an empty ring yields zero steps). Exact for ROB_ENTRIES == 2**ROB_W.
+    // Both rewrites: whole-module sequential miter against the pre-change
+    // RTL (Yosys SAT, 6 steps from reset) at ROB_ENTRIES = 4 and 8.
+    rean_dist  = tail_d - head_d;
+    rean_steps = '0;
+    for (int unsigned j = 0; j < ROB_ENTRIES; j++) begin
+      rean_stop[j] = rob_d[ROB_W'(head_d + ROB_W'(j))].valid || (ROB_W'(j) == rean_dist);
+    end
+    // `rean_stop` is never empty (j == dist always stops); isolate its lowest
+    // set bit and encode it — a find-first without a priority chain.
+    rean_first = rean_stop & (~rean_stop + 1'b1);
+    for (int unsigned j = 0; j < ROB_ENTRIES; j++) begin
+      if (rean_first[j]) rean_steps = rean_steps | ROB_W'(j);
+    end
+    head_d = head_d + rean_steps;
 `endif
     if (flush_i) begin
       rob_d   = '0;

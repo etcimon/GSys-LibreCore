@@ -545,6 +545,17 @@ pub struct GenerateLoop {
     pub loc: SourceLoc,
     /// Continuous assigns / statements counted inside (timing density hint).
     pub body_assign_count: u32,
+    /// Procedural `for (int …)` inside an always block (unrolled by synthesis),
+    /// as opposed to a `generate` loop.
+    #[serde(default)]
+    pub procedural: bool,
+    /// Procedural loop header: initial value text (`0`) and condition text
+    /// (`k < CVA6Cfg.NR_SB_ENTRIES`), for the trip count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub init_text: Option<String>,
+    /// See `init_text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cond_text: Option<String>,
 }
 
 /// Named port connection on a module instance (formal ↔ actual).

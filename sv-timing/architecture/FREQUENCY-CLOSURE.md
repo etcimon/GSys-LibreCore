@@ -2,7 +2,18 @@
 
 Structural (not STA) frequency closure for the precompiler loop.
 
-## Current campaign (2026-10-16, delay-v34, planner reaches plain cones)
+## Current campaign (2026-10-16, delay-v35, loop-carried chains)
+
+Latest: the fanout-insensitive whole-core mapped report (A97/A98) showed the
+netlist's worst path is a 436-cell loop-carried chain through
+`scoreboard`/`g6lc_rob` that the structural model billed as one iteration.
+delay-v35 bills procedural loop-carried accumulators by trip count; the two
+production walks (scoreboard younger-cancel window, ROB free/re-anchor) are
+rewritten exactly (A98/A99; fixture 14.7 ns → 0.78 ns) and the live board is
+back to worst **23.0** (`frontend speculative_d`), 160/1377 reg-to-reg
+failing, with scoreboard 13.6 and rob 11.3.
+
+### Earlier on 2026-10-16 (delay-v34, planner reaches plain cones)
 
 Latest: with `||`/`&&` parsed correctly (delay-v34), the reduction fold, and
 the planner fixes (A95–A96), the emitted latency-neutral tree reports worst
