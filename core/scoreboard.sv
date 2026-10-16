@@ -184,11 +184,21 @@ module scoreboard #(
     assign sb_live_o[i] = mem_q[i].issued;
   end
 
+  // Issued count as a register (sv-timing A106): the popcount over the 32
+  // `issued` flags fed the free count, the full flags and the issue enable
+  // — the netlist's worst scoreboard path (`sb_full_o` on the way to
+  // `mem_q`'s next state). `issued` is set only by an issue, cleared only
+  // by a commit ack or a flush, so the count advances by the issues minus
+  // the acks and clears on flush; the popcount equality is asserted in
+  // simulation. The register is reset and flushed with the entries.
+  logic [$clog2(CVA6Cfg.NR_SB_ENTRIES+1)-1:0] sb_issued_cnt_q, sb_issued_cnt_d;
+  logic [$clog2(CVA6Cfg.NR_SB_ENTRIES+1)-1:0] sb_issued_popcnt;
   always_comb begin
-    sb_issued_cnt = '0;
+    sb_issued_popcnt = '0;
     for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
-      if (mem_q[i].issued) sb_issued_cnt += 1'b1;
+      if (mem_q[i].issued) sb_issued_popcnt += 1'b1;
     end
+    sb_issued_cnt = sb_issued_cnt_q;
 `ifdef G6LC_MUT_SB_POPCOUNT_FREE
     // MUTANT: restore the popcount free count under MIXED — a committed hole
     // inside the live window then reads as allocatable space and dispatch
@@ -220,6 +230,17 @@ module scoreboard #(
 
   assign sb_full_o = issue_full[0];
   assign sb_empty_o = sb_issued_cnt == '0;
+
+  assign sb_issued_cnt_d = flush_i ? '0
+                         : sb_issued_cnt_q + $clog2(CVA6Cfg.NR_SB_ENTRIES+1)'(num_issue)
+                                           - $clog2(CVA6Cfg.NR_SB_ENTRIES+1)'(num_commit);
+  //pragma translate_off
+  always_ff @(posedge clk_i) begin
+    if (rst_ni)
+      sb_issued_cnt_is_popcount: assert (sb_issued_cnt_q == sb_issued_popcnt)
+        else $error("scoreboard: issued count %0d != popcount %0d", sb_issued_cnt_q, sb_issued_popcnt);
+  end
+  //pragma translate_on
 
   // T6b: per-hart oldest live instruction. commit_pointer_q[0] is the oldest
   // live slot, so the first issued entry each hart owns in ring order from it
@@ -857,8 +878,10 @@ module scoreboard #(
       mem_q            <= '{default: sb_mem_t'(0)};
       commit_pointer_q <= '0;
       issue_pointer_q  <= '0;
+      sb_issued_cnt_q  <= '0;
     end else begin
       issue_pointer_q <= issue_pointer_n;
+      sb_issued_cnt_q <= sb_issued_cnt_d;
       mem_q <= mem_n;
       mem_q[x_id_i].sbe.rd <= (x_transaction_accepted_i && ~x_issue_writeback_i) ? 5'b0 : mem_n[x_id_i].sbe.rd;
       commit_pointer_q <= commit_pointer_n;
