@@ -1740,10 +1740,21 @@ prerequisite for this work under the existing dual license. No licensing policy 
   Discriminator in flight: `l1s1u` — the same model with `cpu@1`
   `status = "disabled"` in the DT (`q-linux-payload.sh ONE_HART=1`), so
   OpenSBI parks hart 1 and Linux is single-hart on the HPDCACHE package,
-  with the live oracle attached (`+rvfi_cycle_stamp`). Pass → the defect
-  needs the second hart (SMT interaction); fail → the oracle names the
-  load on the HPDCACHE single core. The 4-core `l1r4` (t38, `maxcpus=1`
-  but 8 cpu nodes) runs in parallel.
+  with the live oracle attached (`+rvfi_cycle_stamp`). **Result: pass —
+  single-hart Linux on the HPDCACHE package runs through `eventpoll_init`
+  and on to `Unpacking initramfs` (1.45 s guest, 124 M cycles) with 0
+  stored-byte mismatches over 96 M retirements** (the 326 `image/zero`
+  entries are the kernel's own text patching through the fixmap alias, as
+  on the ooo). So T39 needs the second hart: the drained handoff itself
+  (restart PC / per-hart CSR state), cross-hart visibility through the
+  commit queue, or the frontend's per-hart state. Data run `l1s1j` (2-hart
+  L1 on t38 server1, both harts' RVFI with cycle stamps kept as zstd,
+  `+smt_sched_trace` 95–110 M, stop at 110 M; ≈ 6 h at 5 k cycles/s): the
+  last hart-0 instructions before the oops name the load that returned
+  the NULL `dir`, and the sched trace says whether a switch sits between
+  the store and the load — the input for a two-hart oracle (merge by
+  cycle stamp). The 4-core `l1r4` (t38, `maxcpus=1` but 8 cpu nodes) is
+  paused (`SIGSTOP`) to leave the host to the verdict runs.
 - [ ] **T37 — L3 on the T36 ooo: `kworker/u2:0` (`async_run_entry_fn`)
   oopses in `__memset` called from `blake2s_final+0x36` with a store page
   fault at `0xffffffc80005c000` — the guard page above the task's VMAP
