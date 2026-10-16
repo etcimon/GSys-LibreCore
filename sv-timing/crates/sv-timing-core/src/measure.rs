@@ -180,8 +180,20 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
             })
             .filter(|(_, gs)| !gs.is_empty())
             .collect();
+        // A guard that evaluates to a constant zero (`if (CVA6Cfg.NrHarts > 1)`
+        // at one hart) is elaboration-time dead code: synthesis removes the
+        // body, and so does the board (delay-v38).
+        let dead_guarded: BTreeSet<NodeId> = module
+            .guards
+            .iter()
+            .filter(|(_, gs)| {
+                gs.iter()
+                    .any(|g| widths.eval_text(g.strip_prefix('^').unwrap_or(g)) == Some(0))
+            })
+            .map(|(id, _)| *id)
+            .collect();
         for node in module.nodes.values_mut() {
-            if dead.contains(&node.id) {
+            if dead.contains(&node.id) || dead_guarded.contains(&node.id) {
                 node.fo4_cost = 0.0;
                 continue;
             }
