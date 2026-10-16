@@ -373,6 +373,17 @@ module wt_dcache_wbuffer
       logic                                          fixup_coalesced, fixup_active_coalesced;
       logic                                          fixup_alloc, fixup_pop, fixup_dead, fixup_active_dead;
       logic                                          fixup_active_valid;
+      // T37: which entry the in-flight tag check / retire belongs to. The active
+      // entry (active_paddr, fixup_wr_*, fixup_inv_*) follows fixup_bypass_valid_q
+      // combinationally, so a push that lands in the bypass slot while the FIFO
+      // head is in CHECK/RETIRE moved the pass onto the bypass word with the
+      // head's hit vector: RETIRE then took the full-queue fallback and
+      // invalidated the HEAD's way at the BYPASS word's index and dropped the
+      // bypass word unwritten -- its line stayed valid and stale in L1 (Linux
+      // blake2s: `sw` 0x5be0cd19 -> h[7], the `lw` 19 cycles later read the old
+      // 0; the inval hit way 6, the line sat in way 3). The pass is restarted
+      // from PEND whenever the selection changes under it.
+      logic                                          fixup_sel_bypass_q, fixup_sel_bypass_d;
 
       function automatic fixup_entry_t merge_fixup(
           input fixup_entry_t prior,
@@ -571,19 +582,28 @@ module wt_dcache_wbuffer
         end
 
         // State machine for the active (head or bypass) entry.
+        fixup_sel_bypass_d = fixup_sel_bypass_q;
         case (fixup_state_q)
           FIXUP_PEND: begin
             if (fixup_active_dead && fixup_bypass_valid_q && !fixup_active_coalesced) begin
               fixup_bypass_valid_d = 1'b0;
             end
             if (fixup_rd_req && rd_ack_i) begin
-              fixup_state_d = FIXUP_CHECK;
+              fixup_state_d      = FIXUP_CHECK;
+              fixup_sel_bypass_d = fixup_bypass_valid_q;
             end
           end
 
           FIXUP_CHECK: begin
             if (fixup_active_dead || !fixup_active_valid) begin
               fixup_state_d = FIXUP_PEND;
+`ifdef G6LC_MUT_FIXUP_SEL_DRIFT
+            end else if (1'b0) begin   // review mutation: the pre-fix shape (pass follows the selection)
+`else
+            end else if (fixup_bypass_valid_q != fixup_sel_bypass_q) begin
+              // T37: the active entry changed under the check -- restart on it
+              fixup_state_d = FIXUP_PEND;
+`endif
             end else if (fixup_check_en_q1) begin
               if (|fixup_hit_oh_q) begin
                 fixup_state_d = FIXUP_RETIRE;
@@ -602,6 +622,13 @@ module wt_dcache_wbuffer
               // Invalidated (or gone) before retire: drop the entry without
               // touching the write/inv ports or PMU pulses.
               fixup_state_d = FIXUP_PEND;
+`ifdef G6LC_MUT_FIXUP_SEL_DRIFT
+            end else if (1'b0) begin
+`else
+            end else if (fixup_bypass_valid_q != fixup_sel_bypass_q) begin
+              // T37: the hit vector belongs to the other entry -- restart
+              fixup_state_d = FIXUP_PEND;
+`endif
             end else if (fixup_bypass_valid_q) begin
               // Full-queue fallback: a tag hit must become an explicit
               // invalidation of the hit way.
@@ -635,12 +662,14 @@ module wt_dcache_wbuffer
           fixup_tail            <= '0;
           fixup_cnt             <= '0;
           fixup_bypass_valid_q  <= 1'b0;
+          fixup_sel_bypass_q    <= 1'b0;
           refill_hit_q          <= 1'b0;
         end else begin
           fixup_q               <= fixup_d;
           fixup_bypass_q        <= fixup_bypass_d;
           fixup_state_q         <= fixup_state_d;
           fixup_bypass_valid_q  <= fixup_bypass_valid_d;
+          fixup_sel_bypass_q    <= fixup_sel_bypass_d;
           refill_hit_q          <= refill_hit_d;
 
           // Head/tail and count management.  A push into the FIFO increments
