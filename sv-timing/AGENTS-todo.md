@@ -148,8 +148,12 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   runtime index depth, dead loops; g6lc_iq select/alloc edits (netlist
   6.21 → 4.40 ns at 46–47 cells: the wake/count cone is the deepest now).
 - [x] A105: iq count as a delta (asserted invariant); frontend target /
-  link add as `base + off + imm` (realigner exposes base/off); linear-
-  update function loops cost once. Whole core elaborates.
+  link add as `base + off + imm` (realigner exposes base/off); csr guest
+  time registered before the VS timer compare; scoreboard commit pointer
+  as a selected increment bank (A88); linear-update function loops cost
+  once; emit: all-or-nothing RHS rewrites per record, loop header vars
+  block-local. Whole core elaborates. Live board 55.0 worst (iq dense
+  class / 47 cells), 689 of 1625 reg→reg.
 - [ ] A105 next: netlist evidence for A105 (live remap + module board);
   scoreboard `mem_n` write-site chain (54 cells, under-read 15.6 — the
   board's trace names only yosys internals; map the module with RTL

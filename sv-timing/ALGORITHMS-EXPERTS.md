@@ -7803,15 +7803,39 @@ invariant, each latency-neutral:
    invariant `count_q == $countones(valid)` holds from reset and is
    asserted in simulation (`ooo_iq_count_is_popcount`).
 
-Both elaborate in the whole core (slang, remote). Their netlist evidence is
-the next live remap; the structural board cannot show them (the frontend
-worst there is still the `accepted_target` function cost, the iq worst the
-dense-cone class), which is itself the point: at this depth the board ranks
+3. **CSR guest time registered before the VS timer compare.**
+   `vstimecmp_hit_d = (rtc_time_i + htimedelta_q) >= vstimecmp_q` was a
+   64-bit add and a 64-bit compare in one cycle (16.8, the csr board
+   worst). The guest time is registered and compared a cycle later; the
+   hit was already registered and the RTC ticks far below the core clock,
+   so the extra core cycle is invisible to the timer contract. (The
+   algebraic alternative `rtc >= vstimecmp − htimedelta` is **not** exact:
+   the architectural sum wraps modulo 2^64 — `a = 0, d = 2, c = 1`
+   separates them.)
+4. **Scoreboard commit pointer as a selected increment bank** (A88 in
+   production): `cp + num_commit + k` (popcount → adder → flush mux) is a
+   bank of `cp + c` incrementers, c = k..k+NrCommitPorts, selected by the
+   ack count — SAT-exact, mapped 0.247 → 0.169 ns at 5 bits.
+
+All four elaborate in the whole core (slang, remote). Their netlist
+evidence is the next live remap; the structural board can show only the
+csr one (16.8 → 14.5, the next csr cone) — at this depth the board ranks
 and the netlist decides.
 
 Model: a function loop that is a linear update (a flag set under a guard,
 an OR/XOR accumulate) costs its body once plus a gate per tree level — the
-eight 64-bit compares of a window hit test run side by side.
+eight 64-bit compares of a window hit test run side by side; `frontend`
+70.5 → 47.0 against 43 cells. Live board under delay-v38 with A105:
+**worst 55.0 (`g6lc_iq`, the dense-cone class of the dispatch block; 47
+cells), 1247 failing primary, 689 of 1625 reg→reg**; calibration ratios
+of the real cones 0.9–1.7 cells/FO4 (iq 0.9, frontend 0.9, store_buffer
+1.3, rename 1.7, realign 0.9, wbuffer 1.1).
+
+Emit (same round): origin RHS rewrites are all-or-nothing per record (a
+first rewrite that cannot land — an `if (c) x = y;` one-liner, a generate
+line — while an extra does left the extra reading an undeclared `_top`,
+and the emitted tree failed elaboration), and `for (int p …)` header
+variables are block-local, so a hoisted cut feed never reads them.
 
 ## A90 — Incrementers are not gates (delay-v32)
 
