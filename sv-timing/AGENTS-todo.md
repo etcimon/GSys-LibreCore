@@ -108,8 +108,13 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   membership vector; per-port hit popcount + find-first re-anchor). Fixture:
   walk 14.7 ns / 144 cells → 0.78 ns / 12 cells (Nangate45). SAT: scoreboard
   window N = 4/8/16 exhaustive, ROB whole-module 6-step at 4 entries; the
-  32-entry window and 8-entry ROB miters run with a time budget on the
-  builder. Live board back to 23.0 (frontend), 435 failing.
+  8-entry ROB miter exceeded its 40-minute budget (inconclusive), the
+  32-entry window miter runs with a 3.9 h budget on the builder
+  (`/opt/testharness/work/svt-prefix-20261015/sbwin/sat32.log`). Live board
+  back to 23.0 (frontend), 435 failing; emitted 20.0, 394 failing.
+- [ ] ROB rewrite (A99) needs a leaf beyond the 4-entry proof: a bounded
+  miter at 8 entries with k-induction, or a directed `tb_g6lc_rob` free/
+  re-anchor test with the pre-change RTL as the reference model.
 - [ ] Buffer the mapped netlist before STA: OpenROAD `repair_design` on the
   top modules' netlists (or placed whole core); then anchor the structural
   model on the mapped per-module numbers.

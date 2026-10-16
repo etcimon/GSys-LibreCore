@@ -7318,7 +7318,8 @@ j] || (j == tail − head)`, isolates the lowest set bit (`stop & (~stop + 1)`,
 never empty) and OR-encodes it — a find-first without a priority chain.
 Exact for `ROB_ENTRIES == 2**ROB_W`. Proof: **whole-module sequential miter**
 of the pre-change RTL against the new one (Yosys SAT, 6 steps from reset) at
-`ROB_ENTRIES = 4`; the 8-entry miter runs with a time budget. Structural
+`ROB_ENTRIES = 4`; the 8-entry miter (304 k variables) exceeded a 40-minute
+budget — inconclusive, not a counterexample. Structural
 63.2 → 11.3. The whole core elaborates with both edits (slang, remote).
 
 Host: `openroad-timing.tcl` gained `OR_IGNORE_FANOUT_ABOVE=N` — the flat

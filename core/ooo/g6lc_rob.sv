@@ -155,7 +155,8 @@ module g6lc_rob #(
     // stopped at tail (`stop` marks the first valid slot or the tail itself,
     // so an empty ring yields zero steps). Exact for ROB_ENTRIES == 2**ROB_W.
     // Both rewrites: whole-module sequential miter against the pre-change
-    // RTL (Yosys SAT, 6 steps from reset) at ROB_ENTRIES = 4 and 8.
+    // RTL (Yosys SAT, 6 steps from reset) proved at ROB_ENTRIES = 4; the
+    // 8-entry miter (304 k variables) exceeded a 40-minute budget.
     rean_dist  = tail_d - head_d;
     rean_steps = '0;
     for (int unsigned j = 0; j < ROB_ENTRIES; j++) begin
