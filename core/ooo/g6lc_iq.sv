@@ -389,7 +389,14 @@ module g6lc_iq
       end
     end
     disp_ack_o = '0;
-    free = ~valid_after;
+    // Dispatch allocates among the slots that were free at the start of the
+    // cycle (sv-timing A106): a slot an issue frees this cycle becomes
+    // allocatable next cycle. This takes the whole wake -> select -> ack
+    // cone off the dispatch chain (the netlist's deepest path through the
+    // module); `full_o` already counts from the registered state, and the
+    // age matrix still ranks the newcomer against `valid_after`.
+    free = '0;
+    for (int unsigned e = 0; e < DEPTH; e++) free[e] = !q_q[e].valid;
     alloc = '0;
     alloc_slot = '0;
     slot = 0;
