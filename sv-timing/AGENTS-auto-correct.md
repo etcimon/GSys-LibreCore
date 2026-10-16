@@ -30,6 +30,28 @@
     `always_comb` density; more aggressive sets (InsertReg, multi-cut) score
     less clean. The winner’s \(C\) is the module’s final cleanliness.
 
+## Transform catalog (as built, 2026-10-16) — exactness and area
+
+Planner order within a pass is latency-neutral first; it is also the area
+order (ALGORITHMS-EXPERTS A102). Every structural rewrite is emitted into the
+origin file; a transform that cannot emit safely stays **credit-only** and
+the trace says so.
+
+| Transform | Kind | Shape | Exactness | Area | Evidence |
+|---|---|---|---|---|---|
+| `LoopRewrite` (A101/A103) | latency-neutral, ranked first with `SelectIncrement` | serial `for` walks: **FindFirst** (`if (v[i] && pick == 0) pick = i`, flag form), **CondCount** (`if (c) cnt = cnt + 1`), **RingWalk** (`cid = a; … if (cid == b) break; … cid++`), **StreamCompact** (`if (keep) { out[dst] = f(k); dst++ }`) → lowest-set-bit / `$countones` / interval membership / prefix popcounts + one-hot gather | exact under the shape's conditions (`fixtures/auto_correct/{loop_walks,stream_compact,find_first_equiv}.sv`; SAT at 16/32 bits, sequential miter N = 8); loops in functions/generate blocks skipped | **negative** (fixture −90 %; compaction −4.5 % at N = 8) | A101 fixture 14.5 → 0.91 ns mapped |
+| `SelectIncrement` (A88/A91) | latency-neutral | `LHS = REG + step` (k ≤ 4 step bits) → `2^k` precomputed increments + one select; the runtime index mux is billed (delay-v33) | exact (SAT 12-step from reset) | **positive, bounded** (`MAX_CANDIDATE_BITS` 512; ≈ +3 % of `instr_queue`) | slack 0.055 → 0.073 ns at 1 ns |
+| `BalanceMux` (one-hot tree / hot-arm staging) | latency-neutral | exclusive `case` arms → AND-OR tree over the 16 deepest safe arms; **the tree's arm set and the rewritten labels are one set** (`onehot_usable_arms`); once per origin | exact under `unique case` | neutral to negative (alu `result_o`) | A102 |
+| `RebalanceAssoc` | latency-neutral | reassociation, `\|a \|\| \|b \|\| \|c` → `\|{a,b,c}` (delay-v34) | exact | neutral | emitted RHS, reparse |
+| `SplitAssign` | latency-neutral | split one assign into two nets | exact | neutral | |
+| `InsertReg` (`--allow-latency`) | **changes latency** (S4, last) | register cut at the cost-chosen site; feed and origin are **one decision** (`cut_assigns_from_source`: a cut whose feed cannot be real keeps its origin; a feed reading a peer cut's LHS is real); enum/struct LHS samples through `type(lhs)'(…)` | protocol change — study only; validated by the host's `--allow-over-budget` label | **positive** (flops: 10–30 % of a small module for a 64-bit cut) | A102 |
+
+Measurement truths the transforms depend on (versioned `MEASUREMENT_VERSION`,
+`crates/sv-timing-core/src/version.rs`): delay-v29 widths, v31 N-operand
+sums, v32 incrementers, v33 runtime index mux, v34 `\|\|`, v35 loop-carried
+trips, v36 find-first guards, **v37 guards as reads + mux, field-granular
+index-aware carry**. A version bump invalidates cached measurements.
+
 ## Pass loop (copy for PR descriptions)
 
 ```text

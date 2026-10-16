@@ -88,7 +88,8 @@ so an unpatched tool cannot pass silently.
 | `build` | `--iss` · `--elf` · `--force` · `--from-timing` · `--use-emit` | Makefile verilate / sim-verilator + incremental manifests |
 | `test` | `<id…>` · `--suite` · `--group` · `--all` · `--open-source` · `--list` · `--ai` · `--ai-remote` · `--ai-qemu` · `--channels N` · `--ai-dram 0\|1` · `--from-timing` · `--use-emit` | `verif/regress` suites (preflight skips missing tools) |
 | `verify` | `--lint` · `--formal` · `--sim` · `--synth` · `--target` · `--qualification smt2-cookie\|perf-foundation` · `--ai` · `--ai-overlay [--ai-overlay-int]` · `--remote` · `--allow-skips` · `--from-timing` · `--use-emit` · `--json` | AGENTS.md §0.2 multi-stage gate |
-| `timings` | `status\|doctor\|flist\|compile\|analyze\|area\|correct\|validate\|summary\|dashboard\|sta-handoff\|correlate\|fo4-golden\|retune-propose\|parse-bench-log\|lab-run` · `-o` · `--from-timing` | sv-timing host adapter; **doctor** = readiness + FO4 retune checklist; **lab-run** = offline S0 report |
+| `timings` | `status\|doctor\|flist\|compile\|analyze\|area\|correct\|validate\|summary\|dashboard\|sta-handoff\|sta-rtl\|correlate\|fo4-golden\|retune-propose\|parse-bench-log\|lab-run` · `-o` · `--from-timing` · `--budget-fo4 N\|--fo4 N` · `sta-rtl`: `--target --platform\|--liberty --remote --map-recipe --allow-over-budget --svt-args --no-sram-stub --rebuild-openroad` | sv-timing host adapter; **doctor** = readiness + FO4 retune checklist; **lab-run** = offline S0 report; **sta-rtl** = the integrated structural→gate-level route (§7.1) |
+| `tools install openroad` / profile `timing` | `toolchain.openroad.{flavour,march,pgo,jobs,threads,cmakeArgs}` | Managed `tools/openroad` fork (submodule init of `src/sta` + `third-party/abc`, `-march`, PGO) into `workspace/tooling/openroad-g6lc` (`openroad` + `sta`); WSL on Windows |
 | `tensor` | `status\|doctor\|probe\|test\|golden\|cosim\|queue-soak\|rtl\|rtl-hard\|virt-card\|frameworks\|pytorch\|virt-impl\|regress\|check` · `--board` · `--core` · `--impl soft\|hard\|full` · `--suite` · `--backend sim\|mmio\|virt-card` | Spawn-only adapter for `ai-tensor/` |
 | `remote` | `[--remote-ssh <host>] [--ai] [--channels N] <proxy-subcommand> …` | Gateway to `verif/regress/remote/testharness_proxy.py` (SSH + rsync + Verilator); pulls land in `remote-runs/<tag>/` |
 | `g6q` | `[--remote] [--ai] [--from-timing DIR] <subcommand> …` | Gateway to `g6lc_qemu/tools/g6q.py` (`--remote` → `g6q_remote.py`) |
@@ -341,11 +342,43 @@ Maps: `AGENTS-specs-to-impl.md` · `AGENTS-specs-to-tests.md` · `AGENTS-specs-c
 | Managed `openroad` recipe (tools/openroad fork, submodule init, `-march`, PGO) + `sta-rtl` local/remote | done |
 | doctor / lab-run / lab-report / CI asserts | done |
 
+### 7.1 The integrated route — `timings sta-rtl` (structural → gate-level, one command)
+
+```bash
+./build.sh timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --allow-over-budget --remote --map-recipe streamed
+```
+
+One command, three labelled stages (`tooling/rtlTiming.ts`); every stage reports
+PASS / FAIL / SKIP / STUDY and the host classifies from `RESULT`/`STA_RESULT`
+lines, never from an exit code:
+
+| Stage | What runs | Produces |
+|---|---|---|
+| **s0-svt-correct** | sv-timing `correct --all-modules --allow-latency --emit` on the target's portable flist at the budget (`--fo4 N` → the clock sv-timing derives: 10 FO4 = 4000 MHz at `fo4Ps` 20, margin 0.2); the cfg snapshot (`svt/cfg-snapshot.json`, 222 elaborated `CVA6Cfg` fields) is merged into `svt/param-map.json`; `--width-map` is passed only while `svt/width-map.json` carries the current sources' hash | `workspace/build/sta-rtl/<target>/svt/{portable.f, correct.json, corrected/, svt_corrected.f}`; the completion gate: a budget **MISS stops before mapping** unless `--allow-over-budget` (result labelled **STUDY**) |
+| **s1-yosys-map** | Yosys (managed formal build) on the live tree or the emitted overlay (`emitFlist`), `tc_sram` replaced by the registered macro stub unless `--no-sram-stub`; `--map-recipe lean` (default), `hierarchical`, `synth`, or **`streamed`** (remote: phase A word-level RTLIL + module list + `width-map.json`; phase B one yosys per module in parallel, delay-oriented ABC `&st; &dch -f; &nf -D <period>` then plain then `-fast` under `timeout`, resume cache keyed on the module RTLIL's sha256) | `netlist.v`, `mapped/*.v`, `maplog/*.log`, `SYNTH_STREAM_FALLBACK plain= fast= cached= fail=`; pulls `svt/width-map.json` (`s1-width-map`) |
+| **s2-openroad-sta** | the fork's `sta` (liberty-only link; `openroad` needs `OR_LEF`) runs `scripts/openroad-timing.tcl` against the generated SDC (`--clock-port`, default `clk_i`, at `--target-mhz`, default `soc.targetFrequencyMHz`; I/O delays 20 % of the period) | `reports/paths-{max,min}.rpt`, `summary.txt`, `STA_RESULT top= wns_max= tns_max= wns_min= tns_min= ignored_fanout_drivers=` |
+
+**Flags and config** — `--fo4 N|--budget-fo4 N` (default `physicalDesign.structural.fo4Budget` 10; `--fo4 0` = live RTL), `--from-timing <pkg>` (reuse an emit), `--svt-args "…"` (raw sv-timing dials appended to `physicalDesign.structural.svtArgs` = `--opt-max-stages-per-region 13 --real-cut-feeds --assume-clk`; do not repeat a dial the config already sets), `--allow-over-budget` / `physicalDesign.structural.allowOverBudget`, `--platform nangate45|sky130hd|sky130hs` (study liberty from the fork's `test/`; `--liberty`, `physicalDesign.pdk.liberty`, `CVA6_LIBERTY` win), `--remote` (proxy `sync` + one script on the builder; builds the fork there when absent — `toolchain.openroad.{march,pgo,jobs}`, `nproc` threads; `--rebuild-openroad` forces), `--threads` / `toolchain.openroad.threads` (0 = every core → `set_thread_count`).
+
+**Environment knobs of the Tcl** — `OR_THREADS`, `OR_REPORT_DIR`, `OR_LEF`, and `OR_IGNORE_FANOUT_ABOVE=N` (disable the leaf drivers of nets with more than N flat loads: a **labelled logic-depth study** of an unbuffered netlist, never sign-off — the whole-core `wns` is broadcast fanout until `repair_design`).
+
+**Per-module study scripts** (on a streamed run's artifacts):
+
+| Script | Purpose | Output |
+|---|---|---|
+| `scripts/openroad-module-board.tcl` | one `sta` per `mapped/*.v`, children black-boxed, inputs ideal, broadcast drivers > 64 loads disabled; the worst register-to-register path per module | `module-board.tsv`: `module instances clock worst_reg2reg_ns cells_on_path startpoint endpoint worst_any_ns broadcast_drivers_disabled start_net end_net trace` — **cells** is the depth metric that survives the fanout model; `end_net`/`trace` name RTL registers and nets |
+| `scripts/sta_module_delta.py <run_a> <run_b>` | per-module area (yosys `stat -liberty`) and board delta between two runs, largest area increase first | TSV + `TOTAL`/`SUMMARY` lines (the performance/area question of ALGORITHMS-EXPERTS A102) |
+
+**Reading the numbers** (ALGORITHMS-EXPERTS A97–A103): structural FO4 is screening; a streamed study netlist is unplaced and unbuffered; identical RTLIL maps to ±1 % area / ±6 cells across runs (autoidx-dependent ABC order) — compare whole-tree totals and cell counts, not single ns; `STUDY` means the budget was missed and mapping was requested anyway; `INCONCLUSIVE` means no complete validated emitted analysis. Current state of record: `sv-timing/architecture/FREQUENCY-CLOSURE.md`.
+
 ### Still open (lab PD or residual)
 
 1. **S3b-lab (package edit)** — retune `sv-timing` FO4 table from **real** STA using `retune-proposal.md`
    (host propose + fixture guard done; gate `s9-lab-gate`). The real STA is now one command
-   away: `timings sta-rtl --target <cfg> --platform nangate45 [--remote]` (study liberty).
+   away: `timings sta-rtl --target <cfg> --platform nangate45 [--remote]` (study liberty,
+   §7.1). The structural model is now calibrated against the per-module netlist
+   (ALGORITHMS-EXPERTS A103, delay-v37); the retune of `fo4-v1` from that
+   calibration is the next S3b-lab step.
 2. **S4b OpenROAD + LEF** — open-PDK/NDA tech under `pd/pdk/` (scaffold already); the fork
    binary and its `test/<platform>` LEF/lib sets are installed, the floorplan step still needs
    a real die/LEF plan.

@@ -2,7 +2,48 @@
 
 Structural (not STA) frequency closure for the precompiler loop.
 
-## Current campaign (2026-10-16, delay-v35, loop-carried chains)
+## Current campaign (2026-10-16, delay-v37, guards — the board sees the OoO cones)
+
+Latest: the per-module mapped board (A100) calibrated the structural model
+module by module and found it blind where the OoO depth is — `g6lc_iq` and
+`g6lc_lsq` had no register-to-register path at all (0.0 FO4 against 47 and
+13 mapped cells), `scoreboard`/`rename`/`store_buffer` read 3–5× fewer FO4
+than cells — because the lowerer never represented the `if` an assignment
+sits under nor the index of a dynamically indexed LHS. delay-v37 records
+both as the node's guards (reads + a mux), with field-granular, index-aware
+loop carry (A103). Live `g6lc64_ooo` at 10 FO4 / 20 ps:
+
+| | worst reg→reg | failing primary / reg→reg |
+|---|---|---|
+| delay-v36 (blind) | 23.0 `frontend speculative_d` | 435 / 160 of 1377 |
+| **delay-v37 (truth)** | **38.5 `store_buffer` cancel squash** | **1204 / 673 of 1628** |
+
+Calibration (structural FO4 / mapped cells): iq 16.5 / 47, store_buffer
+38.5 / 49, wbuffer 18.6 / 21, instr_queue 17.0 / 16, instr_realign 26 / 23,
+frontend 23 / 43, rename 19 / 52, scoreboard 15.6 / 54, perf_counters 34.7 /
+13 — within ±30 % where the board used to be blind; rename/scoreboard still
+under-read (dynamic struct-array reads behind rotated indices),
+perf_counters/TLBs over-read (dense control cones).
+
+The emitted −O3 allow-latency tree (A102) maps end to end: total area
++0.35 % (flops of InsertReg where it rises: branch_unit +29 %, alu +12–15 %,
+missunit +12 %; one-hot BalanceMux neutral, LoopRewrite negative); depth
+bought on the module board (scoreboard 5.16 → 3.98 ns, frontend 43 → 37
+cells, csr 2.02 → 1.36 ns). Three logic-dropping emit defects were found by
+that area delta and fixed with tests (zero-fed stage + rewritten origin;
+one-hot tree labels ≠ arms; stale width map).
+
+What stands between the board and 10 FO4 is now legible and ranked: the
+OoO *control* cones — iq select (47 cells), store_buffer squash (49), rename
+allocation (52), scoreboard commit select (54), frontend branch-target add
+(43) — then the single-cycle 64-bit add/compare wall. Those are
+microarchitecture (precomputed selects, one-cycle-later counts, stationary
+queues), not latency-neutral rewrites; the automatic toolbox (BalanceMux,
+RebalanceAssoc, SelectIncrement, LoopRewrite with FindFirst / CondCount /
+RingWalk / StreamCompact) is exact and area-neutral-or-better, and the
+planner's latency-neutral-first order is also the area order.
+
+### Earlier on 2026-10-16 (delay-v35, loop-carried chains)
 
 Latest: the fanout-insensitive whole-core mapped report (A97/A98) showed the
 netlist's worst path is a 436-cell loop-carried chain through

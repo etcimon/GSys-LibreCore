@@ -161,6 +161,8 @@ Concrete examples:
 ./build.sh tools install timing          # formal Yosys + tools/openroad fork (-march, PGO)
 ./build.sh timings sta-rtl --target g6lc64_ooo --platform nangate45          # yosys map + openroad STA, here
 ./build.sh timings sta-rtl --target g6lc64_ooo_server --remote --target-mhz 1250  # same two steps on the builder
+./build.sh timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --allow-over-budget --remote --map-recipe streamed
+                                          # the integrated route: sv-timing at 10 FO4 → emitted tree → streamed yosys map → STA (STUDY on a miss)
 ```
 
 **Gate-level STA of the LibreCore RTL (`timings sta-rtl`).** Yosys (the managed formal build,
@@ -198,6 +200,24 @@ synthesizes it too. The same knob is on `timings compile|correct|area` (`--budge
 `--fo4-ps`, `--budget-margin`, `--opt-level`, `--svt-args`), which forward
 `--fo4-ps`/`--budget-margin` on `correct` and no longer pass `--cache` to it (analyze-only in
 the CLI; `correct` exited 2 at argument parsing before).
+
+**The integrated route and its studies (state 2026-10-16).** `--map-recipe streamed` (remote) is
+the only recipe whose memory is bounded by the word-level design: phase A dumps RTLIL and the
+module list (and `width-map.json`, hashed against the live sources so a stale map is never
+consumed), phase B maps one module per yosys process in parallel with the delay-oriented ABC
+script and a content-keyed resume cache, then the whole core links in the fork's `sta`.
+`--allow-over-budget` lets a budget **MISS** map anyway and labels the result **STUDY**; a
+run without a complete validated emitted analysis is **INCONCLUSIVE**, never an optimistic
+fallback. On the streamed artifacts, `build-platform/scripts/openroad-module-board.tcl` reports
+each module's worst register-to-register path (ns, cells, RTL start/end nets) with children
+black-boxed and broadcast drivers disabled, and `scripts/sta_module_delta.py <live run>
+<emitted run>` the per-module area/depth delta. Read cells, not single ns (identical RTLIL maps
+to ±1 % area / ±6 cells across runs). The structural model is calibrated against those cells
+(sv-timing delay-v37: iq 16.5 FO4 / 47 cells, store_buffer 38.5 / 49, wbuffer 18.6 / 21); the
+live `g6lc64_ooo` board reads **38.5 FO4 worst, 673 of 1628 reg→reg over 10 FO4** — the OoO
+control cones, not arithmetic — and 10 FO4 is not closed. Flags, stages and labels:
+`AGENTS-build-platform.md` §7.1; numbers and their provenance: `sv-timing/ALGORITHMS-EXPERTS.md`
+A97–A103 and `sv-timing/architecture/FREQUENCY-CLOSURE.md`.
 
 Why those three dials, measured on `g6lc64_ooo` at 10 FO4 (264 files, 234 modules, 10,858
 paths, ~2 min release build) on 2026-10-15: `-O2` → 451 annotate edits, nothing structural.

@@ -16,6 +16,24 @@ does not mean a place-and-route path of 300 ps. It means: under `fo4-v1`, delay-
 path_class detector 24, and the current compose/classify/pass loop, this cone is the
 worst remaining single-cycle primary.
 
+**State of record (2026-10-16, delay-v37 — A97–A103 at the end of this manual).**
+
+| Quantity | Value | Where |
+|---|---|---|
+| Measurement | `delay-v37` (guards as reads + mux; field-granular, index-aware loop carry) | `crates/sv-timing-core/src/version.rs`, A103 |
+| Live `g6lc64_ooo` at 10 FO4 / 20 ps | **worst 38.5** (`store_buffer` cancel squash); 1204 failing primary, 673 of 1628 reg→reg | `timings sta-rtl --fo4 10` pre-pass; `baseline-v37.json` |
+| Same tree under delay-v36 | 23.0 / 435 / 160 — the model was blind to guarded writes in the OoO modules | A103 |
+| Calibration vs netlist (structural FO4 / mapped cells) | iq 16.5 / 47, store_buffer 38.5 / 49, wbuffer 18.6 / 21, instr_queue 17 / 16, realign 26 / 23, frontend 23 / 43; rename 19 / 52 and scoreboard 15.6 / 54 under-read, perf_counters 34.7 / 13 over-read | module board, run C (A100, A103) |
+| Emitted −O3 allow-latency tree | elaborates and maps end to end; area +0.35 % (InsertReg flops), depth bought on the board (scoreboard 5.16 → 3.98 ns, frontend 43 → 37 cells) | A102 |
+| Automatic transforms | `LoopRewrite` (FindFirst, CondCount, RingWalk, StreamCompact), `SelectIncrement`, `BalanceMux` (one-hot, arm set = rewrite set), `RebalanceAssoc`, `SplitAssign`, `InsertReg` — exact or latency-labelled, area-neutral-or-better except InsertReg | A88–A103, `AGENTS-auto-correct.md` catalog |
+| Production RTL rewrites | instr_queue admission count (A92), scoreboard cancel window (A98), ROB free/re-anchor (A99), rename/iq/store_buffer find-first and popcount (A100) — SAT at fixture sizes; 8/32-entry miters inconclusive on budget | A92–A100 |
+| Mapping noise floor | ±1 % area, ±6 cells on identical RTLIL (autoidx-dependent ABC order) | A102 |
+| 10 FO4 | **not closed**; the ranked residual is the OoO control cones (47–54 cells) and the single-cycle 64-bit add/compare wall | A103 |
+
+The route that produces these numbers is one host command (`AGENTS-build-platform.md` §7.1):
+`timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --allow-over-budget --remote --map-recipe streamed`,
+followed by `scripts/openroad-module-board.tcl` and `scripts/sta_module_delta.py` on the run's artifacts.
+
 **Frozen-snapshot numbers (2026-10-15; fresh development results in Part LII).**
 
 | Quantity | Value | Where it is computed |

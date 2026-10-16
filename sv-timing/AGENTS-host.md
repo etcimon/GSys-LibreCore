@@ -187,3 +187,21 @@ bun run --cwd build-platform src/cli/index.ts test sv-timing-smoke --from-timing
 ```
 
 Outputs: `build-platform/workspace/build/sv-timing/verif-tests/<suite>/`.
+
+## Host route of record (build-platform `timings sta-rtl`)
+
+The monorepo host drives this package through one route — `timings sta-rtl
+--fo4 N [--allow-over-budget] [--remote] [--map-recipe streamed]` — and the
+package's contract with it is: `correct --files-from <portable.f>
+--all-modules --target-mhz <from N> --fo4-ps --budget-margin -O3 --emit
+--param-map <cfg snapshot merged> [--width-map <elaborated widths, only while
+their source hash matches>] --json-out correct.json`. The host reads
+`post_analyze.frequency_closure` and `integrity.{reparse_ok, joint_ok,
+structural_ok}` for its completion gate (a MISS stops mapping; `STUDY` when
+mapping was requested anyway; `INCONCLUSIVE` without a complete validated
+report), overlays `corrected/svt_corrected.f` on its manifest, and maps the
+emitted tree with yosys + the `tools/openroad` fork. Everything the package
+needs from the host arrives as files on the command line; nothing of the host
+is linked in (`tools/check_independence.py`). The route, its flags and its
+study scripts are documented in the monorepo's `AGENTS-build-platform.md`
+§7.1.
