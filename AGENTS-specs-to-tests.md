@@ -877,6 +877,34 @@ reaches the head (`STQ_QUEUED_CANCEL_DROPPED`). Positive 9 checks; `+oracle_nega
 fails `STQ_CANCELLED_NOT_PUSHED` with `pushes=1 (tid 3) wbs=1 (tid 3)` — the ghost. The system
 witness is the server1 Linux L1 past cycle 76,935,847 on `ooocoh-t38-server1-pgo-build`.
 
+## A store fault pops the LSU bypass once (2026-10-16, T40)
+
+Same leaf, scenarios S4/S5 (`tb_g6lc_stq_cancel_ptw.sv`): a store accepted with a DTLB hit whose
+translation exception lands in `VALID_STORE` must not pop the bypass again — the counter stays 0,
+`ready_o` returns, the store is written back with the exception and not pushed, and the LSU takes
+the next store (`STQ_EX_VALID_STORE_NO_DOUBLE_POP`, `STQ_EX_WB_NOT_PUSHED`, `STQ_EX_LSU_ALIVE`);
+the same exception while the request waits in `WAIT_TRANSLATION` pops exactly once
+(`STQ_EX_WAIT_POPPED_ONCE`). Spec anchor: Part II `#sec:sstatus`/exception precision — a faulting
+store traps once and leaves no architectural side effect; the implementation invariant under
+test is the LSU request queue's occupancy. 15 checks pass; `+define+G6LC_MUT_SU_EX_POP_ALWAYS`
+(the upstream unconditional pop) fails `STQ_EX_VALID_STORE_NO_DOUBLE_POP` with `byp_cnt=3` —
+the state the `+hang_dump` probe printed on the boot (`bypass cnt=3`, both entries invalid, the
+head load `ready=1 issue_ack=0`, `lsu_ready=0`). System witness: the ooo L1 past `uname -a` to
+`G6LC_LINUX_SHELL` on `ooocoh-t42-ooo-pgo-build` (owed).
+
+## WT dcache fixup queue: a pass finishes on the entry it started on (2026-10-16, T37)
+
+No leaf yet (owed): the witness is the `+smt_mem_watch` window on the L3 boot — the `sw` of
+`0x5be0cd19` to `0x818cb608` (be `f0`) allocated at 428,672,409, a false-miss tag check at 414,
+the ACK at 415 pushing it to the fixup queue's bypass slot while the FIFO head was mid-pass,
+`wt_inval idx=60 ways=40` at 418 (the head's way, the bypass word's index), the `lw` at 425
+hitting way 3 with `raw 0x000000001f83d9ab` and `forward=0` — and the live oracle over the
+repeated L3 run on `ooocoh-t42-ooo-pgo-build`: the two blake2s `lw`s (retire ≈ 330.35 M) must
+read `0x5be0cd19` / `0x0` and the run must pass 701 M cycles with 0 stored mismatches. Stage 53
+of `ooo_mem_min.S` (the blake2s copy-loop shape, bare mode) is the negative: 153/153 Spike-exact
+on t38/t41/t42 — the shape alone does not fill the queue and time the push into the head's pass.
+`G6LC_MUT_FIXUP_SEL_DRIFT` restores the pre-fix shape for a future leaf.
+
 ## Speculative store queue: flush coinciding with a commit (2026-10-15, T35 hardening)
 
 `verif/tb/core/run-stq-flush-ptr.sh` → `tb_g6lc_stq_flush_ptr.sv`, a `store_buffer` unit leaf in
