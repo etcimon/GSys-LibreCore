@@ -1848,10 +1848,40 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `wt_fixup_push`, `wt_fixup_wr` next to `wt_tx`/`wt_ack`/`wt_check` and
   the mem side's `wt_lookup`/`wt_word`/`wt_inval`; run `l3watch2` on
   `ooocoh-t40-ooo-pgo-build` (t39 + the prints) with
-  `+smt_mem_watch=818cb608` to cycle 428.68 M (≈ 4 h) — in flight. Stage
-  53 (`ooo_mem_min.S`, the copy-loop shape in bare mode) passes 153/153:
-  the shape alone does not trigger it. The T35-class first instance: the
-  ooo L1 with the fixed initrd hit its assertion form at cycle
+  `+smt_mem_watch=818cb608` to cycle 428.68 M. **Root cause from that
+  window (2026-10-16):** the upper-half `sw` (be `f0`, `0x5be0cd19`) is
+  allocated in the wbuffer at 428,672,409 (entry 0, fresh — the lower
+  half's entry had just been ACKed and written to L1 at 408), TX at 410,
+  `wt_check hit=08` (way 3) at 412/413, then **`wt_check hit=00` at 414**
+  and the ACK at **415 with `checked=1 hit=00`** → no ACK-time L1 write,
+  the word is pushed to the SL-W fixup queue (`wt_fixup_push … be=f0`,
+  `full=0`; the FIFO was at capacity, so it landed in the **bypass
+  slot**). At **418 `wt_inval idx=60 ways=40`** — the fixup queue's
+  full-queue fallback invalidated **way 6** at our index — and the word
+  was gone: the `lw` at **425 hit way 3 (`hit=08`) with `raw
+  0x000000001f83d9ab`, `forward=0`** → the stale 0. Two defects in the
+  queue's shape: (1) the pass that was in CHECK/RETIRE for the FIFO
+  **head** when the push landed in the bypass continued on the **bypass**
+  word — `active_paddr`, `fixup_wr_*`, `fixup_inv_*` follow
+  `fixup_bypass_valid_q` combinationally — with the **head's** hit vector
+  (way 6), so the fallback invalidated the wrong way at our index and
+  dropped our word unwritten (its line stayed valid and stale in way 3);
+  (2) the wbuffer's own check flipped to `hit=00` on a line that was
+  present (the tag read lost its cycle to a valid-bit write — `inv_req` /
+  `wr_denied` set `vld_we` without blocking `rd_ack`, so `cmp_en_q`
+  dropped and the acked requester saw a miss), which is what sent the
+  word to the queue in the first place. **Fix (1):** the fixup pass
+  records which entry it started on (`fixup_sel_bypass_q`) and restarts
+  from PEND when the selection changes under it (`G6LC_MUT_FIXUP_SEL_DRIFT`
+  = the pre-fix shape). (2) is benign on its own (a false miss costs a
+  refill / a fixup pass, both of which re-check) and is left as recorded
+  behaviour. Lint clean; build `ooocoh-t42-ooo-pgo-build` (t41 + the fix);
+  verdict: L3 with the live oracle past 701 M cycles with 0 stored
+  mismatches, L1 to the shell marker, battery + stages. Stage 53
+  (`ooo_mem_min.S`, the copy-loop shape in bare mode) passes 153/153: the
+  shape alone does not trigger it — the queue has to be full and the
+  push has to land during the head's pass. The T35-class first instance:
+  the ooo L1 with the fixed initrd hit its assertion form at cycle
   460,435,800 before t38.
   Housekeeping found on the way: three sim-only per-commit
   trace files were written unconditionally on every run (`trace_hart_0.dasm`
