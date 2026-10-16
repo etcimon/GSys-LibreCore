@@ -452,7 +452,12 @@ bun run src/cli/index.ts setup --install --profile dual-hart
   its `wns` is unbuffered broadcast fanout until the netlist is repaired
   (`repair_design`), see ALGORITHMS-EXPERTS A97; `OR_IGNORE_FANOUT_ABOVE=N`
   on `openroad-timing.tcl` disables the leaf drivers of nets with more than
-  N flat loads for a labelled logic-depth study (A98). The portable sv-timing flist carries the
+  N flat loads for a labelled logic-depth study (A98).
+  `scripts/openroad-module-board.tcl` is the per-module view of the same
+  artifacts: one `sta` per `mapped/*.v` (children black-boxed, inputs ideal,
+  broadcast drivers disabled), one TSV row per module with the worst
+  register-to-register path in ns and cells — the ranking of which module to
+  rewrite next (ALGORITHMS-EXPERTS A100). The portable sv-timing flist carries the
   manifest's `+define+` lines and `verify.synthDefines`, so sv-timing measures
   the design the flow synthesizes. Tests: `test/sta-rtl-study.test.ts`.
 

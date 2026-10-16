@@ -112,6 +112,17 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   32-entry window miter runs with a 3.9 h budget on the builder
   (`/opt/testharness/work/svt-prefix-20261015/sbwin/sat32.log`). Live board
   back to 23.0 (frontend), 435 failing; emitted 20.0, 394 failing.
+- [x] A100: module-level mapped board (`openroad-module-board.tcl`, one sta
+  per module, children black-boxed, broadcast drivers disabled): rob 211 →
+  35 cells, scoreboard 125 → 54 cells after A98/A99. Find-first/popcount
+  walks in g6lc_rename (`pick_free`), g6lc_iq (slot alloc, live count) and
+  store_buffer (insertion index) rewritten exactly; SAT-exhaustive at 16/32
+  bits (`find_first_equiv.sv`). Core elaborates. Netlist confirmation of
+  A100 (run C) and the scoreboard's remaining 54-cell cone are next.
+- [ ] Record the `if` a node sits under in the lowerer: (a) bill
+  `if (cond) x = const` chains, (b) let delay-v35 give unconditional
+  `acc = acc + x` chains log depth (yosys `$macc` tree) and keep conditional
+  ones serial.
 - [ ] ROB rewrite (A99) needs a leaf beyond the 4-entry proof: a bounded
   miter at 8 entries with k-induction, or a directed `tb_g6lc_rob` free/
   re-anchor test with the pre-change RTL as the reference model.

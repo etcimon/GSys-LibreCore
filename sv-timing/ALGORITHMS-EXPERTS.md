@@ -7329,6 +7329,51 @@ fanout checker (`set_max_fanout` + `report_check_types -max_fanout
 (`STA_IGNORED_FANOUT …`). It is what let the chain show through; it is not a
 sign-off number.
 
+## A100 — Module-level mapped board; find-first and popcount walks (exact)
+
+`build-platform/scripts/openroad-module-board.tcl` turns the streamed run's
+per-module netlists into a **module board**: one `sta` process per module
+(461 in parallel, ~40 s), the module linked as its own top with children as
+black boxes, inputs ideal, leaf drivers of nets with more than 64 loads
+disabled (`OR_IGNORE_FANOUT_ABOVE`), and the worst register-to-register path
+reported in ns with its cell count. Inputs ideal at a module boundary means
+the whole-core report's broadcast artifacts (A97) do not reach these rows;
+the cell count is the depth metric that survives any fanout model. Nangate45
+typ, 0.25 ns clock, before A98/A99 → after:
+
+| module | before (ns / cells) | after (ns / cells) | note |
+|---|---:|---:|---|
+| g6lc_rename | 26.2 / 255 | 23.2 / 257 | `pick_free` scan ×2 ports — A100 rewrite not yet in this netlist |
+| g6lc_rob | 15.4 / 211 | **2.6 / 35** | A99 free walk → hit vectors + find-first |
+| scoreboard | 10.9 / 125 | **5.2 / 54** | A98 cancel walk → window; next: the 54-cell commit-select cone |
+| g6lc_iq | 5.1 / 57 | 5.1 / 57 | slot-allocation scan (A100 rewrite pending in netlist) |
+| store_buffer | 5.1 / 50 | 5.1 / 50 | insertion-index running sum (A100 pending) |
+| frontend | 4.1 / 43 | 4.1 / 43 | next after A100 |
+| instr_realign | 2.8 / 23 | 2.8 / 23 | the `cur` walk is a small-support cone synthesis flattens; 23 cells |
+
+Whole-core fanout-insensitive `wns` moved −79.7 → **−44.1 ns** with A98/A99
+alone (the remaining broadcast-free chain is rename's).
+
+Three more walks rewritten exactly (A100), all `fixtures/auto_correct/
+find_first_equiv.sv` shapes proved by exhaustive SAT at 16 and 32 bits:
+
+- `g6lc_rename` `pick_free`/`pick_ffree`: `for i: if (fr[i] && pick == 0)
+  pick = i` → `lowest = fr & (~fr + 1)` (one incrementer) and an OR-encode
+  of the one-hot. The scan was 72 deep per port, twice in series.
+- `g6lc_iq` slot allocation: the same `free[e] && !alloc[p]` scan per port →
+  lowest-set-bit isolate, `alloc = |lowest`, `free &= ~lowest`.
+- `store_buffer` insertion index: `if (older) ins = ins + 1` over
+  `DEPTH_SPEC` → `$countones(older_vec)`; `g6lc_iq` live count likewise
+  `$countones` over the valid vector instead of a running sum.
+
+Model note: yosys turns an *unconditional* `acc = acc + x` chain into a
+`$macc` compressor tree, so only conditional/compare-gated arithmetic walks
+are serial; delay-v35 bills both as serial because the lowerer does not yet
+record the `if` a node sits under (todo). The RTL forms above make the
+distinction moot where it mattered. Whole core elaborates (slang) with all
+A98–A100 edits; functional validation deferred per campaign policy — the
+proofs cover the rewritten functions, not their callers' invariants.
+
 ## A90 — Incrementers are not gates (delay-v32)
 
 `x + 1` and `x + CONST` were billed 1 FO4 at every width since delay-v18

@@ -198,21 +198,34 @@ module g6lc_rename #(
   // No busy snapshot is kept -- see the restore below.
   logic [NR_PORTS-1:0][31:0][PRF_W-1:0] ckpt_map_c;
 
+  // Find-first as arithmetic, not as a walk (sv-timing A100): the scan
+  // `for i: if (fr[i] && pick == 0) pick = i` is a PRF_ENTRIES-deep priority
+  // chain that synthesis keeps serial — the mapped rename netlist's worst
+  // register-to-register path was 255 cells / 26 ns (Nangate45, fanout
+  // excluded), two of these chains in series across the issue ports.
+  // `fr & (~fr + 1)` isolates the lowest set bit with one incrementer (log
+  // depth), and OR-ing the indices of a one-hot is a balanced tree. Exact: an
+  // empty vector gives 0, as the scan did.
+  //
   // Lowest free FP phys. Starts at 0, not 1: FP has no hardwired-zero register,
-  // so nothing reserves FP physical 0.
+  // so nothing reserves FP physical 0 (and a set bit 0 selects 0, as before).
   function automatic logic [FPRF_W-1:0] pick_ffree(input logic [FPN-1:0] fr);
+    logic [FPN-1:0] lowest;
+    lowest = fr & (~fr + 1'b1);
     pick_ffree = '0;
     for (int unsigned i = 0; i < FPN; i++) begin
-      if (fr[i] && pick_ffree == '0 && !fr[0]) pick_ffree = FPRF_W'(i);
+      if (lowest[i]) pick_ffree = pick_ffree | FPRF_W'(i);
     end
-    if (fr[0]) pick_ffree = '0;
   endfunction
 
   // Lowest free phys ≥1 in current free vector
   function automatic logic [PRF_W-1:0] pick_free(input logic [PRF_ENTRIES-1:0] fr);
+    logic [PRF_ENTRIES-1:0] cand, lowest;
+    cand   = fr & ~PRF_ENTRIES'(1);
+    lowest = cand & (~cand + 1'b1);
     pick_free = '0;
     for (int unsigned i = 1; i < PRF_ENTRIES; i++) begin
-      if (fr[i] && pick_free == '0) pick_free = PRF_W'(i);
+      if (lowest[i]) pick_free = pick_free | PRF_W'(i);
     end
   endfunction
 

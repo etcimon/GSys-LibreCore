@@ -241,6 +241,7 @@ module store_buffer
     automatic logic [$clog2(DEPTH_SPEC):0] speculative_status_cnt;
     automatic logic [$clog2(DEPTH_SPEC)-1:0] src, dst;
     automatic logic [$clog2(DEPTH_SPEC):0] live, old_cnt, ins;
+    automatic logic [DEPTH_SPEC-1:0] older_vec;
     automatic int unsigned nlive, nins;
     automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.PLEN-1:0] a_addr;
     automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.XLEN-1:0] a_data;
@@ -256,6 +257,7 @@ module store_buffer
     live    = '0;
     old_cnt = '0;
     ins     = '0;
+    older_vec = '0;
     nlive   = 0;
     nins    = 0;
     a_addr  = '0;
@@ -343,11 +345,14 @@ module store_buffer
           a_fk[k]     = speculative_queue_n[src].fwd_keep;
         end
       end
-      // position of the arrival = number of already-queued stores older than it
-      ins = '0;
+      // position of the arrival = number of already-queued stores older than it.
+      // A popcount of the per-slot verdicts, not a running `ins + 1` (that is a
+      // DEPTH_SPEC-deep incrementer chain synthesis keeps serial — sv-timing
+      // A100; the mapped store buffer's worst path was 50 cells).
       for (int unsigned k = 0; k < DEPTH_SPEC; k++)
-        if (((k + 1) < nlive) && ooo_older(a_tid[k], a_tid[(nlive > 0) ? nlive-1 : 0]))
-          ins = ins + 1'b1;
+        older_vec[k] = ((k + 1) < nlive) &&
+                       ooo_older(a_tid[k], a_tid[(nlive > 0) ? nlive-1 : 0]);
+      ins  = ($clog2(DEPTH_SPEC) + 1)'($countones(older_vec));
       nins = int'(ins);
       // rewrite dense with the arrival at `ins`, younger entries shifted up
       for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin

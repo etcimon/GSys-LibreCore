@@ -385,15 +385,21 @@ module g6lc_iq
     alloc = '0;
     alloc_slot = '0;
     slot = 0;
+    // Lowest free slot per port as arithmetic (sv-timing A100): the scan
+    // `for e: if (free[e] && !alloc[p]) …` is a DEPTH-deep priority chain
+    // synthesis keeps serial (the mapped netlist's worst path here, 57
+    // cells). `free & (~free + 1)` isolates the lowest set bit with one
+    // incrementer; the index is an OR over a one-hot. Exact: an empty free
+    // vector allocates nothing and leaves alloc_slot at 0, as the scan did.
     for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
       if (disp_valid_i[p]) begin
+        automatic logic [DEPTH-1:0] lowest;
+        lowest   = free & (~free + 1'b1);
+        alloc[p] = |lowest;
         for (int unsigned e = 0; e < DEPTH; e++) begin
-          if (free[e] && !alloc[p]) begin
-            alloc[p] = 1'b1;
-            alloc_slot[p] = EW'(e);
-            free[e] = 1'b0;
-          end
+          if (lowest[e]) alloc_slot[p] = alloc_slot[p] | EW'(e);
         end
+        free = free & ~lowest;
       end
     end
     for (int unsigned p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin
@@ -457,11 +463,12 @@ module g6lc_iq
   end
 
   // Live count of the resolved next state — an unconditional single-assignment
-  // block so the popcount cannot infer a latch.
+  // block so the popcount cannot infer a latch. Written as $countones over
+  // the valid vector (a compressor tree), not a running sum (sv-timing A100).
+  logic [DEPTH-1:0] q_d_valid;
   always_comb begin
-    count_d = '0;
-    for (int unsigned e = 0; e < DEPTH; e++)
-      count_d = count_d + DW'(q_d[e].valid);
+    for (int unsigned e = 0; e < DEPTH; e++) q_d_valid[e] = q_d[e].valid;
+    count_d = DW'($countones(q_d_valid));
   end
 
   always_ff @(posedge clk_i or negedge rst_ni) begin
