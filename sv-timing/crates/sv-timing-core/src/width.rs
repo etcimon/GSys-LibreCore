@@ -88,7 +88,10 @@ struct Dims {
 
 impl Dims {
     fn bits(&self) -> u32 {
-        self.packed.iter().copied().fold(1u32, |a, b| a.saturating_mul(b))
+        self.packed
+            .iter()
+            .copied()
+            .fold(1u32, |a, b| a.saturating_mul(b))
     }
     /// One `[i]` applied: strips an unpacked dim first, else the outer packed dim.
     fn indexed(&self) -> Dims {
@@ -120,6 +123,8 @@ pub struct WidthResolver<'a> {
     const_exprs: &'a BTreeMap<String, String>,
     typedef_texts: &'a BTreeMap<String, String>,
     package_imports: &'a [String],
+    /// Elaborated widths for this module (`--width-map`), when supplied.
+    elaborated: Option<&'a BTreeMap<String, u32>>,
     consts: RefCell<BTreeMap<String, Option<i64>>>,
     visiting: RefCell<BTreeSet<String>>,
 }
@@ -142,6 +147,7 @@ impl<'a> WidthResolver<'a> {
             &module.const_exprs,
             &module.typedef_texts,
             &module.package_imports,
+            None,
         )
     }
 
@@ -154,6 +160,7 @@ impl<'a> WidthResolver<'a> {
         const_exprs: &'a BTreeMap<String, String>,
         typedef_texts: &'a BTreeMap<String, String>,
         package_imports: &'a [String],
+        elaborated: Option<&'a BTreeMap<String, u32>>,
     ) -> Self {
         Self {
             packages,
@@ -163,6 +170,7 @@ impl<'a> WidthResolver<'a> {
             const_exprs,
             typedef_texts,
             package_imports,
+            elaborated,
             consts: RefCell::new(BTreeMap::new()),
             visiting: RefCell::new(BTreeSet::new()),
         }
@@ -336,7 +344,12 @@ impl<'a> WidthResolver<'a> {
         let (head, dims_text) = split_dims(text);
         let mut words: Vec<&str> = head
             .split_whitespace()
-            .filter(|w| !matches!(*w, "signed" | "unsigned" | "var" | "automatic" | "const" | "static"))
+            .filter(|w| {
+                !matches!(
+                    *w,
+                    "signed" | "unsigned" | "var" | "automatic" | "const" | "static"
+                )
+            })
             .collect();
         if words.is_empty() {
             // A bare dimension on an implicit `logic`.
@@ -430,7 +443,8 @@ impl<'a> WidthResolver<'a> {
         {
             return true;
         }
-        self.imported_packages().any(|p| p.const_exprs.contains_key(name))
+        self.imported_packages()
+            .any(|p| p.const_exprs.contains_key(name))
     }
 
     fn decl_dims(&self, name: &str) -> Option<Dims> {
@@ -453,7 +467,25 @@ impl<'a> WidthResolver<'a> {
     }
 
     fn signal_dims(&self, name: &str) -> Option<Dims> {
-        self.decl_dims(name).or_else(|| self.port_dims(name))
+        if let Some(d) = self.decl_dims(name).or_else(|| self.port_dims(name)) {
+            return Some(d);
+        }
+        // Source could not size it (constant function in a localparam): the
+        // elaborated map can, for packed signals. An unpacked array is
+        // lowered to a memory or a flattened wire there, so its entry is not
+        // an element width — leave those unresolved.
+        let bits = *self.elaborated?.get(name)?;
+        let has_unpacked = self
+            .decls
+            .iter()
+            .any(|d| d.name == name && !d.unpacked_text.trim().is_empty());
+        if has_unpacked || bits == 0 {
+            return None;
+        }
+        Some(Dims {
+            packed: vec![bits],
+            unpacked: 0,
+        })
     }
 
     fn expr_dims(&self, e: &Expr, depth: u32) -> Option<Dims> {
@@ -605,7 +637,10 @@ impl<'a> WidthResolver<'a> {
                     | OperatorClass::ShiftVar
                     | OperatorClass::ShiftConst => {
                         bump(&mut out.arith, self.expr_width(left));
-                        if !matches!(op_class, OperatorClass::ShiftVar | OperatorClass::ShiftConst) {
+                        if !matches!(
+                            op_class,
+                            OperatorClass::ShiftVar | OperatorClass::ShiftConst
+                        ) {
                             bump(&mut out.arith, self.expr_width(right));
                         }
                     }
@@ -752,8 +787,8 @@ fn split_top_level_colon(text: &str) -> Option<(&str, &str)> {
     let bytes = text.as_bytes();
     for (i, c) in text.char_indices() {
         // `pkg::NAME` scope operator, not a range separator.
-        let scope_colon = c == ':'
-            && (bytes.get(i + 1) == Some(&b':') || (i > 0 && bytes[i - 1] == b':'));
+        let scope_colon =
+            c == ':' && (bytes.get(i + 1) == Some(&b':') || (i > 0 && bytes[i - 1] == b':'));
         match c {
             '(' | '[' | '{' => depth += 1,
             ')' | ']' | '}' => depth -= 1,
@@ -808,6 +843,7 @@ mod tests {
         consts: BTreeMap<String, String>,
         typedefs: BTreeMap<String, String>,
         imports: Vec<String>,
+        elaborated: BTreeMap<String, u32>,
     }
 
     impl Fixture {
@@ -820,6 +856,7 @@ mod tests {
                 &self.consts,
                 &self.typedefs,
                 &self.imports,
+                Some(&self.elaborated),
             )
         }
     }
@@ -845,10 +882,7 @@ mod tests {
         );
         Fixture {
             packages,
-            ints: BTreeMap::from([
-                ("CVA6Cfg.XLEN".to_string(), 64),
-                ("XLEN".to_string(), 64),
-            ]),
+            ints: BTreeMap::from([("CVA6Cfg.XLEN".to_string(), 64), ("XLEN".to_string(), 64)]),
             decls: vec![
                 decl("idx_q", "fifo_idx_t", "", ""),
                 decl("count", "logic", "[3:0]", ""),
@@ -863,7 +897,11 @@ mod tests {
                 },
             ],
             ports: vec![
-                port("instr_i", Some("logic"), Some("[CVA6Cfg.INSTR_PER_FETCH-1:0][31:0]")),
+                port(
+                    "instr_i",
+                    Some("logic"),
+                    Some("[CVA6Cfg.INSTR_PER_FETCH-1:0][31:0]"),
+                ),
                 port("addr_i", Some("logic"), Some("[riscv::VLEN-1:0]")),
                 port("valid_i", Some("logic"), None),
             ],
@@ -874,9 +912,17 @@ mod tests {
             ]),
             typedefs: BTreeMap::from([
                 ("fifo_idx_t".to_string(), "logic [IdxW-1:0]".to_string()),
-                ("state_e".to_string(), "enum logic [1:0] {IDLE, BUSY}".to_string()),
+                (
+                    "state_e".to_string(),
+                    "enum logic [1:0] {IDLE, BUSY}".to_string(),
+                ),
             ]),
             imports: vec!["riscv::*".into()],
+            elaborated: BTreeMap::from([
+                ("two_d".to_string(), 8u32),
+                ("mem".to_string(), 64u32),
+                ("count".to_string(), 32u32),
+            ]),
         }
     }
 
@@ -899,8 +945,16 @@ mod tests {
         assert_eq!(r.const_value("IdxW"), Some(3));
         assert_eq!(r.const_value("CVA6Cfg.XLEN"), Some(64));
         assert_eq!(r.const_value("riscv::VLEN"), Some(39));
-        assert_eq!(r.const_value("VLEN"), Some(39), "imported package localparam");
-        assert_eq!(r.const_value("CVA6Cfg.INSTR_PER_FETCH"), None, "not in the map");
+        assert_eq!(
+            r.const_value("VLEN"),
+            Some(39),
+            "imported package localparam"
+        );
+        assert_eq!(
+            r.const_value("CVA6Cfg.INSTR_PER_FETCH"),
+            None,
+            "not in the map"
+        );
         assert_eq!(r.eval_text("(DEPTH > 1) ? $clog2(DEPTH) : 1"), Some(3));
         assert_eq!(r.eval_text("2**IdxW - 1"), Some(7));
     }
@@ -916,7 +970,11 @@ mod tests {
         assert_eq!(w("mem"), Some(8), "element width of an unpacked array");
         assert_eq!(w("word"), Some(64), "package typedef over the param-map");
         assert_eq!(w("addr_i"), Some(39), "port dims through a package scope");
-        assert_eq!(w("two_d"), None, "NrFifo depends on an unmapped Cfg field");
+        // `two_d` cannot be sized from source (NrFifo is an unmapped Cfg
+        // field) — the elaborated map supplies it. `count` is sized from source
+        // (4), so the map's 32 is not consulted; `mem` is unpacked, so the
+        // map's flattened 64 is refused.
+        assert_eq!(w("two_d"), Some(8), "elaborated width map fills the gap");
         assert_eq!(w("instr_i"), None, "unresolved outer dim stays unknown");
         assert_eq!(w("count[2:0]"), Some(3));
         assert_eq!(w("word[idx_q +: 8]"), Some(8));
@@ -942,15 +1000,27 @@ mod tests {
         assert_eq!(nw.arith, Some(64));
         assert_eq!(nw.compare, Some(64));
         // `idx_d = idx_q + fifo_idx_t'(shamt)`: 3-bit context, no compare.
-        let nw = r.node_widths(Some(&Expr::parse("idx_q")), Some(&Expr::parse("idx_q + count")));
+        let nw = r.node_widths(
+            Some(&Expr::parse("idx_q")),
+            Some(&Expr::parse("idx_q + count")),
+        );
         assert_eq!(nw.arith, Some(4), "max(lhs 3, operand 4)");
         assert_eq!(nw.compare, None);
         // Nothing resolvable keeps the reference width.
-        let nw = r.node_widths(Some(&Expr::parse("two_d[0]")), Some(&Expr::parse("x + y")));
+        let nw = r.node_widths(
+            Some(&Expr::parse("unknown_lhs")),
+            Some(&Expr::parse("x + y")),
+        );
         assert_eq!(nw, NodeWidths::default());
+        // An elaborated-map signal indexed once: 8-bit packed, one bit selected.
+        let nw = r.node_widths(Some(&Expr::parse("two_d[0]")), Some(&Expr::parse("x + y")));
+        assert_eq!(nw.arith, Some(1));
         // scoreboard `commit_pointer_q[0] + TRANS_ID_BITS'(k)`: the unrolled
         // `int k` and the localparam DEPTH are constants, not 32-bit operands.
-        let nw = r.node_widths(Some(&Expr::parse("idx_q")), Some(&Expr::parse("idx_q + k + DEPTH")));
+        let nw = r.node_widths(
+            Some(&Expr::parse("idx_q")),
+            Some(&Expr::parse("idx_q + k + DEPTH")),
+        );
         assert_eq!(nw.arith, Some(3));
     }
 
@@ -960,7 +1030,10 @@ mod tests {
         assert_eq!(width_factor(OperatorClass::AddSub, None), 1.0);
         assert!((width_factor(OperatorClass::AddSub, Some(4)) - 0.4).abs() < 1e-9);
         assert!((width_factor(OperatorClass::Compare, Some(64)) - 1.2).abs() < 1e-9);
-        assert!((width_factor(OperatorClass::ShiftVar, Some(1)) - 0.2).abs() < 1e-9, "max(w,2)");
+        assert!(
+            (width_factor(OperatorClass::ShiftVar, Some(1)) - 0.2).abs() < 1e-9,
+            "max(w,2)"
+        );
         assert_eq!(width_factor(OperatorClass::Mul, Some(16)), 0.5);
         assert_eq!(width_factor(OperatorClass::DivRem, Some(64)), 2.0);
         assert_eq!(width_factor(OperatorClass::LogicBit, Some(64)), 1.0);

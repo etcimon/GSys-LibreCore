@@ -17,6 +17,7 @@ import { existsSync, mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { flagBool } from "../args.ts";
+import { snapshotCvaCfg } from "../../tooling/cfgSnapshot.ts";
 import { requireContext, type Command, type CommandArgs } from "../command.ts";
 import type { PlatformContext } from "../../context.ts";
 import { run } from "../../platform/exec.ts";
@@ -249,11 +250,27 @@ async function runAnalyzeOrCorrect(
 
   let paramMapPath = paramMapFlag;
   if (!paramMapPath && autoParamMap) {
+    // Elaborated CVA6Cfg fields (yosys-slang probe) so width inference sees
+    // the cfg-dimensioned counters; falls back to the XLEN-only map.
+    let extra: Record<string, number> = {};
+    let cfgNote = "XLEN only";
+    if (!dryRun) {
+      try {
+        const snap = await snapshotCvaCfg(ctx, edaPaths(ctx), target, layout.dir);
+        if (snap) {
+          extra = snap.entries;
+          cfgNote = snap.detail;
+        }
+      } catch (e) {
+        cfgNote = `cfg snapshot skipped: ${e instanceof Error ? e.message : String(e)}`;
+      }
+    }
     paramMapPath = writeHostParamMap(ctx, {
       outPath: layout.paramMap,
       xlen: assumeXlen,
+      extra,
     });
-    logger.info(`param-map: ${paramMapPath}`);
+    logger.info(`param-map: ${paramMapPath} (${cfgNote})`);
   } else if (paramMapPath) {
     logger.info(`param-map: ${paramMapPath}`);
   }

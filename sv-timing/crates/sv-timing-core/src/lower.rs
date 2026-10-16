@@ -86,6 +86,7 @@ pub fn lower_unit(unit: &ParsedUnit, opts: &LowerOptions) -> CoreResult<AnalyzeO
     let mut design = TimingDesign::empty(opts.target.clone());
     design.param_map_keys = opts.param_map.keys();
     design.param_map_ints = opts.param_map.int_entries();
+    design.width_map = opts.param_map.width_map.clone();
     design.package_mode = opts.package_mode;
     let mut names = NameTable::new();
     let mut next_module: ModuleId = 0;
@@ -1201,8 +1202,7 @@ where
                     let loc = first_locate_loc(tree, li, path_str, nd);
                     for d in nd {
                         if let RefNode::NetIdentifier(id) = d {
-                            if let Some(name) = identifier_str(tree, RefNode::NetIdentifier(id))
-                            {
+                            if let Some(name) = identifier_str(tree, RefNode::NetIdentifier(id)) {
                                 block_local.insert(name.clone());
                                 local_nets.push((name, loc.clone()));
                             }
@@ -1312,9 +1312,13 @@ where
     }
     for decl in &mut out {
         if decl.loc.origin == OriginKind::UserFile {
-            decl.scope = scopes.iter()
-                .filter(|s| s.file == decl.loc.file
-                    && s.byte_start <= decl.loc.byte_start && decl.loc.byte_start < s.byte_end)
+            decl.scope = scopes
+                .iter()
+                .filter(|s| {
+                    s.file == decl.loc.file
+                        && s.byte_start <= decl.loc.byte_start
+                        && decl.loc.byte_start < s.byte_end
+                })
                 .min_by_key(|s| s.byte_end - s.byte_start)
                 .cloned();
             // A module declaration must not inherit the block-local flag just
@@ -2775,11 +2779,18 @@ mod tests {
                 .find(|d| d.name == name)
                 .map(|d| d.block_local)
         };
-        assert_eq!(local("brh"), Some(true), "automatic inside the block is local");
+        assert_eq!(
+            local("brh"),
+            Some(true),
+            "automatic inside the block is local"
+        );
         assert_eq!(local("h"), Some(true), "for loop variable is local");
         assert_eq!(local("ev"), Some(false), "module-level variable is visible");
         let set = module.block_local_names();
-        assert!(set.contains("brh") && set.contains("h") && !set.contains("ev"), "{set:?}");
+        assert!(
+            set.contains("brh") && set.contains("h") && !set.contains("ev"),
+            "{set:?}"
+        );
         assert!(set.contains("cmo_req"), "generate-local net: {set:?}");
         assert!(!set.contains("gated"), "{set:?}");
         assert!(module.text_refs_block_local("&brh", &set));
@@ -2860,7 +2871,10 @@ mod tests {
         assert!(
             wrap.nodes.is_empty(),
             "instance-only wrapper must have no datapath nodes, got {:?}",
-            wrap.nodes.values().map(|n| (&n.op_class, &n.loc.start_line)).collect::<Vec<_>>()
+            wrap.nodes
+                .values()
+                .map(|n| (&n.op_class, &n.loc.start_line))
+                .collect::<Vec<_>>()
         );
         assert!(
             !out.design.paths.iter().any(|p| p.module == wrap.id),
@@ -2904,13 +2918,22 @@ mod tests {
         );
         let out = analyze_inline_source(text);
         let m = out.design.modules.values().next().unwrap();
-        let find = |rhs: &str| m.nodes.values().find(|n| n.rhs.as_deref() == Some(rhs)).unwrap();
+        let find = |rhs: &str| {
+            m.nodes
+                .values()
+                .find(|n| n.rhs.as_deref() == Some(rhs))
+                .unwrap()
+        };
         let global = find("a * b");
         let first = find("a + b");
         let second = find("a - c");
         let y = find("tmp ^ c");
         let z = find("tmp ^ b");
-        let outside = m.nodes.values().find(|n| n.lhs.as_deref() == Some("outside")).unwrap();
+        let outside = m
+            .nodes
+            .values()
+            .find(|n| n.lhs.as_deref() == Some("outside"))
+            .unwrap();
         assert!(y.fans_in.contains(&first.id));
         assert!(!y.fans_in.contains(&second.id) && !y.fans_in.contains(&global.id));
         assert!(z.fans_in.contains(&second.id));
@@ -2922,9 +2945,11 @@ mod tests {
         assert_eq!(declarations.iter().filter(|d| d.block_local).count(), 2);
         let nodes: Vec<_> = m.nodes.keys().copied().collect();
         let tree = crate::ref_order::RefOrderTree::from_nodes(m, &nodes);
-        let linked = |from, to| tree.edges.iter().any(|e| {
-            nodes[e.from_stmt as usize] == from && nodes[e.to_stmt as usize] == to
-        });
+        let linked = |from, to| {
+            tree.edges
+                .iter()
+                .any(|e| nodes[e.from_stmt as usize] == from && nodes[e.to_stmt as usize] == to)
+        };
         assert!(linked(first.id, y.id));
         assert!(linked(second.id, z.id));
         assert!(linked(global.id, outside.id));
@@ -2942,7 +2967,10 @@ mod tests {
             "assign y = a * k;\n",
             "endmodule\n",
         );
-        let source = format!("`ifdef REMOVED\n{}\n`endif\n{body}", "// padding\n".repeat(80));
+        let source = format!(
+            "`ifdef REMOVED\n{}\n`endif\n{body}",
+            "// padding\n".repeat(80)
+        );
         for text in [body.to_string(), source] {
             let out = analyze_inline_source(&text);
             let m = out.design.modules.values().next().unwrap();

@@ -107,6 +107,7 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
     // Width inference reads packages / param-map while nodes are mutated.
     let packages = design.packages.clone();
     let param_ints = design.param_map_ints.clone();
+    let width_map = design.width_map.clone();
     let seeds: BTreeMap<crate::ir::ModuleId, ConstSeed> = design
         .modules
         .iter()
@@ -141,6 +142,7 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
             &module.const_exprs,
             &module.typedef_texts,
             &module.package_imports,
+            width_map.get(&module.name),
         );
         for node in module.nodes.values_mut() {
             // Spine expand / half-split lock residual segment FO4 across remeasure.
@@ -344,8 +346,10 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
         let Some(n) = module.nodes.get(&nid) else {
             continue;
         };
-        let reads: BTreeSet<_> = node_read_symbols(n).into_iter()
-            .map(|s| bindings.key(&s, &n.loc)).collect();
+        let reads: BTreeSet<_> = node_read_symbols(n)
+            .into_iter()
+            .map(|s| bindings.key(&s, &n.loc))
+            .collect();
         let mut hits_seq = false;
         for r in &reads {
             if seq_lhs.contains(r) {
@@ -360,8 +364,11 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
         if hits_seq {
             reads_reg.push(nid);
         }
-        let lhs = n.lhs.as_deref()
-            .map(|s| bindings.key(&ident_base(s), &n.loc)).unwrap_or_default();
+        let lhs = n
+            .lhs
+            .as_deref()
+            .map(|s| bindings.key(&ident_base(s), &n.loc))
+            .unwrap_or_default();
         if !lhs.is_empty() && (seq_reads.contains(&lhs) || outputs.contains(&lhs)) {
             sinks.push(nid);
         }
@@ -415,8 +422,11 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
         let lhs = module
             .nodes
             .get(&sink)
-            .and_then(|n| n.lhs.as_deref()
-                .map(|s| bindings.key(&ident_base(s), &n.loc)))
+            .and_then(|n| {
+                n.lhs
+                    .as_deref()
+                    .map(|s| bindings.key(&ident_base(s), &n.loc))
+            })
             .unwrap_or_default();
         let capture = seq_reads.contains(&lhs);
         let start = if launch {

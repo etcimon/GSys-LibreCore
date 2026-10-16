@@ -710,11 +710,7 @@ impl TimingModule {
         if name.contains("::") {
             return None;
         }
-        let root = name
-            .split(['.', '['])
-            .next()
-            .unwrap_or(name)
-            .trim();
+        let root = name.split(['.', '[']).next().unwrap_or(name).trim();
         (!root.is_empty()).then_some(root)
     }
 
@@ -761,8 +757,7 @@ impl TimingModule {
                 // A member named `index` is not a local variable `index`.
                 // Retain the conservative scan for escaped identifiers.
                 let qualified = !has_escaped_ident
-                    && (before.ends_with('.') || before.ends_with("::")
-                        || after.starts_with("::"));
+                    && (before.ends_with('.') || before.ends_with("::") || after.starts_with("::"));
                 if !qualified && block_local.contains(&text[start..i]) {
                     return true;
                 }
@@ -826,6 +821,9 @@ pub struct TimingDesign {
     /// the width inference's outermost constant scope.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub param_map_ints: BTreeMap<String, i64>,
+    /// Elaborated net widths per module (`--width-map`), see `ParamMap::width_map`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub width_map: crate::param_map::WidthMap,
     /// True when package-mode denser surface was requested.
     #[serde(default)]
     pub package_mode: bool,
@@ -874,6 +872,7 @@ impl TimingDesign {
             target,
             param_map_keys: Vec::new(),
             param_map_ints: BTreeMap::new(),
+            width_map: BTreeMap::new(),
             package_mode: false,
             path_exceptions: Vec::new(),
             parallel_timing: BTreeMap::new(),

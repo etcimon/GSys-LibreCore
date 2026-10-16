@@ -44,7 +44,10 @@ impl<'a> BindingIndex<'a> {
             if loop_info.loc.origin == crate::OriginKind::UserFile
                 && loop_info.loc.byte_end > loop_info.loc.byte_start
             {
-                scopes.entry(&loop_info.genvar).or_default().push(&loop_info.loc);
+                scopes
+                    .entry(&loop_info.genvar)
+                    .or_default()
+                    .push(&loop_info.loc);
             }
         }
         for spans in scopes.values_mut() {
@@ -59,7 +62,8 @@ impl<'a> BindingIndex<'a> {
             if let Some(root) = TimingModule::root_ident(name) {
                 if let Some(spans) = self.scopes.get(root) {
                     if let Some(scope) = spans.iter().find(|s| {
-                        s.file == loc.file && s.byte_start <= loc.byte_start
+                        s.file == loc.file
+                            && s.byte_start <= loc.byte_start
                             && loc.byte_start < s.byte_end
                     }) {
                         return format!("{name}@{}:{}", scope.byte_start, scope.byte_end);
@@ -174,7 +178,11 @@ impl RefOrderTree {
             let Some(n) = module.nodes.get(&nid) else {
                 continue;
             };
-            let lhs = n.lhs.as_deref().map(ident_base).filter(|s| !s.is_empty())
+            let lhs = n
+                .lhs
+                .as_deref()
+                .map(ident_base)
+                .filter(|s| !s.is_empty())
                 .map(|s| bindings.key(&s, &n.loc));
 
             let mut reads: Vec<String> = Vec::new();

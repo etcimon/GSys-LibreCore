@@ -67,10 +67,14 @@ test("streamed recipe: phase A dumps RTLIL + module list, phase B maps and evict
   expect(a).toContain("--best-effort-hierarchy");
   expect(a).not.toContain("flatten");
   expect(a).toContain("opt_dff");
+  // techmap is phase B's job: the whole-core gate level never exists at once.
+  expect(a).not.toContain("techmap");
   expect(a).toContain("write_rtlil $RUN/wordlevel.il");
   expect(a).toContain("tee -q -o $RUN/modules.txt ls");
   expect(a).not.toContain("abc -liberty");
-  const b = streamedPhaseBShell({ runDir: "$RUN", liberty: "$LIB", yosysVar: "$YS", periodPs: 800, logVar: "$RUN/synth.log" }).join("\n");
+  const b = streamedPhaseBShell({ runDir: "$RUN", liberty: "$LIB", yosysVar: "$YS", periodPs: 800, logVar: "$RUN/synth.log", pullTag: "sta-rtl-x" }).join("\n");
+  expect(b).toContain("rtlil_width_map.py");
+  expect(b).toContain("/opt/testharness/runs/sta-rtl-x/output/width-map.json");
   expect(b).toContain("read_rtlil $RUN/wordlevel.il");
   for (const step of ["select %s", "techmap", "dfflibmap -liberty %s", "write_verilog -selected -noattr -noexpr", "select -clear", "delete %s"]) {
     expect(b).toContain(step);

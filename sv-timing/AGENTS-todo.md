@@ -59,8 +59,11 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
 - [x] Board (review tree, delay-v31 + snapshot): worst RegToReg **21.0**
   (`fpnew_fma_multi`, exponent widths unresolved), 696 failing primary paths —
   the count rose with width scaling because a 64-bit add is 12 FO4 here.
-- [ ] Elaborated per-module net-width sidecar (yosys `write_json` netnames) so
-  function-derived localparams (`geo(CVA6Cfg).slots`, `exp_bits()`) resolve.
+- [x] Elaborated per-module net-width sidecar: `tools/rtlil_width_map.py`
+  (RTLIL `wire width N \name` → `{module: {net: bits}}`), `--width-map` on
+  analyze/correct, `WidthResolver` fallback for packed signals the source
+  cannot size; streamed `sta-rtl` produces and pulls it. Whole-core map still
+  pending (phase A re-run word-level only after a techmap OOM).
 - [ ] Whole-core mapped STA: streamed run in progress; none finished yet.
 - [ ] 10 FO4 completion: the residual is 64-bit adders/compares (12 FO4 at
   this table) plus a few real narrow chains (`g6lc_bp_ckpt` 17, `instr_queue`

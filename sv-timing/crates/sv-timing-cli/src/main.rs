@@ -220,6 +220,10 @@ enum Commands {
         /// Debug surface for path forensics with the real param-map.
         #[arg(long = "ir-out")]
         ir_out: Option<PathBuf>,
+        /// Elaborated net widths (`tools/rtlil_width_map.py` JSON) for signals
+        /// the source cannot size (constant-function localparams).
+        #[arg(long = "width-map")]
+        width_map: Option<PathBuf>,
         /// Optimization level + dials (analysis dials apply here).
         #[command(flatten)]
         opt: OptArgs,
@@ -431,6 +435,9 @@ enum Commands {
         /// JSONL algorithm trace (measure / scale / worklist / apply / refuse).
         #[arg(long = "trace-log")]
         trace_log: Option<PathBuf>,
+        /// Elaborated net widths (`tools/rtlil_width_map.py` JSON), see `analyze`.
+        #[arg(long = "width-map")]
+        width_map: Option<PathBuf>,
         /// Optimization level + the ten dials.
         #[command(flatten)]
         opt: OptArgs,
@@ -957,6 +964,15 @@ fn build_param_map(
     cfg_snapshot: Option<PathBuf>,
     assume_xlen: Option<u32>,
 ) -> Result<ParamMap, String> {
+    build_param_map_with_widths(param_map, cfg_snapshot, assume_xlen, None)
+}
+
+fn build_param_map_with_widths(
+    param_map: Option<PathBuf>,
+    cfg_snapshot: Option<PathBuf>,
+    assume_xlen: Option<u32>,
+    width_map: Option<PathBuf>,
+) -> Result<ParamMap, String> {
     let mut map = ParamMap::new();
     let path = param_map.or(cfg_snapshot);
     if let Some(p) = path {
@@ -964,6 +980,9 @@ fn build_param_map(
     }
     if let Some(x) = assume_xlen {
         map = map.with_assume_xlen(x);
+    }
+    if let Some(w) = width_map {
+        map = map.with_width_map_path(&w).map_err(|e| e.to_string())?;
     }
     Ok(map)
 }
@@ -1180,6 +1199,7 @@ fn main() -> ExitCode {
             allow_parse_errors,
             trace_log,
             ir_out,
+            width_map,
             opt,
         } => {
             let opt = match opt.resolve(None) {
@@ -1232,7 +1252,7 @@ fn main() -> ExitCode {
                 target: TimingTarget::new(target_mhz, fo4_ps, budget_margin),
                 cost_model: load_fo4_v1_default(),
                 module_filter: module_filter.clone(),
-                param_map: match build_param_map(param_map, cfg_snapshot, assume_xlen) {
+                param_map: match build_param_map_with_widths(param_map, cfg_snapshot, assume_xlen, width_map) {
                     Ok(m) => m,
                     Err(e) => {
                         eprintln!("error: {e}");
@@ -1409,6 +1429,7 @@ fn main() -> ExitCode {
             package_mode,
             allow_parse_errors,
             trace_log,
+            width_map,
             opt,
         } => {
             let opt = match opt.resolve(max_passes) {
@@ -1473,7 +1494,7 @@ fn main() -> ExitCode {
             // construct `ParamMap::new()` — an empty map — which meant it lowered the
             // emitted RTL without any of the `CVA6Cfg.*` values the real analysis had,
             // produced no paths, and then reported that as a closure verdict.
-            let base_param_map = match build_param_map(param_map, cfg_snapshot, assume_xlen) {
+            let base_param_map = match build_param_map_with_widths(param_map, cfg_snapshot, assume_xlen, width_map) {
                 Ok(m) => m,
                 Err(e) => {
                     eprintln!("error: {e}");

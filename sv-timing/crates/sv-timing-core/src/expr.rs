@@ -508,7 +508,9 @@ impl Expr {
                             .map(|l| l.fo4_critical_cost_latticed(base, seed))
                             .fold(0.0_f64, f64::max);
                         return base(OperatorClass::AddSub)
-                            + CSA_LEVEL_LOGIC_BITS * base(OperatorClass::LogicBit) * (n - 2) as f64
+                            + CSA_LEVEL_LOGIC_BITS
+                                * base(OperatorClass::LogicBit)
+                                * (n - 2) as f64
                             + worst;
                     }
                 }
@@ -2661,7 +2663,10 @@ mod tests {
         let cast_w = Expr::parse("(CVA6Cfg.PtLevels + HYP_EXT) * VpnLen");
         assert_eq!(cast_w.dominant_op_class(), OperatorClass::AddSub);
         let c = cast_w.fo4_critical_cost(&base);
-        assert!((10.0..56.0).contains(&c), "const*runtime is one CPA, got {c}");
+        assert!(
+            (10.0..56.0).contains(&c),
+            "const*runtime is one CPA, got {c}"
+        );
         // Same expression is elaboration when VpnLen is a module localparam.
         let seeded = ConstSeed::from_names(["VpnLen", "PtLevels"]);
         assert_eq!(
@@ -2725,7 +2730,11 @@ mod tests {
         // `Cfg.FIELD` is Const under the heuristic seed; VpnLen is runtime by
         // name. Their product is not elaboration (0) — it is a shift-add CPA.
         let mixed = Expr::parse("ExampleCfg.PtLevels * VpnLen");
-        assert_eq!(mixed.dominant_op_class(), OperatorClass::AddSub, "{mixed:?}");
+        assert_eq!(
+            mixed.dominant_op_class(),
+            OperatorClass::AddSub,
+            "{mixed:?}"
+        );
         assert!(mixed.fo4_critical_cost(&arithmetic_base) >= 10.0);
         for (left, right) in [
             ("a", "b"),
@@ -2876,7 +2885,10 @@ mod tests {
             OperatorClass::AddSub,
             "32'(a+b) is a+b"
         );
-        assert_eq!(Expr::parse("32'(a + b)").fo4_critical_cost(&arithmetic_base), 10.0);
+        assert_eq!(
+            Expr::parse("32'(a + b)").fo4_critical_cost(&arithmetic_base),
+            10.0
+        );
         // csr_regfile pmpaddr read: a part-select bound inside a cast is not an adder.
         let pmp = Expr::parse("CVA6Cfg.XLEN'({pmpaddr_q[pmpaddr_index][CVA6Cfg.PLEN-3:1], 1'b1})");
         assert!(
@@ -3250,18 +3262,30 @@ mod tests {
     #[test]
     fn multi_operand_add_is_carry_save_plus_one_cpa() {
         // Two operands: one CPA.
-        assert_eq!(Expr::parse("a + b").fo4_critical_cost(&arithmetic_base), 10.0);
+        assert_eq!(
+            Expr::parse("a + b").fo4_critical_cost(&arithmetic_base),
+            10.0
+        );
         // Three runtime operands: CPA + one 3:2 level.
-        assert_eq!(Expr::parse("a + b + c").fo4_critical_cost(&arithmetic_base), 11.5);
+        assert_eq!(
+            Expr::parse("a + b + c").fo4_critical_cost(&arithmetic_base),
+            11.5
+        );
         // fpnew exponent_product shape: six runtime operands (calls are leaves)
         // plus constants folded into one — not 5 x 10 serial.
         let e = Expr::parse(
             "exponent_a + info_a.is_subnormal + exponent_b + info_b.is_subnormal - 2 * bias_src + bias_dst",
         );
         let c = e.fo4_critical_cost(&arithmetic_base);
-        assert!((16.0..=20.0).contains(&c), "6-operand sum should be CPA + 4 CSA levels, got {c} {e:?}");
+        assert!(
+            (16.0..=20.0).contains(&c),
+            "6-operand sum should be CPA + 4 CSA levels, got {c} {e:?}"
+        );
         // Constants fold: `a + b + 1 + 2` is still one CPA + one level.
-        assert_eq!(Expr::parse("a + b + 1 + 2").fo4_critical_cost(&arithmetic_base), 11.5);
+        assert_eq!(
+            Expr::parse("a + b + 1 + 2").fo4_critical_cost(&arithmetic_base),
+            11.5
+        );
         // `x + 1` stays an increment (no flattening below three operands).
         assert!(Expr::parse("x + 1").fo4_critical_cost(&arithmetic_base) < 4.0);
         // A multiply inside the sum is a leaf whose cost adds to the CSA/CPA.
@@ -3296,7 +3320,11 @@ mod tests {
             "a * WIDTH",
         ] {
             let e = Expr::parse(text);
-            assert_eq!(e.dominant_op_class(), OperatorClass::AddSub, "{text}: {e:?}");
+            assert_eq!(
+                e.dominant_op_class(),
+                OperatorClass::AddSub,
+                "{text}: {e:?}"
+            );
             let c = e.fo4_critical_cost(&arithmetic_base);
             assert!((10.0..56.0).contains(&c), "{text}: {c}");
         }
@@ -3440,7 +3468,10 @@ mod tests {
         let sum = e.fo4_cost(&base);
         let crit = e.fo4_critical_cost(&base);
         assert!(crit <= sum + 1e-9, "crit={crit} sum={sum}");
-        assert!(crit >= 10.0 + 2.0 * CSA_LEVEL_LOGIC_BITS - 1e-9, "crit={crit}");
+        assert!(
+            crit >= 10.0 + 2.0 * CSA_LEVEL_LOGIC_BITS - 1e-9,
+            "crit={crit}"
+        );
     }
 
     #[test]

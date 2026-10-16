@@ -1005,6 +1005,31 @@ export async function runRemoteScript(
 }
 
 /**
+ * Pull `/opt/testharness/runs/<tag>/output/` back through the proxy
+ * (`pull --tag`). Used for small result files a remote script leaves there
+ * (the sta-rtl streamed recipe's elaborated width map).
+ */
+export async function pullRemoteOutput(
+  ctx: PlatformContext,
+  tag: string,
+  dest: string,
+): Promise<{ ok: boolean; text: string }> {
+  const wrapper = "verif/regress/remote-testharness.sh";
+  if (!existsSync(join(ctx.repoRoot, wrapper))) return { ok: false, text: `${wrapper} missing` };
+  const onWindows = ctx.host.os === "windows";
+  if (onWindows && !hasWsl()) return { ok: false, text: "wsl unavailable" };
+  mkdirSync(dest, { recursive: true });
+  const destArg = onWindows ? await windowsPathToWsl(dest) : dest;
+  const repoArg = onWindows ? await windowsPathToWsl(ctx.repoRoot) : ctx.repoRoot;
+  const hostFlag = ctx.config.verify.formal?.remoteHost ? ` --host ${ctx.config.verify.formal.remoteHost}` : "";
+  const posix = `cd ${JSON.stringify(repoArg)} && bash ${wrapper}${hostFlag} --timeout 600 pull --tag ${tag} --dest ${JSON.stringify(destArg)}`;
+  const res = onWindows
+    ? await run("wsl", wslCommand(posix), { cwd: ctx.repoRoot, stdio: "capture", allowFailure: true, dryRun: ctx.dryRun, logger: ctx.logger })
+    : await run("bash", ["-lc", posix], { cwd: ctx.repoRoot, stdio: "capture", allowFailure: true, dryRun: ctx.dryRun, logger: ctx.logger });
+  return { ok: res.ok, text: `${res.stdout}\n${res.stderr}` };
+}
+
+/**
  * Synthesis smoke for every target on the remote builder in one round trip.
  *
  * Uses the builder's managed formal toolchain, whose Yosys has the slang

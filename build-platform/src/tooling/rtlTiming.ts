@@ -24,7 +24,7 @@
 // platform matching soc.process (nangate45 / sky130hd / sky130hs / asap7).
 // Numbers from a study library rank paths; they are not sign-off.
 
-import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
 import type { PlatformContext } from "../context.ts";
@@ -32,6 +32,7 @@ import { run } from "../platform/exec.ts";
 import { getHostInfo } from "../platform/os.ts";
 import { windowsPathToWsl, wslCommand } from "../platform/wsl.ts";
 import { snapshotCvaCfg } from "./cfgSnapshot.ts";
+import { pullRemoteOutput } from "./eda.ts";
 import {
   REMOTE_FORMAL,
   REMOTE_OPENROAD,
@@ -329,8 +330,10 @@ export function buildMapScript(opts: {
           "memory_map",
           "opt_clean",
           "opt_dff",
-          "techmap",
-          "opt_clean",
+          // `streamed` keeps the design word-level here: techmap is the pass
+          // that balloons the whole-core representation (44/48 GiB), so it
+          // runs per module in phase B.
+          ...(opts.recipe === "streamed" ? [] : ["techmap", "opt_clean"]),
         ];
   return [
     [
@@ -378,7 +381,7 @@ export function abcCommand(liberty: string, periodPs?: number): string {
  * instances as plain cell instantiations, so OpenSTA links the set as a
  * hierarchical netlist.
  */
-export function streamedPhaseBShell(opts: { runDir: string; liberty: string; yosysVar: string; periodPs: number; logVar: string }): string[] {
+export function streamedPhaseBShell(opts: { runDir: string; liberty: string; yosysVar: string; periodPs: number; logVar: string; pullTag: string }): string[] {
   const abc = abcCommand(opts.liberty, opts.periodPs);
   return [
     `if [ ! -s "${opts.runDir}/modules.txt" ] || [ ! -s "${opts.runDir}/wordlevel.il" ]; then echo "RESULT fail synth"; echo LOGSTART; tail -40 "${opts.logVar}"; echo LOGEND; exit 1; fi`,
@@ -397,6 +400,10 @@ export function streamedPhaseBShell(opts: { runDir: string; liberty: string; yos
     `if [ "$rcb" != 0 ]; then echo "RESULT fail synth"; echo LOGSTART; tail -40 "${opts.runDir}/synth-map.log"; echo LOGEND; exit 1; fi`,
     `cat "${opts.runDir}/mapped/"*.v > "${opts.runDir}/netlist.v"`,
     `grep -h "Chip area for module" "${opts.runDir}/synth-map.log" | awk '{s+=$NF} END {printf "SYNTH_STREAM_AREA total=%.3f\n", s}'`,
+    // Elaborated net widths for sv-timing's width inference, parked where the
+    // proxy's `pull --tag` reaches them.
+    `mkdir -p "/opt/testharness/runs/${opts.pullTag}/output"`,
+    `python3 "$REPO/sv-timing/tools/rtlil_width_map.py" "${opts.runDir}/wordlevel.il" -o "/opt/testharness/runs/${opts.pullTag}/output/width-map.json" && echo "WIDTH_MAP ok"`,
   ];
 }
 
@@ -537,6 +544,9 @@ async function runSvtPrepass(
     jsonOut: posixPath(join(svtDir, "correct.json")),
     cache: posixPath(join(svtDir, "ir.sqlite")),
     paramMap,
+    // Elaborated widths from a previous remote `--map-recipe streamed` run
+    // (phase A's wordlevel.il through tools/rtlil_width_map.py, pulled back).
+    widthMap: existsSync(join(svtDir, "width-map.json")) ? posixPath(join(svtDir, "width-map.json")) : undefined,
     assumeXlen: ctx.config.soc.xlen as number | undefined,
     packageMode: "packages",
     extraArgs: [...defaults, ...extra],
@@ -779,7 +789,7 @@ async function runRemote(
     periodPs: 1e6 / opts.targetMhz,
   });
   const phaseB = opts.mapRecipe === "streamed"
-    ? streamedPhaseBShell({ runDir: "$RUN", liberty: "$LIB", yosysVar: "$YS", periodPs: 1e6 / opts.targetMhz, logVar: "$RUN/synth.log" })
+    ? streamedPhaseBShell({ runDir: "$RUN", liberty: "$LIB", yosysVar: "$YS", periodPs: 1e6 / opts.targetMhz, logVar: "$RUN/synth.log", pullTag: `sta-rtl-${opts.target}` })
     : [];
 
   const lines = [
@@ -842,6 +852,18 @@ async function runRemote(
     return { ...result, ok: true, dryRun: true };
   }
   writeFileSync(join(outDir, "remote.log"), res.text, "utf8");
+  if (/^WIDTH_MAP ok/m.test(res.text)) {
+    const dest = join(outDir, "remote-output");
+    const pulled = await pullRemoteOutput(ctx, `sta-rtl-${opts.target}`, dest);
+    const src = join(dest, "width-map.json");
+    if (pulled.ok && existsSync(src)) {
+      mkdirSync(join(outDir, "svt"), { recursive: true });
+      copyFileSync(src, join(outDir, "svt", "width-map.json"));
+      stages.push({ id: "s1-width-map", status: "pass", detail: `elaborated net widths → ${posixPath(join(outDir, "svt", "width-map.json"))} (next sv-timing pre-pass uses --width-map)` });
+    } else {
+      stages.push({ id: "s1-width-map", status: "skip", detail: `width map produced on the builder but not pulled (${pulled.text.trim().split("\n").slice(-1)[0] ?? ""})` });
+    }
+  }
   if (res.error) {
     stages.push({ id: "remote", status: "fail", detail: res.error });
     return result;

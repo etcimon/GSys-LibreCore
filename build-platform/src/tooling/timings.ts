@@ -823,6 +823,8 @@ export function buildSvTimingCorrectArgs(opts: {
   jsonOut?: string;
   cache?: string;
   paramMap?: string;
+  /** Elaborated net widths (`--width-map`), when a pulled width-map.json exists. */
+  widthMap?: string;
   assumeXlen?: number;
   packageMode?: "off" | "packages";
   /**
@@ -858,6 +860,9 @@ export function buildSvTimingCorrectArgs(opts: {
   if (opts.jsonOut) args.push("--json-out", opts.jsonOut);
   if (opts.paramMap) {
     args.push("--param-map", opts.paramMap);
+  }
+  if (opts.widthMap) {
+    args.push("--width-map", opts.widthMap);
   }
   if (opts.assumeXlen !== undefined) {
     args.push("--assume-xlen", String(opts.assumeXlen));

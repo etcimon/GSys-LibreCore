@@ -1209,11 +1209,14 @@ fn apply_work_item(
                     return Ok((false, Some("latency_not_allowed")));
                 }
                 Err(TransformError::InvalidOpportunity(detail)) => {
-                    ctx.log_algo("cut.refuse_detail", AlgoTrace::kv([
-                        ("path_id", json!(ins_opp.path_id)),
-                        ("module", json!(ctx.active_module_name)),
-                        ("detail", json!(detail)),
-                    ]));
+                    ctx.log_algo(
+                        "cut.refuse_detail",
+                        AlgoTrace::kv([
+                            ("path_id", json!(ins_opp.path_id)),
+                            ("module", json!(ctx.active_module_name)),
+                            ("detail", json!(detail)),
+                        ]),
+                    );
                     return Ok((false, Some("cut_schedule")));
                 }
                 Err(e) => return Err(e),

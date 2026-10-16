@@ -16,6 +16,10 @@ use serde_json::Value;
 
 use crate::error::{CoreError, CoreResult};
 
+/// Elaborated net widths per base module name (`--width-map`), from
+/// `tools/rtlil_width_map.py` over a `write_rtlil` dump.
+pub type WidthMap = BTreeMap<String, BTreeMap<String, u32>>;
+
 /// Host-supplied hierarchical / const substitutions.
 #[derive(Debug, Clone, Default)]
 pub struct ParamMap {
@@ -23,6 +27,11 @@ pub struct ParamMap {
     pub entries: BTreeMap<String, Value>,
     /// Source path if loaded from disk.
     pub source: Option<String>,
+    /// Elaborated widths (module → net → bits). Consulted by width inference
+    /// for packed signals whose declaration the source cannot size (constant
+    /// functions). Its CRC is keyed into `entries` as `__width_map` so the
+    /// analyze cache and fingerprints see it.
+    pub width_map: WidthMap,
 }
 
 impl ParamMap {
@@ -58,6 +67,7 @@ impl ParamMap {
         Ok(Self {
             entries,
             source: None,
+            width_map: WidthMap::new(),
         })
     }
 
@@ -88,6 +98,44 @@ impl ParamMap {
             self.insert("CVA6Cfg.XLEN-1", Value::from(xlen.saturating_sub(1)));
         }
         self
+    }
+
+    /// Attach an elaborated width map (`sv-timing-width-map.v1` JSON).
+    pub fn with_width_map_path(mut self, path: impl AsRef<Path>) -> CoreResult<Self> {
+        let path = path.as_ref();
+        let text = std::fs::read_to_string(path).map_err(|source| CoreError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        let doc: Value = serde_json::from_str(&text)
+            .map_err(|e| CoreError::InvalidOptions(format!("width map {}: {e}", path.display())))?;
+        if doc.get("schema").and_then(Value::as_str) != Some("sv-timing-width-map.v1") {
+            return Err(CoreError::InvalidOptions(format!(
+                "width map {}: expected schema sv-timing-width-map.v1",
+                path.display()
+            )));
+        }
+        let mut map = WidthMap::new();
+        if let Some(mods) = doc.get("modules").and_then(Value::as_object) {
+            for (m, nets) in mods {
+                let Some(nets) = nets.as_object() else {
+                    continue;
+                };
+                let entry = map.entry(m.clone()).or_default();
+                for (n, w) in nets {
+                    if let Some(w) = w.as_u64() {
+                        entry.insert(n.clone(), u32::try_from(w).unwrap_or(u32::MAX));
+                    }
+                }
+            }
+        }
+        let digest = fnv1a64(text.as_bytes());
+        self.entries.insert(
+            "__width_map".into(),
+            Value::String(format!("{digest:016x}")),
+        );
+        self.width_map = map;
+        Ok(self)
     }
 
     /// Lookup exact key.
@@ -172,6 +220,16 @@ impl ParamMap {
         }
         lines.join("\n")
     }
+}
+
+/// FNV-1a 64 — a content fingerprint for cache keys, not a security hash.
+fn fnv1a64(bytes: &[u8]) -> u64 {
+    let mut h: u64 = 0xcbf2_9ce4_8422_2325;
+    for b in bytes {
+        h ^= u64::from(*b);
+        h = h.wrapping_mul(0x0000_0100_0000_01b3);
+    }
+    h
 }
 
 fn canonical_param_value(value: &Value) -> String {

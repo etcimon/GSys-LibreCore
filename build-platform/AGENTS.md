@@ -436,7 +436,12 @@ bun run src/cli/index.ts setup --install --profile dual-hart
   pre-pass writes `svt/cfg-snapshot.json` — the 222 elaborated `CVA6Cfg`
   int/bit fields from a yosys-slang probe (`tooling/cfgSnapshot.ts`) — and
   merges them into `svt/param-map.json`, so sv-timing's width inference
-  (delay-v29) resolves cfg-dimensioned counters. Tests:
+  (delay-v29) resolves cfg-dimensioned counters. A streamed remote run also
+  derives `width-map.json` from phase A's RTLIL (`sv-timing/tools/
+  rtlil_width_map.py`), parks it under the proxy's `runs/sta-rtl-<target>/
+  output/`, and the host pulls it (`pullRemoteOutput`) to `svt/width-map.json`;
+  the next pre-pass passes `--width-map` so function-derived localparams
+  (`geo(CVA6Cfg).slots`) are sized by the elaborator. Tests:
   `test/sta-rtl-study.test.ts`.
 
 #### 4.6.2a Running the formal gate

@@ -280,25 +280,46 @@ pub fn prepare_pipeline_cuts(
         return Err(TransformError::LatencyNotAllowed);
     }
     if !ctx.policy.module_allowed(&ctx.active_module_name) {
-        return Err(TransformError::ModuleNotAllowlisted(ctx.active_module_name.clone()));
+        return Err(TransformError::ModuleNotAllowlisted(
+            ctx.active_module_name.clone(),
+        ));
     }
     resolve_gate(ctx)?;
-    let path_idx = ctx.design.paths.iter().position(|p| p.id == opportunity.path_id)
+    let path_idx = ctx
+        .design
+        .paths
+        .iter()
+        .position(|p| p.id == opportunity.path_id)
         .ok_or_else(|| TransformError::InvalidOpportunity("path missing".into()))?;
     let original_path = ctx.design.paths[path_idx].clone();
     let module_id = original_path.module;
-    let module = ctx.design.modules.get(&module_id)
+    let module = ctx
+        .design
+        .modules
+        .get(&module_id)
         .ok_or_else(|| TransformError::InvalidOpportunity("module missing".into()))?;
-    let first_new_id = module.nodes.keys().next_back().copied().unwrap_or(0)
+    let first_new_id = module
+        .nodes
+        .keys()
+        .next_back()
+        .copied()
+        .unwrap_or(0)
         .checked_add(1)
         .ok_or_else(|| TransformError::InvalidOpportunity("node ids exhausted".into()))?;
-    let original_nodes: Vec<_> = original_path.nodes.iter()
-        .filter_map(|id| module.nodes.get(id).cloned()).collect();
+    let original_nodes: Vec<_> = original_path
+        .nodes
+        .iter()
+        .filter_map(|id| module.nodes.get(id).cloned())
+        .collect();
     let original_dirty = ctx.pending_ir_dirty;
     let result = expand_expr_spine_for_path(ctx, opportunity.path_id)
         .and_then(|_| select_pipeline_cuts(ctx, opportunity));
     if result.is_err() {
-        let module = ctx.design.modules.get_mut(&module_id).expect("trial module");
+        let module = ctx
+            .design
+            .modules
+            .get_mut(&module_id)
+            .expect("trial module");
         drop(module.nodes.split_off(&first_new_id));
         for node in original_nodes {
             module.nodes.insert(node.id, node);
@@ -369,7 +390,12 @@ pub fn select_pipeline_cuts(
     // pipe that is right for every iteration — refuse the cut (raw_checker
     // `gen_same_rd`, instr_scan). Lean emit never reads the origin, but the
     // cut is booked as FO4 either way, so refuse at the source.
-    if let Some(path) = ctx.design.paths.iter().find(|p| p.id == opportunity.path_id) {
+    if let Some(path) = ctx
+        .design
+        .paths
+        .iter()
+        .find(|p| p.id == opportunity.path_id)
+    {
         if let Some(module) = ctx.design.modules.get(&path.module) {
             let block_local = module.block_local_names();
             if !block_local.is_empty() {
@@ -1898,7 +1924,13 @@ mod tests {
 
     fn expansion_trial() -> (PassContext, Opportunity) {
         let mut design = design_with_path();
-        let root = design.modules.get_mut(&0).unwrap().nodes.get_mut(&0).unwrap();
+        let root = design
+            .modules
+            .get_mut(&0)
+            .unwrap()
+            .nodes
+            .get_mut(&0)
+            .unwrap();
         root.rhs = Some("a + b + c + d".into());
         root.rhs_expr = Some(sv_timing_core::Expr::parse(root.rhs.as_ref().unwrap()));
         root.fo4_cost = 30.0;
@@ -1926,8 +1958,10 @@ mod tests {
     fn refused_expansion_does_not_change_ir_or_dirty_state() {
         let (mut ctx, opp) = expansion_trial();
         let before = serde_json::to_value(&ctx.design).unwrap();
-        assert!(matches!(prepare_pipeline_cuts(&mut ctx, &opp),
-                         Err(TransformError::IncompleteGateInfo)));
+        assert!(matches!(
+            prepare_pipeline_cuts(&mut ctx, &opp),
+            Err(TransformError::IncompleteGateInfo)
+        ));
         assert_eq!(serde_json::to_value(&ctx.design).unwrap(), before);
         assert!(!ctx.pending_ir_dirty);
 
@@ -1935,17 +1969,23 @@ mod tests {
         ctx.assume_clk = true;
         let module = ctx.design.modules.get_mut(&0).unwrap();
         module.decls.push(sv_timing_core::ir::DeclSite {
-            name: "local_value".into(), type_name: "logic".into(),
-            packed_text: String::new(), unpacked_text: String::new(),
-            loc: loc(), block_local: true,
-            scope: None, loop_var: false,
+            name: "local_value".into(),
+            type_name: "logic".into(),
+            packed_text: String::new(),
+            unpacked_text: String::new(),
+            loc: loc(),
+            block_local: true,
+            scope: None,
+            loop_var: false,
         });
         for id in 1..4 {
             module.nodes.get_mut(&id).unwrap().lhs = Some("local_value".into());
         }
         let before = serde_json::to_value(&ctx.design).unwrap();
-        assert!(matches!(prepare_pipeline_cuts(&mut ctx, &opp),
-                         Err(TransformError::InvalidOpportunity(_))));
+        assert!(matches!(
+            prepare_pipeline_cuts(&mut ctx, &opp),
+            Err(TransformError::InvalidOpportunity(_))
+        ));
         assert_eq!(serde_json::to_value(&ctx.design).unwrap(), before);
         assert!(!ctx.pending_ir_dirty);
         assert!(ctx.trace.records.is_empty());

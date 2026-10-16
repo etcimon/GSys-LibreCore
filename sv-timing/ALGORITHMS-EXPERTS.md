@@ -7021,9 +7021,20 @@ probe, and reads each port's bit count from `write_json` (value = width − 1).
 `cva6_cfg.<Field>` (`svt/cfg-snapshot.json` keeps provenance). With it the
 scoreboard commit-pointer adds (5 bits) and `g6lc_bp_ckpt`'s span arithmetic
 (4 bits) resolve; `g6lc_fetch_pkg::geo(CVA6Cfg).slots`-style function-derived
-localparams and fpnew's `exp_bits()` widths do not — the next step is an
-elaborated per-module net-width sidecar (yosys `write_json` netnames after
-`read_slang`), which would close that class generally.
+localparams and fpnew's `exp_bits()` widths do not. For those the elaborator's
+own net widths are the input: `tools/rtlil_width_map.py` turns the `write_rtlil`
+dump the streamed recipe's phase A produces (after `read_slang; hierarchy;
+proc; …`) into `{module: {net: bits}}` keyed by base module name (slang's
+`name$hier.path` specializations merged, widest wins — the conservative
+direction); `analyze`/`correct --width-map` attach it (`ParamMap::width_map`,
+fingerprinted as `__width_map` for the cache) and `WidthResolver` consults it
+only for signals the source could not size and whose declaration is packed
+(unpacked arrays are memories or flattened wires there). The remote `sta-rtl`
+streamed run parks the map under the proxy's `runs/<tag>/output/`, the host
+pulls it to `svt/width-map.json`, and the next pre-pass passes `--width-map`.
+Tests: `width::tests` (elaborated fixture entry fills `two_d`, refused for the
+unpacked `mem`, ignored where source sizing wins), `verif/regress/
+test_rtlil_width_map.py`.
 
 ## A87 — Whole-core mapping on the builder: what it took, what is still open
 
