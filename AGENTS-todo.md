@@ -1806,10 +1806,20 @@ prerequisite for this work under the existing dual license. No licensing policy 
   data-array handoff again (T28/T34 family: ACK-before-check, check
   pointer reuse), not forwarding (`st_fwd_valid=0` would be the
   signature; the T36 `+smt_mem_watch` run at the first PA showed exactly
-  that). FST window **428,672,300–460 on `ooocoh-t38-ooo-fst-build`**
-  (`prof-t37bfst`, in flight, ≈ 6 h) for the wbuffer/data-array state of
-  that dword. The T35-class first instance: the ooo L1 with the fixed
-  initrd hit its assertion form at cycle 460,435,800 before t38.
+  that). The trace model ran at ≈ 7 k cycles/s on the shared host (14 h to
+  the window), so the witness is the watch instead: the oracle's Sv39 walk
+  at retire 330,350,549 (`--walk=…:814e7`) gives the stack page
+  `ppn=0x818cb` (`[VRW--GAD]`, every PTE stored by the kernel), i.e. the
+  dword is **PA `0x818cb608`** (`buflen` at `0x818cb750`); the wbuffer
+  watch gained `wt_alloc` (arrival/merge with the entry's byte state),
+  `wt_fixup_push`, `wt_fixup_wr` next to `wt_tx`/`wt_ack`/`wt_check` and
+  the mem side's `wt_lookup`/`wt_word`/`wt_inval`; run `l3watch2` on
+  `ooocoh-t40-ooo-pgo-build` (t39 + the prints) with
+  `+smt_mem_watch=818cb608` to cycle 428.68 M (≈ 4 h) — in flight. Stage
+  53 (`ooo_mem_min.S`, the copy-loop shape in bare mode) passes 153/153:
+  the shape alone does not trigger it. The T35-class first instance: the
+  ooo L1 with the fixed initrd hit its assertion form at cycle
+  460,435,800 before t38.
   Housekeeping found on the way: three sim-only per-commit
   trace files were written unconditionally on every run (`trace_hart_0.dasm`
   33 GB, `iti.traces` 15.5 GB, `encaps.traces` per 760 M cycles — 190 GB
