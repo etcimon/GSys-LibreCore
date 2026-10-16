@@ -154,7 +154,12 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   once; emit: all-or-nothing RHS rewrites per record, loop header vars
   block-local. Whole core elaborates. Live board 55.0 worst (iq dense
   class / 47 cells), 689 of 1625 reg→reg.
-- [ ] A105 next: netlist evidence for A105 (live remap + module board);
+- [x] A105 netlist (emitted tree): store_buffer 49 → 42 cells (compaction),
+  frontend 43 → 38 (three-operand sum), scoreboard 54 → 51; iq mapped by
+  the plain fallback (49 cells, not comparable).
+- [ ] A105 next: live remap with csr / scoreboard edits (in flight:
+  `sta-rtl-live-a105.log`); the emitted iq needs the delay-oriented ABC
+  within budget (raise the per-module timeout or split the dispatch block);
   scoreboard `mem_n` write-site chain (54 cells, under-read 15.6 — the
   board's trace names only yosys internals; map the module with RTL
   names kept (`keep` on `mem_n`) for one diagnostic run); the dense-cone

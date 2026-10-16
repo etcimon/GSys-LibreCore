@@ -7831,6 +7831,21 @@ cells), 1247 failing primary, 689 of 1625 reg→reg**; calibration ratios
 of the real cones 0.9–1.7 cells/FO4 (iq 0.9, frontend 0.9, store_buffer
 1.3, rename 1.7, realign 0.9, wbuffer 1.1).
 
+### What the netlist said (emitted −O3 tree with A104/A105 iq + frontend, module board, Nangate45)
+
+| module | live run C | emitted A105 | reading |
+|---|---|---|---|
+| store_buffer | 5.38 ns / 49 cells | **3.81 ns / 42 cells** | StreamCompact in the squash: −7 cells, −29 % |
+| frontend | 4.09 / 43 | **3.15 / 38** | the three-operand target sum: −5 cells |
+| scoreboard | 5.16 / 54 | 3.86 / 51 | emitted BalanceMux/LoopRewrite; the commit bank is not in this tree yet |
+| g6lc_iq | 6.21 / 47 | 3.83 / 49 | mapped by the plain ABC fallback (the delay script timed out on the emitted iq) — cells not comparable |
+| rename | 4.41 / 52 | 4.41 / 52 | untouched |
+| rob | 2.63 / 35 | 2.46 / 35 | |
+
+The emitted tree elaborates and maps end to end again after the emit
+fixes below (its earlier run failed on `svt_bm_top_…` and `p`). The live
+remap with the csr and scoreboard edits is in flight.
+
 Emit (same round): origin RHS rewrites are all-or-nothing per record (a
 first rewrite that cannot land — an `if (c) x = y;` one-liner, a generate
 line — while an extra does left the extra reading an undeclared `_top`,
