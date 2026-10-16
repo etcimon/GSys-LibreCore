@@ -603,6 +603,95 @@ impl Expr {
             }
         }
     }
+    /// Names of every user function called in this expression.
+    pub fn call_names<'a>(&'a self, out: &mut Vec<&'a str>) {
+        match self {
+            Expr::Ident { .. } | Expr::Literal { .. } | Expr::Opaque { .. } => {}
+            Expr::Unary { arg, .. } => arg.call_names(out),
+            Expr::Binary { left, right, .. } => {
+                left.call_names(out);
+                right.call_names(out);
+            }
+            Expr::Ternary {
+                cond,
+                then_e,
+                else_e,
+            } => {
+                cond.call_names(out);
+                then_e.call_names(out);
+                else_e.call_names(out);
+            }
+            Expr::Concat { parts } => {
+                for p in parts {
+                    p.call_names(out);
+                }
+            }
+            Expr::Replicate { body, .. } => body.call_names(out),
+            Expr::PartSelect { left, right, .. } => {
+                left.call_names(out);
+                right.call_names(out);
+            }
+            Expr::Index { base, index } => {
+                base.call_names(out);
+                index.call_names(out);
+            }
+            Expr::Call { name, args } => {
+                if !name.starts_with('$') {
+                    out.push(name.as_str());
+                }
+                for a in args {
+                    a.call_names(out);
+                }
+            }
+        }
+    }
+
+    /// Every runtime index expression (`arr[idx]` with `idx` not constant
+    /// under `seed`), for the select-depth bill (delay-v38).
+    pub fn runtime_indices<'a>(&'a self, seed: &ConstSeed, out: &mut Vec<&'a Expr>) {
+        match self {
+            Expr::Ident { .. } | Expr::Literal { .. } | Expr::Opaque { .. } => {}
+            Expr::Unary { arg, .. } => arg.runtime_indices(seed, out),
+            Expr::Binary { left, right, .. } => {
+                left.runtime_indices(seed, out);
+                right.runtime_indices(seed, out);
+            }
+            Expr::Ternary {
+                cond,
+                then_e,
+                else_e,
+            } => {
+                cond.runtime_indices(seed, out);
+                then_e.runtime_indices(seed, out);
+                else_e.runtime_indices(seed, out);
+            }
+            Expr::Concat { parts } => {
+                for p in parts {
+                    p.runtime_indices(seed, out);
+                }
+            }
+            Expr::Replicate { body, .. } => body.runtime_indices(seed, out),
+            Expr::PartSelect { left, right, .. } => {
+                left.runtime_indices(seed, out);
+                right.runtime_indices(seed, out);
+            }
+            Expr::Index { base, index } => {
+                base.runtime_indices(seed, out);
+                if !is_constant_range_select(index) {
+                    let idx = indexed_part_select_base(index).unwrap_or(index);
+                    if !idx.const_class(seed).is_const() {
+                        out.push(idx);
+                    }
+                    idx.runtime_indices(seed, out);
+                }
+            }
+            Expr::Call { args, .. } => {
+                for a in args {
+                    a.runtime_indices(seed, out);
+                }
+            }
+        }
+    }
 
     /// Lattice class of this expression (P1).
     pub fn const_class(&self, seed: &ConstSeed) -> ConstClass {

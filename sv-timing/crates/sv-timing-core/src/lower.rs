@@ -1841,6 +1841,7 @@ where
             return_expr: return_expr_text(&text).unwrap_or_default(),
             return_dimension: return_dimension_text(tree, func),
             constants: constants.clone(),
+            body_text: text,
         });
     }
     out

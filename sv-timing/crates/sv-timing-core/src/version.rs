@@ -92,7 +92,11 @@ pub const IR_VERSION: &str = "ir-v1";
 /// = 0`) and cost a mux on the guard (compare + select level); the structural
 /// board had no register-to-register path at all through g6lc_iq / g6lc_lsq
 /// and 5× fewer cells than the netlist in scoreboard / rename / store_buffer.
-pub const MEASUREMENT_VERSION: &str = "delay-v37";
+/// `delay-v38`: a runtime index selects among 2^k entries — ceil(k/2) 4:1
+/// levels, not one; a zero-trip loop is dead; a guard on a bitwise
+/// self-accumulate is one gate (the under-read of rename / scoreboard /
+/// iq against the netlist, A104).
+pub const MEASUREMENT_VERSION: &str = "delay-v38";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

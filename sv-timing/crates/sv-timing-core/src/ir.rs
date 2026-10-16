@@ -485,6 +485,11 @@ pub struct FunctionBody {
     pub return_dimension: String,
     /// Integer `name = value` bindings visible in the enclosing scope.
     pub constants: Vec<(String, i64)>,
+    /// The declaration's full text (header to `endfunction`), for the
+    /// call-site cost of a multi-statement body (delay-v38): a find-first
+    /// `pick_free(fr)` is an incrementer and an encode, not one gate.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub body_text: String,
 }
 
 /// One variable or net declaration. An empty vector that this lowerer wrote

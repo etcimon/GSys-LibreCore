@@ -317,7 +317,7 @@ fn trip_bounds(
 
 /// The statement after the `for (...)` header, without an enclosing
 /// `begin … end` pair.
-fn loop_body(text: &str) -> Option<String> {
+pub(crate) fn loop_body(text: &str) -> Option<String> {
     let open = text.find('(')?;
     let mut depth = 0i32;
     let mut close = None;
@@ -354,7 +354,7 @@ fn loop_body(text: &str) -> Option<String> {
     Some(body.to_string())
 }
 
-fn normalize_ws(s: &str) -> String {
+pub(crate) fn normalize_ws(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut prev_space = false;
     for c in s.chars() {
@@ -794,7 +794,7 @@ fn ring_walk(
 
 /// Split a statement list text at top-level `;` (brackets, parens and
 /// `begin … end` blocks kept whole).
-fn split_statements(text: &str) -> Vec<String> {
+pub(crate) fn split_statements(text: &str) -> Vec<String> {
     let mut out = Vec::new();
     let mut depth = 0i32;
     let mut block = 0i32;
@@ -844,7 +844,7 @@ fn split_statements(text: &str) -> Vec<String> {
 
 /// `if (COND) BODY` → `(COND, BODY)` for a statement whose body is the rest
 /// (a `begin … end` block has its delimiters stripped).
-fn split_if(stmt: &str) -> Option<(String, String)> {
+pub(crate) fn split_if(stmt: &str) -> Option<(String, String)> {
     let rest = stmt.trim().strip_prefix("if (")?;
     let close = matching_paren(rest)?;
     let cond = rest[..close].trim().to_string();

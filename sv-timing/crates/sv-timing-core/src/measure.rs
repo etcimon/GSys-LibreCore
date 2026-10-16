@@ -157,6 +157,10 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
         // p < NrIssuePorts; …)` at two ports) is dead: its nodes are no
         // logic at all (delay-v37).
         let dead = dead_loop_nodes(module, &widths);
+        // delay-v38: a user function's body costs what its statements cost
+        // (serial, loops by trip count), charged at the call site instead of
+        // the one gate a `Call` was.
+        let fn_costs = function_body_costs(module, &packages, &widths, &model);
         // delay-v37: a guarded assignment is a mux on its guards — the
         // compare in `if (sel == 3'd5) y = a` and the one select level are
         // on y's path, and a dynamically indexed LHS decodes its index.
@@ -272,6 +276,12 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
                 if !ex.is_opaque() {
                     node.fo4_cost = ex.fo4_critical_cost_latticed(&base, &seed);
                     node.op_class = Some(ex.dominant_op_class_latticed(&seed));
+                    // delay-v38: a runtime index selects among 2^k entries —
+                    // ceil(k/2) 4:1 levels, not one. The expression bill
+                    // charged one `mux` per index; add the deeper levels of the
+                    // widest index once (critical-path approximation).
+                    node.fo4_cost += extra_select_levels(ex, &widths, &seed) * model.mux;
+                    node.fo4_cost += call_body_extra(ex, &fn_costs, &model);
                     if let Some(gc) = guard_cost {
                         node.fo4_cost =
                             node.fo4_cost.max(gc) + guard_level(&carried, node.id, &model);
@@ -1083,6 +1093,324 @@ fn find_first_floors(
         }
     }
     out
+}
+
+/// Serial cost of a function body's statements (delay-v38). Assignments cost
+/// their RHS at the reference width; a statement under `if (c)` adds the
+/// guard and one select level (one gate for a bitwise self-accumulate); a
+/// `for` with a resolvable bound multiplies its body by the trip count — by
+/// `log2` for a bitwise self-accumulate (`idx = idx | i`), the encode of a
+/// one-hot. `case` bodies and anything unparsable cost nothing (the return
+/// expression still does). Functions in packages are included.
+fn function_body_costs(
+    module: &TimingModule,
+    packages: &BTreeMap<String, crate::ir::TimingPackage>,
+    widths: &crate::width::WidthResolver<'_>,
+    model: &CostModel,
+) -> BTreeMap<String, f64> {
+    let mut out = BTreeMap::new();
+    let bodies = module
+        .function_bodies
+        .iter()
+        .chain(packages.values().flat_map(|p| p.function_bodies.iter()));
+    for fb in bodies {
+        if fb.body_text.is_empty() {
+            continue;
+        }
+        let c = function_text_cost(&fb.body_text, widths, model);
+        if c > 0.0 {
+            let e = out.entry(fb.name.clone()).or_insert(0.0_f64);
+            *e = e.max(c);
+        }
+    }
+    out
+}
+
+fn function_text_cost(
+    text: &str,
+    widths: &crate::width::WidthResolver<'_>,
+    model: &CostModel,
+) -> f64 {
+    // header `function … ;` up to the first `;` after the closing paren of the
+    // port list; body up to `endfunction`
+    let t = crate::loop_walk::normalize_ws(text);
+    let Some(end) = t.rfind("endfunction") else {
+        return 0.0;
+    };
+    let head_end = match t.find(')') {
+        Some(i) => t[i..].find(';').map(|j| i + j + 1).unwrap_or(0),
+        None => 0,
+    };
+    if head_end == 0 || head_end >= end {
+        return 0.0;
+    }
+    let body = &t[head_end..end];
+    statements_cost(body, widths, model, 0)
+}
+
+fn statements_cost(
+    body: &str,
+    widths: &crate::width::WidthResolver<'_>,
+    model: &CostModel,
+    depth: u32,
+) -> f64 {
+    if depth > 4 {
+        return 0.0;
+    }
+    let base = |c: OperatorClass| model.scaled_fo4(c, None);
+    let seed = crate::expr::ConstSeed::heuristic();
+    // ASAP over the statement list: a statement starts when the last write
+    // of anything it reads is done (independent statements overlap — the
+    // 64 `out[Perm[k]] = in[k]` of a permutation are wiring, not a chain).
+    let mut arrival: BTreeMap<String, f64> = BTreeMap::new();
+    let mut worst = 0.0_f64;
+    let roots = |text: &str| -> Vec<String> {
+        ident_tokens(text)
+            .into_iter()
+            .map(|s| ident_base(&s))
+            .filter(|s| !s.is_empty())
+            .collect()
+    };
+    let place =
+        |reads: &[String], writes: &[String], own: f64, arrival: &mut BTreeMap<String, f64>| {
+            let start = reads
+                .iter()
+                .filter_map(|r| arrival.get(r).copied())
+                .fold(0.0_f64, f64::max);
+            let done = start + own;
+            for w in writes {
+                let e = arrival.entry(w.clone()).or_insert(0.0);
+                *e = e.max(done);
+            }
+            done
+        };
+    for st in crate::loop_walk::split_statements(body) {
+        let st = st.trim();
+        if st.starts_with("for (") {
+            let Some(hdr_end) = st.find(')') else {
+                continue;
+            };
+            let header = &st[5..hdr_end];
+            let parts: Vec<&str> = header.split(';').collect();
+            if parts.len() < 2 {
+                continue;
+            }
+            let init = parts[0].rsplit('=').next().map(str::trim).unwrap_or("0");
+            let cond = parts[1].trim();
+            let (var, bound, inclusive) = if let Some((l, r)) = cond.split_once("<=") {
+                (l.trim(), r.trim(), true)
+            } else if let Some((l, r)) = cond.split_once('<') {
+                (l.trim(), r.trim(), false)
+            } else {
+                continue;
+            };
+            let (Some(lo), Some(hi)) = (widths.eval_text(init), widths.eval_text(bound)) else {
+                continue;
+            };
+            let trips = (hi - lo + i64::from(inclusive)).max(0) as u32;
+            if trips == 0 {
+                continue;
+            }
+            let inner = crate::loop_walk::loop_body(st).unwrap_or_default();
+            // Iterations are independent when every write is indexed by the
+            // loop variable (`data[b*8 +: 8] = …`): × 1. A linear update
+            // (`x = x | …`, `x = x ^ …`, a flag set under a guard, a
+            // shift-xor `state = {state[..], fb}`) is balanced by synthesis:
+            // × log2(trips). Anything else carried (`cid = cid + 1`)
+            // repeats per trip.
+            let stmts = crate::loop_walk::split_statements(&inner);
+            let writes_unindexed: Vec<&String> =
+                stmts.iter().filter(|st| !lhs_indexed_by(st, var)).collect();
+            let per = statements_cost(&inner, widths, model, depth + 1);
+            let levels = f64::from(trips.next_power_of_two().trailing_zeros().max(1));
+            let own = if writes_unindexed.is_empty() {
+                per
+            } else if writes_unindexed.iter().all(|st| is_linear_update(st)) {
+                per * levels
+            } else {
+                per * f64::from(trips)
+            };
+            let writes: Vec<String> = stmts
+                .iter()
+                .filter_map(|s| {
+                    let b = crate::loop_walk::split_if(s)
+                        .map(|(_, b)| b)
+                        .unwrap_or_else(|| s.clone());
+                    b.split_once('=').map(|(l, _)| ident_base(l.trim()))
+                })
+                .filter(|s| !s.is_empty())
+                .collect();
+            let reads = roots(&inner);
+            worst = worst.max(place(&reads, &writes, own, &mut arrival));
+        } else if let Some((cond, inner)) = crate::loop_walk::split_if(st) {
+            let g = Expr::parse(&cond);
+            let gc = if g.is_opaque() {
+                0.0
+            } else {
+                g.fo4_critical_cost_latticed(&base, &seed)
+            };
+            let ic = statements_cost(&inner, widths, model, depth + 1);
+            let assoc = crate::loop_walk::split_statements(&inner)
+                .iter()
+                .all(|st| is_bitwise_accumulate(st));
+            let own = gc.max(ic) + if assoc { model.logic_bit } else { model.mux };
+            let writes: Vec<String> = crate::loop_walk::split_statements(&inner)
+                .iter()
+                .filter_map(|s| s.split_once('=').map(|(l, _)| ident_base(l.trim())))
+                .filter(|s| !s.is_empty())
+                .collect();
+            let mut reads = roots(&cond);
+            reads.extend(roots(&inner));
+            worst = worst.max(place(&reads, &writes, own, &mut arrival));
+        } else if let Some(rest) = st.strip_prefix("return ") {
+            let e = Expr::parse(rest);
+            let own = if e.is_opaque() {
+                0.0
+            } else {
+                e.fo4_critical_cost_latticed(&base, &seed)
+            };
+            worst = worst.max(place(&roots(rest), &[], own, &mut arrival));
+        } else if let Some((l, r)) = st.split_once('=') {
+            if r.starts_with('=') || l.ends_with('<') || l.ends_with('>') || l.ends_with('!') {
+                continue;
+            }
+            // declarations with initialisers (`logic [N-1:0] x = …`) count their RHS too
+            let e = Expr::parse(r.trim());
+            let own = if e.is_opaque() {
+                0.0
+            } else {
+                e.fo4_critical_cost_latticed(&base, &seed)
+            };
+            let lhs_root = ident_base(l.trim().rsplit(' ').next().unwrap_or(l.trim()));
+            worst = worst.max(place(&roots(r), &[lhs_root], own, &mut arrival));
+        }
+    }
+    worst
+}
+
+/// The statement's LHS carries the loop variable in an index (`x[i]`,
+/// `d[i*8 +: 8]`): one element per iteration.
+fn lhs_indexed_by(stmt: &str, var: &str) -> bool {
+    let inner = crate::loop_walk::split_if(stmt)
+        .map(|(_, b)| b)
+        .unwrap_or_else(|| stmt.to_string());
+    let Some((l, _)) = inner.split_once('=') else {
+        return true; // not a write
+    };
+    let l = l.trim();
+    if l.is_empty() || l.ends_with('<') || l.ends_with('>') || l.ends_with('!') {
+        return true;
+    }
+    let Some(open) = l.find('[') else {
+        return false;
+    };
+    let idx = &l[open..];
+    idx.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+        .any(|w| w == var)
+}
+
+/// A linear update of the LHS: `x = x | …`, `x = x ^ …`, `x = {x[..], f}` —
+/// no arithmetic, compare or select outside index brackets. Synthesis
+/// balances these to log depth (XOR/OR trees, shift-xor networks).
+fn is_linear_update(stmt: &str) -> bool {
+    if is_bitwise_accumulate(stmt) {
+        return true;
+    }
+    let inner = crate::loop_walk::split_if(stmt)
+        .map(|(_, b)| b)
+        .unwrap_or_else(|| stmt.to_string());
+    let Some((l, r)) = inner.split_once('=') else {
+        return false;
+    };
+    let l = l.trim();
+    let r = r.trim();
+    if r.starts_with('=') {
+        return false;
+    }
+    // a flag set/cleared under a guard (`if (hit) found = 1'b1`) is
+    // `found | hit` / `found & ~miss`: an OR/AND tree over the copies
+    if r.chars()
+        .all(|c| c.is_ascii_alphanumeric() || c == '\'' || c == '_')
+        && !r.contains(l)
+    {
+        return true;
+    }
+    if !r.contains(l) {
+        return false;
+    }
+    // strip index brackets, then refuse arithmetic / compare / select
+    let mut depth = 0i32;
+    let mut outside = String::new();
+    for c in r.chars() {
+        match c {
+            '[' => depth += 1,
+            ']' => depth -= 1,
+            _ if depth == 0 => outside.push(c),
+            _ => {}
+        }
+    }
+    !outside.contains(['+', '-', '*', '/', '%', '<', '>', '?'])
+        && !outside.contains("==")
+        && !outside.contains("!=")
+}
+
+/// `[if (…)] x = x | …` / `& …` / `^ …`.
+fn is_bitwise_accumulate(stmt: &str) -> bool {
+    let inner = crate::loop_walk::split_if(stmt)
+        .map(|(_, b)| b)
+        .unwrap_or_else(|| stmt.to_string());
+    let Some((l, r)) = inner.split_once('=') else {
+        return false;
+    };
+    let l = l.trim();
+    let r = r.trim();
+    !l.is_empty()
+        && r.strip_prefix(l).is_some_and(|rest| {
+            let rest = rest.trim_start();
+            rest.starts_with('|') || rest.starts_with('&') || rest.starts_with('^')
+        })
+}
+
+/// The costliest user-function body called in an expression, less the one
+/// `Other` gate the expression bill already charged for the call.
+fn call_body_extra(ex: &Expr, fn_costs: &BTreeMap<String, f64>, model: &CostModel) -> f64 {
+    if fn_costs.is_empty() {
+        return 0.0;
+    }
+    let mut names = Vec::new();
+    ex.call_names(&mut names);
+    let mut worst = 0.0_f64;
+    for n in names {
+        let short = n.rsplit("::").next().unwrap_or(n);
+        if let Some(c) = fn_costs.get(short).or_else(|| fn_costs.get(n)) {
+            worst = worst.max(*c);
+        }
+    }
+    (worst - model.scaled_fo4(OperatorClass::Other, None)).max(0.0)
+}
+
+/// Levels beyond the one already billed for the widest runtime index of an
+/// expression: a k-bit index is `ceil(k/2)` 4:1 mux levels (`mem_q[slot]`
+/// over 32 entries is three, not one).
+fn extra_select_levels(
+    ex: &Expr,
+    widths: &crate::width::WidthResolver<'_>,
+    seed: &crate::expr::ConstSeed,
+) -> f64 {
+    let mut idx = Vec::new();
+    ex.runtime_indices(seed, &mut idx);
+    let mut worst = 0u32;
+    for i in idx {
+        let w = widths.node_widths(None, Some(i));
+        if let Some(k) = w.arith.or(w.for_class(OperatorClass::Compare)) {
+            worst = worst.max(k);
+        }
+    }
+    if worst <= 2 {
+        0.0
+    } else {
+        f64::from(worst.div_ceil(2) - 1)
+    }
 }
 
 /// Nodes inside procedural loops that unroll to zero iterations.
