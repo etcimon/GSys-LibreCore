@@ -767,7 +767,22 @@ module cva6_mmu
       // DTLB Miss
       // ---------
       // watch out for exceptions
-      if (ptw_active && !walking_instr) begin
+      // T42: the fault is reported only when the walk is for the registered
+      // requester's page. Under the OoO younger-cancel a cancelled load's walk
+      // keeps going (no flush), and its error — a wrong-path pointer, usually
+      // 0 — was raised here while a live load or store sat in WAIT_TRANSLATION
+      // behind it: that request took a LOAD/STORE_PAGE_FAULT with the dead
+      // walk's address as tval. Linux saw stval = 0 on user demand-paging
+      // faults, found no VMA at 0 and killed the process (every
+      // `unhandled signal 11 … at 0x0000000000000000`, the procd die at 13.9 s).
+      // A foreign walk's error is dropped; the requester's own walk follows and
+      // reports its own fault if it has one.
+`ifdef G6LC_MUT_MMU_PTW_FOREIGN
+      if (ptw_active && !walking_instr) begin   // review mutation: the pre-fix shape (any walk's fault)
+`else
+      if (ptw_active && !walking_instr && lsu_req_q &&
+          (update_vaddr[CVA6Cfg.VLEN-1:12] == lsu_vaddr_q[CVA6Cfg.VLEN-1:12])) begin
+`endif
         // The PTW broadcast is not bound to the registered requester: the walk
         // may belong to another LSU client whose request lost the port mux, so
         // any exception raised here is foreign to a requester whose own

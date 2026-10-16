@@ -4672,6 +4672,43 @@ module cva6
       end
     end
   end
+  // +mmu_trace +mmu_lo=N +mmu_hi=M: per-cycle MMU / PTW / load-store-unit
+  // translation state inside the window (T42: which walk a PTW fault is
+  // attributed to, and the tval that leaves with it).
+  if (CVA6Cfg.MmuPresent) begin : gen_mmu_trace
+    bit mmu_trace;
+    int unsigned mmu_lo, mmu_hi, mmu_cycle;
+    initial begin
+      mmu_trace = $test$plusargs("mmu_trace");
+      mmu_lo = 0; mmu_hi = 0;
+      void'($value$plusargs("mmu_lo=%0d", mmu_lo));
+      void'($value$plusargs("mmu_hi=%0d", mmu_hi));
+    end
+    always @(posedge clk_i) begin
+      if (!rst_ni) mmu_cycle = 0;
+      else if (mmu_trace) begin
+        mmu_cycle = mmu_cycle + 1;
+        if (mmu_cycle >= mmu_lo && mmu_cycle <= mmu_hi) begin
+          $display("[mmu-trace] c=%0d req_i=%b vaddr_i=%h st_i=%b | req_q=%b vaddr_q=%h st_q=%b dtlb_hit_q=%b | ptw_active=%b instr=%b ptw_st=%0d walk_vaddr=%h ptw_err=%b | ex=%b cause=%0d tval=%h ex_ptw=%b lsu_valid=%b | LU st=%0d tid=%0d vaddr=%h wb=%b wb_ex=%b | SU st=%0d",
+                   mmu_cycle,
+                   ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.lsu_req_i, ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.lsu_vaddr_i,
+                   ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.lsu_is_store_i,
+                   ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.lsu_req_q, ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.lsu_vaddr_q,
+                   ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.lsu_is_store_q, ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.dtlb_hit_q,
+                   ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.ptw_active, ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.walking_instr,
+                   ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.i_ptw.state_q, ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.update_vaddr,
+                   ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.ptw_error,
+                   ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.lsu_exception_o.valid, ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.lsu_exception_o.cause,
+                   ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.lsu_exception_o.tval, ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.lsu_exception_ptw_o,
+                   ex_stage_i.lsu_i.gen_mmu.i_cva6_mmu.lsu_valid_o,
+                   ex_stage_i.lsu_i.i_load_unit.state_q, ex_stage_i.lsu_i.i_load_unit.lsu_ctrl_i.trans_id,
+                   ex_stage_i.lsu_i.i_load_unit.lsu_ctrl_i.vaddr, ex_stage_i.lsu_i.i_load_unit.valid_o,
+                   ex_stage_i.lsu_i.i_load_unit.ex_o.valid,
+                   ex_stage_i.lsu_i.i_store_unit.state_q);
+        end
+      end
+    end
+  end
   if (CVA6Cfg.OoOEn) begin : gen_ld_trace_lsq
     always @(posedge clk_i) begin
       if (rst_ni && ld_trace && ld_cycle >= ld_lo && ld_cycle <= ld_hi) begin

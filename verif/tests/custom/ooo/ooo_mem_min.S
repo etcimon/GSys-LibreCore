@@ -1608,6 +1608,259 @@ main:
   .text
 .Lb2_done:
 
+#elif STAGE == 54
+  # T43: two AMOs to one word (the workqueue's work->data on the L3 boot):
+  # `amoor.d.aq` sets a bit (0x800 -> 0x801), ~50 cycles later `amoswap.d.rl
+  # zero` writes 0x800 back; the `ld` that follows must read 0x800 — on the
+  # boot it read 0x801 (the swap's value never became visible), 866 cycles
+  # later and on every later read. The line is warm (loaded) before the AMOs
+  # and re-read between them, as in process_one_work. Spike: trivially 0x800.
+  la   s2, .Lamo_word
+  li   t0, 0x800
+  sd   t0, 0(s2)
+  fence rw, rw
+  ld   zero, 0(s2)                     # line valid in the data cache
+  ld   zero, 8(s2)
+  li   t1, 1
+  amoor.d.aq t2, t1, (s2)              # 0x800 -> 0x801, returns 0x800
+  li   t3, 0x800
+  bne  t2, t3, fail_t2
+  ld   t2, 8(s2)                       # the neighbour word, as the kernel does
+  ld   t2, 0(s2)                       # reads 0x801
+  li   t3, 0x801
+  bne  t2, t3, fail_t2
+  li   t4, 0x7fffffffffffffff
+  li   t5, 3
+  divu t6, t4, t5                      # ~50 cycles of filler, like the boot's gap
+  andi t6, t6, 0
+  add  t3, t3, t6
+  li   t1, 0x800
+  amoswap.d.rl zero, t1, (s2)          # 0x801 -> 0x800, rd = x0
+  ld   t2, 0(s2)
+  li   t3, 0x800
+#ifdef MEM_ORDER_NEGATIVE
+  xori t3, t3, 1
+#endif
+  bne  t2, t3, fail_t2
+  fence rw, rw
+  ld   t2, 0(s2)                       # and after a drain
+  bne  t2, t3, fail_t2
+  # the same pair back to back, no gap, then the read
+  amoor.d.aq t2, t1, (s2)              # t1 = 0x800: 0x800 | 0x800 = 0x800 (no change), returns 0x800
+  li   t1, 1
+  amoor.d.aq t2, t1, (s2)              # 0x800 -> 0x801
+  li   t1, 0x800
+  amoswap.d.rl zero, t1, (s2)          # -> 0x800
+  ld   t2, 0(s2)
+  bne  t2, t3, fail_t2
+  j    .Lamo_done
+  .section .data
+  .balign 64
+.Lamo_word:
+  .space 64
+  .text
+.Lamo_done:
+
+#elif STAGE == 55
+  # T42: a load page fault must report the faulting virtual address in tval.
+  # On the L3/L1 boots every user-space page fault arrived with stval = 0
+  # (`csrr s3, stval` -> 0 right after a LOAD_PAGE_FAULT at a valid user VA),
+  # so Linux's do_page_fault looked up address 0, found no VMA and killed the
+  # process (every `unhandled signal 11 … at 0x0000000000000000`). Data
+  # translation on (MPRV, MPP=S, Sv39 identity gigapage for VPN2 = 2); the
+  # faulting loads hit (a) an unmapped VPN2 (PTW walks one level and faults),
+  # (b) a mapped page whose PTE is invalid at the leaf level (PTW walks to
+  # level 0 and faults), (c) with MPP = U a supervisor-only page (DTLB-hit
+  # permission fault), (d) with MPP = U the invalid leaf again (the user
+  # demand-paging shape). The handler compares mtval with the address
+  # and mcause with LOAD_PAGE_FAULT, then skips the load. Spike: identical.
+  csrr s1, mtvec
+  la   t0, .Ltv_handler
+  csrw mtvec, t0
+  la   t1, .Ltv_pt
+  li   t2, (0x80000 << 10) | 0xCF
+  sd   t2, 16(t1)                      # VPN2 = 2: identity gigapage, RWX AD
+  la   t3, .Ltv_pt1
+  srli t4, t3, 12
+  slli t4, t4, 10
+  ori  t4, t4, 1                       # VPN2 = 1 -> next level (pointer PTE)
+  sd   t4, 8(t1)
+  la   t5, .Ltv_pt0
+  srli t4, t5, 12
+  slli t4, t4, 10
+  ori  t4, t4, 1
+  sd   t4, 0(t3)                       # VPN1 = 0 of VPN2 = 1 -> level-0 table
+  # level 0: page 0 invalid (V = 0), page 1 = the stack page with U = 1 (RWX AUD)
+  sd   zero, 0(t5)
+  srli t4, sp, 12
+  slli t4, t4, 10
+  ori  t4, t4, 0xDF                    # V R W X U A D
+  sd   t4, 8(t5)
+  srli t1, t1, 12
+  li   t2, 8
+  slli t2, t2, 60
+  or   t1, t1, t2
+  csrw satp, t1
+  sfence.vma
+  li   t0, -1
+  srli t0, t0, 10
+  csrw pmpaddr0, t0
+  li   t0, 0x0F
+  csrw pmpcfg0, t0
+  li   t0, (1 << 17) | (1 << 11)       # MPRV | MPP = S, SUM = 0
+  csrs mstatus, t0
+  li   s4, 0                           # trap count
+  # (a) unmapped VPN2 = 3
+  li   s5, 0xC0000000
+  addi s5, s5, 0x578
+  ld   t0, 0(s5)
+.Ltv_a:
+  # (b) VPN2 = 1 / VPN1 = 0 / VPN0 = 0: pointer chain to an invalid leaf
+  li   s5, 0x40000000
+  addi s5, s5, 0x10
+  ld   t0, 0(s5)
+.Ltv_b:
+  # (c) the user shape: effective privilege U (MPP = U), load from the
+  # supervisor-only identity gigapage (U = 0) -> DTLB-hit permission fault
+  li   t0, (1 << 11)
+  csrc mstatus, t0                     # MPP = U (MPRV stays on)
+  mv   s5, sp
+  addi s5, s5, 0x18
+  ld   t0, 0(s5)
+.Ltv_c:
+  # (d) U again, through the pointer chain to the invalid leaf (PTW fault)
+  li   s5, 0x40000000
+  addi s5, s5, 0x578
+  ld   t0, 0(s5)
+.Ltv_d:
+  li   t0, (1 << 17) | (3 << 11)
+  csrc mstatus, t0                     # MPRV off
+  csrw satp, zero
+  sfence.vma
+  li   t0, 4
+#ifdef MEM_ORDER_NEGATIVE
+  xori t0, t0, 1
+#endif
+  bne  s4, t0, fail_trap_count
+  csrw mtvec, s1
+  j    .Ltv_done
+  .balign 4
+.Ltv_handler:
+  csrr t1, mcause
+  li   t2, 13                          # LOAD_PAGE_FAULT
+  bne  t1, t2, fail_trap_cause
+  csrr t1, mtval
+  bne  t1, s5, fail_trap_tval          # the faulting VA, never 0
+  addi s4, s4, 1
+  csrr t1, mepc
+  addi t1, t1, 4                       # skip the ld (uncompressed)
+  csrw mepc, t1
+  mret
+  .section .data
+  .balign 4096
+.Ltv_pt:
+  .space 4096
+.Ltv_pt1:
+  .space 4096
+.Ltv_pt0:
+  .space 4096
+  .text
+.Ltv_done:
+
+#elif STAGE == 56
+  # T42 reproducer: a WRONG-PATH load whose page-table walk faults must not
+  # fault the live load waiting behind it. Data translation on (MPRV, MPP=S,
+  # Sv39: identity gigapage for VPN2 = 2; VPN2 = 1 -> level-1 table -> level-0
+  # table with page 0 INVALID and page 1 mapping the stack). Each iteration
+  # flushes the TLB, then a late-resolving taken branch (cold, predicted
+  # not-taken) has on its wrong path a load through the invalid leaf (a
+  # three-level walk, longer than the divu) and on its correct path a load
+  # from the valid page next to it (cold DTLB: it waits in WAIT_TRANSLATION
+  # behind the dead walk). Pre-fix the dead walk's PAGE_FAULT was attached to
+  # the live load (tval = the wrong-path address); the handler fails on any
+  # trap. Spike: no trap, the live load reads the stack word.
+  csrr s1, mtvec
+  la   t0, .Lfw_handler
+  csrw mtvec, t0
+  la   t1, .Lfw_pt
+  li   t2, (0x80000 << 10) | 0xCF
+  sd   t2, 16(t1)                      # VPN2 = 2: identity gigapage, RWX AD
+  la   t3, .Lfw_pt1
+  srli t4, t3, 12
+  slli t4, t4, 10
+  ori  t4, t4, 1
+  sd   t4, 8(t1)                       # VPN2 = 1 -> level-1 table
+  la   t5, .Lfw_pt0
+  srli t4, t5, 12
+  slli t4, t4, 10
+  ori  t4, t4, 1
+  sd   t4, 0(t3)                       # VPN1 = 0 -> level-0 table
+  sd   zero, 0(t5)                     # page 0: invalid
+  srli t4, sp, 12
+  slli t4, t4, 10
+  ori  t4, t4, 0xCF                    # page 1: the stack page, V R W X A D (U = 0)
+  sd   t4, 8(t5)
+  li   t0, 0x600d600d600d600d
+  sd   t0, 0(sp)                       # the word the live load reads (via 0x40001000 + sp[11:0])
+  fence rw, rw
+  srli t1, t1, 12
+  li   t2, 8
+  slli t2, t2, 60
+  or   t1, t1, t2
+  csrw satp, t1
+  sfence.vma
+  li   t0, -1
+  srli t0, t0, 10
+  csrw pmpaddr0, t0
+  li   t0, 0x0F
+  csrw pmpcfg0, t0
+  li   t0, (1 << 17) | (1 << 11)       # MPRV | MPP = S
+  csrs mstatus, t0
+  li   s4, 0x40000010                  # wrong-path address: three-level walk, invalid leaf
+  li   s5, 0x40001000
+  slli t0, sp, 52
+  srli t0, t0, 52                      # sp[11:0]
+  add  s5, s5, t0                      # live address: the stack word through the valid leaf
+  li   s6, 0x7fffffffffffffff
+  li   s7, 3
+  li   s8, 0x600d600d600d600d
+  .rept 12
+  sfence.vma                           # cold DTLB for both loads
+  divu t3, s6, s7                      # late, nonzero
+  andi t4, t3, 0                       # the wrong-path address depends on the same result:
+  add  t5, s4, t4                      # the load issues the cycle the branch resolves
+  bnez t3, 1f                          # taken; cold -> predicted not-taken
+  ld   t0, 0(t5)                       # wrong path: walk to the invalid leaf, cancelled mid-walk
+  ld   t0, 8(t5)
+1:
+  ld   t1, 0(s5)                       # live: waits for the PTW behind the dead walk
+  bne  t1, s8, fail_t2
+  .endr
+  li   t0, (1 << 17) | (3 << 11)
+  csrc mstatus, t0                     # MPRV off
+  csrw satp, zero
+  sfence.vma
+  ld   t0, 0(sp)
+#ifdef MEM_ORDER_NEGATIVE
+  xori t0, t0, 1
+#endif
+  bne  t0, s8, fail_t2
+  csrw mtvec, s1
+  j    .Lfw_done
+  .balign 4
+.Lfw_handler:
+  j    fail_trap_cause                 # no trap is expected
+  .section .data
+  .balign 4096
+.Lfw_pt:
+  .space 4096
+.Lfw_pt1:
+  .space 4096
+.Lfw_pt0:
+  .space 4096
+  .text
+.Lfw_done:
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".
