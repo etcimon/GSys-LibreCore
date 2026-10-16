@@ -86,9 +86,14 @@ test("streamed recipe: phase A dumps RTLIL + module list, phase B maps and evict
   expect(b).toContain('bash "$RUN/map_all.sh" > "$RUN/synth-map.log" 2>&1');
   expect(b).toContain('R="$1"; YS="$2"; LIB="$3"; tmo="$4"; idx="$5"; il="$6"');
   expect(b).toContain('timeout "$tmo" "$YS" -q -p "read_rtlil $il; async2sync t:\\$aldff t:\\$aldffe; techmap; opt_clean; dfflibmap -liberty $LIB;');
-  // Reruns keep mapped modules; an unmappable flop type fails the step.
-  expect(b).toContain('if [ -s "$out" ]; then echo "$idx ok cached"; exit 0; fi');
+  // Reruns keep mapped modules of the same RTLIL; an unmappable flop type
+  // fails the step.
   expect(b).toContain("_ALDFF_");
+  // The resume cache is keyed on the module RTLIL's content: another tree's
+  // netlist for the same module index is never served.
+  expect(b).toContain('sha=$(sha256sum "$il" | cut -c1-16)');
+  expect(b).toContain('[ "$(cat "$out.sha" 2>/dev/null)" = "$sha" ]');
+  expect(b).toContain('echo "$sha" > "$out.sha"; echo "$idx ok delay"');
   // The width map records the live-source hash the host computed.
   const withHash = streamedPhaseBShell({ runDir: "$RUN", liberty: "$LIB", yosysVar: "$YS", periodPs: 800, logVar: "$RUN/synth.log", pullTag: "sta-rtl-x", sourceSha256: "abc123" }).join("\n");
   expect(withHash).toContain('--source-sha256 "abc123" -o "/opt/testharness/runs/sta-rtl-x/output/width-map.json"');

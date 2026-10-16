@@ -475,16 +475,21 @@ export function streamedPhaseBShell(opts: {
     `R="$1"; YS="$2"; LIB="$3"; tmo="$4"; idx="$5"; il="$6"`,
     `stem=$(basename "$il" .il)`,
     `out="$R/mapped/$stem.v"; log="$R/maplog/$stem.log"`,
-    `if [ -s "$out" ]; then echo "$idx ok cached"; exit 0; fi`,
+    // Resume cache keyed on the module's RTLIL content (A102): the run dir
+    // is reused across trees, and a netlist of another tree's module must
+    // not be served — it was, for a whole emitted-tree run.
+    `sha=$(sha256sum "$il" | cut -c1-16)`,
+    `if [ -s "$out" ] && [ "$(cat "$out.sha" 2>/dev/null)" = "$sha" ]; then echo "$idx ok cached"; exit 0; fi`,
+    `rm -f "$out" "$out.sha" "$log"`,
     // slang's async-load flops ($aldff: a reset to a non-constant value, the
     // icache's areq_o) have no liberty cell; make those few synchronous so the
     // netlist links instead of carrying $_ALDFF_ black boxes (study netlist).
     `run() { timeout "$tmo" "$YS" -q -p "read_rtlil $il; async2sync t:\\$aldff t:\\$aldffe; techmap; opt_clean; dfflibmap -liberty $LIB; $1; opt_clean -purge; tee -q -a $log stat -liberty $LIB; write_verilog -noattr -noexpr $out" >> "$log" 2>&1; }`,
-    `if run ${JSON.stringify(abc)}; then echo "$idx ok delay"; exit 0; fi`,
+    `if run ${JSON.stringify(abc)}; then echo "$sha" > "$out.sha"; echo "$idx ok delay"; exit 0; fi`,
     `rm -f "$out"; echo "fallback: plain" >> "$log"`,
-    `if run ${JSON.stringify(abcPlain)}; then echo "$idx ok plain"; exit 0; fi`,
+    `if run ${JSON.stringify(abcPlain)}; then echo "$sha" > "$out.sha"; echo "$idx ok plain"; exit 0; fi`,
     `rm -f "$out"; echo "fallback: fast" >> "$log"`,
-    `if run ${JSON.stringify(abcFast)}; then echo "$idx ok fast"; exit 0; fi`,
+    `if run ${JSON.stringify(abcFast)}; then echo "$sha" > "$out.sha"; echo "$idx ok fast"; exit 0; fi`,
     `rm -f "$out"; echo "$idx FAIL"; exit 1`,
     `MAP_ONE`,
     `chmod +x "${R}/map_one.sh"`,
@@ -499,7 +504,7 @@ export function streamedPhaseBShell(opts: {
     `echo "SYNTH_STREAM_FALLBACK plain=$(grep -c ' ok plain$' "${R}/synth-map.log") fast=$(grep -c ' ok fast$' "${R}/synth-map.log") cached=$(grep -c ' ok cached$' "${R}/synth-map.log") fail=$(grep -c ' FAIL$' "${R}/synth-map.log")"`,
     // A black-boxed flop type in the netlist is a mapping defect, not an STA input.
     `if grep -q '_ALDFF_\\|_DLATCH_\\|_SR_' "${R}/mapped/"*.v; then echo "RESULT fail synth"; echo LOGSTART; grep -l '_ALDFF_\\|_DLATCH_\\|_SR_' "${R}/mapped/"*.v | head; echo LOGEND; exit 1; fi`,
-    `if [ "$(ls "${R}/mapped" | wc -l)" != "$(wc -l < "${R}/il/modules.tsv")" ]; then echo "RESULT fail synth"; echo LOGSTART; grep ' FAIL$' "${R}/synth-map.log" | head -20; for f in $(grep ' FAIL$' "${R}/synth-map.log" | head -3 | cut -d' ' -f1); do tail -5 "${R}/maplog/$(cut -f2 "${R}/il/modules.tsv" | sed -n "${"$"}{f}p" | sed 's/\\.il$//').log"; done; echo LOGEND; exit 1; fi`,
+    `if [ "$(ls "${R}/mapped"/*.v | wc -l)" != "$(wc -l < "${R}/il/modules.tsv")" ]; then echo "RESULT fail synth"; echo LOGSTART; grep ' FAIL$' "${R}/synth-map.log" | head -20; for f in $(grep ' FAIL$' "${R}/synth-map.log" | head -3 | cut -d' ' -f1); do tail -5 "${R}/maplog/$(cut -f2 "${R}/il/modules.tsv" | sed -n "${"$"}{f}p" | sed 's/\\.il$//').log"; done; echo LOGEND; exit 1; fi`,
     `cat "${R}/mapped/"*.v > "${R}/netlist.v"`,
     `grep -h "Chip area for module" "${R}/maplog/"*.log | awk '{s+=$NF} END {printf "SYNTH_STREAM_AREA total=%.3f\\n", s}'`,
   ];
