@@ -24,6 +24,7 @@
 // platform matching soc.process (nangate45 / sky130hd / sky130hs / asap7).
 // Numbers from a study library rank paths; they are not sign-off.
 
+import { createHash } from "node:crypto";
 import { copyFileSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { isAbsolute, join } from "node:path";
 
@@ -110,6 +111,47 @@ export interface RtlTimingOptions {
   sramStub?: boolean;
   /** Permit mapping a valid emitted study that still misses the FO4 budget. */
   allowOverBudget?: boolean;
+}
+
+/**
+ * sha256 over the source files of a portable sv-timing flist, in list order
+ * (lines that are not `+define+`/`-`/`#` options). Computed on the host for
+ * both sides of the freshness check: recorded into the width map the remote
+ * phase A produces (`--source-sha256`), compared before the pre-pass passes
+ * `--width-map`. A map elaborated from another tree put a 4-bit `shamt` into
+ * an emitted select (`shamt[3]`, A102).
+ */
+export function portableSourceHash(portablePath: string): string | undefined {
+  let text: string;
+  try {
+    text = readFileSync(portablePath, "utf8");
+  } catch {
+    return undefined;
+  }
+  const h = createHash("sha256");
+  for (const raw of text.split(/\r?\n/)) {
+    const l = raw.trim();
+    if (!l || /^[+#-]/.test(l)) continue;
+    try {
+      h.update(readFileSync(l));
+    } catch {
+      return undefined;
+    }
+  }
+  return h.digest("hex");
+}
+
+/** The width map path when its recorded source hash matches the portable flist's sources; else undefined. */
+export function freshWidthMap(mapPath: string, portablePath: string): string | undefined {
+  if (!existsSync(mapPath)) return undefined;
+  let recorded: string | undefined;
+  try {
+    recorded = JSON.parse(readFileSync(mapPath, "utf8"))?.source_sha256;
+  } catch {
+    return undefined;
+  }
+  if (!recorded) return posixPath(mapPath); // older map without the field: accepted
+  return portableSourceHash(portablePath) === recorded ? posixPath(mapPath) : undefined;
 }
 
 /** Completion gate: no IR credit, incomplete report or skipped source can close. */
@@ -399,6 +441,8 @@ export function streamedPhaseBShell(opts: {
   jobs?: number;
   /** Seconds before the delay-oriented ABC script is abandoned for a module. */
   abcTimeoutS?: number;
+  /** Host-computed hash of the live sources, recorded into the width map (`portableSourceHash`). */
+  sourceSha256?: string;
 }): string[] {
   // Inside map_one.sh the liberty is its own `$LIB` argument (the heredoc is
   // quoted, so the outer script's variables do not reach it).
@@ -415,7 +459,10 @@ export function streamedPhaseBShell(opts: {
     // one is removed by hand or with SYNTH_FORCE=1.
     `mkdir -p "${R}/mapped" "${R}/il" "${R}/maplog" "/opt/testharness/runs/${opts.pullTag}/output"; rm -f "${R}/il/"*.il; if [ "\${SYNTH_FORCE:-0}" = 1 ]; then rm -f "${R}/mapped/"*.v "${R}/maplog/"*; fi`,
     // One pass: per-module RTLIL for phase B + the elaborated width map for sv-timing.
-    `python3 ${tool} "${R}/wordlevel.il" --split-dir "${R}/il" -o "/opt/testharness/runs/${opts.pullTag}/output/width-map.json" && echo "WIDTH_MAP ok"`,
+    // The map carries a hash of the sources it was elaborated from: the host
+    // pre-pass refuses a stale one (a 4-bit `shamt` from an older tree put
+    // `shamt[3]` into an emitted select, A102).
+    `python3 ${tool} "${R}/wordlevel.il" --split-dir "${R}/il"${opts.sourceSha256 ? ` --source-sha256 "${opts.sourceSha256}"` : ""} -o "/opt/testharness/runs/${opts.pullTag}/output/width-map.json" && echo "WIDTH_MAP ok"`,
     `if [ ! -s "${R}/il/modules.tsv" ]; then echo "RESULT fail synth"; echo LOGSTART; echo "rtlil split produced no modules"; echo LOGEND; exit 1; fi`,
     `echo "SYNTH_STREAM modules=$(wc -l < "${R}/il/modules.tsv") jobs=${jobs} abc_timeout_s=${tmo}"`,
     // map_one <index> <il file> : techmap + liberty map in a fresh process; the
@@ -597,8 +644,9 @@ async function runSvtPrepass(
     cache: posixPath(join(svtDir, "ir.sqlite")),
     paramMap,
     // Elaborated widths from a previous remote `--map-recipe streamed` run
-    // (phase A's wordlevel.il through tools/rtlil_width_map.py, pulled back).
-    widthMap: existsSync(join(svtDir, "width-map.json")) ? posixPath(join(svtDir, "width-map.json")) : undefined,
+    // (phase A's wordlevel.il through tools/rtlil_width_map.py, pulled back),
+    // only while the sources still hash the same (A102).
+    widthMap: freshWidthMap(join(svtDir, "width-map.json"), join(svtDir, "portable.f")),
     assumeXlen: ctx.config.soc.xlen as number | undefined,
     packageMode: "packages",
     extraArgs: [...defaults, ...extra],
@@ -609,6 +657,9 @@ async function runSvtPrepass(
   }
   const budgetNote = `${fo4BudgetFor(targetMhz, fo4Ps, margin).toFixed(1)} FO4 (target ${targetMhz.toFixed(0)} MHz, fo4_ps=${fo4Ps}, margin=${margin})`;
   ctx.logger.info(`sta-rtl: sv-timing correct --all-modules --emit at ${budgetNote}`);
+  if (existsSync(join(svtDir, "width-map.json")) && !args.includes("--width-map")) {
+    ctx.logger.warn("sta-rtl: svt/width-map.json ignored — its source_sha256 does not match this tree (regenerated by the next streamed mapping)");
+  }
   ctx.logger.info(`+ ${cmd.argv.join(" ")}`);
   if (ctx.dryRun) {
     return { stage: { id: "s0-svt-correct", status: "skip", detail: `dry-run ${budgetNote}` }, targetMhz, budget };
@@ -841,7 +892,14 @@ async function runRemote(
     periodPs: 1e6 / opts.targetMhz,
   });
   const phaseB = opts.mapRecipe === "streamed"
-    ? streamedPhaseBShell({ runDir: "$RUN", liberty: "$LIB", yosysVar: "$YS", periodPs: 1e6 / opts.targetMhz, logVar: "$RUN/synth.log", pullTag: `sta-rtl-${opts.target}` })
+    ? streamedPhaseBShell({
+        runDir: "$RUN", liberty: "$LIB", yosysVar: "$YS", periodPs: 1e6 / opts.targetMhz, logVar: "$RUN/synth.log",
+        pullTag: `sta-rtl-${opts.target}`,
+        // Phase A elaborates the live tree (the emit overlay replaces files,
+        // but the width map is consumed by the pre-pass over the live
+        // sources); hash what the pre-pass will read.
+        sourceSha256: portableSourceHash(join(outDir, "svt", "portable.f")),
+      })
     : [];
 
   const lines = [

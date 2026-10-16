@@ -32,6 +32,164 @@ pub struct CutAssign {
     pub continuous: bool,
 }
 
+/// `lhs = <pipe>` samples the stage register through `type(lhs)'(…)` when
+/// the LHS is declared with a user type (enum, packed struct, typedef): the
+/// pipe is `logic [SVT_DATA_W-1:0]` unless its declaration could be typed,
+/// and such an LHS has no implicit conversion from that
+/// (`wt_dcache_missunit` `state_d = pipe` failed elaboration). The cast is
+/// exact (the feed zero-extends through `SVT_DATA_W'(rhs)`) and legal at the
+/// use site, where the LHS is already declared. Plain `logic`/`bit`/`reg`
+/// vectors keep the bare sample (an implicit conversion exists).
+pub fn typed_sample(source: &str, lhs: &str, pipe: &str) -> String {
+    let l = lhs.trim();
+    if l.is_empty() || l.contains('[') || l.contains('(') || pipe.contains('\'') {
+        return pipe.to_string();
+    }
+    let root: String = l
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+        .collect();
+    if lhs_has_user_type(source, &root) {
+        format!("type({l})'({pipe})")
+    } else {
+        pipe.to_string()
+    }
+}
+
+/// True when `name` is declared with a type that is not a built-in vector
+/// type (`state_e state_d;`, `my_pkg::req_t req;`, `var type(x) y;`).
+pub fn lhs_has_user_type(source: &str, name: &str) -> bool {
+    const BUILTIN: &[&str] = &[
+        "logic", "bit", "reg", "wire", "int", "integer", "byte", "shortint", "longint",
+        "genvar", "input", "output", "inout", "assign", "localparam", "parameter", "automatic",
+        "var", "unsigned", "signed", "if", "else", "for", "case", "always_comb", "always_ff",
+        "always", "typedef", "function", "task", "return", "begin", "end",
+    ];
+    let masked = crate::masked_syntax(source);
+    for line in masked.lines() {
+        let t = line.trim();
+        if !t.ends_with(';') || t.contains('=') || t.contains('(') {
+            continue;
+        }
+        let body = &t[..t.len() - 1];
+        let mut parts = body.split_whitespace();
+        let Some(first) = parts.next() else {
+            continue;
+        };
+        let type_tok = if first == "var" {
+            parts.next().unwrap_or("")
+        } else {
+            first
+        };
+        if type_tok.is_empty() || BUILTIN.contains(&type_tok) || type_tok.starts_with('[') {
+            continue;
+        }
+        if !(type_tok.chars().next().is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+            && type_tok
+                .chars()
+                .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == ':'))
+        {
+            continue;
+        }
+        let rest: String = parts.collect::<Vec<_>>().join(" ");
+        // names after the type (and any packed/unpacked dims)
+        let rest = rest.rsplit(']').next().unwrap_or(&rest).to_string();
+        if rest
+            .split(',')
+            .map(|n| n.trim().trim_end_matches(|c: char| c == '[' ))
+            .any(|n| n.split('[').next().map(str::trim) == Some(name))
+        {
+            return true;
+        }
+    }
+    false
+}
+
+/// Identifiers declared inside a procedural body (`always*`, `initial`,
+/// `function`, `task`): a module-scope feed cannot name them. Generate-block
+/// declarations are not in this set — the twin/generate paths handle those
+/// with their own scope rules. Text scan over the comment-masked source: a
+/// process opens at its keyword and closes when its `begin`/`end` depth
+/// returns to zero (functions and tasks close at `endfunction`/`endtask`).
+pub fn block_local_idents(source: &str) -> std::collections::BTreeSet<String> {
+    let mut out = std::collections::BTreeSet::new();
+    let masked = crate::masked_syntax(source);
+    let mut in_proc = false;
+    let mut in_fn = false;
+    let mut depth = 0i32;
+    for line in masked.lines() {
+        let t = line.trim();
+        let words: Vec<&str> = t
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|w| !w.is_empty())
+            .collect();
+        let first = words.first().copied().unwrap_or("");
+        if !in_proc && !in_fn {
+            if first.starts_with("always") || first == "initial" {
+                in_proc = true;
+                depth = 0;
+            } else if first == "function" || first == "task" {
+                in_fn = true;
+            } else {
+                continue;
+            }
+        }
+        if in_fn && (words.contains(&"endfunction") || words.contains(&"endtask")) {
+            in_fn = false;
+            continue;
+        }
+        let decl_kw = matches!(
+            first,
+            "logic" | "bit" | "int" | "integer" | "reg" | "automatic" | "var"
+        );
+        // Inside a process the declaration sits after its `begin` (depth ≥ 1);
+        // inside a function/task anywhere counts.
+        if decl_kw && (in_fn || depth > 0) {
+            let after_dims = match t.rfind(']') {
+                Some(i) => &t[i + 1..],
+                None => {
+                    let mut rest = t;
+                    for kw in [
+                        "automatic", "var", "logic", "bit", "int", "unsigned", "integer", "reg",
+                    ] {
+                        rest = rest.trim_start().strip_prefix(kw).unwrap_or(rest);
+                    }
+                    rest
+                }
+            };
+            for part in after_dims.split(',') {
+                let name: String = part
+                    .trim()
+                    .chars()
+                    .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                    .collect();
+                if !name.is_empty() && !matches!(name.as_str(), "unsigned" | "signed") {
+                    out.insert(name);
+                }
+            }
+        }
+        if in_proc {
+            let mut opened = false;
+            for w in &words {
+                match *w {
+                    "begin" | "fork" => {
+                        depth += 1;
+                        opened = true;
+                    }
+                    "end" | "join" => depth -= 1,
+                    _ => {}
+                }
+            }
+            // A one-statement process (`always_comb x = y;`) has no begin.
+            if depth <= 0 && (opened || !t.starts_with("always")) {
+                in_proc = false;
+                depth = 0;
+            }
+        }
+    }
+    out
+}
+
 /// Extract `lhs`/`rhs` from a single SV assignment line.
 ///
 /// Handles case items like `ADD, SUB: result_o = adder_result;` by stripping
@@ -849,7 +1007,29 @@ pub fn has_free_gen_index(text: &str) -> bool {
 pub fn cut_assigns_from_source(source: &str, trace: &EditTrace) -> Vec<CutAssign> {
     // Radius 8: multi-line nested ternaries (exp_backoff mask_d is 3 lines;
     // some CSR/decoder cases need more headroom than 6).
-    cut_assigns_from_source_ex(source, trace, 8)
+    let mut cuts = cut_assigns_from_source_ex(source, trace, 8);
+    // A feed hoisted to module scope cannot read a block-local (`v`,
+    // `vaddr_x`, `jump_base` — automatics of the origin's always block);
+    // the origin stays, the stage is fed zero: credit-only in effect, and the
+    // emitted file elaborates (A102).
+    let locals = block_local_idents(source);
+    if !locals.is_empty() {
+        for c in &mut cuts {
+            let names = ident_set(&c.rhs);
+            let lhs_root: String = c
+                .lhs
+                .chars()
+                .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
+                .collect();
+            if names.iter().any(|n| locals.contains(n)) || locals.contains(&lhs_root) {
+                c.rhs = "'0".into();
+                c.line = 0;
+                c.end_line = 0;
+                c.continuous = false;
+            }
+        }
+    }
+    cuts
 }
 
 /// Same as [`cut_assigns_from_source`] with explicit nearby-line search radius.
@@ -1893,7 +2073,7 @@ pub fn rewrite_origin_assigns(source: &str, cuts: &[CutAssign]) -> String {
                         out.push_str(&labels);
                         out.push_str(&cut.lhs);
                         out.push_str(op);
-                        out.push_str(&cut.pipe_name);
+                        out.push_str(&typed_sample(source, &cut.lhs, &cut.pipe_name));
                         out.push_str(";\n");
                     }
                 } else if is_case_label_only_line(line) {
@@ -1962,7 +2142,7 @@ pub fn rewrite_origin_assigns(source: &str, cuts: &[CutAssign]) -> String {
                 out.push_str("assign ");
                 out.push_str(&lhs);
                 out.push_str(" = ");
-                out.push_str(&cut.pipe_name);
+                out.push_str(&typed_sample(source, &lhs, &cut.pipe_name));
                 out.push_str(";\n");
             } else if is_case_label_only_line(line) {
                 out.push_str(line);
@@ -1999,7 +2179,7 @@ pub fn rewrite_origin_assigns(source: &str, cuts: &[CutAssign]) -> String {
                 out.push_str("assign ");
                 out.push_str(&lhs);
                 out.push_str(" = ");
-                out.push_str(&cut.pipe_name);
+                out.push_str(&typed_sample(source, &lhs, &cut.pipe_name));
                 out.push_str(";\n");
             } else if is_case_label_only_line(line) {
                 out.push_str(line);
@@ -3424,6 +3604,44 @@ endmodule
             !rewritten.contains("sgt = pipe_svt_p1"),
             "must not rewrite comma-list lvalue as pipe sample:\n{rewritten}"
         );
+    }
+
+    /// A102: an enum LHS samples its pipe through `type(lhs)'(…)`; a plain
+    /// vector keeps the bare sample; a feed that names a block-local of the
+    /// origin's process is neutralised (origin kept, stage fed zero).
+    #[test]
+    fn enum_lhs_is_cast_and_block_local_feeds_are_neutralised() {
+        let src = "module m (input logic clk_i, rst_ni, a, b, output logic [3:0] y_o);\n  typedef enum logic [1:0] {IDLE, RUN} state_e;\n  state_e state_d, state_q;\n  logic [3:0] plain_d;\n  always_comb begin\n    automatic logic [3:0] tmp;\n    tmp = {a, b, a, b};\n    state_d = a ? RUN : IDLE;\n    plain_d = tmp + 4'd1;\n  end\nendmodule\n";
+        assert!(lhs_has_user_type(src, "state_d"));
+        assert!(!lhs_has_user_type(src, "plain_d"));
+        assert_eq!(typed_sample(src, "state_d", "pipe_svt_p1"), "type(state_d)'(pipe_svt_p1)");
+        assert_eq!(typed_sample(src, "plain_d", "pipe_svt_p1"), "pipe_svt_p1");
+        assert_eq!(typed_sample(src, "state_d[0]", "pipe_svt_p1"), "pipe_svt_p1");
+        let locals = block_local_idents(src);
+        assert!(locals.contains("tmp"), "{locals:?}");
+        assert!(!locals.contains("state_d") && !locals.contains("plain_d"), "{locals:?}");
+        // A cut whose feed reads `tmp` is neutralised.
+        let line_plain = src.lines().position(|l| l.contains("plain_d = tmp")).unwrap() as u32 + 1;
+        let mut tr = EditTrace::new();
+        tr.record_edit(EditRecord {
+            id: 0,
+            kind: EditKind::InsertReg,
+            origin: test_loc("m.sv", line_plain),
+            path_id: Some(0),
+            node_id: Some(1),
+            new_name: Some("pipe_svt_p1".into()),
+            fo4_before: Some(12.0),
+            fo4_after: Some(10.0),
+            rationale: "t".into(),
+            emit_rhs: None,
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+        });
+        let cuts = cut_assigns_from_source(src, &tr);
+        assert_eq!(cuts.len(), 1);
+        assert_eq!(cuts[0].rhs, "'0", "block-local feed must be zeroed: {:?}", cuts[0]);
+        assert_eq!(cuts[0].line, 0, "origin must be kept");
+        assert_eq!(rewrite_origin_assigns(src, &cuts), src);
     }
 
     #[test]

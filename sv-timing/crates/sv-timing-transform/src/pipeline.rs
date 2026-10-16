@@ -1684,6 +1684,28 @@ pub fn balance_mux_on_path(
             });
     }
 
+    // Once per origin as well as once per path: nineteen paths run through
+    // `alu` `result_o`, and each used to emit its own one-hot tree for the
+    // same assignment — eighteen dead copies (area, and dangling markers
+    // whose fallback injection landed before the module's declarations).
+    // The first rewrite's credit is on the node; later paths see it after
+    // the remeasure. A structural (snippet) rewrite at an origin already
+    // rewritten structurally is refused; a credit-only record is still fine.
+    if emit_snippet.is_some()
+        && ctx.trace.records.iter().any(|r| {
+            r.kind == EditKind::BalanceMux
+                && r.emit_snippet.is_some()
+                && r.origin.file == rewrite_origin.file
+                && r.origin.start_line == rewrite_origin.start_line
+        })
+    {
+        return Err(TransformError::InvalidOpportunity(format!(
+            "balance_mux: origin {}:{} already rewritten structurally",
+            rewrite_origin.file,
+            rewrite_origin.start_line
+        )));
+    }
+
     let rec = EditRecord {
         id: 0,
         kind: EditKind::BalanceMux,

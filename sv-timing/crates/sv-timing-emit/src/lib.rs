@@ -466,6 +466,14 @@ fn inject_bm_snippets_at_origin(source: &str, jobs: &[(String, String)]) -> Stri
             continue;
         }
         let Some(pos) = enclosing_process_byte_for_marker(source, marker) else {
+            // The marker is not in the rewritten source: this snippet's RHS
+            // rewrite did not land (another edit claimed the line). Injecting
+            // it anyway would add dead logic, and the first-process fallback
+            // can sit above the module's own declarations (alu `bit_indx`,
+            // "used before its declaration"). Drop it; the edit stays credit.
+            if !snippet.contains("always_ff factorize") {
+                continue;
+            }
             fallback.push_str(snippet);
             if !snippet.ends_with('\n') {
                 fallback.push('\n');

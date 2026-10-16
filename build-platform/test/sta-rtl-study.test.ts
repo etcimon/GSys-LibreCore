@@ -6,7 +6,8 @@
 // shell, and the manifest file substitution (tc_sram study stub).
 
 import { expect, test } from "bun:test";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import {
@@ -14,7 +15,7 @@ import {
   cfgValuesFromYosysJson,
   cvaCfgIntFields,
 } from "../src/tooling/cfgSnapshot.ts";
-import { abcCommand, buildMapScript, streamedPhaseBShell } from "../src/tooling/rtlTiming.ts";
+import { abcCommand, buildMapScript, freshWidthMap, portableSourceHash, streamedPhaseBShell } from "../src/tooling/rtlTiming.ts";
 
 const repoRoot = join(import.meta.dir, "..", "..");
 
@@ -88,6 +89,9 @@ test("streamed recipe: phase A dumps RTLIL + module list, phase B maps and evict
   // Reruns keep mapped modules; an unmappable flop type fails the step.
   expect(b).toContain('if [ -s "$out" ]; then echo "$idx ok cached"; exit 0; fi');
   expect(b).toContain("_ALDFF_");
+  // The width map records the live-source hash the host computed.
+  const withHash = streamedPhaseBShell({ runDir: "$RUN", liberty: "$LIB", yosysVar: "$YS", periodPs: 800, logVar: "$RUN/synth.log", pullTag: "sta-rtl-x", sourceSha256: "abc123" }).join("\n");
+  expect(withHash).toContain('--source-sha256 "abc123" -o "/opt/testharness/runs/sta-rtl-x/output/width-map.json"');
   expect(b).toContain("&nf,-D,800");
   expect(b).toContain('if run "abc -liberty $LIB -D 800"; then echo "$idx ok plain"');
   expect(b).toContain('if run "abc -liberty $LIB -fast"; then echo "$idx ok fast"');
@@ -97,6 +101,25 @@ test("streamed recipe: phase A dumps RTLIL + module list, phase B maps and evict
   // silent partial netlist.
   expect(b).toContain('echo "RESULT fail synth"');
   expect(b).toContain('if [ "$(ls "$RUN/mapped" | wc -l)" != "$(wc -l < "$RUN/il/modules.tsv")" ]');
+});
+
+test("a width map whose source hash differs from the portable sources is refused", () => {
+  const dir = mkdtempSync(join(tmpdir(), "svt-wm-"));
+  const src = join(dir, "a.sv");
+  writeFileSync(src, "module a; endmodule\n");
+  const portable = join(dir, "portable.f");
+  writeFileSync(portable, `+define+SYNTHESIS\n${src.replace(/\\/g, "/")}\n`);
+  const hash = portableSourceHash(portable)!;
+  expect(hash).toMatch(/^[0-9a-f]{64}$/);
+  const map = join(dir, "width-map.json");
+  writeFileSync(map, JSON.stringify({ source_sha256: hash, modules: {} }));
+  expect(freshWidthMap(map, portable)).toBeDefined();
+  writeFileSync(src, "module a; logic x; endmodule\n");
+  expect(freshWidthMap(map, portable)).toBeUndefined();
+  // A map without the field (older run) is still accepted.
+  writeFileSync(map, JSON.stringify({ modules: {} }));
+  expect(freshWidthMap(map, portable)).toBeDefined();
+  rmSync(dir, { recursive: true, force: true });
 });
 
 test("lean recipe keeps the single-process flat mapping", () => {

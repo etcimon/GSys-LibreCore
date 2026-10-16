@@ -144,6 +144,11 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("rtlil", type=Path, help="RTLIL dump (`write_rtlil`)")
     ap.add_argument("-o", "--out", type=Path, default=None, help="output JSON (default stdout)")
     ap.add_argument("--split-dir", type=Path, default=None, help="also write one RTLIL file per module here")
+    ap.add_argument(
+        "--source-sha256",
+        default=None,
+        help="hash of the sources the dump was elaborated from (recorded as `source_sha256`; a consumer refuses a map whose sources changed)",
+    )
     args = ap.parse_args(argv)
     if args.split_dir is not None:
         with args.rtlil.open("r", encoding="utf-8", errors="replace") as fh:
@@ -152,6 +157,7 @@ def main(argv: list[str] | None = None) -> int:
     with args.rtlil.open("r", encoding="utf-8", errors="replace") as fh:
         modules = parse_rtlil(fh)
     doc = {
+        **({"source_sha256": args.source_sha256} if args.source_sha256 else {}),
         "schema": "sv-timing-width-map.v1",
         "source": str(args.rtlil),
         "module_count": len(modules),

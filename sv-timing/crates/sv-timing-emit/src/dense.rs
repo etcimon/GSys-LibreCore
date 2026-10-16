@@ -374,11 +374,17 @@ pub fn emit_blocks_for_trace_src(
             if !safe {
                 continue; // demoted — FO4 credit already on the edit
             }
-            let marker = r
-                .emit_rhs
-                .clone()
-                .or_else(|| r.new_name.clone())
-                .unwrap_or_default();
+            // The marker is an identifier the rewritten source contains: the
+            // staged RHS for BalanceMux, the declared vector for LoopRewrite
+            // (whose `emit_rhs` is the whole replacement statement).
+            let marker = if r.kind == EditKind::LoopRewrite {
+                r.new_name.clone().unwrap_or_default()
+            } else {
+                r.emit_rhs
+                    .clone()
+                    .or_else(|| r.new_name.clone())
+                    .unwrap_or_default()
+            };
             if marker.is_empty() {
                 snippets.push(s.as_str());
             } else {
