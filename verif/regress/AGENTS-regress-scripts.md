@@ -220,3 +220,10 @@ retirements/s), the FIFO throttles the model if it does not. Launch recipe:
 `t21/q-t37-launch.sh`. The other three sim-only per-commit trace files (`trace_hart_0.dasm`,
 `iti.traces`, `encaps.traces`) are gated by `+core_notrace` on models built after
 2026-10-15; on older models symlink the three names to `/dev/null` before launching.
+Two companions: `+rvfi_cycle_stamp` appends ` @<cycle>` to every `core` line of the RVFI trace
+(opt-in; the oracle's `retire N` / `line L` then maps to a cycle for an FST window —
+`zstd -dc trace_rvfi.dasm.zst | sed -n 'L,Lp'`), and `+hang_dump=N` (`core/cva6.sv`, OoO census
+block) prints, after N cycles without a commit ack, the scoreboard head, every IQ entry with its
+readiness/bypass bits and `ready[e]`, the LSQ store/load entries, the LSU bypass entries and the
+store/load unit states, three times 1000 cycles apart — for a boot that stops retiring where no
+probe window is known in advance (T40).
