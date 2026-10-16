@@ -1815,7 +1815,8 @@ prerequisite for this work under the existing dual license. No licensing policy 
   not yet reproduced in a leaf. Builds `ooocoh-t46m-ooo-pgo-build`
   (pre-fix + `+mmu_trace`: the window 477,251,150–300 of the L1 trace
   run shows the walk/requester pairing) and `ooocoh-t46-ooo-pgo-build`
-  (fix) for the L1/L3 verdicts.
+  (fix) for the L1/L3 verdicts; on t46 the frozen battery and every
+  stage 4–56 are Spike-exact and qualified (s11 10,953 cycles).
 - [ ] **T43 — L3 on t42: an `amoor.d.aq` (0x800 → 0x801) then, 53 cycles
   later, `amoswap.d.rl zero` (→ 0x800) on a workqueue `work->data`
   (PA `0x8fc8e380`); the `c.ld` 866 cycles after the swap reads 0x801,
