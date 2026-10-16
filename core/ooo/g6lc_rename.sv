@@ -218,6 +218,34 @@ module g6lc_rename #(
     end
   endfunction
 
+  // Highest free entry (sv-timing A106): the same isolate on the bit-reversed
+  // vector. Port 1 picks from the top of the pool and port 0 from the bottom,
+  // both from one snapshot, so the second pick no longer waits for the first
+  // pick's clear — one incrementer and one demux off the rename chain. Which
+  // physical register a destination gets is not architecturally visible.
+  function automatic logic [PRF_W-1:0] pick_free_hi(input logic [PRF_ENTRIES-1:0] fr);
+    logic [PRF_ENTRIES-1:0] cand, rev, rev_low, highest;
+    cand    = fr & ~PRF_ENTRIES'(1);
+    rev     = {<<{cand}};
+    rev_low = rev & (~rev + 1'b1);
+    highest = {<<{rev_low}};
+    pick_free_hi = '0;
+    for (int unsigned i = 1; i < PRF_ENTRIES; i++) begin
+      if (highest[i]) pick_free_hi = pick_free_hi | PRF_W'(i);
+    end
+  endfunction
+
+  function automatic logic [FPRF_W-1:0] pick_ffree_hi(input logic [FPN-1:0] fr);
+    logic [FPN-1:0] rev, rev_low, highest;
+    rev     = {<<{fr}};
+    rev_low = rev & (~rev + 1'b1);
+    highest = {<<{rev_low}};
+    pick_ffree_hi = '0;
+    for (int unsigned i = 0; i < FPN; i++) begin
+      if (highest[i]) pick_ffree_hi = pick_ffree_hi | FPRF_W'(i);
+    end
+  endfunction
+
   // Lowest free phys ≥1 in current free vector
   function automatic logic [PRF_W-1:0] pick_free(input logic [PRF_ENTRIES-1:0] fr);
     logic [PRF_ENTRIES-1:0] cand, lowest;
@@ -259,15 +287,51 @@ module g6lc_rename #(
     // latch to the elaborator even when every read is guarded.
     picked = '0;
     n_br = 0;
-    for (int unsigned p = 0; p < NR_PORTS; p++) begin
+    // Capacity for the first two ports as counts, not as a pick chain
+    // (sv-timing A106): "at least one free" is `|cand`, "at least two" is
+    // `|(cand & (cand - 1))` — one subtractor, in parallel with nothing.
+    // Ports beyond the second keep the serial pick on the remainder.
+    begin
+      automatic logic [PRF_ENTRIES-1:0] cand;
+      automatic logic [FPN-1:0] fcand;
+      automatic logic need0, need1, fneed0, fneed1;
+      cand   = avail & ~PRF_ENTRIES'(1);
+      fcand  = favail;
+      need0  = valid_i[0] && need_rd_i[0] && !(FP_EN && is_fpr_rd_i[0]);
+      need1  = NR_PORTS > 1 && valid_i[1] && need_rd_i[1] && !(FP_EN && is_fpr_rd_i[1]);
+      fneed0 = FP_EN && valid_i[0] && need_rd_i[0] && is_fpr_rd_i[0];
+      fneed1 = FP_EN && NR_PORTS > 1 && valid_i[1] && need_rd_i[1] && is_fpr_rd_i[1];
+      if ((need0 || need1) && !(|cand)) stall_c = 1'b1;
+      if (need0 && need1 && !(|(cand & (cand - 1'b1)))) stall_c = 1'b1;
+      // FP destinations draw on their own pool, so the two classes cannot
+      // stall each other out — a benefit the split buys that a shared pool
+      // with a common freelist would not.
+      if ((fneed0 || fneed1) && !(|fcand)) stall_c = 1'b1;
+      if (fneed0 && fneed1 && !(|(fcand & (fcand - 1'b1)))) stall_c = 1'b1;
+      // the remainder for ports >= 2: what the first two would take
+      if (need0) begin
+        picked = pick_free(avail);
+        avail[picked] = 1'b0;
+      end
+      if (need1) begin
+        picked = pick_free_hi(avail);
+        avail[picked] = 1'b0;
+      end
+      if (fneed0) begin
+        fpicked_c = pick_ffree(favail);
+        favail[fpicked_c] = 1'b0;
+      end
+      if (fneed1) begin
+        fpicked_c = pick_ffree_hi(favail);
+        favail[fpicked_c] = 1'b0;
+      end
+    end
+    for (int unsigned p = 2; p < NR_PORTS; p++) begin
       if (valid_i[p] && need_rd_i[p] && !(FP_EN && is_fpr_rd_i[p])) begin
         picked = pick_free(avail);
         if (picked == '0) stall_c = 1'b1;
         else avail[picked] = 1'b0;
       end
-      // FP destinations draw on their own pool, so the two classes cannot
-      // stall each other out — a benefit the split buys that a shared pool
-      // with a common freelist would not.
       if (FP_EN && valid_i[p] && need_rd_i[p] && is_fpr_rd_i[p]) begin
         fpicked_c = pick_ffree(favail);
         if (!favail[fpicked_c]) stall_c = 1'b1;
@@ -293,8 +357,8 @@ module g6lc_rename #(
   always_comb begin
     // Block-locals are declared and defaulted here: one declared inside a
     // conditional scope reads as a latch to the elaborator.
-    automatic logic [PRF_W-1:0] p1, p2, old, picked;
-    automatic logic [FPRF_W-1:0] f1, f2, f3, fold, fpicked;
+    automatic logic [PRF_W-1:0] p1, p2, old, picked, pick_lo, pick_hi;
+    automatic logic [FPRF_W-1:0] f1, f2, f3, fold, fpicked, fpick_lo, fpick_hi;
     automatic logic [PRF_ENTRIES-1:0] squashed, arch_ref;
     automatic logic [FPN-1:0] fsquashed, farch_ref;
     automatic logic [LVL_W-1:0] level;
@@ -341,6 +405,14 @@ module g6lc_rename #(
     ckpt_hart_d = ckpt_hart_q;
 
     begin
+      // Both picks from one snapshot of the free lists (sv-timing A106):
+      // port 0 the lowest, port 1 the highest. Neither waits for the other's
+      // clear; the single-free case (both name the same entry) is caught by
+      // the `free_d[picked]` gate at port 1.
+      pick_lo  = pick_free(free_d);
+      pick_hi  = pick_free_hi(free_d);
+      fpick_lo = pick_ffree(ffree_d);
+      fpick_hi = pick_ffree_hi(ffree_d);
       for (int unsigned p = 0; p < NR_PORTS; p++) begin
         // map_d, not map_q: earlier ports in this same cycle have already written
         // it, so a younger op in the group sees its older sibling's rename and
@@ -376,7 +448,10 @@ module g6lc_rename #(
           // FP destination: allocate from the FP pool. No `!= 0` guard — f0 is
           // an ordinary register, so FP physical 0 is a legitimate allocation
           // and the pool starts at 0 rather than 1.
-          fpicked = pick_ffree(ffree_d);
+          // Port 1 picks from the top of the pool (sv-timing A106): no wait
+          // on port 0's clear. `ffree_d[fpicked]` still gates the single-
+          // free case (both picks name the same entry; port 0 took it).
+          fpicked = (p == 0) ? fpick_lo : (p == 1) ? fpick_hi : pick_ffree(ffree_d);
           if (ffree_d[fpicked]) begin
             do_falloc[p] = 1'b1;
             alloc_fprd_c[p] = fpicked;
@@ -389,11 +464,14 @@ module g6lc_rename #(
               if (ckpt_hart_d[s] == hart_i[p]) ckpt_falloc_d[s][fpicked] = 1'b1;
           end
         end else if (valid_i[p] && enable_i && need_rd_i[p]) begin
-          // free_d already has earlier ports' allocs removed
-          picked = pick_free(free_d);
+          // free_d already has earlier ports' allocs removed; port 1 picks
+          // the highest free entry from the same snapshot (sv-timing A106),
+          // so its pick does not wait on port 0's clear — `free_d[picked]`
+          // gates the single-free case where both picks coincide.
+          picked = (p == 0) ? pick_lo : (p == 1) ? pick_hi : pick_free(free_d);
           // Exhaustion is reported by the ungated capacity block above; here it
           // simply means no allocation happens this cycle.
-          if (picked != '0) begin
+          if (picked != '0 && free_d[picked]) begin
             do_alloc[p] = 1'b1;
             alloc_prd_c[p] = picked;
             free_d[picked] = 1'b0;
