@@ -1770,7 +1770,28 @@ prerequisite for this work under the existing dual license. No licensing policy 
   COW/demand-paging store→load path (the T40 class exercised the same
   faults), `sfence.vma`/ASID handling on `fork`+`exec`, or the payload's
   musl/busybox itself (the single-hart server1 `l1s1v` and the L3 run
-  will say whether it is model-independent).
+  will say whether it is model-independent). **The L3 run says it is a
+  class, not an incident:** `l3orc3` (t42) reaches procd — `init: Console
+  is alive`, `kmodloader`, `init: - preinit -` at 11.42 s, the failsafe
+  prompt (`Press the [1], [2], [3] or [4] key … debug level`) — and then
+  at 13.65 s `virt_to_cache: Object is not a Slab page!` (`WARNING` in
+  `kmem_cache_free` from `exit_mmap` → maple-tree destroy of `cat`'s mm:
+  a corrupted node pointer), `sh[38]` segfault at NULL in libc (the L1
+  signature), and an Oops in `load_elf_binary` ("kernel access to user
+  memory without uaccess routines at 0x10000", `cat` exec) → panic at
+  13.95 s / 1.01 G cycles. Every symptom is a corrupted pointer in a
+  process's memory-management state. The oracle (old version, no user
+  folding) counted 72 k "stored" mismatches from retire 452 M on — the
+  user-space blind spot, not evidence. **Tooling landed for it:**
+  `rvfi_memcheck.py` now shadows the register file, follows `satp`
+  (`csrrw/s/c`), walks Sv39 over its own memory model for user-half VAs
+  (U-mode loads/stores and the kernel's SUM accesses) with a cache dropped
+  on `sfence.vma`, and keeps that state per hart (`core <h>:` is now
+  printed by the tracer — `rvfi_hart_o`/`commit_instr_hart` through the
+  probes, `rvfi_instr_t` untouched). Offline pass over the L3 trace
+  (`oracle_user.log`) and the L1 `cat` trace (`l1tr`) in flight: the first
+  `stored` mismatch in a user process or in the mm structures names the
+  defect.
 - [ ] **T39 — server1 (HPDCACHE, SMT2, t38) L1 past the T35 point oopses at
   1.267 s guest: `insert_header+0x9c` (`__register_sysctl_table` from
   `eventpoll_init`) NULL pointer dereference at `0x50`, PID 1 (2026-10-15).**
