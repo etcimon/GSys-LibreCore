@@ -386,9 +386,11 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
   probe), objpay 6 / 3,005, vgpages 8 / 1,763 (65,536 pages), vgctl 15 / 75, vnfront 47 / 343,
   cmdexec 8 / 33, vnpump 87 / 263, vgsys 33 / 1,064 incl. `ue_cpos_maxconc_1`, vgtop compute
   arm 77 sessions step 1 OK (step 2 `mp_latency` sweep not recorded), shwave 402 / 72,309 on
-  the pre-texture manifest; **owed:** sys-venus and vndec on the landed tree (vndec launched at
-  record time), the live-tree 5.008 lint rerun (worktree lint was clean), the post-heartbeat
-  bridge `vkcmp` all-scenes rerun. **Guest (CTS-1 `cts1-objmgmt.txt`, run `out-g3bi-cts1-r4`,
+  the pre-texture manifest; vndec on the landed tree **2,181 / 158,116 PASS**
+  (`.cache/g3b/live-gates2/vndec.log`; the regenerated sm5 tape runs at a reduced `--count`
+  because the `vkEnumeratePhysicalDeviceGroups` mutant exceeded the 64 Ki-word decoder
+  window); **owed:** sys-venus on the landed tree, the live-tree 5.008 lint rerun (worktree
+  lint was clean), the post-heartbeat bridge `vkcmp` all-scenes rerun. **Guest (CTS-1 `cts1-objmgmt.txt`, run `out-g3bi-cts1-r4`,
   pre-heartbeat-IDLE bridge): 131 run of 140 — 106 Pass / 20 Fail / 4 NotSupported / 9 not run
   (`max_concurrent.{command_pool*, descriptor_pool*, descriptor_set*, framebuffer,
   render_pass}` absent from the QPA — cause owed), no ring abort.** `create_multiple_devices.
