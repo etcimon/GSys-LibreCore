@@ -29,7 +29,9 @@ module cva6_rvfi
     input rvfi_probes_t rvfi_probes_i,
     output rvfi_instr_t [CVA6Cfg.NrCommitPorts-1:0] rvfi_instr_o,
     output rvfi_to_iti_t rvfi_to_iti_o,
-    output rvfi_csr_t rvfi_csr_o
+    output rvfi_csr_t rvfi_csr_o,
+    // SMT: hart of each retired instruction (0 when NrHarts == 1); sampled with rvfi_instr_o
+    output logic [CVA6Cfg.NrCommitPorts-1:0][7:0] rvfi_hart_o
 );
 
   localparam logic [CVA6Cfg.XLEN-1:0] IsaCode =
@@ -488,6 +490,7 @@ module cva6_rvfi
           commit_instr_op[i]
       )) ? commit_instr_result[i] : wdata[i];
       rvfi_instr_o[i].pc_rdata <= commit_instr_pc[i];
+      rvfi_hart_o[i] <= instr.commit_instr_hart[i];
       rvfi_instr_o[i].mem_addr <= mem_q[commit_pointer[i]].lsu_addr;
       // So far, only write paddr is reported. TODO: read paddr
       rvfi_instr_o[i].mem_paddr <= mem_paddr;

@@ -104,6 +104,7 @@ module ariane_gate_tb;
     ariane_axi::resp_t   axi_ariane_resp;
     rvfi_probes_t rvfi_probes;
     rvfi_csr_t rvfi_csr;
+    logic [CVA6Cfg.NrCommitPorts-1:0][7:0] rvfi_hart;
     rvfi_instr_t [CVA6Cfg.NrCommitPorts-1:0]  rvfi_instr;
 
     ariane #(
@@ -177,7 +178,8 @@ module ariane_gate_tb;
       .rst_ni    (rst_ni),
       .rvfi_probes_i(rvfi_probes),
       .rvfi_instr_o(rvfi_instr),
-      .rvfi_csr_o(rvfi_csr)
+      .rvfi_csr_o(rvfi_csr),
+      .rvfi_hart_o(rvfi_hart)
   );
 
   rvfi_tracer  #(
@@ -193,6 +195,7 @@ module ariane_gate_tb;
     .rst_ni(rst_ni),
     .rvfi_i(rvfi_instr),
     .rvfi_csr_i(rvfi_csr),
+    .rvfi_hart_i(rvfi_hart),
     .end_of_test_o(rvfi_exit)
   );
 

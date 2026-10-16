@@ -1344,6 +1344,7 @@ module ariane_testharness #(
   ariane_axi::resp_t   axi_ariane_resp;
   rvfi_probes_t rvfi_probes;
   rvfi_csr_t rvfi_csr;
+  logic [CVA6Cfg.NrCommitPorts-1:0][7:0] rvfi_hart;
   rvfi_instr_t [CVA6Cfg.NrCommitPorts-1:0]  rvfi_instr;
   rvfi_to_iti_t rvfi_to_iti;
   iti_to_encoder_t iti_to_encoder;
@@ -1593,7 +1594,8 @@ module ariane_testharness #(
       .rvfi_probes_i(rvfi_probes),
       .rvfi_instr_o (rvfi_instr),
       .rvfi_to_iti_o   (rvfi_to_iti),
-      .rvfi_csr_o   (rvfi_csr)
+      .rvfi_csr_o   (rvfi_csr),
+      .rvfi_hart_o  (rvfi_hart)
   );
 
   rvfi_tracer  #(
@@ -1609,6 +1611,7 @@ module ariane_testharness #(
     .rst_ni(rst_ni),
     .rvfi_i(rvfi_instr),
     .rvfi_csr_i(rvfi_csr),
+    .rvfi_hart_i(rvfi_hart),
     .end_of_test_o(core_tracer_exit[0])
   );
 
@@ -1714,6 +1717,7 @@ module ariane_testharness #(
 
   for (genvar c = 1; c < NR_CORES; c++) begin : gen_secondary_trace
     rvfi_csr_t                                sec_rvfi_csr;
+    logic [CVA6Cfg.NrCommitPorts-1:0][7:0] sec_rvfi_hart;
     rvfi_instr_t [CVA6Cfg.NrCommitPorts-1:0]  sec_rvfi_instr;
     rvfi_to_iti_t                             sec_rvfi_to_iti;
 
@@ -1731,7 +1735,8 @@ module ariane_testharness #(
         .rvfi_probes_i(i_cluster.core_rvfi[c]),
         .rvfi_instr_o (sec_rvfi_instr),
         .rvfi_to_iti_o(sec_rvfi_to_iti),
-        .rvfi_csr_o   (sec_rvfi_csr)
+        .rvfi_csr_o   (sec_rvfi_csr),
+        .rvfi_hart_o  (sec_rvfi_hart)
     );
 
     rvfi_tracer #(
@@ -1746,6 +1751,7 @@ module ariane_testharness #(
         .rst_ni(rst_ni),
         .rvfi_i(sec_rvfi_instr),
         .rvfi_csr_i(sec_rvfi_csr),
+        .rvfi_hart_i(sec_rvfi_hart),
         .end_of_test_o(core_tracer_exit[c]  /* observer only: must not terminate the simulation */)
     );
 

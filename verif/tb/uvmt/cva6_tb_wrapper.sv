@@ -94,6 +94,7 @@ module cva6_tb_wrapper import uvmt_cva6_pkg::*; #(
   rvfi_probes_t rvfi_probes;
   rvfi_to_iti_t rvfi_to_iti;
   rvfi_csr_t rvfi_csr;
+  logic [CVA6Cfg.NrCommitPorts-1:0][7:0] rvfi_hart;
   assign rvfi_o = rvfi_instr;
   assign rvfi_csr_o = rvfi_csr;
 
@@ -169,7 +170,8 @@ module cva6_tb_wrapper import uvmt_cva6_pkg::*; #(
       .rvfi_probes_i(rvfi_probes),
       .rvfi_instr_o(rvfi_instr),
       .rvfi_to_iti_o   (rvfi_to_iti),
-      .rvfi_csr_o(rvfi_csr)
+      .rvfi_csr_o(rvfi_csr),
+      .rvfi_hart_o(rvfi_hart)
   );
 
   rvfi_tracer  #(
@@ -185,6 +187,7 @@ module cva6_tb_wrapper import uvmt_cva6_pkg::*; #(
     .rst_ni(rst_ni),
     .rvfi_i(rvfi_instr),
     .rvfi_csr_i(rvfi_csr),
+    .rvfi_hart_i(rvfi_hart),
     .end_of_test_o(tb_exit_o)
   ) ;
 

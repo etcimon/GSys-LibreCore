@@ -34,6 +34,8 @@ module rvfi_tracer #(
   input logic                           rst_ni,
   input rvfi_instr_t[CVA6Cfg.NrCommitPorts-1:0] rvfi_i,
   input rvfi_csr_t                      rvfi_csr_i,
+  // SMT: hart of each retired instruction (0 when NrHarts == 1), printed as `core <h>:`
+  input logic [CVA6Cfg.NrCommitPorts-1:0][7:0] rvfi_hart_i,
   output logic[31:0]                    end_of_test_o
 );
 
@@ -142,7 +144,7 @@ module rvfi_tracer #(
              pc64, rvfi_i[i].insn, rvfi_i[i].insn);
         end
         else begin
-           $fwrite(f, "core   0: 0x%h (0x%h) DASM(%h)",
+           $fwrite(f, "core   %0d: 0x%h (0x%h) DASM(%h)", HART_ID + rvfi_hart_i[i],
              pc64, rvfi_i[i].insn, rvfi_i[i].insn);
         end
         if (cycle_stamp) $fwrite(f, " @%0d", cycles);

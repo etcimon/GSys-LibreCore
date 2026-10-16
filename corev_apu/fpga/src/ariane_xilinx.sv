@@ -833,7 +833,8 @@ ariane #(
       .rvfi_probes_i(rvfi_probes),
       .rvfi_instr_o (rvfi_instr),
       .rvfi_to_iti_o   (rvfi_to_iti),
-      .rvfi_csr_o   ()
+      .rvfi_csr_o   (),
+      .rvfi_hart_o  ()
   );
 
 

@@ -116,6 +116,9 @@ module cva6_rvfi_probes
       instr.commit_instr_rd[i] = commit_instr_i[i].rd;
       instr.commit_instr_result[i] = commit_instr_i[i].result;
       instr.commit_instr_valid[i] = commit_instr_i[i].valid;
+      // SMT: the retiring instruction's hart (0 when NrHarts == 1) -- the
+      // tracer prints it so a two-hart trace can be split by hart
+      instr.commit_instr_hart[i] = 8'(commit_instr_i[i].hart_id);
     end
 
     instr.commit_drop = commit_drop_i;

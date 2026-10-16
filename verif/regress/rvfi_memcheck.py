@@ -22,6 +22,10 @@ them); the walk cache is dropped on sfence.vma and satp writes. Kernel writes
 into a user buffer (copy_to_user) and the process's own loads then meet at the
 same physical byte. A user VA with no valid leaf stays a va-space key.
 
+Harts: the tracer prints `core <h>:` per retirement (SMT harts of one core
+share the file in retirement order); the oracle keeps satp and the shadow
+registers per hart and checks all harts against one memory model.
+
 --merge: a second hart's trace, both written with +rvfi_cycle_stamp; the two are
 interleaved by retirement cycle (hart 0 first on a tie) and checked against ONE
 memory model -- a store is visible to the other hart from its retirement on.
@@ -240,8 +244,15 @@ def main():
             merge = a.split('=', 1)[1]
     trace, elf = args[0], args[1]
     mem = Mem(load_elf(elf))
+    # per-hart shadow state (the tracer prints `core <h>:`; an SMT core's harts
+    # share one trace file in retirement order, each with its own satp/regs)
+    sv39_h = {}
+    regs_h = {}
+    hart = 0
     sv39 = Sv39(mem)
     regs = [0] * 32
+    sv39_h[0] = sv39
+    regs_h[0] = regs
     n = 0
     loads = stores = amos = skipped = 0
     mism = 0
@@ -280,6 +291,17 @@ def main():
             lineno += 1
             if line.startswith('core'):
                 retire += 1
+                try:
+                    h = int(line[4:line.index(':')])
+                except ValueError:
+                    h = 0
+                if h != hart:
+                    hart = h
+                    if h not in sv39_h:
+                        sv39_h[h] = Sv39(mem)
+                        regs_h[h] = [0] * 32
+                    sv39 = sv39_h[h]
+                    regs = regs_h[h]
                 if stop_retire is not None and retire >= stop_retire:
                     break
                 if progress and retire % progress == 0:
