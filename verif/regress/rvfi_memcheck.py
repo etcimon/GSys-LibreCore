@@ -12,6 +12,15 @@ then applied as stores; sc applies only on success (rd == 0).
 
 usage: rvfi_memcheck.py <trace_rvfi_hart_00.dasm> <fw_payload.elf> [--max N] [--all]
        [--watch=HEXADDR] [--stop-retire=N] [--walk=VA:ROOTPPN] [--progress=N]
+       [--merge=<trace_rvfi_hart_01.dasm>]
+
+--merge: a second hart's trace, both written with +rvfi_cycle_stamp; the two are
+interleaved by retirement cycle (hart 0 first on a tie) and checked against ONE
+memory model -- a store is visible to the other hart from its retirement on.
+Under the drained SMT handoff the harts never retire in the same window, so a
+`stored` mismatch is a real cross-hart (or same-hart) value error; under mixed
+residency a store retired a few cycles before another hart's load may legally
+be invisible to it, so mismatches within such a window are hints.
 
 The trace path may be a FIFO: `mkfifo trace_rvfi_hart_00.dasm` in the run
 directory, start the oracle (python3 -u ... --progress=10000000), then the
@@ -168,6 +177,10 @@ def main():
             # --walk=VA:ROOTPPN  Sv39 walk over the model memory at --stop-retire
             va, root = a.split('=')[1].split(':')
             walks.append((int(va, 16), int(root, 16)))
+    merge = None
+    for a in sys.argv[1:]:
+        if a.startswith('--merge='):
+            merge = a.split('=', 1)[1]
     trace, elf = args[0], args[1]
     mem = Mem(load_elf(elf))
     n = 0
@@ -176,8 +189,35 @@ def main():
     unknown = 0
     retire = 0
     lineno = 0
-    with open(trace, 'r', errors='replace') as f:
-        for line in f:
+
+    def records(f):
+        # one retirement = the `core` line (with ` @cycle`) and its detail line
+        core = None
+        for ln in f:
+            if ln.startswith('core'):
+                core = ln
+                continue
+            if core is None:
+                continue
+            at = core.rfind(' @')
+            cyc = int(core[at + 2:]) if at >= 0 else -1
+            yield cyc, core, ln
+            core = None
+
+    def merged(f0, f1):
+        r0, r1 = records(f0), records(f1)
+        a = next(r0, None)
+        b = next(r1, None)
+        while a is not None or b is not None:
+            if b is None or (a is not None and a[0] <= b[0]):
+                yield a[1]; yield a[2]
+                a = next(r0, None)
+            else:
+                yield b[1]; yield b[2]
+                b = next(r1, None)
+
+    with open(trace, 'r', errors='replace') as f,          (open(merge, 'r', errors='replace') if merge else open(trace, 'r', errors='replace')) as f2:
+        for line in (merged(f, f2) if merge else f):
             lineno += 1
             if line.startswith('core'):
                 retire += 1
