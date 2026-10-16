@@ -7470,6 +7470,120 @@ forms are proved exhaustively at 32 bits (A100) and the window at 4/8/16
 5. **Conditions as nodes** (the todo of A100): billing `if` guards generally
    would make every scan visible without the shape-specific floor.
 
+## A102 — Performance/area of the emitted tree, measured; what the area delta exposed
+
+The question: where does the sv-timing emit *pay* area for depth, and is it
+worth it. The answer needed the whole emitted tree mapped the same way as
+the live one (`timings sta-rtl --fo4 10 --allow-over-budget --remote
+--map-recipe streamed`: pre-pass → sync → streamed yosys map → module board)
+and a per-module join of area (yosys `stat -liberty`) with depth (module
+board): `build-platform/scripts/sta_module_delta.py <live run> <emitted
+run>`, largest area increase first.
+
+### Noise floor first
+
+Two mappings of **logically identical** RTLIL differ. `wt_dcache_wbuffer`
+is byte-identical (comments aside) between the live and the emitted tree,
+yet mapped 61140 vs 61594 µm² (+0.7 %) and 21 vs 27 cells / 2.04 vs 3.19 ns
+on its worst register-to-register path. The two RTLIL files differ only in
+`autoidx` — the numbers in `$auto$…$N` names — and ABC's result follows
+yosys's name-dependent ordering. `rename -enumerate` does not converge them
+(62724 vs 62246). So at module level: **area ±1 %, worst path ±6 cells /
+±1 ns are noise**; whole-tree totals average it out; cell counts beat ns.
+Between two live trees (run B → run C) only the three edited modules moved
+— the noise appears when a tree's *other* files change the global numbering.
+
+### What the first delta exposed (and fixed): three ways the emit dropped logic
+
+The first emitted-tree delta showed `pmp_entry` −26 %, `alu` −35/−44 %,
+`multiplier` −12.5 %. None was optimization:
+
+1. **Zero-fed stage with a rewritten origin.** The dense block judged a cut's
+   feed on its own (peer cut LHS, automatic, free loop index, generate-local
+   param) and emitted `svt_zero` or the previous stage ("lean chain") while
+   the origin was rewritten to sample the stage — `base = pipe` with the pipe
+   fed zero. RTLIL miter gold vs gate on `pmp_entry`: **FAIL**. Ten modules
+   carried the pattern. Now one decision in `cut_assigns_from_source`: a cut
+   whose feed cannot be real keeps its origin; and a feed that reads a peer
+   cut's LHS *is* real — that LHS samples its own stage, which is what a
+   multi-stage cut of one cone means (`t0 = reg(a+b); t1 = reg(t0+c)`).
+2. **One-hot tree with more labels than arms.** `emit_onehot_or_tree` kept
+   the 16 deepest safe arms; `onehot_lhs_rewrites` put `_top` on every safe
+   label: alu `result_o` had 27 labels on a 13-arm tree, so `ADDW` read 0.
+   One `onehot_usable_arms` set drives both; labels outside it keep their
+   RHS. Dedupe per origin on top (19 trees for one `result_o` before).
+3. **Stale elaborated widths.** The width map from an older tree made
+   `shamt` 4 bits (it is `$clog2(NrFifo+1)` = 3) and SelectIncrement
+   indexed `shamt[3]`. The map now records a sha256 of the portable flist's
+   sources; the pre-pass passes `--width-map` only while they hash the same.
+
+Plus two that only failed elaboration (block-local names in hoisted feeds;
+enum LHS sampling a `logic` pipe without a cast) and a resume cache that
+served another tree's netlists (`-s "$out"` → keyed on the RTLIL's sha).
+Every one of these is pinned by a unit test; the emitted tree now
+elaborates in slang and maps end to end.
+
+### The measured delta (live A100 tree → emitted −O3 allow-latency tree, Nangate45 typ)
+
+Per module, yosys `stat -liberty` area and the module board's worst
+register-to-register path (cells / ns; children black-boxed, inputs ideal,
+broadcast drivers disabled). Edits per module from the pre-pass's
+`correct.json` (73 InsertReg, 77 BalanceMux, 10 SplitAssign, 9
+RebalanceAssoc, 1 LoopRewrite over 264 files).
+
+| module | area live → emitted | Δ | path live → emitted | edits |
+|---|---:|---:|---|---|
+| branch_unit | 1178 → 1522 µm² | **+29.2 %** | — (no reg→reg) | 3 InsertReg (64-bit target add) |
+| exp_backoff | 414 → 500 | +20.8 % | 6 → 6 cells, 0.46 → 0.46 ns | 1 InsertReg |
+| alu (×2) | 9213 → 10610, 9462 → 10620 | +15.2 / +12.2 % | — → 13 cells, 0.70 ns | one-hot tree (13 arms) + cuts |
+| wt_dcache_missunit | 5951 → 6665 | +12.0 % | 12 → 13 cells, 0.74 → 1.64 ns | 7 InsertReg, one origin |
+| aes | 7536 → 8215 | +9.0 % | — | 13 InsertReg |
+| g6lc_loop_buffer | 7329 → 7760 | +5.9 % | 15 → 11 cells, 2.46 → 1.63 ns | 4 InsertReg |
+| cva6_shared_tlb | 1346 → 1420 | +5.5 % | 5 → 5, 0.32 → 0.28 ns | cuts |
+| wt_dcache_mem | 15257 → 15992 | +4.8 % | — | 3 InsertReg |
+| pmp_entry (×24) | 594 → 618 | +4.1 % | — | 4 InsertReg (was −26 % with the defect) |
+| csr_regfile | 23091 → 23439 | +1.5 % | 11 → 14 cells, 2.02 → 1.36 ns | 2 InsertReg (timer compare) |
+| scoreboard | 244120 → 244731 | +0.3 % | 54 → 53 cells, 5.16 → 3.98 ns | 1 LoopRewrite |
+| g6lc_bp_ckpt | 28151 → 28164 | +0.0 % | 12 → 11, 1.23 → 0.97 ns | 7 InsertReg, one origin |
+| frontend | 15928 → 15879 | −0.3 % | 43 → 37 cells, 4.09 → 3.45 ns | 8 BalanceMux, 3 Rebalance, 1 InsertReg |
+| g6lc_rob | 101316 → 101433 | +0.1 % | 35 → 35, 2.63 → 2.46 ns | BalanceMux |
+| instr_queue | 5111 → 5005 | −2.1 % | 16 → 12 cells, 1.14 → 1.60 ns | SelectIncrement (A91) — fewer cells, slower mux |
+| multiplier | 37461 → 37694 | +0.6 % | — → **110 cells, 6.84 ns** | InsertReg inside the multiply: the cut is not where the mapped depth splits |
+| **total (130 modules ≥ 300 µm²)** | **1 960 449 → 1 967 340** | **+0.35 %** | 43 up / 3 down | |
+
+Whole-core unbuffered STA of the emitted tree: `wns_max` −1154 ns vs −1446 ns
+live (broadcast fanout, not logic depth — A97). The first, defective emit
+had read −0.73 % total with `pmp_entry` −26 %, `alu` −35/−44 %,
+`multiplier` −12.5 %: the area that "went away" was dropped logic.
+
+### Reading it as policy
+
+- **Area goes up only where registers go in.** Every module with +5 % or
+  more carries InsertReg cuts; the flops of a 64-bit cut on a small module
+  are 10–30 % of it (`branch_unit`, `exp_backoff`). This is the price of
+  latency, and it is the one transform that changes latency; it stays last
+  in the planner (S4) and off for latency-neutral runs.
+- **BalanceMux one-hot trees are area-neutral or negative** once exact
+  (AND-OR replaces a chain of 64-bit MUX2 arms); **LoopRewrite is strongly
+  negative** (A101); **RebalanceAssoc/SplitAssign neutral**;
+  **SelectIncrement positive and bounded** (`2^k` candidate incrementers,
+  `MAX_STEP_BITS` 4, `MAX_CANDIDATE_BITS` 512) — on `instr_queue` ≈ +3 %
+  of a 5 kµm² module. The planner's latency-neutral-first order is also the
+  area order, so no new dial is needed; what was needed was exactness.
+- **Whole-tree area is flat within noise** for the −O3 study tree; the
+  depth it buys is on the module board (scoreboard 54 → 53 cells / 5.2 →
+  4.0 ns, frontend 43 → 37 / 4.1 → 3.4, csr_regfile 2.0 → 1.4 ns, rob 2.6 →
+  2.5), the rest is the 64-bit arithmetic and the broadcast nets the
+  structural board already named.
+
+Open: the whole-fixture sequential miter for A101 and the 32-entry
+scoreboard window both exceeded their budgets (1.5 M variables; OOM at 32
+entries) — recorded as inconclusive; the shapes are proved at 16/32 bits
+and 4/8/16 entries respectively. Module-level exactness of the allow-
+latency tree cannot be stated as a cycle-exact miter (latency moved);
+its evidence is the fixture proofs, the single-decision emit rules, and
+the area no longer dropping where logic was lost.
+
 ## A90 — Incrementers are not gates (delay-v32)
 
 `x + 1` and `x + CONST` were billed 1 FO4 at every width since delay-v18

@@ -457,7 +457,14 @@ bun run src/cli/index.ts setup --install --profile dual-hart
   artifacts: one `sta` per `mapped/*.v` (children black-boxed, inputs ideal,
   broadcast drivers disabled), one TSV row per module with the worst
   register-to-register path in ns and cells — the ranking of which module to
-  rewrite next (ALGORITHMS-EXPERTS A100). The portable sv-timing flist carries the
+  rewrite next (ALGORITHMS-EXPERTS A100). `scripts/sta_module_delta.py <run_a>
+  <run_b>` joins two runs' per-module areas and board rows into an area/depth
+  delta (largest area increase first; A102). Module-level numbers carry a
+  mapping noise floor of about ±1 % area / ±6 cells (autoidx-dependent ABC
+  ordering) — compare whole-tree totals and cell counts, not single ns. The
+  streamed resume cache is keyed on each module RTLIL's sha256, and the
+  width map the run leaves behind records a hash of the live sources the
+  pre-pass consumes (`--width-map` only while they match). The portable sv-timing flist carries the
   manifest's `+define+` lines and `verify.synthDefines`, so sv-timing measures
   the design the flow synthesizes. Tests: `test/sta-rtl-study.test.ts`.
 

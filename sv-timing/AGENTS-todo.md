@@ -128,6 +128,17 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
 - [x] Run C module board (A100 netlist): rename 257 → 52 cells (23.2 → 4.4
   ns), iq 57 → 47 cells, rob 35, scoreboard 54, store_buffer 49 (its worst
   is the dense-rewrite dynamic indexing, not the count), frontend 43.
+- [x] A102: emitted −O3 tree mapped end to end (slang + streamed yosys);
+  per-module area/depth delta (`sta_module_delta.py`); mapping noise floor
+  measured (±1 % area, ±6 cells on identical RTLIL — autoidx-dependent ABC
+  ordering). Three logic-dropping emit defects found by the area delta and
+  fixed with tests (zero-fed stage + rewritten origin; one-hot tree labels ≠
+  arms; stale width map). Resume cache keyed on RTLIL sha. Area rises only
+  with InsertReg (flops); one-hot/LoopRewrite neutral-to-negative.
+- [ ] A102 next: canonical ABC input order (sort by signal name before
+  `abc`, or `abc -nocleanup` + sorted AIG) to cut the module-level noise
+  floor; a latency-aware miter (unroll gold by the cut's stage count) so
+  the allow-latency tree can be proved per module.
 - [ ] A101 next shapes: composed walks (ROB free-by-tid), walk-until-valid,
   one-hot if-chain muxes (invariant-tagged), loops inside functions.
 - [ ] Record the `if` a node sits under in the lowerer: (a) bill
