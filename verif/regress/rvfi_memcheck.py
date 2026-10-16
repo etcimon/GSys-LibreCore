@@ -14,6 +14,14 @@ usage: rvfi_memcheck.py <trace_rvfi_hart_00.dasm> <fw_payload.elf> [--max N] [--
        [--watch=HEXADDR] [--stop-retire=N] [--walk=VA:ROOTPPN] [--progress=N]
        [--merge=<trace_rvfi_hart_01.dasm>]
 
+User space: the oracle shadows the integer register file from the trace's rd
+writes, follows every csrrw/csrrs/csrrc of satp, and folds user-half virtual
+addresses (U-mode accesses and S-mode SUM accesses, VA < 2^38) onto physical
+addresses by walking the Sv39 tables in its own memory model (the kernel wrote
+them); the walk cache is dropped on sfence.vma and satp writes. Kernel writes
+into a user buffer (copy_to_user) and the process's own loads then meet at the
+same physical byte. A user VA with no valid leaf stays a va-space key.
+
 --merge: a second hart's trace, both written with +rvfi_cycle_stamp; the two are
 interleaved by retirement cycle (hart 0 first on a tie) and checked against ONE
 memory model -- a store is visible to the other hart from its retirement on.
@@ -42,7 +50,56 @@ LINEAR_VA, LINEAR_PA, LINEAR_LEN = 0xffffffd800000000, 0x80000000, 0x10000000
 VA_FLOOR = 0xffffffc000000000
 
 
-def fold(addr):
+USER_TOP = 1 << 38           # Sv39 user half
+
+
+class Sv39:
+    """satp shadow + walk over the oracle's own memory model."""
+    def __init__(self, mem):
+        self.mem = mem
+        self.satp = 0
+        self.cache = {}
+
+    def set_satp(self, v):
+        self.satp = v
+        self.cache = {}
+
+    def flush(self):
+        self.cache = {}
+
+    def translate(self, va):
+        if (self.satp >> 60) != 8:
+            return None
+        key = (self.satp & ((1 << 44) - 1), va >> 12)
+        hit = self.cache.get(key)
+        if hit is not None:
+            return hit | (va & 0xFFF)
+        pt = (self.satp & ((1 << 44) - 1)) << 12
+        for lvl in (2, 1, 0):
+            idx = (va >> (12 + 9 * lvl)) & 0x1ff
+            pte = self.mem.read(pt + idx * 8, 8)
+            if not pte & 1:
+                return None
+            if pte & 0xe:                       # leaf
+                ppn = pte >> 10
+                if lvl == 2:
+                    pa = ((ppn >> 18) << 30) | (va & ((1 << 30) - 1))
+                elif lvl == 1:
+                    pa = ((ppn >> 9) << 21) | (va & ((1 << 21) - 1))
+                else:
+                    pa = (ppn << 12) | (va & 0xFFF)
+                self.cache[key] = pa & ~0xFFF
+                return pa
+            pt = (pte >> 10) << 12
+        return None
+
+
+def fold(addr, sv39=None):
+    if sv39 is not None and (sv39.satp >> 60) == 8 and addr < USER_TOP:
+        pa = sv39.translate(addr)
+        if pa is not None and DRAM_LO <= pa < DRAM_HI:
+            return pa, 'pa'
+        return addr, 'va'
     if KIMG_VA <= addr < KIMG_VA + KIMG_LEN:
         return addr - KIMG_VA + KIMG_PA, 'pa'
     if LINEAR_VA <= addr < LINEAR_VA + LINEAR_LEN:
@@ -183,6 +240,8 @@ def main():
             merge = a.split('=', 1)[1]
     trace, elf = args[0], args[1]
     mem = Mem(load_elf(elf))
+    sv39 = Sv39(mem)
+    regs = [0] * 32
     n = 0
     loads = stores = amos = skipped = 0
     mism = 0
@@ -226,11 +285,44 @@ def main():
                 if progress and retire % progress == 0:
                     print(f"progress retire={retire} loads={loads} stores={stores} mismatches={mism} stored-mismatches={mism - unknown} pages={len(mem.pages)}", flush=True)
                 continue
-            if not (line and line[0] in '0123' and line[1] == ' ') or ' mem ' not in line:
+            if not (line and line[0] in '0123' and line[1] == ' '):
+                continue
+            if ' mem ' not in line:
+                # shadow the register file and follow satp / sfence.vma
+                t = line.split()
+                if len(t) >= 3:
+                    try:
+                        insn = int(t[2][3:-1], 16)
+                    except ValueError:
+                        insn = 0
+                    for k in range(3, len(t) - 1):
+                        if t[k].startswith('x') and len(t[k]) > 1 and t[k][1:].isdigit():
+                            try:
+                                regs[int(t[k][1:])] = int(t[k + 1], 16)
+                            except ValueError:
+                                pass
+                            break
+                    if (insn & 0x7F) == 0x73:
+                        f3 = (insn >> 12) & 7
+                        if f3 != 0 and ((insn >> 20) & 0xFFF) == 0x180:
+                            rs1 = (insn >> 15) & 0x1F
+                            src = rs1 if f3 >= 5 else regs[rs1]
+                            old = sv39.satp
+                            new = src if (f3 & 3) == 1 else (old | src) if (f3 & 3) == 2 else (old & ~src)
+                            sv39.set_satp(new)
+                        elif f3 == 0 and (insn >> 25) == 0x09:
+                            sv39.flush()                 # sfence.vma
                 continue
             t = line.split()
             if len(t) < 3 or 'mem' not in t:
                 continue
+            for k in range(3, len(t) - 1):
+                if t[k].startswith('x') and len(t[k]) > 1 and t[k][1:].isdigit():
+                    try:
+                        regs[int(t[k][1:])] = int(t[k + 1], 16)
+                    except ValueError:
+                        pass
+                    break
             n += 1
             if maxn and n > maxn:
                 break
@@ -254,7 +346,7 @@ def main():
                     except (ValueError, IndexError):
                         rdval = None
                     break
-            addr, space = fold(addr)
+            addr, space = fold(addr, sv39)
             if space == 'mmio':
                 skipped += 1
                 continue
