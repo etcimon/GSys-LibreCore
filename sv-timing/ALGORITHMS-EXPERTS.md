@@ -8177,6 +8177,72 @@ ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
 
+## A114 — Area selectivity: Dial 11, the trade-off ledger, and the measured feedback loop
+
+**What the width map did and did not tune.** The elaborated width map
+(A102/A113) enters the plan in two ways only: it scales every operator's
+cost by its real width (so a 5-bit counter is not a 32-bit one) and it
+names the instantiated modules. It did **not** choose or order
+transformations. The order was fixed: the latency-neutral kinds first
+(LoopRewrite, SelectIncrement, BalanceMux, RebalanceAssoc, SplitAssign —
+the planner's worklist by slack, `min_gain` the only filter), then
+InsertReg under `--allow-latency` with the per-module cap. Dial 7
+(`area_weight`, "penalty per added flop") was declared in every preset and
+read by nothing; no edit carried an area estimate; and the OpenSTA numbers
+of A113's calibration were reported, never consumed. Area was controlled
+only by the *kind order* — which is the right first-order policy (A102
+measured the latency-neutral kinds area-neutral or negative and every
+module ≥ +5 % area carrying InsertReg) — but it had no second order: a
+64-flop cut that buys 2 FO4 and a 1-flop cut that buys 12 were treated
+alike.
+
+**Dial 11 — `max_cells_per_fo4`.** Each gated edit now carries a
+preliminary cell estimate and the structural FO4 it removes:
+
+| kind | est_cells | fo4_gain |
+|---|---|---|
+| InsertReg (one stage) | width of the cut net (one flop per bit) | the shorter of the two segments the stage separates |
+| SelectIncrement | `(2·2^k − 1) × width` (candidate adders + the select) | `fo4_before − fo4_after` of the node |
+| BalanceMux, RebalanceAssoc, SplitAssign, LoopRewrite | 0 (area-neutral or negative by A101/A102) | — |
+
+An edit is refused when `est_cells / fo4_gain` exceeds the limit (presets
+16 at -O1…-O3, 8 at -Os, 4 at -Oz; `--opt-max-cells-per-fo4 0` disables
+it). A refusal is a worklist verdict (`area_gate`), not an abort: the plan
+moves to the next candidate. At 16, a 64-bit cut must buy ≥ 4 FO4 of
+depth, a 32-bit SelectIncrement with 4 candidates (224 cells) ≥ 14, and a
+1-bit control cut is always admitted. The fixture's 5-bit step (32
+candidates, 1 008 cells) is above the default on purpose — it is the
+shape A102's `instr_queue` paid for with 1.14 → 1.60 ns.
+
+**The feedback loop.** `--feedback calibration.tsv` (or JSON
+`{module: ratio}`) loads the **measured** cells per structural FO4 per
+module from the previous gate-level run (A113's `s3-calibration`) and
+scales the limit per module by `ratio / 1.3`, clamped to ¼ … 4×: where a
+structural FO4 is worth more mapped cells (an under-read cone such as the
+store buffer at 1.6) the gain is real and larger and more area is
+admitted; where the model over-reads (perf_counters at 0.4) the same cut
+must buy more. The host passes the previous run's `calibration.tsv`
+automatically, so the OpenSTA numbers of run *n* select the edits of run
+*n+1* — preliminary estimates first, measured ratios second.
+
+**The ledger.** Every gated edit, applied or refused — module, origin
+line, kind, est_cells, fo4_gain, cells/FO4, the limit in force, the
+verdict — is in `correct.json` (`tradeoffs[]`, `area_gate{}`,
+`edits[*].est_cells / fo4_gain / cells_per_fo4`), summarised on one line
+(`area gate: max 16.0 cells/FO4; applied N (+M est. cells), refused K
+(would add L cells for G FO4)`), and listed by `sv-timing correct
+--tradeoffs N` / `timings sta-rtl --tradeoffs N`, largest preliminary cell
+estimate first — the place to read what the plan bought, what it refused,
+and which refusals are worth moving the dial or the design for.
+
+**How to regenerate toward budget at lower area.** Run the route; read the
+ledger's refused rows (the depth left on the table, with its cell price)
+and the applied rows with the highest est_cells (what the depth cost);
+move Dial 11 per run (or per module, through the feedback file's ratio)
+and compare `SYNTH_STREAM_AREA total` and the module board between runs
+— the two numbers the route already prints. The first run under the gate
+is recorded below.
+
 ## A113 — The route plans, verdicts and calibrates the live design
 
 Auditing what the integrated route actually ran (the command line and

@@ -198,6 +198,11 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   associative (clmul 416 → 50 FO4 against 3.36 ns mapped). Live v39 board:
   iq 55.1, lsq 50.8, multiplier 50.0, rename 49.3, frontend 47.0 — agrees
   with the mapped ranking.
+- [x] A114: Dial 11 `max_cells_per_fo4` (InsertReg / SelectIncrement area
+  gate), `--feedback calibration.tsv` (measured cells/FO4 scales the limit
+  per module), `--tradeoffs N` ledger; host flags/config; route passes the
+  previous calibration automatically. First gated run in flight
+  (`sta-rtl-emitted-a114.log`).
 - [ ] A113 next: rerun the route under delay-v39 (headline = the real top);
   the multiplier as a pipelined 2-stage product (owner: +1 cycle MUL);
   the four over-reads (iq dense class, perf_counters, lsq, ptw) are the

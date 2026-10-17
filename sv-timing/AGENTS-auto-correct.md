@@ -82,3 +82,13 @@ When diagnosing a bad rewrite, call / CLI-export:
 - `--trace-log PATH` JSONL algorithm trace (`measure` / `scale` / `worklist` / `apply` / `refuse`)
 
 Never ship auto-correct without origin comments on new constructs.
+
+## Dial 11 — area selectivity (A114)
+
+`--opt-max-cells-per-fo4 N` (presets 16 / -Os 8 / -Oz 4; 0 off): an
+InsertReg stage (one flop per bit of the cut net) or a SelectIncrement
+(`(2·2^k − 1) × width`) is refused when its preliminary cells per FO4 of
+gain exceed N. `--feedback calibration.tsv` scales N per module by the
+measured cells/FO4 (¼ … 4× the 1.3 band). `--tradeoffs N` lists the ledger
+(applied and refused). Dial 7 (`area_weight`) is inert and kept only for
+preset compatibility.
