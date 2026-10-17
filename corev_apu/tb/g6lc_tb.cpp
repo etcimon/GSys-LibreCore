@@ -271,6 +271,8 @@ static const char *verilog_plusargs[] = {
     "hang_dump",
     // +mmu_trace +mmu_lo +mmu_hi (core/cva6.sv gen_mmu_trace): windowed MMU/PTW/LSU translation state
     "mmu_trace", "mmu_lo", "mmu_hi",
+    // +smt_drain_strict (core/cva6.sv ooo_switch_drained): stop on any drained-handoff witness, not only on resident OoO state
+    "smt_drain_strict",
     // T33/T34: per-event line for load-unit replays (core/cva6.sv census block)
     "lu_replay_trace",
     // T35: store-buffer speculative-queue event trace (core/store_buffer.sv)
