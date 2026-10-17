@@ -118,16 +118,32 @@ module g6lc_iq
   logic [DEPTH-1:0] ready;
   logic [CVA6Cfg.NrIssuePorts-1:0][DEPTH-1:0] grant;
   logic [DEPTH-1:0] valid_after;
+  // registered cancel verdict per slot (A112, see the wake block)
+  logic [DEPTH-1:0] cancel_hit_q;
 
   assign full_o  = (int'(count_q) + CVA6Cfg.NrIssuePorts > DEPTH);
   assign empty_o = (count_q == '0);
 
   // 1) Cancel squash + WB wakeup
+  //
+  // The cancel verdict is registered (sv-timing A112): `cancel_hit_q[e]` is
+  // last cycle's `cancelled_mask_i[q_q[e].sbe.trans_id]` for the entry that
+  // is still in slot e, so the 32-way lookup ends at a flop instead of
+  // heading every wake -> select -> ack and dispatch-age path through the
+  // queue (the module board's measured largest term: -11 % with the lookup
+  // cut). A wrong-path entry can therefore issue in the cancel cycle itself
+  // — the same situation as a wrong-path op issued the cycle before the
+  // cancel arrived, which the pipeline already squashes downstream (the
+  // scoreboard's cancelled flag drops its writeback; the store buffer's push
+  // guard tests the mask; head-only ops are never cancelled at the head).
+  // The mask is level-held per scoreboard slot until the slot is freed, so
+  // a one-cycle-late read loses nothing; `full_o`/`count_q` follow `valid`
+  // and stay consistent (`ooo_iq_count_is_popcount`).
   always_comb begin
     q_wake = q_q;
     for (int unsigned e = 0; e < DEPTH; e++) begin
       // Drop wrong-path ops still waiting in the IQ (keep older non-cancelled)
-      if (q_q[e].valid && cancelled_mask_i[q_q[e].sbe.trans_id])
+      if (q_q[e].valid && cancel_hit_q[e])
         q_wake[e].valid = 1'b0;
       if (q_wake[e].valid) begin
         for (int unsigned w = 0; w < NR_WB; w++) begin
@@ -520,11 +536,15 @@ module g6lc_iq
   // the cancels, minus the acks, plus the allocations. Every operand is an
   // early signal; the invariant `count_q == $countones(valid)` holds from
   // reset and is asserted below.
-  logic [DEPTH-1:0] q_d_valid, cancel_hit;
+  logic [DEPTH-1:0] q_d_valid, cancel_hit, cancel_hit_d;
   always_comb begin
     for (int unsigned e = 0; e < DEPTH; e++) begin
       q_d_valid[e]  = q_d[e].valid;
-      cancel_hit[e] = q_q[e].valid && cancelled_mask_i[q_q[e].sbe.trans_id];
+      // this cycle's squash (A112: the verdict registered last cycle)
+      cancel_hit[e] = q_q[e].valid && cancel_hit_q[e];
+      // next cycle's verdict, on the entry that will occupy slot e: a
+      // newcomer's tid is tested against the mask the cycle it lands
+      cancel_hit_d[e] = q_d[e].valid && cancelled_mask_i[q_d[e].sbe.trans_id];
     end
     count_d = flush_i ? '0
             : count_q - DW'($countones(cancel_hit))
@@ -544,9 +564,11 @@ module g6lc_iq
       q_q <= '0;
       older_q <= '0;
       count_q <= '0;
+      cancel_hit_q <= '0;
     end else begin
       q_q <= q_d;
       older_q <= older_d;
+      cancel_hit_q <= cancel_hit_d;
       count_q <= count_d;
     end
   end
