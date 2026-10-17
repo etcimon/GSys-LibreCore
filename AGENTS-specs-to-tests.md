@@ -903,7 +903,43 @@ repeated L3 run on `ooocoh-t42-ooo-pgo-build`: the two blake2s `lw`s (retire ≈
 read `0x5be0cd19` / `0x0` and the run must pass 701 M cycles with 0 stored mismatches. Stage 53
 of `ooo_mem_min.S` (the blake2s copy-loop shape, bare mode) is the negative: 153/153 Spike-exact
 on t38/t41/t42 — the shape alone does not fill the queue and time the push into the head's pass.
-`G6LC_MUT_FIXUP_SEL_DRIFT` restores the pre-fix shape for a future leaf.
+`G6LC_MUT_FIXUP_SEL_DRIFT` restores the pre-fix shape for a future leaf. **Verdicts landed:** the
+L3 live oracle on t42 passed the blake2s point (retire 330.35 M) and ran to procd's preinit with
+0 stored mismatches of this class; the invariant `fixup_pass_entry_stable` (a fixup write or
+invalidation acts on the entry whose tag check produced `fixup_hit_oh_q`) now lives in
+`gen_fixup_queue`, and the model built with the mutation (`ooocoh-t43m-ooo-pgo-build`) fires it
+at cycle 97,365,899 of the same boot — the pre-fix drift is frequent, the blake2s instance is
+the one whose dropped word was read back.
+
+## Page-fault tval and the dead walk (2026-10-17, T42)
+
+Stage 55 of `ooo_mem_min.S` (`ooo_pagefault_tval`): with data translation on (MPRV, Sv39
+identity gigapage) four loads fault — an unmapped VPN2, a pointer chain to an invalid leaf,
+MPP = U against a supervisor-only page, MPP = U through the invalid leaf — and the handler
+requires `mcause == 13` and **`mtval == the faulting VA`** each time (106/106 Spike-exact on the
+pre-fix and fixed models: tval is right whenever the walk is the requester's own). Spec anchor:
+Part II `#sec:mtval`/`#sec:stval` — on a page fault the trap value register holds the faulting
+virtual address. Stage 56 (`ooo_dead_walk_no_foreign_fault`): a wrong-path load through an
+invalid leaf, cancelled the cycle its walk starts, then a live load behind it on a cold DTLB; the
+handler fails on any trap (165/165 Spike-exact — the leaf does not yet time the live request
+into the dead walk's fault; the `+mmu_trace` window on the pre-fix L1 boot does:
+c=477,251,244 a wrong-path **store to VA 0** starts the walk, c=477,251,281 the live user `ld`
+(`vaddr_q=0x3f95f16f90`) is the registered requester when it faults, `cause=13 tval=0
+ex_ptw=1`). The fix (`cva6_mmu.sv`: a PTW fault is reported only when `update_vaddr` and
+`lsu_vaddr_q` share a page) is verified by the L1 `/init` on `ooocoh-t46-ooo-pgo-build`
+running `cat /proc/cpuinfo`, `/proc/loadavg`, `/proc/stat`, `free` and the shell with no
+signal, where the pre-fix model killed `cat` with `SIGSEGV at 0x0`. `G6LC_MUT_MMU_PTW_FOREIGN`
+restores the pre-fix branch for a future leaf that lands the timing.
+
+## Two AMOs to one word (2026-10-16, T43, open)
+
+Stage 54 of `ooo_mem_min.S` (`ooo_amo_or_then_swap`): `amoor.d.aq` (0x800 → 0x801), the
+boot's ~50-cycle gap, `amoswap.d.rl zero` (→ 0x800), then `ld` must read 0x800, plus the pair
+back to back; 48/48 Spike-exact on t42/t46 — the bare shape does not lose the swap. Spec anchor:
+Part I `#sec:amo` — AMOs are atomic read-modify-writes and a later AMO's value is what
+subsequent loads observe. The system witness is the L3 oracle (`amoswap` at 713,884,701, the
+`c.ld` at 713,885,567 and every later read return the `amoor` value) and the `+smt_mem_watch`
+window run `l3watch3` (missunit `wt_amo_req`/`wt_amo_ack`/`wt_inv`/`wt_refill`).
 
 ## Speculative store queue: flush coinciding with a commit (2026-10-15, T35 hardening)
 

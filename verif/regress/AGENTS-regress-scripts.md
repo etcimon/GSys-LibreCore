@@ -227,3 +227,25 @@ block) prints, after N cycles without a commit ack, the scoreboard head, every I
 readiness/bypass bits and `ready[e]`, the LSQ store/load entries, the LSU bypass entries and the
 store/load unit states, three times 1000 cycles apart — for a boot that stops retiring where no
 probe window is known in advance (T40).
+### User space, harts and two-file merge (2026-10-16/17, T39/T42)
+
+- **User space.** The oracle shadows the integer register file from the trace's `x<n>` writes,
+  follows every `csrrw/csrrs/csrrc` of `satp` (CSR 0x180) and folds user-half virtual
+  addresses (VA < 2^38 while satp.MODE = Sv39) onto physical addresses by walking the Sv39
+  tables **in its own memory model** (the kernel wrote them); the walk cache is dropped on
+  `sfence.vma` and on satp writes. U-mode loads/stores and the kernel's SUM accesses
+  (`copy_to_user`) meet at the same physical byte, so a user process reading what the kernel
+  wrote — or the kernel reading what the process wrote — is checked. A user VA with no valid
+  leaf stays a `va`-space key (never-stored bytes there are skipped). Before this the user
+  phase produced tens of thousands of false `stored` mismatches (the kernel fills pages through
+  the linear map, the process reads them through its own VA).
+- **Harts.** The tracer prints `core <h>:` per retirement (`rvfi_hart_o`); an SMT core's harts
+  share one file in retirement order and the oracle keeps satp and the shadow registers per
+  hart, checking all harts against one memory model. Under the drained handoff a `stored`
+  mismatch is a real value error; under mixed residency a store retired a few cycles before
+  another hart's load may legally be invisible to it.
+- **`--merge=<trace2>`.** Two files written with `+rvfi_cycle_stamp` are interleaved by
+  cycle (hart 0 first on a tie) — for multi-core runs where each core has its own tracer.
+- Offline on a kept trace: `zstd -dc trace_rvfi.dasm.zst | python3 -u rvfi_memcheck.py
+  /dev/stdin payload.elf --progress=20000000 > oracle_user.log`.
+
