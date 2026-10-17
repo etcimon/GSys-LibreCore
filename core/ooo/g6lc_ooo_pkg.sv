@@ -26,9 +26,18 @@ package g6lc_ooo_pkg;
   // TRANS_ID_BITS so the modular subtraction wraps exactly like the scoreboard.
   function automatic logic ooo_age_older(input int unsigned width, input logic [31:0] a,
                                          input logic [31:0] b, input logic [31:0] cp);
-    logic [31:0] mask;
+    logic [31:0] mask, am, bm, cm;
     mask = (32'd1 << width) - 32'd1;
-    return ((a - cp) & mask) < ((b - cp) & mask);
+    am = a & mask;
+    bm = b & mask;
+    cm = cp & mask;
+    // The circular order is [cp, 2^width), then [0, cp).
+    // Compare within a half in parallel with deciding which half each
+    // operand occupies. This removes two subtractors from the age gates
+    // shared by IQ, LSQ, ROB and store-buffer consumers.
+    // Mask first: callers may carry unrelated upper bits; width=0 still
+    // compares two zero distances, and width>=32 retains the old mask.
+    return ((am < cm) == (bm < cm)) ? (am < bm) : (bm < cm);
   endfunction
 
   function automatic logic [31:0] ooo_age_dist(input int unsigned width, input logic [31:0] a,

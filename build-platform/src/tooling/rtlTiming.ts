@@ -568,6 +568,8 @@ function marchValue(ctx: PlatformContext): string {
 /** Outcome of the optional sv-timing pre-pass. */
 interface SvtPrepass {
   stage: RtlTimingResult["stages"][number];
+  /** Structural report paired with this run's emitted package; absent for live RTL. */
+  reportPath?: string;
   /** Stages that ran before the pre-pass (the remote width-map refresh). */
   preStages?: RtlTimingResult["stages"];
   /** `svt_corrected.f` to overlay on the manifest, when the pass emitted. */
@@ -614,6 +616,7 @@ async function runSvtPrepass(
     return {
       stage: { id: "s0-svt-correct", status: "pass", detail: `${completion.detail}; reusing ${posixPath(v.correctedFlist)}` },
       emitFlist: v.correctedFlist,
+      reportPath: join(v.dir, "correct.json"),
       budget,
     };
   }
@@ -765,6 +768,7 @@ async function runSvtPrepass(
     stage: { id: "s0-svt-correct", status: "pass", detail: `${completion.detail}; ${replaced} files → ${posixPath(emitFlist)}; ${cfgNote}; ${widthNote}${gateNote}` },
     preStages,
     emitFlist: posixPath(emitFlist),
+    reportPath: join(svtDir, "correct.json"),
     targetMhz,
     budget,
   };
@@ -1214,7 +1218,9 @@ async function runRemote(
     const board = join(dest, "module-board.tsv");
     if (pulled.ok && existsSync(board)) {
       copyFileSync(board, join(outDir, "module-board.tsv"));
-      const cal = writeCalibration(join(outDir, "svt", "correct.json"), board, join(outDir, "calibration.tsv"));
+      // --fo4 0 maps live RTL. A correct.json left by a preceding emitted
+      // run describes another design and must not supply its FO4 ratios.
+      const cal = writeCalibration(pre.reportPath, board, join(outDir, "calibration.tsv"));
       stages.push({ id: "s3-calibration", status: "pass", detail: cal });
     } else {
       stages.push({ id: "s3-calibration", status: "skip", detail: "module board produced on the builder but not pulled" });
@@ -1260,10 +1266,10 @@ export function moduleBoardShell(opts: { runDir: string; liberty: string; period
  * module) with the module board (mapped ns / cells per module) into
  * `calibration.tsv`, largest structural first; returns a one-line summary.
  */
-export function writeCalibration(correctJson: string, boardTsv: string, outPath: string): string {
+export function writeCalibration(correctJson: string | undefined, boardTsv: string, outPath: string): string {
   let post: any;
   try {
-    post = JSON.parse(readFileSync(correctJson, "utf8"))?.post_analyze;
+    post = correctJson ? JSON.parse(readFileSync(correctJson, "utf8"))?.post_analyze : undefined;
   } catch {
     post = undefined;
   }

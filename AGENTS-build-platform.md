@@ -344,6 +344,12 @@ Maps: `AGENTS-specs-to-impl.md` · `AGENTS-specs-to-tests.md` · `AGENTS-specs-c
 
 ### 7.1 The integrated route — `timings sta-rtl` (structural → gate-level, one command)
 
+**A118 provenance correction:** a live `--fo4 0` run no longer joins a
+leftover `svt/correct.json` from an earlier emitted tree. Its calibration
+has mapped values and missing structural columns. Reused or newly emitted
+packages carry their own paired report path. Cell/FO4 and ns/FO4
+correlations are screening aids, not alternative definitions of 10 FO4.
+
 ```bash
 ./build.sh timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --allow-over-budget --remote --map-recipe streamed
 ```

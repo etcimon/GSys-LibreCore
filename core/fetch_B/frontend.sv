@@ -217,6 +217,17 @@ module frontend
   // three-operand sum (sv-timing A105) — the realigner's cursor add is no
   // longer in series with the 64-bit target add.
   logic [NrInstr-1:0][CVA6Cfg.VLEN-1:0] addr_base, addr_off;
+  // Keep the late live/taken decision off the target arithmetic. Compute
+  // both direct targets from the decoded immediates in parallel, then
+  // select a complete address. The previous select of an immediate put
+  // prefix filtering and branch prediction in front of the full adder.
+  // These are alternatives, not extra cycles; the cf_select priority and
+  // leftover override below still decide exactly which address is used.
+  logic [NrInstr-1:0][CVA6Cfg.VLEN-1:0] direct_rvi_target, direct_rvc_target;
+  for (genvar i = 0; i < NrInstr; i++) begin : gen_direct_target
+    assign direct_rvi_target[i] = addr_base[i] + addr_off[i] + rvi_imm[i];
+    assign direct_rvc_target[i] = addr_base[i] + addr_off[i] + rvc_imm[i];
+  end
   logic [NrInstr-1:0] instruction_valid_raw, instruction_valid;
   // BHT, BTB and RAS prediction
   bht_prediction_t [NrInstr-1:0] bht_prediction;
@@ -451,7 +462,7 @@ module frontend
       // calculate the jump target address: base + offset + immediate as one
       // sum (equal to addr[i] + imm modulo 2^VLEN)
       if (taken_rvc_cf[i] || taken_rvi_cf[i]) begin
-        predict_address = addr_base[i] + addr_off[i] + (taken_rvc_cf[i] ? rvc_imm[i] : rvi_imm[i]);
+        predict_address = taken_rvc_cf[i] ? direct_rvc_target[i] : direct_rvi_target[i];
       end
     end
     // Leftover-complete RVI jal is slot0 at carry_pc. Later slots in the
@@ -462,7 +473,7 @@ module frontend
     if (serving_unaligned && instruction_valid[0] && rvi_jump[0]) begin
       cf_type[0] = ariane_pkg::Jump;
       taken_rvi_cf[0] = 1'b1;
-      predict_address = addr_base[0] + addr_off[0] + rvi_imm[0];
+      predict_address = direct_rvi_target[0];
       ras_push = rvi_call[0] && instr_queue_consumed[0];
       if (rvi_call[0]) ras_update = addr_base[0] + addr_off[0] + 4;
     end

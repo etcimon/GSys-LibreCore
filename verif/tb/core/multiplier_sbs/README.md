@@ -14,3 +14,15 @@ verilator --binary --timing -Wno-fatal -Wno-lint -Wno-style -Wno-WIDTH -Wno-UNOP
 
 Evidence of record: 3 seeds x 300k cycles, ~234k valid results per seed,
 0 mismatches.
+
+`tb_mul_lifetime` additionally instantiates the real `mult` wrapper and
+checks fixed two-cycle valid/TID/data alignment, flush and cancellation,
+mask removal, and TID reuse. Run this top with stock Verilator 5.008
+(`--binary --timing --assert -O0`) including `mult.sv`, `serdiv.sv` and
+`lzc.sv`. The preceding wrapper must fail the flush case as a negative
+control; the changed wrapper must print `PASS tb_mul_lifetime checks=15`.
+
+The isolated runner `verif/regress/remote/run_fo4_control_review.py` builds
+both versions with `CONTROL_MODE=lifetime` and reruns the arithmetic
+comparison on the same stock tool. The experimental A-fork failed the
+directed harness's stimulus check; its outputs do not qualify this test.

@@ -63,6 +63,11 @@ test("calibration joins the structural worst per live module with the module boa
   expect(rows.some((r) => r.startsWith("g6lc_ai_exec"))).toBe(false);
   expect(summary).toContain("worst mapped: g6lc_iq 3.10 ns");
   expect(summary).toContain("1 under-read");
+  // A live mapping must not inherit an earlier corrected tree's FO4.
+  const live = writeCalibration(undefined, board, out);
+  const liveRows = readFileSync(out, "utf8");
+  expect(liveRows).toContain("g6lc_iq\t3.100\t-\t-\t3.042\t41\t-");
+  expect(live).toContain("0 under-read");
 });
 
 test("the module board shell keeps the heredoc-local variables literal", () => {

@@ -85,13 +85,14 @@ test("streamed recipe: phase A dumps RTLIL + module list, phase B maps and evict
   expect(b).toContain(String.raw`while IFS=\$'\t' read -r i f; do printf "%s\0%s\0" "\$i" "$RUN/il/\$f"; done`);
   expect(b).toContain('bash "$RUN/map_all.sh" > "$RUN/synth-map.log" 2>&1');
   expect(b).toContain('R="$1"; YS="$2"; LIB="$3"; tmo="$4"; idx="$5"; il="$6"');
-  expect(b).toContain('timeout "$tmo" "$YS" -q -p "read_rtlil $il; async2sync t:\\$aldff t:\\$aldffe; techmap; opt_clean; dfflibmap -liberty $LIB;');
+  expect(b).toContain('timeout "$tmo" "$YS" -q -p "read_rtlil $il; booth; async2sync t:\\$aldff t:\\$aldffe; techmap; opt_clean; dfflibmap -liberty $LIB;');
   // Reruns keep mapped modules of the same RTLIL; an unmappable flop type
   // fails the step.
   expect(b).toContain("_ALDFF_");
-  // The resume cache is keyed on the module RTLIL's content: another tree's
-  // netlist for the same module index is never served.
-  expect(b).toContain('sha=$(sha256sum "$il" | cut -c1-16)');
+  // Both RTLIL and recipe participate: a previously mapped module must be
+  // rebuilt when arithmetic lowering or the ABC delay target changes.
+  expect(b).toContain('sha=$( { cat "$il"; echo "${MAP_RECIPE_KEY:-}"; } | sha256sum | cut -c1-16)');
+  expect(b).toContain('MAP_RECIPE_KEY="map-v2:booth:abc -liberty $LIB -D 800');
   expect(b).toContain('[ "$(cat "$out.sha" 2>/dev/null)" = "$sha" ]');
   expect(b).toContain('echo "$sha" > "$out.sha"; echo "$idx ok delay"');
   // The width map records the live-source hash the host computed.

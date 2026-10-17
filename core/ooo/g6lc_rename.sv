@@ -427,8 +427,8 @@ module g6lc_rename #(
         prs1_o[p] = p1;
         prs2_o[p] = p2;
         prd_old_o[p] = old;
-        rs1_ready_o[p] = (rs1_i[p] == 5'd0) || !busy_d[p1];
-        rs2_ready_o[p] = (rs2_i[p] == 5'd0) || !busy_d[p2];
+        rs1_ready_o[p] = (rs1_i[p] == 5'd0) || !busy_q[p1];
+        rs2_ready_o[p] = (rs2_i[p] == 5'd0) || !busy_q[p2];
         if (FP_EN) begin
           f1 = fmap_d[hart_i[p]][rs1_i[p]];
           f2 = fmap_d[hart_i[p]][rs2_i[p]];
@@ -439,9 +439,28 @@ module g6lc_rename #(
           fprs3_o[p] = f3;
           fprd_old_o[p] = fold;
           // Readiness is taken from whichever class the operand belongs to.
-          if (is_fpr_rs1_i[p]) rs1_ready_o[p] = !fbusy_d[f1];
-          if (is_fpr_rs2_i[p]) rs2_ready_o[p] = !fbusy_d[f2];
-          if (is_fpr_rs3_i[p]) rs3_ready_o[p] = !fbusy_d[f3];
+          if (is_fpr_rs1_i[p]) rs1_ready_o[p] = !fbusy_q[f1];
+          if (is_fpr_rs2_i[p]) rs2_ready_o[p] = !fbusy_q[f2];
+          if (is_fpr_rs3_i[p]) rs3_ready_o[p] = !fbusy_q[f3];
+        end
+        // Before writeback/free/recovery below, busy_d differs from busy_q
+        // only at older ports' allocations. Bypass those tags directly:
+        // allocate -> full busy-vector demux -> indexed busy read otherwise
+        // puts two dynamic selectors in series. Compare physical tags so
+        // this is also exact for aliasing maps; no free/map invariant is
+        // needed. Preserve the integer x0 and FP physical-zero asymmetry.
+        for (int unsigned e = 0; e < p; e++) begin
+          if (do_alloc[e]) begin
+            if (!(FP_EN && is_fpr_rs1_i[p]) && rs1_i[p] != 0 &&
+                p1 == alloc_prd_c[e]) rs1_ready_o[p] = 1'b0;
+            if (!(FP_EN && is_fpr_rs2_i[p]) && rs2_i[p] != 0 &&
+                p2 == alloc_prd_c[e]) rs2_ready_o[p] = 1'b0;
+          end
+          if (FP_EN && do_falloc[e]) begin
+            if (is_fpr_rs1_i[p] && f1 == alloc_fprd_c[e]) rs1_ready_o[p] = 1'b0;
+            if (is_fpr_rs2_i[p] && f2 == alloc_fprd_c[e]) rs2_ready_o[p] = 1'b0;
+            if (is_fpr_rs3_i[p] && f3 == alloc_fprd_c[e]) rs3_ready_o[p] = 1'b0;
+          end
         end
 
         if (FP_EN && valid_i[p] && enable_i && need_rd_i[p] && is_fpr_rd_i[p]) begin

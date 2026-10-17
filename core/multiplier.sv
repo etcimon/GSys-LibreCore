@@ -9,6 +9,7 @@
 // specific language governing permissions and limitations under the License.
 //
 // Author: Florian Zaruba <zarubaf@iis.ee.ethz.ch>
+// Modified by: Etienne Cimon (configurable multiply pipeline and lifetime contract).
 //
 // Description: Multiplication Unit with one pipeline register
 //              This unit relies on retiming features of the synthesizer
@@ -143,9 +144,9 @@ module multiplier
     // b_top·A_u (one add, off the product's depth); stage 2 sums the shifted
     // products and subtracts the shifted correction once. Exact modulo
     // 2^(2·XLEN) — all the operations read. One more cycle of MUL latency;
-    // the result still travels with its trans_id, so no other contract
-    // changes (mult.sv arbitrates on `mult_valid`, the scoreboard drops a
-    // late result after a flush by its `issued` guard).
+    // the result travels with its trans_id. mult.sv carries cancellation
+    // liveness with the pipeline and suppresses killed results before
+    // arbitration, including after scoreboard TID reuse.
     localparam int unsigned NS = CVA6Cfg.XLEN / 16;
     localparam int unsigned AW = CVA6Cfg.XLEN + 1;   // unsigned pattern of the signed operand
     localparam int unsigned PW = AW + 17;            // (XLEN+1) × 17 unsigned

@@ -77,7 +77,7 @@ module alu
   // Adder
   // ------
   logic adder_op_b_negate;
-  logic adder_z_flag;
+  logic operands_equal;
   logic [CVA6Cfg.XLEN:0] adder_in_a, adder_in_b;
   logic [CVA6Cfg.XLEN-1:0] adder_result;
   logic [CVA6Cfg.XLEN-1:0] operand_a_bitmanip, bit_indx;
@@ -121,15 +121,18 @@ module alu
   // actual adder
   assign adder_result_ext_o = adder_in_a + adder_in_b;
   assign adder_result       = adder_result_ext_o[CVA6Cfg.XLEN:1];
-  assign adder_z_flag       = ~|adder_result;
+  // EQ/NE do not need the subtraction carry chain. For these opcodes the
+  // bitmanip input is unchanged and (a-b)==0 iff a==b modulo 2^XLEN.
+  // Keep the adder for arithmetic results; compare in parallel.
+  assign operands_equal    = (operand_a == operand_b);
 
   // get the right branch comparison result
   if (HasBranch) begin
     always_comb begin : branch_resolve
       // set comparison by default
       case (fu_data_i.operation)
-        EQ:       alu_branch_res_o = adder_z_flag;
-        NE:       alu_branch_res_o = ~adder_z_flag;
+        EQ:       alu_branch_res_o = operands_equal;
+        NE:       alu_branch_res_o = ~operands_equal;
         LTS, LTU: alu_branch_res_o = less;
         GES, GEU: alu_branch_res_o = ~less;
         default:  alu_branch_res_o = 1'b1;

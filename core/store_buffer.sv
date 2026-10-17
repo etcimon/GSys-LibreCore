@@ -336,21 +336,22 @@ module store_buffer
     // board's worst store-buffer path. Here each snapshot entry gets its
     // position after the insertion (`pos_ins`, the identity when nothing
     // arrives) and its keep verdict (all kept when nothing is cancelled);
-    // its final slot is the number of kept entries whose inserted position
-    // is smaller, and one gather writes the window. Exact: the composition
+    // its final slot is the number of kept predecessors, and one gather
+    // writes the window. Existing entries retain their relative order;
+    // only comparisons involving the arrival depend on its insertion rank.
+    // Exact: the composition
     // of the two maps, evaluated as one. The cancel verdict is a property
     // of the entry — looked up on its registered trans_id, and the arrival
     // is never cancelled (the push guard tested trans_id_i).
     begin : spec_rewrite
       automatic logic ins_active, sq_active;
       automatic logic [DEPTH_SPEC-1:0] keep, cancel;
-      automatic logic [DEPTH_SPEC-1:0][$clog2(DEPTH_SPEC):0] pos_ins, final_slot;
+      automatic logic [DEPTH_SPEC-1:0][$clog2(DEPTH_SPEC):0] final_slot;
       automatic logic [$clog2(DEPTH_SPEC)-1:0] ks;
       ins_active = CVA6Cfg.OoOEn && valid_i && !cancelled_mask_i[trans_id_i];
       sq_active  = (|cancelled_mask_i && !flush_i) || (flush_i && LEGACY_SMT_KEEP);
       keep = '0;
       cancel = '0;
-      pos_ins = '0;
       final_slot = '0;
       if (ins_active || sq_active) begin
         live   = speculative_status_cnt_n;
@@ -391,14 +392,6 @@ module store_buffer
                          ooo_older(a_tid[k], a_tid[(nlive > 0) ? nlive-1 : 0]);
         ins  = ($clog2(DEPTH_SPEC) + 1)'($countones(older_vec));
         nins = int'(ins);
-        // position after the insertion: the arrival at `ins`, younger
-        // entries shifted up; the identity without an arrival
-        for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
-          if (!ins_active)           pos_ins[k] = ($clog2(DEPTH_SPEC) + 1)'(k);
-          else if (k + 1 == nlive)   pos_ins[k] = ins;
-          else if (k < nins)         pos_ins[k] = ($clog2(DEPTH_SPEC) + 1)'(k);
-          else                       pos_ins[k] = ($clog2(DEPTH_SPEC) + 1)'(k + 1);
-        end
         // keep verdict per entry: every live entry when nothing is
         // cancelled, else the squash's rule
         for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
@@ -412,11 +405,20 @@ module store_buffer
 `endif
           end
         end
-        // final slot = kept entries placed before this one
+        // Direct predecessor relation, avoiding rank -> inserted-position
+        // arithmetic -> DEPTH_SPEC^2 dynamic comparisons. For two existing
+        // entries the relation is just j<k; the arrival precedes k exactly
+        // when k>=ins. This uses the same ins as the original permutation,
+        // without assuming that older_vec is a prefix or that IDs are unique.
         for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
           automatic logic [DEPTH_SPEC-1:0] ahead;
-          for (int unsigned j = 0; j < DEPTH_SPEC; j++)
-            ahead[j] = keep[j] && (pos_ins[j] < pos_ins[k]);
+          for (int unsigned j = 0; j < DEPTH_SPEC; j++) begin
+            if (j == k) ahead[j] = 1'b0;
+            else if (!ins_active) ahead[j] = keep[j] && (j < k);
+            else if (k + 1 == nlive) ahead[j] = keep[j] && (j < nins);
+            else if (j + 1 == nlive) ahead[j] = keep[j] && (k >= nins);
+            else ahead[j] = keep[j] && (j < k);
+          end
           final_slot[k] = ($clog2(DEPTH_SPEC) + 1)'($countones(ahead));
         end
         live = ($clog2(DEPTH_SPEC) + 1)'($countones(keep));
@@ -1135,6 +1137,5 @@ module store_buffer
   //pragma translate_on
 
 endmodule
-
 
 

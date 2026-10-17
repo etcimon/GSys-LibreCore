@@ -2,7 +2,25 @@
 
 Structural (not STA) frequency closure for the precompiler loop.
 
-## Current campaign (2026-10-16, A104–A106 — the netlist's own worst paths)
+## Current objective and evidence rules (A118)
+
+The objective is **10 FO4 at 20 ps/FO4**, margin 0.2: a 200 ps logic
+budget under a 250 ps clock. The empirical 13-cell and 0.7 ns comparisons
+in older records are not alternative closure thresholds.
+
+The current source and boundary audit is
+[`CONTROL-CONE-CLOSURE.md`](CONTROL-CONE-CLOSURE.md). Paired snapshots use
+map-v2 (`booth`, `&syn2`) and record both the uncut OpenSTA timing graph and
+the historical module study with fanout cuts. Children black-boxed in a
+module board, unplaced nets, and disabled timing arcs cannot certify
+whole-core closure. A successful OpenSTA process with negative WNS means
+the analysis ran, not that timing passed.
+
+Live mapping (`--fo4 0`) now leaves structural columns empty instead of
+joining an older emitted report. Fresh structural numbers must be paired
+with the exact live source snapshot and its elaborated widths.
+
+## Historical campaign (2026-10-16, A104–A106)
 
 Latest: with the structural board calibrated (delay-v38) the campaign
 moved to the module board's own ranking and removed the serial

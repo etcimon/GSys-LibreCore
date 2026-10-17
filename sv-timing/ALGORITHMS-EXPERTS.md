@@ -16,7 +16,17 @@ does not mean a place-and-route path of 300 ps. It means: under `fo4-v1`, delay-
 path_class detector 24, and the current compose/classify/pass loop, this cone is the
 worst remaining single-cycle primary.
 
-**State of record (2026-10-16, delay-v37 — A97–A103 at the end of this manual).**
+**Current qualification note (A118).** The historical tables below mix live
+and emitted trees and several mapping recipes. They are retained as observations,
+not interchangeable baselines. The 10 FO4 objective at `fo4_ps=20` remains a
+200 ps logic budget within a 250 ps clock with 20% margin. The earlier
+13-cell / approximately 0.7 ns comparisons are correlations, **not conversions
+of that budget or closure criteria**. A118 pairs immutable source snapshots,
+uses the same map-v2 recipe, and reports the uncut timing graph beside the
+fanout-filtered module study. See
+[`CONTROL-CONE-CLOSURE.md`](architecture/CONTROL-CONE-CLOSURE.md).
+
+**Historical state (2026-10-16, delay-v37 — A97–A103).**
 
 | Quantity | Value | Where |
 |---|---|---|
@@ -8176,6 +8186,122 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A118 — Remove serial control dependencies before adding pipeline cycles
+
+The target remains 10 FO4; neither a change of measurement version nor a
+cell-count correlation establishes closure. The eleven-module contract audit
+is in `architecture/CONTROL-CONE-CLOSURE.md`. This round changes internal
+expressions and uses the existing multiplier latency configuration; it adds
+no caller ports or global configuration fields.
+
+| Candidate | Exact relation and applicability | Implementation |
+|---|---|---|
+| Circular order | After masking all operands, circular order consists of `[cp, 2^w)` followed by `[0, cp)`. Equal sides compare `a<b`; different sides select the side containing `b`. Masks must precede the comparison. | `g6lc_ooo_pkg::ooo_age_older`; shared IQ/LSQ/ROB/store consumers |
+| Compaction predecessor | Existing entries keep index order. Only comparisons involving the arriving last entry depend on the insertion rank. Keep the original rank, compute predecessors directly, then count kept predecessors. | `store_buffer::spec_rewrite` |
+| Busy-table bypass | Before writeback/free/recovery, `busy_d` equals `busy_q` with older ports' allocations set. A read is `busy_q[tag] OR any(older allocation == tag)`. This also holds for aliasing maps; preserve integer x0 and FP physical zero. | `g6lc_rename` readiness |
+| Equality | For equal-width bitvectors, subtraction is zero iff the operands are equal. EQ/NE use equality directly while arithmetic results retain their adder. | `alu::branch_resolve` |
+| Late-select arithmetic | `base+off+(sel?c:b)` equals `sel?(base+off+c):(base+off+b)` modulo the result width. Duplicated arithmetic can trade area for removing the late control input from the add path. | frontend direct-target candidate |
+
+These are production-source candidates with explicit proofs, **not new
+generic automatic passes**. To generalize them into sv-timing, the detector
+must establish the mask/width and truncation context, vector write order,
+scope, and lack of side effects before authorizing emission. The existing
+LoopRewrite/SelectIncrement/BalanceMux ordering and area ledger do not by
+themselves prove those conditions. In particular, a zero area estimate for
+an unmeasured rewrite must not stand for measured area neutrality.
+
+Minimal discriminators are implemented in
+`verif/regress/remote/run_fo4_control_review.py`: SAT on the actual age helper,
+SAT on extracted old/new compaction-control code, subtraction-zero and
+selected-target identities, and matched-state rename equivalence with FP
+enabled for one and two harts. The runner captures source hashes, elaborates
+the complete `g6lc64_ooo` hierarchy, then maps the requested modules with
+identical recipe and liberty in isolated output directories. A run does not
+overwrite the shared builder checkout or its mapping cache.
+
+### Multiplier lifetime is part of the pipeline boundary
+
+The earlier A115 text relied on the scoreboard's current `issued` bit to
+reject late results. That does not establish allocation-generation identity
+after TID reuse. For `MultStages>1`, `mult.sv` now carries a small live/TID
+pipeline alongside the existing arithmetic pipeline. Flush clears it;
+cancellation kills the corresponding entry permanently as it advances.
+Current-cycle cancellation also masks output before multiply/divide
+arbitration. A new use of the same TID cannot revive the killed result.
+
+`tb_mul_lifetime` checks back-to-back results, flush, cancellation at entry
+and in flight, mask removal and TID reuse. The preceding wrapper fails on a
+result emitted during flush; the new wrapper passes that directed witness.
+This qualifies the stated boundary cases, not all OoO firmware behavior.
+The first installed A-fork simulator failed the test's input-drive check;
+the semantic witness uses stock Verilator 5.008 and retains the negative
+RTL control. No hardware change was made to accommodate that simulator.
+
+### Report identity
+
+The host previously joined a `--fo4 0` live mapping with a leftover
+`svt/correct.json` from an emitted design. `SvtPrepass.reportPath` now names
+only the report paired with the package actually mapped. Live mapping has
+no such report and produces missing structural columns rather than stale
+FO4/feedback ratios. Fresh live structural analysis is a separate artifact.
+
+### Paired results (map-v2, Nangate45, g6lc64_ooo)
+
+Evidence: `build-platform/workspace/build/sv-timing/control-cones-a118-final/result/`.
+`sources.json` and `result.json` retain identities, recipe, proof results,
+module areas and both board modes. The table's ns columns are the worst
+module path of any kind with the historical fanout-64 filter; FO4 is the
+fresh **source** analyzer's worst single-cycle path of any kind. The
+source FO4 values shown are unchanged between the paired snapshots.
+
+| Module | Structural FO4 | Study ns before → after | Area change | Interpretation |
+|---|---:|---:|---:|---|
+| g6lc_rename | 49.3 | 3.499 → 3.232 | +0.42% | Reg→reg improves 3.499 → 2.725 ns, 32 → 29 cells; the remaining worst is a boundary path |
+| store_buffer | 24.0 | 3.524 → 3.277 | −2.28% | Reg→reg improves 3.302 → 2.455 ns, 34 cells both |
+| frontend | 47.0 | 3.344 → 2.744 | +11.54% | Early target alternatives trade duplicated arithmetic for later control selection |
+| g6lc_iq | 55.1 | 2.690 → 2.922 | −3.94% | Shared age change saves area but worsens this filtered path; do not call it a uniform timing win |
+| multiplier | 72.0 | 2.441 → 2.441 | 0% | Datapath unchanged; structural maximum is an unpruned constant-generate fallback |
+| g6lc_lsq | 50.8 | 1.777 → 3.141 | +1.96% | Reg→reg improves 1.722 → 1.501; boundary timing worsens and remains a follow-up |
+| scoreboard | 19.6 | 2.245 → 2.245 | 0% | No RTL edit this aggregate |
+| instr_realign | 32.1 | 2.547 → 2.547 | 0% | Existing prefix implementation retained |
+| wt_dcache_wbuffer | 18.6 | 2.476 → 2.203 | −2.71% | No RTL edit; mapping variation after upstream changes, not credit to a new wbuffer algorithm |
+| issue_read_operands | 12.5 | 1.757 → 1.717 | +0.70% | No RTL edit; mapping variation, not a new operand pipeline |
+| primary alu | 31.2 | 2.160 → 1.936 | +0.31% | EQ/NE use direct equality; branchless secondary ALU is unchanged |
+
+The sum of these specialized modules plus `mult` is 945,166.096 →
+938,935.312 µm² (−0.66%); this is **not whole-chip area**. The wrapper's
+lifetime guard adds 148.960 µm². The largest filtered module delay is
+3.524 → 3.277 ns, still far outside 200 ps.
+
+The uncut graph gives a less favorable and necessary counterpoint:
+frontend 5.734 → 6.292 ns, IQ 49.482 → 31.987 ns, rename 77.140 →
+64.854 ns, store buffer 92.929 → 86.288 ns, and unedited wbuffer
+89.232 → 98.747 ns. These are unbuffered, unplaced nets. This round does
+**not** establish a whole-design timing improvement or physical closure;
+buffering/placement and the boundary regressions must be assessed next.
+
+Fresh delay-v39 source closure is **72.0 FO4 before and after**, with
+695/1634 reg→reg paths over budget. The recorded worst is the multiplier's
+`gen_sum_n` fallback, which is uninstantiated for `NS=4`; see the lowering
+limitation in `CONTROL-CONE-CLOSURE.md`. That does not license ignoring
+other real failing paths. The old 55 FO4 and emitted-tree numbers describe
+different source/measurement scopes.
+
+The same snapshot was regenerated with `correct -O3 --emit --real-cut-feeds`,
+fresh elaborated widths and **without `--allow-latency`**. Its 632 records
+are 342 BalanceMux, 58 SplitAssign, 3 RebalanceAssoc, 1 LoopRewrite and
+228 annotations; no InsertReg. Joint reparse and structural integrity
+passed, emitted re-analysis remains 72 FO4 with 714 failing reg→reg paths.
+The generated tree also passed whole-core slang elaboration and hierarchy
+checking (`control-cones-a118-final/emitted-check/`, 31 seconds).
+The generated package is `result/review-corrected/svt_corrected.f`; it is
+review output, not whole-package functional-equivalence evidence. The
+mapped table above belongs to the production-source snapshot, not this emit.
+
+Stock-Verilator revalidation also passed 300,000 arithmetic comparison
+cycles (234,215 valid results, zero mismatches), alongside the 15 directed
+multiplier lifetime checks and the failing preceding-wrapper control.
 
 ## A115 — The two-stage multiplier (`CVA6Cfg.MultStages`)
 

@@ -3,6 +3,34 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A118 — paired control-cone work (10 FO4 remains open)
+
+- [x] Audit all eleven requested modules and their pipeline contracts in
+  `architecture/CONTROL-CONE-CLOSURE.md`; preserve interfaces and cycle timing
+  for the exact reductions.
+- [x] SAT-check shared circular age comparison, extracted store predecessor
+  relation and ALU equality; prove rename matched-state equivalence at one
+  and two harts with FP enabled.
+- [x] Contain two-stage multiply cancellation/flush lifetime in `mult.sv`;
+  the directed checker detects the previous flush defect.
+- [x] Stop live mappings from consuming an older emitted `correct.json`.
+- [x] Paired map-v2 area/timing assessment and fresh structural report:
+  rename reg→reg 3.499→2.725 ns; store buffer 3.302→2.455 ns; frontend
+  3.344→2.744 ns with +11.54% module area. IQ filtered path and LSQ boundary
+  path regress; uncut timing is explicitly recorded in A118.
+- [x] Fresh source reports and latency-neutral review emit at the exact
+  10-FO4 target; integrity and whole-core emitted elaboration pass.
+  Source/emitted maximum remains 72 FO4.
+- [ ] Constant-generate reachability in lowering: `NS=4` multiplier still
+  bills the dead `gen_sum_n` fallback. Add branch-origin/unknown-condition
+  tests before excluding paths; do not adjust the cost table to hide it.
+- [ ] Buffer/place the retained candidates and resolve LSQ boundary / IQ
+  tradeoffs. No cell/ns ratio can redefine 10 FO4; closure remains open.
+- [ ] Turn proven source idioms into generic sv-timing rewrites only after
+  detectors establish width, scope, state ordering and emission conditions.
+- [ ] Re-pipeline remaining queue/issue boundaries only with their
+  acceptance, resource reservation, flush and identity semantics represented.
+
 ## 2026-10-15 — continued closure work (not closed)
 
 - [x] Register-cut trials now preflight gates and roll back refused speculative

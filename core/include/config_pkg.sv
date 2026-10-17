@@ -722,9 +722,8 @@ package config_pkg;
     // multiplier (the 65x65 product in one cycle, the deepest single path of
     // the core at 5.3 ns on the Nangate45 study); 2 = the product split into
     // XLEN/16 partial products registered before one final sum — exact, one
-    // more cycle of MUL latency, no other contract changes (the result still
-    // travels with its trans_id; a late result after a flush is dropped by the
-    // scoreboard's `issued` guard as today).
+    // more cycle of MUL latency. mult.sv carries cancellation/flush liveness
+    // with the transaction so a late result cannot alias a reused TID.
     int unsigned MultStages;
     // U5/U6 memory hierarchy: optional L3 + server-ready prefetch (SoC, not L1)
     bit          L3En;                // AXI L3 below L2 (requires L2En)

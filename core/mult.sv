@@ -1,5 +1,4 @@
-
-
+// Modified by: Etienne Cimon (multicycle multiply cancellation lifetime).
 module mult
   import ariane_pkg::*;
 #(
@@ -26,7 +25,7 @@ module mult
     // Mult transaction ID - ISSUE_STAGE
     output logic     [CVA6Cfg.TRANS_ID_BITS-1:0] mult_trans_id_o
 );
-  logic mul_valid;
+  logic mul_valid, mul_valid_raw;
   logic div_valid;
   logic div_ready_i;  // receiver of division result is able to accept the result
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] mul_trans_id;
@@ -42,6 +41,40 @@ module mult
   // Input Arbitration
 
   assign mul_valid_op = ~flush_i && mult_valid_i && (fu_data_i.operation inside { MUL, MULH, MULHU, MULHSU, MULW, CLMUL, CLMULH, CLMULR });
+
+  if (CVA6Cfg.MultStages > 1) begin : gen_mul_lifetime
+    // A two-stage result can outlive a flush/cancel and its scoreboard
+    // slot can be reused. Checking only the current slot's issued bit at
+    // writeback cannot distinguish those generations. Carry liveness with
+    // the transaction through the existing fixed-latency arithmetic pipe;
+    // a cancellation stays killed even after the external mask clears.
+    // No new caller ports or arithmetic stages are required.
+    logic [CVA6Cfg.MultStages-1:0] live_q;
+    logic [CVA6Cfg.MultStages-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] tid_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        live_q <= '0;
+        tid_q <= '0;
+      end else if (flush_i) begin
+        live_q <= '0;
+        tid_q <= '0;
+      end else begin
+        live_q[0] <= mul_valid_op &&
+                     (!CVA6Cfg.OoOEn || !cancelled_mask_i[fu_data_i.trans_id]);
+        tid_q[0] <= fu_data_i.trans_id;
+        for (int unsigned s = 1; s < CVA6Cfg.MultStages; s++) begin
+          live_q[s] <= live_q[s-1] &&
+                       (!CVA6Cfg.OoOEn || !cancelled_mask_i[tid_q[s-1]]);
+          tid_q[s] <= tid_q[s-1];
+        end
+      end
+    end
+    assign mul_valid = mul_valid_raw && live_q[CVA6Cfg.MultStages-1] &&
+                       !flush_i &&
+                       (!CVA6Cfg.OoOEn || !cancelled_mask_i[mul_trans_id]);
+  end else begin : gen_mul_single_lifetime
+    assign mul_valid = mul_valid_raw;
+  end
 
   assign div_owner_free = !CVA6Cfg.OoOEn || (!div_owner_live_q[fu_data_i.trans_id] && !cancelled_mask_i[fu_data_i.trans_id]);
   assign div_valid_op = ~flush_i && mult_valid_i && div_owner_free && (fu_data_i.operation inside { DIV, DIVU, DIVW, DIVUW, REM, REMU, REMW, REMUW });
@@ -108,7 +141,7 @@ module mult
       .operand_b_i    (fu_data_i.operand_b),
       .result_o       (mul_result),
       .mult_valid_i   (mul_valid_op),
-      .mult_valid_o   (mul_valid),
+      .mult_valid_o   (mul_valid_raw),
       .mult_trans_id_o(mul_trans_id)
   );
 

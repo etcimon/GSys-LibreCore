@@ -85,3 +85,86 @@ module tb_mul_sbs;
     end
   end
 endmodule
+
+// Directed boundary check of the real mult wrapper, in addition to the
+// arithmetic comparison above. A killed generation must never reappear
+// when the cancellation mask clears or its TID is reused.
+module tb_mul_lifetime;
+  timeunit 1ns;
+  timeprecision 1ps;
+  import ariane_pkg::*;
+  function automatic config_pkg::cva6_cfg_t cfg();
+    cfg = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg);
+    cfg.MultStages = 2;
+    cfg.OoOEn = 1;
+  endfunction
+  localparam config_pkg::cva6_cfg_t C = cfg();
+  typedef struct packed {
+    logic [C.TRANS_ID_BITS-1:0] trans_id;
+    fu_op operation;
+    logic [C.XLEN-1:0] operand_a, operand_b;
+  } fu_t;
+  logic clk = 0, rst_n = 0, flush = 0, valid_i = 0;
+  logic [C.NR_SB_ENTRIES-1:0] cancelled = '0;
+  logic [C.TRANS_ID_BITS-1:0] tid_drive = '0;
+  logic [C.XLEN-1:0] a_drive = '0;
+  fu_t fu;
+  // Drive leaf nets and assemble the input continuously. This also keeps
+  // task scheduling independent of packed-struct partial-write handling.
+  assign fu = {tid_drive, MUL, a_drive, C.XLEN'(7)};
+  logic valid_o, ready_o;
+  logic [C.TRANS_ID_BITS-1:0] tid_o;
+  logic [C.XLEN-1:0] result_o;
+  always #1 clk = ~clk;
+  mult #(.CVA6Cfg(C), .fu_data_t(fu_t)) dut (
+      .clk_i(clk), .rst_ni(rst_n), .flush_i(flush), .cancelled_mask_i(cancelled),
+      .fu_data_i(fu), .mult_valid_i(valid_i), .result_o,
+      .mult_valid_o(valid_o), .mult_ready_o(ready_o), .mult_trans_id_o(tid_o));
+  int checked = 0;
+  task automatic cycle(input bit send, input int tid, input int a,
+                       input int kill_tid, input bit squash,
+                       input bit expect_valid, input int expect_tid, input int expect_data);
+    @(negedge clk);
+    valid_i = send;
+    tid_drive = C.TRANS_ID_BITS'(tid);
+    a_drive = C.XLEN'(a);
+    #0.01;
+    if (fu.trans_id !== C.TRANS_ID_BITS'(tid))
+      $fatal(1, "MUL_STIMULUS TID was not driven");
+    cancelled = '0;
+    if (kill_tid >= 0) cancelled[kill_tid] = 1'b1;
+    flush = squash;
+    @(posedge clk);
+    #0.1;
+    if (valid_o !== expect_valid ||
+        (expect_valid && (tid_o !== C.TRANS_ID_BITS'(expect_tid) ||
+                          result_o !== C.XLEN'(expect_data))))
+      $fatal(1, "MUL_LIFETIME step=%0d valid=%b tid=%0d data=%h expected=%b/%0d/%0d",
+             checked, valid_o, tid_o, result_o, expect_valid, expect_tid, expect_data);
+    checked++;
+  endtask
+  initial begin
+    repeat (2) @(negedge clk);
+    rst_n = 1;
+    cycle(1, 1, 3, -1, 0, 0, 0, 0);
+    cycle(1, 2, 5, -1, 0, 1, 1, 21);
+    cycle(0, 0, 0, -1, 0, 1, 2, 35);
+    cycle(0, 0, 0, -1, 0, 0, 0, 0);
+    // Flush an outstanding multiply, then immediately reuse the slot.
+    cycle(1, 3, 9, -1, 0, 0, 0, 0);
+    cycle(0, 0, 0, -1, 1, 0, 0, 0);
+    cycle(1, 3, 11, -1, 0, 0, 0, 0);
+    cycle(0, 0, 0, -1, 0, 1, 3, 77);
+    // Dispatch on a cancelled slot, then remove the mask before completion.
+    cycle(1, 4, 13, 4, 0, 0, 0, 0);
+    cycle(0, 0, 0, -1, 0, 0, 0, 0);
+    // Cancel one stage while a different generation enters the pipeline.
+    cycle(1, 5, 17, -1, 0, 0, 0, 0);
+    cycle(1, 6, 19, 5, 0, 0, 0, 0);
+    cycle(1, 5, 23, -1, 0, 1, 6, 133);
+    cycle(0, 0, 0, -1, 0, 1, 5, 161);
+    cycle(0, 0, 0, -1, 0, 0, 0, 0);
+    $display("PASS tb_mul_lifetime checks=%0d", checked);
+    $finish;
+  end
+endmodule
