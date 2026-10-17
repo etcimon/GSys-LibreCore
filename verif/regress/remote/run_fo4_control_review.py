@@ -6,6 +6,12 @@
 Local: python run_fo4_control_review.py --snapshot DIR --baseline REV
 Remote: testharness_proxy.py py run_fo4_control_review.py --data DIR/inputs.tar.gz
         --tag fo4-control-<unique> --pull
+Selection round: --profile selection --baseline 36bbe0114. Its directed
+leaf mode also uploads tb_g6lc_lsq.sv and tb_g6lc_iq_store_age.sv and sets
+CONTROL_MODE=selection-leaf.
+CONTROL_MODE=placed-iq reads a completed paired run from CONTROL_REFERENCE
+and an uploaded openroad-module-place-study.tcl; it never overwrites the
+reference artifacts. PLACEMENT_GDB=1 captures a tool crash when needed.
 
 Uses the host's existing portable flist; captures every source and include
 header, with hashes. No shared checkout sync, cache overwrite, or source edit
@@ -34,7 +40,7 @@ MODULES = {"g6lc_rename", "store_buffer", "frontend", "g6lc_iq", "multiplier",
            "issue_read_operands", "alu", "mult"}
 
 
-def snapshot(dest: Path, baseline: str) -> None:
+def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
     root = Path(__file__).resolve().parents[3]
     flist = root / "build-platform/workspace/build/sta-rtl/g6lc64_ooo/svt/portable.f"
     text = flist.read_text(encoding="utf-8")
@@ -57,7 +63,11 @@ def snapshot(dest: Path, baseline: str) -> None:
         files[name] = (root / name).read_bytes()
     files["portable.f"] = text.replace(root.as_posix(), "@ROOT@").encode()
     files["host-param-map.json"] = (flist.parent / "param-map.json").read_bytes()
-    for name in CHANGED:
+    changed = ("core/ooo/g6lc_iq.sv", "core/ooo/g6lc_lsq.sv") if profile == "selection" else CHANGED
+    files["review.json"] = json.dumps({"profile": profile, "changed_files": changed,
+                                      "modules": sorted(MODULES if profile == "control" else
+                                                        {"g6lc_iq", "g6lc_lsq"})}).encode()
+    for name in changed:
         files["baseline/" + name] = subprocess.check_output(
             ["git", "show", f"{baseline}:{name}"], cwd=root)
     identity = {n: hashlib.sha256(b).hexdigest() for n, b in sorted(files.items())}
@@ -91,10 +101,12 @@ def analyze_results(results: Path) -> None:
     cfg = json.loads(captured.read_text(encoding="utf-8"))
     if cfg.get("CVA6Cfg.XLEN") != 64 or cfg.get("CVA6Cfg.MultStages") != 2:
         raise ValueError("expected g6lc64_ooo XLEN=64/MultStages=2 parameter snapshot")
+    review = source / "review.json"
+    changed = json.loads(review.read_text())["changed_files"] if review.exists() else CHANGED
     for variant in ("baseline", "candidate"):
         flist = portable
         if variant == "baseline":
-            for name in CHANGED:
+            for name in changed:
                 old = source / "baseline" / name
                 if old.exists():
                     flist = flist.replace((source / name).as_posix(), old.as_posix())
@@ -155,6 +167,80 @@ def remote() -> None:
         path = out / f"{name}.ys"
         path.write_text(commands)
         return run(name, [ys, "-Q", "-T", "-s", str(path)], timeout=timeout)
+
+    if os.environ.get("CONTROL_MODE") == "placed-iq":
+        reference = Path(os.environ["CONTROL_REFERENCE"])
+        paired = json.loads((reference / "result.json").read_text())
+        study = data / "openroad-module-place-study.tcl"
+        platform = Path("/opt/testharness/src/openroad-g6lc/test/Nangate45")
+        binary = "/opt/testharness/toolchains/openroad-g6lc-pgo/bin/openroad"
+        evidence["openroad_version"] = subprocess.check_output([binary, "-version"], text=True).strip()
+        evidence["placement_script_sha256"] = hashlib.sha256(study.read_bytes()).hexdigest()
+        evidence["placement_inputs"] = {}
+        for variant in ("baseline", "candidate"):
+            names = [n for n in paired["maps"][variant] if n.split("$")[0] == "g6lc_iq"]
+            assert len(names) == 1
+            top = names[0]
+            entries = (reference / variant / "il/modules.tsv").read_text().splitlines()
+            entry = next(l.split("\t") for l in entries if l.split("\t")[2].lstrip("\\") == top)
+            netlist = reference / variant / Path(entry[1]).with_suffix(".v")
+            evidence["placement_inputs"][variant] = hashlib.sha256(netlist.read_bytes()).hexdigest()
+            env = dict(os.environ, STUDY_PLATFORM=str(platform), OR_TOP=top,
+                       OR_VERILOG=str(netlist), STUDY_OUTPUT=str(out / variant),
+                       STUDY_VARIANT=variant)
+            command = [binary, "-no_init", "-exit", str(study)]
+            if os.environ.get("PLACEMENT_GDB") == "1":
+                command = ["gdb", "--batch", "-ex", "run", "-ex", "bt", "--args", *command]
+            log = run(f"placed-{variant}", command,
+                      timeout=900, env=env)
+            row = next((l for l in log.splitlines() if l.startswith("PLACE_STUDY ")), None)
+            if not row:
+                raise RuntimeError(f"{variant}: placement did not complete")
+            evidence["maps"][variant] = dict(re.findall(r"(\w+)=(\S+)", row))
+            (out / "result.json").write_text(json.dumps(evidence, indent=2))
+            print(row, flush=True)
+        return
+
+    if (src / "review.json").exists():
+        review = json.loads((src / "review.json").read_text())
+        if review["profile"] == "selection" and os.environ.get("CONTROL_MODE", "selection") in (
+            "selection", "selection-leaf"
+        ):
+            if os.environ.get("CONTROL_MODE") == "selection-leaf":
+                vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+                evidence["simulator"] = subprocess.check_output([vl, "--version"], text=True).strip()
+                packages = ["core/include/config_pkg.sv", "core/include/g6lc64_ooo_config_pkg.sv",
+                            "core/include/riscv_pkg.sv", "core/include/ariane_pkg.sv",
+                            "core/ooo/g6lc_ooo_pkg.sv"]
+                for top, dut, verdict in (
+                    ("tb_g6lc_lsq", "core/ooo/g6lc_lsq.sv", "LSQ_HART_PASS"),
+                    ("tb_g6lc_iq_store_age", "core/ooo/g6lc_iq.sv", "PASS tb_g6lc_iq_store_age"),
+                ):
+                    bench = data / f"{top}.sv"
+                    evidence["sources"][bench.name] = hashlib.sha256(bench.read_bytes()).hexdigest()
+                    obj = out / top
+                    run(top + "-build", [vl, "-O0", "--binary", "--timing", "--assert",
+                        "-Wno-fatal", "-Wno-WIDTH", "-Wno-UNOPTFLAT",
+                        "-I" + str(src / "core/include"), "--top-module", top,
+                        *[str(src / p) for p in packages], str(src / dut), str(bench),
+                        "--Mdir", str(obj), "-j", "4"])
+                    log = run(top, [str(obj / ("V" + top))], timeout=60)
+                    assert verdict in log
+                    negative = subprocess.run([str(obj / ("V" + top)), "+oracle_negative"],
+                        cwd=out, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                        timeout=60)
+                    (out / (top + "-negative.log")).write_text(negative.stdout)
+                    assert negative.returncode != 0 and (
+                        "LSQ_" in negative.stdout if top == "tb_g6lc_lsq" else
+                        "IQ_ST_AGE" in negative.stdout or "ORACLE_NEGATIVE" in negative.stdout)
+                    evidence["proofs"][top] = "directed PASS; oracle-negative detected"
+                (out / "result.json").write_text(json.dumps(evidence, indent=2))
+                print("PASS selection leaf checks and negative controls", flush=True)
+                return
+            prove_selections(src, out, yosys, evidence)
+            map_snapshots(src, out, sta, lib, abc, evidence, yosys, run,
+                          changed=review["changed_files"], modules=set(review["modules"]))
+            return
 
     if os.environ.get("CONTROL_MODE") == "emit-elab":
         portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
@@ -323,7 +409,11 @@ endmodule
         assert "Equivalence successfully proven!" in log
         evidence["proofs"][f"rename-{harts}h"] = "matched-state equivalence PASS"
     print("PROOFS " + json.dumps(evidence["proofs"]), flush=True)
+    map_snapshots(src, out, sta, lib, abc, evidence, yosys, run)
 
+
+def map_snapshots(src, out, sta, lib, abc, evidence, yosys, run,
+                  *, changed=CHANGED, modules=MODULES):
     # Map both snapshots with identical options. The old/new package and
     # three consumers are switched by filelist, not by editing the snapshot.
     portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
@@ -332,7 +422,7 @@ endmodule
         work.mkdir()
         flist = portable
         if variant == "baseline":
-            for name in CHANGED:
+            for name in changed:
                 flist = flist.replace(str(src / name), str(src / "baseline" / name))
         flist = flist.replace(str(src / "vendor/pulp-platform/tech_cells_generic/src/rtl/tc_sram.sv"),
                               str(src / "build-platform/scripts/tc_sram_timing_stub.sv"))
@@ -346,7 +436,7 @@ endmodule
                                 str(work / "wordlevel.il"), "--split-dir", str(work / "il"),
                                 "-o", str(work / "width-map.json")])
         entries = [l.split("\t") for l in (work / "il/modules.tsv").read_text().splitlines()]
-        entries = [e for e in entries if e[2].lstrip("\\").split("$")[0] in MODULES]
+        entries = [e for e in entries if e[2].lstrip("\\").split("$")[0] in modules]
 
         def map_one(entry):
             index, filename, escaped = entry
@@ -390,6 +480,114 @@ endmodule
     (out / "result.json").write_text(json.dumps(evidence, indent=2))
 
 
+def prove_selections(src, out, yosys, evidence):
+    """Prove extracted production selection logic, including padded/tied inputs."""
+    iq_gold = (src / "baseline/core/ooo/g6lc_iq.sv").read_text()
+    iq_gate = (src / "core/ooo/g6lc_iq.sv").read_text()
+    start = iq_gold.index("  for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_grant")
+    old = iq_gold[start:iq_gold.index("  always_comb begin", start)]
+    start = iq_gate.index("  // BEGIN A119 parallel first-two grant predicates")
+    new = iq_gate[start:iq_gate.index("  always_comb begin", start)]
+
+    def iq_module(name, body):
+        return f"""
+module {name} #(parameter DEPTH=5, PORTS=2) (
+ input logic [DEPTH-1:0] ready,
+ input logic [DEPTH-1:0][DEPTH-1:0] older_t,
+ output logic [PORTS-1:0][DEPTH-1:0] grant);
+{body.replace('CVA6Cfg.NrIssuePorts', 'PORTS')}
+endmodule
+"""
+    for depth, ports in ((1, 1), (2, 2), (5, 2), (5, 3), (24, 2)):
+        w = max(1, (depth-1).bit_length())
+        fixture = out / f"iq-select-{depth}-{ports}.sv"
+        comparison = f"""
+module iq_eq(input logic [{depth-1}:0] ready,
+             input logic [{depth-1}:0][{w-1}:0] age, output logic ok);
+  logic [{depth-1}:0][{depth-1}:0] older_t;
+  logic [{ports-1}:0][{depth-1}:0] a, b;
+  for (genvar e=0;e<{depth};e++)
+    for (genvar o=0;o<{depth};o++)
+      assign older_t[e][o] = age[o]<age[e] || (age[o]==age[e] && o<e);
+  gold #({depth}, {ports}) g(ready, older_t, a);
+  gate #({depth}, {ports}) h(ready, older_t, b);
+  assign ok = a == b;
+endmodule
+"""
+        if depth == 24:
+            # At production depth, prove the implemented grants directly
+            # against their rank specification for arbitrary age matrices.
+            # This avoids asking SAT to rediscover transitivity of 24
+            # symbolic age values. The small total-order cases above
+            # compare the cascade, including later ports, independently.
+            comparison = f"""
+module iq_eq(input logic [{depth-1}:0] ready,
+             input logic [{depth-1}:0][{depth-1}:0] older_t, output logic ok);
+  logic [1:0][{depth-1}:0] grant;
+  gate #({depth}, 2) h(ready, older_t, grant);
+  always_comb begin
+    ok = 1'b1;
+    for (int e=0;e<{depth};e++) begin
+      ok &= grant[0][e] == (ready[e] && $countones(ready & older_t[e]) == 0);
+      ok &= grant[1][e] == (ready[e] && $countones(ready & older_t[e]) == 1);
+    end
+  end
+endmodule
+"""
+        fixture.write_text(iq_module("gold", old) + iq_module("gate", new) + comparison)
+        log = yosys(f"iq-select-{depth}-{ports}",
+                    f"read_slang --top iq_eq {fixture}\nprep -top iq_eq -flatten\n"
+                    "sat -prove ok 1 -verify\n", timeout=600)
+        assert "SUCCESS!" in log
+        evidence["proofs"][f"iq-{depth}entries-{ports}ports"] = (
+            "arbitrary-matrix rank SAT PASS" if depth == 24 else "total-order SAT PASS")
+
+    lsq = (src / "core/ooo/g6lc_lsq.sv").read_text()
+    st_tree = lsq.split("// BEGIN A119 stable youngest-store tournament", 1)[1].split(
+        "// END A119 stable youngest-store tournament", 1)[0]
+    ld_tree = lsq.split("// BEGIN A119 stable oldest-violation tournament", 1)[1].split(
+        "// END A119 stable oldest-violation tournament", 1)[0]
+    for depth in (1, 3, 8, 16):
+        fixture = out / f"lsq-select-{depth}.sv"
+        fixture.write_text(f"""
+module lsq_eq(input logic [{depth-1}:0] stl_match, viol_cand,
+              input logic [{depth-1}:0][4:0] stl_age,
+              input logic [{depth-1}:0][31:0] viol_age, output logic ok);
+  localparam ST_ENTRIES={depth}, LD_ENTRIES={depth};
+  localparam StSelectLeaves=1<<$clog2(ST_ENTRIES), LdSelectLeaves=1<<$clog2(LD_ENTRIES);
+  localparam StSelectWidth=ST_ENTRIES>1?$clog2(ST_ENTRIES):1;
+  localparam LdSelectWidth=LD_ENTRIES>1?$clog2(LD_ENTRIES):1;
+{st_tree.replace('CVA6Cfg.TRANS_ID_BITS', '5')}
+{ld_tree}
+  logic st_found, ld_found;
+  logic [4:0] st_best;
+  logic [31:0] ld_best;
+  logic [StSelectWidth-1:0] st_slot;
+  logic [LdSelectWidth-1:0] ld_slot;
+  always_comb begin
+    st_found=0; ld_found=0; st_best=0; ld_best='1; st_slot=0; ld_slot=0;
+    for (int i=0;i<ST_ENTRIES;i++)
+      if (stl_match[i] && (!st_found || stl_age[i]>st_best)) begin
+        st_found=1; st_best=stl_age[i]; st_slot=StSelectWidth'(i);
+      end
+    for (int j=0;j<LD_ENTRIES;j++)
+      if (viol_cand[j] && viol_age[j]<ld_best) begin
+        ld_found=1; ld_best=viol_age[j]; ld_slot=LdSelectWidth'(j);
+      end
+  end
+  assign ok = (st_found==stl_pick_valid[1]) && (ld_found==viol_pick_valid[1]) &&
+              (!st_found || st_slot==stl_pick_slot[1]) &&
+              (!ld_found || ld_slot==viol_pick_slot[1]);
+endmodule
+""")
+        log = yosys(f"lsq-select-{depth}",
+                    f"read_slang --top lsq_eq {fixture}\nprep -top lsq_eq -flatten\n"
+                    "sat -prove ok 1 -verify\n", timeout=600)
+        assert "SUCCESS!" in log
+        evidence["proofs"][f"lsq-{depth}entries"] = "stable min/max SAT PASS"
+    print("PROOFS " + json.dumps(evidence["proofs"]), flush=True)
+
+
 if __name__ == "__main__":
     if "TH_DATA_DIR" in os.environ:
         remote()
@@ -398,11 +596,12 @@ if __name__ == "__main__":
         mode = parser.add_mutually_exclusive_group(required=True)
         mode.add_argument("--snapshot", type=Path)
         mode.add_argument("--analyze-results", type=Path)
-        parser.add_argument("--baseline", help="revision containing the pre-A118 RTL")
+        parser.add_argument("--baseline", help="baseline revision for the selected review profile")
+        parser.add_argument("--profile", choices=("control", "selection"), default="control")
         args = parser.parse_args()
         if args.snapshot:
             if not args.baseline:
                 parser.error("--snapshot requires --baseline (A118 uses bfea01481)")
-            snapshot(args.snapshot, args.baseline)
+            snapshot(args.snapshot, args.baseline, args.profile)
         else:
             analyze_results(args.analyze_results)

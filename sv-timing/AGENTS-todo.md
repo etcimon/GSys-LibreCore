@@ -3,6 +3,34 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A119 — selection cones and truthful reachability
+
+- [x] Parallel first-two IQ grants via saturated rank; retain later-port
+  cascade and all acknowledgment/cancellation interfaces.
+- [x] Stable LSQ min/max tournaments, including empty, tie and sentinel
+  behavior. Eligibility and same-cycle metadata updates remain unchanged.
+- [x] Extracted-source SAT checks and existing directed IQ/LSQ checks with
+  negative controls. The full 24-entry cascade miter timed out; production
+  rank-specification proof passes separately.
+- [x] delay-v40 excludes only provably inactive if-generate branches;
+  defaults, truncation, ambiguity and unknown origins are conservative.
+  Core and workspace tests cover the new behavior.
+- [x] Paired map-v2: IQ filtered 2.922→2.403 ns (+3.66% area);
+  LSQ worst-any 3.141→1.958 ns (+1.45% area), uncut 8.607→6.202 ns.
+- [x] Resolve IQ fanout tradeoff with paired OpenROAD placement/repair:
+  worst-any 3.606→2.806 ns (+3.0% area), 79 fewer repair buffers, zero
+  reported electrical violations on both variants, no disabled arcs.
+  Pre-CTS/unrouted WNS remains negative; no closure claim.
+- [x] Regenerate structural and latency-neutral review artifacts with fresh
+  widths; source maximum 55.078, emitted maximum 55.664 FO4. Emitted
+  integrity and whole-core elaboration pass. Same-source v39→v40 correction
+  removes the dead multiplier fallback (72→50 FO4 for that module).
+- [ ] Continue from IQ count/ack and LSQ update tails plus rename/store/
+  frontend residuals. 10 FO4 remains an open objective.
+- [ ] Existing independence-scan failures: host-name references in unchanged
+  core/emit fixtures, param-map compatibility aliases and host soak tooling.
+  A119's 348 Rust tests pass; the independence scanner does not.
+
 ## A118 — paired control-cone work (10 FO4 remains open)
 
 - [x] Audit all eleven requested modules and their pipeline contracts in

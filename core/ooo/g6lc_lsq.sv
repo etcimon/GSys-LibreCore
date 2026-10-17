@@ -375,38 +375,63 @@ module g6lc_lsq #(
   // stl_forward_o/stl_data_o are observability of "this load's bytes are fully
   // covered by one older store with data present" -- the same predicate the
   // store_buffer checks as st_fwd_covers downstream.
+  localparam int unsigned StSelectLeaves = 1 << $clog2(ST_ENTRIES);
+  localparam int unsigned StSelectWidth = (ST_ENTRIES > 1) ? $clog2(ST_ENTRIES) : 1;
+  logic [ST_ENTRIES-1:0] stl_match;
+  logic stl_need_stall;
+  logic [ST_ENTRIES-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] stl_age;
+  for (genvar i = 0; i < ST_ENTRIES; i++) begin : gen_stl_age
+    assign stl_age[i] = CVA6Cfg.TRANS_ID_BITS'(g6lc_ooo_pkg::ooo_age_dist(
+        CVA6Cfg.TRANS_ID_BITS, 32'(st_q[i].id), 32'(commit_ptr_i)));
+  end
+  // BEGIN A119 stable youngest-store tournament
+  logic [2*StSelectLeaves-1:1] stl_pick_valid;
+  logic [2*StSelectLeaves-1:1][CVA6Cfg.TRANS_ID_BITS-1:0] stl_pick_age;
+  logic [2*StSelectLeaves-1:1][StSelectWidth-1:0] stl_pick_slot;
+  for (genvar i = 0; i < StSelectLeaves; i++) begin : gen_stl_leaf
+    if (i < ST_ENTRIES) begin : gen_entry
+      assign stl_pick_valid[StSelectLeaves+i] = stl_match[i];
+      assign stl_pick_age[StSelectLeaves+i] = stl_age[i];
+      assign stl_pick_slot[StSelectLeaves+i] = StSelectWidth'(i);
+    end else begin : gen_pad
+      assign stl_pick_valid[StSelectLeaves+i] = 1'b0;
+      assign stl_pick_age[StSelectLeaves+i] = '0;
+      assign stl_pick_slot[StSelectLeaves+i] = '0;
+    end
+  end
+  for (genvar n = 1; n < StSelectLeaves; n++) begin : gen_stl_pick
+    logic take_right;
+    // Strict > preserves the former scan's first-index tie rule.
+    assign take_right = stl_pick_valid[2*n+1] &&
+                        (!stl_pick_valid[2*n] || stl_pick_age[2*n+1] > stl_pick_age[2*n]);
+    assign stl_pick_valid[n] = stl_pick_valid[2*n] | stl_pick_valid[2*n+1];
+    assign stl_pick_age[n] = take_right ? stl_pick_age[2*n+1] : stl_pick_age[2*n];
+    assign stl_pick_slot[n] = take_right ? stl_pick_slot[2*n+1] : stl_pick_slot[2*n];
+  end
+  // END A119 stable youngest-store tournament
+  assign stl_forward_o = !PHYS_VALIDATE && !stl_need_stall && stl_pick_valid[1];
+  assign stl_data_o = stl_forward_o ? st_q[stl_pick_slot[1]].data : '0;
+  assign stl_stall_o = stl_need_stall;
   always_comb begin
     automatic logic [LANES-1:0] ld_be, sbe;
-    automatic logic need_stall, found_match;
-    automatic int unsigned best;
-    automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] ld_dist, sdist, best_dist;
+    automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] ld_dist, sdist;
     sbe         = '0;
-    need_stall  = 1'b0;
-    found_match = 1'b0;
-    best        = 0;
-    best_dist   = '0;
+    stl_need_stall = 1'b0;
+    stl_match   = '0;
     ld_dist     = '0;
     sdist       = '0;
-    stl_forward_o = 1'b0;
-    stl_data_o = '0;
-    stl_stall_o = 1'b0;
     ld_be = lane_be(ld_query_addr_i, ld_query_size_i);
 
     if (ld_query_i) begin
-      need_stall  = 1'b0;
-      found_match = 1'b0;
-      best        = 0;
-      best_dist   = '0;
       ld_dist     = CVA6Cfg.TRANS_ID_BITS'(g6lc_ooo_pkg::ooo_age_dist(
                         CVA6Cfg.TRANS_ID_BITS, 32'(ld_query_id_i), 32'(commit_ptr_i)));
       for (int unsigned i = 0; i < ST_ENTRIES; i++) begin
-        sdist = CVA6Cfg.TRANS_ID_BITS'(g6lc_ooo_pkg::ooo_age_dist(
-                    CVA6Cfg.TRANS_ID_BITS, 32'(st_q[i].id), 32'(commit_ptr_i)));
+        sdist = stl_age[i];
         if (st_q[i].valid && (!LSQ_HART_OWN || st_q[i].hart == ld_query_hart_i) && sdist < ld_dist) begin
           if (!st_q[i].addr_v) begin
             // Unresolved OLDER store may yet alias: stall regardless of any
             // resolved match (the unresolved one could be the true producer).
-            need_stall = 1'b1;
+            stl_need_stall = 1'b1;
           end else begin
             sbe = lane_be(st_q[i].addr, st_q[i].size);
             if ((PHYS_VALIDATE ?
@@ -415,23 +440,14 @@ module g6lc_lsq #(
                  same_word(st_q[i].addr, ld_query_addr_i)) && (sbe & ld_be) != '0) begin
               // Byte overlap with an older store. Data still in flight means
               // the load must wait for the store to land in the LSU buffer.
-              if (!st_q[i].data_v) need_stall = 1'b1;
+              if (!st_q[i].data_v) stl_need_stall = 1'b1;
               // Youngest older store whose lanes fully cover the load's bytes
               // is the one the store_buffer will forward from.
-              if ((sbe & ld_be) == ld_be && (!found_match || sdist > best_dist)) begin
-                found_match = 1'b1;
-                best        = i;
-                best_dist   = sdist;
-              end
+              if ((sbe & ld_be) == ld_be) stl_match[i] = 1'b1;
             end
           end
         end
       end
-      if (!PHYS_VALIDATE && !need_stall && found_match) begin
-        stl_forward_o = 1'b1;
-        stl_data_o    = st_q[best].data;
-      end
-      stl_stall_o = need_stall;
     end
   end
 
@@ -439,25 +455,53 @@ module g6lc_lsq #(
   // resolved (and therefore read) overlapping bytes means that load may hold
   // stale data. Report the oldest such load; replaying it squashes the rest.
   logic [LD_ENTRIES-1:0] viol_cand, phys_alias_cand;
+  localparam int unsigned LdSelectLeaves = 1 << $clog2(LD_ENTRIES);
+  localparam int unsigned LdSelectWidth = (LD_ENTRIES > 1) ? $clog2(LD_ENTRIES) : 1;
+  logic [LD_ENTRIES-1:0][31:0] viol_age;
+  for (genvar j = 0; j < LD_ENTRIES; j++) begin : gen_viol_age
+    assign viol_age[j] = g6lc_ooo_pkg::ooo_age_dist(
+        CVA6Cfg.TRANS_ID_BITS, 32'(ld_q[j].id), 32'(commit_ptr_i));
+  end
+  // BEGIN A119 stable oldest-violation tournament
+  logic [2*LdSelectLeaves-1:1] viol_pick_valid;
+  logic [2*LdSelectLeaves-1:1][31:0] viol_pick_age;
+  logic [2*LdSelectLeaves-1:1][LdSelectWidth-1:0] viol_pick_slot;
+  for (genvar j = 0; j < LdSelectLeaves; j++) begin : gen_viol_leaf
+    if (j < LD_ENTRIES) begin : gen_entry
+      // Preserve the old 32'hFFFFFFFF initial best-distance sentinel,
+      // including configurations with a full 32-bit transaction ID.
+      assign viol_pick_valid[LdSelectLeaves+j] = viol_cand[j] && viol_age[j] != 32'hFFFF_FFFF;
+      assign viol_pick_age[LdSelectLeaves+j] = viol_age[j];
+      assign viol_pick_slot[LdSelectLeaves+j] = LdSelectWidth'(j);
+    end else begin : gen_pad
+      assign viol_pick_valid[LdSelectLeaves+j] = 1'b0;
+      assign viol_pick_age[LdSelectLeaves+j] = '1;
+      assign viol_pick_slot[LdSelectLeaves+j] = '0;
+    end
+  end
+  for (genvar n = 1; n < LdSelectLeaves; n++) begin : gen_viol_pick
+    logic take_right;
+    assign take_right = viol_pick_valid[2*n+1] &&
+                        (!viol_pick_valid[2*n] || viol_pick_age[2*n+1] < viol_pick_age[2*n]);
+    assign viol_pick_valid[n] = viol_pick_valid[2*n] | viol_pick_valid[2*n+1];
+    assign viol_pick_age[n] = take_right ? viol_pick_age[2*n+1] : viol_pick_age[2*n];
+    assign viol_pick_slot[n] = take_right ? viol_pick_slot[2*n+1] : viol_pick_slot[2*n];
+  end
+  // END A119 stable oldest-violation tournament
+  assign mem_violation_id_o = viol_pick_valid[1] ? ld_q[viol_pick_slot[1]].id : '0;
+  assign mem_violation_pc_o = viol_pick_valid[1] ? ld_q[viol_pick_slot[1]].pc : '0;
   always_comb begin
     automatic logic [LANES-1:0] sbe_v, lbe_v;
     automatic logic [CVA6Cfg.PLEN-1:0] ld_addr_now;
     automatic logic [1:0] ld_size_now;
     automatic logic ld_addr_v_now;
-    automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] best_id;
-    automatic logic [CVA6Cfg.VLEN-1:0] best_pc;
     automatic logic [HID_W-1:0] st_hart_now;
-    automatic logic [31:0] best_dist, this_dist;
     viol_cand = PHYS_VALIDATE ? phys_alias_cand : '0;
     sbe_v = '0;
     lbe_v = '0;
     ld_addr_now = '0;
     ld_size_now = '0;
     ld_addr_v_now = 1'b0;
-    best_id = '0;
-    best_pc = '0;
-    best_dist = 32'hFFFF_FFFF;
-    this_dist = '0;
     st_hart_now = '0;
     for (int unsigned u = 0; u < NR_UPDATE; u++) begin
       if (!PHYS_VALIDATE && addr_valid_i[u] && addr_is_st_i[u]) begin
@@ -487,16 +531,6 @@ module g6lc_lsq #(
       end
     end
     mem_violation_o = |viol_cand;
-    for (int unsigned j = 0; j < LD_ENTRIES; j++) begin
-      this_dist = g6lc_ooo_pkg::ooo_age_dist(CVA6Cfg.TRANS_ID_BITS, 32'(ld_q[j].id), 32'(commit_ptr_i));
-      if (viol_cand[j] && this_dist < best_dist) begin
-        best_dist = this_dist;
-        best_id = ld_q[j].id;
-        best_pc = ld_q[j].pc;
-      end
-    end
-    mem_violation_id_o = best_id;
-    mem_violation_pc_o = best_pc;
   end
 
   always_comb begin

@@ -350,6 +350,16 @@ has mapped values and missing structural columns. Reused or newly emitted
 packages carry their own paired report path. Cell/FO4 and ns/FO4
 correlations are screening aids, not alternative definitions of 10 FO4.
 
+**A119 placement discriminator:** `scripts/openroad-module-place-study.tcl`
+adds a fixed, paired IQ floorplan/placement/repair experiment to the isolated
+`verif/regress/remote/run_fo4_control_review.py` runner. `CONTROL_MODE=placed-iq`
+and `CONTROL_REFERENCE=<completed paired run output>` reuse immutable mapped
+netlists; upload the Tcl alongside the source archive. It reports uncut
+pre-CTS timing, repaired area, buffer count, placement checks and electrical
+violations. It is a standalone module experiment, not a change to the default
+whole-core flow or a routed sign-off gate. A119 evidence is under
+`workspace/build/sv-timing/selection-a119/placed-margin/`.
+
 ```bash
 ./build.sh timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --allow-over-budget --remote --map-recipe streamed
 ```

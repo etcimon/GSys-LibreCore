@@ -13,7 +13,7 @@
 //     only fence/system CSR-class ops still wait for the commit head
 //   * Dual-grant oldest-ready up to NrIssuePorts
 //   * Entries never move: relative age lives in a DEPTH x DEPTH `older`
-//     matrix and selection grants ports in oldest-first order by cascade.
+//     matrix and selection grants ports in oldest-first order.
 //     The previous compacting layout rebuilt the whole queue every cycle —
 //     a DEPTH-wide mux tree on the entry payload. The matrix costs DEPTH^2
 //     one-bit flops and no payload movement at all.
@@ -192,18 +192,41 @@ module g6lc_iq
   // logic, so the cycle is broken without costing an issue cycle.
   localparam int unsigned EW = (DEPTH <= 1) ? 1 : $clog2(DEPTH);
   logic [CVA6Cfg.NrIssuePorts-1:0][EW-1:0] slot_entry;
-  // Cascaded oldest-first grant: port p takes the ready entry with no
-  // remaining entry older than it (col_e is the transposed age matrix),
-  // then that entry leaves the pool. The grant set is identical to the
-  // rank==p selection it replaces — the p-th oldest ready entry, the same
-  // grants the compacting layout produced by scanning slots in order; the
-  // sim-only rank popcount (ooo_iq_grant_is_rank) pins the two together.
+  // Oldest-ready grants. The first two ports use zero/one older-ready
+  // predicates in parallel (A119); later ports retain the cascade.
+  // The asserted age matrix is a strict total order, so rank 0 and rank 1
+  // each identify at most one entry. No grant depends on issue_ack_i.
   logic [DEPTH-1:0][DEPTH-1:0] older_t;
   for (genvar e = 0; e < DEPTH; e++) begin : gen_older_t
     for (genvar o = 0; o < DEPTH; o++) begin : gen_older_t_o
       assign older_t[e][o] = older_q[o][e];
     end
   end
+  // BEGIN A119 parallel first-two grant predicates
+  localparam int unsigned GrantLeaves = 1 << $clog2(DEPTH);
+  logic [DEPTH-1:0] first_ready, second_ready;
+  for (genvar e = 0; e < DEPTH; e++) begin : gen_ready_rank
+    // Saturate the population at two: any/many summarize each subtree.
+    // This avoids both a full popcount and the port-0 grant -> remaining
+    // pool -> port-1 grant dependency. Padding leaves are always zero.
+    logic [2*GrantLeaves-1:1] any_ready, many_ready;
+    for (genvar o = 0; o < GrantLeaves; o++) begin : gen_leaf
+      if (o < DEPTH) begin : gen_entry
+        assign any_ready[GrantLeaves+o] = ready[o] && older_t[e][o];
+      end else begin : gen_pad
+        assign any_ready[GrantLeaves+o] = 1'b0;
+      end
+      assign many_ready[GrantLeaves+o] = 1'b0;
+    end
+    for (genvar n = 1; n < GrantLeaves; n++) begin : gen_node
+      assign any_ready[n] = any_ready[2*n] | any_ready[2*n+1];
+      assign many_ready[n] = many_ready[2*n] | many_ready[2*n+1] |
+                             (any_ready[2*n] & any_ready[2*n+1]);
+    end
+    assign first_ready[e] = ready[e] && !any_ready[1];
+    assign second_ready[e] = ready[e] && any_ready[1] && !many_ready[1];
+  end
+  // END A119 parallel first-two grant predicates
   for (genvar p = 0; p < CVA6Cfg.NrIssuePorts; p++) begin : gen_grant
     // Per-scope pool nets: rem for port p is a distinct signal, so the
     // cascade chain is acyclic at signal granularity (a shared pool array
@@ -215,7 +238,13 @@ module g6lc_iq
       assign rem = gen_grant[p-1].rem & ~gen_grant[p-1].g;
     end
     for (genvar e = 0; e < DEPTH; e++) begin : gen_grant_e
-      assign g[e] = rem[e] && !(|(rem & older_t[e]));
+      if (p == 0) begin : gen_rank0
+        assign g[e] = first_ready[e];
+      end else if (p == 1) begin : gen_rank1
+        assign g[e] = second_ready[e];
+      end else begin : gen_later
+        assign g[e] = rem[e] && !(|(rem & older_t[e]));
+      end
     end
     assign grant[p] = g;
   end

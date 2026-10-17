@@ -658,6 +658,19 @@ pub fn line_report(design: &TimingDesign) -> Vec<LineCost>;
 | **Multi-cycle** | Module attribute `// sv-timing: multi-cycle` **or** CLI `--multi-cycle-modules a,b` **or** heuristic: `always_ff` with explicit iteration counter handshake. Multi-cycle paths set `multi_cycle=true` and are **excluded from negative-slack ranking** (listed separately). Hosts tag their multi-cycle FUs. |
 | **False paths** | Not computed in v1; opaque boundaries stop the path. |
 
+**Constant generate reachability (delay-v40).** Before building regions,
+lowering excludes inactive `if`-generate branches only when a bounded
+integer evaluator proves the condition. Inputs are exact host parameter keys
+or unique, lexically visible `localparam int [unsigned|signed]` definitions.
+Parameter defaults, ambiguous/shadowed names, width-truncating localparams,
+negative/overflowing arithmetic, unsupported expressions and unresolved
+origins remain unknown. Unknown conditions retain both branches. The initial
+subset supports comparisons/Boolean tests and nonnegative int32 localparam
+arithmetic; it is deliberately narrower than heuristic width inference.
+Inactive instances and loops are excluded with their regions; fallback
+operator discovery must not resurrect the excluded assignments. Source
+text is unchanged and no FO4 credit is awarded for a proposed hardware edit.
+
 ---
 
 ### 3. FO4 cost model and target frequency

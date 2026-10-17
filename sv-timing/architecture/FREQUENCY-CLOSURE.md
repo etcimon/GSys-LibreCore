@@ -20,6 +20,18 @@ Live mapping (`--fo4 0`) now leaves structural columns empty instead of
 joining an older emitted report. Fresh structural numbers must be paired
 with the exact live source snapshot and its elaborated widths.
 
+**A119:** delay-v40 removes only proven-inactive if-generate branches.
+On the same A118 source this corrects the maximum 72 → 55.078 FO4;
+it is a measurement correction. The new IQ parallel grants and LSQ stable
+tournaments leave the whole-design maximum at 55.078; LSQ's own maximum
+falls 50.751 → 42.5. Paired module studies and the subsequent IQ
+placement/buffering discriminator are recorded in ALGORITHMS-EXPERTS A119.
+That discriminator supports the IQ candidate: 3.606→2.806 ns worst-any,
+3.144→2.525 ns reg→reg at +3.0% repaired area, 79 fewer repair buffers,
+and zero reported electrical violations for both variants. No timing arcs
+were disabled. These pre-CTS, unrouted module results still have negative
+WNS and cannot establish whole-core 10-FO4 closure.
+
 ## Historical campaign (2026-10-16, A104–A106)
 
 Latest: with the structural board calibrated (delay-v38) the campaign

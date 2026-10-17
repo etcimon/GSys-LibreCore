@@ -5,6 +5,25 @@ and a 4000 MHz structural target. The logic budget is 200 ps; the clock is
 250 ps. Nangate45 module studies are separate observations. Neither a
 cell-count ratio nor a fitted ns/FO4 ratio changes this budget.
 
+## A119 candidates
+
+* IQ: compute the first two grants from independent zero/one-older-ready
+  predicates using a balanced saturating count tree. Higher issue widths
+  retain the existing cascade for later ports. Exactness requires the
+  already asserted strict age order; arbitrary ack patterns remain valid.
+* LSQ: replace serial youngest-store and oldest-violation scans with stable
+  tournament trees over the same distance keys. Keep earliest-index ties,
+  invalid/default behavior, byte coverage and same-cycle address updates.
+  These transformations add no state, ports or configuration fields.
+* Analyzer: exclude a constant-generate branch only when its condition is
+  proved from explicit host facts or unambiguous visible localparams.
+  Parameter defaults, unknown values and unresolved source origins are not
+  sufficient evidence. This corrects measurement; it earns no hardware gain.
+
+Focused proof precedes the paired map-v2 measurement. The A118 area/uncut
+timing regressions are part of the baseline; successful elaboration or
+filtered timing alone must not select a winner.
+
 ## Current boundaries and proposed changes
 
 The map-v2 board uses `booth` and ABC `&syn2`; compare candidates with that
@@ -97,7 +116,7 @@ shortening a path while adding bubbles or reservations is not free throughput.
 
 ## Measurement limitation found in the paired run
 
-Fresh delay-v39 analysis reports a 72 FO4 multiplier path at the `acc +=
+Historical delay-v39 analysis reports a 72 FO4 multiplier path at the `acc +=
 term[k]` fallback. In this target `NS=XLEN/16=4`, so `gen_sum4` is selected
 and the fallback `gen_sum_n` is not elaborated. The source analyzer still
 includes that generate alternative; the width map identifies live module
@@ -105,7 +124,36 @@ types, not live statements within them. Do not remove its cost by retuning a
 coefficient or claim hardware improved because of a model-only correction.
 A general fix needs constant-generate branch reachability in lowering,
 including nested `else if`, unknown conditions, and source-origin tests.
-The recorded report remains 72 FO4 until that fix is independently validated.
+That report remains part of the record. A119's delay-v40 implements the
+conservative reachability subset described in `DESIGN.md` and tests unknown,
+shadowed, truncated and overflowing cases. On the identical A118 snapshot,
+the multiplier maximum becomes 50 FO4 and the design maximum becomes
+55.078 FO4 (IQ), with no hardware change.
+
+## A119 initial selection result
+
+Paired map-v2 module studies: IQ 2.922 → 2.403 ns with +3.66% area;
+LSQ worst-any 3.141 → 1.958 ns with +1.45% area. LSQ uncut timing also
+improves 8.607 → 6.202 ns, while IQ uncut worst-any rises 31.987 →
+37.850 ns. IQ reg→reg uncut slightly improves. These distinct path classes
+must not be merged into a blanket improvement claim.
+
+The IQ fanout tradeoff motivates a paired OpenROAD placement/repair study
+with a common floorplan, constraints and RC, without disabled timing arcs.
+The source structural result under delay-v40 remains 55.078 FO4 overall;
+LSQ's own worst-any falls 50.751 → 42.5 FO4. These remain budget misses.
+
+The placed discriminator now supports retaining the IQ candidate: worst-any
+3.606 → 2.806 ns, reg→reg 3.144 → 2.525 ns, area +3.0%, and repair
+buffers 15,174 → 15,095. Both variants have zero reported slew/capacitance/
+fanout violations after legalization using a 10% repair margin. Negative
+WNS remains; this is pre-CTS and unrouted, not a closed core.
+
+Next high-value boundaries are the IQ count/ack tail, LSQ next-state
+updates, and the remaining rename/store/frontend paths. A delayed
+acknowledgment or count cannot be introduced independently of capacity and
+ownership. The source rewrites here demonstrate that parallel selection
+can buy timing without new pipeline latency before those larger changes.
 
 ## Retained evidence and tradeoffs
 

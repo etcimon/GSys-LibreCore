@@ -100,7 +100,10 @@ pub const IR_VERSION: &str = "ir-v1";
 /// multiplier is a CSA tree of depth ~log w and one adder), not linearly —
 /// the 65×65 product had read 227 FO4 against a mapped depth near the
 /// 64-bit target sum's (A113).
-pub const MEASUREMENT_VERSION: &str = "delay-v39";
+/// `delay-v40`: inactive if-generate branches are excluded before lowering
+/// when explicit host facts or safe, unique localparams prove reachability.
+/// Unknown conditions, parameter defaults and ambiguous origins stay live.
+pub const MEASUREMENT_VERSION: &str = "delay-v40";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

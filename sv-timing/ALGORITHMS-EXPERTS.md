@@ -26,6 +26,11 @@ uses the same map-v2 recipe, and reports the uncut timing graph beside the
 fanout-filtered module study. See
 [`CONTROL-CONE-CLOSURE.md`](architecture/CONTROL-CONE-CLOSURE.md).
 
+**A119 update:** delay-v40 source maximum is 55.078 FO4 and the fresh
+latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
+paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
+worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
+
 **Historical state (2026-10-16, delay-v37 — A97–A103).**
 
 | Quantity | Value | Where |
@@ -8186,6 +8191,111 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A119 — Parallel issue grants, stable LSQ tournaments, and generate reachability
+
+The 10-FO4 objective remains unchanged. This round replaces serial control
+dependencies inside IQ and LSQ without new ports, state or latency:
+
+* **IQ rank-zero/rank-one:** each entry reduces its older-ready vector to
+  `(any, many)`, where `many` means at least two. The associative combine is
+  `(a.any|b.any, a.many|b.many|(a.any&b.any))`. Root predicates `!any` and
+  `any&&!many` select the first two ready instructions independently; the
+  second grant no longer waits for first-grant removal. Later ports use the
+  original cascade. The existing strict-total-age-order and one-hot
+  assertions remain the contract; acknowledgments remain removal-only.
+* **LSQ stable tournaments:** fully covering store candidates compete by
+  maximum circular distance (youngest older store); violation candidates
+  compete by minimum distance (oldest replay). Balanced trees preserve
+  earliest-slot ties with strict comparisons and left preference. Empty
+  masks remain empty; the original 32-bit minimum sentinel is preserved.
+  Eligibility, hart isolation, byte overlap, address-update priority and
+  stall behavior are unchanged. Only winner reduction and selection move.
+
+These are source implementations, not yet generic sv-timing transform kinds.
+A future `StableSelect` detector must prove that the scan only accumulates a
+winner, identify its strict/non-strict tie policy, preserve default outputs,
+and reject loops with other side effects. A future `SaturatingRank` rewrite
+must retain the age-order invariant and all remaining-port behavior.
+
+**Evidence strategy.** The isolated selection profile of
+`verif/regress/remote/run_fo4_control_review.py` extracts the production
+trees. SAT proves the IQ against the preceding cascade at small depths,
+including three ports; at 24 entries it proves the zero/one-older-ready
+specification for arbitrary matrices. The original 24-entry cascade miter
+exhausted its 600-second budget and is inconclusive. That timeout is not
+substituted with a claim of whole-module equivalence. LSQ min/max trees are
+checked at 1/3/8/16 entries with unconstrained keys, ties and masks. Existing
+IQ store-order and LSQ hart-isolation leaf checks pass with negative controls
+on stock Verilator. Paired mapping uses the same recipe and library.
+
+**delay-v40: generate reachability.** The A118 72-FO4 multiplier maximum
+included a fallback branch that slang did not instantiate. Lowering now
+excludes known-inactive if-generate ranges before constructing regions,
+loops and instances; fallback discovery cannot resurrect them. The evaluator
+uses exact host keys or unique visible `localparam int` definitions, with
+bounded nonnegative int32 arithmetic. Parameter defaults, width-truncating
+locals, unknown values, overflow, shadowed names and unresolved scope origins
+do not authorize exclusion. Unknown branches remain measured. This changes
+measurement and planning scope; it is not a hardware improvement.
+
+**Same-source measurement control:** the frozen A118 source and width map
+report 72.0 FO4 under delay-v39 and 55.078 FO4 under delay-v40. The
+multiplier's maximum falls 72 → 50 when the dead fallback is excluded;
+IQ becomes the reported maximum. There was no RTL or mapping change in
+that comparison.
+
+**A119 hardware comparison under delay-v40:** source maximum remains
+55.078 FO4; LSQ's maximum falls 50.751 → 42.5. With identical map-v2
+options, IQ's filtered delay falls 2.922 → 2.403 ns at area
+173,701.458 → 180,062.050 µm². LSQ worst-any falls 3.141 → 1.958 ns
+at area 33,931.758 → 34,423.326 µm²; its reg→reg path becomes the
+new local bottleneck at 1.820 ns (formerly 1.501).
+
+Uncut IQ worst-any rises 31.987 → 37.850 ns, despite reg→reg falling
+31.756 → 30.878. Uncut LSQ worst-any falls 8.607 → 6.202. Therefore
+the IQ candidate needs a buffering/placement discriminator. The host
+`openroad-module-place-study.tcl` uses the same 900×900 µm die, 880×880
+µm core, pin layers, density 0.40, 250 ps clock and 50 ps uncertainty
+for both variants. It places, estimates RC, repairs electrical violations
+and legalizes without disabling fanout drivers. This is a pre-CTS,
+unrouted module study, not whole-core sign-off.
+
+**Placed IQ discriminator completed.** With 10% slew/capacitance repair
+margin before legalization, both variants finish with zero reported
+electrical violations and no disabled timing arcs:
+
+| IQ metric | A118 baseline | A119 parallel ranks |
+|---|---:|---:|
+| Worst data arrival, any path (ns) | 3.606 | 2.806 |
+| Worst reg→reg arrival (ns) | 3.144 | 2.525 |
+| Cell area after repair (µm²) | 189,319.922 | 194,951.125 |
+| Repair buffers inserted | 15,174 | 15,095 |
+| WNS at 250 ps / 50 ps uncertainty (ns) | −3.443671 | −2.641909 |
+
+The candidate buys 22.2% lower worst delay at +3.0% area, with 79 fewer
+repair buffers. This supports retaining the parallel grants despite the
+uncut, unplaced regression. It still misses the target and does not include
+CTS or routing. The zero-margin trial is retained separately: it left
+13/9 post-legalization electrical violations. The first script trial also
+exposed a host-script lifetime defect: PathEnd objects from one timing
+search were retained across another search/report. GDB localized the stale
+handle access; extracting numerical arrivals immediately fixes the script
+without changing OpenSTA.
+
+Evidence directory: `build-platform/workspace/build/sv-timing/selection-a119/`
+(`result-b/`, `leaf/`, `placed-margin/`, `emitted-check/`).
+The fresh -O3 latency-neutral review emit has 623 records, passes joint
+integrity and full-core slang elaboration, and remains at 55.664 FO4
+(704/1594 reg→reg paths over budget). No automatic register cuts were
+enabled or credited. Mapped/placed numbers above refer to the production
+source snapshots, not that review emit.
+
+Validation: 348 Rust tests and the target lint gate pass. The package
+independence scanner still flags pre-existing host-name references in
+unchanged files (`expr.rs`, `param_map.rs`, `relocation.rs`, `width.rs`,
+emit fixtures and host soak tools). No new host dependency was introduced;
+that separate scanner failure is not a passing independence gate.
 
 ## A118 — Remove serial control dependencies before adding pipeline cycles
 

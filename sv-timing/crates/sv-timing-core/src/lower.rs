@@ -466,7 +466,22 @@ fn lower_file(
             ),
             loc: mod_loc,
         };
-        design.instances.extend(insts);
+        let dead_generate = constant_generate_dead_spans(
+            tree,
+            li,
+            &path_str,
+            &scope.nodes,
+            &module,
+            &design.param_map_ints,
+        );
+        let is_dead = |loc: &SourceLoc| {
+            loc.origin == OriginKind::UserFile
+                && loc.file == path_str
+                && loc_in_spans(loc, &dead_generate)
+        };
+        module.gen_loops.retain(|g| !is_dead(&g.loc));
+        module.instances.retain(|i| !is_dead(&i.loc));
+        design.instances.extend(module.instances.iter().cloned());
 
         let mut region_ops: Vec<RegionExtract> = Vec::new();
 
@@ -480,6 +495,9 @@ fn lower_file(
                         sv_parser::AlwaysKeyword::Always(_) => RegionKind::AlwaysComb,
                     };
                     let region_loc = first_locate_loc(tree, li, &path_str, x);
+                    if is_dead(&region_loc) {
+                        continue;
+                    }
                     let mut gate = extract_gate_from_always(tree, x);
                     gate.is_comb = kind != RegionKind::AlwaysFf;
                     let label = first_named_begin_label(tree, x);
@@ -497,6 +515,9 @@ fn lower_file(
                 }
                 RefNode::ContinuousAssign(x) => {
                     let region_loc = first_locate_loc(tree, li, &path_str, x);
+                    if is_dead(&region_loc) {
+                        continue;
+                    }
                     let ops = collect_ops_and_assigns(tree, li, &path_str, &file.bytes, x);
                     if !ops.is_empty() {
                         region_ops.push(RegionExtract {
@@ -517,13 +538,14 @@ fn lower_file(
 
         // Fallback: this module's CST slice, not the whole file.
         if region_ops.is_empty() {
-            let ops = collect_ops_and_assigns(
+            let mut ops = collect_ops_and_assigns(
                 tree,
                 li,
                 &path_str,
                 &file.bytes,
                 scope.nodes.iter().cloned(),
             );
+            ops.retain(|op| !is_dead(&op.loc));
             if !ops.is_empty() {
                 region_ops.push(RegionExtract {
                     kind: RegionKind::AlwaysComb,
@@ -840,6 +862,237 @@ where
         }
     }
     out
+}
+
+/// A localparam accepted for reachability (not heuristic width inference).
+struct GenerateConst {
+    expr: Expr,
+    loc: SourceLoc,
+    scope: Option<(u32, u32)>,
+}
+
+/// Prove a small integer subset without borrowing WidthResolver's default
+/// parameters or width-insensitive arithmetic. Localparam int arithmetic is
+/// evaluated in its 32-bit context and every intermediate must fit a positive
+/// signed int32. Condition arithmetic without that context is left unknown.
+fn generate_const_value(
+    expr: &Expr,
+    at: u32,
+    int_context: bool,
+    locals: &BTreeMap<String, GenerateConst>,
+    declared: &std::collections::BTreeSet<String>,
+    host: &BTreeMap<String, i64>,
+    depth: u32,
+) -> Option<i64> {
+    if depth > 12 {
+        return None;
+    }
+    let eval =
+        |e: &Expr, wide| generate_const_value(e, at, wide, locals, declared, host, depth + 1);
+    let value = match expr {
+        Expr::Literal { text } => {
+            let t = text.trim().replace('_', "");
+            match t.as_str() {
+                "'0" | "1'b0" => Some(0),
+                "1'b1" => Some(1),
+                _ => t.parse::<i64>().ok(),
+            }
+        }
+        Expr::Ident { name } => {
+            if let Some(c) = locals.get(name) {
+                if c.scope.is_some_and(|(lo, hi)| at < lo || at >= hi) {
+                    return None;
+                }
+                generate_const_value(
+                    &c.expr,
+                    c.loc.byte_start,
+                    true,
+                    locals,
+                    declared,
+                    host,
+                    depth + 1,
+                )
+            } else if !declared.contains(name) {
+                // Exact keys only. No last-member fallback from Cfg.FIELD
+                // to FIELD, and no guessing from parameter defaults.
+                host.get(name).copied()
+            } else {
+                None
+            }
+        }
+        Expr::Unary { op, arg } if op == "!" => eval(arg, false).map(|v| i64::from(v == 0)),
+        Expr::Binary {
+            op, left, right, ..
+        } => {
+            let arithmetic = matches!(op.as_str(), "+" | "-" | "*" | "/" | "%");
+            if arithmetic && !int_context {
+                return None;
+            }
+            let l = eval(left, arithmetic)?;
+            let r = eval(right, arithmetic)?;
+            match op.as_str() {
+                "+" => l.checked_add(r),
+                "-" => l.checked_sub(r),
+                "*" => l.checked_mul(r),
+                "/" if r != 0 => l.checked_div(r),
+                "%" if r != 0 => l.checked_rem(r),
+                "==" => Some(i64::from(l == r)),
+                "!=" => Some(i64::from(l != r)),
+                "<" => Some(i64::from(l < r)),
+                "<=" => Some(i64::from(l <= r)),
+                ">" => Some(i64::from(l > r)),
+                ">=" => Some(i64::from(l >= r)),
+                "&&" => Some(i64::from(l != 0 && r != 0)),
+                "||" => Some(i64::from(l != 0 || r != 0)),
+                _ => None,
+            }
+        }
+        _ => None,
+    }?;
+    (0..=i64::from(i32::MAX)).contains(&value).then_some(value)
+}
+
+/// Known-dead source ranges of conditional generate constructs. Width facts
+/// alone cannot prove reachability: an elaborated width map merges multiple
+/// specializations. Only explicit values and safe local constants qualify.
+fn constant_generate_dead_spans(
+    tree: &SyntaxTree,
+    li: &LineIndex,
+    path: &str,
+    nodes: &[RefNode<'_>],
+    module: &TimingModule,
+    host: &BTreeMap<String, i64>,
+) -> Vec<(u32, u32)> {
+    use std::collections::BTreeSet;
+    let mut definitions: BTreeMap<String, BTreeSet<(u32, u32)>> = BTreeMap::new();
+    let mut scopes = Vec::new();
+    let mut unresolved_scope = false;
+    for node in nodes {
+        let span = match node {
+            RefNode::GenerateBlock(b) => origin_byte_span(tree, li, *b),
+            RefNode::SeqBlock(b) => origin_byte_span(tree, li, *b),
+            RefNode::FunctionDeclaration(b) => origin_byte_span(tree, li, *b),
+            RefNode::TaskDeclaration(b) => origin_byte_span(tree, li, *b),
+            _ => None,
+        };
+        if let Some(span) = span {
+            scopes.push(span);
+        } else if matches!(
+            node,
+            RefNode::GenerateBlock(_)
+                | RefNode::SeqBlock(_)
+                | RefNode::FunctionDeclaration(_)
+                | RefNode::TaskDeclaration(_)
+        ) {
+            unresolved_scope = true;
+        }
+        if let RefNode::ParamAssignment(pa) = node {
+            if let Some(name) = identifier_str(tree, RefNode::ParameterIdentifier(&pa.nodes.0)) {
+                definitions
+                    .entry(name)
+                    .or_default()
+                    .insert(origin_byte_span(tree, li, *pa).unwrap_or((u32::MAX, u32::MAX)));
+            }
+        }
+    }
+    // A host key cannot turn a port, variable or genvar into an elaboration
+    // parameter. Blocking a shadowed spelling globally is conservative.
+    let runtime_names: BTreeSet<_> = module
+        .ports
+        .iter()
+        .map(|p| p.name.clone())
+        .chain(module.decls.iter().map(|d| d.name.clone()))
+        .chain(module.gen_loops.iter().map(|g| g.genvar.clone()))
+        .collect();
+    let declared: BTreeSet<_> = definitions
+        .keys()
+        .cloned()
+        .chain(runtime_names.iter().cloned())
+        .collect();
+    let host: BTreeMap<_, _> = host
+        .iter()
+        .filter(|(name, _)| {
+            !TimingModule::root_ident(name).is_some_and(|root| runtime_names.contains(root))
+        })
+        .map(|(k, v)| (k.clone(), *v))
+        .collect();
+    let mut locals = BTreeMap::new();
+    for node in nodes {
+        let RefNode::LocalParameterDeclaration(sv_parser::LocalParameterDeclaration::Param(p)) =
+            node
+        else {
+            continue;
+        };
+        let ty = node_text(tree, &p.nodes.1).unwrap_or_default();
+        let ty = ty.split_whitespace().collect::<Vec<_>>().join(" ");
+        if unresolved_scope || !matches!(ty.as_str(), "int" | "int unsigned" | "int signed") {
+            continue;
+        }
+        for item in &p.nodes.2 {
+            let RefNode::ParamAssignment(pa) = item else {
+                continue;
+            };
+            let Some(name) = identifier_str(tree, RefNode::ParameterIdentifier(&pa.nodes.0)) else {
+                continue;
+            };
+            if !pa.nodes.1.is_empty()
+                || runtime_names.contains(&name)
+                || definitions.get(&name).is_none_or(|d| d.len() != 1)
+            {
+                continue;
+            }
+            let loc = loop_source_span(tree, li, path, pa);
+            let Some((_, rhs)) = &pa.nodes.2 else {
+                continue;
+            };
+            let Some(text) = node_text(tree, rhs) else {
+                continue;
+            };
+            if loc.origin != OriginKind::UserFile {
+                continue;
+            }
+            let scope = scopes
+                .iter()
+                .copied()
+                .filter(|(lo, hi)| *lo <= loc.byte_start && loc.byte_start < *hi)
+                .min_by_key(|(lo, hi)| hi - lo);
+            locals.insert(
+                name,
+                GenerateConst {
+                    expr: Expr::parse(&text),
+                    loc,
+                    scope,
+                },
+            );
+        }
+    }
+    let mut dead = Vec::new();
+    for node in nodes {
+        let RefNode::IfGenerateConstruct(g) = node else {
+            continue;
+        };
+        let cond = &g.nodes.1.nodes.1;
+        let Some((at, _)) = origin_byte_span(tree, li, cond) else {
+            continue;
+        };
+        let Some(text) = node_text(tree, cond) else {
+            continue;
+        };
+        let Some(value) =
+            generate_const_value(&Expr::parse(&text), at, false, &locals, &declared, &host, 0)
+        else {
+            continue;
+        };
+        let inactive = if value == 0 {
+            Some(&g.nodes.2)
+        } else {
+            g.nodes.3.as_ref().map(|(_, block)| block)
+        };
+        if let Some(span) = inactive.and_then(|b| origin_byte_span(tree, li, b)) {
+            dead.push(span);
+        }
+    }
+    dead
 }
 
 /// `typedef <data_type> <name>;`: name → data-type text (`logic [IdxW-1:0]`,
@@ -3030,6 +3283,10 @@ mod tests {
     }
 
     fn analyze_inline_source(text: &str) -> AnalyzeOutput {
+        analyze_inline_with_options(text, &LowerOptions::default())
+    }
+
+    fn analyze_inline_with_options(text: &str, options: &LowerOptions) -> AnalyzeOutput {
         let path = PathBuf::from("origin_test.sv");
         let defines: sv_parser::Defines = Default::default();
         let (tree, _) =
@@ -3046,9 +3303,164 @@ mod tests {
                 files: vec![file],
                 skipped: vec![],
             },
-            &LowerOptions::default(),
+            options,
         )
         .expect("lower inline source")
+    }
+
+    #[test]
+    fn generate_reachability_requires_explicit_facts_and_keeps_unknown_branches() {
+        let src = r#"
+package cfg_pkg;
+  typedef struct packed { int unsigned XLEN; } cfg_t;
+endpackage
+module m #(parameter cfg_pkg::cfg_t Cfg = '{XLEN:64})
+          (input logic [31:0] a,b, output logic [31:0] y);
+  if (Cfg.XLEN > 0) begin : active
+    localparam int unsigned NS = Cfg.XLEN / 16;
+    if (NS == 4) begin : four
+      assign y = a + b;
+    end else if (NS == 2) begin : two
+      assign y = a * b;
+    end else begin : other
+      always_comb begin
+        y = a / b;
+        for (int i=0;i<16;i++) y = y + b;
+      end
+    end
+  end else begin : zero
+    assign y = a - b;
+  end
+endmodule
+"#;
+        let unknown = analyze_inline_source(src);
+        let unknown_m = unknown.design.modules.values().next().unwrap();
+        assert!(unknown_m
+            .nodes
+            .values()
+            .any(|n| n.rhs.as_deref() == Some("a / b")));
+        let mut opts = LowerOptions::default();
+        opts.param_map.insert("Cfg.XLEN", serde_json::json!(64));
+        let known = analyze_inline_with_options(src, &opts);
+        let m = known.design.modules.values().next().unwrap();
+        let rhs: Vec<_> = m.nodes.values().filter_map(|n| n.rhs.as_deref()).collect();
+        assert_eq!(rhs, vec!["a + b"], "{rhs:?}");
+        assert!(
+            m.gen_loops.is_empty(),
+            "dead fallback's loop must not survive"
+        );
+        opts.param_map.insert("Cfg.XLEN", serde_json::json!(32));
+        let other = analyze_inline_with_options(src, &opts);
+        let rhs: Vec<_> = other
+            .design
+            .modules
+            .values()
+            .next()
+            .unwrap()
+            .nodes
+            .values()
+            .filter_map(|n| n.rhs.as_deref())
+            .collect();
+        assert_eq!(rhs, vec!["a * b"], "{rhs:?}");
+    }
+
+    #[test]
+    fn generate_reachability_refuses_truncation_defaults_and_shadowing() {
+        for decl in [
+            "parameter int N=4;",
+            "localparam logic [1:0] N=4;",
+            "localparam int unsigned N=2147483647+1;",
+            "localparam int N=-1;",
+            "localparam int N=1/0;",
+            "localparam int N=1'bx;",
+        ] {
+            let src = format!(
+                "module m(input logic a,b, output logic y); {decl}
+                 if (N==4) assign y=a; else assign y=b; endmodule"
+            );
+            let out = analyze_inline_source(&src);
+            let m = out.design.modules.values().next().unwrap();
+            assert_eq!(
+                m.nodes
+                    .values()
+                    .filter(|n| n.lhs.as_deref() == Some("y"))
+                    .count(),
+                2,
+                "{decl}"
+            );
+        }
+        let shadowed = r#"
+module m #(parameter int MODE=0)(input logic a,b,output logic y);
+ if (MODE) begin:g
+   localparam int N=4;
+   if(N==4) assign y=a; else assign y=b;
+ end else begin:h
+   localparam int N=2;
+   if(N==4) assign y=a; else assign y=b;
+ end
+endmodule
+"#;
+        let out = analyze_inline_source(shadowed);
+        let m = out.design.modules.values().next().unwrap();
+        assert_eq!(
+            m.nodes
+                .values()
+                .filter(|n| n.lhs.as_deref() == Some("y"))
+                .count(),
+            4
+        );
+        let narrow = "module m(input logic a,b,output logic y);
+            if ((1'b1 + 1'b1) == 1'b0) assign y=a; else assign y=b;
+            endmodule";
+        let out = analyze_inline_source(narrow);
+        assert_eq!(
+            out.design
+                .modules
+                .values()
+                .next()
+                .unwrap()
+                .nodes
+                .values()
+                .filter(|n| n.lhs.as_deref() == Some("y"))
+                .count(),
+            2
+        );
+        let runtime = "module m(input logic cfg,a,b,output logic y);
+            if (cfg) assign y=a; else assign y=b; endmodule";
+        let mut opts = LowerOptions::default();
+        opts.param_map.insert("cfg", serde_json::json!(0));
+        let out = analyze_inline_with_options(runtime, &opts);
+        assert_eq!(
+            out.design
+                .modules
+                .values()
+                .next()
+                .unwrap()
+                .nodes
+                .values()
+                .filter(|n| n.lhs.as_deref() == Some("y"))
+                .count(),
+            2
+        );
+    }
+
+    #[test]
+    fn dead_generate_does_not_reappear_through_fallback_or_instance_stitch() {
+        let src = r#"
+module child(input logic a,output logic y); assign y=~a; endmodule
+module m(input logic clk,a,output logic q,y);
+ if (0) begin:gone
+   child u(.a(a),.y(y));
+   always_ff @(posedge clk) q<=a;
+ end
+endmodule
+"#;
+        let out = analyze_inline_source(src);
+        let m = out.design.modules.values().find(|m| m.name == "m").unwrap();
+        assert!(m.nodes.is_empty(), "{:?}", m.nodes);
+        assert!(m.regions.is_empty());
+        assert!(m.instances.is_empty());
+        assert!(!out.design.instances.iter().any(|i| i.parent_name == "m"));
     }
 
     /// multiplier A115 shape: a `logic` *array* declared inside a conditional
