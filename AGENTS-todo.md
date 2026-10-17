@@ -1970,7 +1970,18 @@ prerequisite for this work under the existing dual license. No licensing policy 
   is owed. Builds `ooocoh-t49-server1-pgo-build` / `ooocoh-t49-ooo-pgo-build`
   (HEAD incl. A105–A108 + this fix): verdicts = the 2-hart server1 L1
   past 1.267 s to the shell (T39), the single-hart server1 L1 past
-  `Run /init` to the shell with the oracle (T44), the ooo battery.
+  `Run /init` to the shell with the oracle (T44), the ooo battery (done:
+  s11 + stages 4–57 Spike-exact on t49). **The WT package has it too,
+  rarely:** the full offline oracle over the t47b L3 trace (730 M
+  retirements, vmap/MMIO folding) finds exactly 3 stored mismatches, all
+  the same shape — a user `sb` (`0x00f48023`, byte 0x02 to VA
+  `0x3f9d9b0af4`, PA `0x80c00af4`) at c=959,098,552 and a user `lbu` of
+  the same byte 19 cycles later returning the old 0x82 (retire
+  598,041,722; two more at 687.9 M). t47b predates the fix; the t49 L3
+  (`l3h49`) is the verdict for the WT package as well. Leaf: load-cancel
+  scenario 25 (covered load vs a two-cycle response burst) passes on the
+  fix and fails `LOAD_FWD_FALLTHROUGH req=1 wb=0` under
+  `FAULT_REVIEW_MUTATE_FWD_FALLTHROUGH=1`; the 64-record leaf stays green.
 - [x] **T43 — L3 on t42: an `amoor.d.aq` (0x800 → 0x801) then, 53 cycles
   later, `amoswap.d.rl zero` (→ 0x800) on a workqueue `work->data`
   (PA `0x8fc8e380`); the `c.ld` 866 cycles after the swap reads 0x801,
