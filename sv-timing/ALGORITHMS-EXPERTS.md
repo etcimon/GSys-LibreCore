@@ -8219,6 +8219,38 @@ reading column is the model's own worklist (the dense-cone class, the
 function class and parameter-dead code are the over-reads; dynamic
 struct-array demuxes the under-reads, A103–A107).
 
+### The first run of the corrected route
+
+`timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10
+--allow-over-budget --remote --map-recipe streamed`, current tree:
+
+| stage | result |
+|---|---|
+| s0-width-map | elaborated net widths of this tree (327 s, 3.7 GiB; 108 live modules) |
+| s0-svt-correct | `live modules=108 uninstantiated=126 (skipped)`; 690 edits; integrity passes after one emitter fix the elaborated widths exposed (comma-list `assign a = x, b = y;` — one statement per line now); verdict `STUDY: worst live primary 416.0 FO4, 1182 live paths exceed 10 (126 uninstantiated modules excluded, their worst 280.5)` |
+| s1-yosys-map | 348 s, 3.7 GiB, every module under the delay-oriented script |
+| s2-openroad-sta | whole-core STA (unbuffered fanout `wns`, as before) |
+| s3-calibration | 69 modules; of the 28 reg→reg cones ≥ 8 cells **22 track** (0.6–2.0 cells/FO4), 4 over-read (iq's dense class 0.45, perf_counters 0.40, lsq 0.43, ptw 0.55), 2 under-read |
+
+Two findings from the first `calibration.tsv`:
+
+- **The design's worst physical path is the multiplier, and no reg→reg
+  ranking could show it.** `multiplier`'s 65×65 product runs from its
+  ports (the issue stage's operand registers, in the flat core) into
+  `mult_result_q`: 5.34 ns on Nangate45 — above the frontend's 4.35 — but
+  it is an in→reg path of the module, so the per-module reg→reg board
+  listed it as `-`. The calibration now leads with the worst mapped path
+  of **any** kind per module (`worst_any_ns`) and labels boundary-dominated
+  modules; the pipelined multiplier joins the A107 list of single-cycle
+  contracts (one more cycle of MUL latency).
+- **The structural model over-read that multiplier 8×.** `Mul` scaled
+  linearly with width (56 × 130/32 = 227 FO4; 416 on the path), so the
+  live headline was the multiplier at 416 against a mapped depth ≈ 1.2× the
+  frontend's. A tree multiplier is a CSA tree of depth ~log w and one
+  adder: **delay-v39** scales `Mul` like `AddSub` (log₂ w / log₂ 32; the
+  iterative divider keeps the linear law). The next run's headline is the
+  design's real top, not the table's.
+
 Why the structural worst read "below 20" in October's first week and 55
 now is not a regression of the design; it is the instrument learning to
 see — delay-v35 (loop carry), v37 (guards and indexed writes: `g6lc_iq`

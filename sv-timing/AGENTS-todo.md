@@ -191,7 +191,13 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   (`s0-width-map`), `correct` plans the instantiated modules only, the
   completion gate and headline are the live design's, effective emit flag
   printed, `s3-calibration` (module board + structural join) on every
-  remote run. End-to-end run in flight (`sta-rtl-emitted-a113.log`).
+  remote run. First full run: 108 live modules planned, 22/28 cones track,
+  the multiplier is the design's worst physical path (5.34 ns, in→reg —
+  invisible to a reg→reg ranking); delay-v39 scales `Mul` by log2(w).
+- [ ] A113 next: rerun the route under delay-v39 (headline = the real top);
+  the multiplier as a pipelined 2-stage product (owner: +1 cycle MUL);
+  the four over-reads (iq dense class, perf_counters, lsq, ptw) are the
+  model's worklist; `calibration.tsv` is the artifact to read first.
 - [ ] **Owed: OoO validation of A104–A112** — `testharness_proxy.py di
   --flavour B` (refused while the owner's `ooocoh-t48` Linux-boot runs hold
   the builder) and the soak; the asserted invariants
