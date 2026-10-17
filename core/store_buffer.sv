@@ -239,8 +239,7 @@ module store_buffer
   // ----------------------------------------
   always_comb begin : core_if
     automatic logic [$clog2(DEPTH_SPEC):0] speculative_status_cnt;
-    automatic logic [$clog2(DEPTH_SPEC)-1:0] src, dst;
-    automatic logic [$clog2(DEPTH_SPEC):0] live, old_cnt, ins;
+    automatic logic [$clog2(DEPTH_SPEC):0] live, ins;
     automatic logic [DEPTH_SPEC-1:0] older_vec;
     automatic int unsigned nlive, nins;
     automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.PLEN-1:0] a_addr;
@@ -251,24 +250,8 @@ module store_buffer
     automatic logic [DEPTH_SPEC-1:0][HID_W-1:0] a_hart;
     automatic logic [DEPTH_SPEC-1:0] a_wr, a_fk;
     automatic cbo_t a_cbo[DEPTH_SPEC];
-    // Per slot of speculative_queue_n: the entry there is cancelled this
-    // cycle (sv-timing A108). The cancel verdict is a property of the entry
-    // (its trans_id), not of the slot, so it is looked up once on the
-    // registered queue — and for the arrival, on trans_id_i, which the push
-    // guard already proved not cancelled — and then permuted alongside the
-    // entries by the program-order insertion below. The squash's keep bits
-    // and its count no longer wait for the inserted queue's trans_id muxes
-    // before the 32-way cancelled_mask lookup.
-    automatic logic [DEPTH_SPEC-1:0] a_cancel, cancel_hit_n;
     speculative_status_cnt      = speculative_status_cnt_q;
-    a_cancel = '0;
-    for (int unsigned i = 0; i < DEPTH_SPEC; i++)
-      cancel_hit_n[i] = speculative_queue_q[i].valid &&
-                        cancelled_mask_i[speculative_queue_q[i].trans_id];
-    src     = '0;
-    dst     = '0;
     live    = '0;
-    old_cnt = '0;
     ins     = '0;
     older_vec = '0;
     nlive   = 0;
@@ -320,86 +303,9 @@ module store_buffer
 
     speculative_status_cnt_n = speculative_status_cnt;
 
-    // U5.4 OoO: place each arrival at its program-order position.
-    //
-    // Entries are written here at AGU time, so arrival order is ISSUE order.
-    // Under in-order issue that was program order; under OoO it is not, and
-    // this queue's head is what the commit handoff below hands to memory --
-    // so a younger store whose data resolved first reached memory ahead of an
-    // older store to the same address. The rest of the module (forward scan,
-    // rvfi_mem_paddr_o, the commit assertions) also reads the head as the
-    // oldest store, so the fix restores that invariant rather than adding an
-    // exception to it. Every pre-existing entry is already ordered, so the
-    // arrival only has to sink past the younger stores it was queued behind.
-    if (CVA6Cfg.OoOEn && valid_i && !cancelled_mask_i[trans_id_i]) begin
-      live   = speculative_status_cnt_n;
-      nlive  = int'(live);
-      a_addr = '0;
-      a_data = '0;
-      a_be   = '0;
-      a_sz   = '0;
-      a_tid  = '0;
-      a_hart = '0;
-      a_wr   = '0;
-      a_fk   = '0;
-      for (int unsigned i = 0; i < DEPTH_SPEC; i++) a_cbo[i] = cbo_t'('0);
-      // snapshot the live set in current order, oldest first, arrival last
-      for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
-        if (k < nlive) begin
-          src         = speculative_read_pointer_n + $clog2(DEPTH_SPEC)'(k);
-          a_addr[k]   = speculative_queue_n[src].address;
-          a_data[k]   = speculative_queue_n[src].data;
-          a_be[k]     = speculative_queue_n[src].be;
-          a_sz[k]     = speculative_queue_n[src].data_size;
-          a_cbo[k]    = speculative_queue_n[src].cbo_op;
-          a_tid[k]    = speculative_queue_n[src].trans_id;
-          a_hart[k]   = speculative_queue_n[src].hart;
-          a_wr[k]     = speculative_queue_n[src].wait_rvalid;
-          a_fk[k]     = speculative_queue_n[src].fwd_keep;
-        end
-      end
-      // position of the arrival = number of already-queued stores older than it.
-      // A popcount of the per-slot verdicts, not a running `ins + 1` (that is a
-      // DEPTH_SPEC-deep incrementer chain synthesis keeps serial — sv-timing
-      // A100; the mapped store buffer's worst path was 50 cells).
-      for (int unsigned k = 0; k < DEPTH_SPEC; k++)
-        older_vec[k] = ((k + 1) < nlive) &&
-                       ooo_older(a_tid[k], a_tid[(nlive > 0) ? nlive-1 : 0]);
-      ins  = ($clog2(DEPTH_SPEC) + 1)'($countones(older_vec));
-      nins = int'(ins);
-      // cancel verdict per snapshot entry (the arrival, last, is never
-      // cancelled: the push guard tested trans_id_i)
-      for (int unsigned k = 0; k < DEPTH_SPEC; k++)
-        a_cancel[k] = (k < nlive) && cancelled_mask_i[a_tid[k]];
-      // rewrite dense with the arrival at `ins`, younger entries shifted up
-      for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
-        if (k < nlive) begin
-          if (k < nins) dst = $clog2(DEPTH_SPEC)'(k);
-          else if (k == nins) dst = $clog2(DEPTH_SPEC)'(nlive - 1);
-          else dst = $clog2(DEPTH_SPEC)'(k - 1);
-          speculative_queue_n[k].address     = a_addr[dst];
-          speculative_queue_n[k].data        = a_data[dst];
-          speculative_queue_n[k].be          = a_be[dst];
-          speculative_queue_n[k].data_size   = a_sz[dst];
-          speculative_queue_n[k].cbo_op      = a_cbo[dst];
-          speculative_queue_n[k].trans_id    = a_tid[dst];
-          speculative_queue_n[k].hart        = a_hart[dst];
-          speculative_queue_n[k].wait_rvalid = a_wr[dst];
-          speculative_queue_n[k].fwd_keep    = a_fk[dst];
-          speculative_queue_n[k].valid       = 1'b1;
-          cancel_hit_n[k]                    = a_cancel[dst];
-        end else begin
-          speculative_queue_n[k].valid    = 1'b0;
-          speculative_queue_n[k].fwd_keep = 1'b0;
-          cancel_hit_n[k]                 = 1'b0;
-        end
-      end
-      speculative_read_pointer_n  = '0;
-      speculative_write_pointer_n = $clog2(DEPTH_SPEC)'(nlive);
-    end
-
     // G1ah: a spec store that a live load already forwarded from must
-    // drain. Mark those entries before cancel/flush compact.
+    // drain. Mark those entries before the rewrite below (it permutes the
+    // marked entries; marking before or after the permutation is the same).
     if (LEGACY_SMT_KEEP && load_paddr_valid_i) begin
       for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
         if (speculative_queue_n[i].valid &&
@@ -409,95 +315,137 @@ module store_buffer
       end
     end
 
+    // One permutation for two rewrites (sv-timing A109).
+    //
+    // U5.4 OoO: place each arrival at its program-order position. Entries
+    // are written here at AGU time, so arrival order is ISSUE order; under
+    // OoO that is not program order, and this queue's head is what the
+    // commit handoff hands to memory — so the arrival sinks past the younger
+    // stores it was queued behind (the rank `ins` below, a popcount of the
+    // per-entry age verdicts, sv-timing A100).
+    //
     // FSE S4: younger-only cancel — keep older stores, drop cancelled TIDs.
-    // G1ah SMT+SS: also keep fwd_keep. A on flush keeps only fwd_keep.
-    // I13: B keeps !cancelled on flush too — keep-skip cancelled wrong-path
-    // stores, but a mispredict flush was dropping older frame `sd s2/s3`
-    // still in the spec queue (getprop `sw` mepc=0x12eb2 mcause=6).
-    // Snapshot then rewrite dense [0 .. live) so pointers match status_cnt.
-    if ((|cancelled_mask_i && !flush_i) ||
-        (flush_i && LEGACY_SMT_KEEP)) begin
-      old_cnt = speculative_status_cnt_n;
-      live = '0;
-      dst  = '0;
-      a_addr = '0;
-      a_data = '0;
-      a_be   = '0;
-      a_sz   = '0;
-      a_tid  = '0;
-      a_hart = '0;
-      a_wr   = '0;
-      a_fk   = '0;
-      for (int unsigned i = 0; i < DEPTH_SPEC; i++) a_cbo[i] = cbo_t'('0);
-      // Stream compaction in its parallel form (sv-timing A103/A106, the
-      // StreamCompact shape): the walk `if (keep) { a[dst] = q[src]; dst++ }`
-      // was a conditional running count and a write at a running index —
-      // DEPTH_SPEC incrementers and demuxes in series (the module board's
-      // worst store-buffer path, 49 cells). Here `keep[k]` is the walk's
-      // condition per slot, `pos[k]` the number of kept slots before k
-      // (independent popcounts, not a running sum), the gather writes
-      // `a[j]` from the one k with `keep[k] && pos[k] == j`, and the counts
-      // advance by the popcount. Exact: `dst` and `live` enter at zero, the
-      // outputs are not read in the walk; SAT-proved on the fixture, 49 → 42
-      // cells in the emitted tree.
-      begin : spec_compact
-        automatic logic [DEPTH_SPEC-1:0] keep;
-        automatic logic [DEPTH_SPEC-1:0][$clog2(DEPTH_SPEC+1)-1:0] pos;
-        automatic logic [$clog2(DEPTH_SPEC)-1:0] ks;
-        keep = '0;
+    // G1ah SMT+SS: also keep fwd_keep. A on flush keeps only fwd_keep. I13: B
+    // keeps !cancelled on flush too — keep-skip cancelled wrong-path stores,
+    // but a mispredict flush was dropping older frame `sd s2/s3` still in
+    // the spec queue (getprop `sw` mepc=0x12eb2 mcause=6).
+    //
+    // Both rewrites take the dense window [read_ptr_n, read_ptr_n + n) and
+    // write it back dense at [0, live). Done one after the other they were
+    // two permutations in series (insert, then compact) — the module
+    // board's worst store-buffer path. Here each snapshot entry gets its
+    // position after the insertion (`pos_ins`, the identity when nothing
+    // arrives) and its keep verdict (all kept when nothing is cancelled);
+    // its final slot is the number of kept entries whose inserted position
+    // is smaller, and one gather writes the window. Exact: the composition
+    // of the two maps, evaluated as one. The cancel verdict is a property
+    // of the entry — looked up on its registered trans_id, and the arrival
+    // is never cancelled (the push guard tested trans_id_i).
+    begin : spec_rewrite
+      automatic logic ins_active, sq_active;
+      automatic logic [DEPTH_SPEC-1:0] keep, cancel;
+      automatic logic [DEPTH_SPEC-1:0][$clog2(DEPTH_SPEC):0] pos_ins, final_slot;
+      automatic logic [$clog2(DEPTH_SPEC)-1:0] ks;
+      ins_active = CVA6Cfg.OoOEn && valid_i && !cancelled_mask_i[trans_id_i];
+      sq_active  = (|cancelled_mask_i && !flush_i) || (flush_i && LEGACY_SMT_KEEP);
+      keep = '0;
+      cancel = '0;
+      pos_ins = '0;
+      final_slot = '0;
+      if (ins_active || sq_active) begin
+        live   = speculative_status_cnt_n;
+        nlive  = int'(live);
+        a_addr = '0;
+        a_data = '0;
+        a_be   = '0;
+        a_sz   = '0;
+        a_tid  = '0;
+        a_hart = '0;
+        a_wr   = '0;
+        a_fk   = '0;
+        for (int unsigned i = 0; i < DEPTH_SPEC; i++) a_cbo[i] = cbo_t'('0);
+        // snapshot the live window in current order, oldest first (the
+        // arrival, when there is one, last)
         for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
-          ks = speculative_read_pointer_n + $clog2(DEPTH_SPEC)'(k);
-          keep[k] = (k < unsigned'(old_cnt)) && speculative_queue_n[ks].valid &&
-`ifdef G6LC_FETCH_B
-              ((LEGACY_SMT_KEEP &&
-                speculative_queue_n[ks].fwd_keep) ||
-               !cancel_hit_n[ks]);
-`else
-              ((LEGACY_SMT_KEEP &&
-                speculative_queue_n[ks].fwd_keep) ||
-               (!flush_i && !cancel_hit_n[ks]));
-`endif
+          if (k < nlive) begin
+            ks          = speculative_read_pointer_n + $clog2(DEPTH_SPEC)'(k);
+            a_addr[k]   = speculative_queue_n[ks].address;
+            a_data[k]   = speculative_queue_n[ks].data;
+            a_be[k]     = speculative_queue_n[ks].be;
+            a_sz[k]     = speculative_queue_n[ks].data_size;
+            a_cbo[k]    = speculative_queue_n[ks].cbo_op;
+            a_tid[k]    = speculative_queue_n[ks].trans_id;
+            a_hart[k]   = speculative_queue_n[ks].hart;
+            a_wr[k]     = speculative_queue_n[ks].wait_rvalid;
+            a_fk[k]     = speculative_queue_n[ks].fwd_keep;
+            // the verdict on the registered entry; the arrival's slot held
+            // an invalid entry, and the arrival itself is not cancelled
+            cancel[k]   = !(ins_active && (k + 1 == nlive)) &&
+                          speculative_queue_q[ks].valid &&
+                          cancelled_mask_i[speculative_queue_q[ks].trans_id];
+          end
         end
+        // rank of the arrival = number of already-queued stores older than it
         for (int unsigned k = 0; k < DEPTH_SPEC; k++)
-          pos[k] = $clog2(DEPTH_SPEC+1)'($countones(keep & ((DEPTH_SPEC'(1) << k) - 1'b1)));
-        for (int unsigned j = 0; j < DEPTH_SPEC; j++) begin
-          for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
+          older_vec[k] = ins_active && ((k + 1) < nlive) &&
+                         ooo_older(a_tid[k], a_tid[(nlive > 0) ? nlive-1 : 0]);
+        ins  = ($clog2(DEPTH_SPEC) + 1)'($countones(older_vec));
+        nins = int'(ins);
+        // position after the insertion: the arrival at `ins`, younger
+        // entries shifted up; the identity without an arrival
+        for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
+          if (!ins_active)           pos_ins[k] = ($clog2(DEPTH_SPEC) + 1)'(k);
+          else if (k + 1 == nlive)   pos_ins[k] = ins;
+          else if (k < nins)         pos_ins[k] = ($clog2(DEPTH_SPEC) + 1)'(k);
+          else                       pos_ins[k] = ($clog2(DEPTH_SPEC) + 1)'(k + 1);
+        end
+        // keep verdict per entry: every live entry when nothing is
+        // cancelled, else the squash's rule
+        for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
+          if (k < nlive) begin
             ks = speculative_read_pointer_n + $clog2(DEPTH_SPEC)'(k);
-            if (keep[k] && pos[k] == $clog2(DEPTH_SPEC+1)'(j)) begin
-              a_addr[j] = speculative_queue_n[ks].address;
-              a_data[j] = speculative_queue_n[ks].data;
-              a_be[j]   = speculative_queue_n[ks].be;
-              a_sz[j]   = speculative_queue_n[ks].data_size;
-              a_cbo[j]  = speculative_queue_n[ks].cbo_op;
-              a_tid[j]  = speculative_queue_n[ks].trans_id;
-              a_hart[j] = speculative_queue_n[ks].hart;
-              a_wr[j]   = speculative_queue_n[ks].wait_rvalid;
-              a_fk[j]   = speculative_queue_n[ks].fwd_keep;
+            keep[k] = !sq_active || (speculative_queue_n[ks].valid &&
+`ifdef G6LC_FETCH_B
+                      ((LEGACY_SMT_KEEP && a_fk[k]) || !cancel[k]));
+`else
+                      ((LEGACY_SMT_KEEP && a_fk[k]) || (!flush_i && !cancel[k])));
+`endif
+          end
+        end
+        // final slot = kept entries placed before this one
+        for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
+          automatic logic [DEPTH_SPEC-1:0] ahead;
+          for (int unsigned j = 0; j < DEPTH_SPEC; j++)
+            ahead[j] = keep[j] && (pos_ins[j] < pos_ins[k]);
+          final_slot[k] = ($clog2(DEPTH_SPEC) + 1)'($countones(ahead));
+        end
+        live = ($clog2(DEPTH_SPEC) + 1)'($countones(keep));
+        // one gather: slot s takes the kept entry whose final slot is s
+        for (int unsigned sl = 0; sl < DEPTH_SPEC; sl++) begin
+          speculative_queue_n[sl].valid    = 1'b0;
+          speculative_queue_n[sl].fwd_keep = 1'b0;
+          for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
+            if (keep[k] && final_slot[k] == ($clog2(DEPTH_SPEC) + 1)'(sl)) begin
+              speculative_queue_n[sl].address     = a_addr[k];
+              speculative_queue_n[sl].data        = a_data[k];
+              speculative_queue_n[sl].be          = a_be[k];
+              speculative_queue_n[sl].data_size   = a_sz[k];
+              speculative_queue_n[sl].cbo_op      = a_cbo[k];
+              speculative_queue_n[sl].trans_id    = a_tid[k];
+              speculative_queue_n[sl].hart        = a_hart[k];
+              speculative_queue_n[sl].wait_rvalid = a_wr[k];
+              speculative_queue_n[sl].fwd_keep    = a_fk[k];
+              speculative_queue_n[sl].valid       = 1'b1;
             end
           end
         end
-        dst  = dst + $clog2(DEPTH_SPEC)'($countones(keep));
-        live = live + $clog2(DEPTH_SPEC+1)'($countones(keep));
+        speculative_read_pointer_n  = '0;
+        speculative_write_pointer_n = $clog2(DEPTH_SPEC)'(live);
+        speculative_status_cnt_n    = live;
       end
-      for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
-        speculative_queue_n[k].valid = 1'b0;
-        speculative_queue_n[k].fwd_keep = 1'b0;
-        if (k < unsigned'(live)) begin
-          speculative_queue_n[k].address     = a_addr[k];
-          speculative_queue_n[k].data        = a_data[k];
-          speculative_queue_n[k].be          = a_be[k];
-          speculative_queue_n[k].data_size   = a_sz[k];
-          speculative_queue_n[k].cbo_op      = a_cbo[k];
-          speculative_queue_n[k].trans_id    = a_tid[k];
-          speculative_queue_n[k].hart        = a_hart[k];
-          speculative_queue_n[k].wait_rvalid = a_wr[k];
-          speculative_queue_n[k].fwd_keep    = a_fk[k];
-          speculative_queue_n[k].valid       = 1'b1;
-        end
-      end
-      speculative_read_pointer_n  = '0;
-      speculative_write_pointer_n = dst;
-      speculative_status_cnt_n    = live;
+    end
+    if (flush_i && LEGACY_SMT_KEEP) begin
+      // the LEGACY flush ran the keep-only rewrite above; nothing to evict
     end else if (flush_i) begin
       // SI / no G1ah: evict all speculative stores
       for (int unsigned i = 0; i < DEPTH_SPEC; i++) speculative_queue_n[i].valid = 1'b0;
