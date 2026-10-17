@@ -28,7 +28,7 @@ worst remaining single-cycle primary.
 | Automatic transforms | `LoopRewrite` (FindFirst, CondCount, RingWalk, StreamCompact), `SelectIncrement`, `BalanceMux` (one-hot, arm set = rewrite set), `RebalanceAssoc`, `SplitAssign`, `InsertReg` — exact or latency-labelled, area-neutral-or-better except InsertReg | A88–A103, `AGENTS-auto-correct.md` catalog |
 | Production RTL rewrites | instr_queue admission count (A92), scoreboard cancel window (A98), ROB free/re-anchor (A99), rename/iq/store_buffer find-first and popcount (A100) — SAT at fixture sizes; 8/32-entry miters inconclusive on budget | A92–A100 |
 | Mapping noise floor | ±1 % area, ±6 cells on identical RTLIL (autoidx-dependent ABC order) | A102 |
-| 10 FO4 | **not closed**. Module board worst (cells, Nangate45): 54 → **44** across A104–A106 (rename 52 → 25, scoreboard 54 → 22, iq 47 → 38, frontend 43 → 34, store_buffer 49 → 44); the ranked residual is store_buffer 44, iq 38, rob 35, frontend 34 (the 64-bit wall) at ≈ 1.3 cells/FO4, where 10 FO4 ≈ 13 cells | A103–A106 |
+| 10 FO4 | **not closed**. Module board worst (cells, Nangate45): 54 → **44** across A104–A107 (scoreboard 54 → 22, rename 52 → 25, iq 47 → 38, frontend 43 → 34, rob 35 → 26, store_buffer 49 → 44); at ≈ 1.3 cells/FO4 the budget is ≈ 13 cells. The ranked residual — store_buffer 44 (next-state squash), iq 38 (wake/select), frontend 34 (the 64-bit wall), wbuffer 27, rob 26, rename 25, realign 22, scoreboard 22 — is single-cycle contracts the exact toolbox cannot change; A107 lists what each would take | A103–A107 |
 
 The route that produces these numbers is one host command (`AGENTS-build-platform.md` §7.1):
 `timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --allow-over-budget --remote --map-recipe streamed`,
@@ -7944,14 +7944,15 @@ by the union of the earlier ports' hits; the vectors are then disjoint, so
 one popcount of their union is the decrement; tail and count advance by
 the popcount of the allocations. Two ports naming one tid still free one
 slot and count one. The head re-anchor (A99) is unchanged and keeps its
-own cone.
+own cone. **Netlist (live remap, module board): rob 2.50 ns / 35 cells →
+2.11 / 26.**
 
 ### Where the campaign stands against 10 FO4
 
-Module board (cells, Nangate45, delay-oriented ABC) from run C to A106:
+Module board (cells, Nangate45, delay-oriented ABC) from run C to A107:
 scoreboard 54 → 22, rename 52 → 25, store_buffer 49 → 44, iq 47 → 38,
-frontend 43 → 34, rob 35 (A107 in flight), realign 23 → 22, wbuffer 21 →
-27 (noise band). At ≈ 1.3 cells/FO4 the budget is ≈ 13 cells. What is
+frontend 43 → 34, rob 35 → 26, realign 23 → 22, wbuffer 21 → 27 (noise
+band). Board worst 54 → 44. At ≈ 1.3 cells/FO4 the budget is ≈ 13 cells. What is
 left, cone by cone, and why it is no longer a transform:
 
 | cone | cells | what it is | what 10 FO4 would take |

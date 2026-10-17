@@ -168,7 +168,7 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   49 → 44, iq 38, frontend 34, rob 35; module-board worst 54 → 44.
 - [x] A107: rob retire hits from `rob_q` for every port at once, masked by
   the earlier ports' hits; one popcount; allocations counted at once.
-  Whole core elaborates; live remap in flight (`sta-rtl-live-a107.log`).
+  Netlist: rob 35 → 26 cells. Board worst stays store_buffer 44.
 - [ ] A107 next (ranked, each ≈ 2× the budget, each an owner-level change
   beyond the exact toolbox): store_buffer squash on the registered queue
   (three same-cycle events to fold — needs a proof) or one cycle later;
