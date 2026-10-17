@@ -1199,46 +1199,69 @@ export function writeCalibration(correctJson: string, boardTsv: string, outPath:
   } catch {
     post = undefined;
   }
-  const structural = new Map<string, { fo4: number; line: number }>();
+  // Structural worst per live module: reg→reg, and any single-cycle path
+  // (a module whose product or compare starts at its ports — the multiplier's
+  // 64×64 product into mult_result_q — is a reg→reg path of the flat core
+  // that a per-module reg→reg ranking never shows, A113).
+  const structural = new Map<string, { fo4: number; line: number; anyFo4: number; anyKind: string }>();
   if (post?.paths && post?.modules) {
     const names = new Map<number, string>(post.modules.map((m: any) => [m.id, m.name]));
     const dead = liveFilter(post);
     for (const p of post.paths) {
-      if (p.multi_cycle || p.path_kind !== "regtoreg" || dead.has(p.module_id)) continue;
+      if (p.multi_cycle || dead.has(p.module_id)) continue;
       const n = names.get(p.module_id) ?? String(p.module_id);
-      const cur = structural.get(n);
-      if (!cur || p.total_fo4 > cur.fo4) structural.set(n, { fo4: p.total_fo4, line: p.primary_loc?.start_line ?? 0 });
+      const cur = structural.get(n) ?? { fo4: NaN, line: 0, anyFo4: 0, anyKind: "-" };
+      if (p.path_kind === "regtoreg" && !(p.total_fo4 <= cur.fo4)) {
+        cur.fo4 = p.total_fo4;
+        cur.line = p.primary_loc?.start_line ?? 0;
+      }
+      if (p.total_fo4 > cur.anyFo4) {
+        cur.anyFo4 = p.total_fo4;
+        cur.anyKind = String(p.path_kind ?? "-");
+      }
+      structural.set(n, cur);
     }
   }
-  const rows: { module: string; fo4: number; line: number; ns: number; cells: number }[] = [];
+  const rows: { module: string; fo4: number; line: number; anyFo4: number; anyKind: string; ns: number; cells: number; anyNs: number }[] = [];
   const lines = readFileSync(boardTsv, "utf8").split(/\r?\n/).slice(1);
   for (const l of lines) {
     const f = l.split("\t");
-    if (f.length < 5) continue;
+    if (f.length < 8) continue;
     const module = f[0]!.split("$")[0]!;
     const ns = Number(f[3]);
     const cells = Number(f[4]);
-    if (!Number.isFinite(ns) || !Number.isFinite(cells)) continue;
+    const anyNs = Number(f[7]);
+    if (!Number.isFinite(anyNs) && !Number.isFinite(ns)) continue;
     const st = structural.get(module);
-    rows.push({ module, fo4: st?.fo4 ?? NaN, line: st?.line ?? 0, ns, cells });
+    rows.push({
+      module, fo4: st?.fo4 ?? NaN, line: st?.line ?? 0, anyFo4: st?.anyFo4 ?? NaN, anyKind: st?.anyKind ?? "-",
+      ns: Number.isFinite(ns) ? ns : NaN, cells: Number.isFinite(cells) ? cells : 0, anyNs: Number.isFinite(anyNs) ? anyNs : ns,
+    });
   }
-  rows.sort((a, b) => (Number.isNaN(b.fo4) ? -1 : b.fo4) - (Number.isNaN(a.fo4) ? -1 : a.fo4));
-  const out = ["module\tstructural_fo4\tprimary_line\tmapped_ns\tcells_on_path\tcells_per_fo4\treading"];
+  // worst mapped path of any kind first: that is the design's period
+  rows.sort((a, b) => b.anyNs - a.anyNs);
+  const out = ["module\tmapped_any_ns\tstructural_any_fo4\tany_kind\tmapped_reg2reg_ns\tcells_on_path\tstructural_reg2reg_fo4\tprimary_line\tcells_per_fo4\treading"];
   let within = 0, over = 0, under = 0, n = 0;
   for (const r of rows) {
-    const ratio = Number.isFinite(r.fo4) && r.fo4 > 0 ? r.cells / r.fo4 : NaN;
+    const ratio = Number.isFinite(r.fo4) && r.fo4 > 0 && r.cells > 0 ? r.cells / r.fo4 : NaN;
     let reading = "-";
     if (Number.isFinite(ratio) && r.cells >= 8) {
       n++;
       if (ratio < 0.6) { reading = "over-read"; over++; }
       else if (ratio > 2.0) { reading = "under-read"; under++; }
       else { reading = "tracks"; within++; }
+    } else if (r.cells === 0 && Number.isFinite(r.anyNs) && r.anyNs > 0) {
+      reading = "boundary path (in-reg / reg-out)";
     }
-    out.push([r.module, Number.isFinite(r.fo4) ? r.fo4.toFixed(1) : "-", r.line || "-", r.ns.toFixed(3), r.cells, Number.isFinite(ratio) ? ratio.toFixed(2) : "-", reading].join("\t"));
+    out.push([
+      r.module, Number.isFinite(r.anyNs) ? r.anyNs.toFixed(3) : "-", Number.isFinite(r.anyFo4) ? r.anyFo4.toFixed(1) : "-", r.anyKind,
+      Number.isFinite(r.ns) ? r.ns.toFixed(3) : "-", r.cells || "-", Number.isFinite(r.fo4) ? r.fo4.toFixed(1) : "-", r.line || "-",
+      Number.isFinite(ratio) ? ratio.toFixed(2) : "-", reading,
+    ].join("\t"));
   }
   writeFileSync(outPath, out.join("\n") + "\n", "utf8");
-  const top = rows.filter((r) => Number.isFinite(r.fo4)).slice(0, 3).map((r) => `${r.module} ${r.fo4.toFixed(1)} FO4 / ${r.ns.toFixed(2)} ns / ${r.cells} cells`).join("; ");
-  return `${rows.length} modules → ${posixPath(outPath)}; cones ≥ 8 cells: ${within} track (0.6–2.0 cells/FO4), ${over} over-read, ${under} under-read of ${n}; top: ${top}`;
+  const top = rows.slice(0, 3).map((r) => `${r.module} ${r.anyNs.toFixed(2)} ns${r.cells ? ` / ${r.cells} cells` : " (boundary)"}${Number.isFinite(r.anyFo4) ? ` / ${r.anyFo4.toFixed(1)} FO4` : ""}`).join("; ");
+  return `${rows.length} modules → ${posixPath(outPath)}; reg→reg cones ≥ 8 cells: ${within} track (0.6–2.0 cells/FO4), ${over} over-read, ${under} under-read of ${n}; worst mapped: ${top}`;
 }
 
 /** `tc_sram` → study stub (see scripts/tc_sram_timing_stub.sv), unless --no-sram-stub. */

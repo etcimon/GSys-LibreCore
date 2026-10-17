@@ -96,7 +96,11 @@ pub const IR_VERSION: &str = "ir-v1";
 /// levels, not one; a zero-trip loop is dead; a guard on a bitwise
 /// self-accumulate is one gate (the under-read of rename / scoreboard /
 /// iq against the netlist, A104).
-pub const MEASUREMENT_VERSION: &str = "delay-v38";
+/// `delay-v39`: a multiplier scales with log2(width) like an adder (a tree
+/// multiplier is a CSA tree of depth ~log w and one adder), not linearly —
+/// the 65×65 product had read 227 FO4 against a mapped depth near the
+/// 64-bit target sum's (A113).
+pub const MEASUREMENT_VERSION: &str = "delay-v39";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

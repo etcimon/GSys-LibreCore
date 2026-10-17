@@ -47,10 +47,17 @@ pub fn width_factor(class: OperatorClass, width: Option<u32>) -> f64 {
         return 1.0;
     };
     match class {
-        OperatorClass::AddSub | OperatorClass::Compare | OperatorClass::ShiftVar => {
-            (f64::from(w.max(2))).log2() / f64::from(REF_WIDTH).log2()
-        }
-        OperatorClass::Mul | OperatorClass::DivRem => f64::from(w.max(1)) / f64::from(REF_WIDTH),
+        // Adders, comparators and barrel shifters are log-depth in the width;
+        // so is a tree multiplier (partial-product rows are summed by a CSA
+        // tree of depth ~log w, then one adder): a 65×65 product scaled
+        // linearly read 227 FO4 and headed the live board at 416 while the
+        // mapped multiplier was ~1.2× the frontend's 64-bit sum (A113). A
+        // sequential divider is the exception: it is iterative.
+        OperatorClass::AddSub
+        | OperatorClass::Compare
+        | OperatorClass::ShiftVar
+        | OperatorClass::Mul => (f64::from(w.max(2))).log2() / f64::from(REF_WIDTH).log2(),
+        OperatorClass::DivRem => f64::from(w.max(1)) / f64::from(REF_WIDTH),
         _ => 1.0,
     }
 }
@@ -1056,7 +1063,10 @@ mod tests {
             (width_factor(OperatorClass::ShiftVar, Some(1)) - 0.2).abs() < 1e-9,
             "max(w,2)"
         );
-        assert_eq!(width_factor(OperatorClass::Mul, Some(16)), 0.5);
+        assert!(
+            (width_factor(OperatorClass::Mul, Some(16)) - 0.8).abs() < 1e-9,
+            "tree multiplier: log depth"
+        );
         assert_eq!(width_factor(OperatorClass::DivRem, Some(64)), 2.0);
         assert_eq!(width_factor(OperatorClass::LogicBit, Some(64)), 1.0);
         assert_eq!(width_factor(OperatorClass::Mux, Some(4)), 1.0);

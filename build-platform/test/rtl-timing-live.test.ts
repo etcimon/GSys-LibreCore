@@ -56,10 +56,12 @@ test("calibration joins the structural worst per live module with the module boa
   const summary = writeCalibration(correct, board, out);
   const rows = readFileSync(out, "utf8").trim().split("\n");
   expect(rows[0]).toContain("cells_per_fo4");
-  // live module first, ratio 41 / 9.5 = 4.3 → under-read; dead module absent (no netlist row dropped)
-  expect(rows[1]).toMatch(/^g6lc_iq\t9\.5\t12\t3\.042\t41\t4\.32\tunder-read/);
-  expect(rows.some((r) => r.startsWith("other\t-\t-\t1.000\t12"))).toBe(true);
+  // worst mapped path of any kind first; live module ratio 41 / 9.5 = 4.3 → under-read;
+  // the dead module's row (no netlist) is dropped
+  expect(rows[1]).toMatch(/^g6lc_iq\t3\.100\t9\.5\tregtoreg\t3\.042\t41\t9\.5\t12\t4\.32\tunder-read/);
+  expect(rows.some((r) => r.startsWith("other\t1.000\t-\t-\t1.000\t12"))).toBe(true);
   expect(rows.some((r) => r.startsWith("g6lc_ai_exec"))).toBe(false);
+  expect(summary).toContain("worst mapped: g6lc_iq 3.10 ns");
   expect(summary).toContain("1 under-read");
 });
 
