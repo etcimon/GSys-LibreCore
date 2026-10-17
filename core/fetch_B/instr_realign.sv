@@ -120,11 +120,78 @@ module instr_realign
   assign hw_first = CVA6Cfg.RVC ? CurW'(g6lc_fetch_pkg::hw_off(CVA6Cfg, 64'(address_i))) : '0;
   assign hw_avail = CurW'(NrHalfWords) - hw_first;
 
+  // Parallel realignment (sv-timing A110). The serial walk — a cursor that
+  // steps by 1 or 2 halfwords depending on what it finds — was the module
+  // board's realigner path and the first half of the frontend's branch-target
+  // path (the predictor adds the immediate to the cursor's address). Here:
+  //
+  //   vis[h]  — an instruction is visited at halfword h. The walk's recurrence
+  //             vis[h] = vis[h-1] & c'[h-1]  |  vis[h-2] & ~c'[h-2]
+  //             (c' = "compressed", with position 0 counted compressed when a
+  //             carried lower half completes there) is a two-term linear
+  //             recurrence over the boolean semiring: a product of 2x2
+  //             matrices, taken as a log-depth prefix. Positions at or past
+  //             hw_avail are never visited.
+  //   idx[h]  — the visit's ordinal = popcount(vis[h-1:0]) = its slot.
+  //   split   — a visited RVI whose upper half is past the block: it carries.
+  //
+  // Each slot takes the one visited position whose ordinal is the slot; the
+  // carry takes the one split visit. Same values as the walk, position by
+  // position (equivalence: side-by-side harness, see the A110 record).
+  localparam int unsigned IdxW = $clog2(NrHalfWords + 1);
+  localparam int unsigned Lvl = (NrHalfWords > 1) ? $clog2(NrHalfWords) : 1;
+
+  logic [NrHalfWords-1:0] vis, split, cprime;
+  logic [NrHalfWords-1:0][IdxW-1:0] idx;
+  // prefix[l][h]: the product of the step matrices covering the last 2**l
+  // steps ending at h (boolean 2x2, [row][col])
+  logic [Lvl:0][NrHalfWords-1:0][1:0][1:0] pfx;
+  logic vis0;
+
+  always_comb begin : realign_visits
+    // position 0 counts as a compressed visit when the carried half completes
+    for (int unsigned h = 0; h < NrHalfWords; h++)
+      cprime[h] = (h == 0 && carry_ok) ? 1'b1 : hw_compressed[h];
+    vis0 = carry_ok || (hw_avail != '0);
+    // step matrix M_h: s[h+1] = M_h * s[h], s = (vis[h], vis[h-1])
+    //   [ c'[h]   ~c'[h-1] ]
+    //   [ 1        0       ]
+    // pfx[0][h] = M_{h-1} (the single step into h); pfx[0][0] = identity
+    pfx = '0;
+    pfx[0][0][0][0] = 1'b1;
+    pfx[0][0][1][1] = 1'b1;
+    for (int unsigned h = 1; h < NrHalfWords; h++) begin
+      pfx[0][h][0][0] = cprime[h-1];
+      pfx[0][h][0][1] = (h >= 2) ? ~cprime[h-2] : 1'b0;
+      pfx[0][h][1][0] = 1'b1;
+      pfx[0][h][1][1] = 1'b0;
+    end
+    // Kogge-Stone: pfx[l][h] = pfx[l-1][h] * pfx[l-1][h - 2**(l-1)]
+    for (int unsigned l = 1; l <= Lvl; l++) begin
+      for (int unsigned h = 0; h < NrHalfWords; h++) begin
+        if (h >= (1 << (l - 1))) begin
+          for (int unsigned i = 0; i < 2; i++)
+            for (int unsigned j = 0; j < 2; j++)
+              pfx[l][h][i][j] = (pfx[l-1][h][i][0] & pfx[l-1][h-(1<<(l-1))][0][j]) |
+                                (pfx[l-1][h][i][1] & pfx[l-1][h-(1<<(l-1))][1][j]);
+        end else begin
+          pfx[l][h] = pfx[l-1][h];
+        end
+      end
+    end
+    // s[0] = (vis0, 0): vis[h] = pfx[Lvl][h][0][0] & vis0, masked to the block
+    for (int unsigned h = 0; h < NrHalfWords; h++) begin
+      vis[h] = (h == 0) ? vis0 : (pfx[Lvl][h][0][0] & vis0 & (CurW'(h) < hw_avail));
+      idx[h] = IdxW'($countones(vis & NrHalfWords'((NrHalfWords'(1) << h) - 1'b1)));
+      // an RVI whose upper half is past the block carries (never at the
+      // carried position: that visit is compressed by construction)
+      split[h] = vis[h] && !cprime[h] && (CurW'(h) + CurW'(1) >= hw_avail);
+    end
+  end
+
   always_comb begin : realign
-    logic [CurW-1:0] cur, nxt;  // cursor into the halfword stream, relative to address_i
     logic [15:0] lo, hi;
     logic [CVA6Cfg.VLEN-1:0] slot_addr;
-    logic tail;  // cursor sits on the last halfword of the block
 
     carry_valid_d = 1'b0;
     carry_instr_d = carry_instr_q;
@@ -135,67 +202,40 @@ module instr_realign
     addr_o        = '0;
     base_o        = '0;
     off_o         = '0;
-    cur           = '0;
-    nxt           = '0;
-    tail          = 1'b0;
     lo            = '0;
     hi            = '0;
     slot_addr     = '0;
 
-    // a carried half always completes into an RVI with halfword 0 of this block
-    if (carry_ok) begin
-      // Slot 0 is the CARRIED pc, not address_i: the instruction began in the
-      // previous window. cur starts at 1 so the completing high half is consumed.
-      valid_o[0] = valid_i;
-      instr_o[0] = {hw[0], carry_instr_q};
-      addr_o[0]  = carry_addr_q;
-      base_o[0]  = carry_addr_q;
-      cur        = CurW'(1);
-    end
-
-    for (int unsigned k = 0; k < CVA6Cfg.INSTR_PER_FETCH; k++) begin
-      if ((k != 0 || !carry_ok) && (cur < hw_avail)) begin
-        nxt = cur + CurW'(1);
-        tail = nxt >= hw_avail;
-        lo = hw[cur[HwIdxW-1:0]];
-        // On the last halfword there is no successor to read. hi is only used by
-        // the RVI arms, and `tail` sends a split RVI to the carry instead, so the
-        // zero is never emitted as instruction bytes (I2 / A_no_fabricate).
-        hi = tail ? 16'b0 : hw[nxt[HwIdxW-1:0]];
-        // cur is a halfword index, so the trailing 1'b0 is the byte scale; this
-        // is a concatenation rather than a multiply on purpose.
-        slot_addr = address_i + {{(CVA6Cfg.VLEN - CurW - 1) {1'b0}}, cur, 1'b0};
-
-        unique case ({
-          hw_compressed[cur[HwIdxW-1:0]], tail
-        })
-          // compressed, whether or not it is the last halfword
-          2'b10, 2'b11: begin
-            valid_o[k] = valid_i;
-            instr_o[k] = {hi, lo};
-            addr_o[k]  = slot_addr;
-            base_o[k]  = address_i;
-            off_o[k]   = {{(CVA6Cfg.VLEN - CurW - 1) {1'b0}}, cur, 1'b0};
-            cur        = nxt;
+    for (int unsigned h = 0; h < NrHalfWords; h++) begin
+      lo        = hw[h];
+      // on the last halfword there is no successor to read; the zero is never
+      // emitted as instruction bytes (a split RVI carries instead)
+      hi        = (CurW'(h) + CurW'(1) < hw_avail) ? hw[(h + 1) % NrHalfWords] : 16'b0;
+      slot_addr = address_i + {{(CVA6Cfg.VLEN - CurW - 1) {1'b0}}, CurW'(h), 1'b0};
+      if (vis[h] && int'(idx[h]) < int'(CVA6Cfg.INSTR_PER_FETCH)) begin
+        for (int unsigned k = 0; k < CVA6Cfg.INSTR_PER_FETCH; k++) begin
+          if (idx[h] == IdxW'(k)) begin
+            if (h == 0 && carry_ok) begin
+              // the carried pc, not address_i: the instruction began in the
+              // previous window; hw[0] is its upper half
+              valid_o[k] = valid_i;
+              instr_o[k] = {hw[0], carry_instr_q};
+              addr_o[k]  = carry_addr_q;
+              base_o[k]  = carry_addr_q;
+            end else if (!split[h]) begin
+              valid_o[k] = valid_i;
+              instr_o[k] = {hi, lo};
+              addr_o[k]  = slot_addr;
+              base_o[k]  = address_i;
+              off_o[k]   = {{(CVA6Cfg.VLEN - CurW - 1) {1'b0}}, CurW'(h), 1'b0};
+            end
           end
-          // RVI fully contained in this block
-          2'b00: begin
-            valid_o[k] = valid_i;
-            instr_o[k] = {hi, lo};
-            addr_o[k]  = slot_addr;
-            base_o[k]  = address_i;
-            off_o[k]   = {{(CVA6Cfg.VLEN - CurW - 1) {1'b0}}, cur, 1'b0};
-            cur        = cur + CurW'(2);
-          end
-          // RVI split at the block boundary: carry its lower half
-          2'b01: begin
-            carry_valid_d = 1'b1;
-            carry_instr_d = lo;
-            carry_addr_d  = slot_addr;
-            cur           = hw_avail;
-          end
-          default: ;
-        endcase
+        end
+        if (split[h]) begin
+          carry_valid_d = 1'b1;
+          carry_instr_d = lo;
+          carry_addr_d  = slot_addr;
+        end
       end
     end
   end
