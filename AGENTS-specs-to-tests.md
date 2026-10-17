@@ -931,15 +931,24 @@ running `cat /proc/cpuinfo`, `/proc/loadavg`, `/proc/stat`, `free` and the shell
 signal, where the pre-fix model killed `cat` with `SIGSEGV at 0x0`. `G6LC_MUT_MMU_PTW_FOREIGN`
 restores the pre-fix branch for a future leaf that lands the timing.
 
-## Two AMOs to one word (2026-10-16, T43, open)
+## Two AMOs to one word — the valid-bit write of an invalidation (2026-10-16/17, T43)
 
 Stage 54 of `ooo_mem_min.S` (`ooo_amo_or_then_swap`): `amoor.d.aq` (0x800 → 0x801), the
-boot's ~50-cycle gap, `amoswap.d.rl zero` (→ 0x800), then `ld` must read 0x800, plus the pair
-back to back; 48/48 Spike-exact on t42/t46 — the bare shape does not lose the swap. Spec anchor:
-Part I `#sec:amo` — AMOs are atomic read-modify-writes and a later AMO's value is what
-subsequent loads observe. The system witness is the L3 oracle (`amoswap` at 713,884,701, the
-`c.ld` at 713,885,567 and every later read return the `amoor` value) and the `+smt_mem_watch`
-window run `l3watch3` (missunit `wt_amo_req`/`wt_amo_ack`/`wt_inv`/`wt_refill`).
+boot's ~50-cycle gap, a second AMO (→ 0x800), then `ld` must read 0x800, plus the pair back to
+back; 48/48 Spike-exact on t42/t46/t47b — the bare shape does not create the coincidence. Spec
+anchor: Part I `#sec:amo` — AMOs are atomic read-modify-writes and a later AMO's value is what
+subsequent loads observe. The system witness is the `+smt_mem_watch` window `l3watch3` (t45):
+`wt_amo_req op=AND` at 713,884,690, then at 693 the missunit's all-ways invalidation
+(`wr_cl_we=ff`) coinciding with an unacked fixup `inv_req` printed `wt_inval … ways=ff
+valid=f7 explicit=1 ack=0` — seven ways validated with the line's tag — and the `c.ld` at
+713,885,561 hit them all (`hit=f7`, `raw 0x801`). The invariant `missunit_vld_write_own_bits`
+(`wt_dcache_mem.sv`: a missunit line write writes its own valid bits, at most one way) is the
+leaf-level check; `G6LC_MUT_VLD_WDATA_INV_PRIO` restores the pre-fix mux. Verdict on
+`ooocoh-t47b-ooo-pgo-build` (`l3watch4`): the same workqueue loop refills 0x800 after every
+`amoand` (eight rounds at 713,869,135–713,875,857), no foreign valid write, the invariant silent
+through 713.9 M cycles; the live oracle on the L3 (`l3orc5`) past retire 365 M with 0 stored
+mismatches. The pre-fix L3 on t46 (`l3orc4`) reproduced the mismatch at retire 489,004,871
+with T42 fixed, so the two are independent.
 
 ## Speculative store queue: flush coinciding with a commit (2026-10-15, T35 hardening)
 
