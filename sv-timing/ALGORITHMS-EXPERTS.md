@@ -8072,6 +8072,32 @@ environment contract is the honest fallback, and it must assert the
 reference's invariants so illegal stimulus is a harness failure, not a
 "mismatch".
 
+## A110 — The realigner as a boolean prefix (the cone the frontend shares)
+
+A108 noted that the frontend's target sum and the realigner's cursor walk
+share their first half: `off[i] = {cur_i, 1'b0}` is the serial walk's
+output. The walk — a cursor stepping 1 or 2 halfwords depending on what it
+finds — is the recurrence `vis[h] = vis[h−1] ∧ c'[h−1] ∨ vis[h−2] ∧
+¬c'[h−2]` ("an instruction is visited at halfword h"), with `c'` the
+compressed flags and position 0 counted compressed when a carried lower
+half completes there (so the carried slot falls out of the same
+numbering). A two-term linear recurrence over the boolean semiring is a
+product of 2×2 matrices; the module takes it as a Kogge-Stone prefix
+(`pfx[l][h] = pfx[l−1][h] ⊙ pfx[l−1][h − 2^(l−1)]`, `vis[h] = pfx[h][0][0]
+∧ vis0`, masked past `hw_avail`). A visit's slot is the popcount of the
+visits before it; a visited RVI whose upper half is past the block is the
+split that carries; each slot takes the one visited position whose ordinal
+it is. Same values as the walk, position by position, including the
+compressed-at-tail zero upper half and the carried slot's address.
+
+Evidence: `verif/tb/core/instr_realign_sbs/` — random halfword streams with
+mostly sequential fetch blocks (so split RVIs carry into the next block),
+every output compared each cycle: **3 seeds × 500 k cycles, ≈ 162 k carries
+per seed, 0 mismatches.** Whole core elaborates. Netlist: live remap in
+flight (expected: realign 22 and the frontend's 34 both shorten; at
+`NrHalfWords = 4` the prefix is two levels against the walk's four
+compare-mux-add steps).
+
 ## A90 — Incrementers are not gates (delay-v32)
 
 `x + 1` and `x + CONST` were billed 1 FO4 at every width since delay-v18

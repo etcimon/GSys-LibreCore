@@ -179,6 +179,9 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   cells, 4.26 → 2.77 ns); evidence: side-by-side harness
   `verif/tb/core/store_buffer_sbs` 4 × 400 k cycles 0 mismatches; 8-step
   miter inconclusive (50 min). Board worst 54 → 38 across the campaign.
+- [x] A110: instr_realign visits as a Kogge-Stone boolean prefix, slots by
+  ordinal; harness `verif/tb/core/instr_realign_sbs` 3 × 500 k cycles 0
+  mismatches; live remap in flight (`sta-rtl-live-a110.log`).
 - [ ] A107 next (ranked, each ≈ 2× the budget, each an owner-level change
   beyond the exact toolbox):
   iq wake/select pipeline split; frontend pipelined target (the 64-bit
