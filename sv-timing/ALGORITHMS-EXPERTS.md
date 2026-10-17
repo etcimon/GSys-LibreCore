@@ -8048,7 +8048,8 @@ read garbage differently) and the head address of an empty queue (stale
 data of an invalid slot — the two revisions leave different stale data,
 which nothing reads). With the environment assumed and the don't-care
 masked, 8 steps at XLEN = 64 / PLEN = 56 (16 M variables) did not finish in
-50 min — recorded as inconclusive. The evidence of record is the
+50 min, and 5- and 7-step runs timed out at 2 h each — recorded as
+inconclusive. The evidence of record is the
 side-by-side harness `verif/tb/core/store_buffer_sbs/` (Verilator, random
 stimulus under the legal environment: no commit on an empty queue or an
 invalid head, no push into a full queue, unique live tids): **4 seeds ×
