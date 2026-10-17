@@ -187,6 +187,11 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
 - [x] A112: iq ablation (cancel lookup −11 %, grant −7 %, wake −1 %); cancel
   verdict registered (latency-free). Netlist iq 3.51 → 3.04 ns, rob 26 → 23
   cells. OoO harness built (407 s).
+- [x] A113: route correctness — width map before the pre-pass
+  (`s0-width-map`), `correct` plans the instantiated modules only, the
+  completion gate and headline are the live design's, effective emit flag
+  printed, `s3-calibration` (module board + structural join) on every
+  remote run. End-to-end run in flight (`sta-rtl-emitted-a113.log`).
 - [ ] **Owed: OoO validation of A104–A112** — `testharness_proxy.py di
   --flavour B` (refused while the owner's `ooocoh-t48` Linux-boot runs hold
   the builder) and the soak; the asserted invariants

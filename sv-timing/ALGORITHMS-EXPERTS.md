@@ -8177,6 +8177,57 @@ ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
 
+## A113 — The route plans, verdicts and calibrates the live design
+
+Auditing what the integrated route actually ran (the command line and
+`correct.log` of the A105 emitted run) found the configuration right — 10.0
+FO4 = 250 ps / 20 ps × (1 − 0.2), `-O3` with 13 stages, `--allow-latency`,
+`--real-cut-feeds --assume-clk`, the 222-field cfg snapshot — and three
+mechanisms wrong, each of which made the headline the wrong number or the
+emitted tree the wrong tree:
+
+1. **The width map arrived one run late.** The map was written by the
+   streamed mapping's phase A, *after* the pre-pass, so every run that
+   followed an RTL edit planned (and emitted) on heuristic widths; the
+   fresh map served only the next run on an unchanged tree, and the
+   freshness guard (A102) could only refuse the stale one. The remote route
+   now runs phase A of the live tree first (`s0-width-map`, own run dir,
+   ≈ 6 min) and pulls the map before the pre-pass; the pre-pass stage says
+   which widths it planned on.
+2. **Dead modules decided the plan and the headline.** The file list carries
+   every module a family of configs can use; `correct --all-modules` planned
+   all 234 and its `post_closure` / `max_path_fo4` were `g6lc_ai_exec`'s
+   280.5 FO4 — a module `g6lc64_ooo` does not instantiate. The width map
+   names the instantiated set (`frequency_closure.uninstantiated_modules`,
+   A89); `correct` now plans only those (`--include-uninstantiated` to
+   restore), prints the live count and the dead modules' worst separately,
+   and the host's completion gate reads the emitted re-analysis over the
+   live modules (a dead cone cannot miss the budget, its worst is reported
+   beside the verdict).
+3. **A misleading log line.** `emit richer: … emit_balance_mux_rtl=false`
+   printed the raw flag while `--real-cut-feeds` implies the structural
+   emit; it prints the effective value now.
+
+And one mechanism missing: the structural ↔ mapped comparison that every
+A-record since A100 was built by hand is now a stage. `s3-calibration` runs
+the per-module board after the STA and joins it with the pre-pass's emitted
+re-analysis into `calibration.tsv` — structural worst reg→reg FO4 per live
+module, mapped ns and cells, `cells_per_fo4`, and a reading (`tracks` at
+0.6–2.0 cells/FO4, `over-read`, `under-read`; cones under 8 cells are not
+classified). The model is validated against OpenSTA on every run, and the
+reading column is the model's own worklist (the dense-cone class, the
+function class and parameter-dead code are the over-reads; dynamic
+struct-array demuxes the under-reads, A103–A107).
+
+Why the structural worst read "below 20" in October's first week and 55
+now is not a regression of the design; it is the instrument learning to
+see — delay-v35 (loop carry), v37 (guards and indexed writes: `g6lc_iq`
+had no reg→reg path at all), v38 (function bodies, runtime index depth) —
+while the comparable series, the netlist, went 54 → 38 cells. Measurement
+versions are not comparable across each other; the banner's
+`measurement=delay-vNN` and the calibration column travel with every number
+from here on.
+
 ## A90 — Incrementers are not gates (delay-v32)
 
 `x + 1` and `x + CONST` were billed 1 FO4 at every width since delay-v18

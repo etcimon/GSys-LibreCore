@@ -205,3 +205,17 @@ needs from the host arrives as files on the command line; nothing of the host
 is linked in (`tools/check_independence.py`). The route, its flags and its
 study scripts are documented in the monorepo's `AGENTS-build-platform.md`
 §7.1.
+
+## Route correctness (A113)
+
+- The host passes `--width-map` only when the map hashes to the sources it
+  will read; on the remote route it refreshes the map first (phase A of the
+  live tree) so the pre-pass never plans on heuristic widths after an edit.
+- `correct --all-modules` plans the modules the width map names as
+  instantiated; the host's gate reads the emitted re-analysis over those
+  modules (`frequency_closure.uninstantiated_modules`) and reports the
+  dead modules' worst beside the verdict.
+- After the STA the host joins the per-module board with the emitted
+  re-analysis (`calibration.tsv`): the package's structural FO4 is checked
+  against OpenSTA per module on every run; the reading column
+  (`over-read` / `under-read`) is the model's worklist.
