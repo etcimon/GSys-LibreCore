@@ -213,6 +213,19 @@ pub struct OptOptions {
     pub jobs: Option<usize>,
     /// Dial 10b — cache tier.
     pub cache_mode: CacheMode,
+    /// Dial 11 — area selectivity: an edit that adds state or candidates is
+    /// refused when its preliminary cell estimate per FO4 of structural gain
+    /// exceeds this (`0` = off). One flop per bit per InsertReg stage; a
+    /// SelectIncrement costs `(2·candidates − 1) × width`. The per-module
+    /// `cells_per_fo4` the host measures with OpenSTA (calibration.tsv) scales
+    /// the limit: where a structural FO4 is worth more cells the gain is real
+    /// and larger (A114).
+    #[serde(default = "default_max_cells_per_fo4")]
+    pub max_cells_per_fo4: f64,
+}
+
+fn default_max_cells_per_fo4() -> f64 {
+    16.0
 }
 
 impl Default for OptOptions {
@@ -244,6 +257,14 @@ impl OptOptions {
             OptLevel::Os => (4.0, -4.0, 1.0),
             OptLevel::Oz => (1.0, 0.0, 0.0),
         };
+        // A 64-bit cut (64 flops) must buy at least 4 FO4 at the speed levels,
+        // 8 at -Os, 16 at -Oz; a one-bit control cut is always cheap enough.
+        let max_cells_per_fo4 = match level {
+            OptLevel::O0 => 0.0,
+            OptLevel::Os => 8.0,
+            OptLevel::Oz => 4.0,
+            _ => 16.0,
+        };
         let effort = match level {
             OptLevel::O0 => OptEffort::Fast,
             OptLevel::O3 => OptEffort::Thorough,
@@ -262,6 +283,7 @@ impl OptOptions {
             effort,
             jobs: None,
             cache_mode: CacheMode::Unit,
+            max_cells_per_fo4,
         }
     }
 
@@ -316,7 +338,7 @@ impl OptOptions {
     pub fn summary(&self) -> String {
         format!(
             "-{lvl} (max_passes={mp} worklist_width={ww} cut={cs} stages={ms} \
-             min_gain={mg} slack_target={st} area_weight={aw} reassoc={ra} \
+             min_gain={mg} slack_target={st} area_weight={aw} max_cells_per_fo4={mc} reassoc={ra} \
              effort={ef} cache={cm})",
             lvl = self.level.as_str(),
             mp = self.max_passes,
@@ -326,6 +348,7 @@ impl OptOptions {
             mg = self.min_gain_fo4,
             st = self.slack_target_fo4,
             aw = self.area_weight,
+            mc = self.max_cells_per_fo4,
             ra = self.allow_reassoc,
             ef = self.effort.as_str(),
             cm = self.cache_mode.as_str(),
@@ -350,6 +373,8 @@ pub struct OptOverrides {
     pub slack_target_fo4: Option<f64>,
     /// Dial 7.
     pub area_weight: Option<f64>,
+    /// Dial 11 override (`--opt-max-cells-per-fo4`; 0 disables the gate).
+    pub max_cells_per_fo4: Option<f64>,
     /// Dial 8.
     pub allow_reassoc: Option<bool>,
     /// Dial 9.
@@ -386,6 +411,9 @@ pub fn resolve(level: OptLevel, ov: &OptOverrides) -> OptOptions {
     }
     if let Some(v) = ov.area_weight {
         o.area_weight = v;
+    }
+    if let Some(v) = ov.max_cells_per_fo4 {
+        o.max_cells_per_fo4 = v.max(0.0);
     }
     if let Some(v) = ov.allow_reassoc {
         o.allow_reassoc = v;

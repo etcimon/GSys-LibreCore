@@ -31,7 +31,7 @@ import {
 import { writeLabReport } from "../../tooling/labReport.ts";
 import { assessTimingsDoctor } from "../../tooling/timingsDoctor.ts";
 import { proposeFo4Retune } from "../../tooling/retunePropose.ts";
-import { hostCores, runRtlTiming } from "../../tooling/rtlTiming.ts";
+import { hostCores, runRtlTiming, tradeoffRows } from "../../tooling/rtlTiming.ts";
 import {
   buildBenchCorrelation,
   materializeStaSmokePackage,
@@ -505,6 +505,10 @@ export const timingsCommand: Command = {
     "                     evicts it, bounding memory to the word-level design\n" +
     "                     --no-sram-stub  keep the behavioural tc_sram (default: registered macro\n" +
     "                     boundary stub, scripts/tc_sram_timing_stub.sv; the flop-per-bit array OOMs)\n" +
+    "                     --max-cells-per-fo4 N  sv-timing Dial 11: refuse a register cut / select\n" +
+    "                     whose preliminary cells per FO4 of gain exceed N (preset 16; 0 = off); the\n" +
+    "                     previous run's calibration.tsv scales it per module (measured cells/FO4)\n" +
+    "                     --tradeoffs N  list the N largest area/depth trade-offs (applied + refused)\n" +
     "  timings correlate  FO4 dashboard + optional --bench id metrics JSON\n" +
     "  timings fo4-golden check|write  S3b FO4 golden vs analyze.json\n" +
     "  timings retune-propose  S3b-lab: correlate.json → retune-proposal.md (never edits fo4-v1)\n" +
@@ -836,6 +840,9 @@ export const timingsCommand: Command = {
         sramStub: args.flags["no-sram-stub"] === undefined ? undefined : !flagBool(args.flags, "no-sram-stub"),
         allowOverBudget: args.flags["allow-over-budget"] === undefined
           ? undefined : flagBool(args.flags, "allow-over-budget"),
+        maxCellsPerFo4: flagStr(args.flags, "max-cells-per-fo4") != null
+          ? Number(flagStr(args.flags, "max-cells-per-fo4")) : undefined,
+        tradeoffRows: flagStr(args.flags, "tradeoffs") != null ? Number(flagStr(args.flags, "tradeoffs")) : undefined,
       });
       if (asJson) {
         logger.raw(JSON.stringify(result, null, 2) + "\n");
@@ -857,6 +864,17 @@ export const timingsCommand: Command = {
         if (st.status === "fail") logger.error(line);
         else if (st.status === "pass") logger.success(line);
         else logger.info(line);
+      }
+      // The area/depth ledger of the plan (A114): what was bought and refused.
+      const rowsWanted = flagStr(args.flags, "tradeoffs") != null
+        ? Number(flagStr(args.flags, "tradeoffs"))
+        : (ctx.config.physicalDesign?.structural?.tradeoffRows ?? 0);
+      if (rowsWanted > 0) {
+        const rows = tradeoffRows(join(result.outDir, "svt", "correct.json"), rowsWanted);
+        if (rows.length) {
+          logger.info(`trade-offs (top ${rows.length - 1} by preliminary cells; svt/correct.json tradeoffs[], calibration.tsv feeds the next run):`);
+          for (const r of rows) logger.info(`  ${r}`);
+        }
       }
       if (result.ok && result.wnsMax !== undefined) {
         logger.success(`wns_max ${result.wnsMax} ns  tns_max ${result.tnsMax} ns  wns_min ${result.wnsMin} ns  tns_min ${result.tnsMin} ns`);

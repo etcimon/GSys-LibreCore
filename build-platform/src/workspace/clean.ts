@@ -345,26 +345,50 @@ export function listRepoDataTargets(
 
   const cacheRoot = join(repoRoot, cfg.repoCacheDir);
   const cacheParts: CleanTarget[] = [];
-  let cacheNames: string[] = [];
-  try {
-    cacheNames = readdirSync(cacheRoot);
-  } catch {
-    // absent
-  }
-  for (const n of cacheNames) {
-    const path = join(cacheRoot, n);
+  // Loose files under 1 MiB (scripts, notes, small logs) are never candidates:
+  // they are the operator's working notes, not space.
+  const SMALL_FILE = 1024 * 1024;
+  const sizeableFiles = (dir: string): string[] => {
+    try {
+      return readdirSync(dir).filter((c) => {
+        try {
+          const st = lstatSync(join(dir, c));
+          return st.isFile() && st.size >= SMALL_FILE;
+        } catch {
+          return false;
+        }
+      });
+    } catch {
+      return [];
+    }
+  };
+  const cachePart = (path: string, label: string): CleanTarget => {
     const m = measurePath(path);
-    cacheParts.push({
+    return {
       purpose: "repo-cache",
       path,
-      label: `${cfg.repoCacheDir}/${n}`,
+      label,
       present: true,
       bytes: m.bytes,
       mtimeMs: m.mtimeMs,
       requiresYes: true,
       rootKind: "repo-data",
       hold: isActive(m.mtimeMs) ? "active" : undefined,
-    });
+    };
+  };
+  for (const n of [...dirChildren(cacheRoot), ...sizeableFiles(cacheRoot)]) {
+    const part = cachePart(join(cacheRoot, n), `${cfg.repoCacheDir}/${n}`);
+    // An active entry is a working tree (e.g. a guest/regress scratch dir): its
+    // own stale sub-entries are still reclaimable, so offer those instead of
+    // holding the whole entry.
+    const sub = part.hold === "active"
+      ? [...dirChildren(part.path), ...sizeableFiles(part.path)]
+      : [];
+    if (sub.length === 0) {
+      cacheParts.push(part);
+      continue;
+    }
+    for (const c of sub) cacheParts.push(cachePart(join(part.path, c), `${part.label}/${c}`));
   }
   out.push(aggregate("repo-cache", cacheRoot, `${cfg.repoCacheDir} (repo root)`, cacheParts, "entries"));
 

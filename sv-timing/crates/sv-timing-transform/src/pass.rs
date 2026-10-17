@@ -17,7 +17,7 @@ use sv_timing_core::{
     OpportunityKind, PathId, RankedPaths, RelocationPlan, TimingDesign, TimingPath,
 };
 
-use crate::edit::EditTrace;
+use crate::edit::{EditKind, EditTrace};
 use crate::pipeline::{insert_register, prepare_pipeline_cuts, split_assign};
 use crate::worklist::{order_worklist_with_plan, WorklistPolicy};
 
@@ -131,6 +131,35 @@ impl PassPolicy {
     }
 }
 
+/// Reference cells per structural FO4 (the calibrated real-cone band, A103).
+pub const REF_CELLS_PER_FO4: f64 = 1.3;
+
+/// Area/depth trade-off of one planned edit, applied or refused, for the
+/// `--tradeoffs` listing and the JSON report (A114).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct Tradeoff {
+    /// Edit id in the trace when applied.
+    pub edit_id: Option<u32>,
+    /// Edit kind.
+    pub kind: EditKind,
+    /// Module the edit belongs to.
+    pub module: String,
+    /// Origin line in the source RTL.
+    pub line: u32,
+    /// Preliminary cell estimate the edit adds (flops, candidate adders, selects).
+    pub est_cells: f64,
+    /// Structural FO4 removed from the path by the edit.
+    pub fo4_gain: f64,
+    /// `est_cells / fo4_gain`.
+    pub cells_per_fo4: f64,
+    /// Limit in force for the module (`None` = gate off).
+    pub limit: Option<f64>,
+    /// Whether the edit was applied.
+    pub applied: bool,
+    /// Verdict text.
+    pub reason: String,
+}
+
 /// Shared bag for multi-pass algorithms.
 #[derive(Debug)]
 pub struct PassContext {
@@ -166,6 +195,11 @@ pub struct PassContext {
     pub algo_trace: AlgoTrace,
     /// InsertReg applies per module this run (cap spray on one FPU tree).
     pub insert_reg_by_module: BTreeMap<String, u32>,
+    /// Area/depth ledger of every gated edit (A114).
+    pub tradeoffs: Vec<Tradeoff>,
+    /// Measured cells per structural FO4 per module (host calibration); scales
+    /// the Dial 11 limit for that module.
+    pub module_cells_per_fo4: BTreeMap<String, f64>,
 }
 
 impl PassContext {
@@ -194,6 +228,66 @@ impl PassContext {
             relocation: None,
             algo_trace: AlgoTrace::disabled(),
             insert_reg_by_module: BTreeMap::new(),
+            tradeoffs: Vec::new(),
+            module_cells_per_fo4: BTreeMap::new(),
+        }
+    }
+
+    /// Dial 11 limit for `module`: the preset/override value scaled by the
+    /// module's measured cells per FO4 against the reference band (clamped to
+    /// ¼ … 4×), `None` when the gate is off.
+    pub fn area_limit_for(&self, module: &str) -> Option<f64> {
+        let max = self.policy.opt.max_cells_per_fo4;
+        if !(max > 0.0) {
+            return None;
+        }
+        let scale = self
+            .module_cells_per_fo4
+            .get(module)
+            .map(|r| (r / REF_CELLS_PER_FO4).clamp(0.25, 4.0))
+            .unwrap_or(1.0);
+        Some(max * scale)
+    }
+
+    /// Admit or refuse an edit by its preliminary cells per FO4 of gain; the
+    /// verdict is appended to the ledger either way (`edit_id` is filled by
+    /// the caller once the edit is recorded).
+    pub fn admit_area(&mut self, kind: EditKind, line: u32, est_cells: f64, fo4_gain: f64) -> bool {
+        let module = self.active_module_name.clone();
+        let limit = self.area_limit_for(&module);
+        let ratio = if fo4_gain > 1e-9 {
+            est_cells / fo4_gain
+        } else {
+            f64::INFINITY
+        };
+        let applied = match limit {
+            Some(l) => ratio <= l,
+            None => true,
+        };
+        let reason = match (limit, applied) {
+            (None, _) => "area gate off".to_string(),
+            (Some(l), true) => format!("{ratio:.1} <= {l:.1} cells/FO4"),
+            (Some(l), false) => format!("refused: {ratio:.1} > {l:.1} cells/FO4"),
+        };
+        self.tradeoffs.push(Tradeoff {
+            edit_id: None,
+            kind,
+            module,
+            line,
+            est_cells,
+            fo4_gain,
+            cells_per_fo4: ratio,
+            limit,
+            applied,
+            reason,
+        });
+        applied
+    }
+
+    /// Link the last ledger entry to the last recorded edit.
+    pub fn link_last_tradeoff(&mut self) {
+        if let (Some(t), Some(r)) = (self.tradeoffs.last_mut(), self.trace.records.last()) {
+            t.edit_id = Some(r.id);
         }
     }
 
@@ -1382,7 +1476,10 @@ fn apply_work_item(
         if let Some(ins_opp) = ins {
             match prepare_pipeline_cuts(ctx, &ins_opp) {
                 Ok(plan) => {
-                    insert_register(ctx, &plan)?;
+                    if insert_register(ctx, &plan)?.is_empty() {
+                        // every cut of the plan was refused by the area gate (A114)
+                        return Ok((false, Some("area_gate")));
+                    }
                     did = true;
                     if let Some(last) = ctx.trace.records.last_mut() {
                         if !reloc_id.is_empty() {

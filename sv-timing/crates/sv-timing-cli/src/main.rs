@@ -75,6 +75,10 @@ struct OptArgs {
     /// Dial 8 — allow equivalence-unverified algebraic reshaping (reserved).
     #[arg(long = "opt-allow-reassoc", default_value_t = false)]
     opt_allow_reassoc: bool,
+    /// Dial 11 — refuse an InsertReg / SelectIncrement whose preliminary cell
+    /// estimate per FO4 of gain exceeds this (presets 16; -Os 8; -Oz 4; 0 = off).
+    #[arg(long = "opt-max-cells-per-fo4")]
+    opt_max_cells_per_fo4: Option<f64>,
     /// Dial 9 — analysis depth: fast | balanced | thorough.
     #[arg(long = "opt-effort")]
     opt_effort: Option<String>,
@@ -121,6 +125,7 @@ impl OptArgs {
             min_gain_fo4: self.opt_min_gain_fo4,
             slack_target_fo4: self.opt_slack_target_fo4,
             area_weight: self.opt_area_weight,
+            max_cells_per_fo4: self.opt_max_cells_per_fo4,
             allow_reassoc: self.opt_allow_reassoc.then_some(true),
             effort,
             jobs: self.opt_jobs,
@@ -144,6 +149,7 @@ fn opt_to_json(opt: &OptOptions) -> serde_json::Value {
             "min_gain_fo4": opt.min_gain_fo4,
             "slack_target_fo4": opt.slack_target_fo4,
             "area_weight": opt.area_weight,
+            "max_cells_per_fo4": opt.max_cells_per_fo4,
             "allow_reassoc": opt.allow_reassoc,
             "effort": opt.effort.as_str(),
             "jobs": opt.jobs,
@@ -443,6 +449,15 @@ enum Commands {
         /// a dead module's cone is not this target's period, A113).
         #[arg(long = "include-uninstantiated", default_value_t = false)]
         include_uninstantiated: bool,
+        /// Print the N largest area/depth trade-offs (applied and refused by
+        /// Dial 11), largest preliminary cell estimate first (A114).
+        #[arg(long = "tradeoffs", default_value_t = 0)]
+        tradeoffs: usize,
+        /// Measured cells per structural FO4 per module from a previous
+        /// gate-level run (the host's `calibration.tsv`, or JSON
+        /// `{module: ratio}`); scales the Dial 11 limit per module (A114).
+        #[arg(long = "feedback")]
+        feedback: Option<PathBuf>,
         /// Optimization level + the ten dials.
         #[command(flatten)]
         opt: OptArgs,
@@ -960,6 +975,47 @@ fn design_to_analyze_json(
     })
 }
 
+/// Measured cells per structural FO4 per module: the host's
+/// `calibration.tsv` (columns `module` and `cells_per_fo4`, `-` for none) or
+/// a JSON object `{module: ratio}`.
+fn load_feedback_ratios(
+    path: &std::path::Path,
+) -> Result<std::collections::BTreeMap<String, f64>, String> {
+    let text = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
+    let mut out = std::collections::BTreeMap::new();
+    if text.trim_start().starts_with('{') {
+        let v: serde_json::Value = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+        if let Some(obj) = v.as_object() {
+            for (k, val) in obj {
+                if let Some(r) = val.as_f64() {
+                    if r > 0.0 {
+                        out.insert(k.clone(), r);
+                    }
+                }
+            }
+        }
+        return Ok(out);
+    }
+    let mut lines = text.lines();
+    let header: Vec<&str> = lines.next().unwrap_or("").split('\t').collect();
+    let col = |name: &str| header.iter().position(|h| *h == name);
+    let (Some(mi), Some(ri)) = (col("module"), col("cells_per_fo4")) else {
+        return Err("expected tab-separated columns `module` and `cells_per_fo4`".into());
+    };
+    for l in lines {
+        let f: Vec<&str> = l.split('\t').collect();
+        if f.len() <= mi.max(ri) {
+            continue;
+        }
+        if let Ok(r) = f[ri].trim().parse::<f64>() {
+            if r > 0.0 {
+                out.insert(f[mi].trim().to_string(), r);
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn package_mode_on(s: &str) -> bool {
     matches!(
         s.trim().to_ascii_lowercase().as_str(),
@@ -1444,6 +1500,8 @@ fn main() -> ExitCode {
             trace_log,
             width_map,
             include_uninstantiated,
+            tradeoffs,
+            feedback,
             opt,
         } => {
             let opt = match opt.resolve(max_passes) {
@@ -1620,6 +1678,19 @@ fn main() -> ExitCode {
             let mut ctx = PassContext::new(design, names, policy);
             ctx.assume_clk = assume_clk;
             ctx.cost_model = load_fo4_v1_default();
+            if let Some(fb) = feedback.as_ref() {
+                match load_feedback_ratios(fb) {
+                    Ok(m) => {
+                        println!(
+                            "  feedback: {} module cells/FO4 ratios from {} (Dial 11 limit scaled per module)",
+                            m.len(),
+                            fb.display()
+                        );
+                        ctx.module_cells_per_fo4 = m;
+                    }
+                    Err(e) => eprintln!("warning: --feedback {}: {e}", fb.display()),
+                }
+            }
             if let Some(tp) = trace_log {
                 match AlgoTrace::to_file(&tp) {
                     Ok(t) => {
@@ -1688,11 +1759,17 @@ fn main() -> ExitCode {
                 post_closure.max_freq_mhz
             );
 
+            let ledger_by_edit: std::collections::BTreeMap<u32, &sv_timing_transform::Tradeoff> =
+                ctx.tradeoffs
+                    .iter()
+                    .filter_map(|t| t.edit_id.map(|id| (id, t)))
+                    .collect();
             let edits: Vec<serde_json::Value> = ctx
                 .trace
                 .records
                 .iter()
                 .map(|r| {
+                    let t = ledger_by_edit.get(&r.id);
                     serde_json::json!({
                         "id": r.id,
                         "kind": format!("{:?}", r.kind).to_ascii_lowercase(),
@@ -1709,9 +1786,67 @@ fn main() -> ExitCode {
                         "fo4_before": r.fo4_before,
                         "fo4_after": r.fo4_after,
                         "rationale": r.rationale,
+                        "est_cells": t.map(|t| t.est_cells),
+                        "fo4_gain": t.map(|t| t.fo4_gain),
+                        "cells_per_fo4": t.map(|t| t.cells_per_fo4),
                     })
                 })
                 .collect();
+            // Area gate ledger (A114): the summary line, the optional listing,
+            // and the JSON array the host reads.
+            let (applied_n, applied_cells, refused_n, refused_cells, refused_gain) = ctx
+                .tradeoffs
+                .iter()
+                .fold((0usize, 0.0_f64, 0usize, 0.0_f64, 0.0_f64), |a, t| {
+                    if t.applied {
+                        (a.0 + 1, a.1 + t.est_cells, a.2, a.3, a.4)
+                    } else {
+                        (a.0, a.1, a.2 + 1, a.3 + t.est_cells, a.4 + t.fo4_gain)
+                    }
+                });
+            println!(
+                "  area gate: max {:.1} cells/FO4{}; applied {} gated edits (+{:.0} est. cells), refused {} (would add {:.0} cells for {:.1} FO4)",
+                ctx.policy.opt.max_cells_per_fo4,
+                if ctx.module_cells_per_fo4.is_empty() { "" } else { " (scaled by measured cells/FO4 per module)" },
+                applied_n,
+                applied_cells,
+                refused_n,
+                refused_cells,
+                refused_gain
+            );
+            if tradeoffs > 0 {
+                let mut sorted: Vec<&sv_timing_transform::Tradeoff> =
+                    ctx.tradeoffs.iter().collect();
+                sorted.sort_by(|a, b| {
+                    b.est_cells
+                        .partial_cmp(&a.est_cells)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+                println!(
+                    "  tradeoffs (top {} of {} by preliminary cells; cells/FO4 against the module's limit):",
+                    tradeoffs.min(sorted.len()),
+                    sorted.len()
+                );
+                println!(
+                    "    {:<9} {:<16} {:<28} {:>6} {:>9} {:>8} {:>9}  verdict",
+                    "verdict", "kind", "module", "line", "est_cells", "fo4_gain", "cells/FO4"
+                );
+                for t in sorted.iter().take(tradeoffs) {
+                    println!(
+                        "    {:<9} {:<16} {:<28} {:>6} {:>9.0} {:>8.1} {:>9.1}  {}",
+                        if t.applied { "applied" } else { "refused" },
+                        format!("{:?}", t.kind).to_ascii_lowercase(),
+                        t.module.chars().take(28).collect::<String>(),
+                        t.line,
+                        t.est_cells,
+                        t.fo4_gain,
+                        t.cells_per_fo4,
+                        t.reason
+                    );
+                }
+            }
+            let tradeoffs_json =
+                serde_json::to_value(&ctx.tradeoffs).unwrap_or(serde_json::Value::Null);
 
             let mut integrity = serde_json::json!({
                 "reparse_ok": true,
@@ -2038,6 +2173,16 @@ fn main() -> ExitCode {
                     "max_path_fo4_before_all_modules": fo4_before_all,
                     "max_path_fo4_after_all_modules": fo4_after_all,
                     "planned_modules": ctx.policy.correct_allow_modules.len(),
+                    "area_gate": {
+                        "max_cells_per_fo4": ctx.policy.opt.max_cells_per_fo4,
+                        "feedback_modules": ctx.module_cells_per_fo4.len(),
+                        "applied": applied_n,
+                        "applied_est_cells": applied_cells,
+                        "refused": refused_n,
+                        "refused_est_cells": refused_cells,
+                        "refused_fo4_gain": refused_gain,
+                    },
+                    "tradeoffs": tradeoffs_json,
                     "post_closure": {
                         "target_mhz": post_closure.target_mhz,
                         "budget_fo4": post_closure.budget_fo4,

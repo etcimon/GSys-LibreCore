@@ -2057,6 +2057,9 @@ endmodule
         policy.allow_latency = false;
         policy.emit_structural = true;
         policy.max_passes = 4;
+        // this test is about the emission; the fixture's 5-bit step (32
+        // candidates) is above the Dial 11 default on purpose (A114)
+        policy.opt.max_cells_per_fo4 = 0.0;
         let mut ctx = PassContext::new(out.design, out.names, policy);
         ctx.cost_model = default_fo4_v1_embedded();
         let ctx = run_correct_passes(ctx).expect("correct");

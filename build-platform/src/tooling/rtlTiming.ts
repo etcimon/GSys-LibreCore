@@ -111,6 +111,10 @@ export interface RtlTimingOptions {
   sramStub?: boolean;
   /** Permit mapping a valid emitted study that still misses the FO4 budget. */
   allowOverBudget?: boolean;
+  /** sv-timing Dial 11 override (`--max-cells-per-fo4`; 0 = off). */
+  maxCellsPerFo4?: number;
+  /** Trade-off rows to list (`--tradeoffs N`). */
+  tradeoffRows?: number;
 }
 
 /**
@@ -671,6 +675,17 @@ async function runSvtPrepass(
   if (!has("--opt-max-stages-per-region")) {
     defaults.push("--opt-max-stages-per-region", String(Math.min(16, Math.max(8, Math.ceil(128 / budget)))));
   }
+  // Dial 11 (A114): the area gate and its ledger. The previous run's
+  // calibration (measured cells per structural FO4 per module) scales the
+  // limit per module — the OpenSTA numbers feed the next plan's selectivity.
+  const maxCells = opts.maxCellsPerFo4 ?? cfg?.maxCellsPerFo4;
+  if (!has("--opt-max-cells-per-fo4") && maxCells != null && Number.isFinite(maxCells)) {
+    defaults.push("--opt-max-cells-per-fo4", String(maxCells));
+  }
+  const tradeoffRows = opts.tradeoffRows ?? cfg?.tradeoffRows ?? 24;
+  if (!has("--tradeoffs") && tradeoffRows > 0) defaults.push("--tradeoffs", String(tradeoffRows));
+  const calibration = join(outDir, "calibration.tsv");
+  if (!has("--feedback") && existsSync(calibration)) defaults.push("--feedback", posixPath(calibration));
   const args = buildSvTimingCorrectArgs({
     portableFlist: portable.portablePath,
     allModules: true,
@@ -730,13 +745,51 @@ async function runSvtPrepass(
   }
   const replaced = readFileSync(emitFlist, "utf8").split(/\r?\n/).filter((l) => /__svt\.(sv|v|svh)$/i.test(l.trim())).length;
   const widthNote = args.includes("--width-map") ? "elaborated widths" : "heuristic widths";
+  const gateNote = areaGateNote(join(svtDir, "correct.json"), args.includes("--feedback"));
   return {
-    stage: { id: "s0-svt-correct", status: "pass", detail: `${completion.detail}; ${replaced} files → ${posixPath(emitFlist)}; ${cfgNote}; ${widthNote}` },
+    stage: { id: "s0-svt-correct", status: "pass", detail: `${completion.detail}; ${replaced} files → ${posixPath(emitFlist)}; ${cfgNote}; ${widthNote}${gateNote}` },
     preStages,
     emitFlist: posixPath(emitFlist),
     targetMhz,
     budget,
   };
+}
+
+/** One clause from the pre-pass's area-gate summary (A114). */
+function areaGateNote(correctJson: string, fedBack: boolean): string {
+  try {
+    const g = JSON.parse(readFileSync(correctJson, "utf8"))?.area_gate;
+    if (!g) return "";
+    return `; area gate ${g.max_cells_per_fo4} cells/FO4${fedBack ? ` scaled by ${g.feedback_modules} measured modules` : ""}: ` +
+      `${g.applied} applied (+${Math.round(g.applied_est_cells)} est. cells), ${g.refused} refused (${Math.round(g.refused_est_cells)} cells for ${Number(g.refused_fo4_gain).toFixed(1)} FO4)`;
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * Trade-off rows of a pre-pass report, largest preliminary cell estimate
+ * first: what the plan bought and what it refused, per module and line, so an
+ * owner can move the dial or the design (A114).
+ */
+export function tradeoffRows(correctJson: string, limit = 24): string[] {
+  let rows: any[];
+  try {
+    rows = JSON.parse(readFileSync(correctJson, "utf8"))?.tradeoffs ?? [];
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(rows) || rows.length === 0) return [];
+  rows.sort((a, b) => (b.est_cells ?? 0) - (a.est_cells ?? 0));
+  const out = [`verdict  kind              module                        line  est_cells  fo4_gain  cells/FO4  limit`];
+  for (const t of rows.slice(0, limit)) {
+    out.push(
+      `${(t.applied ? "applied" : "refused").padEnd(8)} ${String(t.kind).padEnd(17)} ${String(t.module).slice(0, 29).padEnd(29)} ` +
+      `${String(t.line).padStart(5)} ${Number(t.est_cells).toFixed(0).padStart(10)} ${Number(t.fo4_gain).toFixed(1).padStart(9)} ` +
+      `${Number.isFinite(t.cells_per_fo4) ? Number(t.cells_per_fo4).toFixed(1).padStart(10) : "       inf"}  ${t.limit == null ? "off" : Number(t.limit).toFixed(1)}`,
+    );
+  }
+  return out;
 }
 
 /**

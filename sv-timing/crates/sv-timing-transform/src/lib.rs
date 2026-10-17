@@ -20,7 +20,7 @@ pub mod worklist;
 
 pub use edit::{EditKind, EditRecord, EditTrace, EmitRhsRewrite};
 pub use factor_always_ff::factor_always_ff_regions;
-pub use pass::{run_correct_passes, PassContext, PassPolicy, TransformError, TransformResult};
+pub use pass::{run_correct_passes, PassContext, PassPolicy, Tradeoff, TransformError, TransformResult};
 pub use pipeline::{
     balance_mux_on_path, expand_expr_spine_for_path, insert_register, rebalance_associative_node,
     schedule_pipeline_cuts, select_pipeline_cuts, split_assign, CutPlan, CutPoint,

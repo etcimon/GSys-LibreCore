@@ -1570,6 +1570,10 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       budgetMargin: 0.2,
       optLevel: "3",
       svtArgs: ["--opt-max-stages-per-region", "13", "--real-cut-feeds", "--assume-clk"],
+      // Dial 11 at the -O3 preset (16 cells per FO4 of gain); the previous
+      // run's calibration.tsv scales it per module. 24 trade-off rows listed.
+      maxCellsPerFo4: 16,
+      tradeoffRows: 24,
     },
   },
 

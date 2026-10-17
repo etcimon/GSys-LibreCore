@@ -649,6 +649,17 @@ export interface StructuralTimingConfig {
    * snippets. `timings sta-rtl --svt-args` appends after these.
    */
   svtArgs: string[];
+  /**
+   * sv-timing Dial 11 (A114): an InsertReg / SelectIncrement is refused when
+   * its preliminary cell estimate per FO4 of structural gain exceeds this
+   * (one flop per bit per stage; `(2·2^k − 1) × width` for a select). The
+   * per-module `cells_per_fo4` of the previous run's `calibration.tsv` scales
+   * the limit per module. `0` disables the gate; `undefined` = the preset
+   * (16 at -O1…-O3, 8 at -Os, 4 at -Oz).
+   */
+  maxCellsPerFo4?: number;
+  /** Rows of the trade-off listing printed by the pre-pass and after the run (default 24). */
+  tradeoffRows?: number;
 }
 
 export interface PhysicalDesignConfig {

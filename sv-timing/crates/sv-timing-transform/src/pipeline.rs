@@ -744,8 +744,29 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
         pos(b).cmp(&pos(a))
     });
 
-    for (i, cut) in ordered.into_iter().enumerate() {
-        let stage = (i as u32) + 1;
+    let mut stage = 0u32;
+    for cut in ordered.into_iter() {
+        // Area gate (Dial 11, A114): one flop per bit of the cut net per
+        // stage against the FO4 the stage removes (the shorter segment).
+        let width = ctx
+            .design
+            .paths
+            .iter()
+            .find(|p| p.id == cut.path_id)
+            .and_then(|p| ctx.design.modules.get(&p.module))
+            .and_then(|m| m.nodes.get(&cut.after_node))
+            .map(|n| n.width.max(1))
+            .unwrap_or(1);
+        let gain = cut.fo4_left.min(cut.fo4_right);
+        if !ctx.admit_area(
+            EditKind::InsertReg,
+            cut.origin.start_line,
+            f64::from(width),
+            gain,
+        ) {
+            continue;
+        }
+        stage += 1;
         let (sig_id, name) = ctx.names.alloc_signal(
             &ctx.active_module_name,
             &plan.name_stem,
@@ -774,6 +795,7 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
             emit_snippet: None,
         };
         ctx.trace.record_edit(rec.clone());
+        ctx.link_last_tradeoff();
         edits.push(rec);
         ctx.pending_ir_dirty = true;
     }
@@ -1701,8 +1723,7 @@ pub fn balance_mux_on_path(
     {
         return Err(TransformError::InvalidOpportunity(format!(
             "balance_mux: origin {}:{} already rewritten structurally",
-            rewrite_origin.file,
-            rewrite_origin.start_line
+            rewrite_origin.file, rewrite_origin.start_line
         )));
     }
 
@@ -1760,7 +1781,7 @@ pub fn select_increment_on_node(
         .find(|m| m.name == ctx.active_module_name)
         .map(|m| m.id)
         .ok_or_else(|| TransformError::InvalidOpportunity("module not found".into()))?;
-    let (shape, cand, select_text, snippet, region_id, first_new_id, node_loc) = {
+    let (shape, cand, select_text, snippet, region_id, first_new_id, node_loc, area) = {
         let module = ctx.design.modules.get(&module_id).expect("module");
         let node = module
             .nodes
@@ -1819,6 +1840,14 @@ pub fn select_increment_on_node(
             .unwrap_or(0)
             .checked_add(1)
             .ok_or_else(|| TransformError::InvalidOpportunity("node ids exhausted".into()))?;
+        // Area gate (Dial 11, A114): `2^k` candidate adders and a `2^k`-way
+        // select, each `width` wide, against the FO4 the select removes.
+        let area = (
+            f64::from(2 * shape.candidates() as u32 - 1)
+                * f64::from(shape.width.unwrap_or(32).max(1)),
+            shape.fo4_before - shape.fo4_after,
+            node.loc.start_line,
+        );
         (
             shape,
             cand,
@@ -1827,8 +1856,15 @@ pub fn select_increment_on_node(
             region_id,
             first_new_id,
             node.loc.clone(),
+            area,
         )
     };
+    let (est_cells, gain, line) = area;
+    if !ctx.admit_area(EditKind::SelectIncrement, line, est_cells, gain) {
+        return Err(TransformError::InvalidOpportunity(format!(
+            "select_increment: area gate ({est_cells:.0} cells for {gain:.1} FO4)"
+        )));
+    }
 
     let module = ctx.design.modules.get_mut(&module_id).expect("module");
     let gate = module
@@ -2253,6 +2289,70 @@ mod tests {
         let edits = insert_register(&mut ctx, &plan).unwrap();
         assert_eq!(edits.len(), 1);
         assert!(edits[0].new_name.as_ref().unwrap().contains("svt_p"));
+    }
+
+    /// Dial 11 (A114): a cut is one flop per bit of the cut net per stage; it
+    /// is refused when that buys too little FO4, admitted when the gate is
+    /// off, and the limit follows the module's measured cells/FO4.
+    #[test]
+    fn area_gate_refuses_wide_cuts_that_buy_little_and_keeps_a_ledger() {
+        let mut design = design_with_path();
+        for n in design.modules.get_mut(&0).unwrap().nodes.values_mut() {
+            n.width = 64;
+        }
+        let mut ctx = PassContext::new(design, NameTable::new(), PassPolicy::strict_test());
+        ctx.active_module_name = "m".into();
+        ctx.policy.correct_allow_modules = vec!["m".into()];
+        ctx.policy.allow_latency = true;
+        ctx.assume_clk = true;
+        let opp = Opportunity {
+            kind: OpportunityKind::InsertReg,
+            path_id: 0,
+            insert_after: 1,
+            estimated_fo4_before: 40.0,
+            estimated_fo4_after: 20.0,
+            loc: loc(),
+            rationale: "test".into(),
+            requires_clock_in_scope: true,
+            changes_latency: true,
+        };
+        let plan = select_pipeline_cuts(&ctx, &opp).unwrap();
+        // every cut: 64 flops against the FO4 its shorter segment removes
+        let ratios: Vec<f64> = plan
+            .cuts
+            .iter()
+            .map(|c| 64.0 / c.fo4_left.min(c.fo4_right))
+            .collect();
+        let (lo, hi) = ratios
+            .iter()
+            .fold((f64::MAX, 0.0_f64), |a, r| (a.0.min(*r), a.1.max(*r)));
+        // below the cheapest cut's ratio: everything refused
+        ctx.policy.opt.max_cells_per_fo4 = lo * 0.5;
+        let edits = insert_register(&mut ctx, &plan).unwrap();
+        assert!(edits.is_empty(), "refused: {edits:?}");
+        let t = ctx.tradeoffs.last().expect("ledger entry");
+        assert!(
+            !t.applied
+                && t.edit_id.is_none()
+                && t.est_cells == 64.0
+                && t.reason.starts_with("refused")
+        );
+        assert_eq!(t.limit, Some(lo * 0.5));
+        // the module's measured cells/FO4 scales the limit: at 2.6 (2× the
+        // reference band) a limit of 0.6×hi becomes 1.2×hi and every cut passes
+        ctx.policy.opt.max_cells_per_fo4 = hi * 0.6;
+        ctx.module_cells_per_fo4.insert("m".into(), 2.6);
+        assert!((ctx.area_limit_for("m").unwrap() - hi * 1.2).abs() < 1e-9);
+        let edits = insert_register(&mut ctx, &plan).unwrap();
+        assert_eq!(edits.len(), plan.cuts.len());
+        let t = ctx.tradeoffs.last().unwrap();
+        assert!(t.applied && t.edit_id == Some(edits.last().unwrap().id));
+        // gate off: always admitted, ledger says so
+        ctx.module_cells_per_fo4.clear();
+        ctx.policy.opt.max_cells_per_fo4 = 0.0;
+        assert_eq!(ctx.area_limit_for("m"), None);
+        assert!(!insert_register(&mut ctx, &plan).unwrap().is_empty());
+        assert_eq!(ctx.tradeoffs.last().unwrap().reason, "area gate off");
     }
 
     fn expansion_trial() -> (PassContext, Opportunity) {
