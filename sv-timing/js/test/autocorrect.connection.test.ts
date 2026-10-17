@@ -28,6 +28,7 @@ describe("auto-correct connection", () => {
       targetMhz: 3000,
       allowLatency: true,
       assumeClk: true,
+      realCutFeeds: true,
       dryRun: true,
       jsonOut,
     });
@@ -38,7 +39,8 @@ describe("auto-correct connection", () => {
     expect(result.allow_latency).toBe(true);
     expect(result.modules_allowlist).toContain("deep_add_chain");
     expect(Array.isArray(result.edits)).toBe(true);
-    // Tight budget + allow-latency should produce at least one pipeline edit.
+    // Structural planning is explicit: allow-latency alone does not authorize
+    // credit-only cuts in the lean emitter.
     expect(result.edits.length).toBeGreaterThanOrEqual(1);
     expect(result.note ?? "").toMatch(/dry|correct|edit/i);
   }, 180_000);

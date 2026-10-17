@@ -31,6 +31,12 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A120 update:** retain the rename write-mask fusion (placed 3.375→2.964 ns,
+−0.95% area), and reject the slower IQ/store candidates. IR v2, delay-v41
+and correction-v1 add compound-dependency accounting, typed +/- candidates
+and lowering-context cache identity. Fresh retained source/emit still read
+55.078/55.664 FO4. See A120 for the separate hardware and measurement results.
+
 **Historical state (2026-10-16, delay-v37 — A97–A103).**
 
 | Quantity | Value | Where |
@@ -8191,6 +8197,109 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A120 — Preserve predecoded choices and move late count inputs off adders
+
+Three production candidates retain existing ports, reset behavior and cycle
+latency: IQ precomputes all legal count decrements before selecting with the
+late issue/ack popcount; rename reuses one-hot free-register masks for
+free/busy/checkpoint updates while retaining binary architectural tags; store
+compaction gathers payload with AND/OR selection and explicitly preserves
+the old invalid-slot payload on an empty match.
+
+The IQ identity is modular:
+`(count - cancelled - issued + allocated) == (count - cancelled + allocated) - issued`.
+`issued` is a popcount of P bits, so the candidate bank covers 0..P, including
+non-prefix acknowledgments. The base is combinational, not a newly inserted
+pipeline register; timing remains a measured question.
+
+Rename's bit-mask update requires tag widths that represent the pool. The
+first proof attempts exposed a harness error: `FPRF_ENTRIES=40` retained the
+module's disabled-FP default `FPRF_W=1`. That configuration truncates chosen
+indices and is not a valid FP allocation configuration. A120 explicitly sets
+both tag widths for 40/80-entry, one/two-hart and two/three-port proofs and
+adds a local legality guard. The earlier A118 matched-state result must not
+be cited as coverage of correctly sized FP allocation. Hiding all internal
+proof correspondences then exhausted the two-hart budget; the retained proof
+uses normal matching with valid dimensions.
+
+**Generic typed offset correction.** `SelectIncrement` supports `REG-step`
+as well as `REG+step`. Each candidate substitutes `type(step)'(K'(j))`
+into the original RHS; widening/narrowing casts and mixed signedness survive.
+Small signed selectors index through `$unsigned(step)`, so negative bit
+patterns do not become negative array indices. Subtraction is not commuted.
+Unknown result widths, unresolved masks/indices, unsupported tokens and
+overwritten procedural selectors are refused.
+
+The standalone `select_offsets.sv` fixture exercises signed negative steps,
+mixed signedness and explicit truncation. Its actual emitted SV passes
+matched-state equivalence. With the area gate explicitly disabled for this
+feature test, mapped worst-any is 0.456→0.439 ns and area 213.066→329.308 µm².
+That small gain costs 54.6% more area: it supports preserving the default
+area gate, not universally enabling candidate banks.
+
+**Measurement and cache safety.** The gather exposed compound assignments
+being parsed as malformed LHS names (`acc |`) without their read dependency.
+`delay-v41` normalizes them for measurement and records `BlockingCompound`
+in IR v2. Automatic correction refuses paths containing compound updates;
+emission refuses to treat them as plain `=`. `correction-v1` separately
+versions opportunity/emission semantics. Module cache identities now include
+the lowering context as well as file hashes, preventing reuse of a module
+whose generate branches were pruned using different parameter facts.
+
+**Placement decides retention.** The three trials were mapped with the same
+map-v2 recipe, then independently placed/repaired with identical constraints,
+900×900 µm die and no disabled timing arcs. All six placed variants have
+zero reported electrical violations:
+
+| Trial | Worst placed arrival before → after (ns) | Repaired area before → after (µm²) | Decision |
+|---|---:|---:|---|
+| IQ decrement bank | 2.806 → 2.958 | 194,951.125 → 188,339.172 | Rejected: saves area but worsens the timing objective |
+| Rename mask reuse | 3.375 → 2.964 | 243,366.062 → 241,050.000 | Retained: −12.2% delay and −0.95% area |
+| Store parallel gather | 4.125 → 4.474 | 75,096.055 → 69,820.211 | Rejected: area saving does not justify the critical-path regression |
+
+The IQ and store trials remain in the immutable `precompute-a120c` input
+archive and measurement outputs; production keeps their A119/A118 logic.
+Rename repair buffers are 16,200→16,250; WNS is −3.223→−2.803 ns at
+250 ps with 50 ps uncertainty. This is a pre-CTS, unrouted module
+comparison, not whole-core closure.
+
+**Oracle corrections.** The store-buffer side-by-side harness was stale:
+it randomized the committing TID, checked assumptions after state changed,
+used next-state `ready_o` as current capacity, and assumed depth four.
+It now obeys the reference's clocked input assertions, drives legal CBO
+metadata, sizes its TID/queue tracking from configuration, and requires full
+occupancy coverage. With the trial source it passes 400,000 cycles,
+210,505 pushes, 84,775 commits, 77,838 cancel cycles and 9,275 flushes,
+zero mismatches, reaching the actual depth eight. Core assertions stay on.
+
+**Debug logic is not a timing optimization.** delay-v41 exposes a 170.413
+FO4 path through `scoreboard.sb_issued_popcnt`. Its only consumer is the
+simulation assertion; synthesis had already removed it. The reference
+calculation is now in the same `translate_off` scope as that assertion,
+separate from functional capacity logic. This repairs its coding/measurement
+boundary and must not be reported as a physical speedup.
+
+Evidence: `build-platform/workspace/build/sv-timing/precompute-a120c/`
+(`result-d`, `placed-iq`, `placed-rename`, `placed-store`, `store-test-d`);
+typed-emission proof in `precompute-a120/offset-proof`.
+
+The retained source was elaborated again into a fresh width map
+(`retained-a120/result/`, elaboration-only widths). Under IR v2 /
+delay-v41 / correction-v1 its maximum is 55.078 FO4 (IQ); scoreboard is
+19.634 FO4 after the simulation-only calculation is fenced. The fresh
+latency-neutral review emit has 587 records, complete joint integrity and
+a 55.664-FO4 maximum, with 720/1591 reg→reg paths over budget. Neither
+source nor emit closes 10 FO4. The placed numbers above refer to the
+production trial snapshots, not to this review emit.
+The retained emitted tree also passes full-core slang elaboration and
+hierarchy checking (`retained-a120/emitted-check/`, 31 seconds).
+
+Validation: 352 Rust tests, the target lint gate, and all five TypeScript
+connection tests pass. The client now exposes `realCutFeeds` explicitly;
+the old dry-run connection test requested pipeline edits without enabling
+structural planning. Package independence scanning has the previously
+recorded failures in unchanged host-name references; it is not reported green.
 
 ## A119 — Parallel issue grants, stable LSQ tournaments, and generate reachability
 

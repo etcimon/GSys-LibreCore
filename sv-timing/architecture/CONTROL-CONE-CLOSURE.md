@@ -24,6 +24,44 @@ Focused proof precedes the paired map-v2 measurement. The A118 area/uncut
 timing regressions are part of the baseline; successful elaboration or
 filtered timing alone must not select a winner.
 
+## A120 candidates: move late control off arithmetic and payload routing
+
+* IQ count: compute cancellation/allocation base count independently of issue
+  acknowledgment, precompute all 0..NrIssuePorts decrements, then select.
+  This is an exact modular reassociation, with no delayed capacity update.
+* Rename: retain the one-hot free-register choice for free/busy/checkpoint
+  bit updates instead of encoding it and decoding the tag again. Keep the
+  binary tag for maps and external outputs; preserve single-free collisions.
+* Store buffer: use the compaction permutation's one-hot destination mask
+  to gather payload with AND/OR logic. Preserve the old payload when no
+  candidate matches, including architecturally invalid slots.
+* Generic SelectIncrement: extend register-plus-step to register-minus-step.
+  Candidate expressions must preserve original casts and signedness, and
+  array indices must use the unsigned bit pattern of signed selectors.
+  No new register boundary or timing-model discount is implied.
+
+These are candidates until paired mapping supports them. Proof must cover
+wraparound, signed steps, zero matches, FP physical zero, multiple issue
+ports and same-cycle allocation conflicts. A new pipeline cycle is not
+needed for these local transformations.
+
+A120 retention: keep rename mask reuse, which improves placed delay
+3.375→2.964 ns and repaired area 243,366→241,050 µm². Revert the IQ bank
+and store gather: they reduce area but worsen placed worst delay
+2.806→2.958 ns and 4.125→4.474 ns respectively. The complete trial
+snapshots remain evidence, not production defaults.
+
+The scoreboard's assertion reference popcount now shares the assertion's
+simulation-only scope. Its removal from structural timing is not a hardware
+gain: Yosys already discarded the unobserved reference calculation.
+
+Retained-source validation is recorded under `retained-a120/`; its fresh
+elaboration-only width map supports a complete source analysis and review
+emit. The source is still 55.078 FO4 and the emitted tree 55.664 FO4.
+No state, clock, ISA, DTS, caller interface, scan or PMU contract changed.
+The new rename legality check rejects tag widths that truncate pool indices.
+The generic package changes remain independent of host RTL/config packages.
+
 ## Current boundaries and proposed changes
 
 The map-v2 board uses `booth` and ABC `&syn2`; compare candidates with that

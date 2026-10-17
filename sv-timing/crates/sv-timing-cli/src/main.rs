@@ -141,6 +141,7 @@ fn opt_to_json(opt: &OptOptions) -> serde_json::Value {
         "level": opt.level.as_str(),
         "digest": opt.digest(),
         "measurement": MEASUREMENT_VERSION,
+        "correction": sv_timing_core::CORRECTION_VERSION,
         "dials": {
             "max_passes": opt.max_passes,
             "worklist_width": opt.worklist_width,

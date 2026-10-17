@@ -142,6 +142,10 @@ module g6lc_rename #(
   // integer-only build is unchanged.
   localparam int unsigned FPN   = (FPRF_ENTRIES < 1) ? 1 : FPRF_ENTRIES;
   localparam bit          FP_EN = (FPRF_ENTRIES >= 32);
+  if (PRF_W < 1 || PRF_W < $clog2(PRF_ENTRIES) ||
+      FPRF_W < 1 || (FP_EN && FPRF_W < $clog2(FPN))) begin : gen_bad_tag_width
+    initial $fatal(1, "g6lc_rename: physical tag width must represent every pool entry");
+  end
   logic [NH-1:0][31:0][FPRF_W-1:0] fmap_q, fmap_d;
   logic [NH-1:0][31:0][FPRF_W-1:0] famap_q, famap_d;
   logic [FPN-1:0] ffree_q, ffree_d;
@@ -257,6 +261,29 @@ module g6lc_rename #(
     end
   endfunction
 
+  // A120: retain the one-hot choice for bit-vector updates. Encoding is
+  // needed for map/tag outputs, but decoding that tag for free/busy/ckpt
+  // writes needlessly puts another selector after allocation.
+  function automatic logic [PRF_ENTRIES-1:0] pick_free_mask(
+      input logic [PRF_ENTRIES-1:0] fr, input logic high);
+    logic [PRF_ENTRIES-1:0] cand, ordered, lowest, reversed, reversed_lowest;
+    cand = fr & ~PRF_ENTRIES'(1);
+    reversed = {<<{cand}};
+    ordered = high ? reversed : cand;
+    lowest = ordered & (~ordered + 1'b1);
+    reversed_lowest = {<<{lowest}};
+    return high ? reversed_lowest : lowest;
+  endfunction
+  function automatic logic [FPN-1:0] pick_ffree_mask(
+      input logic [FPN-1:0] fr, input logic high);
+    logic [FPN-1:0] ordered, lowest, reversed, reversed_lowest;
+    reversed = {<<{fr}};
+    ordered = high ? reversed : fr;
+    lowest = ordered & (~ordered + 1'b1);
+    reversed_lowest = {<<{lowest}};
+    return high ? reversed_lowest : lowest;
+  endfunction
+
   logic [NR_PORTS-1:0][PRF_W-1:0] alloc_prd_c;
   logic [NR_PORTS-1:0] do_alloc;
   logic [NR_PORTS-1:0][FPRF_W-1:0] alloc_fprd_c;
@@ -361,12 +388,20 @@ module g6lc_rename #(
     automatic logic [FPRF_W-1:0] f1, f2, f3, fold, fpicked, fpick_lo, fpick_hi;
     automatic logic [PRF_ENTRIES-1:0] squashed, arch_ref;
     automatic logic [FPN-1:0] fsquashed, farch_ref;
+    automatic logic [PRF_ENTRIES-1:0] picked_mask, pick_lo_mask, pick_hi_mask;
+    automatic logic [FPN-1:0] fpicked_mask, fpick_lo_mask, fpick_hi_mask;
     automatic logic [LVL_W-1:0] level;
     automatic int unsigned rel, n_ret, mis_hart, lvl_rel, same_before;
     p1 = '0; p2 = '0; old = '0; picked = '0;
     squashed = '0; arch_ref = '0; fsquashed = '0; farch_ref = '0;
     level = '0; rel = 0; n_ret = 0; mis_hart = 0; lvl_rel = 0;
     same_before = 0;
+    picked_mask = '0;
+    fpicked_mask = '0;
+    pick_lo_mask = pick_free_mask(free_q, 1'b0);
+    pick_hi_mask = pick_free_mask(free_q, 1'b1);
+    fpick_lo_mask = pick_ffree_mask(ffree_q, 1'b0);
+    fpick_hi_mask = pick_ffree_mask(ffree_q, 1'b1);
     map_d = map_q;
     amap_d = amap_q;
     free_d = free_q;
@@ -471,16 +506,18 @@ module g6lc_rename #(
           // on port 0's clear. `ffree_d[fpicked]` still gates the single-
           // free case (both picks name the same entry; port 0 took it).
           fpicked = (p == 0) ? fpick_lo : (p == 1) ? fpick_hi : pick_ffree(ffree_d);
-          if (ffree_d[fpicked]) begin
+          fpicked_mask = (p == 0) ? fpick_lo_mask :
+                         (p == 1) ? fpick_hi_mask : pick_ffree_mask(ffree_d, 1'b0);
+          if (|(ffree_d & fpicked_mask)) begin
             do_falloc[p] = 1'b1;
             alloc_fprd_c[p] = fpicked;
-            ffree_d[fpicked] = 1'b0;
+            ffree_d = ffree_d & ~fpicked_mask;
             fmap_d[hart_i[p]][rd_i[p]] = fpicked;
-            fbusy_d[fpicked] = 1'b1;
+            fbusy_d = fbusy_d | fpicked_mask;
             fowner_d[fpicked] = hart_i[p];
             fprd_o[p] = fpicked;
             for (int unsigned s = 0; s < CKPT_DEPTH; s++)
-              if (ckpt_hart_d[s] == hart_i[p]) ckpt_falloc_d[s][fpicked] = 1'b1;
+              if (ckpt_hart_d[s] == hart_i[p]) ckpt_falloc_d[s] = ckpt_falloc_d[s] | fpicked_mask;
           end
         end else if (valid_i[p] && enable_i && need_rd_i[p]) begin
           // free_d already has earlier ports' allocs removed; port 1 picks
@@ -488,22 +525,24 @@ module g6lc_rename #(
           // so its pick does not wait on port 0's clear — `free_d[picked]`
           // gates the single-free case where both picks coincide.
           picked = (p == 0) ? pick_lo : (p == 1) ? pick_hi : pick_free(free_d);
+          picked_mask = (p == 0) ? pick_lo_mask :
+                        (p == 1) ? pick_hi_mask : pick_free_mask(free_d, 1'b0);
           // Exhaustion is reported by the ungated capacity block above; here it
           // simply means no allocation happens this cycle.
-          if (picked != '0 && free_d[picked]) begin
+          if (|(free_d & picked_mask)) begin
             do_alloc[p] = 1'b1;
             alloc_prd_c[p] = picked;
-            free_d[picked] = 1'b0;
+            free_d = free_d & ~picked_mask;
             owner_d[picked] = hart_i[p];
             map_d[hart_i[p]][rd_i[p]] = picked;
-            busy_d[picked] = 1'b1;
+            busy_d = busy_d | picked_mask;
             prd_o[p] = picked;
             // Younger than every live checkpoint OF THIS HART, including one
             // taken earlier in the same group. Marking a peer hart's
             // checkpoints would make its mispredict squash this allocation,
             // which is the aliasing the per-hart namespaces exist to prevent.
             for (int unsigned s = 0; s < CKPT_DEPTH; s++)
-              if (ckpt_hart_d[s] == hart_i[p]) ckpt_alloc_d[s][picked] = 1'b1;
+              if (ckpt_hart_d[s] == hart_i[p]) ckpt_alloc_d[s] = ckpt_alloc_d[s] | picked_mask;
           end
         end else if (valid_i[p] && enable_i) begin
           prd_o[p] = old;

@@ -10,6 +10,13 @@
 
 ## 0. Summary
 
+A120 correction: module IR identity includes the parse/lowering context,
+parameter values, IR/measurement versions and correction version as well
+as source hashes. A design-key miss must not resurrect a module whose
+generate branches were pruned under different facts. Thread count is
+excluded. IR v2 also separates measured compound updates from ordinary
+source-rewritable assignments; older module blobs cannot supply that contract.
+
 Two independent problems are recorded here.
 
 1. **Wall-clock**: cold analyze is single-threaded and carries several

@@ -200,6 +200,9 @@ pub enum AssignKind {
     Unknown,
     /// Blocking `=` (combo temp, including in `always_ff`).
     Blocking,
+    /// Blocking compound update (`+=`, `|=`, ...). RHS is normalized for
+    /// measurement, but automatic source rewrites require separate support.
+    BlockingCompound,
     /// Non-blocking `<=` (flop write).
     Nonblocking,
     /// Continuous `assign`.
@@ -214,7 +217,10 @@ impl AssignKind {
 
     /// Combinational definition (blocking or continuous).
     pub fn is_comb_def(self) -> bool {
-        matches!(self, AssignKind::Blocking | AssignKind::Continuous)
+        matches!(
+            self,
+            AssignKind::Blocking | AssignKind::BlockingCompound | AssignKind::Continuous
+        )
     }
 
     /// True when kind was not recovered from CST.

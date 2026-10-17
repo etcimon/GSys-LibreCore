@@ -3,7 +3,7 @@
 
 //! `SelectIncrement` shape detection (ALGORITHMS-EXPERTS A88).
 //!
-//! A register plus a narrow runtime step at the end of a control cone —
+//! A register plus/minus a narrow runtime step at the end of a control cone —
 //! `seq_d = seq_q + 16'(step)`, `idx_d = (idx_q + step) & MASK` — puts the
 //! adder's carry chain *after* the cone that computes `step`. Every candidate
 //! sum is a constant-offset increment of the register alone, available at the
@@ -43,6 +43,10 @@ pub struct SelectIncrementShape {
     pub step_ident: String,
     /// Declared width of the step (`k`); candidates = `2^k`.
     pub step_bits: u32,
+    /// Original arithmetic operator (`+` or `-`).
+    pub operator: String,
+    /// Original source RHS, including casts and the optional mask.
+    pub rhs_text: String,
     /// `& MASK` applied to the sum, when present (constant text).
     pub mask_text: Option<String>,
     /// Assignment LHS as written.
@@ -67,6 +71,13 @@ impl SelectIncrementShape {
     /// Estimated FO4 gain on the node (never negative).
     pub fn gain(&self) -> f64 {
         (self.fo4_before - self.fo4_after).max(0.0)
+    }
+
+    /// Substitute one selector bit pattern without changing the expression's
+    /// original width/signedness context. A genvar/int is not the step's type.
+    pub fn candidate_expr(&self, index: &str) -> String {
+        let value = format!("type({})'({}'({index}))", self.step_ident, self.step_bits);
+        substitute_step(&self.rhs_text, &self.step_ident, &value)
     }
 }
 
@@ -120,6 +131,16 @@ pub fn detect(
         return None;
     }
     let rhs = node.rhs_expr.as_ref()?;
+    let rhs_text = node.rhs.as_deref()?.trim();
+    // The source-template substitution below handles simple SV expressions,
+    // not comments, strings, escaped identifiers or preprocessor directives.
+    if !rhs_text.is_ascii()
+        || rhs_text.contains(['"', '\\', '`'])
+        || rhs_text.contains("//")
+        || rhs_text.contains("/*")
+    {
+        return None;
+    }
     // Optional `& MASK` with a constant mask.
     let (sum, mask_text) = match rhs {
         Expr::Binary {
@@ -128,9 +149,9 @@ pub fn detect(
             left,
             right,
         } if op == "&" => {
-            if is_const_leaf(right) {
+            if is_const_leaf(right) && resolver.eval_text(&right.emit()).is_some() {
                 (left.as_ref(), Some(right.emit()))
-            } else if is_const_leaf(left) {
+            } else if is_const_leaf(left) && resolver.eval_text(&left.emit()).is_some() {
                 (right.as_ref(), Some(left.emit()))
             } else {
                 return None;
@@ -147,13 +168,13 @@ pub fn detect(
     else {
         return None;
     };
-    if op != "+" {
+    if !matches!(op.as_str(), "+" | "-") {
         return None;
     }
     // One side is a register read, the other a bare runtime identifier.
-    let (reg, step) = if is_register_read(left, regs) && step_ident(right).is_some() {
+    let (reg, step) = if is_register_read(left, regs, resolver) && step_ident(right).is_some() {
         (left.as_ref(), right.as_ref())
-    } else if is_register_read(right, regs) && step_ident(left).is_some() {
+    } else if op == "+" && is_register_read(right, regs, resolver) && step_ident(left).is_some() {
         (right.as_ref(), left.as_ref())
     } else {
         return None;
@@ -161,6 +182,29 @@ pub fn detect(
     let step_name = step_ident(step)?;
     if block_local.contains(step_name) || regs.contains(step_name) {
         // A register step is already stable at the edge: nothing to move.
+        return None;
+    }
+    // Hoisting a read of a procedural temporary that is overwritten later
+    // would use its final value rather than its value at this assignment.
+    for region in module
+        .regions
+        .values()
+        .filter(|r| r.nodes.contains(&node.id))
+    {
+        if region
+            .nodes
+            .iter()
+            .filter_map(|id| module.nodes.get(id))
+            .any(|n| {
+                n.id != node.id
+                    && n.lhs.as_deref().and_then(TimingModule::root_ident) == Some(step_name)
+                    && n.loc.byte_start >= node.loc.byte_start
+            })
+        {
+            return None;
+        }
+    }
+    if lhs_root == step_name {
         return None;
     }
     let reg_text = reg.emit();
@@ -174,11 +218,9 @@ pub fn detect(
     }
     let width = resolver
         .expr_width(node.lhs_expr.as_ref()?)
-        .or_else(|| resolver.expr_width(reg));
-    if let Some(w) = width {
-        if (1u32 << step_bits).saturating_mul(w) > MAX_CANDIDATE_BITS {
-            return None;
-        }
+        .or_else(|| resolver.expr_width(reg))?;
+    if (1u32 << step_bits).saturating_mul(width) > MAX_CANDIDATE_BITS {
+        return None;
     }
     let fo4_before = node.fo4_cost;
     let fo4_after = f64::from(step_bits.div_ceil(2)) * model.mux
@@ -194,9 +236,11 @@ pub fn detect(
         reg_text,
         step_ident: step_name.to_string(),
         step_bits,
+        operator: op.clone(),
+        rhs_text: rhs_text.to_string(),
         mask_text,
         lhs_text,
-        width,
+        width: Some(width),
         fo4_before,
         fo4_after,
     })
@@ -219,13 +263,14 @@ fn looks_like_constant_name(name: &str) -> bool {
 }
 
 /// `reg_q` or `reg_q[CONST]` with `reg_q` a register root.
-fn is_register_read(e: &Expr, regs: &BTreeSet<String>) -> bool {
+fn is_register_read(e: &Expr, regs: &BTreeSet<String>, resolver: &WidthResolver<'_>) -> bool {
     match e {
         Expr::Ident { name } => TimingModule::root_ident(name).is_some_and(|r| regs.contains(r)),
         Expr::Index { base, index } => {
             matches!(base.as_ref(), Expr::Ident { .. })
                 && is_const_leaf(index)
-                && is_register_read(base, regs)
+                && resolver.eval_text(&index.emit()).is_some()
+                && is_register_read(base, regs, resolver)
         }
         _ => false,
     }
@@ -233,7 +278,17 @@ fn is_register_read(e: &Expr, regs: &BTreeSet<String>) -> bool {
 
 fn step_ident(e: &Expr) -> Option<&str> {
     match e {
-        Expr::Ident { name } if !name.contains('.') && !name.contains("::") => Some(name.as_str()),
+        Expr::Ident { name }
+            if name
+                .as_bytes()
+                .first()
+                .is_some_and(|b| b.is_ascii_alphabetic() || *b == b'_')
+                && name
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'$') =>
+        {
+            Some(name.as_str())
+        }
         _ => None,
     }
 }
@@ -242,7 +297,9 @@ fn step_ident(e: &Expr) -> Option<&str> {
 /// k = 3..4 (so the structural model and the netlist agree on two levels).
 pub fn select_rhs(cand: &str, step: &str, step_bits: u32) -> String {
     if step_bits <= 2 {
-        return format!("{cand}[{step}]");
+        // A signed selector must index by its bit pattern, not by a negative
+        // integer value. The candidates themselves retain its signed type.
+        return format!("{cand}[$unsigned({step})]");
     }
     let low = step_bits - 1;
     let lo_sel = format!("{step}[{}:0]", low - 1);
@@ -255,17 +312,71 @@ pub fn select_rhs(cand: &str, step: &str, step_bits: u32) -> String {
 /// truncates the genvar sum to the result width: exact modulo 2^W.
 pub fn candidate_snippet(shape: &SelectIncrementShape, cand: &str) -> String {
     let n = shape.candidates();
-    let masked = match &shape.mask_text {
-        Some(m) => format!("(({} + svt_j) & {m})", shape.reg_text),
-        None => format!("({} + svt_j)", shape.reg_text),
-    };
+    let expression = shape.candidate_expr("svt_j");
     let lhs = &shape.lhs_text;
     format!(
-        "  // sv-timing select_increment: `{lhs} = {reg} + {step}` -> {n} precomputed\n  // increments of the register (off the `{step}` cone) and one select.\n  var type({lhs}) {cand} [0:{last}];\n  for (genvar svt_j = 0; svt_j < {n}; svt_j++) begin : gen_{cand}\n    assign {cand}[svt_j] = type({lhs})'({masked});\n  end\n",
-        reg = shape.reg_text,
+        "  // sv-timing select_increment: `{lhs} = {rhs}` -> {n} precomputed\n  // typed offsets of the register (off the `{step}` cone) and one select.\n  var type({lhs}) {cand} [0:{last}];\n  for (genvar svt_j = 0; svt_j < {n}; svt_j++) begin : gen_{cand}\n    assign {cand}[svt_j] = type({lhs})'({expression});\n  end\n",
+        rhs = shape.rhs_text,
         step = shape.step_ident,
         last = n - 1,
     )
+}
+
+/// Replace bare identifier tokens only. Package members, typedef names and
+/// based-number digits are not references to the runtime selector.
+fn substitute_step(text: &str, name: &str, replacement: &str) -> String {
+    let bytes = text.as_bytes();
+    let mut out = String::new();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'\'' {
+            let mut j = i + 1;
+            if j < bytes.len() && matches!(bytes[j], b's' | b'S') {
+                j += 1;
+            }
+            if j < bytes.len()
+                && matches!(
+                    bytes[j],
+                    b'b' | b'B' | b'o' | b'O' | b'd' | b'D' | b'h' | b'H'
+                )
+            {
+                j += 1;
+                while j < bytes.len() && bytes[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                while j < bytes.len()
+                    && (bytes[j].is_ascii_alphanumeric() || matches!(bytes[j], b'_' | b'?'))
+                {
+                    j += 1;
+                }
+                out.push_str(&text[i..j]);
+                i = j;
+                continue;
+            }
+        }
+        if bytes[i].is_ascii_alphabetic() || matches!(bytes[i], b'_' | b'$') {
+            let start = i;
+            while i < bytes.len()
+                && (bytes[i].is_ascii_alphanumeric() || matches!(bytes[i], b'_' | b'$'))
+            {
+                i += 1;
+            }
+            let before = text[..start].trim_end();
+            let after = text[i..].trim_start();
+            let bare = !before.ends_with(['.', ':'])
+                && !after.starts_with("::")
+                && !after.starts_with('\'');
+            out.push_str(if &text[start..i] == name && bare {
+                replacement
+            } else {
+                &text[start..i]
+            });
+        } else {
+            out.push(bytes[i] as char);
+            i += 1;
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -338,7 +449,10 @@ mod tests {
                 decl("other_q", "logic", "[15:0]"),
             ],
             ports: vec![],
-            consts: BTreeMap::new(),
+            consts: BTreeMap::from([
+                ("WrapMask".into(), "65535".into()),
+                ("IdxMask".into(), "3".into()),
+            ]),
             typedefs: BTreeMap::from([("idx_t".to_string(), "logic [1:0]".to_string())]),
             imports: vec![],
         }
@@ -443,12 +557,8 @@ mod tests {
             snip.contains("var type(wrap_d) wrap_d_svt_cand [0:7];"),
             "{snip}"
         );
-        assert!(
-            snip.contains(
-                "assign wrap_d_svt_cand[svt_j] = type(wrap_d)'(((wrap_q + svt_j) & WrapMask));"
-            ),
-            "{snip}"
-        );
+        assert!(snip.contains("16'(type(step)'(3'(svt_j)))"), "{snip}");
+        assert!(snip.contains("& WrapMask"), "{snip}");
         // A 2-bit index add is cheaper than any select: no shape.
         let n3 = node(
             "idx_d",
@@ -461,7 +571,7 @@ mod tests {
             select_rhs("c", "step", 3),
             "(step[2] ? c[{1'b1, step[1:0]}] : c[{1'b0, step[1:0]}])"
         );
-        assert_eq!(select_rhs("c", "s2", 2), "c[s2]");
+        assert_eq!(select_rhs("c", "s2", 2), "c[$unsigned(s2)]");
     }
 
     #[test]
@@ -498,10 +608,20 @@ mod tests {
             &model
         )
         .is_none());
-        // Subtraction / non-register operand / NBA target.
-        assert!(detect(
+        // Subtraction is supported in this direction; step - REG is not.
+        let sub = detect(
             &m,
             &node("seq_d", "seq_q - step", AssignKind::Continuous, 8.0),
+            &regs,
+            &r,
+            &model,
+        )
+        .expect("decrement");
+        assert_eq!(sub.operator, "-");
+        assert_eq!(sub.candidate_expr("7"), "seq_q - type(step)'(3'(7))");
+        assert!(detect(
+            &m,
+            &node("seq_d", "step - seq_q", AssignKind::Continuous, 8.0),
             &regs,
             &r,
             &model
@@ -532,5 +652,22 @@ mod tests {
             &model
         )
         .is_none());
+    }
+
+    #[test]
+    fn selector_substitution_preserves_casts_literals_and_qualified_names() {
+        let text = "(q - 16'(dead)) & (pkg::dead | 16'h dead)";
+        assert_eq!(
+            substitute_step(text, "dead", "type(dead)'(3'(j))"),
+            "(q - 16'(type(dead)'(3'(j)))) & (pkg::dead | 16'h dead)"
+        );
+        assert_eq!(
+            substitute_step("q + step_t'(step)", "step", "v"),
+            "q + step_t'(v)"
+        );
+        assert_eq!(
+            select_rhs("candidate", "signed_step", 1),
+            "candidate[$unsigned(signed_step)]"
+        );
     }
 }

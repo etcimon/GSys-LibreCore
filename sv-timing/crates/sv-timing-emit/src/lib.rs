@@ -2130,7 +2130,9 @@ endmodule
             "{emitted}"
         );
         assert!(
-            emitted.contains("assign seq_d_svt_cand[svt_j] = type(seq_d)'((seq_q + svt_j));"),
+            emitted.contains(
+                "assign seq_d_svt_cand[svt_j] = type(seq_d)'(seq_q + 16'(type(step)'(3'(svt_j))));"
+            ),
             "{emitted}"
         );
         assert!(emitted.contains("assign seq_d = (step[2] ? seq_d_svt_cand[{1'b1, step[1:0]}] : seq_d_svt_cand[{1'b0, step[1:0]}]);"), "{emitted}");
@@ -2141,6 +2143,58 @@ endmodule
         assert!(
             !emitted.contains("assign seq_d = seq_q + 16'(step);"),
             "origin adder must be gone: {emitted}"
+        );
+    }
+
+    #[test]
+    fn typed_offset_fixture_preserves_signed_steps_and_casts() {
+        use sv_timing_core::{analyze_files, LowerOptions, ParseOptions, TimingTarget};
+        use sv_timing_transform::{run_correct_passes, PassContext, PassPolicy};
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/select_offsets.sv");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let mut opt = sv_timing_core::OptOptions::preset(sv_timing_core::OptLevel::O3);
+        opt.max_cells_per_fo4 = 0.0;
+        let out = analyze_files(
+            &[path],
+            &ParseOptions::default(),
+            &LowerOptions {
+                target: TimingTarget::new(4000.0, 20.0, 0.2),
+                opt: opt.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        // Deliberately exercise all forms; production area selectivity is a
+        // separate gate and refuses expensive small-gain candidate banks.
+        let policy = PassPolicy::from_opt(opt, vec!["select_offsets".into()], false);
+        let ctx = run_correct_passes(PassContext::new(out.design, out.names, policy)).unwrap();
+        let offsets: Vec<_> = ctx
+            .trace
+            .records
+            .iter()
+            .filter(|r| r.kind == EditKind::SelectIncrement)
+            .collect();
+        assert_eq!(offsets.len(), 4);
+        assert_eq!(
+            ctx.tradeoffs.iter().filter(|t| t.edit_id.is_some()).count(),
+            4
+        );
+        let mut dense = dense_options_from_source(&source);
+        dense.emit_balance_mux_rtl = true;
+        dense.real_cut_feeds = true;
+        let emitted =
+            apply_edits_to_source_dense(&source, &ctx.trace, &EmitPolicy::default(), &dense);
+        assert!(emitted.contains("signed_minus_svt_cand[$unsigned(signed_step)]"));
+        assert!(emitted.contains("16'(type(signed_step)'(2'(svt_j)))"));
+        assert!(emitted.contains("2'(type(step)'(3'(svt_j)))"));
+        let mut tree = EmitTree::new();
+        tree.add_file("select_offsets__svt.sv", FileRole::Module, emitted);
+        let integrity = integrity_reparse(&tree, &ParseOptions::default());
+        assert!(
+            integrity.joint_ok && integrity.reparse_ok,
+            "{:?}",
+            integrity.messages
         );
     }
 

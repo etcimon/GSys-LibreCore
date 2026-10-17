@@ -227,6 +227,8 @@ export interface CorrectOptions {
   modulesAllow: string[];
   allowLatency?: boolean;
   assumeClk?: boolean;
+  /** Plan structural source rewrites and real cut feeds (CLI --real-cut-feeds). */
+  realCutFeeds?: boolean;
   dryRun?: boolean;
   emitDir?: string;
   jsonOut: string;

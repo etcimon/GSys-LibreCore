@@ -111,11 +111,12 @@ module sb_wrap_new
   // the head slot's address is don't-care while the speculative queue is
   // empty (stale data of an invalid slot); compare it only when live
   assign rvfi_mem_paddr_o = (u.speculative_status_cnt_q != '0) ? paddr_raw : '0;
-  // environment contract (store_buffer.sv:1023): no commit on an empty
-  // speculative queue; no push when not ready
-  always_comb begin
-    assume (!commit_i || u.speculative_status_cnt_q != '0);
-    assume (!valid_i || ready_o);
+  // Sample acceptance at the clock edge. ready_o describes next-state
+  // capacity, so a legal final-slot push can deassert it in this cycle.
+  always_ff @(posedge clk_i) if (rst_ni) begin
+    assume (!commit_i || (u.speculative_status_cnt_q != '0 && !flush_i &&
+                         u.commit_status_cnt_q < u.DEPTH_COMMIT));
+    assume (!valid_i || u.speculative_status_cnt_q < u.DEPTH_SPEC);
   end
 endmodule
 module sb_wrap_old
@@ -227,11 +228,12 @@ module sb_wrap_old
   // the head slot's address is don't-care while the speculative queue is
   // empty (stale data of an invalid slot); compare it only when live
   assign rvfi_mem_paddr_o = (u.speculative_status_cnt_q != '0) ? paddr_raw : '0;
-  // environment contract (store_buffer.sv:1023): no commit on an empty
-  // speculative queue; no push when not ready
-  always_comb begin
-    assume (!commit_i || u.speculative_status_cnt_q != '0);
-    assume (!valid_i || ready_o);
+  // Same clocked contract as sb_wrap_new; no post-edge assertion on inputs
+  // that have just been consumed.
+  always_ff @(posedge clk_i) if (rst_ni) begin
+    assume (!commit_i || (u.speculative_status_cnt_q != '0 && !flush_i &&
+                         u.commit_status_cnt_q < u.DEPTH_COMMIT));
+    assume (!valid_i || u.speculative_status_cnt_q < u.DEPTH_SPEC);
   end
 endmodule
 module sb_miter_super

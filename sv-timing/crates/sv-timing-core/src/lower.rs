@@ -2860,6 +2860,7 @@ where
     T: IntoIterator<Item = RefNode<'a>> + Copy,
 {
     let mut loc = first_locate_loc(tree, line_index, path_str, root);
+    let mut assign_kind = assign_kind;
     let mut start: Option<u32> = None;
     let mut end: Option<u32> = None;
     for node in root {
@@ -2877,13 +2878,17 @@ where
             len: (e - s) as usize,
         };
         let text = tree.get_str(&span)?;
+        let clean = blank_sv_comments(text);
+        if assign_kind == AssignKind::Blocking && compound_assign_parts(&clean).is_some() {
+            assign_kind = AssignKind::BlockingCompound;
+        }
         let source_start = loc.byte_start as usize;
         if loc.origin == OriginKind::UserFile
             && bytes.get(source_start..source_start + text.len()) != Some(text.as_bytes())
         {
             loc.origin = OriginKind::ExpandedMacro;
         }
-        let (lhs, rhs) = split_assign_text(text);
+        let (lhs, rhs) = split_assign_text(&clean);
         (
             lhs.map(|s| blank_sv_comments(&s)),
             rhs.map(|s| blank_sv_comments(&s)),
@@ -2909,6 +2914,9 @@ where
 
 fn split_assign_text(text: &str) -> (Option<String>, Option<String>) {
     let t = text.trim().trim_end_matches(';').trim();
+    if let Some((lhs, op, rhs)) = compound_assign_parts(t) {
+        return (Some(lhs.to_string()), Some(format!("{lhs} {op} ({rhs})")));
+    }
     // NBA first
     if let Some((l, r)) = t.split_once("<=") {
         return (Some(l.trim().to_string()), Some(r.trim().to_string()));
@@ -2920,6 +2928,38 @@ fn split_assign_text(text: &str) -> (Option<String>, Option<String>) {
         }
     }
     (None, Some(t.to_string()))
+}
+
+/// Recover a compound operator immediately before the assignment's `=`.
+/// Keep the original source intact; only the measurement RHS is expanded.
+fn compound_assign_parts(text: &str) -> Option<(&str, &str, &str)> {
+    let t = text.trim().trim_end_matches(';').trim();
+    let mut depth = 0i32;
+    let equal = t.char_indices().find_map(|(i, c)| {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            '=' if depth == 0 => return Some(i),
+            _ => {}
+        }
+        None
+    })?;
+    let (left, right) = (&t[..equal], &t[equal + 1..]);
+    if right.starts_with('=') {
+        return None;
+    }
+    let left = left.trim_end();
+    for op in [
+        "<<<", ">>>", "<<", ">>", "+", "-", "*", "/", "%", "&", "|", "^",
+    ] {
+        if let Some(lhs) = left.strip_suffix(op) {
+            let lhs = lhs.trim();
+            if !lhs.is_empty() {
+                return Some((lhs, op, right.trim()));
+            }
+        }
+    }
+    None
 }
 
 /// True when a CST operator token sits inside a `//` / `/*` comment.
@@ -3284,6 +3324,86 @@ mod tests {
 
     fn analyze_inline_source(text: &str) -> AnalyzeOutput {
         analyze_inline_with_options(text, &LowerOptions::default())
+    }
+
+    #[test]
+    fn compound_updates_keep_the_read_dependency_and_refuse_automatic_rewrites() {
+        for op in ["+", "|"] {
+            let source = |update: &str| {
+                format!(
+                    "module m(input logic clk_i, input logic [7:0] a, output logic [7:0] q);
+                 logic [7:0] acc;
+                 always_comb begin
+                   acc='0;
+                   for(int i=0;i<8;i++) begin {update} end
+                 end
+                 always_ff @(posedge clk_i) q<=acc;
+                 endmodule"
+                )
+            };
+            let plain = analyze_inline_source(&source(&format!("acc = acc {op} a;")));
+            let compound = analyze_inline_source(&source(&format!("acc {op}= a;")));
+            let p = plain
+                .design
+                .modules
+                .values()
+                .next()
+                .unwrap()
+                .nodes
+                .values()
+                .find(|n| {
+                    n.lhs.as_deref() == Some("acc")
+                        && n.rhs.as_deref().is_some_and(|r| r.contains("acc"))
+                })
+                .unwrap();
+            let c = compound
+                .design
+                .modules
+                .values()
+                .next()
+                .unwrap()
+                .nodes
+                .values()
+                .find(|n| n.assign_kind == AssignKind::BlockingCompound)
+                .unwrap();
+            assert_eq!(c.lhs.as_deref(), Some("acc"));
+            assert!(c.rhs.as_deref().unwrap().contains("acc"));
+            assert!(c.assign_kind.is_comb_def());
+            assert!(
+                (p.fo4_cost - c.fo4_cost).abs() < 1e-9,
+                "{} vs {}",
+                p.fo4_cost,
+                c.fo4_cost
+            );
+            assert!(!compound.design.opportunities.iter().any(|o| {
+                compound
+                    .design
+                    .paths
+                    .iter()
+                    .any(|p| p.id == o.path_id && p.nodes.contains(&c.id))
+            }));
+        }
+        assert_eq!(
+            compound_assign_parts("a[i==j]<<=b;"),
+            Some(("a[i==j]", "<<", "b"))
+        );
+        assert!(compound_assign_parts("q <= a;").is_none());
+        let with_comment = analyze_inline_source(
+            "module m(input logic a, output logic q);
+             always_comb begin q='0; q /* note: x = y */ |= a; end
+             endmodule",
+        );
+        assert!(with_comment
+            .design
+            .modules
+            .values()
+            .next()
+            .unwrap()
+            .nodes
+            .values()
+            .any(
+                |n| n.lhs.as_deref() == Some("q") && n.assign_kind == AssignKind::BlockingCompound
+            ));
     }
 
     fn analyze_inline_with_options(text: &str, options: &LowerOptions) -> AnalyzeOutput {

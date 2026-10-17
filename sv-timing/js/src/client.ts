@@ -95,6 +95,7 @@ export class SvTimingClient {
     for (const f of options.files ?? []) args.push("--file", f);
     if (options.allowLatency) args.push("--allow-latency");
     if (options.assumeClk) args.push("--assume-clk");
+    if (options.realCutFeeds) args.push("--real-cut-feeds");
     if (options.targetMhz != null)
       args.push("--target-mhz", String(options.targetMhz));
     if (options.maxPasses != null)

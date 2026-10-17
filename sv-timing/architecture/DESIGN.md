@@ -671,6 +671,27 @@ Inactive instances and loops are excluded with their regions; fallback
 operator discovery must not resurrect the excluded assignments. Source
 text is unchanged and no FO4 credit is awarded for a proposed hardware edit.
 
+**Typed offset selection (correction-v1, A120).** SelectIncrement now
+recognizes `REG - step` as well as addition; subtraction is not commuted.
+IR and emission substitute typed selector bit patterns into the original
+source RHS so size/signedness casts are retained. Signed selectors index the
+candidate array through their unsigned representation. Unknown result widths,
+unresolved masks/indices, complex source tokens and later procedural writes
+to the selector are refused. The correction version participates in analyze
+cache identity because opportunities change independently of delay costs.
+
+**Compound updates (delay-v41).** `acc |= x` and other compound updates
+normalize to read/modify/write expressions for dataflow and costing; the
+operator is not part of the LHS name. `BlockingCompound` remains explicit.
+Automatic correction refuses paths containing these updates until their
+source rewrite semantics are implemented; the emitter also refuses to
+treat a compound update as plain `=`. This prevents a parallel gather's
+accumulator dependency from disappearing solely because of source syntax.
+IR schema v2 records the compound assignment kind. Module-cache keys now
+include parse options, lowering/correction versions and parameter facts;
+otherwise a full-design cache miss could reuse a module with the other
+generate branch already discarded.
+
 ---
 
 ### 3. FO4 cost model and target frequency

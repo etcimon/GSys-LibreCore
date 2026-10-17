@@ -1994,6 +1994,16 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
                 | PathClassKind::DenseControlCone
         );
         let module = design.modules.get(&path.module);
+        if module.is_some_and(|m| {
+            path.nodes
+                .iter()
+                .filter_map(|id| m.nodes.get(id))
+                .any(|n| n.assign_kind == crate::ir::AssignKind::BlockingCompound)
+        }) {
+            // Measure the read/modify/write dependency, but do not authorize
+            // a source rewrite until compound origins have explicit support.
+            continue;
+        }
 
         // SelectIncrement: `REG + narrow step` at the end of a cone — exact,
         // latency-neutral, the adder leaves the critical path (A88). Any class
@@ -2028,10 +2038,11 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
                         estimated_fo4_after: (path.total_fo4 - shape.gain()).max(0.0),
                         loc: n.loc.clone(),
                         rationale: format!(
-                            "path {} select_increment on node {id}: `{}` = `{}` + `{}` ({} candidates, {} select level(s); no latency)",
+                            "path {} select_increment on node {id}: `{}` = `{}` {} `{}` ({} candidates, {} select level(s); no latency)",
                             path.id,
                             shape.lhs_text,
                             shape.reg_text,
+                            shape.operator,
                             shape.step_ident,
                             shape.candidates(),
                             shape.mux_levels()

@@ -360,6 +360,12 @@ violations. It is a standalone module experiment, not a change to the default
 whole-core flow or a routed sign-off gate. A119 evidence is under
 `workspace/build/sv-timing/selection-a119/placed-margin/`.
 
+A120 generalizes that same discriminator to `CONTROL_MODULE=g6lc_rename`
+or `store_buffer` (default remains `g6lc_iq`). The paired source snapshots
+and fixed placement recipe remain explicit. It selected the rename write-mask
+candidate and rejected the IQ count-bank and store-gather trials; artifacts
+are under `workspace/build/sv-timing/precompute-a120c/`.
+
 ```bash
 ./build.sh timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --allow-over-budget --remote --map-recipe streamed
 ```

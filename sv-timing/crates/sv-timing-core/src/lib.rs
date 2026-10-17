@@ -108,12 +108,14 @@ pub use relocation::{
     RelocationCard, RelocationKind, RelocationOption, RelocationPattern, RelocationPlan,
     RelocationSummary, RelocationTier, RELOCATION_PLAN_SCHEMA,
 };
-pub use version::{IR_VERSION, MEASUREMENT_VERSION, PACKAGE_VERSION, PARSER_PIN_HINT};
+pub use version::{
+    CORRECTION_VERSION, IR_VERSION, MEASUREMENT_VERSION, PACKAGE_VERSION, PARSER_PIN_HINT,
+};
 
 /// Library identity for report banners.
 pub fn banner() -> String {
     format!(
         "sv-timing-core {PACKAGE_VERSION} ir={IR_VERSION} measurement={MEASUREMENT_VERSION} \
-         parser_pin={PARSER_PIN_HINT}"
+         correction={CORRECTION_VERSION} parser_pin={PARSER_PIN_HINT}"
     )
 }

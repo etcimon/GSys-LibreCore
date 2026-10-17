@@ -9,6 +9,10 @@ Remote: testharness_proxy.py py run_fo4_control_review.py --data DIR/inputs.tar.
 Selection round: --profile selection --baseline 36bbe0114. Its directed
 leaf mode also uploads tb_g6lc_lsq.sv and tb_g6lc_iq_store_age.sv and sets
 CONTROL_MODE=selection-leaf.
+The precompute profile replays the archived A120 trial snapshot, including
+the IQ bank and store gather later rejected from production. Use the cited
+inputs.tar.gz for those experiments; the retained tree uses final-widths.
+CONTROL_MODE=precompute-leaf uploads store_buffer_sbs for asserted comparison.
 CONTROL_MODE=placed-iq reads a completed paired run from CONTROL_REFERENCE
 and an uploaded openroad-module-place-study.tcl; it never overwrites the
 reference artifacts. PLACEMENT_GDB=1 captures a tool crash when needed.
@@ -34,7 +38,7 @@ import tarfile
 
 CHANGED = ("core/ooo/g6lc_ooo_pkg.sv", "core/ooo/g6lc_rename.sv",
            "core/store_buffer.sv", "core/alu.sv", "core/mult.sv",
-           "core/fetch_B/frontend.sv")
+           "core/fetch_B/frontend.sv", "core/scoreboard.sv")
 MODULES = {"g6lc_rename", "store_buffer", "frontend", "g6lc_iq", "multiplier",
            "g6lc_lsq", "scoreboard", "instr_realign", "wt_dcache_wbuffer",
            "issue_read_operands", "alu", "mult"}
@@ -63,10 +67,15 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
         files[name] = (root / name).read_bytes()
     files["portable.f"] = text.replace(root.as_posix(), "@ROOT@").encode()
     files["host-param-map.json"] = (flist.parent / "param-map.json").read_bytes()
-    changed = ("core/ooo/g6lc_iq.sv", "core/ooo/g6lc_lsq.sv") if profile == "selection" else CHANGED
+    profile_files = {
+        "control": CHANGED,
+        "selection": ("core/ooo/g6lc_iq.sv", "core/ooo/g6lc_lsq.sv"),
+        "precompute": ("core/ooo/g6lc_iq.sv", "core/ooo/g6lc_rename.sv", "core/store_buffer.sv"),
+    }
+    changed = profile_files[profile]
+    measured = MODULES if profile == "control" else {Path(p).stem for p in changed}
     files["review.json"] = json.dumps({"profile": profile, "changed_files": changed,
-                                      "modules": sorted(MODULES if profile == "control" else
-                                                        {"g6lc_iq", "g6lc_lsq"})}).encode()
+                                      "modules": sorted(measured)}).encode()
     for name in changed:
         files["baseline/" + name] = subprocess.check_output(
             ["git", "show", f"{baseline}:{name}"], cwd=root)
@@ -103,7 +112,11 @@ def analyze_results(results: Path) -> None:
         raise ValueError("expected g6lc64_ooo XLEN=64/MultStages=2 parameter snapshot")
     review = source / "review.json"
     changed = json.loads(review.read_text())["changed_files"] if review.exists() else CHANGED
+    if not (results / "candidate/width-map.json").exists():
+        raise ValueError("candidate elaborated widths are required")
     for variant in ("baseline", "candidate"):
+        if not (results / variant / "width-map.json").exists():
+            continue
         flist = portable
         if variant == "baseline":
             for name in changed:
@@ -168,6 +181,82 @@ def remote() -> None:
         path.write_text(commands)
         return run(name, [ys, "-Q", "-T", "-s", str(path)], timeout=timeout)
 
+    if os.environ.get("CONTROL_MODE") == "final-widths":
+        # Widths and live specializations are elaboration facts. No gate
+        # mapping is needed to refresh them after selecting the retained RTL.
+        work = out / "candidate"
+        work.mkdir()
+        flist = (src / "portable.f").read_text().replace("@ROOT@", str(src))
+        (work / "core.f").write_text(flist)
+        yosys("final-elaboration",
+              f"read_slang -f {work}/core.f --top cva6 --single-unit --best-effort-hierarchy\n"
+              f"hierarchy -check -top cva6\nwrite_rtlil {work}/wordlevel.il\n", timeout=300)
+        run("final-widths", ["python3", str(src / "sv-timing/tools/rtlil_width_map.py"),
+                            str(work / "wordlevel.il"), "-o", str(work / "width-map.json")])
+        evidence["width_mode"] = "elaboration-only; no timing result inferred"
+        (out / "result.json").write_text(json.dumps(evidence, indent=2))
+        print("PASS retained-source elaboration and width extraction", flush=True)
+        return
+
+    if os.environ.get("CONTROL_MODE") == "offset-fixture":
+        sources = {"gold": data / "select_offsets.sv", "gate": data / "select_offsets__svt.sv"}
+        commands = []
+        for name, path in sources.items():
+            evidence["sources"][path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
+            commands += [f"read_slang --top select_offsets {path}", "proc", "memory_map",
+                         "opt_clean", f"rename select_offsets {name}", f"design -stash {name}"]
+        commands += ["design -copy-from gold -as gold gold", "design -copy-from gate -as gate gate",
+                     "equiv_make gold gate equiv", "hierarchy -top equiv",
+                     "equiv_simple -seq 1", "equiv_status -assert"]
+        log = yosys("offset-equivalence", "\n".join(commands))
+        assert "Equivalence successfully proven!" in log
+        evidence["proofs"]["offsets"] = "typed emitted RTL equivalence PASS"
+        for name, path in sources.items():
+            netlist, stats = out / f"{name}.v", out / f"{name}.stat"
+            yosys(f"offset-map-{name}",
+                  f"read_slang --top select_offsets {path}\nproc\nopt_clean\nwreduce\nalumacc\n"
+                  f"booth\ntechmap\nopt_clean\ndfflibmap -liberty {lib}\n{abc}\n"
+                  f"opt_clean -purge\ntee -o {stats} stat -liberty {lib}\n"
+                  f"write_verilog -noattr -noexpr {netlist}\n")
+            env = dict(os.environ, OR_LIBERTY=lib, OR_VERILOG=str(netlist),
+                       OR_TOP="select_offsets", OR_PERIOD_NS="0.25", OR_IGNORE_FANOUT_ABOVE="0")
+            text = run(f"offset-sta-{name}", [sta, "-exit",
+                       str(src / "build-platform/scripts/openroad-module-board.tcl")], env=env)
+            row = next(l for l in text.splitlines() if l.startswith("ROW\t"))
+            evidence["maps"][name] = {"row": row,
+                "area_um2": float(re.search(r"Chip area for module .*?:\s*([\d.]+)", stats.read_text())[1])}
+        (out / "result.json").write_text(json.dumps(evidence, indent=2))
+        print(json.dumps(evidence["maps"]), flush=True)
+        return
+
+    if os.environ.get("CONTROL_MODE") == "precompute-leaf":
+        vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+        evidence["simulator"] = subprocess.check_output([vl, "--version"], text=True).strip()
+        portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
+        packages = [l for l in portable.splitlines()
+                    if l.startswith("+") or l.endswith("_pkg.sv") or "/include/" in l]
+        old = (src / "baseline/core/store_buffer.sv").read_text()
+        assert old.count("module store_buffer\n") == 1
+        golden = out / "store_buffer_old.sv"
+        golden.write_text(old.replace("module store_buffer\n", "module store_buffer_old\n", 1))
+        harness = data / "store_buffer_sbs"
+        for p in harness.glob("*.sv"):
+            evidence["sources"][p.name] = hashlib.sha256(p.read_bytes()).hexdigest()
+        flist = out / "store.f"
+        flist.write_text("\n".join(packages + [
+            str(src / "core/store_buffer.sv"), str(golden),
+            str(harness / "wrap.sv"), str(harness / "tb_sb_sbs.sv")]) + "\n")
+        obj = out / "obj-store"
+        run("store-build", [vl, "-O0", "--binary", "--timing", "--assert",
+            "-Wno-fatal", "-Wno-WIDTH", "-Wno-UNOPTFLAT", "-f", str(flist),
+            "--top-module", "tb_sb_sbs", "--Mdir", str(obj), "-j", "4"], timeout=600)
+        log = run("store-sbs", [str(obj / "Vtb_sb_sbs"), "+seed=17"], timeout=180)
+        assert "PASS" in log and "errors=0" in log
+        evidence["proofs"]["store-sbs"] = log
+        (out / "result.json").write_text(json.dumps(evidence, indent=2))
+        print(log, flush=True)
+        return
+
     if os.environ.get("CONTROL_MODE") == "placed-iq":
         reference = Path(os.environ["CONTROL_REFERENCE"])
         paired = json.loads((reference / "result.json").read_text())
@@ -177,8 +266,12 @@ def remote() -> None:
         evidence["openroad_version"] = subprocess.check_output([binary, "-version"], text=True).strip()
         evidence["placement_script_sha256"] = hashlib.sha256(study.read_bytes()).hexdigest()
         evidence["placement_inputs"] = {}
+        module = os.environ.get("CONTROL_MODULE", "g6lc_iq")
+        if module not in {"g6lc_iq", "g6lc_rename", "store_buffer"}:
+            raise ValueError(f"unsupported standalone placement module: {module}")
+        evidence["placement_module"] = module
         for variant in ("baseline", "candidate"):
-            names = [n for n in paired["maps"][variant] if n.split("$")[0] == "g6lc_iq"]
+            names = [n for n in paired["maps"][variant] if n.split("$")[0] == module]
             assert len(names) == 1
             top = names[0]
             entries = (reference / variant / "il/modules.tsv").read_text().splitlines()
@@ -203,6 +296,11 @@ def remote() -> None:
 
     if (src / "review.json").exists():
         review = json.loads((src / "review.json").read_text())
+        if review["profile"] == "precompute" and not os.environ.get("CONTROL_MODE"):
+            prove_precompute(src, out, yosys, evidence)
+            map_snapshots(src, out, sta, lib, abc, evidence, yosys, run,
+                          changed=review["changed_files"], modules=set(review["modules"]))
+            return
         if review["profile"] == "selection" and os.environ.get("CONTROL_MODE", "selection") in (
             "selection", "selection-leaf"
         ):
@@ -391,12 +489,15 @@ endmodule
     # Rename: match state by name, then prove the changed read cones. Both
     # designs share arbitrary matched state; this is not only reset testing.
     for harts in (1, 2):
+        entries = 40 if harts == 1 else 80
+        tag_width = (entries-1).bit_length()
         commands = []
         for variant, source in (("gold", "baseline/core/ooo/g6lc_rename.sv"),
                                 ("gate", "core/ooo/g6lc_rename.sv")):
             commands += [
                 f"read_slang --top g6lc_rename -G NR_HARTS={harts} "
-                "-G PRF_ENTRIES=40 -G FPRF_ENTRIES=40 -G CKPT_DEPTH=4 "
+                f"-G PRF_ENTRIES={entries} -G FPRF_ENTRIES={entries} "
+                f"-G PRF_W={tag_width} -G FPRF_W={tag_width} -G CKPT_DEPTH=4 "
                 f"--ignore-assertions {source}",
                 "proc", "memory_map", "async2sync", "opt_clean",
                 f"rename g6lc_rename {variant}", f"design -stash {variant}",
@@ -588,6 +689,83 @@ endmodule
     print("PROOFS " + json.dumps(evidence["proofs"]), flush=True)
 
 
+def prove_precompute(src, out, yosys, evidence):
+    iq = (src / "core/ooo/g6lc_iq.sv").read_text()
+    bank = iq.split("// BEGIN A120 late issue-count select", 1)[1].split(
+        "// END A120 late issue-count select", 1)[0].replace("CVA6Cfg.NrIssuePorts", "PORTS")
+    for depth, ports in ((1, 1), (3, 2), (24, 2), (32, 4)):
+        fixture = out / f"count-{depth}-{ports}.sv"
+        fixture.write_text(f"""
+module count_eq(
+ input logic [$clog2({depth}+1)-1:0] count_q,
+ input logic [{depth-1}:0] cancel_hit,
+ input logic [{ports-1}:0] issue_valid_o, issue_ack_i, disp_ack_o,
+ input logic flush_i, output logic ok);
+ localparam DEPTH={depth}, PORTS={ports}, DW=$clog2(DEPTH+1);
+ logic [DW-1:0] count_d, gold;
+{bank}
+ assign gold=flush_i ? '0 : count_q-DW'($countones(cancel_hit))
+                   -DW'($countones(issue_valid_o & issue_ack_i))
+                   +DW'($countones(disp_ack_o));
+ assign ok=count_d==gold;
+endmodule
+""")
+        text = yosys(f"count-{depth}-{ports}", f"read_slang --top count_eq {fixture}\n"
+                     "prep -top count_eq -flatten\nsat -prove ok 1 -verify\n")
+        assert "SUCCESS!" in text
+        evidence["proofs"][f"count-{depth}-{ports}"] = "all-pattern modular SAT PASS"
+    for harts, entries, ports in ((1, 40, 2), (2, 80, 2), (1, 40, 3)):
+        tag_width = (entries-1).bit_length()
+        commands = []
+        for variant, path in (("gold", "baseline/core/ooo/g6lc_rename.sv"),
+                              ("gate", "core/ooo/g6lc_rename.sv")):
+            commands += [
+                f"read_slang --top g6lc_rename -G NR_HARTS={harts} -G NR_PORTS={ports} "
+                f"-G PRF_ENTRIES={entries} -G FPRF_ENTRIES={entries} "
+                f"-G PRF_W={tag_width} -G FPRF_W={tag_width} -G CKPT_DEPTH=4 "
+                f"--ignore-assertions {path}", "proc", "memory_map", "async2sync", "opt_clean",
+                f"rename g6lc_rename {variant}", f"design -stash {variant}",
+            ]
+        commands += ["design -copy-from gold -as gold gold",
+                     "design -copy-from gate -as gate gate", "equiv_make gold gate equiv",
+                     "hierarchy -top equiv", "equiv_simple -seq 1", "equiv_status -assert"]
+        text = yosys(f"rename-{harts}-{ports}", "\n".join(commands), timeout=600)
+        assert "Equivalence successfully proven!" in text
+        evidence["proofs"][f"rename-{harts}h-{ports}p"] = "matched-state equivalence PASS"
+    # A118 established the stable-rank relation. Check that control region is
+    # byte-identical, then prove the new gather for its one-hot-or-zero mask.
+    def rank_region(text):
+        return text.split("// Direct predecessor relation", 1)[1].split("// one gather:", 1)[0]
+    old = (src / "baseline/core/store_buffer.sv").read_text()
+    new = (src / "core/store_buffer.sv").read_text()
+    assert rank_region(old) == rank_region(new)
+    evidence["rank_control_sha256"] = hashlib.sha256(rank_region(new).encode()).hexdigest()
+    for depth in (4, 8, 16):
+        fixture = out / f"gather-{depth}.sv"
+        fixture.write_text(f"""
+module gather_eq(input logic [{depth-1}:0] selected,
+ input logic [{depth-1}:0][146:0] payload, input logic [146:0] previous,
+ output logic ok);
+ logic [146:0] gold, combined, gate;
+ always_comb begin
+   gold=previous & ~147'(5); // clear valid and fwd_keep only
+   combined='0;
+   for(int k=0;k<{depth};k++) begin
+     if(selected[k]) gold=payload[k] | 147'(4); // valid
+     combined |= selected[k] ? payload[k] : '0;
+   end
+   gate=(|selected) ? (combined | 147'(4)) : (previous & ~147'(5));
+ end
+ assign ok=((selected & (selected-1'b1)) != '0) || (gold==gate);
+endmodule
+""")
+        text = yosys(f"gather-{depth}", f"read_slang --top gather_eq {fixture}\n"
+                     "prep -top gather_eq -flatten\nsat -prove ok 1 -verify\n")
+        assert "SUCCESS!" in text
+        evidence["proofs"][f"gather-{depth}"] = "one-hot/empty payload SAT PASS"
+    print("PROOFS " + json.dumps(evidence["proofs"]), flush=True)
+
+
 if __name__ == "__main__":
     if "TH_DATA_DIR" in os.environ:
         remote()
@@ -597,7 +775,7 @@ if __name__ == "__main__":
         mode.add_argument("--snapshot", type=Path)
         mode.add_argument("--analyze-results", type=Path)
         parser.add_argument("--baseline", help="baseline revision for the selected review profile")
-        parser.add_argument("--profile", choices=("control", "selection"), default="control")
+        parser.add_argument("--profile", choices=("control", "selection", "precompute"), default="control")
         args = parser.parse_args()
         if args.snapshot:
             if not args.baseline:

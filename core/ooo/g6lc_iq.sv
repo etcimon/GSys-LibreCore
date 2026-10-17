@@ -562,8 +562,8 @@ module g6lc_iq
   // allocations, and the three sets are disjoint by construction — a grant
   // needs a valid, uncancelled entry; an allocation needs a slot free after
   // issue — so the popcount of the next state is the registered count minus
-  // the cancels, minus the acks, plus the allocations. Every operand is an
-  // early signal; the invariant `count_q == $countones(valid)` holds from
+  // the cancels, minus the acks, plus the allocations. The acknowledged
+  // issue count arrives after selection; the invariant below holds from
   // reset and is asserted below.
   logic [DEPTH-1:0] q_d_valid, cancel_hit, cancel_hit_d;
   always_comb begin

@@ -496,6 +496,11 @@ fn sanitize_lhs(lhs: &str) -> Option<String> {
     if l.is_empty() {
         return None;
     }
+    // Never interpret `acc|=x` as a plain assignment to `acc|`. The core
+    // measures compound updates, but emission must retain their source.
+    if l.ends_with(['+', '-', '*', '/', '%', '&', '|', '^', '<', '>']) {
+        return None;
+    }
     // Must not contain commas or bare case-label lists
     if l.contains(',') || l.contains(':') {
         return None;
@@ -3014,6 +3019,9 @@ mod tests {
 
     #[test]
     fn parse_blocking_and_nba() {
+        assert!(parse_assign_line("acc|=x;").is_none());
+        assert!(parse_assign_line("acc += x;").is_none());
+        assert!(parse_assign_line("q[i+1] <<= a;").is_none());
         let (l, r, nba) = parse_assign_line("    t1 = t0 + c_i;").unwrap();
         assert_eq!(l, "t1");
         assert_eq!(r, "t0 + c_i");

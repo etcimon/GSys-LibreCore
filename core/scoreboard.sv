@@ -192,12 +192,7 @@ module scoreboard #(
   // the acks and clears on flush; the popcount equality is asserted in
   // simulation. The register is reset and flushed with the entries.
   logic [$clog2(CVA6Cfg.NR_SB_ENTRIES+1)-1:0] sb_issued_cnt_q, sb_issued_cnt_d;
-  logic [$clog2(CVA6Cfg.NR_SB_ENTRIES+1)-1:0] sb_issued_popcnt;
   always_comb begin
-    sb_issued_popcnt = '0;
-    for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
-      if (mem_q[i].issued) sb_issued_popcnt += 1'b1;
-    end
     sb_issued_cnt = sb_issued_cnt_q;
 `ifdef G6LC_MUT_SB_POPCOUNT_FREE
     // MUTANT: restore the popcount free count under MIXED — a committed hole
@@ -235,6 +230,15 @@ module scoreboard #(
                          : sb_issued_cnt_q + $clog2(CVA6Cfg.NR_SB_ENTRIES+1)'(num_issue)
                                            - $clog2(CVA6Cfg.NR_SB_ENTRIES+1)'(num_commit);
   //pragma translate_off
+  // This reference count is consumed only by the assertion. Keep its
+  // calculation out of synthesis/timing just like the assertion itself.
+  logic [$clog2(CVA6Cfg.NR_SB_ENTRIES+1)-1:0] sb_issued_popcnt;
+  always_comb begin
+    sb_issued_popcnt = '0;
+    for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
+      if (mem_q[i].issued) sb_issued_popcnt += 1'b1;
+    end
+  end
   always_ff @(posedge clk_i) begin
     if (rst_ni)
       sb_issued_cnt_is_popcount: assert (sb_issued_cnt_q == sb_issued_popcnt)

@@ -16,9 +16,7 @@ use sv_timing_core::{
 
 use crate::crc::{digest_files, FileDigest};
 use crate::pathkey::PathIndex;
-use crate::store::{
-    compute_pp_fingerprint, crc_set_for_file, CacheStats, ModuleIrBlob, TimingCache,
-};
+use crate::store::{compute_pp_fingerprint, CacheStats, ModuleIrBlob, TimingCache};
 
 /// Result of cached analyze.
 #[derive(Debug)]
@@ -70,6 +68,10 @@ pub fn analyze_with_cache(
     param_keys.push(format!(
         "#measurement={}",
         sv_timing_core::MEASUREMENT_VERSION
+    ));
+    param_keys.push(format!(
+        "#correction={}",
+        sv_timing_core::CORRECTION_VERSION
     ));
     param_keys.push(format!(
         "#path_class={}",
@@ -216,7 +218,7 @@ pub fn analyze_with_cache(
             }
             continue;
         }
-        let cs = crate::fingerprint::module_crc_set(&pairs);
+        let cs = module_crc_in_context(&pairs, parse, lower);
         match cache.get_module(mod_name, &cs)? {
             Some(blob) if sv_timing_core::lower_fields_cover(&blob.emitted_lower_fields) => {
                 stats.module_hits += 1;
@@ -280,6 +282,7 @@ pub fn analyze_with_cache(
             &design_key,
             &design,
             lower,
+            parse,
             &hit_blobs,
             None,
         )?;
@@ -377,6 +380,7 @@ pub fn analyze_with_cache(
         &design_key,
         &design,
         lower,
+        parse,
         &hit_blobs,
         Some(&design),
     )?;
@@ -435,6 +439,7 @@ fn full_rebuild(
         design_key,
         &out.design,
         lower,
+        parse,
         &[],
         Some(&out.design),
     )?;
@@ -525,6 +530,36 @@ fn merge_miss_into(design: &mut TimingDesign, names: &mut NameTable, miss: MissS
     let _ = miss.module_names;
 }
 
+/// Lowering can prune generate branches using parameter facts. File bytes
+/// alone cannot identify reusable module IR across different host contexts.
+fn module_crc_in_context(
+    pairs: &[(String, String)],
+    parse: &ParseOptions,
+    lower: &LowerOptions,
+) -> String {
+    let context = format!(
+        "{}|{}|{}|{:?}|{:?}|{}|{}",
+        IR_VERSION,
+        sv_timing_core::MEASUREMENT_VERSION,
+        sv_timing_core::CORRECTION_VERSION,
+        (
+            &parse.include_paths,
+            &parse.defines,
+            parse.ignore_include_error,
+            parse.allow_parse_errors
+        ),
+        lower.package_mode,
+        lower.opt.analysis_digest(),
+        lower.param_map.value_canonical(),
+    );
+    let mut keyed = pairs.to_vec();
+    keyed.push((
+        "#svt_lower_context".into(),
+        crate::fingerprint::sha256_hex(context.as_bytes()),
+    ));
+    crate::fingerprint::module_crc_set(&keyed)
+}
+
 fn commit_all(
     cache: &mut TimingCache,
     digests: &[FileDigest],
@@ -532,6 +567,7 @@ fn commit_all(
     design_key: &str,
     design: &TimingDesign,
     lower: &LowerOptions,
+    parse: &ParseOptions,
     _hits: &[ModuleIrBlob],
     _full: Option<&TimingDesign>,
 ) -> CoreResult<()> {
@@ -544,7 +580,7 @@ fn commit_all(
             .map(|d| d.path.clone())
             .unwrap_or_else(|| m.file.clone());
         let crc = found.map(|d| d.crc.as_str()).unwrap_or("unknown");
-        let cs = crc_set_for_file(&path_str, crc);
+        let cs = module_crc_in_context(&[(path_str.clone(), crc.to_string())], parse, lower);
         let paths_for_mod: Vec<_> = design
             .paths
             .iter()
@@ -739,7 +775,66 @@ mod tests {
         let float = analyze_with_cache(&[sv], &parse, &lower, &mut cache).unwrap();
         assert_ne!(integer.stats.design_key, float.stats.design_key);
         assert!(!float.stats.design_hit);
+        assert_eq!(
+            float.stats.module_hits, 0,
+            "parameter context must also invalidate module IR"
+        );
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn changed_host_fact_cannot_reuse_a_pruned_generate_branch() {
+        let dir = std::env::temp_dir().join(format!(
+            "svt_gen_context_{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sv = write_mod(
+            &dir,
+            "context_mod",
+            "typedef struct packed {bit EN;} cfg_t;
+             parameter cfg_t Cfg='0;
+             if (Cfg.EN) assign y=a+b; else assign y=a*b;",
+        );
+        let mut cache =
+            TimingCache::open(crate::store::CacheConfig::at(dir.join("ir.sqlite"))).unwrap();
+        let parse = ParseOptions::default();
+        let mut lower = LowerOptions::default();
+        lower.param_map.insert("Cfg.EN", serde_json::json!(1));
+        let first = analyze_with_cache(&[sv.clone()], &parse, &lower, &mut cache).unwrap();
+        assert!(first
+            .output
+            .design
+            .modules
+            .values()
+            .next()
+            .unwrap()
+            .nodes
+            .values()
+            .any(|n| n.rhs.as_deref() == Some("a+b")));
+        lower.param_map.insert("Cfg.EN", serde_json::json!(0));
+        let second = analyze_with_cache(&[sv.clone()], &parse, &lower, &mut cache).unwrap();
+        assert_eq!(second.stats.module_hits, 0);
+        assert!(second
+            .output
+            .design
+            .modules
+            .values()
+            .next()
+            .unwrap()
+            .nodes
+            .values()
+            .any(|n| n.rhs.as_deref() == Some("a*b")));
+        assert!(
+            analyze_with_cache(&[sv], &parse, &lower, &mut cache)
+                .unwrap()
+                .from_cache
+        );
+        drop(cache);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]

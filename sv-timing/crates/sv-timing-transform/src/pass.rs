@@ -1200,6 +1200,21 @@ fn apply_work_item(
     ctx: &mut PassContext,
     item: &crate::worklist::WorkItem,
 ) -> TransformResult<(bool, Option<&'static str>)> {
+    if ctx
+        .design
+        .paths
+        .iter()
+        .find(|p| p.id == item.path_id)
+        .and_then(|p| ctx.design.modules.get(&p.module).map(|m| (p, m)))
+        .is_some_and(|(p, m)| {
+            p.nodes
+                .iter()
+                .filter_map(|id| m.nodes.get(id))
+                .any(|n| n.assign_kind == sv_timing_core::AssignKind::BlockingCompound)
+        })
+    {
+        return Ok((false, Some("compound_source_rewrite_unsupported")));
+    }
     let mut did = false;
     let Some(opp) = item.opportunity.clone() else {
         return Ok((false, Some("no_opportunity")));

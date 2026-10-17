@@ -7,7 +7,11 @@
 pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Timing IR schema version (bump on breaking IR changes).
-pub const IR_VERSION: &str = "ir-v1";
+pub const IR_VERSION: &str = "ir-v2";
+
+/// Opportunity/structural-emission semantics, independent of delay costs.
+/// v1 adds typed +/- offset candidates and unsigned selector indexing.
+pub const CORRECTION_VERSION: &str = "correction-v1";
 
 /// Measurement semantics version.
 ///
@@ -103,7 +107,9 @@ pub const IR_VERSION: &str = "ir-v1";
 /// `delay-v40`: inactive if-generate branches are excluded before lowering
 /// when explicit host facts or safe, unique localparams prove reachability.
 /// Unknown conditions, parameter defaults and ambiguous origins stay live.
-pub const MEASUREMENT_VERSION: &str = "delay-v40";
+/// `delay-v41`: compound assignments retain their read/modify/write
+/// dependency in IR. They are measured but not automatically source-rewritten.
+pub const MEASUREMENT_VERSION: &str = "delay-v41";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

@@ -14,3 +14,13 @@ bounded miter (`miter -equiv`, `sat -set-assumes -seq N`); the 8-step miter is
 inconclusive within 50 min at the full XLEN=64 / PLEN=56 widths. Evidence of
 record: 4 seeds x 400k cycles, 0 mismatches (215k pushes, 146k commits, 78k
 cancel cycles, 9k flushes per seed).
+
+A120 refresh: use `--assert` on the stock Verilator semantic witness.
+The harness now obeys the reference's clocked capacity/commit assertions,
+drives the committing TID from the head, keeps scoreboard owners live and
+drives legal CBO metadata. Wrapper assumptions are sampled before the edge;
+`ready_o` is next-state capacity and is not a current-cycle acceptance test.
+Queue depth and TID widths are configuration-derived. The A120 trial passed
+400k cycles with zero mismatches and full occupancy at depth eight; the
+gather rewrite was nevertheless rejected after it worsened placed timing.
+Earlier four-entry stimulus is narrower historical evidence.

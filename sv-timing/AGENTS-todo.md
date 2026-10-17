@@ -3,6 +3,34 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A120 — late-control arithmetic and predecoded writes
+
+- [x] Candidate IQ count bank, rename mask reuse and store-buffer parallel
+  gather implemented without interface or pipeline-latency changes.
+- [x] Generic +/- offset correction preserves source casts and signed
+  selector patterns; emitted fixture equivalence passes. The expensive
+  fixture does not justify disabling the production area gate.
+- [x] Compound read/modify/write dependency restored for measurement
+  (`delay-v41`, IR v2); compound source rewrites fail closed.
+- [x] Module-cache context includes parameter and lowering facts so
+  constant-generate pruning cannot leak between configurations.
+- [x] Paired placement: retain rename mask reuse (3.375→2.964 ns,
+  −0.95% repaired area); reject IQ count bank and store gather, both slower
+  after placement despite area savings. No timing arcs disabled.
+- [x] Correct stale store harness contracts and geometry. Actual-depth
+  coverage plus 400k cycles with assertions enabled: zero mismatches.
+- [x] Move assertion-only scoreboard reference count into translate_off;
+  its newly measured 170.413-FO4 path was absent from synthesis already.
+- [x] Fresh retained-source elaboration/widths and full structural/review
+  artifacts: source 55.078, emitted 55.664 FO4, joint integrity complete.
+  Full-core emitted elaboration, 352 Rust tests, target lint, and five TS
+  connection tests pass.
+- [x] Explicit `realCutFeeds` option on the TS client; pipeline dry-run
+  tests request structural planning rather than assuming latency permission
+  alone grants edits.
+- [ ] 10-FO4 closure and whole-core functional qualification remain open;
+  no stage-count estimate or dead-debug-logic removal closes this gap.
+
 ## A119 — selection cones and truthful reachability
 
 - [x] Parallel first-two IQ grants via saturated rank; retain later-port

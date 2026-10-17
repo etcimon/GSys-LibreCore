@@ -32,6 +32,15 @@ and zero reported electrical violations for both variants. No timing arcs
 were disabled. These pre-CTS, unrouted module results still have negative
 WNS and cannot establish whole-core 10-FO4 closure.
 
+**A120:** retain the rename one-hot write masks (placed 3.375→2.964 ns,
+−0.95% repaired area). Reject the IQ count bank and store payload gather:
+both save area but worsen placed timing. The package gains typed +/- offset
+emission, compound-update measurement, and context-sensitive module caching
+(IR v2, delay-v41, correction-v1). The assertion-only scoreboard reference
+count is now fenced from synthesis/timing. Fresh retained-source maximum is
+55.078 FO4; the latency-neutral review emit remains at 55.664 FO4. Details
+and the rejected-candidate evidence are in ALGORITHMS-EXPERTS A120.
+
 ## Historical campaign (2026-10-16, A104–A106)
 
 Latest: with the structural board calibrated (delay-v38) the campaign

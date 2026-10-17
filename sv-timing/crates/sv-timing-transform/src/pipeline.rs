@@ -1879,10 +1879,7 @@ pub fn select_increment_on_node(
     let mut new_ids = Vec::new();
     for j in 0..shape.candidates() {
         let id = first_new_id + j;
-        let sum = match &shape.mask_text {
-            Some(m) => format!("({} + {j}) & {m}", shape.reg_text),
-            None => format!("{} + {j}", shape.reg_text),
-        };
+        let sum = shape.candidate_expr(&j.to_string());
         let lhs = format!("{cand}[{j}]");
         module.nodes.insert(
             id,
@@ -1932,9 +1929,10 @@ pub fn select_increment_on_node(
         fo4_before: Some(fo4_before),
         fo4_after: Some(shape.fo4_after),
         rationale: format!(
-            "select_increment path {path_id} node {node_id}: `{}` = `{}` + `{}` -> {} candidates, {} select level(s) {fo4_before:.1}->{:.1} on the node (latency-neutral, exact mod 2^W)",
+            "select_increment path {path_id} node {node_id}: `{}` = `{}` {} `{}` -> {} candidates, {} select level(s) {fo4_before:.1}->{:.1} on the node (latency-neutral, exact mod 2^W)",
             shape.lhs_text,
             shape.reg_text,
+            shape.operator,
             shape.step_ident,
             shape.candidates(),
             shape.mux_levels(),
@@ -1945,6 +1943,7 @@ pub fn select_increment_on_node(
         emit_snippet: Some(snippet),
     };
     ctx.trace.record_edit(rec.clone());
+    ctx.link_last_tradeoff();
     ctx.pending_ir_dirty = true;
     Ok(rec)
 }

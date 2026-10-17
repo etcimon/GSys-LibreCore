@@ -10,6 +10,10 @@
 module tb_sb_sbs;
   import ariane_pkg::*;
   localparam config_pkg::cva6_cfg_t CVA6Cfg = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg);
+  localparam int DepthSpec = g6lc_ooo_pkg::ooo_spec_store_depth(CVA6Cfg);
+  localparam int PtrW = $clog2(DepthSpec);
+  localparam int CntW = $clog2(DepthSpec + 1);
+  localparam int TidW = CVA6Cfg.TRANS_ID_BITS;
   localparam type cbo_t = logic [7:0];
   typedef struct packed {
     logic [CVA6Cfg.DCACHE_INDEX_WIDTH-1:0] address_index;
@@ -79,6 +83,7 @@ module tb_sb_sbs;
   `define RND(sig, w) sig = (w)'(rnd256())
 
   int unsigned cyc = 0, errors = 0, pushes = 0, commits = 0, cancels = 0, flushes = 0, seed = 1;
+  int unsigned max_spec_seen = 0;
   int unsigned pc_mode;
   initial begin
     if (!$value$plusargs("seed=%d", seed)) seed = 1;
@@ -88,7 +93,9 @@ module tb_sb_sbs;
   // drive inputs on the negative edge (settle before posedge)
   always @(negedge clk) begin
     logic [255:0] r;
-    r = rnd256(); sb_live_i = $bits(sb_live_i)'(r);
+    // Every reserved store must retain a live scoreboard owner. Keep the
+    // surrounding scoreboard window live; unique store TIDs are tracked below.
+    sb_live_i = '1;
     r = rnd256(); stall_st_pending_i = $bits(stall_st_pending_i)'(r);
     r = rnd256(); page_offset_i = $bits(page_offset_i)'(r);
     r = rnd256(); load_paddr_i = $bits(load_paddr_i)'(r);
@@ -108,6 +115,21 @@ module tb_sb_sbs;
     r = rnd256(); data_size_i = $bits(data_size_i)'(r);
     r = rnd256(); cbo_op_i = $bits(cbo_op_i)'(r);
     r = rnd256(); req_port_i = $bits(req_port_i)'(r);
+    cbo_op_i = cbo_t'(ariane_pkg::CBO_NONE);
+    case (r[47:40] % 5)
+      1: if (CVA6Cfg.RVZiCbom) cbo_op_i = cbo_t'(ariane_pkg::CBO_CLEAN);
+      2: if (CVA6Cfg.RVZiCbom) cbo_op_i = cbo_t'(ariane_pkg::CBO_FLUSH);
+      3: if (CVA6Cfg.RVZiCbom) cbo_op_i = cbo_t'(ariane_pkg::CBO_INVAL);
+      4: if (CVA6Cfg.RVZiCboz) begin
+        cbo_op_i = cbo_t'(ariane_pkg::CBO_ZERO);
+        paddr_i[$clog2(CVA6Cfg.DCACHE_LINE_WIDTH >= 64 ?
+                       CVA6Cfg.DCACHE_LINE_WIDTH / 8 : 64)-1:0] = '0;
+        data_i = '0;
+        be_i = '1;
+        data_size_i = 2'b11;
+      end
+      default: ;
+    endcase
 
     // sparse cancels, rare flushes; density varies by phase
     r = rnd256();
@@ -115,15 +137,21 @@ module tb_sb_sbs;
     cancelled_mask_i = (r[7:0] < 8'd40) ? ($bits(cancelled_mask_i)'(rnd256()) & $bits(cancelled_mask_i)'(rnd256())) : '0;
     if (pc_mode == 3) cancelled_mask_i = (r[15:8] < 8'd120) ? $bits(cancelled_mask_i)'(rnd256()) : '0;
     flush_i = (r[23:16] < 8'd6);
-    // legal environment: no commit on an empty speculative queue
-    commit_i = (r[31:24] < 8'd110) && (u_old.u.speculative_status_cnt_q != '0);
+    // Commit names the actual head, has room in the committed queue and
+    // never coincides with flush (the reference's own interface assertions).
+    commit_i = (r[31:24] < 8'd110) && !flush_i &&
+               (u_old.u.speculative_status_cnt_q != '0) &&
+               (u_old.u.commit_status_cnt_q < u_old.u.DEPTH_COMMIT) &&
+               u_old.u.speculative_queue_q[u_old.u.speculative_read_pointer_q].valid;
+    if (commit_i)
+      commit_trans_id_i = u_old.u.speculative_queue_q[u_old.u.speculative_read_pointer_q].trans_id;
     // no push when not ready (ready_o depends on commit_i)
     #0.1;
-    // room after this cycle's pop (the module's own ready_o counts the push
-    // it is being asked about, so it cannot be sampled for the decision)
+    // The interface forbids a push on a registered-full queue, even with a
+    // same-cycle commit. Do not create lookahead capacity in the harness.
     begin
       logic can_push;
-      can_push = (int'(u_old.u.speculative_status_cnt_q) - int'(commit_i)) < 4;
+      can_push = int'(u_old.u.speculative_status_cnt_q) < u_old.u.DEPTH_SPEC;
       valid_i = (r[39:32] < 8'd150) && can_push;
       if (pc_mode == 5) valid_i = (r[39:32] < 8'd250) && can_push;
     end
@@ -131,9 +159,10 @@ module tb_sb_sbs;
     // the tids not live in the queue (shadow set maintained below)
     begin
       int tries;
-      logic [4:0] cand;
-      cand = 5'(r[55:48] % 12);
-      for (tries = 0; tries < 16 && live_tid[cand]; tries++) cand = 5'(($urandom % 12));
+      logic [TidW-1:0] cand;
+      cand = TidW'(r[55:48] % CVA6Cfg.NR_SB_ENTRIES);
+      for (tries = 0; tries < CVA6Cfg.NR_SB_ENTRIES && live_tid[cand]; tries++)
+        cand = TidW'($urandom % CVA6Cfg.NR_SB_ENTRIES);
       trans_id_i = cand;
       if (live_tid[cand]) valid_i = 1'b0;
     end
@@ -142,11 +171,11 @@ module tb_sb_sbs;
     valid_without_flush_i = valid_i && !flush_i;
   end
   // shadow set of live tids (per the OLD model's own state)
-  logic [31:0] live_tid = '0;
+  logic [CVA6Cfg.NR_SB_ENTRIES-1:0] live_tid = '0;
   always @(posedge clk) begin
     if (!rst_ni) live_tid <= '0;
     else begin
-      logic [31:0] nxt;
+      logic [CVA6Cfg.NR_SB_ENTRIES-1:0] nxt;
       nxt = live_tid;
       if (commit_i) nxt[u_old.u.speculative_queue_q[u_old.u.speculative_read_pointer_q].trans_id] = 1'b0;
       nxt &= ~cancelled_mask_i;
@@ -156,21 +185,24 @@ module tb_sb_sbs;
     end
   end
   // the OLD model must itself stay consistent under this stimulus
-  always @(posedge clk) if (rst_ni && u_old.u.speculative_status_cnt_q > 3'd4) begin
-    $display("ILLEGAL cyc=%0d old cnt=%0d", cyc, u_old.u.speculative_status_cnt_q); $finish;
+  always @(posedge clk) if (rst_ni && int'(u_old.u.speculative_status_cnt_q) > DepthSpec) begin
+    $fatal(1, "ILLEGAL cyc=%0d old cnt=%0d depth=%0d", cyc, u_old.u.speculative_status_cnt_q, DepthSpec);
   end
   int unsigned dbg_from = 0, dbg_to = 0;
   initial begin
     void'($value$plusargs("dbg_from=%d", dbg_from));
     void'($value$plusargs("dbg_to=%d", dbg_to));
   end
-  function automatic string qdump(input logic [3:0] v, input logic [3:0][4:0] t, input logic [1:0] rp, input logic [1:0] wp, input logic [2:0] cnt);
-    qdump = $sformatf("v=%b tids=%0d,%0d,%0d,%0d rp=%0d wp=%0d cnt=%0d", v, t[0], t[1], t[2], t[3], rp, wp, cnt);
+  function automatic string qdump(
+      input logic [DepthSpec-1:0] v, input logic [DepthSpec-1:0][TidW-1:0] t,
+      input logic [PtrW-1:0] rp, wp, input logic [CntW-1:0] cnt);
+    qdump = $sformatf("v=%b rp=%0d wp=%0d cnt=%0d tids=", v, rp, wp, cnt);
+    for (int i = 0; i < DepthSpec; i++) qdump = {qdump, $sformatf("%0d,", t[i])};
   endfunction
   always @(posedge clk) begin
     if (rst_ni && cyc >= dbg_from && cyc <= dbg_to) begin
-      logic [3:0] vo, vn; logic [3:0][4:0] to, tn;
-      for (int i = 0; i < 4; i++) begin
+      logic [DepthSpec-1:0] vo, vn; logic [DepthSpec-1:0][TidW-1:0] to, tn;
+      for (int i = 0; i < DepthSpec; i++) begin
         vo[i] = u_old.u.speculative_queue_q[i].valid; to[i] = u_old.u.speculative_queue_q[i].trans_id;
         vn[i] = u_new.u.speculative_queue_q[i].valid; tn[i] = u_new.u.speculative_queue_q[i].trans_id;
       end
@@ -180,6 +212,8 @@ module tb_sb_sbs;
     end
     if (rst_ni) begin
       cyc++;
+      if (int'(u_old.u.speculative_status_cnt_q) > max_spec_seen)
+        max_spec_seen = int'(u_old.u.speculative_status_cnt_q);
       if (valid_i) pushes++;
       if (commit_i) commits++;
       if (|cancelled_mask_i) cancels++;
@@ -223,6 +257,9 @@ module tb_sb_sbs;
         $finish;
       end
       if (cyc == 400000) begin
+        if (max_spec_seen != DepthSpec)
+          $fatal(1, "STQ_COVERAGE max occupancy=%0d expected full depth=%0d", max_spec_seen, DepthSpec);
+        $display("STQ_COVERAGE max occupancy=%0d", max_spec_seen);
         $display("%s tb_sb_sbs cycles=%0d pushes=%0d commits=%0d cancels=%0d flushes=%0d errors=%0d",
                  errors == 0 ? "PASS" : "FAIL", cyc, pushes, commits, cancels, flushes, errors);
         $finish;

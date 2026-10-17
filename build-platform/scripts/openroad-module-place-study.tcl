@@ -1,7 +1,7 @@
 # Copyright (c) 2026 Etienne Cimon
 # SPDX-License-Identifier: MIT
 #
-# Paired IQ placement/buffering discriminator. A pre-CTS, unrouted module
+# Paired module placement/buffering discriminator. A pre-CTS, unrouted module
 # study, not whole-core sign-off. No fanout drivers or timing arcs are
 # disabled. Both variants use the same floorplan, pins, RC and constraints.
 foreach key {STUDY_PLATFORM OR_VERILOG OR_TOP STUDY_OUTPUT STUDY_VARIANT} {
@@ -70,7 +70,7 @@ set any_ns [max_arrival_ns [find_timing_paths -path_delay max -group_path_count 
 set rr_ns [max_arrival_ns [find_timing_paths -path_delay max -group_path_count 1 -sort_by_slack \
   -from [all_registers -clock_pins] -to [all_registers -data_pins]]]
 if {$any_ns eq "-" || $rr_ns eq "-"} {
-  error "placed IQ has no constrained data path"
+  error "placed module has no constrained data path"
 }
 report_checks -path_delay max -group_path_count 3 -fields {slew cap fanout} > "$out/paths.rpt"
 report_check_types -max_slew -max_capacitance -max_fanout -violators > "$out/electrical.rpt"
