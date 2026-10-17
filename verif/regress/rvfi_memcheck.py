@@ -22,6 +22,10 @@ them); the walk cache is dropped on sfence.vma and satp writes. Kernel writes
 into a user buffer (copy_to_user) and the process's own loads then meet at the
 same physical byte. A user VA with no valid leaf stays a va-space key.
 
+Kernel aliases: vmalloc / VMAP-stack / fixmap addresses (above VA_FLOOR, outside
+the linear map and the kernel image) are walked the same way, so a page written
+through the linear map and read through its vmap alias is one physical byte.
+
 Harts: the tracer prints `core <h>:` per retirement (SMT harts of one core
 share the file in retirement order); the oracle keeps satp and the shadow
 registers per hart and checks all harts against one memory model.
@@ -99,11 +103,18 @@ class Sv39:
 
 
 def fold(addr, sv39=None):
-    if sv39 is not None and (sv39.satp >> 60) == 8 and addr < USER_TOP:
-        pa = sv39.translate(addr)
-        if pa is not None and DRAM_LO <= pa < DRAM_HI:
-            return pa, 'pa'
-        return addr, 'va'
+    if sv39 is not None and (sv39.satp >> 60) == 8:
+        # user half, and the kernel's vmalloc/VMAP/fixmap windows (everything
+        # above VA_FLOOR that is neither the linear map nor the kernel image):
+        # those pages are also reachable through the linear map, so the walk
+        # is what makes the two aliases meet at one physical byte
+        if addr < USER_TOP or (addr >= VA_FLOOR and
+                               not (LINEAR_VA <= addr < LINEAR_VA + LINEAR_LEN) and
+                               not (KIMG_VA <= addr < KIMG_VA + KIMG_LEN)):
+            pa = sv39.translate(addr)
+            if pa is not None and DRAM_LO <= pa < DRAM_HI:
+                return pa, 'pa'
+            return addr, 'va'
     if KIMG_VA <= addr < KIMG_VA + KIMG_LEN:
         return addr - KIMG_VA + KIMG_PA, 'pa'
     if LINEAR_VA <= addr < LINEAR_VA + LINEAR_LEN:
