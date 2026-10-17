@@ -7843,14 +7843,72 @@ of the real cones 0.9–1.7 cells/FO4 (iq 0.9, frontend 0.9, store_buffer
 | rob | 2.63 / 35 | 2.46 / 35 | |
 
 The emitted tree elaborates and maps end to end again after the emit
-fixes below (its earlier run failed on `svt_bm_top_…` and `p`). The live
-remap with the csr and scoreboard edits is in flight.
+fixes below (its earlier run failed on `svt_bm_top_…` and `p`).
+
+**Live remap with A104/A105 in production (module board):** `g6lc_iq`
+6.21 ns / 47 cells → **4.60 / 37** (the count delta took the popcount off
+the dispatch cone), `frontend` 4.09 / 43 → **4.35 / 34** (the three-operand
+sum; the ns is fanout noise), `scoreboard` 5.16 / 54 → 3.98 / 51 (the
+commit bank is small; the `sb_full_o` chain remains — A106), `csr_regfile`
+2.02 / 11 → 1.49 / 14 (the timer chain is gone from the top; the worst is
+now `instret`), rename and store_buffer unchanged (A106).
 
 Emit (same round): origin RHS rewrites are all-or-nothing per record (a
 first rewrite that cannot land — an `if (c) x = y;` one-liner, a generate
 line — while an extra does left the extra reading an undeclared `_top`,
 and the emitted tree failed elaboration), and `for (int p …)` header
 variables are block-local, so a hoisted cut feed never reads them.
+
+## A106 — Decoupling: snapshots, registered counts, a parallel squash
+
+The module board after A105 named the next three cones by their cells:
+rename 52, scoreboard 51, store_buffer 49, and iq's remaining 37. Each
+is a serial dependence that the microarchitecture does not need, removed
+exactly or by a stated, architecturally invisible policy:
+
+1. **Rename picks both ports from one free-list snapshot.** The two-port
+   allocation was `pick_free(free_d) → clear → pick_free(free_d) → clear`.
+   Port 0 now takes the lowest free entry and port 1 the highest (the same
+   lowest-set-bit isolate on the bit-reversed vector), both from one
+   snapshot; the single-free case, where both picks name one entry, is
+   caught by the `free_d[picked]` gate at port 1. The capacity block
+   counts instead of picking: at least one free is `|cand`, at least two
+   is `|(cand & (cand − 1))` — one subtractor beside the pick, not after
+   it. Ports beyond two keep the serial pick. Same for the FP pool. Which
+   physical register a destination gets is not architecturally visible.
+2. **Scoreboard issued count as a register.** With RTL names kept in a
+   diagnostic map, the worst scoreboard path reads `mem_q → mem_n →
+   sb_full_o → mem_q`: the popcount over the 32 `issued` flags fed the free
+   count, the full flags and the issue enable. `issued` is set only by an
+   issue and cleared only by a commit ack or a flush, so the count is a
+   register advanced by `num_issue − num_commit`, cleared on flush;
+   `sb_issued_cnt_is_popcount` asserts the equality in simulation.
+3. **Issue-queue dispatch allocates among the slots free at the start of
+   the cycle.** `free = ~valid_after` put the wake → select → ack cone in
+   front of the allocation. `free = ~valid_q`: a slot an issue frees this
+   cycle becomes allocatable next cycle. `full_o` already counts from the
+   registered state (`count_q == popcount(valid_q)`), so a non-full queue
+   always has the slots the ports need, and the age matrix still ranks the
+   newcomer against `valid_after`.
+4. **Store-buffer cancel squash in its parallel form, in production.** The
+   StreamCompact shape (A103/A104), written parameterized: `keep[k]` per
+   slot, `pos[k] = popcount(keep[k−1:0])`, a one-hot gather, counts
+   advanced by the popcount; `dst`'s cast wraps modulo its width exactly
+   as the walk did. SAT-proved on the fixture, 49 → 42 cells in the
+   emitted tree.
+
+All four elaborate in the whole core (slang, remote); the live remap with
+them is in flight. The structural board sees only the squash
+(store_buffer 38.5 → 23.3); the rest are dependence removals the
+node-latency model does not express — the netlist decides. Live
+structural board: worst 55.1 (`g6lc_iq`, the dense-cone class), 693 of
+1626 reg→reg over 10 FO4.
+
+How to read the diagnostic map: `setattr -set keep 1 w:mem_n w:mem_q …`
+before `abc` keeps those wires' RTL names through mapping, so the board's
+`trace` column names the cone (`sb_full_o` on the way to `mem_q`) — a
+legibility run, not a measurement run (the kept nets fence ABC's
+restructuring).
 
 ## A90 — Incrementers are not gates (delay-v32)
 

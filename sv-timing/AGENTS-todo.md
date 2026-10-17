@@ -157,16 +157,21 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
 - [x] A105 netlist (emitted tree): store_buffer 49 → 42 cells (compaction),
   frontend 43 → 38 (three-operand sum), scoreboard 54 → 51; iq mapped by
   the plain fallback (49 cells, not comparable).
-- [ ] A105 next: live remap with csr / scoreboard edits (in flight:
-  `sta-rtl-live-a105.log`); the emitted iq needs the delay-oriented ABC
-  within budget (raise the per-module timeout or split the dispatch block);
-  scoreboard `mem_n` write-site chain (54 cells, under-read 15.6 — the
-  board's trace names only yosys internals; map the module with RTL
-  names kept (`keep` on `mem_n`) for one diagnostic run); the dense-cone
-  class (iq 55 vs 46–47 cells) — per-node arrival should be per input
-  (the wake compare does not wait for `slot`), not one latency per node;
-  the 64-bit single-cycle wall (csr timer compare, 12.0–12.5 add/compare
-  + mux) is the floor at 20 ps without a pipelined ALU / 2-cycle paths.
+- [x] A105 live remap: iq 47 → 37 cells (count delta), frontend 43 → 34
+  (three-operand sum), scoreboard 54 → 51, csr timer chain gone.
+- [x] A106: rename two-port picks from one snapshot (lowest/highest, count-
+  based capacity); scoreboard issued count as a register (diagnostic map
+  with `keep` named the `sb_full_o` chain); iq dispatch frees from
+  `~valid_q`; store_buffer squash in StreamCompact form in production.
+  Whole core elaborates; live remap in flight (`sta-rtl-live-a106.log`).
+- [ ] A106 next: read the A106 board; the emitted iq needs the delay-
+  oriented ABC within budget (raise the per-module timeout or split the
+  dispatch block); the dense-cone class (iq 55 vs 37 cells now) — per-node
+  arrival per input, not one latency per node; the 64-bit single-cycle
+  wall (12.0–12.5 add/compare + mux) is the floor at 20 ps without a
+  pipelined ALU / 2-cycle paths — an owner decision; run the OoO sim
+  suites on A104–A106 (asserts `ooo_iq_count_is_popcount`,
+  `sb_issued_cnt_is_popcount`, the iq/rename policy changes).
 - [ ] A103 next: rename (52 cells / 19 FO4) and scoreboard (54 / 15.6) still
   under-read — dynamic struct-array reads behind rotated indices
   (`mem_q[head_slot[h]]`, `commit_sel_slot`); perf_counters / TLB over-read
