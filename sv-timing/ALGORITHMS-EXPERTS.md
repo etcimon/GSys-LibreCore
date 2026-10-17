@@ -28,7 +28,7 @@ worst remaining single-cycle primary.
 | Automatic transforms | `LoopRewrite` (FindFirst, CondCount, RingWalk, StreamCompact), `SelectIncrement`, `BalanceMux` (one-hot, arm set = rewrite set), `RebalanceAssoc`, `SplitAssign`, `InsertReg` — exact or latency-labelled, area-neutral-or-better except InsertReg | A88–A103, `AGENTS-auto-correct.md` catalog |
 | Production RTL rewrites | instr_queue admission count (A92), scoreboard cancel window (A98), ROB free/re-anchor (A99), rename/iq/store_buffer find-first and popcount (A100) — SAT at fixture sizes; 8/32-entry miters inconclusive on budget | A92–A100 |
 | Mapping noise floor | ±1 % area, ±6 cells on identical RTLIL (autoidx-dependent ABC order) | A102 |
-| 10 FO4 | **not closed**. Module board worst (cells, Nangate45): 54 → **38** across A104–A111 (scoreboard 54 → 22, rename 52 → 25, store_buffer 49 → 38, iq 47 → 38, frontend 43 → 34, rob 35 → 26, realign 23 → 15); at ≈ 1.3 cells/FO4 the budget is ≈ 13 cells. The ranked residual — iq 38 (wake/select), store_buffer 38 (one permutation + gather), frontend 34 (the 64-bit wall), wbuffer 27, rob 26, rename 25, scoreboard 22 — is single-cycle contracts the exact toolbox cannot change; A107 lists what each would take | A103–A111 |
+| 10 FO4 | **not closed**. Module board (Nangate45) across A104–A112: worst delay 6.21 → **4.35 ns** (frontend, the 64-bit target sum), worst cells 54 → **38–41** (scoreboard 54 → 22, rename 52 → 25, store_buffer 49 → 38, iq 47 → 41 at 6.21 → 3.04 ns, frontend 43 → 34, rob 35 → 23, realign 23 → 15); at ≈ 1.3 cells/FO4 the budget is ≈ 13 cells. The residual is single-cycle contracts (the 64-bit adds, the two-port selects, the same-cycle permutations); A107/A112 list what each would take and what ablation measured | A103–A112 |
 
 The route that produces these numbers is one host command (`AGENTS-build-platform.md` §7.1):
 `timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --allow-over-budget --remote --map-recipe streamed`,
@@ -8156,8 +8156,21 @@ buffer's push guard tests the mask, head-only ops are never cancelled at
 the head); the mask is level-held per scoreboard slot, so a one-cycle-late
 read loses nothing. Not cycle-exact (one more wrong-path issue slot per
 cancel), so the evidence is the OoO Verilator harness and the directed
-mini suite on A104–A112, not a miter; whole core elaborates; netlist in the
-next remap.
+mini suite on A104–A112, not a miter; whole core elaborates. **Netlist
+(live remap, module board): g6lc_iq 3.506 ns / 38 cells → 3.042 / 41** —
+the −13 % the ablation predicted (the +3 cells are the band); **g6lc_rob
+2.107 / 26 → 1.931 / 23** (A111). The OoO Verilator harness built in 407 s
+on the builder; the directed mini suite is queued behind the owner's
+Linux-boot workloads (the proxy refuses a second workload) — owed before
+A112 is called validated.
+
+### Board after A112 (cells / ns, Nangate45)
+
+frontend 34 / 4.35 (the 64-bit target sum — the wall), rename 25 / 3.77,
+wbuffer 27 / 3.12, iq 41 / 3.04, store_buffer 38 / 2.77, scoreboard 22 /
+2.76, loop_buffer 15, realign 15, lsq 15, rob 23 / 1.93. By delay the
+worst module is now the frontend; by cells the iq's 41 and store_buffer's
+38 are two permutation/select cones of ≈ 2× the 13-cell budget.
 
 Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made

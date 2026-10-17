@@ -185,8 +185,15 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
 - [x] A111: rob decrement = Σ |hit_r| (one-hot per port, asserted); remap
   owed.
 - [x] A112: iq ablation (cancel lookup −11 %, grant −7 %, wake −1 %); cancel
-  verdict registered (latency-free). OoO harness build + DI suite launched
-  (`ooo-build-a112.log`); live remap in flight (`sta-rtl-live-a112.log`).
+  verdict registered (latency-free). Netlist iq 3.51 → 3.04 ns, rob 26 → 23
+  cells. OoO harness built (407 s).
+- [ ] **Owed: OoO validation of A104–A112** — `testharness_proxy.py di
+  --flavour B` (refused while the owner's `ooocoh-t48` Linux-boot runs hold
+  the builder) and the soak; the asserted invariants
+  (`ooo_iq_count_is_popcount`, `sb_issued_cnt_is_popcount`,
+  `ooo_rob_hit_onehot`), the slot-choice policies (iq/rename), the
+  registered cancel (A112) and the dispatch-from-`~valid_q` (A106) are
+  behaviour changes that only the sim suites can qualify.
 - [ ] A107 next (ranked, each ≈ 2× the budget, each an owner-level change
   beyond the exact toolbox):
   iq wake/select pipeline split; frontend pipelined target (the 64-bit
