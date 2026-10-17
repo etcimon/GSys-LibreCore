@@ -225,6 +225,10 @@ pub fn apply_edits_to_source_dense(
     if trace.records.is_empty() {
         return source.to_string();
     }
+    // Comma-list continuous assigns become one statement per line first (same
+    // line count), so a rewritten item cannot end the list early (A113).
+    let normalized = crate::rhs::normalize_comma_assigns(source);
+    let source: &str = &normalized;
     let cuts = cut_assigns_from_source(source, trace);
     // R12e lean default: do **not** rewrite origins or emit continuous sinks.
     // Pipe stages still emit with zero feeds (FO4 screening sidecar). Origin

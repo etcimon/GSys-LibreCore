@@ -730,6 +730,74 @@ pub fn line_inside_generate(source: &str, line: u32) -> bool {
 }
 
 /// True when `line` is a continuous `assign` statement.
+/// `assign a = x,\n       b = y;` → `assign a = x;\n       assign b = y;` — one
+/// statement per line, same line count. The origin rewrite rebuilds a line
+/// as `{assign} lhs = rhs;`, which on a comma-list item ended the statement
+/// early and left the next item as a bare `b = y;` (hpdcache_amo, A113).
+/// Items are separated only at bracket depth zero; a list whose items share
+/// a line is left alone (splitting it would move the lines below).
+pub fn normalize_comma_assigns(source: &str) -> String {
+    let mut out = String::with_capacity(source.len() + 64);
+    // in_list: the next non-blank line starts a new item of the open list;
+    // in_item: inside an item (or a plain assign) that continues on the next line
+    let (mut in_list, mut in_item) = (false, false);
+    let mut depth = 0i32;
+    let terminate = |text: &mut String| {
+        // the separator becomes a terminator, on the code part only
+        let comment_at = text.find("//").unwrap_or(text.len());
+        if let Some(pos) = text[..comment_at].rfind(',') {
+            text.replace_range(pos..pos + 1, ";");
+        }
+    };
+    for (i, raw) in source.split('\n').enumerate() {
+        if i > 0 {
+            out.push('\n');
+        }
+        let line = raw.strip_suffix('\r').unwrap_or(raw);
+        let code = strip_line_comment(line);
+        let trimmed = code.trim();
+        let mut text = line.to_string();
+        let blank = trimmed.is_empty() || trimmed.starts_with("//");
+        let starts_assign = trimmed.starts_with("assign ") || trimmed.starts_with("assign\t");
+        let mut active = in_item;
+        if !in_item && in_list && !blank {
+            // a new item: give it its own `assign`
+            let indent_len = line.len() - line.trim_start().len();
+            text = format!("{}assign {}", &line[..indent_len], &line[indent_len..]);
+            depth = 0;
+            active = true;
+        } else if !in_item && starts_assign {
+            depth = 0;
+            active = true;
+        }
+        if active && !blank {
+            for c in code.chars() {
+                match c {
+                    '(' | '[' | '{' => depth += 1,
+                    ')' | ']' | '}' => depth -= 1,
+                    _ => {}
+                }
+            }
+            if depth <= 0 && trimmed.ends_with(',') {
+                terminate(&mut text);
+                in_list = true;
+                in_item = false;
+            } else if depth <= 0 && trimmed.ends_with(';') {
+                in_list = false;
+                in_item = false;
+            } else {
+                in_item = true;
+                in_list = false;
+            }
+        }
+        out.push_str(&text);
+        if raw.ends_with('\r') {
+            out.push('\r');
+        }
+    }
+    out
+}
+
 fn line_is_continuous_assign(source: &str, line: u32) -> bool {
     let Some(raw) = source_line(source, line) else {
         return false;
@@ -2787,6 +2855,28 @@ pub fn test_loc(file: &str, line: u32) -> SourceLoc {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comma_list_assigns_become_one_statement_per_line() {
+        let src = "  assign ld_data = ld_data_i,\n         st_data = st_data_i; // c\n  assign ugt = (ld_data_i > st_data_i),\n         sgt = (ld_data > st_data),\n         sum = ld_data + st_data;\n  assign x = f(a,\n               b),\n         y = {p,\n              q};\n  assign z = 1;\n";
+        let out = normalize_comma_assigns(src);
+        let lines: Vec<&str> = out.lines().collect();
+        assert_eq!(lines.len(), src.lines().count(), "line count preserved");
+        assert_eq!(lines[0], "  assign ld_data = ld_data_i;");
+        assert_eq!(lines[1], "         assign st_data = st_data_i; // c");
+        assert_eq!(lines[2], "  assign ugt = (ld_data_i > st_data_i);");
+        assert_eq!(lines[3], "         assign sgt = (ld_data > st_data);");
+        assert_eq!(lines[4], "         assign sum = ld_data + st_data;");
+        // a comma inside parentheses is not an item separator
+        assert_eq!(lines[5], "  assign x = f(a,");
+        assert_eq!(lines[6], "               b);");
+        // an item that itself spans lines keeps its continuation lines
+        assert_eq!(lines[7], "         assign y = {p,");
+        assert_eq!(lines[8], "              q};");
+        assert_eq!(lines[9], "  assign z = 1;");
+        // idempotent
+        assert_eq!(normalize_comma_assigns(&out), out);
+    }
     use sv_timing_transform::{EditKind, EditRecord, EditTrace};
 
     #[test]
