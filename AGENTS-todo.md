@@ -1899,7 +1899,28 @@ prerequisite for this work under the existing dual license. No licensing policy 
   (#49–#64: a VMAP-stack `lw` reading `0xc0` for `0x81` repeatedly, the
   kernel stack of `cat` reading `0x10000`/`0x69000` for pointers →
   the `load_elf_binary` oops) are probably T42's consequences but are
-  not yet attributed.
+  not yet attributed. **Root cause (2026-10-17, from the `l3watch3`
+  window):** c=713,884,637 `wt_amo_req op=OR data=1` → `wt_inv idx=38
+  all=1` → ack 0x800; a speculative load refills the line at 649
+  (`…0801`); c=713,884,690 the second AMO (`amoand.d.rl zero, ~1` —
+  funct5 01100 is AND, not swap) → at **693 the missunit's "invalidate
+  all ways" (`wr_cl_we=ff, wr_vld_bits=0`) coincides with a pending,
+  unacked fixup-queue `inv_req` (`wt_inval … ways=ff valid=f7 explicit=1
+  ack=0`)** and the valid SRAM is written with the fixup's
+  `inv_vld_bits & ~way` = **f7 in all eight ways** with the missunit's
+  tag: seven ways now hold "0x8fc8e valid"; the `c.ld` at 713,885,561
+  hits them all (`hit=f7`) and reads the stale 0x801. `wt_dcache_mem.sv`
+  had `vld_wdata = inv_req_i ? … : wr_denied ? 0 : wr_vld_bits_i` (the
+  SL-W priority) while `vld_addr`/`vld_req` put `wr_cl_vld_i` first — the
+  data and the address/way of one valid-bit write came from two different
+  requesters. **Fix:** `vld_wdata` follows the same priority (`wr_cl_vld_i`
+  first); invariant `missunit_vld_write_own_bits` (a missunit line write
+  writes its own bits, at most one way set); `G6LC_MUT_VLD_WDATA_INV_PRIO`
+  = the pre-fix mux. Lint clean. Build `ooocoh-t47-ooo-pgo-build`
+  (t46 + fix): verdicts = the watch window (no `valid=f7` write, the
+  561 load misses and refills 0x800), L3 with the user-space-aware live
+  oracle to login, battery + stages. The L3 run on t46 (`l3orc4`, no T43)
+  continues for the T42-in-L3 evidence.
 - [ ] **T39 — server1 (HPDCACHE, SMT2, t38) L1 past the T35 point oopses at
   1.267 s guest: `insert_header+0x9c` (`__register_sysctl_table` from
   `eventpoll_init`) NULL pointer dereference at `0x50`, PID 1 (2026-10-15).**
