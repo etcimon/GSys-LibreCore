@@ -360,6 +360,30 @@ violations. It is a standalone module experiment, not a change to the default
 whole-core flow or a routed sign-off gate. A119 evidence is under
 `workspace/build/sv-timing/selection-a119/placed-margin/`.
 
+A121 adds the physical reading of the budget and platform discovery:
+
+- `timings platforms` lists every OpenROAD platform the fork checkout ships,
+  read from `tools/openroad/test/<p>/<p>.vars` (liberty corner, extra
+  liberties, LEFs, site, tracks, layer RC) with `yosys-map` (plain-text
+  liberty) or `sta-only` (gzip'd, asap7) readiness. `--platform` on
+  `sta-rtl` resolves through the same detection; the static table remains
+  the fallback for an unpopulated submodule.
+- `timings fo4-probe --remote [--all | --platform P]` measures each
+  platform's FO4 on the builder (`scripts/openroad-fo4-probe.tcl`: the
+  liberty's minimum inverter driving four copies, chain 8 − chain 4) into
+  `workspace/build/sta-rtl/platform-fo4.json`.
+- `timings adjusted --output <sta-rtl dir> [--platform P]` and the
+  `s3-adjusted-fo4` stage of the remote streamed route run `sv-timing
+  adjusted` on the module board: mapped ns / platform FO4 against the
+  budget, with the budget-equivalent MHz on the platform, at the target
+  `fo4_ps`, and on every probed platform.
+- The study Tcl (`openroad-timing`, `-module-board`, `-module-place-study`,
+  `-fo4-probe`) is mirrored in the fork at `tools/openroad/g6lc/`;
+  `test/adjusted-fo4.test.ts` pins the mirror to `build-platform/scripts/`.
+  The fork commit is local to the submodule until pushed; the parent's
+  gitlink is bumped only after that push so the builder's pinned fetch
+  cannot miss it.
+
 A120 generalizes that same discriminator to `CONTROL_MODULE=g6lc_rename`
 or `store_buffer` (default remains `g6lc_iq`). The paired source snapshots
 and fixed placement recipe remain explicit. It selected the rename write-mask

@@ -20,6 +20,7 @@
 //! Multi-pass transform orchestration lives in `sv-timing-transform`; emission in
 //! `sv-timing-emit`. See `architecture/AUTO-CORRECT-CORE-API.md`.
 
+pub mod adjusted;
 pub mod algo_trace;
 pub mod cleanliness;
 pub mod cone_lane;

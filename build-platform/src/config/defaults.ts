@@ -1567,6 +1567,9 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       allowOverBudget: false,
       fo4Budget: 10,
       fo4Ps: 20,
+      // A121: the probed platform FO4 is reported beside the budget, not
+      // substituted for its unit unless asked.
+      fo4PsFromPlatform: false,
       budgetMargin: 0.2,
       optLevel: "3",
       svtArgs: ["--opt-max-stages-per-region", "13", "--real-cut-feeds", "--assume-clk"],

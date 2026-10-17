@@ -31,6 +31,14 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A121 update:** the budget now has a physical reading. `sv-timing adjusted`
+divides each module's mapped delay by the platform's measured FO4 (probe:
+minimum inverter driving four copies; nangate45 21.40 ps, asap7 14.36,
+sky130hs 72.08, sky130hd 80.91). On the last full board one structural FO4
+is ~3.05 inverter delays: the 55-FO4 maximum is ~165 adjusted FO4, 227 MHz
+budget-equivalent on nangate45. Platforms are auto-detected from the fork's
+`test/<p>/<p>.vars`; the study Tcl is mirrored in `tools/openroad/g6lc/`.
+
 **A120 update:** retain the rename write-mask fusion (placed 3.375→2.964 ns,
 −0.95% area), and reject the slower IQ/store candidates. IR v2, delay-v41
 and correction-v1 add compound-dependency accounting, typed +/- candidates
@@ -8197,6 +8205,72 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A121 — Adjusted FO4: the budget read in the platform's own inverter delay
+
+**Contract.** The structural FO4 is a model unit; a mapped delay is physical
+but library-bound. The budget formula already carries the bridge —
+`budget_fo4 = (1e6 / f_mhz / fo4_ps) · (1 − margin)` — if `fo4_ps` is the
+*measured* FO4 of the liberty the netlist was timed with. A121 measures it
+and reads every mapped path in that unit:
+
+```text
+adjusted_fo4  = mapped_ns · 1000 / platform_fo4_ps
+f_mhz(fo4_ps) = 1e6 · (1 − margin) / (max adjusted_fo4 · fo4_ps)
+```
+
+**Probe (`openroad-fo4-probe.tcl`, `fo4Probe.ts`).** The host scans the
+platform's liberty text for leaf cells with one input pin and an output
+whose function is `!A`, `(!A)`, `!(A)` or `A'` (any pin name), drops
+`dont_use` cells, and takes the smallest area — ties broken by the plainest
+name, which separates `inv_1` from `clkinv_1` and `INVx1` from `INVxp33`.
+It writes a netlist of two chains of that cell, 8 and 4 stages long, with
+every stage output loaded by exactly four copies (next stage + three
+dummies). OpenSTA times both chains from the same input slew; `(t8 − t4) / 4`
+cancels the first stage, the output stage and the slew, leaving the
+steady-state FO4. Gzip'd liberties are inflated for the scan and read
+natively by OpenSTA, so asap7 — unmappable by yosys — still yields its FO4.
+Windows checkouts store the fork's `*_tt.lib` symlinks as one-line files
+naming their target; the scanner follows them.
+
+**Measured platform FO4 (builder, 2026-10-17).** asap7 `INVx1_ASAP7_75t_R`
+14.36 ps; nangate45 `INV_X1` 21.40 ps; sky130hs `inv_1` 72.08 ps; sky130hd
+`inv_1` 80.91 ps. Nangate45 lands within 7 % of the model's assumed 20 ps:
+the structural and adjusted "10 FO4" are the same ~214 ps on the study
+platform.
+
+**Reading (`sv-timing adjusted`).** The package joins a header-driven
+per-module board (`module`, `worst_any_ns|worst_ns`, optional reg→reg and
+cell count; derived-parameter suffixes `name$…` stripped) with the report's
+structural worst per live module. Measured modules decide closure; modules
+without a mapped row receive an *estimated* value from the median
+adjusted/structural ratio, labelled, never decisive. The frequency is quoted
+on the mapped platform, at the configured process `fo4_ps`, and — from the
+shared `platform-fo4.json` table — on every other probed platform at its
+own unit: one logic depth, four cycle times.
+
+**What it revealed on the last full `g6lc64_ooo` board.** Median
+adjusted/structural **3.05** over 64 modules (p25 1.63, p75 5.18): one
+structural FO4 is about three inverter delays after mapping, so the 55-FO4
+structural maximum is ~165 adjusted FO4 and the distance to 10 is ~16×.
+Worst measured `store_buffer` 3.524 ns = 164.7 adjusted FO4; 56/65 measured
+modules over budget; budget-equivalent 227 MHz on nangate45, 243 MHz at
+fo4_ps = 20, 338 MHz on asap7, 67/60 MHz on sky130hs/hd. The spread of the
+ratio is itself a calibration map: `store_buffer` 7.1, `wt_dcache_wbuffer`
+6.2, `csr_regfile` 6.0 and `alu` 5.7 are where the delay model reads
+lightest against the netlist; `g6lc_lsq` 1.6, `multiplier` 2.0 and `g6lc_iq`
+2.3 are where it tracks. These are ideal-input, unplaced module paths: upper
+bounds on logic speed, not sign-off.
+
+**Where it lives.** `crates/sv-timing-core/src/adjusted.rs` (schema
+`adjusted-fo4.v1`, four unit tests), CLI `adjusted`; host
+`build-platform/src/tooling/fo4Probe.ts`, `openroadPlatforms.ts`
+(platforms auto-detected from the fork's `test/<p>/<p>.vars`: liberty,
+extra liberties, LEFs, site, tracks, RC; `yosysMappable` vs `staReadable`),
+`timings platforms | fo4-probe | adjusted`, and the `s3-adjusted-fo4` stage
+of the remote route. The Tcl is mirrored into the fork at
+`tools/openroad/g6lc/` beside the platforms it reads; a host test pins the
+mirror byte-identical to the canonical `build-platform/scripts/` copies.
 
 ## A120 — Preserve predecoded choices and move late count inputs off adders
 

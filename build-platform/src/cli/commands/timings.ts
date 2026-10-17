@@ -13,7 +13,7 @@
 // --output / -o / --out  : compile target directory (portable.f + JSON + cache + stamp)
 // Does not link monorepo code into sv-timing crates. See sv-timing/AGENTS-host.md.
 
-import { existsSync, mkdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import { flagBool } from "../args.ts";
@@ -31,7 +31,8 @@ import {
 import { writeLabReport } from "../../tooling/labReport.ts";
 import { assessTimingsDoctor } from "../../tooling/timingsDoctor.ts";
 import { proposeFo4Retune } from "../../tooling/retunePropose.ts";
-import { hostCores, runRtlTiming, tradeoffRows } from "../../tooling/rtlTiming.ts";
+import { hostCores, platformFo4Table, runAdjustedFo4, runPlatformFo4Probes, runRtlTiming, tradeoffRows } from "../../tooling/rtlTiming.ts";
+import { describePlatform, detectOpenroadPlatforms } from "../../tooling/openroadPlatforms.ts";
 import {
   buildBenchCorrelation,
   materializeStaSmokePackage,
@@ -539,6 +540,9 @@ export const timingsCommand: Command = {
     "bun run src/cli/index.ts timings sta-rtl --target g6lc64_ooo --platform nangate45",
     "bun run src/cli/index.ts timings sta-rtl --target g6lc64_ooo_server --remote --target-mhz 1250",
     "bun run src/cli/index.ts timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --remote",
+    "bun run src/cli/index.ts timings platforms",
+    "bun run src/cli/index.ts timings fo4-probe --all --remote",
+    "bun run src/cli/index.ts timings adjusted --output workspace/build/sta-rtl/g6lc64_ooo --platform nangate45",
     "bun run src/cli/index.ts timings lab-run --try-tools",
     "bun run src/cli/index.ts timings retune-propose",
     "bun run src/cli/index.ts timings retune-propose --from-handoff workspace/build/sta-handoff/lab-run",
@@ -880,6 +884,96 @@ export const timingsCommand: Command = {
         logger.success(`wns_max ${result.wnsMax} ns  tns_max ${result.tnsMax} ns  wns_min ${result.wnsMin} ns  tns_min ${result.tnsMin} ns`);
       }
       return result.ok ? 0 : 1;
+    }
+
+    if (sub === "platforms") {
+      // Every platform the fork checkout ships (test/<dir>/<name>.vars),
+      // with the probed FO4 when this host has one.
+      const forkRoot = join(ctx.repoRoot, "tools", "openroad");
+      const platforms = detectOpenroadPlatforms(forkRoot);
+      const table = platformFo4Table(ctx);
+      if (asJson) {
+        logger.raw(JSON.stringify({ platforms, fo4: table }, null, 2) + "\n");
+        return 0;
+      }
+      logger.heading(`OpenROAD platforms in ${posixPath(forkRoot)}/test (auto-detected from <platform>.vars)`);
+      if (!platforms.length) logger.warn("none: populate the submodule (git submodule update --init tools/openroad)");
+      for (const p of platforms) {
+        const f = table[p.id];
+        logger.info(`  ${describePlatform(p)}${f ? `  FO4 ${f.fo4_ps.toFixed(2)} ps (${f.cell})` : "  FO4 not probed (timings fo4-probe --remote)"}`);
+      }
+      logger.info("yosys-map: plain-text liberty, usable for sta-rtl mapping; sta-only: gzip'd liberty, FO4 probe and STA only");
+      return 0;
+    }
+
+    if (sub === "fo4-probe") {
+      // Measure the platform FO4 (minimum inverter driving four copies) on
+      // the builder for one platform or every detected one. The result is
+      // the unit `adjusted` reads mapped delays in.
+      const forkRoot = join(ctx.repoRoot, "tools", "openroad");
+      const want = flagStr(args.flags, "platform");
+      const all = flagBool(args.flags, "all") || want == null;
+      const platforms = detectOpenroadPlatforms(forkRoot).filter((p) => p.staReadable && (all || p.id === want.toLowerCase()));
+      if (!platforms.length) {
+        logger.error(`no probe-able platform${want ? ` named ${want}` : ""} in ${posixPath(forkRoot)}/test`);
+        return 2;
+      }
+      if (!flagBool(args.flags, "remote")) {
+        logger.error("timings fo4-probe runs the fork's sta on the builder: pass --remote");
+        return 2;
+      }
+      const res = await runPlatformFo4Probes(ctx, platforms);
+      if (asJson) {
+        logger.raw(JSON.stringify(res, null, 2) + "\n");
+        return res.ok ? 0 : 1;
+      }
+      logger.heading("Platform FO4 probe (inverter chain 8−4 stages, four loads per stage)");
+      for (const r of res.results) {
+        const line = `  ${r.platform.padEnd(10)} ${r.ok ? `${r.fo4Ps!.toFixed(2)} ps  ${r.cell}  (chain8 ${r.chain8Ns!.toFixed(4)} ns, chain4 ${r.chain4Ns!.toFixed(4)} ns)` : `fail: ${r.error}`}`;
+        if (r.ok) logger.success(line);
+        else logger.error(line);
+      }
+      logger.info(`table → ${posixPath(join(ctx.paths.build, "sta-rtl", "platform-fo4.json"))}`);
+      return res.ok ? 0 : 1;
+    }
+
+    if (sub === "adjusted") {
+      // Re-read an existing sta-rtl out-dir's module board in adjusted FO4.
+      const dir = outputSpec ?? fromTiming ?? args.positionals[1];
+      if (!dir) {
+        logger.error("timings adjusted requires --output <sta-rtl out-dir> (with module-board.tsv)");
+        return 2;
+      }
+      const outDir = resolveTimingsOutputDir(ctx, dir, { create: false }).dir;
+      const board = join(outDir, "module-board.tsv");
+      if (!existsSync(board)) {
+        logger.error(`no module board at ${posixPath(board)} (run sta-rtl --remote --map-recipe streamed first)`);
+        return 2;
+      }
+      const platformId = (flagStr(args.flags, "platform") ?? ctx.config.soc.process ?? "").toLowerCase();
+      const probed = platformFo4Table(ctx)[platformId];
+      if (!probed) {
+        logger.error(`platform ${platformId || "?"} has no probed FO4 (timings fo4-probe --platform ${platformId} --remote)`);
+        return 2;
+      }
+      const cfg = ctx.config.physicalDesign?.structural;
+      const report = [join(outDir, "svt", "correct.json"), join(outDir, "svt", "analyze.json")].find((p) => existsSync(p));
+      const stage = await runAdjustedFo4(ctx, {
+        board, report, outDir, platform: probed,
+        budget: Number(flagStr(args.flags, "budget-fo4") ?? flagStr(args.flags, "fo4") ?? cfg?.fo4Budget ?? 10),
+        margin: Number(flagStr(args.flags, "budget-margin") ?? cfg?.budgetMargin ?? 0.2),
+        targetFo4Ps: Number(flagStr(args.flags, "fo4-ps") ?? cfg?.fo4Ps ?? 20),
+      });
+      if (asJson) {
+        logger.raw(JSON.stringify(stage, null, 2) + "\n");
+      } else {
+        const line = `  [${stage.status}] ${stage.id}: ${stage.detail}`;
+        if (stage.status === "fail") logger.error(line);
+        else logger.success(line);
+        const txt = join(outDir, "adjusted-fo4.txt");
+        if (existsSync(txt)) logger.raw(readFileSync(txt, "utf8"));
+      }
+      return stage.status === "fail" ? 1 : 0;
     }
 
     if (sub === "correlate") {

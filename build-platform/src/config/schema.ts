@@ -637,6 +637,16 @@ export interface StructuralTimingConfig {
   fo4Budget: number;
   /** Process FO4 in ps behind the budget. */
   fo4Ps: number;
+  /**
+   * Take `fo4Ps` from the mapped platform's *measured* FO4 when one is in
+   * `workspace/build/sta-rtl/platform-fo4.json` (`timings fo4-probe`), so
+   * the structural budget and the adjusted reading share one unit on that
+   * platform. Off by default: the objective of record is 10 FO4 at 20 ps,
+   * and changing the unit changes the structural target frequency
+   * (nangate45's 21.40 ps makes 10 FO4 a 3 738 MHz target instead of 4 000).
+   * An explicit `--fo4-ps` always wins; the pre-pass stage names the source.
+   */
+  fo4PsFromPlatform?: boolean;
   /** Budget margin 0..1. */
   budgetMargin: number;
   /** sv-timing `--opt-level` preset (`0`..`3`, `s`, `z`); `3` is the only multi-cut one. */

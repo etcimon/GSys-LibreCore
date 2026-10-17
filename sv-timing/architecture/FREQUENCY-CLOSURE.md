@@ -41,6 +41,65 @@ count is now fenced from synthesis/timing. Fresh retained-source maximum is
 55.078 FO4; the latency-neutral review emit remains at 55.664 FO4. Details
 and the rejected-candidate evidence are in ALGORITHMS-EXPERTS A120.
 
+## Adjusted FO4 — the physical reading of the budget (A121)
+
+The structural FO4 is a screening estimate over source operators. The
+**adjusted FO4** is the same budget read on the mapped netlist in the
+platform's own unit:
+
+```text
+platform_fo4_ps  = stage delay of the liberty's minimum inverter driving
+                   four copies of itself (chain of 8 minus chain of 4, / 4)
+adjusted_fo4     = mapped_ns · 1000 / platform_fo4_ps
+closes(10)       = every measured module's adjusted_fo4 ≤ 10
+f_mhz(fo4_ps)    = 1e6 · (1 − margin) / (max adjusted_fo4 · fo4_ps)
+```
+
+`f_mhz` inverts the budget formula: it is the frequency at which the budget
+equals the worst measured path on any process characterised by `fo4_ps`. It
+is a **pre-layout library projection** — ideal module inputs, no wires, no
+clock uncertainty — so it bounds what the logic can reach, not what a design
+closes at. Modules without a mapped row receive an *estimated* value from the
+median adjusted/structural ratio and never decide closure.
+
+Measured platform FO4 on the fork's test libraries (`timings fo4-probe --all
+--remote`, OpenSTA on the builder, 2026-10-17):
+
+| platform | corner liberty | inverter | FO4 (ps) |
+|---|---|---|---:|
+| asap7 | `AO_RVT_FF` + `INVBUF_RVT_TT` (gz) | `INVx1_ASAP7_75t_R` | 14.36 |
+| nangate45 | `Nangate45_typ` | `INV_X1` | 21.40 |
+| sky130hs | `sky130_fd_sc_hs__tt_025C_1v80` | `sky130_fd_sc_hs__inv_1` | 72.08 |
+| sky130hd | `sky130_fd_sc_hd__tt_025C_1v80` | `sky130_fd_sc_hd__inv_1` | 80.91 |
+
+Nangate45's 21.4 ps is within 7 % of the budget's assumed 20 ps, so on the
+study platform a structural "10 FO4" and an adjusted "10 FO4" are the same
+214 ps of logic. The two readings differ in *what* they count: on the
+`g6lc64_ooo` module board of the last full route, the median
+adjusted/structural ratio is **3.05** (p25 1.63, p75 5.18) — one structural
+FO4 of the delay model is about three inverter delays after mapping. The
+structural 55 FO4 maximum is therefore ~165 adjusted FO4, and the gap to the
+objective is ~16×, not 5.5×. The reading for that board: worst measured
+`store_buffer` 3.524 ns = 164.7 adjusted FO4, 56 of 65 measured modules over
+10; budget-equivalent **227 MHz on nangate45, 243 MHz at fo4_ps = 20, 338 MHz
+on asap7, 67 MHz on sky130hs, 60 MHz on sky130hd**. (That board predates the
+A118–A120 rewrites; the route now writes `adjusted-fo4.json` on every run.)
+
+What a 10 adjusted-FO4 cycle means physically: ten inverter delays per
+clock, including the flop overhead this reading excludes. No pipeline of
+this depth reaches it by local rewrites; the honest levers are the
+re-pipelining obligations listed in `CONTROL-CONE-CLOSURE.md`, and the
+adjusted reading is what measures each one in cycle time rather than in
+model credit. Quote `platform_fo4_ps` and the platform with every adjusted
+number; a structural FO4 and an adjusted FO4 are not interchangeable.
+
+Package: `sv-timing adjusted --board module-board.tsv --report correct.json
+--platform-fo4-ps 21.4 [--budget-fo4 10 --budget-margin 0.2 --target-fo4-ps
+20] --json-out adjusted-fo4.json` (`crates/sv-timing-core/src/adjusted.rs`,
+schema `adjusted-fo4.v1`; the board is header-driven and host-agnostic).
+Host: `timings platforms`, `timings fo4-probe`, `timings adjusted`, and the
+`s3-adjusted-fo4` stage of `timings sta-rtl --remote --map-recipe streamed`.
+
 ## Historical campaign (2026-10-16, A104–A106)
 
 Latest: with the structural board calibrated (delay-v38) the campaign

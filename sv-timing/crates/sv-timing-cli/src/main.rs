@@ -161,6 +161,44 @@ fn opt_to_json(opt: &OptOptions) -> serde_json::Value {
 
 #[derive(Subcommand, Debug)]
 enum Commands {
+    /// Mapped delays in the platform's own FO4 unit, against the budget.
+    ///
+    /// Joins a per-module board (`module`, `worst_any_ns`, …) with the
+    /// structural report; the platform FO4 comes from an inverter-chain probe
+    /// on the same liberty. Closure and the budget-equivalent frequency use
+    /// measured modules only.
+    Adjusted {
+        /// Per-module board TSV (header-driven: module, worst_any_ns|worst_ns, …).
+        #[arg(long = "board")]
+        board: PathBuf,
+        /// analyze/correct report JSON for structural values (optional).
+        #[arg(long = "report")]
+        report: Option<PathBuf>,
+        /// Platform FO4 in picoseconds as measured on the liberty.
+        #[arg(long = "platform-fo4-ps")]
+        platform_fo4_ps: f64,
+        /// Platform name for the report.
+        #[arg(long = "platform-name", default_value = "platform")]
+        platform_name: String,
+        /// How the platform FO4 was measured.
+        #[arg(long = "platform-method", default_value = "inverter-chain")]
+        platform_method: String,
+        /// Budget in FO4 (default 10).
+        #[arg(long = "budget-fo4", default_value_t = 10.0)]
+        budget_fo4: f64,
+        /// Budget margin 0..1 (default 0.2).
+        #[arg(long = "budget-margin", default_value_t = 0.2)]
+        budget_margin: f64,
+        /// Process FO4 (ps) the frequency projection is also quoted at.
+        #[arg(long = "target-fo4-ps", default_value_t = 20.0)]
+        target_fo4_ps: f64,
+        /// Rows to print, worst first.
+        #[arg(long = "top", default_value_t = 24)]
+        top: usize,
+        /// Write the adjusted report JSON.
+        #[arg(long = "json-out")]
+        json_out: Option<PathBuf>,
+    },
     /// Print package / version banner and optional cache status.
     Status {
         /// SQLite cache path (optional).
@@ -1055,6 +1093,80 @@ fn build_param_map_with_widths(
 fn main() -> ExitCode {
     let cli = Cli::parse();
     match cli.command {
+        Commands::Adjusted {
+            board,
+            report,
+            platform_fo4_ps,
+            platform_name,
+            platform_method,
+            budget_fo4,
+            budget_margin,
+            target_fo4_ps,
+            top,
+            json_out,
+        } => {
+            if !(platform_fo4_ps > 0.0) {
+                eprintln!("error: --platform-fo4-ps must be positive");
+                return ExitCode::from(2);
+            }
+            let text = match std::fs::read_to_string(&board) {
+                Ok(t) => t,
+                Err(e) => {
+                    eprintln!("error: read board {}: {e}", board.display());
+                    return ExitCode::from(2);
+                }
+            };
+            let mapped = match sv_timing_core::adjusted::parse_board_tsv(&text) {
+                Ok(m) => m,
+                Err(e) => {
+                    eprintln!("error: board {}: {e}", board.display());
+                    return ExitCode::from(2);
+                }
+            };
+            let structural = match &report {
+                Some(p) => match std::fs::read_to_string(p)
+                    .map_err(|e| e.to_string())
+                    .and_then(|t| {
+                        serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string())
+                    }) {
+                    Ok(v) => sv_timing_core::adjusted::structural_from_report(&v),
+                    Err(e) => {
+                        eprintln!("error: report {}: {e}", p.display());
+                        return ExitCode::from(2);
+                    }
+                },
+                None => Vec::new(),
+            };
+            let platform = sv_timing_core::adjusted::PlatformFo4 {
+                name: platform_name,
+                fo4_ps: platform_fo4_ps,
+                method: platform_method,
+                cell: None,
+            };
+            let adjusted = sv_timing_core::adjusted::adjust(
+                &structural,
+                &mapped,
+                &platform,
+                budget_fo4,
+                budget_margin,
+                target_fo4_ps,
+            );
+            print!("{}", sv_timing_core::adjusted::render_table(&adjusted, top));
+            if let Some(out) = json_out {
+                let value = match serde_json::to_value(&adjusted) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("error: serialize: {e}");
+                        return ExitCode::from(2);
+                    }
+                };
+                if let Err(e) = write_json(&out, &value) {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(2);
+                }
+            }
+            return ExitCode::SUCCESS;
+        }
         Commands::Status { cache, json_out } => {
             println!("{}", banner());
             println!("ir_version={IR_VERSION}");

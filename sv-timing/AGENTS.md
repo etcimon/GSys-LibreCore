@@ -113,6 +113,7 @@ Full detail: `architecture/DESIGN.md` § Multi-Step Architecture.
 | 5–7 Paths / rank / opportunities | core | Explicit `--modules` or `--all-modules` |
 | 8 Correct | transform + emit | Opt-in, allowlist |
 | 9–10 Report + SQLite CRC cache | cli + cache | Default `./.sv-timing-cache/` |
+| 11 Adjusted reading | core `adjusted` + cli `adjusted` | Host-supplied module board (mapped ns) ÷ measured platform FO4 vs the budget; budget-equivalent MHz per process. Measured rows decide; estimated rows are labelled. See `FREQUENCY-CLOSURE.md` § Adjusted FO4 |
 
 ---
 

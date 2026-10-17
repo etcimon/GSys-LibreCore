@@ -3,6 +3,21 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A121 — adjusted FO4 and platform discovery
+
+- [x] `adjusted.rs` + CLI `adjusted`: mapped ns / measured platform FO4 vs
+  the budget; budget-equivalent MHz on the platform, at the target fo4_ps
+  and on every probed platform; estimated rows never decide closure.
+- [x] Host probe (liberty inverter scan, 8−4 chain netlist, OpenSTA Tcl):
+  asap7 14.36, nangate45 21.40, sky130hs 72.08, sky130hd 80.91 ps.
+- [x] Platforms auto-detected from `tools/openroad/test/<p>/<p>.vars`;
+  study Tcl mirrored into the fork's `g6lc/` with an identity test.
+- [ ] Read the structural/adjusted ratio map (median 3.05, p25 1.63, p75
+  5.18) back into the delay model's per-class costs — a measured retune,
+  not a fo4-v1 edit from synthetic fixtures.
+- [ ] 10 adjusted FO4 is ~16× away on the last board; only re-pipelining
+  with carried control contracts moves it. No closure claim.
+
 ## A120 — late-control arithmetic and predecoded writes
 
 - [x] Candidate IQ count bank, rename mask reuse and store-buffer parallel

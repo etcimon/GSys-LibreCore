@@ -687,6 +687,16 @@ Automatic correction refuses paths containing these updates until their
 source rewrite semantics are implemented; the emitter also refuses to
 treat a compound update as plain `=`. This prevents a parallel gather's
 accumulator dependency from disappearing solely because of source syntax.
+**Adjusted reading (A121).** `adjusted.rs` consumes two host artefacts the
+package does not produce — a per-module board of mapped delays (header-driven
+TSV) and a platform FO4 measured on the same liberty — and reports every
+module in platform-FO4 units against the budget, with the frequency at which
+the budget would equal the worst measured path on the mapped platform, at the
+configured process `fo4_ps`, and on other probed platforms. The package never
+runs a timer or reads a liberty; the probe and board are host stages. The
+reading is a pre-layout bound (ideal inputs, no wires); it decides closure
+only from measured rows and labels the fitted estimates.
+
 IR schema v2 records the compound assignment kind. Module-cache keys now
 include parse options, lowering/correction versions and parameter facts;
 otherwise a full-design cache miss could reuse a module with the other

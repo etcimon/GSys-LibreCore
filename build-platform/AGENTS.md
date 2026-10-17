@@ -194,6 +194,20 @@ prefix and exports `OPENROAD_EXE`; `staHandoff.ts` `resolveStaTool` prefers
 the managed fork (`openroad`, then `sta`) over PATH; `rtlTiming.ts` +
 `timings sta-rtl` is the consumer (below).
 
+Platforms are **discovered, not listed** (`tooling/openroadPlatforms.ts`):
+every `tools/openroad/test/<dir>/<name>.vars` becomes a `--platform` with its
+liberty corner, extra liberties, LEFs, site, tracks and layer RC; the
+`PLATFORM_FILES` table in `rtlTiming.ts` is only the fallback when the
+submodule is not populated. To add a platform, add its `.vars` + files to the
+fork's `test/` (that is also how upstream's flow tests work) — nothing in the
+host changes. `tooling/fo4Probe.ts` + `scripts/openroad-fo4-probe.tcl`
+measure a platform's FO4 (minimum inverter driving four copies) and
+`timings fo4-probe --remote --all` fills `workspace/build/sta-rtl/platform-fo4.json`;
+`timings adjusted` / the `s3-adjusted-fo4` stage read a module board in that
+unit (`sv-timing adjusted`). The study Tcl is mirrored at `tools/openroad/g6lc/`;
+edit the canonical `scripts/openroad-*.tcl`, copy, and keep
+`test/adjusted-fo4.test.ts` green.
+
 ### 4.4 Add a regression/test suite
 1. Add a `TestSuite` entry to `defaults.ts` `tests.suites` (or `.config.ts`) with:
    `id`, `description`, `script` (repo-relative `verif/regress/*.sh`), `group`

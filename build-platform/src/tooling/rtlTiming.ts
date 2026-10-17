@@ -47,6 +47,8 @@ import {
   toRemotePaths,
   writeFlatManifest,
 } from "./eda.ts";
+import { buildProbe, parseProbeOutput } from "./fo4Probe.ts";
+import { findOpenroadPlatform, type OpenroadPlatform } from "./openroadPlatforms.ts";
 import { resolveStaTool, staThreadCount, type StaTool } from "./staHandoff.ts";
 import {
   buildSvTimingCorrectArgs,
@@ -271,17 +273,35 @@ const PLATFORM_FILES: Record<string, { lib: string; lefs: string[] }> = {
   },
 };
 
-/** Study-liberty path inside a fork checkout for a platform, or null. */
-export function platformLiberty(platform: string | undefined): string | null {
+/**
+ * Study-liberty path inside a fork checkout for a platform, or null. The
+ * fork's own `test/<platform>/<platform>.vars` is read when a checkout is
+ * present (`forkRoot`), so any platform the fork ships is known; the table
+ * above is the fallback for an unpopulated submodule (the remote route reads
+ * the builder's checkout).
+ */
+export function platformLiberty(platform: string | undefined, forkRoot?: string): string | null {
   if (!platform) return null;
+  const detected = forkRoot ? findOpenroadPlatform(forkRoot, platform) : undefined;
+  if (detected?.staReadable) return detected.liberty;
   const rel = PLATFORM_FILES[platform.toLowerCase()]?.lib;
   return rel ? `test/${rel}` : null;
 }
 
 /** LEF paths inside a fork checkout for a platform (tech first), or []. */
-export function platformLefs(platform: string | undefined): string[] {
+export function platformLefs(platform: string | undefined, forkRoot?: string): string[] {
   if (!platform) return [];
+  const detected = forkRoot ? findOpenroadPlatform(forkRoot, platform) : undefined;
+  if (detected && detected.lefs.length) return detected.lefs;
   return (PLATFORM_FILES[platform.toLowerCase()]?.lefs ?? []).map((r) => `test/${r}`);
+}
+
+/** All liberties a platform's corner spans (typical first), fork-relative. */
+export function platformLiberties(platform: string | undefined, forkRoot?: string): string[] {
+  const first = platformLiberty(platform, forkRoot);
+  if (!first) return [];
+  const detected = forkRoot && platform ? findOpenroadPlatform(forkRoot, platform) : undefined;
+  return [first, ...(detected?.extraLiberty ?? [])];
 }
 
 /**
@@ -302,8 +322,9 @@ export function resolveTimingLiberty(
   lefForkRels: string[];
 } | null {
   const platform = (opts.platform ?? ctx.config.soc.process ?? "").toLowerCase();
-  const lefForkRels = platformLefs(platform);
-  const lefs = lefForkRels.map((r) => join(ctx.repoRoot, "tools", "openroad", r));
+  const forkRoot = join(ctx.repoRoot, "tools", "openroad");
+  const lefForkRels = platformLefs(platform, forkRoot);
+  const lefs = lefForkRels.map((r) => join(forkRoot, r));
   if (opts.liberty) {
     const p = isAbsolute(opts.liberty) ? opts.liberty : join(ctx.repoRoot, opts.liberty);
     if (existsSync(p)) return { path: p, source: "explicit", lefs, lefForkRels };
@@ -316,9 +337,9 @@ export function resolveTimingLiberty(
   if (process.env.CVA6_LIBERTY && existsSync(process.env.CVA6_LIBERTY)) {
     return { path: process.env.CVA6_LIBERTY, source: "env", lefs, lefForkRels };
   }
-  const rel = platformLiberty(platform);
+  const rel = platformLiberty(platform, forkRoot);
   if (rel) {
-    const p = join(ctx.repoRoot, "tools", "openroad", rel);
+    const p = join(forkRoot, rel);
     // The remote route reads it from the builder's fork checkout even when the
     // local submodule is not populated.
     return { path: p, source: "platform", forkRel: rel, lefs, lefForkRels };
@@ -577,6 +598,9 @@ interface SvtPrepass {
   targetMhz?: number;
   /** Effective budget (flag, else physicalDesign.structural). */
   budget?: number;
+  /** Budget inputs the adjusted reading quotes its frequency with. */
+  margin?: number;
+  fo4Ps?: number;
 }
 
 /**
@@ -593,7 +617,13 @@ async function runSvtPrepass(
   top?: string,
 ): Promise<SvtPrepass> {
   const cfgEarly = ctx.config.physicalDesign?.structural;
-  const fo4Ps = opts.fo4Ps ?? cfgEarly?.fo4Ps ?? 20;
+  // A121: the structural unit may follow the mapped platform's measured FO4
+  // (opt-in); an explicit flag always wins and the stage says which applied.
+  const probedPs = cfgEarly?.fo4PsFromPlatform
+    ? platformFo4Table(ctx)[(opts.platform ?? ctx.config.soc.process ?? "").toLowerCase()]?.fo4_ps
+    : undefined;
+  const fo4Ps = opts.fo4Ps ?? (probedPs && probedPs > 0 ? probedPs : undefined) ?? cfgEarly?.fo4Ps ?? 20;
+  if (opts.fo4Ps == null && probedPs) ctx.logger.info(`sta-rtl: fo4_ps ${probedPs.toFixed(2)} from the probed ${(opts.platform ?? ctx.config.soc.process ?? "").toLowerCase()} FO4 (physicalDesign.structural.fo4PsFromPlatform)`);
   const margin = opts.budgetMargin ?? cfgEarly?.budgetMargin ?? 0.2;
   if (opts.fromTiming) {
     const v = validateTimingsOutDir(ctx, { fromTiming: opts.fromTiming, requireEmit: true });
@@ -618,12 +648,14 @@ async function runSvtPrepass(
       emitFlist: v.correctedFlist,
       reportPath: join(v.dir, "correct.json"),
       budget,
+      margin,
+      fo4Ps,
     };
   }
   const cfg = ctx.config.physicalDesign?.structural;
   const budget = opts.fo4Budget ?? cfg?.fo4Budget ?? 0;
   if (budget === 0) {
-    return { stage: { id: "s0-svt-correct", status: "skip", detail: "--fo4 0: no sv-timing pass; live RTL" } };
+    return { stage: { id: "s0-svt-correct", status: "skip", detail: "--fo4 0: no sv-timing pass; live RTL" }, margin, fo4Ps };
   }
   const targetMhz = targetMhzForFo4Budget(budget, fo4Ps, margin);
   if (!Number.isFinite(targetMhz)) {
@@ -771,6 +803,8 @@ async function runSvtPrepass(
     reportPath: join(svtDir, "correct.json"),
     targetMhz,
     budget,
+    margin,
+    fo4Ps,
   };
 }
 
@@ -1068,6 +1102,12 @@ async function runRemote(
   const libRemote = libertyForkRel
     ? `${REMOTE_OPENROAD_SRC}/${libertyForkRel}`
     : toRemotePaths(posixPath(libertyLocal), ctx.repoRoot);
+  // The platform FO4 probe (A121): the liberty's own minimum inverter, read
+  // here from the local checkout to write the probe netlist; timed on the
+  // builder with the same sta that times the modules.
+  const probe = buildProbe(libertyLocal);
+  const probeShell = "error" in probe ? [] : fo4ProbeShell({ runDir: "$RUN", liberty: "$LIB", netlist: probe.netlist, cell: probe.inverter.cell });
+  if ("error" in probe) ctx.logger.warn(`sta-rtl: no platform FO4 probe (${probe.error})`);
   const lefRemote = lefForkRels.map((r) => `${REMOTE_OPENROAD_SRC}/${r}`).join(" ");
   const or = ctx.config.toolchain.openroad;
   const threads = or.threads > 0 ? String(or.threads) : "$(nproc)";
@@ -1139,6 +1179,7 @@ async function runRemote(
     'rc=$?; echo "STA rc=$rc"; grep -E "STA_RESULT|STA_MEASURE" "$RUN/sta.log"',
     'echo LOGSTART; tail -80 "$RUN/sta.log"; echo LOGEND',
     ...(opts.mapRecipe === "streamed" ? moduleBoardShell({ runDir: "$RUN", liberty: "$LIB", periodNs: 1000 / opts.targetMhz, pullTag: `sta-rtl-${opts.target}` }) : []),
+    ...probeShell,
     'echo "RESULT $rc"',
   ];
 
@@ -1222,11 +1263,217 @@ async function runRemote(
       // run describes another design and must not supply its FO4 ratios.
       const cal = writeCalibration(pre.reportPath, board, join(outDir, "calibration.tsv"));
       stages.push({ id: "s3-calibration", status: "pass", detail: cal });
+      // Adjusted FO4 (A121): the board's mapped delays in this platform's own
+      // FO4 unit, against the structural budget — the physical reading of
+      // "10 FO4" and the frequency it is equivalent to on any process.
+      const probed = recordPlatformFo4(ctx, opts, res.text, outDir);
+      if (probed) {
+        const adj = await runAdjustedFo4(ctx, {
+          board: join(outDir, "module-board.tsv"), report: pre.reportPath, outDir,
+          platform: probed, budget: pre.budget ?? 10, margin: pre.margin ?? 0.2, targetFo4Ps: pre.fo4Ps ?? 20,
+        });
+        stages.push(adj);
+      } else {
+        stages.push({ id: "s3-adjusted-fo4", status: "skip", detail: "no platform FO4 probe result in the remote log" });
+      }
     } else {
       stages.push({ id: "s3-calibration", status: "skip", detail: "module board produced on the builder but not pulled" });
     }
   }
   return { ...result, ...parsed, ok: true };
+}
+
+/**
+ * Shell lines that time the FO4 probe netlist on the builder with the same
+ * `sta` as the module board; one `FO4_PROBE ps=…` line reaches the log.
+ */
+export function fo4ProbeShell(opts: { runDir: string; liberty: string; netlist: string; cell: string }): string[] {
+  const R = opts.runDir;
+  return [
+    `cat > "${R}/fo4-probe.v" <<'G6LC_FO4_PROBE_EOF'`,
+    opts.netlist.trimEnd(),
+    "G6LC_FO4_PROBE_EOF",
+    `OR_LIBERTY="${opts.liberty}" OR_VERILOG="${R}/fo4-probe.v" OR_CELL=${JSON.stringify(opts.cell)} timeout 120 "$STA" $STA_ARGS "$REPO/build-platform/scripts/openroad-fo4-probe.tcl" 2>/dev/null | grep "^FO4_PROBE" || echo "FO4_PROBE fail sta"`,
+  ];
+}
+
+export interface PlatformFo4Record {
+  platform: string;
+  liberty: string;
+  fo4_ps: number;
+  cell: string;
+  method: string;
+  chain8_ns: number;
+  chain4_ns: number;
+  measured_at: string;
+}
+
+/** Parse the probe line from a remote log and persist it beside the run. */
+export function recordPlatformFo4(ctx: PlatformContext, opts: RtlTimingOptions, remoteLog: string, outDir: string): PlatformFo4Record | null {
+  const p = parseProbeOutput(remoteLog);
+  if (!p) return null;
+  const platform = (opts.platform ?? ctx.config.soc.process ?? "platform").toLowerCase();
+  const rec: PlatformFo4Record = {
+    platform, liberty: opts.liberty ?? platformLiberty(platform, join(ctx.repoRoot, "tools", "openroad")) ?? "?",
+    fo4_ps: p.fo4Ps, cell: p.cell, method: "inverter-chain-8-4", chain8_ns: p.chain8Ns, chain4_ns: p.chain4Ns,
+    measured_at: new Date().toISOString(),
+  };
+  writeFileSync(join(outDir, "platform-fo4.json"), JSON.stringify(rec, null, 2) + "\n", "utf8");
+  // The shared platform table: one record per platform, read by every
+  // adjusted report so a reading can be quoted on every probed process.
+  const tablePath = join(ctx.paths.build, "sta-rtl", "platform-fo4.json");
+  let table: Record<string, PlatformFo4Record> = {};
+  try {
+    if (existsSync(tablePath)) table = JSON.parse(readFileSync(tablePath, "utf8"));
+  } catch {
+    table = {};
+  }
+  table[platform] = rec;
+  mkdirSync(join(ctx.paths.build, "sta-rtl"), { recursive: true });
+  writeFileSync(tablePath, JSON.stringify(table, null, 2) + "\n", "utf8");
+  return rec;
+}
+
+export interface PlatformProbeResult {
+  platform: string;
+  liberty: string;
+  ok: boolean;
+  fo4Ps?: number;
+  cell?: string;
+  chain8Ns?: number;
+  chain4Ns?: number;
+  error?: string;
+}
+
+/**
+ * Probe several platforms' FO4 in one builder session: each platform's probe
+ * netlist (from its own liberty, read locally) is timed by the fork's `sta`
+ * against the builder's checkout of the same liberty. Results land in the
+ * shared `platform-fo4.json` table; a platform's failure does not stop the
+ * others.
+ */
+export async function runPlatformFo4Probes(
+  ctx: PlatformContext,
+  platforms: OpenroadPlatform[],
+): Promise<{ ok: boolean; results: PlatformProbeResult[]; log: string }> {
+  const forkRoot = join(ctx.repoRoot, "tools", "openroad");
+  const results: PlatformProbeResult[] = [];
+  const lines = [
+    "set -u",
+    `REPO=${REMOTE_REPO}`,
+    `OR=${REMOTE_OPENROAD}`,
+    `RUN="$HOME/.cache/g6lc-sta/fo4-probe"`,
+    'mkdir -p "$RUN"',
+    '[ -f "$OR/openroad-env.sh" ] && . "$OR/openroad-env.sh"',
+    'STA="$OR/bin/sta"; STA_ARGS="-exit"; if [ ! -x "$STA" ]; then STA="$OR/bin/openroad"; STA_ARGS="-no_init -exit"; fi',
+    'if [ ! -x "$STA" ]; then echo "RESULT_TOOLCHAIN fail openroad"; exit 3; fi',
+  ];
+  for (const p of platforms) {
+    const libs = [p.liberty, ...p.extraLiberty];
+    const probe = buildProbe(libs.map((l) => join(forkRoot, l)));
+    if ("error" in probe) {
+      results.push({ platform: p.id, liberty: p.liberty, ok: false, error: probe.error });
+      continue;
+    }
+    const remoteLibs = libs.map((l) => `${REMOTE_OPENROAD_SRC}/${l}`).join(" ");
+    lines.push(
+      `echo "PROBE ${p.id}"`,
+      `cat > "$RUN/${p.id}.v" <<'G6LC_FO4_PROBE_EOF'`,
+      probe.netlist.trimEnd(),
+      "G6LC_FO4_PROBE_EOF",
+      `OR_LIBERTY="${remoteLibs}" OR_VERILOG="$RUN/${p.id}.v" OR_CELL=${JSON.stringify(probe.inverter.cell)} timeout 300 "$STA" $STA_ARGS "$REPO/build-platform/scripts/openroad-fo4-probe.tcl" 2>&1 | grep -E "^FO4_PROBE|Error" | head -3 || echo "FO4_PROBE fail sta"`,
+    );
+  }
+  lines.push('echo "RESULT 0"');
+  ctx.logger.info(`fo4-probe: ${platforms.map((p) => p.id).join(", ")} on the builder's fork checkout`);
+  const res = await runRemoteScript(ctx, lines.join("\n") + "\n", { name: "fo4-probe", budgetSeconds: 900, sync: true });
+  if (ctx.dryRun) return { ok: true, results, log: res.text };
+  if (res.error) return { ok: false, results: [...results, { platform: "*", liberty: "-", ok: false, error: res.error }], log: res.text };
+  // Split the log per PROBE marker and parse each platform's line.
+  const chunks = res.text.split(/^PROBE /m).slice(1);
+  for (const chunk of chunks) {
+    const id = chunk.split(/\r?\n/)[0]!.trim();
+    const p = platforms.find((x) => x.id === id);
+    if (!p) continue;
+    const parsed = parseProbeOutput(chunk);
+    if (!parsed) {
+      const err = chunk.match(/^FO4_PROBE fail (.*)$/m)?.[1] ?? chunk.match(/Error.*$/m)?.[0] ?? "no probe line";
+      results.push({ platform: id, liberty: p.liberty, ok: false, error: err.trim() });
+      continue;
+    }
+    results.push({ platform: id, liberty: p.liberty, ok: true, fo4Ps: parsed.fo4Ps, cell: parsed.cell, chain8Ns: parsed.chain8Ns, chain4Ns: parsed.chain4Ns });
+    const rec: PlatformFo4Record = {
+      platform: id, liberty: p.liberty, fo4_ps: parsed.fo4Ps, cell: parsed.cell, method: "inverter-chain-8-4",
+      chain8_ns: parsed.chain8Ns, chain4_ns: parsed.chain4Ns, measured_at: new Date().toISOString(),
+    };
+    const tablePath = join(ctx.paths.build, "sta-rtl", "platform-fo4.json");
+    const table = platformFo4Table(ctx);
+    table[id] = rec;
+    mkdirSync(join(ctx.paths.build, "sta-rtl"), { recursive: true });
+    writeFileSync(tablePath, JSON.stringify(table, null, 2) + "\n", "utf8");
+  }
+  results.sort((a, b) => a.platform.localeCompare(b.platform));
+  return { ok: results.length > 0 && results.every((r) => r.ok), results, log: res.text };
+}
+
+/** Every probed platform on this host (`platform-fo4.json` table). */
+export function platformFo4Table(ctx: PlatformContext): Record<string, PlatformFo4Record> {
+  const tablePath = join(ctx.paths.build, "sta-rtl", "platform-fo4.json");
+  try {
+    return existsSync(tablePath) ? JSON.parse(readFileSync(tablePath, "utf8")) : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * `sv-timing adjusted` over a module board: writes `adjusted-fo4.json` and
+ * returns the stage. The budget-equivalent frequency is quoted on the mapped
+ * platform, at the configured process fo4_ps, and on every other probed
+ * platform (same adjusted FO4, each platform's own unit).
+ */
+export async function runAdjustedFo4(
+  ctx: PlatformContext,
+  o: { board: string; report?: string; outDir: string; platform: PlatformFo4Record; budget: number; margin: number; targetFo4Ps: number },
+): Promise<RtlTimingResult["stages"][number]> {
+  const id = "s3-adjusted-fo4";
+  const jsonOut = join(o.outDir, "adjusted-fo4.json");
+  const args = [
+    "adjusted", "--board", posixPath(o.board), "--platform-fo4-ps", String(o.platform.fo4_ps),
+    "--platform-name", `${o.platform.platform} (${o.platform.cell})`, "--platform-method", o.platform.method,
+    "--budget-fo4", String(o.budget), "--budget-margin", String(o.margin), "--target-fo4-ps", String(o.targetFo4Ps),
+    "--top", "16", "--json-out", posixPath(jsonOut),
+  ];
+  if (o.report && existsSync(o.report)) args.push("--report", posixPath(o.report));
+  const cmd = buildSvtRunCommand(ctx, args, { release: true });
+  if (!cmd) return { id, status: "skip", detail: "sv-timing package not found" };
+  const r = await run(cmd.argv[0]!, cmd.argv.slice(1), { cwd: cmd.cwd, allowFailure: true, stdio: "capture", logger: ctx.logger, dryRun: ctx.dryRun });
+  if (!r.ok || !existsSync(jsonOut)) {
+    return { id, status: "fail", detail: `sv-timing adjusted exit ${r.code}: ${(r.stderr || r.stdout).trim().split("\n").slice(-2).join(" | ")}` };
+  }
+  writeFileSync(join(o.outDir, "adjusted-fo4.txt"), r.stdout, "utf8");
+  let rep: any;
+  try {
+    rep = JSON.parse(readFileSync(jsonOut, "utf8"));
+  } catch {
+    return { id, status: "fail", detail: "adjusted-fo4.json unreadable" };
+  }
+  const w = rep.worst;
+  if (!w) return { id, status: "fail", detail: "no measured module in the board" };
+  const others = Object.values(platformFo4Table(ctx))
+    .filter((p) => p.platform !== o.platform.platform && p.fo4_ps > 0)
+    .map((p) => `${p.platform} ${(1e6 * (1 - o.margin) / (w.adjusted_fo4 * p.fo4_ps)).toFixed(0)} MHz`);
+  const detail =
+    `worst measured ${w.module} ${Number(w.adjusted_fo4).toFixed(1)} adjusted FO4 (${Number(w.mapped_ns).toFixed(3)} ns; platform FO4 ${o.platform.fo4_ps.toFixed(2)} ps/${o.platform.cell}) ` +
+    `vs budget ${o.budget} → closes: ${rep.closes ? "yes" : "no"} (${rep.measured_over_budget}/${rep.measured_modules} measured over); ` +
+    `budget-equivalent ${Number(rep.implied_mhz_on_platform).toFixed(0)} MHz on ${o.platform.platform}, ${Number(rep.implied_mhz_at_target_fo4).toFixed(0)} MHz at fo4_ps=${o.targetFo4Ps}` +
+    (others.length ? `; on probed platforms: ${others.join(", ")}` : "") +
+    (rep.fit ? `; adjusted/structural median ${Number(rep.fit.ratio_median).toFixed(2)} over ${rep.fit.n}` : "") +
+    ` → ${posixPath(jsonOut)}`;
+  // A measured reading over budget is a result, not a tooling failure: the
+  // stage passes and the detail carries the verdict (the pre-pass's
+  // completion gate owns the budget decision).
+  return { id, status: "pass", detail };
 }
 
 /**
