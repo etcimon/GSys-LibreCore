@@ -181,7 +181,9 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   miter inconclusive (50 min). Board worst 54 → 38 across the campaign.
 - [x] A110: instr_realign visits as a Kogge-Stone boolean prefix, slots by
   ordinal; harness `verif/tb/core/instr_realign_sbs` 3 × 500 k cycles 0
-  mismatches; live remap in flight (`sta-rtl-live-a110.log`).
+  mismatches; netlist 22 → 15 cells (3.27 → 2.31 ns).
+- [x] A111: rob decrement = Σ |hit_r| (one-hot per port, asserted); remap
+  owed.
 - [ ] A107 next (ranked, each ≈ 2× the budget, each an owner-level change
   beyond the exact toolbox):
   iq wake/select pipeline split; frontend pipelined target (the 64-bit

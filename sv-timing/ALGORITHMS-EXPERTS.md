@@ -28,7 +28,7 @@ worst remaining single-cycle primary.
 | Automatic transforms | `LoopRewrite` (FindFirst, CondCount, RingWalk, StreamCompact), `SelectIncrement`, `BalanceMux` (one-hot, arm set = rewrite set), `RebalanceAssoc`, `SplitAssign`, `InsertReg` — exact or latency-labelled, area-neutral-or-better except InsertReg | A88–A103, `AGENTS-auto-correct.md` catalog |
 | Production RTL rewrites | instr_queue admission count (A92), scoreboard cancel window (A98), ROB free/re-anchor (A99), rename/iq/store_buffer find-first and popcount (A100) — SAT at fixture sizes; 8/32-entry miters inconclusive on budget | A92–A100 |
 | Mapping noise floor | ±1 % area, ±6 cells on identical RTLIL (autoidx-dependent ABC order) | A102 |
-| 10 FO4 | **not closed**. Module board worst (cells, Nangate45): 54 → **38** across A104–A109 (scoreboard 54 → 22, rename 52 → 25, store_buffer 49 → 38, iq 47 → 38, frontend 43 → 34, rob 35 → 26); at ≈ 1.3 cells/FO4 the budget is ≈ 13 cells. The ranked residual — iq 38 (wake/select), store_buffer 38 (one permutation + gather), frontend 34 (the 64-bit wall), wbuffer 27, rob 26, rename 25, realign 22, scoreboard 22 — is single-cycle contracts the exact toolbox cannot change; A107 lists what each would take | A103–A109 |
+| 10 FO4 | **not closed**. Module board worst (cells, Nangate45): 54 → **38** across A104–A111 (scoreboard 54 → 22, rename 52 → 25, store_buffer 49 → 38, iq 47 → 38, frontend 43 → 34, rob 35 → 26, realign 23 → 15); at ≈ 1.3 cells/FO4 the budget is ≈ 13 cells. The ranked residual — iq 38 (wake/select), store_buffer 38 (one permutation + gather), frontend 34 (the 64-bit wall), wbuffer 27, rob 26, rename 25, scoreboard 22 — is single-cycle contracts the exact toolbox cannot change; A107 lists what each would take | A103–A111 |
 
 The route that produces these numbers is one host command (`AGENTS-build-platform.md` §7.1):
 `timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --allow-over-budget --remote --map-recipe streamed`,
@@ -8093,10 +8093,33 @@ compressed-at-tail zero upper half and the carried slot's address.
 Evidence: `verif/tb/core/instr_realign_sbs/` — random halfword streams with
 mostly sequential fetch blocks (so split RVIs carry into the next block),
 every output compared each cycle: **3 seeds × 500 k cycles, ≈ 162 k carries
-per seed, 0 mismatches.** Whole core elaborates. Netlist: live remap in
-flight (expected: realign 22 and the frontend's 34 both shorten; at
-`NrHalfWords = 4` the prefix is two levels against the walk's four
-compare-mux-add steps).
+per seed, 0 mismatches.** Whole core elaborates. **Netlist (live remap,
+module board): instr_realign 3.27 ns / 22 cells → 2.31 / 15.** The
+frontend's own row stays 4.35 / 34: the per-module board measures each
+module's own logic, so the cross-module path realigner → target adder is
+shorter by the realigner's seven cells in the flat core, while the
+frontend's intra-module worst (the 64-bit three-operand sum behind the
+slot select into `bp_tgt_q`) is unchanged — the wall.
+
+## A111 — ROB decrement by ports, not by entries
+
+A tid names at most one valid ROB entry (a live instruction has one slot),
+so each retire port's hit vector is one-hot-or-zero and the count's
+decrement is `Σ_r |free_hit[r]` — an OR-reduce per port instead of the
+32-entry popcount (A107 had already made the hit vectors disjoint across
+ports). Asserted (`ooo_rob_hit_onehot`); whole core elaborates; netlist in
+the next remap.
+
+### Board after A110 (cells, Nangate45, every module under the delay-oriented script)
+
+iq 38, store_buffer 38, frontend 34 (4.35 ns, the ns-worst), wbuffer 27,
+rob 26 (A111 pending), rename 25, scoreboard 22, realign 15, loop_buffer
+15, lsq 15. **Campaign: module-board worst 54 → 38 cells**; the OoO control
+cones went from 47–54 to 22–38, the realigner from 23 to 15. At ≈ 1.3
+cells/FO4 the 10 FO4 budget is ≈ 13 cells: the remaining cones are the
+single-cycle contracts A107 lists (wake/select, the 64-bit target and
+ALU adds, the same-cycle squash), and the next lever is pipelining them —
+an IPC decision.
 
 ## A90 — Incrementers are not gates (delay-v32)
 

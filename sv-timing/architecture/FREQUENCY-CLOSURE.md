@@ -14,7 +14,7 @@ target sum, the store-buffer squash in StreamCompact form. Module board
 worst (cells, Nangate45): **54 → 38**; rename 52 → 25, scoreboard 54 →
 22, iq 47 → 38, frontend 43 → 34, rob 35 → 26 (A107), store_buffer 49 →
 38 (A108/A109: verdicts travel with entries; insertion + squash as one
-permutation). At ≈ 1.3 cells/FO4, 10 FO4 is ≈ 13 cells: not closed; the
+permutation), realign 23 → 15 (A110: the cursor walk as a boolean prefix). At ≈ 1.3 cells/FO4, 10 FO4 is ≈ 13 cells: not closed; the
 residual is iq 38, store_buffer 38, frontend 34 (the 64-bit wall), then
 the band at 22–27.
 Structural live board: worst 55.1 (`g6lc_iq`, dense-cone class), 693 of
