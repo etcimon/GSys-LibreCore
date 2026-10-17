@@ -15,8 +15,12 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 - [ ] Read the structural/adjusted ratio map (median 3.05, p25 1.63, p75
   5.18) back into the delay model's per-class costs — a measured retune,
   not a fo4-v1 edit from synthetic fixtures.
-- [ ] 10 adjusted FO4 is ~16× away on the last board; only re-pipelining
-  with carried control contracts moves it. No closure claim.
+- [x] Full route end to end with the new stage: worst measured `g6lc_lsq`
+  176.0 adjusted FO4 (3.766 ns), 56/73 over, 212 MHz budget-equivalent on
+  nangate45 (317 asap7). Folded modules measure 0 and are never estimated.
+- [ ] 10 adjusted FO4 is ~17× away; only re-pipelining with carried control
+  contracts moves it. The LSQ in→reg boundary cone is the measured worst.
+  No closure claim.
 
 ## A120 — late-control arithmetic and predecoded writes
 

@@ -132,8 +132,10 @@ pub struct AdjustedReport {
     pub target_fo4_ps: f64,
     /// Every module, worst first (measured and estimated).
     pub modules: Vec<AdjustedModule>,
-    /// Modules with a mapped delay.
+    /// Modules with a mapped row (including those that folded to no path).
     pub measured_modules: usize,
+    /// Mapped rows that linked with a clock but had no timing path.
+    pub measured_no_path: usize,
     /// Modules estimated from the fit.
     pub estimated_modules: usize,
     /// Worst measured module, or `None` when nothing was measured.
@@ -202,12 +204,31 @@ pub fn adjust(
 
     let mut modules = Vec::new();
     let mut ratios = Vec::new();
+    let mut measured_no_path = 0usize;
     for (name, mapped) in board {
-        if !(mapped.worst_ns > 0.0) || !scale.is_finite() {
+        if !scale.is_finite() || !mapped.worst_ns.is_finite() || mapped.worst_ns < 0.0 {
+            continue;
+        }
+        let st = structural_by_name.get(name.as_str());
+        if mapped.worst_ns == 0.0 {
+            // Linked and clocked, but no timing path after mapping: the
+            // module's logic folded away (parameter-dead at this
+            // configuration). Measured as zero; never estimated from the
+            // structural value, which cannot see the folding.
+            measured_no_path += 1;
+            modules.push(AdjustedModule {
+                module: name.clone(),
+                adjusted_fo4: 0.0,
+                source: AdjustedSource::Measured,
+                mapped_ns: Some(0.0),
+                structural_fo4: st.and_then(|s| s.worst_fo4),
+                structural_kind: st.and_then(|s| s.worst_kind.clone()),
+                ratio: None,
+                over_budget: false,
+            });
             continue;
         }
         let adjusted = mapped.worst_ns * scale;
-        let st = structural_by_name.get(name.as_str());
         let structural_fo4 = st.and_then(|s| s.worst_fo4).filter(|v| *v > 0.0);
         let ratio = structural_fo4.map(|s| adjusted / s);
         if let Some(r) = ratio {
@@ -274,6 +295,7 @@ pub fn adjust(
         margin,
         target_fo4_ps,
         measured_modules: measured.len(),
+        measured_no_path,
         estimated_modules: modules.len() - measured.len(),
         implied_mhz_on_platform: worst_fo4.and_then(|a| implied_mhz(a, fo4_ps, margin)),
         implied_mhz_at_target_fo4: worst_fo4.and_then(|a| implied_mhz(a, target_fo4_ps, margin)),
@@ -315,6 +337,8 @@ pub fn parse_board_tsv(text: &str) -> Result<BTreeMap<String, MappedPath>, Strin
         .ok_or("board header has no `worst_any_ns`/`worst_ns` column")?;
     let reg2reg = col(&["worst_reg2reg_ns", "reg2reg_ns"]);
     let cells = col(&["cells_on_path", "cells"]);
+    let instances = col(&["instances"]);
+    let clock = col(&["clock"]);
     let mut out: BTreeMap<String, MappedPath> = BTreeMap::new();
     for line in lines {
         let f: Vec<&str> = line.split('\t').collect();
@@ -323,8 +347,25 @@ pub fn parse_board_tsv(text: &str) -> Result<BTreeMap<String, MappedPath>, Strin
         let reg2reg_ns = reg2reg
             .and_then(|c| f.get(c))
             .and_then(|v| v.trim().parse::<f64>().ok());
-        let Some(worst_ns) = worst_ns.or(reg2reg_ns).filter(|v| v.is_finite()) else {
-            continue;
+        let worst_ns = match worst_ns.or(reg2reg_ns).filter(|v| v.is_finite()) {
+            Some(v) => v,
+            None => {
+                // A linked, clocked module with no path at all is measured
+                // zero; a row without an instance count or a clock (link
+                // or tool failure) is unknown and skipped.
+                let linked = instances
+                    .and_then(|c| f.get(c))
+                    .and_then(|v| v.trim().parse::<u64>().ok())
+                    .is_some_and(|n| n > 0);
+                let clocked = clock.map_or(true, |c| {
+                    f.get(c)
+                        .is_some_and(|v| v.trim() != "-" && !v.trim().is_empty())
+                });
+                if !(linked && clocked) {
+                    continue;
+                }
+                0.0
+            }
         };
         let cells = cells
             .and_then(|c| f.get(c))
@@ -422,9 +463,9 @@ pub fn structural_from_report(report: &serde_json::Value) -> Vec<StructuralModul
 pub fn render_table(report: &AdjustedReport, rows: usize) -> String {
     let mut out = String::new();
     out.push_str(&format!(
-        "adjusted FO4 on {} (FO4 {:.2} ps, {}): budget {:.1} FO4 = {:.3} ns; measured {} / estimated {}\n",
+        "adjusted FO4 on {} (FO4 {:.2} ps, {}): budget {:.1} FO4 = {:.3} ns; measured {} ({} folded to no path) / estimated {}\n",
         report.platform.name, report.platform.fo4_ps, report.platform.method, report.budget_fo4,
-        report.budget_ns_on_platform, report.measured_modules, report.estimated_modules
+        report.budget_ns_on_platform, report.measured_modules, report.measured_no_path, report.estimated_modules
     ));
     match (&report.worst, report.implied_mhz_on_platform, report.implied_mhz_at_target_fo4) {
         (Some(w), Some(on), Some(at)) => out.push_str(&format!(
@@ -560,16 +601,33 @@ mod tests {
 
     #[test]
     fn board_tsv_is_header_driven_and_strips_derived_suffixes() {
-        let text = "module\tinstances\tworst_reg2reg_ns\tcells_on_path\tworst_any_ns\n\
-                    iq$top.x\t1\t2.403\t32\t2.403\n\
-                    iq$top.y\t1\t2.100\t30\t2.900\n\
-                    dead\t1\t-\t-\t-\n\
-                    boundary\t1\t-\t-\t1.250\n";
+        let text =
+            "module\tinstances\tclock\tworst_reg2reg_ns\tcells_on_path\tstartpoint\tworst_any_ns\n\
+                    iq$top.x\t1\tclk_i\t2.403\t32\t_1_\t2.403\n\
+                    iq$top.y\t1\tclk_i\t2.100\t30\t_2_\t2.900\n\
+                    folded\t1\tclk_i\t-\t0\t-\t-\n\
+                    broken\t-\t-\t-\t-\tlink failed\t-\n\
+                    boundary\t1\tclk_i\t-\t-\t-\t1.250\n";
         let b = parse_board_tsv(text).unwrap();
-        assert_eq!(b.len(), 2);
+        assert_eq!(b.len(), 3);
         assert_eq!(b["iq"].worst_ns, 2.9);
         assert_eq!(b["iq"].cells, Some(30));
         assert_eq!(b["boundary"].worst_ns, 1.25);
+        assert_eq!(b["folded"].worst_ns, 0.0);
+        assert!(!b.contains_key("broken"));
+        let structural = vec![StructuralModule {
+            name: "folded".into(),
+            worst_fo4: Some(37.0),
+            worst_kind: None,
+        }];
+        let r = adjust(&structural, &b, &platform(20.0), 10.0, 0.2, 20.0);
+        let folded = r.modules.iter().find(|m| m.module == "folded").unwrap();
+        assert_eq!(folded.source, AdjustedSource::Measured);
+        assert_eq!(folded.adjusted_fo4, 0.0);
+        assert!(!folded.over_budget);
+        assert_eq!(r.measured_no_path, 1);
+        assert_eq!(r.estimated_modules, 0);
+        assert!(r.fit.is_none(), "a folded module has no ratio to fit");
         assert!(parse_board_tsv("name\tns\nx\t1\n").is_err());
         assert_eq!(board_module_name("\\g6$cva6.i"), "g6");
     }

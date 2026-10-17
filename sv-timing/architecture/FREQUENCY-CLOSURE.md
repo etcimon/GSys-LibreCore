@@ -74,16 +74,28 @@ Measured platform FO4 on the fork's test libraries (`timings fo4-probe --all
 
 Nangate45's 21.4 ps is within 7 % of the budget's assumed 20 ps, so on the
 study platform a structural "10 FO4" and an adjusted "10 FO4" are the same
-214 ps of logic. The two readings differ in *what* they count: on the
-`g6lc64_ooo` module board of the last full route, the median
-adjusted/structural ratio is **3.05** (p25 1.63, p75 5.18) — one structural
-FO4 of the delay model is about three inverter delays after mapping. The
-structural 55 FO4 maximum is therefore ~165 adjusted FO4, and the gap to the
-objective is ~16×, not 5.5×. The reading for that board: worst measured
-`store_buffer` 3.524 ns = 164.7 adjusted FO4, 56 of 65 measured modules over
-10; budget-equivalent **227 MHz on nangate45, 243 MHz at fo4_ps = 20, 338 MHz
-on asap7, 67 MHz on sky130hs, 60 MHz on sky130hd**. (That board predates the
-A118–A120 rewrites; the route now writes `adjusted-fo4.json` on every run.)
+214 ps of logic. The two readings differ in *what* they count. Fresh full
+route on the retained A120 tree (`timings sta-rtl --fo4 10 --remote
+--map-recipe streamed`, 2026-10-17, corrected emit mapped; `adjusted-fo4.json`
+is now written on every run):
+
+| reading | value |
+|---|---|
+| structural worst live primary | 55.7 FO4 (1 209 live paths over 10; 126 uninstantiated modules excluded) |
+| module board | 73 measured (8 linked modules folded to no path), 20 estimated |
+| adjusted/structural ratio | median **2.91** (p25 1.77, p75 5.12) over 64 modules |
+| worst measured | `g6lc_lsq` 3.766 ns = **176.0 adjusted FO4** (an in→reg boundary cone: its reg→reg path is 7 cells) |
+| next | `g6lc_iq` 142.8, `frontend` 142.4, `store_buffer` 141.3, `multiplier` 131.8, `scoreboard` 127.9, `g6lc_rename` 125.9 |
+| over budget | 56 of 73 measured modules |
+| budget-equivalent | **212 MHz on nangate45, 227 MHz at fo4_ps = 20; 317 MHz on asap7, 63 MHz on sky130hs, 56 MHz on sky130hd** |
+
+One structural FO4 of the delay model is about three inverter delays after
+mapping, so the structural 55 FO4 maximum is ~165–176 adjusted FO4 and the
+gap to the objective is ~17×, not 5.5×. The previous full board (before
+A118–A120) read `store_buffer` 3.524 ns = 164.7 adjusted FO4 at a 3.05 median
+ratio; `g6lc_rename` moved 3.499 → 2.693 ns and `store_buffer` 3.524 → 3.024
+between the two boards, but both boards are of *corrected emits* with their
+own cuts, so module-to-module deltas across them are not source deltas.
 
 What a 10 adjusted-FO4 cycle means physically: ten inverter delays per
 clock, including the flop overhead this reading excludes. No pipeline of

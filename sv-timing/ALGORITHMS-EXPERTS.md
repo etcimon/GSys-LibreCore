@@ -8249,18 +8249,25 @@ on the mapped platform, at the configured process `fo4_ps`, and — from the
 shared `platform-fo4.json` table — on every other probed platform at its
 own unit: one logic depth, four cycle times.
 
-**What it revealed on the last full `g6lc64_ooo` board.** Median
-adjusted/structural **3.05** over 64 modules (p25 1.63, p75 5.18): one
-structural FO4 is about three inverter delays after mapping, so the 55-FO4
-structural maximum is ~165 adjusted FO4 and the distance to 10 is ~16×.
-Worst measured `store_buffer` 3.524 ns = 164.7 adjusted FO4; 56/65 measured
-modules over budget; budget-equivalent 227 MHz on nangate45, 243 MHz at
-fo4_ps = 20, 338 MHz on asap7, 67/60 MHz on sky130hs/hd. The spread of the
-ratio is itself a calibration map: `store_buffer` 7.1, `wt_dcache_wbuffer`
-6.2, `csr_regfile` 6.0 and `alu` 5.7 are where the delay model reads
-lightest against the netlist; `g6lc_lsq` 1.6, `multiplier` 2.0 and `g6lc_iq`
-2.3 are where it tracks. These are ideal-input, unplaced module paths: upper
-bounds on logic speed, not sign-off.
+**What it revealed.** Previous full board (pre-A118): median
+adjusted/structural **3.05** over 64 modules (p25 1.63, p75 5.18); worst
+measured `store_buffer` 3.524 ns = 164.7 adjusted FO4; 227 MHz
+budget-equivalent on nangate45. Fresh full route on the retained A120 tree
+(the `s3-adjusted-fo4` stage, 2026-10-17): median **2.91** (p25 1.77, p75
+5.12); worst measured `g6lc_lsq` 3.766 ns = **176.0 adjusted FO4** — an
+in→reg boundary cone (7-cell reg→reg) the module board times with ideal
+inputs; then `g6lc_iq` 142.8, `frontend` 142.4, `store_buffer` 141.3,
+`multiplier` 131.8, `scoreboard` 127.9, `g6lc_rename` 125.9; 56/73 measured
+over budget, 8 linked modules folded to no path (measured 0, never
+estimated — `g6lc_thread_select` at `NrHarts = 1` among them);
+budget-equivalent **212 MHz on nangate45, 227 MHz at fo4_ps = 20, 317 MHz on
+asap7, 63/56 MHz on sky130hs/hd**. One structural FO4 is about three
+inverter delays after mapping, so the 55.7-FO4 structural maximum is ~176
+adjusted FO4 and the distance to 10 is ~17×. The spread of the ratio is a
+calibration map: `scoreboard` 6.5, `store_buffer` 6.1 and `frontend` 5.0
+are where the delay model reads lightest against the netlist; `g6lc_rename`
+2.55, `g6lc_iq` 2.56 and `multiplier` 2.9 are where it tracks. Ideal-input,
+unplaced module paths: upper bounds on logic speed, not sign-off.
 
 **Where it lives.** `crates/sv-timing-core/src/adjusted.rs` (schema
 `adjusted-fo4.v1`, four unit tests), CLI `adjusted`; host
