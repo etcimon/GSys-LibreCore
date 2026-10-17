@@ -206,11 +206,11 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   3.12, instr_queue 1.22 → 1.14 ns).
 - [x] A115: two-stage multiplier (`MultStages`, on for g6lc64_ooo); harness
   3 × 300 k cycles 0 mismatches; whole core elaborates.
-- [x] A116: frontend target as a narrow sum (SAT-proved, exact). Route with
-  A115+A116 in flight (`sta-rtl-emitted-a116.log`).
-- [ ] NarrowAdd as a LoopRewrite-class pass (wide add + sign-extended narrow
-  operand → low add + hi ±1 select); the store buffer's permutation (38
-  cells); rename's reg→out pick (25).
+- [x] A116: frontend target as a narrow sum (SAT-proved, exact) — measured
+  worse (3.25 → 4.05 ns: two serial 24-bit adds vs CSA + prefix adder) and
+  reverted. A115 measured: multiplier 5.34 → 1.95 ns.
+- [ ] the store buffer's permutation (38 cells); rename's reg→out pick (25);
+  the iq dense cone (25 cells, 55 structural).
 - [ ] A114 next: calibrate the estimates against the per-module `stat`
   area deltas (sta_module_delta) so est_cells is in measured cells; a
   per-kind limit (SelectIncrement vs InsertReg); the ledger as a

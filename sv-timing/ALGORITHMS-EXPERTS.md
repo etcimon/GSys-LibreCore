@@ -8199,7 +8199,10 @@ is today for memory operations. Config-gated (user + derived field;
 one-register multiplier except `g6lc64_ooo`. Whole core elaborates;
 side-by-side harness `verif/tb/core/multiplier_sbs` (the two builds of the
 same source, every MUL/CLMUL op, corner operands): 3 seeds × 300 k cycles,
-≈ 234 k valid results per seed, 0 mismatches. Netlist in the A116 run.
+≈ 234 k valid results per seed, 0 mismatches. **Netlist (module board):
+multiplier 5.34 ns in→reg (live) / 3.12–3.36 (emitted, with a cut) → 1.95
+ns any-kind, 1.54 ns / 37 cells reg→reg** — the design's worst physical
+path is no longer the multiplier.
 
 ## A116 — The branch target as a narrow sum
 
@@ -8212,10 +8215,17 @@ its decrement, selected by (carry, sign of the step); the two incrementers
 run from the registered base in parallel with the low add. SAT-proved equal
 to the three-operand sum for every base, offset and immediate shape (jal
 21-bit, branch 13-bit, rvc 12-bit, the link step 2/4) at VLEN 64 and 32.
-Same cycle, no state; the slot's `ras_update` link address uses the same
-form. Whole core elaborates. This is the shape of a general pass
-("NarrowAdd": a wide add whose second operand is a sign-extended narrow
-value) — recorded as the next LoopRewrite-class candidate.
+Same cycle, no state; the slot's `ras_update` link address used the same
+form. Whole core elaborated. **Measured worse and reverted**: frontend
+3.25 ns / 38 cells → 4.05 ns / 49 cells on the module board. The reason is
+instructive: under the delay-oriented script a 64-bit three-operand add is
+one CSA level plus a *prefix* adder (≈ 8 levels), while the narrow form as
+written was two serial 24-bit adds (`off + imm`, then `base_lo + step`)
+plus the select — deeper, not shallower. A three-operand narrow add would
+save two or three levels at most: the 64-bit carry chain was never the
+log-depth adder's cost. Recorded so the "NarrowAdd" idea is not tried
+again without the board; the multiplier's A115 result in the same run
+stands (below).
 
 ## A114 — Area selectivity: Dial 11, the trade-off ledger, and the measured feedback loop
 
