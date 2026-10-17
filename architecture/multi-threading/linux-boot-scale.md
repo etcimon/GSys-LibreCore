@@ -651,6 +651,18 @@ oracle's pace (≈ 27 k cycles/s on the loaded host vs ≈ 37 k free).
 anomaly stays open (T42: `cat` segfaults in libc at a NULL pointer after the first cpuinfo block;
 the shell still comes up).
 
+**L3 state (2026-10-17, `ooocoh-t47b-ooo-pgo-build` = the t46 file set + T43; HEAD `ooocoh-t49`
+carries the same fixes plus T39/T44 and the A105–A108 timing refactors, battery Spike-exact):**
+`l3orc5` runs the trimmed OpenWrt rootfs through `init: - preinit -` (11.42 s), the failsafe prompt,
+`mount_root` (15.65 s), `procd: - early -` (16.02 s) and on, 1.13 G cycles / 691 M retired so far,
+with the user-space-aware live oracle at **0 stored-byte mismatches** once device pages are
+classified: every "stored" mismatch the earlier oracle versions reported at
+`0xffffffc80001d000/008` on every L3 was the 8250 driver (`mem32be_serial_in`) reading LSR/IIR
+through the UART's ioremap — a walked page outside DRAM is now `mmio` and skipped. Five more
+defects were taken out on the way to this point (T40 store-unit double pop, T42 dead-walk tval,
+T43 valid-bit write mux, T39/T44 covered-load fall-through on the HPDCACHE package), each with a
+leaf or invariant plus a mutation and a boot-window witness (`AGENTS-todo.md` T40–T44).
+
 Method note for T35/T37: the root cause was reached without an FST. The `+stq_trace` event window
 (pushes/commits/cancels/flushes with cycles) put the stale push 28 cycles after an SMT switch and
 44 cycles after its tid's cancel bit cleared, which named the store unit's `WAIT_TRANSLATION` as

@@ -2022,8 +2022,14 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `l3watch4` (t47b) the same workqueue loop runs `amoor` → `amoand` →
   refill **0x800** over and over (713,869,135 … 713,875,857, eight
   rounds), no `valid=f7` write, `missunit_vld_write_own_bits` silent for
-  the whole 713.9 M cycles. The L3 `l3orc5` on t47b is past retire 365 M
-  with 0 stored mismatches and continuing towards procd/login.
+  the whole 713.9 M cycles. The L3 `l3orc5` on t47b is past retire 691 M
+  (`procd: - early -` at 16.02 s) and continuing towards login; the offline
+  oracle with the vmap/MMIO-aware fold reports 0 mismatches through 516 M
+  and is re-running to the end. The "stored" mismatches every L3 showed at
+  `0xffffffc80001d000/008` were the 8250 driver's LSR/IIR reads through the
+  UART ioremap (`mem32be_serial_in`; the walk resolves the VA to PA
+  `0x10000000`) — the oracle now classifies a walked non-DRAM page as
+  `mmio`.
 - [ ] **T39 — server1 (HPDCACHE, SMT2, t38) L1 past the T35 point oopses at
   1.267 s guest: `insert_header+0x9c` (`__register_sysctl_table` from
   `eventpoll_init`) NULL pointer dereference at `0x50`, PID 1 (2026-10-15).**
