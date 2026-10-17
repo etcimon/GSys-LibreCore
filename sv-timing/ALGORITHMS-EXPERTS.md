@@ -8177,6 +8177,46 @@ ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
 
+## A115 — The two-stage multiplier (`CVA6Cfg.MultStages`)
+
+A113's calibration put the design's worst physical path where no reg→reg
+ranking had looked: the multiplier's (XLEN+1)×(XLEN+1) product, 5.34 ns
+in→reg on the Nangate45 study against 3.8 ns for the next cone. The
+original comment says "relies on retiming features of the synthesizer";
+the study flow has none, and neither does a flow that wants a verifiable
+RTL. With `MultStages = 2` the B operand is cut into XLEN/16 slices (16
+unsigned bits each, the top one 17 bits carrying the sign); the XLEN/16
+partial products A × B_k are registered; the second stage sums the shifted
+products once, as a balanced tree. `Σ_k (A × B_k) << 16k == A × B` for
+every signedness the operation selects (the sign bits live in the
+(XLEN+1)-bit operands), so the split is exact; the carry-less results take
+the same two stages so the operator select sees them together. One more
+cycle of MUL latency; nothing else in the contract moves — the result
+travels with its trans_id, `mult.sv` arbitrates on the valid, and a late
+result after a flush is dropped by the scoreboard's `issued` guard as it
+is today for memory operations. Config-gated (user + derived field;
+`check_cfg`: `{1,2}`, `XLEN % 16 == 0`); every target package keeps the
+one-register multiplier except `g6lc64_ooo`. Whole core elaborates;
+side-by-side harness `verif/tb/core/multiplier_sbs` (the two builds of the
+same source, every MUL/CLMUL op, corner operands): 3 seeds × 300 k cycles,
+≈ 234 k valid results per seed, 0 mismatches. Netlist in the A116 run.
+
+## A116 — The branch target as a narrow sum
+
+The frontend's worst cone (3.25 ns / 38 cells) is the 64-bit three-operand
+target sum behind the slot select. `base + off + imm` only ever adds a
+small signed step to the block base — `off < FETCH_WIDTH/8`, `imm` at most
+21 bits — so the sum is `{base_hi + {+1, 0, −1}, lo}`: one 24-bit add gives
+`lo` and its carry, the high part is the base's high part, its increment or
+its decrement, selected by (carry, sign of the step); the two incrementers
+run from the registered base in parallel with the low add. SAT-proved equal
+to the three-operand sum for every base, offset and immediate shape (jal
+21-bit, branch 13-bit, rvc 12-bit, the link step 2/4) at VLEN 64 and 32.
+Same cycle, no state; the slot's `ras_update` link address uses the same
+form. Whole core elaborates. This is the shape of a general pass
+("NarrowAdd": a wide add whose second operand is a sign-extended narrow
+value) — recorded as the next LoopRewrite-class candidate.
+
 ## A114 — Area selectivity: Dial 11, the trade-off ledger, and the measured feedback loop
 
 **What the width map did and did not tune.** The elaborated width map

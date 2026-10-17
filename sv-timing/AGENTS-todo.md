@@ -204,6 +204,13 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   previous calibration automatically. First gated run: 60 applied / 10
   refused, area −0.10 %, worst paths unchanged or better (multiplier 3.36 →
   3.12, instr_queue 1.22 → 1.14 ns).
+- [x] A115: two-stage multiplier (`MultStages`, on for g6lc64_ooo); harness
+  3 × 300 k cycles 0 mismatches; whole core elaborates.
+- [x] A116: frontend target as a narrow sum (SAT-proved, exact). Route with
+  A115+A116 in flight (`sta-rtl-emitted-a116.log`).
+- [ ] NarrowAdd as a LoopRewrite-class pass (wide add + sign-extended narrow
+  operand → low add + hi ±1 select); the store buffer's permutation (38
+  cells); rename's reg→out pick (25).
 - [ ] A114 next: calibrate the estimates against the per-module `stat`
   area deltas (sta_module_delta) so est_cells is in measured cells; a
   per-kind limit (SelectIncrement vs InsertReg); the ledger as a
