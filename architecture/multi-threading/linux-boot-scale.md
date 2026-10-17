@@ -663,6 +663,18 @@ defects were taken out on the way to this point (T40 store-unit double pop, T42 
 T43 valid-bit write mux, T39/T44 covered-load fall-through on the HPDCACHE package), each with a
 leaf or invariant plus a mutation and a boot-window witness (`AGENTS-todo.md` T40–T44).
 
+**L3 reached (2026-10-17, `l3orc5` on `ooocoh-t47b-ooo-pgo-build`):** the trimmed OpenWrt 24.10
+rootfs boots under procd to **`Please press Enter to activate this console.`** at ≈ 1.314 G cycles
+(795 M retired, 24.6 s guest; the prompt is split across three UART fragments in the log by the
+`[ptw-err]`/`[mmu-ife]` diagnostics), then `kmodloader` finishes `/etc/modules.d` at 27.03 s and the
+system idles waiting for input; 1.84 G cycles / 1.05 G retired at the last census, IPC 0.57. The
+user-space-aware oracle over the kept trace (vmap/MMIO folding) finds exactly three stored-byte
+mismatches in 730 M retirements, all the T39/T44 shape (a user `sb` then `lbu` 19 cycles apart
+reading the old byte) that `ooocoh-t49` fixes; the t49 L3 (`l3h49`) is replicating the climb on HEAD
+and is past preinit. Budget as measured: kernel to `/sbin/init` 10.3 s guest ≈ 560 M cycles,
+preinit → procd init 14 s ≈ 750 M cycles, at ≈ 20–27 k cycles/s on the loaded builder (≈ 18 h
+wall for the prompt).
+
 Method note for T35/T37: the root cause was reached without an FST. The `+stq_trace` event window
 (pushes/commits/cancels/flushes with cycles) put the stale push 28 cycles after an SMT switch and
 44 cycles after its tid's cancel bit cleared, which named the store unit's `WAIT_TRANSLATION` as
