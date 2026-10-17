@@ -85,11 +85,13 @@ module g6lc_rob #(
         rob_d[rid].e = alloc_entry_i[a];
       end
     end
-    for (int unsigned a = 0; a < NR_ALLOC; a++) begin
-      if (alloc_valid_i[a] && !full_o) begin
-        tail_d  = tail_d + 1'b1;
-        count_d = count_d + 1'b1;
-      end
+    // Pointer and count advance by the number of allocations at once
+    // (sv-timing A107), not by one serial increment per port.
+    begin
+      automatic logic [NR_ALLOC-1:0] alloc_fire;
+      for (int unsigned a = 0; a < NR_ALLOC; a++) alloc_fire[a] = alloc_valid_i[a] && !full_o;
+      tail_d  = tail_d + ROB_W'($countones(alloc_fire));
+      count_d = count_d + (ROB_W + 1)'($countones(alloc_fire));
     end
     for (int unsigned w = 0; w < NR_COMPLETE; w++) begin
       if (complete_valid_i[w]) begin
@@ -136,17 +138,29 @@ module g6lc_rob #(
     // decrements synthesis keeps serial (structural 63 FO4 at 2 x 32). Port
     // r's hits are taken on the state port r-1 left, so two ports naming
     // the same tid still free one slot and count one, as before.
+    // Hits from the registered state for every port at once (sv-timing
+    // A107): an entry allocated this cycle cannot retire this cycle, so
+    // `rob_q` and the pre-free `rob_d` agree on what a retire tid can hit;
+    // "port r's hits on the state port r-1 left" is the mask by the earlier
+    // ports' hits. The ports' hit vectors are then disjoint, so one
+    // popcount of their union is the count's decrement. Exact as before:
+    // two ports naming one tid still free one slot and count one.
     free_hit = '0;
-    for (int unsigned r = 0; r < NR_RETIRE; r++) begin
-      if (retire_ack_i[r]) begin
+    begin
+      automatic logic [ROB_ENTRIES-1:0] taken, all_hits;
+      taken = '0;
+      for (int unsigned r = 0; r < NR_RETIRE; r++) begin
         for (int unsigned i = 0; i < ROB_ENTRIES; i++) begin
-          free_hit[r][i] = rob_d[i].valid && (rob_d[i].tid == retire_tid_i[r]);
+          free_hit[r][i] = retire_ack_i[r] && rob_q[i].valid &&
+                           (rob_q[i].tid == retire_tid_i[r]) && !taken[i];
         end
-        for (int unsigned i = 0; i < ROB_ENTRIES; i++) begin
-          if (free_hit[r][i]) rob_d[i].valid = 1'b0;
-        end
+        taken = taken | free_hit[r];
       end
-      count_d = count_d - (ROB_W + 1)'($countones(free_hit[r]));
+      all_hits = taken;
+      for (int unsigned i = 0; i < ROB_ENTRIES; i++) begin
+        if (all_hits[i]) rob_d[i].valid = 1'b0;
+      end
+      count_d = count_d - (ROB_W + 1)'($countones(all_hits));
     end
     // Re-anchor the report-only head on the oldest remaining entry: advance
     // past the run of freed slots starting at head, never past tail. The
