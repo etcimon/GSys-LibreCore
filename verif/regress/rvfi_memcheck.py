@@ -112,8 +112,10 @@ def fold(addr, sv39=None):
                                not (LINEAR_VA <= addr < LINEAR_VA + LINEAR_LEN) and
                                not (KIMG_VA <= addr < KIMG_VA + KIMG_LEN)):
             pa = sv39.translate(addr)
-            if pa is not None and DRAM_LO <= pa < DRAM_HI:
-                return pa, 'pa'
+            if pa is not None:
+                # a mapped page outside DRAM is a device (ioremap'd UART, CLINT,
+                # PLIC): its reads are hardware state, not the last store
+                return (pa, 'pa') if DRAM_LO <= pa < DRAM_HI else (pa, 'mmio')
             return addr, 'va'
     if KIMG_VA <= addr < KIMG_VA + KIMG_LEN:
         return addr - KIMG_VA + KIMG_PA, 'pa'
