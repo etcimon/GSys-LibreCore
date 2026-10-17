@@ -137,10 +137,139 @@ pub fn lhs_has_user_type(source: &str, name: &str) -> bool {
     false
 }
 
+/// Identifiers declared inside a generate block (`if … begin : g`, `for
+/// (genvar …) begin : g`, `else begin : g`): a module-scope feed cannot
+/// *read* them (the multiplier's `term[]` array inside `gen_two_stage` was
+/// hoisted into a module-scope feed, A116). A generate-local **LHS** is
+/// still a legal cut: its origin is rewritten in place (the twin-generate
+/// path). Text scan over the comment-masked source: any module-level
+/// `begin … end` nesting outside a process/function is a generate block.
+pub fn generate_local_idents(source: &str) -> std::collections::BTreeSet<String> {
+    const TYPE_WORDS: [&str; 9] = [
+        "logic", "bit", "int", "integer", "reg", "wire", "var", "signed", "unsigned",
+    ];
+    let mut out = std::collections::BTreeSet::new();
+    let masked = crate::masked_syntax(source);
+    let (mut in_proc, mut in_fn) = (false, false);
+    let mut depth = 0i32;
+    let mut gen_depth = 0i32;
+    for line in masked.lines() {
+        let t = line.trim();
+        let words: Vec<&str> = t
+            .split(|c: char| !(c.is_ascii_alphanumeric() || c == '_'))
+            .filter(|w| !w.is_empty())
+            .collect();
+        let first = words.first().copied().unwrap_or("");
+        if in_fn {
+            if words.contains(&"endfunction") || words.contains(&"endtask") {
+                in_fn = false;
+            }
+            continue;
+        }
+        if in_proc {
+            let mut opened = false;
+            for w in &words {
+                match *w {
+                    "begin" | "fork" => {
+                        depth += 1;
+                        opened = true;
+                    }
+                    "end" | "join" => depth -= 1,
+                    _ => {}
+                }
+            }
+            if depth <= 0 && (opened || !t.starts_with("always")) {
+                in_proc = false;
+                depth = 0;
+            }
+            continue;
+        }
+        if first.starts_with("always") || first == "initial" {
+            // a one-line process without `begin` closes at once
+            if words.contains(&"begin") {
+                in_proc = true;
+                depth = words.iter().filter(|w| **w == "begin").count() as i32
+                    - words.iter().filter(|w| **w == "end").count() as i32;
+                if depth <= 0 {
+                    in_proc = false;
+                }
+            }
+            continue;
+        }
+        if first == "function" || first == "task" {
+            in_fn = true;
+            continue;
+        }
+        if gen_depth > 0 && TYPE_WORDS[..7].contains(&first) {
+            // names: identifiers at bracket depth 0 after the type words, up to `=`/`;`
+            let mut bdepth = 0i32;
+            let mut tok = String::new();
+            let mut names: Vec<String> = Vec::new();
+            let mut flush = |tok: &mut String| {
+                if !tok.is_empty() {
+                    if !TYPE_WORDS.contains(&tok.as_str())
+                        && !tok.chars().next().is_some_and(|c| c.is_ascii_digit())
+                    {
+                        names.push(tok.clone());
+                    }
+                    tok.clear();
+                }
+            };
+            for c in t.chars() {
+                match c {
+                    '[' | '(' | '{' => {
+                        flush(&mut tok);
+                        bdepth += 1;
+                    }
+                    ']' | ')' | '}' => bdepth -= 1,
+                    '=' | ';' if bdepth == 0 => {
+                        flush(&mut tok);
+                        break;
+                    }
+                    c if bdepth == 0 && (c.is_ascii_alphanumeric() || c == '_') => tok.push(c),
+                    _ if bdepth == 0 => flush(&mut tok),
+                    _ => {}
+                }
+            }
+            flush(&mut tok);
+            out.extend(names);
+        }
+        if first == "for" {
+            // `for (genvar k …)`: the genvar is block-local too
+            if let Some(open) = t.find('(') {
+                let hdr = t[open + 1..].split(';').next().unwrap_or("");
+                let mut ws = hdr.split_whitespace();
+                while let Some(w) = ws.next() {
+                    if w == "genvar" {
+                        if let Some(n) = ws.next() {
+                            let name: String = n
+                                .chars()
+                                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_')
+                                .collect();
+                            if !name.is_empty() {
+                                out.insert(name);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        for w in &words {
+            match *w {
+                "begin" => gen_depth += 1,
+                "end" => gen_depth = (gen_depth - 1).max(0),
+                _ => {}
+            }
+        }
+    }
+    out
+}
+
 /// Identifiers declared inside a procedural body (`always*`, `initial`,
 /// `function`, `task`): a module-scope feed cannot name them. Generate-block
-/// declarations are not in this set — the twin/generate paths handle those
-/// with their own scope rules. Text scan over the comment-masked source: a
+/// declarations are not in this set — see [`generate_local_idents`] (a
+/// generate-local LHS is a legal in-place cut; a generate-local *read* in a
+/// hoisted feed is not). Text scan over the comment-masked source: a
 /// process opens at its keyword and closes when its `begin`/`end` depth
 /// returns to zero (functions and tasks close at `endfunction`/`endtask`).
 pub fn block_local_idents(source: &str) -> std::collections::BTreeSet<String> {
@@ -1151,6 +1280,7 @@ pub fn cut_assigns_from_source(source: &str, trace: &EditTrace) -> Vec<CutAssign
     // the origin stays, the stage is fed zero: credit-only in effect, and the
     // emitted file elaborates (A102).
     let locals = block_local_idents(source);
+    let gen_locals = generate_local_idents(source);
     // One decision for feed and origin (A102). The dense block used to judge
     // the feed on its own — free loop index, generate-local param, a peer
     // cut's LHS, an automatic — and emit `svt_zero` or the previous stage
@@ -1170,7 +1300,10 @@ pub fn cut_assigns_from_source(source: &str, trace: &EditTrace) -> Vec<CutAssign
             .chars()
             .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
             .collect();
-        let refs_local = names.iter().any(|n| locals.contains(n)) || locals.contains(&lhs_root);
+        let refs_local = names
+            .iter()
+            .any(|n| locals.contains(n) || gen_locals.contains(n))
+            || locals.contains(&lhs_root);
         let refs_auto = names.iter().any(|n| n.starts_with("temp_"));
         let unsafe_feed = refs_local
             || refs_auto
@@ -3865,6 +3998,37 @@ endmodule
     /// A102: an enum LHS samples its pipe through `type(lhs)'(…)`; a plain
     /// vector keeps the bare sample; a feed that names a block-local of the
     /// origin's process is neutralised (origin kept, stage fed zero).
+    #[test]
+    fn generate_block_declarations_are_generate_local() {
+        let src = "module m;
+logic [3:0] top;
+if (1) begin : gen_two
+  logic signed [65:0] term[4];
+  wire w1, w2;
+  for (genvar k = 0; k < 4; k++) begin : gen_term
+    assign term[k] = 66'(k);
+  end
+  if (1) begin : gen_sum4
+    assign top = 4'(term[0] + term[1]);
+  end
+end else begin : gen_one
+  logic one_local;
+  assign top = '0;
+end
+logic after;
+endmodule
+";
+        let locals = generate_local_idents(src);
+        assert!(locals.contains("term"), "{locals:?}");
+        assert!(locals.contains("w1") && locals.contains("w2"), "{locals:?}");
+        assert!(locals.contains("k"), "{locals:?}");
+        assert!(locals.contains("one_local"), "{locals:?}");
+        assert!(
+            !locals.contains("top") && !locals.contains("after"),
+            "{locals:?}"
+        );
+    }
+
     #[test]
     fn enum_lhs_is_cast_and_block_local_feeds_are_neutralised() {
         let src = "module m (input logic clk_i, rst_ni, a, b, output logic [3:0] y_o);\n  typedef enum logic [1:0] {IDLE, RUN} state_e;\n  state_e state_d, state_q;\n  logic [3:0] plain_d;\n  always_comb begin\n    automatic logic [3:0] tmp;\n    tmp = {a, b, a, b};\n    state_d = a ? RUN : IDLE;\n    plain_d = tmp + 4'd1;\n  end\nendmodule\n";

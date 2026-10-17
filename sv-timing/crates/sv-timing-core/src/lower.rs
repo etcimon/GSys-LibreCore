@@ -3051,6 +3051,59 @@ mod tests {
         .expect("lower inline source")
     }
 
+    /// multiplier A115 shape: a `logic` *array* declared inside a conditional
+    /// generate block, written by a nested genvar loop and read in a nested
+    /// generate-if; a hoisted feed must not name it (`term`, A116 emit).
+    #[test]
+    fn decl_sites_flag_generate_block_arrays_as_local() {
+        let text = concat!(
+            "module gen_arr(input logic [63:0] a, output logic [63:0] y);
+",
+            "localparam int unsigned NS = 4;
+",
+            "if (NS > 1) begin : gen_two
+",
+            "  logic signed [65:0] term[NS];
+",
+            "  for (genvar k = 0; k < NS; k++) begin : gen_term
+",
+            "    assign term[k] = 66'(a) <<< (16 * k);
+",
+            "  end
+",
+            "  if (NS == 4) begin : gen_sum4
+",
+            "    assign y = 64'((term[0] + term[1]) + (term[2] + term[3]));
+",
+            "  end
+",
+            "end else begin : gen_one
+",
+            "  assign y = a;
+",
+            "end
+",
+            "endmodule
+",
+        );
+        let out = analyze_inline_source(text);
+        let module = out
+            .design
+            .modules
+            .values()
+            .find(|m| m.name == "gen_arr")
+            .unwrap();
+        let term = module.decls.iter().find(|d| d.name == "term");
+        assert_eq!(
+            term.map(|d| d.block_local),
+            Some(true),
+            "{:?}",
+            module.decls
+        );
+        let set = module.block_local_names();
+        assert!(module.text_refs_block_local("(term[0] + term[1]) + (term[2] + term[3])", &set));
+    }
+
     #[test]
     fn decl_sites_flag_block_locals_and_loop_variables() {
         // perf_counters shape: `automatic logic brh` inside `for … always_comb`,
