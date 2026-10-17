@@ -217,6 +217,37 @@ module frontend
   // three-operand sum (sv-timing A105) — the realigner's cursor add is no
   // longer in series with the 64-bit target add.
   logic [NrInstr-1:0][CVA6Cfg.VLEN-1:0] addr_base, addr_off;
+  // Narrow target sum (sv-timing A116). `base + off + imm` only ever adds a
+  // small signed step to the block base: off < FETCH_WIDTH/8 and imm is a
+  // 21-bit (jal) / 13-bit (branch) / 12-bit (rvc) immediate, so the step
+  // fits in TGT_LO bits. The sum is then {base_hi + {+1, 0, -1}, lo}: one
+  // TGT_LO-bit add gives lo and its carry, the high part is the base's high
+  // part, its increment or its decrement, selected by (carry, sign of the
+  // step) — exact modulo 2^VLEN, and the 64-bit carry chain is gone from the
+  // target path (the two incrementers run from the registered base in
+  // parallel with the low add). Identical for every slot that shares the
+  // block base; ABC merges the duplicated incrementers.
+  localparam int unsigned TGT_LO = 24;
+  logic [NrInstr-1:0][CVA6Cfg.VLEN-1:0] base_hi_inc, base_hi_dec;
+  for (genvar i = 0; i < NrInstr; i++) begin : gen_tgt_hi
+    assign base_hi_inc[i] = {addr_base[i][CVA6Cfg.VLEN-1:TGT_LO] + 1'b1, {TGT_LO{1'b0}}};
+    assign base_hi_dec[i] = {addr_base[i][CVA6Cfg.VLEN-1:TGT_LO] - 1'b1, {TGT_LO{1'b0}}};
+  end
+  function automatic logic [CVA6Cfg.VLEN-1:0] narrow_target(
+      input logic [CVA6Cfg.VLEN-1:0] base, input logic [CVA6Cfg.VLEN-1:0] hi_inc,
+      input logic [CVA6Cfg.VLEN-1:0] hi_dec, input logic [CVA6Cfg.VLEN-1:0] off,
+      input logic [CVA6Cfg.VLEN-1:0] imm);
+    logic [TGT_LO-1:0] step;
+    logic [TGT_LO:0]   lo;
+    logic              neg;
+    step = TGT_LO'(off) + TGT_LO'(imm);
+    neg  = step[TGT_LO-1];
+    lo   = {1'b0, base[TGT_LO-1:0]} + {1'b0, step};
+    narrow_target = base;
+    narrow_target[TGT_LO-1:0] = lo[TGT_LO-1:0];
+    if (lo[TGT_LO] && !neg) narrow_target[CVA6Cfg.VLEN-1:TGT_LO] = hi_inc[CVA6Cfg.VLEN-1:TGT_LO];
+    else if (!lo[TGT_LO] && neg) narrow_target[CVA6Cfg.VLEN-1:TGT_LO] = hi_dec[CVA6Cfg.VLEN-1:TGT_LO];
+  endfunction
   logic [NrInstr-1:0] instruction_valid_raw, instruction_valid;
   // BHT, BTB and RAS prediction
   bht_prediction_t [NrInstr-1:0] bht_prediction;
@@ -446,12 +477,14 @@ module frontend
       // we actually consumed it
       if (is_call[i]) begin
         ras_push   = instr_queue_consumed[i];
-        ras_update = addr_base[i] + addr_off[i] + (rvc_call[i] ? 2 : 4);
+        ras_update = narrow_target(addr_base[i], base_hi_inc[i], base_hi_dec[i], addr_off[i],
+                                   CVA6Cfg.VLEN'(rvc_call[i] ? 2 : 4));
       end
       // calculate the jump target address: base + offset + immediate as one
-      // sum (equal to addr[i] + imm modulo 2^VLEN)
+      // narrow sum (equal to addr[i] + imm modulo 2^VLEN, A116)
       if (taken_rvc_cf[i] || taken_rvi_cf[i]) begin
-        predict_address = addr_base[i] + addr_off[i] + (taken_rvc_cf[i] ? rvc_imm[i] : rvi_imm[i]);
+        predict_address = narrow_target(addr_base[i], base_hi_inc[i], base_hi_dec[i], addr_off[i],
+                                        taken_rvc_cf[i] ? rvc_imm[i] : rvi_imm[i]);
       end
     end
     // Leftover-complete RVI jal is slot0 at carry_pc. Later slots in the
@@ -462,9 +495,10 @@ module frontend
     if (serving_unaligned && instruction_valid[0] && rvi_jump[0]) begin
       cf_type[0] = ariane_pkg::Jump;
       taken_rvi_cf[0] = 1'b1;
-      predict_address = addr_base[0] + addr_off[0] + rvi_imm[0];
+      predict_address = narrow_target(addr_base[0], base_hi_inc[0], base_hi_dec[0], addr_off[0], rvi_imm[0]);
       ras_push = rvi_call[0] && instr_queue_consumed[0];
-      if (rvi_call[0]) ras_update = addr_base[0] + addr_off[0] + 4;
+      if (rvi_call[0])
+        ras_update = narrow_target(addr_base[0], base_hi_inc[0], base_hi_dec[0], addr_off[0], CVA6Cfg.VLEN'(4));
     end
   end
 
