@@ -28,7 +28,7 @@ worst remaining single-cycle primary.
 | Automatic transforms | `LoopRewrite` (FindFirst, CondCount, RingWalk, StreamCompact), `SelectIncrement`, `BalanceMux` (one-hot, arm set = rewrite set), `RebalanceAssoc`, `SplitAssign`, `InsertReg` — exact or latency-labelled, area-neutral-or-better except InsertReg | A88–A103, `AGENTS-auto-correct.md` catalog |
 | Production RTL rewrites | instr_queue admission count (A92), scoreboard cancel window (A98), ROB free/re-anchor (A99), rename/iq/store_buffer find-first and popcount (A100) — SAT at fixture sizes; 8/32-entry miters inconclusive on budget | A92–A100 |
 | Mapping noise floor | ±1 % area, ±6 cells on identical RTLIL (autoidx-dependent ABC order) | A102 |
-| 10 FO4 | **not closed**. Module board (Nangate45) across A104–A112: worst delay 6.21 → **4.35 ns** (frontend, the 64-bit target sum), worst cells 54 → **38–41** (scoreboard 54 → 22, rename 52 → 25, store_buffer 49 → 38, iq 47 → 41 at 6.21 → 3.04 ns, frontend 43 → 34, rob 35 → 23, realign 23 → 15); at ≈ 1.3 cells/FO4 the budget is ≈ 13 cells. The residual is single-cycle contracts (the 64-bit adds, the two-port selects, the same-cycle permutations); A107/A112 list what each would take and what ablation measured | A103–A112 |
+| 10 FO4 | **not closed**. Module board (Nangate45) across A104–A112: worst reg→reg delay 6.21 → **4.35 ns** (frontend, the 64-bit target sum), worst cells 54 → **38–41**; the design's worst path of any kind is the **multiplier's product, 5.34 ns in→reg** (A113). Structural (delay-v39, live, fresh width map): worst 55.1, 694 of 1 630 reg→reg over 10 FO4; the two boards agree on ranking and scale (≈ 0.07 ns per structural FO4). The route now refreshes the width map first, plans and verdicts the live design only, and writes `calibration.tsv` every run | A103–A113 |
 
 The route that produces these numbers is one host command (`AGENTS-build-platform.md` §7.1):
 `timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --allow-over-budget --remote --map-recipe streamed`,
@@ -8248,8 +8248,36 @@ Two findings from the first `calibration.tsv`:
   live headline was the multiplier at 416 against a mapped depth ≈ 1.2× the
   frontend's. A tree multiplier is a CSA tree of depth ~log w and one
   adder: **delay-v39** scales `Mul` like `AddSub` (log₂ w / log₂ 32; the
-  iterative divider keeps the linear law). The next run's headline is the
-  design's real top, not the table's.
+  iterative divider keeps the linear law). The remaining 416 was the
+  carry-less multiply's loop, `clmul_d = b[i] ? clmul_d ^ (a << i) :
+  clmul_d` — a guarded XOR accumulate written as a select, billed as 64
+  mux copies; `c ? x ^ t : x` is `x ^ (t & {c})`, an XOR tree, and
+  delay-v39 recognises the select form in both the IR carry and the
+  function-body scan (log₂ 64 = 6 copies).
+
+### The live board under delay-v39 (fresh width map), against the mapped board
+
+| structural FO4 (kind) | module | mapped ns (reg→reg / any) | cells | reading |
+|---:|---|---|---:|---|
+| 55.1 reg→reg | g6lc_iq | 3.16 / 3.18 | 25 | dense-cone class still ≈ 2× (the one remaining artefact in the top) |
+| 50.8 reg→out | g6lc_lsq | 1.92 / 3.10 | 14 | boundary path; tracks on `any` |
+| 50.0 in→reg | multiplier | 1.08 / 3.36 | 18 | **was 416**; tracks on `any` |
+| 49.3 reg→out | g6lc_rename | 3.77 / 3.77 | 25 | tracks |
+| 47.0 reg→reg | frontend | 3.15 / 3.25 | 38 | tracks (the 64-bit target sum) |
+| 41.3 in→reg | fpnew_cast_multi | — | — | not on the board (black-boxed cast) |
+| 37.2 reg→reg | g6lc_thread_select | — | 1 | parameter-dead at one hart (model) |
+| 34.7 reg→reg | perf_counters | 1.05 / 1.07 | 14 | over-read (model) |
+| 32.1 reg→out | instr_realign | 2.31 / 2.38 | 15 | tracks |
+| 31.2 in→out | alu | — / 2.25 | — | the 64-bit ALU, combinational module |
+| 24.0 in→out | store_buffer | 3.32 / 3.60 | 38 | under-read (the one permutation + gather) |
+
+Across the five largest real cones the two boards agree on the ranking
+and on the scale (≈ 0.07 ns of Nangate45 per structural FO4; 10 FO4 ≈
+0.7 ns here): the structural metric is now an instrument that can be
+read beside the netlist, with three named artefacts left (the dense-cone
+class, parameter-dead code, the perf-counter select) and one named
+under-read (the store buffer's permutation). Live board: worst 55.1,
+694 of 1 630 reg→reg over 10 FO4, 126 dead modules excluded.
 
 Why the structural worst read "below 20" in October's first week and 55
 now is not a regression of the design; it is the instrument learning to

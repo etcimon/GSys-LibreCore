@@ -25,6 +25,17 @@ the band at 22–27.
 Structural live board: worst 55.1 (`g6lc_iq`, dense-cone class), 693 of
 1626 reg→reg. Details: ALGORITHMS-EXPERTS A104–A106.
 
+**Route of record (A113):** `timings sta-rtl … --fo4 10 --allow-over-budget
+--remote --map-recipe streamed` refreshes the elaborated width map before
+the pre-pass, plans and verdicts the instantiated modules only, maps,
+runs the STA, then writes `calibration.tsv` (structural FO4 per module
+beside mapped ns / cells, worst path of any kind first). First run under
+it: 22 of 28 reg→reg cones ≥ 8 cells track at 0.6–2.0 cells/FO4; the
+design's worst physical path is the multiplier's product (5.34 ns,
+in→reg — invisible to a reg→reg ranking); delay-v39 made the structural
+board agree with the mapped one on the top five (iq 55.1, lsq 50.8,
+multiplier 50.0, rename 49.3, frontend 47.0 ↔ 3.2–3.8 ns).
+
 ## Earlier (2026-10-16, delay-v37, guards — the board sees the OoO cones)
 
 Latest: the per-module mapped board (A100) calibrated the structural model

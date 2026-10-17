@@ -194,6 +194,10 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   remote run. First full run: 108 live modules planned, 22/28 cones track,
   the multiplier is the design's worst physical path (5.34 ns, in→reg —
   invisible to a reg→reg ranking); delay-v39 scales `Mul` by log2(w).
+- [x] delay-v39: `Mul` log scaling; guarded accumulate as a select is
+  associative (clmul 416 → 50 FO4 against 3.36 ns mapped). Live v39 board:
+  iq 55.1, lsq 50.8, multiplier 50.0, rename 49.3, frontend 47.0 — agrees
+  with the mapped ranking.
 - [ ] A113 next: rerun the route under delay-v39 (headline = the real top);
   the multiplier as a pipelined 2-stage product (owner: +1 cycle MUL);
   the four over-reads (iq dense class, perf_counters, lsq, ptw) are the
