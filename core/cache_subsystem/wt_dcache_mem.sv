@@ -196,9 +196,24 @@ module wt_dcache_mem
   // SL-W: explicit `inv_req` invalidates one way.  It has priority over the
   // existing `wr_denied` path so the full-queue fallback cannot be starved by
   // a colliding word write.
-  assign vld_wdata     = inv_req_i  ? (inv_vld_bits_i & ~inv_way_oh_i) :
+  // T43: the valid-bit DATA follows the same priority as vld_addr/vld_req --
+  // the missunit's line write/invalidation (wr_cl_vld_i) first. With inv_req_i
+  // ahead of it, an AMO/flush "invalidate all ways" (wr_cl_we=ff,
+  // wr_vld_bits=0) that coincided with a pending, unacked fixup inv_req wrote
+  // the fixup's `inv_vld_bits & ~way` (e.g. f7) into all eight ways at the
+  // missunit's index with the missunit's tag: seven ways validated on one
+  // line, the next load hit them all (hit=f7) and read the pre-AMO word (the
+  // L3 boot's amoand after amoor on work->data, cycle 713,884,693).
+`ifdef G6LC_MUT_VLD_WDATA_INV_PRIO
+  assign vld_wdata     = inv_req_i  ? (inv_vld_bits_i & ~inv_way_oh_i) :   // review mutation: the pre-fix mux
                          wr_denied ? '0 :
                                      wr_vld_bits_i;
+`else
+  assign vld_wdata     = wr_cl_vld_i ? wr_vld_bits_i :
+                         inv_req_i   ? (inv_vld_bits_i & ~inv_way_oh_i) :
+                         wr_denied   ? '0 :
+                                       wr_vld_bits_i;
+`endif
   assign vld_addr      = (wr_cl_vld_i) ? wr_cl_idx_i :
                          (inv_req_i)  ? inv_idx_i :
                          (wr_denied)  ? wr_idx_i :
@@ -468,6 +483,14 @@ module wt_dcache_mem
                  smt_mem_cycle, vld_addr, vld_req, vld_wdata, inv_req_i, inv_ack_o);
     end
   end
+
+  // T43 invariant: a missunit line write / invalidation writes its own valid
+  // bits (at most one way set -- the refilled way), never another path's.
+  missunit_vld_write_own_bits :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      (wr_cl_vld_i && |wr_cl_we_i) |-> (vld_wdata == wr_vld_bits_i && $onehot0(vld_wdata)))
+  else $error("[l1 dcache] missunit line write at idx %h would validate ways %h (own bits %h, inv_req=%b)",
+              wr_cl_idx_i, vld_wdata, wr_vld_bits_i, inv_req_i);
 `ifndef VERILATOR
   initial begin
     cach_line_width_axi :
