@@ -3404,6 +3404,41 @@ mod tests {
             "{}",
             acc.fo4_cost
         );
+        // The same accumulate written as a select — `c ? x ^ t : x` is
+        // `x ^ (t & {c})` — is still a balanced XOR tree (the carry-less
+        // multiply's 64-trip loop read 416 FO4 as a mux chain, delay-v39).
+        let text_sel = concat!(
+            "module m4 (input logic [63:0] a_i, b_i, output logic [63:0] clmul_o);
+",
+            "  always_comb begin
+",
+            "    clmul_o = '0;
+",
+            "    for (int i = 0; i < 64; i++) clmul_o = (|((b_i >> i) & 1)) ? clmul_o ^ (a_i << i) : clmul_o;
+",
+            "  end
+",
+            "endmodule
+",
+        );
+        let out4 = analyze_inline_source(text_sel);
+        let m4 = out4.design.modules.values().next().unwrap();
+        let sel = m4
+            .nodes
+            .values()
+            .find(|n| {
+                n.rhs
+                    .as_deref()
+                    .is_some_and(|r| r.contains("clmul_o ^ (a_i << i)"))
+            })
+            .expect("select accumulate");
+        // log2(64) = 6 copies of (shift, xor, select) — well under the 64
+        // copies of the serial reading (416 FO4 on the multiplier)
+        assert!(
+            sel.fo4_cost < 6.0 * (model.shift_const + model.logic_bit + model.mux) + 8.0,
+            "a guarded XOR accumulate as a select is log depth, not 64 copies: {}",
+            sel.fo4_cost
+        );
         // A non-associative loop-carried update (a priority mux chain) stays
         // serial: trips × body. (`if (cond) x = const` carries its cost in the
         // condition, which this model does not yet bill — see AGENTS-todo.)

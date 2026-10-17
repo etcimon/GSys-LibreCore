@@ -977,11 +977,10 @@ fn loop_carried_multipliers(
             let Some(&via_guard_only) = carried_keys.get(&key) else {
                 continue;
             };
-            let assoc = n.rhs_expr.as_ref().is_some_and(|e| {
-                matches!(e, crate::expr::Expr::Binary { op, left, right, .. }
-                    if matches!(op.as_str(), "|" | "&" | "^" | "||" | "&&")
-                        && (expr_root_is(left, root) || expr_root_is(right, root)))
-            });
+            let assoc = n
+                .rhs_expr
+                .as_ref()
+                .is_some_and(|e| is_assoc_self_update(e, root));
             let mult = if assoc { depth } else { trips };
             let e = out.entry(n.id).or_insert(CarryBill {
                 mult: 1,
@@ -994,6 +993,28 @@ fn loop_carried_multipliers(
         }
     }
     out
+}
+
+/// `x OP t` / `t OP x` with OP bitwise or logical — and the same under a
+/// select, `c ? x OP t : x` (the carry-less multiply's `clmul_d = b[i] ?
+/// clmul_d ^ (a << i) : clmul_d`): `c ? x ^ t : x` is `x ^ (t & {c})`, an
+/// XOR tree synthesis balances to log depth, not a 64-deep mux chain
+/// (delay-v39).
+fn is_assoc_self_update(e: &Expr, root: &str) -> bool {
+    match e {
+        Expr::Binary {
+            op, left, right, ..
+        } => {
+            matches!(op.as_str(), "|" | "&" | "^" | "||" | "&&")
+                && (expr_root_is(left, root) || expr_root_is(right, root))
+        }
+        Expr::Ternary { then_e, else_e, .. } => {
+            // one arm holds, the other accumulates
+            (expr_root_is(else_e, root) && is_assoc_self_update(then_e, root))
+                || (expr_root_is(then_e, root) && is_assoc_self_update(else_e, root))
+        }
+        _ => false,
+    }
 }
 
 /// Identifier references with their index/member text intact
@@ -1379,12 +1400,41 @@ fn is_bitwise_accumulate(stmt: &str) -> bool {
         return false;
     };
     let l = l.trim();
-    let r = r.trim();
-    !l.is_empty()
-        && r.strip_prefix(l).is_some_and(|rest| {
+    let r = r.trim().trim_end_matches(';').trim();
+    if l.is_empty() {
+        return false;
+    }
+    let accumulates = |t: &str| {
+        t.strip_prefix(l).is_some_and(|rest| {
             let rest = rest.trim_start();
             rest.starts_with('|') || rest.starts_with('&') || rest.starts_with('^')
         })
+    };
+    if accumulates(r) {
+        return true;
+    }
+    // `c ? x OP t : x` (or the arms swapped): a guarded accumulate as a select
+    if let Some((_, arms)) = r.split_once('?') {
+        if let Some((a, b)) = split_top_level_colon(arms) {
+            let (a, b) = (a.trim(), b.trim());
+            return (b == l && accumulates(a)) || (a == l && accumulates(b));
+        }
+    }
+    false
+}
+
+/// Split `a : b` at the first top-level `:` (not inside brackets).
+fn split_top_level_colon(t: &str) -> Option<(&str, &str)> {
+    let mut depth = 0i32;
+    for (i, c) in t.char_indices() {
+        match c {
+            '(' | '[' | '{' => depth += 1,
+            ')' | ']' | '}' => depth -= 1,
+            ':' if depth == 0 => return Some((&t[..i], &t[i + 1..])),
+            _ => {}
+        }
+    }
+    None
 }
 
 /// The costliest user-function body called in an expression, less the one
