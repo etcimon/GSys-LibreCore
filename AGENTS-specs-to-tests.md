@@ -950,6 +950,28 @@ through 713.9 M cycles; the live oracle on the L3 (`l3orc5`) past retire 365 M w
 mismatches. The pre-fix L3 on t46 (`l3orc4`) reproduced the mismatch at retire 489,004,871
 with T42 fixed, so the two are independent.
 
+## A covered load completes from the forward, never from the cache (2026-10-17, T39/T44)
+
+Load-cancel leaf scenario 25 (`tb_g6lc_review_load_cancel`, `run_ooo_fault_review.py`
+`FAULT_REVIEW_LEAF=1`, OoO with and without MMU): two older loads are in flight; their D$
+responses arrive back to back on the IDLE and WAIT_PAGE_OFFSET decision cycles of a load the
+STQ forward fully covers (`page_offset_matches_i`, `st_fwd_valid_i`, `be ff`). Checks:
+`req.data_req` stays low on both cycles and the one after (`LOAD_FWD_FALLTHROUGH`), the two
+older loads complete in order (`LOAD_FWD_BURST_OLDER`), and once the port is free the covered
+load writes back the forwarded word with `pop` (`LOAD_FWD_COMPLETE`). Spec anchor: Part I
+`#sec:memorymodel` (RVWMO) — a load must return the value of the latest store to its bytes in
+program order from the same hart; here that store is still in the queue, so only the forward
+can satisfy it. `+oracle_negative` and `FAULT_REVIEW_MUTATE_FWD_FALLTHROUGH=1`
+(`G6LC_MUT_LU_FWD_RVALID_FALLTHROUGH`, the pre-fix `else → WAIT_GNT`) fail with
+`LOAD_FWD_FALLTHROUGH req=1 wb=0`; the 64-record leaf stays green. System witness: the 2-hart
+server1's `insert_header` (`sd` offered at c=102,399,002, forward valid 012–015, the load in
+WAIT_GNT at 014 while the LU wrote back other loads on 012–014, retired 0 at 072) — `l1s1x`
+`+mmu_trace` window. Stage 57 of `ooo_mem_min.S` (two back-to-back hits before each
+store/covered-load pair, filler swept 0..7) is Spike-exact on the WT model before and after:
+the WT shape does not land two responses on the decision cycles. Verdicts owed on
+`ooocoh-t49-server1-pgo-build`: the 2-hart L1 past 1.267 s to the shell (T39) and the
+single-hart L1 past `Run /init` to the shell with the oracle (T44).
+
 ## Speculative store queue: flush coinciding with a commit (2026-10-15, T35 hardening)
 
 `verif/tb/core/run-stq-flush-ptr.sh` → `tb_g6lc_stq_flush_ptr.sv`, a `store_buffer` unit leaf in
