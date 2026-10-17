@@ -179,22 +179,43 @@ export function checkFo4Completion(
       !Number.isFinite(p?.total_fo4) || p.total_fo4 < 0)) {
     return { ok: false, detail: "INCONCLUSIVE: path classification/cost is missing" };
   }
-  const primary = post.paths.filter((p: any) => p.multi_cycle === false);
-  if (primary.length === 0 || primary.some((p: any) => !Number.isFinite(p.total_fo4))) {
+  const allPrimary = post.paths.filter((p: any) => p.multi_cycle === false);
+  if (allPrimary.length === 0 || allPrimary.some((p: any) => !Number.isFinite(p.total_fo4))) {
     return { ok: false, detail: "INCONCLUSIVE: primary path coverage/cost is missing" };
+  }
+  // The verdict is the live design's: with an elaborated width map the
+  // re-analysis names the modules the target does not instantiate, and a
+  // dead module's cone is not this target's period (A113).
+  const dead = liveFilter(post);
+  const primary = allPrimary.filter((p: any) => !dead.has(p.module_id));
+  if (primary.length === 0) {
+    return { ok: false, detail: "INCONCLUSIVE: no primary path in an instantiated module" };
   }
   const worst = primary.reduce((max: number, p: any) => Math.max(max, p.total_fo4), 0);
   const failed = primary.filter((p: any) => p.total_fo4 > budget + 1e-8).length;
+  const deadWorst = allPrimary.filter((p: any) => dead.has(p.module_id))
+    .reduce((max: number, p: any) => Math.max(max, p.total_fo4), 0);
+  const deadNote = dead.size ? ` (${dead.size} uninstantiated modules excluded, their worst ${deadWorst.toFixed(1)})` : "";
   if (failed) {
     return {
       ok: allowOverBudget,
-      detail: `${allowOverBudget ? "STUDY" : "MISS"}: worst primary ${worst} FO4, ` +
-        `${failed} paths exceed ${budget}; ` +
+      detail: `${allowOverBudget ? "STUDY" : "MISS"}: worst live primary ${worst.toFixed(1)} FO4, ` +
+        `${failed} live paths exceed ${budget}${deadNote}; ` +
         (allowOverBudget ? "mapping explicitly requested despite the miss" :
           "mapping stopped; --allow-over-budget enables an exploratory STA run"),
     };
   }
-  return { ok: true, detail: `emitted primary paths meet ${budget} FO4; functional/STA checks remain` };
+  return { ok: true, detail: `emitted live primary paths meet ${budget} FO4${deadNote}; functional/STA checks remain` };
+}
+
+/** Module ids the emitted re-analysis lists as uninstantiated (empty without a width map). */
+function liveFilter(post: any): Set<number> {
+  const names: string[] = post?.frequency_closure?.uninstantiated_modules ?? [];
+  const dead = new Set<number>();
+  if (!names.length || !Array.isArray(post?.modules)) return dead;
+  const set = new Set(names);
+  for (const m of post.modules) if (set.has(m?.name)) dead.add(m.id);
+  return dead;
 }
 
 function checkFo4Report(path: string, budget: number, allowOverBudget?: boolean) {
@@ -528,6 +549,8 @@ function marchValue(ctx: PlatformContext): string {
 /** Outcome of the optional sv-timing pre-pass. */
 interface SvtPrepass {
   stage: RtlTimingResult["stages"][number];
+  /** Stages that ran before the pre-pass (the remote width-map refresh). */
+  preStages?: RtlTimingResult["stages"];
   /** `svt_corrected.f` to overlay on the manifest, when the pass emitted. */
   emitFlist?: string;
   targetMhz?: number;
@@ -546,6 +569,7 @@ async function runSvtPrepass(
   ctx: PlatformContext,
   opts: RtlTimingOptions,
   outDir: string,
+  top?: string,
 ): Promise<SvtPrepass> {
   const cfgEarly = ctx.config.physicalDesign?.structural;
   const fo4Ps = opts.fo4Ps ?? cfgEarly?.fo4Ps ?? 20;
@@ -618,6 +642,16 @@ async function runSvtPrepass(
     extra: cfgEntries,
   });
   const correctedDir = posixPath(join(svtDir, "corrected"));
+  // The elaborated width map must describe *this* tree. It used to be written
+  // by the streamed mapping's phase A — after the pre-pass — so every run that
+  // followed an RTL edit planned on heuristic widths and the fresh map served
+  // only the next run. On the remote route the map is now refreshed first
+  // (phase A of the live tree, ~6 min on the builder) whenever its recorded
+  // source hash does not match (A113).
+  const preStages: RtlTimingResult["stages"] = [];
+  if (opts.remote && top && !freshWidthMap(join(svtDir, "width-map.json"), join(svtDir, "portable.f"))) {
+    preStages.push(await refreshWidthMapRemote(ctx, opts, top, outDir));
+  }
   // The emitter only writes files it touched; a stale emit from an earlier
   // run with other options would otherwise survive.
   // Defaults that make the budget reachable: -O3 (multi-cut, budget-fit) and
@@ -665,11 +699,11 @@ async function runSvtPrepass(
   const budgetNote = `${fo4BudgetFor(targetMhz, fo4Ps, margin).toFixed(1)} FO4 (target ${targetMhz.toFixed(0)} MHz, fo4_ps=${fo4Ps}, margin=${margin})`;
   ctx.logger.info(`sta-rtl: sv-timing correct --all-modules --emit at ${budgetNote}`);
   if (existsSync(join(svtDir, "width-map.json")) && !args.includes("--width-map")) {
-    ctx.logger.warn("sta-rtl: svt/width-map.json ignored — its source_sha256 does not match this tree (regenerated by the next streamed mapping)");
+    ctx.logger.warn("sta-rtl: svt/width-map.json ignored — its source_sha256 does not match this tree (the pre-pass runs on heuristic widths; remote runs refresh it first)");
   }
   ctx.logger.info(`+ ${cmd.argv.join(" ")}`);
   if (ctx.dryRun) {
-    return { stage: { id: "s0-svt-correct", status: "skip", detail: `dry-run ${budgetNote}` }, targetMhz, budget };
+    return { stage: { id: "s0-svt-correct", status: "skip", detail: `dry-run ${budgetNote}` }, preStages, targetMhz, budget };
   }
   rmSync(correctedDir, { recursive: true, force: true });
   rmSync(join(svtDir, "correct.json"), { force: true });
@@ -683,24 +717,103 @@ async function runSvtPrepass(
   writeFileSync(join(svtDir, "correct.log"), `exit=${res.code}\n${res.stdout}\n${res.stderr}\n`, "utf8");
   const emitFlist = join(correctedDir, "svt_corrected.f");
   if (!res.ok) {
-    return { stage: { id: "s0-svt-correct", status: "fail", detail: `sv-timing correct exit ${res.code} (svt/correct.log)` }, targetMhz, budget };
+    return { stage: { id: "s0-svt-correct", status: "fail", detail: `sv-timing correct exit ${res.code} (svt/correct.log)` }, preStages, targetMhz, budget };
   }
   const completion = checkFo4Report(
     join(svtDir, "correct.json"), budget, opts.allowOverBudget ?? cfg?.allowOverBudget,
   );
   if (!completion.ok) {
-    return { stage: { id: "s0-svt-correct", status: "fail", detail: completion.detail }, targetMhz, budget };
+    return { stage: { id: "s0-svt-correct", status: "fail", detail: completion.detail }, preStages, targetMhz, budget };
   }
   if (!existsSync(emitFlist)) {
-    return { stage: { id: "s0-svt-correct", status: "fail", detail: "no emitted filelist for the validated result" }, targetMhz, budget };
+    return { stage: { id: "s0-svt-correct", status: "fail", detail: "no emitted filelist for the validated result" }, preStages, targetMhz, budget };
   }
   const replaced = readFileSync(emitFlist, "utf8").split(/\r?\n/).filter((l) => /__svt\.(sv|v|svh)$/i.test(l.trim())).length;
+  const widthNote = args.includes("--width-map") ? "elaborated widths" : "heuristic widths";
   return {
-    stage: { id: "s0-svt-correct", status: "pass", detail: `${completion.detail}; ${replaced} files → ${posixPath(emitFlist)}; ${cfgNote}` },
+    stage: { id: "s0-svt-correct", status: "pass", detail: `${completion.detail}; ${replaced} files → ${posixPath(emitFlist)}; ${cfgNote}; ${widthNote}` },
+    preStages,
     emitFlist: posixPath(emitFlist),
     targetMhz,
     budget,
   };
+}
+
+/**
+ * Remote phase A of the live tree, width map only: slang elaboration +
+ * word-level lowering on the builder, `rtlil_width_map.py` over the RTLIL
+ * with the host's source hash recorded, pulled back to `svt/width-map.json`.
+ * Runs in its own run dir so a mapping in flight is not disturbed.
+ */
+async function refreshWidthMapRemote(
+  ctx: PlatformContext,
+  opts: RtlTimingOptions,
+  top: string,
+  outDir: string,
+): Promise<RtlTimingResult["stages"][number]> {
+  const id = "s0-width-map";
+  const paths = edaPaths(ctx);
+  const manifest = writeFlatManifest(ctx, paths, opts.target, {
+    outSubdir: "sta-rtl", outTag: `${opts.target}-live`, replaceFiles: sramStubSubstitution(ctx, opts),
+  });
+  let flist: string;
+  try {
+    flist = toRemotePaths(readFileSync(manifest.path, "utf8"), ctx.repoRoot).replace(/\r/g, "");
+  } catch {
+    return { id, status: "fail", detail: "could not read the generated live manifest" };
+  }
+  const script = buildMapScript({
+    manifest: `$RUN/${opts.target}.f`,
+    top,
+    liberty: "$LIB",
+    netlist: "$RUN/netlist.v",
+    defines: ctx.config.verify.synthDefines,
+    slangArgs: ctx.config.verify.synthSlangArgsByTarget[opts.target] ?? [],
+    recipe: "streamed",
+    streamDir: "$RUN",
+  });
+  const tag = `sta-rtl-${opts.target}-widthmap`;
+  const sha = portableSourceHash(join(outDir, "svt", "portable.f"));
+  const lines = [
+    "set -u",
+    `REPO=${REMOTE_REPO}`,
+    `RUN="$HOME/.cache/g6lc-sta/${opts.target}-widthmap"`,
+    'mkdir -p "$RUN"',
+    "LIB=unused",
+    `YS=${REMOTE_FORMAL}/bin/yosys`,
+    'if [ ! -x "$YS" ]; then YS="$(command -v yosys || true)"; fi',
+    'if [ -z "$YS" ]; then echo "RESULT_TOOLCHAIN fail yosys"; exit 3; fi',
+    `cat > "$RUN/${opts.target}.f" <<'G6LC_FLIST_EOF'`,
+    flist,
+    "G6LC_FLIST_EOF",
+    'cd "$REPO"',
+    `echo "WIDTHMAP start $(date -u +%FT%TZ)"`,
+    `/usr/bin/time -f "WIDTHMAP_MEASURE maxrss_kb=%M elapsed_s=%e" "$YS" -p ${JSON.stringify(script)} > "$RUN/synth.log" 2>&1`,
+    'rc=$?; echo "WIDTHMAP rc=$rc"; grep -E "WIDTHMAP_MEASURE" "$RUN/synth.log"',
+    'if [ "$rc" != 0 ] || [ ! -s "$RUN/wordlevel.il" ]; then echo "RESULT fail synth"; echo LOGSTART; tail -40 "$RUN/synth.log"; echo LOGEND; exit 1; fi',
+    `mkdir -p "/opt/testharness/runs/${tag}/output"`,
+    `python3 "$REPO/sv-timing/tools/rtlil_width_map.py" "$RUN/wordlevel.il"${sha ? ` --source-sha256 "${sha}"` : ""} -o "/opt/testharness/runs/${tag}/output/width-map.json" && echo "WIDTH_MAP ok"`,
+    'echo "RESULT 0"',
+  ];
+  ctx.logger.info(`sta-rtl: refreshing the elaborated width map on the builder (phase A of the live tree)`);
+  const res = await runRemoteScript(ctx, lines.join("\n") + "\n", { name: tag, budgetSeconds: 3600, sync: true });
+  if (ctx.dryRun) return { id, status: "skip", detail: "dry-run: width-map refresh script generated" };
+  writeFileSync(join(outDir, "widthmap-remote.log"), res.text, "utf8");
+  if (res.error) return { id, status: "fail", detail: res.error };
+  if (!/^WIDTH_MAP ok/m.test(res.text)) {
+    const log = res.text.match(/^LOGSTART$([\s\S]*?)^LOGEND$/m);
+    return { id, status: "fail", detail: `phase A failed on the builder: ${(log?.[1] ?? "").trim().split("\n").slice(-3).join(" | ")}` };
+  }
+  const dest = join(outDir, "remote-output-widthmap");
+  const pulled = await pullRemoteOutput(ctx, tag, dest);
+  const src = join(dest, "width-map.json");
+  if (!pulled.ok || !existsSync(src)) {
+    return { id, status: "fail", detail: `width map produced but not pulled (${pulled.text.trim().split("\n").slice(-1)[0] ?? ""})` };
+  }
+  mkdirSync(join(outDir, "svt"), { recursive: true });
+  copyFileSync(src, join(outDir, "svt", "width-map.json"));
+  const m = res.text.match(/WIDTHMAP_MEASURE maxrss_kb=(\d+) elapsed_s=([\d.]+)/);
+  return { id, status: "pass", detail: `elaborated net widths of this tree → svt/width-map.json${m ? ` (${m[2]} s, ${Math.round(Number(m[1]) / 1024)} MiB)` : ""}` };
 }
 
 async function toolPath(tool: StaTool, p: string): Promise<string> {
@@ -845,7 +958,7 @@ async function runRemote(
   outDir: string,
   pre: SvtPrepass,
 ): Promise<RtlTimingResult> {
-  const stages: RtlTimingResult["stages"] = [pre.stage];
+  const stages: RtlTimingResult["stages"] = [...(pre.preStages ?? []), pre.stage];
   const result: RtlTimingResult = {
     ok: false, outDir: posixPath(outDir), target: opts.target, top, liberty: posixPath(libertyLocal), stages,
     emitFlist: pre.emitFlist, fo4Budget: pre.budget, svtTargetMhz: pre.targetMhz,
@@ -953,6 +1066,7 @@ async function runRemote(
     '  /usr/bin/time -f "STA_MEASURE maxrss_kb=%M elapsed_s=%e" "$STA" $STA_ARGS "$REPO/build-platform/scripts/openroad-timing.tcl" > "$RUN/sta.log" 2>&1',
     'rc=$?; echo "STA rc=$rc"; grep -E "STA_RESULT|STA_MEASURE" "$RUN/sta.log"',
     'echo LOGSTART; tail -80 "$RUN/sta.log"; echo LOGEND',
+    ...(opts.mapRecipe === "streamed" ? moduleBoardShell({ runDir: "$RUN", liberty: "$LIB", periodNs: 1000 / opts.targetMhz, pullTag: `sta-rtl-${opts.target}` }) : []),
     'echo "RESULT $rc"',
   ];
 
@@ -1024,7 +1138,107 @@ async function runRemote(
     status: "pass",
     detail: `wns_max ${parsed.wnsMax} tns_max ${parsed.tnsMax}${staM ? ` (${staM[2]} s, ${threads} threads)` : ""}`,
   });
+  // Per-module board and the structural ↔ mapped calibration (A113): the
+  // sv-timing numbers are validated against OpenSTA on every run, not by hand.
+  if (/^BOARD_MEASURE/m.test(res.text)) {
+    const dest = join(outDir, "remote-output");
+    const pulled = await pullRemoteOutput(ctx, `sta-rtl-${opts.target}`, dest);
+    const board = join(dest, "module-board.tsv");
+    if (pulled.ok && existsSync(board)) {
+      copyFileSync(board, join(outDir, "module-board.tsv"));
+      const cal = writeCalibration(join(outDir, "svt", "correct.json"), board, join(outDir, "calibration.tsv"));
+      stages.push({ id: "s3-calibration", status: "pass", detail: cal });
+    } else {
+      stages.push({ id: "s3-calibration", status: "skip", detail: "module board produced on the builder but not pulled" });
+    }
+  }
   return { ...result, ...parsed, ok: true };
+}
+
+/**
+ * One `sta` per mapped module (parallel), own logic only, worst reg→reg path
+ * with its cell count and RTL-named nets (`openroad-module-board.tcl`), written
+ * to `module-board.tsv` in the pull directory.
+ */
+export function moduleBoardShell(opts: { runDir: string; liberty: string; periodNs: number; pullTag: string }): string[] {
+  const R = opts.runDir;
+  const per = opts.periodNs.toFixed(4);
+  const jobs = `$(( $(nproc) / 2 > 2 ? $(nproc) / 2 : 2 ))`;
+  return [
+    // board_one <run> <lib> <sta> <sta-args> <period> <il-file> <module>
+    `cat > "${R}/board_one.sh" <<'BOARD_ONE'`,
+    `#!/usr/bin/env bash`,
+    `set -u`,
+    `R="$1"; LIB="$2"; STA="$3"; STA_ARGS="$4"; PER="$5"; f="$6"; m="$7"`,
+    `stem="\${f%.il}"; v="$R/mapped/$stem.v"; top="\${m#\\\\}"`,
+    `[ -s "$v" ] || { printf 'ROW\\t%s\\t-\\t-\\t-\\t-\\tno netlist\\t-\\t-\\t-\\t-\\t-\\n' "$top"; exit 0; }`,
+    `OR_LIBERTY="$LIB" OR_VERILOG="$v" OR_TOP="$top" OR_PERIOD_NS="$PER" timeout 900 "$STA" $STA_ARGS "$REPO/build-platform/scripts/openroad-module-board.tcl" 2>/dev/null | grep "^ROW" || printf 'ROW\\t%s\\t-\\t-\\t-\\t-\\tsta failed\\t-\\t-\\t-\\t-\\t-\\n' "$top"`,
+    `BOARD_ONE`,
+    `chmod +x "${R}/board_one.sh"`,
+    `printf 'module\\tinstances\\tclock\\tworst_reg2reg_ns\\tcells_on_path\\tstartpoint\\tendpoint\\tworst_any_ns\\tbroadcast_drivers_disabled\\tstart_net\\tend_net\\ttrace\\n' > "${R}/module-board.tsv"`,
+    // The driver expands the run dir, liberty, sta and repo now (unquoted
+    // heredoc); the loop's own variables stay literal.
+    `cat > "${R}/board_all.sh" <<BOARD_ALL`,
+    `export REPO="$REPO"`,
+    `cut -f1,2,3 "${R}/il/modules.tsv" | while IFS=\\$'\\t' read -r i f m; do printf "%s\\0%s\\0" "\\$f" "\\$m"; done | xargs -0 -n 2 -P ${jobs} "${R}/board_one.sh" "${R}" "${opts.liberty}" "$STA" "$STA_ARGS" ${per} | sed "s/^ROW\\t//" >> "${R}/module-board.tsv"`,
+    `BOARD_ALL`,
+    `/usr/bin/time -f "BOARD_MEASURE maxrss_kb=%M elapsed_s=%e" bash "${R}/board_all.sh" 2>&1 | grep BOARD_MEASURE`,
+    `mkdir -p "/opt/testharness/runs/${opts.pullTag}/output"; cp "${R}/module-board.tsv" "/opt/testharness/runs/${opts.pullTag}/output/module-board.tsv"`,
+  ];
+}
+
+/**
+ * Join the pre-pass's emitted re-analysis (structural worst reg→reg FO4 per
+ * module) with the module board (mapped ns / cells per module) into
+ * `calibration.tsv`, largest structural first; returns a one-line summary.
+ */
+export function writeCalibration(correctJson: string, boardTsv: string, outPath: string): string {
+  let post: any;
+  try {
+    post = JSON.parse(readFileSync(correctJson, "utf8"))?.post_analyze;
+  } catch {
+    post = undefined;
+  }
+  const structural = new Map<string, { fo4: number; line: number }>();
+  if (post?.paths && post?.modules) {
+    const names = new Map<number, string>(post.modules.map((m: any) => [m.id, m.name]));
+    const dead = liveFilter(post);
+    for (const p of post.paths) {
+      if (p.multi_cycle || p.path_kind !== "regtoreg" || dead.has(p.module_id)) continue;
+      const n = names.get(p.module_id) ?? String(p.module_id);
+      const cur = structural.get(n);
+      if (!cur || p.total_fo4 > cur.fo4) structural.set(n, { fo4: p.total_fo4, line: p.primary_loc?.start_line ?? 0 });
+    }
+  }
+  const rows: { module: string; fo4: number; line: number; ns: number; cells: number }[] = [];
+  const lines = readFileSync(boardTsv, "utf8").split(/\r?\n/).slice(1);
+  for (const l of lines) {
+    const f = l.split("\t");
+    if (f.length < 5) continue;
+    const module = f[0]!.split("$")[0]!;
+    const ns = Number(f[3]);
+    const cells = Number(f[4]);
+    if (!Number.isFinite(ns) || !Number.isFinite(cells)) continue;
+    const st = structural.get(module);
+    rows.push({ module, fo4: st?.fo4 ?? NaN, line: st?.line ?? 0, ns, cells });
+  }
+  rows.sort((a, b) => (Number.isNaN(b.fo4) ? -1 : b.fo4) - (Number.isNaN(a.fo4) ? -1 : a.fo4));
+  const out = ["module\tstructural_fo4\tprimary_line\tmapped_ns\tcells_on_path\tcells_per_fo4\treading"];
+  let within = 0, over = 0, under = 0, n = 0;
+  for (const r of rows) {
+    const ratio = Number.isFinite(r.fo4) && r.fo4 > 0 ? r.cells / r.fo4 : NaN;
+    let reading = "-";
+    if (Number.isFinite(ratio) && r.cells >= 8) {
+      n++;
+      if (ratio < 0.6) { reading = "over-read"; over++; }
+      else if (ratio > 2.0) { reading = "under-read"; under++; }
+      else { reading = "tracks"; within++; }
+    }
+    out.push([r.module, Number.isFinite(r.fo4) ? r.fo4.toFixed(1) : "-", r.line || "-", r.ns.toFixed(3), r.cells, Number.isFinite(ratio) ? ratio.toFixed(2) : "-", reading].join("\t"));
+  }
+  writeFileSync(outPath, out.join("\n") + "\n", "utf8");
+  const top = rows.filter((r) => Number.isFinite(r.fo4)).slice(0, 3).map((r) => `${r.module} ${r.fo4.toFixed(1)} FO4 / ${r.ns.toFixed(2)} ns / ${r.cells} cells`).join("; ");
+  return `${rows.length} modules → ${posixPath(outPath)}; cones ≥ 8 cells: ${within} track (0.6–2.0 cells/FO4), ${over} over-read, ${under} under-read of ${n}; top: ${top}`;
 }
 
 /** `tc_sram` → study stub (see scripts/tc_sram_timing_stub.sv), unless --no-sram-stub. */
@@ -1075,7 +1289,7 @@ export async function runRtlTiming(ctx: PlatformContext, opts: RtlTimingOptions)
   }
   // sv-timing runs here on both routes: the package is a host tool and the
   // emit is synced to the builder with the rest of the workspace sta-rtl tree.
-  const pre = await runSvtPrepass(ctx, opts, outDir);
+  const pre = await runSvtPrepass(ctx, opts, outDir, top);
   if (opts.remote) return runRemote(ctx, opts, top, lib.path, lib.forkRel, lib.lefForkRels, outDir, pre);
   return runLocal(ctx, opts, top, lib.path, lib.lefs, outDir, pre);
 }

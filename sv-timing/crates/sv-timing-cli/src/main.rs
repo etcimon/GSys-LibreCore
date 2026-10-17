@@ -438,6 +438,11 @@ enum Commands {
         /// Elaborated net widths (`tools/rtlil_width_map.py` JSON), see `analyze`.
         #[arg(long = "width-map")]
         width_map: Option<PathBuf>,
+        /// With `--all-modules` and a width map, also plan the modules the
+        /// elaborator did not instantiate (default: the live design only —
+        /// a dead module's cone is not this target's period, A113).
+        #[arg(long = "include-uninstantiated", default_value_t = false)]
+        include_uninstantiated: bool,
         /// Optimization level + the ten dials.
         #[command(flatten)]
         opt: OptArgs,
@@ -1438,6 +1443,7 @@ fn main() -> ExitCode {
             allow_parse_errors,
             trace_log,
             width_map,
+            include_uninstantiated,
             opt,
         } => {
             let opt = match opt.resolve(max_passes) {
@@ -1516,77 +1522,93 @@ fn main() -> ExitCode {
             };
             let base_package_mode = package_mode_on(&package_mode);
 
-            let (design, names, source_pairs, allow) =
-                if paths.is_empty() || (!all_modules && allow.is_empty()) {
-                    let target = TimingTarget::new(target_mhz, fo4_ps, budget_margin);
-                    (
-                        TimingDesign::empty(target),
-                        NameTable::new(),
-                        Vec::new(),
-                        allow,
-                    )
-                } else {
-                    let parse_opts = ParseOptions {
-                        include_paths: project.incdirs.clone(),
-                        defines: project.defines_for_parse(),
-                        ignore_include_error: false,
-                        jobs: opt.jobs,
-                        allow_parse_errors,
-                    };
-                    let module_filter = if all_modules {
-                        Vec::new()
-                    } else {
-                        allow.clone()
-                    };
-                    let mut lower = LowerOptions {
-                        target: TimingTarget::new(target_mhz, fo4_ps, budget_margin),
-                        cost_model: load_fo4_v1_default(),
-                        module_filter,
-                        param_map: base_param_map.clone(),
-                        package_mode: base_package_mode,
-                        opt: opt.clone(),
-                    };
-                    lower.cost_model.id = "fo4-v1".into();
-                    match analyze_files(&paths, &parse_opts, &lower) {
-                        Ok(out) => {
-                            println!(
-                                "  analyzed modules={} paths={} opportunities={} files={}",
-                                out.design.modules.len(),
-                                out.design.paths.len(),
-                                out.design.opportunities.len(),
-                                paths.len()
-                            );
-                            for m in out.design.modules.values() {
-                                println!(
-                                    "    module {} file={} nodes={}",
-                                    m.name,
-                                    m.file,
-                                    m.nodes.len()
-                                );
-                            }
-                            let mut sources = Vec::new();
-                            for p in &paths {
-                                if let Ok(text) = std::fs::read_to_string(p) {
-                                    sources.push((p.clone(), text));
-                                }
-                            }
-                            let allow_resolved = if all_modules {
-                                out.design
-                                    .modules
-                                    .values()
-                                    .map(|m| m.name.clone())
-                                    .collect()
-                            } else {
-                                allow
-                            };
-                            (out.design, out.names, sources, allow_resolved)
-                        }
-                        Err(e) => {
-                            eprintln!("error: {e}");
-                            return ExitCode::from(1);
-                        }
-                    }
+            let (design, names, source_pairs, allow) = if paths.is_empty()
+                || (!all_modules && allow.is_empty())
+            {
+                let target = TimingTarget::new(target_mhz, fo4_ps, budget_margin);
+                (
+                    TimingDesign::empty(target),
+                    NameTable::new(),
+                    Vec::new(),
+                    allow,
+                )
+            } else {
+                let parse_opts = ParseOptions {
+                    include_paths: project.incdirs.clone(),
+                    defines: project.defines_for_parse(),
+                    ignore_include_error: false,
+                    jobs: opt.jobs,
+                    allow_parse_errors,
                 };
+                let module_filter = if all_modules {
+                    Vec::new()
+                } else {
+                    allow.clone()
+                };
+                let mut lower = LowerOptions {
+                    target: TimingTarget::new(target_mhz, fo4_ps, budget_margin),
+                    cost_model: load_fo4_v1_default(),
+                    module_filter,
+                    param_map: base_param_map.clone(),
+                    package_mode: base_package_mode,
+                    opt: opt.clone(),
+                };
+                lower.cost_model.id = "fo4-v1".into();
+                match analyze_files(&paths, &parse_opts, &lower) {
+                    Ok(out) => {
+                        println!(
+                            "  analyzed modules={} paths={} opportunities={} files={}",
+                            out.design.modules.len(),
+                            out.design.paths.len(),
+                            out.design.opportunities.len(),
+                            paths.len()
+                        );
+                        for m in out.design.modules.values() {
+                            println!(
+                                "    module {} file={} nodes={}",
+                                m.name,
+                                m.file,
+                                m.nodes.len()
+                            );
+                        }
+                        let mut sources = Vec::new();
+                        for p in &paths {
+                            if let Ok(text) = std::fs::read_to_string(p) {
+                                sources.push((p.clone(), text));
+                            }
+                        }
+                        let allow_resolved = if all_modules {
+                            // The elaborated width map names the modules the
+                            // target instantiates; the file list carries every
+                            // module a family of configs can use. Plan the live
+                            // design unless asked otherwise (A113).
+                            let live_only =
+                                !include_uninstantiated && !out.design.width_map.is_empty();
+                            let (live, dead): (Vec<String>, Vec<String>) = out
+                                .design
+                                .modules
+                                .values()
+                                .map(|m| m.name.clone())
+                                .partition(|n| !live_only || out.design.width_map.contains_key(n));
+                            if live_only {
+                                println!(
+                                        "  live modules={} uninstantiated={} (skipped: not in the elaborated design)",
+                                        live.len(),
+                                        dead.len()
+                                    );
+                            }
+                            live
+                        } else {
+                            allow
+                        };
+                        (out.design, out.names, sources, allow_resolved)
+                    }
+                    Err(e) => {
+                        eprintln!("error: {e}");
+                        return ExitCode::from(1);
+                    }
+                }
+            };
 
             // Re-apply allowlist on policy after all-modules resolve
             // (`policy` is already `mut`; a rebinding here is redundant.)
@@ -1607,7 +1629,26 @@ fn main() -> ExitCode {
                     Err(e) => eprintln!("warning: --trace-log: {e}"),
                 }
             }
-            let fo4_before = ctx
+            // The headline is the planned design's: with a width map the dead
+            // modules are out of the allowlist, and their cones must not be the
+            // number the host prints (`g6lc_ai_exec` at 280 FO4 headed a run of a
+            // config that does not instantiate it, A113).
+            let planned: std::collections::BTreeSet<sv_timing_core::ir::ModuleId> = ctx
+                .design
+                .modules
+                .iter()
+                .filter(|(_, m)| ctx.policy.correct_allow_modules.contains(&m.name))
+                .map(|(id, _)| *id)
+                .collect();
+            let max_fo4_planned = |d: &TimingDesign| {
+                d.paths
+                    .iter()
+                    .filter(|p| planned.is_empty() || planned.contains(&p.module))
+                    .map(|p| p.total_fo4)
+                    .fold(0.0_f64, f64::max)
+            };
+            let fo4_before = max_fo4_planned(&ctx.design);
+            let fo4_before_all = ctx
                 .design
                 .paths
                 .iter()
@@ -1622,12 +1663,19 @@ fn main() -> ExitCode {
                 }
             };
 
-            let fo4_after = ctx
+            let fo4_after = max_fo4_planned(&ctx.design);
+            let fo4_after_all = ctx
                 .design
                 .paths
                 .iter()
                 .map(|p| p.total_fo4)
                 .fold(0.0_f64, f64::max);
+            if fo4_after_all > fo4_after + 1e-9 {
+                println!(
+                    "  unplanned (uninstantiated) modules: max_path_fo4 {:.1}->{:.1} — not this target's period",
+                    fo4_before_all, fo4_after_all
+                );
+            }
 
             // Post-correct re-analyze gate (IR): frequency_closure on transformed design.
             let post_closure = frequency_closure(&ctx.design);
@@ -1692,8 +1740,12 @@ fn main() -> ExitCode {
                 // sources so imports/localparams still resolve under out-dir.
                 let emit_all = emit_unchanged || source_pairs.len() > 1;
                 if real_cut_feeds || emit_balance_mux_rtl {
+                    // `--real-cut-feeds` implies the structural emit (BalanceMux
+                    // RTL, LoopRewrite spans, origin RHS rewrites): print what is
+                    // in effect, not the raw flag.
                     println!(
-                        "  emit richer: real_cut_feeds={real_cut_feeds} emit_balance_mux_rtl={emit_balance_mux_rtl}"
+                        "  emit richer: real_cut_feeds={real_cut_feeds} emit_balance_mux_rtl={} (effective)",
+                        real_cut_feeds || emit_balance_mux_rtl
                     );
                 }
                 let proj_opts = ProjectEmitOptions {
@@ -1983,6 +2035,9 @@ fn main() -> ExitCode {
                     "project_entries": project_entries,
                     "max_path_fo4_before": fo4_before,
                     "max_path_fo4_after": fo4_after,
+                    "max_path_fo4_before_all_modules": fo4_before_all,
+                    "max_path_fo4_after_all_modules": fo4_after_all,
+                    "planned_modules": ctx.policy.correct_allow_modules.len(),
                     "post_closure": {
                         "target_mhz": post_closure.target_mhz,
                         "budget_fo4": post_closure.budget_fo4,
