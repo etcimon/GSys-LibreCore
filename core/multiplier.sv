@@ -124,62 +124,77 @@ module multiplier
   fu_op                             operator_s1;
 
   if (CVA6Cfg.MultStages > 1) begin : gen_two_stage
-    // Two-stage multiplier (sv-timing A115): the (XLEN+1)×(XLEN+1) product
+    // Two-stage multiplier (sv-timing A115). The (XLEN+1)×(XLEN+1) product
     // is the deepest single path of the core (5.3 ns on the Nangate45 study
-    // against 3.8 ns for the next cone). B is cut into NS = XLEN/16 slices
-    // — 16 unsigned bits each, the top one 17 bits carrying the sign — and
-    // the NS partial products A × B_k are registered; the second stage sums
-    // the shifted products once. Exact: Σ_k (A × B_k) << 16k == A × B for
-    // every signedness the sign bits above encode. Area: NS × (XLEN+18)
-    // flops and NS−1 extra adders; the partial-product trees are the same
-    // work the one-stage multiplier did. One more cycle of MUL latency; the
-    // result still travels with its trans_id, so no other contract changes
-    // (mult.sv arbitrates on `mult_valid`, the scoreboard drops a late
-    // result after a flush by its `issued` guard).
+    // against 3.8 ns for the next cone).
+    //
+    // Unsigned partial products with a sign correction, not signed ones:
+    // synthesis implements a signed `*` by sign-extending both operands to
+    // the result width (an 82×82 array for a 65×17 product), which is why
+    // the first signed-slice form of this stage measured *deeper* than the
+    // one-stage multiplier. With A = A_u − a_top·2^(XLEN+1) and
+    // B = B_u − b_top·2^(XLEN+1) (A_u, B_u the unsigned (XLEN+1)-bit
+    // patterns, a_top/b_top their top bits):
+    //
+    //   A·B ≡ A_u·B_u − 2^(XLEN+1)·(a_top·B_u + b_top·A_u)   (mod 2^(2·XLEN))
+    //
+    // Stage 1 registers the NS = XLEN/16 unsigned products A_u × B_u[slice]
+    // (16 bits each, the top slice 17) and the correction a_top·B_u +
+    // b_top·A_u (one add, off the product's depth); stage 2 sums the shifted
+    // products and subtracts the shifted correction once. Exact modulo
+    // 2^(2·XLEN) — all the operations read. One more cycle of MUL latency;
+    // the result still travels with its trans_id, so no other contract
+    // changes (mult.sv arbitrates on `mult_valid`, the scoreboard drops a
+    // late result after a flush by its `issued` guard).
     localparam int unsigned NS = CVA6Cfg.XLEN / 16;
-    localparam int unsigned PW = CVA6Cfg.XLEN + 18;  // (XLEN+1) × 17 signed
-    // unpacked so an element keeps its signedness (a packed-array element
-    // select is unsigned by the LRM)
-    logic signed [PW-1:0] pp_d[NS], pp_q[NS];
+    localparam int unsigned AW = CVA6Cfg.XLEN + 1;   // unsigned pattern of the signed operand
+    localparam int unsigned PW = AW + 17;            // (XLEN+1) × 17 unsigned
+    localparam int unsigned RW = CVA6Cfg.XLEN * 2;
+    logic [AW-1:0] a_u, b_u;
+    assign a_u = op_a_s;  // the (XLEN+1)-bit two's-complement pattern, read unsigned
+    assign b_u = op_b_s;
+    logic [PW-1:0] pp_d[NS], pp_q[NS];
+    logic [AW:0]   corr_d, corr_q;                   // a_top·B_u + b_top·A_u
     for (genvar k = 0; k < NS; k++) begin : gen_pp
       if (k == NS - 1) begin : gen_top
-        // the top slice: 16 magnitude bits plus the operand's sign bit
-        logic signed [16:0] b_k;
-        assign b_k = $signed(op_b_s[CVA6Cfg.XLEN:16*k]);
-        assign pp_d[k] = op_a_s * b_k;
+        assign pp_d[k] = a_u * b_u[AW-1:16*k];       // 17-bit top slice (sign bit included)
       end else begin : gen_mid
-        logic signed [16:0] b_k;
-        assign b_k = $signed({1'b0, op_b_s[16*k+:16]});
-        assign pp_d[k] = op_a_s * b_k;
+        assign pp_d[k] = a_u * b_u[16*k+:16];
       end
     end
-    // Stage 2: one sum of the sign-extended, shifted partial products. The
-    // reduction is written as a balanced tree so the structural model and
-    // synthesis both see log depth (a serial sum would read NS adders deep).
-    logic signed [CVA6Cfg.XLEN*2+1:0] term[NS];
+    assign corr_d = (a_u[AW-1] ? {1'b0, b_u} : '0) + (b_u[AW-1] ? {1'b0, a_u} : '0);
+    // Stage 2: the shifted products summed as a balanced tree (so the
+    // structural model and synthesis both see log depth), minus the
+    // correction at bit XLEN+1.
+    logic [RW-1:0] term[NS];
     for (genvar k = 0; k < NS; k++) begin : gen_term
-      assign term[k] = (CVA6Cfg.XLEN*2+2)'(pp_q[k]) <<< (16 * k);
+      assign term[k] = RW'(pp_q[k]) << (16 * k);
     end
+    logic [RW-1:0] corr_sh, prod_sum;
+    assign corr_sh = RW'(corr_q) << AW;
     if (NS == 4) begin : gen_sum4
-      assign mult_result_d = (CVA6Cfg.XLEN*2)'((term[0] + term[1]) + (term[2] + term[3]));
+      assign prod_sum = (term[0] + term[1]) + (term[2] + term[3]);
     end else if (NS == 2) begin : gen_sum2
-      assign mult_result_d = (CVA6Cfg.XLEN*2)'(term[0] + term[1]);
+      assign prod_sum = term[0] + term[1];
     end else begin : gen_sum_n
       always_comb begin
-        automatic logic signed [CVA6Cfg.XLEN*2+1:0] acc;
+        automatic logic [RW-1:0] acc;
         acc = '0;
         for (int unsigned k = 0; k < NS; k++) acc = acc + term[k];
-        mult_result_d = (CVA6Cfg.XLEN*2)'(acc);
+        prod_sum = acc;
       end
     end
+    assign mult_result_d = prod_sum - corr_sh;
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (~rst_ni) begin
         pp_q          <= '{default: '0};
+        corr_q        <= '0;
         mult_valid_s1 <= 1'b0;
         trans_id_s1   <= '0;
         operator_s1   <= MUL;
       end else begin
         pp_q          <= pp_d;
+        corr_q        <= corr_d;
         mult_valid_s1 <= mult_valid;
         trans_id_s1   <= trans_id_i;
         operator_s1   <= operation_i;
