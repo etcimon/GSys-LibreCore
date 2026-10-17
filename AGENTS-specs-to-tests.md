@@ -943,7 +943,14 @@ subsequent loads observe. The system witness is the `+smt_mem_watch` window `l3w
 valid=f7 explicit=1 ack=0` — seven ways validated with the line's tag — and the `c.ld` at
 713,885,561 hit them all (`hit=f7`, `raw 0x801`). The invariant `missunit_vld_write_own_bits`
 (`wt_dcache_mem.sv`: a missunit line write writes its own valid bits, at most one way) is the
-leaf-level check; `G6LC_MUT_VLD_WDATA_INV_PRIO` restores the pre-fix mux. Verdict on
+leaf-level check; `G6LC_MUT_VLD_WDATA_INV_PRIO` restores the pre-fix mux. **Leaf
+`verif/tb/uncore/tb_g6lc_wt_mem_vld.sv` (`run-wt-mem-vld.sh`, `wt_dcache_mem` alone, g6lc64_ooo
+config):** S1 two ways refilled at one index hit one way each; S2 the missunit's all-ways
+invalidation with the fixup `inv_req` for way 3 pending in the same cycle — `inv_ack` low, then
+tag-only lookups of both tags miss and `rd_vld_bits == 0`; S3 the explicit inval alone is acked
+and clears exactly its way. Positive passes; `+oracle_negative` fails `WT_MEM_VLD_S2_FOREIGN_VALID`;
+the mutation build fires `missunit_vld_write_own_bits` with "would validate ways f7 (own bits 00,
+inv_req=1)" — the boot's vector. Verdict on
 `ooocoh-t47b-ooo-pgo-build` (`l3watch4`): the same workqueue loop refills 0x800 after every
 `amoand` (eight rounds at 713,869,135–713,875,857), no foreign valid write, the invariant silent
 through 713.9 M cycles; the live oracle on the L3 (`l3orc5`) past retire 365 M with 0 stored

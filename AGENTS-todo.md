@@ -2085,7 +2085,9 @@ prerequisite for this work under the existing dual license. No licensing policy 
   requesters. **Fix:** `vld_wdata` follows the same priority (`wr_cl_vld_i`
   first); invariant `missunit_vld_write_own_bits` (a missunit line write
   writes its own bits, at most one way set); `G6LC_MUT_VLD_WDATA_INV_PRIO`
-  = the pre-fix mux. Lint clean. Build `ooocoh-t47b-ooo-pgo-build`
+  = the pre-fix mux. Lint clean. Leaf `tb_g6lc_wt_mem_vld`
+  (`verif/tb/uncore/run-wt-mem-vld.sh`): positive, oracle-negative, and
+  the mutation build firing the invariant with `ways f7`. Build `ooocoh-t47b-ooo-pgo-build`
   (**provenance: the t46 file set at `6ebe117e1` + this fix** — the
   concurrent A105–A108 timing refactors of `store_buffer`, `g6lc_rob`,
   `g6lc_iq`, `g6lc_rename`, `csr_regfile`, `fetch_B/frontend` and
