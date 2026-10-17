@@ -7928,6 +7928,48 @@ before `abc` keeps those wires' RTL names through mapping, so the board's
 legibility run, not a measurement run (the kept nets fence ABC's
 restructuring).
 
+## A107 — The ROB count, and what the board says 10 FO4 needs
+
+### ROB retire hits from the registered state
+
+The module board's rob worst (35 cells, `count_d → count_q`) was the
+count chain: alloc `+1`, `+1` → port 0 hits on `rob_d` → popcount →
+subtract → port 1 hits "on the state port 0 left" → popcount → subtract.
+Two facts make it parallel and exact: an entry allocated this cycle
+cannot retire this cycle (the scoreboard frees a tid at commit and
+re-issues it later), so `rob_q` and the pre-free `rob_d` agree on what a
+retire tid can hit; and "the state port r−1 left" is the mask by the
+earlier ports' hits. Every port's hits come from `rob_q` at once, masked
+by the union of the earlier ports' hits; the vectors are then disjoint, so
+one popcount of their union is the decrement; tail and count advance by
+the popcount of the allocations. Two ports naming one tid still free one
+slot and count one. The head re-anchor (A99) is unchanged and keeps its
+own cone.
+
+### Where the campaign stands against 10 FO4
+
+Module board (cells, Nangate45, delay-oriented ABC) from run C to A106:
+scoreboard 54 → 22, rename 52 → 25, store_buffer 49 → 44, iq 47 → 38,
+frontend 43 → 34, rob 35 (A107 in flight), realign 23 → 22, wbuffer 21 →
+27 (noise band). At ≈ 1.3 cells/FO4 the budget is ≈ 13 cells. What is
+left, cone by cone, and why it is no longer a transform:
+
+| cone | cells | what it is | what 10 FO4 would take |
+|---|---:|---|---|
+| store_buffer squash → status count | 44 | the cancel squash runs on the **next-state** queue (this cycle's push and pop applied), then its popcount is the next count: push demux → next-state read → `cancelled_mask[tid]` lookup → compare → popcount | run the squash on the registered queue with the push and pop folded in algebraically — an exactness proof over three same-cycle events, or a one-cycle-later squash (the cancelled stores are already masked at the forwarding path) |
+| iq wake → select → ack clear | 38 | tag compares against the writeback ports, the age-matrix grant per port (port 1 after port 0's grant), the acked clear | a **wake/select pipeline split** (speculative wakeup, select one cycle later) — the standard high-frequency OoO structure; an IPC change, an owner decision |
+| frontend target sum → `bp_tgt_q` | 34 | one 64-bit three-operand add behind the realigner's slot select and the predictor's `taken` decision | **the 64-bit wall**: 12 FO4 for the add alone at 20 ps; a pipelined target (predict one cycle later, redirect-on-taken) or a narrower target datapath |
+| realign cursor walk | 22 | the `cur` recurrence over compressed flags (a two-state linear recurrence) and the slot compaction | parallel prefix over 2×2 boolean matrices + the StreamCompact gather — exact, worth one more pass; ≈ 2× |
+| rename / scoreboard | 25 / 22 | the 64-entry isolate + encode (12 + 6) and the issue write demux | a registered free-list head (pick one cycle early, bypass on free) — exact by invariant, ≈ 2× |
+| the 12.0–12.5 structural band (ex_stage, issue_read_operands, loop_buffer, tlb, ptw, lsq) | — | a single 64-bit add or compare plus one mux | the wall again |
+
+The exact, latency-neutral toolbox — one-hot selects under the design's
+assertions, counts as registered deltas, snapshots for multi-port picks,
+three-operand sums, the LoopRewrite shapes — took the OoO control cones
+from 3–4× the budget to ≈ 2×. The rest is the microarchitecture's
+single-cycle contracts at XLEN = 64 and 20 ps: pipelining them is the
+remaining lever, and it changes IPC, which is not a transform's decision.
+
 ## A90 — Incrementers are not gates (delay-v32)
 
 `x + 1` and `x + CONST` were billed 1 FO4 at every width since delay-v18

@@ -166,9 +166,16 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   Whole core elaborates; live remap in flight (`sta-rtl-live-a106.log`).
 - [x] A106 board: rename 52 → 25 cells, scoreboard 54 → 22, store_buffer
   49 → 44, iq 38, frontend 34, rob 35; module-board worst 54 → 44.
-- [ ] A106 next: rob `count_d` (35 cells: free-by-tid popcount + add — a
-  registered delta like iq/scoreboard); store_buffer status count after
-  the squash (44); the emitted iq needs the delay-
+- [x] A107: rob retire hits from `rob_q` for every port at once, masked by
+  the earlier ports' hits; one popcount; allocations counted at once.
+  Whole core elaborates; live remap in flight (`sta-rtl-live-a107.log`).
+- [ ] A107 next (ranked, each ≈ 2× the budget, each an owner-level change
+  beyond the exact toolbox): store_buffer squash on the registered queue
+  (three same-cycle events to fold — needs a proof) or one cycle later;
+  iq wake/select pipeline split; frontend pipelined target (the 64-bit
+  wall); realign cursor as a 2×2 boolean prefix + compaction gather
+  (exact; one more pass); rename/scoreboard registered free-list head.
+  Also: the emitted iq needs the delay-
   oriented ABC within budget (raise the per-module timeout or split the
   dispatch block); the dense-cone class (iq 55 vs 37 cells now) — per-node
   arrival per input, not one latency per node; the 64-bit single-cycle
