@@ -1978,7 +1978,11 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `0x3f9d9b0af4`, PA `0x80c00af4`) at c=959,098,552 and a user `lbu` of
   the same byte 19 cycles later returning the old 0x82 (retire
   598,041,722; two more at 687.9 M). t47b predates the fix; the t49 L3
-  (`l3h49`) is the verdict for the WT package as well. Leaf: load-cancel
+  (`l3h49`) is the verdict for the WT package as well. **HEAD L1 verdict
+  (2026-10-17, `l1h49` on `ooocoh-t49-ooo-pgo-build` = HEAD incl.
+  A105–A108): `/init` → `uname`, the whole cpuinfo, loadavg, stat, `free`,
+  `G6LC_LINUX_SHELL`, the ash prompt — no signal, no oops, 486 M cycles,
+  364.5 M retired.** Leaf: load-cancel
   scenario 25 (covered load vs a two-cycle response burst) passes on the
   fix and fails `LOAD_FWD_FALLTHROUGH req=1 wb=0` under
   `FAULT_REVIEW_MUTATE_FWD_FALLTHROUGH=1`; the 64-record leaf stays green.
