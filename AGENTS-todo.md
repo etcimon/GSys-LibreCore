@@ -1986,6 +1986,29 @@ prerequisite for this work under the existing dual license. No licensing policy 
   scenario 25 (covered load vs a two-cycle response burst) passes on the
   fix and fails `LOAD_FWD_FALLTHROUGH req=1 wb=0` under
   `FAULT_REVIEW_MUTATE_FWD_FALLTHROUGH=1`; the 64-record leaf stays green.
+  **T39 verdict (2026-10-17, `l1s2h` on `ooocoh-t49-server1-pgo-build`):
+  the 2-hart L1 runs through `insert_header` (1.2629 s `clocksource:
+  Switched`, 1.267 s where every pre-fix run oopsed) and on to 123.8 M
+  cycles / 1.665 s (`PCI: CLS 0 bytes`) — the NULL `dir` is gone.** It
+  then stopped on the drained-handoff witness → T45.
+- [ ] **T45 — `ooo_switch_drained` fires on the 2-hart server1 at
+  c=123,804,019 (t49): `hart=0 sbem=1 sbn=0 stp=0 lsqb=0 rob=0 iq=0
+  starve=1` — a starve switch with every OoO structure and the scoreboard
+  empty, only `no_st_pending_commit` low (2026-10-17).** The selector
+  registers its decision (`switch_q <= do_switch`), so `drain_ready_i` held
+  at the decision cycle and `no_st_pending_commit` dropped one cycle later;
+  with `sb_issued_cnt == 0` at the decision no store can have committed in
+  between, which leaves the D$-side half (`dcache_commit_wbuffer_empty`:
+  the HPDCACHE wrapper covers one skid cycle, `st_skid_q`; a store in the
+  cache's replay table or a second pipeline stage is invisible to it). A
+  store in flight inside the shared cache is ordered by the cache for both
+  harts, so the switch is benign for the IQ/ROB/LSQ aliasing the witness
+  guards. The witness now prints `stq=`/`wbuf=`/`ack=` apart and stops only
+  when OoO state or a core-side store is resident (or `+smt_drain_strict`).
+  Build `ooocoh-t50-server1-pgo-build`; the 2-hart L1 reruns to the shell
+  with the breakdown in the log; if `wbuf=0` is the only culprit the
+  wrapper's skid cover is widened (or the witness's D$ half is dropped by
+  contract) — recorded here either way.
 - [x] **T43 — L3 on t42: an `amoor.d.aq` (0x800 → 0x801) then, 53 cycles
   later, `amoswap.d.rl zero` (→ 0x800) on a workqueue `work->data`
   (PA `0x8fc8e380`); the `c.ld` 866 cycles after the swap reads 0x801,
