@@ -1916,11 +1916,19 @@ prerequisite for this work under the existing dual license. No licensing policy 
   requesters. **Fix:** `vld_wdata` follows the same priority (`wr_cl_vld_i`
   first); invariant `missunit_vld_write_own_bits` (a missunit line write
   writes its own bits, at most one way set); `G6LC_MUT_VLD_WDATA_INV_PRIO`
-  = the pre-fix mux. Lint clean. Build `ooocoh-t47-ooo-pgo-build`
-  (t46 + fix): verdicts = the watch window (no `valid=f7` write, the
+  = the pre-fix mux. Lint clean. Build `ooocoh-t47b-ooo-pgo-build`
+  (**provenance: the t46 file set at `6ebe117e1` + this fix** — the
+  concurrent A105–A108 timing refactors of `store_buffer`, `g6lc_rob`,
+  `g6lc_iq`, `g6lc_rename`, `csr_regfile`, `fetch_B/frontend` and
+  `instr_realign` landed in HEAD during this pass and are pinned OUT of
+  the overlay until they carry their own boot qualification; the first
+  `ooocoh-t47` attempt mixed an old `frontend.sv` with the new
+  `instr_realign.sv` and failed on `base_o`/`off_o`): verdicts = the
+  watch window (`l3watch4`: no `valid=f7` write at 713,884,693, the
   561 load misses and refills 0x800), L3 with the user-space-aware live
-  oracle to login, battery + stages. The L3 run on t46 (`l3orc4`, no T43)
-  continues for the T42-in-L3 evidence.
+  oracle (`l3orc5`) to login, battery + stages. The L3 run on t46
+  (`l3orc4`, no T43) continues for the T42-in-L3 evidence and should
+  reproduce the T43 mismatch at retire 489 M.
 - [ ] **T39 — server1 (HPDCACHE, SMT2, t38) L1 past the T35 point oopses at
   1.267 s guest: `insert_header+0x9c` (`__register_sysctl_table` from
   `eventpoll_init`) NULL pointer dereference at `0x50`, PID 1 (2026-10-15).**
