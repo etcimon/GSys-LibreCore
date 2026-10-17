@@ -1810,7 +1810,7 @@ prerequisite for this work under the existing dual license. No licensing policy 
   WFI (`halt=1` in the idle dump).** The first complete L1 on the OoO
   core. Battery and stages 38/46–53 Spike-exact on t41 and t42. One
   anomaly on the way → T42.
-- [ ] **T42 — L1 userspace: `cat /proc/cpuinfo` dies with `unhandled signal
+- [x] **T42 — L1 userspace: `cat /proc/cpuinfo` dies with `unhandled signal
   11 … at 0x0 in libc.so` (`epc 0x3f95efda1c`, `badaddr 0`, cause 13 —
   a load through a NULL pointer) at 7.90 s guest after printing the first
   CPU block; the rest of `/init` (`cat /proc/stat`, `free`, the shell)
@@ -1871,6 +1871,19 @@ prerequisite for this work under the existing dual license. No licensing policy 
   run shows the walk/requester pairing) and `ooocoh-t46-ooo-pgo-build`
   (fix) for the L1/L3 verdicts; on t46 the frozen battery and every
   stage 4–56 are Spike-exact and qualified (s11 10,953 cycles).
+  **Mechanism confirmed and fix verified (2026-10-17).** The `+mmu_trace`
+  window on the pre-fix model: at c=477,251,244 a **wrong-path store to
+  virtual address 0** (`st_i=1 vaddr_i=0`) misses the DTLB and the PTW
+  starts walking 0 (`walk_vaddr=0`); the store is cancelled (T35 drops it
+  from the store unit, the walk keeps going); at c=477,251,281 the live
+  user `ld` is the registered requester (`vaddr_q=0x3f95f16f90`,
+  `dtlb_hit_q=0`) when the dead walk faults (`ptw_err=1`) and the MMU
+  raises `cause=13 tval=0 ex_ptw=1` — the load unit in WAIT_TRANSLATION
+  writes it back (`wb=1 wb_ex=1`). On `ooocoh-t46-ooo-pgo-build` (fix) the
+  L1 `/init` runs `uname`, the **whole** `cat /proc/cpuinfo`,
+  `/proc/loadavg`, `/proc/stat`, `free`, `G6LC_LINUX_SHELL` and the ash
+  prompt with **no signal** (`l1fix3`, 486.5 M cycles, exit 0); the L3
+  with the user-space-aware live oracle (`l3orc4`) is in flight.
 - [ ] **T43 — L3 on t42: an `amoor.d.aq` (0x800 → 0x801) then, 53 cycles
   later, `amoswap.d.rl zero` (→ 0x800) on a workqueue `work->data`
   (PA `0x8fc8e380`); the `c.ld` 866 cycles after the swap reads 0x801,
