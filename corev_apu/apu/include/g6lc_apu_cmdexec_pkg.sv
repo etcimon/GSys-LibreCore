@@ -24,9 +24,22 @@ package g6lc_apu_cmdexec_pkg;
   typedef struct packed {
     logic [4:0]      fence_idx;         // fence slot, 31 = none
     logic [2:0]      nbufs;             // buffers in this submit (1..4)
+    logic [7:0]      ctx;               // ObjTab ctx tag of the
+                                        // submitting stream (vnfront's
+                                        // ctx_i) — keys the per-context
+                                        // sticky fault register and the
+                                        // watchdog device-loss pulse
     logic [3:0][7:0] crec;              // cmdrec buffer indices
     logic [3:0][31:0] chndl;            // objtab {gen,slot} handles
   } apu_cmdexec_submit_t;
+
+  // §7b exception contract (2026-10-16): execution-time faults are
+  // recorded per context in a sticky register word:
+  //   {count[15:0], work_id[7:0], code[7:0], pc[15:0], wave[15:0]}
+  // count saturates at 0xFFFF; work_id[7:0] is the engine/class tag
+  // (APU_SH_WORK_VS/FS low byte for graphics waves, the record ctype
+  // low byte otherwise).
+  localparam int unsigned APU_CMDEXEC_FAULT_W = 64;
 
   // executor state registers, snapshotted into every work record
   typedef struct packed {

@@ -46,6 +46,10 @@ module g6lc_apu_vgtop
   parameter int unsigned Fences = 16,
   // ring ALIVE watchdog refresh period: 2**AliveTickLog2 cycles
   parameter int unsigned AliveTickLog2 = 20,
+  // §7b exception contract: cmdexec per-work-item watchdog —
+  // 2**WorkBudgetLog2 cycles without issue/completion progress while
+  // work is outstanding declares the device dead (ring FATAL)
+  parameter int unsigned WorkBudgetLog2 = 30,
   // cmdrec record-payload arena per command buffer, in 32-bit
   // words.  The 256-word default overflowed on
   // vkCmdCopyBufferToImage of a 4-layer mipmapped array image —
@@ -304,6 +308,11 @@ module g6lc_apu_vgtop
     apu_vgpages_req_t vp_pg_req;
     logic        vp_ex_v, vp_ex_rdy;
     apu_cmdexec_submit_t vp_ex_submit;
+    // §7b exception contract: cmdexec watchdog device-loss pulse —
+    // the context's rings go FATAL in the pump
+    logic        ex_devlost_v;
+    logic [7:0]  ex_devlost_ctx;
+    logic        ex_dead;
 
     g6lc_apu_vnpump #(.Enable(1'b1), .Rings(Rings),
                       .AliveTickLog2(AliveTickLog2)) i_pump (
@@ -351,6 +360,7 @@ module g6lc_apu_vgtop
       .ex_fence_lost_i(ex_fence_lost), .ex_fence_clr_o(ex_fence_clr),
       .ex_fence_fail_o(ex_fence_fail),
       .ctx_kill_valid_i(vc_ctx_kill_v), .ctx_kill_id_i(vc_ctx_kill_id),
+      .devlost_valid_i(ex_devlost_v), .devlost_ctx_i(ex_devlost_ctx),
             .busy_o(vp_busy),
       .ring_active_o(ring_active_o), .ring_status_o(ring_status_o),
       .ring_head_o(ring_head_o), .ring_extra_w_o(ring_extra_w_o));
@@ -413,7 +423,8 @@ module g6lc_apu_vgtop
                           work_is_xfer ? xf_work_rdy :
                           work_is_draw ? rs_work_rdy : work_ready_i;
 
-    g6lc_apu_cmdexec #(.Enable(1'b1), .Fences(Fences)) i_exec (
+    g6lc_apu_cmdexec #(.Enable(1'b1), .Fences(Fences),
+                       .WorkBudgetLog2(WorkBudgetLog2)) i_exec (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .submit_valid_i(vp_ex_v), .submit_ready_o(vp_ex_rdy),
       .submit_i(vp_ex_submit),
@@ -441,6 +452,9 @@ module g6lc_apu_vgtop
       // §12.3 3d-d: vgctl's relocation hold blocks new dequeues;
       // ex_idle reports nothing in flight for the drain wait
       .hold_i(vc_hold), .idle_o(ex_idle),
+      // §7b exception contract: watchdog device loss -> ring FATAL
+      .devlost_valid_o(ex_devlost_v), .devlost_ctx_o(ex_devlost_ctx),
+      .dead_o(ex_dead),
       .busy_o(ex_busy));
 
     // ---- cmdrec -----------------------------------------------------------------
@@ -941,6 +955,8 @@ module g6lc_apu_vgtop_fixture
   parameter int unsigned Fences = 16,
   // ring ALIVE watchdog refresh period: 2**AliveTickLog2 cycles
   parameter int unsigned AliveTickLog2 = 20,
+  // §7b exception contract: cmdexec work watchdog — see g6lc_apu_cmdexec
+  parameter int unsigned WorkBudgetLog2 = 30,
   parameter int unsigned CrPayWords = 1024,
   parameter int unsigned ObjEntries    = 65536,
   parameter int unsigned ObjMaxCtx     = 32,
@@ -1009,7 +1025,8 @@ module g6lc_apu_vgtop_fixture
 );
   g6lc_apu_vgtop #(
     .Enable(Enable), .Rings(Rings), .Fences(Fences),
-    .AliveTickLog2(AliveTickLog2), .CrPayWords(CrPayWords),
+    .AliveTickLog2(AliveTickLog2), .WorkBudgetLog2(WorkBudgetLog2),
+    .CrPayWords(CrPayWords),
     .ObjEntries(ObjEntries), .ObjMaxCtx(ObjMaxCtx),
     .PayMemBytes(PayMemBytes), .DirCacheSets(DirCacheSets),
     .EntCacheLines(EntCacheLines), .PayCacheLines(PayCacheLines),

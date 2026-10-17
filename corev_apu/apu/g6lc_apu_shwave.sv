@@ -226,7 +226,8 @@ module g6lc_apu_shwave
       // G2b implicit-LOD: quad-lane derivative chain producing λ
       W_TXL0, W_TXL1, W_TXL2, W_TXL3, W_TXL4, W_TXL5, W_TXL6, W_TXL7,
       W_TXL8, W_TXL9, W_TXLA, W_TXLB, W_TXLC,
-      W_TXC0, W_TXC1, W_TXC1B, W_TXC2, W_TXC3,  // sampled-coord compute
+      W_TXC0, W_TXC0A, W_TXC1, W_TXC1B, W_TXC2, W_TXC3,
+                                                 // sampled-coord compute
       W_TXC4, W_TXC5, W_TXC6,
       // G3a-ii texture completion: projected-sample divide (wave-wide
       // preamble), dref clamp/quantize, gather u16->fp result jobs,
@@ -403,6 +404,7 @@ module g6lc_apu_shwave
     logic [7:0]   tx_msk_q;           // image-operands mask word
     logic         tx_rdy_q;           // dref quantize done this lane
     logic [2:0]   tx_osl_q;           // ConstOffset operand slot (0=none)
+    logic [2:0]   tx_bsl_q;           // Bias operand slot (0=none)
     logic [15:0]  tx_r16_q;           // Dref quantized to u16 (UNORM)
     logic [31:0]  tx_qraw_q;          // unclamped λ (QueryLod)
     // entry record
@@ -738,19 +740,25 @@ module g6lc_apu_shwave
         99:      f_nva = 3'd3;              // ImageWrite: img,coord,texel
         95:      f_nva = (wc > 6) ? 3'd3 : 3'd2;  // Fetch: img,coord[,lod]
         88:      f_nva = 3'd3;              // SampleExplicitLod + Lod op
-        87:      f_nva = 3'd2;              // SampleImplicitLod: img,coord
-        // G3a-ii: operand counts grow with the image-operands mask
-        // (Lod and/or ConstOffset ids trail the mask word)
-        89:      f_nva = (wc > 7 && (oq[5] & 32'h8) != 0) ? 3'd4 : 3'd3;
+        // G3a-ii: operand counts grow with the image-operands mask —
+        // Bias (bit 0) on the implicit forms and gathers; Lod (bit 1)
+        // and ConstOffset (bit 3) ids trail the mask word in that order
+        87:      f_nva = 3'(3'd2 + ((wc > 5) ? {2'b0, oq[4][3]} +
+                                            {2'b0, oq[4][0]} : 4'd0));
+        89:      f_nva = 3'(3'd3 + ((wc > 6) ? {2'b0, oq[5][3]} +
+                                             {2'b0, oq[5][0]} : 4'd0));
         90:      f_nva = (wc > 8 && (oq[5] & 32'h8) != 0) ? 3'd5 : 3'd4;
-        91:      f_nva = (wc > 5 && (oq[4] & 32'h8) != 0) ? 3'd3 : 3'd2;
+        91:      f_nva = 3'(3'd2 + ((wc > 5) ? {2'b0, oq[4][3]} +
+                                            {2'b0, oq[4][0]} : 4'd0));
         92:      f_nva = (wc > 6 && (oq[4] & 32'h8) != 0) ? 3'd4 : 3'd3;
-        93:      f_nva = (wc > 6 && (oq[5] & 32'h8) != 0) ? 3'd4 : 3'd3;
+        93:      f_nva = 3'(3'd3 + ((wc > 6) ? {2'b0, oq[5][3]} +
+                                             {2'b0, oq[5][0]} : 4'd0));
         94:      f_nva = (wc > 8 && (oq[5] & 32'h8) != 0) ? 3'd5 : 3'd4;
         // gather/dref-gather: img,coord,comp|dref + trailing
-        // Lod/ConstOffset ids after the mask word at oq[5]
+        // Bias/Lod/ConstOffset ids after the mask word at oq[5]
         96,97:   f_nva = 3'(3'd3 + ((wc > 6) ? {2'b0, oq[5][3]} +
-                                             {2'b0, oq[5][1]} : 4'd0));
+                                             {2'b0, oq[5][1]} +
+                                             {2'b0, oq[5][0]} : 4'd0));
         105:     f_nva = 3'd2;              // QueryLod: img,coord
         207,208,209,210,211,212,213,214,215:
                f_nva = 3'd1;              // G2b derivative ops: 1 operand
@@ -783,7 +791,7 @@ module g6lc_apu_shwave
         f_opid = (k < 3) ? oq[2 + k] : oq[k + 3];
       else if (o == 92)                 // mask at oq[4], lod[,off] trail
         f_opid = (k < 2) ? oq[2 + k] : oq[k + 3];
-      else if (o == 91)                 // optional ConstOffset at oq[5]
+      else if (o == 87 || o == 91)      // mask at oq[4], Bias at oq[5]
         f_opid = (k < 2) ? oq[2 + k] : oq[k + 3];
       // mask at oq[5]; trailing Lod/ConstOffset ids at oq[6..7]
       // (96 gather: comp is oq[4]; 97 dref-gather: dref is oq[4] —
@@ -5119,21 +5127,34 @@ module g6lc_apu_shwave
                         opc_q == 16'd93 || opc_q == 16'd94 ||
                         opc_q == 16'd96 || opc_q == 16'd97) &&
                        wc_q > 16'd6) ? ops_q[5] :
-                      ((opc_q == 16'd91 || opc_q == 16'd92) &&
+                      ((opc_q == 16'd87 || opc_q == 16'd91 ||
+                        opc_q == 16'd92) &&
                        wc_q > 16'd5) ? ops_q[4] : 32'h0) & 32'hFF);
                 // ConstOffset operand slot: gathers fetch the trailing
-                // ids positionally (Lod before ConstOffset, both after
-                // the mask word); 0 marks "no offset operand"
+                // ids positionally (Bias, then Lod, then ConstOffset —
+                // all after the mask word); 0 marks "no offset operand"
                 tx_osl_q <=
                   ((opc_q == 16'd96 || opc_q == 16'd97) &&
                    wc_q > 16'd6 && (ops_q[5] & 32'h8) != 0)
-                      ? ((ops_q[5] & 32'h2) != 0 ? 3'd4 : 3'd3) : 3'd0;
+                      ? (3'd3 + {2'b0, ops_q[5][1]} +
+                         {2'b0, ops_q[5][0]}) : 3'd0;
+                // Bias operand slot (mask bit 0): k=2 for 87/91
+                // (img,coord), k=3 for 89/93 (…,dref) and the gathers
+                // (…,comp|dref); 0 marks "no Bias operand"
+                tx_bsl_q <=
+                  ((opc_q == 16'd87 || opc_q == 16'd91) &&
+                   wc_q > 16'd5 && (ops_q[4] & 32'h1) != 0) ? 3'd2 :
+                  ((opc_q == 16'd89 || opc_q == 16'd93 ||
+                    opc_q == 16'd96 || opc_q == 16'd97) &&
+                   wc_q > 16'd6 && (ops_q[5] & 32'h1) != 0) ? 3'd3 :
+                  3'd0;
                 // operand-mask legality: Lod (0x2) decoded on the
-                // explicit/sample forms, ConstOffset (0x8) on gathers;
-                // implicit forms take no image operands in v1 (Bias
-                // rides the sampler record)
+                // explicit forms, Bias (0x1) on the implicit forms and
+                // gathers, ConstOffset (0x8) on the fetch/gather forms;
+                // every other image operand faults (Offset/ConstOffsets/
+                // Sample/MinLod are not decoded in v1)
                 if ((opc_q == 16'd87 && wc_q > 16'd5 &&
-                     ops_q[4] != 32'h0) ||
+                     (ops_q[4] & ~32'h1) != 0) ||
                     (opc_q == 16'd95 &&
                      wc_q > 16'd6 && (ops_q[4] & ~32'h2) != 0) ||
                     (opc_q == 16'd88 &&
@@ -5143,11 +5164,11 @@ module g6lc_apu_shwave
                      ops_q[4] != 32'h0) ||
                     (opc_q == 16'd99 && wc_q > 16'd4 &&
                      ops_q[3] != 32'h0) ||
-                    // G3a-ii: dref/proj implicit take no image operands
+                    // G3a-ii: dref/proj implicit take Bias only
                     ((opc_q == 16'd89 || opc_q == 16'd93) &&
-                     wc_q > 16'd6 && ops_q[5] != 32'h0) ||
+                     wc_q > 16'd6 && (ops_q[5] & ~32'h1) != 0) ||
                     (opc_q == 16'd91 && wc_q > 16'd5 &&
-                     ops_q[4] != 32'h0) ||
+                     (ops_q[4] & ~32'h1) != 0) ||
                     // explicit forms require Lod, allow +ConstOffset
                     ((opc_q == 16'd90 || opc_q == 16'd94) &&
                      (wc_q < 16'd8 || (ops_q[5] & ~32'hA) != 0 ||
@@ -5155,9 +5176,9 @@ module g6lc_apu_shwave
                     (opc_q == 16'd92 &&
                      (wc_q < 16'd7 || (ops_q[4] & ~32'hA) != 0 ||
                       (ops_q[4] & 32'h2) == 0)) ||
-                    // gathers: Lod and/or ConstOffset only
+                    // gathers: Bias, Lod and/or ConstOffset only
                     ((opc_q == 16'd96 || opc_q == 16'd97) &&
-                     wc_q > 16'd6 && (ops_q[5] & ~32'hA) != 0) ||
+                     wc_q > 16'd6 && (ops_q[5] & ~32'hB) != 0) ||
                     // QueryLod takes no image operands
                     (opc_q == 16'd105 && wc_q > 16'd5 &&
                      ops_q[4] != 32'h0)) begin
@@ -5278,10 +5299,11 @@ module g6lc_apu_shwave
             tx_r16_q <= t1_q[ls_lane_q[2:0]][0][15:0];
             // continue: explicit-lod forms straight into the coordinate
             // compute; implicit (and gather without a Lod operand)
-            // derive λ first
+            // derive λ first; a Bias operand detours through W_TXC0A
             st_q <= ((opc_q == 16'd90 || opc_q == 16'd94) ||
-                     (opc_q == 16'd97 && tx_msk_q[1])) ? W_TXC0
-                                                       : W_TXL0;
+                     (opc_q == 16'd97 && tx_msk_q[1]))
+                      ? ((tx_bsl_q != 3'd0) ? W_TXC0A : W_TXC0)
+                      : W_TXL0;
           end
           // ---- format decode + mip/lod setup -------------------------
           // walk targets: tx_mt_q = primary level, tx_mt1_q = second
@@ -5337,7 +5359,8 @@ module g6lc_apu_shwave
                 // λ from the quad-lane derivatives first
                 16'd88, 16'd92, 16'd96:
                   st_q <= (opc_q == 16'd96 && !tx_msk_q[1])
-                          ? W_TXL0 : W_TXC0;
+                          ? W_TXL0
+                          : ((tx_bsl_q != 3'd0) ? W_TXC0A : W_TXC0);
                 16'd95, 16'd98, 16'd99: begin    // fetch / read / write
                   lod = (opc_q == 16'd95 && wc_q > 16'd6)
                         ? va_q[2][ls_lane_q[2:0]][0][4:0] : 5'h0;
@@ -5445,7 +5468,8 @@ module g6lc_apu_shwave
             st_q <= W_TXLC;
           W_TXLC:                        // t0 = log2(ρ²) * 0.5 = λ
             jset(0, 5'd2, {2'd0, S_T0}, {2'd0, S_HALF},
-                 {2'd0, S_ZERO}, 1, 0, W_TXC0);
+                 {2'd0, S_ZERO}, 1, 0,
+                 (tx_bsl_q != 3'd0) ? W_TXC0A : W_TXC0);
           // ---- sampled-coordinate compute (op88) ---------------------
           // lod*16 (fp job) -> F2I -> +bias, clamp [minLod,maxLod] and
           // mip range -> {m0,m1,fw}; dims -> fp scale; coords -> 8.8
@@ -5460,6 +5484,7 @@ module g6lc_apu_shwave
             txfa_q[0] <=
               (opc_q == 16'd87 || opc_q == 16'd89 || opc_q == 16'd91 ||
                opc_q == 16'd93 || opc_q == 16'd105 ||
+               tx_bsl_q != 3'd0 ||   // W_TXC0A merged Bias into t0
                ((opc_q == 16'd96 || opc_q == 16'd97) && !tx_msk_q[1]))
                 ? t0_q[ls_lane_q[2:0]][0]
                 : va_q[(opc_q == 16'd88 || opc_q == 16'd92) ? 3'd2
@@ -5473,6 +5498,27 @@ module g6lc_apu_shwave
             ncomp_q    <= 4'd1;
             jset(0, 5'd3, {2'd1, S_TX}, {2'd1, S_T0},
                  {2'd0, S_ZERO}, 2, 0, W_TXC1);
+          end
+          // W_TXC0A: SPIR-V Bias image operand (mask bit 0) — λ += bias
+          // in fp32 BEFORE the ·16 quantize (spec: λ_base + bias +
+          // mipLodBias).  The merged value lands in t0 so the re-entered
+          // W_TXC0 consumes it like an implicit λ.  The λ source: t0 for
+          // the implicit forms, the shifted lod operand slot (3+bit0)
+          // for a Lod+bias gather.
+          W_TXC0A: begin
+            txfa_q[0] <= ((opc_q == 16'd96 || opc_q == 16'd97) &&
+                          tx_msk_q[1])
+                           ? va_q[3'd3 + {2'b0, tx_msk_q[0]}]
+                                 [ls_lane_q[2:0]][0]
+                           : t0_q[ls_lane_q[2:0]][0];
+            txfa_q[1] <= va_q[tx_bsl_q][ls_lane_q[2:0]][0];
+            tx_1lane_q <= 1'b1;
+            ncomp_q    <= 4'd1;
+            // ADD adds operands b+c in this unit (a is unused on the
+            // add/sub ops): stage λ/bias in txfa[0]/txfa[1] and read
+            // them via the b/c slots
+            jset(0, 5'd0, {2'd0, S_ZERO}, {2'd3, S_TX}, {2'd3, S_TX},
+                 3'd1, 1'b0, W_TXC0, 1'b0, 1'b0, 2'd0, 2'd0, 2'd1);
           end
           W_TXC1: begin
             ncomp_q <= 4'd2;

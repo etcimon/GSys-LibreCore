@@ -809,21 +809,24 @@ class Model:
             q = va[1][(nc - 1) & 3]
             va[1] = [fdiv(va[1][0], q), fdiv(va[1][1], q),
                      va[1][2], va[1][3]]
-        # W_TX0 operand-mask legality (only Lod 0x2 is decoded); 87
-        # takes no image operands in v1 (Bias rides the sampler record)
+        # W_TX0 operand-mask legality: Lod (0x2) on the explicit and
+        # fetch forms, Bias (0x1) on the implicit forms and gathers,
+        # ConstOffset (0x8) on the fetch/gather forms — every other
+        # image operand faults (Offset/ConstOffsets/Sample/MinLod are
+        # not decoded in v1)
         if (opc == 95 and wc > 6 and (ops[4] & ~0x2) != 0) or \
-           (opc == 87 and wc > 5 and ops[4] != 0) or \
+           (opc == 87 and wc > 5 and (ops[4] & ~0x1) != 0) or \
            (opc == 88 and (wc < 7 or (ops[4] & ~0x2) != 0 or
                            not (ops[4] & 0x2))) or \
            (opc == 98 and wc > 5 and ops[4] != 0) or \
            (opc == 99 and wc > 4 and ops[3] != 0) or \
-           (opc in (89, 93) and wc > 6 and ops[5] != 0) or \
-           (opc == 91 and wc > 5 and ops[4] != 0) or \
+           (opc in (89, 93) and wc > 6 and (ops[5] & ~0x1) != 0) or \
+           (opc == 91 and wc > 5 and (ops[4] & ~0x1) != 0) or \
            (opc in (90, 94) and (wc < 8 or (ops[5] & ~0xA) != 0 or
                                  not (ops[5] & 0x2))) or \
            (opc == 92 and (wc < 7 or (ops[4] & ~0xA) != 0 or
                            not (ops[4] & 0x2))) or \
-           (opc in (96, 97) and wc > 6 and (ops[5] & ~0xA) != 0) or \
+           (opc in (96, 97) and wc > 6 and (ops[5] & ~0xB) != 0) or \
            (opc == 105 and wc > 5 and ops[4] != 0):
             self.fault = 'IMGOPMASK'
             return 'ret'
@@ -950,7 +953,16 @@ class Model:
         if implicit:
             lod_in = self.ilod_v(pc, ops[3], va[1], meta['w'], meta['h'])
         else:
-            lod_in = va[2][0] if opc in (88, 92) else va[3][0]
+            lod_in = va[2][0] if opc in (88, 92) else \
+                va[3 + (1 if (gath and wc > 6 and (ops[5] & 1))
+                        else 0)][0]
+        # SPIR-V Bias image operand (mask bit 0): adds to λ in fp32
+        # before the q4.4 quantize (spec order: λ_base + bias +
+        # mipLodBias, then min/max-lod and level clamp); operand slot
+        # k=2 for 87/91, k=3 for the dref/gather forms (W_TXC0A)
+        if ((opc in (87, 91) and wc > 5 and (ops[4] & 1)) or
+                (opc in (89, 93, 96, 97) and wc > 6 and (ops[5] & 1))):
+            lod_in = fadd(lod_in, va[2 if opc in (87, 91) else 3][0])
         # G3a-ii dref: the compare ref is quantized to u16 once for
         # UNORM depth (D16); D32_SFLOAT compares in fp directly
         ref16 = 0
@@ -2604,24 +2616,31 @@ class Model:
             return 3                          # img, coord, texel
         if opc == 95:
             return 3 if wc > 6 else 2         # img, coord[, lod]
-        if opc in (87, 88, 103):
+        if opc in (88, 103):
             return 3 if opc == 88 else 2
-        # G3a-ii
+        # G3a-ii: Bias (bit 0) on the implicit forms and gathers; Lod
+        # (bit 1)/ConstOffset (bit 3) ids trail the mask word
+        if opc == 87:
+            return 2 + (((ops[4] >> 3) & 1) + (ops[4] & 1)
+                        if wc > 5 else 0)
         if opc == 89:
-            return 4 if (wc > 7 and (ops[5] & 8)) else 3
+            return 3 + (((ops[5] >> 3) & 1) + (ops[5] & 1)
+                        if wc > 6 else 0)
         if opc == 90:
             return 5 if (wc > 8 and (ops[5] & 8)) else 4
         if opc == 91:
-            return 3 if (wc > 5 and (ops[4] & 8)) else 2
+            return 2 + (((ops[4] >> 3) & 1) + (ops[4] & 1)
+                        if wc > 5 else 0)
         if opc == 92:
             return 4 if (wc > 6 and (ops[4] & 8)) else 3
         if opc == 93:
-            return 4 if (wc > 6 and (ops[5] & 8)) else 3
+            return 3 + (((ops[5] >> 3) & 1) + (ops[5] & 1)
+                        if wc > 6 else 0)
         if opc == 94:
             return 5 if (wc > 8 and (ops[5] & 8)) else 4
         if opc in (96, 97):
-            return 3 + (((ops[5] >> 3) & 1) + ((ops[5] >> 1) & 1)
-                        if wc > 6 else 0)
+            return 3 + (((ops[5] >> 3) & 1) + ((ops[5] >> 1) & 1) +
+                        (ops[5] & 1) if wc > 6 else 0)
         if opc == 105:
             return 2
         if opc in (61, 65, 66, 68, 81, 83, 84, 109, 110, 111, 112,

@@ -161,7 +161,7 @@ EXCEPTION TEX-X2 · Filtering precision latitude
 
 | Heuristic | Trigger | Priority | Smallest useful action | Reject / defer when |
 |---|---|---:|---|---|
-| TEX-H1 λ precision | before CTS-2 | high | **done G3a-ii (2026-10-15):** implicit-LOD λ = ½·log2(ρ²) through the §7d log2 core (`W_TXL8` xcall), `mipmapPrecisionBits = 8`; the discriminating check is `texture.mipmap.*` / `glsl.texture_functions.*` in CTS-2 — not yet run (the vertex-stage texture hang blocks the `*_vertex` variants) | — |
+| TEX-H1 λ precision | before CTS-2 | high | **done G3a-ii (2026-10-15):** implicit-LOD λ = ½·log2(ρ²) through the §7d log2 core (`W_TXL8` xcall), `mipmapPrecisionBits = 8`; first CTS-2 evidence `g3aii-2026-10-15-tex-*` (run against `glsl.texture_functions`, the λ oracle): `sampler2d_*_fragment` **Pass**; `sampler2d_bias_*` failed pre-fix on the unimplemented Bias image operand (λ += bias(operand) + mipLodBias before clamp — landed, `fs_tex_bias`); `*_vertex` run aborted by Mesa patience (per-prim FS flush on a 16,928-prim draw — merge landed, residual cost is vertex-stage texturing) | — |
 | TEX-H2 2D matrix | CTS-2 | high | filtering.2d + mipmap.2d + shadow.2d | — |
 | TEX-H3 Cube/3D/array | G3d | high | layouts + seamless cube | — |
 | TEX-H4 BC family | G3d/UE | medium | decode-on-miss BC1–7 | mobile formats (skip) |

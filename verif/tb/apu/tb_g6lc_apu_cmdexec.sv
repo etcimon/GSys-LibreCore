@@ -43,6 +43,8 @@ module tb_g6lc_apu_cmdexec;
   logic [15:0]        done_seq;
   logic [Fences-1:0]  fsig, flost, fclr = '0, ffail = '0;
   logic               osub_r, ow_v, oxcr_v, oxcr_cr, oxot_v, oxot_cr;
+  logic               odl_v, odl_dead;
+  logic [7:0]         odl_ctx;
   logic [15:0]        odone;
   logic [Fences-1:0]  ofsig, oflost;
   apu_cmdexec_work_t  ow_o;
@@ -62,9 +64,22 @@ module tb_g6lc_apu_cmdexec;
   // submissions while high and report true drain on idle_o
   logic               hold = 1'b0;
   logic               ce_idle;
-  assign w_done_pl = '{code: APU_SH_DONE_OK, default: '0};
+  // §7b exception contract: the done model returns a per-item code —
+  // work index fault_at completes with APU_SH_DONE_FAULT; pc/wave/
+  // work_id below let the sticky-register check see real tags
+  logic [7:0]         code_at [64];
+  int                 fault_at = -1, done_i = 0;
+  logic               pend_hold = 1'b0;   // starve the done model
+  logic [7:0]         dl_ctx;
+  logic               dl_v, dl_dead, dl_seen = 1'b0;
+  // payload latched with the w_done pulse — done_i advances on the
+  // same edge, so a combinational read would return the NEXT item
+  initial w_done_pl = '{code: APU_SH_DONE_OK, default: '0};
 
-  g6lc_apu_cmdexec #(.Enable(1'b1), .Fences(Fences)) i_dut (
+  g6lc_apu_cmdexec #(.Enable(1'b1), .Fences(Fences),
+                     // small watchdog budget so the expiry vector is
+                     // reachable in a directed run
+                     .WorkBudgetLog2(8)) i_dut (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
     .submit_valid_i(sub_v), .submit_ready_o(sub_r), .submit_i(sub),
     .cr_req_valid_o(xcr_v), .cr_req_ready_i(xcr_r), .cr_req_o(xcr_req),
@@ -80,6 +95,8 @@ module tb_g6lc_apu_cmdexec;
     .done_seq_o(done_seq),
     .fence_signaled_o(fsig), .fence_lost_o(flost),
     .fence_clr_i(fclr), .fence_fail_i(ffail), .xf_o(), .rd_o(),
+    .devlost_valid_o(dl_v), .devlost_ctx_o(dl_ctx),
+    .dead_o(dl_dead),
     .hold_i(hold), .idle_o(ce_idle), .busy_o());
   g6lc_apu_cmdexec_fixture #(.Enable(1'b0), .Fences(Fences)) i_off (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
@@ -97,6 +114,8 @@ module tb_g6lc_apu_cmdexec;
     .done_seq_o(odone),
     .fence_signaled_o(ofsig), .fence_lost_o(oflost),
     .fence_clr_i(fclr), .fence_fail_i(ffail), .xf_o(), .rd_o(),
+    .devlost_valid_o(odl_v), .devlost_ctx_o(odl_ctx),
+    .dead_o(odl_dead),
     .hold_i(hold), .idle_o(), .busy_o());
 
   // ---- backend mux: TB setup vs executor ------------------------------
@@ -187,8 +206,11 @@ module tb_g6lc_apu_cmdexec;
                             odone !== '0 || ofsig !== '0 ||
                             oflost !== '0 || odslot !== '0 ||
                             oddesc !== '0 || odpushn !== '0 ||
-                            odpush !== '0)
+                            odpush !== '0 || odl_v || odl_dead)
     $fatal(1, "disabled cmdexec active");
+
+  // watchdog pulse latch
+  always @(posedge clk) if (dl_v) dl_seen <= 1'b1;
 
   // ---- work port model ----------------------------------------------
   logic [31:0] got_work [64];
@@ -198,6 +220,8 @@ module tb_g6lc_apu_cmdexec;
     if (w_v && w_r) begin
       got_work[work_i] <= w_o.ctype;
       got_snap[work_i] <= w_o.snap;
+      code_at[work_i]  <= work_i == fault_at ? APU_SH_DONE_FAULT
+                                             : APU_SH_DONE_OK;
       work_i <= work_i + 1;
       pend   <= pend + 1;
     end
@@ -206,9 +230,13 @@ module tb_g6lc_apu_cmdexec;
       dtimer <= dtimer - 1;
       if (dtimer == 1) begin
         w_done <= 1'b1;
+        w_done_pl <= '{code: code_at[done_i], wave: 16'h5,
+                       pc: 16'h7C, work_id: 32'hF000_0002,
+                       default: '0};
+        done_i <= done_i + 1;
         pend   <= pend - 1 + (w_v && w_r ? 1 : 0);
       end
-    end else if (pend != 0) begin
+    end else if (pend != 0 && !pend_hold) begin
       dtimer <= 3;
     end
   end
@@ -285,7 +313,7 @@ module tb_g6lc_apu_cmdexec;
                         input logic [7:0] r0, input logic [31:0] h0,
                         input logic [7:0] r1, input logic [31:0] h1);
     sub_v = 1'b1;
-    sub = '{fence_idx: f, nbufs: 3'(nb),
+    sub = '{fence_idx: f, nbufs: 3'(nb), ctx: 8'h0,
             crec: '{8'h0, 8'h0, r1, r0},
             chndl: '{32'h0, 32'h0, h1, h0}};
     // wait for handshake
@@ -521,6 +549,78 @@ module tb_g6lc_apu_cmdexec;
     @(negedge clk);
     check("fail cleared", fsig[5] === 1'b0 && flost[5] === 1'b0);
     cases++;
+
+    // ---- case 9: exec-time fault, second CB still runs --------------------
+    // §7b exception contract (2026-10-16): a work item that completes
+    // with DONE_FAULT retires with undefined results and the executor
+    // continues — the remaining buffer executes, the fence signals
+    // normally (no DEVICE_LOST), and the context's sticky fault
+    // register counts the fault.
+    tb_drv = 1'b1;
+    cr_op(APU_CMDREC_OP_BEGIN, 6, 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, 6, 0,
+          mkrec(APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT, 0, 0, 32'h8));
+    cr_op(APU_CMDREC_OP_END, 6, 0, '0);
+    cr_op(APU_CMDREC_OP_BEGIN, 7, 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, 7, 0,
+          mkrec(APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT, 0, 0, 32'h9));
+    cr_op(APU_CMDREC_OP_END, 7, 0, '0);
+    tb_drv = 1'b0;
+    begin
+      int w0 = work_i;
+      fault_at = work_i;       // first work of this submit faults
+      submit(5'd6, 2, 8'd6, cb_h, 8'd7, cb_h);
+      wait_fence(6, 4000);
+      check("fault cont work", work_i == w0 + 2);
+      check("fault cont ok", flost[6] === 1'b0);
+      check("fault reg cnt",
+            i_dut.gen_on.fault_q[0][63:48] === 16'h0001);
+      check("fault reg code",
+            i_dut.gen_on.fault_q[0][39:32] === 8'(APU_SH_DONE_FAULT));
+      check("fault reg pc/wave",
+            i_dut.gen_on.fault_q[0][31:0] === 32'h007C_0005);
+      check("fault reg wid",
+            i_dut.gen_on.fault_q[0][47:40] === 8'h02);
+      cases++;
+    end
+
+    // ---- case 10: watchdog expiry = true device loss ----------------------
+    // The engine never returns: pend_hold starves the done model, the
+    // work-budget watchdog expires, the submission retires lost,
+    // devlost pulses (vnpump marks the ctx's rings FATAL), dead stays
+    // set and a follow-on submission retires lost without issuing work
+    tb_drv = 1'b1;
+    cr_op(APU_CMDREC_OP_BEGIN, 8, 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, 8, 0,
+          mkrec(APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT, 0, 0, 32'hA));
+    cr_op(APU_CMDREC_OP_END, 8, 0, '0);
+    cr_op(APU_CMDREC_OP_BEGIN, 9, 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, 9, 0,
+          mkrec(APU_VN_TYPE_VK_CMD_EXECUTE_COMMANDS_EXT, 0, 0, 32'hB));
+    cr_op(APU_CMDREC_OP_END, 9, 0, '0);
+    tb_drv = 1'b0;
+    begin
+      int w0 = work_i;
+      pend_hold = 1'b1;
+      submit(5'd7, 1, 8'd8, cb_h, 8'h0, 32'h0);
+      wait_fence(7, 8000);
+      check("wd fence lost", flost[7] === 1'b1);
+      check("wd devlost", dl_seen === 1'b1);
+      check("wd dead", dl_dead === 1'b1);
+      check("wd ctx", dl_ctx === 8'h00);
+      // device dead: the next submission retires without issuing work
+      seq0 = done_seq;
+      submit(5'd8, 1, 8'd9, cb_h, 8'h0, 32'h0);
+      wait_fence(8, 4000);
+      check("dead fence lost", flost[8] === 1'b1);
+      check("dead no work", work_i == w0 + 1);
+      check("dead seq adv", done_seq == seq0 + 16'h1);
+      // the fault register is NOT a device-loss record — unchanged
+      check("wd no fault rec",
+            i_dut.gen_on.fault_q[0][63:48] === 16'h0001);
+      pend_hold = 1'b0;
+      cases++;
+    end
 
     $display("PASS tb_g6lc_apu_cmdexec cases=%0d checks=%0d cycles=%0d",
              cases, checks, cycles);

@@ -631,6 +631,10 @@ module g6lc_apu_vnfront
     // failed through ex_fence_fail_o.  Covers every failure exit
     // between the two points, present and future.
     logic                sub_armed_q;
+    // §7b exception contract: the submission had a rejected element —
+    // its resolvable buffers still pushed to the executor (the
+    // feedback CB must run) but its fence completes DEVICE_LOST
+    logic                sub_lost_q;
 
     logic [CbBufs-1:0]   cb_alloc_q;
     logic [31:0]         cb_pool_q [CbBufs];
@@ -1106,6 +1110,7 @@ module g6lc_apu_vnfront
         ex_fence_clr_o <= '0;
         ex_fence_fail_o <= '0;
         sub_armed_q  <= 1'b0;
+        sub_lost_q   <= 1'b0;
       end else begin
         ex_fence_clr_o <= '0;
         ex_fence_fail_o <= '0;
@@ -1740,9 +1745,17 @@ module g6lc_apu_vnfront
                                 (fs >= 0 &&
                                  ent_q.aux[7:0] < 8'(Fences))
                                 ? 5'(ent_q.aux[7:0]) : FENCE_NONE,
+                                ctx: ctx_i,
                                 nbufs: '0, crec: '0, chndl: '0};
                 sub_armed_q <= (fs >= 0 &&
                                 ent_q.aux[7:0] < 8'(Fences));
+                // §7b exception contract: a rejected element must not
+                // lose the whole submission — Mesa appends its
+                // feedback command buffer and the guest's fence wait
+                // polls the slot that CB fills.  Bad elements are
+                // skipped, the resolvable buffers still execute and
+                // the fence completes DEVICE_LOST at StDone.
+                sub_lost_q  <= 1'b0;
                 blob_ret_q  <= StElemSub;
                 blob_done_q <= StSubPush;
                 state_q     <= StBlobRd;
@@ -2185,8 +2198,14 @@ module g6lc_apu_vnfront
                 (ot_cpl_i.entry.state & APU_CB_EXECUTABLE) == 0 ||
                 ot_cpl_i.entry.aux[7:0] >= 8'(CbBufs) ||
                 sub_q.nbufs == 3'd4) begin
-              result_q <= APU_VK_ERROR_UNKNOWN;
-              state_q  <= StRep;
+              // §7b exception contract: reject the ELEMENT, not the
+              // submission — Mesa's feedback command buffer must still
+              // execute or the guest's slot-polling fence wait hangs.
+              // The reply reports the rejection and the armed fence
+              // completes DEVICE_LOST at StDone.
+              sub_lost_q <= 1'b1;
+              blob_i_q   <= blob_i_q + 5'd1;
+              state_q    <= StBlobRd;
             end else begin
               sub_q.crec[sub_q.nbufs[1:0]]  <=
                   8'(ot_cpl_i.entry.aux[7:0]);
@@ -4220,6 +4239,13 @@ module g6lc_apu_vnfront
               result_q <= APU_VK_ERROR_UNKNOWN;
               state_q  <= StRep;
             end else if (ex_submit_ready_i) begin
+              // §7b exception contract: a partially rejected
+              // submission still runs its resolvable buffers — Mesa's
+              // feedback CB writes the slot the guest polls — but the
+              // reply reports the rejection and StDone fails the
+              // armed fence (DEVICE_LOST surfaces to the app)
+              if (sub_lost_q)
+                result_q <= APU_VK_ERROR_UNKNOWN;
               pushed_q <= pushed_q + 16'h1;
               sub_armed_q <= 1'b0;
               are_i_q  <= '0;
@@ -5337,10 +5363,16 @@ module g6lc_apu_vnfront
             // command retires — the reply already carries the
             // VkResult; the fence completes DEVICE_LOST so the
             // guest's vkWaitForFences terminates instead of hanging
-            if (sub_armed_q) begin
+            if (sub_armed_q ||
+                (sub_lost_q && sub_q.fence_idx != FENCE_NONE &&
+                 sub_q.fence_idx < 5'(Fences))) begin
+              // a rejected submit that still ran its buffers also
+              // completes its fence DEVICE_LOST — the guest's wait
+              // terminates instead of hanging on the slot
               ex_fence_fail_o[
                 sub_q.fence_idx[$clog2(Fences)-1:0]] <= 1'b1;
               sub_armed_q <= 1'b0;
+              sub_lost_q  <= 1'b0;
             end
             state_q <= StIdle;
           end

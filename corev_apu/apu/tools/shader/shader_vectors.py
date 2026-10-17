@@ -1086,6 +1086,25 @@ GFX = {
                              kind=1,
                              smp=dict(mag=1, min=1, mm=1, au=2, av=2,
                                       maxl=3.0))]),
+    # fs_tex_bias: OpImageSampleImplicitLod + Bias image operand
+    # (mask 0x1) — per-quad bias flips the mip choice across the
+    # λ=0 boundary; the dEQP texture().bias shape.
+    'fs_tex_bias':   dict(stage=4, count=16, vbase=1, inst=0,
+                         binds=[img_bind(
+                             0, 0, dict(w=4, h=4, fmt=2, mips=2),
+                             kind=1,
+                             smp=dict(mag=0, min=0, mm=1, au=2, av=2,
+                                      maxl=2.0))]),
+    # fs_tex_array: sampler2DArray implicit LOD — coord.z is the array
+    # layer (W_TXC1 F2I), 4 layers on a 2-mip map; the dEQP
+    # sampler2darray_fixed_fragment shape.
+    'fs_tex_array':  dict(stage=4, count=16, vbase=1, inst=0,
+                         binds=[img_bind(
+                             0, 0, dict(w=4, h=4, fmt=2, mips=2,
+                                        dim=1, layers=4),
+                             kind=1,
+                             smp=dict(mag=0, min=0, mm=1, au=2, av=2,
+                                      maxl=2.0))]),
 }
 GFX_SEEDS = [1]
 
@@ -1175,6 +1194,26 @@ def gfx_inputs(name, g, seed):
             rec[3] = f2b_w(1.0)
             rec[4] = f2b_w(0.1 + (i * 0.23) % 0.85)
             rec[5] = f2b_w(0.1 + (i * 0.31) % 0.85)
+            w += rec
+        return w
+    if name in ('fs_tex_bias', 'fs_tex_array'):
+        # fs_tex_implicit's per-quad λ spread (quads 0/2 mip1, 1/3
+        # mip0).  vcol.z: for _bias the Bias operand {-1.5,+1.5,-1.5,
+        # +1.0} flips every quad's mip choice; for _array the layer
+        # index 0..3 (one per quad).
+        for i in range(g['count']):
+            lx, ly, q = i & 1, (i >> 1) & 1, i >> 2
+            du = (0.5, 0.125, 0.0, 0.0625)[q]
+            dv = (0.0, 0.0, 0.5, 0.125)[q]
+            rec = [0] * (spirv_model.VARY_STRIDE // 4)
+            rec[0] = f2b_w(i + 0.5)
+            rec[1] = f2b_w(0.5)
+            rec[2] = f2b_w(0.0)
+            rec[3] = f2b_w(1.0)
+            rec[4] = f2b_w(0.25 + lx * du)
+            rec[5] = f2b_w(0.25 + ly * dv + (0.25 if q == 2 else 0.0))
+            rec[6] = f2b_w((-1.5, 1.5, -1.5, 1.0)[q]
+                           if name == 'fs_tex_bias' else float(q))
             w += rec
         return w
     if name == 'fs_tex_qlod':

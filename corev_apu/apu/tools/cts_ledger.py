@@ -82,7 +82,7 @@ OWNER = {
 ACCEPT = ('Pass', 'NotSupported')
 TRACK = ('QualityWarning', 'CompatibilityWarning', 'Waiver')
 COLUMNS = ['pass', 'not_supported', 'quality_warning', 'fail', 'crash',
-           'timeout', 'other']
+           'timeout', 'other', 'pass_with_fault']
 
 
 def status_column(status):
@@ -329,6 +329,9 @@ def cmd_parse(a):
     meta = {k: getattr(a, k) for k in
             ('run_tag', 'deqp_sha256', 'profile_hash', 'mesa', 'kernel',
              'device_name')}
+    # §7b exception contract: the bridge's sticky device-fault count
+    # for this run (-1 = not measured / pre-contract run)
+    meta['device_faults'] = a.device_faults
     meta['cts_commit'] = g['cts_commit']
     meta['generated'] = time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())
     if a.caselist:
@@ -351,6 +354,12 @@ def cmd_render(a):
     g, _ = load_groups(a.groups)
     latest = {}            # test name -> (meta.generated, record, run_tag)
     runs = []
+    # §7b exception contract: a run's device_faults budget taints that
+    # many of its passing results — a pass with faults in the run
+    # record is a pass-with-fault, never a plain pass.  The per-test
+    # attribution inside the run is unknowable, so the budget is
+    # consumed in ledger (sorted-name) order.
+    flrem = {}
     for rp in a.results:
         with open(rp) as f:
             res = json.load(f)
@@ -360,6 +369,8 @@ def cmd_render(a):
                      g['cts_commit'][:12]), file=sys.stderr)
             return 2
         runs.append(res['meta'])
+        tag = res['meta'].get('run_tag')
+        flrem[tag] = max(0, int(res['meta'].get('device_faults', -1)))
         stamp = res['meta']['generated']
         for r in res['results']:
             prev = latest.get(r['name'])
@@ -371,13 +382,17 @@ def cmd_render(a):
         rows[gname].update({'selected': info['count'], 'run': 0,
                             'owner': info['owner'], 'last': ''})
     stray = 0
-    for name, (stamp, r, tag) in latest.items():
+    for name, (stamp, r, tag) in sorted(latest.items()):
         gname = r.get('group')
         if gname is None or gname not in rows:
             stray += 1
             continue
         row = rows[gname]
-        row[status_column(r['status'])] += 1
+        col = status_column(r['status'])
+        if col == 'pass' and flrem.get(tag, 0) > 0:
+            col = 'pass_with_fault'
+            flrem[tag] -= 1
+        row[col] += 1
         row['run'] += 1
         if tag and (not row['last'] or stamp >= row['last_stamp']):
             row['last'] = tag
@@ -392,36 +407,45 @@ def cmd_render(a):
                  'acceptable outcomes and `not-supported` is honest only when '
                  'the capability is truthfully unadvertised; '
                  '`quality-warning` is tracked; `fail`/`crash`/`timeout`/'
-                 '`other` are defects; `not-run` = selected − run. '
+                 '`other` are defects; `pass-w-fault` counts a Pass whose '
+                 'run recorded execution-time device faults (the §7b '
+                 'contract lets a faulted work item complete with undefined '
+                 'results, so the result is not a plain pass); '
+                 '`not-run` = selected − run. '
                  'Newest run wins per test name. No waivers.\n'
                  % (g['cts_commit'], g.get('generated', ''),
                     g['index_sha256'][:16]))
     lines.append('Runs merged: %s\n' % (', '.join(
-        '`%s` (%s, deqp-vk `%s`, profile `%s`)' % (
+        '`%s` (%s, deqp-vk `%s`, profile `%s`%s)' % (
             m.get('run_tag'), m.get('generated'),
             (m.get('deqp_sha256') or '')[:12],
-            (m.get('profile_hash') or '')[:12]) for m in runs) or 'none'))
+            (m.get('profile_hash') or '')[:12],
+            '' if int(m.get('device_faults', -1)) < 0
+            else ', faults=%d' % int(m['device_faults']))
+        for m in runs) or 'none'))
     lines.append('| group | owner | selected | run | not-run | pass | '
-                 'not-supported | quality-warning | fail | crash | timeout | '
-                 'other | last evidence |')
-    lines.append('|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---|')
+                 'pass-w-fault | not-supported | quality-warning | fail | '
+                 'crash | timeout | other | last evidence |')
+    lines.append('|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|'
+                 '---:|---|')
     for gname in sorted(rows):
         r = rows[gname]
         notrun = r['selected'] - r['run']
         lines.append('| `%s` | %s | %d | %d | %d | %d | %d | %d | %d | %d | %d '
-                     '| %d | %s |' % (
+                     '| %d | %d | %s |' % (
                          gname, r['owner'], r['selected'], r['run'], notrun,
-                         r['pass'], r['not_supported'], r['quality_warning'],
+                         r['pass'], r['pass_with_fault'],
+                         r['not_supported'], r['quality_warning'],
                          r['fail'], r['crash'], r['timeout'], r['other'],
                          ('`%s`' % r['last']) if r['last'] else ''))
         for c in COLUMNS + ['selected', 'run']:
             tot[c] += r[c]
     lines.append('| **total** | | %d | %d | %d | %d | %d | %d | %d | %d | %d | '
-                 '%d | |' % (tot['selected'], tot['run'],
+                 '%d | %d | |' % (tot['selected'], tot['run'],
                              tot['selected'] - tot['run'], tot['pass'],
-                             tot['not_supported'], tot['quality_warning'],
-                             tot['fail'], tot['crash'], tot['timeout'],
-                             tot['other']))
+                             tot['pass_with_fault'], tot['not_supported'],
+                             tot['quality_warning'], tot['fail'],
+                             tot['crash'], tot['timeout'], tot['other']))
     if stray:
         lines.append('\n%d result(s) named a test outside the pinned '
                      'must-pass (not counted).' % stray)
@@ -477,6 +501,10 @@ def main(argv=None):
     p.add_argument('--mesa', default='')
     p.add_argument('--kernel', default='')
     p.add_argument('--device-name', default='')
+    p.add_argument('--device-faults', type=int, default=-1,
+                   help='bridge sticky device-fault count for the run '
+                        '(-1 = unmeasured); >0 taints that many Pass '
+                        'results as pass-with-fault (§7b contract)')
     p.add_argument('--caselist', default='')
     p.set_defaults(fn=cmd_parse)
     p = sub.add_parser('render')

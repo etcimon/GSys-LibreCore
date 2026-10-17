@@ -150,6 +150,7 @@ module tb_g6lc_apu_vnpump
     .ex_fence_lost_i(16'h0), .ex_fence_clr_o(ex_fclr),
     .ex_fence_fail_o(),
     .ctx_kill_valid_i(ctx_kill_v), .ctx_kill_id_i(ctx_kill_id),
+    .devlost_valid_i(1'b0), .devlost_ctx_i(8'h0),
     .busy_o(busy),
     .ring_active_o(ring_active), .ring_status_o(ring_status),
     .ring_head_o(ring_head), .ring_extra_w_o(ring_extra));
@@ -195,6 +196,7 @@ module tb_g6lc_apu_vnpump
     .ex_done_seq_i(16'h0), .ex_fence_signaled_i(16'h0),
     .ex_fence_lost_i(16'h0), .ex_fence_clr_o(), .ex_fence_fail_o(),
     .ctx_kill_valid_i(1'b0), .ctx_kill_id_i(8'h0),
+    .devlost_valid_i(1'b0), .devlost_ctx_i(8'h0),
     .busy_o(z_busy),
     .ring_active_o(z_ract), .ring_status_o(z_rstat),
     .ring_head_o(z_rhead), .ring_extra_w_o());

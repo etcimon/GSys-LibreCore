@@ -404,6 +404,48 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
   `g3bi-2026-10-16` owed. Earlier runs on the way: `out-g3bi-cts1-r3` died on an alive expiry
   during a `descriptor_pool` space wait (the residual that motivated the heartbeat);
   `out-g3bi-mctail3` 7/8 Pass with the abort gone.
+- [x] **A1 — whole-submission exception contract, Bias operand, FS batch merging
+  (2026-10-17; Aggregation A, part 1 of the six-aggregation re-plan).** Grounding first
+  (`specs/architecture/venus-fence-contract.md`, read against upstream `mesa-25.2.8`; the guest
+  runs the stock Ubuntu package `25.2.8-0ubuntu0.24.04.4`): `vkQueueSubmit` is asynchronous
+  with no reply, so an execution result can never reach its return value; fences are
+  **feedback slots** written by a Mesa-appended command buffer in the same submission
+  (`vkCmdFillBuffer(slot, VK_SUCCESS)`), polled host-side with `vn_relax`; `vkQueueWaitIdle` is
+  an empty submission carrying that CB; ring `FATAL` makes the next submit `abort()`; the
+  upstream `vn_relax` watchdog bounds every wait (16 384 iterations). Hence the array-frag
+  "hang": the renderer abandoned the faulted submission, the feedback CB never ran, the slot
+  stayed `VK_NOT_READY`. **Contract implemented (cmdexec):** execution-time faults
+  (`DONE_FAULT/BUDGET/UNSUPPORTED`) retire the work item with undefined results and the
+  submission *continues* (remaining records + CBs, fence signals, feedback lands); the fault
+  lands in a per-context sticky register `{count, work_id, code, pc, wave}` (`FaultCtxs`=32,
+  debug tap + bridge `stats()`); a per-work-item watchdog (`WorkBudgetLog2`, default 30 ≈ 1 s
+  at 1 GHz, fixtures override) declares true loss: `devlost` pulse → vnpump marks the
+  context's rings `FATAL`, outstanding work abandoned, `dead` sticky until engine reset, later
+  submissions retire lost; submit-time rejections keep DEVICE_LOST and drive the feedback
+  path. Harness: `device_faults=N` in every run record, `cts_ledger.py --device-faults`, new
+  `pass-w-fault` column (a Pass in a run with faults is never a plain pass). **Bias** (image
+  operand 0x1 on 87/89/91/93 and gathers): `λ = λ_base + bias + mipLodBias` then clamp
+  (`W_TXC0A`, model mirror); the ±`maxSamplerLodBias` clamp of the sum is still owed
+  (Aggregation B). **FS batch merging** (D item pulled forward): `bat_front_q` — same-facing
+  primitives share an FS batch, a facing change or FSB-full flushes, varyings are already
+  per-fragment so merging is exact (rast case 14 pixel-identical, mixed facing still splits).
+  **Evidence:** shwave **404 / 73,471** (incl. `fs_tex_bias`, `fs_tex_array`), cmdexec **10 /
+  50** (case 9 faulted dispatch → second CB runs, fence signals, fault reg = 1; case 10
+  watchdog → FATAL/dead), rast 15 / 15,472, vnfront 47 / 343, vnpump 87 / 263, vgsys 98 PASS
+  lines incl. `ue_cpos_maxconc_1` 179 / 53,290, vgtop 77+77 sessions, sys-venus 30 sessions +
+  5 arms `cfail=0` (built at `make -j2` after two OOM kills of the `-j nproc` build on the
+  15 GB box; identical session list run manually), 5.008 lint clean, `gen_vn_tables.py`
+  byte-identical. **Guest (`out-a12r`): 5/5 Pass, faults=0** — `sampler2d_bias_fixed/float`,
+  both array-bias cases, and `sampler2darray_fixed_fragment` (its earlier `code=01` wave
+  fault is gone with the array/Bias decode; `faults=0` confirms it is absent, not masked).
+  `sampler2d_fixed_vertex` (16 928 prims) still exceeds the watchdog: 46.1 M cycles, 1 444
+  waves all `code=00`, `faults=0 dead=0` → classified **harness patience / vertex-texture
+  throughput**, the Aggregation D item (`.cache/cts/runs/a1-2026-10-16/NOTES.md`). Ledger
+  re-rendered with `g3aii-2026-10-15-*`, `g3bi-2026-10-16`, `a1-2026-10-16`: **193 run — 146
+  pass / 18 NotSupported / 26 fail / 2 crash / 1 timeout**, 29 open defects (20 = the 1D/3D
+  image class, the texture-vertex patience, `max_concurrent.sampler` 317 s harness timeout,
+  the precision budget, the 1.1 multiview feature, `device_properties` limits, the two unrun
+  smoke cases). Owed: deqp-vk/profile hashes in the newer run records (rendered empty).
 - [ ] **CTS track (2026-10-14) — the Khronos Vulkan CTS becomes the acceptance oracle.**
   Source of record `specs/VK-GL-CTS` (lazy, shallow, `update = none`) pinned to
   `vulkan-cts-1.4.6.2` = `f6a29701220f34dd1407513bfe80d74ca7b392ce`; must-pass index

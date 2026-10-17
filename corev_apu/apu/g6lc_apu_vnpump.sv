@@ -158,6 +158,13 @@ module g6lc_apu_vnpump
   // ring's FATAL/idle status or head publish
   input  logic               ctx_kill_valid_i,
   input  logic [7:0]         ctx_kill_id_i,
+  // §7b exception contract (2026-10-16): device loss from cmdexec's
+  // work watchdog — the context's rings go FATAL *with* a status
+  // write (the blob is still mapped, so the guest's ring watchdog
+  // observes it) and in-flight streams/parks of the ctx are demoted
+  // like a CTX_DESTROY
+  input  logic               devlost_valid_i,
+  input  logic [7:0]         devlost_ctx_i,
   // observability
   output logic            busy_o,
   output logic [Rings-1:0]       ring_active_o,
@@ -220,6 +227,7 @@ module g6lc_apu_vnpump
                     ex_submit_ready_i | (|ex_done_seq_i) |
                     (|ex_fence_signaled_i) | (|ex_fence_lost_i) |
                     ctx_kill_valid_i | (|ctx_kill_id_i) |
+                    devlost_valid_i | (|devlost_ctx_i) |
                     (|xs_desc_i[0]) | (|xs_desc_i[1]) |
                     (|xs_desc_i[2]) | (|xs_desc_i[3]);
   end else begin : gen_on
@@ -532,29 +540,47 @@ module g6lc_apu_vnpump
     localparam int unsigned AliveTick = 1 << AliveTickLog2;
     logic [AliveTickLog2-1:0] alive_tk_q;
     logic [Rings-1:0] alive_pend_q;
+    // §7b exception contract: one-shot FATAL status writes queued by
+    // the cmdexec watchdog's device-loss pulse — they take precedence
+    // over the ALIVE refresh so the guest's ring watchdog sees the
+    // fault on the earliest possible read
+    logic [Rings-1:0] fatal_pend_q;
     logic [RIdxW-1:0] bg_idx_q;
     logic             bg_we;
+    logic             bg_fatal;
     logic [RIdxW-1:0] bg_idx;
     logic [APU_VG_AP_WORD_W-1:0] bg_addr;
     logic [31:0]      bg_data;
     wire bg_done = mp_rvalid_i && rsp_owner_q == OW_BWR;
     always_comb begin
-      bg_we   = 1'b0;
-      bg_idx  = '0;
-      bg_addr = '0;
-      // descending iteration leaves the lowest pending index selected
-      for (int i = Rings - 1; i >= 0; i--)
-        if (alive_pend_q[i] && ring_q[i].live && !ring_q[i].fatal &&
+      bg_we    = 1'b0;
+      bg_fatal = 1'b0;
+      bg_idx   = '0;
+      bg_addr  = '0;
+      // descending iteration leaves the lowest pending index selected;
+      // a pending FATAL write wins over an ALIVE refresh
+      for (int i = Rings - 1; i >= 0; i--) begin
+        if (fatal_pend_q[i] && ring_q[i].live &&
             !(ctx_kill_valid_i && ring_q[i].ctx == ctx_kill_id_i)) begin
+          bg_we    = 1'b1;
+          bg_fatal = 1'b1;
+          bg_idx   = RIdxW'(i);
+          bg_addr  = ring_q[i].status_w;
+        end else if (alive_pend_q[i] && ring_q[i].live &&
+                     !ring_q[i].fatal &&
+                     !(ctx_kill_valid_i &&
+                       ring_q[i].ctx == ctx_kill_id_i)) begin
           bg_we   = 1'b1;
           bg_idx  = RIdxW'(i);
           bg_addr = ring_q[i].status_w;
         end
-      // never drop a published IDLE bit: a cleared IDLE makes the
-      // guest skip the NotifyRing the poll backoff relies on
+      end
+      // never drop a published IDLE or FATAL bit: a cleared IDLE makes
+      // the guest skip the NotifyRing the poll backoff relies on
       bg_data = APU_VNRING_ALIVE |
+                (bg_we && bg_fatal ? APU_VNRING_FATAL : 32'h0) |
                 (bg_we && ring_q[bg_idx].idle ? APU_VNRING_IDLE
-                                             : 32'h0);
+                                              : 32'h0);
     end
     always_comb begin
       src         = OW_NONE;
@@ -770,6 +796,7 @@ module g6lc_apu_vnpump
         rsp_owner_q <= OW_NONE; rsp_hi_q <= 1'b0;
         dec_start_q <= 1'b0; fr_start_q <= 1'b0;
         alive_tk_q <= '0; alive_pend_q <= '0; bg_idx_q <= '0;
+        fatal_pend_q <= '0;
       end else begin
         dec_start_q <= 1'b0;
         fr_start_q <= 1'b0;
@@ -795,7 +822,39 @@ module g6lc_apu_vnpump
         end
         for (int i = 0; i < Rings; i++)
           if (!ring_q[i].live) alive_pend_q[i] <= 1'b0;
-        if (bg_done) alive_pend_q[bg_idx_q] <= 1'b0;
+        for (int i = 0; i < Rings; i++)
+          if (!ring_q[i].live) fatal_pend_q[i] <= 1'b0;
+        if (bg_done) begin
+          alive_pend_q[bg_idx_q] <= 1'b0;
+          fatal_pend_q[bg_idx_q] <= 1'b0;
+        end
+
+        // §7b exception contract device loss: cmdexec's watchdog found
+        // an engine that never returned — mark the context's rings
+        // FATAL *and* publish the status (the aperture blob is still
+        // mapped, unlike ctx_kill).  Streams and parked waits of the
+        // ctx demote exactly like CTX_DESTROY so nothing ever writes
+        // their heads again; the executor is already dead, so the
+        // rings drain.
+        if (devlost_valid_i) begin
+          for (int i = 0; i < Rings; i++)
+            if (ring_q[i].live && ring_q[i].ctx == devlost_ctx_i &&
+                !ring_q[i].fatal) begin
+              ring_q[i].fatal    <= 1'b1;
+              fatal_pend_q[i]    <= 1'b1;
+            end
+          for (int i = 0; i < 2; i++)
+            if (st_q[i].live && st_q[i].ring_stream &&
+                st_q[i].ctx == devlost_ctx_i)
+              st_q[i].ring_stream <= 1'b0;
+          for (int i = 0; i < Rings; i++)
+            if (park_q[i].live &&
+                park_q[i].st0.ctx == devlost_ctx_i)
+              park_q[i].live <= 1'b0;
+          if (park_q[Rings].live &&
+              park_q[Rings].st0.ctx == devlost_ctx_i)
+            park_q[Rings].live <= 1'b0;
+        end
 
         // §12.3 5b-r2 CTX_DESTROY: retire every live ring of the dead
         // context with NO status write — the aperture window can be
@@ -1587,6 +1646,8 @@ module g6lc_apu_vnpump_fixture
   output logic [15:0]        ex_fence_fail_o,
   input  logic            ctx_kill_valid_i,
   input  logic [7:0]      ctx_kill_id_i,
+  input  logic            devlost_valid_i,
+  input  logic [7:0]      devlost_ctx_i,
   output logic            busy_o,
   output logic [Rings-1:0]       ring_active_o,
   output logic [Rings-1:0][31:0] ring_status_o,

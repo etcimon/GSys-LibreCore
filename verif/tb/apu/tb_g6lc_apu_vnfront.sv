@@ -255,6 +255,7 @@ module tb_g6lc_apu_vnfront;
     .done_seq_o(f_dseq),
     .fence_signaled_o(f_fsig), .fence_lost_o(f_flost),
     .fence_clr_i(f_fclr), .fence_fail_i(f_ffail), .xf_o(), .rd_o(),
+    .devlost_valid_o(), .devlost_ctx_o(), .dead_o(),
     .hold_i(1'b0), .idle_o(), .busy_o());
 
   // ---- shared backends with 4-master arbitration -----------------------

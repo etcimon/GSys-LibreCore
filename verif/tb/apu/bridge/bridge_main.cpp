@@ -528,15 +528,19 @@ static void update_state(const HS& h) {
   }
 }
 
+static uint64_t last_faults = 0;
+
 static void stats() {
   fprintf(stderr,
     "[bridge] cycles=%lu mmio_r=%lu mmio_w=%lu dma_rd=%lu(%lu B) "
-    "dma_wr=%lu(%lu B) irq=%lu oob=%lu\n",
+    "dma_wr=%lu(%lu B) irq=%lu oob=%lu faults=%lu dead=%u\n",
     (unsigned long)cycles, (unsigned long)st_mmio_r,
     (unsigned long)st_mmio_w, (unsigned long)st_dma_rd,
     (unsigned long)st_dma_rd_bytes, (unsigned long)st_dma_wr,
     (unsigned long)st_dma_wr_bytes, (unsigned long)st_irq,
-    (unsigned long)st_oob);
+    (unsigned long)st_oob,
+    (unsigned long)(top->dbg_faults_o & 0xffffffffULL),
+    (unsigned)((top->dbg_faults_o >> 32) & 1));
   if (dbg) {
     // wedge snapshot: ObjTab live count, {f_seen,rdone,vg_idle},
     // vgpages used, per-ring head + {live,fatal,idle} status, vnfront
@@ -689,6 +693,16 @@ int main(int argc, char** argv) {
     cycles++;
     update_state(h);
     top->clk_i = 0;
+    // §7b exception contract: edge-triggered per-context execution
+    // fault count — a guest harness greps the last device_faults line
+    // after a CTS list instead of waiting for the stats() cadence
+    uint64_t flt = top->dbg_faults_o;
+    if (flt != last_faults) {
+      fprintf(stderr, "[dbg] device_faults=%lu dead=%u cyc=%lu\n",
+              (unsigned long)(flt & 0xffffffffULL),
+              (unsigned)((flt >> 32) & 1), (unsigned long)cycles);
+      last_faults = flt;
+    }
     if (bench && cycles - bench_start >= bench) break;
     if (maxcyc && cycles >= maxcyc) break;
     if ((do_stats || dbg) && (cycles & stats_mask) == 0) stats();

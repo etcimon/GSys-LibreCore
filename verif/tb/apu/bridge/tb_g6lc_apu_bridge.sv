@@ -69,7 +69,11 @@ module tb_g6lc_apu_bridge
   // debug tap page: sel -> 64-bit readback (server overlay; see
   // bridge_main.cpp for the map).  All zeros under VenusOff.
   input  logic [7:0]  dbg_sel_i,
-  output logic [63:0] dbg_rdata_o
+  output logic [63:0] dbg_rdata_o,
+  // §7b exception contract: {dead, pad, fault aggregate} — the bridge
+  // prints an edge-triggered device_faults line when it changes so a
+  // guest run record can carry the count even between stats() ticks
+  output logic [63:0] dbg_faults_o
 );
 
   function automatic config_pkg::cva6_cfg_t venus_core();
@@ -209,7 +213,11 @@ module tb_g6lc_apu_bridge
     .ApuCfg(Cfg), .CoreCfg(venus_core()),
     // 4096-cycle ALIVE heartbeat (~2.7 s wall at the ~1.5 kHz bridge
     // sim rate) so the Mesa ring watchdog sees refreshes
-    .AliveTickLog2(12)
+    .AliveTickLog2(12),
+    // §7b exception contract: work-item watchdog — 4 Mi cycles is far
+    // above any legitimate wave at sim rate yet still catches an
+    // engine that never returns inside a guest session
+    .WorkBudgetLog2(22)
   ) i_dut (
     .clk_i, .rst_ni, .testmode_i(1'b1),
     .guest_req_i(g_req), .guest_rsp_o(g_rsp),
@@ -290,6 +298,20 @@ module tb_g6lc_apu_bridge
                          .i_objmem.gen_on.ot_q;
     wire [3:0]  om_opq = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
                          .i_objmem.gen_on.op_q;
+    // §7b exception contract: cmdexec per-context sticky fault
+    // registers + watchdog dead flag (sel 67 = {dead, fault count},
+    // sel 68+i = ctx i's {count,work_id[7:0],code,pc,wave} word)
+    wire [31:0][63:0] ex_fault = i_dut.gen_venus.i_vgsys.gen_on.i_top
+                                 .gen_on.i_exec.gen_on.fault_q;
+    wire        ex_dead  = i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
+                           .i_exec.gen_on.dead_q;
+    logic [31:0] fault_agg;
+    always_comb begin
+      fault_agg = '0;
+      for (int i = 0; i < 32; i++)
+        fault_agg = fault_agg + 32'(ex_fault[i][63:48]);
+    end
+    assign dbg_faults_o = {31'h0, ex_dead, fault_agg};
     wire [4:0]  om_mpf = {i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
                           .i_objmem.gen_on.mp_busy_q,
                           i_dut.gen_venus.i_vgsys.gen_on.i_top.gen_on
@@ -819,6 +841,9 @@ module tb_g6lc_apu_bridge
         8'd65:   dbg_rdata_o = {16'h0, fr_otop, tab_wrec, tab_walk};
         // sel66: vnfront pending otr id[63:0]
         8'd66:   dbg_rdata_o = fr_oid;
+        // sel67: §7b fault contract — {dead flag, aggregate
+        //        execution-fault count across contexts}
+        8'd67:   dbg_rdata_o = {31'h0, ex_dead, fault_agg};
         default: begin
           if (dbg_sel_i >= 8'd16 && dbg_sel_i < 8'd20)
             dbg_rdata_o = 64'(r_head[dbg_sel_i[1:0]]);
@@ -826,6 +851,9 @@ module tb_g6lc_apu_bridge
             dbg_rdata_o = 64'(r_status[dbg_sel_i[1:0]]);
           else if (dbg_sel_i >= 8'd24 && dbg_sel_i < 8'd28)
             dbg_rdata_o = 64'(r_extra[dbg_sel_i[1:0]]);
+          else if (dbg_sel_i >= 8'd68 && dbg_sel_i < 8'd100)
+            // sel 68+i: context i's sticky fault word
+            dbg_rdata_o = ex_fault[dbg_sel_i - 8'd68];
           else dbg_rdata_o = '0;
         end
       endcase
@@ -834,6 +862,7 @@ module tb_g6lc_apu_bridge
     assign f_seen_q = 1'b0;
     assign f_id_q   = '0;
     assign f_ring_q = '0;
+    assign dbg_faults_o = '0;
     always_comb dbg_rdata_o = dbg_sel_i == 8'd0
                                 ? 64'h600D_B21D_0000_0001 : '0;
   end

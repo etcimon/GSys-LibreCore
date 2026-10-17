@@ -48,6 +48,8 @@ module g6lc_apu_vgsys
   parameter int unsigned Fences = 16,
   // ring ALIVE watchdog refresh period: 2**AliveTickLog2 cycles
   parameter int unsigned AliveTickLog2 = 20,
+  // §7b exception contract: cmdexec work watchdog — see g6lc_apu_cmdexec
+  parameter int unsigned WorkBudgetLog2 = 30,
   parameter int unsigned CrPayWords    = 1024,
   // §5a G3b-i objmem carve geometry, passed through
   parameter int unsigned ObjEntries    = 65536,
@@ -311,7 +313,8 @@ module g6lc_apu_vgsys
          mp_rsp[APU_MP_CTL]};
     g6lc_apu_vgtop #(
       .Enable(1'b1), .Rings(Rings), .Fences(Fences),
-      .AliveTickLog2(AliveTickLog2), .CrPayWords(CrPayWords),
+      .AliveTickLog2(AliveTickLog2), .WorkBudgetLog2(WorkBudgetLog2),
+      .CrPayWords(CrPayWords),
       .ObjEntries(ObjEntries), .ObjMaxCtx(ObjMaxCtx),
       .PayMemBytes(PayMemBytes), .DirCacheSets(DirCacheSets),
       .EntCacheLines(EntCacheLines), .PayCacheLines(PayCacheLines),
@@ -422,6 +425,8 @@ module g6lc_apu_vgsys_fixture
   parameter int unsigned Fences = 16,
   // ring ALIVE watchdog refresh period: 2**AliveTickLog2 cycles
   parameter int unsigned AliveTickLog2 = 20,
+  // §7b exception contract: cmdexec work watchdog — see g6lc_apu_cmdexec
+  parameter int unsigned WorkBudgetLog2 = 30,
   parameter int unsigned CrPayWords    = 1024,
   parameter int unsigned ObjEntries    = 65536,
   parameter int unsigned ObjMaxCtx     = 32,
@@ -491,7 +496,8 @@ module g6lc_apu_vgsys_fixture
 );
   g6lc_apu_vgsys #(
     .Enable(Enable), .Rings(Rings), .Fences(Fences),
-    .AliveTickLog2(AliveTickLog2), .CrPayWords(CrPayWords),
+    .AliveTickLog2(AliveTickLog2), .WorkBudgetLog2(WorkBudgetLog2),
+    .CrPayWords(CrPayWords),
     .ObjEntries(ObjEntries), .ObjMaxCtx(ObjMaxCtx),
     .PayMemBytes(PayMemBytes), .DirCacheSets(DirCacheSets),
     .EntCacheLines(EntCacheLines), .PayCacheLines(PayCacheLines),

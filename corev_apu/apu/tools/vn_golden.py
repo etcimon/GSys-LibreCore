@@ -2895,19 +2895,25 @@ class FrontModel:
             elif ct == T.get('vkCmdBindIndexBuffer', -1):
                 ib = r['handle'][0]
             elif ct == T.get('vkCmdDispatchIndirect', -1):
-                # issues on the work port -> shcore UNSUPPORTED -> lost
-                return True
+                # issues on the work port -> shcore UNSUPPORTED.
+                # §7b exception contract: an engine-completion fault —
+                # the work item retires with undefined results, the
+                # sticky fault register counts it, and the submission
+                # continues (fence signals, reply stays VK_SUCCESS)
+                pass
             elif ct in (T['vkCmdCopyBuffer'], T['vkCmdFillBuffer'],
                         T['vkCmdUpdateBuffer'],
                         T['vkCmdCopyBufferToImage'],
                         T['vkCmdCopyImageToBuffer'],
                         T['vkCmdCopyImage'],
                         T['vkCmdClearColorImage']):
-                # §12.3 C/5a + C/5b: Xfer operand resolution +
-                # validation — unbound/OOB/overlap/misalignment refuse
-                # the record (FAULT) -> DEVICE_LOST on the fence
-                if self._xfer_record_lost(session, r, aux):
-                    return True
+                # §12.3 C/5a + C/5b: Xfer operand validation runs in
+                # the engine — unbound/OOB/overlap/misalignment refuse
+                # the record -> DONE_FAULT on the work port.  §7b
+                # exception contract: execution-time, not submission-
+                # losing — the record's writes are suppressed and the
+                # remaining records/buffers continue
+                self._xfer_record_lost(session, r, aux)
         self.aux_work[aux] = wk
         return False
 

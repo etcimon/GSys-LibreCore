@@ -1474,29 +1474,38 @@ module tb_g6lc_apu_vgsys
 
   // WorkSink=0 (the §6c-ii SoC seam): i_ws0 owns the queues and the
   // AXI slave.  A session whose submit carries a non-dispatch record
-  // gets refused UNSUPPORTED one cycle after accept -> cmdexec marks
-  // the submission DEVICE_LOST (flost_q plus the 0xFFFF_FFFC vk
-  // result visible in the guest response), the chain still publishes,
-  // nothing hangs, and the following session passes.
+  // gets refused UNSUPPORTED one cycle after accept — an
+  // execution-time fault under §7b: the submission completes, the
+  // fence signals (not lost), the sticky fault register counts it,
+  // the chain still publishes, and the following session passes.
   task automatic neg_worksink0();
     int unsigned pubs0;
     pubs0 = u_count;
     // worksink variant: the submit's CB records a vkCmdDispatchIndirect
     // — a non-dispatch CLS_WORK record the WorkSink=0 backend refuses.
-    // The tape's own expectations are truthful: the wait-class replies
-    // expect the 0xFFFF_FFC DEVICE_LOST result (CK_REPLY).
+    // §7b exception contract: an engine-completion fault (UNSUPPORTED)
+    // is execution-time — the submission completes, the fence signals
+    // (not lost), and the sticky fault register records the event.
     $readmemh("vn_vectors/ue_ws0_bufcopy_1.hex", tape, 0);
     $readmemh("vn_vectors/ue_ws0_bufcopy_1.exp", expm, 0);
     tp = 0; ep = 0;
     play_tape();
     repeat (200) @(posedge clk);
     check(u_count > pubs0, "worksink0: chains still publish");
-    check(|i_ws0.gen_on.i_top.gen_on.i_exec.gen_on.flost_q,
-          "worksink0: cmdexec fence lost (DEVICE_LOST)");
+    check(~|i_ws0.gen_on.i_top.gen_on.i_exec.gen_on.flost_q,
+          "worksink0: fence signals, not lost (execution fault)");
+    begin
+      // the session's context id is the tape's, not 0 — aggregate the
+      // per-context fault counts
+      int unsigned fc = 0;
+      for (int c = 0; c < 32; c++)
+        fc += i_ws0.gen_on.i_top.gen_on.i_exec.gen_on.fault_q[c][63:48];
+      check(fc != 0, "worksink0: sticky fault register recorded the fault");
+    end
     check_axi_bal();
-    // next session passes: after DEVICE_LOST the driver reinitialises
-    // — a backend reset clears the fence-lost state (it is in the
-    // engine reset domain), then a fresh transport session replays.
+    // next session passes: a backend reset clears the fault/fence
+    // state (it is in the engine reset domain), then a fresh
+    // transport session replays.
     rreq = 1'b1;
     begin
       int unsigned tr = 0;

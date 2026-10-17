@@ -455,6 +455,64 @@ SEGMENT CTS-0/api
                   in CTS-1, not yet observed post-fix.
   NEXT ARTIFACT   ledger row `api` re-rendered from a post-fix run; G3b-i (§5a
                   implementation decisions) for the device-count abort.
+
+SEGMENT §7b/api — submission exception contract
+  QUESTION        What does the device owe Mesa when a submission faults mid-flight,
+                  and what does stock Mesa 25.2.8 actually do with each failure class?
+  OBJECTIVE       A documented, vector-checked contract for execution-time faults,
+                  submit-time rejections, and true device loss (ring FATAL) — the
+                  difference between a Pass-with-fault, a DEVICE_LOST wait, and a
+                  guest abort.
+  ENVELOPE        as cts-info.md; sources of record: Mesa 25.2.8 `vn_queue.c` /
+                  `vn_feedback.c` / `vn_ring.c`.
+  INPUTS          `specs/architecture/venus-fence-contract.md` (the Mesa reading);
+                  vectors `ue_cneg_xfer_{oob,overlap,img_oob}_1`,
+                  `ue_cneg_clear_oob_1`, `ue_ws0_bufcopy_1` (vgtop + vgsys); cmdexec
+                  TB fault-then-second-CB and watchdog-expiry cases; guest runs
+                  `g3aii-2026-10-15-*` and `g3bi-2026-10-16`.
+  CONTRACT        Execution-time faults (engine `DONE_*` non-OK) retire the work item
+                  with undefined results and never lose the submission — remaining
+                  records and command buffers continue, Mesa's appended feedback CB
+                  lands, the fence signals, `vkQueueSubmit` stays `VK_SUCCESS`; the
+                  per-context sticky fault register (count + last {engine, code,
+                  pc/wave}) feeds `device_faults` in every run record and the
+                  ledger's `pass-w-fault` column. Submit-time rejections keep the
+                  DEVICE_LOST path but terminate the wait: vnfront pulses
+                  `ex_fence_fail_o`, cmdexec marks the fence signaled+lost, the guest
+                  poll returns `VK_ERROR_DEVICE_LOST`. True device loss is the
+                  per-work-item watchdog (`WorkBudgetLog2`): drain, ring FATAL,
+                  context dead until `CTX_DESTROY`.
+  OBSERVATIONS    Mesa `vnQueueSubmit` is asynchronous — a faulted draw cannot change
+                  its reply; a dropped submission would hang `vn_WaitForFences` (the
+                  feedback slot is only written by Mesa's own appended CB), so a
+                  whole-submit rejection must fail the fence explicitly.
+                  Vectors (post-contract tree, 5.020): cmdexec TB case 9 (faulted
+                  dispatch → second CB executes, fence signals, sticky count=1) and
+                  case 10 (forced watchdog → drain + `devlost` → ring FATAL);
+                  `tb_g6lc_apu_vgtop` 77 sessions ×2 gate steps + small-geometry
+                  arms green on regenerated `ue_cneg_*` expectations;
+                  `tb_g6lc_apu_vgsys`/`tb_g6lc_apu_sys_venus` `worksink0` arms
+                  (`DispatchIndirect WorkSink=0` = exec-time UNSUPPORTED) green.
+                  `g3bi-2026-10-16` (cts1-objmgmt r4, 131 cases): 106 Pass / 20 Fail
+                  / 4 NotSupported, no abort — Fails are the honest
+                  `vkCreateImage → VK_ERROR_FEATURE_NOT_PRESENT` profile gaps
+                  (`maxImageDimension1D = 0` class).
+  RESULT          (2026-10-16) The contract is implemented and vector-checked:
+                  engine faults continue the submission (fence signals, not lost);
+                  the golden model's `_xfer_record_lost` was reclassified from
+                  submit-loss to engine-fault for operand-bound violations, and the
+                  `ue_cneg_*` vectors regenerated. `SHDONE code=01` in the
+                  `sampler2darray_fixed_fragment` log is `APU_SH_DONE_FAULT` (the
+                  `sh_done_pl`/`work_done_pl` namespace: 0=OK 1=FAULT 2=UNSUPPORTED
+                  3=BUDGET), *not* the module-scan `APU_SH_FAULT_MAGIC` — a runtime
+                  wave fault, which the sticky register's pc/wave payload localizes
+                  on rerun. The guest-side discriminator stands: the case must now
+                  produce Pass/Fail, never abort.
+  LIMITS          `device_faults` is only emitted by bridge builds carrying the
+                  diagnostic (`tb_g6lc_apu_bridge.sv` edge lines); pre-contract runs
+                  record `-1`.
+  NEXT ARTIFACT   `sampler2darray_fixed_fragment` guest verdict (run `out-a12`);
+                  per-test fault attribution if the register grows a record FIFO.
 ```
 
 ## Performance / area / scalability

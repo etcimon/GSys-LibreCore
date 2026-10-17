@@ -133,6 +133,12 @@ module tb_g6lc_apu_rast;
                                  // 1=checkerboard discard, 2=FragDepth
   logic [31:0] sh_f8z = '0;      // FragDepth value for mode 2
   bit          dbg_f8 = 1'b0;
+  // A1.3: FS batch observability — count batches and accumulate the
+  // per-batch FrontFacing bits (imm[3].0) the DUT emits
+  int          fs_batches = 0;
+  logic [1:0]  fs_frontm  = '0;
+  logic [31:0] fbsnap [1024];     // case-14 baseline framebuffer
+  int          nb_a = 0, nb_b = 0; // case-14 per-draw batch counts
 
   assign shr = shst == SH_IDLE;
   always_ff @(posedge clk or negedge rst_n) begin
@@ -148,6 +154,10 @@ module tb_g6lc_apu_rast;
             sh_imm_q <= shim;
             sh_n <= int'(shim[0]);
             sh_i <= 0;
+            if (shc == APU_SH_WORK_FS) begin
+              fs_batches <= fs_batches + 1;
+              fs_frontm  <= fs_frontm | (2'b01 << shim[3][0]);
+            end
             shst <= SH_RUN;
           end
         end
@@ -1399,6 +1409,100 @@ module tb_g6lc_apu_rast;
                              x, y, got));
           end
         end
+
+    // ============ case 14: FS batch merge (A1.3) ==============
+    // Two same-facing triangles in one draw must share FS batches
+    // (batch count drops vs. the separate-draw baseline) and render
+    // pixel-identically to that baseline (the pre-merge semantics);
+    // a mixed-facing pair must still split at the facing boundary
+    // with distinct imm[3].0 bits.
+    cases++;
+    // tri A = case-2 geometry (front, red/green/blue corners)
+    put_vert(0, 32'hBF600000, 32'hBF600000,
+                32'h3F800000, 32'h00000000, 32'h00000000, 32'h3F800000);
+    put_vert(1, 32'h3F400000, 32'hBF200000,
+                32'h00000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    put_vert(2, 32'hBF200000, 32'h3F600000,
+                32'h00000000, 32'h00000000, 32'h3F800000, 32'h3F800000);
+    // tri B same winding handedness (positive shoelace = front under
+    // front_ccw=0), cyan-ish, lower-right: ndc (0.125,0.125),
+    // (0.875,0.25), (0.25,0.875) -> px (18,18),(30,20),(20,30)
+    put_vert(3, 32'h3E000000, 32'h3E000000,
+                32'h00000000, 32'h3F800000, 32'h3F800000, 32'h3F800000);
+    put_vert(4, 32'h3F600000, 32'h3E800000,
+                32'h3F000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    put_vert(5, 32'h3E800000, 32'h3F600000,
+                32'h3F800000, 32'h3E800000, 32'h3E800000, 32'h3F800000);
+    // baseline: clear, then A and B as separate draws — every prim
+    // boundary flushes (pre-merge semantics)
+    d = mk_clear();
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    fs_batches = 0; fs_frontm = '0;
+    d = mk_draw();
+    d.vertex_count = 3;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case14 A code=%0d", w_dpl.code));
+    nb_a = fs_batches;
+    fs_batches = 0;
+    d.vb_base[0] = VB + 3 * 24;   // B alone
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case14 B code=%0d", w_dpl.code));
+    nb_b = fs_batches;
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++)
+        fbsnap[y * 32 + x] = fbpx(x, y);
+    // merged: one draw, vertex_count=6 — same-facing prims share
+    // batches, so the batch count drops below nb_a + nb_b (the two
+    // partial tails fold together)
+    d = mk_clear();
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    fs_batches = 0; fs_frontm = '0;
+    d = mk_draw();
+    d.vertex_count = 6;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case14 merged code=%0d", w_dpl.code));
+    checks++;
+    if (fs_batches >= nb_a + nb_b || fs_batches == 0)
+      fail($sformatf("case14 same-facing fs_batches=%0d exp < %0d",
+                     fs_batches, nb_a + nb_b));
+    checks++;
+    if (fs_frontm != 2'b10)
+      fail($sformatf("case14 merged fs_frontm=%b exp 10",
+                     fs_frontm));
+    for (int y = 0; y < 32; y++)
+      for (int x = 0; x < 32; x++) begin
+        checks++;
+        if (fbpx(x, y) != fbsnap[y * 32 + x])
+          fail($sformatf("case14 merged px(%0d,%0d)=%08x exp %08x",
+                         x, y, fbpx(x, y), fbsnap[y * 32 + x]));
+      end
+    // mixed-facing: B reversed winding (back face), cull off —
+    // must split into two batches with both FrontFacing bits seen
+    put_vert(4, 32'h3E800000, 32'h3F600000,
+                32'h3F000000, 32'h3F800000, 32'h00000000, 32'h3F800000);
+    put_vert(5, 32'h3F600000, 32'h3E800000,
+                32'h3F800000, 32'h3E800000, 32'h3E800000, 32'h3F800000);
+    d = mk_clear();
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT));
+    fs_batches = 0; fs_frontm = '0;
+    d = mk_draw();
+    d.vertex_count = 6; d.cull = 2'b00;
+    do_work(d, 32'(APU_VN_TYPE_VK_CMD_DRAW_EXT));
+    if (w_dpl.code != APU_SH_DONE_OK)
+      fail($sformatf("case14 mixed code=%0d", w_dpl.code));
+    checks++;
+    // no cross-facing merge: the batch count must be the same as
+    // two separate draws
+    if (fs_batches != nb_a + nb_b)
+      fail($sformatf("case14 mixed fs_batches=%0d exp %0d",
+                     fs_batches, nb_a + nb_b));
+    checks++;
+    if (fs_frontm != 2'b11)
+      fail($sformatf("case14 mixed fs_frontm=%b exp 11",
+                     fs_frontm));
 
     // ---- report ---------------------------------------------------------
     if (fails == 0)

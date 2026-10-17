@@ -269,6 +269,53 @@ module tb_g6lc_apu_shwave;
                    dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][3],
                  dut.gen_on.i_wave.gen_on.tx_iu_q,
                  dut.gen_on.i_wave.gen_on.tx_iv_q);
+      if (dut.gen_on.i_wave.gen_on.st_q == 8'd24)     // W_FU0
+        $display("FU0 cyc=%0d lane=%0d xop=%0d ja=%02x jb=%02x jca=%0d jcb=%0d opa=%08x opb=%08x opc=%08x txfa=%08x %08x",
+                 cyc,
+                 dut.gen_on.i_wave.gen_on.ls_lane_q,
+                 dut.gen_on.i_wave.gen_on.xop_q,
+                 dut.gen_on.i_wave.gen_on.ja_q,
+                 dut.gen_on.i_wave.gen_on.jb_q,
+                 dut.gen_on.i_wave.gen_on.jca_q,
+                 dut.gen_on.i_wave.gen_on.jcb_q,
+                 dut.gen_on.i_wave.gen_on.fma_ops[
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][0][0],
+                 dut.gen_on.i_wave.gen_on.fma_ops[
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][0][1],
+                 dut.gen_on.i_wave.gen_on.fma_ops[
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][0][2],
+                 dut.gen_on.i_wave.gen_on.txfa_q[0],
+                 dut.gen_on.i_wave.gen_on.txfa_q[1]);
+      if (dut.gen_on.i_wave.gen_on.st_q == 8'd25)     // W_FU1
+        $display("FU1 cyc=%0d lane=%0d act=%x ov=%x res=%08x rc=%08x dn=%x ret=%0d",
+                 cyc,
+                 dut.gen_on.i_wave.gen_on.ls_lane_q,
+                 dut.gen_on.i_wave.gen_on.fuact_q,
+                 dut.gen_on.i_wave.gen_on.fma_ov[
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]],
+                 dut.gen_on.i_wave.gen_on.fma_res[
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][0],
+                 dut.gen_on.i_wave.gen_on.fu_rc_q[
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][0],
+                 dut.gen_on.i_wave.gen_on.fu_dn_q[
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]],
+                 dut.gen_on.i_wave.gen_on.ret_q);
+      if (dut.gen_on.i_wave.gen_on.st_q == 8'd130 ||  // W_TXC0A
+          dut.gen_on.i_wave.gen_on.st_q == 8'd129 ||  // W_TXC0
+          dut.gen_on.i_wave.gen_on.st_q == 8'd133)    // W_TXC2
+        $display("TXB cyc=%0d st=%0d lane=%0d bsl=%0d msk=%02x lam=%08x va2=%08x txfa=%08x %08x t2=%08x",
+                 cyc, dut.gen_on.i_wave.gen_on.st_q,
+                 dut.gen_on.i_wave.gen_on.ls_lane_q,
+                 dut.gen_on.i_wave.gen_on.tx_bsl_q,
+                 dut.gen_on.i_wave.gen_on.tx_msk_q,
+                 dut.gen_on.i_wave.gen_on.t0_q[
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][0],
+                 dut.gen_on.i_wave.gen_on.va_q[2][
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][0],
+                 dut.gen_on.i_wave.gen_on.txfa_q[0],
+                 dut.gen_on.i_wave.gen_on.txfa_q[1],
+                 dut.gen_on.i_wave.gen_on.t2_q[
+                   dut.gen_on.i_wave.gen_on.ls_lane_q[2:0]][0]);
     end
   always_ff @(posedge clk)
     if (dbg_tx &&
@@ -1255,7 +1302,7 @@ module tb_g6lc_apu_shwave;
   endtask
 
   // G1a graphics wave work — no mut/bad/opt arms (single vector each)
-  string gfx_names [15] = '{"vs_passthru",
+  string gfx_names [17] = '{"vs_passthru",
                           // G3a-ii: vertex-stage ExplicitLod sample
                           "vs_texlod", "fs_color",
                           "fs_deriv", "fs_tex_implicit",
@@ -1268,7 +1315,10 @@ module tb_g6lc_apu_shwave;
                           // G3a-ii §7d: Dref implicit/explicit + PCF,
                           // Proj*, Gather/DrefGather, QueryLod
                           "fs_tex_shadow", "fs_tex_proj",
-                          "fs_tex_gather", "fs_tex_qlod"};
+                          "fs_tex_gather", "fs_tex_qlod",
+                          // G3a-ii CTS fixes: Bias image operand +
+                          // sampler2DArray implicit LOD
+                          "fs_tex_bias", "fs_tex_array"};
 
   // G3a-i runtime-fault arms — single vector, DONE_FAULT expected
   // (fn_deep's depth-10 chain overflows the CallDepth=8 stack)

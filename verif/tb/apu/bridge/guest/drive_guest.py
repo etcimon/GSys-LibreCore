@@ -625,15 +625,36 @@ def main():
                         "2>&1 | tail -25",
                         timeout=int(os.environ.get(
                             "G6LC_CTS_TIMEOUT", "14400")))
+                    # §7b exception contract: the bridge's sticky
+                    # device-fault count — edge-triggered lines in the
+                    # server log track every execution-time fault; the
+                    # last value is the post-list count and feeds the
+                    # run record's device_faults field (a Pass with
+                    # faults is a pass-with-fault, not a plain pass).
+                    server_log.flush()
+                    df = "?"
+                    try:
+                        server_log.close()
+                        with open(
+                                f"{args.out}/server-run-{mode}.log",
+                                "rb") as lf:
+                            lf.seek(0, os.SEEK_END)
+                            tail = lf.read(1 << 20)
+                        mm = re.findall(rb"device_faults=(\d+)", tail)
+                        df = mm[-1].decode() if mm else "0"
+                    except OSError:
+                        pass
+                    server_log = open(
+                        f"{args.out}/server-run-{mode}.log", "ab")
                     if rc is None:
                         # con.run timeout — possible wedge; leave rc
                         # visible, mark the guest run failed.
-                        print("G6LC_CTS_RUN cases=? rc=timeout",
-                              flush=True)
+                        print("G6LC_CTS_RUN cases=? rc=timeout "
+                              f"device_faults={df}", flush=True)
                         fail = True
                     else:
-                        print(f"G6LC_CTS_RUN cases={ctscases} rc={rc}",
-                              flush=True)
+                        print(f"G6LC_CTS_RUN cases={ctscases} rc={rc} "
+                              f"device_faults={df}", flush=True)
                         fail |= (rc != 0)
                     con.run(
                         "cd /root; "

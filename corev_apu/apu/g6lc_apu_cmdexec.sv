@@ -33,7 +33,15 @@ module g6lc_apu_cmdexec
   import g6lc_apu_rast_pkg::*;
 #(
   parameter bit          Enable = 1'b0,
-  parameter int unsigned Fences = 16
+  parameter int unsigned Fences = 16,
+  // §7b exception contract (2026-10-16): per-work-item watchdog — if
+  // 2**WorkBudgetLog2 cycles pass with work outstanding and neither a
+  // work issue nor a completion, an engine did not return: true
+  // device loss.  The default (~1 s at 1 GHz) sits far above any
+  // legal work item; verification fixtures override it.
+  parameter int unsigned WorkBudgetLog2 = 30,
+  // sticky execution-fault registers, one per context tag
+  parameter int unsigned FaultCtxs = 32
 ) (
   input  logic               clk_i,
   input  logic               rst_ni,
@@ -92,6 +100,12 @@ module g6lc_apu_cmdexec
   // idle_o deliberately does not consult fifo_n_q.
   input  logic               hold_i,
   output logic               idle_o,
+  // §7b exception contract (2026-10-16): watchdog device loss — a
+  // one-cycle pulse with the faulting submission's ctx tag; vnpump
+  // marks that context's rings FATAL.  dead_o is the sticky level.
+  output logic               devlost_valid_o,
+  output logic [7:0]         devlost_ctx_o,
+  output logic               dead_o,
   // drained indication: FSM idle, submit FIFO empty, no outstanding
   // work items (used by the vgsys idle_o / reset sequencer)
   output logic               busy_o
@@ -120,6 +134,9 @@ module g6lc_apu_cmdexec
     assign fence_signaled_o = '0;
     assign fence_lost_o    = '0;
     assign idle_o          = 1'b1;
+    assign devlost_valid_o = 1'b0;
+    assign devlost_ctx_o   = '0;
+    assign dead_o          = 1'b0;
     logic unused;
     assign unused = clk_i | rst_ni | testmode_i | submit_valid_i |
                     hold_i |
@@ -196,6 +213,18 @@ module g6lc_apu_cmdexec
     logic [7:0]          dsd_skip_q;    // dones owed to older works
     logic [15:0]         done_seq_q;
     logic [Fences-1:0]   fsig_q, flost_q;
+    // §7b exception contract (2026-10-16): sticky per-context
+    // execution-fault registers — {count, work_id[7:0], code, pc,
+    // wave}; the debug tap and the bridge stats() read them
+    // hierarchically.  Once a watchdog expiry declares the device
+    // dead every later submission is retired lost.
+    logic [FaultCtxs-1:0][63:0] fault_q;
+    logic [WorkBudgetLog2-1:0]  wb_cnt_q;
+    logic                dead_q;
+    logic                devlost_q;
+    logic [7:0]          devlost_ctx_q;
+    wire                 wd_fire = (&wb_cnt_q) && outst_q != 8'h0 &&
+                                   !dead_q;
     apu_cmdexec_state_t  snap_q;
     // §7b/5a-ii + §12.3 F5: dispatch assembly state
     logic [2:0]          ds_slot_q;     // resolved module slot
@@ -395,6 +424,9 @@ module g6lc_apu_cmdexec
     assign done_seq_o     = done_seq_q;
     assign fence_signaled_o = fsig_q;
     assign fence_lost_o   = flost_q;
+    assign devlost_valid_o = devlost_q;
+    assign devlost_ctx_o   = devlost_ctx_q;
+    assign dead_o         = dead_q;
     assign cr_cpl_ready_o = 1'b1;
     assign ot_cpl_ready_o = 1'b1;
     assign op_cpl_ready_o = 1'b1;
@@ -723,6 +755,11 @@ module g6lc_apu_cmdexec
         done_seq_q  <= '0;
         fsig_q      <= '0;
         flost_q     <= '0;
+        fault_q     <= '0;
+        wb_cnt_q    <= '0;
+        dead_q      <= 1'b0;
+        devlost_q   <= 1'b0;
+        devlost_ctx_q <= '0;
         snap_q      <= '0;
         ds_slot_q   <= '0;
         ds_set_q    <= '0;
@@ -777,12 +814,43 @@ module g6lc_apu_cmdexec
         pay_ib_q    <= 1'b0; pay_bc_q <= 1'b0; clr_ok_q <= 1'b0;
         pay_ret_q   <= StNextBuf;
       end else begin
-        // work completions retire outstanding items; a non-OK done
-        // code (§7b/5a-ii: FAULT/BUDGET/UNSUPPORTED from shcore)
-        // marks the submission lost
+        // work completions retire outstanding items.  A non-OK done
+        // code (FAULT/BUDGET/UNSUPPORTED) is an EXECUTION-TIME fault:
+        // the work item retires with undefined results, the
+        // submission continues through its remaining records and
+        // command buffers (Mesa's feedback write still lands and the
+        // fence signals normally), and the fault is recorded in the
+        // context's sticky fault register — it never loses the
+        // submission.  Submit-level failures set lost_q directly.
         if (work_done_i && outst_q != 8'h0) outst_q <= outst_q - 8'h1;
-        if (work_done_i && work_done_pl_i.code != 8'(APU_SH_DONE_OK))
-          lost_q <= 1'b1;
+        if (work_done_i &&
+            work_done_pl_i.code != 8'(APU_SH_DONE_OK) &&
+            cur_q.ctx < 8'(FaultCtxs))
+          fault_q[5'(cur_q.ctx)] <=
+              {fault_q[5'(cur_q.ctx)][63:48] == 16'hFFFF
+                   ? 16'hFFFF
+                   : fault_q[5'(cur_q.ctx)][63:48] + 16'h1,
+               work_done_pl_i.work_id[7:0], work_done_pl_i.code,
+               work_done_pl_i.pc, work_done_pl_i.wave};
+        // watchdog: a bounded stall between work issue/completion
+        // while items are outstanding is true device loss
+        if (outst_q == 8'h0 || (work_valid_o && work_ready_i) ||
+            work_done_i)
+          wb_cnt_q <= '0;
+        else if (!dead_q)
+          wb_cnt_q <= wb_cnt_q + WorkBudgetLog2'(1);
+        devlost_q <= 1'b0;
+        if (wd_fire) begin
+          // the engine never returned: drain — abandon the outstanding
+          // items, retire this submission lost, pulse devlost so
+          // vnpump marks the context's rings FATAL, and stay dead
+          // until the context is destroyed
+          dead_q        <= 1'b1;
+          lost_q        <= 1'b1;
+          outst_q       <= '0;
+          devlost_q     <= 1'b1;
+          devlost_ctx_q <= cur_q.ctx;
+        end
         // fence clear mask (vkResetFences)
         fsig_q  <= fsig_q & ~fence_clr_i;
         flost_q <= flost_q & ~fence_clr_i;
@@ -804,10 +872,18 @@ module g6lc_apu_cmdexec
           fifo_n_q    <= fifo_n_q + 3'd1;
         end
 
+        // watchdog expiry abandons the in-flight submission wherever
+        // the FSM is parked — the outstanding count is dropped above
+        // so StUnpReq → StFinalDrain → StDone retires the fence lost
+        if (wd_fire)
+          state_q <= StUnpReq;
+        else
         case (state_q)
           StIdle: begin
             // §12.3 3d-d: the relocation hold blocks dequeue — the
-            // queued submission starts once hold_i drops
+            // queued submission starts once hold_i drops.  On a dead
+            // device every submission retires immediately with the
+            // fence lost; the context is unusable until CTX_DESTROY.
             if (fifo_n_q != 3'd0 && !hold_i) begin
               cur_q       <= fifo_q[fifo_head_q[1:0]];
               fifo_head_q <= fifo_head_q + 3'd1;
@@ -815,9 +891,9 @@ module g6lc_apu_cmdexec
               pin_i_q     <= '0;
               buf_i_q     <= '0;
               pinned_q    <= '0;
-              lost_q      <= 1'b0;
-              state_q     <= fifo_q[fifo_head_q[1:0]].nbufs == 3'd0
-                             ? StDone : StPinReq;
+              lost_q      <= dead_q;
+              state_q     <= fifo_q[fifo_head_q[1:0]].nbufs == 3'd0 ||
+                             dead_q ? StDone : StPinReq;
             end
           end
 
@@ -1469,8 +1545,10 @@ module g6lc_apu_cmdexec
             if (dsd_skip_q != 8'h0)
               dsd_skip_q <= dsd_skip_q - 8'h1;
             else
-              state_q <= lost_q || work_done_pl_i.code !=
-                         8'(APU_SH_DONE_OK) ? StUnpReq : StNextBuf;
+              // §7b exception contract: a faulted work item retires
+              // (undefined results) and execution continues with the
+              // next record — only a submit-level failure aborts
+              state_q <= lost_q ? StUnpReq : StNextBuf;
           end
           StDrain: if (outst_q == 8'h0 ||
                        (outst_q == 8'h1 && work_done_i)) begin
@@ -2137,7 +2215,9 @@ module g6lc_apu_cmdexec_fixture
   import g6lc_apu_sh_pkg::*;
   import g6lc_apu_rast_pkg::*;
 #(parameter bit Enable = 1'b0,
-  parameter int unsigned Fences = 16) (
+  parameter int unsigned Fences = 16,
+  parameter int unsigned WorkBudgetLog2 = 30,
+  parameter int unsigned FaultCtxs = 32) (
   input  logic               clk_i,
   input  logic               rst_ni,
   input  logic               testmode_i,
@@ -2180,7 +2260,12 @@ module g6lc_apu_cmdexec_fixture
   output apu_rast_draw_t     rd_o,
   input  logic               hold_i,
   output logic               idle_o,
+  output logic               devlost_valid_o,
+  output logic [7:0]         devlost_ctx_o,
+  output logic               dead_o,
   output logic               busy_o
 );
-  g6lc_apu_cmdexec #(.Enable(Enable), .Fences(Fences)) i_dut (.*);
+  g6lc_apu_cmdexec #(.Enable(Enable), .Fences(Fences),
+                     .WorkBudgetLog2(WorkBudgetLog2),
+                     .FaultCtxs(FaultCtxs)) i_dut (.*);
 endmodule

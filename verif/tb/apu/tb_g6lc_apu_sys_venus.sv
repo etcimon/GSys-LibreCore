@@ -1362,11 +1362,11 @@ module tb_g6lc_apu_sys_venus;
   endtask
 
   // WorkSink=0 (the sys path): a session whose submit carries a
-  // non-dispatch record is refused UNSUPPORTED -> the fence reports
-  // DEVICE_LOST (flost_q and the 0xFFFF_FFFC vk result in the
-  // aperture replies, verified by the tape's CK_REPLYs), nothing
-  // hangs, and the next session passes after the driver-level
-  // reset + re-probe a lost device requires.
+  // non-dispatch record is refused UNSUPPORTED — an execution-time
+  // fault under §7b: the submission completes, the fence signals
+  // (flost_q stays clear, the CK_REPLYs expect VK_SUCCESS), the
+  // sticky fault register counts it, nothing hangs, and the next
+  // session passes after a driver-level reset + re-probe.
   task automatic arm_worksink0();
     int unsigned pubs0;
     vq_init();
@@ -1375,15 +1375,13 @@ module tb_g6lc_apu_sys_venus;
     pubs0 = pubs;
     // worksink variant: the submit's CB records a vkCmdDispatchIndirect
     // — a non-dispatch CLS_WORK record the WorkSink=0 backend refuses.
-    // The tape's own expectations are truthful: the wait-class replies
-    // expect the 0xFFFF_FFC DEVICE_LOST result.
     $readmemh("vn_vectors/ue_ws0_bufcopy_1.hex", tape, 0);
     $readmemh("vn_vectors/ue_ws0_bufcopy_1.exp", expm, 0);
     tp = 0; ep = 0;
     play_tape();
     repeat (200) @(posedge clk);
     check(pubs > pubs0, "worksink0: chains still publish");
-    check(ws0_lost, "worksink0: cmdexec fence lost (DEVICE_LOST)");
+    check(!ws0_lost, "worksink0: fence signals, not lost (exec fault)");
     check_axi_bal();
     // next session passes: after DEVICE_LOST a driver reinitialises
     // the device — STATUS<-0 (backend reset, clearing the fence-lost

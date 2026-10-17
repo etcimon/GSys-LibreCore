@@ -520,6 +520,13 @@ module g6lc_apu_rast
     logic         help_q;
     logic [15:0]  px_q, py_q;
     logic         front_q;                  // accepted prim's front bit
+    // A1.3 (2026-10-16): front bit of the fragments currently in the
+    // open FS batch — set when the first fragment of a fresh batch is
+    // recorded (S_F_LSET f_q==0).  Adjacent same-facing primitives
+    // merge into one batch; a facing change with the batch open
+    // flushes before the new primitive scans.  imm[3] carries this
+    // per-batch bit to the wave.
+    logic         bat_front_q;
     logic         vsw_q;                    // geom slots 1/2 swapped this prim
     // ---- G2b clip-space clipper state -----------------------------------
     // Clip planes (bit order): 0 near z>=0, 1 far z<=w, 2 w>=1e-5,
@@ -864,7 +871,7 @@ module g6lc_apu_rast
         bx0_q <= '0; bx1_q <= '0; by0_q <= '0; by1_q <= '0;
         sx_q <= '0; sy_q <= '0; p_q <= '0; f_q <= '0; nf_q <= '0;
         rs_q <= '0; fz_q <= '0; lc_q <= '0;
-        lz_q <= '0; lzdone_q <= 1'b0;
+        lz_q <= '0; lzdone_q <= 1'b0; bat_front_q <= 1'b0;
         for (int i = 0; i < FSB; i++) begin
           fsxy_q[i] <= '0; fs_help_q[i] <= 1'b0; fsz_q[i] <= '0;
         end
@@ -1996,7 +2003,18 @@ module g6lc_apu_rast
                 {vz_q[1], vz_q[2]}   <= {vz_q[2], vz_q[1]};
                 {vrw_q[1], vrw_q[2]} <= {vrw_q[2], vrw_q[1]};
               end
-              st_q <= S_PR_SHF;
+              // A1.3: same-facing primitives merge into the open FS
+              // batch; a facing change with fragments pending flushes
+              // first so the wave's per-batch FrontFacing bit stays
+              // uniform.  The flush runs the whole FS wave + ROP and
+              // resumes here (S_PR_SHF) — the prim's vertex/varying
+              // state is untouched by the flush.
+              if (f_q != 6'd0 && front_w != bat_front_q) begin
+                nf_q <= {1'b0, f_q}; f_q <= '0;
+                flr_q <= S_PR_SHF;
+                st_q <= S_FLUSH;
+              end else
+                st_q <= S_PR_SHF;
             end
           end
           S_PR_SHF: begin
@@ -2091,14 +2109,11 @@ module g6lc_apu_rast
               sx_q <= bx0_q & ~16'd1;
               if (sy_q >= by1_q) begin
                 t_pd();
-                // per-primitive flush keeps front_q constant inside
-                // each FS batch (imm[3] carries it to the wave)
-                if (f_q != 6'd0) begin
-                  nf_q <= {1'b0, f_q}; f_q <= '0;
-                  flr_q <= S_PR_I0;
-                  st_q <= S_FLUSH;
-                end else
-                  st_q <= S_PR_I0;
+                // A1.3: no per-primitive flush — same-facing
+                // primitives merge into the open batch; the batch
+                // closes on prim-stream end (S_PR_I0), a facing
+                // change (S_PR_AREA), or FSB full (S_F_LSET)
+                st_q <= S_PR_I0;
               end else
                 sy_q <= sy_q + 16'd2;
             end else if (blk_hit) begin
@@ -2340,6 +2355,10 @@ module g6lc_apu_rast
               fsxy_q[f_q]   <= {py_q, px_q};
               fs_help_q[f_q] <= help_q;
               fsz_q[f_q]    <= fz_q;
+              // A1.3: the first fragment of a fresh batch adopts the
+              // accepting primitive's facing — a mid-draw flush
+              // (facing change) keeps emitting the OLD batch's bit
+              if (f_q == 6'd0) bat_front_q <= front_q;
               lane_q <= lane_q + 2'd1;
               if ({1'b0, f_q} + 7'd1 == 7'(FSB)) begin
                 nf_q <= {1'b0, f_q} + 7'd1; f_q <= '0;
@@ -2424,10 +2443,10 @@ module g6lc_apu_rast
             sh_imm_o[0] <= {25'h0, nf_q};
             sh_imm_o[1] <= fsi_q;
             sh_imm_o[2] <= fso_q;
-            // imm[3].0 = the primitive's front-facing bit for the
-            // FrontFacing builtin; constant for the whole batch
-            // because the scan flushes at every primitive boundary
-            sh_imm_o[3] <= {31'h0, front_q}; sh_imm_o[4] <= '0;
+            // imm[3].0 = the batch's front-facing bit for the
+            // FrontFacing builtin; uniform because a facing change
+            // flushes the open batch before the new primitive scans
+            sh_imm_o[3] <= {31'h0, bat_front_q}; sh_imm_o[4] <= '0;
             // imm[5]/imm[6] = per-record helper-lane mask (bits
             // [223:160] of the dispatch payload — the wave engine
             // suppresses helper side effects: atomics, image writes,
