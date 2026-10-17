@@ -28,11 +28,13 @@ ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_srgb_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_sfu_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objtab_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_sh_pkg.sv
+// G3b-ii: shcore's residency FILL client imports the ObjPay types —
+// the package must precede g6lc_apu_shcore.sv here.
+${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objpay_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_shmod.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_shwave.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/g6lc_apu_shcore.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vg_pkg.sv
-${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objpay_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_cmdrec_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_cmdexec_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vnfront_pkg.sv

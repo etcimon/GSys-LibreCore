@@ -69,6 +69,16 @@ module g6lc_apu_cmdexec
   input  logic               op_cpl_valid_i,
   output logic               op_cpl_ready_o,
   input  apu_objpay_cpl_t    op_cpl_i,
+  // G3b-ii: ShaderCore residency-manager client — pipeline module
+  // handle -> slot resolve (LOOKUP / FILL) and slot pin release
+  // (UNPIN).  sm_req_o is level-held until sm_gnt_i; a completion
+  // pulses sm_cpl_i with sm_cpl_pl_i.  Shares the shcore manager
+  // port with vnfront through the vgtop arbiter.
+  output logic               sm_req_o,
+  output apu_sh_sm_req_t     sm_req_pl_o,
+  input  logic               sm_gnt_i,
+  input  logic               sm_cpl_i,
+  input  apu_sh_sm_cpl_t     sm_cpl_pl_i,
   output logic               work_valid_o,
   input  logic               work_ready_i,
   output apu_cmdexec_work_t  work_o,
@@ -122,6 +132,8 @@ module g6lc_apu_cmdexec
     assign op_req_valid_o  = 1'b0;
     assign op_req_o        = '0;
     assign op_cpl_ready_o  = 1'b0;
+    assign sm_req_o        = 1'b0;
+    assign sm_req_pl_o     = '0;
     assign work_valid_o    = 1'b0;
     assign work_o          = '0;
     assign xf_o            = '0;
@@ -154,6 +166,19 @@ module g6lc_apu_cmdexec
       StRdReq, StRdCpl, StResReq, StResCpl, StDispatch,
       StWork, StDrain, StUnpReq, StUnpCpl, StNextBuf,
       StBufDone, StFinalDrain, StCbRes, StCbResCpl, StDone,
+      // G3b-ii: shcore residency-manager client + module resolver —
+      // StSmReq/StSmCpl are the request subroutine (level-held req,
+      // gnt accept, cpl); StRsReq/..C resolve {handle,park} -> slot
+      // via LOOKUP, FILL on miss (pinning the slot for the record),
+      // execution-fault on a scan-faulting fill; StUnpD drains the
+      // completed-work pending-UNPIN queue (FILL-BUSY backoff and
+      // per-buffer hygiene); StPBR/StPBRC read one ObjPay word of a
+      // pipeline module-handle block
+      StSmReq, StSmCpl, StRsReq, StRsLookC, StRsFillC, StUnpD,
+      StPBR, StPBRC,
+      StDsModR0, StDsModR1, StDsModRC,
+      StDrModR0, StDrModR1, StDrModR2, StDrModR3,
+      StDrModRC0, StDrModRC1,
       StPayReq, StPayCpl,
       // §7b/5a-ii + §12.3 F5: dispatch assembly — pipeline -> pipeline
       // layout -> per bound set {layout compat, pool liveness, poison,
@@ -228,6 +253,47 @@ module g6lc_apu_cmdexec
     apu_cmdexec_state_t  snap_q;
     // §7b/5a-ii + §12.3 F5: dispatch assembly state
     logic [2:0]          ds_slot_q;     // resolved module slot
+    // G3b-ii: module-resolver operand ({handle, {chunk,words}} from
+    // the pipeline's ObjPay block), resolved slot, fill-fault flag,
+    // and subroutine returns; sm client request/completion holding
+    logic [31:0]         ds_mh_q;       // compute module handle
+    logic [31:0]         ds_mc_q;       // compute module {chunk,words}
+    logic [31:0]         rs_hnd_q, rs_cw_q;
+    logic [2:0]          rs_slot_q;
+    logic                rs_fault_q;
+    state_e              rs_ret_q;
+    apu_sh_sm_op_e       sm_op_q;
+    logic                sm_pin_q;
+    logic [2:0]          sm_slot_q;
+    logic [31:0]         sm_hnd_q;
+    logic [15:0]         sm_chk_q, sm_nw_q;
+    logic                sm_ok_q, sm_busy_q;
+    logic [2:0]          sm_rslot_q;
+    logic [7:0]          sm_flt_q;
+    state_e              sm_ret_q, unp_ret_q;
+    // pin bookkeeping: every issued work pushes the record's pin
+    // bundle {bvalid,bslot,avalid,aslot}; a work_done pops the oldest
+    // bundle into the pending-UNPIN ring, drained at FILL-BUSY backoff
+    // and per buffer end so residency pins track true in-flight work
+    localparam int unsigned PinQ = 16;  // ring depth caps the works in
+                                        // flight per drain window —
+                                        // issue stalls, never drops
+    logic [7:0]          rec_pin_q;
+    logic [15:0][7:0]    pinq_q;
+    logic [4:0]          pinq_h_q, pinq_t_q;
+    logic [4:0]          pinq_due_q;    // done-but-unpopped bundles
+    logic [15:0][7:0]    unpq_q;
+    logic [4:0]          unp_h_q, unp_t_q;
+    logic                unp_ph_q;      // drain: a-slot done phase
+    logic                unp_src_q;     // StUnpD drains rec_pin_q
+    wire                 pinq_full = (pinq_t_q - pinq_h_q) == 5'(PinQ);
+    wire                 unpq_full = (unp_t_q - unp_h_q) == 5'(PinQ);
+    // generic pipeline-block ObjPay read (module {handle,park} words)
+    logic [31:0]         pbr_addr_q;
+    logic [31:0]         pbr_data_q;
+    state_e              pbr_ret_q;
+    logic [31:0]         gp_mh_q [2];   // draw stage module handles
+    logic [31:0]         gp_mc_q [2];   // draw stage {chunk,words}
     logic [1:0]          ds_set_q;      // set index 0..3
     logic [15:0]         ds_pl_q;       // pipeline-layout slot
     logic [15:0]         ds_plg_q;      // pipeline-layout generation
@@ -483,9 +549,24 @@ module g6lc_apu_cmdexec
       ot_req_o       = '0;
       op_req_valid_o = 1'b0;
       op_req_o       = '0;
+      sm_req_o       = 1'b0;
+      sm_req_pl_o    = '0;
       work_valid_o   = 1'b0;
       work_o         = '0;
       case (state_q)
+        // G3b-ii: level-held sm client request until the arbiter
+        // grants; the payload rides smr_q's staged fields
+        StSmReq: begin
+          sm_req_o    = 1'b1;
+          sm_req_pl_o = '{op: sm_op_q, pin: sm_pin_q,
+                          slot: sm_slot_q, handle: sm_hnd_q,
+                          chunk: sm_chk_q, words: sm_nw_q};
+        end
+        StPBR: begin
+          op_req_valid_o = 1'b1;
+          op_req_o       = '{op: APU_OBJPAY_OP_READ,
+                             addr: pbr_addr_q, default: '0};
+        end
         StPinReq: begin
           ot_req_valid_o = 1'b1;
           ot_req_o       = '{op: APU_OBJTAB_OP_PIN,
@@ -600,7 +681,7 @@ module g6lc_apu_cmdexec
                              default: '0};
         end
         StDsIssue: begin
-          work_valid_o = 1'b1;
+          work_valid_o = !pinq_full;
           work_o       = '{ctype: rec_q.ctype, snap: snap_q, rec: rec_q};
         end
         StXfBufReq: begin
@@ -718,13 +799,13 @@ module g6lc_apu_cmdexec
         // the internal render-pass CLEAR rides the work port with the
         // CLEAR_ATTACHMENTS carrier so vgtop routes it to the raster
         StBrpIssue: begin
-          work_valid_o = 1'b1;
+          work_valid_o = !pinq_full;
           work_o       = '{ctype:
                               32'(APU_VN_TYPE_VK_CMD_CLEAR_ATTACHMENTS_EXT),
                           snap: snap_q, rec: rec_q};
         end
         StWork: begin
-          work_valid_o = 1'b1;
+          work_valid_o = !pinq_full;
           work_o       = '{ctype: rec_q.ctype, snap: snap_q, rec: rec_q};
         end
         default: ;
@@ -752,6 +833,38 @@ module g6lc_apu_cmdexec
         lost_q      <= 1'b0;
         outst_q     <= '0;
         dsd_skip_q  <= '0;
+        rec_pin_q   <= '0;
+        pinq_h_q    <= '0;
+        pinq_t_q    <= '0;
+        pinq_due_q  <= '0;
+        unp_h_q     <= '0;
+        unp_t_q     <= '0;
+        unp_ph_q    <= 1'b0;
+        unp_src_q   <= 1'b0;
+        ds_mh_q     <= '0;
+        ds_mc_q     <= '0;
+        rs_hnd_q    <= '0;
+        rs_cw_q     <= '0;
+        rs_slot_q   <= '0;
+        rs_fault_q  <= 1'b0;
+        rs_ret_q    <= StIdle;
+        sm_op_q     <= APU_SH_SM_LOOKUP;
+        sm_pin_q    <= 1'b0;
+        sm_slot_q   <= '0;
+        sm_hnd_q    <= '0;
+        sm_chk_q    <= '0;
+        sm_nw_q     <= '0;
+        sm_ok_q     <= 1'b0;
+        sm_busy_q   <= 1'b0;
+        sm_rslot_q  <= '0;
+        sm_flt_q    <= '0;
+        sm_ret_q    <= StIdle;
+        unp_ret_q   <= StIdle;
+        pbr_addr_q  <= '0;
+        pbr_data_q  <= '0;
+        pbr_ret_q   <= StIdle;
+        gp_mh_q     <= '{default: '0};
+        gp_mc_q     <= '{default: '0};
         done_seq_q  <= '0;
         fsig_q      <= '0;
         flost_q     <= '0;
@@ -823,6 +936,59 @@ module g6lc_apu_cmdexec
         // context's sticky fault register — it never loses the
         // submission.  Submit-level failures set lost_q directly.
         if (work_done_i && outst_q != 8'h0) outst_q <= outst_q - 8'h1;
+        // G3b-ii: residency-pin FIFO — every accepted work pushes the
+        // record's pin bundle {bv,bs[2:0],av,as[2:0]} (zero for
+        // pin-less records so the FIFO stays aligned with outst_q);
+        // a work_done pops the oldest bundle into the pending-UNPIN
+        // ring, which StUnpD drains (FILL-BUSY backoff + buffer end)
+        if (work_valid_o && work_ready_i) begin
+          pinq_q[pinq_t_q[3:0]] <= rec_pin_q;
+          pinq_t_q              <= pinq_t_q + 5'd1;
+          // the queue owns the bundle now — a record that faults after
+          // issue must not release it a second time
+          rec_pin_q             <= '0;
+        end
+        // a completion owes the oldest bundle a pop; the pop is
+        // level-triggered so a full UNPIN ring only defers it — a
+        // dropped bundle would pin a residency slot forever.  EVERY
+        // work completion owes a pop: dispatch/draw works wait in
+        // StDsDone and never count into outst_q, so gating on outst
+        // would orphan their bundles (a pinned slot forever).  The
+        // count never exceeds the pushed-but-unpopped entries, so a
+        // stray done after a watchdog clear cannot phantom-pop a stale
+        // bundle into the UNPIN ring.
+        pinq_due_q <= pinq_due_q +
+                      ((work_done_i &&
+                        (pinq_t_q - pinq_h_q) > pinq_due_q)
+                           ? 5'd1 : 5'd0) -
+                      ((pinq_due_q != 5'd0 &&
+                        (pinq_q[pinq_h_q[3:0]] == 8'h0 ||
+                         !unpq_full)) ? 5'd1 : 5'd0);
+        if (pinq_due_q != 5'd0 &&
+            (pinq_q[pinq_h_q[3:0]] == 8'h0 || !unpq_full)) begin
+          if (pinq_q[pinq_h_q[3:0]] != 8'h0) begin
+            unpq_q[unp_t_q[3:0]] <= pinq_q[pinq_h_q[3:0]];
+            unp_t_q              <= unp_t_q + 5'd1;
+          end
+          pinq_h_q <= pinq_h_q + 5'd1;
+        end
+// pragma translate_off
+`ifdef G6LC_APU_DBG_PINQ
+        if (work_valid_o && work_ready_i)
+          $display("[PQ] push rec_pin=%02x t=%0t", rec_pin_q, $time);
+        if (work_done_i)
+          $display("[PQ] done outst=%0d st=%0d due=%0d t=%0t",
+                   outst_q, state_q, pinq_due_q, $time);
+        if (pinq_due_q != 5'd0 &&
+            (pinq_q[pinq_h_q[3:0]] == 8'h0 || !unpq_full))
+          $display("[PQ] pop head=%02x unp=%0d/%0d t=%0t",
+                   pinq_q[pinq_h_q[3:0]], unp_h_q, unp_t_q, $time);
+        if (state_q == StUnpD)
+          $display("[PQ] unpd src=%0d rec=%02x unp=%0d/%0d due=%0d ret=%0d t=%0t",
+                   unp_src_q, rec_pin_q, unp_h_q, unp_t_q, pinq_due_q,
+                   unp_ret_q, $time);
+`endif
+// pragma translate_on
         if (work_done_i &&
             work_done_pl_i.code != 8'(APU_SH_DONE_OK) &&
             cur_q.ctx < 8'(FaultCtxs))
@@ -850,6 +1016,16 @@ module g6lc_apu_cmdexec
           outst_q       <= '0;
           devlost_q     <= 1'b1;
           devlost_ctx_q <= cur_q.ctx;
+          // abandon the pin bookkeeping too — the dead context's
+          // pinned slots are released by the CTX_DESTROY sweep
+          rec_pin_q  <= '0;
+          pinq_h_q   <= '0;
+          pinq_t_q   <= '0;
+          pinq_due_q <= '0;
+          unp_h_q    <= '0;
+          unp_t_q    <= '0;
+          unp_ph_q   <= 1'b0;
+          unp_src_q  <= 1'b0;
         end
         // fence clear mask (vkResetFences)
         fsig_q  <= fsig_q & ~fence_clr_i;
@@ -934,6 +1110,9 @@ module g6lc_apu_cmdexec
             end else begin
               rec_q   <= cr_cpl_i.rec;
               h_i_q   <= '0;
+              // G3b-ii: this record's issued works carry no residency
+              // pins until a module resolve deposits them
+              rec_pin_q <= '0;
               // G1c: clear the pay-walk mode selectors — the dispatch
               // case arms re-arm the one the record needs
               pay_push_q <= 1'b0;
@@ -1315,14 +1494,24 @@ module g6lc_apu_cmdexec
               default:                  state_q <= StNextBuf;
             endcase
           end
-          StWork: if (work_ready_i) begin
+          StWork: if (pinq_full && unpq_full) begin
+            // both pin rings saturated: drain the UNPIN ring to open
+            // room, then retry the issue — never drop a bundle
+            unp_ret_q <= StWork;
+            unp_ph_q  <= 1'b0;
+            state_q   <= StUnpD;
+          end else if (work_ready_i && !pinq_full) begin
             outst_q <= outst_q + 8'h1 -
                        ((work_done_i && outst_q != 8'h0) ? 8'h1 : 8'h0);
             state_q <= StNextBuf;
           end
 
           // ---- §7b/5a-ii + §12.3 F5: dispatch assembly ---------------
-          // pipeline -> {slot, pipeline-layout {slot,gen}}
+          // pipeline -> {ObjPay module block, pipeline-layout
+          // {slot,gen}}; G3b-ii: slots are a residency cache — the
+          // module {handle,park} words are read from the pipeline's
+          // ObjPay block (w0/1 compute, w44..47 graphics) and
+          // resolved through the shcore manager (LOOKUP/FILL)
           StDsPipeReq: if (ot_req_ready_i) state_q <= StDsPipeCpl;
           StDsPipeCpl: if (ot_cpl_valid_i) begin
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
@@ -1334,19 +1523,261 @@ module g6lc_apu_cmdexec
               lost_q  <= 1'b1;
               state_q <= StUnpReq;
             end else begin
-              ds_slot_q <= ot_cpl_i.entry.aux[2:0];
               ds_pl_q   <= ot_cpl_i.entry.aux[47:32];
               ds_plg_q  <= ot_cpl_i.entry.aux[63:48];
-              // G1c graphics pipe aux lo: {ObjPay base[31:16], ..,
-              // gfx[6], fs_slot[5:3], vs_slot[2:0]}
-              rd_q.vs_slot  <= ot_cpl_i.entry.aux[2:0];
-              rd_q.fs_slot  <= ot_cpl_i.entry.aux[5:3];
-              // §5a: parked payload base is a 64-word chunk index
-              rd_gpay_q     <= 32'(ot_cpl_i.entry.aux[31:16]) << 6;
-              dr_vbmask_q   <= '0;
-              dr_pi_q       <= '0;
-              desc_q    <= '0;
-              state_q   <= StDsLayReq;
+              // §5a: the ObjPay block base is a 64-word chunk index —
+              // compute parks {handle,park} at w0/1; graphics carries
+              // the state block there and the stage descriptors at
+              // w44..47
+              rd_gpay_q   <= 32'(ot_cpl_i.entry.aux[31:16]) << 6;
+              dr_vbmask_q <= '0;
+              dr_pi_q     <= '0;
+              desc_q      <= '0;
+              rs_fault_q  <= 1'b0;
+              pbr_addr_q  <= (32'(ot_cpl_i.entry.aux[31:16]) << 6) +
+                             (rec_is_draw ? 32'd44 : 32'd0);
+              pbr_ret_q   <= rec_is_draw ? StDrModR0 : StDsModR0;
+              state_q     <= StPBR;
+            end
+          end
+          // module-handle block reads: compute needs w0..1; a draw
+          // needs w44..47 ({VS handle,VS park,FS handle,FS park})
+          StDsModR0: begin
+            ds_mh_q    <= pbr_data_q;
+            pbr_addr_q <= pbr_addr_q + 32'd1;
+            pbr_ret_q  <= StDsModR1;
+            state_q    <= StPBR;
+          end
+          StDsModR1: begin
+            ds_mc_q   <= pbr_data_q;
+            rs_hnd_q  <= ds_mh_q;
+            rs_cw_q   <= pbr_data_q;
+            rs_ret_q  <= StDsModRC;
+            state_q   <= StRsReq;
+          end
+          StDsModRC: begin
+            if (rs_fault_q) begin
+              // execution-time fault: the dispatch retires undefined;
+              // the sticky register records it and the submission
+              // continues (§7b contract — the fence still signals)
+              if (cur_q.ctx < 8'(FaultCtxs))
+                fault_q[5'(cur_q.ctx)] <=
+                    {fault_q[5'(cur_q.ctx)][63:48] == 16'hFFFF
+                         ? 16'hFFFF
+                         : fault_q[5'(cur_q.ctx)][63:48] + 16'h1,
+                     rec_i_q, sm_flt_q, 16'h0, 16'h0};
+              if (rec_pin_q != 8'h0) begin
+                // no work was issued — the bundle never reached pinq;
+                // release the slot pins before the next record
+                unp_src_q <= 1'b1;
+                unp_ph_q  <= 1'b0;
+                unp_ret_q <= StNextBuf;
+                state_q   <= StUnpD;
+              end else begin
+                state_q <= StNextBuf;
+              end
+            end else begin
+              ds_slot_q         <= rs_slot_q;
+              rec_pin_q[3:0]    <= {1'b1, rs_slot_q};
+              state_q           <= StDsLayReq;
+            end
+          end
+          StDrModR0: begin
+            gp_mh_q[0] <= pbr_data_q;
+            pbr_addr_q <= pbr_addr_q + 32'd1;
+            pbr_ret_q  <= StDrModR1;
+            state_q    <= StPBR;
+          end
+          StDrModR1: begin
+            gp_mc_q[0] <= pbr_data_q;
+            pbr_addr_q <= pbr_addr_q + 32'd1;
+            pbr_ret_q  <= StDrModR2;
+            state_q    <= StPBR;
+          end
+          StDrModR2: begin
+            gp_mh_q[1] <= pbr_data_q;
+            pbr_addr_q <= pbr_addr_q + 32'd1;
+            pbr_ret_q  <= StDrModR3;
+            state_q    <= StPBR;
+          end
+          StDrModR3: begin
+            gp_mc_q[1] <= pbr_data_q;
+            rs_hnd_q   <= gp_mh_q[0];
+            rs_cw_q    <= gp_mc_q[0];
+            rs_ret_q   <= StDrModRC0;
+            state_q    <= StRsReq;
+          end
+          StDrModRC0: begin
+            if (rs_fault_q) begin
+              if (cur_q.ctx < 8'(FaultCtxs))
+                fault_q[5'(cur_q.ctx)] <=
+                    {fault_q[5'(cur_q.ctx)][63:48] == 16'hFFFF
+                         ? 16'hFFFF
+                         : fault_q[5'(cur_q.ctx)][63:48] + 16'h1,
+                     rec_i_q, sm_flt_q, 16'h0, 16'h0};
+              if (rec_pin_q != 8'h0) begin
+                // no work was issued — release the slot pins before
+                // the next record (the bundle never reached pinq)
+                unp_src_q <= 1'b1;
+                unp_ph_q  <= 1'b0;
+                unp_ret_q <= StNextBuf;
+                state_q   <= StUnpD;
+              end else begin
+                state_q <= StNextBuf;
+              end
+            end else begin
+              rd_q.vs_slot      <= rs_slot_q;
+              rec_pin_q[3:0]    <= {1'b1, rs_slot_q};
+              rs_hnd_q          <= gp_mh_q[1];
+              rs_cw_q           <= gp_mc_q[1];
+              rs_ret_q          <= StDrModRC1;
+              state_q           <= StRsReq;
+            end
+          end
+          StDrModRC1: begin
+            if (rs_fault_q) begin
+              if (cur_q.ctx < 8'(FaultCtxs))
+                fault_q[5'(cur_q.ctx)] <=
+                    {fault_q[5'(cur_q.ctx)][63:48] == 16'hFFFF
+                         ? 16'hFFFF
+                         : fault_q[5'(cur_q.ctx)][63:48] + 16'h1,
+                     rec_i_q, sm_flt_q, 16'h0, 16'h0};
+              if (rec_pin_q != 8'h0) begin
+                // the VS resolve already pinned its slot — release it;
+                // no work was issued so the bundle never reached pinq
+                unp_src_q <= 1'b1;
+                unp_ph_q  <= 1'b0;
+                unp_ret_q <= StNextBuf;
+                state_q   <= StUnpD;
+              end else begin
+                state_q <= StNextBuf;
+              end
+            end else begin
+              rd_q.fs_slot      <= rs_slot_q;
+              rec_pin_q[7:4]    <= {1'b1, rs_slot_q};
+              state_q           <= StDsLayReq;
+            end
+          end
+          // ---- G3b-ii: shcore residency-manager subroutine ---------
+          // StRsReq resolves {rs_hnd_q,rs_cw_q} -> rs_slot_q with the
+          // slot pinned for the record's work; a faulting FILL sets
+          // rs_fault_q and returns.  StSmReq/StSmCpl are the generic
+          // level-held request/completion arm.
+          StRsReq: begin
+            sm_op_q  <= APU_SH_SM_LOOKUP;
+            sm_pin_q <= 1'b1;
+            sm_hnd_q <= rs_hnd_q;
+            sm_ret_q <= StRsLookC;
+            state_q  <= StSmReq;
+          end
+          StRsLookC: begin
+            if (sm_ok_q) begin
+              rs_slot_q <= sm_rslot_q;
+              state_q   <= rs_ret_q;
+            end else if (sm_busy_q) begin
+              state_q <= StRsReq;             // defensive: retry
+            end else begin
+              // miss: FILL streams the module's parked pCode from
+              // ObjPay through the shmod scanner into an LRU slot
+              sm_op_q  <= APU_SH_SM_FILL;
+              sm_pin_q <= 1'b1;
+              sm_chk_q <= rs_cw_q[31:16];
+              sm_nw_q  <= rs_cw_q[15:0];
+              sm_ret_q <= StRsFillC;
+              state_q  <= StSmReq;
+            end
+          end
+          StRsFillC: begin
+            if (sm_ok_q) begin
+              rs_slot_q <= sm_rslot_q;
+              state_q   <= rs_ret_q;
+            end else if (sm_busy_q) begin
+              // every slot pinned: free completed-work pins, then
+              // retry — in-flight works release theirs as their done
+              // pulses land in the pending-UNPIN ring
+              unp_ret_q <= StRsReq;
+              state_q   <= StUnpD;
+            end else begin
+              rs_fault_q <= 1'b1;
+              state_q    <= rs_ret_q;
+            end
+          end
+          StUnpD: begin
+            if (unp_src_q) begin
+              // rec_pin_q holds a bundle taken by a record that never
+              // issued work (fill fault or lost submit): release its
+              // slots here — it never enters the queue
+              if (rec_pin_q == 8'h0) begin
+                unp_src_q <= 1'b0;
+                unp_ph_q  <= 1'b0;
+                state_q   <= unp_ret_q;
+              end else if (rec_pin_q[3]) begin
+                sm_op_q        <= APU_SH_SM_UNPIN;
+                sm_pin_q       <= 1'b0;
+                sm_slot_q      <= rec_pin_q[2:0];
+                rec_pin_q[3:0] <= 4'h0;
+                sm_ret_q       <= StUnpD;
+                state_q        <= StSmReq;
+              end else begin
+                sm_op_q        <= APU_SH_SM_UNPIN;
+                sm_pin_q       <= 1'b0;
+                sm_slot_q      <= rec_pin_q[6:4];
+                rec_pin_q[7:4] <= 4'h0;
+                sm_ret_q       <= StUnpD;
+                state_q        <= StSmReq;
+              end
+            end else if (unp_h_q == unp_t_q && pinq_due_q == 5'd0) begin
+              // due>0 entries still owe a pop — wait for them so a
+              // deferred bundle is not left behind
+              unp_ph_q <= 1'b0;
+              state_q  <= unp_ret_q;
+            end else if (unp_h_q != unp_t_q &&
+                         unpq_q[unp_h_q[3:0]][3] && !unp_ph_q) begin
+              sm_op_q   <= APU_SH_SM_UNPIN;
+              sm_pin_q  <= 1'b0;
+              sm_slot_q <= unpq_q[unp_h_q[3:0]][2:0];
+              unp_ph_q  <= 1'b1;
+              sm_ret_q  <= StUnpD;
+              state_q   <= StSmReq;
+            end else if (unp_h_q != unp_t_q &&
+                         unpq_q[unp_h_q[3:0]][7]) begin
+              sm_op_q   <= APU_SH_SM_UNPIN;
+              sm_pin_q  <= 1'b0;
+              sm_slot_q <= unpq_q[unp_h_q[3:0]][6:4];
+              unp_ph_q  <= 1'b0;
+              unp_h_q   <= unp_h_q + 5'd1;
+              sm_ret_q  <= StUnpD;
+              state_q   <= StSmReq;
+            end else if (unp_h_q != unp_t_q) begin
+              unp_ph_q <= 1'b0;
+              unp_h_q  <= unp_h_q + 5'd1;
+            end
+          end
+          StSmReq: if (sm_gnt_i) state_q <= StSmCpl;
+          StSmCpl: if (sm_cpl_i) begin
+            sm_ok_q    <= sm_cpl_pl_i.ok;
+            sm_busy_q  <= sm_cpl_pl_i.busy;
+            sm_rslot_q <= sm_cpl_pl_i.slot;
+            sm_flt_q   <= sm_cpl_pl_i.fault.code;
+            state_q    <= sm_ret_q;
+// pragma translate_off
+            if ($test$plusargs("smtrace"))
+              $display("[sm t=%0d] op=%0d hnd=%08x slot=%0d ok=%0d busy=%0d rslot=%0d flt=%02x",
+                       $time, sm_op_q, sm_hnd_q, sm_slot_q,
+                       sm_cpl_pl_i.ok, sm_cpl_pl_i.busy,
+                       sm_cpl_pl_i.slot, sm_cpl_pl_i.fault.code);
+// pragma translate_on
+          end
+          // one-word ObjPay read of a pipeline module block
+          StPBR:  if (op_req_ready_i) state_q <= StPBRC;
+          StPBRC: if (op_cpl_valid_i) begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
+              // a corrupt pipeline block is a submit-level failure
+              lost_q  <= 1'b1;
+              state_q <= StUnpReq;
+            end else begin
+              pbr_data_q <= op_cpl_i.rdata;
+              state_q    <= pbr_ret_q;
             end
           end
           // pipeline layout object: live + right generation -> its
@@ -1529,7 +1960,13 @@ module g6lc_apu_cmdexec
                      rd_q.vs_slot, rd_q.fs_slot, $time);
 `endif
 // pragma translate_on
-            if (work_ready_i) begin
+            if (pinq_full && unpq_full) begin
+              // both pin rings saturated: drain the UNPIN ring to open
+              // room, then retry the issue — never drop a bundle
+              unp_ret_q <= StDsIssue;
+              unp_ph_q  <= 1'b0;
+              state_q   <= StUnpD;
+            end else if (work_ready_i && !pinq_full) begin
               // work_done_i pulses are unordered across engines: the
               // next outst_q completions retire older works (a
               // serialized done queue may deliver them cycles after the
@@ -1877,7 +2314,13 @@ module g6lc_apu_cmdexec
           end
           // internal render-pass clear work: one issued work item per
           // loadOp-CLEAR attachment
-          StBrpIssue: if (work_ready_i) begin
+          StBrpIssue: if (pinq_full && unpq_full) begin
+            // both pin rings saturated: drain the UNPIN ring to open
+            // room, then retry the issue — never drop a bundle
+            unp_ret_q <= StBrpIssue;
+            unp_ph_q  <= 1'b0;
+            state_q   <= StUnpD;
+          end else if (work_ready_i && !pinq_full) begin
             outst_q <= outst_q + 8'h1 -
                        ((work_done_i && outst_q != 8'h0) ? 8'h1 : 8'h0);
             brp_ak_q <= brp_ak_q + 3'd1;
@@ -2090,7 +2533,16 @@ module g6lc_apu_cmdexec
             end
           end
           StUnpReq: begin
-            if (!pinned_q[buf_i_q[1:0]]) begin
+            if (rec_pin_q != 8'h0) begin
+              // a record abandoned mid-walk (lost submit) may still
+              // hold module pins — its work never issued so the
+              // bundle never reached pinq; release before the
+              // buffer's own UNPIN
+              unp_src_q <= 1'b1;
+              unp_ph_q  <= 1'b0;
+              unp_ret_q <= StUnpReq;
+              state_q   <= StUnpD;
+            end else if (!pinned_q[buf_i_q[1:0]]) begin
               state_q <= StBufDone;      // nothing pinned: skip UNPIN
             end else if (ot_req_ready_i) begin
               state_q <= StUnpCpl;
@@ -2098,7 +2550,13 @@ module g6lc_apu_cmdexec
           end
           StUnpCpl: if (ot_cpl_valid_i) state_q <= StBufDone;
           StBufDone: begin
-            if (buf_i_q + 3'd1 < {2'b0, cur_q.nbufs}) begin
+            if (unp_h_q != unp_t_q) begin
+              // G3b-ii: release residency pins of completed works
+              // before the next buffer — pins must not outlive the
+              // works that took them
+              unp_ret_q <= StBufDone;
+              state_q   <= StUnpD;
+            end else if (buf_i_q + 3'd1 < {2'b0, cur_q.nbufs}) begin
               buf_i_q <= buf_i_q + 3'd1;
               rec_i_q <= '0;
               state_q <= StCntReq;
@@ -2111,7 +2569,14 @@ module g6lc_apu_cmdexec
             if (outst_q == 8'h0 ||
                 (outst_q == 8'h1 && work_done_i)) begin
               buf_i_q <= '0;
-              state_q <= StCbRes;
+              // G3b-ii: the last works can complete inside the drain —
+              // their pin bundles landed in the UNPIN ring and must
+              // drain before the submission completes, else a pinned
+              // slot outlives the submit and a later module-create FILL
+              // can starve forever on an all-pinned victim set
+              unp_ph_q  <= 1'b0;
+              unp_ret_q <= StCbRes;
+              state_q   <= StUnpD;
             end
           end
 
@@ -2196,7 +2661,7 @@ module g6lc_apu_cmdexec
       dbg_ctype_q <= rec_q.ctype;
       dbg_otst_q  <= ot_cpl_i.status;
       dbg_othnd_q <= ot_cpl_i.handle;
-      dbg_otrid_q <= ot_req_o.id;
+      dbg_otrid_q <= ot_req_o.id[31:0];
       dbg_otaux_q <= ot_cpl_i.entry.aux;
       dbg_hi_q    <= h_i_q;
     end
@@ -2242,6 +2707,11 @@ module g6lc_apu_cmdexec_fixture
   input  logic               op_cpl_valid_i,
   output logic               op_cpl_ready_o,
   input  apu_objpay_cpl_t    op_cpl_i,
+  output logic               sm_req_o,
+  output apu_sh_sm_req_t     sm_req_pl_o,
+  input  logic               sm_gnt_i,
+  input  logic               sm_cpl_i,
+  input  apu_sh_sm_cpl_t     sm_cpl_pl_i,
   output logic               work_valid_o,
   input  logic               work_ready_i,
   output apu_cmdexec_work_t  work_o,

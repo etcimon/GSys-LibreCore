@@ -173,19 +173,16 @@ module g6lc_apu_vnfront
   input  logic               op_cpl_valid_i,
   output logic               op_cpl_ready_o,
   input  apu_objpay_cpl_t    op_cpl_i,
-  // ShaderCore slot manager + module staging + commit (§7b/5a-ii)
+  // ShaderCore residency manager (G3b-ii): module create/destroy and
+  // pipeline commit use LOOKUP/FILL/INVAL — the staging/commit ports
+  // are internal to shcore now.  sm_req_o is level-held until
+  // sm_gnt_i (vgtop arbitrates front > exec > ctl, gated by a FILL
+  // in flight); sm_cpl_i pulses the completion.
   output logic               sm_req_o,
   output apu_sh_sm_req_t     sm_req_pl_o,
+  input  logic               sm_gnt_i,
   input  logic               sm_cpl_i,
   input  apu_sh_sm_cpl_t     sm_cpl_pl_i,
-  output logic               sh_wr_en_o,
-  output logic [2:0]         sh_wr_slot_o,
-  output logic [15:0]        sh_wr_addr_o,
-  output logic [31:0]        sh_wr_data_o,
-  output logic               sh_commit_o,
-  output apu_sh_commit_t     sh_commit_pl_o,
-  input  logic               sh_c_done_i,
-  input  apu_sh_cpl_t        sh_c_done_pl_i,
   // aperture page allocator (§7b/5a-ii, arbitrated in vgtop)
   output logic               pg_req_valid_o,
   input  logic               pg_req_ready_i,
@@ -239,9 +236,6 @@ module g6lc_apu_vnfront
     assign op_req_valid_o = 1'b0; assign op_req_o = '0;
     assign op_cpl_ready_o = 1'b0;
     assign sm_req_o = 1'b0;        assign sm_req_pl_o = '0;
-    assign sh_wr_en_o = 1'b0;      assign sh_wr_slot_o = '0;
-    assign sh_wr_addr_o = '0;      assign sh_wr_data_o = '0;
-    assign sh_commit_o = 1'b0;     assign sh_commit_pl_o = '0;
     assign pg_req_valid_o = 1'b0;  assign pg_req_o = '0;
     assign pg_cpl_ready_o = 1'b0;
     assign ap_req_o = 1'b0;   assign ap_we_o = 1'b0;
@@ -260,8 +254,7 @@ module g6lc_apu_vnfront
                     (|ot_cpl_i) | cr_req_ready_i | cr_cpl_valid_i |
                     (|cr_cpl_i) | cr_pay_ready_i | op_req_ready_i |
                     op_cpl_valid_i | (|op_cpl_i) |
-                    sm_cpl_i | (|sm_cpl_pl_i) |
-                    sh_c_done_i | (|sh_c_done_pl_i) |
+                    sm_gnt_i | sm_cpl_i | (|sm_cpl_pl_i) |
                     pg_req_ready_i | pg_cpl_valid_i | (|pg_cpl_i) |
                     ex_submit_ready_i | (|ex_done_seq_i) |
                     (|ex_fence_signaled_i) | (|ex_fence_lost_i) |
@@ -325,24 +318,33 @@ module g6lc_apu_vnfront
       StUpdCpPC, StUpdCpRC, StUpdCpBC, StUpdCpNext,
       StPayProd, StPayResLo, StPayResHi, StPayResCpl, StPayCapW,
       StPaySend,
-      // §7b/5a-ii: slot manager, module staging, pipeline commit,
-      // aperture pages
+      // §7b/5a-ii + G3b-ii: residency-manager client, module extent
+      // staging into ObjPay, pipeline commit, aperture pages
       StSmReq, StSmCpl,
-      StShRd, StShWr, StShCommit, StShCWait,
+      StShRd, StShWr, StShWrC,
+      StShFill, StShFillC, StShFillR,
       StPgReq, StPgCpl,
       StShModObj, StShModCpl,
       StPipeH0, StPipeH1, StPipeH2, StPipeH3, StPipeH4,
-      StPipeLay0, StPipeModCpl, StPipeLayCpl, StPipeAllocC,
+      StPipeLay0, StPipeModCpl, StPipeModPin, StPipeLayCpl,
+      StPipeAlcP, StPipeW1, StPipeAllocC,
       StPipeAuxC, StPipeAuxCpl, StPipeAuxHiC, StPipeFail,
-      StRetSm, StRetSmF,
+      StPipeFaux,
+      // G3b-ii: module/pipeline retire — RETIRE_LAZY, zombie-safe
+      // UNPIN chain (ZDONE frees the module extent + INVALs shcore
+      // residency), graphics-block module-handle reads
+      StRetLazyC, StRetModI,
+      StRetPBR, StRetPBR2, StRetPipeC,
+      StRetUnp, StRetUnpC, StRetUnpF, StRetUnpI,
+      StRetPNext, StRetPFree,
       // G1c: graphics-pipeline element — staged keep-word parse in
       // vk.xml decode order (StGpRd/StGpCap walk a phase counter),
-      // the VS/FS module commit loop, then the 44-word ObjPay state
-      // block + the aux pair; StGpUnr unwinds taken ShaderCore refs
-      // on failure, StGpFrC releases the ObjPay extent
-      StGpRd, StGpCap, StGpModL, StGpModC, StGpRefC,
+      // the VS/FS module FILL + ObjTab-PIN loop, then the 48-word
+      // ObjPay state block + the aux pair; StGpUnr unwinds taken
+      // module pins on failure
+      StGpRd, StGpCap, StGpModL, StGpModC, StGpFillC, StGpPinC,
       StGpLayC, StGpAlcC, StGpPayW, StGpPayWd, StGpObjC,
-      StGpAuxH, StGpUnr, StRetUnrV,
+      StGpAuxH, StGpUnr,
       // G1c: BeginRenderPass record handles — the staged
       // renderPass/framebuffer ids resolve into rec.handle[0..1]
       StBrpIdLo, StBrpIdHi, StBrpIdCpl,
@@ -357,7 +359,7 @@ module g6lc_apu_vnfront
     state_e              op_ret_q, stg_ret_q, auxhi_ret_q,
                          auxlo_ret_q, stv_ret_q, ap_ret_q,
                          pro_ret_q, pay_done_q;
-    state_e              sm_ret_q, sh_ret_q, shc_ret_q, pg_ret_q,
+    state_e              sm_ret_q, pg_ret_q,
                          rsv_ret_q, row_ret_q;
 
     logic [15:0]         cs_base_q, cs_len_q, rep_base_q, rep_len_q;
@@ -523,16 +525,25 @@ module g6lc_apu_vnfront
     logic                pay_bind_q;   // stream mode: resolve sets
     logic                pay_vb_q;     // stream mode: BindVB buffers
 
-    // §7b/5a-ii: ShaderCore slot manager / staging / commit + pages
+    // §7b/5a-ii + G3b-ii: ShaderCore residency-manager client regs —
+    // sm requests carry the full {op,pin,slot,handle,chunk,words}
+    // record; the completion's {ok,busy,slot,entry,fault} latches here
     apu_sh_sm_op_e       sm_op_q;
     logic [2:0]          sm_slot_q;
-    logic                sm_ok_q;
+    logic                sm_pin_q;
+    logic [31:0]         sm_hnd_q;
+    logic [15:0]         sm_chunk_q, sm_words_q;
+    logic                sm_ok_q, sm_busy_q;
     logic [2:0]          sm_rslot_q;
+    apu_sh_entry_t       sm_entry_q;
     logic [15:0]         shw_i_q;      // pCode stream cursor
     logic [15:0]         shw_n_q;      // pCode word count
-    logic [2:0]          sh_slot_q;    // committed/alloc'd slot
-    logic [15:0]         sh_nw_q;      // module nwords
-    logic                shc_ok_q;     // commit result
+    // G3b-ii retire plumbing: module handle being UNPIN'd/INVAL'd and
+    // the pipeline's ObjPay block (base + word count)
+    logic [31:0]         ret_mh_q, ret_mh1_q;
+    logic [31:0]         ret_payb_q;
+    logic [15:0]         ret_pw_q;
+    state_e              unp_ret_q;
     apu_vgpages_op_e     pg_op_q;
     logic [31:0]         pg_base_q, pg_bytes_q;
     logic                pg_ok_q;
@@ -543,18 +554,24 @@ module g6lc_apu_vnfront
     logic                pl_spec_q;
     logic [31:0]         pl_layh_q;    // layout {gen,slot}
     logic                pl_errv_q;    // first error latched
+    // G3b-ii: the pipeline records the module's ObjTab handle and its
+    // parked pCode extent {chunk,words} — cmdexec re-FILLs residency
+    // from those when the slot was evicted
+    logic [31:0]         pl_modh_q, pl_modc_q;
+    logic                pl_pin_q;    // module ObjTab pin held
     // G1c: vkCreateGraphicsPipelines element state — the staged keep
     // words parse in vk.xml decode order behind phase counter
-    // gp_ph_q; the VS then FS modules commit through the StShCommit
-    // loop (gp_st_q) and the packed 44-word state block lands in
-    // ObjPay (layout below at gp_pay_w).
+    // gp_ph_q; the VS then FS modules go LOOKUP->FILL->ObjTab-PIN
+    // (gp_st_q) and the packed 48-word state block lands in ObjPay
+    // (layout below at gp_pay_w; w44..47 = per-stage {handle,park}).
     logic                pre_gp_q;    // elements are graphics pipes
     logic [5:0]          gp_ph_q;     // parse phase
     logic [7:0]          gp_stg_q;    // staged-word cursor
     logic [63:0]         gp_mod0_q, gp_mod1_q; // VS/FS module ids
-    logic                gp_st_q;     // commit loop: 0 VS, 1 FS
-    logic [1:0]          gp_refs_q;   // ShaderCore refs held
-    logic [2:0]          gp_vs_q, gp_fs_q;
+    logic                gp_st_q;     // module loop: 0 VS, 1 FS
+    logic [1:0]          gp_refs_q;   // ObjTab module pins held
+    logic [31:0]         gp_mh0_q, gp_mh1_q;   // module handles
+    logic [31:0]         gp_mc0_q, gp_mc1_q;   // module extent parks
     logic [7:0]          gp_fsm_q;    // FS entry.in_mask
     logic                gp_late_q;   // FS entry.fs_late (G3a-i late-Z)
     logic                gp_fdep_q;   // FS entry.fs_fdepth (writes FragDepth)
@@ -585,7 +602,6 @@ module g6lc_apu_vnfront
     logic                gp_sca_q;    // pScissors element present
     logic                gp_vpdyn_q;  // VIEWPORT in pDynamicStates
     logic                gp_scdyn_q;  // SCISSOR in pDynamicStates
-    logic [2:0]          ret_fs_q;    // pipeline retire: FS slot
     logic                ret_gp_q;    // pipeline retire: aux[6] graphics
     logic [31:0]         auxhi_val_q;  // generic SETAUXHI value
 
@@ -788,6 +804,9 @@ module g6lc_apu_vnfront
     //           instead of the streamed SetViewport shadow
     //   w40+a = static VkRect2D i32[4] — valid when w25[17] (same rule
     //           for VK_DYNAMIC_STATE_SCISSOR)
+    //   w44/46 = VS/FS module ObjTab handle {gen,slot} (G3b-ii)
+    //   w45/47 = VS/FS module parked pCode extent {chunk[31:16],
+    //            words[15:0]} — cmdexec re-FILLs residency from it
     function automatic logic [31:0] gp_pay_w(input logic [5:0] i);
       if (i == 6'd0)
         return {gp_fsm_q, gp_top_q, gp_nattr_q, gp_nbind_q,
@@ -806,7 +825,14 @@ module g6lc_apu_vnfront
         return gp_bconst_q[2'(i - 6'd30)];
       if (i < 6'd40)
         return gp_vp_q[3'(i - 6'd34)];
-      return gp_sc_q[2'(i - 6'd40)];
+      if (i < 6'd44)
+        return gp_sc_q[2'(i - 6'd40)];
+      // G3b-ii: per-stage module descriptors for cmdexec's residency
+      // resolve — {handle}, then the parked pCode {chunk,words}
+      if (i == 6'd44) return gp_mh0_q;
+      if (i == 6'd45) return gp_mc0_q;
+      if (i == 6'd46) return gp_mh1_q;
+      return gp_mc1_q;
     endfunction
     // wire format -> device id, or 8'hFF unsupported
     function automatic logic [7:0] f_img_fmt(input logic [31:0] f);
@@ -941,9 +967,6 @@ module g6lc_apu_vnfront
       cr_pay_valid_o = 1'b0;    cr_pay_data_o = '0;
       ex_submit_valid_o = 1'b0; ex_submit_o = '0;
       sm_req_o = 1'b0;          sm_req_pl_o = '0;
-      sh_wr_en_o = 1'b0;        sh_wr_slot_o = '0;
-      sh_wr_addr_o = '0;        sh_wr_data_o = '0;
-      sh_commit_o = 1'b0;       sh_commit_pl_o = '0;
       pg_req_valid_o = 1'b0;    pg_req_o = '0;
       ap_req_o = 1'b0;          ap_we_o = ap_we_q;
       ap_addr_o = ap_addr_q;    ap_wdata_o = ap_wdata_q;
@@ -972,14 +995,11 @@ module g6lc_apu_vnfront
         StCsRd:    begin front_re = 1'b1; front_addr = csa_q;     end
         StSmReq:   begin sm_req_o = 1'b1;
                          sm_req_pl_o = '{op: sm_op_q,
-                                        slot: sm_slot_q};       end
-        StShWr:    begin sh_wr_en_o   = 1'b1;
-                         sh_wr_slot_o = sh_slot_q;
-                         sh_wr_addr_o = shw_i_q;
-                         sh_wr_data_o = csw_q;                   end
-        StShCommit: begin sh_commit_o = 1'b1;
-                         sh_commit_pl_o = '{slot: sh_slot_q,
-                                           nwords: sh_nw_q};     end
+                                        pin: sm_pin_q,
+                                        slot: sm_slot_q,
+                                        handle: sm_hnd_q,
+                                        chunk: sm_chunk_q,
+                                        words: sm_words_q};     end
         StPgReq:   begin pg_req_valid_o = 1'b1;
                          pg_req_o = '{op: pg_op_q,
                                      base: pg_base_q,
@@ -1068,10 +1088,14 @@ module g6lc_apu_vnfront
         pay_send_q <= '0; pay_send_n_q <= '0; pay_word_q <= '0;
         pay_nset_q <= '0; pay_bind_q <= 1'b0; pay_vb_q <= 1'b0;
         pay_pbnd_q <= '0; pay_ndyn_q <= '0;
-        sm_op_q <= APU_SH_SM_ALLOC; sm_slot_q <= '0;
-        sm_ok_q <= 1'b0; sm_rslot_q <= '0;
+        sm_op_q <= APU_SH_SM_LOOKUP; sm_slot_q <= '0;
+        sm_pin_q <= 1'b0; sm_hnd_q <= '0;
+        sm_chunk_q <= '0; sm_words_q <= '0;
+        sm_ok_q <= 1'b0; sm_busy_q <= 1'b0;
+        sm_rslot_q <= '0; sm_entry_q <= '0;
         shw_i_q <= '0; shw_n_q <= '0;
-        sh_slot_q <= '0; sh_nw_q <= '0; shc_ok_q <= 1'b0;
+        ret_mh_q <= '0; ret_mh1_q <= '0;
+        ret_payb_q <= '0; ret_pw_q <= '0; unp_ret_q <= StIdle;
         pg_op_q <= APU_VGPAGES_OP_ALLOC;
         pg_base_q <= '0; pg_bytes_q <= '0;
         imw_m_q <= '0; imw_nm_q <= '0; imw_tgt_q <= '0;
@@ -1089,12 +1113,14 @@ module g6lc_apu_vnfront
         pre_gp_q <= 1'b0; gp_ph_q <= '0; gp_stg_q <= '0;
         gp_mod0_q <= '0; gp_mod1_q <= '0;
         gp_st_q <= 1'b0; gp_refs_q <= '0;
-        gp_vs_q <= '0; gp_fs_q <= '0; gp_fsm_q <= '0;
+        gp_mh0_q <= '0; gp_mh1_q <= '0;
+        gp_mc0_q <= '0; gp_mc1_q <= '0; gp_fsm_q <= '0;
         gp_late_q <= 1'b0; gp_fdep_q <= 1'b0;
+        pl_modh_q <= '0; pl_modc_q <= '0; pl_pin_q <= 1'b0;
         gp_nbind_q <= '0; gp_nattr_q <= '0; gp_i_q <= '0;
         gp_top_q <= '0; gp_cull_q <= '0; gp_ff_q <= 1'b0;
         gp_bnd_q <= '0; gp_atr_q <= '0;
-        ret_fs_q <= '0; ret_gp_q <= 1'b0;
+        ret_gp_q <= 1'b0;
         blob_i_q <= '0; blob_n_q <= '0; blob_sel_q <= 1'b0;
         brp_i_q  <= 1'b0;
         blob_id_q <= '0; pd_id_q <= '0;
@@ -1510,12 +1536,15 @@ module g6lc_apu_vnfront
                     state_q <= StDPoolSum;
                   end else if (act_q.obj_kind ==
                                6'(APU_VN_KIND_VK_SHADER_MODULE)) begin
-                    // §7b/5a-ii: claim a ShaderCore slot, then stream
-                    // blob[0] (pCode) from the CS into wr_* for it
-                    sm_op_q   <= APU_SH_SM_ALLOC;
-                    sm_slot_q <= '0;
-                    sm_ret_q  <= StShModObj;
-                    state_q   <= StSmReq;
+                    // G3b-ii: the pCode words park in an ObjPay
+                    // extent (chunk-parked in aux[63:32]); the FILL
+                    // that follows streams them into a resident slot
+                    // and runs the commit scan for validation
+                    opr_q    <= '{op: APU_OBJPAY_OP_ALLOC,
+                                  words: 32'(op_q.blob[0].words),
+                                  default: '0};
+                    op_ret_q <= StShModObj;
+                    state_q  <= StOpReq;
                   end else if (act_q.obj_kind ==
                                6'(APU_VN_KIND_VK_DEVICE_MEMORY)) begin
                     // 3d-b: pNext policy before any allocation —
@@ -1954,10 +1983,14 @@ module g6lc_apu_vnfront
                 state_q  <= StOpReq;
               end else if (act_q.obj_kind ==
                            6'(APU_VN_KIND_VK_SHADER_MODULE)) begin
-                // release the held ShaderCore slot
-                sm_op_q  <= APU_SH_SM_UNREF;
-                sm_ret_q <= StRep;
-                state_q  <= StSmReq;
+                // G3b-ii: object not created — release the parked
+                // pCode extent
+                opr_q    <= '{op: APU_OBJPAY_OP_FREE,
+                              addr: op_base_q,
+                              words: {16'h0, op_words_q},
+                              default: '0};
+                op_ret_q <= StRep;
+                state_q  <= StOpReq;
               end else if ((act_q.obj_kind ==
                             6'(APU_VN_KIND_VK_DEVICE_MEMORY) &&
                             pg_res_q != APU_MEM_UNBACKED) ||
@@ -2036,15 +2069,14 @@ module g6lc_apu_vnfront
               state_q  <= StOtReq;
             end else if (act_q.obj_kind ==
                          6'(APU_VN_KIND_VK_SHADER_MODULE)) begin
-              // §7b/5a-ii: aux[2:0]=slot, aux[31:16]=nwords
-              otr_q <= '{op: APU_OBJTAB_OP_SETAUX,
-                         id: {32'h0, ot_cpl_i.handle},
-                         kind: act_q.obj_kind,
-                         mask: 32'hFFFF_0007,
-                         value: {sh_nw_q, 13'h0, sh_slot_q},
-                         ctx: ctx_i, default: '0};
-              ot_ret_q <= StAllocAux;
-              state_q  <= StOtReq;
+              // G3b-ii: aux[63:32] parks the pCode extent
+              // {chunk=base>>6, words}; aux[31:0] owns no slot —
+              // residency is ShaderCore's cache, populated by the
+              // validating FILL that follows the aux write
+              hnd_pay_q   <= ot_cpl_i.handle;
+              auxhi_val_q <= {16'(op_base_q >> 6), op_words_q};
+              auxhi_ret_q <= StShFill;
+              state_q     <= StAuxSet;
             end else if (act_q.obj_kind ==
                          6'(APU_VN_KIND_VK_DEVICE_MEMORY)) begin
               // §7b/5a-ii: aux[63:32] = aperture page base.
@@ -2404,29 +2436,37 @@ module g6lc_apu_vnfront
                 pg_bytes_q <= 32'(ot_cpl_i.entry.size);
               end
               if (act_q.obj_kind ==
-                  6'(APU_VN_KIND_VK_SHADER_MODULE) ||
-                  act_q.obj_kind == 6'(APU_VN_KIND_VK_PIPELINE)) begin
-                // §7b/5a-ii: release the ShaderCore slot reference
-                // first, then retire the object
-                sm_op_q   <= APU_SH_SM_UNREF;
-                sm_slot_q <= ot_cpl_i.entry.aux[2:0];
-                sm_ret_q  <= StRetSm;
-                state_q   <= StSmReq;
-                if (act_q.obj_kind == 6'(APU_VN_KIND_VK_PIPELINE) &&
-                    ot_cpl_i.entry.aux[6]) begin
-                  // G1c/G2a: a graphics pipeline frees its 44-word
-                  // ObjPay state block and drops BOTH stage refs — the
-                  // FS slot waits behind ret_fs_q for StRetSm's second
-                  // UNREF (StRetUnrV runs the VS one after the FREE)
-                  ret_gp_q <= 1'b1;
-                  ret_fs_q <= ot_cpl_i.entry.aux[5:3];
-                  opr_q    <= '{op: APU_OBJPAY_OP_FREE,
-                               addr: 32'(ot_cpl_i.entry.aux[31:16])
-                                      << 6,
-                               words: 32'd44, default: '0};
-                  op_ret_q <= StRetUnrV;
-                  state_q  <= StOpReq;
-                end
+                  6'(APU_VN_KIND_VK_SHADER_MODULE)) begin
+                // G3b-ii: lazy retire — the directory id dies now;
+                // pipelines may hold ObjTab pins, in which case the
+                // entry zombies until their last UNPIN (the ZDONE
+                // completion frees the extent + INVALs residency).
+                // ret_mh_q keeps the {gen,slot} handle for the INVAL
+                // when the retire completes immediately (pins==0).
+                ret_mh_q  <= ot_cpl_i.handle;
+                otr_q    <= '{op: APU_OBJTAB_OP_RETIRE_LAZY,
+                             id: APU_VN_ID_TAG | op_q.q[
+                                 role_slot(op_q, APU_VN_ROLE_RETIRE)],
+                             kind: act_q.obj_kind, default: '0};
+                ot_ret_q <= StRetLazyC;
+                state_q  <= StOtReq;
+              end else if (act_q.obj_kind ==
+                           6'(APU_VN_KIND_VK_PIPELINE)) begin
+                // G3b-ii: pipelines carry no shcore refs — their
+                // ObjPay block holds the stage module {handle,park}
+                // pairs.  Read the first handle before retiring;
+                // a graphics pipeline's second handle follows.
+                ret_gp_q   <= ot_cpl_i.entry.aux[6];
+                ret_payb_q <= 32'(ot_cpl_i.entry.aux[31:16]) << 6;
+                ret_pw_q   <= ot_cpl_i.entry.aux[6] ? 16'd48 : 16'd2;
+                opr_q      <= '{op: APU_OBJPAY_OP_READ,
+                               addr: (32'(ot_cpl_i.entry.aux[31:16])
+                                      << 6) +
+                                     (ot_cpl_i.entry.aux[6]
+                                      ? 32'd44 : 32'd0),
+                               default: '0};
+                op_ret_q   <= StRetPBR;
+                state_q    <= StOpReq;
               end else if (act_q.obj_kind ==
                            6'(APU_VN_KIND_VK_DESCRIPTOR_POOL)) begin
                 // §12.3 F5-d: kill live sets first so the pool's own
@@ -4327,11 +4367,16 @@ module g6lc_apu_vnfront
             state_q <= StPoolLoop;
           end
 
-          // ---- §7b/5a-ii: ShaderCore slot manager --------------------
-          StSmReq:  state_q <= StSmCpl;
+          // ---- §7b/5a-ii + G3b-ii: ShaderCore residency manager ----
+          // the request is level-held until the vgtop arbiter's
+          // sm_gnt_i marks the accepted cycle (a FILL in flight or a
+          // higher-priority requester stalls the grant)
+          StSmReq:  if (sm_gnt_i) state_q <= StSmCpl;
           StSmCpl: if (sm_cpl_i) begin
             sm_ok_q    <= sm_cpl_pl_i.ok;
+            sm_busy_q  <= sm_cpl_pl_i.busy;
             sm_rslot_q <= sm_cpl_pl_i.slot;
+            sm_entry_q <= sm_cpl_pl_i.entry;
             state_q    <= sm_ret_q;
           end
 
@@ -4343,17 +4388,18 @@ module g6lc_apu_vnfront
             state_q  <= pg_ret_q;
           end
 
-          // ---- §7b/5a-ii: vkCreateShaderModule ------------------------
-          // sm ALLOC completion -> pCode staging (blob[0])
+          // ---- G3b-ii: vkCreateShaderModule ---------------------------
+          // ObjPay extent ALLOC completion -> stream blob[0] (pCode)
+          // from the CS into the extent one word per op WRITE
           StShModObj: begin
-            if (!sm_ok_q) begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
               result_q <= APU_VK_ERROR_OUT_OF_DEVICE_MEMORY;
               state_q  <= StRep;
             end else begin
-              sh_slot_q <= sm_rslot_q;
-              sh_nw_q   <= 16'(op_q.blob[0].words);
-              shw_i_q   <= '0;
-              shw_n_q   <= 16'(op_q.blob[0].words);
+              op_base_q  <= op_cpl_i.base;
+              op_words_q <= 16'(op_q.blob[0].words);
+              shw_i_q    <= '0;
+              shw_n_q    <= 16'(op_q.blob[0].words);
               if (op_q.blob[0].words == 17'h0) begin
                 state_q <= StShModCpl;
               end else begin
@@ -4362,16 +4408,60 @@ module g6lc_apu_vnfront
             end
           end
           // stream blob[0] words: CS read (StCsRd->StCsCap->csw_q),
-          // then a sh_wr pulse in StShWr
+          // then an ObjPay WRITE in StShWr
           StShRd: begin
             csa_q    <= cs_base_q + op_q.blob[0].off + shw_i_q;
             cs_ret_q <= StShWr;
             state_q  <= StCsRd;
           end
           StShWr: begin
+            opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
+                         addr: op_base_q + 32'(shw_i_q),
+                         wdata: csw_q, default: '0};
+            op_ret_q <= StShWrC;
+            state_q  <= StOpReq;
+          end
+          StShWrC: begin
             shw_i_q <= shw_i_q + 16'd1;
             state_q <= (shw_i_q + 16'd1 >= shw_n_q)
                        ? StShModCpl : StShRd;
+          end
+          // object + extent parked: FILL the pCode through a resident
+          // slot — the commit scan validates it (G3b-ii: scan moved
+          // from pipeline create to module create)
+          StShFill: begin
+            sm_op_q    <= APU_SH_SM_FILL;
+            sm_pin_q   <= 1'b0;
+            sm_hnd_q   <= hnd_pay_q;
+            sm_chunk_q <= 16'(op_base_q >> 6);
+            sm_words_q <= op_words_q;
+            sm_ret_q   <= StShFillC;
+            state_q    <= StSmReq;
+          end
+          StShFillC: begin
+            if (sm_busy_q) begin
+              // every slot pinned by in-flight work — retry after the
+              // current request drains (pins release at work done)
+              state_q <= StSmReq;
+            end else if (!sm_ok_q) begin
+              // scan fault: create fails — retire the object, then
+              // free the extent (StShFillR chains FREE -> StRep)
+              result_q <= APU_VK_ERROR_UNKNOWN;
+              otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
+                           id: {32'h0, hnd_pay_q},
+                           kind: act_q.obj_kind, default: '0};
+              ot_ret_q <= StShFillR;
+              state_q  <= StOtReq;
+            end else begin
+              state_q <= StRep;
+            end
+          end
+          StShFillR: begin
+            opr_q    <= '{op: APU_OBJPAY_OP_FREE,
+                         addr: op_base_q,
+                         words: {16'h0, op_words_q}, default: '0};
+            op_ret_q <= StRep;
+            state_q  <= StOpReq;
           end
           // staging done: ObjTab.ALLOC the module object
           StShModCpl: begin
@@ -4775,8 +4865,9 @@ module g6lc_apu_vnfront
               end
             endcase
           end
-          // module LOOKUP completion -> stage commit loop (StShCommit
-          // pulses {slot,nwords}; the completion lands at StShCWait)
+          // module LOOKUP completion -> the module's handle and
+          // parked extent {chunk,words} feed a residency FILL, which
+          // returns the scanned entry for the stage check
           StGpModL: begin
             otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
                          id: APU_VN_ID_TAG |
@@ -4790,14 +4881,52 @@ module g6lc_apu_vnfront
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
               state_q <= StPipeFail;
             end else begin
-              sh_slot_q <= ot_cpl_i.entry.aux[2:0];
-              sh_nw_q   <= ot_cpl_i.entry.aux[31:16];
-              state_q   <= StShCommit;
+              if (!gp_st_q) begin
+                gp_mh0_q <= ot_cpl_i.handle;
+                gp_mc0_q <= ot_cpl_i.entry.aux[63:32];
+              end else begin
+                gp_mh1_q <= ot_cpl_i.handle;
+                gp_mc1_q <= ot_cpl_i.entry.aux[63:32];
+              end
+              sm_op_q    <= APU_SH_SM_FILL;
+              sm_pin_q   <= 1'b0;
+              sm_hnd_q   <= ot_cpl_i.handle;
+              sm_chunk_q <= ot_cpl_i.entry.aux[63:48];
+              sm_words_q <= ot_cpl_i.entry.aux[47:32];
+              sm_ret_q   <= StGpFillC;
+              state_q    <= StSmReq;
             end
           end
-          // REF success -> next stage, then the pipeline-layout lookup
-          StGpRefC: begin
-            if (!sm_ok_q) begin
+          // FILL cpl: entry.em gates the stage (VS then FS) — the
+          // slot itself is just a residency cache line, not kept
+          StGpFillC: begin
+            if (sm_busy_q) begin
+              state_q <= StSmReq;          // all slots pinned — retry
+            end else if (!sm_ok_q ||
+                         sm_entry_q.em !=
+                            (gp_st_q ? 4'(APU_SH_EM_FRAGMENT)
+                                     : 4'(APU_SH_EM_VERTEX))) begin
+              state_q <= StPipeFail;
+            end else begin
+              if (gp_st_q) begin
+                gp_fsm_q  <= sm_entry_q.in_mask;
+                gp_late_q <= sm_entry_q.fs_late;
+                gp_fdep_q <= sm_entry_q.fs_fdepth;
+              end
+              // keep the module materialized for the pipeline's
+              // lifetime: an ObjTab pin makes a later module destroy
+              // a zombie until pipeline retire UNPINs it
+              otr_q    <= '{op: APU_OBJTAB_OP_PIN,
+                           id: {32'h0, gp_st_q ? gp_mh1_q : gp_mh0_q},
+                           kind: 6'(APU_VN_KIND_VK_SHADER_MODULE),
+                           ctx: ctx_i, default: '0};
+              ot_ret_q <= StGpPinC;
+              state_q  <= StOtReq;
+            end
+          end
+          // PIN success -> next stage, then the pipeline-layout lookup
+          StGpPinC: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
               state_q <= StPipeFail;
             end else begin
               gp_refs_q <= gp_refs_q + 2'd1;
@@ -4819,8 +4948,9 @@ module g6lc_apu_vnfront
               state_q <= StPipeFail;
             end else begin
               pl_layh_q <= ot_cpl_i.handle;
-              // 44-word ObjPay state block for the draw assembly
-              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC, words: 32'd44,
+              // 48-word ObjPay state block for the draw assembly —
+              // w44..47 carry the per-stage module {handle,park}
+              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC, words: 32'd48,
                            default: '0};
               op_ret_q <= StGpAlcC;
               state_q  <= StOpReq;
@@ -4851,7 +4981,7 @@ module g6lc_apu_vnfront
             state_q  <= StOpReq;
           end
           StGpPayWd: begin
-            if (pay_i_q + 16'd1 >= 16'd44) begin
+            if (pay_i_q + 16'd1 >= 16'd48) begin
               // ObjTab ALLOC the pipeline object (id = this element's
               // out id); aux writes follow on the completion
               otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
@@ -4872,19 +5002,20 @@ module g6lc_apu_vnfront
           end
           StGpObjC: begin
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
-              // no object: free the ObjPay extent; the refs unwind at
-              // StPipeFail
+              // no object: free the ObjPay extent; the module pins
+              // unwind at StGpUnr
               opr_q    <= '{op: APU_OBJPAY_OP_FREE,
                            addr: op_base_q,
-                           words: 32'd44, default: '0};
+                           words: 32'd48, default: '0};
               op_ret_q <= StGpUnr;
               state_q  <= StOpReq;
             end else begin
               hnd_pay_q    <= ot_cpl_i.handle;
-              // aux[31:0] = {ObjPay base[15:0], 9'h0, gfx=1[6],
-              //              fs_slot[5:3], vs_slot[2:0]}
+              // aux[31:0] = {ObjPay block chunk[15:0], 9'h0,
+              //              gfx=1[6], 6'h0} — the stage module
+              // {handle,park} pairs live in block words 44..47
               auxlo_val_q  <= {16'(op_base_q[31:6]), 9'h0, 1'b1,
-                               gp_fs_q, gp_vs_q};
+                               6'h0};
               auxlo_mask_q <= 32'hFFFF_FFFF;
               auxlo_ret_q  <= StGpAuxH;
               state_q      <= StAuxLo;
@@ -4897,8 +5028,8 @@ module g6lc_apu_vnfront
             auxhi_ret_q <= StPipeAuxHiC;
             state_q     <= StAuxSet;
           end
-          // unwind ShaderCore refs taken by this element (the ObjPay
-          // extent, if any, was already freed at StGpObjC)
+          // unwind ObjTab module pins taken by this element (the
+          // ObjPay extent, if any, was already freed at StGpObjC)
           StGpUnr: begin
             if (gp_refs_q == 2'd0) begin
               if (!pl_errv_q) begin
@@ -4909,11 +5040,14 @@ module g6lc_apu_vnfront
               blob_i_q <= blob_i_q + 5'd1;
               state_q  <= StBlobRd;
             end else begin
-              sm_op_q   <= APU_SH_SM_UNREF;
-              sm_slot_q <= gp_refs_q == 2'd2 ? gp_fs_q : gp_vs_q;
+              otr_q    <= '{op: APU_OBJTAB_OP_UNPIN,
+                           id: {32'h0, gp_refs_q == 2'd2
+                                       ? gp_mh1_q : gp_mh0_q},
+                           kind: 6'(APU_VN_KIND_VK_SHADER_MODULE),
+                           ctx: ctx_i, default: '0};
               gp_refs_q <= gp_refs_q - 2'd1;
-              sm_ret_q  <= StGpUnr;
-              state_q   <= StSmReq;
+              ot_ret_q  <= StGpUnr;
+              state_q   <= StOtReq;
             end
           end
           StPipeH1: begin
@@ -4945,7 +5079,8 @@ module g6lc_apu_vnfront
             if (pl_spec_q) begin
               state_q <= StPipeFail;
             end else begin
-              // LOOKUP the shader module -> {slot, nwords} in aux
+              // LOOKUP the shader module -> {gen,slot} handle plus
+              // its parked pCode extent {chunk,words} in aux[63:32]
               otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
                            id: APU_VN_ID_TAG | pl_modid_q,
                            kind: 6'(APU_VN_KIND_VK_SHADER_MODULE),
@@ -4958,8 +5093,24 @@ module g6lc_apu_vnfront
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
               state_q <= StPipeFail;
             end else begin
-              sh_slot_q <= ot_cpl_i.entry.aux[2:0];
-              sh_nw_q   <= ot_cpl_i.entry.aux[31:16];
+              pl_modh_q <= ot_cpl_i.handle;
+              pl_modc_q <= ot_cpl_i.entry.aux[63:32];
+              // pin the module entry for the pipeline's lifetime —
+              // a later vkDestroyShaderModule zombies it until this
+              // pin releases at pipeline retire
+              otr_q    <= '{op: APU_OBJTAB_OP_PIN,
+                           id: {32'h0, ot_cpl_i.handle},
+                           kind: 6'(APU_VN_KIND_VK_SHADER_MODULE),
+                           ctx: ctx_i, default: '0};
+              ot_ret_q <= StPipeModPin;
+              state_q  <= StOtReq;
+            end
+          end
+          StPipeModPin: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              state_q <= StPipeFail;
+            end else begin
+              pl_pin_q <= 1'b1;
               otr_q    <= '{op: APU_OBJTAB_OP_LOOKUP,
                            id: APU_VN_ID_TAG | pl_layid_q,
                            kind: 6'(APU_VN_KIND_VK_PIPELINE_LAYOUT),
@@ -4973,85 +5124,72 @@ module g6lc_apu_vnfront
               state_q <= StPipeFail;
             end else begin
               pl_layh_q <= ot_cpl_i.handle;
-              state_q   <= StShCommit;
+              // G3b-ii: a 2-word ObjPay block carries the module
+              // {handle, {chunk,words}} — cmdexec re-FILLs residency
+              // from it when the slot was evicted (the module may be
+              // a zombie then, invisible to any LOOKUP)
+              opr_q    <= '{op: APU_OBJPAY_OP_ALLOC, words: 32'd2,
+                           default: '0};
+              op_ret_q <= StPipeAlcP;
+              state_q  <= StOpReq;
             end
           end
-          // commit the module's code into its slot; wait sh_c_done
-          StShCommit: state_q <= StShCWait;
-          StShCWait: if (sh_c_done_i) begin
-            shc_ok_q <= sh_c_done_pl_i.ok;
-            if (!sh_c_done_pl_i.ok) begin
+          StPipeAlcP: begin
+            if (op_cpl_i.status != APU_OBJPAY_OK) begin
               state_q <= StPipeFail;
-            end else if (pre_gp_q) begin
-              // G1c: the commit payload carries the parsed entry —
-              // the VS module must report execution-model VERTEX,
-              // the FS module FRAGMENT (its Input-location mask is
-              // what the raster interpolates)
-              if (!gp_st_q) begin
-                if (sh_c_done_pl_i.entry.em != APU_SH_EM_VERTEX) begin
-                  state_q <= StPipeFail;
-                end else begin
-                  gp_vs_q   <= sh_slot_q;
-                  sm_op_q   <= APU_SH_SM_REF;
-                  sm_ret_q  <= StGpRefC;
-                  state_q   <= StSmReq;
-                end
-              end else begin
-                if (sh_c_done_pl_i.entry.em != APU_SH_EM_FRAGMENT) begin
-                  state_q <= StPipeFail;
-                end else begin
-                  gp_fs_q   <= sh_slot_q;
-                  gp_fsm_q  <= sh_c_done_pl_i.entry.in_mask;
-                  gp_late_q <= sh_c_done_pl_i.entry.fs_late;
-                  gp_fdep_q <= sh_c_done_pl_i.entry.fs_fdepth;
-                  sm_op_q   <= APU_SH_SM_REF;
-                  sm_ret_q  <= StGpRefC;
-                  state_q   <= StSmReq;
-                end
-              end
             end else begin
-              // commit ok: the pipeline holds a slot reference
-              sm_op_q   <= APU_SH_SM_REF;
-              sm_ret_q  <= StPipeAllocC;
-              state_q   <= StSmReq;
+              op_base_q <= op_cpl_i.base;
+              opr_q     <= '{op: APU_OBJPAY_OP_WRITE,
+                            addr: op_cpl_i.base,
+                            wdata: pl_modh_q, default: '0};
+              op_ret_q  <= StPipeW1;
+              state_q   <= StOpReq;
             end
           end
-          // REF ok -> ObjTab.ALLOC the pipeline object
+          StPipeW1: begin
+            opr_q    <= '{op: APU_OBJPAY_OP_WRITE,
+                         addr: op_base_q + 32'd1,
+                         wdata: pl_modc_q, default: '0};
+            op_ret_q <= StPipeAllocC;
+            state_q  <= StOpReq;
+          end
+          // block parked -> ObjTab.ALLOC the pipeline object
           StPipeAllocC: begin
-            if (!sm_ok_q) begin
-              state_q <= StPipeFail;
-            end else begin
-              otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
-                         id: blob_id_q,
-                         kind: act_q.obj_kind,
-                         parent_id: act_q.parent_qslot ==
-                                    APU_VN_QSLOT_NONE
-                                    ? 64'h0
-                                    : {32'h0,
-                                       hnd_q[int'(act_q.parent_qslot)]},
-                         ctx: ctx_i, default: '0};
-              ot_ret_q <= StPipeAuxC;
-              state_q  <= StOtReq;
-            end
+            otr_q <= '{op: APU_OBJTAB_OP_ALLOC,
+                       id: blob_id_q,
+                       kind: act_q.obj_kind,
+                       parent_id: act_q.parent_qslot ==
+                                  APU_VN_QSLOT_NONE
+                                  ? 64'h0
+                                  : {32'h0,
+                                     hnd_q[int'(act_q.parent_qslot)]},
+                       ctx: ctx_i, default: '0};
+            ot_ret_q <= StPipeAuxC;
+            state_q  <= StOtReq;
           end
           StPipeAuxC: begin
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
-              // no object: release the reference we just took
-              sm_op_q  <= APU_SH_SM_UNREF;
-              sm_ret_q <= StPipeFail;
-              state_q  <= StSmReq;
+              // no object: free the block, then StPipeFail unpins
+              opr_q    <= '{op: APU_OBJPAY_OP_FREE,
+                           addr: op_base_q,
+                           words: 32'd2, default: '0};
+              op_ret_q <= StPipeFaux;
+              state_q  <= StOpReq;
             end else begin
               hnd_pay_q <= ot_cpl_i.handle;
+              // aux[31:0] = {ObjPay block chunk[15:0], 9'h0, gfx=0[6],
+              //              6'h0}
               otr_q <= '{op: APU_OBJTAB_OP_SETAUX,
                          id: {32'h0, ot_cpl_i.handle},
                          kind: act_q.obj_kind,
-                         mask: 32'h7,
-                         value: {29'h0, sh_slot_q},
+                         mask: 32'hFFFF_FFFF,
+                         value: {16'(op_base_q >> 6), 16'h0},
                          ctx: ctx_i, default: '0};
               ot_ret_q <= StPipeAuxCpl;
               state_q  <= StOtReq;
             end
           end
+          StPipeFaux: state_q <= StPipeFail;   // block freed
           StPipeAuxCpl: begin
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
               state_q <= StPipeFail;
@@ -5066,16 +5204,27 @@ module g6lc_apu_vnfront
             blob_i_q <= blob_i_q + 5'd1;
             state_q  <= StBlobRd;
           end
-          // failed element: first error + VK_NULL_HANDLE echo; a
-          // graphics element unwinds the ShaderCore refs it already
-          // took first (StPipeFail re-enters via sm_ret until 0)
+          // failed element: first error + VK_NULL_HANDLE echo; the
+          // ObjTab module pins taken so far unwind first (a compute
+          // element holds at most one, a graphics element up to two)
           StPipeFail: begin
-            if (pre_gp_q && gp_refs_q != 2'd0) begin
-              sm_op_q   <= APU_SH_SM_UNREF;
-              sm_slot_q <= gp_refs_q == 2'd2 ? gp_fs_q : gp_vs_q;
+            if (!pre_gp_q && pl_pin_q) begin
+              otr_q     <= '{op: APU_OBJTAB_OP_UNPIN,
+                            id: {32'h0, pl_modh_q},
+                            kind: 6'(APU_VN_KIND_VK_SHADER_MODULE),
+                            ctx: ctx_i, default: '0};
+              pl_pin_q  <= 1'b0;
+              ot_ret_q  <= StPipeFail;
+              state_q   <= StOtReq;
+            end else if (pre_gp_q && gp_refs_q != 2'd0) begin
+              otr_q     <= '{op: APU_OBJTAB_OP_UNPIN,
+                            id: {32'h0, gp_refs_q == 2'd2
+                                        ? gp_mh1_q : gp_mh0_q},
+                            kind: 6'(APU_VN_KIND_VK_SHADER_MODULE),
+                            ctx: ctx_i, default: '0};
               gp_refs_q <= gp_refs_q - 2'd1;
-              sm_ret_q  <= StPipeFail;
-              state_q   <= StSmReq;
+              ot_ret_q  <= StPipeFail;
+              state_q   <= StOtReq;
             end else begin
               if (!pl_errv_q) begin
                 pl_errv_q <= 1'b1;
@@ -5087,39 +5236,121 @@ module g6lc_apu_vnfront
             end
           end
 
-          // ---- §7b/5a-ii: retire continuation after sm UNREF ----------
-          // G1c: a graphics pipeline (ret_gp_q) drops both stage refs:
-          // ret_sm_q[2:0] held the VS slot, ret_fs_q the FS slot.
-          StRetSm: begin
+          // ---- G3b-ii: retire continuations ----------------------------
+          // vkDestroyShaderModule: RETIRE_LAZY completion — a pinned
+          // module zombifies (the reply is already due: the handle is
+          // dead, pipelines keep it materialized); an unpinned one
+          // retired for real — free the pCode extent and drop shcore
+          // residency
+          StRetLazyC: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              result_q <= err_of(ot_cpl_i.status);
+              state_q  <= StRep;
+            end else if (ot_cpl_i.entry.pins != 8'h0) begin
+              // zombie: extent + residency release rides the last
+              // UNPIN's ZDONE (pipeline retire) or the RESET_CTX sweep
+              state_q <= StRep;
+            end else begin
+              opr_q    <= '{op: APU_OBJPAY_OP_FREE,
+                           addr: 32'(ot_cpl_i.entry.aux[63:48]) << 6,
+                           words: {16'h0, ot_cpl_i.entry.aux[47:32]},
+                           default: '0};
+              op_ret_q <= StRetModI;
+              state_q  <= StOpReq;
+            end
+          end
+          StRetModI: begin
+            sm_op_q   <= APU_SH_SM_INVAL;
+            sm_pin_q  <= 1'b0;
+            sm_hnd_q  <= ret_mh_q;
+            sm_ret_q  <= StRep;
+            state_q   <= StSmReq;
+          end
+          // pipeline retire: block word 44 (gfx) / 0 (compute) carried
+          // the first module handle; word 46 the second for graphics
+          StRetPBR: begin
+            ret_mh_q <= op_cpl_i.rdata;
             if (ret_gp_q) begin
-              sm_op_q   <= APU_SH_SM_UNREF;
-              sm_slot_q <= ret_fs_q;
-              sm_ret_q  <= StRetSmF;
-              state_q   <= StSmReq;
-              ret_gp_q  <= 1'b0;
+              opr_q    <= '{op: APU_OBJPAY_OP_READ,
+                           addr: ret_payb_q + 32'd46, default: '0};
+              op_ret_q <= StRetPBR2;
+              state_q  <= StOpReq;
             end else begin
               otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
                            id: APU_VN_ID_TAG | op_q.q[
                                role_slot(op_q, APU_VN_ROLE_RETIRE)],
                            kind: act_q.obj_kind, default: '0};
-              ot_ret_q <= StRetCpl;
+              ot_ret_q <= StRetPipeC;
               state_q  <= StOtReq;
             end
           end
-          StRetSmF: begin
-            otr_q    <= '{op: APU_OBJTAB_OP_RETIRE,
-                         id: APU_VN_ID_TAG | op_q.q[
-                             role_slot(op_q, APU_VN_ROLE_RETIRE)],
-                         kind: act_q.obj_kind, default: '0};
-            ot_ret_q <= StRetCpl;
+          StRetPBR2: begin
+            ret_mh1_q <= op_cpl_i.rdata;
+            otr_q     <= '{op: APU_OBJTAB_OP_RETIRE,
+                          id: APU_VN_ID_TAG | op_q.q[
+                              role_slot(op_q, APU_VN_ROLE_RETIRE)],
+                          kind: act_q.obj_kind, default: '0};
+            ot_ret_q  <= StRetPipeC;
+            state_q   <= StOtReq;
+          end
+          // pipeline object dead: release the module pin(s); a ZDONE
+          // cpl means the module was a zombie — free its parked
+          // extent and INVAL its residency before continuing
+          StRetPipeC: begin
+            if (ot_cpl_i.status != APU_OBJTAB_OK) begin
+              result_q <= err_of(ot_cpl_i.status);
+              state_q  <= StRep;
+            end else begin
+              unp_ret_q <= StRetPNext;
+              state_q   <= StRetUnp;
+            end
+          end
+          StRetUnp: begin
+            otr_q    <= '{op: APU_OBJTAB_OP_UNPIN,
+                         id: {32'h0, ret_mh_q},
+                         kind: 6'(APU_VN_KIND_VK_SHADER_MODULE),
+                         default: '0};
+            ot_ret_q <= StRetUnpC;
             state_q  <= StOtReq;
           end
-          // G1c retire tail: ObjPay extent freed (sm_slot_q still
-          // holds the VS slot) -> UNREF VS, StRetSm does FS + RETIRE
-          StRetUnrV: begin
-            sm_op_q   <= APU_SH_SM_UNREF;
-            sm_ret_q  <= StRetSm;
+          StRetUnpC: begin
+            if (ot_cpl_i.status == APU_OBJTAB_ZDONE) begin
+              // last pin: the zombie module just retired — its cpl
+              // entry carries the parked pCode extent
+              opr_q    <= '{op: APU_OBJPAY_OP_FREE,
+                           addr: 32'(ot_cpl_i.entry.aux[63:48]) << 6,
+                           words: {16'h0, ot_cpl_i.entry.aux[47:32]},
+                           default: '0};
+              op_ret_q <= StRetUnpF;
+              state_q  <= StOpReq;
+            end else begin
+              state_q <= unp_ret_q;
+            end
+          end
+          StRetUnpF: begin
+            sm_op_q   <= APU_SH_SM_INVAL;
+            sm_pin_q  <= 1'b0;
+            sm_hnd_q  <= ret_mh_q;
+            sm_ret_q  <= StRetUnpI;
             state_q   <= StSmReq;
+          end
+          StRetUnpI: state_q <= unp_ret_q;
+          StRetPNext: begin
+            if (ret_gp_q) begin
+              ret_mh_q  <= ret_mh1_q;
+              unp_ret_q <= StRetPFree;
+              state_q   <= StRetUnp;
+            end else begin
+              state_q <= StRetPFree;
+            end
+          end
+          // module pins released: free the pipeline's ObjPay block
+          StRetPFree: begin
+            opr_q    <= '{op: APU_OBJPAY_OP_FREE,
+                         addr: ret_payb_q,
+                         words: {16'h0, ret_pw_q}, default: '0};
+            op_ret_q <= StRep;
+            state_q  <= StOpReq;
           end
 
           // ---- §12.3 C/5b: image create validation + mip walk ---------
@@ -5441,16 +5672,9 @@ module g6lc_apu_vnfront_fixture
   input  apu_objpay_cpl_t    op_cpl_i,
   output logic               sm_req_o,
   output apu_sh_sm_req_t     sm_req_pl_o,
+  input  logic               sm_gnt_i,
   input  logic               sm_cpl_i,
   input  apu_sh_sm_cpl_t     sm_cpl_pl_i,
-  output logic               sh_wr_en_o,
-  output logic [2:0]         sh_wr_slot_o,
-  output logic [15:0]        sh_wr_addr_o,
-  output logic [31:0]        sh_wr_data_o,
-  output logic               sh_commit_o,
-  output apu_sh_commit_t     sh_commit_pl_o,
-  input  logic               sh_c_done_i,
-  input  apu_sh_cpl_t        sh_c_done_pl_i,
   output logic               pg_req_valid_o,
   input  logic               pg_req_ready_i,
   output apu_vgpages_req_t   pg_req_o,

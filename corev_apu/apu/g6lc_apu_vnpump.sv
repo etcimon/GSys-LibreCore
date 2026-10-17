@@ -121,19 +121,14 @@ module g6lc_apu_vnpump
   input  logic            op_cpl_valid_i,
   output logic            op_cpl_ready_o,
   input  apu_objpay_cpl_t op_cpl_i,
-  // ShaderCore slot/stage/commit pass-through (vnfront inside, §7b)
+  // ShaderCore residency-manager pass-through (vnfront inside, G3b-ii)
+  // — sm_gnt_i marks the arbitrated accept cycle (vgtop priority:
+  // front > exec > ctl, gated by shcore's sm_busy_o during a FILL)
   output logic               sm_req_o,
   output apu_sh_sm_req_t     sm_req_pl_o,
+  input  logic               sm_gnt_i,
   input  logic               sm_cpl_i,
   input  apu_sh_sm_cpl_t     sm_cpl_pl_i,
-  output logic               sh_wr_en_o,
-  output logic [2:0]         sh_wr_slot_o,
-  output logic [15:0]        sh_wr_addr_o,
-  output logic [31:0]        sh_wr_data_o,
-  output logic               sh_commit_o,
-  output apu_sh_commit_t     sh_commit_pl_o,
-  input  logic               sh_c_done_i,
-  input  apu_sh_cpl_t        sh_c_done_pl_i,
   // aperture page allocator pass-through (vnfront inside, §7b)
   output logic               pg_req_valid_o,
   input  logic               pg_req_ready_i,
@@ -198,9 +193,6 @@ module g6lc_apu_vnpump
     assign op_req_valid_o = 1'b0; assign op_req_o = '0;
     assign op_cpl_ready_o = 1'b0;
     assign sm_req_o = 1'b0;        assign sm_req_pl_o = '0;
-    assign sh_wr_en_o = 1'b0;      assign sh_wr_slot_o = '0;
-    assign sh_wr_addr_o = '0;      assign sh_wr_data_o = '0;
-    assign sh_commit_o = 1'b0;     assign sh_commit_pl_o = '0;
     assign pg_req_valid_o = 1'b0;  assign pg_req_o = '0;
     assign pg_cpl_ready_o = 1'b0;
     assign ex_submit_valid_o = 1'b0; assign ex_submit_o = '0;
@@ -221,8 +213,7 @@ module g6lc_apu_vnpump
                     cr_req_ready_i | cr_cpl_valid_i | (|cr_cpl_i) |
                     cr_pay_ready_i |
                     op_req_ready_i | op_cpl_valid_i | (|op_cpl_i) |
-                    sm_cpl_i | (|sm_cpl_pl_i) |
-                    sh_c_done_i | (|sh_c_done_pl_i) |
+                    sm_gnt_i | sm_cpl_i | (|sm_cpl_pl_i) |
                     pg_req_ready_i | pg_cpl_valid_i | (|pg_cpl_i) |
                     ex_submit_ready_i | (|ex_done_seq_i) |
                     (|ex_fence_signaled_i) | (|ex_fence_lost_i) |
@@ -418,11 +409,8 @@ module g6lc_apu_vnpump
       .op_cpl_valid_i(op_cpl_valid_i), .op_cpl_ready_o(fr_op_cpl_rdy),
       .op_cpl_i(op_cpl_i),
       .sm_req_o(sm_req_o), .sm_req_pl_o(sm_req_pl_o),
+      .sm_gnt_i(sm_gnt_i),
       .sm_cpl_i(sm_cpl_i), .sm_cpl_pl_i(sm_cpl_pl_i),
-      .sh_wr_en_o(sh_wr_en_o), .sh_wr_slot_o(sh_wr_slot_o),
-      .sh_wr_addr_o(sh_wr_addr_o), .sh_wr_data_o(sh_wr_data_o),
-      .sh_commit_o(sh_commit_o), .sh_commit_pl_o(sh_commit_pl_o),
-      .sh_c_done_i(sh_c_done_i), .sh_c_done_pl_i(sh_c_done_pl_i),
       .pg_req_valid_o(pg_req_valid_o), .pg_req_ready_i(pg_req_ready_i),
       .pg_req_o(pg_req_o),
       .pg_cpl_valid_i(pg_cpl_valid_i), .pg_cpl_ready_o(pg_cpl_ready_o),
@@ -1620,16 +1608,9 @@ module g6lc_apu_vnpump_fixture
   input  apu_objpay_cpl_t op_cpl_i,
   output logic               sm_req_o,
   output apu_sh_sm_req_t     sm_req_pl_o,
+  input  logic               sm_gnt_i,
   input  logic               sm_cpl_i,
   input  apu_sh_sm_cpl_t     sm_cpl_pl_i,
-  output logic               sh_wr_en_o,
-  output logic [2:0]         sh_wr_slot_o,
-  output logic [15:0]        sh_wr_addr_o,
-  output logic [31:0]        sh_wr_data_o,
-  output logic               sh_commit_o,
-  output apu_sh_commit_t     sh_commit_pl_o,
-  input  logic               sh_c_done_i,
-  input  apu_sh_cpl_t        sh_c_done_pl_i,
   output logic               pg_req_valid_o,
   input  logic               pg_req_ready_i,
   output apu_vgpages_req_t   pg_req_o,

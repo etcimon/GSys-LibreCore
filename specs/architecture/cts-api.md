@@ -513,6 +513,34 @@ SEGMENT §7b/api — submission exception contract
                   record `-1`.
   NEXT ARTIFACT   `sampler2darray_fixed_fragment` guest verdict (run `out-a12`);
                   per-test fault attribution if the register grows a record FIFO.
+
+SEGMENT G3b-ii/api — module/pipeline residency on the guest
+  QUESTION        Does the G3b-ii residency mechanism (PayMem-backed SPIR-V,
+                  8-slot FILL/LRU cache, RETIRE_LAZY zombies, handle-keyed
+                  pipelines) survive the api.object_management churn set?
+  OBJECTIVE       Every `single`/`multiple_*`/`max_concurrent` module and
+                  pipeline case either Pass or honestly NotSupported.
+  ENVELOPE        as cts-info.md; bridge `bridge-g3bii` on the post-A1..A3
+                  pin-lifetime tree; run `g3bii-2026-10-17`
+                  (`.cache/cts/runs/g3bii-2026-10-17/`).
+  INPUTS          caselist `cts-g3bii-objmgmt-compute.txt` (40 objmgmt cases).
+  OBSERVATIONS    All 24 creatable-kind cases Pass — `shader_module`,
+                  `pipeline_cache`, `pipeline_layout_{empty,single}`,
+                  `graphics_pipeline`, `compute_pipeline` across
+                  `single`/`multiple_unique`/`multiple_shared`/
+                  `max_concurrent`; `max_concurrent.shader_module` holds
+                  >>8 live modules through the FILL/LRU churn with
+                  `device_faults=0`. The 16 `merged_pipeline_cache*`
+                  NotSupported are honest (cache merge unimplemented).
+  RESULT          **G3b-ii mechanism green on the guest** — eviction,
+                  re-fill, zombie retirement and handle-keyed pipelines all
+                  correct under real Mesa object churn. The remaining api
+                  fails are recorded-reference lifetime (see pipeline card),
+                  not residency.
+  LIMITS          `single.*`/`multiple_*` cover ≤16 objects;
+                  `max_concurrent` scales to the ObjTab bound; directory
+                  pressure past that is Aggregation-D sizing.
+  NEXT ARTIFACT   `api.command_buffers.*` / `descriptor_pool.*` with G3b-iii.
 ```
 
 ## Performance / area / scalability

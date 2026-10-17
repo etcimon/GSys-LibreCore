@@ -842,8 +842,10 @@ module tb_g6lc_apu_vgsys
           int unsigned rg = ntap(), ad = ntap(),
                        eh = ntap(), tmo = ntap();
           int unsigned t = 0;
-          while (apm[apix((ad >> 2))] != eh && t < tmo) begin
+          int unsigned cur = apm[apix((ad >> 2))];
+          while (cur != eh && t < tmo) begin
             @(posedge clk); t++;
+            cur = apm[apix((ad >> 2))];
           end
           check(apm[apix((ad >> 2))] == eh,
                 $sformatf("WAIT_HEAD ring%0d ap got=%08x exp=%08x",
@@ -860,8 +862,10 @@ module tb_g6lc_apu_vgsys
           int unsigned rg = ntap(), ad = ntap(), mask = ntap(),
                        want = ntap(), tmo = ntap();
           int unsigned t = 0;
-          while (((apm[apix((ad >> 2))] & mask) != want) && t < tmo)
-            begin @(posedge clk); t++; end
+          int unsigned cur = apm[apix((ad >> 2))] & mask;
+          while (cur != want && t < tmo)
+            begin @(posedge clk); t++;
+                  cur = apm[apix((ad >> 2))] & mask; end
           check((apm[apix((ad >> 2))] & mask) == want,
                 $sformatf("WAIT_IDLE ring%0d status=%08x mask=%0d want=%0d",
                           rg, apm[apix((ad >> 2))], mask, want));

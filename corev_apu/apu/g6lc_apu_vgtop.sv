@@ -204,7 +204,8 @@ module g6lc_apu_vgtop
     logic            pg_req_ready, pg_cpl_ready;
     apu_vgpages_req_t pg_req;
     apu_vgpages_cpl_t pg_cpl;
-    typedef enum logic [1:0] { OPG_PUMP, OPG_EXEC, OPG_CTL } opg_e;
+    typedef enum logic [1:0] { OPG_PUMP, OPG_EXEC, OPG_CTL,
+                               OPG_SH } opg_e;
     // raster is the third, lowest-priority vgpages requester
     typedef enum logic [1:0] { PGG_PUMP, PGG_CTL, PGG_RAST } pgg_e;
     opg_e opg_q;
@@ -293,17 +294,12 @@ module g6lc_apu_vgtop
     logic [31:0] vp_pay_d;
     logic        vp_op_v, vp_op_rdy, vp_op_cpl_rdy;
     apu_objpay_req_t vp_op_req;
-    // §7b/5a-ii: vnfront's ShaderCore + vgports (inside the pump)
-    logic        vp_sm_req;
+    // §7b/5a-ii: vnfront's ShaderCore + vgports (inside the pump).
+    // G3b-ii: the pump no longer stages module words — shcore's own
+    // FILL engine streams pCode from ObjPay; the sm port is arbitrated
+    // (vnfront > cmdexec > vgctl) and gated by shcore's sm_busy_o.
+    logic        vp_sm_req, vp_sm_gnt;
     apu_sh_sm_req_t vp_sm_req_pl;
-    logic        vp_sh_wr_en;
-    logic [2:0]  vp_sh_wr_slot;
-    logic [15:0] vp_sh_wr_addr;
-    logic [31:0] vp_sh_wr_data;
-    logic        vp_sh_commit;
-    apu_sh_commit_t vp_sh_commit_pl;
-    logic        vp_sh_cdone;
-    apu_sh_cpl_t vp_sh_cpl;
     logic        vp_pg_v, vp_pg_rdy, vp_pg_cpl_rdy;
     apu_vgpages_req_t vp_pg_req;
     logic        vp_ex_v, vp_ex_rdy;
@@ -345,11 +341,8 @@ module g6lc_apu_vgtop
       .op_cpl_ready_o(vp_op_cpl_rdy),
       .op_cpl_i(op_cpl),
       .sm_req_o(vp_sm_req), .sm_req_pl_o(vp_sm_req_pl),
+      .sm_gnt_i(vp_sm_gnt),
       .sm_cpl_i(vp_sm_cpl), .sm_cpl_pl_i(vp_sm_cpl_pl),
-      .sh_wr_en_o(vp_sh_wr_en), .sh_wr_slot_o(vp_sh_wr_slot),
-      .sh_wr_addr_o(vp_sh_wr_addr), .sh_wr_data_o(vp_sh_wr_data),
-      .sh_commit_o(vp_sh_commit), .sh_commit_pl_o(vp_sh_commit_pl),
-      .sh_c_done_i(vp_sh_cdone), .sh_c_done_pl_i(vp_sh_cpl),
       .pg_req_valid_o(vp_pg_v), .pg_req_ready_i(vp_pg_rdy),
       .pg_req_o(vp_pg_req),
       .pg_cpl_valid_i(pg_cpl_valid && pgg_q == PGG_PUMP),
@@ -416,6 +409,13 @@ module g6lc_apu_vgtop
     logic [1023:0]      ex_push;
     logic               ex_done_v;
     apu_sh_done_t       ex_done_pl;
+    // G3b-ii: cmdexec's residency-manager client (LOOKUP/FILL/UNPIN of
+    // module handles while assembling draws/dispatches)
+    logic               ex_sm_req, ex_sm_gnt;
+    apu_sh_sm_req_t     ex_sm_req_pl;
+    // G3b-ii: shcore's ObjPay client (module pCode fills)
+    logic               sc_op_v, sc_op_rdy;
+    apu_objpay_req_t    sc_op_req;
 
     assign work_valid_o = ex_work_v && !work_is_disp && !work_is_xfer &&
                           !work_is_draw;
@@ -440,6 +440,9 @@ module g6lc_apu_vgtop
       .op_req_o(ex_op_req),
       .op_cpl_valid_i(op_cpl_valid && opg_q == OPG_EXEC),
       .op_cpl_ready_o(ex_op_cpl_rdy), .op_cpl_i(op_cpl),
+      .sm_req_o(ex_sm_req), .sm_req_pl_o(ex_sm_req_pl),
+      .sm_gnt_i(ex_sm_gnt),
+      .sm_cpl_i(vp_sm_cpl), .sm_cpl_pl_i(vp_sm_cpl_pl),
       .work_valid_o(ex_work_v), .work_ready_i(ex_work_rdy),
       .work_o(work_o), .xf_o(ex_xfer), .rd_o(rs_rd),
       .work_done_i(ex_done_v),
@@ -534,17 +537,22 @@ module g6lc_apu_vgtop
       .omp_req_o(omp_req),
       .omp_rsp_valid_i(omp_rsp_v), .omp_rsp_i(omp_rsp));
 
-    // §6c: vgctl's RESET_CTX reap frees join as a third, lowest-priority
-    // requester
-    assign op_req_valid = vp_op_v | ex_op_v | vc_op_v;
+    // §6c: vgctl's RESET_CTX reap frees join as a third requester;
+    // G3b-ii: shcore's FILL engine is the fourth (its module streams
+    // lose to every interactive client)
+    assign op_req_valid = vp_op_v | ex_op_v | vc_op_v | sc_op_v;
     assign op_req = vp_op_v ? vp_op_req :
-                    ex_op_v ? ex_op_req : vc_op_req;
+                    ex_op_v ? ex_op_req :
+                    vc_op_v ? vc_op_req : sc_op_req;
     assign vp_op_rdy = vp_op_v & op_req_ready;
     assign ex_op_rdy = !vp_op_v & ex_op_v & op_req_ready;
     assign vc_op_rdy = !vp_op_v & !ex_op_v & vc_op_v & op_req_ready;
+    assign sc_op_rdy = !vp_op_v & !ex_op_v & !vc_op_v & sc_op_v &
+                       op_req_ready;
     assign op_cpl_ready = (opg_q == OPG_PUMP) ? vp_op_cpl_rdy :
-                          (opg_q == OPG_EXEC) ? ex_op_cpl_rdy
-                                              : vc_op_cpl_rdy;
+                          (opg_q == OPG_EXEC) ? ex_op_cpl_rdy :
+                          (opg_q == OPG_CTL)  ? vc_op_cpl_rdy
+                                              : 1'b1;
 
     // ---- vgpages -------------------------------------------------------------------
     // §7b/5a-ii: one aperture page allocator, arbitrated between the
@@ -571,7 +579,17 @@ module g6lc_apu_vgtop
     assign pg_cpl_ready = (pgg_q == PGG_PUMP) ? vp_pg_cpl_rdy :
                           (pgg_q == PGG_CTL)  ? vc_pg_cpl_rdy
                                               : rs_pg_cpl_rdy;
-    assign vc_sm_gnt = vc_sm_req & ~vp_sm_req;
+    // ---- ShaderCore sm arbiter (G3b-ii) ------------------------------
+    // Three requesters hold their request level until the grant marks
+    // the accepted cycle; shcore services one request at a time and a
+    // multi-cycle FILL holds everyone off through sm_busy_o.
+    // Priority: vnfront > cmdexec > vgctl (reap traffic is
+    // background).
+    logic sh_sm_busy;
+    assign vp_sm_gnt = vp_sm_req & ~sh_sm_busy;
+    assign ex_sm_gnt = ex_sm_req & ~vp_sm_req & ~sh_sm_busy;
+    assign vc_sm_gnt = vc_sm_req & ~vp_sm_req & ~ex_sm_req &
+                       ~sh_sm_busy;
 
     // ---- ShaderCore ---------------------------------------------------------------
     // §7b/5a-ii: module slots (sm), pCode staging (wr_*) and pipeline
@@ -694,17 +712,25 @@ module g6lc_apu_vgtop
       .ShaderMembers(ShaderMembers), .ScratchBytes(ScratchBytes),
       .SlabBytes(SlabBytes), .ShaderBudget(ShaderBudget)) i_sh (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
-      .wr_en_i(vp_sh_wr_en), .wr_slot_i(vp_sh_wr_slot),
-      .wr_addr_i(vp_sh_wr_addr), .wr_data_i(vp_sh_wr_data),
-      .commit_i(vp_sh_commit), .commit_pl_i(vp_sh_commit_pl),
-      .c_busy_o(), .c_done_o(vp_sh_cdone), .c_done_pl_o(vp_sh_cpl),
+      // G3b-ii: module staging/commit is internal to the residency
+      // FILL engine now — the external ports are a TB backdoor
+      .wr_en_i(1'b0), .wr_slot_i('0), .wr_addr_i('0), .wr_data_i('0),
+      .commit_i(1'b0), .commit_pl_i('0),
+      .c_busy_o(), .c_done_o(), .c_done_pl_o(),
       .retire_i(1'b0), .retire_slot_i('0),
-      // §6c: vgctl's RESET_CTX reap joins the slot-manager port; the
-      // pump's one-cycle pulses win, vgctl level-holds its request
-      // until vc_sm_gnt marks the accepted cycle
-      .sm_req_i(vp_sm_req | vc_sm_req),
-      .sm_req_pl_i(vp_sm_req ? vp_sm_req_pl : vc_sm_req_pl),
+      // G3b-ii: three arbitrated requesters — vnfront (module/pipeline
+      // create), cmdexec (assembly resolves), vgctl (reap INVALs) —
+      // each holds its request until its gnt; a FILL in flight gates
+      // every grant through sm_busy_o
+      .sm_req_i(vp_sm_gnt | ex_sm_gnt | vc_sm_gnt),
+      .sm_req_pl_i(vp_sm_gnt ? vp_sm_req_pl :
+                  ex_sm_gnt ? ex_sm_req_pl : vc_sm_req_pl),
       .sm_cpl_o(vp_sm_cpl), .sm_cpl_pl_o(vp_sm_cpl_pl),
+      .sm_busy_o(sh_sm_busy),
+      .op_req_valid_o(sc_op_v), .op_req_ready_i(sc_op_rdy),
+      .op_req_o(sc_op_req),
+      .op_cpl_valid_i(op_cpl_valid && opg_q == OPG_SH),
+      .op_cpl_i(op_cpl),
       // G1b: the raster's VS/FS wave batches win the work port over
       // cmdexec dispatches; while a raster wave is issued/in flight
       // the sidebands (desc live-read by the LSU; push latched at
@@ -786,7 +812,8 @@ module g6lc_apu_vgtop
     // ---- objtab -------------------------------------------------------------------
     g6lc_apu_objtab #(.Enable(1'b1), .ObjEntries(ObjEntries),
                       .MaxCtx(ObjMaxCtx),
-                      .KindListKind(APU_VN_KIND_VK_DEVICE_MEMORY))
+                      .KindListKind(APU_VN_KIND_VK_DEVICE_MEMORY),
+                      .KindSweepPins(APU_VN_KIND_VK_SHADER_MODULE))
         i_tab (
       .clk_i(clk_i), .rst_ni(rst_ni), .testmode_i(testmode_i),
       .req_valid_i(ot_req_valid), .req_ready_o(ot_req_ready),
@@ -897,7 +924,8 @@ module g6lc_apu_vgtop
                   ex_cr_v ? CG_EXEC : CG_XFER;
         // §7b/5a-ii: ObjPay/vgpages grant owners, same latch scheme
         if (op_req_valid && op_req_ready)
-          opg_q <= vp_op_v ? OPG_PUMP : ex_op_v ? OPG_EXEC : OPG_CTL;
+          opg_q <= vp_op_v ? OPG_PUMP : ex_op_v ? OPG_EXEC :
+                   vc_op_v ? OPG_CTL : OPG_SH;
         if (pg_req_valid && pg_req_ready)
           pgg_q <= vp_pg_v ? PGG_PUMP : vc_pg_v ? PGG_CTL : PGG_RAST;
         // raster wave in flight on the shcore work port

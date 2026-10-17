@@ -1,0 +1,3 @@
+dEQP-VK.compute.pipeline.basic.pkadd_immediate
+dEQP-VK.compute.pipeline.basic.undefined_values
+dEQP-VK.compute.pipeline.basic.indirect_after_base_dispatch

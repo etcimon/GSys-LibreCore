@@ -62,7 +62,12 @@ module g6lc_apu_objtab
   // kind linked into the global SCAN_OVL list — must equal
   // g6lc_apu_vn_pkg::APU_VN_KIND_VK_DEVICE_MEMORY (kept a parameter
   // so this module needs no vn_pkg dependency)
-  parameter int unsigned KindListKind = 8
+  parameter int unsigned KindListKind = 8,
+  // G3b-ii: kind whose pins are owned by same-ctx pipelines
+  // (g6lc_apu_vn_pkg::APU_VN_KIND_VK_SHADER_MODULE) — a RESET_CTX
+  // kills the pipelines in the same sweep, so keeping a pinned module
+  // entry would leak it and its ObjPay extent; swept like unpinned.
+  parameter int unsigned KindSweepPins = 13
 ) (
   input  logic            clk_i,
   input  logic            rst_ni,
@@ -110,9 +115,9 @@ module g6lc_apu_objtab
       StAllocWrE, StAllocCtxDo, StAllocCtxRd, StAllocCtxWr,
       StAllocCtxHd, StAllocKindChk, StAllocKindRd, StAllocKindWr,
       StAllocKindHd, StAllocDWr, StAllocParChk, StAllocParW,
-      // RETIRE
+      // RETIRE / RETIRE_LAZY (StZombTomb = the lazy-tombstone step)
       StRetKindChk, StRetKill, StRetPush, StRetWb,
-      StRetTomb, StRetParChk, StRetDone,
+      StRetTomb, StRetParChk, StRetDone, StZombTomb,
       // unlink subroutine (prev/next of a dying entry, one list)
       StUnlPr, StUnlPrW, StUnlNChk, StUnlNr, StUnlNrW,
       // parent refcnt update subroutine
@@ -150,6 +155,9 @@ module g6lc_apu_objtab
     logic [15:0]        par_slot_q;
     logic [31:0]        alloc_bucket_q;
     logic [15:0]        alloc_gen_q;
+    // RETIRE_LAZY: the in-flight retire came from a zombie's last
+    // UNPIN -> the completion status is ZDONE, not OK
+    logic               ret_zdone_q;
     // unlink subroutine
     apu_objent_mem_t    unl_rec_q;   // the dying entry's record
     logic               unl_kind_q;  // 0 = ctx list, 1 = kind list
@@ -266,6 +274,16 @@ module g6lc_apu_objtab
     function automatic apu_objent_mem_t set_dead(apu_objent_mem_t r);
       r.live = 1'b0; return r;
     endfunction
+    function automatic apu_objent_mem_t set_zombie(
+        apu_objent_mem_t r);
+      r.pad7 = 1'b1; return r;
+    endfunction
+    // a zombie resolves only for PIN/UNPIN (the pipeline pins its
+    // modules may still hold); every other op sees it as dead
+    function automatic logic zomb_blk(apu_objent_mem_t r);
+      return r.pad7 && req_q.op != APU_OBJTAB_OP_PIN &&
+             req_q.op != APU_OBJTAB_OP_UNPIN;
+    endfunction
     function automatic apu_objent_mem_t set_ref(
         apu_objent_mem_t r, logic [15:0] v);
       r.refcnt = v; return r;
@@ -318,6 +336,7 @@ module g6lc_apu_objtab
         res_nogen_q <= 1'b0; res_st_q <= ResMiss; res_slot_q <= '0;
         res_rec_q <= '0; res_hdl_q <= 1'b0;
         hit_slot_q <= '0; wr_rec_q <= '0; wr_slot_q <= '0;
+        ret_zdone_q <= 1'b0;
         par_rec_q <= '0; par_slot_q <= '0;
         alloc_bucket_q <= '0; alloc_gen_q <= '0;
         unl_rec_q <= '0; unl_kind_q <= 1'b0;
@@ -397,7 +416,7 @@ module g6lc_apu_objtab
           // ERD of a handle-addressed slot (or READSLOT)
           res_rec_q  <= om_rsp_q.rec;
           res_slot_q <= res_id_q[15:0];
-          if (!om_rsp_q.rec.live ||
+          if (!om_rsp_q.rec.live || zomb_blk(om_rsp_q.rec) ||
               (!res_nogen_q &&
                om_rsp_q.rec.gen != res_id_q[31:16])) begin
             res_st_q <= res_nogen_q ? ResMiss : ResGen;
@@ -418,7 +437,11 @@ module g6lc_apu_objtab
           end else begin
             res_rec_q  <= om_rsp_q.rec;
             res_slot_q <= om_rsp_q.entry;
-            if (res_knd_q && om_rsp_q.rec.kind != req_q.kind) begin
+            if (zomb_blk(om_rsp_q.rec)) begin
+              res_st_q <= ResMiss;
+              state_q  <= res_ret_q;
+            end else if (res_knd_q &&
+                         om_rsp_q.rec.kind != req_q.kind) begin
               res_st_q <= ResKind;
               state_q  <= res_ret_q;
             end else begin
@@ -578,23 +601,34 @@ module g6lc_apu_objtab
                            entry: '0};
               state_q <= StCpl;
             end
-            APU_OBJTAB_OP_RETIRE: begin
+            APU_OBJTAB_OP_RETIRE, APU_OBJTAB_OP_RETIRE_LAZY: begin
               if (res_st_q != ResOk) begin
                 cpl_q   <= '{status: res_status(res_st_q), handle: '0,
-                             entry: '0};
-                state_q <= StCpl;
-              end else if (res_rec_q.pins != 8'h0) begin
-                cpl_q   <= '{status: APU_OBJTAB_PINNED, handle: '0,
                              entry: '0};
                 state_q <= StCpl;
               end else if (res_rec_q.refcnt != 16'h0) begin
                 cpl_q   <= '{status: APU_OBJTAB_BUSY_CHILDREN,
                              handle: '0, entry: '0};
                 state_q <= StCpl;
+              end else if (res_rec_q.pins != 8'h0 &&
+                           req_q.op == APU_OBJTAB_OP_RETIRE) begin
+                cpl_q   <= '{status: APU_OBJTAB_PINNED, handle: '0,
+                             entry: '0};
+                state_q <= StCpl;
+              end else if (res_rec_q.pins != 8'h0) begin
+                // G3b-ii RETIRE_LAZY: the id dies now (directory
+                // tombstone) but the entry survives as a zombie until
+                // the last UNPIN retires it
+                cpl_q   <= '{status: APU_OBJTAB_OK,
+                             handle: {res_rec_q.gen, res_slot_q},
+                             entry: ent_of(res_rec_q)};
+                om_call(APU_OMT_EWR, '0, '0, res_slot_q,
+                        set_zombie(res_rec_q), StZombTomb);
               end else begin
-                hit_slot_q <= res_slot_q;
-                par_slot_q <= res_rec_q.parent_slot;
-                rtk_par_q  <= 1'b0;
+                hit_slot_q  <= res_slot_q;
+                par_slot_q  <= res_rec_q.parent_slot;
+                rtk_par_q   <= 1'b0;
+                ret_zdone_q <= 1'b0;
                 unl_start(res_rec_q, 1'b0, StRetKindChk);
               end
             end
@@ -603,6 +637,19 @@ module g6lc_apu_objtab
                 cpl_q   <= '{status: res_status(res_st_q), handle: '0,
                              entry: '0};
                 state_q <= StCpl;
+              end else if (req_q.op == APU_OBJTAB_OP_UNPIN &&
+                           res_rec_q.pad7 && res_rec_q.pins <= 8'h1) begin
+                // last pin of a zombie: run the full retire sequence;
+                // the directory id was tombstoned by RETIRE_LAZY (or
+                // left for lazy invalidation on the handle form), so
+                // res_hdl_q := 1 suppresses the redundant DTOMB
+                res_rec_q   <= set_pins(res_rec_q, 8'h0);
+                res_hdl_q   <= 1'b1;
+                hit_slot_q  <= res_slot_q;
+                par_slot_q  <= res_rec_q.parent_slot;
+                rtk_par_q   <= 1'b0;
+                ret_zdone_q <= 1'b1;
+                unl_start(res_rec_q, 1'b0, StRetKindChk);
               end else begin
                 cpl_q <= '{status: APU_OBJTAB_OK,
                            handle: {res_rec_q.gen, res_slot_q},
@@ -756,10 +803,21 @@ module g6lc_apu_objtab
           end
         end
         StRetDone: begin
-          cpl_q   <= '{status: APU_OBJTAB_OK,
+          cpl_q   <= '{status: ret_zdone_q ? APU_OBJTAB_ZDONE
+                                          : APU_OBJTAB_OK,
                        handle: {res_rec_q.gen, hit_slot_q},
                        entry: ent_of(res_rec_q)};
+          ret_zdone_q <= 1'b0;
           state_q <= StCpl;
+        end
+        StZombTomb: begin
+          // RETIRE_LAZY zombie path: the entry was already marked;
+          // tombstone the directory id (handle-form requests leave
+          // the row for lazy invalidation, exactly like RETIRE)
+          if (!res_hdl_q)
+            om_call(APU_OMT_DTOMB, res_id_q, '0, '0, '0, StCpl);
+          else
+            state_q <= StCpl;
         end
 
         // ---------------- unlink subroutine -------------------------------
@@ -872,7 +930,9 @@ module g6lc_apu_objtab
             // ctx sharing the overflow head — keep it linked
             state_q <= StScanKeep;
           end else if (!scan_kids_q &&
-                      om_rsp_q.rec.pins != 8'h0) begin
+                      om_rsp_q.rec.pins != 8'h0 &&
+                      !om_rsp_q.rec.pad7 &&
+                      om_rsp_q.rec.kind != 6'(KindSweepPins)) begin
             pinned_q <= pinned_q + 16'h1;
             state_q  <= StScanKeep;
           end else begin
@@ -1020,7 +1080,8 @@ module g6lc_apu_objtab_fixture
 #(parameter bit          Enable       = 1'b0,
   parameter int unsigned ObjEntries   = 1024,
   parameter int unsigned MaxCtx       = 8,
-  parameter int unsigned KindListKind = 8) (
+  parameter int unsigned KindListKind = 8,
+  parameter int unsigned KindSweepPins = 13) (
   input  logic            clk_i,
   input  logic            rst_ni,
   input  logic            testmode_i,
@@ -1038,6 +1099,7 @@ module g6lc_apu_objtab_fixture
   input  apu_omt_rsp_t    omt_rsp_i
 );
   g6lc_apu_objtab #(.Enable(Enable), .ObjEntries(ObjEntries),
-                    .MaxCtx(MaxCtx), .KindListKind(KindListKind))
+                    .MaxCtx(MaxCtx), .KindListKind(KindListKind),
+                    .KindSweepPins(KindSweepPins))
       i_dut (.*);
 endmodule

@@ -89,7 +89,8 @@ ue_cpos_clear_srgb_1 ue_cpos_clear_rgba16f_1 \
 ue_cneg_clear_oob_1 ue_cpos_ctxkill_reuse_1 \
 ue_cpos_rb_mapafter_1 ue_cpos_ubo_bindfirst_1 \
 ue_cpos_evict_1 ue_cpos_reloc_hold_1 \
-ue_cneg_stale_mem_1 ue_donecol_1 ue_cpos_maxconc_1"
+ue_cneg_stale_mem_1 ue_donecol_1 ue_cpos_maxconc_1
+ue_cpos_modres_1"
 # G3b-i: the *full* negatives run on a small-geometry build of the
 # same RTL (ObjEntries=256, 256 KiB PayMem) so the FULL paths stay
 # covered while the default geometry is the big one.

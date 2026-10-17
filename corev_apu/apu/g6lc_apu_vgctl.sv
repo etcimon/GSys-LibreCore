@@ -270,6 +270,12 @@ module g6lc_apu_vgctl
     // back in the allocator)
     logic [5:0]   reap_kind_q;
     logic [63:0]  reap_aux_q, reap_size_q;
+    // G3b-ii: the swept entry's {gen,slot} (module INVAL needs the
+    // handle form) plus reap-path selectors — a module sweeps its
+    // pCode extent AND its residency line; a pipeline sweeps its
+    // module-descriptor/state block at aux[31:16] (aux[6] = graphics)
+    logic [15:0]  reap_gen_q, reap_slot_q;
+    logic         reap_inval_q, reap_ppipe_q;
 
     // bytes remaining in current read desc
     logic [31:0] rd_rem;
@@ -454,14 +460,24 @@ module g6lc_apu_vgctl
     assign op_cpl_ready_o = state_q == StReapOpCpl;
     // aux[63:32] = {base>>6[15:0], words[15:0]} — vnfront parks the
     // ObjPay extent's chunk index; the FREE port takes the word
-    // address back, so the packed base unparks with <<6
+    // address back, so the packed base unparks with <<6.  G3b-ii: a
+    // pipeline parks its block in aux[31:16] instead (state block +
+    // module descriptors) — aux[6] (graphics) picks the word count
     assign op_req_o = '{op: APU_OBJPAY_OP_FREE,
-                       addr: {16'h0, reap_aux_q[63:48]} << 6,
-                       words: {16'h0, reap_aux_q[47:32]},
+                       addr: reap_ppipe_q
+                             ? ({16'h0, reap_aux_q[31:16]} << 6)
+                             : ({16'h0, reap_aux_q[63:48]} << 6),
+                       words: reap_ppipe_q
+                              ? (reap_aux_q[6] ? 32'd48 : 32'd2)
+                              : {16'h0, reap_aux_q[47:32]},
                        default: '0};
     assign sm_req_o    = state_q == StReapSmReq;
-    assign sm_req_pl_o = '{op: APU_SH_SM_UNREF,
-                          slot: reap_aux_q[2:0]};
+    // G3b-ii: a swept module's residency line is invalidated by its
+    // {gen,slot} handle — the entry is already tombstoned, so no
+    // ObjTab walk is needed for the tag
+    assign sm_req_pl_o = '{op: APU_SH_SM_INVAL,
+                          handle: {reap_gen_q, reap_slot_q},
+                          default: '0};
 
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (!rst_ni) begin
@@ -490,6 +506,8 @@ module g6lc_apu_vgctl
         pg_exclh_q <= '0;
         pg_bytes_q <= '0; pg_ret_q <= StIdle;
         reap_kind_q <= '0; reap_aux_q <= '0; reap_size_q <= '0;
+        reap_gen_q <= '0; reap_slot_q <= '0;
+        reap_inval_q <= 1'b0; reap_ppipe_q <= 1'b0;
         ctx_kill_valid_o <= 1'b0; ctx_kill_id_o <= '0;
         for (int i = 0; i < REQW; i++) req_ram[i] <= '0;
         for (int i = 0; i < RESPW; i++) resp_ram[i] <= '0;
@@ -976,19 +994,36 @@ module g6lc_apu_vgctl
               6'(APU_VN_KIND_VK_DESCRIPTOR_SET_LAYOUT),
               6'(APU_VN_KIND_VK_PIPELINE_LAYOUT): begin
                 // ObjPay extent {base[15:0], words[15:0]} at aux[63:32]
-                state_q    <= StReapOpReq;
+                reap_ppipe_q <= 1'b0;
+                reap_inval_q <= 1'b0;
+                state_q      <= StReapOpReq;
               end
-              6'(APU_VN_KIND_VK_SHADER_MODULE),
+              6'(APU_VN_KIND_VK_SHADER_MODULE): begin
+                // G3b-ii: pCode extent at aux[63:32], then invalidate
+                // the module's residency line by {gen,slot}
+                reap_ppipe_q <= 1'b0;
+                reap_inval_q <= 1'b1;
+                state_q      <= StReapOpReq;
+              end
               6'(APU_VN_KIND_VK_PIPELINE): begin
-                // ShaderCore slot reference at aux[2:0]
-                state_q    <= StReapSmReq;
+                // G3b-ii: module-descriptor/state block at aux[31:16]
+                // (aux[6] = graphics -> 48 words; compute -> 2).  The
+                // pipeline's module pins die with the context's
+                // ObjTab entries — no per-module UNPIN needed here
+                reap_ppipe_q <= 1'b1;
+                reap_inval_q <= 1'b0;
+                state_q      <= StReapOpReq;
               end
               default: state_q <= StOtCpl;   // stateless kind
             endcase
           end
           StReapOpReq: if (op_req_ready_i) state_q <= StReapOpCpl;
-          // reclaim status is advisory — the object is already dead
-          StReapOpCpl: if (op_cpl_valid_i) state_q <= StOtCpl;
+          // reclaim status is advisory — the object is already dead;
+          // a module chains its residency INVAL after the extent free
+          StReapOpCpl: if (op_cpl_valid_i) begin
+            reap_inval_q <= 1'b0;
+            state_q      <= reap_inval_q ? StReapSmReq : StOtCpl;
+          end
           StReapSmReq: if (sm_gnt_i)       state_q <= StReapSmCpl;
           StReapSmCpl: if (sm_cpl_i)       state_q <= StOtCpl;
 
@@ -1184,6 +1219,8 @@ module g6lc_apu_vgctl
                   reap_kind_q <= ot_cpl_i.entry.kind;
                   reap_aux_q  <= ot_cpl_i.entry.aux;
                   reap_size_q <= ot_cpl_i.entry.size;
+                  reap_gen_q  <= ot_cpl_i.entry.gen;
+                  reap_slot_q <= ot_cpl_i.handle[15:0];
                   state_q     <= StReapDec;
                 end else begin
                   state_q <= StWrPrep;

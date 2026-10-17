@@ -591,7 +591,7 @@ module g6lc_apu_shmod
             fu_req = 1'b1; fu_we = 1'b1; fu_addr = {slot_q, clr_q};
             if (clr_q < 10'(MaxFuncs * MaxParams)) begin
               pt_req = 1'b1; pt_we = 1'b1;
-              pt_addr = {slot_q, clr_q[PTW-1:0]};
+              pt_addr = {slot_q, PTW'(clr_q)};
             end
           end
           S_HDR: begin

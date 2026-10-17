@@ -184,6 +184,9 @@ module tb_g6lc_apu_objtab;
   int          mf_fsk [$];   // flop top (max 32)
   int          mf_stk [$];   // DRAM stack
   int          m_bump;
+  // G3b-ii: zombie marks (RETIRE_LAZY'd, still pinned) — swept by
+  // RESET_CTX like a live entry but resolvable only to PIN/UNPIN
+  bit          me_zomb [ObjEntries];
   // ctx live lists, head = newest (queue front)
   int          m_ctxq [int][$];
   // global DEVICE_MEMORY (kind 8) list, front = newest — SCAN_OVL order
@@ -252,6 +255,7 @@ module tb_g6lc_apu_objtab;
       me_refcnt[i] = 0; me_pins[i] = 0; me_ctx[i] = 0;
       me_state[i] = '0;
       me_bind[i] = -1; me_boff[i] = '0; me_size[i] = '0; me_aux[i] = '0;
+      me_zomb[i] = 0;
     end
     mf_fsk.delete(); mf_stk.delete(); m_bump = 0;
     m_ctxq.delete(); m_memq.delete();
@@ -495,6 +499,111 @@ module tb_g6lc_apu_objtab;
     md_t[hb] = 1;
     xpect("readslot dead", mkr(APU_OBJTAB_OP_READSLOT, 64'(slot), 6'd0,
                                0, 0, 0, 0, 0, 0, 0), APU_OBJTAB_MISS);
+    cases++;
+
+    // ---- G3b-ii: RETIRE_LAZY zombie lifecycle ----
+    // a pinned entry is tombstoned immediately (id dies) but stays
+    // live as a zombie until the last UNPIN retires it with ZDONE
+    begin
+      int          zs, zg;
+      logic [63:0] zid;
+      zid = 64'hE000_0000_0000_0042;
+      xpect("lazy alloc", mkr(APU_OBJTAB_OP_ALLOC, zid, 6'd13, 0, 8'd1,
+                               0, 0, 0, 0, 0), APU_OBJTAB_OK);
+      st = m_alloc(zid, 6'd13, 64'h0, 8'd1, zs, zg);
+      check("lazy model", st == APU_OBJTAB_OK);
+      // two pipeline pins, as vkCreateGraphicsPipelines would take
+      xpect("lazy pin1", mkr(APU_OBJTAB_OP_PIN, hnd(zg, zs), 6'd13, 0,
+                             0, 0, 0, 0, 0, 0), APU_OBJTAB_OK);
+      xpect("lazy pin2", mkr(APU_OBJTAB_OP_PIN, hnd(zg, zs), 6'd13, 0,
+                             0, 0, 0, 0, 0, 0), APU_OBJTAB_OK);
+      me_pins[zs] = 2;
+      // plain RETIRE still refuses a pinned entry
+      xpect("lazy retire pinned",
+            mkr(APU_OBJTAB_OP_RETIRE, zid, 6'd13, 0, 0, 0, 0, 0, 0, 0),
+            APU_OBJTAB_PINNED);
+      // RETIRE_LAZY: OK now — the client id is dead immediately
+      op(mkr(APU_OBJTAB_OP_RETIRE_LAZY, zid, 6'd13, 0, 0, 0, 0, 0, 0,
+             0), c);
+      check("lazy retire ok", c.status == APU_OBJTAB_OK);
+      void'(m_probe(zid, hb, rb));
+      md_t[hb] = 1;
+      me_zomb[zs] = 1;
+      xpect("lazy lookup dead",
+            mkr(APU_OBJTAB_OP_LOOKUP, zid, 6'd13, 0, 0, 0, 0, 0, 0, 0),
+            APU_OBJTAB_MISS);
+      xpect("lazy dup dead", mkr(APU_OBJTAB_OP_ALLOC, zid, 6'd13, 0,
+                                 8'd1, 0, 0, 0, 0, 0),
+            APU_OBJTAB_OK);
+      // the re-alloc took a new slot/entry; keep the model honest
+      begin
+        int rs2, rg2;
+        st = m_alloc(zid, 6'd13, 64'h0, 8'd1, rs2, rg2);
+        check("lazy re-model", st == APU_OBJTAB_OK);
+        // drop it again at once (plain retire, unpinned)
+        xpect("lazy re-retire",
+              mkr(APU_OBJTAB_OP_RETIRE, zid, 6'd13, 0, 0, 0, 0, 0, 0,
+                  0), APU_OBJTAB_OK);
+        m_kill(rs2);
+        void'(m_probe(zid, hb, rb));
+        md_t[hb] = 1;
+      end
+      // non-PIN/UNPIN ops on the zombie handle refuse
+      xpect("lazy hnd blk",
+            mkr(APU_OBJTAB_OP_SETSTATE, hnd(zg, zs), 6'd13, 0, 0,
+                32'hFFFF_FFFF, 32'h1, 0, 0, 0), APU_OBJTAB_GEN);
+      // pins still resolve: first UNPIN drops to 1, entry survives
+      xpect("lazy unpin1",
+            mkr(APU_OBJTAB_OP_UNPIN, hnd(zg, zs), 6'd13, 0, 0, 0, 0, 0,
+                0, 0), APU_OBJTAB_OK);
+      me_pins[zs] = 1;
+      // last UNPIN runs the full retire — ZDONE, not OK
+      op(mkr(APU_OBJTAB_OP_UNPIN, hnd(zg, zs), 6'd13, 0, 0, 0, 0, 0, 0,
+             0), c);
+      check("lazy zdone", c.status == APU_OBJTAB_ZDONE);
+      check("lazy zdone hnd",
+            int'(c.handle[15:0]) == zs && int'(c.handle[31:16]) == zg);
+      me_pins[zs] = 0; me_zomb[zs] = 0;
+      m_kill(zs);
+      // retired for good: the handle form now misses too
+      xpect("lazy hnd dead",
+            mkr(APU_OBJTAB_OP_LOOKUP, hnd(zg, zs), 6'd13, 0, 0, 0, 0,
+                0, 0, 0), APU_OBJTAB_GEN);
+    end
+    cases++;
+
+    // ---- G3b-ii: RESET_CTX sweeps a zombie like a live entry ------
+    begin
+      int          zs2, zg2;
+      logic [63:0] zid2;
+      zid2 = 64'hE000_0000_0000_0057;
+      op(mkr(APU_OBJTAB_OP_ALLOC, zid2, 6'd13, 0, 8'd6, 0, 0, 0, 0,
+             0), c);
+      void'(m_alloc(zid2, 6'd13, 64'h0, 8'd6, zs2, zg2));
+      xpect("zom pin", mkr(APU_OBJTAB_OP_PIN, hnd(zg2, zs2), 6'd13, 0,
+                           0, 0, 0, 0, 0, 0), APU_OBJTAB_OK);
+      me_pins[zs2] = 1;
+      xpect("zom lazy",
+            mkr(APU_OBJTAB_OP_RETIRE_LAZY, zid2, 6'd13, 0, 0, 0, 0, 0,
+                0, 0), APU_OBJTAB_OK);
+      void'(m_probe(zid2, hb, rb));
+      md_t[hb] = 1;
+      me_zomb[zs2] = 1;
+      // sweep ctx 6: the zombie dies (zombies bypass the pinned skip)
+      op(mkr(APU_OBJTAB_OP_RESET_CTX, 0, 0, 0, 8'd6, 0, 0, 0, 0, 0), c);
+      check("zom sweep ok", c.status == APU_OBJTAB_OK);
+      // zombies are not counted as surviving pins
+      check("zom sweep pins", c.handle[15:0] == 16'h0);
+      me_zomb[zs2] = 0; me_pins[zs2] = 0;
+      m_kill(zs2);
+      // the slot is reusable again
+      xpect("zom realloc",
+            mkr(APU_OBJTAB_OP_ALLOC, 64'hE000_0000_0000_0099, 6'd13, 0,
+                8'd6, 0, 0, 0, 0, 0), APU_OBJTAB_OK);
+      st = m_alloc(64'hE000_0000_0000_0099, 6'd13, 64'h0, 8'd6, slot,
+                   gen);
+      check("zom re-model", st == APU_OBJTAB_OK);
+    end
     cases++;
 
     // ---- parent / child ----

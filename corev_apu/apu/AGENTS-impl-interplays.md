@@ -3902,6 +3902,24 @@ validation FAULT before any write (replaces the 64-bit need guard
 and closes the u32 wrap); the advertised queue is
 COMPUTE|TRANSFER-only with raster limits zeroed and resource
 counts bounded by the shared ObjTab (vn_device_profile.toml).
+Module residency (G3b-ii, 2026-10-17): vkCreateShaderModule parks
+pCode in an ObjPay extent (aux[63:32] chunk) and still fills a shmod
+slot for the commit scan — but the slot is now a *cache line*, not a
+lifetime.  ShaderCore owns module staging/commit internally: its
+FILL engine reads the parked extent through a fourth op_* client on
+the ObjPay arbiter, streams words into the shmod wr_* path and runs
+commit.  The sm_* port is three-way arbitrated (front > exec > ctl)
+and held while sm_busy.  Pipelines park module *handles* (compute
+block w0/1; graphics stage descriptors at w44..47), so cmdexec
+resolves handle -> slot with LOOKUP at dispatch/draw assembly, FILLs
+on miss (pin the slot while the record's work is outstanding, UNPIN
+at completion), and a fill fault is an execution-time fault under the
+fence contract — the work item retires undefined, the sticky fault
+register records {engine,code,pc,wave}, the submission continues.
+vkDestroyShaderModule is ObjTab RETIRE_LAZY: the id tombstones at
+once and, when a live pipeline still pins it, survives as a zombie
+that retires on the last UNPIN (ZDONE) — RESET_CTX sweeps zombies
+with the rest.
 ```
 
 ### What §16 still waits on (§12.3 phases B–D)

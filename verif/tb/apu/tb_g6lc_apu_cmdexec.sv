@@ -50,12 +50,27 @@ module tb_g6lc_apu_cmdexec;
   apu_cmdexec_work_t  ow_o;
   apu_cmdrec_req_t    oxcr_req;
   apu_objtab_req_t    oxot_req;
-  // §7b/5a-ii: ObjPay port + shcore dispatch sideband.  No bound
-  // descriptor sets in this TB, so the ObjPay request is never driven;
-  // work_done carries a constant OK payload.
+  // §7b/5a-ii: ObjPay port + shcore dispatch sideband.  G3b-ii made
+  // the op port real: dispatch assembly reads the pipeline's module
+  // block ({handle,{chunk,words}}) so a behavioural ObjPay answers,
+  // and the sm client gets a residency model (hit/miss/pin/LRU-lite)
   logic               xop_v, oop_v, xop_cr, oop_cr;
   apu_objpay_req_t    xop_req, oop_req;
+  apu_objpay_cpl_t    xop_cpl;
   apu_sh_done_t       w_done_pl;
+  // G3b-ii sm client: level-held req until gnt; 1-cycle model cpl
+  logic               xsm_v, xsm_cv = 1'b0;
+  apu_sh_sm_req_t     xsm_pl;
+  apu_sh_sm_cpl_t     xsm_cpl;
+  logic               osm_v;
+  // residency model state: 8 slots, handle->valid/pins/age
+  bit    m_rs_v   [8];
+  int    m_rs_h   [8];
+  int    m_rs_pin [8];
+  int    m_rs_age [8];
+  bit    m_fill_fault = 0;   // force the next FILL to a scan fault
+  int    m_fill_i = 0;       // FILL attempts so far
+  int    m_fill_fault_at = -1;  // fault the Nth FILL attempt
   logic [2:0]         dslot, odslot;
   apu_sh_desc_t       ddesc, oddesc;
   logic [5:0]         dpushn, odpushn;
@@ -87,7 +102,9 @@ module tb_g6lc_apu_cmdexec;
     .ot_req_valid_o(xot_v), .ot_req_ready_i(xot_r), .ot_req_o(xot_req),
     .ot_cpl_valid_i(xot_cv), .ot_cpl_ready_o(xot_cr), .ot_cpl_i(xot_cpl),
     .op_req_valid_o(xop_v), .op_req_ready_i(1'b1), .op_req_o(xop_req),
-    .op_cpl_valid_i(1'b0), .op_cpl_ready_o(xop_cr), .op_cpl_i('0),
+    .op_cpl_valid_i(xop_cv), .op_cpl_ready_o(xop_cr), .op_cpl_i(xop_cpl),
+    .sm_req_o(xsm_v), .sm_req_pl_o(xsm_pl),
+    .sm_gnt_i(xsm_v), .sm_cpl_i(xsm_cv), .sm_cpl_pl_i(xsm_cpl),
     .work_valid_o(w_v), .work_ready_i(w_r), .work_o(w_o),
     .work_done_i(w_done), .work_done_pl_i(w_done_pl),
     .disp_slot_o(dslot), .desc_o(ddesc),
@@ -107,6 +124,8 @@ module tb_g6lc_apu_cmdexec;
     .ot_cpl_valid_i(xot_cv), .ot_cpl_ready_o(oxot_cr), .ot_cpl_i(xot_cpl),
     .op_req_valid_o(oop_v), .op_req_ready_i(1'b1), .op_req_o(oop_req),
     .op_cpl_valid_i(1'b0), .op_cpl_ready_o(oop_cr), .op_cpl_i('0),
+    .sm_req_o(osm_v), .sm_req_pl_o(),
+    .sm_gnt_i(1'b0), .sm_cpl_i(1'b0), .sm_cpl_pl_i('0),
     .work_valid_o(ow_v), .work_ready_i(w_r), .work_o(ow_o),
     .work_done_i(w_done), .work_done_pl_i(w_done_pl),
     .disp_slot_o(odslot), .desc_o(oddesc),
@@ -203,11 +222,113 @@ module tb_g6lc_apu_cmdexec;
   always @(posedge clk) cycles++;
   always @(negedge clk) if (ow_v || oxcr_v || oxcr_cr || oxot_v ||
                             oxot_cr || oop_v || oop_cr || osub_r ||
+                            osm_v ||
                             odone !== '0 || ofsig !== '0 ||
                             oflost !== '0 || odslot !== '0 ||
                             oddesc !== '0 || odpushn !== '0 ||
                             odpush !== '0 || odl_v || odl_dead)
     $fatal(1, "disabled cmdexec active");
+
+  // ---- G3b-ii: behavioural ObjPay + residency-manager models ------
+  // exec reads pipeline module blocks ({handle,{chunk,words}}) from
+  // paymem — the TB writes them directly during setup.  The sm model
+  // mirrors shcore's residency table loosely: LOOKUP hit/miss, FILL
+  // takes the lowest free then the oldest unpinned slot (BUSY when
+  // all eight are pinned), UNPIN/INVAL bookkeeping.  One-cycle cpl.
+  logic [31:0] paymem [4096];
+  logic        xop_cv = 1'b0;
+  always_ff @(posedge clk or negedge rst_ni) begin
+    if (!rst_ni) begin
+      xop_cv <= 1'b0; xop_cpl <= '0;
+    end else begin
+      xop_cv <= 1'b0;
+      if (xop_v) begin
+        xop_cv  <= 1'b1;
+        xop_cpl <= '{status: APU_OBJPAY_OK,
+                     rdata: xop_req.op == APU_OBJPAY_OP_READ
+                            ? paymem[xop_req.addr[11:0]] : 32'h0,
+                     default: '0};
+      end
+    end
+  end
+
+  always_ff @(posedge clk or negedge rst_ni) begin
+    if (!rst_ni) begin
+      xsm_cv <= 1'b0; xsm_cpl <= '0;
+      for (int i = 0; i < 8; i++) begin
+        m_rs_v[i] = 0; m_rs_h[i] = 0; m_rs_pin[i] = 0; m_rs_age[i] = 0;
+      end
+    end else begin
+      xsm_cv <= 1'b0;
+      if (xsm_v) begin         // gnt == req: sole client, always idle
+        automatic int hit = -1, vic = -1, vage = -1;
+        for (int i = 0; i < 8; i++)
+          if (m_rs_v[i] && m_rs_h[i] == xsm_pl.handle) hit = i;
+        xsm_cv <= 1'b1;
+        unique case (xsm_pl.op)
+          APU_SH_SM_LOOKUP: begin
+            if (hit >= 0) begin
+              if (xsm_pl.pin) m_rs_pin[hit]++;
+              for (int i = 0; i < 8; i++)
+                if (m_rs_v[i] && i != hit && m_rs_age[i] < m_rs_age[hit])
+                  m_rs_age[i]++;
+              m_rs_age[hit] = 0;
+              xsm_cpl <= '{ok: 1'b1, busy: 1'b0, slot: 3'(hit),
+                           default: '0};
+            end else begin
+              xsm_cpl <= '{ok: 1'b0, busy: 1'b0, default: '0};
+            end
+          end
+          APU_SH_SM_FILL: begin
+            m_fill_i++;
+            for (int i = 0; i < 8; i++)
+              if (!m_rs_v[i] && vic < 0) vic = i;
+            if (vic < 0)
+              for (int i = 0; i < 8; i++)
+                if (m_rs_pin[i] == 0 &&
+                    (vage < 0 || m_rs_age[i] > vage)) begin
+                  vic = i; vage = m_rs_age[i];
+                end
+            if (hit >= 0) begin
+              if (xsm_pl.pin) m_rs_pin[hit]++;
+              xsm_cpl <= '{ok: 1'b1, busy: 1'b0, slot: 3'(hit),
+                           default: '0};
+            end else if (vic < 0) begin
+              xsm_cpl <= '{ok: 1'b0, busy: 1'b1, default: '0};
+            end else if (m_fill_fault ||
+                         m_fill_i - 1 == m_fill_fault_at) begin
+              m_fill_fault = 0;
+              xsm_cpl <= '{ok: 1'b0, busy: 1'b0,
+                           fault: '{code: 8'h11, default: '0},
+                           default: '0};
+            end else begin
+              m_rs_v[vic]   = 1;
+              m_rs_h[vic]   = xsm_pl.handle;
+              m_rs_pin[vic] = xsm_pl.pin ? 1 : 0;
+              for (int i = 0; i < 8; i++)
+                if (m_rs_v[i] && i != vic) m_rs_age[i]++;
+              m_rs_age[vic] = 0;
+              xsm_cpl <= '{ok: 1'b1, busy: 1'b0, slot: 3'(vic),
+                           default: '0};
+            end
+          end
+          APU_SH_SM_UNPIN: begin
+            if (m_rs_pin[xsm_pl.slot] > 0) begin
+              m_rs_pin[xsm_pl.slot]--;
+              xsm_cpl <= '{ok: 1'b1, busy: 1'b0, slot: xsm_pl.slot,
+                           default: '0};
+            end else begin
+              xsm_cpl <= '{ok: 1'b0, busy: 1'b0, default: '0};
+            end
+          end
+          default: begin       // INVAL
+            if (hit >= 0) m_rs_v[hit] = 0;
+            xsm_cpl <= '{ok: 1'b1, busy: 1'b0, default: '0};
+          end
+        endcase
+      end
+    end
+  end
 
   // watchdog pulse latch
   always @(posedge clk) if (dl_v) dl_seen <= 1'b1;
@@ -307,6 +428,7 @@ module tb_g6lc_apu_cmdexec;
   endfunction
 
   logic [31:0] cb_h, pipe_h, dset_h, buf0_h, buf1_h;
+  logic [31:0] lay_h, gpipe_h, rp_h, fb_h, view_h, img_h;
   logic [15:0] seq0;
 
   task automatic submit(input logic [4:0] f, input int nb,
@@ -349,6 +471,15 @@ module tb_g6lc_apu_cmdexec;
     ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0002,
           APU_VN_KIND_VK_PIPELINE,
           .mask(32'hFFFF_FFFF), .value(ot_cpl.handle));
+    // G3b-ii: aux[31:16] = the pipeline's ObjPay block chunk — the
+    // block carries {module handle, {pCode chunk,words}} that the
+    // assembly resolves through the sm residency model.  Block at
+    // chunk 40 (word base 2560); the fake module parks at chunk 60.
+    paymem[(40 << 6) + 0] = 32'h0001_0009;
+    paymem[(40 << 6) + 1] = {16'd60, 16'd96};
+    ot_op(APU_OBJTAB_OP_SETAUX, 64'h1000_0000_0000_0002,
+          APU_VN_KIND_VK_PIPELINE,
+          .mask(32'hFFFF_FFFF), .value({16'd40, 16'h0}));
     ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0003,
           APU_VN_KIND_VK_DESCRIPTOR_SET);
     dset_h = ot_cpl.handle;
@@ -584,7 +715,145 @@ module tb_g6lc_apu_cmdexec;
       cases++;
     end
 
-    // ---- case 10: watchdog expiry = true device loss ----------------------
+    // ---- case 10: late completion still unpins (A1) --------------------
+    // Pins must not outlive a submission: pend_hold starves the done
+    // model so the dispatch's completion lands well after issue (the
+    // record's own StDsDone wait holds).  The pop->unpq->StUnpD drain
+    // must still release the slot before StDone — a stranded bundle
+    // pins the slot forever and a later module-create FILL starves on
+    // an all-pinned victim set (StShFillC -> StSmReq livelock).  After
+    // the fence every slot must be unpinned.
+    tb_drv = 1'b1;
+    cr_op(APU_CMDREC_OP_BEGIN, 10, 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, 10, 0,
+          mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, pipe_h,
+                APU_VN_KIND_VK_PIPELINE, 0));
+    cr_op(APU_CMDREC_OP_APPEND, 10, 0,
+          mkrec(APU_VN_TYPE_VK_CMD_DISPATCH_EXT, 0, 0, 32'h8));
+    cr_op(APU_CMDREC_OP_END, 10, 0, '0);
+    tb_drv = 1'b0;
+    begin
+      int w0 = work_i;
+      int pins = 0;
+      pend_hold = 1'b1;          // no dones — the walk parks in FinalDrain
+      submit(5'd9, 1, 8'd10, cb_h, 8'h0, 32'h0);
+      repeat (600) @(negedge clk);
+      for (int i = 0; i < 8; i++) pins += m_rs_pin[i];
+      check("fd work issued", work_i == w0 + 1);
+      check("fd pin held", pins == 1);
+      pend_hold = 1'b0;          // the done now lands inside FinalDrain
+      wait_fence(9, 8000);
+      pins = 0;
+      for (int i = 0; i < 8; i++) pins += m_rs_pin[i];
+      check("fd pins drained", pins == 0);
+      check("fd no lost", flost[9] === 1'b0);
+      cases++;
+    end
+
+    // ---- case 11: FS fill fault releases the VS pin (A2) ----------------
+    // Draw whose FS module FILL faults after the VS resolve already
+    // pinned its slot: the VS pin is not riding pinq (the draw never
+    // issued work) and must be released by the fault path.  Minimal
+    // rp/fb scaffolding gives the draw an active attachment.
+    tb_drv = 1'b1;
+    // graphics pipeline: aux[6] = graphics bit, aux[31:16] = ObjPay
+    // block chunk 52; module handles live at w44..47
+    ot_op(APU_OBJTAB_OP_LOOKUP, 64'h1000_0000_0000_0007,
+          APU_VN_KIND_VK_PIPELINE_LAYOUT);
+    lay_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0035,
+          APU_VN_KIND_VK_PIPELINE);
+    gpipe_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0035,
+          APU_VN_KIND_VK_PIPELINE,
+          .mask(32'hFFFF_FFFF), .value(lay_h));
+    ot_op(APU_OBJTAB_OP_SETAUX, 64'h1000_0000_0000_0035,
+          APU_VN_KIND_VK_PIPELINE,
+          .mask(32'hFFFF_FFFF), .value({16'd52, 9'h0, 1'b1, 6'h0}));
+    // {VS handle, VS {chunk,words}, FS handle, FS {chunk,words}}
+    paymem[(52 << 6) + 44] = 32'h0001_00A1;
+    paymem[(52 << 6) + 45] = {16'd61, 16'd96};
+    paymem[(52 << 6) + 46] = 32'h0001_00B2;
+    paymem[(52 << 6) + 47] = {16'd62, 16'd96};
+    // image + view + rp + fb for one colour attachment
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0010,
+          APU_VN_KIND_VK_IMAGE, .size(64'd4096));
+    img_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUX, 64'h1000_0000_0000_0010,
+          APU_VN_KIND_VK_IMAGE,
+          .mask(32'hFFFF_FFFF), .value(32'h0040_0040));   // {h,w}
+    ot_op(APU_OBJTAB_OP_SETBIND, 64'h1000_0000_0000_0010,
+          APU_VN_KIND_VK_IMAGE,
+          .mem_id(64'h1000_0000_0000_0006));
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h0000_0002_0000_0030,
+          APU_VN_KIND_VK_IMAGE_VIEW);
+    view_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUX, 64'h0000_0002_0000_0030,
+          APU_VN_KIND_VK_IMAGE_VIEW,
+          .mask(32'h0000_FFFF), .value({16'h0, img_h[15:0]}));
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0033,
+          APU_VN_KIND_VK_RENDER_PASS);
+    rp_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0033,
+          APU_VN_KIND_VK_RENDER_PASS,
+          .mask(32'hFFFF_FFFF), .value({16'd50, 16'd7}));
+    // rp block: 1 attachment {fmt,loadOp=LOAD,storeOp}, 1 subpass,
+    // colour ref -> att 0, no depth word (words = 7)
+    paymem[(50 << 6) + 0] = 32'd1;
+    paymem[(50 << 6) + 1] = 32'h0;
+    paymem[(50 << 6) + 2] = 32'h0;
+    paymem[(50 << 6) + 3] = 32'h0;
+    paymem[(50 << 6) + 4] = 32'd1;
+    paymem[(50 << 6) + 5] = 32'd1;
+    paymem[(50 << 6) + 6] = 32'd0;
+    ot_op(APU_OBJTAB_OP_ALLOC, 64'h1000_0000_0000_0034,
+          APU_VN_KIND_VK_FRAMEBUFFER);
+    fb_h = ot_cpl.handle;
+    ot_op(APU_OBJTAB_OP_SETAUXHI, 64'h1000_0000_0000_0034,
+          APU_VN_KIND_VK_FRAMEBUFFER,
+          .mask(32'hFFFF_FFFF), .value({16'd51, 16'd8}));
+    // fb block: {rp id 2w, attachmentCount, view id 2w, w, h, layers}
+    paymem[(51 << 6) + 0] = 32'h0000_0033;
+    paymem[(51 << 6) + 1] = 32'h1000_0000;
+    paymem[(51 << 6) + 2] = 32'd1;
+    paymem[(51 << 6) + 3] = 32'h0000_0030;
+    paymem[(51 << 6) + 4] = 32'h0000_0002;
+    paymem[(51 << 6) + 5] = 32'd64;
+    paymem[(51 << 6) + 6] = 32'd64;
+    paymem[(51 << 6) + 7] = 32'd1;
+    cr_op(APU_CMDREC_OP_BEGIN, 11, 0, '0);
+    cr_op(APU_CMDREC_OP_APPEND, 11, 0,
+          mkrec(APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT, gpipe_h,
+                APU_VN_KIND_VK_PIPELINE, 0));
+    begin
+      apu_cmdrec_rec_t rr = mkrec(
+          APU_VN_TYPE_VK_CMD_BEGIN_RENDER_PASS_EXT, rp_h,
+          APU_VN_KIND_VK_RENDER_PASS, 0);
+      rr.handle[1] = fb_h; rr.kind[1] = APU_VN_KIND_VK_FRAMEBUFFER;
+      cr_op(APU_CMDREC_OP_APPEND, 11, 0, rr, 16'd1);
+    end
+    cr_op(APU_CMDREC_OP_APPEND, 11, 0,
+          mkrec(APU_VN_TYPE_VK_CMD_DRAW_EXT, 0, 0, 32'd3));
+    cr_op(APU_CMDREC_OP_APPEND, 11, 0,
+          mkrec(APU_VN_TYPE_VK_CMD_END_RENDER_PASS_EXT, 0, 0, 0));
+    cr_op(APU_CMDREC_OP_END, 11, 0, '0);
+    tb_drv = 1'b0;
+    begin
+      int pins = 0;
+      m_fill_fault_at = m_fill_i + 1;   // the second FILL (FS) faults
+      submit(5'd10, 1, 8'd11, cb_h, 8'h0, 32'h0);
+      wait_fence(10, 8000);
+      for (int i = 0; i < 8; i++) pins += m_rs_pin[i];
+      check("fsflt pins drained", pins == 0);
+      check("fsflt no lost", flost[10] === 1'b0);
+      check("fsflt fault cnt",
+            i_dut.gen_on.fault_q[0][63:48] === 16'h0002);
+      check("fsflt fault code",
+            i_dut.gen_on.fault_q[0][39:32] === 8'h11);
+      cases++;
+    end
+
+    // ---- case 12: watchdog expiry = true device loss ----------------------
     // The engine never returns: pend_hold starves the done model, the
     // work-budget watchdog expires, the submission retires lost,
     // devlost pulses (vnpump marks the ctx's rings FATAL), dead stays
@@ -601,6 +870,7 @@ module tb_g6lc_apu_cmdexec;
     tb_drv = 1'b0;
     begin
       int w0 = work_i;
+      int fault_cnt0 = i_dut.gen_on.fault_q[0][63:48];
       pend_hold = 1'b1;
       submit(5'd7, 1, 8'd8, cb_h, 8'h0, 32'h0);
       wait_fence(7, 8000);
@@ -617,7 +887,7 @@ module tb_g6lc_apu_cmdexec;
       check("dead seq adv", done_seq == seq0 + 16'h1);
       // the fault register is NOT a device-loss record — unchanged
       check("wd no fault rec",
-            i_dut.gen_on.fault_q[0][63:48] === 16'h0001);
+            i_dut.gen_on.fault_q[0][63:48] === 16'(fault_cnt0));
       pend_hold = 1'b0;
       cases++;
     end

@@ -513,6 +513,12 @@ module g6lc_apu_objpay
         StCpl: if (cpl_ready_i) state_q <= StIdle;
         default: state_q <= StIdle;
         endcase
+// pragma translate_off
+        if ($test$plusargs("optrace") && state_q == StCpl)
+          $display("[op t=%0t] op=%0d addr=%08x words=%08x -> st=%0d base=%08x rdata=%08x",
+                   $time, req_q.op, req_q.addr, req_q.words,
+                   cpl_q.status, cpl_q.base, cpl_q.rdata);
+// pragma translate_on
       end
     end
 

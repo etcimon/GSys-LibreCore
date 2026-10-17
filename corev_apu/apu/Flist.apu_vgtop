@@ -14,7 +14,7 @@ ${CVA6_REPO_DIR}/vendor/pulp-platform/axi/src/axi_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_bus_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vg_pkg.sv
-${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objpay_pkg.sv
+// g6lc_apu_objpay_pkg arrives through Flist.apu_shcore (G3b-ii).
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_cmdrec_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_cmdexec_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_vnfront_pkg.sv

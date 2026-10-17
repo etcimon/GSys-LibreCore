@@ -1753,8 +1753,10 @@ class FrontModel:
         self.outstanding = []                  # (fence_slot, pin slots)
         self.work_hold = False                 # TB: gate work_ready_i
         # §7b/5a-ii: ShaderCore slot manager + module code shadow
-        self.sh_slots = [0] * SH_SLOTS         # users count per slot
-        self.sh_code = {}                      # slot -> pCode words
+        # G3b-ii: module pCode lives in ObjPay and ShaderCore slots
+        # are a residency cache keyed by the module handle — the
+        # shadow keeps only the words, keyed by {gen,slot}
+        self.sh_code = {}                      # module handle -> pCode
         # §7b/5a-ii: aperture pages.  `self.ap` may be bound to a
         # TransportModel so vgctl blobs and device memory share one
         # allocator; standalone runs use this bitmap.
@@ -1779,11 +1781,14 @@ class FrontModel:
         self.apm = {}
 
     # ---- ObjTab -------------------------------------------------------------
-    def resolve(self, idv, kind):
+    def resolve(self, idv, kind, allow_zomb=False):
         """-> (status, slot, entry).  Mirrors res_start: handle form iff
         id[63:32]==0 and the gen field is nonzero (a live generation is
         never 0, so a small zero-gen id is a client id and probes the
-        directory like any other id)."""
+        directory like any other id).  G3b-ii: a RETIRE_LAZY zombie
+        (entry alive, directory id tombstoned) resolves only for the
+        PIN/UNPIN ops that own its remaining pins — allow_zomb is the
+        model's zomb_blk bypass."""
         if idv == 0:
             return 'MISS', -1, None
         if idv < (1 << 32) and ((idv >> 16) & 0xFFFF) != 0:
@@ -1793,6 +1798,8 @@ class FrontModel:
             e = self.ent[slot]
             if e is None or e['gen'] != gen:
                 return 'GEN', -1, None
+            if e.get('zomb') and not allow_zomb:
+                return 'GEN', -1, None
             if kind and e['kind'] != kind:
                 return 'KIND', slot, e
             return 'OK', slot, e
@@ -1801,6 +1808,8 @@ class FrontModel:
             return 'MISS', -1, None
         e = self.ent[s]
         if e is None:
+            return 'MISS', -1, None
+        if e.get('zomb') and not allow_zomb:
             return 'MISS', -1, None
         if kind and e['kind'] != kind:
             return 'KIND', s, e
@@ -1828,6 +1837,7 @@ class FrontModel:
         self.gens[slot] = g
         self.ent[slot] = {'id': idv, 'kind': kind, 'gen': g,
                           'parent': par, 'refcnt': 0, 'pins': 0,
+                          'zomb': 0,
                           'state': 0, 'aux': 0, 'ctx': self.ctx,
                           'size': 0, 'bind_mem': -1, 'bind_mgen': 0,
                           'bind_off': 0}
@@ -1962,39 +1972,67 @@ class FrontModel:
         self.pay_top[cbuf] += len(words)
         return top
 
-    # ---- §7b/5a-ii: ShaderCore slot manager + aperture pages ---------
-    def sm_alloc(self):
-        for i, u in enumerate(self.sh_slots):
-            if u == 0:
-                self.sh_slots[i] = 1
-                return i
-        return None
-
-    def sm_ref(self, slot):
-        self.sh_slots[slot] += 1
-
-    def sm_unref(self, slot):
-        self.sh_slots[slot] -= 1
-        if self.sh_slots[slot] == 0:
-            self.sh_code.pop(slot, None)
-
-    def sh_commit_ok(self, slot):
-        """spirv_scan mirror of the g6lc_apu_shmod commit scan."""
+    # ---- G3b-ii: module code shadow + ObjTab pins --------------------
+    # ShaderCore residency is an invisible eight-slot cache — the
+    # .exp state never names a slot, so the shadow keeps only the
+    # parked pCode words, keyed by the module's ObjTab handle.  A
+    # pipeline create/destroy PINs/UNPINs the module entry so a
+    # RETIRE_LAZY'd module stays materialized (zombie) until the last
+    # pin drops, matching the ObjTab pad7 semantics.
+    def sh_scan_h(self, hnd):
+        """-> the commit-scan result for module handle, or None on a
+        fault (pipeline create + the module-create FILL both re-run
+        the scan)."""
         try:
-            spirv_scan.Scanner(list(self.sh_code.get(slot, []))).scan()
-            return True
-        except spirv_scan.Fault:
-            return False
-
-    def _sh_scan(self, slot):
-        """-> the scan result or None on a commit fault (G1c needs the
-        execution model and in/out masks, not just the verdict)."""
-        try:
-            sc = spirv_scan.Scanner(list(self.sh_code.get(slot, [])))
+            sc = spirv_scan.Scanner(list(self.sh_code.get(hnd, [])))
             sc.scan()
             return sc
         except spirv_scan.Fault:
             return None
+
+    def pin(self, hnd):
+        """ObjTab PIN mirror -> status."""
+        st, s, e = self.resolve(hnd, 0, allow_zomb=True)
+        if st != 'OK':
+            return st
+        e['pins'] = min(e['pins'] + 1, 0xFF)
+        return 'OK'
+
+    def unpin(self, hnd):
+        """ObjTab UNPIN mirror -> (status, zdone_entry).  A zombie's
+        last pin runs the retire sequence and reports ZDONE; the
+        caller frees the module's parked pCode extent."""
+        st, s, e = self.resolve(hnd, 0, allow_zomb=True)
+        if st != 'OK':
+            return st, None
+        if e['zomb'] and e['pins'] <= 1:
+            e['pins'] = 0
+            if e['parent'] >= 0 and self.ent[e['parent']] is not None:
+                self.ent[e['parent']]['refcnt'] -= 1
+            self._free_slot(s, e)
+            return 'ZDONE', e
+        e['pins'] = max(e['pins'] - 1, 0)
+        return 'OK', None
+
+    def retire_lazy(self, idv, kind):
+        """RETIRE_LAZY mirror -> (status, slot, zombied).  The
+        directory id dies now; a pinned entry survives as a zombie
+        until its last UNPIN (that UNPIN's cpl carries the entry for
+        the extent free), an unpinned one retires plainly."""
+        st, s, e = self.resolve(idv, kind)
+        if st != 'OK':
+            return st, s, False
+        if e['refcnt']:
+            return 'BUSY_CHILDREN', s, False
+        if e['pins']:
+            self.idmap.pop(e['id'], None)
+            e['id'] = 0
+            e['zomb'] = 1
+            return 'OK', s, True
+        if e['parent'] >= 0 and self.ent[e['parent']] is not None:
+            self.ent[e['parent']]['refcnt'] -= 1
+        self._free_slot(s, e)
+        return 'OK', s, False
 
     def _gpipe_build(self, idv, pay, par, out):
         """G1c/G2a mirror of vnfront's StGp* graphics-pipeline element
@@ -2141,42 +2179,47 @@ class FrontModel:
                 elif w == 1:
                     scdyn = 1
         lid = nx() | (nx() << 32)            # pipeline layout id
-        # StGpShk: VS commit em==VERTEX, FS commit em==FRAGMENT, refs
+        # G3b-ii StGpModL/C: VS then FS — ObjTab LOOKUP the module,
+        # FILL residency (the commit scan re-runs on the parked
+        # pCode), then ObjTab PIN for the pipeline's lifetime
         refs = []
-        vs = fs = fsm = None
+        mh = [None, None]
+        mc = [0, 0]
+        fsm = 0
         fdep = flate = 0
-        for em, mod in ((0, m0), (4, m1)):
-            mst, _ms, me = self.resolve(mod, KIND['VkShaderModule'])
-            sc = None
-            if mst == 'OK':
-                sc = self._sh_scan(me['aux'] & 7)
+        for si, (em, mod) in enumerate(((0, m0), (4, m1))):
+            mst, ms, me = self.resolve(mod, KIND['VkShaderModule'])
+            mhnd = ((me['gen'] << 16) | ms) if mst == 'OK' else None
+            sc = self.sh_scan_h(mhnd) if mhnd is not None else None
             if sc is None or sc.em != em:
-                for sl in reversed(refs):
-                    self.sm_unref(sl)
+                for rh in reversed(refs):
+                    self.unpin(rh)
                 return fail()
-            self.sm_ref(me['aux'] & 7)
-            refs.append(me['aux'] & 7)
-            if em == 0:
-                vs = me['aux'] & 7
-            else:
-                fs = me['aux'] & 7
+            if self.pin(mhnd) != 'OK':
+                for rh in reversed(refs):
+                    self.unpin(rh)
+                return fail()
+            refs.append(mhnd)
+            mh[si] = mhnd
+            mc[si] = (me['aux'] >> 32) & 0xFFFFFFFF
+            if em == 4:
                 fsm = sc.in_mask
                 fdep = 1 if sc.wr_fdepth else 0
                 flate = 1 if (sc.wr_fdepth or sc.has_kill) else 0
         lst, ls, le = self.resolve(lid, KIND['VkPipelineLayout'])
         if lst != 'OK':
-            for sl in reversed(refs):
-                self.sm_unref(sl)
+            for rh in reversed(refs):
+                self.unpin(rh)
             return fail()
-        pbase = self.pay_alloc(44)
+        pbase = self.pay_alloc(48)
         st, h, s = (0, 0, 0)
         if pbase is not None:
             st, h, s = self.alloc(idv, KIND['VkPipeline'], par)
         if pbase is None or st != 'OK':
             if pbase is not None:
-                self.pay_free(pbase, 44)
-            for sl in reversed(refs):
-                self.sm_unref(sl)
+                self.pay_free(pbase, 48)
+            for rh in reversed(refs):
+                self.unpin(rh)
             return fail()
         # word0 bit1 is the semantic front_ccw flag (1 = CCW); the
         # staged keep word is the raw VkFrontFace enum (CCW=0, CW=1)
@@ -2210,12 +2253,17 @@ class FrontModel:
         for i in range(4):
             words.append(bconst[i])
         words += vp + scw                   # w34..43
+        # w44/46 = VS/FS module ObjTab handle; w45/47 = the module's
+        # parked pCode {chunk,words} — cmdexec re-FILLs residency
+        # from them after an eviction
+        words += [mh[0] & 0xFFFFFFFF, mc[0],
+                  mh[1] & 0xFFFFFFFF, mc[1]]
         for i, w in enumerate(words):
             self.pay[pbase + i] = w
             out['payw'].append((pbase + i, w))
+        # aux[31:0] = {block chunk[15:0], 9'h0, gfx=1[6], 6'h0}
         self.setaux(h, 0xFFFF_FFFF,
-                    (((pbase >> 6) & 0xFFFF) << 16) | (1 << 6) |
-                    (fs << 3) | vs)
+                    (((pbase >> 6) & 0xFFFF) << 16) | 0x40)
         self.setauxhi(h, (le['gen'] << 16) | ls)
         return True
 
@@ -2927,21 +2975,33 @@ class FrontModel:
             e = self.ent[s]
             if e is None or e['ctx'] != ctx:
                 continue
-            if e['pins']:
+            if e['pins'] and not e.get('zomb'):
                 pin += 1
                 continue
+            # G3b-ii: a zombie (pinned RETIRE_LAZY'd module) sweeps
+            # like any entry — its pinning pipelines die in the same
+            # walk — and its resources release below
             # §7b/5a-ii: release aux-held resources the same way the
             # RETIRE arm does
-            if e['kind'] in (KIND['VkShaderModule'], KIND['VkPipeline']):
-                self.sm_unref(e['aux'] & 7)
-                if e['kind'] == KIND['VkPipeline'] and \
-                        (e['aux'] >> 6) & 1:
-                    # G1c/G2a: a graphics pipeline drops the FS ref
-                    # too and frees the 44-word ObjPay block at
-                    # aux[31:16]
-                    self.sm_unref((e['aux'] >> 3) & 7)
-                    self.pay_free(((e['aux'] >> 16) & 0xFFFF) << 6,
-                                  44)
+            if e['kind'] == KIND['VkShaderModule']:
+                # parked pCode extent + code shadow
+                self.pay_free(((e['aux'] >> 48) & 0xFFFF) << 6,
+                              (e['aux'] >> 32) & 0xFFFF)
+                self.sh_code.pop((e['gen'] << 16) | s, None)
+            elif e['kind'] == KIND['VkPipeline']:
+                # module handles ride the ObjPay block tail — UNPIN
+                # them; a ZDONE means a zombie module just retired
+                pblk = ((e['aux'] >> 16) & 0xFFFF) << 6
+                gfx = (e['aux'] >> 6) & 1
+                for mh in ([self.pay.get(pblk + 44, 0),
+                            self.pay.get(pblk + 46, 0)] if gfx
+                           else [self.pay.get(pblk, 0)]):
+                    st2, ze = self.unpin(mh)
+                    if st2 == 'ZDONE':
+                        self.pay_free(((ze['aux'] >> 48) & 0xFFFF) << 6,
+                                      (ze['aux'] >> 32) & 0xFFFF)
+                        self.sh_code.pop(mh, None)
+                self.pay_free(pblk, 48 if gfx else 2)
             elif e['kind'] == KIND['VkDeviceMemory']:
                 # §12.3 C: an unbacked extent frees nothing
                 if (e['aux'] >> 32) & 0xFFFFFFFF != UNBACKED:
@@ -3390,25 +3450,38 @@ class FrontModel:
                                 out['payw'].append((pbase + i, w))
                             self.setauxhi(h, ((pbase >> 6) << 16) | nw)
                 elif obj_kind == KIND['VkShaderModule']:
-                    # §7b/5a-ii: sm ALLOC -> stream blob[0] (pCode) into
-                    # the slot's staging -> ObjTab ALLOC ->
-                    # aux[2:0]=slot, aux[31:16]=nwords
-                    sh = self.sm_alloc()
-                    if sh is None:
+                    # G3b-ii: pCode parks in an ObjPay extent (the CS
+                    # blob streams in word-per-op-WRITE), the object
+                    # takes aux[63:32]={base>>6,words} and a
+                    # validating ShaderCore FILL re-runs the commit
+                    # scan — a scan fault fails the create after the
+                    # entry retires and the extent frees
+                    off, wn = rec['blob'][0]
+                    pbase = self.pay_alloc(wn)
+                    if pbase is None:
                         out['result'] = VK_ERR_OOM
                     else:
-                        st, h, slot = self.alloc(rec['q'][new], obj_kind,
-                                                 par)
+                        for i in range(wn):
+                            w = words[off + i] & 0xFFFFFFFF
+                            self.pay[pbase + i] = w
+                            out['payw'].append((pbase + i, w))
+                        st, h, slot = self.alloc(rec['q'][new],
+                                                 obj_kind, par)
                         if st != 'OK':
-                            self.sm_unref(sh)
+                            self.pay_free(pbase, wn)
                             out['result'] = self._err(st)
                         else:
-                            off, wn = rec['blob'][0]
-                            self.sh_code[sh] = [
-                                w & 0xFFFFFFFF
-                                for w in words[off:off + wn]]
-                            self.setaux(h, 0xFFFF0007,
-                                        ((wn & 0xFFFF) << 16) | sh)
+                            self.setauxhi(h,
+                                          ((pbase >> 6) << 16) |
+                                          (wn & 0xFFFF))
+                            self.sh_code[h] = [
+                                self.pay[pbase + i]
+                                for i in range(wn)]
+                            if self.sh_scan_h(h) is None:
+                                self.retire(rec['q'][new], obj_kind)
+                                self.pay_free(pbase, wn)
+                                self.sh_code.pop(h, None)
+                                out['result'] = VK_ERR_UNKNOWN
                 elif obj_kind == KIND['VkDeviceMemory']:
                     # 3d-b: pNext policy mirrors vnfront — import structs
                     # refused INVALID_EXTERNAL_HANDLE, export with
@@ -3727,13 +3800,17 @@ class FrontModel:
                                 continue
                             gp_err = not self._gpipe_build(
                                 idv, rec['pay'], par, out)
-                    # §7b/5a-ii: the staged payload is consumed per
+                    # G3b-ii: the staged payload is consumed per
                     # element {module id(2), spec presence(1), layout
-                    # id(2)}; spec/module/layout miss/commit fault ->
-                    # VK_ERROR_UNKNOWN + VK_NULL_HANDLE echo; the object
-                    # keeps aux[2:0]=slot, aux[63:32]=layout handle.
-                    # (G1c graphics creates ran their element path
-                    # above; the compute loop gets an empty list.)
+                    # id(2)}; spec/module/layout miss -> VK_NULL_HANDLE
+                    # echo.  The module is LOOKUP'd -> ObjTab PIN'd
+                    # for the pipeline's lifetime (no re-scan: the
+                    # create-time FILL already validated it), the
+                    # layout resolves to a handle, and a 2-word ObjPay
+                    # block {module hnd, module parked extent} parks
+                    # at aux[31:0]={chunk,16'h0}; aux[63:32]=layout
+                    # handle.  (G1c graphics creates ran their element
+                    # path above; the compute loop gets an empty list.)
                     gp_ct = session['T'].get('vkCreateGraphicsPipelines')
                     for ei, idv in enumerate(
                             blob_ids(slot) if ct != gp_ct else []):
@@ -3745,32 +3822,39 @@ class FrontModel:
                             out['null_mask'].add(ei)
                             continue
                         mid = pay[5 * ei] | (pay[5 * ei + 1] << 32)
-                        mst, _ms, me = self.resolve(
+                        mst, ms, me = self.resolve(
                             mid, KIND['VkShaderModule'])
                         if mst != 'OK':
                             out['result'] = VK_ERR_UNKNOWN
                             out['null_mask'].add(ei)
                             continue
-                        mslot = me['aux'] & 7
+                        mhnd = (me['gen'] << 16) | ms
+                        mpark = (me['aux'] >> 32) & 0xFFFFFFFF
+                        if self.pin(mhnd) != 'OK':
+                            out['result'] = VK_ERR_UNKNOWN
+                            out['null_mask'].add(ei)
+                            continue
                         lid = pay[5 * ei + 3] | (pay[5 * ei + 4] << 32)
                         lst, ls, le = self.resolve(
                             lid, KIND['VkPipelineLayout'])
-                        if lst != 'OK':
+                        pbase = self.pay_alloc(2) if lst == 'OK' \
+                            else None
+                        st, h, s = ('OK', 0, 0)
+                        if pbase is not None:
+                            st, h, s = self.alloc(idv, obj_kind, par)
+                        if lst != 'OK' or pbase is None or st != 'OK':
+                            if pbase is not None:
+                                self.pay_free(pbase, 2)
+                            self.unpin(mhnd)
                             out['result'] = VK_ERR_UNKNOWN
                             out['null_mask'].add(ei)
                             continue
-                        if not self.sh_commit_ok(mslot):
-                            out['result'] = VK_ERR_UNKNOWN
-                            out['null_mask'].add(ei)
-                            continue
-                        self.sm_ref(mslot)
-                        st, h, s = self.alloc(idv, obj_kind, par)
-                        if st != 'OK':
-                            self.sm_unref(mslot)
-                            out['result'] = self._err(st)
-                            out['null_mask'].add(ei)
-                            continue
-                        self.setaux(h, 0x7, mslot)
+                        self.pay[pbase] = mhnd
+                        self.pay[pbase + 1] = mpark
+                        out['payw'].append((pbase, mhnd))
+                        out['payw'].append((pbase + 1, mpark))
+                        self.setaux(h, 0xFFFF_FFFF,
+                                    ((pbase >> 6) & 0xFFFF) << 16)
                         self.setauxhi(h, (le['gen'] << 16) | ls)
                 else:
                     for idv in blob_ids(slot):
@@ -3837,7 +3921,13 @@ class FrontModel:
                         break
                     pay_w = (e['aux'] >> 32) & 0xFFFF
                     pay_b = ((e['aux'] >> 48) & 0xFFFF) << 6
-                st, s = self.retire(idv, obj_kind)
+                if obj_kind == KIND['VkShaderModule']:
+                    # G3b-ii: RETIRE_LAZY — the id tombstones now; a
+                    # pinned module zombifies until its last UNPIN
+                    st, s, zomb = self.retire_lazy(idv, obj_kind)
+                else:
+                    st, s = self.retire(idv, obj_kind)
+                    zomb = False
                 if st != 'OK':
                     out['result'] = self._err(st)
                     break
@@ -3851,17 +3941,35 @@ class FrontModel:
                 elif obj_kind == KIND['VkFence'] and aux < self.FENCES:
                     self.falloc[aux] = 0
                 elif obj_kind == KIND['VkShaderModule']:
-                    self.sm_unref(aux_full & 7)
+                    # an unzombied retire frees the pCode extent and
+                    # the code shadow now; a zombie's release rides
+                    # the last pipeline UNPIN's ZDONE (or RESET_CTX)
+                    if not zomb:
+                        self.pay_free(((aux_full >> 48) & 0xFFFF) << 6,
+                                      (aux_full >> 32) & 0xFFFF)
+                        self.sh_code.pop((e['gen'] << 16) | s, None)
                 elif obj_kind == KIND['VkPipeline']:
-                    self.sm_unref(aux_full & 7)
-                    if (aux_full >> 6) & 1:
-                        # G1c/G2a: graphics pipeline — drop the FS ref
-                        # and free the 44-word ObjPay block at
-                        # aux[31:16]
-                        self.sm_unref((aux_full >> 3) & 7)
-                        self.pay_free(
-                            ((aux_full >> 16) & 0xFFFF) << 6,
-                            44)
+                    # the ObjPay block at aux[31:16]<<6 carries the
+                    # pinned module handles (gfx: w44/w46, compute:
+                    # w0); each UNPIN may retire a zombie (ZDONE) —
+                    # free its parked pCode extent + code shadow;
+                    # then the block itself frees
+                    pblk = ((aux_full >> 16) & 0xFFFF) << 6
+                    if (aux_full >> 6) & 1:      # graphics pipeline
+                        hs = [self.pay.get(pblk + 44, 0),
+                              self.pay.get(pblk + 46, 0)]
+                        pbw = 48
+                    else:
+                        hs = [self.pay.get(pblk, 0)]
+                        pbw = 2
+                    for mh in hs:
+                        st2, ze = self.unpin(mh)
+                        if st2 == 'ZDONE':
+                            self.pay_free(
+                                ((ze['aux'] >> 48) & 0xFFFF) << 6,
+                                (ze['aux'] >> 32) & 0xFFFF)
+                            self.sh_code.pop(mh, None)
+                    self.pay_free(pblk, pbw)
                 elif obj_kind == KIND['VkDeviceMemory']:
                     # §12.3 C: an unbacked memory frees nothing
                     if (aux_full >> 32) & 0xFFFFFFFF != UNBACKED:
@@ -6995,14 +7103,28 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 srows[b['set']].append(
                     dict(binding=b['binding'], kind=kind,
                          count=b['idx'] + 1))
-        seg_a1 += [
-            ('vkCreateShaderModule', dict(
+        # G3b-ii modres: 12 identical-content modules (> 8 residency
+        # slots) — distinct handles, so the ShaderCore cache must
+        # evict/refill across the dispatch sweep
+        nmods = 12 if variant == 'modres' else 1
+        # modres needs 12+12 live ids: V[k] walks
+        # 0x4000_0000_1000 + i*0x1000_0001, so sm+m / pipe+m would land
+        # on the dsl/pl/pipe/dp/ds/cp/cb/fen ids — give the sweeps
+        # their own bases in the 0x7xxx window (distinct wire ids are
+        # all the hash ALLOC needs)
+        sm_h = ([0x7000_0000_2000 + m * 0x1000_0001
+                 for m in range(nmods)] if variant == 'modres'
+                else [V['sm']])
+        pipe_h = ([0x7100_0000_2000 + m * 0x1000_0001
+                   for m in range(nmods)] if variant == 'modres'
+                  else [V['pipe']])
+        for m in range(nmods):
+            seg_a1.append(('vkCreateShaderModule', dict(
                 device=V['dev'],
                 pCreateInfo=st('VkShaderModuleCreateInfo',
                                codeSize=len(vec['spv']) * 4,
                                pCode=vec['spv']),
-                pShaderModule=V['sm'])),
-        ]
+                pShaderModule=sm_h[m])))
         for k, s in enumerate(setnos):
             seg_a1.append(('vkCreateDescriptorSetLayout', dict(
                 device=V['dev'],
@@ -7057,12 +7179,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                         offset=0, size=len(vec['push']) * 4)]
                     if vec['push'] else []),
                 pPipelineLayout=V['pl'])),
-            ('vkCreateComputePipelines', dict(
+        ]
+        for pi in range(nmods):
+            seg_a1.append(('vkCreateComputePipelines', dict(
                 device=V['dev'], pipelineCache=0, createInfoCount=1,
                 pCreateInfos=[st(
                     'VkComputePipelineCreateInfo',
                     stage=st('VkPipelineShaderStageCreateInfo',
-                             stage=0x20, module=V['sm'], pName='main',
+                             stage=0x20,
+                             module=sm_h[pi],
+                             pName='main',
                              pSpecializationInfo=(
                                  st('VkSpecializationInfo',
                                     mapEntryCount=0, pMapEntries=[],
@@ -7070,8 +7196,15 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                                  if variant == 'spec' else None)),
                     layout=V['pl'], basePipelineHandle=0,
                     basePipelineIndex=0)],
-                pPipelines=[V['pipe']])),
-        ]
+                pPipelines=[pipe_h[pi]])))
+        if variant == 'modres':
+            # Vulkan permits destroying a module once its pipelines
+            # exist: RETIRE_LAZY tombstones the id now and keeps a
+            # zombie (pinned by pipe[MODRES_Z]) whose extent still
+            # backs FILLs — the dispatch sweep below must execute it
+            seg_a1.append(('vkDestroyShaderModule', dict(
+                device=V['dev'],
+                shaderModule=sm_h[5])))
         if variant == 'modgone':
             seg_a1.append(('vkDestroyShaderModule', dict(
                 device=V['dev'], shaderModule=V['sm'])))
@@ -7579,6 +7712,21 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 # UNSUPPORTED one cycle later -> DEVICE_LOST
                 seg_a2.append(('vkCmdDispatchIndirect', dict(
                     commandBuffer=V['cb'], buffer=bufs[0], offset=0)))
+            elif variant == 'modres':
+                # G3b-ii: dispatch all 12 pipelines in order, twice —
+                # pass 1 fills the 8 residency slots then evicts for
+                # 9..12; pass 2 re-FILLs the evicted handles.  pipe[5]
+                # rides a zombie module.  Outputs are identical, so
+                # the readback gate below is unchanged.
+                for _p2 in range(2):
+                    for m2 in range(nmods):
+                        seg_a2.append(('vkCmdBindPipeline', dict(
+                            commandBuffer=V['cb'], pipelineBindPoint=1,
+                            pipeline=pipe_h[m2])))
+                        seg_a2.append(('vkCmdDispatch', dict(
+                            commandBuffer=V['cb'], groupCountX=vec['gx'],
+                            groupCountY=vec['gy'],
+                            groupCountZ=vec['gz'])))
             elif variant != 'donecol':
                 # donecol emits its dispatch ahead of the collision
                 # pair above instead
@@ -8126,10 +8274,11 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 ]
             seg_c += [
                 ('vkDestroyPipeline', dict(
-                    device=V['dev'], pipeline=V['pipe'])),
-                ('vkDestroyPipelineLayout', dict(
-                    device=V['dev'], pipelineLayout=V['pl'])),
-            ]
+                    device=V['dev'],
+                    pipeline=pipe_h[pi]))
+                for pi in range(nmods)]
+            seg_c.append(('vkDestroyPipelineLayout', dict(
+                device=V['dev'], pipelineLayout=V['pl'])))
             for k in range(nsets):
                 seg_c.append(('vkDestroyDescriptorSetLayout', dict(
                     device=V['dev'], descriptorSetLayout=dsls[k])))
@@ -8137,7 +8286,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 seg_c.append(('vkDestroyDescriptorSetLayout', dict(
                     device=V['dev'],
                     descriptorSetLayout=V['dsl'] + 4)))
-            if variant != 'modgone':
+            if variant == 'modres':
+                # module 5 already RETIRE_LAZY'd above; the rest die
+                # here after their pipelines' UNPINs
+                for m in range(nmods):
+                    if m == 5:
+                        continue
+                    seg_c.append(('vkDestroyShaderModule', dict(
+                        device=V['dev'],
+                        shaderModule=sm_h[m])))
+            elif variant != 'modgone':
                 seg_c.append(('vkDestroyShaderModule', dict(
                     device=V['dev'], shaderModule=V['sm'])))
             for i in range(len(bufs)):

@@ -76,7 +76,18 @@ package g6lc_apu_objtab_pkg;
     // on unordered queues, so each publish must be atomic against the
     // other: whichever lands second either skips (bind sees a placed
     // base) or restarts as a relocation (map sees DEVBACKED).
-    APU_OBJTAB_OP_SETAUXHI_CAS = 4'd13
+    APU_OBJTAB_OP_SETAUXHI_CAS = 4'd13,
+    // G3b-ii: retire a possibly-pinned object.  The directory id is
+    // tombstoned NOW (the client handle dies immediately, exactly like
+    // RETIRE); with pins == 0 the entry retires exactly like RETIRE;
+    // with pins != 0 the entry stays live as a ZOMBIE (pad7 in the
+    // memory record): invisible to every resolve except PIN/UNPIN and
+    // the ctx/kind walks, retired automatically when UNPIN drops pins
+    // to 0.  That final transition completes the UNPIN with ZDONE so
+    // the requester reclaims the entry's external resources (ObjPay
+    // extent, ShaderCore residency).  RESET_CTX sweeps zombies like
+    // any entry.  refcnt != 0 still completes BUSY_CHILDREN.
+    APU_OBJTAB_OP_RETIRE_LAZY = 4'd14
   } apu_objtab_op_e;
 
   typedef enum logic [3:0] {
@@ -97,7 +108,12 @@ package g6lc_apu_objtab_pkg;
     APU_OBJTAB_SWEEP         = 4'd9,
     // §12.3 3d-d: SETAUXHI_CAS compare failed — another agent already
     // published a base; the returned entry carries it
-    APU_OBJTAB_CONFLICT      = 4'd10
+    APU_OBJTAB_CONFLICT      = 4'd10,
+    // G3b-ii: an UNPIN that released the last pin of a zombie
+    // (RETIRE_LAZY'd) entry and retired it.  Same payload shape as the
+    // final RETIRE completion (entry = the retired entry, handle =
+    // {gen,slot}) so the requester frees what the entry owned.
+    APU_OBJTAB_ZDONE         = 4'd11
   } apu_objtab_status_e;
 
   typedef struct packed {
@@ -225,7 +241,8 @@ package g6lc_apu_objtab_pkg;
     logic [15:0] pad2, refcnt;                // w2
     logic [15:0] parent_slot, gen;            // w1
     logic [7:0]  pad0, ctx, pins;
-    logic        pad7;                        // w0 bit 7 spare
+    logic        pad7;                        // w0 bit 7: zombie
+                                              // (RETIRE_LAZY + pins)
     logic [5:0]  kind;
     logic        live;                        // w0
   } apu_objent_mem_t;

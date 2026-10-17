@@ -446,6 +446,50 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
   image class, the texture-vertex patience, `max_concurrent.sampler` 317 s harness timeout,
   the precision budget, the 1.1 multiview feature, `device_properties` limits, the two unrun
   smoke cases). Owed: deqp-vk/profile hashes in the newer run records (rendered empty).
+- [x] **G3b-ii — module/pipeline residency (2026-10-17; Aggregation A, part A2).** §5a as
+  designed: `vkCreateShaderModule` parks the SPIR-V words in an ObjPay extent
+  (`aux[63:32]` chunk parking) and runs the create-time commit scan for validation;
+  ShaderCore owns an 8-slot residency table (`{valid, handle{gen,slot16}, lru, pins}`)
+  with a `sm_*` FILL engine that streams words from ObjPay through a third `op_*`
+  client and re-runs the commit scan on the victim slot (`BUSY` when every slot is
+  pinned). Pipelines store module handles, not slots; cmdexec resolves
+  `LOOKUP`→hit / `FILL`→wait at dispatch/draw assembly, fill-fault = §7b
+  execution-time fault. `APU_OBJTAB_OP_RETIRE_LAZY` tombstones a handle at once and
+  keeps a pinned entry as a zombie that retires on the last `UNPIN` (vgctl reaps
+  ZDONE); `vkDestroyShaderModule` uses it so a module may die under live pipelines.
+  The sm port is 3-way arbitrated front > exec > ctl gated by `sm_busy`.
+  **Executor pin lifetime (review defects A1–A3, all fixed):** `StFinalDrain` drains
+  pending UNPINs before `StCbRes`/`StDone`; faulting module-resolution paths release
+  `rec_pin_q`; the 16-deep pin/unpin rings gate work issue at
+  `(pinq_t_q - pinq_h_q) == PinQ` and stall pop→push when `unpq` is full (a dropped
+  bundle = a permanently pinned slot). Found by the TB sweep, not the RTL: the
+  `ue_cpos_modres_1` generator reused colliding handle values across object classes —
+  fixed in `vn_golden.py`, vectors regenerated (`ue_sm5_core` now at `--count 17`,
+  the 64 Ki-word decoder-stream window). **Evidence (local 5.020, `/tmp/g6lc-apu-*-v2`
+  + `.cache/g3b*/`):** cmdexec 12/60, objtab 16/101,566, shcore 11/18,791, vnfront
+  179+11+24+47, vnpump 87/263, vgctl 15/75, vndec 2,469/179,287, vgtop step-1 78/78 +
+  step-2 78/78 + small arm 2/2 (all incl. `ue_cpos_modres_1`), vgsys 83 PASS/0 FAIL +
+  14 negatives + small arm 2/2, sys-venus 31 sessions + 5 arms `cfail=0`, 5.008 lint
+  clean on all touched modules; shcore Enable=1 reduced-geometry synth **2,804,885
+  cells / 194,704 FF / 0 latches** (no pre-G3b-ii shcore baseline — fixture is new;
+  the g3a `shw-1s` runs measured shwave only); Enable=0 inert (0 cells); freshness:
+  `gen_vn_tables --audit-profile` unchanged 7 findings, `gen_dmprog --check` and
+  `gen_sfu_tables --check` fresh. **Guest (`g3bii-2026-10-17`, two chunks,
+  `device_faults=0`, `.cache/cts/runs/g3bii-2026-10-17/NOTES.md`):** every
+  api.object_management module/pipeline case **Pass** — `shader_module`,
+  `pipeline_cache`, `pipeline_layout_*`, `graphics_pipeline`, `compute_pipeline` over
+  `single`/`multiple_unique`/`multiple_shared`/`max_concurrent` (the >8-slot
+  eviction oracle) — plus 16 honest `merged_pipeline_cache*` NotSupported;
+  api.pipeline 5 Pass / 2 Fail / 2 NS; compute.pipeline.basic 2 Pass / 48 Fail /
+  29 NS / 1 Crash (`indirect_after_base_dispatch` — unimplemented DispatchIndirect
+  rejected at submit → ring FATAL → Mesa fast-abort, contract path verified; G3b-iii
+  scope). The 48 compute fails are shader-semantics defects clustered around
+  workgroups >1 invocation, Workgroup slab/barriers, SSBO robustness
+  (`read_unbound_ssbo` returns 0xBEBEBEBE poison), image↔SSBO copies, and control
+  flow — none are residency regressions; per-cluster diagnosis in the cts-compute
+  card. `deqp_sha256`/`profile_hash` fields filled for all runs. Owed:
+  smtrace/optrace probe removal cleanup; `apu_sh_sm_req_t.slot` 3-bit width
+  (ShaderSlots ≤ 8 until the width becomes a localparam — Aggregation D).
 - [ ] **CTS track (2026-10-14) — the Khronos Vulkan CTS becomes the acceptance oracle.**
   Source of record `specs/VK-GL-CTS` (lazy, shallow, `update = none`) pinned to
   `vulkan-cts-1.4.6.2` = `f6a29701220f34dd1407513bfe80d74ca7b392ce`; must-pass index

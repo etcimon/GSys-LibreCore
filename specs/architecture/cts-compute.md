@@ -151,6 +151,53 @@ EXCEPTION COMPUTE-X2 · Specialization constants (current refusal)
 | COMPUTE-H3 128/256 invocations | 1.0 minimum | high | `MaxWaves` ≥ 16 (8 lanes) or wider waves; measure RF area | the RF banking (W3.3) is not yet parameterized — do it there |
 | COMPUTE-H4 Zero-init | 1.3 ladder | medium | capability-gated slab clear | — |
 
+## Segment card (current)
+
+```text
+SEGMENT G3b-ii/compute
+  QUESTION        Does compute.pipeline.basic pass on the post-G3b-ii device —
+                  the first broad compute-semantics probe through real Mesa
+                  submissions (not golden tapes)?
+  OBJECTIVE       Classified verdicts for the 80-case compute.pipeline.basic
+                  set under the residency pipeline (module FILL→dispatch).
+  ENVELOPE        as cts-info.md; bridge `bridge-g3bii`, run
+                  `g3bii-2026-10-17` (two chunks; `.cache/cts/runs/
+                  g3bii-2026-10-17/NOTES.md`).
+  INPUTS          caselist `cts-g3bii-objmgmt-compute.txt` + remainder list.
+  CONTRACT        Pass or truthfully-unadvertised NotSupported; faults must
+                  land in `device_faults` and never hang the fence wait.
+  OBSERVATIONS    2 Pass (`empty_shader`, `image_atomic_op_local_size_1`),
+                  48 Fail, 29 NotSupported (spec-constants/f16/f16x/int16 and
+                  SPIR-V>1.3 families — honest), 1 Crash
+                  (`indirect_after_base_dispatch`: DispatchIndirect is
+                  G3b-iii scope; vnfront rejected the record → ring FATAL →
+                  Mesa aborted at iter 4096 — the §7b fast-abort path, not a
+                  hang). `device_faults=0` for the whole run: every failing
+                  dispatch retired nominally with wrong or no output.
+                  Discriminator: `local_size_1` passes, `local_size_8` fails —
+                  the failure mass concentrates at workgroup invocation > 1.
+  HYPOTHESES      (first-level, unverified locally) C1 workgroup geometry:
+                  `empty_workgroup_*`/`max_local_size_*` expect 1 find 0 —
+                  dispatch issues no store for multi-invocation groups.
+                  C2 Workgroup slab: `shared_var_*`/`shared_atomic_op_*`/
+                  `ssbo_local_barrier_*` — shared-var stores and barrier
+                  sequencing inside a workgroup. C3 SSBO robustness/arrays:
+                  `read_unbound_ssbo` returns 0xBEBEBEBE poison instead of
+                  robust-0; `write_multiple_*`/`ssbo_unsized_arr_*` land
+                  poison — descriptor-array/bounds resolution. C4
+                  image↔SSBO copies, image atomics>1 lane, `*_barrier_*`:
+                  zero output. C5 `branch_past_barrier`/`webgl_spirv_loop`/
+                  `vec2_nclamp_nan`: control-flow and FP corner cases.
+  DISCRIMINATOR   rerun one member per cluster solo with
+                  `G6LC_APU_DEBUG=1` wave trace; the tapes only exercise
+                  ≤8-lane golden sessions — add a ≥2-group workgroup vector.
+  RESULT          compute.basic is 2/80 green today; the deficits are shader
+                  semantics, not residency (all object-management cases Pass).
+  LIMITS          QPA failure text only; no per-case wave trace yet.
+  NEXT ARTIFACT   per-cluster smoke vectors + 1-case guest repros; COMPUTE-H1
+                  spec constants still gate the 27 NS cases.
+```
+
 ## Performance / area / scalability
 
 Compute is the roofline baseline (W1.5/W1.6): instructions per cycle per wave, LSU

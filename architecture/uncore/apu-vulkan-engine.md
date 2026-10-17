@@ -499,6 +499,102 @@ DRAM with on-chip caches.
     free list (`FREE_DESCRIPTOR_SET_BIT`), `DispatchIndirect`/`DispatchBase`; acceptance
     `api.command_buffers.*`, `api.descriptor_pool.*`, `api.descriptor_set.*`,
     `compute.indirect_dispatch.*`, `compute.device_group.*` (dispatch base).
+  - *G3b-ii landed (2026-10-17).* PayMem-backed SPIR-V modules, the 8-slot
+    `ShaderSlots` residency cache with `sm_*` FILL/LOOKUP (LRU over unpinned
+    slots, `BUSY` when the victim set is empty), `RETIRE_LAZY`/ZDONE zombies,
+    and pipelines keyed by module handle are all in. Executor pin lifetime is
+    closed: pending UNPINs drain after `StFinalDrain` before command-buffer
+    restore, faulting module-resolution paths release `rec_pin_q`, and the
+    16-deep pin/unpin rings gate work issue at `(pinq_t_q - pinq_h_q) == PinQ`.
+    Gate lines: cmdexec `PASS cases=12 checks=60` (directed fd/fsflt arms
+    included); shcore `PASS cases=11 checks=18791`; objtab `PASS cases=16
+    checks=101566`; vnfront `179+11+24+47` arms green; vgtop step-1 78/78 and
+    step-2 78/78 sessions (incl. `ue_cpos_modres_1`, 12 modules + 12 pipelines
+    through 8 slots, bit-exact); vgsys 83 PASS / 0 FAIL + 14 negatives +
+    small arm; sys-venus 31 sessions + 5 arms `cfail=0`; Verilator 5.008 lint
+    clean on cmdexec/vnfront/vnpump/vgtop/vgsys/shcore/objtab; shcore Enable=1
+    reduced-geometry synth 2 804 885 cells / 194 704 FF / 0 latches (no
+    pre-G3b-ii baseline — the fixture is new), Enable=0 inert (0 cells).
+    Guest CTS run `g3bii-2026-10-17` (129-case objmgmt+pipeline+compute.basic
+    caselist, two chunks; `.cache/cts/runs/g3bii-2026-10-17/NOTES.md`): every
+    object-management `shader_module`/`pipeline_layout_*`/`graphics_pipeline`/
+    `compute_pipeline`/`pipeline_cache` case **Pass** including all
+    `max_concurrent` variants (40-case group: 24 Pass, 16 honest
+    `merged_pipeline_cache` NotSupported); api.pipeline 5 Pass / 2 Fail /
+    2 NS; compute.pipeline.basic 2 Pass / 48 Fail / 29 NS / 1 Crash
+    (`indirect_after_base_dispatch` — unimplemented DispatchIndirect rejected
+    at submit, ring FATAL, Mesa fast-abort; G3b-iii scope). The compute.basic
+    fails are shader-semantics defects (multi-invocation workgroups, shared
+    vars/barriers, SSBO robustness, image↔SSBO), not residency regressions —
+    `device_faults=0` for the whole run. Known scalability limit
+    (Aggregation D item): `apu_sh_sm_req_t.slot` is 3 bits, so
+    `ShaderSlots <= 8` until the package width becomes a localparam.
+  - *G3b-iii decisions (2026-10-17).* Sizing comes from the CTS: `api.command_buffers.
+    allocate_many_primary` allocates **10 000** command buffers on 64-bit hosts, so
+    neither a per-buffer flop row nor an on-chip descriptor SRAM scales — the command
+    buffer becomes an ObjPay-resident object like every other kind.
+    - *Descriptor block.* `vkAllocateCommandBuffers` parks one 64-word ObjPay chunk per
+      buffer in `aux[63:32] = {chunk, 64}`: `w0 flags {recording, sealed, secondary,
+      one_time, simultaneous, rp_continue}`, `w1 count`, `w2 rec_head`, `w3 rec_tail`,
+      `w4 row` (next record row in the tail chunk), `w5 pay_head`, `w6 pay_tail`,
+      `w7 pay_top` (absolute word address of the next free payload word), `w8 pool handle`,
+      `w9 own handle`, `w10 pool_prev`, `w11 pool_next` (doubly linked per-pool chain, the
+      head parked in the pool's `aux[63:32]` — O(1) unlink for `vkFreeCommandBuffers`,
+      O(n) walk for pool reset/destroy), `w12..63` reserved. The `cmdrec` request field
+      `cbuf[7:0]` becomes `cbd[31:0]` = descriptor word address; `cmdrec` keeps a
+      `CbOpen = 4`-entry write-back descriptor cache (recording + executing buffers) and no
+      other per-buffer state. 10 000 buffers cost 2.5 MiB of the 16 MiB PayMem.
+    - *Record chain.* `CbChunkWords = 1024` (4 KiB, 16 ObjPay units): `w0 next` (word
+      address, 0 = end), `w1..15` reserved, rows `1..63` = one 16-word
+      `apu_cmdrec_rec_t` each (16-word aligned ⇒ one 64 B payload-cache line per record).
+      Chunks are allocated at `BEGIN` (first) and on row overflow; `RESET`/pool reset walks
+      and `FREE`s both chains. **Payload chain**: same chunk shape, `w0 next`, payload
+      words bump-allocated from `w1`; a record's payload never straddles a chunk (if
+      `pay_n` does not fit the remainder, a new chunk starts and the tail is wasted;
+      `pay_n ≤ 1023` is already guaranteed by `PAY_MAX = 512`), and `imm[7]` now stores the
+      **absolute PayMem word address** of the payload — the executor's `PAYREAD` becomes a
+      direct ObjPay read and the `cmdrec` `PAYREAD` op is retired.
+    - *Read side.* ObjPay gains `APU_OBJPAY_OP_READN` (`words ≤ 16`, within one
+      16-word-aligned line; one completion per word, `req_ready` low until the last) so a
+      record costs one line fill + 16 beats instead of 16 round trips; vgtop's `opg_q`
+      grant already stays latched for the burst. `cmdrec READ(idx)` keeps a sequential
+      cursor `{chunk, row}` per open descriptor — `idx == cur+1` advances (row++ or hop
+      `next` at row 63), `idx == 0` rewinds to `rec_head`, anything else walks from the head
+      (correctness path only) — and a 2-record prefetch FIFO fills behind the cursor while
+      the executor resolves the current record.
+    - *Secondary buffers.* `vkCmdExecuteCommands` is a WORK-class record whose payload is
+      the secondary handle list; the executor pushes `{cbd, cursor}` onto a one-deep stack
+      (Vulkan forbids nested secondaries), runs the secondary's records to `count`, pops.
+      No state restore: the spec leaves all primary state except the render-pass state
+      undefined after the call. A secondary with `RENDER_PASS_CONTINUE` inherits the open
+      render pass; `SIMULTANEOUS_USE` is accepted (records are read-only at execute).
+    - *Pools.* `vkResetCommandPool` = `cmdrec RESET_POOL(head)`: walk the pool chain,
+      `RESET` each descriptor, stream one interim completion per buffer carrying `w9` so
+      vnfront clears the buffer's ObjTab state (the RESET_CTX SWEEP pattern), final OK.
+      `vkDestroyCommandPool` = the same walk with the descriptors freed, then
+      `RETIRE_KIDS`. `vkTrimCommandPool` is a no-op (chains are already exact).
+    - *Descriptor-set free.* Pools created with `FREE_DESCRIPTOR_SET_BIT` carry a
+      first-fit free list of `{off[15:0], len[15:0]}` extents (`DsFreeMax = 64`, in the
+      pool's ObjPay block) with coalescing on free; allocation that cannot be satisfied
+      although the pool has room answers `VK_ERROR_FRAGMENTED_POOL`, which the spec permits
+      and `api.descriptor_pool.repeated_free_reset_*` tolerates. Pools without the bit keep
+      the bump allocator.
+    - *Events (pulled forward from A3).* `api.command_buffers.*` is gated on
+      `checkEventSupport` — `record_many_primary` records 5 000 `vkCmdSetEvent` +
+      `vkCmdResetEvent` pairs. An event is its ObjTab entry's `state[0]`: host
+      `vkSetEvent`/`vkResetEvent` = `SETSTATE`, `vkGetEventStatus` = `LOOKUP` →
+      `VK_EVENT_SET`/`VK_EVENT_RESET`. Device `vkCmdSetEvent`/`vkCmdResetEvent` are
+      BARRIER-class records (drain outstanding work, then `SETSTATE`); `vkCmdWaitEvents`
+      drains, then polls the listed events' `state[0]` every 64 cycles until all are set
+      (a host-set event arrives through vnfront's ring while the executor polls); the A1
+      watchdog still bounds an event that is never set. The three `vkCmd*Event*` commands
+      join the profile command set (`vn_device_profile.toml` → regenerated tables); the host
+      trio leaves `UNSUPPORTED`.
+    - *Indirect.* `DrawIndirect`/`DrawIndexedIndirect`/`DispatchIndirect` read their
+      `{count/x, instance/y, first/z, …}` words from the bound buffer through the
+      executor's aperture path at issue time (`drawCount ≤ maxDrawIndirectCount = 1` for
+      now, `stride` honoured); `DispatchBase` (core 1.1) adds the `baseGroup` triple to the
+      dispatch work's `imm` and shwave's `WorkgroupId` builtin (`cts-device-group.md`).
 
 ### 4b. Reply builder `g6lc_apu_vnrep` (interface of record, increment 3)
 
@@ -1146,6 +1242,37 @@ color/write masks, depth/stencil ops) into the tile buffer, resolve/write-out to
 bound image through DMA with the format conversions the profile advertises. Images are
 `ObjTab` objects with metadata (format, extent, tiling, layout); 64×64 is a test
 rectangle, not a limit. `Xfer` handles copies/clears/blits and MSAA resolve.
+
+### 9a. Image dimensionality — object contract first, sampling second (Aggregation A3 / B; decision 2026-10-17)
+
+CTS-1 `api.object_management.*.{image_1d, image_3d, image_view_1d, image_view_1d_arr,
+image_view_3d}` fail today because `vkCreateImage` refuses `VK_IMAGE_TYPE_1D/3D` with
+`FEATURE_NOT_PRESENT`; 1D/3D images and every view type except cube-array are core 1.0, so
+the refusal is a conformance defect, not an honest NotSupported. The contract splits in two:
+
+- **A3 — objects.** `vkCreateImage` accepts 1D, 2D and 3D; `vkCreateImageView` accepts
+  `1D, 1D_ARRAY, 2D, 2D_ARRAY, 3D, CUBE` (`CUBE_ARRAY` stays NotSupported until
+  `imageCubeArray` is advertised). The device layout keeps the **one** address function every
+  engine already implements, `off(layer, mip) = layer·layer_bytes + mip_off[mip]`: a 1D image
+  is a 2D image with `h = 1`; a **3D image is stored as `depth` layers each owning the full
+  mip chain**, and mip `m` uses layers `0 … max(d >> m, 1) − 1` (slice `z` of mip `m` is
+  `off(z, m)`); a cube is a 2D array of `6` layers (`6 × arrayLayers` for cube arrays later).
+  The 3D form over-allocates the lower mips (≤ 14 % for a full chain) in exchange for not
+  forking the address generator in vnfront/Xfer/shwave/golden; memory requirements,
+  `vkGetImageSubresourceLayout` (`depthPitch = layer_bytes`) and copies/clears follow it.
+  **ObjTab image entry**: `aux[53:45] layers` carries `depth` for 3D (arrayLayers is 1 by VU),
+  `state[20:19]` gains `itype[1:0]` (`VkImageType`; mask widens from `0x7FFFF`), nothing
+  else moves. **Descriptor record** (`g6lc_apu_sh_pkg` byte +15): `{rsvd1, dim[2:0],
+  mips[3:0]}` — `dim` 0 = 2D, 1 = 2D-array, 2 = 1D, 3 = 1D-array, 4 = 3D, 5 = cube,
+  6 = cube-array, 7 reserved; `+16 layers[15:0]` carries the view's layer count (= depth for
+  3D, `6 × n` for cubes). Limits move with the mechanism: `maxImageDimension1D = 4096`,
+  `maxImageDimension3D = 256`, `maxImageDimensionCube = 4096`, `maxImageArrayLayers` as today.
+- **B — sampling.** The shwave texture path decodes `dim`: 1D (`v = 0`, no `h` wrap), 3D
+  (third coordinate selects a slice, trilinear across slices), cube (major-axis face select
+  + `s,t` projection, seamless edges by clamp-to-face in v1), arrays by `layers`. Until B lands,
+  a sample through a 1D/3D/cube record is an execution-time fault under the A1 contract
+  (undefined result, sticky register) — never a hang — and the texture/glsl ledger rows show
+  it; `imageCubeArray`, `samplerAnisotropy`, `textureCompressionBC` stay unadvertised.
 
 ## 10. Verification and development-speed rules
 

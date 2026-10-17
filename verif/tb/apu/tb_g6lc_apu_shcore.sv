@@ -20,6 +20,7 @@
 module tb_g6lc_apu_shcore;
   import g6lc_apu_vn_pkg::*;
   import g6lc_apu_objtab_pkg::*;
+  import g6lc_apu_objpay_pkg::*;
   import g6lc_apu_sh_pkg::*;
 
   localparam int unsigned MAXW = 262144;
@@ -39,6 +40,15 @@ module tb_g6lc_apu_shcore;
   logic         retire; logic [2:0]  retire_slot;
   logic         sm_req; apu_sh_sm_req_t sm_pl;
   logic         sm_cpl; apu_sh_sm_cpl_t sm_cpl_pl;
+  logic         smb;               // residency manager busy (FILL)
+  // G3b-ii: behavioural ObjPay for the FILL port — parked module
+  // images live in paymem[chunk<<6 ..]; every op completes next cycle
+  logic         sop_v;
+  apu_objpay_req_t sop_req;
+  logic         sop_cv = 1'b0;
+  apu_objpay_cpl_t sop_cpl;
+  logic [31:0]  paymem [65536];
+  logic         off_sop_v;
   logic         work;   logic        work_ready;
   logic [31:0]  work_ctype;
   logic [8*32-1:0] work_imm;
@@ -80,9 +90,29 @@ module tb_g6lc_apu_shcore;
     .mem_rdata_i(mem_rdata), .mem_err_i(1'b0),
     .ot_req_valid_o(otb_v), .ot_req_ready_i(1'b1),
     .ot_req_o(otb_req),
-    .ot_cpl_valid_i(otb_cv), .ot_cpl_ready_o(), .ot_cpl_i(otb_cpl));
+    .ot_cpl_valid_i(otb_cv), .ot_cpl_ready_o(), .ot_cpl_i(otb_cpl),
+    .op_req_valid_o(sop_v), .op_req_ready_i(1'b1),
+    .op_req_o(sop_req),
+    .op_cpl_valid_i(sop_cv), .op_cpl_i(sop_cpl),
+    .sm_busy_o(smb));
 
-  // §12.3 3d-d: ObjTab READSLOT stub — slot named by the record
+  // G3b-ii: one-cycle ObjPay model — a FILL's stream reads the parked
+  // image; WRITE/ALLOC/FREE answer OK (the TB writes paymem directly)
+  always_ff @(posedge clk or negedge rst_n) begin
+    if (!rst_n) begin
+      sop_cv <= 1'b0; sop_cpl <= '0;
+    end else begin
+      sop_cv <= 1'b0;
+      if (sop_v) begin
+        sop_cv  <= 1'b1;
+        sop_cpl <= '{status: APU_OBJPAY_OK,
+                     rdata: sop_req.op == APU_OBJPAY_OP_READ
+                             ? paymem[sop_req.addr[15:0]] : 32'h0,
+                     default: '0};
+      end
+    end
+  end
+  // the resolved base — slot named by the record's memory-object
   // handle {gen:1,slot:1} is a live DEVICE_MEMORY with base 0, so the
   // resolved base equals the record's +28 offset (the .hex binding
   // address, same as the old absolute +0).
@@ -132,19 +162,22 @@ module tb_g6lc_apu_shcore;
     .mem_rdata_i('0), .mem_err_i(1'b0),
     .ot_req_valid_o(), .ot_req_ready_i(1'b0),
     .ot_req_o(),
-    .ot_cpl_valid_i(1'b0), .ot_cpl_ready_o(), .ot_cpl_i('0));
+    .ot_cpl_valid_i(1'b0), .ot_cpl_ready_o(), .ot_cpl_i('0),
+    .op_req_valid_o(off_sop_v), .op_req_ready_i(1'b0),
+    .op_req_o(),
+    .op_cpl_valid_i(1'b0), .op_cpl_i('0), .sm_busy_o());
 
   // continuous Enable=0 quiet monitor — sticky flag (fails is
   // written from the initial process; counted once at the end)
   logic off_bad;
+  wire  off_act = off_c_busy | off_c_done | (|off_c_pl) |
+                  off_sm_cpl | (|off_sm_pl) |
+                  off_ready | off_busy | off_done | (|off_pl) |
+                  off_mem_re | off_mem_we | (|off_mem_addr) |
+                  (|off_mem_wdata) | (|off_mem_wstrb) | off_sop_v;
   always_ff @(posedge clk or negedge rst_n) begin
     if (!rst_n) off_bad <= 1'b0;
-    else if (!off_bad &&
-             (off_c_busy | off_c_done | (|off_c_pl) |
-              off_sm_cpl | (|off_sm_pl) |
-              off_ready | off_busy | off_done | (|off_pl) |
-              off_mem_re | off_mem_we | (|off_mem_addr) |
-              (|off_mem_wdata) | (|off_mem_wstrb))) begin
+    else if (!off_bad && off_act) begin
       off_bad <= 1'b1;
       $display("FAIL Enable=0 activity at cycle %0d", cyc);
     end
@@ -251,18 +284,35 @@ module tb_g6lc_apu_shcore;
     @(negedge clk); retire = 0;
   endtask
 
-  // one slot-manager request; cpl pulses on the accept cycle's next
-  // clock, visible at the second negedge
-  task automatic sm_op(input apu_sh_sm_op_e op, input int slot,
+  // one residency-manager request — wait for the manager to go idle
+  // (a FILL streams+commits for many cycles), pulse the request, then
+  // wait out the completion
+  task automatic sm_op(input apu_sh_sm_req_t req,
                        output apu_sh_sm_cpl_t pl);
+    do @(negedge clk); while (smb);
+    sm_req = 1; sm_pl = req;
     @(negedge clk);
-    sm_req = 1; sm_pl = '{op: op, slot: slot[2:0]};
-    @(negedge clk);
-    sm_req = 0; pl = sm_cpl_pl;
-    checks++;
+    sm_req = 0; pl = '0;
     if (sm_cpl !== 1'b1) begin
-      fails++; $display("FAIL sm no completion op=%0d", op);
+      for (int g = 0; g < 2000000 && sm_cpl !== 1'b1; g++)
+        @(negedge clk);
     end
+    if (sm_cpl !== 1'b1) begin
+      checks++;
+      fails++; $display("FAIL sm no completion op=%0d", req.op);
+    end else begin
+      pl = sm_cpl_pl;
+    end
+  endtask
+
+  // park a vector module image in the behavioural ObjPay —
+  // {file}.hex carries the pCode words at wbuf[8 .. 8+n)
+  task automatic park(input string file, input int chunk,
+                      output int nwords);
+    $readmemh({shv, "/", file, ".hex"}, wbuf);
+    nwords = wbuf[0];
+    for (int i = 0; i < nwords; i++)
+      paymem[(chunk << 6) + i] = wbuf[8 + i];
   endtask
 
   // stage vector file + bindings + buffers for one slot
@@ -551,29 +601,112 @@ module tb_g6lc_apu_shcore;
     cmp("bad.commit.code", {24'h0, cpl.fault.code}, ebuf[0]);
     retire_do(2);
 
-    // 8. slot manager (§7b): ALLOC/REF/UNREF lifecycle, retire-at-0
-    //    reuse, underflow/dead-ref refusal, full pool
+    // 8. residency manager (G3b-ii): LOOKUP/FILL/UNPIN/INVAL over
+    //    ObjPay-parked pCode — free-slot fill, LOOKUP hit, LRU victim
+    //    choice, all-pinned BUSY then success after an unpin,
+    //    faulting-module fill, INVAL drop, UNPIN underflow
     cases++;
     begin
       apu_sh_sm_cpl_t spl;
-      sm_op(APU_SH_SM_ALLOC, 0, spl);
-      cmp("sm.alloc0.ok",   {31'h0, spl.ok}, 1);
-      cmp("sm.alloc0.slot", {29'h0, spl.slot}, 0);
-      sm_op(APU_SH_SM_REF, 0, spl);
-      cmp("sm.ref.ok",      {31'h0, spl.ok}, 1);
-      sm_op(APU_SH_SM_UNREF, 0, spl);          // users 2 -> 1
-      sm_op(APU_SH_SM_ALLOC, 0, spl);
-      cmp("sm.alloc1.slot", {29'h0, spl.slot}, 1);
-      sm_op(APU_SH_SM_UNREF, 0, spl);          // users 1 -> 0: retire
-      sm_op(APU_SH_SM_UNREF, 0, spl);
-      cmp("sm.underflow",   {31'h0, spl.ok}, 0);
-      sm_op(APU_SH_SM_REF, 0, spl);
-      cmp("sm.refdead",     {31'h0, spl.ok}, 0);
-      // fill the pool: slots 0,2..7 get users=1 (slot 1 still held)
-      for (int s = 0; s < 7; s++) sm_op(APU_SH_SM_ALLOC, 0, spl);
-      sm_op(APU_SH_SM_ALLOC, 0, spl);
-      cmp("sm.full",        {31'h0, spl.ok}, 0);
-      for (int s = 0; s < 8; s++) sm_op(APU_SH_SM_UNREF, s, spl);
+      logic [2:0]   sl42, slev;
+      int           nw;
+      // park bufcopy_1's image at ObjPay chunk 4 (word base 256)
+      park("bufcopy_1", 4, nw);
+      // cold miss -> FILL (pinned) -> resident; LOOKUP hits the slot
+      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
+             handle: 32'h0001_0042, chunk: '0, words: '0}, spl);
+      cmp("rs.miss",      {31'h0, spl.ok}, 0);
+      sm_op('{op: APU_SH_SM_FILL, pin: 1'b1, slot: '0,
+             handle: 32'h0001_0042, chunk: 16'd4,
+             words: nw[15:0]}, spl);
+      cmp("rs.fill.ok",   {31'h0, spl.ok}, 1);
+      cmp("rs.fill.busy", {31'h0, spl.busy}, 0);
+      sl42 = spl.slot;
+      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
+             handle: 32'h0001_0042, chunk: '0, words: '0}, spl);
+      cmp("rs.hit",       {31'h0, spl.ok}, 1);
+      cmp("rs.hit.slot",  {29'h0, spl.slot}, {29'h0, sl42});
+      cmp("rs.hit.em",    {28'h0, spl.entry.em},
+          {28'h0, APU_SH_EM_GLCOMPUTE});
+
+      // LRU victim: fill slots 1..7 with distinct unpinned modules
+      // (slot sl42 stays pinned) — a ninth FILL must evict the OLDEST
+      // unpinned resident, not the pinned one
+      for (int m = 1; m < 8; m++)
+        sm_op('{op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
+               handle: 32'h0001_0100 + 32'(m), chunk: 16'd4,
+               words: nw[15:0]}, spl);
+      sm_op('{op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
+             handle: 32'h0001_0108, chunk: 16'd4,
+             words: nw[15:0]}, spl);
+      cmp("rs.evict.ok",  {31'h0, spl.ok}, 1);
+      slev = spl.slot;
+      // the pinned handle survived the eviction
+      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
+             handle: 32'h0001_0042, chunk: '0, words: '0}, spl);
+      cmp("rs.pinkeep",   {31'h0, spl.ok}, 1);
+      // module 1 (oldest unpinned) was evicted
+      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
+             handle: 32'h0001_0101, chunk: '0, words: '0}, spl);
+      cmp("rs.evicted",   {31'h0, spl.ok}, 0);
+
+      // all-pinned BUSY: pin every resident slot once (LOOKUP pin=1
+      // on each surviving handle), then FILL must report busy
+      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b1, slot: '0,
+             handle: 32'h0001_0042, chunk: '0, words: '0}, spl);
+      for (int m = 2; m < 8; m++)
+        sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b1, slot: '0,
+               handle: 32'h0001_0100 + 32'(m), chunk: '0,
+               words: '0}, spl);
+      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b1, slot: '0,
+             handle: 32'h0001_0108, chunk: '0, words: '0}, spl);
+      sm_op('{op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
+             handle: 32'h0001_0200, chunk: 16'd4,
+             words: nw[15:0]}, spl);
+      cmp("rs.busy",      {31'h0, spl.busy}, 1);
+      cmp("rs.busy.ok",   {31'h0, spl.ok}, 0);
+      // unpin one slot (module 0x108's) — the retry succeeds there
+      sm_op('{op: APU_SH_SM_UNPIN, pin: 1'b0, slot: slev,
+             handle: '0, chunk: '0, words: '0}, spl);
+      cmp("rs.unpin",     {31'h0, spl.ok}, 1);
+      sm_op('{op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
+             handle: 32'h0001_0200, chunk: 16'd4,
+             words: nw[15:0]}, spl);
+      cmp("rs.fill2.ok",  {31'h0, spl.ok}, 1);
+      cmp("rs.fill2.slot",{29'h0, spl.slot}, {29'h0, slev});
+
+      // faulting module: bad image -> fill completes !ok with the
+      // scanner's fault and leaves no residency
+      park("bufcopy_bad_0", 5, nw);
+      sm_op('{op: APU_SH_SM_FILL, pin: 1'b0, slot: '0,
+             handle: 32'h0001_0300, chunk: 16'd5,
+             words: nw[15:0]}, spl);
+      cmp("rs.ffill.ok",  {31'h0, spl.ok}, 0);
+      cmp("rs.ffill.busy",{31'h0, spl.busy}, 0);
+      checks++;
+      if (spl.fault.code === 8'h0) begin
+        fails++; $display("FAIL rs.ffill.fault code=0");
+      end
+      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
+             handle: 32'h0001_0300, chunk: '0, words: '0}, spl);
+      cmp("rs.ffill.miss",{31'h0, spl.ok}, 0);
+
+      // INVAL drops residency; UNPIN on an unpinned slot refuses
+      sm_op('{op: APU_SH_SM_INVAL, pin: 1'b0, slot: '0,
+             handle: 32'h0001_0042, chunk: '0, words: '0}, spl);
+      cmp("rs.inval",     {31'h0, spl.ok}, 1);
+      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
+             handle: 32'h0001_0042, chunk: '0, words: '0}, spl);
+      cmp("rs.inval.miss",{31'h0, spl.ok}, 0);
+      sm_op('{op: APU_SH_SM_LOOKUP, pin: 1'b0, slot: '0,
+             handle: 32'h0001_0102, chunk: '0, words: '0}, spl);
+      slev = spl.slot;
+      sm_op('{op: APU_SH_SM_UNPIN, pin: 1'b0, slot: slev,
+             handle: '0, chunk: '0, words: '0}, spl);
+      cmp("rs.unpin.ok",  {31'h0, spl.ok}, 1);
+      sm_op('{op: APU_SH_SM_UNPIN, pin: 1'b0, slot: slev,
+             handle: '0, chunk: '0, words: '0}, spl);
+      cmp("rs.unpin.ufl", {31'h0, spl.ok}, 0);
     end
 
     // 9. Enable=0 quiet (continuous monitor + final check)

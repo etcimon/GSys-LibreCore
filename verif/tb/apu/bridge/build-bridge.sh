@@ -43,7 +43,7 @@ if [ -n "${G6LC_APU_DBG_TRACE:-}" ]; then DBGDEF+=(-DG6LC_APU_DEBUG); fi
 build_one() { # name, extra-verilator-args
   local name="$1"; shift
   t0=$SECONDS
-  if ! "$VERILATOR" --cc --exe --build --assert -j "$(nproc)" \
+  if ! "$VERILATOR" --cc --exe --build --assert -j "${G6LC_BRIDGE_JOBS:-$(nproc)}" \
       -O2 -CFLAGS "-O2 -I$OUT" --trace-fst \
       $WNO "${VLTS[@]}" "${DBGDEF[@]}" \
       -f "$ROOT/corev_apu/apu/Flist.apu_soc" \

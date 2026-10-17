@@ -6,7 +6,8 @@
 // composes (real shmod/shwave commit + dispatch behaviour).
 -f ${CVA6_REPO_DIR}/corev_apu/apu/Flist.apu_shcore
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_cmdrec_pkg.sv
-${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_objpay_pkg.sv
+// g6lc_apu_objpay_pkg arrives through Flist.apu_shcore (G3b-ii:
+// shcore's FILL client needs it before this flist's engines).
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_mp_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_cmdexec_pkg.sv
 ${CVA6_REPO_DIR}/corev_apu/apu/include/g6lc_apu_rast_pkg.sv

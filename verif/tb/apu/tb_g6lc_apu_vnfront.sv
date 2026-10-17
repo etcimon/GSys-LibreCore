@@ -101,19 +101,18 @@ module tb_g6lc_apu_vnfront;
   logic               fop_v, fop_r, fop_cv;
   apu_objpay_req_t    fop_req;
   apu_objpay_cpl_t    fop_cpl;
-  // §7b/5a-ii: front ShaderCore staging + slot manager + vgpages
-  logic               fsm_req;
-  apu_sh_sm_req_t     fsm_pl;
+  // §7b/5a-ii + G3b-ii: ShaderCore residency-manager clients —
+  // vnfront (module create/destroy) ahead of cmdexec (dispatch
+  // resolve), combinational grant gated by shcore's sm_busy_o; the
+  // completion broadcasts — only the granted client is in its
+  // wait-cpl state (mirrors vgtop's manager arbiter)
+  logic               fsm_req, xsm_v;
+  apu_sh_sm_req_t     fsm_pl, xsm_pl;
   apu_sh_sm_cpl_t     sm_cpl_pl;
   logic               sm_cpl;
-  logic               fsh_wr;
-  logic [2:0]         fsh_slot;
-  logic [15:0]        fsh_addr;
-  logic [31:0]        fsh_data;
-  logic               fsh_commit;
-  apu_sh_commit_t     fsh_cpl;
-  logic               sh_c_done;
-  apu_sh_cpl_t        sh_c_pl;
+  logic               shb;
+  wire                fsm_gnt = fsm_req & ~shb;
+  wire                xsm_gnt = xsm_v & ~fsm_req & ~shb;
   logic               fpg_v, fpg_r, fpg_cv;
   apu_vgpages_req_t   fpg_req;
   apu_vgpages_cpl_t   fpg_cpl;
@@ -135,9 +134,8 @@ module tb_g6lc_apu_vnfront;
   logic               o_payv, o_opv;
   logic [31:0]        o_payd;
   apu_objpay_req_t    o_opreq;
-  logic               o_smreq, o_shwr, o_shcom, o_pgv;
+  logic               o_smreq, o_pgv;
   apu_sh_sm_req_t     o_smpl;
-  apu_sh_commit_t     o_shcpl;
   apu_vgpages_req_t   o_pgreq;
 
   g6lc_apu_vnfront #(.Enable(1'b1), .Fences(Fences), .CbBufs(16))
@@ -163,11 +161,8 @@ module tb_g6lc_apu_vnfront;
     .op_cpl_valid_i(fop_cv), .op_cpl_ready_o(),
     .op_cpl_i(fop_cpl),
     .sm_req_o(fsm_req), .sm_req_pl_o(fsm_pl),
+    .sm_gnt_i(fsm_gnt),
     .sm_cpl_i(sm_cpl), .sm_cpl_pl_i(sm_cpl_pl),
-    .sh_wr_en_o(fsh_wr), .sh_wr_slot_o(fsh_slot),
-    .sh_wr_addr_o(fsh_addr), .sh_wr_data_o(fsh_data),
-    .sh_commit_o(fsh_commit), .sh_commit_pl_o(fsh_cpl),
-    .sh_c_done_i(sh_c_done), .sh_c_done_pl_i(sh_c_pl),
     .pg_req_valid_o(fpg_v), .pg_req_ready_i(fpg_r),
     .pg_req_o(fpg_req),
     .pg_cpl_valid_i(fpg_cv), .pg_cpl_ready_o(),
@@ -204,11 +199,8 @@ module tb_g6lc_apu_vnfront;
     .op_req_o(o_opreq),
     .op_cpl_valid_i(1'b0), .op_cpl_ready_o(), .op_cpl_i('0),
     .sm_req_o(o_smreq), .sm_req_pl_o(o_smpl),
+    .sm_gnt_i(1'b0),
     .sm_cpl_i(1'b0), .sm_cpl_pl_i('0),
-    .sh_wr_en_o(o_shwr), .sh_wr_slot_o(), .sh_wr_addr_o(),
-    .sh_wr_data_o(),
-    .sh_commit_o(o_shcom), .sh_commit_pl_o(o_shcpl),
-    .sh_c_done_i(1'b0), .sh_c_done_pl_i('0),
     .pg_req_valid_o(o_pgv), .pg_req_ready_i(1'b0),
     .pg_req_o(o_pgreq),
     .pg_cpl_valid_i(1'b0), .pg_cpl_ready_o(), .pg_cpl_i('0),
@@ -250,6 +242,9 @@ module tb_g6lc_apu_vnfront;
     .op_cpl_valid_i(xop_cv), .op_cpl_ready_o(), .op_cpl_i(xop_cpl),
     .work_valid_o(w_v), .work_ready_i(w_r), .work_o(w_o),
     .work_done_i(w_done), .work_done_pl_i(w_done_pl),
+    .sm_req_o(xsm_v), .sm_req_pl_o(xsm_pl),
+    .sm_gnt_i(xsm_gnt),
+    .sm_cpl_i(sm_cpl), .sm_cpl_pl_i(sm_cpl_pl),
     .disp_slot_o(xdisp_slot), .desc_o(xdesc),
     .push_n_o(xpush_n), .push_o(xpush),
     .done_seq_o(f_dseq),
@@ -345,23 +340,32 @@ module tb_g6lc_apu_vnfront;
     .pay_valid_i(fpay_v), .pay_data_i(fpay_d),
     .pay_ready_o(fpay_r));
 
-  // §7b/5a-ii: objpay shared front(0)/exec(1), same grant scheme
+  // §7b/5a-ii + G3b-ii: objpay shared front(0)/exec(1)/shcore-FILL(2),
+  // same grant scheme — a FILL streams its pCode words through here
   logic               op_vld, op_rdy, op_cvld;
   apu_objpay_req_t    op_req;
   apu_objpay_cpl_t    op_cpl;
-  logic               op_busy = 1'b0, op_own = 1'b0;
+  logic               op_busy = 1'b0;
+  logic [1:0]         op_own = '0;
+  logic               sop_v, sop_r;
+  apu_objpay_req_t    sop_req;
   wire   op_take = op_vld && op_rdy;
-  wire   op_sel  = op_busy ? op_own : ~fop_v;
-  assign op_vld = op_sel ? xop_v : fop_v;
-  assign op_req = op_sel ? xop_req : fop_req;
-  assign fop_r  = !op_sel && op_rdy;
-  assign xop_r  =  op_sel && op_rdy;
-  assign fop_cv = op_cvld && op_busy && !op_own;
-  assign xop_cv = op_cvld && op_busy &&  op_own;
+  wire   [1:0] op_sel = op_busy ? op_own
+                       : (fop_v ? 2'd0
+                          : (xop_v ? 2'd1 : 2'd2));
+  assign op_vld = op_sel == 2'd0 ? fop_v
+                : op_sel == 2'd1 ? xop_v : sop_v;
+  assign op_req = op_sel == 2'd0 ? fop_req
+                : op_sel == 2'd1 ? xop_req : sop_req;
+  assign fop_r  = op_sel == 2'd0 && op_rdy;
+  assign xop_r  = op_sel == 2'd1 && op_rdy;
+  assign sop_r  = op_sel == 2'd2 && op_rdy;
+  assign fop_cv = op_cvld && op_busy && op_own == 2'd0;
+  assign xop_cv = op_cvld && op_busy && op_own == 2'd1;
   assign fop_cpl = op_cpl;
   assign xop_cpl = op_cpl;
   always @(posedge clk or negedge rst_ni)
-    if (!rst_ni) begin op_busy <= 1'b0; op_own <= 1'b0; end
+    if (!rst_ni) begin op_busy <= 1'b0; op_own <= '0; end
     else if (op_take) begin op_busy <= 1'b1; op_own <= op_sel; end
     else if (op_cvld) op_busy <= 1'b0;
 
@@ -441,13 +445,20 @@ module tb_g6lc_apu_vnfront;
   // (the synth small screen rejects every vector module)
   g6lc_apu_shcore #(.Enable(1'b1)) i_shc (
     .clk_i(clk), .rst_ni(rst_ni), .testmode_i(1'b0),
-    .wr_en_i(fsh_wr), .wr_slot_i(fsh_slot),
-    .wr_addr_i(fsh_addr), .wr_data_i(fsh_data),
-    .commit_i(fsh_commit), .commit_pl_i(fsh_cpl),
-    .c_busy_o(), .c_done_o(sh_c_done), .c_done_pl_o(sh_c_pl),
+    // G3b-ii: staging/commit is internal to the FILL engine; the
+    // external ports are a backdoor the front no longer drives
+    .wr_en_i(1'b0), .wr_slot_i('0), .wr_addr_i('0), .wr_data_i('0),
+    .commit_i(1'b0), .commit_pl_i('0),
+    .c_busy_o(), .c_done_o(), .c_done_pl_o(),
     .retire_i(1'b0), .retire_slot_i(3'h0),
-    .sm_req_i(fsm_req), .sm_req_pl_i(fsm_pl),
+    .sm_req_i(fsm_gnt | xsm_gnt),
+    .sm_req_pl_i(fsm_gnt ? fsm_pl : xsm_pl),
     .sm_cpl_o(sm_cpl), .sm_cpl_pl_o(sm_cpl_pl),
+    .sm_busy_o(shb),
+    .op_req_valid_o(sop_v), .op_req_ready_i(sop_r),
+    .op_req_o(sop_req),
+    .op_cpl_valid_i(op_cvld && op_busy && op_own == 2'd2),
+    .op_cpl_i(op_cpl),
     .work_i(w_v_sh), .work_ready_o(w_r_sh),
     .work_ctype_i(w_o.ctype), .work_imm_i(w_o.rec.imm),
     .disp_slot_i(xdisp_slot), .desc_i(xdesc),
@@ -537,8 +548,8 @@ module tb_g6lc_apu_vnfront;
     if (o_csre || o_repwe || o_otv || o_crcv || o_subv || o_busy ||
         o_done || o_fclr !== '0 || o_result !== '0 ||
         o_payv || o_opv || o_payd !== '0 || o_opreq !== '0 ||
-        o_smreq || o_smpl !== '0 || o_shwr || o_shcom ||
-        o_shcpl !== '0 || o_pgv || o_pgreq !== '0 || o_apreq ||
+        o_smreq || o_smpl !== '0 ||
+        o_pgv || o_pgreq !== '0 || o_apreq ||
         o_rwords !== '0 || o_fault !== '0)
       $fatal(1, "disabled vnfront active");
   end
@@ -628,20 +639,14 @@ module tb_g6lc_apu_vnfront;
     if (cr_cvld)
       $display("CR cpl own=%0d st=%0d cnt=%0d", cr_own, cr_cpl.status,
                cr_cpl.count);
-    if (fsh_wr)
-      $display("SH wr slot=%0d addr=%04x data=%08x", fsh_slot, fsh_addr,
-               fsh_data);
-    if (fsh_commit)
-      $display("SH commit slot=%0d nwords=%0d", fsh_cpl.slot,
-               fsh_cpl.nwords);
-    if (sh_c_done)
-      $display("SH cpl ok=%0d fault=%08x entry=%08x regs=%0d vars=%0d",
-               sh_c_pl.ok, sh_c_pl.fault, sh_c_pl.entry,
-               sh_c_pl.n_regs, sh_c_pl.n_vars);
-    if (fsm_req)
-      $display("SM req op=%0d slot=%0d", fsm_pl.op, fsm_pl.slot);
+    if (fsm_req && fsm_gnt)
+      $display("SM req op=%0d slot=%0d hnd=%08x chunk=%0d w=%0d",
+               fsm_pl.op, fsm_pl.slot, fsm_pl.handle, fsm_pl.chunk,
+               fsm_pl.words);
     if (sm_cpl)
-      $display("SM cpl ok=%0d slot=%0d", sm_cpl_pl.ok, sm_cpl_pl.slot);
+      $display("SM cpl ok=%0d busy=%0d slot=%0d fault=%08x",
+               sm_cpl_pl.ok, sm_cpl_pl.busy, sm_cpl_pl.slot,
+               sm_cpl_pl.fault);
   end
 `endif
 

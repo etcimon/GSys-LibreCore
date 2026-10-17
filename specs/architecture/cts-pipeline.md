@@ -249,6 +249,40 @@ EXCEPTION PIPE-X2 · Precision latitude in the tests
 | PIPE-H5 Timestamps + bind points | CTS-2 | medium | cycle counter + period; per-bind-point sets | — |
 | PIPE-H6 Cube/3D/1D | G3d | medium | layouts + address math | — |
 
+## Segment card (current)
+
+```text
+SEGMENT G3b-ii/pipeline
+  QUESTION        Do pipelines-as-{module handle, ObjPay block} survive the
+                  api.pipeline lifetime/create cases on the guest?
+  OBJECTIVE       Classified verdicts for the 9 api.pipeline cases in the
+                  g3bii caselist under G3b-ii residency.
+  ENVELOPE        as cts-info.md; run `g3bii-2026-10-17` chunk 1
+                  (`.cache/cts/runs/g3bii-2026-10-17/`).
+  INPUTS          caselist `cts-g3bii-objmgmt-compute.txt`.
+  OBSERVATIONS    5 Pass (`renderpass.framebuffer_compatible_renderpass`,
+                  `pipeline_layout.lifetime.graphics`/`compute`,
+                  `pipeline_invalid_pointers_unused_structs.{graphics,
+                  compute}`), 2 NotSupported (`destroy_after_{graphics,
+                  compute}_pipeline_construction` — feature-gated skips),
+                  2 Fail: `renderpass.destroy_pipeline_renderpass` and
+                  `pipeline_layout.lifetime.destroy_after_end`
+                  ("expected 125 but found 50" — the dispatch ran and wrote
+                  the wrong value, not a rejected create).
+  HYPOTHESES      `destroy_after_end` destroys the pipeline *layout* between
+                  record and execute; the recorded dispatch must resolve
+                  against the layout snapshot (or the layout must be pinned
+                  by the recording) — found-50 says execution proceeded on a
+                  stale/rewritten ObjTab entry. `destroy_pipeline_renderpass`
+                  is the same class on the renderpass handle (graphics path).
+                  Both are recorded-reference lifetime, not residency — the
+                  G3b-iii record-chain work owns the fix.
+  RESULT          create/lifetime green; two destroy-between-record-and-use
+                  cases defected for follow-up.
+  NEXT ARTIFACT   smoke vector: record dispatch, destroy layout, submit —
+                  the recorded reference must still resolve.
+```
+
 ## Performance / area / scalability
 
 `pipeline.*` is 37 % of the must-pass by count and is dominated by sampler/image
