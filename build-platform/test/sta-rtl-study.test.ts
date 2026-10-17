@@ -56,7 +56,7 @@ test("ABC mapping is delay-oriented and structure-preserving when a period is kn
   expect(cmd).toContain("-D 250");
   // `&st; &dch -f; &nf -D` keeps the Brent-Kung carry tree; the default
   // liberty script (`dc2; dretime; …`) collapses it to ripple depth.
-  expect(cmd).toContain("+&get,-n;&st;&dch,-f;&nf,-D,250;&put");
+  expect(cmd).toContain("+&get,-n;&st;&syn2;&dch,-f;&nf,-D,250;&put");
   expect(cmd.endsWith(";")).toBe(false);
 });
 

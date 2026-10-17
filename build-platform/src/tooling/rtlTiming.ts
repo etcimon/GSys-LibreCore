@@ -434,10 +434,22 @@ export function buildMapScript(opts: {
   ].join("; ");
 }
 
-/** Delay-oriented liberty mapping (see `periodPs` on `buildMapScript`). */
+/**
+ * Delay-oriented liberty mapping (see `periodPs` on `buildMapScript`).
+ *
+ * `&syn2` (AIG rewriting with balancing) sits between the structural hash
+ * and the choice computation: yosys lowers `$macc`/`$alu` arithmetic into
+ * row-serial full-adder chains (`maccmap`), and `&st; &dch -f; &nf` maps
+ * that chain as it is — the two-stage multiplier's 65×17 product measured
+ * 6.1 ns (a ripple of XOR2/MUX2 pairs) against 2.0 ns for the same product
+ * mapped alone. With `&syn2` the same module reads 2.4 ns in→reg and its
+ * 128-bit sum 1.76 ns / 37 cells instead of 2.99 / 94 (ALGORITHMS-EXPERTS
+ * A117). `booth` (Booth-encoded partial products, −10 % multiplier area)
+ * runs before techmap in the per-module map.
+ */
 export function abcCommand(liberty: string, periodPs?: number): string {
   return periodPs && periodPs > 0
-    ? `abc -liberty ${liberty} -D ${Math.round(periodPs)} -script +&get,-n;&st;&dch,-f;&nf,-D,${Math.round(periodPs)};&put`
+    ? `abc -liberty ${liberty} -D ${Math.round(periodPs)} -script +&get,-n;&st;&syn2;&dch,-f;&nf,-D,${Math.round(periodPs)};&put`
     : `abc -liberty ${liberty}`;
 }
 
@@ -503,13 +515,15 @@ export function streamedPhaseBShell(opts: {
     // Resume cache keyed on the module's RTLIL content (A102): the run dir
     // is reused across trees, and a netlist of another tree's module must
     // not be served — it was, for a whole emitted-tree run.
-    `sha=$(sha256sum "$il" | cut -c1-16)`,
+    // The key covers the module's RTLIL *and* the mapping recipe: a recipe
+    // change (the ABC script, `booth`) must not be served from the cache.
+    `sha=$( { cat "$il"; echo "\${MAP_RECIPE_KEY:-}"; } | sha256sum | cut -c1-16)`,
     `if [ -s "$out" ] && [ "$(cat "$out.sha" 2>/dev/null)" = "$sha" ]; then echo "$idx ok cached"; exit 0; fi`,
     `rm -f "$out" "$out.sha" "$log"`,
     // slang's async-load flops ($aldff: a reset to a non-constant value, the
     // icache's areq_o) have no liberty cell; make those few synchronous so the
     // netlist links instead of carrying $_ALDFF_ black boxes (study netlist).
-    `run() { timeout "$tmo" "$YS" -q -p "read_rtlil $il; async2sync t:\\$aldff t:\\$aldffe; techmap; opt_clean; dfflibmap -liberty $LIB; $1; opt_clean -purge; tee -q -a $log stat -liberty $LIB; write_verilog -noattr -noexpr $out" >> "$log" 2>&1; }`,
+    `run() { timeout "$tmo" "$YS" -q -p "read_rtlil $il; booth; async2sync t:\\$aldff t:\\$aldffe; techmap; opt_clean; dfflibmap -liberty $LIB; $1; opt_clean -purge; tee -q -a $log stat -liberty $LIB; write_verilog -noattr -noexpr $out" >> "$log" 2>&1; }`,
     `if run ${JSON.stringify(abc)}; then echo "$sha" > "$out.sha"; echo "$idx ok delay"; exit 0; fi`,
     `rm -f "$out"; echo "fallback: plain" >> "$log"`,
     `if run ${JSON.stringify(abcPlain)}; then echo "$sha" > "$out.sha"; echo "$idx ok plain"; exit 0; fi`,
@@ -522,6 +536,7 @@ export function streamedPhaseBShell(opts: {
     // outer script's run dir / yosys / liberty expand now and the loop's own
     // variables stay literal (a `bash -c '…'` child does not see them).
     `cat > "${R}/map_all.sh" <<MAP_ALL`,
+    `export MAP_RECIPE_KEY="map-v2:booth:${abc.replace(/"/g, "")}"`,
     `cut -f1,2 "${R}/il/modules.tsv" | while IFS=\\$'\\t' read -r i f; do printf "%s\\0%s\\0" "\\$i" "${R}/il/\\$f"; done | xargs -0 -n 2 -P ${jobs} "${R}/map_one.sh" "${R}" "${opts.yosysVar}" "${opts.liberty}" ${tmo}`,
     `MAP_ALL`,
     `/usr/bin/time -f "SYNTH_MEASURE_B maxrss_kb=%M elapsed_s=%e" bash "${R}/map_all.sh" > "${R}/synth-map.log" 2>&1`,
