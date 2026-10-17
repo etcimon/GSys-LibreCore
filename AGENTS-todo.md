@@ -1949,6 +1949,28 @@ prerequisite for this work under the existing dual license. No licensing policy 
   T43, `+mmu_trace` available) and a rerun of the 2-hart L1 with
   `+mmu_trace +mmu_lo=102399000 +mmu_hi=102399080` plus the STQ watch;
   the single-hart L1 with the oracle on the same build for T44.
+  **Root cause (2026-10-17, `l1s1x` window):** the load (tid 6, vaddr
+  `…19c3d38`) enters at c=102,399,012 (IDLE, STQ match → WAIT_PAGE_OFFSET
+  at 013 with `store_forward valid=1 be=ff`), and at 014 it is in
+  **WAIT_GNT** — it went to the HPDCACHE. The LU wrote back other loads
+  at 012/013/014 (`wb=1`: consecutive HPDCACHE responses), so
+  `data_rvalid` was high on its decision cycle; in `WAIT_PAGE_OFFSET`
+  the forward branch is `st_fwd_covers && !data_rvalid`, `st_pipeline_busy`
+  is 0 whenever the forward covers, and the final `else` ("no in-flight
+  stores: re-issue to D$") took the covered load to the cache, which
+  returned the line the store had not reached (drain at 043). Same-hart,
+  no SMT involvement; the HPDCACHE's multi-cycle response bursts make the
+  coincidence common where the WT dcache's single-cycle hits do not.
+  **Fix:** `core/load_unit.sv` WAIT_PAGE_OFFSET — a covered load waits
+  while `data_rvalid` is high and never falls through
+  (`G6LC_MUT_LU_FWD_RVALID_FALLTHROUGH` = pre-fix). Lint clean. Stage 57
+  (two back-to-back hits before each store/covered-load pair, filler
+  swept 0..7) passes 520/520 on the pre-fix WT model — the WT shape
+  does not land two responses on the decision cycles; a load-unit leaf
+  is owed. Builds `ooocoh-t49-server1-pgo-build` / `ooocoh-t49-ooo-pgo-build`
+  (HEAD incl. A105–A108 + this fix): verdicts = the 2-hart server1 L1
+  past 1.267 s to the shell (T39), the single-hart server1 L1 past
+  `Run /init` to the shell with the oracle (T44), the ooo battery.
 - [x] **T43 — L3 on t42: an `amoor.d.aq` (0x800 → 0x801) then, 53 cycles
   later, `amoswap.d.rl zero` (→ 0x800) on a workqueue `work->data`
   (PA `0x8fc8e380`); the `c.ld` 866 cycles after the swap reads 0x801,
