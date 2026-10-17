@@ -251,7 +251,20 @@ module store_buffer
     automatic logic [DEPTH_SPEC-1:0][HID_W-1:0] a_hart;
     automatic logic [DEPTH_SPEC-1:0] a_wr, a_fk;
     automatic cbo_t a_cbo[DEPTH_SPEC];
+    // Per slot of speculative_queue_n: the entry there is cancelled this
+    // cycle (sv-timing A108). The cancel verdict is a property of the entry
+    // (its trans_id), not of the slot, so it is looked up once on the
+    // registered queue — and for the arrival, on trans_id_i, which the push
+    // guard already proved not cancelled — and then permuted alongside the
+    // entries by the program-order insertion below. The squash's keep bits
+    // and its count no longer wait for the inserted queue's trans_id muxes
+    // before the 32-way cancelled_mask lookup.
+    automatic logic [DEPTH_SPEC-1:0] a_cancel, cancel_hit_n;
     speculative_status_cnt      = speculative_status_cnt_q;
+    a_cancel = '0;
+    for (int unsigned i = 0; i < DEPTH_SPEC; i++)
+      cancel_hit_n[i] = speculative_queue_q[i].valid &&
+                        cancelled_mask_i[speculative_queue_q[i].trans_id];
     src     = '0;
     dst     = '0;
     live    = '0;
@@ -354,6 +367,10 @@ module store_buffer
                        ooo_older(a_tid[k], a_tid[(nlive > 0) ? nlive-1 : 0]);
       ins  = ($clog2(DEPTH_SPEC) + 1)'($countones(older_vec));
       nins = int'(ins);
+      // cancel verdict per snapshot entry (the arrival, last, is never
+      // cancelled: the push guard tested trans_id_i)
+      for (int unsigned k = 0; k < DEPTH_SPEC; k++)
+        a_cancel[k] = (k < nlive) && cancelled_mask_i[a_tid[k]];
       // rewrite dense with the arrival at `ins`, younger entries shifted up
       for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
         if (k < nlive) begin
@@ -370,9 +387,11 @@ module store_buffer
           speculative_queue_n[k].wait_rvalid = a_wr[dst];
           speculative_queue_n[k].fwd_keep    = a_fk[dst];
           speculative_queue_n[k].valid       = 1'b1;
+          cancel_hit_n[k]                    = a_cancel[dst];
         end else begin
           speculative_queue_n[k].valid    = 1'b0;
           speculative_queue_n[k].fwd_keep = 1'b0;
+          cancel_hit_n[k]                 = 1'b0;
         end
       end
       speculative_read_pointer_n  = '0;
@@ -432,12 +451,11 @@ module store_buffer
 `ifdef G6LC_FETCH_B
               ((LEGACY_SMT_KEEP &&
                 speculative_queue_n[ks].fwd_keep) ||
-               !cancelled_mask_i[speculative_queue_n[ks].trans_id]);
+               !cancel_hit_n[ks]);
 `else
               ((LEGACY_SMT_KEEP &&
                 speculative_queue_n[ks].fwd_keep) ||
-               (!flush_i &&
-                !cancelled_mask_i[speculative_queue_n[ks].trans_id]));
+               (!flush_i && !cancel_hit_n[ks]));
 `endif
         end
         for (int unsigned k = 0; k < DEPTH_SPEC; k++)
