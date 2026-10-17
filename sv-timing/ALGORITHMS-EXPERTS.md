@@ -28,7 +28,7 @@ worst remaining single-cycle primary.
 | Automatic transforms | `LoopRewrite` (FindFirst, CondCount, RingWalk, StreamCompact), `SelectIncrement`, `BalanceMux` (one-hot, arm set = rewrite set), `RebalanceAssoc`, `SplitAssign`, `InsertReg` — exact or latency-labelled, area-neutral-or-better except InsertReg | A88–A103, `AGENTS-auto-correct.md` catalog |
 | Production RTL rewrites | instr_queue admission count (A92), scoreboard cancel window (A98), ROB free/re-anchor (A99), rename/iq/store_buffer find-first and popcount (A100) — SAT at fixture sizes; 8/32-entry miters inconclusive on budget | A92–A100 |
 | Mapping noise floor | ±1 % area, ±6 cells on identical RTLIL (autoidx-dependent ABC order) | A102 |
-| 10 FO4 | **not closed**. Module board (Nangate45) across A104–A112: worst reg→reg delay 6.21 → **4.35 ns** (frontend, the 64-bit target sum), worst cells 54 → **38–41**; the design's worst path of any kind is the **multiplier's product, 5.34 ns in→reg** (A113). Structural (delay-v39, live, fresh width map): worst 55.1, 694 of 1 630 reg→reg over 10 FO4; the two boards agree on ranking and scale (≈ 0.07 ns per structural FO4). The route now refreshes the width map first, plans and verdicts the live design only, and writes `calibration.tsv` every run | A103–A113 |
+| 10 FO4 | **not closed**. Module board (Nangate45) across A104–A112: worst reg→reg delay 6.21 → **4.35 ns** (frontend, the 64-bit target sum), worst cells 54 → **38–41**; the design's worst path of any kind is the **multiplier's product, 5.34 ns in→reg** (A113; 3.12 ns in the emitted tree with its admitted cut). Structural (delay-v39, live, fresh width map): worst 55.1, 694 of 1 630 reg→reg over 10 FO4; the two boards agree on ranking and scale (≈ 0.07 ns per structural FO4). The route refreshes the width map first, plans and verdicts the live design only, gates area by Dial 11 with the previous run's measured cells/FO4 (A114: −0.10 % area, worst paths unchanged or better), and writes `calibration.tsv` + the trade-off ledger every run | A103–A114 |
 
 The route that produces these numbers is one host command (`AGENTS-build-platform.md` §7.1):
 `timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --allow-over-budget --remote --map-recipe streamed`,
@@ -8240,8 +8240,34 @@ ledger's refused rows (the depth left on the table, with its cell price)
 and the applied rows with the highest est_cells (what the depth cost);
 move Dial 11 per run (or per module, through the feedback file's ratio)
 and compare `SYNTH_STREAM_AREA total` and the module board between runs
-— the two numbers the route already prints. The first run under the gate
-is recorded below.
+— the two numbers the route already prints.
+
+### First gated run (route of record, feedback from the previous run's calibration)
+
+`feedback: 50 module cells/FO4 ratios`; `area gate: max 16.0 cells/FO4
+(scaled per module); applied 60 gated edits (+645 est. cells), refused 10
+(would add 1 137 cells)`. The ledger's head:
+
+| verdict | kind | module : line | est_cells | fo4_gain | cells/FO4 | limit |
+|---|---|---|---:|---:|---:|---:|
+| refused | InsertReg | lsu_bypass : 142 | 385 | 7.5 | 51.3 | 11.7 |
+| refused | SelectIncrement | instr_queue : 281 | 240 | 3.0 | 80.0 | 9.7 |
+| applied | InsertReg | multiplier : 61 | 64 | 4.5 | 14.2 | 63.3 (under-read module, 4× band) |
+| applied | InsertReg ×3 | g6lc_loop_buffer : 79 | 64 each | 6.8–7.8 | 8.2–9.4 | 11.0 |
+| applied | InsertReg | frontend : 744 | 64 | 5.5 | 11.6 | 15.9 |
+| refused | InsertReg ×6 | cva6 : 70–1342 | 64 each | 3.5–9.5 | 6.7–18.3 | 4.0 (over-read module, ¼ band) |
+| refused / applied | InsertReg | instr_queue : 85 | 64 | 2.5–9.0 | 7.1–25.6 | 9.7 (the 2.5 and 5.0 FO4 stages refused, the 7.5–9.0 ones kept) |
+
+Against the ungated run of the same tree: **total mapped area 1 929 421 →
+1 927 537 µm² (−0.10 %)**, the module board's worst paths unchanged or
+better (rename 3.77, store_buffer 3.60, frontend 3.25, iq 3.18 ns as
+before; **multiplier 3.36 → 3.12** from the admitted cut; **instr_queue
+1.22 → 1.14 ns** with the 240-cell SelectIncrement refused — the A102
+regression, now a ledger row instead of a surprise; lsu_bypass's refused
+385-flop cut was buying 7.5 structural FO4 on a 9-cell path). The gate's
+first effect is the expected one: the area it declines is area that bought
+no mapped depth. Dial 11 is the knob; the ledger is where to read what the
+next turn of it would buy or cost.
 
 ## A113 — The route plans, verdicts and calibrates the live design
 
