@@ -2110,7 +2110,21 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `Please press Enter to activate this console.` at ≈ 1.314 G cycles /
   795 M retired (24.6 s guest), runs `kmodloader` for `/etc/modules.d` at
   27.03 s and idles waiting for input (1.84 G cycles at the last look).**
-  The offline
+  It then died at 36.3 s (1.94 G cycles): `list_add corruption. next->prev
+  should be prev (ffffffff8015cd62), but was ffffffc80023bbd0` in
+  `release_pages` ← `exit_mmap` of `S10boot`, then a fatal exception at
+  37.1 s. The full offline oracle over the 1.11 G-retirement trace names
+  it: **5 stored mismatches in total** — #1–#3 the T39/T44 user `sb`/`lbu`
+  shape; #4 at retire 948,230,046 a kernel `ld a3,-136(s0)` (slab,
+  `0xffffffff801515c0`) reading `0xffffffd80fbf0016` for `0x80190016`
+  (the low half-word right, the rest stale — a partial forward or the
+  same fall-through with a `sh` on top); **#5 at retire 1,084,991,457 the
+  `c.ldsp s7,184(sp)` of `ret_from_exception` (`0xffffffff8065fe8c`)
+  reading `0xffffffff8015cd62` for `0xffffffc80023bbd0` — exactly the two
+  values in the `list_add` warning: the register restore took the old
+  stack word.** All on t47b, which predates the T39/T44 fix; the t49 L3
+  (`l3h49`, past `procd: - early -`) is the verdict for the whole climb,
+  and #4's shape gets its own number if it survives there. The offline
   oracle with the vmap/MMIO-aware fold reports 0 mismatches through 516 M
   and is re-running to the end. The "stored" mismatches every L3 showed at
   `0xffffffc80001d000/008` were the 8250 driver's LSR/IIR reads through the
