@@ -1949,7 +1949,7 @@ prerequisite for this work under the existing dual license. No licensing policy 
   T43, `+mmu_trace` available) and a rerun of the 2-hart L1 with
   `+mmu_trace +mmu_lo=102399000 +mmu_hi=102399080` plus the STQ watch;
   the single-hart L1 with the oracle on the same build for T44.
-- [ ] **T43 — L3 on t42: an `amoor.d.aq` (0x800 → 0x801) then, 53 cycles
+- [x] **T43 — L3 on t42: an `amoor.d.aq` (0x800 → 0x801) then, 53 cycles
   later, `amoswap.d.rl zero` (→ 0x800) on a workqueue `work->data`
   (PA `0x8fc8e380`); the `c.ld` 866 cycles after the swap reads 0x801,
   and so does every later read (2026-10-16).** From the user-space-aware
@@ -1993,7 +1993,15 @@ prerequisite for this work under the existing dual license. No licensing policy 
   561 load misses and refills 0x800), L3 with the user-space-aware live
   oracle (`l3orc5`) to login, battery + stages. The L3 run on t46
   (`l3orc4`, no T43) continues for the T42-in-L3 evidence and should
-  reproduce the T43 mismatch at retire 489 M.
+  reproduce the T43 mismatch at retire 489 M. **Verified (2026-10-17):**
+  `l3orc4` (t46: T42 in, T43 out) reproduced the mismatch at retire
+  489,004,871 exactly and died of the slab corruption at 14.78 s (T43 is
+  independent of T42; the `sh` NULL segfault of T42 is gone there); on
+  `l3watch4` (t47b) the same workqueue loop runs `amoor` → `amoand` →
+  refill **0x800** over and over (713,869,135 … 713,875,857, eight
+  rounds), no `valid=f7` write, `missunit_vld_write_own_bits` silent for
+  the whole 713.9 M cycles. The L3 `l3orc5` on t47b is past retire 365 M
+  with 0 stored mismatches and continuing towards procd/login.
 - [ ] **T39 — server1 (HPDCACHE, SMT2, t38) L1 past the T35 point oopses at
   1.267 s guest: `insert_header+0x9c` (`__register_sysctl_table` from
   `eventpoll_init`) NULL pointer dereference at `0x50`, PID 1 (2026-10-15).**
