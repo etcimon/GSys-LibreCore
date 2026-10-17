@@ -7971,6 +7971,57 @@ from 3–4× the budget to ≈ 2×. The rest is the microarchitecture's
 single-cycle contracts at XLEN = 64 and 20 ps: pipelining them is the
 remaining lever, and it changes IPC, which is not a transform's decision.
 
+## A108 — Verdicts travel with entries: the store-buffer squash, and the two cones that share the realigner
+
+### The store-buffer squash's cancel lookup
+
+A107 left store_buffer at 44 cells with "the squash runs on the next-state
+queue". Reading the block in statement order shows what that is under
+`OoOEn`: a push triggers a **program-order insertion** (snapshot the live
+window, compare the arrival's tid against each entry — `older_vec` — count,
+and rewrite the window dense with the arrival at its rank), and the cancel
+squash then runs on that rewritten queue: `cancelled_mask_i[
+speculative_queue_n[ks].trans_id]` — a 32-way lookup behind the insertion's
+trans_id muxes behind the push write, then a compare, then the popcount
+into the status count. Two dense rewrites in series.
+
+The cancel verdict is a property of the **entry**, not of the slot. It is
+looked up once per registered entry (`cancelled_mask_i[q_q[i].trans_id]`),
+the arrival's verdict is known (`!cancelled_mask_i[trans_id_i]` is the push
+guard), and the insertion permutes the verdict bit alongside the entry
+(`cancel_hit_n[k] = a_cancel[dst]`). The squash's keep bits read that bit.
+The data still flows through the insertion muxes into the gather; the keep
+→ popcount → count path no longer waits for it. Exact: same function of
+the same inputs, evaluated before the permutation instead of after it.
+
+### What the frontend and the realigner share
+
+The frontend's remaining 34 cells end at `bp_tgt_q` through the
+three-operand target sum — whose `off[i]` operand is the realigner's
+cursor `{cur_i, 1'b0}`, the 22-cell serial walk over the compressed flags.
+The two cones share their first half. Two ways out, both evaluated and
+not taken in this round:
+
+- **The cursor as a parallel prefix.** `start[h]` ("an instruction starts
+  at halfword h") is a two-term boolean recurrence `start[h] = start[h−1]
+  ∧ c[h−1] ∨ start[h−2] ∧ ¬c[h−2]`; as 2×2 boolean matrices it is a
+  log-depth prefix (3 levels of 2×2 products for 8 halfwords ≈ 7 gate
+  levels against ≈ 12–16 serial), and the slot assignment is a
+  StreamCompact gather over `start` with the slot cap `rank < IPF` and the
+  carry as the last visited split RVI. Exact, ≈ 5–7 cells off both cones;
+  intricate (carry, tail, the `k ≠ 0 ∨ ¬carry_ok` skip) for a second-tier
+  gain — recorded, not written.
+- **Pre-decode per halfword position.** Compute the target `address_i +
+  2h + imm(hw[h], hw[h+1])` for every position h in parallel and let the
+  slot's one-hot select the sum: the add no longer waits for the cursor
+  at all. That is the conventional high-frequency fetch structure (scan
+  and target per position, not per slot); it doubles the `instr_scan`
+  instances and the target adders (≈ +6 % of the frontend's area) and
+  reshapes the predictor indexing — an owner-level restructure, listed
+  with the pipeline splits of A107.
+
+Netlist evidence for the squash verdict change: live remap in flight.
+
 ## A90 — Incrementers are not gates (delay-v32)
 
 `x + 1` and `x + CONST` were billed 1 FO4 at every width since delay-v18

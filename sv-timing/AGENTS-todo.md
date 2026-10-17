@@ -169,9 +169,14 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
 - [x] A107: rob retire hits from `rob_q` for every port at once, masked by
   the earlier ports' hits; one popcount; allocations counted at once.
   Netlist: rob 35 → 26 cells. Board worst stays store_buffer 44.
+- [x] A108: store_buffer cancel verdicts looked up once on the registered
+  queue and permuted with the entries through the program-order insertion
+  (exact). Whole core elaborates; live remap in flight
+  (`sta-rtl-live-a108.log`). Evaluated, not written: realign cursor as a
+  2×2 boolean prefix (≈ 5–7 cells off realign and frontend), per-position
+  pre-decode (owner-level).
 - [ ] A107 next (ranked, each ≈ 2× the budget, each an owner-level change
-  beyond the exact toolbox): store_buffer squash on the registered queue
-  (three same-cycle events to fold — needs a proof) or one cycle later;
+  beyond the exact toolbox): store_buffer squash one cycle later;
   iq wake/select pipeline split; frontend pipelined target (the 64-bit
   wall); realign cursor as a 2×2 boolean prefix + compaction gather
   (exact; one more pass); rename/scoreboard registered free-list head.
