@@ -1884,6 +1884,18 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `/proc/loadavg`, `/proc/stat`, `free`, `G6LC_LINUX_SHELL` and the ash
   prompt with **no signal** (`l1fix3`, 486.5 M cycles, exit 0); the L3
   with the user-space-aware live oracle (`l3orc4`) is in flight.
+- [ ] **T44 — single-hart `g6lc64_ooo_server1` (HPDCACHE, t41 = T35+T40) L1:
+  `Run /init` at 7.19 s then an Oops in `move_page_tables` (`shift_arg_pages`
+  ← `load_elf_binary` ← `kernel_execve` of `/init`): store page fault at
+  `0x00ffffd583706448` — a pointer with its top byte zeroed (2026-10-17,
+  `l1s1v`).** Not WT (no wbuffer) and not T42's shape (tval is a plausible
+  bad address, not 0): an HPDCACHE-path value error in the first `exec`.
+  Together with T39 (the 2-hart server1's same-hart `sd`/`ld` 29 cycles
+  apart reading 0 at PA `0x819c3d38`, `insert_header`) this points at a
+  same-hart store→load staleness on the HPDCACHE package. Next: the
+  `l1s1w` STQ watch window (102,398,950–102,399,120, `+smt_mem_watch=
+  819c3d38 +stq_trace`) on the T39 instance; then an L1 of the
+  single-hart server1 with the oracle from a t47-era build (T42/T43 in).
 - [ ] **T43 — L3 on t42: an `amoor.d.aq` (0x800 → 0x801) then, 53 cycles
   later, `amoswap.d.rl zero` (→ 0x800) on a workqueue `work->data`
   (PA `0x8fc8e380`); the `c.ld` 866 cycles after the swap reads 0x801,
