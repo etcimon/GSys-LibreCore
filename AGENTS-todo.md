@@ -1892,10 +1892,21 @@ prerequisite for this work under the existing dual license. No licensing policy 
   bad address, not 0): an HPDCACHE-path value error in the first `exec`.
   Together with T39 (the 2-hart server1's same-hart `sd`/`ld` 29 cycles
   apart reading 0 at PA `0x819c3d38`, `insert_header`) this points at a
-  same-hart store→load staleness on the HPDCACHE package. Next: the
-  `l1s1w` STQ watch window (102,398,950–102,399,120, `+smt_mem_watch=
-  819c3d38 +stq_trace`) on the T39 instance; then an L1 of the
-  single-hart server1 with the oracle from a t47-era build (T42/T43 in).
+  same-hart store→load staleness on the HPDCACHE package. **The `l1s1w`
+  STQ watch window on the T39 instance (2026-10-17):** the `sd` is offered
+  and pushed at c=102,399,002 (tid 56, `data=ffffffd801805f00 be=ff`),
+  a load with the right PA looks it up at 012–015 and gets
+  `store_forward valid=1` (the full word), commit at 039, drain to the
+  HPDCACHE at 043 — and **no load presents PA `0x819c3d38` to the STQ
+  again before the stale `ld s8` retires at 072 with x24 = 0.** Only one
+  hart retires in the window (the sched trace shows no switch). So the
+  retired load either is the 012–015 instance whose forwarded result was
+  lost on the way to the register, or it executed with a **different
+  physical address** (a wrong translation: the oracle sees only the VA) and
+  read a zero elsewhere. Next: `ooocoh-t47b-server1-pgo-build` (t46 set +
+  T43, `+mmu_trace` available) and a rerun of the 2-hart L1 with
+  `+mmu_trace +mmu_lo=102399000 +mmu_hi=102399080` plus the STQ watch;
+  the single-hart L1 with the oracle on the same build for T44.
 - [ ] **T43 — L3 on t42: an `amoor.d.aq` (0x800 → 0x801) then, 53 cycles
   later, `amoswap.d.rl zero` (→ 0x800) on a workqueue `work->data`
   (PA `0x8fc8e380`); the `c.ld` 866 cycles after the swap reads 0x801,
