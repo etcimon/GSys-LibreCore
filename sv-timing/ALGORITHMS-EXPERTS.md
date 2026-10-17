@@ -8122,6 +8122,48 @@ single-cycle contracts A107 lists (wake/select, the 64-bit target and
 ALU adds, the same-cycle squash), and the next lever is pipelining them —
 an IPC decision.
 
+## A112 — Ablation before architecture: the issue queue's cones, measured
+
+The owner chose the wake/select split as the next lever for `g6lc_iq`
+(38 cells). Before changing issue latency, the module's cones were
+**ablated on the mapped netlist**: each named cone is replaced by a free
+input (`add -input X_cut W; connect -set X X_cut` on the module's RTLIL,
+then the same ABC script and the module board), so the board reports the
+worst path *without* that cone:
+
+| cut | worst reg→reg | Δ | reading |
+|---|---:|---:|---|
+| none | 3.506 ns | — | |
+| `cancel_hit` (the 32-way `cancelled_mask_i[tid]` lookup per entry) | 3.110 | **−11 %** | on every longest path: wake → select → ack, the count delta, the dispatch-age clears |
+| `grant` (both ports' cascade) | 3.247 | −7 % | the select itself |
+| `q_wake` (the tag-compare wakeup) | 3.466 | −1 % | **the split's whole gain** |
+| `ready` (wake + cancel + all issue gates) | 3.588 | 0 % | other paths of equal length remain (dispatch, age) |
+| `older_t` (the age matrix) | 3.506 | 0 % | |
+
+The wakeup is already shallow (6-bit tag compares in parallel): a
+wake/select pipeline split would buy ≈ 1 % and cost one cycle of
+wake-to-issue latency on every dependent pair. The measured term is the
+cancel lookup, and it pipelines **without** an issue-latency cost:
+
+**A112 — the cancel verdict registered.** `cancel_hit_q[e]` is last
+cycle's mask test for the entry in slot e (a newcomer is tested the cycle
+it lands, on its next-state tid); the squash, the count delta and the
+dispatch-age clears read the register. A wrong-path entry can therefore
+issue in the cancel cycle itself — the same case as a wrong-path op issued
+the cycle *before* the cancel arrived, which the pipeline already squashes
+downstream (the scoreboard's cancelled flag drops its writeback, the store
+buffer's push guard tests the mask, head-only ops are never cancelled at
+the head); the mask is level-held per scoreboard slot, so a one-cycle-late
+read loses nothing. Not cycle-exact (one more wrong-path issue slot per
+cancel), so the evidence is the OoO Verilator harness and the directed
+mini suite on A104–A112, not a miter; whole core elaborates; netlist in the
+next remap.
+
+Method note: ablation is cheap (minutes per cut on one module) and it
+ranks the *measured* contributors before an architecture change is made
+on a model's say-so — here it turned a latency-costing split into a
+latency-free pipeline stage.
+
 ## A90 — Incrementers are not gates (delay-v32)
 
 `x + 1` and `x + CONST` were billed 1 FO4 at every width since delay-v18

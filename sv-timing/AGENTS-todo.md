@@ -184,6 +184,9 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   mismatches; netlist 22 → 15 cells (3.27 → 2.31 ns).
 - [x] A111: rob decrement = Σ |hit_r| (one-hot per port, asserted); remap
   owed.
+- [x] A112: iq ablation (cancel lookup −11 %, grant −7 %, wake −1 %); cancel
+  verdict registered (latency-free). OoO harness build + DI suite launched
+  (`ooo-build-a112.log`); live remap in flight (`sta-rtl-live-a112.log`).
 - [ ] A107 next (ranked, each ≈ 2× the budget, each an owner-level change
   beyond the exact toolbox):
   iq wake/select pipeline split; frontend pipelined target (the 64-bit
