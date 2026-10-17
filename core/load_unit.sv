@@ -447,10 +447,26 @@ module load_unit
       // wait here for the page offset to not match anymore
       WAIT_PAGE_OFFSET: begin
         // R3a: complete from STQ forward when bytes are fully covered
-        if (st_fwd_covers && !req_port_i.data_rvalid) begin
+        // T39/T44: a covered load WAITS while the result port carries a D$
+        // response (data_rvalid); it never falls through to the "re-issue to
+        // D$" branch below. Pre-fix, st_pipeline_busy is 0 whenever the
+        // forward covers, so one cycle of rvalid from an unrelated load sent
+        // the covered load to WAIT_GNT and it read the line the store had not
+        // reached yet (HPDCACHE: insert_header's `ld s8,56(s1)` 29 cycles
+        // after its `sd`, the 2-hart server1 oops; the single-hart exec oops).
+`ifdef G6LC_MUT_LU_FWD_RVALID_FALLTHROUGH
+        if (st_fwd_covers && !req_port_i.data_rvalid) begin   // review mutation: the pre-fix shape
           state_d     = IDLE;
           pop_ld_o    = 1'b1;
           st_fwd_done = 1'b1;
+`else
+        if (st_fwd_covers) begin
+          if (!req_port_i.data_rvalid) begin
+            state_d     = IDLE;
+            pop_ld_o    = 1'b1;
+            st_fwd_done = 1'b1;
+          end
+`endif
         end else if (st_pipeline_busy && lu_replay_fire) begin
           // T33: the only store in the way is speculative and has not left in
           // WPO_REPLAY_AFTER cycles -- it is waiting on retirement, possibly on

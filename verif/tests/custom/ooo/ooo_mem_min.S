@@ -1861,6 +1861,53 @@ main:
   .text
 .Lfw_done:
 
+#elif STAGE == 57
+  # T39/T44: a load fully covered by an older store in the STQ must complete
+  # from the forward even when the D$ result port is busy on the cycle it
+  # would complete. Pre-fix, WAIT_PAGE_OFFSET fell through to "re-issue to
+  # D$" whenever st_fwd_covers was set and data_rvalid was high (another
+  # load's response), and the load read the line the store had not reached
+  # yet. Two independent hits are issued right before each store/load pair so
+  # their back-to-back responses land on the covered load's decision cycles;
+  # the filler between them is swept 0..7 to cover every alignment. The value
+  # stored changes per round, so a stale read is a wrong value, not a repeat.
+  la   s2, .Lfr_lines
+  addi s3, s2, 256                     # the forwarded word (its own line)
+  li   s4, 0x1000
+  sd   s4, 0(s3)
+  ld   zero, 0(s2)                     # warm the hit lines and the forwarded line
+  ld   zero, 64(s2)
+  ld   zero, 0(s3)
+  fence rw, rw
+  .set FR_FILL, 0
+  .rept 8
+  .rept 6
+  addi s4, s4, 1
+  ld   t0, 0(s2)                       # hit
+  ld   t1, 64(s2)                      # hit, response the cycle after
+  .rept FR_FILL
+  nop
+  .endr
+  sd   s4, 0(s3)                       # the store (in the STQ for a while)
+  ld   t2, 0(s3)                       # covered: must forward s4
+  add  t3, t0, t1
+  bne  t2, s4, fail_t2
+  .endr
+  .set FR_FILL, FR_FILL + 1
+  .endr
+  ld   t2, 0(s3)
+#ifdef MEM_ORDER_NEGATIVE
+  xori t2, t2, 1
+#endif
+  bne  t2, s4, fail_t2
+  j    .Lfr_done
+  .section .data
+  .balign 64
+.Lfr_lines:
+  .space 512
+  .text
+.Lfr_done:
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".
