@@ -175,8 +175,12 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   (`sta-rtl-live-a108.log`). Evaluated, not written: realign cursor as a
   2×2 boolean prefix (≈ 5–7 cells off realign and frontend), per-position
   pre-decode (owner-level).
+- [x] A109: store_buffer insertion + squash as one permutation (45 → 38
+  cells, 4.26 → 2.77 ns); evidence: side-by-side harness
+  `verif/tb/core/store_buffer_sbs` 4 × 400 k cycles 0 mismatches; 8-step
+  miter inconclusive (50 min). Board worst 54 → 38 across the campaign.
 - [ ] A107 next (ranked, each ≈ 2× the budget, each an owner-level change
-  beyond the exact toolbox): store_buffer squash one cycle later;
+  beyond the exact toolbox):
   iq wake/select pipeline split; frontend pipelined target (the 64-bit
   wall); realign cursor as a 2×2 boolean prefix + compaction gather
   (exact; one more pass); rename/scoreboard registered free-list head.

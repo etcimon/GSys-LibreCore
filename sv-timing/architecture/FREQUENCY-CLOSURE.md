@@ -11,11 +11,12 @@ the design's assertions, counts as registered deltas (asserted
 invariants), both allocation picks from one snapshot (lowest/highest),
 dispatch freeing from the registered valid set, the three-operand branch
 target sum, the store-buffer squash in StreamCompact form. Module board
-worst (cells, Nangate45): **54 → 44**; rename 52 → 25, scoreboard 54 →
+worst (cells, Nangate45): **54 → 38**; rename 52 → 25, scoreboard 54 →
 22, iq 47 → 38, frontend 43 → 34, rob 35 → 26 (A107), store_buffer 49 →
-44. At ≈ 1.3
-cells/FO4, 10 FO4 is ≈ 13 cells: not closed; the residual is store_buffer
-44, iq 38, rob 35, frontend 34 (the 64-bit wall), then the band at 20–27.
+38 (A108/A109: verdicts travel with entries; insertion + squash as one
+permutation). At ≈ 1.3 cells/FO4, 10 FO4 is ≈ 13 cells: not closed; the
+residual is iq 38, store_buffer 38, frontend 34 (the 64-bit wall), then
+the band at 22–27.
 Structural live board: worst 55.1 (`g6lc_iq`, dense-cone class), 693 of
 1626 reg→reg. Details: ALGORITHMS-EXPERTS A104–A106.
 

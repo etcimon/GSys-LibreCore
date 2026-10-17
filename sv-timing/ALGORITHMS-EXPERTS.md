@@ -28,7 +28,7 @@ worst remaining single-cycle primary.
 | Automatic transforms | `LoopRewrite` (FindFirst, CondCount, RingWalk, StreamCompact), `SelectIncrement`, `BalanceMux` (one-hot, arm set = rewrite set), `RebalanceAssoc`, `SplitAssign`, `InsertReg` — exact or latency-labelled, area-neutral-or-better except InsertReg | A88–A103, `AGENTS-auto-correct.md` catalog |
 | Production RTL rewrites | instr_queue admission count (A92), scoreboard cancel window (A98), ROB free/re-anchor (A99), rename/iq/store_buffer find-first and popcount (A100) — SAT at fixture sizes; 8/32-entry miters inconclusive on budget | A92–A100 |
 | Mapping noise floor | ±1 % area, ±6 cells on identical RTLIL (autoidx-dependent ABC order) | A102 |
-| 10 FO4 | **not closed**. Module board worst (cells, Nangate45): 54 → **44** across A104–A107 (scoreboard 54 → 22, rename 52 → 25, iq 47 → 38, frontend 43 → 34, rob 35 → 26, store_buffer 49 → 44); at ≈ 1.3 cells/FO4 the budget is ≈ 13 cells. The ranked residual — store_buffer 44 (next-state squash), iq 38 (wake/select), frontend 34 (the 64-bit wall), wbuffer 27, rob 26, rename 25, realign 22, scoreboard 22 — is single-cycle contracts the exact toolbox cannot change; A107 lists what each would take | A103–A107 |
+| 10 FO4 | **not closed**. Module board worst (cells, Nangate45): 54 → **38** across A104–A109 (scoreboard 54 → 22, rename 52 → 25, store_buffer 49 → 38, iq 47 → 38, frontend 43 → 34, rob 35 → 26); at ≈ 1.3 cells/FO4 the budget is ≈ 13 cells. The ranked residual — iq 38 (wake/select), store_buffer 38 (one permutation + gather), frontend 34 (the 64-bit wall), wbuffer 27, rob 26, rename 25, realign 22, scoreboard 22 — is single-cycle contracts the exact toolbox cannot change; A107 lists what each would take | A103–A109 |
 
 The route that produces these numbers is one host command (`AGENTS-build-platform.md` §7.1):
 `timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --allow-over-budget --remote --map-recipe streamed`,
@@ -8020,7 +8020,57 @@ not taken in this round:
   reshapes the predictor indexing — an owner-level restructure, listed
   with the pipeline splits of A107.
 
-Netlist evidence for the squash verdict change: live remap in flight.
+Netlist: the verdict change alone took store_buffer 4.85 → 4.26 ns at
+45 cells (the delay moved, the depth did not — the insertion's data
+permutation still fed the squash's).
+
+## A109 — One permutation for two rewrites (store_buffer 45 → 38 cells)
+
+Under `OoOEn` a push runs the **program-order insertion** (snapshot the
+window, rank the arrival by `ooo_older`, rewrite dense) and a cancel runs
+the **squash** on that rewritten queue — two dense permutations in series.
+Both map the window `[read_ptr_n, read_ptr_n + n)` onto `[0, live)`; the
+composition is one permutation: each snapshot entry gets its position
+after the insertion (`pos_ins`: the arrival at `ins`, younger entries
+shifted, the identity when nothing arrives) and its keep verdict (`keep`:
+all when nothing is cancelled, else the squash's rule on the registered
+tid), its final slot is `popcount(keep[j] && pos_ins[j] < pos_ins[k])`,
+and one gather writes the window; `live = popcount(keep)`. The LEGACY
+`fwd_keep` marking moves before the rewrite (it marks entries; the
+permutation carries the mark).
+
+**Evidence.** The bounded yosys miter (both revisions elaborated under the
+real `g6lc64_ooo` config, `miter -equiv`, `sat -seq 8 -set-assumes`) first
+produced two counterexamples that were the *environment's*, not the
+design's: a commit on an empty queue (the module's own assertion at
+`store_buffer.sv:1023` forbids it; the count underflows and both revisions
+read garbage differently) and the head address of an empty queue (stale
+data of an invalid slot — the two revisions leave different stale data,
+which nothing reads). With the environment assumed and the don't-care
+masked, 8 steps at XLEN = 64 / PLEN = 56 (16 M variables) did not finish in
+50 min — recorded as inconclusive. The evidence of record is the
+side-by-side harness `verif/tb/core/store_buffer_sbs/` (Verilator, random
+stimulus under the legal environment: no commit on an empty queue or an
+invalid head, no push into a full queue, unique live tids): **4 seeds ×
+400 k cycles, 0 mismatches** on every output every cycle (≈ 215 k pushes,
+146 k commits, 78 k cancel cycles, 9 k flushes per seed). Two of the
+harness's own early "mismatches" were again illegal stimulus (duplicate
+live tids, a push into a full queue), under which the reference revision
+itself leaves its invariants — the harness asserts the reference's count
+stays legal so that cannot recur silently.
+
+**Netlist (live remap, module board):** store_buffer 4.26 ns / 45 cells →
+**2.77 / 38**. Board after A109 (cells): iq 38, store_buffer 38, frontend
+34 (4.35 ns, the ns-worst), wbuffer 27, rob 26, rename 25, realign 22,
+scoreboard 22. **Campaign: module-board worst 54 → 38 cells.**
+
+Lesson of the round, for the method: a bounded miter's first
+counterexamples are usually the environment's — read them before
+believing them, and encode the module's own assertions as assumptions;
+when the SAT instance is too wide, a side-by-side harness under the same
+environment contract is the honest fallback, and it must assert the
+reference's invariants so illegal stimulus is a harness failure, not a
+"mismatch".
 
 ## A90 — Incrementers are not gates (delay-v32)
 
