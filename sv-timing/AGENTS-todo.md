@@ -164,7 +164,11 @@ Detailed experiments and reproduction surface: ALGORITHMS-EXPERTS Part LII.
   with `keep` named the `sb_full_o` chain); iq dispatch frees from
   `~valid_q`; store_buffer squash in StreamCompact form in production.
   Whole core elaborates; live remap in flight (`sta-rtl-live-a106.log`).
-- [ ] A106 next: read the A106 board; the emitted iq needs the delay-
+- [x] A106 board: rename 52 → 25 cells, scoreboard 54 → 22, store_buffer
+  49 → 44, iq 38, frontend 34, rob 35; module-board worst 54 → 44.
+- [ ] A106 next: rob `count_d` (35 cells: free-by-tid popcount + add — a
+  registered delta like iq/scoreboard); store_buffer status count after
+  the squash (44); the emitted iq needs the delay-
   oriented ABC within budget (raise the per-module timeout or split the
   dispatch block); the dense-cone class (iq 55 vs 37 cells now) — per-node
   arrival per input, not one latency per node; the 64-bit single-cycle

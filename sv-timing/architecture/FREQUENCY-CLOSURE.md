@@ -2,7 +2,23 @@
 
 Structural (not STA) frequency closure for the precompiler loop.
 
-## Current campaign (2026-10-16, delay-v37, guards — the board sees the OoO cones)
+## Current campaign (2026-10-16, A104–A106 — the netlist's own worst paths)
+
+Latest: with the structural board calibrated (delay-v38) the campaign
+moved to the module board's own ranking and removed the serial
+dependences the microarchitecture does not need — one-hot selects under
+the design's assertions, counts as registered deltas (asserted
+invariants), both allocation picks from one snapshot (lowest/highest),
+dispatch freeing from the registered valid set, the three-operand branch
+target sum, the store-buffer squash in StreamCompact form. Module board
+worst (cells, Nangate45): **54 → 44**; rename 52 → 25, scoreboard 54 →
+22, iq 47 → 38, frontend 43 → 34, store_buffer 49 → 44. At ≈ 1.3
+cells/FO4, 10 FO4 is ≈ 13 cells: not closed; the residual is store_buffer
+44, iq 38, rob 35, frontend 34 (the 64-bit wall), then the band at 20–27.
+Structural live board: worst 55.1 (`g6lc_iq`, dense-cone class), 693 of
+1626 reg→reg. Details: ALGORITHMS-EXPERTS A104–A106.
+
+## Earlier (2026-10-16, delay-v37, guards — the board sees the OoO cones)
 
 Latest: the per-module mapped board (A100) calibrated the structural model
 module by module and found it blind where the OoO depth is — `g6lc_iq` and

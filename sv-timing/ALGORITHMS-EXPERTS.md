@@ -28,7 +28,7 @@ worst remaining single-cycle primary.
 | Automatic transforms | `LoopRewrite` (FindFirst, CondCount, RingWalk, StreamCompact), `SelectIncrement`, `BalanceMux` (one-hot, arm set = rewrite set), `RebalanceAssoc`, `SplitAssign`, `InsertReg` — exact or latency-labelled, area-neutral-or-better except InsertReg | A88–A103, `AGENTS-auto-correct.md` catalog |
 | Production RTL rewrites | instr_queue admission count (A92), scoreboard cancel window (A98), ROB free/re-anchor (A99), rename/iq/store_buffer find-first and popcount (A100) — SAT at fixture sizes; 8/32-entry miters inconclusive on budget | A92–A100 |
 | Mapping noise floor | ±1 % area, ±6 cells on identical RTLIL (autoidx-dependent ABC order) | A102 |
-| 10 FO4 | **not closed**; the ranked residual is the OoO control cones (43–54 cells) and the single-cycle 64-bit add/compare wall; delay-v38 adds function-body costing (rename 19 → 34 vs 52 cells) and A104's OneHotSelect / StreamCompact / iq edits — the netlist moved iq 6.2 → 4.4 ns at equal cells | A103, A104 |
+| 10 FO4 | **not closed**. Module board worst (cells, Nangate45): 54 → **44** across A104–A106 (rename 52 → 25, scoreboard 54 → 22, iq 47 → 38, frontend 43 → 34, store_buffer 49 → 44); the ranked residual is store_buffer 44, iq 38, rob 35, frontend 34 (the 64-bit wall) at ≈ 1.3 cells/FO4, where 10 FO4 ≈ 13 cells | A103–A106 |
 
 The route that produces these numbers is one host command (`AGENTS-build-platform.md` §7.1):
 `timings sta-rtl --target g6lc64_ooo --platform nangate45 --fo4 10 --allow-over-budget --remote --map-recipe streamed`,
@@ -7897,8 +7897,26 @@ exactly or by a stated, architecturally invisible policy:
    as the walk did. SAT-proved on the fixture, 49 → 42 cells in the
    emitted tree.
 
-All four elaborate in the whole core (slang, remote); the live remap with
-them is in flight. The structural board sees only the squash
+### What the netlist said (live remap with A104–A106, module board, Nangate45, every module under the delay-oriented script)
+
+| module | run C (A100) | A105 | **A106** |
+|---|---|---|---|
+| g6lc_rename | 4.41 ns / 52 cells | 4.41 / 52 | **3.77 / 25** |
+| scoreboard | 5.16 / 54 | 3.98 / 51 | **2.76 / 22** |
+| store_buffer | 5.38 / 49 | 5.38 / 49 | **4.85 / 44** |
+| g6lc_iq | 6.21 / 47 | 4.60 / 37 | 3.51 / 38 |
+| frontend | 4.09 / 43 | 4.35 / 34 | 4.35 / 34 |
+| g6lc_rob | 2.63 / 35 | 2.63 / 35 | 2.50 / 35 |
+| wt_dcache_wbuffer | 2.04 / 21 | 2.26 / 20 | 3.12 / 27 (noise band) |
+
+The worst module on the board went from 54 cells (scoreboard) to 44
+(store_buffer: the compaction's result into the status count), with the
+OoO control cones at 22–38. The next ranked: store_buffer 44, iq 38, rob
+35 (`count_d → count_q`, the free-by-tid popcount and add), frontend 34
+(the 64-bit target sum — the wall), wbuffer 27, rename 25, scoreboard 22,
+realign 22.
+
+All four elaborate in the whole core (slang, remote). The structural board sees only the squash
 (store_buffer 38.5 → 23.3); the rest are dependence removals the
 node-latency model does not express — the netlist decides. Live
 structural board: worst 55.1 (`g6lc_iq`, the dense-cone class), 693 of
