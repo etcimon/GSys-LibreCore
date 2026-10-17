@@ -160,7 +160,12 @@ module g6lc_rob #(
       for (int unsigned i = 0; i < ROB_ENTRIES; i++) begin
         if (all_hits[i]) rob_d[i].valid = 1'b0;
       end
-      count_d = count_d - (ROB_W + 1)'($countones(all_hits));
+      // A tid names at most one valid entry (a live instruction has one ROB
+      // slot), so each port's hit vector is one-hot-or-zero and the count
+      // decrements by the number of ports that hit — an OR-reduce per port,
+      // not a popcount over the entries (sv-timing A111; asserted below).
+      for (int unsigned r = 0; r < NR_RETIRE; r++)
+        count_d = count_d - (ROB_W + 1)'(|free_hit[r]);
     end
     // Re-anchor the report-only head on the oldest remaining entry: advance
     // past the run of freed slots starting at head, never past tail. The
@@ -222,4 +227,13 @@ module g6lc_rob #(
   end
 //pragma translate_on
 
+  //pragma translate_off
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      for (int unsigned r = 0; r < NR_RETIRE; r++)
+        ooo_rob_hit_onehot: assert ($onehot0(free_hit[r]))
+          else $error("g6lc_rob: retire tid %0d names %0d entries", retire_tid_i[r], $countones(free_hit[r]));
+    end
+  end
+  //pragma translate_on
 endmodule
