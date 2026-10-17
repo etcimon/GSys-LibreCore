@@ -561,6 +561,31 @@ module tb_g6lc_review_load_cancel;
         end
         if(seen_ex!==!negative)$fatal(1,"LOAD_MISALIGN_EXCEPTION seen=%b killed=%b",seen_ex,killed);
       end
+      25:begin
+        // T39/T44: a load fully covered by the STQ forward must not leave
+        // WAIT_PAGE_OFFSET for the D$ while the result port carries other
+        // loads' responses. Two older loads are in flight; their responses
+        // arrive back to back on the covered load's IDLE and WAIT_PAGE_OFFSET
+        // decision cycles. Pre-fix the second cycle took it to WAIT_GNT
+        // (data_req next cycle) and it read the line the store had not
+        // reached; now it completes from the forward once the port is free.
+        if(COH)$fatal(1,"LOAD_FWD_SCENARIO requires COH=0 (forward live)");
+        resp.data_gnt=1;offer(1,LBU);old_id=req.data_id;tick();quiet();tick();
+        offer(2,LBU);new_id=req.data_id;tick();quiet();tick();
+        match_page=1;fwd_valid=1;
+        resp.data_rvalid=1;resp.data_rid=old_id;resp.data_rdata=64'h11;
+        offer(3,LD);#2;
+        if(req.data_req)$fatal(1,"LOAD_FWD_FALLTHROUGH idle");
+        if(!wb || tid!=3'd1)$fatal(1,"LOAD_FWD_BURST_OLDER wb=%b tid=%0d",wb,tid);
+        tick();quiet();resp.data_rid=new_id;#2;
+        if(req.data_req)$fatal(1,"LOAD_FWD_FALLTHROUGH wait");
+        if(!wb || tid!=3'd2)$fatal(1,"LOAD_FWD_BURST_OLDER wb=%b tid=%0d",wb,tid);
+        tick();resp.data_rvalid=0;#2;
+        if(req.data_req!=negative)$fatal(1,"LOAD_FWD_FALLTHROUGH req=%b wb=%b tid=%0d",req.data_req,wb,tid);
+        if(!wb || tid!=3'd3 || result!=64'h12345666 || !pop)
+          $fatal(1,"LOAD_FWD_COMPLETE wb=%b tid=%0d data=%h pop=%b",wb,tid,result,pop);
+        tick();fwd_valid=0;match_page=0;
+      end
       default:$fatal(1,"LOAD_CANCEL_SCENARIO");
     endcase
     resp='0;match_page=0;repeat(2)tick();

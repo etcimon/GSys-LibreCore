@@ -112,6 +112,7 @@ def run_leaf():
     pins = {'sources': hashes, 'before': before, 'queuedCancelMutation': mutation, 'misalignMutation': misalign_mutation,
             'physicalMutation': physical_mutation,
             'exkillMutation': os.environ.get('FAULT_REVIEW_MUTATE_EXKILL') == '1',
+            'fwdFallthroughMutation': os.environ.get('FAULT_REVIEW_MUTATE_FWD_FALLTHROUGH') == '1',
             'compiledSources': {p.name: sha(p) for p in source.glob('*.sv')},
             'runnerSha256': sha(Path(__file__)),
             'compilerControlSha256': sha(Path('/opt/testharness/runs/pmp-transition-split-20260919/output/source/split-counter.vlt')),
@@ -129,7 +130,12 @@ def run_leaf():
     exkill_mutation = os.environ.get('FAULT_REVIEW_MUTATE_EXKILL') == '1'
     if exkill_mutation:
         physical = True
-    for ooo, nload, mmu in ([(1, 4, 1)] if physical else [(1, 4, 0)] if before or mutation else [(1, 4, 1), (0, 4, 1)] if misalign_mutation or ni_gate else [(1, 2, 0), (1, 4, 1), (0, 4, 1)]):
+    # T39/T44 mutation: rebuild the pre-fix WAIT_PAGE_OFFSET fall-through (a covered
+    # load leaves for the D$ when data_rvalid is high) through the RTL-side
+    # G6LC_MUT_LU_FWD_RVALID_FALLTHROUGH ifdef; scenario 25 must then fail with
+    # LOAD_FWD_FALLTHROUGH.
+    fwd_mutation = os.environ.get('FAULT_REVIEW_MUTATE_FWD_FALLTHROUGH') == '1'
+    for ooo, nload, mmu in ([(1, 4, 1)] if physical or fwd_mutation else [(1, 4, 0)] if before or mutation else [(1, 4, 1), (0, 4, 1)] if misalign_mutation or ni_gate else [(1, 2, 0), (1, 4, 1), (0, 4, 1)]):
         work = out / f'ooo{ooo}-loads{nload}-mmu{mmu}'
         work.mkdir()
         model = work / 'model'
@@ -138,6 +144,8 @@ def run_leaf():
             ports.append('-DG6LC_REVIEW_PHYS_PORT')
         if exkill_mutation:
             ports.append('-DG6LC_MUT_LSU_EXKILL')
+        if fwd_mutation:
+            ports.append('-DG6LC_MUT_LU_FWD_RVALID_FALLTHROUGH')
         command = ['verilator', '--cc', '--main', '--exe', '--timing', '--assert', '--threads', '1',
                    '-Wno-fatal', '-Werror-LATCH', '-Werror-UNOPTFLAT', *ports,
                    '/opt/testharness/runs/pmp-transition-split-20260919/output/source/split-counter.vlt',
@@ -153,14 +161,15 @@ def run_leaf():
         deps = '\n'.join(p.read_text() for p in model.glob('*.d'))
         if str(runtime / 'include/verilated_funcs.h') not in deps:
             raise ValueError('compiled runtime identity missing')
-        scenarios = [physical_faults[physical_mutation][0]] if physical_mutation else [22] if exkill_mutation else ([16] if before else list(range(16, 25))) if physical else [1] if mutation else [13] if misalign_mutation else [14, 15] if ni_gate else [0, 4, 6] if before else list(range(14)) if ooo and mmu else list(range(8)) + [10, 11] if ooo else [2, 3, 4, 5, 6, 13]
+        scenarios = [physical_faults[physical_mutation][0]] if physical_mutation else [22] if exkill_mutation else [25] if fwd_mutation else ([16] if before else list(range(16, 25))) if physical else [1] if mutation else [13] if misalign_mutation else [14, 15] if ni_gate else [0, 4, 6] if before else list(range(14)) + [25] if ooo and mmu else list(range(8)) + [10, 11, 25] if ooo else [2, 3, 4, 5, 6, 13]
         for case in scenarios:
-            for negative in ([False] if before or mutation or misalign_mutation or physical_mutation or exkill_mutation else [False, True]):
+            for negative in ([False] if before or mutation or misalign_mutation or physical_mutation or exkill_mutation or fwd_mutation else [False, True]):
                 cmd = [str(model / 'review-test'), f'+scenario={case}'] + (['+oracle_negative'] if negative else [])
                 result = subprocess.run(cmd, cwd=work, capture_output=True, text=True, timeout=15)
                 text = result.stdout + result.stderr
                 (work / f'case{case}-negative{int(negative)}.log').write_text(text)
                 expected = (physical_faults[physical_mutation][3] if physical_mutation else
+                            'LOAD_FWD_FALLTHROUGH' if fwd_mutation or (negative and case == 25) else
                             'LOAD_EXKILL_TAG' if exkill_mutation or (physical and case == 22 and negative) else
                             'LOAD_EXKILL_FOREIGN_ATTACH' if physical and case == 23 and negative else
                             'LOAD_MISALIGN_EXCEPTION' if physical and case == 24 and negative else
