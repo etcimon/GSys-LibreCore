@@ -426,8 +426,10 @@ def main():
                     mem.write(addr, size, wdata)
                     stores += 1
     for va, root in walks:
+        if root == 0:                       # --walk=VA:0 -> the current satp root
+            root = sv39.satp & ((1 << 44) - 1)
         pt = root << 12
-        print(f"walk VA=0x{va:x} root=0x{pt:x} at retire {retire}:")
+        print(f"walk VA=0x{va:x} root=0x{pt:x} (satp=0x{sv39.satp:x}) at retire {retire}:")
         for lvl in (2, 1, 0):
             idx = (va >> (12 + 9 * lvl)) & 0x1ff
             pa = pt + idx * 8
