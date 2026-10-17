@@ -197,6 +197,7 @@ package cva6_config_pkg;
       LsqStoreEntries: unsigned'(0),
       MemDepPredEn: bit'(0),
       OoORetireWidth: unsigned'(0),
+      MultStages: unsigned'(0),
       L3En: bit'(0),
       L3ByteSize: unsigned'(0),
       L3SetAssoc: unsigned'(0),

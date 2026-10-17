@@ -718,6 +718,14 @@ package config_pkg;
     int unsigned LsqStoreEntries;     // store queue (0 → MaxOutstandingStores)
     bit          MemDepPredEn;        // store-set memory dependence predictor
     int unsigned OoORetireWidth;      // max retire/cycle (0 → NrCommitPorts)
+    // Multiplier pipeline depth (sv-timing A115): 0/1 = the one-register
+    // multiplier (the 65x65 product in one cycle, the deepest single path of
+    // the core at 5.3 ns on the Nangate45 study); 2 = the product split into
+    // XLEN/16 partial products registered before one final sum — exact, one
+    // more cycle of MUL latency, no other contract changes (the result still
+    // travels with its trans_id; a late result after a flush is dropped by the
+    // scoreboard's `issued` guard as today).
+    int unsigned MultStages;
     // U5/U6 memory hierarchy: optional L3 + server-ready prefetch (SoC, not L1)
     bit          L3En;                // AXI L3 below L2 (requires L2En)
     int unsigned L3ByteSize;          // e.g. 2 MiB
@@ -910,6 +918,7 @@ package config_pkg;
     int unsigned LsqStoreEntries;
     bit          MemDepPredEn;
     int unsigned OoORetireWidth;
+    int unsigned MultStages;
     bit          L3En;
     int unsigned L3ByteSize;
     int unsigned L3SetAssoc;
@@ -1186,6 +1195,9 @@ package config_pkg;
     assert (Cfg.FtqDepth == 0 || (2 ** $clog2(Cfg.FtqDepth) == Cfg.FtqDepth));
     // U4 slice-OoO legality (mutually exclusive with U5; needs speculative SB + non-blocking D$).
     assert (!(Cfg.SliceOoOEn && Cfg.OoOEn));
+    // A115: the multiplier is one or two stages; XLEN must split into 16-bit slices.
+    assert (Cfg.MultStages inside {1, 2});
+    assert (!(Cfg.MultStages == 2 && (Cfg.XLEN % 16) != 0));
     assert (!(Cfg.SliceOoOEn && !Cfg.SpeculativeSb));
     assert (!(Cfg.SliceOoOEn && Cfg.BPCkptDepth != 0 &&
               Cfg.BPCkptDepth < Cfg.SliceAiqDepth));

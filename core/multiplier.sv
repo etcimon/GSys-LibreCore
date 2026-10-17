@@ -111,15 +111,89 @@ module multiplier
   end
 
 
-  // single stage version
-  assign mult_result_d = $signed(
-      {operand_a_i[CVA6Cfg.XLEN-1] & sign_a, operand_a_i}
-  ) * $signed(
-      {operand_b_i[CVA6Cfg.XLEN-1] & sign_b, operand_b_i}
-  );
+  // The signed (XLEN+1)-bit operands: the sign bit is the operation's, so
+  // MULHU/MULHSU/MUL share one multiplier.
+  logic signed [CVA6Cfg.XLEN:0] op_a_s, op_b_s;
+  assign op_a_s = $signed({operand_a_i[CVA6Cfg.XLEN-1] & sign_a, operand_a_i});
+  assign op_b_s = $signed({operand_b_i[CVA6Cfg.XLEN-1] & sign_b, operand_b_i});
 
+  // Stage 1 → stage 2 pipeline of the control (two-stage only): the product's
+  // valid, trans_id and operator ride one register further.
+  logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id_s1;
+  logic                             mult_valid_s1;
+  fu_op                             operator_s1;
 
-  assign operator_d = operation_i;
+  if (CVA6Cfg.MultStages > 1) begin : gen_two_stage
+    // Two-stage multiplier (sv-timing A115): the (XLEN+1)×(XLEN+1) product
+    // is the deepest single path of the core (5.3 ns on the Nangate45 study
+    // against 3.8 ns for the next cone). B is cut into NS = XLEN/16 slices
+    // — 16 unsigned bits each, the top one 17 bits carrying the sign — and
+    // the NS partial products A × B_k are registered; the second stage sums
+    // the shifted products once. Exact: Σ_k (A × B_k) << 16k == A × B for
+    // every signedness the sign bits above encode. Area: NS × (XLEN+18)
+    // flops and NS−1 extra adders; the partial-product trees are the same
+    // work the one-stage multiplier did. One more cycle of MUL latency; the
+    // result still travels with its trans_id, so no other contract changes
+    // (mult.sv arbitrates on `mult_valid`, the scoreboard drops a late
+    // result after a flush by its `issued` guard).
+    localparam int unsigned NS = CVA6Cfg.XLEN / 16;
+    localparam int unsigned PW = CVA6Cfg.XLEN + 18;  // (XLEN+1) × 17 signed
+    // unpacked so an element keeps its signedness (a packed-array element
+    // select is unsigned by the LRM)
+    logic signed [PW-1:0] pp_d[NS], pp_q[NS];
+    for (genvar k = 0; k < NS; k++) begin : gen_pp
+      if (k == NS - 1) begin : gen_top
+        // the top slice: 16 magnitude bits plus the operand's sign bit
+        logic signed [16:0] b_k;
+        assign b_k = $signed(op_b_s[CVA6Cfg.XLEN:16*k]);
+        assign pp_d[k] = op_a_s * b_k;
+      end else begin : gen_mid
+        logic signed [16:0] b_k;
+        assign b_k = $signed({1'b0, op_b_s[16*k+:16]});
+        assign pp_d[k] = op_a_s * b_k;
+      end
+    end
+    // Stage 2: one sum of the sign-extended, shifted partial products. The
+    // reduction is written as a balanced tree so the structural model and
+    // synthesis both see log depth (a serial sum would read NS adders deep).
+    logic signed [CVA6Cfg.XLEN*2+1:0] term[NS];
+    for (genvar k = 0; k < NS; k++) begin : gen_term
+      assign term[k] = (CVA6Cfg.XLEN*2+2)'(pp_q[k]) <<< (16 * k);
+    end
+    if (NS == 4) begin : gen_sum4
+      assign mult_result_d = (CVA6Cfg.XLEN*2)'((term[0] + term[1]) + (term[2] + term[3]));
+    end else if (NS == 2) begin : gen_sum2
+      assign mult_result_d = (CVA6Cfg.XLEN*2)'(term[0] + term[1]);
+    end else begin : gen_sum_n
+      always_comb begin
+        automatic logic signed [CVA6Cfg.XLEN*2+1:0] acc;
+        acc = '0;
+        for (int unsigned k = 0; k < NS; k++) acc = acc + term[k];
+        mult_result_d = (CVA6Cfg.XLEN*2)'(acc);
+      end
+    end
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (~rst_ni) begin
+        pp_q          <= '{default: '0};
+        mult_valid_s1 <= 1'b0;
+        trans_id_s1   <= '0;
+        operator_s1   <= MUL;
+      end else begin
+        pp_q          <= pp_d;
+        mult_valid_s1 <= mult_valid;
+        trans_id_s1   <= trans_id_i;
+        operator_s1   <= operation_i;
+      end
+    end
+  end else begin : gen_one_stage
+    // single stage version
+    assign mult_result_d = op_a_s * op_b_s;
+    assign mult_valid_s1 = mult_valid;
+    assign trans_id_s1   = trans_id_i;
+    assign operator_s1   = operation_i;
+  end
+
+  assign operator_d = operator_s1;
 
   always_comb begin : p_selmux
     unique case (operator_q)
@@ -135,13 +209,30 @@ module multiplier
     endcase
   end
   if (CVA6Cfg.RVB) begin
+    // The carry-less results take the same number of stages as the product
+    // so the operator select at the output sees them together (A115).
+    logic [CVA6Cfg.XLEN-1:0] clmul_s1, clmulr_s1;
+    if (CVA6Cfg.MultStages > 1) begin : gen_clmul_two_stage
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (~rst_ni) begin
+          clmul_s1  <= '0;
+          clmulr_s1 <= '0;
+        end else begin
+          clmul_s1  <= clmul_d;
+          clmulr_s1 <= clmulr_d;
+        end
+      end
+    end else begin : gen_clmul_one_stage
+      assign clmul_s1  = clmul_d;
+      assign clmulr_s1 = clmulr_d;
+    end
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (~rst_ni) begin
         clmul_q  <= '0;
         clmulr_q <= '0;
       end else begin
-        clmul_q  <= clmul_d;
-        clmulr_q <= clmulr_d;
+        clmul_q  <= clmul_s1;
+        clmulr_q <= clmulr_s1;
       end
     end
   end else begin
@@ -159,9 +250,9 @@ module multiplier
       mult_result_q <= '0;
     end else begin
       // Input silencing
-      trans_id_q    <= trans_id_i;
+      trans_id_q    <= trans_id_s1;
       // Output Register
-      mult_valid_q  <= mult_valid;
+      mult_valid_q  <= mult_valid_s1;
       operator_q    <= operator_d;
       mult_result_q <= mult_result_d;
     end

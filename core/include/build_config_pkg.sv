@@ -432,6 +432,8 @@ package build_config_pkg;
       cfg.LsqStoreEntries = CVA6Cfg.LsqStoreEntries;
       cfg.OoORetireWidth = CVA6Cfg.OoORetireWidth;
     end
+    // A115: 0 = the single-register multiplier
+    cfg.MultStages = (CVA6Cfg.MultStages == 0) ? 1 : CVA6Cfg.MultStages;
     // FSE S3 / U5 production: store-set on by default whenever full OoO is enabled
     // (can still force-off only by also disabling OoO). Explicit MemDepPredEn=1 keeps on for slice/etc.
     cfg.MemDepPredEn = CVA6Cfg.MemDepPredEn || CVA6Cfg.OoOEn;

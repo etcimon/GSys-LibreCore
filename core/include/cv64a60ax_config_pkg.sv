@@ -206,6 +206,7 @@ localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
       LsqStoreEntries: unsigned'(0),
       MemDepPredEn: bit'(0),
       OoORetireWidth: unsigned'(0),
+      MultStages: unsigned'(0),
       L3En: bit'(0),
       L3ByteSize: unsigned'(0),
       L3SetAssoc: unsigned'(0),

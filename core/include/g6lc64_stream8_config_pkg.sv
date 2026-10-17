@@ -272,6 +272,7 @@ package cva6_config_pkg;
       LsqStoreEntries: unsigned'(0),
       MemDepPredEn: bit'(0),
       OoORetireWidth: unsigned'(0),
+      MultStages: unsigned'(0),
       // Stream plane × multicore (U6/p6): L2 miss-edge multi-stream PF on.
       // L3 stays optional (ooo_server enables L3 + inclusive L1/L2 back-inval).
       L3En: bit'(0),
