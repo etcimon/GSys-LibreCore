@@ -410,34 +410,56 @@ module store_buffer
       a_wr   = '0;
       a_fk   = '0;
       for (int unsigned i = 0; i < DEPTH_SPEC; i++) a_cbo[i] = cbo_t'('0);
-      for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
-        if (k < unsigned'(old_cnt)) begin
-          src = speculative_read_pointer_n + $clog2(DEPTH_SPEC)'(k);
-          if (speculative_queue_n[src].valid &&
+      // Stream compaction in its parallel form (sv-timing A103/A106, the
+      // StreamCompact shape): the walk `if (keep) { a[dst] = q[src]; dst++ }`
+      // was a conditional running count and a write at a running index —
+      // DEPTH_SPEC incrementers and demuxes in series (the module board's
+      // worst store-buffer path, 49 cells). Here `keep[k]` is the walk's
+      // condition per slot, `pos[k]` the number of kept slots before k
+      // (independent popcounts, not a running sum), the gather writes
+      // `a[j]` from the one k with `keep[k] && pos[k] == j`, and the counts
+      // advance by the popcount. Exact: `dst` and `live` enter at zero, the
+      // outputs are not read in the walk; SAT-proved on the fixture, 49 → 42
+      // cells in the emitted tree.
+      begin : spec_compact
+        automatic logic [DEPTH_SPEC-1:0] keep;
+        automatic logic [DEPTH_SPEC-1:0][$clog2(DEPTH_SPEC+1)-1:0] pos;
+        automatic logic [$clog2(DEPTH_SPEC)-1:0] ks;
+        keep = '0;
+        for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
+          ks = speculative_read_pointer_n + $clog2(DEPTH_SPEC)'(k);
+          keep[k] = (k < unsigned'(old_cnt)) && speculative_queue_n[ks].valid &&
 `ifdef G6LC_FETCH_B
               ((LEGACY_SMT_KEEP &&
-                speculative_queue_n[src].fwd_keep) ||
-               !cancelled_mask_i[speculative_queue_n[src].trans_id])
+                speculative_queue_n[ks].fwd_keep) ||
+               !cancelled_mask_i[speculative_queue_n[ks].trans_id]);
 `else
               ((LEGACY_SMT_KEEP &&
-                speculative_queue_n[src].fwd_keep) ||
+                speculative_queue_n[ks].fwd_keep) ||
                (!flush_i &&
-                !cancelled_mask_i[speculative_queue_n[src].trans_id]))
+                !cancelled_mask_i[speculative_queue_n[ks].trans_id]));
 `endif
-              ) begin
-            a_addr[dst] = speculative_queue_n[src].address;
-            a_data[dst] = speculative_queue_n[src].data;
-            a_be[dst]   = speculative_queue_n[src].be;
-            a_sz[dst]   = speculative_queue_n[src].data_size;
-            a_cbo[dst]  = speculative_queue_n[src].cbo_op;
-            a_tid[dst]  = speculative_queue_n[src].trans_id;
-            a_hart[dst] = speculative_queue_n[src].hart;
-            a_wr[dst]   = speculative_queue_n[src].wait_rvalid;
-            a_fk[dst]   = speculative_queue_n[src].fwd_keep;
-            dst  = dst + 1'b1;
-            live = live + 1'b1;
+        end
+        for (int unsigned k = 0; k < DEPTH_SPEC; k++)
+          pos[k] = $clog2(DEPTH_SPEC+1)'($countones(keep & ((DEPTH_SPEC'(1) << k) - 1'b1)));
+        for (int unsigned j = 0; j < DEPTH_SPEC; j++) begin
+          for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
+            ks = speculative_read_pointer_n + $clog2(DEPTH_SPEC)'(k);
+            if (keep[k] && pos[k] == $clog2(DEPTH_SPEC+1)'(j)) begin
+              a_addr[j] = speculative_queue_n[ks].address;
+              a_data[j] = speculative_queue_n[ks].data;
+              a_be[j]   = speculative_queue_n[ks].be;
+              a_sz[j]   = speculative_queue_n[ks].data_size;
+              a_cbo[j]  = speculative_queue_n[ks].cbo_op;
+              a_tid[j]  = speculative_queue_n[ks].trans_id;
+              a_hart[j] = speculative_queue_n[ks].hart;
+              a_wr[j]   = speculative_queue_n[ks].wait_rvalid;
+              a_fk[j]   = speculative_queue_n[ks].fwd_keep;
+            end
           end
         end
+        dst  = dst + $clog2(DEPTH_SPEC)'($countones(keep));
+        live = live + $clog2(DEPTH_SPEC+1)'($countones(keep));
       end
       for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
         speculative_queue_n[k].valid = 1'b0;
