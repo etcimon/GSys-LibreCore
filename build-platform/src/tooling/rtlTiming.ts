@@ -420,6 +420,12 @@ export function buildMapScript(opts: {
           "memory_map",
           "opt_clean",
           "opt_dff",
+          // slang's async-load flops ($aldff: a reset to a non-constant value,
+          // the icache's areq_o) have no liberty cell; the per-module phase
+          // makes them synchronous before mapping — the whole-core recipes
+          // must too, or OpenSTA refuses to link the $_ALDFFE_ black boxes
+          // (the A128 live-RTL route failed at STA after an 86-minute map).
+          ...(opts.recipe === "streamed" ? [] : ["async2sync t:$aldff t:$aldffe"]),
           // `streamed` keeps the design word-level here: techmap is the pass
           // that balloons the whole-core representation (44/48 GiB), so it
           // runs per module in phase B.
