@@ -3,6 +3,17 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A126 — multiplier merge resolved
+
+- [x] `clmul_s1`/`clmulr_s1` module-level; contract carries them and
+  rewires `clmul_q`/`clmulr_q`; bundle priced at resolved widths;
+  emitted three-stage multiplier passes `tb_mul_sbs +lag=2` (0 errors).
+- [ ] Adopt: `MultStages = 3` in the OoO configs with the emitted stage
+  (or the stage written by hand after the emitted form); three-cycle
+  `tb_mul_lifetime`; full route for the mapped reading.
+- [ ] A `latency` word in the vocabulary binding a domain's stage count to
+  a parameter, so the planner refuses a stage the wrapper cannot track.
+
 ## A125 — generate-scope emission and merge balance
 
 - [x] Stage emitted inside the owning named generate block; measured data

@@ -887,6 +887,8 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
     // the carried signals, the protocol signals and constants. Checked in
     // data order (first stage first) before anything is rewired.
     let mut carried_domain: Option<sv_timing_core::pipe_contract::PipeDomain> = None;
+    // the carried bundle's flop count, priced with every stage (set with the plan)
+    let mut carried_extra: u32 = 0;
     // Lines of the tail nodes (after the last cut), captured before the IR
     // rewire truncates the path at each cut.
     let mut tail_lines: Vec<u32> = Vec::new();
@@ -904,7 +906,35 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
             }
         });
         if let Some(d) = &plan_domain {
-            let extra = 1 + 8 + 8 * d.carry.len() as u32;
+            // the bundle's real width: valid, the id and every carried
+            // signal at their declared widths (8 when unresolved)
+            let extra = {
+                let m = ordered
+                    .first()
+                    .and_then(|cut| ctx.design.paths.iter().find(|p| p.id == cut.path_id))
+                    .and_then(|p| ctx.design.modules.get(&p.module));
+                match m {
+                    Some(m) => {
+                        let resolver = sv_timing_core::width::WidthResolver::from_parts(
+                            &ctx.design.packages,
+                            &ctx.design.param_map_ints,
+                            &m.decls,
+                            &m.ports,
+                            &m.const_exprs,
+                            &m.typedef_texts,
+                            &m.package_imports,
+                            ctx.design.width_map.get(&m.name),
+                        );
+                        let w = |sig: &str| {
+                            resolver
+                                .expr_width(&sv_timing_core::Expr::parse(sig))
+                                .unwrap_or(8)
+                        };
+                        1 + w(&d.id) + d.carry.iter().map(|c| w(c)).sum::<u32>()
+                    }
+                    None => 1 + 8 + 8 * d.carry.len() as u32,
+                }
+            };
             let mut kept: Vec<&CutPoint> = Vec::new();
             for cut in ordered.iter() {
                 // A carried stage is a whole statement: an expression-spine
@@ -956,6 +986,7 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
                 }
             }
             ordered = kept;
+            carried_extra = extra;
             if ordered.is_empty() {
                 return Ok(Vec::new());
             }
@@ -1282,10 +1313,7 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
             .and_then(|m| m.nodes.get(&cut.after_node))
             .map(|n| n.width.max(1))
             .unwrap_or(1)
-            + carried_domain
-                .as_ref()
-                .map(|d| 1 + 8 + 8 * d.carry.len() as u32)
-                .unwrap_or(0);
+            + carried_extra;
         let gain = cut.fo4_left.min(cut.fo4_right);
         if !ctx.admit_area(
             EditKind::InsertReg,

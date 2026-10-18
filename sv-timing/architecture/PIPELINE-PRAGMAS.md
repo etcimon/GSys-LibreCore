@@ -346,3 +346,50 @@ merge rule: elaborates for `MultStages` 1 and 2, valid and trans_id align at
 `lag=2` on every cycle, **77 313 result mismatches of 234 155** — all
 CLMUL-class, as the rule now predicts. The merge rule is the round's
 result; the stage itself waits on the RTL.
+
+## 8. The merge resolved from both ends (A126)
+
+The merge rule named the hazard: `result_o` reads `clmul_q`, one stage
+short of the product. Two ends corrected it, neither alone sufficient.
+
+**RTL end.** The carry-less stage-1 results `clmul_s1` / `clmulr_s1` were
+locals of the unnamed `if (CVA6Cfg.RVB)` block — a stage in
+`gen_two_stage` could not carry them, and an export's default could not
+read them. They are now module-level nets (zero in the new `gen_no_clmul`
+branch; the RVB block became `gen_clmul`), the same logic made visible.
+The contract then says what must travel and where it lands:
+
+```systemverilog
+// svt-pipe: carry  mul operator_s1,corr_q,clmul_s1,clmulr_s1
+// svt-pipe: result mul valid=mult_valid_q id=trans_id_q operator_d corr_sh clmul_q clmulr_q
+```
+
+`clmul_q <= clmul_s1` becomes `clmul_q <= svt_gen_two_stage_clmul_s1` —
+the carried copy when the two-stage branch exists, `clmul_s1` otherwise —
+so the carry-less path gains the same stage the product gained and the
+select at `result_o` sees one operation's operands. The merge closure now
+finds every register it reads among the staged (`clmul_q`, `clmulr_q`,
+`operator_q`, `mult_result_q`) and admits the plan.
+
+**Mechanism end.** The area gate then refused the stage: a bundle priced
+at `1 + 8 + 8·|carry|` understated two 64-bit carries. The estimate now
+uses the resolved widths — valid 1, id 5, operator 8, `corr_q` 66,
+`clmul_s1` 64, `clmulr_s1` 64 — plus the 128-bit data: **336 cells for
+10 FO4, 33.6 cells/FO4**, over the -O3 limit of 16. Balancing a parallel
+datapath is what the stage costs here; the ledger says so, and the run
+admitted it explicitly with `--opt-max-cells-per-fo4 48` (the row is in
+`tradeoffs[]`).
+
+**Witness.** Emitted three-stage multiplier against the one-stage
+reference two cycles later (`tb_mul_sbs +lag=2`, stock Verilator):
+**3 seeds × 300 000 cycles, 234 155 / 234 213 / 233 708 valid results, 0
+errors** — every MUL / MULH* / MULW / CLMUL / CLMULH / CLMULR result, valid
+and trans_id. The refactored stock RTL under `lag=1`: 0 errors, unchanged.
+
+**What adoption needs.** The emitted module is one cycle longer than
+`MultStages` says; `mult.sv` tracks cancellation for `MultStages` cycles.
+Adoption is the emitted RTL *with* `MultStages = 3` in the configuration
+(the wrapper's liveness follows the parameter); `tb_mul_lifetime` is a
+fixed two-cycle script and needs a three-cycle variant before that
+change. The mapped reading of the three-stage product comes from the full
+route, not from this step.

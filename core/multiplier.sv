@@ -152,12 +152,14 @@ module multiplier
     // rides as {mult_valid_s1, trans_id_s1, operator_s1}; cancellation is
     // applied outside this module (mult.sv), so the domain has no kill and
     // no flush of its own. A further stage may be cut at the shifted-product
-    // sum; the correction and the operator must travel with it (corr_sh is
-    // the shifted correction, re-derived from the carried copy), and the
-    // output register's valid / trans_id / operator read the last stage.
+    // sum; the correction, the operator and the carry-less stage-1 results
+    // must travel with it (corr_sh is the shifted correction, re-derived from
+    // the carried copy; clmul_q / clmulr_q register the carried copies so the
+    // operator select at result_o sees every operand of one operation), and
+    // the output register's valid / trans_id / operator read the last stage.
     // svt-pipe: protocol mul valid=mult_valid_s1 id=trans_id_s1
-    // svt-pipe: carry mul operator_s1,corr_q
-    // svt-pipe: result mul valid=mult_valid_q id=trans_id_q operator_d corr_sh
+    // svt-pipe: carry mul operator_s1,corr_q,clmul_s1,clmulr_s1
+    // svt-pipe: result mul valid=mult_valid_q id=trans_id_q operator_d corr_sh clmul_q clmulr_q
     localparam int unsigned NS = CVA6Cfg.XLEN / 16;
     localparam int unsigned AW = CVA6Cfg.XLEN + 1;   // unsigned pattern of the signed operand
     localparam int unsigned PW = AW + 17;            // (XLEN+1) × 17 unsigned
@@ -237,10 +239,13 @@ module multiplier
       end
     endcase
   end
-  if (CVA6Cfg.RVB) begin
-    // The carry-less results take the same number of stages as the product
-    // so the operator select at the output sees them together (A115).
-    logic [CVA6Cfg.XLEN-1:0] clmul_s1, clmulr_s1;
+  // The carry-less results take the same number of stages as the product so
+  // the operator select at the output sees them together (A115). Their
+  // stage-1 values are module-level nets (zero without RVB) so a further
+  // product stage can carry them (sv-timing A126: a merge at result_o of a
+  // datapath one stage shorter was the witness's finding).
+  logic [CVA6Cfg.XLEN-1:0] clmul_s1, clmulr_s1;
+  if (CVA6Cfg.RVB) begin : gen_clmul
     if (CVA6Cfg.MultStages > 1) begin : gen_clmul_two_stage
       always_ff @(posedge clk_i or negedge rst_ni) begin
         if (~rst_ni) begin
@@ -264,9 +269,11 @@ module multiplier
         clmulr_q <= clmulr_s1;
       end
     end
-  end else begin
-    assign clmul_q  = '0;
-    assign clmulr_q = '0;
+  end else begin : gen_no_clmul
+    assign clmul_s1  = '0;
+    assign clmulr_s1 = '0;
+    assign clmul_q   = '0;
+    assign clmulr_q  = '0;
   end
   // -----------------------
   // Output pipeline register

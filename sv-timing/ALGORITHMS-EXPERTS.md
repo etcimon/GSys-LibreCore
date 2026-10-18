@@ -31,6 +31,12 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A126 update:** the multiplier merge is resolved from both ends — the
+carry-less stage-1 nets lifted to module scope and carried by the
+contract, the bundle priced at real widths — and the emitted three-stage
+multiplier passes the side-by-side witness at `lag=2` (3 seeds × 300 k,
+0 errors, all eight operations). Adoption waits on `MultStages = 3`.
+
 **A125 update:** stages inside named generate blocks are emitted in place
 with module-level exports for the other configurations; the multiplier's
 third stage emitted correctly and the side-by-side witness caught a
@@ -8235,6 +8241,22 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A126 — The merge resolved from both ends
+
+The A125 rule named the hazard (`result_o` reads `clmul_q`, one stage
+short). The RTL end made the carry-less stage-1 results module-level nets
+(`clmul_s1`/`clmulr_s1` out of the unnamed `if (RVB)` block, zero in
+`gen_no_clmul`) and the contract carried them and rewired their output
+registers (`carry … clmul_s1,clmulr_s1`, `result … clmul_q clmulr_q`); the
+mechanism end priced the bundle at its resolved widths — 336 cells for
+10 FO4, 33.6 cells/FO4, admitted explicitly over the -O3 limit — and
+emitted the stage inside `gen_two_stage` with exports whose defaults read
+the now-visible nets. Witness: the emitted three-stage multiplier at
+`+lag=2`, 3 seeds × 300 k cycles, ≈ 234 k results each, **0 errors**, all
+eight operations; the refactored stock RTL at `lag=1` unchanged. Adoption
+needs `MultStages = 3` (the wrapper's liveness) and a three-cycle
+`tb_mul_lifetime`; the mapped reading comes from the full route.
 
 ## A125 — Generate-scope emission, exports, and the merge rule the witness taught
 
