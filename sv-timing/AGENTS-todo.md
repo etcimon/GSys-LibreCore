@@ -8,7 +8,9 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 - [x] D$ forwarding balanced tree (SAT-equivalent at 5 geometries), loop
   predictor row-local training in RTL (equivalence + model), loop buffer
   bounded add (6 sbs runs + 6-step miter); paired placement improves all three.
-- [ ] Re-read the whole-core board with the three changes (loop buffer must
+- [x] Scoreboard head scan in absolute slot order (SAT-equivalent at five
+  geometries incl. 64×4); read on the board, no isolated pair.
+- [ ] Re-read the whole-core board with the four changes (loop buffer must
   improve there, A136 lesson); then step 1 continues with `instr_queue`
   prefix ranks, `perf_counters` carry summaries, `g6lc_bp_ghist` balanced folds.
 

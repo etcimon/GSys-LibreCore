@@ -138,6 +138,26 @@ module scoreboard #(
     scoreboard_entry_t sbe;  // this is the score board entry we will send to ex
   } sb_mem_t;
   sb_mem_t [CVA6Cfg.NR_SB_ENTRIES-1:0] mem_q, mem_n;
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin scoreboard status=proposal target=10-adjusted-FO4
+  // svt-plan: cone issued/complete/cancel metadata drives multiwriter entry
+  // updates, head discovery and consumers; head validity is not merely a hint.
+  // svt-plan: reshape keep lifecycle bits local to entries and predecode
+  // writeback TIDs into bank-local events; merge field updates by explicit priority.
+  // svt-plan: boundary writeback event capture -> result/exception install;
+  // stage completion visibility with the data, while commit/cancel remain authoritative.
+  // svt-plan: carry TID+generation, hart, result, exception, destination
+  // class and cancellation state; reserve capture space for every WB port.
+  // svt-plan: head hierarchical oldest-live selection from registered
+  // metadata plus same-cycle removals; never expose an unreconciled stale head.
+  // svt-plan: effect separates late WB transport/decode from wide updates;
+  // local lifecycle cones avoid dragging payload muxes into occupancy.
+  // svt-plan: cost WB storage and completion latency; forward pending data
+  // only with matching lifetime, or delay wakeup; physical register duplication
+  // helps fanout only if implementation preserves distinct local copies.
+  // svt-plan: limit slot reuse, cancellation broadcasts and multi-hart head
+  // selection remain; derive counts from unique accepted lifecycle events.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A124; 2.74 ns reg->reg on Nangate45).
   // The scoreboard owns the transaction ids every other contract kills by:
   // its entry array is written by issue, writeback, commit, cancel and flush
@@ -269,27 +289,36 @@ module scoreboard #(
   logic [SB_NH-1:0] head_valid;
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] reclaim_n;
 
+  // A140: absolute-order form (the A136 ROB re-anchor). Ring order from the
+  // commit pointer is "slots >= cp in slot order, then slots < cp", so the
+  // head is the lowest candidate at or above cp when one exists, else the
+  // lowest candidate below it. Two lowest-set isolations on the registered
+  // candidate vector split by a thermometer mask replace the
+  // NR_SB_ENTRIES-way rotation crossbar, the rotated isolate and the final
+  // pointer add; the slot is encoded directly. hdist below still subtracts
+  // the pointer, as it did. The serial reference under translate_off is the
+  // equivalence witness in every simulation.
   always_comb begin : sb_head_scan
     for (int unsigned h = 0; h < SB_NH; h++) begin
-      automatic logic [CVA6Cfg.NR_SB_ENTRIES-1:0] rot;
-      automatic logic [CVA6Cfg.NR_SB_ENTRIES-1:0] first;
-      automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0]  hit;
+      automatic logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cand, ge, hi_c, lo_c, first_hi, first_lo, first;
       automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0]  slot;
-      rot = '0;
       for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
-        slot   = commit_pointer_q[0] + CVA6Cfg.TRANS_ID_BITS'(i);
-        rot[i] = mem_q[slot].issued &&
-                 (mem_q[slot].sbe.hart_id == $bits(mem_q[slot].sbe.hart_id)'(h));
+        cand[i] = mem_q[i].issued &&
+                  (mem_q[i].sbe.hart_id == $bits(mem_q[i].sbe.hart_id)'(h));
+        ge[i]   = (CVA6Cfg.TRANS_ID_BITS'(i) >= commit_pointer_q[0]);
       end
-      first = rot & (~rot + 1'b1);
-      hit   = '0;
+      hi_c     = cand & ge;
+      lo_c     = cand & ~ge;
+      first_hi = hi_c & (~hi_c + 1'b1);
+      first_lo = lo_c & (~lo_c + 1'b1);
+      first    = (|hi_c) ? first_hi : first_lo;
+      slot     = '0;
       for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++)
-        if (first[i]) hit = CVA6Cfg.TRANS_ID_BITS'(i);
-      slot               = commit_pointer_q[0] + hit;
+        if (first[i]) slot = slot | CVA6Cfg.TRANS_ID_BITS'(i);
       head_slot[h]       = slot;
-      head_valid[h]      = |rot;
-      sb_head_valid_o[h] = |rot;
-      sb_head_pc_o[h]    = (|rot) ? mem_q[slot].sbe.pc : '0;
+      head_valid[h]      = |cand;
+      sb_head_valid_o[h] = |cand;
+      sb_head_pc_o[h]    = (|cand) ? mem_q[slot].sbe.pc : '0;
     end
   end
 

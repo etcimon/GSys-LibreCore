@@ -211,6 +211,17 @@ each proven against the previous revision and measured in one paired run
 | `g6lc_bp_loop` row-local training | 1.911 → **1.459 ns** (-23.7%) | 1.353 → 0.961 ns | 17777 → 15595 µm² (-12.3%) | 759 → 499 |
 | `g6lc_loop_buffer` bounded address add | 1.824 → **1.507 ns** (-17.4%) | 1.824 → 1.507 ns | 7412 → 7807 µm² (+5.3%) | 185 → 197 |
 
+* **`core/scoreboard.sv`** (`fo4-a140-sbhead3`) — the per-hart head scan
+  takes the A136 ROB form: candidates in absolute slot order split by a
+  thermometer mask at the commit pointer, two lowest-set isolations, direct
+  slot encode; the rotation crossbar and the pointer add are gone (hdist still
+  subtracts, as before). The scan block is extracted by text from both
+  revisions into standalone modules and proven combinationally equivalent on
+  (slot under head_valid, validity, PC) at 32×2, 16×1, 8×2, 64×4 and 32×1
+  entries×harts (the 64×4 problem: 14 M variables). The serial T6b-1
+  reference assertion stays on. Isolated placement is not available for this
+  module (type-parameter heavy); it is read on the whole-core board.
+
 Proof record: `dmem-fwd-eq-16-8-8`, `dmem-fwd-eq-8-8-4`, `dmem-fwd-eq-4-4-1`, `dmem-fwd-eq-2-8-8`, `dmem-fwd-eq-1-8-8`, `loop-eq-16-4-1`, `loop-eq-8-1-0`, `loop-eq-32-2-1`, `loop-model-candidate-1`, `loop-model-candidate-17`, `loop-negative`, `lbuf-sbs-8x64-1`, `lbuf-sbs-8x64-17`, `lbuf-sbs-4x32-1`, `lbuf-sbs-4x32-17`, `lbuf-sbs-6x128-1`, `lbuf-sbs-6x128-17`, `lbuf-miter-6`. Whole-core board after
 landing: re-measured below when the route completes (the A136 loop-buffer
 candidate improved in isolation and lost on the board; this one must be read

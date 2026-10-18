@@ -84,6 +84,7 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
         "stq": ("core/store_buffer.sv",),
         "step1": ("core/cache_subsystem/wt_dcache_mem.sv", "core/frontend/g6lc_bp_loop.sv",
                   "core/frontend/g6lc_loop_buffer.sv"),
+        "sbhead": ("core/scoreboard.sv",),
     }
     changed = profile_files[profile]
     if profile == "statcor":
@@ -621,6 +622,10 @@ foreach kind {in_reg reg_reg reg_out in_out} {
 
     if (src / "review.json").exists():
         review = json.loads((src / "review.json").read_text())
+        if review["profile"] == "sbhead" and not os.environ.get("CONTROL_MODE"):
+            review_sbhead(src, out, evidence, yosys)
+            (out / "result.json").write_text(json.dumps(evidence, indent=2))
+            return
         if review["profile"] == "step1" and not os.environ.get("CONTROL_MODE"):
             review_step1(src, out, sta, lib, abc, evidence, yosys, run)
             (out / "result.json").write_text(json.dumps(evidence, indent=2))
@@ -1022,6 +1027,50 @@ def pair_module(src, out, sta, lib, abc, evidence, yosys, run, key, top, flists,
         entry["placement"] = dict(re.findall(r"(\w+)=(\S+)", row))
         evidence["maps"][f"{key}-{variant}"] = entry
         (out / "result.json").write_text(json.dumps(evidence, indent=2))
+
+
+def review_sbhead(src, out, evidence, yosys):
+    """A140: the scoreboard's per-hart head scan in absolute slot order vs the
+    previous rotated form, extracted by text into standalone modules and
+    proven combinationally equivalent (slot, validity, PC) by SAT."""
+    live = (src / "core/scoreboard.sv").read_text()
+    base = (src / "baseline/core/scoreboard.sv").read_text()
+
+    def block(text):
+        a = text.index("  always_comb begin : sb_head_scan\n")
+        b = text.index("\n  end\n", a) + len("\n  end\n")
+        return text[a:b]
+    subs = [("CVA6Cfg.NR_SB_ENTRIES", "N"), ("CVA6Cfg.TRANS_ID_BITS", "TW"), ("CVA6Cfg.VLEN", "64"),
+            ("SB_NH", "NH")]
+    old_block, new_block = block(base), block(live)
+    for a, b in subs:
+        old_block = old_block.replace(a, b)
+        new_block = new_block.replace(a, b)
+    pkg = ("package sbhead_pkg;\n  typedef struct packed { logic [1:0] hart_id; logic [63:0] pc; } sbe_t;\n"
+           "  typedef struct packed { logic issued; sbe_t sbe; } sb_entry_t;\nendpackage\n")
+    header = ("import sbhead_pkg::*; #(parameter int unsigned N = 32, parameter int unsigned TW = 5,"
+              " parameter int unsigned NH = 2) (\n"
+              "  input sb_entry_t [N-1:0] mem_q, input logic [0:0][TW-1:0] commit_pointer_q,\n"
+              "  output logic [NH-1:0] sb_head_valid_o, output logic [NH-1:0][63:0] sb_head_pc_o,\n"
+              "  output logic [NH-1:0][TW-1:0] head_slot_o, output logic [NH-1:0] head_valid);\n"
+              "  logic [NH-1:0][TW-1:0] head_slot;\n")
+    # head_slot is consumed only under head_valid in scoreboard.sv (priv[h],
+    # hdist[h], the port-1 search), so the slot is compared under that guard;
+    # the rotated form left the pointer there, the absolute form leaves zero.
+    footer = ("  for (genvar h = 0; h < NH; h++) begin : gen_mask\n"
+              "    assign head_slot_o[h] = head_valid[h] ? head_slot[h] : '0;\n  end\nendmodule\n")
+    (out / "sbhead.sv").write_text(pkg + "module sbhead_old " + header + old_block + footer +
+                                   "module sbhead_new " + header + new_block + footer)
+    evidence["sources"]["sbhead.sv"] = hashlib.sha256((out / "sbhead.sv").read_bytes()).hexdigest()
+    for n, tw, nh in ((32, 5, 2), (16, 4, 1), (8, 3, 2), (64, 6, 4), (32, 5, 1)):
+        key = f"sbhead-eq-{n}-{tw}-{nh}"
+        text = yosys(key,
+                     f"read_slang {out}/sbhead.sv --top sbhead_old --top sbhead_new "
+                     f"-G N={n} -G TW={tw} -G NH={nh}\nproc\n"
+                     "miter -equiv -flatten -make_assert sbhead_old sbhead_new m\n"
+                     "hierarchy -top m\nsat -verify -prove-asserts m\n", timeout=1800)
+        assert "SUCCESS!" in text, text[-1500:]
+        evidence["proofs"][key] = "combinational equivalence of the head scan (slot, valid, pc) PASS"
 
 
 def review_step1(src, out, sta, lib, abc, evidence, yosys, run):
@@ -2040,7 +2089,7 @@ if __name__ == "__main__":
         mode.add_argument("--snapshot", type=Path)
         mode.add_argument("--analyze-results", type=Path)
         parser.add_argument("--baseline", help="baseline revision for the selected review profile")
-        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt", "stq", "step1"), default="control")
+        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt", "stq", "step1", "sbhead"), default="control")
         args = parser.parse_args()
         if args.snapshot:
             if not args.baseline:
