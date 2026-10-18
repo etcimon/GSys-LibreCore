@@ -15,6 +15,13 @@ inconclusive within 50 min at the full XLEN=64 / PLEN=56 widths. Evidence of
 record: 4 seeds x 400k cycles, 0 mismatches (215k pushes, 146k commits, 78k
 cancel cycles, 9k flushes per seed).
 
+A138 trial (reverted): a config-gated input stage was judged by a three-
+instance shift witness (`tb_sb_stage.sv`, kept with the trial patch under
+`sv-timing/architecture/trials/`): staged RTL, previous RTL with the staged
+inputs delayed one cycle (state must match), previous RTL live (its forwarding
+/ stall / readiness bound the staged outputs). Four 300k-cycle runs passed and
+the gate-off RTL was cycle-exact here (2 × 400k); placement rejected the stage.
+
 A120 refresh: use `--assert` on the stock Verilator semantic witness.
 The harness now obeys the reference's clocked capacity/commit assertions,
 drives the committing TID from the head, keeps scoreboard owners live and

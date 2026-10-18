@@ -81,6 +81,7 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
         "loop-emit": ("core/frontend/g6lc_bp_loop.sv",),
         "lbuf": ("core/frontend/g6lc_loop_buffer.sv", "core/ooo/g6lc_rob.sv"),
         "ckpt": ("core/frontend/g6lc_bp_ckpt.sv",),
+        "stq": ("core/store_buffer.sv",),
     }
     changed = profile_files[profile]
     if profile == "statcor":
@@ -95,6 +96,9 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
     if profile == "ckpt":
         name = "verif/tb/core/tb_g6lc_rtl_review.sv"
         files[name] = (root / name).read_bytes()
+    if profile == "stq":
+        for p in (root / "verif/tb/core/store_buffer_sbs").glob("*.sv"):
+            files[p.relative_to(root).as_posix()] = p.read_bytes()
     if profile == "boundary":
         for folder in ("store_buffer_sbs", "instr_realign_sbs"):
             for p in (root / "verif/tb/core" / folder).glob("*.sv"):
@@ -607,6 +611,10 @@ foreach kind {in_reg reg_reg reg_out in_out} {
 
     if (src / "review.json").exists():
         review = json.loads((src / "review.json").read_text())
+        if review["profile"] == "stq" and not os.environ.get("CONTROL_MODE"):
+            review_stq(src, out, sta, lib, abc, evidence, yosys, run)
+            (out / "result.json").write_text(json.dumps(evidence, indent=2))
+            return
         if review["profile"] == "ckpt" and not os.environ.get("CONTROL_MODE"):
             review_ckpt(src, out, sta, lib, abc, evidence, yosys, run)
             (out / "result.json").write_text(json.dumps(evidence, indent=2))
@@ -964,6 +972,127 @@ endmodule
         text = run("lbuf-place-" + variant, [
             "/opt/testharness/toolchains/openroad-g6lc-pgo/bin/openroad", "-exit",
             str(src / "build-platform/scripts/openroad-module-place-study.tcl")], env=env, timeout=900)
+        row = next(l for l in text.splitlines() if l.startswith("PLACE_STUDY "))
+        evidence["maps"][variant]["placement"] = dict(re.findall(r"(\w+)=(\S+)", row))
+        (out / "result.json").write_text(json.dumps(evidence, indent=2))
+    print(json.dumps(evidence["maps"], indent=2), flush=True)
+
+
+def review_stq(src, out, sta, lib, abc, evidence, yosys, run):
+    """A138 store-buffer input stage: gate-off equivalence against the baseline,
+    the shift witness (staged design == delayed reference state; previous
+    semantics bound the outputs), a negative control and the paired mapping /
+    placement of stage off vs on at the g6lc64_ooo geometry."""
+    portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
+    packages = [l for l in portable.splitlines()
+                if l.startswith("+") or l.endswith("_pkg.sv") or "/include/" in l]
+    sbs = src / "verif/tb/core/store_buffer_sbs"
+    baseline = src / "baseline/core/store_buffer.sv"
+    new = src / "core/store_buffer.sv"
+    old = baseline.read_text()
+    assert old.count("module store_buffer\n") == 1
+    golden = out / "store_buffer_old.sv"
+    golden.write_text(old.replace("module store_buffer\n", "module store_buffer_old\n", 1))
+    # Timing / equivalence top: sb_wrap_new's ports around a config whose
+    # StqInputStage bit is the STAGE parameter.
+    wrap_text = (sbs / "wrap.sv").read_text()
+    body = wrap_text[wrap_text.index("module sb_wrap_new"):]
+    body = body[:body.index("endmodule") + len("endmodule")]
+    body = body.replace("module sb_wrap_new", "module g6lc_stq_timing", 1)
+    body = body.replace("    parameter config_pkg::cva6_cfg_t CVA6Cfg = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg),",
+                        "    parameter bit STAGE = 1'b0,\n"
+                        "    parameter config_pkg::cva6_cfg_t CVA6Cfg = build_config_pkg::build_config(stq_timing_pkg::user_cfg(STAGE)),", 1)
+    tail = body[body.index("  logic [CVA6Cfg.PLEN-1:0] paddr_raw;"):]
+    body = body.replace(tail,
+        "  store_buffer #(.CVA6Cfg(CVA6Cfg), .dcache_req_i_t(dcache_req_i_t), .dcache_req_o_t(dcache_req_o_t), .cbo_t(cbo_t)) u (.*);\nendmodule")
+    wrapper = out / "stq_timing.sv"
+    wrapper.write_text("""
+package stq_timing_pkg;
+  function automatic config_pkg::cva6_user_cfg_t user_cfg(input bit stage);
+    user_cfg = cva6_config_pkg::cva6_cfg;
+    user_cfg.StqInputStage = stage;
+  endfunction
+endpackage
+""" + body + "\n")
+    old_wrapper = out / "stq_timing_old.sv"
+    old_wrapper.write_text(wrapper.read_text().replace("g6lc_stq_timing", "g6lc_stq_timing_old")
+                           .replace("  store_buffer #(", "  store_buffer_old #(").replace("stq_timing_pkg", "stq_timing_old_pkg"))
+    # 2. shift witness
+    vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+    tb_flist = out / "stq-tb.f"
+    tb_flist.write_text("\n".join(packages + [str(new), str(golden), str(sbs / "wrap.sv"),
+                                              str(sbs / "wrap_stage.sv"), str(sbs / "tb_sb_stage.sv")]) + "\n")
+    obj = out / "obj-stq-stage"
+    run("stq-stage-build", [vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal", "-Wno-lint", "-Wno-style",
+        "-Wno-WIDTH", "-Wno-UNOPTFLAT", "-f", str(tb_flist), "--top-module", "tb_sb_stage",
+        "--Mdir", str(obj), "-j", "8"], timeout=1800)
+    for label, args in (("plain-1", ["+seed=1"]), ("plain-17", ["+seed=17"]), ("cbo-1", ["+seed=1", "+cbo"]), ("cbo-5", ["+seed=5", "+cbo"])):
+        log = run(f"stq-stage-{label}", [str(obj / "Vtb_sb_stage"), *args], timeout=1800)
+        line = next((l for l in log.splitlines() if l.startswith("PASS tb_sb_stage")), "")
+        assert line and "%Error" not in log, log[-1500:]
+        evidence["proofs"][f"stq-stage-{label}"] = line
+    # 3. negative control: the staged store no longer forwards -> FWD check fails
+    mutant = out / "store_buffer_mut.sv"
+    mut_text = new.read_text()
+    needle = "if (pass == 1 && in_live && spec_visible(in_q.trans_id) &&"
+    assert mut_text.count(needle) == 1
+    mutant.write_text(mut_text.replace(needle, "if (pass == 1 && 1'b0 && spec_visible(in_q.trans_id) &&"))
+    mflist = out / "stq-mut.f"
+    mflist.write_text("\n".join(packages + [str(mutant), str(golden), str(sbs / "wrap.sv"),
+                                            str(sbs / "wrap_stage.sv"), str(sbs / "tb_sb_stage.sv")]) + "\n")
+    mobj = out / "obj-stq-mutant"
+    run("stq-mutant-build", [vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal", "-Wno-lint", "-Wno-style",
+        "-Wno-WIDTH", "-Wno-UNOPTFLAT", "-f", str(mflist), "--top-module", "tb_sb_stage",
+        "--Mdir", str(mobj), "-j", "8"], timeout=1800)
+    bad = subprocess.run([str(mobj / "Vtb_sb_stage"), "+seed=1"], cwd=out, capture_output=True, text=True, timeout=1800)
+    (out / "stq-mutant.log").write_text(bad.stdout + bad.stderr)
+    assert bad.returncode != 0 and "FWD" in bad.stdout, "mutant was not caught"
+    evidence["proofs"]["stq-negative"] = "staged store removed from forwarding: FWD check fails"
+    # 1. gate off == previous RTL. equiv_simple did not finish in 20 minutes
+    # on this module (46 k instances); the established evidence form for the
+    # store buffer is the cycle-exact side-by-side harness (A109/A120):
+    # previous RTL vs live RTL with the gate off, every output every cycle.
+    flist_gate = out / "stq-gate.f"
+    flist_gate.write_text("\n".join(packages + [str(new), str(wrapper)]) + "\n")
+    sbs_flist = out / "stq-sbs.f"
+    sbs_flist.write_text("\n".join(packages + [str(new), str(golden), str(sbs / "wrap.sv"),
+                                               str(sbs / "tb_sb_sbs.sv")]) + "\n")
+    sobj = out / "obj-stq-sbs"
+    run("stq-sbs-build", [vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal", "-Wno-lint", "-Wno-style",
+        "-Wno-WIDTH", "-Wno-UNOPTFLAT", "-f", str(sbs_flist), "--top-module", "tb_sb_sbs",
+        "--Mdir", str(sobj), "-j", "8"], timeout=1800)
+    for seed in (1, 17):
+        log = run(f"stq-sbs-{seed}", [str(sobj / "Vtb_sb_sbs"), f"+seed={seed}"], timeout=1800)
+        line = next((l for l in log.splitlines() if "PASS" in l and "errors=0" in l), "")
+        assert line and "%Error" not in log, log[-1500:]
+        evidence["proofs"][f"stq-sbs-off-{seed}"] = line.strip()
+    # 4. paired mapping / placement: stage off vs on
+    for variant, stage in (("stq-off", 0), ("stq-on", 1)):
+        netlist, stats = out / f"{variant}.v", out / f"{variant}.stat"
+        yosys("map-" + variant,
+              f"read_slang -f {flist_gate} --top g6lc_stq_timing --single-unit -G STAGE={stage}\n"
+              "proc\nflatten\nopt_clean\nwreduce\nalumacc\nopt_clean\nmemory_map\n"
+              f"opt_dff\ntechmap\nopt_clean\ndfflibmap -liberty {lib}\n{abc}\n"
+              f"opt_clean -purge\ntee -o {stats} stat -liberty {lib}\n"
+              f"write_verilog -noattr -noexpr {netlist}\n", timeout=3600)
+        evidence["maps"][variant] = {
+            "area_um2": float(re.search(r"Chip area for module .*?:\s*([\d.]+)", stats.read_text())[1]),
+            "board": {},
+        }
+        for fan in (0, 64):
+            env = dict(os.environ, OR_LIBERTY=lib, OR_VERILOG=str(netlist),
+                       OR_TOP="g6lc_stq_timing", OR_PERIOD_NS="0.25", OR_IGNORE_FANOUT_ABOVE=str(fan))
+            text = run(f"sta-{variant}-{fan}", [sta, "-exit",
+                str(src / "build-platform/scripts/openroad-module-board.tcl")], env=env, timeout=1800)
+            row = next(l for l in text.splitlines() if l.startswith("ROW\t"))
+            assert "failed" not in row
+            evidence["maps"][variant]["board"][str(fan)] = row
+        env = dict(os.environ, STUDY_PLATFORM=str(Path(lib).parent),
+                   OR_VERILOG=str(netlist), OR_TOP="g6lc_stq_timing",
+                   STUDY_OUTPUT=str(out / variant), STUDY_VARIANT=variant)
+        text = run("place-" + variant, [
+            "/opt/testharness/toolchains/openroad-g6lc-pgo/bin/openroad", "-exit",
+            str(src / "build-platform/scripts/openroad-module-place-study.tcl")], env=env, timeout=2400)
         row = next(l for l in text.splitlines() if l.startswith("PLACE_STUDY "))
         evidence["maps"][variant]["placement"] = dict(re.findall(r"(\w+)=(\S+)", row))
         (out / "result.json").write_text(json.dumps(evidence, indent=2))
@@ -1728,7 +1857,7 @@ if __name__ == "__main__":
         mode.add_argument("--snapshot", type=Path)
         mode.add_argument("--analyze-results", type=Path)
         parser.add_argument("--baseline", help="baseline revision for the selected review profile")
-        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt"), default="control")
+        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt", "stq"), default="control")
         args = parser.parse_args()
         if args.snapshot:
             if not args.baseline:

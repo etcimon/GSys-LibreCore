@@ -1,0 +1,1435 @@
+diff --git a/core/include/build_config_pkg.sv b/core/include/build_config_pkg.sv
+index 21ad86fb6..130e0096d 100644
+--- a/core/include/build_config_pkg.sv
++++ b/core/include/build_config_pkg.sv
+@@ -100,6 +100,7 @@ package build_config_pkg;
+     // cont.14 shows it is necessary for stock /cpus with current STQ RTL.
+     cfg.SpeculativeSb = CVA6Cfg.SliceOoOEn || CVA6Cfg.OoOEn || CVA6Cfg.DeepSpecEn;
+     cfg.DeepSpecEn = CVA6Cfg.DeepSpecEn;
++    cfg.StqInputStage = CVA6Cfg.StqInputStage;
+ 
+     // Dual ALU minimum under SS; scale toward issue width (cap 4 for area).
+     // Hang-6: NrALUs=1 under dual still BADOFFSET — not dual-ALU residual.
+diff --git a/core/include/config_pkg.sv b/core/include/config_pkg.sv
+index a8068c0d1..1e54ad4ab 100644
+--- a/core/include/config_pkg.sv
++++ b/core/include/config_pkg.sv
+@@ -711,6 +711,9 @@ package config_pkg;
+     // FSE: deep speculation depth plane (architecture/speculative-execution/)
+     // 0 = legacy STQ depth 4 + package-stated buffers; 1 = auto floors + deeper STQ
+     bit          DeepSpecEn;
++    // A138: store buffer input stage (request/commit/flush/cancel captured
++    // before the speculative-queue permutation; +1 cycle store handoff)
++    bit          StqInputStage;
+     int unsigned RobEntries;          // ROB depth (0 → NrScoreboardEntries when OoOEn)
+     int unsigned PrfEntries;          // physical RF size (0 → 32+RobEntries)
+     int unsigned IqEntries;           // unified IQ depth (0 → RobEntries)
+@@ -789,6 +792,7 @@ package config_pkg;
+     int unsigned NrIssuePorts;
+     bit          SpeculativeSb;
+     bit          DeepSpecEn;          // FSE depth plane (STQ/load/ckpt floors)
++    bit          StqInputStage;       // A138 store-buffer input stage
+ 
+     int unsigned NrALUs;
+     bit          ALUBypass;
+@@ -1291,6 +1295,10 @@ package config_pkg;
+     assert (!(Cfg.DeepSpecEn && Cfg.BPCkptDepth != 0 &&
+               Cfg.BPCkptDepth < Cfg.NR_SB_ENTRIES));
+     assert (!(Cfg.DeepSpecEn && Cfg.MaxOutstandingStores > 16)); // STQ CAM cap v1
++    // A138: the staged store buffer excludes the legacy SMT keep path (its
++    // permutation reads the live load address) and needs the speculative queue.
++    assert (!(Cfg.StqInputStage && Cfg.SuperscalarEn && Cfg.NrHarts > 1 && !Cfg.OoOEn));
++    assert (!(Cfg.StqInputStage && !Cfg.SpeculativeSb));
+     // L3 sits below L2; line size must match for inclusive hierarchy.
+     assert (!(Cfg.L3En && !Cfg.L2En));
+     assert (!(Cfg.L3En && Cfg.L3ByteSize == 0));
+diff --git a/core/include/cv32a60x_config_pkg.sv b/core/include/cv32a60x_config_pkg.sv
+index d0153a5e3..acf13b4a2 100644
+--- a/core/include/cv32a60x_config_pkg.sv
++++ b/core/include/cv32a60x_config_pkg.sv
+@@ -172,6 +172,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv32a65x_config_pkg.sv b/core/include/cv32a65x_config_pkg.sv
+index 903baaa2c..140254416 100644
+--- a/core/include/cv32a65x_config_pkg.sv
++++ b/core/include/cv32a65x_config_pkg.sv
+@@ -172,6 +172,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv32a6_ima_sv32_fpga_config_pkg.sv b/core/include/cv32a6_ima_sv32_fpga_config_pkg.sv
+index 7f351aabd..ba6f75da7 100644
+--- a/core/include/cv32a6_ima_sv32_fpga_config_pkg.sv
++++ b/core/include/cv32a6_ima_sv32_fpga_config_pkg.sv
+@@ -227,6 +227,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv32a6_imac_sv32_config_pkg.sv b/core/include/cv32a6_imac_sv32_config_pkg.sv
+index 41db94d0a..07cc6862f 100644
+--- a/core/include/cv32a6_imac_sv32_config_pkg.sv
++++ b/core/include/cv32a6_imac_sv32_config_pkg.sv
+@@ -226,6 +226,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a60ax_config_pkg.sv b/core/include/cv64a60ax_config_pkg.sv
+index 83fcf44d5..443cb8881 100644
+--- a/core/include/cv64a60ax_config_pkg.sv
++++ b/core/include/cv64a60ax_config_pkg.sv
+@@ -199,6 +199,7 @@ localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdc_sv39_config_pkg.sv b/core/include/cv64a6_imafdc_sv39_config_pkg.sv
+index 9b07b4f9f..557f46ded 100644
+--- a/core/include/cv64a6_imafdc_sv39_config_pkg.sv
++++ b/core/include/cv64a6_imafdc_sv39_config_pkg.sv
+@@ -246,6 +246,7 @@ package cva6_config_pkg;
+       // next_pow2(MaxOutstandingStores) (spec) / min(8, …) (commit) and couples
+       // SpeculativeSb via build_config_pkg.
+       DeepSpecEn: bit'(1),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdc_sv39_hpdcache_config_pkg.sv b/core/include/cv64a6_imafdc_sv39_hpdcache_config_pkg.sv
+index e9e2052db..9d578d822 100644
+--- a/core/include/cv64a6_imafdc_sv39_hpdcache_config_pkg.sv
++++ b/core/include/cv64a6_imafdc_sv39_hpdcache_config_pkg.sv
+@@ -238,6 +238,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv b/core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv
+index 641a0a06d..c5c692237 100644
+--- a/core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv
++++ b/core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv
+@@ -240,6 +240,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdc_sv39_openpiton_config_pkg.sv b/core/include/cv64a6_imafdc_sv39_openpiton_config_pkg.sv
+index e673790f6..7be36c4cf 100644
+--- a/core/include/cv64a6_imafdc_sv39_openpiton_config_pkg.sv
++++ b/core/include/cv64a6_imafdc_sv39_openpiton_config_pkg.sv
+@@ -231,6 +231,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdc_sv39_wb_config_pkg.sv b/core/include/cv64a6_imafdc_sv39_wb_config_pkg.sv
+index 75f4bf96d..d8e990004 100644
+--- a/core/include/cv64a6_imafdc_sv39_wb_config_pkg.sv
++++ b/core/include/cv64a6_imafdc_sv39_wb_config_pkg.sv
+@@ -231,6 +231,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdch_sv39_config_pkg.sv b/core/include/cv64a6_imafdch_sv39_config_pkg.sv
+index 3faf1b246..ccbd79eb0 100644
+--- a/core/include/cv64a6_imafdch_sv39_config_pkg.sv
++++ b/core/include/cv64a6_imafdch_sv39_config_pkg.sv
+@@ -231,6 +231,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdch_sv39_wb_config_pkg.sv b/core/include/cv64a6_imafdch_sv39_wb_config_pkg.sv
+index c1ae76583..aa08f17ab 100644
+--- a/core/include/cv64a6_imafdch_sv39_wb_config_pkg.sv
++++ b/core/include/cv64a6_imafdch_sv39_wb_config_pkg.sv
+@@ -231,6 +231,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdcv_sv39_config_pkg.sv b/core/include/cv64a6_imafdcv_sv39_config_pkg.sv
+index c12f21c91..5a11e0700 100644
+--- a/core/include/cv64a6_imafdcv_sv39_config_pkg.sv
++++ b/core/include/cv64a6_imafdcv_sv39_config_pkg.sv
+@@ -233,6 +233,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_spec_deep_config_pkg.sv b/core/include/cv64a6_spec_deep_config_pkg.sv
+index 88114f6d8..6f1af9852 100644
+--- a/core/include/cv64a6_spec_deep_config_pkg.sv
++++ b/core/include/cv64a6_spec_deep_config_pkg.sv
+@@ -231,6 +231,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(1),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ai_config_pkg.sv b/core/include/g6lc64_ai_config_pkg.sv
+index b35b8894a..308fc4b2c 100644
+--- a/core/include/g6lc64_ai_config_pkg.sv
++++ b/core/include/g6lc64_ai_config_pkg.sv
+@@ -337,6 +337,7 @@ package cva6_config_pkg;
+       // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
+       // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
+       DeepSpecEn: bit'(1),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ooo_config_pkg.sv b/core/include/g6lc64_ooo_config_pkg.sv
+index 2ff8b1668..0b8716507 100644
+--- a/core/include/g6lc64_ooo_config_pkg.sv
++++ b/core/include/g6lc64_ooo_config_pkg.sv
+@@ -261,6 +261,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(1),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ooo_int2_config_pkg.sv b/core/include/g6lc64_ooo_int2_config_pkg.sv
+index 1dedbf1e0..2be820e2b 100644
+--- a/core/include/g6lc64_ooo_int2_config_pkg.sv
++++ b/core/include/g6lc64_ooo_int2_config_pkg.sv
+@@ -295,6 +295,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ooo_int2_l3_ai_config_pkg.sv b/core/include/g6lc64_ooo_int2_l3_ai_config_pkg.sv
+index d8cf8fc49..6bc90c89a 100644
+--- a/core/include/g6lc64_ooo_int2_l3_ai_config_pkg.sv
++++ b/core/include/g6lc64_ooo_int2_l3_ai_config_pkg.sv
+@@ -310,6 +310,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ooo_int2_l3_config_pkg.sv b/core/include/g6lc64_ooo_int2_l3_config_pkg.sv
+index 28f7468ae..aa18b0c38 100644
+--- a/core/include/g6lc64_ooo_int2_l3_config_pkg.sv
++++ b/core/include/g6lc64_ooo_int2_l3_config_pkg.sv
+@@ -303,6 +303,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ooo_int_config_pkg.sv b/core/include/g6lc64_ooo_int_config_pkg.sv
+index df993d63c..75f6867fb 100644
+--- a/core/include/g6lc64_ooo_int_config_pkg.sv
++++ b/core/include/g6lc64_ooo_int_config_pkg.sv
+@@ -269,6 +269,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(1),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ooo_server1_config_pkg.sv b/core/include/g6lc64_ooo_server1_config_pkg.sv
+index 7437690a8..9f745bda8 100644
+--- a/core/include/g6lc64_ooo_server1_config_pkg.sv
++++ b/core/include/g6lc64_ooo_server1_config_pkg.sv
+@@ -282,6 +282,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(1),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ooo_server_config_pkg.sv b/core/include/g6lc64_ooo_server_config_pkg.sv
+index 31ca140e5..1559afaad 100644
+--- a/core/include/g6lc64_ooo_server_config_pkg.sv
++++ b/core/include/g6lc64_ooo_server_config_pkg.sv
+@@ -278,6 +278,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(1),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_server_math_config_pkg.sv b/core/include/g6lc64_server_math_config_pkg.sv
+index d40c9e3c2..33faad73e 100644
+--- a/core/include/g6lc64_server_math_config_pkg.sv
++++ b/core/include/g6lc64_server_math_config_pkg.sv
+@@ -263,6 +263,7 @@ package cva6_config_pkg;
+       // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
+       // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
+       DeepSpecEn: bit'(1),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_server_math_l3_config_pkg.sv b/core/include/g6lc64_server_math_l3_config_pkg.sv
+index a8bec5c45..dbbf90efd 100644
+--- a/core/include/g6lc64_server_math_l3_config_pkg.sv
++++ b/core/include/g6lc64_server_math_l3_config_pkg.sv
+@@ -268,6 +268,7 @@ package cva6_config_pkg;
+       // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
+       // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
+       DeepSpecEn: bit'(1),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_server_math_v_config_pkg.sv b/core/include/g6lc64_server_math_v_config_pkg.sv
+index 6e9b7a652..9627bd1a2 100644
+--- a/core/include/g6lc64_server_math_v_config_pkg.sv
++++ b/core/include/g6lc64_server_math_v_config_pkg.sv
+@@ -273,6 +273,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_smt2_ai_config_pkg.sv b/core/include/g6lc64_smt2_ai_config_pkg.sv
+index 5edc21acf..ae13c1c57 100644
+--- a/core/include/g6lc64_smt2_ai_config_pkg.sv
++++ b/core/include/g6lc64_smt2_ai_config_pkg.sv
+@@ -331,6 +331,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_smt2_config_pkg.sv b/core/include/g6lc64_smt2_config_pkg.sv
+index ba4935105..b6d247c99 100644
+--- a/core/include/g6lc64_smt2_config_pkg.sv
++++ b/core/include/g6lc64_smt2_config_pkg.sv
+@@ -279,6 +279,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_smt2_l3_config_pkg.sv b/core/include/g6lc64_smt2_l3_config_pkg.sv
+index e58488d57..11431c5d3 100644
+--- a/core/include/g6lc64_smt2_l3_config_pkg.sv
++++ b/core/include/g6lc64_smt2_l3_config_pkg.sv
+@@ -282,6 +282,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_smt2_ooo_int_ai_config_pkg.sv b/core/include/g6lc64_smt2_ooo_int_ai_config_pkg.sv
+index 93165ee6d..edb0a0906 100644
+--- a/core/include/g6lc64_smt2_ooo_int_ai_config_pkg.sv
++++ b/core/include/g6lc64_smt2_ooo_int_ai_config_pkg.sv
+@@ -299,6 +299,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(0),
+       SmtDrainForceCycles: unsigned'(0),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_smt2_ooo_int_config_pkg.sv b/core/include/g6lc64_smt2_ooo_int_config_pkg.sv
+index e4ca3b3a3..0631e1122 100644
+--- a/core/include/g6lc64_smt2_ooo_int_config_pkg.sv
++++ b/core/include/g6lc64_smt2_ooo_int_config_pkg.sv
+@@ -292,6 +292,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(0),
+       SmtDrainForceCycles: unsigned'(0),
+       DeepSpecEn: bit'(0),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_stream8_config_pkg.sv b/core/include/g6lc64_stream8_config_pkg.sv
+index a1bc9ef66..adaf5f240 100644
+--- a/core/include/g6lc64_stream8_config_pkg.sv
++++ b/core/include/g6lc64_stream8_config_pkg.sv
+@@ -265,6 +265,7 @@ package cva6_config_pkg;
+       // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
+       // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
+       DeepSpecEn: bit'(1),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_stream8_l3_ai_config_pkg.sv b/core/include/g6lc64_stream8_l3_ai_config_pkg.sv
+index b99537af5..ce469fecf 100644
+--- a/core/include/g6lc64_stream8_l3_ai_config_pkg.sv
++++ b/core/include/g6lc64_stream8_l3_ai_config_pkg.sv
+@@ -277,6 +277,7 @@ package cva6_config_pkg;
+       // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
+       // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
+       DeepSpecEn: bit'(1),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_stream8_l3_config_pkg.sv b/core/include/g6lc64_stream8_l3_config_pkg.sv
+index 17856c3b9..8ba0c48c3 100644
+--- a/core/include/g6lc64_stream8_l3_config_pkg.sv
++++ b/core/include/g6lc64_stream8_l3_config_pkg.sv
+@@ -270,6 +270,7 @@ package cva6_config_pkg;
+       // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
+       // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
+       DeepSpecEn: bit'(1),
++      StqInputStage: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/store_buffer.sv b/core/store_buffer.sv
+index 8362c9b39..be153f6c4 100644
+--- a/core/store_buffer.sv
++++ b/core/store_buffer.sv
+@@ -226,14 +226,126 @@ module store_buffer
+   // port; tid-keyed eviction is T6b-4b' if the stall stat is material.
+   localparam bit MixCommit = CVA6Cfg.OoOEn &&
+                             (CVA6Cfg.NrHarts > 1) && !CVA6Cfg.SmtDrainedHandoff;
++  // A138 input stage (CVA6Cfg.StqInputStage). The queue's next state folds
++  // insertion, the younger-cancel squash and the commit release into one
++  // permutation; with the stage, that permutation reads only registers:
++  // the store request, the commit pulse, the flush, the cancel mask and the
++  // program-age anchor are captured first and applied one cycle later. The
++  // core state therefore equals the unstaged design's state delayed by one
++  // cycle, which is what the witness checks. Everything the current cycle
++  // must still see is read from the registers directly: the staged store is a
++  // forwarding / page-offset source placed at its program-age position, the
++  // head a staged commit will pop is already architectural (no age or hart
++  // filter, no liveness assertion), ready_o / commit_ready_o / empty account
++  // for the staged items, and the RVFI address follows the committing head.
++  // Loads see every store they would have seen; the only visible differences
++  // are conservative (ready, page-offset stall and the memory write one cycle
++  // later). The gate must not coexist with the legacy SMT keep path.
++  localparam bit IN_STAGE = CVA6Cfg.StqInputStage;
++  typedef struct packed {
++    logic [CVA6Cfg.PLEN-1:0] address;
++    logic [CVA6Cfg.XLEN-1:0] data;
++    logic [(CVA6Cfg.XLEN/8)-1:0] be;
++    logic [1:0] data_size;
++    cbo_t cbo_op;
++    logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id;
++    logic [HID_W-1:0] hart;
++  } st_req_t;
++  st_req_t                           in_q, cur_req, eff_req;
++  logic                              in_valid_q, commit_stage_q, flush_stage_q;
++  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]  cancelled_stage_q;
++  logic [CVA6Cfg.TRANS_ID_BITS-1:0]  anchor_stage_q;
++  logic                              eff_valid, eff_commit, eff_flush;
++  logic [CVA6Cfg.NR_SB_ENTRIES-1:0]  eff_cancelled;
++  logic [CVA6Cfg.TRANS_ID_BITS-1:0]  eff_anchor;
++  assign cur_req = '{address: paddr_i, data: data_i, be: be_i, data_size: data_size_i,
++                     cbo_op: cbo_op_i, trans_id: trans_id_i, hart: st_hart_i};
++  assign eff_req       = IN_STAGE ? in_q : cur_req;
++  assign eff_valid     = IN_STAGE ? in_valid_q : valid_i;
++  assign eff_commit    = IN_STAGE ? commit_stage_q : commit_i;
++  assign eff_flush     = IN_STAGE ? flush_stage_q : flush_i;
++  assign eff_cancelled = IN_STAGE ? cancelled_stage_q : cancelled_mask_i;
++  assign eff_anchor    = IN_STAGE ? anchor_stage_q : oldest_live_tid_i;
++  // Program age inside the permutation: anchored where its participants were
++  // captured. Every participant is still live when the permutation runs (the
++  // staged store has not been inserted, queue entries have not committed), so
++  // the earlier anchor orders them exactly as the live one would have.
++  function automatic logic ooo_older_core(input logic [CVA6Cfg.TRANS_ID_BITS-1:0] a,
++                                          input logic [CVA6Cfg.TRANS_ID_BITS-1:0] b);
++    return g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(a), 32'(b), 32'(eff_anchor));
++  endfunction
++  // The head a staged commit is about to pop: architectural, like a
++  // commit-queue entry (it was handed off in the unstaged view).
++  logic [$clog2(DEPTH_SPEC)-1:0] spec_next_head;
++  logic                          spec_next_head_in_queue;
++  assign spec_next_head = speculative_read_pointer_q +
++                          $clog2(DEPTH_SPEC)'(IN_STAGE && commit_stage_q);
++  assign spec_next_head_in_queue =
++      speculative_status_cnt_q > ($clog2(DEPTH_SPEC) + 1)'(IN_STAGE && commit_stage_q);
++  function automatic logic head_committing(input int unsigned i);
++    return IN_STAGE && commit_stage_q &&
++           ($clog2(DEPTH_SPEC)'(i) == speculative_read_pointer_q);
++  endfunction
++
+   logic spec_head_valid, spec_head_mismatch;
+-  assign spec_head_valid = (speculative_status_cnt_q != '0) &&
+-                           speculative_queue_q[speculative_read_pointer_q].valid;
+-  assign spec_head_mismatch = MixCommit && spec_head_valid &&
+-                              (speculative_queue_q[speculative_read_pointer_q].trans_id !=
+-                               commit_trans_id_i);
++  // The oldest live speculative store as the commit port sees it: with the
++  // stage, either the queue slot after a staged pop or the staged store
++  // itself, whichever is older in program order (a late-arriving older store
++  // is inserted ahead of the queue by the permutation; the commit port may
++  // retire it before that permutation has run).
++  // Entries the staged cancel mask will squash are skipped as well: the
++  // unstaged design had removed them already.
++  logic [CVA6Cfg.TRANS_ID_BITS-1:0] spec_head_tid;
++  logic [CVA6Cfg.PLEN-1:0]          spec_head_addr;
++  logic                             spec_head_is_staged, spec_q_head_valid, in_live;
++  logic [$clog2(DEPTH_SPEC)-1:0]    spec_q_head;
++  always_comb begin
++    spec_q_head_valid = 1'b0;
++    spec_q_head       = spec_next_head;
++    if (!IN_STAGE) begin
++      spec_q_head_valid = (speculative_status_cnt_q != '0) &&
++                          speculative_queue_q[speculative_read_pointer_q].valid;
++    end else begin
++      for (int unsigned k = DEPTH_SPEC; k > 0; k--) begin
++        automatic logic [$clog2(DEPTH_SPEC)-1:0] idx;
++        idx = spec_next_head + $clog2(DEPTH_SPEC)'(k - 1);
++        if ((k - 1) + 32'(commit_stage_q) < 32'(speculative_status_cnt_q) &&
++            speculative_queue_q[idx].valid &&
++            !eff_cancelled[speculative_queue_q[idx].trans_id]) begin
++          spec_q_head_valid = 1'b1;
++          spec_q_head       = idx;
++        end
++      end
++    end
++  end
++  assign in_live = IN_STAGE && in_valid_q && !eff_cancelled[in_q.trans_id] && !flush_stage_q;
++  assign spec_head_is_staged = in_live &&
++      (!spec_q_head_valid || ooo_older(in_q.trans_id, speculative_queue_q[spec_q_head].trans_id));
++  assign spec_head_valid = spec_head_is_staged || (spec_q_head_valid && !(IN_STAGE && flush_stage_q));
++  assign spec_head_tid   = spec_head_is_staged ? in_q.trans_id : speculative_queue_q[spec_q_head].trans_id;
++  assign spec_head_addr  = spec_head_is_staged ? in_q.address  : speculative_queue_q[spec_q_head].address;
++  assign spec_head_mismatch = MixCommit && spec_head_valid && (spec_head_tid != commit_trans_id_i);
++
++  always_ff @(posedge clk_i or negedge rst_ni) begin : p_in_stage
++    if (~rst_ni) begin
++      in_q              <= '0;
++      in_valid_q        <= 1'b0;
++      commit_stage_q    <= 1'b0;
++      flush_stage_q     <= 1'b0;
++      cancelled_stage_q <= '0;
++      anchor_stage_q    <= '0;
++    end else begin
++      in_valid_q        <= IN_STAGE && valid_i;
++      if (IN_STAGE && valid_i) in_q <= cur_req;
++      commit_stage_q    <= IN_STAGE && commit_i;
++      flush_stage_q     <= IN_STAGE && flush_i;
++      cancelled_stage_q <= IN_STAGE ? cancelled_mask_i : '0;
++      anchor_stage_q    <= IN_STAGE ? oldest_live_tid_i : '0;
++    end
++  end
+ 
+-  assign store_buffer_empty_o = (speculative_status_cnt_q == 0) & no_st_pending_o;
++  assign store_buffer_empty_o = (speculative_status_cnt_q == 0) & no_st_pending_o &
++                                !(IN_STAGE && in_valid_q);
+   // ----------------------------------------
+   // Speculative Queue - Core Interface
+   // ----------------------------------------
+@@ -284,19 +396,19 @@ module store_buffer
+     // LSU interface
+     // we are ready to accept a new entry and the input data is valid
+     // (skip if this TID is already cancelled — FSE S4)
+-    if (valid_i && !cancelled_mask_i[trans_id_i]) begin
+-      speculative_queue_n[speculative_write_pointer_q].address = paddr_i;
+-      speculative_queue_n[speculative_write_pointer_q].data = data_i;
+-      speculative_queue_n[speculative_write_pointer_q].be = be_i;
+-      speculative_queue_n[speculative_write_pointer_q].data_size = data_size_i;
++    if (eff_valid && !eff_cancelled[eff_req.trans_id]) begin
++      speculative_queue_n[speculative_write_pointer_q].address = eff_req.address;
++      speculative_queue_n[speculative_write_pointer_q].data = eff_req.data;
++      speculative_queue_n[speculative_write_pointer_q].be = eff_req.be;
++      speculative_queue_n[speculative_write_pointer_q].data_size = eff_req.data_size;
+       speculative_queue_n[speculative_write_pointer_q].valid = 1'b1;
+-      speculative_queue_n[speculative_write_pointer_q].cbo_op = cbo_op_i;
+-      speculative_queue_n[speculative_write_pointer_q].trans_id = trans_id_i;
+-      speculative_queue_n[speculative_write_pointer_q].hart = st_hart_i;
++      speculative_queue_n[speculative_write_pointer_q].cbo_op = eff_req.cbo_op;
++      speculative_queue_n[speculative_write_pointer_q].trans_id = eff_req.trans_id;
++      speculative_queue_n[speculative_write_pointer_q].hart = eff_req.hart;
+       speculative_queue_n[speculative_write_pointer_q].wait_rvalid = 1'b0;
+       speculative_queue_n[speculative_write_pointer_q].fwd_keep =
+           LEGACY_SMT_KEEP &&
+-          load_paddr_valid_i && pa_eq(paddr_i, load_paddr_i);
++          load_paddr_valid_i && pa_eq(eff_req.address, load_paddr_i);
+       // advance the write pointer
+       speculative_write_pointer_n = speculative_write_pointer_q + 1'b1;
+       speculative_status_cnt++;
+@@ -304,7 +416,7 @@ module store_buffer
+ 
+     // evict the current entry out of this queue, the commit queue will thankfully take it and commit it
+     // to the memory hierarchy
+-    if (commit_i) begin
++    if (eff_commit) begin
+       // invalidate
+       speculative_queue_n[speculative_read_pointer_q].valid = 1'b0;
+       // advance the read pointer
+@@ -359,8 +471,8 @@ module store_buffer
+       automatic logic [DEPTH_SPEC-1:0] keep, cancel;
+       automatic logic [DEPTH_SPEC-1:0][$clog2(DEPTH_SPEC):0] final_slot;
+       automatic logic [$clog2(DEPTH_SPEC)-1:0] ks;
+-      ins_active = CVA6Cfg.OoOEn && valid_i && !cancelled_mask_i[trans_id_i];
+-      sq_active  = (|cancelled_mask_i && !flush_i) || (flush_i && LEGACY_SMT_KEEP);
++      ins_active = CVA6Cfg.OoOEn && eff_valid && !eff_cancelled[eff_req.trans_id];
++      sq_active  = (|eff_cancelled && !eff_flush) || (eff_flush && LEGACY_SMT_KEEP);
+       keep = '0;
+       cancel = '0;
+       final_slot = '0;
+@@ -394,13 +506,13 @@ module store_buffer
+             // an invalid entry, and the arrival itself is not cancelled
+             cancel[k]   = !(ins_active && (k + 1 == nlive)) &&
+                           speculative_queue_q[ks].valid &&
+-                          cancelled_mask_i[speculative_queue_q[ks].trans_id];
++                          eff_cancelled[speculative_queue_q[ks].trans_id];
+           end
+         end
+         // rank of the arrival = number of already-queued stores older than it
+         for (int unsigned k = 0; k < DEPTH_SPEC; k++)
+           older_vec[k] = ins_active && ((k + 1) < nlive) &&
+-                         ooo_older(a_tid[k], a_tid[(nlive > 0) ? nlive-1 : 0]);
++                         ooo_older_core(a_tid[k], a_tid[(nlive > 0) ? nlive-1 : 0]);
+         ins  = ($clog2(DEPTH_SPEC) + 1)'($countones(older_vec));
+         nins = int'(ins);
+         // keep verdict per entry: every live entry when nothing is
+@@ -412,7 +524,7 @@ module store_buffer
+ `ifdef G6LC_FETCH_B
+                       ((LEGACY_SMT_KEEP && a_fk[k]) || !cancel[k]));
+ `else
+-                      ((LEGACY_SMT_KEEP && a_fk[k]) || (!flush_i && !cancel[k])));
++                      ((LEGACY_SMT_KEEP && a_fk[k]) || (!eff_flush && !cancel[k])));
+ `endif
+           end
+         end
+@@ -457,9 +569,9 @@ module store_buffer
+         speculative_status_cnt_n    = live;
+       end
+     end
+-    if (flush_i && LEGACY_SMT_KEEP) begin
++    if (eff_flush && LEGACY_SMT_KEEP) begin
+       // the LEGACY flush ran the keep-only rewrite above; nothing to evict
+-    end else if (flush_i) begin
++    end else if (eff_flush) begin
+       // SI / no G1ah: evict all speculative stores
+       for (int unsigned i = 0; i < DEPTH_SPEC; i++) speculative_queue_n[i].valid = 1'b0;
+ 
+@@ -483,7 +595,20 @@ module store_buffer
+     end
+ 
+     // we are ready if the speculative and the commit queue have a space left
+-    ready_o = (speculative_status_cnt_n < $bits(speculative_status_cnt_n)'(DEPTH_SPEC)) || commit_i;
++    if (IN_STAGE) begin
++      // Capacity from registers only: the lagging count plus the staged
++      // store, less the staged pop, plus this cycle's arrival. Cancels and
++      // this cycle's commit are ignored (conservative), the legacy same-cycle
++      // commit allowance is dropped.
++      automatic logic [$clog2(DEPTH_SPEC)+1:0] occ_est;
++      occ_est = ($clog2(DEPTH_SPEC) + 2)'(speculative_status_cnt_q) +
++                ($clog2(DEPTH_SPEC) + 2)'(in_valid_q) -
++                ($clog2(DEPTH_SPEC) + 2)'(commit_stage_q) +
++                ($clog2(DEPTH_SPEC) + 2)'(valid_i);
++      ready_o = occ_est < ($clog2(DEPTH_SPEC) + 2)'(DEPTH_SPEC);
++    end else begin
++      ready_o = (speculative_status_cnt_n < $bits(speculative_status_cnt_n)'(DEPTH_SPEC)) || commit_i;
++    end
+   end
+ 
+   // ----------------------------------------
+@@ -513,16 +638,20 @@ module store_buffer
+   assign req_port_o.data_be = commit_queue_q[commit_read_pointer_q].be;
+   assign req_port_o.data_size = commit_queue_q[commit_read_pointer_q].data_size;
+ 
+-  assign rvfi_mem_paddr_o = speculative_queue_q[speculative_read_pointer_q].address;
++  assign rvfi_mem_paddr_o = IN_STAGE ? spec_head_addr
++                                     : speculative_queue_q[speculative_read_pointer_q].address;
+ 
+   always_comb begin : store_if
+     automatic logic [$clog2(DEPTH_COMMIT):0] commit_status_cnt;
+     commit_status_cnt      = commit_status_cnt_q;
+ 
+-    commit_ready_o         = (commit_status_cnt_q < $bits(commit_status_cnt_q)'(DEPTH_COMMIT)) &&
++    commit_ready_o         = ((commit_status_cnt_q + $bits(commit_status_cnt_q)'(IN_STAGE && commit_stage_q)) <
++                              $bits(commit_status_cnt_q)'(DEPTH_COMMIT)) &&
+                              !spec_head_mismatch;
+     // no store is pending if we don't have any element in the commit queue e.g.: it is empty
+-    no_st_pending_o        = (commit_status_cnt_q == 0);
++    // a staged commit is a committed store that has not reached the commit
++    // queue yet: it is pending for every serialising consumer
++    no_st_pending_o        = (commit_status_cnt_q == 0) && !(IN_STAGE && commit_stage_q);
+     // default assignments
+     commit_read_pointer_n  = commit_read_pointer_q;
+     commit_write_pointer_n = commit_write_pointer_q;
+@@ -580,7 +709,7 @@ module store_buffer
+     // happened if we got a grant
+ 
+     // shift the store request from the speculative buffer to the non-speculative
+-    if (commit_i) begin
++    if (eff_commit) begin
+       commit_queue_n[commit_write_pointer_q] = speculative_queue_q[speculative_read_pointer_q];
+       commit_write_pointer_n = commit_write_pointer_n + 1'b1;
+       commit_status_cnt++;
+@@ -686,19 +815,25 @@ module store_buffer
+       // Age filter is load-bearing for LIVENESS here, not just for data:
+       // commit is in-order, so an older load that stalls on a YOUNGER store
+       // can never progress -- that store cannot commit until the load retires.
+-      if (!spec_stall_futile &&
+-          speculative_queue_q[i].valid &&
+-          spec_visible(speculative_queue_q[i].trans_id) &&
++      if (speculative_queue_q[i].valid &&
++          (head_committing(i) || (!spec_stall_futile && spec_visible(speculative_queue_q[i].trans_id))) &&
+           (po_eq(speculative_queue_q[i].address[11:0], page_offset_i) ||
+            (CVA6Cfg.RVZiCboz &&
+             speculative_queue_q[i].cbo_op == ariane_pkg::CBO_ZERO &&
+             ((speculative_queue_q[i].address[11:0] >> CBOZ_OFF_W) ==
+              (page_offset_i >> CBOZ_OFF_W))))) begin
+         page_offset_matches_now = 1'b1;
+-        po_spec_match = 1'b1;
+-        break;
++        if (head_committing(i)) po_commit_match = 1'b1;
++        else po_spec_match = 1'b1;
+       end
+     end
++    if (in_live && !spec_stall_futile && spec_visible(in_q.trans_id) &&
++        (po_eq(in_q.address[11:0], page_offset_i) ||
++         (CVA6Cfg.RVZiCboz && in_q.cbo_op == ariane_pkg::CBO_ZERO &&
++          ((in_q.address[11:0] >> CBOZ_OFF_W) == (page_offset_i >> CBOZ_OFF_W))))) begin
++      page_offset_matches_now = 1'b1;
++      po_spec_match = 1'b1;
++    end
+     if (!spec_stall_futile && valid_without_flush_i && spec_visible(trans_id_i) &&
+         (po_eq(paddr_i[11:0], page_offset_i) ||
+          (CVA6Cfg.RVZiCboz && cbo_op_i == ariane_pkg::CBO_ZERO &&
+@@ -766,33 +901,68 @@ module store_buffer
+           end
+         end
+       end
+-      for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
+-        sidx = speculative_read_pointer_q + $clog2(DEPTH_SPEC)'(k);
+-        if (speculative_queue_q[sidx].valid &&
+-            spec_visible(speculative_queue_q[sidx].trans_id) &&
+-            (!HART_OWN || speculative_queue_q[sidx].hart == load_hart_i) &&
+-            (pa_eq(speculative_queue_q[sidx].address, load_paddr_i) ||
+-             cboz_covers(speculative_queue_q[sidx].cbo_op,
+-                         speculative_queue_q[sidx].address, load_paddr_i))) begin
+-          if (CVA6Cfg.RVZiCboz &&
+-              speculative_queue_q[sidx].cbo_op == ariane_pkg::CBO_ZERO) begin
++      // Program order among the speculative sources: queue entries older
++      // than the staged store, the staged store, the younger entries (the
++      // staged store's program-age slot, as the permutation will place it).
++      // The head a staged commit pops is architectural: no age or hart filter.
++      for (int unsigned pass = 0; pass < 2; pass++) begin
++        if (pass == 1 && in_live && spec_visible(in_q.trans_id) &&
++            (!HART_OWN || in_q.hart == load_hart_i) &&
++            (pa_eq(in_q.address, load_paddr_i) ||
++             cboz_covers(in_q.cbo_op, in_q.address, load_paddr_i))) begin
++          if (CVA6Cfg.RVZiCboz && in_q.cbo_op == ariane_pkg::CBO_ZERO) begin
+             for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+-              if (cboz_covers(speculative_queue_q[sidx].cbo_op,
+-                              speculative_queue_q[sidx].address,
+-                              load_paddr_i + CVA6Cfg.PLEN'(b))) begin
++              if (cboz_covers(in_q.cbo_op, in_q.address, load_paddr_i + CVA6Cfg.PLEN'(b))) begin
+                 data_m[8*b+:8] = '0;
+                 be_m[b]        = 1'b1;
+               end
+             end
+           end else begin
+             for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+-              if (speculative_queue_q[sidx].be[b]) begin
+-                data_m[8*b+:8] = speculative_queue_q[sidx].data[8*b+:8];
++              if (in_q.be[b]) begin
++                data_m[8*b+:8] = in_q.data[8*b+:8];
+                 be_m[b]        = 1'b1;
+               end
+             end
+           end
+         end
++        for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
++          automatic logic committing, older_than_staged, in_pass;
++          sidx = speculative_read_pointer_q + $clog2(DEPTH_SPEC)'(k);
++          committing = head_committing(int'(sidx));
++          older_than_staged = !(IN_STAGE && in_valid_q) || committing ||
++                              ooo_older(speculative_queue_q[sidx].trans_id, in_q.trans_id);
++          in_pass = (pass == 0) ? older_than_staged : !older_than_staged;
++          // Entries the staged flush / cancel will remove are dead already:
++          // the unstaged design had removed them (same exposure, shifted).
++          if (in_pass && speculative_queue_q[sidx].valid &&
++              (committing || (spec_visible(speculative_queue_q[sidx].trans_id) &&
++                              (!HART_OWN || speculative_queue_q[sidx].hart == load_hart_i) &&
++                              !(IN_STAGE && (flush_stage_q ||
++                                             eff_cancelled[speculative_queue_q[sidx].trans_id])))) &&
++              (pa_eq(speculative_queue_q[sidx].address, load_paddr_i) ||
++               cboz_covers(speculative_queue_q[sidx].cbo_op,
++                           speculative_queue_q[sidx].address, load_paddr_i))) begin
++            if (CVA6Cfg.RVZiCboz &&
++                speculative_queue_q[sidx].cbo_op == ariane_pkg::CBO_ZERO) begin
++              for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
++                if (cboz_covers(speculative_queue_q[sidx].cbo_op,
++                                speculative_queue_q[sidx].address,
++                                load_paddr_i + CVA6Cfg.PLEN'(b))) begin
++                  data_m[8*b+:8] = '0;
++                  be_m[b]        = 1'b1;
++                end
++              end
++            end else begin
++              for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
++                if (speculative_queue_q[sidx].be[b]) begin
++                  data_m[8*b+:8] = speculative_queue_q[sidx].data[8*b+:8];
++                  be_m[b]        = 1'b1;
++                end
++              end
++            end
++          end
++        end
+       end
+       if (valid_without_flush_i && spec_visible(trans_id_i) &&
+           (!HART_OWN || st_hart_i == load_hart_i) &&
+@@ -1005,13 +1175,20 @@ module store_buffer
+                                                  load_paddr_i + CVA6Cfg.PLEN'(b))))
+               ooo_fwd_visible_cover[b] = 1'b1;
+       for (int unsigned i = 0; i < DEPTH_SPEC; i++)
+-        if (speculative_queue_q[i].valid && spec_visible(speculative_queue_q[i].trans_id) &&
+-            (!HART_OWN || speculative_queue_q[i].hart == load_hart_i))
++        if (speculative_queue_q[i].valid &&
++            (head_committing(i) || (spec_visible(speculative_queue_q[i].trans_id) &&
++                                    (!HART_OWN || speculative_queue_q[i].hart == load_hart_i))))
+           for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++)
+             if ((pa_eq(speculative_queue_q[i].address, load_paddr_i) && speculative_queue_q[i].be[b]) ||
+                 (CVA6Cfg.RVZiCboz && cboz_covers(speculative_queue_q[i].cbo_op, speculative_queue_q[i].address,
+                                                  load_paddr_i + CVA6Cfg.PLEN'(b))))
+               ooo_fwd_visible_cover[b] = 1'b1;
++      // A138: the staged store is a visible source at its program age
++      if (in_live && spec_visible(in_q.trans_id) && (!HART_OWN || in_q.hart == load_hart_i))
++        for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++)
++          if ((pa_eq(in_q.address, load_paddr_i) && in_q.be[b]) ||
++              (CVA6Cfg.RVZiCboz && cboz_covers(in_q.cbo_op, in_q.address, load_paddr_i + CVA6Cfg.PLEN'(b))))
++            ooo_fwd_visible_cover[b] = 1'b1;
+       if (valid_without_flush_i && spec_visible(trans_id_i) && (!HART_OWN || st_hart_i == load_hart_i))
+         for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++)
+           if ((pa_eq(paddr_i, load_paddr_i) && be_i[b]) ||
+@@ -1028,30 +1205,37 @@ module store_buffer
+   else $error("[Commit Queue] You are trying to commit and flush in the same cycle");
+ 
+   speculative_buffer_overflow :
+-  assert property (@(posedge clk_i) rst_ni && (speculative_status_cnt_q == $bits(speculative_status_cnt_q)'(DEPTH_SPEC)) |-> !valid_i)
++  assert property (@(posedge clk_i) rst_ni &&
++                   ((speculative_status_cnt_q + ($clog2(DEPTH_SPEC) + 1)'(IN_STAGE && in_valid_q) -
++                     ($clog2(DEPTH_SPEC) + 1)'(IN_STAGE && commit_stage_q)) ==
++                    $bits(speculative_status_cnt_q)'(DEPTH_SPEC)) |-> !valid_i)
+   else
+     $error("[Speculative Queue] You are trying to push new data although the buffer is not ready");
+ 
+   speculative_buffer_underflow :
+-  assert property (@(posedge clk_i) rst_ni && (speculative_status_cnt_q == 0) |-> !commit_i)
++  assert property (@(posedge clk_i) rst_ni && (speculative_status_cnt_q == 0) &&
++                   !(IN_STAGE && in_valid_q) |-> !commit_i)
+   else $error("[Speculative Queue] You are committing although there are no stores to commit");
+ 
+   commit_buffer_overflow :
+-  assert property (@(posedge clk_i) rst_ni && (commit_status_cnt_q == $bits(commit_status_cnt_q)'(DEPTH_COMMIT)) |-> !commit_i)
++  assert property (@(posedge clk_i) rst_ni &&
++                   ((commit_status_cnt_q + $bits(commit_status_cnt_q)'(IN_STAGE && commit_stage_q)) ==
++                    $bits(commit_status_cnt_q)'(DEPTH_COMMIT)) |-> !commit_i)
+   else $error("[Commit Queue] You are trying to commit a store although the buffer is full");
+ 
+   // U5.4 OoO: the store handed to memory must be the one commit is retiring.
+   // Commit is in program order, so the committing store is the oldest live
+   // store and therefore the queue head. This catches any program-order
+   // insertion error directly, at the handoff rather than in a later value.
++  // A138: under the input stage the head this commit will pop is the slot
++  // after a staged pop, or the staged store itself while the queue lags.
+   ooo_commit_is_oldest :
+   assert property (@(posedge clk_i) disable iff (!rst_ni)
+                    (CVA6Cfg.OoOEn && commit_i) |->
+-                   (speculative_queue_q[speculative_read_pointer_q].valid &&
+-                    speculative_queue_q[speculative_read_pointer_q].trans_id == commit_trans_id_i))
++                   (spec_head_valid && spec_head_tid == commit_trans_id_i))
+   else
+     $error("[Speculative Queue] OoO commit handoff took tid %0d, commit is retiring tid %0d",
+-           speculative_queue_q[speculative_read_pointer_q].trans_id, commit_trans_id_i);
++           spec_head_tid, commit_trans_id_i);
+ 
+   // U5.4 OoO: a store younger than the querying load must never reach it --
+   // every forwarded byte has an older (visible) source.
+@@ -1080,7 +1264,7 @@ module store_buffer
+     for (genvar i = 0; i < DEPTH_SPEC; i++) begin : gen_spec_entry_live
+       ooo_spec_entry_live :
+       assert property (@(posedge clk_i) disable iff (!rst_ni)
+-                       speculative_queue_q[i].valid |->
++                       speculative_queue_q[i].valid && !head_committing(i) |->
+                        sb_live_i[speculative_queue_q[i].trans_id])
+       else $error("[Speculative Queue] entry %0d holds tid %0d whose scoreboard slot is not live",
+                   i, speculative_queue_q[i].trans_id);
+diff --git a/verif/tb/core/store_buffer_sbs/tb_sb_stage.sv b/verif/tb/core/store_buffer_sbs/tb_sb_stage.sv
+new file mode 100644
+index 000000000..da9543e77
+--- /dev/null
++++ b/verif/tb/core/store_buffer_sbs/tb_sb_stage.sv
+@@ -0,0 +1,397 @@
++// Copyright 2026 Etienne Cimon
++// SPDX-License-Identifier: MIT
++//
++// Witness for the A138 store-buffer input stage (CVA6Cfg.StqInputStage).
++//
++// Three instances share one random legal stimulus (g6lc64_ooo geometry):
++//   u_new  live RTL, StqInputStage = 1 (the design under test; the flist's
++//          cva6_config_pkg must be the g6lc64_ooo package)
++//   u_del  reference RTL (a prior revision renamed store_buffer_old) whose
++//          STAGED inputs (store request, commit, flush, cancel mask, age
++//          anchor) arrive one cycle late and whose other inputs are live
++//   u_ref  reference RTL with every input live (the previous semantics)
++// Checks, every cycle after reset:
++//   SHIFT   u_new's queue / pointer / count / commit-queue state == u_del's
++//           (the stage is exactly a one-cycle delay of the permutation's
++//           inputs), req_port_o and no_st_pending_o identical
++//   STALL   u_ref.page_offset_matches_o -> u_new.page_offset_matches_o
++//   FWD     every byte u_ref forwards is forwarded by u_new with the same
++//           value, or u_new stalls the load (page_offset_matches_o); a byte
++//           u_new forwards that u_ref does not is only allowed from the
++//           committing head or in the cycle after a cancel / flush
++//   READY   u_new.ready_o -> u_ref.ready_o-derived capacity holds for the
++//           next push (checked by the reference's own interface assertions)
++//   RVFI    on commit_i, u_new.rvfi_mem_paddr_o names the entry it pops next
++//   EMPTY   u_new.store_buffer_empty_o -> u_ref.store_buffer_empty_o
++module tb_sb_stage;
++  import ariane_pkg::*;
++  function automatic config_pkg::cva6_user_cfg_t staged_user_cfg();
++    staged_user_cfg = cva6_config_pkg::cva6_cfg;
++    staged_user_cfg.StqInputStage = 1'b1;
++  endfunction
++  localparam config_pkg::cva6_cfg_t CfgRef = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg);
++  localparam config_pkg::cva6_cfg_t CfgNew = build_config_pkg::build_config(staged_user_cfg());
++  localparam int DepthSpec = g6lc_ooo_pkg::ooo_spec_store_depth(CfgRef);
++  localparam int TidW = CfgRef.TRANS_ID_BITS;
++  localparam int BE = CfgRef.XLEN / 8;
++  localparam type cbo_t = logic [7:0];
++  typedef struct packed {
++    logic [CfgRef.DCACHE_INDEX_WIDTH-1:0] address_index;
++    logic [CfgRef.DCACHE_TAG_WIDTH-1:0]   address_tag;
++    logic [CfgRef.XLEN-1:0]               data_wdata;
++    logic [CfgRef.DCACHE_USER_WIDTH-1:0]  data_wuser;
++    logic                                 data_req;
++    logic                                 data_we;
++    logic [BE-1:0]                        data_be;
++    logic [1:0]                           data_size;
++    logic [CfgRef.DcacheIdWidth-1:0]      data_id;
++    logic                                 kill_req;
++    logic                                 tag_valid;
++    cbo_t                                 cbo_op;
++  } dcache_req_i_t;
++  typedef struct packed {
++    logic                                 data_gnt;
++    logic                                 data_rvalid;
++    logic [CfgRef.DcacheIdWidth-1:0]      data_rid;
++    logic [CfgRef.XLEN-1:0]               data_rdata;
++    logic [CfgRef.DCACHE_USER_WIDTH-1:0]  data_ruser;
++  } dcache_req_o_t;
++  localparam int HW = $clog2(CfgRef.NrHarts > 1 ? CfgRef.NrHarts : 2);
++
++  logic clk = 1'b0, rst_ni = 1'b0;
++  always #1 clk = ~clk;
++
++  // live stimulus
++  logic flush_i, commit_i, valid_i, valid_without_flush_i, stall_st_pending_i;
++  logic [CfgRef.NR_SB_ENTRIES-1:0] cancelled_mask_i, sb_live_i;
++  logic [11:0] page_offset_i;
++  logic [CfgRef.PLEN-1:0] load_paddr_i, paddr_i;
++  logic load_paddr_valid_i, head_phys_pending_i, dcache_wbuffer_empty_i;
++  logic [TidW-1:0] load_trans_id_i, commit_trans_id_i, oldest_live_tid_i, trans_id_i;
++  logic [HW-1:0] load_hart_i, st_hart_i;
++  logic [CfgRef.XLEN-1:0] data_i;
++  logic [BE-1:0] be_i;
++  logic [1:0] data_size_i;
++  cbo_t cbo_op_i;
++  // Memory handshakes are protocol-legal per instance: a CBO response
++  // (rvalid) only follows a grant of that instance's own CBO request, never
++  // in the grant cycle (the previous semantics and the staged design run the
++  // commit queue at different phases, so they cannot share one random
++  // stream). u_new and u_del share a port: their commit queues are identical.
++  dcache_req_o_t req_port_i, req_port_ref_i;
++  logic pend_new, pend_ref;
++  // one-cycle delayed copies of the staged set (for u_del)
++  logic d_flush, d_commit, d_valid;
++  logic [CfgRef.NR_SB_ENTRIES-1:0] d_cancel;
++  logic [CfgRef.PLEN-1:0] d_paddr;
++  logic [TidW-1:0] d_tid, d_anchor, d_ctid;
++  logic [HW-1:0] d_hart;
++  logic [CfgRef.XLEN-1:0] d_data;
++  logic [BE-1:0] d_be;
++  logic [1:0] d_size;
++  cbo_t d_cbo;
++  always_ff @(posedge clk or negedge rst_ni) begin
++    if (!rst_ni) begin
++      d_flush <= 0; d_commit <= 0; d_valid <= 0; d_cancel <= '0; d_paddr <= '0; d_tid <= '0;
++      d_anchor <= '0; d_hart <= '0; d_data <= '0; d_be <= '0; d_size <= '0; d_cbo <= '0; d_ctid <= '0;
++    end else begin
++      d_flush <= flush_i; d_commit <= commit_i; d_valid <= valid_i; d_cancel <= cancelled_mask_i;
++      d_paddr <= paddr_i; d_tid <= trans_id_i; d_anchor <= oldest_live_tid_i; d_hart <= st_hart_i;
++      d_data <= data_i; d_be <= be_i; d_size <= data_size_i; d_cbo <= cbo_op_i; d_ctid <= commit_trans_id_i;
++    end
++  end
++
++  // outputs
++  logic no_st_new, no_st_del, no_st_ref, empty_new, empty_ref, pom_new, pom_ref, pso_new, pso_ref;
++  logic fwdv_new, fwdv_ref, cready_new, cready_ref, cready_del, ready_new, ready_ref;
++  logic [CfgRef.XLEN-1:0] fwdd_new, fwdd_ref;
++  logic [BE-1:0] fwdbe_new, fwdbe_ref;
++  logic [CfgRef.PLEN-1:0] rvfi_new, rvfi_ref;
++  dcache_req_i_t req_new, req_del, req_ref;
++
++  sb_wrap_stage #(.CVA6Cfg(CfgNew)) u_new (
++    .clk_i(clk), .rst_ni, .flush_i, .cancelled_mask_i, .sb_live_i, .stall_st_pending_i,
++    .page_offset_i, .load_paddr_i, .load_paddr_valid_i, .load_trans_id_i, .commit_trans_id_i,
++    .oldest_live_tid_i, .head_phys_pending_i, .load_hart_i, .dcache_wbuffer_empty_i,
++    .commit_i, .valid_i, .valid_without_flush_i, .paddr_i, .trans_id_i, .st_hart_i,
++    .data_i, .be_i, .data_size_i, .cbo_op_i, .req_port_i,
++    .no_st_pending_o(no_st_new), .store_buffer_empty_o(empty_new), .page_offset_matches_o(pom_new),
++    .page_offset_spec_only_o(pso_new), .st_fwd_valid_o(fwdv_new), .st_fwd_data_o(fwdd_new),
++    .st_fwd_be_o(fwdbe_new), .commit_ready_o(cready_new), .ready_o(ready_new),
++    .rvfi_mem_paddr_o(rvfi_new), .req_port_o(req_new));
++  sb_wrap_old #(.CVA6Cfg(CfgRef)) u_del (
++    .clk_i(clk), .rst_ni, .flush_i(d_flush), .cancelled_mask_i(d_cancel), .sb_live_i('1), .stall_st_pending_i,
++    .page_offset_i, .load_paddr_i, .load_paddr_valid_i, .load_trans_id_i, .commit_trans_id_i(d_ctid),
++    .oldest_live_tid_i(d_anchor), .head_phys_pending_i, .load_hart_i, .dcache_wbuffer_empty_i,
++    .commit_i(d_commit), .valid_i(d_valid), .valid_without_flush_i(d_valid && !d_flush),
++    .paddr_i(d_paddr), .trans_id_i(d_tid), .st_hart_i(d_hart),
++    .data_i(d_data), .be_i(d_be), .data_size_i(d_size), .cbo_op_i(d_cbo), .req_port_i,
++    .no_st_pending_o(no_st_del), .store_buffer_empty_o(), .page_offset_matches_o(),
++    .page_offset_spec_only_o(), .st_fwd_valid_o(), .st_fwd_data_o(),
++    .st_fwd_be_o(), .commit_ready_o(cready_del), .ready_o(),
++    .rvfi_mem_paddr_o(), .req_port_o(req_del));
++  sb_wrap_old #(.CVA6Cfg(CfgRef)) u_ref (
++    .clk_i(clk), .rst_ni, .flush_i, .cancelled_mask_i, .sb_live_i, .stall_st_pending_i,
++    .page_offset_i, .load_paddr_i, .load_paddr_valid_i, .load_trans_id_i, .commit_trans_id_i,
++    .oldest_live_tid_i, .head_phys_pending_i, .load_hart_i, .dcache_wbuffer_empty_i,
++    .commit_i, .valid_i, .valid_without_flush_i, .paddr_i, .trans_id_i, .st_hart_i,
++    .data_i, .be_i, .data_size_i, .cbo_op_i, .req_port_i(req_port_ref_i),
++    .no_st_pending_o(no_st_ref), .store_buffer_empty_o(empty_ref), .page_offset_matches_o(pom_ref),
++    .page_offset_spec_only_o(pso_ref), .st_fwd_valid_o(fwdv_ref), .st_fwd_data_o(fwdd_ref),
++    .st_fwd_be_o(fwdbe_ref), .commit_ready_o(cready_ref), .ready_o(ready_ref),
++    .rvfi_mem_paddr_o(rvfi_ref), .req_port_o(req_ref));
++
++  function automatic logic [255:0] rnd256();
++    rnd256 = {$urandom, $urandom, $urandom, $urandom, $urandom, $urandom, $urandom, $urandom};
++  endfunction
++
++  int unsigned cyc = 0, errors = 0, pushes = 0, commits = 0, cancels = 0, flushes = 0, seed = 1;
++  // +cbo: CBO stores with per-instance protocol-legal responses. The previous
++  // semantics then drain on a different stream, so only the staged design's
++  // own relations (SHIFT, RVFI, staged-item accounting, forwarded data
++  // equality) are checked; the cross-instance STALL / FWD-coverage
++  // implications need the shared gnt-only stream of the default mode.
++  bit cbo_mode;
++  int unsigned fwd_ref_bytes = 0, fwd_stall_instead = 0, fwd_extra_bytes = 0, max_occ = 0, stage_commits = 0;
++  int unsigned pc_mode;
++  logic ready_new_q;
++  logic [CfgRef.NR_SB_ENTRIES-1:0] live_tid = '0;
++  // program order: the oldest live slot advances with commits; store tids are
++  // allocated above it so ooo_older is meaningful (a small ring of 32)
++  logic [TidW-1:0] anchor = '0;
++  initial begin
++    if (!$value$plusargs("seed=%d", seed)) seed = 1;
++    cbo_mode = $test$plusargs("cbo");
++    void'($urandom(seed));
++    #7 rst_ni = 1'b1;
++  end
++  always @(negedge clk) begin
++    logic [255:0] r;
++    sb_live_i = '1;
++    r = rnd256(); stall_st_pending_i = r[0];
++    r = rnd256(); page_offset_i = r[11:0];
++    r = rnd256(); load_paddr_i = {r[CfgRef.PLEN-1:12], page_offset_i};
++    // keep loads inside a small address set so forwards and stalls happen
++    load_paddr_i[CfgRef.PLEN-1:6] = {{(CfgRef.PLEN-9){1'b0}}, r[14:12]};
++    page_offset_i = load_paddr_i[11:0];
++    r = rnd256(); load_paddr_valid_i = r[1:0] != 0;
++    r = rnd256(); load_trans_id_i = TidW'(anchor + TidW'(r[4:0] % 24));
++    r = rnd256(); head_phys_pending_i = r[7:0] < 8'd8;
++    r = rnd256(); load_hart_i = '0;
++    r = rnd256(); dcache_wbuffer_empty_i = r[0];
++    r = rnd256(); paddr_i = {r[CfgRef.PLEN-1:0]};
++    paddr_i[CfgRef.PLEN-1:6] = {{(CfgRef.PLEN-9){1'b0}}, r[70:68]};
++    r = rnd256(); st_hart_i = '0;
++    r = rnd256(); data_i = r[CfgRef.XLEN-1:0];
++    r = rnd256(); be_i = r[BE-1:0];
++    r = rnd256(); data_size_i = r[1:0];
++    r = rnd256(); req_port_i = $bits(req_port_i)'(r);
++    req_port_i.data_rvalid = cbo_mode && pend_new && r[200];
++    req_port_ref_i = req_port_i;
++    if (cbo_mode) begin
++      req_port_ref_i.data_gnt = r[201];
++      req_port_ref_i.data_rvalid = pend_ref && r[202];
++    end
++    cbo_op_i = cbo_t'(ariane_pkg::CBO_NONE);
++    if (cbo_mode) case (r[47:40] % 6)
++      1: if (CfgRef.RVZiCbom) cbo_op_i = cbo_t'(ariane_pkg::CBO_CLEAN);
++      2: if (CfgRef.RVZiCboz) begin
++        cbo_op_i = cbo_t'(ariane_pkg::CBO_ZERO);
++        paddr_i[$clog2(CfgRef.DCACHE_LINE_WIDTH >= 64 ? CfgRef.DCACHE_LINE_WIDTH / 8 : 64)-1:0] = '0;
++        data_i = '0; be_i = '1; data_size_i = 2'b11;
++      end
++      default: ;
++    endcase
++    r = rnd256();
++    pc_mode = cyc[11:9];
++    // cancels name live younger tids only (as the scoreboard does)
++    cancelled_mask_i = '0;
++    if ((r[7:0] < 8'd40) || (pc_mode == 3 && r[15:8] < 8'd120)) begin
++      logic [TidW-1:0] cut;
++      cut = TidW'(anchor + TidW'(r[20:16] % 24));
++      for (int t = 0; t < CfgRef.NR_SB_ENTRIES; t++)
++        if (live_tid[t] && g6lc_ooo_pkg::ooo_age_older(TidW, 32'(cut), t, 32'(anchor))) cancelled_mask_i[t] = 1'b1;
++    end
++    flush_i = (r[23:16] < 8'd6);
++    // commit: the previous semantics' head, with room, never with flush; also
++    // only when the staged design can take it
++    commit_i = (r[31:24] < 8'd110) && !flush_i && cready_new &&
++               (u_ref.u.commit_status_cnt_q < u_ref.u.DEPTH_COMMIT) &&
++               (u_ref.u.speculative_status_cnt_q != '0) &&
++               u_ref.u.speculative_queue_q[u_ref.u.speculative_read_pointer_q].valid;
++    commit_trans_id_i = u_ref.u.speculative_queue_q[u_ref.u.speculative_read_pointer_q].trans_id;
++    oldest_live_tid_i = anchor;
++    #0.1;
++    // push only when the staged design said ready last cycle (the store unit
++    // posts one cycle after it saw ready) and the reference has room
++    begin
++      logic can_push;
++      can_push = ready_new_q && (int'(u_ref.u.speculative_status_cnt_q) < DepthSpec);
++      valid_i = ((r[39:32] < 8'd150) || (pc_mode == 5 && r[39:32] < 8'd250)) && can_push && !flush_i;
++    end
++    begin
++      logic [TidW-1:0] cand;
++      cand = TidW'(anchor + TidW'(8 + (r[55:48] % 16)));
++      for (int tries = 0; tries < 24 && live_tid[cand]; tries++) cand = TidW'(anchor + TidW'(8 + ($urandom % 16)));
++      trans_id_i = cand;
++      if (live_tid[cand]) valid_i = 1'b0;
++    end
++    valid_without_flush_i = valid_i;
++  end
++  always @(posedge clk) begin
++    if (!rst_ni) begin pend_new <= 1'b0; pend_ref <= 1'b0; end
++    else begin
++      if (req_port_i.data_rvalid) pend_new <= 1'b0;
++      else if (req_new.data_req && req_port_i.data_gnt && req_new.cbo_op != cbo_t'(ariane_pkg::CBO_NONE)) pend_new <= 1'b1;
++      if (req_port_ref_i.data_rvalid) pend_ref <= 1'b0;
++      else if (req_ref.data_req && req_port_ref_i.data_gnt && req_ref.cbo_op != cbo_t'(ariane_pkg::CBO_NONE)) pend_ref <= 1'b1;
++    end
++  end
++  always @(posedge clk) begin
++    if (!rst_ni) begin live_tid <= '0; ready_new_q <= 1'b0; anchor <= '0; end
++    else begin
++      logic [CfgRef.NR_SB_ENTRIES-1:0] nxt;
++      nxt = live_tid;
++      if (commit_i) nxt[u_ref.u.speculative_queue_q[u_ref.u.speculative_read_pointer_q].trans_id] = 1'b0;
++      nxt &= ~cancelled_mask_i;
++      if (flush_i) nxt = '0;
++      if (valid_i && !cancelled_mask_i[trans_id_i] && !flush_i) nxt[trans_id_i] = 1'b1;
++      live_tid <= nxt;
++      ready_new_q <= ready_new;
++      // the oldest live slot advances slowly; everything live stays above it
++      if (($urandom % 8) == 0 && nxt == '0) anchor <= anchor + TidW'(1);
++    end
++  end
++
++  // RVFI: the address presented on a commit names the entry popped next cycle
++  logic commit_q; logic [CfgRef.PLEN-1:0] rvfi_q;
++  logic [CfgRef.NR_SB_ENTRIES-1:0] cancel_q; logic flush_q;
++  always @(posedge clk) begin
++    commit_q <= commit_i && rst_ni; rvfi_q <= rvfi_new; cancel_q <= cancelled_mask_i; flush_q <= flush_i;
++  end
++  `define CHK(cond, msg) if (!(cond)) begin errors++; if (errors <= 12) $display("[%0d] %s", cyc, msg); end
++  function automatic string qdump(input string tag);
++    qdump = $sformatf("%s: ref rp=%0d cnt=%0d |", tag, u_ref.u.speculative_read_pointer_q, u_ref.u.speculative_status_cnt_q);
++    for (int i = 0; i < DepthSpec; i++)
++      if (u_ref.u.speculative_queue_q[i].valid)
++        qdump = {qdump, $sformatf(" [%0d] t%0d a%h be%h d%h", i, u_ref.u.speculative_queue_q[i].trans_id,
++                 u_ref.u.speculative_queue_q[i].address, u_ref.u.speculative_queue_q[i].be, u_ref.u.speculative_queue_q[i].data)};
++    qdump = {qdump, $sformatf(" || new rp=%0d cnt=%0d cstg=%b in=%b t%0d a%h be%h d%h |", u_new.u.speculative_read_pointer_q,
++             u_new.u.speculative_status_cnt_q, u_new.u.commit_stage_q, u_new.u.in_valid_q, u_new.u.in_q.trans_id,
++             u_new.u.in_q.address, u_new.u.in_q.be, u_new.u.in_q.data)};
++    for (int i = 0; i < DepthSpec; i++)
++      if (u_new.u.speculative_queue_q[i].valid)
++        qdump = {qdump, $sformatf(" [%0d] t%0d a%h be%h d%h", i, u_new.u.speculative_queue_q[i].trans_id,
++                 u_new.u.speculative_queue_q[i].address, u_new.u.speculative_queue_q[i].be, u_new.u.speculative_queue_q[i].data)};
++    qdump = {qdump, $sformatf(" || cq ref=%0d new=%0d anchor=%0d arrival v=%b t%0d a%h be%h", u_ref.u.commit_status_cnt_q,
++             u_new.u.commit_status_cnt_q, oldest_live_tid_i, valid_without_flush_i, trans_id_i, paddr_i, be_i)};
++  endfunction
++  // bytes a commit-queue entry of the staged design covers for this load
++  // (the previous semantics may already have drained that entry to memory)
++  logic [BE-1:0] new_cq_cover;
++  always_comb begin
++    new_cq_cover = '0;
++    for (int i = 0; i < u_new.u.DEPTH_COMMIT; i++)
++      if (u_new.u.commit_queue_q[i].valid) begin
++        if (u_new.u.commit_queue_q[i].address[CfgRef.PLEN-1:3] == load_paddr_i[CfgRef.PLEN-1:3])
++          new_cq_cover |= u_new.u.commit_queue_q[i].be;
++        // a cbo.zero entry zeroes its whole line
++        if (CfgRef.RVZiCboz && u_new.u.commit_queue_q[i].cbo_op == cbo_t'(ariane_pkg::CBO_ZERO) &&
++            u_new.u.commit_queue_q[i].address[CfgRef.PLEN-1:u_new.u.CBOZ_OFF_W] == load_paddr_i[CfgRef.PLEN-1:u_new.u.CBOZ_OFF_W])
++          new_cq_cover = '1;
++      end
++  end
++  // drain / receive bookkeeping for the commit-queue occupancy relation
++  int unsigned ref_drains = 0, new_drains = 0, ref_recv = 0, new_recv = 0;
++  logic [$clog2(u_new.u.DEPTH_COMMIT)-1:0] ref_rp_q, new_rp_q;
++  string hist[4];
++  always @(posedge clk) if (rst_ni) begin
++    cyc++;
++    #0.2;
++    if (u_ref.u.commit_read_pointer_q != ref_rp_q) ref_drains++;
++    if (u_new.u.commit_read_pointer_q != new_rp_q) new_drains++;
++    ref_rp_q = u_ref.u.commit_read_pointer_q; new_rp_q = u_new.u.commit_read_pointer_q;
++    if (commit_i) ref_recv++;
++    if (u_new.u.commit_stage_q) new_recv++;
++    hist[cyc % 4] = $sformatf("[%0d] cm=%b cstg=%b gnt=%b rv=%b st=%b | ref cq=%0d rp=%0d head v=%b wr=%b cbo=%0d tid=%0d | new cq=%0d rp=%0d head v=%b wr=%b cbo=%0d tid=%0d | drains ref=%0d new=%0d recv ref=%0d new=%0d",
++      cyc, commit_i, u_new.u.commit_stage_q, req_port_i.data_gnt, req_port_i.data_rvalid, stall_st_pending_i,
++      u_ref.u.commit_status_cnt_q, u_ref.u.commit_read_pointer_q, u_ref.u.commit_queue_q[u_ref.u.commit_read_pointer_q].valid,
++      u_ref.u.commit_queue_q[u_ref.u.commit_read_pointer_q].wait_rvalid, u_ref.u.commit_queue_q[u_ref.u.commit_read_pointer_q].cbo_op,
++      u_ref.u.commit_queue_q[u_ref.u.commit_read_pointer_q].trans_id,
++      u_new.u.commit_status_cnt_q, u_new.u.commit_read_pointer_q, u_new.u.commit_queue_q[u_new.u.commit_read_pointer_q].valid,
++      u_new.u.commit_queue_q[u_new.u.commit_read_pointer_q].wait_rvalid, u_new.u.commit_queue_q[u_new.u.commit_read_pointer_q].cbo_op,
++      u_new.u.commit_queue_q[u_new.u.commit_read_pointer_q].trans_id, ref_drains, new_drains, ref_recv, new_recv);
++    // (the commit queues of u_ref and u_new drain on different handshake
++    // streams, so no occupancy relation between them is checked here; the
++    // CREADY implication below is checked against u_del instead)
++    // SHIFT: state identity between the staged design and the delayed reference
++    for (int i = 0; i < DepthSpec; i++) begin
++      `CHK(u_new.u.speculative_queue_q[i] == u_del.u.speculative_queue_q[i], $sformatf("SHIFT spec entry %0d differs", i))
++    end
++    `CHK(u_new.u.speculative_read_pointer_q == u_del.u.speculative_read_pointer_q, $sformatf("SHIFT read ptr %0d/%0d", u_new.u.speculative_read_pointer_q, u_del.u.speculative_read_pointer_q))
++    `CHK(u_new.u.speculative_write_pointer_q == u_del.u.speculative_write_pointer_q, $sformatf("SHIFT write ptr %0d/%0d", u_new.u.speculative_write_pointer_q, u_del.u.speculative_write_pointer_q))
++    `CHK(u_new.u.speculative_status_cnt_q == u_del.u.speculative_status_cnt_q, $sformatf("SHIFT cnt %0d/%0d", u_new.u.speculative_status_cnt_q, u_del.u.speculative_status_cnt_q))
++    for (int i = 0; i < u_new.u.DEPTH_COMMIT; i++) begin
++      `CHK(u_new.u.commit_queue_q[i] == u_del.u.commit_queue_q[i], $sformatf("SHIFT commit entry %0d differs", i))
++    end
++    `CHK(u_new.u.commit_read_pointer_q == u_del.u.commit_read_pointer_q && u_new.u.commit_write_pointer_q == u_del.u.commit_write_pointer_q &&
++         u_new.u.commit_status_cnt_q == u_del.u.commit_status_cnt_q && u_new.u.cboz_beat_q == u_del.u.cboz_beat_q, "SHIFT commit pointers/count differ")
++    `CHK(req_new == req_del, $sformatf("SHIFT req_port_o new=%h del=%h", req_new, req_del))
++    // STALL: the staged design stalls every load the previous semantics stalled
++    // The live match (a store present in a queue) must be covered; the R3a
++    // sticky terms follow each instance's own drain events and are not
++    // comparable across the two timings.
++    if (!cbo_mode) begin
++      `CHK(!(u_ref.u.page_offset_matches_now && load_paddr_valid_i) || pom_new, $sformatf("STALL ref=1 new=0 pa=%h ldtid=%0d", load_paddr_i, load_trans_id_i))
++    end
++    // FWD: every byte the previous semantics forwards is forwarded with the
++    // same value or the load is stalled; extra bytes only from the committing
++    // head or in the cycle after a cancel / flush
++    for (int b = 0; b < BE; b++) begin
++      if (fwdbe_ref[b]) begin
++        fwd_ref_bytes++;
++        if (fwdbe_new[b]) begin
++          `CHK(fwdd_new[8*b+:8] == fwdd_ref[8*b+:8], $sformatf("FWD byte %0d data new=%h ref=%h ld a%h t%0d %s", b, fwdd_new[8*b+:8], fwdd_ref[8*b+:8], load_paddr_i, load_trans_id_i, qdump("state")))
++        end else begin
++          fwd_stall_instead++;
++          if (!cbo_mode) begin
++            `CHK(pom_new, $sformatf("FWD byte %0d forwarded by ref, neither forwarded nor stalled by new (pa=%h ldtid=%0d)", b, load_paddr_i, load_trans_id_i))
++          end
++        end
++      end else if (fwdbe_new[b]) begin
++        fwd_extra_bytes++;
++        if (!cbo_mode) begin
++          `CHK(u_new.u.commit_stage_q || new_cq_cover[b] || flush_q || (|cancel_q) || flush_i || (|cancelled_mask_i), $sformatf("FWD extra byte %0d outside an explicable window (pa=%h ldtid=%0d) %s", b, load_paddr_i, load_trans_id_i, qdump("state")))
++        end
++      end
++    end
++    // READY / EMPTY / COMMIT-READY conservativeness
++    `CHK(!empty_new || (u_ref.u.speculative_status_cnt_q == 0), "EMPTY new=1 while the previous semantics hold a speculative store")
++    `CHK(!no_st_new || !u_new.u.commit_stage_q, "NOSTPEND new=1 while a commit is staged")
++    `CHK(!cready_new || cready_del, $sformatf("CREADY new=1 del=0: ref cq=%0d new cq=%0d cstg=%b ref_rp=%0d ref_wp=%0d new_rp=%0d new_wp=%0d ref_head v=%b wr=%b cbo=%0d new_head v=%b wr=%b cbo=%0d gnt=%b rvalid=%b stall=%b",
++         u_ref.u.commit_status_cnt_q, u_new.u.commit_status_cnt_q, u_new.u.commit_stage_q,
++         u_ref.u.commit_read_pointer_q, u_ref.u.commit_write_pointer_q, u_new.u.commit_read_pointer_q, u_new.u.commit_write_pointer_q,
++         u_ref.u.commit_queue_q[u_ref.u.commit_read_pointer_q].valid, u_ref.u.commit_queue_q[u_ref.u.commit_read_pointer_q].wait_rvalid, u_ref.u.commit_queue_q[u_ref.u.commit_read_pointer_q].cbo_op,
++         u_new.u.commit_queue_q[u_new.u.commit_read_pointer_q].valid, u_new.u.commit_queue_q[u_new.u.commit_read_pointer_q].wait_rvalid, u_new.u.commit_queue_q[u_new.u.commit_read_pointer_q].cbo_op,
++         req_port_i.data_gnt, req_port_i.data_rvalid, stall_st_pending_i))
++    // RVFI: commit at t names the entry popped at t+1
++    if (commit_q) begin
++      `CHK(rvfi_q == u_new.u.speculative_queue_q[u_new.u.speculative_read_pointer_q].address, $sformatf("RVFI %h != popped %h", rvfi_q, u_new.u.speculative_queue_q[u_new.u.speculative_read_pointer_q].address))
++    end
++    if (valid_i) pushes++;
++    if (commit_i) commits++;
++    if (|cancelled_mask_i) cancels++;
++    if (flush_i) flushes++;
++    if (u_new.u.commit_stage_q) stage_commits++;
++    if (int'(u_new.u.speculative_status_cnt_q) > int'(max_occ)) max_occ = u_new.u.speculative_status_cnt_q;
++    if (errors > 12) $fatal(1, "FAIL tb_sb_stage errors=%0d", errors);
++    if (cyc == 300000) begin
++      if (errors != 0 || pushes < 1000 || commits < 1000 || cancels < 100 || flushes < 20 || fwd_ref_bytes < 1000 || max_occ < DepthSpec)
++        $fatal(1, "FAIL/vacuous pushes=%0d commits=%0d cancels=%0d flushes=%0d fwd_bytes=%0d max_occ=%0d errors=%0d",
++               pushes, commits, cancels, flushes, fwd_ref_bytes, max_occ, errors);
++      $display("PASS tb_sb_stage mode=%s cycles=%0d pushes=%0d commits=%0d cancels=%0d flushes=%0d fwd_bytes=%0d stall_instead=%0d extra_bytes=%0d max_occ=%0d staged_commits=%0d errors=0",
++               cbo_mode ? "cbo" : "plain", cyc, pushes, commits, cancels, flushes, fwd_ref_bytes, fwd_stall_instead, fwd_extra_bytes, max_occ, stage_commits);
++      $finish;
++    end
++  end
++endmodule
+diff --git a/verif/tb/core/store_buffer_sbs/wrap_stage.sv b/verif/tb/core/store_buffer_sbs/wrap_stage.sv
+new file mode 100644
+index 000000000..79674484a
+--- /dev/null
++++ b/verif/tb/core/store_buffer_sbs/wrap_stage.sv
+@@ -0,0 +1,116 @@
++// Copyright 2026 Etienne Cimon
++// SPDX-License-Identifier: MIT
++// Wrapper for the A138 staged store buffer (tb_sb_stage): sb_wrap_new's
++// ports, no legacy interface assumptions, RVFI address unmasked.
++module sb_wrap_stage
++  import ariane_pkg::*;
++#(
++    parameter config_pkg::cva6_cfg_t CVA6Cfg = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg),
++    localparam type cbo_t = logic [7:0],
++    localparam type dcache_req_i_t = struct packed {
++      logic [CVA6Cfg.DCACHE_INDEX_WIDTH-1:0] address_index;
++      logic [CVA6Cfg.DCACHE_TAG_WIDTH-1:0]   address_tag;
++      logic [CVA6Cfg.XLEN-1:0]               data_wdata;
++      logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0]  data_wuser;
++      logic                                  data_req;
++      logic                                  data_we;
++      logic [(CVA6Cfg.XLEN/8)-1:0]           data_be;
++      logic [1:0]                            data_size;
++      logic [CVA6Cfg.DcacheIdWidth-1:0]      data_id;
++      logic                                  kill_req;
++      logic                                  tag_valid;
++      cbo_t                                  cbo_op;
++    },
++    localparam type dcache_req_o_t = struct packed {
++      logic                                 data_gnt;
++      logic                                 data_rvalid;
++      logic [CVA6Cfg.DcacheIdWidth-1:0]     data_rid;
++      logic [CVA6Cfg.XLEN-1:0]              data_rdata;
++      logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0] data_ruser;
++    }
++) (
++    input logic clk_i,  // Clock
++    input logic rst_ni,  // Asynchronous reset active low
++    input logic flush_i,  // full flush: drop all speculative stores
++    // FSE S4: younger-only cancel (SB cancelled TIDs); does not touch commit queue
++    input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cancelled_mask_i,
++    // Scoreboard issued mask: an OoO speculative entry is a reservation whose
++    // scoreboard slot must still be live (assertion only)
++    input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_live_i,
++    input logic stall_st_pending_i,  // Stall issuing non-speculative request
++    output logic         no_st_pending_o, // non-speculative queue is empty (e.g.: everything is committed to the memory hierarchy)
++    output logic         store_buffer_empty_o, // there is no store pending in neither the speculative unit or the non-speculative queue
++
++    input  logic [11:0]  page_offset_i,         // load VA/PA[11:0] (always available)
++    // R3a: full load paddr when DTLB has translated; required for exact STQ match.
++    input  logic [CVA6Cfg.PLEN-1:0] load_paddr_i,
++    input  logic                    load_paddr_valid_i,
++    // U5.4 OoO program-order keys. A store may only be observed by a load that
++    // follows it in program order, and stores must reach memory in that order.
++    // Index order is not age once scoreboard slots are reused, so age is the
++    // circular trans_id distance from the oldest live instruction. Both inputs
++    // are inert when OoOEn is 0.
++    input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] load_trans_id_i,
++    input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] commit_trans_id_i,
++    // T6b-4b: the scoreboard reclaim pointer — the oldest live slot. This is
++    // the program-age anchor for the speculative queue's circular ordering;
++    // commit_trans_id_i stays the *committing* tid (port-0 slot) for the
++    // head-match gate below. Aliases commit_trans_id_i under legacy order.
++    input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] oldest_live_tid_i,
++    // N1d: the commit head is an unpublished load (phys_pending — it needs
++    // this LSU to make progress). A speculative-queue stall can only clear
++    // through commit, so holding a younger load on it is a circular wait;
++    // release it and let the LSQ phys_replay scan arbitrate any true alias
++    // when the released load publishes its physical address. Constant 0
++    // unless the OoO physical-tracking policy (COH_OOO) is live.
++    input  logic                          head_phys_pending_i,
++    // T6b: hart of the querying load. Under OoO multi-hart a load forwards
++    // only from its OWN hart's speculative stores; a peer hart's store is not
++    // visible until commit. Constant-0 otherwise (single hart / in-order).
++    input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] load_hart_i,
++    // R3a cont.13: D$ write buffer empty — sticky [11:0] match must outlive
++    // STQ→wbuffer handoff so post-return loads of *nextoffset see the store.
++    input  logic                    dcache_wbuffer_empty_i,
++    output logic         page_offset_matches_o, // hazard: stall load until STQ drains / forward
++    // T33: the live match comes from the SPECULATIVE queue only (no committed
++    // entry, no sticky drain window). Such a store can only leave after every
++    // older instruction retires, so a load parked on it in WAIT_PAGE_OFFSET
++    // must not hold the load unit against an older load -- the load unit
++    // replays it instead (see load_unit.sv).
++    output logic         page_offset_spec_only_o,
++    // R3a: store→load data forward (byte-merge, oldest→youngest). When a load's
++    // BE is fully covered, the load unit may complete without a D$ request.
++    output logic                              st_fwd_valid_o,
++    output logic [CVA6Cfg.XLEN-1:0]           st_fwd_data_o,
++    output logic [(CVA6Cfg.XLEN/8)-1:0]       st_fwd_be_o,
++
++    input logic commit_i,  // commit the instruction which was placed there most recently
++    output logic commit_ready_o,  // commit queue is ready to accept another commit request
++    output logic ready_o,  // the store queue is ready to accept a new request
++                           // it is only ready if it can unconditionally commit the instruction, e.g.:
++                           // the commit buffer needs to be empty
++    input logic valid_i,  // this is a valid store
++    input  logic         valid_without_flush_i, // just tell if the address is valid which we are current putting and do not take any further action
++
++    input  logic [CVA6Cfg.PLEN-1:0]  paddr_i,         // physical address of store which needs to be placed in the queue
++    input  logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id_i, // scoreboard tid (FSE S4 younger cancel)
++    // T6b: hart of the arriving store, recorded on its speculative entry.
++    input  logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] st_hart_i,
++    output logic [CVA6Cfg.PLEN-1:0] rvfi_mem_paddr_o,
++    input logic [CVA6Cfg.XLEN-1:0] data_i,  // data which is placed in the queue
++    input logic [(CVA6Cfg.XLEN/8)-1:0] be_i,  // byte enable in
++    input logic [1:0] data_size_i,  // type of request we are making (e.g.: bytes to write)
++    input cbo_t cbo_op_i,  // type of cache block operation
++
++    // D$ interface
++    input  dcache_req_o_t req_port_i,
++    output dcache_req_i_t req_port_o
++);
++  logic [CVA6Cfg.PLEN-1:0] paddr_raw;
++  store_buffer #(.CVA6Cfg(CVA6Cfg), .dcache_req_i_t(dcache_req_i_t), .dcache_req_o_t(dcache_req_o_t), .cbo_t(cbo_t)) u (.rvfi_mem_paddr_o(paddr_raw), .*);
++  // A138: the RVFI address is compared against the entry popped next cycle
++  // by tb_sb_stage, so it is passed through unmasked; the staged design's
++  // interface rules (push with a staged pop pending, commit of a staged
++  // store) are the module's own clocked assertions, not the sb_wrap_new ones.
++  assign rvfi_mem_paddr_o = paddr_raw;
++endmodule

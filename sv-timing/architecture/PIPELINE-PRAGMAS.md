@@ -695,6 +695,16 @@ The old board's trace describes reg→reg, not necessarily worst-any:
 the causal claims about the input cone in §§12–13 require the independent
 boundary reports now produced by the isolated review runner.
 
+## 17. Input staging as a uniform shift (A138, trial)
+
+For a module whose next-state permutation consumes every input, the admitted
+stage is input staging of the whole input set, judged by a shift witness
+(state equality with a delayed reference; outputs bounded by the previous
+semantics). Built by hand on the store buffer behind `CVA6Cfg.StqInputStage`,
+functionally proven, rejected on placement (the worst path was inside the
+permutation). Any automatic `stage-input` mechanism inherits both the witness
+obligations and the applicability condition (placed in→reg must dominate).
+
 ## 16. Row-local source preparation (A135)
 
 `row-local <name> index=<net> rows=<param> banks=<q:d,...> max-rows=<n>`

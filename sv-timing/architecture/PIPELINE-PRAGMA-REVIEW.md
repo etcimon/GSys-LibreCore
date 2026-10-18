@@ -174,6 +174,65 @@ and the normal package parser. Upload the emitted multiplier along with the
 same source snapshot for the third comparison. An emitted reparse or a
 structural reduction alone is not the acceptance condition.
 
+## A138 — store buffer input stage: functionally proven, rejected on timing
+
+The first true pipeline stage attempted on the board's worst cone
+(`core/store_buffer.sv`, 173.0 adjusted FO4), as a config gate
+(`CVA6Cfg.StqInputStage`, default 0): the store request, the commit pulse, the
+flush, the cancel mask and the program-age anchor captured one cycle before the
+speculative-queue permutation, which then reads registers only. The core state
+is the unstaged design's state delayed by one cycle; the current cycle's
+outputs are derived from the registers — the staged store forwards at its
+program-age position, the head a staged commit pops is architectural, entries
+the staged flush / cancel remove are masked, `ready_o` / `commit_ready_o` /
+`no_st_pending_o` / `store_buffer_empty_o` count the staged items, the RVFI
+address and the commit-head assertion follow the head the commit port sees
+(the slot after a staged pop or the staged store, whichever is older, skipping
+entries the staged mask squashes).
+
+**Functional evidence (`fo4-a138-stq18`)** — a three-instance shift witness
+(`tb_sb_stage`: staged RTL; previous RTL fed the staged inputs one cycle late;
+previous RTL live), g6lc64_ooo geometry, 300k cycles each:
+
+| run | pushes | commits | cancel cycles | flushes | forwarded bytes | errors |
+|---|---:|---:|---:|---:|---:|---:|
+| plain seed 1 | 172,439 | 74,442 | 40,308 | 7,005 | 88,348 | **0** |
+| plain seed 17 | 172,373 | 74,354 | 40,143 | 6,988 | 89,588 | **0** |
+| cbo seed 1 / 5 | 166k | 54k | 41k | 7k | 118k | **0** |
+
+Checked every cycle: queue / pointer / count / commit-queue state equal to the
+delayed reference; `req_port_o` identical; every reference-forwarded byte
+forwarded with the same value (plain mode: no stall substitution at all);
+extra bytes only from the committing head, a commit-queue entry the reference
+had already drained, or the cycle after a cancel / flush; the live page-offset
+match a superset; readiness and pending flags conservative; the RVFI address
+names the entry popped next cycle. A mutant that drops the staged store from
+forwarding is caught. With the gate off the live RTL is cycle-exact against the
+previous revision (`tb_sb_sbs`, 2 × 400k cycles, 0 mismatches). Six witness
+and head-view defects were found and fixed on the way (the commit port can
+retire a store that is still staged; squashed entries must not be the head; a
+shared random memory handshake let a CBO response coincide with a grant; the
+R3a sticky terms are not comparable across the two timings).
+
+**Physical evidence (same Nangate45 flow, no disabled arcs) — rejected:**
+
+| Store buffer (g6lc64_ooo, isolated) | Stage off | Stage on |
+|---|---:|---:|
+| Placed worst arrival | 3.964 ns | **4.316 ns** (+8.9%) |
+| Placed reg→reg | 3.964 ns | 4.316 ns |
+| Repaired area | 75340.5 µm² | 81456.1 µm² (+8.1%) |
+| Filtered module study | 3.242 ns | 3.655 ns |
+
+The isolated placed baseline shows the worst path was already register-to-
+register (the permutation itself), not the input cone the module board's
+`any` figure pointed at. Input staging cannot shorten that, and the derived
+current-cycle views (two-pass forwarding with age compares against the staged
+store, the squash-aware head) add to the paths that remain. The RTL and the
+config field are reverted; the complete trial (RTL, config plumbing, witness)
+is kept as `trials/a138-store-buffer-input-stage.patch`, and the `stq` review
+profile remains in the runner. Lesson recorded in PIPELINING-RT-LEARNING §4a:
+measure the *placed* split of the target before choosing an input stage.
+
 ## A137 — checkpoint stack: slot-order search rejected; live board flow fix
 
 **Live board after A134–A136 (`timings sta-rtl --remote --map-recipe

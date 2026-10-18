@@ -205,6 +205,32 @@ rule yet. The rejected rename/store-buffer bypasses show why an exact algebraic
 rewrite still needs a physical discriminator: filtered mapping improved, but
 placement worsened.
 
+## 4a. Input staging as a uniform shift — and when it cannot pay (A138)
+
+The store buffer's permutation reads every input the module has; the stage
+the contract admits is input staging of the whole input set. The method that
+makes it checkable is the **uniform shift**: stage every input the permutation
+consumes so the core state equals the previous design's state one cycle later,
+then derive the current-cycle outputs from the registers and prove each
+derivation by implication against the previous semantics (state identity with
+a delayed reference; forwarding, stall and readiness bounded by a live
+reference). Obligations the witness surfaced: the commit port may retire a
+store that is still staged; squashed entries are neither head nor forwarding
+sources; a committed-but-staged head is architectural yet still pending for
+serialising consumers; a shared random memory handshake must be protocol-legal
+per instance once phases differ.
+
+The trial passed every functional check and was **rejected on placement**
+(3.964 → 4.316 ns, +8.1% area). The decisive error was in target selection: the
+module board's `any` figure (3.70 ns unplaced) suggested an input cone, but the
+isolated *placed* baseline put the worst path inside the permutation
+(reg→reg 3.96 ns), which an input stage cannot shorten, while the derived
+views add logic to the remaining paths. Applicability condition for input
+staging: the placed in→reg cone must exceed the placed reg→reg cone by more
+than the derived-view cost; measure that split first. The next rung for this
+module is a stage *inside* the permutation (insert, then compact), which the
+uniform-shift witness can also judge.
+
 ## 5. Implemented preprocessor: source intent to initial IR
 
 Example:

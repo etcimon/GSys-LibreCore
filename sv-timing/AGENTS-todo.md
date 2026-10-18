@@ -3,6 +3,14 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A138 — store buffer input stage (rejected on timing)
+
+- [x] Gated input stage built and proven (shift witness 4 × 300k, gate-off
+  sbs 2 × 400k, mutant caught); placed 3.964 → 4.316 ns at +8.1% area → reverted.
+  Trial kept as `architecture/trials/a138-store-buffer-input-stage.patch`.
+- [ ] Store buffer: a stage inside the permutation (insert, then compact)
+  judged by the same uniform-shift witness; measure the placed split first.
+
 ## A137 — checkpoint stack trial and live-board flow
 
 - [x] `g6lc_bp_ckpt` slot-order oldest-live search: proven, placed reg→reg

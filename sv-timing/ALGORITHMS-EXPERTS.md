@@ -31,6 +31,13 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A138 update:** store-buffer input stage (gated `StqInputStage`) built as a
+uniform one-cycle shift with register-derived current-cycle views; shift
+witness 4 × 300k cycles clean, gate-off cycle-exact 2 × 400k, mutant caught —
+and rejected on placement (3.964 → 4.316 ns, +8.1% area): the placed worst path
+was the permutation itself, not the input cone. RTL/config reverted; trial kept
+as `architecture/trials/a138-store-buffer-input-stage.patch`.
+
 **A137 update (board):** live board after A134–A136: realign 119 → 50.8,
 statcor 83.7 → 33.7, ROB 82.4 → 69.8, multiplier 118 → 97.3 adjusted FO4;
 top four unchanged. The loop-buffer registered expectation read worse on the
@@ -8314,6 +8321,20 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A138 — Input staging as a uniform shift (store buffer; rejected)
+
+Stage the request, commit, flush, cancel mask and age anchor; run the
+unchanged permutation on the registers. State(t) == previous State(t−1) by
+construction (checked white-box every cycle). Current-cycle outputs derived:
+the staged store as a forwarding source at its program-age slot (two passes
+split by `ooo_older(entry, staged)`), the head a staged commit pops treated as
+committed, entries the staged mask / flush remove masked from forwarding,
+`ready_o` as a register sum, the commit-port head as the older of the slot
+after the staged pop and the staged store (skipping squashed entries). Placed:
+3.964 → 4.316 ns worst, area +8.1% — the placed worst path was already
+reg→reg inside the permutation. Reverted; evidence and the lesson in
+`architecture/PIPELINE-PRAGMA-REVIEW.md` (A138).
 
 ## A136 — Registered derived addresses; absolute-order ring search
 
