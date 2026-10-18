@@ -25,6 +25,7 @@ pub fn emitted_lower_field_names() -> &'static [&'static str] {
         "default_text",
         "fn_bodies",
         "param_override_present",
+        "pipe_pragmas_derived",
     ]
 }
 
@@ -732,7 +733,8 @@ pub struct TimingModule {
     /// collected over the module span, like the `$onehot` facts. They name
     /// the roles a register cut must carry (valid, id, kill, flush, carried
     /// signals, result side) and where a stage boundary is permitted or
-    /// forbidden. Declared by the designer, consumed by `InsertReg`.
+    /// forbidden. Source declarations and derived representation facts are
+    /// distinguished by `PipePragma::derived`, consumed by `InsertReg`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pipe_pragmas: Vec<PipePragma>,
     /// Source span of module header.
@@ -742,9 +744,14 @@ pub struct TimingModule {
 /// One `// svt-pipe: <kind> [domain] key=value … flag …` pragma as written.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PipePragma {
-    /// `protocol`, `carry`, `result`, `cut-ok`, `no-cut`, `require-contract`.
+    /// Produced by pipeline preprocessing rather than read from source.
+    /// Original pragmas remain alongside these facts for provenance/rebuild.
+    #[serde(default)]
+    pub derived: bool,
+    /// Source directive (`protocol`, `carry`, `result`, `cut-ok`, `no-cut`,
+    /// `require-contract`, `latency`, `representation`) or a derived fact kind.
     pub kind: String,
-    /// Protocol domain name when the kind takes one (`protocol`, `carry`, `result`, `cut-ok`).
+    /// Protocol domain name when the directive takes one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub domain: Option<String>,
     /// `key=value` arguments, in order.

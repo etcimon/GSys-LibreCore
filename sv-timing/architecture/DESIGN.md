@@ -24,6 +24,25 @@
 
 ## Current correctness audit: source origins and validation
 
+### Pipeline representation preprocessing (A133)
+
+Before the first timing attribution, compile source pipeline representation
+pragmas into ordinary carry/result/no-cut facts in the initial IR. Preserve
+the original comments and mark derived facts explicitly; preprocessing must
+be idempotent and must not change executable nodes, delay costs or authorize an
+unauthored boundary. An explicit cut on either component authorizes the whole
+pair; equivalent anchors let the planner reach it through either critical path.
+The first supported representation is a module-local, equal-width carry-save
+pair with an explicit sum-plus-carry consumer. Its carry row becomes a
+companion in the existing protocol bundle; existing InsertReg and emitter
+gates remain authoritative. A successful cut consumes the representation
+directive into a no-cut guard on both rows in emitted SV, preventing an unbalanced repeat.
+Unsupported shapes produce diagnostics and cannot silently become bare cuts.
+
+The evidence and transfer methodology is
+[`PIPELINING-RT-LEARNING.md`](PIPELINING-RT-LEARNING.md). This is deterministic
+preprocessing and reviewed engineering knowledge, not an autonomous learner.
+
 ### Pipeline contract validation (A132)
 
 An explicit `cut-ok` naming an unresolved domain must refuse the cut, never

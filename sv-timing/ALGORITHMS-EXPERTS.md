@@ -31,6 +31,13 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A133 update:** representation directives are compiled into initial IR before
+costs and on remeasurement. A declared carry-save pair becomes one atomic cut
+boundary with either row as the critical anchor; the other row travels through
+the existing bundle machinery. Source/emit witnesses and a misaligned-companion
+negative control qualify the implementation. Method and limits:
+[`PIPELINING-RT-LEARNING.md`](architecture/PIPELINING-RT-LEARNING.md).
+
 **A132 update:** split both multiplier operands into product tiles and carry
 sum/carry rows across the existing middle boundary. Paired placement/repair
 without disabled arcs: 2.634 → 2.215 ns worst arrival (+1.4% area);
@@ -8278,6 +8285,31 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A133 — Compile representation obligations before timing
+
+The multiplier's transferable mechanism is a complete represented value and
+operation moving through a boundary. The first generic compiler rule accepts
+`representation <domain> carry-save sum=… carry=… result=…`, validates equal
+widths, independent row cones, exact consumer shape and explicit protocol
+roles, then derives carry/result facts. One authored cut permits either row
+as the critical anchor, always with its companion; no-cut on either forbids
+the pair. Applied boundaries stay closed in mutable IR and emitted comments.
+Raw facts and original locations are retained; preprocessing is idempotent,
+cache/context-aware, and assigns no timing credit.
+
+The fixture demonstrated why aliases are necessary: the carry row, not the
+authored sum anchor, lies on the longest path. The emitted cut captures it
+and carries the sum. Six runs of 200,032 cycles pass including drain,
+cancellation and flush; reconnecting the unstaged companion fails on values.
+Mapped Nangate45 worst arrival falls 0.808 → 0.699 ns at +27.9% area.
+Structural 15 → 10 is approximately 32.7 adjusted FO4 after mapping, not
+physical closure. This is a tested compiler primitive, not automatic tiling
+or a generic state-machine/ready protocol.
+
+The evidence-based reasoning method, pattern families, rejection conditions
+and extension requirements are in `architecture/PIPELINING-RT-LEARNING.md`,
+linked from the root development guides.
 
 ## A132 — Validate the boundary, the emitted file and the physical result
 

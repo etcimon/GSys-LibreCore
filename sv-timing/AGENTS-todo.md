@@ -3,6 +3,26 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A133 — representation-aware initial-IR preprocessing
+
+- [x] Document transferable multiplier patterns and counterexamples in
+  `architecture/PIPELINING-RT-LEARNING.md`; link the root development guides.
+- [x] Compile `representation <domain> carry-save sum=… carry=… result=…`
+  into derived carry/result/no-cut facts before timing and on remeasurement.
+- [x] Preserve raw facts/provenance; reject unsupported shapes without partial
+  normalization; keep applied boundaries closed across later passes/cache rebuild.
+- [x] Admit either critical row only as one authored atomic boundary; reject
+  cross-row dependencies, feedback into inputs/control, and protocol aliases.
+- [x] Emitted fixture and source: 3 × 200,032 cycles each, no errors and a clean
+  drain; unstaged-companion negative control fails. Mapped worst 0.808 → 0.699 ns
+  at +27.9% area; structural 15 → 10 does not close measured 10 adjusted FO4.
+- [x] 380 package tests; current-parameter and cache-roundtrip normalization;
+  emitted no-cut guards survive stricter-budget re-correction with no new stage.
+- [x] Existing A123 source/twin witness passes the strengthened drain check
+  across all three seeds (`fo4-a133-legacy`).
+- [ ] Other representation/queue/feedback strategies require their own compiler
+  rules and validation; this pass does not infer their missing protocols.
+
 ## A132 — pragma admission and paired physical review
 
 - [x] Reject unresolved/invalid domains instead of permitting uncarried cuts;

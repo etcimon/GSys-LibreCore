@@ -44,6 +44,7 @@ pub mod pass_strategy;
 pub mod path_class;
 pub mod patterns;
 pub mod pipe_contract;
+pub mod pipeline_preprocess;
 pub mod ref_order;
 pub mod relocation;
 pub mod select_increment;

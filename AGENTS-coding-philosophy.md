@@ -287,6 +287,15 @@ lens and a normative document disagree, the normative document wins and the lens
 
 ### 2.10 Runtime reflection and bounded learning (preliminary)
 
+For pipeline work, use the concrete specialization
+[`PIPELINING-RT-LEARNING.md`](sv-timing/architecture/PIPELINING-RT-LEARNING.md).
+It maps the multiplier's successful and rejected changes to reusable
+representation/lifetime/boundary patterns and to an implemented initial-IR
+pragma preprocessor. Preserve the complete represented value and operation
+bundle; test the emitted artifact and its physical timing separately from
+structural estimates. Its supported compiler rules do not authorize unimplemented
+queue handshakes, arbitrary retiming, or a claim of 10-FO4 closure.
+
 [`AGENTS-rt-learning-philosophy-AGI.md`](AGENTS-rt-learning-philosophy-AGI.md)
 generalizes the §2.9 guides into evidence-bounded analysis segments, conditional
 pattern transfer and versioned learning artifacts. It retains their proposition,

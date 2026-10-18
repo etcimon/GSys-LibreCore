@@ -1382,6 +1382,20 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
                 .get(&cut.after_node)
                 .map(|n| n.width)
                 .filter(|w| *w > 0);
+            let cut_lhs = module
+                .nodes
+                .get(&cut.after_node)
+                .and_then(|n| n.lhs.as_deref());
+            st.consumed_representations =
+                sv_timing_core::pipeline_preprocess::representations(module)
+                    .into_iter()
+                    .filter(|p| {
+                        p.domain == d.name
+                            && (Some(p.sum.as_str()) == cut_lhs
+                                || Some(p.carry.as_str()) == cut_lhs)
+                    })
+                    .map(|p| (p.loc.start_line, format!("{},{}", p.sum, p.carry)))
+                    .collect();
             if data_stage == last_data_stage {
                 // Tail nodes (after the last cut on the path) read the last
                 // stage's carried copies, valid and id.
@@ -1411,6 +1425,25 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
         });
         if pipe_stage.is_some() {
             prev_stage_name = Some(name.clone());
+        }
+        if let Some(st) = &pipe_stage {
+            if let Some(module) = ctx
+                .design
+                .paths
+                .iter()
+                .find(|p| p.id == cut.path_id)
+                .and_then(|p| ctx.design.modules.get_mut(&p.module))
+            {
+                let plans: Vec<_> = sv_timing_core::pipeline_preprocess::representations(module)
+                    .into_iter()
+                    .filter(|p| {
+                        st.consumed_representations.iter().any(|(line, rows)| {
+                            *line == p.loc.start_line && rows == &format!("{},{}", p.sum, p.carry)
+                        })
+                    })
+                    .collect();
+                sv_timing_core::pipeline_preprocess::mark_applied(module, &plans);
+            }
         }
         let rationale = match &pipe_stage {
             Some(st) => format!(

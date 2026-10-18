@@ -103,6 +103,10 @@ impl CostModel {
 /// parallel arms are not over-counted (arrival-time style). Falls back to
 /// `op_class` base when no tree is present.
 pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
+    // Compile representation obligations into the initial IR before any
+    // timing/path/opportunity pass consumes the contracts. Rebuild derived
+    // facts on re-attribution, including designs rehydrated from module cache.
+    crate::pipeline_preprocess::prepare_design(design);
     design.versions.cost_model = model.id.clone();
     // Width inference reads packages / param-map while nodes are mutated.
     let packages = design.packages.clone();
@@ -2399,6 +2403,7 @@ pub fn remeasure_path_slacks_with_hints(
     design: &mut TimingDesign,
     external_hints: Option<&std::collections::BTreeMap<String, crate::path_class::PathClassHint>>,
 ) {
+    crate::pipeline_preprocess::prepare_design(design);
     let budget = design.target.budget_fo4;
     let fo4_ps = design.target.fo4_ps;
     let margin = design.target.budget_margin;

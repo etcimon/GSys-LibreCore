@@ -244,7 +244,10 @@ pub fn apply_edits_to_source_dense(
         // Guard predicates first: byte spans of the pristine source, one
         // line each, so the line-based stages below see unchanged numbering.
         let after_guards = crate::rhs::rewrite_guard_predicates(source, trace);
-        let (after_consumers, exports) = crate::rhs::rewrite_pipe_consumers(&after_guards, trace);
+        let after_representation =
+            crate::rhs::consume_representation_directives(&after_guards, trace);
+        let (after_consumers, exports) =
+            crate::rhs::rewrite_pipe_consumers(&after_representation, trace);
         pipe_exports = exports;
         let after_loops = crate::rhs::rewrite_loop_spans(&after_consumers, trace);
         rewrite_origin_rhs_replaces(&after_loops, trace)
@@ -2649,6 +2652,71 @@ endmodule
                 .iter()
                 .map(|r| &r.rationale)
                 .collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
+    fn representation_prepass_drives_real_paired_stage_and_consumes_permission() {
+        use sv_timing_core::{analyze_files, LowerOptions, ParseOptions, TimingTarget};
+        use sv_timing_transform::{run_correct_passes, PassContext, PassPolicy};
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/pipe_representation.sv");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let mut opt = sv_timing_core::OptOptions::preset(sv_timing_core::OptLevel::O3);
+        opt.max_cells_per_fo4 = 128.0;
+        let out = analyze_files(
+            &[path],
+            &ParseOptions::default(),
+            &LowerOptions {
+                target: TimingTarget::new(4000.0, 20.0, 0.2),
+                opt: opt.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut policy = PassPolicy::from_opt(opt, vec!["pipe_representation".into()], true);
+        policy.emit_structural = true;
+        let mut pc = PassContext::new(out.design, out.names, policy);
+        pc.assume_clk = true;
+        let ctx = run_correct_passes(pc).unwrap();
+        let cuts: Vec<_> = ctx
+            .trace
+            .records
+            .iter()
+            .filter(|r| r.kind == EditKind::InsertReg)
+            .collect();
+        assert_eq!(cuts.len(), 1, "{:?}", ctx.trace.records);
+        let cut = cuts[0];
+        let stage = cut.pipe_stage.as_ref().unwrap();
+        assert_eq!(
+            stage.carry_sigs,
+            ["sum_row"],
+            "the carry row is critical in this fixture"
+        );
+        assert_eq!(stage.carry_widths, [Some(32)]);
+        assert_eq!(stage.data_width, Some(32));
+        assert_eq!(stage.consumed_representations.len(), 1);
+        let name = cut.new_name.as_deref().unwrap();
+        let mut dense = dense_options_from_source(&source);
+        dense.emit_balance_mux_rtl = true;
+        dense.real_cut_feeds = true;
+        let emitted =
+            apply_edits_to_source_dense(&source, &ctx.trace, &EmitPolicy::default(), &dense);
+        assert!(
+            emitted.contains(&format!("{name}_c_sum_row <= sum_row;")),
+            "{emitted}"
+        );
+        assert!(
+            emitted.contains(&format!("assign res_d = {name}_c_sum_row + carry_row;")),
+            "{emitted}"
+        );
+        assert!(emitted.contains("// svt-pipe: no-cut on=sum_row,carry_row"));
+        assert!(!emitted.contains("// svt-pipe: representation "));
+        let module = ctx.design.modules.values().next().unwrap();
+        let contract = sv_timing_core::pipe_contract::resolve(module).unwrap();
+        assert!(
+            contract.no_cut.contains("sum_row") && contract.no_cut.contains("carry_row"),
+            "next pass must not cut this representation twice"
         );
     }
 

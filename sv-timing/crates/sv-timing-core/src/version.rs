@@ -7,13 +7,14 @@
 pub const PACKAGE_VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// Timing IR schema version (bump on breaking IR changes).
-pub const IR_VERSION: &str = "ir-v3";
+pub const IR_VERSION: &str = "ir-v4";
 
 /// Opportunity/structural-emission semantics, independent of delay costs.
 /// v1 adds typed +/- offset candidates and unsigned selector indexing.
 /// v3 rejects invalid/unresolved protocol cuts and checks exact latency and
 /// bundle widths before inserting carried registers.
-pub const CORRECTION_VERSION: &str = "correction-v3";
+/// v4 compiles representation obligations before timing and carries paired rows.
+pub const CORRECTION_VERSION: &str = "correction-v4";
 
 /// Measurement semantics version.
 ///

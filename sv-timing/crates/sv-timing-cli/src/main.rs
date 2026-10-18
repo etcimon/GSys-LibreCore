@@ -1027,6 +1027,7 @@ fn design_to_analyze_json(
             Some(serde_json::json!({
                 "module": m.name,
                 "contract": contract,
+                "representations": sv_timing_core::pipeline_preprocess::representations(m),
                 "bundle_issues": bundle_issues,
                 "unbound_no_cut": unbound_no_cut,
                 "note": "Declarations only: cut permission is not emission, functional validation or measured timing closure."

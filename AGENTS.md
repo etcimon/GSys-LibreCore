@@ -183,6 +183,12 @@ the review & validation checklist in the PR.
   guides with evidence-bounded analysis segments, conditional pattern transfer and versioned memory.
   It is not an implemented learner or an AGI claim, and never overrides authorization, specifications,
   privacy or verification gates.
+- **Pipelining counterpart**: [`sv-timing/architecture/PIPELINING-RT-LEARNING.md`](sv-timing/architecture/PIPELINING-RT-LEARNING.md)
+  derives representation, lifetime and measurement rules from the multiplier
+  experiments. Use it when inferring pipeline changes or pragma strategies:
+  supported representation obligations are compiled into initial IR before
+  timing/transforms; candidate strategies still require emitted functional and
+  physical evidence. A pragma or projected stage count is not budget closure.
 - **Uncore counterpart**: for changes to the SoC-integration layer (`corev_apu/**`, board wrappers,
   vendored controllers/PHY), `AGENTS-corev-apu.md` carries the SystemVerilog **preconditions** (AXI
   seam, clock/reset/CDC, PHY-vs-controller separation, DFT, flist/DTS), and `AGENTS-vendor.md` +

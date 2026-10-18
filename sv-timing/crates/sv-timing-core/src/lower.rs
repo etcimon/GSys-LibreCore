@@ -1820,7 +1820,10 @@ fn collect_pipe_pragmas(
         };
         let mut words = rest.split_whitespace();
         let Some(kind) = words.next() else { continue };
-        let takes_domain = matches!(kind, "protocol" | "carry" | "result" | "cut-ok" | "latency");
+        let takes_domain = matches!(
+            kind,
+            "protocol" | "carry" | "result" | "cut-ok" | "latency" | "representation"
+        );
         let mut domain = None;
         let mut args = Vec::new();
         let mut bare = Vec::new();
@@ -1840,7 +1843,12 @@ fn collect_pipe_pragmas(
         let trimmed_len = line.trim_end_matches(['\n', '\r']).len();
         let end_byte = line_start + trimmed_len;
         out.push(crate::ir::PipePragma {
-            kind: kind.to_string(),
+            derived: false,
+            kind: if kind == "representation" && !line[..ci].trim().is_empty() {
+                "invalid-inline-representation".into()
+            } else {
+                kind.to_string()
+            },
             domain,
             args,
             words: bare,

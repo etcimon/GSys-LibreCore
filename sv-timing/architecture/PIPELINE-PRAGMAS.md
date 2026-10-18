@@ -694,3 +694,21 @@ places at 2.298 ns. Neither source nor emit is near 10 adjusted FO4 yet.
 The old board's trace describes reg→reg, not necessarily worst-any:
 the causal claims about the input cone in §§12–13 require the independent
 boundary reports now produced by the isolated review runner.
+
+## 15. Representation preprocessing (A133)
+
+`representation <domain> carry-save sum=<net> carry=<net> result=<net>` is a
+standalone comment directive compiled before initial timing attribution.
+The equal-width consumer must be exactly sum plus already-shifted carry.
+An authored cut on either row authorizes one paired boundary: the critical
+row is data and the other becomes its companion. A prohibition on either
+blocks both. No boundary is authorized by the representation alone.
+
+The compiler preserves source facts and adds marked derived carry/result and
+equivalent-anchor facts to IR. It refuses unsupported scope, widths, hidden
+reads, feedback and protocol-role aliases. Successful emission replaces the
+directive with `no-cut on=sum,carry`; comma-separated no-cut targets are
+supported for that consumed boundary.
+
+See [PIPELINING-RT-LEARNING.md](PIPELINING-RT-LEARNING.md) for the implemented
+pipeline, evidence, mathematical obligations and broader strategy families.

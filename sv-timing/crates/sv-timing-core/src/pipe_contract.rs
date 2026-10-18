@@ -216,13 +216,41 @@ fn anchor_lhs(module: &TimingModule, line: u32) -> Option<(String, u32)> {
 
 /// Resolve the module's pragmas. `None` when the module declares none.
 pub fn resolve(module: &TimingModule) -> Option<PipeContract> {
-    if module.pipe_pragmas.is_empty() {
+    resolve_pragmas(module, &module.pipe_pragmas)
+}
+
+pub(crate) fn resolve_pragmas(
+    module: &TimingModule,
+    pragmas: &[crate::ir::PipePragma],
+) -> Option<PipeContract> {
+    if pragmas.is_empty() {
         return None;
     }
     let mut c = PipeContract::default();
-    for p in &module.pipe_pragmas {
+    for p in pragmas {
         let at = format!("{}:{}", p.loc.file, p.loc.start_line);
         match p.kind.as_str() {
+            "representation" => {
+                let prepared = pragmas.iter().any(|q| {
+                    q.derived
+                        && q.loc == p.loc
+                        && matches!(q.kind.as_str(), "representation-ready" | "preprocess-error")
+                });
+                if !prepared {
+                    c.rejected.push(format!(
+                        "{at}: representation requires initial-IR preprocessing"
+                    ));
+                }
+            }
+            "representation-ready" if p.derived => {}
+            "pipeline-boundary-applied" if p.derived => {
+                if let Some(on) = arg(&p.args, "on") {
+                    c.no_cut.insert(on.to_string());
+                }
+            }
+            "preprocess-error" if p.derived => {
+                c.rejected.push(format!("{at}: {}", p.words.join(" ")));
+            }
             "protocol" => {
                 if let Some((key, _)) = p
                     .args
@@ -385,7 +413,7 @@ pub fn resolve(module: &TimingModule) -> Option<PipeContract> {
                     .or_else(|| anchor_lhs(module, p.loc.start_line));
                 match lhs {
                     Some((l, _)) => {
-                        c.no_cut.insert(l);
+                        c.no_cut.extend(l.split(',').map(str::to_string));
                     }
                     None => c
                         .rejected
@@ -495,7 +523,9 @@ pub fn cut_permission(
                 "require-contract: cut-ok has no resolved domain".into(),
             );
         }
-        return CutPermission::Allowed(d);
+        return CutPermission::Allowed(
+            d.map(|d| crate::pipeline_preprocess::domain_at_cut(module, d, lhs)),
+        );
     }
     if contract.require_contract {
         return CutPermission::Forbidden(format!("require-contract: `{lhs}` has no cut-ok"));
@@ -537,6 +567,10 @@ pub fn alignment_violation(cut_lhs: &[String], readers: &[BTreeSet<String>]) -> 
 /// The bundle one stage of a domain carries, as the emitter serializes it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PipeStage {
+    /// Representation directives consumed by this cut: (original line,
+    /// comma-separated row names). Emission guards both against another cut.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub consumed_representations: Vec<(u32, String)>,
     /// Domain name.
     pub domain: String,
     /// Stage number within this cut plan (1-based).
@@ -852,6 +886,7 @@ pub fn stage_for(
         }
     }
     PipeStage {
+        consumed_representations: Vec::new(),
         domain: domain.name.clone(),
         stage,
         kill_expr: domain.kill_for(&id_src),

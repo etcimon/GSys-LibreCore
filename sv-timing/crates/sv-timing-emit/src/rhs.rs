@@ -2595,6 +2595,41 @@ pub fn strip_line_comment_pub(line: &str) -> String {
     strip_line_comment(line).to_string()
 }
 
+/// Consume representation instructions only after a stage was actually placed.
+/// Preserve line numbers for subsequent source rewrites and prohibit a second
+/// cut at the old boundary when the emitted source is analyzed again.
+pub fn consume_representation_directives(source: &str, trace: &EditTrace) -> String {
+    let consumed: std::collections::BTreeMap<u32, &str> = trace
+        .records
+        .iter()
+        .filter_map(|r| r.pipe_stage.as_ref())
+        .flat_map(|st| {
+            st.consumed_representations
+                .iter()
+                .map(|(line, sum)| (*line, sum.as_str()))
+        })
+        .collect();
+    if consumed.is_empty() {
+        return source.into();
+    }
+    let mut out = String::with_capacity(source.len());
+    for (i, line) in source.lines().enumerate() {
+        if let Some(sum) = consumed.get(&((i + 1) as u32)) {
+            if line
+                .trim_start()
+                .starts_with("// svt-pipe: representation ")
+            {
+                let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
+                out.push_str(&format!("{indent}// svt-pipe: no-cut on={sum}\n"));
+                continue;
+            }
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
+
 /// Module-level exports of a generate-scoped stage (A125). A consumer
 /// outside the stage's conditional generate block cannot name the block
 /// hierarchically: the block does not exist when the condition is false

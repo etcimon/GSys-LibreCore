@@ -421,23 +421,27 @@ foreach kind {in_reg reg_reg reg_out in_out} {
         print(json.dumps(evidence["maps"]), flush=True)
         return
 
-    if os.environ.get("CONTROL_MODE") == "pipe-fixture":
+    if os.environ.get("CONTROL_MODE") in ("pipe-fixture", "pipe-representation"):
         # A123 protocol witness: the svt-pipe fixture and its emitted twin,
         # each under the latency-agnostic testbench, three seeds. The twin's
         # `pipe_contract` module is renamed so the same testbench selects it.
         vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
         evidence["simulator"] = subprocess.check_output([vl, "--version"], text=True).strip()
-        gold = data / "pipe_contract.sv"
-        twin_src = data / "pipe_contract__svt.sv"
+        representation = os.environ.get("CONTROL_MODE") == "pipe-representation"
+        module = "pipe_representation" if representation else "pipe_contract"
+        gold = data / f"{module}.sv"
+        twin_src = data / f"{module}__svt.sv"
         tb = data / "tb_pipe_contract.sv"
         for f in (gold, twin_src, tb):
             evidence["sources"][f.name] = hashlib.sha256(f.read_bytes()).hexdigest()
-        twin = out / "pipe_contract_svt.sv"
+        twin = out / f"{module}_svt.sv"
         text = twin_src.read_text()
-        assert text.count("module pipe_contract (") == 1
-        twin.write_text(text.replace("module pipe_contract (", "module pipe_contract_svt (", 1)
+        assert text.count(f"module {module} (") == 1
+        twin.write_text(text.replace(f"module {module} (", f"module {module}_svt (", 1)
                         .replace("module pipe_contract_side (", "module pipe_contract_side_svt (", 1))
         for name, srcs, defs in (("gold", [gold, tb], []), ("twin", [twin, tb], ["+define+SVT_TWIN"])):
+            if representation:
+                defs = defs + ["+define+SVT_REPRESENTATION"]
             obj = out / f"obj-{name}"
             run(f"pipe-build-{name}", [vl, "-O0", "--binary", "--timing", "--assert", "-Wno-fatal",
                 "-Wno-WIDTH", "-Wno-UNOPTFLAT", *defs, *map(str, srcs),
@@ -446,8 +450,25 @@ foreach kind {in_reg reg_reg reg_out in_out} {
                 log = run(f"pipe-sim-{name}-{seed}", [str(obj / "Vtb_pipe_contract"), f"+seed={seed}"], timeout=300)
                 assert "PASS" in log and "errors=0" in log, f"{name} seed {seed}"
                 evidence["proofs"][f"pipe-{name}-{seed}"] = log.strip().splitlines()[-2][:200]
+        if representation:
+            # Discriminator: retain the data cut but read its unstaged companion.
+            # Failure must be a value mismatch, not an elaboration error.
+            bad = out / "misaligned.sv"
+            bad_text, n = re.subn(r"assign res_d\s*=[^;]+;",
+                                  "assign res_d = sum_row + carry_row;", twin.read_text())
+            assert n == 1
+            bad.write_text(bad_text)
+            obj = out / "obj-bad"
+            run("pipe-build-bad", [vl, "-O0", "--binary", "--timing", "--assert", "-Wno-fatal",
+                "-Wno-WIDTH", "-Wno-UNOPTFLAT", "+define+SVT_TWIN", "+define+SVT_REPRESENTATION",
+                str(bad), str(tb), "--top-module", "tb_pipe_contract", "--Mdir", str(obj), "-j", "4"])
+            result = subprocess.run([str(obj / "Vtb_pipe_contract"), "+seed=7"], cwd=out,
+                                    capture_output=True, text=True, timeout=300)
+            (out / "pipe-bad.log").write_text(result.stdout + result.stderr)
+            assert result.returncode != 0 and "value" in result.stdout and "expected" in result.stdout
+            evidence["proofs"]["negative-control"] = "unstaged companion rejected by value witness"
         # mapped twin: the stage count and the data path it leaves on Nangate45
-        for name, path, top in (("gold", gold, "pipe_contract"), ("twin", twin, "pipe_contract_svt")):
+        for name, path, top in (("gold", gold, module), ("twin", twin, f"{module}_svt")):
             netlist, stats = out / f"{name}.v", out / f"{name}.stat"
             yosys(f"pipe-map-{name}",
                   f"read_slang --top {top} {path}\nproc\nasync2sync\nopt_clean\nwreduce\nalumacc\n"
