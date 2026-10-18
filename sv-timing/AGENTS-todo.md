@@ -3,6 +3,20 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A127 — id-less domains and the sweep
+
+- [x] `protocol` without `id=` (global kill); emitter / exports / assertions
+  omit the id.
+- [x] Sweep of the 56 files (`PIPELINE-PRAGMAS.md` §9): one carried stage,
+  seven bare InsertRegs in contract-less modules, refusals per file.
+- [ ] Contracts for the fetch-side streams (`instr_realign`, `instr_queue`,
+  `g6lc_loop_buffer`) with id-less domains; witnesses.
+- [ ] `require-contract` on the seven modules with bare InsertRegs until
+  their protocols are declared.
+- [ ] `stage-input` and read-retiming mechanisms for the state machines
+  (LSQ, store buffer, scoreboard, ROB, dispatch, caches, TLBs).
+- [ ] FLU decision for ALU / branch / CSR / AES in `ex_stage`.
+
 ## A126 — multiplier merge resolved
 
 - [x] `clmul_s1`/`clmulr_s1` module-level; contract carries them and

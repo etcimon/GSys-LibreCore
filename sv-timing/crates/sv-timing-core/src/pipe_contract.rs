@@ -73,7 +73,15 @@ impl PipeDomain {
         if self.kill.is_empty() {
             return "(1'b0)".to_string();
         }
+        if self.id.is_empty() || !self.kill.contains("$id") {
+            return format!("({})", self.kill);
+        }
         format!("({})", self.kill.replace("$id", id_expr))
+    }
+
+    /// Does the domain travel with a transaction id?
+    pub fn has_id(&self) -> bool {
+        !self.id.is_empty()
     }
 }
 
@@ -149,20 +157,28 @@ pub fn resolve(module: &TimingModule) -> Option<PipeContract> {
                         .push(format!("{at}: protocol without a domain name"));
                     continue;
                 };
-                let (Some(valid), Some(id)) = (arg(&p.args, "valid"), arg(&p.args, "id")) else {
+                let Some(valid) = arg(&p.args, "valid") else {
                     c.rejected
-                        .push(format!("{at}: protocol {name} needs valid= and id="));
+                        .push(format!("{at}: protocol {name} needs valid="));
                     continue;
                 };
+                // id-less domain (A127): a stream with a global kill (fetch
+                // realign, frontend queues) — `kill=` may not use `$id` then.
+                let id = arg(&p.args, "id").unwrap_or("");
                 let kill = arg(&p.args, "kill").unwrap_or("");
-                if !kill.is_empty() && !kill.contains("$id") {
-                    c.rejected
-                        .push(format!("{at}: protocol {name}: kill= must use $id"));
+                if id.is_empty() && kill.contains("$id") {
+                    c.rejected.push(format!(
+                        "{at}: protocol {name}: kill= uses $id but the domain has no id="
+                    ));
                     continue;
                 }
                 let flush = arg(&p.args, "flush").map(str::to_string);
                 let mut missing = Vec::new();
-                for s in [valid, id].into_iter().chain(flush.as_deref()) {
+                for s in [valid, id]
+                    .into_iter()
+                    .filter(|s| !s.is_empty())
+                    .chain(flush.as_deref())
+                {
                     if !name_declared(module, s) {
                         missing.push(s.to_string());
                     }
@@ -314,7 +330,7 @@ fn node_in_domain(module: &TimingModule, node: &IrNode, d: &PipeDomain) -> bool 
         });
     }
     let root = |s: &str| TimingModule::root_ident(s).unwrap_or(s).to_string();
-    reads.contains(&root(&d.valid)) || reads.contains(&root(&d.id))
+    reads.contains(&root(&d.valid)) || (d.has_id() && reads.contains(&root(&d.id)))
 }
 
 /// Permission for a cut at `node`. A node of a statement under a `cut-ok`
@@ -644,7 +660,11 @@ pub fn stage_for(
     let (valid_src, id_src, carry_src) = match prev {
         Some(p) => {
             let (v, i) = stage_nets(p);
-            (v, i, domain.carry.iter().map(|c| carry_net(p, c)).collect())
+            (
+                v,
+                if domain.has_id() { i } else { String::new() },
+                domain.carry.iter().map(|c| carry_net(p, c)).collect(),
+            )
         }
         None => (
             domain.valid.clone(),
@@ -698,7 +718,7 @@ pub fn stage_for(
                     format!("({v_net} & ~{})", domain.kill_for(&id_net)),
                 ));
             }
-            if reads.contains(&root(&domain.id)) {
+            if domain.has_id() && reads.contains(&root(&domain.id)) {
                 consumer_rewires.push((line, domain.id.clone(), id_net.clone()));
             }
             for c in &domain.carry {
@@ -879,15 +899,20 @@ mod tests {
         let m = analyze(
             "module p(input logic clk_i, input logic v_i, input logic [2:0] t_i, output logic y_o);
              // svt-pipe: protocol a valid=v_i id=t_i kill=nothing_i[$id]
-             // svt-pipe: protocol b valid=v_i id=t_i kill=v_i
+             // svt-pipe: protocol b valid=v_i kill=t_i[$id]
+             // svt-pipe: protocol c valid=v_i kill=v_i
              // svt-pipe: carry zz t_i
              // svt-pipe: require-contract
              assign y_o = v_i;
              endmodule",
         );
         let c = resolve(&m).unwrap();
-        assert!(c.domains.is_empty(), "{:?}", c.domains);
+        // `a`: unbound kill signal; `b`: $id without an id; `zz`: unknown domain
         assert_eq!(c.rejected.len(), 3, "{:?}", c.rejected);
+        // `c`: an id-less domain with a global kill (A127)
+        assert_eq!(c.domains.len(), 1, "{:?}", c.domains);
+        assert!(!c.domains[0].has_id());
+        assert_eq!(c.domains[0].kill_for("anything"), "(v_i)");
         assert!(c.require_contract);
         let y = m
             .nodes

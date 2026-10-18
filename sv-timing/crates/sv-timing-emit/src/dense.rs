@@ -681,9 +681,11 @@ fn dense_pipe_block(
             d.push_str(&format!(
                 "  logic {v}; // staged valid (killed at each stage and at use)\n"
             ));
-            match st.id_width {
-                Some(w) => d.push_str(&format!("  logic [{w}-1:0] {id}; // staged id\n")),
-                None => d.push_str(&format!("  var type({}) {id}; // staged id\n", st.id_src)),
+            if !st.id_src.is_empty() {
+                match st.id_width {
+                    Some(w) => d.push_str(&format!("  logic [{w}-1:0] {id}; // staged id\n")),
+                    None => d.push_str(&format!("  var type({}) {id}; // staged id\n", st.id_src)),
+                }
             }
             for (k, c) in st.carry_src.iter().enumerate() {
                 let net = carry_net_for(&name, k, st);
@@ -870,7 +872,9 @@ fn dense_pipe_block(
                 if let Some(st) = stage_by_name.get(name) {
                     let (v, id) = sv_timing_core::pipe_contract::stage_nets(name);
                     b.push_str(&format!("      {v} <= 1'b0;\n"));
-                    b.push_str(&format!("      {id} <= '0;\n"));
+                    if !st.id_src.is_empty() {
+                        b.push_str(&format!("      {id} <= '0;\n"));
+                    }
                     for k in 0..st.carry_src.len() {
                         b.push_str(&format!("      {} <= '0;\n", carry_net_for(name, k, st)));
                     }
@@ -904,7 +908,9 @@ fn dense_pipe_block(
                             st.valid_src, st.kill_expr
                         )),
                     }
-                    b.push_str(&format!("      {id} <= {};\n", st.id_src));
+                    if !st.id_src.is_empty() {
+                        b.push_str(&format!("      {id} <= {};\n", st.id_src));
+                    }
                     for (k, c) in st.carry_src.iter().enumerate() {
                         b.push_str(&format!("      {} <= {c};\n", carry_net_for(name, k, st)));
                     }
@@ -918,13 +924,22 @@ fn dense_pipe_block(
                 b.push_str("  //pragma translate_off\n");
                 for (name, st) in &stage_by_name {
                     let (v, id) = sv_timing_core::pipe_contract::stage_nets(name);
-                    let kill_now = st.kill_expr.replace(&st.id_src, &id);
+                    let kill_now = if st.id_src.is_empty() {
+                        st.kill_expr.clone()
+                    } else {
+                        st.kill_expr.replace(&st.id_src, &id)
+                    };
+                    let same_op = if st.id_src.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" && {id} == $past({id})")
+                    };
                     b.push_str(&format!(
                         "  always_ff @(posedge {}) if ({}) begin\n",
                         opts.clk, opts.rst_n
                     ));
                     b.push_str(&format!(
-                        "    svt_pipe_{name}_killed_stays_dead: assert (!($past({v}) && $past({kill_now}) && {v} && {id} == $past({id})))\n"
+                        "    svt_pipe_{name}_killed_stays_dead: assert (!($past({v}) && $past({kill_now}) && {v}{same_op}))\n"
                     ));
                     b.push_str(&format!(
                         "      else $error(\"svt-pipe `{}`: stage {} kept an operation killed last cycle\");\n",

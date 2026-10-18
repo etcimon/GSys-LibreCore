@@ -31,6 +31,13 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A127 update:** id-less domains (valid + global kill) join the
+vocabulary; a sweep of all 56 listed modules under `correct
+--allow-latency` yields one carried stage (the multiplier), seven bare
+registers in contract-less modules (review items), and refusals that name
+the next decisions per file. The remaining rungs are designer decisions
+(FLU redesign, input staging, read retiming), written as contracts.
+
 **A126 update:** the multiplier merge is resolved from both ends — the
 carry-less stage-1 nets lifted to module scope and carried by the
 contract, the bundle priced at real widths — and the emitted three-stage
@@ -8241,6 +8248,31 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A127 — Id-less domains and the sweep of the list
+
+**Mechanism.** A domain may omit `id=` when its kill is global
+(`kill=kill_i`, no `$id`): fetch-side streams travel with a valid and a
+kill but no transaction id. Stage nets, exports, consumer rewires and the
+fenced assertions omit the id accordingly.
+
+**The sweep.** All 56 modules of the list under one `correct
+--allow-latency` at -O3 (dial 11 at 48): **one carried stage** — the
+multiplier's; seven **bare** registers in modules that declare no
+contract (review items, not pipelines); the rest latency-neutral credits
+and refusals that name the next `cut-ok` / `no-cut` decisions
+(`PIPELINE-PRAGMAS.md` §9). The structural headline did not move (78.2
+FO4), and no adjusted reading changed: the sweep is the campaign's work
+order, stated per file, not its progress.
+
+**What the list needs, by class.** Operation pipelines with a local
+protocol (multiplier done; FPU wrappers, `serdiv` next) — declare, emit,
+witness, adopt with the latency parameter. Fixed-latency units through
+`ex_stage`'s one FLU port (ALU, branch, CSR, AES) — an FLU redesign with
+IPC on the table, recorded as `no-cut` until decided. State machines
+(most of the list) — input staging or read retiming, mechanisms the
+vocabulary reserves and this round did not build, each with a
+module-specific correctness argument.
 
 ## A126 — The merge resolved from both ends
 

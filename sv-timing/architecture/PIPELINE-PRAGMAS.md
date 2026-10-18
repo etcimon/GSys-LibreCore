@@ -393,3 +393,121 @@ Adoption is the emitted RTL *with* `MultStages = 3` in the configuration
 fixed two-cycle script and needs a three-cycle variant before that
 change. The mapped reading of the three-stage product comes from the full
 route, not from this step.
+
+## 9. The sweep (A127): every file of the list under `correct --allow-latency`
+
+One run over the 56 modules at -O3, dial 11 at 48, contracts as declared
+in rounds one and two. "Stage" is what the planner emitted: *carried* =
+under a contract with valid / id / kill / flush travelling; **bare** = a
+plain register in a module that declares no contract (exactly what a
+contract exists to forbid — these are review items, not pipelines).
+"Neutral" are the latency-neutral credits (BalanceMux / rebalance / loop
+rewrite) the run also recorded.
+
+| module | adj FO4 | contract | stage | neutral | verdicts |
+|---|---:|---|---|---|---|
+| `g6lc_lsq` | 176.0 | yes | none | balancemux 21 | insertreg_refused:cut_schedule=1, refuse=1 |
+| `g6lc_iq` | 142.8 | - | none | balancemux 38 | — |
+| `frontend` | 142.4 | yes | none | balancemux 3, rebalanceassoc 3 | refuse=4 |
+| `store_buffer` | 141.3 | - | none | balancemux 26 | — |
+| `multiplier` | 131.8 | yes | 1 carried | — | plan=1, refuse=5, rejected=5 |
+| `scoreboard` | 127.9 | yes | none | looprewrite 1 | refuse=1 |
+| `g6lc_rename` | 125.9 | - | none | — | — |
+| `instr_realign` | 119.0 | - | none | balancemux 1 | — |
+| `wt_dcache_wbuffer` | 105.6 | - | none | balancemux 1, rebalanceassoc 1 | — |
+| `g6lc_ooo_dispatch` | 97.9 | - | none | balancemux 2 | — |
+| `alu` | 96.4 | yes | none | balancemux 18 | refuse=1 |
+| `csr_regfile` | 87.0 | - | none | balancemux 1 | — |
+| `aes` | 83.7 | - | none | — | — |
+| `g6lc_rob` | 77.9 | - | none | balancemux 16 | — |
+| `branch_unit` | 77.4 | - | none | balancemux 3 | — |
+| `g6lc_loop_buffer` | 71.6 | - | 4 **bare** | balancemux 8 | — |
+| `perf_counters` | 70.8 | - | none | — | — |
+| `g6lc_bp_ckpt` | 68.0 | - | none | balancemux 14, rebalanceassoc 1 | — |
+| `issue_read_operands` | 65.9 | - | none | balancemux 1 | — |
+| `g6lc_prf` | 65.2 | - | none | — | — |
+| `serdiv` | 63.3 | - | none | — | — |
+| `instr_queue` | 62.7 | - | none | balancemux 1 | insertreg_refused:compound_source_rewrite_unsupported=1 |
+| `g6lc_bp_statcor` | 60.9 | - | 2 **bare** | balancemux 5 | — |
+| `wt_dcache_missunit` | 60.0 | - | none | balancemux 1 | insertreg_refused:compound_source_rewrite_unsupported=1 |
+| `load_unit` | 59.3 | - | none | — | — |
+| `store_unit` | 58.0 | - | 1 **bare** | balancemux 1 | — |
+| `g6lc_bp_loop` | 54.5 | - | 1 **bare** | balancemux 11 | — |
+| `ariane_regfile` | 54.3 | - | none | — | — |
+| `cva6_fifo_v3` | 54.3 | - | none | — | — |
+| `g6lc_icache` | 52.5 | - | none | balancemux 14 | — |
+| `cva6` | 48.2 | - | 1 **bare** | balancemux 1 | — |
+| `g6lc_memdep` | 47.9 | - | none | balancemux 5 | — |
+| `fpu_wrap` | 47.3 | - | none | — | — |
+| `wt_dcache_mem` | 47.2 | - | none | balancemux 2 | insertreg_refused:cut_schedule=1 |
+| `cva6_mmu` | 45.7 | - | none | balancemux 5 | — |
+| `ex_stage` | 42.8 | - | none | balancemux 2 | — |
+| `cva6_tlb` | 41.8 | - | none | balancemux 14 | — |
+| `cva6_ptw` | 41.6 | - | none | — | — |
+| `ras` | 39.1 | - | none | — | — |
+| `g6lc_bp_ittage` | 32.9 | - | none | — | — |
+| `lsu_bypass` | 32.3 | - | none | — | — |
+| `csr_buffer` | 30.6 | - | none | — | — |
+| `wt_axi_adapter` | 29.8 | - | none | — | — |
+| `g6lc_bp_tage` | 29.2 | - | none | — | — |
+| `commit_stage` | 26.7 | - | none | balancemux 13 | — |
+| `mult` | 25.6 | - | none | balancemux 3 | — |
+| `exp_backoff` | 23.6 | - | 1 **bare** | — | — |
+| `g6lc_way_predictor` | 23.2 | - | none | — | — |
+| `g6lc_ftq` | 19.8 | - | none | — | — |
+| `rr_arb_tree` | 19.0 | - | none | — | — |
+| `cva6_shared_tlb` | 14.7 | - | 1 **bare** | — | — |
+| `g6lc_bp_ghist` | 14.5 | - | none | — | — |
+| `axi_shim` | 13.7 | - | none | — | — |
+| `id_stage` | 10.9 | - | none | balancemux 5 | — |
+| `fpnew_top` | 10.8 | - | none | — | — |
+| `g6lc_fdip` | 10.1 | - | none | rebalanceassoc 1 | — |
+
+### 9.1 Reading
+
+- **One carried stage in the whole list**: the multiplier (A126). Every
+  other module either declares `no-cut` where its cone is (the state
+  machines and loops of round one), or declares nothing and gets at most
+  a bare register the planner cannot justify — seven of them, all in
+  modules whose protocol nobody has declared (`g6lc_loop_buffer` 4,
+  `g6lc_bp_statcor` 2, `store_unit`, `g6lc_bp_loop`, `cva6`,
+  `exp_backoff`, `cva6_shared_tlb`). They stay review-only.
+- **The refusals name the next contracts**: block-locals of `always`
+  bodies and generate branches (`sdist` in the LSQ's STL scan, `rid` in
+  the ROB, `less`/`sgn` in the ALU, `instret_d` in the CSR file,
+  `fixup_active_dead` in the write buffer) — each a `cut-ok` decision or
+  a `no-cut` with its reason, by the designer.
+- **The structural report moved nowhere** (78.2 FO4 before and after):
+  the one carried stage sits in a module whose structural worst is the
+  atomic product, and the design's worst is elsewhere. The adjusted
+  reading of the three-stage multiplier itself is owed to the full route.
+
+### 9.2 What "pipelines throughout the list" is, after this sweep
+
+Not a tool pass. Each file's rung is one of three decisions, and the
+contract is how the decision is written down where the tool can enforce
+it:
+
+1. **An operation pipeline with a local protocol** (multiplier): declare,
+   emit, witness, adopt with the latency parameter. Done once; repeatable
+   where such a protocol exists — the FPU wrappers and `serdiv` are the
+   candidates with their own valid / id.
+2. **A fixed-latency unit whose latency is architectural** (ALU, branch,
+   CSR, AES through `ex_stage`'s single FLU writeback port): a stage adds
+   a structural hazard on that port and a cycle to branch resolution; the
+   decision is an FLU redesign (own writeback port, speculative
+   bypass), with IPC on the table. The contract records `no-cut` until
+   it is taken.
+3. **A state machine** (LSQ, IQ, store buffer, scoreboard, rename, ROB,
+   dispatch, caches, TLBs — most of the list): the cone is a many-writer
+   next-state function. Its rungs are *input staging* with the
+   acceptance outputs counting the staged request, or *read retiming*
+   (a scan computed from `_q` instead of `_d`, one cycle stale, declared
+   acceptable) — mechanisms the vocabulary reserves (`stage-input`) and
+   this round did not build, each with a module-specific correctness
+   argument the designer must make.
+
+Id-less domains (`protocol … valid= kill=<global>`, no `id=`) are in the
+vocabulary as of this round for the fetch-side streams (realign, queues),
+whose stages are rung 1 with a global kill; their contracts are the next
+declarations to write.
