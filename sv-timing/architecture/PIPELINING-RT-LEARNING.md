@@ -231,6 +231,24 @@ than the derived-view cost; measure that split first. The next rung for this
 module is a stage *inside* the permutation (insert, then compact), which the
 uniform-shift witness can also judge.
 
+## 4b. Two measurement lessons from A140
+
+**The isolate form matters more than the search form.** The A136 ROB and the
+A140 scoreboard use the same absolute-order search, but the scoreboard's
+first version isolated the lowest set bit as `x & (~x + 1)`, which the live
+board's mapping recipe kept as a carry chain (+31% on the module). The ROB's
+explicit log-depth prefix OR (`below = x << 1; below |= below << l …`) is the
+form that measures: write the depth you mean, do not rely on the mapper to
+restructure arithmetic.
+
+**Know which measurement is deterministic.** The whole-core module board is
+content-cached per module; unchanged modules repeat bit-for-bit, but any
+module that is re-mapped can move by up to a quarter of its value with no
+source change (A140 observed −26% … +14% on untouched modules). The isolated
+paired flow reproduces its baselines across sessions. Acceptance therefore
+rests on the pair; the board is the whole-core guard, and a board delta
+inside the re-map band is not evidence either way.
+
 ## 5. Implemented preprocessor: source intent to initial IR
 
 Example:

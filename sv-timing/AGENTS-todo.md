@@ -12,9 +12,14 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
   adder compare at 64/32 bits, both LSB modes); read on the board.
 - [x] Scoreboard head scan in absolute slot order (SAT-equivalent at five
   geometries incl. 64×4); read on the board, no isolated pair.
-- [ ] Re-read the whole-core board with the four changes (loop buffer must
-  improve there, A136 lesson); then step 1 continues with `instr_queue`
-  prefix ranks, `perf_counters` carry summaries, `g6lc_bp_ghist` balanced folds.
+- [x] Whole-core board read (×3). D$ −36%, loop predictor −7%, loop buffer
+  and scoreboard inside the re-map noise band (isolated pairs decide: both
+  improve); branch-unit check neutral → reverted to a trial patch. Board
+  per-module noise on re-map documented (±26% on unchanged modules).
+- [ ] Re-measure the A136 loop-buffer registered-expectation candidate with
+  an isolated pair (its board rejection predates the noise finding).
+- [ ] Step 1 continues: `instr_queue` prefix ranks, `g6lc_bp_tage` balanced
+  provider select, `ras` top cache; then step 2 (ownership/credits).
 
 ## A138 — store buffer input stage (rejected on timing)
 

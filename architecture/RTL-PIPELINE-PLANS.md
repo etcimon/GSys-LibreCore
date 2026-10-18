@@ -293,8 +293,8 @@ snapshot replay can outweigh a shorter local cone.
 |---|---|---|---|
 | A140 | `cache_subsystem/wt_dcache_mem.sv` | `reshape` ordered per-byte merge | balanced first-valid tree; SAT-equivalent; placed 3.154 → 2.333 ns, area +31.0% (AND-OR alternative recorded) |
 | A140 | `frontend/g6lc_bp_loop.sv` | `reshape` row-local training | equivalence + model; placed 1.911 → 1.459 ns, area -12.3% |
-| A140 | `branch_unit.sv` | `split` target add vs resolve compare | carry-free sum-equals test for the mispredict decision; SAT-equal; board reading pending |
-| A140 | `scoreboard.sv` | `reshape`/`split` head-scan (absolute-order search) | SAT-equivalent at 5 geometries; whole-core board reading pending |
+| A140 | `branch_unit.sv` | `split` target add vs resolve compare | carry-free sum-equals test SAT-proven but board-neutral (worst path is the redirect adder); reverted, kept as a trial patch for the frontend late-correction design |
+| A140 | `scoreboard.sv` | `reshape`/`split` head-scan (absolute-order search, prefix-OR isolate) | SAT-equivalent at 5 geometries; isolated pair −71% unbuffered / −3.9% placed; board inside noise |
 | A140 | `frontend/g6lc_loop_buffer.sv` | `reshape` bounded low add + prepared high alternative | sbs + miter; placed 1.824 → 1.507 ns, area +5.3% |
 
 Evidence and the whole-core reading live in

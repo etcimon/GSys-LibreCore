@@ -623,7 +623,7 @@ foreach kind {in_reg reg_reg reg_out in_out} {
     if (src / "review.json").exists():
         review = json.loads((src / "review.json").read_text())
         if review["profile"] == "sbhead" and not os.environ.get("CONTROL_MODE"):
-            review_sbhead(src, out, evidence, yosys)
+            review_sbhead(src, out, sta, lib, abc, evidence, yosys, run)
             (out / "result.json").write_text(json.dumps(evidence, indent=2))
             return
         if review["profile"] == "step1" and not os.environ.get("CONTROL_MODE"):
@@ -1029,7 +1029,7 @@ def pair_module(src, out, sta, lib, abc, evidence, yosys, run, key, top, flists,
         (out / "result.json").write_text(json.dumps(evidence, indent=2))
 
 
-def review_sbhead(src, out, evidence, yosys):
+def review_sbhead(src, out, sta, lib, abc, evidence, yosys, run):
     """A140: the scoreboard's per-hart head scan in absolute slot order vs the
     previous rotated form, extracted by text into standalone modules and
     proven combinationally equivalent (slot, validity, PC) by SAT."""
@@ -1037,8 +1037,11 @@ def review_sbhead(src, out, evidence, yosys):
     base = (src / "baseline/core/scoreboard.sv").read_text()
 
     def block(text):
-        a = text.index("  always_comb begin : sb_head_scan\n")
-        b = text.index("\n  end\n", a) + len("\n  end\n")
+        # the live form carries its prefix-OR helper; take it along
+        marker = "  function automatic logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_lowest_set("
+        a = text.index(marker) if marker in text else text.index("  always_comb begin : sb_head_scan\n")
+        s0 = text.index("  always_comb begin : sb_head_scan\n")
+        b = text.index("\n  end\n", s0) + len("\n  end\n")
         return text[a:b]
     subs = [("CVA6Cfg.NR_SB_ENTRIES", "N"), ("CVA6Cfg.TRANS_ID_BITS", "TW"), ("CVA6Cfg.VLEN", "64"),
             ("SB_NH", "NH")]
@@ -1062,7 +1065,10 @@ def review_sbhead(src, out, evidence, yosys):
     (out / "sbhead.sv").write_text(pkg + "module sbhead_old " + header + old_block + footer +
                                    "module sbhead_new " + header + new_block + footer)
     evidence["sources"]["sbhead.sv"] = hashlib.sha256((out / "sbhead.sv").read_bytes()).hexdigest()
-    for n, tw, nh in ((32, 5, 2), (16, 4, 1), (8, 3, 2), (64, 6, 4), (32, 5, 1)):
+    geoms = ((32, 5, 2), (16, 4, 1), (8, 3, 2), (32, 5, 1), (64, 6, 4))
+    if os.environ.get("SBHEAD_FAST"):
+        geoms = ((32, 5, 2),)
+    for n, tw, nh in geoms:
         key = f"sbhead-eq-{n}-{tw}-{nh}"
         text = yosys(key,
                      f"read_slang {out}/sbhead.sv --top sbhead_old --top sbhead_new "
@@ -1071,6 +1077,32 @@ def review_sbhead(src, out, evidence, yosys):
                      "hierarchy -top m\nsat -verify -prove-asserts m\n", timeout=1800)
         assert "SUCCESS!" in text, text[-1500:]
         evidence["proofs"][key] = "combinational equivalence of the head scan (slot, valid, pc) PASS"
+    # isolated paired timing of exactly the changed cone (32 entries, 2 harts)
+    flists = {}
+    # registered boundary so the study measures the cone reg -> reg
+    timing_top = """
+module sbhead_timing import sbhead_pkg::*; #(parameter int unsigned N = 32, parameter int unsigned TW = 5,
+                                             parameter int unsigned NH = 2) (
+  input logic clk_i, input logic rst_ni,
+  input sb_entry_t [N-1:0] mem_i, input logic [TW-1:0] cp_i,
+  output logic [NH-1:0] valid_o, output logic [NH-1:0][63:0] pc_o, output logic [NH-1:0][TW-1:0] slot_o);
+  sb_entry_t [N-1:0] mem_q; logic [0:0][TW-1:0] cp_q;
+  logic [NH-1:0] v, hv; logic [NH-1:0][63:0] pc; logic [NH-1:0][TW-1:0] sl;
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin mem_q <= '0; cp_q <= '0; valid_o <= '0; pc_o <= '0; slot_o <= '0; end
+    else begin mem_q <= mem_i; cp_q[0] <= cp_i; valid_o <= v; pc_o <= pc; slot_o <= sl; end
+  end
+  sbhead_core #(.N(N), .TW(TW), .NH(NH)) u (.mem_q(mem_q), .commit_pointer_q(cp_q), .sb_head_valid_o(v),
+                                           .sb_head_pc_o(pc), .head_slot_o(sl), .head_valid(hv));
+endmodule
+"""
+    for variant, blk in (("baseline", old_block), ("candidate", new_block)):
+        path = out / f"sbhead-{variant}.sv"
+        path.write_text(pkg + "module sbhead_core " + header + blk + footer + timing_top)
+        flist = out / f"sbhead-{variant}.f"
+        flist.write_text(str(path) + "\n")
+        flists[variant] = flist
+    pair_module(src, out, sta, lib, abc, evidence, yosys, run, "sbhead", "sbhead_timing", flists)
     # ---- branch_unit: the carry-free sum_eq against the adder compare, the
     # function text taken from the live source, both LSB modes.
     bu = (src / "core/branch_unit.sv").read_text()

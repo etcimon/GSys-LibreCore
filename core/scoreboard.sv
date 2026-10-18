@@ -298,6 +298,16 @@ module scoreboard #(
   // pointer add; the slot is encoded directly. hdist below still subtracts
   // the pointer, as it did. The serial reference under translate_off is the
   // equivalence witness in every simulation.
+  // Lowest set bit as a log-depth prefix OR (the A136 ROB form): a bit is
+  // the lowest set bit iff it is set and no lower bit is. `x & (~x + 1)`
+  // mapped as a carry chain on the live board (+31% on this module).
+  function automatic logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_lowest_set(input logic [CVA6Cfg.NR_SB_ENTRIES-1:0] x);
+    logic [CVA6Cfg.NR_SB_ENTRIES-1:0] below;
+    below = x << 1;
+    for (int unsigned l = 1; l < CVA6Cfg.NR_SB_ENTRIES; l = l << 1) below = below | (below << l);
+    return x & ~below;
+  endfunction
+
   always_comb begin : sb_head_scan
     for (int unsigned h = 0; h < SB_NH; h++) begin
       automatic logic [CVA6Cfg.NR_SB_ENTRIES-1:0] cand, ge, hi_c, lo_c, first_hi, first_lo, first;
@@ -309,8 +319,8 @@ module scoreboard #(
       end
       hi_c     = cand & ge;
       lo_c     = cand & ~ge;
-      first_hi = hi_c & (~hi_c + 1'b1);
-      first_lo = lo_c & (~lo_c + 1'b1);
+      first_hi = sb_lowest_set(hi_c);
+      first_lo = sb_lowest_set(lo_c);
       first    = (|hi_c) ? first_hi : first_lo;
       slot     = '0;
       for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++)

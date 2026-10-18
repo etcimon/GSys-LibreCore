@@ -232,6 +232,60 @@ each proven against the previous revision and measured in one paired run
   SAT-proven against the adder compare at 64 and 32 bits, both LSB modes;
   a translate_off witness compares both forms every cycle.
 
+**Whole-core board readings (streamed recipe, Nangate45, `timings sta-rtl
+--remote --fo4 0 --platform nangate45 --map-recipe streamed`; the route now
+takes ~6 minutes):**
+
+| Module | A137 board | first A140 board | after the scoreboard prefix-OR fix |
+|---|---:|---:|---:|
+| `wt_dcache_mem` | 2.068 ns / 96.6 | **1.315 ns / 61.5** | 1.315 ns / 61.5 |
+| `g6lc_bp_loop` | 1.202 ns / 56.2 | 1.123 ns / 52.5 | 1.123 ns / 52.5 |
+| `g6lc_loop_buffer` | 1.548 ns / 72.3 | 1.618 ns / 75.6 | 1.618 ns / 75.6 |
+| `scoreboard` | 2.006 ns / 93.7 | 2.623 ns / 122.6 (`x & (~x+1)` isolate) | 2.165 ns / 101.2 (prefix-OR isolate) |
+| `branch_unit` | 1.448 ns / 67.7 | 1.461 ns / 68.3 | 1.461 ns / 68.3 |
+| whole core | 216 MHz budget-equivalent | 215 MHz | 215 MHz |
+
+**Measurement finding — the module board is noisy for re-mapped modules.**
+Between the A137 board and the first A140 board, four modules whose source
+did not change moved: `issue_read_operands` 1.943 → 1.430 ns (−26%),
+`cva6_tlb` 1.478 → 1.152 (−22%), `g6lc_rename` 2.693 → 2.954 (+9.7%),
+`multiplier` +2%; the other 47 unchanged modules were bit-identical (cache
+hits). Between the two A140 boards (only `scoreboard.sv` changed)
+`store_buffer` moved +6.4%, `g6lc_lsq` +13.7%, `multiplier` +2.8%,
+`cva6_tlb` −2.2%. A same-source repeat of a board is bit-identical because
+every module hits the content cache — so a repeat does not measure this
+noise; a re-map does. The isolated paired flow, by contrast, reproduced its
+baselines exactly across sessions (loop buffer 1.824 ns in A136 and twice
+today; D$ forwarding 3.154 twice; loop predictor 1.911 twice). Consequence
+for acceptance: a board delta inside the observed re-map band (here up to
+±26% on an unchanged module) is not a verdict; the deterministic isolated
+pair decides, and the board guards against gross whole-core regressions.
+The A136 loop-buffer rejection (isolated −18%, board +31%) was taken under
+the assumption that the board was deterministic; it should be re-measured
+with a pair before that candidate is considered closed.
+
+**Retention decisions.**
+
+* `wt_dcache_mem` tree — retained: −26% isolated placed, −36% on the board.
+* `g6lc_bp_loop` row-local — retained: −24% isolated placed, −7% board.
+* `g6lc_loop_buffer` bounded add — retained: −17% isolated placed (both
+  isolated views improve); the board's +4.5% is inside the re-map band.
+* `scoreboard` head scan — retained in the **prefix-OR** form: the first
+  form used `x & (~x + 1)` for the lowest-set isolate and the board mapped it
+  as a carry chain (2.006 → 2.623 ns, +31%); with the A136 ROB's log-depth
+  prefix OR (`sb_lowest_set`) the board reads 2.165 ns / 101.2 and the
+  isolated pair of exactly the changed cone (registered in/out, 32 entries ×
+  2 harts, `fo4-a140-sbhead5`) reads unbuffered 2.233 → 0.643 ns
+  and placed 2.655 → 2.552 ns at area 21300 → 20595 µm².
+  Equivalence re-proven for the prefix form at the five geometries.
+* `branch_unit` carry-free target check — **not retained**: SAT-equal and
+  sound, but the module's worst path is the redirect address through the
+  adder, so the board is neutral (+0.9%) and there is no isolated pair; the
+  RTL is reverted and the change kept as
+  `trials/a140-branch-unit-carry-free-target-check.patch` for the frontend's
+  late-correction design, where a target compare without the adder's carry
+  chain is the point.
+
 Proof record: `dmem-fwd-eq-16-8-8`, `dmem-fwd-eq-8-8-4`, `dmem-fwd-eq-4-4-1`, `dmem-fwd-eq-2-8-8`, `dmem-fwd-eq-1-8-8`, `loop-eq-16-4-1`, `loop-eq-8-1-0`, `loop-eq-32-2-1`, `loop-model-candidate-1`, `loop-model-candidate-17`, `loop-negative`, `lbuf-sbs-8x64-1`, `lbuf-sbs-8x64-17`, `lbuf-sbs-4x32-1`, `lbuf-sbs-4x32-17`, `lbuf-sbs-6x128-1`, `lbuf-sbs-6x128-17`, `lbuf-miter-6`. Whole-core board after
 landing: re-measured below when the route completes (the A136 loop-buffer
 candidate improved in isolation and lost on the board; this one must be read

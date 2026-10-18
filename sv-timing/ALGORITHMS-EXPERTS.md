@@ -31,6 +31,13 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A140 board/noise note:** the per-module board is deterministic only for
+cache hits; re-mapped modules moved up to ±26% with no source change, so
+acceptance rests on the isolated pair (reproducible across sessions). The
+scoreboard head scan needed the explicit prefix-OR isolate (as the ROB) — the
+`x & (~x+1)` form mapped as a carry chain. Branch-unit carry-free target check
+proven but board-neutral → trial patch only.
+
 **A140 update:** step 1 of the A139 plans landed: D$ per-byte forwarding as a
 balanced first-valid tree (placed 3.154 → 2.333 ns,
 area +31.0% of the module's logic; the

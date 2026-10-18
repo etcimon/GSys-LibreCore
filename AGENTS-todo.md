@@ -27,7 +27,10 @@ Design record: [`architecture/RTL-PIPELINE-PLANS.md`](architecture/RTL-PIPELINE-
   D$ per-byte forwarding tree, loop-predictor row-local training, loop-buffer
   bounded address add — each equivalence-proven and measured in paired
   placement (`sv-timing/architecture/PIPELINE-PRAGMA-REVIEW.md` A140).
-- [ ] Re-read the whole-core board; continue step 1, then promote step-2
+- [x] Whole-core board read three times; scoreboard head scan landed in the
+  prefix-OR form; branch-unit check reverted to a trial patch; per-module
+  board noise on re-map documented (acceptance rests on the isolated pair).
+- [ ] Continue step 1, then promote step-2
   proposals (ownership/credits) with their consumer protocols. The remaining
   annotations do not implement stages or establish FO4 closure.
 
