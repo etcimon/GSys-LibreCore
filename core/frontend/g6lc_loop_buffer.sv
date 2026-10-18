@@ -51,11 +51,29 @@ module g6lc_loop_buffer
     output logic                    consume_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_loop_buffer status=proposal target=10-adjusted-FO4
+  // svt-plan: cone expect_pc/expect_fill reconstruct base+cursor before
+  // address equality; the cursor is bounded although base has full VLEN width.
+  // svt-plan: reshape choose a low slice covering the configured maximum
+  // cursor offset; precompute base upper and upper+1 at arm, then select by
+  // the low addition's carry. Preserve full-width wrap and crossing behavior.
+  // svt-plan: boundary optional prepare arm bounds/base alternatives ->
+  // capture/replay; make capturing/armed visible only with prepared metadata.
+  // svt-plan: carry base/end, body length, fill/replay cursor and flush state;
+  // simultaneous arm/fill/consume must retain the current priority semantics.
+  // svt-plan: effect replaces a full-VLEN recurring add with bounded low
+  // arithmetic plus upper compare/select; precompute both cursor cases.
+  // svt-plan: cost upper alternatives and potentially an arm cycle; replay
+  // remains one block/cycle only when hit/data/consume remain aligned.
+  // svt-plan: limit the high select/equality can still dominate; restricting
+  // loops to one page is an optional policy loss, not an equivalent rewrite.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 71.6 adjusted FO4 on the
   // Nangate45 board): loop buffer: fill / replay state machine on the fetch stream (id-less domain); expect_fill is its control.
   // svt-pipe: require-contract
   // svt-pipe: protocol lb valid=cf_valid_i flush=flush_i
-  // svt-pipe: no-cut on=expect_fill
+  // svt-pipe: no-cut on=fill_low_sum
 
   localparam int unsigned IDX_W = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);
   localparam int unsigned ALIGN = CVA6Cfg.FETCH_ALIGN_BITS;
@@ -81,13 +99,27 @@ module g6lc_loop_buffer
   // ---- Sequential address reconstruction (shared shift) ----
   // expect_pc  = base + replay<<ALIGN   (lookup hit)
   // expect_fill = base + fill_ptr<<ALIGN (capture accept)
-  logic [CVA6Cfg.VLEN-1:0] expect_pc, expect_fill;
-  assign expect_pc   = base_q + (CVA6Cfg.VLEN'(replay_q)   << ALIGN);
-  assign expect_fill = base_q + (CVA6Cfg.VLEN'(fill_ptr_q) << ALIGN);
+  // A140: the cursor offset is below 2**LOW_W bytes, so base + offset only
+  // carries into base[VLEN-1:LOW_W] as +0 or +1. The +1 alternative is
+  // registered at arm (base_hi_p1_q); both high compares run in parallel with
+  // the LOW_W-bit add and the add's carry picks one. Exactly
+  // base + (cursor << ALIGN) modulo 2**VLEN, including the wrap, with no
+  // VLEN-wide add or incrementer in front of the equality.
+  localparam int unsigned LOW_W = (IDX_W + ALIGN >= CVA6Cfg.VLEN) ? CVA6Cfg.VLEN - 1 : IDX_W + ALIGN;
+  localparam int unsigned HI_W  = CVA6Cfg.VLEN - LOW_W;
+  logic [HI_W-1:0] base_hi_p1_q, base_hi_p1_d;
+  logic [LOW_W:0]  pc_low_sum, fill_low_sum;
+  assign pc_low_sum   = {1'b0, base_q[LOW_W-1:0]} + ((LOW_W + 1)'(replay_q)   << ALIGN);
+  assign fill_low_sum = {1'b0, base_q[LOW_W-1:0]} + ((LOW_W + 1)'(fill_ptr_q) << ALIGN);
+  function automatic logic addr_eq(input logic [CVA6Cfg.VLEN-1:0] a, input logic [LOW_W:0] low_sum);
+    return (a[LOW_W-1:0] == low_sum[LOW_W-1:0]) &&
+           (low_sum[LOW_W] ? (a[CVA6Cfg.VLEN-1:LOW_W] == base_hi_p1_q)
+                           : (a[CVA6Cfg.VLEN-1:LOW_W] == base_q[CVA6Cfg.VLEN-1:LOW_W]));
+  endfunction
 
   // Single-comparator hit: armed and lookup matches sequential cursor
   logic seq_hit;
-  assign seq_hit = enable_i && armed_q && (lookup_vaddr_i == expect_pc) &&
+  assign seq_hit = enable_i && armed_q && addr_eq(lookup_vaddr_i, pc_low_sum) &&
                    ({1'b0, replay_q} < body_len_q);
 
   assign hit_o     = seq_hit;
@@ -97,7 +129,7 @@ module g6lc_loop_buffer
 
   // Sequential fill accept (one EQ, no range cone)
   logic fill_accept;
-  assign fill_accept = capturing_q && fill_valid_i && (fill_vaddr_i == expect_fill) &&
+  assign fill_accept = capturing_q && fill_valid_i && addr_eq(fill_vaddr_i, fill_low_sum) &&
                        (body_len_q < NR_EXT);
 
   always_comb begin
@@ -108,6 +140,7 @@ module g6lc_loop_buffer
     capturing_d  = capturing_q;
     armed_d      = armed_q;
     base_d       = base_q;
+    base_hi_p1_d = base_hi_p1_q;
     end_d        = end_q;
 
     if (flush_i) begin
@@ -125,6 +158,7 @@ module g6lc_loop_buffer
         body_len_d  = '0;
         replay_d    = '0;
         base_d      = cf_target_i;
+        base_hi_p1_d = cf_target_i[CVA6Cfg.VLEN-1:LOW_W] + HI_W'(1);
         end_d       = cf_pc_i;
       end
 
@@ -167,6 +201,7 @@ module g6lc_loop_buffer
       capturing_q <= 1'b0;
       armed_q     <= 1'b0;
       base_q      <= '0;
+      base_hi_p1_q <= HI_W'(1);
       end_q       <= '0;
     end else begin
       data_q      <= data_d;
@@ -176,8 +211,26 @@ module g6lc_loop_buffer
       capturing_q <= capturing_d;
       armed_q     <= armed_d;
       base_q      <= base_d;
+      base_hi_p1_q <= base_hi_p1_d;
       end_q       <= end_d;
     end
   end
+
+  //pragma translate_off
+  // A140 invariants: the registered high alternative is exactly base's high
+  // slice plus one, and the split compare equals the VLEN-wide reference
+  // (base + (cursor << ALIGN)) for both cursors.
+  logic [CVA6Cfg.VLEN-1:0] expect_pc, expect_fill;
+  assign expect_pc   = base_q + (CVA6Cfg.VLEN'(replay_q)   << ALIGN);
+  assign expect_fill = base_q + (CVA6Cfg.VLEN'(fill_ptr_q) << ALIGN);
+  always_ff @(posedge clk_i) if (rst_ni) begin
+    assert (base_hi_p1_q == base_q[CVA6Cfg.VLEN-1:LOW_W] + HI_W'(1))
+    else $error("g6lc_loop_buffer: base_hi_p1_q lost the base invariant");
+    assert (addr_eq(lookup_vaddr_i, pc_low_sum) == (lookup_vaddr_i == expect_pc))
+    else $error("g6lc_loop_buffer: split lookup compare differs from the reference");
+    assert (addr_eq(fill_vaddr_i, fill_low_sum) == (fill_vaddr_i == expect_fill))
+    else $error("g6lc_loop_buffer: split fill compare differs from the reference");
+  end
+  //pragma translate_on
 
 endmodule

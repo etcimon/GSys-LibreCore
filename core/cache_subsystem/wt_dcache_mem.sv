@@ -89,6 +89,26 @@ module wt_dcache_mem
     output logic wbuffer_fwd_hit_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin wt_dcache_mem status=proposal target=10-adjusted-FO4
+  // svt-plan: cone production forwarding is per-byte first-match across
+  // wbuffer_all; the single wbuffer_hit_idx read is only a mutation branch.
+  // svt-plan: reshape for each byte form ordered {valid,data,user} leaves;
+  // merge with associative left-valid priority, preserving lower-index wins.
+  // svt-plan: boundary local byte winners/cache word -> final overlay;
+  // latch payloads with masks, not a hit vector pointing at mutable entries.
+  // svt-plan: carry request identity, PA, hit/miss/exception, byte winners,
+  // cache/refill data and user bits, wr_cl_vld_i source class and coherence epoch.
+  // svt-plan: conflict define snapshot visibility at accepted load lookup;
+  // invalidate/replay an invalidated response and serialize older stores
+  // that have not yet appeared in the forwarding snapshot.
+  // svt-plan: effect serial O(WbufferAllDepth) byte selection becomes
+  // O(log WbufferAllDepth) merge levels, optionally split across a register.
+  // svt-plan: cost payload snapshot registers and +1 response cycle if cut;
+  // delay wbuffer_fwd_hit_o, miss decision and load completion consistently.
+  // svt-plan: limit rd_tag is not guaranteed in the request cycle; a free
+  // earlier tag CAM or one new-entry bypass cannot cover all concurrent writers.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 47.2 adjusted FO4 on the
   // Nangate45 board): D$ data path: bank select and forward merge.
   // svt-pipe: require-contract
@@ -367,25 +387,51 @@ module wt_dcache_mem
   assign wbuffer_ruser = wbuffer_all[wbuffer_hit_idx].user;
   assign wbuffer_be    = (|wbuffer_hit_oh) ? wbuffer_all[wbuffer_hit_idx].valid : '0;
 `else
-  // per byte lane: the lowest-index matching entry that holds the byte
-  logic [(CVA6Cfg.XLEN/8)-1:0][$clog2(WbufferAllDepth+1)-1:0] wbuffer_sel;
-  always_comb begin
-    wbuffer_rdata = '0;
-    wbuffer_ruser = '0;
-    wbuffer_be    = '0;
-    wbuffer_sel   = '0;
-    for (int unsigned k = 0; k < CVA6Cfg.XLEN / 8; k++) begin
-      for (int unsigned e = 0; e < WbufferAllDepth; e++) begin
-        if (!wbuffer_be[k] && wbuffer_hit_oh[e] && wbuffer_all[e].valid[k]) begin
-          wbuffer_be[k]         = 1'b1;
-          wbuffer_sel[k]        = e[$clog2(WbufferAllDepth+1)-1:0];
-          wbuffer_rdata[8*k+:8] = wbuffer_all[e].data[8*k+:8];
+  // per byte lane: the lowest-index matching entry that holds the byte.
+  // A140: the serial "first hit wins" scan over WbufferAllDepth entries is a
+  // balanced tree of the same associative merge (left operand wins when
+  // valid), so the depth is log2(WbufferAllDepth) select levels instead of
+  // one priority chain per lane. Data and user travel in the leaf tuple, so
+  // the user byte follows the same winning entry as the data byte. Measured
+  // (A140, paired placement): worst arrival -26% for +31% of this module's
+  // logic area; the prefix-one-hot AND-OR form measured -7% at -4.5% area and
+  // is the area-neutral alternative recorded in the review.
+  typedef struct packed {
+    logic       v;
+    logic [7:0] d;
+    logic [7:0] u;
+  } fwd_leaf_t;
+  localparam int unsigned FWD_LVL = (WbufferAllDepth <= 1) ? 0 : $clog2(WbufferAllDepth);
+  localparam int unsigned FWD_USER_BYTES = (CVA6Cfg.DCACHE_USER_WIDTH / 8 < CVA6Cfg.XLEN / 8) ?
+      CVA6Cfg.DCACHE_USER_WIDTH / 8 : CVA6Cfg.XLEN / 8;
+  for (genvar k = 0; k < CVA6Cfg.XLEN / 8; k++) begin : gen_fwd_lane
+    fwd_leaf_t [WbufferAllDepth-1:0] node [0:FWD_LVL];
+    for (genvar e = 0; e < WbufferAllDepth; e++) begin : gen_leaf
+      assign node[0][e].v = wbuffer_hit_oh[e] & wbuffer_all[e].valid[k];
+      assign node[0][e].d = wbuffer_all[e].data[8*k+:8];
+      if (k < FWD_USER_BYTES) begin : gen_user_leaf
+        assign node[0][e].u = wbuffer_all[e].user[8*k+:8];
+      end else begin : gen_no_user_leaf
+        assign node[0][e].u = '0;
+      end
+    end
+    for (genvar l = 1; l <= FWD_LVL; l++) begin : gen_level
+      for (genvar n = 0; n < WbufferAllDepth; n++) begin : gen_node
+        if (n < (WbufferAllDepth >> l)) begin : gen_merge
+          assign node[l][n] = node[l-1][2*n].v ? node[l-1][2*n] : node[l-1][2*n+1];
+        end else begin : gen_unused
+          assign node[l][n] = '0;
         end
       end
     end
-    for (int unsigned k = 0; k < CVA6Cfg.DCACHE_USER_WIDTH / 8; k++) begin
-      if (wbuffer_be[k]) wbuffer_ruser[8*k+:8] = wbuffer_all[wbuffer_sel[k]].user[8*k+:8];
+    assign wbuffer_be[k]         = node[FWD_LVL][0].v;
+    assign wbuffer_rdata[8*k+:8] = node[FWD_LVL][0].v ? node[FWD_LVL][0].d : 8'h0;
+    if (k < FWD_USER_BYTES) begin : gen_user_out
+      assign wbuffer_ruser[8*k+:8] = node[FWD_LVL][0].v ? node[FWD_LVL][0].u : 8'h0;
     end
+  end
+  if (CVA6Cfg.DCACHE_USER_WIDTH > FWD_USER_BYTES * 8) begin : gen_user_tail
+    assign wbuffer_ruser[CVA6Cfg.DCACHE_USER_WIDTH-1:FWD_USER_BYTES*8] = '0;
   end
 `endif
   // Complete-word forward: every byte of the XLEN readout is in the buffer.

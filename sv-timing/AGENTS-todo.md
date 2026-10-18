@@ -3,6 +3,15 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A140 — A139 step 1 landed (latency-neutral rewrites)
+
+- [x] D$ forwarding balanced tree (SAT-equivalent at 5 geometries), loop
+  predictor row-local training in RTL (equivalence + model), loop buffer
+  bounded add (6 sbs runs + 6-step miter); paired placement improves all three.
+- [ ] Re-read the whole-core board with the three changes (loop buffer must
+  improve there, A136 lesson); then step 1 continues with `instr_queue`
+  prefix ranks, `perf_counters` carry summaries, `g6lc_bp_ghist` balanced folds.
+
 ## A138 — store buffer input stage (rejected on timing)
 
 - [x] Gated input stage built and proven (shift witness 4 × 300k, gate-off

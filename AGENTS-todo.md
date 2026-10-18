@@ -12,6 +12,25 @@ is the queue, not the design.
 | Host / verify | [`AGENTS-build-platform.md`](AGENTS-build-platform.md) · [`AGENTS-build.md`](AGENTS-build.md) · [`build-platform/AGENTS.md`](build-platform/AGENTS.md) | CLI, residual soaks, probe→verify |
 | Philosophy / SoC envelope | [`AGENTS-coding-philosophy.md`](AGENTS-coding-philosophy.md) · [`AGENTS-configuration.md`](AGENTS-configuration.md) · [`agents/guides/AGENTS-soc-readiness.md`](agents/guides/AGENTS-soc-readiness.md) | Timing, verify-in-lockstep, target SoC |
 
+## A139 module-driven pipeline design pass (2026-10-18)
+
+Design record: [`architecture/RTL-PIPELINE-PLANS.md`](architecture/RTL-PIPELINE-PLANS.md).
+
+- [x] Re-read the 53 editable modules from the earlier over-10-adjusted-FO4
+  list and add `svt-plan:` proposal blocks to their active sources.
+- [x] Replace the draft's stale-rank, single-word forwarding, registered-PRF
+  and automatic fourth-multiplier-stage assumptions with source-specific
+  boundaries, ownership, capacity, expected structural effects and residuals.
+- [x] Document integration order and tradeoffs. This pass changes comments and
+  documentation only; tests, sv-timing and timing tools are intentionally omitted.
+- [x] Step 1 (A140): three latency-neutral `reshape` items landed as RTL —
+  D$ per-byte forwarding tree, loop-predictor row-local training, loop-buffer
+  bounded address add — each equivalence-proven and measured in paired
+  placement (`sv-timing/architecture/PIPELINE-PRAGMA-REVIEW.md` A140).
+- [ ] Re-read the whole-core board; continue step 1, then promote step-2
+  proposals (ownership/credits) with their consumer protocols. The remaining
+  annotations do not implement stages or establish FO4 closure.
+
 ## APU full-feature continuation (2026-10-10)
 
 Contract: `architecture/uncore/apu-vulkan-engine.md` current continuation; plan

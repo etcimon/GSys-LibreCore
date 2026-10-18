@@ -31,6 +31,15 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A140 update:** step 1 of the A139 plans landed: D$ per-byte forwarding as a
+balanced first-valid tree (placed 3.154 → 2.333 ns,
+area +31.0% of the module's logic; the
+AND-OR alternative 3.154 → 2.937 ns at
+-4.5%), loop-predictor row-local training in the shipped
+RTL (1.911 → 1.459 ns, area -12.3%), loop-buffer bounded
+address add (1.824 → 1.507 ns, area +5.3%). All
+equivalence-proven; board re-read pending.
+
 **A138 update:** store-buffer input stage (gated `StqInputStage`) built as a
 uniform one-cycle shift with register-derived current-cycle views; shift
 witness 4 × 300k cycles clean, gate-off cycle-exact 2 × 400k, mutant caught —

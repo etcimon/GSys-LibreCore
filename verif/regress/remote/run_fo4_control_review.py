@@ -82,6 +82,8 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
         "lbuf": ("core/frontend/g6lc_loop_buffer.sv", "core/ooo/g6lc_rob.sv"),
         "ckpt": ("core/frontend/g6lc_bp_ckpt.sv",),
         "stq": ("core/store_buffer.sv",),
+        "step1": ("core/cache_subsystem/wt_dcache_mem.sv", "core/frontend/g6lc_bp_loop.sv",
+                  "core/frontend/g6lc_loop_buffer.sv"),
     }
     changed = profile_files[profile]
     if profile == "statcor":
@@ -99,6 +101,14 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
     if profile == "stq":
         for p in (root / "verif/tb/core/store_buffer_sbs").glob("*.sv"):
             files[p.relative_to(root).as_posix()] = p.read_bytes()
+    if profile == "step1":
+        for name in ("verif/tb/core/tb_g6lc_loop_buffer_sbs.sv", "verif/tb/core/tb_g6lc_bp_loop_emit.sv",
+                     "vendor/pulp-platform/common_cells/src/lzc.sv",
+                     "vendor/pulp-platform/common_cells/src/rr_arb_tree.sv",
+                     "common/local/util/sram.sv", "common/local/util/sram_cache.sv",
+                     "common/local/util/tc_sram_wrapper.sv",
+                     "common/local/util/tc_sram_wrapper_cache_techno.sv"):
+            files[name] = (root / name).read_bytes()
     if profile == "boundary":
         for folder in ("store_buffer_sbs", "instr_realign_sbs"):
             for p in (root / "verif/tb/core" / folder).glob("*.sv"):
@@ -611,6 +621,10 @@ foreach kind {in_reg reg_reg reg_out in_out} {
 
     if (src / "review.json").exists():
         review = json.loads((src / "review.json").read_text())
+        if review["profile"] == "step1" and not os.environ.get("CONTROL_MODE"):
+            review_step1(src, out, sta, lib, abc, evidence, yosys, run)
+            (out / "result.json").write_text(json.dumps(evidence, indent=2))
+            return
         if review["profile"] == "stq" and not os.environ.get("CONTROL_MODE"):
             review_stq(src, out, sta, lib, abc, evidence, yosys, run)
             (out / "result.json").write_text(json.dumps(evidence, indent=2))
@@ -975,6 +989,175 @@ endmodule
         row = next(l for l in text.splitlines() if l.startswith("PLACE_STUDY "))
         evidence["maps"][variant]["placement"] = dict(re.findall(r"(\w+)=(\S+)", row))
         (out / "result.json").write_text(json.dumps(evidence, indent=2))
+    print(json.dumps(evidence["maps"], indent=2), flush=True)
+
+
+def pair_module(src, out, sta, lib, abc, evidence, yosys, run, key, top, flists, place_timeout=900):
+    """Map, module-board and placement study of a baseline/candidate pair."""
+    for variant, flist in flists.items():
+        netlist, stats = out / f"{key}-{variant}.v", out / f"{key}-{variant}.stat"
+        yosys(f"{key}-map-{variant}",
+              f"read_slang -f {flist} --top {top} --single-unit\n"
+              "proc\nflatten\nopt_clean\nwreduce\nalumacc\nopt_clean\nmemory_map\n"
+              f"opt_dff\ntechmap\nopt_clean\ndfflibmap -liberty {lib}\n{abc}\n"
+              f"opt_clean -purge\ntee -o {stats} stat -liberty {lib}\n"
+              f"write_verilog -noattr -noexpr {netlist}\n", timeout=3600)
+        entry = {"area_um2": float(re.search(r"Chip area for module .*?:\s*([\d.]+)", stats.read_text())[1]),
+                 "board": {}}
+        for fan in (0, 64):
+            env = dict(os.environ, OR_LIBERTY=lib, OR_VERILOG=str(netlist),
+                       OR_TOP=top, OR_PERIOD_NS="0.25", OR_IGNORE_FANOUT_ABOVE=str(fan))
+            text = run(f"{key}-sta-{variant}-{fan}", [sta, "-exit",
+                str(src / "build-platform/scripts/openroad-module-board.tcl")], env=env, timeout=1800)
+            row = next(l for l in text.splitlines() if l.startswith("ROW\t"))
+            assert "failed" not in row
+            entry["board"][str(fan)] = row
+        env = dict(os.environ, STUDY_PLATFORM=str(Path(lib).parent),
+                   OR_VERILOG=str(netlist), OR_TOP=top,
+                   STUDY_OUTPUT=str(out / f"{key}-{variant}"), STUDY_VARIANT=f"{key}-{variant}")
+        text = run(f"{key}-place-{variant}", [
+            "/opt/testharness/toolchains/openroad-g6lc-pgo/bin/openroad", "-exit",
+            str(src / "build-platform/scripts/openroad-module-place-study.tcl")], env=env, timeout=place_timeout)
+        row = next(l for l in text.splitlines() if l.startswith("PLACE_STUDY "))
+        entry["placement"] = dict(re.findall(r"(\w+)=(\S+)", row))
+        evidence["maps"][f"{key}-{variant}"] = entry
+        (out / "result.json").write_text(json.dumps(evidence, indent=2))
+
+
+def review_step1(src, out, sta, lib, abc, evidence, yosys, run):
+    """A140 step-1 (latency-neutral) RTL: the D$ per-byte forwarding tree,
+    the loop predictor's row-local training and the loop buffer's bounded
+    address add. Equivalence per change, then paired mapping / placement."""
+    portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
+    packages = [l for l in portable.splitlines()
+                if l.startswith("+") or l.endswith("_pkg.sv") or "/include/" in l]
+    vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+    evidence["simulator"] = subprocess.check_output([vl, "--version"], text=True).strip()
+
+    # ---- 1. D$ forwarding merge: the live block, tied by text to a standalone
+    # module, against the previous serial scan from the baseline file.
+    live = (src / "core/cache_subsystem/wt_dcache_mem.sv").read_text()
+    base = (src / "baseline/core/cache_subsystem/wt_dcache_mem.sv").read_text()
+    new_block = live[live.index("  typedef struct packed {\n    logic       v;"):
+                     live.index("`endif\n  // Complete-word forward")]
+    old_block = base[base.index("  logic [(CVA6Cfg.XLEN/8)-1:0][$clog2(WbufferAllDepth+1)-1:0] wbuffer_sel;"):
+                     base.index("`endif\n  // Complete-word forward")]
+    subs = [("CVA6Cfg.XLEN / 8", "B"), ("CVA6Cfg.XLEN/8", "B"), ("WbufferAllDepth", "D"),
+            ("CVA6Cfg.DCACHE_USER_WIDTH / 8", "U"), ("CVA6Cfg.DCACHE_USER_WIDTH", "(8*U)"),
+            ("wbuffer_hit_oh", "hit_i"), ("wbuffer_all[e].valid", "valid_i[e]"),
+            ("wbuffer_all[e].data", "data_i[e]"), ("wbuffer_all[e].user", "user_i[e]"),
+            ("wbuffer_all[wbuffer_sel[k]].user", "user_i[wbuffer_sel[k]]"),
+            ("wbuffer_be", "be_o"), ("wbuffer_rdata", "rdata_o"), ("wbuffer_ruser", "ruser_o")]
+    for a, b in subs:
+        new_block = new_block.replace(a, b)
+        old_block = old_block.replace(a, b)
+    header = ("#(parameter int unsigned D = 16, parameter int unsigned B = 8, parameter int unsigned U = 8) (\n"
+              "  input logic [D-1:0] hit_i, input logic [D-1:0][B-1:0] valid_i,\n"
+              "  input logic [D-1:0][8*B-1:0] data_i, input logic [D-1:0][8*U-1:0] user_i,\n"
+              "  output logic [B-1:0] be_o, output logic [8*B-1:0] rdata_o, output logic [8*U-1:0] ruser_o);\n")
+    (out / "fwd_merge.sv").write_text(
+        "module fwd_merge_old " + header + old_block + "endmodule\n"
+        "module fwd_merge_new " + header + new_block + "endmodule\n")
+    evidence["sources"]["fwd_merge.sv"] = hashlib.sha256((out / "fwd_merge.sv").read_bytes()).hexdigest()
+    for d, b, u in ((16, 8, 8), (8, 8, 4), (4, 4, 1), (2, 8, 8), (1, 8, 8)):
+        key = f"dmem-fwd-eq-{d}-{b}-{u}"
+        text = yosys(key,
+                     f"read_slang {out}/fwd_merge.sv --top fwd_merge_old --top fwd_merge_new "
+                     f"-G D={d} -G B={b} -G U={u}\nproc\n"
+                     "miter -equiv -flatten -make_assert fwd_merge_old fwd_merge_new m\n"
+                     "hierarchy -top m\nsat -verify -prove-asserts m\n", timeout=900)
+        assert "SUCCESS!" in text, text[-1500:]
+        evidence["proofs"][key] = "combinational equivalence of the per-byte merge PASS"
+    # paired module timing of wt_dcache_mem through a wrapper giving it the
+    # OoO configuration's wbuffer_t (as wt_dcache.sv does)
+    ports = live[live.index("    input logic clk_i,"):live.index(");\n", live.index("    input logic clk_i,"))]
+    wrapper = out / "dmem_timing.sv"
+    wrapper.write_text("""
+module g6lc_dmem_timing
+  import ariane_pkg::*;
+  import wt_cache_pkg::*;
+#(
+    parameter config_pkg::cva6_cfg_t CVA6Cfg = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg),
+    localparam int unsigned NumPorts = 3,
+    localparam DCACHE_CL_IDX_WIDTH = $clog2(CVA6Cfg.DCACHE_NUM_WORDS),
+    localparam type wbuffer_t = struct packed {
+      logic [CVA6Cfg.DCACHE_TAG_WIDTH+(CVA6Cfg.DCACHE_INDEX_WIDTH-CVA6Cfg.XLEN_ALIGN_BYTES)-1:0] wtag;
+      logic [CVA6Cfg.XLEN-1:0] data;
+      logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0] user;
+      logic [(CVA6Cfg.XLEN/8)-1:0] dirty;
+      logic [(CVA6Cfg.XLEN/8)-1:0] valid;
+      logic [(CVA6Cfg.XLEN/8)-1:0] txblock;
+      logic checked;
+      logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] hit_oh;
+    }
+) (
+""" + ports + """);
+  wt_dcache_mem #(.CVA6Cfg(CVA6Cfg), .DCACHE_CL_IDX_WIDTH(DCACHE_CL_IDX_WIDTH), .wbuffer_t(wbuffer_t), .NumPorts(NumPorts)) u (.*);
+endmodule
+""")
+    common = [str(src / n) for n in ("vendor/pulp-platform/common_cells/src/lzc.sv",
+                                    "vendor/pulp-platform/common_cells/src/rr_arb_tree.sv",
+                                    "common/local/util/sram.sv", "common/local/util/sram_cache.sv",
+                                    "common/local/util/tc_sram_wrapper.sv",
+                                    "common/local/util/tc_sram_wrapper_cache_techno.sv",
+                                    "build-platform/scripts/tc_sram_timing_stub.sv")]
+    flists = {}
+    for variant, path in (("baseline", src / "baseline/core/cache_subsystem/wt_dcache_mem.sv"),
+                          ("candidate", src / "core/cache_subsystem/wt_dcache_mem.sv")):
+        flist = out / f"dmem-{variant}.f"
+        flist.write_text("\n".join(packages + common + [str(path), str(wrapper)]) + "\n")
+        flists[variant] = flist
+    pair_module(src, out, sta, lib, abc, evidence, yosys, run, "dmem", "g6lc_dmem_timing", flists, place_timeout=2400)
+
+    # ---- 2. Loop predictor: row-local training in the shipped RTL vs the
+    # baseline's indexed form (matched-state equivalence, model, pair).
+    bench = src / "verif/tb/core/tb_g6lc_bp_loop_emit.sv"
+    flists = {}
+    for variant, path in (("baseline", src / "baseline/core/frontend/g6lc_bp_loop.sv"),
+                          ("candidate", src / "core/frontend/g6lc_bp_loop.sv")):
+        flist = out / f"loop-{variant}.f"
+        flist.write_text("\n".join(packages + [str(path), str(bench)]) + "\n")
+        flists[variant] = flist
+    for entries, slots, rvc in ((16, 4, 1), (8, 1, 0), (32, 2, 1)):
+        commands = []
+        for variant, name in (("baseline", "gold"), ("candidate", "gate")):
+            commands += [
+                f"read_slang -f {flists[variant]} --top g6lc_loop_timing --single-unit "
+                f"-G ENTRIES={entries} -G SLOTS={slots} -G RVC={rvc} --ignore-assertions",
+                "proc", "flatten", "memory_map", "async2sync", "opt_clean",
+                f"rename g6lc_loop_timing {name}", f"design -stash {name}",
+            ]
+        commands += ["design -copy-from gold -as gold gold", "design -copy-from gate -as gate gate",
+                     "equiv_make gold gate equiv", "hierarchy -top equiv",
+                     "equiv_simple -seq 1", "equiv_status -assert"]
+        key = f"loop-eq-{entries}-{slots}-{rvc}"
+        text = yosys(key, "\n".join(commands), timeout=300)
+        assert "Equivalence successfully proven!" in text
+        evidence["proofs"][key] = "matched-state equivalence PASS"
+    key = "loop-model-candidate"
+    obj = out / f"obj-{key}"
+    run(key + "-build", [vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal",
+        "-Wno-WIDTH", "-Wno-UNOPTFLAT", "-f", str(flists["candidate"]), "--top-module", "tb_g6lc_bp_loop",
+        "--Mdir", str(obj), "-j", "4"])
+    for seed in (1, 17):
+        log = run(f"{key}-{seed}", [str(obj / "Vtb_g6lc_bp_loop"), f"+seed={seed}"])
+        assert "LOOP_PASS" in log
+        evidence["proofs"][f"{key}-{seed}"] = next(l for l in log.splitlines() if "LOOP_PASS" in l)
+    bad = subprocess.run([str(obj / "Vtb_g6lc_bp_loop"), "+oracle_negative"],
+                         cwd=out, capture_output=True, text=True, timeout=120)
+    (out / (key + "-negative.log")).write_text(bad.stdout + bad.stderr)
+    assert bad.returncode != 0 and "LOOP_MISMATCH" in bad.stdout
+    evidence["proofs"]["loop-negative"] = "model negative control fails as required"
+    pair_module(src, out, sta, lib, abc, evidence, yosys, run, "loop", "g6lc_loop_timing", flists)
+
+    # ---- 3. Loop buffer: the existing side-by-side witness (its invariant
+    # assertions on), the bounded miter and the pair, through review_lbuf.
+    sub = {"proofs": {}, "maps": {}, "sources": {}}
+    review_lbuf(src, out, sta, lib, abc, sub, yosys, run)
+    evidence["proofs"].update(sub["proofs"])
+    for variant, entry in sub["maps"].items():
+        evidence["maps"][f"lbuf-{variant}"] = entry
+    (out / "result.json").write_text(json.dumps(evidence, indent=2))
     print(json.dumps(evidence["maps"], indent=2), flush=True)
 
 
@@ -1857,7 +2040,7 @@ if __name__ == "__main__":
         mode.add_argument("--snapshot", type=Path)
         mode.add_argument("--analyze-results", type=Path)
         parser.add_argument("--baseline", help="baseline revision for the selected review profile")
-        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt", "stq"), default="control")
+        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt", "stq", "step1"), default="control")
         args = parser.parse_args()
         if args.snapshot:
             if not args.baseline:

@@ -174,6 +174,48 @@ and the normal package parser. Upload the emitted multiplier along with the
 same source snapshot for the third comparison. An emitted reparse or a
 structural reduction alone is not the acceptance condition.
 
+## A140 — step 1 of the A139 plans: three latency-neutral rewrites landed
+
+The first rung of `architecture/RTL-PIPELINE-PLANS.md` (remove avoidable logic
+depth before adding protocols). Three `svt-plan: reshape` items became RTL,
+each proven against the previous revision and measured in one paired run
+(`fo4-a140-step1h`; the forwarding alternative in `fo4-a140-step1g`):
+
+* **`core/cache_subsystem/wt_dcache_mem.sv`** — the per-byte "lowest matching
+  entry wins" forwarding scan over `WbufferAllDepth` entries is a balanced
+  tree of the same associative merge; data and user bytes travel in the leaf
+  tuple. Proof: the live block is extracted by text into a standalone module
+  and proven combinationally equivalent to the previous serial scan (SAT
+  miter) at five geometries (depth 16/8/4/2/1, 8- and 4-byte lanes, 8/4/1
+  user bytes). The prefix-one-hot + AND-OR form was measured as well; it is
+  area-neutral but gains far less, so the tree is retained with its area cost
+  recorded.
+* **`core/frontend/g6lc_bp_loop.sv`** — the row-local training the A135 emit
+  proved is now the shipped RTL (`row-local-applied`). Matched-state
+  equivalence with the indexed form at 16×4, 8×1 and 32×2; the independent
+  per-row model passes (2 seeds, 240k checks each) and its negative control
+  still fails.
+* **`core/frontend/g6lc_loop_buffer.sv`** — `base + (cursor << ALIGN)` only
+  carries into the high slice as +0/+1, so the +1 alternative is registered at
+  arm and both high compares run beside a `IDX_W+ALIGN`-bit add; the carry
+  picks the compare. Exact modulo 2^VLEN (wrap included), two invariant
+  assertions (registered increment; split compare == reference) on in the
+  witness. Six cycle-exact side-by-side runs (3 geometries × 2 seeds, 300k
+  cycles) and the 6-step output miter pass. Unlike A136, no wide select is
+  added to the hit path — the registered value feeds a compare, not a mux.
+
+| Module (isolated, Nangate45, paired placement/repair, no disabled arcs) | Worst arrival | Reg→reg | Repaired area | Buffers |
+|---|---:|---:|---:|---:|
+| `wt_dcache_mem` forwarding tree (retained) | 3.154 → **2.333 ns** (-26.0%) | 0.425 → 0.660 ns | 8861 → 11610 µm² (+31.0%) | 994 → 1057 |
+| `wt_dcache_mem` prefix one-hot + AND-OR (alternative, not retained) | 3.154 → **2.937 ns** (-6.9%) | 0.425 → 0.490 ns | 8861 → 8458 µm² (-4.5%) | 994 → 1012 |
+| `g6lc_bp_loop` row-local training | 1.911 → **1.459 ns** (-23.7%) | 1.353 → 0.961 ns | 17777 → 15595 µm² (-12.3%) | 759 → 499 |
+| `g6lc_loop_buffer` bounded address add | 1.824 → **1.507 ns** (-17.4%) | 1.824 → 1.507 ns | 7412 → 7807 µm² (+5.3%) | 185 → 197 |
+
+Proof record: `dmem-fwd-eq-16-8-8`, `dmem-fwd-eq-8-8-4`, `dmem-fwd-eq-4-4-1`, `dmem-fwd-eq-2-8-8`, `dmem-fwd-eq-1-8-8`, `loop-eq-16-4-1`, `loop-eq-8-1-0`, `loop-eq-32-2-1`, `loop-model-candidate-1`, `loop-model-candidate-17`, `loop-negative`, `lbuf-sbs-8x64-1`, `lbuf-sbs-8x64-17`, `lbuf-sbs-4x32-1`, `lbuf-sbs-4x32-17`, `lbuf-sbs-6x128-1`, `lbuf-sbs-6x128-17`, `lbuf-miter-6`. Whole-core board after
+landing: re-measured below when the route completes (the A136 loop-buffer
+candidate improved in isolation and lost on the board; this one must be read
+there before the gain is claimed for the core).
+
 ## A138 — store buffer input stage: functionally proven, rejected on timing
 
 The first true pipeline stage attempted on the board's worst cone
