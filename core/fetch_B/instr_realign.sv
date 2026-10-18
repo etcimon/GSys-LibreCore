@@ -67,6 +67,23 @@ module instr_realign
     output logic [CVA6Cfg.INSTR_PER_FETCH-1:0][31:0] instr_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin instr_realign status=proposal target=10-adjusted-FO4
+  // svt-plan: cone realign_visits already uses a parallel prefix matrix;
+  // prefix -> per-position rank -> instruction gather remains serial work.
+  // svt-plan: boundary halfword classification/visits/ranks -> gather;
+  // alternatively bank rank/gather locally before adding an interface cycle.
+  // svt-plan: carry fetched bytes, starting VA, token/hart/epoch, carry
+  // half+PC, continuation match, lengths, split flags and exception association.
+  // svt-plan: ownership accept a window once; commit carry state only at
+  // the defined consumption event, including partial acceptance and kill retention.
+  // svt-plan: effect splits prefix/rank calculation from wide gather;
+  // registered continuation-address state already exists and is not a new gain.
+  // svt-plan: cost whole-window storage and realignment latency; frontend
+  // and instr_queue need packet backpressure and synchronized consumed masks.
+  // svt-plan: limit a delayed same-hart window cannot use an old carry bank
+  // while a younger window updates it; serialize or forward pending carry state.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 119.0 adjusted FO4 on the
   // Nangate45 board): fetch-window realign: a stream with a global kill (id-less domain); the carry bank is per-hart state.
   // svt-pipe: require-contract

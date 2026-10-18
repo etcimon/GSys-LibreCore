@@ -1,3 +1,4 @@
+// Modified by: Etienne Cimon (2026) - A139 pipeline-design comments.
 /* Copyright 2018 ETH Zurich and University of Bologna.
  * Copyright and related rights are licensed under the Solderpad Hardware
  * License, Version 0.51 (the “License”); you may not use this file except in
@@ -65,6 +66,23 @@ module axi_shim #(
     output axi_req_t axi_req_o,
     input axi_rsp_t axi_resp_i
 );
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin axi_shim status=proposal target=10-adjusted-FO4
+  // svt-plan: cone write-state/beat-counter muxes interact with independent
+  // AXI address/data/response handshakes and wide beat selection.
+  // svt-plan: boundary complete AW/AR descriptors and W beats into elastic
+  // channel slots; preselect the next beat while the current beat is held.
+  // svt-plan: carry every address/control/ID/ATOP field and data/user/strb/
+  // last together; VALID and payload remain stable until their own READY.
+  // svt-plan: capacity local credits cover every accepted beat/descriptor;
+  // preserve AW/W association, burst count and B/R response ownership.
+  // svt-plan: effect removes downstream READY from upstream state cones
+  // and splits beat mux from channel output; use skid capacity for full throughput.
+  // svt-plan: cost channel storage and latency; no combinational ready loop
+  // may reappear through a fall-through bypass across adjacent channel buffers.
+  // svt-plan: limit AXI channel independence is not permission to reorder
+  // write data or lose atomic/exclusive response semantics.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 13.7 adjusted FO4 on the
   // Nangate45 board): AXI shim: read / write FSMs.
   // svt-pipe: require-contract

@@ -405,6 +405,28 @@ module g6lc_iq
   // A104): `q_after_issue[slot_entry[g]]` re-decoded the slot the select
   // had just encoded; `issue_valid_o[g]` is `|grant[g]`, so the write under
   // `grant[g][e] && issue_ack_i[g]` is the same write.
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_iq status=proposal target=10-adjusted-FO4
+  // svt-plan: cone wakeup comparisons feed age/resource select, grant and
+  // q_after_issue; a readiness register changes dependent-issue distance.
+  // svt-plan: reshape bank entries; select eligible local candidates and
+  // merge ordered candidates across banks with resource-compatible grants.
+  // svt-plan: boundary wakeup -> candidate records -> final issue handshake;
+  // each bank supplies enough ranked candidates for NrIssuePorts, not one.
+  // svt-plan: carry slot+generation, TID, hart, age, FU class, source-ready
+  // state and operand identity; reserve candidates until ack or cancellation.
+  // svt-plan: conflict recheck liveness and FU acceptance before issuing;
+  // keep valid on refusal, and clear an entry only once on issue_ack_i.
+  // svt-plan: effect divides CAM wakeup from global select and reduces each
+  // selection fan-in; exact oldest-eligible ordering must survive the merge.
+  // svt-plan: cost candidate registers and reservations; dependent ops pay
+  // a stage unless an exact producer-to-consumer availability schedule exists.
+  // svt-plan: alternative early wake only for guaranteed, accepted fixed-
+  // latency producers with a matching operand bypass; variable-latency loads
+  // need transitive consumer replay, which phys_replay_o alone does not supply.
+  // svt-plan: limit age-matrix update and final resource arbitration remain;
+  // speculative wakeup is a separate architecture, not a free latency fix.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A124; 3.06 ns reg->reg older_d ->
   // q_after_issue on Nangate45). Wakeup -> select -> grant -> entry clear is
   // the issue loop: a stage in it costs a bubble between dependent

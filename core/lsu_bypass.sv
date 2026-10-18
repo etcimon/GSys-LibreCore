@@ -1,3 +1,4 @@
+// Modified by: Etienne Cimon (2026) - A139 pipeline-design comments.
 // Copyright 2018 ETH Zurich and University of Bologna.
 // Copyright and related rights are licensed under the Solderpad Hardware
 // License, Version 0.51 (the "License"); you may not use this file except in
@@ -56,6 +57,23 @@ module lsu_bypass
     output logic      ready_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin lsu_bypass status=proposal target=10-adjusted-FO4
+  // svt-plan: cone posted request, two pop sources and branch/cancel
+  // marking share memory/count/pointer update; ready_o currently means empty.
+  // svt-plan: reshape separate payload writes from per-entry live/kill
+  // metadata; derive count/pointers directly from normalized accepted events.
+  // svt-plan: boundary optional held head packet -> load/store destination;
+  // include that packet in capacity and preserve the current posting protocol.
+  // svt-plan: carry complete lsu_req, TID lifetime and sticky speculative
+  // cancellation; a transient cancelled_mask cannot be the only remembered kill.
+  // svt-plan: effect removes wide mem_n dependencies from occupancy and
+  // exposes only a local validity mux on the common bypass path.
+  // svt-plan: cost head storage if staged and possible LSU dispatch delay;
+  // simultaneous pop_ld_i/pop_st_i semantics need normalization before retiming.
+  // svt-plan: limit do not replace empty-only ready with ordinary FIFO
+  // not-full semantics without changing the upstream producer's contract.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 32.3 adjusted FO4 on the
   // Nangate45 board): LSU bypass queue: push / pop next-state.
   // svt-pipe: require-contract
@@ -166,4 +184,3 @@ module lsu_bypass
     end
   end
 endmodule
-

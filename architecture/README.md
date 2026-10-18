@@ -67,6 +67,7 @@ Host **workspace lifecycle** (granular `clean`, cache-like diag/formal/timings o
 
 | Document | Scope |
 |---|---|
+| [`RTL-PIPELINE-PLANS.md`](RTL-PIPELINE-PLANS.md) | A139 source-level pipeline proposals for 53 modules: dependency cuts, ownership, capacity, structural expectations and residuals. Comments only; no new timing result or implemented stage. |
 | `current-stage.md` | **WIP snapshot:** parallel change sets (SMT2, QEMU firmware, 100 TOPS island, PCIe stand-in, OoO/H/RVV/stream, graphics lane). |
 | `uncore/apu-graphics.md` | **Graphics lane:** where the APU code sits, which execbuffer prefix is proven, gates A0–A7, and why a private decoder is not the screenshot. |
 | `g6lc-qemu/README.md` | **Host plan:** `g6lc_qemu` generator — configs ⇄ flists ⇄ DTS → four emulation backends + D1 tandem / D2 uarch. Q0–Q9 in `g6lc-qemu/staging.md`. **Never evidence** (see `multi-threading/testharness-proxy.md`). |

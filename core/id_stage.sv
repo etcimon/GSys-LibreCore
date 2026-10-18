@@ -181,6 +181,23 @@ module id_stage #(
     // Data cache request input - CACHE
     output dcache_req_i_t dcache_req_ports_o
 );
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin id_stage status=proposal target=10-adjusted-FO4
+  // svt-plan: cone compressed/macro decode and issue-lane packing feed
+  // held issue entries; a new register must respect per-lane consumption.
+  // svt-plan: reshape predecode length/class in parallel and use balanced
+  // accepted-lane prefixes; prefer shortening this logic before another stage.
+  // svt-plan: boundary optional expanded instruction packet -> issue group;
+  // reserve packet space before consuming fetch entries or advancing a macro.
+  // svt-plan: carry PC, original bits/length, expanded operation, exception,
+  // hart/fetch epoch, prediction and macro first/last/double-destination state.
+  // svt-plan: ownership hold unaccepted lanes and kill on redirect/flush;
+  // Zcmp/Zcmt/CVXIF paths must not repeat or skip a sub-operation.
+  // svt-plan: effect separates expansion from issue packing when needed.
+  // svt-plan: cost packet storage and decode/mispredict latency.
+  // svt-plan: limit near-budget control can lose more to another handshake
+  // than it gains in logic depth; no fixed added stage is assumed beneficial.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 10.9 adjusted FO4 on the
   // Nangate45 board): decode: the issue handshake is same-cycle.
   // svt-pipe: require-contract

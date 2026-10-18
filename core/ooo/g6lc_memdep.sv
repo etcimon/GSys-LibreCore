@@ -33,6 +33,23 @@ module g6lc_memdep #(
     output logic                     predict_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_memdep status=proposal target=10-adjusted-FO4
+  // svt-plan: cone indexed store training and violation training write
+  // set_ssid_d; the final valid training lane wins the load's assigned SSID.
+  // svt-plan: reshape compute per-row update candidates locally from
+  // registered state, with store-lane priority and load-training override explicit.
+  // svt-plan: boundary optional training packet -> row update;
+  // capture train_pc_i and all relevant store PCs, not the current query PC.
+  // svt-plan: carry enable/flush epoch, valid, row, SSID and wait-bit update;
+  // a delayed update from a flushed epoch must not repopulate the table.
+  // svt-plan: effect removes indexed read/update/write round trips and
+  // bounds write-priority depth; query read/select can be banked independently.
+  // svt-plan: cost row-local logic or training storage; delayed predictor
+  // learning can change stalls and must not replace authoritative LSQ ordering.
+  // svt-plan: limit predictor output and replay/publication correctness
+  // are separate; weaker prediction is safe only with that independent mechanism.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 47.9 adjusted FO4 on the
   // Nangate45 board): memory dependence predictor: set update.
   // svt-pipe: require-contract

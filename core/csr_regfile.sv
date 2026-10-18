@@ -235,6 +235,25 @@ module csr_regfile
     output logic break_from_trigger_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin csr_regfile status=proposal target=10-adjusted-FO4
+  // svt-plan: cone address/privilege translation -> CSR read select ->
+  // CSR read-modify-write and architectural outputs; RVFI mostly taps state.
+  // svt-plan: reshape bank read decode by CSR class; compute local read
+  // data and access legality in parallel before a bounded final select.
+  // svt-plan: boundary prepare CSR access -> commit-qualified read/modify/write;
+  // do not use an issue-time CSR value after older writes or privilege changes.
+  // svt-plan: carry hart, address/op, operand, privilege/virtualization/debug
+  // context and retire identity; revalidate context before architectural update.
+  // svt-plan: ownership serialize side effects, traps, interrupt state and
+  // PMP updates at commit; freeze/replay prepared accesses on context changes.
+  // svt-plan: effect can remove decode depth from read/modify/write feedback;
+  // a registered RVFI bundle alone cannot shorten functional CSR feedback.
+  // svt-plan: cost decode/access registers and CSR latency; RVFI snapshot
+  // changes require the same retire token and before/after-state convention.
+  // svt-plan: limit counter updates and asynchronous events remain live;
+  // do not defer PMP visibility or call all CSR consumers trace-only.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 87.0 adjusted FO4 on the
   // Nangate45 board): CSR file: register writes and PMP configuration are architectural state; no stage inside the write select.
   // svt-pipe: require-contract

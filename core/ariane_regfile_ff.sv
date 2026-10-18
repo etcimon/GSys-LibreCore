@@ -1,3 +1,4 @@
+// Modified by: Etienne Cimon (2026) - A139 pipeline-design comments.
 // Copyright 2018 ETH Zurich and University of Bologna.
 // Copyright and related rights are licensed under the Solderpad Hardware
 // License, Version 0.51 (the "License"); you may not use this file except in
@@ -42,6 +43,23 @@ module ariane_regfile #(
     input  logic [CVA6Cfg.NrCommitPorts-1:0]                 we_i
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin ariane_regfile status=proposal target=10-adjusted-FO4
+  // svt-plan: cone write decode into mem and combinational indexed reads;
+  // unlike g6lc_prf, this implementation has no explicit current-write bypass.
+  // svt-plan: boundary optional accepted commit-write capture -> local
+  // bank writes, with read overlay for writes whose original edge has passed.
+  // svt-plan: carry every commit port's we/address/data and cycle order;
+  // preserve highest-port collision priority and ZERO_REG_ZERO behavior.
+  // svt-plan: visibility pending committed writes are architectural;
+  // never expose current-cycle pre-edge writes early as a new bypass behavior.
+  // svt-plan: effect separates late commit transport from row write decode;
+  // bank-local read muxes can bound each data-selection subtree.
+  // svt-plan: cost write packet storage and read overlays; registered reads
+  // instead require a new issue_read_operands schedule, not a local substitution.
+  // svt-plan: limit existing combinational read timing and integer/FP zero
+  // differences are contractual; no benefit is guaranteed from write capture alone.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 54.3 adjusted FO4 on the
   // Nangate45 board): architectural register file: write-through read; a stage is a bypass change.
   // svt-pipe: require-contract

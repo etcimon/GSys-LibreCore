@@ -30,6 +30,23 @@ module aes
     output logic     [CVA6Cfg.XLEN-1:0] result_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin aes status=proposal target=10-adjusted-FO4
+  // svt-plan: cone AES byte select/SubBytes/MixColumns and key-schedule
+  // paths share a result select with SHA paths; not every operation is a round.
+  // svt-plan: boundary S-box/subword or SHA XOR partials -> linear mix/key
+  // completion -> result-class select; split S-box internals only if still dominant.
+  // svt-plan: carry op, orig_instr_aes, untouched operand fragments,
+  // byte rotation/round constants and ex_stage valid/TID/hart lifetime.
+  // svt-plan: alignment AES32/64, SHA and key-schedule alternatives must
+  // reach their selected result with the same operation token.
+  // svt-plan: effect separates nonlinear substitution from linear mixing
+  // and final selection; partial XOR trees bound SHA fan-in independently.
+  // svt-plan: cost intermediate datapath registers and crypto latency;
+  // reserve FLU completion capacity or give this unit a held response channel.
+  // svt-plan: limit S-box depth and FLU arbitration remain; a result register
+  // only moves the complete combinational crypto cone behind a new boundary.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 83.7 adjusted FO4 on the
   // Nangate45 board): AES rounds: a pure datapath on the FLU port (see ex_stage); a stage here is an FLU latency decision.
   // svt-pipe: require-contract

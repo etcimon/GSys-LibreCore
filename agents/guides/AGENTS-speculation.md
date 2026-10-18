@@ -3,6 +3,12 @@
 Feature-addition playbook for speculation, flush/recovery, and memory ordering. Read `../../AGENTS.md`
 first. Spec summaries live in `../spec/` (see `../spec/INDEX.md`).
 
+Pipeline design reference: [A139 module-driven plans](../../architecture/RTL-PIPELINE-PLANS.md).
+Source-local `svt-plan:` proposals treat reservations, pending visibility,
+generation-safe reuse and recovery as part of each proposed boundary.
+In particular, they do not assume LSQ replay repairs all speculative consumers
+or that delaying a queue's inputs makes its entire state a uniform time shift.
+
 ## Table of contents
 1. Spec grounding
 2. Code map (`file:line`)

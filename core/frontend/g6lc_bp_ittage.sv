@@ -30,6 +30,23 @@ module g6lc_bp_ittage
     output btb_prediction_t [CVA6Cfg.INSTR_PER_FETCH-1:0] btb_prediction_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_bp_ittage status=proposal target=10-adjusted-FO4
+  // svt-plan: cone PC/history hash -> indexed row/column read ->
+  // tag validity and wide indirect target output.
+  // svt-plan: boundary hash/address preparation -> table read/tag select;
+  // or table response -> frontend provider selection when memory dominates.
+  // svt-plan: carry slot PC, folded history snapshot, hart/fetch epoch,
+  // target/tag/valid and query token; carry folded_update_i with training PC.
+  // svt-plan: ownership flush/debug suppression applies at the defined
+  // acceptance event; delayed training cannot revive invalidated entries.
+  // svt-plan: effect separates address hashing from table/read selection;
+  // bank by slot/row to limit mux fanout while preserving collision policy.
+  // svt-plan: cost query/training registers and later indirect prediction;
+  // frontend must keep an early fallback and resolve the matching token.
+  // svt-plan: limit training and query use different history snapshots;
+  // a live folded_i sampled a cycle later describes a different prediction.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 32.9 adjusted FO4 on the
   // Nangate45 board): indirect target predictor: table update state.
   // svt-pipe: require-contract

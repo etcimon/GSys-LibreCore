@@ -102,6 +102,27 @@ module g6lc_bp_ckpt
     output logic                 full_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_bp_ckpt status=proposal target=10-adjusted-FO4
+  // svt-plan: cone restore truncation -> post-free vector -> oldest-live
+  // search -> span/allocation; clear-side restore intentionally sees current frees.
+  // svt-plan: reshape separate per-hart live/epoch metadata from checkpoint
+  // payloads; search small groups for oldest survivor and merge ring offsets.
+  // svt-plan: boundary post-free group summaries -> reclaim head/span;
+  // keep resolve-side indexed restore separate from background reclamation.
+  // svt-plan: carry hart, index+epoch, head/span snapshot and restore/clear
+  // kind; preserve ghist and RAS pointer/count/top as one checkpoint value.
+  // svt-plan: conflict while reclaim is pending, suppress reuse of uncertain
+  // slots; a same-bank restore restarts the summary or invalidates its epoch.
+  // svt-plan: consumer clear_restore_o needs a response handshake or a
+  // frontend recovery hold; a stale oldest slot is not a valid restore point.
+  // svt-plan: effect splits truncation from ring search, without adding an
+  // absolute-slot-to-offset conversion to a consumer that needs ring distance.
+  // svt-plan: cost summary registers and conservative allocation stalls;
+  // guarantee reclamation progresses under repeated pushes and restores.
+  // svt-plan: limit all-or-none multi-push and non-power-of-two geometry
+  // still require explicit span arithmetic; no generic valid_d register cut.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 68.0 adjusted FO4 on the
   // Nangate45 board): branch checkpoint stack: push / restore state.
   // svt-pipe: require-contract

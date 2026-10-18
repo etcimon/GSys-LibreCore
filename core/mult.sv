@@ -25,6 +25,23 @@ module mult
     // Mult transaction ID - ISSUE_STAGE
     output logic     [CVA6Cfg.TRANS_ID_BITS-1:0] mult_trans_id_o
 );
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin mult status=proposal target=10-adjusted-FO4
+  // svt-plan: cone multiplier/divider completion selection and per-owner
+  // live/cancelled bookkeeping converge at a single result port.
+  // svt-plan: boundary optional owner-qualified completion -> held result;
+  // keep multiplier pipeline depth and live_q/tid_q depth exactly identical.
+  // svt-plan: carry result, operation class, TID lifetime and valid;
+  // divider owner persists through cancellation until its physical result drains.
+  // svt-plan: capacity fixed-latency multiply needs a reserved result slot;
+  // divider ready may wait, but killed divider results must still retire internally.
+  // svt-plan: effect separates completion arbitration from owner-table
+  // updates; predecode owner events locally to reduce cancellation fanout.
+  // svt-plan: cost result storage and writeback latency; prevent a killed
+  // old result from clearing the ownership of a newly reused TID.
+  // svt-plan: limit changing MultStages without actual matching RTL stages
+  // breaks liveness alignment; output buffering alone leaves arithmetic untouched.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 25.6 adjusted FO4 on the
   // Nangate45 board): multiplier wrapper: carries the multiplier's cancellation liveness for MultStages cycles (A115); its depth follows the parameter.
   // svt-pipe: require-contract

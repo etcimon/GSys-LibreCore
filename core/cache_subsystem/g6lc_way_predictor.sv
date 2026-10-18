@@ -32,6 +32,23 @@ module g6lc_way_predictor
     input  logic [$clog2(NR_WAYS)-1:0] update_way_i
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_way_predictor status=proposal target=10-adjusted-FO4
+  // svt-plan: cone indexed {valid,way} read then binary-to-one-hot decode;
+  // update index drives a separate small table write.
+  // svt-plan: reshape decode way per row before bounded row selection;
+  // one-hot stored ways are an area alternative when NR_WAYS is small.
+  // svt-plan: boundary optional lookup preparation -> selected way hint;
+  // svt-plan: carry request index/token and cache epoch across a lookup edge.
+  // svt-plan: ownership a stale hint must cause full tag verification or
+  // retry, never a hit; preserve invalid-entry default and flush priority.
+  // svt-plan: effect removes selected binary-way decode from the serial
+  // lookup path; banking bounds row mux depth without changing hint latency.
+  // svt-plan: cost wider row data or query registers; later hints help only
+  // if the cache can launch lookup earlier or tolerate a fallback access.
+  // svt-plan: limit tag validity is authoritative; delaying the hint alone
+  // can reduce usefulness even when its local path becomes shorter.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 23.2 adjusted FO4 on the
   // Nangate45 board): way predictor: table update.
   // svt-pipe: require-contract

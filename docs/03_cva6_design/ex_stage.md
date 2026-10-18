@@ -1,5 +1,11 @@
 # Execute Stage
 
+The A139 [module-driven pipeline designs](../../architecture/RTL-PIPELINE-PLANS.md)
+describe proposed changes to FU arithmetic, completion arbitration, issue,
+retirement and memory transactions. Matching `svt-plan:` comments live beside
+the RTL contracts. They are design proposals: the stage latencies and
+interfaces described by the implementation have not changed in that pass.
+
 The execute stage is a logical stage which encapsulates all the
 functional units (FUs). The FUs are not supposed to have inter-unit
 dependencies for the moment, e.g.: every FU must be able to perform its

@@ -21,6 +21,25 @@ module g6lc_prf #(
     input  logic [NR_WRITE-1:0]                we_i
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_prf status=proposal target=10-adjusted-FO4
+  // svt-plan: cone combinational mem_q read plus CURRENT write-through;
+  // highest write port wins. Reads are not registered in this module.
+  // svt-plan: boundary accepted write packets -> bank-local write decode;
+  // keep banked read selection and bypass in parallel.
+  // svt-plan: bypass priority current writes > newest pending writes >
+  // mem_q, highest port within each cycle; ZERO_REG_ZERO overrides all.
+  // svt-plan: carry we/address/data and relative write age; capture the
+  // entire NR_WRITE group each cycle or add upstream completion backpressure.
+  // svt-plan: ownership physical-register recycling must not let a delayed
+  // older write win over a new owner; preserve ordering at the write acceptance seam.
+  // svt-plan: effect separates long write transport from array decode;
+  // read banking reduces mux fan-in but extra bypass comparisons can dominate.
+  // svt-plan: cost write packet registers and per-read comparisons; a
+  // bounded one-cycle pending window avoids growing the bypass priority chain.
+  // svt-plan: limit no local valid/ready or generation ports exist; adding
+  // read latency needs coordinated IQ/operand scheduling, not only this file.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 65.2 adjusted FO4 on the
   // Nangate45 board): physical register file: write ports into mem_q; a stage is a bypass-network change.
   // svt-pipe: require-contract

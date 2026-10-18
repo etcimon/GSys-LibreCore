@@ -237,6 +237,30 @@ module store_buffer
   // ----------------------------------------
   // Speculative Queue - Core Interface
   // ----------------------------------------
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin store_buffer status=proposal target=10-adjusted-FO4
+  // svt-plan: cone spec_rewrite combines arrival rank, survivor ranks and a
+  // wide payload gather; delaying its inputs leaves that recurrence intact.
+  // svt-plan: reshape keep payloads in stationary slots; update live bits
+  // locally on cancel/commit and order narrow slot references, not store data.
+  // svt-plan: boundary prepare bank-local age/byte candidates, then merge;
+  // a pending commit descriptor owns its slot until the commit queue accepts.
+  // svt-plan: carry slot+generation, TID, hart, age context, PA, data, be,
+  // size, cbo_op and acceptance/commit state through every pending operation.
+  // svt-plan: capacity reserve a free slot before the store-unit promise;
+  // count all reservations once; acceptance is not a same-cycle valid/ready test.
+  // svt-plan: visibility include pending stores in hazards/forwarding;
+  // choose youngest older store PER BYTE; committed sources survive flush;
+  // preserve valid_without_flush_i, CBO_ZERO coverage and handoff stickies.
+  // svt-plan: conflict invalidate prepared candidates on slot reuse, kill
+  // or age-context change; reselect on conflict, never install stale ranks.
+  // svt-plan: effect removes DEPTH-wide payload movement from queue update;
+  // local compare then balanced winner merge can replace serial forwarding.
+  // svt-plan: cost metadata and pending descriptors; extra lookup/commit
+  // latency needs load_unit/store_unit/commit integration; no uniform shift.
+  // svt-plan: limit age selection, free-slot allocation and byte merges
+  // remain; LEGACY_SMT_KEEP needs its own ownership rules before enabling.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A124; 3.02 ns speculative_queue_n ->
   // write pointer on Nangate45). The queue's next state folds insertion,
   // the younger-cancel squash and the commit release into one permutation;
@@ -1148,5 +1172,3 @@ module store_buffer
   //pragma translate_on
 
 endmodule
-
-

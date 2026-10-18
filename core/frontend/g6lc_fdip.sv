@@ -35,6 +35,24 @@ module g6lc_fdip
     output logic                    pf_drop_pma_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_fdip status=proposal target=10-adjusted-FO4
+  // svt-plan: cone FTQ peek address -> execute/cacheable-region checks ->
+  // demand-priority and icache-ready gating of prefetch.
+  // svt-plan: reshape evaluate region checks in parallel.
+  // svt-plan: boundary optional peek/PMA candidate ->
+  // current-cycle demand/ready arbitration.
+  // svt-plan: carry prefetch address, originating queue epoch and PMA
+  // context; recheck demand, flush and current icache readiness when issuing.
+  // svt-plan: ownership discard stale candidates; never hold off demand
+  // to complete a speculative prefetch, and never issue from yesterday's ready.
+  // svt-plan: effect removes region-comparison depth from final arbitration;
+  // no need to pipeline the demand path with this best-effort hint.
+  // svt-plan: cost candidate register and one-cycle-later prefetch; optional
+  // hints can be dropped rather than adding backpressure to FTQ.
+  // svt-plan: limit PMA execute/cacheability still governs every issued
+  // prefetch; extra latency may outweigh the small remaining logic reduction.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 10.1 adjusted FO4 on the
   // Nangate45 board): fetch-directed prefetcher: peek / issue state (id-less fetch domain).
   // svt-pipe: require-contract

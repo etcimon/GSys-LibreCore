@@ -89,6 +89,25 @@ module instr_queue
     output logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:0] queue_oldest_pc_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin instr_queue status=proposal target=10-adjusted-FO4
+  // svt-plan: cone branch mask -> compaction/rank -> FIFO positions ->
+  // partial acceptance, replay address and insertion-index advance.
+  // svt-plan: boundary prepare ordered instruction packet -> reserve FIFO
+  // and address capacity -> publish accepted lanes and replay remainder atomically.
+  // svt-plan: carry lane validity, PCs/lengths, exceptions, CF/prediction,
+  // hart/fetch token, leftover ownership and first unconsumed slot.
+  // svt-plan: capacity count pending packets and address entries; backpressure
+  // preserves all lanes; consumed_o describes actual publication exactly once.
+  // svt-plan: recovery flush kills queued packets; partial leftover-slot
+  // acceptance must reproduce lo_partial and the matching replay_addr_o.
+  // svt-plan: effect separates prefix/rank work from FIFO write decode;
+  // balanced prefix ranks replace serial per-lane compaction dependence.
+  // svt-plan: cost packet buffering and fetch-to-decode latency; delaying
+  // replay_o alone can accept duplicate or missing instructions.
+  // svt-plan: limit per-FIFO capacity and address stream alignment remain;
+  // frontend and realigner consume the same accepted-token event.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 62.7 adjusted FO4 on the
   // Nangate45 board): instruction queue on the fetch stream (id-less domain).
   // svt-pipe: require-contract

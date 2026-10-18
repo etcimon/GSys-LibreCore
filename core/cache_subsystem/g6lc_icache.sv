@@ -75,6 +75,23 @@ module g6lc_icache
     output icache_req_t  mem_data_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_icache status=proposal target=10-adjusted-FO4
+  // svt-plan: cone translated tag/hit selection feeds response, miss request
+  // and next-state decisions; response token already identifies fetch ownership.
+  // svt-plan: boundary bank tag/data read -> registered hit/miss descriptor
+  // -> response or MSHR issue; precompute independent PMA/NC attributes.
+  // svt-plan: carry token, VA/PA, tag/offset, selected data, exception,
+  // cacheability and invalidation epoch through the same descriptor.
+  // svt-plan: conflict kill stale responses and suppress refills invalidated
+  // after lookup; a held miss cannot issue twice when memory is backpressured.
+  // svt-plan: effect separates way compare from word selection and miss
+  // arbitration; banking limits per-stage fanout instead of copying a global mux.
+  // svt-plan: cost response/miss slots and fetch-hit latency; early fetch
+  // prediction must cover the delay and reserve space for returning windows.
+  // svt-plan: limit flush sweep, translation ownership and NC fetch behavior
+  // stay synchronized; dreq ready is a capacity promise, not a delayed hint.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 52.5 adjusted FO4 on the
   // Nangate45 board): instruction cache: tag compare and fill FSM.
   // svt-pipe: require-contract

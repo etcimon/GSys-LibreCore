@@ -122,6 +122,25 @@ module store_unit
     output dcache_req_i_t req_port_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin store_unit status=proposal target=10-adjusted-FO4
+  // svt-plan: cone translation/hazard and store-buffer/AMO availability
+  // drive the state transition; st_ready combines both destinations.
+  // svt-plan: boundary translate/format -> reserved store-or-AMO packet;
+  // use downstream reservation credits rather than delayed combinational ready.
+  // svt-plan: carry TID+generation, hart, PA/VA context, data/be/size,
+  // CBO/AMO opcode, exception and RVFI address through the held packet.
+  // svt-plan: capacity pop_st_o only when this unit retains the request;
+  // each downstream valid fires once, even while another destination is stalled.
+  // svt-plan: visibility preserve staged-store load hazards and physical
+  // publication; kill/cancel applies while held, AMO commit gating remains separate.
+  // svt-plan: effect removes queue next-state computation from the local
+  // ready/state path; translation preparation and dispatch can overlap.
+  // svt-plan: cost one reserved packet and credit logic; added latency and
+  // lower throughput if shared st_ready is not redesigned consistently.
+  // svt-plan: limit changing store_buffer ready alone does not solve AMO
+  // acceptance or translation ownership; integrate with store_buffer/load_unit.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 58.0 adjusted FO4 on the
   // Nangate45 board): store unit FSM: the store buffer handshake is same-cycle.
   // svt-pipe: require-contract

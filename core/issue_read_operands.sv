@@ -165,6 +165,25 @@ module issue_read_operands
     output logic [CVA6Cfg.XLEN-1:0] g1gq_rdata_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin issue_read_operands status=proposal target=10-adjusted-FO4
+  // svt-plan: cone source hazards/forwarding and FU availability determine
+  // issue_ack_o; FU valid outputs already come from *_valid_q registers.
+  // svt-plan: boundary operand selection -> reserved execution packet;
+  // extend the existing issue register rather than adding duplicate capture.
+  // svt-plan: carry instruction/TID generation, hart, FU/op, all operands,
+  // PC/length, exception and RVFI operand association as one held packet.
+  // svt-plan: capacity ack only against a real packet/FU reservation;
+  // yesterday's ready bit is not a credit unless capacity was reserved then.
+  // svt-plan: bypass form balanced priority over eligible producers and
+  // preserve CSR, FP, CASQ and same-cycle forwarding restrictions.
+  // svt-plan: effect separates source resolution from downstream ready
+  // propagation; bounded credit logic can shorten the acknowledgement path.
+  // svt-plan: cost held packets and resource accounting; extra stages change
+  // dependence distance and redirect latency unless absorbed by existing capture.
+  // svt-plan: limit FU completion-port scheduling must be solved with
+  // ex_stage; a stale-ready approximation can lose acknowledged instructions.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 65.9 adjusted FO4 on the
   // Nangate45 board): operand read and FU issue: the issue handshake with the scoreboard is same-cycle.
   // svt-pipe: require-contract
@@ -1718,6 +1737,5 @@ module issue_read_operands
 
 
 endmodule
-
 
 

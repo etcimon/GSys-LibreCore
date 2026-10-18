@@ -171,6 +171,27 @@ module multiplier
     // liveness with the pipeline and suppresses killed results before
     // arbitration, including after scoreboard TID reuse.
     //
+    // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+    // svt-plan: begin multiplier status=proposal target=10-adjusted-FO4
+    // svt-plan: cone existing three-stage path already uses AB=16 tiles,
+    // SB=8 slices, carry-save reduction and a final RW-bit add; it is not
+    // a remaining full-width-by-nine multiply needing the old slice proposal.
+    // svt-plan: boundary tile products -> bounded compressor levels ->
+    // registered sum/carry -> segmented final carry-prefix/select -> result.
+    // svt-plan: reshape split a compressor level group or final adder first;
+    // smaller AB/SB trades shallower products for more rows/registers, so size
+    // product, reduction and final-add stages together instead of halving blindly.
+    // svt-plan: carry both RW-bit rows with shifted-carry convention, modular
+    // sign correction, operator, valid, TID and every CLMUL result alternative.
+    // svt-plan: ownership implement each actual depth and mult.sv liveness
+    // together; setting MultStages=4 alone currently does not create stage four.
+    // svt-plan: effect replaces a long reduction or carry propagation with
+    // bounded levels; operand-only capture merely relocates the tile cone.
+    // svt-plan: cost extra row/carry-prefix registers and multiply latency;
+    // one result/cycle needs completion-port capacity for the longer pipeline.
+    // svt-plan: limit partial-product generation, carry-select output mux and
+    // cancellation/output arbitration remain; no inferred numeric FO4 gain.
+    // svt-plan: end
     // Re-pipelining contract (sv-timing A123/A124). The product's control
     // rides as {mult_valid_s1, trans_id_s1, operator_s1}; cancellation is
     // applied outside this module (mult.sv), so the domain has no kill and

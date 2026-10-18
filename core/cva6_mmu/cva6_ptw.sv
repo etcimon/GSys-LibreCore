@@ -1,3 +1,4 @@
+// Modified by: Etienne Cimon (2026) - A139 pipeline-design comments.
 // Copyright (c) 2018 ETH Zurich and University of Bologna.
 // Copyright (c) 2021 Thales.
 // Copyright (c) 2022 Bruno Sá and Zero-Day Labs.
@@ -93,6 +94,23 @@ module cva6_ptw
     output logic [CVA6Cfg.GPLEN-1:0] bad_gpaddr_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin cva6_ptw status=proposal target=10-adjusted-FO4
+  // svt-plan: cone returned PTE decode/permission/page-size classification
+  // feeds leaf response or next-level pointer and walk-state update.
+  // svt-plan: boundary PTE validation -> leaf/next-level action;
+  // retain raw PTE and walk context while classifying independently.
+  // svt-plan: carry VA/GPA, level, S/G-stage, ASID/VMID/hart, access type,
+  // root/privilege context, fault address and walk epoch with the PTE.
+  // svt-plan: ownership fences/context changes cancel both classification
+  // and queued refill; never emit a TLB update from an obsolete walk.
+  // svt-plan: effect divides PTE checks from pointer/response construction;
+  // arithmetic/address fields can be prepared in parallel with leaf checks.
+  // svt-plan: cost one context stage and extra cycles per visited level;
+  // issue only one next request per classified PTE and hold on cache refusal.
+  // svt-plan: limit nested translation and NAPOT/superpage legality remain
+  // part of the same verdict; added levels increase walk latency, not throughput.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 41.6 adjusted FO4 on the
   // Nangate45 board): page-table walker FSM.
   // svt-pipe: require-contract

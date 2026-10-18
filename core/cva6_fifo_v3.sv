@@ -39,6 +39,23 @@ module cva6_fifo_v3 #(
     output dtype                  data_o,      // output data
     input  logic                  pop_i        // pop head from queue
 );
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin cva6_fifo_v3 status=proposal target=10-adjusted-FO4
+  // svt-plan: cone memory head selection, fall-through and count/pointer
+  // update have different contracts for DEPTH=0, singleton and larger FIFOs.
+  // svt-plan: reshape bank head selection or cache a prefetched head;
+  // compute occupancy from accepted push/pop events, not payload next state.
+  // svt-plan: boundary storage read -> held head; include head storage in
+  // total capacity and refill it on accepted pop without duplicating entries.
+  // svt-plan: carry full payload/valid and pointer ownership; preserve flush,
+  // simultaneous push/pop, wrap, testmode and arbitrary supported depth.
+  // svt-plan: effect removes deep array muxing from output when a head cache
+  // is possible; count feedback remains narrow and independent.
+  // svt-plan: cost head register and bypass paths; fall-through/DEPTH=0 must
+  // retain their current combinational semantics or use an explicit new mode.
+  // svt-plan: limit do not silently register full_o/empty_o and overpromise
+  // capacity; caller-visible latency depends on the selected FIFO mode.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 54.3 adjusted FO4 on the
   // Nangate45 board): FIFO: push / pop handshake and usage are same-cycle by contract.
   // svt-pipe: require-contract

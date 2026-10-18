@@ -33,6 +33,23 @@ module g6lc_bp_statcor
     output bht_prediction_t [CVA6Cfg.INSTR_PER_FETCH-1:0] pred_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_bp_statcor status=proposal target=10-adjusted-FO4
+  // svt-plan: cone training is already row-local; remaining candidates are
+  // lookup tag/weight selection and update/decay distribution.
+  // svt-plan: reshape bank lookup, compute local hit/weight candidates,
+  // then merge before correction; localize decay/update enables per bank.
+  // svt-plan: boundary optional local lookup -> correction decision;
+  // keep training independent, using latest row state for every saturation update.
+  // svt-plan: carry query PC/slot, base prediction, hart/history/fetch
+  // epoch through correction; flush invalidates pending correction and training.
+  // svt-plan: effect bounds lookup mux fan-in; no claimed gain for redoing
+  // the existing per-row update transformation.
+  // svt-plan: cost candidate registers and late-correction latency; preserve
+  // tag collision/takeover and update-versus-decay priority.
+  // svt-plan: limit a correction arriving after fetch must use the frontend
+  // correction protocol rather than overwrite a newer window's prediction.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 60.9 adjusted FO4 on the
   // Nangate45 board): statistical corrector: table update state.
   // svt-pipe: require-contract

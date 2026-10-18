@@ -1,3 +1,4 @@
+// Modified by: Etienne Cimon (2026) - A139 pipeline-design comments.
 // Copyright (c) 2023 Thales.
 // Copyright (c) 2024, PlanV Technology
 // SPDX-License-Identifier: Apache-2.0 WITH SHL-2.1
@@ -91,6 +92,23 @@ module cva6_shared_tlb #(
 
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin cva6_shared_tlb status=proposal target=10-adjusted-FO4
+  // svt-plan: cone flush row/tag reads -> per-way SFENCE/VVMA/GVMA
+  // matching -> valid-bit writes and sweep completion.
+  // svt-plan: boundary row read -> registered flush-match mask -> invalidate;
+  // decouple row cursor advancement from accepted invalidation write completion.
+  // svt-plan: carry row index, way mask, fence kind/context and sweep
+  // generation; count outstanding mask/write packets before clearing flush busy.
+  // svt-plan: conflict serialize or epoch-mask lookup/refill traffic so a
+  // concurrent refill cannot recreate a translation the in-flight fence removes.
+  // svt-plan: effect splits match logic from valid-array write arbitration;
+  // steady one-row/cycle service needs independent read/write capacity.
+  // svt-plan: cost row descriptors and sweep drain cycles; preserve page
+  // overlap, global-entry and virtualization-specific matching semantics.
+  // svt-plan: limit commit's fence completion depends on actual drained
+  // writes; an advanced cursor alone does not mean invalidation is complete.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 14.7 adjusted FO4 on the
   // Nangate45 board): shared TLB: flush / lookup FSM.
   // svt-pipe: require-contract

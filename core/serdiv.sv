@@ -51,6 +51,24 @@ module serdiv
     output logic [WIDTH-1:0] res_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin serdiv status=proposal target=10-adjusted-FO4
+  // svt-plan: cone input leading-zero alignment, recurring compare/add
+  // step and final result negation are three different latency candidates.
+  // svt-plan: boundary normalize/count -> aligned operand load; optional
+  // final sign correction -> held result reduces setup/output paths.
+  // svt-plan: reshape for a shorter divide recurrence, segment add/compare
+  // into prepare and finalize microsteps; hold op_a_q/op_b_q and quotient
+  // state until finalize. One quotient digit then costs multiple cycles.
+  // svt-plan: carry id, opcode/rem/sign flags, zero/-1 cases, count and
+  // partial carry/compare; flush cancels all phases, result holds until ready.
+  // svt-plan: effect bounds arithmetic depth per microstep; changing radix
+  // is an alternative algorithm tradeoff, not the only possible pipeline.
+  // svt-plan: cost longer division latency and extra partial-state flops;
+  // interleaving divides would require multiple complete contexts and tags.
+  // svt-plan: limit normalize-only staging does not shorten DIVIDE feedback;
+  // overflow, divide-by-zero and signed remainder keep their exact semantics.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 63.3 adjusted FO4 on the
   // Nangate45 board): serial divider: an iterative FSM with its own ready / done; stages are its radix, not registers.
   // svt-pipe: require-contract

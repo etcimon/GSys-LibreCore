@@ -136,6 +136,28 @@ module wt_dcache_wbuffer
     output logic [CVA6Cfg.DCACHE_MAX_TX-1:0] tx_vld_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin wt_dcache_wbuffer status=proposal target=10-adjusted-FO4
+  // svt-plan: cone fixup selection, coalescing, supersession and array-write
+  // acknowledgement interact with the same pending entry and its byte mask.
+  // svt-plan: reshape retain the existing acceptance-time T47 byte clearing;
+  // use stationary fixup descriptors plus narrow age references for exports.
+  // svt-plan: boundary prepare a fixup write descriptor after tag lookup;
+  // retire it only when the array grants the still-live byte subset.
+  // svt-plan: carry source slot+generation, PA, data/user, be, way and
+  // tag/invalidation version; keep the source reserved until acknowledgement.
+  // svt-plan: conflict a coalesce/new store/invalidation after preparation
+  // must mask or invalidate the descriptor, including on its grant cycle;
+  // replay changed payloads rather than writing old data under a new mask.
+  // svt-plan: visibility export the pending write until array visibility;
+  // preserve newest-byte order across wbuffer, fixup queue and bypass entry.
+  // svt-plan: effect separates tag/age selection from payload write control;
+  // a bounded local supersession check replaces repeating the entire lookup.
+  // svt-plan: cost descriptor storage and version comparisons; write service
+  // gains a cycle and can replay, so capacity includes prepared/inflight work.
+  // svt-plan: limit byte conflict checks remain on grant; increasing pending
+  // depth without shortening the export merge can move the bottleneck there.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 105.6 adjusted FO4 on the
   // Nangate45 board): fixup and wbuffer next-state merge accepted stores,
   // deferred writes and byte supersession. wbuffer_data_o exports wbuffer_q;

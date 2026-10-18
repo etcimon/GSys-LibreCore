@@ -85,6 +85,23 @@ module alu
 
   assign adder_op_b_negate = fu_data_i.operation inside {EQ, NE, SUB, SUBW, ANDN, ORN, XNOR};
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin alu status=proposal target=10-adjusted-FO4
+  // svt-plan: cone operand conditioning, add/compare or shift/bitmanip,
+  // then result selection; an output register does not split the operator.
+  // svt-plan: reshape compute class results in parallel; use group
+  // generate/propagate and local sums for add/sub, balanced mux levels for shifts.
+  // svt-plan: boundary local sums/prefix groups or partial shifts ->
+  // carry completion/remaining shifts -> class result; align all alternatives.
+  // svt-plan: carry operation/class, signed/word mode, branch comparison,
+  // complete FLU ownership from ex_stage and any operands used after the cut.
+  // svt-plan: effect divides carry/shift depth and reduces final selection
+  // fan-in; logical ops must not bypass the agreed result-availability schedule.
+  // svt-plan: cost intermediate sums/flags and additional execution cycles;
+  // branch comparison latency and result-port reservation change together.
+  // svt-plan: limit final carry prefix and output mux remain; no automatic
+  // 10-FO4 claim from replacing '+' or registering result_o.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A124; 2.06 ns in->out on Nangate45,
   // the 64-bit adder alone is ~26 adjusted FO4 on this library). The ALU is a
   // pure datapath with no valid of its own: a stage here is a fixed-latency

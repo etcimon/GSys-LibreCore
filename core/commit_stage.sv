@@ -109,6 +109,23 @@ module commit_stage
     input logic break_from_trigger_i
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin commit_stage status=proposal target=10-adjusted-FO4
+  // svt-plan: cone retire classification, serialization conditions,
+  // exception priority and register/store/CSR acknowledgements converge here.
+  // svt-plan: boundary read-only retire preparation -> architectural commit;
+  // predecode immutable instruction fields while keeping final eligibility live.
+  // svt-plan: carry TID+generation, hart, destination/result, PC/exception,
+  // memory/CSR class and CASQ dual-destination state in the prepared record.
+  // svt-plan: ownership recheck oldest status, interrupt/trap/debug, store
+  // readiness and TLB-flush busy before one atomic commit decision.
+  // svt-plan: effect removes instruction decode and payload selection
+  // from the final side-effect gate; it does not defer that gate after an ack.
+  // svt-plan: cost preparation registers and possible retire bubbles;
+  // RVFI, register writes, freeing old mappings and memory commit share one event.
+  // svt-plan: limit CASQ split writes, fences and precise exceptions cannot
+  // be pipelined independently; no speculative external side effects.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 26.7 adjusted FO4 on the
   // Nangate45 board): commit: architectural state update; the commit acknowledge is same-cycle.
   // svt-pipe: require-contract
@@ -631,5 +648,4 @@ module commit_stage
 
 
 endmodule
-
 

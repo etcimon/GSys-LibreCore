@@ -60,6 +60,23 @@ module cva6_tlb
     output logic [CVA6Cfg.PtLevels-2:0] lu_is_page_o,
     output logic lu_hit_o
 );
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin cva6_tlb status=proposal target=10-adjusted-FO4
+  // svt-plan: cone page-size/VPN/ASID/VMID matching, hit reduction,
+  // replacement update and refill/flush writes share translation metadata.
+  // svt-plan: boundary bank-local match records -> hit/payload select;
+  // prepare refill decode separately, preserving the current install arbitration.
+  // svt-plan: carry lookup VA, ASID/VMID/hart, stage enables, access kind,
+  // selected PTEs/page sizes and translation epoch through the response.
+  // svt-plan: conflict flush/context change kills pending hits and refills;
+  // keep NAPOT, superpage overlap, global entries and two-stage matching exact.
+  // svt-plan: effect separates parallel comparisons from global select and
+  // permission consumers; bounds each bank's compare fanout.
+  // svt-plan: cost match/PTE registers and +1 lookup cycle; MMU/LSU must hold
+  // the request and align permissions, exceptions, hit and translated address.
+  // svt-plan: limit replacing !lu_hit_o with an update-address CAM changes
+  // policy unless lookup/refill ownership is reconciled; it is not a free cut.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 41.8 adjusted FO4 on the
   // Nangate45 board): TLB: tag match and replacement state.
   // svt-pipe: require-contract

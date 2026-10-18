@@ -83,6 +83,23 @@ module ras #(
     input  logic [CVA6Cfg.VLEN-1:0]  restore_push_ra_i
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin ras status=proposal target=10-adjusted-FO4
+  // svt-plan: cone tos/count update and indexed top read feed return
+  // prediction and checkpoints; restore may also apply a resolving push/pop.
+  // svt-plan: reshape keep a per-hart top cache plus prefetched next-top;
+  // update cache from the same prioritized push/pop/restore event as the stack.
+  // svt-plan: boundary optional backing-array read -> next-top cache;
+  // repeated pops require refill bandwidth or a conservative prediction miss.
+  // svt-plan: carry hart, pointer/count generation, top validity/value and
+  // restore payload; same-bank restore wins speculative updates as today.
+  // svt-plan: effect removes indexed array selection from common top output;
+  // stationary storage avoids moving the stack payload on push/pop.
+  // svt-plan: cost cached tops and refill control; snapshots must reflect
+  // logical top, including restore_pop/restore_push and empty-stack cases.
+  // svt-plan: limit return prediction may fall back when cache refill lags;
+  // never return an old valid top or change checkpoint contents silently.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 39.1 adjusted FO4 on the
   // Nangate45 board): return address stack: push / pop state.
   // svt-pipe: require-contract

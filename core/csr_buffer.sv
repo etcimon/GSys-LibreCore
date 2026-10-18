@@ -44,6 +44,23 @@ module csr_buffer
     // CSR address to write - COMMIT_STAGE
     output logic [11:0] csr_addr_o
 );
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin csr_buffer status=proposal target=10-adjusted-FO4
+  // svt-plan: cone cancel/commit removal -> free-slot search -> allocate
+  // feeds tab_d; OoO commit reads by TID rather than entry position.
+  // svt-plan: reshape preselect free slots from registered validity and
+  // maintain local entry lifecycle bits; avoid payload movement or a serial search.
+  // svt-plan: boundary optional accepted CSR-address record -> table insert;
+  // reserve its credit before csr_valid_i and include it in commit lookup.
+  // svt-plan: carry TID+generation, CSR address and ownership; flush/cancel
+  // clears pending entries and commit releases exactly the matched reservation.
+  // svt-plan: effect separates release/search/allocation dependencies;
+  // registered free choices can cost a bubble when only a just-freed slot exists.
+  // svt-plan: cost reservation metadata and pending-lookup bypass; no CSR
+  // read or side effect may proceed without its matching address record.
+  // svt-plan: limit the legacy single-entry mode has different acceptance
+  // semantics and must keep its bypass/result timing or select an explicit mode.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 30.6 adjusted FO4 on the
   // Nangate45 board): CSR buffer: the dual-entry CSR hazard table.
   // svt-pipe: require-contract

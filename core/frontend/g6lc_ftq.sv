@@ -38,6 +38,23 @@ module g6lc_ftq
     output logic [$clog2(DEPTH+1)-1:0] count_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_ftq status=proposal target=10-adjusted-FO4
+  // svt-plan: cone head+peek_offset read and queue count/pointer updates;
+  // flush plus push intentionally seeds a new entry rather than dropping it.
+  // svt-plan: reshape cache the head tuple and bank peek selection;
+  // count accepted push/pop once, independent of wide tuple writes.
+  // svt-plan: boundary optional peek request -> prefetch hint, keeping
+  // demand head visibility separate from the nonblocking prefetch stream.
+  // svt-plan: carry VA/taken/target, offset and head/flush epoch; drop a
+  // delayed peek after its head moved or queue was reseeded.
+  // svt-plan: effect splits peek addition/read from prefetch PMA selection;
+  // demand count feedback remains local instead of gaining another stage.
+  // svt-plan: cost head/peek registers; preserve full/empty behavior and
+  // same-cycle flush+push, which define the next demand stream.
+  // svt-plan: limit stale peek is discardable, stale demand head is not;
+  // head caching needs correct refill on every accepted pop and wrap.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 19.8 adjusted FO4 on the
   // Nangate45 board): fetch target queue: push / pop state (id-less fetch domain).
   // svt-pipe: require-contract

@@ -121,6 +121,25 @@ module load_unit
     output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] phys_hart_o,
     output logic [1:0] phys_size_o
 );
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin load_unit status=proposal target=10-adjusted-FO4
+  // svt-plan: cone translation/hazard/request control is separate from
+  // return-data shift/sign selection; choose boundaries for both transactions.
+  // svt-plan: boundary request/translation ownership -> permission+hazard
+  // verdict -> cache acceptance; optional response snapshot -> align/extend.
+  // svt-plan: carry TID+generation, hart, VA/PA, size/op, endian mode,
+  // exception context, load-buffer ID and forwarding source with the token.
+  // svt-plan: capacity reserve load-buffer/response slots at acceptance;
+  // tag_valid/kill_req must refer to the same earlier cache request.
+  // svt-plan: visibility NI/MMIO requests wait for commit/permissions;
+  // recheck pending older stores before publication, including STQ bypasses.
+  // svt-plan: effect separates tag/permission/hazard control from request
+  // dispatch and isolates returned-word selection from shift/sign logic.
+  // svt-plan: cost extra load latency and held requests/results; neither
+  // dtlb_hit nor st_fwd_data can be delayed without its ownership and verdict.
+  // svt-plan: limit early index request is already overlapped with translation;
+  // added stages must retain that split and COH_OOO physical validation.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 59.3 adjusted FO4 on the
   // Nangate45 board): load unit FSM: the TLB / D$ handshakes are same-cycle.
   // svt-pipe: require-contract

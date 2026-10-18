@@ -3,6 +3,12 @@
 Feature-addition playbook for control-flow speculation in the CVA6 frontend. Read `../../AGENTS.md`
 first. Spec summaries live in `../spec/` (see `../spec/INDEX.md`).
 
+Pipeline design reference: [A139 module-driven plans](../../architecture/RTL-PIPELINE-PLANS.md).
+The `svt-plan:` blocks in active fetch and predictor sources describe early
+prediction, late correction, checkpoint reclamation and aligned history
+snapshots. These are proposals, with explicit recovery and capacity obligations;
+they do not change the currently implemented fetch latency.
+
 ## Table of contents
 1. Spec grounding (why it is microarchitectural)
 2. Code map (`file:line`)

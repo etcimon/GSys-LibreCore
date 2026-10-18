@@ -64,6 +64,23 @@ module wt_axi_adapter
     output logic [63:0] inval_apply_addr_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin wt_axi_adapter status=proposal target=10-adjusted-FO4
+  // svt-plan: cone AXI return classification and invalidate/response
+  // arbitration feed self-invalidation pending state and cache return outputs.
+  // svt-plan: boundary accepted bus response -> decoded held return event;
+  // distinguish transport completion from cache invalidation visibility.
+  // svt-plan: carry source channel, ID, data/user, response/error/last,
+  // cache transaction identity and associated invalidation address/order.
+  // svt-plan: capacity assert AXI ready only with actual return storage;
+  // retain self-invalidation until apply handshake, not merely bus acceptance.
+  // svt-plan: effect separates external return mux/decode from coherence
+  // action selection; use bounded local arbitration for each response class.
+  // svt-plan: cost return slots and completion latency; preserve read/write
+  // ordering and drain pending events before fence/empty completion.
+  // svt-plan: limit bus buffering cannot reorder an invalidate behind a
+  // response that would expose stale data; queues must have an explicit order.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 29.8 adjusted FO4 on the
   // Nangate45 board): AXI adapter: request / response FSMs.
   // svt-pipe: require-contract

@@ -78,6 +78,25 @@ module wt_dcache_missunit
     output dcache_req_t mem_data_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin wt_dcache_missunit status=proposal target=10-adjusted-FO4
+  // svt-plan: cone miss arbitration/MSHR selection and refill/control
+  // decode feed cache writes, invalidations and completion acknowledgements.
+  // svt-plan: boundary accepted refill -> cache-install descriptor -> grant;
+  // prepare way/index/tag/data enables together outside the array-write cycle.
+  // svt-plan: carry MSHR identity, PA, way, data/user, NC/size, refill
+  // epoch and killed status; hold the descriptor until all required writes finish.
+  // svt-plan: conflict invalidation/fill_killed prevents publishing stale
+  // lines; a later invalidate cannot be overtaken by a buffered refill.
+  // svt-plan: visibility do not free the MSHR or report completion before
+  // installation is visible; align wr_cl_inv with fixup byte-supersession rules.
+  // svt-plan: effect separates MSHR/refill decode from array arbitration;
+  // registered descriptor fields shorten cross-module control propagation.
+  // svt-plan: cost refill holding space and miss latency; preserve fairness
+  // among demand, flush and invalidation, including simultaneous events.
+  // svt-plan: limit array grant and coherence ordering remain; merely
+  // registering wr_cl_tag_o would misalign its data and write enables.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 60.0 adjusted FO4 on the
   // Nangate45 board): miss unit: FSM with AXI handshakes; miss_req_i / miss_id_i are its protocol.
   // svt-pipe: require-contract

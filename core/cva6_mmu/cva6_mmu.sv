@@ -129,6 +129,23 @@ module cva6_mmu
     input logic           [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] pmpaddr_i
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin cva6_mmu status=proposal target=10-adjusted-FO4
+  // svt-plan: cone TLB result selection, translated-address construction,
+  // privilege/PMP checks and exception selection form a response transaction.
+  // svt-plan: boundary translation/PTE snapshot -> permission/PA response;
+  // prepare independent permission terms in parallel with address formation.
+  // svt-plan: carry requester identity, hart, VA, ASID/VMID, PTE/page size,
+  // access kind, privilege/SUM/MXR/stage enables and fault metadata.
+  // svt-plan: ownership extend existing held-context rules to every new
+  // stage; invalidate on matching fence/context change before response visibility.
+  // svt-plan: effect separates lookup from permission/exception reduction;
+  // keeps late architectural context muxes off a held transaction's datapath.
+  // svt-plan: cost response storage and translation latency; frontend/LSU
+  // must wait or kill the same request, including early cache-index requests.
+  // svt-plan: limit neither permission checks nor non-idempotent access
+  // ordering may be bypassed to hide the new latency.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 45.7 adjusted FO4 on the
   // Nangate45 board): MMU: translation handshakes same-cycle with the TLBs.
   // svt-pipe: require-contract

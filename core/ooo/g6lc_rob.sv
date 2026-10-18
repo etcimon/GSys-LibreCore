@@ -44,6 +44,25 @@ module g6lc_rob #(
     input  logic [NR_RETIRE-1:0][TID_W-1:0]        retire_tid_i
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_rob status=proposal target=10-adjusted-FO4
+  // svt-plan: cone complete/retire TID CAMs feed per-entry updates, unique
+  // free-event count and head re-anchor; SMT retire need not be head+r.
+  // svt-plan: reshape maintain a TID-to-slot directory at allocation;
+  // completion/free events carry slot+generation and validate against rob_q.
+  // svt-plan: boundary directory/event decode -> local slot update;
+  // retain the existing slot-order head search and bank its live summaries.
+  // svt-plan: carry TID, slot generation, completion/exception or retire
+  // kind; deduplicate multiple retire ports before changing count.
+  // svt-plan: ownership pending retire prevents slot reuse; pending
+  // completion is cancelled with its original owner even after TID reuse.
+  // svt-plan: effect replaces repeated all-entry TID compares with indexed
+  // lookup plus local identity checks, then a bounded head-summary reduction.
+  // svt-plan: cost directory and event storage; completion-to-retire latency;
+  // allocation capacity counts slots pending physical release conservatively.
+  // svt-plan: limit head/count feedback remains; do not delay allocation,
+  // free and output logic independently and claim uniform shifted state.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 77.9 adjusted FO4 on the
   // Nangate45 board): ROB: head / count next-state written by alloc, commit, cancel and flush in one function.
   // svt-pipe: require-contract

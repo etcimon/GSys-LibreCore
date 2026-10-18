@@ -470,6 +470,25 @@ module g6lc_ooo_dispatch
     end
   end
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_ooo_dispatch status=proposal target=10-adjusted-FO4
+  // svt-plan: cone dispatch_ack_o gates indexed writes into the per-TID
+  // destination, old-destination, class, late-result and checkpoint tables.
+  // svt-plan: boundary accepted dispatch record -> local table write decodes;
+  // reserve record capacity before acknowledging the whole dispatch group.
+  // svt-plan: carry TID+generation, hart, integer/FP new/old destinations,
+  // is_st, late_result, branch/checkpoint state and per-lane acceptance.
+  // svt-plan: bypass every issue/writeback/retire/recovery table read from
+  // the newest matching pending record; preserve same-cycle writer priority.
+  // svt-plan: conflict kill on cancel/flush, and prevent an old record or
+  // late completion from overwriting metadata after the TID has been reused.
+  // svt-plan: effect removes late ack from wide table write-decode cones;
+  // explicit predecode can distribute writes while bounded bypass handles reads.
+  // svt-plan: cost per-port records and read comparisons; no added consumer
+  // latency only if all table reads, including checkpoint release, use bypass.
+  // svt-plan: limit can_go and shared rename/IQ/LSQ/ROB capacity still need
+  // a consistent reservation rule; staging the table does not shorten that rule.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A124; 2.10 ns in->reg tid_is_fpr_d on
   // Nangate45). The per-tid side tables are written under the dispatch
   // handshake (dispatch_valid_i / dispatch_ack_o) and read by the issue side

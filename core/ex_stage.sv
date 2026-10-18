@@ -299,6 +299,25 @@ module ex_stage
     input logic [5:0] orig_instr_aes_i
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin ex_stage status=proposal target=10-adjusted-FO4
+  // svt-plan: cone one_cycle_select and mult_valid feed a shared FLU
+  // result/TID mux; independent new FU latencies create completion collisions.
+  // svt-plan: reshape make completion capacity explicit: reserve future
+  // fixed-latency slots or buffer each FU response before fair arbitration.
+  // svt-plan: boundary FU completion packet -> selected writeback packet;
+  // coordinate ALU, AES, branch, CSR and mult/serdiv availability schedules.
+  // svt-plan: carry result, TID+generation, hart, exception/flags, operation
+  // class and branch recovery payload; filter killed owners before publication.
+  // svt-plan: capacity acknowledge issue only with guaranteed completion
+  // storage; a fixed-latency producer cannot be backpressured after its last edge.
+  // svt-plan: effect localizes wide result selection and ready propagation,
+  // enabling actual intra-FU cuts instead of data-only output registers.
+  // svt-plan: cost response queues/arbitration and possible writeback delay;
+  // keep CSR side effects and branch redirect timing separate from result muxing.
+  // svt-plan: limit completion bandwidth remains finite; carry latency to
+  // IQ wakeup, forwarding and scoreboard completion consistently.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 42.8 adjusted FO4 on the
   // Nangate45 board): execute stage: the FLU's single writeback port serialises ALU / branch / CSR / mult / AES; a stage on any of them is an FLU redesign.
   // svt-pipe: require-contract

@@ -194,6 +194,27 @@ module g6lc_lsq #(
       end
   end
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_lsq status=proposal target=10-adjusted-FO4
+  // svt-plan: cone alloc, virtual/physical address updates, completion,
+  // replay, release and cancel all act on ld_d/st_d in one ownership domain.
+  // svt-plan: boundary address event -> bank-local dependence candidates ->
+  // replay/issue verdict; keep slot allocation separate from address completion.
+  // svt-plan: carry slot+generation, TID, hart, address space, address/size,
+  // is-store, program age and publication state through each pending event.
+  // svt-plan: visibility pending older store addresses participate in hazard
+  // checks; unresolved older stores block a load or force tracked speculation.
+  // svt-plan: conflict recheck release/cancel/flush and generation before
+  // applying a delayed event; physical and virtual updates are not interchangeable.
+  // svt-plan: capacity reserve event slots before accepting AGU/physical
+  // updates; prevent load publication/retirement until its verdict is final.
+  // svt-plan: effect separates address CAM work from dependence reduction;
+  // local comparisons plus balanced reduction bound fan-in per stage.
+  // svt-plan: cost event/candidate storage and AGU-to-issue/replay latency;
+  // delayed AGU updates alone do not make all LSQ state a uniform time shift.
+  // svt-plan: limit publication and consumer-replay semantics dominate;
+  // a load already consumed by younger instructions needs broader recovery.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A124; worst measured cone of the core,
   // 3.77 ns in->reg into ld_d on Nangate45). The entry arrays are a
   // many-writer next-state function — alloc, AGU update, complete, release,

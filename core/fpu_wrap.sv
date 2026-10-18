@@ -40,6 +40,23 @@ module fpu_wrap
     output logic                                   fpu_early_valid_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin fpu_wrap status=proposal target=10-adjusted-FO4
+  // svt-plan: cone operation/format/RM translation feeds fpnew acceptance;
+  // existing STALL operand hold already captures a complete stalled request.
+  // svt-plan: boundary decoded request queue -> fpnew input handshake;
+  // extend that hold mechanism instead of independently delaying fpu_tag.
+  // svt-plan: carry operands, op/modifier, source/destination/int formats,
+  // resolved rounding mode, tag+generation, hart and cancellation ownership.
+  // svt-plan: capacity upstream ack reserves both queue space and owner;
+  // track ownership through fpnew output and release only when result is consumed.
+  // svt-plan: effect separates decode from vendor ready propagation;
+  // optional output queue separates flag/result handling from completion arbitration.
+  // svt-plan: cost queue registers and FPU latency; long-latency operations
+  // and killed outputs still release reservations without touching reused owners.
+  // svt-plan: limit changing fpnew internal latency is a separate vendor
+  // configuration task; wrapper buffering alone does not split its arithmetic.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 47.3 adjusted FO4 on the
   // Nangate45 board): FPU wrapper: operand formatting into fpnew, which has its own pipeline; the tag travels inside fpnew.
   // svt-pipe: require-contract

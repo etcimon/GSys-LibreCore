@@ -381,6 +381,28 @@ module g6lc_rename #(
 
   assign stall_o = stall_c;
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_rename status=proposal target=10-adjusted-FO4
+  // svt-plan: cone map read, older-lane bypass, free-register allocation,
+  // map write and checkpoint capture share one accepted rename group.
+  // svt-plan: boundary reserve physical registers/checkpoints and read maps
+  // -> resolve same-group dependencies -> publish the complete group.
+  // svt-plan: carry per-lane hart, integer/FP class, architectural sources,
+  // new/old physical destinations, busy state, checkpoint tag and group epoch.
+  // svt-plan: ownership reserve resources atomically; stalled groups hold
+  // allocations; flush releases only unpublished reservations exactly once.
+  // svt-plan: bypass compare against earlier lanes of the same hart/class,
+  // then earlier pending groups; newest matching destination wins, including
+  // prd_old for WAW; integer x0 is fixed while FP f0 remains allocatable.
+  // svt-plan: recovery checkpoint the logical map at each branch's lane,
+  // including older pending writes; reconcile concurrent retire/free/wakeup.
+  // svt-plan: effect separates free selection and map read from dependency
+  // resolution/write; bounded group windows avoid an unbounded bypass chain.
+  // svt-plan: cost group registers and rollback metadata; +1 or more dispatch
+  // cycles, with one group/cycle only if each stage has reserved capacity.
+  // svt-plan: limit same-hart dependency compare/select and checkpoint copy
+  // remain; dispatch/IQ/ROB must share one group acceptance decision.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A124; 2.69 ns on Nangate45). The map
   // tables are read, bypassed within the group and written in one cycle; a
   // stage inside the block would present a stale map to the younger ports.

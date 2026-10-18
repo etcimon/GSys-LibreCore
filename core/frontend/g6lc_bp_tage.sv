@@ -36,6 +36,23 @@ module g6lc_bp_tage
     output logic                         hist_update_taken_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_bp_tage status=proposal target=10-adjusted-FO4
+  // svt-plan: cone PC/history hashing and table reads feed ordered provider
+  // selection; base update/allocation/decay are separate state recurrences.
+  // svt-plan: boundary table hit/counter candidates -> provider/alternate
+  // selection; merge candidates in a balanced tree preserving table priority.
+  // svt-plan: carry PC/slot, history snapshot, provider/alternate identity,
+  // confidence, hart/fetch epoch; align base prediction with tagged candidates.
+  // svt-plan: training register addresses/outcomes, not stale updated rows;
+  // preserve same-row update/allocate/decay order and folded_update_i context.
+  // svt-plan: effect splits lookup from provider selection; local base-row
+  // update and banked decay enables avoid a global read-modify-write chain.
+  // svt-plan: cost candidate registers and later prediction; history update
+  // fires once per accepted training event, independent of pipeline stalls.
+  // svt-plan: limit frontend needs early fallback and token-based correction;
+  // registered provider alone cannot be paired with a newer query's base result.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 29.2 adjusted FO4 on the
   // Nangate45 board): TAGE: table update and decay state.
   // svt-pipe: require-contract

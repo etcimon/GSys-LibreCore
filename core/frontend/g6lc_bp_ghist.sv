@@ -44,6 +44,23 @@ module g6lc_bp_ghist
     output logic [NR_FOLDS-1:0][FOLD_W-1:0] folded_src_o
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_bp_ghist status=proposal target=10-adjusted-FO4
+  // svt-plan: cone hart-selected history shift/restore and XOR folding;
+  // live lookup and training history select different owners.
+  // svt-plan: reshape balance XOR folds; optionally maintain per-hart
+  // folded summaries incrementally with the full history on accepted update.
+  // svt-plan: boundary restore-fold preparation -> atomic history+fold
+  // publication; hold prediction until both represent the same history version.
+  // svt-plan: carry hart, update/restore/flush kind and history version;
+  // preserve restore-before-update and final flush priority for the selected bank.
+  // svt-plan: effect replaces recurring full-history reduction with bounded
+  // XOR updates; explicit fold_src_i still requires its independent reduction.
+  // svt-plan: cost folded-state copies and restore logic; full history stays
+  // available for checkpoints and arbitrary restore, not reconstructed from folds.
+  // svt-plan: limit a register only on folded_o misaligns PC/history;
+  // short existing fold trees may favor balancing without additional state.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 14.5 adjusted FO4 on the
   // Nangate45 board): global history: shift / restore.
   // svt-pipe: require-contract

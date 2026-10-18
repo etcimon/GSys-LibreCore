@@ -127,6 +127,25 @@ module perf_counters
     input logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][31:0] mcountinhibit_b_i
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin perf_counters status=proposal target=10-adjusted-FO4
+  // svt-plan: cone event select/privilege inhibit -> enabled full-width
+  // increment -> overflow sticky; CSR accesses add another update priority.
+  // svt-plan: reshape segment counters; precompute carry-enable summaries
+  // of the REGISTERED lower slices, then increment each slice locally.
+  // svt-plan: boundary optional event capture -> local counter update;
+  // exact-cycle reads require folding pending events or draining before access.
+  // svt-plan: carry event with hart, privilege/debug and inhibit decision;
+  // CSR writes suppress the same cycle's counting only in the accessed bank.
+  // svt-plan: conflict rebuild carry summaries on whole/partial CSR writes;
+  // preserve RV32 halves, Sscofpmf overflow and interrupt timing.
+  // svt-plan: effect shorter local carry propagation without delaying
+  // architectural state if summaries are maintained exactly each cycle.
+  // svt-plan: cost summary flops and update logic; summary maintenance must
+  // itself use bounded carry work, not recreate the wide increment elsewhere.
+  // svt-plan: limit blindly pipelining event or overflow bits changes
+  // counter/interrupt observations; event-tree fanout remains a separate cone.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 70.8 adjusted FO4 on the
   // Nangate45 board): performance counters: the event group select and the counter increments; no in-flight operation.
   // svt-pipe: require-contract

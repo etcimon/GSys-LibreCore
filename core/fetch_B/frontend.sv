@@ -749,6 +749,28 @@ module frontend
   assign fetch_address = arch_valid ? arch_pc :
       redirect_hold ? redirect_pc_q : seq_base;
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin frontend status=proposal target=10-adjusted-FO4
+  // svt-plan: cone response alignment, per-slot direct-target additions,
+  // taken-slot priority and next-PC arbitration are distinct dependent work.
+  // svt-plan: reshape use an early next-block prediction for the fetch loop;
+  // compute direct targets and full provider selection as a late correction.
+  // svt-plan: boundary response/predecode -> target/provider -> correction;
+  // precompute addr_off+immediate locally to avoid two serial VLEN additions.
+  // svt-plan: carry response token, hart, fetch epoch, slot PCs/lengths,
+  // exceptions, carry-half ownership, predictions and checkpoint identifiers.
+  // svt-plan: ownership a correction applies only to its surviving token;
+  // kill every younger fetch/FTQ/instruction-queue entry in that epoch and
+  // undo its speculative RAS/history effects before restarting the stream.
+  // svt-plan: capacity reserve response and checkpoint slots on early fetch;
+  // retain the complete token under backpressure; redirects invalidate it.
+  // svt-plan: effect removes full direct-target arithmetic from the early
+  // next-PC recurrence; late target selection still needs a balanced tree.
+  // svt-plan: cost response stages and epoch tracking; prediction errors add
+  // bubbles, including stale BTB hits, not just cold direct-branch misses.
+  // svt-plan: limit requires coordinated FTQ, realigner, queue, predictor
+  // and controller changes; a data register alone cannot implement recovery.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A124; 3.05 ns reg->reg npc_d ->
   // predict_address on Nangate45). npc_q -> predictor lookup -> seq_base ->
   // npc_d is the fetch loop: a register anywhere in it changes the redirect

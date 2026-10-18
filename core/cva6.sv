@@ -473,6 +473,23 @@ module cva6
     input  logic        l2_pf_useful_i
 );
 
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin cva6 status=proposal target=10-adjusted-FO4
+  // svt-plan: cone gen_cmo_local request -> local invalidation arbitration
+  // -> done crosses ownership between CMO state and shared invalidation users.
+  // svt-plan: boundary held local invalidation descriptor -> arbiter accept;
+  // partition top-level control distribution at actual consumer handshakes.
+  // svt-plan: carry address/op and CMO identity until cl_inval_fire;
+  // acknowledge only the accepted requester, preserving competing invalidations.
+  // svt-plan: ownership completion waits for the operation's real visibility;
+  // no registered broadcast may turn an unaccepted request into cmo_req_done.
+  // svt-plan: effect can isolate global arbitration/ready propagation from
+  // local FSM decode; predecode stable request fields rather than retime all wires.
+  // svt-plan: cost pending slots and CMO/fence latency; integrate with the
+  // miss unit and commit drain conditions rather than add a top-level delay.
+  // svt-plan: limit this module also contains large wiring cones; source
+  // locality alone does not identify which child feedback must be redesigned.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 48.2 adjusted FO4 on the
   // Nangate45 board): core top: CMO / invalidation FSM and the cross-unit wiring; no stage at the top.
   // svt-pipe: require-contract
