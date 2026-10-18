@@ -114,16 +114,19 @@ TY_HAS_MBI = 1 << 29
 DEC = dict(RelaxedPrecision=0, SpecId=1, Block=2, BufferBlock=3,
            RowMajor=4, ColMajor=5, ArrayStride=6, MatrixStride=7,
            Builtin=11, NoPerspective=13, Flat=14, Centroid=16,
-           Restrict=19, Aliased=20, NonWritable=24, NonReadable=25,
+           Restrict=19, Aliased=20, Volatile=21, Coherent=23,
+           NonWritable=24, NonReadable=25,
            Uniform=26, Location=30, Binding=33, DescriptorSet=34,
            Offset=35, NoContraction=42)
 DEC_ID_OK = {DEC['RelaxedPrecision'], DEC['Block'], DEC['BufferBlock'],
              DEC['ArrayStride'], DEC['Builtin'], DEC['Restrict'],
-             DEC['Aliased'], DEC['NonWritable'], DEC['NonReadable'],
+             DEC['Aliased'], DEC['Volatile'], DEC['Coherent'],
+             DEC['NonWritable'], DEC['NonReadable'],
              DEC['Binding'], DEC['DescriptorSet'], DEC['NoContraction'],
              DEC['SpecId'], DEC['Uniform'], DEC['Location']}
 DEC_MBR_OK = {DEC['RelaxedPrecision'], DEC['RowMajor'], DEC['ColMajor'],
-              DEC['MatrixStride'], DEC['Offset'], DEC['NonWritable'],
+              DEC['MatrixStride'], DEC['Offset'], DEC['Volatile'],
+              DEC['Coherent'], DEC['NonWritable'],
               DEC['NonReadable'], DEC['NoContraction'], DEC['SpecId'],
               DEC['Builtin']}
 
@@ -905,7 +908,22 @@ class Scanner:
 
     def h_59(self, opc, ops, at):       # OpVariable
         if len(ops) > 3:
-            raise Fault(FAULT['VAR'], opc, at)   # initializer unsupported
+            # initializer operand: legal only when it evaluates to
+            # all-zero on a storage class whose bytes are pre-cleared
+            # at wave/workgroup start (Function/Private scratch and
+            # the Workgroup slab both come up zeroed) — then the init
+            # is a no-op.  Tint/glslang emit OpConstantNull here;
+            # non-zero initializers stay refused (no per-call
+            # re-init machinery).
+            sc = ops[2]
+            init_ok = sc in (SC['FUNCTION'], SC['PRIVATE'],
+                             SC['WORKGROUP']) and len(ops) == 4
+            if init_ok:
+                w = self.consts.get(ops[3])
+                init_ok = w is not None and not any(
+                    x & 0xFFFFFFFF for x in w)
+            if not init_ok:
+                raise Fault(FAULT['VAR'], opc, at)
         self.variable(ops[0], ops[1], ops[2:], at)
 
     def h_54(self, opc, ops, at):       # OpFunction

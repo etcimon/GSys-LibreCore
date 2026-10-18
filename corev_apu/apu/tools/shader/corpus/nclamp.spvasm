@@ -1,0 +1,76 @@
+; nclamp.spvasm — GLSL.std.450 NMin/NMax/NClamp NaN-suppression smoke.
+; glslang never emits the N-variants for GLSL min/max/clamp (those map
+; to the F- variants), so this is hand-assembled like phiflow:
+;     dst[3i+0] = NMin(src[i], src[i+32])
+;     dst[3i+1] = NMax(src[i], src[i+32])
+;     dst[3i+2] = NClamp(src[i], src[i+32], src[i+64])
+; The vector file's infn places NaN across the three operand streams
+; so every single-NaN slot and several both-NaN cases are exercised.
+; Assembled with `spirv-as --target-env vulkan1.1`.
+               OpCapability Shader
+          %1 = OpExtInstImport "GLSL.std.450"
+               OpMemoryModel Logical GLSL450
+               OpEntryPoint GLCompute %main "main" %gl_LocalInvocationIndex
+               OpExecutionMode %main LocalSize 32 1 1
+               OpDecorate %gl_LocalInvocationIndex BuiltIn LocalInvocationIndex
+               OpDecorate %_runtimearr_float ArrayStride 4
+               OpDecorate %In Block
+               OpMemberDecorate %In 0 NonWritable
+               OpMemberDecorate %In 0 Offset 0
+               OpDecorate %_ NonWritable
+               OpDecorate %_ Binding 0
+               OpDecorate %_ DescriptorSet 0
+               OpDecorate %_runtimearr_float_0 ArrayStride 4
+               OpDecorate %Out Block
+               OpMemberDecorate %Out 0 NonReadable
+               OpMemberDecorate %Out 0 Offset 0
+               OpDecorate %__0 NonReadable
+               OpDecorate %__0 Binding 1
+               OpDecorate %__0 DescriptorSet 0
+       %void = OpTypeVoid
+          %3 = OpTypeFunction %void
+       %uint = OpTypeInt 32 0
+%_ptr_Input_uint = OpTypePointer Input %uint
+%gl_LocalInvocationIndex = OpVariable %_ptr_Input_uint Input
+      %float = OpTypeFloat 32
+%_runtimearr_float = OpTypeRuntimeArray %float
+         %In = OpTypeStruct %_runtimearr_float
+%_ptr_StorageBuffer_In = OpTypePointer StorageBuffer %In
+          %_ = OpVariable %_ptr_StorageBuffer_In StorageBuffer
+        %int = OpTypeInt 32 1
+      %int_0 = OpConstant %int 0
+%_ptr_StorageBuffer_float = OpTypePointer StorageBuffer %float
+    %uint_32 = OpConstant %uint 32
+    %uint_64 = OpConstant %uint 64
+     %uint_3 = OpConstant %uint 3
+     %uint_1 = OpConstant %uint 1
+     %uint_2 = OpConstant %uint 2
+%_runtimearr_float_0 = OpTypeRuntimeArray %float
+        %Out = OpTypeStruct %_runtimearr_float_0
+%_ptr_StorageBuffer_Out = OpTypePointer StorageBuffer %Out
+        %__0 = OpVariable %_ptr_StorageBuffer_Out StorageBuffer
+       %main = OpFunction %void None %3
+          %5 = OpLabel
+          %i = OpLoad %uint %gl_LocalInvocationIndex
+         %pa = OpAccessChain %_ptr_StorageBuffer_float %_ %int_0 %i
+          %a = OpLoad %float %pa
+         %i1 = OpIAdd %uint %i %uint_32
+         %pb = OpAccessChain %_ptr_StorageBuffer_float %_ %int_0 %i1
+          %b = OpLoad %float %pb
+         %i2 = OpIAdd %uint %i %uint_64
+         %pc = OpAccessChain %_ptr_StorageBuffer_float %_ %int_0 %i2
+          %c = OpLoad %float %pc
+         %r0 = OpExtInst %float %1 NMin %a %b
+         %r1 = OpExtInst %float %1 NMax %a %b
+         %r2 = OpExtInst %float %1 NClamp %a %b %c
+         %o0 = OpIMul %uint %i %uint_3
+         %qa = OpAccessChain %_ptr_StorageBuffer_float %__0 %int_0 %o0
+               OpStore %qa %r0
+         %o1 = OpIAdd %uint %o0 %uint_1
+         %qb = OpAccessChain %_ptr_StorageBuffer_float %__0 %int_0 %o1
+               OpStore %qb %r1
+         %o2 = OpIAdd %uint %o0 %uint_2
+         %qc = OpAccessChain %_ptr_StorageBuffer_float %__0 %int_0 %o2
+               OpStore %qc %r2
+               OpReturn
+               OpFunctionEnd

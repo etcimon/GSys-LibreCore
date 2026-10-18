@@ -160,42 +160,58 @@ SEGMENT G3b-ii/compute
                   submissions (not golden tapes)?
   OBJECTIVE       Classified verdicts for the 80-case compute.pipeline.basic
                   set under the residency pipeline (module FILL→dispatch).
-  ENVELOPE        as cts-info.md; bridge `bridge-g3bii`, run
-                  `g3bii-2026-10-17` (two chunks; `.cache/cts/runs/
-                  g3bii-2026-10-17/NOTES.md`).
-  INPUTS          caselist `cts-g3bii-objmgmt-compute.txt` + remainder list.
+  ENVELOPE        as cts-info.md; bridge `bridge-g3bii` /
+                  `bridge-g3bii-cpb`, runs `g3bii-2026-10-17` (two chunks)
+                  and `g3bii-cpb-2026-10-18` (post-fix rerun;
+                  `.cache/cts/runs/*/NOTES.md`).
+  INPUTS          caselist `cts-g3bii-objmgmt-compute.txt` + remainder
+                  list; rerun: `cts-compute-basic.txt` (80 cases).
   CONTRACT        Pass or truthfully-unadvertised NotSupported; faults must
                   land in `device_faults` and never hang the fence wait.
-  OBSERVATIONS    2 Pass (`empty_shader`, `image_atomic_op_local_size_1`),
-                  48 Fail, 29 NotSupported (spec-constants/f16/f16x/int16 and
-                  SPIR-V>1.3 families — honest), 1 Crash
-                  (`indirect_after_base_dispatch`: DispatchIndirect is
-                  G3b-iii scope; vnfront rejected the record → ring FATAL →
-                  Mesa aborted at iter 4096 — the §7b fast-abort path, not a
-                  hang). `device_faults=0` for the whole run: every failing
-                  dispatch retired nominally with wrong or no output.
-                  Discriminator: `local_size_1` passes, `local_size_8` fails —
-                  the failure mass concentrates at workgroup invocation > 1.
-  HYPOTHESES      (first-level, unverified locally) C1 workgroup geometry:
-                  `empty_workgroup_*`/`max_local_size_*` expect 1 find 0 —
-                  dispatch issues no store for multi-invocation groups.
-                  C2 Workgroup slab: `shared_var_*`/`shared_atomic_op_*`/
-                  `ssbo_local_barrier_*` — shared-var stores and barrier
-                  sequencing inside a workgroup. C3 SSBO robustness/arrays:
-                  `read_unbound_ssbo` returns 0xBEBEBEBE poison instead of
-                  robust-0; `write_multiple_*`/`ssbo_unsized_arr_*` land
-                  poison — descriptor-array/bounds resolution. C4
-                  image↔SSBO copies, image atomics>1 lane, `*_barrier_*`:
-                  zero output. C5 `branch_past_barrier`/`webgl_spirv_loop`/
-                  `vec2_nclamp_nan`: control-flow and FP corner cases.
-  DISCRIMINATOR   rerun one member per cluster solo with
-                  `G6LC_APU_DEBUG=1` wave trace; the tapes only exercise
-                  ≤8-lane golden sessions — add a ≥2-group workgroup vector.
-  RESULT          compute.basic is 2/80 green today; the deficits are shader
-                  semantics, not residency (all object-management cases Pass).
-  LIMITS          QPA failure text only; no per-case wave trace yet.
-  NEXT ARTIFACT   per-cluster smoke vectors + 1-case guest repros; COMPUTE-H1
-                  spec constants still gate the 27 NS cases.
+  OBSERVATIONS    Run `g3bii-2026-10-17` (pre-lifecycle-fix): 2 Pass /
+                  48 Fail / 29 NS / 1 Crash.  Rerun `g3bii-cpb-2026-10-18`
+                  after the command-buffer lifecycle fix (BEGIN implicit
+                  reset on EXECUTABLE/drained-PENDING, `StCbPendW` wait,
+                  `StElemSubW` submit-element PEND relookup, CB_RESET /
+                  pool-reset drain guards; model updated first):
+                  **44 Pass / 27 NotSupported / 6 Fail of 77 recorded**,
+                  `device_faults=0`.  Absent: `indirect_after_base_dispatch`
+                  (DispatchIndirect unimplemented → vnfront record reject →
+                  ring FATAL → Mesa `vn_relax` abort at iter 1024 —
+                  contract path, not a hang; G3b-iii) plus `pkadd_immediate`
+                  and `undefined_values` (never reached).
+  ROOT CAUSES     C1 `empty_workgroup_*` fixed by the lifecycle work
+                  (zero-dim dispatch + implicit-reset resubmit); C2
+                  Workgroup slab/barriers/shared-atomics all PASS; C3 SSBO
+                  robustness/arrays all PASS (descriptor zeroing + LSU
+                  valid bit); C4 image↔SSBO copies and `*_barrier_*` PASS.
+                  The residual mass decomposes into three feature gaps,
+                  each confirmed to mechanism with `G6LC_APU_DEBUG=1`:
+                  (a) `max_local_size_{x,y,z}` — pipefail `spec=1`:
+                  pipeline create refuses staged specialization data
+                  (`StPipeLay0`) → null pipeline → `cmdexec lost` → SSBO
+                  stays 0. COMPUTE-H1, not geometry — `cts_mls64`
+                  (64-inv workgroup, 8 waves) passes tb_g6lc_apu_shwave
+                  (3/10 checks, 12051 cy). (b) `image_atomic_op_
+                  local_size_{1,8}` — commit scan rejects the
+                  `OpTypePointer Image`/`OpImageTexelPointer` idiom
+                  (`COMMIT FAULT STORAGE opcode=32` locally on an
+                  equivalent glslang compile) → module RETIRE at create →
+                  pipe LOOKUP miss → `cmdexec lost`. (c)
+                  `branch_past_barrier` — shader is `local_size_x=128` >
+                  advertised 64 (COMPUTE-H3 capability gap).
+  RESULT          compute.basic is 44/80 green (77 recorded); every
+                  remaining defect is a named feature item, none is a
+                  residency or fault-contract regression.
+  LIMITS          `image_atomic_op_local_size_1` recorded Pass in
+                  `g3bii-2026-10-17` on the same bridge binary; A/B now
+                  fails deterministically solo — unexplained
+                  ordering/state dependence, flagged for a dedicated pass.
+                  3 cases unrecorded due to the abort (above).
+  NEXT ARTIFACT   COMPUTE-H1 spec constants (gates 27 NS + 3 Fails),
+                  image texel-pointer + atomics (2 Fails), COMPUTE-H3
+                  128-inv groups (1 Fail), G3b-iii DispatchIndirect +
+                  rerun for the 3 unrecorded cases.
 ```
 
 ## Performance / area / scalability

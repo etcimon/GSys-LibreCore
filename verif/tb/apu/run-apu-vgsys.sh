@@ -82,7 +82,7 @@ ue_cpos_rb_mapafter_1 ue_cpos_ubo_bindfirst_1 \
 ue_cpos_evict_1 ue_cpos_reloc_hold_1 \
 ue_cneg_evict_full_1 ue_cneg_bind_full_1 ue_cneg_stale_mem_1 \
 ue_gpos_tri_1 ue_gpos_vbwide_1 ue_gpos_statvp_1 ue_cpos_maxconc_1
-ue_cpos_modres_1"
+ue_cpos_modres_1 ue_cpos_rerec_1"
 # G3b-i: the *full* negatives also run on a small-geometry build of
 # the same RTL (ObjEntries=256, 256 KiB PayMem) so the FULL paths
 # stay covered while the default geometry is the big one

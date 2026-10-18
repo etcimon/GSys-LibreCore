@@ -490,6 +490,32 @@ list/strip only, dynamic viewport/scissor only, indexed `gl_VertexIndex` unsuppo
   card. `deqp_sha256`/`profile_hash` fields filled for all runs. Owed:
   smtrace/optrace probe removal cleanup; `apu_sh_sm_req_t.slot` 3-bit width
   (ShaderSlots ≤ 8 until the width becomes a localparam — Aggregation D).
+- [x] **G3b-ii/compute defect clusters (2026-10-18) — compute.pipeline.basic rerun
+  on the fixed tree.** Root cause of the `copy_ssbo_single_invocation` mass:
+  `vkBeginCommandBuffer` rejected an EXECUTABLE (drained-PENDING) command
+  buffer — no implicit reset after `StCbRes` — so records stayed INVALID-marked,
+  the submit element was dropped (`sub_lost`) and only the fence-fallback ran.
+  Fixed in RTL (implicit reset on EXECUTABLE BEGIN, `StCbPendW`/`pw_ret_q`
+  in-flight drain wait, `StElemSubW` submit-element PEND relookup, `CB_RESET`/
+  pool-reset drain guards) with `vn_golden.py` updated first as spec of record;
+  new `ue_cpos_rerec_1` session (fill → dispatch → re-record → resubmit) in the
+  vgtop/vgsys/sys-venus lists. **Guest (`g3bii-cpb-2026-10-18`, 80-case list,
+  `device_faults=0`): 44 Pass / 27 NS / 6 Fail of 77 recorded** (was 2/48/29/1)
+  — deqp aborted on case 78, `indirect_after_base_dispatch` (DispatchIndirect,
+  G3b-iii), taking `pkadd_immediate`/`undefined_values` unrecorded. Cluster
+  verdicts: C1 `empty_workgroup_*` PASS, `max_local_size_{x,y,z}` Fail =
+  spec-constant pipe-create refusal (`pipefail spec=1` → null pipeline →
+  `cmdexec lost` → SSBO 0) = COMPUTE-H1 not geometry (`cts_mls64` 64-inv/
+  8-wave shwave vector passes 3/10); C2/C3/C4 all PASS; C5
+  `webgl_spirv_loop`/`vec2_nclamp_nan_component` PASS, `branch_past_barrier`
+  Fail = local_size 128 > advertised 64 (COMPUTE-H3);
+  `image_atomic_op_local_size_{1,8}` Fail = commit scan rejects
+  `OpImageTexelPointer`/`OpTypePointer Image` (module RETIRE → pipe LOOKUP
+  miss → `cmdexec lost`; local scanner repro `COMMIT FAULT STORAGE
+  opcode=32`). Ledger re-rendered (`run=322 pass=219 ns=65 defects=38`);
+  per-cluster card in `cts-compute.md`. Owed: image texel-pointer + image
+  atomics feature item; `image_atomic_op_local_size_1` pass-variant anomaly
+  (passed once on the same bridge binary, fails deterministically solo).
 - [ ] **CTS track (2026-10-14) — the Khronos Vulkan CTS becomes the acceptance oracle.**
   Source of record `specs/VK-GL-CTS` (lazy, shallow, `update = none`) pinned to
   `vulkan-cts-1.4.6.2` = `f6a29701220f34dd1407513bfe80d74ca7b392ce`; must-pass index

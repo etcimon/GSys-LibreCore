@@ -269,7 +269,7 @@ module g6lc_apu_vnfront
       StBlobRd, StBlobLo, StBlobHi,
       StElemAlloc, StElemAllocCpl, StElemAuxCpl,
       StElemPd, StElemPdCpl,
-      StElemSub, StElemSubCpl,
+      StElemSub, StElemSubCpl, StElemSubW,
       StElemFenc, StElemFencCpl,
       StElemRec, StElemRecCpl,
       StElemRetL, StElemRetR, StElemRetCpl, StElemRetPay,
@@ -280,7 +280,7 @@ module g6lc_apu_vnfront
       // §12.3 3d-d: bind-time device backing — ALLOC_HI completion
       // check, DEVBACKED aux write, then the SETBIND (single/array)
       StBindDev, StBindDevCas, StBindSet, StBind2Set,
-      StCbGo, StCbCrCpl, StCbSetCpl,
+      StCbGo, StCbCrCpl, StCbSetCpl, StCbPendW,
       StRecFill, StRecApp, StAppendCpl,
       StSubPush, StSubState, StSubStateNext,
       StWaitIdle, StFencPoll, StFencClr,
@@ -355,6 +355,7 @@ module g6lc_apu_vnfront
       StRep, StRepKick, StRepWait, StDone
     } state_e;
     state_e              state_q, ot_ret_q, cr_ret_q, cs_ret_q;
+    state_e              pw_ret_q;
     state_e              blob_ret_q, blob_done_q;
     state_e              op_ret_q, stg_ret_q, auxhi_ret_q,
                          auxlo_ret_q, stv_ret_q, ap_ret_q,
@@ -1163,11 +1164,26 @@ module g6lc_apu_vnfront
             for (int i = 0; i < APU_VN_EXEC_WORDS; i++)
               exec_w_q[32*i +: 32] <= i < APU_VN_PROFILE_WORDS
                                       ? APU_VN_PROFILE[i] : 32'h0;
+            // pipeline-create scratch is per-command: a leftover
+            // pl_errv masks the next create's error reply, and a
+            // leftover pl_pin/pl_modh unpins a stale module handle
+            // in StPipeFail's unwind
+            pl_modid_q <= '0; pl_layid_q <= '0; pl_spec_q <= 1'b0;
+            pl_modh_q  <= '0; pl_modc_q <= '0;  pl_pin_q  <= 1'b0;
+            pl_layh_q  <= '0; pl_errv_q <= 1'b0;
+            pre_gp_q   <= 1'b0;
+            gp_refs_q  <= '0; gp_mh0_q <= '0;   gp_mh1_q <= '0;
             state_q <= StDec;
           end
 
           StDec: state_q <= StDecWait;
           StDecWait: if (dec_done) begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] vnf cmd: ctype=%08x imm0=%08x t=%0t",
+                     dec_op.cmd_type, dec_op.imm[0], $time);
+`endif
+// pragma translate_on
             op_q <= dec_op;
             if (dec_op.fault == APU_VN_FAULT_FLAGS &&
                 dec_op.cmd_type ==
@@ -1844,7 +1860,15 @@ module g6lc_apu_vnfront
                   end
                 end else begin
                   are_i_q <= '0;
-                  state_q <= StPoolLoop;
+                  // a pool reset with command buffers still in flight
+                  // would wipe their streams under the executor — the
+                  // spec requires the app to have synchronized; drain
+                  // first rather than corrupting the read
+                  if (pushed_q != ex_done_seq_i) begin
+                    pw_ret_q <= StPoolLoop;
+                    state_q  <= StCbPendW;
+                  end else
+                    state_q <= StPoolLoop;
                 end
               end
               default: begin
@@ -2226,8 +2250,16 @@ module g6lc_apu_vnfront
             state_q  <= StOtReq;
           end
           StElemSubCpl: begin
-            if (ot_cpl_i.status != APU_OBJTAB_OK ||
-                (ot_cpl_i.entry.state & APU_CB_EXECUTABLE) == 0 ||
+            if (ot_cpl_i.status == APU_OBJTAB_OK &&
+                (ot_cpl_i.entry.state & APU_CB_PENDING) != 0 &&
+                pushed_q != ex_done_seq_i) begin
+              // the element's owner submission is still in flight —
+              // wait for the drain, then re-issue the LOOKUP (otr_q is
+              // untouched while we wait)
+              state_q <= StElemSubW;
+            end else if (ot_cpl_i.status != APU_OBJTAB_OK ||
+                (ot_cpl_i.entry.state &
+                 (APU_CB_EXECUTABLE | APU_CB_PENDING)) == 0 ||
                 ot_cpl_i.entry.aux[7:0] >= 8'(CbBufs) ||
                 sub_q.nbufs == 3'd4) begin
               // §7b exception contract: reject the ELEMENT, not the
@@ -2247,6 +2279,11 @@ module g6lc_apu_vnfront
               state_q     <= StBlobRd;
             end
           end
+          // the element was PENDING while its owner submission was in
+          // flight — the drain has now completed (cmdexec's EXECUTABLE
+          // restore lands before the done count); re-issue the LOOKUP
+          StElemSubW:
+            if (pushed_q == ex_done_seq_i) state_q <= StOtReq;
 
           // WAIT/RESET fences: LOOKUP each fence id -> mask
           StElemFenc: begin
@@ -2768,10 +2805,23 @@ module g6lc_apu_vnfront
           // ---- CB_BEGIN/END/RESET + RECORD dispatch ----------------------
           StCbGo: begin
             if (act_q.act_class == APU_VN_ACT_CB_BEGIN) begin
-              if (ent_q.state != 32'h0) begin
+              if ((ent_q.state &
+                   (APU_CB_RECORDING | APU_CB_INVALID)) != 0) begin
                 result_q <= APU_VK_ERROR_UNKNOWN;
                 state_q  <= StRep;
+              end else if ((ent_q.state & APU_CB_PENDING) != 0 &&
+                           pushed_q != ex_done_seq_i) begin
+                // §6.1: a re-begin raced its owner submission — the
+                // fence's feedback slot can wake the guest before
+                // cmdexec's EXECUTABLE restore lands; wait out the
+                // drain, then the stale PENDING mark is superseded by
+                // the implicit reset this begin performs
+                pw_ret_q <= StCbGo;
+                state_q  <= StCbPendW;
               end else begin
+                // implicit reset: an EXECUTABLE (or drained-PENDING)
+                // buffer rewinds here — cmdrec BEGIN clears the
+                // stream's count/payload-top/seal itself
                 crr_q    <= '{op: APU_CMDREC_OP_BEGIN,
                               cbuf: 8'(ent_q.aux[7:0]), idx: '0,
                               rec: '0, pay_n: '0};
@@ -2790,11 +2840,19 @@ module g6lc_apu_vnfront
                 state_q  <= StCrReq;
               end
             end else if (act_q.act_class == APU_VN_ACT_CB_RESET) begin
-              crr_q    <= '{op: APU_CMDREC_OP_RESET,
-                            cbuf: 8'(ent_q.aux[7:0]), idx: '0,
-                            rec: '0, pay_n: '0};
-              cr_ret_q <= StCbCrCpl;
-              state_q  <= StCrReq;
+              if ((ent_q.state & APU_CB_PENDING) != 0 &&
+                  pushed_q != ex_done_seq_i) begin
+                // a reset on an in-flight buffer would wipe its
+                // stream under the executor — drain first
+                pw_ret_q <= StCbGo;
+                state_q  <= StCbPendW;
+              end else begin
+                crr_q    <= '{op: APU_CMDREC_OP_RESET,
+                              cbuf: 8'(ent_q.aux[7:0]), idx: '0,
+                              rec: '0, pay_n: '0};
+                cr_ret_q <= StCbCrCpl;
+                state_q  <= StCrReq;
+              end
             end else begin
               // RECORD: requires RECORDING, not PENDING/INVALID
               if ((ent_q.state & APU_CB_RECORDING) == 0 ||
@@ -2919,6 +2977,10 @@ module g6lc_apu_vnfront
               result_q <= APU_VK_ERROR_UNKNOWN;
             state_q <= StRep;
           end
+          // a PENDING buffer's owner submission is still in flight —
+          // hold until the executor drains, then resume at pw_ret_q
+          StCbPendW:
+            if (pushed_q == ex_done_seq_i) state_q <= pw_ret_q;
 
           // ---- RECORD: fill handle slots, then append -------------------
           StRecFill: begin
@@ -5201,6 +5263,11 @@ module g6lc_apu_vnfront
             end
           end
           StPipeAuxHiC: begin
+            // element committed: the module pin(s) now belong to the
+            // pipeline entry, not the in-flight create — clear so a
+            // later element's StPipeFail cannot unpin them
+            pl_pin_q <= 1'b0;
+            gp_refs_q <= '0;
             blob_i_q <= blob_i_q + 5'd1;
             state_q  <= StBlobRd;
           end
@@ -5208,6 +5275,13 @@ module g6lc_apu_vnfront
           // ObjTab module pins taken so far unwind first (a compute
           // element holds at most one, a graphics element up to two)
           StPipeFail: begin
+`ifdef G6LC_APU_DBG_LOST
+// pragma translate_off
+            $display("[DBG] pipefail: spec=%0d pin=%0d modh=%08x modid=%016x layid=%016x errv=%0d i=%0d/%0d t=%0t",
+                     pl_spec_q, pl_pin_q, pl_modh_q, pl_modid_q,
+                     pl_layid_q, pl_errv_q, blob_i_q, blob_n_q, $time);
+// pragma translate_on
+`endif
             if (!pre_gp_q && pl_pin_q) begin
               otr_q     <= '{op: APU_OBJTAB_OP_UNPIN,
                             id: {32'h0, pl_modh_q},
@@ -5297,6 +5371,12 @@ module g6lc_apu_vnfront
           // cpl means the module was a zombie — free its parked
           // extent and INVAL its residency before continuing
           StRetPipeC: begin
+`ifdef G6LC_APU_DBG_LOST
+// pragma translate_off
+            $display("[DBG] retpipec: st=%0d frm=%0d t=%0t",
+                     ot_cpl_i.status, dbg_frm_q, $time);
+// pragma translate_on
+`endif
             if (ot_cpl_i.status != APU_OBJTAB_OK) begin
               result_q <= err_of(ot_cpl_i.status);
               state_q  <= StRep;
@@ -5306,6 +5386,12 @@ module g6lc_apu_vnfront
             end
           end
           StRetUnp: begin
+`ifdef G6LC_APU_DBG_LOST
+// pragma translate_off
+            $display("[DBG] retunp: mh=%08x uret=%0d frm=%0d t=%0t",
+                     ret_mh_q, unp_ret_q, dbg_frm_q, $time);
+// pragma translate_on
+`endif
             otr_q    <= '{op: APU_OBJTAB_OP_UNPIN,
                          id: {32'h0, ret_mh_q},
                          kind: 6'(APU_VN_KIND_VK_SHADER_MODULE),
@@ -5336,6 +5422,12 @@ module g6lc_apu_vnfront
           end
           StRetUnpI: state_q <= unp_ret_q;
           StRetPNext: begin
+`ifdef G6LC_APU_DBG_LOST
+// pragma translate_off
+            $display("[DBG] retpnext: gp=%0d mh1=%08x frm=%0d t=%0t",
+                     ret_gp_q, ret_mh1_q, dbg_frm_q, $time);
+// pragma translate_on
+`endif
             if (ret_gp_q) begin
               ret_mh_q  <= ret_mh1_q;
               unp_ret_q <= StRetPFree;
@@ -5611,7 +5703,56 @@ module g6lc_apu_vnfront
         endcase
       end
     end
+
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+    // lifecycle watcher: mutating ObjTab ops + their completions
+    // (LOOKUP/READSLOT are hot and already covered by cmdexec prints;
+    //  vnfront is single-flight on the ot port so one shadow op reg
+    //  attributes the completion).  frm carries the FSM state that
+    //  last ran outside the ot handshake — i.e. the request issuer;
+    //  ret is the registered completion target (ot_ret_q).
+    apu_objtab_op_e dbg_last_op_q;
+    state_e         dbg_frm_q, dbg_sfrm_q, dbg_ofrm_q;
+    always_ff @(posedge clk_i) begin
+      if (state_q != StOtReq && state_q != StOtCpl)
+        dbg_frm_q <= state_q;
+      if (state_q != StSmReq && state_q != StSmCpl)
+        dbg_sfrm_q <= state_q;
+      if (state_q != StOpReq && state_q != StOpCpl)
+        dbg_ofrm_q <= state_q;
+      if (ot_req_valid_o && ot_req_ready_i) begin
+        dbg_last_op_q <= ot_req_o.op;
+        if (ot_req_o.op != APU_OBJTAB_OP_LOOKUP &&
+            ot_req_o.op != APU_OBJTAB_OP_READSLOT)
+          $display("[DBG] vnf ot req: op=%0d id=%016x kind=%0d frm=%0d ret=%0d t=%0t",
+                   ot_req_o.op, ot_req_o.id, ot_req_o.kind,
+                   dbg_frm_q, ot_ret_q, $time);
+      end
+      if (sm_req_o && sm_gnt_i)
+        $display("[DBG] vnf sm req: op=%0d hnd=%08x frm=%0d ret=%0d t=%0t",
+                 sm_op_q, sm_hnd_q, dbg_sfrm_q, sm_ret_q, $time);
+      if (op_req_valid_o && op_req_ready_i)
+        $display("[DBG] vnf op req: op=%0d addr=%08x frm=%0d ret=%0d t=%0t",
+                 op_req_o.op, op_req_o.addr, dbg_ofrm_q, op_ret_q, $time);
+      if (ot_cpl_valid_i && ot_cpl_ready_o &&
+          dbg_last_op_q != APU_OBJTAB_OP_LOOKUP &&
+          dbg_last_op_q != APU_OBJTAB_OP_READSLOT)
+        $display("[DBG] vnf ot cpl: op=%0d status=%0d handle=%08x t=%0t",
+                 dbg_last_op_q, ot_cpl_i.status, ot_cpl_i.handle, $time);
+      // submit-element trace: one line per CB id word-pair the blob
+      // walker surfaces — csa_q already holds the element's second
+      // word address, blob_id_q the just-assembled client id
+      if (state_q == StBlobHi && blob_ret_q == StElemSub)
+        $display("[DBG] subblob i=%0d n=%0d sel=%0d off=%04x w=%0d csa=%08x base=%08x id=%016x t=%0t",
+                 blob_i_q, blob_n_q, blob_sel_q, op_q.blob[blob_sel_q].off,
+                 op_q.blob[blob_sel_q].words, csa_q, cs_base_q,
+                 {csw_q | APU_VN_ID_TAG[63:32], blob_id_q[31:0]}, $time);
+    end
+`endif
+// pragma translate_on
   end
+
 endmodule
 
 // enable-0 fixture for the synthesis screen

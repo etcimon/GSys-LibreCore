@@ -193,7 +193,7 @@ module g6lc_apu_shwave
       W_IR0, W_IR1, W_IR2, W_IR3,
       W_RW0, W_RW1,
       W_CHT0, W_CHT1, W_CHM0, W_CHM1, W_CHE0, W_CHE1, W_CHX,
-      W_AL0, W_AL1, W_AL2, W_AL3, W_AL4, W_AL5, W_AL6, W_AL7,
+      W_AL0, W_AL0W, W_AL1, W_AL2, W_AL3, W_AL4, W_AL5, W_AL6, W_AL7,
       W_LS0, W_LS1, W_LS2, W_SSB, W_SSB1, W_LSA, W_CHFIN,
       W_XCNT, W_XG,
       W_WB, W_NEXT, W_EOW, W_DONE,
@@ -408,7 +408,7 @@ module g6lc_apu_shwave
     logic [15:0]  tx_r16_q;           // Dref quantized to u16 (UNORM)
     logic [31:0]  tx_qraw_q;          // unclamped λ (QueryLod)
     // entry record
-    logic [15:0]  eoff_q, escratch_q;
+    logic [15:0]  eoff_q, escratch_q, eslab_q;
     logic [7:0]   lx_q, ly_q, lz_q, ninit_q;
     // workgroup/wave iteration
     logic [15:0]  wgx_q, wgy_q, wgz_q;
@@ -2463,7 +2463,8 @@ module g6lc_apu_shwave
         end
         W_ATS0: begin                      // WG/scratch atomic read
           if (ls_sc_q == APU_SH_SC_WORKGROUP) begin
-            if (ls_off_q < 32'(SlabBytes)) sb_req = 1'b1;
+            if (ls_off_q < 32'(SlabBytes) &&
+                ls_off_q < {16'h0, eslab_q}) sb_req = 1'b1;
             sb_addr = SLWA'(ls_off_q >> 2);
           end else begin
             if ((ls_off_q >> 2) < SCW &&
@@ -2474,7 +2475,8 @@ module g6lc_apu_shwave
         end
         W_ATS1: begin                      // WG/scratch atomic write
           if (ls_sc_q == APU_SH_SC_WORKGROUP) begin
-            if (ls_off_q < 32'(SlabBytes)) begin
+            if (ls_off_q < 32'(SlabBytes) &&
+                ls_off_q < {16'h0, eslab_q}) begin
               sb_req = 1'b1;
               sb_we  = (at_op_q != 16'd227);   // AtomicLoad: no write
             end
@@ -2512,7 +2514,8 @@ module g6lc_apu_shwave
             sb_we = ls_store_q && act_w[ls_lane_q[2:0]] &&
                     !dead_q[wave_q][ls_lane_q[2:0]] &&
                     !hlp_w[ls_lane_q[2:0]] &&
-                    ((ls_off_q >> 2) < SLW);
+                    ((ls_off_q >> 2) < SLW) &&
+                    (ls_off_q < {16'h0, eslab_q});
             sb_addr = SLWA'(ls_off_q >> 2);
             sb_wdata = ls_wd;
             sb_be = 4'hF;
@@ -2872,7 +2875,7 @@ module g6lc_apu_shwave
         tx_samp_q <= '0; tx_isflt_q <= '0; tx_isint_q <= '0;
         tx_issr_q <= '0; tx_isf16_q <= '0; tx_nch_q <= '0;
         for (int i = 0; i < 32; i++) push_q[i] <= '0;
-        eoff_q <= '0; escratch_q <= '0;
+        eoff_q <= '0; escratch_q <= '0; eslab_q <= '0;
         lx_q <= '0; ly_q <= '0; lz_q <= '0; ninit_q <= '0;
         wgx_q <= '0; wgy_q <= '0; wgz_q <= '0;
         wave_q <= '0; nwaves_q <= '0; tot_q <= '0;
@@ -3006,7 +3009,14 @@ module g6lc_apu_shwave
             wave_q <= '0; insns_q <= '0; robust_q <= '0;
             done_code_q <= '0; wait_q <= '0;
             wsw_q <= '0; nbar_q <= '0; nmem_q <= '0;
-            st_q <= W_ENT0;
+            // C1 (cts empty_workgroup_*): a zero-dimension compute
+            // dispatch issues no workgroups at all — retire OK
+            // without fetching the entry; gfx batches ride gcnt
+            // and always run their single iteration
+            st_q <= (disp_pl_i.work_id != APU_SH_WORK_VS &&
+                     disp_pl_i.work_id != APU_SH_WORK_FS &&
+                     (disp_pl_i.gx == 0 || disp_pl_i.gy == 0 ||
+                      disp_pl_i.gz == 0)) ? W_DONE : W_ENT0;
           end
           W_ENT0: st_q <= W_ENT1;       // entry read issued
           W_ENT1: begin
@@ -3014,6 +3024,8 @@ module g6lc_apu_shwave
             lx_q <= entry_data_i[39:32]; ly_q <= entry_data_i[47:40];
             lz_q <= entry_data_i[55:48]; ninit_q <= entry_data_i[63:56];
             escratch_q <= entry_data_i[79:64];
+            eslab_q   <= entry_data_i[111:96];  // w3[15:0]: declared
+                                                // Workgroup slab bytes
             fslate_q <= entry_data_i[123];  // FS late-Z: slot-8 tail writes
             // graphics wave work: tot = the record count; the lanes of
             // wave w are records w*LAN .. w*LAN+LAN-1
@@ -3087,8 +3099,12 @@ module g6lc_apu_shwave
             end
           end
           // per-workgroup shared slab zero (sb write in the port comb)
+          // — bounded by the module's declared Workgroup footprint
+          // (entry w3[15:0]), not the whole slab: a 4096-workgroup
+          // dispatch of a no-shared shader must not burn SlabBytes/4
+          // cycles per group
           W_SCLR: begin
-            if ({16'h0, ls_off_q} + 4 < SLW * 4) begin
+            if (ls_off_q < {16'h0, eslab_q}) begin
               ls_off_q <= ls_off_q + 4;
             end else begin
               ls_off_q <= '0; st_q <= W_SCHED;
@@ -4196,7 +4212,10 @@ module g6lc_apu_shwave
                   73, 74, 75: begin
                     wb_q <= int_alu; st_q <= W_WB;
                   end
-                  // NMin / NMax: fpnew MINMAX but NaN → canonical qNaN
+                  // NMin / NMax: fpnew MINMAX is already NaN-
+                  // suppressing (single NaN → the other operand; both
+                  // NaN → canonical qNaN) — exactly the GLSL.std.450
+                  // "N" contract; take the unit result as-is
                   79, 80: unique case (xq_q)
                     0: jset(3, {1'b0, (xnum_q == 7'd80)
                                  ? fpnew_pkg::RTZ[2:0]
@@ -4206,14 +4225,12 @@ module g6lc_apu_shwave
                     default: begin
                       for (int l = 0; l < LAN; l++)
                         for (int c = 0; c < VEC; c++)
-                          wb_q[l][c] <=
-                            (f_nan(va_q[0][l][c]) ||
-                             f_nan(va_q[1][l][c]))
-                            ? 32'h7FC0_0000 : t0_q[l][c];
+                          wb_q[l][c] <= t0_q[l][c];
                       st_q <= W_WB;
                     end
                   endcase
-                  // NClamp = NMin(NMax(x,lo),hi) with qNaN on any NaN
+                  // NClamp = NMin(NMax(x,lo),hi) — the same NaN-
+                  // suppressing chain lands through t0/t1 verbatim
                   81: unique case (xq_q)
                     0: jset(3, {1'b0, fpnew_pkg::RTZ[2:0], 1'b1},
                             {2'd0, S_V0}, {2'd0, S_V1}, 7'h0,
@@ -4224,11 +4241,7 @@ module g6lc_apu_shwave
                     default: begin
                       for (int l = 0; l < LAN; l++)
                         for (int c = 0; c < VEC; c++)
-                          wb_q[l][c] <=
-                            (f_nan(va_q[0][l][c]) ||
-                             f_nan(va_q[1][l][c]) ||
-                             f_nan(va_q[2][l][c]))
-                            ? 32'h7FC0_0000 : t1_q[l][c];
+                          wb_q[l][c] <= t1_q[l][c];
                       st_q <= W_WB;
                     end
                   endcase
@@ -4768,25 +4781,53 @@ module g6lc_apu_shwave
           // F5: the buffer extent comes from the memory-resident
           // record selected by the pointer's descriptor index
           W_AL0: begin
+            // type query for the pointer's element type is issued
+            // here; W_AL0W samples it on the next cycle
+            st_q <= W_AL0W;
+          end
+          W_AL0W: begin
+            // sample ty_elem NOW — the W_DS* record fetch parks
+            // type_id_o on row 0, so the table data is gone by the
+            // time the detour returns
+            al_ty_q   <= ty_elem;
             dsc_set_q <= va_q[0][0][1][19:12];
             dsc_bd_q  <= va_q[0][0][1][27:20];
             dsc_idx_q <= va_q[0][0][2][15:0];
-            dret_q    <= W_AL1;
+            dret_q    <= W_AL2;
             st_q      <= W_DS0;
           end
-          W_AL1: begin al_ty_q <= ty_elem; st_q <= W_AL2; end
           W_AL2: st_q <= W_AL3;
           W_AL3: begin
             cmb_q <= ty_mbase + 10'(ops_q[3]);
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] al3 al_ty=%0d ty_mbase=%0d cmb=%0d",
+                     al_ty_q, ty_mbase, ty_mbase + 10'(ops_q[3]));
+`endif
+// pragma translate_on
             st_q <= W_AL4;
           end
           W_AL4: st_q <= W_AL5;
           W_AL5: begin
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] al5 cmb=%0d mb_off=%0d mb_ty=%0d raw=%016x",
+                     cmb_q, mb_off, mb_ty, memb_data_i);
+`endif
+// pragma translate_on
             al_off_q <= mb_off; al_ty2_q <= mb_ty; st_q <= W_AL6;
           end
           W_AL6: st_q <= W_AL7;
           W_AL7: begin
             al_st_q <= (ty_stride != 0) ? ty_stride : 16'd4;
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+            $display("[DBG] arrlen bsz=%08x off=%0d stride=%0d lit=%0d t=%0t",
+                     ls_bsz_q, al_off_q,
+                     (ty_stride != 0) ? ty_stride : 16'd4,
+                     ops_q[3], $time);
+`endif
+// pragma translate_on
             // unsigned divide (size-off)/stride via divider path
             for (int l = 0; l < LAN; l++) begin
               dv_q_q[l] <= (ls_bsz_q >= {16'h0, al_off_q})
@@ -5000,6 +5041,14 @@ module g6lc_apu_shwave
               logic [31:0]  memh, size;
               val = {mem_err_i ? 64'h0 : mem_rdata_i,
                      dsc_rec_q[191:0]};
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+              $display("[DBG] dsrec set=%0d bd=%0d idx=%0d off32=%0d memh=%08x size=%08x kind=%0d flags=%02x t=%0t",
+                       dsc_set_q[3:0], dsc_bd_q, dsc_idx_q,
+                       dsc_row_q.off32, val[31:0], val[63:32],
+                       val[71:64], val[79:72], $time);
+`endif
+// pragma translate_on
               memh  = val[31:0];
               size  = val[63:32];
               kind  = val[71:64];
@@ -6339,7 +6388,8 @@ module g6lc_apu_shwave
           W_SSB: st_q <= W_SSB1;              // sb/sc issued
           W_SSB1: begin
             if (ls_sc_q == APU_SH_SC_WORKGROUP) begin
-              if ((ls_off_q >> 2) >= SLW) begin
+              if ((ls_off_q >> 2) >= SLW ||
+                  ls_off_q >= {16'h0, eslab_q}) begin
                 robust_q <= robust_q + 1;
                 if (!ls_store_q)
                   wb_q[ls_lane_q[2:0]][ls_wc] <= '0;
@@ -6530,7 +6580,8 @@ module g6lc_apu_shwave
           W_ATS0: st_q <= W_ATS1;
           W_ATS1: begin
             if ((ls_sc_q == APU_SH_SC_WORKGROUP &&
-                 ls_off_q >= 32'(SlabBytes)) ||
+                 (ls_off_q >= 32'(SlabBytes) ||
+                  ls_off_q >= {16'h0, eslab_q})) ||
                 (ls_sc_q != APU_SH_SC_WORKGROUP &&
                  ((ls_off_q >> 2) >= SCW ||
                   ls_off_q >= {16'h0, escratch_q}))) begin

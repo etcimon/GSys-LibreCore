@@ -305,6 +305,22 @@ SFU_IN = {
 }
 
 
+def nclamp_in(seed, bi, w):
+    """nclamp input hook — a=src[0:32], b=src[32:64], c=src[64:96];
+    NaN planted per slot (see DESC), finite values seeded."""
+    rng = random.Random(seed * 977 + bi)
+    vals = [struct.unpack('<f', struct.pack(
+        '<f', rng.uniform(-8.0, 8.0)))[0] for _ in range(w)]
+    for i in range(32):
+        if i % 5 == 0:
+            vals[i] = _NAN
+        if i % 4 == 1 or i % 4 == 3:
+            vals[32 + i] = _NAN
+        if i % 3 == 2:
+            vals[64 + i] = _NAN
+    return vals
+
+
 def sfu_in(name, bi, w):
     """sfu_* input hook for gen_inputs — binding 0 gets the domain-
     spanning record table; any other binding gets zeros."""
@@ -367,6 +383,57 @@ DESC = {
                          bindings=[(0, 0, 64, 0), (0, 1, 64, 1)]),
     'localsize64':  dict(groups=(1, 1, 1), fmt='i', push=0,
                          bindings=[(0, 0, 64, 0), (0, 1, 64, 1)]),
+    # CTS probe corpus (compute.pipeline.basic): the exact guest
+    # shaders.  cts_atomic1 = empty_workgroup's atomicAdd block.
+    # cts_shared1 = shared_var_single_invocation (SPIR-V 1.0: SSBO
+    # rides Uniform+BufferBlock, workgroup slab + both barriers).
+    'cts_atomic1':  dict(groups=(1, 1, 1), fmt='z', push=0,
+                         bindings=[(0, 0, 1, 1, 7 << 16)]),
+    'cts_shared1':  dict(groups=(1, 1, 1), fmt='z', push=0,
+                         bindings=[(0, 0, 1, 1, 7 << 16)]),
+    # cts_arrlen1 = read_unbound_ssbo: two bindings; bind1's record
+    # sizes a 16-byte buffer so OpArrayLength of the runtime member
+    # is (16-16)/4 = 0; ssbo0.x must read back 0.
+    'cts_arrlen1':  dict(groups=(1, 1, 1), fmt='z', push=0,
+                         bindings=[(0, 0, 1, 1, 7 << 16),
+                                   (0, 1, 4, 0, 7 << 16)]),
+    # cts_arrlensb = read_unbound_ssbo as the guest compiles it
+    # (glslang --target-env vulkan1.1 -> StorageBuffer class instead
+    # of Uniform+BufferBlock).  Same bindings/expectation.
+    'cts_arrlensb': dict(groups=(1, 1, 1), fmt='z', push=0,
+                         bindings=[(0, 0, 1, 1, 7 << 16),
+                                   (0, 1, 4, 0, 7 << 16)]),
+    # cts_sharedg = shared_var_single_group: local 3x2x5 = 30
+    # invocations = 4 waves sharing one workgroup slab across a
+    # barrier-separated shared exchange.
+    'cts_sharedg':  dict(groups=(1, 1, 1), fmt='z', push=0,
+                         bindings=[(0, 0, 30, 1, 7 << 16)]),
+    # cts_wgloop = webgl_spirv_loop (Tint-built loop): a Function var
+    # carries a zero OpConstantNull initializer — the commit must
+    # accept it as a no-op on pre-zeroed scratch.  mut=False: the one
+    # IAdd->ISub mutation site is the loop counter increment, which
+    # would make the `until ==1` exit unreachable.
+    'cts_wgloop':   dict(groups=(1, 1, 1), fmt='z', push=0, cf=True,
+                         mut=False,
+                         bindings=[(0, 0, 1, 1, 7 << 16)]),
+    # cts_imgcopy = copy_image_to_ssbo_large (r32ui uimage2D load ->
+    # SSBO store): the guest wedge probe — imageLoad on a 2x4 R32UI
+    # storage image, one wave of 8 lanes.
+    'cts_imgcopy':  dict(groups=(1, 1, 1), fmt='z', push=0,
+                         bindings=[
+        img_bind(0, 1, dict(w=2, h=4, fmt=10), kind=3),
+        (0, 0, 8, 1, 7 << 16)]),
+    # cts_b2b = copy_ssbo_* (BufferToBufferInvertTest, SSBO->SSBO):
+    # gl_NumWorkGroups*gl_WorkGroupSize sizing, OpArrayLength on the
+    # output runtime array, per-lane ~copy of 256 words.
+    'cts_b2b':      dict(groups=(1, 1, 1), fmt='i', push=0,
+                         bindings=[(0, 0, 256, 0), (0, 1, 256, 1)]),
+    # cts_mls64 = max_local_size_*: local_size_x=64 (spec-const folded
+    # by Mesa to a literal), 8 waves of one workgroup, every lane
+    # stores 1 at values[gl_LocalInvocationIndex].  One 64-word SSBO.
+    'cts_mls64':    dict(groups=(1, 1, 1), fmt='z', push=0,
+                         bindings=[(0, 0, 64, 1, 7 << 16)]),
+
     # ---- increment-4b corpus (§7c): control flow / barriers / matrix
     # cf=True → the bad arm is an unstructured branch (merge-op
     # removal) expected to fault APU_SH_FAULT_BRANCH at commit.
@@ -521,6 +588,15 @@ DESC = {
     # Function temporaries instead).
     'dynvec':       dict(groups=(1, 1, 1), fmt='i', push=0,
                          bindings=[(0, 0, 32, 0), (0, 1, 32, 1)]),
+    # nclamp: hand-assembled — GLSL.std.450 NMin/NMax/NClamp are the
+    # NaN-suppressing variants (a NaN operand yields the other
+    # operand; NaN only when both NaN); glslang emits the F- forms for
+    # GLSL min/max/clamp so this needs nclamp.spvasm.  infn plants NaN
+    # in each operand slot plus both-NaN pairs:
+    #   a[i%5==0]  b[i%4==1 or i%4==3]  c[i%3==2]
+    'nclamp':       dict(groups=(1, 1, 1), fmt='f', push=0,
+                         infn=nclamp_in,
+                         bindings=[(0, 0, 96, 0), (0, 1, 96, 1)]),
     # fn_divret: callee takes an early `return v` under divergence
     # while sibling lanes are parked at the caller merge — the
     # non-kill variant of the all-dead callee unwind.
@@ -1392,7 +1468,8 @@ def main():
                           'carries model words' %
                           (name, seed, r.stderr.strip()))
                     emit(name, seed, words, desc, inputs,
-                         oracle_out=mc[1], model_cache=mc)
+                         oracle_out=oracle_image(mc[1], mc, desc),
+                         model_cache=mc)
                     continue
                 data = open(out_bin, 'rb').read()
                 owords = list(struct.unpack('<%dI' % (len(data) // 4),
@@ -1497,7 +1574,8 @@ def main():
                           'section carries model words' %
                           (name, seed, r.stderr.strip()))
                     emit(name + '_opt', seed, words, desc, inputs,
-                         oracle_out=mc[1], model_cache=mc)
+                         oracle_out=oracle_image(mc[1], mc, desc),
+                         model_cache=mc)
                     continue
                 data = open(out_bin, 'rb').read()
                 owords = list(struct.unpack('<%dI' % (len(data) // 4),
@@ -1520,6 +1598,18 @@ def main():
     spirv_scan.Scanner(deep_words).scan()
     base, _ = emit('fn_deep', 0, deep_words, deep_desc,
                    gen_inputs(deep_desc, 7), expect_done=2)
+    summary.append(base)
+    # C1 smoke: a zero-dimension dispatch must retire DONE_OK with no
+    # waves issued and no stores — the zeroed output preload returns
+    # untouched.  oracle_out folds the preload image directly (no
+    # lavapipe run needed: nothing executes).
+    zero_desc = dict(groups=(0, 2, 3), fmt='z', push=0,
+                     bindings=[(0, 0, 64, 0), (0, 1, 32, 1)])
+    zero_words = read_spv(os.path.join(CORPUS, 'fn_deep.spv'))
+    spirv_scan.Scanner(zero_words).scan()
+    base, _ = emit('zerodim', 0, zero_words, zero_desc,
+                   gen_inputs(zero_desc, 7), expect_done=1,
+                   oracle_out=[0] * 96)
     summary.append(base)
     print('wrote %d cases to %s' % (len(summary), OUT))
     return 0

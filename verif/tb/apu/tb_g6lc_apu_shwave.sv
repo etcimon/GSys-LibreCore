@@ -134,7 +134,10 @@ module tb_g6lc_apu_shwave;
     .mem_rdata_i(mem_rdata), .mem_err_i(1'b0),
     .ot_req_valid_o(otb_v), .ot_req_ready_i(1'b1),
     .ot_req_o(otb_req),
-    .ot_cpl_valid_i(otb_cv), .ot_cpl_ready_o(), .ot_cpl_i(otb_cpl));
+    .ot_cpl_valid_i(otb_cv), .ot_cpl_ready_o(), .ot_cpl_i(otb_cpl),
+    .op_req_valid_o(), .op_req_ready_i(1'b0), .op_req_o(),
+    .op_cpl_valid_i(1'b0), .op_cpl_i('0),
+    .sm_busy_o());
 
   // §12.3 3d-d: ObjTab READSLOT stub for record memory-handle
   // resolve.  The record writer names handle {gen:1,slot:1} and puts
@@ -198,7 +201,10 @@ module tb_g6lc_apu_shwave;
     .mem_rdata_i('0), .mem_err_i(1'b0),
     .ot_req_valid_o(), .ot_req_ready_i(1'b0),
     .ot_req_o(),
-    .ot_cpl_valid_i(1'b0), .ot_cpl_ready_o(), .ot_cpl_i('0));
+    .ot_cpl_valid_i(1'b0), .ot_cpl_ready_o(), .ot_cpl_i('0),
+    .op_req_valid_o(), .op_req_ready_i(1'b0), .op_req_o(),
+    .op_cpl_valid_i(1'b0), .op_cpl_i('0),
+    .sm_busy_o());
 
   // continuous Enable=0 quiet monitor — sticky flag; the failure is
   // counted once at the end (fails is written from the initial
@@ -816,7 +822,10 @@ module tb_g6lc_apu_shwave;
   // run one vector: commit, load buffers, dispatch, compare
   // 4b-opt: saved unopt output words for the unopt==opt bit-exact
   // check — uout[name idx][seed][word pos over out bindings].
-  logic [31:0] uout [51][4][2048];
+  // First dim must cover names[] (indices are position-based):
+  // overflow drops the stash silently and opt reads zeros.
+  localparam int UoNames = 64;
+  logic [31:0] uout [UoNames][4][2048];
   int          cur_nidx, cur_seed, ou_mism, ou_mism_t, ou_words;
   bit          is_opt;
 
@@ -1320,11 +1329,12 @@ module tb_g6lc_apu_shwave;
                           // sampler2DArray implicit LOD
                           "fs_tex_bias", "fs_tex_array"};
 
-  // G3a-i runtime-fault arms — single vector, DONE_FAULT expected
-  // (fn_deep's depth-10 chain overflows the CallDepth=8 stack)
-  string fault_names [1] = '{"fn_deep"};
+  // single-vector arms — fn_deep: DONE_FAULT expected (depth-10 chain
+  // overflows the CallDepth=8 stack); zerodim: gx=0 dispatch retires
+  // DONE_OK with no waves and no stores (preload image untouched)
+  string fault_names [2] = '{"fn_deep", "zerodim"};
 
-  string names [51] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
+  string names [56] = '{"arrlen", "bufcopy", "bufscale", "builtin_gid",
       "builtin_lid", "builtin_lindex", "compare", "composite",
       "intmix", "localsize32", "localsize64", "math450", "oob",
       "pushscale", "vec4arith",
@@ -1334,6 +1344,14 @@ module tb_g6lc_apu_shwave;
       "matvec", "matmat", "precise_dot",
       // §12.3 F5 memory-resident descriptor corpus
       "descarr", "multiset", "arroob",
+      // read_unbound_ssbo guest variant (StorageBuffer class)
+      "cts_arrlensb",
+      // webgl_spirv_loop probe: Function-var zero initializer
+      "cts_wgloop",
+      // copy_image_to_ssbo_large probe: r32ui imageLoad -> SSBO
+      "cts_imgcopy",
+      // copy_ssbo_* probe: NumWorkGroups*WorkGroupSize + ArrayLength
+      "cts_b2b",
       // §12.3 C/5b image corpus (texelFetch/imageLoad/imageStore/
       // textureLod bilinear+mip/address modes, sRGB, 2D-array, query)
       "texfetch", "texfetch_mip", "texlod_lin", "texlod_mip",
@@ -1341,7 +1359,7 @@ module tb_g6lc_apu_shwave;
       // G3a-i: function calls, atomics, integer/bit ops, pack/unpack
       // + Modf/Frexp/Ldexp, dynamic vector ops
       "fn_call", "atomic_hist", "atomic_cas", "bitops", "packops",
-      "dynvec", "fn_divret",
+      "dynvec", "fn_divret", "nclamp",
       // G3a-ii §7d SFU corpus (class-4 Gate-2 op bounds from
       // g6lc_apu_sfu_pkg)
       "sfu_exp", "sfu_log", "sfu_pow", "sfu_trig", "sfu_atrig",
@@ -1376,7 +1394,12 @@ module tb_g6lc_apu_shwave;
       // atomic_hist has no mut arm: a flipped index op can move one
       // atomic onto another's cell and the result then depends on
       // wave interleave order — not bit-reproducible by construction.
-      if (names[i] == "atomic_hist") continue;
+      // cts_arrlensb carries no flippable arithmetic op either.
+      // cts_wgloop's only site is the loop-counter increment —
+      // flipping it would hang the loop (mut=False in DESC).
+      if (names[i] == "atomic_hist" || names[i] == "cts_arrlensb" ||
+          names[i] == "cts_wgloop")
+        continue;
       cases++;
       run_vec(names[i], {names[i], "_mut_0"});
     end
@@ -1407,10 +1430,13 @@ module tb_g6lc_apu_shwave;
     for (int i = 0; i < $size(names); i++) begin
       // no spirv-opt twin for hand-assembled phiflow or the G3a-i
       // corpus (the optimizer inlines calls/folds atomics away)
+      // cts_arrlensb has no optimizer twin either (CTS-probe corpus)
       if (names[i] == "phiflow" || names[i] == "fn_call" ||
           names[i] == "atomic_hist" || names[i] == "atomic_cas" ||
           names[i] == "bitops" || names[i] == "packops" ||
-          names[i] == "dynvec" || names[i] == "fn_divret") continue;
+          names[i] == "dynvec" || names[i] == "fn_divret" ||
+          names[i] == "cts_arrlensb" || names[i] == "nclamp" ||
+          names[i] == "cts_wgloop") continue;
       for (int s = 1; s <= 3; s++) begin
         if (only != "" && names[i] != only) continue;
         cases++;

@@ -1256,8 +1256,15 @@ module g6lc_apu_cmdexec
             case (rec_cls(rec_q.ctype))
               APU_CMDEXEC_CLS_STATE: begin
                 case (rec_q.ctype)
-                  APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT:
+                  APU_VN_TYPE_VK_CMD_BIND_PIPELINE_EXT: begin
                     snap_q.pipeline <= rec_q.handle[0];
+// pragma translate_off
+`ifdef G6LC_APU_DBG_LOST
+                    $display("[DBG] bind-pipe: hnd=%08x bufidx=%0d t=%0t",
+                             rec_q.handle[0], buf_i_q, $time);
+`endif
+// pragma translate_on
+                  end
                   APU_VN_TYPE_VK_CMD_BIND_DESCRIPTOR_SETS_EXT: begin
                     // §7b/F5: arena stream = {hnd×nset, ndyn×nset,
                     // dyn words}.  firstSet..firstSet+count-1 land in
@@ -2643,8 +2650,9 @@ module g6lc_apu_cmdexec
                  rd_q.ca[0].h,
                  outst_q, $time);
       if (state_q == StDsPipeCpl && ot_cpl_valid_i)
-        $display("[DBG] pipecpl: status=%0d kind=%0d aux=%016x t=%0t",
+        $display("[DBG] pipecpl: status=%0d kind=%0d aux=%016x phnd=%08x chnd=%08x t=%0t",
                  ot_cpl_i.status, ot_cpl_i.entry.kind, ot_cpl_i.entry.aux,
+                 snap_q.pipeline, ot_cpl_i.handle,
                  $time);
       if (state_q == StDrPayCpl && op_cpl_valid_i)
         $display("[DBG] gpay[%0d] = %08x (gpay=%04x) t=%0t",

@@ -369,14 +369,17 @@ module g6lc_apu_shmod
       endcase
     endfunction
     function automatic logic is_dec_id(input logic [15:0] d);
+      // 21 Volatile / 23 Coherent are inert here: every LSU access
+      // goes through the same PayMem path — no cache ordering exists
+      // for them to constrain
       unique case (d)
-        0,1,2,3,6,11,19,20,24,25,26,30,33,34,42: is_dec_id = 1'b1;
+        0,1,2,3,6,11,19,20,21,23,24,25,26,30,33,34,42: is_dec_id = 1'b1;
         default: is_dec_id = 1'b0;
       endcase
     endfunction
     function automatic logic is_dec_mbr(input logic [15:0] d);
       unique case (d)
-        0,1,4,5,7,11,24,25,35,42: is_dec_mbr = 1'b1;
+        0,1,4,5,7,11,21,23,24,25,35,42: is_dec_mbr = 1'b1;
         default: is_dec_mbr = 1'b0;
       endcase
     endfunction
@@ -838,6 +841,11 @@ module g6lc_apu_shmod
               1: begin
                    ty_req = 1'b1; ty_addr = {slot_q, ty_elem};
                    de_req = 1'b1; de_addr = {slot_q, ops_q[1][9:0]};
+                   // initializer operand present → fetch its const row
+                   // so ph2 can check it reads all-zero
+                   if (wc_q == 5) begin
+                     co_req = 1'b1; co_addr = {slot_q, ops_q[3][9:0]};
+                   end
                 end
               3: begin
                    va_req = 1'b1; va_we = 1'b1;
@@ -1484,7 +1492,16 @@ module g6lc_apu_shmod
                 end
               end
               59: begin
-                if (wc_q > 4) begin
+                // wc==5 carries an Initializer operand: legal only on
+                // the pre-zeroed classes (W_SC0 clears Function/Private
+                // lane scratch per wave, W_SCLR the Workgroup slab)
+                // and only when S_VRB ph2 sees an all-zero const row —
+                // mirrors h_59 in spirv_scan.py
+                if (wc_q > 5 ||
+                    (wc_q == 5 &&
+                     ops_q[2][3:0] != APU_SH_SC_WORKGROUP &&
+                     ops_q[2][3:0] != APU_SH_SC_PRIVATE &&
+                     ops_q[2][3:0] != APU_SH_SC_FUNCTION)) begin
                   fl_code_q <= APU_SH_FAULT_VAR; fl_opc_q <= opc_q;
                   fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
                 end else if (!is_sc_ok(ops_q[2][3:0])) begin
@@ -2123,6 +2140,15 @@ module g6lc_apu_shmod
                     end
                   end
                 endcase
+                // OpVariable initializer: accepted only when the
+                // const row is all-zero — a zero init is a no-op on
+                // pre-zeroed storage.  Valid SPIR-V always uses a
+                // constant instruction here; an unwritten/stale row
+                // only matters for ill-formed modules.
+                if (wc_q == 5 && |co_rdata) begin
+                  fl_code_q <= APU_SH_FAULT_VAR; fl_opc_q <= opc_q;
+                  fl_word_q <= at_q; fail_q <= 1'b1; st_q <= S_DONE;
+                end
                 ph_q <= 3;
               end
               default: begin

@@ -4055,7 +4055,14 @@ class FrontModel:
             e = ent_of(cb_q)
             aux = e['aux'] & 0xFF
             if cls == 'CB_BEGIN':
-                if e['state'] != 0:
+                # §6.1 implicit reset: BEGIN on an EXECUTABLE buffer
+                # rewinds the stream.  A PENDING buffer means its owner
+                # submission is still in flight — the RTL waits for the
+                # drain, after which cmdexec's restore reads EXECUTABLE,
+                # so normalize the mark here (same result either way)
+                if e['state'] & CB_PEND:
+                    e['state'] = (e['state'] & ~0xF) | CB_EXEC
+                if e['state'] & (CB_REC | CB_INV):
                     out['result'] = VK_ERR_UNKNOWN
                 else:
                     self.rec_state[aux] = 1
@@ -4222,6 +4229,12 @@ class FrontModel:
             ok = True
             for idv in blob_ids(1):
                 st, s, e = self.resolve(idv, KIND['VkCommandBuffer'])
+                # a PENDING element means its owner submission is still
+                # in flight — the RTL waits for the drain then re-reads
+                # the entry, by which point cmdexec's StCbRes has
+                # restored EXECUTABLE (a resubmit is legal)
+                if st == 'OK' and (e['state'] & CB_PEND):
+                    e['state'] = (e['state'] & ~0xF) | CB_EXEC
                 if st != 'OK' or not (e['state'] & CB_EXEC) or \
                         (e['aux'] & 0xFF) >= self.CB_BUFS or \
                         len(cbs) == 4:
@@ -7727,6 +7740,16 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                             commandBuffer=V['cb'], groupCountX=vec['gx'],
                             groupCountY=vec['gy'],
                             groupCountZ=vec['gz'])))
+            elif variant == 'zerodisp':
+                # C1 (cts empty_workgroup_*): a zero-dimension
+                # dispatch must be a no-op that cannot disturb the
+                # real dispatch that follows it in the same buffer
+                seg_a2.append(('vkCmdDispatch', dict(
+                    commandBuffer=V['cb'], groupCountX=0,
+                    groupCountY=2, groupCountZ=3)))
+                seg_a2.append(('vkCmdDispatch', dict(
+                    commandBuffer=V['cb'], groupCountX=vec['gx'],
+                    groupCountY=vec['gy'], groupCountZ=vec['gz'])))
             elif variant != 'donecol':
                 # donecol emits its dispatch ahead of the collision
                 # pair above instead
@@ -8246,6 +8269,54 @@ def build_transport(model, asm, sim, rep_sim, enc, gen, rng,
                 note("B' maxconc: destroy 4096")
                 run_batches(compile_cmds(seg_mc))
                 check_live()
+
+            if variant == 'rerec':
+                # §6.1 implicit reset: re-BEGIN the SAME command buffer
+                # after its submission retired — the CTS device-local
+                # readback shape.  The cb sits EXECUTABLE (cmdexec
+                # StCbRes restored it) or briefly PENDING (ffb slot
+                # wake raced the restore); a stale-PENDING rejection
+                # strands every record on INVALID marks and the
+                # resubmit drops the cb — the fill below never lands.
+                rr_pat = 0x5EC0_5EC0
+                rr_ob = vec['outs'][0]['bind_idx']
+                seg_rr = [
+                    ('vkBeginCommandBuffer', dict(
+                        commandBuffer=V['cb'],
+                        pBeginInfo=st('VkCommandBufferBeginInfo',
+                                      flags=0,
+                                      pInheritanceInfo=None))),
+                    ('vkCmdFillBuffer', dict(
+                        commandBuffer=V['cb'], dstBuffer=bufs[rr_ob],
+                        dstOffset=0, size=16, data=rr_pat)),
+                    ('vkEndCommandBuffer', dict(commandBuffer=V['cb'])),
+                    ('vkCreateFence', dict(
+                        device=V['dev'],
+                        pCreateInfo=st('VkFenceCreateInfo', flags=0),
+                        pFence=V['fen'] + 1)),
+                    ('vkQueueSubmit', dict(
+                        queue=V['queue'], submitCount=1,
+                        pSubmits=[st(
+                            'VkSubmitInfo', waitSemaphoreCount=0,
+                            pWaitSemaphores=[], pWaitDstStageMask=[],
+                            commandBufferCount=1,
+                            pCommandBuffers=[V['cb']],
+                            signalSemaphoreCount=0,
+                            pSignalSemaphores=[])],
+                        fence=V['fen'] + 1)),
+                    ('vkDeviceWaitIdle', dict(device=V['dev'])),
+                    ('vkWaitForFences', dict(
+                        device=V['dev'], fenceCount=1,
+                        pFences=[V['fen'] + 1], waitAll=1,
+                        timeout=0xFFFFFFFFFFFFFFFF)),
+                ]
+                note("B' rerec: implicit-reset re-record + resubmit")
+                run_batches(compile_cmds(seg_rr))
+                base_b = blob_base[rr_ob]
+                W(TP_CHECK, CK_APR, 4, base_b)
+                for j in range(4):
+                    rec(EK_APRCHK, base_b + 4 * j, rr_pat, rr_pat, 0)
+                note("B' gates: rerec fill 4 words")
 
             # ---- segment C: reverse-order teardown -------------------- #
             seg_c = [
