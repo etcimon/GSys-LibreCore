@@ -31,6 +31,11 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A130 update:** live-RTL board after adoption — multiplier 2.820 → 2.581
+ns (131.8 → 120.6 adjusted FO4), worst now the stage-1 product; the
+board's top is `store_buffer` 173.0 with the concurrent write-buffer fixes
+in the tree; 56 of 65 over budget.
+
 **A129 update:** `latency <dom> <param> base=…` binds a domain's stage
 count to the parameter its consumers track; a plan is admitted only when
 `base + k` equals the parameter's value, otherwise refused with the value
@@ -8260,6 +8265,22 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A130 — The live-RTL board after the multiplier's adoption
+
+The route on the live `g6lc64_ooo` tree (`MultStages = 3`, contracts
+declared, streamed recipe): the multiplier reads **2.581 ns = 120.6
+adjusted FO4** (was 2.820 / 131.8 on the previous board), reg→reg 1.817
+(was 2.013); its worst is now the stage-1 Booth product from the inputs
+into `pp_q`. The board's top is `store_buffer` 173.0 (3.702 ns) and
+`wt_dcache_wbuffer` 132.3 — both up from the previous board, with the
+concurrent fixup-queue fixes (T46/T47) in the tree; `g6lc_lsq` / `g6lc_iq`
+/ `scoreboard` read lower on the live RTL than on the old corrected emit,
+whose own cuts had created the boundary cones. 56 of 65 measured modules
+remain over budget; budget-equivalent 216 MHz. The multiplier's next rung
+is narrower partial-product slices under the existing third stage — an
+arithmetic restructure, not a cut. Flow fix: whole-core recipes run
+`async2sync t:$aldff t:$aldffe` before mapping.
 
 ## A129 — The `latency` word
 

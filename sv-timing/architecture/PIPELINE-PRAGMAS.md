@@ -581,3 +581,60 @@ proposed; under 2 the plan is proposed and refused with the parameter to
 change. The word is the general form of A126's "adoption needs
 `MultStages = 3`": the designer writes it once, and the tool enforces it
 for every later run.
+
+## 12. The live-RTL board after adoption (A130)
+
+`timings sta-rtl --remote --fo4 0 --target g6lc64_ooo --map-recipe streamed`
+on the tree with `MultStages = 3` and every contract declared — the **live
+RTL**, no sv-timing emit. The previous board (§6) was of the *corrected
+emit*; the two columns below are therefore not the same netlist, and the
+tree also carries the concurrent write-buffer fixes (T46/T47). Platform
+FO4 21.40 ps/INV_X1; 56 of 65 measured modules over budget;
+budget-equivalent 216 MHz on Nangate45.
+
+| # | module | adj FO4 | ns | §6 board | delta |
+|---|---|---:|---:|---:|---:|
+| 1 | `store_buffer` | 173.0 | 3.702 | 141.3 | +31.7 |
+| 2 | `wt_dcache_wbuffer` | 132.3 | 2.831 | 105.6 | +26.7 |
+| 3 | `frontend` | 128.2 | 2.744 | 142.4 | -14.2 |
+| 4 | `g6lc_rename` | 125.9 | 2.693 | 125.9 | +0.0 |
+| 5 | `multiplier` | 120.6 | 2.581 | 131.8 | -11.2 |
+| 6 | `instr_realign` | 119.0 | 2.547 | 119.0 | +0.0 |
+| 7 | `g6lc_iq` | 112.3 | 2.403 | 142.8 | -30.5 |
+| 8 | `g6lc_ooo_dispatch` | 100.8 | 2.157 | 97.9 | +2.9 |
+| 9 | `wt_dcache_mem` | 96.6 | 2.068 | 47.2 | +49.5 |
+| 10 | `scoreboard` | 93.7 | 2.006 | 127.9 | -34.2 |
+| 11 | `g6lc_lsq` | 91.6 | 1.961 | 176.0 | -84.4 |
+| 12 | `issue_read_operands` | 90.8 | 1.943 | 65.9 | +24.9 |
+| 13 | `alu` | 90.5 | 1.936 | 96.4 | -5.9 |
+| 14 | `csr_regfile` | 84.9 | 1.816 | 87.0 | -2.1 |
+| 15 | `g6lc_bp_statcor` | 83.7 | 1.791 | 60.9 | +22.8 |
+| 16 | `aes` | 83.7 | 1.790 | 83.7 | +0.0 |
+| 17 | `g6lc_rob` | 82.4 | 1.764 | 77.9 | +4.5 |
+| 18 | `g6lc_bp_ckpt` | 73.3 | 1.568 | 68.0 | +5.2 |
+| 19 | `g6lc_loop_buffer` | 72.3 | 1.548 | 71.6 | +0.7 |
+| 20 | `cva6_tlb` | 69.1 | 1.478 | 41.8 | +27.2 |
+
+**The multiplier.** 2.820 → **2.581 ns** (131.8 → 120.6 adjusted FO4),
+reg→reg 2.013 → **1.817 ns**. The worst path is now the stage-1 product
+from the module's inputs into `pp_q` (operand conditioning + the 65×17
+Booth product, 38 cells reg→reg); the shifted-product sum that the third
+stage isolated no longer appears. The remaining 120 adjusted FO4 is the
+atomic product itself: the next rung in this module is *narrower slices*
+(XLEN/8 partial products of 65×9 under `MultStages = 3`, whose sum tree the
+third stage already owns), an arithmetic restructure the contract can
+admit (`cut-ok` stays on the sum) but cannot perform.
+
+**What moved and why, honestly.** `g6lc_lsq` 176 → 92, `g6lc_iq` 143 →
+112, `scoreboard` 128 → 94 read lower on the live RTL than on the old
+emit: the emit's own cuts had created in→reg boundary cones the board
+attributed to those modules. `store_buffer` 141 → 173 and
+`wt_dcache_wbuffer` 106 → 132 read higher: the write-buffer fixup-queue
+work (T46/T47) added bytes-superseded masking to the forward merge and
+the queue permutation. Neither movement is a pipeline result; the
+multiplier's is.
+
+**Flow.** The whole-core recipes now make slang's async-load flops
+synchronous before mapping, as the per-module phase did; the first
+live-RTL attempt mapped for 86 minutes and failed at OpenSTA on
+`$_ALDFFE_` black boxes.

@@ -3,6 +3,16 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A130 — live-RTL board
+
+- [x] Route on the live tree (`--fo4 0 --map-recipe streamed`); whole-core
+  recipes make `$aldff` synchronous; worklist `a130-worklist.json`.
+- [ ] Multiplier: XLEN/8 partial-product slices under `MultStages = 3`
+  (the third stage owns the 8-term sum); witnesses; board.
+- [ ] `store_buffer` / `wt_dcache_wbuffer`: the fixup-queue forward merge
+  and the queue permutation are the new top — read with the T46/T47
+  authors before any contract changes.
+
 ## A129 — latency word
 
 - [x] `latency <dom> <param> base=<n|param>`; refusal names the parameter
