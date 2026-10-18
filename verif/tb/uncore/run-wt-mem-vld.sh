@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
-# wt_dcache_mem leaf (T43 valid-bit write single-requester): positive, +oracle_negative (must fail) and the
-# G6LC_MUT_VLD_WDATA_INV_PRIO mutation (the pre-fix valid-bit data mux: an all-ways invalidation coinciding with a
+# wt_dcache_mem leaf (T43 valid-bit write single-requester, T46 byte-merged forward): positive, +oracle_negative
+# (must fail), the G6LC_MUT_VLD_WDATA_INV_PRIO mutation (the pre-fix valid-bit data mux: an all-ways invalidation coinciding with a
 # pending fixup inv_req validates the other ways with the missunit's tag -- must fail WT_MEM_VLD_S2_FOREIGN_VALID).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
@@ -48,5 +48,8 @@ grep -q "WT_MEM_VLD_S2" "$OUT/neg.log" || { echo "FAIL oracle negative did not f
 build mut "+define+G6LC_MUT_VLD_WDATA_INV_PRIO"
 "$OUT/mut/tb" > "$OUT/mut.log" 2>&1
 grep -q "WT_MEM_VLD_S2_FOREIGN_VALID\|missunit line write" "$OUT/mut.log" || { echo "FAIL mutation G6LC_MUT_VLD_WDATA_INV_PRIO not caught"; tail -5 "$OUT/mut.log"; exit 1; }
+build mut2 "+define+G6LC_MUT_WBUF_FWD_ONE_HOT"
+"$OUT/mut2/tb" > "$OUT/mut2.log" 2>&1
+grep -q "WT_MEM_VLD_S4_PARTIAL_FORWARD" "$OUT/mut2.log" || { echo "FAIL mutation G6LC_MUT_WBUF_FWD_ONE_HOT not caught"; tail -5 "$OUT/mut2.log"; exit 1; }
 set -e
-echo "PASS run-wt-mem-vld (positive, oracle negative, valid-bit mux mutation caught)"
+echo "PASS run-wt-mem-vld (positive, oracle negative, valid-bit mux + single-entry forward mutations caught)"

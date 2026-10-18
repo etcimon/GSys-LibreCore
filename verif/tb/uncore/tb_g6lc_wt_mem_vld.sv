@@ -17,7 +17,10 @@
 //     -> inv_ack low in that cycle, afterwards lookups of A and B miss (no way
 //        valid), rd_vld_bits_o == 0
 // S3  the explicit inv alone (no missunit write): acked, invalidates its way only
-// Pass token: WT_MEM_VLD_PASS. +oracle_negative flips the S2 expectation.
+// S4  (T46) a word held by a fixup entry (8 bytes) and a younger wbuffer entry
+//     (2 bytes): the readout merges byte-wise, young over old over array
+// Pass token: WT_MEM_VLD_PASS. +oracle_negative flips the S2/S4 expectations;
+// G6LC_MUT_VLD_WDATA_INV_PRIO fails S2, G6LC_MUT_WBUF_FWD_ONE_HOT fails S4.
 module tb_g6lc_wt_mem_vld;
   import ariane_pkg::*;
   import wt_cache_pkg::*;
@@ -83,10 +86,12 @@ module tb_g6lc_wt_mem_vld;
     inv_req     <= d_inv_req;
     inv_way_oh  <= d_inv_way_oh;
     inv_vld_bits<= d_inv_vld_bits;
+    wbuffer_data  <= d_wbuffer_data;
+    fixup_wbuffer <= d_fixup_wbuffer;
   end
 
-  wbuffer_t [CVA6Cfg.WtDcacheWbufDepth-1:0] wbuffer_data = '0;
-  wbuffer_t [CVA6Cfg.WtDcacheFixupDepth:0]  fixup_wbuffer = '0;
+  wbuffer_t [CVA6Cfg.WtDcacheWbufDepth-1:0] wbuffer_data = '0, d_wbuffer_data = '0;
+  wbuffer_t [CVA6Cfg.WtDcacheFixupDepth:0]  fixup_wbuffer = '0, d_fixup_wbuffer = '0;
   logic wbuffer_fwd_hit;
 
   wt_dcache_mem #(
@@ -180,6 +185,29 @@ module tb_g6lc_wt_mem_vld;
     if (hit != 8'h04 || vld != 8'h04) $fatal(1, "WT_MEM_VLD_S3_A hit=%h vld=%h", hit, vld);
     lookup(TAG_B, hit, vld);
     if (hit != 8'h00) $fatal(1, "WT_MEM_VLD_S3_B hit=%h", hit);
+
+    // S4 (T46): one word held by two entries -- the older store in the fixup
+    // queue (all 8 bytes, array write pending) and a younger 2-byte store in
+    // the wbuffer. A read must merge byte-wise (wbuffer bytes over fixup bytes
+    // over the array), never take the young entry's bytes over the stale array.
+    refill(TAG_A, 0);                         // array holds A5.. for the line
+    d_fixup_wbuffer[0] = '0;
+    d_fixup_wbuffer[0].wtag  = {TAG_A, IDX, {(CVA6Cfg.DCACHE_OFFSET_WIDTH-CVA6Cfg.XLEN_ALIGN_BYTES){1'b0}}};
+    d_fixup_wbuffer[0].data  = 64'h0000000080190017;
+    d_fixup_wbuffer[0].valid = 8'hFF;
+    d_wbuffer_data[0] = '0;
+    d_wbuffer_data[0].wtag  = d_fixup_wbuffer[0].wtag;
+    d_wbuffer_data[0].data  = 64'h0000000000000016;
+    d_wbuffer_data[0].valid = 8'h03;
+    tick();
+    d_rd_req[1] = 1; d_rd_tag_only[1] = 0; d_rd_idx[1] = IDX; d_rd_tag[1] = TAG_A;
+    tick(); d_rd_req[1] = 0; tick(); #1;
+    if ((rd_data != 64'h0000000080190016 || !wbuffer_fwd_hit) != negative)
+      $fatal(1, "WT_MEM_VLD_S4_PARTIAL_FORWARD data=%h fwd_hit=%b (expected 0000000080190016 from fixup + wbuffer bytes) hit_oh=%b cmp=%h wtag0=%h wtagF=%h depth=%0d",
+             rd_data, wbuffer_fwd_hit, dut.wbuffer_hit_oh, dut.wbuffer_cmp_addr >> CVA6Cfg.XLEN_ALIGN_BYTES,
+             dut.wbuffer_all[0].wtag, dut.wbuffer_all[CVA6Cfg.WtDcacheWbufDepth].wtag, dut.WbufferAllDepth);
+    tick();
+    d_fixup_wbuffer[0] = '0; d_wbuffer_data[0] = '0; tick();
 
     $display("WT_MEM_VLD_PASS");
     $finish;

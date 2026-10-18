@@ -346,9 +346,42 @@ module wt_dcache_mem
   );
 
   // SL-W: the hit index may point into the combined wbuffer_all (normal + fixup)
-  assign wbuffer_rdata = wbuffer_all[wbuffer_hit_idx].data;
+  // T46: with the fixup queue a word can be held by two entries at once -- the
+  // store that was ACKed before its tag check sits in the fixup queue with its
+  // array write pending while a younger store to the same word allocates a
+  // fresh wbuffer entry. Forwarding from the single lowest-index hit (the
+  // young wbuffer entry) took its bytes and left the rest to the array, which
+  // did not have the older word yet: a `sd` then `sh` then `ld` on one stack
+  // slot returned the `sh` bytes over the pre-`sd` contents (L3 boot, retire
+  // 948,230,046). The readout now merges byte-wise across every matching
+  // entry, lowest index first: the wbuffer entry (youngest; upstream keeps one
+  // per word), then the fixup entries newest-first.
+`ifdef G6LC_MUT_WBUF_FWD_ONE_HOT
+  assign wbuffer_rdata = wbuffer_all[wbuffer_hit_idx].data;   // review mutation: the pre-fix single-entry forward
   assign wbuffer_ruser = wbuffer_all[wbuffer_hit_idx].user;
   assign wbuffer_be    = (|wbuffer_hit_oh) ? wbuffer_all[wbuffer_hit_idx].valid : '0;
+`else
+  // per byte lane: the lowest-index matching entry that holds the byte
+  logic [(CVA6Cfg.XLEN/8)-1:0][$clog2(WbufferAllDepth+1)-1:0] wbuffer_sel;
+  always_comb begin
+    wbuffer_rdata = '0;
+    wbuffer_ruser = '0;
+    wbuffer_be    = '0;
+    wbuffer_sel   = '0;
+    for (int unsigned k = 0; k < CVA6Cfg.XLEN / 8; k++) begin
+      for (int unsigned e = 0; e < WbufferAllDepth; e++) begin
+        if (!wbuffer_be[k] && wbuffer_hit_oh[e] && wbuffer_all[e].valid[k]) begin
+          wbuffer_be[k]         = 1'b1;
+          wbuffer_sel[k]        = e[$clog2(WbufferAllDepth+1)-1:0];
+          wbuffer_rdata[8*k+:8] = wbuffer_all[e].data[8*k+:8];
+        end
+      end
+    end
+    for (int unsigned k = 0; k < CVA6Cfg.DCACHE_USER_WIDTH / 8; k++) begin
+      if (wbuffer_be[k]) wbuffer_ruser[8*k+:8] = wbuffer_all[wbuffer_sel[k]].user[8*k+:8];
+    end
+  end
+`endif
   // Complete-word forward: every byte of the XLEN readout is in the buffer.
   // A cache-miss load of that word must not issue a refill (stale DRAM) while
   // the store is still sitting in the wbuffer. Per-word miss-unit *masking* of
