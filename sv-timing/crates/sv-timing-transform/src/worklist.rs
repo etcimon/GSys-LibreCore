@@ -512,6 +512,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: path(0, 0.0, "t.sv", 1).primary_loc.clone(),
             },
         );

@@ -3,6 +3,26 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A123 — re-pipelining contracts (`svt-pipe`)
+
+- [x] `pipe_contract.rs`: vocabulary, resolution with rejections, permission
+  (LHS / spine-line anchors), data-order stage bundle, feed and consumer
+  rewires, alignment + foreign-read refusals; IR `pipe_pragmas`.
+- [x] `insert_register`: per-stage gate before alignment, all-or-nothing
+  carried plans, two-pass application (reverse rewire, data-order bundle).
+- [x] Emitter: hoisted plain-vector bundle declarations, stage capture with
+  kill/flush, fenced assertions, `rewrite_pipe_consumers`, owning-module
+  injection, same-module twin rewrites.
+- [x] Fixture + latency-agnostic witness (`tb_pipe_contract`), remote
+  `CONTROL_MODE=pipe-fixture` (Verilator 3 seeds gold + twin, Nangate45 map).
+- [ ] Balance registers for side paths (today refused with the count).
+- [ ] Narrow the pipe to the cut net's width in contract mode (`SVT_DATA_W`
+  64 for 32-bit nets doubled the fixture's flops).
+- [ ] `ready=` back-pressure; carried signals of struct type (plain-vector
+  copies lose member access at the consumer).
+- [ ] Write the contract at the core's real boundaries (lsq alloc/update,
+  scoreboard commit, rename map write, store-buffer insert) and measure.
+
 ## A122 — hand tunings abstracted to generic transforms
 
 - [x] `expr_rewrite`: `CircularCompare`, `ZeroDetectEquality`, `PushSelect`

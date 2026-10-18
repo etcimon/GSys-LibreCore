@@ -728,7 +728,32 @@ pub struct TimingModule {
     /// assignment RHS, so an exact identity must be able to rewrite one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guard_sites: Vec<GuardSite>,
+    /// In-file re-pipelining facts (A123): `// svt-pipe: …` comment pragmas
+    /// collected over the module span, like the `$onehot` facts. They name
+    /// the roles a register cut must carry (valid, id, kill, flush, carried
+    /// signals, result side) and where a stage boundary is permitted or
+    /// forbidden. Declared by the designer, consumed by `InsertReg`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pipe_pragmas: Vec<PipePragma>,
     /// Source span of module header.
+    pub loc: SourceLoc,
+}
+
+/// One `// svt-pipe: <kind> [domain] key=value … flag …` pragma as written.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct PipePragma {
+    /// `protocol`, `carry`, `result`, `cut-ok`, `no-cut`, `require-contract`.
+    pub kind: String,
+    /// Protocol domain name when the kind takes one (`protocol`, `carry`, `result`, `cut-ok`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub domain: Option<String>,
+    /// `key=value` arguments, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<(String, String)>,
+    /// Bare words (carried signal names for `carry`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub words: Vec<String>,
+    /// The pragma comment's own location.
     pub loc: SourceLoc,
 }
 

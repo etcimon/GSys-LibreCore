@@ -254,6 +254,10 @@ pub fn path_is_handshake_locked(design: &TimingDesign, path: &TimingPath) -> boo
     let Some(module) = design.modules.get(&path.module) else {
         return false;
     };
+    // A123: a declared contract with a `cut-ok` on this path owns the lock.
+    if path_has_contract_cut(design, path) {
+        return false;
+    }
     let locked = handshake_locked_names(module);
     if locked.is_empty() {
         return false;
@@ -287,6 +291,29 @@ pub fn path_is_handshake_locked(design: &TimingDesign, path: &TimingPath) -> boo
         }
     }
     false
+}
+
+/// A path whose module declares an `svt-pipe` protocol and whose nodes
+/// include a `cut-ok` anchor of that contract (A123): the designer has
+/// named the valid / id / kill / flush the cut must carry, so the P10
+/// heuristic — which exists precisely because a bare register would lose
+/// them — yields to the declared contract on that path.
+fn path_has_contract_cut(design: &TimingDesign, path: &TimingPath) -> bool {
+    let Some(module) = design.modules.get(&path.module) else {
+        return false;
+    };
+    let Some(contract) = crate::pipe_contract::resolve(module) else {
+        return false;
+    };
+    if contract.domains.is_empty() || contract.cut_ok.is_empty() {
+        return false;
+    }
+    path.nodes.iter().filter_map(|id| module.nodes.get(id)).any(|n| {
+        matches!(
+            crate::pipe_contract::cut_permission(module, &contract, n),
+            crate::pipe_contract::CutPermission::Allowed(_)
+        )
+    })
 }
 
 /// Tag P10 evidence onto paths that touch a locked handshake (after classify).
@@ -1092,6 +1119,7 @@ mod tests {
             guards: Default::default(),
             onehot_facts: Default::default(),
             guard_sites: Default::default(),
+            pipe_pragmas: Default::default(),
             loc: crate::loc::SourceLoc::file_start("lzc.sv"),
         };
         m.id = 0;
@@ -1156,6 +1184,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: crate::loc::SourceLoc::file_start("axi2mem.sv"),
             },
         );
@@ -1202,6 +1231,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: crate::loc::SourceLoc::file_start("policy.sv"),
             },
         );

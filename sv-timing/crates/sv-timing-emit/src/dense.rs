@@ -517,6 +517,13 @@ fn balance_mux_or_credit_block(snippets: &[&str], credit_only: &[&EditRecord]) -
 /// the first origin line, where the LHS they are typed after is in scope. The
 /// feeds and the capture stage stay in the late block (R11: feeds may read
 /// mid-module nets). Lean emit keeps every declaration in the late block.
+/// Carried net of pipe `name` for the k-th carried signal of stage `st`
+/// (the signal's original name; every stage names its copy after it).
+fn carry_net_for(name: &str, k: usize, st: &sv_timing_core::pipe_contract::PipeStage) -> String {
+    let sig = st.carry_sigs.get(k).map(String::as_str).unwrap_or("x");
+    sv_timing_core::pipe_contract::carry_net(name, sig)
+}
+
 fn dense_pipe_block(
     opts: &DenseEmitOptions,
     cuts: &[CutAssign],
@@ -565,6 +572,18 @@ fn dense_pipe_block(
         })
     };
 
+    // A123: stage bundles by pipe name (declared protocol domains only).
+    let stage_by_name: std::collections::BTreeMap<
+        String,
+        &sv_timing_core::pipe_contract::PipeStage,
+    > = pipe
+        .iter()
+        .filter_map(|r| {
+            r.pipe_stage
+                .as_ref()
+                .map(|st| (r.new_name.clone().unwrap_or_default(), st))
+        })
+        .collect();
     let seq = has_seq_clock(opts);
     let mut b = String::new();
     b.push_str("\n  // BEGIN sv-timing auto-correct (dense emit)\n");
@@ -623,14 +642,61 @@ fn dense_pipe_block(
         // every pipe is declared at the top of the module. Lean emit reads
         // nothing and keeps the declarations here.
         let hoist = opts.real_cut_feeds;
+        // A123: a stage inside a declared protocol domain carries its valid,
+        // id and side-band; the contract is serialized as a comment so the
+        // emitted file states what the stage samples and why it is legal.
+        let bundle_decls = r.pipe_stage.as_ref().map(|st| {
+            let (v, id) = sv_timing_core::pipe_contract::stage_nets(&name);
+            let mut d = format!(
+                "  // svt-pipe: stage {} of `{}` (InsertReg #{}): valid<={} & ~{}, id<={}{}{}\n",
+                st.stage,
+                st.domain,
+                r.id,
+                st.valid_src,
+                st.kill_expr,
+                st.id_src,
+                st.flush
+                    .as_ref()
+                    .map(|f| format!(", flush {f}"))
+                    .unwrap_or_default(),
+                if st.carry_src.is_empty() {
+                    String::new()
+                } else {
+                    format!(", carry {}", st.carry_src.join(","))
+                }
+            );
+            d.push_str(&format!(
+                "  logic {v}; // staged valid (killed at each stage and at use)\n"
+            ));
+            match st.id_width {
+                Some(w) => d.push_str(&format!("  logic [{w}-1:0] {id}; // staged id\n")),
+                None => d.push_str(&format!("  var type({}) {id}; // staged id\n", st.id_src)),
+            }
+            for (k, c) in st.carry_src.iter().enumerate() {
+                let net = carry_net_for(&name, k, st);
+                match st.carry_widths.get(k).copied().flatten() {
+                    Some(w) => {
+                        d.push_str(&format!("  logic [{w}-1:0] {net}; // carried side-band\n"))
+                    }
+                    None => d.push_str(&format!("  var type({c}) {net}; // carried side-band\n")),
+                }
+            }
+            d
+        });
         if hoist {
             let mut d = format!("  // pipe declarations (InsertReg #{}: {})\n", r.id, name);
             d.push_str(&pipe_decl(&name, "_c", "comb feed", true));
             d.push_str(&pipe_decl(&name, "", "staged value", true));
+            if let Some(bd) = &bundle_decls {
+                d.push_str(bd);
+            }
             decl_jobs.push((name.clone(), d));
         } else {
             b.push_str(&pipe_decl(&name, "_c", "comb feed", false));
             b.push_str(&pipe_decl(&name, "", "staged value", false));
+            if let Some(bd) = &bundle_decls {
+                b.push_str(bd);
+            }
         }
     }
     let mut split_names: Vec<String> = Vec::new();
@@ -684,6 +750,16 @@ fn dense_pipe_block(
                 && !gen_local
                 && !refs_auto;
             if use_real {
+                // A123: a carried stage's logic reads the previous stage's
+                // copy of every carried signal, never the live one.
+                let mut rhs_text = rhs.clone();
+                if let Some(st) = stage_by_name.get(name) {
+                    for (old, new) in &st.feed_rewires {
+                        rhs_text =
+                            sv_timing_core::select_increment::substitute_step(&rhs_text, old, new);
+                    }
+                }
+                let rhs = &rhs_text;
                 match typed_in_late(name) {
                     Some(l) => b.push_str(&format!(
                         "  assign {name}_c = type({l})'(({rhs})); // cut feed (origin rhs)\n"
@@ -778,6 +854,14 @@ fn dense_pipe_block(
                     Some(l) => b.push_str(&format!("      {name} <= type({l})'('0);\n")),
                     None => b.push_str(&format!("      {name} <= '0;\n")),
                 }
+                if let Some(st) = stage_by_name.get(name) {
+                    let (v, id) = sv_timing_core::pipe_contract::stage_nets(name);
+                    b.push_str(&format!("      {v} <= 1'b0;\n"));
+                    b.push_str(&format!("      {id} <= '0;\n"));
+                    for k in 0..st.carry_src.len() {
+                        b.push_str(&format!("      {} <= '0;\n", carry_net_for(name, k, st)));
+                    }
+                }
             }
             b.push_str("    end else begin : svt_capture\n");
             for name in &stage_names {
@@ -791,9 +875,61 @@ fn dense_pipe_block(
                     // Lean: direct capture (no enable mux theater).
                     b.push_str(&format!("      {name} <= {name}_c;\n"));
                 }
+                if let Some(st) = stage_by_name.get(name) {
+                    // The staged valid: the source valid, killed by the
+                    // cancellation raised this cycle against the source id,
+                    // cleared by flush. Data and side-band sample unconditionally
+                    // (the valid gates their use).
+                    let (v, id) = sv_timing_core::pipe_contract::stage_nets(name);
+                    match &st.flush {
+                        Some(f) => b.push_str(&format!(
+                            "      {v} <= {f} ? 1'b0 : ({} & ~{});\n",
+                            st.valid_src, st.kill_expr
+                        )),
+                        None => b.push_str(&format!(
+                            "      {v} <= {} & ~{};\n",
+                            st.valid_src, st.kill_expr
+                        )),
+                    }
+                    b.push_str(&format!("      {id} <= {};\n", st.id_src));
+                    for (k, c) in st.carry_src.iter().enumerate() {
+                        b.push_str(&format!("      {} <= {c};\n", carry_net_for(name, k, st)));
+                    }
+                }
             }
             b.push_str("    end\n");
             b.push_str("  end\n");
+            // Proof obligations of the contract, fenced from synthesis: a
+            // killed or flushed operation never stands valid in a stage.
+            if !stage_by_name.is_empty() {
+                b.push_str("  //pragma translate_off\n");
+                for (name, st) in &stage_by_name {
+                    let (v, id) = sv_timing_core::pipe_contract::stage_nets(name);
+                    let kill_now = st.kill_expr.replace(&st.id_src, &id);
+                    b.push_str(&format!(
+                        "  always_ff @(posedge {}) if ({}) begin\n",
+                        opts.clk, opts.rst_n
+                    ));
+                    b.push_str(&format!(
+                        "    svt_pipe_{name}_killed_stays_dead: assert (!($past({v}) && $past({kill_now}) && {v} && {id} == $past({id})))\n"
+                    ));
+                    b.push_str(&format!(
+                        "      else $error(\"svt-pipe `{}`: stage {} kept an operation killed last cycle\");\n",
+                        st.domain, st.stage
+                    ));
+                    if let Some(f) = &st.flush {
+                        b.push_str(&format!(
+                            "    svt_pipe_{name}_flush_clears: assert (!($past({f}) && {v}))\n"
+                        ));
+                        b.push_str(&format!(
+                            "      else $error(\"svt-pipe `{}`: stage {} survived a flush\");\n",
+                            st.domain, st.stage
+                        ));
+                    }
+                    b.push_str("  end\n");
+                }
+                b.push_str("  //pragma translate_on\n");
+            }
         } else {
             b.push_str("  // --- comb-only staging (named begin : svt_comb_stage) ---\n");
             b.push_str("  always_comb begin : svt_comb_stage\n");
@@ -1022,6 +1158,7 @@ mod tests {
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.record_edit(EditRecord {
             id: 1,
@@ -1038,6 +1175,7 @@ mod tests {
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr
     }
@@ -1121,6 +1259,7 @@ mod tests {
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let block = dense_autocorrect_block(&tr, &DenseEmitOptions::default());
         assert!(
@@ -1161,6 +1300,7 @@ mod tests {
             emit_snippet: Some(snippet.into()),
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let mut opts = DenseEmitOptions::default();
         opts.emit_balance_mux_rtl = true; // opt-in structural BalanceMux

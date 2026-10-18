@@ -697,6 +697,12 @@ runs a timer or reads a liberty; the probe and board are host stages. The
 reading is a pre-layout bound (ideal inputs, no wires); it decides closure
 only from measured rows and labels the fitted estimates.
 
+**Re-pipelining contracts (A123).** `// svt-pipe:` pragmas in the RTL
+declare the valid / id / kill / flush / carried roles of an operation in
+flight and where a stage may or may not be cut; `InsertReg` carries the
+bundle per stage in data order, rewires the consumer side onto the last
+stage and refuses misaligned plans. Design: `PIPELINE-PRAGMAS.md`.
+
 **Exact identities and pattern sites (A122).** `expr_rewrite` applies
 three exact, latency-neutral identities as pure RHS rewrites — on an
 assignment or on an `if` predicate (IR v3 `guard_sites`, span-replaced in

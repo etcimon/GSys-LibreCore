@@ -2257,6 +2257,27 @@ pub fn all_emit_extra_cuts(source: &str, cuts: &[CutAssign]) -> Vec<CutAssign> {
     out
 }
 
+/// The `(module line, endmodule line)` span enclosing `line` (1-based), or
+/// `(0, 0)` when the line is outside every module. Textual: a `module` /
+/// `endmodule` keyword at the start of a line (after indentation).
+fn module_span_of_line(source: &str, line: u32) -> (u32, u32) {
+    let mut start = 0u32;
+    for (i, l) in source.lines().enumerate() {
+        let n = (i + 1) as u32;
+        let t = l.trim_start();
+        if t.starts_with("module ") || t.starts_with("module	") || t == "module" {
+            start = n;
+        }
+        if t.starts_with("endmodule") {
+            if n >= line && start <= line {
+                return (start, n);
+            }
+            start = 0;
+        }
+    }
+    (0, 0)
+}
+
 /// Comment-out origin assignment lines (avoid use-before-declare of pipe regs).
 ///
 /// `lhs = rhs` → `// sv-timing: cut #id moved lhs ← (rhs) via pipe`
@@ -2295,11 +2316,15 @@ pub fn rewrite_origin_assigns(source: &str, cuts: &[CutAssign]) -> String {
         let Some((lhs, rhs, _, end)) = parse_assign_multiline(source, ln, 8) else {
             continue;
         };
+        // A twin is a generate copy inside the *same module*: an identical
+        // assign in another module of the file is a different design (the
+        // A123 fixture's two modules), whose pipes do not exist there.
         let Some(cut) = cuts.iter().find(|c| {
             c.continuous
                 && c.line > 0
                 && lhs_base_ident(&c.lhs) == lhs_base_ident(&lhs)
                 && norm_expr(&c.rhs) == norm_expr(&rhs)
+                && module_span_of_line(source, c.line) == module_span_of_line(source, ln)
         }) else {
             continue;
         };
@@ -2552,6 +2577,78 @@ fn loop_end_line(lines: &[&str], start_idx: usize) -> u32 {
         }
     }
     (start_idx + 1) as u32
+}
+
+/// A123: rewire the consumer-side assignments a protocol's `result` pragma
+/// names onto the last stage of each domain — the staged valid (killed again
+/// at use), the staged id and the carried side-band replace the domain's
+/// input signals in those assignments' RHS, as whole identifiers. Line-based
+/// and line-count preserving; a line that is not a rewritable assign leaves
+/// its edit credit-only.
+pub fn rewrite_pipe_consumers(source: &str, trace: &EditTrace) -> String {
+    // The last stage of each domain owns the rewires (earlier stages name
+    // the same lines with their own nets; the final sample is the one the
+    // consumer must read).
+    let mut last_by_domain: std::collections::BTreeMap<String, &EditRecord> =
+        std::collections::BTreeMap::new();
+    for r in &trace.records {
+        if let Some(st) = &r.pipe_stage {
+            let e = last_by_domain.entry(st.domain.clone()).or_insert(r);
+            if st.stage >= e.pipe_stage.as_ref().map(|s| s.stage).unwrap_or(0) {
+                *e = r;
+            }
+        }
+    }
+    let mut by_line: std::collections::BTreeMap<u32, Vec<(String, String, u32)>> =
+        std::collections::BTreeMap::new();
+    for r in last_by_domain.values() {
+        let Some(st) = &r.pipe_stage else { continue };
+        for (line, old, new) in &st.consumer_rewires {
+            by_line
+                .entry(*line)
+                .or_default()
+                .push((old.clone(), new.clone(), r.id));
+        }
+    }
+    if by_line.is_empty() {
+        return source.to_string();
+    }
+    let mut out = String::with_capacity(source.len() + 256);
+    for (i, line) in source.lines().enumerate() {
+        let line_no = (i + 1) as u32;
+        match by_line.get(&line_no) {
+            Some(rewires) if rhs_rewrite_line_ok(source, line_no) => {
+                match parse_assign_multiline(source, line_no, 1) {
+                    Some((lhs, rhs, nonblocking, end)) if end == line_no => {
+                        let mut new_rhs = rhs.clone();
+                        for (old, new, _) in rewires {
+                            new_rhs = sv_timing_core::select_increment::substitute_step(
+                                &new_rhs, old, new,
+                            );
+                        }
+                        let indent: String =
+                            line.chars().take_while(|c| c.is_whitespace()).collect();
+                        let keep_assign = line_is_continuous_assign(source, line_no);
+                        let op = if nonblocking { "<=" } else { "=" };
+                        let id = rewires.first().map(|r| r.2).unwrap_or(0);
+                        out.push_str(&format!(
+                            "{indent}{}{lhs} {op} {new_rhs}; // sv-timing: svt-pipe consumer #{id}\n",
+                            if keep_assign { "assign " } else { "" }
+                        ));
+                    }
+                    _ => {
+                        out.push_str(line);
+                        out.push('\n');
+                    }
+                }
+            }
+            _ => {
+                out.push_str(line);
+                out.push('\n');
+            }
+        }
+    }
+    out
 }
 
 /// Replace every `if` predicate an A122 guard identity rewrote
@@ -3172,6 +3269,7 @@ endmodule
             emit_snippet: Some(snippet.into()),
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let out = rewrite_origin_rhs_replaces(src, &trace);
         assert!(
@@ -3317,6 +3415,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let cuts = cut_assigns_from_source(src, &tr);
         assert_eq!(cuts.len(), 1);
@@ -3403,6 +3502,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         if let Some(r) = tr.records.last_mut() {
             r.id = 16;
@@ -3453,6 +3553,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let cuts = cut_assigns_from_source(src, &tr);
         assert_eq!(cuts.len(), 1);
@@ -3500,6 +3601,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3557,6 +3659,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3616,6 +3719,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3663,6 +3767,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.record_edit(EditRecord {
             id: 1,
@@ -3679,6 +3784,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         // Force ids (record_edit renumbers)
         tr.records[0].id = 0;
@@ -3731,6 +3837,7 @@ endmodule
                 emit_snippet: None,
                 emit_predicate: false,
                 emit_predicate_from: None,
+                pipe_stage: None,
             });
         }
         for (i, r) in tr.records.iter_mut().enumerate() {
@@ -3779,6 +3886,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3838,6 +3946,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3935,6 +4044,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4019,6 +4129,7 @@ endmodule
                 emit_snippet: None,
                 emit_predicate: false,
                 emit_predicate_from: None,
+                pipe_stage: None,
             });
         }
         tr.records[0].id = 0;
@@ -4083,6 +4194,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4178,6 +4290,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let cuts = cut_assigns_from_source(src, &tr);
         assert_eq!(cuts.len(), 1);
@@ -4247,6 +4360,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4321,6 +4435,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4399,6 +4514,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4470,6 +4586,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());

@@ -3,6 +3,8 @@
 
 //! Pipelining: cut selection, insert_register (IR rewire), split_assign.
 
+use serde_json::json;
+use sv_timing_core::AlgoTrace;
 use sv_timing_core::{
     ConstSeed, EdgeKind, GateInfo, IrNode, NodeId, OperatorClass, Opportunity, OpportunityKind,
     PathClassKind, PathEndpoint, PathId, SourceLoc,
@@ -731,6 +733,8 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
     // Apply cuts from the **end** of the path first so earlier node indices stay valid
     // on the residual left segment (budget multi-cut).
     let mut ordered: Vec<&CutPoint> = plan.cuts.iter().collect();
+    #[allow(unused_mut)]
+    let mut _ordered_is_filtered = false;
     ordered.sort_by(|a, b| {
         // Higher path position first when both on same path.
         let pos = |c: &CutPoint| {
@@ -744,10 +748,338 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
         pos(b).cmp(&pos(a))
     });
 
+    // A123: the module's in-file re-pipelining contract. A `no-cut` anchor
+    // (or a module that requires a contract) refuses the cut; a cut inside a
+    // declared domain carries that domain's valid / id / kill / flush bundle.
+    let contract = ctx
+        .design
+        .modules
+        .values()
+        .find(|m| m.name == ctx.active_module_name)
+        .and_then(sv_timing_core::pipe_contract::resolve);
+    if let Some(c) = &contract {
+        for r in &c.rejected {
+            ctx.log_algo(
+                "pipe_contract.rejected",
+                AlgoTrace::kv([
+                    ("module", json!(ctx.active_module_name)),
+                    ("detail", json!(r)),
+                ]),
+            );
+        }
+    }
+    // Alignment (A123): once any cut of the plan is carried, every cut must
+    // be; no stage may read an earlier stage's value except its chain
+    // predecessor; and past stage 1 a stage may read only its predecessor,
+    // the carried signals, the protocol signals and constants. Checked in
+    // data order (first stage first) before anything is rewired.
+    let mut carried_domain: Option<sv_timing_core::pipe_contract::PipeDomain> = None;
+    // Lines of the tail nodes (after the last cut), captured before the IR
+    // rewire truncates the path at each cut.
+    let mut tail_lines: Vec<u32> = Vec::new();
+    if let Some(c) = contract.as_ref().filter(|c| !c.domains.is_empty()) {
+        // The area gate decides per stage *before* alignment: a carried stage
+        // costs its valid, id and side-band flops too, and a stage the gate
+        // refuses must not be in the plan the bundle depth is derived from.
+        let plan_domain = ordered.iter().find_map(|cut| {
+            let path = ctx.design.paths.iter().find(|p| p.id == cut.path_id)?;
+            let m = ctx.design.modules.get(&path.module)?;
+            let n = m.nodes.get(&cut.after_node)?;
+            match sv_timing_core::pipe_contract::cut_permission(m, c, n) {
+                sv_timing_core::pipe_contract::CutPermission::Allowed(Some(d)) => Some(d),
+                _ => None,
+            }
+        });
+        if let Some(d) = &plan_domain {
+            let extra = 1 + 8 + 8 * d.carry.len() as u32;
+            let mut kept: Vec<&CutPoint> = Vec::new();
+            for cut in ordered.iter() {
+                let width = ctx
+                    .design
+                    .paths
+                    .iter()
+                    .find(|p| p.id == cut.path_id)
+                    .and_then(|p| ctx.design.modules.get(&p.module))
+                    .and_then(|m| m.nodes.get(&cut.after_node))
+                    .map(|n| n.width.max(1))
+                    .unwrap_or(1)
+                    + extra;
+                let gain = cut.fo4_left.min(cut.fo4_right);
+                if ctx.area_would_admit(f64::from(width), gain) {
+                    kept.push(cut);
+                } else {
+                    // Record the refusal in the ledger; the stage leaves the plan.
+                    let _ = ctx.admit_area(
+                        EditKind::InsertReg,
+                        cut.origin.start_line,
+                        f64::from(width),
+                        gain,
+                    );
+                }
+            }
+            ordered = kept;
+            if ordered.is_empty() {
+                return Ok(Vec::new());
+            }
+        }
+        let mut carried = 0usize;
+        let mut cut_lhs: Vec<String> = Vec::new();
+        let mut readers: Vec<std::collections::BTreeSet<String>> = Vec::new();
+        let mut domain_of_plan: Option<sv_timing_core::pipe_contract::PipeDomain> = None;
+        for cut in ordered.iter().rev() {
+            let Some(path) = ctx.design.paths.iter().find(|p| p.id == cut.path_id) else {
+                continue;
+            };
+            let Some(m) = ctx.design.modules.get(&path.module) else {
+                continue;
+            };
+            let Some(n) = m.nodes.get(&cut.after_node) else {
+                continue;
+            };
+            if let sv_timing_core::pipe_contract::CutPermission::Allowed(Some(d)) =
+                sv_timing_core::pipe_contract::cut_permission(m, c, n)
+            {
+                carried += 1;
+                domain_of_plan.get_or_insert(d);
+            }
+            cut_lhs.push(
+                n.lhs
+                    .as_deref()
+                    .and_then(sv_timing_core::ir::TimingModule::root_ident)
+                    .unwrap_or("")
+                    .to_string(),
+            );
+            let next = path
+                .nodes
+                .iter()
+                .position(|id| *id == cut.after_node)
+                .and_then(|i| path.nodes.get(i + 1))
+                .and_then(|id| m.nodes.get(id));
+            let mut reads = std::collections::BTreeSet::new();
+            if let Some(nn) = next {
+                if let Some(e) = nn.rhs_expr.as_ref() {
+                    e.walk_idents(&mut |i| {
+                        reads.insert(
+                            sv_timing_core::ir::TimingModule::root_ident(i)
+                                .unwrap_or(i)
+                                .to_string(),
+                        );
+                    });
+                }
+                for g in m.guards.get(&nn.id).into_iter().flatten() {
+                    sv_timing_core::Expr::parse(g.trim_start_matches('^')).walk_idents(&mut |i| {
+                        reads.insert(
+                            sv_timing_core::ir::TimingModule::root_ident(i)
+                                .unwrap_or(i)
+                                .to_string(),
+                        );
+                    });
+                }
+            }
+            readers.push(reads);
+        }
+        if carried > 0 {
+            let domain = domain_of_plan.clone().expect("carried implies a domain");
+            let mut refuse = if carried != ordered.len() {
+                Some(format!(
+                    "{carried} of {} cuts carry the contract: a stage without valid/id would desynchronise the operation",
+                    ordered.len()
+                ))
+            } else {
+                sv_timing_core::pipe_contract::alignment_violation(&cut_lhs, &readers)
+            };
+            if refuse.is_none() {
+                // Foreign reads past stage 1: the node after cut k (k ≥ 1,
+                // zero-based) computes stage k+2's data and may read only
+                // the chain, the carried signals and the protocol.
+                let module = ctx
+                    .design
+                    .paths
+                    .iter()
+                    .find(|p| p.id == ordered[0].path_id)
+                    .and_then(|p| ctx.design.modules.get(&p.module));
+                if let Some(m) = module {
+                    let resolver = sv_timing_core::width::WidthResolver::from_parts(
+                        &ctx.design.packages,
+                        &ctx.design.param_map_ints,
+                        &m.decls,
+                        &m.ports,
+                        &m.const_exprs,
+                        &m.typedef_texts,
+                        &m.package_imports,
+                        ctx.design.width_map.get(&m.name),
+                    );
+                    let is_const = |name: &str| resolver.is_const_name(name) || name.contains("::");
+                    for (k, reads) in readers.iter().enumerate() {
+                        // readers[k] is the node after the k-th cut in data order;
+                        // the last entry is the result-side node, which the
+                        // `result` pragma rewires rather than this check.
+                        if k + 1 >= readers.len() {
+                            break;
+                        }
+                        let foreign = sv_timing_core::pipe_contract::foreign_reads(
+                            m,
+                            &domain,
+                            reads,
+                            cut_lhs.get(k).map(String::as_str),
+                            &is_const,
+                        );
+                        if !foreign.is_empty() {
+                            refuse = Some(format!(
+                                "stage {} reads `{}` which is neither its chain predecessor nor carried: declare `svt-pipe: carry {} {}` or balance it",
+                                k + 2,
+                                foreign.join("`, `"),
+                                domain.name,
+                                foreign.join(",")
+                            ));
+                            break;
+                        }
+                    }
+                }
+            }
+            if refuse.is_none() {
+                // The tail: every node of the path after the last cut computes
+                // on the last stage's age and may read only that stage's
+                // value, the tail's own earlier nodes, the carried signals and
+                // the protocol. Its carried / valid / id reads are rewired
+                // onto the last stage below.
+                let last = &ordered[0];
+                if let Some((m, path)) = ctx
+                    .design
+                    .paths
+                    .iter()
+                    .find(|p| p.id == last.path_id)
+                    .and_then(|p| ctx.design.modules.get(&p.module).map(|m| (m, p)))
+                {
+                    let resolver = sv_timing_core::width::WidthResolver::from_parts(
+                        &ctx.design.packages,
+                        &ctx.design.param_map_ints,
+                        &m.decls,
+                        &m.ports,
+                        &m.const_exprs,
+                        &m.typedef_texts,
+                        &m.package_imports,
+                        ctx.design.width_map.get(&m.name),
+                    );
+                    let is_const = |name: &str| resolver.is_const_name(name) || name.contains("::");
+                    let start = path
+                        .nodes
+                        .iter()
+                        .position(|id| *id == last.after_node)
+                        .map(|i| i + 1)
+                        .unwrap_or(path.nodes.len());
+                    let mut allowed_prev: std::collections::BTreeSet<String> =
+                        std::collections::BTreeSet::new();
+                    if let Some(l) = cut_lhs.last() {
+                        allowed_prev.insert(l.clone());
+                    }
+                    for id in &path.nodes[start..] {
+                        let Some(n) = m.nodes.get(id) else { continue };
+                        if n.loc.start_line != 0 && !tail_lines.contains(&n.loc.start_line) {
+                            tail_lines.push(n.loc.start_line);
+                        }
+                        let mut reads = std::collections::BTreeSet::new();
+                        if let Some(e) = n.rhs_expr.as_ref() {
+                            e.walk_idents(&mut |i| {
+                                reads.insert(
+                                    sv_timing_core::ir::TimingModule::root_ident(i)
+                                        .unwrap_or(i)
+                                        .to_string(),
+                                );
+                            });
+                        }
+                        for g in m.guards.get(id).into_iter().flatten() {
+                            sv_timing_core::Expr::parse(g.trim_start_matches('^')).walk_idents(
+                                &mut |i| {
+                                    reads.insert(
+                                        sv_timing_core::ir::TimingModule::root_ident(i)
+                                            .unwrap_or(i)
+                                            .to_string(),
+                                    );
+                                },
+                            );
+                        }
+                        let reads: std::collections::BTreeSet<String> =
+                            reads.difference(&allowed_prev).cloned().collect();
+                        let foreign = sv_timing_core::pipe_contract::foreign_reads(
+                            m, &domain, &reads, None, &is_const,
+                        );
+                        if !foreign.is_empty() {
+                            refuse = Some(format!(
+                                "tail node `{}` (line {}) reads `{}` which is neither the last stage nor carried: declare `svt-pipe: carry {} {}` or balance it",
+                                n.lhs.as_deref().unwrap_or("?"),
+                                n.loc.start_line,
+                                foreign.join("`, `"),
+                                domain.name,
+                                foreign.join(",")
+                            ));
+                            break;
+                        }
+                        if let Some(l) = n
+                            .lhs
+                            .as_deref()
+                            .and_then(sv_timing_core::ir::TimingModule::root_ident)
+                        {
+                            allowed_prev.insert(l.to_string());
+                        }
+                    }
+                }
+            }
+            ctx.log_algo(
+                "pipe_contract.plan",
+                AlgoTrace::kv([
+                    ("module", json!(ctx.active_module_name)),
+                    ("domain", json!(domain.name)),
+                    ("cuts", json!(cut_lhs)),
+                    ("tail_lines", json!(tail_lines)),
+                ]),
+            );
+            if let Some(why) = refuse {
+                ctx.log_algo(
+                    "pipe_contract.misaligned",
+                    AlgoTrace::kv([
+                        ("module", json!(ctx.active_module_name)),
+                        ("detail", json!(why)),
+                    ]),
+                );
+                return Ok(Vec::new());
+            }
+            carried_domain = Some(domain);
+        }
+    }
+    let total = ordered.len();
+    // Pass 1 (reverse path order, so earlier node indices stay valid on the
+    // residual left segment): permission, area gate, name, IR rewire.
+    let mut placed: Vec<(CutPoint, String, usize)> = Vec::new();
     let mut stage = 0u32;
-    for cut in ordered.into_iter() {
+    for (idx, cut) in ordered.into_iter().enumerate() {
+        let permission = match (
+            &contract,
+            ctx.design.paths.iter().find(|p| p.id == cut.path_id),
+        ) {
+            (Some(c), Some(p)) => ctx
+                .design
+                .modules
+                .get(&p.module)
+                .and_then(|m| m.nodes.get(&cut.after_node).map(|n| (m, n)))
+                .map(|(m, n)| sv_timing_core::pipe_contract::cut_permission(m, c, n))
+                .unwrap_or(sv_timing_core::pipe_contract::CutPermission::Unconstrained),
+            _ => sv_timing_core::pipe_contract::CutPermission::Unconstrained,
+        };
+        if let sv_timing_core::pipe_contract::CutPermission::Forbidden(why) = permission {
+            ctx.log_algo(
+                "pipe_contract.refuse",
+                AlgoTrace::kv([
+                    ("module", json!(ctx.active_module_name)),
+                    ("line", json!(cut.origin.start_line)),
+                    ("detail", json!(why)),
+                ]),
+            );
+            continue;
+        }
         // Area gate (Dial 11, A114): one flop per bit of the cut net per
-        // stage against the FO4 the stage removes (the shorter segment).
+        // stage against the FO4 the stage removes (the shorter segment). A
+        // carried stage adds its valid, id and side-band flops.
         let width = ctx
             .design
             .paths
@@ -756,7 +1088,11 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
             .and_then(|p| ctx.design.modules.get(&p.module))
             .and_then(|m| m.nodes.get(&cut.after_node))
             .map(|n| n.width.max(1))
-            .unwrap_or(1);
+            .unwrap_or(1)
+            + carried_domain
+                .as_ref()
+                .map(|d| 1 + 8 + 8 * d.carry.len() as u32)
+                .unwrap_or(0);
         let gain = cut.fo4_left.min(cut.fo4_right);
         if !ctx.admit_area(
             EditKind::InsertReg,
@@ -766,17 +1102,111 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
         ) {
             continue;
         }
+        // Data-order stage index: the last cut on the path is applied first.
+        let data_stage = total - idx;
         stage += 1;
         let (sig_id, name) = ctx.names.alloc_signal(
             &ctx.active_module_name,
             &plan.name_stem,
-            sv_timing_core::SignalNameTag::Pipeline { stage },
+            sv_timing_core::SignalNameTag::Pipeline {
+                stage: data_stage as u32,
+            },
             cut.origin.clone(),
         );
-
         // IR rewire: truncate path at cut; insert seq marker node on module.
         rewire_path_at_cut(ctx, cut, sig_id, &name, &plan.gate);
-
+        placed.push((cut.clone(), name, data_stage));
+    }
+    let _ = stage;
+    // Pass 2 (data order): the bundle of each carried stage samples the
+    // previous data stage's bundle; the first samples the domain's signals.
+    placed.sort_by_key(|(_, _, ds)| *ds);
+    let last_data_stage = placed.iter().map(|(_, _, ds)| *ds).max().unwrap_or(0);
+    let mut prev_stage_name: Option<String> = None;
+    for (cut, name, data_stage) in placed {
+        let pipe_stage = carried_domain.as_ref().and_then(|d| {
+            let (module, path) = ctx
+                .design
+                .paths
+                .iter()
+                .find(|p| p.id == cut.path_id)
+                .and_then(|p| ctx.design.modules.get(&p.module).map(|m| (m, p)))?;
+            let resolver = sv_timing_core::width::WidthResolver::from_parts(
+                &ctx.design.packages,
+                &ctx.design.param_map_ints,
+                &module.decls,
+                &module.ports,
+                &module.const_exprs,
+                &module.typedef_texts,
+                &module.package_imports,
+                ctx.design.width_map.get(&module.name),
+            );
+            let width_of = |sig: &str| resolver.expr_width(&sv_timing_core::Expr::parse(sig));
+            let mut st = sv_timing_core::pipe_contract::stage_for(
+                module,
+                d,
+                &name,
+                data_stage as u32,
+                prev_stage_name.as_deref(),
+                &width_of,
+            );
+            if data_stage == last_data_stage {
+                // Tail nodes (after the last cut on the path) read the last
+                // stage's carried copies, valid and id.
+                let _ = path;
+                let (v_net, id_net) = sv_timing_core::pipe_contract::stage_nets(&name);
+                for line in tail_lines.iter().copied() {
+                    if st.consumer_rewires.iter().any(|(l, _, _)| *l == line) {
+                        continue;
+                    }
+                    for c in &d.carry {
+                        st.consumer_rewires.push((
+                            line,
+                            c.clone(),
+                            sv_timing_core::pipe_contract::carry_net(&name, c),
+                        ));
+                    }
+                    st.consumer_rewires.push((
+                        line,
+                        d.valid.clone(),
+                        format!("({v_net} & ~{})", d.kill_for(&id_net)),
+                    ));
+                    st.consumer_rewires
+                        .push((line, d.id.clone(), id_net.clone()));
+                }
+            }
+            Some(st)
+        });
+        if pipe_stage.is_some() {
+            prev_stage_name = Some(name.clone());
+        }
+        let rationale = match &pipe_stage {
+            Some(st) => format!(
+                "insert_register after node {} (path {} multi-cut; left_fo4≈{:.1} right≈{:.1}); svt-pipe domain `{}` stage {}: valid<={} & ~{}, id<={}{}{}",
+                cut.after_node,
+                cut.path_id,
+                cut.fo4_left,
+                cut.fo4_right,
+                st.domain,
+                st.stage,
+                st.valid_src,
+                st.kill_expr,
+                st.id_src,
+                st.flush
+                    .as_ref()
+                    .map(|f| format!(", flush {f}"))
+                    .unwrap_or_default(),
+                if st.carry_src.is_empty() {
+                    String::new()
+                } else {
+                    format!(", carry {}", st.carry_src.join(","))
+                }
+            ),
+            None => format!(
+                "insert_register after node {} (path {} multi-cut; left_fo4≈{:.1} right≈{:.1})",
+                cut.after_node, cut.path_id, cut.fo4_left, cut.fo4_right
+            ),
+        };
         let rec = EditRecord {
             id: 0,
             kind: EditKind::InsertReg,
@@ -786,15 +1216,13 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
             new_name: Some(name),
             fo4_before: Some(cut.fo4_left + cut.fo4_right),
             fo4_after: Some(cut.fo4_left.max(cut.fo4_right)),
-            rationale: format!(
-                "insert_register after node {} (path {} multi-cut; left_fo4≈{:.1} right≈{:.1})",
-                cut.after_node, cut.path_id, cut.fo4_left, cut.fo4_right
-            ),
+            rationale,
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage,
         };
         ctx.trace.record_edit(rec.clone());
         ctx.link_last_tradeoff();
@@ -1021,6 +1449,7 @@ pub fn split_assign(
         emit_snippet: None,
         emit_predicate: false,
         emit_predicate_from: None,
+        pipe_stage: None,
     };
     ctx.trace.record_edit(rec.clone());
     ctx.pending_ir_dirty = true;
@@ -1099,6 +1528,7 @@ pub fn rebalance_associative_node(
         emit_snippet: None,
         emit_predicate: false,
         emit_predicate_from: None,
+        pipe_stage: None,
     };
     ctx.trace.record_edit(rec.clone());
     ctx.pending_ir_dirty = true;
@@ -1238,6 +1668,7 @@ pub fn expr_rewrite_on_node(
             emit_snippet: None,
             emit_predicate: true,
             emit_predicate_from: Some(from),
+            pipe_stage: None,
         };
         ctx.trace.record_edit(rec.clone());
         if shape.est_cells > 0.0 {
@@ -1298,6 +1729,7 @@ pub fn expr_rewrite_on_node(
         emit_snippet: None,
         emit_predicate: false,
         emit_predicate_from: None,
+        pipe_stage: None,
     };
     ctx.trace.record_edit(rec.clone());
     if shape.est_cells > 0.0 {
@@ -1953,6 +2385,7 @@ pub fn balance_mux_on_path(
         emit_snippet,
         emit_predicate: false,
         emit_predicate_from: None,
+        pipe_stage: None,
     };
     ctx.balance_mux_done.insert(path_id);
     ctx.balance_mux_credit.insert(path_id, fo4_after);
@@ -2153,6 +2586,7 @@ pub fn select_increment_on_node(
         emit_snippet: Some(snippet),
         emit_predicate: false,
         emit_predicate_from: None,
+        pipe_stage: None,
     };
     ctx.trace.record_edit(rec.clone());
     ctx.link_last_tradeoff();
@@ -2282,6 +2716,7 @@ pub fn loop_rewrite_on_node(
         emit_snippet: Some(shape.decls.clone()),
         emit_predicate: false,
         emit_predicate_from: None,
+        pipe_stage: None,
     };
     ctx.trace.record_edit(rec.clone());
     ctx.pending_ir_dirty = true;
@@ -2444,6 +2879,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: loc(),
             },
         );
@@ -2750,6 +3186,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: loc(),
             },
         );
@@ -2849,6 +3286,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: loc(),
             },
         );
@@ -2960,6 +3398,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: loc(),
             },
         );
@@ -3070,6 +3509,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: loc(),
             },
         );
@@ -3157,6 +3597,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: loc(),
             },
         );
@@ -3285,6 +3726,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: loc(),
             },
         );
@@ -3384,6 +3826,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: loc(),
             },
         );
@@ -3471,6 +3914,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: loc(),
             },
         );
@@ -3606,6 +4050,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: loc(),
             },
         );
@@ -3765,6 +4210,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: loc(),
             },
         );
@@ -3870,6 +4316,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: loc(),
             },
         );

@@ -31,6 +31,14 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A123 update:** re-pipelining is now *declarable*: `// svt-pipe:` pragmas
+(protocol valid/id/kill/flush, carry, result, cut-ok, no-cut,
+require-contract) are collected like the `$onehot` facts and turn a
+register cut into a carried stage — valid killed at every stage and at use,
+id and side-band in lockstep, flush clearing all stages, consumers rewired
+onto the last stage — with age consistency enforced and misaligned plans
+refused. Fixture twin: protocol witness 6 × 200 k cycles, 0 errors.
+
 **A122 update:** the A118–A120 hand rewrites are abstracted to their
 mechanisms. Three are exact expression identities and are now passes
 (`CircularCompare`, `ZeroDetectEquality`, `PushSelect`), firing on RHS and
@@ -8214,6 +8222,76 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A123 — Re-pipelining contracts declared in the RTL (`svt-pipe` pragmas)
+
+**Mechanism.** A register cut is exact for a pure datapath and wrong for an
+operation in flight: the staged value loses its valid, its id, the
+cancellation raised in later cycles, the flush and its side-band — which is
+why the two-stage multiplier (A115) carried all of these by hand and why
+the P10 heuristic refuses `InsertReg` on a same-edge pulse + index. The IR
+cannot infer those roles; the designer can declare them where the logic
+is, as comment pragmas the parser never sees — the mechanism of the
+`translate_off` fences and the `$onehot0` facts (collected over the module
+span, treated as the design's own proof obligation) applied to pipelining:
+
+```systemverilog
+// svt-pipe: protocol ex valid=valid_q id=tid_q kill=cancel_i[$id] flush=flush_i
+// svt-pipe: carry ex op_q,a_q,c_q
+// svt-pipe: result ex valid=res_valid_d id=res_tid_d
+// svt-pipe: cut-ok ex        ← next assignment may be a stage boundary
+// svt-pipe: no-cut           ← next assignment never is
+// svt-pipe: require-contract ← only cut-ok anchors may be cut in this module
+```
+
+**What the transform does with it.** `InsertReg` consults the resolved
+contract: a `no-cut` anchor (or a `require-contract` module without
+`cut-ok`) refuses the cut; a cut inside a declared domain carries the
+domain's bundle — per stage, in data order,
+`v <= flush ? 0 : (valid_prev & ~kill(id_prev))`, `id <= id_prev`, every
+carried signal in lockstep — and the consumer side named by `result` reads
+the last stage's valid (killed again at use), id and carried copies. The
+P10 lock yields exactly on paths that contain an allowed anchor. Age
+consistency is enforced, not assumed: a stage's feed may read only its
+chain predecessor, carried copies, protocol signals and constants; the
+tail after the last cut likewise; a plan whose stages read an earlier
+stage's value or an uncarried input is refused with the signal named
+(“side path needs *n* balance register(s)”, “declare `svt-pipe: carry …`”).
+The area gate prices a carried stage (data + 1 + 8 + 8·|carry| flops) per
+stage *before* alignment. Serialization: hoisted plain-vector declarations
+of resolved widths, a `// svt-pipe: stage k of <dom>` comment stating what
+the stage samples, `edits[*].pipe_stage` in the JSON, and two fenced
+assertions per stage (`*_killed_stays_dead`, `*_flush_clears`).
+
+**Evidence.** `fixtures/auto_correct/pipe_contract.sv`, two modules. The
+straight chain: two carried stages (the gate refused two low-gain ones),
+structural 34 → 14 FO4, stage 2's feed reading `pipe_svt_p1_c_c_q`, the
+tail reading `pipe_svt_p2_c_op_q`/`_a_q`, the result side
+`pipe_svt_p2_v & ~cancel_i[pipe_svt_p2_id]`. Latency-agnostic witness
+(`tb_pipe_contract`: every emerging result belongs to an issued,
+never-cancelled, never-flushed operation, with its id and value, exactly
+once) — gold and twin, 3 seeds × 200 000 cycles, **0 errors** (twin: 103.9 k
+issued, 86.9 k emerged, 11.1 k killed in flight, 3.9 k flushed). Mapped on
+Nangate45: gold 1.123 ns / 1593 µm², twin 1.103 ns / 2652 µm² — the
+mapped gain is small because ABC builds the three-operand sum as one
+carry-save adder (the structural 34 over-reads a ≈ 52 adjusted-FO4 cone)
+and the stage the gate kept out is the tail's remaining depth; the area is
+the contract's honest price plus 64-wide pipes for 32-bit nets
+(`SVT_DATA_W`, to narrow). The side-path module is refused: “stage 4 reads
+`s1` (cut 1) past stage 2: side path needs 2 balance register(s)”.
+
+**Defects the fixture exposed (fixed).** The twin-assign rewrite crossed
+module boundaries in a multi-module file; every injection targeted the
+first header / last `endmodule` of the file rather than the owning module
+(the stage block landed in the wrong design, and the witness passed
+vacuously with `emerged=0` until the trace showed `p1_v` never rising);
+`type(<signal>)` declarations hoisted above the signal's own declaration
+elaborate in Verilator and not in slang.
+
+**Not done, by design.** No protocol inference; no balance registers on
+side paths (refused instead); no ready/back-pressure; no cross-port
+retiming; the planner's cut points are admitted, carried or refused, not
+chosen by the contract. Design: `architecture/PIPELINE-PRAGMAS.md`.
 
 ## A122 — From hand tunings to generic transforms: what each rewrite really did
 

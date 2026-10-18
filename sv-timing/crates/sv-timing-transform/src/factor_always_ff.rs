@@ -107,6 +107,7 @@ pub fn factor_always_ff_regions(ctx: &mut PassContext) {
             emit_snippet: Some(sv),
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
     }
 }
@@ -315,6 +316,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: loc(),
             },
         );

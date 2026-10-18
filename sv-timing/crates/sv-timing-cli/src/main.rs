@@ -1928,6 +1928,8 @@ fn main() -> ExitCode {
                         "est_cells": t.map(|t| t.est_cells),
                         "fo4_gain": t.map(|t| t.fo4_gain),
                         "cells_per_fo4": t.map(|t| t.cells_per_fo4),
+                        // A123: the carried stage contract, when the cut is in a domain.
+                        "pipe_stage": r.pipe_stage,
                     })
                 })
                 .collect();

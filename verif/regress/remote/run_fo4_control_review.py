@@ -232,6 +232,50 @@ def remote() -> None:
         print(json.dumps(evidence["maps"]), flush=True)
         return
 
+    if os.environ.get("CONTROL_MODE") == "pipe-fixture":
+        # A123 protocol witness: the svt-pipe fixture and its emitted twin,
+        # each under the latency-agnostic testbench, three seeds. The twin's
+        # `pipe_contract` module is renamed so the same testbench selects it.
+        vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+        evidence["simulator"] = subprocess.check_output([vl, "--version"], text=True).strip()
+        gold = data / "pipe_contract.sv"
+        twin_src = data / "pipe_contract__svt.sv"
+        tb = data / "tb_pipe_contract.sv"
+        for f in (gold, twin_src, tb):
+            evidence["sources"][f.name] = hashlib.sha256(f.read_bytes()).hexdigest()
+        twin = out / "pipe_contract_svt.sv"
+        text = twin_src.read_text()
+        assert text.count("module pipe_contract (") == 1
+        twin.write_text(text.replace("module pipe_contract (", "module pipe_contract_svt (", 1)
+                        .replace("module pipe_contract_side (", "module pipe_contract_side_svt (", 1))
+        for name, srcs, defs in (("gold", [gold, tb], []), ("twin", [twin, tb], ["+define+SVT_TWIN"])):
+            obj = out / f"obj-{name}"
+            run(f"pipe-build-{name}", [vl, "-O0", "--binary", "--timing", "--assert", "-Wno-fatal",
+                "-Wno-WIDTH", "-Wno-UNOPTFLAT", *defs, *map(str, srcs),
+                "--top-module", "tb_pipe_contract", "--Mdir", str(obj), "-j", "4"], timeout=600)
+            for seed in (7, 19, 23):
+                log = run(f"pipe-sim-{name}-{seed}", [str(obj / "Vtb_pipe_contract"), f"+seed={seed}"], timeout=300)
+                assert "PASS" in log and "errors=0" in log, f"{name} seed {seed}"
+                evidence["proofs"][f"pipe-{name}-{seed}"] = log.strip().splitlines()[-2][:200]
+        # mapped twin: the stage count and the data path it leaves on Nangate45
+        for name, path, top in (("gold", gold, "pipe_contract"), ("twin", twin, "pipe_contract_svt")):
+            netlist, stats = out / f"{name}.v", out / f"{name}.stat"
+            yosys(f"pipe-map-{name}",
+                  f"read_slang --top {top} {path}\nproc\nasync2sync\nopt_clean\nwreduce\nalumacc\n"
+                  f"booth\ntechmap\nopt_clean\ndfflibmap -liberty {lib}\n{abc}\n"
+                  f"opt_clean -purge\ntee -o {stats} stat -liberty {lib}\n"
+                  f"write_verilog -noattr -noexpr {netlist}\n")
+            env = dict(os.environ, OR_LIBERTY=lib, OR_VERILOG=str(netlist),
+                       OR_TOP=top, OR_PERIOD_NS="0.25", OR_IGNORE_FANOUT_ABOVE="0")
+            text = run(f"pipe-sta-{name}", [sta, "-exit",
+                       str(src / "build-platform/scripts/openroad-module-board.tcl")], env=env)
+            row = next(l for l in text.splitlines() if l.startswith("ROW\t"))
+            evidence["maps"][name] = {"row": row,
+                "area_um2": float(re.search(r"Chip area for module .*?:\s*([\d.]+)", stats.read_text())[1])}
+        (out / "result.json").write_text(json.dumps(evidence, indent=2))
+        print(json.dumps(evidence["maps"]), flush=True)
+        return
+
     if os.environ.get("CONTROL_MODE") == "precompute-leaf":
         vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
         evidence["simulator"] = subprocess.check_output([vl, "--version"], text=True).strip()

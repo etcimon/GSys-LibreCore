@@ -60,3 +60,4 @@ Live checklist: [`../AGENTS-todo.md`](../AGENTS-todo.md). Soak playbook + number
 | [`../AGENTS-todo.md`](../AGENTS-todo.md) | Implementation state |
 
 When changing behavior, update `DESIGN.md` / `AUTO-CORRECT-CORE-API.md` / the FO4–soak docs and log the pass in `AGENTS-todo.md`.
+- [`PIPELINE-PRAGMAS.md`](PIPELINE-PRAGMAS.md) — `svt-pipe` re-pipelining contracts declared in the RTL (A123)

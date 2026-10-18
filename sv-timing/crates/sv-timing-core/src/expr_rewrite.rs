@@ -844,6 +844,7 @@ mod tests {
             guards: Default::default(),
             onehot_facts: Default::default(),
             guard_sites: Default::default(),
+            pipe_pragmas: Default::default(),
             loc: SourceLoc::file_start("m.sv"),
         };
         for (i, (lhs, rhs, kind, cost)) in nodes.into_iter().enumerate() {

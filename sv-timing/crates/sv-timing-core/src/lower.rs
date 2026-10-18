@@ -465,6 +465,12 @@ fn lower_file(
                 &scope_end_byte(tree, li, &path_str, scope.nodes.iter().cloned()),
             ),
             guard_sites: collect_guard_sites(tree, li, &path_str, scope.nodes.iter().cloned()),
+            pipe_pragmas: collect_pipe_pragmas(
+                &file.bytes,
+                &path_str,
+                &scope.loc,
+                &scope_end_byte(tree, li, &path_str, scope.nodes.iter().cloned()),
+            ),
             loc: mod_loc,
         };
         let dead_generate = constant_generate_dead_spans(
@@ -1774,6 +1780,72 @@ where
 
 /// Arguments of every `$onehot0(…)` / `$onehot(…)` in the module's source
 /// span, whitespace-normalized (`grant[p]`).
+/// `// svt-pipe: <kind> [domain] key=value … word …` pragmas inside the
+/// module span (A123). Textual, like the `$onehot` facts: the pragma is a
+/// comment, so the parser never sees it, and its location is the comment
+/// line itself (the anchor of `cut-ok` / `no-cut` is the next statement).
+fn collect_pipe_pragmas(
+    bytes: &[u8],
+    path_str: &str,
+    start: &SourceLoc,
+    end: &u32,
+) -> Vec<crate::ir::PipePragma> {
+    let lo = start.byte_start as usize;
+    let hi = (*end as usize).max(lo).min(bytes.len());
+    let text = String::from_utf8_lossy(&bytes[lo..hi]);
+    let line_base = start.start_line;
+    let mut out = Vec::new();
+    let mut offset = lo;
+    for (i, line) in text.split_inclusive('\n').enumerate() {
+        let line_no = line_base + i as u32;
+        let line_start = offset;
+        offset += line.len();
+        let Some(ci) = line.find("//") else { continue };
+        let body = line[ci + 2..].trim();
+        let Some(rest) = body.strip_prefix("svt-pipe:") else {
+            continue;
+        };
+        let mut words = rest.split_whitespace();
+        let Some(kind) = words.next() else { continue };
+        let takes_domain = matches!(kind, "protocol" | "carry" | "result" | "cut-ok");
+        let mut domain = None;
+        let mut args = Vec::new();
+        let mut bare = Vec::new();
+        for w in words {
+            if let Some((k, v)) = w.split_once('=') {
+                args.push((k.to_string(), v.trim_end_matches(',').to_string()));
+            } else if takes_domain && domain.is_none() {
+                domain = Some(w.trim_end_matches(',').to_string());
+            } else {
+                for part in w.split(',') {
+                    if !part.is_empty() {
+                        bare.push(part.to_string());
+                    }
+                }
+            }
+        }
+        let trimmed_len = line.trim_end_matches(['\n', '\r']).len();
+        let end_byte = line_start + trimmed_len;
+        out.push(crate::ir::PipePragma {
+            kind: kind.to_string(),
+            domain,
+            args,
+            words: bare,
+            loc: SourceLoc {
+                file: path_str.to_string(),
+                start_line: line_no,
+                start_col: (ci + 1) as u32,
+                end_line: line_no,
+                end_col: (trimmed_len + 1) as u32,
+                byte_start: (line_start + ci) as u32,
+                byte_end: end_byte as u32,
+                origin: OriginKind::UserFile,
+            },
+        });
+    }
+    out
+}
+
 fn collect_onehot_facts(bytes: &[u8], start: &SourceLoc, end: &u32) -> Vec<String> {
     let lo = start.byte_start as usize;
     let hi = (*end as usize).max(lo).min(bytes.len());

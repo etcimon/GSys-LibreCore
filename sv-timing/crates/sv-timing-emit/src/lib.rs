@@ -243,7 +243,8 @@ pub fn apply_edits_to_source_dense(
         // Guard predicates first: byte spans of the pristine source, one
         // line each, so the line-based stages below see unchanged numbering.
         let after_guards = crate::rhs::rewrite_guard_predicates(source, trace);
-        let after_loops = crate::rhs::rewrite_loop_spans(&after_guards, trace);
+        let after_consumers = crate::rhs::rewrite_pipe_consumers(&after_guards, trace);
+        let after_loops = crate::rhs::rewrite_loop_spans(&after_consumers, trace);
         rewrite_origin_rhs_replaces(&after_loops, trace)
     } else {
         source.to_string()
@@ -304,6 +305,7 @@ pub fn apply_edits_to_source_dense(
                 emit_snippet: None,
                 emit_predicate: false,
                 emit_predicate_from: None,
+                pipe_stage: None,
             });
             cuts_for_dense.push(CutAssign {
                 line: 0,
@@ -325,10 +327,16 @@ pub fn apply_edits_to_source_dense(
     // - early: factorize comments / first-process-safe review
     // - origin process: BalanceMux RTL (after mid-module decls; gemm pe_float_en)
     // - late: dense pipe before endmodule (cut feeds may reference mid-module nets)
-    let rewritten = inject_after_module_header(&rewritten, &blocks.top);
-    let rewritten = inject_before_first_process(&rewritten, &blocks.early);
-    let rewritten = inject_bm_snippets_at_origin(&rewritten, &blocks.bm_at_origin);
-    let rewritten = inject_before_endmodule(&rewritten, &blocks.late);
+    // Multi-module files: every injection targets the module that owns the
+    // edits (the A123 fixture carries a second, untouched module after it;
+    // "last endmodule" put the pipe stages in the wrong design).
+    let (lo, hi) = owning_module_slice(&rewritten, emit_trace, source);
+    let (before, body, after) = (&rewritten[..lo], &rewritten[lo..hi], &rewritten[hi..]);
+    let body = inject_after_module_header(body, &blocks.top);
+    let body = inject_before_first_process(&body, &blocks.early);
+    let body = inject_bm_snippets_at_origin(&body, &blocks.bm_at_origin);
+    let body = inject_before_endmodule(&body, &blocks.late);
+    let rewritten = format!("{before}{body}{after}");
     let mut out = String::new();
     out.push_str(&header);
     out.push_str(&rewritten);
@@ -604,6 +612,74 @@ fn enclosing_process_byte_for_marker(source: &str, marker: &str) -> Option<usize
             i -= 1;
         }
     }
+}
+
+/// Byte span `[lo, hi)` of the module that owns the trace's edits inside
+/// `rewritten` — the whole text when the file holds one module or no edit
+/// names a line. The module is identified by name in the original source
+/// (the nearest `module <name>` above the first edit's origin line), then
+/// located in the rewritten text, whose module names are unchanged.
+fn owning_module_slice(rewritten: &str, trace: &EditTrace, original: &str) -> (usize, usize) {
+    let masked = masked_syntax(rewritten);
+    let ends: Vec<usize> = keyword_positions(&masked, "endmodule").collect();
+    if ends.len() <= 1 {
+        return (0, rewritten.len());
+    }
+    let Some(line) = trace
+        .records
+        .iter()
+        .filter(|r| r.origin.start_line > 0)
+        .map(|r| r.origin.start_line)
+        .next()
+    else {
+        return (0, rewritten.len());
+    };
+    let name = original
+        .lines()
+        .take(line as usize)
+        .filter_map(|l| {
+            let t = l.trim_start();
+            let rest = t.strip_prefix("module")?;
+            let rest = rest.trim_start_matches(|c: char| c.is_whitespace());
+            if rest.len() == t.len() - "module".len() {
+                return None; // `module` must be followed by whitespace
+            }
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+                .collect();
+            (!name.is_empty()).then_some(name)
+        })
+        .last();
+    let Some(name) = name else {
+        return (0, rewritten.len());
+    };
+    let starts: Vec<usize> = keyword_positions(&masked, "module")
+        .filter(|&i| {
+            let rest = &masked[i + "module".len()..];
+            let rest_t = rest.trim_start();
+            rest.len() != rest_t.len() && rest_t.starts_with(name.as_str()) && {
+                let after = rest_t[name.len()..].chars().next();
+                !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '$')
+            }
+        })
+        .collect();
+    let Some(&lo) = starts.first() else {
+        return (0, rewritten.len());
+    };
+    // the module's own `endmodule`: the first one after its header
+    let Some(&end) = ends.iter().find(|&&e| e > lo) else {
+        return (0, rewritten.len());
+    };
+    let hi = end + "endmodule".len();
+    // include the rest of the endmodule line
+    let hi = rewritten[hi..]
+        .find('\n')
+        .map(|k| hi + k + 1)
+        .unwrap_or(rewritten.len());
+    // start the slice at the beginning of the `module` line
+    let lo = rewritten[..lo].rfind('\n').map(|k| k + 1).unwrap_or(0);
+    (lo, hi)
 }
 
 /// Insert `block` immediately before the last `endmodule` in `source`.
@@ -1032,6 +1108,7 @@ mod tests {
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         annotate_origin_comments(&mut tree, &trace);
         let text = &tree.files.values().next().unwrap().text;
@@ -1101,6 +1178,7 @@ mod tests {
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let policy = EmitPolicy::default();
         let text = apply_edits_to_source(src, &trace, &policy);
@@ -1181,6 +1259,7 @@ mod tests {
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.real_cut_feeds = true;
@@ -1259,6 +1338,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.real_cut_feeds = true;
@@ -1332,6 +1412,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.real_cut_feeds = true;
@@ -1412,6 +1493,7 @@ endmodule
             emit_snippet: Some(snippet.into()),
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         // Lean default: BalanceMux credit-only (no RTL).
         let lean = apply_edits_to_source(src, &trace, &EmitPolicy::default());
@@ -1499,6 +1581,7 @@ endmodule
             emit_snippet: Some(snippet.into()),
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.emit_balance_mux_rtl = true;
@@ -1575,6 +1658,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         trace.records[0].id = 0;
         trace.records[0].new_name = Some("pipe_svt_p1".into());
@@ -1602,6 +1686,7 @@ endmodule
             emit_snippet: Some(snippet.into()),
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.emit_balance_mux_rtl = true;
@@ -1653,6 +1738,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let policy = EmitPolicy::default();
         let lean = apply_edits_to_source(src, &trace, &policy);
@@ -1740,6 +1826,7 @@ endmodule
                 emit_snippet: None,
                 emit_predicate: false,
                 emit_predicate_from: None,
+                pipe_stage: None,
             });
         }
         let mut dense = dense_options_from_source(src);
@@ -1807,6 +1894,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let policy = EmitPolicy::default();
         let lean = apply_edits_to_source(src, &trace, &policy);
@@ -2230,6 +2318,170 @@ endmodule
     /// A122 end to end: the three exact identities fire on the fixture's
     /// over-budget cones and are written as pure RHS rewrites; the signed
     /// and self-wrapping shapes are left untouched; the emitted file reparses.
+    /// A123: the `svt-pipe` contract declared in the fixture turns the
+    /// planner's register cuts into carried stages — valid killed at each
+    /// stage and at use, id and side-band in lockstep, flush clearing every
+    /// stage, consumer side rewired onto the last stage — and refuses the
+    /// side-path module whose stages would mix operations of two ages.
+    #[test]
+    fn pipe_contract_fixture_carries_the_bundle_and_refuses_the_side_path() {
+        use sv_timing_core::{analyze_files, LowerOptions, ParseOptions, TimingTarget};
+        use sv_timing_transform::{run_correct_passes, PassContext, PassPolicy};
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/pipe_contract.sv");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let opt = sv_timing_core::OptOptions::preset(sv_timing_core::OptLevel::O3);
+        let analyze = || {
+            analyze_files(
+                &[path.clone()],
+                &ParseOptions::default(),
+                &LowerOptions {
+                    target: TimingTarget::new(4000.0, 20.0, 0.2),
+                    opt: opt.clone(),
+                    ..Default::default()
+                },
+            )
+            .unwrap()
+        };
+        // the pragmas are collected and resolve to one domain per module
+        let out = analyze();
+        for m in out.design.modules.values() {
+            let c = sv_timing_core::pipe_contract::resolve(m).expect("contract");
+            assert!(c.rejected.is_empty(), "{}: {:?}", m.name, c.rejected);
+            assert_eq!(c.domains.len(), 1, "{}", m.name);
+            assert_eq!(c.cut_ok.len(), 4, "{}", m.name);
+            assert!(
+                c.no_cut.contains("res_valid_o"),
+                "{}: {:?}",
+                m.name,
+                c.no_cut
+            );
+        }
+        // positive module: carried stages, data order, consumer rewires
+        let mut policy = PassPolicy::from_opt(opt.clone(), vec!["pipe_contract".into()], true);
+        policy.emit_structural = true;
+        // continuous assigns carry no process gate: the module's one clock is assumed (CLI `--assume-clk`)
+        let mut pc = PassContext::new(out.design, out.names, policy);
+        pc.assume_clk = true;
+        let ctx = run_correct_passes(pc).unwrap();
+        let stages: Vec<_> = ctx
+            .trace
+            .records
+            .iter()
+            .filter(|r| r.kind == EditKind::InsertReg)
+            .collect();
+        assert!(
+            stages.len() >= 2,
+            "{:?}",
+            stages.iter().map(|r| &r.rationale).collect::<Vec<_>>()
+        );
+        assert!(
+            stages.iter().all(|r| r.pipe_stage.is_some()),
+            "every cut carries the contract"
+        );
+        let first = stages
+            .iter()
+            .find(|r| r.pipe_stage.as_ref().unwrap().stage == 1)
+            .unwrap();
+        let st1 = first.pipe_stage.as_ref().unwrap();
+        assert_eq!(
+            (st1.valid_src.as_str(), st1.id_src.as_str()),
+            ("valid_q", "tid_q")
+        );
+        assert_eq!(st1.kill_expr, "(cancel_i[tid_q])");
+        assert_eq!(st1.flush.as_deref(), Some("flush_i"));
+        assert_eq!(st1.carry_sigs, vec!["op_q", "a_q", "c_q"]);
+        assert_eq!(st1.id_width, Some(4));
+        let second = stages
+            .iter()
+            .find(|r| r.pipe_stage.as_ref().unwrap().stage == 2)
+            .unwrap();
+        let st2 = second.pipe_stage.as_ref().unwrap();
+        let p1 = first.new_name.as_deref().unwrap();
+        assert_eq!(st2.valid_src, format!("{p1}_v"));
+        assert_eq!(st2.kill_expr, format!("(cancel_i[{p1}_id])"));
+        assert!(st2
+            .feed_rewires
+            .iter()
+            .any(|(o, n)| o == "c_q" && n == &format!("{p1}_c_c_q")));
+        let mut dense = dense_options_from_source(&source);
+        dense.emit_balance_mux_rtl = true;
+        dense.real_cut_feeds = true;
+        let emitted =
+            apply_edits_to_source_dense(&source, &ctx.trace, &EmitPolicy::default(), &dense);
+        let last = stages
+            .iter()
+            .max_by_key(|r| r.pipe_stage.as_ref().unwrap().stage)
+            .and_then(|r| r.new_name.as_deref())
+            .unwrap();
+        assert!(
+            emitted.contains(&format!(
+                "{p1}_v <= flush_i ? 1'b0 : (valid_q & ~(cancel_i[tid_q]));"
+            )),
+            "{emitted}"
+        );
+        assert!(emitted.contains(&format!("{p1}_id <= tid_q;")), "{emitted}");
+        assert!(
+            emitted.contains(&format!("{p1}_c_op_q <= op_q;")),
+            "{emitted}"
+        );
+        assert!(
+            emitted.contains(&format!("assign res_tid_d = {last}_id;")),
+            "{emitted}"
+        );
+        assert!(
+            emitted.contains(&format!(
+                "assign res_valid_d = ({last}_v & ~(cancel_i[{last}_id]))"
+            )),
+            "{emitted}"
+        );
+        // the tail reads the last stage's carried copies, never the live signals
+        assert!(
+            emitted.contains(&format!(
+                "assign s3 = s2 + {{{last}_c_op_q, {last}_c_a_q[29:0]}};"
+            )),
+            "{emitted}"
+        );
+        assert!(
+            emitted.contains(&format!("svt_pipe_{p1}_killed_stays_dead: assert")),
+            "{emitted}"
+        );
+        assert!(emitted.contains("//pragma translate_off"), "{emitted}");
+        // the hoisted bundle declarations are plain vectors (legal before the signals they mirror)
+        assert!(
+            emitted.contains(&format!("logic [4-1:0] {p1}_id;")),
+            "{emitted}"
+        );
+        // the untouched second module keeps its text: no twin rewrite crossed the module boundary
+        assert!(!emitted.contains("twin moved"), "{emitted}");
+        assert_eq!(emitted.matches("begin : svt_pipe_ff
+").count(), 1, "{emitted}");
+        // the stage block lives in the module that owns the edits
+        let ff_at = emitted.find("begin : svt_pipe_ff
+").unwrap();
+        let side_at = emitted.find("module pipe_contract_side").unwrap();
+        assert!(ff_at < side_at, "stage block emitted into the wrong module");
+        // negative module: the side path is refused, nothing is cut
+        let out = analyze();
+        let mut policy = PassPolicy::from_opt(opt, vec!["pipe_contract_side".into()], true);
+        policy.emit_structural = true;
+        let mut pc = PassContext::new(out.design, out.names, policy);
+        pc.assume_clk = true;
+        let ctx = run_correct_passes(pc).unwrap();
+        assert!(
+            ctx.trace
+                .records
+                .iter()
+                .all(|r| r.kind != EditKind::InsertReg),
+            "{:?}",
+            ctx.trace
+                .records
+                .iter()
+                .map(|r| &r.rationale)
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn expr_identity_fixture_rewrites_exact_shapes_and_keeps_refused_ones() {
         use sv_timing_core::{analyze_files, LowerOptions, ParseOptions, TimingTarget};
@@ -2563,6 +2815,7 @@ endmodule
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         };
         let mut trace = EditTrace::new();
         trace.record_edit(mk(2, "a || |{b, c, d}"));

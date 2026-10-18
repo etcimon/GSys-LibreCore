@@ -74,6 +74,12 @@ pub struct EditRecord {
     /// The predicate text the span held when the edit was planned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emit_predicate_from: Option<String>,
+    /// For an `InsertReg` inside a declared protocol domain (A123): the
+    /// valid / id / kill / flush / carried bundle this stage samples and the
+    /// consumer-side rewires, serialized with the edit so the emitter writes
+    /// the stage as the designer's contract describes it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pipe_stage: Option<sv_timing_core::pipe_contract::PipeStage>,
 }
 
 /// Additional origin→RHS rewrite for multi-arm exclusive wire-up.
@@ -142,6 +148,7 @@ mod tests {
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         assert_eq!(t.records[0].origin.start_line, 10);
         assert!(t.to_json_pretty().unwrap().contains("a.sv"));

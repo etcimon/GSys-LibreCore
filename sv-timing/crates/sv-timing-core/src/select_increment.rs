@@ -324,7 +324,7 @@ pub fn candidate_snippet(shape: &SelectIncrementShape, cand: &str) -> String {
 
 /// Replace bare identifier tokens only. Package members, typedef names and
 /// based-number digits are not references to the runtime selector.
-fn substitute_step(text: &str, name: &str, replacement: &str) -> String {
+pub fn substitute_step(text: &str, name: &str, replacement: &str) -> String {
     let bytes = text.as_bytes();
     let mut out = String::new();
     let mut i = 0;
@@ -480,6 +480,7 @@ mod tests {
             guards: Default::default(),
             onehot_facts: Default::default(),
             guard_sites: Default::default(),
+            pipe_pragmas: Default::default(),
             loc: SourceLoc::file_start("t.sv"),
         };
         let mut ff = node("seq_q", "seq_d", AssignKind::Nonblocking, 0.0);

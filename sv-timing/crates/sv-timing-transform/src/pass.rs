@@ -284,6 +284,22 @@ impl PassContext {
         applied
     }
 
+    /// The gate's verdict without a ledger row (A123: a carried plan is
+    /// all-or-nothing, so every stage is checked before any is recorded).
+    pub(crate) fn area_would_admit(&self, est_cells: f64, fo4_gain: f64) -> bool {
+        match self.area_limit_for(&self.active_module_name) {
+            Some(l) => {
+                let ratio = if fo4_gain > 1e-9 {
+                    est_cells / fo4_gain
+                } else {
+                    f64::INFINITY
+                };
+                ratio <= l
+            }
+            None => true,
+        }
+    }
+
     /// Link the last ledger entry to the last recorded edit.
     pub fn link_last_tradeoff(&mut self) {
         if let (Some(t), Some(r)) = (self.tradeoffs.last_mut(), self.trace.records.last()) {
@@ -297,7 +313,7 @@ impl PassContext {
         self
     }
 
-    fn log_algo(&self, kind: &str, fields: Map<String, Value>) {
+    pub(crate) fn log_algo(&self, kind: &str, fields: Map<String, Value>) {
         self.algo_trace.emit(kind, self.pass_index, fields);
     }
 

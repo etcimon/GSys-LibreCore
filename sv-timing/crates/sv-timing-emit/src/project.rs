@@ -355,6 +355,7 @@ pub fn synthesize_project(
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                pipe_pragmas: Default::default(),
                 loc: loc.clone(),
             };
             tm.regions.insert(
@@ -587,6 +588,7 @@ mod tests {
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.record_edit(EditRecord {
             id: 1,
@@ -603,6 +605,7 @@ mod tests {
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let leaf = edits_for_source(&tr, Path::new("leaf.sv"));
         assert_eq!(leaf.records.len(), 1);
@@ -626,6 +629,7 @@ mod tests {
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let alu = edits_for_source(&tr, Path::new("/mnt/e/cva6/core/alu.sv"));
         assert!(
@@ -695,6 +699,7 @@ mod tests {
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         tr.record_edit(EditRecord {
             id: 1,
@@ -711,6 +716,7 @@ mod tests {
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let sources = vec![(PathBuf::from("leaf.sv"), src_a.to_string())];
         let policy = EmitPolicy::default();
@@ -759,6 +765,7 @@ mod tests {
             emit_snippet: None,
             emit_predicate: false,
             emit_predicate_from: None,
+            pipe_stage: None,
         });
         let sources = vec![
             (PathBuf::from("leaf.sv"), leaf_src.to_string()),
