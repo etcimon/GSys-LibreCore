@@ -8,6 +8,8 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 - [x] D$ forwarding balanced tree (SAT-equivalent at 5 geometries), loop
   predictor row-local training in RTL (equivalence + model), loop buffer
   bounded add (6 sbs runs + 6-step miter); paired placement improves all three.
+- [x] Branch unit: carry-free JAL/JALR target check (SAT-equal to the
+  adder compare at 64/32 bits, both LSB modes); read on the board.
 - [x] Scoreboard head scan in absolute slot order (SAT-equivalent at five
   geometries incl. 64×4); read on the board, no isolated pair.
 - [ ] Re-read the whole-core board with the four changes (loop buffer must

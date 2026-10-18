@@ -222,6 +222,16 @@ each proven against the previous revision and measured in one paired run
   reference assertion stays on. Isolated placement is not available for this
   module (type-parameter heavy); it is read on the whole-core board.
 
+* **`core/branch_unit.sv`** (`fo4-a140-sumeq`) — the JAL/JALR target check
+  `jump_base + imm != predict_address` is a carry-free test: `a + b == c`
+  iff `a ^ b ^ c == ((a & b) | ((a ^ b) & ~c)) << 1` (the carry each bit
+  would need must reproduce the majority recurrence), with the JALR LSB
+  clear handled by comparing bits [VLEN-1:1] with the real carry `a0 & b0`
+  into bit 1 and requiring `c[0] == 0`. The adder still produces the
+  redirect address; only the mispredict decision loses the carry chain.
+  SAT-proven against the adder compare at 64 and 32 bits, both LSB modes;
+  a translate_off witness compares both forms every cycle.
+
 Proof record: `dmem-fwd-eq-16-8-8`, `dmem-fwd-eq-8-8-4`, `dmem-fwd-eq-4-4-1`, `dmem-fwd-eq-2-8-8`, `dmem-fwd-eq-1-8-8`, `loop-eq-16-4-1`, `loop-eq-8-1-0`, `loop-eq-32-2-1`, `loop-model-candidate-1`, `loop-model-candidate-17`, `loop-negative`, `lbuf-sbs-8x64-1`, `lbuf-sbs-8x64-17`, `lbuf-sbs-4x32-1`, `lbuf-sbs-4x32-17`, `lbuf-sbs-6x128-1`, `lbuf-sbs-6x128-17`, `lbuf-miter-6`. Whole-core board after
 landing: re-measured below when the route completes (the A136 loop-buffer
 candidate improved in isolation and lost on the board; this one must be read

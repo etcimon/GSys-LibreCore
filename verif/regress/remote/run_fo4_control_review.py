@@ -84,7 +84,7 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
         "stq": ("core/store_buffer.sv",),
         "step1": ("core/cache_subsystem/wt_dcache_mem.sv", "core/frontend/g6lc_bp_loop.sv",
                   "core/frontend/g6lc_loop_buffer.sv"),
-        "sbhead": ("core/scoreboard.sv",),
+        "sbhead": ("core/scoreboard.sv", "core/branch_unit.sv"),
     }
     changed = profile_files[profile]
     if profile == "statcor":
@@ -1071,6 +1071,29 @@ def review_sbhead(src, out, evidence, yosys):
                      "hierarchy -top m\nsat -verify -prove-asserts m\n", timeout=1800)
         assert "SUCCESS!" in text, text[-1500:]
         evidence["proofs"][key] = "combinational equivalence of the head scan (slot, valid, pc) PASS"
+    # ---- branch_unit: the carry-free sum_eq against the adder compare, the
+    # function text taken from the live source, both LSB modes.
+    bu = (src / "core/branch_unit.sv").read_text()
+    fa = bu.index("  function automatic logic sum_eq(")
+    fb = bu.index("  endfunction\n", fa) + len("  endfunction\n")
+    fn = bu[fa:fb].replace("CVA6Cfg.VLEN", "W")
+    (out / "sum_eq.sv").write_text(
+        "module sum_eq_ref #(parameter int unsigned W = 64, parameter bit IGN = 0) (\n"
+        "  input logic [W-1:0] a, b, c, output logic eq);\n"
+        "  logic [W-1:0] s; assign s = a + b;\n"
+        "  assign eq = IGN ? ((s[W-1:1] == c[W-1:1]) && !c[0]) : (s == c);\nendmodule\n"
+        "module sum_eq_new #(parameter int unsigned W = 64, parameter bit IGN = 0) (\n"
+        "  input logic [W-1:0] a, b, c, output logic eq);\n" + fn +
+        "  assign eq = sum_eq(a, b, c, IGN);\nendmodule\n")
+    evidence["sources"]["sum_eq.sv"] = hashlib.sha256((out / "sum_eq.sv").read_bytes()).hexdigest()
+    for w, ign in ((64, 0), (64, 1), (32, 0), (32, 1)):
+        key = f"sumeq-eq-{w}-{ign}"
+        text = yosys(key,
+                     f"read_slang {out}/sum_eq.sv --top sum_eq_ref --top sum_eq_new -G W={w} -G IGN={ign}\n"
+                     "proc\nmiter -equiv -flatten -make_assert sum_eq_ref sum_eq_new m\n"
+                     "hierarchy -top m\nsat -verify -prove-asserts m\n", timeout=900)
+        assert "SUCCESS!" in text, text[-1500:]
+        evidence["proofs"][key] = "carry-free sum-equals test == adder compare PASS"
 
 
 def review_step1(src, out, sta, lib, abc, evidence, yosys, run):

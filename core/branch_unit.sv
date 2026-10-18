@@ -1,3 +1,4 @@
+// Modified by: Etienne Cimon (2026) - A139 pipeline-design comments.
 // Copyright 2018 ETH Zurich and University of Bologna.
 // Copyright and related rights are licensed under the Solderpad Hardware
 // License, Version 0.51 (the "License"); you may not use this file except in
@@ -52,12 +53,51 @@ module branch_unit #(
     // Branch exception out - TO_BE_COMPLETED
     output exception_t branch_exception_o
 );
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin branch_unit status=proposal target=10-adjusted-FO4
+  // svt-plan: cone target addition, branch condition/prediction comparison
+  // and resolve delivery form a dependency chain; link result also uses PC/length.
+  // svt-plan: boundary target/link preparation and condition -> resolve
+  // comparison; segment the target adder if its own carry depth dominates.
+  // svt-plan: carry TID+generation, hart, PC/length, target, condition,
+  // prediction/checkpoint identity, CF type, link value and exception context.
+  // svt-plan: ownership suppress killed branch tokens; compare only against
+  // that token's prediction; recovery must include every younger op admitted
+  // during the added delay, not a frozen old cancellation bitmap.
+  // svt-plan: effect removes target-add depth from resolve comparison;
+  // a resolve output register alone would leave both in the same stage.
+  // svt-plan: cost branch latency and mispredict penalty; controller,
+  // checkpoint recovery and FLU completion must accept the delayed token together.
+  // svt-plan: limit JALR masking/alignment and exception priority stay exact;
+  // retirement cannot pass an unresolved older branch.
+  // svt-plan: end
   // Re-pipelining contract (sv-timing A128; 77.4 adjusted FO4 on the
   // Nangate45 board): branch resolution: pure datapath; resolved_branch_o feeds the controller the same cycle — an FLU / redirect latency decision.
   // svt-pipe: require-contract
 
   logic [CVA6Cfg.VLEN-1:0] target_address;
   logic [CVA6Cfg.VLEN-1:0] next_pc;
+
+  // A140: carry-free "sum equals" test for the target check. a + b == c
+  // (mod 2**VLEN) iff the bitwise x = a ^ b ^ c equals
+  // y = ((a & b) | ((a ^ b) & ~c)) << 1: the carry each bit would need
+  // (a_i ^ b_i ^ c_i) must reproduce the majority recurrence. Constant depth
+  // per bit plus one equality, no carry propagation in front of the
+  // mispredict decision; the adder still produces the redirect address.
+  // With ignore_lsb (JALR clears the target's LSB) bit 0 of the sum is not
+  // compared, the carry into bit 1 is the real a0 & b0, and c[0] must be 0.
+  function automatic logic sum_eq(input logic [CVA6Cfg.VLEN-1:0] a, input logic [CVA6Cfg.VLEN-1:0] b,
+                                  input logic [CVA6Cfg.VLEN-1:0] c, input logic ignore_lsb);
+    logic [CVA6Cfg.VLEN-1:0] x, y;
+    x = a ^ b ^ c;
+    y = ((a & b) | ((a ^ b) & ~c)) << 1;
+    if (ignore_lsb) begin
+      y[1] = a[0] & b[0];
+      return (x[CVA6Cfg.VLEN-1:1] == y[CVA6Cfg.VLEN-1:1]) && !c[0];
+    end
+    return x == y;
+  endfunction
+  logic target_eq_jalr, target_eq_jal;
 
   // here we handle the various possibilities of mis-predicts
   always_comb begin : mispredict_handler
@@ -92,6 +132,11 @@ module branch_unit #(
     target_address = $unsigned($signed(jump_base) + $signed(fu_data_i.imm[CVA6Cfg.VLEN-1:0]));
     // on a JALR we are supposed to reset the LSB to 0 (according to the specification)
     if (fu_data_i.operation == ariane_pkg::JALR) target_address[0] = 1'b0;
+    // the prediction check as a carry-free test on the same operands (A140)
+    target_eq_jalr = sum_eq(jump_base, fu_data_i.imm[CVA6Cfg.VLEN-1:0],
+                            branch_predict_i.predict_address, 1'b1);
+    target_eq_jal  = sum_eq(jump_base, fu_data_i.imm[CVA6Cfg.VLEN-1:0],
+                            branch_predict_i.predict_address, 1'b0);
     // we need to put the branch target address into rd, this is the result of this unit
     branch_result_o = next_pc;
     resolved_branch_o.pc = instr_pc;
@@ -122,7 +167,7 @@ module branch_unit #(
       if (fu_data_i.operation == ariane_pkg::JALR
           // check if the address of the jump register is correct and that we actually predicted
           && (branch_predict_i.cf == ariane_pkg::NoCF
-              || target_address != branch_predict_i.predict_address)) begin
+              || !target_eq_jalr)) begin
         resolved_branch_o.is_mispredict = 1'b1;
         resolved_branch_o.ckpt_restore  = 1'b1;
         // update BTB only if this wasn't a return (predicted: cf == Return;
@@ -142,8 +187,7 @@ module branch_unit #(
         resolved_branch_o.is_taken = 1'b1;
         resolved_branch_o.target_address = target_address;
         resolved_branch_o.cf_type = ariane_pkg::Jump;
-        if (branch_predict_i.cf == ariane_pkg::NoCF ||
-            target_address != branch_predict_i.predict_address) begin
+        if (branch_predict_i.cf == ariane_pkg::NoCF || !target_eq_jal) begin
           resolved_branch_o.is_mispredict = 1'b1;
           resolved_branch_o.ckpt_restore  = 1'b1;
         end
@@ -243,4 +287,18 @@ module branch_unit #(
       end
     end
   end
+  //pragma translate_off
+  // A140 witness: the carry-free target checks agree with the adder-based
+  // compare for this cycle's operands (target_address carries the JALR LSB
+  // clear exactly when the operation is a JALR).
+  always_ff @(posedge clk_i) if (rst_ni) begin
+    if (fu_data_i.operation == ariane_pkg::JALR)
+      assert (target_eq_jalr == (target_address == branch_predict_i.predict_address))
+      else $error("branch_unit: carry-free JALR target check differs from the adder compare");
+    else
+      assert (target_eq_jal == (target_address == branch_predict_i.predict_address))
+      else $error("branch_unit: carry-free JAL target check differs from the adder compare");
+  end
+  //pragma translate_on
+
 endmodule
