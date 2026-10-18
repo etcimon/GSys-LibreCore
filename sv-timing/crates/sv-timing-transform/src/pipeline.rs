@@ -793,6 +793,8 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         };
         ctx.trace.record_edit(rec.clone());
         ctx.link_last_tradeoff();
@@ -1017,6 +1019,8 @@ pub fn split_assign(
         emit_rhs: None,
         emit_rhs_extras: Vec::new(),
         emit_snippet: None,
+        emit_predicate: false,
+        emit_predicate_from: None,
     };
     ctx.trace.record_edit(rec.clone());
     ctx.pending_ir_dirty = true;
@@ -1093,8 +1097,212 @@ pub fn rebalance_associative_node(
         emit_rhs: Some(emitted),
         emit_rhs_extras: Vec::new(),
         emit_snippet: None,
+        emit_predicate: false,
+        emit_predicate_from: None,
     };
     ctx.trace.record_edit(rec.clone());
+    ctx.pending_ir_dirty = true;
+    Ok(rec)
+}
+
+/// Apply the exact expression identities of `expr_rewrite` (A122) to one
+/// node: circular compare, zero detect of a difference, late select pushed
+/// through arithmetic. Pure RHS rewrite, no new names, no latency. The
+/// `PushSelect` adders go through the area gate (Dial 11) like a
+/// SelectIncrement candidate bank; the other two add no cells.
+pub fn expr_rewrite_on_node(
+    ctx: &mut PassContext,
+    path_id: PathId,
+    node_id: NodeId,
+    origin: SourceLoc,
+) -> TransformResult<EditRecord> {
+    use sv_timing_core::expr_rewrite as xr;
+    if !ctx.policy.module_allowed(&ctx.active_module_name) {
+        return Err(TransformError::ModuleNotAllowlisted(
+            ctx.active_module_name.clone(),
+        ));
+    }
+    let model = sv_timing_core::CostModel::default();
+    let module_id = ctx
+        .design
+        .modules
+        .values()
+        .find(|m| m.name == ctx.active_module_name)
+        .map(|m| m.id)
+        .ok_or_else(|| TransformError::InvalidOpportunity("module not found".into()))?;
+    // Guard mode: the opportunity's locus is an `if` predicate span of the
+    // module (not the node's own line) — the identity rewrites the predicate.
+    let (shape, line, guard) = {
+        let module = ctx.design.modules.get(&module_id).expect("module");
+        let node = module
+            .nodes
+            .get(&node_id)
+            .ok_or_else(|| TransformError::InvalidOpportunity(format!("node {node_id} missing")))?;
+        let regs = sv_timing_core::select_increment::register_roots(module);
+        let arrivals = xr::Arrivals::of(module, &regs, &model);
+        let resolver = sv_timing_core::width::WidthResolver::from_parts(
+            &ctx.design.packages,
+            &ctx.design.param_map_ints,
+            &module.decls,
+            &module.ports,
+            &module.const_exprs,
+            &module.typedef_texts,
+            &module.package_imports,
+            ctx.design.width_map.get(&module.name),
+        );
+        let guard_site = module
+            .guard_sites
+            .iter()
+            .position(|g| g.loc == origin && origin != node.loc);
+        match guard_site {
+            Some(gi) => {
+                let site = &module.guard_sites[gi];
+                let shape = xr::detect_guard(module, site, &resolver, &model, &arrivals)
+                    .ok_or_else(|| {
+                        TransformError::InvalidOpportunity(format!(
+                            "expr_rewrite: guard `{}` carries no exact identity with a gain",
+                            site.text
+                        ))
+                    })?;
+                (shape, site.loc.start_line, Some(gi))
+            }
+            None => {
+                let shape =
+                    xr::detect(module, node, &resolver, &model, &arrivals).ok_or_else(|| {
+                        TransformError::InvalidOpportunity(format!(
+                            "expr_rewrite: node {node_id} carries no exact identity with a gain"
+                        ))
+                    })?;
+                (shape, node.loc.start_line, None)
+            }
+        }
+    };
+    let kind = match shape.kind {
+        xr::IdentityKind::CircularCompare => EditKind::CircularCompare,
+        xr::IdentityKind::ZeroDetectEquality => EditKind::ZeroDetectEquality,
+        xr::IdentityKind::PushSelect => EditKind::PushSelect,
+    };
+    if shape.est_cells > 0.0 && !ctx.admit_area(kind, line, shape.est_cells, shape.gain()) {
+        return Err(TransformError::InvalidOpportunity(format!(
+            "expr_rewrite: area gate ({:.0} cells for {:.1} FO4)",
+            shape.est_cells,
+            shape.gain()
+        )));
+    }
+    let module = ctx.design.modules.get_mut(&module_id).expect("module");
+    if let Some(gi) = guard {
+        // Every guard list naming this predicate (with or without the `^`
+        // outer-loop mark) now reads the rewritten form; the site follows.
+        let from = shape.rhs_before.clone();
+        for list in module.guards.values_mut() {
+            for g in list.iter_mut() {
+                let (prefix, body) = match g.strip_prefix('^') {
+                    Some(b) => ("^", b),
+                    None => ("", g.as_str()),
+                };
+                if body.trim() == from {
+                    *g = format!("{prefix}{}", shape.rhs_after);
+                }
+            }
+        }
+        module.guard_sites[gi].text = shape.rhs_after.clone();
+        let rec = EditRecord {
+            id: 0,
+            kind,
+            origin,
+            path_id: Some(path_id),
+            node_id: Some(node_id),
+            new_name: None,
+            fo4_before: Some(shape.fo4_before),
+            fo4_after: Some(shape.fo4_after),
+            rationale: format!(
+                "expr_rewrite {} path {path_id} guard of node {node_id}: `if ({})` -> `if ({})` {:.1}->{:.1} on the predicate (latency-neutral, exact{})",
+                shape
+                    .kinds
+                    .iter()
+                    .map(|k| k.as_str())
+                    .collect::<Vec<_>>()
+                    .join("+"),
+                shape.rhs_before,
+                shape.rhs_after,
+                shape.fo4_before,
+                shape.fo4_after,
+                if shape.est_cells > 0.0 {
+                    format!("; +{:.0} est. cells", shape.est_cells)
+                } else {
+                    String::new()
+                }
+            ),
+            emit_rhs: Some(shape.rhs_after.clone()),
+            emit_rhs_extras: Vec::new(),
+            emit_snippet: None,
+            emit_predicate: true,
+            emit_predicate_from: Some(from),
+        };
+        ctx.trace.record_edit(rec.clone());
+        if shape.est_cells > 0.0 {
+            ctx.link_last_tradeoff();
+        }
+        ctx.pending_ir_dirty = true;
+        return Ok(rec);
+    }
+    let node = module.nodes.get_mut(&node_id).expect("node");
+    // The node's own cost scales with the tree's critical cost (the measured
+    // cost is width-scaled; the ratio keeps that scaling). A `PushSelect`
+    // leaves the tree's critical depth unchanged — its gain is an arrival
+    // effect on the path, which the per-node sum cannot show until the
+    // measurement carries per-input arrivals.
+    let base = |c| model.base_fo4(c);
+    let tree_before = node
+        .rhs_expr
+        .as_ref()
+        .map(|e| e.fo4_critical_cost(&base))
+        .unwrap_or(0.0);
+    let tree_after = shape.expr_after.fo4_critical_cost(&base);
+    if tree_before > 1e-9 {
+        node.fo4_cost = (node.fo4_cost * (tree_after / tree_before).min(1.0)).max(0.0);
+    }
+    node.rhs = Some(shape.rhs_after.clone());
+    node.op_class = Some(shape.expr_after.dominant_op_class());
+    node.rhs_expr = Some(shape.expr_after.clone());
+    let rec = EditRecord {
+        id: 0,
+        kind,
+        origin,
+        path_id: Some(path_id),
+        node_id: Some(node_id),
+        new_name: None,
+        fo4_before: Some(shape.fo4_before),
+        fo4_after: Some(shape.fo4_after),
+        rationale: format!(
+            "expr_rewrite {} path {path_id} node {node_id}: `{}` = `{}` -> `{}` {:.1}->{:.1} on the node (latency-neutral, exact{})",
+            shape
+                .kinds
+                .iter()
+                .map(|k| k.as_str())
+                .collect::<Vec<_>>()
+                .join("+"),
+            shape.lhs_text,
+            shape.rhs_before,
+            shape.rhs_after,
+            shape.fo4_before,
+            shape.fo4_after,
+            if shape.est_cells > 0.0 {
+                format!("; +{:.0} est. cells", shape.est_cells)
+            } else {
+                String::new()
+            }
+        ),
+        emit_rhs: Some(shape.rhs_after.clone()),
+        emit_rhs_extras: Vec::new(),
+        emit_snippet: None,
+        emit_predicate: false,
+        emit_predicate_from: None,
+    };
+    ctx.trace.record_edit(rec.clone());
+    if shape.est_cells > 0.0 {
+        ctx.link_last_tradeoff();
+    }
     ctx.pending_ir_dirty = true;
     Ok(rec)
 }
@@ -1743,6 +1951,8 @@ pub fn balance_mux_on_path(
         emit_rhs,
         emit_rhs_extras,
         emit_snippet,
+        emit_predicate: false,
+        emit_predicate_from: None,
     };
     ctx.balance_mux_done.insert(path_id);
     ctx.balance_mux_credit.insert(path_id, fo4_after);
@@ -1941,6 +2151,8 @@ pub fn select_increment_on_node(
         emit_rhs: Some(select_text),
         emit_rhs_extras: Vec::new(),
         emit_snippet: Some(snippet),
+        emit_predicate: false,
+        emit_predicate_from: None,
     };
     ctx.trace.record_edit(rec.clone());
     ctx.link_last_tradeoff();
@@ -2068,6 +2280,8 @@ pub fn loop_rewrite_on_node(
         emit_rhs: Some(shape.replacement.clone()),
         emit_rhs_extras: Vec::new(),
         emit_snippet: Some(shape.decls.clone()),
+        emit_predicate: false,
+        emit_predicate_from: None,
     };
     ctx.trace.record_edit(rec.clone());
     ctx.pending_ir_dirty = true;
@@ -2229,6 +2443,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );
@@ -2534,6 +2749,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );
@@ -2632,6 +2848,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );
@@ -2742,6 +2959,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );
@@ -2851,6 +3069,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );
@@ -2937,6 +3156,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );
@@ -3064,6 +3284,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );
@@ -3162,6 +3383,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );
@@ -3248,6 +3470,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );
@@ -3382,6 +3605,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );
@@ -3540,6 +3764,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );
@@ -3644,6 +3869,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );

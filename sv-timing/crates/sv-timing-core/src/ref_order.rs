@@ -600,6 +600,7 @@ mod tests {
             config_branch: false,
             guards: Default::default(),
             onehot_facts: Default::default(),
+            guard_sites: Default::default(),
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0, 1]);
@@ -634,6 +635,7 @@ mod tests {
             config_branch: false,
             guards: Default::default(),
             onehot_facts: Default::default(),
+            guard_sites: Default::default(),
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0, 1]);
@@ -703,6 +705,7 @@ mod tests {
             config_branch: false,
             guards: Default::default(),
             onehot_facts: Default::default(),
+            guard_sites: Default::default(),
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0, 1]);
@@ -748,6 +751,7 @@ mod tests {
             config_branch: false,
             guards: Default::default(),
             onehot_facts: Default::default(),
+            guard_sites: Default::default(),
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0]);
@@ -798,6 +802,7 @@ mod tests {
             config_branch: false,
             guards: Default::default(),
             onehot_facts: Default::default(),
+            guard_sites: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -855,6 +860,7 @@ mod tests {
             config_branch: false,
             guards: Default::default(),
             onehot_facts: Default::default(),
+            guard_sites: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -911,6 +917,7 @@ mod tests {
             config_branch: false,
             guards: Default::default(),
             onehot_facts: Default::default(),
+            guard_sites: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -971,6 +978,7 @@ mod tests {
             config_branch: false,
             guards: Default::default(),
             onehot_facts: Default::default(),
+            guard_sites: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -1044,6 +1052,7 @@ mod tests {
             config_branch: false,
             guards: Default::default(),
             onehot_facts: Default::default(),
+            guard_sites: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();

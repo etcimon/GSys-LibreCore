@@ -188,6 +188,7 @@ impl ModuleSolution {
             OpportunityKind::BalanceMux => spec.comb_exclusive || spec.ff_factor || spec.comb_split,
             OpportunityKind::SelectIncrement => spec.comb_exclusive || spec.comb_split,
             OpportunityKind::LoopRewrite => spec.comb_exclusive || spec.comb_split,
+            OpportunityKind::ExprRewrite => spec.comb_exclusive || spec.comb_split,
         }
     }
 }
@@ -635,6 +636,7 @@ mod tests {
             config_branch: false,
             guards: Default::default(),
             onehot_facts: Default::default(),
+            guard_sites: Default::default(),
             loc: loc(),
         }
     }

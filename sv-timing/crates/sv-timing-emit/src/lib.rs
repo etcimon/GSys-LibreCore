@@ -240,7 +240,10 @@ pub fn apply_edits_to_source_dense(
     // LoopRewrite spans first (line counts preserved), then origin RHS
     // rewrites; both are structural and opt in with the BalanceMux RTL knob.
     let after_bm = if dense.emit_balance_mux_rtl {
-        let after_loops = crate::rhs::rewrite_loop_spans(source, trace);
+        // Guard predicates first: byte spans of the pristine source, one
+        // line each, so the line-based stages below see unchanged numbering.
+        let after_guards = crate::rhs::rewrite_guard_predicates(source, trace);
+        let after_loops = crate::rhs::rewrite_loop_spans(&after_guards, trace);
         rewrite_origin_rhs_replaces(&after_loops, trace)
     } else {
         source.to_string()
@@ -299,6 +302,8 @@ pub fn apply_edits_to_source_dense(
                 emit_rhs: None,
                 emit_rhs_extras: Vec::new(),
                 emit_snippet: None,
+                emit_predicate: false,
+                emit_predicate_from: None,
             });
             cuts_for_dense.push(CutAssign {
                 line: 0,
@@ -1025,6 +1030,8 @@ mod tests {
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         annotate_origin_comments(&mut tree, &trace);
         let text = &tree.files.values().next().unwrap().text;
@@ -1092,6 +1099,8 @@ mod tests {
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         let policy = EmitPolicy::default();
         let text = apply_edits_to_source(src, &trace, &policy);
@@ -1170,6 +1179,8 @@ mod tests {
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.real_cut_feeds = true;
@@ -1246,6 +1257,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.real_cut_feeds = true;
@@ -1317,6 +1330,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.real_cut_feeds = true;
@@ -1395,6 +1410,8 @@ endmodule
             emit_rhs: Some("svt_bm_top_p1_n0".into()),
             emit_rhs_extras: Vec::new(),
             emit_snippet: Some(snippet.into()),
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         // Lean default: BalanceMux credit-only (no RTL).
         let lean = apply_edits_to_source(src, &trace, &EmitPolicy::default());
@@ -1480,6 +1497,8 @@ endmodule
             emit_rhs: Some("svt_bm_top_p1_n0".into()),
             emit_rhs_extras: Vec::new(),
             emit_snippet: Some(snippet.into()),
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.emit_balance_mux_rtl = true;
@@ -1554,6 +1573,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         trace.records[0].id = 0;
         trace.records[0].new_name = Some("pipe_svt_p1".into());
@@ -1579,6 +1600,8 @@ endmodule
             emit_rhs: Some("svt_bm_top".into()),
             emit_rhs_extras: Vec::new(),
             emit_snippet: Some(snippet.into()),
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.emit_balance_mux_rtl = true;
@@ -1628,6 +1651,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         let policy = EmitPolicy::default();
         let lean = apply_edits_to_source(src, &trace, &policy);
@@ -1713,6 +1738,8 @@ endmodule
                 emit_rhs: None,
                 emit_rhs_extras: Vec::new(),
                 emit_snippet: None,
+                emit_predicate: false,
+                emit_predicate_from: None,
             });
         }
         let mut dense = dense_options_from_source(src);
@@ -1778,6 +1805,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         let policy = EmitPolicy::default();
         let lean = apply_edits_to_source(src, &trace, &policy);
@@ -2198,6 +2227,148 @@ endmodule
         );
     }
 
+    /// A122 end to end: the three exact identities fire on the fixture's
+    /// over-budget cones and are written as pure RHS rewrites; the signed
+    /// and self-wrapping shapes are left untouched; the emitted file reparses.
+    #[test]
+    fn expr_identity_fixture_rewrites_exact_shapes_and_keeps_refused_ones() {
+        use sv_timing_core::{analyze_files, LowerOptions, ParseOptions, TimingTarget};
+        use sv_timing_transform::{run_correct_passes, PassContext, PassPolicy};
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/expr_identities.sv");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let opt = sv_timing_core::OptOptions::preset(sv_timing_core::OptLevel::O3);
+        let out = analyze_files(
+            &[path],
+            &ParseOptions::default(),
+            &LowerOptions {
+                target: TimingTarget::new(4000.0, 20.0, 0.2),
+                opt: opt.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let identities: Vec<_> = out
+            .design
+            .opportunities
+            .iter()
+            .filter(|o| o.kind == sv_timing_core::OpportunityKind::ExprRewrite)
+            .map(|o| o.rationale.clone())
+            .collect();
+        assert!(
+            identities
+                .iter()
+                .any(|r| r.contains("circular_compare") && r.contains("`older`")),
+            "{identities:?}"
+        );
+        assert!(
+            identities
+                .iter()
+                .any(|r| r.contains("zero_detect_equality")),
+            "{identities:?}"
+        );
+        assert!(
+            identities
+                .iter()
+                .any(|r| r.contains("push_select") && r.contains("`target`")),
+            "{identities:?}"
+        );
+        assert!(
+            !identities
+                .iter()
+                .any(|r| r.contains("signed_keep") || r.contains("wrap_keep")),
+            "{identities:?}"
+        );
+        let policy = PassPolicy::from_opt(opt, vec!["expr_identities".into()], false);
+        let ctx = run_correct_passes(PassContext::new(out.design, out.names, policy)).unwrap();
+        let kinds: Vec<EditKind> = ctx.trace.records.iter().map(|r| r.kind).collect();
+        assert!(kinds.contains(&EditKind::CircularCompare), "{kinds:?}");
+        assert!(kinds.contains(&EditKind::ZeroDetectEquality), "{kinds:?}");
+        assert!(kinds.contains(&EditKind::PushSelect), "{kinds:?}");
+        // PushSelect is the only priced one: one extra 64-bit adder
+        let priced: Vec<_> = ctx
+            .tradeoffs
+            .iter()
+            .filter(|t| t.edit_id.is_some())
+            .collect();
+        assert!(
+            priced.iter().any(|t| (t.est_cells - 64.0).abs() < 1e-9),
+            "{priced:?}"
+        );
+        let mut dense = dense_options_from_source(&source);
+        dense.emit_balance_mux_rtl = true;
+        dense.real_cut_feeds = true;
+        let emitted =
+            apply_edits_to_source_dense(&source, &ctx.trace, &EmitPolicy::default(), &dense);
+        assert!(emitted.contains("assign older = ((a_adj < b_adj) ^ (a_adj < head_q)) ^ (b_adj < head_q); // sv-timing: circular_compare (exact identity)"), "{emitted}");
+        // under budget on this fixture: eligible, but no failing path asks for it
+        assert!(
+            emitted.contains("assign older_eq = (a_adj - head_q) <= (b_adj - head_q);"),
+            "{emitted}"
+        );
+        assert!(
+            emitted.contains("assign match = a_adj == b_adj; // sv-timing: zero_detect_equality"),
+            "{emitted}"
+        );
+        assert!(
+            emitted.contains(
+                "assign differ = x_q != (y_q ^ {8'b0, ctl_q}); // sv-timing: zero_detect_equality"
+            ),
+            "{emitted}"
+        );
+        assert!(emitted.contains("assign target = taken ? (pc_q + imm_a_q) : (pc_q + imm_b_q); // sv-timing: push_select"), "{emitted}");
+        assert!(
+            emitted.contains(
+                "assign signed_keep = (s_a_q - $signed(head_q)) < (s_b_q - $signed(head_q));"
+            ),
+            "{emitted}"
+        );
+        assert!(
+            emitted.contains("assign wrap_keep = (x_q + y_q - 16'd7) == 0;"),
+            "{emitted}"
+        );
+        // guard position: the predicate span is rewritten in place, one line
+        assert!(
+            emitted.contains("if (((a_adj < b_adj) ^ (a_adj < head_q)) ^ (b_adj < head_q) /* sv-timing: circular_compare #"),
+            "{emitted}"
+        );
+        assert!(
+            emitted.contains("if (x_q != y_q /* sv-timing: zero_detect_equality #"),
+            "{emitted}"
+        );
+        // same-line replacement: the statement the predicate guards is still on its line
+        let guard_line = emitted
+            .lines()
+            .find(|l| l.contains("/* sv-timing: circular_compare #"))
+            .expect("rewritten guard line");
+        assert!(guard_line.contains("guard_pick = a_adj;"), "{guard_line}");
+        let src_gap = source
+            .lines()
+            .position(|l| l.contains("guard_hit = ctl_q[0];"))
+            .unwrap()
+            - source
+                .lines()
+                .position(|l| l.contains("guard_pick = a_adj;"))
+                .unwrap();
+        let out_gap = emitted
+            .lines()
+            .position(|l| l.contains("guard_hit = ctl_q[0];"))
+            .unwrap()
+            - emitted
+                .lines()
+                .position(|l| l.contains("guard_pick = a_adj;"))
+                .unwrap();
+        assert_eq!(src_gap, out_gap, "guard rewrites keep line numbering");
+        let mut tree = EmitTree::new();
+        tree.add_file("expr_identities__svt.sv", FileRole::Module, emitted);
+        let integrity = integrity_reparse(&tree, &ParseOptions::default());
+        assert!(
+            integrity.joint_ok && integrity.reparse_ok,
+            "{:?}",
+            integrity.messages
+        );
+    }
+
     /// A101 end to end: the four serial walks of `loop_walks.sv` become their
     /// exact parallel forms in the emitted SV (span replaced in place, module-
     /// scope vectors declared before the process), re-analysis of the emitted
@@ -2390,6 +2561,8 @@ endmodule
             emit_rhs: Some(rhs.into()),
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         };
         let mut trace = EditTrace::new();
         trace.record_edit(mk(2, "a || |{b, c, d}"));

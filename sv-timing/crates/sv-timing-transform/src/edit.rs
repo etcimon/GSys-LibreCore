@@ -24,6 +24,12 @@ pub enum EditKind {
     SelectIncrement,
     /// Serial loop walk → exact parallel form (A101).
     LoopRewrite,
+    /// `(a - h) < (b - h)` → parity of three plain compares (A122, exact).
+    CircularCompare,
+    /// `(a - b) == 0` → `a == b` (A122, exact).
+    ZeroDetectEquality,
+    /// `(c ? x : y) + z` → `c ? (x + z) : (y + z)` for a late `c` (A122, exact).
+    PushSelect,
     /// Name expansion / declaration materialization.
     ExpandName,
     /// Annotation only.
@@ -60,6 +66,14 @@ pub struct EditRecord {
     /// Optional dense always_comb / wire fragment injected before `endmodule`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub emit_snippet: Option<String>,
+    /// `emit_rhs` replaces an `if` predicate at `origin`'s byte span rather
+    /// than an assignment's RHS (A122 guard identities). The span's current
+    /// text must equal `emit_predicate_from`, else the edit stays credit-only.
+    #[serde(default)]
+    pub emit_predicate: bool,
+    /// The predicate text the span held when the edit was planned.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub emit_predicate_from: Option<String>,
 }
 
 /// Additional origin→RHS rewrite for multi-arm exclusive wire-up.
@@ -126,6 +140,8 @@ mod tests {
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         assert_eq!(t.records[0].origin.start_line, 10);
         assert!(t.to_json_pretty().unwrap().contains("a.sv"));

@@ -105,6 +105,8 @@ pub fn factor_always_ff_regions(ctx: &mut PassContext) {
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: Some(sv),
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
     }
 }
@@ -312,6 +314,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );

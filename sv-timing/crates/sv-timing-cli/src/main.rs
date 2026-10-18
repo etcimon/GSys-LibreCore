@@ -666,6 +666,27 @@ fn design_to_analyze_json(
 ) -> serde_json::Value {
     let ranked = rank_paths_by_slack(&design.paths, &design.target);
     let closure = frequency_closure(design);
+    // A122: statement-level mechanisms behind the measured hand rewrites,
+    // reported wherever they occur (no emitter yet); live modules only.
+    let structural_patterns = {
+        let dead: std::collections::BTreeSet<&str> = closure
+            .uninstantiated_modules
+            .iter()
+            .map(String::as_str)
+            .collect();
+        let mut sites: Vec<sv_timing_core::patterns::PatternSite> = design
+            .modules
+            .values()
+            .filter(|m| !dead.contains(m.name.as_str()))
+            .flat_map(sv_timing_core::patterns::sites)
+            .collect();
+        sites.sort_by(|a, b| {
+            a.module
+                .cmp(&b.module)
+                .then(a.write_line.cmp(&b.write_line))
+        });
+        serde_json::to_value(sites).unwrap_or(serde_json::Value::Null)
+    };
     let paths_json: Vec<serde_json::Value> = ranked
         .primary
         .iter()
@@ -874,6 +895,7 @@ fn design_to_analyze_json(
                     sv_timing_core::OpportunityKind::BalanceMux => "balance_mux",
                     sv_timing_core::OpportunityKind::SelectIncrement => "select_increment",
                     sv_timing_core::OpportunityKind::LoopRewrite => "loop_rewrite",
+                    sv_timing_core::OpportunityKind::ExprRewrite => "expr_rewrite",
                 },
                 "path_id": o.path_id,
                 "estimated_fo4_before": o.estimated_fo4_before,
@@ -978,6 +1000,10 @@ fn design_to_analyze_json(
         "path_exceptions": design.path_exceptions,
         "relocation_plan": build_relocation_plan(design),
         "opportunities": opportunities,
+        // A122: statement-level mechanisms behind the measured hand rewrites,
+        // reported wherever they occur (no emitter yet). Live modules only
+        // when the design knows which are instantiated.
+        "structural_patterns": structural_patterns,
         "sta_hints": sta_hints,
         "frequency_closure": {
             "target_mhz": closure.target_mhz,

@@ -858,11 +858,13 @@ pub fn trial_allows(trial: OverBudgetTrial, kind: crate::ir::OpportunityKind) ->
     use crate::ir::OpportunityKind::*;
     match trial {
         OverBudgetTrial::Leave => false,
-        OverBudgetTrial::RefuseRegister => matches!(kind, SelectIncrement | LoopRewrite),
+        OverBudgetTrial::RefuseRegister => {
+            matches!(kind, SelectIncrement | LoopRewrite | ExprRewrite)
+        }
         OverBudgetTrial::BalanceField => {
             matches!(
                 kind,
-                BalanceMux | SplitAssign | SelectIncrement | LoopRewrite
+                BalanceMux | SplitAssign | SelectIncrement | LoopRewrite | ExprRewrite
             )
         }
         OverBudgetTrial::CriticalChain | OverBudgetTrial::BalanceThenRegister => true,
@@ -886,6 +888,7 @@ pub fn is_latency_neutral_kind(kind: crate::ir::OpportunityKind) -> bool {
             | crate::ir::OpportunityKind::SplitAssign
             | crate::ir::OpportunityKind::SelectIncrement
             | crate::ir::OpportunityKind::LoopRewrite
+            | crate::ir::OpportunityKind::ExprRewrite
     )
 }
 
@@ -1088,6 +1091,7 @@ mod tests {
             config_branch: false,
             guards: Default::default(),
             onehot_facts: Default::default(),
+            guard_sites: Default::default(),
             loc: crate::loc::SourceLoc::file_start("lzc.sv"),
         };
         m.id = 0;
@@ -1151,6 +1155,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: crate::loc::SourceLoc::file_start("axi2mem.sv"),
             },
         );
@@ -1196,6 +1201,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: crate::loc::SourceLoc::file_start("policy.sv"),
             },
         );

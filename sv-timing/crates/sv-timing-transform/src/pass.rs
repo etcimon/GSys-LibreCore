@@ -633,7 +633,9 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
                     .iter()
                     .filter(|o| o.path_id == w.path_id && is_latency_neutral_kind(o.kind))
                     .min_by_key(|o| match o.kind {
-                        OpportunityKind::SelectIncrement | OpportunityKind::LoopRewrite => 0u8,
+                        OpportunityKind::SelectIncrement
+                        | OpportunityKind::LoopRewrite
+                        | OpportunityKind::ExprRewrite => 0u8,
                         OpportunityKind::BalanceMux => 1,
                         OpportunityKind::SplitAssign => 2,
                         OpportunityKind::InsertReg => 3,
@@ -1386,6 +1388,32 @@ fn apply_work_item(
                     ]),
                 );
                 return Ok((false, Some("select_increment_refused")));
+            }
+            Err(e) => return Err(e),
+        }
+    }
+    // 0c) ExprRewrite (A122): exact identities on one node — pure RHS
+    // rewrite, no names, no latency; `PushSelect` priced by the area gate.
+    if !did && opp.kind == OpportunityKind::ExprRewrite {
+        match crate::pipeline::expr_rewrite_on_node(ctx, opp.path_id, node, origin.clone()) {
+            Ok(_) => {
+                did = true;
+                if let Some(last) = ctx.trace.records.last_mut() {
+                    if !reloc_id.is_empty() {
+                        last.rationale = format!("relocation {reloc_id}; {}", last.rationale);
+                    }
+                }
+            }
+            Err(TransformError::InvalidOpportunity(detail)) => {
+                ctx.log_algo(
+                    "expr_rewrite.refuse",
+                    AlgoTrace::kv([
+                        ("path_id", json!(opp.path_id)),
+                        ("module", json!(ctx.active_module_name)),
+                        ("detail", json!(detail)),
+                    ]),
+                );
+                return Ok((false, Some("expr_rewrite_refused")));
             }
             Err(e) => return Err(e),
         }

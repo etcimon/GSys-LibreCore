@@ -2554,6 +2554,56 @@ fn loop_end_line(lines: &[&str], start_idx: usize) -> u32 {
     (start_idx + 1) as u32
 }
 
+/// Replace every `if` predicate an A122 guard identity rewrote
+/// (`EditRecord::emit_predicate`). Runs on the pristine source, before any
+/// line-based stage: the origin's byte span must still hold the planned
+/// predicate text (`emit_predicate_from`) and the replacement is one line,
+/// so every other edit keeps its line numbers. A span that moved or changed
+/// leaves its edit credit-only; replacements are applied back to front.
+pub fn rewrite_guard_predicates(source: &str, trace: &EditTrace) -> String {
+    let mut jobs: Vec<(usize, usize, String, u32, &'static str)> = Vec::new();
+    for r in &trace.records {
+        if !r.emit_predicate {
+            continue;
+        }
+        let (Some(new_text), Some(from)) = (r.emit_rhs.as_ref(), r.emit_predicate_from.as_ref())
+        else {
+            continue;
+        };
+        let (start, end) = (r.origin.byte_start as usize, r.origin.byte_end as usize);
+        if start >= end || end > source.len() || new_text.contains('\n') {
+            continue;
+        }
+        if source.get(start..end).map(str::trim) != Some(from.trim()) {
+            continue;
+        }
+        let label = match r.kind {
+            EditKind::CircularCompare => "circular_compare",
+            EditKind::ZeroDetectEquality => "zero_detect_equality",
+            EditKind::PushSelect => "push_select",
+            _ => "identity",
+        };
+        jobs.push((start, end, new_text.clone(), r.id, label));
+    }
+    if jobs.is_empty() {
+        return source.to_string();
+    }
+    jobs.sort_by(|a, b| b.0.cmp(&a.0));
+    let mut out = source.to_string();
+    let mut last_start = usize::MAX;
+    for (start, end, text, id, label) in jobs {
+        if end > last_start {
+            continue; // overlapping spans: first (rightmost) claim wins
+        }
+        out.replace_range(
+            start..end,
+            &format!("{text} /* sv-timing: {label} #{id} */"),
+        );
+        last_start = start;
+    }
+    out
+}
+
 /// Replace the source span of every `LoopRewrite` edit with its replacement
 /// statement. The replacement is fitted to the span's line count — joined
 /// onto fewer lines when longer, padded with comment lines when shorter — so
@@ -2697,11 +2747,16 @@ fn rhs_rewrite_line_ok(source: &str, line: u32) -> bool {
 
 /// Also applies [`EditRecord::emit_rhs_extras`] (exclusive one-hot multi-arm wire-up).
 pub fn rewrite_origin_rhs_replaces(source: &str, trace: &EditTrace) -> String {
-    let mut replaces: Vec<(u32, u32, String, u32)> = Vec::new(); // start, end, new_rhs, edit_id
+    let mut replaces: Vec<(u32, u32, String, u32, &'static str)> = Vec::new(); // start, end, new_rhs, edit_id, label
     for r in &trace.records {
         if !matches!(
             r.kind,
-            EditKind::BalanceMux | EditKind::SelectIncrement | EditKind::RebalanceAssoc
+            EditKind::BalanceMux
+                | EditKind::SelectIncrement
+                | EditKind::RebalanceAssoc
+                | EditKind::CircularCompare
+                | EditKind::ZeroDetectEquality
+                | EditKind::PushSelect
         ) {
             continue;
         }
@@ -2716,10 +2771,17 @@ pub fn rewrite_origin_rhs_replaces(source: &str, trace: &EditTrace) -> String {
             .as_ref()
             .map(|s| balance_mux_snippet_safe(source, s, r.origin.start_line))
             .unwrap_or(false);
-        let pure_rhs_rewrite = r.kind == EditKind::RebalanceAssoc
+        // An exact identity (A122) names exactly the identifiers the origin
+        // RHS did and declares nothing, so a line inside a generate is as
+        // rewritable as a module-scope one.
+        let identity = matches!(
+            r.kind,
+            EditKind::CircularCompare | EditKind::ZeroDetectEquality | EditKind::PushSelect
+        );
+        let pure_rhs_rewrite = (r.kind == EditKind::RebalanceAssoc || identity)
             && r.emit_snippet.is_none()
             && r.origin.start_line != 0
-            && !line_inside_generate(source, r.origin.start_line)
+            && (identity || !line_inside_generate(source, r.origin.start_line))
             && r.emit_rhs.as_ref().is_some_and(|new_rhs| {
                 parse_assign_multiline(source, r.origin.start_line, 6)
                     .is_some_and(|(_, old_rhs, _, _)| ident_set(&old_rhs) == ident_set(new_rhs))
@@ -2749,13 +2811,20 @@ pub fn rewrite_origin_rhs_replaces(source: &str, trace: &EditTrace) -> String {
             targets.push((ex.origin.start_line, end, ex.emit_rhs.clone()));
         }
         let all_rewritable = targets.iter().all(|(start, _, _)| {
-            !line_inside_generate(source, *start) && rhs_rewrite_line_ok(source, *start)
+            (identity || !line_inside_generate(source, *start))
+                && rhs_rewrite_line_ok(source, *start)
         });
         if !all_rewritable {
             continue;
         }
+        let label = match r.kind {
+            EditKind::CircularCompare => "circular_compare (exact identity)",
+            EditKind::ZeroDetectEquality => "zero_detect_equality (exact identity)",
+            EditKind::PushSelect => "push_select (exact identity)",
+            _ => "BalanceMux/rebalance",
+        };
         for (start, end, new_rhs) in targets {
-            replaces.push((start, end, new_rhs, r.id));
+            replaces.push((start, end, new_rhs, r.id, label));
         }
     }
     if replaces.is_empty() {
@@ -2763,17 +2832,17 @@ pub fn rewrite_origin_rhs_replaces(source: &str, trace: &EditTrace) -> String {
     }
     // Expand each rewrite span using multi-line assign recovery so ternary
     // continuations (and similar) are claimed even when origin end_line is short.
-    let mut expanded: Vec<(u32, u32, String, u32)> = Vec::new();
-    for (start, end, new_rhs, edit_id) in &replaces {
+    let mut expanded: Vec<(u32, u32, String, u32, &'static str)> = Vec::new();
+    for (start, end, new_rhs, edit_id, label) in &replaces {
         let span_end = parse_assign_multiline(source, *start, 6)
             .map(|(_, _, _, e)| e)
             .unwrap_or(*end)
             .max(*end)
             .max(*start);
-        expanded.push((*start, span_end, new_rhs.clone(), *edit_id));
+        expanded.push((*start, span_end, new_rhs.clone(), *edit_id, label));
     }
     // First claim wins per line
-    let mut line_map: std::collections::BTreeMap<u32, (u32, u32, String, u32)> =
+    let mut line_map: std::collections::BTreeMap<u32, (u32, u32, String, u32, &'static str)> =
         std::collections::BTreeMap::new();
     for r in &expanded {
         for ln in r.0..=r.1 {
@@ -2785,7 +2854,7 @@ pub fn rewrite_origin_rhs_replaces(source: &str, trace: &EditTrace) -> String {
     for (i, line) in lines.iter().enumerate() {
         let line_no = (i + 1) as u32;
         if let Some(rep) = line_map.get(&line_no) {
-            let (start, end, new_rhs, edit_id) = rep;
+            let (start, end, new_rhs, edit_id, label) = rep;
             let indent: String = line.chars().take_while(|c| c.is_whitespace()).collect();
             let start_line_txt = source_line(source, *start).unwrap_or("");
             let start_is_labels_only = is_case_label_only_line(start_line_txt);
@@ -2813,7 +2882,7 @@ pub fn rewrite_origin_rhs_replaces(source: &str, trace: &EditTrace) -> String {
                     let assign_kw = if keep_assign { "assign " } else { "" };
                     out.push_str(&indent);
                     out.push_str(&format!(
-                        "{case_prefix}{assign_kw}{lhs} {op} {new_rhs}; // sv-timing: BalanceMux/rebalance #{edit_id} RHS rewrite\n"
+                        "{case_prefix}{assign_kw}{lhs} {op} {new_rhs}; // sv-timing: {label} #{edit_id} RHS rewrite\n"
                     ));
                 } else {
                     out.push_str(line);
@@ -3101,6 +3170,8 @@ endmodule
             emit_rhs: Some("svt_bm_top".into()),
             emit_rhs_extras: Vec::new(),
             emit_snippet: Some(snippet.into()),
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         let out = rewrite_origin_rhs_replaces(src, &trace);
         assert!(
@@ -3244,6 +3315,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         let cuts = cut_assigns_from_source(src, &tr);
         assert_eq!(cuts.len(), 1);
@@ -3328,6 +3401,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         if let Some(r) = tr.records.last_mut() {
             r.id = 16;
@@ -3376,6 +3451,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         let cuts = cut_assigns_from_source(src, &tr);
         assert_eq!(cuts.len(), 1);
@@ -3421,6 +3498,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3476,6 +3555,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3533,6 +3614,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3578,6 +3661,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         tr.record_edit(EditRecord {
             id: 1,
@@ -3592,6 +3677,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         // Force ids (record_edit renumbers)
         tr.records[0].id = 0;
@@ -3642,6 +3729,8 @@ endmodule
                 emit_rhs: None,
                 emit_rhs_extras: Vec::new(),
                 emit_snippet: None,
+                emit_predicate: false,
+                emit_predicate_from: None,
             });
         }
         for (i, r) in tr.records.iter_mut().enumerate() {
@@ -3688,6 +3777,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3745,6 +3836,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3840,6 +3933,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3922,6 +4017,8 @@ endmodule
                 emit_rhs: None,
                 emit_rhs_extras: Vec::new(),
                 emit_snippet: None,
+                emit_predicate: false,
+                emit_predicate_from: None,
             });
         }
         tr.records[0].id = 0;
@@ -3984,6 +4081,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4077,6 +4176,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         let cuts = cut_assigns_from_source(src, &tr);
         assert_eq!(cuts.len(), 1);
@@ -4144,6 +4245,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4216,6 +4319,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4292,6 +4397,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4361,6 +4468,8 @@ endmodule
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());

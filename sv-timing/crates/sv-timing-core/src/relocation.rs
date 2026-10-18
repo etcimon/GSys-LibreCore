@@ -962,6 +962,7 @@ pub fn opportunity_to_relocation_kind(k: OpportunityKind) -> RelocationKind {
         // Dashboards: a latency-neutral T1 rewrite, same bucket as BalanceMux.
         OpportunityKind::SelectIncrement => RelocationKind::BalanceMux,
         OpportunityKind::LoopRewrite => RelocationKind::BalanceMux,
+        OpportunityKind::ExprRewrite => RelocationKind::BalanceMux,
     }
 }
 
@@ -1084,6 +1085,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );
@@ -1169,6 +1171,7 @@ mod tests {
                     config_branch: false,
                     guards: Default::default(),
                     onehot_facts: Default::default(),
+                    guard_sites: Default::default(),
                     loc: loc(),
                 },
             );
@@ -1281,6 +1284,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(),
             },
         );
@@ -1454,6 +1458,7 @@ mod tests {
             config_branch: false,
             guards: Default::default(),
             onehot_facts: Default::default(),
+            guard_sites: Default::default(),
             loc: loc(),
         }
     }

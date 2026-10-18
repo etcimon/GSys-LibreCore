@@ -1965,6 +1965,7 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
     let model = CostModel::default();
     // SelectIncrement (A88) needs widths and the module's register set.
     let mut reg_cache: BTreeMap<ModuleId, std::collections::BTreeSet<String>> = BTreeMap::new();
+    let mut arrival_cache: BTreeMap<ModuleId, crate::expr_rewrite::Arrivals> = BTreeMap::new();
     let mut loop_shapes: BTreeMap<ModuleId, Vec<crate::loop_walk::LoopWalkShape>> = BTreeMap::new();
     for path in &design.paths {
         if path.multi_cycle || path.slack_fo4 >= 0.0 {
@@ -1973,6 +1974,115 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
         if path.nodes.is_empty() {
             continue;
         }
+        let module = design.modules.get(&path.module);
+        // ExprRewrite (A122): exact identities on one node — circular compare,
+        // zero detect of a difference, a late select pushed through
+        // arithmetic. Pure RHS rewrites; the transform re-detects and prices.
+        // Offered before the single-node guard: an identity needs no interior.
+        if let Some(m) = module {
+            let regs = reg_cache
+                .entry(m.id)
+                .or_insert_with(|| crate::select_increment::register_roots(m));
+            let arrivals = arrival_cache
+                .entry(m.id)
+                .or_insert_with(|| crate::expr_rewrite::Arrivals::of(m, regs, &model));
+            let resolver = crate::width::WidthResolver::from_parts(
+                &design.packages,
+                &design.param_map_ints,
+                &m.decls,
+                &m.ports,
+                &m.const_exprs,
+                &m.typedef_texts,
+                &m.package_imports,
+                design.width_map.get(&m.name),
+            );
+            // The `if` predicates guarding a node of the path: an identity on
+            // one is offered with the predicate's own span as its locus.
+            let mut guard_sites_seen: std::collections::BTreeSet<(u32, u32)> =
+                std::collections::BTreeSet::new();
+            for id in &path.nodes {
+                for g in m.guards.get(id).into_iter().flatten() {
+                    let text = g.trim_start_matches('^').trim();
+                    for site in m.guard_sites.iter().filter(|s| s.text.trim() == text) {
+                        if !guard_sites_seen.insert((site.loc.start_line, site.loc.byte_start)) {
+                            continue;
+                        }
+                        let Some(shape) =
+                            crate::expr_rewrite::detect_guard(m, site, &resolver, &model, arrivals)
+                        else {
+                            continue;
+                        };
+                        out.push(Opportunity {
+                            kind: OpportunityKind::ExprRewrite,
+                            path_id: path.id,
+                            insert_after: *id,
+                            estimated_fo4_before: path.total_fo4,
+                            estimated_fo4_after: (path.total_fo4 - shape.gain()).max(0.0),
+                            loc: site.loc.clone(),
+                            rationale: format!(
+                                "path {} expr_rewrite {} on guard of node {id}: `if ({})` -> `if ({})` (guard {:.1}->{:.1} FO4{}; no latency)",
+                                path.id,
+                                shape
+                                    .kinds
+                                    .iter()
+                                    .map(|k| k.as_str())
+                                    .collect::<Vec<_>>()
+                                    .join("+"),
+                                shape.rhs_before,
+                                shape.rhs_after,
+                                shape.fo4_before,
+                                shape.fo4_after,
+                                if shape.est_cells > 0.0 {
+                                    format!(", +{:.0} est. cells", shape.est_cells)
+                                } else {
+                                    String::new()
+                                }
+                            ),
+                            requires_clock_in_scope: false,
+                            changes_latency: false,
+                        });
+                    }
+                }
+            }
+            for id in &path.nodes {
+                let Some(n) = m.nodes.get(id) else { continue };
+                let Some(shape) = crate::expr_rewrite::detect(m, n, &resolver, &model, arrivals)
+                else {
+                    continue;
+                };
+                out.push(Opportunity {
+                    kind: OpportunityKind::ExprRewrite,
+                    path_id: path.id,
+                    insert_after: *id,
+                    estimated_fo4_before: path.total_fo4,
+                    estimated_fo4_after: (path.total_fo4 - shape.gain()).max(0.0),
+                    loc: n.loc.clone(),
+                    rationale: format!(
+                        "path {} expr_rewrite {} on node {id}: `{}` = `{}` -> `{}` (node {:.1}->{:.1} FO4{}; no latency)",
+                        path.id,
+                        shape
+                            .kinds
+                            .iter()
+                            .map(|k| k.as_str())
+                            .collect::<Vec<_>>()
+                            .join("+"),
+                        shape.lhs_text,
+                        shape.rhs_before,
+                        shape.rhs_after,
+                        shape.fo4_before,
+                        shape.fo4_after,
+                        if shape.est_cells > 0.0 {
+                            format!(", +{:.0} est. cells", shape.est_cells)
+                        } else {
+                            String::new()
+                        }
+                    ),
+                    requires_clock_in_scope: false,
+                    changes_latency: false,
+                });
+            }
+        }
+
         // PASS-STRATEGY P3: a single-node path has no interior to cut.
         if path.nodes.len() <= 1 {
             continue;
@@ -1993,7 +2103,6 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
                 | PathClassKind::IndependentLhsBundle
                 | PathClassKind::DenseControlCone
         );
-        let module = design.modules.get(&path.module);
         if module.is_some_and(|m| {
             path.nodes
                 .iter()
@@ -2644,6 +2753,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: loc(1),
             },
         );

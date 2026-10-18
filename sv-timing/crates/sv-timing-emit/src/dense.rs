@@ -344,6 +344,9 @@ pub fn emit_blocks_for_trace_src(
                     | EditKind::SelectIncrement
                     | EditKind::LoopRewrite
                     | EditKind::RebalanceAssoc
+                    | EditKind::CircularCompare
+                    | EditKind::ZeroDetectEquality
+                    | EditKind::PushSelect
                     | EditKind::Annotate
             )
         })
@@ -848,6 +851,9 @@ fn credit_only_review_block(records: &[&EditRecord]) -> String {
             EditKind::SelectIncrement => "select_increment",
             EditKind::LoopRewrite => "loop_rewrite",
             EditKind::RebalanceAssoc => "rebalance_assoc",
+            EditKind::CircularCompare => "circular_compare",
+            EditKind::ZeroDetectEquality => "zero_detect_equality",
+            EditKind::PushSelect => "push_select",
             EditKind::Annotate => "annotate",
             _ => "credit",
         };
@@ -1014,6 +1020,8 @@ mod tests {
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         tr.record_edit(EditRecord {
             id: 1,
@@ -1028,6 +1036,8 @@ mod tests {
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         tr
     }
@@ -1109,6 +1119,8 @@ mod tests {
             emit_rhs: None,
             emit_rhs_extras: Vec::new(),
             emit_snippet: None,
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         let block = dense_autocorrect_block(&tr, &DenseEmitOptions::default());
         assert!(
@@ -1147,6 +1159,8 @@ mod tests {
             emit_rhs: Some("svt_bm_top".into()),
             emit_rhs_extras: Vec::new(),
             emit_snippet: Some(snippet.into()),
+            emit_predicate: false,
+            emit_predicate_from: None,
         });
         let mut opts = DenseEmitOptions::default();
         opts.emit_balance_mux_rtl = true; // opt-in structural BalanceMux

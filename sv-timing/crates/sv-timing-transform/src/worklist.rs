@@ -202,7 +202,9 @@ pub fn order_worklist_with_plan(
             w.opportunity.as_ref().is_some_and(|o| {
                 matches!(
                     o.kind,
-                    OpportunityKind::SelectIncrement | OpportunityKind::LoopRewrite
+                    OpportunityKind::SelectIncrement
+                        | OpportunityKind::LoopRewrite
+                        | OpportunityKind::ExprRewrite
                 )
             })
         };
@@ -237,7 +239,9 @@ pub fn order_worklist_with_plan(
             w.opportunity.as_ref().is_some_and(|o| {
                 matches!(
                     o.kind,
-                    OpportunityKind::SelectIncrement | OpportunityKind::LoopRewrite
+                    OpportunityKind::SelectIncrement
+                        | OpportunityKind::LoopRewrite
+                        | OpportunityKind::ExprRewrite
                 )
             })
         };
@@ -289,11 +293,18 @@ fn pick_opportunity_for_card(
         o.path_id == path.id
             && matches!(
                 o.kind,
-                OpportunityKind::SelectIncrement | OpportunityKind::LoopRewrite
+                OpportunityKind::SelectIncrement
+                    | OpportunityKind::LoopRewrite
+                    | OpportunityKind::ExprRewrite
             )
             && sv_timing_core::pass_strategy::trial_allows(trial, o.kind)
     }) {
-        return (Some(o.clone()), Some("t1_select_increment".into()));
+        let label = match o.kind {
+            OpportunityKind::LoopRewrite => "t1_loop_rewrite",
+            OpportunityKind::ExprRewrite => "t1_expr_rewrite",
+            _ => "t1_select_increment",
+        };
+        return (Some(o.clone()), Some(label.into()));
     }
     let prefer_reg = sv_timing_core::pass_strategy::trial_prefers_register(path);
     let mut options: Vec<_> = card
@@ -356,14 +367,18 @@ fn pick_opportunity_default(p: &TimingPath, opportunities: &[Opportunity]) -> Op
             // it removes the adder from the cone without touching protocol.
             if prefer_reg {
                 match o.kind {
-                    OpportunityKind::SelectIncrement | OpportunityKind::LoopRewrite => 0u8,
+                    OpportunityKind::SelectIncrement
+                    | OpportunityKind::LoopRewrite
+                    | OpportunityKind::ExprRewrite => 0u8,
                     OpportunityKind::InsertReg => 1,
                     OpportunityKind::BalanceMux => 2,
                     OpportunityKind::SplitAssign => 3,
                 }
             } else {
                 match o.kind {
-                    OpportunityKind::SelectIncrement | OpportunityKind::LoopRewrite => 0u8,
+                    OpportunityKind::SelectIncrement
+                    | OpportunityKind::LoopRewrite
+                    | OpportunityKind::ExprRewrite => 0u8,
                     OpportunityKind::BalanceMux => 1,
                     OpportunityKind::SplitAssign => 2,
                     OpportunityKind::InsertReg => 3,
@@ -496,6 +511,7 @@ mod tests {
                 config_branch: false,
                 guards: Default::default(),
                 onehot_facts: Default::default(),
+                guard_sites: Default::default(),
                 loc: path(0, 0.0, "t.sv", 1).primary_loc.clone(),
             },
         );

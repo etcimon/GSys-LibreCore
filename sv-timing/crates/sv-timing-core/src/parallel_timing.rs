@@ -615,6 +615,7 @@ mod tests {
             config_branch: false,
             guards: Default::default(),
             onehot_facts: Default::default(),
+            guard_sites: Default::default(),
             loc: loc(),
         }
     }

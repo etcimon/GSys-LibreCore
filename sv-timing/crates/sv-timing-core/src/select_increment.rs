@@ -479,6 +479,7 @@ mod tests {
             config_branch: false,
             guards: Default::default(),
             onehot_facts: Default::default(),
+            guard_sites: Default::default(),
             loc: SourceLoc::file_start("t.sv"),
         };
         let mut ff = node("seq_q", "seq_d", AssignKind::Nonblocking, 0.0);

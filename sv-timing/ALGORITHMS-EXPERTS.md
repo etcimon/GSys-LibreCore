@@ -31,6 +31,15 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A122 update:** the A118–A120 hand rewrites are abstracted to their
+mechanisms. Three are exact expression identities and are now passes
+(`CircularCompare`, `ZeroDetectEquality`, `PushSelect`), firing on RHS and
+on `if` predicates (IR v3 guard sites), proven on a fixture (−22.6 % delay,
++7.6 % area). Two are statement-level mechanisms reported as sites
+(`IndexedWriteReadBypass`, `OneHotEncodeDecode`): 6 real sites on the live
+core, the rename map writes among them. The identities find no remaining
+direct site on this tree — the campaign already applied them by hand.
+
 **A121 update:** the budget now has a physical reading. `sv-timing adjusted`
 divides each module's mapped delay by the platform's measured FO4 (probe:
 minimum inverter driving four copies; nangate45 21.40 ps, asap7 14.36,
@@ -8205,6 +8214,84 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A122 — From hand tunings to generic transforms: what each rewrite really did
+
+The A104–A120 campaign rewrote eleven modules by hand. Each rewrite worked
+for a *mechanism*, not for the module; this entry names the mechanism,
+states the exact generic form, and records which forms are now passes of
+the package, which are reported as sites, and which remain manual.
+
+| hand rewrite (entry) | mechanism it removed | generic form | status in sv-timing |
+|---|---|---|---|
+| IQ / LSQ / store-buffer age tests (A118) | two modular subtractions before a comparator | **`CircularCompare`**: `(a − h) < (b − h)` → `(a < b) ^ (a < h) ^ (b < h)` | pass (`expr_rewrite`), RHS and `if` guards, proven |
+| ALU EQ/NE from the shared subtractor (A118) | zero detect of a difference | **`ZeroDetectEquality`**: `(a − b) == 0`, `!(a − b)`, `~\|(a − b)` → `a == b` | pass, proven |
+| frontend both targets before the taken select (A118) | arithmetic serialized behind a late select | **`PushSelect`**: `z + (c ? x : y)` → `c ? (z + x) : (z + y)` | pass, arrival-gated, area-gated (Dial 11), proven |
+| rename busy bits read registered + bypass (A118) | same-cycle indexed write → indexed read through an array | **`IndexedWriteReadBypass`**: `r = (ri == wi && we) ? v : X_q[ri]` | reported site (`structural_patterns`); emitter pending |
+| rename one-hot write masks (A120) | one-hot → encoder → decoder round trip | **`OneHotEncodeDecode`**: `for i: if (sel[i]) X[i] <= v` | reported site; emitter pending |
+| IQ first-two grants in parallel (A119) | serial priority cascade | k-th-set selection by prefix popcount | manual (next `LoopRewrite` shape) |
+| LSQ oldest/youngest tournaments (A119) | loop-carried argmin/argmax | tournament tree | manual (next `LoopRewrite` shape) |
+| realign cursor walk → prefix (A110) | serial walk | `LoopRewrite` (A101) | pass since A101 |
+| scoreboard / IQ registered counts (A106, A112) | popcount of a state vector | incremental counter + invariant | manual: exact only when the event vectors are early; adds state |
+| two-stage multiplier with carried lifetime (A115) | one 65×65 product per cycle | re-pipelining with valid/TID/cancel carried | architectural; no generic form |
+
+**Exactness, as code.** `crates/sv-timing-core/src/expr_rewrite.rs`
+refuses whatever it cannot prove: `CircularCompare` needs every leaf of
+`a`, `b`, `h` declared unsigned (`logic`/`bit`, unsigned typedefs; signed
+operands rotate the ring differently — refused) and equal widths or
+extension-stable operands (no arithmetic inside, so a narrower compare
+cannot wrap differently); `ZeroDetectEquality` needs extension-stable
+operands (`(a + c − b) == 0` is refused: the unsized `0` widens the
+context the sum wraps in); `PushSelect` is exact for any width and sign
+(the whole expression's context decides both forms alike) and fires only
+when the condition's structural arrival exceeds the data's, costing one
+adder per extra arm, priced by the area gate. Every rewrite re-emits the
+whole RHS from the tree, so casts, comments, strings and macros in the
+origin refuse the node (the tree does not keep them), and the result must
+round-trip through the parser. The 4-bit circular identity is checked
+exhaustively in the unit tests.
+
+**Guards.** The codebase's comparisons mostly guard assignments
+(`if ((a − h) < (b − h)) …`) rather than feed an RHS. IR v3 records every
+`if` / `else if` predicate with its source span (`TimingModule::guard_sites`);
+an identity on a predicate of a node on a failing path is an `ExprRewrite`
+opportunity whose locus is the predicate, and the emitter replaces exactly
+that byte span, in place, one line, before any line-based stage — so every
+other edit keeps its numbering. The module's `guards` texts follow the
+rewrite so re-measurement sees the new form.
+
+**Proof and board.** `fixtures/auto_correct/expr_identities.sv` carries
+the three shapes in RHS and guard position plus the two refused shapes
+(signed, self-wrapping). The emitted file (6 rewrites, 2 in guards) is
+proved equivalent to the fixture under matched state (`async2sync`, 345
+cells, 0 unproven) and mapped on Nangate45: gold **2.167 ns / 30 cells**,
+gate **1.678 ns / 17 cells** (−22.6 %), area 3310 → 3563 µm² (+7.6 %, the
+pushed 64-bit adder). Fixture-scale evidence, not a core result.
+
+**Applicability on the live core — the honest reading.** With the fresh
+width map, the three identities find **no** site on the failing paths of
+the 108 live modules: the campaign already applied them by hand where they
+mattered, and a textual census of the live sources confirms the direct
+shapes no longer exist (the age tests go through `age_older`, the ALU
+through the direct compare). The passes now guard those spots against
+regression and serve new RTL; they are not a reservoir of FO4 on this
+tree. The statement-level census is where the remaining generic work is:
+`structural_patterns` in the analyze report lists, after recognising loop
+variables and genvars as static selects (76 raw → 6 real),
+**5 `IndexedWriteReadBypass` sites** — `g6lc_rename` `map_d` (L537→568),
+`fmap_d` (L515→569), `favail` (two writes, L349→364), `id_stage`
+`fetch_entry_ready_o`, `perf_counters` `event_group` (32 writes) — and
+**1 `OneHotEncodeDecode`** (`g6lc_iq` `older_d`, L464→550). The rename map
+writes are the same mechanism the A118 busy-bit bypass removed, left in
+the map and FP map paths; they are the next concrete targets, now found by
+the detector rather than by reading.
+
+**Where it lives.** `expr_rewrite.rs` (identities, arrivals, 5 tests),
+`patterns.rs` (sites, 4 tests), `OpportunityKind::ExprRewrite`,
+`EditKind::{CircularCompare, ZeroDetectEquality, PushSelect}`,
+`EditRecord::{emit_predicate, emit_predicate_from}`, emitter
+`rewrite_guard_predicates` + the identity branch of the pure-RHS rewrite
+(allowed inside generates: no names are added), `correction-v2`, `ir-v3`.
 
 ## A121 — Adjusted FO4: the budget read in the platform's own inverter delay
 

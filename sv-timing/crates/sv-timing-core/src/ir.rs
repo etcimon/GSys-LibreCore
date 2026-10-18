@@ -383,6 +383,10 @@ pub enum OpportunityKind {
     /// A serial loop walk (find-first scan, conditional count, ring pointer
     /// walk) → its exact parallel form (latency-neutral; `loop_walk`, A101).
     LoopRewrite,
+    /// An exact expression identity on one node — circular compare, zero
+    /// detect of a difference, late select pushed through arithmetic
+    /// (latency-neutral; `expr_rewrite`, A122).
+    ExprRewrite,
 }
 
 /// Pipeline / rewrite opportunity.
@@ -719,7 +723,23 @@ pub struct TimingModule {
     /// design's own assertion is the proof obligation (A104).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub onehot_facts: Vec<String>,
+    /// Every `if` / `else if` predicate of the module with its source span
+    /// (A122): comparisons in this codebase mostly live in guards, not in
+    /// assignment RHS, so an exact identity must be able to rewrite one.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub guard_sites: Vec<GuardSite>,
     /// Source span of module header.
+    pub loc: SourceLoc,
+}
+
+/// One `if` predicate as written, with the span of the expression inside
+/// the parentheses (not the statement). The text is what [`TimingModule::guards`]
+/// records for the assignments the predicate encloses.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GuardSite {
+    /// Predicate text, trimmed.
+    pub text: String,
+    /// Span of the predicate expression in the original source.
     pub loc: SourceLoc,
 }
 

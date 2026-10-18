@@ -464,6 +464,7 @@ fn lower_file(
                 &scope.loc,
                 &scope_end_byte(tree, li, &path_str, scope.nodes.iter().cloned()),
             ),
+            guard_sites: collect_guard_sites(tree, li, &path_str, scope.nodes.iter().cloned()),
             loc: mod_loc,
         };
         let dead_generate = constant_generate_dead_spans(
@@ -2517,6 +2518,42 @@ where
 /// every predicate decided on the way to it (the else branches read the same
 /// predicates). Nested conditionals contribute their own entries; the assign
 /// collects the union.
+/// Every `if` / `else if` predicate in `root` with the span of the
+/// expression inside its parentheses (A122 guard rewrites).
+fn collect_guard_sites<'a, T>(
+    tree: &'a SyntaxTree,
+    li: &LineIndex,
+    path_str: &str,
+    root: T,
+) -> Vec<crate::ir::GuardSite>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut out = Vec::new();
+    let mut push = |text: Option<String>, loc: SourceLoc| {
+        if let Some(t) = text {
+            if loc.origin == OriginKind::UserFile && !t.is_empty() {
+                out.push(crate::ir::GuardSite { text: t, loc });
+            }
+        }
+    };
+    for node in root {
+        if let RefNode::ConditionalStatement(cs) = node {
+            push(
+                node_text(tree, &cs.nodes.2.nodes.1).map(|t| t.trim().to_string()),
+                loop_source_span(tree, li, path_str, &cs.nodes.2.nodes.1),
+            );
+            for (_, _, pred, _) in &cs.nodes.4 {
+                push(
+                    node_text(tree, &pred.nodes.1).map(|t| t.trim().to_string()),
+                    loop_source_span(tree, li, path_str, &pred.nodes.1),
+                );
+            }
+        }
+    }
+    out
+}
+
 fn collect_if_guard_spans<'a, T>(
     tree: &'a SyntaxTree,
     li: &LineIndex,

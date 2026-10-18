@@ -3,6 +3,23 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A122 — hand tunings abstracted to generic transforms
+
+- [x] `expr_rewrite`: `CircularCompare`, `ZeroDetectEquality`, `PushSelect`
+  as exact passes on RHS and `if` predicates (IR v3 `guard_sites`,
+  predicate-span emission); fixture proven equivalent, gold 2.167 → gate
+  1.678 ns on Nangate45.
+- [x] `patterns`: `IndexedWriteReadBypass` and `OneHotEncodeDecode` sites
+  in the analyze report (`structural_patterns`), loop/genvar indices
+  recognised as static.
+- [ ] Emit the bypass form (`(ri == wi && we) ? v : X_q[ri]`): needs the
+  statement rewriter (guard conjunction as enable, struct-field values).
+  Targets: rename `map_d`/`fmap_d`/`favail`, iq `older_d`.
+- [ ] Next `LoopRewrite` shapes: argmin/argmax tournament, k-th-set
+  selection by prefix popcount (A119 by hand).
+- [ ] Per-input arrival in the path model so a `PushSelect` gain shows in
+  the structural remeasure (today only the mapped board sees it).
+
 ## A121 — adjusted FO4 and platform discovery
 
 - [x] `adjusted.rs` + CLI `adjusted`: mapped ns / measured platform FO4 vs

@@ -199,27 +199,30 @@ def remote() -> None:
         return
 
     if os.environ.get("CONTROL_MODE") == "offset-fixture":
-        sources = {"gold": data / "select_offsets.sv", "gate": data / "select_offsets__svt.sv"}
+        # Any auto-correct fixture: CONTROL_FIXTURE names the module/file
+        # (default select_offsets); gold is the fixture, gate its emitted twin.
+        fx = os.environ.get("CONTROL_FIXTURE", "select_offsets")
+        sources = {"gold": data / f"{fx}.sv", "gate": data / f"{fx}__svt.sv"}
         commands = []
         for name, path in sources.items():
             evidence["sources"][path.name] = hashlib.sha256(path.read_bytes()).hexdigest()
-            commands += [f"read_slang --top select_offsets {path}", "proc", "memory_map",
-                         "opt_clean", f"rename select_offsets {name}", f"design -stash {name}"]
+            commands += [f"read_slang --top {fx} {path}", "proc", "async2sync", "memory_map",
+                         "opt_clean", f"rename {fx} {name}", f"design -stash {name}"]
         commands += ["design -copy-from gold -as gold gold", "design -copy-from gate -as gate gate",
                      "equiv_make gold gate equiv", "hierarchy -top equiv",
                      "equiv_simple -seq 1", "equiv_status -assert"]
         log = yosys("offset-equivalence", "\n".join(commands))
         assert "Equivalence successfully proven!" in log
-        evidence["proofs"]["offsets"] = "typed emitted RTL equivalence PASS"
+        evidence["proofs"][fx] = "emitted RTL equivalence PASS"
         for name, path in sources.items():
             netlist, stats = out / f"{name}.v", out / f"{name}.stat"
             yosys(f"offset-map-{name}",
-                  f"read_slang --top select_offsets {path}\nproc\nopt_clean\nwreduce\nalumacc\n"
+                  f"read_slang --top {fx} {path}\nproc\nasync2sync\nopt_clean\nwreduce\nalumacc\n"
                   f"booth\ntechmap\nopt_clean\ndfflibmap -liberty {lib}\n{abc}\n"
                   f"opt_clean -purge\ntee -o {stats} stat -liberty {lib}\n"
                   f"write_verilog -noattr -noexpr {netlist}\n")
             env = dict(os.environ, OR_LIBERTY=lib, OR_VERILOG=str(netlist),
-                       OR_TOP="select_offsets", OR_PERIOD_NS="0.25", OR_IGNORE_FANOUT_ABOVE="0")
+                       OR_TOP=fx, OR_PERIOD_NS="0.25", OR_IGNORE_FANOUT_ABOVE="0")
             text = run(f"offset-sta-{name}", [sta, "-exit",
                        str(src / "build-platform/scripts/openroad-module-board.tcl")], env=env)
             row = next(l for l in text.splitlines() if l.startswith("ROW\t"))
