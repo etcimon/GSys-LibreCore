@@ -1807,7 +1807,7 @@ fn collect_pipe_pragmas(
         };
         let mut words = rest.split_whitespace();
         let Some(kind) = words.next() else { continue };
-        let takes_domain = matches!(kind, "protocol" | "carry" | "result" | "cut-ok");
+        let takes_domain = matches!(kind, "protocol" | "carry" | "result" | "cut-ok" | "latency");
         let mut domain = None;
         let mut args = Vec::new();
         let mut bare = Vec::new();

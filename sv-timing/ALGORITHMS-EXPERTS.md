@@ -31,6 +31,12 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A129 update:** `latency <dom> <param> base=…` binds a domain's stage
+count to the parameter its consumers track; a plan is admitted only when
+`base + k` equals the parameter's value, otherwise refused with the value
+to set. Declared on the multiplier; the adoption's fourth-stage hazard is
+closed.
+
 **A128 update:** every editable file of the over-budget list now carries a
 fail-closed contract; the multiplier's third stage is adopted in RTL under
 `MultStages = 3` (`g6lc64_ooo`), with the side-by-side and reference-model
@@ -8254,6 +8260,19 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A129 — The `latency` word
+
+`latency <dom> <param> base=<n|param>` binds a domain's stage count to the
+parameter its consumers read (the wrapper's liveness depth, a latency
+table). A plan of k stages is admitted only when `base + k` equals the
+parameter's elaborated value; otherwise the refusal names the value to
+set. On the multiplier (`base=CVA6Cfg.MultStages`, the source follows the
+parameter since A128): under `MultStages = 2` the `prod_sum` stage is
+proposed and refused — "set `CVA6Cfg.MultStages` = 3 to admit the stage";
+under 3 the module meets the structural budget and no further stage is
+proposed. The adoption hazard (a fourth stage the wrapper cannot track)
+is closed by contract.
 
 ## A128 — Contracts on the whole list; the multiplier's third stage adopted
 

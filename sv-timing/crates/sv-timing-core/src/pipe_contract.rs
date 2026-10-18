@@ -64,6 +64,14 @@ pub struct PipeDomain {
     /// protocol signals and must read the last stage's copies.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub result_also: Vec<String>,
+    /// `latency <dom> <param> base=<n|param>` (A129): the parameter that
+    /// publishes this domain's stage count to the module's consumers (a
+    /// wrapper's cancellation liveness, a scoreboard's latency table), and
+    /// the stages the source already has — a number, or a parameter when the
+    /// source follows it. A plan of k stages is admitted only when
+    /// `base + k` equals the parameter's elaborated value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub latency: Option<(String, String)>,
 }
 
 impl PipeDomain {
@@ -209,7 +217,28 @@ pub fn resolve(module: &TimingModule) -> Option<PipeContract> {
                     result_valid: None,
                     result_id: None,
                     result_also: Vec::new(),
+                    latency: None,
                 });
+            }
+            "latency" => {
+                // latency <dom> <param> base=<n>
+                let Some(name) = p.domain.as_deref() else {
+                    c.rejected
+                        .push(format!("{at}: latency without a domain name"));
+                    continue;
+                };
+                let (Some(param), Some(base)) = (p.words.first(), arg(&p.args, "base")) else {
+                    c.rejected.push(format!(
+                        "{at}: latency {name} needs <param> and base=<n|param>"
+                    ));
+                    continue;
+                };
+                match c.domains.iter_mut().find(|d| &d.name == name) {
+                    Some(d) => d.latency = Some((param.clone(), base.to_string())),
+                    None => c
+                        .rejected
+                        .push(format!("{at}: latency {name}: domain not declared")),
+                }
             }
             "carry" | "result" => {
                 let Some(name) = p.domain.clone() else {

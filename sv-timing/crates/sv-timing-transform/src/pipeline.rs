@@ -1195,6 +1195,37 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
                 }
             }
             if refuse.is_none() {
+                // Latency parameter (A129): the stage count the consumers are
+                // told must equal what the source has plus what this plan adds.
+                if let Some((param, base)) = &domain.latency {
+                    let lookup = |name: &str| -> Option<i64> {
+                        name.parse::<i64>().ok().or_else(|| {
+                            ctx.design.param_map_ints.get(name).copied().or_else(|| {
+                                ctx.design
+                                    .param_map_ints
+                                    .get(name.rsplit('.').next().unwrap_or(name))
+                                    .copied()
+                            })
+                        })
+                    };
+                    match (lookup(param), lookup(base)) {
+                        (None, _) | (_, None) => {
+                            refuse = Some(format!(
+                                "latency: `{param}` / base `{base}` have no elaborated value in the param map: the stage count cannot be checked"
+                            ));
+                        }
+                        (Some(v), Some(b)) if b + ordered.len() as i64 != v => {
+                            refuse = Some(format!(
+                                "latency: `{param}` = {v} but the source has {b} stage(s) and this plan adds {}: the consumers would track {v} cycle(s); set `{param}` = {} to admit the stage",
+                                ordered.len(),
+                                b + ordered.len() as i64
+                            ));
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            if refuse.is_none() {
                 // Merge balance: the consumers' downstream may read no
                 // register that is not staged with the domain.
                 let last = &ordered[0];

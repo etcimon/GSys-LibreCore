@@ -553,3 +553,31 @@ running as this is written; the module's mapped worst was the product
 cone at 2.820 ns = 131.8 adjusted FO4. The 56 declarations move no path by
 themselves: they are the enforcement layer under which every further
 stage on the list is a designer's decision the tool can carry out.
+
+## 11. The `latency` word (A129)
+
+```systemverilog
+// svt-pipe: latency mul CVA6Cfg.MultStages base=CVA6Cfg.MultStages
+```
+
+A domain's stage count is a contract with the module's *consumers*: the
+wrapper's cancellation liveness (`mult.sv` tracks `MultStages` cycles), a
+scoreboard's latency table, a bypass network's distance. The word names
+the parameter that publishes it and the stages the source already has
+(`base=`, a number or a parameter when the source follows it, as the
+multiplier does since A128). A plan of k stages is admitted only when
+`base + k` equals the parameter's elaborated value from the param map;
+otherwise:
+
+> latency: `CVA6Cfg.MultStages` = 2 but the source has 2 stage(s) and this
+> plan adds 1: the consumers would track 2 cycle(s); set
+> `CVA6Cfg.MultStages` = 3 to admit the stage
+
+This closes the hazard the adoption created: with `gen_three_stage` written
+and the `cut-ok` still on `prod_sum`, the planner would otherwise add a
+fourth stage the wrapper cannot track. Under `MultStages = 3` the
+multiplier's reg→reg paths meet the run's structural budget and no plan is
+proposed; under 2 the plan is proposed and refused with the parameter to
+change. The word is the general form of A126's "adoption needs
+`MultStages = 3`": the designer writes it once, and the tool enforces it
+for every later run.

@@ -173,7 +173,8 @@ module multiplier
     // so the tool refuses any other register in this module.
     // svt-pipe: protocol mul valid=mult_valid_s1 id=trans_id_s1
     // svt-pipe: carry mul operator_s1,corr_q,clmul_s1,clmulr_s1
-    // svt-pipe: result mul valid=mult_valid_q id=trans_id_q operator_d clmul_q clmulr_q
+    // svt-pipe: result mul valid=mult_valid_q id=trans_id_q operator_d corr_sh clmul_q clmulr_q
+    // svt-pipe: latency mul CVA6Cfg.MultStages base=CVA6Cfg.MultStages
     localparam int unsigned NS = CVA6Cfg.XLEN / 16;
     localparam int unsigned AW = CVA6Cfg.XLEN + 1;   // unsigned pattern of the signed operand
     localparam int unsigned PW = AW + 17;            // (XLEN+1) × 17 unsigned

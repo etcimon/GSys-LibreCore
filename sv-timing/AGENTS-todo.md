@@ -3,6 +3,13 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A129 — latency word
+
+- [x] `latency <dom> <param> base=<n|param>`; refusal names the parameter
+  value to set; declared on the multiplier.
+- [ ] Declare `latency` on every domain with a published depth as they are
+  written (FPU wrappers, serdiv, fetch streams with queue headroom).
+
 ## A128 — contracts on the list; multiplier adopted
 
 - [x] Contracts on the 44 remaining editable files; sweep resolves all.
