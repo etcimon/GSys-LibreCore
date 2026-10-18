@@ -17,6 +17,15 @@ to the issue stage.
 
 ![Instruction re-alignment Process](_static/instr_realign.png)
 
+**Current LibreCore fetch_B timing note (A134):** the live realigner retains
+per-hart leftover state. For supported RVC window geometry, it captures the
+64-bit continuation address with the split instruction's PC and compares the
+next window directly against that registered value. Kill/flush retention and
+narrow-address overflow semantics are preserved, with no added interface cycle.
+The fallback geometry uses the original calculation. Paired placement improves
+worst arrival 2.977 → 2.257 ns at 17.2% less area; this is a pre-CTS module study,
+not whole-core closure. [Evidence and limits](../../sv-timing/architecture/PIPELINE-PRAGMA-REVIEW.md#a134--further-controlstate-files).
+
 As mentioned above the instruction re-aligner checks the incoming data
 stream for compressed instructions. Compressed instruction have their
 last bit unequal to 11 while normal 32-bit instructions have their last

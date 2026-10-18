@@ -82,6 +82,14 @@ The separate PH_BHT registered path is not changed by this repair. See
 current contracts, validation, the measured generic logic cost and remaining
 physical/firmware qualification limits.
 
+**A134 implementation note:** statistical-corrector training now computes each
+row's counter/tag/valid update locally and selects the write row afterward.
+Lookup latency and the tagged-owner training policy remain unchanged. Paired
+placement improves worst arrival 1.622 → 1.095 ns at 12.6% more module area.
+Matched-state equivalence and the existing predictor model pass; these are
+module-level results with no new ISA, DTS, trace or PMU contract.
+[Review](../../sv-timing/architecture/PIPELINE-PRAGMA-REVIEW.md#a134--further-controlstate-files).
+
 <!-- ![Implementation of Ariane's BTB](../../img/ariane_overview.pdf) -->
 ![Ariane Block Diagram](_static/branch_prediction.png)
 

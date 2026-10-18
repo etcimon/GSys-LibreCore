@@ -3,6 +3,23 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A134 — further control/state implementations
+
+- [x] Realigner: cache the full-width continuation address with per-hart carry
+  state; compute split PC from window geometry. Five surface configurations,
+  edge-time comparison and a narrow-wrap negative control pass.
+- [x] Statcor: row-local training removes indexed read/modify/write feedback;
+  matched-state equivalence and existing model/negative controls pass.
+- [x] Paired placement: retain realign (−24.2% worst delay, −17.2% area) and
+  statcor (−32.5% delay, +12.6% area). Restore rename/store bypass trials after
+  placed timing regresses despite better filtered map results.
+- [x] Final whole-core slang elaboration and selected-target lint gate pass;
+  both retained modules' pragma audits have no rejected/unbound targets.
+- [ ] Broad local verify synthesis did not finish during the surface review;
+  isolated paired synthesis/placement is complete, full gate/SoC sign-off is not.
+- [ ] Whole-core timing closure remains open; the new state-cache and row-update
+  patterns need separate compiler rules before automatic pragma lowering.
+
 ## A133 — representation-aware initial-IR preprocessing
 
 - [x] Document transferable multiplier patterns and counterexamples in

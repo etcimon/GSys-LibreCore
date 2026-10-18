@@ -338,3 +338,32 @@ module tb_g6lc_bp_statcor;
     $finish;
   end
 endmodule
+
+// Package-compatible leaf top for paired synthesis/equivalence of the real
+// predictor. No host-specific type guessing or production interface changes.
+module g6lc_sc_timing
+  import ariane_pkg::*;
+#(
+  parameter int unsigned SLOTS = 4,
+  parameter int unsigned ENTRIES = 64,
+  parameter int unsigned TAGB = 8,
+  parameter bit RVC = 1
+) (
+  input logic clk_i, rst_ni, flush_i,
+  input logic [63:0] vpc_i, update_pc_i,
+  input logic update_valid_i, update_taken_i,
+  input bht_prediction_t [SLOTS-1:0] pred_i,
+  output bht_prediction_t [SLOTS-1:0] pred_o
+);
+  function automatic config_pkg::cva6_cfg_t cfg();
+    cfg = config_pkg::cva6_cfg_empty;
+    cfg.XLEN = 64; cfg.VLEN = 64; cfg.RVC = RVC;
+    cfg.INSTR_PER_FETCH = SLOTS;
+  endfunction
+  typedef struct packed {logic valid; logic [63:0] pc; logic taken;} update_t;
+  update_t update;
+  assign update = '{valid: update_valid_i, pc: update_pc_i, taken: update_taken_i};
+  g6lc_bp_statcor #(.CVA6Cfg(cfg()), .bht_update_t(update_t),
+                   .NR_ENTRIES(ENTRIES), .TAG_BITS(TAGB)) dut (
+    .clk_i, .rst_ni, .flush_i, .vpc_i, .bht_update_i(update), .pred_i, .pred_o);
+endmodule

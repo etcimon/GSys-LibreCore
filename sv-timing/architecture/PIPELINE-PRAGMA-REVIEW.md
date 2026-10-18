@@ -173,3 +173,105 @@ captured multiplier using its elaborated widths, exact three-stage parameter,
 and the normal package parser. Upload the emitted multiplier along with the
 same source snapshot for the third comparison. An emitted reparse or a
 structural reduction alone is not the acceptance condition.
+
+## A134 — further control/state files
+
+This batch compares immutable snapshots against `62c00081a`. It retains two
+implementations and rejects two others after placement. Interfaces and cycle
+latencies are unchanged; the new realigner state is a redundant representation
+of an existing carry entry.
+
+### Retained: realigner continuation state
+
+In `core/fetch_B/instr_realign.sv`, an accepted split instruction can start
+only at the last available halfword. For the supported power-of-two RVC
+geometry its PC is the incoming window's upper address bits concatenated
+with the last-halfword offset and the original bit 0. This replaces a late
+selected address sum at carry capture.
+
+The same accepted event records `carry_pc + 2` in a per-hart continuation
+bank. The next window compares its address against this registered value,
+removing the increment from the carry-state feedback path. The invariant is:
+
+```text
+carry_valid[h] => carry_next[h] == uint64(carry_pc[h]) + uint64(2)
+```
+
+Kill and flush remain inert on both banks. The 64-bit successor preserves the
+old distinction between full-width wrap and VLEN<64 overflow; it must not be
+truncated back to VLEN. Other geometries and RVC-off use the original path.
+The companion bank has a no-cut guard and a simulation-only invariant.
+
+Five surface configurations cover 32/64/128-bit fetch windows, 1/2/4 harts,
+32/64-bit virtual addresses, reduced output-slot capacity and RVC disabled.
+Each runs 500,000 cycles with no mismatches. The witness now compares the
+packet **at the consuming edge**, as well as settled outputs after the edge.
+A deliberately truncated successor fails that interface witness even with
+RTL assertions disabled (`fo4-a134-realign-final`).
+
+### Retained: statistical-corrector row-local training
+
+`core/frontend/g6lc_bp_statcor.sv` previously selected a counter/tag/valid row,
+computed its update, then decoded a write back into the table. Each row now
+prepares its own next value and is selected by the update index. This removes
+the read-mux → train → write-decode feedback chain. Prediction lookup latency,
+tag ownership, saturation, weak-row takeover, strong-owner decay and flush
+priority are unchanged.
+
+Matched-state equivalence passes for 64 entries/4 slots/RVC, 8 entries/1 slot/
+no RVC, and 24 entries/4 slots (including out-of-range index encodings).
+The existing independent counter model passes both slot/RVC variants and its
+negative controls. The isolated timing wrapper uses the production geometry:
+64 entries, four slots, eight tag bits, VLEN=64 and RVC enabled.
+
+### Physical decisions
+
+Nangate45 paired placement/repair, identical constraints per pair, no disabled
+timing arcs, and no reported slew/capacitance/fanout violations:
+
+| Candidate | Worst arrival, ns | Reg→reg, ns | Repaired area, µm² | Decision |
+|---|---:|---:|---:|---|
+| Realigner continuation state | **2.977 → 2.257** | **2.357 → 1.717** | **3348.940 → 2771.986** | Retain: −24.2% delay, −17.2% area |
+| Statistical corrector row-local training | **1.622 → 1.095** | **1.178 → 0.578** | 9543.017 → 10749.061 | Retain: −32.5% delay, +12.6% area |
+| Rename indexed map-read bypass | 2.964 → 3.105 | 2.964 → 3.105 | 241050.000 → 241028.453 | Rejected; RTL restored |
+| Store-buffer snapshot bypass | 4.086 → 4.801 | 4.086 → 4.801 | 76140.633 → 76630.344 | Rejected; RTL restored |
+
+Using the recorded 21.398 ps calibration, the retained **placed** worst delays
+are approximately **105.5 adjusted FO4** for realign and **51.2** for statcor.
+These remain pre-CTS, unrouted module studies with negative WNS at the requested
+clock, not whole-core timing closure.
+
+The historical fanout-filtered module reading also improves: realign
+2.547 → 1.088 ns (119.0 → 50.8 adjusted FO4), and the isolated statcor wrapper
+1.548 → 0.773 ns (72.3 → 36.1). Do not substitute those filtered figures for
+the placed figures. Rename and store buffer looked better under that filter
+but worsened after placement; four rename equivalence configurations and a
+400,000-cycle store-buffer comparison passed, so they were rejected for
+physical timing, not functionality.
+
+Artifacts are under `build-platform/workspace/build/sv-timing/precompute-a134/`:
+`map-a`, `surface-a`, `realign-final`, `place-realign`, `place-rename`,
+`place-store`, and `statcor/result`. Replay the archived `inputs.tar.gz` for
+the rejected trials; current production RTL intentionally no longer contains
+them. The runner's `boundary` and `statcor` profiles capture sources, tests,
+recipes, netlist hashes and results.
+
+The pragma audit resolves all three initially changed modules with no unbound
+targets. The new cached-state representation is implemented directly in RTL;
+it is not a carry-save pair and is not falsely declared as one. The A133
+preprocessor still requires a dedicated, validated rule before it can infer
+this state transformation automatically.
+Whole-core slang elaboration/hierarchy checking of the final retained RTL
+passes (`fo4-a134-final-elab`).
+The standard `verify --lint --target g6lc64_ooo` gate also passes both checks.
+The broader local `verify --lint --synth` attempts (selected OoO target and
+default targets) were stopped after their synthesis phase did not finish
+within this surface review. They are incomplete, not passes. The configured
+`opt -fast` smoke has documented scaling problems on large cores; the isolated
+paired synthesis/STA/placement results above completed and are retained separately.
+
+SoC/validation scope: retained behavior is gated by the existing RVC/geometry
+and predictor configuration. No new interface, clock, reset, ISA, DTS,
+trace-latency or PMU event is introduced. The continuation flops use the existing
+clock and asynchronous active-low reset; no RAM was converted to flops.
+Power and full-core software regression are outside this surface review.

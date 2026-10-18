@@ -31,6 +31,12 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A134 update:** further RTL files improve with unchanged cycle interfaces.
+Realigner continuation caching: placed worst 2.977 → 2.257 ns at −17.2% area.
+Statcor row-local training: 1.622 → 1.095 ns at +12.6% area. Rename and store
+snapshot bypasses were restored after placed regressions. Evidence and limits:
+[`PIPELINE-PRAGMA-REVIEW.md`](architecture/PIPELINE-PRAGMA-REVIEW.md#a134--further-controlstate-files).
+
 **A133 update:** representation directives are compiled into initial IR before
 costs and on remeasurement. A declared carry-save pair becomes one atomic cut
 boundary with either row as the critical anchor; the other row travels through
@@ -8285,6 +8291,30 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A134 — Cache a state predicate; localize table feedback
+
+The realigner's split PC is the last available halfword of its fetch window.
+Expressing that geometry directly and recording its 64-bit successor with the
+same hart's carry state removes a PC increment from the next-window feedback
+cone. Kill/flush retention and narrow-VLEN overflow are preserved. Five
+500k-cycle comparisons cover width/hart/RVC/slot variants; the interface
+witness samples before and after the update edge and detects a deliberately
+truncated successor.
+
+The statistical corrector prepares each row's next counter/tag/valid locally,
+then selects the update row. It preserves the tagged-owner saturation,
+takeover/decay, lookup and flush rules while removing a shared indexed read
+before the write decode. Three matched-state equivalence configurations and
+the existing independent predictor model with negative controls pass.
+
+Paired Nangate45 placement without disabled arcs retains realign
+(2.977→2.257 ns, −17.2% area) and statcor (1.622→1.095 ns, +12.6% area).
+Rename map-read bypass and store snapshot bypass improved filtered mapping
+but worsened placement (2.964→3.105 and 4.086→4.801 ns); both are restored.
+These are pre-CTS module results, not 10 adjusted-FO4 or whole-core closure.
+The retained RTL patterns are candidates for future preprocessing rules;
+the carry-save rule does not silently claim support for them.
 
 ## A133 — Compile representation obligations before timing
 

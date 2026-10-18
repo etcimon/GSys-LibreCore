@@ -159,6 +159,26 @@ by this pass. The table is a transfer guide, not a list of implemented passes.
 Queue staging, automatic multiplier tiling, automatic compressor synthesis,
 generic ready/backpressure and cross-module retiming are not implied.
 
+The A134 follow-up provides two further tested RTL patterns
+([evidence](PIPELINE-PRAGMA-REVIEW.md#a134--further-controlstate-files)):
+
+* **Cache the state-only side of a predicate at its update edge.** The realigner
+  records the continuation address with its carry PC, then compares the live
+  request against it. The proof is validity-qualified, per owner/hart, and
+  includes reset, retention and width overflow. Geometry makes the cached value
+  available before the late split decision. Simply registering the whole
+  predicate would use the previous request and be wrong.
+* **Compute small table updates before the late row selection.** The statistical
+  corrector computes each row's update from that row's registered state and
+  selects one write. This avoids a shared read-mux/train/write-decode chain.
+  It applies to this small flop-based table, not automatically to SRAMs with
+  limited read ports, and it trades area for timing.
+
+Both retain cycle latency. Neither is implemented as an automatic initial-IR
+rule yet. The rejected rename/store-buffer bypasses show why an exact algebraic
+rewrite still needs a physical discriminator: filtered mapping improved, but
+placement worsened.
+
 ## 5. Implemented preprocessor: source intent to initial IR
 
 Example:

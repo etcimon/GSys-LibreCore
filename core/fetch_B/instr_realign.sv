@@ -79,6 +79,8 @@ module instr_realign
   localparam int unsigned NrHalfWords = Geo.hw_per_w;
   localparam int unsigned HwIdxW = Geo.align_bits - 1;
   localparam int unsigned CurW = Geo.align_bits;
+  localparam bit FastContinuation = CVA6Cfg.RVC && NrHalfWords > 1 &&
+      (NrHalfWords == (1 << HwIdxW)) && CVA6Cfg.VLEN > CurW && CVA6Cfg.VLEN <= 64;
 
   logic [NrHalfWords-1:0][15:0] hw;
   logic [NrHalfWords-1:0] hw_compressed;
@@ -99,6 +101,8 @@ module instr_realign
   // address (a redirect, a replay, or the same block presented twice) leaves the
   // carry stale and it must be dropped instead of consuming a halfword.
   logic carry_ok;
+  logic carry_next_match;
+  logic [CVA6Cfg.VLEN-1:0] window_last_pc;
 
   assign carry_valid_q = carry_valid_bank_q[hart_i];
   assign carry_instr_q = carry_instr_bank_q[hart_i];
@@ -106,7 +110,7 @@ module instr_realign
 
   assign carry_ok = g6lc_fetch_pkg::leftover_complete(
       carry_valid_q,
-      g6lc_fetch_pkg::leftover_next(64'(address_i), 64'(carry_addr_q)),
+      carry_next_match,
       g6lc_fetch_pkg::rvi_prefix(carry_instr_q),
       1'b1);
   assign serving_unaligned_o = carry_ok;
@@ -125,6 +129,38 @@ module instr_realign
   // right-shifted the line, so slot 0 is always the addressed halfword.
   assign hw_first = CVA6Cfg.RVC ? CurW'(g6lc_fetch_pkg::hw_off(CVA6Cfg, 64'(address_i))) : '0;
   assign hw_avail = CurW'(NrHalfWords) - hw_first;
+
+  if (FastContinuation) begin : gen_continuation
+    // A134: a split can only start at the last available halfword. Its PC
+    // is therefore the window base plus the constant last-halfword offset.
+    // Precompute and register the successor with the same hart's carry
+    // state, removing carry_addr_q + 2 from the next window's feedback cone.
+    // Keep 64 bits: at VLEN<64, overflow is NOT a match for a wrapped address.
+    // svt-pipe: no-cut on=carry_next_bank_q
+    logic [NH-1:0][63:0] carry_next_bank_q;
+    logic [63:0] window_next_pc;
+    assign window_last_pc =
+        {address_i[CVA6Cfg.VLEN-1:CurW], {(CurW-1){1'b1}}, address_i[0]};
+    assign window_next_pc = 64'(window_last_pc) + 64'd2;
+    assign carry_next_match = 64'(address_i) == carry_next_bank_q[hart_i];
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) carry_next_bank_q <= '0;
+      else if (g6lc_fetch_pkg::leftover_update(flush_i, valid_i, kill_i) && carry_valid_d)
+        carry_next_bank_q[hart_i] <= window_next_pc;
+    end
+    // pragma translate_off
+    always_ff @(posedge clk_i) if (rst_ni) begin
+      for (int unsigned h = 0; h < NH; h++)
+        if (carry_valid_bank_q[h])
+          assert (carry_next_bank_q[h] == 64'(carry_addr_bank_q[h]) + 64'd2)
+            else $error("realign continuation lost carry PC/hart alignment");
+    end
+    // pragma translate_on
+  end else begin : gen_continuation_fallback
+    assign window_last_pc = '0;
+    assign carry_next_match =
+        g6lc_fetch_pkg::leftover_next(64'(address_i), 64'(carry_addr_q));
+  end
 
   // Parallel realignment (sv-timing A110). The serial walk — a cursor that
   // steps by 1 or 2 halfwords depending on what it finds — was the module
@@ -240,7 +276,7 @@ module instr_realign
         if (split[h]) begin
           carry_valid_d = 1'b1;
           carry_instr_d = lo;
-          carry_addr_d  = slot_addr;
+          carry_addr_d  = FastContinuation ? window_last_pc : slot_addr;
         end
       end
     end

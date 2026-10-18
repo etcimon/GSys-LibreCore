@@ -37,6 +37,9 @@ module g6lc_bp_statcor
   // Nangate45 board): statistical corrector: table update state.
   // svt-pipe: require-contract
   // svt-pipe: no-cut on=tag_q
+  // A134: each row prepares its own next counter/tag state, selected by the
+  // update index. This removes the indexed read -> train -> indexed write
+  // feedback chain without delaying training or changing prediction latency.
 
   localparam int unsigned OFFSET = CVA6Cfg.RVC == 1'b1 ? 1 : 2;
   localparam int unsigned IDX_W = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);
@@ -90,22 +93,24 @@ module g6lc_bp_statcor
     w_d   = w_q;
     tag_d = tag_q;
     v_d   = v_q;
-    if (bht_update_i.valid) begin
-      if (v_q[uidx] && tag_q[uidx] == utag) begin
-        // Owner: train toward the absolute outcome.
-        if (bht_update_i.taken) begin
-          if (w_q[uidx] != 3'b111) w_d[uidx] = w_q[uidx] + 3'b001;
+    for (int unsigned row = 0; row < NR_ENTRIES; row++) begin
+      if (bht_update_i.valid && uidx == IDX_W'(row)) begin
+        if (v_q[row] && tag_q[row] == utag) begin
+          // Owner: train toward the absolute outcome.
+          if (bht_update_i.taken) begin
+            if (w_q[row] != 3'b111) w_d[row] = w_q[row] + 3'b001;
+          end else begin
+            if (w_q[row] != 3'b000) w_d[row] = w_q[row] - 3'b001;
+          end
+        end else if (!v_q[row] || (w_q[row] >= 3'b011 && w_q[row] <= 3'b101)) begin
+          // Free or weakly held row: take it over, one step from neutral.
+          v_d[row]   = 1'b1;
+          tag_d[row] = utag;
+          w_d[row]   = bht_update_i.taken ? 3'b101 : 3'b011;
         end else begin
-          if (w_q[uidx] != 3'b000) w_d[uidx] = w_q[uidx] - 3'b001;
+          // Strongly held by another branch: decay toward neutral.
+          w_d[row] = (w_q[row] > 3'b100) ? w_q[row] - 3'b001 : w_q[row] + 3'b001;
         end
-      end else if (!v_q[uidx] || (w_q[uidx] >= 3'b011 && w_q[uidx] <= 3'b101)) begin
-        // Free or weakly held row: take it over, one step from neutral.
-        v_d[uidx]   = 1'b1;
-        tag_d[uidx] = utag;
-        w_d[uidx]   = bht_update_i.taken ? 3'b101 : 3'b011;
-      end else begin
-        // Strongly held by another branch: decay toward neutral.
-        w_d[uidx] = (w_q[uidx] > 3'b100) ? w_q[uidx] - 3'b001 : w_q[uidx] + 3'b001;
       end
     end
   end

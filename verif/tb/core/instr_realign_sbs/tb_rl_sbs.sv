@@ -6,7 +6,29 @@
 // across blocks; every output compared each cycle.
 module tb_rl_sbs;
   import ariane_pkg::*;
-  localparam config_pkg::cva6_cfg_t CVA6Cfg = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg);
+  function automatic config_pkg::cva6_cfg_t leaf_cfg();
+    leaf_cfg = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg);
+`ifdef SVT_RL_WIDTH
+    leaf_cfg.FETCH_WIDTH = `SVT_RL_WIDTH;
+`endif
+`ifdef SVT_RL_HARTS
+    leaf_cfg.NrHarts = `SVT_RL_HARTS;
+`endif
+`ifdef SVT_RL_VLEN
+    leaf_cfg.VLEN = `SVT_RL_VLEN;
+`endif
+`ifdef SVT_RL_RVC
+    leaf_cfg.RVC = `SVT_RL_RVC;
+`endif
+    leaf_cfg.FETCH_ALIGN_BITS = $clog2(leaf_cfg.FETCH_WIDTH / 8);
+    leaf_cfg.INSTR_PER_FETCH = leaf_cfg.FETCH_WIDTH / (leaf_cfg.RVC ? 16 : 32);
+    leaf_cfg.LOG2_INSTR_PER_FETCH = $clog2(leaf_cfg.INSTR_PER_FETCH);
+`ifdef SVT_RL_SLOTS
+    leaf_cfg.INSTR_PER_FETCH = `SVT_RL_SLOTS;
+    leaf_cfg.LOG2_INSTR_PER_FETCH = $clog2(leaf_cfg.INSTR_PER_FETCH);
+`endif
+  endfunction
+  localparam config_pkg::cva6_cfg_t CVA6Cfg = leaf_cfg();
   logic clk = 1'b0, rst_ni = 1'b0;
   always #1 clk = ~clk;
   logic flush_i;
@@ -30,8 +52,8 @@ module tb_rl_sbs;
   function automatic logic [255:0] rnd256();
     rnd256 = {$urandom, $urandom, $urandom, $urandom, $urandom, $urandom, $urandom, $urandom};
   endfunction
-  int unsigned cyc = 0, errors = 0, carries = 0, seed = 1;
-  logic [CVA6Cfg.VLEN-1:0] next_addr = '0;
+  int unsigned cyc = 0, errors = 0, carries = 0, accepted_splits = 0, completions = 0, seed = 1;
+  logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:0] next_addr = '0;
   initial begin
     if (!$value$plusargs("seed=%d", seed)) seed = 1;
     void'($urandom(seed));
@@ -41,40 +63,66 @@ module tb_rl_sbs;
     logic [255:0] r;
     r = rnd256(); flush_i = $bits(flush_i)'(r);
     r = rnd256(); kill_i = $bits(kill_i)'(r);
-    r = rnd256(); hart_i = $bits(hart_i)'(r);
+    r = rnd256(); hart_i = $bits(hart_i)'(r[31:0] % CVA6Cfg.NrHarts);
     r = rnd256(); data_i = $bits(data_i)'(r);
 
     r = rnd256();
     // 70 %: the next sequential block (carry completes); 20 %: a jump to a
     // random halfword-aligned address (carry dropped / unaligned start);
     // 10 %: the same block again
-    if (r[7:0] < 8'd180) address_i = next_addr;
+    if (r[7:0] < 8'd180) address_i = next_addr[hart_i];
     else if (r[7:0] < 8'd230) address_i = {$bits(address_i)'(r[127:64]) & ~$bits(address_i)'(1)};
     valid_i = (r[15:8] < 8'd220);
     // bias the halfword stream: ~45 % compressed (low two bits != 11)
     for (int h = 0; h < CVA6Cfg.FETCH_WIDTH / 16; h++) begin
       if (r[16 + h]) data_i[16*h +: 2] = 2'b11; else data_i[16*h +: 2] = 2'(r[40 + 2*h +: 2]) % 3;
     end
+    // Narrow-VLEN and full-64-bit wraps have different leftover_next behavior.
+    // Exercise both parity values without assuming that a test input is aligned.
+    case (cyc % 256)
+      0, 2: begin
+        hart_i = '0; valid_i = 1; flush_i = 0; kill_i = 0;
+        address_i = (cyc % 256 == 0) ? ~CVA6Cfg.VLEN'(1) : '1;
+        data_i[15:0] = 16'h0003;
+      end
+      1, 3: begin
+        hart_i = '0; valid_i = 1; flush_i = 0; kill_i = 0;
+        address_i = CVA6Cfg.VLEN'(cyc % 256 == 3);
+      end
+      default: ;
+    endcase
   end
+  task automatic check_outputs;
+    if (serving_unaligned_o_old !== serving_unaligned_o_new) begin $display("MISMATCH cyc=%0d serving_unaligned", cyc); errors++; end
+    if (leftover_pending_o_old !== leftover_pending_o_new) begin $display("MISMATCH cyc=%0d leftover_pending", cyc); errors++; end
+    if (leftover_valid_o_old !== leftover_valid_o_new) begin $display("MISMATCH cyc=%0d leftover_valid", cyc); errors++; end
+    if (leftover_pc_o_old !== leftover_pc_o_new) begin $display("MISMATCH cyc=%0d leftover_pc", cyc); errors++; end
+    if (valid_o_old !== valid_o_new) begin $display("MISMATCH cyc=%0d valid", cyc); errors++; end
+    if (addr_o_old !== addr_o_new) begin $display("MISMATCH cyc=%0d addr", cyc); errors++; end
+    if (base_o_old !== base_o_new) begin $display("MISMATCH cyc=%0d base", cyc); errors++; end
+    if (off_o_old !== off_o_new) begin $display("MISMATCH cyc=%0d off", cyc); errors++; end
+    if (instr_o_old !== instr_o_new) begin $display("MISMATCH cyc=%0d instruction", cyc); errors++; end
+  endtask
+
   always @(posedge clk) begin
     if (rst_ni) begin
       cyc++;
       // the following block starts where this one ends
-      next_addr <= (address_i & ~$bits(address_i)'(CVA6Cfg.FETCH_WIDTH / 8 - 1)) + $bits(address_i)'(CVA6Cfg.FETCH_WIDTH / 8);
+      next_addr[hart_i] <= (address_i & ~$bits(address_i)'(CVA6Cfg.FETCH_WIDTH / 8 - 1)) + $bits(address_i)'(CVA6Cfg.FETCH_WIDTH / 8);
       if (u_old.carry_valid_d) carries++;
+      if (u_old.carry_valid_d && valid_i && !kill_i && !flush_i) accepted_splits++;
+      if (serving_unaligned_o_old && valid_i && !kill_i && !flush_i) completions++;
+      // This is the packet consumed at this edge. Comparing only after the
+      // state update can miss an incorrect carry completion that clears itself.
+      check_outputs();
       #0.2;
-        if (serving_unaligned_o_old !== serving_unaligned_o_new) begin $display("MISMATCH cyc=%0d serving_unaligned_o old=%h new=%h", cyc, serving_unaligned_o_old, serving_unaligned_o_new); errors++; end
-        if (leftover_pending_o_old !== leftover_pending_o_new) begin $display("MISMATCH cyc=%0d leftover_pending_o old=%h new=%h", cyc, leftover_pending_o_old, leftover_pending_o_new); errors++; end
-        if (leftover_valid_o_old !== leftover_valid_o_new) begin $display("MISMATCH cyc=%0d leftover_valid_o old=%h new=%h", cyc, leftover_valid_o_old, leftover_valid_o_new); errors++; end
-        if (leftover_pc_o_old !== leftover_pc_o_new) begin $display("MISMATCH cyc=%0d leftover_pc_o old=%h new=%h", cyc, leftover_pc_o_old, leftover_pc_o_new); errors++; end
-        if (valid_o_old !== valid_o_new) begin $display("MISMATCH cyc=%0d valid_o old=%h new=%h", cyc, valid_o_old, valid_o_new); errors++; end
-        if (addr_o_old !== addr_o_new) begin $display("MISMATCH cyc=%0d addr_o old=%h new=%h", cyc, addr_o_old, addr_o_new); errors++; end
-        if (base_o_old !== base_o_new) begin $display("MISMATCH cyc=%0d base_o old=%h new=%h", cyc, base_o_old, base_o_new); errors++; end
-        if (off_o_old !== off_o_new) begin $display("MISMATCH cyc=%0d off_o old=%h new=%h", cyc, off_o_old, off_o_new); errors++; end
-        if (instr_o_old !== instr_o_new) begin $display("MISMATCH cyc=%0d instr_o old=%h new=%h", cyc, instr_o_old, instr_o_new); errors++; end
-      if (errors > 5) begin $display("FAIL tb_rl_sbs cyc=%0d errors=%0d", cyc, errors); $finish; end
+      check_outputs();
+      if (errors > 5) $fatal(1, "FAIL tb_rl_sbs cyc=%0d errors=%0d", cyc, errors);
       if (cyc == 500000) begin
-        $display("%s tb_rl_sbs cycles=%0d carries=%0d errors=%0d", errors == 0 ? "PASS" : "FAIL", cyc, carries, errors);
+        if (errors || (CVA6Cfg.RVC && (accepted_splits == 0 || completions == 0)))
+          $fatal(1, "realign comparison failed or vacuous");
+        $display("PASS tb_rl_sbs cycles=%0d carries=%0d accepted_splits=%0d completions=%0d errors=%0d",
+                 cyc, carries, accepted_splits, completions, errors);
         $finish;
       end
     end

@@ -175,6 +175,14 @@ same window: the TAGE base bimodal indexes `pc[OFFSET+COL_BITS +: log2(rows)]`,
 so 128 entries on a 4-slot fetch is a 256-byte alias period — too small for the
 server (T21e raises it).
 
+A134 preserves that policy while preparing each row's update before the late
+write-row selection, removing the indexed read/train/write feedback chain.
+The realigner also caches its continuation address with the existing per-hart
+carry state. Both keep cycle interfaces unchanged. See the
+[paired timing and functional review](../../sv-timing/architecture/PIPELINE-PRAGMA-REVIEW.md#a134--further-controlstate-files);
+the results are pre-CTS module evidence, not a new predictor accuracy or
+whole-core frequency claim.
+
 ### T21e (2026-10-11): predictor output slots are COLUMNS of the aligned block
 
 `fetch_B/frontend.sv gen_prediction_shifted` reads `prediction[addr[i][IdxW:1] &

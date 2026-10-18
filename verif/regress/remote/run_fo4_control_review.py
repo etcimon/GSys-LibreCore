@@ -76,8 +76,17 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
         "selection": ("core/ooo/g6lc_iq.sv", "core/ooo/g6lc_lsq.sv"),
         "precompute": ("core/ooo/g6lc_iq.sv", "core/ooo/g6lc_rename.sv", "core/store_buffer.sv"),
         "multiplier": ("core/multiplier.sv",),
+        "boundary": ("core/store_buffer.sv", "core/ooo/g6lc_rename.sv", "core/fetch_B/instr_realign.sv"),
+        "statcor": ("core/frontend/g6lc_bp_statcor.sv",),
     }
     changed = profile_files[profile]
+    if profile == "statcor":
+        name = "verif/tb/core/tb_g6lc_bp_statcor.sv"
+        files[name] = (root / name).read_bytes()
+    if profile == "boundary":
+        for folder in ("store_buffer_sbs", "instr_realign_sbs"):
+            for p in (root / "verif/tb/core" / folder).glob("*.sv"):
+                files[p.relative_to(root).as_posix()] = p.read_bytes()
     measured = MODULES if profile == "control" else {Path(p).stem for p in changed}
     files["review.json"] = json.dumps({"profile": profile, "changed_files": changed,
                                       "modules": sorted(measured)}).encode()
@@ -557,7 +566,7 @@ foreach kind {in_reg reg_reg reg_out in_out} {
         evidence["placement_script_sha256"] = hashlib.sha256(study.read_bytes()).hexdigest()
         evidence["placement_inputs"] = {}
         module = os.environ.get("CONTROL_MODULE", "g6lc_iq")
-        if module not in {"g6lc_iq", "g6lc_rename", "store_buffer"}:
+        if module not in {"g6lc_iq", "g6lc_rename", "store_buffer", "instr_realign"}:
             raise ValueError(f"unsupported standalone placement module: {module}")
         evidence["placement_module"] = module
         for variant in ("baseline", "candidate"):
@@ -586,6 +595,18 @@ foreach kind {in_reg reg_reg reg_out in_out} {
 
     if (src / "review.json").exists():
         review = json.loads((src / "review.json").read_text())
+        if review["profile"] == "statcor" and not os.environ.get("CONTROL_MODE"):
+            review_statcor(src, out, sta, lib, abc, evidence, yosys, run)
+            (out / "result.json").write_text(json.dumps(evidence, indent=2))
+            return
+        if review["profile"] == "boundary" and os.environ.get("CONTROL_MODE") in (None, "boundary-surface"):
+            if os.environ.get("CONTROL_MODE") == "boundary-surface":
+                prove_boundary_surface(src, out, evidence, yosys, run)
+                (out / "result.json").write_text(json.dumps(evidence, indent=2))
+                return
+            map_snapshots(src, out, sta, lib, abc, evidence, yosys, run,
+                          changed=review["changed_files"], modules=set(review["modules"]))
+            return
         if review["profile"] == "precompute" and not os.environ.get("CONTROL_MODE"):
             prove_precompute(src, out, yosys, evidence)
             map_snapshots(src, out, sta, lib, abc, evidence, yosys, run,
@@ -814,6 +835,166 @@ endmodule
         evidence["proofs"][f"rename-{harts}h"] = "matched-state equivalence PASS"
     print("PROOFS " + json.dumps(evidence["proofs"]), flush=True)
     map_snapshots(src, out, sta, lib, abc, evidence, yosys, run)
+
+
+def review_statcor(src, out, sta, lib, abc, evidence, yosys, run):
+    """Small tagged-table study: row-local training, unchanged read/clock contract."""
+    portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
+    packages = [l for l in portable.splitlines()
+                if l.startswith("+") or l.endswith("_pkg.sv") or "/include/" in l]
+    bench = src / "verif/tb/core/tb_g6lc_bp_statcor.sv"
+    flists = {}
+    for variant, path in (("baseline", src / "baseline/core/frontend/g6lc_bp_statcor.sv"),
+                          ("candidate", src / "core/frontend/g6lc_bp_statcor.sv")):
+        flist = out / f"statcor-{variant}.f"
+        flist.write_text("\n".join(packages + [str(path), str(bench)]) + "\n")
+        flists[variant] = flist
+    for entries, slots, rvc in ((64, 4, 1), (8, 1, 0), (24, 4, 1)):
+        commands = []
+        for variant, name in (("baseline", "gold"), ("candidate", "gate")):
+            commands += [
+                f"read_slang -f {flists[variant]} --top g6lc_sc_timing --single-unit "
+                f"-G ENTRIES={entries} -G SLOTS={slots} -G RVC={rvc} --ignore-assertions",
+                "proc", "flatten", "memory_map", "async2sync", "opt_clean",
+                f"rename g6lc_sc_timing {name}", f"design -stash {name}",
+            ]
+        commands += ["design -copy-from gold -as gold gold", "design -copy-from gate -as gate gate",
+                     "equiv_make gold gate equiv", "hierarchy -top equiv",
+                     "equiv_simple -seq 1", "equiv_status -assert"]
+        key = f"statcor-eq-{entries}-{slots}-{rvc}"
+        text = yosys(key, "\n".join(commands), timeout=300)
+        assert "Equivalence successfully proven!" in text
+        evidence["proofs"][key] = "matched-state equivalence PASS"
+    vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+    for slots, rvc in ((4, 1), (1, 0)):
+        key = f"statcor-model-{slots}-{rvc}"
+        obj = out / f"obj-{key}"
+        run(key + "-build", [vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal",
+            "-Wno-WIDTH", "-Wno-UNOPTFLAT", f"-GSLOTS={slots}", f"-GRVC={rvc}",
+            "-f", str(flists["candidate"]), "--top-module", "tb_g6lc_bp_statcor",
+            "--Mdir", str(obj), "-j", "4"])
+        log = run(key, [str(obj / "Vtb_g6lc_bp_statcor")])
+        assert "STATCOR_PASS" in log
+        evidence["proofs"][key] = next(l for l in log.splitlines() if "STATCOR_PASS" in l)
+        bad = subprocess.run([str(obj / "Vtb_g6lc_bp_statcor"), "+oracle_negative"],
+                             cwd=out, capture_output=True, text=True, timeout=60)
+        (out / (key + "-negative.log")).write_text(bad.stdout + bad.stderr)
+        assert bad.returncode != 0 and "STATCOR_MISMATCH" in bad.stdout
+    for variant, flist in flists.items():
+        netlist, stats = out / f"{variant}.v", out / f"{variant}.stat"
+        yosys("statcor-map-" + variant,
+              f"read_slang -f {flist} --top g6lc_sc_timing --single-unit\n"
+              "proc\nflatten\nopt_clean\nwreduce\nalumacc\nopt_clean\nmemory_map\n"
+              f"opt_dff\ntechmap\nopt_clean\ndfflibmap -liberty {lib}\n{abc}\n"
+              f"opt_clean -purge\ntee -o {stats} stat -liberty {lib}\n"
+              f"write_verilog -noattr -noexpr {netlist}\n")
+        evidence["maps"][variant] = {
+            "area_um2": float(re.search(r"Chip area for module .*?:\s*([\d.]+)", stats.read_text())[1]),
+            "board": {},
+        }
+        for fan in (0, 64):
+            env = dict(os.environ, OR_LIBERTY=lib, OR_VERILOG=str(netlist),
+                       OR_TOP="g6lc_sc_timing", OR_PERIOD_NS="0.25", OR_IGNORE_FANOUT_ABOVE=str(fan))
+            text = run(f"statcor-sta-{variant}-{fan}", [sta, "-exit",
+                str(src / "build-platform/scripts/openroad-module-board.tcl")], env=env)
+            row = next(l for l in text.splitlines() if l.startswith("ROW\t"))
+            assert "failed" not in row
+            evidence["maps"][variant]["board"][str(fan)] = row
+        env = dict(os.environ, STUDY_PLATFORM=str(Path(lib).parent),
+                   OR_VERILOG=str(netlist), OR_TOP="g6lc_sc_timing",
+                   STUDY_OUTPUT=str(out / variant), STUDY_VARIANT=variant)
+        text = run("statcor-place-" + variant, [
+            "/opt/testharness/toolchains/openroad-g6lc-pgo/bin/openroad", "-exit",
+            str(src / "build-platform/scripts/openroad-module-place-study.tcl")], env=env, timeout=900)
+        row = next(l for l in text.splitlines() if l.startswith("PLACE_STUDY "))
+        evidence["maps"][variant]["placement"] = dict(re.findall(r"(\w+)=(\S+)", row))
+        (out / "result.json").write_text(json.dumps(evidence, indent=2))
+    print(json.dumps(evidence["maps"], indent=2), flush=True)
+
+
+def prove_boundary_surface(src, out, evidence, yosys, run):
+    """Focused equivalence and stateful witnesses for the A134 boundary batch."""
+    vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+    evidence["simulator"] = subprocess.check_output([vl, "--version"], text=True).strip()
+    requested = os.environ.get("CONTROL_SURFACE_MODULE", "all")
+    if requested not in {"all", "g6lc_rename", "store_buffer", "instr_realign"}:
+        raise ValueError(requested)
+    rename_cases = ((1, 40, 2, 40), (2, 80, 2, 80), (1, 40, 3, 40), (1, 40, 2, 0))
+    for harts, entries, ports, fp in (rename_cases if requested in {"all", "g6lc_rename"} else ()):
+        width = (entries - 1).bit_length()
+        commands = []
+        for variant, path in (("gold", "baseline/core/ooo/g6lc_rename.sv"),
+                              ("gate", "core/ooo/g6lc_rename.sv")):
+            commands += [
+                f"read_slang --top g6lc_rename -G NR_HARTS={harts} -G NR_PORTS={ports} "
+                f"-G PRF_ENTRIES={entries} -G FPRF_ENTRIES={fp} "
+                f"-G PRF_W={width} -G FPRF_W={width} -G CKPT_DEPTH=4 "
+                f"--ignore-assertions {path}",
+                "proc", "memory_map", "async2sync", "opt_clean",
+                f"rename g6lc_rename {variant}", f"design -stash {variant}",
+            ]
+        commands += ["design -copy-from gold -as gold gold", "design -copy-from gate -as gate gate",
+                     "equiv_make gold gate equiv", "hierarchy -top equiv",
+                     "equiv_simple -seq 1", "equiv_status -assert"]
+        key = f"rename-{harts}h-{ports}p-fp{fp}"
+        text = yosys(key, "\n".join(commands), timeout=600)
+        assert "Equivalence successfully proven!" in text
+        evidence["proofs"][key] = "matched-state equivalence PASS"
+    portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
+    packages = [l for l in portable.splitlines()
+                if l.startswith("+") or l.endswith("_pkg.sv") or "/include/" in l]
+    for module, file, bench, top in (
+        ("store_buffer", "core/store_buffer.sv", "store_buffer_sbs", "tb_sb_sbs"),
+        ("instr_realign", "core/fetch_B/instr_realign.sv", "instr_realign_sbs", "tb_rl_sbs"),
+    ):
+        if requested not in {"all", module}:
+            continue
+        old = (src / "baseline" / file).read_text()
+        golden = out / f"{module}_old.sv"
+        assert old.count(f"module {module}\n") == 1
+        golden.write_text(old.replace(f"module {module}\n", f"module {module}_old\n", 1))
+        flist = out / f"{module}.f"
+        harness = sorted((src / "verif/tb/core" / bench).glob("*.sv"))
+        flist.write_text("\n".join(packages + [str(src / file), str(golden)] + list(map(str, harness))) + "\n")
+        matrix = [("default", [])]
+        if module == "instr_realign":
+            matrix += [
+                ("32b-2h-32va", ["+define+SVT_RL_WIDTH=32", "+define+SVT_RL_HARTS=2", "+define+SVT_RL_VLEN=32"]),
+                ("128b-2h-64va", ["+define+SVT_RL_WIDTH=128", "+define+SVT_RL_HARTS=2", "+define+SVT_RL_VLEN=64"]),
+                ("128b-4h-fewslots", ["+define+SVT_RL_WIDTH=128", "+define+SVT_RL_HARTS=4", "+define+SVT_RL_SLOTS=2"]),
+                ("no-rvc", ["+define+SVT_RL_RVC=0"]),
+            ]
+        for label, defs in matrix:
+            key = f"{module}-{label}"
+            obj = out / f"obj-{key}"
+            run(key + "-build", [vl, "-O1", "--binary", "--timing", "--assert",
+                "-Wno-fatal", "-Wno-WIDTH", "-Wno-UNOPTFLAT", *defs, "-f", str(flist),
+                "--top-module", top, "--Mdir", str(obj), "-j", "4"], timeout=600)
+            log = run(key + "-sim", [str(obj / f"V{top}"), "+seed=17"], timeout=180)
+            assert f"PASS {top}" in log and "errors=0" in log, log[-1200:]
+            evidence["proofs"][key] = next(l for l in log.splitlines() if f"PASS {top}" in l)
+        if module == "instr_realign":
+            text = (src / file).read_text()
+            needle = "carry_next_bank_q[hart_i] <= window_next_pc;"
+            assert text.count(needle) == 1
+            bad = out / "realign_truncated.sv"
+            bad.write_text(text.replace(needle,
+                "carry_next_bank_q[hart_i] <= 64'(CVA6Cfg.VLEN'(window_next_pc));"))
+            bad_flist = out / "realign-negative.f"
+            bad_flist.write_text(flist.read_text().replace(str(src / file), str(bad)))
+            obj = out / "obj-realign-negative"
+            # Disable RTL assertions here: the interface comparison itself
+            # must detect the narrow-VLEN wrap error.
+            run("realign-negative-build", [vl, "-O1", "--binary", "--timing",
+                "-Wno-fatal", "-Wno-WIDTH", "-Wno-UNOPTFLAT",
+                "+define+SVT_RL_VLEN=32", "+define+SVT_RL_RVC=1",
+                "-f", str(bad_flist), "--top-module", top, "--Mdir", str(obj), "-j", "4"])
+            result = subprocess.run([str(obj / f"V{top}"), "+seed=17"], cwd=out,
+                                    capture_output=True, text=True, timeout=180)
+            (out / "realign-negative.log").write_text(result.stdout + result.stderr)
+            assert result.returncode != 0 and "MISMATCH" in result.stdout
+            evidence["proofs"]["realign-negative"] = "truncated successor rejected by interface witness"
+    print(json.dumps(evidence["proofs"], indent=2), flush=True)
 
 
 def map_snapshots(src, out, sta, lib, abc, evidence, yosys, run,
@@ -1078,7 +1259,7 @@ if __name__ == "__main__":
         mode.add_argument("--snapshot", type=Path)
         mode.add_argument("--analyze-results", type=Path)
         parser.add_argument("--baseline", help="baseline revision for the selected review profile")
-        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier"), default="control")
+        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor"), default="control")
         args = parser.parse_args()
         if args.snapshot:
             if not args.baseline:
