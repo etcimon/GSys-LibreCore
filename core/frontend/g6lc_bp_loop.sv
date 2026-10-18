@@ -24,6 +24,11 @@ module g6lc_bp_loop
     output bht_prediction_t [CVA6Cfg.INSTR_PER_FETCH-1:0] pred_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 54.5 adjusted FO4 on the
+  // Nangate45 board): loop predictor: table update state.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=mem_q
+
   localparam int unsigned OFFSET = CVA6Cfg.RVC == 1'b1 ? 1 : 2;
   localparam int unsigned IDX_W = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);
 

@@ -39,6 +39,12 @@ module cva6_fifo_v3 #(
     output dtype                  data_o,      // output data
     input  logic                  pop_i        // pop head from queue
 );
+  // Re-pipelining contract (sv-timing A128; 54.3 adjusted FO4 on the
+  // Nangate45 board): FIFO: push / pop handshake and usage are same-cycle by contract.
+  // svt-pipe: require-contract
+  // svt-pipe: protocol ff valid=push_i flush=flush_i
+  // svt-pipe: no-cut on=usage_o
+
   // local parameter
   // FIFO depth - handle the case of pass-through, synthesizer will do constant propagation
   localparam int unsigned FifoDepth = (DEPTH > 0) ? DEPTH : 1;

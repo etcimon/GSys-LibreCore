@@ -89,6 +89,11 @@ module wt_dcache_mem
     output logic wbuffer_fwd_hit_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 47.2 adjusted FO4 on the
+  // Nangate45 board): D$ data path: bank select and forward merge.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=wbuffer_data_o
+
   localparam DCACHE_NUM_BANKS = CVA6Cfg.DCACHE_LINE_WIDTH / CVA6Cfg.XLEN;
   localparam DCACHE_NUM_BANKS_WIDTH = $clog2(DCACHE_NUM_BANKS);
 

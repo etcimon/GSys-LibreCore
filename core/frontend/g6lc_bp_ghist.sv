@@ -44,6 +44,12 @@ module g6lc_bp_ghist
     output logic [NR_FOLDS-1:0][FOLD_W-1:0] folded_src_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 14.5 adjusted FO4 on the
+  // Nangate45 board): global history: shift / restore.
+  // svt-pipe: require-contract
+  // svt-pipe: protocol gh valid=update_valid_i flush=flush_i
+  // svt-pipe: no-cut on=ghist_d
+
   localparam int unsigned NH    = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
   localparam int unsigned HID_W = (NH <= 1) ? 1 : $clog2(NH);
 

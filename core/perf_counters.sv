@@ -127,6 +127,11 @@ module perf_counters
     input logic [(CVA6Cfg.NrHarts < 1 ? 1 : CVA6Cfg.NrHarts)-1:0][31:0] mcountinhibit_b_i
 );
 
+  // Re-pipelining contract (sv-timing A128; 70.8 adjusted FO4 on the
+  // Nangate45 board): performance counters: the event group select and the counter increments; no in-flight operation.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=generic_counter_d
+
   typedef logic [11:0] csr_addr_t;
 
   localparam int unsigned NH = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;

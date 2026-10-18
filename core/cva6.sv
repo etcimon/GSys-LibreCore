@@ -473,6 +473,11 @@ module cva6
     input  logic        l2_pf_useful_i
 );
 
+  // Re-pipelining contract (sv-timing A128; 48.2 adjusted FO4 on the
+  // Nangate45 board): core top: CMO / invalidation FSM and the cross-unit wiring; no stage at the top.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=gen_cmo_local
+
   localparam type interrupts_t = struct packed {
     logic [CVA6Cfg.XLEN-1:0] S_SW;
     logic [CVA6Cfg.XLEN-1:0] VS_SW;

@@ -1195,8 +1195,10 @@ package config_pkg;
     // U4 slice-OoO legality (mutually exclusive with U5; needs speculative SB + non-blocking D$).
     assert (!(Cfg.SliceOoOEn && Cfg.OoOEn));
     // A115: the multiplier is one or two stages; XLEN must split into 16-bit slices.
-    assert (Cfg.MultStages inside {1, 2});
-    assert (!(Cfg.MultStages == 2 && (Cfg.XLEN % 16) != 0));
+    // 3 = the shifted-product sum registered as well (sv-timing A128);
+    // mult.sv tracks cancellation for MultStages cycles either way.
+    assert (Cfg.MultStages inside {1, 2, 3});
+    assert (!(Cfg.MultStages > 1 && (Cfg.XLEN % 16) != 0));
     assert (!(Cfg.SliceOoOEn && !Cfg.SpeculativeSb));
     assert (!(Cfg.SliceOoOEn && Cfg.BPCkptDepth != 0 &&
               Cfg.BPCkptDepth < Cfg.SliceAiqDepth));

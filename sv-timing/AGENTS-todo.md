@@ -3,6 +3,19 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A128 — contracts on the list; multiplier adopted
+
+- [x] Contracts on the 44 remaining editable files; sweep resolves all.
+- [x] `gen_three_stage` in `multiplier.sv`; `MultStages` 3 admitted and set
+  for `g6lc64_ooo`; `tb_mul_sbs` depth via `SVT_MUL_STAGES`; model-based
+  `tb_mul_lifetime`; `CONTROL_MODE=source-elab`.
+- [ ] Read the live route's board (`timings sta-rtl --remote --fo4 0
+  --target g6lc64_ooo`): the multiplier's adjusted FO4 at 3 stages and the
+  new worst list.
+- [ ] Core-level regression (riscv-tests / Linux boot) with `MultStages = 3`
+  before the config change ships.
+- [ ] Turn the `no-cut` reasons into decisions, file by file (§9.2).
+
 ## A127 — id-less domains and the sweep
 
 - [x] `protocol` without `id=` (global kill); emitter / exports / assertions

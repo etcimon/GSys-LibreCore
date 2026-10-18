@@ -33,6 +33,11 @@ module g6lc_bp_statcor
     output bht_prediction_t [CVA6Cfg.INSTR_PER_FETCH-1:0] pred_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 60.9 adjusted FO4 on the
+  // Nangate45 board): statistical corrector: table update state.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=tag_q
+
   localparam int unsigned OFFSET = CVA6Cfg.RVC == 1'b1 ? 1 : 2;
   localparam int unsigned IDX_W = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);
   // Slot bits of an instruction address inside the fetch window: slot i of

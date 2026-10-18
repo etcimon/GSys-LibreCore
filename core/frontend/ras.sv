@@ -83,6 +83,12 @@ module ras #(
     input  logic [CVA6Cfg.VLEN-1:0]  restore_push_ra_i
 );
 
+  // Re-pipelining contract (sv-timing A128; 39.1 adjusted FO4 on the
+  // Nangate45 board): return address stack: push / pop state.
+  // svt-pipe: require-contract
+  // svt-pipe: protocol ra valid=push_i
+  // svt-pipe: no-cut on=ra_d
+
   localparam int unsigned NH    = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
   localparam int unsigned HID_W = (NH <= 1) ? 1 : $clog2(NH);
 

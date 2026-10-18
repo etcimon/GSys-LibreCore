@@ -121,6 +121,11 @@ module load_unit
     output logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] phys_hart_o,
     output logic [1:0] phys_size_o
 );
+  // Re-pipelining contract (sv-timing A128; 59.3 adjusted FO4 on the
+  // Nangate45 board): load unit FSM: the TLB / D$ handshakes are same-cycle.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=state_q
+
   enum logic [3:0] {
     IDLE,
     WAIT_GNT,

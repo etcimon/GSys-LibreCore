@@ -67,6 +67,12 @@ module instr_realign
     output logic [CVA6Cfg.INSTR_PER_FETCH-1:0][31:0] instr_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 119.0 adjusted FO4 on the
+  // Nangate45 board): fetch-window realign: a stream with a global kill (id-less domain); the carry bank is per-hart state.
+  // svt-pipe: require-contract
+  // svt-pipe: protocol rl valid=valid_i kill=kill_i flush=flush_i
+  // svt-pipe: no-cut on=carry_addr_bank_q
+
   localparam g6lc_fetch_pkg::fetch_geo_t Geo = g6lc_fetch_pkg::geo(CVA6Cfg);
   // halfwords per fetch block, bits needed to index one, and the cursor width
   // (the cursor also has to represent "one past the last halfword")

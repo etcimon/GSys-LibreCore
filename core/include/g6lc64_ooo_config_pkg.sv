@@ -268,7 +268,7 @@ package cva6_config_pkg;
       LsqStoreEntries: unsigned'(0),
       MemDepPredEn: bit'(1),
       OoORetireWidth: unsigned'(0),
-      MultStages: unsigned'(2),
+      MultStages: unsigned'(3),  // A128: shifted-product sum staged (A115 two-stage + one)
       L3En: bit'(0),
       L3ByteSize: unsigned'(0),
       L3SetAssoc: unsigned'(0),

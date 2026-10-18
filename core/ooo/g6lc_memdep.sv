@@ -33,6 +33,11 @@ module g6lc_memdep #(
     output logic                     predict_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 47.9 adjusted FO4 on the
+  // Nangate45 board): memory dependence predictor: set update.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=set_ssid_q
+
   localparam int unsigned SW = (NR_SETS <= 1) ? 1 : $clog2(NR_SETS);
 
   logic [NR_SETS-1:0] set_valid_q, set_valid_d;

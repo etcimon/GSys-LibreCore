@@ -89,6 +89,12 @@ module instr_queue
     output logic [CVA6Cfg.NrHarts-1:0][CVA6Cfg.VLEN-1:0] queue_oldest_pc_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 62.7 adjusted FO4 on the
+  // Nangate45 board): instruction queue on the fetch stream (id-less domain).
+  // svt-pipe: require-contract
+  // svt-pipe: protocol iq valid=valid_i flush=flush_i
+  // svt-pipe: no-cut on=idx_is_q
+
   localparam g6lc_fetch_pkg::fetch_geo_t Geo = g6lc_fetch_pkg::geo(CVA6Cfg);
   localparam g6lc_fetch_pkg::fetch_en_t  En  = g6lc_fetch_pkg::en(CVA6Cfg);
   localparam int unsigned NrFifo = Geo.slots;

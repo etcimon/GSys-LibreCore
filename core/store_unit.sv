@@ -122,6 +122,11 @@ module store_unit
     output dcache_req_i_t req_port_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 58.0 adjusted FO4 on the
+  // Nangate45 board): store unit FSM: the store buffer handshake is same-cycle.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=trans_id_o
+
   // align data to address e.g.: shift data to be naturally 64
   function automatic [CVA6Cfg.XLEN-1:0] data_align(logic [2:0] addr, logic [63:0] data);
     // Set addr[2] to 1'b0 when 32bits

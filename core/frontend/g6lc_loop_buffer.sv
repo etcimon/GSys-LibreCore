@@ -51,6 +51,12 @@ module g6lc_loop_buffer
     output logic                    consume_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 71.6 adjusted FO4 on the
+  // Nangate45 board): loop buffer: fill / replay state machine on the fetch stream (id-less domain); expect_fill is its control.
+  // svt-pipe: require-contract
+  // svt-pipe: protocol lb valid=cf_valid_i flush=flush_i
+  // svt-pipe: no-cut on=expect_fill
+
   localparam int unsigned IDX_W = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);
   localparam int unsigned ALIGN = CVA6Cfg.FETCH_ALIGN_BITS;
   localparam logic [IDX_W:0] NR_EXT = NR_ENTRIES[IDX_W:0];

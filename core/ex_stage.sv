@@ -299,6 +299,11 @@ module ex_stage
     input logic [5:0] orig_instr_aes_i
 );
 
+  // Re-pipelining contract (sv-timing A128; 42.8 adjusted FO4 on the
+  // Nangate45 board): execute stage: the FLU's single writeback port serialises ALU / branch / CSR / mult / AES; a stage on any of them is an FLU redesign.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=flu_result_o
+
   // -------------------------
   // Fixed Latency Units
   // -------------------------

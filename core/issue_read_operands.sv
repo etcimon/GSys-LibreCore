@@ -165,6 +165,11 @@ module issue_read_operands
     output logic [CVA6Cfg.XLEN-1:0] g1gq_rdata_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 65.9 adjusted FO4 on the
+  // Nangate45 board): operand read and FU issue: the issue handshake with the scoreboard is same-cycle.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=fpu_hart_n
+
   localparam OPERANDS_PER_INSTR = CVA6Cfg.NrRgprPorts / CVA6Cfg.NrIssuePorts;
   // CASQ pair-high index: only reachable when OPERANDS_PER_INSTR == 3 (the
   // procedural guards on casq_active ensure that), but slang checks indices

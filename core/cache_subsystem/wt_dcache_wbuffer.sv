@@ -136,6 +136,11 @@ module wt_dcache_wbuffer
     output logic [CVA6Cfg.DCACHE_MAX_TX-1:0] tx_vld_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 105.6 adjusted FO4 on the
+  // Nangate45 board): write buffer: fixup / wbuffer merge is a many-writer next-state; the forward merge at wbuffer_data_o reads every entry.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=wbuffer_data_o
+
   function automatic logic [(CVA6Cfg.XLEN/8)-1:0] to_byte_enable8(
       input logic [CVA6Cfg.XLEN_ALIGN_BYTES-1:0] offset, input logic [1:0] size);
     logic [(CVA6Cfg.XLEN/8)-1:0] be;

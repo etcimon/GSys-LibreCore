@@ -56,6 +56,11 @@ module lsu_bypass
     output logic      ready_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 32.3 adjusted FO4 on the
+  // Nangate45 board): LSU bypass queue: push / pop next-state.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=mem_n
+
   lsu_ctrl_t [1:0] mem_n, mem_q;
   logic read_pointer_n, read_pointer_q;
   logic write_pointer_n, write_pointer_q;

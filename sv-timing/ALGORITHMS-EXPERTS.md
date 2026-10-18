@@ -31,6 +31,12 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A128 update:** every editable file of the over-budget list now carries a
+fail-closed contract; the multiplier's third stage is adopted in RTL under
+`MultStages = 3` (`g6lc64_ooo`), with the side-by-side and reference-model
+lifetime witnesses passing and whole-core elaboration clean. The live
+route for its adjusted reading is running.
+
 **A127 update:** id-less domains (valid + global kill) join the
 vocabulary; a sweep of all 56 listed modules under `correct
 --allow-latency` yields one carried stage (the multiplier), seven bare
@@ -8248,6 +8254,26 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A128 — Contracts on the whole list; the multiplier's third stage adopted
+
+**Declarations.** The 44 editable files of the over-budget list that had
+no contract now carry one in the fail-closed form (`require-contract`;
+port-level protocol roles where unambiguous, id-less for the fetch
+streams; `no-cut` on the measured worst cone with its reason). Vendored
+tier-U files are not edited. Every contract resolves; the sweep's only
+remaining bare register is in vendored `exp_backoff`.
+
+**Adoption.** The multiplier's emitted third stage is written into the RTL
+as `gen_three_stage` (`MultStages == 3`): `prod_sum` registered with the
+correction, operator, valid, trans_id and the carry-less stage-1 results;
+the output and carry-less registers read last-stage nets both branches
+drive. `check_cfg` admits 3; `g6lc64_ooo` sets 3; `mult.sv`'s liveness
+follows the parameter. Witnesses: `tb_mul_sbs` at `MultStages = 3`,
+`+lag=2`, 4 seeds × 300 k, 0 errors; `tb_mul_lifetime` rewritten as a
+reference-model script, PASS at 2 and 3 stages (18 checks), negative
+control intact; whole-core slang elaboration PASS. The adjusted reading
+is owed to the live route started on the builder.
 
 ## A127 — Id-less domains and the sweep of the list
 

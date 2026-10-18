@@ -60,6 +60,11 @@ module cva6_tlb
     output logic [CVA6Cfg.PtLevels-2:0] lu_is_page_o,
     output logic lu_hit_o
 );
+  // Re-pipelining contract (sv-timing A128; 41.8 adjusted FO4 on the
+  // Nangate45 board): TLB: tag match and replacement state.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=tags_q
+
   // SV39 defines three levels of page tables
   localparam bit HART_TAG = (CVA6Cfg.NrHarts > 1) && !CVA6Cfg.SmtDrainedHandoff;
   struct packed {

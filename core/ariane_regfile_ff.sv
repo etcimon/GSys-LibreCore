@@ -42,6 +42,11 @@ module ariane_regfile #(
     input  logic [CVA6Cfg.NrCommitPorts-1:0]                 we_i
 );
 
+  // Re-pipelining contract (sv-timing A128; 54.3 adjusted FO4 on the
+  // Nangate45 board): architectural register file: write-through read; a stage is a bypass change.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=mem
+
   localparam ADDR_WIDTH = 5;
   localparam NUM_WORDS = 2 ** ADDR_WIDTH;
 

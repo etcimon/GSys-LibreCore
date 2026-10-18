@@ -102,6 +102,12 @@ module g6lc_bp_ckpt
     output logic                 full_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 68.0 adjusted FO4 on the
+  // Nangate45 board): branch checkpoint stack: push / restore state.
+  // svt-pipe: require-contract
+  // svt-pipe: protocol ck valid=push_i flush=flush_i
+  // svt-pipe: no-cut on=valid_d
+
   localparam int unsigned NH = (CVA6Cfg.NrHarts < 1) ? 1 : CVA6Cfg.NrHarts;
   localparam int unsigned HID_W = (NH <= 1) ? 1 : $clog2(NH);
   localparam int unsigned PUSH_CNT_W = (NR_PUSH <= 1) ? 1 : $clog2(NR_PUSH + 1);

@@ -25,6 +25,11 @@ module mult
     // Mult transaction ID - ISSUE_STAGE
     output logic     [CVA6Cfg.TRANS_ID_BITS-1:0] mult_trans_id_o
 );
+  // Re-pipelining contract (sv-timing A128; 25.6 adjusted FO4 on the
+  // Nangate45 board): multiplier wrapper: carries the multiplier's cancellation liveness for MultStages cycles (A115); its depth follows the parameter.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=div_owner_live_q
+
   logic mul_valid, mul_valid_raw;
   logic div_valid;
   logic div_ready_i;  // receiver of division result is able to accept the result

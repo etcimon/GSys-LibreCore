@@ -123,6 +123,19 @@ module multiplier
   logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id_s1;
   logic                             mult_valid_s1;
   fu_op                             operator_s1;
+  // The last internal stage, as the output register sees it: the stage-1
+  // control with MultStages <= 2, the stage-2 copies with MultStages == 3
+  // (sv-timing A128: the third stage the contract emitted, written out).
+  logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id_sl;
+  logic                             mult_valid_sl;
+  fu_op                             operator_sl;
+  logic [CVA6Cfg.XLEN-1:0]          clmul_sl, clmulr_sl;
+  // The carry-less stage-1 results take the same number of stages as the
+  // product so the operator select at the output sees them together (A115);
+  // module-level nets (zero without RVB) so a further product stage can carry
+  // them (A126: a merge at result_o of a datapath one stage shorter was the
+  // witness's finding). Driven in gen_clmul / gen_no_clmul below.
+  logic [CVA6Cfg.XLEN-1:0]          clmul_s1, clmulr_s1;
 
   if (CVA6Cfg.MultStages > 1) begin : gen_two_stage
     // Two-stage multiplier (sv-timing A115). The (XLEN+1)×(XLEN+1) product
@@ -153,13 +166,14 @@ module multiplier
     // applied outside this module (mult.sv), so the domain has no kill and
     // no flush of its own. A further stage may be cut at the shifted-product
     // sum; the correction, the operator and the carry-less stage-1 results
-    // must travel with it (corr_sh is the shifted correction, re-derived from
-    // the carried copy; clmul_q / clmulr_q register the carried copies so the
-    // operator select at result_o sees every operand of one operation), and
-    // the output register's valid / trans_id / operator read the last stage.
+    // must travel with it, and the output register's valid / trans_id /
+    // operator read the last stage. That stage is written out below as
+    // `gen_three_stage` (MultStages == 3, A128), exactly as the contract
+    // emitted and the side-by-side witness qualified it; the contract stays
+    // so the tool refuses any other register in this module.
     // svt-pipe: protocol mul valid=mult_valid_s1 id=trans_id_s1
     // svt-pipe: carry mul operator_s1,corr_q,clmul_s1,clmulr_s1
-    // svt-pipe: result mul valid=mult_valid_q id=trans_id_q operator_d corr_sh clmul_q clmulr_q
+    // svt-pipe: result mul valid=mult_valid_q id=trans_id_q operator_d clmul_q clmulr_q
     localparam int unsigned NS = CVA6Cfg.XLEN / 16;
     localparam int unsigned AW = CVA6Cfg.XLEN + 1;   // unsigned pattern of the signed operand
     localparam int unsigned PW = AW + 17;            // (XLEN+1) × 17 unsigned
@@ -200,7 +214,51 @@ module multiplier
         prod_sum = acc;
       end
     end
-    assign mult_result_d = prod_sum - corr_sh;
+    if (CVA6Cfg.MultStages > 2) begin : gen_three_stage
+      // Third stage (sv-timing A126/A128): the shifted-product sum is
+      // registered, and the correction, the operator, the valid / trans_id
+      // and the carry-less stage-1 results travel with it so the operator
+      // select at result_o sees the operands of one operation. mult.sv
+      // tracks cancellation for MultStages cycles.
+      logic [RW-1:0]                    prod_sum_q;
+      logic [AW:0]                      corr_s2;
+      logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id_s2;
+      logic                             mult_valid_s2;
+      fu_op                             operator_s2;
+      logic [CVA6Cfg.XLEN-1:0]          clmul_s2, clmulr_s2;
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (~rst_ni) begin
+          prod_sum_q    <= '0;
+          corr_s2       <= '0;
+          trans_id_s2   <= '0;
+          mult_valid_s2 <= 1'b0;
+          operator_s2   <= MUL;
+          clmul_s2      <= '0;
+          clmulr_s2     <= '0;
+        end else begin
+          prod_sum_q    <= prod_sum;
+          corr_s2       <= corr_q;
+          trans_id_s2   <= trans_id_s1;
+          mult_valid_s2 <= mult_valid_s1;
+          operator_s2   <= operator_s1;
+          clmul_s2      <= clmul_s1;
+          clmulr_s2     <= clmulr_s1;
+        end
+      end
+      assign mult_result_d = prod_sum_q - (RW'(corr_s2) << AW);
+      assign trans_id_sl   = trans_id_s2;
+      assign mult_valid_sl = mult_valid_s2;
+      assign operator_sl   = operator_s2;
+      assign clmul_sl      = clmul_s2;
+      assign clmulr_sl     = clmulr_s2;
+    end else begin : gen_two_stage_out
+      assign mult_result_d = prod_sum - corr_sh;
+      assign trans_id_sl   = trans_id_s1;
+      assign mult_valid_sl = mult_valid_s1;
+      assign operator_sl   = operator_s1;
+      assign clmul_sl      = clmul_s1;
+      assign clmulr_sl     = clmulr_s1;
+    end
     always_ff @(posedge clk_i or negedge rst_ni) begin
       if (~rst_ni) begin
         pp_q          <= '{default: '0};
@@ -222,9 +280,14 @@ module multiplier
     assign mult_valid_s1 = mult_valid;
     assign trans_id_s1   = trans_id_i;
     assign operator_s1   = operation_i;
+    assign trans_id_sl   = trans_id_s1;
+    assign mult_valid_sl = mult_valid_s1;
+    assign operator_sl   = operator_s1;
+    assign clmul_sl      = clmul_s1;
+    assign clmulr_sl     = clmulr_s1;
   end
 
-  assign operator_d = operator_s1;
+  assign operator_d = operator_sl;
 
   always_comb begin : p_selmux
     unique case (operator_q)
@@ -239,12 +302,6 @@ module multiplier
       end
     endcase
   end
-  // The carry-less results take the same number of stages as the product so
-  // the operator select at the output sees them together (A115). Their
-  // stage-1 values are module-level nets (zero without RVB) so a further
-  // product stage can carry them (sv-timing A126: a merge at result_o of a
-  // datapath one stage shorter was the witness's finding).
-  logic [CVA6Cfg.XLEN-1:0] clmul_s1, clmulr_s1;
   if (CVA6Cfg.RVB) begin : gen_clmul
     if (CVA6Cfg.MultStages > 1) begin : gen_clmul_two_stage
       always_ff @(posedge clk_i or negedge rst_ni) begin
@@ -265,8 +322,8 @@ module multiplier
         clmul_q  <= '0;
         clmulr_q <= '0;
       end else begin
-        clmul_q  <= clmul_s1;
-        clmulr_q <= clmulr_s1;
+        clmul_q  <= clmul_sl;
+        clmulr_q <= clmulr_sl;
       end
     end
   end else begin : gen_no_clmul
@@ -287,9 +344,9 @@ module multiplier
       mult_result_q <= '0;
     end else begin
       // Input silencing
-      trans_id_q    <= trans_id_s1;
+      trans_id_q    <= trans_id_sl;
       // Output Register
-      mult_valid_q  <= mult_valid_s1;
+      mult_valid_q  <= mult_valid_sl;
       operator_q    <= operator_d;
       mult_result_q <= mult_result_d;
     end

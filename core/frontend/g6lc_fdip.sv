@@ -35,6 +35,11 @@ module g6lc_fdip
     output logic                    pf_drop_pma_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 10.1 adjusted FO4 on the
+  // Nangate45 board): fetch-directed prefetcher: peek / issue state (id-less fetch domain).
+  // svt-pipe: require-contract
+  // svt-pipe: protocol fd valid=peek_valid_i flush=flush_i
+
   logic pma_ok;
   logic [63:0] addr64;
 

@@ -109,6 +109,11 @@ module commit_stage
     input logic break_from_trigger_i
 );
 
+  // Re-pipelining contract (sv-timing A128; 26.7 adjusted FO4 on the
+  // Nangate45 board): commit: architectural state update; the commit acknowledge is same-cycle.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=casq_hi_rd_q
+
   // ila_0 i_ila_commit (
   //     .clk(clk_i), // input wire clk
   //     .probe0(commit_instr_i[0].pc), // input wire [63:0]  probe0

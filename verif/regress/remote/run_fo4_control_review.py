@@ -420,6 +420,19 @@ def remote() -> None:
                           changed=review["changed_files"], modules=set(review["modules"]))
             return
 
+    if os.environ.get("CONTROL_MODE") == "source-elab":
+        # the snapshot's own tree (no emit): whole-core slang elaboration
+        portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
+        flist = out / "source.f"
+        flist.write_text(portable + "\n")
+        yosys("source-elaboration",
+              f"read_slang -f {flist} --top cva6 --single-unit --best-effort-hierarchy\n"
+              "hierarchy -check -top cva6\n", timeout=300)
+        evidence["source_elaboration"] = "PASS"
+        (out / "result.json").write_text(json.dumps(evidence, indent=2))
+        print("PASS source whole-core elaboration", flush=True)
+        return
+
     if os.environ.get("CONTROL_MODE") == "emit-elab":
         portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
         emitted = data / "review-corrected"

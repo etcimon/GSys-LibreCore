@@ -78,6 +78,11 @@ module wt_dcache_missunit
     output dcache_req_t mem_data_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 60.0 adjusted FO4 on the
+  // Nangate45 board): miss unit: FSM with AXI handshakes; miss_req_i / miss_id_i are its protocol.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=wr_cl_tag_o
+
   // functions
   function automatic logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] dcache_way_bin2oh(
       input logic [CVA6Cfg.DCACHE_SET_ASSOC_WIDTH-1:0] in);

@@ -44,6 +44,11 @@ module csr_buffer
     // CSR address to write - COMMIT_STAGE
     output logic [11:0] csr_addr_o
 );
+  // Re-pipelining contract (sv-timing A128; 30.6 adjusted FO4 on the
+  // Nangate45 board): CSR buffer: the dual-entry CSR hazard table.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=tab_q
+
   // In-order keeps the single-entry buffer bit-identically. OoO can issue a
   // second CSR while an older one awaits commit, so the table is two entries
   // and the commit selects its address by trans_id.

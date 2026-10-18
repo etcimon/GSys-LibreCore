@@ -21,6 +21,11 @@ module g6lc_prf #(
     input  logic [NR_WRITE-1:0]                we_i
 );
 
+  // Re-pipelining contract (sv-timing A128; 65.2 adjusted FO4 on the
+  // Nangate45 board): physical register file: write ports into mem_q; a stage is a bypass-network change.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=mem_q
+
   logic [PRF_ENTRIES-1:0][DATA_WIDTH-1:0] mem_q;
 
   // Combinational read with write-through (highest write port wins on clash)

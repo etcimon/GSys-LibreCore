@@ -44,6 +44,12 @@ module g6lc_rob #(
     input  logic [NR_RETIRE-1:0][TID_W-1:0]        retire_tid_i
 );
 
+  // Re-pipelining contract (sv-timing A128; 77.9 adjusted FO4 on the
+  // Nangate45 board): ROB: head / count next-state written by alloc, commit, cancel and flush in one function.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=head_d
+  // svt-pipe: no-cut on=count_d
+
   typedef struct packed {
     logic             valid;
     logic             complete;

@@ -129,6 +129,10 @@ module cva6_mmu
     input logic           [avoid_neg(CVA6Cfg.NrPMPEntries-1):0][CVA6Cfg.PLEN-3:0] pmpaddr_i
 );
 
+  // Re-pipelining contract (sv-timing A128; 45.7 adjusted FO4 on the
+  // Nangate45 board): MMU: translation handshakes same-cycle with the TLBs.
+  // svt-pipe: require-contract
+
   // memory management, pte for cva6 (Sv39 layout, MSB-first)
   // bit 63: N (Svnapot), bits 62:61: PBMT (Svpbmt), bits 60:54: reserved
   localparam type pte_cva6_t = struct packed {

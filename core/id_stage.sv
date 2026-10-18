@@ -181,6 +181,11 @@ module id_stage #(
     // Data cache request input - CACHE
     output dcache_req_i_t dcache_req_ports_o
 );
+  // Re-pipelining contract (sv-timing A128; 10.9 adjusted FO4 on the
+  // Nangate45 board): decode: the issue handshake is same-cycle.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=issue_n
+
   // ID/ISSUE register stage
   typedef struct packed {
     logic              valid;

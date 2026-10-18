@@ -38,6 +38,12 @@ module g6lc_ftq
     output logic [$clog2(DEPTH+1)-1:0] count_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 19.8 adjusted FO4 on the
+  // Nangate45 board): fetch target queue: push / pop state (id-less fetch domain).
+  // svt-pipe: require-contract
+  // svt-pipe: protocol fq valid=push_i flush=flush_i
+  // svt-pipe: no-cut on=count_o
+
   localparam int unsigned PTR_W = (DEPTH <= 1) ? 1 : $clog2(DEPTH);
 
   typedef struct packed {

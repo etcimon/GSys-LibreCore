@@ -93,6 +93,11 @@ module cva6_ptw
     output logic [CVA6Cfg.GPLEN-1:0] bad_gpaddr_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 41.6 adjusted FO4 on the
+  // Nangate45 board): page-table walker FSM.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=data_rdata_q
+
   // input registers
   logic data_rvalid_q;
   logic [CVA6Cfg.XLEN-1:0] data_rdata_q;

@@ -51,6 +51,11 @@ module serdiv
     output logic [WIDTH-1:0] res_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 63.3 adjusted FO4 on the
+  // Nangate45 board): serial divider: an iterative FSM with its own ready / done; stages are its radix, not registers.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=op_a_q
+
   /////////////////////////////////////
   // signal declarations
   /////////////////////////////////////

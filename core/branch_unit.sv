@@ -52,6 +52,10 @@ module branch_unit #(
     // Branch exception out - TO_BE_COMPLETED
     output exception_t branch_exception_o
 );
+  // Re-pipelining contract (sv-timing A128; 77.4 adjusted FO4 on the
+  // Nangate45 board): branch resolution: pure datapath; resolved_branch_o feeds the controller the same cycle — an FLU / redirect latency decision.
+  // svt-pipe: require-contract
+
   logic [CVA6Cfg.VLEN-1:0] target_address;
   logic [CVA6Cfg.VLEN-1:0] next_pc;
 

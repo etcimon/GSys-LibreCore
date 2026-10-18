@@ -30,6 +30,10 @@ module aes
     output logic     [CVA6Cfg.XLEN-1:0] result_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 83.7 adjusted FO4 on the
+  // Nangate45 board): AES rounds: a pure datapath on the FLU port (see ex_stage); a stage here is an FLU latency decision.
+  // svt-pipe: require-contract
+
   logic [63:0] sr;
   logic [ 7:0] sbox_in;
   logic [31:0] aes32esi_gen;

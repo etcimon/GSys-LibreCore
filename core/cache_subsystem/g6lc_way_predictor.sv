@@ -32,6 +32,11 @@ module g6lc_way_predictor
     input  logic [$clog2(NR_WAYS)-1:0] update_way_i
 );
 
+  // Re-pipelining contract (sv-timing A128; 23.2 adjusted FO4 on the
+  // Nangate45 board): way predictor: table update.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=mem_q
+
   localparam int unsigned IDX_W = (NR_ENTRIES <= 1) ? 1 : $clog2(NR_ENTRIES);
   localparam int unsigned WAY_W = (NR_WAYS <= 1) ? 1 : $clog2(NR_WAYS);
 

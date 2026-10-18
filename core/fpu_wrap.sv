@@ -40,6 +40,11 @@ module fpu_wrap
     output logic                                   fpu_early_valid_o
 );
 
+  // Re-pipelining contract (sv-timing A128; 47.3 adjusted FO4 on the
+  // Nangate45 board): FPU wrapper: operand formatting into fpnew, which has its own pipeline; the tag travels inside fpnew.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=fpu_gen
+
   // this is a workaround
   // otherwise compilation might issue an error if FLEN=0
   enum logic {

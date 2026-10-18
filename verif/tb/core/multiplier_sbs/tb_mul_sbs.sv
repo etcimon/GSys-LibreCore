@@ -11,8 +11,13 @@ module tb_mul_sbs;
     with_stages = c;
     with_stages.MultStages = n;
   endfunction
+`ifndef SVT_MUL_STAGES
+`define SVT_MUL_STAGES 2
+`endif
+  // the staged instance's depth: 2 (A115) or 3 (A128); run with +lag=MultStages-1
+  localparam int unsigned STAGES = `SVT_MUL_STAGES;
   localparam config_pkg::cva6_cfg_t Cfg1 = build_config_pkg::build_config(with_stages(UCfg1, 1));
-  localparam config_pkg::cva6_cfg_t Cfg2 = build_config_pkg::build_config(with_stages(UCfg1, 2));
+  localparam config_pkg::cva6_cfg_t Cfg2 = build_config_pkg::build_config(with_stages(UCfg1, STAGES));
   logic clk = 1'b0, rst_ni = 1'b0;
   always #1 clk = ~clk;
   logic [Cfg1.TRANS_ID_BITS-1:0] trans_id_i;
@@ -112,7 +117,7 @@ module tb_mul_lifetime;
   import ariane_pkg::*;
   function automatic config_pkg::cva6_cfg_t cfg();
     cfg = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg);
-    cfg.MultStages = 2;
+    cfg.MultStages = `SVT_MUL_STAGES;
     cfg.OoOEn = 1;
   endfunction
   localparam config_pkg::cva6_cfg_t C = cfg();
@@ -138,9 +143,24 @@ module tb_mul_lifetime;
       .fu_data_i(fu), .mult_valid_i(valid_i), .result_o,
       .mult_valid_o(valid_o), .mult_ready_o(ready_o), .mult_trans_id_o(tid_o));
   int checked = 0;
+  // Reference model of the wrapper's lifetime contract, for any MultStages:
+  // an operation issued at step k emerges at step k + MultStages - 1 with
+  // data a*7 unless its slot was cancelled at any step from issue through
+  // emergence (inclusive) or a flush happened in between.
+  localparam int unsigned STAGES = `SVT_MUL_STAGES;
+  bit          live  [16];
+  int          issue [16];
+  int          adata [16];
+  int          step = 0;
   task automatic cycle(input bit send, input int tid, input int a,
-                       input int kill_tid, input bit squash,
-                       input bit expect_valid, input int expect_tid, input int expect_data);
+                       input int kill_tid, input bit squash);
+    bit expect_valid = 0;
+    int expect_tid = 0, expect_data = 0;
+    // what emerges this step (sampled after this step's posedge)
+    for (int t = 0; t < 16; t++)
+      if (live[t] && issue[t] + int'(STAGES) - 1 == step && t != kill_tid && !squash) begin
+        expect_valid = 1; expect_tid = t; expect_data = adata[t] * 7;
+      end
     @(negedge clk);
     valid_i = send;
     tid_drive = C.TRANS_ID_BITS'(tid);
@@ -151,6 +171,14 @@ module tb_mul_lifetime;
     cancelled = '0;
     if (kill_tid >= 0) cancelled[kill_tid] = 1'b1;
     flush = squash;
+    // the model's state after this step's edge
+    if (squash) for (int t = 0; t < 16; t++) live[t] = 0;
+    if (kill_tid >= 0) live[kill_tid] = 0;
+    for (int t = 0; t < 16; t++)
+      if (live[t] && issue[t] + int'(STAGES) - 1 == step) live[t] = 0;  // emerged
+    if (send && !squash && kill_tid != tid) begin
+      live[tid] = 1; issue[tid] = step; adata[tid] = a;
+    end
     @(posedge clk);
     #0.1;
     if (valid_o !== expect_valid ||
@@ -159,29 +187,34 @@ module tb_mul_lifetime;
       $fatal(1, "MUL_LIFETIME step=%0d valid=%b tid=%0d data=%h expected=%b/%0d/%0d",
              checked, valid_o, tid_o, result_o, expect_valid, expect_tid, expect_data);
     checked++;
+    step++;
   endtask
   initial begin
+    for (int t = 0; t < 16; t++) live[t] = 0;
     repeat (2) @(negedge clk);
     rst_n = 1;
-    cycle(1, 1, 3, -1, 0, 0, 0, 0);
-    cycle(1, 2, 5, -1, 0, 1, 1, 21);
-    cycle(0, 0, 0, -1, 0, 1, 2, 35);
-    cycle(0, 0, 0, -1, 0, 0, 0, 0);
+    cycle(1, 1, 3, -1, 0);
+    cycle(1, 2, 5, -1, 0);
+    cycle(0, 0, 0, -1, 0);
+    cycle(0, 0, 0, -1, 0);
     // Flush an outstanding multiply, then immediately reuse the slot.
-    cycle(1, 3, 9, -1, 0, 0, 0, 0);
-    cycle(0, 0, 0, -1, 1, 0, 0, 0);
-    cycle(1, 3, 11, -1, 0, 0, 0, 0);
-    cycle(0, 0, 0, -1, 0, 1, 3, 77);
+    cycle(1, 3, 9, -1, 0);
+    cycle(0, 0, 0, -1, 1);
+    cycle(1, 3, 11, -1, 0);
+    cycle(0, 0, 0, -1, 0);
+    cycle(0, 0, 0, -1, 0);
     // Dispatch on a cancelled slot, then remove the mask before completion.
-    cycle(1, 4, 13, 4, 0, 0, 0, 0);
-    cycle(0, 0, 0, -1, 0, 0, 0, 0);
+    cycle(1, 4, 13, 4, 0);
+    cycle(0, 0, 0, -1, 0);
+    cycle(0, 0, 0, -1, 0);
     // Cancel one stage while a different generation enters the pipeline.
-    cycle(1, 5, 17, -1, 0, 0, 0, 0);
-    cycle(1, 6, 19, 5, 0, 0, 0, 0);
-    cycle(1, 5, 23, -1, 0, 1, 6, 133);
-    cycle(0, 0, 0, -1, 0, 1, 5, 161);
-    cycle(0, 0, 0, -1, 0, 0, 0, 0);
-    $display("PASS tb_mul_lifetime checks=%0d", checked);
+    cycle(1, 5, 17, -1, 0);
+    cycle(1, 6, 19, 5, 0);
+    cycle(1, 5, 23, -1, 0);
+    cycle(0, 0, 0, -1, 0);
+    cycle(0, 0, 0, -1, 0);
+    cycle(0, 0, 0, -1, 0);
+    $display("PASS tb_mul_lifetime stages=%0d checks=%0d", STAGES, checked);
     $finish;
   end
 endmodule

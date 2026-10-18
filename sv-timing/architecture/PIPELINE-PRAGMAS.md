@@ -511,3 +511,45 @@ Id-less domains (`protocol … valid= kill=<global>`, no `id=`) are in the
 vocabulary as of this round for the fetch-side streams (realign, queues),
 whose stages are rung 1 with a global kill; their contracts are the next
 declarations to write.
+
+## 10. Contracts on every file of the list; the multiplier's stage adopted (A128)
+
+**Declarations.** All 44 editable files of the list that had none now carry
+a contract, in the same fail-closed form: `require-contract` (no bare
+register can land), the protocol roles the module's ports expose where
+the role is unambiguous (`instr_realign` `valid_i`/`kill_i`/`flush_i` as an
+id-less domain; `g6lc_loop_buffer`, `instr_queue`, `g6lc_ftq`, `g6lc_fdip`,
+`g6lc_bp_ckpt`, `g6lc_bp_ghist`, `ras`, `cva6_fifo_v3` on their push /
+update valids), and `no-cut` on the measured worst cone's next-state or
+register with the one-line reason — a state machine, a same-cycle
+handshake, the FLU port, an architectural loop. The three vendored tier-U
+files (`exp_backoff`, `rr_arb_tree`, `fpnew_top`) are not edited. The
+sweep resolves every contract; the only bare register left is
+`exp_backoff`'s (vendored).
+
+**The multiplier's stage, adopted.** The emitted third stage is written
+into the RTL as `gen_three_stage` under `MultStages == 3`: `prod_sum`
+registered, `corr_q` / `operator_s1` / `trans_id_s1` / `mult_valid_s1` /
+`clmul_s1` / `clmulr_s1` one register further, and the output register and
+the carry-less registers reading "last stage" nets (`*_sl`) that the
+two-stage and three-stage branches both drive — the export pattern of §7
+as plain RTL. `check_cfg` admits `MultStages inside {1, 2, 3}`;
+`g6lc64_ooo` sets 3. `mult.sv` tracks cancellation for `MultStages` cycles
+unchanged.
+
+**Witnesses.** `tb_mul_sbs` takes the staged depth from `SVT_MUL_STAGES`
+(default 2): `MultStages = 3` against the one-stage reference at `+lag=2`,
+seeds 1 / 5 / 17 / 23 × 300 000 cycles, ≈ 234 k results each, **0 errors**.
+`tb_mul_lifetime` is now a reference-model script (an operation issued at
+step k emerges at k + MultStages − 1 unless cancelled through emergence or
+flushed): **PASS at 2 and at 3 stages, 18 checks each**; the old wrapper
+still fails it at step 5 (negative control unchanged). Whole-core slang
+elaboration of the source tree with `MultStages = 3`: PASS
+(`CONTROL_MODE=source-elab`).
+
+**Reading.** The adjusted reading of the three-stage multiplier belongs
+to the live-RTL route on `g6lc64_ooo` (`timings sta-rtl --remote --fo4 0`),
+running as this is written; the module's mapped worst was the product
+cone at 2.820 ns = 131.8 adjusted FO4. The 56 declarations move no path by
+themselves: they are the enforcement layer under which every further
+stage on the list is a designer's decision the tool can carry out.
