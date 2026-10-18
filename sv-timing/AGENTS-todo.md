@@ -3,6 +3,21 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A132 — pragma admission and paired physical review
+
+- [x] Reject unresolved/invalid domains instead of permitting uncarried cuts;
+  require scalar valids and resolved bundle widths; reject unsupported ready.
+- [x] Exact latency parameter lookup and correct diagnostics for source-following
+  depth; conditional int localparam reachability (delay-v42 / correction-v3).
+- [x] `pipeline_contracts` in analyze JSON, including shape and target diagnostics.
+- [x] Isolated paired mapping with per-boundary reports, emitted-SV comparison
+  and optional placement; expanded multiplier lifetime surface witness.
+- [x] Retain tiled products + carry-save middle stage: placed worst arrival
+  2.634 → 2.215 ns at +1.4% area; actual corrected SV 2.298 ns, same latency.
+  Six arithmetic surface variants pass; three lifetime witnesses pass.
+- [ ] Stateful input staging still requires reservations, backpressure and replay.
+  Review: `architecture/PIPELINE-PRAGMA-REVIEW.md`.
+
 ## A131 — hand re-pipelining with the contracts as the check
 
 - [x] Multiplier 8-bit slices under `MultStages = 3` (`gen_sum8`);

@@ -137,9 +137,13 @@ module wt_dcache_wbuffer
 );
 
   // Re-pipelining contract (sv-timing A128; 105.6 adjusted FO4 on the
-  // Nangate45 board): write buffer: fixup / wbuffer merge is a many-writer next-state; the forward merge at wbuffer_data_o reads every entry.
+  // Nangate45 board): fixup and wbuffer next-state merge accepted stores,
+  // deferred writes and byte supersession. wbuffer_data_o exports wbuffer_q;
+  // load byte selection is in wt_dcache_mem. Staging must reserve acceptance
+  // capacity and preserve supersession before a deferred write can retire.
   // svt-pipe: require-contract
   // svt-pipe: no-cut on=wbuffer_data_o
+  // svt-pipe: no-cut on=fixup_bypass_d
 
   function automatic logic [(CVA6Cfg.XLEN/8)-1:0] to_byte_enable8(
       input logic [CVA6Cfg.XLEN_ALIGN_BYTES-1:0] offset, input logic [1:0] size);

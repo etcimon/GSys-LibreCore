@@ -906,8 +906,8 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
             }
         });
         if let Some(d) = &plan_domain {
-            // the bundle's real width: valid, the id and every carried
-            // signal at their declared widths (8 when unresolved)
+            // The bundle's real width: scalar valid, optional id, and carried
+            // signals. Unresolved widths cannot authorize emitted registers.
             let extra = {
                 let m = ordered
                     .first()
@@ -925,12 +925,11 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
                             &m.package_imports,
                             ctx.design.width_map.get(&m.name),
                         );
-                        let w = |sig: &str| {
-                            resolver
-                                .expr_width(&sv_timing_core::Expr::parse(sig))
-                                .unwrap_or(8)
-                        };
-                        1 + w(&d.id) + d.carry.iter().map(|c| w(c)).sum::<u32>()
+                        let w = |sig: &str| resolver.expr_width(&sv_timing_core::Expr::parse(sig));
+                        d.check_widths(&w)
+                            .map_err(TransformError::InvalidOpportunity)?;
+                        1 + if d.has_id() { w(&d.id).unwrap() } else { 0 }
+                            + d.carry.iter().map(|c| w(c).unwrap()).sum::<u32>()
                     }
                     None => 1 + 8 + 8 * d.carry.len() as u32,
                 }
@@ -1197,33 +1196,9 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
             if refuse.is_none() {
                 // Latency parameter (A129): the stage count the consumers are
                 // told must equal what the source has plus what this plan adds.
-                if let Some((param, base)) = &domain.latency {
-                    let lookup = |name: &str| -> Option<i64> {
-                        name.parse::<i64>().ok().or_else(|| {
-                            ctx.design.param_map_ints.get(name).copied().or_else(|| {
-                                ctx.design
-                                    .param_map_ints
-                                    .get(name.rsplit('.').next().unwrap_or(name))
-                                    .copied()
-                            })
-                        })
-                    };
-                    match (lookup(param), lookup(base)) {
-                        (None, _) | (_, None) => {
-                            refuse = Some(format!(
-                                "latency: `{param}` / base `{base}` have no elaborated value in the param map: the stage count cannot be checked"
-                            ));
-                        }
-                        (Some(v), Some(b)) if b + ordered.len() as i64 != v => {
-                            refuse = Some(format!(
-                                "latency: `{param}` = {v} but the source has {b} stage(s) and this plan adds {}: the consumers would track {v} cycle(s); set `{param}` = {} to admit the stage",
-                                ordered.len(),
-                                b + ordered.len() as i64
-                            ));
-                        }
-                        _ => {}
-                    }
-                }
+                refuse = domain
+                    .check_latency(ordered.len(), &ctx.design.param_map_ints)
+                    .err();
             }
             if refuse.is_none() {
                 // Merge balance: the consumers' downstream may read no

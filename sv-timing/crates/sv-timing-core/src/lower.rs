@@ -928,6 +928,19 @@ fn generate_const_value(
             }
         }
         Expr::Unary { op, arg } if op == "!" => eval(arg, false).map(|v| i64::from(v == 0)),
+        Expr::Ternary {
+            cond,
+            then_e,
+            else_e,
+        } if int_context => {
+            // Both arms must be in the bounded, nonnegative int subset.
+            // This handles slice-count localparams without guessing widths
+            // or signed extensions from an unsupported unselected arm.
+            let c = eval(cond, false)?;
+            let yes = eval(then_e, true)?;
+            let no = eval(else_e, true)?;
+            Some(if c != 0 { yes } else { no })
+        }
         Expr::Binary {
             op, left, right, ..
         } => {
@@ -3594,12 +3607,50 @@ endmodule
     }
 
     #[test]
+    fn generate_reachability_resolves_conditional_slice_count() {
+        let src = r#"
+package cfg_pkg;
+  typedef struct packed { int unsigned XLEN; int unsigned Stages; } cfg_t;
+endpackage
+module m #(parameter cfg_pkg::cfg_t Cfg = '{64,3})
+          (input logic [31:0] a,b, output logic [31:0] y);
+  localparam int unsigned SB = Cfg.Stages > 2 ? 8 : 16;
+  localparam int unsigned NS = Cfg.XLEN / SB;
+  if (NS == 8) assign y = a + b;
+  else if (NS == 4) assign y = a * b;
+  else assign y = a / b;
+endmodule
+"#;
+        let mut opts = LowerOptions::default();
+        opts.param_map.insert("Cfg.XLEN", serde_json::json!(64));
+        for (stages, expected) in [(3, "a + b"), (2, "a * b")] {
+            opts.param_map
+                .insert("Cfg.Stages", serde_json::json!(stages));
+            let out = analyze_inline_with_options(src, &opts);
+            let m = out.design.modules.values().next().unwrap();
+            let rhs: Vec<_> = m.nodes.values().filter_map(|n| n.rhs.as_deref()).collect();
+            assert_eq!(rhs, vec![expected]);
+        }
+        let unknown = analyze_inline_source(src);
+        assert!(unknown
+            .design
+            .modules
+            .values()
+            .next()
+            .unwrap()
+            .nodes
+            .values()
+            .any(|n| n.rhs.as_deref() == Some("a / b")));
+    }
+
+    #[test]
     fn generate_reachability_refuses_truncation_defaults_and_shadowing() {
         for decl in [
             "parameter int N=4;",
             "localparam logic [1:0] N=4;",
             "localparam int unsigned N=2147483647+1;",
             "localparam int N=-1;",
+            "localparam int N=1 ? 4 : 2147483647+1;",
             "localparam int N=1/0;",
             "localparam int N=1'bx;",
         ] {

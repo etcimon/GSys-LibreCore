@@ -1004,6 +1004,34 @@ fn design_to_analyze_json(
         // reported wherever they occur (no emitter yet). Live modules only
         // when the design knows which are instantiated.
         "structural_patterns": structural_patterns,
+        // Contract declarations are reported even when no opportunity reaches
+        // InsertReg. Trace-event counts are not a contract coverage census.
+        "pipeline_contracts": design.modules.values().filter_map(|m| {
+            let contract = sv_timing_core::pipe_contract::resolve(m)?;
+            let widths = sv_timing_core::width::WidthResolver::from_parts(
+                &design.packages, &design.param_map_ints, &m.decls, &m.ports,
+                &m.const_exprs, &m.typedef_texts, &m.package_imports,
+                design.width_map.get(&m.name),
+            );
+            let bundle_issues: Vec<_> = contract.domains.iter().filter_map(|d| {
+                d.check_widths(&|s| widths.expr_width(&sv_timing_core::Expr::parse(s))).err()
+            }).collect();
+            let unbound_no_cut: Vec<_> = contract.no_cut.iter().filter(|name| {
+                !m.decls.iter().any(|d| &d.name == *name)
+                    && !m.ports.iter().any(|p| &p.name == *name)
+                    && !m.nodes.values().any(|n| {
+                        n.lhs.as_deref().and_then(sv_timing_core::ir::TimingModule::root_ident)
+                            == Some(name.as_str())
+                    })
+            }).collect();
+            Some(serde_json::json!({
+                "module": m.name,
+                "contract": contract,
+                "bundle_issues": bundle_issues,
+                "unbound_no_cut": unbound_no_cut,
+                "note": "Declarations only: cut permission is not emission, functional validation or measured timing closure."
+            }))
+        }).collect::<Vec<_>>(),
         "sta_hints": sta_hints,
         "frequency_closure": {
             "target_mhz": closure.target_mhz,

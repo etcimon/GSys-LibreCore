@@ -31,6 +31,14 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A132 update:** split both multiplier operands into product tiles and carry
+sum/carry rows across the existing middle boundary. Paired placement/repair
+without disabled arcs: 2.634 → 2.215 ns worst arrival (+1.4% area);
+actual corrected SV 2.298 ns, behavior and latency verified. The pragma
+audit finds 53 guarded modules but zero enabled cuts; it now reports vector
+valids, unbound targets and invalid domains explicitly. See
+[`PIPELINE-PRAGMA-REVIEW.md`](architecture/PIPELINE-PRAGMA-REVIEW.md).
+
 **A131 update:** hand rung on the multiplier — 8-bit operand slices under
 `MultStages = 3`: reg→reg 1.817 → 1.623 ns on the live board, boundary
 cone 2.581 → 2.531 ns (118.3 adjusted FO4); witnesses pass; the contract
@@ -8270,6 +8278,43 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A132 — Validate the boundary, the emitted file and the physical result
+
+The pragma census was counting worklist events instead of declarations.
+Analyze JSON now reports `pipeline_contracts` for every annotated module:
+53 of the 56 measured over-budget modules have guards, 12 domains are
+declared, and none currently authorizes an added stage. Three vector-valid
+domains need lane/packet semantics before they can use a scalar stage.
+Three `no-cut` names were scope labels or nonexistent ports and are corrected.
+Rejected contracts and unresolved domains no longer permit an uncarried cut.
+Latency checks use exact parameter keys and no longer suggest increasing
+the same parameter that also determines the source's existing depth.
+
+The physical experiment partitions the multiplier's arithmetic at its
+existing three-cycle boundaries: 16-bit A tiles by 8-bit B slices (partial
+top slices retained), a 3:2 compressor tree including `~corr_sh + 1`,
+then one final carry-propagate add. CLMUL, valid, ID and operation stay
+aligned. An operand-capture fourth-cycle candidate was rejected because
+it moved the long product cone rather than dividing it.
+
+Paired Nangate45 placement/repair, no disabled arcs: worst arrival
+**2.634 → 2.215 ns**, repaired area **52,164.730 → 52,886.117 µm²**.
+Reg→reg is essentially flat (2.139 → 2.145 ns). The actual corrected SV
+passes the same arithmetic/lifetime checks and places at **2.298 ns**;
+one latency-neutral SplitAssign preserves most, not all, of the source gain.
+Unbuffered timing worsens, so the placement comparison is essential.
+This is a pre-CTS module result, still 103.5 adjusted FO4 on source and
+107.4 on emit at 21.398 ps, not 10-FO4 closure.
+
+The runner pins source snapshots, obtains elaborated widths, binds the
+measured latency and reports in→reg/reg→reg/reg→out independently.
+The historical board's trace belongs to reg→reg and cannot explain its
+worst-any column. Conditional int localparam pruning (`delay-v42`) removes
+another source of reporting error; it earns no hardware timing credit.
+Evidence and remaining state-machine implementations are recorded in
+`architecture/PIPELINE-PRAGMA-REVIEW.md`; 373 Rust tests and the focused
+source/emitted witnesses pass.
 
 ## A131 — Hand re-pipelining with contracts as the check: the multiplier's slices
 

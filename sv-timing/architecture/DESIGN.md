@@ -24,6 +24,23 @@
 
 ## Current correctness audit: source origins and validation
 
+### Pipeline contract validation (A132)
+
+An explicit `cut-ok` naming an unresolved domain must refuse the cut, never
+degrade to an uncarried stage. Likewise `require-contract` needs a resolved
+domain at a permitted anchor. Latency checks use exact parameter names;
+qualified names must not fall back to an unrelated unqualified parameter.
+When source depth follows the published parameter, increasing that parameter
+does not authorize an extra tool-inserted stage.
+
+Physical validation compares the same source configuration and mapping recipe,
+with separate input-to-register, register-to-register and register-to-output
+reports. The historical module board's start/end trace belongs to its
+register-to-register column, not necessarily its `worst_any_ns` column.
+Carry-save reduction across an existing register boundary is an RTL candidate:
+sum and carry form one indivisible bundle and require one final addition.
+Neither an annotation nor a structural estimate establishes adjusted-FO4 closure.
+
 ### Lexical binding delta (2026-10-15)
 
 P5 must distinguish block-local declarations with the same spelling in different

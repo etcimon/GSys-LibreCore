@@ -10,6 +10,12 @@ module tb_mul_sbs;
   function automatic config_pkg::cva6_user_cfg_t with_stages(config_pkg::cva6_user_cfg_t c, int unsigned n);
     with_stages = c;
     with_stages.MultStages = n;
+`ifdef SVT_MUL_XLEN
+    with_stages.XLEN = `SVT_MUL_XLEN;
+`endif
+`ifdef SVT_MUL_RVB
+    with_stages.RVB = `SVT_MUL_RVB;
+`endif
   endfunction
 `ifndef SVT_MUL_STAGES
 `define SVT_MUL_STAGES 2
@@ -85,7 +91,7 @@ module tb_mul_sbs;
     r0 = rnd64(); r1 = rnd64(); r2 = rnd64();
     mult_valid_i = (r0[7:0] < 8'd200);
     trans_id_i   = $bits(trans_id_i)'(r0[23:16]);
-    operation_i  = ops[r0[10:8]];
+    operation_i  = ops[Cfg1.RVB ? int'(r0[10:8]) : int'(r0[10:8]) % 5];
     operand_a_i  = Cfg1.XLEN'(shaped(r1, r0[39:32]));
     operand_b_i  = Cfg1.XLEN'(shaped(r2, r0[47:40]));
   end
@@ -102,6 +108,7 @@ module tb_mul_sbs;
       end
       if (cyc == 300000) begin
         $display("%s tb_mul_sbs lag=%0d cycles=%0d valid_results=%0d errors=%0d", errors == 0 ? "PASS" : "FAIL", lag, cyc, valids, errors);
+        if (errors != 0 || valids == 0) $fatal(1, "Multiplier comparison failed or was vacuous");
         $finish;
       end
     end
@@ -214,6 +221,16 @@ module tb_mul_lifetime;
     cycle(0, 0, 0, -1, 0);
     cycle(0, 0, 0, -1, 0);
     cycle(0, 0, 0, -1, 0);
+    // Cancel at each pipeline age, including the output-use edge, then
+    // remove the mask and reuse that TID. Drain before the next experiment.
+    for (int age = 0; age < int'(STAGES); age++) begin
+      cycle(1, 7, 29, age == 0 ? 7 : -1, 0);
+      for (int k = 1; k < int'(STAGES); k++)
+        cycle(0, 0, 0, k == age ? 7 : -1, 0);
+      cycle(1, 7, 31, -1, 0);
+      for (int k = 0; k < int'(STAGES); k++)
+        cycle(0, 0, 0, -1, 0);
+    end
     $display("PASS tb_mul_lifetime stages=%0d checks=%0d", STAGES, checked);
     $finish;
   end

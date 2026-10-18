@@ -37,6 +37,7 @@ Live checklist: [`../AGENTS-todo.md`](../AGENTS-todo.md). Soak playbook + number
 
 | Doc | Purpose |
 |---|---|
+| [`PIPELINE-PRAGMA-REVIEW.md`](PIPELINE-PRAGMA-REVIEW.md) | A132 contract audit, required stateful boundaries, paired source/emitted placement evidence |
 | [`DESIGN.md`](DESIGN.md) | Full architecture: independence, stages, IR, FO4, CRC+SQLite, auto-correct, host boundary, PR plan |
 | [`OPTIMIZATION-LEVELS.md`](OPTIMIZATION-LEVELS.md) | **L0–L5** aggressiveness: measure → path_class → T1 BalanceMux → T2 InsertReg → T3 suggest |
 | [`PERF-CACHE.md`](PERF-CACHE.md) | **IR-only** SQLite analyze cache: design/module hits, CRC-32C, path_class hints |

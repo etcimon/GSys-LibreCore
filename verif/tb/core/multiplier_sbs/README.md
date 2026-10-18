@@ -39,3 +39,16 @@ and 3; the pre-A115 wrapper still fails it at step 5.
 A131: at three stages the second operand is sliced 8 bits wide (eight
 (XLEN+1) x 9 products, `gen_sum8`); the same `+define+SVT_MUL_STAGES=3
 +lag=2` run covers it (3 seeds x 300k, 0 errors).
+
+A132 also tiles the first operand and carries two compressed rows through
+the middle boundary at the same three-cycle latency. The lifetime witness
+now cancels at every pipeline age and reuses the ID after clearing the mask
+(39 checks at three stages). Optional `SVT_MUL_XLEN=32` and `SVT_MUL_RVB=0`
+exercise source parameter variants; emitted RTL is qualified for the exact
+specialization used to generate it. Arithmetic mismatches and vacuous output
+counts now return a failing simulator exit code.
+
+`run_fo4_control_review.py --profile multiplier` with remote
+`CONTROL_MODE=mult-pipeline` compares immutable baseline/source snapshots,
+and an optionally uploaded `multiplier__svt.sv`, using identical mapping and
+separate boundary reports. `CONTROL_PLACE=1` adds placement/repair.

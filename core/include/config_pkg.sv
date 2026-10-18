@@ -1194,7 +1194,7 @@ package config_pkg;
     assert (Cfg.FtqDepth == 0 || (2 ** $clog2(Cfg.FtqDepth) == Cfg.FtqDepth));
     // U4 slice-OoO legality (mutually exclusive with U5; needs speculative SB + non-blocking D$).
     assert (!(Cfg.SliceOoOEn && Cfg.OoOEn));
-    // A115: the multiplier is one or two stages; XLEN must split into 16-bit slices.
+    // Configurable multiply depth; every arithmetic/CLMUL/control path agrees.
     // 3 = the shifted-product sum registered as well (sv-timing A128) and
     // 8-bit operand slices (A131); mult.sv tracks cancellation for
     // MultStages cycles either way. XLEN must split into the slices.

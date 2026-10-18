@@ -137,6 +137,16 @@ module multiplier
   // witness's finding). Driven in gen_clmul / gen_no_clmul below.
   logic [CVA6Cfg.XLEN-1:0]          clmul_s1, clmulr_s1;
 
+  // Constant-function scope must be outside generate blocks (IEEE 1800).
+  function automatic int unsigned compressor_rows(
+      input int unsigned initial_rows, input int unsigned level);
+    int unsigned n;
+    n = initial_rows;
+    for (int unsigned l = 0; l < level; l++)
+      n = 2 * (n / 3) + (n % 3);
+    return n;
+  endfunction
+
   if (CVA6Cfg.MultStages > 1) begin : gen_two_stage
     // Two-stage multiplier (sv-timing A115). The (XLEN+1)×(XLEN+1) product
     // is the deepest single path of the core (5.3 ns on the Nangate45 study
@@ -164,17 +174,15 @@ module multiplier
     // Re-pipelining contract (sv-timing A123/A124). The product's control
     // rides as {mult_valid_s1, trans_id_s1, operator_s1}; cancellation is
     // applied outside this module (mult.sv), so the domain has no kill and
-    // no flush of its own. A further stage may be cut at the shifted-product
-    // sum; the correction, the operator and the carry-less stage-1 results
-    // must travel with it, and the output register's valid / trans_id /
-    // operator read the last stage. That stage is written out below as
-    // `gen_three_stage` (MultStages == 3, A128), exactly as the contract
-    // emitted and the side-by-side witness qualified it; the contract stays
-    // so the tool refuses any other register in this module.
+    // no flush of its own. The existing middle boundary carries both
+    // carry-save rows plus operator/valid/id/CLMUL. A further tool cut would
+    // exceed the wrapper's published latency: permission stays closed until
+    // a matching boundary and consumer depth are implemented together.
     // svt-pipe: protocol mul valid=mult_valid_s1 id=trans_id_s1
     // svt-pipe: carry mul operator_s1,corr_q,clmul_s1,clmulr_s1
     // svt-pipe: result mul valid=mult_valid_q id=trans_id_q operator_d corr_sh clmul_q clmulr_q
     // svt-pipe: latency mul CVA6Cfg.MultStages base=CVA6Cfg.MultStages
+    // svt-pipe: no-cut on=prod_sum
     // Slice width of the second operand (A131): 16 bits with two stages
     // (A115), 8 bits with three — the third stage owns the sum of the
     // slices' products, so the stage-1 product can be the narrower
@@ -184,39 +192,50 @@ module multiplier
     localparam int unsigned SB = CVA6Cfg.MultStages > 2 ? 8 : 16;
     localparam int unsigned NS = CVA6Cfg.XLEN / SB;
     localparam int unsigned AW = CVA6Cfg.XLEN + 1;   // unsigned pattern of the signed operand
-    localparam int unsigned PW = AW + SB + 1;        // (XLEN+1) × (SB+1) unsigned
+    // Tile both operands at three stages: registering a 65x9 product still
+    // leaves a wide adder inside stage 1. 16x8 tiles (top B slice 9 bits)
+    // move that accumulation into the carry-save stage without another cycle.
+    localparam int unsigned AB = CVA6Cfg.MultStages > 2 ? 16 : AW;
+    localparam int unsigned NA = (AW + AB - 1) / AB;
+    localparam int unsigned NPART = NS * NA;
+    localparam int unsigned PW = AB + SB + 1;
     localparam int unsigned RW = CVA6Cfg.XLEN * 2;
     logic [AW-1:0] a_u, b_u;
     assign a_u = op_a_s;  // the (XLEN+1)-bit two's-complement pattern, read unsigned
     assign b_u = op_b_s;
-    logic [PW-1:0] pp_d[NS], pp_q[NS];
+    logic [PW-1:0] pp_d[NPART], pp_q[NPART];
     logic [AW:0]   corr_d, corr_q;                   // a_top·B_u + b_top·A_u
-    for (genvar k = 0; k < NS; k++) begin : gen_pp
-      if (k == NS - 1) begin : gen_top
-        assign pp_d[k] = a_u * b_u[AW-1:SB*k];       // (SB+1)-bit top slice (sign bit included)
+    for (genvar k = 0; k < NPART; k++) begin : gen_pp
+      localparam int unsigned AK = k / NS;
+      localparam int unsigned BK = k % NS;
+      wire [AB-1:0] a_slice;
+      if (AK == NA - 1) begin : gen_a_top
+        assign a_slice = AB'(a_u[AW-1:AB*AK]);
+      end else begin : gen_a_mid
+        assign a_slice = a_u[AB*AK+:AB];
+      end
+      if (BK == NS - 1) begin : gen_top
+        assign pp_d[k] = a_slice * b_u[AW-1:SB*BK];
       end else begin : gen_mid
-        assign pp_d[k] = a_u * b_u[SB*k+:SB];
+        assign pp_d[k] = a_slice * b_u[SB*BK+:SB];
       end
     end
     assign corr_d = (a_u[AW-1] ? {1'b0, b_u} : '0) + (b_u[AW-1] ? {1'b0, a_u} : '0);
     // Stage 2: the shifted products summed as a balanced tree (so the
     // structural model and synthesis both see log depth), minus the
     // correction at bit XLEN+1.
-    logic [RW-1:0] term[NS];
-    for (genvar k = 0; k < NS; k++) begin : gen_term
-      assign term[k] = RW'(pp_q[k]) << (SB * k);
+    logic [RW-1:0] term[NPART];
+    for (genvar k = 0; k < NPART; k++) begin : gen_term
+      assign term[k] = RW'(pp_q[k]) << (AB * (k / NS) + SB * (k % NS));
     end
     logic [RW-1:0] corr_sh, prod_sum;
     assign corr_sh = RW'(corr_q) << AW;
     if (NS == 8) begin : gen_sum8
-      // svt-pipe: cut-ok mul
       assign prod_sum = ((term[0] + term[1]) + (term[2] + term[3])) +
                         ((term[4] + term[5]) + (term[6] + term[7]));
     end else if (NS == 4) begin : gen_sum4
-      // svt-pipe: cut-ok mul
       assign prod_sum = (term[0] + term[1]) + (term[2] + term[3]);
     end else if (NS == 2) begin : gen_sum2
-      // svt-pipe: cut-ok mul
       assign prod_sum = term[0] + term[1];
     end else begin : gen_sum_n
       always_comb begin
@@ -227,13 +246,42 @@ module multiplier
       end
     end
     if (CVA6Cfg.MultStages > 2) begin : gen_three_stage
-      // Third stage (sv-timing A126/A128): the shifted-product sum is
-      // registered, and the correction, the operator, the valid / trans_id
-      // and the carry-less stage-1 results travel with it so the operator
-      // select at result_o sees the operands of one operation. mult.sv
-      // tracks cancellation for MultStages cycles.
-      logic [RW-1:0]                    prod_sum_q;
-      logic [AW:0]                      corr_s2;
+      // A132: keep the middle stage carry-save. Each 3:2 compressor
+      // preserves a+b+c modulo 2**RW without propagating a carry across
+      // the word. Include -corr_sh as ~corr_sh + 1 in the same reduction;
+      // only the final stage performs a carry-propagate addition.
+      // Both rows and the protocol/CLMUL bundle cross the same edge.
+      // svt-pipe: no-cut on=reduce_sum
+      // svt-pipe: no-cut on=reduce_carry
+      localparam int unsigned NOPS = NPART + 2;
+      // Upper bound: remaining levels pass through the last two rows.
+      localparam int unsigned LEVELS = 2 * $clog2(NOPS);
+      wire [RW-1:0] rows [0:LEVELS][NOPS];
+      for (genvar k = 0; k < NPART; k++) begin : gen_row
+        assign rows[0][k] = term[k];
+      end
+      assign rows[0][NPART] = ~corr_sh;
+      assign rows[0][NPART+1] = RW'(1);
+      for (genvar l = 0; l < LEVELS; l++) begin : gen_reduce
+        localparam int unsigned N = compressor_rows(NOPS, l);
+        localparam int unsigned GROUPS = N / 3;
+        for (genvar g = 0; g < GROUPS; g++) begin : gen_compress
+          wire [RW-1:0] a = rows[l][3*g];
+          wire [RW-1:0] b = rows[l][3*g+1];
+          wire [RW-1:0] c = rows[l][3*g+2];
+          assign rows[l+1][2*g] = a ^ b ^ c;
+          assign rows[l+1][2*g+1] = ((a & b) | (a & c) | (b & c)) << 1;
+        end
+        for (genvar r = 0; r < N % 3; r++) begin : gen_remainder
+          assign rows[l+1][2*GROUPS+r] = rows[l][3*GROUPS+r];
+        end
+        for (genvar z = compressor_rows(NOPS, l+1); z < NOPS; z++) begin : gen_unused
+          assign rows[l+1][z] = '0;
+        end
+      end
+      wire [RW-1:0] reduce_sum = rows[LEVELS][0];
+      wire [RW-1:0] reduce_carry = rows[LEVELS][1];
+      logic [RW-1:0]                    prod_sum_q, prod_carry_q;
       logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id_s2;
       logic                             mult_valid_s2;
       fu_op                             operator_s2;
@@ -241,15 +289,15 @@ module multiplier
       always_ff @(posedge clk_i or negedge rst_ni) begin
         if (~rst_ni) begin
           prod_sum_q    <= '0;
-          corr_s2       <= '0;
+          prod_carry_q  <= '0;
           trans_id_s2   <= '0;
           mult_valid_s2 <= 1'b0;
           operator_s2   <= MUL;
           clmul_s2      <= '0;
           clmulr_s2     <= '0;
         end else begin
-          prod_sum_q    <= prod_sum;
-          corr_s2       <= corr_q;
+          prod_sum_q    <= reduce_sum;
+          prod_carry_q  <= reduce_carry;
           trans_id_s2   <= trans_id_s1;
           mult_valid_s2 <= mult_valid_s1;
           operator_s2   <= operator_s1;
@@ -257,7 +305,7 @@ module multiplier
           clmulr_s2     <= clmulr_s1;
         end
       end
-      assign mult_result_d = prod_sum_q - (RW'(corr_s2) << AW);
+      assign mult_result_d = prod_sum_q + prod_carry_q;
       assign trans_id_sl   = trans_id_s2;
       assign mult_valid_sl = mult_valid_s2;
       assign operator_sl   = operator_s2;

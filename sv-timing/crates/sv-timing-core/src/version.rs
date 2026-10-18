@@ -11,7 +11,9 @@ pub const IR_VERSION: &str = "ir-v3";
 
 /// Opportunity/structural-emission semantics, independent of delay costs.
 /// v1 adds typed +/- offset candidates and unsigned selector indexing.
-pub const CORRECTION_VERSION: &str = "correction-v2";
+/// v3 rejects invalid/unresolved protocol cuts and checks exact latency and
+/// bundle widths before inserting carried registers.
+pub const CORRECTION_VERSION: &str = "correction-v3";
 
 /// Measurement semantics version.
 ///
@@ -109,7 +111,9 @@ pub const CORRECTION_VERSION: &str = "correction-v2";
 /// Unknown conditions, parameter defaults and ambiguous origins stay live.
 /// `delay-v41`: compound assignments retain their read/modify/write
 /// dependency in IR. They are measured but not automatically source-rewritten.
-pub const MEASUREMENT_VERSION: &str = "delay-v41";
+/// `delay-v42`: bounded int localparam ternaries can prove generate
+/// reachability; unknown conditions and unsafe arms remain conservative.
+pub const MEASUREMENT_VERSION: &str = "delay-v42";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

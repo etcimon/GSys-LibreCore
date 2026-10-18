@@ -91,6 +91,70 @@ impl PipeDomain {
     pub fn has_id(&self) -> bool {
         !self.id.is_empty()
     }
+
+    /// Validate the bundle shape before emitting scalar valid registers.
+    /// Multi-lane valids need independent domains, not silent truncation.
+    pub fn check_widths(&self, width: &dyn Fn(&str) -> Option<u32>) -> Result<(), String> {
+        for valid in std::iter::once(&self.valid).chain(self.result_valid.iter()) {
+            if width(valid) != Some(1) {
+                return Err(format!("protocol `{}`: `{valid}` must have a resolved one-bit valid; split vector lanes into domains", self.name));
+            }
+        }
+        for sig in self.carry.iter().chain(self.has_id().then_some(&self.id)) {
+            if !width(sig).is_some_and(|w| w > 0) {
+                return Err(format!(
+                    "protocol `{}`: unresolved bundle width for `{sig}`",
+                    self.name
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    /// Check added stages against the published latency, using exact parameter
+    /// names. A source that already follows that parameter has no spare cycles.
+    pub fn check_latency(
+        &self,
+        added: usize,
+        values: &std::collections::BTreeMap<String, i64>,
+    ) -> Result<(), String> {
+        let Some((param, base)) = &self.latency else {
+            return Ok(());
+        };
+        let lookup = |name: &str| {
+            name.parse::<i64>()
+                .ok()
+                .or_else(|| values.get(name).copied())
+        };
+        let (Some(published), Some(existing)) = (lookup(param), lookup(base)) else {
+            return Err(format!(
+                "latency: `{param}` / base `{base}` lack an exact elaborated value"
+            ));
+        };
+        if published < 1 || existing < 0 {
+            return Err(
+                "latency: published depth must be positive and source depth nonnegative".into(),
+            );
+        }
+        let expected = i64::try_from(added)
+            .ok()
+            .and_then(|n| existing.checked_add(n))
+            .ok_or("latency: stage count overflow")?;
+        if published == expected {
+            return Ok(());
+        }
+        if param == base {
+            return Err(format!(
+                "latency: source already follows `{param}` ({existing} cycles); adding {added} \
+                 stage(s) requires an RTL boundary change and matching consumer depth, not \
+                 merely increasing the same parameter"
+            ));
+        }
+        Err(format!(
+            "latency: `{param}` = {published}, source depth = {existing}, added = {added}; \
+             consumers must track {expected} cycles"
+        ))
+    }
 }
 
 /// Everything the pragmas of one module declare.
@@ -160,6 +224,16 @@ pub fn resolve(module: &TimingModule) -> Option<PipeContract> {
         let at = format!("{}:{}", p.loc.file, p.loc.start_line);
         match p.kind.as_str() {
             "protocol" => {
+                if let Some((key, _)) = p
+                    .args
+                    .iter()
+                    .find(|(key, _)| !matches!(key.as_str(), "valid" | "id" | "kill" | "flush"))
+                {
+                    c.rejected.push(format!(
+                        "{at}: unsupported protocol field `{key}`; no handshake is inferred"
+                    ));
+                    continue;
+                }
                 let Some(name) = p.domain.clone() else {
                     c.rejected
                         .push(format!("{at}: protocol without a domain name"));
@@ -371,6 +445,11 @@ pub fn cut_permission(
     contract: &PipeContract,
     node: &IrNode,
 ) -> CutPermission {
+    // Rejected facts cannot become permission for an uncarried register.
+    // In particular an unknown explicit domain used to fall through to None.
+    if let Some(reason) = contract.rejected.first() {
+        return CutPermission::Forbidden(format!("invalid pipeline contract: {reason}"));
+    }
     let lhs_root = node.lhs.as_deref().and_then(TimingModule::root_ident);
     let by_line = contract
         .cut_ok
@@ -391,16 +470,31 @@ pub fn cut_permission(
         .iter()
         .find(|(l, _, line)| l == lhs || (*line != 0 && *line == node.loc.start_line))
     {
-        let d = dom
-            .as_ref()
-            .and_then(|n| contract.domains.iter().find(|d| &d.name == n))
-            .or_else(|| {
-                contract
-                    .domains
-                    .iter()
-                    .find(|d| node_in_domain(module, node, d))
-            })
-            .cloned();
+        let d = if let Some(name) = dom {
+            match contract.domains.iter().find(|d| &d.name == name) {
+                Some(d) => Some(d.clone()),
+                None => {
+                    return CutPermission::Forbidden(format!("unknown pipeline domain `{name}`"))
+                }
+            }
+        } else {
+            let mut domains = contract
+                .domains
+                .iter()
+                .filter(|d| node_in_domain(module, node, d));
+            let first = domains.next().cloned();
+            if domains.next().is_some() {
+                return CutPermission::Forbidden(
+                    "cut-ok matches multiple domains; name one explicitly".into(),
+                );
+            }
+            first
+        };
+        if d.is_none() && contract.require_contract {
+            return CutPermission::Forbidden(
+                "require-contract: cut-ok has no resolved domain".into(),
+            );
+        }
         return CutPermission::Allowed(d);
     }
     if contract.require_contract {
@@ -952,5 +1046,95 @@ mod tests {
             cut_permission(&m, &c, y),
             CutPermission::Forbidden(_)
         ));
+    }
+
+    #[test]
+    fn rejected_and_missing_domains_cannot_authorize_bare_cuts() {
+        for facts in [
+            "// svt-pipe: cut-ok absent on=sum",
+            "// svt-pipe: require-contract\n// svt-pipe: cut-ok on=sum",
+            "// svt-pipe: protocol ex valid=valid_i\n\
+             // svt-pipe: carry ex nonexistent\n// svt-pipe: cut-ok ex on=sum",
+        ] {
+            let m = analyze(&format!(
+                "module p(input logic valid_i, input logic [15:0] a, b, output logic [15:0] sum);\n\
+                 {facts}\nassign sum = a+b;\nendmodule"
+            ));
+            let c = resolve(&m).unwrap();
+            let n = m
+                .nodes
+                .values()
+                .find(|n| n.lhs.as_deref() == Some("sum"))
+                .unwrap();
+            assert!(
+                matches!(cut_permission(&m, &c, n), CutPermission::Forbidden(_)),
+                "{facts}"
+            );
+        }
+    }
+
+    #[test]
+    fn vector_valid_and_unsupported_ready_do_not_become_scalar_streams() {
+        let m = analyze(SRC);
+        let d = resolve(&m).unwrap().domains.remove(0);
+        let widths = |s: &str| match s {
+            "valid_i" | "res_valid_o" => Some(1),
+            "tid_i" => Some(3),
+            "op_i" => Some(2),
+            _ => None,
+        };
+        assert!(d.check_widths(&widths).is_ok());
+        assert!(d
+            .check_widths(&|_| Some(2))
+            .unwrap_err()
+            .contains("one-bit"));
+        assert!(d
+            .check_widths(&|s| if s == "op_i" { None } else { widths(s) })
+            .is_err());
+        let m = analyze(&SRC.replace("valid=valid_i", "valid=valid_i ready=valid_i"));
+        let c = resolve(&m).unwrap();
+        assert!(c
+            .rejected
+            .iter()
+            .any(|r| r.contains("unsupported protocol field")));
+        let n = m
+            .nodes
+            .values()
+            .find(|n| n.lhs.as_deref() == Some("sum"))
+            .unwrap();
+        assert!(matches!(
+            cut_permission(&m, &c, n),
+            CutPermission::Forbidden(_)
+        ));
+    }
+
+    #[test]
+    fn latency_requires_exact_names_and_distinguishes_source_following_depth() {
+        let m = analyze(&SRC.replace(
+            "// svt-pipe: carry ex op_i",
+            "// svt-pipe: latency ex Cfg.Stages base=2\n// svt-pipe: carry ex op_i",
+        ));
+        let mut d = resolve(&m).unwrap().domains.remove(0);
+        let mut params = std::collections::BTreeMap::from([("Stages".into(), 3)]);
+        assert!(d.check_latency(1, &params).unwrap_err().contains("exact"));
+        params.insert("Cfg.Stages".into(), 3);
+        assert!(d.check_latency(1, &params).is_ok());
+        assert!(d.check_latency(2, &params).is_err());
+        d.latency.as_mut().unwrap().1 = "0".into();
+        assert!(
+            d.check_latency(3, &params).is_ok(),
+            "a combinational source has zero stages"
+        );
+        d.latency.as_mut().unwrap().1 = "Cfg.Stages".into();
+        assert!(d.check_latency(0, &params).is_ok());
+        assert!(d
+            .check_latency(1, &params)
+            .unwrap_err()
+            .contains("RTL boundary"));
+        params.insert("Cfg.Stages".into(), -1);
+        assert!(d
+            .check_latency(0, &params)
+            .unwrap_err()
+            .contains("positive"));
     }
 }

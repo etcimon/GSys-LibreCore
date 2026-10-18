@@ -672,3 +672,25 @@ streamed live route re-mapped the core (474 s) and OpenSTA linked
 (`s2-openroad-sta` pass). The contract on the module is unchanged
 (`cut-ok` on the sum, `latency … base=CVA6Cfg.MultStages`), so `correct
 --allow-latency` still proposes nothing further under 3 stages.
+
+## 14. A132: applicability audit and measured source/emit comparison
+
+The current review is [PIPELINE-PRAGMA-REVIEW.md](PIPELINE-PRAGMA-REVIEW.md).
+It distinguishes the 53 existing guards from executable cut plans, records
+the vector-valid and target-binding gaps, and describes the request reservation,
+backpressure and replay obligations for the highest measured modules.
+
+Invalid domains now refuse emission; required contracts cannot fall back to
+uncarried registers. Stage admission requires resolved scalar valids and bundle
+widths. Unsupported `ready=` is an error. `latency` uses exact keys and explains
+that `base=<same parameter>` leaves no room for an automatically added stage.
+The old advice in §11 to increase that parameter does not solve this equation.
+
+The retained RTL partitions the multiplier into smaller product tiles,
+carry-save reduction and a final addition, at its existing three-cycle depth.
+Paired placement with no disabled arcs improves worst arrival 2.634 → 2.215 ns
+at +1.4% area. The actual corrected SV passes the same surface witnesses and
+places at 2.298 ns. Neither source nor emit is near 10 adjusted FO4 yet.
+The old board's trace describes reg→reg, not necessarily worst-any:
+the causal claims about the input cone in §§12–13 require the independent
+boundary reports now produced by the isolated review runner.

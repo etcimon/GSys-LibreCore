@@ -62,15 +62,20 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
             files[p.relative_to(root).as_posix()] = p.read_bytes()
     for name in ("sv-timing/tools/rtlil_width_map.py",
                  "build-platform/scripts/openroad-module-board.tcl",
+                 "build-platform/scripts/openroad-module-place-study.tcl",
                  "build-platform/scripts/tc_sram_timing_stub.sv",
                  "verif/tb/core/multiplier_sbs/tb_mul_sbs.sv"):
         files[name] = (root / name).read_bytes()
     files["portable.f"] = text.replace(root.as_posix(), "@ROOT@").encode()
     files["host-param-map.json"] = (flist.parent / "param-map.json").read_bytes()
+    fo4 = flist.parent.parent / "platform-fo4.json"
+    if fo4.exists():
+        files["platform-fo4.json"] = fo4.read_bytes()
     profile_files = {
         "control": CHANGED,
         "selection": ("core/ooo/g6lc_iq.sv", "core/ooo/g6lc_lsq.sv"),
         "precompute": ("core/ooo/g6lc_iq.sv", "core/ooo/g6lc_rename.sv", "core/store_buffer.sv"),
+        "multiplier": ("core/multiplier.sv",),
     }
     changed = profile_files[profile]
     measured = MODULES if profile == "control" else {Path(p).stem for p in changed}
@@ -97,6 +102,10 @@ def analyze_results(results: Path) -> None:
     root = Path(__file__).resolve().parents[3]
     results = results.resolve()
     source = results / "source"
+    review_path = source / "review.json"
+    if review_path.exists() and json.loads(review_path.read_text())["profile"] == "multiplier":
+        analyze_multiplier_results(root, results)
+        return
     portable = (source / "portable.f").read_text(encoding="utf-8").replace("@ROOT@", source.as_posix())
     params = source / "host-param-map.json"
     # Use snapshot cfg values, not a newer host run's parameter map. The
@@ -149,6 +158,49 @@ def analyze_results(results: Path) -> None:
                        stderr=subprocess.STDOUT, env=dict(os.environ, RUST_MIN_STACK="16777216"))
 
 
+def analyze_multiplier_results(root: Path, results: Path) -> None:
+    """Correct the isolated source using its own elaborated widths and latency."""
+    source = results / "source"
+    portable = (source / "portable.f").read_text().replace("@ROOT@", source.as_posix())
+    packages = [l for l in portable.splitlines()
+                if l.startswith("+") or l.endswith("_pkg.sv") or "/include/" in l]
+    flist = results / "multiplier-analysis.f"
+    flist.write_text("\n".join(packages + [(source / "core/multiplier.sv").as_posix()]) + "\n")
+    params = json.loads((source / "host-param-map.json").read_text())
+    # The measurement wrapper explicitly overrides this field; all other
+    # configuration values come from the captured package/host snapshot.
+    params["CVA6Cfg.MultStages"] = 3
+    params["cva6_cfg.MultStages"] = 3
+    param_file = results / "multiplier-analysis-params.json"
+    param_file.write_text(json.dumps(params, indent=2))
+    widths = results / "candidate3-width-map.json"
+    assert widths.exists(), "run mult-pipeline mapping before correction"
+    width_data = json.loads(widths.read_text())
+    if "multiplier" not in width_data["modules"]:
+        # read_slang may flatten the known study wrapper. Peel only that
+        # instance prefix, preserving generate scopes and the original map.
+        instance = width_data["modules"].get("g6lc_mul_timing", {})
+        peeled = {name[len("dut."):]: width for name, width in instance.items()
+                  if name.startswith("dut.")}
+        assert peeled, "missing elaborated multiplier instance widths"
+        width_data["modules"] = {"multiplier": peeled}
+        widths = results / "multiplier-analysis-width-map.json"
+        widths.write_text(json.dumps(width_data, indent=2))
+    command = [sys.executable, str(root / "sv-timing/tools/svt.py"), "run", "--release", "--",
+               "correct", "--files-from", str(flist), "--modules-allow", "multiplier",
+               "--param-map", str(param_file), "--width-map", str(widths),
+               "--assume-xlen", "64", "--package-mode", "packages",
+               "--target-mhz", "4000", "--fo4-ps", "20", "--budget-margin", "0.2",
+               "--opt-level", "3", "--allow-latency", "--real-cut-feeds", "--assume-clk",
+               "--emit", "--out-dir", str(results / "corrected"),
+               "--json-out", str(results / "correct.json"),
+               "--trace-log", str(results / "correct.jsonl")]
+    with (results / "correct.log").open("w") as log:
+        subprocess.run(command, cwd=root / "sv-timing", check=True,
+                       stdout=log, stderr=subprocess.STDOUT,
+                       env=dict(os.environ, RUST_MIN_STACK="16777216"))
+
+
 def remote() -> None:
     data, out = Path(os.environ["TH_DATA_DIR"]), Path(os.environ["TH_OUT_DIR"])
     src = out / "source"
@@ -165,6 +217,7 @@ def remote() -> None:
     lib = "/opt/testharness/src/openroad-g6lc/test/Nangate45/Nangate45_typ.lib"
     abc = f"abc -liberty {lib} -D 250 -script +&get,-n;&st;&syn2;&dch,-f;&nf,-D,250;&put"
     evidence: dict = {"sources": identity, "recipe": abc, "proofs": {}, "maps": {}}
+    evidence["liberty_sha256"] = hashlib.sha256(Path(lib).read_bytes()).hexdigest()
 
     def run(name, argv, *, timeout=600, env=None):
         log = out / f"{name}.log"
@@ -180,6 +233,142 @@ def remote() -> None:
         path = out / f"{name}.ys"
         path.write_text(commands)
         return run(name, [ys, "-Q", "-T", "-s", str(path)], timeout=timeout)
+
+    if os.environ.get("CONTROL_MODE") == "mult-pipeline":
+        # Same snapshot, config, recipe and latency on both sides. Optional
+        # corrected SV is tested and mapped as a third, independent variant.
+        portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
+        packages = [l for l in portable.splitlines()
+                    if l.startswith("+") or l.endswith("_pkg.sv") or "/include/" in l]
+        variants = {"baseline": (src / "baseline/core/multiplier.sv", 3),
+                    "candidate3": (src / "core/multiplier.sv", 3)}
+        emitted = data / "multiplier__svt.sv"
+        if emitted.exists():
+            variants["emitted"] = (emitted, 3)
+            evidence["sources"]["emitted"] = hashlib.sha256(emitted.read_bytes()).hexdigest()
+        vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+        evidence["simulator"] = subprocess.check_output([vl, "--version"], text=True).strip()
+        wrapper = out / "mul_timing.sv"
+        wrapper.write_text("""
+module g6lc_mul_timing
+  import ariane_pkg::*;
+  import config_pkg::*;
+#(parameter cva6_cfg_t Base = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg)) (
+  input logic clk_i, rst_ni, mult_valid_i,
+  input logic [Base.TRANS_ID_BITS-1:0] trans_id_i,
+  input fu_op operation_i,
+  input logic [Base.XLEN-1:0] operand_a_i, operand_b_i,
+  output logic [Base.XLEN-1:0] result_o,
+  output logic mult_valid_o,
+  output logic [Base.TRANS_ID_BITS-1:0] mult_trans_id_o
+);
+  function automatic cva6_cfg_t cfg();
+    cfg = Base;
+    cfg.MultStages = `SVT_MUL_STAGES;
+  endfunction
+  multiplier #(.CVA6Cfg(cfg())) dut (.*);
+endmodule
+""")
+        timing = out / "boundary.tcl"
+        board = (src / "build-platform/scripts/openroad-module-board.tcl").read_text()
+        assert board.rstrip().endswith("\nexit")
+        timing.write_text(
+            board.rstrip()[:-len("exit")] + r"""
+# Each boundary owns its own path report; do not attach the r2r trace to any_ns.
+foreach kind {in_reg reg_reg reg_out in_out} {
+  switch $kind {
+    in_reg  {set from $ins; set to [all_registers -data_pins]}
+    reg_reg {set from [all_registers -clock_pins]; set to [all_registers -data_pins]}
+    reg_out {set from [all_registers -clock_pins]; set to [all_outputs]}
+    in_out  {set from $ins; set to [all_outputs]}
+  }
+  set paths [find_timing_paths -path_delay max -path_group mclk -group_path_count 1 -sort_by_slack -from $from -to $to]
+  if {[llength $paths] == 0} {continue}
+  set pe [lindex $paths 0]
+  set ns [expr {[$pe data_arrival_time] * 1e9}]
+  puts "BOUNDARY\t$kind\t$ns"
+  report_checks -path_delay max -path_group mclk -group_path_count 1 -from $from -to $to -fields {slew cap fanout} \
+    > "$::env(BOUNDARY_PREFIX)-$kind.rpt"
+}
+""")
+        for variant, (module, stages) in variants.items():
+            defines = [f"+define+SVT_MUL_STAGES={stages}"]
+            flist = out / f"mul-{variant}.f"
+            flist.write_text("\n".join(packages + defines + [str(module), str(wrapper)]) + "\n")
+            netlist = out / f"mul-{variant}.v"
+            text = yosys(f"mul-map-{variant}",
+                         f"read_slang -f {flist} --top g6lc_mul_timing --single-unit\n"
+                         "hierarchy -check -top g6lc_mul_timing\n"
+                         f"write_rtlil {out / f'{variant}-elaborated.il'}\n"
+                         "proc\nflatten\nopt_clean\nwreduce\nalumacc\nopt_clean\n"
+                         "memory -nomap\nmemory_map\nopt_clean\nopt_dff\nbooth\n"
+                         "techmap\nopt_clean\n"
+                         f"dfflibmap -liberty {lib}\n{abc}\nopt_clean -purge\n"
+                         f"stat -liberty {lib}\nwrite_verilog -noattr -noexpr {netlist}\n")
+            area = re.findall(r"Chip area for module .*?:\s*([\d.]+)", text)
+            assert area, "missing mapped area"
+            evidence["maps"][variant] = {"stages": stages, "area_um2": float(area[-1]), "boundaries": {}}
+            run(f"widths-{variant}", [sys.executable, str(src / "sv-timing/tools/rtlil_width_map.py"),
+                                    str(out / f"{variant}-elaborated.il"),
+                                    "-o", str(out / f"{variant}-width-map.json")])
+            for fanout in (0, 64):
+                env = dict(os.environ, OR_LIBERTY=lib, OR_VERILOG=str(netlist),
+                           OR_TOP="g6lc_mul_timing", OR_PERIOD_NS="0.25",
+                           OR_IGNORE_FANOUT_ABOVE=str(fanout),
+                           BOUNDARY_PREFIX=str(out / f"{variant}-fanout{fanout}"))
+                report = run(f"mul-sta-{variant}-{fanout}", [sta, "-exit", str(timing)], env=env)
+                assert "ROW\t" in report and "link failed" not in report
+                boundary = {m[0]: float(m[1]) for m in
+                            re.findall(r"^BOUNDARY\t(\w+)\t([\d.eE+-]+)$", report, re.M)}
+                assert "reg_reg" in boundary and "in_reg" in boundary, report[-1000:]
+                evidence["maps"][variant]["boundaries"][str(fanout)] = boundary
+            if os.environ.get("CONTROL_PLACE") == "1":
+                env = dict(os.environ,
+                           STUDY_PLATFORM=str(Path(lib).parent), OR_VERILOG=str(netlist),
+                           OR_TOP="g6lc_mul_timing", STUDY_OUTPUT=str(out / f"placed-{variant}"),
+                           STUDY_VARIANT=variant)
+                report = run(f"place-{variant}", [
+                    "/opt/testharness/toolchains/openroad-g6lc-pgo/bin/openroad", "-exit",
+                    str(src / "build-platform/scripts/openroad-module-place-study.tcl"),
+                ], env=env, timeout=900)
+                row = next(l for l in report.splitlines() if l.startswith("PLACE_STUDY "))
+                evidence["maps"][variant]["placement"] = dict(
+                    item.split("=", 1) for item in row.split()[1:])
+            simlist = out / f"sim-{variant}.f"
+            simlist.write_text("\n".join(packages + [
+                str(src / "vendor/pulp-platform/common_cells/src/lzc.sv"),
+                str(src / "core/serdiv.sv"), str(module), str(src / "core/mult.sv"),
+                str(src / "verif/tb/core/multiplier_sbs/tb_mul_sbs.sv"),
+            ]) + "\n")
+            for top in ("tb_mul_sbs", "tb_mul_lifetime"):
+                obj = out / f"obj-{variant}-{top}"
+                run(f"build-{variant}-{top}", [
+                    vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal",
+                    "-Wno-WIDTH", "-Wno-UNOPTFLAT", *defines,
+                    "--top-module", top, "-f", str(simlist), "--Mdir", str(obj), "-j", "4"])
+                log = run(f"sim-{variant}-{top}", [str(obj / f"V{top}"), "+seed=17", f"+lag={stages-1}"])
+                assert f"PASS {top}" in log, log
+                evidence["proofs"][f"{variant}-{top}"] = log.strip()
+            if variant == "candidate3":
+                # Surface coverage of the partial top tile and the feature-off
+                # branch. Corrected SV is qualified only for its specialization.
+                for label, depth, extra in [
+                    ("rv32", 3, ["+define+SVT_MUL_XLEN=32"]),
+                    ("no-rvb", 3, ["+define+SVT_MUL_RVB=0"]),
+                    ("two-stage", 2, []),
+                ]:
+                    obj = out / f"obj-{label}"
+                    run(f"build-{label}", [
+                        vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal",
+                        "-Wno-WIDTH", "-Wno-UNOPTFLAT", f"+define+SVT_MUL_STAGES={depth}",
+                        *extra, "--top-module", "tb_mul_sbs", "-f", str(simlist),
+                        "--Mdir", str(obj), "-j", "4"])
+                    log = run(f"sim-{label}", [str(obj / "Vtb_mul_sbs"), "+seed=23", f"+lag={depth-1}"])
+                    assert "PASS tb_mul_sbs" in log and "errors=0" in log
+                    evidence["proofs"][label] = log.strip()
+        (out / "result.json").write_text(json.dumps(evidence, indent=2))
+        print(json.dumps(evidence["maps"], indent=2), flush=True)
+        return
 
     if os.environ.get("CONTROL_MODE") == "final-widths":
         # Widths and live specializations are elaboration facts. No gate
@@ -868,7 +1057,7 @@ if __name__ == "__main__":
         mode.add_argument("--snapshot", type=Path)
         mode.add_argument("--analyze-results", type=Path)
         parser.add_argument("--baseline", help="baseline revision for the selected review profile")
-        parser.add_argument("--profile", choices=("control", "selection", "precompute"), default="control")
+        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier"), default="control")
         args = parser.parse_args()
         if args.snapshot:
             if not args.baseline:
