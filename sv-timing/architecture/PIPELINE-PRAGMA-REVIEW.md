@@ -174,6 +174,38 @@ and the normal package parser. Upload the emitted multiplier along with the
 same source snapshot for the third comparison. An emitted reparse or a
 structural reduction alone is not the acceptance condition.
 
+## A137 — checkpoint stack: slot-order search rejected; live board flow fix
+
+The A136 ROB form was carried to `g6lc_bp_ckpt`'s oldest-live search (the
+same rotate → lzc → `head + off` shape). Functionally it held: matched-state
+equivalence at 1×32×4 (shipped), 2×8×2 and 2×16×4 (2×64×4 did not finish in
+15 minutes — inconclusive), the seven directed scenarios and seven randomized
+model runs (20k cycles each) with the rotated-reference assertion on, and a
+reference mutant reported. Equivalence first exposed that the lzc-based form
+reads `head + DEPTH-1` on an empty bank; the candidate reproduced that so the
+unused clear-side payload ports stayed identical.
+
+Placement rejected it (`fo4-a137-ckpt5`, same flow, no disabled arcs):
+
+| Checkpoint stack (1×32×4) | Baseline | Candidate |
+|---|---:|---:|
+| Placed worst arrival | 3.410 ns | 3.348 ns |
+| Placed reg→reg | 2.334 ns | **2.715 ns** (+16.3%) |
+| Repaired area | 29262.7 µm² | 29070.3 µm² |
+| Filtered module study | 2.356 ns | 2.241 ns |
+
+The consumer here needs both the slot (clear-side read) and the ring offset
+(`head_d = head_q + off`), so the slot-order form adds a subtraction before
+the pointer add and gives back what the removed rotate saved. The ROB only
+needed the slot. The file is restored; the profile stays as the counterexample.
+
+The whole-core live board re-measure after A134–A136 first failed in the
+flow: the remote yosys script is a bash double-quoted word, and the lean and
+hierarchical recipes' `async2sync t:$aldff t:$aldffe` was expanded by the
+shell (`set -u`: "aldff: unbound variable"). `bashDoubleQuoted` now escapes
+only `<attr>:$<type>` selectors (shell paths such as `$RUN` must still
+expand); `test/bash-quoted.test.ts` pins both directions.
+
 ## A136 — further worst-arrival modules without interface cycles
 
 The three highest measured cones (`store_buffer` 3.702 ns, `wt_dcache_wbuffer`

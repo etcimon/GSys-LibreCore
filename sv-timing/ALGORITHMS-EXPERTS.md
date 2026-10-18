@@ -31,6 +31,12 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A137 update:** the ROB slot-order search carried to the checkpoint stack
+was functionally proven (equivalence ×3, directed + randomized model, mutant)
+but placed reg→reg worsened 2.334 → 2.715 ns because that consumer also needs
+the ring offset — rejected and restored. Live-board flow fix: yosys `t:$aldff`
+selectors are escaped in the remote bash word, shell paths still expand.
+
 **A136 update:** two further latency-neutral changes on the measured list.
 Loop buffer registered expectation: placed 1.824 → 1.493 ns at +12.1% area,
 six cycle-exact runs + 6-step output miter. ROB absolute-order re-anchor:

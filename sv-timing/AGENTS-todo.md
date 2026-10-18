@@ -3,6 +3,13 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A137 — checkpoint stack trial and live-board flow
+
+- [x] `g6lc_bp_ckpt` slot-order oldest-live search: proven, placed reg→reg
+  +16.3% → rejected, restored; counterexample recorded (consumer needs offset).
+- [x] `timings sta-rtl` remote quoting: `t:$aldff` no longer expanded by bash.
+- [ ] Whole-core live board after A134–A136 (streamed recipe) in progress.
+
 ## A136 — further worst-arrival modules (latency-neutral)
 
 - [x] Loop buffer registered expectation address: 6 cycle-exact sbs runs,

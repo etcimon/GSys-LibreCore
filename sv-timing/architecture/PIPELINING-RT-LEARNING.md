@@ -184,6 +184,13 @@ A136 adds two more, with the same discipline
   and the first attempt showed why: a same-cycle arm+consume corner made a
   two-register form inconsistent; the corrected form chooses the side the next
   cycle can observe.
+* **Search in absolute order; do not rotate — when the consumer wants the
+  slot.** The checkpoint stack (A137) needs the ring offset as well as the
+  slot: the slot-order form then re-derives the offset with a subtraction
+  ahead of the pointer add, and placed reg→reg worsened 2.334 → 2.715 ns
+  while the filtered study still improved. Applicability condition: the
+  found slot must be the consumer's value, not an operand of further
+  pointer arithmetic.
 * **Search in absolute order; do not rotate.** A ring find-first "from head"
   equals the lowest hit at or above head, else the lowest hit below it. Two
   log-depth lowest-set searches on the unrotated vector and a late select

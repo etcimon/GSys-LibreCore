@@ -80,6 +80,7 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
         "statcor": ("core/frontend/g6lc_bp_statcor.sv",),
         "loop-emit": ("core/frontend/g6lc_bp_loop.sv",),
         "lbuf": ("core/frontend/g6lc_loop_buffer.sv", "core/ooo/g6lc_rob.sv"),
+        "ckpt": ("core/frontend/g6lc_bp_ckpt.sv",),
     }
     changed = profile_files[profile]
     if profile == "statcor":
@@ -91,6 +92,9 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
     if profile == "lbuf":
         for name in ("verif/tb/core/tb_g6lc_loop_buffer_sbs.sv", "verif/tb/core/tb_g6lc_rob.sv"):
             files[name] = (root / name).read_bytes()
+    if profile == "ckpt":
+        name = "verif/tb/core/tb_g6lc_rtl_review.sv"
+        files[name] = (root / name).read_bytes()
     if profile == "boundary":
         for folder in ("store_buffer_sbs", "instr_realign_sbs"):
             for p in (root / "verif/tb/core" / folder).glob("*.sv"):
@@ -603,6 +607,10 @@ foreach kind {in_reg reg_reg reg_out in_out} {
 
     if (src / "review.json").exists():
         review = json.loads((src / "review.json").read_text())
+        if review["profile"] == "ckpt" and not os.environ.get("CONTROL_MODE"):
+            review_ckpt(src, out, sta, lib, abc, evidence, yosys, run)
+            (out / "result.json").write_text(json.dumps(evidence, indent=2))
+            return
         if review["profile"] == "lbuf" and not os.environ.get("CONTROL_MODE"):
             if os.environ.get("A136_ONLY") != "rob":
                 review_lbuf(src, out, sta, lib, abc, evidence, yosys, run)
@@ -954,6 +962,147 @@ endmodule
                    OR_VERILOG=str(netlist), OR_TOP="g6lc_lbuf_timing",
                    STUDY_OUTPUT=str(out / variant), STUDY_VARIANT=variant)
         text = run("lbuf-place-" + variant, [
+            "/opt/testharness/toolchains/openroad-g6lc-pgo/bin/openroad", "-exit",
+            str(src / "build-platform/scripts/openroad-module-place-study.tcl")], env=env, timeout=900)
+        row = next(l for l in text.splitlines() if l.startswith("PLACE_STUDY "))
+        evidence["maps"][variant]["placement"] = dict(re.findall(r"(\w+)=(\S+)", row))
+        (out / "result.json").write_text(json.dumps(evidence, indent=2))
+    print(json.dumps(evidence["maps"], indent=2), flush=True)
+
+
+def review_ckpt(src, out, sta, lib, abc, evidence, yosys, run):
+    """Checkpoint stack oldest-live search in slot order: matched-state
+    equivalence against the baseline (no new state), the directed and the
+    randomized model benches with the rotated-reference assertion on, and
+    paired mapping / placement at the shipped g6lc64_ooo geometry."""
+    portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
+    packages = [l for l in portable.splitlines()
+                if l.startswith("+") or l.endswith("_pkg.sv") or "/include/" in l]
+    common = [l for l in portable.splitlines() if l.endswith("/lzc.sv")]
+    # The review bench file holds many leaves; mirror the audit runner's
+    # companion set so every module it names elaborates (the ckpt tops
+    # themselves need only the packages, lzc and the stack).
+    companions = ("g6lc_iq.sv", "g6lc_bp_tage_table.sv", "g6lc_bp_tage.sv", "g6lc_bp_ghist.sv",
+                  "g6lc_bp_ittage.sv", "g6lc_l2_mshr.sv", "g6lc_coherence_pkg.sv",
+                  "g6lc_l3_inclusive_inv.sv", "g6lc_cluster.sv")
+    bench_files = [l for l in portable.splitlines() if l.rsplit("/", 1)[-1] in companions]
+    baseline = src / "baseline/core/frontend/g6lc_bp_ckpt.sv"
+    new = src / "core/frontend/g6lc_bp_ckpt.sv"
+    bench = src / "verif/tb/core/tb_g6lc_rtl_review.sv"
+    skip_equiv = os.environ.get("A137_SKIP_EQUIV") == "1"
+    wrapper = out / "ckpt_timing.sv"
+    wrapper.write_text("""
+module g6lc_ckpt_timing import ariane_pkg::*; #(
+  parameter int unsigned NH = 1, parameter int unsigned DEPTH = 32, parameter int unsigned NR_PUSH = 4,
+  parameter int unsigned GL = 24, parameter int unsigned TAGW = 8) (
+  input logic clk_i, rst_ni, flush_i, clear_i, pop_i, pop_v_i, restore_i,
+  input logic [$clog2(NH > 1 ? NH : 2)-1:0] push_hart_i, pop_hart_i,
+  input logic [NR_PUSH-1:0] push_i,
+  input logic [GL-1:0] push_ghist_i,
+  input logic [0:0] push_ras_tos_i,
+  input logic [1:0] push_ras_cnt_i,
+  input logic [63:0] push_ras_top_i,
+  input logic [TAGW-1:0] pop_idx_i,
+  output logic clear_restore_o, alloc_v_o, entry_valid_o, restore_valid_o, empty_o, full_o,
+  output logic [0:0] clear_ras_tos_o, entry_ras_tos_o,
+  output logic [1:0] clear_ras_cnt_o, entry_ras_cnt_o,
+  output logic [63:0] clear_ras_top_o, entry_ras_top_o,
+  output logic [NR_PUSH-1:0][TAGW-1:0] alloc_idx_o,
+  output logic [GL-1:0] entry_ghist_o);
+  function automatic config_pkg::cva6_cfg_t cfg();
+    cfg = config_pkg::cva6_cfg_empty; cfg.XLEN = 64; cfg.VLEN = 64; cfg.RVC = 1;
+    cfg.INSTR_PER_FETCH = NR_PUSH; cfg.NrHarts = NH; cfg.RASDepth = 2;
+  endfunction
+  g6lc_bp_ckpt #(.CVA6Cfg(cfg()), .GHIST_LEN(GL), .DEPTH(DEPTH), .RAS_DEPTH(2), .RAS_PTR_W(1),
+                 .RAS_CNT_W(2), .RAS_VLEN(64), .NR_PUSH(NR_PUSH), .TAG_W(TAGW)) dut (.*);
+endmodule
+""")
+    # 2 x 64 x 4 (7.4 k payload cells) did not finish in 15 minutes; the
+    # identity is per bank, so a second two-hart geometry at 16 covers it.
+    for nh, depth, np_, tagw in () if skip_equiv else ((1, 32, 4, 8), (2, 8, 2, 7), (2, 16, 4, 8)):
+        commands = []
+        for path, name in ((baseline, "gold"), (new, "gate")):
+            flist = out / f"ckpt-{name}.f"
+            flist.write_text("\n".join(packages + common + [str(path), str(wrapper)]) + "\n")
+            commands += [
+                f"read_slang -f {flist} --top g6lc_ckpt_timing --single-unit --ignore-assertions "
+                f"-G NH={nh} -G DEPTH={depth} -G NR_PUSH={np_} -G TAGW={tagw}",
+                "proc", "flatten", "memory_map", "async2sync", "opt_clean",
+                f"rename g6lc_ckpt_timing {name}", f"design -stash {name}",
+            ]
+        commands += ["design -copy-from gold -as gold gold", "design -copy-from gate -as gate gate",
+                     "equiv_make gold gate equiv", "hierarchy -top equiv",
+                     "equiv_simple -seq 1", "equiv_status -assert"]
+        key = f"ckpt-eq-{nh}-{depth}-{np_}"
+        text = yosys(key, "\n".join(commands), timeout=900)
+        assert "Equivalence successfully proven!" in text
+        evidence["proofs"][key] = "matched-state equivalence PASS"
+    vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+    tb_flist = out / "ckpt-tb.f"
+    tb_flist.write_text("\n".join(packages + common + bench_files + [str(new), str(bench)]) + "\n")
+    obj = out / "obj-ckpt-directed"
+    run("ckpt-directed-build", [vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal",
+        "-Wno-WIDTH", "-Wno-UNOPTFLAT", "-f", str(tb_flist), "--top-module", "tb_g6lc_review_ckpt",
+        "--Mdir", str(obj), "-j", "4"], timeout=900)
+    for scenario in range(7):
+        log = run(f"ckpt-directed-{scenario}", [str(obj / "Vtb_g6lc_review_ckpt"), f"+scenario={scenario}"], timeout=120)
+        assert "RTL_REVIEW_PASS ckpt" in log and "%Error" not in log and "rotated reference" not in log, log[-600:]
+    evidence["proofs"]["ckpt-directed"] = "tb_g6lc_review_ckpt scenarios 0-6 PASS, reference assertion quiet"
+    for label, defs, seeds in (("nh2-d64-np4", ["-GNH=2", "-GDEPTH=64", "-GNR_PUSH=4"], (1, 2, 3)),
+                               ("nh1-d32-np4", ["-GNH=1", "-GDEPTH=32", "-GNR_PUSH=4"], (1, 2)),
+                               ("nh2-d4-np2", ["-GNH=2", "-GDEPTH=4", "-GNR_PUSH=2"], (1, 2))):
+        robj = out / f"obj-ckptrand-{label}"
+        run(f"ckptrand-build-{label}", [vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal",
+            "-Wno-WIDTH", "-Wno-UNOPTFLAT", *defs, "-f", str(tb_flist),
+            "--top-module", "tb_g6lc_review_ckptrand", "--Mdir", str(robj), "-j", "4"], timeout=900)
+        for seed in seeds:
+            log = run(f"ckptrand-{label}-{seed}", [str(robj / "Vtb_g6lc_review_ckptrand"),
+                                                    f"+seed={seed}", "+cycles=20000"], timeout=600)
+            line = next((l for l in log.splitlines() if "RTL_REVIEW_" in l and "ckptrand" in l), "")
+            assert line.startswith("RTL_REVIEW_PASS") and "errors=0" in line and "rotated reference" not in log, log[-800:]
+            evidence["proofs"][f"ckptrand-{label}-{seed}"] = line
+    # Negative control on the reference assertion: a shifted reference offset
+    # must be reported by the randomized bench.
+    mutant = out / "g6lc_bp_ckpt_mut.sv"
+    mutant.write_text(new.read_text().replace("if (valid_rot[j]) ref_off = IDX_W'(j);",
+                                              "if (valid_rot[j]) ref_off = IDX_W'(j + 1);"))
+    mflist = out / "ckpt-mut.f"
+    mflist.write_text("\n".join(packages + common + bench_files + [str(mutant), str(bench)]) + "\n")
+    mobj = out / "obj-ckpt-mutant"
+    run("ckpt-mutant-build", [vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal",
+        "-Wno-WIDTH", "-Wno-UNOPTFLAT", "-GNH=1", "-GDEPTH=32", "-GNR_PUSH=4", "-f", str(mflist),
+        "--top-module", "tb_g6lc_review_ckptrand", "--Mdir", str(mobj), "-j", "4"], timeout=900)
+    bad = subprocess.run([str(mobj / "Vtb_g6lc_review_ckptrand"), "+seed=1", "+cycles=2000"], cwd=out,
+                         capture_output=True, text=True, timeout=300)
+    (out / "ckpt-mutant.log").write_text(bad.stdout + bad.stderr)
+    assert "rotated reference" in bad.stdout + bad.stderr, "mutated reference was not reported"
+    evidence["proofs"]["ckpt-assertion-negative"] = "mutated rotated reference is reported"
+    for variant, path in (("ckpt-baseline", baseline), ("ckpt-candidate", new)):
+        vflist = out / f"{variant}.f"
+        vflist.write_text("\n".join(packages + common + [str(path), str(wrapper)]) + "\n")
+        netlist, stats = out / f"{variant}.v", out / f"{variant}.stat"
+        yosys("map-" + variant,
+              f"read_slang -f {vflist} --top g6lc_ckpt_timing --single-unit\n"
+              "proc\nflatten\nopt_clean\nwreduce\nalumacc\nopt_clean\nmemory_map\n"
+              f"opt_dff\ntechmap\nopt_clean\ndfflibmap -liberty {lib}\n{abc}\n"
+              f"opt_clean -purge\ntee -o {stats} stat -liberty {lib}\n"
+              f"write_verilog -noattr -noexpr {netlist}\n")
+        evidence["maps"][variant] = {
+            "area_um2": float(re.search(r"Chip area for module .*?:\s*([\d.]+)", stats.read_text())[1]),
+            "board": {},
+        }
+        for fan in (0, 64):
+            env = dict(os.environ, OR_LIBERTY=lib, OR_VERILOG=str(netlist),
+                       OR_TOP="g6lc_ckpt_timing", OR_PERIOD_NS="0.25", OR_IGNORE_FANOUT_ABOVE=str(fan))
+            text = run(f"sta-{variant}-{fan}", [sta, "-exit",
+                str(src / "build-platform/scripts/openroad-module-board.tcl")], env=env)
+            row = next(l for l in text.splitlines() if l.startswith("ROW\t"))
+            assert "failed" not in row
+            evidence["maps"][variant]["board"][str(fan)] = row
+        env = dict(os.environ, STUDY_PLATFORM=str(Path(lib).parent),
+                   OR_VERILOG=str(netlist), OR_TOP="g6lc_ckpt_timing",
+                   STUDY_OUTPUT=str(out / variant), STUDY_VARIANT=variant)
+        text = run("place-" + variant, [
             "/opt/testharness/toolchains/openroad-g6lc-pgo/bin/openroad", "-exit",
             str(src / "build-platform/scripts/openroad-module-place-study.tcl")], env=env, timeout=900)
         row = next(l for l in text.splitlines() if l.startswith("PLACE_STUDY "))
@@ -1579,7 +1728,7 @@ if __name__ == "__main__":
         mode.add_argument("--snapshot", type=Path)
         mode.add_argument("--analyze-results", type=Path)
         parser.add_argument("--baseline", help="baseline revision for the selected review profile")
-        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf"), default="control")
+        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt"), default="control")
         args = parser.parse_args()
         if args.snapshot:
             if not args.baseline:

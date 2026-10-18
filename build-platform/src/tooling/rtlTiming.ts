@@ -381,6 +381,20 @@ export function buildClockSdc(opts: { clockPort: string; targetMhz: number; top:
  * - `synth`: Yosys's full `synth -flatten` before the mapping (slower, the
  *   netlist Yosys would hand a real flow).
  */
+/**
+ * A yosys script as one bash double-quoted word. The scripts rely on the
+ * remote shell expanding `$RUN`-style paths, but a yosys cell-type selector
+ * (`t:$aldff`) must reach yosys literally: `set -u` otherwise aborts the
+ * run with "aldff: unbound variable" (seen on the lean and hierarchical
+ * recipes; the streamed recipe had escaped it by hand). Only the `$` of a
+ * `<attr>:$<type>` selector is escaped; quotes, backslashes and backticks
+ * are escaped as JSON.stringify did.
+ */
+export function bashDoubleQuoted(text: string): string {
+  const quoted = text.replace(/[\\"`]/g, (c) => "\\" + c);
+  return '"' + quoted.replace(/\b([a-z]):\$/g, (_m, attr: string) => attr + ":\\$") + '"';
+}
+
 export function buildMapScript(opts: {
   manifest: string;
   top: string;
@@ -900,7 +914,7 @@ async function refreshWidthMapRemote(
     "G6LC_FLIST_EOF",
     'cd "$REPO"',
     `echo "WIDTHMAP start $(date -u +%FT%TZ)"`,
-    `/usr/bin/time -f "WIDTHMAP_MEASURE maxrss_kb=%M elapsed_s=%e" "$YS" -p ${JSON.stringify(script)} > "$RUN/synth.log" 2>&1`,
+    `/usr/bin/time -f "WIDTHMAP_MEASURE maxrss_kb=%M elapsed_s=%e" "$YS" -p ${bashDoubleQuoted(script)} > "$RUN/synth.log" 2>&1`,
     'rc=$?; echo "WIDTHMAP rc=$rc"; grep -E "WIDTHMAP_MEASURE" "$RUN/synth.log"',
     'if [ "$rc" != 0 ] || [ ! -s "$RUN/wordlevel.il" ]; then echo "RESULT fail synth"; echo LOGSTART; tail -40 "$RUN/synth.log"; echo LOGEND; exit 1; fi',
     `mkdir -p "/opt/testharness/runs/${tag}/output"`,
@@ -985,7 +999,7 @@ async function runLocal(
   if (staTool.viaWsl) {
     const ys = await windowsPathToWsl(paths.yosys);
     const cwd = await windowsPathToWsl(ctx.repoRoot);
-    synth = await run("wsl", wslCommand(`cd ${JSON.stringify(cwd)} && ${JSON.stringify(ys)} -p ${JSON.stringify(script)}`), {
+    synth = await run("wsl", wslCommand(`cd ${JSON.stringify(cwd)} && ${JSON.stringify(ys)} -p ${bashDoubleQuoted(script)}`), {
       cwd: ctx.repoRoot, stdio: "capture", allowFailure: true, dryRun: ctx.dryRun, logger: ctx.logger,
     });
   } else {
@@ -1174,7 +1188,7 @@ async function runRemote(
     "G6LC_SDC_EOF",
     'cd "$REPO"',
     `echo "SYNTH start $(date -u +%FT%TZ)"`,
-    `/usr/bin/time -f "SYNTH_MEASURE maxrss_kb=%M elapsed_s=%e" "$YS" -p ${JSON.stringify(script)} > "$RUN/synth.log" 2>&1`,
+    `/usr/bin/time -f "SYNTH_MEASURE maxrss_kb=%M elapsed_s=%e" "$YS" -p ${bashDoubleQuoted(script)} > "$RUN/synth.log" 2>&1`,
     'rc=$?; echo "SYNTH rc=$rc"; grep -E "SYNTH_MEASURE|Number of cells|Chip area" "$RUN/synth.log" | tail -4',
     'if [ "$rc" != 0 ]; then echo "RESULT fail synth"; echo LOGSTART; tail -40 "$RUN/synth.log"; echo LOGEND; exit 1; fi',
     ...phaseB,
