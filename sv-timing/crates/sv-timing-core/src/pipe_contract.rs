@@ -422,6 +422,12 @@ pub struct PipeStage {
     /// falls back to `type()`, legal only for ports).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub carry_widths: Vec<Option<u32>>,
+    /// Width of the staged data net (the cut node's), when the measurement
+    /// resolved it: the pipe is declared at that width instead of the
+    /// module-wide `SVT_DATA_W` (a 128-bit product sum must not be staged
+    /// through a 64-bit pipe).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub data_width: Option<u32>,
     /// `kill` with `$id` bound to `id_src`.
     pub kill_expr: String,
     /// Flush signal, when declared.
@@ -465,7 +471,9 @@ pub fn plain_vector(module: &TimingModule, name: &str) -> bool {
                 "logic" | "bit" | "reg" | "wire" | "" | "signed" | "unsigned" | "int" | "integer"
             )
         }
-        None => true,
+        // not recorded as a declaration (a package-imported user type such as
+        // `fu_op x;`): read back through a cast, which is also legal on vectors
+        None => false,
     }
 }
 
@@ -477,6 +485,140 @@ pub fn carry_read(module: &TimingModule, name: &str, sig: &str) -> String {
     } else {
         format!("type({sig})'({net})")
     }
+}
+
+/// The named generate block (if/case generate — not a `for` body, whose
+/// copies would each need their own stage) that declares `name`, as the
+/// declaration site's lexical scope. `None` for a module-level name, a loop
+/// variable, or a scope that is a generate loop's body.
+pub fn generate_scope_of(module: &TimingModule, name: &str) -> Option<crate::SourceLoc> {
+    let d = module.decls.iter().find(|d| d.name == name)?;
+    if d.loop_var || !d.block_local {
+        return None;
+    }
+    let sc = d.scope.clone()?;
+    let in_loop = module.gen_loops.iter().any(|g| {
+        g.loc.file == sc.file && g.loc.start_line <= sc.start_line && g.loc.end_line >= sc.end_line
+    });
+    if in_loop {
+        return None;
+    }
+    Some(sc)
+}
+
+/// Do all block-local names `text` reads live in scope `sc` (or at module
+/// level)? A name declared in another block is not visible where the stage
+/// will be emitted.
+pub fn block_locals_within(module: &TimingModule, text: &str, sc: &crate::SourceLoc) -> bool {
+    let mut ok = true;
+    crate::expr::Expr::parse(text).walk_idents(&mut |i| {
+        let root = TimingModule::root_ident(i).unwrap_or(i);
+        if let Some(d) = module
+            .decls
+            .iter()
+            .find(|d| d.name == root && d.block_local)
+        {
+            match &d.scope {
+                Some(s)
+                    if s.file == sc.file
+                        && s.start_line == sc.start_line
+                        && s.end_line == sc.end_line => {}
+                // a nested scope inside `sc` is fine only if the name is not read
+                // from outside it; the stage's feed sits at `sc`'s level, so refuse.
+                _ => ok = false,
+            }
+        }
+    });
+    ok
+}
+
+/// Merge balance (A125). Everything downstream of the stage's consumers —
+/// the result registers and whatever reads them, up to the module's outputs
+/// — is at the staged age. A register it merges with that is *not* staged
+/// with the domain (a parallel datapath of its own depth, such as the
+/// carry-less product beside the multiplier's product) arrives at the old
+/// age: the merge would pair results of different operations. Returns the
+/// first such register and the node that reads it.
+pub fn merge_violation(
+    module: &TimingModule,
+    domain: &PipeDomain,
+    consumer_lhs: &BTreeSet<String>,
+    is_const: &dyn Fn(&str) -> bool,
+) -> Option<(String, String, u32)> {
+    let regs = crate::select_increment::register_roots(module);
+    let root = |s: &str| TimingModule::root_ident(s).unwrap_or(s).to_string();
+    let mut allowed: BTreeSet<String> = consumer_lhs.clone();
+    for c in domain.carry.iter().chain(domain.result_also.iter()) {
+        allowed.insert(root(c));
+    }
+    allowed.insert(root(&domain.valid));
+    allowed.insert(root(&domain.id));
+    if let Some(f) = &domain.flush {
+        allowed.insert(root(f));
+    }
+    crate::expr::Expr::parse(&domain.kill.replace("$id", "0")).walk_idents(&mut |i| {
+        allowed.insert(root(i));
+    });
+    // downstream closure over the module's nodes: first the whole closure
+    // (every LHS reached is at the staged age), then the reads
+    let node_reads = |n: &IrNode| -> BTreeSet<String> {
+        let mut reads = BTreeSet::new();
+        if let Some(e) = &n.rhs_expr {
+            e.walk_idents(&mut |i| {
+                reads.insert(root(i));
+            });
+        }
+        for g in module.guards.get(&n.id).into_iter().flatten() {
+            crate::expr::Expr::parse(g.trim_start_matches('^')).walk_idents(&mut |i| {
+                reads.insert(root(i));
+            });
+        }
+        reads
+    };
+    let mut frontier: Vec<String> = consumer_lhs.iter().cloned().collect();
+    let mut visited: BTreeSet<u32> = BTreeSet::new();
+    while let Some(name) = frontier.pop() {
+        let mut newly: Vec<String> = Vec::new();
+        for n in module.nodes.values() {
+            if visited.contains(&n.id) || !node_reads(n).contains(&name) {
+                continue;
+            }
+            visited.insert(n.id);
+            if let Some(lhs) = n.lhs.as_deref().and_then(TimingModule::root_ident) {
+                if allowed.insert(lhs.to_string()) {
+                    frontier.push(lhs.to_string());
+                }
+                newly.push(lhs.to_string());
+            }
+        }
+        // every other writer of a reached LHS is the same merge point (the
+        // other arms of a case / if that select the result)
+        for lhs in newly {
+            for n in module.nodes.values() {
+                if n.lhs.as_deref().and_then(TimingModule::root_ident) == Some(lhs.as_str()) {
+                    visited.insert(n.id);
+                }
+            }
+        }
+    }
+    let mut hits: Vec<(String, String, u32)> = Vec::new();
+    for id in &visited {
+        let Some(n) = module.nodes.get(id) else {
+            continue;
+        };
+        let lhs = n
+            .lhs
+            .as_deref()
+            .and_then(TimingModule::root_ident)
+            .unwrap_or("?");
+        for r in node_reads(n) {
+            if regs.contains(&r) && !allowed.contains(&r) && !is_const(&r) {
+                hits.push((r, lhs.to_string(), n.loc.start_line));
+            }
+        }
+    }
+    hits.sort();
+    hits.into_iter().next()
 }
 
 /// Staged net names for a pipe `name`.
@@ -539,14 +681,30 @@ pub fn stage_for(
                 continue;
             }
             let line = n.loc.start_line;
-            consumer_rewires.push((
-                line,
-                domain.valid.clone(),
-                format!("({v_net} & ~{})", domain.kill_for(&id_net)),
-            ));
-            consumer_rewires.push((line, domain.id.clone(), id_net.clone()));
+            // only the signals the consumer actually reads: an export of an
+            // unread carried signal would need a default the consumer's
+            // scope may not see
+            let mut reads = BTreeSet::new();
+            if let Some(e) = &n.rhs_expr {
+                e.walk_idents(&mut |i| {
+                    reads.insert(TimingModule::root_ident(i).unwrap_or(i).to_string());
+                });
+            }
+            let root = |s: &str| TimingModule::root_ident(s).unwrap_or(s).to_string();
+            if reads.contains(&root(&domain.valid)) {
+                consumer_rewires.push((
+                    line,
+                    domain.valid.clone(),
+                    format!("({v_net} & ~{})", domain.kill_for(&id_net)),
+                ));
+            }
+            if reads.contains(&root(&domain.id)) {
+                consumer_rewires.push((line, domain.id.clone(), id_net.clone()));
+            }
             for c in &domain.carry {
-                consumer_rewires.push((line, c.clone(), carry_read(module, name, c)));
+                if reads.contains(&root(c)) {
+                    consumer_rewires.push((line, c.clone(), carry_read(module, name, c)));
+                }
             }
         }
     }
@@ -560,6 +718,7 @@ pub fn stage_for(
         carry_sigs: domain.carry.clone(),
         id_width: width_of(&domain.id),
         carry_widths: domain.carry.iter().map(|c| width_of(c)).collect(),
+        data_width: None,
         flush: domain.flush.clone(),
         consumer_rewires,
         feed_rewires,
@@ -583,6 +742,12 @@ pub fn foreign_reads(
         allowed.insert(root(p));
     }
     for c in &domain.carry {
+        allowed.insert(root(c));
+    }
+    // a `result` consumer is rewired onto the last stage's copies, so a
+    // read of it is at the stage's age (a derived net such as a shifted
+    // carried value)
+    for c in &domain.result_also {
         allowed.insert(root(c));
     }
     allowed.insert(root(&domain.valid));
@@ -697,10 +862,13 @@ mod tests {
             .iter()
             .any(|(_, old, new)| old == "valid_i"
                 && new.contains("sum_svt_p1_v & ~(cancel_i[sum_svt_p1_id])")));
+        // `res_valid_o` / `res_tid_o` do not read `op_i`: no rewire of it there
+        // (an unread carried signal gets no export either)
+        assert!(!st.consumer_rewires.iter().any(|(_, old, _)| old == "op_i"));
         assert!(st
             .consumer_rewires
             .iter()
-            .any(|(_, old, new)| old == "op_i" && new == "sum_svt_p1_c_op_i"));
+            .any(|(_, old, new)| old == "tid_i" && new == "sum_svt_p1_id"));
         let st2 = stage_for(&m, d, "sum_svt_p2", 2, Some("sum_svt_p1"), &w);
         assert_eq!(st2.valid_src, "sum_svt_p1_v");
         assert_eq!(st2.kill_expr, "(cancel_i[sum_svt_p1_id])");

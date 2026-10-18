@@ -589,6 +589,7 @@ mod tests {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.record_edit(EditRecord {
             id: 1,
@@ -606,6 +607,7 @@ mod tests {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let leaf = edits_for_source(&tr, Path::new("leaf.sv"));
         assert_eq!(leaf.records.len(), 1);
@@ -630,6 +632,7 @@ mod tests {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let alu = edits_for_source(&tr, Path::new("/mnt/e/cva6/core/alu.sv"));
         assert!(
@@ -700,6 +703,7 @@ mod tests {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.record_edit(EditRecord {
             id: 1,
@@ -717,6 +721,7 @@ mod tests {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let sources = vec![(PathBuf::from("leaf.sv"), src_a.to_string())];
         let policy = EmitPolicy::default();
@@ -766,6 +771,7 @@ mod tests {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let sources = vec![
             (PathBuf::from("leaf.sv"), leaf_src.to_string()),

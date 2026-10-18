@@ -152,11 +152,12 @@ module multiplier
     // rides as {mult_valid_s1, trans_id_s1, operator_s1}; cancellation is
     // applied outside this module (mult.sv), so the domain has no kill and
     // no flush of its own. A further stage may be cut at the shifted-product
-    // sum; the correction and the operator must travel with it, and the
+    // sum; the correction and the operator must travel with it (corr_sh is
+    // the shifted correction, re-derived from the carried copy), and the
     // output register's valid / trans_id / operator read the last stage.
     // svt-pipe: protocol mul valid=mult_valid_s1 id=trans_id_s1
     // svt-pipe: carry mul operator_s1,corr_q
-    // svt-pipe: result mul valid=mult_valid_q id=trans_id_q operator_d
+    // svt-pipe: result mul valid=mult_valid_q id=trans_id_q operator_d corr_sh
     localparam int unsigned NS = CVA6Cfg.XLEN / 16;
     localparam int unsigned AW = CVA6Cfg.XLEN + 1;   // unsigned pattern of the signed operand
     localparam int unsigned PW = AW + 17;            // (XLEN+1) × 17 unsigned

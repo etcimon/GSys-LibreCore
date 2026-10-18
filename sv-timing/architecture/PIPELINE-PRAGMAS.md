@@ -283,3 +283,66 @@ it.
    design decisions with IPC cost; the contract records them as `no-cut`
    with the architecture that would move them, so no tool pass spends
    effort there.
+
+## 7. Generate-scope emission and merge balance (A125)
+
+**Generate scope.** A cut whose net is declared inside a *named* generate
+block (if/case generate, not a loop body) is admitted when the contract
+permits the anchor and the statement's RHS names only block-locals of that
+scope (`generate_scope_of`, `block_locals_within`); an expression-spine cut
+of the same statement inherits the scope, but a carried plan drops spine
+cuts (a stage is a whole statement). The stage is then emitted *inside the
+block*: its declarations after `begin : <label>`, its feed, capture, sinks
+and assertions before the block's `end` (`inject_into_gen_block`, tokens in
+order so `end else begin : sibling` closes the block at its `end`). The
+staged data net takes the measured width (`PipeStage::data_width`: a
+128-bit product sum is not staged through the module-wide 64-bit pipe).
+
+**Exports.** A consumer outside the block cannot read `label.net`: the
+block does not exist when its condition is false (the one-stage
+configuration of the same module), and the consumer must then read what it
+read before. Each such read becomes a module-level export driven by a
+generate-if on the block's own condition — the staged expression,
+hierarchically, in the active branch; the original signal in the other:
+
+```systemverilog
+logic [1-1:0] svt_gen_two_stage_mult_valid_s1;   // header
+…
+if (CVA6Cfg.MultStages > 1) begin : gen_svt_export_gen_two_stage
+  assign svt_gen_two_stage_mult_valid_s1 = (gen_two_stage.pipe_svt_p1_v & ~(1'b0));
+end else begin : gen_svt_export_default
+  assign svt_gen_two_stage_mult_valid_s1 = mult_valid_s1;
+end
+…
+mult_valid_q <= svt_gen_two_stage_mult_valid_s1;  // the consumer
+```
+
+Only signals a consumer actually reads are rewired or exported (an export
+of an unread block-local would need a default its scope cannot see).
+
+**Merge balance.** The side-by-side witness (`tb_mul_sbs +lag=2`) found
+what the alignment rules had not: the emitted three-stage multiplier
+elaborated in both configurations and failed on one result in three — the
+carry-less products (`clmul_q`, `clmulr_q`) keep their own two-stage
+pipeline and merge with the product at `result_o`, one operation late.
+`merge_violation` now closes everything downstream of the stage's
+consumers (every writer of a reached LHS is the same merge point — the
+other arms of the result select) and refuses any register read there that
+is not staged with the domain:
+
+> merge at `result_o` reads register `clmul_q`, which is not staged with
+> domain `mul`: a parallel datapath must take the same stage (carry it, or
+> stage it with the same parameter)
+
+So the multiplier's third stage is admitted, emitted correctly inside
+`gen_two_stage`, exported to its module-level consumers — and refused on
+merge balance until the carry-less pipeline takes the same depth. That is
+a designer change, named: the clmul staging must follow the product's
+stage count (and `mult.sv`'s liveness depth, `MultStages`, with it).
+
+**Evidence.** Stock multiplier under the widened witness: 3 seeds × 300 k,
+`lag=1`, 0 errors (unchanged). Emitted three-stage multiplier before the
+merge rule: elaborates for `MultStages` 1 and 2, valid and trans_id align at
+`lag=2` on every cycle, **77 313 result mismatches of 234 155** — all
+CLMUL-class, as the rule now predicts. The merge rule is the round's
+result; the stage itself waits on the RTL.

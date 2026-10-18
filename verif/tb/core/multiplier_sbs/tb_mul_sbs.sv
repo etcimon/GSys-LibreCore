@@ -25,15 +25,30 @@ module tb_mul_sbs;
   multiplier #(.CVA6Cfg(Cfg1)) u1 (.clk_i(clk), .rst_ni(rst_ni), .trans_id_i(trans_id_i), .mult_valid_i(mult_valid_i), .operation_i(operation_i), .operand_a_i(operand_a_i), .operand_b_i(operand_b_i), .result_o(result_1), .mult_valid_o(valid_1), .mult_trans_id_o(tid_1));
   multiplier #(.CVA6Cfg(Cfg2)) u2 (.clk_i(clk), .rst_ni(rst_ni), .trans_id_i(trans_id_i), .mult_valid_i(mult_valid_i), .operation_i(operation_i), .operand_a_i(operand_a_i), .operand_b_i(operand_b_i), .result_o(result_2), .mult_valid_o(valid_2), .mult_trans_id_o(tid_2));
 
-  // the one-stage outputs delayed by one cycle = what the two-stage must show
+  // the one-stage outputs delayed by `lag` cycles = what the staged version
+  // must show: 1 for the two-stage multiplier, 2 for a three-stage one
+  // (`+lag=N`, sv-timing A125 generate-scope stage on prod_sum)
+  localparam int unsigned MAX_LAG = 4;
+  int unsigned lag = 1;
+  logic [MAX_LAG:1][Cfg1.XLEN-1:0] result_1_sh;
+  logic [MAX_LAG:1] valid_1_sh;
+  logic [MAX_LAG:1][Cfg1.TRANS_ID_BITS-1:0] tid_1_sh;
+  always_ff @(posedge clk) begin
+    result_1_sh[1] <= result_1;
+    valid_1_sh[1]  <= valid_1;
+    tid_1_sh[1]    <= tid_1;
+    for (int unsigned k = 2; k <= MAX_LAG; k++) begin
+      result_1_sh[k] <= result_1_sh[k-1];
+      valid_1_sh[k]  <= valid_1_sh[k-1];
+      tid_1_sh[k]    <= tid_1_sh[k-1];
+    end
+  end
   logic [Cfg1.XLEN-1:0] result_1_d;
   logic valid_1_d;
   logic [Cfg1.TRANS_ID_BITS-1:0] tid_1_d;
-  always_ff @(posedge clk) begin
-    result_1_d <= result_1;
-    valid_1_d  <= valid_1;
-    tid_1_d    <= tid_1;
-  end
+  assign result_1_d = result_1_sh[lag];
+  assign valid_1_d  = valid_1_sh[lag];
+  assign tid_1_d    = tid_1_sh[lag];
 
   fu_op ops[8] = '{MUL, MULH, MULHU, MULHSU, MULW, CLMUL, CLMULH, CLMULR};
   int unsigned cyc = 0, errors = 0, valids = 0, seed = 1;
@@ -55,6 +70,8 @@ module tb_mul_sbs;
   endfunction
   initial begin
     if (!$value$plusargs("seed=%d", seed)) seed = 1;
+    if (!$value$plusargs("lag=%d", lag)) lag = 1;
+    if (lag < 1 || lag > MAX_LAG) lag = 1;
     void'($urandom(seed));
     #7 rst_ni = 1'b1;
   end
@@ -70,7 +87,7 @@ module tb_mul_sbs;
   always @(posedge clk) begin
     if (rst_ni) begin
       cyc++;
-      if (cyc > 3) begin
+      if (cyc > 3 + lag) begin
         if (valid_1_d !== valid_2) begin errors++; if (errors < 10) $display("[%0d] valid mismatch 1-stage(d)=%b 2-stage=%b", cyc, valid_1_d, valid_2); end
         if (valid_2) begin
           valids++;
@@ -79,7 +96,7 @@ module tb_mul_sbs;
         end
       end
       if (cyc == 300000) begin
-        $display("%s tb_mul_sbs cycles=%0d valid_results=%0d errors=%0d", errors == 0 ? "PASS" : "FAIL", cyc, valids, errors);
+        $display("%s tb_mul_sbs lag=%0d cycles=%0d valid_results=%0d errors=%0d", errors == 0 ? "PASS" : "FAIL", lag, cyc, valids, errors);
         $finish;
       end
     end

@@ -31,6 +31,13 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A125 update:** stages inside named generate blocks are emitted in place
+with module-level exports for the other configurations; the multiplier's
+third stage emitted correctly and the side-by-side witness caught a
+parallel-datapath merge (CLMUL one operation late) — now a contract rule
+(`merge_violation`) that refuses the stage until the carry-less pipeline
+takes the same depth.
+
 **A124 update:** the core's 56 over-budget files are listed in order with
 their rung arithmetic; contracts are declared on the first nine (one
 admissible `cut-ok`, the rest `no-cut` with the architecture that would
@@ -8228,6 +8235,38 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A125 — Generate-scope emission, exports, and the merge rule the witness taught
+
+**Mechanism.** A contract-admitted cut on a net declared in a named
+generate block is staged *inside* the block (declarations after its
+`begin : label`, feed / capture / sinks before its `end`), at the net's
+measured width. Consumers outside the block read module-level exports
+driven by a generate-if on the block's own condition — the staged
+expression when the branch exists, the original signal otherwise — so the
+module's other configurations keep elaborating. Only signals a consumer
+reads are rewired or exported.
+
+**What the witness found.** The emitted three-stage multiplier
+(`prod_sum` staged, `operator_s1`/`corr_q` carried, `corr_sh` re-derived,
+`mult_valid_q`/`trans_id_q`/`operator_d` rewired through exports)
+elaborated for `MultStages` 1 and 2 and aligned valid / trans_id on every
+cycle at `+lag=2`, yet produced **77 313 wrong results of 234 155** — every
+CLMUL-class op: the carry-less products keep their own two-stage pipeline
+and merge with the product at `result_o` one operation late. The alignment
+rules (chain, tail, foreign reads) had covered the path; they had not
+covered a *parallel datapath merging downstream*. `merge_violation` now
+closes everything downstream of the stage's consumers — including every
+other writer of a reached LHS, the other arms of the result select — and
+refuses a register read there that is not staged with the domain. On the
+multiplier it names `clmul_q` at `result_o`; the stage is refused until the
+carry-less pipeline takes the same depth (and `mult.sv`'s liveness with
+it), which is the designer's change.
+
+**Status.** The stock multiplier passes the widened witness unchanged
+(3 seeds × 300 k, `lag=1`, 0 errors). Adjusted FO4 did not move; the
+round's product is a mechanism that would have emitted a wrong pipeline and
+now refuses it with the cause. 369 Rust tests.
 
 ## A124 — The core's list, and the first contracts on it
 

@@ -1295,6 +1295,15 @@ pub fn cut_assigns_from_source(source: &str, trace: &EditTrace) -> Vec<CutAssign
     // that reads another cut's LHS is a real feed: the peer's origin now
     // samples its own stage, so the read sees the registered value — that is
     // what a multi-stage cut of one cone means.
+    // A125: a stage emitted inside its generate block may read and drive
+    // that block's locals — the planner admitted it only when every
+    // block-local it names is of that scope.
+    let scoped_pipes: std::collections::BTreeSet<String> = trace
+        .records
+        .iter()
+        .filter(|r| r.gen_scope.is_some())
+        .filter_map(|r| r.new_name.clone())
+        .collect();
     for c in &mut cuts {
         if c.line == 0 {
             continue;
@@ -1305,10 +1314,12 @@ pub fn cut_assigns_from_source(source: &str, trace: &EditTrace) -> Vec<CutAssign
             .chars()
             .take_while(|ch| ch.is_ascii_alphanumeric() || *ch == '_')
             .collect();
-        let refs_local = names
-            .iter()
-            .any(|n| locals.contains(n) || gen_locals.contains(n))
-            || locals.contains(&lhs_root);
+        let in_scope = scoped_pipes.contains(&c.pipe_name);
+        let refs_local = !in_scope
+            && (names
+                .iter()
+                .any(|n| locals.contains(n) || gen_locals.contains(n))
+                || locals.contains(&lhs_root));
         let refs_auto = names.iter().any(|n| n.starts_with("temp_"));
         let unsafe_feed = refs_local
             || refs_auto
@@ -2579,13 +2590,45 @@ fn loop_end_line(lines: &[&str], start_idx: usize) -> u32 {
     (start_idx + 1) as u32
 }
 
+/// `strip_line_comment` for callers outside this module.
+pub fn strip_line_comment_pub(line: &str) -> String {
+    strip_line_comment(line).to_string()
+}
+
+/// Module-level exports of a generate-scoped stage (A125). A consumer
+/// outside the stage's conditional generate block cannot name the block
+/// hierarchically: the block does not exist when the condition is false
+/// (the one-stage configuration of the same module), and the consumer must
+/// then read what it read before. Each such read becomes a module-level
+/// net driven by a generate-if on the block's own condition — the staged
+/// expression in the active branch, the original signal otherwise.
+#[derive(Debug, Default, Clone)]
+pub struct PipeExports {
+    /// Declarations for the module header (plain vectors of resolved widths).
+    pub decls: String,
+    /// The generate-if driving the exports; module scope, before `endmodule`.
+    pub late: String,
+}
+
+/// Condition text of the generate-if whose `begin : <label>` is on `line`.
+fn gen_block_condition(source: &str, line: u32) -> Option<String> {
+    let l = source.lines().nth(line.checked_sub(1)? as usize)?;
+    let t = strip_line_comment(l);
+    let b = t.find("begin")?;
+    let head = t[..b].trim();
+    let open = head.find('(')?;
+    let close = head.rfind(')')?;
+    (close > open).then(|| head[open + 1..close].trim().to_string())
+}
+
 /// A123: rewire the consumer-side assignments a protocol's `result` pragma
 /// names onto the last stage of each domain — the staged valid (killed again
 /// at use), the staged id and the carried side-band replace the domain's
 /// input signals in those assignments' RHS, as whole identifiers. Line-based
 /// and line-count preserving; a line that is not a rewritable assign leaves
-/// its edit credit-only.
-pub fn rewrite_pipe_consumers(source: &str, trace: &EditTrace) -> String {
+/// its edit credit-only. Returns the rewritten text and the exports a
+/// generate-scoped stage needs at module level.
+pub fn rewrite_pipe_consumers(source: &str, trace: &EditTrace) -> (String, PipeExports) {
     // The last stage of each domain owns the rewires (earlier stages name
     // the same lines with their own nets; the final sample is the one the
     // consumer must read).
@@ -2601,17 +2644,118 @@ pub fn rewrite_pipe_consumers(source: &str, trace: &EditTrace) -> String {
     }
     let mut by_line: std::collections::BTreeMap<u32, Vec<(String, String, u32)>> =
         std::collections::BTreeMap::new();
+    let mut exports = PipeExports::default();
+    let mut export_lines: Vec<String> = Vec::new();
+    let mut export_else: Vec<String> = Vec::new();
+    let mut export_cond: Option<(String, String)> = None; // (label, condition)
     for r in last_by_domain.values() {
         let Some(st) = &r.pipe_stage else { continue };
+        let Some(name) = r.new_name.as_deref() else {
+            continue;
+        };
+        let scope = r.gen_scope.as_ref().and_then(|sc| {
+            crate::gen_block_label(source, sc.start_line).map(|l| {
+                (
+                    l,
+                    sc.start_line,
+                    sc.end_line,
+                    gen_block_condition(source, sc.start_line),
+                )
+            })
+        });
+        let (v_net, id_net) = sv_timing_core::pipe_contract::stage_nets(name);
+        let mut seen_exports: std::collections::BTreeSet<String> =
+            std::collections::BTreeSet::new();
         for (line, old, new) in &st.consumer_rewires {
+            let mut text = new.clone();
+            if let Some((label, s, e, cond)) = &scope {
+                if *line < *s || *line > *e {
+                    // outside the block: through a module-level export with the
+                    // original read as the default of the other branches
+                    let Some(cond) = cond else { continue };
+                    let export = format!("svt_{label}_{}", old.replace(['.', '[', ']'], "_"));
+                    let (width, plain): (u32, bool) = if text.contains(&v_net)
+                        && !text.contains(&id_net)
+                        && !text.contains("_c_")
+                    {
+                        (1, true)
+                    } else if text.contains(&id_net) && !text.contains("_c_") {
+                        (st.id_width.unwrap_or(1), true)
+                    } else {
+                        let k = st.carry_sigs.iter().position(|c| c == old);
+                        (
+                            k.and_then(|k| st.carry_widths.get(k).copied().flatten())
+                                .unwrap_or(1),
+                            !text.contains("type("),
+                        )
+                    };
+                    if seen_exports.insert(export.clone()) {
+                        exports.decls.push_str(&format!(
+                            "  logic [{width}-1:0] {export}; // svt-pipe export of `{old}` from {label}\n"
+                        ));
+                        // the staged expression, hierarchically, without the consumer-side cast
+                        let mut inner = text.clone();
+                        if let Some(i) = inner.find(")'(") {
+                            if let Some(open) = inner[..i].rfind("type(") {
+                                let close = inner[i + 3..]
+                                    .find(')')
+                                    .map(|c| i + 3 + c)
+                                    .unwrap_or(inner.len() - 1);
+                                inner = inner[i + 3..close].to_string();
+                                let _ = open;
+                            }
+                        }
+                        for net in [name.to_string(), v_net.clone(), id_net.clone()]
+                            .into_iter()
+                            .chain(
+                                st.carry_sigs
+                                    .iter()
+                                    .map(|c| sv_timing_core::pipe_contract::carry_net(name, c)),
+                            )
+                        {
+                            inner = sv_timing_core::select_increment::substitute_step(
+                                &inner,
+                                &net,
+                                &format!("{label}.{net}"),
+                            );
+                        }
+                        export_lines.push(format!("    assign {export} = {inner};\n"));
+                        export_else.push(format!("    assign {export} = {old};\n"));
+                        export_cond.get_or_insert((label.clone(), cond.clone()));
+                    }
+                    text = if plain {
+                        export
+                    } else {
+                        format!("type({old})'({export})")
+                    };
+                }
+            }
             by_line
                 .entry(*line)
                 .or_default()
-                .push((old.clone(), new.clone(), r.id));
+                .push((old.clone(), text, r.id));
         }
     }
+    if let Some((label, cond)) = export_cond {
+        exports.late.push_str(&format!(
+            "  // svt-pipe exports: the staged reads of `{label}` for the module's consumers,\n  // the original signals when that branch is not elaborated\n"
+        ));
+        exports
+            .late
+            .push_str(&format!("  if ({cond}) begin : gen_svt_export_{label}\n"));
+        for l in &export_lines {
+            exports.late.push_str(l);
+        }
+        exports
+            .late
+            .push_str("  end else begin : gen_svt_export_default\n");
+        for l in &export_else {
+            exports.late.push_str(l);
+        }
+        exports.late.push_str("  end\n");
+    }
     if by_line.is_empty() {
-        return source.to_string();
+        return (source.to_string(), exports);
     }
     let mut out = String::with_capacity(source.len() + 256);
     for (i, line) in source.lines().enumerate() {
@@ -2625,6 +2769,27 @@ pub fn rewrite_pipe_consumers(source: &str, trace: &EditTrace) -> String {
                             new_rhs = sv_timing_core::select_increment::substitute_step(
                                 &new_rhs, old, new,
                             );
+                        }
+                        // `type(x)'(net)[i]` is not legal: an indexed use reads the net
+                        while let Some(k) = new_rhs.find(")'(") {
+                            let Some(close) = new_rhs[k + 3..].find(')') else {
+                                break;
+                            };
+                            let net_end = k + 3 + close;
+                            if new_rhs[net_end + 1..].starts_with('[') {
+                                let Some(open) = new_rhs[..k].rfind("type(") else {
+                                    break;
+                                };
+                                let net = new_rhs[k + 3..net_end].to_string();
+                                new_rhs.replace_range(open..=net_end, &net);
+                            } else {
+                                break;
+                            }
+                        }
+                        if new_rhs == rhs {
+                            out.push_str(line);
+                            out.push('\n');
+                            continue;
                         }
                         let indent: String =
                             line.chars().take_while(|c| c.is_whitespace()).collect();
@@ -2648,7 +2813,7 @@ pub fn rewrite_pipe_consumers(source: &str, trace: &EditTrace) -> String {
             }
         }
     }
-    out
+    (out, exports)
 }
 
 /// Replace every `if` predicate an A122 guard identity rewrote
@@ -3270,6 +3435,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let out = rewrite_origin_rhs_replaces(src, &trace);
         assert!(
@@ -3416,6 +3582,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let cuts = cut_assigns_from_source(src, &tr);
         assert_eq!(cuts.len(), 1);
@@ -3503,6 +3670,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         if let Some(r) = tr.records.last_mut() {
             r.id = 16;
@@ -3554,6 +3722,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let cuts = cut_assigns_from_source(src, &tr);
         assert_eq!(cuts.len(), 1);
@@ -3602,6 +3771,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3660,6 +3830,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3720,6 +3891,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3768,6 +3940,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.record_edit(EditRecord {
             id: 1,
@@ -3785,6 +3958,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         // Force ids (record_edit renumbers)
         tr.records[0].id = 0;
@@ -3838,6 +4012,7 @@ endmodule
                 emit_predicate: false,
                 emit_predicate_from: None,
                 pipe_stage: None,
+                gen_scope: None,
             });
         }
         for (i, r) in tr.records.iter_mut().enumerate() {
@@ -3887,6 +4062,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -3947,6 +4123,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4045,6 +4222,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4130,6 +4308,7 @@ endmodule
                 emit_predicate: false,
                 emit_predicate_from: None,
                 pipe_stage: None,
+                gen_scope: None,
             });
         }
         tr.records[0].id = 0;
@@ -4195,6 +4374,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4291,6 +4471,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let cuts = cut_assigns_from_source(src, &tr);
         assert_eq!(cuts.len(), 1);
@@ -4361,6 +4542,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4436,6 +4618,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4515,6 +4698,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());
@@ -4587,6 +4771,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.records[0].id = 0;
         tr.records[0].new_name = Some("pipe_svt_p1".into());

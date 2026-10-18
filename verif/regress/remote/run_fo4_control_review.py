@@ -276,6 +276,39 @@ def remote() -> None:
         print(json.dumps(evidence["maps"]), flush=True)
         return
 
+    if os.environ.get("CONTROL_MODE") == "mult-svt":
+        # A125: the emitted multiplier (its gen_two_stage branch carries the
+        # third stage) against the one-stage reference two cycles later, on
+        # the stock tool, three seeds; then both mapped on Nangate45.
+        portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
+        packages = [l for l in portable.splitlines()
+                    if l.startswith("+") or l.endswith("_pkg.sv") or "/include/" in l]
+        vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+        evidence["simulator"] = subprocess.check_output([vl, "--version"], text=True).strip()
+        twin = data / "multiplier__svt.sv"
+        evidence["sources"]["multiplier__svt.sv"] = hashlib.sha256(twin.read_bytes()).hexdigest()
+        for variant, mult_src, lag in (("stock", src / "core/multiplier.sv", 1), ("svt", twin, 2)):
+            flist = out / f"mul-{variant}.f"
+            flist.write_text("\n".join(packages + [
+                str(src / "vendor/pulp-platform/common_cells/src/lzc.sv"),
+                str(mult_src),
+                str(src / "verif/tb/core/multiplier_sbs/tb_mul_sbs.sv"),
+            ]) + "\n")
+            obj = out / f"obj-{variant}"
+            run(f"mul-build-{variant}",
+                [vl, "-O0", "--binary", "--timing", "--assert", "-Wno-fatal", "-Wno-WIDTH",
+                 "-Wno-UNOPTFLAT", "--top-module", "tb_mul_sbs", "-f", str(flist),
+                 "--Mdir", str(obj), "-j", "4"], timeout=900)
+            for seed in (1, 17, 23):
+                log = run(f"mul-sbs-{variant}-{seed}", [str(obj / "Vtb_mul_sbs"), f"+seed={seed}", f"+lag={lag}"], timeout=600)
+                assert "PASS" in log and "errors=0" in log, f"{variant} seed {seed}"
+                evidence["proofs"][f"mul-{variant}-{seed}"] = log.strip().splitlines()[-2][:200]
+        # the standalone module takes its CVA6Cfg from the elaborating top:
+        # the mapped reading comes from the full sta-rtl route, not here
+        (out / "result.json").write_text(json.dumps(evidence, indent=2))
+        print(json.dumps(evidence["proofs"]), flush=True)
+        return
+
     if os.environ.get("CONTROL_MODE") == "precompute-leaf":
         vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
         evidence["simulator"] = subprocess.check_output([vl, "--version"], text=True).strip()

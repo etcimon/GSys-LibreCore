@@ -239,11 +239,13 @@ pub fn apply_edits_to_source_dense(
     // `stc_elem_q` instead of `dot_pending_q` at gemm :1859).
     // LoopRewrite spans first (line counts preserved), then origin RHS
     // rewrites; both are structural and opt in with the BalanceMux RTL knob.
+    let mut pipe_exports = crate::rhs::PipeExports::default();
     let after_bm = if dense.emit_balance_mux_rtl {
         // Guard predicates first: byte spans of the pristine source, one
         // line each, so the line-based stages below see unchanged numbering.
         let after_guards = crate::rhs::rewrite_guard_predicates(source, trace);
-        let after_consumers = crate::rhs::rewrite_pipe_consumers(&after_guards, trace);
+        let (after_consumers, exports) = crate::rhs::rewrite_pipe_consumers(&after_guards, trace);
+        pipe_exports = exports;
         let after_loops = crate::rhs::rewrite_loop_spans(&after_consumers, trace);
         rewrite_origin_rhs_replaces(&after_loops, trace)
     } else {
@@ -306,6 +308,7 @@ pub fn apply_edits_to_source_dense(
                 emit_predicate: false,
                 emit_predicate_from: None,
                 pipe_stage: None,
+                gen_scope: None,
             });
             cuts_for_dense.push(CutAssign {
                 line: 0,
@@ -321,7 +324,45 @@ pub fn apply_edits_to_source_dense(
         emit_trace_owned = Some(t);
     }
     let emit_trace = emit_trace_owned.as_ref().unwrap_or(trace);
-    let blocks = dense::emit_blocks_for_trace_src(emit_trace, dense, &cuts_for_dense, Some(source));
+    // A125: a stage planned inside a named generate block is emitted inside
+    // that block — its declarations after the block's `begin : label`, its
+    // feeds / capture / sinks before the block's `end` — so the block-local
+    // nets it reads and drives are in scope. Module-level stages keep the
+    // header / endmodule placement.
+    let mut scoped: std::collections::BTreeMap<(u32, u32), EditTrace> =
+        std::collections::BTreeMap::new();
+    let mut module_trace = EditTrace::default();
+    for r in &emit_trace.records {
+        match &r.gen_scope {
+            Some(sc) if r.kind == EditKind::InsertReg => {
+                scoped
+                    .entry((sc.start_line, sc.end_line))
+                    .or_default()
+                    .records
+                    .push(r.clone());
+            }
+            _ => module_trace.records.push(r.clone()),
+        }
+    }
+    let pipe_names = |t: &EditTrace| -> std::collections::BTreeSet<String> {
+        t.records
+            .iter()
+            .filter_map(|r| r.new_name.clone())
+            .collect()
+    };
+    let module_cuts: Vec<CutAssign> = {
+        let names = pipe_names(&module_trace);
+        cuts_for_dense
+            .iter()
+            .filter(|c| names.contains(&c.pipe_name))
+            .cloned()
+            .collect()
+    };
+    let mut blocks =
+        dense::emit_blocks_for_trace_src(&module_trace, dense, &module_cuts, Some(source));
+    // A125: module-level exports of generate-scoped stages
+    blocks.top.push_str(&pipe_exports.decls);
+    blocks.late.push_str(&pipe_exports.late);
     let header = machine_header(&policy.tool, &policy.run_id);
     // Dual inject (R11):
     // - early: factorize comments / first-process-safe review
@@ -332,7 +373,23 @@ pub fn apply_edits_to_source_dense(
     // "last endmodule" put the pipe stages in the wrong design).
     let (lo, hi) = owning_module_slice(&rewritten, emit_trace, source);
     let (before, body, after) = (&rewritten[..lo], &rewritten[lo..hi], &rewritten[hi..]);
-    let body = inject_after_module_header(body, &blocks.top);
+    // Generate-scoped stages first: located by the block's label, which the
+    // module-level injections below do not disturb.
+    let mut body = body.to_string();
+    for ((start_line, _end_line), t) in &scoped {
+        let Some(label) = gen_block_label(source, *start_line) else {
+            continue; // an unlabeled block cannot be addressed: credit-only
+        };
+        let names = pipe_names(t);
+        let cuts: Vec<CutAssign> = cuts_for_dense
+            .iter()
+            .filter(|c| names.contains(&c.pipe_name))
+            .cloned()
+            .collect();
+        let b = dense::emit_blocks_for_trace_src(t, dense, &cuts, Some(source));
+        body = inject_into_gen_block(&body, &label, &b.top, &b.late);
+    }
+    let body = inject_after_module_header(&body, &blocks.top);
     let body = inject_before_first_process(&body, &blocks.early);
     let body = inject_bm_snippets_at_origin(&body, &blocks.bm_at_origin);
     let body = inject_before_endmodule(&body, &blocks.late);
@@ -680,6 +737,95 @@ fn owning_module_slice(rewritten: &str, trace: &EditTrace, original: &str) -> (u
     // start the slice at the beginning of the `module` line
     let lo = rewritten[..lo].rfind('\n').map(|k| k + 1).unwrap_or(0);
     (lo, hi)
+}
+
+/// The label of the generate block whose `begin : <label>` is on `line`
+/// (1-based) of `source`, or on the line a `generate`-style header spans to.
+pub fn gen_block_label(source: &str, line: u32) -> Option<String> {
+    let l = source.lines().nth(line.checked_sub(1)? as usize)?;
+    let t = crate::rhs::strip_line_comment_pub(l);
+    let i = t.find("begin")?;
+    let rest = t[i + "begin".len()..].trim_start();
+    let rest = rest.strip_prefix(':')?.trim_start();
+    let label: String = rest
+        .chars()
+        .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
+        .collect();
+    (!label.is_empty()).then_some(label)
+}
+
+/// Inject `top` right after the `begin : label` line of the named generate
+/// block and `late` right before its matching `end`. Depth is counted on
+/// `begin` / `end` keywords from the label line. Unchanged when the block is
+/// not found.
+fn inject_into_gen_block(source: &str, label: &str, top: &str, late: &str) -> String {
+    let lines: Vec<&str> = source.lines().collect();
+    let needle = format!(": {label}");
+    let Some(begin_idx) = lines.iter().position(|l| {
+        let t = crate::rhs::strip_line_comment_pub(l);
+        t.contains("begin") && {
+            let after = t.split("begin").nth(1).unwrap_or("").trim_start();
+            after.starts_with(&needle)
+                || after
+                    .strip_prefix(':')
+                    .map(|r| r.trim_start().starts_with(label))
+                    .unwrap_or(false)
+        }
+    }) else {
+        return source.to_string();
+    };
+    // Tokens in order: `end else begin : sibling` closes this block at its
+    // `end` even though a `begin` follows on the same line.
+    let mut depth = 0i32;
+    let mut end_idx = None;
+    'scan: for (i, l) in lines.iter().enumerate().skip(begin_idx) {
+        let t = crate::rhs::strip_line_comment_pub(l);
+        for tok in t.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            match tok {
+                "begin" => depth += 1,
+                "end" => {
+                    depth -= 1;
+                    if depth <= 0 && i > begin_idx {
+                        end_idx = Some(i);
+                        break 'scan;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    let Some(end_idx) = end_idx else {
+        return source.to_string();
+    };
+    let indent: String = lines[begin_idx]
+        .chars()
+        .take_while(|c| c.is_whitespace())
+        .collect();
+    let mut out = String::with_capacity(source.len() + top.len() + late.len() + 128);
+    for (i, l) in lines.iter().enumerate() {
+        if i == end_idx && !late.trim().is_empty() {
+            out.push_str(&format!(
+                "{indent}  // BEGIN sv-timing auto-correct (generate scope {label})\n"
+            ));
+            out.push_str(late);
+            if !late.ends_with('\n') {
+                out.push('\n');
+            }
+            out.push_str(&format!(
+                "{indent}  // END sv-timing auto-correct (generate scope {label})\n"
+            ));
+        }
+        out.push_str(l);
+        out.push('\n');
+        if i == begin_idx && !top.trim().is_empty() {
+            out.push_str(&format!("{indent}  // sv-timing auto-correct (stage declarations, generate scope {label})\n"));
+            out.push_str(top);
+            if !top.ends_with('\n') {
+                out.push('\n');
+            }
+        }
+    }
+    out
 }
 
 /// Insert `block` immediately before the last `endmodule` in `source`.
@@ -1109,6 +1255,7 @@ mod tests {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         annotate_origin_comments(&mut tree, &trace);
         let text = &tree.files.values().next().unwrap().text;
@@ -1179,6 +1326,7 @@ mod tests {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let policy = EmitPolicy::default();
         let text = apply_edits_to_source(src, &trace, &policy);
@@ -1260,6 +1408,7 @@ mod tests {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.real_cut_feeds = true;
@@ -1339,6 +1488,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.real_cut_feeds = true;
@@ -1413,6 +1563,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.real_cut_feeds = true;
@@ -1494,6 +1645,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         // Lean default: BalanceMux credit-only (no RTL).
         let lean = apply_edits_to_source(src, &trace, &EmitPolicy::default());
@@ -1582,6 +1734,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.emit_balance_mux_rtl = true;
@@ -1659,6 +1812,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         trace.records[0].id = 0;
         trace.records[0].new_name = Some("pipe_svt_p1".into());
@@ -1687,6 +1841,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let mut dense = dense_options_from_source(src);
         dense.emit_balance_mux_rtl = true;
@@ -1739,6 +1894,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let policy = EmitPolicy::default();
         let lean = apply_edits_to_source(src, &trace, &policy);
@@ -1827,6 +1983,7 @@ endmodule
                 emit_predicate: false,
                 emit_predicate_from: None,
                 pipe_stage: None,
+                gen_scope: None,
             });
         }
         let mut dense = dense_options_from_source(src);
@@ -1895,6 +2052,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let policy = EmitPolicy::default();
         let lean = apply_edits_to_source(src, &trace, &policy);
@@ -2454,11 +2612,23 @@ endmodule
         );
         // the untouched second module keeps its text: no twin rewrite crossed the module boundary
         assert!(!emitted.contains("twin moved"), "{emitted}");
-        assert_eq!(emitted.matches("begin : svt_pipe_ff
-").count(), 1, "{emitted}");
+        assert_eq!(
+            emitted
+                .matches(
+                    "begin : svt_pipe_ff
+"
+                )
+                .count(),
+            1,
+            "{emitted}"
+        );
         // the stage block lives in the module that owns the edits
-        let ff_at = emitted.find("begin : svt_pipe_ff
-").unwrap();
+        let ff_at = emitted
+            .find(
+                "begin : svt_pipe_ff
+",
+            )
+            .unwrap();
         let side_at = emitted.find("module pipe_contract_side").unwrap();
         assert!(ff_at < side_at, "stage block emitted into the wrong module");
         // negative module: the side path is refused, nothing is cut
@@ -2816,6 +2986,7 @@ endmodule
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         };
         let mut trace = EditTrace::new();
         trace.record_edit(mk(2, "a || |{b, c, d}"));

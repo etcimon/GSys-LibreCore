@@ -80,6 +80,11 @@ pub struct EditRecord {
     /// the stage as the designer's contract describes it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pipe_stage: Option<sv_timing_core::pipe_contract::PipeStage>,
+    /// The named generate block this stage is emitted inside (A125): its
+    /// declarations, feeds, capture and sinks go into that block, and
+    /// consumers outside it read the stage nets through the block's label.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub gen_scope: Option<sv_timing_core::SourceLoc>,
 }
 
 /// Additional origin→RHS rewrite for multi-arm exclusive wire-up.
@@ -149,6 +154,7 @@ mod tests {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         assert_eq!(t.records[0].origin.start_line, 10);
         assert!(t.to_json_pretty().unwrap().contains("a.sv"));

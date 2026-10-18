@@ -553,16 +553,29 @@ fn dense_pipe_block(
     let width_lit = opts.data_width.max(1);
     // A hoisted declaration sits right after the module header, so `type(lhs)`
     // may only name a port there (a module variable is declared later).
+    // A125: a carried stage knows its data width from the measurement.
+    let width_by_pipe: std::collections::BTreeMap<String, u32> = pipe
+        .iter()
+        .filter_map(|r| {
+            r.pipe_stage
+                .as_ref()
+                .and_then(|st| st.data_width)
+                .and_then(|w| r.new_name.clone().map(|n| (n, w)))
+        })
+        .collect();
     let pipe_decl = |name: &str, suffix: &str, comment: &str, hoisted: bool| -> String {
         let typed = lhs_by_pipe
             .get(name)
             .filter(|l| !hoisted || header_idents.contains(l.split('.').next().unwrap_or(l)));
         match typed {
             Some(l) => format!("  var type({l}) {name}{suffix}; // {comment}\n"),
-            None if hoisted => {
-                format!("  logic [{width_lit}-1:0] {name}{suffix}; // {comment}\n")
-            }
-            None => format!("  logic [SVT_DATA_W-1:0] {name}{suffix}; // {comment}\n"),
+            None => match width_by_pipe.get(name) {
+                Some(w) => format!("  logic [{w}-1:0] {name}{suffix}; // {comment}\n"),
+                None if hoisted => {
+                    format!("  logic [{width_lit}-1:0] {name}{suffix}; // {comment}\n")
+                }
+                None => format!("  logic [SVT_DATA_W-1:0] {name}{suffix}; // {comment}\n"),
+            },
         }
     };
     // The late block's typed feed / reset must agree with the declaration.
@@ -1159,6 +1172,7 @@ mod tests {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr.record_edit(EditRecord {
             id: 1,
@@ -1176,6 +1190,7 @@ mod tests {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         tr
     }
@@ -1260,6 +1275,7 @@ mod tests {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let block = dense_autocorrect_block(&tr, &DenseEmitOptions::default());
         assert!(
@@ -1301,6 +1317,7 @@ mod tests {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
         let mut opts = DenseEmitOptions::default();
         opts.emit_balance_mux_rtl = true; // opt-in structural BalanceMux

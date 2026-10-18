@@ -26,6 +26,10 @@ pub struct CutPoint {
     pub fo4_right: f64,
     /// Origin for the cut.
     pub origin: SourceLoc,
+    /// The named generate block (if/case generate, not a loop body) the cut
+    /// net is declared in, when the module's contract admits a stage there
+    /// (A125): the stage is emitted inside that block.
+    pub gen_scope: Option<SourceLoc>,
 }
 
 /// Validated plan ready for `insert_register`.
@@ -359,7 +363,7 @@ pub fn select_pipeline_cuts(
     // policy_subcode 30.5 with a single 10/20 split.
     let max_cuts = (ctx.policy.opt.max_stages_per_region as usize).clamp(1, 16);
 
-    let cuts = match schedule_pipeline_cuts(ctx, opportunity.path_id, budget, max_cuts) {
+    let mut cuts = match schedule_pipeline_cuts(ctx, opportunity.path_id, budget, max_cuts) {
         Ok(c) if !c.is_empty() => c,
         Ok(_) => {
             return Err(TransformError::InvalidOpportunity(
@@ -382,6 +386,7 @@ pub fn select_pipeline_cuts(
                 fo4_left,
                 fo4_right,
                 origin,
+                gen_scope: None,
             }]
         }
     };
@@ -401,21 +406,89 @@ pub fn select_pipeline_cuts(
         if let Some(module) = ctx.design.modules.get(&path.module) {
             let block_local = module.block_local_names();
             if !block_local.is_empty() {
-                for cut in &cuts {
+                let contract = sv_timing_core::pipe_contract::resolve(module);
+                for cut in &mut cuts {
                     if let Some(n) = module.nodes.get(&cut.after_node) {
                         let hit = [n.lhs.as_deref(), n.rhs.as_deref()]
                             .into_iter()
                             .flatten()
                             .any(|t| module.text_refs_block_local(t, &block_local));
-                        if hit {
-                            return Err(TransformError::InvalidOpportunity(format!(
-                                "cut after node {} names a block-local ({} <- {})",
-                                cut.after_node,
-                                n.lhs.as_deref().unwrap_or("?"),
-                                n.rhs.as_deref().unwrap_or("?")
-                            )));
+                        if !hit {
+                            continue;
                         }
+                        // A125: a block-local inside a *named generate block*
+                        // (not a loop body) under a contract-permitted anchor is
+                        // staged inside that block; the RHS may name only
+                        // block-locals of the same scope.
+                        let permitted = contract.as_ref().is_some_and(|c| {
+                            matches!(
+                                sv_timing_core::pipe_contract::cut_permission(module, c, n),
+                                sv_timing_core::pipe_contract::CutPermission::Allowed(_)
+                            )
+                        });
+                        let scope = n
+                            .lhs
+                            .as_deref()
+                            .and_then(sv_timing_core::ir::TimingModule::root_ident)
+                            .and_then(|root| {
+                                sv_timing_core::pipe_contract::generate_scope_of(module, root)
+                            })
+                            .or_else(|| {
+                                // an expression-spine node split out of a statement:
+                                // the statement's own LHS (the cut-ok anchor on its line)
+                                // names the scope
+                                contract.as_ref().and_then(|c| {
+                                    c.cut_ok
+                                        .iter()
+                                        .find(|(_, _, line)| {
+                                            *line != 0 && *line == n.loc.start_line
+                                        })
+                                        .and_then(|(lhs, _, _)| {
+                                            sv_timing_core::pipe_contract::generate_scope_of(
+                                                module, lhs,
+                                            )
+                                        })
+                                })
+                            });
+                        let same_scope_rhs = scope.as_ref().is_some_and(|sc| {
+                            n.rhs.as_deref().is_none_or(|rhs| {
+                                sv_timing_core::pipe_contract::block_locals_within(module, rhs, sc)
+                            })
+                        });
+                        if permitted && same_scope_rhs {
+                            cut.gen_scope = scope;
+                            continue;
+                        }
+                        return Err(TransformError::InvalidOpportunity(format!(
+                            "cut after node {} names a block-local ({} <- {}){}",
+                            cut.after_node,
+                            n.lhs.as_deref().unwrap_or("?"),
+                            n.rhs.as_deref().unwrap_or("?"),
+                            if scope.is_some() && !permitted {
+                                "; a generate-scoped stage needs a `svt-pipe: cut-ok` anchor"
+                            } else {
+                                ""
+                            }
+                        )));
                     }
+                }
+            }
+        }
+    }
+
+    // A125: a cut whose node names no block-local (an expression-spine
+    // node, a plain intermediate) but sits inside a sibling cut's generate
+    // scope is emitted in that scope too — one plan, one block.
+    let scopes: Vec<SourceLoc> = cuts.iter().filter_map(|c| c.gen_scope.clone()).collect();
+    if !scopes.is_empty() {
+        for c in &mut cuts {
+            if c.gen_scope.is_none() {
+                if let Some(sc) = scopes.iter().find(|sc| {
+                    sc.file == c.origin.file
+                        && sc.start_line <= c.origin.start_line
+                        && sc.end_line >= c.origin.start_line
+                }) {
+                    c.gen_scope = Some(sc.clone());
                 }
             }
         }
@@ -520,6 +593,7 @@ pub fn schedule_pipeline_cuts(
             fo4_left: total,
             fo4_right: 0.0,
             origin,
+            gen_scope: None,
         }]);
     }
 
@@ -596,6 +670,7 @@ pub fn schedule_pipeline_cuts(
                 fo4_left: left,
                 fo4_right: right,
                 origin,
+                gen_scope: None,
             });
             if cuts.len() >= max_cuts {
                 break;
@@ -629,6 +704,7 @@ pub fn schedule_pipeline_cuts(
                     fo4_left: left,
                     fo4_right: right,
                     origin,
+                    gen_scope: None,
                 });
                 last_cut = i + 1;
                 cum2 = 0.0;
@@ -653,6 +729,7 @@ pub fn schedule_pipeline_cuts(
             fo4_left: left.max(total * 0.5),
             fo4_right: right.max(total * 0.5),
             origin,
+            gen_scope: None,
         });
     }
 
@@ -830,6 +907,31 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
             let extra = 1 + 8 + 8 * d.carry.len() as u32;
             let mut kept: Vec<&CutPoint> = Vec::new();
             for cut in ordered.iter() {
+                // A carried stage is a whole statement: an expression-spine
+                // cut (no LHS of its own) would need the statement's RHS
+                // rewritten around it, which the carried emission does not
+                // do yet — the stage is left to the statement's own cut.
+                let has_lhs = ctx
+                    .design
+                    .paths
+                    .iter()
+                    .find(|p| p.id == cut.path_id)
+                    .and_then(|p| ctx.design.modules.get(&p.module))
+                    .and_then(|m| m.nodes.get(&cut.after_node))
+                    .and_then(|n| n.lhs.as_deref())
+                    .and_then(sv_timing_core::ir::TimingModule::root_ident)
+                    .is_some();
+                if !has_lhs {
+                    ctx.log_algo(
+                        "pipe_contract.refuse",
+                        AlgoTrace::kv([
+                            ("module", json!(ctx.active_module_name)),
+                            ("line", json!(cut.origin.start_line)),
+                            ("detail", json!("expression-spine cut dropped from a carried plan: a stage is a whole statement")),
+                        ]),
+                    );
+                    continue;
+                }
                 let width = ctx
                     .design
                     .paths
@@ -1061,6 +1163,61 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
                     }
                 }
             }
+            if refuse.is_none() {
+                // Merge balance: the consumers' downstream may read no
+                // register that is not staged with the domain.
+                let last = &ordered[0];
+                if let Some(m) = ctx
+                    .design
+                    .paths
+                    .iter()
+                    .find(|p| p.id == last.path_id)
+                    .and_then(|p| ctx.design.modules.get(&p.module))
+                {
+                    let resolver = sv_timing_core::width::WidthResolver::from_parts(
+                        &ctx.design.packages,
+                        &ctx.design.param_map_ints,
+                        &m.decls,
+                        &m.ports,
+                        &m.const_exprs,
+                        &m.typedef_texts,
+                        &m.package_imports,
+                        ctx.design.width_map.get(&m.name),
+                    );
+                    let is_const = |name: &str| resolver.is_const_name(name) || name.contains("::");
+                    let mut consumer_lhs: std::collections::BTreeSet<String> =
+                        cut_lhs.iter().filter(|l| !l.is_empty()).cloned().collect();
+                    for t in [domain.result_valid.as_deref(), domain.result_id.as_deref()]
+                        .into_iter()
+                        .flatten()
+                        .chain(domain.result_also.iter().map(String::as_str))
+                    {
+                        consumer_lhs.insert(t.to_string());
+                    }
+                    for line in &tail_lines {
+                        for n in m.nodes.values().filter(|n| n.loc.start_line == *line) {
+                            if let Some(l) = n
+                                .lhs
+                                .as_deref()
+                                .and_then(sv_timing_core::ir::TimingModule::root_ident)
+                            {
+                                consumer_lhs.insert(l.to_string());
+                            }
+                        }
+                    }
+                    if let Some((reg, at, line)) = sv_timing_core::pipe_contract::merge_violation(
+                        m,
+                        &domain,
+                        &consumer_lhs,
+                        &is_const,
+                    ) {
+                        refuse = Some(format!(
+                            "merge at `{at}` (line {line}) reads register `{reg}`, which is not staged with domain `{}`: a parallel datapath must take the same stage (carry it, or stage it with the same parameter)",
+                            domain.name
+                        ));
+                    }
+                }
+            }
             ctx.log_algo(
                 "pipe_contract.plan",
                 AlgoTrace::kv([
@@ -1186,6 +1343,11 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
                 prev_stage_name.as_deref(),
                 &width_of,
             );
+            st.data_width = module
+                .nodes
+                .get(&cut.after_node)
+                .map(|n| n.width)
+                .filter(|w| *w > 0);
             if data_stage == last_data_stage {
                 // Tail nodes (after the last cut on the path) read the last
                 // stage's carried copies, valid and id.
@@ -1259,6 +1421,7 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage,
+            gen_scope: cut.gen_scope.clone(),
         };
         ctx.trace.record_edit(rec.clone());
         ctx.link_last_tradeoff();
@@ -1486,6 +1649,7 @@ pub fn split_assign(
         emit_predicate: false,
         emit_predicate_from: None,
         pipe_stage: None,
+        gen_scope: None,
     };
     ctx.trace.record_edit(rec.clone());
     ctx.pending_ir_dirty = true;
@@ -1565,6 +1729,7 @@ pub fn rebalance_associative_node(
         emit_predicate: false,
         emit_predicate_from: None,
         pipe_stage: None,
+        gen_scope: None,
     };
     ctx.trace.record_edit(rec.clone());
     ctx.pending_ir_dirty = true;
@@ -1705,6 +1870,7 @@ pub fn expr_rewrite_on_node(
             emit_predicate: true,
             emit_predicate_from: Some(from),
             pipe_stage: None,
+            gen_scope: None,
         };
         ctx.trace.record_edit(rec.clone());
         if shape.est_cells > 0.0 {
@@ -1766,6 +1932,7 @@ pub fn expr_rewrite_on_node(
         emit_predicate: false,
         emit_predicate_from: None,
         pipe_stage: None,
+        gen_scope: None,
     };
     ctx.trace.record_edit(rec.clone());
     if shape.est_cells > 0.0 {
@@ -2422,6 +2589,7 @@ pub fn balance_mux_on_path(
         emit_predicate: false,
         emit_predicate_from: None,
         pipe_stage: None,
+        gen_scope: None,
     };
     ctx.balance_mux_done.insert(path_id);
     ctx.balance_mux_credit.insert(path_id, fo4_after);
@@ -2623,6 +2791,7 @@ pub fn select_increment_on_node(
         emit_predicate: false,
         emit_predicate_from: None,
         pipe_stage: None,
+        gen_scope: None,
     };
     ctx.trace.record_edit(rec.clone());
     ctx.link_last_tradeoff();
@@ -2753,6 +2922,7 @@ pub fn loop_rewrite_on_node(
         emit_predicate: false,
         emit_predicate_from: None,
         pipe_stage: None,
+        gen_scope: None,
     };
     ctx.trace.record_edit(rec.clone());
     ctx.pending_ir_dirty = true;

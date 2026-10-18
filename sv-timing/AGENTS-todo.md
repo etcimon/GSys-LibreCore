@@ -3,6 +3,19 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A125 — generate-scope emission and merge balance
+
+- [x] Stage emitted inside the owning named generate block; measured data
+  width; exports with a sibling default for outside consumers; only-read
+  rewires; `tb_mul_sbs +lag=N`; remote `CONTROL_MODE=mult-svt`.
+- [x] `merge_violation`: downstream closure (all writers of a reached LHS)
+  refuses an unstaged register at a merge — found by the witness on CLMUL.
+- [ ] Multiplier: carry-less pipeline depth = product depth (`MultStages`),
+  `mult.sv` liveness depth with it; then re-run `mult-svt` and the board.
+- [ ] Spine cuts inside carried plans (statement RHS rewritten around the
+  staged sub-expression).
+- [ ] Generate loops (per-iteration stages); unnamed generate blocks.
+
 ## A124 — the core's list and round one
 
 - [x] Ordered list of the 56 files over 10 adjusted FO4 (`PIPELINE-PRAGMAS.md` §6).

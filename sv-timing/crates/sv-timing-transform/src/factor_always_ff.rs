@@ -108,6 +108,7 @@ pub fn factor_always_ff_regions(ctx: &mut PassContext) {
             emit_predicate: false,
             emit_predicate_from: None,
             pipe_stage: None,
+            gen_scope: None,
         });
     }
 }
