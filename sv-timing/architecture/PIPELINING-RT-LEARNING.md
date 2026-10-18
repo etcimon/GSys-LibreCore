@@ -177,13 +177,16 @@ The A134 follow-up provides two further tested RTL patterns
 A136 adds two more, with the same discipline
 ([evidence](PIPELINE-PRAGMA-REVIEW.md#a136--further-worst-arrival-modules-without-interface-cycles)):
 
-* **Register a derived address instead of recomputing it.** The loop buffer's
+* **Register a derived address instead of recomputing it — then check the
+  unbuffered view.** (A137 outcome: reverted.) The loop buffer's
   compares read `base + cursor<<ALIGN`; a register tracks the sum for the active
   cursor and is updated from register-formed candidates on exactly the cursor
   events. The proof obligation is a per-state invariant asserted every cycle,
   and the first attempt showed why: a same-cycle arm+consume corner made a
   two-register form inconsistent; the corrected form chooses the side the next
-  cycle can observe.
+  cycle can observe. The placed pair improved, the live unbuffered board got
+  worse (late 64-bit mux selects that only buffer repair absorbs) and the
+  change was reverted: a candidate must improve in both views.
 * **Search in absolute order; do not rotate — when the consumer wants the
   slot.** The checkpoint stack (A137) needs the ring offset as well as the
   slot: the slot-order form then re-derives the offset with a subtraction

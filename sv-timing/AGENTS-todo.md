@@ -8,12 +8,15 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 - [x] `g6lc_bp_ckpt` slot-order oldest-live search: proven, placed reg→reg
   +16.3% → rejected, restored; counterexample recorded (consumer needs offset).
 - [x] `timings sta-rtl` remote quoting: `t:$aldff` no longer expanded by bash.
-- [ ] Whole-core live board after A134–A136 (streamed recipe) in progress.
+- [x] Whole-core live board after A134–A136: realign 50.8, statcor 33.7, ROB
+  69.8, multiplier 97.3; store/wbuffer/frontend/rename unchanged at the top.
+- [x] Loop buffer A136 reverted: live board 72.3 → 94.9 despite placed gain.
 
 ## A136 — further worst-arrival modules (latency-neutral)
 
 - [x] Loop buffer registered expectation address: 6 cycle-exact sbs runs,
-  6-step output miter, placed 1.824 → 1.493 ns at +12.1% area (retained).
+  6-step output miter, placed 1.824 → 1.493 ns at +12.1% area — **reverted in
+  A137** (live unbuffered board 1.548 → 2.030 ns).
 - [x] ROB absolute-order head re-anchor: equivalence ×3, directed + mutant
   negative, placed reg→reg 2.049 → 1.568 ns at −2.0% area (retained).
 - [ ] `store_buffer` / `wt_dcache_wbuffer` / `frontend`: need input staging

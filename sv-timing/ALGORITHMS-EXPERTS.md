@@ -31,6 +31,11 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A137 update (board):** live board after A134–A136: realign 119 → 50.8,
+statcor 83.7 → 33.7, ROB 82.4 → 69.8, multiplier 118 → 97.3 adjusted FO4;
+top four unchanged. The loop-buffer registered expectation read worse on the
+unbuffered board (72.3 → 94.9) despite the placed gain and is reverted.
+
 **A137 update:** the ROB slot-order search carried to the checkpoint stack
 was functionally proven (equivalence ×3, directed + randomized model, mutant)
 but placed reg→reg worsened 2.334 → 2.715 ns because that consumer also needs

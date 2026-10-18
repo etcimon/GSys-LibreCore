@@ -176,6 +176,25 @@ structural reduction alone is not the acceptance condition.
 
 ## A137 — checkpoint stack: slot-order search rejected; live board flow fix
 
+**Live board after A134–A136 (`timings sta-rtl --remote --map-recipe
+streamed`, Nangate45, fanout-filtered unplaced module study, per-module map
+content-hashed):** `instr_realign` 119.0 → **50.8** adjusted FO4 (2.547 →
+1.088 ns), `g6lc_bp_statcor` 83.7 → **33.7** (1.791 → 0.721 ns), `g6lc_rob`
+82.4 → **69.8** (1.764 → 1.493 ns), `multiplier` 118.3 → **97.3** (2.531 →
+2.081 ns). The top of the list is unchanged (`store_buffer` 173.0,
+`wt_dcache_wbuffer` 132.3, `frontend` 128.2, `g6lc_rename` 125.9); 56 of 73
+measured modules remain over budget; budget-equivalent 216 MHz.
+
+**Loop buffer reverted.** The A136 registered-expectation form improved the
+placed/repaired pair (1.824 → 1.493 ns) but read **worse on the live board**:
+72.3 → 94.9 adjusted FO4 (1.548 → 2.030 ns, 9 cells, ending at the new
+expectation register). The new form moves the critical path onto late mux
+selects with 64-bit fanout; `repair_design` buffers them in the placed flow,
+the unbuffered board does not. The two views disagree, the board is the
+acceptance metric, so the RTL is restored to its A135 state and the result
+is recorded as a flow-disagreement counterexample: retention needs both the
+paired placement and the live board to improve.
+
 The A136 ROB form was carried to `g6lc_bp_ckpt`'s oldest-live search (the
 same rotate → lzc → `head + off` shape). Functionally it held: matched-state
 equivalence at 1×32×4 (shipped), 2×8×2 and 2×16×4 (2×64×4 did not finish in
