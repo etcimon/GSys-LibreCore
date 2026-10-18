@@ -2061,6 +2061,27 @@ prerequisite for this work under the existing dual license. No licensing policy 
   Switched`, 1.267 s where every pre-fix run oopsed) and on to 123.8 M
   cycles / 1.665 s (`PCI: CLS 0 bytes`) — the NULL `dir` is gone.** It
   then stopped on the drained-handoff witness → T45.
+- [ ] **T47 — the fixup queue's deferred array write put older bytes back
+  over a younger store's write to the same word (2026-10-18).** The t49 L3
+  (`l3h49`, T39/T44 in, T46 out) died at **36.3137 s with the identical
+  `list_add corruption … (ffffffff8015cd62) … ffffffc80023bbd0`** as t47b
+  — same guest time, same values, two RTL builds — so it is not the
+  covered-load class: the t47b oracle's mismatch #5 (`ret_from_exception`
+  `c.ldsp s7,184(sp)` returning the previous trap frame's s7) is a trap
+  frame slot written twice: the first `sd` ACKed before its tag check
+  (fixup queue, array write pending), the second `sd` through the wbuffer
+  whose array write lands first, then the fixup's RETIRE writes the old
+  word back. **Fix:** `wt_dcache_wbuffer.sv` — a store accepted into the
+  wbuffer (`wbuffer_wren`) clears the bytes it covers from every pending
+  fixup entry (queue and bypass slot) for its word, on the post-push state
+  so an ACK and a re-write in the same cycle are masked too; an entry with
+  no bytes left is dead and skipped. Invariant
+  `fixup_write_not_superseded` (a fixup array write never carries a byte
+  a younger wbuffer entry holds). `G6LC_MUT_FIXUP_KEEP_SUPERSEDED` =
+  pre-fix. Lint clean. Build `ooocoh-t52-ooo-pgo-build` (HEAD = T35…T47):
+  battery, L1, and the L3 past 36.3 s with the oracle are the verdict; the
+  t51 L3 (T46 in, T47 out) keeps running to attribute the 36 s death
+  between the two.
 - [x] **T46 — WT dcache readout forwarded from ONE wbuffer/fixup entry: a
   word held by an older fixup entry (array write pending) and a younger
   wbuffer entry at once gave a load the young entry's bytes over the
