@@ -405,6 +405,16 @@ module g6lc_iq
   // A104): `q_after_issue[slot_entry[g]]` re-decoded the slot the select
   // had just encoded; `issue_valid_o[g]` is `|grant[g]`, so the write under
   // `grant[g][e] && issue_ack_i[g]` is the same write.
+  // Re-pipelining contract (sv-timing A124; 3.06 ns reg->reg older_d ->
+  // q_after_issue on Nangate45). Wakeup -> select -> grant -> entry clear is
+  // the issue loop: a stage in it costs a bubble between dependent
+  // instructions unless the consumers are woken speculatively one cycle
+  // ahead — an issue-queue architecture, not a module-local stage. The
+  // A119 parallel grants and the A122 one-hot site (older_d) are the
+  // latency-neutral forms that remain.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=q_after_issue
+  // svt-pipe: no-cut on=older_d
   always_comb begin
     q_after_issue = q_chain;
     for (int unsigned g = 0; g < CVA6Cfg.NrIssuePorts; g++)

@@ -749,6 +749,15 @@ module frontend
   assign fetch_address = arch_valid ? arch_pc :
       redirect_hold ? redirect_pc_q : seq_base;
 
+  // Re-pipelining contract (sv-timing A124; 3.05 ns reg->reg npc_d ->
+  // predict_address on Nangate45). npc_q -> predictor lookup -> seq_base ->
+  // npc_d is the fetch loop: a register anywhere in it changes the redirect
+  // latency of every prediction, i.e. the predictor architecture (next-line
+  // prediction with late correction), not a module-local stage.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=npc_d
+  // svt-pipe: no-cut on=seq_base
+  // svt-pipe: no-cut on=fetch_address
   always_comb begin : npc_select
     if (arch_valid) npc_d = arch_step ? next_block(arch_pc) : arch_pc;
     // re-present the redirect target until its block has been registered

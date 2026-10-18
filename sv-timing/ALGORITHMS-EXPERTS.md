@@ -31,6 +31,12 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A124 update:** the core's 56 over-budget files are listed in order with
+their rung arithmetic; contracts are declared on the first nine (one
+admissible `cut-ok`, the rest `no-cut` with the architecture that would
+move them); the planner is driven by the contract. The multiplier's third
+stage is blocked on generate-scope emission; the queues on input staging.
+
 **A123 update:** re-pipelining is now *declarable*: `// svt-pipe:` pragmas
 (protocol valid/id/kill/flush, carry, result, cut-ok, no-cut,
 require-contract) are collected like the `$onehot` facts and turn a
@@ -8222,6 +8228,45 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A124 — The core's list, and the first contracts on it
+
+**The list.** Fifty-six modules measure over 10 adjusted FO4 on the
+retained tree (Nangate45): `g6lc_lsq` 176.0 (3.766 ns), `g6lc_iq` 142.8,
+`frontend` 142.4, `store_buffer` 141.3, `multiplier` 131.8, `scoreboard`
+127.9, `g6lc_rename` 125.9, `instr_realign` 119.0, `wt_dcache_wbuffer`
+105.6, `g6lc_ooo_dispatch` 97.9, `alu` 96.4, … down to `g6lc_fdip` 10.1.
+The full ordered table with files is `architecture/PIPELINE-PRAGMAS.md` §6.
+The rung arithmetic (`ceil(adj/10)`: 18 stages for the LSQ cone, 15 for
+the IQ, 10 for the ALU) says what 10 adjusted FO4 means physically: a
+214 ps cycle is below one 64-bit adder on this library, so the lower rungs
+split operators, not only cones.
+
+**The pattern.** Worst file first: declare its contract, run `correct
+--allow-latency`, keep what the witness and the board confirm, re-measure,
+move on. The contract's verdicts name the next mechanism when the rung is
+not yet mechanizable.
+
+**Round one.** Contracts on nine files (multiplier, lsq, frontend,
+store_buffer, scoreboard, iq, rename, alu, dispatch) — protocol roles from
+the ports, `no-cut` where a stage would split one transaction's view (the
+many-writer next-state functions, the fetch and issue loops, the rename
+map) with the architecture that would move each written beside it, one
+`cut-ok` where a stage is admissible (the multiplier's shifted-product
+sum). Verdicts: the multiplier's bare cuts on `operand_a`/`sign_a`/`sign_b`
+are refused (they would have desynchronised valid/id — exactly the hazard
+the contract exists for); the planner, now driven by permission, snaps the
+stage-2 cut to `prod_sum`; the emitter refuses it because `prod_sum` lives
+in `gen_two_stage` — generate-scope emission is the next emitter
+mechanism. The state machines ask for input staging (`stage-input`,
+reserved in the vocabulary); rename and realign for id-less domains;
+dispatch for struct-member ids.
+
+**Mechanism changes.** A declared protocol implies `require-contract`;
+`kill=` optional (a kill without `$id` is global); `result` takes further
+consumer assignments; user-typed carries read back through `type()'()`;
+names declared with package-imported types bind through their
+assignments; `schedule_pipeline_cuts` snaps to permitted anchors.
 
 ## A123 — Re-pipelining contracts declared in the RTL (`svt-pipe` pragmas)
 

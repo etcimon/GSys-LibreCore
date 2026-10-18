@@ -45,7 +45,8 @@ pub struct PipeDomain {
     pub valid: String,
     /// Transaction / tag identifying the operation.
     pub id: String,
-    /// Kill expression with `$id` standing for the operation's id.
+    /// Kill expression with `$id` standing for the operation's id; empty
+    /// when the domain declares none (cancellation handled outside, flush only).
     pub kill: String,
     /// Flush signal, when declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -59,11 +60,19 @@ pub struct PipeDomain {
     /// Consumer-side id assignment to rewire onto the last stage.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub result_id: Option<String>,
+    /// Further consumer-side assignments (by LHS root) that read carried or
+    /// protocol signals and must read the last stage's copies.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub result_also: Vec<String>,
 }
 
 impl PipeDomain {
-    /// `kill` with `$id` replaced by `id_expr`, parenthesised.
+    /// `kill` with `$id` replaced by `id_expr`, parenthesised; `(1'b0)` for
+    /// a domain without a kill.
     pub fn kill_for(&self, id_expr: &str) -> String {
+        if self.kill.is_empty() {
+            return "(1'b0)".to_string();
+        }
         format!("({})", self.kill.replace("$id", id_expr))
     }
 }
@@ -96,9 +105,17 @@ pub enum CutPermission {
     Forbidden(String),
 }
 
+/// Declared in the module: a declaration site, a port, or — for a variable
+/// of a package-imported user type the parser does not record as a
+/// declaration (`fu_op operator_s1;`) — the LHS root of some assignment.
 fn name_declared(module: &TimingModule, name: &str) -> bool {
     let root = TimingModule::root_ident(name).unwrap_or(name);
-    module.decls.iter().any(|d| d.name == root) || module.ports.iter().any(|p| p.name == root)
+    module.decls.iter().any(|d| d.name == root)
+        || module.ports.iter().any(|p| p.name == root)
+        || module
+            .nodes
+            .values()
+            .any(|n| n.lhs.as_deref().and_then(TimingModule::root_ident) == Some(root))
 }
 
 fn arg<'a>(args: &'a [(String, String)], key: &str) -> Option<&'a str> {
@@ -132,16 +149,13 @@ pub fn resolve(module: &TimingModule) -> Option<PipeContract> {
                         .push(format!("{at}: protocol without a domain name"));
                     continue;
                 };
-                let (Some(valid), Some(id), Some(kill)) = (
-                    arg(&p.args, "valid"),
-                    arg(&p.args, "id"),
-                    arg(&p.args, "kill"),
-                ) else {
+                let (Some(valid), Some(id)) = (arg(&p.args, "valid"), arg(&p.args, "id")) else {
                     c.rejected
-                        .push(format!("{at}: protocol {name} needs valid=, id= and kill="));
+                        .push(format!("{at}: protocol {name} needs valid= and id="));
                     continue;
                 };
-                if !kill.contains("$id") {
+                let kill = arg(&p.args, "kill").unwrap_or("");
+                if !kill.is_empty() && !kill.contains("$id") {
                     c.rejected
                         .push(format!("{at}: protocol {name}: kill= must use $id"));
                     continue;
@@ -178,6 +192,7 @@ pub fn resolve(module: &TimingModule) -> Option<PipeContract> {
                     carry: Vec::new(),
                     result_valid: None,
                     result_id: None,
+                    result_also: Vec::new(),
                 });
             }
             "carry" | "result" => {
@@ -218,6 +233,20 @@ pub fn resolve(module: &TimingModule) -> Option<PipeContract> {
                     }
                     d.result_valid = rv.map(str::to_string);
                     d.result_id = rid.map(str::to_string);
+                    let unknown: Vec<_> = p
+                        .words
+                        .iter()
+                        .filter(|w| !name_declared(module, w))
+                        .cloned()
+                        .collect();
+                    if !unknown.is_empty() {
+                        c.rejected.push(format!(
+                            "{at}: result {name}: unknown consumer(s) {}",
+                            unknown.join(", ")
+                        ));
+                    } else {
+                        d.result_also.extend(p.words.iter().cloned());
+                    }
                 }
             }
             "cut-ok" => {
@@ -226,9 +255,9 @@ pub fn resolve(module: &TimingModule) -> Option<PipeContract> {
                     .or_else(|| anchor_lhs(module, p.loc.start_line));
                 match lhs {
                     Some((l, line)) => c.cut_ok.push((l, p.domain.clone(), line)),
-                    None => c
-                        .rejected
-                        .push(format!("{at}: cut-ok has no assignment to anchor to")),
+                    None => c.rejected.push(format!(
+                        "{at}: cut-ok has no assignment to anchor to (an inactive generate branch, or more than three lines above it)"
+                    )),
                 }
             }
             "no-cut" => {
@@ -245,10 +274,20 @@ pub fn resolve(module: &TimingModule) -> Option<PipeContract> {
                 }
             }
             "require-contract" => c.require_contract = true,
+            // reserved words of the vocabulary that take no action yet
+            "stage-input" => c.rejected.push(format!(
+                "{at}: stage-input is reserved (input staging is not implemented)"
+            )),
             other => c
                 .rejected
                 .push(format!("{at}: unknown svt-pipe kind `{other}`")),
         }
+    }
+    // A module that declares a protocol has said how its operations travel:
+    // a bare register anywhere else in it would desynchronise them, so the
+    // contract is required implicitly.
+    if !c.domains.is_empty() {
+        c.require_contract = true;
     }
     for (lhs, dom, _) in &c.cut_ok {
         if let Some(d) = dom {
@@ -398,6 +437,48 @@ pub struct PipeStage {
     pub feed_rewires: Vec<(String, String)>,
 }
 
+/// Is `name` declared as a plain vector (`logic`/`bit`/`reg`/`wire`, any
+/// packed range) — or as a user type whose consumers need a cast back?
+pub fn plain_vector(module: &TimingModule, name: &str) -> bool {
+    let root = TimingModule::root_ident(name).unwrap_or(name);
+    let ty = module
+        .decls
+        .iter()
+        .find(|d| d.name == root)
+        .map(|d| d.type_name.clone())
+        .or_else(|| {
+            module
+                .ports
+                .iter()
+                .find(|p| p.name == root)
+                .and_then(|p| p.type_name.clone())
+        });
+    match ty {
+        Some(t) => {
+            let head = t
+                .trim()
+                .split(|c: char| c.is_whitespace() || c == '[')
+                .next()
+                .unwrap_or("");
+            matches!(
+                head,
+                "logic" | "bit" | "reg" | "wire" | "" | "signed" | "unsigned" | "int" | "integer"
+            )
+        }
+        None => true,
+    }
+}
+
+/// The text a consumer reads for carried signal `sig` of pipe `name`.
+pub fn carry_read(module: &TimingModule, name: &str, sig: &str) -> String {
+    let net = carry_net(name, sig);
+    if plain_vector(module, sig) {
+        net
+    } else {
+        format!("type({sig})'({net})")
+    }
+}
+
 /// Staged net names for a pipe `name`.
 pub fn stage_nets(name: &str) -> (String, String) {
     (format!("{name}_v"), format!("{name}_id"))
@@ -434,7 +515,7 @@ pub fn stage_for(
         Some(p) => domain
             .carry
             .iter()
-            .map(|c| (c.clone(), carry_net(p, c)))
+            .map(|c| (c.clone(), carry_read(module, p, c)))
             .collect(),
         None => Vec::new(),
     };
@@ -445,6 +526,7 @@ pub fn stage_for(
     for target in [domain.result_valid.as_deref(), domain.result_id.as_deref()]
         .into_iter()
         .flatten()
+        .chain(domain.result_also.iter().map(String::as_str))
     {
         for n in module.nodes.values() {
             if !matches!(
@@ -464,7 +546,7 @@ pub fn stage_for(
             ));
             consumer_rewires.push((line, domain.id.clone(), id_net.clone()));
             for c in &domain.carry {
-                consumer_rewires.push((line, c.clone(), carry_net(name, c)));
+                consumer_rewires.push((line, c.clone(), carry_read(module, name, c)));
             }
         }
     }

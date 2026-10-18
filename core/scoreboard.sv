@@ -138,6 +138,15 @@ module scoreboard #(
     scoreboard_entry_t sbe;  // this is the score board entry we will send to ex
   } sb_mem_t;
   sb_mem_t [CVA6Cfg.NR_SB_ENTRIES-1:0] mem_q, mem_n;
+  // Re-pipelining contract (sv-timing A124; 2.74 ns reg->reg on Nangate45).
+  // The scoreboard owns the transaction ids every other contract kills by:
+  // its entry array is written by issue, writeback, commit, cancel and flush
+  // in one next-state function, so no stage is admissible inside it. The
+  // admissible mechanisms are at its ports: staging the writeback results
+  // (valid + trans_id, killed by the cancel the scoreboard itself raises) and
+  // the issue acknowledge, each a one-cycle latency the consumers must absorb.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=mem_n
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] still_issued;
 
   logic [CVA6Cfg.NrIssuePorts-1:0] issue_full;

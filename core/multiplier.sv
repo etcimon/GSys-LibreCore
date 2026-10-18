@@ -147,6 +147,16 @@ module multiplier
     // the result travels with its trans_id. mult.sv carries cancellation
     // liveness with the pipeline and suppresses killed results before
     // arbitration, including after scoreboard TID reuse.
+    //
+    // Re-pipelining contract (sv-timing A123/A124). The product's control
+    // rides as {mult_valid_s1, trans_id_s1, operator_s1}; cancellation is
+    // applied outside this module (mult.sv), so the domain has no kill and
+    // no flush of its own. A further stage may be cut at the shifted-product
+    // sum; the correction and the operator must travel with it, and the
+    // output register's valid / trans_id / operator read the last stage.
+    // svt-pipe: protocol mul valid=mult_valid_s1 id=trans_id_s1
+    // svt-pipe: carry mul operator_s1,corr_q
+    // svt-pipe: result mul valid=mult_valid_q id=trans_id_q operator_d
     localparam int unsigned NS = CVA6Cfg.XLEN / 16;
     localparam int unsigned AW = CVA6Cfg.XLEN + 1;   // unsigned pattern of the signed operand
     localparam int unsigned PW = AW + 17;            // (XLEN+1) × 17 unsigned
@@ -174,8 +184,10 @@ module multiplier
     logic [RW-1:0] corr_sh, prod_sum;
     assign corr_sh = RW'(corr_q) << AW;
     if (NS == 4) begin : gen_sum4
+      // svt-pipe: cut-ok mul
       assign prod_sum = (term[0] + term[1]) + (term[2] + term[3]);
     end else if (NS == 2) begin : gen_sum2
+      // svt-pipe: cut-ok mul
       assign prod_sum = term[0] + term[1];
     end else begin : gen_sum_n
       always_comb begin
@@ -258,6 +270,7 @@ module multiplier
   // -----------------------
   // Output pipeline register
   // -----------------------
+  // svt-pipe: no-cut
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (~rst_ni) begin
       mult_valid_q  <= '0;

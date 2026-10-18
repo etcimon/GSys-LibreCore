@@ -381,6 +381,17 @@ module g6lc_rename #(
 
   assign stall_o = stall_c;
 
+  // Re-pipelining contract (sv-timing A124; 2.69 ns on Nangate45). The map
+  // tables are read, bypassed within the group and written in one cycle; a
+  // stage inside the block would present a stale map to the younger ports.
+  // The admissible form is the rename-read / rename-write split with an
+  // intra-group bypass carried across the stage (valid_i per port, flush_i /
+  // flush_hart_i; no cancel and no transaction id yet — rename precedes the
+  // scoreboard, so the protocol pragma waits for an id-less domain). The A122
+  // sites map_d / fmap_d / favail are the latency-neutral bypasses first.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=map_d
+  // svt-pipe: no-cut on=fmap_d
   always_comb begin
     // Block-locals are declared and defaulted here: one declared inside a
     // conditional scope reads as a latch to the elaborator.

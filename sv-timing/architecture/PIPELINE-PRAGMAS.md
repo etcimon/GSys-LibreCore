@@ -164,3 +164,122 @@ the edits (`owning_module_slice`) rather than the first header / last
   (acceptance, reservation, byte validity, cancellation, transaction
   identity — CONTROL-CONE-CLOSURE.md) and the balance-register mechanism
   for their side paths. The fixture shows the shape; the core is the work.
+
+## 6. The core's list (A124): every file over 10 adjusted FO4, in order
+
+Measured on the retained tree (Nangate45 module board, `adjusted-fo4.json`,
+platform FO4 21.40 ps). `st@10` is the arithmetic of the rung — the number
+of stages of ≤ 10 adjusted FO4 the worst cone would need, flop overhead
+excluded — not a plan: at 10 adjusted FO4 (214 ps) the cycle is below one
+64-bit adder on this library (≈ 26 adjusted FO4), so the lower rungs need
+operators split across stages, not only stages between operators.
+
+| # | module | adj FO4 | ns | st@10 | file |
+|---|---|---:|---:|---:|---|
+| 1 | `g6lc_lsq` | 176.0 | 3.766 | 18 | `core/ooo/g6lc_lsq.sv` |
+| 2 | `g6lc_iq` | 142.8 | 3.055 | 15 | `core/ooo/g6lc_iq.sv` |
+| 3 | `frontend` | 142.4 | 3.047 | 15 | `core/fetch_B/frontend.sv` |
+| 4 | `store_buffer` | 141.3 | 3.024 | 15 | `core/store_buffer.sv` |
+| 5 | `multiplier` | 131.8 | 2.820 | 14 | `core/multiplier.sv` |
+| 6 | `scoreboard` | 127.9 | 2.737 | 13 | `core/scoreboard.sv` |
+| 7 | `g6lc_rename` | 125.9 | 2.693 | 13 | `core/ooo/g6lc_rename.sv` |
+| 8 | `instr_realign` | 119.0 | 2.547 | 12 | `core/fetch_B/instr_realign.sv` |
+| 9 | `wt_dcache_wbuffer` | 105.6 | 2.259 | 11 | `core/cache_subsystem/wt_dcache_wbuffer.sv` |
+| 10 | `g6lc_ooo_dispatch` | 97.9 | 2.095 | 10 | `core/ooo/g6lc_ooo_dispatch.sv` |
+| 11 | `alu` | 96.4 | 2.063 | 10 | `core/alu.sv` |
+| 12 | `csr_regfile` | 87.0 | 1.862 | 9 | `core/csr_regfile.sv` |
+| 13 | `aes` | 83.7 | 1.790 | 9 | `core/aes.sv` |
+| 14 | `g6lc_rob` | 77.9 | 1.667 | 8 | `core/ooo/g6lc_rob.sv` |
+| 15 | `branch_unit` | 77.4 | 1.657 | 8 | `core/branch_unit.sv` |
+| 16 | `g6lc_loop_buffer` | 71.6 | 1.533 | 8 | `core/frontend/g6lc_loop_buffer.sv` |
+| 17 | `perf_counters` | 70.8 | 1.515 | 8 | `core/perf_counters.sv` |
+| 18 | `g6lc_bp_ckpt` | 68.0 | 1.456 | 7 | `core/frontend/g6lc_bp_ckpt.sv` |
+| 19 | `issue_read_operands` | 65.9 | 1.411 | 7 | `core/issue_read_operands.sv` |
+| 20 | `g6lc_prf` | 65.2 | 1.395 | 7 | `core/ooo/g6lc_prf.sv` |
+| 21 | `serdiv` | 63.3 | 1.354 | 7 | `core/serdiv.sv` |
+| 22 | `instr_queue` | 62.7 | 1.342 | 7 | `core/fetch_B/instr_queue.sv` |
+| 23 | `g6lc_bp_statcor` | 60.9 | 1.304 | 7 | `core/frontend/g6lc_bp_statcor.sv` |
+| 24 | `wt_dcache_missunit` | 60.0 | 1.283 | 6 | `core/cache_subsystem/wt_dcache_missunit.sv` |
+| 25 | `load_unit` | 59.3 | 1.268 | 6 | `core/load_unit.sv` |
+| 26 | `store_unit` | 58.0 | 1.242 | 6 | `core/store_unit.sv` |
+| 27 | `g6lc_bp_loop` | 54.5 | 1.167 | 6 | `core/frontend/g6lc_bp_loop.sv` |
+| 28 | `ariane_regfile` | 54.3 | 1.161 | 6 | `core/ariane_regfile_ff.sv` |
+| 29 | `cva6_fifo_v3` | 54.3 | 1.161 | 6 | `core/cva6_fifo_v3.sv` |
+| 30 | `g6lc_icache` | 52.5 | 1.124 | 6 | `core/cache_subsystem/g6lc_icache.sv` |
+| 31 | `cva6` | 48.2 | 1.032 | 5 | `core/cva6.sv` |
+| 32 | `g6lc_memdep` | 47.9 | 1.026 | 5 | `core/ooo/g6lc_memdep.sv` |
+| 33 | `fpu_wrap` | 47.3 | 1.012 | 5 | `core/fpu_wrap.sv` |
+| 34 | `wt_dcache_mem` | 47.2 | 1.009 | 5 | `core/cache_subsystem/wt_dcache_mem.sv` |
+| 35 | `cva6_mmu` | 45.7 | 0.978 | 5 | `core/cva6_mmu/cva6_mmu.sv` |
+| 36 | `ex_stage` | 42.8 | 0.916 | 5 | `core/ex_stage.sv` |
+| 37 | `cva6_tlb` | 41.8 | 0.895 | 5 | `core/cva6_mmu/cva6_tlb.sv` |
+| 38 | `cva6_ptw` | 41.6 | 0.891 | 5 | `core/cva6_mmu/cva6_ptw.sv` |
+| 39 | `ras` | 39.1 | 0.837 | 4 | `core/frontend/ras.sv` |
+| 40 | `g6lc_bp_ittage` | 32.9 | 0.705 | 4 | `core/frontend/g6lc_bp_ittage.sv` |
+| 41 | `lsu_bypass` | 32.3 | 0.691 | 4 | `core/lsu_bypass.sv` |
+| 42 | `csr_buffer` | 30.6 | 0.655 | 4 | `core/csr_buffer.sv` |
+| 43 | `wt_axi_adapter` | 29.8 | 0.638 | 3 | `core/cache_subsystem/wt_axi_adapter.sv` |
+| 44 | `g6lc_bp_tage` | 29.2 | 0.625 | 3 | `core/frontend/g6lc_bp_tage.sv` |
+| 45 | `commit_stage` | 26.7 | 0.572 | 3 | `core/commit_stage.sv` |
+| 46 | `mult` | 25.6 | 0.547 | 3 | `core/mult.sv` |
+| 47 | `exp_backoff` | 23.6 | 0.505 | 3 | `vendor/pulp-platform/common_cells/src/exp_backoff.sv` |
+| 48 | `g6lc_way_predictor` | 23.2 | 0.497 | 3 | `core/cache_subsystem/g6lc_way_predictor.sv` |
+| 49 | `g6lc_ftq` | 19.8 | 0.423 | 2 | `core/frontend/g6lc_ftq.sv` |
+| 50 | `rr_arb_tree` | 19.0 | 0.407 | 2 | `vendor/pulp-platform/common_cells/src/rr_arb_tree.sv` |
+| 51 | `cva6_shared_tlb` | 14.7 | 0.315 | 2 | `core/cva6_mmu/cva6_shared_tlb.sv` |
+| 52 | `g6lc_bp_ghist` | 14.5 | 0.311 | 2 | `core/frontend/g6lc_bp_ghist.sv` |
+| 53 | `axi_shim` | 13.7 | 0.293 | 2 | `core/axi_shim.sv` |
+| 54 | `id_stage` | 10.9 | 0.234 | 2 | `core/id_stage.sv` |
+| 55 | `fpnew_top` | 10.8 | 0.231 | 2 | `core/cvfpu/src/fpnew_top.sv` |
+| 56 | `g6lc_fdip` | 10.1 | 0.217 | 2 | `core/frontend/g6lc_fdip.sv` |
+
+### 6.1 The pattern: contract first, then the rung the contract admits
+
+Each round takes the worst file, declares its contract (where a stage may
+go, what it must carry, where it may not go and why), runs `correct
+--allow-latency`, keeps what the witness and the board confirm, re-measures,
+and moves to the new worst. The contract's verdicts name the next mechanism
+when a rung is not yet mechanizable.
+
+### 6.2 Round one (A124): contracts on the first nine files
+
+| file | contract | verdict of `correct --allow-latency` |
+|---|---|---|
+| `core/multiplier.sv` | `protocol mul valid=mult_valid_s1 id=trans_id_s1` (no kill: mult.sv carries cancellation), `carry operator_s1,corr_q`, `result valid=mult_valid_q id=trans_id_q operator_d`, `cut-ok` on `prod_sum`, `no-cut` on the output register | contract resolved; bare cuts on `operand_a`, `sign_a`, `sign_b` **refused** (they would have desynchronised valid/id); the planner snapped the stage-2 cut to `prod_sum` — and the emitter refused it: `prod_sum` is declared inside `gen_two_stage` (**generate-scope emission** is the next emitter mechanism) |
+| `core/ooo/g6lc_lsq.sv` | `protocol agu valid=addr_valid_i id=addr_id_i kill=cancelled_mask_i[$id] flush=flush_i`, `carry addr_i,addr_is_st_i,addr_size_i`, `no-cut` on `ld_d`, `st_d` | no stage admissible in the many-writer next-state function; **input staging** of the AGU request (with the occupancy outputs counting it) is the mechanism |
+| `core/fetch_B/frontend.sv` | `require-contract`, `no-cut` on `npc_d`, `seq_base`, `fetch_address` | the fetch loop is architectural (next-line prediction with late correction) |
+| `core/store_buffer.sv` | `protocol st valid=valid_i id=trans_id_i kill=cancelled_mask_i[$id] flush=flush_i`, `no-cut` on `speculative_queue_n`, `speculative_write_pointer_n` | input staging of the store request before the permutation |
+| `core/scoreboard.sv` | `require-contract`, `no-cut` on `mem_n` | the id owner: staging belongs at its ports (writeback results, issue ack) |
+| `core/ooo/g6lc_iq.sv` | `require-contract`, `no-cut` on `q_after_issue`, `older_d` | wakeup/select loop: speculative wakeup is an issue-queue architecture |
+| `core/ooo/g6lc_rename.sv` | `require-contract`, `no-cut` on `map_d`, `fmap_d` | rename-read / rename-write split with intra-group bypass; id-less domain needed for a protocol pragma |
+| `core/alu.sv` | `require-contract` | pure datapath: the stage is the FLU's, to be declared in `ex_stage` on `flu` valid / trans_id |
+| `core/ooo/g6lc_ooo_dispatch.sv` | `require-contract`, `no-cut` on `tid_is_fpr_d` | input staging of the dispatch record (struct-member id) |
+
+Changes to the mechanism this round required: a declared `protocol`
+implies `require-contract`; `kill=` is optional (flush-only / carried-only
+domains) and a kill without `$id` is a global kill; `result` takes bare
+words for further consumer assignments (`operator_d`); carried signals of
+user type are read back through `type(<sig>)'(<net>)`; names declared with
+a package-imported type (`fu_op operator_s1;`, absent from the parser's
+declaration sites) bind through their assignments; and the cut
+**scheduler** snaps each wanted cut back to the nearest permitted anchor of
+its segment, so the contract drives the planner rather than only judging
+it.
+
+### 6.3 What the verdicts ask for next
+
+1. **Generate-scope emission**: declare the pipe, the bundle and the stage
+   block inside the generate block that owns the cut (`gen_two_stage`),
+   not at module scope. Unblocks the multiplier's third stage.
+2. **Input staging** (`stage-input`, reserved): register a request
+   (valid, id, kill, flush, carried fields) at a module's input and rewire
+   every read of it, with the designer declaring how the module's
+   acceptance / occupancy outputs account for the staged request. Unblocks
+   lsq, store_buffer, dispatch, and the scoreboard's ports.
+3. **Id-less domains** (rename, realign: `valid` + global `kill`/`flush`,
+   no transaction id) and **struct-member ids** (dispatch).
+4. **Balance registers** for side paths (A123).
+5. The architectural rungs — fetch loop, issue loop, FLU latency — are
+   design decisions with IPC cost; the contract records them as `no-cut`
+   with the architecture that would move them, so no tool pass spends
+   effort there.

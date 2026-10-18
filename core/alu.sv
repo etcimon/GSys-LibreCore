@@ -85,6 +85,13 @@ module alu
 
   assign adder_op_b_negate = fu_data_i.operation inside {EQ, NE, SUB, SUBW, ANDN, ORN, XNOR};
 
+  // Re-pipelining contract (sv-timing A124; 2.06 ns in->out on Nangate45,
+  // the 64-bit adder alone is ~26 adjusted FO4 on this library). The ALU is a
+  // pure datapath with no valid of its own: a stage here is a fixed-latency
+  // unit latency change, to be declared in ex_stage on the FLU's valid /
+  // trans_id (flu_valid, trans_id_i, flush_i) so the result keeps its id.
+  // svt-pipe: require-contract
+
   always_comb begin
     operand_a_bitmanip = operand_a;
     operand_a_cpop     = fu_data_cpop_i.operand_a;

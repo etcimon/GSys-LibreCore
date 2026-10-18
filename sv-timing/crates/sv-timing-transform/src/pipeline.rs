@@ -547,11 +547,44 @@ pub fn schedule_pipeline_cuts(
     let mut seg_start = 0usize;
     let mut cum = 0.0_f64;
 
+    // A123/A124: in a module whose contract is required, a stage may only
+    // sit at a permitted anchor. The greedy schedule snaps each wanted cut
+    // back to the nearest permitted node of its segment, or takes no cut
+    // there — the contract drives the planner, not only the verdict.
+    let permitted: Option<Vec<bool>> = module.and_then(|m| {
+        let c = sv_timing_core::pipe_contract::resolve(m)?;
+        if !c.require_contract {
+            return None;
+        }
+        Some(
+            path.nodes
+                .iter()
+                .map(|id| {
+                    m.nodes.get(id).is_some_and(|n| {
+                        matches!(
+                            sv_timing_core::pipe_contract::cut_permission(m, &c, n),
+                            sv_timing_core::pipe_contract::CutPermission::Allowed(_)
+                        )
+                    })
+                })
+                .collect(),
+        )
+    });
+    let snap = |wanted: usize, seg_start: usize| -> Option<usize> {
+        match &permitted {
+            None => Some(wanted),
+            Some(ok) => (seg_start..=wanted).rev().find(|&k| ok[k]),
+        }
+    };
+
     for i in 0..path.nodes.len() {
         let c = costs[i];
         // If adding this node overflows and segment has at least one prior node → cut before i.
         if cum + c > budget + 1e-9 && i > seg_start {
-            let cut_idx = i - 1;
+            let Some(cut_idx) = snap(i - 1, seg_start) else {
+                cum += c;
+                continue;
+            };
             let after = path.nodes[cut_idx];
             let left: f64 = costs[seg_start..=cut_idx].iter().sum();
             let right: f64 = costs[cut_idx + 1..].iter().sum();
@@ -567,8 +600,8 @@ pub fn schedule_pipeline_cuts(
             if cuts.len() >= max_cuts {
                 break;
             }
-            seg_start = i;
-            cum = c;
+            seg_start = cut_idx + 1;
+            cum = costs[cut_idx + 1..=i].iter().sum();
         } else {
             cum += c;
         }
@@ -582,6 +615,9 @@ pub fn schedule_pipeline_cuts(
         for i in 0..path.nodes.len().saturating_sub(1) {
             cum2 += costs[i];
             if cum2 >= budget && i + 1 > last_cut {
+                let Some(i) = snap(i, last_cut) else {
+                    continue;
+                };
                 let after = path.nodes[i];
                 let left: f64 = costs[..=i].iter().sum();
                 let right: f64 = costs[i + 1..].iter().sum();
@@ -1163,7 +1199,7 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
                         st.consumer_rewires.push((
                             line,
                             c.clone(),
-                            sv_timing_core::pipe_contract::carry_net(&name, c),
+                            sv_timing_core::pipe_contract::carry_read(module, &name, c),
                         ));
                     }
                     st.consumer_rewires.push((

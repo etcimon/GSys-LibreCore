@@ -470,6 +470,16 @@ module g6lc_ooo_dispatch
     end
   end
 
+  // Re-pipelining contract (sv-timing A124; 2.10 ns in->reg tid_is_fpr_d on
+  // Nangate45). The per-tid side tables are written under the dispatch
+  // handshake (dispatch_valid_i / dispatch_ack_o) and read by the issue side
+  // the next cycle: the writes are indexed by the incoming trans_id, so the
+  // admissible stage is input staging of the dispatch record (dispatch_valid_i,
+  // dispatch_sbe_i[p].trans_id, killed by cancelled_mask_i, cleared by
+  // flush_i), not a cut in the tables; the id is a struct member, which the
+  // protocol word does not take yet.
+  // svt-pipe: require-contract
+  // svt-pipe: no-cut on=tid_is_fpr_d
   always_comb begin
     tid_prd_d = tid_prd_q;
     tid_old_d = tid_old_q;

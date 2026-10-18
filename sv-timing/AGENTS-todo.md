@@ -3,6 +3,20 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A124 — the core's list and round one
+
+- [x] Ordered list of the 56 files over 10 adjusted FO4 (`PIPELINE-PRAGMAS.md` §6).
+- [x] Contracts on multiplier, lsq, frontend, store_buffer, scoreboard, iq,
+  rename, alu, dispatch; planner snaps to permitted anchors; implied
+  `require-contract`; optional kill; result consumers; typed carries.
+- [ ] Generate-scope emission (pipe + bundle + stage block inside the
+  owning generate block) — multiplier `prod_sum`.
+- [ ] `stage-input` mechanism — lsq AGU request, store_buffer request,
+  dispatch record, scoreboard ports.
+- [ ] Id-less domains (rename, realign) and struct-member ids (dispatch).
+- [ ] Contracts on the next files of the list (realign, wbuffer, csr,
+  aes, rob, branch_unit, …).
+
 ## A123 — re-pipelining contracts (`svt-pipe`)
 
 - [x] `pipe_contract.rs`: vocabulary, resolution with rejections, permission

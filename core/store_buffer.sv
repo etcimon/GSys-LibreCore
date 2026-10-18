@@ -237,6 +237,17 @@ module store_buffer
   // ----------------------------------------
   // Speculative Queue - Core Interface
   // ----------------------------------------
+  // Re-pipelining contract (sv-timing A124; 3.02 ns speculative_queue_n ->
+  // write pointer on Nangate45). The queue's next state folds insertion,
+  // the younger-cancel squash and the commit release into one permutation;
+  // a stage inside it would split one transaction's view. The store request
+  // itself has a protocol (valid_i, trans_id_i, cancelled_mask_i, flush_i):
+  // input staging of the request before the permutation is the admissible
+  // mechanism, with ready_o accounting for the staged entry.
+  // svt-pipe: require-contract
+  // svt-pipe: protocol st valid=valid_i id=trans_id_i kill=cancelled_mask_i[$id] flush=flush_i
+  // svt-pipe: no-cut on=speculative_queue_n
+  // svt-pipe: no-cut on=speculative_write_pointer_n
   always_comb begin : core_if
     automatic logic [$clog2(DEPTH_SPEC):0] speculative_status_cnt;
     automatic logic [$clog2(DEPTH_SPEC):0] live, ins;

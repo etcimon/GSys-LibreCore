@@ -194,6 +194,20 @@ module g6lc_lsq #(
       end
   end
 
+  // Re-pipelining contract (sv-timing A124; worst measured cone of the core,
+  // 3.77 ns in->reg into ld_d on Nangate45). The entry arrays are a
+  // many-writer next-state function — alloc, AGU update, complete, release,
+  // cancel and flush in one block — so no stage boundary is admissible inside
+  // it: a stage would hold half the writers' view of an entry. The mechanism
+  // that shortens this cone is input staging: register the AGU update request
+  // with its id (killed by cancelled_mask_i, cleared by flush_i) before the CAM,
+  // with the occupancy outputs counting the staged request. The roles are
+  // declared for that mechanism (one domain per update port u).
+  // svt-pipe: require-contract
+  // svt-pipe: protocol agu valid=addr_valid_i id=addr_id_i kill=cancelled_mask_i[$id] flush=flush_i
+  // svt-pipe: carry agu addr_i,addr_is_st_i,addr_size_i
+  // svt-pipe: no-cut on=ld_d
+  // svt-pipe: no-cut on=st_d
   always_comb begin
     // Declared and defaulted at block scope: a local declared inside a
     // conditional scope reads as a latch to the elaborator.
