@@ -586,6 +586,30 @@ module wt_dcache_wbuffer
             fixup_bypass_d.be = '0;
         end
 
+        // T47: a younger store accepted into the wbuffer for a word that still
+        // has a fixup entry pending supersedes that entry's bytes. The fixup's
+        // deferred array write would otherwise land AFTER the younger store's
+        // own write and put the older bytes back (the L3 boot's
+        // ret_from_exception restore of s7 reading the previous trap frame's
+        // value, 36.3 s on every WT model since the fixup queue). The bytes the
+        // new store covers are dropped from every entry holding the word; an
+        // entry whose bytes are all superseded becomes dead and is skipped.
+`ifndef G6LC_MUT_FIXUP_KEEP_SUPERSEDED
+        // (compared on the post-push state so a word ACKed and re-written in
+        // the same cycle is masked too)
+        if (wbuffer_wren) begin
+          for (int unsigned k = 0; k < FixupDepth; k++) begin
+            if (fixup_d[k].paddr[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES] ==
+                {req_port_i.address_tag, req_port_i.address_index[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.XLEN_ALIGN_BYTES]})
+              fixup_d[k].be = fixup_d[k].be & ~req_port_i.data_be;
+          end
+          if (fixup_bypass_valid_d &&
+              fixup_bypass_d.paddr[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES] ==
+              {req_port_i.address_tag, req_port_i.address_index[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.XLEN_ALIGN_BYTES]})
+            fixup_bypass_d.be = fixup_bypass_d.be & ~req_port_i.data_be;
+        end
+`endif
+
         // State machine for the active (head or bypass) entry.
         fixup_sel_bypass_d = fixup_sel_bypass_q;
         case (fixup_state_q)
@@ -695,6 +719,25 @@ module wt_dcache_wbuffer
           (fixup_wr_req || fixup_inv_req) |-> (fixup_bypass_valid_q == fixup_sel_bypass_q))
       else $error("[l1 dcache wbuffer] fixup pass acting on an entry other than the one it tag-checked (bypass=%b sel=%b idx=%h way=%h)",
                   fixup_bypass_valid_q, fixup_sel_bypass_q, paddr_cl_idx, fixup_hit_oh_q);
+
+      // T47 invariant: a fixup array write never carries a byte that a younger
+      // wbuffer entry holds for the same word (the deferred write would put the
+      // older byte back after the younger store's own write).
+      logic fixup_wr_superseded;
+      always_comb begin
+        fixup_wr_superseded = 1'b0;
+        for (int unsigned i = 0; i < CVA6Cfg.WtDcacheWbufDepth; i++) begin
+          if ((|wbuffer_q[i].valid) &&
+              wbuffer_q[i].wtag == active_paddr[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES] &&
+              (|(wbuffer_q[i].valid & fixup_wr_data_be)))
+            fixup_wr_superseded = 1'b1;
+        end
+      end
+      fixup_write_not_superseded :
+      assert property (@(posedge clk_i) disable iff (!rst_ni)
+          (fixup_wr_req && fixup_wr_ack) |-> !fixup_wr_superseded)
+      else $error("[l1 dcache wbuffer] fixup array write of pa %h be %h over bytes a younger wbuffer entry holds",
+                  active_paddr, fixup_wr_data_be);
       //pragma translate_on
 
       // Convert a fixup paddr to the wtag used by the cache readout mux.
