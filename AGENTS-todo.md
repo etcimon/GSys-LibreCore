@@ -2074,7 +2074,19 @@ prerequisite for this work under the existing dual license. No licensing policy 
   Build `ooocoh-t50-server1-pgo-build`; the 2-hart L1 reruns to the shell
   with the breakdown in the log; if `wbuf=0` is the only culprit the
   wrapper's skid cover is widened (or the witness's D$ half is dropped by
-  contract) — recorded here either way.
+  contract) — recorded here either way. **Breakdown (2026-10-18, `l1s2i`
+  on t50): `stp=0 (stq=1 wbuf=0 ack=0)` — the core's commit queue is
+  empty and nothing commits in the switch cycle; only the HPDCACHE
+  wrapper's `wbuffer_empty_o` is low: a store the cache accepted earlier
+  is still inside it (its wbuf/rtab) one cycle after the selector saw
+  `drain_ready_i`.** Contract clarified rather than the RTL changed: the
+  drained handoff's store condition is the core-side queue (the scoreboard,
+  ROB/IQ/LSQ and the commit queue are what a hart switch can alias); a
+  store already inside the shared cache is ordered by the cache for every
+  hart. The selector still waits for `no_st_pending_commit` (both halves)
+  at the decision; the witness reports the D$-side lag and stops only
+  under `+smt_drain_strict`. One witness in 130 M cycles; the run goes on
+  to the shell (system verdict owed).
 - [x] **T43 — L3 on t42: an `amoor.d.aq` (0x800 → 0x801) then, 53 cycles
   later, `amoswap.d.rl zero` (→ 0x800) on a workqueue `work->data`
   (PA `0x8fc8e380`); the `c.ld` 866 cycles after the swap reads 0x801,
