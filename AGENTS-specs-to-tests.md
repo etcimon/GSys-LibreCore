@@ -982,6 +982,20 @@ the WT shape does not land two responses on the decision cycles. Verdicts owed o
 `ooocoh-t49-server1-pgo-build`: the 2-hart L1 past 1.267 s to the shell (T39) and the
 single-hart L1 past `Run /init` to the shell with the oracle (T44).
 
+## The fixup queue's deferred write never supersedes a younger store (2026-10-18, T47)
+
+No leaf yet (owed; the shape needs an ACK-before-check word followed by a second store to the
+same word, which the bare stages do not time): the witnesses are the two identical L3 deaths at
+36.3137 s on t47b and t49 (`list_add corruption … (ffffffff8015cd62) … ffffffc80023bbd0` in
+`release_pages` ← `exit_mmap` of `S10boot`), the oracle mismatch that names them (retire
+1,084,991,457: `ret_from_exception`'s `c.ldsp s7,184(sp)` returning the previous frame's s7),
+and the invariant `fixup_write_not_superseded` in `wt_dcache_wbuffer.sv` (a fixup array write
+carries no byte a younger wbuffer entry holds for the word), which is active on every WT build
+from `ooocoh-t52` on. Spec anchor: Part I `#sec:memorymodel` — a later store to a byte is the
+value every later load of that byte returns; the implementation invariant under test is the
+order of two cache-array writes to one word. `G6LC_MUT_FIXUP_KEEP_SUPERSEDED` restores the
+pre-fix behaviour. Verdict: the t52 L3 past 36.3 s with the live oracle (owed).
+
 ## Speculative store queue: flush coinciding with a commit (2026-10-15, T35 hardening)
 
 `verif/tb/core/run-stq-flush-ptr.sh` → `tb_g6lc_stq_flush_ptr.sv`, a `store_buffer` unit leaf in
