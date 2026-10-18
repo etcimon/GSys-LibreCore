@@ -950,7 +950,10 @@ invalidation with the fixup `inv_req` for way 3 pending in the same cycle — `i
 tag-only lookups of both tags miss and `rd_vld_bits == 0`; S3 the explicit inval alone is acked
 and clears exactly its way. Positive passes; `+oracle_negative` fails `WT_MEM_VLD_S2_FOREIGN_VALID`;
 the mutation build fires `missunit_vld_write_own_bits` with "would validate ways f7 (own bits 00,
-inv_req=1)" — the boot's vector. Verdict on
+inv_req=1)" — the boot's vector. The same leaf's S4 (T46) presents one word in a fixup entry
+(8 bytes) and a younger wbuffer entry (2 bytes): the readout must merge byte-wise
+(`rd_data_o == 0x80190016`, `wbuffer_fwd_hit_o`); `G6LC_MUT_WBUF_FWD_ONE_HOT` returns
+`a5a5a5a5a5a50016` (`WT_MEM_VLD_S4_PARTIAL_FORWARD`). Verdict on
 `ooocoh-t47b-ooo-pgo-build` (`l3watch4`): the same workqueue loop refills 0x800 after every
 `amoand` (eight rounds at 713,869,135–713,875,857), no foreign valid write, the invariant silent
 through 713.9 M cycles; the live oracle on the L3 (`l3orc5`) past retire 365 M with 0 stored

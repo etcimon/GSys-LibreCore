@@ -2035,6 +2035,28 @@ prerequisite for this work under the existing dual license. No licensing policy 
   Switched`, 1.267 s where every pre-fix run oopsed) and on to 123.8 M
   cycles / 1.665 s (`PCI: CLS 0 bytes`) — the NULL `dir` is gone.** It
   then stopped on the drained-handoff witness → T45.
+- [x] **T46 — WT dcache readout forwarded from ONE wbuffer/fixup entry: a
+  word held by an older fixup entry (array write pending) and a younger
+  wbuffer entry at once gave a load the young entry's bytes over the
+  pre-store array contents (2026-10-17).** From the t47b L3 trace
+  (mismatch #4): kernel stack slot `0xffffffc80024bbe8`, `sd 0x80190017`
+  at c=1,643,900,562, `sh 0x0016` at 567, `ld` at 574 returning
+  `0xffffffd80fbf0016` — the `sh` bytes over the dword that was there
+  before the `sd`. `wt_dcache_mem.sv` picked `wbuffer_all[lzc(hit_oh)]`
+  (the lowest-index hit = the young wbuffer entry, 2 bytes valid) and
+  overlaid only its bytes on the array; upstream's `hot1` invariant (one
+  entry per word) no longer holds once the SL-W fixup queue moves ACKed
+  words out of the wbuffer. **Fix:** byte-wise merge across every matching
+  entry, lowest index first (wbuffer entry, then fixup newest-first);
+  `wbuffer_fwd_hit_o` = all bytes covered by the merge.
+  `G6LC_MUT_WBUF_FWD_ONE_HOT` = pre-fix. Leaf `tb_g6lc_wt_mem_vld` S4
+  (fixup entry 8 bytes + wbuffer entry 2 bytes of one word → `rd_data_o`
+  `0x80190016`, `fwd_hit`): positive passes, the mutation returns
+  `a5a5a5a5a5a50016` — the boot's shape. Lint clean. Build
+  `ooocoh-t51-ooo-pgo-build` (HEAD = T35…T46): battery + L1 + L3 with the
+  oracle are the verdict; the t47b L3's mismatch #5 (the
+  `ret_from_exception` stack restore that killed `S10boot`) is a `sd`/`ld`
+  pair on one slot and may be this class or T39/T44's — the t51 L3 says.
 - [ ] **T45 — `ooo_switch_drained` fires on the 2-hart server1 at
   c=123,804,019 (t49): `hart=0 sbem=1 sbn=0 stp=0 lsqb=0 rob=0 iq=0
   starve=1` — a starve switch with every OoO structure and the scoreboard
