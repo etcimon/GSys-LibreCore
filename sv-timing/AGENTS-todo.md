@@ -3,6 +3,16 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A136 — further worst-arrival modules (latency-neutral)
+
+- [x] Loop buffer registered expectation address: 6 cycle-exact sbs runs,
+  6-step output miter, placed 1.824 → 1.493 ns at +12.1% area (retained).
+- [x] ROB absolute-order head re-anchor: equivalence ×3, directed + mutant
+  negative, placed reg→reg 2.049 → 1.568 ns at −2.0% area (retained).
+- [ ] `store_buffer` / `wt_dcache_wbuffer` / `frontend`: need input staging
+  with acceptance accounting or a next-line predictor; bypass trials rejected.
+- [ ] Whole-core board re-measure after A134–A136; 10 adjusted FO4 open.
+
 ## A135 — pragma-executed row-local preparation
 
 - [x] `row-local` directive: parse-time statement spans, checked plan in

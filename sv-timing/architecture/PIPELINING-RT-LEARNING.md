@@ -174,6 +174,22 @@ The A134 follow-up provides two further tested RTL patterns
   It applies to this small flop-based table, not automatically to SRAMs with
   limited read ports, and it trades area for timing.
 
+A136 adds two more, with the same discipline
+([evidence](PIPELINE-PRAGMA-REVIEW.md#a136--further-worst-arrival-modules-without-interface-cycles)):
+
+* **Register a derived address instead of recomputing it.** The loop buffer's
+  compares read `base + cursor<<ALIGN`; a register tracks the sum for the active
+  cursor and is updated from register-formed candidates on exactly the cursor
+  events. The proof obligation is a per-state invariant asserted every cycle,
+  and the first attempt showed why: a same-cycle arm+consume corner made a
+  two-register form inconsistent; the corrected form chooses the side the next
+  cycle can observe.
+* **Search in absolute order; do not rotate.** A ring find-first "from head"
+  equals the lowest hit at or above head, else the lowest hit below it. Two
+  log-depth lowest-set searches on the unrotated vector and a late select
+  replace a dynamic rotate, a carry-chain isolate and a final add; the result
+  is the slot itself. Keep the rotated form as a reference assertion.
+
 Both retain cycle latency. Neither is implemented as an automatic initial-IR
 rule yet. The rejected rename/store-buffer bypasses show why an exact algebraic
 rewrite still needs a physical discriminator: filtered mapping improved, but

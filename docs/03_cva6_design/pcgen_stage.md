@@ -82,6 +82,12 @@ The separate PH_BHT registered path is not changed by this repair. See
 current contracts, validation, the measured generic logic cost and remaining
 physical/firmware qualification limits.
 
+**A136 note:** the loop buffer keeps a registered expectation address for
+its sequential lookup / fill compares instead of recomputing `base +
+cursor<<ALIGN` each cycle; outputs are cycle-exact against the previous RTL
+(side-by-side runs and a bounded output miter). Paired placement measured
+1.824 → 1.493 ns at +12.1% module area. No ISA, DTS or trace change.
+
 **A135 note:** the loop predictor's training block carries an `svt-pipe:
 row-local` directive; `sv-timing correct --emit` produces an equivalent
 per-row form whose paired placement measured 1.911 → 1.410 ns at −6.9% area.

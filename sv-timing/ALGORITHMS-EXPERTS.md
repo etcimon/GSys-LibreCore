@@ -31,6 +31,12 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A136 update:** two further latency-neutral changes on the measured list.
+Loop buffer registered expectation: placed 1.824 → 1.493 ns at +12.1% area,
+six cycle-exact runs + 6-step output miter. ROB absolute-order re-anchor:
+placed reg→reg 2.049 → 1.568 ns at −2.0% area, equivalence ×3. The top three
+cones still need the §A132 stateful boundaries. Record: `PIPELINE-PRAGMA-REVIEW.md` (A136).
+
 **A135 update:** `row-local` is the second pragma the tool executes end to
 end: statement span retained at parse, checked plan in initial IR, prepared
 source reparsed before correction, emit mapped to the original path. Loop
@@ -8297,6 +8303,31 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A136 — Registered derived addresses; absolute-order ring search
+
+Two exact, latency-neutral forms measured on the next modules of the list.
+
+*Loop buffer.* `expect = base_q + (cursor_q << ALIGN)` sat in front of the
+64-bit equality that decides a hit or a fill. The sum is a function of state
+only, so a register holds it: reset to `base` whenever a cursor resets
+(flush, arm, close, wrap), advanced by one block when a cursor advances. The
+candidate `base_q + ((cursor_q + 1) << ALIGN)` is formed off registers in
+parallel with the compare and selected late. Capturing and armed are
+exclusive and every return to armed passes through the close, so one register
+serves both cursors; the arm wins an arm+consume cycle because only the fill
+compare can observe the next state. Invariants (`armed_q → expect == base +
+replay<<ALIGN`, `capturing_q → expect == base + fill<<ALIGN`) are asserted.
+
+*ROB.* `first stop in ring order from head` was computed as rotate(stops,
+head) → `x & (~x + 1)` → encode → `head + steps`. In slot order it is the
+lowest stop at or above `head_q`, else the lowest stop below it; `lowest_set`
+is a log-depth prefix OR (`x & ~prefix_or(x << 1)`), and the found slot is the
+new head. The tail stop (`j == tail_d`) reproduces the empty-ring and
+full-ring cases exactly. Matched-state equivalence holds at 8/16/32 entries
+because the identity is combinational for power-of-two depth.
+
+Evidence and physical pairs: `architecture/PIPELINE-PRAGMA-REVIEW.md` (A136).
 
 ## A135 — Execute the row-local pattern from a pragma
 

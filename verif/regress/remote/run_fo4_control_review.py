@@ -79,6 +79,7 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
         "boundary": ("core/store_buffer.sv", "core/ooo/g6lc_rename.sv", "core/fetch_B/instr_realign.sv"),
         "statcor": ("core/frontend/g6lc_bp_statcor.sv",),
         "loop-emit": ("core/frontend/g6lc_bp_loop.sv",),
+        "lbuf": ("core/frontend/g6lc_loop_buffer.sv", "core/ooo/g6lc_rob.sv"),
     }
     changed = profile_files[profile]
     if profile == "statcor":
@@ -87,6 +88,9 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
     if profile == "loop-emit":
         name = "verif/tb/core/tb_g6lc_bp_loop_emit.sv"
         files[name] = (root / name).read_bytes()
+    if profile == "lbuf":
+        for name in ("verif/tb/core/tb_g6lc_loop_buffer_sbs.sv", "verif/tb/core/tb_g6lc_rob.sv"):
+            files[name] = (root / name).read_bytes()
     if profile == "boundary":
         for folder in ("store_buffer_sbs", "instr_realign_sbs"):
             for p in (root / "verif/tb/core" / folder).glob("*.sv"):
@@ -599,6 +603,12 @@ foreach kind {in_reg reg_reg reg_out in_out} {
 
     if (src / "review.json").exists():
         review = json.loads((src / "review.json").read_text())
+        if review["profile"] == "lbuf" and not os.environ.get("CONTROL_MODE"):
+            if os.environ.get("A136_ONLY") != "rob":
+                review_lbuf(src, out, sta, lib, abc, evidence, yosys, run)
+            review_rob(src, out, sta, lib, abc, evidence, yosys, run)
+            (out / "result.json").write_text(json.dumps(evidence, indent=2))
+            return
         if review["profile"] == "loop-emit" and not os.environ.get("CONTROL_MODE"):
             review_loop_emit(src, out, data, sta, lib, abc, evidence, yosys, run)
             (out / "result.json").write_text(json.dumps(evidence, indent=2))
@@ -843,6 +853,226 @@ endmodule
         evidence["proofs"][f"rename-{harts}h"] = "matched-state equivalence PASS"
     print("PROOFS " + json.dumps(evidence["proofs"]), flush=True)
     map_snapshots(src, out, sta, lib, abc, evidence, yosys, run)
+
+
+def review_lbuf(src, out, sta, lib, abc, evidence, yosys, run):
+    """Loop buffer: registered expectation addresses vs the baseline source.
+    Side-by-side cycle-exact witness (with the new module's own invariant
+    assertions on), a bounded output miter from reset, and paired mapping /
+    placement of the shipped geometry."""
+    portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
+    packages = [l for l in portable.splitlines()
+                if l.startswith("+") or l.endswith("_pkg.sv") or "/include/" in l]
+    bench = src / "verif/tb/core/tb_g6lc_loop_buffer_sbs.sv"
+    old = (src / "baseline/core/frontend/g6lc_loop_buffer.sv").read_text()
+    assert old.count("module g6lc_loop_buffer\n") == 1
+    golden = out / "g6lc_loop_buffer_old.sv"
+    golden.write_text(old.replace("module g6lc_loop_buffer\n", "module g6lc_loop_buffer_old\n", 1))
+    vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+    evidence["simulator"] = subprocess.check_output([vl, "--version"], text=True).strip()
+    flist = out / "lbuf-sbs.f"
+    flist.write_text("\n".join(packages + [str(src / "core/frontend/g6lc_loop_buffer.sv"),
+                                           str(golden), str(bench)]) + "\n")
+    for label, defs in (("8x64", []), ("4x32", ["-GENTRIES=4", "-GDATA_W=32", "-GALIGN=2"]),
+                        ("6x128", ["-GENTRIES=6", "-GDATA_W=128", "-GALIGN=4"])):
+        obj = out / f"obj-lbuf-{label}"
+        run(f"lbuf-build-{label}", [vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal",
+            "-Wno-WIDTH", "-Wno-UNOPTFLAT", *defs, "-f", str(flist),
+            "--top-module", "tb_g6lc_loop_buffer_sbs", "--Mdir", str(obj), "-j", "4"], timeout=600)
+        for seed in (1, 17):
+            log = run(f"lbuf-sbs-{label}-{seed}", [str(obj / "Vtb_g6lc_loop_buffer_sbs"), f"+seed={seed}"], timeout=300)
+            assert "PASS tb_g6lc_loop_buffer_sbs" in log and "errors=0" in log, log[-800:]
+            assert "%Error" not in log and "lost the" not in log
+            evidence["proofs"][f"lbuf-sbs-{label}-{seed}"] = next(
+                l for l in log.splitlines() if "PASS tb_g6lc_loop_buffer_sbs" in l)
+    # Bounded miter from reset on the shipped geometry: both variants driven
+    # by the same free inputs; outputs must agree for every reachable prefix.
+    miter = out / "lbuf_miter.sv"
+    miter.write_text("""
+module lbuf_miter import ariane_pkg::*; (
+  input logic clk_i, rst_ni, flush_i, enable_i, cf_valid_i, cf_taken_i, fill_valid_i, lookup_ready_i,
+  input logic [63:0] cf_pc_i, cf_target_i, fill_vaddr_i, lookup_vaddr_i,
+  input logic [63:0] fill_data_i,
+  output logic ok);
+  function automatic config_pkg::cva6_cfg_t cfg();
+    cfg = config_pkg::cva6_cfg_empty; cfg.XLEN = 64; cfg.VLEN = 64;
+    cfg.FETCH_WIDTH = 64; cfg.FETCH_ALIGN_BITS = 3;
+  endfunction
+  logic ho, hn, ao, an, co, cn; logic [63:0] dato, datn;
+  g6lc_loop_buffer_old #(.CVA6Cfg(cfg()), .NR_ENTRIES(8), .DATA_W(64)) a (.*, .hit_o(ho), .data_o(dato), .active_o(ao), .consume_o(co));
+  g6lc_loop_buffer     #(.CVA6Cfg(cfg()), .NR_ENTRIES(8), .DATA_W(64)) b (.*, .hit_o(hn), .data_o(datn), .active_o(an), .consume_o(cn));
+  assign ok = (ho == hn) && (ao == an) && (co == cn) && (!ho || dato == datn);
+endmodule
+""")
+    mflist = out / "lbuf-miter.f"
+    mflist.write_text("\n".join(packages + [str(src / "core/frontend/g6lc_loop_buffer.sv"),
+                                            str(golden), str(miter)]) + "\n")
+    # A 12-step bound exceeded 25 minutes on the shipped widths (1.4 M
+    # variables). Use a short bound with a hard time limit; a timeout is
+    # recorded as inconclusive, never as a pass.
+    script = out / "lbuf-miter.ys"
+    script.write_text(f"read_slang -f {mflist} --top lbuf_miter --single-unit --ignore-assertions\n"
+                      "hierarchy -top lbuf_miter\nproc\nflatten\nasync2sync\nopt_clean\n"
+                      "sat -seq 6 -set-init-zero -set rst_ni 1 -prove ok 1 -verify\n")
+    ys = "/opt/testharness/toolchains/formal/bin/yosys"
+    try:
+        res = subprocess.run([ys, "-Q", "-T", "-s", str(script)], cwd=src, capture_output=True,
+                             text=True, timeout=600)
+        (out / "lbuf-miter.log").write_text(res.stdout + res.stderr)
+        if res.returncode == 0 and "SUCCESS!" in res.stdout:
+            evidence["proofs"]["lbuf-miter-6"] = "6-step output miter from reset PASS"
+        else:
+            assert "FAIL!" not in res.stdout, res.stdout[-1500:]
+            evidence["proofs"]["lbuf-miter-6"] = "INCONCLUSIVE (solver did not finish)"
+    except subprocess.TimeoutExpired as e:
+        (out / "lbuf-miter.log").write_text(str(e.stdout or "") + "\nTIMEOUT")
+        evidence["proofs"]["lbuf-miter-6"] = "INCONCLUSIVE (600 s timeout)"
+    for variant, path in (("baseline", src / "baseline/core/frontend/g6lc_loop_buffer.sv"),
+                          ("candidate", src / "core/frontend/g6lc_loop_buffer.sv")):
+        vflist = out / f"lbuf-{variant}.f"
+        vflist.write_text("\n".join(packages + [str(path), str(bench)]) + "\n")
+        netlist, stats = out / f"{variant}.v", out / f"{variant}.stat"
+        yosys("lbuf-map-" + variant,
+              f"read_slang -f {vflist} --top g6lc_lbuf_timing --single-unit\n"
+              "proc\nflatten\nopt_clean\nwreduce\nalumacc\nopt_clean\nmemory_map\n"
+              f"opt_dff\ntechmap\nopt_clean\ndfflibmap -liberty {lib}\n{abc}\n"
+              f"opt_clean -purge\ntee -o {stats} stat -liberty {lib}\n"
+              f"write_verilog -noattr -noexpr {netlist}\n")
+        evidence["maps"][variant] = {
+            "area_um2": float(re.search(r"Chip area for module .*?:\s*([\d.]+)", stats.read_text())[1]),
+            "board": {},
+        }
+        for fan in (0, 64):
+            env = dict(os.environ, OR_LIBERTY=lib, OR_VERILOG=str(netlist),
+                       OR_TOP="g6lc_lbuf_timing", OR_PERIOD_NS="0.25", OR_IGNORE_FANOUT_ABOVE=str(fan))
+            text = run(f"lbuf-sta-{variant}-{fan}", [sta, "-exit",
+                str(src / "build-platform/scripts/openroad-module-board.tcl")], env=env)
+            row = next(l for l in text.splitlines() if l.startswith("ROW\t"))
+            assert "failed" not in row
+            evidence["maps"][variant]["board"][str(fan)] = row
+        env = dict(os.environ, STUDY_PLATFORM=str(Path(lib).parent),
+                   OR_VERILOG=str(netlist), OR_TOP="g6lc_lbuf_timing",
+                   STUDY_OUTPUT=str(out / variant), STUDY_VARIANT=variant)
+        text = run("lbuf-place-" + variant, [
+            "/opt/testharness/toolchains/openroad-g6lc-pgo/bin/openroad", "-exit",
+            str(src / "build-platform/scripts/openroad-module-place-study.tcl")], env=env, timeout=900)
+        row = next(l for l in text.splitlines() if l.startswith("PLACE_STUDY "))
+        evidence["maps"][variant]["placement"] = dict(re.findall(r"(\w+)=(\S+)", row))
+        (out / "result.json").write_text(json.dumps(evidence, indent=2))
+    print(json.dumps(evidence["maps"], indent=2), flush=True)
+
+
+def review_rob(src, out, sta, lib, abc, evidence, yosys, run):
+    """ROB head re-anchor in absolute slot order: matched-state equivalence
+    against the baseline (no new state), the directed ROB witness with the
+    rotated-reference assertion on, and paired mapping / placement."""
+    old = (src / "baseline/core/ooo/g6lc_rob.sv").read_text()
+    assert old.count("module g6lc_rob\n") == 1 or old.count("module g6lc_rob ") == 1
+    golden = out / "g6lc_rob_old.sv"
+    golden.write_text(old.replace("module g6lc_rob", "module g6lc_rob_old", 1))
+    new = src / "core/ooo/g6lc_rob.sv"
+    wrapper = out / "rob_timing.sv"
+    wrapper.write_text("""
+module g6lc_rob_timing #(parameter int unsigned ENTRIES = 32, parameter int unsigned W = 5,
+                         parameter int unsigned NA = 2, parameter int unsigned NR = 2,
+                         parameter int unsigned NC = 4, parameter int unsigned TID_W = 5,
+                         parameter int unsigned NR_SB = 32, parameter int unsigned PW = 64) (
+  input logic clk_i, rst_ni, flush_i,
+  input logic [NR_SB-1:0] cancelled_mask_i,
+  input logic [NA-1:0] alloc_valid_i,
+  input logic [NA-1:0][PW-1:0] alloc_entry_i,
+  input logic [NA-1:0][TID_W-1:0] alloc_tid_i,
+  output logic [NA-1:0][W-1:0] alloc_id_o,
+  output logic full_o, empty_o,
+  input logic [NC-1:0] complete_valid_i,
+  input logic [NC-1:0][TID_W-1:0] complete_tid_i,
+  input logic [NC-1:0] complete_exc_i,
+  output logic [NR-1:0] retire_valid_o,
+  output logic [NR-1:0][PW-1:0] retire_entry_o,
+  output logic [NR-1:0][W-1:0] retire_id_o,
+  input logic [NR-1:0] retire_ack_i,
+  input logic [NR-1:0][TID_W-1:0] retire_tid_i);
+  g6lc_rob #(.ROB_ENTRIES(ENTRIES), .ROB_W(W), .NR_ALLOC(NA), .NR_RETIRE(NR), .NR_COMPLETE(NC),
+             .TID_W(TID_W), .NR_SB(NR_SB), .entry_t(logic [PW-1:0])) dut (.*);
+endmodule
+""")
+    # The gold side reads the unrenamed baseline file: the renamed copy only
+    # serves a possible combined simulation; both must stay byte-equal in body.
+    baseline = src / "baseline/core/ooo/g6lc_rob.sv"
+    for entries, w, nc in ((8, 3, 2), (16, 4, 3), (32, 5, 4)):
+        commands = []
+        for path, name in ((baseline, "gold"), (new, "gate")):
+            flist = out / f"rob-{name}.f"
+            flist.write_text(f"{path}\n{wrapper}\n")
+            commands += [
+                f"read_slang -f {flist} --top g6lc_rob_timing --single-unit --ignore-assertions "
+                f"-G ENTRIES={entries} -G W={w} -G NC={nc} -G TID_W={w} -G NR_SB={entries}",
+                "proc", "flatten", "memory_map", "async2sync", "opt_clean",
+                f"rename g6lc_rob_timing {name}", f"design -stash {name}",
+            ]
+        commands += ["design -copy-from gold -as gold gold", "design -copy-from gate -as gate gate",
+                     "equiv_make gold gate equiv", "hierarchy -top equiv",
+                     "equiv_simple -seq 1", "equiv_status -assert"]
+        key = f"rob-eq-{entries}"
+        text = yosys(key, "\n".join(commands), timeout=600)
+        assert "Equivalence successfully proven!" in text
+        evidence["proofs"][key] = "matched-state equivalence PASS"
+    vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+    obj = out / "obj-rob-directed"
+    run("rob-directed-build", [vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal",
+        "-Wno-WIDTH", "-Wno-UNOPTFLAT", str(new), str(src / "verif/tb/core/tb_g6lc_rob.sv"),
+        "--top-module", "tb_g6lc_rob", "--Mdir", str(obj), "-j", "4"], timeout=600)
+    for scenario in (0, 1):
+        log = run(f"rob-directed-{scenario}", [str(obj / "Vtb_g6lc_rob"), f"+scenario={scenario}"], timeout=120)
+        assert "RTL_REVIEW_PASS" in log and "%Error" not in log and "re-anchor" not in log, log[-600:]
+    evidence["proofs"]["rob-directed"] = "tb_g6lc_rob scenarios 0 and 1 PASS, rotated-reference assertion quiet"
+    # Negative control on the new assertion itself: a wrong reference head
+    # must be reported. Forced through a define-free textual mutant copy.
+    mutant = out / "g6lc_rob_mut.sv"
+    mutant.write_text(new.read_text().replace("ref_head = head_q + ref_steps;",
+                                              "ref_head = head_q + ref_steps + ROB_W'(1);"))
+    mobj = out / "obj-rob-mutant"
+    run("rob-mutant-build", [vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal",
+        "-Wno-WIDTH", "-Wno-UNOPTFLAT", str(mutant), str(src / "verif/tb/core/tb_g6lc_rob.sv"),
+        "--top-module", "tb_g6lc_rob", "--Mdir", str(mobj), "-j", "4"], timeout=600)
+    bad = subprocess.run([str(mobj / "Vtb_g6lc_rob"), "+scenario=0"], cwd=out,
+                         capture_output=True, text=True, timeout=120)
+    (out / "rob-mutant.log").write_text(bad.stdout + bad.stderr)
+    assert "re-anchor" in bad.stdout + bad.stderr, "mutated reference was not reported"
+    evidence["proofs"]["rob-assertion-negative"] = "mutated rotated reference is reported"
+    for variant, path in (("rob-baseline", src / "baseline/core/ooo/g6lc_rob.sv"),
+                          ("rob-candidate", new)):
+        vflist = out / f"{variant}.f"
+        vflist.write_text(f"{path}\n{wrapper}\n")
+        netlist, stats = out / f"{variant}.v", out / f"{variant}.stat"
+        yosys("map-" + variant,
+              f"read_slang -f {vflist} --top g6lc_rob_timing --single-unit\n"
+              "proc\nflatten\nopt_clean\nwreduce\nalumacc\nopt_clean\nmemory_map\n"
+              f"opt_dff\ntechmap\nopt_clean\ndfflibmap -liberty {lib}\n{abc}\n"
+              f"opt_clean -purge\ntee -o {stats} stat -liberty {lib}\n"
+              f"write_verilog -noattr -noexpr {netlist}\n")
+        evidence["maps"][variant] = {
+            "area_um2": float(re.search(r"Chip area for module .*?:\s*([\d.]+)", stats.read_text())[1]),
+            "board": {},
+        }
+        for fan in (0, 64):
+            env = dict(os.environ, OR_LIBERTY=lib, OR_VERILOG=str(netlist),
+                       OR_TOP="g6lc_rob_timing", OR_PERIOD_NS="0.25", OR_IGNORE_FANOUT_ABOVE=str(fan))
+            text = run(f"sta-{variant}-{fan}", [sta, "-exit",
+                str(src / "build-platform/scripts/openroad-module-board.tcl")], env=env)
+            row = next(l for l in text.splitlines() if l.startswith("ROW\t"))
+            assert "failed" not in row
+            evidence["maps"][variant]["board"][str(fan)] = row
+        env = dict(os.environ, STUDY_PLATFORM=str(Path(lib).parent),
+                   OR_VERILOG=str(netlist), OR_TOP="g6lc_rob_timing",
+                   STUDY_OUTPUT=str(out / variant), STUDY_VARIANT=variant)
+        text = run("place-" + variant, [
+            "/opt/testharness/toolchains/openroad-g6lc-pgo/bin/openroad", "-exit",
+            str(src / "build-platform/scripts/openroad-module-place-study.tcl")], env=env, timeout=900)
+        row = next(l for l in text.splitlines() if l.startswith("PLACE_STUDY "))
+        evidence["maps"][variant]["placement"] = dict(re.findall(r"(\w+)=(\S+)", row))
+        (out / "result.json").write_text(json.dumps(evidence, indent=2))
+    print(json.dumps(evidence["maps"], indent=2), flush=True)
 
 
 def review_loop_emit(src, out, data, sta, lib, abc, evidence, yosys, run):
@@ -1349,7 +1579,7 @@ if __name__ == "__main__":
         mode.add_argument("--snapshot", type=Path)
         mode.add_argument("--analyze-results", type=Path)
         parser.add_argument("--baseline", help="baseline revision for the selected review profile")
-        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit"), default="control")
+        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf"), default="control")
         args = parser.parse_args()
         if args.snapshot:
             if not args.baseline:

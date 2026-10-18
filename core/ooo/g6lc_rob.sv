@@ -49,6 +49,11 @@ module g6lc_rob #(
   // svt-pipe: require-contract
   // svt-pipe: no-cut on=head_d
   // svt-pipe: no-cut on=count_d
+  // A136: the head re-anchor searches the post-free valid vector in
+  // absolute slot order (two parallel-prefix find-firsts split at the
+  // registered head) instead of rotating it by the head first; the head
+  // becomes the found slot, not head + steps. Same value every cycle
+  // (asserted below against the rotated form).
 
   typedef struct packed {
     logic             valid;
@@ -65,8 +70,17 @@ module g6lc_rob #(
   // (driven only in the always_comb below; module-scope so every frontend
   // scopes them the same way).
   logic [NR_RETIRE-1:0][ROB_ENTRIES-1:0] free_hit;
-  logic [ROB_ENTRIES-1:0] rean_stop, rean_first;
-  logic [ROB_W-1:0]       rean_dist, rean_steps;
+  logic [ROB_ENTRIES-1:0] anchor_stop, anchor_hi, anchor_lo, anchor_first_hi, anchor_first_lo, anchor_first;
+  logic [ROB_ENTRIES-1:0] anchor_ge_head;
+
+  // Lowest set bit as a log-depth prefix OR (no carry chain). Exact for any
+  // width: a bit is the lowest set bit iff it is set and no lower bit is.
+  function automatic logic [ROB_ENTRIES-1:0] lowest_set(input logic [ROB_ENTRIES-1:0] x);
+    logic [ROB_ENTRIES-1:0] below;
+    below = x << 1;
+    for (int unsigned l = 1; l < ROB_ENTRIES; l = l << 1) below = below | (below << l);
+    return x & ~below;
+  endfunction
 
   assign full_o = (count_q > ROB_ENTRIES[ROB_W:0] - NR_ALLOC[ROB_W:0]);
   assign empty_o = (count_q == '0);
@@ -174,26 +188,27 @@ module g6lc_rob #(
         count_d = count_d - (ROB_W + 1)'(|free_hit[r]);
     end
     // Re-anchor the report-only head on the oldest remaining entry: advance
-    // past the run of freed slots starting at head, never past tail. The
-    // step-until-valid walk (dynamic index per step) is the same chain shape;
-    // the run length is one find-first over the valid vector rotated to head,
-    // stopped at tail (`stop` marks the first valid slot or the tail itself,
-    // so an empty ring yields zero steps). Exact for ROB_ENTRIES == 2**ROB_W.
-    // Both rewrites: whole-module sequential miter against the pre-change
-    // RTL (Yosys SAT, 6 steps from reset) proved at ROB_ENTRIES = 4; the
-    // 8-entry miter (304 k variables) exceeded a 40-minute budget.
-    rean_dist  = tail_d - head_d;
-    rean_steps = '0;
+    // past the run of freed slots starting at head, never past tail. In
+    // absolute slot order the stops are the valid post-free slots and the
+    // tail itself (an empty ring stops at head == tail, a full ring at
+    // tail == head keeps the head, exactly as the rotated form did). The
+    // first stop in ring order from head is the lowest stop at or above
+    // head when one exists, else the lowest stop below it; its slot number
+    // is the new head. Exact for ROB_ENTRIES == 2**ROB_W (rotated reference
+    // under translate_off below; A107 history in the git log).
     for (int unsigned j = 0; j < ROB_ENTRIES; j++) begin
-      rean_stop[j] = rob_d[ROB_W'(head_d + ROB_W'(j))].valid || (ROB_W'(j) == rean_dist);
+      anchor_stop[j]    = rob_d[j].valid || (ROB_W'(j) == tail_d);
+      anchor_ge_head[j] = (ROB_W'(j) >= head_q);
     end
-    // `rean_stop` is never empty (j == dist always stops); isolate its lowest
-    // set bit and encode it — a find-first without a priority chain.
-    rean_first = rean_stop & (~rean_stop + 1'b1);
+    anchor_hi       = anchor_stop & anchor_ge_head;
+    anchor_lo       = anchor_stop & ~anchor_ge_head;
+    anchor_first_hi = lowest_set(anchor_hi);
+    anchor_first_lo = lowest_set(anchor_lo);
+    anchor_first    = (|anchor_hi) ? anchor_first_hi : anchor_first_lo;
+    head_d = '0;
     for (int unsigned j = 0; j < ROB_ENTRIES; j++) begin
-      if (rean_first[j]) rean_steps = rean_steps | ROB_W'(j);
+      if (anchor_first[j]) head_d = head_d | ROB_W'(j);
     end
-    head_d = head_d + rean_steps;
 `endif
     if (flush_i) begin
       rob_d   = '0;
@@ -234,11 +249,27 @@ module g6lc_rob #(
 //pragma translate_on
 
   //pragma translate_off
+  // Rotated-walk reference for the absolute-order re-anchor (A136).
+  logic [ROB_ENTRIES-1:0] ref_stop, ref_first;
+  logic [ROB_W-1:0]       ref_dist, ref_steps, ref_head;
+  always_comb begin
+    ref_dist  = tail_d - head_q;
+    ref_steps = '0;
+    for (int unsigned j = 0; j < ROB_ENTRIES; j++)
+      ref_stop[j] = rob_d[ROB_W'(head_q + ROB_W'(j))].valid || (ROB_W'(j) == ref_dist);
+    ref_first = ref_stop & (~ref_stop + 1'b1);
+    for (int unsigned j = 0; j < ROB_ENTRIES; j++)
+      if (ref_first[j]) ref_steps = ref_steps | ROB_W'(j);
+    ref_head = head_q + ref_steps;
+  end
   always_ff @(posedge clk_i) begin
     if (rst_ni) begin
       for (int unsigned r = 0; r < NR_RETIRE; r++)
         ooo_rob_hit_onehot: assert ($onehot0(free_hit[r]))
           else $error("g6lc_rob: retire tid %0d names %0d entries", retire_tid_i[r], $countones(free_hit[r]));
+      if (!flush_i)
+        ooo_rob_head_reanchor: assert (head_d == ref_head)
+          else $error("g6lc_rob: absolute re-anchor %0d != rotated reference %0d", head_d, ref_head);
     end
   end
   //pragma translate_on

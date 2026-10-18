@@ -210,7 +210,7 @@ blockers below supersede any implied claim of verified end-to-end precision.
 |------|------|
 | `g6lc_rename.sv` | Multi-port RAT + free pool + busy + full-state branch ckpt (any port) |
 | `g6lc_iq.sv` | Compacting IQ, chain wakeup, multi-grant ready select + cancel squash |
-| `g6lc_rob.sv` | ROB with multi-WB complete-by-tid + cancel complete |
+| `g6lc_rob.sv` | ROB with multi-WB complete-by-tid + cancel complete; head re-anchor searches the post-free valid vector in slot order (A136, equivalence-proven, placed reg→reg 2.049 → 1.568 ns) |
 | `g6lc_lsq.sv` | Multi-alloc LSQ + live addr CAM + STL + cancel drop |
 | `g6lc_memdep.sv` | Store-set |
 | `g6lc_prf.sv` | Multi-port PRF with write-through |

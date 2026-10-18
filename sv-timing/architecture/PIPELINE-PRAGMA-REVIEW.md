@@ -174,6 +174,56 @@ and the normal package parser. Upload the emitted multiplier along with the
 same source snapshot for the third comparison. An emitted reparse or a
 structural reduction alone is not the acceptance condition.
 
+## A136 — further worst-arrival modules without interface cycles
+
+The three highest measured cones (`store_buffer` 3.702 ns, `wt_dcache_wbuffer`
+2.831 ns, `frontend` 2.744 ns) still need the stateful boundaries of §A132
+(input staging with acceptance accounting; a next-line prediction change).
+Their earlier bypass trials lost placed timing and remain rejected. This batch
+continues down the list with two latency-neutral changes, paired against
+`2a5ee192b` on the same Nangate45 flow with no disabled arcs
+(`fo4-a136-pair3`, `fo4-a136-rob3`).
+
+**`g6lc_loop_buffer`: registered expectation address.** The lookup and fill
+compares read `base_q + cursor<<ALIGN` through a 64-bit adder every cycle.
+One register now tracks that sum for the active cursor (capturing and armed
+are mutually exclusive; every return to armed passes through the close, which
+resets replay), updated from one candidate sum formed off registers in
+parallel with the compares. Evidence: six cycle-exact side-by-side runs
+(8×64, 4×32, 6×128; 300k cycles each; hits, fills, arms, wraps and flushes
+all exercised; the new invariant assertions on), a 6-step output miter from
+reset (a 12-step bound did not finish in 25 minutes and is recorded as
+inconclusive, not as a pass). A first two-register form failed the fill
+invariant in the arm+consume corner and was corrected before measurement.
+
+| Loop buffer | Baseline | Candidate |
+|---|---:|---:|
+| Placed worst arrival | 1.824 ns | **1.493 ns** (−18.1%) |
+| Repaired area | 7411.6 µm² | 8309.6 µm² (+12.1%) |
+| Buffers | 185 | 251 |
+
+**`g6lc_rob`: head re-anchor in absolute slot order.** The post-free valid
+vector was rotated by the head (a dynamic barrel shift) before an
+incrementer-based find-first and a final add. The stops are now formed in slot
+order, split at the registered head into two log-depth lowest-set searches,
+and the found slot is the head. Exact for power-of-two depth; the rotated walk
+stays under `translate_off` as a per-cycle reference assertion. Evidence:
+matched-state equivalence at 8/16/32 entries, both directed `tb_g6lc_rob`
+scenarios with the reference assertion quiet, and a textual mutant of the
+reference that the assertion reports.
+
+| ROB (32 entries, isolated) | Baseline | Candidate |
+|---|---:|---:|
+| Placed reg→reg | 2.049 ns | **1.568 ns** (−23.5%) |
+| Placed worst arrival | 2.049 ns | 1.994 ns (−2.7%; input tid-compare cone remains) |
+| Repaired area | 33524.0 µm² | **32855.8 µm²** (−2.0%) |
+| Filtered module study | 1.852 ns | 1.301 ns |
+
+Whole-core slang elaboration of the retained RTL passes
+(`fo4-a136-final-elab`); both modules' pragma audits have no rejected or
+unbound targets. These are pre-CTS module results on an isolated flow; the
+whole-core board is not re-measured here and 10 adjusted FO4 remains open.
+
 ## A135 — pragma-driven row-local emission on the loop predictor
 
 `core/frontend/g6lc_bp_loop.sv` now carries only a comment:
