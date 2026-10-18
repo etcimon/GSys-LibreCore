@@ -175,9 +175,16 @@ module multiplier
     // svt-pipe: carry mul operator_s1,corr_q,clmul_s1,clmulr_s1
     // svt-pipe: result mul valid=mult_valid_q id=trans_id_q operator_d corr_sh clmul_q clmulr_q
     // svt-pipe: latency mul CVA6Cfg.MultStages base=CVA6Cfg.MultStages
-    localparam int unsigned NS = CVA6Cfg.XLEN / 16;
+    // Slice width of the second operand (A131): 16 bits with two stages
+    // (A115), 8 bits with three — the third stage owns the sum of the
+    // slices' products, so the stage-1 product can be the narrower
+    // (XLEN+1) × 9 and the 8-term sum has a stage of its own. The live
+    // board read the 65 × 17 product into pp_q as the module's worst cone
+    // (2.58 ns from the inputs) once the sum was staged.
+    localparam int unsigned SB = CVA6Cfg.MultStages > 2 ? 8 : 16;
+    localparam int unsigned NS = CVA6Cfg.XLEN / SB;
     localparam int unsigned AW = CVA6Cfg.XLEN + 1;   // unsigned pattern of the signed operand
-    localparam int unsigned PW = AW + 17;            // (XLEN+1) × 17 unsigned
+    localparam int unsigned PW = AW + SB + 1;        // (XLEN+1) × (SB+1) unsigned
     localparam int unsigned RW = CVA6Cfg.XLEN * 2;
     logic [AW-1:0] a_u, b_u;
     assign a_u = op_a_s;  // the (XLEN+1)-bit two's-complement pattern, read unsigned
@@ -186,9 +193,9 @@ module multiplier
     logic [AW:0]   corr_d, corr_q;                   // a_top·B_u + b_top·A_u
     for (genvar k = 0; k < NS; k++) begin : gen_pp
       if (k == NS - 1) begin : gen_top
-        assign pp_d[k] = a_u * b_u[AW-1:16*k];       // 17-bit top slice (sign bit included)
+        assign pp_d[k] = a_u * b_u[AW-1:SB*k];       // (SB+1)-bit top slice (sign bit included)
       end else begin : gen_mid
-        assign pp_d[k] = a_u * b_u[16*k+:16];
+        assign pp_d[k] = a_u * b_u[SB*k+:SB];
       end
     end
     assign corr_d = (a_u[AW-1] ? {1'b0, b_u} : '0) + (b_u[AW-1] ? {1'b0, a_u} : '0);
@@ -197,11 +204,15 @@ module multiplier
     // correction at bit XLEN+1.
     logic [RW-1:0] term[NS];
     for (genvar k = 0; k < NS; k++) begin : gen_term
-      assign term[k] = RW'(pp_q[k]) << (16 * k);
+      assign term[k] = RW'(pp_q[k]) << (SB * k);
     end
     logic [RW-1:0] corr_sh, prod_sum;
     assign corr_sh = RW'(corr_q) << AW;
-    if (NS == 4) begin : gen_sum4
+    if (NS == 8) begin : gen_sum8
+      // svt-pipe: cut-ok mul
+      assign prod_sum = ((term[0] + term[1]) + (term[2] + term[3])) +
+                        ((term[4] + term[5]) + (term[6] + term[7]));
+    end else if (NS == 4) begin : gen_sum4
       // svt-pipe: cut-ok mul
       assign prod_sum = (term[0] + term[1]) + (term[2] + term[3]);
     end else if (NS == 2) begin : gen_sum2

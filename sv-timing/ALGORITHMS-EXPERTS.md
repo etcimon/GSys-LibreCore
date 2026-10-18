@@ -31,6 +31,11 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A131 update:** hand rung on the multiplier — 8-bit operand slices under
+`MultStages = 3`: reg→reg 1.817 → 1.623 ns on the live board, boundary
+cone 2.581 → 2.531 ns (118.3 adjusted FO4); witnesses pass; the contract
+still fences the module.
+
 **A130 update:** live-RTL board after adoption — multiplier 2.820 → 2.581
 ns (131.8 → 120.6 adjusted FO4), worst now the stage-1 product; the
 board's top is `store_buffer` 173.0 with the concurrent write-buffer fixes
@@ -8265,6 +8270,19 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A131 — Hand re-pipelining with contracts as the check: the multiplier's slices
+
+Under `MultStages = 3` the multiplier's second operand is sliced into
+8-bit pieces (eight (XLEN+1)×9 products, an 8-term sum in the third
+stage's cycle); two-stage configurations keep 16-bit slices. Live board:
+reg→reg 1.817 → **1.623 ns** (−10.7 %), worst any 2.581 → 2.531 ns
+(120.6 → 118.3 adjusted FO4) — the boundary cone is the operand
+conditioning ahead of the product, whose real start is the issue stage's
+operand mux. Witnesses: `tb_mul_sbs` at 2 and 3 stages (3 seeds × 300 k
+each, 0 errors), `tb_mul_lifetime` at 3 stages, whole-core map + STA.
+The contract is unchanged and still admits nothing further under
+`MultStages = 3`.
 
 ## A130 — The live-RTL board after the multiplier's adoption
 

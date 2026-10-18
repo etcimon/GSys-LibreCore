@@ -638,3 +638,37 @@ multiplier's is.
 synchronous before mapping, as the per-module phase did; the first
 live-RTL attempt mapped for 86 minutes and failed at OpenSTA on
 `$_ALDFFE_` black boxes.
+
+## 13. Hand re-pipelining, surface-tested: the multiplier's slices (A131)
+
+With the emit path set aside and the contracts kept as the validation
+layer, the first hand rung on the live board's multiplier cone: under
+`MultStages = 3` the second operand is sliced into **8-bit** pieces
+(`SB = MultStages > 2 ? 8 : 16`, `NS = XLEN / SB`, `PW = AW + SB + 1`),
+eight (XLEN+1) × 9 partial products instead of four (XLEN+1) × 17, and an
+8-term balanced sum (`gen_sum8`) in the stage the third register already
+owns. Two-stage configurations keep the A115 16-bit slices. `check_cfg`
+requires `XLEN % 8 == 0` at three stages.
+
+| multiplier, Nangate45 live board | §12 (3 stages, 16-bit slices) | now (3 stages, 8-bit slices) |
+|---|---:|---:|
+| worst reg→reg | 1.817 ns (38 cells) | **1.623 ns** (33 cells) — the 8-term sum |
+| worst any (in→reg into `pp_q`) | 2.581 ns = 120.6 adj FO4 | **2.531 ns = 118.3 adj FO4** |
+
+The reg→reg cone the module owns fell 10.7 %; the boundary cone from
+the operand inputs barely moved, because it is dominated by the operand
+conditioning ahead of the product (the MULW / MULH* sign and width
+selection on `operation_i`), not by the product's width — a cone whose
+real start is the issue stage's operand mux, which the module board reads
+with ideal inputs. The module's own stages now sit at 76 adjusted FO4;
+the next rung for the boundary is a stage on the conditioned operands
+(`MultStages = 4`, `mult.sv` follows), which the contract would admit
+through the same `latency` word.
+
+**Surface tests.** `tb_mul_sbs`: `MultStages = 2` (16-bit slices,
+`lag=1`) and `MultStages = 3` (8-bit, `lag=2`), seeds 1/17/23 × 300 k,
+**0 errors** each; `tb_mul_lifetime` at 3 stages PASS (18 checks); the
+streamed live route re-mapped the core (474 s) and OpenSTA linked
+(`s2-openroad-sta` pass). The contract on the module is unchanged
+(`cut-ok` on the sum, `latency … base=CVA6Cfg.MultStages`), so `correct
+--allow-latency` still proposes nothing further under 3 stages.

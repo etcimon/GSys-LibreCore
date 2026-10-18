@@ -35,3 +35,7 @@ is a reference-model script since A128 (an operation issued at step k
 emerges at step k + MultStages - 1 unless cancelled through emergence or
 flushed) and prints `PASS tb_mul_lifetime stages=N checks=18` for N = 2
 and 3; the pre-A115 wrapper still fails it at step 5.
+
+A131: at three stages the second operand is sliced 8 bits wide (eight
+(XLEN+1) x 9 products, `gen_sum8`); the same `+define+SVT_MUL_STAGES=3
++lag=2` run covers it (3 seeds x 300k, 0 errors).

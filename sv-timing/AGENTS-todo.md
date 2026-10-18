@@ -3,6 +3,19 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A131 — hand re-pipelining with the contracts as the check
+
+- [x] Multiplier 8-bit slices under `MultStages = 3` (`gen_sum8`);
+  `check_cfg` XLEN % 8; witnesses at 2 and 3 stages; live board.
+- [ ] Multiplier boundary: a stage on the conditioned operands
+  (`MultStages = 4`, wrapper follows) — or read the cone from `ex_stage`'s
+  operand mux in the whole-design report before deciding.
+- [ ] `store_buffer` (173.0) / `wt_dcache_wbuffer` (132.3): hand rungs need
+  the T46/T47 context; the A120 store-buffer side-by-side harness is the
+  witness once a latency-neutral restructure is chosen.
+- [ ] Analyzer: conditional localparams (`SB = cond ? 8 : 16`) in
+  constant-generate reachability (`gen_sum_n` still counted structurally).
+
 ## A130 — live-RTL board
 
 - [x] Route on the live tree (`--fo4 0 --map-recipe streamed`); whole-core
