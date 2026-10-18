@@ -78,10 +78,14 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
         "multiplier": ("core/multiplier.sv",),
         "boundary": ("core/store_buffer.sv", "core/ooo/g6lc_rename.sv", "core/fetch_B/instr_realign.sv"),
         "statcor": ("core/frontend/g6lc_bp_statcor.sv",),
+        "loop-emit": ("core/frontend/g6lc_bp_loop.sv",),
     }
     changed = profile_files[profile]
     if profile == "statcor":
         name = "verif/tb/core/tb_g6lc_bp_statcor.sv"
+        files[name] = (root / name).read_bytes()
+    if profile == "loop-emit":
+        name = "verif/tb/core/tb_g6lc_bp_loop_emit.sv"
         files[name] = (root / name).read_bytes()
     if profile == "boundary":
         for folder in ("store_buffer_sbs", "instr_realign_sbs"):
@@ -595,6 +599,10 @@ foreach kind {in_reg reg_reg reg_out in_out} {
 
     if (src / "review.json").exists():
         review = json.loads((src / "review.json").read_text())
+        if review["profile"] == "loop-emit" and not os.environ.get("CONTROL_MODE"):
+            review_loop_emit(src, out, data, sta, lib, abc, evidence, yosys, run)
+            (out / "result.json").write_text(json.dumps(evidence, indent=2))
+            return
         if review["profile"] == "statcor" and not os.environ.get("CONTROL_MODE"):
             review_statcor(src, out, sta, lib, abc, evidence, yosys, run)
             (out / "result.json").write_text(json.dumps(evidence, indent=2))
@@ -835,6 +843,88 @@ endmodule
         evidence["proofs"][f"rename-{harts}h"] = "matched-state equivalence PASS"
     print("PROOFS " + json.dumps(evidence["proofs"]), flush=True)
     map_snapshots(src, out, sta, lib, abc, evidence, yosys, run)
+
+
+def review_loop_emit(src, out, data, sta, lib, abc, evidence, yosys, run):
+    """Source vs sv-timing emitted row-local loop predictor: equivalence,
+    independent model witness with negative control, mapping and placement.
+    The emitted file is an uploaded artifact; its hash is recorded."""
+    portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
+    packages = [l for l in portable.splitlines()
+                if l.startswith("+") or l.endswith("_pkg.sv") or "/include/" in l]
+    bench = src / "verif/tb/core/tb_g6lc_bp_loop_emit.sv"
+    emitted = data / "g6lc_bp_loop__svt.sv"
+    evidence["sources"]["g6lc_bp_loop__svt.sv"] = hashlib.sha256(emitted.read_bytes()).hexdigest()
+    text = emitted.read_text()
+    assert "row-local-applied train" in text and "__svt_row_train" in text, "emit lacks the prepared form"
+    assert "svt-pipe: row-local train" not in text
+    variants = {"source": src / "core/frontend/g6lc_bp_loop.sv", "emitted": emitted}
+    flists = {}
+    for variant, path in variants.items():
+        flist = out / f"loop-{variant}.f"
+        flist.write_text("\n".join(packages + [str(path), str(bench)]) + "\n")
+        flists[variant] = flist
+    for entries, slots, rvc in ((16, 4, 1), (8, 1, 0), (32, 2, 1)):
+        commands = []
+        for variant, name in (("source", "gold"), ("emitted", "gate")):
+            commands += [
+                f"read_slang -f {flists[variant]} --top g6lc_loop_timing --single-unit "
+                f"-G ENTRIES={entries} -G SLOTS={slots} -G RVC={rvc} --ignore-assertions",
+                "proc", "flatten", "memory_map", "async2sync", "opt_clean",
+                f"rename g6lc_loop_timing {name}", f"design -stash {name}",
+            ]
+        commands += ["design -copy-from gold -as gold gold", "design -copy-from gate -as gate gate",
+                     "equiv_make gold gate equiv", "hierarchy -top equiv",
+                     "equiv_simple -seq 1", "equiv_status -assert"]
+        key = f"loop-eq-{entries}-{slots}-{rvc}"
+        out_text = yosys(key, "\n".join(commands), timeout=300)
+        assert "Equivalence successfully proven!" in out_text
+        evidence["proofs"][key] = "matched-state equivalence PASS"
+    vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+    for variant, flist in flists.items():
+        key = f"loop-model-{variant}"
+        obj = out / f"obj-{key}"
+        run(key + "-build", [vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal",
+            "-Wno-WIDTH", "-Wno-UNOPTFLAT", "-f", str(flist), "--top-module", "tb_g6lc_bp_loop",
+            "--Mdir", str(obj), "-j", "4"])
+        for seed in (1, 17):
+            log = run(f"{key}-{seed}", [str(obj / "Vtb_g6lc_bp_loop"), f"+seed={seed}"])
+            assert "LOOP_PASS" in log
+            evidence["proofs"][f"{key}-{seed}"] = next(l for l in log.splitlines() if "LOOP_PASS" in l)
+        bad = subprocess.run([str(obj / "Vtb_g6lc_bp_loop"), "+oracle_negative"],
+                             cwd=out, capture_output=True, text=True, timeout=120)
+        (out / (key + "-negative.log")).write_text(bad.stdout + bad.stderr)
+        assert bad.returncode != 0 and "LOOP_MISMATCH" in bad.stdout
+    for variant, flist in flists.items():
+        netlist, stats = out / f"{variant}.v", out / f"{variant}.stat"
+        yosys("loop-map-" + variant,
+              f"read_slang -f {flist} --top g6lc_loop_timing --single-unit\n"
+              "proc\nflatten\nopt_clean\nwreduce\nalumacc\nopt_clean\nmemory_map\n"
+              f"opt_dff\ntechmap\nopt_clean\ndfflibmap -liberty {lib}\n{abc}\n"
+              f"opt_clean -purge\ntee -o {stats} stat -liberty {lib}\n"
+              f"write_verilog -noattr -noexpr {netlist}\n")
+        evidence["maps"][variant] = {
+            "area_um2": float(re.search(r"Chip area for module .*?:\s*([\d.]+)", stats.read_text())[1]),
+            "board": {},
+        }
+        for fan in (0, 64):
+            env = dict(os.environ, OR_LIBERTY=lib, OR_VERILOG=str(netlist),
+                       OR_TOP="g6lc_loop_timing", OR_PERIOD_NS="0.25", OR_IGNORE_FANOUT_ABOVE=str(fan))
+            out_text = run(f"loop-sta-{variant}-{fan}", [sta, "-exit",
+                str(src / "build-platform/scripts/openroad-module-board.tcl")], env=env)
+            row = next(l for l in out_text.splitlines() if l.startswith("ROW\t"))
+            assert "failed" not in row
+            evidence["maps"][variant]["board"][str(fan)] = row
+        env = dict(os.environ, STUDY_PLATFORM=str(Path(lib).parent),
+                   OR_VERILOG=str(netlist), OR_TOP="g6lc_loop_timing",
+                   STUDY_OUTPUT=str(out / variant), STUDY_VARIANT=variant)
+        out_text = run("loop-place-" + variant, [
+            "/opt/testharness/toolchains/openroad-g6lc-pgo/bin/openroad", "-exit",
+            str(src / "build-platform/scripts/openroad-module-place-study.tcl")], env=env, timeout=900)
+        row = next(l for l in out_text.splitlines() if l.startswith("PLACE_STUDY "))
+        evidence["maps"][variant]["placement"] = dict(re.findall(r"(\w+)=(\S+)", row))
+        (out / "result.json").write_text(json.dumps(evidence, indent=2))
+    print(json.dumps(evidence["maps"], indent=2), flush=True)
 
 
 def review_statcor(src, out, sta, lib, abc, evidence, yosys, run):
@@ -1259,7 +1349,7 @@ if __name__ == "__main__":
         mode.add_argument("--snapshot", type=Path)
         mode.add_argument("--analyze-results", type=Path)
         parser.add_argument("--baseline", help="baseline revision for the selected review profile")
-        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor"), default="control")
+        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit"), default="control")
         args = parser.parse_args()
         if args.snapshot:
             if not args.baseline:

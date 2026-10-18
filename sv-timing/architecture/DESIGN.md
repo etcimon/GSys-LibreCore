@@ -24,6 +24,20 @@
 
 ## Current correctness audit: source origins and validation
 
+### Row-local source preparation (A135)
+
+`row-local` compiles an explicitly bounded indexed table update into a
+per-row update before the ordinary correction worklist. Initial lowering
+retains an original-source conditional-statement span and prepares a checked
+plan; it earns no timing credit. The opt-in correction path writes a separate
+prepared source, reparses it under its own filename and the same configuration,
+then builds the IR used by later transforms. Original sources remain untouched.
+The output manifest preserves the original logical filename and records the
+prepared input/provenance separately. Unsupported side effects, mutable/signed
+indices, macros, local includes, ambiguous writes and unbounded replication
+refuse preparation. This is a latency-neutral implementation of A134's
+row-local training pattern, not permission to pipeline state recurrences.
+
 ### Pipeline representation preprocessing (A133)
 
 Before the first timing attribution, compile source pipeline representation

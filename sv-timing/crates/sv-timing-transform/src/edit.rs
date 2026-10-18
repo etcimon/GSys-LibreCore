@@ -10,6 +10,8 @@ use sv_timing_core::{NodeId, PathId, SourceLoc};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum EditKind {
+    /// A checked row-local pragma compiled into a separate prepared source.
+    RowLocal,
     /// Pipeline register insertion.
     InsertReg,
     /// Wire / assign split.

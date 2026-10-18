@@ -31,6 +31,12 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A135 update:** `row-local` is the second pragma the tool executes end to
+end: statement span retained at parse, checked plan in initial IR, prepared
+source reparsed before correction, emit mapped to the original path. Loop
+predictor: placed 1.911 → 1.410 ns at −6.9% area, equivalence + model witness
+pass. Record: `architecture/PIPELINE-PRAGMA-REVIEW.md` (A135).
+
 **A134 update:** further RTL files improve with unchanged cycle interfaces.
 Realigner continuation caching: placed worst 2.977 → 2.257 ns at −17.2% area.
 Statcor row-local training: 1.622 → 1.095 ns at +12.6% area. Rename and store
@@ -8291,6 +8297,24 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A135 — Execute the row-local pattern from a pragma
+
+The A134 hand pattern (compute each table row's update before the late row
+select) is now compiled from `// svt-pipe: row-local …`. The rule is a
+source-preparation stage, not an IR credit: the conditional statement's exact
+original bytes are retained at parse; the plan checks index stability and
+signedness, bank type/dimension agreement, the write footprint against the
+lowered IR, token-level hazards (calls, macros, locals, compound assignment,
+enclosing terminators) and the authored replication bound; `correct --emit`
+writes the prepared file, reparses it under the same configuration, and the
+ordinary passes run on that program. The consumed directive becomes
+`row-local-applied`, so a second run cannot re-expand it.
+
+Loop predictor evidence: three equivalence geometries, an independent model
+with a negative control on source and emit, and paired placement 1.911 →
+1.410 ns at −6.9% area. The structural headline did not change (18.6 FO4);
+the emitted program and the physical pair are the evidence, per PL-P4.
 
 ## A134 — Cache a state predicate; localize table feedback
 

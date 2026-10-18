@@ -44,6 +44,7 @@ fn ident(s: &str) -> bool {
 
 fn fact(p: &PipePragma, kind: &str, args: Vec<(String, String)>, words: Vec<String>) -> PipePragma {
     PipePragma {
+        row_local: None,
         derived: true,
         kind: kind.into(),
         domain: p.domain.clone(),
@@ -400,7 +401,7 @@ pub fn prepare_design(design: &mut TimingDesign) {
         if !module
             .pipe_pragmas
             .iter()
-            .any(|p| p.kind == "representation")
+            .any(|p| matches!(p.kind.as_str(), "representation" | "row-local"))
         {
             continue;
         }
@@ -412,7 +413,7 @@ pub fn prepare_design(design: &mut TimingDesign) {
             .collect();
         let mut base: Vec<_> = source
             .iter()
-            .filter(|p| p.kind != "representation")
+            .filter(|p| !matches!(p.kind.as_str(), "representation" | "row-local"))
             .cloned()
             .collect();
         let resolver = crate::width::WidthResolver::from_parts(
@@ -452,6 +453,16 @@ pub fn prepare_design(design: &mut TimingDesign) {
                     base.push(error.clone());
                     derived.push(error);
                 }
+            }
+        }
+        for p in source.iter().filter(|p| p.kind == "row-local") {
+            match crate::row_local::compile(module, p, &resolver) {
+                Ok(plan) => {
+                    let mut ready = fact(p, "row-local-ready", vec![], vec![]);
+                    ready.row_local = Some(plan);
+                    derived.push(ready);
+                }
+                Err(reason) => derived.push(fact(p, "preprocess-error", vec![], vec![reason])),
             }
         }
         module.pipe_pragmas = source.into_iter().chain(derived).collect();
@@ -515,6 +526,7 @@ pub fn mark_applied(module: &mut TimingModule, plans: &[RepresentationPlan]) {
                 continue;
             }
             module.pipe_pragmas.push(PipePragma {
+                row_local: None,
                 derived: true,
                 kind: "pipeline-boundary-applied".into(),
                 domain: Some(plan.domain.clone()),

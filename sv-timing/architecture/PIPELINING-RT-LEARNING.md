@@ -294,6 +294,47 @@ initial-IR normalization, unchanged executable costs, repeated preparation,
 serialization/cache round trips, refusal cases, actual paired emission and
 protection against recutting the consumed boundary.
 
+## 5a. Second implemented rule: `row-local` source preparation (A135)
+
+The A134 statistical-corrector pattern is now a pragma the tool executes:
+
+```systemverilog
+always_comb begin
+  mem_d = mem_q;
+  // svt-pipe: row-local train index=uidx rows=NR_ENTRIES banks=mem_q:mem_d max-rows=32
+  if (bht_update_i.valid) begin
+    ... reads mem_q[uidx], writes mem_d[uidx] fields ...
+  end
+end
+```
+
+Pipeline position: parsing retains the conditional statement's original
+source span and bytes; `prepare_design` compiles the directive into a
+`row-local-ready` plan (no IR cost change); `correct --emit` with structural
+emission writes a prepared copy under `<out>/_prepared/`, reparses it under
+its own path and configuration, and only then runs the ordinary worklist.
+Emission maps the prepared file back to the original logical path and keeps
+the consumed directive as `row-local-applied`. `svt_pragma_preprocess.json`
+and the JSON `pragma_preprocessing` block record the source-level edits.
+
+The generated form is `for (int unsigned r = 0; r < rows; r++) if (index == r)
+<statement with bank[index] -> bank[r]>`. It is exact when the index is a
+stable, unsigned, registered/input-derived selector, every bank reference in the
+statement uses that index, the only writes are `destination[index]` fields,
+and the statement has no calls, macros, strings, loops, locals, compound
+assignments or enclosing-block terminators. The lowered IR write footprint
+must match the statement text. Row counts come from declared elaboration
+constants and must fit the authored `max-rows`. Anything else is a contract
+rejection, not a partial rewrite.
+
+Evidence for `g6lc_bp_loop` (`fo4-a135-loop-emit`): equivalence of source vs
+emitted for 16x4/RVC, 8x1/no-RVC and 32x2 geometries; an independent per-row
+model passes both seeds on both variants and detects a forced-wrong override;
+paired Nangate45 placement/repair with no disabled arcs improves worst arrival
+**1.911 → 1.410 ns** (−26.2%) at **−6.9% area**. The structural estimate did
+not move (18.6 FO4), which confirms that this rule must be judged by the
+reparsed emit and physical result, not by the IR headline.
+
 ## 6. Validation and evidence retention
 
 The fixture is `fixtures/auto_correct/pipe_representation.sv`; its independent

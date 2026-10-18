@@ -230,11 +230,17 @@ pub(crate) fn resolve_pragmas(
     for p in pragmas {
         let at = format!("{}:{}", p.loc.file, p.loc.start_line);
         match p.kind.as_str() {
-            "representation" => {
+            "representation" | "row-local" => {
+                if p.kind == "row-local" {
+                    c.require_contract = true;
+                }
                 let prepared = pragmas.iter().any(|q| {
                     q.derived
                         && q.loc == p.loc
-                        && matches!(q.kind.as_str(), "representation-ready" | "preprocess-error")
+                        && matches!(
+                            q.kind.as_str(),
+                            "representation-ready" | "row-local-ready" | "preprocess-error"
+                        )
                 });
                 if !prepared {
                     c.rejected.push(format!(
@@ -243,6 +249,8 @@ pub(crate) fn resolve_pragmas(
                 }
             }
             "representation-ready" if p.derived => {}
+            "row-local-ready" if p.derived => {}
+            "row-local-applied" => c.require_contract = true,
             "pipeline-boundary-applied" if p.derived => {
                 if let Some(on) = arg(&p.args, "on") {
                     c.no_cut.insert(on.to_string());

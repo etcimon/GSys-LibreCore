@@ -16,6 +16,7 @@ pub mod edit;
 pub mod factor_always_ff;
 pub mod pass;
 pub mod pipeline;
+pub mod source_prepare;
 pub mod worklist;
 
 pub use edit::{EditKind, EditRecord, EditTrace, EmitRhsRewrite};

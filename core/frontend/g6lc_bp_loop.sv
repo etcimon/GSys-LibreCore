@@ -57,6 +57,8 @@ module g6lc_bp_loop
 
   always_comb begin
     mem_d = mem_q;
+    // Prepare each row's training before the selected write; no added cycle.
+    // svt-pipe: row-local train index=uidx rows=NR_ENTRIES banks=mem_q:mem_d max-rows=32
     if (bht_update_i.valid) begin
       if (mem_q[uidx].valid && mem_q[uidx].tag == bht_update_i.pc) begin
         if (bht_update_i.taken) begin

@@ -1119,6 +1119,7 @@ mod tests {
             guards: Default::default(),
             onehot_facts: Default::default(),
             guard_sites: Default::default(),
+            decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
             loc: crate::loc::SourceLoc::file_start("lzc.sv"),
         };
@@ -1184,6 +1185,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
                 loc: crate::loc::SourceLoc::file_start("axi2mem.sv"),
             },
@@ -1231,6 +1233,7 @@ mod tests {
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
                 loc: crate::loc::SourceLoc::file_start("policy.sv"),
             },

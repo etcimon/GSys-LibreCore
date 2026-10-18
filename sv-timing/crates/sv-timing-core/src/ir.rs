@@ -26,6 +26,7 @@ pub fn emitted_lower_field_names() -> &'static [&'static str] {
         "fn_bodies",
         "param_override_present",
         "pipe_pragmas_derived",
+        "statement_source",
     ]
 }
 
@@ -729,6 +730,10 @@ pub struct TimingModule {
     /// assignment RHS, so an exact identity must be able to rewrite one.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub guard_sites: Vec<GuardSite>,
+    /// Declaration source text per declared port/variable name, captured for
+    /// authored preparation rules (A135). Empty for ordinary analyses.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub decl_texts: BTreeMap<String, String>,
     /// In-file re-pipelining facts (A123): `// svt-pipe: …` comment pragmas
     /// collected over the module span, like the `$onehot` facts. They name
     /// the roles a register cut must carry (valid, id, kill, flush, carried
@@ -744,6 +749,9 @@ pub struct TimingModule {
 /// One `// svt-pipe: <kind> [domain] key=value … flag …` pragma as written.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PipePragma {
+    /// Checked source-preparation plan, present only on a derived ready fact.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub row_local: Option<crate::row_local::RowLocalPlan>,
     /// Produced by pipeline preprocessing rather than read from source.
     /// Original pragmas remain alongside these facts for provenance/rebuild.
     #[serde(default)]
@@ -769,13 +777,32 @@ pub struct PipePragma {
 /// records for the assignments the predicate encloses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GuardSite {
+    /// Complete original-source conditional statement (outer `if` only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub statement: Option<SourceStatement>,
     /// Predicate text, trimmed.
     pub text: String,
     /// Span of the predicate expression in the original source.
     pub loc: SourceLoc,
 }
 
+/// A concrete source statement retained for checked preprocessing.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SourceStatement {
+    /// Original-source span, not an offset into preprocessed parser text.
+    pub loc: SourceLoc,
+    /// Exact bytes at that span, used as the emitter's stale-source guard.
+    pub text: String,
+}
+
 impl TimingModule {
+    /// Source text of the declaration (port or variable) binding `name`, when
+    /// the lowerer retained it. Used by preparation rules that need qualifiers
+    /// the summary fields drop (`signed`).
+    pub fn source_decl_text(&self, name: &str) -> Option<&str> {
+        self.decl_texts.get(name).map(String::as_str)
+    }
+
     /// Genvar names whose generate-loop span covers `loc` (elaboration, not runtime `i`).
     pub fn genvar_names_at(&self, loc: &SourceLoc) -> Vec<String> {
         if loc.origin != crate::loc::OriginKind::UserFile {

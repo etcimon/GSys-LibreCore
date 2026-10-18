@@ -174,6 +174,29 @@ and the normal package parser. Upload the emitted multiplier along with the
 same source snapshot for the third comparison. An emitted reparse or a
 structural reduction alone is not the acceptance condition.
 
+## A135 — pragma-driven row-local emission on the loop predictor
+
+`core/frontend/g6lc_bp_loop.sv` now carries only a comment:
+`// svt-pipe: row-local train index=uidx rows=NR_ENTRIES banks=mem_q:mem_d max-rows=32`.
+`sv-timing correct --emit --real-cut-feeds` prepares the per-row form,
+reparses it and emits it as `g6lc_bp_loop__svt.sv`; production RTL is unchanged.
+
+| Loop predictor, Nangate45 | Source | sv-timing emitted |
+|---|---:|---:|
+| Placed worst arrival | 1.911 ns | **1.410 ns** (−26.2%) |
+| Placed reg→reg | 1.353 ns | **1.066 ns** |
+| Repaired area | 17776.779 µm² | **16551.320 µm²** (−6.9%) |
+| Filtered module study | 1.743 ns | 0.856 ns |
+
+Three matched-state equivalence geometries pass; the new independent model
+(`verif/tb/core/tb_g6lc_bp_loop_emit.sv`) passes seeds 1/17 on both variants
+with identical coverage counts and fails under `+oracle_negative`. Placement
+reports no electrical violations and no disabled arcs. At 21.398 ps/FO4 the
+emitted placed worst is ~65.9 adjusted FO4: better, not closed. The structural
+IR headline stayed at 18.6 FO4 — the gain is visible only in the reparsed emit
+and the physical comparison, which is why the tool reports the prepared source
+separately from the correction ledger.
+
 ## A134 — further control/state files
 
 This batch compares immutable snapshots against `62c00081a`. It retains two

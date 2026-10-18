@@ -464,7 +464,20 @@ fn lower_file(
                 &scope.loc,
                 &scope_end_byte(tree, li, &path_str, scope.nodes.iter().cloned()),
             ),
-            guard_sites: collect_guard_sites(tree, li, &path_str, scope.nodes.iter().cloned()),
+            guard_sites: collect_guard_sites(
+                tree,
+                li,
+                &path_str,
+                &file.bytes,
+                scope.nodes.iter().cloned(),
+            ),
+            decl_texts: collect_decl_texts(
+                tree,
+                li,
+                &path_str,
+                &file.bytes,
+                scope.nodes.iter().cloned(),
+            ),
             pipe_pragmas: collect_pipe_pragmas(
                 &file.bytes,
                 &path_str,
@@ -1822,7 +1835,14 @@ fn collect_pipe_pragmas(
         let Some(kind) = words.next() else { continue };
         let takes_domain = matches!(
             kind,
-            "protocol" | "carry" | "result" | "cut-ok" | "latency" | "representation"
+            "protocol"
+                | "carry"
+                | "result"
+                | "cut-ok"
+                | "latency"
+                | "representation"
+                | "row-local"
+                | "row-local-applied"
         );
         let mut domain = None;
         let mut args = Vec::new();
@@ -1843,9 +1863,11 @@ fn collect_pipe_pragmas(
         let trimmed_len = line.trim_end_matches(['\n', '\r']).len();
         let end_byte = line_start + trimmed_len;
         out.push(crate::ir::PipePragma {
+            row_local: None,
             derived: false,
-            kind: if kind == "representation" && !line[..ci].trim().is_empty() {
-                "invalid-inline-representation".into()
+            kind: if matches!(kind, "representation" | "row-local") && !line[..ci].trim().is_empty()
+            {
+                "invalid-inline-pipeline-directive".into()
             } else {
                 kind.to_string()
             },
@@ -2611,35 +2633,126 @@ where
 /// every predicate decided on the way to it (the else branches read the same
 /// predicates). Nested conditionals contribute their own entries; the assign
 /// collects the union.
+/// Declaration source text per name, only for files that author a
+/// source-preparation directive (the texts are otherwise unused).
+fn collect_decl_texts<'a, T>(
+    tree: &'a SyntaxTree,
+    li: &LineIndex,
+    path_str: &str,
+    bytes: &[u8],
+    root: T,
+) -> BTreeMap<String, String>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut out = BTreeMap::new();
+    let wanted = String::from_utf8_lossy(bytes).lines().any(|line| {
+        line.split_once("svt-pipe:")
+            .is_some_and(|(_, rest)| rest.split_whitespace().next() == Some("row-local"))
+    });
+    if !wanted {
+        return out;
+    }
+    for node in root {
+        let (loc, names): (SourceLoc, Vec<String>) = match node {
+            RefNode::AnsiPortDeclaration(p) => (
+                loop_source_span(tree, li, path_str, p),
+                p.into_iter()
+                    .filter_map(|n| match n {
+                        RefNode::PortIdentifier(id) => {
+                            identifier_str(tree, RefNode::PortIdentifier(id))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            RefNode::DataDeclaration(d) => (
+                loop_source_span(tree, li, path_str, d),
+                d.into_iter()
+                    .filter_map(|n| match n {
+                        RefNode::VariableIdentifier(id) => {
+                            identifier_str(tree, RefNode::VariableIdentifier(id))
+                        }
+                        _ => None,
+                    })
+                    .collect(),
+            ),
+            _ => continue,
+        };
+        if loc.origin != OriginKind::UserFile {
+            continue;
+        }
+        let Some(text) = bytes
+            .get(loc.byte_start as usize..loc.byte_end as usize)
+            .and_then(|b| std::str::from_utf8(b).ok())
+        else {
+            continue;
+        };
+        for name in names {
+            out.entry(name).or_insert_with(|| text.to_string());
+        }
+    }
+    out
+}
+
 /// Every `if` / `else if` predicate in `root` with the span of the
 /// expression inside its parentheses (A122 guard rewrites).
 fn collect_guard_sites<'a, T>(
     tree: &'a SyntaxTree,
     li: &LineIndex,
     path_str: &str,
+    bytes: &[u8],
     root: T,
 ) -> Vec<crate::ir::GuardSite>
 where
     T: IntoIterator<Item = RefNode<'a>>,
 {
+    // Full statement text is only needed by authored source-preparation rules.
+    // Avoid retaining nested body copies on ordinary large RTL files.
+    let capture_statements = String::from_utf8_lossy(bytes).lines().any(|line| {
+        line.split_once("svt-pipe:")
+            .is_some_and(|(_, rest)| rest.split_whitespace().next() == Some("row-local"))
+    });
     let mut out = Vec::new();
-    let mut push = |text: Option<String>, loc: SourceLoc| {
+    let mut push = |text: Option<String>, loc: SourceLoc, statement| {
         if let Some(t) = text {
             if loc.origin == OriginKind::UserFile && !t.is_empty() {
-                out.push(crate::ir::GuardSite { text: t, loc });
+                out.push(crate::ir::GuardSite {
+                    text: t,
+                    loc,
+                    statement,
+                });
             }
         }
     };
     for node in root {
         if let RefNode::ConditionalStatement(cs) = node {
+            let statement = if capture_statements {
+                let statement_loc = loop_source_span(tree, li, path_str, cs);
+                if statement_loc.origin == OriginKind::UserFile {
+                    bytes
+                        .get(statement_loc.byte_start as usize..statement_loc.byte_end as usize)
+                        .and_then(|b| std::str::from_utf8(b).ok())
+                        .map(|text| crate::ir::SourceStatement {
+                            loc: statement_loc,
+                            text: text.into(),
+                        })
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             push(
                 node_text(tree, &cs.nodes.2.nodes.1).map(|t| t.trim().to_string()),
                 loop_source_span(tree, li, path_str, &cs.nodes.2.nodes.1),
+                statement,
             );
             for (_, _, pred, _) in &cs.nodes.4 {
                 push(
                     node_text(tree, &pred.nodes.1).map(|t| t.trim().to_string()),
                     loop_source_span(tree, li, path_str, &pred.nodes.1),
+                    None,
                 );
             }
         }

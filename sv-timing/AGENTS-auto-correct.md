@@ -52,6 +52,15 @@ sums, v32 incrementers, v33 runtime index mux, v34 `\|\|`, v35 loop-carried
 trips, v36 find-first guards, **v37 guards as reads + mux, field-granular
 index-aware carry**. A version bump invalidates cached measurements.
 
+## Source preparation before the pass loop (A135)
+
+`correct --emit` with structural emission runs `source_prepare::prepare` first:
+checked `row-local` plans rewrite a copy of the file under `<out>/_prepared/`,
+the copy is reparsed with the same configuration, and the pass loop below runs
+on that program. Originals are never edited; `svt_pragma_preprocess.json` and
+the `pragma_preprocessing` JSON block record the edits at original loci. A
+preparation that no longer matches its source or directive refuses the run.
+
 ## Pass loop (copy for PR descriptions)
 
 ```text

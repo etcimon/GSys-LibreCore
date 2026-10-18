@@ -3,6 +3,16 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A135 — pragma-executed row-local preparation
+
+- [x] `row-local` directive: parse-time statement spans, checked plan in
+  initial IR, prepared source reparse before correction, origin-mapped emit,
+  `row-local-applied` receipt; refusals for unsafe shapes; 385 workspace tests.
+- [x] Loop predictor from pragma: equivalence (3 geometries), independent model
+  + negative control, placed 1.911 → 1.410 ns at −6.9% area (`fo4-a135-loop-emit`).
+- [ ] Carry the prepared-source mechanism to further table/predictor files
+  only with their own witnesses; whole-core 10 adjusted FO4 remains open.
+
 ## A134 — further control/state implementations
 
 - [x] Realigner: cache the full-width continuation address with per-hart carry

@@ -1028,6 +1028,7 @@ fn design_to_analyze_json(
                 "module": m.name,
                 "contract": contract,
                 "representations": sv_timing_core::pipeline_preprocess::representations(m),
+                "row_local": sv_timing_core::row_local::plans(m),
                 "bundle_issues": bundle_issues,
                 "unbound_no_cut": unbound_no_cut,
                 "note": "Declarations only: cut permission is not emission, functional validation or measured timing closure."
@@ -1748,7 +1749,7 @@ fn main() -> ExitCode {
             };
             let base_package_mode = package_mode_on(&package_mode);
 
-            let (design, names, source_pairs, allow) = if paths.is_empty()
+            let (mut design, mut names, mut source_pairs, allow) = if paths.is_empty()
                 || (!all_modules && allow.is_empty())
             {
                 let target = TimingTarget::new(target_mhz, fo4_ps, budget_margin);
@@ -1843,7 +1844,108 @@ fn main() -> ExitCode {
                 policy.correct_enabled = !allow.is_empty();
             }
 
+            let original_max = |d: &TimingDesign, planned_only: bool| {
+                d.paths
+                    .iter()
+                    .filter(|p| {
+                        !planned_only
+                            || d.modules
+                                .get(&p.module)
+                                .is_some_and(|m| allow.contains(&m.name))
+                    })
+                    .map(|p| p.total_fo4)
+                    .fold(0.0_f64, f64::max)
+            };
+            let source_fo4_before = original_max(&design, true);
+            let source_fo4_before_all = original_max(&design, false);
+            let mut preparation = sv_timing_transform::source_prepare::PreparedSources::default();
+            if !dry && emit && !source_pairs.is_empty() {
+                let root = emit_root
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from(".sv-timing-out/corrected"));
+                preparation = match sv_timing_transform::source_prepare::prepare(
+                    &design,
+                    &source_pairs,
+                    &policy,
+                    &root,
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("pragma preparation refused: {e}");
+                        return ExitCode::from(1);
+                    }
+                };
+                if !preparation.origins.is_empty() {
+                    let prepared_paths: Vec<_> =
+                        preparation.sources.iter().map(|(p, _)| p.clone()).collect();
+                    let parse_opts = ParseOptions {
+                        include_paths: project.incdirs.clone(),
+                        defines: project.defines_for_parse(),
+                        ignore_include_error: false,
+                        jobs: opt.jobs,
+                        allow_parse_errors: false,
+                    };
+                    let lower = LowerOptions {
+                        target: TimingTarget::new(target_mhz, fo4_ps, budget_margin),
+                        cost_model: load_fo4_v1_default(),
+                        module_filter: if all_modules {
+                            Vec::new()
+                        } else {
+                            allow.clone()
+                        },
+                        param_map: base_param_map.clone(),
+                        package_mode: base_package_mode,
+                        opt: opt.clone(),
+                    };
+                    let prepared = match analyze_files(&prepared_paths, &parse_opts, &lower) {
+                        Ok(o) => o,
+                        Err(e) => {
+                            eprintln!("prepared source reparse failed: {e}");
+                            return ExitCode::from(1);
+                        }
+                    };
+                    println!(
+                        "  pragma preprocessing: {} source edit(s), reparsed before correction",
+                        preparation.trace.records.len()
+                    );
+                    design = prepared.design;
+                    names = prepared.names;
+                    source_pairs = preparation.sources.clone();
+                    if let Err(e) = write_json(
+                        &root.join("svt_pragma_preprocess.json"),
+                        &serde_json::to_value(&preparation).expect("preparation report"),
+                    ) {
+                        eprintln!("preparation report: {e}");
+                        return ExitCode::from(1);
+                    }
+                }
+            }
             let mut ctx = PassContext::new(design, names, policy);
+            // These annotations mark the prepared files for normal emission.
+            // The actual source edits are separately recorded at original loci.
+            for (prepared, original) in &preparation.origins {
+                ctx.trace.record_edit(sv_timing_transform::EditRecord {
+                    id: 0,
+                    kind: sv_timing_transform::EditKind::Annotate,
+                    origin: sv_timing_core::SourceLoc::file_start(prepared),
+                    path_id: None,
+                    node_id: None,
+                    new_name: None,
+                    fo4_before: None,
+                    fo4_after: None,
+                    rationale: format!(
+                        "prepared from {}; see svt_pragma_preprocess.json",
+                        original.display()
+                    ),
+                    emit_rhs: None,
+                    emit_rhs_extras: Vec::new(),
+                    emit_snippet: None,
+                    emit_predicate: false,
+                    emit_predicate_from: None,
+                    pipe_stage: None,
+                    gen_scope: None,
+                });
+            }
             ctx.assume_clk = assume_clk;
             ctx.cost_model = load_fo4_v1_default();
             if let Some(fb) = feedback.as_ref() {
@@ -1886,13 +1988,9 @@ fn main() -> ExitCode {
                     .map(|p| p.total_fo4)
                     .fold(0.0_f64, f64::max)
             };
-            let fo4_before = max_fo4_planned(&ctx.design);
-            let fo4_before_all = ctx
-                .design
-                .paths
-                .iter()
-                .map(|p| p.total_fo4)
-                .fold(0.0_f64, f64::max);
+            let fo4_before = source_fo4_before;
+            let fo4_before_all = source_fo4_before_all;
+            let fo4_after_preprocess = max_fo4_planned(&ctx.design);
 
             let ctx = match run_correct_passes(ctx) {
                 Ok(c) => c,
@@ -2054,6 +2152,7 @@ fn main() -> ExitCode {
                     );
                 }
                 let proj_opts = ProjectEmitOptions {
+                    source_origins: preparation.origins.clone(),
                     out_dir: dir.clone(),
                     layout: if preserve_rel {
                         ProjectLayout::PreserveRel
@@ -2333,6 +2432,8 @@ fn main() -> ExitCode {
                     "all_modules": all_modules,
                     "input_files": paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
                     "edits": edits,
+                    "pragma_preprocessing": preparation,
+                    "max_path_fo4_after_preprocess": fo4_after_preprocess,
                     "emit_dir": emit_dir_s,
                     "out_dir": emit_dir_s,
                     "filelist": filelist_s,

@@ -46,6 +46,7 @@ pub mod patterns;
 pub mod pipe_contract;
 pub mod pipeline_preprocess;
 pub mod ref_order;
+pub mod row_local;
 pub mod relocation;
 pub mod select_increment;
 pub mod version;

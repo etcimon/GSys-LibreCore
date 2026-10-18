@@ -637,6 +637,7 @@ mod tests {
             guards: Default::default(),
             onehot_facts: Default::default(),
             guard_sites: Default::default(),
+            decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
             loc: loc(),
         }

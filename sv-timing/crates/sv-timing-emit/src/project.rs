@@ -32,6 +32,8 @@ pub enum ProjectLayout {
 /// Options for multi-file project auto-correct emission.
 #[derive(Debug, Clone)]
 pub struct ProjectEmitOptions {
+    /// Prepared input -> original logical source path (layout only).
+    pub source_origins: BTreeMap<PathBuf, PathBuf>,
     /// Output directory root (CLI `--out-dir` / `--emit-dir`).
     pub out_dir: PathBuf,
     /// Layout policy for corrected sources.
@@ -57,6 +59,7 @@ pub struct ProjectEmitOptions {
 impl Default for ProjectEmitOptions {
     fn default() -> Self {
         Self {
+            source_origins: BTreeMap::new(),
             out_dir: PathBuf::from(".sv-timing-out/corrected"),
             layout: ProjectLayout::PreserveRel,
             source_root: None,
@@ -235,7 +238,8 @@ pub fn synthesize_project(
         if file_trace.records.is_empty() && !opts.emit_unchanged {
             continue;
         }
-        let mut rel = emit_rel_for_source(path, opts);
+        let logical_path = opts.source_origins.get(path).unwrap_or(path);
+        let mut rel = emit_rel_for_source(logical_path, opts);
         // Collision guard
         let key0 = rel.to_string_lossy().replace('\\', "/");
         if used_rel.contains(&key0) {
@@ -355,6 +359,7 @@ pub fn synthesize_project(
                 guards: Default::default(),
                 onehot_facts: Default::default(),
                 guard_sites: Default::default(),
+                decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
                 loc: loc.clone(),
             };
@@ -534,7 +539,10 @@ pub fn emit_project_autocorrect(
     mut opts: ProjectEmitOptions,
 ) -> CoreResult<ProjectEmitResult> {
     if opts.source_root.is_none() {
-        let paths: Vec<PathBuf> = sources.iter().map(|(p, _)| p.clone()).collect();
+        let paths: Vec<PathBuf> = sources
+            .iter()
+            .map(|(p, _)| opts.source_origins.get(p).unwrap_or(p).clone())
+            .collect();
         opts.source_root = infer_source_root(&paths);
     }
     let new_mods = new_modules_from_trace(trace);

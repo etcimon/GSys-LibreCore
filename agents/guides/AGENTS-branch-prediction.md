@@ -175,6 +175,9 @@ same window: the TAGE base bimodal indexes `pc[OFFSET+COL_BITS +: log2(rows)]`,
 so 128 entries on a 4-slot fetch is a 256-byte alias period — too small for the
 server (T21e raises it).
 
+A135 makes the row-local rewrite a tool-executed pragma on the loop predictor
+(`// svt-pipe: row-local train …`); see the A135 entry of the paired review.
+
 A134 preserves that policy while preparing each row's update before the late
 write-row selection, removing the indexed read/train/write feedback chain.
 The realigner also caches its continuation address with the existing per-hart

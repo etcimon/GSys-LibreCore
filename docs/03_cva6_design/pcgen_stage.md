@@ -82,6 +82,12 @@ The separate PH_BHT registered path is not changed by this repair. See
 current contracts, validation, the measured generic logic cost and remaining
 physical/firmware qualification limits.
 
+**A135 note:** the loop predictor's training block carries an `svt-pipe:
+row-local` directive; `sv-timing correct --emit` produces an equivalent
+per-row form whose paired placement measured 1.911 → 1.410 ns at −6.9% area.
+The production file keeps the compact form; the emitted copy is a review
+artifact qualified by equivalence and an independent model.
+
 **A134 implementation note:** statistical-corrector training now computes each
 row's counter/tag/valid update locally and selects the write row afterward.
 Lookup latency and the tagged-owner training policy remain unchanged. Paired

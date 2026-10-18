@@ -695,6 +695,19 @@ The old board's trace describes reg→reg, not necessarily worst-any:
 the causal claims about the input cone in §§12–13 require the independent
 boundary reports now produced by the isolated review runner.
 
+## 16. Row-local source preparation (A135)
+
+`row-local <name> index=<net> rows=<param> banks=<q:d,...> max-rows=<n>`
+must directly precede one `always_comb` conditional statement. Preparation
+replaces that statement with an explicit per-row loop and `index == row`
+selection; the directive is consumed into `row-local-applied`. It changes no
+cycle latency and awards no timing credit. Prepared files are separate review
+artifacts that are reparsed before correction; originals are never edited.
+Refusals cover unstable or signed indices, mismatched bank types, non-field
+writes, calls/macros/locals, unbounded replication and stale sources.
+Measured loop-predictor result: 1.911 → 1.410 ns placed at −6.9% area.
+See [PIPELINING-RT-LEARNING.md](PIPELINING-RT-LEARNING.md) §5a.
+
 ## 15. Representation preprocessing (A133)
 
 `representation <domain> carry-save sum=<net> carry=<net> result=<net>` is a
