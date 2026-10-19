@@ -482,6 +482,8 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            branch_arms: Default::default(),
+            launch_fo4: Default::default(),
             loc: SourceLoc::file_start("t.sv"),
         };
         let mut ff = node("seq_q", "seq_d", AssignKind::Nonblocking, 0.0);

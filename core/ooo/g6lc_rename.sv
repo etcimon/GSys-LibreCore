@@ -435,14 +435,15 @@ module g6lc_rename #(
     // conditional scope reads as a latch to the elaborator.
     automatic logic [PRF_W-1:0] p1, p2, old, picked, pick_lo, pick_hi;
     automatic logic [FPRF_W-1:0] f1, f2, f3, fold, fpicked, fpick_lo, fpick_hi;
-    automatic logic [PRF_ENTRIES-1:0] squashed, arch_ref;
-    automatic logic [FPN-1:0] fsquashed, farch_ref;
+    automatic logic [PRF_ENTRIES-1:0] squashed, arch_ref, free_rep;
+    automatic logic [FPN-1:0] fsquashed, farch_ref, ffree_rep;
     automatic logic [PRF_ENTRIES-1:0] picked_mask, pick_lo_mask, pick_hi_mask;
     automatic logic [FPN-1:0] fpicked_mask, fpick_lo_mask, fpick_hi_mask;
     automatic logic [LVL_W-1:0] level;
     automatic int unsigned rel, n_ret, mis_hart, lvl_rel, same_before;
     p1 = '0; p2 = '0; old = '0; picked = '0;
     squashed = '0; arch_ref = '0; fsquashed = '0; farch_ref = '0;
+    free_rep = free_q; ffree_rep = ffree_q;
     level = '0; rel = 0; n_ret = 0; mis_hart = 0; lvl_rel = 0;
     same_before = 0;
     picked_mask = '0;
@@ -677,10 +678,12 @@ module g6lc_rename #(
       if (free_i[f] && free_prd_i[f] != '0) begin
         free_d[free_prd_i[f]] = 1'b1;
         busy_d[free_prd_i[f]] = 1'b0;
+        free_rep[free_prd_i[f]] = 1'b1;
       end
       if (FP_EN && ffree_i[f]) begin
         ffree_d[ffree_prd_i[f]] = 1'b1;
         fbusy_d[ffree_prd_i[f]] = 1'b0;
+        ffree_rep[ffree_prd_i[f]] = 1'b1;
       end
     end
 
@@ -725,13 +728,19 @@ module g6lc_rename #(
       level = ckpt_slot(mis_hart, int'(ckpt_head_q[mis_hart]) + rel);
       // ckpt_alloc_q[level] only ever accumulated this checkpoint's own hart's
       // allocations, so the squash cannot reach a peer hart's registers.
-      squashed = ckpt_alloc_q[level] & ~free_d;
+      // A147: the squash is taken against the free list before this cycle's
+      // allocations (registered list + commit frees), not against free_d
+      // after the picks: a mispredict cycle never allocates (the controller
+      // raises flush_unissued on every mispredict and dispatch's can_go —
+      // enable_i — excludes it; asserted below), so both are the same set and
+      // the repair no longer waits on the allocation picks.
+      squashed = ckpt_alloc_q[level] & ~free_rep;
       map_d[ckpt_hart_q[level]] = ckpt_map_q[level];
       free_d = free_d | squashed;
       busy_d = busy_d & ~squashed;
       if (FP_EN) begin
         // Same repair-not-reinstate rule as the integer class, on its own pool.
-        fsquashed = ckpt_falloc_q[level] & ~ffree_d;
+        fsquashed = ckpt_falloc_q[level] & ~ffree_rep;
         fmap_d[ckpt_hart_q[level]] = ckpt_fmap_q[level];
         ffree_d = ffree_d | fsquashed;
         fbusy_d = fbusy_d & ~fsquashed;
@@ -881,5 +890,14 @@ module g6lc_rename #(
       end
     end
   end
+
+  //pragma translate_off
+  // A147: the recovery repair above assumes no allocation in a mispredict
+  // cycle. Allocation needs enable_i with a valid port.
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && !flush_i && mispredict_i && enable_i && (|valid_i))
+      $error("g6lc_rename: rename enabled in a mispredict-recovery cycle (A147 repair assumes none)");
+  end
+  //pragma translate_on
 
 endmodule

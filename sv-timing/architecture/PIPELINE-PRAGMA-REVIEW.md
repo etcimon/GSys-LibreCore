@@ -174,6 +174,108 @@ and the normal package parser. Upload the emitted multiplier along with the
 same source snapshot for the third comparison. An emitted reparse or a
 structural reduction alone is not the acceptance condition.
 
+## A147 — three rungs toward the delay-v44 worst, over the preprocessed pipelining
+
+**The model first.** Under delay-v43 the structural worst was `g6lc_rename`
+234.9 FO4: allocation picks → … following the mispredict repair of `free_d`.
+That chain is not in the RTL — the picks read `free_d` *before* the repair
+writes it in the same `always_comb`; compose linked every read to the
+block's last write. delay-v44 links reaching definitions (the latest write
+before the read inside a procedural block; another region's last write):
+rename 234.9 → 130.4 (the repair chain itself, in→out), while modules whose
+writers are spread over several regions read higher where the old single
+"last def" had hidden real fan-in (`rr_arb_tree` 25.6 → 38.4, `scoreboard`
+86.1 → 145.8, `g6lc_lsq` 181.2 → 216.9). New worst: `wt_dcache_wbuffer`
+160.6 reg→reg (`g6lc_lsq` 216.9 is reg→out).
+
+**Multiplier: `MultStages = 4` segments the final add.** The board's
+multiplier reg→reg worst was the final carry-propagate add
+(`prod_sum_q[5] → mult_result_d[126]`, 1.563 ns / 33 cells). `gen_four_stage`
+adds the low halves of the carry-save rows in stage 3 and registers their
+carry-out with the upper rows; stage 4 adds the upper halves with that
+carry. Valid, trans_id, operator and both CLMUL results take the same stage
+(the A126 merge rule); `mult.sv` tracks `MultStages` cycles unchanged;
+`check_cfg` admits 4; `g6lc64_ooo` sets 4 (+1 multiply latency). The
+rejected A132 operand-capture fourth stage is not this: that moved the tile
+cone behind a register without dividing it.
+
+| evidence | result |
+|---|---|
+| split identity, RW = 128 (yosys SAT) | proven |
+| sequential miter: 4-stage vs 3-stage delayed one cycle, all ops, valid, tid (k-induction, shared stages merged) | proven; negative (high half without the carry) fails at the base case |
+| `tb_mul_sbs` `SVT_MUL_STAGES=4 +lag=3`, 300k cycles | 234 213 results, 0 errors |
+| `tb_mul_lifetime` at 4 stages | PASS, 54 checks |
+| same source at 3 stages vs baseline | identical maps and placement (the branch is inactive) |
+| unplaced Nangate45, fanout 0 / 64 | reg→reg 1.662 → **1.366 ns**; in→reg 3.343 → 3.338 / 2.144 → 2.088 |
+| placed + repaired, no disabled arcs | any 2.215 → **2.114 ns**, reg→reg 2.145 → **1.679 ns**, area 52 886 → 55 146 µm² (+4.3 %) |
+
+Run `fo4-a147-mul` (`CONTROL_MODE=mult-pipeline CONTROL_MUL_STAGES=3,4
+CONTROL_PLACE=1`). The module's worst is now the in→reg tile cone from the
+operand inputs, which the module board reads with ideal drivers. The
+structural model reads stage 4's `hi_s + hi_c + cout` as two adds (16.0 vs
+14.0 FO4 reg→reg): a 1-bit carry-in is not yet recognised as one adder.
+
+**Rename: the mispredict repair no longer waits on the allocation.** The
+squash set is now taken against the free list before this cycle's
+allocations (`free_q` plus commit frees) instead of `free_d` after the picks.
+That is the same set because a mispredict cycle never allocates: the
+controller raises `flush_unissued` on every mispredict and dispatch's
+`can_go` (rename's `enable_i`) excludes it, in every legal OoO configuration
+(`check_cfg` refuses OoO with `NrHarts > 1`; with fetch B the controller sees
+the same `resolved_branch`). A fenced `$error` asserts it. Matched-state
+equivalence with `enable_i` masked by `mispredict_i` in both copies: proven
+at 1 hart/40, 1/64, 2/80 entries; the unmasked negative leaves 158
+unproven cells — the invariant is necessary and the check discriminates.
+The board's rename worst (`free_q → owner_d → free_d`) runs through the
+per-hart flush reclaim, whose `flush_hart_i` the core ties to `'0`: a
+module-board artifact, not this chain. Physical evidence is owed.
+
+**TAGE tables: a row-local directive the preprocessor applies.**
+`g6lc_bp_tage_table` carries `svt-pipe: row-local train index=update_index_i
+rows=NR_ENTRIES banks=mem_q:mem_d max-rows=64` on its update. `correct`
+prepares it, reparses, then runs the worklist over the prepared program
+(“pragma preprocessing: 1 source edit(s), reparsed before correction”).
+Emitted vs source matched-state equivalence: proven at 64/6, 16/4 and 48/6
+entries/index bits (an out-of-range index writes no row in either form).
+Structural 10.6 → 12.0 (as A135: this rule is judged on the placed pair,
+which is owed).
+
+**Preprocessing under the new model.** The representation fixture's emit is
+byte-identical to A133's measured file; the row-local fixture prepares and
+reparses (structural emission needs `--real-cut-feeds` or
+`--emit-balance-mux-rtl`). The whole-core run prepares the TAGE table and
+transforms the reparsed design.
+
+**The corrected g6lc64_ooo.** `correct --all-modules` at 10 FO4 (`-O3
+--opt-max-passes 6 --allow-latency --assume-clk --real-cut-feeds
+--contracts-only`, dial 11 at 48, live params with `MultStages = 4`, the
+elaborated width map; run `a147c-ooo-fo4-10`): one preprocessing edit,
+then the worklist over the reparsed program — 22 BalanceMux, SelectIncrement
+(`g6lc_ftq`), LoopRewrite (`scoreboard`), RebalanceAssoc (`g6lc_bp_ckpt`),
+three SplitAssign (`g6lc_freelist`), all latency-neutral; post-analysis
+valid (reparse, structural, joint). Without `--contracts-only` the planner
+had landed 11 bare registers in modules that declare no protocol
+(`wt_dcache_ctrl` ×4, `acc_dispatcher` ×4, `hpdcache_cmo`, `instr_scan`,
+vendored `exp_backoff`) — the review-only cuts A127 named, which would
+change control-path latency; the flag refuses them (11 refusals logged).
+The structural worst does not move (`wt_dcache_wbuffer` 160.6 reg→reg,
+`g6lc_lsq` 216.9 reg→out): the top cones are next-state functions under
+`no-cut`, and the moves above are the hand rungs.
+
+**Verilator.** Lint of the live tree: PASS (269 warnings, unchanged count;
+slang 2). Lint of the 264-file corrected tree (`verify --lint --from-timing
+… --use-emit`): PASS (276 warnings; slang 2). The first corrected emit had
+failed: `g6lc_ftq`'s select rewrite read candidates that were never
+declared. `snippet_refs_late_declared_local` took `logic [PTR_W:0] c;` (a
+block-local sized by `PTR_W`) for a late declaration of `PTR_W`, so the
+candidate snippet was refused at module scope, sent "in process", dropped,
+and the RHS rewrite still landed. Names inside a dimension are uses now, and
+a generate-loop snippet is never in-process; the ftq emit is matched-state
+equivalent to its source. Remote: the g6lc64_ooo Verilator harness of the
+live RTL builds (137 s, `work-ver-ooo-a147`); the DI minis were refused by
+the overlap guard (two foreign soaks), so core-level function and IPC
+evidence for `MultStages = 4` and the rename change is owed.
+
 ## A145 — IQ protocol stage, first rung: the staged store-age gate (built, measured, not retained)
 
 **The ask and its physical bound.** The request was to turn the pipeline

@@ -51,7 +51,7 @@ pub enum PathClassKind {
 }
 
 /// Detector pipeline version — bump when adding detectors so plain cache hits re-scan.
-pub const PATH_CLASS_DETECTOR_VERSION: u32 = 24;
+pub const PATH_CLASS_DETECTOR_VERSION: u32 = 25;
 
 impl PathClassKind {
     /// True when InsertReg multi-cut is a poor first tool.
@@ -216,6 +216,7 @@ pub fn classify_and_adjust_paths(
                 // sum. Class stays MultiCycleTagged — InsertReg stays off.
                 let (adj, conf, ev, attempted) =
                     deflate_or_raw(module, &path.nodes, raw, budget, model);
+                let (adj, ev) = dependency_floor(module, &path.nodes, budget, raw, adj, ev);
                 updates.push((
                     idx,
                     PathException {
@@ -273,6 +274,19 @@ pub fn classify_and_adjust_paths(
                 } else {
                     h.adjusted_fo4.min(raw)
                 };
+                let (adjusted, evidence) =
+                    if matches!(h.path_class, PathClassKind::AtomicOverBudget) {
+                        (adjusted, h.evidence.clone())
+                    } else {
+                        dependency_floor(
+                            module,
+                            &path.nodes,
+                            budget,
+                            raw,
+                            adjusted,
+                            h.evidence.clone(),
+                        )
+                    };
                 updates.push((
                     idx,
                     PathException {
@@ -282,7 +296,7 @@ pub fn classify_and_adjust_paths(
                         raw_fo4: raw,
                         adjusted_fo4: adjusted,
                         confidence: h.confidence * 0.95,
-                        evidence: format!("cache-hint: {}", h.evidence),
+                        evidence: format!("cache-hint: {evidence}"),
                         attempted: vec![PatternAttempt {
                             detector: "cache_hint".into(),
                             matched: true,
@@ -310,6 +324,8 @@ pub fn classify_and_adjust_paths(
                     ev = format!(
                         "{ev}; P4 remainder − atomic {cls:?} node {nid} fo4≈{cost:.1} peel={peel:.1} is T3"
                     );
+                } else {
+                    (adj, ev) = dependency_floor(module, &path.nodes, budget, raw, adj, ev);
                 }
             }
             updates.push((
@@ -398,6 +414,9 @@ pub fn classify_and_adjust_paths(
         }
         design.path_exceptions.push(ex);
     }
+    // A declared cycle step overrides the name heuristic. The step stays
+    // measurable; longer cones drop off only when the step fits the budget.
+    crate::pipe_contract::apply_cycle_contracts(design);
 }
 
 fn pick_better(
@@ -552,6 +571,81 @@ fn try_atomic_over_budget(
     ))
 }
 
+/// delay-v43: no deflation may read below the path's dependency makespan.
+///
+/// The detectors replace the statement-order sum with a model of what runs
+/// in parallel (max field, max arm, max node). Each is a lower estimate
+/// that is only right when the statements really are independent. The
+/// reference tree now carries guard reads, field-granular keys and branch
+/// exclusivity, so its ASAP makespan is the longest chain of true
+/// write→read dependencies — a floor every deflation must respect. The
+/// write buffer's push → bypass allocation → post-push supersede compare
+/// (A144: 13.5 structural against 30 mapped cells) was max-field credit
+/// over such a chain.
+fn dependency_floor(
+    module: Option<&crate::ir::TimingModule>,
+    nodes: &[NodeId],
+    budget: f64,
+    raw: f64,
+    adjusted: f64,
+    evidence: String,
+) -> (f64, String) {
+    let Some(m) = module else {
+        return (adjusted, evidence);
+    };
+    let scratch = classification_scratch(m, nodes, budget);
+    if !scratch.procedural_ok || scratch.makespan_fo4 <= adjusted + 1e-9 {
+        return (adjusted, evidence);
+    }
+    let floor = scratch.makespan_fo4.min(raw);
+    (
+        floor,
+        format!(
+            "{evidence}; dependency floor makespan={:.1} (deps={}) > deflated {adjusted:.1}; chain {}",
+            scratch.makespan_fo4,
+            scratch.dep_edges,
+            critical_chain_text(m, &scratch)
+        ),
+    )
+}
+
+/// The zero-slack statements of a scratchboard in completion order, as
+/// `L<line>(<FO4>)`: where a dependency makespan comes from.
+fn critical_chain_text(m: &crate::ir::TimingModule, scratch: &ParallelScratch) -> String {
+    let mut crit: Vec<&crate::parallel_timing::ScratchOp> = scratch
+        .ops
+        .iter()
+        .filter(|o| o.slack_fo4 < 1e-6 && o.latency_fo4 > 0.0)
+        .collect();
+    crit.sort_by(|a, b| {
+        a.asap_end
+            .partial_cmp(&b.asap_end)
+            .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    let mut parts: Vec<String> = Vec::new();
+    let mut t = 0.0_f64;
+    for o in crit {
+        // one chain: each op starts where the previous one ended
+        if (o.asap_start - t).abs() > 1e-6 && !parts.is_empty() {
+            continue;
+        }
+        let line = m
+            .nodes
+            .get(&o.node_id)
+            .map(|n| n.loc.start_line)
+            .unwrap_or(0);
+        parts.push(format!("L{line}({:.1})", o.latency_fo4));
+        t = o.asap_end;
+    }
+    if parts.len() > 12 {
+        let tail = parts.split_off(parts.len() - 6);
+        parts.truncate(6);
+        parts.push("…".into());
+        parts.extend(tail);
+    }
+    parts.join(">")
+}
+
 fn classification_scratch(
     module: &crate::ir::TimingModule,
     nodes: &[NodeId],
@@ -697,7 +791,10 @@ fn try_parallel_timing(
     budget: f64,
 ) -> Option<(f64, f64, String)> {
     let m = module?;
-    if nodes.len() < 4 {
+    // delay-v43: the reference tree carries guard reads, field keys and arm
+    // exclusivity, so its makespan is trusted on short composed chains too
+    // (two independent writes under one guard are not in series).
+    if nodes.len() < 2 {
         return None;
     }
     let scratch = classification_scratch(m, nodes, budget);
@@ -1308,7 +1405,9 @@ pub fn hints_from_exceptions(exceptions: &[PathException]) -> BTreeMap<String, P
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::ir::{IrNode, PathEndpoint, PathKind, TimingModule, TimingPath, TimingTarget};
+    use crate::ir::{
+        IrNode, PathEndpoint, PathKind, PipePragma, TimingModule, TimingPath, TimingTarget,
+    };
     use crate::loc::{OriginKind, SourceLoc};
     use std::collections::BTreeMap as Map;
 
@@ -1381,6 +1480,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -1407,6 +1508,127 @@ mod tests {
             class_note: None,
         });
         design
+    }
+
+    #[test]
+    fn cycle_step_over_budget_stays_measurable() {
+        let mut design = make_exclusive_design();
+        design.target = TimingTarget::new(4000.0, 20.0, 0.2);
+        let loc = design.modules[&0].loc.clone();
+        {
+            let module = design.modules.get_mut(&0).unwrap();
+            module.nodes.get_mut(&0).unwrap().lhs = Some("state_q".into());
+            module.nodes.get_mut(&1).unwrap().lhs = Some("result_o".into());
+            module.nodes.get_mut(&2).unwrap().lhs = Some("busy_o".into());
+            module.nodes.get_mut(&3).unwrap().lhs = Some("valid_i".into());
+            module.nodes.get_mut(&4).unwrap().lhs = Some("id_i".into());
+            module.pipe_pragmas.push(PipePragma {
+                row_local: None,
+                derived: false,
+                kind: "protocol".into(),
+                domain: Some("mma".into()),
+                args: vec![
+                    ("valid".into(), "valid_i".into()),
+                    ("id".into(), "id_i".into()),
+                ],
+                words: vec![],
+                loc: loc.clone(),
+            });
+            module.pipe_pragmas.push(PipePragma {
+                row_local: None,
+                derived: false,
+                kind: "cycle".into(),
+                domain: Some("mma".into()),
+                args: vec![
+                    ("q".into(), "state_q".into()),
+                    ("d".into(), "result_o".into()),
+                    ("hold".into(), "busy_o".into()),
+                    ("steps".into(), "1".into()),
+                ],
+                words: vec![],
+                loc,
+            });
+        }
+        design.paths[0].startpoint = "alu.state_q/CP".into();
+        design.paths[0].endpoint = "alu.result_o/D".into();
+        design.paths[0].total_fo4 = 280.0;
+        design.paths[0].multi_cycle = true;
+        let mut unrolled = design.paths[0].clone();
+        unrolled.id = 42;
+        unrolled.endpoint = "alu.other/D".into();
+        unrolled.total_fo4 = 400.0;
+        design.paths.push(unrolled);
+        crate::pipe_contract::apply_cycle_contracts(&mut design);
+        assert!(!design.paths[0].multi_cycle, "step stays on the board");
+        let note = design.paths[0].class_note.as_deref().unwrap_or("");
+        assert!(note.contains("cycle step mma"), "{note}");
+        assert!(note.contains("280.0 FO4 vs budget 10.0"), "{note}");
+        assert!(
+            !design.paths[1].multi_cycle,
+            "over-budget step does not hide the longer cone"
+        );
+        assert_eq!(
+            crate::pass_strategy::trial_for_path(&design.paths[0]),
+            crate::pass_strategy::OverBudgetTrial::BalanceField
+        );
+    }
+
+    #[test]
+    fn cycle_step_within_budget_excludes_the_unrolled_cone() {
+        let mut design = make_exclusive_design();
+        design.target = TimingTarget::new(4000.0, 20.0, 0.2);
+        let loc = design.modules[&0].loc.clone();
+        {
+            let module = design.modules.get_mut(&0).unwrap();
+            module.nodes.get_mut(&0).unwrap().lhs = Some("prod_sum_q".into());
+            module.nodes.get_mut(&1).unwrap().lhs = Some("mult_result_d".into());
+            module.nodes.get_mut(&2).unwrap().lhs = Some("mult_valid_q".into());
+            module.nodes.get_mut(&3).unwrap().lhs = Some("valid_i".into());
+            module.nodes.get_mut(&4).unwrap().lhs = Some("id_i".into());
+            module.pipe_pragmas.push(PipePragma {
+                row_local: None,
+                derived: false,
+                kind: "protocol".into(),
+                domain: Some("mul".into()),
+                args: vec![
+                    ("valid".into(), "valid_i".into()),
+                    ("id".into(), "id_i".into()),
+                ],
+                words: vec![],
+                loc: loc.clone(),
+            });
+            module.pipe_pragmas.push(PipePragma {
+                row_local: None,
+                derived: false,
+                kind: "cycle".into(),
+                domain: Some("mul".into()),
+                args: vec![
+                    ("q".into(), "prod_sum_q".into()),
+                    ("d".into(), "mult_result_d".into()),
+                    ("hold".into(), "mult_valid_q".into()),
+                    ("steps".into(), "1".into()),
+                ],
+                words: vec![],
+                loc,
+            });
+        }
+        // Decl may not have that shape. steps name must be declared. Use "1" if Decl is awkward.
+        design.paths[0].startpoint = "alu.prod_sum_q/CP".into();
+        design.paths[0].endpoint = "alu.mult_result_d/D".into();
+        design.paths[0].total_fo4 = 8.0;
+        design.paths[0].slack_fo4 = 2.0;
+        let mut unrolled = design.paths[0].clone();
+        unrolled.id = 43;
+        unrolled.endpoint = "alu.mult_result_q/D".into();
+        unrolled.total_fo4 = 56.0;
+        unrolled.slack_fo4 = -46.0;
+        unrolled.multi_cycle = false;
+        design.paths.push(unrolled);
+        crate::pipe_contract::apply_cycle_contracts(&mut design);
+        assert!(!design.paths[0].multi_cycle);
+        assert!(design.paths[1].multi_cycle, "unrolled cone leaves the board");
+        let note = design.paths[1].class_note.as_deref().unwrap_or("");
+        assert!(note.contains("excluded"), "{note}");
     }
 
     fn make_scratch_design(is_comb: bool) -> TimingDesign {
@@ -1640,6 +1862,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -1782,6 +2006,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -1873,6 +2099,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -1965,6 +2193,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -2099,6 +2329,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -2219,6 +2451,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -2319,6 +2553,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -2436,6 +2672,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -2482,8 +2720,21 @@ mod tests {
 
     #[test]
     fn composed_next_state_fsm_bundles_to_max_field_not_makespan() {
-        // coherence_hub: P5 compose + `_d` fields. Shared winner temps serialize
-        // the scratchboard makespan (~3× max_field) but each flop D is one field.
+        composed_next_state_fsm(false);
+    }
+
+    /// delay-v43: the same bundle when each field really reads the previous
+    /// one (no exclusive arms) is a chain; the dependency makespan floors the
+    /// max-field credit (the write buffer's push → bypass → supersede).
+    #[test]
+    fn next_state_bundle_over_a_true_chain_is_floored_at_its_makespan() {
+        composed_next_state_fsm(true);
+    }
+
+    fn composed_next_state_fsm(true_chain: bool) {
+        // coherence_hub: P5 compose + `_d` fields. Each field is written in
+        // its own exclusive arm (the hub's per-branch decrements), so a read
+        // sees the value from before the statement: each flop D is one field.
         let mut design = TimingDesign::empty(TimingTarget::new(4000.0, 20.0, 0.2));
         let mut nodes = Map::new();
         for i in 0..8u32 {
@@ -2576,6 +2827,12 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: if true_chain {
+                    Default::default()
+                } else {
+                    (0..8u32).map(|i| (i, vec![[500, i]])).collect()
+                },
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -2610,12 +2867,21 @@ mod tests {
             p.path_class,
             p.class_note
         );
-        assert!(
-            p.total_fo4 <= 10.5,
-            "next-state capture is max_field not makespan, got {} note={:?}",
-            p.total_fo4,
-            p.class_note
-        );
+        if true_chain {
+            assert!(
+                p.total_fo4 >= 79.0,
+                "eight dependent 10-FO4 fields are a chain, got {} note={:?}",
+                p.total_fo4,
+                p.class_note
+            );
+        } else {
+            assert!(
+                p.total_fo4 <= 10.5,
+                "next-state capture is max_field not makespan, got {} note={:?}",
+                p.total_fo4,
+                p.class_note
+            );
+        }
         assert!(p.path_class.discourages_insert_reg());
     }
 
@@ -2701,6 +2967,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -2807,6 +3075,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -2897,6 +3167,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -2986,6 +3258,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -3082,6 +3356,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -3188,6 +3464,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -3331,6 +3609,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -3445,6 +3725,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -3560,6 +3842,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -3684,6 +3968,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );

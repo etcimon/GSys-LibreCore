@@ -20,6 +20,7 @@ pub type ModuleId = u32;
 /// list does not contain every name was lowered by an older binary.
 pub fn emitted_lower_field_names() -> &'static [&'static str] {
     &[
+        "branch_arms",
         "config_branch",
         "decls",
         "default_text",
@@ -718,6 +719,20 @@ pub struct TimingModule {
     /// the trip multiplier must not scale it.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub guards: BTreeMap<NodeId, Vec<String>>,
+    /// Conditional / case arms a node sits in (delay-v43), as
+    /// `[statement_key, arm_index]` pairs; the key is the statement's
+    /// original-source byte start. Two nodes in different arms of one
+    /// statement are mutually exclusive: a read in one arm does not see a
+    /// write made in the other, so the reference tree does not chain them.
+    /// Empty for nodes outside any branch.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub branch_arms: BTreeMap<NodeId, Vec<[u32; 2]>>,
+    /// Launch arrival (FO4) of the register outputs a node reads (delay-v43):
+    /// the unbuffered Q-net delay of a flop driving many loads
+    /// ([`crate::load`]). An arrival, not a latency — a node whose other
+    /// inputs come later does not pay it. Filled by `attribute_costs`.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub launch_fo4: BTreeMap<NodeId, f64>,
     /// Texts the module asserts one-hot: the arguments of every
     /// `$onehot0(…)` / `$onehot(…)` in its source (`grant[p]`). A rewrite
     /// that is exact only under a one-hot select (`OneHotSelect`) may fire
@@ -796,6 +811,32 @@ pub struct SourceStatement {
 }
 
 impl TimingModule {
+    /// True when `a` and `b` sit in different arms of one conditional or case
+    /// statement ([`Self::branch_arms`]): at most one of them executes.
+    pub fn nodes_exclusive(&self, a: NodeId, b: NodeId) -> bool {
+        let (Some(xa), Some(xb)) = (self.branch_arms.get(&a), self.branch_arms.get(&b)) else {
+            return false;
+        };
+        xa.iter()
+            .any(|[ka, ia]| xb.iter().any(|[kb, ib]| ka == kb && ia != ib))
+    }
+
+    /// True when every arm `writer` sits in also encloses `reader`: whenever
+    /// the read executes, the write has executed before it.
+    pub fn arms_enclose(&self, writer: NodeId, reader: NodeId) -> bool {
+        let w = self
+            .branch_arms
+            .get(&writer)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        let r = self
+            .branch_arms
+            .get(&reader)
+            .map(Vec::as_slice)
+            .unwrap_or(&[]);
+        w.iter().all(|x| r.contains(x))
+    }
+
     /// Source text of the declaration (port or variable) binding `name`, when
     /// the lowerer retained it. Used by preparation rules that need qualifiers
     /// the summary fields drop (`signed`).

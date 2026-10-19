@@ -105,7 +105,9 @@ pub fn lhs_has_user_type(source: &str, name: &str) -> bool {
         let Some(first) = parts.next() else {
             continue;
         };
-        let type_tok = if first == "var" {
+        // Port declarations lead with a direction (`output scoreboard_entry_t
+        // instruction_o`). The direction is not the type.
+        let type_tok = if matches!(first, "var" | "input" | "output" | "inout") {
             parts.next().unwrap_or("")
         } else {
             first
@@ -1084,6 +1086,73 @@ pub fn balance_mux_snippet_safe(source: &str, snippet: &str, origin_line: u32) -
     true
 }
 
+/// The snippet is illegal at module scope only because it names a block-local
+/// or loop index (`automatic logic brh` inside the hart loop). Staging can
+/// still run inside that `begin`, where the name is visible and the operators
+/// are unchanged.
+pub fn balance_mux_snippet_in_process(source: &str, snippet: &str, origin_line: u32) -> bool {
+    let t = snippet.trim();
+    // A147: a generate loop (the SelectIncrement candidates) cannot live
+    // inside a process; such a snippet is module-scope or nothing, and its
+    // RHS rewrite must not land without it.
+    if t.is_empty()
+        || t.contains("genvar")
+        || has_free_gen_index(t)
+        || line_inside_generate(source, origin_line)
+        || snippet_has_generate_local_param(t)
+    {
+        return false;
+    }
+    let inject_at = enclosing_process_start_line(source, origin_line);
+    snippet_refs_late_declared_local(source, t, inject_at)
+}
+
+/// Split a BalanceMux `always_comb` snippet into declarations and statements
+/// that can live inside the origin process. The operators stay the same.
+pub fn snippet_as_process_statements(snippet: &str) -> (String, String) {
+    let mut decls = String::new();
+    let mut stmts = String::new();
+    let mut in_proc = false;
+    let mut depth = 0i32;
+    for line in snippet.lines() {
+        let t = line.trim();
+        if t.is_empty() || t.starts_with("//") {
+            continue;
+        }
+        if !in_proc && (t.starts_with("always_comb") || t.starts_with("always_ff")) {
+            in_proc = true;
+            depth = 0;
+            continue;
+        }
+        if in_proc {
+            if t.starts_with("begin") {
+                depth += 1;
+                continue;
+            }
+            if t == "end" || t.starts_with("end ") || t.starts_with("end:") {
+                depth -= 1;
+                if depth <= 0 {
+                    in_proc = false;
+                }
+                continue;
+            }
+            stmts.push_str("    ");
+            stmts.push_str(t);
+            stmts.push('\n');
+            continue;
+        }
+        if t.starts_with("logic ") || t.starts_with("var ") {
+            decls.push_str("    ");
+            decls.push_str(t);
+            if !t.ends_with(';') {
+                decls.push(';');
+            }
+            decls.push('\n');
+        }
+    }
+    (decls, stmts)
+}
+
 /// Generate-scoped localparam names illegal at module-scope inject.
 pub fn snippet_has_generate_local_param(text: &str) -> bool {
     let bytes = text.as_bytes();
@@ -1192,9 +1261,36 @@ pub fn snippet_refs_late_declared_local(
                     off += line.len() + 1;
                     continue;
                 }
+                // A147: a name inside a dimension (`logic [PTR_W:0] c;`) is
+                // a use, not a declaration: only names outside the brackets
+                // are declared by the line (g6lc_ftq: a block-local sized by
+                // PTR_W read as a late declaration of PTR_W).
+                let declared_here = {
+                    let mut depth = 0i32;
+                    let outside: String = t
+                        .chars()
+                        .map(|c| match c {
+                            '[' => {
+                                depth += 1;
+                                ' '
+                            }
+                            ']' => {
+                                depth -= 1;
+                                ' '
+                            }
+                            _ if depth > 0 => ' ',
+                            c => c,
+                        })
+                        .collect();
+                    outside
+                        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                        .any(|tok| tok == id)
+                };
                 let module_decl =
-                    t.starts_with("logic ") || t.starts_with("wire ") || t.starts_with("reg ");
-                let block_decl = t.starts_with("automatic ") || t.starts_with("var ");
+                    (t.starts_with("logic ") || t.starts_with("wire ") || t.starts_with("reg "))
+                        && declared_here;
+                let block_decl =
+                    (t.starts_with("automatic ") || t.starts_with("var ")) && declared_here;
                 let loop_var = t.starts_with("for ")
                     || t.starts_with("for(")
                     || t.contains(" for (")
@@ -3066,7 +3162,10 @@ pub fn rewrite_origin_rhs_replaces(source: &str, trace: &EditTrace) -> String {
         let has_safe_snippet = r
             .emit_snippet
             .as_ref()
-            .map(|s| balance_mux_snippet_safe(source, s, r.origin.start_line))
+            .map(|s| {
+                balance_mux_snippet_safe(source, s, r.origin.start_line)
+                    || balance_mux_snippet_in_process(source, s, r.origin.start_line)
+            })
             .unwrap_or(false);
         // An exact identity (A122) names exactly the identifiers the origin
         // RHS did and declares nothing, so a line inside a generate is as
@@ -3256,7 +3355,11 @@ fn needs_null_stmt_after_control(lines: &[&str], idx: usize) -> bool {
 }
 
 /// Continuous assigns that drive original lhs from pipe Q (after decls).
-pub fn sink_assigns_sv(cuts: &[CutAssign]) -> String {
+///
+/// `source` selects the cast in [`typed_sample`]: a user-typed LHS
+/// (`state_e state_d`) cannot take a `logic [SVT_DATA_W-1:0]` pipe without
+/// `type(lhs)'(pipe)`. Pass `None` when the declaration text is unavailable.
+pub fn sink_assigns_sv(cuts: &[CutAssign], source: Option<&str>) -> String {
     if cuts.is_empty() {
         return String::new();
     }
@@ -3287,17 +3390,21 @@ pub fn sink_assigns_sv(cuts: &[CutAssign]) -> String {
             ));
             continue;
         }
+        let sample = source
+            .map(|src| typed_sample(src, &c.lhs, &c.pipe_name))
+            .unwrap_or_else(|| c.pipe_name.clone());
         if !rhs_structurally_complete(&c.rhs) {
             // Incomplete feed — still sink lhs from pipe, comment incomplete was-
             b.push_str(&format!(
-                "  assign {} = {}; // was (incomplete expr — feed in _c may be placeholder)\n",
-                c.lhs, c.pipe_name
+                "  assign {lhs} = {sample}; // was (incomplete expr — feed in _c may be placeholder)\n",
+                lhs = c.lhs
             ));
             continue;
         }
         b.push_str(&format!(
-            "  assign {} = {}; // was ({})\n",
-            c.lhs, c.pipe_name, c.rhs
+            "  assign {lhs} = {sample}; // was ({rhs})\n",
+            lhs = c.lhs,
+            rhs = c.rhs
         ));
     }
     b
@@ -3518,9 +3625,31 @@ endmodule
             edit_id: 0,
             continuous: true,
         }];
-        let sinks = sink_assigns_sv(&cuts);
+        let sinks = sink_assigns_sv(&cuts, None);
         assert!(sinks.contains("assign result_o = pipe_svt_p1"));
         assert!(!sinks.contains("assign ADD"));
+    }
+
+    #[test]
+    fn continuous_sink_casts_user_typed_lhs() {
+        let src = "module m;\n  state_e state_d;\n  assign state_d = next_state;\nendmodule\n";
+        let cuts = [CutAssign {
+            line: 3,
+            end_line: 3,
+            lhs: "state_d".into(),
+            rhs: "next_state".into(),
+            nonblocking: false,
+            pipe_name: "pipe_svt_p1".into(),
+            edit_id: 1,
+            continuous: true,
+        }];
+        let sinks = sink_assigns_sv(&cuts, Some(src));
+        assert!(
+            sinks.contains("assign state_d = type(state_d)'(pipe_svt_p1);"),
+            "{sinks}"
+        );
+        let plain = sink_assigns_sv(&cuts, None);
+        assert!(plain.contains("assign state_d = pipe_svt_p1;"), "{plain}");
     }
 
     #[test]
@@ -3733,7 +3862,7 @@ endmodule
         assert!(rewritten.contains("continuation"));
         // Unrelated assign intact
         assert!(rewritten.contains("assign operator_d = operation_i;"));
-        let sinks = sink_assigns_sv(&cuts);
+        let sinks = sink_assigns_sv(&cuts, None);
         assert!(sinks.contains("assign mult_result_d = pipe_svt_p1_4"));
     }
 
@@ -3774,7 +3903,7 @@ endmodule
             "live add must leave the always_comb: {rewritten}"
         );
         assert!(rewritten.contains("t0 = a_i + b_i;")); // other lines intact
-        let sinks = sink_assigns_sv(&cuts);
+        let sinks = sink_assigns_sv(&cuts, None);
         assert!(
             !sinks.contains("assign t1 = t0_svt_p1"),
             "no continuous sink for procedural origin"
@@ -4064,7 +4193,7 @@ endmodule
         assert_eq!(rhss[1], "t0 + c_i");
         assert_eq!(rhss[2], "t1 + d_i");
         // Procedural always_comb origins → no continuous sinks (R12d).
-        let sinks = sink_assigns_sv(&cuts);
+        let sinks = sink_assigns_sv(&cuts, None);
         assert!(
             !sinks.contains("assign t0 = p0"),
             "procedural origins must not get continuous sinks"
@@ -4828,5 +4957,45 @@ endmodule
             t.starts_with("assign req") && t.contains("|tocheck") && !t.starts_with("//")
         });
         assert!(!live, "live |tocheck left on generate-if req:\n{rewritten}");
+    }
+
+    /// A147: a name used inside a later declaration's dimension is not a late
+    /// declaration of that name (g6lc_ftq's SelectIncrement candidates were
+    /// refused at module scope, sent "in process", dropped, and the select
+    /// rewrite still landed on an undeclared vector).
+    #[test]
+    fn dimension_uses_are_not_late_declarations() {
+        let src = "module m;
+  localparam int unsigned W = 4;
+  logic [W-1:0] a, b;
+  assign a = b;
+  always_comb begin
+    logic [W:0] c;
+    c = '0;
+  end
+endmodule
+";
+        let snippet = "  var type(a) a_svt_cand [0:1];
+  for (genvar svt_j = 0; svt_j < 2; svt_j++) begin : gen_a_svt_cand
+    assign a_svt_cand[svt_j] = type(a)'(b + W'(svt_j));
+  end
+";
+        assert!(!snippet_refs_late_declared_local(src, snippet, 4));
+        assert!(balance_mux_snippet_safe(src, snippet, 4));
+        assert!(
+            !balance_mux_snippet_in_process(src, snippet, 4),
+            "a generate loop never goes inside a process"
+        );
+        let late = "module m;
+  assign a = late_q;
+  logic late_q;
+endmodule
+";
+        assert!(snippet_refs_late_declared_local(
+            late,
+            "  assign y = late_q;
+",
+            2
+        ));
     }
 }

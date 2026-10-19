@@ -66,6 +66,13 @@ pub struct PassPolicy {
     /// zero-feed sidecar — PASS-STRATEGY: do not book 304.5→96.5 that the
     /// emitted SV does not contain.
     pub emit_structural: bool,
+    /// An explicit pass count (`--opt-max-passes`) the design-size scaling
+    /// must not exceed. `None`: the scaled count stands (a full core scales a
+    /// 16-pass `-O3` to ~60 passes).
+    pub max_passes_cap: Option<u32>,
+    /// A147 `--contracts-only`: every module is `require-contract` — a
+    /// latency-changing cut lands only on a `cut-ok` anchor.
+    pub contracts_only: bool,
 }
 
 impl Default for PassPolicy {
@@ -79,6 +86,8 @@ impl Default for PassPolicy {
             worklist: WorklistPolicy::default(),
             opt: sv_timing_core::OptOptions::default(),
             emit_structural: true,
+            max_passes_cap: None,
+            contracts_only: false,
         }
     }
 }
@@ -113,6 +122,8 @@ impl PassPolicy {
             // Library default: tests exercise IR rewires. CLI overwrites from
             // `--real-cut-feeds` / `--emit-balance-mux-rtl` (lean soak = false).
             emit_structural: true,
+            max_passes_cap: None,
+            contracts_only: false,
         }
     }
 
@@ -522,7 +533,10 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
         ctx.policy.max_passes,
     );
     ctx.policy.worklist.max_items = scale.worklist_width;
-    ctx.policy.max_passes = scale.max_passes;
+    ctx.policy.max_passes = match ctx.policy.max_passes_cap {
+        Some(cap) => scale.max_passes.min(cap.max(1)),
+        None => scale.max_passes,
+    };
     let idle_limit = scale.idle_limit;
     let apply_cap_default = scale.apply_cap;
     let batch_size = scale.batch_size.max(1);
@@ -531,7 +545,8 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
         0,
         AlgoTrace::kv([
             ("worklist_width", json!(scale.worklist_width)),
-            ("max_passes", json!(scale.max_passes)),
+            ("max_passes", json!(ctx.policy.max_passes)),
+            ("max_passes_scaled", json!(scale.max_passes)),
             ("idle_limit", json!(idle_limit)),
             ("apply_cap", json!(apply_cap_default)),
             ("batch_size", json!(batch_size)),
@@ -1721,6 +1736,46 @@ mod tests {
             banned.is_empty(),
             "lean emit credited IR-mutating kinds: {banned:?}"
         );
+    }
+
+    /// A147 `--contracts-only`: a module with no `svt-pipe` contract takes no
+    /// register cut, while the same module without the flag does.
+    #[test]
+    fn contracts_only_refuses_bare_insert_reg() {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/deep_add_chain.sv");
+        if !path.exists() {
+            return;
+        }
+        let run = |contracts_only: bool| {
+            let mut lower = LowerOptions {
+                target: TimingTarget::new(3000.0, 20.0, 0.2),
+                cost_model: default_fo4_v1_embedded(),
+                module_filter: vec!["deep_add_chain".into()],
+                ..Default::default()
+            };
+            lower.cost_model.id = "fo4-v1".into();
+            let out =
+                analyze_files(&[path.clone()], &ParseOptions::default(), &lower).expect("analyze");
+            let mut policy = PassPolicy::default();
+            policy.correct_enabled = true;
+            policy.correct_allow_modules = vec!["deep_add_chain".into()];
+            policy.allow_latency = true;
+            policy.max_passes = 4;
+            policy.contracts_only = contracts_only;
+            let mut ctx = PassContext::new(out.design, out.names, policy);
+            ctx.assume_clk = true;
+            ctx.cost_model = default_fo4_v1_embedded();
+            run_correct_passes(ctx)
+                .expect("correct")
+                .trace
+                .records
+                .iter()
+                .filter(|r| matches!(r.kind, crate::edit::EditKind::InsertReg))
+                .count()
+        };
+        assert!(run(false) > 0, "the fixture takes a bare cut by default");
+        assert_eq!(run(true), 0, "contracts-only refuses every bare cut");
     }
 
     #[test]

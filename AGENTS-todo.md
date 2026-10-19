@@ -41,6 +41,13 @@ Design record: [`architecture/RTL-PIPELINE-PLANS.md`](architecture/RTL-PIPELINE-
 - [x] A144: write-buffer fixup queue read in slot order (placed 5.344 → 4.853 ns,
   area -18%; board unchanged within noise, a different cone leads); path reports for the top four; frontend
   and IQ protocol changes specified with the core-level validation route.
+- [x] A147: multiplier `MultStages = 4` (segmented final add; g6lc64_ooo +1 MUL
+  latency): proven against 3 stages + 1, witnessed, placed any 2.215 → 2.114 ns,
+  reg→reg 2.145 → 1.679 ns, +4.3 % area. Rename mispredict repair decoupled from
+  the allocation picks (equivalence under the no-allocation-in-recovery
+  invariant, asserted). TAGE table row-local directive (applied by the
+  preprocessor; emitted form proven). Rename/TAGE placed pairs and the core
+  DI/soak on `work-ver-ooo-a147` are owed.
 - [x] A145: IQ staged store-age gate built and witnessed (3 × 200k exact-rule
   checks, negative trips); placed 2.806 → 2.779 ns — neutral, the select loop
   itself is the limiter; reverted to a trial patch. Baseline g6lc64_ooo harness

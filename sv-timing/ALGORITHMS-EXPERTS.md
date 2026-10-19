@@ -31,6 +31,28 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A147 update (delay-v44):** compose links reads to their reaching
+definitions (the rename's 234.9 FO4 chain ran through a later write of the
+same block; now 130.4). Three hand rungs, each proven before measurement:
+the multiplier's `MultStages = 4` segmented final add (placed reg→reg
+2.145 → 1.679 ns, any 2.215 → 2.114 ns), the rename repair decoupled from
+the allocation picks (exact under the asserted no-allocation-in-recovery
+invariant), and a row-local directive on the TAGE tables that the
+preprocessor applies before correction. `--contracts-only` keeps bare
+registers out of contract-less and vendored modules; `--opt-max-passes`
+now bounds the full-core pass scaling. Evidence: PIPELINE-PRAGMA-REVIEW.md
+A147.
+
+**A146 update (delay-v43):** structural moved onto the board. The reference
+tree reads guards, keys dependencies per field and knows branch exclusivity;
+its makespan floors every deflation (the write buffer read 14.5 structural
+against 137.1 adjusted FO4). A board-matching load term, field-aware compose,
+and billed function tables/nested calls bring the adjusted/structural median
+2.72 → 1.17 (sd(log) 0.714 → 0.575, Spearman 0.66 → 0.80). A measured
+`fo4-calibration.v1` profile (`adjusted --calibration-out`, applied with
+`analyze|correct --calibration`) reads structural in platform FO4: median
+|log| residual 0.449 → 0.310. Section A146.
+
 **A144 update:** write-buffer fixup queue read in slot order (parallel match,
 first-in-FIFO-order via split prefix isolates): selection SAT-equal at four
 depths, placed 5.344 → 4.853 ns, area -18%. Path reports show the
@@ -8354,6 +8376,75 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A146 — Structural reads the board: dependency floor, load, calibration
+
+**Finding.** On the A144 board `wt_dcache_wbuffer` measured 2.934 ns = 137.1
+adjusted FO4 while its structural worst was 14.5 — a 9.5× ratio against a
+2.72 median. The mapped path (board columns are endpoint-first: OpenSTA's
+`Path::pins()` walks back from the capture pin) is `wbuffer_q[4].wtag` →
+`rtrn_ptr` read → coalesce compares → bypass-allocate decision → post-push
+`fixup_bypass_d.paddr` → T47 supersede compare → `fixup_bypass_d.be`.
+`IndependentLhsBundle` with `next_state = true` returned the widest single
+`_d` field (13.5) and discarded its own makespan (19.0), while the reference
+tree could not see the chain at all: guard reads were not reads, and a write
+of `fixup_bypass_d` did not relate to a read of `fixup_bypass_d.paddr`.
+
+**Mechanisms (delay-v43, detector 25).**
+
+1. *Reference tree* (`ref_order.rs`): guard predicates and dynamic LHS
+   indices are reads; dependency keys are field-granular with element
+   indices starred (`q[*].be`), related when equal or whole⊃field; index
+   identifiers inside flattened member paths are reads. Lowering records each
+   assign's `[statement, arm]` pairs (`TimingModule::branch_arms`); a read
+   skips writes in an exclusive arm and walks back through conditional or
+   partial writes (priority-mux semantics) to the first enclosing write that
+   covers it (≤ 8 edges).
+2. *Dependency floor* (`path_class.rs::dependency_floor`): every deflation is
+   clamped below by the tree's ASAP makespan (not after a P4 atomic peel);
+   the class note names the critical chain (`chain L…(FO4)>…`). The
+   parallel-timing detector runs on chains of two or more nodes.
+3. *Compose* (`measure.rs`): field writes are capture sinks and field reads
+   link to whole/field defs; a composed cone equal to a region path re-tags
+   that path's endpoints (a single `assign s_d = a_q + b_q` is reg→reg).
+4. *Load* (`load.rs`): per-bit fanout of each net — one load per data read,
+   the selected width per bare select (`if (v)`, `v ? :`), `4×` width per
+   dynamic-index bit, a compound predicate's width broadcast charged to the
+   guarded node. `0.35·(F−4)` FO4 to the 64-load board limit, log4 stages
+   above it; register-output loads are launch arrivals in the scheduler and
+   in path chains (`chain_fo4`), not latencies.
+5. *Function bodies*: a `case` is a table (`ceil(log2 arms)` levels as 4:1
+   cells plus the deepest arm) and calls inside a body bill their callees
+   (fixed-point over four rounds): the AES S-box's three layered calls.
+6. *Calibration* (`calibration.rs`): `calibrated = slope·structural (+
+   launch for regto*)`, slope = median ratio at each launch on a 0.25-FO4 grid
+   ≤ 12, the pair with the least median |log| residual. Profiles carry the
+   measurement version and are refused on another.
+
+**Result** (HEAD f3ecd9602 = the A144 board's source, live params incl.
+`MultStages = 3`, Nangate45 21.398 ps, 64 measured modules):
+
+| | v42 | v43 |
+|---|---:|---:|
+| adjusted/structural median (p25–p75) | 2.72 (1.67–4.16) | 1.17 (0.81–1.47) |
+| sd(log ratio) / MAD(log) | 0.714 / 0.469 | 0.575 / 0.322 |
+| Spearman structural vs adjusted | 0.66 | 0.80 |
+| calibrated median \|log\| (cal/adj IQR) | 0.449 (0.65–1.61) | 0.310 (0.82–1.38) |
+| `wt_dcache_wbuffer` structural / adjusted | 14.5 / 137.1 | 160.6 / 137.1 |
+
+Contributions measured separately: tree + floor alone took sd(log) to 0.666
+and Spearman to 0.74; the load term to 0.603 / 0.77; tables + nested calls to
+0.542 / 0.81 (AES 9.4 → 64.4 against 83.7).
+
+**Not closed by this pass.** Over-reads where the board cannot see logic fed
+by black-boxed children (`id_stage`, `cva6_shared_tlb`); 32-bit billing of
+`int` / `32'()` arithmetic and package helpers on narrow values (`rename`,
+`lsq`, `iq`); under-reads of wide table reads (`ooo_dispatch`, `alu`,
+`loop_buffer`, `memdep`). The profile is in-sample on one board. Tests:
+`ref_order` field/guard/exclusivity/cover cases, the bundle floor over a true
+chain vs exclusive arms, an end-to-end post-push supersede fixture, the
+single-assign reg→reg re-tag, nested function tables, select-broadcast load,
+calibration fit/refusal/round-trip.
 
 ## A141 — Stationary slots and an age matrix (store buffer)
 

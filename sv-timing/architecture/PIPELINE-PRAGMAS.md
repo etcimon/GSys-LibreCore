@@ -663,7 +663,9 @@ real start is the issue stage's operand mux, which the module board reads
 with ideal inputs. The module's own stages now sit at 76 adjusted FO4;
 the next rung for the boundary is a stage on the conditioned operands
 (`MultStages = 4`, `mult.sv` follows), which the contract would admit
-through the same `latency` word.
+through the same `latency` word. (A132 measured that operand-only capture
+and rejected it; A147 spends `MultStages = 4` on the final add instead —
+PIPELINE-PRAGMA-REVIEW.md A147.)
 
 **Surface tests.** `tb_mul_sbs`: `MultStages = 2` (16-bit slices,
 `lag=1`) and `MultStages = 3` (8-bit, `lag=2`), seeds 1/17/23 × 300 k,

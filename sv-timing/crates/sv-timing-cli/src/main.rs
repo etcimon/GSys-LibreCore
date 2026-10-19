@@ -198,6 +198,11 @@ enum Commands {
         /// Write the adjusted report JSON.
         #[arg(long = "json-out")]
         json_out: Option<PathBuf>,
+        /// Fit a structural → platform-FO4 calibration profile from the
+        /// measured modules (needs `--report`) and write it here
+        /// (`fo4-calibration.v1`; apply with `analyze|correct --calibration`).
+        #[arg(long = "calibration-out")]
+        calibration_out: Option<PathBuf>,
     },
     /// Print package / version banner and optional cache status.
     Status {
@@ -269,6 +274,12 @@ enum Commands {
         /// the source cannot size (constant-function localparams).
         #[arg(long = "width-map")]
         width_map: Option<PathBuf>,
+        /// Measured calibration profile (`adjusted --calibration-out`): adds
+        /// `calibrated_fo4` per path and `frequency_closure.calibrated` in the
+        /// profile's platform FO4. Refused when fitted under another
+        /// measurement version.
+        #[arg(long = "calibration")]
+        calibration: Option<PathBuf>,
         /// Optimization level + dials (analysis dials apply here).
         #[command(flatten)]
         opt: OptArgs,
@@ -459,6 +470,11 @@ enum Commands {
         /// Emit BalanceMux structural snippets + origin RHS rewrite (default credit-only).
         #[arg(long = "emit-balance-mux-rtl", default_value_t = false)]
         emit_balance_mux_rtl: bool,
+        /// Treat every module as `svt-pipe: require-contract`: a register cut
+        /// lands only on a `cut-ok` anchor of a declared contract (no bare
+        /// registers in modules with no protocol, including vendored files).
+        #[arg(long = "contracts-only", default_value_t = false)]
+        contracts_only: bool,
         /// Write CorrectResult JSON for TypeScript.
         #[arg(long = "json-out")]
         json_out: Option<PathBuf>,
@@ -497,6 +513,10 @@ enum Commands {
         /// `{module: ratio}`); scales the Dial 11 limit per module (A114).
         #[arg(long = "feedback")]
         feedback: Option<PathBuf>,
+        /// Measured calibration profile, see `analyze --calibration`; applied
+        /// to the post-correct analysis.
+        #[arg(long = "calibration")]
+        calibration: Option<PathBuf>,
         /// Optimization level + the ten dials.
         #[command(flatten)]
         opt: OptArgs,
@@ -656,6 +676,33 @@ fn parse_module_list(s: &str) -> Vec<String> {
         .collect()
 }
 
+/// Report spelling of a path kind (`regtoreg`, `intoout`, …).
+fn path_kind_str(k: sv_timing_core::PathKind) -> &'static str {
+    match k {
+        sv_timing_core::PathKind::InToOut => "intoout",
+        sv_timing_core::PathKind::RegToReg => "regtoreg",
+        sv_timing_core::PathKind::InToReg => "intoreg",
+        sv_timing_core::PathKind::RegToOut => "regtoout",
+    }
+}
+
+/// Load a calibration profile and refuse one fitted under other semantics.
+fn load_calibration(
+    path: Option<&PathBuf>,
+) -> Result<Option<sv_timing_core::calibration::CalibrationProfile>, String> {
+    let Some(p) = path else {
+        return Ok(None);
+    };
+    let text =
+        std::fs::read_to_string(p).map_err(|e| format!("calibration {}: {e}", p.display()))?;
+    let profile: sv_timing_core::calibration::CalibrationProfile =
+        serde_json::from_str(&text).map_err(|e| format!("calibration {}: {e}", p.display()))?;
+    profile
+        .check_measurement(MEASUREMENT_VERSION)
+        .map_err(|e| format!("calibration {}: {e}", p.display()))?;
+    Ok(Some(profile))
+}
+
 fn design_to_analyze_json(
     design: &TimingDesign,
     files: &[(String, usize)],
@@ -663,9 +710,33 @@ fn design_to_analyze_json(
     target_mhz: f64,
     fo4_ps: f64,
     budget_margin: f64,
+    calibration: Option<&sv_timing_core::calibration::CalibrationProfile>,
 ) -> serde_json::Value {
     let ranked = rank_paths_by_slack(&design.paths, &design.target);
     let closure = frequency_closure(design);
+    let calibrated_closure = calibration.map(|c| {
+        let dead: std::collections::BTreeSet<&str> = closure
+            .uninstantiated_modules
+            .iter()
+            .map(String::as_str)
+            .collect();
+        sv_timing_core::calibration::calibrated_closure(
+            c,
+            ranked
+                .primary
+                .iter()
+                .filter(|p| {
+                    design
+                        .modules
+                        .get(&p.module)
+                        .is_some_and(|m| !dead.contains(m.name.as_str()))
+                })
+                .map(|p| (p.id, p.total_fo4, path_kind_str(p.path_kind))),
+            design.target.budget_fo4,
+            budget_margin,
+            fo4_ps,
+        )
+    });
     // A122: statement-level mechanisms behind the measured hand rewrites,
     // reported wherever they occur (no emitter yet); live modules only.
     let structural_patterns = {
@@ -700,6 +771,8 @@ fn design_to_analyze_json(
                 "endpoint": p.endpoint,
                 "total_fo4": p.total_fo4,
                 "total_fo4_raw": p.total_fo4_raw,
+                "calibrated_fo4": calibration
+                    .map(|c| c.calibrate(p.total_fo4, path_kind_str(p.path_kind))),
                 "path_class": p.path_class,
                 "class_note": p.class_note,
                 "slack_fo4": p.slack_fo4,
@@ -1051,6 +1124,7 @@ fn design_to_analyze_json(
             "intoout_failing": closure.intoout_failing,
             "regtoreg_failing": closure.regtoreg_failing,
             "uninstantiated_modules": closure.uninstantiated_modules,
+            "calibrated": calibrated_closure,
         },
         "pass_plan": {
             "abort_correct": design.pass_plan.abort_correct,
@@ -1160,7 +1234,12 @@ fn main() -> ExitCode {
             target_fo4_ps,
             top,
             json_out,
+            calibration_out,
         } => {
+            if calibration_out.is_some() && report.is_none() {
+                eprintln!("error: --calibration-out needs --report (the structural values to fit)");
+                return ExitCode::from(2);
+            }
             if !(platform_fo4_ps > 0.0) {
                 eprintln!("error: --platform-fo4-ps must be positive");
                 return ExitCode::from(2);
@@ -1179,20 +1258,24 @@ fn main() -> ExitCode {
                     return ExitCode::from(2);
                 }
             };
-            let structural = match &report {
+            let report_json = match &report {
                 Some(p) => match std::fs::read_to_string(p)
                     .map_err(|e| e.to_string())
                     .and_then(|t| {
                         serde_json::from_str::<serde_json::Value>(&t).map_err(|e| e.to_string())
                     }) {
-                    Ok(v) => sv_timing_core::adjusted::structural_from_report(&v),
+                    Ok(v) => Some(v),
                     Err(e) => {
                         eprintln!("error: report {}: {e}", p.display());
                         return ExitCode::from(2);
                     }
                 },
-                None => Vec::new(),
+                None => None,
             };
+            let structural = report_json
+                .as_ref()
+                .map(sv_timing_core::adjusted::structural_from_report)
+                .unwrap_or_default();
             let platform = sv_timing_core::adjusted::PlatformFo4 {
                 name: platform_name,
                 fo4_ps: platform_fo4_ps,
@@ -1210,6 +1293,41 @@ fn main() -> ExitCode {
             print!("{}", sv_timing_core::adjusted::render_table(&adjusted, top));
             if let Some(out) = json_out {
                 let value = match serde_json::to_value(&adjusted) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("error: serialize: {e}");
+                        return ExitCode::from(2);
+                    }
+                };
+                if let Err(e) = write_json(&out, &value) {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(2);
+                }
+            }
+            if let (Some(out), Some(rj)) = (calibration_out, report_json.as_ref()) {
+                let r = rj.get("post_analyze").unwrap_or(rj);
+                let version = |key: &str| {
+                    r.pointer(&format!("/versions/{key}"))
+                        .and_then(|v| v.as_str())
+                        .unwrap_or("unknown")
+                        .to_string()
+                };
+                let profile = match sv_timing_core::calibration::fit_profile(
+                    &adjusted,
+                    &version("measurement"),
+                    &version("cost_model"),
+                ) {
+                    Ok(p) => p,
+                    Err(e) => {
+                        eprintln!("error: calibration: {e}");
+                        return ExitCode::from(2);
+                    }
+                };
+                print!(
+                    "{}",
+                    sv_timing_core::calibration::render_profile(&profile, top)
+                );
+                let value = match serde_json::to_value(&profile) {
                     Ok(v) => v,
                     Err(e) => {
                         eprintln!("error: serialize: {e}");
@@ -1433,10 +1551,18 @@ fn main() -> ExitCode {
             trace_log,
             ir_out,
             width_map,
+            calibration,
             opt,
         } => {
             let opt = match opt.resolve(None) {
                 Ok(o) => o,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            let calibration = match load_calibration(calibration.as_ref()) {
+                Ok(c) => c,
                 Err(e) => {
                     eprintln!("error: {e}");
                     return ExitCode::from(2);
@@ -1591,6 +1717,7 @@ fn main() -> ExitCode {
                             target_mhz,
                             fo4_ps,
                             budget_margin,
+                            calibration.as_ref(),
                         );
                         if let Some(o) = body.as_object_mut() {
                             o.insert("opt".into(), opt_to_json(&opt));
@@ -1660,6 +1787,7 @@ fn main() -> ExitCode {
             emit_unchanged,
             real_cut_feeds,
             emit_balance_mux_rtl,
+            contracts_only,
             json_out,
             param_map,
             cfg_snapshot,
@@ -1671,10 +1799,19 @@ fn main() -> ExitCode {
             include_uninstantiated,
             tradeoffs,
             feedback,
+            calibration,
             opt,
         } => {
+            let explicit_passes = opt.opt_max_passes.or(max_passes);
             let opt = match opt.resolve(max_passes) {
                 Ok(o) => o,
+                Err(e) => {
+                    eprintln!("error: {e}");
+                    return ExitCode::from(2);
+                }
+            };
+            let calibration = match load_calibration(calibration.as_ref()) {
+                Ok(c) => c,
                 Err(e) => {
                     eprintln!("error: {e}");
                     return ExitCode::from(2);
@@ -1725,6 +1862,9 @@ fn main() -> ExitCode {
             // Lean emit (default soak) does not rewrite origin assigns. Do not
             // book IR FO4 for cuts the emitted SV will not contain.
             policy.emit_structural = real_cut_feeds || emit_balance_mux_rtl;
+            // An explicit pass count bounds the design-size scaling.
+            policy.max_passes_cap = explicit_passes;
+            policy.contracts_only = contracts_only;
             if all_modules {
                 // Allowlist is filled after analyze discovers module names.
                 policy.correct_enabled = opt.max_passes > 0;
@@ -2333,6 +2473,7 @@ fn main() -> ExitCode {
                                             target_mhz,
                                             fo4_ps,
                                             budget_margin,
+                                            calibration.as_ref(),
                                         ));
                                         post_analyze_valid = !post.design.paths.is_empty()
                                             && post.skipped_files.is_empty()

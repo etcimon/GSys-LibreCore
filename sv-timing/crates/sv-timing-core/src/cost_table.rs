@@ -37,6 +37,9 @@ pub fn parse_fo4_toml(text: &str) -> CoreResult<CostModel> {
             "priority_mux_per_level" => model.priority_mux_per_level = parse_f64(val)?,
             "concat" => model.concat = parse_f64(val)?,
             "other" => model.other = parse_f64(val)?,
+            "load_per_fanout" => model.load_per_fanout = parse_f64(val)?,
+            "load_reference_fanout" => model.load_reference_fanout = parse_f64(val)?,
+            "load_fanout_cap" => model.load_fanout_cap = parse_f64(val)?,
             _ => {}
         }
     }

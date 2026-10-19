@@ -44,6 +44,15 @@ pub struct CostModel {
     pub concat: f64,
     /// Other.
     pub other: f64,
+    /// delay-v43 load term: FO4 per unit load beyond
+    /// [`Self::load_reference_fanout`] on an unbuffered driver (logical
+    /// effort `g/5` for an average mapped gate, g ≈ 1.75). 0 disables it.
+    pub load_per_fanout: f64,
+    /// Fanout the operator costs already assume (the FO4 definition).
+    pub load_reference_fanout: f64,
+    /// Largest fanout the module board times unbuffered; above it the board
+    /// drops the driver and a repaired netlist buffers it (log4 stages).
+    pub load_fanout_cap: f64,
 }
 
 impl Default for CostModel {
@@ -61,6 +70,9 @@ impl Default for CostModel {
             priority_mux_per_level: 3.0,
             concat: 0.5,
             other: 1.0,
+            load_per_fanout: 0.35,
+            load_reference_fanout: 4.0,
+            load_fanout_cap: 64.0,
         }
     }
 }
@@ -340,6 +352,22 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
                 node.fo4_cost = node.fo4_cost.max(oc) + model.mux;
             }
         }
+        // delay-v43: unbuffered output / select-broadcast load (crate::load).
+        // Locked nodes keep their cost across remeasure, so they neither pay
+        // nor load (adding to them would accumulate).
+        let skip: BTreeSet<NodeId> = module
+            .nodes
+            .values()
+            .filter(|n| n.fo4_locked || dead.contains(&n.id) || dead_guarded.contains(&n.id))
+            .map(|n| n.id)
+            .collect();
+        let loads = crate::load::node_loads(module, &widths, model, &skip);
+        for (id, extra) in loads.extra {
+            if let Some(n) = module.nodes.get_mut(&id) {
+                n.fo4_cost += extra;
+            }
+        }
+        module.launch_fo4 = loads.launch;
         for region in module.regions.values_mut() {
             region.total_fo4 = region
                 .nodes
@@ -353,12 +381,9 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
     let margin = design.target.budget_margin;
     for path in &mut design.paths {
         if let Some(module) = design.modules.get(&path.module) {
-            // Path nodes are ordered along one timing path → sum of node critical FO4.
-            path.total_fo4 = path
-                .nodes
-                .iter()
-                .filter_map(|id| module.nodes.get(id).map(|n| n.fo4_cost))
-                .sum();
+            // Path nodes are ordered along one timing path → sum of node
+            // critical FO4 (plus a late register launch, delay-v43).
+            path.total_fo4 = chain_fo4(module, &path.nodes);
         }
         path.slack_fo4 = budget - path.total_fo4;
         path.max_freq_mhz = max_freq_mhz_for_path(path.total_fo4, fo4_ps, margin);
@@ -377,6 +402,24 @@ pub fn attribute_costs(design: &mut TimingDesign, model: &CostModel) {
     crate::cleanliness::fill_design_cleanliness(design);
     refresh_primary_locs(design);
     design.pass_plan = crate::pass_strategy::plan_from_design(design);
+}
+
+/// FO4 of a node chain: the latency sum, or later when a register output a
+/// node reads arrives after everything before it (delay-v43 launch load,
+/// [`TimingModule::launch_fo4`]): `max_i(launch_i + Σ_{j≥i} cost_j)`.
+pub fn chain_fo4(module: &TimingModule, nodes: &[NodeId]) -> f64 {
+    let mut suffix = 0.0_f64;
+    let mut best = 0.0_f64;
+    for id in nodes.iter().rev() {
+        suffix += module
+            .nodes
+            .get(id)
+            .map(|n| n.fo4_cost.max(0.0))
+            .unwrap_or(0.0);
+        let launch = module.launch_fo4.get(id).copied().unwrap_or(0.0);
+        best = best.max(suffix + launch);
+    }
+    best.max(suffix)
 }
 
 /// Point `primary_loc` at the highest-FO4 node on each path.
@@ -464,23 +507,91 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
     if comb_ids.is_empty() {
         return;
     }
-    let mut comb_defs: BTreeMap<String, NodeId> = BTreeMap::new();
+    // Every comb def per key with its region and source position.
+    let mut comb_defs: BTreeMap<String, Vec<(crate::ir::RegionId, u32, NodeId)>> = BTreeMap::new();
     for &nid in &comb_ids {
         if let Some(n) = module.nodes.get(&nid) {
             if let Some(lhs) = &n.lhs {
                 let b = bindings.key(&ident_base(lhs), &n.loc);
                 if !b.is_empty() {
-                    comb_defs.insert(b, nid);
+                    let region = region_of.get(&nid).copied().unwrap_or(0);
+                    comb_defs
+                        .entry(b)
+                        .or_default()
+                        .push((region, n.loc.byte_start, nid));
                 }
             }
         }
     }
+    let procedural: BTreeSet<crate::ir::RegionId> = module
+        .regions
+        .values()
+        .filter(|r| r.kind != RegionKind::ContAssign)
+        .map(|r| r.id)
+        .collect();
+    // delay-v43: whole/field relations (`byp_d` read, `byp_d.be` written).
+    let mut defs_by_root: BTreeMap<String, Vec<String>> = BTreeMap::new();
+    for k in comb_defs.keys() {
+        if let Some(root) = crate::ref_order::dep_root(k) {
+            defs_by_root.entry(root).or_default().push(k.clone());
+        }
+    }
+    // delay-v44: reaching definitions. Another region contributes its final
+    // value (its last write); inside the reader's own procedural block only
+    // the latest write *before* the read reaches it. A later write of the
+    // same block (the rename's mispredict repair of `free_d`, written after
+    // the allocation picks read it) is not a fan-in of the read.
+    let related_defs = |r: &str, reader: NodeId, reader_pos: u32| -> Vec<NodeId> {
+        let reader_region = region_of.get(&reader).copied();
+        let mut out = Vec::new();
+        let Some(keys) = crate::ref_order::dep_root(r).and_then(|root| defs_by_root.get(&root))
+        else {
+            return out;
+        };
+        for k in keys.iter().filter(|k| crate::ref_order::dep_related(k, r)) {
+            let Some(defs) = comb_defs.get(k) else {
+                continue;
+            };
+            let mut best: BTreeMap<crate::ir::RegionId, (u32, NodeId)> = BTreeMap::new();
+            for &(region, pos, nid) in defs {
+                if Some(region) == reader_region
+                    && procedural.contains(&region)
+                    && pos >= reader_pos
+                {
+                    continue;
+                }
+                let e = best.entry(region).or_insert((pos, nid));
+                if pos >= e.0 {
+                    *e = (pos, nid);
+                }
+            }
+            out.extend(best.values().map(|(_, nid)| *nid));
+        }
+        out
+    };
+    let by_root = |set: &BTreeSet<String>| -> BTreeMap<String, Vec<String>> {
+        let mut m: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        for k in set {
+            if let Some(root) = crate::ref_order::dep_root(k) {
+                m.entry(root).or_default().push(k.clone());
+            }
+        }
+        m
+    };
+    let related_in = |set: &BTreeMap<String, Vec<String>>, key: &str| -> bool {
+        crate::ref_order::dep_root(key)
+            .and_then(|root| set.get(&root))
+            .is_some_and(|v| v.iter().any(|k| crate::ref_order::dep_related(k, key)))
+    };
     let outputs: BTreeSet<String> = module
         .ports
         .iter()
         .filter(|p| p.direction == "output" || p.direction == "inout")
         .map(|p| ident_base(&p.name))
         .collect();
+    let seq_lhs_roots = by_root(&seq_lhs);
+    let seq_reads_roots = by_root(&seq_reads);
+    let outputs_roots = by_root(&outputs);
 
     let mut edges: Vec<(NodeId, NodeId)> = Vec::new();
     let mut reads_reg: Vec<NodeId> = Vec::new();
@@ -495,11 +606,11 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
             .collect();
         let mut hits_seq = false;
         for r in &reads {
-            if seq_lhs.contains(r) {
+            if related_in(&seq_lhs_roots, r) {
                 hits_seq = true;
             }
-            if let Some(&src) = comb_defs.get(r) {
-                if src != nid {
+            for src in related_defs(r, nid, n.loc.byte_start) {
+                if src != nid && !edges.contains(&(src, nid)) {
                     edges.push((src, nid));
                 }
             }
@@ -512,7 +623,9 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
             .as_deref()
             .map(|s| bindings.key(&ident_base(s), &n.loc))
             .unwrap_or_default();
-        if !lhs.is_empty() && (seq_reads.contains(&lhs) || outputs.contains(&lhs)) {
+        if !lhs.is_empty()
+            && (related_in(&seq_reads_roots, &lhs) || related_in(&outputs_roots, &lhs))
+        {
             sinks.push(nid);
         }
     }
@@ -554,9 +667,47 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
     let mut next_id = design.paths.iter().map(|p| p.id).max().unwrap_or(0);
     let mod_name = module.name.clone();
     let mut new_paths: Vec<TimingPath> = Vec::new();
+    // delay-v43: a composed cone whose node list equals a region path (one
+    // `assign x_d = f(y_q)`) re-tags that path's endpoints instead of being
+    // dropped; the region default is in→out and hid the reg→reg kind.
+    let mut retag: Vec<(Vec<NodeId>, PathEndpoint, PathEndpoint)> = Vec::new();
     for sink in sinks {
         let nodes = longest_comb_path(module, &comb_ids, sink);
-        if nodes.is_empty() || existing.contains(&nodes) {
+        if nodes.is_empty() {
+            continue;
+        }
+        if existing.contains(&nodes) {
+            let launch = nodes
+                .iter()
+                .any(|id| module.nodes.get(id).is_some_and(|n| n.reads_reg));
+            let capture = module
+                .nodes
+                .get(&sink)
+                .and_then(|n| {
+                    n.lhs
+                        .as_deref()
+                        .map(|s| bindings.key(&ident_base(s), &n.loc))
+                })
+                .is_some_and(|lhs| related_in(&seq_reads_roots, &lhs));
+            if launch || capture {
+                let start = if launch {
+                    PathEndpoint::RegClock { cell: 0 }
+                } else {
+                    PathEndpoint::InputPort {
+                        module: mid,
+                        port: 0,
+                    }
+                };
+                let end = if capture {
+                    PathEndpoint::RegData { cell: 1 }
+                } else {
+                    PathEndpoint::OutputPort {
+                        module: mid,
+                        port: 0,
+                    }
+                };
+                retag.push((nodes, start, end));
+            }
             continue;
         }
         let launch = nodes
@@ -571,7 +722,7 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
                     .map(|s| bindings.key(&ident_base(s), &n.loc))
             })
             .unwrap_or_default();
-        let capture = seq_reads.contains(&lhs);
+        let capture = related_in(&seq_reads_roots, &lhs);
         let start = if launch {
             PathEndpoint::RegClock { cell: 0 }
         } else {
@@ -589,10 +740,7 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
             }
         };
         let path_kind = PathKind::from_endpoints(&start, &end);
-        let total_fo4: f64 = nodes
-            .iter()
-            .filter_map(|id| module.nodes.get(id).map(|n| n.fo4_cost.max(0.0)))
-            .sum();
+        let total_fo4 = chain_fo4(module, &nodes);
         next_id += 1;
         let region_id = region_of.get(&sink).copied().unwrap_or(0);
         let primary = module
@@ -619,6 +767,17 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
             total_fo4_raw: None,
             class_note: Some("P5 composed launch-capture".into()),
         });
+    }
+    for path in design.paths.iter_mut().filter(|p| p.module == mid) {
+        if let Some((_, start, end)) = retag.iter().find(|(n, _, _)| *n == path.nodes) {
+            if path.path_kind == PathKind::InToOut {
+                path.start = start.clone();
+                path.end = end.clone();
+                path.path_kind = PathKind::from_endpoints(start, end);
+                path.startpoint = start.report_name(&mod_name);
+                path.endpoint = end.report_name(&mod_name);
+            }
+        }
     }
     design.paths.extend(new_paths);
 }
@@ -752,7 +911,8 @@ fn longest_comb_path(module: &TimingModule, comb: &BTreeSet<NodeId>, sink: NodeI
             }
         }
         visiting.remove(&id);
-        let total = self_c + pred_c;
+        let launch = module.launch_fo4.get(&id).copied().unwrap_or(0.0);
+        let total = self_c + pred_c.max(launch);
         best_pred.insert(id, pred);
         best_cost.insert(id, total);
         total
@@ -1137,27 +1297,36 @@ fn find_first_floors(
 /// guard and one select level (one gate for a bitwise self-accumulate); a
 /// `for` with a resolvable bound multiplies its body by the trip count — by
 /// `log2` for a bitwise self-accumulate (`idx = idx | i`), the encode of a
-/// one-hot. `case` bodies and anything unparsable cost nothing (the return
-/// expression still does). Functions in packages are included.
+/// one-hot. A `case` is a table (delay-v43); anything unparsable costs
+/// nothing (the return expression still does). Functions in packages are
+/// included. A call inside a body bills its callee (delay-v43: the AES S-box
+/// is three layered calls), resolved over a few rounds so nesting composes.
 fn function_body_costs(
     module: &TimingModule,
     packages: &BTreeMap<String, crate::ir::TimingPackage>,
     widths: &crate::width::WidthResolver<'_>,
     model: &CostModel,
 ) -> BTreeMap<String, f64> {
-    let mut out = BTreeMap::new();
-    let bodies = module
+    let bodies: Vec<&crate::ir::FunctionBody> = module
         .function_bodies
         .iter()
-        .chain(packages.values().flat_map(|p| p.function_bodies.iter()));
-    for fb in bodies {
-        if fb.body_text.is_empty() {
-            continue;
+        .chain(packages.values().flat_map(|p| p.function_bodies.iter()))
+        .filter(|fb| !fb.body_text.is_empty())
+        .collect();
+    let mut out: BTreeMap<String, f64> = BTreeMap::new();
+    for _round in 0..4 {
+        let mut next: BTreeMap<String, f64> = BTreeMap::new();
+        for fb in &bodies {
+            let c = function_text_cost(&fb.body_text, widths, model, &out);
+            if c > 0.0 {
+                let e = next.entry(fb.name.clone()).or_insert(0.0_f64);
+                *e = e.max(c);
+            }
         }
-        let c = function_text_cost(&fb.body_text, widths, model);
-        if c > 0.0 {
-            let e = out.entry(fb.name.clone()).or_insert(0.0_f64);
-            *e = e.max(c);
+        let stable = next == out;
+        out = next;
+        if stable {
+            break;
         }
     }
     out
@@ -1167,6 +1336,7 @@ fn function_text_cost(
     text: &str,
     widths: &crate::width::WidthResolver<'_>,
     model: &CostModel,
+    fns: &BTreeMap<String, f64>,
 ) -> f64 {
     // header `function … ;` up to the first `;` after the closing paren of the
     // port list; body up to `endfunction`
@@ -1182,13 +1352,29 @@ fn function_text_cost(
         return 0.0;
     }
     let body = &t[head_end..end];
-    statements_cost(body, widths, model, 0)
+    statements_cost(body, widths, model, fns, 0)
+}
+
+/// An expression's critical cost inside a function body, its calls billed
+/// at their callees' known costs.
+fn body_expr_cost(
+    e: &Expr,
+    base: &dyn Fn(OperatorClass) -> f64,
+    seed: &crate::expr::ConstSeed,
+    fns: &BTreeMap<String, f64>,
+    model: &CostModel,
+) -> f64 {
+    if e.is_opaque() {
+        return 0.0;
+    }
+    e.fo4_critical_cost_latticed(base, seed) + call_body_extra(e, fns, model)
 }
 
 fn statements_cost(
     body: &str,
     widths: &crate::width::WidthResolver<'_>,
     model: &CostModel,
+    fns: &BTreeMap<String, f64>,
     depth: u32,
 ) -> f64 {
     if depth > 4 {
@@ -1221,7 +1407,31 @@ fn statements_cost(
             }
             done
         };
-    for st in crate::loop_walk::split_statements(body) {
+    // delay-v43: a `case` inside a function body is a table — a mux tree of
+    // ceil(log2(arms)) levels over its selector (4:1 cells, like a runtime
+    // index), plus the deepest arm. The S-box / mix-column tables of the AES
+    // unit cost nothing before (statement splitting saw constant assigns).
+    let (body, cases) = take_case_blocks(body);
+    for (sel, items) in &cases {
+        let sel_c = body_expr_cost(&Expr::parse(sel), &base, &seed, fns, model);
+        let arms = crate::loop_walk::split_statements(items);
+        let mut arm_c = 0.0_f64;
+        let mut writes: Vec<String> = Vec::new();
+        for arm in &arms {
+            let body = strip_case_label(arm);
+            arm_c = arm_c.max(statements_cost(body, widths, model, fns, depth + 1));
+            if let Some((l, _)) = body.split_once('=') {
+                let w = ident_base(l.trim());
+                if !w.is_empty() && !writes.contains(&w) {
+                    writes.push(w);
+                }
+            }
+        }
+        let levels = (arms.len().max(2) as f64).log2().ceil();
+        let own = sel_c + arm_c + model.mux * (levels / 2.0).ceil();
+        worst = worst.max(place(&roots(sel), &writes, own, &mut arrival));
+    }
+    for st in crate::loop_walk::split_statements(&body) {
         let st = st.trim();
         if st.starts_with("for (") {
             let Some(hdr_end) = st.find(')') else {
@@ -1258,7 +1468,7 @@ fn statements_cost(
             let stmts = crate::loop_walk::split_statements(&inner);
             let writes_unindexed: Vec<&String> =
                 stmts.iter().filter(|st| !lhs_indexed_by(st, var)).collect();
-            let per = statements_cost(&inner, widths, model, depth + 1);
+            let per = statements_cost(&inner, widths, model, fns, depth + 1);
             let levels = f64::from(trips.next_power_of_two().trailing_zeros().max(1));
             // A linear update's copies are parallel except for the
             // OR/AND/XOR tree that joins them: the body once plus a gate per
@@ -1284,13 +1494,8 @@ fn statements_cost(
             let reads = roots(&inner);
             worst = worst.max(place(&reads, &writes, own, &mut arrival));
         } else if let Some((cond, inner)) = crate::loop_walk::split_if(st) {
-            let g = Expr::parse(&cond);
-            let gc = if g.is_opaque() {
-                0.0
-            } else {
-                g.fo4_critical_cost_latticed(&base, &seed)
-            };
-            let ic = statements_cost(&inner, widths, model, depth + 1);
+            let gc = body_expr_cost(&Expr::parse(&cond), &base, &seed, fns, model);
+            let ic = statements_cost(&inner, widths, model, fns, depth + 1);
             let assoc = crate::loop_walk::split_statements(&inner)
                 .iter()
                 .all(|st| is_bitwise_accumulate(st));
@@ -1304,29 +1509,130 @@ fn statements_cost(
             reads.extend(roots(&inner));
             worst = worst.max(place(&reads, &writes, own, &mut arrival));
         } else if let Some(rest) = st.strip_prefix("return ") {
-            let e = Expr::parse(rest);
-            let own = if e.is_opaque() {
-                0.0
-            } else {
-                e.fo4_critical_cost_latticed(&base, &seed)
-            };
+            let own = body_expr_cost(&Expr::parse(rest), &base, &seed, fns, model);
             worst = worst.max(place(&roots(rest), &[], own, &mut arrival));
         } else if let Some((l, r)) = st.split_once('=') {
             if r.starts_with('=') || l.ends_with('<') || l.ends_with('>') || l.ends_with('!') {
                 continue;
             }
             // declarations with initialisers (`logic [N-1:0] x = …`) count their RHS too
-            let e = Expr::parse(r.trim());
-            let own = if e.is_opaque() {
-                0.0
-            } else {
-                e.fo4_critical_cost_latticed(&base, &seed)
-            };
+            let own = body_expr_cost(&Expr::parse(r.trim()), &base, &seed, fns, model);
             let lhs_root = ident_base(l.trim().rsplit(' ').next().unwrap_or(l.trim()));
             worst = worst.max(place(&roots(r), &[lhs_root], own, &mut arrival));
         }
     }
     worst
+}
+
+/// Remove every top-level `case (sel) … endcase` from a statement-list text,
+/// returning the rest and each block's `(selector, items)`.
+fn take_case_blocks(body: &str) -> (String, Vec<(String, String)>) {
+    let mut rest = String::with_capacity(body.len());
+    let mut out = Vec::new();
+    let b = body.as_bytes();
+    let word_at = |i: usize| -> Option<(usize, &str)> {
+        if !(b[i].is_ascii_alphabetic() || b[i] == b'_') {
+            return None;
+        }
+        if i > 0 && (b[i - 1].is_ascii_alphanumeric() || b[i - 1] == b'_') {
+            return None;
+        }
+        let mut j = i;
+        while j < b.len() && (b[j].is_ascii_alphanumeric() || b[j] == b'_') {
+            j += 1;
+        }
+        Some((j, &body[i..j]))
+    };
+    let mut i = 0usize;
+    let mut copied = 0usize;
+    while i < b.len() {
+        let Some((j, w)) = word_at(i) else {
+            i += 1;
+            continue;
+        };
+        if !matches!(w, "case" | "casez" | "casex") {
+            i = j;
+            continue;
+        }
+        // selector in parentheses
+        let Some(open) = body[j..].find('(').map(|o| j + o) else {
+            break;
+        };
+        if !body[j..open].trim().is_empty() {
+            i = j;
+            continue;
+        }
+        let mut depth = 0i32;
+        let mut close = None;
+        for (k, c) in body[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        close = Some(open + k);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        let Some(close) = close else {
+            break;
+        };
+        // matching endcase (nested cases counted)
+        let mut nest = 1i32;
+        let mut k = close + 1;
+        let mut end = None;
+        while k < b.len() {
+            if let Some((kj, kw)) = word_at(k) {
+                match kw {
+                    "case" | "casez" | "casex" => nest += 1,
+                    "endcase" => {
+                        nest -= 1;
+                        if nest == 0 {
+                            end = Some((k, kj));
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                k = kj;
+            } else {
+                k += 1;
+            }
+        }
+        let Some((end_start, end_stop)) = end else {
+            break;
+        };
+        rest.push_str(&body[copied..i]);
+        out.push((
+            body[open + 1..close].trim().to_string(),
+            body[close + 1..end_start].trim().to_string(),
+        ));
+        copied = end_stop;
+        i = end_stop;
+    }
+    rest.push_str(&body[copied..]);
+    (rest, out)
+}
+
+/// `8'h3c: s = 8'hd1` → `s = 8'hd1`; `default: …` likewise.
+fn strip_case_label(arm: &str) -> &str {
+    let b = arm.as_bytes();
+    let mut depth = 0i32;
+    for i in 0..b.len() {
+        match b[i] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' => depth -= 1,
+            b':' if depth == 0 && b.get(i + 1) != Some(&b':') && (i == 0 || b[i - 1] != b':') => {
+                return arm[i + 1..].trim();
+            }
+            b'=' if depth == 0 => return arm,
+            _ => {}
+        }
+    }
+    arm
 }
 
 /// The statement's LHS carries the loop variable in an index (`x[i]`,
@@ -2415,11 +2721,7 @@ pub fn remeasure_path_slacks_with_hints(
     }
     for path in &mut design.paths {
         if let Some(module) = design.modules.get(&path.module) {
-            path.total_fo4 = path
-                .nodes
-                .iter()
-                .filter_map(|id| module.nodes.get(id).map(|n| n.fo4_cost))
-                .sum();
+            path.total_fo4 = chain_fo4(module, &path.nodes);
         }
         path.slack_fo4 = budget - path.total_fo4;
         path.max_freq_mhz = max_freq_mhz_for_path(path.total_fo4, fo4_ps, margin);
@@ -2761,6 +3063,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(1),
             },
         );

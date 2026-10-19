@@ -115,7 +115,19 @@ pub const CORRECTION_VERSION: &str = "correction-v5";
 /// dependency in IR. They are measured but not automatically source-rewritten.
 /// `delay-v42`: bounded int localparam ternaries can prove generate
 /// reachability; unknown conditions and unsafe arms remain conservative.
-pub const MEASUREMENT_VERSION: &str = "delay-v42";
+/// `delay-v43`: the reference tree reads guards, keys dependencies by field
+/// (`q[*].be`), and knows branch exclusivity (`TimingModule::branch_arms`);
+/// its dependency makespan is a floor under every path-class deflation (the
+/// next-state bundle billed the write buffer's push → bypass → supersede
+/// chain as its widest single field). Unbuffered output / select-broadcast
+/// loads are billed per driver (`crate::load`, linear to the board's 64-load
+/// limit). A composed cone equal to a region path re-tags its endpoints
+/// (`assign x_d = f(y_q)` is reg→reg, not in→out).
+/// `delay-v44`: compose links a read to its reaching definition — inside one
+/// procedural block only the latest write before the read, from another
+/// region that region's last write (the rename's repair of `free_d`, written
+/// after the allocation picks read it, was composed as their predecessor).
+pub const MEASUREMENT_VERSION: &str = "delay-v44";
 
 /// Hint for which upstream pin the vendored tree should track (see tools/sv-parser.rev).
 pub const PARSER_PIN_HINT: &str = "v0.13.5";

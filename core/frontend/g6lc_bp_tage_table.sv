@@ -58,6 +58,13 @@ module g6lc_bp_tage_table
 
   always_comb begin
     mem_d = mem_q;
+    // A147: row-local training (the A134/A135 pattern, applied by sv-timing's
+    // initial-IR preprocessor before correction): each row computes its own
+    // update from its registered entry and the row selected by
+    // update_index_i takes it — no indexed read -> counter -> indexed
+    // write-decode chain. Exact for any NR_ENTRIES <= 2**IDX_BITS (an
+    // out-of-range index writes no row in either form).
+    // svt-pipe: row-local train index=update_index_i rows=NR_ENTRIES banks=mem_q:mem_d max-rows=64
     if (update_valid_i) begin
       if (update_alloc_i) begin
         mem_d[update_index_i].valid = 1'b1;

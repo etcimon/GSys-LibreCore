@@ -299,6 +299,10 @@ pub struct EmitBlocks {
     /// process that references `marker` (gemm `pe_float_en` is declared after
     /// the first `always_comb`).
     pub bm_at_origin: Vec<(String, String)>,
+    /// BalanceMux RTL that names a block-local. `(marker, snippet)` is placed
+    /// inside that `begin`: declarations with the other locals, assignments
+    /// before the rewritten statement. No nested `always_comb`.
+    pub bm_in_process: Vec<(String, String)>,
 }
 
 /// Build early + late emit blocks for dual inject placement.
@@ -358,6 +362,7 @@ pub fn emit_blocks_for_trace_src(
     // the module's first process (gemm `pe_float_en` is declared in between).
     let mut snippets: Vec<&str> = Vec::new();
     let mut bm_at_origin: Vec<(String, String)> = Vec::new();
+    let mut bm_in_process: Vec<(String, String)> = Vec::new();
     let mut top = String::new();
     for r in &trace.records {
         if let Some(s) = r.emit_snippet.as_ref() {
@@ -371,11 +376,14 @@ pub fn emit_blocks_for_trace_src(
             if !opts.emit_balance_mux_rtl {
                 continue;
             }
+            let in_process = source.is_some_and(|src| {
+                crate::rhs::balance_mux_snippet_in_process(src, s, r.origin.start_line)
+            });
             let safe = source
                 .map(|src| crate::rhs::balance_mux_snippet_safe(src, s, r.origin.start_line))
                 .unwrap_or_else(|| !snippet_unsafe_at_module_scope(s));
-            if !safe {
-                continue; // demoted — FO4 credit already on the edit
+            if !safe && !in_process {
+                continue; // generate / unsafe — FO4 credit already on the edit
             }
             // The marker is an identifier the rewritten source contains: the
             // staged RHS for BalanceMux, the declared vector for LoopRewrite
@@ -390,6 +398,8 @@ pub fn emit_blocks_for_trace_src(
             };
             if marker.is_empty() {
                 snippets.push(s.as_str());
+            } else if in_process {
+                bm_in_process.push((marker, s.clone()));
             } else {
                 bm_at_origin.push((marker, s.clone()));
             }
@@ -407,6 +417,7 @@ pub fn emit_blocks_for_trace_src(
             &splits,
             &credit_only,
             snippets.is_empty(),
+            source,
         );
         for (_, d) in decl_jobs {
             top.push_str(&d);
@@ -415,7 +426,12 @@ pub fn emit_blocks_for_trace_src(
     };
 
     // No structural content at all → empty.
-    if early.is_empty() && late.is_empty() && bm_at_origin.is_empty() && top.is_empty() {
+    if early.is_empty()
+        && late.is_empty()
+        && bm_at_origin.is_empty()
+        && bm_in_process.is_empty()
+        && top.is_empty()
+    {
         return EmitBlocks::default();
     }
     // Pipe-only: early empty, late dense.
@@ -426,6 +442,7 @@ pub fn emit_blocks_for_trace_src(
         early,
         late,
         bm_at_origin,
+        bm_in_process,
     }
 }
 
@@ -531,6 +548,7 @@ fn dense_pipe_block(
     splits: &[&EditRecord],
     credit_only: &[&EditRecord],
     note_credit_only: bool,
+    source: Option<&str>,
 ) -> (String, Vec<(String, String)>) {
     let mut decl_jobs: Vec<(String, String)> = Vec::new();
     let header_idents = opts.header_idents();
@@ -648,6 +666,18 @@ fn dense_pipe_block(
             .new_name
             .clone()
             .unwrap_or_else(|| format!("svt_pipe_p{}", i + 1));
+        // Same-cycle or-reduce: the assign already read `|vec`. A flop here
+        // would show next-state (`|retire_pc_i`) one cycle late.
+        if let Some(expr) = r.rationale.strip_prefix("or-reduce ") {
+            decl_jobs.push((
+                name.clone(),
+                format!("  logic {name}; // same-cycle or-reduce\n"),
+            ));
+            b.push_str(&format!(
+                "  assign {name} = ({expr}); // same-cycle or-reduce\n"
+            ));
+            continue;
+        }
         stage_names.push(name.clone());
         // Real feeds: the rewritten origin reads the pipe wherever it is — a
         // procedural `lhs = pipe;` in its always block, an or-reduce prep in a
@@ -995,7 +1025,7 @@ fn dense_pipe_block(
 
     // --- cut sinks: drive original lhs from pipe Q (legal after decls) ---
     if !cuts.is_empty() {
-        b.push_str(&sink_assigns_sv(cuts));
+        b.push_str(&sink_assigns_sv(cuts, source));
     }
 
     b.push_str("  // END sv-timing auto-correct (dense emit)\n");

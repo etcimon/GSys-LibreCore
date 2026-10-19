@@ -16,6 +16,60 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 - [ ] 10 adjusted FO4 per stage is physically out of reach on this platform
   (flop overhead 0.13–0.18 of 0.214 ns); the agreed stage target is ~1.0 ns.
 
+## A147 — RTL toward the delay-v44 worst, over the preprocessed pipelining
+
+- [x] delay-v44: compose links reads to reaching definitions (rename 234.9 →
+  130.4; the repair → allocation chain was a back edge).
+- [x] `--opt-max-passes` caps the design-size pass scaling (a full core
+  scaled a 16-pass `-O3` to 61 passes, ~4 h); the scale trace reports both.
+- [x] `--contracts-only`: every module behaves as `require-contract` (no
+  bare register in contract-less or vendored modules).
+- [x] Multiplier `MultStages = 4` (segmented final add): SAT + k-induction
+  miter (negative fails), `tb_mul_sbs` lag=3 and `tb_mul_lifetime` 4-stage
+  pass; placed any 2.215 → 2.114 ns, reg→reg 2.145 → 1.679 ns, +4.3 % area.
+- [x] Rename repair against the pre-allocation free list (exact under the
+  no-allocation-in-recovery invariant; equivalence 1h/40, 1h/64, 2h/80;
+  unmasked negative fails). Physical pair owed.
+- [x] `g6lc_bp_tage_table` row-local directive; prepared + emitted
+  equivalence at 64/16/48 entries. Physical pair owed.
+- [x] Emitter: a name inside a later declaration's dimension is not a late
+  declaration; a generate-loop snippet is never in-process (the ftq
+  SelectIncrement rewrite had landed without its candidates).
+- [x] Whole-core `correct` at 10 FO4 with the preprocessed TAGE table
+  (`a147c-ooo-fo4-10`, latency-neutral edits only under `--contracts-only`);
+  Verilator lint of the 264-file corrected emit PASS; remote g6lc64_ooo
+  harness build of the live RTL.
+- [ ] Carry-in recognition (`a + b + 1-bit`) in the cost model; value-range
+  widths for `int`/`32'()` (rename's repair chain is int arithmetic).
+- [ ] DI minis + OpenSBI soak on `work-ver-ooo-a147` (refused by the remote
+  overlap guard during this pass).
+
+## A146 — structural toward adjusted (delay-v43, detector 25)
+
+- [x] Reference tree: guard reads, field-granular dependency keys, branch
+  exclusivity (`TimingModule::branch_arms`, lowered per `if`/`case` arm),
+  priority-mux walk back to a covering write.
+- [x] Dependency makespan floors every path-class deflation; parallel timing
+  on chains ≥ 2 nodes; class notes name the critical chain.
+- [x] Compose: field sinks/defs; a cone equal to a region path re-tags it
+  (single-assign reg→reg).
+- [x] Board-matching load term (`load.rs`, `CostModel::load_*`, TOML keys);
+  register-output loads as launch arrivals (`TimingModule::launch_fo4`,
+  `measure::chain_fo4`).
+- [x] Function bodies: `case` tables and nested calls billed.
+- [x] `fo4-calibration.v1`: `adjusted --calibration-out`, `analyze|correct
+  --calibration` (per-path `calibrated_fo4`, `frequency_closure.calibrated`),
+  measurement-version refusal.
+- [x] Live core vs A144 board: median ratio 2.72 → 1.17, sd(log) 0.714 →
+  0.575, Spearman 0.66 → 0.80, calibrated |log| 0.449 → 0.310.
+- [ ] `int` / `32'()` value-range widths (rename/lsq/iq over-read); wide
+  table-read cost (dispatch/alu/memdep under-read).
+- [ ] Board: report children-fed logic (black-boxed instance outputs are not
+  startpoints: `id_stage`, `cva6_shared_tlb`); fix endpoint-first
+  `start_net`/`end_net`/trace order in `openroad-module-board.tcl`.
+- [ ] Host: write `calibration.json` from the `s3-adjusted-fo4` stage when a
+  structural report exists; refit per platform.
+
 ## A144 — write-buffer fixup queue in slot order; protocol items specified
 
 - [x] Path reports (`build-platform/workspace/build/sv-timing/path_report.py`

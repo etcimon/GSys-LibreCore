@@ -866,6 +866,11 @@ pub fn trial_for_path(path: &TimingPath) -> OverBudgetTrial {
         return OverBudgetTrial::Leave;
     }
     let note = path.class_note.as_deref().unwrap_or("");
+    // A cycle-contract step is the clock path. Shrink it in place. A register
+    // would add a cycle `steps` does not publish.
+    if note.contains("cycle step") {
+        return OverBudgetTrial::BalanceField;
+    }
     if note.contains("P10 handshake") || note.contains("indexed restore") {
         return OverBudgetTrial::RefuseRegister;
     }
@@ -1121,6 +1126,8 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            branch_arms: Default::default(),
+            launch_fo4: Default::default(),
             loc: crate::loc::SourceLoc::file_start("lzc.sv"),
         };
         m.id = 0;
@@ -1187,6 +1194,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: crate::loc::SourceLoc::file_start("axi2mem.sv"),
             },
         );
@@ -1235,6 +1244,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: crate::loc::SourceLoc::file_start("policy.sv"),
             },
         );

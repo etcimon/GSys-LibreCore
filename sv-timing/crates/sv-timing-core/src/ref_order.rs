@@ -24,6 +24,109 @@ pub fn ident_base(name: &str) -> String {
     name.split('[').next().unwrap_or(name).trim().to_string()
 }
 
+/// Field-granular dependency key (delay-v43): bracket contents become `*`,
+/// members stay. `q[k].be` → `q[*].be`; `byp_d.paddr[55:3]` → `byp_d.paddr[*]`.
+pub fn dep_key(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut depth = 0u32;
+    for c in name.trim().chars() {
+        match c {
+            '[' => {
+                if depth == 0 {
+                    out.push_str("[*");
+                }
+                depth += 1;
+            }
+            ']' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    out.push(']');
+                }
+            }
+            c if depth == 0 && !c.is_whitespace() => out.push(c),
+            _ => {}
+        }
+    }
+    out
+}
+
+fn split_scope(key: &str) -> (&str, &str) {
+    key.split_once('@').unwrap_or((key, ""))
+}
+
+/// Root identifier of a dependency key, keeping its lexical scope suffix.
+pub(crate) fn dep_root(key: &str) -> Option<String> {
+    let (name, scope) = split_scope(key);
+    let root = name.split(['.', '[']).next().unwrap_or(name).trim();
+    if root.is_empty() {
+        return None;
+    }
+    Some(if scope.is_empty() {
+        root.to_string()
+    } else {
+        format!("{root}@{scope}")
+    })
+}
+
+fn prefix_at_boundary(short: &str, long: &str) -> bool {
+    long.len() > short.len()
+        && long.starts_with(short)
+        && matches!(long.as_bytes()[short.len()], b'.' | b'[')
+}
+
+/// Same storage: equal keys, or one is a whole containing the other field.
+pub(crate) fn dep_related(a: &str, b: &str) -> bool {
+    let (an, asc) = split_scope(a);
+    let (bn, bsc) = split_scope(b);
+    asc == bsc && (an == bn || prefix_at_boundary(an, bn) || prefix_at_boundary(bn, an))
+}
+
+/// The write defines everything the read observes: same or containing key
+/// with no element index (an indexed write defines one element only).
+fn dep_covers(writer: &str, read: &str) -> bool {
+    let (wn, wsc) = split_scope(writer);
+    let (rn, rsc) = split_scope(read);
+    wsc == rsc && !wn.contains("[*]") && (wn == rn || prefix_at_boundary(wn, rn))
+}
+
+/// Field-granular read keys of an expression, including identifiers inside
+/// the brackets of a flattened `a[i].f` member path (`wbuffer_q[ptr].wtag`
+/// reads `ptr`).
+fn collect_dep_reads(ex: &Expr, out: &mut Vec<String>) {
+    ex.walk_idents(&mut |id| push_dep_read(id, out));
+}
+
+fn push_dep_read(id: &str, out: &mut Vec<String>) {
+    let k = dep_key(id);
+    if !k.is_empty() && !out.contains(&k) {
+        out.push(k);
+    }
+    let b = id.as_bytes();
+    let mut i = 0usize;
+    while i < b.len() {
+        if b[i] == b'[' {
+            let start = i + 1;
+            let mut depth = 1i32;
+            let mut j = start;
+            while j < b.len() && depth > 0 {
+                match b[j] {
+                    b'[' => depth += 1,
+                    b']' => depth -= 1,
+                    _ => {}
+                }
+                j += 1;
+            }
+            let end = if depth == 0 { j - 1 } else { j };
+            if let Some(inner) = id.get(start..end) {
+                Expr::parse(inner).walk_idents(&mut |s| push_dep_read(s, out));
+            }
+            i = j;
+            continue;
+        }
+        i += 1;
+    }
+}
+
 /// Lexical keys for def-use analysis. Source spelling is retained on IR nodes;
 /// these keys never enter emitted SystemVerilog. Build once per graph traversal.
 pub(crate) struct BindingIndex<'a> {
@@ -171,7 +274,15 @@ impl RefOrderTree {
             procedural_ok: true,
             ..Self::default()
         };
-        let mut last_write: BTreeMap<String, u32> = BTreeMap::new();
+        // delay-v43: writes indexed by root identifier, each with its
+        // field-granular dependency key (`q[*].be`) and base name. A read
+        // depends on the most recent writes of a related key (equal, a
+        // containing whole, or a contained field) that are not in an
+        // exclusive arm, back to the first one that encloses the read and
+        // covers it entirely (priority-mux semantics: an enclosed partial or
+        // conditional write still lets older values through).
+        let mut writes: BTreeMap<String, Vec<(String, u32, String)>> = BTreeMap::new();
+        let mut seen_edges: std::collections::BTreeSet<(u32, u32)> = Default::default();
 
         for (ord, nid) in nodes.iter().copied().enumerate() {
             let stmt_ord = ord as u32;
@@ -184,23 +295,95 @@ impl RefOrderTree {
                 .map(ident_base)
                 .filter(|s| !s.is_empty())
                 .map(|s| bindings.key(&s, &n.loc));
+            let lhs_dep = n
+                .lhs
+                .as_deref()
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .map(|s| bindings.key(&dep_key(s), &n.loc));
 
             let mut reads: Vec<String> = Vec::new();
-            if let Some(ref ex) = n.rhs_expr {
+            let mut dep_reads: Vec<String> = Vec::new();
+            let rhs_parsed;
+            let rhs_ex = match (&n.rhs_expr, &n.rhs) {
+                (Some(ex), _) => Some(ex),
+                (None, Some(rhs)) => {
+                    rhs_parsed = Expr::parse(rhs);
+                    Some(&rhs_parsed)
+                }
+                _ => None,
+            };
+            if let Some(ex) = rhs_ex {
                 collect_expr(&mut tree, &param_names, stmt_ord, nid, ex, &mut reads);
-            } else if let Some(ref rhs) = n.rhs {
-                collect_expr(
-                    &mut tree,
-                    &param_names,
-                    stmt_ord,
-                    nid,
-                    &Expr::parse(rhs),
-                    &mut reads,
-                );
+                collect_dep_reads(ex, &mut dep_reads);
+            }
+            // Guards (if predicates, dynamic LHS indices) are reads of the
+            // node: the select of `if (g) x = a` waits for `g`.
+            if let Some(gs) = module.guards.get(&nid) {
+                for g in gs {
+                    let gex = Expr::parse(g.strip_prefix('^').unwrap_or(g));
+                    gex.walk_idents(&mut |id| {
+                        let base = ident_base(id);
+                        if !base.is_empty() && !reads.contains(&base) {
+                            reads.push(base);
+                        }
+                    });
+                    collect_dep_reads(&gex, &mut dep_reads);
+                }
             }
 
             for r in &mut reads {
                 *r = bindings.key(r, &n.loc);
+            }
+            for r in &mut dep_reads {
+                *r = bindings.key(r, &n.loc);
+            }
+            let mut forwarded_roots: std::collections::BTreeSet<String> = Default::default();
+            let mut consumed_bases: std::collections::BTreeSet<String> = Default::default();
+            for r in &dep_reads {
+                let Some(root) = dep_root(r) else {
+                    continue;
+                };
+                let Some(ws) = writes.get(&root) else {
+                    continue;
+                };
+                let mut taken = 0usize;
+                for (wkey, wstmt, wbase) in ws.iter().rev() {
+                    if *wstmt >= stmt_ord || !dep_related(wkey, r) {
+                        continue;
+                    }
+                    let wnid = nodes[*wstmt as usize];
+                    if module.nodes_exclusive(wnid, nid) {
+                        continue;
+                    }
+                    let writer = module.nodes.get(&wnid);
+                    // NBA updates after the timestep (IEEE 1800). A later
+                    // statement reading that LHS sees Q, not a combo chain.
+                    // Treating it as a forward edge poisoned always_ff
+                    // IndependentLhsBundle (gemm 144-node 161.5 serial sum).
+                    if writer.is_some_and(|w| w.assign_kind.is_seq_def()) {
+                        break;
+                    }
+                    if writer
+                        .and_then(|w| w.gate.as_ref())
+                        .is_some_and(|gate| !gate.is_comb)
+                    {
+                        tree.procedural_ok = false;
+                    }
+                    if seen_edges.insert((*wstmt, stmt_ord)) {
+                        tree.edges.push(RefEdge {
+                            from_stmt: *wstmt,
+                            to_stmt: stmt_ord,
+                            var: r.clone(),
+                        });
+                    }
+                    forwarded_roots.insert(root.clone());
+                    consumed_bases.insert(wbase.clone());
+                    taken += 1;
+                    if (module.arms_enclose(wnid, nid) && dep_covers(wkey, r)) || taken >= 8 {
+                        break;
+                    }
+                }
             }
             for r in &reads {
                 let e = tree.vars.entry(r.clone()).or_default();
@@ -211,34 +394,15 @@ impl RefOrderTree {
                     name: r.clone(),
                     role: RefRole::Read,
                 });
-                if let Some(&wstmt) = last_write.get(r) {
-                    if wstmt < stmt_ord {
-                        let writer = module.nodes.get(&nodes[wstmt as usize]);
-                        // NBA updates after the timestep (IEEE 1800). A later
-                        // statement reading that LHS sees Q, not a combo chain.
-                        // Treating it as a forward edge poisoned always_ff
-                        // IndependentLhsBundle (gemm 144-node 161.5 serial sum).
-                        if writer.is_some_and(|w| w.assign_kind.is_seq_def()) {
-                            continue;
-                        }
-                        e.forward_reads += 1;
-                        if writer
-                            .and_then(|w| w.gate.as_ref())
-                            .is_some_and(|gate| !gate.is_comb)
-                        {
-                            tree.procedural_ok = false;
-                        }
-                        tree.edges.push(RefEdge {
-                            from_stmt: wstmt,
-                            to_stmt: stmt_ord,
-                            var: r.clone(),
-                        });
-                    } else if wstmt == stmt_ord {
-                        // Same-statement `x = x - 1`: not a cross-statement comb chain.
-                    }
-                } else {
+                let root = dep_root(r).unwrap_or_else(|| r.clone());
+                if forwarded_roots.contains(&root) {
+                    consumed_bases.insert(r.clone());
+                } else if !writes.contains_key(&root) {
                     e.reads_before_write += 1;
                 }
+            }
+            for b in consumed_bases {
+                tree.vars.entry(b).or_default().forward_reads += 1;
             }
 
             if let Some(ref l) = lhs {
@@ -250,7 +414,14 @@ impl RefOrderTree {
                     name: l.clone(),
                     role: RefRole::Write,
                 });
-                last_write.insert(l.clone(), stmt_ord);
+                if let Some(dk) = lhs_dep {
+                    if let Some(root) = dep_root(&dk) {
+                        writes
+                            .entry(root)
+                            .or_default()
+                            .push((dk, stmt_ord, l.clone()));
+                    }
+                }
             }
         }
 
@@ -603,6 +774,8 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            branch_arms: Default::default(),
+            launch_fo4: Default::default(),
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0, 1]);
@@ -640,6 +813,8 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            branch_arms: Default::default(),
+            launch_fo4: Default::default(),
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0, 1]);
@@ -712,6 +887,8 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            branch_arms: Default::default(),
+            launch_fo4: Default::default(),
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0, 1]);
@@ -760,6 +937,8 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            branch_arms: Default::default(),
+            launch_fo4: Default::default(),
             loc: loc(),
         };
         let t = RefOrderTree::from_nodes(&m, &[0]);
@@ -813,6 +992,8 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            branch_arms: Default::default(),
+            launch_fo4: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -873,6 +1054,8 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            branch_arms: Default::default(),
+            launch_fo4: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -932,6 +1115,8 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            branch_arms: Default::default(),
+            launch_fo4: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -995,6 +1180,8 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            branch_arms: Default::default(),
+            launch_fo4: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -1071,6 +1258,8 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            branch_arms: Default::default(),
+            launch_fo4: Default::default(),
             loc: loc(),
         };
         let mut seed = crate::expr::ConstSeed::heuristic();
@@ -1088,6 +1277,131 @@ mod tests {
                 .dominant_op_class_latticed(&seed),
             crate::ir::OperatorClass::AddSub,
             "BM-staged wrap + t must stay CPA"
+        );
+    }
+
+    fn module_of(nodes: Vec<IrNode>) -> TimingModule {
+        let mut map = Map::new();
+        for n in nodes {
+            map.insert(n.id, n);
+        }
+        TimingModule {
+            id: 0,
+            name: "m".into(),
+            file: "t.sv".into(),
+            nodes: map,
+            regions: Map::new(),
+            localparams: vec![],
+            parameters: vec![],
+            ports: vec![],
+            gen_loops: vec![],
+            functions: vec![],
+            function_bodies: Vec::new(),
+            package_imports: vec![],
+            instances: vec![],
+            decls: Vec::new(),
+            const_exprs: Default::default(),
+            typedef_texts: Default::default(),
+            config_branch: false,
+            guards: Default::default(),
+            onehot_facts: Default::default(),
+            guard_sites: Default::default(),
+            decl_texts: Default::default(),
+            pipe_pragmas: Default::default(),
+            branch_arms: Default::default(),
+            launch_fo4: Default::default(),
+            loc: loc(),
+        }
+    }
+
+    fn has_edge(t: &RefOrderTree, from: u32, to: u32) -> bool {
+        t.edges
+            .iter()
+            .any(|e| e.from_stmt == from && e.to_stmt == to)
+    }
+
+    #[test]
+    fn dep_keys_keep_members_and_star_indices() {
+        assert_eq!(dep_key("q[k].be"), "q[*].be");
+        assert_eq!(dep_key("byp_d.paddr[55:3]"), "byp_d.paddr[*]");
+        assert_eq!(dep_key("a[b[c]].f"), "a[*].f");
+        assert!(dep_related("byp_d", "byp_d.be"));
+        assert!(dep_related("q[*]", "q[*].be"));
+        assert!(!dep_related("q[*].be", "q[*].paddr"));
+        assert!(!dep_related("byp", "byp_d"));
+        assert!(dep_covers("byp_d", "byp_d.be"));
+        assert!(
+            !dep_covers("q[*]", "q[*].be"),
+            "an element write covers one element"
+        );
+    }
+
+    /// delay-v43: the write buffer's T47 shape. A whole-struct write, then a
+    /// guard that reads one field and a field rewrite: both depend on it.
+    #[test]
+    fn guard_reads_and_field_reads_follow_whole_struct_writes() {
+        let mut m = module_of(vec![
+            node(0, "byp_d", "push_entry", OperatorClass::Mux, 2.5),
+            node(
+                1,
+                "byp_d.be",
+                "byp_d.be & ~mask_i",
+                OperatorClass::LogicBit,
+                1.0,
+            ),
+            node(2, "other_d.x", "a_i", OperatorClass::Other, 1.0),
+        ]);
+        m.guards.insert(1, vec!["byp_d.paddr == req_i".into()]);
+        let t = RefOrderTree::from_nodes(&m, &[0, 1, 2]);
+        assert!(
+            has_edge(&t, 0, 1),
+            "field read + guard read of a whole write: {:?}",
+            t.edges
+        );
+        assert!(!has_edge(&t, 0, 2) && !has_edge(&t, 1, 2));
+        assert!(
+            !t.is_write_only("byp_d"),
+            "a field read consumes the whole write"
+        );
+    }
+
+    /// Arms of one `case`/`if` are exclusive: a read in one arm sees the
+    /// value from before the statement, not the other arm's write.
+    #[test]
+    fn exclusive_arms_do_not_chain() {
+        let mut m = module_of(vec![
+            node(0, "cnt_d", "cnt_q", OperatorClass::Other, 0.0),
+            node(1, "cnt_d", "cnt_d + 1", OperatorClass::AddSub, 10.0),
+            node(2, "cnt_d", "cnt_d - 1", OperatorClass::AddSub, 10.0),
+            node(3, "out_d", "cnt_d", OperatorClass::Other, 1.0),
+        ]);
+        m.branch_arms.insert(1, vec![[100, 0]]);
+        m.branch_arms.insert(2, vec![[100, 1]]);
+        let t = RefOrderTree::from_nodes(&m, &[0, 1, 2, 3]);
+        assert!(has_edge(&t, 0, 1));
+        assert!(has_edge(&t, 0, 2), "arm 1 reads the pre-case value");
+        assert!(!has_edge(&t, 1, 2), "arm 1 does not see arm 0's write");
+        // after the case, the read is a mux over both arms and the default
+        assert!(has_edge(&t, 1, 3) && has_edge(&t, 2, 3));
+        assert!(
+            has_edge(&t, 0, 3),
+            "an unconditional earlier write still reaches the mux"
+        );
+    }
+
+    /// An enclosing write of the whole value ends the priority chain.
+    #[test]
+    fn covering_write_stops_the_search() {
+        let m = module_of(vec![
+            node(0, "x_d", "a_i", OperatorClass::Other, 1.0),
+            node(1, "x_d", "b_i + c_i", OperatorClass::AddSub, 10.0),
+            node(2, "y_d", "x_d", OperatorClass::Other, 1.0),
+        ]);
+        let t = RefOrderTree::from_nodes(&m, &[0, 1, 2]);
+        assert!(has_edge(&t, 1, 2));
+        assert!(
+            !has_edge(&t, 0, 2),
+            "x_d was overwritten whole before the read"
         );
     }
 }

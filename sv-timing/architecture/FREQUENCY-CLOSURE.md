@@ -112,6 +112,50 @@ schema `adjusted-fo4.v1`; the board is header-driven and host-agnostic).
 Host: `timings platforms`, `timings fo4-probe`, `timings adjusted`, and the
 `s3-adjusted-fo4` stage of `timings sta-rtl --remote --map-recipe streamed`.
 
+### Structural toward adjusted (A146, delay-v43)
+
+The A144 write buffer read **14.5 structural vs 137.1 adjusted FO4 (9.5×)**:
+the next-state bundle billed a push → bypass-allocate → post-push supersede
+chain as its widest single field, and the model priced no load. delay-v43
+fixes the model, and a measured calibration maps it onto the platform unit:
+
+* **Dependency floor.** The reference tree reads guards, keys dependencies
+  by field (`q[*].be`), and knows branch exclusivity
+  (`TimingModule::branch_arms`); its ASAP makespan is a floor under every
+  path-class deflation. Short composed chains use it too.
+* **Board-matching load** (`crates/sv-timing-core/src/load.rs`): a driver of
+  `F` unit loads costs `0.35·(F−4)` FO4 up to the board's 64-load limit (above
+  it the board drops the driver; a repaired tree costs log4 stages). Register
+  outputs are launch *arrivals*, not latencies.
+* **Compose and function costs.** A single-assign cone between flops is
+  reg→reg (the multiplier's final add read in→out); field writes are capture
+  sinks; function-body `case` tables and nested calls are billed (AES S-box).
+* **Calibration** (`crates/sv-timing-core/src/calibration.rs`, schema
+  `fo4-calibration.v1`): `sv-timing adjusted … --report analyze.json
+  --calibration-out cal.json` fits `calibrated = slope·structural (+ launch
+  for register-launched paths)` over the measured modules (median-ratio
+  slope, launch ≤ 12 FO4, minimum median |log| residual).
+  `analyze|correct --calibration cal.json` adds `calibrated_fo4` per path and
+  `frequency_closure.calibrated`; a profile fitted under another `delay-vNN`
+  is refused. Calibrated values are an estimate in platform FO4; measured
+  rows still decide.
+
+Same HEAD source as the A144 board, Nangate45 21.398 ps, 64 measured modules:
+
+| reading | adjusted/structural median | sd(log) | Spearman | calibrated \|log\| median (IQR of cal/adj) |
+|---|---:|---:|---:|---:|
+| delay-v42 | 2.72 | 0.714 | 0.66 | 0.449 (0.65–1.61), slope 2.62 |
+| **delay-v43** | **1.17** | **0.575** | **0.80** | **0.310 (0.82–1.38)**, slope 1.105, launch 4.25 |
+
+`wt_dcache_wbuffer` now reads 160.6 structural (137.1 adjusted). Residuals
+that remain and why: `id_stage` / `cva6_shared_tlb` over-read because the
+board black-boxes child instances (decoder outputs, SRAM read data are not
+startpoints there); `rename` / `lsq` / `iq` over-read where `int` / `32'()`
+arithmetic and package helpers are billed at 32 bits; `ooo_dispatch` / `alu`
+/ `loop_buffer` / `memdep` under-read wide table reads. The calibration is
+fitted in-sample on one board; refit it per platform and per measurement
+version.
+
 ## Historical campaign (2026-10-16, A104–A106)
 
 Latest: with the structural board calibrated (delay-v38) the campaign

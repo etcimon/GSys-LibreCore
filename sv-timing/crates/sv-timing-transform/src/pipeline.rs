@@ -1296,6 +1296,17 @@ pub fn insert_register(ctx: &mut PassContext, plan: &CutPlan) -> TransformResult
                 .unwrap_or(sv_timing_core::pipe_contract::CutPermission::Unconstrained),
             _ => sv_timing_core::pipe_contract::CutPermission::Unconstrained,
         };
+        // A147 `--contracts-only`: no bare register outside a declared anchor.
+        let permission = match permission {
+            sv_timing_core::pipe_contract::CutPermission::Unconstrained
+                if ctx.policy.contracts_only =>
+            {
+                sv_timing_core::pipe_contract::CutPermission::Forbidden(
+                    "contracts-only: no `svt-pipe: cut-ok` anchor in a declared contract".into(),
+                )
+            }
+            p => p,
+        };
         if let sv_timing_core::pipe_contract::CutPermission::Forbidden(why) = permission {
             ctx.log_algo(
                 "pipe_contract.refuse",
@@ -3154,6 +3165,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -3462,6 +3475,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -3563,6 +3578,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -3676,6 +3693,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -3788,6 +3807,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -3877,6 +3898,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -4007,6 +4030,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -4108,6 +4133,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -4197,6 +4224,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -4334,6 +4363,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -4495,6 +4526,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );
@@ -4602,6 +4635,8 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc(),
             },
         );

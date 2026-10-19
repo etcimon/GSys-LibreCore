@@ -22,6 +22,7 @@
 
 pub mod adjusted;
 pub mod algo_trace;
+pub mod calibration;
 pub mod cleanliness;
 pub mod cone_lane;
 pub mod cost_table;
@@ -31,6 +32,7 @@ pub mod expr;
 pub mod expr_rewrite;
 pub mod filelist;
 pub mod ir;
+pub mod load;
 pub mod loc;
 pub mod loop_walk;
 pub mod lower;

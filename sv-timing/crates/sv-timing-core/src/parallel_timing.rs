@@ -318,6 +318,9 @@ impl ParallelScratch {
         let mut asap_end = vec![0.0f64; n];
         for i in 0..n {
             let s = i as u32;
+            // delay-v43: a register output read here arrives after its own
+            // Q-net load (`TimingModule::launch_fo4`), not at t = 0.
+            let launch = module.launch_fo4.get(&nodes[i]).copied().unwrap_or(0.0);
             let start = preds
                 .get(&s)
                 .map(|ps| {
@@ -325,7 +328,8 @@ impl ParallelScratch {
                         .map(|&p| asap_end.get(p as usize).copied().unwrap_or(0.0))
                         .fold(0.0f64, f64::max)
                 })
-                .unwrap_or(0.0);
+                .unwrap_or(0.0)
+                .max(launch);
             asap_start[i] = start;
             asap_end[i] = start + latency[i];
         }
@@ -618,6 +622,8 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            branch_arms: Default::default(),
+            launch_fo4: Default::default(),
             loc: loc(),
         }
     }

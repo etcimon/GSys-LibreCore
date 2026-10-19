@@ -299,6 +299,11 @@ def remote() -> None:
                     if l.startswith("+") or l.endswith("_pkg.sv") or "/include/" in l]
         variants = {"baseline": (src / "baseline/core/multiplier.sv", 3),
                     "candidate3": (src / "core/multiplier.sv", 3)}
+        # A147: CONTROL_MUL_STAGES="3,4" also maps and witnesses the candidate
+        # at further depths (the segmented final add under MultStages = 4).
+        for depth in os.environ.get("CONTROL_MUL_STAGES", "3").split(","):
+            if depth.strip() and int(depth) != 3:
+                variants[f"candidate{int(depth)}"] = (src / "core/multiplier.sv", int(depth))
         emitted = data / "multiplier__svt.sv"
         if emitted.exists():
             variants["emitted"] = (emitted, 3)

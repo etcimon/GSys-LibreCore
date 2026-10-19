@@ -345,6 +345,8 @@ struct OpExtract {
     /// Predicates of the enclosing `if`s (within the block) and the index
     /// expressions of a dynamically indexed LHS — reads and a mux (delay-v37).
     guards: Vec<String>,
+    /// Conditional / case arms enclosing the assign (delay-v43).
+    arms: Vec<[u32; 2]>,
 }
 
 /// Intermediate region extract before IR materialization.
@@ -459,6 +461,8 @@ fn lower_file(
             typedef_texts: collect_typedef_texts_in(tree, scope.nodes.iter().cloned()),
             config_branch: module_has_config_branch(scope.nodes.iter().cloned()),
             guards: Default::default(),
+            branch_arms: Default::default(),
+            launch_fo4: Default::default(),
             onehot_facts: collect_onehot_facts(
                 &file.bytes,
                 &scope.loc,
@@ -630,6 +634,9 @@ fn lower_file(
                 );
                 if !op.guards.is_empty() {
                     module.guards.insert(nid, op.guards.clone());
+                }
+                if !op.arms.is_empty() {
+                    module.branch_arms.insert(nid, op.arms.clone());
                 }
                 node_ids.push(nid);
                 prev = Some(nid);
@@ -1840,6 +1847,7 @@ fn collect_pipe_pragmas(
                 | "result"
                 | "cut-ok"
                 | "latency"
+                | "cycle"
                 | "representation"
                 | "row-local"
                 | "row-local-applied"
@@ -2467,6 +2475,7 @@ where
 {
     let nodes: Vec<RefNode<'a>> = root.into_iter().collect();
     let nodes_for_guards: Vec<RefNode<'a>> = nodes.clone();
+    let arm_spans = collect_branch_arm_spans(tree, line_index, path_str, nodes.iter().cloned());
     let mut ops = Vec::new();
     let mut assigns: Vec<OpExtract> = Vec::new();
 
@@ -2497,6 +2506,7 @@ where
                     case_selector: None,
                     assign_kind: AssignKind::Unknown,
                     guards: Vec::new(),
+                    arms: Vec::new(),
                 });
             }
             RefNode::NetAssignment(na) => {
@@ -2590,6 +2600,15 @@ where
                 if !a.guards.contains(&ix) {
                     a.guards.push(ix);
                 }
+            }
+        }
+        for (span, arm) in &arm_spans {
+            if span.file == a.loc.file
+                && a.loc.byte_start >= span.byte_start
+                && a.loc.byte_start < span.byte_end
+                && !a.arms.contains(arm)
+            {
+                a.arms.push(*arm);
             }
         }
     }
@@ -2797,6 +2816,64 @@ where
                     out.push((sp, preds.clone()));
                 }
             }
+        }
+    }
+    out
+}
+
+/// Arm bodies of every `if` / `else if` / `else` and `case` item (delay-v43),
+/// each tagged `[statement_key, arm_index]` with the statement's
+/// original-source byte start as the key. Assigns in two arms of one
+/// statement are mutually exclusive.
+fn collect_branch_arm_spans<'a, T>(
+    tree: &'a SyntaxTree,
+    li: &LineIndex,
+    path_str: &str,
+    root: T,
+) -> Vec<(SourceLoc, [u32; 2])>
+where
+    T: IntoIterator<Item = RefNode<'a>>,
+{
+    let mut out = Vec::new();
+    let mut push = |span: SourceLoc, key: u32, arm: u32| {
+        if span.origin == OriginKind::UserFile && span.byte_end > span.byte_start {
+            out.push((span, [key, arm]));
+        }
+    };
+    for node in root {
+        match node {
+            RefNode::ConditionalStatement(cs) => {
+                let stmt = loop_source_span(tree, li, path_str, cs);
+                if stmt.origin != OriginKind::UserFile {
+                    continue;
+                }
+                let key = stmt.byte_start;
+                push(loop_source_span(tree, li, path_str, &cs.nodes.3), key, 0);
+                let mut arm = 1u32;
+                for (_, _, _, body) in &cs.nodes.4 {
+                    push(loop_source_span(tree, li, path_str, body), key, arm);
+                    arm += 1;
+                }
+                if let Some((_, body)) = &cs.nodes.5 {
+                    push(loop_source_span(tree, li, path_str, body), key, arm);
+                }
+            }
+            RefNode::CaseStatementNormal(cs) => {
+                let stmt = loop_source_span(tree, li, path_str, cs);
+                if stmt.origin != OriginKind::UserFile {
+                    continue;
+                }
+                let key = stmt.byte_start;
+                push(loop_source_span(tree, li, path_str, &cs.nodes.3), key, 0);
+                for (i, item) in cs.nodes.4.iter().enumerate() {
+                    push(
+                        loop_source_span(tree, li, path_str, item),
+                        key,
+                        i as u32 + 1,
+                    );
+                }
+            }
+            _ => {}
         }
     }
     out
@@ -3152,6 +3229,7 @@ where
         case_selector: None,
         assign_kind,
         guards: Vec::new(),
+        arms: Vec::new(),
     })
 }
 
@@ -4237,9 +4315,12 @@ endmodule
         // is 32 copies. The mask write it feeds is one copy and inherits the
         // chain through the def-use path.
         let one = model.scaled_fo4(OperatorClass::Compare, Some(5));
+        // delay-v43 adds the output load of `cid` (guards and an index read
+        // it) once, after the trip multiplier.
+        let load_max = model.load_per_fanout * model.load_fanout_cap;
         assert!(
-            (step.fo4_cost - 32.0 * one).abs() < 1e-6,
-            "arithmetic loop-carried step must cost trips × body: {} vs {}",
+            step.fo4_cost >= 32.0 * one - 1e-6 && step.fo4_cost <= 32.0 * one + load_max,
+            "arithmetic loop-carried step must cost trips × body (+ its load): {} vs {}",
             step.fo4_cost,
             32.0 * one
         );
@@ -4299,9 +4380,13 @@ endmodule
             })
             .expect("select accumulate");
         // log2(64) = 6 copies of (shift, xor, select) — well under the 64
-        // copies of the serial reading (416 FO4 on the multiplier)
+        // copies of the serial reading (416 FO4 on the multiplier); delay-v43
+        // adds one select broadcast to the 64 result bits.
         assert!(
-            sel.fo4_cost < 6.0 * (model.shift_const + model.logic_bit + model.mux) + 8.0,
+            sel.fo4_cost
+                < 6.0 * (model.shift_const + model.logic_bit + model.mux)
+                    + 8.0
+                    + crate::load::load_fo4(&model, 64.0),
             "a guarded XOR accumulate as a select is log depth, not 64 copies: {}",
             sel.fo4_cost
         );
@@ -4329,8 +4414,10 @@ endmodule
             .values()
             .find(|n| n.rhs.as_deref().is_some_and(|r| r.contains("hit_i[k] ?")))
             .expect("priority pick inside the loop");
+        // (+ the delay-v43 output load of `idx_o`, a handful of reads)
         assert!(
-            (pick.fo4_cost - 32.0 * model.mux).abs() < 1e-6,
+            pick.fo4_cost >= 32.0 * model.mux - 1e-6
+                && pick.fo4_cost <= 32.0 * model.mux + model.load_per_fanout * 4.0,
             "serial priority chain must cost trips × mux: {}",
             pick.fo4_cost
         );
@@ -4577,6 +4664,227 @@ endmodule
             row.fo4_cost <= model.mux + 0.01,
             "genvar index is a wire: {}",
             row.fo4_cost
+        );
+    }
+
+    fn worst_regtoreg(out: &AnalyzeOutput) -> f64 {
+        out.design
+            .paths
+            .iter()
+            .filter(|p| !p.multi_cycle && p.path_kind == crate::ir::PathKind::RegToReg)
+            .map(|p| p.total_fo4)
+            .fold(0.0, f64::max)
+    }
+
+    /// delay-v43, the write buffer's A144 shape: a coalesce verdict selects
+    /// whether a push lands in the bypass slot, and a later statement compares
+    /// the *post-push* bypass address against the incoming store to clear
+    /// bytes. The next-state bundle billed this as its widest single field;
+    /// the dependency chain (compare → verdict → allocate → compare → mask)
+    /// is the floor now, so the supersede compare adds to the coalesce one.
+    #[test]
+    fn post_push_supersede_compare_chains_after_the_allocation() {
+        let src = |supersede: bool| {
+            format!(
+                "module wbx (
+  input logic clk_i, rst_ni, push_i, req_i,
+  input logic [31:0] push_addr_i, req_addr_i,
+  input logic [7:0] push_be_i, req_be_i,
+  output logic [7:0] be_o
+);
+  typedef struct packed {{ logic [31:0] addr; logic [7:0] be; }} ent_t;
+  ent_t [3:0] q_q, q_d;
+  ent_t byp_q, byp_d;
+  logic byp_v_q, byp_v_d, coalesced;
+  always_comb begin
+    q_d = q_q;
+    byp_d = byp_q;
+    byp_v_d = byp_v_q;
+    coalesced = 1'b0;
+    if (push_i) begin
+      for (int unsigned k = 0; k < 4; k++)
+        if (q_q[k].addr == push_addr_i) begin
+          q_d[k].be = q_q[k].be | push_be_i;
+          coalesced = 1'b1;
+        end
+      if (!coalesced && !byp_v_q) begin
+        byp_v_d = 1'b1;
+        byp_d = '{{addr: push_addr_i, be: push_be_i}};
+      end
+    end
+    {sup}
+  end
+  always_ff @(posedge clk_i or negedge rst_ni)
+    if (!rst_ni) begin q_q <= '0; byp_q <= '0; byp_v_q <= 1'b0; end
+    else begin q_q <= q_d; byp_q <= byp_d; byp_v_q <= byp_v_d; end
+  assign be_o = byp_q.be;
+endmodule",
+                sup = if supersede {
+                    "if (req_i && byp_v_d && byp_d.addr == req_addr_i) byp_d.be = byp_d.be & ~req_be_i;"
+                } else {
+                    ""
+                }
+            )
+        };
+        let opts = |t: &str| {
+            let mut o = LowerOptions::default();
+            o.cost_model = default_fo4_v1_embedded();
+            o.target = crate::ir::TimingTarget::new(4000.0, 20.0, 0.2);
+            analyze_inline_with_options(t, &o)
+        };
+        let without = worst_regtoreg(&opts(&src(false)));
+        let with = worst_regtoreg(&opts(&src(true)));
+        let model = CostModel::default();
+        // a 32-bit equality compare is 4 FO4 at this table; the supersede
+        // compare + mask sit after the allocation, not beside it
+        assert!(
+            with >= without + model.compare,
+            "supersede after the push must lengthen the chain: {without} → {with}"
+        );
+    }
+
+    /// delay-v43: one `assign x_d = f(y_q)` is a region path *and* the whole
+    /// composed cone; the composed reg→reg kind re-tags it instead of being
+    /// dropped as a duplicate (the multiplier's final add read in→out).
+    #[test]
+    fn single_assign_cone_between_flops_is_reg_to_reg() {
+        let text = "module fa (input logic clk_i, rst_ni, input logic [63:0] a_i, b_i,
+  output logic [63:0] s_o);
+  logic [63:0] a_q, b_q, s_d, s_q;
+  assign s_d = a_q + b_q;
+  always_ff @(posedge clk_i or negedge rst_ni)
+    if (!rst_ni) begin a_q <= '0; b_q <= '0; s_q <= '0; end
+    else begin a_q <= a_i; b_q <= b_i; s_q <= s_d; end
+  assign s_o = s_q;
+endmodule";
+        let out = analyze_inline_source(text);
+        let m = out.design.modules.values().next().unwrap();
+        let add = m
+            .nodes
+            .values()
+            .find(|n| n.lhs.as_deref() == Some("s_d"))
+            .unwrap();
+        let kinds: Vec<_> = out
+            .design
+            .paths
+            .iter()
+            .filter(|p| p.nodes == vec![add.id])
+            .map(|p| p.path_kind)
+            .collect();
+        assert!(
+            kinds.contains(&crate::ir::PathKind::RegToReg),
+            "the add between flops is reg→reg: {kinds:?}"
+        );
+    }
+
+    /// delay-v44: compose links a read to its reaching definition. Inside one
+    /// procedural block a write *after* the read is not its fan-in (the
+    /// rename's mispredict repair of `free_d`, written after the allocation
+    /// picks read it, was billed as their predecessor: 234.9 vs 130.4 FO4).
+    #[test]
+    fn compose_links_reads_to_their_reaching_definition() {
+        let text = "module rd (input logic clk_i, input logic [63:0] m_i, r_i,
+  output logic [63:0] a_o);
+  logic [63:0] f_q, f_d, a;
+  always_comb begin
+    f_d = f_q;
+    a = f_d & m_i;
+    f_d = (f_d + r_i) | (f_d - m_i);
+  end
+  always_ff @(posedge clk_i) begin f_q <= f_d; a_o <= a; end
+endmodule";
+        let out = analyze_inline_source(text);
+        let m = out.design.modules.values().next().unwrap();
+        let read = m
+            .nodes
+            .values()
+            .find(|n| n.lhs.as_deref() == Some("a"))
+            .unwrap();
+        let later = m
+            .nodes
+            .values()
+            .find(|n| {
+                n.lhs.as_deref() == Some("f_d") && n.rhs.as_deref().is_some_and(|r| r.contains('+'))
+            })
+            .unwrap();
+        assert!(
+            !read.fans_in.contains(&later.id),
+            "a later write of the same block is not a fan-in: {:?}",
+            read.fans_in
+        );
+    }
+
+    /// delay-v43: a function body's `case` is a table and nested calls bill
+    /// their callees (the AES S-box: layered calls over a lookup).
+    #[test]
+    fn function_tables_and_nested_calls_are_billed() {
+        let text = "module lut (input logic [7:0] x_i, output logic [7:0] y_o);
+  function automatic logic [7:0] tbl(input logic [7:0] a);
+    logic [7:0] r;
+    case (a)
+      8'h00: r = 8'h63; 8'h01: r = 8'h7c; 8'h02: r = 8'h77; 8'h03: r = 8'h7b;
+      8'h04: r = 8'hf2; 8'h05: r = 8'h6b; 8'h06: r = 8'h6f; 8'h07: r = 8'hc5;
+      8'h08: r = 8'h30; 8'h09: r = 8'h01; 8'h0a: r = 8'h67; 8'h0b: r = 8'h2b;
+      8'h0c: r = 8'hfe; 8'h0d: r = 8'hd7; 8'h0e: r = 8'hab; 8'h0f: r = 8'h76;
+      default: r = 8'h00;
+    endcase
+    return r;
+  endfunction
+  function automatic logic [7:0] twice(input logic [7:0] a);
+    logic [7:0] t;
+    t = tbl(a);
+    return tbl(t);
+  endfunction
+  assign y_o = twice(x_i);
+endmodule";
+        let out = analyze_inline_source(text);
+        let m = out.design.modules.values().next().unwrap();
+        let n = m
+            .nodes
+            .values()
+            .find(|n| n.lhs.as_deref() == Some("y_o"))
+            .unwrap();
+        let model = CostModel::default();
+        // two 17-arm tables in series: ≥ 2 × ceil(5/2) 4:1 levels of mux
+        assert!(
+            n.fo4_cost >= 2.0 * 3.0 * model.mux - model.other - 1e-9,
+            "nested table calls must bill: {}",
+            n.fo4_cost
+        );
+    }
+
+    /// delay-v43 board-matching load: a 1-bit select broadcast to a wide
+    /// mux costs more than the same select on a narrow one.
+    #[test]
+    fn select_broadcast_load_grows_with_the_selected_width() {
+        let src = |w: u32| {
+            format!(
+                "module sel (input logic clk_i, input logic s_i,
+  input logic [{m}:0] a_i, b_i, output logic [{m}:0] y_o);
+  logic s_q, c;
+  logic [{m}:0] y_d;
+  assign c = s_q ^ s_i;
+  assign y_d = c ? a_i : b_i;
+  always_ff @(posedge clk_i) begin s_q <= s_i; y_o <= y_d; end
+endmodule",
+                m = w - 1
+            )
+        };
+        let cost = |w: u32| {
+            let out = analyze_inline_source(&src(w));
+            let m = out.design.modules.values().next().unwrap();
+            m.nodes
+                .values()
+                .find(|n| n.lhs.as_deref() == Some("c"))
+                .unwrap()
+                .fo4_cost
+        };
+        let model = CostModel::default();
+        let narrow = cost(4);
+        let wide = cost(48);
+        assert!(
+            wide - narrow >= model.load_per_fanout * 40.0 - 1e-6,
+            "48 select loads vs 4: {narrow} → {wide}"
         );
     }
 

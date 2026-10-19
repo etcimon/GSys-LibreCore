@@ -21,7 +21,14 @@
 //! // svt-pipe: cut-ok [<dom>]                           next assignment: a stage may be cut here
 //! // svt-pipe: no-cut                                   next assignment: never cut (handshake, side effect)
 //! // svt-pipe: require-contract                         module: only pragma-permitted cuts
+//! // svt-pipe: cycle <dom> q=<flop> d=<next> hold=<sig> steps=<n|param>
 //! ```
+//!
+//! `cycle` names one register-to-register step the hardware already has.
+//! The long cone leaves the single-cycle board only when that step measures
+//! at or under the FO4 budget. A step over budget stays on the board so a
+//! latency-neutral transform can still shrink it. The pragma writes no
+//! register and no stall.
 //!
 //! Resolution checks every named signal against the module's declarations
 //! and ports and refuses a contract it cannot bind; `$id` must appear in
@@ -72,6 +79,24 @@ pub struct PipeDomain {
     /// `base + k` equals the parameter's elaborated value.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub latency: Option<(String, String)>,
+    /// `cycle <dom> q=<flop> d=<next> hold=<sig> steps=<n|param>`. The one
+    /// enabled register-to-register step. `hold` is the signal consumers
+    /// already wait on. `steps` is the published wait count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cycle: Option<CycleStep>,
+}
+
+/// One enabled cycle of a multi-cycle or pipelined domain.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct CycleStep {
+    /// Launch flop.
+    pub q: String,
+    /// Capture net of that same cycle.
+    pub d: String,
+    /// Handshake the rest of the machine already waits on.
+    pub hold: String,
+    /// Published cycle count (a number or a parameter name).
+    pub steps: String,
 }
 
 impl PipeDomain {
@@ -328,6 +353,7 @@ pub(crate) fn resolve_pragmas(
                     result_id: None,
                     result_also: Vec::new(),
                     latency: None,
+                    cycle: None,
                 });
             }
             "latency" => {
@@ -429,6 +455,55 @@ pub(crate) fn resolve_pragmas(
                 }
             }
             "require-contract" => c.require_contract = true,
+            "cycle" => {
+                // cycle <dom> q=<flop> d=<next> hold=<sig> steps=<n|param>
+                let Some(name) = p.domain.as_deref() else {
+                    c.rejected
+                        .push(format!("{at}: cycle without a domain name"));
+                    continue;
+                };
+                let (q, d, hold, steps) = (
+                    arg(&p.args, "q"),
+                    arg(&p.args, "d"),
+                    arg(&p.args, "hold"),
+                    arg(&p.args, "steps"),
+                );
+                let (Some(q), Some(d), Some(hold), Some(steps)) = (q, d, hold, steps) else {
+                    c.rejected.push(format!(
+                        "{at}: cycle {name} needs q=, d=, hold= and steps="
+                    ));
+                    continue;
+                };
+                let mut missing = Vec::new();
+                for s in [q, d, hold] {
+                    if !name_declared(module, s) {
+                        missing.push(s.to_string());
+                    }
+                }
+                if steps.parse::<u32>().is_err() && !name_declared(module, steps) {
+                    missing.push(steps.to_string());
+                }
+                if !missing.is_empty() {
+                    c.rejected.push(format!(
+                        "{at}: cycle {name}: unknown signal(s) {}",
+                        missing.join(", ")
+                    ));
+                    continue;
+                }
+                match c.domains.iter_mut().find(|dom| dom.name == name) {
+                    Some(dom) => {
+                        dom.cycle = Some(CycleStep {
+                            q: q.to_string(),
+                            d: d.to_string(),
+                            hold: hold.to_string(),
+                            steps: steps.to_string(),
+                        });
+                    }
+                    None => c
+                        .rejected
+                        .push(format!("{at}: cycle {name}: domain not declared")),
+                }
+            }
             // reserved words of the vocabulary that take no action yet
             "stage-input" => c.rejected.push(format!(
                 "{at}: stage-input is reserved (input staging is not implemented)"
@@ -954,6 +1029,122 @@ pub fn foreign_reads(
         .collect()
 }
 
+fn label_has(label: &str, name: &str) -> bool {
+    label
+        .split(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+        .any(|part| part == name)
+}
+
+fn append_note(path: &mut crate::ir::TimingPath, text: String) {
+    match path.class_note.as_mut() {
+        Some(note) if note.contains("cycle ") => {}
+        Some(note) => {
+            note.push_str("; ");
+            note.push_str(&text);
+        }
+        None => path.class_note = Some(text),
+    }
+}
+
+/// Measure each `cycle` step and decide which cones leave the single-cycle board.
+///
+/// The step path (`q` launch to `d` capture) always stays. Its FO4 is compared
+/// with the budget. Longer cones in the same module are excluded only when
+/// that step is within budget. An unmeasured step, or a step over budget,
+/// clears `multi_cycle` on the module so a name heuristic cannot hide the
+/// clock path. The step note begins with `cycle step` so a later trial can
+/// still run a latency-neutral shrink on it.
+pub fn apply_cycle_contracts(design: &mut crate::ir::TimingDesign) {
+    let budget = design.target.budget_fo4;
+    let specs: Vec<_> = design
+        .modules
+        .iter()
+        .filter_map(|(id, module)| {
+            let contract = resolve(module)?;
+            Some(
+                contract
+                    .domains
+                    .into_iter()
+                    .filter_map(move |domain| {
+                        domain.cycle.map(|step| (*id, domain.name, step))
+                    }),
+            )
+        })
+        .flatten()
+        .collect();
+    for (mid, dom, step) in specs {
+        let step_ix: Vec<usize> = design
+            .paths
+            .iter()
+            .enumerate()
+            .filter(|(_, path)| {
+                path.module == mid
+                    && label_has(&path.startpoint, &step.q)
+                    && label_has(&path.endpoint, &step.d)
+            })
+            .map(|(i, _)| i)
+            .collect();
+        let step_fo4 = step_ix
+            .iter()
+            .map(|i| design.paths[*i].total_fo4)
+            .reduce(f64::max);
+        let Some(step_fo4) = step_fo4 else {
+            for path in design.paths.iter_mut().filter(|p| p.module == mid) {
+                path.multi_cycle = false;
+            }
+            if let Some(path) = design
+                .paths
+                .iter_mut()
+                .filter(|p| p.module == mid)
+                .max_by(|a, b| a.total_fo4.total_cmp(&b.total_fo4))
+            {
+                append_note(
+                    path,
+                    format!(
+                        "cycle {dom}: {}→{} not measured; cone stays on the board",
+                        step.q, step.d
+                    ),
+                );
+            }
+            continue;
+        };
+        let within = step_fo4 <= budget + 1e-6;
+        for (i, path) in design.paths.iter_mut().enumerate() {
+            if path.module != mid {
+                continue;
+            }
+            if step_ix.contains(&i) {
+                path.multi_cycle = false;
+                append_note(
+                    path,
+                    format!(
+                        "cycle step {dom}: {}→{} {step_fo4:.1} FO4 vs budget {budget:.1}",
+                        step.q, step.d
+                    ),
+                );
+            } else if within && path.total_fo4 > step_fo4 + 0.05 {
+                path.multi_cycle = true;
+                append_note(
+                    path,
+                    format!(
+                        "cycle {dom}: excluded; step {}→{} is {step_fo4:.1} FO4 within budget {budget:.1}",
+                        step.q, step.d
+                    ),
+                );
+            } else if !within {
+                path.multi_cycle = false;
+                append_note(
+                    path,
+                    format!(
+                        "cycle {dom}: step {}→{} {step_fo4:.1} FO4 over budget {budget:.1}; cone stays on the board",
+                        step.q, step.d
+                    ),
+                );
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -992,6 +1183,29 @@ mod tests {
      assign res_valid_o = valid_i & ~cancel_i[tid_i];
      assign res_tid_o = tid_i;
      endmodule";
+
+    #[test]
+    fn cycle_pragma_binds_the_enabled_step() {
+        let src = "module m(input logic clk_i, rst_ni, valid_i, id_i,
+       output logic busy_o, valid_o, result_o);
+     logic state_q;
+     // svt-pipe: protocol mma valid=valid_i id=id_i
+     // svt-pipe: cycle mma q=state_q d=result_o hold=busy_o steps=1
+     // svt-pipe: no-cut on=busy_o
+     assign result_o = state_q;
+     assign busy_o = state_q;
+     assign valid_o = state_q;
+     endmodule";
+        let m = analyze(src);
+        let c = resolve(&m).expect("contract");
+        assert!(c.rejected.is_empty(), "{:?}", c.rejected);
+        let step = c.domains[0].cycle.as_ref().expect("cycle");
+        assert_eq!(step.q, "state_q");
+        assert_eq!(step.d, "result_o");
+        assert_eq!(step.hold, "busy_o");
+        assert_eq!(step.steps, "1");
+        assert!(c.no_cut.contains("busy_o"));
+    }
 
     #[test]
     fn pragmas_are_collected_resolved_and_anchored() {

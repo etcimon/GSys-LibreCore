@@ -361,6 +361,8 @@ pub fn synthesize_project(
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+                branch_arms: Default::default(),
+                launch_fo4: Default::default(),
                 loc: loc.clone(),
             };
             tm.regions.insert(

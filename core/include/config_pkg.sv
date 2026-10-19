@@ -1205,11 +1205,12 @@ package config_pkg;
     assert (!(Cfg.SliceOoOEn && Cfg.OoOEn));
     // Configurable multiply depth; every arithmetic/CLMUL/control path agrees.
     // 3 = the shifted-product sum registered as well (sv-timing A128) and
-    // 8-bit operand slices (A131); mult.sv tracks cancellation for
+    // 8-bit operand slices (A131); 4 = the final carry-propagate add split
+    // into two half-width segments (A147). mult.sv tracks cancellation for
     // MultStages cycles either way. XLEN must split into the slices.
-    assert (Cfg.MultStages inside {1, 2, 3});
+    assert (Cfg.MultStages inside {1, 2, 3, 4});
     assert (!(Cfg.MultStages == 2 && (Cfg.XLEN % 16) != 0));
-    assert (!(Cfg.MultStages == 3 && (Cfg.XLEN % 8) != 0));
+    assert (!(Cfg.MultStages >= 3 && (Cfg.XLEN % 8) != 0));
     assert (!(Cfg.SliceOoOEn && !Cfg.SpeculativeSb));
     assert (!(Cfg.SliceOoOEn && Cfg.BPCkptDepth != 0 &&
               Cfg.BPCkptDepth < Cfg.SliceAiqDepth));

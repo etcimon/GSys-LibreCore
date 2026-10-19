@@ -184,7 +184,7 @@ module multiplier
     // svt-plan: carry both RW-bit rows with shifted-carry convention, modular
     // sign correction, operator, valid, TID and every CLMUL result alternative.
     // svt-plan: ownership implement each actual depth and mult.sv liveness
-    // together; setting MultStages=4 alone currently does not create stage four.
+    // together; MultStages=4 (A147) segments the final add (gen_four_stage).
     // svt-plan: effect replaces a long reduction or carry propagation with
     // bounded levels; operand-only capture merely relocates the tile cone.
     // svt-plan: cost extra row/carry-prefix registers and multiply latency;
@@ -326,12 +326,62 @@ module multiplier
           clmulr_s2     <= clmulr_s1;
         end
       end
-      assign mult_result_d = prod_sum_q + prod_carry_q;
-      assign trans_id_sl   = trans_id_s2;
-      assign mult_valid_sl = mult_valid_s2;
-      assign operator_sl   = operator_s2;
-      assign clmul_sl      = clmul_s2;
-      assign clmulr_sl     = clmulr_s2;
+      if (CVA6Cfg.MultStages > 3) begin : gen_four_stage
+        // A147: segmented final addition. The RW-bit carry-propagate add of
+        // the carry-save rows was the module's reg->reg worst on the A144
+        // board (prod_sum_q -> mult_result_d, 1.563 ns / 33 cells). Stage 3
+        // adds the low halves and registers their carry-out with the upper
+        // rows; stage 4 adds the upper halves with that carry, so each stage
+        // owns one HW-bit carry chain. Exact modulo 2**RW:
+        //   s + c == {s_hi + c_hi + cout, lo}  where {cout, lo} = s_lo + c_lo
+        // Valid, trans_id, operator and both CLMUL results take the same
+        // stage (the A126 merge rule), and mult.sv tracks MultStages cycles.
+        localparam int unsigned HW = RW / 2;
+        logic [HW:0]                      lo_sum;
+        logic [HW-1:0]                    lo_q, hi_sum_q, hi_carry_q;
+        logic                             lo_cout_q;
+        logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id_s3;
+        logic                             mult_valid_s3;
+        fu_op                             operator_s3;
+        logic [CVA6Cfg.XLEN-1:0]          clmul_s3, clmulr_s3;
+        assign lo_sum = {1'b0, prod_sum_q[HW-1:0]} + {1'b0, prod_carry_q[HW-1:0]};
+        always_ff @(posedge clk_i or negedge rst_ni) begin
+          if (~rst_ni) begin
+            lo_q          <= '0;
+            lo_cout_q     <= 1'b0;
+            hi_sum_q      <= '0;
+            hi_carry_q    <= '0;
+            trans_id_s3   <= '0;
+            mult_valid_s3 <= 1'b0;
+            operator_s3   <= MUL;
+            clmul_s3      <= '0;
+            clmulr_s3     <= '0;
+          end else begin
+            lo_q          <= lo_sum[HW-1:0];
+            lo_cout_q     <= lo_sum[HW];
+            hi_sum_q      <= prod_sum_q[RW-1:HW];
+            hi_carry_q    <= prod_carry_q[RW-1:HW];
+            trans_id_s3   <= trans_id_s2;
+            mult_valid_s3 <= mult_valid_s2;
+            operator_s3   <= operator_s2;
+            clmul_s3      <= clmul_s2;
+            clmulr_s3     <= clmulr_s2;
+          end
+        end
+        assign mult_result_d = {hi_sum_q + hi_carry_q + HW'(lo_cout_q), lo_q};
+        assign trans_id_sl   = trans_id_s3;
+        assign mult_valid_sl = mult_valid_s3;
+        assign operator_sl   = operator_s3;
+        assign clmul_sl      = clmul_s3;
+        assign clmulr_sl     = clmulr_s3;
+      end else begin : gen_three_stage_out
+        assign mult_result_d = prod_sum_q + prod_carry_q;
+        assign trans_id_sl   = trans_id_s2;
+        assign mult_valid_sl = mult_valid_s2;
+        assign operator_sl   = operator_s2;
+        assign clmul_sl      = clmul_s2;
+        assign clmulr_sl     = clmulr_s2;
+      end
     end else begin : gen_two_stage_out
       assign mult_result_d = prod_sum - corr_sh;
       assign trans_id_sl   = trans_id_s1;

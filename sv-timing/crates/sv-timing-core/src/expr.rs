@@ -1505,12 +1505,15 @@ impl ExprStagePlan {
     /// [`Self::to_sv_fragment`] with the top wire typed after the assignment it
     /// replaces: `var type(<lhs>) top;` and `top = type(<lhs>)'(<expr>);`.
     ///
-    /// The staging wires hold sub-expressions in the assignment's context width
-    /// and stay `logic [w-1:0]`; only the value that flows back into the origin
-    /// LHS must carry the LHS type — an enum (`instruction_o.fu`, `imm_select`)
-    /// or a packed struct has no implicit conversion from a vector, and the
-    /// origin line becomes `lhs = top` verbatim. `lhs_type_of` is the LHS text;
-    /// it must be visible at module scope (the caller checks block-local names).
+    /// Staging wires that hold a 1-bit result (compare, reduction, `&&`/`||`)
+    /// are plain `logic`. A `logic [w-1:0]` dest for those results is a
+    /// Verilator `WIDTHEXPAND` (`opcode == OpcodeMadd` into a 64-bit arm).
+    /// Wider arithmetic stays `logic [w-1:0]`. The value that flows back into
+    /// the origin LHS carries the LHS type — an enum (`instruction_o.fu`,
+    /// `imm_select`) or a packed struct has no implicit conversion from a
+    /// vector, and the origin line becomes `lhs = top` verbatim.
+    /// `lhs_type_of` is the LHS text; it must be visible at module scope
+    /// (the caller checks block-local names).
     pub fn to_sv_fragment_typed(
         &self,
         top_wire: Option<&str>,
@@ -1520,6 +1523,19 @@ impl ExprStagePlan {
         // Never emit [0-1:0] / [1-1:0] — default to 64 when width unknown.
         let w = if data_width < 2 { 64 } else { data_width };
         let lhs_ty = lhs_type_of.map(str::trim).filter(|t| !t.is_empty());
+        let mut scalar_wires: Vec<String> = Vec::new();
+        let wire_scalar: Vec<bool> = self
+            .wires
+            .iter()
+            .map(|(name, rhs)| {
+                let scalar = expr_result_is_scalar(&Expr::parse(rhs), &scalar_wires);
+                if scalar {
+                    scalar_wires.push(name.clone());
+                }
+                scalar
+            })
+            .collect();
+        let top_scalar = expr_result_is_scalar(&self.top, &scalar_wires);
         // Unique begin label: prefer top wire, else first staged wire.
         let block = top_wire
             .map(|t| format!("{t}_stage"))
@@ -1527,13 +1543,18 @@ impl ExprStagePlan {
             .unwrap_or_else(|| "svt_balance_mux_stage".into());
         let mut b = String::new();
         b.push_str("  // --- BalanceMux arm staging (latency-neutral) ---\n");
-        for (name, _) in &self.wires {
-            b.push_str(&format!("  logic [{w}-1:0] {name};\n"));
+        for ((name, _), scalar) in self.wires.iter().zip(wire_scalar.iter()) {
+            if *scalar {
+                b.push_str(&format!("  logic {name};\n"));
+            } else {
+                b.push_str(&format!("  logic [{w}-1:0] {name};\n"));
+            }
         }
         if let Some(tw) = top_wire {
             if !self.wires.iter().any(|(n, _)| n == tw) {
                 match lhs_ty {
                     Some(ty) => b.push_str(&format!("  var type({ty}) {tw};\n")),
+                    None if top_scalar => b.push_str(&format!("  logic {tw};\n")),
                     None => b.push_str(&format!("  logic [{w}-1:0] {tw};\n")),
                 }
             }
@@ -1550,6 +1571,46 @@ impl ExprStagePlan {
         }
         b.push_str("  end\n");
         b
+    }
+}
+
+/// True when `e` is a self-determined 1-bit result. Arithmetic and selects
+/// stay wide: a wrong `logic` declaration would truncate them.
+fn expr_result_is_scalar(e: &Expr, scalar_idents: &[String]) -> bool {
+    match e {
+        Expr::Ident { name } => scalar_idents.iter().any(|s| s == name),
+        Expr::Literal { text } => matches!(text.as_str(), "1'b0" | "1'b1" | "1'bx" | "1'bz"),
+        Expr::Binary {
+            op, left, right, ..
+        } => {
+            if matches!(
+                op.as_str(),
+                "==" | "!=" | "===" | "!==" | "<" | "<=" | ">" | ">=" | "&&" | "||"
+            ) {
+                return true;
+            }
+            if matches!(op.as_str(), "|" | "&" | "^" | "~^" | "^~") {
+                return expr_result_is_scalar(left, scalar_idents)
+                    && expr_result_is_scalar(right, scalar_idents);
+            }
+            false
+        }
+        Expr::Unary { op, arg } => {
+            matches!(
+                op.as_str(),
+                "!" | "|" | "&" | "^" | "~|" | "~&" | "^~" | "~^"
+            ) || (op == "~" && expr_result_is_scalar(arg, scalar_idents))
+        }
+        Expr::Ternary { then_e, else_e, .. } => {
+            expr_result_is_scalar(then_e, scalar_idents)
+                && expr_result_is_scalar(else_e, scalar_idents)
+        }
+        Expr::PartSelect { .. }
+        | Expr::Concat { .. }
+        | Expr::Replicate { .. }
+        | Expr::Index { .. }
+        | Expr::Call { .. }
+        | Expr::Opaque { .. } => false,
     }
 }
 
@@ -3795,12 +3856,46 @@ mod tests {
             frag.contains("svt_bm_top = type(instruction_o.fu)'("),
             "{frag}"
         );
-        // Staging wires keep the context width.
+        // Shift arms stay at the context width. A compare arm does not.
         assert!(frag.contains("logic [64-1:0] svt_bm_0;"), "{frag}");
         // Without an LHS the legacy vector declaration stays.
         let plain = plan.to_sv_fragment(Some("svt_bm_top"), 64);
         assert!(plain.contains("logic [64-1:0] svt_bm_top;"), "{plain}");
         assert!(!plain.contains("type("), "{plain}");
+    }
+
+    #[test]
+    fn predicate_stage_wires_are_scalar_logic() {
+        // decoder imm_select: each `==` is 1 bit. A 64-bit arm is a Verilator
+        // WIDTHEXPAND on the assignment, and a later `||` of those arms must
+        // stay 1 bit so the enum cast sees a condition.
+        let e = Expr::parse(
+            "instr.rtype.opcode == riscv::OpcodeMadd || instr.rtype.opcode == riscv::OpcodeMsub ? RS3 : MUX_RD_RS3",
+        );
+        let plan = e.stage_for_balance_mux("svt_bm_").expect("stage");
+        let frag = plan.to_sv_fragment_typed(Some("svt_bm_top"), 64, Some("imm_select"));
+        assert!(
+            frag.contains("logic svt_bm_0;"),
+            "compare arm must be scalar:\n{frag}"
+        );
+        assert!(
+            !frag.contains("logic [64-1:0] svt_bm_"),
+            "no wide predicate arm:\n{frag}"
+        );
+        assert!(frag.contains("var type(imm_select) svt_bm_top;"), "{frag}");
+        assert!(!frag.contains("|instr.rtype.opcode"), "{frag}");
+    }
+
+    #[test]
+    fn logical_or_of_compares_is_not_a_reduction() {
+        let e = Expr::parse(
+            "instr.rtype.opcode == riscv::OpcodeMadd || instr.rtype.opcode == riscv::OpcodeMsub || instr.rtype.opcode == riscv::OpcodeNmadd || instr.rtype.opcode == riscv::OpcodeNmsub",
+        );
+        let t = e.emit();
+        assert!(t.contains("||"), "{t}");
+        assert!(!t.contains("|instr"), "{t}");
+        let staged = e.rebalance_associative().emit();
+        assert!(!staged.contains("|instr"), "{staged}");
     }
 
     #[test]
