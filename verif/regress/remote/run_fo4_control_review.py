@@ -86,6 +86,7 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
                   "core/frontend/g6lc_loop_buffer.sv"),
         "sbhead": ("core/scoreboard.sv", "core/branch_unit.sv"),
         "stq3": ("core/store_buffer.sv",),
+        "isolate": ("core/ooo/g6lc_rename.sv", "core/ooo/g6lc_iq.sv", "core/scoreboard.sv"),
     }
     changed = profile_files[profile]
     if profile == "statcor":
@@ -107,6 +108,9 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
         for name in ("verif/tb/core/tb_g6lc_stq_flush_ptr.sv", "verif/tb/core/run-stq-flush-ptr.sh",
                      "core/include/config_pkg.sv", "core/include/g6lc64_ooo_config_pkg.sv",
                      "core/include/riscv_pkg.sv", "core/include/ariane_pkg.sv", "core/ooo/g6lc_ooo_pkg.sv"):
+            files[name] = (root / name).read_bytes()
+    if profile == "isolate":
+        for name in ("verif/tb/core/tb_g6lc_iq_store_age.sv",):
             files[name] = (root / name).read_bytes()
     if profile == "step1":
         for name in ("verif/tb/core/tb_g6lc_loop_buffer_sbs.sv", "verif/tb/core/tb_g6lc_bp_loop_emit.sv",
@@ -628,6 +632,10 @@ foreach kind {in_reg reg_reg reg_out in_out} {
 
     if (src / "review.json").exists():
         review = json.loads((src / "review.json").read_text())
+        if review["profile"] == "isolate" and not os.environ.get("CONTROL_MODE"):
+            review_isolate(src, out, sta, lib, abc, evidence, yosys, run)
+            (out / "result.json").write_text(json.dumps(evidence, indent=2))
+            return
         if review["profile"] == "stq3" and not os.environ.get("CONTROL_MODE"):
             review_stq3(src, out, sta, lib, abc, evidence, yosys, run)
             (out / "result.json").write_text(json.dumps(evidence, indent=2))
@@ -1037,6 +1045,170 @@ def pair_module(src, out, sta, lib, abc, evidence, yosys, run, key, top, flists,
         entry["placement"] = dict(re.findall(r"(\w+)=(\S+)", row))
         evidence["maps"][f"{key}-{variant}"] = entry
         (out / "result.json").write_text(json.dumps(evidence, indent=2))
+
+
+def review_isolate(src, out, sta, lib, abc, evidence, yosys, run):
+    """A143: every `x & (~x+1)` / `x & (x-1)` isolate in rename, the issue
+    queue and the scoreboard reclaim scan becomes the explicit log-depth
+    prefix form (the A140 lesson). Proofs: SAT on the isolate identities at
+    the shipped widths, matched-state equivalence of rename and the IQ, the
+    IQ store-age leaf; then the whole-core split map + board and standalone
+    placement of the three modules."""
+    vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+    evidence["simulator"] = subprocess.check_output([vl, "--version"], text=True).strip()
+    # 1. the identities themselves (prefix form == incrementer / decrementer form)
+    (out / "isolate_id.sv").write_text("""
+module isolate_id #(parameter int unsigned W = 64) (input logic [W-1:0] x, output logic ok);
+  function automatic logic [W-1:0] lowest_set(input logic [W-1:0] v);
+    logic [W-1:0] below;
+    below = v << 1;
+    for (int unsigned l = 1; l < W; l = l << 1) below = below | (below << l);
+    return v & ~below;
+  endfunction
+  logic [W-1:0] a, b, rev, c, d;
+  assign a = x & (~x + 1'b1);
+  assign b = lowest_set(x);
+  assign rev = {<<{x}};
+  assign c = {<<{rev & (~rev + 1'b1)}};              // highest set bit, the pick_hi form
+  assign d = {<<{lowest_set(rev)}};
+  assign ok = (a == b) && (c == d) && ((|(x & (x - 1'b1))) == (|(x & ~lowest_set(x))));
+endmodule
+""")
+    for w in (16, 32, 40, 64, 80, 96, 128):
+        key = f"isolate-id-{w}"
+        text = yosys(key, f"read_slang {out}/isolate_id.sv --top isolate_id -G W={w}\n"
+                          "prep -top isolate_id\nflatten\nsat -prove ok 1 -verify\n", timeout=600)
+        assert "SUCCESS!" in text, text[-1200:]
+        evidence["proofs"][key] = "prefix isolate == incrementer isolate, highest-set and at-least-two forms PASS"
+    # 2. the scoreboard reclaim scan, old (rotated) vs new (absolute order), by text
+    live = (src / "core/scoreboard.sv").read_text()
+    base = (src / "baseline/core/scoreboard.sv").read_text()
+
+    def reclaim_block(text):
+        a = text.index("    reclaim_n = commit_pointer_q[0];\n    if (MixedSmt) begin")
+        b = text.index("\n    end\n", a) + len("\n    end\n")
+        blk = text[a:b]
+        for x, y in (("CVA6Cfg.NR_SB_ENTRIES", "N"), ("CVA6Cfg.TRANS_ID_BITS", "TW"), ("MixedSmt", "1'b1"),
+                     ("mem_n[i].issued", "issued_i[i]"), ("mem_n[rslot].issued", "issued_i[rslot]"),
+                     ("commit_pointer_q[0]", "cp_i"), ("issue_pointer[num_issue]", "tail_i")):
+            blk = blk.replace(x, y)
+        return blk
+    fn = live[live.index("  function automatic logic [CVA6Cfg.NR_SB_ENTRIES-1:0] sb_lowest_set("):]
+    fn = fn[:fn.index("  endfunction\n") + len("  endfunction\n")].replace("CVA6Cfg.NR_SB_ENTRIES", "N")
+    hdr = ("#(parameter int unsigned N = 32, parameter int unsigned TW = 5) (\n"
+           "  input logic [N-1:0] issued_i, input logic [TW-1:0] cp_i, tail_i, output logic [TW-1:0] reclaim_n);\n")
+    (out / "reclaim.sv").write_text(
+        "module reclaim_old " + hdr + "  always_comb begin\n" + reclaim_block(base) + "  end\nendmodule\n"
+        "module reclaim_new " + hdr + fn + "  always_comb begin\n" + reclaim_block(live) + "  end\nendmodule\n")
+    for n, tw in ((32, 5), (16, 4), (64, 6)):
+        key = f"reclaim-eq-{n}"
+        text = yosys(key, f"read_slang {out}/reclaim.sv --top reclaim_old --top reclaim_new -G N={n} -G TW={tw}\n"
+                          "proc\nmiter -equiv -flatten -make_assert reclaim_old reclaim_new m\n"
+                          "hierarchy -top m\nsat -verify -prove-asserts m\n", timeout=900)
+        assert "SUCCESS!" in text, text[-1200:]
+        evidence["proofs"][key] = "reclaim scan absolute-order form == rotated form PASS"
+    # 3. rename and IQ: matched-state equivalence (the changes are combinational)
+    for harts, entries in ((1, 40), (2, 80), (1, 64)):
+        tag_width = (entries - 1).bit_length()
+        commands = []
+        for variant, source in (("gold", "baseline/core/ooo/g6lc_rename.sv"), ("gate", "core/ooo/g6lc_rename.sv")):
+            commands += [
+                f"read_slang --top g6lc_rename -G NR_HARTS={harts} -G PRF_ENTRIES={entries} -G FPRF_ENTRIES={entries} "
+                f"-G PRF_W={tag_width} -G FPRF_W={tag_width} -G CKPT_DEPTH=4 --ignore-assertions {src / source}",
+                "proc", "memory_map", "async2sync", "opt_clean", f"rename g6lc_rename {variant}", f"design -stash {variant}",
+            ]
+        commands += ["design -copy-from gold -as gold gold", "design -copy-from gate -as gate gate",
+                     "equiv_make gold gate equiv", "hierarchy -top equiv", "equiv_simple -seq 1", "equiv_status -assert"]
+        key = f"rename-eq-{harts}h-{entries}"
+        text = yosys(key, "\n".join(commands), timeout=900)
+        assert "Equivalence successfully proven!" in text, text[-1200:]
+        evidence["proofs"][key] = "matched-state equivalence PASS"
+    bench = src / "verif/tb/core/tb_g6lc_iq_store_age.sv"
+    packages = ["core/include/config_pkg.sv", "core/include/g6lc64_ooo_config_pkg.sv", "core/include/riscv_pkg.sv",
+                "core/include/ariane_pkg.sv", "core/ooo/g6lc_ooo_pkg.sv"]
+    # a synthesizable IQ equivalence top: the IQ's own port list under the
+    # store-age bench's configuration and entry type (the bench top has
+    # timing controls and is not an equivalence harness)
+    iq_text = (src / "core/ooo/g6lc_iq.sv").read_text()
+    ports = iq_text[iq_text.index("    input  logic clk_i,"):iq_text.index("\n);\n", iq_text.index("    input  logic clk_i,"))]
+    (out / "iq_eq_top.sv").write_text("""
+package iq_eq_pkg;
+  import ariane_pkg::*;
+  typedef struct packed {fu_t fu; fu_op op; logic [3:0] trans_id; logic hart_id; logic [31:0] pc;} sbe_t_port;
+  function automatic config_pkg::cva6_cfg_t configuration(input int np);
+    config_pkg::cva6_cfg_t c = config_pkg::cva6_cfg_empty;
+    c.NrIssuePorts = np; c.NrWbPorts = 2; c.NR_SB_ENTRIES = 16; c.TRANS_ID_BITS = 4; c.RVA = 1;
+    return c;
+  endfunction
+endpackage
+module g6lc_iq_eq
+  import ariane_pkg::*;
+  import iq_eq_pkg::*;
+#(
+    parameter config_pkg::cva6_cfg_t CVA6Cfg = iq_eq_pkg::configuration(2),
+    parameter int unsigned DEPTH  = 16,
+    parameter int unsigned PRF_W  = 4,
+    parameter int unsigned NR_WB = CVA6Cfg.NrWbPorts,
+    parameter int unsigned FPRF_W = 1,
+    parameter type scoreboard_entry_t = sbe_t_port
+) (
+""" + ports + """
+);
+  g6lc_iq #(.CVA6Cfg(CVA6Cfg), .DEPTH(DEPTH), .PRF_W(PRF_W), .NR_WB(NR_WB), .FPRF_W(FPRF_W),
+            .scoreboard_entry_t(scoreboard_entry_t)) dut (.*);
+endmodule
+""")
+    for depth in (16, 32):
+        commands = []
+        for variant, source in (("gold", "baseline/core/ooo/g6lc_iq.sv"), ("gate", "core/ooo/g6lc_iq.sv")):
+            commands += [
+                "read_slang --top g6lc_iq_eq --single-unit --ignore-assertions "
+                f"-G DEPTH={depth} " + " ".join(str(src / q) for q in packages) +
+                f" {src / source} {out / 'iq_eq_top.sv'}",
+                "hierarchy -top g6lc_iq_eq", "proc", "memory_map", "async2sync", "opt_clean",
+                f"rename g6lc_iq_eq {variant}", f"design -stash {variant}",
+            ]
+        commands += ["design -copy-from gold -as gold gold", "design -copy-from gate -as gate gate",
+                     "equiv_make gold gate equiv", "hierarchy -top equiv", "equiv_simple -seq 1", "equiv_status -assert"]
+        key = f"iq-eq-{depth}"
+        text = yosys(key, "\n".join(commands), timeout=900)
+        assert "Equivalence successfully proven!" in text, text[-1200:]
+        evidence["proofs"][key] = "matched-state equivalence PASS"
+    obj = out / "obj-iq-leaf"
+    run("iq-leaf-build", [vl, "-O0", "--binary", "--timing", "--assert", "-Wno-fatal", "-Wno-WIDTH", "-Wno-UNOPTFLAT",
+                          "-I" + str(src / "core/include"), "--top-module", "tb_g6lc_iq_store_age",
+                          *[str(src / q) for q in packages], str(src / "core/ooo/g6lc_iq.sv"), str(bench),
+                          "--Mdir", str(obj), "-j", "4"], timeout=900)
+    log = run("iq-leaf", [str(obj / "Vtb_g6lc_iq_store_age")], timeout=120)
+    assert "PASS tb_g6lc_iq_store_age" in log, log[-800:]
+    neg = subprocess.run([str(obj / "Vtb_g6lc_iq_store_age"), "+oracle_negative"], cwd=out, capture_output=True, text=True, timeout=120)
+    assert neg.returncode != 0 and ("IQ_ST_AGE" in neg.stdout + neg.stderr or "ORACLE_NEGATIVE" in neg.stdout + neg.stderr)
+    evidence["proofs"]["iq-leaf"] = "directed PASS; oracle-negative detected"
+    (out / "result.json").write_text(json.dumps(evidence, indent=2))
+    # 4. whole-core split map + board of the three modules, then standalone placement
+    modules = {"g6lc_rename", "g6lc_iq", "scoreboard"}
+    map_snapshots(src, out, sta, lib, abc, evidence, yosys, run,
+                  changed=("core/ooo/g6lc_rename.sv", "core/ooo/g6lc_iq.sv", "core/scoreboard.sv"), modules=modules)
+    study = src / "build-platform/scripts/openroad-module-place-study.tcl"
+    platform = Path(lib).parent
+    evidence["placement"] = {}
+    for module in sorted(modules):
+        evidence["placement"][module] = {}
+        for variant in ("baseline", "candidate"):
+            names = [n for n in evidence["maps"][variant] if n.split("$")[0] == module]
+            assert len(names) == 1, names
+            top = names[0]
+            entries = (out / variant / "il/modules.tsv").read_text().splitlines()
+            entry = next(l.split("\t") for l in entries if l.split("\t")[2].lstrip("\\") == top)
+            netlist = out / variant / Path(entry[1]).with_suffix(".v")
+            env = dict(os.environ, STUDY_PLATFORM=str(platform), OR_TOP=top, OR_VERILOG=str(netlist),
+                       STUDY_OUTPUT=str(out / f"placed-{module}-{variant}"), STUDY_VARIANT=f"{module}-{variant}")
+            log = run(f"placed-{module}-{variant}", ["/opt/testharness/toolchains/openroad-g6lc-pgo/bin/openroad",
+                                                      "-no_init", "-exit", str(study)], timeout=2400, env=env)
+            row = next(l for l in log.splitlines() if l.startswith("PLACE_STUDY "))
+            evidence["placement"][module][variant] = dict(re.findall(r"(\w+)=(\S+)", row))
+            (out / "result.json").write_text(json.dumps(evidence, indent=2))
+    print(json.dumps(evidence["placement"], indent=2), flush=True)
 
 
 def review_stq3(src, out, sta, lib, abc, evidence, yosys, run):
@@ -2227,7 +2399,7 @@ if __name__ == "__main__":
         mode.add_argument("--snapshot", type=Path)
         mode.add_argument("--analyze-results", type=Path)
         parser.add_argument("--baseline", help="baseline revision for the selected review profile")
-        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt", "stq", "step1", "sbhead", "stq3"), default="control")
+        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt", "stq", "step1", "sbhead", "stq3", "isolate"), default="control")
         args = parser.parse_args()
         if args.snapshot:
             if not args.baseline:

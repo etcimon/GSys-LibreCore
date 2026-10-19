@@ -759,25 +759,28 @@ module scoreboard #(
 
     // ------
     // T6b-4b reclaim (MIXED only): the next-cycle reclaim pointer is the
-    // oldest slot still live in mem_n at or after the current pointer —
-    // rotate the issued mask into ring order from it and isolate the first
-    // set bit (same structure as sb_head_scan). When nothing is live it
-    // follows the allocation tail so the free-window stays consistent.
+    // oldest slot still live in mem_n at or after the current pointer. A143:
+    // the same absolute-order form as sb_head_scan — the first live slot at
+    // or above the pointer, else the first below it (two prefix-OR isolates
+    // on the issued vector split by a thermometer mask; no rotation
+    // crossbar, no rotated carry-chain isolate, no pointer add). When
+    // nothing is live it follows the allocation tail so the free-window
+    // stays consistent.
     // ------
     reclaim_n = commit_pointer_q[0];
     if (MixedSmt) begin
-      automatic logic [CVA6Cfg.NR_SB_ENTRIES-1:0] live_rot;
-      automatic logic [CVA6Cfg.NR_SB_ENTRIES-1:0] live_first;
-      automatic logic [CVA6Cfg.TRANS_ID_BITS-1:0] rslot;
-      live_rot = '0;
+      automatic logic [CVA6Cfg.NR_SB_ENTRIES-1:0] live, ge, hi_c, lo_c, first;
       for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++) begin
-        rslot       = commit_pointer_q[0] + CVA6Cfg.TRANS_ID_BITS'(i);
-        live_rot[i] = mem_n[rslot].issued;
+        live[i] = mem_n[i].issued;
+        ge[i]   = (CVA6Cfg.TRANS_ID_BITS'(i) >= commit_pointer_q[0]);
       end
-      live_first = live_rot & (~live_rot + 1'b1);
+      hi_c  = live & ge;
+      lo_c  = live & ~ge;
+      first = (|hi_c) ? sb_lowest_set(hi_c) : sb_lowest_set(lo_c);
+      reclaim_n = '0;
       for (int unsigned i = 0; i < CVA6Cfg.NR_SB_ENTRIES; i++)
-        if (live_first[i]) reclaim_n = commit_pointer_q[0] + CVA6Cfg.TRANS_ID_BITS'(i);
-      if (live_rot == '0) reclaim_n = issue_pointer[num_issue];
+        if (first[i]) reclaim_n = reclaim_n | CVA6Cfg.TRANS_ID_BITS'(i);
+      if (live == '0) reclaim_n = issue_pointer[num_issue];
     end
   end
 

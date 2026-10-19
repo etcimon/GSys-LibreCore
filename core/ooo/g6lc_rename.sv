@@ -207,15 +207,30 @@ module g6lc_rename #(
   // chain that synthesis keeps serial — the mapped rename netlist's worst
   // register-to-register path was 255 cells / 26 ns (Nangate45, fanout
   // excluded), two of these chains in series across the issue ports.
-  // `fr & (~fr + 1)` isolates the lowest set bit with one incrementer (log
-  // depth), and OR-ing the indices of a one-hot is a balanced tree. Exact: an
-  // empty vector gives 0, as the scan did.
+  // The lowest set bit is isolated as an explicit log-depth prefix OR (a bit
+  // is the lowest set bit iff it is set and no lower bit is); A143 — the
+  // earlier `fr & (~fr + 1)` is the same function, but the live board mapped
+  // that incrementer as a carry chain (scoreboard, A140: +31%). OR-ing the
+  // indices of a one-hot is a balanced tree. Exact: an empty vector gives 0,
+  // as the scan did.
+  function automatic logic [PRF_ENTRIES-1:0] lowest_set(input logic [PRF_ENTRIES-1:0] x);
+    logic [PRF_ENTRIES-1:0] below;
+    below = x << 1;
+    for (int unsigned l = 1; l < PRF_ENTRIES; l = l << 1) below = below | (below << l);
+    return x & ~below;
+  endfunction
+  function automatic logic [FPN-1:0] flowest_set(input logic [FPN-1:0] x);
+    logic [FPN-1:0] below;
+    below = x << 1;
+    for (int unsigned l = 1; l < FPN; l = l << 1) below = below | (below << l);
+    return x & ~below;
+  endfunction
   //
   // Lowest free FP phys. Starts at 0, not 1: FP has no hardwired-zero register,
   // so nothing reserves FP physical 0 (and a set bit 0 selects 0, as before).
   function automatic logic [FPRF_W-1:0] pick_ffree(input logic [FPN-1:0] fr);
     logic [FPN-1:0] lowest;
-    lowest = fr & (~fr + 1'b1);
+    lowest = flowest_set(fr);
     pick_ffree = '0;
     for (int unsigned i = 0; i < FPN; i++) begin
       if (lowest[i]) pick_ffree = pick_ffree | FPRF_W'(i);
@@ -231,7 +246,7 @@ module g6lc_rename #(
     logic [PRF_ENTRIES-1:0] cand, rev, rev_low, highest;
     cand    = fr & ~PRF_ENTRIES'(1);
     rev     = {<<{cand}};
-    rev_low = rev & (~rev + 1'b1);
+    rev_low = lowest_set(rev);
     highest = {<<{rev_low}};
     pick_free_hi = '0;
     for (int unsigned i = 1; i < PRF_ENTRIES; i++) begin
@@ -242,7 +257,7 @@ module g6lc_rename #(
   function automatic logic [FPRF_W-1:0] pick_ffree_hi(input logic [FPN-1:0] fr);
     logic [FPN-1:0] rev, rev_low, highest;
     rev     = {<<{fr}};
-    rev_low = rev & (~rev + 1'b1);
+    rev_low = flowest_set(rev);
     highest = {<<{rev_low}};
     pick_ffree_hi = '0;
     for (int unsigned i = 0; i < FPN; i++) begin
@@ -254,7 +269,7 @@ module g6lc_rename #(
   function automatic logic [PRF_W-1:0] pick_free(input logic [PRF_ENTRIES-1:0] fr);
     logic [PRF_ENTRIES-1:0] cand, lowest;
     cand   = fr & ~PRF_ENTRIES'(1);
-    lowest = cand & (~cand + 1'b1);
+    lowest = lowest_set(cand);
     pick_free = '0;
     for (int unsigned i = 1; i < PRF_ENTRIES; i++) begin
       if (lowest[i]) pick_free = pick_free | PRF_W'(i);
@@ -270,7 +285,7 @@ module g6lc_rename #(
     cand = fr & ~PRF_ENTRIES'(1);
     reversed = {<<{cand}};
     ordered = high ? reversed : cand;
-    lowest = ordered & (~ordered + 1'b1);
+    lowest = lowest_set(ordered);
     reversed_lowest = {<<{lowest}};
     return high ? reversed_lowest : lowest;
   endfunction
@@ -279,7 +294,7 @@ module g6lc_rename #(
     logic [FPN-1:0] ordered, lowest, reversed, reversed_lowest;
     reversed = {<<{fr}};
     ordered = high ? reversed : fr;
-    lowest = ordered & (~ordered + 1'b1);
+    lowest = flowest_set(ordered);
     reversed_lowest = {<<{lowest}};
     return high ? reversed_lowest : lowest;
   endfunction
@@ -316,7 +331,8 @@ module g6lc_rename #(
     n_br = 0;
     // Capacity for the first two ports as counts, not as a pick chain
     // (sv-timing A106): "at least one free" is `|cand`, "at least two" is
-    // `|(cand & (cand - 1))` — one subtractor, in parallel with nothing.
+    // "something is set besides the lowest set bit" (A143: the prefix-OR
+    // isolate, not the `cand - 1` decrementer chain), in parallel with nothing.
     // Ports beyond the second keep the serial pick on the remainder.
     begin
       automatic logic [PRF_ENTRIES-1:0] cand;
@@ -329,12 +345,12 @@ module g6lc_rename #(
       fneed0 = FP_EN && valid_i[0] && need_rd_i[0] && is_fpr_rd_i[0];
       fneed1 = FP_EN && NR_PORTS > 1 && valid_i[1] && need_rd_i[1] && is_fpr_rd_i[1];
       if ((need0 || need1) && !(|cand)) stall_c = 1'b1;
-      if (need0 && need1 && !(|(cand & (cand - 1'b1)))) stall_c = 1'b1;
+      if (need0 && need1 && !(|(cand & ~lowest_set(cand)))) stall_c = 1'b1;
       // FP destinations draw on their own pool, so the two classes cannot
       // stall each other out — a benefit the split buys that a shared pool
       // with a common freelist would not.
       if ((fneed0 || fneed1) && !(|fcand)) stall_c = 1'b1;
-      if (fneed0 && fneed1 && !(|(fcand & (fcand - 1'b1)))) stall_c = 1'b1;
+      if (fneed0 && fneed1 && !(|(fcand & ~flowest_set(fcand)))) stall_c = 1'b1;
       // the remainder for ports >= 2: what the first two would take
       if (need0) begin
         picked = pick_free(avail);
