@@ -254,7 +254,173 @@ void UMbgenPropertyWidget::FillSheet()
             SNew(STextBlock).Text(FText::FromString(TEXT("Auto-connect (CEM / SATA rails only)")))
         ]
     ];
+    FillRecipes(Board, Contracts);
     UE_LOG(LogTemp, Display, TEXT("mbgen properties %s role=%s support=%s"), *PartId, *Role, *Support);
+}
+
+void UMbgenPropertyWidget::FillRecipes(AMbgenBoardActor* Board, const FString& Contracts)
+{
+    if (!Board || !Body.IsValid()) { return; }
+    auto Line = [](const FString& S) -> TSharedRef<SWidget>
+    {
+        return SNew(STextBlock).Text(FText::FromString(S)).AutoWrapText(true);
+    };
+    // Existing blocks on this host: shown with their id and a Remove.
+    for (const FString& BlockId : Board->BlocksHostedOn(PartId))
+    {
+        Body->AddSlot().AutoHeight().Padding(8, 2)
+        [
+            SNew(SHorizontalBox)
+            + SHorizontalBox::Slot().FillWidth(1.f).VAlign(VAlign_Center)
+            [ Line(FString::Printf(TEXT("block  %s"), *BlockId)) ]
+            + SHorizontalBox::Slot().AutoWidth()
+            [
+                SNew(SButton)
+                .OnClicked_Lambda([this, BlockId]()
+                {
+                    if (AMbgenBoardActor* Live = AMbgenBoardActor::FindLive(GetWorld()))
+                    {
+                        Live->ApplyGestureJson(FString::Printf(TEXT("{\"op\":\"remove_recipe\",\"block\":\"%s\"}"), *BlockId));
+                    }
+                    FillSheet();
+                    return FReply::Handled();
+                })
+                [ SNew(STextBlock).Text(FText::FromString(TEXT("Remove"))) ]
+            ]
+        ];
+    }
+    // Only a host with power contracts can be decoupled; the recipe says so itself.
+    if (Contracts.IsEmpty()) { return; }
+    RecipeBox = SNew(SVerticalBox);
+    Body->AddSlot().AutoHeight().Padding(8, 2)
+    [
+        SNew(SHorizontalBox)
+        + SHorizontalBox::Slot().AutoWidth().VAlign(VAlign_Center).Padding(0, 0, 8, 0)
+        [ SNew(STextBlock).Text(FText::FromString(TEXT("decouple rails"))) ]
+        + SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 4, 0)
+        [
+            SNew(SButton)
+            .OnClicked_Lambda([this]() { PreviewRecipe(TEXT("decap_per_rail"), 1); return FReply::Handled(); })
+            [ SNew(STextBlock).Text(FText::FromString(TEXT("1 per rail"))) ]
+        ]
+        + SHorizontalBox::Slot().AutoWidth().Padding(0, 0, 4, 0)
+        [
+            SNew(SButton)
+            .OnClicked_Lambda([this]() { PreviewRecipe(TEXT("decap_per_rail"), 2); return FReply::Handled(); })
+            [ SNew(STextBlock).Text(FText::FromString(TEXT("2 per rail"))) ]
+        ]
+        + SHorizontalBox::Slot().AutoWidth()
+        [
+            SNew(SButton)
+            .OnClicked_Lambda([this]() { PreviewRecipe(TEXT("decap_per_rail"), 0); return FReply::Handled(); })
+            [ SNew(STextBlock).Text(FText::FromString(TEXT("suggested"))) ]
+        ]
+    ];
+    Body->AddSlot().AutoHeight().Padding(16, 0, 8, 4) [ RecipeBox.ToSharedRef() ];
+}
+
+void UMbgenPropertyWidget::PreviewRecipe(const FString& Recipe, int32 PerRail)
+{
+    if (!RecipeBox.IsValid()) { return; }
+    RecipeBox->ClearChildren();
+    AMbgenBoardActor* Board = AMbgenBoardActor::FindLive(GetWorld());
+    if (!Board) { return; }
+    auto Line = [](const FString& S) -> TSharedRef<SWidget>
+    {
+        return SNew(STextBlock).Text(FText::FromString(S)).AutoWrapText(true);
+    };
+    FString Params = PerRail > 0 ? FString::Printf(TEXT("{\"per_rail\":\"%d\"}"), PerRail) : FString();
+    FString Text = Board->RecipeProposalJson(Recipe, PartId, Params);
+    TSharedPtr<FJsonObject> P;
+    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Text);
+    if (Text.IsEmpty() || !FJsonSerializer::Deserialize(Reader, P) || !P.IsValid() || P->HasField(TEXT("error")))
+    {
+        RecipeBox->AddSlot().AutoHeight() [ Line(TEXT("no proposal (recipes need the mbcore_c DLL)")) ];
+        return;
+    }
+    if (PerRail <= 0)
+    {
+        // "suggested" = the processor card's preview decap heuristic, re-queried with that count.
+        const int32 Suggested = (int32)P->GetNumberField(TEXT("suggested_per_rail"));
+        Params = FString::Printf(TEXT("{\"per_rail\":\"%d\"}"), FMath::Max(Suggested, 1));
+        Text = Board->RecipeProposalJson(Recipe, PartId, Params);
+        TSharedRef<TJsonReader<>> Again = TJsonReaderFactory<>::Create(Text);
+        if (Text.IsEmpty() || !FJsonSerializer::Deserialize(Again, P) || !P.IsValid()) { return; }
+        PerRail = FMath::Max(Suggested, 1);
+    }
+    const TArray<TSharedPtr<FJsonValue>>* Add = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* Remove = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* Conns = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* Missing = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* Conflicts = nullptr;
+    P->TryGetArrayField(TEXT("add"), Add);
+    P->TryGetArrayField(TEXT("remove"), Remove);
+    P->TryGetArrayField(TEXT("connections"), Conns);
+    P->TryGetArrayField(TEXT("missing"), Missing);
+    P->TryGetArrayField(TEXT("conflicts"), Conflicts);
+    if (Conflicts)
+    {
+        for (const TSharedPtr<FJsonValue>& C : *Conflicts) { RecipeBox->AddSlot().AutoHeight() [ Line(FString::Printf(TEXT("✕ %s"), *C->AsString())) ]; }
+    }
+    if (!P->GetBoolField(TEXT("applicable"))) { return; }
+    int32 Reused = 0;
+    if (Add)
+    {
+        for (const TSharedPtr<FJsonValue>& V : *Add)
+        {
+            const TSharedPtr<FJsonObject> A = V->AsObject();
+            if (!A.IsValid()) { continue; }
+            if (A->GetBoolField(TEXT("reused"))) { Reused += 1; }
+        }
+    }
+    RecipeBox->AddSlot().AutoHeight()
+    [ Line(FString::Printf(TEXT("%s × %d:  +%d part(s) (%d reused), −%d, %d connection(s)"), *Recipe, PerRail,
+        Add ? Add->Num() : 0, Reused, Remove ? Remove->Num() : 0, Conns ? Conns->Num() : 0)) ];
+    if (Add)
+    {
+        for (const TSharedPtr<FJsonValue>& V : *Add)
+        {
+            const TSharedPtr<FJsonObject> A = V->AsObject();
+            if (!A.IsValid()) { continue; }
+            RecipeBox->AddSlot().AutoHeight()
+            [ Line(FString::Printf(TEXT("  + %s  %s %s%s"), *A->GetStringField(TEXT("id")), *A->GetStringField(TEXT("role")), *A->GetStringField(TEXT("value")), A->GetBoolField(TEXT("reused")) ? TEXT("  (kept)") : TEXT(""))) ];
+        }
+    }
+    if (Remove)
+    {
+        for (const TSharedPtr<FJsonValue>& V : *Remove) { RecipeBox->AddSlot().AutoHeight() [ Line(FString::Printf(TEXT("  − %s"), *V->AsString())) ]; }
+    }
+    if (Conns)
+    {
+        for (const TSharedPtr<FJsonValue>& V : *Conns)
+        {
+            const TSharedPtr<FJsonObject> C = V->AsObject();
+            if (!C.IsValid()) { continue; }
+            TArray<FString> Pins;
+            for (const TSharedPtr<FJsonValue>& Pin : C->GetArrayField(TEXT("pins"))) { Pins.Add(Pin->AsString()); }
+            RecipeBox->AddSlot().AutoHeight()
+            [ Line(FString::Printf(TEXT("  %s ← %s"), *C->GetStringField(TEXT("net")), *FString::Join(Pins, TEXT(", ")))) ];
+        }
+    }
+    if (Missing)
+    {
+        for (const TSharedPtr<FJsonValue>& M : *Missing) { RecipeBox->AddSlot().AutoHeight() [ Line(FString::Printf(TEXT("  ? %s"), *M->AsString())) ]; }
+    }
+    RecipeBox->AddSlot().AutoHeight().Padding(0, 4)
+    [
+        SNew(SButton)
+        .OnClicked_Lambda([this, Recipe, PerRail]()
+        {
+            if (AMbgenBoardActor* Live = AMbgenBoardActor::FindLive(GetWorld()))
+            {
+                // One gesture: one undo entry, one revision step.
+                Live->ApplyGestureJson(FString::Printf(TEXT("{\"op\":\"expand_recipe\",\"recipe\":\"%s\",\"host\":\"%s\",\"params\":{\"per_rail\":\"%d\"}}"), *Recipe, *PartId, PerRail));
+            }
+            FillSheet();
+            return FReply::Handled();
+        })
+        [ SNew(STextBlock).Text(FText::FromString(TEXT("Apply as one undo step"))) ]
+    ];
 }
 
 void UMbgenPropertyWidget::FillBoardSettings(AMbgenBoardActor* Board)

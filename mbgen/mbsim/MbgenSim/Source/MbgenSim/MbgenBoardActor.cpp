@@ -1911,6 +1911,7 @@ void AMbgenBoardActor::EnsureCore()
     // ABI v3 additions: optional, an older DLL falls back to the mbgen exe.
     FnCircuit = FPlatformProcess::GetDllExport(DllHandle, TEXT("mb_circuit"));
     FnOutlineProposal = FPlatformProcess::GetDllExport(DllHandle, TEXT("mb_outline_proposal"));
+    FnRecipeProposal = FPlatformProcess::GetDllExport(DllHandle, TEXT("mb_recipe_proposal"));
     FnFree = FPlatformProcess::GetDllExport(DllHandle, TEXT("mb_string_free"));
     if (!FnOpen || !FnClose || !FnApply || !FnRoute || !FnScene || !FnFree)
     {
@@ -2006,6 +2007,46 @@ FString AMbgenBoardActor::OutlineProposalJson(const FString& TemplateId)
     }
     FFileHelper::LoadFileToString(Text, *OutPath);
     return Text;
+}
+
+FString AMbgenBoardActor::RecipeProposalJson(const FString& Recipe, const FString& Host, const FString& ParamsJson)
+{
+    using Fn = char*(*)(const mb_session*, const char*, const char*, const char*);
+    using FreeFn = void(*)(char*);
+    EnsureCore();
+    if (!FnRecipeProposal || !FnFree || !EnsureSession())
+    {
+        return FString();
+    }
+    const FTCHARToUTF8 RecipeUtf8(*Recipe);
+    const FTCHARToUTF8 HostUtf8(*Host);
+    const FTCHARToUTF8 ParamsUtf8(*ParamsJson);
+    char* Raw = ((Fn)FnRecipeProposal)((const mb_session*)CoreSession, RecipeUtf8.Get(), HostUtf8.Get(), ParamsJson.IsEmpty() ? nullptr : ParamsUtf8.Get());
+    if (!Raw)
+    {
+        return FString();
+    }
+    const FString Text = UTF8_TO_TCHAR(Raw);
+    ((FreeFn)FnFree)(Raw);
+    return Text;
+}
+
+TArray<FString> AMbgenBoardActor::BlocksHostedOn(const FString& Host) const
+{
+    TArray<FString> Out;
+    FString Text;
+    if (!FFileHelper::LoadFileToString(Text, *DesignFile)) { return Out; }
+    TSharedPtr<FJsonObject> Design;
+    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Text);
+    if (!FJsonSerializer::Deserialize(Reader, Design) || !Design.IsValid()) { return Out; }
+    const TArray<TSharedPtr<FJsonValue>>* Blocks = nullptr;
+    if (!Design->TryGetArrayField(TEXT("blocks"), Blocks)) { return Out; }
+    for (const TSharedPtr<FJsonValue>& V : *Blocks)
+    {
+        const TSharedPtr<FJsonObject> B = V->AsObject();
+        if (B.IsValid() && B->GetStringField(TEXT("host")) == Host) { Out.Add(B->GetStringField(TEXT("id"))); }
+    }
+    return Out;
 }
 
 bool AMbgenBoardActor::ApplyViaDll(const FString& GestureJson, bool& bApplied, FString& Reason)

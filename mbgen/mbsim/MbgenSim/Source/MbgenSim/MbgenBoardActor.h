@@ -69,6 +69,10 @@ public:
     FString CircuitJson();
     /* What set_outline would do (mb_outline_proposal, else `mbgen outline-proposal`). Empty on failure. */
     FString OutlineProposalJson(const FString& TemplateId);
+    /* What a circuit recipe would do on a host part (mb_recipe_proposal). Empty without the DLL. */
+    FString RecipeProposalJson(const FString& Recipe, const FString& Host, const FString& ParamsJson);
+    /* Circuit blocks hosted on a part, from design.json: block ids. */
+    TArray<FString> BlocksHostedOn(const FString& Host) const;
     void AddRole(const FString& RoleId);
     void SelectPart(const FString& Id);
     void RefreshOpenSheets();
@@ -113,6 +117,7 @@ private:
     void* FnLibrary = nullptr;
     void* FnCircuit = nullptr;
     void* FnOutlineProposal = nullptr;
+    void* FnRecipeProposal = nullptr;
     void* FnFree = nullptr;
     bool EnsureSession();
     FString DllText(void* Fn, const char* Arg);

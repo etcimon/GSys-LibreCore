@@ -400,6 +400,14 @@ mod catia_nav_source_tests {
         assert!(OUTLINE_CPP.contains("Board->OutlineProposalJson(TemplateId)"));
         assert!(OUTLINE_CPP.contains("PreviewOutline(Id)"));
         assert!(OUTLINE_CPP.contains("TEXT(\"Apply %s\")"));
+        // The Properties sheet previews a recipe (adds / connections / missing)
+        // and applies it as exactly one gesture; existing blocks can be removed.
+        assert!(PROPERTY_CPP.contains("Board->RecipeProposalJson(Recipe, PartId, Params)"));
+        assert!(PROPERTY_CPP.contains("\\\"op\\\":\\\"expand_recipe\\\""));
+        assert!(PROPERTY_CPP.contains("\\\"op\\\":\\\"remove_recipe\\\""));
+        assert!(PROPERTY_CPP.contains("Board->BlocksHostedOn(PartId)"));
+        assert!(ACTOR_CPP.contains("TEXT(\"mb_recipe_proposal\")"));
+        assert!(MBCORE_C_H.contains("mb_recipe_proposal"));
     }
 
     #[test]

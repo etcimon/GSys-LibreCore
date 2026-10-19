@@ -42,6 +42,12 @@ char *mb_circuit(const mb_session *session);
    "dropped_blocks", "affected_nets", "revision". Read-only. */
 char *mb_outline_proposal(const mb_session *session, const char *template_id);
 
+/* What a circuit recipe would do on host: "add" [{id,role,value,reused}],
+   "remove", "connections", "missing", "conflicts", "applicable",
+   "suggested_per_rail", "revision". params_json: object of string values or
+   NULL. Read-only; apply with {"op":"expand_recipe",...} through mb_apply. */
+char *mb_recipe_proposal(const mb_session *session, const char *recipe, const char *host, const char *params_json);
+
 char *mb_scene(mb_session *session);
 char *mb_anchors(mb_session *session);
 char *mb_library_json(void);

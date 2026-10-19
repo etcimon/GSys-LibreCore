@@ -13,7 +13,7 @@ cargo rustc -p mbcore_c -- -C panic=abort
 
 Incremental `Access is denied (os error 5)` under `target/debug/incremental` is expected while Unreal holds `mbcore_c.dll`. Stop `UnrealEditor` whose command line contains `MbgenSim.uproject` before relinking the DLL or running UBT.
 
-Last recorded `cargo test --workspace`: 121 mbcore + 11 mbcore_c + 25 mbcompiler (counts drift). Nav: `cargo test -p mbcore --lib nav`. Circuit/recipes/router: `cargo test -p mbcore circuit` / `recipes` / `route` (the 32-net Mini-ITX fixture has an 8 s debug / 400 ms release budget). Dual-source: `cargo test -p mbcompiler catia` / `navdiag`. Profiles vs `core/include`: `cargo test -p mbcore committed_profiles_agree_with_core_include` (skips in a standalone checkout).
+Last recorded `cargo test --workspace`: 121 mbcore + 12 mbcore_c + 25 mbcompiler (counts drift). Nav: `cargo test -p mbcore --lib nav`. Circuit/recipes/router: `cargo test -p mbcore circuit` / `recipes` / `route` (the 32-net Mini-ITX fixture has an 8 s debug / 400 ms release budget). Dual-source: `cargo test -p mbcompiler catia` / `navdiag`. Profiles vs `core/include`: `cargo test -p mbcore committed_profiles_agree_with_core_include` (skips in a standalone checkout).
 
 ## Board flow (corev-mb, Python + TS)
 

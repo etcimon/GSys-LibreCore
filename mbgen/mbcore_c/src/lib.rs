@@ -255,6 +255,45 @@ pub unsafe extern "C" fn mb_outline_proposal(session: *const Session, template_i
     }
 }
 
+/// What a circuit recipe would do on `host`: parts to add (reused or new),
+/// parts to remove, connections, missing inputs and conflicts. Read-only;
+/// `{"op":"expand_recipe",...}` through `mb_apply` applies it as one gesture.
+/// `params_json` is an object of string values (e.g. `{"per_rail":"2"}`) or null.
+#[no_mangle]
+pub unsafe extern "C" fn mb_recipe_proposal(
+    session: *const Session,
+    recipe: *const c_char,
+    host: *const c_char,
+    params_json: *const c_char,
+) -> *mut c_char {
+    if session.is_null() {
+        return err_json("no session");
+    }
+    let (Ok(recipe), Ok(host)) = (read_str(recipe), read_str(host)) else {
+        return err_json("null recipe or host");
+    };
+    let params: std::collections::BTreeMap<String, String> = if params_json.is_null() {
+        Default::default()
+    } else {
+        match read_str(params_json).map(|s| serde_json::from_str(s)) {
+            Ok(Ok(p)) => p,
+            _ => return err_json("bad params"),
+        }
+    };
+    let sess = &*session;
+    let proposal = mbcore::propose(&sess.design, recipe, host, &params);
+    #[derive(Serialize)]
+    struct Msg {
+        #[serde(flatten)]
+        proposal: mbcore::Proposal,
+        applicable: bool,
+        suggested_per_rail: u32,
+        revision: u64,
+    }
+    let applicable = proposal.is_applicable();
+    json_ptr(&Msg { proposal, applicable, suggested_per_rail: mbcore::suggested_decaps(&sess.design), revision: sess.revision })
+}
+
 /// The resolved circuit (components, pins, nets, obligations, diagnostics)
 /// for the current design, with the session revision.
 #[no_mangle]
@@ -583,6 +622,33 @@ mod tests {
             assert!(c2["nets"].as_array().unwrap().iter().any(|n| n["id"] == "P12V" && n["pins"].as_array().unwrap().iter().any(|p| p == "slot0_c_p12v_0.1")));
             mb_session_close(sess);
             assert_eq!(take(mb_circuit(ptr::null()))["error"], "no session");
+        }
+    }
+
+    #[test]
+    fn recipe_proposal_is_read_only_and_apply_is_one_gesture() {
+        unsafe {
+            let sess = open_mini();
+            let recipe = cstring("decap_per_rail");
+            let host = cstring("slot0");
+            let params = cstring(r#"{"per_rail":"1"}"#);
+            let p = take(mb_recipe_proposal(sess, recipe.as_ptr(), host.as_ptr(), params.as_ptr()));
+            assert!(p.get("error").is_none(), "{p}");
+            assert_eq!(p["applicable"], true);
+            assert_eq!(p["add"].as_array().unwrap().len(), 3);
+            assert!(p["suggested_per_rail"].as_u64().unwrap() >= 2);
+            assert_eq!(mb_session_revision(sess), 0, "a proposal mutates nothing");
+            let usb = cstring("usb0");
+            let no = take(mb_recipe_proposal(sess, recipe.as_ptr(), usb.as_ptr(), ptr::null()));
+            assert_eq!(no["applicable"], false);
+            assert!(!no["conflicts"].as_array().unwrap().is_empty());
+            let g = cstring(r#"{"op":"expand_recipe","recipe":"decap_per_rail","host":"slot0","params":{"per_rail":"1"}}"#);
+            let applied = take(mb_apply(sess, g.as_ptr()));
+            assert_eq!(applied["applied"], true);
+            assert_eq!(mb_session_revision(sess), 1, "one gesture, one revision step");
+            let bad = cstring("{not json");
+            assert!(take(mb_recipe_proposal(sess, recipe.as_ptr(), host.as_ptr(), bad.as_ptr())).get("error").is_some());
+            mb_session_close(sess);
         }
     }
 
