@@ -174,6 +174,90 @@ and the normal package parser. Upload the emitted multiplier along with the
 same source snapshot for the third comparison. An emitted reparse or a
 structural reduction alone is not the acceptance condition.
 
+## A144 — path reports on the top four, and the write buffer's fixup queue
+
+**Path reports.** The module board gives start/end nets only; the full
+cell-by-cell reports of the mapped per-module netlists (`path_report.py`,
+fanout>64 drivers disabled as on the board, reset recovery excluded) say what
+the remaining top cones actually are:
+
+| Module | Critical cone, from the report | Nature |
+|---|---|---|
+| `wt_dcache_wbuffer` | flop → 3 MUX2 (head-relative read of a fixup entry) → tag compare → a Depth-deep AOI/OAI priority chain → merge → flop | logic depth; latency-neutral fix (this entry) |
+| `frontend` | flop → OR4 → **OAI33 with 64 loads (1.04 ns)** → MUX → two chained address compares (XNOR/OR4/NOR4 trees) → **OAI21 with 64 loads (0.45 ns)** → compare → flop | 1.5 of 4.1 ns is two broadcast control nets at the fanout limit; the logic is two serial 64-bit compares on the next-PC select |
+| `g6lc_iq` | `commit_ptr_i` → age compares (XNOR, 50 loads) → NOR4 trees with 51/59 loads (0.94 + 1.11 ns) → select → XOR chains → flop | fanout-dominated age/oldest broadcast off the commit pointer, then the select |
+| `g6lc_ooo_dispatch` | `wb_id_i` → 3 MUX2 (table read) → OR4 → NOR2 (0.45 ns) → 4 MUX2 → `issue_op_a_o` | the writeback-id table read feeding the operand output — not the `can_go` write cone the module board's trace suggested |
+
+The rename and store-buffer cones that led the board were logic depth and
+were removed (A141, A143). The frontend and IQ cones are dominated by
+broadcast nets a real flow buffers; their logic depth (two serial compares;
+age compare → select) is what a protocol change would address.
+
+**Write buffer (`fo4-a144-wbuf4`, retained).** The fixup queue's push
+coalesce and returning-word match walked `(head + k) % Depth` entries
+serially. Slots are now tested in parallel (occupied = ring distance below
+the count) and the first match in FIFO order is the lowest matching slot at
+or above the head, else below it (two prefix-OR isolates) — the selection is
+SAT-equal to the ring walk (merge one-hot, coalesced, active-head, any-match)
+at depths 2/4/8/16 for every head, count and address pattern. The
+whole-module matched-state proof did not finish within 600 s per depth
+(recorded inconclusive; it stalls on one `$equiv` cell after proving the
+outputs through `wr_user_o`). Directed fixup regressions
+(`run_wt_fixup_review.py`): NC 24/24 and INV 38/38 expected outcomes; the
+retained-copy regression's scenario 3 (`d2-s3`) fails identically on the
+unchanged baseline — a stale expectation since T46/T47, recorded, not a
+difference.
+
+| `wt_dcache_wbuffer` (isolated pair, OoO configuration) | Before | **After** |
+|---|---:|---:|
+| Mapped area | 65760 µm² | **54739 µm²** (-16.8%) |
+| Unbuffered reg→reg / cells | 3.166 ns / 26 | **1.932 ns / 21** |
+| Placed worst arrival | 5.344 ns | **4.853 ns** (-9.2%) |
+| Repaired area / buffers | 70548 µm² / 4879 | **57834 µm²** / 3505 |
+| Whole-core board | 2.831 ns / 132.3 | 2.934 ns (inside the re-map band; the board's worst cone for this module is now the bypass-slot merge/supersede path, `fixup_bypass_d` → `wbuffer_data_o`, a different cone from the FIFO walk this entry removed — next step-1 item: compare the pre-push addresses in parallel and select by the allocation instead of comparing the post-push mux output) |
+
+**Protocol-level changes — explored, specified, not landed.** With the path
+reports in hand the step-2/3 items read as follows. Each changes an
+interface latency and therefore needs the core-level route, which exists:
+`testharness_proxy.py build --flavour B --target g6lc64_ooo` (Verilator
+harness, ~1 h), `di --flavour B` (the directed minis, including
+`mini_stq_flush_fwd`), `soak` (the OpenSBI cookie soak — the IPC reading,
+by cycle count against the baseline harness). None of that was run in this
+pass; the remote has no g6lc64_ooo harness at HEAD yet.
+
+* **Frontend, early next-line prediction with late correction.** The cone
+  is the next-PC select comparing the resolved/predicted targets twice in
+  series. Design: select the next fetch address from a small next-line
+  table indexed by the current fetch address (one cycle early), issue the
+  fetch, and let the full predictor's result one cycle later *correct* it
+  with a token (fetch epoch + slot) — a correction squashes the one
+  speculative fetch, costing a bubble only when the next-line guess and
+  the full prediction disagree. Carried bundle: epoch, FTQ slot, RAS/ckpt
+  identity, the alternative target. Cost: the extra bubble on disagreement
+  (BTB/next-line agreement is typically >90 %), one more recovery case in
+  FTQ/realigner/queue. Validation: DI + soak cycle count; the realigner
+  and queue side-by-side benches extended with the epoch.
+* **Issue queue, pipelined select with speculative wakeup.** The cone is the
+  age/oldest broadcast off the commit pointer feeding the select. Design:
+  compute readiness and age one cycle ahead into a registered candidate
+  vector; select from registered candidates; keep one-cycle dependent
+  issue through speculative wakeup (a selected producer wakes consumers
+  the same cycle for fixed-latency FUs, with replay on a load miss).
+  Carried: candidate bits, age rows, producer tags per lane, the replay
+  mask. Cost: a replay path and its IPC on load misses; the age matrix read
+  moves to the candidate stage. Validation: `tb_g6lc_iq_store_age`
+  extended with wakeup/replay, DI, soak.
+* **LSQ AGU input staging** (`protocol agu` already declared): capture the
+  AGU update one cycle before the CAM write with full bypass to the same-
+  cycle readers; +1 load-to-use latency unless bypassed into issue. The
+  placed reg→reg of 1.89 ns against 2.23 any bounds the gain to ~15 % for
+  that latency — the weakest trade of the four; recorded as such.
+* **Dispatch record staging.** The report shows the module's worst path is
+  the writeback-id table read to the operand output, not the write cone;
+  staging the writes would not touch it. Dropped from the candidate list;
+  the read path is a table-indexing shape (A140 lesson: a direct per-entry
+  compare against the id, AND-OR, instead of a mux tree).
+
 ## A142/A143 — the isolate sweep on the new worst module; a tile trial rejected
 
 **A143 (`fo4-a143-isolate`).** With the store buffer off the top, `g6lc_rename`

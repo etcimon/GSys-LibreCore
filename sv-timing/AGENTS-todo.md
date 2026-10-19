@@ -3,6 +3,20 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A144 — write-buffer fixup queue in slot order; protocol items specified
+
+- [x] Path reports (`build-platform/workspace/build/sv-timing/path_report.py`
+  via the proxy): frontend/IQ cones are broadcast-dominated; dispatch's is
+  the wb-id table read, not the write cone.
+- [x] Fixup queue slot-order read: selection SAT-equal at 4 depths; NC 24/24,
+  INV 38/38; placed 5.344 → 4.853 ns, area -18%.
+  Module matched-state proof inconclusive (600 s/depth); copy regression s3
+  stale on baseline too.
+- [ ] Protocol items need the core route: `build --target g6lc64_ooo`, `di`,
+  `soak` cycle count vs baseline. Order: frontend next-line + late
+  correction, IQ pipelined select + speculative wakeup; LSQ staging last.
+- [ ] Dispatch: wb-id table read as per-entry compare + AND-OR (step 1).
+
 ## A143 — isolate sweep (rename); A142 tile trial rejected
 
 - [x] Rename free-list isolates as explicit prefix ORs: placed 3.131 → 2.833 ns,

@@ -38,6 +38,9 @@ Design record: [`architecture/RTL-PIPELINE-PLANS.md`](architecture/RTL-PIPELINE-
 - [x] A143: rename free-list isolates as explicit prefix ORs (board 2.954 →
   2.462 ns; core budget-equivalent 283 MHz); IQ variant and 8×8 multiplier
   tiles measured and rejected.
+- [x] A144: write-buffer fixup queue read in slot order (placed 5.344 → 4.853 ns,
+  area -18%; board unchanged within noise, a different cone leads); path reports for the top four; frontend
+  and IQ protocol changes specified with the core-level validation route.
 - [ ] Continue step 1, then promote step-2
   proposals (ownership/credits) with their consumer protocols. The remaining
   annotations do not implement stages or establish FO4 closure.

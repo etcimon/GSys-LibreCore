@@ -31,6 +31,12 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A144 update:** write-buffer fixup queue read in slot order (parallel match,
+first-in-FIFO-order via split prefix isolates): selection SAT-equal at four
+depths, placed 5.344 → 4.853 ns, area -18%. Path reports show the
+frontend and IQ cones are broadcast-net dominated; protocol designs for both
+are specified with the core-level validation route (harness build, DI, soak).
+
 **A143 update:** rename free-list isolates → prefix OR (placed 3.131 → 2.833 ns,
 board 2.954 → 2.462); the same in the IQ measured worse (off its
 critical cone) and was dropped. A142 8×8 tiles rejected (+15% placed). Core

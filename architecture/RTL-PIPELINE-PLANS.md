@@ -291,6 +291,7 @@ snapshot replay can outweigh a shorter local cone.
 
 | Pass | Source | Plan facet | Result |
 |---|---|---|---|
+| A144 | `cache_subsystem/wt_dcache_wbuffer.sv` | `reshape` fixup queue slot-order read (step 1) | selection SAT-equal at 4 depths; NC/INV regressions; placed 5.344 → 4.853 ns, area -18%; board 2.831 → 2.934 ns (inside the re-map band; the board's worst cone for this module is now the bypass-slot merge/supersede path, `fixup_bypass_d` → `wbuffer_data_o`, a different cone from the FIFO walk this entry removed — next step-1 item: compare the pre-push addresses in parallel and select by the allocation instead of comparing the post-push mux output) |
 | A143 | `ooo/g6lc_rename.sv` | `reshape` free-selection isolates (step 1) | prefix-OR isolates; SAT + equivalence; placed 3.131 → 2.833 ns; board 2.954 → 2.462 ns |
 | A142 | `multiplier.sv` | step-4 tile size | 8×8 tiles rejected: placed +15% (fan-out, not product depth, bounds stage 1) |
 | A141 | `store_buffer.sv` | `reshape` stationary payloads + narrow order (step 3) | age matrix, one-hot head, per-byte youngest-writer merge; cycle-exact vs ring; placed 4.159 → 2.811 ns, area -36%; board 3.958 → 1.929 ns |
@@ -309,8 +310,8 @@ Evidence and the whole-core reading live in
 | Step | Done | Open |
 |---|---|---|
 | 1 Remove logic depth | D$ forwarding tree, loop-predictor row-local training, loop-buffer bounded add, scoreboard head scan (A140); rename free-list isolates (A143) | `instr_queue` prefix ranks, `g6lc_bp_tage` provider select, `ras` top cache |
-| 2 Ownership and credits | — | `ex_stage` completion reservations, miss-unit install descriptors, MMU response context, dispatch record staging (write cone is `can_go`; no harness) |
-| 3 Recurrence redesigns | store buffer stationary queue (A141) | rename group publication, banked IQ selection, frontend late correction — consumer protocols and IPC decisions first |
+| 2 Ownership and credits | — | `ex_stage` completion reservations, miss-unit install descriptors, MMU response context (dispatch record staging dropped: the path report shows the wb-id table read, not the write cone, is the module's worst path) |
+| 3 Recurrence redesigns | store buffer stationary queue (A141) | frontend next-line + late correction, IQ pipelined select + speculative wakeup (both specified with path-report evidence in `sv-timing/architecture/PIPELINE-PRAGMA-REVIEW.md` A144; validation route: harness build, DI, soak), rename group publication |
 | 4 Arithmetic partition | multiplier tiling/carry-save (A132); 8×8 tiles tried and rejected (A142) | compressor-level split, carry-prefix groups, crypto round split, divider microsteps |
 
 ## Review record
