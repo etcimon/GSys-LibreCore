@@ -1016,8 +1016,18 @@ models (`m58`, `m58f`) — the shape Linux's `clear_page` produced — because `
 beats). The fix is `config_pkg::CBO_BLOCK_BYTES`; `G6LC_MUT_CBOZ_LINE_BYTES` restores the pre-fix
 derivation. The memory oracle (`rvfi_memcheck.py`) now models `cbo.zero` as a 64-byte zero store
 and reports the pre-fix trace's `+0x10` load as a stored mismatch (it had skipped the opcode,
-which is why T44 ran with "0 stored mismatches"). Verdict: stage 58 on `ooocoh-t53-{ooo,server1}`,
-the battery, and the server1 L1 (single and 2-hart) past the first `exec` (owed).
+which is why T44 ran with "0 stored mismatches"). Leaf `verif/tb/core/run-stq-cboz.sh` →
+`tb_g6lc_stq_cboz.sv` (lsu_bypass + store_unit + store_buffer, `RVZiCboz`, a D$ model that
+grants every beat and answers a CBO_ZERO beat with one rvalid the cycle after — the WT
+`zero_rvalid_q` shape): a committed `cbo.zero` on an address 0x38 into a block drains exactly
+`CBO_BLOCK_BYTES/8` CBO_ZERO beats at the block's eight words from the block base, full byte
+enables, zero data, one commit-queue entry, and an ordinary `sd` afterwards is one beat
+(`STQ_CBOZ_BEATS`, `STQ_CBOZ_BLOCK_COVERED`, `STQ_CBOZ_ZERO_FULL_BE`, `STQ_CBOZ_ONE_COMMIT`,
+`STQ_SD_ONE_BEAT`); the mutation drains `beats=2 covered=0xc0` — words 6–7 only (the 16-byte
+line holding the base), the boot's shape. Verdicts: stage 58 Spike-exact on `ooocoh-t53-ooo`
+(`m58`, `m58f`; `m58n` fails as required) and the full battery Spike-exact there (s11 10,965
+cycles — unchanged from t52, so the fix touches no ordinary store); `ooocoh-t53-server1` stage
+58 + battery and its L1 (single and 2-hart) past the first `exec` (owed).
 
 ## Register-level oracle over an RVFI trace (2026-10-19, tooling)
 

@@ -122,7 +122,11 @@ def retirement_roi(text: str, start: int, stop: int) -> list:
                   if kind == 'f' or int(reg) != 0]
         stores = [(int(a, 16), int(v, 16)) for a, v in
                   re.findall(r'\bmem (0x[0-9a-fA-F]+) (0x[0-9a-fA-F]+)', effects)]
-        if stores:
+        if stores and (insn & 0x7f) == 0x0f and ((insn >> 12) & 7) == 2 and (insn >> 20) == 4:
+            # cbo.zero: Spike logs 64 byte writes, the RVFI tracer one record at
+            # the base — both mean "the block is zero"; compare the block only.
+            stores = [(min(a for a, _ in stores) & ~63, 0)]
+        elif stores:
             width = (1 << ((insn >> 12) & 7)) if insn & 3 == 3 else (4 if insn >> 13 == 6 else 8)
             if width not in (1, 2, 4, 8):
                 raise ValueError('unsupported store footprint in retirement ROI')
