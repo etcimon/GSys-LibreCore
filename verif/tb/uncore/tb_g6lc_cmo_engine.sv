@@ -9,7 +9,9 @@
 //        {0,1} leaves the rr pointer at 2, so the next {0,1,2} round must
 //        grant core 2 first; each cmo_done_o pulses exactly once;
 //   sc1  broadcast backpressure — a core's inv_ready held low holds the
-//        broadcast's inv_o and blocks done until released;
+//        broadcast's inv_o and blocks done until released; and (T49) the
+//        inval walks the whole 64-byte block as LINE_BYTES sub-lines from the
+//        block base — one broadcast ack per core per sub-line;
 //   sc2  L2 match-inval handshake under contention — l2_inval_ready_i held
 //        low (the cluster's inclusive-victim slot win) keeps l2_inval_valid_o
 //        raised with a stable address; completion only after the slot frees;
@@ -85,9 +87,15 @@ module tb_g6lc_cmo_engine;
       .evict_ready_o(bcast_rdy), .drain_done_o(bcast_done)
   );
 
+  // T49: an inval walks the 64-byte block as BLOCK_BYTES / LINE_BYTES sub-lines
+  localparam int BLOCK_BYTES = 64;
+  localparam int SUB_LINES   = BLOCK_BYTES / LINE_BYTES;
+  logic [AW-1:0] bcast_addrs[$];
+  always_ff @(posedge clk) if (bcast_v && bcast_rdy) bcast_addrs.push_back(bcast_a);
+
   g6lc_cmo_engine #(
       .NR_CORES(NR_CORES), .L2_EN(1'b1), .L3_EN(L3_EN_P != 0),
-      .AXI_ADDR_WIDTH(AW)
+      .AXI_ADDR_WIDTH(AW), .CMO_BLOCK_BYTES(BLOCK_BYTES), .L1_LINE_BYTES(LINE_BYTES)
   ) i_engine (
       .clk_i(clk), .rst_ni(rst_n),
       .cmo_valid_i(cmo_req_v), .cmo_op_i(cmo_req_op),
@@ -241,7 +249,7 @@ module tb_g6lc_cmo_engine;
       int ack0[NR_CORES];
       for (int c = 0; c < NR_CORES; c++) ack0[c] = bcast_ack_count[c];
       inv_rdy[1] = 1'b0;
-      cmo_ask(0, 2'd0, 64'h8000_2000);
+      cmo_ask(0, 2'd0, 64'h8000_2018);
       // Wait until the broadcast is actually offering core 1's inval.
       begin
         int n;
@@ -257,9 +265,19 @@ module tb_g6lc_cmo_engine;
       end
       inv_rdy[1] = 1'b1;
       wait_done(0, 2, 2000);
+      // every core acknowledged one invalidation per sub-line of the block
       for (int c = 0; c < NR_CORES; c++)
-        if (bcast_ack_count[c] != ack0[c] + 1)
-          $fatal(1, "CMO_BCAST_ACKS core=%0d", c);
+        if (bcast_ack_count[c] != ack0[c] + SUB_LINES)
+          $fatal(1, "CMO_BCAST_ACKS core=%0d acks=%0d expected +%0d", c, bcast_ack_count[c] - ack0[c], SUB_LINES);
+      // and the broadcast walked the block from its base, line by line
+      // (the request named an address 0x18 into the block)
+      begin
+        int n = bcast_addrs.size();
+        if (n < SUB_LINES) $fatal(1, "CMO_BCAST_BLOCK short %0d", n);
+        for (int i = 0; i < SUB_LINES; i++)
+          if (bcast_addrs[n - SUB_LINES + i] !== 64'h8000_2000 + i * LINE_BYTES)
+            $fatal(1, "CMO_BCAST_BLOCK sub-line %0d addr %h", i, bcast_addrs[n - SUB_LINES + i]);
+      end
     end
     $display("CMO_ENGINE_SC1 acks=%0d/%0d/%0d",
              bcast_ack_count[0], bcast_ack_count[1], bcast_ack_count[2]);

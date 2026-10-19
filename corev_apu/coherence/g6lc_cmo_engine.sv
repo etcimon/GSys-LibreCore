@@ -22,6 +22,15 @@
 //                  there is no dirty state to write back; the contract is
 //                  ordering against in-flight writes, which write-idle gives.
 //
+//   Block vs line (T49): a Zicbom op covers the architected cache block the
+//   platform publishes (riscv,cbom-block-size = CMO_BLOCK_BYTES, 64), while
+//   the L1 lines it must invalidate are L1_LINE_BYTES (16 on the OoO
+//   packages). An inval therefore walks the block's CMO_BLOCK_BYTES /
+//   L1_LINE_BYTES sub-lines from the block base, repeating the three pushes
+//   for each (an L2/L3 line larger than a sub-line just sees the same line
+//   cleared again), and cmo_done pulses once after the last. One address per
+//   op left bytes 16..63 of the block valid in every L1.
+//
 // All handshakes are explicit valid/ready; no combinational path from any
 // ready input back into a request grant, and no combinational loop between
 // the engine and the cluster arbitration.
@@ -36,7 +45,11 @@ module g6lc_cmo_engine #(
     // skipped and the write-idle input is ignored (tie it high).
     parameter bit          L2_EN  = 1'b1,
     parameter bit          L3_EN  = 1'b0,
-    parameter int unsigned AXI_ADDR_WIDTH = 64
+    parameter int unsigned AXI_ADDR_WIDTH = 64,
+    // the architected CMO block (riscv,cbom-block-size) and the L1 line it
+    // is made of: an inval walks CMO_BLOCK_BYTES / L1_LINE_BYTES sub-lines
+    parameter int unsigned CMO_BLOCK_BYTES = 64,
+    parameter int unsigned L1_LINE_BYTES   = 16
 ) (
     input  logic clk_i,
     input  logic rst_ni,
@@ -78,7 +91,11 @@ module g6lc_cmo_engine #(
     S_DONE
   } state_e;
 
+  localparam int unsigned SUB_LINES = (CMO_BLOCK_BYTES > L1_LINE_BYTES) ? CMO_BLOCK_BYTES / L1_LINE_BYTES : 1;
+  localparam int unsigned SUB_W     = (SUB_LINES > 1) ? $clog2(SUB_LINES) : 1;
+
   state_e                       state_q, state_d;
+  logic [SUB_W-1:0]             sub_q, sub_d;   // sub-line of the block being invalidated
   logic [$clog2(NR_WRITERS > 1 ? NR_WRITERS : 2)-1:0] sel_q, sel_d;
   logic [$clog2(NR_WRITERS > 1 ? NR_WRITERS : 2)-1:0] rr_ptr_q, rr_ptr_d;
   logic [1:0]                   op_q, op_d;
@@ -113,6 +130,7 @@ module g6lc_cmo_engine #(
 
   always_comb begin
     state_d    = state_q;
+    sub_d      = sub_q;
     sel_d      = sel_q;
     rr_ptr_d   = rr_ptr_q;
     op_d       = op_q;
@@ -137,7 +155,11 @@ module g6lc_cmo_engine #(
           cmo_ready_o[sel_c] = 1'b1;
           sel_d   = sel_c;
           op_d    = cmo_op_i[sel_c];
-          addr_d  = cmo_addr_i[sel_c];
+          // an inval starts at the block base and walks its sub-lines
+          addr_d  = (cmo_op_i[sel_c] == CMO_OP_INVAL)
+                    ? (cmo_addr_i[sel_c] & ~AXI_ADDR_WIDTH'(CMO_BLOCK_BYTES - 1))
+                    : cmo_addr_i[sel_c];
+          sub_d   = '0;
           l1_sent_d = 1'b0;
           l1_done_d = 1'b0;
           l2_done_d = !L2_EN;
@@ -183,8 +205,19 @@ module g6lc_cmo_engine #(
       end
 
       S_DONE: begin
-        cmo_done_o[sel_q] = 1'b1;
-        state_d = S_IDLE;
+        if (op_q == CMO_OP_INVAL && SUB_LINES > 1 && sub_q != SUB_W'(SUB_LINES - 1)) begin
+          // next sub-line of the block: same three pushes, same bookkeeping
+          sub_d     = sub_q + 1'b1;
+          addr_d    = addr_q + AXI_ADDR_WIDTH'(L1_LINE_BYTES);
+          l1_sent_d = 1'b0;
+          l1_done_d = 1'b0;
+          l2_done_d = !L2_EN;
+          l3_done_d = !L3_EN;
+          state_d   = S_ISSUE;
+        end else begin
+          cmo_done_o[sel_q] = 1'b1;
+          state_d = S_IDLE;
+        end
       end
 
       default: state_d = S_IDLE;
@@ -194,6 +227,7 @@ module g6lc_cmo_engine #(
   always_ff @(posedge clk_i or negedge rst_ni) begin
     if (!rst_ni) begin
       state_q   <= S_IDLE;
+      sub_q     <= '0;
       sel_q     <= '0;
       rr_ptr_q  <= '0;
       op_q      <= '0;
@@ -204,6 +238,7 @@ module g6lc_cmo_engine #(
       l3_done_q <= 1'b0;
     end else begin
       state_q   <= state_d;
+      sub_q     <= sub_d;
       sel_q     <= sel_d;
       rr_ptr_q  <= rr_ptr_d;
       op_q      <= op_d;

@@ -2148,17 +2148,32 @@ prerequisite for this work under the existing dual license. No licensing policy 
   MultStages are still pinned out): verdicts = stage 58 + the battery on
   both, server1 L1 (single and 2-hart) past the first `exec` to the shell,
   ooo L1/L3 unchanged.
-- [ ] **T49 — Zicbom block vs the 16-byte L1 line (follow-up of T44,
-  2026-10-19).** The same units assumption sits on the CMO side: the WT
-  tracker and the HPDCACHE adapter issue one line-sized op
-  (`HPDCACHE_REQ_CMO_*_NLINE` on a `clWords = 2` line; the WT sideband
-  one `cmo_addr`) per `cbo.inval/clean/flush`, while the DTS advertises
-  `riscv,cbom-block-size = <64>`. Under eWT the ordering half (clean/flush
-  = write-idle) is block-size independent, but an `inval` of a 64-byte
-  block invalidates 16 bytes of L1. Not reached by the boots (no DMA);
-  fix = iterate `CBO_BLOCK_BYTES / line` sub-lines in the tracker/adapter
-  (or broadcast the block in `g6lc_cmo_engine`), then a stage with a DMA-
-  style memory poke under the block.
+- [x] **T49 — Zicbom block vs the 16-byte L1 line (follow-up of T44,
+  2026-10-19).** The same units assumption sat on the CMO side: a
+  `cbo.inval` reached the cluster engine as one address and the engine
+  pushed one L1 broadcast / one L2 / one L3 match-inval for it, while the
+  DTS advertises `riscv,cbom-block-size = <64>` and the L1 line is 16
+  bytes — bytes 16..63 of the block stayed valid in every L1. The AI
+  island's DMA invalidation queue (`g6lc_ai_inval_queue`, `LineBytes(64)`)
+  fed the same engine one address per 64-byte chunk, so DMA-written data
+  had the same hole. Under eWT the clean/flush half (write-idle) is
+  block-size independent. **Fix:** `g6lc_cmo_engine` takes
+  `CMO_BLOCK_BYTES` (`config_pkg::CBO_BLOCK_BYTES`) and `L1_LINE_BYTES`
+  (`DCACHE_LINE_WIDTH / 8`, from `g6lc_cluster`), aligns an inval to the
+  block base and walks its `CMO_BLOCK_BYTES / L1_LINE_BYTES` sub-lines —
+  the three pushes repeated per sub-line (an L2/L3 line larger than a
+  sub-line is cleared again, harmlessly), `cmo_done` once after the last.
+  Leaf `tb_g6lc_cmo_engine` sc1 now asks for an address 0x18 into the
+  block and requires one broadcast ack per core per sub-line (4) and the
+  four broadcast addresses from the block base in order; both L3 arms and
+  the two `CMO_NO_DONE` negatives pass on Verilator 5.020
+  (`l2=32 l3=32` applies). Not reached by the boots (no DMA, the ooo DTS
+  lists no `zicbom`); the remote `run_cmo_review` engine arm and the next
+  server build are the system verdict. Left as is: a package without the
+  engine (`L2CmoEn = 0`, i.e. `g6lc64_ooo`) performs no L1 invalidation
+  for `cbo.inval` at all — those DTS files do not advertise `zicbom`; the
+  HPDCACHE adapter's own `HPDCACHE_REQ_CMO_*_NLINE` stays one line (the
+  engine's broadcast covers the local L1 under `L2CmoEn`).
 - [ ] **T48 — WT dcache: a store whose value never becomes visible to a
   load thousands of cycles later (2026-10-19).** The t52 L3 (`l3h52`, HEAD =
   T35…T47) reached the login prompt and ran to the 2.5 G-cycle cap

@@ -835,7 +835,10 @@ module g6lc_cluster
         .NR_WRITERS     (CMO_NW),
         .L2_EN          (CVA6Cfg.L2En),
         .L3_EN          (CVA6Cfg.L3En),
-        .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH)
+        .AXI_ADDR_WIDTH (AXI_ADDR_WIDTH),
+        // T49: an inval walks the 64-byte block as L1-line sub-lines
+        .CMO_BLOCK_BYTES(config_pkg::CBO_BLOCK_BYTES),
+        .L1_LINE_BYTES  (CVA6Cfg.DCACHE_LINE_WIDTH / 8)
     ) i_cmo_engine (
         .clk_i,
         .rst_ni,
