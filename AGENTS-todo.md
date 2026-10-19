@@ -2147,7 +2147,19 @@ prerequisite for this work under the existing dual license. No licensing policy 
   qualified t52 file set + this fix only** (HEAD's A141 stationary STQ and
   MultStages are still pinned out): verdicts = stage 58 + the battery on
   both, server1 L1 (single and 2-hart) past the first `exec` to the shell,
-  ooo L1/L3 unchanged.
+  ooo L1/L3 unchanged. **Battery verdicts (2026-10-19):** t53 ooo and t53
+  server1 both Spike-exact over s11 + stages 4,20,32–38,46–49,52–58
+  (`BAD: []`; s11 10,965 / 19,015 cycles, the ooo count unchanged from
+  t52 — the fix touches no ordinary store); stage 58 passes on both with
+  and without the fence; leaf `run-stq-cboz.sh`. The server1 L1 runs
+  (`l1s1t` with the live oracle, `l1s2t` 2-hart) are in flight at
+  ≈ 4.3 k cycles/s (≈ 30 h / 60 h to their old death points).
+  **HEAD re-qualification:** `ooocoh-t54-ooo-pgo-build` = the committed
+  HEAD (A141 stationary STQ, A147 `MultStages = 4`, the A139 pragma
+  comments, T44, T49 — 96 files past the t52 set) builds and is
+  Spike-exact on the same battery (s11 11,002 cycles: +37 from the
+  deeper multiplier); its L1 (`l1h54`) and L3 with the live oracle
+  (`l3h54`) are the boot verdicts for HEAD.
 - [x] **T49 — Zicbom block vs the 16-byte L1 line (follow-up of T44,
   2026-10-19).** The same units assumption sat on the CMO side: a
   `cbo.inval` reached the cluster engine as one address and the engine
