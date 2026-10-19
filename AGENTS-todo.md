@@ -2099,6 +2099,80 @@ prerequisite for this work under the existing dual license. No licensing policy 
   Switched`, 1.267 s where every pre-fix run oopsed) and on to 123.8 M
   cycles / 1.665 s (`PCI: CLS 0 bytes`) — the NULL `dir` is gone.** It
   then stopped on the drained-handoff witness → T45.
+  **T44 proper — root cause (2026-10-19): `cbo.zero` zeroed 16 bytes, not
+  the 64-byte block the DTS advertises.** The `l1s1z` run (t49 + the
+  offline oracle) oopsed again at the first `exec` with the memory oracle
+  at **0 mismatches**, and the new register-level oracle
+  (`verif/regress/rvfi_alucheck.py`: every RV64IMC ALU/shift/mul/div/link
+  result recomputed from the shadow register file, plus every retirement's
+  pc against the previous instruction's predicted next pc) at **0 ALU and
+  0 control-flow mismatches** over 70 M results / 267 M retirements — so
+  the garbage was not a datapath, memory-value or branch error. The trace
+  window: `move_page_tables` reads the new PMD entry at
+  `0xffffffd8024b8010` and gets `0xffffffff80dc1aa0` (a kernel pointer),
+  then computes `pte = __va((val << 2) & 0x00fffffffffff000) + 0x448` =
+  `0x00ffffd583706448` — the oops address. That page had been handed to
+  `pmd_alloc` by `clear_page` 233 k cycles earlier: 64 back-to-back
+  `cbo.zero` (`0xffffffff8065797c`, stride 0x80 = two per iteration) at
+  c=397,587,497 — and `+0x10` still held the page's previous life (a
+  lock + list at +0/+8/+0x18). `store_unit.sv`/`store_buffer.sv` derived
+  the Zicboz block as `DCACHE_LINE_WIDTH / 8` with the width in **bits**
+  (128 on the OoO packages) → 16 bytes → **two** 8-byte drain beats; bytes
+  16..63 of every block stayed stale. Linux's `clear_page` therefore left
+  48 of every 64 bytes of page tables and user zero pages with old
+  content — T44's PTE, and the 2-hart server1's `init` segfault on
+  `0xccccccccccccceb0` (`l1s2i`, 8.02 s: a user page that was never
+  zeroed). The WT `g6lc64_ooo` DTS does not list `zicboz`, which is why its
+  L1/L3 boots never met it; the server DTS lists `zicboz` with
+  `riscv,cboz-block-size = <64>`. The memory oracle had skipped `cbo.zero`
+  (opcode 0x0f, not a store) — the "0 stored mismatches" was a blind spot.
+  **Fix:** `config_pkg::CBO_BLOCK_BYTES = 64` (the architected,
+  software-visible block) used by both the store unit's alignment and the
+  store buffer's beat count; `G6LC_MUT_CBOZ_LINE_BYTES` = the pre-fix
+  derivation. **Stage 58** (`ooo_mem_min.S`: three pre-filled lines, two
+  back-to-back `cbo.zero`, every dword of both read back, the third line
+  untouched, then a cold line from the image; `-DCZ_FENCE` drains first)
+  fails on **both** t52 ooo (WT) and t49 server1 at `+0x10` exactly as
+  Linux did (`m58`, `m58f`, exit 3; Spike with `_ZICBOZ` passes). The
+  oracle now models `cbo.zero` as a 64-byte zero store and reports the
+  pre-fix trace's `+0x10` load as a stored mismatch. Builds
+  `ooocoh-t53-ooo-pgo-build` / `ooocoh-t53-server1-pgo-build` = **the
+  qualified t52 file set + this fix only** (HEAD's A141 stationary STQ and
+  MultStages are still pinned out): verdicts = stage 58 + the battery on
+  both, server1 L1 (single and 2-hart) past the first `exec` to the shell,
+  ooo L1/L3 unchanged.
+- [ ] **T49 — Zicbom block vs the 16-byte L1 line (follow-up of T44,
+  2026-10-19).** The same units assumption sits on the CMO side: the WT
+  tracker and the HPDCACHE adapter issue one line-sized op
+  (`HPDCACHE_REQ_CMO_*_NLINE` on a `clWords = 2` line; the WT sideband
+  one `cmo_addr`) per `cbo.inval/clean/flush`, while the DTS advertises
+  `riscv,cbom-block-size = <64>`. Under eWT the ordering half (clean/flush
+  = write-idle) is block-size independent, but an `inval` of a 64-byte
+  block invalidates 16 bytes of L1. Not reached by the boots (no DMA);
+  fix = iterate `CBO_BLOCK_BYTES / line` sub-lines in the tracker/adapter
+  (or broadcast the block in `g6lc_cmo_engine`), then a stage with a DMA-
+  style memory poke under the block.
+- [ ] **T48 — WT dcache: a store whose value never becomes visible to a
+  load thousands of cycles later (2026-10-19).** The t52 L3 (`l3h52`, HEAD =
+  T35…T47) reached the login prompt and ran to the 2.5 G-cycle cap
+  (1.41 G retired, `kmodloader` done, no oops — past the 36.3 s death, so
+  T47 held) with the live oracle at **2 stored mismatches**, the t51 L3
+  (`l3h51`, T46 in / T47 out) likewise with 1; the register-level oracle
+  over the whole t52 trace is clean (537 M results, 0). All three are the
+  same shape and not a forwarding race: **#1** VMAP stack slot
+  `0xffffffc800243b90` (PA `0x826d2b90`): `sd 0xffffffff812dad59` at
+  c=1,616,650,972 (read back right at 651,018), `c.sdsp s6` writes
+  `0x3f87c2b898` at 654,934, the `c.ldsp s6` of `ret_from_exception` at
+  **663,784 (8,850 cycles later) returns the pre-store `…812dad59`**;
+  **#2** linear-map `0xffffffd80fbed518`: `c.sd 0x342` at 2,272,121,226,
+  `c.ld` 40 k cycles later returns 0 (the value before). Memory must hold
+  the new value (write-through), so a present L1 line kept the old word:
+  the store's array write was skipped or undone — a stale `hit_oh`
+  (checked miss, refill in between), a fixup entry dropped by an
+  index-only `wr_cl_inv_i`, or the T47 masking itself. Watch run
+  `l3watch5` on t52 (`+smt_mem_watch=826d2b90`, to c=1.6167 G) in flight
+  for the mechanism; the mismatches did not kill either run, so this is
+  the last known class on the WT L3 path.
 - [ ] **T47 — the fixup queue's deferred array write put older bytes back
   over a younger store's write to the same word (2026-10-18).** The t49 L3
   (`l3h49`, T39/T44 in, T46 out) died at **36.3137 s with the identical
@@ -2119,7 +2193,15 @@ prerequisite for this work under the existing dual license. No licensing policy 
   pre-fix. Lint clean. Build `ooocoh-t52-ooo-pgo-build` (HEAD = T35…T47):
   battery, L1, and the L3 past 36.3 s with the oracle are the verdict; the
   t51 L3 (T46 in, T47 out) keeps running to attribute the 36 s death
-  between the two.
+  between the two. **Verified (2026-10-19):** t52 battery Spike-exact
+  (`BAD: []`, s11 10,953 cycles), `l1h52` to `G6LC_LINUX_SHELL`, `l3h52`
+  to the OpenWrt login prompt and on to the 2.5 G-cycle cap (1.41 G
+  retired) with no oops — the 36.3 s `list_add` death is gone; the live
+  oracle's 2 remaining stored mismatches are the lost-store shape (T48),
+  not this class. The t51 L3 (T46 in, T47 out) also ran to the cap on its
+  own trajectory, so the 36 s death was timing-dependent rather than a
+  fixed point; the t47b/t49 pair (two builds, same cycle, same values)
+  remains the T47 witness and `fixup_write_not_superseded` the guard.
 - [x] **T46 — WT dcache readout forwarded from ONE wbuffer/fixup entry: a
   word held by an older fixup entry (array write pending) and a younger
   wbuffer entry at once gave a load the young entry's bytes over the
@@ -2171,7 +2253,13 @@ prerequisite for this work under the existing dual license. No licensing policy 
   hart. The selector still waits for `no_st_pending_commit` (both halves)
   at the decision; the witness reports the D$-side lag and stops only
   under `+smt_drain_strict`. One witness in 130 M cycles; the run goes on
-  to the shell (system verdict owed).
+  to the shell (system verdict owed). **System verdict (2026-10-19,
+  `l1s2i` to 898 M cycles):** one witness in the whole run, the 2-hart L1
+  passes `Run /init` at 7.99 s and dies at 8.02 s of `init` segfaulting
+  in libc at `0xccccccccccccceb0` — a user page `clear_page` never
+  zeroed, i.e. **T44's `cbo.zero` block bug, not the handoff**; the
+  contract clarification stands and the t53 server1 rerun is the shell
+  verdict.
 - [x] **T43 — L3 on t42: an `amoor.d.aq` (0x800 → 0x801) then, 53 cycles
   later, `amoswap.d.rl zero` (→ 0x800) on a workqueue `work->data`
   (PA `0x8fc8e380`); the `c.ld` 866 cycles after the swap reads 0x801,

@@ -203,8 +203,10 @@ T32-era depth-2 `g6lc64_ooo` probe trace it named a stale `lw` inside OpenSBI (r
 `0x80009fec` read 0xfa after `0x8000a11a` stored 0xf9 to `0x8004211c` 27 retirements earlier);
 the same 2 M-cycle window on the depth-8 and T33 models is clean, so the race is timing-bound
 and the oracle is run over the full kernel boot trace to find the first wrong value
-(`t21/q-memcheck-bg.sh`). Limits: one hart (no coherence), no DMA, `cbo.zero` not modelled
-(flagged as `image/zero`-source mismatches if it ever appears).
+(`t21/q-memcheck-bg.sh`). Limits: one hart (no coherence), no DMA. `cbo.zero` is modelled as a
+64-byte zero store of the block containing the address (`CBO_BLOCK_BYTES`, the `.dts`
+`riscv,cboz-block-size`) since 2026-10-19 — before that the opcode was skipped, and the T44 trace
+(a core zeroing 16 of the 64 bytes) ran with "0 stored mismatches".
 
 **Live mode (2026-10-15, T37).** A 700 M-cycle boot trace is ~45 GB, so the oracle can also be
 fed through a FIFO while the model runs: in the run directory `mkfifo trace_rvfi_hart_00.dasm`,
@@ -248,4 +250,26 @@ probe window is known in advance (T40).
   cycle (hart 0 first on a tie) — for multi-core runs where each core has its own tracer.
 - Offline on a kept trace: `zstd -dc trace_rvfi.dasm.zst | python3 -u rvfi_memcheck.py
   /dev/stdin payload.elf --progress=20000000 > oracle_user.log`.
+- **Kernel-half VAs across pgds.** A kernel-half VA whose top-level entry is missing from the
+  current process's pgd (Linux copies vmalloc/VMAP entries on `vmalloc_fault`) is walked with
+  the other satp roots seen so far, most recent first, so a VMAP stack written under one pgd and
+  read under another folds to the same physical bytes instead of a never-stored `va` key.
+
+## Register-level oracle over an RVFI trace — `rvfi_alucheck.py` (2026-10-19, T44)
+
+`verif/regress/rvfi_alucheck.py <trace.dasm> [--start-retire=N] [--stop-retire=N]
+[--progress=N] [--max-report=N] [--dump-first=N]` is the complement of the memory oracle for
+"every memory value is right but the kernel dies of a garbage pointer": it shadows the integer
+register file from the trace's rd writes, recomputes every register-only RV64IMC result (ALU,
+logic, shifts, `lui`/`auipc`, `jal`/`jalr` link, mul/div/rem and the `*w` forms, all compressed
+forms) from the pre-instruction state and compares it with the value the core wrote, and checks
+every retirement's pc against the pc the previous instruction predicts (fall-through, `jal`/`jalr`
+target, branch outcome; a trap/interrupt line suspends the check; `sret`/`mret`/`ecall`/`ebreak`/
+`wfi` predict nothing). Loads, CSR reads, AMOs and FP moves update the shadow but are not checked.
+Starting late is fine (a register is checked once written inside the window). ~250 k
+retirements/s. On the T44 trace both counters were 0 (70 M results, 267 M pcs) with the memory
+oracle also at 0 — which is what pointed at the sources no oracle covered (`cbo.zero`); the t52
+L3 trace (537 M results) is clean as well. Caveat for a trace that ends in a panic: the halt loop
+retires `c.j 0` every two cycles to the cycle cap, so `--start-retire` must be placed before it
+(the useful retirements of `l1s1z` end near 346 M of its 467 M).
 

@@ -675,6 +675,33 @@ and is past preinit. Budget as measured: kernel to `/sbin/init` 10.3 s guest ≈
 preinit → procd init 14 s ≈ 750 M cycles, at ≈ 20–27 k cycles/s on the loaded builder (≈ 18 h
 wall for the prompt).
 
+#### S4.7 — HEAD L3 to the cap, the server1 `exec` death, and the third oracle (2026-10-19)
+
+| # | symptom on the boot | mechanism | fix | witness |
+|---|---|---|---|---|
+| T47 | L3 at 36.3 s on two builds (t47b, t49): `list_add corruption` in `release_pages`, the same two values, a `ret_from_exception` restore reading the previous trap frame | a fixup-queue entry (ACKed before its tag check) retired its deferred array write *after* a younger wbuffer store had written the same word: the old word came back | a store accepted into the wbuffer clears its bytes from every pending fixup entry of that word; invariant `fixup_write_not_superseded` | t52 `l3h52`: login prompt, `kmodloader` done, 2.5 G cycles / 1.41 G retired with **no oops**; `G6LC_MUT_FIXUP_KEEP_SUPERSEDED` = pre-fix |
+| T44 | server1 (HPDCACHE) L1 at the first `exec` (7.2 s): store fault at `0x00ffffd583706448` in `move_page_tables`; 2-hart server1 at 8.02 s: `init` segfaults at `0xccccccccccccceb0` | **`cbo.zero` zeroed 16 bytes**: `store_unit`/`store_buffer` derived the Zicboz block as `DCACHE_LINE_WIDTH / 8` with the width in bits (128) — two 8-byte drain beats, bytes 16..63 of every block untouched. `clear_page` (64 back-to-back `cbo.zero`) handed out page tables and user pages with their previous content; the PMD entry at `+0x10` was a kernel pointer, `pte = __va((val << 2) & mask) + 0x448` is the oops address. Only the server DTS lists `zicboz` (`cboz-block-size = <64>`) | `config_pkg::CBO_BLOCK_BYTES = 64` for the alignment and the beat count; `G6LC_MUT_CBOZ_LINE_BYTES` = pre-fix | stage 58 fails at `+0x10` on both the WT t52 and the HPDCACHE t49 models (with and without a fence), passes Spike `_ZICBOZ`; `rvfi_memcheck` now models `cbo.zero` as a 64-byte zero store and flags the pre-fix trace; t53 builds (t52 set + this fix) are the verdict |
+| T48 | t51/t52 L3 oracles: 1–2 stored mismatches each, none fatal | a store's value never visible to a load 8.8 k / 40 k cycles later on the WT dcache (`sd` → `c.ldsp` of `ret_from_exception`, `c.sd 0x342` → `c.ld` 0): memory has the new value, a present L1 line kept the old word | open; watch run `l3watch5` (`+smt_mem_watch=826d2b90` on t52) in flight | the three windows in `AGENTS-todo.md` T48 |
+
+Two methodological results carry forward. (1) **A third oracle.** The memory oracle was at 0
+stored mismatches on the T44 trace because it skipped `cbo.zero` (opcode 0x0f, not a store); the
+new `verif/regress/rvfi_alucheck.py` recomputes every RV64IMC ALU/shift/mul/div/link result from a
+shadow register file and checks every retirement's pc against the previous instruction's predicted
+next pc (fall-through, `jal`/`jalr` target, branch outcome; traps suspend). On the T44 trace it is
+clean (70 M results, 267 M control-flow checks, 0 mismatches), and over the whole t52 L3 trace too
+(537 M results) — which is what pushed the search from "which value is wrong" to "which *source*
+of values is unchecked": the trace window then showed a kernel pointer where a PTE should be and
+`clear_page` 233 k cycles earlier. The lesson is the same as T39/T44's first pass: when every
+oracle is clean, enumerate the sources the oracles do not cover (here CMOs; also CSR reads and
+PTW-side reads) before reading more RTL. (2) **Spike's ISA string per stage**:
+`FP_REVIEW_SPIKE_ISA` lets a stage that uses an extension the default reference lacks still be
+Spike-exact instead of recorded as an "intentional discrepancy".
+
+Where the climb stands: on the WT `g6lc64_ooo` HEAD (t52) L1 reaches the shell and L3 the OpenWrt
+login prompt and idles to the cap with only the T48 pair outstanding; on the HPDCACHE server1 the
+first `exec` was the wall on every run since T39 — T44 removes it, and the t53 server1 L1 (single
+and 2-hart) is the next verdict.
+
 Method note for T35/T37: the root cause was reached without an FST. The `+stq_trace` event window
 (pushes/commits/cancels/flushes with cycles) put the stale push 28 cycles after an SMT switch and
 44 cycles after its tid's cancel bit cleared, which named the store unit's `WAIT_TRANSLATION` as

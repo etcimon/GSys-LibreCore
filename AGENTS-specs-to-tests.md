@@ -994,7 +994,43 @@ carries no byte a younger wbuffer entry holds for the word), which is active on 
 from `ooocoh-t52` on. Spec anchor: Part I `#sec:memorymodel` — a later store to a byte is the
 value every later load of that byte returns; the implementation invariant under test is the
 order of two cache-array writes to one word. `G6LC_MUT_FIXUP_KEEP_SUPERSEDED` restores the
-pre-fix behaviour. Verdict: the t52 L3 past 36.3 s with the live oracle (owed).
+pre-fix behaviour. Verdict: the t52 L3 past 36.3 s with the live oracle (owed). **Verdict
+(2026-10-19):** `l3h52` on `ooocoh-t52-ooo-pgo-build` reaches the OpenWrt login prompt, finishes
+`kmodloader` and idles to the 2.5 G-cycle cap (1.41 G retired) with no oops; the live oracle's two
+remaining stored mismatches are the T48 lost-store shape, not a superseded fixup write.
+
+## `cbo.zero` zeroes the advertised 64-byte block (2026-10-19, T44)
+
+Stage 58 of `verif/tests/custom/ooo/ooo_mem_min.S` (`FP_REVIEW_STAGE=58`, Spike with
+`FP_REVIEW_SPIKE_ISA=RV64IMAFDC_ZICSR_ZIFENCEI_ZICBOZ`): three lines pre-filled with a pattern,
+two back-to-back `cbo.zero` on the first two, every dword of both read back (must be 0), the third
+line read back (must keep the pattern), then one `cbo.zero` on a line the core never touched (its
+pattern comes from the image) with the neighbouring line checked. `-DCZ_FENCE` puts a fence
+between the `cbo.zero`s and the loads so a stale read is a lost beat rather than an ordering miss;
+`MEM_ORDER_NEGATIVE` is the oracle-negative. Spec anchor: Zicboz — `cbo.zero` writes zeros to the
+whole cache block of the implementation-defined block size, which the platform publishes as
+`riscv,cboz-block-size` (64 in every `corev_apu/bootrom/*.dts`). Pre-fix the stage fails at
+`+0x10` (`fail_t2`, exit 3) on both the WT `ooocoh-t52` and the HPDCACHE `ooocoh-t49-server1`
+models (`m58`, `m58f`) — the shape Linux's `clear_page` produced — because `store_unit`/
+`store_buffer` derived the block from `DCACHE_LINE_WIDTH / 8` with the width in bits (16 B, two
+beats). The fix is `config_pkg::CBO_BLOCK_BYTES`; `G6LC_MUT_CBOZ_LINE_BYTES` restores the pre-fix
+derivation. The memory oracle (`rvfi_memcheck.py`) now models `cbo.zero` as a 64-byte zero store
+and reports the pre-fix trace's `+0x10` load as a stored mismatch (it had skipped the opcode,
+which is why T44 ran with "0 stored mismatches"). Verdict: stage 58 on `ooocoh-t53-{ooo,server1}`,
+the battery, and the server1 L1 (single and 2-hart) past the first `exec` (owed).
+
+## Register-level oracle over an RVFI trace (2026-10-19, tooling)
+
+`verif/regress/rvfi_alucheck.py`: shadows the integer register file from the trace's rd writes,
+recomputes every RV64IMC register-only result (arithmetic, logic, shifts, `lui`/`auipc`, `jal`/
+`jalr` link, mul/div/rem and the `*w` forms, all compressed forms) from the pre-instruction state
+and compares it with the value the core wrote; and checks every retirement's pc against the pc the
+previous instruction predicts (fall-through, `jal`/`jalr` target, branch outcome from the shadow
+registers; a trap or interrupt line suspends the check, `sret`/`mret`/`ecall`/`ebreak`/`wfi`
+predict nothing). `--start-retire=N` starts late (a register is checked once written inside the
+window). Validated on the Spike-exact s11/m46/m55/m57 traces (0/0); on the T44 trace (70 M
+results, 267 M control-flow checks) and the whole t52 L3 trace (537 M results) it is clean, which
+is what moved the T44 search to the sources no oracle covered (CMOs).
 
 ## Speculative store queue: flush coinciding with a commit (2026-10-15, T35 hardening)
 
