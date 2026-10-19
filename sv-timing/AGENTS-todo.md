@@ -3,6 +3,16 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A143 — isolate sweep (rename); A142 tile trial rejected
+
+- [x] Rename free-list isolates as explicit prefix ORs: placed 3.131 → 2.833 ns,
+  board 2.954 → 2.462 ns; equivalence + SAT identities. IQ allocation
+  isolate not retained (not on its critical cone; perturbation −). Scoreboard
+  reclaim scan absolute-order (SMT configs only; proven).
+- [x] 8×8 multiplier tiles rejected (placed +15%); recorded.
+- [ ] Top of the board is now `wt_dcache_wbuffer` (fixup retire path) and
+  `frontend` (next-line/late correction): both step-3 protocol items.
+
 ## A141 — step 3: store buffer stationary queue landed
 
 - [x] Stationary slots + age matrix; cycle-exact vs ring (4 × 400k, assertions

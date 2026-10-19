@@ -174,6 +174,58 @@ and the normal package parser. Upload the emitted multiplier along with the
 same source snapshot for the third comparison. An emitted reparse or a
 structural reduction alone is not the acceptance condition.
 
+## A142/A143 — the isolate sweep on the new worst module; a tile trial rejected
+
+**A143 (`fo4-a143-isolate`).** With the store buffer off the top, `g6lc_rename`
+led the board (2.954 ns). Its free-register picks — integer and FP pools, low
+and high picks, the two-port capacity test — were all `x & (~x+1)` /
+`x & (x-1)` isolates over PRF_ENTRIES-wide vectors, the form the A140
+scoreboard experiment showed the live board maps as a carry chain. Every one
+is now the explicit log-depth prefix OR (`lowest_set` / `flowest_set`;
+"at least two" = "something set besides the lowest"). The scoreboard's
+MixedSmt reclaim scan takes the same absolute-order form as its head scan
+(inactive in g6lc64_ooo: identical mapped area, SMT configurations only).
+
+Proofs: the isolate identities (lowest, highest-via-reverse, at-least-two) by
+SAT at 16/32/40/64/80/96/128 bits; the reclaim scan against the rotated form
+at 16/32/64 entries; rename matched-state equivalence at 1h/40, 2h/80 and
+1h/64 entries; the IQ store-age leaf with its oracle negative.
+
+| Rename (whole-core-split netlist, standalone placement) | Before | **After** |
+|---|---:|---:|
+| Placed worst arrival | 3.131 ns | **2.833 ns** (-9.5%) |
+| Placed reg→reg | 3.131 ns | **2.785 ns** (-11.1%) |
+| Repaired area | 241421 µm² | 243082 µm² (+0.7%) |
+| Whole-core board | 2.954 ns / 138.1 | **2.462 ns / 115.1** |
+
+The same rewrite in the issue queue's slot allocation measured **worse**
+(placed 2.806 → 3.086 ns, reg→reg 2.525 → 2.681): its allocation isolate is not on
+the wake→select→grant cone, so the change only perturbed a 190 k µm² mapping.
+Not retained — the lesson is that an isolate rewrite pays only on the module's
+critical cone, and that a large module's pair moves by several percent on any
+RTL perturbation (the same caution as the board's re-map noise).
+
+**A142 (`fo4-a142-mul8`, rejected).** 8×8 instead of 16×8 multiplier tiles at
+three stages: the unbuffered in→reg cone barely moved (2.144 → 2.076 ns)
+while placement worsened (2.215 → 2.549 ns, area +5.9%): the tile
+product's own depth is not what bounds stage 1 — operand fan-out into more
+tiles is. The witnesses (sbs 3 seeds, lifetime, RV32, no-RVB, two-stage) all
+passed; the RTL is unchanged.
+
+**Board after A143** (budget-equivalent **283 MHz**, from 216 at the start of
+A140; 56/73 modules still over budget):
+
+| Module | worst arrival | adjusted FO4 |
+|---|---:|---:|
+| `wt_dcache_wbuffer` | 2.831 ns | 132.3 |
+| `frontend` | 2.744 ns | 128.2 |
+| `g6lc_rename` | 2.462 ns | 115.1 |
+| `g6lc_iq` | 2.403 ns | 112.3 |
+| `g6lc_lsq` | 2.229 ns | 104.2 |
+| `multiplier` | 2.181 ns | 101.9 |
+| `scoreboard` | 2.165 ns | 101.2 |
+| `g6lc_ooo_dispatch` | 2.157 ns | 100.8 |
+
 ## A141 — step 3, the store buffer: stationary slots and an age matrix
 
 The first recurrence redesign of `architecture/RTL-PIPELINE-PLANS.md` step 3,

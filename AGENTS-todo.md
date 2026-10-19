@@ -35,6 +35,9 @@ Design record: [`architecture/RTL-PIPELINE-PLANS.md`](architecture/RTL-PIPELINE-
   −36% area, board 3.958 → 1.929 ns; the core's budget-equivalent frequency
   216 → 271 MHz. Remaining step-2/3 items need consumer protocols and IPC
   decisions first (`architecture/RTL-PIPELINE-PLANS.md`, status table).
+- [x] A143: rename free-list isolates as explicit prefix ORs (board 2.954 →
+  2.462 ns; core budget-equivalent 283 MHz); IQ variant and 8×8 multiplier
+  tiles measured and rejected.
 - [ ] Continue step 1, then promote step-2
   proposals (ownership/credits) with their consumer protocols. The remaining
   annotations do not implement stages or establish FO4 closure.

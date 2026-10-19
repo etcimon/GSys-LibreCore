@@ -31,6 +31,11 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A143 update:** rename free-list isolates → prefix OR (placed 3.131 → 2.833 ns,
+board 2.954 → 2.462); the same in the IQ measured worse (off its
+critical cone) and was dropped. A142 8×8 tiles rejected (+15% placed). Core
+budget-equivalent 283 MHz.
+
 **A141 update:** store-buffer speculative queue as stationary slots with an
 insertion-time age matrix (one-hot head, per-byte youngest-writer merge, no
 permutation). Cycle-exact vs the ring 4 × 400k; placed 4.159 → 2.811 ns
