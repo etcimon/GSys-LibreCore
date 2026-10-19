@@ -2209,6 +2209,20 @@ prerequisite for this work under the existing dual license. No licensing policy 
   own trajectory, so the 36 s death was timing-dependent rather than a
   fixed point; the t47b/t49 pair (two builds, same cycle, same values)
   remains the T47 witness and `fixup_write_not_superseded` the guard.
+  **Leaf (2026-10-19, `verif/tb/uncore/run-wt-wbuf-fixup.sh` →
+  `tb_g6lc_wt_wbuf_fixup.sv`, the wbuffer alone with scripted memory ACK
+  delays and separate gates on the wbuffer's and the queue's tag checks):**
+  A VOID-ACKed into the queue, B (low half) accepted, checked, ACKed and
+  written, then A's entry retired after B's write — the last write of B's
+  bytes carries B's data, the fixup write carries A's upper bytes.
+  **The pre-fix queue survives this shape:** B's checked ACK matches the
+  pending entry (`fixup_match`) and is coalesced into it, so the deferred
+  write already carried B's bytes. The acceptance-time clearing is thus a
+  second guard, and the mechanism written above is not what killed the
+  L3 at 36.3 s; since the t51 L3 (T46 in, T47 out) also survives, the
+  death is attributed to **T46 and/or T47** — the readout merge (T46) is
+  the proven defect of the two (its leaf mutation reproduces the boot's
+  value). Kept as a positive regression of the ACK-coalescing path.
 - [x] **T46 — WT dcache readout forwarded from ONE wbuffer/fixup entry: a
   word held by an older fixup entry (array write pending) and a younger
   wbuffer entry at once gave a load the young entry's bytes over the

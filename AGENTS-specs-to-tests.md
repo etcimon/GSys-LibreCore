@@ -997,7 +997,19 @@ order of two cache-array writes to one word. `G6LC_MUT_FIXUP_KEEP_SUPERSEDED` re
 pre-fix behaviour. Verdict: the t52 L3 past 36.3 s with the live oracle (owed). **Verdict
 (2026-10-19):** `l3h52` on `ooocoh-t52-ooo-pgo-build` reaches the OpenWrt login prompt, finishes
 `kmodloader` and idles to the 2.5 G-cycle cap (1.41 G retired) with no oops; the live oracle's two
-remaining stored mismatches are the T48 lost-store shape, not a superseded fixup write.
+remaining stored mismatches are the T48 lost-store shape, not a superseded fixup write. **Leaf
+(2026-10-19):** `verif/tb/uncore/run-wt-wbuf-fixup.sh` → `tb_g6lc_wt_wbuf_fixup.sv` — the wbuffer
+alone, memory ACKs after a scripted delay, the tag check hits way 0 one cycle after its ack, and
+the TB gates the wbuffer's and the fixup queue's checks separately (`dut.fixup_rd_req`): store A
+VOID-ACKed into the queue, store B (low half) accepted, checked, ACKed and written, the queue
+released afterwards. Checks: the last array write of B's bytes carries B's data
+(`WT_WBUF_FIXUP_YOUNG_BYTES_KEPT`), the fixup write carries A's upper bytes
+(`WT_WBUF_FIXUP_OLD_BYTES_WRITTEN`) and no byte of A's over B's (`…_NO_SUPERSEDED_BYTE`), the
+queue drains. Finding: `G6LC_MUT_FIXUP_KEEP_SUPERSEDED` **survives** this shape — B's checked
+ACK matches the pending entry and is coalesced into it (`fixup_match` → `merge_fixup`), so the
+pre-fix deferred write already carried B's bytes. The T47 clearing is a second guard; the arm is
+kept informational, and the 36.3 s attribution moves to "T46 and/or T47" (T46's leaf mutation
+reproduces the boot's value, T47's does not).
 
 ## `cbo.zero` zeroes the advertised 64-byte block (2026-10-19, T44)
 
