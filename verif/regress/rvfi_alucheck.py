@@ -11,7 +11,11 @@ core wrote.  Loads, CSR accesses, AMOs, FP and anything else that brings a value
 from outside the register file update the shadow and are not checked.  A
 mismatch names the first instruction whose datapath result is wrong -- the
 complement of rvfi_memcheck (memory values) for the cases where the memory
-oracle is clean but the kernel still dies of a garbage pointer.
+oracle is clean but the kernel still dies of a garbage pointer.  Control flow
+is checked too: every retirement's pc is compared with the pc the previous
+instruction predicts from the shadow registers (fall-through, jal/jalr target,
+branch outcome); a trap or interrupt line between the two suspends the check,
+and sret/mret/ecall/ebreak/wfi predict nothing.
 
 usage: rvfi_alucheck.py <trace.dasm> [--start-retire=N] [--stop-retire=N]
                         [--progress=N] [--max-report=N] [--dump-first=N]
@@ -226,6 +230,59 @@ def decode(insn):
     return None
 
 
+def next_pc(insn, pc, r, known):
+    """-> expected pc of the next retired instruction, or None when it depends
+    on state the trace does not carry (sret/mret/ecall/ebreak/wfi) or on an
+    unknown register."""
+    def ok(x): return x == 0 or (known >> x) & 1
+    if insn & 3 != 3:
+        op = insn & 3
+        f3 = (insn >> 13) & 7
+        if op == 1 and f3 == 5:                         # c.j (c.jal is RV32-only; f3 == 1 is c.addiw here)
+            imm = sx((((insn >> 12) & 1) << 11) | (((insn >> 8) & 1) << 10) | (((insn >> 9) & 3) << 8) |
+                     (((insn >> 6) & 1) << 7) | (((insn >> 7) & 1) << 6) | (((insn >> 2) & 1) << 5) |
+                     (((insn >> 11) & 1) << 4) | (((insn >> 3) & 7) << 1), 12)
+            return to64(pc + imm)
+        if op == 1 and f3 in (6, 7):                    # c.beqz / c.bnez
+            rs = 8 + ((insn >> 7) & 7)
+            if not ok(rs): return None
+            imm = sx((((insn >> 12) & 1) << 8) | (((insn >> 5) & 3) << 6) | (((insn >> 2) & 1) << 5) |
+                     (((insn >> 10) & 3) << 3) | (((insn >> 3) & 3) << 1), 9)
+            taken = (r[rs] == 0) if f3 == 6 else (r[rs] != 0)
+            return to64(pc + imm) if taken else to64(pc + 2)
+        if op == 2 and f3 == 4 and ((insn >> 2) & 0x1F) == 0:   # c.jr / c.jalr / c.ebreak
+            rs = (insn >> 7) & 0x1F
+            if rs == 0: return None                     # c.ebreak
+            if not ok(rs): return None
+            return r[rs] & ~1 & M64
+        return to64(pc + 2)
+    opc = insn & 0x7F
+    f3 = (insn >> 12) & 7
+    rs1 = (insn >> 15) & 0x1F
+    rs2 = (insn >> 20) & 0x1F
+    if opc == 0x6F:                                     # jal
+        imm = sx((((insn >> 31) & 1) << 20) | (((insn >> 12) & 0xFF) << 12) | (((insn >> 20) & 1) << 11) |
+                 (((insn >> 21) & 0x3FF) << 1), 21)
+        return to64(pc + imm)
+    if opc == 0x67:                                     # jalr
+        if not ok(rs1): return None
+        imm = sx(insn >> 20, 12)
+        return to64(r[rs1] + imm) & ~1
+    if opc == 0x63:                                     # branches
+        if not (ok(rs1) and ok(rs2)): return None
+        imm = sx((((insn >> 31) & 1) << 12) | (((insn >> 7) & 1) << 11) | (((insn >> 25) & 0x3F) << 5) |
+                 (((insn >> 8) & 0xF) << 1), 13)
+        a, b = r[rs1], r[rs2]
+        taken = {0: a == b, 1: a != b, 4: sx(a, 64) < sx(b, 64), 5: sx(a, 64) >= sx(b, 64),
+                 6: a < b, 7: a >= b}.get(f3)
+        if taken is None: return None
+        return to64(pc + imm) if taken else to64(pc + 4)
+    if opc == 0x73:                                     # system: ecall/ebreak/sret/mret/wfi/csr
+        if f3 == 0: return None
+        return to64(pc + 4)
+    return to64(pc + 4)
+
+
 def main():
     args = [a for a in sys.argv[1:] if not a.startswith('--')]
     start = stop = None
@@ -240,10 +297,14 @@ def main():
         elif a.startswith('--max-report='): max_report = int(a.split('=')[1])
     regs = {}                 # per hart: list of 32 values
     known = {}                # per hart: 32-bit mask of registers written inside the window
+    expect = {}               # per hart: expected pc of the next retirement (control flow)
     hart = 0
     retire = 0
     checked = mism = skipped = 0
+    cf_checked = cf_mism = 0
     lineno = 0
+    trapped = set()           # harts whose next retirement follows a trap/interrupt line
+    prev_insn, prev_pc = {}, {}
     with open(args[0], 'r', errors='replace') as f:
         for line in f:
             lineno += 1
@@ -252,11 +313,16 @@ def main():
                 if stop is not None and retire >= stop:
                     break
                 if progress and retire % progress == 0:
-                    print(f"progress retire={retire} checked={checked} mismatches={mism} skipped={skipped}", flush=True)
+                    print(f"progress retire={retire} checked={checked} mismatches={mism} skipped={skipped} cf_checked={cf_checked} cf_mismatches={cf_mism}", flush=True)
+                if 'INTERRUPT' in line:
+                    trapped.add(hart)
                 try:
                     hart = int(line[4:line.index(':')])
                 except ValueError:
                     hart = 0
+                continue
+            if 'exception @' in line:
+                trapped.add(hart)
                 continue
             if not (line and line[0] in '0123' and line[1] == ' '):
                 continue
@@ -270,6 +336,16 @@ def main():
                 continue
             r = regs.setdefault(hart, [0] * 32)
             k = known.setdefault(hart, 0)
+            # control flow: this retirement's pc against the previous one's prediction
+            if (start is None or retire >= start):
+                e = expect.get(hart)
+                if e is not None and hart not in trapped:
+                    cf_checked += 1
+                    if e != pc:
+                        cf_mism += 1
+                        if cf_mism <= max_report:
+                            print(f"CF-MISMATCH #{cf_mism} retire {retire} line {lineno} hart {hart}: pc=0x{pc:x} expected 0x{e:x} (prev insn 0x{prev_insn.get(hart, 0):08x} at 0x{prev_pc.get(hart, 0):x})", flush=True)
+            trapped.discard(hart)
             rd_val = None
             rd_num = None
             # the tracer prints `x%d`: `x14 0x..` or, space-padded, `x 5 0x..`
@@ -305,7 +381,11 @@ def main():
             if rd_num is not None and rd_val is not None and rd_num != 0:
                 r[rd_num] = rd_val
                 known[hart] = k | (1 << rd_num)
-    print(f"checked={checked} mismatches={mism} skipped={skipped} retire={retire}")
+            # the next pc is predicted from the state AFTER this instruction's rd write
+            expect[hart] = next_pc(insn, pc, r, known[hart])
+            prev_insn[hart] = insn
+            prev_pc[hart] = pc
+    print(f"checked={checked} mismatches={mism} skipped={skipped} cf_checked={cf_checked} cf_mismatches={cf_mism} retire={retire}")
 
 
 if __name__ == '__main__':
