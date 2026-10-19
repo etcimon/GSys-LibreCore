@@ -19,6 +19,7 @@
 #include "MbgenLibraryWidget.h"
 #include "MbgenPropertyWidget.h"
 #include "MbgenOutlineWidget.h"
+#include "MbgenIssuesWidget.h"
 #include "MbgenPackageWidget.h"
 #include "MbgenOrbitPawn.h"
 #if WITH_EDITOR
@@ -302,6 +303,7 @@ void AMbgenBoardActor::FinishPlaceDrag()
     bPlaceDirty = false;
     RebuildFromDesign();
     RefreshOpenSheets();
+    UMbgenIssuesWidget::RefreshAll();
     // One undo entry per drag, not one per throttled sample.
     FString Json;
     if (FFileHelper::LoadFileToString(Json, *DesignFile)) { FMbgenStore::PushUndo(Json, TEXT("place")); }
@@ -577,6 +579,7 @@ void AMbgenBoardActor::ReloadDesignFromDisk()
     EnsureCore();
     RebuildFromDesign();
     RefreshOpenSheets();
+    UMbgenIssuesWidget::RefreshAll();
 }
 
 void AMbgenBoardActor::CopyPartToStore()
@@ -1905,6 +1908,9 @@ void AMbgenBoardActor::EnsureCore()
     FnScene = FPlatformProcess::GetDllExport(DllHandle, TEXT("mb_scene"));
     FnAnchors = FPlatformProcess::GetDllExport(DllHandle, TEXT("mb_anchors"));
     FnLibrary = FPlatformProcess::GetDllExport(DllHandle, TEXT("mb_library_json"));
+    // ABI v3 additions: optional, an older DLL falls back to the mbgen exe.
+    FnCircuit = FPlatformProcess::GetDllExport(DllHandle, TEXT("mb_circuit"));
+    FnOutlineProposal = FPlatformProcess::GetDllExport(DllHandle, TEXT("mb_outline_proposal"));
     FnFree = FPlatformProcess::GetDllExport(DllHandle, TEXT("mb_string_free"));
     if (!FnOpen || !FnClose || !FnApply || !FnRoute || !FnScene || !FnFree)
     {
@@ -1919,29 +1925,100 @@ void AMbgenBoardActor::EnsureCore()
     LogDll(TEXT("mbcore_c"));
 }
 
-bool AMbgenBoardActor::ApplyViaDll(const FString& GestureJson, bool& bApplied, FString& Reason)
+bool AMbgenBoardActor::EnsureSession()
 {
     using OpenFn = mb_session*(*)(const char*);
+    if (!bDllOk || !FnOpen)
+    {
+        return false;
+    }
+    if (CoreSession)
+    {
+        return true;
+    }
+    FString DesignText;
+    if (!FFileHelper::LoadFileToString(DesignText, *DesignFile))
+    {
+        return false;
+    }
+    const FTCHARToUTF8 DesignUtf8(*DesignText);
+    CoreSession = ((OpenFn)FnOpen)(DesignUtf8.Get());
+    if (!CoreSession)
+    {
+        UE_LOG(LogTemp, Warning, TEXT("mbgen session open failed"));
+        return false;
+    }
+    return true;
+}
+
+/* Call a `char *fn(const mb_session *, [const char *])` export and own the result. */
+FString AMbgenBoardActor::DllText(void* Fn, const char* Arg)
+{
+    using Fn1 = char*(*)(const mb_session*);
+    using Fn2 = char*(*)(const mb_session*, const char*);
+    using FreeFn = void(*)(char*);
+    if (!Fn || !FnFree || !EnsureSession())
+    {
+        return FString();
+    }
+    char* Raw = Arg ? ((Fn2)Fn)((const mb_session*)CoreSession, Arg) : ((Fn1)Fn)((const mb_session*)CoreSession);
+    if (!Raw)
+    {
+        return FString();
+    }
+    const FString Text = UTF8_TO_TCHAR(Raw);
+    ((FreeFn)FnFree)(Raw);
+    return Text;
+}
+
+FString AMbgenBoardActor::CircuitJson()
+{
+    EnsureCore();
+    FString Text = DllText(FnCircuit, nullptr);
+    if (!Text.IsEmpty())
+    {
+        return Text;
+    }
+    const FString OutPath = FPaths::ProjectSavedDir() / TEXT("circuit.json");
+    FString Out;
+    if (!RunTool(FString::Printf(TEXT("circuit --design \"%s\" --out \"%s\""), *DesignFile, *OutPath), Out))
+    {
+        return FString();
+    }
+    FFileHelper::LoadFileToString(Text, *OutPath);
+    return Text;
+}
+
+FString AMbgenBoardActor::OutlineProposalJson(const FString& TemplateId)
+{
+    EnsureCore();
+    const FTCHARToUTF8 Utf8(*TemplateId);
+    FString Text = DllText(FnOutlineProposal, Utf8.Get());
+    if (!Text.IsEmpty())
+    {
+        return Text;
+    }
+    const FString OutPath = FPaths::ProjectSavedDir() / TEXT("outline-proposal.json");
+    FString Out;
+    if (!RunTool(FString::Printf(TEXT("outline-proposal --design \"%s\" --template \"%s\" --out \"%s\""), *DesignFile, *TemplateId, *OutPath), Out))
+    {
+        return FString();
+    }
+    FFileHelper::LoadFileToString(Text, *OutPath);
+    return Text;
+}
+
+bool AMbgenBoardActor::ApplyViaDll(const FString& GestureJson, bool& bApplied, FString& Reason)
+{
     using ApplyFn = char*(*)(mb_session*, const char*);
     using FreeFn = void(*)(char*);
     if (!bDllOk || !FnApply || !FnFree)
     {
         return false;
     }
-    if (!CoreSession)
+    if (!EnsureSession())
     {
-        FString DesignText;
-        if (!FFileHelper::LoadFileToString(DesignText, *DesignFile))
-        {
-            return false;
-        }
-        const FTCHARToUTF8 DesignUtf8(*DesignText);
-        CoreSession = ((OpenFn)FnOpen)(DesignUtf8.Get());
-        if (!CoreSession)
-        {
-            UE_LOG(LogTemp, Warning, TEXT("mbgen session open failed"));
-            return false;
-        }
+        return false;
     }
     const FTCHARToUTF8 GestureUtf8(*GestureJson);
     char* Raw = ((ApplyFn)FnApply)((mb_session*)CoreSession, GestureUtf8.Get());
@@ -2350,6 +2427,9 @@ void AMbgenBoardActor::ApplyGestureJson(const FString& GestureJson, bool bIncrem
             RefreshLabels();
             FrameOrbit();
         }
+        // The circuit may have changed membership or parts: refresh findings
+        // once per committed gesture, not per throttled drag sample.
+        UMbgenIssuesWidget::RefreshAll();
     }
     if (LiveRoutingOn())
     {

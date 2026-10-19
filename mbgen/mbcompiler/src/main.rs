@@ -32,6 +32,8 @@ fn run() -> Result<(), String> {
         "compile" => compile_cmd(&mut args),
         "scene" => scene_cmd(&mut args),
         "anchors" => anchors_cmd(&mut args),
+        "circuit" => circuit_cmd(&mut args),
+        "outline-proposal" => outline_proposal_cmd(&mut args),
         "package" => package_cmd(&mut args),
         "library" => library_cmd(&mut args),
         "profiles" => profiles_cmd(&mut args),
@@ -48,6 +50,8 @@ fn run() -> Result<(), String> {
             eprintln!("mbgen compile --design FILE --out DIR");
             eprintln!("mbgen scene --design FILE --out scene.json");
             eprintln!("mbgen anchors --design FILE --out anchors.json");
+            eprintln!("mbgen circuit --design FILE --out circuit.json");
+            eprintln!("mbgen outline-proposal --design FILE --template ID --out FILE");
             eprintln!("mbgen package --design FILE --package ID --out FILE");
             eprintln!("mbgen library --out library.json");
             eprintln!("mbgen profiles --core-include DIR --out mbcore/data/profiles.json [--prefix core/include/]");
@@ -91,6 +95,27 @@ fn anchors_cmd(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
     let marks = anchors(&design);
     fs::write(out, serde_json::to_string_pretty(&marks).map_err(|e| e.to_string())?)
         .map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// No-DLL fallback for the hosts' Issues panel: the resolved circuit.
+fn circuit_cmd(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = flags(args)?;
+    let design = read_design(flags.get("--design").ok_or("--design is required")?)?;
+    let out = flags.get("--out").ok_or("--out is required")?;
+    let circuit = mbcore::resolve(&design).map_err(|e| e.reason)?;
+    fs::write(out, serde_json::to_string_pretty(&circuit).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// No-DLL fallback for the Board window: what `set_outline` would do.
+fn outline_proposal_cmd(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
+    let flags = flags(args)?;
+    let design = read_design(flags.get("--design").ok_or("--design is required")?)?;
+    let template = flags.get("--template").ok_or("--template is required")?;
+    let out = flags.get("--out").ok_or("--out is required")?;
+    let proposal = mbcore::propose_outline(&design, template).map_err(|e| e.reason)?;
+    fs::write(out, serde_json::to_string_pretty(&proposal).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     Ok(())
 }
 

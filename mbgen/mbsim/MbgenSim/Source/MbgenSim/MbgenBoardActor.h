@@ -65,6 +65,10 @@ public:
     void CopyPartToStore();
     void PastePartFromStore();
     void ReloadDesignFromDisk();
+    /* Resolved circuit JSON (mb_circuit, else `mbgen circuit`). Empty on failure. */
+    FString CircuitJson();
+    /* What set_outline would do (mb_outline_proposal, else `mbgen outline-proposal`). Empty on failure. */
+    FString OutlineProposalJson(const FString& TemplateId);
     void AddRole(const FString& RoleId);
     void SelectPart(const FString& Id);
     void RefreshOpenSheets();
@@ -107,7 +111,11 @@ private:
     void* FnScene = nullptr;
     void* FnAnchors = nullptr;
     void* FnLibrary = nullptr;
+    void* FnCircuit = nullptr;
+    void* FnOutlineProposal = nullptr;
     void* FnFree = nullptr;
+    bool EnsureSession();
+    FString DllText(void* Fn, const char* Arg);
     void ApplySettingsPaths();
     bool ShouldThrottlePlace() const;
     void EnsureCore();

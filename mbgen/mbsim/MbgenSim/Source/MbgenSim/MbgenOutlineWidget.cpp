@@ -13,13 +13,105 @@
 TSharedRef<SWidget> UMbgenOutlineWidget::RebuildWidget()
 {
     Rows = SNew(SVerticalBox);
+    Proposal = SNew(SVerticalBox);
     FillRows();
-    Header = SNew(STextBlock).Text(FText::FromString(TEXT("Board — a row swaps the millimetre outline. Parts keep the same pin kernel.")));
+    Header = SNew(STextBlock).Text(FText::FromString(TEXT("Board — a row previews the millimetre outline change; Apply commits it. Parts keep the same pin kernel.")));
     return SNew(SVerticalBox)
         + SVerticalBox::Slot().AutoHeight().Padding(8)
         [ Header.ToSharedRef() ]
-        + SVerticalBox::Slot().FillHeight(1.f)
-        [ Rows.ToSharedRef() ];
+        + SVerticalBox::Slot().AutoHeight()
+        [ Rows.ToSharedRef() ]
+        + SVerticalBox::Slot().FillHeight(1.f).Padding(8, 6)
+        [ Proposal.ToSharedRef() ];
+}
+
+static void AddLine(const TSharedPtr<SVerticalBox>& Box, const FString& Text)
+{
+    Box->AddSlot().AutoHeight().Padding(0, 1)
+    [
+        SNew(STextBlock).Text(FText::FromString(Text)).AutoWrapText(true)
+    ];
+}
+
+/* Show what set_outline would do before offering to do it: a dropped part
+   is a decision the user takes, not a surprise after the click. */
+void UMbgenOutlineWidget::PreviewOutline(const FString& TemplateId)
+{
+    if (!Proposal.IsValid()) { return; }
+    Proposal->ClearChildren();
+    AMbgenBoardActor* Board = AMbgenBoardActor::FindLive(GetWorld());
+    if (!Board) { return; }
+    const FString Text = Board->OutlineProposalJson(TemplateId);
+    TSharedPtr<FJsonObject> P;
+    TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(Text);
+    if (Text.IsEmpty() || !FJsonSerializer::Deserialize(Reader, P) || !P.IsValid() || P->HasField(TEXT("error")))
+    {
+        AddLine(Proposal, FString::Printf(TEXT("%s: no proposal available"), *TemplateId));
+        return;
+    }
+    const FString From = P->GetStringField(TEXT("from"));
+    if (From == TemplateId)
+    {
+        AddLine(Proposal, FString::Printf(TEXT("%s is the current outline."), *TemplateId));
+        return;
+    }
+    const TArray<TSharedPtr<FJsonValue>>* Kept = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* ReEdged = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* Dropped = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* Added = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* Blocks = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* Nets = nullptr;
+    P->TryGetArrayField(TEXT("kept"), Kept);
+    P->TryGetArrayField(TEXT("re_edged"), ReEdged);
+    P->TryGetArrayField(TEXT("dropped"), Dropped);
+    P->TryGetArrayField(TEXT("added_stock"), Added);
+    P->TryGetArrayField(TEXT("dropped_blocks"), Blocks);
+    P->TryGetArrayField(TEXT("affected_nets"), Nets);
+    AddLine(Proposal, FString::Printf(TEXT("%s → %s:  %d kept, %d re-edged, %d dropped, %d stock added"),
+        *From, *TemplateId, Kept ? Kept->Num() : 0, ReEdged ? ReEdged->Num() : 0, Dropped ? Dropped->Num() : 0, Added ? Added->Num() : 0));
+    if (ReEdged)
+    {
+        for (const TSharedPtr<FJsonValue>& V : *ReEdged)
+        {
+            const TSharedPtr<FJsonObject> M = V->AsObject();
+            if (!M.IsValid()) { continue; }
+            AddLine(Proposal, FString::Printf(TEXT("  ↷ %s: %s → %s"), *M->GetStringField(TEXT("id")), *M->GetStringField(TEXT("from_edge")), *M->GetStringField(TEXT("to_edge"))));
+        }
+    }
+    if (Dropped)
+    {
+        for (const TSharedPtr<FJsonValue>& V : *Dropped)
+        {
+            const TSharedPtr<FJsonObject> D = V->AsObject();
+            if (!D.IsValid()) { continue; }
+            AddLine(Proposal, FString::Printf(TEXT("  ✕ %s — %s"), *D->GetStringField(TEXT("id")), *D->GetStringField(TEXT("reason"))));
+        }
+    }
+    if (Blocks && Blocks->Num() > 0)
+    {
+        AddLine(Proposal, FString::Printf(TEXT("  circuit blocks removed: %d"), Blocks->Num()));
+    }
+    if (Nets && Nets->Num() > 0)
+    {
+        TArray<FString> Names;
+        for (const TSharedPtr<FJsonValue>& V : *Nets) { Names.Add(V->AsString()); }
+        AddLine(Proposal, FString::Printf(TEXT("  nets losing pins: %s"), *FString::Join(Names, TEXT(", "))));
+    }
+    if (Added)
+    {
+        for (const TSharedPtr<FJsonValue>& V : *Added)
+        {
+            AddLine(Proposal, FString::Printf(TEXT("  + %s (stock)"), *V->AsString()));
+        }
+    }
+    Proposal->AddSlot().AutoHeight().Padding(0, 6)
+    [
+        SNew(SButton)
+        .OnClicked_Lambda([this, TemplateId]() { ApplyOutline(TemplateId); return FReply::Handled(); })
+        [
+            SNew(STextBlock).Text(FText::FromString(FString::Printf(TEXT("Apply %s"), *TemplateId)))
+        ]
+    ];
 }
 
 void UMbgenOutlineWidget::FillRows()
@@ -60,7 +152,7 @@ void UMbgenOutlineWidget::FillRows()
         Rows->AddSlot().AutoHeight().Padding(4, 1)
         [
             SNew(SButton)
-            .OnClicked_Lambda([this, Id]() { ApplyOutline(Id); return FReply::Handled(); })
+            .OnClicked_Lambda([this, Id]() { PreviewOutline(Id); return FReply::Handled(); })
             [
                 SNew(STextBlock).Text(FText::FromString(Label))
             ]
@@ -115,4 +207,5 @@ void UMbgenOutlineWidget::ApplyOutline(const FString& TemplateId)
     if (!Board) { return; }
     Board->ApplyGestureJson(FString::Printf(
         TEXT("{\"op\":\"set_outline\",\"template_id\":\"%s\"}"), *TemplateId));
+    if (Proposal.IsValid()) { Proposal->ClearChildren(); }
 }

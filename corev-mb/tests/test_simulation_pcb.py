@@ -126,18 +126,25 @@ class PcbTests(unittest.TestCase):
         self.assertTrue(pcb.layout_contract(c, layout)["ok"], "DNP parts do not need a footprint")
 
     def test_gate_requires_every_input_and_all_green(self) -> None:
-        gate = pcb.manufacturing_gate(None, None, None, None, None)
+        gate = pcb.manufacturing_gate(None, None, None, None, None, None)
         self.assertFalse(gate["ready"])
-        self.assertEqual(len(gate["blockers"]), 5)
+        self.assertEqual(len(gate["blockers"]), 6)
         erc = {"ok": True, "errors": 0}
         par = {"ok": True}
         layout = {"ok": True, "unplaced": [], "unresolved_footprints": []}
         drc = {"ok": True, "violations": 0, "unconnected": 0}
-        self.assertTrue(pcb.manufacturing_gate(erc, par, layout, drc, par)["ready"])
-        self.assertFalse(pcb.manufacturing_gate({"ok": False, "errors": 2}, par, layout, drc, par)["ready"])
-        self.assertFalse(pcb.manufacturing_gate(erc, par, {"ok": False, "unplaced": [], "unresolved_footprints": ["slot0"]}, drc, par)["ready"])
-        self.assertFalse(pcb.manufacturing_gate(erc, par, layout, {"ok": False, "violations": 3, "unconnected": 0}, par)["ready"])
-        self.assertFalse(pcb.manufacturing_gate(erc, par, layout, drc, {"ok": False})["ready"])
+        soc = {"id": "g6lc-soc-pkg", "declared_status": "approved", "approved": True, "unresolved": []}
+        self.assertTrue(pcb.manufacturing_gate(erc, par, layout, drc, par, soc)["ready"])
+        self.assertFalse(pcb.manufacturing_gate({"ok": False, "errors": 2}, par, layout, drc, par, soc)["ready"])
+        self.assertFalse(pcb.manufacturing_gate(erc, par, {"ok": False, "unplaced": [], "unresolved_footprints": ["slot0"]}, drc, par, soc)["ready"])
+        self.assertFalse(pcb.manufacturing_gate(erc, par, layout, {"ok": False, "violations": 3, "unconnected": 0}, par, soc)["ready"])
+        self.assertFalse(pcb.manufacturing_gate(erc, par, layout, drc, {"ok": False}, soc)["ready"])
+        # The draft SoC contract blocks on its own, even with everything else green.
+        draft = {"id": "g6lc-soc-pkg", "declared_status": "draft", "approved": False, "unresolved": ["package.type"]}
+        gate = pcb.manufacturing_gate(erc, par, layout, drc, par, draft)
+        self.assertFalse(gate["ready"])
+        self.assertIn("1 unresolved field(s)", gate["blockers"][0])
+        self.assertFalse(pcb.manufacturing_gate(erc, par, layout, drc, par)["ready"], "a missing report is a blocker")
 
     def test_pcb_parity_reuses_the_readback_rules(self) -> None:
         text = """(export (components (comp (ref "J1")) (comp (ref "C1")))

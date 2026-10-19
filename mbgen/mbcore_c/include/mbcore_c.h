@@ -37,6 +37,11 @@ char *mb_route(mb_session *session, int dirty_only);
    "revision". This is the one snapshot SKiDL / simulation / layout consume. */
 char *mb_circuit(const mb_session *session);
 
+/* What set_outline to template_id would do: "kept", "re_edged"
+   [{id,from_edge,to_edge}], "dropped" [{id,reason}], "added_stock",
+   "dropped_blocks", "affected_nets", "revision". Read-only. */
+char *mb_outline_proposal(const mb_session *session, const char *template_id);
+
 char *mb_scene(mb_session *session);
 char *mb_anchors(mb_session *session);
 char *mb_library_json(void);

@@ -7,6 +7,7 @@
 #include "MbgenPackageWidget.h"
 #include "MbgenLibraryWidget.h"
 #include "MbgenOutlineWidget.h"
+#include "MbgenIssuesWidget.h"
 #include "MbgenPropertyWidget.h"
 #include "MbgenSettings.h"
 #include "MbgenStore.h"
@@ -54,6 +55,7 @@ static TWeakPtr<SLevelViewport> GGestureViewport;
 static TWeakPtr<SWindow> GPackageWindow;
 static TWeakPtr<SWindow> GLibraryWindow;
 static TWeakPtr<SWindow> GOutlineWindow;
+static TWeakPtr<SWindow> GIssuesWindow;
 static TWeakPtr<SWindow> GPropertyWindow;
 static TWeakObjectPtr<UMbgenPropertyWidget> GPropertyWidget;
 
@@ -206,6 +208,34 @@ static void ToggleOutlineWindow()
         return;
     }
     OpenOutlineWindow();
+}
+
+static void OpenIssuesWindow()
+{
+    if (GIssuesWindow.IsValid() || !GEditor) { return; }
+    UWorld* World = GEditor->GetEditorWorldContext().World();
+    if (!World) { return; }
+    UMbgenIssuesWidget* Widget = CreateWidget<UMbgenIssuesWidget>(World, UMbgenIssuesWidget::StaticClass());
+    if (!Widget) { return; }
+    TSharedRef<SWindow> Window = SNew(SWindow)
+        .Title(FText::FromString(TEXT("Issues")))
+        .ClientSize(FVector2D(560.f, 480.f))
+        .SupportsMaximize(false);
+    Window->SetContent(Widget->TakeWidget());
+    GIssuesWindow = Window;
+    FSlateApplication::Get().AddWindow(Window);
+    UE_LOG(LogTemp, Display, TEXT("mbgen issues window open"));
+}
+
+static void ToggleIssuesWindow()
+{
+    if (TSharedPtr<SWindow> Existing = GIssuesWindow.Pin())
+    {
+        Existing->RequestDestroyWindow();
+        GIssuesWindow.Reset();
+        return;
+    }
+    OpenIssuesWindow();
 }
 
 static void OpenPropertyWindow(const FString& Id)
@@ -678,6 +708,7 @@ bool FMbgenEditorInput::HandleKeyDownEvent(FSlateApplication&, const FKeyEvent& 
     if (Key == EKeys::C) { TogglePackageWindow(); return true; }
     if (Key == EKeys::L) { ToggleLibraryWindow(); return true; }
     if (Key == EKeys::T) { ToggleOutlineWindow(); return true; }
+    if (Key == EKeys::I) { ToggleIssuesWindow(); return true; }
     if (Key == EKeys::P) { TogglePropertyWindow(); return true; }
     if (Key == EKeys::B)
     {
@@ -740,6 +771,8 @@ void FMbgenEditorBridge::Stop()
     GLibraryWindow.Reset();
     if (TSharedPtr<SWindow> Outline = GOutlineWindow.Pin()) { Outline->RequestDestroyWindow(); }
     GOutlineWindow.Reset();
+    if (TSharedPtr<SWindow> Issues = GIssuesWindow.Pin()) { Issues->RequestDestroyWindow(); }
+    GIssuesWindow.Reset();
     if (TSharedPtr<SWindow> Props = GPropertyWindow.Pin()) { Props->RequestDestroyWindow(); }
     GPropertyWindow.Reset();
     GPropertyWidget.Reset();

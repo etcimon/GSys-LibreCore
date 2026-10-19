@@ -47,7 +47,19 @@ footprints alone:
 | **SKiDL is lossless and counted.** `corev-mb/lib/circuit.py` builds one SKiDL part/pin/net per circuit entity with the same ids; no-connects come only from `circuit.no_connects`; ERC counts come from `skidl.erc_logger` counters; findings are mapped back to mbgen ids; the netlist is read back (s-expression parser) and compared (`parity`). `mb design` fails on an ERC error, a netlist failure or a parity mismatch. | `corev-mb/lib/circuit.py`, `soc.py::_build_from_circuit`, `corev-mb/tests/test_circuit.py` |
 | **Simulation is explicit and revision-bound.** Scenarios are checked-in JSON (models, sources, analysis, measurements with ranges); the deck lists what it could not model; results are `pass`/`fail`/`incomplete` with sha256 of circuit, scenario and deck and the simulator version. No ngspice → `incomplete`, never `pass`. | `corev-mb/lib/simulation.py`, `simulate.py`, `mb simulate`, `test_simulation_pcb.py` |
 | **Manufacturing is gated.** `pcb.manufacturing_gate` needs ERC, SKiDL parity, layout contract (placement + frozen footprint per populated part), PCB DRC and PCB parity — a missing report is a blocker. `kicad-cli` is discovered, never assumed. | `corev-mb/lib/pcb.py` |
-| **A drag can be cancelled.** Mouse-down snapshots the design (`BeginPlaceDrag`); Escape restores it with no undo entry (`CancelPlaceDrag`); every sample of a gesture resolves against the viewport it started in (`GGestureViewport`). | `MbgenBoardActor.cpp`, `MbgenEditorBridge.cpp`, `MbgenPlayerController.cpp` |
+| **A drag can be cancelled.** Mouse-down snapshots the design (`BeginPlaceDrag`); Escape restores it with no undo entry (`CancelPlaceDrag`); every sample of a gesture resolves against the viewport it started in (`GGestureViewport`). | `MbgenBoardActor.cpp`, `MbgenEditorBridge.cpp`, `MbgenPlayerController.cpp`, `unreal.rs::a_drag_can_be_cancelled_…` |
+| **The SoC package is an input document.** `mbcore/data/soc_package.json` lists package, ball map, I/O banks, rails/sequence, thermal, reset/clock/boot pins, interfaces, footprint. `soc_package::assess` reports every null/empty field by path; `approved` only when declared approved **and** nothing is unresolved. The report rides in `circuit.json`, `layout.json`, `manifest.json`, is one `I-SOC-PACKAGE-UNRESOLVED` info on the socket, and is a required input of the Python `manufacturing_gate`. | `soc_package.rs` tests, `pcb.py`, `test_simulation_pcb.py` |
+| **An outline change is proposed before it is applied.** `propose_outline` names kept / re-edged (`from_edge → to_edge`) / dropped (with the reason, including parts owned by a block whose host is dropped) / stock added / blocks removed / nets losing pins; `set_outline` applies exactly that. `mb_outline_proposal` is read-only; the Board window previews it and offers Apply. | `gesture.rs::the_outline_proposal_names_every_drop_…`, `mbcore_c` test, `MbgenOutlineWidget.cpp` |
+| **Rip-up is bounded.** When a kept path walls a dirty net off, kept paths crossing the dirty net's pad span are released and routing runs again, at most `RIP_UP_ROUNDS` times; a board that still fails reports `Unroutable`. | `route.rs::a_kept_path_that_blocks_a_dirty_net_is_ripped_and_both_route` |
+| **Findings are visible where they are made.** The Issues panel (`I` in both hosts) lists `circuit.json` diagnostics with rule id and part/pin/net; a row selects its part; the summary states error/warning/info counts and the SoC package status. It refreshes once per committed gesture, never per drag sample. Labels paint the persistent refdes large and the id small. | `MbgenIssuesWidget.{h,cpp}`, `unreal.rs::both_hosts_show_the_same_issues_panel_from_mb_circuit`, `paint_labels.py` |
+
+## Landed in pass 3 (S2 close, S3 start, S6 rip-up)
+
+- `soc_package.rs` + `data/soc_package.json` (draft; every field unresolved and said so).
+- `propose_outline` + `OutlineProposal`; `mb_outline_proposal`; `mbgen outline-proposal` / `mbgen circuit` CLI fallbacks for hosts without the DLL.
+- `route_nets` rip-up rounds over `route_pass`.
+- `UMbgenIssuesWidget` in both hosts; `AMbgenBoardActor::{CircuitJson, OutlineProposalJson, EnsureSession, DllText}`; Board window previews proposals; labels show refdes.
+- Python gate takes the SoC package report; 21 tests. Rust 121 + 11 + 25.
 
 ## Landed in pass 2 (S2 close, S4, S5, S6, S7/S8 foundations)
 
@@ -80,18 +92,18 @@ footprints alone:
 ## Next (by plan stage)
 
 - **S1** remaining: Editor/standalone event-replay comparison (behaviour, not strings).
-- **S2** remaining: outline migration *proposals* (today `set_outline` keeps what fits and drops the
-  rest silently); the custom-SoC package contract as a checked-in input file with `unresolved` fields.
-- **S3**: the shared workspace UI (library with exact-part search, pin/net explorer, issue list that
-  selects the linked part/pin/net from `circuit.json` diagnostics and `*.erc.json`, simulation
-  controls/plots). Hosts expose `mb_circuit` but do not yet paint it.
+- **S2**: fill `soc_package.json` from the approved package data when it exists (the reader and gate
+  are in place); nothing else open.
+- **S3** remaining: library exact-part search (pcbparts cache), pin/net explorer, surfacing
+  `*.erc.json` / `*.parity.json` / `sim/*.json` from `corev-mb/boards/<id>/outputs` in the Issues
+  panel beside the resolve-time findings, recipe `Proposal` preview panel, simulation controls/plots.
 - **S4**: more verified recipes (power entry / regulator, reset, clock, boot flash) — each needs a
   frozen pinout for its IC; the host side (`Proposal` preview panel, "apply as one undo") is UI work.
 - **S5**: pin *functions* for frozen distributor pinouts (today 146 slot contacts are honest
   `W-PIN-OPEN-UNKNOWN-FUNCTION`); a rail *source* class so `W-NET-NO-SOURCE` can clear.
 - **S6**: pad geometry (`PinSpec::Footprint`) from `cse_get_kicad` freezes so production nets get
-  terminals; bounded rip-up when a kept path blocks a dirty net; plane/zone plan for rails; host
-  paints by `Path.id` with `changed_nets` instead of wholesale.
+  terminals; plane/zone plan for rails; host paints by `Path.id` with `changed_nets` instead of
+  wholesale.
 - **S7**: ngspice on the build host (`probe` / `tools install`) so the live tests stop skipping;
   tran/dc scenarios for reset and power-up once a regulator recipe exists.
 - **S8**: a `.kicad_pcb` writer from `layout.json` (needs footprints), then `pcb.run_drc` /
@@ -112,5 +124,5 @@ footprints alone:
   as its footprint and the manufacturing gate reports that.
 - ngspice and kicad-cli are absent on this host; `mb simulate` honestly returns `incomplete` (exit 4)
   and the KiCad bridge is exercised by pure tests only.
-- `set_outline` migration keeps fitting parts and silently drops the rest — a proposal/preview is
-  the S2 follow-up.
+- The Issues panel shows resolve-time findings only; SKiDL/ERC, parity and simulation results live
+  in `corev-mb/boards/<id>/outputs` and are not yet read back into the hosts.

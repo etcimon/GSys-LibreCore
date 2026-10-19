@@ -16,6 +16,7 @@ mod pack;
 mod profile;
 mod recipes;
 mod route;
+mod soc_package;
 mod scene;
 mod template;
 
@@ -28,6 +29,7 @@ pub use geometry::{
     body_z, copper_z, layer_of, pad_world, rotate_q, world_span, Rect, BOTTOM_COPPER_Z_UM, PCB_THICKNESS_UM,
     TOP_COPPER_Z_UM,
 };
+pub use gesture::{propose_outline, OutlineDrop, OutlineMove, OutlineProposal};
 pub use gesture::{preview, Gesture, PreviewResult, SNAP_UM};
 pub use library::{library_export, LibraryEntry};
 pub use nav::{
@@ -47,10 +49,11 @@ pub use profile::{
     ProfileSource, SvValue, PROFILES_SCHEMA_VERSION,
 };
 pub use recipes::{apply_proposal, disown, propose, remove_block, Proposal, ProposedPart, RECIPE_DECAP_PER_RAIL};
+pub use soc_package::{assess as assess_soc_package, assess_text as assess_soc_package_text, SocPackageReport, SOC_PACKAGE_JSON};
 pub use route::{
     corridor_x_um, hit_z_um, route, route_circuit, route_incremental, route_nets, terminal_of, terminals_for, Keep,
-    Occupancy, RouteResult, Terminal, BODY_KEEP_UM, GRID_UM, SEARCH_BUDGET, TRACE_CLEAR_UM, TRACE_HALF_UM,
-    VIA_CLEAR_UM,
+    Occupancy, RouteResult, Terminal, BODY_KEEP_UM, GRID_UM, RIP_UP_ROUNDS, SEARCH_BUDGET, TRACE_CLEAR_UM,
+    TRACE_HALF_UM, VIA_CLEAR_UM,
 };
 pub use scene::{scene, um_from_local_cm, Body, PCB_TOP_CM};
 pub use template::{

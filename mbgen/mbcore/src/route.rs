@@ -257,9 +257,79 @@ pub struct Keep<'a> {
     pub dirty_nets: &'a BTreeSet<String>,
 }
 
+/// Rip-up rounds after the first pass: a kept path that blocks a dirty net is
+/// released (its net becomes dirty) and routing runs again. Bounded so a
+/// pathological board terminates with `Unroutable`, not a loop.
+pub const RIP_UP_ROUNDS: usize = 2;
+
 /// The engine. `keep` reserves the previous paths of non-dirty nets first so
 /// dirty nets route around them; without `keep` every routable net is routed.
+/// When a dirty net cannot be routed around kept copper, the kept paths that
+/// cross the dirty net's pad span are ripped (their nets join the dirty set)
+/// and one more pass runs, up to `RIP_UP_ROUNDS` times.
 pub fn route_nets(
+    nets: &[Net],
+    terminals: &BTreeMap<String, Terminal>,
+    bodies: &[Body],
+    w_um: i64,
+    d_um: i64,
+    keep: Option<Keep<'_>>,
+) -> RouteResult {
+    let Some(k) = keep else {
+        return route_pass(nets, terminals, bodies, w_um, d_um, None);
+    };
+    let mut dirty: BTreeSet<String> = k.dirty_nets.clone();
+    let mut result = route_pass(nets, terminals, bodies, w_um, d_um, Some(Keep { paths: k.paths, dirty_nets: &dirty }));
+    for _ in 0..RIP_UP_ROUNDS {
+        let failed: Vec<&NetError> = result.errors.iter().filter(|e| e.kind == NetErrorKind::Unroutable).collect();
+        if failed.is_empty() {
+            break;
+        }
+        // Rip kept paths crossing the span of every failed net's pads.
+        let mut rip: BTreeSet<String> = BTreeSet::new();
+        for err in &failed {
+            let Some(net_id) = err.net.as_deref() else { continue };
+            let Some(net) = nets.iter().find(|n| n.id == net_id) else { continue };
+            let pads: Vec<&Terminal> = net.pins.iter().filter_map(|p| terminals.get(p)).collect();
+            if pads.len() < 2 {
+                continue;
+            }
+            let span = Rect {
+                x0: pads.iter().map(|t| t.x_um).min().unwrap(),
+                y0: pads.iter().map(|t| t.y_um).min().unwrap(),
+                x1: pads.iter().map(|t| t.x_um).max().unwrap(),
+                y1: pads.iter().map(|t| t.y_um).max().unwrap(),
+            }
+            .inflate(GRID_UM * 2);
+            for p in k.paths {
+                if dirty.contains(&p.net) {
+                    continue;
+                }
+                if p.hits.iter().any(|h| span.contains(h.x_um, h.y_um)) || path_crosses(p, span) {
+                    rip.insert(p.net.clone());
+                }
+            }
+        }
+        if rip.is_empty() {
+            break;
+        }
+        dirty.extend(rip);
+        result = route_pass(nets, terminals, bodies, w_um, d_um, Some(Keep { paths: k.paths, dirty_nets: &dirty }));
+    }
+    result
+}
+
+/// A straight run between consecutive hits crosses the rectangle.
+fn path_crosses(path: &Path, r: Rect) -> bool {
+    path.hits.windows(2).any(|w| {
+        let (a, b) = (&w[0], &w[1]);
+        let seg = Rect { x0: a.x_um.min(b.x_um), y0: a.y_um.min(b.y_um), x1: a.x_um.max(b.x_um), y1: a.y_um.max(b.y_um) };
+        seg.intersects(r) || (seg.x0 == seg.x1 && seg.x0 >= r.x0 && seg.x0 <= r.x1 && seg.y0 <= r.y1 && seg.y1 >= r.y0)
+            || (seg.y0 == seg.y1 && seg.y0 >= r.y0 && seg.y0 <= r.y1 && seg.x0 <= r.x1 && seg.x1 >= r.x0)
+    })
+}
+
+fn route_pass(
     nets: &[Net],
     terminals: &BTreeMap<String, Terminal>,
     bodies: &[Body],
@@ -904,6 +974,49 @@ mod tests {
         let low_after = second.paths.iter().find(|p| p.net == "LOW").unwrap();
         assert!(low_after.hits.len() > 2, "LOW detoured around the mover");
         assert_eq!(second.changed_nets, vec!["LOW".to_string()]);
+    }
+
+    #[test]
+    fn a_kept_path_that_blocks_a_dirty_net_is_ripped_and_both_route() {
+        // Narrow board: one horizontal corridor. HIGH is routed first along it;
+        // then LOW becomes dirty with pads above and below HIGH's run on both
+        // layers blocked except through HIGH's row... use a 3-row board where
+        // HIGH's kept run (both layers via) walls LOW off.
+        // HIGH's pads sit in the first and last column so its run walls the
+        // whole width; LOW must cross that row.
+        let terminals: BTreeMap<_, _> = [
+            term("h.1", 125, 1_250, 0),
+            term("h.2", 9_875, 1_250, 0),
+            term("l.1", 5_000, 250, 0),
+            term("l.2", 5_000, 2_250, 0),
+        ]
+        .into_iter()
+        .collect();
+        let nets = [signal("HIGH", &["h.1", "h.2"]), signal("LOW", &["l.1", "l.2"])];
+        // Route HIGH alone first, on a 10 mm x 2.5 mm board, then make its
+        // copper occupy both layers along the row so LOW cannot pass under it.
+        let first = route_nets(&nets[..1], &terminals, &[], 10_000, 2_500, None);
+        assert_eq!(first.paths.len(), 1);
+        let mut wall = first.paths[0].clone();
+        // A duplicate of HIGH's run on the bottom layer (as if HIGH had been
+        // routed there too) — both layers of the only crossing row are HIGH's.
+        let mut bottom = wall.clone();
+        for h in &mut bottom.hits {
+            h.layer = 1;
+        }
+        bottom.id = "HIGH#1".into();
+        let kept_paths = vec![wall.clone(), bottom];
+        wall.id = "HIGH#0".into();
+        let dirty: BTreeSet<String> = ["LOW".to_string()].into_iter().collect();
+        // Without rip-up the wall holds: one pass alone cannot route LOW.
+        let blocked = route_pass(&nets, &terminals, &[], 10_000, 2_500, Some(Keep { paths: &kept_paths, dirty_nets: &dirty }));
+        assert!(blocked.errors.iter().any(|e| e.kind == NetErrorKind::Unroutable && e.net.as_deref() == Some("LOW")), "{:?}", blocked.errors);
+        let second = route_nets(&nets, &terminals, &[], 10_000, 2_500, Some(Keep { paths: &kept_paths, dirty_nets: &dirty }));
+        assert!(second.errors.is_empty(), "rip-up should free the row: {:?}", second.errors);
+        assert!(second.paths.iter().any(|p| p.net == "LOW"));
+        assert!(second.paths.iter().any(|p| p.net == "HIGH"));
+        assert!(second.changed_nets.contains(&"HIGH".to_string()), "HIGH was ripped and re-routed");
+        assert!(second.changed_nets.contains(&"LOW".to_string()));
     }
 
     #[test]

@@ -96,6 +96,8 @@ pub struct Circuit {
     pub no_connects: Vec<String>,
     pub obligations: Vec<Obligation>,
     pub diagnostics: Vec<Diagnostic>,
+    /// The custom SoC package contract this circuit's socket stands in for.
+    pub soc_package: crate::soc_package::SocPackageReport,
 }
 
 impl Circuit {
@@ -346,6 +348,18 @@ pub fn resolve(design: &Design) -> Result<Circuit, PackError> {
         }
     }
 
+    // 6. The SoC package is an input; while it is unresolved, the socket is a
+    //    declared gap and the circuit says so once, as information.
+    let soc_package = crate::soc_package::assess();
+    if let Some(blocker) = soc_package.blocker() {
+        if let Some(socket) = components.iter().find(|c| c.role == "socket") {
+            let mut d = diag("I-SOC-PACKAGE-UNRESOLVED", "info", blocker);
+            d.part = Some(socket.id.clone());
+            d.suggestion = Some("fill mbcore/data/soc_package.json (ball map, banks, rails, thermal, boot pins, interfaces, footprint) and set status approved".into());
+            diagnostics.push(d);
+        }
+    }
+
     let mut nets: Vec<CircuitNet> = nets.into_values().collect();
     for n in &mut nets {
         n.pins.sort();
@@ -361,6 +375,7 @@ pub fn resolve(design: &Design) -> Result<Circuit, PackError> {
         no_connects,
         obligations,
         diagnostics,
+        soc_package,
     })
 }
 
@@ -389,6 +404,9 @@ mod tests {
         // Honest: no regulator exists in the design, so every rail is source-less.
         assert!(c.diagnostics.iter().any(|d| d.rule == "W-NET-NO-SOURCE" && d.net.as_deref() == Some("P12V")));
         assert_eq!(c.errors(), 0, "{:?}", c.diagnostics);
+        // The SoC package contract is unresolved: said once, on the socket, as info.
+        assert!(!c.soc_package.approved);
+        assert!(c.diagnostics.iter().any(|d| d.rule == "I-SOC-PACKAGE-UNRESOLVED" && d.part.as_deref() == Some("socket")));
         // Every contract pin is an obligation and is satisfied by its contract net.
         let b1 = slot_pin("B1");
         assert!(c.obligations.iter().any(|o| o.pin == b1));

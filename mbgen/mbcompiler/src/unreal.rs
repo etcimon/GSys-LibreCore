@@ -63,6 +63,8 @@ pub fn build(cfg: &BuilderConfig, repo: &Path) -> Result<Design, String> {
     write(&root.join("Source/MbgenSim/MbgenLibraryWidget.cpp"), LIBRARY_CPP)?;
     write(&root.join("Source/MbgenSim/MbgenOutlineWidget.h"), OUTLINE_H)?;
     write(&root.join("Source/MbgenSim/MbgenOutlineWidget.cpp"), OUTLINE_CPP)?;
+    write(&root.join("Source/MbgenSim/MbgenIssuesWidget.h"), ISSUES_H)?;
+    write(&root.join("Source/MbgenSim/MbgenIssuesWidget.cpp"), ISSUES_CPP)?;
     write(&root.join("Source/MbgenSim/MbgenPropertyWidget.h"), PROPERTY_H)?;
     write(&root.join("Source/MbgenSim/MbgenPropertyWidget.cpp"), PROPERTY_CPP)?;
     write(&root.join("Source/MbgenSim/MbgenStore.h"), STORE_H)?;
@@ -256,6 +258,8 @@ const LIBRARY_H: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/Mbgen
 const LIBRARY_CPP: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenLibraryWidget.cpp");
 const OUTLINE_H: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenOutlineWidget.h");
 const OUTLINE_CPP: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenOutlineWidget.cpp");
+const ISSUES_H: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenIssuesWidget.h");
+const ISSUES_CPP: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenIssuesWidget.cpp");
 const PROPERTY_H: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenPropertyWidget.h");
 const PROPERTY_CPP: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenPropertyWidget.cpp");
 const STORE_H: &str = include_str!("../../mbsim/MbgenSim/Source/MbgenSim/MbgenStore.h");
@@ -350,6 +354,45 @@ mod catia_nav_source_tests {
         assert!(ACTOR_CPP.contains("(!bFinal && ShouldThrottlePlace())"));
         assert!(BRIDGE_CPP.contains("Board->PlaceSelectedAtRay(Cursor.GetOrigin(), Cursor.GetDirection(), true);"));
         assert!(PC_CPP.contains("B->PlaceSelectedAtRay(Origin, Dir, true);"));
+    }
+
+    #[test]
+    fn a_drag_can_be_cancelled_and_belongs_to_the_viewport_it_started_in() {
+        // Both hosts snapshot at mouse-down and restore on Escape, with no undo entry.
+        assert!(ACTOR_CPP.contains("void AMbgenBoardActor::BeginPlaceDrag()"));
+        assert!(ACTOR_CPP.contains("bool AMbgenBoardActor::CancelPlaceDrag()"));
+        assert!(BRIDGE_CPP.contains("Board->BeginPlaceDrag();"));
+        assert!(BRIDGE_CPP.contains("Dragging->CancelPlaceDrag()"));
+        assert!(PC_CPP.contains("B->BeginPlaceDrag();"));
+        assert!(PC_CPP.contains("B->CancelPlaceDrag()"));
+        assert!(PC_CPP.contains("EKeys::Escape"));
+        // The editor resolves every sample of a gesture against the initiating viewport.
+        assert!(BRIDGE_CPP.contains("static TWeakPtr<SLevelViewport> GGestureViewport;"));
+        assert!(BRIDGE_CPP.contains("GGestureViewport = Started;"));
+        assert!(BRIDGE_CPP.contains("static TSharedPtr<SLevelViewport> GestureViewport()"));
+        assert!(!BRIDGE_CPP.contains("TSharedPtr<SLevelViewport> Viewport = ActiveLevelViewport();\n                if (Viewport.IsValid())\n                {\n                    FLevelEditorViewportClient& Client = Viewport->GetLevelViewportClient();\n                    const FViewportCursorLocation Cursor = Client.GetCursorWorldLocationFromMousePos();\n                    Board->PlaceSelectedAtRay"));
+    }
+
+    #[test]
+    fn both_hosts_show_the_same_issues_panel_from_mb_circuit() {
+        // One widget, fed by the resolved circuit, opened on `I` in both hosts;
+        // clicking a finding selects its part. Refreshed per committed gesture.
+        assert!(ISSUES_CPP.contains("Board->CircuitJson()"));
+        assert!(ISSUES_CPP.contains("Board->SelectPart(Part);"));
+        assert!(ISSUES_CPP.contains("TEXT(\"soc_package\")"));
+        assert!(ACTOR_CPP.contains("TEXT(\"mb_circuit\")"));
+        assert!(ACTOR_CPP.contains("TEXT(\"mb_outline_proposal\")"));
+        assert!(ACTOR_CPP.contains("circuit --design"), "exe fallback for an old DLL");
+        assert!(ACTOR_CPP.contains("UMbgenIssuesWidget::RefreshAll();"));
+        assert!(MBCORE_C_H.contains("mb_circuit"));
+        assert!(MBCORE_C_H.contains("mb_outline_proposal"));
+        assert!(BRIDGE_CPP.contains("if (Key == EKeys::I) { ToggleIssuesWindow(); return true; }"));
+        assert!(PC_CPP.contains("BindKey(EKeys::I, IE_Pressed, this, &AMbgenPlayerController::ToggleIssues)"));
+        assert!(PC_H.contains("TObjectPtr<UMbgenIssuesWidget> IssuesWindow;"));
+        // The Board window previews the outline proposal before an Apply.
+        assert!(OUTLINE_CPP.contains("Board->OutlineProposalJson(TemplateId)"));
+        assert!(OUTLINE_CPP.contains("PreviewOutline(Id)"));
+        assert!(OUTLINE_CPP.contains("TEXT(\"Apply %s\")"));
     }
 
     #[test]

@@ -139,9 +139,21 @@ def manufacturing_gate(
     layout: dict[str, Any] | None,
     drc: dict[str, Any] | None,
     pcb_par: dict[str, Any] | None,
+    soc_package: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Pure gate. Every input is required; a missing one is a blocker, not a pass."""
+    """Pure gate. Every input is required; a missing one is a blocker, not a pass.
+
+    `soc_package` is the custom SoC package contract report carried in
+    `circuit.json` / `manifest.json`; the LibreCore board cannot be qualified
+    while it is unresolved."""
     blockers: list[str] = []
+    if soc_package is None:
+        blockers.append("no custom SoC package contract report")
+    elif not soc_package.get("approved"):
+        blockers.append(
+            f"custom SoC package contract {soc_package.get('id', '?')} is {soc_package.get('declared_status', 'draft')} "
+            f"with {len(soc_package.get('unresolved', []))} unresolved field(s)"
+        )
     if erc is None:
         blockers.append("no ERC report")
     elif not erc.get("ok"):

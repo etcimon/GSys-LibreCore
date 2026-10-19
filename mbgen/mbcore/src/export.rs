@@ -70,6 +70,8 @@ impl Bundle {
             },
             "circuit_sha256": circuit_hash,
             "core_source": self.platform["core"]["source"],
+            // The manufacturing endpoint's external input, stated per bundle.
+            "soc_package": self.circuit["soc_package"],
             "files": files,
         })
     }
@@ -155,6 +157,7 @@ pub fn compile(design: &Design) -> Result<Bundle, PackError> {
         })).collect::<Vec<_>>(),
         "rules": { "grid_um": crate::route::GRID_UM, "trace_clear_um": crate::route::TRACE_CLEAR_UM, "trace_half_um": crate::route::TRACE_HALF_UM, "via_clear_um": crate::route::VIA_CLEAR_UM },
         "route_intent": { "rails_as_planes": ["GND", "P12V", "P3V3", "P3V3_AUX"], "paths": routed.paths.len(), "unroutable": routed.errors.len() },
+        "soc_package": { "id": circuit.soc_package.id, "status": circuit.soc_package.declared_status, "approved": circuit.soc_package.approved, "unresolved": circuit.soc_package.unresolved.len() },
     });
     let nets_json = serde_json::to_value(&routed.nets).map_err(|e| PackError { reason: e.to_string() })?;
     let paths_json = serde_json::to_value(&routed.paths).map_err(|e| PackError { reason: e.to_string() })?;
@@ -426,6 +429,8 @@ mod tests {
             assert_eq!(files[name]["sha256"].as_str().unwrap().len(), 64, "{name}");
         }
         assert_eq!(m["core_source"]["sha256"], bundle.platform["core"]["source"]["sha256"]);
+        assert_eq!(m["soc_package"]["approved"], false, "the draft contract is never reported approved");
+        assert_eq!(bundle.layout["soc_package"]["status"], "draft");
         // The manifest hash of a file equals the hash of the text that is written.
         let circuit_text = bundle.files().into_iter().find(|(n, _)| *n == "circuit.json").unwrap().1;
         assert_eq!(files["circuit.json"]["sha256"], sha256_hex(circuit_text.as_bytes()));

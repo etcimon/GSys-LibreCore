@@ -7,6 +7,7 @@ class AMbgenBoardActor;
 class UMbgenPackageWidget;
 class UMbgenLibraryWidget;
 class UMbgenOutlineWidget;
+class UMbgenIssuesWidget;
 class UMbgenPropertyWidget;
 class UMbgenChromeWidget;
 
@@ -28,6 +29,7 @@ private:
     TObjectPtr<UMbgenPackageWidget> PackageWindow;
     TObjectPtr<UMbgenLibraryWidget> LibraryWindow;
     TObjectPtr<UMbgenOutlineWidget> OutlineWindow;
+    TObjectPtr<UMbgenIssuesWidget> IssuesWindow;
     TObjectPtr<UMbgenPropertyWidget> PropertyWindow;
     TObjectPtr<UMbgenChromeWidget> ChromeBar;
     void ChordUndo();
@@ -42,6 +44,7 @@ private:
     void TogglePackages();
     void ToggleLibrary();
     void ToggleOutline();
+    void ToggleIssues();
     void ToggleProperties();
     void ShowProperties(const FString& Id);
     void ShowPackages();

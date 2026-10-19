@@ -13,7 +13,7 @@ cargo rustc -p mbcore_c -- -C panic=abort
 
 Incremental `Access is denied (os error 5)` under `target/debug/incremental` is expected while Unreal holds `mbcore_c.dll`. Stop `UnrealEditor` whose command line contains `MbgenSim.uproject` before relinking the DLL or running UBT.
 
-Last recorded `cargo test --workspace`: 115 mbcore + 10 mbcore_c + 23 mbcompiler (counts drift). Nav: `cargo test -p mbcore --lib nav`. Circuit/recipes/router: `cargo test -p mbcore circuit` / `recipes` / `route` (the 32-net Mini-ITX fixture has an 8 s debug / 400 ms release budget). Dual-source: `cargo test -p mbcompiler catia` / `navdiag`. Profiles vs `core/include`: `cargo test -p mbcore committed_profiles_agree_with_core_include` (skips in a standalone checkout).
+Last recorded `cargo test --workspace`: 121 mbcore + 11 mbcore_c + 25 mbcompiler (counts drift). Nav: `cargo test -p mbcore --lib nav`. Circuit/recipes/router: `cargo test -p mbcore circuit` / `recipes` / `route` (the 32-net Mini-ITX fixture has an 8 s debug / 400 ms release budget). Dual-source: `cargo test -p mbcompiler catia` / `navdiag`. Profiles vs `core/include`: `cargo test -p mbcore committed_profiles_agree_with_core_include` (skips in a standalone checkout).
 
 ## Board flow (corev-mb, Python + TS)
 
@@ -29,7 +29,7 @@ bun build-platform/src/cli/index.ts mb simulate <id> <scenario>   # boards/<id>/
 
 SKiDL writes `skidl_REPL.*` / `<script>.erc` / `<script>_sklib.py` into the cwd; they are byproducts, not outputs — delete them (`*.log` is gitignored, the others are not).
 
-CLI: `preview`, `compile`, `scene`, `anchors`, `library`, `profiles`, `package`, `build`, `open`, `mini-itx`, `textures`. `mbgen open` prefers a path containing `UE_5.8` (test `open_prefers_ue_5_8_over_5_4`). Missing-editor help says Engine 5.8.
+CLI: `preview`, `compile`, `scene`, `anchors`, `circuit`, `outline-proposal`, `library`, `profiles`, `package`, `build`, `open`, `mini-itx`, `textures`. (`circuit` / `outline-proposal` are the hosts' fallbacks when the DLL predates ABI v3.) `mbgen open` prefers a path containing `UE_5.8` (test `open_prefers_ue_5_8_over_5_4`). Missing-editor help says Engine 5.8.
 
 `mbgen profiles --core-include ../core/include --out mbcore/data/profiles.json` regenerates the processor profiles from the SystemVerilog config packages (reads `config_pkg.sv` for shared constants). Run it after any `core/include/*_config_pkg.sv` change; the mbcore test above fails until the committed file matches. Unresolved fields are printed and keep that profile out of the processor window.
 

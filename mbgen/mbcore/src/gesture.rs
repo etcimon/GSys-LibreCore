@@ -497,30 +497,147 @@ fn auto_connect_ok(design: &Design, id: &str) -> Result<(), PackError> {
     Ok(())
 }
 
+/// What changing the outline would do to each part. Nothing is applied; a
+/// host shows this before `SetOutline` so a dropped part is a decision,
+/// not a surprise.
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutlineProposal {
+    pub from: String,
+    pub to: String,
+    /// Parts that keep their edge (position is re-packed; XY is cleared).
+    pub kept: Vec<String>,
+    /// Parts whose edge does not exist on the new outline and move to their role's default edge.
+    pub re_edged: Vec<OutlineMove>,
+    /// Parts the new outline cannot host, with the reason.
+    pub dropped: Vec<OutlineDrop>,
+    /// Stock parts of the new outline that will be added because no part of that role exists.
+    pub added_stock: Vec<String>,
+    /// Owned circuit blocks whose host is dropped (they go with it).
+    pub dropped_blocks: Vec<String>,
+    /// Explicit connections that lose pins because a part is dropped.
+    pub affected_nets: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutlineMove {
+    pub id: String,
+    pub from_edge: String,
+    pub to_edge: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct OutlineDrop {
+    pub id: String,
+    pub reason: String,
+}
+
+impl OutlineProposal {
+    pub fn is_noop(&self) -> bool {
+        self.from == self.to
+    }
+}
+
+pub fn propose_outline(design: &Design, template_id: &str) -> Result<OutlineProposal, PackError> {
+    let template = template_by_id(template_id)?;
+    let mut out = OutlineProposal { from: design.template_id.clone(), to: template.id.clone(), ..Default::default() };
+    if out.is_noop() {
+        return Ok(out);
+    }
+    let has_edge = |id: &str| template.edges.iter().any(|e| e.id == id);
+    let mut survivors: Vec<&str> = Vec::new();
+    for place in &design.placements {
+        let Some(port) = design.ports.iter().find(|p| p.id == place.id) else {
+            out.dropped.push(OutlineDrop { id: place.id.clone(), reason: "placement without a part record".into() });
+            continue;
+        };
+        if has_edge(&place.edge) {
+            out.kept.push(place.id.clone());
+            survivors.push(&place.id);
+            continue;
+        }
+        let Some(r) = role(&port.role) else {
+            out.dropped.push(OutlineDrop { id: place.id.clone(), reason: format!("unknown role {}", port.role) });
+            continue;
+        };
+        if !has_edge(r.edge) {
+            out.dropped.push(OutlineDrop {
+                id: place.id.clone(),
+                reason: format!("{} has no {} edge for role {}", template.id, r.edge, port.role),
+            });
+            continue;
+        }
+        out.re_edged.push(OutlineMove { id: place.id.clone(), from_edge: place.edge.clone(), to_edge: r.edge.into() });
+        survivors.push(&place.id);
+    }
+    // A block goes with its host, and so do the parts it owns — even when
+    // those parts' own edge exists on the new outline.
+    let host_dropped: Vec<String> = out.dropped.iter().map(|d| d.id.clone()).collect();
+    for b in &design.blocks {
+        if host_dropped.contains(&b.host) {
+            out.dropped_blocks.push(b.id.clone());
+            for owned in &b.owns {
+                if out.dropped.iter().any(|d| &d.id == owned) {
+                    continue;
+                }
+                out.kept.retain(|k| k != owned);
+                out.re_edged.retain(|m| &m.id != owned);
+                survivors.retain(|s| s != owned);
+                out.dropped.push(OutlineDrop { id: owned.clone(), reason: format!("owned by block {} whose host {} is dropped", b.id, b.host) });
+            }
+        }
+    }
+    let dropped_ids: Vec<&str> = out.dropped.iter().map(|d| d.id.as_str()).collect();
+    for c in &design.connections {
+        if c.pins.iter().any(|p| p.rsplit_once('.').map(|(part, _)| dropped_ids.contains(&part)).unwrap_or(false)) {
+            out.affected_nets.push(c.net.clone());
+        }
+    }
+    out.affected_nets.sort();
+    out.affected_nets.dedup();
+    if survivors.is_empty() {
+        let stock = Design::from_template(template_id)?;
+        out.added_stock = stock.ports.iter().map(|p| p.id.clone()).collect();
+    } else {
+        let stock = Design::from_template(template_id)?;
+        for port in &stock.ports {
+            let present = design
+                .ports
+                .iter()
+                .filter(|p| survivors.contains(&p.id.as_str()))
+                .any(|p| p.id == port.id || p.role == port.role);
+            if !present {
+                out.added_stock.push(port.id.clone());
+            }
+        }
+    }
+    Ok(out)
+}
+
 fn set_outline(design: &mut Design, template_id: &str) -> Result<(), PackError> {
     let template = template_by_id(template_id)?;
-    if design.template_id == template.id {
+    let proposal = propose_outline(design, template_id)?;
+    if proposal.is_noop() {
         return Ok(());
     }
     design.template_id = template.id.clone();
     design.settings.gap_um = template.gap_um;
-    let has_edge = |id: &str| template.edges.iter().any(|e| e.id == id);
+    // Apply exactly the proposal: kept and re-edged parts survive, dropped
+    // parts go with their blocks and connections.
+    let new_edge = |id: &str| -> Option<String> {
+        if proposal.kept.iter().any(|k| k == id) {
+            return design.placements.iter().find(|p| p.id == id).map(|p| p.edge.clone());
+        }
+        proposal.re_edged.iter().find(|m| m.id == id).map(|m| m.to_edge.clone())
+    };
     let mut ports = Vec::new();
     let mut placements = Vec::new();
     for place in &design.placements {
+        let Some(edge) = new_edge(&place.id) else {
+            continue;
+        };
         let Some(port) = design.ports.iter().find(|p| p.id == place.id) else {
             continue;
         };
-        let mut edge = place.edge.clone();
-        if !has_edge(&edge) {
-            let Some(r) = role(&port.role) else {
-                continue;
-            };
-            if !has_edge(r.edge) {
-                continue;
-            }
-            edge = r.edge.into();
-        }
         ports.push(port.clone());
         placements.push(Placement {
             edge,
@@ -530,6 +647,20 @@ fn set_outline(design: &mut Design, template_id: &str) -> Result<(), PackError> 
             y_um: None,
             ..place.clone()
         });
+    }
+    for d in &proposal.dropped {
+        let prefix = format!("{}.", d.id);
+        for c in &mut design.connections {
+            c.pins.retain(|p| !p.starts_with(&prefix));
+        }
+        design.no_connects.retain(|p| !p.starts_with(&prefix));
+    }
+    design.connections.retain(|c| !c.pins.is_empty());
+    for b in &proposal.dropped_blocks {
+        crate::recipes::remove_block(design, b);
+    }
+    for d in &proposal.dropped {
+        crate::recipes::disown(design, &d.id);
     }
     if ports.is_empty() {
         *design = Design::from_template(template_id)?;
@@ -1045,6 +1176,47 @@ mod tests {
         assert!(result.design.ports.iter().all(|p| p.role != "socket"));
         assert!(result.design.ports.iter().all(|p| p.role != "usb_stack"));
         assert!(crate::pins_for("usb0", "usb_stack").is_empty());
+    }
+
+    #[test]
+    fn the_outline_proposal_names_every_drop_and_set_outline_applies_exactly_it() {
+        // A design with a recipe block on the slot and a user connection on it.
+        let mut design = Design::mini_itx().unwrap();
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("per_rail".to_string(), "1".to_string());
+        design = preview(&design, &Gesture::ExpandRecipe { recipe: "decap_per_rail".into(), host: "slot0".into(), params }).design;
+        let to_card = propose_outline(&design, "pcie-card").unwrap();
+        assert_eq!((to_card.from.as_str(), to_card.to.as_str()), ("mini-itx", "pcie-card"));
+        assert!(!to_card.is_noop());
+        let dropped: Vec<&str> = to_card.dropped.iter().map(|d| d.id.as_str()).collect();
+        assert!(dropped.contains(&"socket"), "{dropped:?}");
+        assert!(dropped.contains(&"usb0"));
+        assert!(dropped.contains(&"slot0"), "a motherboard slot has no edge on a card");
+        assert!(to_card.dropped.iter().all(|d| d.reason.contains("edge") || d.reason.contains("owned by block")), "{:?}", to_card.dropped);
+        assert!(to_card.dropped_blocks.contains(&"slot0.decap_per_rail".to_string()));
+        assert!(dropped.contains(&"slot0_c_p12v_0"), "owned capacitors go with their host even though the card has a power edge");
+        assert!(!to_card.kept.iter().any(|k| k.starts_with("slot0_c_")));
+        assert!(to_card.affected_nets.contains(&"P12V".to_string()));
+        assert!(to_card.added_stock.contains(&"cem0".to_string()));
+        // Apply: exactly the proposal — nothing else survives or vanishes.
+        let applied = preview(&design, &Gesture::SetOutline { template_id: "pcie-card".into() }).design;
+        for d in &to_card.dropped {
+            assert!(applied.ports.iter().all(|p| p.id != d.id), "{} should be gone", d.id);
+        }
+        for k in &to_card.kept {
+            assert!(applied.ports.iter().any(|p| p.id == *k), "{k} should survive");
+        }
+        assert!(applied.blocks.is_empty());
+        assert!(applied.connections.iter().all(|c| !c.pins.iter().any(|p| p.starts_with("slot0"))));
+        assert_eq!(crate::circuit::resolve(&applied).unwrap().errors(), 0);
+        // Same outline is a no-op proposal.
+        assert!(propose_outline(&design, "mini-itx").unwrap().is_noop());
+        // ATX keeps everything from Mini-ITX (same edge set): no drops, no re-edge.
+        let to_atx = propose_outline(&design, "atx").unwrap();
+        assert!(to_atx.dropped.is_empty(), "{:?}", to_atx.dropped);
+        assert!(to_atx.re_edged.is_empty());
+        assert!(to_atx.dropped_blocks.is_empty());
+        assert!(propose_outline(&design, "nope").is_err());
     }
 
     #[test]

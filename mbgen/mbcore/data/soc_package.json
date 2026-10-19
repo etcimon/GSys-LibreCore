@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "id": "g6lc-soc-pkg",
+  "description": "Physical package contract of the custom GSys LibreCore SoC. Every field is an input to the board, not an inference from it. A null or empty value is unresolved and blocks manufacturing qualification; nothing here is defaulted.",
+  "status": "draft",
+  "package": {
+    "type": null,
+    "body_mm": null,
+    "pitch_mm": null,
+    "ball_count": null,
+    "source": null
+  },
+  "ball_map": {
+    "source": null,
+    "sha256": null,
+    "balls": []
+  },
+  "io_banks": [],
+  "power": {
+    "rails": [],
+    "sequence": [],
+    "source": null
+  },
+  "thermal": {
+    "tdp_w": null,
+    "tj_max_c": null,
+    "theta_ja_c_per_w": null,
+    "source": null
+  },
+  "reset_clock_boot": {
+    "por_pin": null,
+    "refclk_pins": [],
+    "boot_mode_pins": [],
+    "jtag_pins": [],
+    "source": null
+  },
+  "interfaces": [],
+  "footprint": {
+    "kicad": null,
+    "model_3d": null,
+    "source": null
+  }
+}

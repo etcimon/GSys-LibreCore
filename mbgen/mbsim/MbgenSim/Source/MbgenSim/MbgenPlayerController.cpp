@@ -4,6 +4,7 @@
 #include "MbgenPackageWidget.h"
 #include "MbgenLibraryWidget.h"
 #include "MbgenOutlineWidget.h"
+#include "MbgenIssuesWidget.h"
 #include "MbgenPropertyWidget.h"
 #include "MbgenChrome.h"
 #include "MbgenStore.h"
@@ -47,6 +48,7 @@ void AMbgenPlayerController::SetupInputComponent()
     InputComponent->BindKey(EKeys::C, IE_Pressed, this, &AMbgenPlayerController::TogglePackages);
     InputComponent->BindKey(EKeys::L, IE_Pressed, this, &AMbgenPlayerController::ToggleLibrary);
     InputComponent->BindKey(EKeys::T, IE_Pressed, this, &AMbgenPlayerController::ToggleOutline);
+    InputComponent->BindKey(EKeys::I, IE_Pressed, this, &AMbgenPlayerController::ToggleIssues);
     InputComponent->BindKey(EKeys::P, IE_Pressed, this, &AMbgenPlayerController::ToggleProperties);
     InputComponent->BindKey(EKeys::B, IE_Pressed, this, &AMbgenPlayerController::ToggleBottom);
     InputComponent->BindKey(EKeys::F, IE_Pressed, this, &AMbgenPlayerController::FramePressed);
@@ -375,6 +377,22 @@ void AMbgenPlayerController::ToggleOutline()
         OutlineWindow->AddToViewport(10);
         OutlineWindow->SetPositionInViewport(FVector2D(24.f, 24.f), false);
         UE_LOG(LogTemp, Display, TEXT("mbgen outline window open"));
+    }
+}
+
+void AMbgenPlayerController::ToggleIssues()
+{
+    if (IssuesWindow && IssuesWindow->IsInViewport())
+    {
+        IssuesWindow->RemoveFromParent();
+        return;
+    }
+    IssuesWindow = CreateWidget<UMbgenIssuesWidget>(this, UMbgenIssuesWidget::StaticClass());
+    if (IssuesWindow)
+    {
+        IssuesWindow->AddToViewport(10);
+        IssuesWindow->SetPositionInViewport(FVector2D(24.f, 420.f), false);
+        UE_LOG(LogTemp, Display, TEXT("mbgen issues window open"));
     }
 }
 

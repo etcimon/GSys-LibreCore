@@ -229,6 +229,32 @@ pub unsafe extern "C" fn mb_route(session: *mut Session, dirty_only: c_int) -> *
     }
 }
 
+/// What `set_outline` to `template_id` would do: kept / re-edged / dropped
+/// (with reasons) / added stock / dropped blocks / affected nets. Nothing is
+/// applied. Hosts show this before offering the change.
+#[no_mangle]
+pub unsafe extern "C" fn mb_outline_proposal(session: *const Session, template_id: *const c_char) -> *mut c_char {
+    if session.is_null() {
+        return err_json("no session");
+    }
+    let Ok(id) = read_str(template_id) else {
+        return err_json("null template id");
+    };
+    let sess = &*session;
+    match mbcore::propose_outline(&sess.design, id) {
+        Ok(p) => {
+            #[derive(Serialize)]
+            struct Msg {
+                #[serde(flatten)]
+                proposal: mbcore::OutlineProposal,
+                revision: u64,
+            }
+            json_ptr(&Msg { proposal: p, revision: sess.revision })
+        }
+        Err(err) => err_json(&err.reason),
+    }
+}
+
 /// The resolved circuit (components, pins, nets, obligations, diagnostics)
 /// for the current design, with the session revision.
 #[no_mangle]
@@ -550,6 +576,25 @@ mod tests {
             assert!(c2["nets"].as_array().unwrap().iter().any(|n| n["id"] == "P12V" && n["pins"].as_array().unwrap().iter().any(|p| p == "slot0_c_p12v_0.1")));
             mb_session_close(sess);
             assert_eq!(take(mb_circuit(ptr::null()))["error"], "no session");
+        }
+    }
+
+    #[test]
+    fn outline_proposal_is_read_only_and_names_drops() {
+        unsafe {
+            let sess = open_mini();
+            let rev_before = mb_session_revision(sess);
+            let id = cstring("pcie-card");
+            let p = take(mb_outline_proposal(sess, id.as_ptr()));
+            assert!(p.get("error").is_none(), "{p}");
+            assert_eq!(p["from"], "mini-itx");
+            assert_eq!(p["to"], "pcie-card");
+            assert!(p["dropped"].as_array().unwrap().iter().any(|d| d["id"] == "socket" && d["reason"].as_str().unwrap().contains("edge")));
+            assert!(p["added_stock"].as_array().unwrap().iter().any(|s| s == "cem0"));
+            assert_eq!(mb_session_revision(sess), rev_before, "a proposal mutates nothing");
+            let bad = cstring("nope");
+            assert!(take(mb_outline_proposal(sess, bad.as_ptr())).get("error").is_some());
+            mb_session_close(sess);
         }
     }
 
