@@ -2239,7 +2239,12 @@ prerequisite for this work under the existing dual license. No licensing policy 
   L3 at 36.3 s; since the t51 L3 (T46 in, T47 out) also survives, the
   death is attributed to **T46 and/or T47** — the readout merge (T46) is
   the proven defect of the two (its leaf mutation reproduces the boot's
-  value). Kept as a positive regression of the ACK-coalescing path.
+  value). Kept as a positive regression of the ACK-coalescing path — and
+  now the home of the **owed T37 drift leaf (S6)**: FIFO full, the head's
+  pass in flight with its retire write held, a ninth VOID ACK into the
+  bypass slot swept over the pass; `G6LC_MUT_FIXUP_SEL_DRIFT` trips the
+  RTL's `fixup pass acting on an entry other than the one it tag-checked`
+  invariant, the fix restarts the pass and every word lands in its own way.
 - [x] **T46 — WT dcache readout forwarded from ONE wbuffer/fixup entry: a
   word held by an older fixup entry (array write pending) and a younger
   wbuffer entry at once gave a load the young entry's bytes over the

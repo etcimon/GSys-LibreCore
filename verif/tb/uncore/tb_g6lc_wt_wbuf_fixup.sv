@@ -26,6 +26,12 @@
 // written by the fixup (WT_WBUF_FIXUP_OLD_BYTES_WRITTEN -- the queue is live,
 // not just emptied); the fixup write carries no byte of B's mask
 // (WT_WBUF_FIXUP_NO_SUPERSEDED_BYTE).
+//   S6  (T37) the fixup-pass drift: FIFO full, the head's pass in flight with
+//       its retire write held, a VOID ACK lands in the bypass slot -- the
+//       pass must restart on the new selection; pre-fix it finished on the
+//       bypass word with the head's hit vector (G6LC_MUT_FIXUP_SEL_DRIFT
+//       trips the RTL's own `fixup pass acting on an entry other than the one
+//       it tag-checked`; the TB's own-way checks are the second line).
 // Pass token: WT_WBUF_FIXUP_PASS. +oracle_negative flips the verdict.
 // G6LC_MUT_FIXUP_KEEP_SUPERSEDED (the pre-fix queue) survives this shape:
 // B's checked ACK matches the pending entry (fixup_match) and is coalesced
@@ -87,8 +93,8 @@ module tb_g6lc_wt_wbuf_fixup;
   logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0] miss_wuser;
   logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] miss_vld_bits;
   logic [2:0] miss_size;
-  logic [CVA6Cfg.MEM_TID_WIDTH-1:0] miss_id, rtrn_id = '0;
-  logic rtrn_vld = 0;
+  logic [CVA6Cfg.MEM_TID_WIDTH-1:0] miss_id, rtrn_id;
+  logic rtrn_vld;
   // cache read port
   logic [CVA6Cfg.DCACHE_TAG_WIDTH-1:0] rd_tag;
   logic [DCACHE_CL_IDX_WIDTH-1:0] rd_idx;
@@ -144,24 +150,47 @@ module tb_g6lc_wt_wbuf_fixup;
   logic wr_cl_vld = 0;
   logic [DCACHE_CL_IDX_WIDTH-1:0] wr_cl_idx = '0;
   assign rd_ack = rd_req && (dut.fixup_rd_req ? fixup_check_en : wbuf_check_en);
-  assign wr_ack = |wr_req;
+  logic wr_ack_en = 1;                      // S6 holds the head's RETIRE write
+  assign wr_ack = |wr_req && wr_ack_en;
   assign inv_ack = inv_req;
+  // (folded so that the S6 words -- eight indices apart -- do not all share
+  // way 0 with the head: the drifted invalidation must be visibly wrong)
+  function automatic logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] way_of_idx(input logic [DCACHE_CL_IDX_WIDTH-1:0] idx);
+    return CVA6Cfg.DCACHE_SET_ASSOC'(1) << ((idx + (idx >> 3)) % CVA6Cfg.DCACHE_SET_ASSOC);
+  endfunction
+  // invalidation log (the fixup queue's full-queue fallback)
+  typedef struct { logic [DCACHE_CL_IDX_WIDTH-1:0] idx; logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] way; } ilog_t;
+  ilog_t ilog[$];
   // array write log
   typedef struct { logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] way; logic [DCACHE_CL_IDX_WIDTH-1:0] idx;
                    logic [CVA6Cfg.DCACHE_OFFSET_WIDTH-1:0] off; logic [CVA6Cfg.XLEN-1:0] data;
                    logic [(CVA6Cfg.XLEN/8)-1:0] be; bit fixup; } wlog_t;
   wlog_t wlog[$];
+  // the ACK of the oldest expired TX is presented combinationally, so
+  // ack_delay = 0 means "one cycle after the TX was accepted" (the earliest
+  // the wbuffer can see it: tx_stat is registered at the accept)
+  always_comb begin
+    rtrn_vld = 1'b0; rtrn_id = '0;
+    for (int t = CVA6Cfg.DCACHE_MAX_TX - 1; t >= 0; t--)
+      if (pend[t] && pend_cnt[t] == 0) begin rtrn_vld = 1'b1; rtrn_id = t[CVA6Cfg.MEM_TID_WIDTH-1:0]; end
+  end
   always_ff @(posedge clk) begin
-    rd_hit_oh <= (rd_req && rd_ack && line_present) ? {{(CVA6Cfg.DCACHE_SET_ASSOC-1){1'b0}}, 1'b1} : '0;
-    rtrn_vld  <= 1'b0;
+    // the line of index I lives in way way_of_idx(I), so a hit vector carried
+    // from one word to another word's line is visibly the wrong way
+    rd_hit_oh <= (rd_req && rd_ack && line_present) ? way_of_idx(rd_idx) : '0;
     for (int t = 0; t < CVA6Cfg.DCACHE_MAX_TX; t++) begin
       if (pend[t]) begin
         if (pend_cnt[t] == 0) begin
-          pend[t] <= 0; rtrn_vld <= 1'b1; rtrn_id <= t[CVA6Cfg.MEM_TID_WIDTH-1:0];
+          if (rtrn_vld && rtrn_id == t[CVA6Cfg.MEM_TID_WIDTH-1:0]) pend[t] <= 0;
         end else pend_cnt[t] <= pend_cnt[t] - 1;
       end
     end
     if (miss_req && miss_ack) begin pend[miss_id] <= 1; pend_cnt[miss_id] <= ack_delay; end
+    if (inv_req && inv_ack) begin
+      ilog_t iv;
+      iv.idx = inv_idx; iv.way = inv_way_oh;
+      ilog.push_back(iv);
+    end
     if (|wr_req && wr_ack) begin
       wlog_t w;
       w.way = wr_req; w.idx = wr_idx; w.off = wr_off; w.data = wr_data; w.be = wr_data_be; w.fixup = dut.fixup_wr_req;
@@ -180,6 +209,11 @@ module tb_g6lc_wt_wbuf_fixup;
     end
     checked++;
   endtask
+  function automatic int inval_of(input logic [CVA6Cfg.PLEN-1:0] pa);
+    int n = 0;
+    foreach (ilog[i]) if (ilog[i].idx == pa[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH]) n++;
+    return n;
+  endfunction
   task automatic store_pa(input logic [CVA6Cfg.PLEN-1:0] pa, input logic [CVA6Cfg.XLEN-1:0] data,
                           input logic [(CVA6Cfg.XLEN/8)-1:0] be);
     req_in = '0; req_in.data_req = 1; req_in.data_we = 1; req_in.data_wdata = data; req_in.data_be = be;
@@ -210,6 +244,13 @@ module tb_g6lc_wt_wbuf_fixup;
            (w.off[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:3] == PA_W[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:3]) && (|w.be[3:0]);
   endfunction
 
+  // S6 words: distinct lines and indices, DRAM
+  function automatic logic [CVA6Cfg.PLEN-1:0] s6_pa(input int k);
+    return 56'h0000_0000_8010_0000 + 56'(k) * 56'h1110;
+  endfunction
+  function automatic logic [CVA6Cfg.XLEN-1:0] s6_data(input int k);
+    return 64'h6600_0000_0000_0000 | 64'(k + 1) * 64'h0101_0101_0101;
+  endfunction
   localparam logic [63:0] DATA_A = 64'hAAAA_AAAA_AAAA_AAAA;
   localparam logic [63:0] DATA_B = 64'h1111_1111_BBBB_BBBB;
   localparam logic [63:0] DATA_C = 64'hCCCC_CCCC_CCCC_CCCC;
@@ -270,7 +311,7 @@ module tb_g6lc_wt_wbuf_fixup;
 
     // S5 (T48 probe): the ACK comes first (checked miss -> queued), the refill
     // later -> the queued word must be written once the line is present
-    line_present = 0; ack_delay = 2;
+    line_present = 0; ack_delay = 3;        // the ACK a cycle after the miss result: a checked-miss push
     store_pa(PA_D, DATA_D, 8'hff);
     repeat (10) tick();                  // checked miss, ACKed, queued, re-checked: miss, waits
     check(writes_of(PA_D, DATA_D) == 0 && dut.gen_fixup_queue.fixup_cnt == 1, "WT_WBUF_FIXUP_S5_QUEUED_WAITING");
@@ -279,6 +320,74 @@ module tb_g6lc_wt_wbuf_fixup;
     repeat (24) tick();
     check(writes_of(PA_D, DATA_D) >= 1 && empty && dut.gen_fixup_queue.fixup_cnt == 0,
           "WT_WBUF_FIXUP_S5_ACK_REFILL_WRITTEN");
+
+    // S6 (T37, the fixup-pass drift): the FIFO is full (FixupDepth VOID-ACKed
+    // words of distinct lines, checks held), the head's pass is released and
+    // its retire write held back, and one more VOID ACK lands in the BYPASS
+    // slot while that pass is in flight. Pre-fix the pass's address followed
+    // fixup_bypass_valid_q combinationally and finished on the bypass word
+    // with the head's hit vector: the full-queue fallback invalidated the
+    // head's WAY at the bypass word's INDEX and the bypass word was dropped
+    // unwritten (G6LC_MUT_FIXUP_SEL_DRIFT); the fix restarts the pass on the
+    // new selection. The arrival cycle is swept over the pass.
+    for (int off = 0; off < 10; off++) begin
+      // reset the DUT and the environment between rounds
+      rst_n = 0; req_in = '0; wbuf_check_en = 0; fixup_check_en = 0; line_present = 1; wr_ack_en = 1;
+      for (int t = 0; t < CVA6Cfg.DCACHE_MAX_TX; t++) begin pend[t] = 0; pend_cnt[t] = 0; end
+      wlog.delete(); ilog.delete(); tick(); tick(); rst_n = 1; #2;
+      ack_delay = 2;
+      for (int k = 0; k < CVA6Cfg.WtDcacheFixupDepth; k++) begin
+        store_pa(s6_pa(k), s6_data(k), 8'hff);
+        repeat (4) tick();
+      end
+      repeat (8) tick();
+      check(dut.gen_fixup_queue.fixup_cnt == CVA6Cfg.WtDcacheFixupDepth && !dut.gen_fixup_queue.fixup_bypass_valid_q,
+            "WT_WBUF_FIXUP_S6_QUEUE_FULL");
+      // release the head's pass; hold its RETIRE write (wr_ack low) so the
+      // pass is in flight when the ninth word -- accepted after the pass
+      // started, never tag-checked (its check gate stays shut), VOID-ACKed
+      // `off` cycles later -- lands in the bypass slot; then let the write go
+      fixup_check_en = 1; tick();              // PEND -> CHECK
+      wr_ack_en = 0;
+      ack_delay = off;
+      store_pa(s6_pa(CVA6Cfg.WtDcacheFixupDepth), s6_data(CVA6Cfg.WtDcacheFixupDepth), 8'hff);
+      repeat (off + 4) tick();                 // the VOID ACK lands (bypass) while RETIRE waits
+      check(dut.gen_fixup_queue.fixup_bypass_valid_q, "WT_WBUF_FIXUP_S6_BYPASS_MID_PASS");
+      wr_ack_en = 1;
+      for (int c = 0; c < 40 * (CVA6Cfg.WtDcacheFixupDepth + 2); c++) begin
+        tick();
+        if ($test$plusargs("debug") && c < 60)
+          $display("dbg off=%0d c=%0d st=%0d cnt=%0d byp=%b bypbe=%h dead=%b rd_req=%b ack=%b tocheck=%b wr=%b inv=%b empty=%b hit_q=%b",
+                   off, c, dut.gen_fixup_queue.fixup_state_q, dut.gen_fixup_queue.fixup_cnt,
+                   dut.gen_fixup_queue.fixup_bypass_valid_q, dut.gen_fixup_queue.fixup_bypass_q.be,
+                   dut.gen_fixup_queue.fixup_active_dead, dut.fixup_rd_req, rd_ack, |dut.tocheck, |wr_req, inv_req, empty,
+                   dut.gen_fixup_queue.fixup_hit_oh_q);
+      end
+      for (int k = 0; k < CVA6Cfg.WtDcacheFixupDepth; k++)
+        if (writes_of(s6_pa(k), s6_data(k)) != 1) begin
+          $display("  S6 off=%0d: word %0d written %0d times", off, k, writes_of(s6_pa(k), s6_data(k)));
+          check(0, "WT_WBUF_FIXUP_S6_HEAD_WORD_WRITTEN");
+        end
+      // every array write and every fallback invalidation hit the way its
+      // own line lives in (a pass that drifted onto the bypass word carries
+      // the head's hit vector to the bypass word's index)
+      foreach (wlog[i]) if (wlog[i].way != way_of_idx(wlog[i].idx)) begin
+        $display("  S6 off=%0d: write idx=%h way=%b expected %b", off, wlog[i].idx, wlog[i].way, way_of_idx(wlog[i].idx));
+        check(0, "WT_WBUF_FIXUP_S6_WRITE_OWN_WAY");
+      end
+      foreach (ilog[i]) if (ilog[i].way != way_of_idx(ilog[i].idx)) begin
+        $display("  S6 off=%0d: inval idx=%h way=%b expected %b", off, ilog[i].idx, ilog[i].way, way_of_idx(ilog[i].idx));
+        check(0, "WT_WBUF_FIXUP_S6_INVAL_OWN_WAY");
+      end
+      // the ninth word reached the array or had its line invalidated
+      if (!(writes_of(s6_pa(CVA6Cfg.WtDcacheFixupDepth), s6_data(CVA6Cfg.WtDcacheFixupDepth)) == 1 ||
+            inval_of(s6_pa(CVA6Cfg.WtDcacheFixupDepth)) >= 1)) begin
+        $display("  S6 off=%0d: ninth word neither written nor invalidated (invals=%0d)", off, ilog.size());
+        check(0, "WT_WBUF_FIXUP_S6_BYPASS_WORD_SETTLED");
+      end
+      check(dut.gen_fixup_queue.fixup_cnt == 0 && !dut.gen_fixup_queue.fixup_bypass_valid_q && empty,
+            "WT_WBUF_FIXUP_S6_DRAINED");
+    end
 
     if (negative) $fatal(1, "ORACLE_NEGATIVE forced");
     $display("WT_WBUF_FIXUP_PASS checked=%0d writes=%0d", checked, wlog.size());

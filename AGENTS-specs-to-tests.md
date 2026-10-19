@@ -1009,7 +1009,15 @@ queue drains. Finding: `G6LC_MUT_FIXUP_KEEP_SUPERSEDED` **survives** this shape 
 ACK matches the pending entry and is coalesced into it (`fixup_match` → `merge_fixup`), so the
 pre-fix deferred write already carried B's bytes. The T47 clearing is a second guard; the arm is
 kept informational, and the 36.3 s attribution moves to "T46 and/or T47" (T46's leaf mutation
-reproduces the boot's value, T47's does not).
+reproduces the boot's value, T47's does not). The same bench carries **S4/S5** (T48 probes: a
+checked-miss word whose line is refilled before / after its ACK reaches the array — both hold) and
+**S6, the owed T37 leaf**: the FIFO full with `WtDcacheFixupDepth` VOID-ACKed words, the head's
+pass released with its retire write held (`wr_ack` gated), a ninth VOID ACK landing in the bypass
+slot `off` cycles into the pass (swept 0..9) — every FIFO word written exactly once in its own way,
+every fallback invalidation in its line's own way (`way_of_idx` folds the index so the eight-apart
+words do not share the head's way), the ninth written or invalidated, the queue drained.
+`G6LC_MUT_FIXUP_SEL_DRIFT` trips the RTL's own `fixup pass acting on an entry other than the one
+it tag-checked (bypass=1 sel=0 idx=88 way=01)` on the shape; the fix restarts the pass.
 
 ## `cbo.zero` zeroes the advertised 64-byte block (2026-10-19, T44)
 

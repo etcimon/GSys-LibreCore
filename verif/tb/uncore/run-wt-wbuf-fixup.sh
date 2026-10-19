@@ -47,6 +47,9 @@ build mut "+define+G6LC_MUT_FIXUP_KEEP_SUPERSEDED"
 # (fixup_match -> merge_fixup), so the deferred write already carries the younger bytes. The
 # acceptance-time clearing is a guard with its own invariant, not the only line of defence; the
 # mutation arm is informational (recorded in AGENTS-specs-to-tests.md, T47).
-if grep -q "WT_WBUF_FIXUP_PASS" "$OUT/mut.log"; then echo "note: G6LC_MUT_FIXUP_KEEP_SUPERSEDED survives this shape (ACK coalescing covers it)"; else echo "note: G6LC_MUT_FIXUP_KEEP_SUPERSEDED caught: $(grep -o 'WT_WBUF_FIXUP_[A-Z_]*\|fixup array write[^"]*' "$OUT/mut.log" | head -1)"; fi
+if grep -q "WT_WBUF_FIXUP_PASS" "$OUT/mut.log"; then echo "note: G6LC_MUT_FIXUP_KEEP_SUPERSEDED survives this shape (ACK coalescing covers it)"; else echo "note: G6LC_MUT_FIXUP_KEEP_SUPERSEDED caught: $(grep -o 'WT_WBUF_FIXUP_[A-Z_0-9]*' "$OUT/mut.log" | head -1)"; fi
+build mut2 "+define+G6LC_MUT_FIXUP_SEL_DRIFT"
+"$OUT/mut2/tb" > "$OUT/mut2.log" 2>&1
+grep -q "WT_WBUF_FIXUP_S6_\|fixup pass acting" "$OUT/mut2.log" || { echo "FAIL mutation G6LC_MUT_FIXUP_SEL_DRIFT not caught (S6)"; tail -12 "$OUT/mut2.log"; exit 1; }
 set -e
-echo "PASS run-wt-wbuf-fixup (positive, oracle negative; keep-superseded arm informational)"
+echo "PASS run-wt-wbuf-fixup (positive, oracle negative, T37 pass-drift mutation caught; keep-superseded arm informational)"
