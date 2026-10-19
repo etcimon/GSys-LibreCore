@@ -56,6 +56,12 @@ module tb_g6lc_cmo_engine;
   int neg_kind = 0;
   int cycle = 0;
 
+  // T49: an inval walks the 64-byte block as BLOCK_BYTES / LINE_BYTES sub-lines
+  localparam int BLOCK_BYTES = 64;
+  localparam int SUB_LINES   = BLOCK_BYTES / LINE_BYTES;
+  logic [AW-1:0] bcast_addrs[$];
+  always_ff @(posedge clk) if (bcast_v && bcast_rdy) bcast_addrs.push_back(bcast_a);
+
   int done_count[NR_CORES];
   int req_issued[NR_CORES];
   int grant_order[$];
@@ -67,6 +73,9 @@ module tb_g6lc_cmo_engine;
   // Per-request completion flags for the early-done oracle: set when the
   // corresponding push completes for the in-flight request, cleared on grant.
   logic l2_seen_done = 0, l3_seen_done = 0, bcast_seen_done = 0;
+  // T49: per-request completion counts -- an inval must drain one broadcast
+  // and apply one L2/L3 match-inval per sub-line of the block before done
+  int l2_since = 0, l3_since = 0, bcast_since = 0;
   logic [1:0] pend_op = '0;
 
   task automatic tick;
@@ -86,12 +95,6 @@ module tb_g6lc_cmo_engine;
       .inv_ready_i(inv_rdy), .inv_o(bcast_inv), .inv_busy_o(),
       .evict_ready_o(bcast_rdy), .drain_done_o(bcast_done)
   );
-
-  // T49: an inval walks the 64-byte block as BLOCK_BYTES / LINE_BYTES sub-lines
-  localparam int BLOCK_BYTES = 64;
-  localparam int SUB_LINES   = BLOCK_BYTES / LINE_BYTES;
-  logic [AW-1:0] bcast_addrs[$];
-  always_ff @(posedge clk) if (bcast_v && bcast_rdy) bcast_addrs.push_back(bcast_a);
 
   g6lc_cmo_engine #(
       .NR_CORES(NR_CORES), .L2_EN(1'b1), .L3_EN(L3_EN_P != 0),
@@ -124,6 +127,9 @@ module tb_g6lc_cmo_engine;
         pend_op       <= cmo_req_op[c];
       end
       if (cmo_done[c]) begin
+        if ($test$plusargs("debug"))
+          $display("dbg done core=%0d op=%0d l2_since=%0d l3_since=%0d bcast_since=%0d bcast_done=%0d cycle=%0d",
+                   c, pend_op, l2_since, l3_since, bcast_since, bcast_done, cycle);
         done_count[c] <= done_count[c] + 1;
         if (done_count[c] + 1 > req_issued[c])
           $fatal(1, "CMO_EARLY_DONE core=%0d done=%0d issued=%0d",
@@ -132,6 +138,13 @@ module tb_g6lc_cmo_engine;
             !(l2_seen_done && (L3_EN_P == 0 || l3_seen_done) && bcast_seen_done))
           $fatal(1, "CMO_EARLY_DONE core=%0d l2=%0d l3=%0d bcast=%0d",
                  c, l2_seen_done, l3_seen_done, bcast_seen_done);
+        // registered counts only: done must follow the last completion, as the
+        // single-line oracle above already demands (a done in the drain's own
+        // cycle is the ENGINE_MUTATION shape)
+        if (pend_op == 2'd0 &&
+            !(l2_since >= SUB_LINES && (L3_EN_P == 0 || l3_since >= SUB_LINES) && bcast_since >= SUB_LINES))
+          $fatal(1, "CMO_EARLY_DONE core=%0d sub-lines l2=%0d l3=%0d bcast=%0d of %0d",
+                 c, l2_since, l3_since, bcast_since, SUB_LINES);
         if (pend_op != 2'd0 && !(l2_idle && l3_idle))
           $fatal(1, "CMO_EARLY_DONE clean core=%0d", c);
       end
@@ -142,16 +155,24 @@ module tb_g6lc_cmo_engine;
       l2_seen_done    <= 1'b0;
       l3_seen_done    <= 1'b0;
       bcast_seen_done <= 1'b0;
+      l2_since        <= 0;
+      l3_since        <= 0;
+      bcast_since     <= 0;
     end
     if (l2_v && l2_rdy) begin
       l2_apply_count <= l2_apply_count + 1;
       l2_seen_done   <= 1'b1;
+      l2_since       <= (cmo_ready != '0) ? 1 : l2_since + 1;
     end
     if (l3_v && l3_rdy) begin
       l3_apply_count <= l3_apply_count + 1;
       l3_seen_done   <= 1'b1;
+      l3_since       <= (cmo_ready != '0) ? 1 : l3_since + 1;
     end
-    if (bcast_done) bcast_seen_done <= 1'b1;
+    if (bcast_done) begin
+      bcast_seen_done <= 1'b1;
+      bcast_since     <= (cmo_ready != '0) ? 1 : bcast_since + 1;
+    end
   end
 
   // While the engine waits on l2_inval_ready_i the offered address must be

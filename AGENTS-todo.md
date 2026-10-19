@@ -2165,11 +2165,13 @@ prerequisite for this work under the existing dual license. No licensing policy 
   sub-line is cleared again, harmlessly), `cmo_done` once after the last.
   Leaf `tb_g6lc_cmo_engine` sc1 now asks for an address 0x18 into the
   block and requires one broadcast ack per core per sub-line (4) and the
-  four broadcast addresses from the block base in order; both L3 arms and
-  the two `CMO_NO_DONE` negatives pass on Verilator 5.020
-  (`l2=32 l3=32` applies). Not reached by the boots (no DMA, the ooo DTS
-  lists no `zicbom`); the remote `run_cmo_review` engine arm and the next
-  server build are the system verdict. Left as is: a package without the
+  four broadcast addresses from the block base in order, and its early-done
+  oracle counts completions per sub-line (registered: a done in the last
+  drain's own cycle is the mutation shape); remote `run_cmo_review`
+  engine lane (Verilator 5.008): both L3 arms pass, `neg0`/`neg1`
+  `CMO_NO_DONE`, the `ENGINE_MUTATION` arm `CMO_EARLY_DONE … bcast=3 of
+  4` (`ooocoh-t53-cmo-engine2`). Not reached by the boots (no DMA, the ooo
+  DTS lists no `zicbom`); the next server build is the system verdict. Left as is: a package without the
   engine (`L2CmoEn = 0`, i.e. `g6lc64_ooo`) performs no L1 invalidation
   for `cbo.inval` at all — those DTS files do not advertise `zicbom`; the
   HPDCACHE adapter's own `HPDCACHE_REQ_CMO_*_NLINE` stays one line (the
