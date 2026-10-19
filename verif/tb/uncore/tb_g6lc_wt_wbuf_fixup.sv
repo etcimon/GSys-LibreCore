@@ -18,6 +18,9 @@
 //       only the bytes B did not cover (0xf0); pre-fix it wrote all eight,
 //       putting A's 0xAA.. back over B's bytes -- the L3 boot's
 //       ret_from_exception restore of the previous trap frame (T47).
+//   S4/S5 (T48 probes) a word whose tag check misses and whose line is
+//       refilled before (S4) / after (S5) its ACK must still reach the array
+//       (re-check after the refill, deferred write) -- both hold.
 // Checks on the array write log: the last write that touches bytes [3:0] of W
 // carries B's data (WT_WBUF_FIXUP_YOUNG_BYTES_KEPT); A's upper bytes are
 // written by the fixup (WT_WBUF_FIXUP_OLD_BYTES_WRITTEN -- the queue is live,
@@ -121,7 +124,7 @@ module tb_g6lc_wt_wbuf_fixup;
       .miss_rtrn_vld_i(rtrn_vld), .miss_rtrn_id_i(rtrn_id),
       .rd_tag_o(rd_tag), .rd_idx_o(rd_idx), .rd_off_o(rd_off), .rd_req_o(rd_req), .rd_tag_only_o(rd_tag_only),
       .rd_ack_i(rd_ack), .rd_data_i('0), .rd_vld_bits_i(rd_hit_oh), .rd_hit_oh_i(rd_hit_oh),
-      .wr_cl_vld_i(1'b0), .wr_cl_idx_i('0), .wr_cl_inv_i(1'b0),
+      .wr_cl_vld_i(wr_cl_vld), .wr_cl_idx_i(wr_cl_idx), .wr_cl_inv_i(1'b0),
       .wr_req_o(wr_req), .wr_ack_i(wr_ack), .wr_idx_o(wr_idx), .wr_off_o(wr_off), .wr_data_o(wr_data),
       .wr_data_be_o(wr_data_be), .wr_user_o(wr_user),
       .inv_req_o(inv_req), .inv_ack_i(inv_ack), .inv_idx_o(inv_idx), .inv_way_oh_o(inv_way_oh), .inv_vld_bits_o(inv_vld_bits),
@@ -137,7 +140,9 @@ module tb_g6lc_wt_wbuf_fixup;
   logic pend[CVA6Cfg.DCACHE_MAX_TX];
   // tag check: the TB gates the wbuffer's and the fixup queue's checks apart;
   // the line is present in way 0, the result is valid one cycle after the ack
-  logic wbuf_check_en = 0, fixup_check_en = 0;
+  logic wbuf_check_en = 0, fixup_check_en = 0, line_present = 1;
+  logic wr_cl_vld = 0;
+  logic [DCACHE_CL_IDX_WIDTH-1:0] wr_cl_idx = '0;
   assign rd_ack = rd_req && (dut.fixup_rd_req ? fixup_check_en : wbuf_check_en);
   assign wr_ack = |wr_req;
   assign inv_ack = inv_req;
@@ -147,7 +152,7 @@ module tb_g6lc_wt_wbuf_fixup;
                    logic [(CVA6Cfg.XLEN/8)-1:0] be; bit fixup; } wlog_t;
   wlog_t wlog[$];
   always_ff @(posedge clk) begin
-    rd_hit_oh <= (rd_req && rd_ack) ? {{(CVA6Cfg.DCACHE_SET_ASSOC-1){1'b0}}, 1'b1} : '0;
+    rd_hit_oh <= (rd_req && rd_ack && line_present) ? {{(CVA6Cfg.DCACHE_SET_ASSOC-1){1'b0}}, 1'b1} : '0;
     rtrn_vld  <= 1'b0;
     for (int t = 0; t < CVA6Cfg.DCACHE_MAX_TX; t++) begin
       if (pend[t]) begin
@@ -175,15 +180,31 @@ module tb_g6lc_wt_wbuf_fixup;
     end
     checked++;
   endtask
-  task automatic store(input logic [CVA6Cfg.XLEN-1:0] data, input logic [(CVA6Cfg.XLEN/8)-1:0] be);
+  task automatic store_pa(input logic [CVA6Cfg.PLEN-1:0] pa, input logic [CVA6Cfg.XLEN-1:0] data,
+                          input logic [(CVA6Cfg.XLEN/8)-1:0] be);
     req_in = '0; req_in.data_req = 1; req_in.data_we = 1; req_in.data_wdata = data; req_in.data_be = be;
     req_in.data_size = 2'b11;
-    req_in.address_tag   = PA_W[CVA6Cfg.DCACHE_TAG_WIDTH+CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_INDEX_WIDTH];
-    req_in.address_index = PA_W[CVA6Cfg.DCACHE_INDEX_WIDTH-1:0];
+    req_in.address_tag   = pa[CVA6Cfg.DCACHE_TAG_WIDTH+CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_INDEX_WIDTH];
+    req_in.address_index = pa[CVA6Cfg.DCACHE_INDEX_WIDTH-1:0];
     #1;
     while (!req_out.data_gnt) tick();
     tick(); req_in = '0; #1;
   endtask
+  task automatic store(input logic [CVA6Cfg.XLEN-1:0] data, input logic [(CVA6Cfg.XLEN/8)-1:0] be);
+    store_pa(PA_W, data, be);
+  endtask
+  task automatic refill(input logic [CVA6Cfg.PLEN-1:0] pa);
+    wr_cl_vld = 1; wr_cl_idx = pa[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH]; tick();
+    wr_cl_vld = 0; wr_cl_idx = '0; #1;
+  endtask
+  function automatic int writes_of(input logic [CVA6Cfg.PLEN-1:0] pa, input logic [CVA6Cfg.XLEN-1:0] data);
+    int n = 0;
+    foreach (wlog[i])
+      if (wlog[i].idx == pa[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH] &&
+          wlog[i].off[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:3] == pa[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:3] &&
+          wlog[i].data == data && wlog[i].be == '1) n++;
+    return n;
+  endfunction
   function automatic bit touches_low(input wlog_t w);
     return (w.idx == PA_W[CVA6Cfg.DCACHE_INDEX_WIDTH-1:CVA6Cfg.DCACHE_OFFSET_WIDTH]) &&
            (w.off[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:3] == PA_W[CVA6Cfg.DCACHE_OFFSET_WIDTH-1:3]) && (|w.be[3:0]);
@@ -191,6 +212,10 @@ module tb_g6lc_wt_wbuf_fixup;
 
   localparam logic [63:0] DATA_A = 64'hAAAA_AAAA_AAAA_AAAA;
   localparam logic [63:0] DATA_B = 64'h1111_1111_BBBB_BBBB;
+  localparam logic [63:0] DATA_C = 64'hCCCC_CCCC_CCCC_CCCC;
+  localparam logic [63:0] DATA_D = 64'hDDDD_DDDD_DDDD_DDDD;
+  localparam logic [CVA6Cfg.PLEN-1:0] PA_C = 56'h0000_0000_8005_3c10;   // another line, another index
+  localparam logic [CVA6Cfg.PLEN-1:0] PA_D = 56'h0000_0000_8006_4d18;
   int last_low, fixup_idx;
   initial begin
     negative = $test$plusargs("oracle_negative");
@@ -230,6 +255,30 @@ module tb_g6lc_wt_wbuf_fixup;
     foreach (wlog[i]) if (touches_low(wlog[i])) last_low = i;
     check(last_low >= 0 && wlog[last_low].data[31:0] == DATA_B[31:0], "WT_WBUF_FIXUP_YOUNG_BYTES_KEPT");
     check(empty && dut.gen_fixup_queue.fixup_cnt == 0 && !dut.gen_fixup_queue.fixup_bypass_valid_q, "WT_WBUF_FIXUP_DRAINED");
+
+    // S4 (T48 probe): a word whose tag check MISSES, then a refill of its line
+    // lands before the ACK -> the ACK must not be treated as "line absent":
+    // the word has to reach the array (re-check after the refill, write)
+    line_present = 0; wbuf_check_en = 1; fixup_check_en = 1; ack_delay = 8;
+    store_pa(PA_C, DATA_C, 8'hff);
+    repeat (4) tick();                   // checked: miss
+    line_present = 1;
+    refill(PA_C);                        // the line arrives (memory copy = pre-store)
+    repeat (24) tick();                  // ACK, re-check, retire
+    check(writes_of(PA_C, DATA_C) >= 1 && empty && dut.gen_fixup_queue.fixup_cnt == 0,
+          "WT_WBUF_FIXUP_S4_MISS_REFILL_ACK_WRITTEN");
+
+    // S5 (T48 probe): the ACK comes first (checked miss -> queued), the refill
+    // later -> the queued word must be written once the line is present
+    line_present = 0; ack_delay = 2;
+    store_pa(PA_D, DATA_D, 8'hff);
+    repeat (10) tick();                  // checked miss, ACKed, queued, re-checked: miss, waits
+    check(writes_of(PA_D, DATA_D) == 0 && dut.gen_fixup_queue.fixup_cnt == 1, "WT_WBUF_FIXUP_S5_QUEUED_WAITING");
+    line_present = 1;
+    refill(PA_D);
+    repeat (24) tick();
+    check(writes_of(PA_D, DATA_D) >= 1 && empty && dut.gen_fixup_queue.fixup_cnt == 0,
+          "WT_WBUF_FIXUP_S5_ACK_REFILL_WRITTEN");
 
     if (negative) $fatal(1, "ORACLE_NEGATIVE forced");
     $display("WT_WBUF_FIXUP_PASS checked=%0d writes=%0d", checked, wlog.size());
