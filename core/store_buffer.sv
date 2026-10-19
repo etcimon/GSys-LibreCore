@@ -133,8 +133,20 @@ module store_buffer
   // speculative entry -> one commit entry -> one commit; only the memory
   // drain is multi-beat, so queue accounting and the scoreboard's single
   // completion stay 1:1 and no entry can be orphaned.
+  // T44: the block is the architected CBO block (config_pkg::CBO_BLOCK_BYTES,
+  // the .dts cboz-block-size = 64), not the D$ line. DCACHE_LINE_WIDTH is in
+  // bits (128 on the OoO packages), so the previous `DCACHE_LINE_WIDTH / 8`
+  // drained two 8-byte beats and left bytes 16..63 of every block stale:
+  // Linux's clear_page (back-to-back cbo.zero) handed out page tables and
+  // user pages with old content — move_page_tables read a kernel pointer
+  // as a PTE on server1 L1, init segfaulted on a 0xcc.. pointer on the
+  // 2-hart server1. Must match store_unit's alignment (same constant).
+`ifdef G6LC_MUT_CBOZ_LINE_BYTES
   localparam int unsigned CBOZ_LINE_B =
       (CVA6Cfg.DCACHE_LINE_WIDTH >= 64) ? (CVA6Cfg.DCACHE_LINE_WIDTH / 8) : 64;
+`else
+  localparam int unsigned CBOZ_LINE_B = config_pkg::CBO_BLOCK_BYTES;
+`endif
   localparam int unsigned CBOZ_STRIDE = CVA6Cfg.XLEN / 8;
   localparam int unsigned CBOZ_BEATS =
       (CBOZ_LINE_B / CBOZ_STRIDE) > 0 ? (CBOZ_LINE_B / CBOZ_STRIDE) : 1;

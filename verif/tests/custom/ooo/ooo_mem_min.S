@@ -1908,6 +1908,68 @@ main:
   .text
 .Lfr_done:
 
+#elif STAGE == 58
+  # T44: cbo.zero must zero the whole block on every cache package. Linux's
+  # clear_page issues back-to-back cbo.zero over a page; on the server1
+  # (HPDCACHE) package the page handed to pmd_alloc kept its old content at
+  # +0x10 and move_page_tables dereferenced a stale kernel pointer as a PTE.
+  # Shape: three lines pre-filled (present in D$), two back-to-back cbo.zero
+  # on the first two, the third untouched; every dword of the first two must
+  # read zero, the third keeps its pattern. Then one cbo.zero on a line the
+  # core never touched (cold, pattern from the image), read back the same way.
+  la   s2, .Lcz_lines
+  li   s4, 0x1122334455667788
+  .set CZ_OFF, 0
+  .rept 24
+  sd   s4, CZ_OFF(s2)
+  .set CZ_OFF, CZ_OFF + 8
+  .endr
+  fence rw, rw
+  addi s3, s2, 64
+  .4byte (4 << 20) | (18 << 15) | (2 << 12) | 0x0f   # cbo.zero (s2)
+  .4byte (4 << 20) | (19 << 15) | (2 << 12) | 0x0f   # cbo.zero (s3)
+#ifdef CZ_FENCE
+  fence rw, rw                         # -DCZ_FENCE: drain first, so a stale read is a lost beat, not an ordering miss
+#endif
+  .set CZ_OFF, 0
+  .rept 16
+  ld   t2, CZ_OFF(s2)
+  bnez t2, fail_t2
+  .set CZ_OFF, CZ_OFF + 8
+  .endr
+  .rept 8
+  ld   t2, CZ_OFF(s2)
+  bne  t2, s4, fail_t0
+  .set CZ_OFF, CZ_OFF + 8
+  .endr
+  la   s5, .Lcz_cold
+  .4byte (4 << 20) | (21 << 15) | (2 << 12) | 0x0f   # cbo.zero (s5)
+  .set CZ_OFF, 0
+  .rept 8
+  ld   t2, CZ_OFF(s5)
+#ifdef MEM_ORDER_NEGATIVE
+  xori t2, t2, 1
+#endif
+  bnez t2, fail_t2
+  .set CZ_OFF, CZ_OFF + 8
+  .endr
+  ld   t2, 72(s5)                      # the neighbouring line keeps its image bytes
+  li   t3, 0x0f0e0d0c0b0a0908
+  bne  t2, t3, fail_t0
+  j    .Lcz_done
+  .section .data
+  .balign 64
+.Lcz_lines:
+  .space 192
+  .balign 64
+.Lcz_cold:
+  .quad 0x0706050403020100, 0x0f0e0d0c0b0a0908, 0x1716151413121110, 0x1f1e1d1c1b1a1918
+  .quad 0x2726252423222120, 0x2f2e2d2c2b2a2928, 0x3736353433323130, 0x3f3e3d3c3b3a3938
+  .quad 0x0706050403020100, 0x0f0e0d0c0b0a0908, 0x1716151413121110, 0x1f1e1d1c1b1a1918
+  .quad 0x2726252423222120, 0x2f2e2d2c2b2a2928, 0x3736353433323130, 0x3f3e3d3c3b3a3938
+  .text
+.Lcz_done:
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".

@@ -205,16 +205,25 @@ module store_unit
   logic [$clog2(CVA6Cfg.NrHarts > 1 ? CVA6Cfg.NrHarts : 2)-1:0] st_hart_n, st_hart_q;
 
   // U7ᶜ cbo.zero full cache-block marker (Zicboz): the store buffer gets ONE
-  // speculative entry carrying the line-aligned base address and cbo_op =
+  // speculative entry carrying the block-aligned base address and cbo_op =
   // CBO_ZERO; the commit-queue drain in store_buffer expands it into
-  // line_bytes/stride ordinary full-width stores after the instruction
+  // block_bytes/stride ordinary full-width stores after the instruction
   // commits. One instruction -> one entry -> one commit keeps the store
   // buffer's commit accounting intact and keeps trans_id_q owned by this
   // instruction for the whole operation (the earlier multi-beat expansion
   // outlived pop_st_o, let lsu_ctrl_i drift to the next store, and both
   // orphaned queue entries and reported completion under a stolen tid).
+  // T44: the block is the architected CBO block (config_pkg::CBO_BLOCK_BYTES,
+  // the .dts cboz-block-size), not the D$ line — DCACHE_LINE_WIDTH is in
+  // bits, and `DCACHE_LINE_WIDTH / 8` aligned and zeroed 16 bytes.
+`ifdef G6LC_MUT_CBOZ_LINE_BYTES
+  // Review-only mutation: the pre-fix D$-line-derived block (16 B on a
+  // 128-bit line), so cbo.zero leaves bytes 16..63 of the block untouched.
   localparam int unsigned CBOZ_LINE_B =
       (CVA6Cfg.DCACHE_LINE_WIDTH >= 64) ? (CVA6Cfg.DCACHE_LINE_WIDTH / 8) : 64;
+`else
+  localparam int unsigned CBOZ_LINE_B = config_pkg::CBO_BLOCK_BYTES;
+`endif
 
   logic [CVA6Cfg.PLEN-1:0] paddr_to_sb;
   // Physical address presented to the store buffer (line-aligned for cbo.zero)

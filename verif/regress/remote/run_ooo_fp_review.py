@@ -19,6 +19,8 @@ is hashed into the record and both runs provably execute the same bytes.
 
 Environment:
   FP_REVIEW_MODEL     path to the Variane_testharness executable
+  FP_REVIEW_SPIKE_ISA Spike --isa string for the reference run (default
+                      RV64IMAFDC_ZICSR_ZIFENCEI; add _ZICBOZ for cbo.zero stages)
   FP_REVIEW_CYCLES    cycle cap (default 2_000_000)
   FP_REVIEW_LABEL     free-form label recorded in results.json (e.g. 'inorder')
 """
@@ -403,7 +405,7 @@ def main() -> int:
     if os.environ.get('FP_REVIEW_SPIKE') == '1':
         spike = Path('/opt/testharness/toolchains/spike/bin/spike')
         trace = out / 'spike.trace'
-        command = [str(spike), '--isa=RV64IMAFDC_ZICSR_ZIFENCEI', '-m256',
+        command = [str(spike), '--isa=' + os.environ.get('FP_REVIEW_SPIKE_ISA', 'RV64IMAFDC_ZICSR_ZIFENCEI'), '-m256',
                    '--steps=200000', '-l', '--log-commits', '--log=' + str(trace), str(elf)]
         reference = subprocess.run(command, cwd=out, capture_output=True, text=True, timeout=120)
         (out / 'spike.log').write_text(reference.stdout + reference.stderr)

@@ -56,6 +56,7 @@ DRAM_LO, DRAM_HI = 0x80000000, 0x90000000
 KIMG_VA, KIMG_PA, KIMG_LEN = 0xffffffff80000000, 0x80200000, 0x40000000
 LINEAR_VA, LINEAR_PA, LINEAR_LEN = 0xffffffd800000000, 0x80000000, 0x10000000
 VA_FLOOR = 0xffffffc000000000
+CBO_BLOCK_BYTES = 64              # riscv,cboz-block-size in every corev_apu/bootrom/*.dts
 
 
 USER_TOP = 1 << 38           # Sv39 user half
@@ -67,10 +68,17 @@ class Sv39:
         self.mem = mem
         self.satp = 0
         self.cache = {}
+        self.roots = []           # every satp root seen, most recent first
 
     def set_satp(self, v):
         self.satp = v
         self.cache = {}
+        ppn = v & ((1 << 44) - 1)
+        if (v >> 60) == 8 and ppn:
+            if ppn in self.roots:
+                self.roots.remove(ppn)
+            self.roots.insert(0, ppn)
+            del self.roots[64:]
 
     def flush(self):
         self.cache = {}
@@ -78,11 +86,25 @@ class Sv39:
     def translate(self, va):
         if (self.satp >> 60) != 8:
             return None
-        key = (self.satp & ((1 << 44) - 1), va >> 12)
+        root = self.satp & ((1 << 44) - 1)
+        pa = self._walk(root, va)
+        if pa is None and va >= VA_FLOOR:
+            # a kernel-half VA whose top-level entry is not yet in this
+            # process's pgd (Linux copies it on vmalloc_fault): the mapping
+            # lives in another pgd -- try the other roots, most recent first
+            for r in self.roots:
+                if r != root:
+                    pa = self._walk(r, va)
+                    if pa is not None:
+                        break
+        return pa
+
+    def _walk(self, root, va):
+        key = (root, va >> 12)
         hit = self.cache.get(key)
         if hit is not None:
             return hit | (va & 0xFFF)
-        pt = (self.satp & ((1 << 44) - 1)) << 12
+        pt = root << 12
         for lvl in (2, 1, 0):
             idx = (va >> (12 + 9 * lvl)) & 0x1ff
             pte = self.mem.read(pt + idx * 8, 8)
@@ -225,6 +247,8 @@ def decode(insn):
         if f5 == 0x02: return ('LR', size, f3 == 2)
         if f5 == 0x03: return ('SC', size, False)
         return ('A', size, f3 == 2)
+    if opc == 0x0F and f3 == 2 and (insn >> 20) == 4:
+        return ('Z', CBO_BLOCK_BYTES, False) # cbo.zero: a block-aligned zero store
     return (None, 0, False)
 
 
@@ -421,6 +445,12 @@ def main():
                 if wdata is not None:
                     mem.write(addr, size, wdata)
                     stores += 1
+            elif kind == 'Z':
+                # the whole architected block (riscv,cboz-block-size), whatever
+                # address inside it the instruction carried; a core that zeroes
+                # less (T44: 16 of 64 bytes) then fails the next load of the rest
+                mem.write(addr & ~(size - 1), size, 0)
+                stores += 1
             elif kind == 'SC':
                 if wdata is not None and rdval == 0:
                     mem.write(addr, size, wdata)

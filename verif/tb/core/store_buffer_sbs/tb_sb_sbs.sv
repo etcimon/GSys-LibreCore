@@ -139,8 +139,7 @@ module tb_sb_sbs;
       3: if (CVA6Cfg.RVZiCbom) cbo_op_i = cbo_t'(ariane_pkg::CBO_INVAL);
       4: if (CVA6Cfg.RVZiCboz) begin
         cbo_op_i = cbo_t'(ariane_pkg::CBO_ZERO);
-        paddr_i[$clog2(CVA6Cfg.DCACHE_LINE_WIDTH >= 64 ?
-                       CVA6Cfg.DCACHE_LINE_WIDTH / 8 : 64)-1:0] = '0;
+        paddr_i[$clog2(config_pkg::CBO_BLOCK_BYTES)-1:0] = '0;
         data_i = '0;
         be_i = '1;
         data_size_i = 2'b11;

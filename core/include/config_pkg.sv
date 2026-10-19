@@ -43,6 +43,15 @@ package config_pkg;
   /// wrong CPU takes an interrupt under Linux.
   localparam int unsigned CVA6_MAX_SW_HARTS = 8;
 
+  /// Zicboz/Zicbom cache-block size in bytes: the architected block a
+  /// cbo.zero zeroes and a cbo.inval/clean/flush operates on. It is a
+  /// software-visible constant (`riscv,cboz-block-size` / `riscv,cbom-block-size`
+  /// = 64 in every `corev_apu/bootrom/*.dts`), independent of the D$ line
+  /// width (128 bits on the OoO packages): the store buffer drains a cbo.zero
+  /// as CBO_BLOCK_BYTES/8 beats. Deriving it from `DcacheLineWidth` zeroed 16 of
+  /// the 64 bytes Linux's clear_page expects (T44).
+  localparam int unsigned CBO_BLOCK_BYTES = 64;
+
   /// The NoC type is a top-level parameter, hence we need a bit more
   /// information on what protocol those type parameters are supporting.
   /// Currently two values are supported"
