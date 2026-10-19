@@ -378,11 +378,12 @@ def main():
                                 print(f"MISMATCH #{mism} retire {retire} line {lineno} hart {hart}: pc=0x{pc:x} insn=0x{insn:08x} x{rd_num} got=0x{rd_val:x} exp=0x{exp:x} srcs={[(s, hex(r[s])) for s in srcs]}", flush=True)
                     else:
                         skipped += 1
+            # the next pc is predicted from the state BEFORE this instruction's rd
+            # write (jalr ra, lo(ra) reads the auipc value, not the link)
+            expect[hart] = next_pc(insn, pc, r, k)
             if rd_num is not None and rd_val is not None and rd_num != 0:
                 r[rd_num] = rd_val
                 known[hart] = k | (1 << rd_num)
-            # the next pc is predicted from the state AFTER this instruction's rd write
-            expect[hart] = next_pc(insn, pc, r, known[hart])
             prev_insn[hart] = insn
             prev_pc[hart] = pc
     print(f"checked={checked} mismatches={mism} skipped={skipped} cf_checked={cf_checked} cf_mismatches={cf_mism} retire={retire}")
