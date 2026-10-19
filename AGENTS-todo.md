@@ -30,6 +30,11 @@ Design record: [`architecture/RTL-PIPELINE-PLANS.md`](architecture/RTL-PIPELINE-
 - [x] Whole-core board read three times; scoreboard head scan landed in the
   prefix-OR form; branch-unit check reverted to a trial patch; per-module
   board noise on re-map documented (acceptance rests on the isolated pair).
+- [x] Step 3 (A141): the store buffer's speculative queue is stationary slots
+  with an age matrix — cycle-exact against the ring, placed 4.159 → 2.811 ns at
+  −36% area, board 3.958 → 1.929 ns; the core's budget-equivalent frequency
+  216 → 271 MHz. Remaining step-2/3 items need consumer protocols and IPC
+  decisions first (`architecture/RTL-PIPELINE-PLANS.md`, status table).
 - [ ] Continue step 1, then promote step-2
   proposals (ownership/credits) with their consumer protocols. The remaining
   annotations do not implement stages or establish FO4 closure.

@@ -174,6 +174,86 @@ and the normal package parser. Upload the emitted multiplier along with the
 same source snapshot for the third comparison. An emitted reparse or a
 structural reduction alone is not the acceptance condition.
 
+## A141 — step 3, the store buffer: stationary slots and an age matrix
+
+The first recurrence redesign of `architecture/RTL-PIPELINE-PLANS.md` step 3,
+on the module that topped every board since A128. The speculative queue was a
+dense ring kept in program order by one permutation per cycle (arrival rank
+by popcount of age verdicts, survivor ranks by popcount of keep verdicts, a
+DEPTH² gather of every payload field). It is now a set of **stationary
+slots**:
+
+* a store takes the lowest free slot (prefix-OR isolate) and never moves;
+* program order is a DEPTH×DEPTH **age matrix**, written once at insertion
+  from the arrival's circular age against every live entry (arrival order
+  when not OoO) and cleared with the entry — the IQ's stationary pattern;
+* the commit head is the live entry no live entry is older than (one-hot),
+  gathered into the commit queue by AND-OR;
+* forwarding takes, per byte, the candidate (older than the load, same hart,
+  lane or cbo.zero match, byte written) that no younger candidate also
+  writes — the same last-writer-wins the ordered walk implemented;
+* cancel and flush clear valid bits in place; the count is the popcount of
+  the live slots; `ready_o`, `commit_ready_o`, RVFI and the legacy SMT keep
+  path are unchanged in meaning.
+
+The ring pointers survive only as debug aliases (`speculative_read_pointer_q`
+= head slot, `speculative_write_pointer_q` = next free slot) for the census
+and the T35 leaf, which now checks `count == popcount(valid)` and a
+stale-age-bit mutation (`G6LC_MUT_STQ_FLUSH_WP_Q`, caught by
+`spec_order_cleared`).
+
+**Precondition made explicit.** The matrix is the program order only while
+the age anchor (`oldest_live_tid_i`, the scoreboard's reclaim pointer) never
+passes a live store. That holds by construction in the core; the module now
+asserts it (`spec_order_matches_anchor`), and the side-by-side harness, which
+used to drive the anchor at random — making the *ring's* insertion ranks just
+as arbitrary — drives the first live tid in ring order.
+
+**Evidence (`fo4-a141-stq3b`).** Cycle-exact side-by-side against the ring,
+every output every cycle, 4 seeds × 400k cycles (≈211k pushes, 85k commits,
+78k cancel cycles, 9.3k flushes per seed), all internal assertions on
+(order total/irreflexive/cleared, one head, anchor agreement, OoO commit
+handoff, liveness): **0 mismatches**. T35 leaf positive, oracle negative,
+mutation caught. Whole-core slang elaboration and the selected-target lint
+pass.
+
+| Store buffer (g6lc64_ooo, Nangate45, isolated pair) | Ring | **Stationary** |
+|---|---:|---:|
+| Mapped area | 70417 µm² | **45486 µm²** (-35.4%) |
+| Unbuffered worst arrival / reg→reg cells | 3.766 ns / 36 | **1.293 ns / 11** |
+| Placed worst arrival | 4.159 ns | **2.811 ns** (-32.4%) |
+| Placed reg→reg | 4.159 ns | **2.148 ns** (-48.4%) |
+| Repaired area / buffers | 75335 µm² / 4773 | **48169 µm²** / 2278 |
+
+**Whole-core board** (streamed recipe): `store_buffer` 3.958 → **1.929 ns**
+(90.1 adjusted FO4; reg→reg 1.250 ns), every other module
+bit-identical. The core's worst module is now `g6lc_rename`; the
+budget-equivalent frequency moved from 216 to **271 MHz** on this platform.
+
+| Module (board after A141) | worst arrival | adjusted FO4 |
+|---|---:|---:|
+| `g6lc_rename` | 2.954 ns | 138.1 |
+| `wt_dcache_wbuffer` | 2.831 ns | 132.3 |
+| `frontend` | 2.744 ns | 128.2 |
+| `g6lc_iq` | 2.403 ns | 112.3 |
+| `g6lc_lsq` | 2.229 ns | 104.2 |
+| `multiplier` | 2.181 ns | 101.9 |
+| `scoreboard` | 2.165 ns | 101.2 |
+| `g6lc_ooo_dispatch` | 2.157 ns | 100.8 |
+
+**Steps 2 and 3 — status.** Done: the store-buffer recurrence (this entry) and
+the step-1 rewrites (A140). Not done, each a producer/consumer redesign with
+an IPC decision: rename read/write group publication (+1 dispatch cycle;
+checkpoints and the inter-group bypass), banked IQ selection (exact
+multi-issue ordering across banks or a documented policy change; speculative
+wakeup for load-use), frontend next-line prediction with late correction
+(epoch recovery across FTQ/realigner/queue), and the step-2 ownership items
+(ex_stage completion reservations, D$ miss-unit install descriptors, MMU
+response context, dispatch record staging). The dispatch record staging was
+examined and set aside: its write cone is dominated by the `can_go` chain
+that staging does not shorten, the bypass touches every table read, and the
+composite module has no standalone harness for a cycle-exact witness.
+
 ## A140 — step 1 of the A139 plans: three latency-neutral rewrites landed
 
 The first rung of `architecture/RTL-PIPELINE-PLANS.md` (remove avoidable logic

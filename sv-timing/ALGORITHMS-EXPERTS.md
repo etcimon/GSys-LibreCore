@@ -31,6 +31,12 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A141 update:** store-buffer speculative queue as stationary slots with an
+insertion-time age matrix (one-hot head, per-byte youngest-writer merge, no
+permutation). Cycle-exact vs the ring 4 × 400k; placed 4.159 → 2.811 ns
+worst, 4.159 → 2.148 ns reg→reg, area -36%; board
+3.958 → 1.929 ns. Precondition (monotonic age anchor) asserted.
+
 **A140 board/noise note:** the per-module board is deterministic only for
 cache hits; re-mapped modules moved up to ±26% with no source change, so
 acceptance rests on the isolated pair (reproducible across sessions). The
@@ -8337,6 +8343,19 @@ Method note: ablation is cheap (minutes per cut on one module) and it
 ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
+
+## A141 — Stationary slots and an age matrix (store buffer)
+
+Replace the program-ordered ring by stationary slots plus a DEPTH×DEPTH age
+matrix `older[i][j]`, written at insertion from the arrival's age against the
+live set (arrival order when in-order) and cleared with the entry. Head =
+`valid[i] & ~|(valid & older[:,i])`; forwarding per byte = candidate with no
+younger candidate (`~|(older[i][:] & cand[:,b])`), AND-OR of the winner's
+byte; cancel/flush clear valid bits; count = popcount. Invariants asserted:
+irreflexive, total between live pairs, cleared with the entry, one head,
+agreement with the live anchor. Placed 4.159 → 2.811 ns /
+4.159 → 2.148 ns reg→reg, area -36%. Evidence:
+`architecture/PIPELINE-PRAGMA-REVIEW.md` (A141).
 
 ## A138 — Input staging as a uniform shift (store buffer; rejected)
 

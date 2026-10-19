@@ -119,8 +119,9 @@ This means:
 -   Two loads to the same address are allowed. They will return in issue
     order.
 -   Two stores to the same address are allowed. They are issued in-order
-    by the scoreboard and stored in-order in the store buffer as long as
-    the scoreboard didn't give the signal to commit them.
+    by the scoreboard and held in the store buffer's speculative queue, in
+    program order (stationary slots with an insertion-time age matrix, A141),
+    as long as the scoreboard didn't give the signal to commit them.
 -   A store followed by a load to the same address can only be satisfied
     if the store has already been committed (marked as committed in the
     store buffer). Otherwise the LSU stalls until the scoreboard commits

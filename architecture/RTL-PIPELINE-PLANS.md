@@ -291,6 +291,7 @@ snapshot replay can outweigh a shorter local cone.
 
 | Pass | Source | Plan facet | Result |
 |---|---|---|---|
+| A141 | `store_buffer.sv` | `reshape` stationary payloads + narrow order (step 3) | age matrix, one-hot head, per-byte youngest-writer merge; cycle-exact vs ring; placed 4.159 → 2.811 ns, area -36%; board 3.958 → 1.929 ns |
 | A140 | `cache_subsystem/wt_dcache_mem.sv` | `reshape` ordered per-byte merge | balanced first-valid tree; SAT-equivalent; placed 3.154 → 2.333 ns, area +31.0% (AND-OR alternative recorded) |
 | A140 | `frontend/g6lc_bp_loop.sv` | `reshape` row-local training | equivalence + model; placed 1.911 → 1.459 ns, area -12.3% |
 | A140 | `branch_unit.sv` | `split` target add vs resolve compare | carry-free sum-equals test SAT-proven but board-neutral (worst path is the redirect adder); reverted, kept as a trial patch for the frontend late-correction design |
@@ -300,6 +301,15 @@ snapshot replay can outweigh a shorter local cone.
 Evidence and the whole-core reading live in
 `sv-timing/architecture/PIPELINE-PRAGMA-REVIEW.md` (A140). The corresponding
 `svt-plan` blocks stay in the sources as the record of the remaining facets.
+
+## Status of the integration order
+
+| Step | Done | Open |
+|---|---|---|
+| 1 Remove logic depth | D$ forwarding tree, loop-predictor row-local training, loop-buffer bounded add, scoreboard head scan (A140) | `instr_queue` prefix ranks, `g6lc_bp_tage` provider select, `ras` top cache |
+| 2 Ownership and credits | — | `ex_stage` completion reservations, miss-unit install descriptors, MMU response context, dispatch record staging (write cone is `can_go`; no harness) |
+| 3 Recurrence redesigns | store buffer stationary queue (A141) | rename group publication, banked IQ selection, frontend late correction — consumer protocols and IPC decisions first |
+| 4 Arithmetic partition | multiplier tiling/carry-save (A132) | compressor-level split, carry-prefix groups, crypto round split, divider microsteps |
 
 ## Review record
 

@@ -3,6 +3,20 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A141 — step 3: store buffer stationary queue landed
+
+- [x] Stationary slots + age matrix; cycle-exact vs ring (4 × 400k, assertions
+  on), T35 leaf + mutation; placed 4.159 → 2.811 ns, area -36%;
+  board 3.958 → 1.929 ns; core budget-equivalent 216 → 271 MHz.
+- [ ] Remaining step 3: rename group publication, banked IQ selection,
+  frontend late correction — each needs the consumer protocol and an IPC
+  decision (core regression through the testharness) before RTL.
+- [ ] Remaining step 2: ex_stage completion reservations, miss-unit install
+  descriptors, MMU response context, dispatch record staging (set aside: the
+  write cone is the `can_go` chain; no standalone harness).
+- [ ] Store buffer residual: the in→out forwarding merge (1.93 ns board) —
+  bank the per-byte candidates (RTL-PIPELINE-PLANS `boundary` facet).
+
 ## A140 — A139 step 1 landed (latency-neutral rewrites)
 
 - [x] D$ forwarding balanced tree (SAT-equivalent at 5 geometries), loop

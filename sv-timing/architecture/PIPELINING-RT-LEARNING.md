@@ -231,6 +231,25 @@ than the derived-view cost; measure that split first. The next rung for this
 module is a stage *inside* the permutation (insert, then compact), which the
 uniform-shift witness can also judge.
 
+## 4c. Stationary slots with an age matrix (A141)
+
+A queue that must present program order to several consumers does not have
+to *be* in program order. Keep payloads where they land, record the order as
+pairwise bits written once (at insertion, against the live set) and cleared
+with the entry, and derive every ordered view from the bits: the head is the
+entry with no older live entry; the youngest writer of a byte is the
+candidate no younger candidate also writes. The permutation — rank
+popcounts and a DEPTH² gather of every field, every cycle — disappears, and
+with it 36 % of the module's area.
+
+Preconditions, stated and asserted: the ordering key must be stable for the
+lifetime of any two live entries (the circular age anchor must never pass a
+live entry — true of a reclaim pointer, false of a random one, which the old
+harness had been driving); IDs must be unique among live entries; and the
+removal must clear both the row and the column. The witness is cycle-exact
+equivalence at the interface against the moving design, which is exactly
+what the pattern preserves.
+
 ## 4b. Two measurement lessons from A140
 
 **The isolate form matters more than the search form.** The A136 ROB and the
