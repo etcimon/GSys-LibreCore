@@ -2,8 +2,8 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 # store_buffer flush/commit pointer leaf (T35): positive, +oracle_negative (must fail), and the
-# G6LC_MUT_STQ_FLUSH_WP_Q mutation (pre-fix write pointer: must fail STQ_PTR_AGREE or
-# STQ_HEAD_IS_ARRIVAL, or trip the RTL's own spec_ptr_consistent / ooo_spec_entry_live).
+# G6LC_MUT_STQ_FLUSH_WP_Q mutation (A141: a leaving entry keeps its age bits; the RTL's
+# own spec_order_cleared must trip — before A141 it was the pre-fix write pointer).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
@@ -32,6 +32,6 @@ set +e
 grep -q "STQ_\|ORACLE_NEGATIVE" "$OUT/neg.log" || { echo "FAIL oracle negative did not fire"; exit 1; }
 build mut "+define+G6LC_MUT_STQ_FLUSH_WP_Q"
 "$OUT/mut/tb" > "$OUT/mut.log" 2>&1
-grep -q "STQ_PTR_AGREE\|STQ_HEAD_IS_ARRIVAL\|pointers rp=\|scoreboard slot is not live" "$OUT/mut.log" || { echo "FAIL mutation G6LC_MUT_STQ_FLUSH_WP_Q not caught"; cat "$OUT/mut.log"; exit 1; }
+grep -q "STQ_PTR_AGREE\|STQ_HEAD_IS_ARRIVAL\|stale age bit\|pointers rp=\|scoreboard slot is not live" "$OUT/mut.log" || { echo "FAIL mutation G6LC_MUT_STQ_FLUSH_WP_Q not caught"; cat "$OUT/mut.log"; exit 1; }
 set -e
 echo "PASS run-stq-flush-ptr (positive, oracle negative, pre-fix write-pointer mutation caught)"

@@ -85,6 +85,7 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
         "step1": ("core/cache_subsystem/wt_dcache_mem.sv", "core/frontend/g6lc_bp_loop.sv",
                   "core/frontend/g6lc_loop_buffer.sv"),
         "sbhead": ("core/scoreboard.sv", "core/branch_unit.sv"),
+        "stq3": ("core/store_buffer.sv",),
     }
     changed = profile_files[profile]
     if profile == "statcor":
@@ -99,9 +100,14 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
     if profile == "ckpt":
         name = "verif/tb/core/tb_g6lc_rtl_review.sv"
         files[name] = (root / name).read_bytes()
-    if profile == "stq":
+    if profile in ("stq", "stq3"):
         for p in (root / "verif/tb/core/store_buffer_sbs").glob("*.sv"):
             files[p.relative_to(root).as_posix()] = p.read_bytes()
+    if profile == "stq3":
+        for name in ("verif/tb/core/tb_g6lc_stq_flush_ptr.sv", "verif/tb/core/run-stq-flush-ptr.sh",
+                     "core/include/config_pkg.sv", "core/include/g6lc64_ooo_config_pkg.sv",
+                     "core/include/riscv_pkg.sv", "core/include/ariane_pkg.sv", "core/ooo/g6lc_ooo_pkg.sv"):
+            files[name] = (root / name).read_bytes()
     if profile == "step1":
         for name in ("verif/tb/core/tb_g6lc_loop_buffer_sbs.sv", "verif/tb/core/tb_g6lc_bp_loop_emit.sv",
                      "vendor/pulp-platform/common_cells/src/lzc.sv",
@@ -622,6 +628,10 @@ foreach kind {in_reg reg_reg reg_out in_out} {
 
     if (src / "review.json").exists():
         review = json.loads((src / "review.json").read_text())
+        if review["profile"] == "stq3" and not os.environ.get("CONTROL_MODE"):
+            review_stq3(src, out, sta, lib, abc, evidence, yosys, run)
+            (out / "result.json").write_text(json.dumps(evidence, indent=2))
+            return
         if review["profile"] == "sbhead" and not os.environ.get("CONTROL_MODE"):
             review_sbhead(src, out, sta, lib, abc, evidence, yosys, run)
             (out / "result.json").write_text(json.dumps(evidence, indent=2))
@@ -1027,6 +1037,79 @@ def pair_module(src, out, sta, lib, abc, evidence, yosys, run, key, top, flists,
         entry["placement"] = dict(re.findall(r"(\w+)=(\S+)", row))
         evidence["maps"][f"{key}-{variant}"] = entry
         (out / "result.json").write_text(json.dumps(evidence, indent=2))
+
+
+def review_stq3(src, out, sta, lib, abc, evidence, yosys, run):
+    """A141 stationary speculative store queue: cycle-exact side-by-side
+    against the ring (the new module's own assertions on), the T35 leaf with
+    its oracle negative and review mutation, and the paired mapping /
+    placement at the g6lc64_ooo geometry."""
+    portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
+    packages = [l for l in portable.splitlines()
+                if l.startswith("+") or l.endswith("_pkg.sv") or "/include/" in l]
+    sbs = src / "verif/tb/core/store_buffer_sbs"
+    baseline = src / "baseline/core/store_buffer.sv"
+    new = src / "core/store_buffer.sv"
+    old = baseline.read_text()
+    assert old.count("module store_buffer\n") == 1
+    golden = out / "store_buffer_old.sv"
+    golden.write_text(old.replace("module store_buffer\n", "module store_buffer_old\n", 1))
+    vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+    evidence["simulator"] = subprocess.check_output([vl, "--version"], text=True).strip()
+    # 1. cycle-exact side-by-side, every output every cycle, 4 seeds x 400k
+    sbs_flist = out / "stq3-sbs.f"
+    sbs_flist.write_text("\n".join(packages + [str(new), str(golden), str(sbs / "wrap.sv"),
+                                               str(sbs / "tb_sb_sbs.sv")]) + "\n")
+    sobj = out / "obj-stq3-sbs"
+    run("stq3-sbs-build", [vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal", "-Wno-lint", "-Wno-style",
+        "-Wno-WIDTH", "-Wno-UNOPTFLAT", "-f", str(sbs_flist), "--top-module", "tb_sb_sbs",
+        "--Mdir", str(sobj), "-j", "8"], timeout=1800)
+    for seed in (1, 17, 23, 42):
+        log = run(f"stq3-sbs-{seed}", [str(sobj / "Vtb_sb_sbs"), f"+seed={seed}"], timeout=1800)
+        line = next((l for l in log.splitlines() if "PASS" in l and "errors=0" in l), "")
+        assert line and "%Error" not in log, log[-1500:]
+        evidence["proofs"][f"stq3-sbs-{seed}"] = line.strip()
+    # 2. the T35 flush/commit leaf: positive, oracle negative, review mutation
+    leaf_srcs = [str(src / n) for n in ("core/include/config_pkg.sv", "core/include/g6lc64_ooo_config_pkg.sv",
+                                        "core/include/riscv_pkg.sv", "core/include/ariane_pkg.sv",
+                                        "core/ooo/g6lc_ooo_pkg.sv", "core/store_buffer.sv",
+                                        "verif/tb/core/tb_g6lc_stq_flush_ptr.sv")]
+    leaf_flags = ["--binary", "--timing", "--assert", "-Wno-fatal", "-Wno-TIMESCALEMOD", "-Wno-UNUSED",
+                  "-Wno-WIDTHTRUNC", "-Wno-WIDTHEXPAND", "-Wno-PINCONNECTEMPTY", "-Wno-CASEINCOMPLETE",
+                  "-Wno-UNOPTFLAT", "-Wno-DECLFILENAME", f"-I{src}/core/include", f"-I{src}/core/ooo"]
+    pos = out / "obj-stq3-leaf"
+    run("stq3-leaf-build", [vl, *leaf_flags, *leaf_srcs, "--top-module", "tb_g6lc_stq_flush_ptr",
+                            "--Mdir", str(pos), "-o", "tb"], timeout=900)
+    log = run("stq3-leaf", [str(pos / "tb")], timeout=300)
+    assert "PASS tb_g6lc_stq_flush_ptr" in log, log[-1200:]
+    evidence["proofs"]["stq3-leaf"] = next(l for l in log.splitlines() if "PASS tb_g6lc_stq_flush_ptr" in l)
+    bad = subprocess.run([str(pos / "tb"), "+oracle_negative"], cwd=out, capture_output=True, text=True, timeout=300)
+    (out / "stq3-leaf-negative.log").write_text(bad.stdout + bad.stderr)
+    assert bad.returncode != 0 and ("STQ_" in bad.stdout + bad.stderr or "ORACLE_NEGATIVE" in bad.stdout + bad.stderr)
+    mut = out / "obj-stq3-leaf-mut"
+    run("stq3-leaf-mut-build", [vl, *leaf_flags, "+define+G6LC_MUT_STQ_FLUSH_WP_Q", *leaf_srcs,
+                                "--top-module", "tb_g6lc_stq_flush_ptr", "--Mdir", str(mut), "-o", "tb"], timeout=900)
+    bad = subprocess.run([str(mut / "tb")], cwd=out, capture_output=True, text=True, timeout=300)
+    (out / "stq3-leaf-mut.log").write_text(bad.stdout + bad.stderr)
+    assert "stale age bit" in bad.stdout + bad.stderr, "mutation not caught"
+    evidence["proofs"]["stq3-leaf-negative"] = "oracle negative fails; stale-age-bit mutation trips spec_order_cleared"
+    # 3. paired mapping / placement (sb_wrap_new's ports, OoO configuration)
+    wrap_text = (sbs / "wrap.sv").read_text()
+    body = wrap_text[wrap_text.index("module sb_wrap_new"):]
+    body = body[:body.index("endmodule") + len("endmodule")]
+    body = body.replace("module sb_wrap_new", "module g6lc_stq_timing", 1)
+    tail = body[body.index("  logic [CVA6Cfg.PLEN-1:0] paddr_raw;"):]
+    body = body.replace(tail,
+        "  store_buffer #(.CVA6Cfg(CVA6Cfg), .dcache_req_i_t(dcache_req_i_t), .dcache_req_o_t(dcache_req_o_t), .cbo_t(cbo_t)) u (.*);\nendmodule")
+    wrapper = out / "stq_timing.sv"
+    wrapper.write_text(body + "\n")
+    flists = {}
+    for variant, path in (("baseline", baseline), ("candidate", new)):
+        flist = out / f"stq3-{variant}.f"
+        flist.write_text("\n".join(packages + [str(path), str(wrapper)]) + "\n")
+        flists[variant] = flist
+    pair_module(src, out, sta, lib, abc, evidence, yosys, run, "stq3", "g6lc_stq_timing", flists, place_timeout=2400)
+    print(json.dumps(evidence["maps"], indent=2), flush=True)
 
 
 def review_sbhead(src, out, sta, lib, abc, evidence, yosys, run):
@@ -2144,7 +2227,7 @@ if __name__ == "__main__":
         mode.add_argument("--snapshot", type=Path)
         mode.add_argument("--analyze-results", type=Path)
         parser.add_argument("--baseline", help="baseline revision for the selected review profile")
-        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt", "stq", "step1", "sbhead"), default="control")
+        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt", "stq", "step1", "sbhead", "stq3"), default="control")
         args = parser.parse_args()
         if args.snapshot:
             if not args.baseline:

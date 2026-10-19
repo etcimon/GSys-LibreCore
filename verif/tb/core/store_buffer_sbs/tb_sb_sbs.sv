@@ -102,7 +102,24 @@ module tb_sb_sbs;
     r = rnd256(); load_paddr_valid_i = $bits(load_paddr_valid_i)'(r);
     r = rnd256(); load_trans_id_i = $bits(load_trans_id_i)'(r);
     r = rnd256(); commit_trans_id_i = $bits(commit_trans_id_i)'(r);
-    r = rnd256(); oldest_live_tid_i = $bits(oldest_live_tid_i)'(r);
+    // A141: the program-age anchor is the scoreboard's reclaim pointer, the
+    // oldest live slot. It advances past retired tids and never jumps over a
+    // live one, so the relative age of two live stores is fixed for their
+    // lifetime — the property the stationary queue's age matrix relies on
+    // (and that the ring's insertion rank also assumed; a random anchor made
+    // both designs' orders arbitrary). Here: the first live tid in ring order
+    // from the previous anchor; unchanged while nothing is live.
+    begin
+      logic found;
+      found = 1'b0;
+      for (int d = 0; d < CVA6Cfg.NR_SB_ENTRIES; d++) begin
+        if (!found && live_tid[TidW'(anchor_q + TidW'(d))]) begin
+          anchor_q = TidW'(anchor_q + TidW'(d));
+          found = 1'b1;
+        end
+      end
+      oldest_live_tid_i = anchor_q;
+    end
     r = rnd256(); head_phys_pending_i = $bits(head_phys_pending_i)'(r);
     r = rnd256(); load_hart_i = $bits(load_hart_i)'(r);
     r = rnd256(); dcache_wbuffer_empty_i = $bits(dcache_wbuffer_empty_i)'(r);
@@ -172,6 +189,7 @@ module tb_sb_sbs;
   end
   // shadow set of live tids (per the OLD model's own state)
   logic [CVA6Cfg.NR_SB_ENTRIES-1:0] live_tid = '0;
+  logic [TidW-1:0] anchor_q = '0;
   always @(posedge clk) begin
     if (!rst_ni) live_tid <= '0;
     else begin

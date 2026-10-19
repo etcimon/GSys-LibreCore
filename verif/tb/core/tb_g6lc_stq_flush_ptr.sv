@@ -124,9 +124,11 @@ module tb_g6lc_stq_flush_ptr;
              commit_cnt_s, commit_head_pa_s, commit_last_pa_s, commit_last_valid_s);
     checked++;
   endtask
-  // the invariant the RTL assertion carries: wp - rp == count (mod DEPTH_SPEC)
+  // the invariant the RTL assertion carries: the count is the number of live
+  // slots (A141 stationary queue; the ring's wp - rp == count before it). The
+  // head is read through the RTL's head-slot alias.
   function automatic bit ptr_agree();
-    return (2'(spec_wp_s - spec_rp_s) == 2'(spec_cnt_s));
+    return (spec_cnt_s == $countones(spec_valid_s));
   endfunction
 
   initial begin

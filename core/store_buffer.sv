@@ -191,9 +191,22 @@ module store_buffer
   // keep a status count for both buffers
   logic [$clog2(DEPTH_SPEC):0] speculative_status_cnt_n, speculative_status_cnt_q;
   logic [$clog2(DEPTH_COMMIT):0] commit_status_cnt_n, commit_status_cnt_q;
-  // Speculative queue
-  logic [$clog2(DEPTH_SPEC)-1:0] speculative_read_pointer_n, speculative_read_pointer_q;
-  logic [$clog2(DEPTH_SPEC)-1:0] speculative_write_pointer_n, speculative_write_pointer_q;
+  // A141 stationary speculative queue. Entries never move: a store is written
+  // into a free slot and stays there until it commits, is cancelled or is
+  // flushed. Program order is the age matrix `spec_older_q[i][j]` (entry i is
+  // older than entry j), written once at insertion from the arrival's age
+  // against every live entry and cleared with the entry; the commit head is
+  // the live entry no live entry is older than, and the forwarding merge
+  // picks, per byte, the candidate no younger candidate overrides. This
+  // replaces the ring plus its insert/squash permutation (rank popcounts and
+  // a DEPTH^2 gather of every payload field each cycle) — the core's worst
+  // measured cone (3.7 ns, A128–A140). The ring pointers survive as debug
+  // aliases: `speculative_read_pointer_q` is the head slot and
+  // `speculative_write_pointer_q` the slot the next arrival takes.
+  logic [DEPTH_SPEC-1:0]                 spec_valid_q;       // mirror of .valid, for the one-hot logic
+  logic [DEPTH_SPEC-1:0][DEPTH_SPEC-1:0] spec_older_q, spec_older_n;
+  logic [DEPTH_SPEC-1:0]                 spec_head_oh, spec_ins_oh, spec_remove, spec_pop;
+  logic [$clog2(DEPTH_SPEC)-1:0]         speculative_read_pointer_q, speculative_write_pointer_q;
   // Commit Queue
   logic [$clog2(DEPTH_COMMIT)-1:0] commit_read_pointer_n, commit_read_pointer_q;
   logic [$clog2(DEPTH_COMMIT)-1:0] commit_write_pointer_n, commit_write_pointer_q;
@@ -227,11 +240,54 @@ module store_buffer
   localparam bit MixCommit = CVA6Cfg.OoOEn &&
                             (CVA6Cfg.NrHarts > 1) && !CVA6Cfg.SmtDrainedHandoff;
   logic spec_head_valid, spec_head_mismatch;
-  assign spec_head_valid = (speculative_status_cnt_q != '0) &&
-                           speculative_queue_q[speculative_read_pointer_q].valid;
+  // lowest set bit as a log-depth prefix OR (A140: `x & (~x+1)` maps as a carry chain)
+  function automatic logic [DEPTH_SPEC-1:0] spec_lowest_set(input logic [DEPTH_SPEC-1:0] x);
+    logic [DEPTH_SPEC-1:0] below;
+    below = x << 1;
+    for (int unsigned l = 1; l < DEPTH_SPEC; l = l << 1) below = below | (below << l);
+    return x & ~below;
+  endfunction
+  // the head: live, and no live entry is older
+  always_comb begin
+    for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+      automatic logic any_older;
+      any_older = 1'b0;
+      for (int unsigned j = 0; j < DEPTH_SPEC; j++)
+        any_older |= spec_valid_q[j] && spec_older_q[j][i];
+      spec_head_oh[i] = spec_valid_q[i] && !any_older;
+    end
+  end
+  // one-hot gather of the head entry (AND-OR over the slots)
+  typedef struct packed {
+    logic [CVA6Cfg.PLEN-1:0] address;
+    logic [CVA6Cfg.XLEN-1:0] data;
+    logic [(CVA6Cfg.XLEN/8)-1:0] be;
+    logic [1:0] data_size;
+    cbo_t cbo_op;
+    logic [CVA6Cfg.TRANS_ID_BITS-1:0] trans_id;
+    logic [HID_W-1:0] hart;
+    logic valid;
+    logic wait_rvalid;
+    logic fwd_keep;
+  } spec_entry_t;
+  spec_entry_t spec_head;
+  always_comb begin
+    spec_head = '0;
+    for (int unsigned i = 0; i < DEPTH_SPEC; i++)
+      if (spec_head_oh[i]) spec_head = spec_head | spec_entry_t'(speculative_queue_q[i]);
+  end
+  assign spec_head_valid = |spec_head_oh;
   assign spec_head_mismatch = MixCommit && spec_head_valid &&
-                              (speculative_queue_q[speculative_read_pointer_q].trans_id !=
-                               commit_trans_id_i);
+                              (spec_head.trans_id != commit_trans_id_i);
+  // debug aliases of the retired ring pointers (census, leaf benches)
+  always_comb begin
+    speculative_read_pointer_q  = '0;
+    speculative_write_pointer_q = '0;
+    for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+      if (spec_head_oh[i]) speculative_read_pointer_q  = speculative_read_pointer_q  | $clog2(DEPTH_SPEC)'(i);
+      if (spec_ins_oh[i])  speculative_write_pointer_q = speculative_write_pointer_q | $clog2(DEPTH_SPEC)'(i);
+    end
+  end
 
   assign store_buffer_empty_o = (speculative_status_cnt_q == 0) & no_st_pending_o;
   // ----------------------------------------
@@ -239,6 +295,10 @@ module store_buffer
   // ----------------------------------------
   // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
   // svt-plan: begin store_buffer status=proposal target=10-adjusted-FO4
+  // svt-plan: landed A141 — the reshape facet: stationary slots, an age
+  // matrix written at insertion, one-hot head and per-byte youngest-writer
+  // merge; cycle-exact against the ring (4 x 400k), placed 4.159 -> 2.811 ns
+  // worst / 4.159 -> 2.148 ns reg->reg at -36% area. Remaining facets below.
   // svt-plan: cone spec_rewrite combines arrival rank, survivor ranks and a
   // wide payload gather; delaying its inputs leaves that recurrence intact.
   // svt-plan: reshape keep payloads in stationary slots; update live bits
@@ -261,86 +321,79 @@ module store_buffer
   // svt-plan: limit age selection, free-slot allocation and byte merges
   // remain; LEGACY_SMT_KEEP needs its own ownership rules before enabling.
   // svt-plan: end
-  // Re-pipelining contract (sv-timing A124; 3.02 ns speculative_queue_n ->
-  // write pointer on Nangate45). The queue's next state folds insertion,
-  // the younger-cancel squash and the commit release into one permutation;
-  // a stage inside it would split one transaction's view. The store request
-  // itself has a protocol (valid_i, trans_id_i, cancelled_mask_i, flush_i):
-  // input staging of the request before the permutation is the admissible
-  // mechanism, with ready_o accounting for the staged entry.
+  // Re-pipelining contract (sv-timing A124/A141). The queue's next state is
+  // now slot-local: a free-slot insert, a one-hot pop, per-entry cancel
+  // verdicts and the age matrix; no permutation remains. A stage inside the
+  // block would still split one transaction's view (insert + its age row
+  // + the count), and the store request has a protocol (valid_i, trans_id_i,
+  // cancelled_mask_i, flush_i): input staging before this block is the
+  // admissible mechanism, with ready_o accounting for the staged entry.
   // svt-pipe: require-contract
   // svt-pipe: protocol st valid=valid_i id=trans_id_i kill=cancelled_mask_i[$id] flush=flush_i
   // svt-pipe: no-cut on=speculative_queue_n
-  // svt-pipe: no-cut on=speculative_write_pointer_n
+  // svt-pipe: no-cut on=spec_older_n
   always_comb begin : core_if
-    automatic logic [$clog2(DEPTH_SPEC):0] speculative_status_cnt;
-    automatic logic [$clog2(DEPTH_SPEC):0] live, ins;
-    automatic logic [DEPTH_SPEC-1:0] older_vec;
-    automatic int unsigned nlive, nins;
-    automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.PLEN-1:0] a_addr;
-    automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.XLEN-1:0] a_data;
-    automatic logic [DEPTH_SPEC-1:0][(CVA6Cfg.XLEN/8)-1:0] a_be;
-    automatic logic [DEPTH_SPEC-1:0][1:0] a_sz;
-    automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.TRANS_ID_BITS-1:0] a_tid;
-    automatic logic [DEPTH_SPEC-1:0][HID_W-1:0] a_hart;
-    automatic logic [DEPTH_SPEC-1:0] a_wr, a_fk;
-    automatic cbo_t a_cbo[DEPTH_SPEC];
-    speculative_status_cnt      = speculative_status_cnt_q;
-    live    = '0;
-    ins     = '0;
-    older_vec = '0;
-    nlive   = 0;
-    nins    = 0;
-    a_addr  = '0;
-    a_data  = '0;
-    a_be    = '0;
-    a_sz    = '0;
-    a_tid   = '0;
-    a_hart  = '0;
-    a_wr    = '0;
-    a_fk    = '0;
-    for (int unsigned i = 0; i < DEPTH_SPEC; i++) a_cbo[i] = cbo_t'('0);
-
-    // default assignments
-    speculative_read_pointer_n  = speculative_read_pointer_q;
-    speculative_write_pointer_n = speculative_write_pointer_q;
-    speculative_queue_n         = speculative_queue_q;
-    // LSU interface
-    // we are ready to accept a new entry and the input data is valid
-    // (skip if this TID is already cancelled — FSE S4)
-    if (valid_i && !cancelled_mask_i[trans_id_i]) begin
-      speculative_queue_n[speculative_write_pointer_q].address = paddr_i;
-      speculative_queue_n[speculative_write_pointer_q].data = data_i;
-      speculative_queue_n[speculative_write_pointer_q].be = be_i;
-      speculative_queue_n[speculative_write_pointer_q].data_size = data_size_i;
-      speculative_queue_n[speculative_write_pointer_q].valid = 1'b1;
-      speculative_queue_n[speculative_write_pointer_q].cbo_op = cbo_op_i;
-      speculative_queue_n[speculative_write_pointer_q].trans_id = trans_id_i;
-      speculative_queue_n[speculative_write_pointer_q].hart = st_hart_i;
-      speculative_queue_n[speculative_write_pointer_q].wait_rvalid = 1'b0;
-      speculative_queue_n[speculative_write_pointer_q].fwd_keep =
-          LEGACY_SMT_KEEP &&
-          load_paddr_valid_i && pa_eq(paddr_i, load_paddr_i);
-      // advance the write pointer
-      speculative_write_pointer_n = speculative_write_pointer_q + 1'b1;
-      speculative_status_cnt++;
+    automatic logic ins_active, lgcy_flush_keep;
+    automatic logic [DEPTH_SPEC-1:0] cancel_hit, live_after;
+    automatic logic [DEPTH_SPEC-1:0] arrival_older_than;  // entry j is older than the arrival
+    automatic logic [$clog2(DEPTH_SPEC):0] cnt;
+    speculative_queue_n = speculative_queue_q;
+    spec_older_n        = spec_older_q;
+    // the arrival takes the lowest free slot (a slot freed this cycle is
+    // taken next cycle; the capacity assertion below guarantees a free one)
+    spec_ins_oh = spec_lowest_set(~spec_valid_q);
+    // the head leaves on commit
+    spec_pop    = commit_i ? spec_head_oh : '0;
+    // FSE S4 younger-only cancel: the verdict is a property of the entry,
+    // looked up on its registered trans_id; the arrival is never cancelled
+    // (the push guard tests trans_id_i). G1ah SMT+SS keeps fwd_keep entries.
+    for (int unsigned i = 0; i < DEPTH_SPEC; i++)
+      cancel_hit[i] = spec_valid_q[i] && cancelled_mask_i[speculative_queue_q[i].trans_id];
+    lgcy_flush_keep = flush_i && LEGACY_SMT_KEEP;
+    for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+      if (LEGACY_SMT_KEEP) begin
+`ifdef G6LC_FETCH_B
+        // I13 (B): on flush or cancel keep fwd_keep and the not-cancelled
+        spec_remove[i] = spec_valid_q[i] && cancel_hit[i] && !speculative_queue_q[i].fwd_keep;
+`else
+        // A: on flush keep only fwd_keep; on cancel keep fwd_keep and the not-cancelled
+        spec_remove[i] = spec_valid_q[i] && !speculative_queue_q[i].fwd_keep &&
+                         (cancel_hit[i] || flush_i);
+`endif
+      end else begin
+        // SI / no G1ah: a flush evicts every speculative store; a cancel its tids
+        spec_remove[i] = spec_valid_q[i] && (flush_i || cancel_hit[i]);
+      end
     end
+    live_after = spec_valid_q & ~spec_pop & ~spec_remove;
 
-    // evict the current entry out of this queue, the commit queue will thankfully take it and commit it
-    // to the memory hierarchy
-    if (commit_i) begin
-      // invalidate
-      speculative_queue_n[speculative_read_pointer_q].valid = 1'b0;
-      // advance the read pointer
-      speculative_read_pointer_n = speculative_read_pointer_q + 1'b1;
-      speculative_status_cnt--;
+    // LSU interface: accept a new entry (skip if this TID is already
+    // cancelled — FSE S4); a flush in the same cycle drops it below exactly
+    // as the ring did (the arrival was inserted, then the flush evicted all)
+    ins_active = valid_i && !cancelled_mask_i[trans_id_i];
+    // program age of the arrival against every entry that stays live: under
+    // OoO the circular distance from the oldest live slot (U5.4), in order
+    // the arrival is the youngest
+    for (int unsigned j = 0; j < DEPTH_SPEC; j++)
+      arrival_older_than[j] = live_after[j] &&
+                              (!CVA6Cfg.OoOEn || ooo_older(speculative_queue_q[j].trans_id, trans_id_i));
+
+    // removals first: valid off, age rows and columns cleared
+    for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+      if (spec_pop[i] || spec_remove[i]) begin
+        speculative_queue_n[i].valid = 1'b0;
+        speculative_queue_n[i].fwd_keep = 1'b0;
+`ifndef G6LC_MUT_STQ_FLUSH_WP_Q
+        // Review mutation (A141, the T35 leaf): leave the age bits of a
+        // leaving entry in place; spec_order_cleared must trip.
+        for (int unsigned j = 0; j < DEPTH_SPEC; j++) begin
+          spec_older_n[i][j] = 1'b0;
+          spec_older_n[j][i] = 1'b0;
+        end
+`endif
+      end
     end
-
-    speculative_status_cnt_n = speculative_status_cnt;
-
-    // G1ah: a spec store that a live load already forwarded from must
-    // drain. Mark those entries before the rewrite below (it permutes the
-    // marked entries; marking before or after the permutation is the same).
+    // G1ah: a spec store that a live load already forwarded from must drain
     if (LEGACY_SMT_KEEP && load_paddr_valid_i) begin
       for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
         if (speculative_queue_n[i].valid &&
@@ -349,162 +402,47 @@ module store_buffer
         end
       end
     end
-
-    // One permutation for two rewrites (sv-timing A109).
-    //
-    // U5.4 OoO: place each arrival at its program-order position. Entries
-    // are written here at AGU time, so arrival order is ISSUE order; under
-    // OoO that is not program order, and this queue's head is what the
-    // commit handoff hands to memory — so the arrival sinks past the younger
-    // stores it was queued behind (the rank `ins` below, a popcount of the
-    // per-entry age verdicts, sv-timing A100).
-    //
-    // FSE S4: younger-only cancel — keep older stores, drop cancelled TIDs.
-    // G1ah SMT+SS: also keep fwd_keep. A on flush keeps only fwd_keep. I13: B
-    // keeps !cancelled on flush too — keep-skip cancelled wrong-path stores,
-    // but a mispredict flush was dropping older frame `sd s2/s3` still in
-    // the spec queue (getprop `sw` mepc=0x12eb2 mcause=6).
-    //
-    // Both rewrites take the dense window [read_ptr_n, read_ptr_n + n) and
-    // write it back dense at [0, live). Done one after the other they were
-    // two permutations in series (insert, then compact) — the module
-    // board's worst store-buffer path. Here each snapshot entry gets its
-    // position after the insertion (`pos_ins`, the identity when nothing
-    // arrives) and its keep verdict (all kept when nothing is cancelled);
-    // its final slot is the number of kept predecessors, and one gather
-    // writes the window. Existing entries retain their relative order;
-    // only comparisons involving the arrival depend on its insertion rank.
-    // Exact: the composition
-    // of the two maps, evaluated as one. The cancel verdict is a property
-    // of the entry — looked up on its registered trans_id, and the arrival
-    // is never cancelled (the push guard tested trans_id_i).
-    begin : spec_rewrite
-      automatic logic ins_active, sq_active;
-      automatic logic [DEPTH_SPEC-1:0] keep, cancel;
-      automatic logic [DEPTH_SPEC-1:0][$clog2(DEPTH_SPEC):0] final_slot;
-      automatic logic [$clog2(DEPTH_SPEC)-1:0] ks;
-      ins_active = CVA6Cfg.OoOEn && valid_i && !cancelled_mask_i[trans_id_i];
-      sq_active  = (|cancelled_mask_i && !flush_i) || (flush_i && LEGACY_SMT_KEEP);
-      keep = '0;
-      cancel = '0;
-      final_slot = '0;
-      if (ins_active || sq_active) begin
-        live   = speculative_status_cnt_n;
-        nlive  = int'(live);
-        a_addr = '0;
-        a_data = '0;
-        a_be   = '0;
-        a_sz   = '0;
-        a_tid  = '0;
-        a_hart = '0;
-        a_wr   = '0;
-        a_fk   = '0;
-        for (int unsigned i = 0; i < DEPTH_SPEC; i++) a_cbo[i] = cbo_t'('0);
-        // snapshot the live window in current order, oldest first (the
-        // arrival, when there is one, last)
-        for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
-          if (k < nlive) begin
-            ks          = speculative_read_pointer_n + $clog2(DEPTH_SPEC)'(k);
-            a_addr[k]   = speculative_queue_n[ks].address;
-            a_data[k]   = speculative_queue_n[ks].data;
-            a_be[k]     = speculative_queue_n[ks].be;
-            a_sz[k]     = speculative_queue_n[ks].data_size;
-            a_cbo[k]    = speculative_queue_n[ks].cbo_op;
-            a_tid[k]    = speculative_queue_n[ks].trans_id;
-            a_hart[k]   = speculative_queue_n[ks].hart;
-            a_wr[k]     = speculative_queue_n[ks].wait_rvalid;
-            a_fk[k]     = speculative_queue_n[ks].fwd_keep;
-            // the verdict on the registered entry; the arrival's slot held
-            // an invalid entry, and the arrival itself is not cancelled
-            cancel[k]   = !(ins_active && (k + 1 == nlive)) &&
-                          speculative_queue_q[ks].valid &&
-                          cancelled_mask_i[speculative_queue_q[ks].trans_id];
-          end
-        end
-        // rank of the arrival = number of already-queued stores older than it
-        for (int unsigned k = 0; k < DEPTH_SPEC; k++)
-          older_vec[k] = ins_active && ((k + 1) < nlive) &&
-                         ooo_older(a_tid[k], a_tid[(nlive > 0) ? nlive-1 : 0]);
-        ins  = ($clog2(DEPTH_SPEC) + 1)'($countones(older_vec));
-        nins = int'(ins);
-        // keep verdict per entry: every live entry when nothing is
-        // cancelled, else the squash's rule
-        for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
-          if (k < nlive) begin
-            ks = speculative_read_pointer_n + $clog2(DEPTH_SPEC)'(k);
-            keep[k] = !sq_active || (speculative_queue_n[ks].valid &&
-`ifdef G6LC_FETCH_B
-                      ((LEGACY_SMT_KEEP && a_fk[k]) || !cancel[k]));
-`else
-                      ((LEGACY_SMT_KEEP && a_fk[k]) || (!flush_i && !cancel[k])));
-`endif
-          end
-        end
-        // Direct predecessor relation, avoiding rank -> inserted-position
-        // arithmetic -> DEPTH_SPEC^2 dynamic comparisons. For two existing
-        // entries the relation is just j<k; the arrival precedes k exactly
-        // when k>=ins. This uses the same ins as the original permutation,
-        // without assuming that older_vec is a prefix or that IDs are unique.
-        for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
-          automatic logic [DEPTH_SPEC-1:0] ahead;
+    // the insertion: payload into the free slot, its age row and column
+    if (ins_active) begin
+      for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+        if (spec_ins_oh[i]) begin
+          speculative_queue_n[i].address = paddr_i;
+          speculative_queue_n[i].data = data_i;
+          speculative_queue_n[i].be = be_i;
+          speculative_queue_n[i].data_size = data_size_i;
+          speculative_queue_n[i].valid = 1'b1;
+          speculative_queue_n[i].cbo_op = cbo_op_i;
+          speculative_queue_n[i].trans_id = trans_id_i;
+          speculative_queue_n[i].hart = st_hart_i;
+          speculative_queue_n[i].wait_rvalid = 1'b0;
+          speculative_queue_n[i].fwd_keep =
+              LEGACY_SMT_KEEP &&
+              load_paddr_valid_i && pa_eq(paddr_i, load_paddr_i);
           for (int unsigned j = 0; j < DEPTH_SPEC; j++) begin
-            if (j == k) ahead[j] = 1'b0;
-            else if (!ins_active) ahead[j] = keep[j] && (j < k);
-            else if (k + 1 == nlive) ahead[j] = keep[j] && (j < nins);
-            else if (j + 1 == nlive) ahead[j] = keep[j] && (k >= nins);
-            else ahead[j] = keep[j] && (j < k);
+            spec_older_n[j][i] = arrival_older_than[j];
+            spec_older_n[i][j] = live_after[j] && !arrival_older_than[j];
           end
-          final_slot[k] = ($clog2(DEPTH_SPEC) + 1)'($countones(ahead));
         end
-        live = ($clog2(DEPTH_SPEC) + 1)'($countones(keep));
-        // one gather: slot s takes the kept entry whose final slot is s
-        for (int unsigned sl = 0; sl < DEPTH_SPEC; sl++) begin
-          speculative_queue_n[sl].valid    = 1'b0;
-          speculative_queue_n[sl].fwd_keep = 1'b0;
-          for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
-            if (keep[k] && final_slot[k] == ($clog2(DEPTH_SPEC) + 1)'(sl)) begin
-              speculative_queue_n[sl].address     = a_addr[k];
-              speculative_queue_n[sl].data        = a_data[k];
-              speculative_queue_n[sl].be          = a_be[k];
-              speculative_queue_n[sl].data_size   = a_sz[k];
-              speculative_queue_n[sl].cbo_op      = a_cbo[k];
-              speculative_queue_n[sl].trans_id    = a_tid[k];
-              speculative_queue_n[sl].hart        = a_hart[k];
-              speculative_queue_n[sl].wait_rvalid = a_wr[k];
-              speculative_queue_n[sl].fwd_keep    = a_fk[k];
-              speculative_queue_n[sl].valid       = 1'b1;
+      end
+      // a flush (non-legacy) in the arrival's cycle evicts it as well
+      if (flush_i && !LEGACY_SMT_KEEP) begin
+        for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+          if (spec_ins_oh[i]) begin
+            speculative_queue_n[i].valid = 1'b0;
+            for (int unsigned j = 0; j < DEPTH_SPEC; j++) begin
+              spec_older_n[i][j] = 1'b0;
+              spec_older_n[j][i] = 1'b0;
             end
           end
         end
-        speculative_read_pointer_n  = '0;
-        speculative_write_pointer_n = $clog2(DEPTH_SPEC)'(live);
-        speculative_status_cnt_n    = live;
       end
     end
-    if (flush_i && LEGACY_SMT_KEEP) begin
-      // the LEGACY flush ran the keep-only rewrite above; nothing to evict
-    end else if (flush_i) begin
-      // SI / no G1ah: evict all speculative stores
-      for (int unsigned i = 0; i < DEPTH_SPEC; i++) speculative_queue_n[i].valid = 1'b0;
 
-      // T35: the pointers must agree after the flush. A commit_i in the flush
-      // cycle advanced speculative_read_pointer_n past _q; leaving the write
-      // pointer at _q put the next arrival one slot behind the head, and under
-      // OoO the program-order rewrite (above) then re-validated the stale slot
-      // at the head -- an entry whose scoreboard slot was no longer live -- and
-      // dropped the arrival. The flush sources that can coincide with a store
-      // commit are the SMT ones (the forced drain's registered pulse); the
-      // in-order flushes are all raised by the committing port-0 instruction
-      // itself, so there this is the same value as before.
-`ifdef G6LC_MUT_STQ_FLUSH_WP_Q
-      // Review mutation (T35): the pre-fix write pointer; the leaf
-      // tb_g6lc_stq_flush_ptr must fail STQ_PTR_AGREE / STQ_HEAD_IS_ARRIVAL.
-      speculative_write_pointer_n = speculative_read_pointer_q;
-`else
-      speculative_write_pointer_n = speculative_read_pointer_n;
-`endif
-      speculative_status_cnt_n = 'b0;
-    end
+    // occupancy from the accepted events (the count is the popcount of the
+    // live slots; the assertion below checks it)
+    cnt = '0;
+    for (int unsigned i = 0; i < DEPTH_SPEC; i++) cnt += ($clog2(DEPTH_SPEC) + 1)'(speculative_queue_n[i].valid);
+    speculative_status_cnt_n = cnt;
 
     // we are ready if the speculative and the commit queue have a space left
     ready_o = (speculative_status_cnt_n < $bits(speculative_status_cnt_n)'(DEPTH_SPEC)) || commit_i;
@@ -537,7 +475,7 @@ module store_buffer
   assign req_port_o.data_be = commit_queue_q[commit_read_pointer_q].be;
   assign req_port_o.data_size = commit_queue_q[commit_read_pointer_q].data_size;
 
-  assign rvfi_mem_paddr_o = speculative_queue_q[speculative_read_pointer_q].address;
+  assign rvfi_mem_paddr_o = spec_head.address;
 
   always_comb begin : store_if
     automatic logic [$clog2(DEPTH_COMMIT):0] commit_status_cnt;
@@ -605,7 +543,7 @@ module store_buffer
 
     // shift the store request from the speculative buffer to the non-speculative
     if (commit_i) begin
-      commit_queue_n[commit_write_pointer_q] = speculative_queue_q[speculative_read_pointer_q];
+      commit_queue_n[commit_write_pointer_q] = spec_head;
       commit_write_pointer_n = commit_write_pointer_n + 1'b1;
       commit_status_cnt++;
     end
@@ -753,11 +691,9 @@ module store_buffer
     automatic logic [CVA6Cfg.XLEN-1:0]     data_m;
     automatic logic [(CVA6Cfg.XLEN/8)-1:0] be_m;
     automatic logic [$clog2(DEPTH_COMMIT)-1:0] cidx;
-    automatic logic [$clog2(DEPTH_SPEC)-1:0]   sidx;
     data_m = '0;
     be_m   = '0;
     cidx   = '0;
-    sidx   = '0;
 
     if (load_paddr_valid_i) begin
       for (int unsigned k = 0; k < DEPTH_COMMIT; k++) begin
@@ -790,31 +726,56 @@ module store_buffer
           end
         end
       end
-      for (int unsigned k = 0; k < DEPTH_SPEC; k++) begin
-        sidx = speculative_read_pointer_q + $clog2(DEPTH_SPEC)'(k);
-        if (speculative_queue_q[sidx].valid &&
-            spec_visible(speculative_queue_q[sidx].trans_id) &&
-            (!HART_OWN || speculative_queue_q[sidx].hart == load_hart_i) &&
-            (pa_eq(speculative_queue_q[sidx].address, load_paddr_i) ||
-             cboz_covers(speculative_queue_q[sidx].cbo_op,
-                         speculative_queue_q[sidx].address, load_paddr_i))) begin
-          if (CVA6Cfg.RVZiCboz &&
-              speculative_queue_q[sidx].cbo_op == ariane_pkg::CBO_ZERO) begin
-            for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
-              if (cboz_covers(speculative_queue_q[sidx].cbo_op,
-                              speculative_queue_q[sidx].address,
-                              load_paddr_i + CVA6Cfg.PLEN'(b))) begin
-                data_m[8*b+:8] = '0;
-                be_m[b]        = 1'b1;
-              end
+      // A141: the speculative sources in program order without walking a
+      // ring: every entry is a candidate per byte (older than the load, same
+      // hart, lane or cbo.zero line match, byte written), and a byte takes
+      // the candidate that no younger candidate also writes — the same
+      // "last writer in program order wins" the ordered walk implemented.
+      begin : spec_fwd
+        automatic logic [DEPTH_SPEC-1:0] ent_match;
+        automatic logic [DEPTH_SPEC-1:0][(CVA6Cfg.XLEN/8)-1:0] cand, win;
+        automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.XLEN-1:0] val;
+        for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+          ent_match[i] = speculative_queue_q[i].valid &&
+                         spec_visible(speculative_queue_q[i].trans_id) &&
+                         (!HART_OWN || speculative_queue_q[i].hart == load_hart_i) &&
+                         (pa_eq(speculative_queue_q[i].address, load_paddr_i) ||
+                          cboz_covers(speculative_queue_q[i].cbo_op,
+                                      speculative_queue_q[i].address, load_paddr_i));
+          for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+            if (CVA6Cfg.RVZiCboz && speculative_queue_q[i].cbo_op == ariane_pkg::CBO_ZERO) begin
+              cand[i][b] = ent_match[i] &&
+                           cboz_covers(speculative_queue_q[i].cbo_op, speculative_queue_q[i].address,
+                                       load_paddr_i + CVA6Cfg.PLEN'(b));
+              val[i][8*b+:8] = '0;
+            end else begin
+              cand[i][b] = ent_match[i] && speculative_queue_q[i].be[b];
+              val[i][8*b+:8] = speculative_queue_q[i].data[8*b+:8];
             end
-          end else begin
-            for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
-              if (speculative_queue_q[sidx].be[b]) begin
-                data_m[8*b+:8] = speculative_queue_q[sidx].data[8*b+:8];
-                be_m[b]        = 1'b1;
-              end
-            end
+          end
+        end
+        for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+          for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+            automatic logic younger_writes;
+            younger_writes = 1'b0;
+            for (int unsigned j = 0; j < DEPTH_SPEC; j++)
+              younger_writes |= spec_older_q[i][j] && cand[j][b];
+            win[i][b] = cand[i][b] && !younger_writes;
+          end
+        end
+        for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+          automatic logic any_cand;
+          automatic logic [7:0] byte_v;
+          any_cand = 1'b0;
+          byte_v   = '0;
+          for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+            any_cand |= cand[i][b];
+            byte_v   |= {8{win[i][b]}} & val[i][8*b+:8];
+          end
+          // speculative stores are younger than every committed one
+          if (any_cand) begin
+            data_m[8*b+:8] = byte_v;
+            be_m[b]        = 1'b1;
           end
         end
       end
@@ -938,15 +899,16 @@ module store_buffer
   always_ff @(posedge clk_i or negedge rst_ni) begin : p_spec
     if (~rst_ni) begin
       speculative_queue_q         <= '{default: 0};
-      speculative_read_pointer_q  <= '0;
-      speculative_write_pointer_q <= '0;
+      spec_older_q                <= '0;
       speculative_status_cnt_q    <= '0;
     end else begin
       speculative_queue_q         <= speculative_queue_n;
-      speculative_read_pointer_q  <= speculative_read_pointer_n;
-      speculative_write_pointer_q <= speculative_write_pointer_n;
+      spec_older_q                <= spec_older_n;
       speculative_status_cnt_q    <= speculative_status_cnt_n;
     end
+  end
+  for (genvar i = 0; i < DEPTH_SPEC; i++) begin : gen_spec_valid
+    assign spec_valid_q[i] = speculative_queue_q[i].valid;
   end
 
   // registers
@@ -1071,11 +1033,10 @@ module store_buffer
   ooo_commit_is_oldest :
   assert property (@(posedge clk_i) disable iff (!rst_ni)
                    (CVA6Cfg.OoOEn && commit_i) |->
-                   (speculative_queue_q[speculative_read_pointer_q].valid &&
-                    speculative_queue_q[speculative_read_pointer_q].trans_id == commit_trans_id_i))
+                   (spec_head_valid && spec_head.trans_id == commit_trans_id_i))
   else
     $error("[Speculative Queue] OoO commit handoff took tid %0d, commit is retiring tid %0d",
-           speculative_queue_q[speculative_read_pointer_q].trans_id, commit_trans_id_i);
+           spec_head.trans_id, commit_trans_id_i);
 
   // U5.4 OoO: a store younger than the querying load must never reach it --
   // every forwarded byte has an older (visible) source.
@@ -1090,15 +1051,59 @@ module store_buffer
   // scoreboard slot that is still issued/live. A reservation outliving its
   // slot (or never backed by one) means the hold-to-commit credit accounting
   // leaked.
-  // T35: the pointer pair and the status count describe one queue. The flush
-  // path used to leave write = read_q while a same-cycle commit moved read to
-  // read_q + 1 (count 0), and the next arrival then landed behind the head.
-  spec_ptr_consistent :
+  // A141: the count is the number of live slots, and the age matrix is a
+  // strict total order on the live entries (irreflexive, antisymmetric,
+  // total between any two live entries, cleared with the entry) with
+  // exactly one head whenever the queue is not empty.
+  spec_cnt_is_popcount :
   assert property (@(posedge clk_i) disable iff (!rst_ni)
-                   ($clog2(DEPTH_SPEC)'(speculative_write_pointer_q - speculative_read_pointer_q) ==
-                    $clog2(DEPTH_SPEC)'(speculative_status_cnt_q)))
-  else $error("[Speculative Queue] pointers rp=%0d wp=%0d disagree with count %0d",
-              speculative_read_pointer_q, speculative_write_pointer_q, speculative_status_cnt_q);
+                   (speculative_status_cnt_q == ($clog2(DEPTH_SPEC) + 1)'($countones(spec_valid_q))))
+  else $error("[Speculative Queue] count %0d disagrees with %0d live slots",
+              speculative_status_cnt_q, $countones(spec_valid_q));
+  for (genvar i = 0; i < DEPTH_SPEC; i++) begin : gen_spec_order_assert
+    for (genvar j = 0; j < DEPTH_SPEC; j++) begin : gen_spec_order_pair
+      if (i == j) begin : gen_irrefl
+        spec_order_irreflexive :
+        assert property (@(posedge clk_i) disable iff (!rst_ni) !spec_older_q[i][i])
+        else $error("[Speculative Queue] slot %0d older than itself", i);
+      end else begin : gen_pair
+        spec_order_total :
+        assert property (@(posedge clk_i) disable iff (!rst_ni)
+                         (spec_valid_q[i] && spec_valid_q[j]) |->
+                         (spec_older_q[i][j] ^ spec_older_q[j][i]))
+        else $error("[Speculative Queue] slots %0d/%0d live without a strict order", i, j);
+        spec_order_cleared :
+        assert property (@(posedge clk_i) disable iff (!rst_ni)
+                         (!spec_valid_q[i] || !spec_valid_q[j]) |->
+                         (!spec_older_q[i][j]))
+        else $error("[Speculative Queue] stale age bit between %0d/%0d", i, j);
+      end
+    end
+  end
+  spec_one_head :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+                   (speculative_status_cnt_q != '0) |-> $onehot(spec_head_oh))
+  else $error("[Speculative Queue] %0d live entries but head one-hot is %b",
+              speculative_status_cnt_q, spec_head_oh);
+  // The age matrix was written against the anchor of the insertion cycle.
+  // It stays the program order only while the anchor (the scoreboard's
+  // reclaim pointer, the oldest live slot) never passes a live store — true
+  // by construction in the core, and what this check holds the environment to.
+  if (CVA6Cfg.OoOEn) begin : gen_spec_order_anchor
+    for (genvar i = 0; i < DEPTH_SPEC; i++) begin : gen_i
+      for (genvar j = 0; j < DEPTH_SPEC; j++) begin : gen_j
+        if (i != j) begin : gen_pair
+          spec_order_matches_anchor :
+          assert property (@(posedge clk_i) disable iff (!rst_ni)
+                           (spec_valid_q[i] && spec_valid_q[j]) |->
+                           (spec_older_q[i][j] == ooo_older(speculative_queue_q[i].trans_id,
+                                                           speculative_queue_q[j].trans_id)))
+          else $error("[Speculative Queue] age of slots %0d/%0d (tids %0d/%0d) disagrees with the anchor %0d",
+                      i, j, speculative_queue_q[i].trans_id, speculative_queue_q[j].trans_id, oldest_live_tid_i);
+        end
+      end
+    end
+  end
 
   if (CVA6Cfg.OoOEn) begin : gen_sb_live_assert
     for (genvar i = 0; i < DEPTH_SPEC; i++) begin : gen_spec_entry_live
