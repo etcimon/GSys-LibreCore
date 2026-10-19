@@ -24,5 +24,10 @@ private:
     TSharedPtr<class STextBlock> Summary;
     TSharedPtr<class SVerticalBox> Rows;
     void FillRows();
+    void AddRow(const FString& Label, const FString& PartId, const FString& PinId, const FString& NetId);
+    /* Boards under corev-mb/boards whose manifest.source_circuit_sha256 equals the live
+       circuit's: their ERC / parity / simulation outputs belong to what is shown. Others
+       with a manifest are reported as stale. */
+    void ReadBackOutputs(const FString& CircuitSha, int32& OutErrors, int32& OutWarnings);
     void SelectIssue(const FString& PartId, const FString& PinId, const FString& NetId);
 };

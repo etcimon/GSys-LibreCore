@@ -52,6 +52,7 @@ footprints alone:
 | **An outline change is proposed before it is applied.** `propose_outline` names kept / re-edged (`from_edge → to_edge`) / dropped (with the reason, including parts owned by a block whose host is dropped) / stock added / blocks removed / nets losing pins; `set_outline` applies exactly that. `mb_outline_proposal` is read-only; the Board window previews it and offers Apply. | `gesture.rs::the_outline_proposal_names_every_drop_…`, `mbcore_c` test, `MbgenOutlineWidget.cpp` |
 | **Rip-up is bounded.** When a kept path walls a dirty net off, kept paths crossing the dirty net's pad span are released and routing runs again, at most `RIP_UP_ROUNDS` times; a board that still fails reports `Unroutable`. | `route.rs::a_kept_path_that_blocks_a_dirty_net_is_ripped_and_both_route` |
 | **Findings are visible where they are made.** The Issues panel (`I` in both hosts) lists `circuit.json` diagnostics with rule id and part/pin/net; a row selects its part; the summary states error/warning/info counts and the SoC package status. It refreshes once per committed gesture, never per drag sample. Labels paint the persistent refdes large and the id small. | `MbgenIssuesWidget.{h,cpp}`, `unreal.rs::both_hosts_show_the_same_issues_panel_from_mb_circuit`, `paint_labels.py` |
+| **Results are bound to the circuit's identity.** `mb_circuit` / `mbgen circuit` report `circuit_sha256` (sha256 of the compact resolved circuit); the bundle manifest records the same value as `source_circuit_sha256` (and `circuit_sha256` for the compiled circuit with placeholders). The Issues panel reads `corev-mb/boards/*/outputs` (SKiDL/ERC issues, parity, `sim/*.json` with measurements) **only** for boards whose manifest matches the live hash; any other ingested board is one `stale` row. Both hosts show the same results because both read the same files through the same widget. | `export::circuit_sha256`, `mbcore_c` test `circuit_json_carries_…`, `MbgenIssuesWidget::ReadBackOutputs` |
 
 ## Landed in pass 3 (S2 close, S3 start, S6 rip-up)
 
@@ -94,9 +95,9 @@ footprints alone:
 - **S1** remaining: Editor/standalone event-replay comparison (behaviour, not strings).
 - **S2**: fill `soc_package.json` from the approved package data when it exists (the reader and gate
   are in place); nothing else open.
-- **S3** remaining: library exact-part search (pcbparts cache), pin/net explorer, surfacing
-  `*.erc.json` / `*.parity.json` / `sim/*.json` from `corev-mb/boards/<id>/outputs` in the Issues
-  panel beside the resolve-time findings, recipe `Proposal` preview panel, simulation controls/plots.
+- **S3** remaining: library exact-part search (pcbparts cache), pin/net explorer, recipe `Proposal`
+  preview panel, running `mb design` / `mb simulate` from the hosts, waveform plots (today: per-
+  measurement rows with pass/OUT).
 - **S4**: more verified recipes (power entry / regulator, reset, clock, boot flash) — each needs a
   frozen pinout for its IC; the host side (`Proposal` preview panel, "apply as one undo") is UI work.
 - **S5**: pin *functions* for frozen distributor pinouts (today 146 slot contacts are honest
@@ -124,5 +125,6 @@ footprints alone:
   as its footprint and the manufacturing gate reports that.
 - ngspice and kicad-cli are absent on this host; `mb simulate` honestly returns `incomplete` (exit 4)
   and the KiCad bridge is exercised by pure tests only.
-- The Issues panel shows resolve-time findings only; SKiDL/ERC, parity and simulation results live
-  in `corev-mb/boards/<id>/outputs` and are not yet read back into the hosts.
+- Readback is by file: the hosts do not run `mb design` / `mb simulate` themselves; a result appears
+  after the CLI has produced it and is shown only while the live circuit still has the identity it
+  was produced from.

@@ -24,7 +24,7 @@ pub use catalog::{
     apply_package, domain_for, library_for, package, packages, LibraryRow, PackageCard, Support,
 };
 pub use circuit::{resolve, Circuit, CircuitNet, Component, Diagnostic, Obligation, CIRCUIT_SCHEMA_VERSION};
-pub use export::{compile, suggested_decaps, Bundle, BUNDLE_SCHEMA_VERSION};
+pub use export::{circuit_sha256, compile, suggested_decaps, Bundle, BUNDLE_SCHEMA_VERSION};
 pub use geometry::{
     body_z, copper_z, layer_of, pad_world, rotate_q, world_span, Rect, BOTTOM_COPPER_Z_UM, PCB_THICKNESS_UM,
     TOP_COPPER_Z_UM,

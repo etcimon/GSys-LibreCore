@@ -380,6 +380,13 @@ mod catia_nav_source_tests {
         assert!(ISSUES_CPP.contains("Board->CircuitJson()"));
         assert!(ISSUES_CPP.contains("Board->SelectPart(Part);"));
         assert!(ISSUES_CPP.contains("TEXT(\"soc_package\")"));
+        // Outputs are bound to the circuit identity: matched by
+        // manifest.source_circuit_sha256, otherwise reported stale.
+        assert!(ISSUES_CPP.contains("TEXT(\"source_circuit_sha256\")"));
+        assert!(ISSUES_CPP.contains("ingested from a previous circuit revision"));
+        for file in [".erc.json", ".parity.json", "TEXT(\"sim\")"] {
+            assert!(ISSUES_CPP.contains(file), "readback lacks {file}");
+        }
         assert!(ACTOR_CPP.contains("TEXT(\"mb_circuit\")"));
         assert!(ACTOR_CPP.contains("TEXT(\"mb_outline_proposal\")"));
         assert!(ACTOR_CPP.contains("circuit --design"), "exe fallback for an old DLL");

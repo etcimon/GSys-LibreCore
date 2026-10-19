@@ -270,8 +270,12 @@ pub unsafe extern "C" fn mb_circuit(session: *const Session) -> *mut c_char {
                 #[serde(flatten)]
                 circuit: mbcore::Circuit,
                 revision: u64,
+                /// Same hash `mbgen compile` writes as `manifest.circuit_sha256`, so a
+                /// host can tell which ingested board's outputs belong to this circuit.
+                circuit_sha256: String,
             }
-            json_ptr(&Msg { circuit, revision: sess.revision })
+            let circuit_sha256 = mbcore::circuit_sha256(&circuit);
+            json_ptr(&Msg { circuit, revision: sess.revision, circuit_sha256 })
         }
         Err(err) => err_json(&err.reason),
     }
@@ -564,6 +568,9 @@ mod tests {
             let c = take(mb_circuit(sess));
             assert!(c.get("error").is_none());
             assert_eq!(c["revision"], 0);
+            assert_eq!(c["circuit_sha256"].as_str().unwrap().len(), 64);
+            let bundle = mbcore::compile(&Design::mini_itx().unwrap()).unwrap();
+            assert_eq!(c["circuit_sha256"], bundle.manifest()["source_circuit_sha256"], "mb_circuit and the manifest agree on the editable circuit's identity");
             assert!(c["components"].as_array().unwrap().iter().all(|k| !k["refdes"].as_str().unwrap().is_empty()));
             assert!(c["nets"].as_array().unwrap().iter().any(|n| n["id"] == "P12V" && n["origins"][0] == "contract"));
             assert!(c["diagnostics"].as_array().unwrap().iter().any(|d| d["rule"] == "W-NET-NO-SOURCE"));

@@ -104,7 +104,13 @@ fn circuit_cmd(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
     let design = read_design(flags.get("--design").ok_or("--design is required")?)?;
     let out = flags.get("--out").ok_or("--out is required")?;
     let circuit = mbcore::resolve(&design).map_err(|e| e.reason)?;
-    fs::write(out, serde_json::to_string_pretty(&circuit).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    // Same shape as `mb_circuit`: the circuit plus its identity hash.
+    let mut value = serde_json::to_value(&circuit).map_err(|e| e.to_string())?;
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert("circuit_sha256".into(), serde_json::Value::String(mbcore::circuit_sha256(&circuit)));
+        obj.insert("revision".into(), serde_json::Value::from(0u64));
+    }
+    fs::write(out, serde_json::to_string_pretty(&value).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
     Ok(())
 }
 

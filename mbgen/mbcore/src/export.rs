@@ -30,6 +30,18 @@ pub struct Bundle {
     pub circuit: Value,
     /// Outline, placements, sides, rotations and route intent for the PCB bridge.
     pub layout: Value,
+    /// Identity of the *editable* design's circuit (before compile-time
+    /// placeholders). A host compares its live `mb_circuit` hash to this to
+    /// know whether a board's outputs belong to what it is showing.
+    pub source_circuit_sha256: String,
+}
+
+/// Identity of a resolved circuit: sha256 of its compact JSON. The manifest,
+/// `mb_circuit` and `mbgen circuit` all report this same value, so outputs
+/// produced from an ingested bundle can be matched to (or rejected by) the
+/// live circuit.
+pub fn circuit_sha256(circuit: &crate::circuit::Circuit) -> String {
+    sha256_hex(serde_json::to_string(circuit).unwrap_or_default().as_bytes())
 }
 
 impl Bundle {
@@ -69,6 +81,7 @@ impl Bundle {
                 "design_schema": self.design["schema_version"],
             },
             "circuit_sha256": circuit_hash,
+            "source_circuit_sha256": self.source_circuit_sha256,
             "core_source": self.platform["core"]["source"],
             // The manufacturing endpoint's external input, stated per bundle.
             "soc_package": self.circuit["soc_package"],
@@ -81,6 +94,7 @@ pub fn compile(design: &Design) -> Result<Bundle, PackError> {
     let card = package(&design.settings.package_id).ok_or_else(|| PackError {
         reason: format!("unknown package {}", design.settings.package_id),
     })?;
+    let source_circuit_sha256 = circuit_sha256(&resolve(design)?);
     let mut built = design.clone();
     expand_hidden(&mut built)?;
     let bodies = scene(&built)?;
@@ -213,6 +227,7 @@ pub fn compile(design: &Design) -> Result<Bundle, PackError> {
         errors: errors_json,
         circuit: circuit_json,
         layout,
+        source_circuit_sha256,
     })
 }
 
@@ -437,6 +452,11 @@ mod tests {
         // Same design, same bytes.
         let again = compile(&Design::mini_itx().unwrap()).unwrap();
         assert_eq!(serde_json::to_string(&again.manifest()).unwrap(), serde_json::to_string(&m).unwrap());
+        // `circuit_sha256` identifies the compiled circuit (with placeholders);
+        // `source_circuit_sha256` identifies the editable one a host shows live.
+        let live = crate::circuit::resolve(&Design::mini_itx().unwrap()).unwrap();
+        assert_eq!(m["source_circuit_sha256"], circuit_sha256(&live));
+        assert_ne!(m["circuit_sha256"], m["source_circuit_sha256"], "compile adds placeholder bodies");
     }
 
     #[test]
