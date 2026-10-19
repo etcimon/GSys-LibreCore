@@ -439,6 +439,38 @@ module wt_dcache_wbuffer
       localparam [$clog2(FixupDepth):0] FixupDepthCnt = FixupDepth[$clog2(FixupDepth):0];
       localparam int unsigned FixupForwardDepth = FixupDepth + int'(FixupDepth > 0);
 
+      // A144: the queue is read in slot order, not by walking (head + k) %
+      // Depth. A slot is occupied when its ring distance from the head is
+      // below the count; a word-address match is tested in every slot in
+      // parallel; "the first match in FIFO order from the head" is the
+      // lowest matching slot at or above the head, else the lowest below
+      // it (two log-depth prefix-OR isolates split by a thermometer mask),
+      // exactly what the serial `!coalesced && k < cnt` walk selected. The
+      // head-relative read muxes and the Depth-deep priority chain were the
+      // module's worst register-to-register path (2.83 ns on the board).
+      logic [FixupDepth-1:0] fixup_slot_valid, fixup_slot_ge_head;
+      always_comb begin
+        for (int unsigned k = 0; k < FixupDepth; k++) begin
+          automatic int unsigned ring_dist;
+          ring_dist = (k >= unsigned'(fixup_head)) ? k - unsigned'(fixup_head)
+                                                    : k + FixupDepth - unsigned'(fixup_head);
+          fixup_slot_valid[k]   = ring_dist < unsigned'(fixup_cnt);
+          fixup_slot_ge_head[k] = k >= unsigned'(fixup_head);
+        end
+      end
+      function automatic logic [FixupDepth-1:0] fixup_lowest_set(input logic [FixupDepth-1:0] x);
+        logic [FixupDepth-1:0] below;
+        below = x << 1;
+        for (int unsigned l = 1; l < FixupDepth; l = l << 1) below = below | (below << l);
+        return x & ~below;
+      endfunction
+      function automatic logic [FixupDepth-1:0] fixup_first_from_head(input logic [FixupDepth-1:0] m);
+        logic [FixupDepth-1:0] hi, lo;
+        hi = m & fixup_slot_ge_head;
+        lo = m & ~fixup_slot_ge_head;
+        return (|hi) ? fixup_lowest_set(hi) : fixup_lowest_set(lo);
+      endfunction
+
       // Full when the FIFO is at capacity and there is no bypass slot available.
       assign fixup_full  = (fixup_cnt == FixupDepthCnt) && fixup_bypass_valid_q;
       assign fixup_empty = (fixup_cnt == '0) && !fixup_bypass_valid_q;
@@ -457,11 +489,9 @@ module wt_dcache_wbuffer
       always_comb begin
         fixup_match = fixup_bypass_valid_q &&
             fixup_bypass_q.paddr[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES] == wbuffer_q[rtrn_ptr].wtag;
-        for (int k = 0; k < FixupDepth; k++) begin
-          int unsigned idx;
-          idx = (int'(unsigned'(fixup_head)) + k) % FixupDepth;
-          if (k < unsigned'(fixup_cnt) &&
-              fixup_q[idx].paddr[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES] == wbuffer_q[rtrn_ptr].wtag)
+        for (int unsigned k = 0; k < FixupDepth; k++) begin
+          if (fixup_slot_valid[k] &&
+              fixup_q[k].paddr[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES] == wbuffer_q[rtrn_ptr].wtag)
             fixup_match = 1'b1;
         end
       end
@@ -572,15 +602,17 @@ module wt_dcache_wbuffer
             fixup_coalesced = 1'b1;
             fixup_active_coalesced = 1'b1;
           end else begin
+            automatic logic [FixupDepth-1:0] push_match, push_first;
+            for (int unsigned k = 0; k < FixupDepth; k++)
+              push_match[k] = fixup_slot_valid[k] &&
+                              (fixup_q[k].paddr[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES] ==
+                               fixup_paddr_push[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES]);
+            push_first = fixup_first_from_head(push_match);
             for (int unsigned k = 0; k < FixupDepth; k++) begin
-              int unsigned idx;
-              idx = (int'(unsigned'(fixup_head)) + int'(k)) % int'(FixupDepth);
-              if (!fixup_coalesced && k < unsigned'(fixup_cnt) &&
-                  (fixup_q[idx].paddr[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES] ==
-                   fixup_paddr_push[CVA6Cfg.PLEN-1:CVA6Cfg.XLEN_ALIGN_BYTES])) begin
-                fixup_d[idx] = merge_fixup(fixup_q[idx], fixup_data_push, fixup_user_push, fixup_be_push);
+              if (push_first[k]) begin
+                fixup_d[k] = merge_fixup(fixup_q[k], fixup_data_push, fixup_user_push, fixup_be_push);
                 fixup_coalesced = 1'b1;
-                fixup_active_coalesced = !fixup_bypass_valid_q && idx == int'(unsigned'(fixup_head));
+                fixup_active_coalesced = !fixup_bypass_valid_q && (k == unsigned'(fixup_head));
               end
             end
           end

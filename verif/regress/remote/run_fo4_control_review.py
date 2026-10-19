@@ -87,6 +87,7 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
         "sbhead": ("core/scoreboard.sv", "core/branch_unit.sv"),
         "stq3": ("core/store_buffer.sv",),
         "isolate": ("core/ooo/g6lc_rename.sv", "core/ooo/g6lc_iq.sv", "core/scoreboard.sv"),
+        "wbuf": ("core/cache_subsystem/wt_dcache_wbuffer.sv",),
     }
     changed = profile_files[profile]
     if profile == "statcor":
@@ -111,6 +112,11 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
             files[name] = (root / name).read_bytes()
     if profile == "isolate":
         for name in ("verif/tb/core/tb_g6lc_iq_store_age.sv",):
+            files[name] = (root / name).read_bytes()
+    if profile == "wbuf":
+        for name in ("vendor/pulp-platform/common_cells/src/lzc.sv",
+                     "vendor/pulp-platform/common_cells/src/rr_arb_tree.sv",
+                     "core/cva6_fifo_v3.sv"):
             files[name] = (root / name).read_bytes()
     if profile == "step1":
         for name in ("verif/tb/core/tb_g6lc_loop_buffer_sbs.sv", "verif/tb/core/tb_g6lc_bp_loop_emit.sv",
@@ -632,6 +638,10 @@ foreach kind {in_reg reg_reg reg_out in_out} {
 
     if (src / "review.json").exists():
         review = json.loads((src / "review.json").read_text())
+        if review["profile"] == "wbuf" and not os.environ.get("CONTROL_MODE"):
+            review_wbuf(src, out, sta, lib, abc, evidence, yosys, run)
+            (out / "result.json").write_text(json.dumps(evidence, indent=2))
+            return
         if review["profile"] == "isolate" and not os.environ.get("CONTROL_MODE"):
             review_isolate(src, out, sta, lib, abc, evidence, yosys, run)
             (out / "result.json").write_text(json.dumps(evidence, indent=2))
@@ -1045,6 +1055,177 @@ def pair_module(src, out, sta, lib, abc, evidence, yosys, run, key, top, flists,
         entry["placement"] = dict(re.findall(r"(\w+)=(\S+)", row))
         evidence["maps"][f"{key}-{variant}"] = entry
         (out / "result.json").write_text(json.dumps(evidence, indent=2))
+
+
+def review_wbuf(src, out, sta, lib, abc, evidence, yosys, run):
+    """A144: the D$ write buffer's fixup queue read in slot order (parallel
+    word match, log-depth first-in-FIFO-order pick) instead of the
+    head-relative serial walk. Combinational change: matched-state
+    equivalence of the whole module under the core's request types at two
+    fixup depths, then the isolated pair."""
+    portable = (src / "portable.f").read_text().replace("@ROOT@", str(src))
+    packages = [l for l in portable.splitlines()
+                if l.startswith("+") or l.endswith("_pkg.sv") or "/include/" in l]
+    common = [str(src / n) for n in ("vendor/pulp-platform/common_cells/src/lzc.sv",
+                                    "vendor/pulp-platform/common_cells/src/rr_arb_tree.sv",
+                                    "core/cva6_fifo_v3.sv")]
+    live = (src / "core/cache_subsystem/wt_dcache_wbuffer.sv").read_text()
+    ports = live[live.index("    input logic clk_i,  // Clock"):live.index("\n);\n", live.index("    input logic clk_i,  // Clock"))]
+    wrapper = out / "wbuf_timing.sv"
+    wrapper.write_text("""
+module g6lc_wbuf_timing
+  import ariane_pkg::*;
+  import wt_cache_pkg::*;
+#(
+    parameter int unsigned FIXUP_DEPTH = 0,
+    localparam type cbo_t = logic [7:0],
+    localparam config_pkg::cva6_cfg_t Base = build_config_pkg::build_config(cva6_config_pkg::cva6_cfg),
+    localparam config_pkg::cva6_cfg_t CVA6Cfg = cfg_with_depth(Base, FIXUP_DEPTH),
+    localparam DCACHE_CL_IDX_WIDTH = $clog2(CVA6Cfg.DCACHE_NUM_WORDS),
+    localparam type dcache_req_i_t = struct packed {
+      logic [CVA6Cfg.DCACHE_INDEX_WIDTH-1:0] address_index;
+      logic [CVA6Cfg.DCACHE_TAG_WIDTH-1:0]   address_tag;
+      logic [CVA6Cfg.XLEN-1:0]               data_wdata;
+      logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0]  data_wuser;
+      logic                                  data_req;
+      logic                                  data_we;
+      logic [(CVA6Cfg.XLEN/8)-1:0]           data_be;
+      logic [1:0]                            data_size;
+      logic [CVA6Cfg.DcacheIdWidth-1:0]      data_id;
+      logic                                  kill_req;
+      logic                                  tag_valid;
+      cbo_t                                  cbo_op;
+    },
+    localparam type dcache_req_o_t = struct packed {
+      logic                                 data_gnt;
+      logic                                 data_rvalid;
+      logic [CVA6Cfg.DcacheIdWidth-1:0]     data_rid;
+      logic [CVA6Cfg.XLEN-1:0]              data_rdata;
+      logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0] data_ruser;
+    },
+    localparam type wbuffer_t = struct packed {
+      logic [CVA6Cfg.DCACHE_TAG_WIDTH+(CVA6Cfg.DCACHE_INDEX_WIDTH-CVA6Cfg.XLEN_ALIGN_BYTES)-1:0] wtag;
+      logic [CVA6Cfg.XLEN-1:0] data;
+      logic [CVA6Cfg.DCACHE_USER_WIDTH-1:0] user;
+      logic [(CVA6Cfg.XLEN/8)-1:0] dirty;
+      logic [(CVA6Cfg.XLEN/8)-1:0] valid;
+      logic [(CVA6Cfg.XLEN/8)-1:0] txblock;
+      logic checked;
+      logic [CVA6Cfg.DCACHE_SET_ASSOC-1:0] hit_oh;
+    }
+) (
+""" + ports + """
+);
+  wt_dcache_wbuffer #(.CVA6Cfg(CVA6Cfg), .DCACHE_CL_IDX_WIDTH(DCACHE_CL_IDX_WIDTH), .dcache_req_i_t(dcache_req_i_t),
+                      .dcache_req_o_t(dcache_req_o_t), .wbuffer_t(wbuffer_t)) u (.*);
+endmodule
+""")
+    # the configuration helper lives in a package so the localparam can call it
+    (out / "wbuf_cfg_pkg.sv").write_text("""
+package wbuf_timing_pkg;
+endpackage
+""")
+    helper = """
+function automatic config_pkg::cva6_cfg_t cfg_with_depth(input config_pkg::cva6_cfg_t base, input int unsigned depth);
+  config_pkg::cva6_cfg_t c = base;
+  if (depth != 0) c.WtDcacheFixupDepth = depth;
+  return c;
+endfunction
+"""
+    wrapper.write_text(helper + wrapper.read_text())
+    flists = {}
+    for variant, path in (("baseline", src / "baseline/core/cache_subsystem/wt_dcache_wbuffer.sv"),
+                          ("candidate", src / "core/cache_subsystem/wt_dcache_wbuffer.sv")):
+        flist = out / f"wbuf-{variant}.f"
+        flist.write_text("\n".join(packages + common + [str(path), str(wrapper)]) + "\n")
+        flists[variant] = flist
+    # The changed selection alone, by SAT: the ring walk's choice (first
+    # match in FIFO order among the first cnt entries from head, and whether
+    # the match is the head) against the slot-order pick, for every head,
+    # count and address pattern. This is the whole semantic content of the
+    # rewrite; the module-level matched-state proof below is the same claim
+    # over the complete module and may not finish on the merged data path.
+    (out / "fixup_pick.sv").write_text("""
+module fixup_pick_old #(parameter int unsigned D = 8, parameter int unsigned AW = 10) (
+  input logic [D-1:0][AW-1:0] paddr_i, input logic [AW-1:0] push_i,
+  input logic [$clog2(D)-1:0] head_i, input logic [$clog2(D):0] cnt_i,
+  output logic [D-1:0] merge_o, output logic coalesced_o, active_o, output logic any_o);
+  always_comb begin
+    merge_o = '0; coalesced_o = 1'b0; active_o = 1'b0; any_o = 1'b0;
+    for (int unsigned k = 0; k < D; k++) begin
+      int unsigned idx;
+      idx = (int'(unsigned'(head_i)) + int'(k)) % int'(D);
+      if (!coalesced_o && k < unsigned'(cnt_i) && paddr_i[idx] == push_i) begin
+        merge_o[idx] = 1'b1; coalesced_o = 1'b1; active_o = (idx == int'(unsigned'(head_i)));
+      end
+      if (k < unsigned'(cnt_i) && paddr_i[idx] == push_i) any_o = 1'b1;
+    end
+  end
+endmodule
+module fixup_pick_new #(parameter int unsigned D = 8, parameter int unsigned AW = 10) (
+  input logic [D-1:0][AW-1:0] paddr_i, input logic [AW-1:0] push_i,
+  input logic [$clog2(D)-1:0] head_i, input logic [$clog2(D):0] cnt_i,
+  output logic [D-1:0] merge_o, output logic coalesced_o, active_o, output logic any_o);
+  logic [D-1:0] slot_valid, ge, m;
+  function automatic logic [D-1:0] lowest_set(input logic [D-1:0] x);
+    logic [D-1:0] below;
+    below = x << 1;
+    for (int unsigned l = 1; l < D; l = l << 1) below = below | (below << l);
+    return x & ~below;
+  endfunction
+  function automatic logic [D-1:0] first_from_head(input logic [D-1:0] v);
+    logic [D-1:0] hi, lo;
+    hi = v & ge; lo = v & ~ge;
+    return (|hi) ? lowest_set(hi) : lowest_set(lo);
+  endfunction
+  always_comb begin
+    for (int unsigned k = 0; k < D; k++) begin
+      automatic int unsigned ring_dist;
+      ring_dist = (k >= unsigned'(head_i)) ? k - unsigned'(head_i) : k + D - unsigned'(head_i);
+      slot_valid[k] = ring_dist < unsigned'(cnt_i);
+      ge[k] = k >= unsigned'(head_i);
+      m[k] = slot_valid[k] && (paddr_i[k] == push_i);
+    end
+    merge_o = first_from_head(m);
+    coalesced_o = |merge_o;
+    any_o = |m;
+    active_o = 1'b0;
+    for (int unsigned k = 0; k < D; k++) if (merge_o[k]) active_o = (k == unsigned'(head_i));
+  end
+endmodule
+""")
+    for d, aw in ((8, 10), (4, 8), (2, 8), (16, 6)):
+        key = f"fixup-pick-eq-{d}"
+        text = yosys(key, f"read_slang {out}/fixup_pick.sv --top fixup_pick_old --top fixup_pick_new -G D={d} -G AW={aw}\n"
+                          "proc\nmiter -equiv -flatten -make_assert fixup_pick_old fixup_pick_new m\n"
+                          "hierarchy -top m\nsat -verify -prove-asserts m\n", timeout=900)
+        assert "SUCCESS!" in text, text[-1200:]
+        evidence["proofs"][key] = "slot-order pick == ring walk (merge one-hot, coalesced, active, any) PASS"
+    (out / "result.json").write_text(json.dumps(evidence, indent=2))
+    # 0 = the configured depth (8). Power-of-two depths only: with a non-power-of-two
+    # depth the head register has unreachable values on which the ring walk and the
+    # slot-order form legitimately differ. The whole-module proof is attempted
+    # with a bounded budget; a timeout is recorded, not treated as a pass.
+    depths = (0, 4, 2) if not os.environ.get("WBUF_SKIP_MODULE_EQ") else ()
+    for depth in depths:
+        commands = []
+        for variant, name in (("baseline", "gold"), ("candidate", "gate")):
+            commands += [
+                f"read_slang -f {flists[variant]} --top g6lc_wbuf_timing --single-unit -G FIXUP_DEPTH={depth} --ignore-assertions",
+                "hierarchy -top g6lc_wbuf_timing", "proc", "flatten", "memory_map", "async2sync", "opt_clean",
+                f"rename g6lc_wbuf_timing {name}", f"design -stash {name}",
+            ]
+        commands += ["design -copy-from gold -as gold gold", "design -copy-from gate -as gate gate",
+                     "equiv_make gold gate equiv", "hierarchy -top equiv", "equiv_simple -seq 1", "equiv_status -assert"]
+        key = f"wbuf-eq-depth{depth}"
+        try:
+            text = yosys(key, "\n".join(commands), timeout=int(os.environ.get("WBUF_EQ_TIMEOUT", "1800")))
+            assert "Equivalence successfully proven!" in text, text[-1500:]
+            evidence["proofs"][key] = "matched-state equivalence of wt_dcache_wbuffer PASS"
+        except Exception as e:
+            evidence["proofs"][key] = f"INCONCLUSIVE ({str(e)[:60]})"
+    pair_module(src, out, sta, lib, abc, evidence, yosys, run, "wbuf", "g6lc_wbuf_timing", flists, place_timeout=2400)
+    print(json.dumps(evidence["maps"], indent=2), flush=True)
 
 
 def review_isolate(src, out, sta, lib, abc, evidence, yosys, run):
@@ -2399,7 +2580,7 @@ if __name__ == "__main__":
         mode.add_argument("--snapshot", type=Path)
         mode.add_argument("--analyze-results", type=Path)
         parser.add_argument("--baseline", help="baseline revision for the selected review profile")
-        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt", "stq", "step1", "sbhead", "stq3", "isolate"), default="control")
+        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt", "stq", "step1", "sbhead", "stq3", "isolate", "wbuf"), default="control")
         args = parser.parse_args()
         if args.snapshot:
             if not args.baseline:

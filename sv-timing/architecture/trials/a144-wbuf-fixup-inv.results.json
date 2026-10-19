@@ -1,0 +1,344 @@
+[
+  {
+    "depth": 0,
+    "scenario": 0,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 0,
+    "scenario": 1,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 0,
+    "scenario": 2,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 0,
+    "scenario": 3,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 0,
+    "scenario": 7,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 0,
+    "scenario": 7,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 0,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 0,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 1,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 1,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 2,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 2,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 3,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 3,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 4,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 4,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 5,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 5,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 6,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 6,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 7,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 2,
+    "scenario": 7,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 0,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 0,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 1,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 1,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 2,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 2,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 3,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 3,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 4,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 4,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 5,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 5,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 6,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 6,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 7,
+    "negative": false,
+    "fault": "",
+    "expectedFailure": false,
+    "rc": 0,
+    "matched": true
+  },
+  {
+    "depth": 4,
+    "scenario": 7,
+    "negative": true,
+    "fault": "",
+    "expectedFailure": true,
+    "rc": 1,
+    "matched": true
+  }
+]
