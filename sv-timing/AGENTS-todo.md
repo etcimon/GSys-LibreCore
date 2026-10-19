@@ -3,6 +3,19 @@
 Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 [`architecture/DESIGN.md`](architecture/DESIGN.md) first. Update this file every pass.
 
+## A145 — IQ staged store-age gate: built, witnessed, timing-neutral, reverted
+
+- [x] `IqStagedStoreGate` trial: exact-rule random witness (3 × 200k, negative
+  trips), store-age leaf; placed 2.806 → 2.779 ns — the loop itself is
+  the 2.40 ns, not the input cone. Patch + result in `architecture/trials/`.
+- [x] g6lc64_ooo baseline harness built (`work-ver-ooo-a145-base`).
+- [ ] IPC route blocked by the remote overlap guard (foreign soaks running):
+  run `soak`/`di` on the baseline library when the machine is free, then
+  implement the real stage (registered candidates + speculative wakeup +
+  replay) and compare `[cookie-exit] t=` cycle counts.
+- [ ] 10 adjusted FO4 per stage is physically out of reach on this platform
+  (flop overhead 0.13–0.18 of 0.214 ns); the agreed stage target is ~1.0 ns.
+
 ## A144 — write-buffer fixup queue in slot order; protocol items specified
 
 - [x] Path reports (`build-platform/workspace/build/sv-timing/path_report.py`

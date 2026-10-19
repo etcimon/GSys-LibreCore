@@ -41,6 +41,11 @@ Design record: [`architecture/RTL-PIPELINE-PLANS.md`](architecture/RTL-PIPELINE-
 - [x] A144: write-buffer fixup queue read in slot order (placed 5.344 → 4.853 ns,
   area -18%; board unchanged within noise, a different cone leads); path reports for the top four; frontend
   and IQ protocol changes specified with the core-level validation route.
+- [x] A145: IQ staged store-age gate built and witnessed (3 × 200k exact-rule
+  checks, negative trips); placed 2.806 → 2.779 ns — neutral, the select loop
+  itself is the limiter; reverted to a trial patch. Baseline g6lc64_ooo harness
+  built; soak/DI blocked by the remote overlap guard (foreign soaks running).
+  Stage budget decided: ~1.0 ns, not 10 FO4 (flop overhead alone is 0.13–0.18 ns).
 - [ ] Continue step 1, then promote step-2
   proposals (ownership/credits) with their consumer protocols. The remaining
   annotations do not implement stages or establish FO4 closure.

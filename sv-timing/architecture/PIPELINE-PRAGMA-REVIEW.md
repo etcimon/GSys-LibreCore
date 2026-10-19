@@ -174,6 +174,62 @@ and the normal package parser. Upload the emitted multiplier along with the
 same source snapshot for the third comparison. An emitted reparse or a
 structural reduction alone is not the acceptance condition.
 
+## A145 — IQ protocol stage, first rung: the staged store-age gate (built, measured, not retained)
+
+**The ask and its physical bound.** The request was to turn the pipeline
+plans into RTL stages under 10 adjusted FO4. On this calibration that is
+0.214 ns, of which the flop itself (clk→Q 0.09–0.14 ns, setup ≈0.04) is
+0.13–0.18 ns: one or two gates per stage. No cut of the OoO loops reaches it;
+the agreed target became ~1.0 ns (47 FO4) with IPC cost measured by the soak
+and recorded.
+
+**What was built (`trials/a145-iq-staged-store-gate.patch`).** A config bit
+`IqStagedStoreGate` (all 20 target packages, on in g6lc64_ooo) under which
+the issue queue evaluates the load's store-age gate one cycle ahead: a
+registered per-slot verdict computed for the entry that will occupy the slot
+(the A112 shape), completed in the select by the stores still queued ahead
+of the load — the only unresolved stores a one-cycle-old mask can miss are
+last cycle's dispatches, and those are queue entries. Conservative by
+construction; a load blocked by an older unresolved store is released one
+cycle after the resolution. Witness `tb_g6lc_iq_stgate`: random ALU/LOAD/STORE
+dispatch with in-order ids, a model LSQ, producers, commit pointer, acks and
+stalls; every issued load is checked against the *exact* current-cycle rule,
+operands and store order are checked for every issue, and the oldest
+exact-rule-issuable op must issue within 3 acked cycles. 3 seeds × 200k
+cycles (≈95k loads, 47k stores per seed) pass; the negative (DUT blind to the
+mask) trips `IQ_STGATE_SAFETY` at cycle 8. The store-age leaf still passes;
+the gate-off module equivalence is inconclusive (equivalence-engine budget,
+as for the write buffer) — the gate-off path is the original code under a
+generate-time constant.
+
+**Measurement — neutral, so not retained.** Whole-core split pair of the IQ:
+mapped area 180062 → 176570 µm², unbuffered reg→reg clk_i → clk_i ns,
+placed worst 2.806 → 2.779 ns, reg→reg 2.525 → 2.768 ns, area
+194951 → 190315 µm². The board's worst path moved from
+`count_d → issue_valid_o → q_after_issue` to `older_unres_d → q_d → …` at the
+same length: the unfiltered path report's 6.2 ns cone from `commit_ptr_i` was
+the *input* cone (fanout-heavy), while the loop the board measures —
+wake CAM → ready → any/many rank trees → grant → one-hot select → clear →
+next state, ≈32 cells — is 2.40 ns on its own and untouched by staging a
+term that feeds `ready`. The RTL and config are reverted; the witness, the
+`iqgate` review profile and the result stay as the harness for the real
+stage.
+
+**What the real stage is, and what it now needs.** Only a register *inside*
+the loop moves it: registered candidates (readiness and age rank computed
+one cycle ahead) with the select and grant on the registered vector, and
+dependent issue kept at one cycle by speculative wakeup from the selected
+producer's tag (fixed-latency FUs) with replay on a load miss. That is an
+IPC change measured at the core: the g6lc64_ooo baseline harness is built
+(`/opt/testharness/work/work-ver-ooo-a145-base`, 171 s with the cache); the
+DI minis and the OpenSBI soak (`[cookie-exit] t=` cycle count) against it
+could not run in this pass — the remote's overlap guard refused them while
+two long-running soaks from other tracks (`ooocoh-t38`, 3.2 days;
+`ooocoh-t52`) occupy the machine, and those are not mine to stop. Commands:
+`testharness_proxy.py soak --flavour B --verlib work-ver-ooo-a145-base --skip-build`
+and `di --flavour B --verlib work-ver-ooo-a145-base`, then the same for the
+candidate library.
+
 ## A144 — path reports on the top four, and the write buffer's fixup queue
 
 **Path reports.** The module board gives start/end nets only; the full

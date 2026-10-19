@@ -1,0 +1,839 @@
+diff --git a/core/include/build_config_pkg.sv b/core/include/build_config_pkg.sv
+index 21ad86fb6..df8aae08e 100644
+--- a/core/include/build_config_pkg.sv
++++ b/core/include/build_config_pkg.sv
+@@ -100,6 +100,7 @@ package build_config_pkg;
+     // cont.14 shows it is necessary for stock /cpus with current STQ RTL.
+     cfg.SpeculativeSb = CVA6Cfg.SliceOoOEn || CVA6Cfg.OoOEn || CVA6Cfg.DeepSpecEn;
+     cfg.DeepSpecEn = CVA6Cfg.DeepSpecEn;
++    cfg.IqStagedStoreGate = CVA6Cfg.IqStagedStoreGate;
+ 
+     // Dual ALU minimum under SS; scale toward issue width (cap 4 for area).
+     // Hang-6: NrALUs=1 under dual still BADOFFSET — not dual-ALU residual.
+diff --git a/core/include/config_pkg.sv b/core/include/config_pkg.sv
+index a8068c0d1..e3fdd81fa 100644
+--- a/core/include/config_pkg.sv
++++ b/core/include/config_pkg.sv
+@@ -711,6 +711,11 @@ package config_pkg;
+     // FSE: deep speculation depth plane (architecture/speculative-execution/)
+     // 0 = legacy STQ depth 4 + package-stated buffers; 1 = auto floors + deeper STQ
+     bit          DeepSpecEn;
++    // A145: issue-queue store-age gate for loads evaluated one cycle ahead
++    // (registered per slot; the one-cycle-old unresolved-store view is
++    // completed by the stores still queued). A load blocked by an older
++    // unresolved store is released one cycle after the store resolves.
++    bit          IqStagedStoreGate;
+     int unsigned RobEntries;          // ROB depth (0 → NrScoreboardEntries when OoOEn)
+     int unsigned PrfEntries;          // physical RF size (0 → 32+RobEntries)
+     int unsigned IqEntries;           // unified IQ depth (0 → RobEntries)
+@@ -789,6 +794,7 @@ package config_pkg;
+     int unsigned NrIssuePorts;
+     bit          SpeculativeSb;
+     bit          DeepSpecEn;          // FSE depth plane (STQ/load/ckpt floors)
++    bit          IqStagedStoreGate;   // A145 staged IQ store-age gate
+ 
+     int unsigned NrALUs;
+     bit          ALUBypass;
+diff --git a/core/include/cv32a60x_config_pkg.sv b/core/include/cv32a60x_config_pkg.sv
+index d0153a5e3..7c7011ee2 100644
+--- a/core/include/cv32a60x_config_pkg.sv
++++ b/core/include/cv32a60x_config_pkg.sv
+@@ -172,6 +172,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv32a65x_config_pkg.sv b/core/include/cv32a65x_config_pkg.sv
+index 903baaa2c..5110f51d1 100644
+--- a/core/include/cv32a65x_config_pkg.sv
++++ b/core/include/cv32a65x_config_pkg.sv
+@@ -172,6 +172,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv32a6_ima_sv32_fpga_config_pkg.sv b/core/include/cv32a6_ima_sv32_fpga_config_pkg.sv
+index 7f351aabd..b7ed21307 100644
+--- a/core/include/cv32a6_ima_sv32_fpga_config_pkg.sv
++++ b/core/include/cv32a6_ima_sv32_fpga_config_pkg.sv
+@@ -227,6 +227,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv32a6_imac_sv32_config_pkg.sv b/core/include/cv32a6_imac_sv32_config_pkg.sv
+index 41db94d0a..411cca214 100644
+--- a/core/include/cv32a6_imac_sv32_config_pkg.sv
++++ b/core/include/cv32a6_imac_sv32_config_pkg.sv
+@@ -226,6 +226,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a60ax_config_pkg.sv b/core/include/cv64a60ax_config_pkg.sv
+index 83fcf44d5..f8c9ce05d 100644
+--- a/core/include/cv64a60ax_config_pkg.sv
++++ b/core/include/cv64a60ax_config_pkg.sv
+@@ -199,6 +199,7 @@ localparam config_pkg::cva6_user_cfg_t cva6_cfg = '{
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a60ax_config_pkg_cvfpu-uvm.sv b/core/include/cv64a60ax_config_pkg_cvfpu-uvm.sv
+index 8974de00c..e1eed8593 100644
+--- a/core/include/cv64a60ax_config_pkg_cvfpu-uvm.sv
++++ b/core/include/cv64a60ax_config_pkg_cvfpu-uvm.sv
+@@ -190,6 +190,7 @@ package cva6_config_pkg;
+       SmtDrainForceCycles: unsigned'(256),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdc_sv39_config_pkg.sv b/core/include/cv64a6_imafdc_sv39_config_pkg.sv
+index 9b07b4f9f..cf39f33c4 100644
+--- a/core/include/cv64a6_imafdc_sv39_config_pkg.sv
++++ b/core/include/cv64a6_imafdc_sv39_config_pkg.sv
+@@ -246,6 +246,7 @@ package cva6_config_pkg;
+       // next_pow2(MaxOutstandingStores) (spec) / min(8, …) (commit) and couples
+       // SpeculativeSb via build_config_pkg.
+       DeepSpecEn: bit'(1),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdc_sv39_hpdcache_config_pkg.sv b/core/include/cv64a6_imafdc_sv39_hpdcache_config_pkg.sv
+index e9e2052db..0c4e7318a 100644
+--- a/core/include/cv64a6_imafdc_sv39_hpdcache_config_pkg.sv
++++ b/core/include/cv64a6_imafdc_sv39_hpdcache_config_pkg.sv
+@@ -238,6 +238,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv b/core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv
+index 641a0a06d..eaeecb60a 100644
+--- a/core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv
++++ b/core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv
+@@ -240,6 +240,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdc_sv39_openpiton_config_pkg.sv b/core/include/cv64a6_imafdc_sv39_openpiton_config_pkg.sv
+index e673790f6..74c06b641 100644
+--- a/core/include/cv64a6_imafdc_sv39_openpiton_config_pkg.sv
++++ b/core/include/cv64a6_imafdc_sv39_openpiton_config_pkg.sv
+@@ -231,6 +231,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdc_sv39_wb_config_pkg.sv b/core/include/cv64a6_imafdc_sv39_wb_config_pkg.sv
+index 75f4bf96d..96bff502e 100644
+--- a/core/include/cv64a6_imafdc_sv39_wb_config_pkg.sv
++++ b/core/include/cv64a6_imafdc_sv39_wb_config_pkg.sv
+@@ -231,6 +231,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdch_sv39_config_pkg.sv b/core/include/cv64a6_imafdch_sv39_config_pkg.sv
+index 3faf1b246..c5dc2a2fb 100644
+--- a/core/include/cv64a6_imafdch_sv39_config_pkg.sv
++++ b/core/include/cv64a6_imafdch_sv39_config_pkg.sv
+@@ -231,6 +231,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdch_sv39_wb_config_pkg.sv b/core/include/cv64a6_imafdch_sv39_wb_config_pkg.sv
+index c1ae76583..174a408e3 100644
+--- a/core/include/cv64a6_imafdch_sv39_wb_config_pkg.sv
++++ b/core/include/cv64a6_imafdch_sv39_wb_config_pkg.sv
+@@ -231,6 +231,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_imafdcv_sv39_config_pkg.sv b/core/include/cv64a6_imafdcv_sv39_config_pkg.sv
+index c12f21c91..9fd386c8b 100644
+--- a/core/include/cv64a6_imafdcv_sv39_config_pkg.sv
++++ b/core/include/cv64a6_imafdcv_sv39_config_pkg.sv
+@@ -233,6 +233,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/cv64a6_spec_deep_config_pkg.sv b/core/include/cv64a6_spec_deep_config_pkg.sv
+index 88114f6d8..e050aba9c 100644
+--- a/core/include/cv64a6_spec_deep_config_pkg.sv
++++ b/core/include/cv64a6_spec_deep_config_pkg.sv
+@@ -231,6 +231,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(1),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ai_config_pkg.sv b/core/include/g6lc64_ai_config_pkg.sv
+index b35b8894a..d2e6b88d6 100644
+--- a/core/include/g6lc64_ai_config_pkg.sv
++++ b/core/include/g6lc64_ai_config_pkg.sv
+@@ -337,6 +337,7 @@ package cva6_config_pkg;
+       // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
+       // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
+       DeepSpecEn: bit'(1),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ooo_config_pkg.sv b/core/include/g6lc64_ooo_config_pkg.sv
+index 2ff8b1668..4bb2f231d 100644
+--- a/core/include/g6lc64_ooo_config_pkg.sv
++++ b/core/include/g6lc64_ooo_config_pkg.sv
+@@ -261,6 +261,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(1),
++      IqStagedStoreGate: bit'(1),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ooo_int2_config_pkg.sv b/core/include/g6lc64_ooo_int2_config_pkg.sv
+index 1dedbf1e0..50486d8af 100644
+--- a/core/include/g6lc64_ooo_int2_config_pkg.sv
++++ b/core/include/g6lc64_ooo_int2_config_pkg.sv
+@@ -295,6 +295,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ooo_int2_l3_ai_config_pkg.sv b/core/include/g6lc64_ooo_int2_l3_ai_config_pkg.sv
+index d8cf8fc49..c613f56c0 100644
+--- a/core/include/g6lc64_ooo_int2_l3_ai_config_pkg.sv
++++ b/core/include/g6lc64_ooo_int2_l3_ai_config_pkg.sv
+@@ -310,6 +310,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ooo_int2_l3_config_pkg.sv b/core/include/g6lc64_ooo_int2_l3_config_pkg.sv
+index 28f7468ae..025f543f5 100644
+--- a/core/include/g6lc64_ooo_int2_l3_config_pkg.sv
++++ b/core/include/g6lc64_ooo_int2_l3_config_pkg.sv
+@@ -303,6 +303,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ooo_int_config_pkg.sv b/core/include/g6lc64_ooo_int_config_pkg.sv
+index df993d63c..219b423c1 100644
+--- a/core/include/g6lc64_ooo_int_config_pkg.sv
++++ b/core/include/g6lc64_ooo_int_config_pkg.sv
+@@ -269,6 +269,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(1),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ooo_server1_config_pkg.sv b/core/include/g6lc64_ooo_server1_config_pkg.sv
+index 7437690a8..f7f3344b5 100644
+--- a/core/include/g6lc64_ooo_server1_config_pkg.sv
++++ b/core/include/g6lc64_ooo_server1_config_pkg.sv
+@@ -282,6 +282,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(1),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_ooo_server_config_pkg.sv b/core/include/g6lc64_ooo_server_config_pkg.sv
+index 31ca140e5..8ea6b3678 100644
+--- a/core/include/g6lc64_ooo_server_config_pkg.sv
++++ b/core/include/g6lc64_ooo_server_config_pkg.sv
+@@ -278,6 +278,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(1),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_server_math_config_pkg.sv b/core/include/g6lc64_server_math_config_pkg.sv
+index d40c9e3c2..7585a3579 100644
+--- a/core/include/g6lc64_server_math_config_pkg.sv
++++ b/core/include/g6lc64_server_math_config_pkg.sv
+@@ -263,6 +263,7 @@ package cva6_config_pkg;
+       // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
+       // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
+       DeepSpecEn: bit'(1),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_server_math_l3_config_pkg.sv b/core/include/g6lc64_server_math_l3_config_pkg.sv
+index a8bec5c45..6beec2996 100644
+--- a/core/include/g6lc64_server_math_l3_config_pkg.sv
++++ b/core/include/g6lc64_server_math_l3_config_pkg.sv
+@@ -268,6 +268,7 @@ package cva6_config_pkg;
+       // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
+       // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
+       DeepSpecEn: bit'(1),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_server_math_v_config_pkg.sv b/core/include/g6lc64_server_math_v_config_pkg.sv
+index 6e9b7a652..9f6edc9e3 100644
+--- a/core/include/g6lc64_server_math_v_config_pkg.sv
++++ b/core/include/g6lc64_server_math_v_config_pkg.sv
+@@ -273,6 +273,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_smt2_ai_config_pkg.sv b/core/include/g6lc64_smt2_ai_config_pkg.sv
+index 5edc21acf..4069eb284 100644
+--- a/core/include/g6lc64_smt2_ai_config_pkg.sv
++++ b/core/include/g6lc64_smt2_ai_config_pkg.sv
+@@ -331,6 +331,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_smt2_config_pkg.sv b/core/include/g6lc64_smt2_config_pkg.sv
+index ba4935105..afe34b0e1 100644
+--- a/core/include/g6lc64_smt2_config_pkg.sv
++++ b/core/include/g6lc64_smt2_config_pkg.sv
+@@ -279,6 +279,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_smt2_l3_config_pkg.sv b/core/include/g6lc64_smt2_l3_config_pkg.sv
+index e58488d57..3a4878f0e 100644
+--- a/core/include/g6lc64_smt2_l3_config_pkg.sv
++++ b/core/include/g6lc64_smt2_l3_config_pkg.sv
+@@ -282,6 +282,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(1),
+       SmtDrainForceCycles: unsigned'(256),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_smt2_ooo_int_ai_config_pkg.sv b/core/include/g6lc64_smt2_ooo_int_ai_config_pkg.sv
+index 93165ee6d..5521522b0 100644
+--- a/core/include/g6lc64_smt2_ooo_int_ai_config_pkg.sv
++++ b/core/include/g6lc64_smt2_ooo_int_ai_config_pkg.sv
+@@ -299,6 +299,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(0),
+       SmtDrainForceCycles: unsigned'(0),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_smt2_ooo_int_config_pkg.sv b/core/include/g6lc64_smt2_ooo_int_config_pkg.sv
+index e4ca3b3a3..58b0fdd99 100644
+--- a/core/include/g6lc64_smt2_ooo_int_config_pkg.sv
++++ b/core/include/g6lc64_smt2_ooo_int_config_pkg.sv
+@@ -292,6 +292,7 @@ package cva6_config_pkg;
+       SmtDrainedHandoff: bit'(0),
+       SmtDrainForceCycles: unsigned'(0),
+       DeepSpecEn: bit'(0),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_stream8_config_pkg.sv b/core/include/g6lc64_stream8_config_pkg.sv
+index a1bc9ef66..3cab3cdd6 100644
+--- a/core/include/g6lc64_stream8_config_pkg.sv
++++ b/core/include/g6lc64_stream8_config_pkg.sv
+@@ -265,6 +265,7 @@ package cva6_config_pkg;
+       // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
+       // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
+       DeepSpecEn: bit'(1),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_stream8_l3_ai_config_pkg.sv b/core/include/g6lc64_stream8_l3_ai_config_pkg.sv
+index b99537af5..40dbc96d4 100644
+--- a/core/include/g6lc64_stream8_l3_ai_config_pkg.sv
++++ b/core/include/g6lc64_stream8_l3_ai_config_pkg.sv
+@@ -277,6 +277,7 @@ package cva6_config_pkg;
+       // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
+       // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
+       DeepSpecEn: bit'(1),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/include/g6lc64_stream8_l3_config_pkg.sv b/core/include/g6lc64_stream8_l3_config_pkg.sv
+index 17856c3b9..498812fec 100644
+--- a/core/include/g6lc64_stream8_l3_config_pkg.sv
++++ b/core/include/g6lc64_stream8_l3_config_pkg.sv
+@@ -270,6 +270,7 @@ package cva6_config_pkg;
+       // DeepSpecEn=0 hangs fill→verify ≥40 B; raise STQ for CRT stream residual
+       // under HPDCACHE_WT + L2 (NrCores=2). Couples SpeculativeSb in build_config.
+       DeepSpecEn: bit'(1),
++      IqStagedStoreGate: bit'(0),
+       RobEntries: unsigned'(0),
+       PrfEntries: unsigned'(0),
+       IqEntries: unsigned'(0),
+diff --git a/core/ooo/g6lc_iq.sv b/core/ooo/g6lc_iq.sv
+index 9bad28dc9..be2e5d8d5 100644
+--- a/core/ooo/g6lc_iq.sv
++++ b/core/ooo/g6lc_iq.sv
+@@ -120,6 +120,14 @@ module g6lc_iq
+   logic [DEPTH-1:0] valid_after;
+   // registered cancel verdict per slot (A112, see the wake block)
+   logic [DEPTH-1:0] cancel_hit_q;
++  // A145 (CVA6Cfg.IqStagedStoreGate): registered "an older store is still
++  // unresolved" verdict per slot, computed last cycle for the entry that
++  // occupies the slot now (the A112 shape). The one-cycle-old mask can miss
++  // only the stores dispatched last cycle, and those are live queue entries
++  // whose age bits the select reads directly (older_st_iq below), so the
++  // staged gate is conservative: a load never issues past an older
++  // unresolved store; it may wait one cycle longer after a resolution.
++  logic [DEPTH-1:0] older_unres_q, older_unres_d;
+ 
+   assign full_o  = (int'(count_q) + CVA6Cfg.NrIssuePorts > DEPTH);
+   assign empty_o = (count_q == '0);
+@@ -281,14 +289,27 @@ module g6lc_iq
+       // unresolved may block it. Resolved older stores are covered by the
+       // store_buffer's forwarding compare, and stores the dispatch-time
+       // predictor cleared (may_bypass) issue past an unresolved one.
++      older_st_iq = 1'b0;
++      for (int unsigned o = 0; o < DEPTH; o++)
++        if (q_chain[o].valid && q_chain[o].sbe.fu == STORE &&
++            (o != e) && older_q[o][e])
++          older_st_iq = 1'b1;
+       older_unresolved_st = 1'b0;
+-      for (int unsigned s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
+-        if (st_unresolved_mask_i[s] &&
+-            (CVA6Cfg.NrHarts <= 1 ||
+-             st_hart_mask_i[q_chain[e].sbe.hart_id][s]) &&
+-            g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(s),
+-                                        32'(q_chain[e].sbe.trans_id), 32'(commit_ptr_i)))
+-          older_unresolved_st = 1'b1;
++      if (CVA6Cfg.IqStagedStoreGate) begin
++        // A145: last cycle's verdict for this slot's occupant, completed by
++        // the stores still queued ahead of this entry (the only unresolved
++        // stores a one-cycle-old mask can miss are last cycle's dispatches,
++        // and those are queue entries now).
++        older_unresolved_st = older_unres_q[e] || older_st_iq;
++      end else begin
++        for (int unsigned s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
++          if (st_unresolved_mask_i[s] &&
++              (CVA6Cfg.NrHarts <= 1 ||
++               st_hart_mask_i[q_chain[e].sbe.hart_id][s]) &&
++              g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(s),
++                                          32'(q_chain[e].sbe.trans_id), 32'(commit_ptr_i)))
++            older_unresolved_st = 1'b1;
++      end
+       // Store ordering between themselves moved to the LSQ hold-to-commit
+       // reservation: an issued store's slot is held until its commit releases
+       // it, so a younger store that fills the queue first can no longer strand
+@@ -316,11 +337,6 @@ module g6lc_iq
+ `else
+       is_st = (q_chain[e].sbe.fu == STORE);
+ `endif
+-      older_st_iq = 1'b0;
+-      for (int unsigned o = 0; o < DEPTH; o++)
+-        if (q_chain[o].valid && q_chain[o].sbe.fu == STORE &&
+-            (o != e) && older_q[o][e])
+-          older_st_iq = 1'b1;
+       // N1d (T10g): CSR ops issue strictly in IQ age order, not just behind
+       // the csr_buffer's credit. The buffer's two entries are freed only by
+       // a commit, and commit is in-order — a younger CSR claiming a credit
+@@ -606,6 +622,19 @@ module g6lc_iq
+       // next cycle's verdict, on the entry that will occupy slot e: a
+       // newcomer's tid is tested against the mask the cycle it lands
+       cancel_hit_d[e] = q_d[e].valid && cancelled_mask_i[q_d[e].sbe.trans_id];
++      // A145: next cycle's store-age verdict for the same occupant, from
++      // this cycle's unresolved-store view (in -> register; the compare
++      // cone leaves the wake -> select -> grant loop)
++      older_unres_d[e] = 1'b0;
++      if (CVA6Cfg.IqStagedStoreGate && q_d[e].valid) begin
++        for (int unsigned s = 0; s < CVA6Cfg.NR_SB_ENTRIES; s++)
++          if (st_unresolved_mask_i[s] &&
++              (CVA6Cfg.NrHarts <= 1 ||
++               st_hart_mask_i[q_d[e].sbe.hart_id][s]) &&
++              g6lc_ooo_pkg::ooo_age_older(CVA6Cfg.TRANS_ID_BITS, 32'(s),
++                                          32'(q_d[e].sbe.trans_id), 32'(commit_ptr_i)))
++            older_unres_d[e] = 1'b1;
++      end
+     end
+     count_d = flush_i ? '0
+             : count_q - DW'($countones(cancel_hit))
+@@ -626,10 +655,12 @@ module g6lc_iq
+       older_q <= '0;
+       count_q <= '0;
+       cancel_hit_q <= '0;
++      older_unres_q <= '0;
+     end else begin
+       q_q <= q_d;
+       older_q <= older_d;
+       cancel_hit_q <= cancel_hit_d;
++      older_unres_q <= older_unres_d;
+       count_q <= count_d;
+     end
+   end
+diff --git a/core/store_buffer.sv b/core/store_buffer.sv
+index f55c3f035..93e696a9b 100644
+--- a/core/store_buffer.sv
++++ b/core/store_buffer.sv
+@@ -691,9 +691,23 @@ module store_buffer
+     automatic logic [CVA6Cfg.XLEN-1:0]     data_m;
+     automatic logic [(CVA6Cfg.XLEN/8)-1:0] be_m;
+     automatic logic [$clog2(DEPTH_COMMIT)-1:0] cidx;
++    // A141 speculative-source candidates (declared here with defaults so a
++    // cycle without a live load leaves no unassigned path for lint)
++    automatic logic [DEPTH_SPEC-1:0] ent_match;
++    automatic logic [DEPTH_SPEC-1:0][(CVA6Cfg.XLEN/8)-1:0] cand, win;
++    automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.XLEN-1:0] val;
++    automatic logic younger_writes, any_cand;
++    automatic logic [7:0] byte_v;
+     data_m = '0;
+     be_m   = '0;
+     cidx   = '0;
++    ent_match = '0;
++    cand = '0;
++    win = '0;
++    val = '0;
++    younger_writes = 1'b0;
++    any_cand = 1'b0;
++    byte_v = '0;
+ 
+     if (load_paddr_valid_i) begin
+       for (int unsigned k = 0; k < DEPTH_COMMIT; k++) begin
+@@ -732,9 +746,6 @@ module store_buffer
+       // the candidate that no younger candidate also writes — the same
+       // "last writer in program order wins" the ordered walk implemented.
+       begin : spec_fwd
+-        automatic logic [DEPTH_SPEC-1:0] ent_match;
+-        automatic logic [DEPTH_SPEC-1:0][(CVA6Cfg.XLEN/8)-1:0] cand, win;
+-        automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.XLEN-1:0] val;
+         for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+           ent_match[i] = speculative_queue_q[i].valid &&
+                          spec_visible(speculative_queue_q[i].trans_id) &&
+@@ -756,7 +767,6 @@ module store_buffer
+         end
+         for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+           for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+-            automatic logic younger_writes;
+             younger_writes = 1'b0;
+             for (int unsigned j = 0; j < DEPTH_SPEC; j++)
+               younger_writes |= spec_older_q[i][j] && cand[j][b];
+@@ -764,8 +774,6 @@ module store_buffer
+           end
+         end
+         for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
+-          automatic logic any_cand;
+-          automatic logic [7:0] byte_v;
+           any_cand = 1'b0;
+           byte_v   = '0;
+           for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
+diff --git a/verif/tb/core/tb_g6lc_iq_stgate.sv b/verif/tb/core/tb_g6lc_iq_stgate.sv
+new file mode 100644
+index 000000000..a9b6d4e6e
+--- /dev/null
++++ b/verif/tb/core/tb_g6lc_iq_stgate.sv
+@@ -0,0 +1,235 @@
++// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
++// Copyright (c) 2026 Etienne Cimon
++//
++// A145 witness: the issue queue's staged store-age gate (CVA6Cfg.IqStagedStoreGate).
++//
++// Random dispatch of ALU/LOAD/STORE ops with in-order trans_ids, a model LSQ
++// (a store is unresolved from the cycle after dispatch until a random delay
++// after it issues), writeback producers, a commit pointer that follows the
++// oldest live op, random acks and memory stalls. Every cycle, for every
++// issued load without a dispatch-time bypass, the EXACT current-cycle rule
++// is checked: no unresolved store older than the load exists now
++// (IQ_STGATE_SAFETY). Operand readiness and store age order are checked for
++// every issue. Liveness: the oldest op that is issuable by the exact rule
++// must issue within LIVENESS_BOUND acked cycles (the staged gate adds at most
++// one). +oracle_negative hides the unresolved mask from the DUT while the
++// checker keeps it: the safety check must then fail (nonzero exit).
++module tb_g6lc_iq_stgate;
++  import ariane_pkg::*;
++  parameter int NP = 2, DEPTH = 16, CYCLES = 200000, LIVENESS_BOUND = 3;
++  localparam int TW = 4, NSB = 16;
++  function automatic config_pkg::cva6_cfg_t configuration();
++    config_pkg::cva6_cfg_t c = config_pkg::cva6_cfg_empty;
++    c.NrIssuePorts = NP; c.NrWbPorts = 2; c.NR_SB_ENTRIES = NSB; c.TRANS_ID_BITS = TW; c.RVA = 1;
++    c.IqStagedStoreGate = 1'b1;
++    return c;
++  endfunction
++  localparam config_pkg::cva6_cfg_t C = configuration();
++  typedef struct packed {fu_t fu; fu_op op; logic [TW-1:0] trans_id; logic hart_id; logic [31:0] pc;} sbe_t;
++
++  logic clk = 0, rst_n = 0, flush = 0, mem_stall = 0, full, empty;
++  logic [NSB-1:0] cancel = '0, st_unresolved = '0, st_live = '0, st_unres_dut;
++  logic [TW-1:0] commit_ptr = '0;
++  logic [NP-1:0] dv = '0, da, iv, ia = '0, r1 = '0, r2 = '0, bypass = '0;
++  sbe_t [NP-1:0] ds, is;
++  logic [NP-1:0][31:0] di = '0, ii;
++  logic [NP-1:0][3:0] p1 = '0, p2 = '0, pd = '0, ip;
++  logic [1:0] wv = '0;
++  logic [1:0][3:0] wp = '0;
++  bit negative;
++  logic [NP-1:0] iv_s, da_s;
++  sbe_t [NP-1:0] is_s;
++  int unsigned seed = 1, cyc = 0, issued = 0, issued_ld = 0, issued_st = 0, dispatched = 0, checks = 0;
++
++  // +oracle_negative: the DUT sees no unresolved store; the checker does
++  assign st_unres_dut = negative ? '0 : st_unresolved;
++
++  g6lc_iq #(.CVA6Cfg(C), .DEPTH(DEPTH), .PRF_W(4), .scoreboard_entry_t(sbe_t)) dut (
++    .clk_i(clk), .rst_ni(rst_n), .flush_i(flush), .cancelled_mask_i(cancel),
++    .disp_valid_i(dv), .disp_sbe_i(ds), .disp_orig_i(di), .disp_prs1_i(p1), .disp_prs2_i(p2), .disp_prd_i(pd),
++    .disp_fprs1_i('0), .disp_fprs2_i('0), .disp_fprs3_i('0),
++    .disp_fpr_rs1_i('0), .disp_fpr_rs2_i('0), .disp_fpr_rs3_i('0),
++    .disp_rs3_ready_i('1), .fwb_valid_i('0), .fwb_prd_i('0),
++    .disp_rs1_ready_i(r1), .disp_rs2_ready_i(r2), .disp_may_bypass_i(bypass), .disp_ack_o(da), .full_o(full), .empty_o(empty),
++    .wb_valid_i(wv), .wb_prd_i(wp),
++    .issue_sbe_o(is), .issue_orig_o(ii), .issue_prd_o(ip), .issue_valid_o(iv), .issue_ack_i(ia), .mem_stall_i(mem_stall),
++    .st_live_mask_i(st_live), .st_unresolved_mask_i(st_unres_dut), .st_hart_mask_i(st_live), .commit_ptr_i(commit_ptr), .sb_live_i('1));
++
++  // ---- model per trans_id
++  typedef struct {
++    bit live, in_iq, issued, wb_done, is_ld, is_st, bypass, rs2_wait;
++    logic [3:0] rs2_tag;
++    int unsigned resolve_at, wb_at, eligible_since;
++  } op_t;
++  op_t m [0:NSB-1];
++  logic [TW-1:0] alloc_ptr = '0;
++  int unsigned n_live = 0;
++
++  function automatic bit older(input logic [TW-1:0] a, input logic [TW-1:0] b);
++    return g6lc_ooo_pkg::ooo_age_older(TW, 32'(a), 32'(b), 32'(commit_ptr));
++  endfunction
++  // rs2 producer done (or writing back this very cycle: the queue wakes on
++  // the pulse and may issue the consumer in the same cycle)?
++  function automatic bit src_done(input int t);
++    if (!m[t].rs2_wait) return 1;   // woken earlier (sticky, as the queue's rs2_rdy)
++    for (int w = 0; w < 2; w++) if (wv[w] && wp[w] == m[t].rs2_tag) return 1;
++    return 0;
++  endfunction
++  function automatic bit older_unresolved_now(input int t);
++    for (int s = 0; s < NSB; s++)
++      if (st_unresolved[s] && older(s[3:0], t[3:0])) return 1;
++    return 0;
++  endfunction
++  // exact-rule issuable (ignores port count)
++  function automatic bit issuable(input int t);
++    bit st_older_in_q;
++    if (!m[t].live || !m[t].in_iq || m[t].issued) return 0;
++    if (!src_done(t)) return 0;
++    if (m[t].is_ld && (mem_stall || (!m[t].bypass && older_unresolved_now(t)))) return 0;
++    if (m[t].is_st) begin
++      st_older_in_q = 0;
++      for (int s = 0; s < NSB; s++) if (m[s].live && m[s].in_iq && !m[s].issued && m[s].is_st && s != t && older(s[3:0], t[3:0])) st_older_in_q = 1;
++      if (st_older_in_q) return 0;
++    end
++    return 1;
++  endfunction
++
++  task automatic tick; clk = 1; #2; clk = 0; #2; endtask
++
++  initial begin
++    negative = $test$plusargs("oracle_negative");
++    if (!$value$plusargs("seed=%d", seed)) seed = 1;
++    void'($urandom(seed));
++    for (int t = 0; t < NSB; t++) begin m[t].live = 0; m[t].in_iq = 0; end
++    #1; tick(); rst_n = 1; #1;
++    for (cyc = 0; cyc < CYCLES; cyc++) begin
++      // ---------------- drive (inputs settle before the edge)
++      dv = '0; ds = '0; r1 = '1; r2 = '0; p1 = '0; p2 = '0; pd = '0; bypass = '0; wv = '0; wp = '0; di = '0;
++      mem_stall = ($urandom % 16 == 0);
++      // dispatch a prefix of the ports (the IQ accepts a prefix when slots
++      // run out, and trans_ids are allocated in order) when the queue has
++      // room and the tids are free
++      begin
++        int n_offer = $urandom % (NP + 2);
++        if (n_offer > NP) n_offer = NP;
++        for (int p = 0; p < NP; p++) begin
++          logic [TW-1:0] t = alloc_ptr + TW'(p);
++          if (p < n_offer && !full && !m[t].live && n_live + p < NSB - 1) begin
++          int kind = $urandom % 5;   // 0,1: ALU  2,3: LOAD  4: STORE
++          dv[p] = 1;
++          ds[p] = '{fu: (kind >= 4) ? STORE : (kind >= 2) ? LOAD : ALU,
++                    op: (kind >= 4) ? SD : (kind >= 2) ? LD : ADD,
++                    trans_id: t, hart_id: 1'b0, pc: 32'h1000 + 32'(t) * 4};
++          di[p] = 32'(t); pd[p] = t; p1[p] = 0;
++          // rs2: ready, or wait on a random live producer not yet written back
++          begin
++            int cand = -1;
++            // physical 0 is the integer no-destination tag: never a producer
++            for (int s = 1; s < NSB; s++) if (m[s].live && !m[s].wb_done && ($urandom % 3 == 0)) cand = s;
++            if (cand >= 0 && ($urandom % 2)) begin r2[p] = 0; p2[p] = cand[3:0]; end
++            else begin r2[p] = 1; p2[p] = 0; end
++          end
++          bypass[p] = (kind >= 2 && kind < 4) && ($urandom % 5 == 0);
++          end else begin
++            n_offer = p;   // keep the offered set a prefix
++          end
++        end
++      end
++      // writebacks for issued ops whose time has come
++      begin
++        int w = 0;
++        for (int s = 0; s < NSB && w < 2; s++)
++          if (m[s].live && m[s].issued && !m[s].wb_done && m[s].wb_at <= cyc) begin
++            wv[w] = 1; wp[w] = s[3:0]; w++;
++          end
++      end
++      ia = {NP{1'b1}};
++      if ($urandom % 10 == 0) ia[0] = 0;
++      if ($urandom % 10 == 0 && NP > 1) ia[1] = 0;
++      #1;
++      // ---------------- check the selection (before the edge; pure function of state)
++      for (int p = 0; p < NP; p++) begin
++        if (iv[p]) begin
++          int t = is[p].trans_id;
++          if (!m[t].live || !m[t].in_iq || m[t].issued) $fatal(1, "IQ_STGATE_PHANTOM cyc=%0d port=%0d tid=%0d", cyc, p, t);
++          if (!src_done(t)) $fatal(1, "IQ_STGATE_OPERANDS cyc=%0d tid=%0d", cyc, t);
++          if (m[t].is_ld && !m[t].bypass && older_unresolved_now(t))
++            $fatal(1, "IQ_STGATE_SAFETY cyc=%0d load tid=%0d issued past an older unresolved store (mask=%h cp=%0d)", cyc, t, st_unresolved, commit_ptr);
++          if (m[t].is_ld && mem_stall) $fatal(1, "IQ_STGATE_MEMSTALL cyc=%0d tid=%0d", cyc, t);
++          if (m[t].is_st)
++            for (int s = 0; s < NSB; s++)
++              if (m[s].live && m[s].in_iq && !m[s].issued && m[s].is_st && s != t && older(s[3:0], t[3:0]) && !(iv[0] && is[0].trans_id == s[3:0] && p == 1))
++                $fatal(1, "IQ_STGATE_STORE_ORDER cyc=%0d tid=%0d older store %0d still queued", cyc, t, s);
++          checks++;
++        end
++      end
++      // liveness: the oldest exact-rule issuable op must issue soon (acked cycles only)
++      begin
++        int oldest = -1;
++        for (int t = 0; t < NSB; t++)
++          if (issuable(t) && (oldest < 0 || older(t[3:0], oldest[3:0]))) oldest = t;
++        if (oldest >= 0 && ia[0]) begin
++          bit taken = 0;
++          for (int p = 0; p < NP; p++) if (iv[p] && ia[p] && is[p].trans_id == oldest[3:0]) taken = 1;
++          if (!taken) begin
++            m[oldest].eligible_since++;
++            if (m[oldest].eligible_since > LIVENESS_BOUND)
++              $fatal(1, "IQ_STGATE_LIVENESS cyc=%0d tid=%0d issuable for %0d acked cycles", cyc, oldest, m[oldest].eligible_since);
++          end else m[oldest].eligible_since = 0;
++        end
++      end
++      // ---------------- edge (sample the pre-edge decisions first: the
++      // outputs follow the new state as soon as the edge has passed)
++      iv_s = iv; is_s = is; da_s = da;
++      tick();
++      // ---------------- model update (what the DUT just did)
++      for (int p = 0; p < NP; p++) begin
++        if (iv_s[p] && ia[p]) begin
++          int t = is_s[p].trans_id;
++          m[t].issued = 1; m[t].in_iq = 0; issued++;
++          m[t].wb_at = cyc + 1 + ($urandom % 3);
++          if (m[t].is_ld) issued_ld++;
++          if (m[t].is_st) begin issued_st++; m[t].resolve_at = cyc + 1 + ($urandom % 3); end
++        end
++      end
++      for (int p = 0; p < NP; p++) begin
++        if (dv[p] && da_s[p]) begin
++          int t = ds[p].trans_id;
++          m[t].live = 1; m[t].in_iq = 1; m[t].issued = 0; m[t].wb_done = 0; m[t].eligible_since = 0;
++          m[t].is_ld = (ds[p].fu == LOAD); m[t].is_st = (ds[p].fu == STORE); m[t].bypass = bypass[p];
++          m[t].rs2_wait = !r2[p]; m[t].rs2_tag = p2[p];
++          st_live[t] <= m[t].is_st; st_unresolved[t] <= m[t].is_st;   // LSQ: allocated at dispatch, unresolved
++          n_live++; dispatched++;
++        end else if (dv[p] && !da_s[p]) begin
++          // refused: leave the tid free (dispatch is all-or-nothing per port here)
++        end
++      end
++      alloc_ptr = alloc_ptr + TW'($countones(dv & da_s));
++      for (int w = 0; w < 2; w++) if (wv[w]) m[wp[w]].wb_done = 1;
++      // wakeups are sticky per waiting entry (newcomers included: same-cycle capture)
++      for (int t = 0; t < NSB; t++)
++        if (m[t].live && m[t].in_iq && m[t].rs2_wait)
++          for (int w = 0; w < 2; w++) if (wv[w] && wp[w] == m[t].rs2_tag) m[t].rs2_wait = 0;
++      for (int s = 0; s < NSB; s++) begin
++        if (m[s].live && m[s].is_st && m[s].issued && st_unresolved[s] && m[s].resolve_at <= cyc) st_unresolved[s] <= 0;
++      end
++      // retire in order: the oldest live op leaves once issued and written back (stores: resolved)
++      begin
++        bit progress = 1;
++        while (progress) begin
++          int h = commit_ptr;
++          progress = 0;
++          if (m[h].live && m[h].issued && m[h].wb_done && !(m[h].is_st && st_unresolved[h])) begin
++            m[h].live = 0; st_live[h] <= 0; n_live--; commit_ptr = commit_ptr + 1'b1; progress = 1;
++          end
++        end
++      end
++      #1;
++    end
++    if (issued_ld < 1000 || issued_st < 300) $fatal(1, "IQ_STGATE_VACUOUS issued_ld=%0d issued_st=%0d", issued_ld, issued_st);
++    if (negative) $fatal(1, "ORACLE_NEGATIVE: no violation observed");
++    $display("PASS tb_g6lc_iq_stgate seed=%0d cycles=%0d dispatched=%0d issued=%0d loads=%0d stores=%0d checks=%0d",
++             seed, CYCLES, dispatched, issued, issued_ld, issued_st, checks);
++    $finish;
++  end
++endmodule

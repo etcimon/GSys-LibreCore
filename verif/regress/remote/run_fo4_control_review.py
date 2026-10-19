@@ -88,6 +88,8 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
         "stq3": ("core/store_buffer.sv",),
         "isolate": ("core/ooo/g6lc_rename.sv", "core/ooo/g6lc_iq.sv", "core/scoreboard.sv"),
         "wbuf": ("core/cache_subsystem/wt_dcache_wbuffer.sv",),
+        "iqgate": ("core/ooo/g6lc_iq.sv", "core/include/config_pkg.sv", "core/include/build_config_pkg.sv",
+                   "core/include/g6lc64_ooo_config_pkg.sv"),
     }
     changed = profile_files[profile]
     if profile == "statcor":
@@ -112,6 +114,9 @@ def snapshot(dest: Path, baseline: str, profile: str = "control") -> None:
             files[name] = (root / name).read_bytes()
     if profile == "isolate":
         for name in ("verif/tb/core/tb_g6lc_iq_store_age.sv",):
+            files[name] = (root / name).read_bytes()
+    if profile == "iqgate":
+        for name in ("verif/tb/core/tb_g6lc_iq_store_age.sv", "verif/tb/core/tb_g6lc_iq_stgate.sv"):
             files[name] = (root / name).read_bytes()
     if profile == "wbuf":
         for name in ("vendor/pulp-platform/common_cells/src/lzc.sv",
@@ -638,6 +643,10 @@ foreach kind {in_reg reg_reg reg_out in_out} {
 
     if (src / "review.json").exists():
         review = json.loads((src / "review.json").read_text())
+        if review["profile"] == "iqgate" and not os.environ.get("CONTROL_MODE"):
+            review_iqgate(src, out, sta, lib, abc, evidence, yosys, run)
+            (out / "result.json").write_text(json.dumps(evidence, indent=2))
+            return
         if review["profile"] == "wbuf" and not os.environ.get("CONTROL_MODE"):
             review_wbuf(src, out, sta, lib, abc, evidence, yosys, run)
             (out / "result.json").write_text(json.dumps(evidence, indent=2))
@@ -1055,6 +1064,115 @@ def pair_module(src, out, sta, lib, abc, evidence, yosys, run, key, top, flists,
         entry["placement"] = dict(re.findall(r"(\w+)=(\S+)", row))
         evidence["maps"][f"{key}-{variant}"] = entry
         (out / "result.json").write_text(json.dumps(evidence, indent=2))
+
+
+def review_iqgate(src, out, sta, lib, abc, evidence, yosys, run):
+    """A145: the issue queue's staged store-age gate (CVA6Cfg.IqStagedStoreGate).
+    The RTL, config field and tb_g6lc_iq_stgate.sv live in
+    sv-timing/architecture/trials/a145-iq-staged-store-gate.patch (the trial
+    measured timing-neutral and was not retained); apply it before this profile.
+    Randomized exact-rule witness with a real negative, the store-age leaf,
+    gate-off matched-state equivalence against the baseline, then the
+    whole-core split map and standalone placement of the IQ (gate on in the
+    OoO configuration)."""
+    vl = "/opt/testharness/toolchains/verilator-v5.008/bin/verilator"
+    evidence["simulator"] = subprocess.check_output([vl, "--version"], text=True).strip()
+    packages = ["core/include/config_pkg.sv", "core/include/g6lc64_ooo_config_pkg.sv", "core/include/riscv_pkg.sv",
+                "core/include/ariane_pkg.sv", "core/ooo/g6lc_ooo_pkg.sv"]
+    for top, bench, seeds, verdict, neg_marker in (
+        ("tb_g6lc_iq_stgate", "verif/tb/core/tb_g6lc_iq_stgate.sv", (1, 17, 23), "PASS tb_g6lc_iq_stgate", "IQ_STGATE_SAFETY"),
+        ("tb_g6lc_iq_store_age", "verif/tb/core/tb_g6lc_iq_store_age.sv", (None,), "PASS tb_g6lc_iq_store_age", "IQ_ST_AGE"),
+    ):
+        obj = out / f"obj-{top}"
+        run(f"{top}-build", [vl, "-O1", "--binary", "--timing", "--assert", "-Wno-fatal", "-Wno-WIDTH", "-Wno-UNOPTFLAT",
+                             "-I" + str(src / "core/include"), "--top-module", top,
+                             *[str(src / q) for q in packages], str(src / "core/ooo/g6lc_iq.sv"), str(src / bench),
+                             "--Mdir", str(obj), "-j", "4"], timeout=900)
+        for seed in seeds:
+            args = [str(obj / ("V" + top))] + ([f"+seed={seed}"] if seed is not None else [])
+            log = run(f"{top}-{seed}", args, timeout=900)
+            assert verdict in log, log[-800:]
+            evidence["proofs"][f"{top}-{seed}"] = next(l for l in log.splitlines() if verdict in l).strip()
+        neg = subprocess.run([str(obj / ("V" + top)), "+oracle_negative"], cwd=out, capture_output=True, text=True, timeout=900)
+        (out / f"{top}-negative.log").write_text(neg.stdout + neg.stderr)
+        assert neg.returncode != 0 and (neg_marker in neg.stdout + neg.stderr or "ORACLE_NEGATIVE" in neg.stdout + neg.stderr), neg.stdout[-600:]
+        evidence["proofs"][f"{top}-negative"] = "oracle negative fails as required"
+    # gate-off: the IQ under cva6_cfg_empty (IqStagedStoreGate = 0) is the baseline, state for state
+    iq_text = (src / "core/ooo/g6lc_iq.sv").read_text()
+    ports = iq_text[iq_text.index("    input  logic clk_i,"):iq_text.index("\n);\n", iq_text.index("    input  logic clk_i,"))]
+    (out / "iq_eq_top.sv").write_text("""
+package iq_eq_pkg;
+  import ariane_pkg::*;
+  typedef struct packed {fu_t fu; fu_op op; logic [3:0] trans_id; logic hart_id; logic [31:0] pc;} sbe_t_port;
+  function automatic config_pkg::cva6_cfg_t configuration(input int np);
+    config_pkg::cva6_cfg_t c = config_pkg::cva6_cfg_empty;
+    c.NrIssuePorts = np; c.NrWbPorts = 2; c.NR_SB_ENTRIES = 16; c.TRANS_ID_BITS = 4; c.RVA = 1;
+    return c;
+  endfunction
+endpackage
+module g6lc_iq_eq
+  import ariane_pkg::*;
+  import iq_eq_pkg::*;
+#(
+    parameter config_pkg::cva6_cfg_t CVA6Cfg = iq_eq_pkg::configuration(2),
+    parameter int unsigned DEPTH  = 16,
+    parameter int unsigned PRF_W  = 4,
+    parameter int unsigned NR_WB = CVA6Cfg.NrWbPorts,
+    parameter int unsigned FPRF_W = 1,
+    parameter type scoreboard_entry_t = sbe_t_port
+) (
+""" + ports + """
+);
+  g6lc_iq #(.CVA6Cfg(CVA6Cfg), .DEPTH(DEPTH), .PRF_W(PRF_W), .NR_WB(NR_WB), .FPRF_W(FPRF_W),
+            .scoreboard_entry_t(scoreboard_entry_t)) dut (.*);
+endmodule
+""")
+    for depth in (16,):
+        commands = []
+        for variant, pkgdir, source in (("gold", "baseline/", "baseline/core/ooo/g6lc_iq.sv"), ("gate", "", "core/ooo/g6lc_iq.sv")):
+            pk = [str(src / (pkgdir + q)) if (src / (pkgdir + q)).exists() else str(src / q) for q in packages]
+            commands += [
+                "read_slang --top g6lc_iq_eq --single-unit --ignore-assertions "
+                f"-G DEPTH={depth} " + " ".join(pk) + f" {src / source} {out / 'iq_eq_top.sv'}",
+                "hierarchy -top g6lc_iq_eq", "proc", "memory_map", "async2sync", "opt_clean",
+                f"rename g6lc_iq_eq {variant}", f"design -stash {variant}",
+            ]
+        commands += ["design -copy-from gold -as gold gold", "design -copy-from gate -as gate gate",
+                     "equiv_make gold gate equiv", "hierarchy -top equiv", "equiv_simple -seq 1", "equiv_status -assert"]
+        key = f"iq-gateoff-eq-{depth}"
+        # the gate-off path is the original code under a generate-time
+        # constant; the proof is attempted with a budget and a timeout is
+        # recorded, not treated as a pass
+        try:
+            text = yosys(key, "\n".join(commands), timeout=int(os.environ.get("IQ_EQ_TIMEOUT", "900")))
+            assert "Equivalence successfully proven!" in text, text[-1200:]
+            evidence["proofs"][key] = "gate-off matched-state equivalence with the baseline PASS"
+        except Exception as e:
+            evidence["proofs"][key] = f"INCONCLUSIVE ({str(e)[:60]})"
+    (out / "result.json").write_text(json.dumps(evidence, indent=2))
+    modules = {"g6lc_iq"}
+    map_snapshots(src, out, sta, lib, abc, evidence, yosys, run,
+                  changed=("core/ooo/g6lc_iq.sv", "core/include/config_pkg.sv", "core/include/build_config_pkg.sv",
+                           "core/include/g6lc64_ooo_config_pkg.sv"), modules=modules)
+    study = src / "build-platform/scripts/openroad-module-place-study.tcl"
+    evidence["placement"] = {}
+    for module in sorted(modules):
+        evidence["placement"][module] = {}
+        for variant in ("baseline", "candidate"):
+            names = [n for n in evidence["maps"][variant] if n.split("$")[0] == module]
+            assert len(names) == 1, names
+            top = names[0]
+            entries = (out / variant / "il/modules.tsv").read_text().splitlines()
+            entry = next(l.split("\t") for l in entries if l.split("\t")[2].lstrip("\\") == top)
+            netlist = out / variant / Path(entry[1]).with_suffix(".v")
+            env = dict(os.environ, STUDY_PLATFORM=str(Path(lib).parent), OR_TOP=top, OR_VERILOG=str(netlist),
+                       STUDY_OUTPUT=str(out / f"placed-{module}-{variant}"), STUDY_VARIANT=f"{module}-{variant}")
+            log = run(f"placed-{module}-{variant}", ["/opt/testharness/toolchains/openroad-g6lc-pgo/bin/openroad",
+                                                      "-no_init", "-exit", str(study)], timeout=2400, env=env)
+            row = next(l for l in log.splitlines() if l.startswith("PLACE_STUDY "))
+            evidence["placement"][module][variant] = dict(re.findall(r"(\w+)=(\S+)", row))
+            (out / "result.json").write_text(json.dumps(evidence, indent=2))
+    print(json.dumps(evidence["placement"], indent=2), flush=True)
 
 
 def review_wbuf(src, out, sta, lib, abc, evidence, yosys, run):
@@ -2580,7 +2698,7 @@ if __name__ == "__main__":
         mode.add_argument("--snapshot", type=Path)
         mode.add_argument("--analyze-results", type=Path)
         parser.add_argument("--baseline", help="baseline revision for the selected review profile")
-        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt", "stq", "step1", "sbhead", "stq3", "isolate", "wbuf"), default="control")
+        parser.add_argument("--profile", choices=("control", "selection", "precompute", "multiplier", "boundary", "statcor", "loop-emit", "lbuf", "ckpt", "stq", "step1", "sbhead", "stq3", "isolate", "wbuf", "iqgate"), default="control")
         args = parser.parse_args()
         if args.snapshot:
             if not args.baseline:

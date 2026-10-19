@@ -291,6 +291,7 @@ snapshot replay can outweigh a shorter local cone.
 
 | Pass | Source | Plan facet | Result |
 |---|---|---|---|
+| A145 | `ooo/g6lc_iq.sv` | staged store-age gate (first rung of the IQ stage) | config-gated trial, exact-rule witness; placed 2.806 → 2.779 ns (neutral: the select loop itself is the limiter); reverted to `trials/a145-iq-staged-store-gate.patch` |
 | A144 | `cache_subsystem/wt_dcache_wbuffer.sv` | `reshape` fixup queue slot-order read (step 1) | selection SAT-equal at 4 depths; NC/INV regressions; placed 5.344 → 4.853 ns, area -18%; board 2.831 → 2.934 ns (inside the re-map band; the board's worst cone for this module is now the bypass-slot merge/supersede path, `fixup_bypass_d` → `wbuffer_data_o`, a different cone from the FIFO walk this entry removed — next step-1 item: compare the pre-push addresses in parallel and select by the allocation instead of comparing the post-push mux output) |
 | A143 | `ooo/g6lc_rename.sv` | `reshape` free-selection isolates (step 1) | prefix-OR isolates; SAT + equivalence; placed 3.131 → 2.833 ns; board 2.954 → 2.462 ns |
 | A142 | `multiplier.sv` | step-4 tile size | 8×8 tiles rejected: placed +15% (fan-out, not product depth, bounds stage 1) |
@@ -304,6 +305,15 @@ snapshot replay can outweigh a shorter local cone.
 Evidence and the whole-core reading live in
 `sv-timing/architecture/PIPELINE-PRAGMA-REVIEW.md` (A140). The corresponding
 `svt-plan` blocks stay in the sources as the record of the remaining facets.
+
+## Stage budget (decided 2026-10-19)
+
+10 adjusted FO4 per stage (0.214 ns on the Nangate45 calibration) is not a
+reachable stage budget for this microarchitecture: the flop's clk→Q plus
+setup is 0.13–0.18 ns of it. The staged implementation of these plans targets
+**~1.0 ns (≈47 adjusted FO4)** per stage; interface-latency changes are
+retained on placed timing with the IPC delta measured by the OpenSBI soak
+cycle count against the baseline harness and recorded for a later decision.
 
 ## Status of the integration order
 
