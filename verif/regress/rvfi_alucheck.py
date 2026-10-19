@@ -14,7 +14,7 @@ complement of rvfi_memcheck (memory values) for the cases where the memory
 oracle is clean but the kernel still dies of a garbage pointer.
 
 usage: rvfi_alucheck.py <trace.dasm> [--start-retire=N] [--stop-retire=N]
-                        [--progress=N] [--max-report=N]
+                        [--progress=N] [--max-report=N] [--dump-first=N]
 
 Starting late is fine: a register is checked only once every source register
 has been written inside the window (the `known` mask).
@@ -231,7 +231,9 @@ def main():
     start = stop = None
     progress = 0
     max_report = 20
+    dump_first = 0
     for a in sys.argv[1:]:
+        if a.startswith('--dump-first='): dump_first = int(a.split('=')[1])
         if a.startswith('--start-retire='): start = int(a.split('=')[1])
         elif a.startswith('--stop-retire='): stop = int(a.split('=')[1])
         elif a.startswith('--progress='): progress = int(a.split('=')[1])
@@ -270,13 +272,23 @@ def main():
             k = known.setdefault(hart, 0)
             rd_val = None
             rd_num = None
+            # the tracer prints `x%d`: `x14 0x..` or, space-padded, `x 5 0x..`
             for i in range(3, len(t) - 1):
+                if t[i] == 'x' and i + 2 < len(t) and t[i + 1].isdigit():
+                    try:
+                        rd_num = int(t[i + 1]); rd_val = int(t[i + 2], 16)
+                    except ValueError:
+                        rd_val = None
+                    break
                 if t[i].startswith('x') and len(t[i]) > 1 and t[i][1:].isdigit():
                     try:
                         rd_num = int(t[i][1:]); rd_val = int(t[i + 1], 16)
                     except ValueError:
                         rd_val = None
                     break
+            if dump_first > 0 and (start is None or retire >= start):
+                dump_first -= 1
+                print(f"dump retire={retire} line={lineno}: {line.rstrip()[:120]} -> rd={rd_num} val={rd_val}")
             if start is None or retire >= start:
                 d = decode(insn)
                 if d is not None and rd_val is not None and ' mem ' not in line:
