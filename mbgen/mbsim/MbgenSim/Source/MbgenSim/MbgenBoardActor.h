@@ -30,7 +30,12 @@ public:
     UPROPERTY(VisibleAnywhere, Category = "mbgen")
     FString SelectedId;
     void ApplyGestureJson(const FString& GestureJson, bool bIncremental = false);
+    /* Snapshot the design at mouse-down so Escape can restore it exactly. */
+    void BeginPlaceDrag();
     void FinishPlaceDrag();
+    /* Escape during a drag: restore the mouse-down design, no undo entry. Returns true if a drag was cancelled. */
+    bool CancelPlaceDrag();
+    bool IsPlaceDragActive() const { return bPlaceDragActive; }
     void UpdateBottomView(const FVector& CameraWorld);
     void ToggleBottomView();
     bool RunTool(const FString& Args, FString& StdOut);
@@ -85,6 +90,8 @@ private:
     TMap<FString, FString> BodyRoles;
     double LastPlaceTime = 0.0;
     bool bPlaceDirty = false;
+    bool bPlaceDragActive = false;
+    FString DragBaseJson;
     bool bDllTried = false;
     bool bDllOk = false;
     bool bBottomView = false;

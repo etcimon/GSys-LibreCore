@@ -11,7 +11,7 @@ typedef struct mb_session mb_session;
    panic=abort. No callbacks. No threads. UBT does not compile this crate. */
 
 /* ABI version. A host built against a different major must not call in. */
-#define MBCORE_C_ABI_VERSION 2
+#define MBCORE_C_ABI_VERSION 3
 unsigned int mb_abi_version(void);
 
 mb_session *mb_session_open(const char *design_json);
@@ -24,10 +24,18 @@ unsigned long long mb_session_revision(const mb_session *session);
 /* Gesture JSON -> PreviewResult JSON (+ "revision"). Pack only. */
 char *mb_apply(mb_session *session, const char *gesture_json);
 
-/* dirty_only != 0: nets touching the last applied part, plus rails.
-   Always rails + 2-pin A* on pad XY. Result carries "revision" and
-   "dirty_only" so the host does not treat a filtered result as a full set. */
+/* dirty_only != 0: keep the previous paths of nets untouched since the last
+   route and recompute only the nets whose parts moved, changed membership, or
+   whose paths a moved body now crosses. The result carries EVERY net and every
+   surviving path plus "changed_nets" / "removed_nets", "revision" and
+   "dirty_only". A full route (0) resets the dirty set. Power/ground stay rails
+   (paths = []) until a plane plan exists. */
 char *mb_route(mb_session *session, int dirty_only);
+
+/* Resolved circuit JSON: components (with refdes), pins, nets with origins,
+   no_connects, obligations, diagnostics (rule/severity/part/pin/net), and
+   "revision". This is the one snapshot SKiDL / simulation / layout consume. */
+char *mb_circuit(const mb_session *session);
 
 char *mb_scene(mb_session *session);
 char *mb_anchors(mb_session *session);

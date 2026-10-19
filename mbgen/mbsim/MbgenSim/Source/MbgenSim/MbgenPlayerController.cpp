@@ -52,6 +52,7 @@ void AMbgenPlayerController::SetupInputComponent()
     InputComponent->BindKey(EKeys::F, IE_Pressed, this, &AMbgenPlayerController::FramePressed);
     InputComponent->BindKey(EKeys::Enter, IE_Pressed, this, &AMbgenPlayerController::CompilePressed);
     InputComponent->BindKey(EKeys::Delete, IE_Pressed, this, &AMbgenPlayerController::DeletePressed);
+    InputComponent->BindKey(EKeys::Escape, IE_Pressed, this, &AMbgenPlayerController::EscapePressed);
     InputComponent->BindKey(EKeys::Left, IE_Pressed, this, &AMbgenPlayerController::NudgeLeft);
     InputComponent->BindKey(EKeys::Right, IE_Pressed, this, &AMbgenPlayerController::NudgeRight);
     InputComponent->BindKey(EKeys::Up, IE_Pressed, this, &AMbgenPlayerController::NudgeUp);
@@ -157,8 +158,20 @@ void AMbgenPlayerController::PlaceReleased()
         {
             // Flush the release sample past the 10 Hz gate, then rebuild once.
             FVector Origin, Dir;
-            if (DeprojectMousePositionToWorld(Origin, Dir)) { B->PlaceSelectedAtRay(Origin, Dir, true); }
+            if (B->IsPlaceDragActive() && DeprojectMousePositionToWorld(Origin, Dir)) { B->PlaceSelectedAtRay(Origin, Dir, true); }
             B->FinishPlaceDrag();
+        }
+    }
+}
+void AMbgenPlayerController::EscapePressed()
+{
+    // Escape during a drag restores the mouse-down design; the drag is over.
+    if (AMbgenBoardActor* B = Board())
+    {
+        if (B->CancelPlaceDrag())
+        {
+            bPlaceDrag = false;
+            bLookDrag = false;
         }
     }
 }
@@ -192,7 +205,7 @@ void AMbgenPlayerController::Tick(float DeltaSeconds)
         FVector Origin, Dir;
         if (DeprojectMousePositionToWorld(Origin, Dir))
         {
-            if (AMbgenBoardActor* B = Board()) { B->PlaceSelectedAtRay(Origin, Dir); }
+            if (AMbgenBoardActor* B = Board(); B && B->IsPlaceDragActive()) { B->PlaceSelectedAtRay(Origin, Dir); }
         }
     }
     if (ChromeBar && ChromeBar->IsInViewport() && GEngine && GEngine->GameViewport)
@@ -244,6 +257,7 @@ void AMbgenPlayerController::SelectUnderCursor()
                 const FString Id = Prim->ComponentTags[0].ToString();
                 if (AMbgenBoardActor::IsEditablePart(Id))
                 {
+                    B->BeginPlaceDrag();
                     B->SelectedId = Id;
                     bPlaceDrag = true;
                     UE_LOG(LogTemp, Display, TEXT("mbgen selected %s"), *B->SelectedId);

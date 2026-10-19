@@ -1549,6 +1549,12 @@ export const DEFAULT_CONFIG: ResolvedBuildConfig = {
       requireExplicit: true,
       maxFixIterations: 4,
     },
+    // `mb simulate`: discover ngspice on PATH; a missing simulator yields
+    // `incomplete` results, never a pass.
+    simulation: {
+      ngspiceBin: null,
+      timeoutSec: 120,
+    },
   },
 
   physicalDesign: {

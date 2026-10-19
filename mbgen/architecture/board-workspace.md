@@ -35,9 +35,37 @@ footprints alone:
 | **Diagnostics are passive.** `DiagnoseNav` is a CallInEditor command; a click never runs the synthetic camera sweep. | `MbgenEditorBridge.cpp` mouse-down |
 | **A drag ends under the cursor.** The release sample bypasses the 10 Hz gate (`PlaceSelectedAtRay(..., bFinal=true)`), then one rebuild. | actor, bridge, controller; `unreal.rs::a_drag_ends_under_the_cursor` |
 | **Identity is monotonic.** `Design.id_seq` (schema 2) hands out ids per role; a deleted id is never reused, across reloads. v1 documents load and migrate. | `template.rs::allocate_id`, gesture tests |
-| **Results carry their revision.** `mb_apply` and `mb_route` return `revision`; `mb_route` also says `dirty_only` so a filtered result is never mistaken for the full set. | `mbcore_c/src/lib.rs`, `mb_session_revision` |
+| **Results carry their revision.** `mb_apply`, `mb_route` and `mb_circuit` return `revision`. A dirty `mb_route` carries **every** net and every surviving path plus `changed_nets`/`removed_nets`; it is never a subset. | `mbcore_c/src/lib.rs` (ABI v3), `route_returns_rails_with_empty_paths_and_dirty_routing_keeps_every_net` |
+| **Refdes is persistent.** A component gets `C`/`J`/`U`/`Y`/`D`/`BT` + number once (`Design.refdes_seq`); copies, outline changes and reloads never reassign it. Scene bodies and `circuit.json` carry it. | `template.rs::assign_refdes`, `scene.rs`, `circuit.rs` |
+| **One transform.** Pads, bodies, anchors and exports go through `geometry.rs` (`rotate_q`, `pad_world`, `body_z`); bottom side mirrors X and sits under the board. | `geometry.rs`, `scene::pose`, `net::anchors`, `route::terminal_of` |
+| **The circuit is derived, never edited.** `circuit::resolve(design)` unions contract nets, explicit `Design.connections` and recipe connections into one snapshot; every disagreement is a `Diagnostic` with a rule id (`E-PIN-UNKNOWN`, `E-DOMAIN-CLASH`, `E-PIN-MULTI-NET`, `E-NC-CONNECTED`, `E-OPEN-REQUIRED`, `W-PASSIVE-OPEN`, `W-NET-NO-SOURCE`). A pin is on one net. | `circuit.rs` tests |
+| **No invented pins.** A capacitor has two terminals by part class (`PinSpec::TwoTerminal`); everything else still waits for a frozen pinout. SATA grounds 1/4/7 are `GND` exactly as `interfaces.py` wires them. | `net.rs` |
+| **Recipes are real parts.** `decap_per_rail` proposes components + connections (`Proposal`), applies atomically, reuses what its `CircuitBlock` already `owns`, shows removals, and only applies to a host that declares power contracts. Deleting the host removes exactly the owned parts. Compile no longer invents floating capacitors. | `recipes.rs`, `gesture.rs` (`expand_recipe`/`remove_recipe`/`connect`/`disconnect`/`no_connect`/`set_part`/`flip`), `export.rs::decoupling_in_the_bundle_comes_from_recipe_blocks_with_wired_terminals` |
+| **Routing is deterministic and layer-aware.** A* over `(x, y, layer, heading)` with an admissible Manhattan heuristic to a pad, Dijkstra for tree joins; SMT bodies block their own layer only; other nets' copper and pads are obstacles; exact pad µm at both ends; same inputs → byte-identical paths; a search budget turns a hang into `Unroutable`. Rails stay `paths = []` until a plane plan exists. | `route.rs` tests (12), incl. `routing_is_deterministic_and_within_budget_on_a_mini_itx_grid` |
+| **Incremental routing keeps clean paths.** A net is dirty when it touches a changed part or a moved body's keep-out crosses its previous path; everything else is kept byte-for-byte. | `route::route_incremental`, session `dirty_parts` |
+| **The bundle is complete or absent.** `mbgen compile` writes every file then `manifest.json` last with a sha256 per file; `mb ingest` refuses a bundle whose files do not hash as declared, and copies `circuit.json`/`layout.json` only when verified. | `export::Bundle::manifest`, `mbcompiler::write_bundle`, `build-platform/src/tooling/mbBundle.ts` + tests |
+| **SKiDL is lossless and counted.** `corev-mb/lib/circuit.py` builds one SKiDL part/pin/net per circuit entity with the same ids; no-connects come only from `circuit.no_connects`; ERC counts come from `skidl.erc_logger` counters; findings are mapped back to mbgen ids; the netlist is read back (s-expression parser) and compared (`parity`). `mb design` fails on an ERC error, a netlist failure or a parity mismatch. | `corev-mb/lib/circuit.py`, `soc.py::_build_from_circuit`, `corev-mb/tests/test_circuit.py` |
+| **Simulation is explicit and revision-bound.** Scenarios are checked-in JSON (models, sources, analysis, measurements with ranges); the deck lists what it could not model; results are `pass`/`fail`/`incomplete` with sha256 of circuit, scenario and deck and the simulator version. No ngspice → `incomplete`, never `pass`. | `corev-mb/lib/simulation.py`, `simulate.py`, `mb simulate`, `test_simulation_pcb.py` |
+| **Manufacturing is gated.** `pcb.manufacturing_gate` needs ERC, SKiDL parity, layout contract (placement + frozen footprint per populated part), PCB DRC and PCB parity — a missing report is a blocker. `kicad-cli` is discovered, never assumed. | `corev-mb/lib/pcb.py` |
+| **A drag can be cancelled.** Mouse-down snapshots the design (`BeginPlaceDrag`); Escape restores it with no undo entry (`CancelPlaceDrag`); every sample of a gesture resolves against the viewport it started in (`GGestureViewport`). | `MbgenBoardActor.cpp`, `MbgenEditorBridge.cpp`, `MbgenPlayerController.cpp` |
 
-## Landed in this pass (S0–S2 groundwork)
+## Landed in pass 2 (S2 close, S4, S5, S6, S7/S8 foundations)
+
+- `Design` v2 component fields: `Port.{refdes, part: PartRef{mpn,lcsc,footprint}, value, dnp}`,
+  `Placement.side`, `Design.{refdes_seq, connections, no_connects, blocks}`; `geometry.rs`.
+- `circuit.rs` resolved snapshot + diagnostics; `recipes.rs` (`decap_per_rail`) with
+  proposal/apply/remove/disown; seven new gestures; delete cascades through blocks.
+- `route.rs` rewritten (occupancy per layer, A*, reservations, tree joins, exact endpoints,
+  incremental `Keep`); `Path.id`; `RouteResult.{changed_nets, removed_nets, grid_um}`.
+- Bundle v2: `circuit.json`, `layout.json`, `manifest.json`; `mbcore_c` ABI v3 (`mb_circuit`,
+  incremental `mb_route`, session `dirty_parts`/`last_route`).
+- `corev-mb/lib/{circuit,simulation,simulate,pcb}.py`; `soc.py` takes the circuit path when
+  `circuit.json` is present; `corev-mb/tests/` (21 tests; live ngspice/kicad tests skip when absent).
+- `mb ingest` bundle verification; `mb simulate`; `motherboard.simulation` config.
+- Verified end to end: mini-itx → `expand_recipe` → compile → ingest → `mb design` (0 ERC errors,
+  parity ok, 4 nets) → `mb simulate` (deck generated; `INCOMPLETE: ngspice not found` on this host).
+
+## Landed in pass 1 (S0–S2 groundwork)
 
 - `Design` schema 2: `schema_version`, `id_seq`, `allocate_id`, `migrate`.
 - `mbcore_c` ABI v2: `mb_abi_version`, `mb_session_revision`, revision on apply/route, `mb_nav_*`.
@@ -51,13 +79,24 @@ footprints alone:
 
 ## Next (by plan stage)
 
-- **S1** remaining: capture the initiating viewport for a whole gesture; Escape cancels a drag;
-  Editor/standalone event-replay comparison (behaviour, not strings).
-- **S2** remaining: `Design` v2 component instances with footprint/side/rotation; shared geometry
-  (`geometry.rs`); outline migration proposals; the custom-SoC package contract as an input file.
-- **S3–S10**: shared workspace UI, circuit model + recipes, lossless SKiDL adapter, real A* with
-  layer-specific occupancy and net reservations, ngspice runner, KiCad bridge, visual fidelity,
-  packaging — as in the plan of record.
+- **S1** remaining: Editor/standalone event-replay comparison (behaviour, not strings).
+- **S2** remaining: outline migration *proposals* (today `set_outline` keeps what fits and drops the
+  rest silently); the custom-SoC package contract as a checked-in input file with `unresolved` fields.
+- **S3**: the shared workspace UI (library with exact-part search, pin/net explorer, issue list that
+  selects the linked part/pin/net from `circuit.json` diagnostics and `*.erc.json`, simulation
+  controls/plots). Hosts expose `mb_circuit` but do not yet paint it.
+- **S4**: more verified recipes (power entry / regulator, reset, clock, boot flash) — each needs a
+  frozen pinout for its IC; the host side (`Proposal` preview panel, "apply as one undo") is UI work.
+- **S5**: pin *functions* for frozen distributor pinouts (today 146 slot contacts are honest
+  `W-PIN-OPEN-UNKNOWN-FUNCTION`); a rail *source* class so `W-NET-NO-SOURCE` can clear.
+- **S6**: pad geometry (`PinSpec::Footprint`) from `cse_get_kicad` freezes so production nets get
+  terminals; bounded rip-up when a kept path blocks a dirty net; plane/zone plan for rails; host
+  paints by `Path.id` with `changed_nets` instead of wholesale.
+- **S7**: ngspice on the build host (`probe` / `tools install`) so the live tests stop skipping;
+  tran/dc scenarios for reset and power-up once a regulator recipe exists.
+- **S8**: a `.kicad_pcb` writer from `layout.json` (needs footprints), then `pcb.run_drc` /
+  `export_manufacturing` behind `manufacturing_gate`.
+- **S9/S10**: visual fidelity and packaging as in the plan of record.
 
 ## Known gaps recorded, not hidden
 
@@ -68,3 +107,10 @@ footprints alone:
   an xlen/board-class filter belongs to S3.
 - No approved custom-SoC package/pad map exists in the tree; manufacturing qualification of the
   LibreCore board stays blocked on that input (plan §5).
+- No production role has pad XY yet, so `paths.json` is still empty on every outline; the router is
+  exercised by injected-terminal tests only. Every component in the bundle has `mbgen:unresolved`
+  as its footprint and the manufacturing gate reports that.
+- ngspice and kicad-cli are absent on this host; `mb simulate` honestly returns `incomplete` (exit 4)
+  and the KiCad bridge is exercised by pure tests only.
+- `set_outline` migration keeps fitting parts and silently drops the rest — a proposal/preview is
+  the S2 follow-up.

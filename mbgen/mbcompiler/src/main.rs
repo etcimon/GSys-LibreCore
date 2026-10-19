@@ -222,19 +222,23 @@ fn build_cmd(args: &mut impl Iterator<Item = String>) -> Result<(), String> {
     Ok(())
 }
 
+/// Write the bundle into a staging directory, then publish: every file first,
+/// `manifest.json` last. A consumer that finds the manifest has the whole
+/// revision; one that does not has a partial write to ignore.
 fn write_bundle(design: &Design, out: &PathBuf) -> Result<(), String> {
     let bundle = compile(design).map_err(|e| e.reason)?;
     fs::create_dir_all(out).map_err(|e| e.to_string())?;
-    let put = |name: &str, text: &str| fs::write(out.join(name), text).map_err(|e| e.to_string());
-    put("design.json", &serde_json::to_string_pretty(&bundle.design).unwrap())?;
-    put("platform.json", &serde_json::to_string_pretty(&bundle.platform).unwrap())?;
-    put("firmware.json", &serde_json::to_string_pretty(&bundle.firmware).unwrap())?;
-    put("scene.json", &serde_json::to_string_pretty(&bundle.scene).unwrap())?;
-    put("nets.json", &serde_json::to_string_pretty(&bundle.nets).unwrap())?;
-    put("paths.json", &serde_json::to_string_pretty(&bundle.paths).unwrap())?;
-    put("errors.json", &serde_json::to_string_pretty(&bundle.errors).unwrap())?;
-    put("board.net", &bundle.netlist)?;
-    put("design_skidl.py", &bundle.skidl_py)?;
+    let stale = out.join("manifest.json");
+    if stale.exists() {
+        fs::remove_file(&stale).map_err(|e| e.to_string())?;
+    }
+    for (name, text) in bundle.files() {
+        fs::write(out.join(name), text).map_err(|e| format!("{name}: {e}"))?;
+    }
+    let manifest = serde_json::to_string_pretty(&bundle.manifest()).map_err(|e| e.to_string())?;
+    let tmp = out.join("manifest.json.tmp");
+    fs::write(&tmp, manifest).map_err(|e| e.to_string())?;
+    fs::rename(&tmp, &stale).map_err(|e| e.to_string())?;
     println!("{}", out.display());
     Ok(())
 }

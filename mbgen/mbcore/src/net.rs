@@ -21,6 +21,8 @@ pub enum PinKind {
     Signal,
     Clock,
     Analog,
+    /// A terminal of a two-terminal passive; takes whatever net it is placed on.
+    Passive,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -77,6 +79,9 @@ pub struct Hit {
 pub struct Path {
     pub net: String,
     pub hits: Vec<Hit>,
+    /// Stable id (`<net>#<k>`) so a host can remove exactly this strip.
+    #[serde(default)]
+    pub id: String,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -133,6 +138,9 @@ pub enum PinSpec {
     NamesOnly { lcsc: String, pins: Vec<PinProto> },
     Footprint { lcsc: String, pins: Vec<PinProto> },
     Catalog { mpn: String },
+    /// A two-terminal passive (capacitor): terminals `1` and `2` exist by
+    /// part class, not by any MPN's pinout. Pad XY still waits for a footprint.
+    TwoTerminal,
 }
 
 /// Pin spec for a role. Independent of which `Template` the design uses.
@@ -140,7 +148,8 @@ pub fn pin_spec(role: &str) -> PinSpec {
     match role {
         "usb_stack" | "esd" | "dp" | "wifi_m2" | "usb_c" => PinSpec::Gap,
         "socket" => PinSpec::UnnamedGrid,
-        "hdmi" | "gbe_magjack" | "phy_gbe" | "spi_flash" | "crystal" | "decap" | "vtt" => {
+        "decap" => PinSpec::TwoTerminal,
+        "hdmi" | "gbe_magjack" | "phy_gbe" | "spi_flash" | "crystal" | "vtt" => {
             PinSpec::Catalog { mpn: String::new() }
         }
         "pcie_slot" => names_only(LCSC_PCIE_SLOT, freeze_pins("pcie_slot")),
@@ -214,9 +223,9 @@ fn net_key(role: &str, name: &str) -> Option<(&'static str, NetClass)> {
             };
             (rail, class)
         }),
-        "sata" if name == "1" => Some(("1", NetClass::Ground)),
-        "sata" if name == "4" => Some(("4", NetClass::Ground)),
-        "sata" if name == "7" => Some(("7", NetClass::Ground)),
+        // SATA data plug grounds 1/4/7 are the board GND, exactly as
+        // `interfaces.py::_tie_sata_grounds` wires them in SKiDL.
+        "sata" if matches!(name, "1" | "4" | "7") => Some(("GND", NetClass::Ground)),
         _ => None,
     }
 }
@@ -228,6 +237,21 @@ pub fn pins_for(part_id: &str, role: &str) -> Vec<Pin> {
             .iter()
             .enumerate()
             .map(|(i, proto)| pin_from_proto(part_id, i as u32, proto, role))
+            .collect(),
+        PinSpec::TwoTerminal => ["1", "2"]
+            .iter()
+            .enumerate()
+            .map(|(i, n)| Pin {
+                id: format!("{part_id}.{n}"),
+                part: part_id.into(),
+                index: i as u32,
+                name: (*n).into(),
+                kind: PinKind::Passive,
+                domain: String::new(),
+                side: PinSide::Top,
+                dx_um: None,
+                dy_um: None,
+            })
             .collect(),
         PinSpec::Gap | PinSpec::UnnamedGrid | PinSpec::Catalog { .. } => Vec::new(),
     }
@@ -359,12 +383,13 @@ pub fn anchors(design: &Design) -> Vec<Anchor> {
             let (Some(dx), Some(dy)) = (pin.dx_um, pin.dy_um) else {
                 continue;
             };
+            let (x_um, y_um) = crate::geometry::pad_world(body.x_um, body.y_um, dx, dy, body.yaw_q, body.side);
             out.push(Anchor {
                 part: body.id.clone(),
                 pin: Some(pin.id),
-                x_um: body.x_um + dx,
-                y_um: body.y_um + dy,
-                z_um: 1_600,
+                x_um,
+                y_um,
+                z_um: crate::geometry::copper_z(body.side),
                 kind: AnchorKind::PinPad,
             });
         }
@@ -404,7 +429,6 @@ mod tests {
             "phy_gbe",
             "spi_flash",
             "crystal",
-            "decap",
             "vtt",
         ]
     }
@@ -420,6 +444,19 @@ mod tests {
         assert!(matches!(pin_spec("socket"), PinSpec::UnnamedGrid));
         assert!(matches!(pin_spec("usb_stack"), PinSpec::Gap));
         assert!(matches!(pin_spec("usb_c"), PinSpec::Gap));
+    }
+
+    #[test]
+    fn a_capacitor_has_two_terminals_by_class_and_no_pad_xy() {
+        assert!(matches!(pin_spec("decap"), PinSpec::TwoTerminal));
+        let pins = pins_for("c0", "decap");
+        assert_eq!(pins.len(), 2);
+        assert_eq!(pins[0].id, "c0.1");
+        assert_eq!(pins[1].id, "c0.2");
+        assert!(pins.iter().all(|p| p.kind == PinKind::Passive && p.domain.is_empty()));
+        assert!(pins.iter().all(|p| p.dx_um.is_none()), "no footprint, no pad XY");
+        // A passive terminal joins no contract net by itself.
+        assert!(contracts_for("decap", &["1".into(), "2".into()]).is_empty());
     }
 
     #[test]
@@ -556,9 +593,11 @@ mod tests {
         assert!(ids.contains(&"P3V3"));
         assert!(ids.contains(&"P3V3_AUX"));
         assert!(ids.contains(&"GND"));
-        assert!(ids.contains(&"1"));
-        assert!(ids.contains(&"4"));
-        assert!(ids.contains(&"7"));
+        // SATA grounds join GND, as the SKiDL witness does; no nets named 1/4/7.
+        assert!(!ids.contains(&"1") && !ids.contains(&"4") && !ids.contains(&"7"));
+        let gnd = nets.iter().find(|n| n.id == "GND").unwrap();
+        assert!(gnd.pins.iter().any(|p| p.starts_with("sata0.")));
+        assert!(gnd.pins.iter().any(|p| p.starts_with("slot0.")));
         let p12 = nets.iter().find(|n| n.id == "P12V").unwrap();
         assert_eq!(p12.class, NetClass::Power);
         assert!(p12.pins.iter().any(|p| p.starts_with("slot0.")));
@@ -627,10 +666,9 @@ mod tests {
         let net = |id: &str| nets.iter().find(|n| n.id == id).unwrap();
         assert_eq!(net("P12V").pins, vec!["slot0.P12V", "cem0.P12V"]);
         assert_eq!(net("P12V").class, NetClass::Power);
-        assert_eq!(net("GND").pins, vec!["slot0.GND", "cem0.GND"]);
+        assert_eq!(net("GND").pins, vec!["slot0.GND", "cem0.GND", "sata0.1", "sata0.4"]);
         assert_eq!(net("GND").class, NetClass::Ground);
-        assert_eq!(net("1").pins, vec!["sata0.1"]);
-        assert_eq!(net("4").pins, vec!["sata0.4"]);
+        assert!(nets.iter().all(|n| n.id != "1" && n.id != "4"));
         assert!(nets.iter().all(|n| n.id != "A1" && n.id != "VDD" && n.id != "VBUS"));
     }
 }

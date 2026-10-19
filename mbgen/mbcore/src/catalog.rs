@@ -161,22 +161,9 @@ pub fn apply_package(design: &Design, package_id: &str) -> Result<Design, PackEr
         let order = next.placements.iter().map(|p| p.order).max().unwrap_or(0) + 1;
         let cpu = next.template()?.edges.into_iter().find(|e| e.id == "cpu");
         let s = cpu.map(|e| (e.s_min + e.s_max) / 2).unwrap_or(0);
-        next.ports.push(Port {
-            id: "ai0".into(),
-            role: role.id.into(),
-            width_um: role.width_um,
-        });
-        next.placements.push(Placement {
-            id: "ai0".into(),
-            edge: role.edge.into(),
-            s_um: s,
-            stack: 0,
-            pinned: false,
-            order,
-            yaw_q: 0,
-            x_um: None,
-            y_um: None,
-        });
+        next.ports.push(Port::new("ai0", role.id, role.width_um));
+        next.placements.push(Placement::new("ai0", role.edge, s, false, order));
+        next.assign_refdes("ai0");
     }
     let template = next.template()?;
     next.repack(&template)?;

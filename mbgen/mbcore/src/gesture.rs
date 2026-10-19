@@ -1,12 +1,14 @@
 //! Gestures propose a design. `preview` keeps the previous design when the
 //! proposal does not pack. `AutoConnect` does not write nets onto `Design`.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::catalog::apply_package;
 use crate::net::anchors;
 use crate::pack::PackError;
-use crate::template::{role, role_extents, template_by_id, Design, Placement, Port};
+use crate::template::{role, role_extents, template_by_id, Connection, Design, Placement, Port, Side};
 
 /// Snap radius for `Place`, in micrometres.
 pub const SNAP_UM: i64 = 500;
@@ -24,8 +26,25 @@ pub enum Gesture {
     SetProperty { id: String, key: String, value: String },
     AutoConnect { id: String },
     SetOutline { template_id: String },
+    /// Put these pins on one net (explicit user intent). Pins must exist.
+    Connect { net: String, pins: Vec<String>, #[serde(default = "default_signal_class")] class: String },
+    /// Take one pin off whatever explicit connection holds it.
+    Disconnect { pin: String },
+    /// Mark a pin deliberately open.
+    NoConnect { pin: String },
+    /// Expand (or re-expand) a circuit recipe on a host part; one undo entry.
+    ExpandRecipe { recipe: String, host: String, #[serde(default)] params: BTreeMap<String, String> },
+    RemoveRecipe { block: String },
+    /// Bind an exact part (frozen MPN / LCSC / footprint id) and value.
+    SetPart { id: String, #[serde(default)] mpn: String, #[serde(default)] lcsc: String, #[serde(default)] footprint: String, #[serde(default)] value: String },
+    /// Move a part to the other copper side.
+    Flip { id: String },
     #[serde(other)]
     Unknown,
+}
+
+fn default_signal_class() -> String {
+    "signal".into()
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -52,6 +71,13 @@ pub fn preview(design: &Design, gesture: &Gesture) -> PreviewResult {
         Gesture::SetProperty { id, key, value } => set_property(&mut next, id, key, value),
         Gesture::AutoConnect { id } => auto_connect_ok(&next, id),
         Gesture::SetOutline { template_id } => set_outline(&mut next, template_id),
+        Gesture::Connect { net, pins, class } => connect(&mut next, net, pins, class),
+        Gesture::Disconnect { pin } => disconnect(&mut next, pin),
+        Gesture::NoConnect { pin } => no_connect(&mut next, pin),
+        Gesture::ExpandRecipe { recipe, host, params } => expand_recipe(&mut next, recipe, host, params),
+        Gesture::RemoveRecipe { block } => remove_recipe(&mut next, block),
+        Gesture::SetPart { id, mpn, lcsc, footprint, value } => set_part(&mut next, id, mpn, lcsc, footprint, value),
+        Gesture::Flip { id } => flip(&mut next, id),
         Gesture::Unknown => unreachable!(),
     };
     if let Err(err) = proposal {
@@ -81,22 +107,9 @@ fn add(design: &mut Design, role_id: &str) -> Result<(), PackError> {
     })?;
     let id = design.allocate_id(role.id);
     let order = design.placements.iter().map(|p| p.order).max().unwrap_or(0) + 1;
-    design.ports.push(Port {
-        id: id.clone(),
-        role: role.id.into(),
-        width_um: role.width_um,
-    });
-    design.placements.push(Placement {
-        id,
-        edge: role.edge.into(),
-        s_um: 0,
-        stack: 0,
-        pinned: false,
-        order,
-        yaw_q: 0,
-        x_um: None,
-        y_um: None,
-    });
+    design.ports.push(Port::new(id.clone(), role.id, role.width_um));
+    design.placements.push(Placement::new(id.clone(), role.edge, 0, false, order));
+    design.assign_refdes(&id);
     Ok(())
 }
 
@@ -137,22 +150,22 @@ fn copy(design: &mut Design, id: &str) -> Result<(), PackError> {
             later.order += 1;
         }
     }
+    // The copy inherits the exact part and value, never the refdes.
     design.ports.push(Port {
         id: new_id.clone(),
         role: port.role,
         width_um: port.width_um,
+        refdes: None,
+        part: port.part,
+        value: port.value,
+        dnp: port.dnp,
     });
-    design.placements.push(Placement {
-        id: new_id,
-        edge: place.edge,
-        s_um: 0,
-        stack: place.stack,
-        pinned: false,
-        order,
-        yaw_q: place.yaw_q,
-        x_um: None,
-        y_um: None,
-    });
+    let mut placed = Placement::new(new_id.clone(), place.edge, 0, false, order);
+    placed.stack = place.stack;
+    placed.yaw_q = place.yaw_q;
+    placed.side = place.side;
+    design.placements.push(placed);
+    design.assign_refdes(&new_id);
     Ok(())
 }
 
@@ -173,6 +186,135 @@ fn delete(design: &mut Design, id: &str) -> Result<(), PackError> {
         })?;
     design.ports.remove(port_i);
     design.placements.remove(place_i);
+    // Blocks hosted on this part go with it, with everything they own;
+    // a directly deleted owned part is disowned so no orphan reference stays.
+    let hosted: Vec<String> = design.blocks.iter().filter(|b| b.host == id).map(|b| b.id.clone()).collect();
+    for block in hosted {
+        crate::recipes::remove_block(design, &block);
+    }
+    crate::recipes::disown(design, id);
+    let prefix = format!("{id}.");
+    for c in &mut design.connections {
+        c.pins.retain(|p| !p.starts_with(&prefix));
+    }
+    design.connections.retain(|c| !c.pins.is_empty());
+    design.no_connects.retain(|p| !p.starts_with(&prefix));
+    Ok(())
+}
+
+fn pin_exists(design: &Design, pin: &str) -> bool {
+    let Some((part, _)) = pin.rsplit_once('.') else {
+        return false;
+    };
+    design
+        .ports
+        .iter()
+        .find(|p| p.id == part)
+        .map(|p| crate::net::pins_for(&p.id, &p.role).iter().any(|x| x.id == pin))
+        .unwrap_or(false)
+}
+
+fn connect(design: &mut Design, net: &str, pins: &[String], class: &str) -> Result<(), PackError> {
+    if net.trim().is_empty() || pins.is_empty() {
+        return Err(PackError { reason: "connect needs a net name and at least one pin".into() });
+    }
+    if !matches!(class, "signal" | "power" | "ground" | "clock") {
+        return Err(PackError { reason: format!("unknown net class {class}") });
+    }
+    for pin in pins {
+        if !pin_exists(design, pin) {
+            return Err(PackError { reason: format!("no pin {pin}") });
+        }
+    }
+    if let Some(existing) = design.connections.iter_mut().find(|c| c.net == net) {
+        if existing.class != class {
+            return Err(PackError { reason: format!("net {net} is {} and cannot also be {class}", existing.class) });
+        }
+        for pin in pins {
+            if !existing.pins.contains(pin) {
+                existing.pins.push(pin.clone());
+            }
+        }
+    } else {
+        design.connections.push(Connection { net: net.into(), pins: pins.to_vec(), class: class.into() });
+    }
+    design.no_connects.retain(|p| !pins.contains(p));
+    Ok(())
+}
+
+fn disconnect(design: &mut Design, pin: &str) -> Result<(), PackError> {
+    let mut found = false;
+    for c in &mut design.connections {
+        let before = c.pins.len();
+        c.pins.retain(|p| p != pin);
+        found |= c.pins.len() != before;
+    }
+    design.connections.retain(|c| !c.pins.is_empty());
+    if found {
+        Ok(())
+    } else {
+        Err(PackError { reason: format!("{pin} is not on an explicit connection") })
+    }
+}
+
+fn no_connect(design: &mut Design, pin: &str) -> Result<(), PackError> {
+    if !pin_exists(design, pin) {
+        return Err(PackError { reason: format!("no pin {pin}") });
+    }
+    if design.connections.iter().any(|c| c.pins.iter().any(|p| p == pin)) {
+        return Err(PackError { reason: format!("{pin} is connected; disconnect it before marking it open") });
+    }
+    if !design.no_connects.iter().any(|p| p == pin) {
+        design.no_connects.push(pin.into());
+    }
+    Ok(())
+}
+
+fn expand_recipe(design: &mut Design, recipe: &str, host: &str, params: &BTreeMap<String, String>) -> Result<(), PackError> {
+    let proposal = crate::recipes::propose(design, recipe, host, params);
+    *design = crate::recipes::apply_proposal(design, &proposal)?;
+    Ok(())
+}
+
+fn remove_recipe(design: &mut Design, block: &str) -> Result<(), PackError> {
+    if !design.blocks.iter().any(|b| b.id == block) {
+        return Err(PackError { reason: format!("no block {block}") });
+    }
+    crate::recipes::remove_block(design, block);
+    Ok(())
+}
+
+fn set_part(design: &mut Design, id: &str, mpn: &str, lcsc: &str, footprint: &str, value: &str) -> Result<(), PackError> {
+    let port = design.ports.iter_mut().find(|p| p.id == id).ok_or_else(|| PackError { reason: format!("no part {id}") })?;
+    if mpn.is_empty() && lcsc.is_empty() && footprint.is_empty() && value.is_empty() {
+        return Err(PackError { reason: "set_part needs an mpn, lcsc, footprint or value".into() });
+    }
+    if !mpn.is_empty() || !lcsc.is_empty() || !footprint.is_empty() {
+        let mut part = port.part.clone().unwrap_or_default();
+        if !mpn.is_empty() {
+            part.mpn = mpn.into();
+        }
+        if !lcsc.is_empty() {
+            part.lcsc = lcsc.into();
+        }
+        if !footprint.is_empty() {
+            part.footprint = footprint.into();
+        }
+        port.part = Some(part);
+    }
+    if !value.is_empty() {
+        port.value = Some(value.into());
+    }
+    Ok(())
+}
+
+fn flip(design: &mut Design, id: &str) -> Result<(), PackError> {
+    let place = design.placements.iter_mut().find(|p| p.id == id).ok_or_else(|| PackError { reason: format!("no part {id}") })?;
+    place.side = match place.side {
+        Side::Top => Side::Bottom,
+        Side::Bottom => Side::Top,
+    };
+    place.pinned = true;
     Ok(())
 }
 
@@ -396,15 +538,19 @@ fn set_outline(design: &mut Design, template_id: &str) -> Result<(), PackError> 
     design.ports = ports;
     design.placements = placements;
     let stock = Design::from_template(template_id)?;
-    for port in stock.ports {
+    for mut port in stock.ports {
         if design.ports.iter().any(|p| p.id == port.id || p.role == port.role) {
             continue;
         }
         let Some(place) = stock.placements.iter().find(|pl| pl.id == port.id).cloned() else {
             continue;
         };
+        // A stock part joins this document's refdes sequence, not the stock one's.
+        port.refdes = None;
+        let id = port.id.clone();
         design.ports.push(port);
         design.placements.push(place);
+        design.assign_refdes(&id);
     }
     Ok(())
 }
@@ -483,6 +629,58 @@ mod tests {
             }
             current = next.design;
         }
+    }
+
+    #[test]
+    fn circuit_gestures_connect_expand_flip_and_cascade_on_delete() {
+        let design = Design::mini_itx().unwrap();
+        let mut params = std::collections::BTreeMap::new();
+        params.insert("per_rail".to_string(), "1".to_string());
+        let expanded = preview(&design, &Gesture::ExpandRecipe { recipe: "decap_per_rail".into(), host: "slot0".into(), params: params.clone() });
+        assert!(expanded.applied, "{:?}", expanded.reason);
+        assert_eq!(expanded.design.blocks.len(), 1);
+        assert_eq!(expanded.design.ports.iter().filter(|p| p.role == "decap").count(), 3);
+        // Connect a user capacitor's terminal to a rail; an unknown pin is refused.
+        let with_cap = preview(&expanded.design, &Gesture::Add { role: "decap".into() }).design;
+        let cap = with_cap.ports.iter().filter(|p| p.role == "decap").map(|p| p.id.clone()).find(|id| !id.starts_with("slot0_c_")).unwrap();
+        let bad = preview(&with_cap, &Gesture::Connect { net: "P3V3".into(), pins: vec!["nope.1".into()], class: "power".into() });
+        assert!(!bad.applied);
+        assert_eq!(bad.design, with_cap);
+        let ok = preview(&with_cap, &Gesture::Connect { net: "P3V3".into(), pins: vec![format!("{cap}.1")], class: "power".into() });
+        assert!(ok.applied, "{:?}", ok.reason);
+        let wrong_class = preview(&ok.design, &Gesture::Connect { net: "P3V3".into(), pins: vec![format!("{cap}.2")], class: "signal".into() });
+        assert!(!wrong_class.applied);
+        // No-connect refuses a connected pin, accepts an open one.
+        assert!(!preview(&ok.design, &Gesture::NoConnect { pin: format!("{cap}.1") }).applied);
+        let nc = preview(&ok.design, &Gesture::NoConnect { pin: format!("{cap}.2") });
+        assert!(nc.applied, "{:?}", nc.reason);
+        assert!(nc.design.no_connects.contains(&format!("{cap}.2")));
+        // Flip moves the part to the bottom and the scene follows.
+        let flipped = preview(&nc.design, &Gesture::Flip { id: cap.clone() });
+        assert!(flipped.applied, "{:?}", flipped.reason);
+        assert_eq!(flipped.design.placements.iter().find(|p| p.id == cap).unwrap().side, Side::Bottom);
+        assert!(scene(&flipped.design).unwrap().iter().find(|b| b.id == cap).unwrap().z_um < 0);
+        // SetPart binds a frozen identity and value.
+        let bound = preview(&flipped.design, &Gesture::SetPart { id: cap.clone(), mpn: "CL05B104KO5NNNC".into(), lcsc: "C1525".into(), footprint: String::new(), value: "100n".into() });
+        assert!(bound.applied, "{:?}", bound.reason);
+        let port = bound.design.ports.iter().find(|p| p.id == cap).unwrap();
+        assert_eq!(port.part.as_ref().unwrap().lcsc, "C1525");
+        assert_eq!(port.value.as_deref(), Some("100n"));
+        // Deleting the host removes its block and owned parts, not the user's capacitor.
+        let gone = preview(&bound.design, &Gesture::Delete { id: "slot0".into() });
+        assert!(gone.applied, "{:?}", gone.reason);
+        assert!(gone.design.blocks.is_empty());
+        assert!(gone.design.ports.iter().all(|p| !p.id.starts_with("slot0_c_")));
+        assert!(gone.design.ports.iter().any(|p| p.id == cap));
+        assert!(gone.design.connections.iter().all(|c| !c.pins.iter().any(|p| p.starts_with("slot0"))));
+        assert_eq!(crate::circuit::resolve(&gone.design).unwrap().errors(), 0);
+        // Disconnect takes the pin off; a second disconnect is a no-op error.
+        let off = preview(&gone.design, &Gesture::Disconnect { pin: format!("{cap}.1") });
+        assert!(off.applied);
+        assert!(!preview(&off.design, &Gesture::Disconnect { pin: format!("{cap}.1") }).applied);
+        // Wire-level compatibility: old clients that know nothing of these ops still parse.
+        let g: Gesture = serde_json::from_str(r#"{"op":"connect","net":"GND","pins":["x.1"]}"#).unwrap();
+        assert!(matches!(g, Gesture::Connect { ref class, .. } if class == "signal"));
     }
 
     #[test]

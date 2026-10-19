@@ -47,6 +47,10 @@ public:
 static TSharedPtr<FMbgenEditorInput> GInput;
 static FVector GNavPivot(0.f, 0.f, 0.f);
 static FString GRightPartId;
+/* The viewport a gesture started in. Every sample of that gesture (move,
+   release, cancel) is resolved against it, so a second viewport or a
+   focus change mid-drag cannot redirect the part or the camera. */
+static TWeakPtr<SLevelViewport> GGestureViewport;
 static TWeakPtr<SWindow> GPackageWindow;
 static TWeakPtr<SWindow> GLibraryWindow;
 static TWeakPtr<SWindow> GOutlineWindow;
@@ -58,14 +62,23 @@ static bool InPie()
     return GEditor && GEditor->PlayWorld != nullptr;
 }
 
-static bool PathHasLevelViewport(const FWidgetPath* Path)
+static TSharedPtr<SLevelViewport> LevelViewportInPath(const FWidgetPath* Path)
 {
-    if (!Path) { return false; }
+    if (!Path) { return nullptr; }
     for (int32 Index = 0; Index < Path->Widgets.Num(); ++Index)
     {
-        if (Path->Widgets[Index].Widget->GetTypeAsString().Contains(TEXT("SLevelViewport"))) { return true; }
+        const TSharedRef<SWidget>& Widget = Path->Widgets[Index].Widget;
+        if (Widget->GetTypeAsString().Contains(TEXT("SLevelViewport")))
+        {
+            return StaticCastSharedRef<SLevelViewport>(Widget);
+        }
     }
-    return false;
+    return nullptr;
+}
+
+static bool PathHasLevelViewport(const FWidgetPath* Path)
+{
+    return LevelViewportInPath(Path).IsValid();
 }
 
 static bool FocusIsLevelViewport()
@@ -91,9 +104,16 @@ static TSharedPtr<SLevelViewport> ActiveLevelViewport()
     return Module.GetFirstActiveLevelViewport();
 }
 
+/* The initiating viewport while a gesture is live, else the active one. */
+static TSharedPtr<SLevelViewport> GestureViewport()
+{
+    if (TSharedPtr<SLevelViewport> Captured = GGestureViewport.Pin()) { return Captured; }
+    return ActiveLevelViewport();
+}
+
 static bool TraceViewport(FHitResult& Hit)
 {
-    TSharedPtr<SLevelViewport> Viewport = ActiveLevelViewport();
+    TSharedPtr<SLevelViewport> Viewport = GestureViewport();
     if (!Viewport.IsValid()) { return false; }
     FLevelEditorViewportClient& Client = Viewport->GetLevelViewportClient();
     UWorld* World = Client.GetWorld();
@@ -304,6 +324,18 @@ static FLevelEditorViewportClient* PerspectiveClient()
     return nullptr;
 }
 
+/* Camera client for the live gesture: the initiating viewport's when it is
+   perspective, else the first perspective client. */
+static FLevelEditorViewportClient* GestureClient()
+{
+    if (TSharedPtr<SLevelViewport> Captured = GGestureViewport.Pin())
+    {
+        FLevelEditorViewportClient& Client = Captured->GetLevelViewportClient();
+        if (Client.IsPerspective() && Client.Viewport) { return &Client; }
+    }
+    return PerspectiveClient();
+}
+
 void FMbgenEditorBridge::DiagnoseNav()
 {
     FLevelEditorViewportClient* Client = PerspectiveClient();
@@ -453,7 +485,7 @@ bool FMbgenEditorInput::HandleMouseButtonUpEvent(FSlateApplication&, const FPoin
         {
             if (AMbgenBoardActor* Board = FindBoard())
             {
-                TSharedPtr<SLevelViewport> Viewport = ActiveLevelViewport();
+                TSharedPtr<SLevelViewport> Viewport = GestureViewport();
                 if (Viewport.IsValid())
                 {
                     FLevelEditorViewportClient& Client = Viewport->GetLevelViewportClient();
@@ -467,8 +499,8 @@ bool FMbgenEditorInput::HandleMouseButtonUpEvent(FSlateApplication&, const FPoin
             if (AMbgenBoardActor* Board = FindBoard())
             {
                 // Flush the release sample past the 10 Hz gate, then rebuild once.
-                TSharedPtr<SLevelViewport> Viewport = ActiveLevelViewport();
-                if (Viewport.IsValid())
+                TSharedPtr<SLevelViewport> Viewport = GestureViewport();
+                if (Viewport.IsValid() && Board->IsPlaceDragActive())
                 {
                     FLevelEditorViewportClient& Client = Viewport->GetLevelViewportClient();
                     const FViewportCursorLocation Cursor = Client.GetCursorWorldLocationFromMousePos();
@@ -477,14 +509,16 @@ bool FMbgenEditorInput::HandleMouseButtonUpEvent(FSlateApplication&, const FPoin
                 Board->FinishPlaceDrag();
             }
         }
+        if (!bRightDown && !bMiddleDown) { GGestureViewport.Reset(); }
     }
+    if (!bLeftDown && !bRightDown && !bMiddleDown) { GGestureViewport.Reset(); }
     return false;
 }
 
 static void PlaceFromCursor(AMbgenBoardActor* Board)
 {
     if (!Board) { return; }
-    TSharedPtr<SLevelViewport> Viewport = ActiveLevelViewport();
+    TSharedPtr<SLevelViewport> Viewport = GestureViewport();
     if (!Viewport.IsValid()) { return; }
     FLevelEditorViewportClient& Client = Viewport->GetLevelViewportClient();
     const FViewportCursorLocation Cursor = Client.GetCursorWorldLocationFromMousePos();
@@ -498,7 +532,7 @@ bool FMbgenEditorInput::HandleMouseMoveEvent(FSlateApplication&, const FPointerE
     const FVector2D Delta = Event.GetCursorDelta();
     if (Delta.IsNearlyZero()) { return false; }
     const bool bAlt = Event.IsAltDown();
-    FLevelEditorViewportClient* Client = PerspectiveClient();
+    FLevelEditorViewportClient* Client = GestureClient();
     if (bLookDrag && bLeftDown && !bAlt && !bMiddleDown && !bRightDown && !UMbgenLibraryWidget::IsRoleDrag())
     {
         if (Client)
@@ -509,13 +543,11 @@ bool FMbgenEditorInput::HandleMouseMoveEvent(FSlateApplication&, const FPointerE
     }
     if (bPlaceDrag && bLeftDown && !bAlt && !bMiddleDown && !bRightDown && !Event.IsControlDown() && !UMbgenLibraryWidget::IsRoleDrag())
     {
-        PlaceFromCursor(FindBoard());
-        if (AMbgenBoardActor* Board = FindBoard())
+        AMbgenBoardActor* Board = FindBoard();
+        if (Board && Board->IsPlaceDragActive())
         {
-            if (FLevelEditorViewportClient* Cam = PerspectiveClient())
-            {
-                Board->UpdateBottomView(Cam->GetViewLocation());
-            }
+            PlaceFromCursor(Board);
+            if (Client) { Board->UpdateBottomView(Client->GetViewLocation()); }
         }
     }
     if (!Client) { return false; }
@@ -549,6 +581,11 @@ bool FMbgenEditorInput::HandleMouseMoveEvent(FSlateApplication&, const FPointerE
 
 bool FMbgenEditorInput::HandleMouseButtonDownEvent(FSlateApplication&, const FPointerEvent& Event)
 {
+    // Capture the viewport the gesture starts in, once, for its whole life.
+    if (!GGestureViewport.IsValid() && !InPie())
+    {
+        if (TSharedPtr<SLevelViewport> Started = LevelViewportInPath(Event.GetEventPath())) { GGestureViewport = Started; }
+    }
     if (Event.GetEffectingButton() == EKeys::MiddleMouseButton) { bMiddleDown = true; }
     if (Event.GetEffectingButton() == EKeys::RightMouseButton)
     {
@@ -558,7 +595,7 @@ bool FMbgenEditorInput::HandleMouseButtonDownEvent(FSlateApplication&, const FPo
         GRightPartId.Empty();
         if (!InPie() && PathHasLevelViewport(Event.GetEventPath()))
         {
-            if (FLevelEditorViewportClient* Client = PerspectiveClient())
+            if (FLevelEditorViewportClient* Client = GestureClient())
             {
                 GNavPivot = PickNavPivot(Client);
             }
@@ -581,7 +618,7 @@ bool FMbgenEditorInput::HandleMouseButtonDownEvent(FSlateApplication&, const FPo
         bLookDrag = true;
         // DiagnoseNav is a CallInEditor command, not a side effect of a click:
         // its synthetic sweep mutates the camera and must never run on input.
-        if (FLevelEditorViewportClient* Client = PerspectiveClient())
+        if (FLevelEditorViewportClient* Client = GestureClient())
         {
             GNavPivot = PickNavPivot(Client);
         }
@@ -592,6 +629,7 @@ bool FMbgenEditorInput::HandleMouseButtonDownEvent(FSlateApplication&, const FPo
     if (!Prim || Prim->ComponentTags.Num() == 0) { return false; }
     AMbgenBoardActor* Board = FindBoard();
     if (!Board) { return false; }
+    Board->BeginPlaceDrag();
     Board->SelectedId = Prim->ComponentTags[0].ToString();
     UE_LOG(LogTemp, Display, TEXT("mbgen selected %s"), *Board->SelectedId);
     Board->PaintAnchors();
@@ -619,6 +657,20 @@ bool FMbgenEditorInput::HandleKeyDownEvent(FSlateApplication&, const FKeyEvent& 
         if (Key == EKeys::O) { FMbgenChrome::Open(); return true; }
         if (Key == EKeys::C) { FMbgenChrome::Copy(); return true; }
         if (Key == EKeys::V) { FMbgenChrome::Paste(); return true; }
+    }
+    if (Key == EKeys::Escape)
+    {
+        // Escape during a drag restores the mouse-down design; the drag is over.
+        if (AMbgenBoardActor* Dragging = FindBoard())
+        {
+            if (Dragging->CancelPlaceDrag())
+            {
+                bPlaceDrag = false;
+                bLookDrag = false;
+                GGestureViewport.Reset();
+                return true;
+            }
+        }
     }
     if (!FocusIsLevelViewport()) { return false; }
     AMbgenBoardActor* Board = FindBoard();

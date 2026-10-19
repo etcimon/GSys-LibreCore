@@ -13,7 +13,8 @@ pub fn um_from_local_cm(cm: f64) -> i64 {
 use serde::Serialize;
 
 use crate::catalog::{library_for, package, Support};
-use crate::template::{role_extents, Design, Placement, Template};
+use crate::geometry::{body_z, world_span};
+use crate::template::{role_extents, Design, Placement, Side, Template};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, serde::Deserialize)]
 pub struct Body {
@@ -31,6 +32,12 @@ pub struct Body {
     pub sz_um: i64,
     #[serde(default)]
     pub yaw_q: u8,
+    /// Copper side the body sits on. Older scene.json files omit it (Top).
+    #[serde(default)]
+    pub side: Side,
+    /// Persistent reference designator, when the design has assigned one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refdes: Option<String>,
 }
 
 pub fn scene(design: &Design) -> Result<Vec<Body>, crate::pack::PackError> {
@@ -59,6 +66,8 @@ pub fn scene(design: &Design) -> Result<Vec<Body>, crate::pack::PackError> {
             sy_um: sy,
             sz_um: sz,
             yaw_q: place.yaw_q % 4,
+            side: place.side,
+            refdes: port.refdes.clone(),
         });
     }
     Ok(bodies)
@@ -79,6 +88,8 @@ fn substrate(t: &Template) -> Body {
         sy_um: t.board_d_um,
         sz_um: 1_600,
         yaw_q: 0,
+        side: Side::Top,
+        refdes: None,
     }
 }
 
@@ -98,6 +109,8 @@ fn shield(t: &Template) -> Body {
             sy_um: 0,
             sz_um: 0,
             yaw_q: 0,
+            side: Side::Top,
+            refdes: None,
         };
     }
     let x = t.edges.iter().find(|e| e.id == "rear_io").map(|e| e.s_min).unwrap_or(0) + t.window_w_um / 2;
@@ -115,19 +128,13 @@ fn shield(t: &Template) -> Body {
         sy_um: 800,
         sz_um: t.window_h_um,
         yaw_q: 0,
-    }
-}
-
-fn world_span(sx: i64, sy: i64, yaw_q: u8) -> (i64, i64) {
-    if yaw_q % 2 == 1 {
-        (sy, sx)
-    } else {
-        (sx, sy)
+        side: Side::Top,
+        refdes: None,
     }
 }
 
 fn pose(t: &Template, place: &Placement, role: &str, sx: i64, sy: i64, sz: i64) -> (i64, i64, i64) {
-    let z = 1_600 + sz / 2;
+    let z = body_z(sz, place.side);
     let (aabb_sx, aabb_sy) = world_span(sx, sy, place.yaw_q);
     if let (Some(x), Some(y)) = (place.x_um, place.y_um) {
         return (x, y, z);
@@ -211,6 +218,22 @@ mod tests {
     }
 
     #[test]
+    fn a_bottom_side_part_hangs_under_the_board_and_says_so() {
+        let mut design = Design::mini_itx().unwrap();
+        let before = scene(&design).unwrap().into_iter().find(|b| b.id == "spi0").unwrap();
+        assert_eq!(before.side, Side::Top);
+        assert_eq!(before.z_um, 1_600 + before.sz_um / 2);
+        design.placements.iter_mut().find(|p| p.id == "spi0").unwrap().side = Side::Bottom;
+        let after = scene(&design).unwrap().into_iter().find(|b| b.id == "spi0").unwrap();
+        assert_eq!(after.side, Side::Bottom);
+        assert_eq!(after.z_um, -(after.sz_um / 2));
+        assert_eq!((after.x_um, after.y_um), (before.x_um, before.y_um));
+        assert!(after.refdes.is_some(), "scene bodies carry the persistent refdes");
+        let json = serde_json::to_value(&after).unwrap();
+        assert_eq!(json["side"], "Bottom");
+    }
+
+    #[test]
     fn mini_itx_nvme_and_slot_keep_their_sit() {
         let bodies = scene(&Design::mini_itx().unwrap()).unwrap();
         let nvme = bodies.iter().find(|b| b.id == "nvme0").unwrap();
@@ -224,17 +247,7 @@ mod tests {
     }
 
     fn sit_place(edge: &str, s: i64) -> Placement {
-        Placement {
-            id: "p".into(),
-            edge: edge.into(),
-            s_um: s,
-            stack: 0,
-            pinned: false,
-            order: 0,
-            yaw_q: 0,
-            x_um: None,
-            y_um: None,
-        }
+        Placement::new("p", edge, s, false, 0)
     }
 
     #[test]

@@ -13,13 +13,27 @@ cargo rustc -p mbcore_c -- -C panic=abort
 
 Incremental `Access is denied (os error 5)` under `target/debug/incremental` is expected while Unreal holds `mbcore_c.dll`. Stop `UnrealEditor` whose command line contains `MbgenSim.uproject` before relinking the DLL or running UBT.
 
-Last recorded `cargo test --workspace`: 89 mbcore + 9 mbcore_c + 23 mbcompiler (counts drift). Nav: `cargo test -p mbcore --lib nav`. Dual-source: `cargo test -p mbcompiler catia` / `navdiag`. Profiles vs `core/include`: `cargo test -p mbcore committed_profiles_agree_with_core_include` (skips in a standalone checkout).
+Last recorded `cargo test --workspace`: 115 mbcore + 10 mbcore_c + 23 mbcompiler (counts drift). Nav: `cargo test -p mbcore --lib nav`. Circuit/recipes/router: `cargo test -p mbcore circuit` / `recipes` / `route` (the 32-net Mini-ITX fixture has an 8 s debug / 400 ms release budget). Dual-source: `cargo test -p mbcompiler catia` / `navdiag`. Profiles vs `core/include`: `cargo test -p mbcore committed_profiles_agree_with_core_include` (skips in a standalone checkout).
+
+## Board flow (corev-mb, Python + TS)
+
+```text
+# from E:\cva6
+python -m unittest discover -s corev-mb/tests -p "test_*.py"      # 21 tests; live ngspice/kicad tests skip when absent
+cd build-platform && bunx tsc --noEmit && bun test test/mb-bundle.test.ts test/core-profile.test.ts
+# end to end on a compiled bundle (see `mbgen compile --design FILE --out DIR`):
+bun build-platform/src/cli/index.ts mb ingest --from <DIR>/platform.json --board <id>   # refuses a bundle that does not match manifest.json
+bun build-platform/src/cli/index.ts mb design <id>        # circuit.json present → lossless SKiDL: *.erc.json, *.net, *.parity.json, *_bom.json; exit 1 on ERC error / parity mismatch
+bun build-platform/src/cli/index.ts mb simulate <id> <scenario>   # boards/<id>/sim/<scenario>.json → outputs/sim/<scenario>.{cir,log,json}; exit 4 = incomplete (e.g. no ngspice)
+```
+
+SKiDL writes `skidl_REPL.*` / `<script>.erc` / `<script>_sklib.py` into the cwd; they are byproducts, not outputs — delete them (`*.log` is gitignored, the others are not).
 
 CLI: `preview`, `compile`, `scene`, `anchors`, `library`, `profiles`, `package`, `build`, `open`, `mini-itx`, `textures`. `mbgen open` prefers a path containing `UE_5.8` (test `open_prefers_ue_5_8_over_5_4`). Missing-editor help says Engine 5.8.
 
 `mbgen profiles --core-include ../core/include --out mbcore/data/profiles.json` regenerates the processor profiles from the SystemVerilog config packages (reads `config_pkg.sv` for shared constants). Run it after any `core/include/*_config_pkg.sv` change; the mbcore test above fails until the committed file matches. Unresolved fields are printed and keep that profile out of the processor window.
 
-`mbcore_c` ABI is versioned (`MBCORE_C_ABI_VERSION`, `mb_abi_version()`). The Unreal nav helper (`MbgenNav.cpp`) binds `mb_nav_*`; an older DLL logs `mbgen nav=local (reduced …)` — rebuild the DLL (editor stopped) and relaunch.
+`mbcore_c` ABI is versioned (`MBCORE_C_ABI_VERSION` = 3, `mb_abi_version()`). The Unreal nav helper (`MbgenNav.cpp`) binds `mb_nav_*`; an older DLL logs `mbgen nav=local (reduced …)` — rebuild the DLL (editor stopped) and relaunch. v3 adds `mb_circuit` and makes `mb_route(dirty_only=1)` incremental (every net + surviving paths + `changed_nets`/`removed_nets`); the route log line now ends with `rev=N changed=K removed=M`.
 
 `mbgen textures --design FILE --out DIR` writes only `T_SolderMask` / `T_SolderData` / `T_SolderNormal` from live `scene()` AABBs.
 

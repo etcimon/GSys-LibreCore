@@ -14,6 +14,8 @@
 //   parts --query "..."     One-off pcbparts.dev search (network-gated by --online).
 //   parts --freeze-pinout   Copy cache pin names into mbgen/mbcore/data (no XY).
 //   test [id]               Report/verify the tandem core+board feature set; --run drives the build.
+//   ingest --from <platform.json>  Import an mbgen bundle (manifest-verified circuit/layout).
+//   simulate <id> <scenario...>    Run ngspice scenarios (boards/<id>/sim/*.json) on circuit.json.
 //
 // One board is active at a time. `select` writes the gitignored overlay
 // (build-platform/.config.local.ts) so `build`/`test`/`vendor` all see the same
@@ -37,6 +39,7 @@ import {
 import { checkoutStatuses, syncControllers } from "../../tooling/vendor.ts";
 import { aiCoreHints, resolveAiBoard } from "../../tooling/ai-board.ts";
 import { checkIngestCore } from "../../tooling/coreProfile.ts";
+import { inspectBundle } from "../../tooling/mbBundle.ts";
 import {
   BoardSpecError,
   boardPaths,
@@ -57,7 +60,7 @@ export const mbCommand: Command = {
   name: "mb",
   summary: "Select / create / design a motherboard (corev-mb) and adapt core + corev_apu to it.",
   usage:
-    "bun run src/cli/index.ts mb [list|select|check|create|design|expand|parts|test|ingest] [id] [--board <id>] [--from <platform.json>] [--sync] [--online] [--fix] [--add <spec>] [--query <q>] [--dry-run] [--json]",
+    "bun run src/cli/index.ts mb [list|select|check|create|design|expand|parts|test|ingest|simulate] [id] [--board <id>] [--from <platform.json>] [--scenario <name>] [--sync] [--online] [--fix] [--add <spec>] [--query <q>] [--dry-run] [--json]",
   details:
     "A board is described by corev-mb/boards/<id>/board.json and a development\n" +
     "architectural target under corev-mb/architecture/<id>/. `mb select <id>` is a\n" +
@@ -105,9 +108,11 @@ export const mbCommand: Command = {
           return await cmdTest(ctx, resolveId(ctx, rest, args.flags, true), args.flags);
         case "ingest":
           return await cmdIngest(ctx, args.flags);
+        case "simulate":
+          return await cmdSimulate(ctx, resolveId(ctx, rest, args.flags, true), rest.slice(1), args.flags);
         default:
           logger.error(`Unknown mb subcommand '${sub}'.`);
-          logger.info("Use one of: list, select, check, create, design, expand, parts, test, ingest.");
+          logger.info("Use one of: list, select, check, create, design, expand, parts, test, ingest, simulate.");
           return 1;
       }
     } catch (err) {
@@ -133,7 +138,16 @@ async function cmdIngest(ctx: PlatformContext, flags: Record<string, string | bo
   const fromFlag = flagString(flags, "from");
   if (!fromFlag) throw new MbUsageError("mb ingest needs --from <platform.json> from mbgen compile.");
   const from = isAbsolute(fromFlag) ? fromFlag : join(ctx.repoRoot, fromFlag);
-  const raw = JSON.parse(await readFile(from, "utf8")) as Record<string, unknown>;
+  const platformText = await readFile(from, "utf8");
+  const raw = JSON.parse(platformText) as Record<string, unknown>;
+  // A manifest next to platform.json makes this a bundle: every file it lists
+  // must hash as declared or the whole ingest is refused (partial write).
+  const bundle = await inspectBundle(from, platformText);
+  if (bundle.issues.length > 0) {
+    logger.error(`Refusing ingest: bundle at ${bundle.dir} does not match its manifest.json:`);
+    for (const issue of bundle.issues) logger.error(`  - ${issue}`);
+    return 1;
+  }
   const boardid = flagString(flags, "board") ?? (typeof raw.boardid === "string" ? raw.boardid : "");
   if (!boardid) throw new MbUsageError("platform.json has no boardid. Pass --board <id>.");
   raw.boardid = boardid;
@@ -158,14 +172,26 @@ async function cmdIngest(ctx: PlatformContext, flags: Record<string, string | bo
   const paths = boardPaths(ctx, boardid);
   const dry = ctx.dryRun || flagBool(flags, "dry-run");
   const gaps = Array.isArray(raw.gaps) ? raw.gaps : [];
+  const sideFiles = Object.keys(bundle.files);
   if (dry) {
     logger.info(`[dry-run] would write ${paths.specFile}`);
     logger.info(`[dry-run] would write ${join(paths.boardDir, "gaps.json")} (${gaps.length} gaps)`);
+    for (const name of sideFiles) logger.info(`[dry-run] would write ${join(paths.boardDir, name)} (manifest-verified)`);
     logger.info("[dry-run] would generate the board package");
   } else {
     await mkdir(paths.boardDir, { recursive: true });
     await writeFile(paths.specFile, JSON.stringify(raw, null, 2) + "\n", "utf8");
     await writeFile(join(paths.boardDir, "gaps.json"), JSON.stringify(gaps, null, 2) + "\n", "utf8");
+    for (const name of sideFiles) {
+      await writeFile(join(paths.boardDir, name), bundle.files[name] ?? "", "utf8");
+      logger.info(`wrote ${join(paths.boardDir, name)} (sha256 verified against manifest.json)`);
+    }
+    if (bundle.manifest) {
+      await writeFile(join(paths.boardDir, "manifest.json"), JSON.stringify(bundle.manifest, null, 2) + "\n", "utf8");
+    }
+    if (bundle.mode === "legacy") {
+      logger.warn("legacy single platform.json (no manifest.json): circuit.json not ingested; `mb design` uses the interface scaffold.");
+    }
     if (raw.skidl === "custom" && !existsSync(join(paths.boardDir, "design.py"))) {
       await writeFile(join(paths.boardDir, "design.py"), customDesignPy(boardid), "utf8");
       logger.info(`wrote ${join(paths.boardDir, "design.py")}`);
@@ -490,6 +516,71 @@ async function cmdDesign(
     return 0;
   }
   logger.error(`design failed (exit ${result.code}).`);
+  return result.code || 1;
+}
+
+// ---------------------------------------------------------------------------
+// simulate — ngspice scenarios over the ingested circuit
+// ---------------------------------------------------------------------------
+
+async function cmdSimulate(
+  ctx: PlatformContext,
+  boardid: string,
+  scenarios: string[],
+  flags: Record<string, string | boolean>,
+): Promise<number> {
+  const { logger } = ctx;
+  const paths = boardPaths(ctx, boardid);
+  const named = [...scenarios];
+  const fromFlag = flagString(flags, "scenario");
+  if (fromFlag) named.push(...fromFlag.split(",").map((s) => s.trim()).filter(Boolean));
+  const simDir = join(paths.boardDir, "sim");
+  if (named.length === 0) {
+    if (!existsSync(simDir)) {
+      logger.error(`No scenarios: pass <scenario> names or add boards/${boardid}/sim/<name>.json.`);
+      return 1;
+    }
+    for (const f of await readdir(simDir)) if (f.endsWith(".json")) named.push(f.slice(0, -5));
+    if (named.length === 0) {
+      logger.error(`boards/${boardid}/sim has no *.json scenarios.`);
+      return 1;
+    }
+  }
+  if (!existsSync(join(paths.boardDir, "circuit.json"))) {
+    logger.error(`No circuit.json for '${boardid}'. Run \`mb ingest --from <bundle>/platform.json\` on an mbgen compile bundle first.`);
+    return 4;
+  }
+  if (!hasBinary("python") && !hasBinary("python3")) {
+    logger.error("python not found on PATH. Run `setup --install` to provision the venv.");
+    return 1;
+  }
+  const python = hasBinary("python3") ? "python3" : "python";
+  const libRoot = isAbsolute(ctx.config.motherboard.libRoot)
+    ? ctx.config.motherboard.libRoot
+    : join(ctx.repoRoot, ctx.config.motherboard.libRoot);
+  const sim = ctx.config.motherboard.simulation;
+  const ngspiceBin = sim.ngspiceBin ?? (hasBinary("ngspice") ? "ngspice" : "");
+  const env = childEnv(ctx, {
+    PYTHONPATH: libRoot,
+    CVA6_MB_BOARD: boardid,
+    NGSPICE_BIN: ngspiceBin,
+    SIM_TIMEOUT_SEC: String(sim.timeoutSec),
+  });
+  logger.heading(`Simulate ${boardid}: ${named.join(", ")}`);
+  logger.info(`ngspice: ${ngspiceBin || "not found (results will be `incomplete`)"}  timeout: ${sim.timeoutSec}s`);
+  const result = await run(python, [join(libRoot, "simulate.py"), boardid, ...named], {
+    cwd: ctx.repoRoot,
+    env,
+    logger,
+    dryRun: ctx.dryRun || flagBool(flags, "dry-run"),
+    allowFailure: true,
+  });
+  if (result.dryRun) return 0;
+  if (result.ok) {
+    logger.success(`all scenarios passed; results under ${join(paths.outputsDir, "sim")}`);
+    return 0;
+  }
+  logger.error(result.code === 4 ? "simulation incomplete (see reasons above)." : `simulation failed (exit ${result.code}).`);
   return result.code || 1;
 }
 

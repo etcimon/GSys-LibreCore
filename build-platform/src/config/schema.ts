@@ -603,6 +603,16 @@ export interface PcbPartsConfig {
   maxFixIterations: number;
 }
 
+export interface BoardSimulationConfig {
+  /**
+   * ngspice executable for `mb simulate`. `null` = discover `ngspice` on PATH;
+   * when nothing is found every scenario reports `incomplete`, never `pass`.
+   */
+  ngspiceBin: string | null;
+  /** Wall-clock budget per scenario in seconds (a timeout is `incomplete`). */
+  timeoutSec: number;
+}
+
 export interface MotherboardConfig {
   /** The single active board id, or null when no board is selected. */
   activeBoard: string | null;
@@ -614,6 +624,8 @@ export interface MotherboardConfig {
   libRoot: string;
   /** pcbparts.dev MCP client settings. */
   pcbParts: PcbPartsConfig;
+  /** Circuit simulation (`mb simulate`) settings. */
+  simulation: BoardSimulationConfig;
 }
 
 // ---------------------------------------------------------------------------

@@ -53,6 +53,7 @@ pub fn library_export() -> Vec<LibraryEntry> {
                     nonempty(lcsc),
                 ),
                 crate::net::PinSpec::Catalog { mpn } => ("catalog", nonempty(mpn), None),
+                crate::net::PinSpec::TwoTerminal => ("two_terminal", None, None),
             };
             let hatch = row.support == Support::Gap;
             let labels = if role.id == "wifi_m2" {
@@ -163,13 +164,11 @@ mod tests {
 
     #[test]
     fn port_has_no_attrs_field() {
-        let port = Port {
-            id: "usb0".into(),
-            role: "usb_stack".into(),
-            width_um: 15_000,
-        };
+        let port = Port::new("usb0", "usb_stack", 15_000);
         let value = serde_json::to_value(&port).unwrap();
         assert!(value.get("attrs").is_none());
+        // Optional component fields are omitted until set, so a v1 reader
+        // sees exactly the three fields it knows.
         assert_eq!(value.as_object().unwrap().len(), 3);
     }
 }

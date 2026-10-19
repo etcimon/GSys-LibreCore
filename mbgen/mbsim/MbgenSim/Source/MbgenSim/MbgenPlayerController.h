@@ -56,6 +56,7 @@ private:
     void CompilePressed();
     void FramePressed();
     void PlaceReleased();
+    void EscapePressed();
     void DeletePressed();
     void NudgeLeft();
     void NudgeRight();

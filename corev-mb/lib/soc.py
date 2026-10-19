@@ -57,6 +57,10 @@ def build_board(boardid: str) -> int:
         print("           pip install -r corev-mb/lib/requirements.txt")
         return 2
 
+    circuit_file = board_dir(boardid) / "circuit.json"
+    if circuit_file.exists():
+        return _build_from_circuit(boardid, spec, circuit_file)
+
     import interfaces  # local module (flat on sys.path)
 
     skidl.reset()
@@ -80,6 +84,57 @@ def build_board(boardid: str) -> int:
 
     _write_bom(spec, out_dir / f"{boardid}_bom.json", parts)
     return 0 if report.ok else 1
+
+
+def _build_from_circuit(boardid: str, spec: dict[str, Any], circuit_file: Path) -> int:
+    """Lossless path: compile the ingested mbgen circuit, ERC it, write the
+    netlist, read it back and compare. Any failure is a non-zero exit."""
+    import skidl  # noqa: PLC0415
+
+    import circuit as circuit_mod  # local module (flat on sys.path)
+
+    circuit = circuit_mod.load_circuit(circuit_file)
+    out_dir = board_dir(boardid) / "outputs"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    skidl.reset()
+    parts = circuit_mod.build_from_circuit(circuit)
+    print(
+        f"[corev-mb] compiled circuit.json: {len(parts)} component(s), "
+        f"{len(circuit.get('pins', []))} pin(s), {len(circuit.get('nets', []))} net(s)"
+    )
+    report = circuit_mod.run_structured_erc(circuit)
+    erc_file = out_dir / f"{boardid}.erc.json"
+    erc_file.write_text(json.dumps(report.as_dict(), indent=2) + "\n")
+    for issue in report.issues:
+        tag = issue.rule
+        where = " ".join(x for x in (issue.part, issue.pin, issue.net) if x)
+        print(f"[corev-mb]   {issue.severity.upper():7} {tag:32} {where} — {issue.message}")
+    print(f"[corev-mb] ERC: {report.errors} error(s), {report.warnings} warning(s) -> {erc_file}")
+
+    net_file = out_dir / f"{boardid}.net"
+    try:
+        text = circuit_mod.write_netlist(net_file)
+    except Exception as exc:  # noqa: BLE001
+        print(f"[corev-mb] netlist generation FAILED: {exc}")
+        return 1
+    print(f"[corev-mb] wrote netlist: {net_file}")
+    par = circuit_mod.parity(circuit, text)
+    par_file = out_dir / f"{boardid}.parity.json"
+    par_file.write_text(json.dumps(par, indent=2) + "\n")
+    print(
+        f"[corev-mb] parity: {'ok' if par['ok'] else 'MISMATCH'} "
+        f"({par['nets_checked']} nets checked, {len(par['unresolved_footprints'])} unresolved footprint(s)) -> {par_file}"
+    )
+    bom = {
+        "board": boardid,
+        "source": "circuit.json",
+        "components": circuit_mod.bom_rows(circuit),
+        "phys": spec.get("phys", []),
+    }
+    bom_file = out_dir / f"{boardid}_bom.json"
+    bom_file.write_text(json.dumps(bom, indent=2) + "\n")
+    print(f"[corev-mb] wrote BOM: {bom_file}")
+    return 0 if report.ok and par["ok"] else 1
 
 
 def _attempt_fixes(spec: dict[str, Any], messages: list[str]) -> None:

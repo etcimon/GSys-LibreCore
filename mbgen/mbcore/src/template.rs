@@ -363,11 +363,55 @@ impl Settings {
     }
 }
 
+/// Exact part a component instance resolves to. Every field comes from a
+/// catalogue freeze; none is typed by hand. Empty strings mean "not frozen".
+#[derive(Clone, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PartRef {
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mpn: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub lcsc: String,
+    /// Frozen footprint identity (pad geometry source). Empty until a
+    /// `cse_get_kicad` freeze exists for this part.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub footprint: String,
+}
+
+fn is_false(b: &bool) -> bool {
+    !b
+}
+
+/// A component instance: the role names the body/pin class, the optional
+/// exact part refines it. `refdes` is persistent — it is assigned once and
+/// survives moves, copies of *other* parts, and reloads.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Port {
     pub id: String,
     pub role: String,
     pub width_um: i64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub refdes: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub part: Option<PartRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// Do-not-populate: kept in the circuit and layout, excluded from assembly.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub dnp: bool,
+}
+
+impl Port {
+    pub fn new(id: impl Into<String>, role: impl Into<String>, width_um: i64) -> Self {
+        Self { id: id.into(), role: role.into(), width_um, refdes: None, part: None, value: None, dnp: false }
+    }
+}
+
+/// Which copper side a component sits on. Bottom mirrors X in pad transforms.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Side {
+    #[default]
+    Top,
+    Bottom,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -386,6 +430,67 @@ pub struct Placement {
     pub x_um: Option<i64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub y_um: Option<i64>,
+    #[serde(default)]
+    pub side: Side,
+}
+
+impl Placement {
+    pub fn new(id: impl Into<String>, edge: impl Into<String>, s_um: i64, pinned: bool, order: u32) -> Self {
+        Self {
+            id: id.into(),
+            edge: edge.into(),
+            s_um,
+            stack: 0,
+            pinned,
+            order,
+            yaw_q: 0,
+            x_um: None,
+            y_um: None,
+            side: Side::Top,
+        }
+    }
+}
+
+/// An explicit user connection: these pin ids belong to one net. Resolution
+/// checks the pins exist and are compatible; a bad connection becomes a
+/// diagnostic, never a silent join.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Connection {
+    pub net: String,
+    pub pins: Vec<String>,
+    /// `power` | `ground` | `signal` | `clock`; defaults to `signal`.
+    #[serde(default = "default_signal")]
+    pub class: String,
+}
+
+fn default_signal() -> String {
+    "signal".into()
+}
+
+/// A circuit-recipe instance. `owns` lists the component ids the recipe
+/// generated so re-expansion reuses them and deletion removes exactly them.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CircuitBlock {
+    pub id: String,
+    pub recipe: String,
+    pub host: String,
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub owns: Vec<String>,
+}
+
+/// Reference-designator prefix by part class. Connectors are `J`, passives by
+/// kind, ICs `U`, crystals `Y`, protection diodes `D`, batteries `BT`.
+pub fn refdes_prefix(role: &str) -> &'static str {
+    match role {
+        "decap" => "C",
+        "crystal" => "Y",
+        "esd" => "D",
+        "rtc_battery" => "BT",
+        "socket" | "spi_flash" | "phy_gbe" | "vtt" | "ai_island" => "U",
+        _ => "J",
+    }
 }
 
 /// Current authoring-document schema. Loaders accept documents without the
@@ -410,9 +515,70 @@ pub struct Design {
     /// files, in which case the first allocation scans existing ids.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub id_seq: BTreeMap<String, u32>,
+    /// Next free reference-designator number per prefix (`C`, `J`, `U`, …).
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub refdes_seq: BTreeMap<String, u32>,
+    /// Explicit user connections (the intended circuit, independent of geometry).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub connections: Vec<Connection>,
+    /// Pin ids deliberately left open. Everything else that is required must connect.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_connects: Vec<String>,
+    /// Circuit-recipe instances and the components they own.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<CircuitBlock>,
 }
 
 impl Design {
+    /// Persistent reference designator for `port_id`, assigning one if absent.
+    pub fn assign_refdes(&mut self, port_id: &str) -> Option<String> {
+        let (role, existing) = {
+            let port = self.ports.iter().find(|p| p.id == port_id)?;
+            (port.role.clone(), port.refdes.clone())
+        };
+        if let Some(r) = existing {
+            return Some(r);
+        }
+        let prefix = refdes_prefix(&role);
+        let scanned = self
+            .ports
+            .iter()
+            .filter_map(|p| p.refdes.as_deref())
+            .filter_map(|r| r.strip_prefix(prefix).and_then(|n| n.parse::<u32>().ok()))
+            .map(|n| n + 1)
+            .max()
+            .unwrap_or(1);
+        let mut next = (*self.refdes_seq.get(prefix).unwrap_or(&0)).max(scanned);
+        let refdes = loop {
+            let candidate = format!("{prefix}{next}");
+            next += 1;
+            if !self.ports.iter().any(|p| p.refdes.as_deref() == Some(candidate.as_str())) {
+                break candidate;
+            }
+        };
+        self.refdes_seq.insert(prefix.to_string(), next);
+        let port = self.ports.iter_mut().find(|p| p.id == port_id)?;
+        port.refdes = Some(refdes.clone());
+        Some(refdes)
+    }
+
+    /// Assign refdes to every port that lacks one, in placement order so a
+    /// migrated v1 document is deterministic.
+    pub fn assign_all_refdes(&mut self) {
+        let order: Vec<String> = {
+            let mut places: Vec<&Placement> = self.placements.iter().collect();
+            places.sort_by_key(|p| p.order);
+            places.iter().map(|p| p.id.clone()).collect()
+        };
+        for id in order {
+            self.assign_refdes(&id);
+        }
+        let orphans: Vec<String> = self.ports.iter().filter(|p| p.refdes.is_none()).map(|p| p.id.clone()).collect();
+        for id in orphans {
+            self.assign_refdes(&id);
+        }
+    }
+
     /// Allocate a fresh part id for `role_id`. Monotonic per role and unique
     /// across every id currently in the document, regardless of role.
     pub fn allocate_id(&mut self, role_id: &str) -> String {
@@ -435,11 +601,13 @@ impl Design {
         }
     }
 
-    /// Bring a loaded document to the current schema. Idempotent.
+    /// Bring a loaded document to the current schema. Idempotent. Parts keep
+    /// their ids and geometry; missing reference designators are assigned.
     pub fn migrate(&mut self) {
         if self.schema_version < DESIGN_SCHEMA_VERSION {
             self.schema_version = DESIGN_SCHEMA_VERSION;
         }
+        self.assign_all_refdes();
     }
 
     /// A packed Mini-ITX with the usual first parts. The slot bracket is pinned.
@@ -481,61 +649,41 @@ impl Design {
                 specs.push(("slot0", "pcie_slot", true, template.slot_pitch_um / 2, template.slot_pitch_um));
             }
         }
-        let mut design = Design {
+        let mut design = Design::empty(&template.id, template.gap_um);
+        for (i, (id, role_id, pinned, s, width)) in specs.iter().enumerate() {
+            design.ports.push(Port::new(*id, *role_id, *width));
+            design
+                .placements
+                .push(Placement::new(*id, role(role_id).expect("role").edge, *s, *pinned, i as u32));
+        }
+        design.assign_all_refdes();
+        design.repack(&template)?;
+        Ok(design)
+    }
+
+    /// A document with no parts on `template_id`.
+    pub fn empty(template_id: &str, gap_um: i64) -> Self {
+        Design {
             schema_version: DESIGN_SCHEMA_VERSION,
-            template_id: template.id.clone(),
-            settings: Settings::new("cv64a6_imafdc_sv39", template.gap_um),
+            template_id: template_id.to_string(),
+            settings: Settings::new("cv64a6_imafdc_sv39", gap_um),
             ports: Vec::new(),
             placements: Vec::new(),
             id_seq: BTreeMap::new(),
-        };
-        for (i, (id, role_id, pinned, s, width)) in specs.iter().enumerate() {
-            design.ports.push(Port {
-                id: (*id).into(),
-                role: (*role_id).into(),
-                width_um: *width,
-            });
-            design.placements.push(Placement {
-                id: (*id).into(),
-                edge: role(role_id).expect("role").edge.into(),
-                s_um: *s,
-                stack: 0,
-                pinned: *pinned,
-                order: i as u32,
-                yaw_q: 0,
-                x_um: None,
-                y_um: None,
-            });
+            refdes_seq: BTreeMap::new(),
+            connections: Vec::new(),
+            no_connects: Vec::new(),
+            blocks: Vec::new(),
         }
-        design.repack(&template)?;
-        Ok(design)
     }
 
     fn pcie_card_design() -> Result<Self, PackError> {
         let template = pcie_card();
         let cem = role("pcie_cem").expect("pcie_cem");
-        let mut design = Design {
-            schema_version: DESIGN_SCHEMA_VERSION,
-            template_id: template.id.clone(),
-            settings: Settings::new("cv64a6_imafdc_sv39", template.gap_um),
-            id_seq: BTreeMap::new(),
-            ports: vec![Port {
-                id: "cem0".into(),
-                role: cem.id.into(),
-                width_um: cem.width_um,
-            }],
-            placements: vec![Placement {
-                id: "cem0".into(),
-                edge: cem.edge.into(),
-                s_um: 44_500,
-                stack: 0,
-                pinned: true,
-                order: 0,
-                yaw_q: 0,
-                x_um: None,
-                y_um: None,
-            }],
-        };
+        let mut design = Design::empty(&template.id, template.gap_um);
+        design.ports.push(Port::new("cem0", cem.id, cem.width_um));
+        design.placements.push(Placement::new("cem0", cem.edge, 44_500, true, 0));
+        design.assign_all_refdes();
         design.repack(&template)?;
         Ok(design)
     }

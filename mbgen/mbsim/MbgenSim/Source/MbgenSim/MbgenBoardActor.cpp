@@ -284,8 +284,17 @@ bool AMbgenBoardActor::HitDeskWorld(const FVector& WorldOrigin, const FVector& W
     return true;
 }
 
+void AMbgenBoardActor::BeginPlaceDrag()
+{
+    bPlaceDragActive = true;
+    DragBaseJson.Empty();
+    FFileHelper::LoadFileToString(DragBaseJson, *DesignFile);
+}
+
 void AMbgenBoardActor::FinishPlaceDrag()
 {
+    bPlaceDragActive = false;
+    DragBaseJson.Empty();
     if (!bPlaceDirty)
     {
         return;
@@ -293,8 +302,29 @@ void AMbgenBoardActor::FinishPlaceDrag()
     bPlaceDirty = false;
     RebuildFromDesign();
     RefreshOpenSheets();
+    // One undo entry per drag, not one per throttled sample.
     FString Json;
     if (FFileHelper::LoadFileToString(Json, *DesignFile)) { FMbgenStore::PushUndo(Json, TEXT("place")); }
+}
+
+bool AMbgenBoardActor::CancelPlaceDrag()
+{
+    if (!bPlaceDragActive)
+    {
+        return false;
+    }
+    bPlaceDragActive = false;
+    const bool bMoved = bPlaceDirty;
+    bPlaceDirty = false;
+    if (!DragBaseJson.IsEmpty())
+    {
+        // The mouse-down document is the truth again; the session reopens on it.
+        FFileHelper::SaveStringToFile(DragBaseJson, *DesignFile);
+        ReloadDesignFromDisk();
+    }
+    DragBaseJson.Empty();
+    UE_LOG(LogTemp, Display, TEXT("mbgen place cancelled (%s)"), bMoved ? TEXT("restored mouse-down design") : TEXT("nothing moved"));
+    return true;
 }
 
 static TSet<FString> ReadPortIds(const FString& Path)
@@ -2147,9 +2177,17 @@ void AMbgenBoardActor::RouteAndPaint(int32 DirtyOnly)
     const TArray<TSharedPtr<FJsonValue>>* Nets = nullptr;
     const TArray<TSharedPtr<FJsonValue>>* Paths = nullptr;
     const TArray<TSharedPtr<FJsonValue>>* Errors = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* Changed = nullptr;
+    const TArray<TSharedPtr<FJsonValue>>* Removed = nullptr;
     Obj->TryGetArrayField(TEXT("nets"), Nets);
     Obj->TryGetArrayField(TEXT("paths"), Paths);
     Obj->TryGetArrayField(TEXT("errors"), Errors);
+    Obj->TryGetArrayField(TEXT("changed_nets"), Changed);
+    Obj->TryGetArrayField(TEXT("removed_nets"), Removed);
+    // ABI v3: a dirty result carries every net and every surviving path, so
+    // it is safe to repaint from it wholesale; `changed_nets` is diagnostics.
+    int64 Revision = 0;
+    Obj->TryGetNumberField(TEXT("revision"), Revision);
     int32 Open = 0;
     int32 Unroutable = 0;
     if (Errors)
@@ -2174,7 +2212,8 @@ void AMbgenBoardActor::RouteAndPaint(int32 DirtyOnly)
     PaintNetErrorBadges(Errors);
     const double PaintMs = (FPlatformTime::Seconds() - P0) * 1000.0;
     UE_LOG(LogTemp, Display, TEXT("mbgen nets=%d open=%d unroutable=%d paths=%d um"), Nets ? Nets->Num() : 0, Open, Unroutable, Paths ? Paths->Num() : 0);
-    UE_LOG(LogTemp, Display, TEXT("mbgen route dirty=%d ms=%.2f grid=250 paint_ms=%.2f"), DirtyOnly, RouteMs, PaintMs);
+    UE_LOG(LogTemp, Display, TEXT("mbgen route dirty=%d ms=%.2f grid=250 paint_ms=%.2f rev=%lld changed=%d removed=%d"),
+        DirtyOnly, RouteMs, PaintMs, Revision, Changed ? Changed->Num() : 0, Removed ? Removed->Num() : 0);
 }
 
 void AMbgenBoardActor::ApplyBottomFlag()

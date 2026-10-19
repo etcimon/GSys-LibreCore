@@ -1,18 +1,19 @@
 //! C ABI for a live mbgen session. JSON in and out. `panic = abort` on this crate.
 
+use std::collections::BTreeSet;
 use std::ffi::{CStr, CString};
 use std::os::raw::{c_char, c_int, c_uint, c_ulonglong};
 use std::ptr;
 
 use mbcore::{
-    anchors, library_export, look_in_place, orbit_around, pick_nav_pivot, preview, route, scene,
-    zoom_distance, zoom_toward, Design, Desk, Gesture, NavVec3, NetClass, PreviewResult, RouteResult,
+    anchors, library_export, look_in_place, orbit_around, pick_nav_pivot, preview, resolve, route, route_incremental,
+    scene, zoom_distance, zoom_toward, Design, Desk, Gesture, NavVec3, PreviewResult, RouteResult,
 };
 use serde::Serialize;
 
 /// Bump the major when a message shape or function signature changes.
 /// Mirrored by `MBCORE_C_ABI_VERSION` in `include/mbcore_c.h`.
-pub const ABI_VERSION: c_uint = 2;
+pub const ABI_VERSION: c_uint = 3;
 
 #[allow(non_camel_case_types)]
 pub struct mb_session {
@@ -20,6 +21,10 @@ pub struct mb_session {
     last_part: Option<String>,
     /// Bumps once per applied gesture. Zero for a freshly opened session.
     revision: u64,
+    /// Parts touched since the last route; drives incremental invalidation.
+    dirty_parts: BTreeSet<String>,
+    /// Last full or incremental route, so dirty routing can keep clean paths.
+    last_route: Option<RouteResult>,
 }
 
 type Session = mb_session;
@@ -76,9 +81,46 @@ fn gesture_id(g: &Gesture) -> Option<String> {
         | Gesture::Turn { id }
         | Gesture::Delete { id }
         | Gesture::SetProperty { id, .. }
+        | Gesture::SetPart { id, .. }
+        | Gesture::Flip { id }
         | Gesture::AutoConnect { id } => Some(id.clone()),
-        Gesture::Add { .. } | Gesture::SetOutline { .. } | Gesture::Unknown => None,
+        Gesture::ExpandRecipe { host, .. } => Some(host.clone()),
+        Gesture::Connect { pins, .. } => pins.first().and_then(|p| p.rsplit_once('.')).map(|(part, _)| part.to_string()),
+        Gesture::Disconnect { pin } | Gesture::NoConnect { pin } => pin.rsplit_once('.').map(|(part, _)| part.to_string()),
+        Gesture::Add { .. } | Gesture::SetOutline { .. } | Gesture::RemoveRecipe { .. } | Gesture::Unknown => None,
     }
+}
+
+/// Every part whose geometry or membership can differ between two designs.
+fn changed_parts(before: &Design, after: &Design) -> BTreeSet<String> {
+    let mut out = BTreeSet::new();
+    for p in &after.placements {
+        match before.placements.iter().find(|q| q.id == p.id) {
+            None => {
+                out.insert(p.id.clone());
+            }
+            Some(q) if q != p => {
+                out.insert(p.id.clone());
+            }
+            _ => {}
+        }
+    }
+    for q in &before.placements {
+        if !after.placements.iter().any(|p| p.id == q.id) {
+            out.insert(q.id.clone());
+        }
+    }
+    // Connection edits change membership without moving anything.
+    if before.connections != after.connections || before.no_connects != after.no_connects {
+        for c in after.connections.iter().chain(before.connections.iter()) {
+            for pin in &c.pins {
+                if let Some((part, _)) = pin.rsplit_once('.') {
+                    out.insert(part.to_string());
+                }
+            }
+        }
+    }
+    out
 }
 
 fn new_port_id(before: &Design, after: &Design) -> Option<String> {
@@ -87,34 +129,6 @@ fn new_port_id(before: &Design, after: &Design) -> Option<String> {
         .iter()
         .find(|p| before.ports.iter().all(|q| q.id != p.id))
         .map(|p| p.id.clone())
-}
-
-fn dirty_route(full: RouteResult, part: Option<&str>) -> RouteResult {
-    let Some(part) = part else {
-        return full;
-    };
-    let prefix = format!("{part}.");
-    let nets: Vec<_> = full
-        .nets
-        .iter()
-        .filter(|n| {
-            matches!(n.class, NetClass::Power | NetClass::Ground)
-                || n.pins.iter().any(|p| p == part || p.starts_with(&prefix))
-        })
-        .cloned()
-        .collect();
-    let keep: Vec<String> = nets.iter().map(|n| n.id.clone()).collect();
-    let paths = full
-        .paths
-        .into_iter()
-        .filter(|p| keep.iter().any(|id| id == &p.net))
-        .collect();
-    let errors = full
-        .errors
-        .into_iter()
-        .filter(|e| e.net.as_ref().map(|id| keep.iter().any(|k| k == id)).unwrap_or(true))
-        .collect();
-    RouteResult { nets, paths, errors }
 }
 
 #[no_mangle]
@@ -129,6 +143,8 @@ pub unsafe extern "C" fn mb_session_open(design_json: *const c_char) -> *mut Ses
         design,
         last_part: None,
         revision: 0,
+        dirty_parts: BTreeSet::new(),
+        last_route: None,
     }))
 }
 
@@ -171,6 +187,7 @@ pub unsafe extern "C" fn mb_apply(session: *mut Session, gesture_json: *const c_
     let result = preview(&sess.design, &gesture);
     if result.applied {
         sess.last_part = new_port_id(&before, &result.design).or_else(|| gesture_id(&gesture));
+        sess.dirty_parts.extend(changed_parts(&before, &result.design));
         sess.design = result.design.clone();
         sess.revision += 1;
     }
@@ -180,24 +197,55 @@ pub unsafe extern "C" fn mb_apply(session: *mut Session, gesture_json: *const c_
     })
 }
 
+/// `dirty_only != 0`: keep the previous paths of nets untouched since the
+/// last route and recompute only nets touching parts that moved, changed
+/// membership, or whose routes a moved body now crosses. The result still
+/// carries every net and every surviving path; `changed_nets` /
+/// `removed_nets` say what differs. A full route resets the dirty set.
 #[no_mangle]
 pub unsafe extern "C" fn mb_route(session: *mut Session, dirty_only: c_int) -> *mut c_char {
     if session.is_null() {
         return err_json("no session");
     }
-    let sess = &*session;
-    match route(&sess.design) {
-        Ok(full) => {
-            let out = if dirty_only != 0 {
-                dirty_route(full, sess.last_part.as_deref())
-            } else {
-                full
-            };
+    let sess = &mut *session;
+    let computed = match (&sess.last_route, dirty_only != 0) {
+        (Some(prev), true) => {
+            let changed: Vec<String> = sess.dirty_parts.iter().cloned().collect();
+            route_incremental(&sess.design, prev, &changed)
+        }
+        _ => route(&sess.design),
+    };
+    match computed {
+        Ok(out) => {
+            sess.dirty_parts.clear();
+            sess.last_route = Some(out.clone());
             json_ptr(&RouteMessage {
                 route: out,
                 revision: sess.revision,
                 dirty_only: dirty_only != 0,
             })
+        }
+        Err(err) => err_json(&err.reason),
+    }
+}
+
+/// The resolved circuit (components, pins, nets, obligations, diagnostics)
+/// for the current design, with the session revision.
+#[no_mangle]
+pub unsafe extern "C" fn mb_circuit(session: *const Session) -> *mut c_char {
+    if session.is_null() {
+        return err_json("no session");
+    }
+    let sess = &*session;
+    match resolve(&sess.design) {
+        Ok(circuit) => {
+            #[derive(Serialize)]
+            struct Msg {
+                #[serde(flatten)]
+                circuit: mbcore::Circuit,
+                revision: u64,
+            }
+            json_ptr(&Msg { circuit, revision: sess.revision })
         }
         Err(err) => err_json(&err.reason),
     }
@@ -461,7 +509,7 @@ mod tests {
     }
 
     #[test]
-    fn route_returns_rails_with_empty_paths() {
+    fn route_returns_rails_with_empty_paths_and_dirty_routing_keeps_every_net() {
         unsafe {
             let sess = open_mini();
             let full = take(mb_route(sess, 0));
@@ -469,11 +517,39 @@ mod tests {
             let nets = full["nets"].as_array().unwrap();
             assert!(nets.iter().any(|n| n["id"] == "P12V"));
             assert!(full["paths"].as_array().unwrap().is_empty());
+            assert_eq!(full["dirty_only"], false);
+            assert_eq!(full["grid_um"], 250);
             let g = cstring(r#"{"op":"nudge","id":"usb0","delta_um":1000}"#);
             let _ = take(mb_apply(sess, g.as_ptr()));
             let dirty = take(mb_route(sess, 1));
+            assert_eq!(dirty["dirty_only"], true);
+            // A dirty result is never a subset of the nets: every net is present.
+            assert_eq!(dirty["nets"].as_array().unwrap().len(), nets.len());
             assert!(dirty["nets"].as_array().unwrap().iter().any(|n| n["id"] == "GND"));
+            assert!(dirty["removed_nets"].as_array().unwrap().is_empty());
             mb_session_close(sess);
+        }
+    }
+
+    #[test]
+    fn circuit_json_carries_refdes_nets_and_diagnostics_with_the_revision() {
+        unsafe {
+            let sess = open_mini();
+            let c = take(mb_circuit(sess));
+            assert!(c.get("error").is_none());
+            assert_eq!(c["revision"], 0);
+            assert!(c["components"].as_array().unwrap().iter().all(|k| !k["refdes"].as_str().unwrap().is_empty()));
+            assert!(c["nets"].as_array().unwrap().iter().any(|n| n["id"] == "P12V" && n["origins"][0] == "contract"));
+            assert!(c["diagnostics"].as_array().unwrap().iter().any(|d| d["rule"] == "W-NET-NO-SOURCE"));
+            let g = cstring(r#"{"op":"expand_recipe","recipe":"decap_per_rail","host":"slot0","params":{"per_rail":"1"}}"#);
+            let applied = take(mb_apply(sess, g.as_ptr()));
+            assert_eq!(applied["applied"], true, "{applied}");
+            let c2 = take(mb_circuit(sess));
+            assert_eq!(c2["revision"], 1);
+            assert!(c2["components"].as_array().unwrap().iter().any(|k| k["id"] == "slot0_c_p12v_0" && k["owner_block"] == "slot0.decap_per_rail"));
+            assert!(c2["nets"].as_array().unwrap().iter().any(|n| n["id"] == "P12V" && n["pins"].as_array().unwrap().iter().any(|p| p == "slot0_c_p12v_0.1")));
+            mb_session_close(sess);
+            assert_eq!(take(mb_circuit(ptr::null()))["error"], "no session");
         }
     }
 

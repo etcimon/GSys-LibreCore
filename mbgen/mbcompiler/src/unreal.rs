@@ -102,15 +102,11 @@ pub fn build(cfg: &BuilderConfig, repo: &Path) -> Result<Design, String> {
     fs::create_dir_all(&product).map_err(|e| e.to_string())?;
     fs::write(root.join("Content/Boards/design.json"), serde_json::to_string_pretty(&design).unwrap()).map_err(|e| e.to_string())?;
     fs::write(root.join("Content/Boards/scene.json"), serde_json::to_string_pretty(&preview).unwrap()).map_err(|e| e.to_string())?;
-    fs::write(product.join("design.json"), serde_json::to_string_pretty(&bundle.design).unwrap()).map_err(|e| e.to_string())?;
-    fs::write(product.join("scene.json"), serde_json::to_string_pretty(&bundle.scene).unwrap()).map_err(|e| e.to_string())?;
-    fs::write(product.join("nets.json"), serde_json::to_string_pretty(&bundle.nets).unwrap()).map_err(|e| e.to_string())?;
-    fs::write(product.join("paths.json"), serde_json::to_string_pretty(&bundle.paths).unwrap()).map_err(|e| e.to_string())?;
-    fs::write(product.join("errors.json"), serde_json::to_string_pretty(&bundle.errors).unwrap()).map_err(|e| e.to_string())?;
-    fs::write(product.join("platform.json"), serde_json::to_string_pretty(&bundle.platform).unwrap()).map_err(|e| e.to_string())?;
-    fs::write(product.join("firmware.json"), serde_json::to_string_pretty(&bundle.firmware).unwrap()).map_err(|e| e.to_string())?;
-    fs::write(product.join("board.net"), &bundle.netlist).map_err(|e| e.to_string())?;
-    fs::write(product.join("design_skidl.py"), &bundle.skidl_py).map_err(|e| e.to_string())?;
+    // Same bundle layout as `mbgen compile`: every file, then the manifest.
+    for (name, text) in bundle.files() {
+        fs::write(product.join(name), text).map_err(|e| format!("{name}: {e}"))?;
+    }
+    fs::write(product.join("manifest.json"), serde_json::to_string_pretty(&bundle.manifest()).unwrap()).map_err(|e| e.to_string())?;
     let boards = root.join("Content/Boards");
     fs::write(boards.join("firmware.json"), serde_json::to_string_pretty(&bundle.firmware).unwrap()).map_err(|e| e.to_string())?;
     fs::write(boards.join("platform.json"), serde_json::to_string_pretty(&bundle.platform).unwrap()).map_err(|e| e.to_string())?;

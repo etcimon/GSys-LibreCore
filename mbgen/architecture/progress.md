@@ -5,6 +5,13 @@ How to continue this tree without a Grok session. Hunt remaining **real** live-s
 > **2026-10-15:** the "do not re-plan pin-circuits" rule is superseded by the approved successor
 > plan — see `board-workspace.md`. v1 notes below stay as history. The "next leftover" rim clamp is
 > **resolved** (`nav::pick_nav_pivot`, shared through `mb_nav_pick_pivot` to both hosts).
+>
+> **2026-10-19 (pass 2):** `board-workspace.md` "Landed in pass 2" — resolved circuit (`circuit.rs`),
+> recipes (`decap_per_rail`), deterministic layer-aware router with incremental invalidation, bundle
+> v2 with manifest, lossless SKiDL adapter + counted ERC + netlist parity, ngspice scenarios, KiCad
+> gate, Escape-cancel + initiating-viewport capture. Several "Deferred" rows below are now partly
+> paid: rail strips still wait for footprints, but A* is no longer "2-pin only" and compile no
+> longer invents decaps.
 
 ## Landed (`E:\cva6` master `df9aff1`)
 

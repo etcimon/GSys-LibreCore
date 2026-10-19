@@ -18,7 +18,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/cv32a60x_config_pkg.sv",
-        "sha256": "e8ea4cf0d115cc38e2ff4123b30d29d90a5fe9bcfbc6c790f4872ca17b3a3c81"
+        "sha256": "f3f88b63be831912e4cc05f7d8460033727f6fdcd9c4ef8df8f1dd0761ce74de"
       }
     },
     {
@@ -37,7 +37,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/cv32a65x_config_pkg.sv",
-        "sha256": "0ae132451bb05e126981e95f628eb765e2c518c41bff9345ccc5fb17da663325"
+        "sha256": "138f66993d007687e43c798caa798a69f8cff724042417f0f70b8af7ecd04f13"
       }
     },
     {
@@ -56,7 +56,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/cv32a6_ima_sv32_fpga_config_pkg.sv",
-        "sha256": "55932732a4d8b84bb048e05d52fd62cff4d02f5cdca311cbb86555b3bdfd3f1d"
+        "sha256": "79ab7224bdffa7c7d903d18f8b035c52fdb5ee91005e53118ec9a89fcf2ed00c"
       }
     },
     {
@@ -75,7 +75,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/cv32a6_imac_sv32_config_pkg.sv",
-        "sha256": "09b75322da2b8846888257def1b138092c886d69c37053982786201fb109f1d6"
+        "sha256": "2cba05b328fdf8d045c7415657e96c4c634608c73ae0708029310beb6b6a22d8"
       }
     },
     {
@@ -94,7 +94,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/cv64a60ax_config_pkg.sv",
-        "sha256": "aa0e03a9ff713627d78001a17f1f4019404f290074a27cd08d69c90dcb97d67d"
+        "sha256": "ec8bc8d62cc833bb740afe48a40e04afd82014b0d00414b9024d9b880f5f95db"
       }
     },
     {
@@ -113,7 +113,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/cv64a6_imafdc_sv39_config_pkg.sv",
-        "sha256": "ce66f0dd3875dbb590c678ecbf543a3cd8de80d7d9b9d7df2903b0203235fb97"
+        "sha256": "c6e201573c7d8af6dab4126a6b4962be787a6f9cbbe495dfab2b80fc9f6a7b9a"
       }
     },
     {
@@ -132,7 +132,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/cv64a6_imafdc_sv39_hpdcache_config_pkg.sv",
-        "sha256": "120077b08aaca4bbc2c4da6a819a93fea369a1677659979a5ee325791444ad10"
+        "sha256": "29f85d6bc7a9d9769500559d2d67b70604d2e62897faa395bad3626e344e98a3"
       }
     },
     {
@@ -151,7 +151,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/cv64a6_imafdc_sv39_hpdcache_wb_config_pkg.sv",
-        "sha256": "fe104b9becb6549fb258deab181db8bed7174aae9488f68c41171d8038ef24d2"
+        "sha256": "0829a7fc58d7975a523ace2533c527f2fb3cadaf1c5082316249e31ead368f41"
       }
     },
     {
@@ -170,7 +170,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/cv64a6_imafdc_sv39_openpiton_config_pkg.sv",
-        "sha256": "acd11ce015321fee1d174886f3e55d021024b3011fd4861f96e2bb46aed735a9"
+        "sha256": "9aaebc306a093eaae7cc6294c9226906931fad29a1eaf8c0df4ba9414b0de4b2"
       }
     },
     {
@@ -189,7 +189,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/cv64a6_imafdc_sv39_wb_config_pkg.sv",
-        "sha256": "b32daef2ab885c891c30e6da6f1bb9becf79c6a04722cd745ccb3b953e9ca3b1"
+        "sha256": "5c580dada9f410e548e7a3899eb00f6a5761ca969cca1026f3d214d18fb7a572"
       }
     },
     {
@@ -208,7 +208,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/cv64a6_imafdch_sv39_config_pkg.sv",
-        "sha256": "33a5c79942b700834bc07ed339281340e1d00ce79fa1ba161d0e7dac651a97ae"
+        "sha256": "5f9131e3cbfa207e48065a1618565a68bd225b1e9c07b634070d55a2a7d2a647"
       }
     },
     {
@@ -227,7 +227,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/cv64a6_imafdch_sv39_wb_config_pkg.sv",
-        "sha256": "6546813df22a6591f5a14f5de14db8a1c523d6b2b61944b56bfc9de32e2c4615"
+        "sha256": "a4f61ee76eaab4baa7e28f0b3b9b910b8894cbc1ae877ecc249fa5990b3e12cb"
       }
     },
     {
@@ -246,7 +246,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/cv64a6_imafdcv_sv39_config_pkg.sv",
-        "sha256": "7fd918a8d76febaa4eec6632cecded7a47fe275f2bfcdb3815f2627b03fcc7f8"
+        "sha256": "6d5dc018cfd397a68ea544e4a2577dbca478b1fa40f724e212c68b0f063f0c93"
       }
     },
     {
@@ -265,7 +265,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/cv64a6_spec_deep_config_pkg.sv",
-        "sha256": "0a4a28d3c7a3d304c45acd313186e5b1bd2a0f043e8c11bf3e765b140622d004"
+        "sha256": "78998317a5fab84a1837e9a902a13b214dd9073059c0ba91da3b0cb1a8f209c5"
       }
     },
     {
@@ -284,7 +284,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_ai_config_pkg.sv",
-        "sha256": "28866c27a59b95508d6b30d87bd1ff4bfd3244b18316add0a6b2df42bd8dc03a"
+        "sha256": "1123f245e381086bd951cda0c3ebd2df38dac4e7b5ba8ee9d7451de35345ae28"
       }
     },
     {
@@ -303,7 +303,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_ooo_config_pkg.sv",
-        "sha256": "2ed92516dc00df7137a14cc544fe4c13ae34173fbd1248a7d0cc3b2d8f4f4825"
+        "sha256": "b3bbf0aa156cf020398d065c5ca3e2fb235b7d5a88c759e875491b42e4c1ed34"
       }
     },
     {
@@ -322,7 +322,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_ooo_int2_config_pkg.sv",
-        "sha256": "c4de5619e30bcb94abcc5ab0a182f173125b5c57301fedfe487e7c630a60cac0"
+        "sha256": "6151454ceb33a29e2e7c2ba4193d7b0f8f81c8734a70e7013df64997295bb7b9"
       }
     },
     {
@@ -341,7 +341,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_ooo_int2_l3_ai_config_pkg.sv",
-        "sha256": "b52dbf245efc217040b0830e2b03bbea88656cf16021beffb101b604d20aba27"
+        "sha256": "5d7cd8b36fbdd08798b7efe7754af4e6890ebe277dbb1950fba35d6b955c92e6"
       }
     },
     {
@@ -360,7 +360,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_ooo_int2_l3_config_pkg.sv",
-        "sha256": "bb8ac6034cf0728836f78234feacea3e9c9c02ba89620ce21a765f622045c634"
+        "sha256": "24a2c19e48c59d7e4883206c6aaeba76acda7c8c251b6033a45d7116538561d8"
       }
     },
     {
@@ -379,7 +379,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_ooo_int_config_pkg.sv",
-        "sha256": "cacc0619c48526e3b3835c7eaead5d366910de2188312686a065fb99897e4f3b"
+        "sha256": "3ba9828561733cdc2eaa6ed7b4853805ed981ad82d4721569dffcccd406b85a8"
       }
     },
     {
@@ -398,7 +398,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_ooo_server1_config_pkg.sv",
-        "sha256": "63167f5d523592d9b0f5a2ca62d49e6b1417a18c595a2eaedf347264bf5b083d"
+        "sha256": "9c1eaa0301a467a51d15ce686d7f312a1e5f566e7491d48d7f5dc0502e508a8f"
       }
     },
     {
@@ -417,7 +417,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_ooo_server_config_pkg.sv",
-        "sha256": "5bdd129ec16b7810875435c86adca5194024037b495278f953935bdc91cab82d"
+        "sha256": "8cbec46d8213acad7aaaed7e20ebce6cfa0133a1e93d72fee03cdd4c7e0b2dbc"
       }
     },
     {
@@ -436,7 +436,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_server_math_config_pkg.sv",
-        "sha256": "f8e9bf124cad8ec6d69cb00a991144b83abadb15cd79de6c0aea5320436de2ed"
+        "sha256": "d413c8943985ad5567aefa88010932bbf224e3ca353c68a9d4ebda89e6b64379"
       }
     },
     {
@@ -455,7 +455,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_server_math_l3_config_pkg.sv",
-        "sha256": "aae6547891e731ceaa1f577b1dbd19a0af53baca060837cde4394bb57f53b614"
+        "sha256": "cea2d97be6657b01399119d23709011df0049a9e1f82dab7fbc8d1325a03f208"
       }
     },
     {
@@ -474,7 +474,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_server_math_v_config_pkg.sv",
-        "sha256": "7b1baf2a7160b44f2f57839795d7f7fac6c0584a63c9a732e331bc51b2f49851"
+        "sha256": "f31b0c581e75b2bc48cee2525640a334dd60138ea65c9c08b646af81290eaebf"
       }
     },
     {
@@ -493,7 +493,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_smt2_ai_config_pkg.sv",
-        "sha256": "aa6d8bb688904dc1fe49f4c5842d88816be916e4b90f98b35b06e0a942d48d0e"
+        "sha256": "61c3071bf13de818621c0e33ec3b8e155892531745b2d0facec210d6453c7df4"
       }
     },
     {
@@ -512,7 +512,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_smt2_config_pkg.sv",
-        "sha256": "733a793b3e6806ad392b3e28755ebf2264b7f725a1640dfd6e17bc78d6b675fc"
+        "sha256": "20375e95e3c2b045788af527bde5d67902a23df5a8a88d5ebd6ed51e06c0e23a"
       }
     },
     {
@@ -531,7 +531,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_smt2_l3_config_pkg.sv",
-        "sha256": "41f25acc241b8abd28cd66f46775bcd93f862b852e04a7b7fc9edd857ea4e617"
+        "sha256": "52fed4452e7c4fda8e0ec4b5043b612da1cf90c554c63d1adbfc6e631e5e5ab1"
       }
     },
     {
@@ -550,7 +550,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_smt2_ooo_int_ai_config_pkg.sv",
-        "sha256": "9cc8f8478458e51b8617b00ec295c5eb3da0d5bd589096c55395019379eb672b"
+        "sha256": "52e0faa3e943f8d0695b8b2f5e471622f84046d83ece91c3f0bdc4a84cbf7371"
       }
     },
     {
@@ -569,7 +569,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_smt2_ooo_int_config_pkg.sv",
-        "sha256": "76ba3985914337edbcb1eed578fc4c6b326ce703587099813723670b4c2411de"
+        "sha256": "b2392a95655e87e0de76b0954b5d9b8fc2f55d3e6b954bba6647698c0423bf96"
       }
     },
     {
@@ -588,7 +588,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_stream8_config_pkg.sv",
-        "sha256": "05bb1b06ce89cc15f7304226eb0363db02a37049249b12132d4b70b6781e8871"
+        "sha256": "55c14bf517c6480f4a9a5a69a9f659af50dfe9405d2c2c549095b9e1ff23a820"
       }
     },
     {
@@ -607,7 +607,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_stream8_l3_ai_config_pkg.sv",
-        "sha256": "877dd6dad8147af8058b8d0f9253faf4c0a4fd8306458a569f7dd6e76d8becb4"
+        "sha256": "b4f8271f2d93c06947ce657a47c7e9378cf4d3e9ae49c21485e568e82404c2d3"
       }
     },
     {
@@ -626,7 +626,7 @@
       "status": "qualified",
       "source": {
         "path": "core/include/g6lc64_stream8_l3_config_pkg.sv",
-        "sha256": "09d677d7b99df436459902502892549f59d68be685b6d61c6b20b64f77ce5809"
+        "sha256": "f063153a547860a4df5bed4775ce6eae33172f3d8e65bff8b67649112289c256"
       }
     }
   ]

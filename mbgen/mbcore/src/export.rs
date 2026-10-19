@@ -1,13 +1,19 @@
 //! Compile a legal preview into the backend bundle. Hidden parts are packed
 //! with the same edge packer. Gap roles stay out of the firmware peripheral list.
 
+use std::collections::BTreeMap;
+
 use serde_json::{json, Value};
 
 use crate::catalog::{domain_for, library_for, package, Support};
+use crate::circuit::resolve;
 use crate::pack::PackError;
-use crate::route::route;
+use crate::profile::sha256_hex;
+use crate::route::route_circuit;
 use crate::scene::scene;
 use crate::template::{role, Design, Placement, Port};
+
+pub const BUNDLE_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Clone, Debug)]
 pub struct Bundle {
@@ -20,6 +26,53 @@ pub struct Bundle {
     pub nets: Value,
     pub paths: Value,
     pub errors: Value,
+    /// The resolved circuit — the one snapshot SKiDL, simulation and layout consume.
+    pub circuit: Value,
+    /// Outline, placements, sides, rotations and route intent for the PCB bridge.
+    pub layout: Value,
+}
+
+impl Bundle {
+    /// `(file name, text)` for every file in the bundle, manifest excluded.
+    pub fn files(&self) -> Vec<(&'static str, String)> {
+        let pretty = |v: &Value| serde_json::to_string_pretty(v).unwrap_or_default();
+        vec![
+            ("design.json", pretty(&self.design)),
+            ("circuit.json", pretty(&self.circuit)),
+            ("layout.json", pretty(&self.layout)),
+            ("platform.json", pretty(&self.platform)),
+            ("firmware.json", pretty(&self.firmware)),
+            ("scene.json", pretty(&self.scene)),
+            ("nets.json", pretty(&self.nets)),
+            ("paths.json", pretty(&self.paths)),
+            ("errors.json", pretty(&self.errors)),
+            ("board.net", self.netlist.clone()),
+            ("design_skidl.py", self.skidl_py.clone()),
+        ]
+    }
+
+    /// Manifest with a sha256 per file. Written last: its presence means the
+    /// bundle is complete and the hashes identify exactly this revision.
+    pub fn manifest(&self) -> Value {
+        let files: BTreeMap<&str, Value> = self
+            .files()
+            .iter()
+            .map(|(name, text)| (*name, json!({ "sha256": sha256_hex(text.as_bytes()), "bytes": text.len() })))
+            .collect();
+        let circuit_hash = sha256_hex(serde_json::to_string(&self.circuit).unwrap_or_default().as_bytes());
+        json!({
+            "schema_version": BUNDLE_SCHEMA_VERSION,
+            "generated_by": "mbgen compile",
+            "project": {
+                "template": self.design["template_id"],
+                "package": self.design["settings"]["package_id"],
+                "design_schema": self.design["schema_version"],
+            },
+            "circuit_sha256": circuit_hash,
+            "core_source": self.platform["core"]["source"],
+            "files": files,
+        })
+    }
 }
 
 pub fn compile(design: &Design) -> Result<Bundle, PackError> {
@@ -82,9 +135,27 @@ pub fn compile(design: &Design) -> Result<Bundle, PackError> {
             }));
         }
     }
-    let routed = route(&built)?;
+    let circuit = resolve(&built)?;
+    let routed = route_circuit(&built, &circuit)?;
     let scene_json = serde_json::to_value(&bodies).map_err(|e| PackError { reason: e.to_string() })?;
     let design_json = serde_json::to_value(&built).map_err(|e| PackError { reason: e.to_string() })?;
+    let circuit_json = serde_json::to_value(&circuit).map_err(|e| PackError { reason: e.to_string() })?;
+    let template = built.template()?;
+    let layout = json!({
+        "schema_version": 1,
+        "units": "um",
+        "origin": "front-left corner, X along width, Y along depth, Z up",
+        "rotation": "yaw_q quarter turns CCW from above; bottom side mirrors X",
+        "outline": { "id": template.id, "w_um": template.board_w_um, "d_um": template.board_d_um, "thickness_um": crate::geometry::PCB_THICKNESS_UM },
+        "stackup": [ { "layer": 0, "name": "F.Cu" }, { "layer": 1, "name": "B.Cu" } ],
+        "placements": circuit.components.iter().map(|c| json!({
+            "id": c.id, "refdes": c.refdes, "side": c.side, "yaw_q": c.yaw_q, "x_um": c.x_um, "y_um": c.y_um,
+            "footprint": c.part.as_ref().map(|p| p.footprint.clone()).unwrap_or_default(),
+            "dnp": c.dnp,
+        })).collect::<Vec<_>>(),
+        "rules": { "grid_um": crate::route::GRID_UM, "trace_clear_um": crate::route::TRACE_CLEAR_UM, "trace_half_um": crate::route::TRACE_HALF_UM, "via_clear_um": crate::route::VIA_CLEAR_UM },
+        "route_intent": { "rails_as_planes": ["GND", "P12V", "P3V3", "P3V3_AUX"], "paths": routed.paths.len(), "unroutable": routed.errors.len() },
+    });
     let nets_json = serde_json::to_value(&routed.nets).map_err(|e| PackError { reason: e.to_string() })?;
     let paths_json = serde_json::to_value(&routed.paths).map_err(|e| PackError { reason: e.to_string() })?;
     let errors_json = serde_json::to_value(&routed.errors).map_err(|e| PackError { reason: e.to_string() })?;
@@ -137,9 +208,19 @@ pub fn compile(design: &Design) -> Result<Bundle, PackError> {
         nets: nets_json,
         paths: paths_json,
         errors: errors_json,
+        circuit: circuit_json,
+        layout,
     })
 }
 
+/// Compile-time support bodies for gap roles whose circuits are not yet
+/// recipes (PHY + crystal per magjack, ESD per USB stack, VTT when memory
+/// exists). They are pinless placeholders in the bundle, never wired.
+///
+/// Decoupling is **not** added here any more: a capacitor with two floating
+/// terminals is not a circuit, and the SKiDL witness said so. Decoupling
+/// comes from `decap_per_rail` recipe blocks the user expands on a host that
+/// declares power contracts, which gives real refdes, nets and ownership.
 fn expand_hidden(design: &mut Design) -> Result<(), PackError> {
     let lans: Vec<_> = design.ports.iter().filter(|p| p.role == "gbe_magjack").map(|p| p.id.clone()).collect();
     let usbs: Vec<_> = design.ports.iter().filter(|p| p.role == "usb_stack").map(|p| p.id.clone()).collect();
@@ -154,14 +235,15 @@ fn expand_hidden(design: &mut Design) -> Result<(), PackError> {
     if mems > 0 {
         push(design, "vtt0", "vtt")?;
     }
-    let card = package(&design.settings.package_id);
-    let ua = card.map(|c| c.core_ua).unwrap_or(250_000);
-    let caps = ((ua + 99_999) / 100_000).clamp(2, 8);
-    for i in 0..caps {
-        push(design, &format!("c{i}"), "decap")?;
-    }
     let template = design.template()?;
     design.repack(&template)
+}
+
+/// Preview decap budget the processor card advertises (`core_ua` heuristic),
+/// so a host can suggest `per_rail` for the decoupling recipe. A hint only.
+pub fn suggested_decaps(design: &Design) -> u32 {
+    let ua = package(&design.settings.package_id).map(|c| c.core_ua).unwrap_or(250_000);
+    ((ua + 99_999) / 100_000).clamp(2, 8) as u32
 }
 
 fn push(design: &mut Design, id: &str, role_id: &str) -> Result<(), PackError> {
@@ -170,18 +252,9 @@ fn push(design: &mut Design, id: &str, role_id: &str) -> Result<(), PackError> {
     }
     let role = role(role_id).ok_or_else(|| PackError { reason: format!("unknown role {role_id}") })?;
     let order = design.placements.iter().map(|p| p.order).max().unwrap_or(0) + 1;
-    design.ports.push(Port { id: id.into(), role: role.id.into(), width_um: role.width_um });
-    design.placements.push(Placement {
-        id: id.into(),
-        edge: role.edge.into(),
-        s_um: 0,
-        stack: 0,
-        pinned: false,
-        order,
-        yaw_q: 0,
-        x_um: None,
-        y_um: None,
-    });
+    design.ports.push(Port::new(id, role.id, role.width_um));
+    design.placements.push(Placement::new(id, role.edge, 0, false, order));
+    design.assign_refdes(id);
     Ok(())
 }
 
@@ -338,6 +411,30 @@ mod tests {
     }
 
     #[test]
+    fn the_bundle_carries_the_circuit_and_a_manifest_that_identifies_every_file() {
+        let bundle = compile(&Design::mini_itx().unwrap()).unwrap();
+        assert_eq!(bundle.circuit["schema_version"], crate::circuit::CIRCUIT_SCHEMA_VERSION);
+        assert!(bundle.circuit["components"].as_array().unwrap().iter().all(|c| !c["refdes"].as_str().unwrap().is_empty()));
+        assert!(bundle.circuit["nets"].as_array().unwrap().iter().any(|n| n["id"] == "P12V"));
+        assert_eq!(bundle.layout["units"], "um");
+        assert_eq!(bundle.layout["outline"]["w_um"], 170_000);
+        assert!(bundle.layout["placements"].as_array().unwrap().iter().any(|p| p["id"] == "socket" && p["side"] == "Top"));
+        let m = bundle.manifest();
+        assert_eq!(m["schema_version"], BUNDLE_SCHEMA_VERSION);
+        let files = m["files"].as_object().unwrap();
+        for name in ["design.json", "circuit.json", "layout.json", "platform.json", "firmware.json", "nets.json", "paths.json"] {
+            assert_eq!(files[name]["sha256"].as_str().unwrap().len(), 64, "{name}");
+        }
+        assert_eq!(m["core_source"]["sha256"], bundle.platform["core"]["source"]["sha256"]);
+        // The manifest hash of a file equals the hash of the text that is written.
+        let circuit_text = bundle.files().into_iter().find(|(n, _)| *n == "circuit.json").unwrap().1;
+        assert_eq!(files["circuit.json"]["sha256"], sha256_hex(circuit_text.as_bytes()));
+        // Same design, same bytes.
+        let again = compile(&Design::mini_itx().unwrap()).unwrap();
+        assert_eq!(serde_json::to_string(&again.manifest()).unwrap(), serde_json::to_string(&m).unwrap());
+    }
+
+    #[test]
     fn only_qualified_profiles_are_offered_and_an_unknown_one_is_refused() {
         assert!(packages().iter().all(|c| c.profile.is_qualified()));
         assert!(packages().len() >= 15);
@@ -414,6 +511,30 @@ mod tests {
         assert!(compiled.len() > preview.len());
         assert!(preview.iter().all(|b| b.role != "phy_gbe" && b.role != "decap"));
         assert!(compiled.iter().any(|b| b["role"] == "phy_gbe"));
-        assert!(compiled.iter().any(|b| b["role"] == "decap"));
+        // No floating capacitors are invented at compile time any more.
+        assert!(compiled.iter().all(|b| b["role"] != "decap"));
+        assert!(suggested_decaps(&design) >= 2);
+    }
+
+    #[test]
+    fn decoupling_in_the_bundle_comes_from_recipe_blocks_with_wired_terminals() {
+        let design = Design::mini_itx().unwrap();
+        let mut params = BTreeMap::new();
+        params.insert("per_rail".to_string(), "1".to_string());
+        let expanded = crate::gesture::preview(&design, &crate::gesture::Gesture::ExpandRecipe { recipe: "decap_per_rail".into(), host: "slot0".into(), params }).design;
+        let bundle = compile(&expanded).unwrap();
+        let caps: Vec<_> = bundle.circuit["components"].as_array().unwrap().iter().filter(|c| c["role"] == "decap").collect();
+        assert_eq!(caps.len(), 3);
+        for cap in caps {
+            let id = cap["id"].as_str().unwrap();
+            for term in ["1", "2"] {
+                let pin = format!("{id}.{term}");
+                assert!(
+                    bundle.circuit["nets"].as_array().unwrap().iter().any(|n| n["pins"].as_array().unwrap().iter().any(|p| p == &pin)),
+                    "{pin} must be on a net"
+                );
+            }
+        }
+        assert!(bundle.scene.as_array().unwrap().iter().any(|b| b["role"] == "decap"));
     }
 }
