@@ -2166,8 +2166,14 @@ prerequisite for this work under the existing dual license. No licensing policy 
   first `exec` to `G6LC_LINUX_INIT_UP` and **`G6LC_LINUX_SHELL`** at
   ≈ 430 M cycles / 319 M retired — the first HPDCACHE-package boot to the
   shell — with the memory oracle (cbo.zero modelled) at **0 mismatches**
-  over 320 M retirements. The 2-hart `l1s2t` is at `Run /init` (8.00 s;
-  the old `init` segfault was at 8.02 s) — T45/T39's verdict follows.
+  over 320 M retirements. The 2-hart `l1s2t` passes the old `init`
+  segfault point (8.02 s) and dies at 8.10 s of **`Attempted to kill
+  init! exitcode=0x7f00`** after `Error loading shared library
+  libgcc_s.so.1 … (needed by /init)` — the Oct-14 `linux-payload-l1s1`
+  (pre libgcc fix, S4.6) that every 2-hart run so far used; the loader
+  now runs far enough to say so, where pre-T44 it segfaulted on an
+  unzeroed page first. `linux-payload-l1s2` (2 cpus, fixed initrd) built;
+  `l1s2u` on t53 is the 2-hart verdict (T45/T39).
 - [ ] **T50 — committed HEAD (`ooocoh-t54-ooo-pgo-build`, A146/A147
   `MultStages = 4`) hangs at c ≈ 5.88 M on both the L1 and the L3 payload:
   the scoreboard head is a `MUL` (fu=5 op=94) at `0xffffffff80059fb8`,
