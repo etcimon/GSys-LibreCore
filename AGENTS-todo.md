@@ -2214,7 +2214,7 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `corev_apu/tb/` only — `corev_apu/coherence/g6lc_cmo_engine.sv` and
   `corev_apu/src/g6lc_cluster.sv` come from the builder's seed, so a
   server model with T49 needs a seed refresh (or the overlay widened).
-- [ ] **T48 — WT dcache: a store whose value never becomes visible to a
+- [x] **T48 — WT dcache: a store whose value never becomes visible to a
   load thousands of cycles later (2026-10-19).** The t52 L3 (`l3h52`, HEAD =
   T35…T47) reached the login prompt and ran to the 2.5 G-cycle cap
   (1.41 G retired, `kmodloader` done, no oops — past the 36.3 s death, so
@@ -2234,7 +2234,36 @@ prerequisite for this work under the existing dual license. No licensing policy 
   index-only `wr_cl_inv_i`, or the T47 masking itself. Watch run
   `l3watch5` on t52 (`+smt_mem_watch=826d2b90`, to c=1.6167 G) in flight
   for the mechanism; the mismatches did not kill either run, so this is
-  the last known class on the WT L3 path.
+  the last known class on the WT L3 path. **Root cause (2026-10-20, the
+  `l3watch5` window):** the trap-frame `sd` (`store_offer 654,925`,
+  `wt_alloc ptr=2` 654,962) is tag-checked three times — `wt_check 965
+  hit=02`, `966 hit=02`, **`967 hit=00`** — and the last result stands:
+  `wt_ack 654,988 … checked=1 hit=00 ack_active=0 wr_req=00 fix_push=0`.
+  Nothing wrote the array, nothing entered the fixup queue, and the line
+  stayed resident in way 1 (every later check hits `02`) with the old
+  word; the `c.ldsp` at 663,784 read it. Two holes: **(A)**
+  `wt_dcache_mem` clears `cmp_en_d` whenever the valid bits are written
+  (`vld_we`) but the read arbiter still grants a lookup in a cycle the SL-W
+  explicit invalidation (`inv_req_i`) owns the port — the acknowledged
+  lookup's compare is killed and it returns `hit=0`: a **false miss**. A
+  load's false miss only refills a line that is already resident
+  (duplicate ways: `wt_check hit=22` at 667,465, `wt_word ways=22`); the
+  write buffer's check records `checked=1, hit_oh=0` for a present line.
+  **(B)** such a checked-miss ACK is a fixup push candidate ("push on a
+  checked tag-miss"), but `fixup_hold` covered unchecked words only, so on
+  a full queue (a trap entry's 30-store burst fills the 8 + bypass) the
+  word was evicted unpushed — dropped. **Fix:** (A) the read arbiter's
+  grant and `rd_acked` exclude `inv_req_i` cycles as they already exclude
+  `wr_cl_vld_i` (`rd_port_busy`); (B) `fixup_hold` holds
+  `!(checked && |hit_oh)` words. Mutations `G6LC_MUT_RD_ACK_DURING_INV`,
+  `G6LC_MUT_FIXUP_DROP_CHECKED_MISS`. Leaves: `tb_g6lc_wt_mem_vld` S5 (a
+  tag-only lookup in an `inv_req` cycle is acked the next cycle and hits;
+  the mutation returns `hit=00 vld=05` for a resident line) and
+  `tb_g6lc_wt_wbuf_fixup` S7 (queue and bypass full, a checked-miss ACK is
+  held and written after the drain; the mutation drops it). The two
+  earlier leaves (T43/T46 S1–S4, T47/T37 S1–S6) still pass with the fix.
+  Build `ooocoh-t55-ooo-pgo-build` (= t53 + this fix): battery, then the
+  L3 with the live oracle is the verdict (the t52 pair must vanish).
 - [ ] **T47 — the fixup queue's deferred array write put older bytes back
   over a younger store's write to the same word (2026-10-18).** The t49 L3
   (`l3h49`, T39/T44 in, T46 out) died at **36.3137 s with the identical
