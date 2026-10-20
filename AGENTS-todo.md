@@ -2262,8 +2262,21 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `tb_g6lc_wt_wbuf_fixup` S7 (queue and bypass full, a checked-miss ACK is
   held and written after the drain; the mutation drops it). The two
   earlier leaves (T43/T46 S1–S4, T47/T37 S1–S6) still pass with the fix.
-  Build `ooocoh-t55-ooo-pgo-build` (= t53 + this fix): battery, then the
-  L3 with the live oracle is the verdict (the t52 pair must vanish).
+  **(B) withdrawn (2026-10-20):** `ooocoh-t55` (A+B) and `ooocoh-t57` (B
+  alone) hang the whole battery on the first stack store (m4: 135
+  retirements, the load parked in WAIT_PAGE_OFFSET with `po_match=1`,
+  the write buffer never empty): the checked-miss word was held on a full
+  queue whose entries wait for their lines to be refilled, and the loads
+  that would refill them wait on the buffer (the page-offset sticky) —
+  a deadlock by construction; the original drop is right *provided the
+  miss is genuine*, which (A) now guarantees. `ooocoh-t58` (A alone,
+  bisect) and **`ooocoh-t59` = t53 + (A) + `inv_req_o` restated on
+  registers (the read grant no longer hangs on the FSM's comb block;
+  `fixup_inv_req_matches_port` asserts the equivalence)**: m4 895 cycles,
+  the whole battery Spike-exact (`BAD: []`, s11 unchanged); S7 of the
+  wbuffer leaf now documents the drop contract. `l1h59`/`l3h59` with the
+  live oracle are the boot verdicts (the t52 pair at retire 933 M /
+  1.287 G must be gone).
 - [ ] **T47 — the fixup queue's deferred array write put older bytes back
   over a younger store's write to the same word (2026-10-18).** The t49 L3
   (`l3h49`, T39/T44 in, T46 out) died at **36.3137 s with the identical

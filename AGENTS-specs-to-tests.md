@@ -1027,14 +1027,15 @@ not be acknowledged in that cycle (the valid-bit write clears `cmp_en`); acked t
 returns `hit=05 vld=05`. `G6LC_MUT_RD_ACK_DURING_INV` (the pre-fix grant) acks it under the write
 and returns **`hit=00 vld=05`** — the boot's `wt_check 967 hit=00` for a resident line
 (`WT_MEM_VLD_S5_FALSE_MISS`). `tb_g6lc_wt_wbuf_fixup` **S7** — the fixup FIFO and its bypass slot
-full (`WtDcacheFixupDepth` + 1 VOID-ACKed words), a tenth word tag-checked as a miss and ACKed: the
-ACK must be held (`fixup_hold`) until the queue drains, then the word is pushed, re-checked against
-the now-present line and written exactly once (`WT_WBUF_FIXUP_S7_CHECKED_MISS_HELD`);
-`G6LC_MUT_FIXUP_DROP_CHECKED_MISS` (the pre-fix hold, unchecked words only) evicts it unpushed
-(`writes=8 invals=1`). Spec anchor: Part I `#sec:memorymodel` — every later load of a byte returns
-the last store to it; the implementation invariants under test are "a resident line never answers
-a lookup as absent" and "an acknowledged store is never dropped from the L1's view". Verdict: the
-t55 L3 with the live oracle (the t52 pair at retire 933 M / 1.287 G must be gone).
+full (`WtDcacheFixupDepth` + 1 VOID-ACKed words), a tenth word tag-checked as a genuine miss and
+ACKed: it leaves the write buffer at once (`WT_WBUF_FIXUP_S7_CHECKED_MISS_NOT_HELD`), nothing is
+written for it, the queue drains. Holding it instead (the first cut, `ooocoh-t55`/`t57`) deadlocked
+every stage of the battery on its first stack store: the held store kept the buffer non-empty while
+the loads that would refill the queue's lines waited on the buffer. Spec anchor: Part I
+`#sec:memorymodel` — every later load of a byte returns the last store to it; the implementation
+invariant under test is "a resident line never answers a lookup as absent", which is what makes the
+drop of a checked miss safe. Verdicts: t59 battery Spike-exact (m4 895 cycles, s11 unchanged); the
+t59 L3 with the live oracle (the t52 pair at retire 933 M / 1.287 G must be gone).
 
 ## `cbo.zero` zeroes the advertised 64-byte block (2026-10-19, T44)
 
