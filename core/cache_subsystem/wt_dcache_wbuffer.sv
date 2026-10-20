@@ -550,10 +550,27 @@ module wt_dcache_wbuffer
       end
 
       // Invalidation outputs to wt_dcache_mem.
-      assign inv_req_o      = fixup_inv_req;
+      // T48: inv_req_o is the RETIRE-state condition restated on registers
+      // only (no path through inv_ack_i), because wt_dcache_mem now holds its
+      // read grants on it: as a copy of the always_comb's fixup_inv_req it
+      // would sit on a block-level cycle (p_bank_req -> inv_ack -> FSM ->
+      // inv_req -> arbiter -> rd_ack -> p_bank_req) that a simulator may
+      // settle in the wrong order. The two agree by construction
+      // (fixup_inv_req_matches_port below).
+      assign inv_req_o      = (fixup_state_q == FIXUP_RETIRE) && fixup_active_valid && !fixup_active_dead &&
+`ifdef G6LC_MUT_FIXUP_SEL_DRIFT
+                              fixup_bypass_valid_q;
+`else
+                              (fixup_bypass_valid_q == fixup_sel_bypass_q) && fixup_bypass_valid_q;
+`endif
       assign inv_idx_o      = fixup_inv_idx;
       assign inv_way_oh_o   = fixup_inv_way_oh;
       assign inv_vld_bits_o = fixup_inv_vld_bits;
+      //pragma translate_off
+      fixup_inv_req_matches_port :
+      assert property (@(posedge clk_i) disable iff (!rst_ni) inv_req_o == fixup_inv_req)
+      else $error("[wt_dcache_wbuffer] inv_req_o (%b) and the fixup FSM's inv request (%b) disagree", inv_req_o, fixup_inv_req);
+      //pragma translate_on
 
       // SL-W PMU events
       assign pm_void_ack_o    = fixup_pm_void_ack;
@@ -1003,19 +1020,18 @@ module wt_dcache_wbuffer
     // SL-W hold: if the post-ACK fixup queue is full and this ACK'd word is a
     // fixup candidate, do not free the TX or pop the return FIFO until a slot
     // frees.  This keeps correctness from depending on queue capacity.
-    // T48: a checked tag-MISS is a candidate too (the push below takes it,
-    // line 1347), so it is held on a full queue as well -- before, only an
-    // unchecked word was held and a checked miss was evicted unpushed. A
-    // false miss (the tag check acknowledged in a valid-bit write cycle,
-    // wt_dcache_mem) then left the resident line stale for good.
+    // T48 note: a checked tag-MISS is deliberately NOT held here. Holding it
+    // (tried as the t55/t57 builds) deadlocks: on a full queue whose entries
+    // wait for their lines to be refilled, the held store keeps the write
+    // buffer non-empty, the loads that would refill those lines wait on the
+    // buffer (page_offset sticky), and nothing drains. A checked miss may be
+    // dropped only because it is genuine: wt_dcache_mem no longer
+    // acknowledges a lookup in a valid-bit write cycle (the false miss of
+    // the L3 boot's trap-frame store).
     fixup_hold = (CVA6Cfg.WtDcacheFixupDepth > 0) &&
                  !tx_stat_q[rtrn_id].nc && !rtrn_inv && tx_stat_q[rtrn_id].vld &&
                  !rtrn_empty &&
-`ifdef G6LC_MUT_FIXUP_DROP_CHECKED_MISS
-                 !wbuffer_q[rtrn_ptr].checked &&            // review mutation: the pre-fix hold
-`else
-                 !(wbuffer_q[rtrn_ptr].checked && (|wbuffer_q[rtrn_ptr].hit_oh)) &&
-`endif
+                 !wbuffer_q[rtrn_ptr].checked &&
                  !(check_same_q1 && (check_ptr_q1 == rtrn_ptr)) &&
                  !(VoidKeepEn && !wbuffer_d[rtrn_ptr].checked &&
                    (wr_paddr[31:12] == VoidKeepTag)) &&
