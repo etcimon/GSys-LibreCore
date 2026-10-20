@@ -2041,7 +2041,7 @@ prerequisite for this work under the existing dual license. No licensing policy 
   `/proc/loadavg`, `/proc/stat`, `free`, `G6LC_LINUX_SHELL` and the ash
   prompt with **no signal** (`l1fix3`, 486.5 M cycles, exit 0); the L3
   with the user-space-aware live oracle (`l3orc4`) is in flight.
-- [ ] **T44 — single-hart `g6lc64_ooo_server1` (HPDCACHE, t41 = T35+T40) L1:
+- [x] **T44 — single-hart `g6lc64_ooo_server1` (HPDCACHE, t41 = T35+T40) L1:
   `Run /init` at 7.19 s then an Oops in `move_page_tables` (`shift_arg_pages`
   ← `load_elf_binary` ← `kernel_execve` of `/init`): store page fault at
   `0x00ffffd583706448` — a pointer with its top byte zeroed (2026-10-17,
@@ -2161,7 +2161,13 @@ prerequisite for this work under the existing dual license. No licensing policy 
   deeper multiplier); its L1 (`l1h54`) and L3 with the live oracle
   (`l3h54`) are the boot verdicts for HEAD — **and both hang at
   c ≈ 5.88 M (T50 below), so HEAD is not boot-qualified; the qualified
-  set stays t53 (= t52 + T44).**
+  set stays t53 (= t52 + T44).** **T44 verified (2026-10-20, `l1s1t` on
+  `ooocoh-t53-server1-pgo-build`, single hart, live oracle):** past the
+  first `exec` to `G6LC_LINUX_INIT_UP` and **`G6LC_LINUX_SHELL`** at
+  ≈ 430 M cycles / 319 M retired — the first HPDCACHE-package boot to the
+  shell — with the memory oracle (cbo.zero modelled) at **0 mismatches**
+  over 320 M retirements. The 2-hart `l1s2t` is at `Run /init` (8.00 s;
+  the old `init` segfault was at 8.02 s) — T45/T39's verdict follows.
 - [ ] **T50 — committed HEAD (`ooocoh-t54-ooo-pgo-build`, A146/A147
   `MultStages = 4`) hangs at c ≈ 5.88 M on both the L1 and the L3 payload:
   the scoreboard head is a `MUL` (fu=5 op=94) at `0xffffffff80059fb8`,
