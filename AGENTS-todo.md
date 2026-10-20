@@ -2159,7 +2159,29 @@ prerequisite for this work under the existing dual license. No licensing policy 
   comments, T44, T49 — 96 files past the t52 set) builds and is
   Spike-exact on the same battery (s11 11,002 cycles: +37 from the
   deeper multiplier); its L1 (`l1h54`) and L3 with the live oracle
-  (`l3h54`) are the boot verdicts for HEAD.
+  (`l3h54`) are the boot verdicts for HEAD — **and both hang at
+  c ≈ 5.88 M (T50 below), so HEAD is not boot-qualified; the qualified
+  set stays t53 (= t52 + T44).**
+- [ ] **T50 — committed HEAD (`ooocoh-t54-ooo-pgo-build`, A146/A147
+  `MultStages = 4`) hangs at c ≈ 5.88 M on both the L1 and the L3 payload:
+  the scoreboard head is a `MUL` (fu=5 op=94) at `0xffffffff80059fb8`,
+  `issued=1 valid=0`, and no result ever comes back (2026-10-19).** The
+  `+hang_dump` (60 dumps, 300 k cycles without a commit ack): IQ entries
+  parked on the MUL's destination (`prs1=14/15/63/67`), LSQ/LSU idle,
+  `lsu_ready=1`, `sb_empty=0`, no flush — a lost multiplier writeback, not
+  a memory stall. The same model is Spike-exact on the whole battery (s11
+  carries MULs; +37 cycles from the deeper pipe), so the loss is
+  conditional — the shape A147 itself names (a cancellation/flush in flight
+  while a live MUL is in the 4-stage pipe: "mult.sv carries
+  cancellation/flush liveness with the transaction") is the first suspect.
+  `core/mult.sv`, `core/multiplier.sv`, `core/serdiv.sv` carry uncommitted
+  edits in the working tree (the A147 author's), so this is recorded for
+  that track rather than fixed here: reproduce with
+  `t21/q-t54-launch.sh` (deterministic), `+hang_dump` at 5.88 M; a
+  MULT leaf with a younger-cancel wave over a 4-cycle MUL is the obvious
+  bench. Until it is closed, boot qualification runs on the t53 file set
+  (`ovl-head53`: t52 + T44), and `MultStages = 4` must not ship in
+  `g6lc64_ooo`.
 - [x] **T49 — Zicbom block vs the 16-byte L1 line (follow-up of T44,
   2026-10-19).** The same units assumption sat on the CMO side: a
   `cbo.inval` reached the cluster engine as one address and the engine
@@ -2187,7 +2209,11 @@ prerequisite for this work under the existing dual license. No licensing policy 
   engine (`L2CmoEn = 0`, i.e. `g6lc64_ooo`) performs no L1 invalidation
   for `cbo.inval` at all — those DTS files do not advertise `zicbom`; the
   HPDCACHE adapter's own `HPDCACHE_REQ_CMO_*_NLINE` stays one line (the
-  engine's broadcast covers the local L1 under `L2CmoEn`).
+  engine's broadcast covers the local L1 under `L2CmoEn`). Note for the
+  system verdict: the remote overlay builds carry `core/` and
+  `corev_apu/tb/` only — `corev_apu/coherence/g6lc_cmo_engine.sv` and
+  `corev_apu/src/g6lc_cluster.sv` come from the builder's seed, so a
+  server model with T49 needs a seed refresh (or the overlay widened).
 - [ ] **T48 — WT dcache: a store whose value never becomes visible to a
   load thousands of cycles later (2026-10-19).** The t52 L3 (`l3h52`, HEAD =
   T35…T47) reached the login prompt and ran to the 2.5 G-cycle cap
