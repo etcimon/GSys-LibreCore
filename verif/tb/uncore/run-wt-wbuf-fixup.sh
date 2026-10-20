@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: MIT
 # Copyright (c) 2026 Etienne Cimon
 # wt_dcache_wbuffer leaf (T47 fixup write never supersedes a younger store): positive, +oracle_negative (must fail), and
+# the G6LC_MUT_FIXUP_SEL_DRIFT (T37) and G6LC_MUT_FIXUP_DROP_CHECKED_MISS (T48) mutations (must fail), and
 # the G6LC_MUT_FIXUP_KEEP_SUPERSEDED arm (informational: the pre-fix queue coalesces the younger ACK into the pending entry
 # and survives this shape; see the note below).
 set -euo pipefail
@@ -51,5 +52,8 @@ if grep -q "WT_WBUF_FIXUP_PASS" "$OUT/mut.log"; then echo "note: G6LC_MUT_FIXUP_
 build mut2 "+define+G6LC_MUT_FIXUP_SEL_DRIFT"
 "$OUT/mut2/tb" > "$OUT/mut2.log" 2>&1
 grep -q "WT_WBUF_FIXUP_S6_\|fixup pass acting" "$OUT/mut2.log" || { echo "FAIL mutation G6LC_MUT_FIXUP_SEL_DRIFT not caught (S6)"; tail -12 "$OUT/mut2.log"; exit 1; }
+build mut3 "+define+G6LC_MUT_FIXUP_DROP_CHECKED_MISS"
+"$OUT/mut3/tb" > "$OUT/mut3.log" 2>&1
+grep -q "WT_WBUF_FIXUP_S7_CHECKED_MISS_HELD" "$OUT/mut3.log" || { echo "FAIL mutation G6LC_MUT_FIXUP_DROP_CHECKED_MISS not caught (S7)"; tail -12 "$OUT/mut3.log"; exit 1; }
 set -e
-echo "PASS run-wt-wbuf-fixup (positive, oracle negative, T37 pass-drift mutation caught; keep-superseded arm informational)"
+echo "PASS run-wt-wbuf-fixup (positive, oracle negative, T37 pass-drift + T48 checked-miss-drop mutations caught; keep-superseded arm informational)"

@@ -164,8 +164,12 @@ module wt_dcache_wbuffer
   // load byte selection is in wt_dcache_mem. Staging must reserve acceptance
   // capacity and preserve supersession before a deferred write can retire.
   // svt-pipe: require-contract
+  // svt-pipe: protocol wb valid=miss_req_o
   // svt-pipe: no-cut on=wbuffer_data_o
   // svt-pipe: no-cut on=fixup_bypass_d
+  // svt-pipe: cycle wb q=wbuffer_q d=wbuffer_data_o hold=miss_req_o steps=1
+  // svt-pipe: cut-ok wb on=wbuffer_data_o
+  // wbuffer_data_o is already wbuffer_q. No extra register; fixup_bypass_d stays locked.
 
   function automatic logic [(CVA6Cfg.XLEN/8)-1:0] to_byte_enable8(
       input logic [CVA6Cfg.XLEN_ALIGN_BYTES-1:0] offset, input logic [1:0] size);
@@ -999,10 +1003,19 @@ module wt_dcache_wbuffer
     // SL-W hold: if the post-ACK fixup queue is full and this ACK'd word is a
     // fixup candidate, do not free the TX or pop the return FIFO until a slot
     // frees.  This keeps correctness from depending on queue capacity.
+    // T48: a checked tag-MISS is a candidate too (the push below takes it,
+    // line 1347), so it is held on a full queue as well -- before, only an
+    // unchecked word was held and a checked miss was evicted unpushed. A
+    // false miss (the tag check acknowledged in a valid-bit write cycle,
+    // wt_dcache_mem) then left the resident line stale for good.
     fixup_hold = (CVA6Cfg.WtDcacheFixupDepth > 0) &&
                  !tx_stat_q[rtrn_id].nc && !rtrn_inv && tx_stat_q[rtrn_id].vld &&
                  !rtrn_empty &&
-                 !wbuffer_q[rtrn_ptr].checked &&
+`ifdef G6LC_MUT_FIXUP_DROP_CHECKED_MISS
+                 !wbuffer_q[rtrn_ptr].checked &&            // review mutation: the pre-fix hold
+`else
+                 !(wbuffer_q[rtrn_ptr].checked && (|wbuffer_q[rtrn_ptr].hit_oh)) &&
+`endif
                  !(check_same_q1 && (check_ptr_q1 == rtrn_ptr)) &&
                  !(VoidKeepEn && !wbuffer_d[rtrn_ptr].checked &&
                    (wr_paddr[31:12] == VoidKeepTag)) &&

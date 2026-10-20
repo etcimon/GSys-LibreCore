@@ -112,8 +112,10 @@ module wt_dcache_mem
   // Re-pipelining contract (sv-timing A128; 47.2 adjusted FO4 on the
   // Nangate45 board): D$ data path: bank select and forward merge.
   // svt-pipe: require-contract
+  // svt-pipe: protocol dm valid=rd_req_i
   // The merge drives rd_data_o; wbuffer_data_i is its input bundle.
   // svt-pipe: no-cut on=rd_data_o
+  // svt-pipe: cycle dm q=rd_data_o d=rd_hit_oh_o hold=rd_req_i steps=1
 
   localparam DCACHE_NUM_BANKS = CVA6Cfg.DCACHE_LINE_WIDTH / CVA6Cfg.XLEN;
   localparam DCACHE_NUM_BANKS_WIDTH = $clog2(DCACHE_NUM_BANKS);
@@ -258,6 +260,19 @@ module wt_dcache_mem
   assign rd_req_prio   = rd_req_i & rd_prio_i;
   assign rd_req_masked = (|rd_req_prio) ? rd_req_prio : rd_req_i;
 
+  // T48: a read is not acknowledged in a cycle the SL-W explicit invalidation
+  // (inv_req_i) owns the valid-bit port. cmp_en_d below is cleared whenever
+  // the valid bits are written, so an acknowledged lookup in that cycle came
+  // back as hit=0 -- a false miss. A load's false miss only refilled a line
+  // that was already resident (duplicate ways, `hit=22`); the write buffer's
+  // tag check recorded `checked=1, hit_oh=0` for a present line, its ACK then
+  // wrote nothing, and with the fixup queue full the word was dropped: the
+  // L3 boot's trap-frame slot that read the previous value 8,850 cycles
+  // later (PA 0x826d2b90, c=1,616,654,967: three checks hit=02, hit=02,
+  // hit=00). The refill (wr_cl_vld_i) already held the port the same way.
+  logic rd_port_busy;
+  assign rd_port_busy = wr_cl_vld_i | inv_req_i;
+
   logic rd_req;
   rr_arb_tree #(
       .NumIn    (NumPorts),
@@ -270,13 +285,21 @@ module wt_dcache_mem
       .req_i  (rd_req_masked),
       .gnt_o  (rd_ack_o),
       .data_i ('0),
-      .gnt_i  (~wr_cl_vld_i),
+`ifdef G6LC_MUT_RD_ACK_DURING_INV
+      .gnt_i  (~wr_cl_vld_i),          // review mutation: the pre-fix grant
+`else
+      .gnt_i  (~rd_port_busy),
+`endif
       .req_o  (rd_req),
       .data_o (),
       .idx_o  (vld_sel_d)
   );
 
+`ifdef G6LC_MUT_RD_ACK_DURING_INV
   assign rd_acked = rd_req & ~wr_cl_vld_i;
+`else
+  assign rd_acked = rd_req & ~rd_port_busy;
+`endif
 
   always_comb begin : p_bank_req
     vld_we    = wr_cl_vld_i;

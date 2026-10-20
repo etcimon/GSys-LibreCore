@@ -3,7 +3,9 @@
 # Copyright (c) 2026 Etienne Cimon
 # wt_dcache_mem leaf (T43 valid-bit write single-requester, T46 byte-merged forward): positive, +oracle_negative
 # (must fail), the G6LC_MUT_VLD_WDATA_INV_PRIO mutation (the pre-fix valid-bit data mux: an all-ways invalidation coinciding with a
-# pending fixup inv_req validates the other ways with the missunit's tag -- must fail WT_MEM_VLD_S2_FOREIGN_VALID).
+# pending fixup inv_req validates the other ways with the missunit's tag -- must fail WT_MEM_VLD_S2_FOREIGN_VALID), the
+# G6LC_MUT_WBUF_FWD_ONE_HOT mutation (S4) and the G6LC_MUT_RD_ACK_DURING_INV mutation (T48: a lookup acknowledged in a
+# fixup inv_req cycle returns a false miss -- must fail WT_MEM_VLD_S5_FALSE_MISS).
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/../../.." && pwd)"
 cd "$ROOT"
@@ -51,5 +53,8 @@ grep -q "WT_MEM_VLD_S2_FOREIGN_VALID\|missunit line write" "$OUT/mut.log" || { e
 build mut2 "+define+G6LC_MUT_WBUF_FWD_ONE_HOT"
 "$OUT/mut2/tb" > "$OUT/mut2.log" 2>&1
 grep -q "WT_MEM_VLD_S4_PARTIAL_FORWARD" "$OUT/mut2.log" || { echo "FAIL mutation G6LC_MUT_WBUF_FWD_ONE_HOT not caught"; tail -5 "$OUT/mut2.log"; exit 1; }
+build mut3 "+define+G6LC_MUT_RD_ACK_DURING_INV"
+"$OUT/mut3/tb" > "$OUT/mut3.log" 2>&1
+grep -q "WT_MEM_VLD_S5_FALSE_MISS" "$OUT/mut3.log" || { echo "FAIL mutation G6LC_MUT_RD_ACK_DURING_INV not caught"; tail -5 "$OUT/mut3.log"; exit 1; }
 set -e
-echo "PASS run-wt-mem-vld (positive, oracle negative, valid-bit mux + single-entry forward mutations caught)"
+echo "PASS run-wt-mem-vld (positive, oracle negative, valid-bit mux + single-entry forward + read-ack-during-inv mutations caught)"

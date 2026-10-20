@@ -19,8 +19,12 @@
 // S3  the explicit inv alone (no missunit write): acked, invalidates its way only
 // S4  (T46) a word held by a fixup entry (8 bytes) and a younger wbuffer entry
 //     (2 bytes): the readout merges byte-wise, young over old over array
-// Pass token: WT_MEM_VLD_PASS. +oracle_negative flips the S2/S4 expectations;
-// G6LC_MUT_VLD_WDATA_INV_PRIO fails S2, G6LC_MUT_WBUF_FWD_ONE_HOT fails S4.
+// S5  (T48) a tag-only lookup requested in a fixup inv_req cycle is not
+//     acknowledged under the valid-bit write (its compare would be killed: a
+//     false miss for a resident line); it is acked the next cycle and hits
+// Pass token: WT_MEM_VLD_PASS. +oracle_negative flips the S2/S4/S5 expectations;
+// G6LC_MUT_VLD_WDATA_INV_PRIO fails S2, G6LC_MUT_WBUF_FWD_ONE_HOT fails S4,
+// G6LC_MUT_RD_ACK_DURING_INV fails S5.
 module tb_g6lc_wt_mem_vld;
   import ariane_pkg::*;
   import wt_cache_pkg::*;
@@ -208,6 +212,37 @@ module tb_g6lc_wt_mem_vld;
              dut.wbuffer_all[0].wtag, dut.wbuffer_all[CVA6Cfg.WtDcacheWbufDepth].wtag, dut.WbufferAllDepth);
     tick();
     d_fixup_wbuffer[0] = '0; d_wbuffer_data[0] = '0; tick();
+
+    // S5 (T48): a tag-only lookup of a resident line requested in the same
+    // cycle as a fixup inv_req for another way. The valid-bit write clears
+    // that cycle's compare (cmp_en), so a lookup acknowledged in it comes back
+    // hit=0 -- a false miss (the L3 boot's wbuffer check: hit=02, hit=02,
+    // hit=00). The lookup must wait for the next cycle and hit.
+    // (ways 0 and 2 hold TAG_A after S3/S4; invalidate way 5, which holds nothing)
+    begin
+      int acked_cycle = -1;
+      d_rd_req[1] = 1; d_rd_tag_only[1] = 1; d_rd_idx[1] = IDX; d_rd_tag[1] = TAG_A;
+      d_inv_req = 1; d_inv_way_oh = 8'h20; d_inv_vld_bits = 8'h01; inv_idx = IDX;
+      tick();                                 // the coincidence cycle
+      #1; if (rd_ack[1]) begin acked_cycle = 0; d_rd_req[1] = 0; end   // one acknowledged read only
+      if (!inv_ack) $fatal(1, "WT_MEM_VLD_S5_INV_NOT_ACKED");
+      d_inv_req = 0;
+      tick();                                 // the lookup is acked now (fix) / its compare runs (pre-fix)
+      #1; if (acked_cycle < 0 && rd_ack[1]) begin acked_cycle = 1; d_rd_req[1] = 0; end
+      if (acked_cycle == 0) begin hit = rd_hit_oh; vld = rd_vld_bits; end
+      tick();                                 // compare of a read acked in the previous cycle
+      #1; if (acked_cycle != 0) begin hit = rd_hit_oh; vld = rd_vld_bits; end
+      if (acked_cycle == 0) begin
+        // acked under the valid-bit write: its result is the false miss
+        if ((hit != 8'h05) != negative)
+          $fatal(1, "WT_MEM_VLD_S5_FALSE_MISS lookup acked in the inv_req cycle returned hit=%h vld=%h for a resident line", hit, vld);
+      end else begin
+        if (acked_cycle < 0) $fatal(1, "WT_MEM_VLD_S5_LOOKUP_NOT_ACKED");
+        if ((hit != 8'h05 || vld != 8'h05) != negative)
+          $fatal(1, "WT_MEM_VLD_S5_HIT hit=%h vld=%h", hit, vld);
+      end
+      d_rd_tag_only[1] = 0; tick();
+    end
 
     $display("WT_MEM_VLD_PASS");
     $finish;

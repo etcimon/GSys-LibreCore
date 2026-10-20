@@ -32,6 +32,9 @@
 //       bypass word with the head's hit vector (G6LC_MUT_FIXUP_SEL_DRIFT
 //       trips the RTL's own `fixup pass acting on an entry other than the one
 //       it tag-checked`; the TB's own-way checks are the second line).
+//   S7  (T48) queue and bypass full, a checked-MISS word ACKed: held until a
+//       slot frees, then pushed, re-checked and written -- not evicted
+//       unpushed (G6LC_MUT_FIXUP_DROP_CHECKED_MISS = the pre-fix hold).
 // Pass token: WT_WBUF_FIXUP_PASS. +oracle_negative flips the verdict.
 // G6LC_MUT_FIXUP_KEEP_SUPERSEDED (the pre-fix queue) survives this shape:
 // B's checked ACK matches the pending entry (fixup_match) and is coalesced
@@ -388,6 +391,40 @@ module tb_g6lc_wt_wbuf_fixup;
       check(dut.gen_fixup_queue.fixup_cnt == 0 && !dut.gen_fixup_queue.fixup_bypass_valid_q && empty,
             "WT_WBUF_FIXUP_S6_DRAINED");
     end
+
+    // S7 (T48): queue AND bypass full, a word whose tag check MISSED is ACKed
+    // -> the ACK must be held until a slot frees (the miss may be false: the
+    // L3 boot's check acknowledged in a valid-bit write cycle), not evicted
+    // unpushed. Once the queue drains the word is pushed, re-checked against
+    // the now-present line and written (G6LC_MUT_FIXUP_DROP_CHECKED_MISS =
+    // the pre-fix hold that covered unchecked words only).
+    rst_n = 0; req_in = '0; wbuf_check_en = 0; fixup_check_en = 0; line_present = 1; wr_ack_en = 1;
+    for (int t = 0; t < CVA6Cfg.DCACHE_MAX_TX; t++) begin pend[t] = 0; pend_cnt[t] = 0; end
+    wlog.delete(); ilog.delete(); tick(); tick(); rst_n = 1; #2;
+    ack_delay = 2;
+    for (int k = 0; k <= CVA6Cfg.WtDcacheFixupDepth; k++) begin   // Depth words + one for the bypass slot
+      store_pa(s6_pa(k), s6_data(k), 8'hff);
+      repeat (4) tick();
+    end
+    repeat (8) tick();
+    check(dut.gen_fixup_queue.fixup_cnt == CVA6Cfg.WtDcacheFixupDepth && dut.gen_fixup_queue.fixup_bypass_valid_q,
+          "WT_WBUF_FIXUP_S7_QUEUE_AND_BYPASS_FULL");
+    // the word under test: checked (miss), then ACKed with nowhere to go
+    line_present = 0; wbuf_check_en = 1; ack_delay = 6;
+    store_pa(s6_pa(CVA6Cfg.WtDcacheFixupDepth + 1), s6_data(CVA6Cfg.WtDcacheFixupDepth + 1), 8'hff);
+    repeat (12) tick();
+    wbuf_check_en = 0;
+    check(writes_of(s6_pa(CVA6Cfg.WtDcacheFixupDepth + 1), s6_data(CVA6Cfg.WtDcacheFixupDepth + 1)) == 0,
+          "WT_WBUF_FIXUP_S7_NOT_WRITTEN_YET");
+    // the line is present from now on; drain the queue
+    line_present = 1; fixup_check_en = 1;
+    repeat (40 * (CVA6Cfg.WtDcacheFixupDepth + 3)) tick();
+    if (writes_of(s6_pa(CVA6Cfg.WtDcacheFixupDepth + 1), s6_data(CVA6Cfg.WtDcacheFixupDepth + 1)) != 1 &&
+        inval_of(s6_pa(CVA6Cfg.WtDcacheFixupDepth + 1)) == 0) begin
+      $display("  S7: the checked-miss word was dropped (writes=%0d invals=%0d)", wlog.size(), ilog.size());
+      check(0, "WT_WBUF_FIXUP_S7_CHECKED_MISS_HELD");
+    end
+    check(empty && dut.gen_fixup_queue.fixup_cnt == 0 && !dut.gen_fixup_queue.fixup_bypass_valid_q, "WT_WBUF_FIXUP_S7_DRAINED");
 
     if (negative) $fatal(1, "ORACLE_NEGATIVE forced");
     $display("WT_WBUF_FIXUP_PASS checked=%0d writes=%0d", checked, wlog.size());
