@@ -697,10 +697,16 @@ PTW-side reads) before reading more RTL. (2) **Spike's ISA string per stage**:
 `FP_REVIEW_SPIKE_ISA` lets a stage that uses an extension the default reference lacks still be
 Spike-exact instead of recorded as an "intentional discrepancy".
 
-Where the climb stands: on the WT `g6lc64_ooo` HEAD (t52) L1 reaches the shell and L3 the OpenWrt
-login prompt and idles to the cap with only the T48 pair outstanding; on the HPDCACHE server1 the
-first `exec` was the wall on every run since T39 — T44 removes it, and the t53 server1 L1 (single
-and 2-hart) is the next verdict.
+| T48 (closed) | as above | **the tag check's false miss**: `wt_dcache_mem` clears `cmp_en` whenever the valid bits are written, but the read arbiter still granted a lookup in a cycle the fixup queue's explicit `inv_req` owned the port — the acknowledged lookup returned `hit=0` for a resident line; the write buffer recorded `checked=1, hit_oh=0`, its ACK wrote nothing, and on a full fixup queue the checked miss was dropped (`wt_check 965 hit=02, 966 hit=02, 967 hit=00`; `wt_ack … fix_push=0`). A load's false miss only refilled duplicate ways (`hit=22`) | no read grant while `inv_req_i` owns the valid-bit port (`rd_port_busy`, as refills already did); `inv_req_o` restated on registers. Holding the checked miss instead deadlocks (t55/t57: the held store keeps the buffer non-empty while the loads that would refill the queue's lines wait on it) — the drop is right once misses are genuine | leaves `tb_g6lc_wt_mem_vld` S5 (mutation `hit=00 vld=05`), `tb_g6lc_wt_wbuf_fixup` S7; t59 (= t53 + fix) battery Spike-exact, `l1h59` to the shell; `l3h59` with the live oracle past retire 540 M at 0 — the t52 pair (933 M / 1.287 G) is the verdict |
+| T50 (open, other track) | committed HEAD hangs at c ≈ 5.88 M on L1 and L3 | a live `MUL` at the scoreboard head never writes back (`issued=1 valid=0`, IQ parked on its destination) — A147 `MultStages = 4` | — | `ooocoh-t54` + `+hang_dump`; HEAD is not boot-qualified, the boot set is t53/t59 |
+
+Where the climb stands: on the WT `g6lc64_ooo` the qualified set (t59 = t52 + T44 + T48) boots L1 to
+the shell; its L3 with the live oracle is replaying the climb to the login prompt with the T48 pair
+as the verdict. On the HPDCACHE `g6lc64_ooo_server1` the first `exec` was the wall on every run
+since T39 — **T44 removes it: the single-hart L1 (`l1s1t`, t53) boots to `G6LC_LINUX_SHELL` with the
+memory oracle at 0 over 320 M retirements, the first HPDCACHE-package shell**, and the 2-hart run
+passes the old `init` segfault to die of the Oct-14 payload's missing `libgcc_s` (the S4.6 payload
+fix never reached the 2-cpu payload); `l1s2u` with a rebuilt payload is the 2-hart verdict.
 
 Method note for T35/T37: the root cause was reached without an FST. The `+stq_trace` event window
 (pushes/commits/cancels/flushes with cycles) put the stale push 28 cycles after an SMT switch and
