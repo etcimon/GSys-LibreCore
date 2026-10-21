@@ -2173,7 +2173,26 @@ prerequisite for this work under the existing dual license. No licensing policy 
   (pre libgcc fix, S4.6) that every 2-hart run so far used; the loader
   now runs far enough to say so, where pre-T44 it segfaulted on an
   unzeroed page first. `linux-payload-l1s2` (2 cpus, fixed initrd) built;
-  `l1s2u` on t53 is the 2-hart verdict (T45/T39).
+  `l1s2u` on t53 is the 2-hart verdict (T45/T39) — it livelocks at
+  2.50 s in a new 2-hart shape (T51); the 2-hart shell is owed behind it.
+- [ ] **T51 — 2-hart `g6lc64_ooo_server1` (t53, the rebuilt 2-cpu payload
+  `linux-payload-l1s2`): hart 1 falls into an S-mode instruction-fetch
+  fault loop at a user address and the boot livelocks at 2.50 s guest
+  (2026-10-21, `l1s2u`).** The console stops mid-line (`jffs2: ve…`,
+  2.504 s); from t=211,040,930 `[ptw-err] vaddr=0x13b90/0x13b98 lvl=0
+  pte=0 instr=1 hart=1 req_hart=1 priv=1 cause=12` repeats — sparse at
+  first (211.0 M, 212.0 M, 219.9 M), then every ≈ 12 cycles (1,479 by
+  254 M cycles); hart 0 stops retiring (112.45 M), hart 1 crawls
+  (77.05 M), `mshr_full=0`, no `[hang]` dump (retirements never pause
+  300 k cycles). An S-mode fetch of a U-page address can only fault, so
+  hart 1's control flow went to a user address while in S-mode — a wrong
+  `sepc`/return path or a corrupted saved PC on the second hart; the
+  same model with the Oct-14 payload (`l1s2t`) ran past this point to
+  8.1 s, so the shape is timing-dependent. Not T39/T44/T45 (those are
+  fixed/benign on this model). Instrument run `l1s2v` (300 M cap, both
+  harts' cycle-stamped RVFI through the live oracle, `+smt_sched_trace`)
+  is in flight for the window before the first fault; the single-hart
+  server1 and every WT ooo run are unaffected.
 - [ ] **T50 — committed HEAD (`ooocoh-t54-ooo-pgo-build`, A146/A147
   `MultStages = 4`) hangs at c ≈ 5.88 M on both the L1 and the L3 payload:
   the scoreboard head is a `MUL` (fu=5 op=94) at `0xffffffff80059fb8`,
