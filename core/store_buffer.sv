@@ -703,9 +703,25 @@ module store_buffer
     automatic logic [CVA6Cfg.XLEN-1:0]     data_m;
     automatic logic [(CVA6Cfg.XLEN/8)-1:0] be_m;
     automatic logic [$clog2(DEPTH_COMMIT)-1:0] cidx;
-    data_m = '0;
-    be_m   = '0;
-    cidx   = '0;
+    // A141 spec_fwd temporaries, declared and defaulted at the block's top:
+    // declared inside the `if (load_paddr_valid_i)` branch they were assigned
+    // on one path only and Verilator inferred latches for them (12 LATCH
+    // warnings on the HEAD builds); the logic is unchanged.
+    automatic logic [DEPTH_SPEC-1:0] ent_match;
+    automatic logic [DEPTH_SPEC-1:0][(CVA6Cfg.XLEN/8)-1:0] cand, win;
+    automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.XLEN-1:0] val;
+    automatic logic younger_writes, any_cand;
+    automatic logic [7:0] byte_v;
+    data_m         = '0;
+    be_m           = '0;
+    cidx           = '0;
+    ent_match      = '0;
+    cand           = '0;
+    win            = '0;
+    val            = '0;
+    younger_writes = 1'b0;
+    any_cand       = 1'b0;
+    byte_v         = '0;
 
     if (load_paddr_valid_i) begin
       for (int unsigned k = 0; k < DEPTH_COMMIT; k++) begin
@@ -744,9 +760,6 @@ module store_buffer
       // the candidate that no younger candidate also writes — the same
       // "last writer in program order wins" the ordered walk implemented.
       begin : spec_fwd
-        automatic logic [DEPTH_SPEC-1:0] ent_match;
-        automatic logic [DEPTH_SPEC-1:0][(CVA6Cfg.XLEN/8)-1:0] cand, win;
-        automatic logic [DEPTH_SPEC-1:0][CVA6Cfg.XLEN-1:0] val;
         for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
           ent_match[i] = speculative_queue_q[i].valid &&
                          spec_visible(speculative_queue_q[i].trans_id) &&
@@ -768,7 +781,6 @@ module store_buffer
         end
         for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin
           for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
-            automatic logic younger_writes;
             younger_writes = 1'b0;
             for (int unsigned j = 0; j < DEPTH_SPEC; j++)
               younger_writes |= spec_older_q[i][j] && cand[j][b];
@@ -776,8 +788,6 @@ module store_buffer
           end
         end
         for (int unsigned b = 0; b < (CVA6Cfg.XLEN / 8); b++) begin
-          automatic logic any_cand;
-          automatic logic [7:0] byte_v;
           any_cand = 1'b0;
           byte_v   = '0;
           for (int unsigned i = 0; i < DEPTH_SPEC; i++) begin

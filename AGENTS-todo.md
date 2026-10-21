@@ -2211,6 +2211,17 @@ prerequisite for this work under the existing dual license. No licensing policy 
   name (sticky `string`) — the periodic `ST_ADDR_MISALIGNED exception`
   lines every 500 k cycles were the S-timer; now `INTERRUPT_<n>` /
   `CAUSE_<n>`.
+- [ ] **A149 — LATCH warnings in the A141 store-buffer forward (HEAD
+  builds, 2026-10-21).** The t54/t60 whole-core builds (Verilator 5.008
+  fork) report 12 `%Warning-LATCH` at `store_buffer.sv` `st_fwd_merge`:
+  the A141 `spec_fwd` temporaries (`ent_match`, `cand`, `win`, `val`,
+  `younger_writes`, `any_cand`, `byte_v`) were declared inside the
+  `if (load_paddr_valid_i)` branch and assigned on that path only (the
+  t59 tree, pre-A141, builds with 38 warnings; HEAD with 52 — the other
+  14 are SPLITVAR/WIDTH notes of the A14x files). Hoisted to the block's
+  top and defaulted unconditionally; the logic is identical. Local 5.020
+  did not flag the original in the `tb_g6lc_stq_cboz` leaf, so the
+  verdict is the next remote whole-core build (warnings 52 → 40 expected).
 - [ ] **A148 — SMT frontend isolation (from T51's window).** (a) An
   in-flight demand fetch of the outgoing hart is translated under the
   incoming hart's context after a coarse switch (one spurious PTW walk,
