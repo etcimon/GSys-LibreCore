@@ -73,6 +73,15 @@ pub fn order_worklist_with_plan(
     policy: &WorklistPolicy,
     plan: Option<&RelocationPlan>,
 ) -> Vec<WorkItem> {
+    if std::env::var("SVT_DEBUG_PORT_STAGE").is_ok() {
+        eprintln!(
+            "DBG order_worklist: {} opportunities, {} port-stage, primary={} multi={}",
+            opportunities.len(),
+            opportunities.iter().filter(|o| o.rationale.starts_with("port-stage")).count(),
+            ranked.primary.len(),
+            ranked.multi_cycle.len()
+        );
+    }
     let primary_by_id: std::collections::BTreeMap<PathId, &TimingPath> =
         ranked.primary.iter().map(|p| (p.id, p)).collect();
     let multi_by_id: std::collections::BTreeMap<PathId, &TimingPath> =
@@ -184,6 +193,49 @@ pub fn order_worklist_with_plan(
         seen.insert(p.id);
     }
 
+    // A149 M12: a port stage sits on the path that ends at the port's
+    // assembly, which is short on its own (the module's cone ends at the net
+    // it reads). Its failure is the cross-module total the opportunity
+    // carries; enqueue it with that slack so the worklist sees the real path.
+    for o in opportunities {
+        if o.kind != OpportunityKind::InsertReg || !o.rationale.starts_with("port-stage") {
+            continue;
+        }
+        if std::env::var("SVT_DEBUG_PORT_STAGE").is_ok() {
+            eprintln!("DBG worklist port-stage path={} seen={} items={}", o.path_id, seen.contains(&o.path_id), items.len());
+        }
+        if seen.contains(&o.path_id) {
+            // the path is already queued with another tool: the port stage,
+            // legal by protocol, takes its place
+            if let Some(item) = items.iter_mut().find(|w| w.path_id == o.path_id) {
+                item.opportunity = Some(o.clone());
+                item.relocation_option_id = Some("t2_port_stage".into());
+            }
+            continue;
+        }
+        let known = ranked
+            .primary
+            .iter()
+            .chain(ranked.multi_cycle.iter())
+            .find(|p| p.id == o.path_id);
+        let (file, line) = known
+            .map(|p| (p.primary_loc.file.clone(), p.primary_loc.start_line))
+            .unwrap_or_else(|| (o.loc.file.clone(), o.loc.start_line));
+        // slack: the cross-module total against a budget this function does
+        // not see; the whole total stands in, so a legal port stage is never
+        // crowded out of the worklist width by in-module paths
+        items.push(WorkItem {
+            path_id: o.path_id,
+            slack_fo4: -o.estimated_fo4_before,
+            total_fo4: o.estimated_fo4_before,
+            opportunity: Some(o.clone()),
+            file,
+            line,
+            relocation_option_id: Some("t2_port_stage".into()),
+        });
+        seen.insert(o.path_id);
+    }
+
     if !policy.skip_multi_cycle {
         for p in &ranked.multi_cycle {
             if seen.contains(&p.id) {
@@ -259,6 +311,16 @@ pub fn order_worklist_with_plan(
                 .then_with(|| a.path_id.cmp(&b.path_id))
         });
     }
+
+    // A149 M12: port stages first, ahead of the cap — the one tool legal by
+    // protocol must not be truncated behind in-module trials.
+    let (mut front, rest): (Vec<WorkItem>, Vec<WorkItem>) = items.into_iter().partition(|w| {
+        w.opportunity
+            .as_ref()
+            .is_some_and(|o| o.kind == OpportunityKind::InsertReg && o.rationale.starts_with("port-stage"))
+    });
+    front.extend(rest);
+    let mut items = front;
 
     // Cap from policy (already design-scaled in run_correct_passes). Soft-atomic
     // PrepStage fills a scaled tail so large atomics get spine staging without
@@ -363,6 +425,11 @@ fn pick_opportunity_default(p: &TimingPath, opportunities: &[Opportunity]) -> Op
         .filter(|o| o.path_id == p.id)
         .filter(|o| sv_timing_core::pass_strategy::trial_allows(trial, o.kind))
         .min_by_key(|o| {
+            // A149 M12: a port stage is the one cut that is legal by protocol
+            // and reaches the cross-module path; it goes first.
+            if o.kind == OpportunityKind::InsertReg && o.rationale.starts_with("port-stage") {
+                return 0u8;
+            }
             // An exact, latency-neutral SelectIncrement beats every other kind:
             // it removes the adder from the cone without touching protocol.
             if prefer_reg {

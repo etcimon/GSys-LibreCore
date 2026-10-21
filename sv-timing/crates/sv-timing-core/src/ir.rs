@@ -27,6 +27,7 @@ pub fn emitted_lower_field_names() -> &'static [&'static str] {
         "fn_bodies",
         "param_override_present",
         "pipe_pragmas_derived",
+        "stage_decls",
         "statement_source",
     ]
 }
@@ -368,6 +369,13 @@ pub struct TimingPath {
     /// Short classification note / evidence.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub class_note: Option<String>,
+    /// `svt-stage` stage of the first comb node on the path (`null` →
+    /// unstaged `-`). A view field, not a closure input.
+    #[serde(default)]
+    pub stage_start: Option<String>,
+    /// `svt-stage` stage of the last comb node on the path.
+    #[serde(default)]
+    pub stage_end: Option<String>,
 }
 
 /// Suggested transform.
@@ -757,6 +765,11 @@ pub struct TimingModule {
     /// distinguished by `PipePragma::derived`, consumed by `InsertReg`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pipe_pragmas: Vec<PipePragma>,
+    /// `svt-stage:` region declarations collected over the module span
+    /// (§19 stage-aware FO4 view). Additive metadata — the node→stage map
+    /// is computed at report time from node locs, not stored in the IR.
+    #[serde(default, skip_serializing_if = "crate::stage_pragma::ModuleStages::is_empty")]
+    pub stage_decls: crate::stage_pragma::ModuleStages,
     /// Source span of module header.
     pub loc: SourceLoc,
 }
@@ -1037,6 +1050,19 @@ pub struct TimingDesign {
 }
 
 impl TimingDesign {
+    /// Every instance of the design: the flat graph when it was populated,
+    /// otherwise the per-module mirrors (a design rehydrated from the cache
+    /// or a host JSON may carry only those).
+    pub fn all_instances(&self) -> Vec<&ModuleInstance> {
+        if !self.instances.is_empty() {
+            return self.instances.iter().collect();
+        }
+        self.modules
+            .values()
+            .flat_map(|m| m.instances.iter())
+            .collect()
+    }
+
     /// Empty design with target.
     pub fn empty(target: TimingTarget) -> Self {
         Self {

@@ -319,6 +319,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),

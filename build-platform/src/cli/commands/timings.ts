@@ -827,6 +827,7 @@ export const timingsCommand: Command = {
       const result = await runRtlTiming(ctx, {
         target,
         top: flagStr(args.flags, "top"),
+        flist: flagStr(args.flags, "flist"),
         liberty: flagStr(args.flags, "liberty"),
         platform: flagStr(args.flags, "platform"),
         clockPort: flagStr(args.flags, "clock-port") ?? "clk_i",

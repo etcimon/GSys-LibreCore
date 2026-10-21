@@ -61,7 +61,10 @@ preprocessing and reviewed engineering knowledge, not an autonomous learner.
 
 An explicit `cut-ok` naming an unresolved domain must refuse the cut, never
 degrade to an uncarried stage. Likewise `require-contract` needs a resolved
-domain at a permitted anchor. Latency checks use exact parameter names;
+domain at a permitted anchor. An over-budget `cycle` cone permits the
+intermediate nodes of that cone (`cone_cut_permission`, A148); the launch
+`q` and any other `no-cut` stay locked. Latency checks use exact parameter
+names;
 qualified names must not fall back to an unrelated unqualified parameter.
 When source depth follows the published parameter, increasing that parameter
 does not authorize an extra tool-inserted stage.

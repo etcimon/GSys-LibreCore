@@ -431,9 +431,14 @@ against `-O2` (`4 / 1 / cost-balanced / 1 / 2 / balanced`) at the same operating
 | 4000 MHz, 20 ps, `-O2` | 928 | false 2086.6 | 503.1 | 99.4 |
 | 4000 MHz, 20 ps, **`-O3`** | **1091** | false 2086.6 | 503.1 | **99.4** |
 
-163 extra edits, identical outcome. **Raising passes / worklist width / multi-cut does not
-move the emitted critical path**, because the limiting cones are `AtomicOverBudget` and no
-cut strategy reaches inside an indivisible operator.
+163 extra edits, identical outcome. On that measurement, raising passes,
+worklist width, and the shared stage cap did not move the emitted critical
+path: the limiting cones were `AtomicOverBudget`, and no cut strategy
+reaches inside an indivisible operator. A separable cone is different.
+A148 gives that cone its own cut count, `ceil(FO4 / budget) − 1` up to
+16, and emits one stage per admitted anchor. The reparse of
+`cone_budget` (60 structural FO4, seven stages) reads 8.0 and 4.0 FO4.
+An atomic multiply or a 64-bit add is still the floor inside its segment.
 
 ### The actionable output for a high target is the T3 stage count
 

@@ -16,6 +16,153 @@ Live tracker for **this package only**. Read [`AGENTS.md`](AGENTS.md) and
 - [ ] 10 adjusted FO4 per stage is physically out of reach on this platform
   (flop overhead 0.13–0.18 of 0.214 ns); the agreed stage target is ~1.0 ns.
 
+## A150 — hyp8 redesign trees (8 FO4 / 5 GHz nameplate) — draft landed, bring-up owed
+
+- [x] Fresh core + APU emits at `--target-mhz 5000 --fo4-ps 20 --budget-margin 0.2`
+  (provenance: `build-platform/workspace/build/sv-timing/hyp8-src/`); boards,
+  ledgers, materialized identity-free trees under `build-platform/workspace/hyp/`.
+- [x] Analyses + cut-minimization protocol; ten rewrite groups; `g6lc_soc` top;
+  decisions (130 rows), coverage (every module has a mode), boot hazards H1–H28.
+  REVIEW A150; `AGENTS-configuration.md` §1.0/§1.0c carry the target of record.
+- [ ] Bring-up (not started; nothing linted/simulated): Verilator lint of
+  `Flist.g6lc_hyp8` and `Flist.hyp8_apu`, then the hazard register in order
+  (H1 drain, H3/H21 replay, H10 staggered ALU classes, H14 CSR side effects,
+  H20 cancel window), then OpenSBI on `g6lc_soc`, then Linux.
+- [x] Port stage at `--all-modules`: root cause = the S4 re-sort dropped the
+  port-stage-first partition behind the idle limit; fixed in `pass.rs`
+  (port stages first), whole-core re-run lands it (`hyp8-src/emit/core-8fo4-ps`,
+  edits 238, unverified 0). REVIEW A150b.
+- [x] Calibration refit under delay-v44 (`hyp8-src/inputs/fo4-calibration-v44.json`):
+  slope 0.992, register-launch intercept 12.0 FO4 (> the 8-FO4 cycle on
+  Nangate45) — recorded in REVIEW A150b; use it with `--calibration` for the
+  next hyp8 board.
+- [x] Predictor group (tage/tage_table/statcor/ittage/bp_loop/ghist) internals
+  staged (P1 index/hash, P2 read/vote, registered verdict) — decisions OIP rows.
+- [x] Replay for speculative wakeup wired (LSQ wait/violation + D$ miss → IQ
+  re-arm), perf events wired, next-line read-ahead narrowed, DMI/DM boundary
+  registers — boot-hazards H3/H5/H21/H27 WIRED, H29 added.
+- [x] `svt-stage` stage-aware FO4 view (PIPELINE-PRAGMAS §19): pragma parse
+  (begin/end cycles/window/after, order, use…on=), node→stage side table,
+  `stages`/`stage_users` report + per-path `stage_start`/`stage_end`,
+  `analyze/correct --stages` table + `--stages-json`, fixture
+  `auto_correct/stage_pragmas.sv`, 3 unit tests. No ir-v bump.
+- [x] `svt-stage` bubble-up (§19.1): `class <stage> decision|value` pragma,
+  output-net reader walk in-module + `carry_over` parent-side, decision/value
+  classification (pragma > recurrence > readiness heuristic > value),
+  throughput/async/replicate/elastic absorption, drag/covered/absorbed
+  verdicts + `svt-pipe: cycle` collide lines; `stage_bubbles` in analyze/
+  correct JSON and `--stages` lines. Fixture `stage_bubbles.sv`, 2 tests.
+- [x] `svt-stage: absorb <stage> by=<mech> [cond=<text>]` (§19.1): declared
+  architectural covers for decision-class stages (spec-wakeup, read-ahead,
+  elastic, replicate, async, throughput) — verdict `absorbed` with
+  `cover={by,cond,verified}` on the stage bubble, readers still listed,
+  `unverified-cover` finding when the IR cannot see the precondition
+  (lat-class/wakeup vocabulary for spec-wakeup, indexed-register D for
+  read-ahead, the matching `svt-pipe` contract for the contract covers).
+  Fixture A1/A2 rows in `stage_bubbles.sv`, 1 new test.
+- [ ] Declare `throughput … accept=` / `async … cycles=` / `replicate` on the new
+  seams and run `analyze`/the bottleneck trace on `Flist.g6lc_hyp8` — needs
+  the tree to parse (bring-up track; nothing linted yet).
+
+## A149 — Cut surface, carry-over, experimental dial
+
+- [x] `--cycle-cuts experimental`: the A148b capacity refusal becomes an
+  `[UNVERIFIED: …]` label on the stage and `boot_validity` in the JSON;
+  default `refuse`.
+- [x] `carry_over.rs`: parent-side readers of a staged output through the
+  instance graph (flop / comb / parent output; `feeds_back`,
+  `propagates_up`) with the adaptation verdict. `correct.json` → `carry_over`.
+- [x] `cut_surface.rs`: per procedural loop holding an over-budget cone —
+  block-locals to hoist, indexed writes, loop-carried names, defaults
+  written outside the loop; verdict. `correct.json` → `cut_surface`.
+- [x] Probe (`a149-probe-exp`): 13 unlocked plans all refused by A123
+  alignment, the area gate or block-local anchors; no stage lands.
+- [x] A149b balance: side reads of stable sources (inputs, registers, nets
+  derived only from them off the plan) are carried instead of refused
+  (`balanceable_side_read`, trace `pipe_contract.balance`); typed ports
+  keep their type on the stage copies (`carry_typed_port`). New checks:
+  off-path readers of a cut net; alignment parses RHS text when the
+  expression is absent (spine nodes). `propagation[]` in `correct.json`
+  (`carry_over::propagation_plan`): delay-capture / stage-comb /
+  propagate-port / blocked-feedback walk with a verdict.
+- [x] Probe (`a149-probe-bal2`, 12 modules, experimental): balance carries
+  land on branch_unit/ex_stage/memdep/store_buffer plans, which are then
+  refused by off-path readers (`spec_ins_oh` read by the write pointer,
+  `jump_base` by `target_address`) or chain-derived tails; emit valid; no
+  register lands. The pre-balance probe had emitted 6 UNVERIFIED stages and a
+  branch_unit file that did not parse (`type(p)'(copy).cf`).
+- [x] A149c M13 `observer_only` (debug/RVFI taps read a cut net late, not a
+  refusal; trace `pipe_contract.observer`) and M1 `carry_from` balance lines
+  (`alignment_balance`; `stage_for` per-stage carries; the
+  `pipe_contract_side` fixture lands balanced, lint clean). Probe
+  `a149-probe-m1`: balance fires on branch_unit/store_buffer; next obstacles
+  are block-local `instr_pc`, the queue write loop, `rs2_forwarding`.
+- [x] Emitter: an InsertReg whose origin cannot be rewritten is not emitted
+  (marker comment); CLI → `boot_validity.unemitted_stages`.
+- [x] A149d M7 `hint <dom> verified-by=<sig>` (advisory domain; capacity rule
+  waived; `[HINT …]` rationale; `g6lc_memdep` declares it). M3/M4 as a plan:
+  `propagation[]` steps carry guards; `retimable` + `moved_registers` when
+  the frontier is pure same-class captures. Probe `a149-probe-m7`: hint
+  admitted, stage unemitted (procedural indexed origin), lint PASS.
+- [x] A149e M12 `protocol … ready=`: elastic stages (`_en` chain, enabled
+  captures, flush/kill), producer ready reads rewired incl. capture guards
+  (`rewire_condition_line`, header lookup); fixture `pipe_elastic.sv`, lint
+  clean. M6 as a plan: `latency_update` → `boot_validity.latency_updates`.
+- [ ] Remaining, in order: M2 (move an off-path reader after the stage,
+  follow its readers), apply M4 across files (delete parent flops, stage the
+  child; reset shadow, carried enable), M5 (slot reservation co-emit into
+  issue_read_operands/IQ; precedent `fus_busy` for mult), M6 co-emission
+  (param + `check_cfg` range in the emitted config package), M8 (`checked`
+  bit before commit), M9 (`conservative <sig> safe=` one-sided bypass, as a
+  `_prepared` source preparation like row-local), M12 registered-ready skid.
+- [ ] Declare `ready=` where the protocol has one (dcache/icache request
+  ports, frontend→instruction queue) and measure the elastic stage on the
+  board; the probe modules have none.
+- [ ] Loop-to-generate / always_ff split refactors: not applied. Each
+  iteration must own its element's default (second always_comb driver),
+  loop-carried chains forbid independent iterations, and a legal home does
+  not make a recurrence cut boot-valid. PIPELINE-PRAGMA-REVIEW A149.
+
+## A148 — Cone budget and contract unlock
+
+- [x] `budget_fit_cuts`: each path asks for `ceil(FO4 / budget) − 1`,
+  capped at 16. The stage dial raises that cap and does not lower it.
+- [x] `cone_cut_permission` unlocks intermediate nodes on an over-budget
+  `cycle` `q`→`d` cone, including a nameless spine node. Launch `q` and
+  other `no-cut` names stay locked. `cut-ok` still wins over `no-cut` on
+  the same name. `path_names` matches an RHS read.
+- [x] An over-budget `cycle step` may take InsertReg. The same note plus
+  a P10 handshake or an indexed restore stays BalanceField.
+- [x] `cone_budget` emit: 60 structural FO4, seven `pipe_svt_p*` stages,
+  reparse segments 8.0 and 4.0, step 4.0 within budget. Verilator 5.020
+  `--lint-only -Wall -Wno-fatal` exit 0. `valid_o` stayed on `valid_q`.
+  `max_path_fo4_after` stayed 60 (in-pass IR max).
+- [x] Docs: ALGORITHMS-EXPERTS A148, PIPELINE-PRAGMAS §18, dial 4,
+  PASS-STRATEGY, FREQUENCY-CLOSURE, DESIGN, PIPELINE-PRAGMA-REVIEW.
+  A147 remains the delay-v44 rungs. The old "set MultStages = base+1"
+  latency text now matches `check_latency`.
+- [ ] Delay-v44 structural readings are not refit through this cut count.
+  A full-core corrected tree with these cuts is not regenerated.
+- [x] A148b boot validity: `cycle_capacity_refusal` — a cycle cone takes at
+  most `steps − 1` registers, only when `hold` gates the launch register
+  (`hold_gates_launch`); `steps=1` takes none (a register in a single-cycle
+  recurrence changes the machine). A within-budget step no longer takes
+  the module's other paths off the board (on `a148` it had hidden 210
+  over-budget paths: wbuffer 121, shared_tlb 84, way_predictor 5).
+  PIPELINE-PRAGMA-REVIEW A148b.
+- [x] `a148f-ooo-fo4-10`: the user's command with the guards — no tool
+  register (every cycle plan refused with its reason), 238 latency-neutral
+  edits, honest board (wbuffer 160.6, lsq 216.9, iq 156.0), lint PASS,
+  remote harness built through the emit overlay
+  (`work-ver-ooo-a148f-emit`); soak refused by the overlap guard.
+- [x] Restored: a row staged by an applied representation boundary stays
+  locked even when the authored `cut-ok` names it (`PipeContract::applied`;
+  the cache round-trip test had been failing).
+- [ ] The 49 `steps=1` cycle lines in `core/` authorize no stage. The
+  cones that set the clock (iq, lsq, wbuffer, scoreboard, rename) are
+  single-cycle recurrences in procedural loops; their boot-valid stages are
+  the RTL routes (A145, RTL-PIPELINE-PLANS), not tool cuts.
+
 ## A147 — RTL toward the delay-v44 worst, over the preprocessed pipelining
 
 - [x] delay-v44: compose links reads to reaching definitions (rename 234.9 →

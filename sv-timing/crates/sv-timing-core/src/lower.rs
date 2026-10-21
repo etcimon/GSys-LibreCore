@@ -121,6 +121,9 @@ pub fn lower_unit(unit: &ParsedUnit, opts: &LowerOptions) -> CoreResult<AnalyzeO
     crate::measure::compose_reg_to_reg_paths(&mut design);
     // Cross-module paths need classification; local paths already classified.
     crate::measure::remeasure_path_slacks(&mut design);
+    // svt-stage: annotate stage_start/stage_end on every path (the
+    // stage-aware FO4 view; no closure semantics change).
+    crate::stage_pragma::annotate_paths(&mut design);
     design.versions.cost_model = opts.cost_model.id.clone();
 
     Ok(AnalyzeOutput {
@@ -488,6 +491,12 @@ fn lower_file(
                 &scope.loc,
                 &scope_end_byte(tree, li, &path_str, scope.nodes.iter().cloned()),
             ),
+            stage_decls: crate::stage_pragma::collect_stage_pragmas(
+                &file.bytes,
+                &path_str,
+                &scope.loc,
+                &scope_end_byte(tree, li, &path_str, scope.nodes.iter().cloned()),
+            ),
             loc: mod_loc,
         };
         let dead_generate = constant_generate_dead_spans(
@@ -718,6 +727,8 @@ fn lower_file(
                 path_class: crate::path_class::PathClassKind::Plain,
                 total_fo4_raw: None,
                 class_note: None,
+            stage_start: None,
+            stage_end: None,
             });
         }
 
@@ -1848,6 +1859,9 @@ fn collect_pipe_pragmas(
                 | "cut-ok"
                 | "latency"
                 | "cycle"
+                | "hint"
+                | "throughput"
+                | "replicate"
                 | "representation"
                 | "row-local"
                 | "row-local-applied"

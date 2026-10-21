@@ -66,6 +66,8 @@ export interface RtlTimingOptions {
   target: string;
   /** Synthesis top (default verify.synthTopByTarget / verify.top). */
   top?: string;
+  /** Manifest override (default verify.flist). Repo-relative; used to map a non-stock tree such as the hyp8 workspace material. */
+  flist?: string;
   /** Liberty .lib (default: physicalDesign.pdk.liberty, CVA6_LIBERTY, then the platform library). */
   liberty?: string;
   /** Fork test platform for the study liberty (default soc.process when it is one). */
@@ -880,7 +882,7 @@ async function refreshWidthMapRemote(
   const id = "s0-width-map";
   const paths = edaPaths(ctx);
   const manifest = writeFlatManifest(ctx, paths, opts.target, {
-    outSubdir: "sta-rtl", outTag: `${opts.target}-live`, replaceFiles: sramStubSubstitution(ctx, opts),
+    outSubdir: "sta-rtl", outTag: `${opts.target}-live`, flist: opts.flist, replaceFiles: sramStubSubstitution(ctx, opts),
   });
   let flist: string;
   try {
@@ -964,7 +966,7 @@ async function runLocal(
 
   const manifest = writeFlatManifest(ctx, paths, opts.target, {
     outSubdir: "sta-rtl", outTag: opts.target, emitFlist: pre.emitFlist,
-    replaceFiles: sramStubSubstitution(ctx, opts),
+    flist: opts.flist, replaceFiles: sramStubSubstitution(ctx, opts),
   });
   const result: RtlTimingResult = {
     ok: false, outDir: posixPath(outDir), target: opts.target, top, liberty: posixPath(liberty), stages,
@@ -1105,7 +1107,7 @@ async function runRemote(
   }
   const manifest = writeFlatManifest(ctx, paths, opts.target, {
     outSubdir: "sta-rtl", outTag: opts.target, emitFlist: pre.emitFlist,
-    replaceFiles: sramStubSubstitution(ctx, opts),
+    flist: opts.flist, replaceFiles: sramStubSubstitution(ctx, opts),
   });
   let flist: string;
   try {

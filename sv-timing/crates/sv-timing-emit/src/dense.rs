@@ -678,6 +678,25 @@ fn dense_pipe_block(
             ));
             continue;
         }
+        // A149: a stage whose origin could not be rewritten (block-local or
+        // loop-index feed, a non-assign origin) would be a register fed
+        // `svt_zero` that nothing reads — a dead sidecar carrying IR credit.
+        // Under real feeds it is not emitted at all; the marker lets the CLI
+        // void the credit.
+        if opts.real_cut_feeds {
+            let unfed = cuts
+                .iter()
+                .find(|c| c.pipe_name == name)
+                .map_or(true, |c| c.line == 0 && c.rhs.trim() == "'0");
+            if unfed {
+                b.push_str(&format!(
+                    "  // sv-timing: stage {name} (InsertReg #{}) not emitted: origin feed unresolved (block-local, loop index or non-assign origin); IR credit void
+",
+                    r.id
+                ));
+                continue;
+            }
+        }
         stage_names.push(name.clone());
         // Real feeds: the rewritten origin reads the pipe wherever it is — a
         // procedural `lhs = pipe;` in its always block, an or-reduce prep in a
@@ -690,6 +709,11 @@ fn dense_pipe_block(
         // emitted file states what the stage samples and why it is legal.
         let bundle_decls = r.pipe_stage.as_ref().map(|st| {
             let (v, id) = sv_timing_core::pipe_contract::stage_nets(&name);
+            let en_decl = if st.ready.is_some() {
+                format!("  logic {name}_en; // elastic stage enable (A149 M12)\n")
+            } else {
+                String::new()
+            };
             let mut d = format!(
                 "  // svt-pipe: stage {} of `{}` (InsertReg #{}): valid<={} & ~{}, id<={}{}{}\n",
                 st.stage,
@@ -711,6 +735,7 @@ fn dense_pipe_block(
             d.push_str(&format!(
                 "  logic {v}; // staged valid (killed at each stage and at use)\n"
             ));
+            d.push_str(&en_decl);
             if !st.id_src.is_empty() {
                 match st.id_width {
                     Some(w) => d.push_str(&format!("  logic [{w}-1:0] {id}; // staged id\n")),
@@ -719,11 +744,23 @@ fn dense_pipe_block(
             }
             for (k, c) in st.carry_src.iter().enumerate() {
                 let net = carry_net_for(&name, k, st);
+                // A149: a typed port keeps its type on every stage copy, named
+                // from the port itself (declared before the module body).
+                let typed_port = st.carry_typed_port.get(k).copied().unwrap_or(false);
+                let orig = st.carry_sigs.get(k).map(String::as_str).unwrap_or(c);
                 match st.carry_widths.get(k).copied().flatten() {
-                    Some(w) => {
-                        d.push_str(&format!("  logic [{w}-1:0] {net}; // carried side-band\n"))
-                    }
-                    None => d.push_str(&format!("  var type({c}) {net}; // carried side-band\n")),
+                    Some(_) if typed_port => d.push_str(&format!(
+                        "  var type({orig}) {net}; // carried side-band (typed port)
+"
+                    )),
+                    Some(w) => d.push_str(&format!(
+                        "  logic [{w}-1:0] {net}; // carried side-band
+"
+                    )),
+                    None => d.push_str(&format!(
+                        "  var type({c}) {net}; // carried side-band
+"
+                    )),
                 }
             }
             d
@@ -791,6 +828,8 @@ fn dense_pipe_block(
                 .any(|tok| tok.starts_with("temp_") || tok == "temp_status");
             let use_real = opts.real_cut_feeds
                 && crate::rhs::rhs_structurally_complete(rhs)
+                && !crate::rhs::rhs_is_initializer(rhs)
+                && !rhs.trim().starts_with("pipe_svt_")
                 && !loopish
                 && !gen_local
                 && !refs_auto;
@@ -813,7 +852,10 @@ fn dense_pipe_block(
                         "  assign {name}_c = ({rhs}); // cut feed (origin rhs)\n"
                     )),
                 }
-            } else if i == 0 {
+            } else {
+                // Unsafe or initializer feeds stay zero. They are not wired
+                // to the previous stage: a lean chain made every later LHS
+                // sample the first cut's constant.
                 match typed_in_late(name) {
                     Some(l) => b.push_str(&format!(
                         "  assign {name}_c = type({l})'(svt_zero); // cut feed (lean zero / unsafe rhs)\n"
@@ -822,9 +864,6 @@ fn dense_pipe_block(
                         "  assign {name}_c = svt_zero; // cut feed (lean zero / unsafe rhs)\n"
                     )),
                 }
-            } else {
-                let prev = &stage_names[i - 1];
-                b.push_str(&format!("  assign {name}_c = {prev}; // lean chain\n"));
             }
         } else if i == 0 {
             match typed_in_late(name) {
@@ -836,8 +875,14 @@ fn dense_pipe_block(
                 )),
             }
         } else {
-            let prev = &stage_names[i - 1];
-            b.push_str(&format!("  assign {name}_c = {prev};\n"));
+            match typed_in_late(name) {
+                Some(l) => b.push_str(&format!(
+                    "  assign {name}_c = type({l})'(svt_zero); // cut feed (unresolved)\n"
+                )),
+                None => b.push_str(&format!(
+                    "  assign {name}_c = svt_zero; // cut feed (unresolved)\n"
+                )),
+            }
         }
     }
     for name in &split_names {
@@ -885,6 +930,24 @@ fn dense_pipe_block(
 
     // --- sequential stages OR comb-only staging when no clock in module ---
     if !stage_names.is_empty() {
+        // A149 M12: elastic enables. Stage k accepts when it is empty or the
+        // stage after it (the consumer's ready for the last) accepts.
+        for name in &stage_names {
+            let Some(st) = stage_by_name.get(name).filter(|st| st.ready.is_some()) else {
+                continue;
+            };
+            let (v, _) = sv_timing_core::pipe_contract::stage_nets(name);
+            let next = stage_by_name
+                .iter()
+                .find(|(n, s)| {
+                    s.domain == st.domain && s.stage == st.stage + 1 && stage_names.contains(*n)
+                })
+                .map(|(n, _)| format!("{n}_en"))
+                .unwrap_or_else(|| st.ready.clone().unwrap_or_default());
+            b.push_str(&format!(
+                "  assign {name}_en = ~{v} | {next}; // elastic stage: accept when empty or draining\n"
+            ));
+        }
         if seq {
             b.push_str(
                 "  // --- sequential stages (posedge+negedge, named begin : svt_pipe_ff) ---\n",
@@ -912,6 +975,42 @@ fn dense_pipe_block(
             }
             b.push_str("    end else begin : svt_capture\n");
             for name in &stage_names {
+                // A149 M12: an elastic stage captures only when enabled
+                // (empty, or draining into the next stage / the consumer);
+                // a flush clears its valid regardless, and an operation held
+                // in it is still killed by a cancellation against its id.
+                if let Some(st) = stage_by_name.get(name).filter(|st| st.ready.is_some()) {
+                    let (v, id) = sv_timing_core::pipe_contract::stage_nets(name);
+                    let kill_now = if st.id_src.is_empty() {
+                        st.kill_expr.clone()
+                    } else {
+                        st.kill_expr.replace(&st.id_src, &id)
+                    };
+                    if let Some(f) = &st.flush {
+                        b.push_str(&format!("      if ({f}) {v} <= 1'b0;\n"));
+                        b.push_str(&format!("      else if ({name}_en) begin\n"));
+                    } else {
+                        b.push_str(&format!("      if ({name}_en) begin\n"));
+                    }
+                    b.push_str(&format!("        {name} <= {name}_c;\n"));
+                    b.push_str(&format!(
+                        "        {v} <= {} & ~{};\n",
+                        st.valid_src, st.kill_expr
+                    ));
+                    if !st.id_src.is_empty() {
+                        b.push_str(&format!("        {id} <= {};\n", st.id_src));
+                    }
+                    for (k, c) in st.carry_src.iter().enumerate() {
+                        b.push_str(&format!("        {} <= {c};\n", carry_net_for(name, k, st)));
+                    }
+                    b.push_str("      end");
+                    if kill_now.trim() != "1'b0" && !kill_now.trim().is_empty() {
+                        b.push_str(&format!(" else if ({kill_now}) {v} <= 1'b0;\n"));
+                    } else {
+                        b.push('\n');
+                    }
+                    continue;
+                }
                 // A typed pipe takes the direct capture: svt_pipe_mux is
                 // logic-vector typed.
                 if scaffold && typed_in_late(name).is_none() {
@@ -950,9 +1049,15 @@ fn dense_pipe_block(
             b.push_str("  end\n");
             // Proof obligations of the contract, fenced from synthesis: a
             // killed or flushed operation never stands valid in a stage.
-            if !stage_by_name.is_empty() {
+            // Only the stages that were emitted (an unfed stage has no nets).
+            let asserted: Vec<(&String, &&sv_timing_core::pipe_contract::PipeStage)> =
+                stage_by_name
+                    .iter()
+                    .filter(|(name, _)| stage_names.contains(*name))
+                    .collect();
+            if !asserted.is_empty() {
                 b.push_str("  //pragma translate_off\n");
-                for (name, st) in &stage_by_name {
+                for (name, st) in asserted {
                     let (v, id) = sv_timing_core::pipe_contract::stage_nets(name);
                     let kill_now = if st.id_src.is_empty() {
                         st.kill_expr.clone()

@@ -639,6 +639,7 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
             branch_arms: Default::default(),
             launch_fo4: Default::default(),
             loc: loc(),
@@ -671,6 +672,8 @@ mod tests {
             path_class: class,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         }
     }
 

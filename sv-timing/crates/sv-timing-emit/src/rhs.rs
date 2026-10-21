@@ -1319,6 +1319,17 @@ pub fn snippet_refs_late_declared_local(
     false
 }
 
+/// An initializer is not a pipeline cut. Sampling `'0` or `1'b0` one cycle
+/// later and leaving the real assignment unread is how `idx_is_d` became a
+/// stuck zero in the fetch queue.
+pub fn rhs_is_initializer(rhs: &str) -> bool {
+    let t: String = rhs.chars().filter(|c| !c.is_whitespace()).collect();
+    matches!(
+        t.as_str(),
+        "'0" | "'1" | "'x" | "'z" | "1'b0" | "1'b1" | "1'bx" | "0"
+    ) || t.starts_with("'{default:")
+}
+
 /// True when text likely references free generate-loop indices (module-scope illegal).
 pub fn has_free_gen_index(text: &str) -> bool {
     let bytes = text.as_bytes();
@@ -1441,7 +1452,6 @@ pub fn cut_assigns_from_source_ex(
     let mut out = Vec::new();
     let mut claimed_lines: std::collections::BTreeSet<u32> = std::collections::BTreeSet::new();
     let mut claimed_lhs: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
-    let mut prev_pipe: Option<String> = None;
 
     let line_count = source.lines().count() as u32;
 
@@ -1464,6 +1474,7 @@ pub fn cut_assigns_from_source_ex(
             if let Some((lhs, rhs, nba, end)) = parse_assign_multiline(source, origin_line, 8) {
                 let lhs_ok = !has_free_gen_index(&lhs) && lhs_is_module_level_net(source, &lhs);
                 if rhs_structurally_complete(&rhs)
+                    && !rhs_is_initializer(&rhs)
                     && !rhs_is_comma_assign_list(&rhs)
                     && lhs_ok
                     && !claimed_lhs.contains(&lhs)
@@ -1501,7 +1512,10 @@ pub fn cut_assigns_from_source_ex(
                 let Some((lhs, rhs, nba, end)) = parse_assign_multiline(source, line_no, 8) else {
                     continue;
                 };
-                if !rhs_structurally_complete(&rhs) || rhs_is_comma_assign_list(&rhs) {
+                if !rhs_structurally_complete(&rhs)
+                    || rhs_is_initializer(&rhs)
+                    || rhs_is_comma_assign_list(&rhs)
+                {
                     continue;
                 }
                 if has_free_gen_index(&lhs) || !lhs_is_module_level_net(source, &lhs) {
@@ -1529,27 +1543,14 @@ pub fn cut_assigns_from_source_ex(
             }
         }
 
-        // --- chain to previous pipe (shared origin or no assign nearby) ---
+        // An unclaimed cut is not chained onto the previous pipe. That chain
+        // rewrote `idx_is_d` to a register whose feed was the initializer.
         if claimed.is_none() {
-            if let Some(prev) = prev_pipe.clone() {
-                claimed = Some(CutAssign {
-                    line: 0, // no origin rewrite
-                    end_line: 0,
-                    lhs: String::new(), // no sink
-                    rhs: prev,
-                    nonblocking: false,
-                    pipe_name: pipe.clone(),
-                    edit_id: r.id,
-                    continuous: false,
-                });
-            }
+            continue;
         }
 
         if let Some(c) = claimed {
-            prev_pipe = Some(c.pipe_name.clone());
             out.push(c);
-        } else {
-            prev_pipe = Some(pipe.clone());
         }
     }
     out
@@ -2888,6 +2889,48 @@ pub fn rewrite_pipe_consumers(source: &str, trace: &EditTrace) -> (String, PipeE
     if by_line.is_empty() {
         return (source.to_string(), exports);
     }
+    // A149 M12: a rewire whose signal is read in the *guard* of the targeted
+    // statement (`else if (ready_i || !valid_q) begin` above `valid_q <= …`)
+    // names the statement's line, where the identifier does not occur. Move
+    // it to the nearest enclosing header above (within six lines) that reads
+    // the identifier, so the condition itself is rewired.
+    let src_lines: Vec<&str> = source.lines().collect();
+    let mut moved: Vec<(u32, (String, String, u32))> = Vec::new();
+    for (line_no, rewires) in &by_line {
+        let Some(text) = src_lines.get((*line_no as usize).wrapping_sub(1)) else {
+            continue;
+        };
+        for rw in rewires {
+            if ident_set(text).contains(&rw.0) {
+                continue;
+            }
+            for back in 1..=6u32 {
+                let Some(k) = line_no.checked_sub(back + 1) else {
+                    break;
+                };
+                let Some(h) = src_lines.get(k as usize) else {
+                    break;
+                };
+                let ht = strip_line_comment(h);
+                let tt = ht.trim_start();
+                let header = tt.starts_with("if")
+                    || tt.starts_with("else if")
+                    || tt.starts_with("end else if")
+                    || tt.contains(" if (")
+                    || tt.contains(" if(");
+                if header && ident_set(ht).contains(&rw.0) {
+                    moved.push((k + 1, rw.clone()));
+                    break;
+                }
+            }
+        }
+    }
+    for (line_no, rw) in moved {
+        let e = by_line.entry(line_no).or_default();
+        if !e.iter().any(|x| x.0 == rw.0) {
+            e.push(rw);
+        }
+    }
     let mut out = String::with_capacity(source.len() + 256);
     for (i, line) in source.lines().enumerate() {
         let line_no = (i + 1) as u32;
@@ -2933,10 +2976,14 @@ pub fn rewrite_pipe_consumers(source: &str, trace: &EditTrace) -> (String, PipeE
                         ));
                     }
                     _ => {
-                        out.push_str(line);
+                        out.push_str(&rewire_condition_line(line, rewires));
                         out.push('\n');
                     }
                 }
+            }
+            Some(rewires) => {
+                out.push_str(&rewire_condition_line(line, rewires));
+                out.push('\n');
             }
             _ => {
                 out.push_str(line);
@@ -2945,6 +2992,66 @@ pub fn rewrite_pipe_consumers(source: &str, trace: &EditTrace) -> (String, PipeE
         }
     }
     (out, exports)
+}
+
+/// A149 M12: a consumer rewire whose line is not an assignment but an
+/// `if (…)` / `else if (…)` / `case (…)` header — the enable of a producer
+/// register (`end else if (ready_i || !valid_q) begin`). The substitution
+/// is applied inside the header's parentheses only, as whole identifiers;
+/// any other line is returned unchanged.
+fn rewire_condition_line(line: &str, rewires: &[(String, String, u32)]) -> String {
+    let code_end = line.find("//").unwrap_or(line.len());
+    let (code, comment) = line.split_at(code_end);
+    let t = code.trim_start();
+    let is_header = t.starts_with("if")
+        || t.starts_with("else if")
+        || t.starts_with("end else if")
+        || t.starts_with("case")
+        || t.contains(" if (")
+        || t.contains(" if(");
+    if !is_header {
+        return line.to_string();
+    }
+    let Some(open) = code.find('(') else {
+        return line.to_string();
+    };
+    let mut depth = 0i32;
+    let mut close = None;
+    for (k, c) in code[open..].char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    close = Some(open + k);
+                    break;
+                }
+            }
+            _ => {}
+        }
+    }
+    let Some(close) = close else {
+        return line.to_string();
+    };
+    let cond = &code[open + 1..close];
+    let mut new_cond = cond.to_string();
+    for (old, new, _) in rewires {
+        new_cond = sv_timing_core::select_increment::substitute_step(&new_cond, old, new);
+    }
+    if new_cond == cond {
+        return line.to_string();
+    }
+    let id = rewires.first().map(|r| r.2).unwrap_or(0);
+    let tag = if comment.is_empty() {
+        format!(" // sv-timing: svt-pipe consumer #{id}")
+    } else {
+        format!(" {comment}")
+    };
+    format!(
+        "{}({new_cond}){}{tag}",
+        &code[..open],
+        code[close + 1..].trim_end()
+    )
 }
 
 /// Replace every `if` predicate an A122 guard identity rewrote

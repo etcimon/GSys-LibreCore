@@ -6,6 +6,7 @@
 | **Corpus** | `full_core` / `full_corev_apu`, 4000 MHz, `fo4_ps=20`, margin 0.2 → **budget 10.0 FO4**, `-O3`. **delay-v4 baseline:** `…/audit-strict-v4/`. **delay-v17:** gemm always_ff 144-node **161.5→26**. **path_class v21:** APU hub **36→11**. **remain-v23:** emit **22**. **delay-v18:** emit **18.5**. **path_class v23 / remain-v24:** emit **20**. **delay-v19:** only `(W)'(1)` is increment. **path_class v24:** 2-arm flop-D exclusive. |
 | **Related** | [`RELOCATION-ANALYSIS.md`](RELOCATION-ANALYSIS.md) (per-path option catalog), [`OPTIMIZATION-LEVELS.md`](OPTIMIZATION-LEVELS.md) (dials/presets), [`FREQUENCY-CLOSURE.md`](FREQUENCY-CLOSURE.md) (budget + current numbers), [`FO4-ALGORITHM-UPGRADES.md`](FO4-ALGORITHM-UPGRADES.md) |
 | **Hard rule** | Structural FO4 is not STA. Nothing here is a frequency claim. |
+| **Cone cuts (A148)** | Each over-budget path gets `ceil(FO4 / 10) − 1` cuts, capped at 16. The stage dial raises that cap and does not shrink it. A `cycle` cone unlocks intermediate nodes; the launch `q` and other `no-cut` names stay locked. A `cycle step` that is also a P10 handshake or an indexed restore stays balance-only. |
 
 ---
 
@@ -534,8 +535,10 @@ primary **30.5** (`g6lc_ai_policy_subcode` Plain). Analyze max_adj
 **61** (max_node 60).
 **remain-v21b** (`audit-remain-v21b/`): residual InsertReg keeps the
 original capture so S4 can cut the 20.5 remainder (`policy_subcode`
-three InsertRegs 30.5→10). Multi-node spine expand + `max_cuts` from
-`--opt-max-stages-per-region`. `--real-cut-feeds` implies BalanceMux
+three InsertRegs 30.5→10). Multi-node spine expand. That run took
+`max_cuts` from `--opt-max-stages-per-region`; the current cap is the
+per-cone `budget_fit_cuts` count, raised by the dial and capped at 16
+(A148). `--real-cut-feeds` implies BalanceMux
 RTL; continuous rewrite keeps `assign` (`te_packet_emitter`
 `address_off`). Integrity green. Emit RegToReg **74.5→26** / 1538 MHz
 (189 edits). IR 74.5→56 (T3 mul floor).

@@ -46,9 +46,11 @@ the package point at the generic form:
 // svt-pipe: protocol <dom> valid=<sig> id=<sig> kill=<expr using $id> [flush=<sig>]
 // svt-pipe: carry <dom> <sig>[,<sig>…]      side-band that must travel with the data
 // svt-pipe: result <dom> valid=<sig> id=<sig> consumer-side assigns to rewire onto the last stage
-// svt-pipe: cut-ok [<dom>]                   next assignment: a stage may be cut here
-// svt-pipe: no-cut                           next assignment: never cut (handshake, side effect)
-// svt-pipe: require-contract                 module: only cut-ok anchors may be cut
+// svt-pipe: cut-ok [<dom>] [on=<lhs>]        this assignment may be a stage boundary
+// svt-pipe: no-cut [on=<lhs>]                this assignment is not a stage boundary
+// svt-pipe: cycle <dom> q=<flop> d=<next> hold=<sig> steps=<n|param>
+// svt-pipe: require-contract                 a bare name is not a stage; a cycle cone is
+// svt-pipe: latency <dom> <param> base=<n|param>
 ```
 
 `$id` in `kill` stands for the id of the operation at the stage being
@@ -56,21 +58,35 @@ killed (`kill=cancel_i[$id]`). Anchors (`cut-ok`, `no-cut`) bind to the
 first assignment within three lines below the pragma, or to `on=<lhs>`.
 
 Resolution (`pipe_contract::resolve`) binds every name against the module's
-declarations and ports; an unbound name, a `kill` without `$id`, a `carry`
-or `result` naming an undeclared domain, an unknown kind — each is a
-*rejected* pragma, reported (`pipe_contract.rejected` in the algo trace)
-and never guessed around. A module whose pragmas all reject has no contract.
+declarations and ports. An unbound name, a `kill` that uses `$id` on a
+domain with no `id=`, a `carry` or `result` naming an undeclared domain,
+or an unknown kind is a *rejected* pragma (`pipe_contract.rejected`). A
+`kill` with no `$id` is the global kill of an id-less domain (A127), not
+a rejection. A rejected contract forbids every cut. It does not fall
+through to an unconstrained module. A `protocol` implies
+`require-contract`. `cycle` `q`, `d`, and `hold` must be declared names;
+`steps` may be an integer, a declared parameter, or a dotted parameter
+such as `CVA6Cfg.MultStages`.
 
 ## 3. Semantics
 
-**Permission** (`cut_permission`). For a cut at node *n*: `no-cut` on its
-LHS → forbidden; `cut-ok` on its LHS, or on the line of the statement the
-planner split *n* out of (expression-spine nodes inherit) → allowed, in the
-named domain or the domain whose valid / id the node reads; otherwise, if
-the module `require-contract`s → forbidden, else unconstrained (today's
-behaviour). The P10 handshake lock yields on a path that contains an
-allowed anchor of a declared domain (`path_has_contract_cut`), and only
-there.
+**Permission** (`cut_permission`, then `cone_cut_permission`). For a cut
+at node *n*, in order: a rejected pragma forbids the module; the cycle
+capture `d` is allowed even if `no-cut` names it; `cut-ok` on its LHS, or
+on the line of the statement the planner split *n* out of, wins over
+`no-cut` on that same name and allows the named domain; any other
+`no-cut` is forbidden; `require-contract` with no anchor is forbidden;
+otherwise a domain whose valid or id the node reads allows the cut, and
+a module with no contract is unconstrained.
+
+The planner does not stop at that named anchor. `cone_cut_permission`
+allows every node on an over-budget path that names both cycle `q` and
+`d` (`path_names`: startpoint, endpoint, LHS, or an RHS read). A nameless
+expression-spine node on that path is an anchor. The launch `q` and any
+other `no-cut` stay forbidden. `schedule_pipeline_cuts` snaps each wanted
+cut to the nearest such node. `insert_register` uses the same permission,
+so a cone of several cuts is emitted instead of one capture. A handshake
+or indexed-restore note on that cycle step stays balance-only (A148).
 
 **Stage bundle** (`stage_for`). Stage *k* of domain *d* samples, on the
 module's clock with the module's reset:
@@ -157,8 +173,11 @@ the edits (`owning_module_slice`) rather than the first header / last
   infer protocols.
 - It does not insert balance registers on side paths (refused instead),
   does not handle ready/back-pressure (a `ready=` word is reserved, not
-  implemented), does not re-time across module ports, and does not change
-  the planner's choice of cut points — only admits, carries or refuses them.
+  implemented), and does not re-time across module ports. On a `cycle`
+  cone it does change the planner's anchors: each budget-fit cut snaps to
+  a cone-permitted node (A148, §18), then the plan is carried or refused
+  as a whole. A module with no `cycle` line still only admits, carries,
+  or refuses the anchors `cut_permission` already named.
 - The whole-core question (A121: 176 adjusted FO4 at the worst module)
   needs the contract written at the eleven modules' real boundaries
   (acceptance, reservation, byte validity, cancellation, transaction
@@ -554,6 +573,278 @@ cone at 2.820 ns = 131.8 adjusted FO4. The 56 declarations move no path by
 themselves: they are the enforcement layer under which every further
 stage on the list is a designer's decision the tool can carry out.
 
+## 18. Cone budget and the emitted stages (A148)
+
+The structural budget \(B\) is the correct target (`budget_fo4`, 10 at
+4000 MHz, `fo4_ps` 20, margin 0.2). Each over-budget path asks for
+
+\[
+\mathrm{cuts} = \min\left(16,\ \lceil \mathrm{FO4}/B \rceil - 1\right)
+\]
+
+and the walker may use more slots when `--opt-max-stages-per-region` is
+larger. The dial does not reduce a cone below its own count. The uniform
+remainder is \(\mathrm{FO4}/(\mathrm{cuts}+1)\). A single node wider than
+\(B\) stays that wide.
+
+A `cycle` line is the contract for that cone. `steps` is the wait the
+rest of the machine already has. When the measured `q`→`d` step is inside
+\(B\), longer cones in the module leave the single-cycle board. When the
+step is over budget or unmeasured, they stay. The step itself is never
+hidden by dividing its FO4 by `steps`.
+
+With `--allow-latency` and `--real-cut-feeds`, an admitted cone becomes
+corrected SV:
+
+```systemverilog
+logic [31:0] pipe_svt_p1_c, pipe_svt_p1;
+logic        pipe_svt_p1_v;
+assign pipe_svt_p1_c = (s1 + 32'd1);          // origin RHS, same cycle
+// origin assign rewritten:
+s2 = pipe_svt_p1;
+always_ff @(posedge clk_i or negedge rst_ni) begin
+  if (!rst_ni) begin
+    pipe_svt_p1   <= '0;
+    pipe_svt_p1_v <= 1'b0;
+  end else begin
+    pipe_svt_p1   <= pipe_svt_p1_c;
+    pipe_svt_p1_v <= valid_i & ~(1'b0);       // stage 1; later stages chain _v
+  end
+end
+```
+
+The reparse of that file is the FO4 reading. On `cone_budget` (sixteen
+32-bit adds, 60 structural FO4, `no-cut` on the launch `a_q`, `cut-ok` on
+`y_d`) the emit placed seven stages. Reparse segments are 8.0 and 4.0
+FO4, the `a_q`→`y_d` step is 4.0, and closure closes. Verilator 5.020
+`--lint-only -Wall -Wno-fatal` exited 0. `valid_o` stayed on `valid_q`
+because the fixture names no `result`. `max_path_fo4_after` in the JSON
+stayed 60: that field is the in-pass IR max, not the reparse.
+
+The same formula does not move a measured board. Delay-v43 was not
+rerun. Delay-v44 changed the structural reading by linking reads to
+reaching definitions (rename 234.9 → 130.4, lsq 181.2 → 216.9) and that
+reading was not refit through this cut count. A 64-bit add remains about
+12 structural FO4 and about 26 adjusted. On the delay-v43 file the
+16-cut structural aim stays over 10 for `g6lc_rename` (13.8) and
+`g6lc_lsq` (10.7).
+
+### 18.1 What a `cycle` cone may absorb (A148b)
+
+The `cone_budget` fixture's seven stages are a reparse result, not a
+machine the fixture's consumer would accept: on a cone `q → f → d → q`
+the launch keeps updating every cycle while `d` arrives `k` cycles late,
+so `q` captures `f(q_{t-k})`. A `cycle` line therefore authorizes a
+register only within the wait it publishes:
+
+- `steps=S` resolves to an integer (a literal, a parameter-map entry such
+  as `CVA6Cfg.MultStages`, or a module parameter with an integer default);
+- `hold` gates the launch register: every non-reset non-blocking write of
+  `q` is under `hold`, or `q <= q_d` and every non-copy writer of `q_d` is;
+- the stages already emitted on the domain plus the plan are at most
+  `S − 1`.
+
+`steps=1` is a single-cycle recurrence and absorbs no register; the plan
+is refused (`pipe_contract.refuse … absorbs 0 register(s)`), and the cone
+keeps its latency-neutral rewrites only. A declared step that fits the
+budget is a fact about that step; it does not take the module's other
+single-cycle paths off the board. A feed-forward datapath whose consumers
+wait on a valid is declared with `protocol`/`result`, not with `cycle`.
+
+### 18.2 Experimental cuts, carry-over, cut surface (A149)
+
+`correct --cycle-cuts experimental` lets a refused cycle plan land. The
+stage's rationale carries `[UNVERIFIED: <reason>]`, the trace records
+`pipe_contract.unverified`, and `correct.json` reports
+`boot_validity.unverified_stages`. Such a tree changes the recurrence; it is
+a research emit and is never a boot claim. The A123 alignment rule (a later
+stage reads only its chain predecessor, carried signals and protocol
+state) still applies and is where the OoO cones stop.
+
+`correct.json` also carries two reference searches that change no IR:
+
+- `carry_over[]` — for each emitted stage on an output port: every parent
+  instance connecting that port, its parent-side readers (`flop`, `comb`,
+  `output`), `feeds_back` (a combinational parent net derived from the port
+  drives an input of the same instance), `propagates_up` (a parent output is
+  written from it), and a verdict naming the adaptation the consumers need.
+- `cut_surface[]` — for each procedural loop holding an over-budget cone:
+  block-locals a per-iteration stage would hoist, roots written under the
+  loop index, loop-carried names, indexed roots also written outside the
+  loop, and a verdict (`expandable`, `expandable with hoisting`,
+  `loop-carried`, `default outside the loop`, `no per-iteration write`).
+  A loop-to-generate rewrite is sound only for `expandable*`; it gives the
+  flop a legal scope and leaves the recurrence question where it was.
+
+### 18.3 Balance instead of refusal; the propagation plan (A149b)
+
+The A123 alignment rule exists so that every input a stage reads has the
+same age as its chain. Its purpose is served by a balance register as well
+as by a refusal, so `insert_register` now carries a side read instead of
+refusing when the read is a **stable source**: an input port, a register of
+the module, or a combinational net whose every source (through at most six
+combinational writers, none on the plan's path) is one of those
+(`balanceable_side_read`). The carried copy travels through every stage like
+an authored `carry`, the stage statements read the previous stage's copy, and
+the consumer reads the last. A side read derived from the staged chain is
+still refused: its lag would have to follow the cut it branches from, which a
+stage-1 copy does not give. Trace: `pipe_contract.balance` with the carried
+names and widths (the area gate priced the plan before this bundle grew;
+the widths are logged so that can be read).
+
+Two checks that the loosening made necessary, both correctness, both
+previously missing: a statement **off the staged path** that reads an
+intermediate cut net is refused (the net now carries its stage's age and a
+carry starts at stage 1, so no balanced copy exists: "side path needs k
+balance register(s) from stage j"); a statement off the path that reads the
+**last** cut net is refused unless the result rewiring reaches it or
+everything else it reads is constant (reset and clock pins excepted). The
+`pipe_contract_side` fixture's `res_d` read `s1` and `s2` past their stages
+and had been refused only by accident (an uncarried `c_q`); it is now
+refused for that reason. Expression-spine nodes keep only the text of their
+RHS, so every alignment check parses it when the expression is absent.
+
+### 18.4 Balance lines from any stage; observers (A149c, M1 and M13)
+
+A carried signal now has a **start stage** (`PipeDomain::carry_from`,
+default 1). The reader after cut *i* feeds stage *i+2* and reads cut *i*'s
+net at age *i+1*; a read of cut *j*'s net (*j < i*) is *i − j* cycles too
+old. `alignment_balance` carries that net from stage *j+2* on: the start
+stage samples the net itself, every later stage samples the previous copy,
+and the reader is rewired to the copy at stage *i+1*. The tail does the
+same for the earlier nets it reads (`pipe_svt_p3_c_s1`,
+`pipe_svt_p3_c_s2` in the `pipe_contract_side` fixture, whose `res_d` is
+now a landed, balanced plan rather than a refusal). `stage_for` lists only
+the carries active at a stage; a balance line adds *n − start + 1*
+registers of the net's width. The age argument is the retiming one: every
+input of every merge has the age of its chain.
+
+An **observer** (`observer_only`) is a statement whose LHS is not an output
+port, not a flop, not wired into a child instance, and has no functional
+reader (through four combinational hops) — a debug alias, an RVFI or
+performance tap whose only consumers are `$display`s and assertions the IR
+has no nodes for. An observer may read a cut net a stage late; the plan is
+not refused for it, and the trace names it (`pipe_contract.observer`).
+`store_buffer`'s `speculative_write_pointer_q` is this shape.
+
+### 18.5 Hint domains, retimable frontiers, unemitted stages (A149d)
+
+```text
+// svt-pipe: hint <dom> verified-by=<sig>
+```
+
+The domain's outputs are predictions a named verifier checks later (a
+memory-dependence guess the LSQ orders anyway, a branch predictor the branch
+unit resolves). A stage on its `cycle` cone changes *when* the hint is made,
+not what the machine computes, so `cycle_capacity_refusal` does not apply;
+the stage's rationale carries `[HINT: advisory domain … verified by …]` and
+the trace `pipe_contract.hint`. The verifier must be a declared name. The
+obligation is the designer's: every consumer treats the output as a hint,
+and waits the hint can prolong stay bounded. `g6lc_memdep` declares
+`hint md verified-by=train_valid_i` (its `svt-plan` lines already said the
+LSQ ordering is authoritative).
+
+`propagation[]` now records each capture's guards (reset, flush, enable) and
+a `retimable` verdict: when every step is a `delay-capture` that reads only
+the staged net and all those captures share one guard class, the parent
+registers can move into the child instead of a stage being added — a
+backward retiming across the port, no latency change. `moved_registers`
+names them. Applying the move is not implemented; the plan states it.
+
+A stage whose origin the emitter cannot rewrite (block-local or loop-index
+feed, a non-assign origin) is **not emitted**: no declaration, no capture,
+no assertion — a marker comment instead (`// sv-timing: stage … not
+emitted: origin feed unresolved … IR credit void`). The CLI collects the
+markers into `boot_validity.unemitted_stages`. Before this the stage was a
+register fed `svt_zero` that nothing read, carrying IR credit.
+
+### 18.6 Elastic stages (`ready=`), latency co-emission as a plan (A149e)
+
+```text
+// svt-pipe: protocol <dom> valid=<v> ready=<r> [id= kill= flush=]
+```
+
+`ready=` names the downstream ready the module's producer logic waits on
+(A132 refused the field; M12 gives it a meaning). A stage on such a domain
+is an **elastic register**:
+
+```systemverilog
+assign pipe_svt_p1_en = ~pipe_svt_p1_v | pipe_svt_p2_en;   // stage k: next stage's enable
+assign pipe_svt_p2_en = ~pipe_svt_p2_v | ready_i;          // last stage: the consumer's ready
+if (flush_i) pipe_svt_p1_v <= 1'b0;
+else if (pipe_svt_p1_en) begin pipe_svt_p1 <= pipe_svt_p1_c; pipe_svt_p1_v <= …; … end
+else if (<kill against the held id>) pipe_svt_p1_v <= 1'b0;
+```
+
+A stage accepts when it is empty or draining; a flush clears its valid
+regardless; an operation held in it is still killed. The producer's reads of
+`ready` — in assigns **and in the guards of its own captures** (`end else if
+(ready_i || !valid_q)`), which the consumer rewiring now reaches through the
+nearest enclosing header — move to the first stage's enable; the consumer
+side (tail and `result` statements) keeps the real ready. The handshake
+absorbs the added cycle: latency-insensitive by construction. Fixture
+`pipe_elastic.sv`: two stages, `ready_o = pipe_svt_p1_en || !valid_q`, the
+input register's enable likewise, `valid_o` from the last stage, Verilator
+lint clean. The ready path itself stays combinational (`~v | ready`), so the
+gain is on data and valid; a registered-ready (two-entry skid) variant is
+the next step if the ready path sets the clock.
+
+`check_latency` still refuses a plan whose stage count the published
+parameter does not cover; M6 is recorded as a plan: `latency_update` gives
+`(param, published, required)` and the CLI lists them in
+`boot_validity.latency_updates` (trace `pipe_contract.latency_update`). The
+co-emission itself — the parameter and its `check_cfg` range set to
+`required` in the same emit — is not performed.
+
+`correct.json` → `propagation[]` is the cross-module plan of each emitted
+stage on an output port (`carry_over::propagation_plan`): a bounded walk
+over the instance graph that records `delay-capture` (a flop reader samples
+one cycle later; its other reads are its balance), `stage-comb` (a
+combinational reader is re-staged and its readers follow),
+`propagate-port` (a parent output moves and the walk enters the
+grandparent) and `blocked-feedback` (the net re-enters an instance whose
+output the walk moved: a cross-module recurrence). `valid` is true only when
+every frontier settled at a capture inside the bound. The plan is what a
+cross-module adaptation would have to do; the tool does not apply it.
+
+### 18.7 Bottleneck trace: callers that wait more than one cycle
+
+`correct.json` → `bottlenecks[]` (`carry_over::bottleneck_trace`) is the
+verbose bubble list for stages that actually landed (`InsertReg`, a
+`cut-ok` anchor, or a `cycle` cone). Stages on the same net are one group.
+`added_cycles` is how many registers that group placed. `via` is `cut-ok`,
+`cycle-cone`, or `insert-reg`.
+
+A caller is listed only when the wait for the result is **more than one
+cycle**:
+
+- A combinational or output reader of *N* cuts waits *N* cycles. One cut is
+  a one-cycle displacement and is not listed. Two or more cuts are a stall
+  on a dependent use.
+- A flop reader can absorb one cut by moving that capture into the child.
+  Further cuts leave an *N*-cycle wait and are listed.
+- A recurrence (the net is a `cycle` `q` or `d`, or `carry_over` says the
+  port feeds back into the same instance) waits *N + 1* cycles: the loop
+  edge plus the cuts. One cut already makes the loop take two cycles, so
+  the caller is listed. That is the displacement of a clock limit into a
+  synchronous wait.
+
+Each caller records `module`, `instance` (empty when the reader is inside
+the staged module), `caller` (the LHS), `line`, `kind` (`flop`, `comb`,
+`output`, `recurrence`), `wait_cycles`, and `bubble` (one sentence). The
+`verdict` is the same fact in one line. `correct` also prints it:
+
+```text
+bottleneck: cycle-cone placed 2 stage(s) on `y_o`; 2 caller(s) wait up to 2 cycle(s), a bubble on a dependent use
+  wait 2 cycles  top u0 s comb line 12  combinational caller sampled this result in the same cycle; 2 cut(s) make it wait 2 cycle(s)
+```
+
+The list is feedback for a person reading an emit. It does not refuse the
+cut, does not change FO4, and does not rewrite the caller. A second copy of
+the callee is not assumed: the trace says who stalls, and a replica only
+helps a second caller that does not need this result. A true dependence on
+the listed caller is still a bubble of `wait_cycles`.
+
 ## 11. The `latency` word (A129)
 
 ```systemverilog
@@ -565,22 +856,21 @@ wrapper's cancellation liveness (`mult.sv` tracks `MultStages` cycles), a
 scoreboard's latency table, a bypass network's distance. The word names
 the parameter that publishes it and the stages the source already has
 (`base=`, a number or a parameter when the source follows it, as the
-multiplier does since A128). A plan of k stages is admitted only when
-`base + k` equals the parameter's elaborated value from the param map;
-otherwise:
+multiplier does since A128). A plan of k stages is admitted only when `base + k` equals the
+parameter's elaborated value. When `base` and the published parameter are
+the same name, both sides move together, so the check refuses:
 
-> latency: `CVA6Cfg.MultStages` = 2 but the source has 2 stage(s) and this
-> plan adds 1: the consumers would track 2 cycle(s); set
-> `CVA6Cfg.MultStages` = 3 to admit the stage
+> latency: source already follows `CVA6Cfg.MultStages` (4 cycles); adding
+> 1 stage(s) requires an RTL boundary change and matching consumer depth,
+> not merely increasing the same parameter
 
-This closes the hazard the adoption created: with `gen_three_stage` written
-and the `cut-ok` still on `prod_sum`, the planner would otherwise add a
-fourth stage the wrapper cannot track. Under `MultStages = 3` the
-multiplier's reg→reg paths meet the run's structural budget and no plan is
-proposed; under 2 the plan is proposed and refused with the parameter to
-change. The word is the general form of A126's "adoption needs
-`MultStages = 3`": the designer writes it once, and the tool enforces it
-for every later run.
+That is the current `check_latency` text. An older diagnostic told the
+user to set the same parameter to `base + 1`; that suggestion is not what
+the tool prints now. `g6lc64_ooo` publishes `MultStages` 4 and
+`multiplier.sv` already has `gen_four_stage`. Another tool stage on that
+product stays refused until the register and the consumer depth change
+together. The word is still the general form of A126: the designer writes
+the published depth once, and the tool enforces it.
 
 ## 12. The live-RTL board after adoption (A130)
 
@@ -737,3 +1027,165 @@ supported for that consumed boundary.
 
 See [PIPELINING-RT-LEARNING.md](PIPELINING-RT-LEARNING.md) for the implemented
 pipeline, evidence, mathematical obligations and broader strategy families.
+
+## 19. `svt-stage`: stage-aware FO4 view
+
+A `svt-stage` region is an annotation, not a cut contract: it groups the IR
+nodes whose origin-mapped source line falls between its `begin`/`end`
+comments and gives that group its own budget multiplier. **The base
+closure numbers are measurement truth and do not change** — this is an
+additional view over the same paths, not a waiver and not STA.
+
+Grammar (one pragma per comment line, anywhere in a module body):
+
+```text
+// svt-stage: begin <name> [cycles=<n>] [window=<n>] [after=<name2>]
+// svt-stage: end <name>
+// svt-stage: order <module> <s1>,<s2>,...
+// svt-stage: use <name> on=<signal>[,<signal>...]
+```
+
+- `cycles=n` (default 1): a path whose first and last comb nodes are both
+  inside the stage is judged against `n × budget_fo4` — a declared
+  multi-cycle window, reported as such.
+- `window=n` (default 0): a path *entering* the stage (last comb node in
+  the stage, first comb node in another stage or unstaged) is judged
+  against `(1+n) × budget_fo4`.
+- `after=<name2>`: documentation plus a boundary check. A finding is
+  emitted when the boundary is crossed combinationally — a path whose
+  comb nodes run `name2 → <name>`, or (the node-graph fallback, when no
+  single path spans both regions) a comb node inside `<name>` that reads
+  a net whose *driver* is a comb node inside `name2`.
+- `use <name> on=<signal>`: overrides region membership for the nodes
+  that drive the named nets (LHS root match), wherever the assign sits.
+- `order` is documentation of the intended stage order for the module.
+- Nodes in no region belong to the implicit stage `-` (unstaged).
+  Unbalanced `begin`/`end`, nesting past one level, duplicate names and
+  bad arguments are reported as pragma issues on the module's first
+  stage row, never silently.
+
+Region membership uses the origin-mapped line (`get_origin`), never the
+preprocessed offset, so pragmas keep meaning through `include` and macro
+expansion.
+
+Report surface: `analyze` and `correct` JSON gain
+
+```json
+"stages": [
+  { "module", "stage",
+    "decl": { "file", "line_begin", "line_end", "cycles", "window", "after" },
+    "node_count",
+    "worst_in_stage":   { "path_id", "total_fo4", "startpoint", "endpoint", "primary_loc" },
+    "worst_into_stage": { "from_stage", "path_id", "total_fo4", "startpoint", "endpoint" },
+    "stage_budget_fo4", "closes_in_stage", "closes_into_stage",
+    "findings": [] }
+],
+"stage_users": [
+  { "module", "stages": [names],
+    "used_by": [ { "parent_module", "instance", "file" } ] }
+]
+```
+
+and every path carries `stage_start` / `stage_end` (first/last comb node
+stage; `null` = unstaged) so a consumer can regroup. CLI:
+`analyze --stages` / `correct --stages` prints the per-module table
+(stage | cycles | window | nodes | worst in-stage vs budget | worst
+into-stage (from) | file:lines | findings) plus a users table; modules
+with no `svt-stage` declarations print nothing. `--stages-json <path>`
+dumps `{stages, stage_users}` separately. Fixture:
+`fixtures/auto_correct/stage_pragmas.sv` (S2 `cycles=2` closes a 14-FO4
+cone against its 16-FO4 stage budget; the deliberate S1→S2 comb crossing
+produces the `after` finding; S3 `window=1` admits the `-` → S3 entry).
+
+### 19.1 Bubble-up: what a declared stage's cycles do to its readers
+
+`svt-stage: class <stage> decision|value` — one pragma line per stage,
+optional — tells the bubble-up analysis the author's intent for every
+reader of that stage's outputs. The distinction is the machine's, not the
+annotator's:
+
+- a register in a cone that produces a READINESS / NEXT-ADDRESS DECISION
+  (issue wakeup → select → grant, a dispatch `issue_valid`, scoreboard
+  operand-ready, an `npc` recurrence, a rename map → prd back-to-back) is
+  a **drag**: it inserts a bubble between dependent decisions and no other
+  issue port can wake the dependent one sooner;
+- a register on a VALUE path (multiplier, ALU result, a verdict, a
+  write-buffer forward) is a **stall** that out-of-order issue covers
+  when another instruction is ready — the dependent use still waits the
+  full depth.
+
+For every stage that *adds cycles* (`cycles>1`, `window>0`, or a region
+containing the registers that publish its results — flop captures in the
+region whose Q is read outside it, including through an output port), the
+analysis computes the stage's **output nets** (nets driven inside the
+stage and read outside it) and walks every reader: in-module readers in
+other stages plus parent-side readers through the instance graph (the
+same `carry_over` walk the bottleneck trace uses, one combinational hop
+included). Each reader records `{module, instance, lhs, line, kind,
+wait_cycles, class, class_source, absorbed, absorbed_by}` where
+`wait_cycles` is `(cycles−1) + window + (publishing register ? 1 : 0)`
+plus one on a recurrence.
+
+Classification order: the stage's `class` pragma wins for all its
+readers; a reader on a `svt-pipe: cycle` recurrence (its LHS is a
+declared `q=`/`d=`/`hold=` name) or a `recurrence`-kind reader is
+`decision`; a reader LHS matching the readiness vocabulary
+(`*valid_o`, `*ready*`, `*rdy*`, `*grant*`, `*select*`, `*issue*`,
+`npc*`, `*map*`, `*prd*`, `*wake*`) is `decision`, labelled `heuristic`;
+everything else is `value`.
+
+A reader is `absorbed` when a declaration covers the wait: the net's
+domain `throughput … accept=<n>` (n ≥ wait), an elastic
+`protocol … ready=` domain, `replicate <dom>`, or the reader module's own
+`async … cycles=<n>` on the read. Verdict per stage:
+
+- `drag` — any non-absorbed `decision` reader; the `svt-pipe: cycle`
+  lines the stage collides with (file:line, in the producer or the
+  reader's module) are listed so the author sees the recurrence it drags;
+- `covered` — every non-absorbed reader is `value`;
+- `absorbed` — every reader is absorbed by a declaration, **or** the
+  stage carries an explicit `svt-stage: absorb` architectural cover
+  (below).
+
+#### Architectural covers: `svt-stage: absorb`
+
+```text
+// svt-stage: absorb <stage> by=<mechanism> [cond=<text>]
+```
+
+`mechanism ∈ {spec-wakeup, read-ahead, elastic, replicate, async,
+throughput}`; `cond=` is free-form rest-of-line text (quotes optional)
+recording the precondition the author asserts. A declared cover is the
+*only* legitimate cover for a decision-class stage: the stage reports
+`verdict: "absorbed"`, its `cover` object carries `{by, cond, verified}`,
+the readers are still listed verbatim, and the verdict no longer hides
+the drag readers — they print as `decision readers: …`.
+
+The cover's precondition is checked where the IR can see it:
+
+- `spec-wakeup` — verified when latency-class/wakeup state is visible in
+  the module (`hyp_lat_class`/`LAT_*` uses, `alloc_lat`, `wake_cnt`, …):
+  producer latency classes fixed, `LAT_NONSPEC` producers waking on real
+  writeback, replay re-arming. When the IR cannot see that machinery —
+  e.g. it lives in a sibling module — the stage still reports `absorbed`
+  but carries an `unverified-cover` finding with the cond text;
+- `read-ahead` — verified when the stage contains a register whose D is
+  an indexed read of another register inside the stage (the table read
+  produced one cycle ahead of its use); otherwise `unverified-cover`;
+- `elastic`, `replicate`, `async`, `throughput` — verified when the
+  corresponding `svt-pipe` contract (`protocol … ready=`, `replicate`,
+  `async … cycles=`, `throughput … accept=`) exists on the module;
+  otherwise `unverified-cover`.
+
+Report: `stage_bubbles` rows gain `cover: {by, cond, verified}` and a
+`findings` array; `--stages` prints `cover by <mech> (cond: …)` and each
+finding on the bubble-up line. Measurement truth unchanged: a cover is an
+author-declared architectural fact, not a waiver.
+
+Report: `stage_bubbles` in the analyze/correct JSON and `--stages` prints
+a `bubble-up: <verdict> — N reader(s), worst wait K cycle(s); drag
+readers: …` line under each stage. Measurement truth unchanged: this is a
+view, not a waiver. Fixture `fixtures/auto_correct/stage_bubbles.sv`
+covers all three verdicts, both `decision` sources, and both `absorb`
+outcomes (a verified `read-ahead` cover and an unverified `spec-wakeup`
+one).

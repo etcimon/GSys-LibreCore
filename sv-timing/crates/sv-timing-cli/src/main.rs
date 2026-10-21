@@ -5,6 +5,7 @@
 // JSON contracts consumed by TypeScript package js/ (@sv-timing/js).
 
 #![forbid(unsafe_code)]
+#![recursion_limit = "256"]
 
 mod area_cmd;
 mod opt_cmd;
@@ -136,6 +137,24 @@ impl OptArgs {
 }
 
 /// JSON view of the resolved dials (additive `opt` block in analyze / correct results).
+/// How a placed stage was authorized: an explicit cut-ok, a cycle cone, or
+/// a plain InsertReg.
+fn stage_cut_via(
+    module: &sv_timing_core::ir::TimingModule,
+    lhs: &str,
+    rationale: &str,
+) -> &'static str {
+    if rationale.contains("cycle") {
+        return "cycle-cone";
+    }
+    if sv_timing_core::pipe_contract::resolve(module)
+        .is_some_and(|c| c.cut_ok.iter().any(|(n, _, _)| n == lhs))
+    {
+        return "cut-ok";
+    }
+    "insert-reg"
+}
+
 fn opt_to_json(opt: &OptOptions) -> serde_json::Value {
     serde_json::json!({
         "level": opt.level.as_str(),
@@ -280,6 +299,14 @@ enum Commands {
         /// measurement version.
         #[arg(long = "calibration")]
         calibration: Option<PathBuf>,
+        /// Stage-aware FO4 view (`svt-stage` pragmas, PIPELINE-PRAGMAS §19):
+        /// per-stage table + stage users. Prints nothing when no module
+        /// declares stages.
+        #[arg(long = "stages", default_value_t = false)]
+        stages: bool,
+        /// Optional separate JSON dump of `stages` / `stage_users`.
+        #[arg(long = "stages-json")]
+        stages_json: Option<PathBuf>,
         /// Optimization level + dials (analysis dials apply here).
         #[command(flatten)]
         opt: OptArgs,
@@ -475,6 +502,11 @@ enum Commands {
         /// registers in modules with no protocol, including vendored files).
         #[arg(long = "contracts-only", default_value_t = false)]
         contracts_only: bool,
+        /// `refuse` (default): a `cycle` cone takes at most `steps-1` registers
+        /// and only when its hold gates the launch. `experimental`: the stage
+        /// lands anyway, labeled UNVERIFIED (research emit; not boot-valid).
+        #[arg(long = "cycle-cuts", default_value = "refuse")]
+        cycle_cuts: String,
         /// Write CorrectResult JSON for TypeScript.
         #[arg(long = "json-out")]
         json_out: Option<PathBuf>,
@@ -517,6 +549,13 @@ enum Commands {
         /// to the post-correct analysis.
         #[arg(long = "calibration")]
         calibration: Option<PathBuf>,
+        /// Stage-aware FO4 view (`svt-stage` pragmas, PIPELINE-PRAGMAS §19):
+        /// per-stage table + stage users on the post-correct analysis.
+        #[arg(long = "stages", default_value_t = false)]
+        stages: bool,
+        /// Optional separate JSON dump of `stages` / `stage_users`.
+        #[arg(long = "stages-json")]
+        stages_json: Option<PathBuf>,
         /// Optimization level + the ten dials.
         #[command(flatten)]
         opt: OptArgs,
@@ -780,6 +819,8 @@ fn design_to_analyze_json(
                 "closes": p.slack_fo4 >= 0.0,
                 "multi_cycle": p.multi_cycle,
                 "node_count": p.nodes.len(),
+                "stage_start": p.stage_start,
+                "stage_end": p.stage_end,
                 "primary_loc": {
                     "file": p.primary_loc.file,
                     "start_line": p.primary_loc.start_line,
@@ -1108,6 +1149,12 @@ fn design_to_analyze_json(
             }))
         }).collect::<Vec<_>>(),
         "sta_hints": sta_hints,
+        // §19 svt-stage view: per-stage budgets against the declared
+        // cycles/window multipliers. Measurement truth unchanged.
+        "stages": sv_timing_core::stage_pragma::stage_report(design),
+        "stage_users": sv_timing_core::stage_pragma::stage_users(design),
+        // §19.1 bubble-up: drag / covered / absorbed per declared stage.
+        "stage_bubbles": sv_timing_core::stage_bubble::stage_bubbles(design),
         "frequency_closure": {
             "target_mhz": closure.target_mhz,
             "budget_fo4": closure.budget_fo4,
@@ -1552,6 +1599,8 @@ fn main() -> ExitCode {
             ir_out,
             width_map,
             calibration,
+            stages,
+            stages_json,
             opt,
         } => {
             let opt = match opt.resolve(None) {
@@ -1757,6 +1806,29 @@ fn main() -> ExitCode {
                         }
                         println!("json_out={}", jpath.display());
                     }
+                    if stages {
+                        let table =
+                            sv_timing_core::stage_pragma::render_stage_table(&out.design);
+                        if table.is_empty() {
+                            println!("stages: none (no svt-stage pragmas)");
+                        } else {
+                            print!("{table}");
+                        }
+                    }
+                    if let Some(sp) = &stages_json {
+                        let body = serde_json::json!({
+                            "schema_version": "0",
+                            "disclaimer": "svt-stage view — a budget-multiplier view, not closure; base measurement unchanged; not STA sign-off",
+                            "stages": sv_timing_core::stage_pragma::stage_report(&out.design),
+                            "stage_users": sv_timing_core::stage_pragma::stage_users(&out.design),
+                            "stage_bubbles": sv_timing_core::stage_bubble::stage_bubbles(&out.design),
+                        });
+                        if let Err(e) = write_json(sp, &body) {
+                            eprintln!("error writing {}: {e}", sp.display());
+                            return ExitCode::from(1);
+                        }
+                        println!("stages_json={}", sp.display());
+                    }
                     ExitCode::SUCCESS
                 }
                 Err(e) => {
@@ -1788,6 +1860,7 @@ fn main() -> ExitCode {
             real_cut_feeds,
             emit_balance_mux_rtl,
             contracts_only,
+            cycle_cuts,
             json_out,
             param_map,
             cfg_snapshot,
@@ -1800,6 +1873,8 @@ fn main() -> ExitCode {
             tradeoffs,
             feedback,
             calibration,
+            stages,
+            stages_json,
             opt,
         } => {
             let explicit_passes = opt.opt_max_passes.or(max_passes);
@@ -1865,6 +1940,16 @@ fn main() -> ExitCode {
             // An explicit pass count bounds the design-size scaling.
             policy.max_passes_cap = explicit_passes;
             policy.contracts_only = contracts_only;
+            policy.cycle_cuts_experimental = match cycle_cuts.as_str() {
+                "refuse" => false,
+                "experimental" => true,
+                other => {
+                    eprintln!(
+                        "error: --cycle-cuts must be `refuse` or `experimental`, got `{other}`"
+                    );
+                    return ExitCode::from(2);
+                }
+            };
             if all_modules {
                 // Allowlist is filled after analyze discovers module names.
                 policy.correct_enabled = opt.max_passes > 0;
@@ -2265,6 +2350,7 @@ fn main() -> ExitCode {
             // record FO4 JSON. Hard-fail only when !allow_parse_errors.
             let mut integrity_hard_fail = false;
             let mut emit_dir_s: Option<String> = None;
+            let mut unemitted_stages: Vec<String> = Vec::new();
             let mut filelist_s: Option<String> = None;
             let mut manifest_s: Option<String> = None;
             let mut project_entries: Vec<serde_json::Value> = Vec::new();
@@ -2320,6 +2406,27 @@ fn main() -> ExitCode {
                         }
                         for w in &proj.written {
                             println!("  wrote {w}");
+                            // A149: a stage the emitter did not write (origin
+                            // feed unresolved) leaves a marker; its IR credit
+                            // is void and the JSON names it.
+                            if let Ok(text) = std::fs::read_to_string(w) {
+                                for line in text.lines() {
+                                    if let Some(rest) =
+                                        line.trim().strip_prefix("// sv-timing: stage ")
+                                    {
+                                        if rest.contains("not emitted") {
+                                            unemitted_stages.push(format!(
+                                                "{}: {}",
+                                                std::path::Path::new(w)
+                                                    .file_name()
+                                                    .and_then(|f| f.to_str())
+                                                    .unwrap_or(w),
+                                                rest.split(" not emitted").next().unwrap_or(rest)
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
                         }
                         for e in &proj.entries {
                             project_entries.push(serde_json::json!({
@@ -2563,6 +2670,110 @@ fn main() -> ExitCode {
                 )
             };
 
+            // A149: carry-over of every emitted stage and the unverified count.
+            let unverified_stages = ctx
+                .trace
+                .records
+                .iter()
+                .filter(|r| {
+                    r.kind == sv_timing_transform::EditKind::InsertReg
+                        && r.rationale.contains("[UNVERIFIED:")
+                })
+                .count();
+            let propagation_json: Vec<sv_timing_core::carry_over::PropagationPlan> = ctx
+                .trace
+                .records
+                .iter()
+                .filter(|r| r.kind == sv_timing_transform::EditKind::InsertReg)
+                .filter_map(|r| {
+                    let module = ctx
+                        .design
+                        .modules
+                        .values()
+                        .find(|m| m.file == r.origin.file)?;
+                    let lhs = r
+                        .node_id
+                        .and_then(|id| module.nodes.get(&id))
+                        .and_then(|n| n.lhs.as_deref())?;
+                    sv_timing_core::carry_over::propagation_plan(&ctx.design, module, lhs, 64)
+                })
+                .collect();
+            let carry_over_json: Vec<sv_timing_core::carry_over::CarryOver> = ctx
+                .trace
+                .records
+                .iter()
+                .filter(|r| r.kind == sv_timing_transform::EditKind::InsertReg)
+                .filter_map(|r| {
+                    let module = ctx
+                        .design
+                        .modules
+                        .values()
+                        .find(|m| m.file == r.origin.file)?;
+                    let lhs = r
+                        .node_id
+                        .and_then(|id| module.nodes.get(&id))
+                        .and_then(|n| n.lhs.as_deref())?;
+                    sv_timing_core::carry_over::carry_over_for_stage(
+                        &ctx.design,
+                        module,
+                        lhs,
+                        r.new_name.as_deref(),
+                    )
+                })
+                .collect();
+            // Callers that must wait more than one cycle for a cut. A single
+            // retimed flop is omitted. Printed so a correct log shows the bubble
+            // without opening the JSON.
+            let stage_sites: Vec<(String, String, String, String)> = ctx
+                .trace
+                .records
+                .iter()
+                .filter(|r| r.kind == sv_timing_transform::EditKind::InsertReg)
+                .filter_map(|r| {
+                    let module = ctx
+                        .design
+                        .modules
+                        .values()
+                        .find(|m| m.file == r.origin.file)?;
+                    let lhs = r
+                        .node_id
+                        .and_then(|id| module.nodes.get(&id))
+                        .and_then(|n| n.lhs.as_deref())?;
+                    let root = sv_timing_core::ir::TimingModule::root_ident(lhs).unwrap_or(lhs);
+                    let via = stage_cut_via(module, root, &r.rationale);
+                    Some((
+                        module.name.clone(),
+                        root.to_string(),
+                        r.new_name.clone().unwrap_or_default(),
+                        via.to_string(),
+                    ))
+                })
+                .collect();
+            let site_refs: Vec<sv_timing_core::carry_over::StageSite<'_>> = stage_sites
+                .iter()
+                .map(|(m, n, s, v)| sv_timing_core::carry_over::StageSite {
+                    module: m,
+                    net: n,
+                    stage: s,
+                    via: v,
+                })
+                .collect();
+            let bottleneck_json =
+                sv_timing_core::carry_over::bottleneck_trace(&ctx.design, &site_refs);
+            for b in &bottleneck_json {
+                eprintln!("bottleneck: {}", b.verdict);
+                for c in &b.callers {
+                    let inst = if c.instance.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {}", c.instance)
+                    };
+                    eprintln!(
+                        "  wait {} cycles  {}{inst} {} {} line {}  {}",
+                        c.wait_cycles, c.module, c.caller, c.kind, c.line, c.bubble
+                    );
+                }
+            }
             if let Some(out) = json_out {
                 let body = serde_json::json!({
                     "schema_version": "0",
@@ -2635,17 +2846,62 @@ fn main() -> ExitCode {
                     "integrity": integrity,
                     "opt": opt_to_json(&opt),
                     "path_class_summary": path_class_summary(&ctx.design),
+                    "cycle_steps": sv_timing_core::pipe_contract::cycle_step_reports(&ctx.design),
+                    // A149: who reads a staged output past the module port, and
+                    // which procedural loops hold the over-budget cones.
+                    "carry_over": carry_over_json,
+                    "propagation": propagation_json,
+                    "bottlenecks": bottleneck_json,
+                    "cut_surface": sv_timing_core::cut_surface::loop_surfaces(&ctx.design),
+                    "boot_validity": {
+                        "cycle_cuts": if ctx.policy.cycle_cuts_experimental { "experimental" } else { "refuse" },
+                        "unverified_stages": unverified_stages,
+                        "unemitted_stages": unemitted_stages,
+                        // A149 M6: parameter changes refused plans would need
+                        "latency_updates": ctx.latency_updates,
+                        "note": if unverified_stages > 0 {
+                            "stages marked UNVERIFIED change a single-cycle recurrence; this emit is a research artifact, not a boot-valid tree"
+                        } else {
+                            "no stage changes a recurrence beyond its declared wait"
+                        },
+                    },
                     "path_exceptions": &ctx.design.path_exceptions,
                     "relocation_plan": ctx
                         .relocation
                         .clone()
                         .unwrap_or_else(|| build_relocation_plan(&ctx.design)),
+                    // §19 svt-stage view on the post-correct design.
+                    "stages": sv_timing_core::stage_pragma::stage_report(&ctx.design),
+                    "stage_users": sv_timing_core::stage_pragma::stage_users(&ctx.design),
+                    "stage_bubbles": sv_timing_core::stage_bubble::stage_bubbles(&ctx.design),
                 });
                 if let Err(e) = write_json(&out, &body) {
                     eprintln!("error: {e}");
                     return ExitCode::from(1);
                 }
                 println!("json_out={}", out.display());
+            }
+            if stages {
+                let table = sv_timing_core::stage_pragma::render_stage_table(&ctx.design);
+                if table.is_empty() {
+                    println!("stages: none (no svt-stage pragmas)");
+                } else {
+                    print!("{table}");
+                }
+            }
+            if let Some(sp) = &stages_json {
+                let body = serde_json::json!({
+                    "schema_version": "0",
+                    "disclaimer": "svt-stage view — a budget-multiplier view, not closure; base measurement unchanged; not STA sign-off",
+                    "stages": sv_timing_core::stage_pragma::stage_report(&ctx.design),
+                    "stage_users": sv_timing_core::stage_pragma::stage_users(&ctx.design),
+                    "stage_bubbles": sv_timing_core::stage_bubble::stage_bubbles(&ctx.design),
+                });
+                if let Err(e) = write_json(sp, &body) {
+                    eprintln!("error writing {}: {e}", sp.display());
+                    return ExitCode::from(1);
+                }
+                println!("stages_json={}", sp.display());
             }
             println!("{note}");
             if integrity_hard_fail || emitted_validation_failed {

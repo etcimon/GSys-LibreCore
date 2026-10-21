@@ -121,6 +121,10 @@ SYNC_INCLUDE = [
     # tree (gitignored, but part of the sync; the rest of workspace/build is
     # excluded below).
     "build-platform/workspace/build/sta-rtl/",
+    # hyp8 redesign trees (Phase 6 bring-up): the hyp8 core/APU RTL manifests
+    # the sta-rtl mapped board and the hyp8 sim flavour elaborate. Gitignored
+    # workspace material, part of the sync like sta-rtl above.
+    "build-platform/workspace/hyp/",
     # `timings sta-rtl --remote --map-recipe streamed`: the builder turns the
     # word-level RTLIL into sv-timing's elaborated width map with this tool.
     "sv-timing/tools/rtlil_width_map.py",
@@ -158,6 +162,9 @@ FLAVOURS = {
     # flavour -> (verilator library dir, uses stock flist)
     "B": ("work-ver-smt2-fw64-B", True),
     "legacy": ("work-ver-smt2-fw64-legacy", False),
+    # hyp8 Phase-6 bring-up: g6lc_testharness on the hyp8 core/APU trees.
+    # Flist + C++ driver + build script under verif/regress/remote/hyp8/.
+    "hyp8": ("work-ver-hyp8", False),
 }
 
 # g6lc64_ai Variane libraries (I3 S4 / CLASS1). Not SMT2 B/legacy.
@@ -994,6 +1001,8 @@ def build_cache_key(root: Path, flavour: str, target: str) -> str:
         "verilator_config.vlt",
         "verif/regress/soft-ladder-build-harness.sh",
         "verif/regress/ai-matrix-build-harness.sh",
+        "verif/regress/remote/hyp8/hyp8-build-harness.sh",
+        "verif/regress/remote/hyp8/Flist.hyp8_sim",
         "core/Flist.cva6",
         "core/Flist.fetch_B",
         "core/Flist.smt_legacy",
@@ -1005,7 +1014,9 @@ def build_cache_key(root: Path, flavour: str, target: str) -> str:
             h.update(p.read_bytes())
 
     exts = {".sv", ".v", ".vlt", ".svh", ".vh", ".cc", ".cpp", ".h", ".hpp"}
-    patterns = ["core/**", "corev_apu/**", "common/**", "vendor/**", "verif/tb/**"]
+    patterns = ["core/**", "corev_apu/**", "common/**", "vendor/**", "verif/tb/**",
+                "verif/regress/remote/hyp8/**",
+                "build-platform/workspace/hyp/**"]
     files = _git_tracked_files(root, patterns)
 
     if not files:
@@ -1056,13 +1067,21 @@ def _manifest_sources(root: Path) -> dict[str, str]:
     RTL/TB sources under the synced trees.
     """
     exts = {".sv", ".v", ".vlt", ".svh", ".vh", ".cc", ".cpp", ".h", ".hpp"}
-    patterns = ["core/**", "corev_apu/**", "common/**", "vendor/**", "verif/tb/**"]
+    patterns = ["core/**", "corev_apu/**", "common/**", "vendor/**", "verif/tb/**",
+                "verif/regress/remote/hyp8/**",
+                "build-platform/workspace/hyp/**"]
+    # These trees are gitignored, so _git_tracked_files never reports them;
+    # they are scanned unconditionally with rglob below.
+    untracked_roots = ["verif/regress/remote/hyp8",
+                       "build-platform/workspace/hyp"]
     files: set[Path] = set()
     for rel in (
         "Makefile",
         "verilator_config.vlt",
         "verif/regress/soft-ladder-build-harness.sh",
         "verif/regress/ai-matrix-build-harness.sh",
+        "verif/regress/remote/hyp8/hyp8-build-harness.sh",
+        "verif/regress/remote/hyp8/Flist.hyp8_sim",
         "core/Flist.cva6",
         "core/Flist.fetch_B",
         "core/Flist.smt_legacy",
@@ -1073,6 +1092,15 @@ def _manifest_sources(root: Path) -> dict[str, str]:
     tracked = _git_tracked_files(root, patterns)
     if tracked:
         files.update(f for f in tracked if f.suffix in exts)
+        for pat in untracked_roots:
+            d = root / pat
+            if d.is_dir():
+                files.update(
+                    f for f in d.rglob("*")
+                    if f.is_file() and f.suffix in exts
+                    and "__pycache__" not in f.parts
+                    and not f.name.endswith((".o", ".d", ".log", ".vcd", ".fst"))
+                )
     else:
         for pat in patterns:
             d = root / pat.rstrip("/**")
@@ -1258,7 +1286,8 @@ def cmd_build(rem: Remote, args) -> int:
         die(f"remote env.sh missing; run '{sys.argv[0]} setup {args.host}' first")
 
     if ai_meta:
-        _no_overlap_guard(rem, f"build {args.flavour}")
+        if not args.allow_overlap:
+            _no_overlap_guard(rem, f"build {args.flavour}")
 
     # AI C++ compile (make -j / cc1plus) OOMs at -j2 on 30 Gi. Keep jobs=1.
     # Model --threads (vthreads) defaults to remote nproc in the harness so
@@ -1331,6 +1360,8 @@ def cmd_build(rem: Remote, args) -> int:
 
     if ai_meta:
         build_sh = "verif/regress/ai-matrix-build-harness.sh"
+    elif args.flavour == "hyp8":
+        build_sh = "verif/regress/remote/hyp8/hyp8-build-harness.sh"
     else:
         build_sh = "verif/regress/soft-ladder-build-harness.sh"
     script = (
@@ -1416,7 +1447,8 @@ def _no_overlap_guard(rem: Remote, command: str = "") -> None:
 
 def cmd_run(rem: Remote, args) -> int:
     rem.start_master()
-    _no_overlap_guard(rem, "run")
+    if not args.allow_overlap:
+        _no_overlap_guard(rem, "run")
     verlib, _ = flavour_info(args.flavour)
     if args.verlib:
         verlib = args.verlib
@@ -1501,7 +1533,8 @@ def cmd_run(rem: Remote, args) -> int:
 
 def cmd_soak(rem: Remote, args) -> int:
     rem.start_master()
-    _no_overlap_guard(rem, "soak")
+    if not args.allow_overlap:
+        _no_overlap_guard(rem, "soak")
     verlib, _ = flavour_info(args.flavour)
     if args.verlib:
         verlib = args.verlib
@@ -1558,7 +1591,8 @@ def cmd_di(rem: Remote, args) -> int:
     it would produce are not measurements. Bypass with --no-oracle-check.
     """
     rem.start_master()
-    _no_overlap_guard(rem, "di")
+    if not args.allow_overlap:
+        _no_overlap_guard(rem, "di")
     root = repo_root()
     verlib, _ = flavour_info(args.flavour)
     if args.verlib:
@@ -2424,7 +2458,8 @@ def cmd_shell(rem: Remote, args) -> int:
         # Shell is the back-door used by helper scripts to launch the DI suite;
         # apply the same overlap guard so two consecutive shell invocations do not
         # both start heavy Variane/soft-ladder workloads.
-        if re.search(r"Variane_testharness|soft-ladder", args.command):
+        if (re.search(r"Variane_testharness|soft-ladder", args.command)
+                and not args.allow_overlap):
             _no_overlap_guard(rem, f"shell ({args.command[:60]}...)")
         timeout = command_timeout(args.timeout, DEFAULT_SHELL_TIMEOUT)
         return rem.run(f"cd {REMOTE_ROOT} && {args.command}",
@@ -2656,6 +2691,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cmd_sync)
 
     sp = sub.add_parser("build", help="build a harness flavour remotely")
+    sp.add_argument("--allow-overlap", action="store_true",
+                    help="bypass the testharness overlap guard (CPU contention "
+                         "only; use with modest jobs/vthreads on the shared host)")
+
     sp.add_argument("flavour", choices=flavour_names())
     sp.add_argument("--target", default=DEFAULT_TARGET)
     sp.add_argument("--verlib", default=None)
@@ -2681,6 +2720,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cmd_build)
 
     sp = sub.add_parser("run", help="upload one ELF and run it (minimal payload)")
+    sp.add_argument("--allow-overlap", action="store_true",
+                    help="bypass the testharness overlap guard (CPU contention "
+                         "only; use with modest jobs/vthreads on the shared host)")
+
     sp.add_argument("elf")
     sp.add_argument("--flavour", choices=flavour_names(), default="B")
     sp.add_argument("--verlib", default=None)
@@ -2699,6 +2742,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cmd_run)
 
     sp = sub.add_parser("soak", help="run the OpenSBI cookie soak remotely")
+    sp.add_argument("--allow-overlap", action="store_true",
+                    help="bypass the testharness overlap guard (CPU contention "
+                         "only; use with modest jobs/vthreads on the shared host)")
+
     sp.add_argument("--flavour", choices=flavour_names(), default="B")
     sp.add_argument("--verlib", default=None,
                     help="override the Verilator work directory name")
@@ -2719,6 +2766,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cmd_soak)
 
     sp = sub.add_parser("di", help="run the directed mini (DI) suite remotely in parallel")
+    sp.add_argument("--allow-overlap", action="store_true",
+                    help="bypass the testharness overlap guard (CPU contention "
+                         "only; use with modest jobs/vthreads on the shared host)")
+
     sp.add_argument("--flavour", choices=flavour_names(), default="B")
     sp.add_argument("--verlib", default=None)
     sp.add_argument("--tests", nargs="+", default=None,
@@ -2821,6 +2872,10 @@ def build_parser() -> argparse.ArgumentParser:
     sp.set_defaults(fn=cmd_apu_leaf_collect)
 
     sp = sub.add_parser("shell", help="interactive ssh into the remote root, or run one command")
+    sp.add_argument("--allow-overlap", action="store_true",
+                    help="bypass the testharness overlap guard (CPU contention "
+                         "only; use with modest jobs/vthreads on the shared host)")
+
     sp.add_argument("command", default=None, nargs="*",
                     help="remote command tokens, joined with spaces; put them "
                          "after '--' if any start with a dash "

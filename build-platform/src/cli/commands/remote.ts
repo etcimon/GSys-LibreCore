@@ -23,6 +23,7 @@ import { flagBool, flagString } from "../args.ts";
 import {
   applyAiEnv,
   formatAiResolvedLine,
+  isAiFlavour,
   parseAiFlagErrors,
   parseAiFlags,
   resolveAiTesting,
@@ -209,12 +210,23 @@ export const remoteCommand: Command = {
       return 1;
     }
 
-    const aiFlagErrors = parseAiFlagErrors(args.flags as Record<string, string | boolean>);
+    // `--flavour` doubles as the proxy's flavour selector (FLAVOURS +
+    // AI_FLAVOURS on the proxy side: B, legacy, hyp8, ai-*). Only validate it
+    // as an AI flavour when it names one; a non-AI value passes straight
+    // through to the proxy (--ai-flavour keeps strict AI validation).
+    const aiFlags: Record<string, string | boolean> = {
+      ...(args.flags as Record<string, string | boolean>),
+    };
+    const proxyFlavour = flagString(aiFlags, "flavour");
+    if (proxyFlavour && !isAiFlavour(proxyFlavour)) {
+      delete aiFlags["flavour"];
+    }
+    const aiFlagErrors = parseAiFlagErrors(aiFlags);
     if (aiFlagErrors.length) {
       for (const e of aiFlagErrors) args.logger.error(e);
       return 2;
     }
-    const aiKnobs = parseAiFlags(args.flags as Record<string, string | boolean>);
+    const aiKnobs = parseAiFlags(aiFlags);
     // `remote --ai` is the S4 testharness path (ai-dt), matching `test --ai-remote`.
     if (aiKnobs.wantAi) aiKnobs.wantRemote = true;
     const ai = resolveAiTesting(aiKnobs);
@@ -260,6 +272,9 @@ export const remoteCommand: Command = {
     }
     if (vthreads && !rest.includes("--vthreads")) {
       rest.push("--vthreads", vthreads);
+    }
+    if (flagBool(args.flags, "allow-overlap") && !rest.includes("--allow-overlap")) {
+      rest.push("--allow-overlap");
     }
     const extraEnv = flagString(args.flags, "env");
     if (extraEnv) {

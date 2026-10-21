@@ -596,6 +596,17 @@ pub fn exception_policy(design: &TimingDesign, path: &TimingPath) -> Option<Exce
             note: "P10 indexed restore (mem[port]); InsertReg refuse".into(),
         });
     }
+    if over_budget_cycle_cone(path) && path.nodes.len() > 1 {
+        return Some(ExceptionPolicy {
+            kind: ExceptionPolicyKind::ResilientDatapath,
+            admit_insert_reg: true,
+            note: format!(
+                "over-budget cycle cone {:.1} FO4 nodes={}; budget-fit InsertReg",
+                path.total_fo4,
+                path.nodes.len()
+            ),
+        });
+    }
     if is_resilient_datapath(design, path) {
         return Some(ExceptionPolicy {
             kind: ExceptionPolicyKind::ResilientDatapath,
@@ -854,6 +865,23 @@ pub enum OverBudgetTrial {
     BalanceThenRegister,
 }
 
+/// An over-budget `cycle` cone that is still on the single-cycle board.
+///
+/// The measured step note contains `cycle step`. A longer cone kept because
+/// that step misses the budget says `cone stays on the board`. A step already
+/// inside the budget, and any handshake or indexed restore, stays locked.
+pub fn over_budget_cycle_cone(path: &TimingPath) -> bool {
+    let note = path.class_note.as_deref().unwrap_or("");
+    if note.contains("P10 handshake") || note.contains("indexed restore") {
+        return false;
+    }
+    if note.contains("within budget") {
+        return false;
+    }
+    note.contains("cycle step")
+        || (note.contains("cone stays on the board") && note.contains("over budget"))
+}
+
 /// Trial for `path`. Handshake notes and multi-cycle tags win over class.
 pub fn trial_for_path(path: &TimingPath) -> OverBudgetTrial {
     if path.slack_fo4 >= -1e-9 {
@@ -866,10 +894,22 @@ pub fn trial_for_path(path: &TimingPath) -> OverBudgetTrial {
         return OverBudgetTrial::Leave;
     }
     let note = path.class_note.as_deref().unwrap_or("");
-    // A cycle-contract step is the clock path. Shrink it in place. A register
-    // would add a cycle `steps` does not publish.
-    if note.contains("cycle step") {
+    // An over-budget cycle step is still the clock path. Budget-fit registers
+    // may land along that cone. A handshake or indexed restore stays
+    // balance-only: a new register there moves a pulse the consumer still
+    // samples on the old cycle.
+    if note.contains("cycle step")
+        && (note.contains("P10 handshake") || note.contains("indexed restore"))
+    {
         return OverBudgetTrial::BalanceField;
+    }
+    // A declared over-budget step is the cone to cut, including when the
+    // class is a dense or next-state bundle. Handshake locks stay above.
+    if over_budget_cycle_cone(path) {
+        if path.path_kind == PathKind::RegToReg && path.nodes.len() > 1 {
+            return OverBudgetTrial::CriticalChain;
+        }
+        return OverBudgetTrial::BalanceThenRegister;
     }
     if note.contains("P10 handshake") || note.contains("indexed restore") {
         return OverBudgetTrial::RefuseRegister;
@@ -966,6 +1006,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         };
         assert!(is_shallow_over_budget(&p, budget));
         p.total_fo4 = 25.0;
@@ -1049,6 +1091,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         }
     }
 
@@ -1126,6 +1170,7 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
             branch_arms: Default::default(),
             launch_fo4: Default::default(),
             loc: crate::loc::SourceLoc::file_start("lzc.sv"),
@@ -1194,6 +1239,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: crate::loc::SourceLoc::file_start("axi2mem.sv"),
@@ -1244,6 +1290,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: crate::loc::SourceLoc::file_start("policy.sv"),

@@ -1480,6 +1480,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -1506,6 +1507,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         design
     }
@@ -1557,6 +1560,7 @@ mod tests {
         unrolled.id = 42;
         unrolled.endpoint = "alu.other/D".into();
         unrolled.total_fo4 = 400.0;
+        unrolled.nodes.clear();
         design.paths.push(unrolled);
         crate::pipe_contract::apply_cycle_contracts(&mut design);
         assert!(!design.paths[0].multi_cycle, "step stays on the board");
@@ -1569,12 +1573,56 @@ mod tests {
         );
         assert_eq!(
             crate::pass_strategy::trial_for_path(&design.paths[0]),
-            crate::pass_strategy::OverBudgetTrial::BalanceField
+            crate::pass_strategy::OverBudgetTrial::BalanceThenRegister
         );
+        assert!(crate::pass_strategy::trial_allows(
+            crate::pass_strategy::trial_for_path(&design.paths[0]),
+            crate::ir::OpportunityKind::InsertReg
+        ));
+        let reports = crate::pipe_contract::cycle_step_reports(&design);
+        assert_eq!(reports.len(), 1);
+        assert!(!reports[0].within_budget);
+        assert_eq!(reports[0].step_fo4, Some(280.0));
+        // The launch net is an LHS on the path, not the flop named by the
+        // startpoint. The step is still the worst q→d cone.
+        let mut via_node = design.paths[0].clone();
+        via_node.id = 99;
+        via_node.startpoint = "alu.reg0/CP".into();
+        via_node.endpoint = "alu.result_o/D".into();
+        via_node.total_fo4 = 310.0;
+        via_node.nodes = vec![0, 1];
+        design.paths.push(via_node);
+        let again = crate::pipe_contract::cycle_step_reports(&design);
+        assert_eq!(again[0].step_fo4, Some(310.0));
+        // A node on the over-budget step, not named by cut-ok, is still a cut.
+        // The launch flop is not.
+        design
+            .modules
+            .get_mut(&0)
+            .unwrap()
+            .nodes
+            .get_mut(&5)
+            .unwrap()
+            .lhs = Some("mid_net".into());
+        design.paths[0].nodes = vec![0, 5, 1];
+        let module = design.modules.get(&0).unwrap();
+        let mid = module.nodes.get(&5).unwrap();
+        let launch = module.nodes.get(&0).unwrap();
+        assert!(matches!(
+            crate::pipe_contract::cone_cut_permission(&design, module, mid),
+            crate::pipe_contract::CutPermission::Allowed(Some(_))
+        ));
+        assert!(matches!(
+            crate::pipe_contract::cone_cut_permission(&design, module, launch),
+            crate::pipe_contract::CutPermission::Forbidden(_)
+        ));
+        assert!((crate::pipe_contract::budget_fit_worst(160.6, 10.0, 8) - 17.84).abs() < 0.05);
+        assert_eq!(reports[0].q, "state_q");
+        assert_eq!(reports[0].d, "result_o");
     }
 
     #[test]
-    fn cycle_step_within_budget_excludes_the_unrolled_cone() {
+    fn cycle_step_within_budget_leaves_other_paths_on_the_board() {
         let mut design = make_exclusive_design();
         design.target = TimingTarget::new(4000.0, 20.0, 0.2);
         let loc = design.modules[&0].loc.clone();
@@ -1623,12 +1671,21 @@ mod tests {
         unrolled.total_fo4 = 56.0;
         unrolled.slack_fo4 = -46.0;
         unrolled.multi_cycle = false;
+        unrolled.nodes.clear();
         design.paths.push(unrolled);
         crate::pipe_contract::apply_cycle_contracts(&mut design);
         assert!(!design.paths[0].multi_cycle);
-        assert!(design.paths[1].multi_cycle, "unrolled cone leaves the board");
+        // A148 boot validity: a step inside the budget is a fact about that
+        // step; another path of the module is still a single-cycle path.
+        assert!(
+            !design.paths[1].multi_cycle,
+            "a declared step must not take another path off the board"
+        );
         let note = design.paths[1].class_note.as_deref().unwrap_or("");
-        assert!(note.contains("excluded"), "{note}");
+        assert!(
+            note.contains("within budget") && note.contains("stays on the board"),
+            "{note}"
+        );
     }
 
     fn make_scratch_design(is_comb: bool) -> TimingDesign {
@@ -1862,6 +1919,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -1889,6 +1947,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         let model = CostModel::default();
         classify_and_adjust_paths(&mut design, &model, None);
@@ -2006,6 +2066,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -2032,6 +2093,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -2099,6 +2162,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -2125,6 +2189,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -2193,6 +2259,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -2219,6 +2286,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -2329,6 +2398,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -2357,6 +2427,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -2451,6 +2523,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -2477,6 +2550,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -2553,6 +2628,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -2579,6 +2655,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -2672,6 +2750,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -2698,6 +2777,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -2827,6 +2908,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: if true_chain {
                     Default::default()
                 } else {
@@ -2857,6 +2939,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -2967,6 +3051,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -2993,6 +3078,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -3075,6 +3162,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -3101,6 +3189,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -3167,6 +3257,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -3193,6 +3284,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -3258,6 +3351,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -3284,6 +3378,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         assert_eq!(design.paths[0].path_class, PathClassKind::AtomicOverBudget);
@@ -3356,6 +3452,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -3383,6 +3480,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         // P4 (audit-strict-v4 cache_ctrl 117 nodes): one DivRem does not brand
@@ -3464,6 +3563,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -3491,6 +3591,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -3609,6 +3711,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -3634,6 +3737,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -3725,6 +3830,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -3750,6 +3856,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -3842,6 +3950,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -3867,6 +3976,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];
@@ -3968,6 +4079,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -3993,6 +4105,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let p = &design.paths[0];

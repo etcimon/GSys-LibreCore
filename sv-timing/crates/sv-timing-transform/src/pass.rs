@@ -73,6 +73,12 @@ pub struct PassPolicy {
     /// A147 `--contracts-only`: every module is `require-contract` — a
     /// latency-changing cut lands only on a `cut-ok` anchor.
     pub contracts_only: bool,
+    /// A149 `--cycle-cuts experimental`: a `cycle` cone whose published wait
+    /// cannot absorb the plan (`steps=1`, a hold that does not gate the
+    /// launch) still takes the stage. Every such stage is recorded as
+    /// `UNVERIFIED` in its rationale and in the trace; the emit is a research
+    /// artifact that changes the recurrence, not a boot-valid tree.
+    pub cycle_cuts_experimental: bool,
 }
 
 impl Default for PassPolicy {
@@ -88,6 +94,7 @@ impl Default for PassPolicy {
             emit_structural: true,
             max_passes_cap: None,
             contracts_only: false,
+            cycle_cuts_experimental: false,
         }
     }
 }
@@ -124,6 +131,7 @@ impl PassPolicy {
             emit_structural: true,
             max_passes_cap: None,
             contracts_only: false,
+            cycle_cuts_experimental: false,
         }
     }
 
@@ -204,6 +212,10 @@ pub struct PassContext {
     pub balance_mux_credit: BTreeMap<PathId, f64>,
     /// Optional JSONL algorithm trace (`--trace-log`).
     pub algo_trace: AlgoTrace,
+    /// A149 M6: parameter changes refused plans would need
+    /// (`{module, domain, param, published, required, stages}`), for the
+    /// JSON report.
+    pub latency_updates: Vec<serde_json::Value>,
     /// InsertReg applies per module this run (cap spray on one FPU tree).
     pub insert_reg_by_module: BTreeMap<String, u32>,
     /// Area/depth ledger of every gated edit (A114).
@@ -238,6 +250,7 @@ impl PassContext {
             balance_mux_credit: BTreeMap::new(),
             relocation: None,
             algo_trace: AlgoTrace::disabled(),
+            latency_updates: Vec::new(),
             insert_reg_by_module: BTreeMap::new(),
             tradeoffs: Vec::new(),
             module_cells_per_fo4: BTreeMap::new(),
@@ -605,6 +618,12 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
             &ctx.policy.worklist,
             ctx.relocation.as_ref(),
         );
+        if std::env::var("SVT_DEBUG_PORT_STAGE").is_ok() {
+            eprintln!(
+                "DBG raw worklist: {:?}",
+                work.iter().map(|w| (w.path_id, w.opportunity.as_ref().map(|o| o.rationale.chars().take(20).collect::<String>()))).collect::<Vec<_>>()
+            );
+        }
         let mut work: Vec<_> = work
             .into_iter()
             .filter_map(|mut w| {
@@ -617,6 +636,21 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
                     return None;
                 }
                 if stage_s4 {
+                    // A149 M12: a port stage is legal by protocol and judged on
+                    // the cross-module total it carries, not on the class of
+                    // the short path that ends at the port's assembly.
+                    if opp.kind == OpportunityKind::InsertReg
+                        && opp.rationale.starts_with("port-stage")
+                    {
+                        // once per port: the opportunity is regenerated at every
+                        // measure while the assembly's cone is unchanged
+                        let placed = ctx.trace.records.iter().any(|r| {
+                            r.kind == EditKind::InsertReg
+                                && r.node_id == Some(opp.insert_after)
+                                && r.origin.file == opp.loc.file
+                        });
+                        return if placed { None } else { Some(w) };
+                    }
                     let path = ctx.design.paths.iter().find(|p| p.id == w.path_id)?;
                     // Resilient datapath may still carry a P10 class_note from
                     // sharing an always_ff with a status pulse (gemm 144-node).
@@ -651,6 +685,12 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
                 }
                 if is_latency_neutral_kind(opp.kind) {
                     return Some(w);
+                }
+                // A149 M12: a port stage waits for S4; a neutral trial in its
+                // place would mark the path skipped before the stage is tried.
+                if opp.kind == OpportunityKind::InsertReg && opp.rationale.starts_with("port-stage")
+                {
+                    return None;
                 }
                 // S3: a card whose preferred tool is a register (plain cones)
                 // still gets its latency-neutral tries — rebalance over the
@@ -757,7 +797,22 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
             // shallow, then remaining monsters. audit-gemm-rcf S4 sorted
             // shallow-first and never reached the 144-node primary.
             let budget = ctx.design.target.budget_fo4;
+            // A150: the worklist's port-stage-first partition must survive
+            // this re-sort. At whole-core scale the resilient/shallow prefix
+            // alone exceeds the idle limit, so a port stage sorted by slack
+            // behind it was never attempted (hyp8 core-8fo4: 0 attempts in
+            // three S4 passes while the 5-module probe landed it).
+            let port_stage = |w: &crate::worklist::WorkItem| {
+                w.opportunity.as_ref().is_some_and(|o| {
+                    o.kind == OpportunityKind::InsertReg && o.rationale.starts_with("port-stage")
+                })
+            };
             work.sort_by(|a, b| {
+                match (port_stage(a), port_stage(b)) {
+                    (true, false) => return std::cmp::Ordering::Less,
+                    (false, true) => return std::cmp::Ordering::Greater,
+                    _ => {}
+                }
                 let resilient = |id| {
                     ctx.design
                         .paths
@@ -860,8 +915,11 @@ pub fn run_correct_passes(mut ctx: PassContext) -> TransformResult<PassContext> 
                     if !sol.allows_opportunity(opp.kind) {
                         let path = ctx.design.paths.iter().find(|p| p.id == w.path_id);
                         let ex = path.and_then(|p| exception_policy(&ctx.design, p));
+                        // A149 M12: a port stage is legal by protocol; the
+                        // module's cleanliness winner does not gate it.
                         let admit_ex = opp.kind == OpportunityKind::InsertReg
-                            && ex.as_ref().is_some_and(|e| e.admit_insert_reg);
+                            && (ex.as_ref().is_some_and(|e| e.admit_insert_reg)
+                                || opp.rationale.starts_with("port-stage"));
                         if !admit_ex {
                             skipped.insert(w.path_id);
                             *refuse_by_reason
@@ -1305,8 +1363,14 @@ fn apply_work_item(
         .map(|p| cone_lane(&ctx.design, p))
         .unwrap_or(ConeLane::CombDatapath);
 
+    let cycle_cut = ctx
+        .design
+        .paths
+        .iter()
+        .find(|p| p.id == opp.path_id)
+        .is_some_and(sv_timing_core::pass_strategy::over_budget_cycle_cone);
     let insert_preferred =
-        reloc_id.contains("insert_reg") || opp.kind == OpportunityKind::InsertReg;
+        reloc_id.contains("insert_reg") || opp.kind == OpportunityKind::InsertReg || cycle_cut;
     let balance_preferred = reloc_id.contains("balance") || opp.kind == OpportunityKind::BalanceMux;
     let admit_ex = ctx
         .design
@@ -1326,9 +1390,12 @@ fn apply_work_item(
 
     // Pattern trial. Multi-cycle and atomic leaves are not cut. A handshake
     // takes no register. A dense cone or independent bundle is balance-only.
+    // A149 M12: a port stage is judged by the protocol it sits on, not by the
+    // pattern class of the short path that ends at the port's assembly.
+    let port_stage = opp.kind == OpportunityKind::InsertReg && opp.rationale.starts_with("port-stage");
     if let Some(path) = ctx.design.paths.iter().find(|p| p.id == opp.path_id) {
         let trial = sv_timing_core::pass_strategy::trial_for_path(path);
-        if !sv_timing_core::pass_strategy::trial_allows(trial, opp.kind) {
+        if !port_stage && !sv_timing_core::pass_strategy::trial_allows(trial, opp.kind) {
             return Ok((false, Some("trial_disallows_kind")));
         }
     }
@@ -1532,21 +1599,27 @@ fn apply_work_item(
         && ctx.policy.allow_latency
         && !path_mc
         && insert_used < insert_cap
-        && (lane.allows_insert_reg() || admit_ex)
+        && (lane.allows_insert_reg() || admit_ex || port_stage)
     {
-        let ins = ctx
-            .design
-            .opportunities
-            .iter()
-            .find(|o| o.path_id == opp.path_id && o.kind == OpportunityKind::InsertReg)
-            .cloned()
-            .or_else(|| {
-                if opp.kind == OpportunityKind::InsertReg {
-                    Some(opp.clone())
-                } else {
-                    None
-                }
-            });
+        // A149 M12: a port stage is its own plan (one register at the
+        // port); the lane of the short anchor path does not gate it and no
+        // other InsertReg opportunity of that path stands in for it.
+        let ins = if port_stage {
+            Some(opp.clone())
+        } else {
+            ctx.design
+                .opportunities
+                .iter()
+                .find(|o| o.path_id == opp.path_id && o.kind == OpportunityKind::InsertReg)
+                .cloned()
+                .or_else(|| {
+                    if opp.kind == OpportunityKind::InsertReg {
+                        Some(opp.clone())
+                    } else {
+                        None
+                    }
+                })
+        };
         if let Some(ins_opp) = ins {
             match prepare_pipeline_cuts(ctx, &ins_opp) {
                 Ok(plan) => {
@@ -1568,6 +1641,10 @@ fn apply_work_item(
                     return Ok((false, Some("latency_not_allowed")));
                 }
                 Err(TransformError::InvalidOpportunity(detail)) => {
+                    eprintln!(
+                        "cut.refuse {} path {}: {detail}",
+                        ctx.active_module_name, ins_opp.path_id
+                    );
                     ctx.log_algo(
                         "cut.refuse_detail",
                         AlgoTrace::kv([
@@ -1589,7 +1666,7 @@ fn apply_work_item(
         "latency_not_allowed"
     } else if insert_preferred && path_mc {
         "multi_cycle"
-    } else if insert_preferred && !lane.allows_insert_reg() && !admit_ex {
+    } else if insert_preferred && !lane.allows_insert_reg() && !admit_ex && !port_stage {
         "lane_forbids_insert_reg"
     } else if insert_preferred && insert_used >= insert_cap {
         "insert_cap"

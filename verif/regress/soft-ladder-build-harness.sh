@@ -182,7 +182,14 @@ fi
 # log line when the fork is not installed.
 VLT_FLAVOUR="${SOFT_LADDER_VERILATOR_FLAVOUR:-g6lc}"
 PINNED_HOME="/root/tools/verilator-v5.008"
-if [[ -z "${VLT_HOME:-}" && -z "${VERILATOR_ROOT:-}" && "$VLT_FLAVOUR" == "g6lc" ]]; then
+# env.sh exports VLT_HOME at the pinned upstream. Flavour g6lc is the
+# tools/verilator install; that prefix wins unless VLT_HOME already names it.
+if [[ "$VLT_FLAVOUR" == "g6lc" && "${VLT_HOME:-}" != *g6lc* ]]; then
+  if [[ -n "${VLT_HOME:-}" ]]; then
+    log "VLT_HOME=$VLT_HOME is not the g6lc fork; selecting the tools/verilator prefix"
+  fi
+  VLT_HOME=""
+  VERILATOR_ROOT=""
   for cand in "$ROOT/build-platform/workspace/tooling/verilator-g6lc"               "${VERILATOR_INSTALL_DIR:-}"               /opt/testharness/toolchains/verilator-v5.008-g6lc; do
     [[ -n "$cand" && -x "$cand/bin/verilator" && -d "$cand/runtime" ]] || continue
     VLT_HOME="$cand"; export VERILATOR_ROOT="$cand/runtime"; break
@@ -393,6 +400,27 @@ if [[ -n "${SOFT_LADDER_OVERLAY:-}" ]]; then
     "${OVERLAY_ARGS[@]}"
   FLIST="$OVERLAY_DIR/Flist.cva6.overlay"
   log "overlay flist=$FLIST fields=$SOFT_LADDER_OVERLAY"
+fi
+
+# Corrected sv-timing emit. Isolated only: the stock flist is flattened and
+# each live source whose basename matches an *__svt.sv is replaced. The
+# remote tools/verilator (g6lc) build then verilates that list.
+if [[ -n "${SOFT_LADDER_EMIT_FLIST:-}" ]]; then
+  [[ "${SOFT_LADDER_ISOLATED:-0}" == 1 ]] || {
+    log "REFUSING: SOFT_LADDER_EMIT_FLIST requires SOFT_LADDER_ISOLATED=1"
+    exit 2
+  }
+  [[ -f "$SOFT_LADDER_EMIT_FLIST" ]] || {
+    log "ERROR: emit flist missing: $SOFT_LADDER_EMIT_FLIST"
+    exit 1
+  }
+  EMIT_OUT="$VERLIB_DIR/Flist.cva6.emit"
+  CVA6_REPO_DIR="$ROOT" python3 "$ROOT/verif/regress/emit_flist_overlay.py" \
+    --stock "$ROOT/$STOCK_FLIST" \
+    --emit "$SOFT_LADDER_EMIT_FLIST" \
+    --out "$EMIT_OUT"
+  FLIST="$EMIT_OUT"
+  log "emit overlay flist=$FLIST from $SOFT_LADDER_EMIT_FLIST"
 fi
 
 # Model threads: 4 by default -- the measured point for the 8-hart server

@@ -31,6 +31,14 @@ latency-neutral emit is 55.664 FO4; 10 FO4 remains open. The IQ now has
 paired placement/repair evidence without disabled arcs: 3.606→2.806 ns
 worst arrival at +3.0% area. See A119 for scope, proofs and residuals.
 
+**A148 update:** each over-budget cone asks for
+`ceil(FO4 / budget) − 1` cuts, capped at 16. The stage dial raises that
+cap and does not lower it. `cone_cut_permission` unlocks intermediate
+nodes on a `cycle` `q`→`d` path; the launch `q` and other `no-cut` names
+stay locked. `--real-cut-feeds` writes those stages. The `cone_budget`
+reparse is 60 → segments of 8.0 and 4.0 structural FO4. Section A148.
+A147 remains the delay-v44 rungs below.
+
 **A147 update (delay-v44):** compose links reads to their reaching
 definitions (the rename's 234.9 FO4 chain ran through a later write of the
 same block; now 130.4). Three hand rungs, each proven before measurement:
@@ -2620,9 +2628,12 @@ A level is **only** a preset over ten dials. It never relaxes a safety gate
 `allows_new_state` iff stages>0 and passes>0. `-O1`/`-Oz` are latency-neutral
 by construction. `--allow-latency` remains a hard gate a level cannot relax.
 
-Dial 4 > 1 implies BudgetFit unless the caller set a cut strategy. Multi-cut
-cap in `select_pipeline_cuts` is `max_stages_per_region.clamp(1,16)` — soak
-often sets 20 on the CLI which then clamps to 16.
+Dial 4 > 1 implies BudgetFit unless the caller set a cut strategy. The
+per-cone cap is not the dial alone. `select_pipeline_cuts` takes
+`max(budget_fit_cuts(path FO4, budget, 16), dial)` and then clamps to
+1..16 (A148). The dial can raise the cap. It does not leave a 160 FO4
+cone at the `-O3` default of 8. A CLI stage count above 16 still clamps
+to 16.
 
 `analysis_digest` includes only effort + cache_mode (what can change analyze).
 Transform dials must not invalidate the analyze cache.
@@ -2842,8 +2853,12 @@ change of the same operators.
 
 The only transform that **adds state**. Requires `--allow-latency`. Walks
 path nodes in order; when the open segment would exceed \(B\), cut after
-the previous node (greedy budget-fit). Cap `max_cuts` from
-`max_stages_per_region` clamped 1..16. Fallback: single mid-cut.
+the previous node (greedy budget-fit). The cut count for that path is
+`budget_fit_cuts` = \(\lceil \mathrm{FO4}/B \rceil - 1\), hard-capped at
+16, then raised to the stage dial when the dial is larger (A148).
+Fallback: single mid-cut. Under `require-contract`, each wanted cut snaps
+to the nearest node `cone_cut_permission` allows, not only the named
+`cut-ok`.
 
 Refuse: multi_cycle; class `discourages_insert_reg` (except UnderBudget
 which would not be here); empty path; total ≤ B; single-node atomic
@@ -2929,15 +2944,19 @@ also hold a zero/lean feed.
 
 ### Summary
 
-| Strategy | Rule | Who uses it |
+| Strategy | Rule | Where it is read |
 |---|---|---|
-| MidNode | index midpoint, cost-blind | A/B only |
-| CostBalanced | prefix-sum bisection, two segments | `-O1`/`-O2` |
-| BudgetFit | greedy fill to \(B\) | `-O3`/`-Os`, multi-cut |
+| MidNode | index midpoint, cost-blind | preset label; not the InsertReg walker |
+| CostBalanced | prefix-sum bisection | preset label for `-O1`/`-O2` |
+| BudgetFit | greedy fill to \(B\) | preset label for `-O3`/`-Os`; also the walker |
 
-`-Os` uses BudgetFit because filling stages to the budget is **flop-minimal**.
-What distinguishes `-Os` is high `min_gain`, tolerated residual overage
-(`slack_target = -4`), and area-weighted ordering.
+`select_pipeline_cuts` always calls `schedule_pipeline_cuts`. That walk is
+the budget-fit segmentation for every level that is allowed to add
+latency, including `-O2`. Dial 3 is recorded and printed. It does not
+choose a different cut. `-Os` still fills stages to the budget because
+that walk is flop-minimal. What distinguishes `-Os` is high `min_gain`,
+tolerated residual overage (`slack_target = -4`), area-weighted
+ordering, and a stage dial of 2 that can only raise a cone's own count.
 
 ### Behavioural study
 
@@ -8377,6 +8396,68 @@ ranks the *measured* contributors before an architecture change is made
 on a model's say-so — here it turned a latency-costing split into a
 latency-free pipeline stage.
 
+## A148 — Cone budget, contract unlock, and the emitted stages
+
+**Cut count.** `budget_fit_cuts(total, B, 16)` is
+\(\lceil total / B \rceil - 1\), or 0 when the cone is already inside
+\(B\). `budget_fit_worst` is `total / (cuts + 1)`. One operator wider
+than \(B\) is not divided by that formula. `select_pipeline_cuts` asks
+the walker for `max(that count, the stage dial)`, then clamps to 1..16.
+`-O3`'s dial of 8 is a floor on the cap, not the cap. A 320 FO4 chain
+with the dial left at 8 still receives 16 cut slots
+(`budget_fit_cuts_follow_the_cone_not_the_named_anchor`).
+
+**What a contract unlocks.** Order inside `cut_permission`: a rejected
+pragma forbids everything; the cycle capture `d` is allowed even when
+`no-cut` names it; an explicit `cut-ok` wins over `no-cut` on the same
+name; any other `no-cut` is forbidden; `require-contract` without an
+anchor is forbidden. `cone_cut_permission` keeps that direct allow. It
+then allows a node that sits on an over-budget path naming both cycle
+`q` and `d`, including a nameless expression-spine node. The launch `q`
+and a different `no-cut` stay forbidden. An invalid contract stays
+forbidden. `path_names` matches the startpoint, the endpoint, an LHS, or
+an RHS read, so a launch flop whose startpoint string is `reg0/CP` still
+binds when the cone reads `a_q`.
+
+**Trial.** An over-budget `cycle step` note may take `InsertReg`
+(`CriticalChain` or `BalanceThenRegister`). The same note plus `P10
+handshake` or `indexed restore` stays `BalanceField`: a new register
+there moves a pulse the consumer still samples on the old cycle. A step
+inside the budget excludes the longer cones in that module. A step over
+budget, or an unmeasured step, clears `multi_cycle` on the module.
+
+**From pragma to corrected SV.** Comments are collected into
+`PipeContract`. A `protocol` implies `require-contract`. With
+`--allow-latency` and `--real-cut-feeds`, each admitted cut becomes a
+carried stage when it resolves to a domain: `pipe_svt_pN_c` is assigned
+the origin RHS, an `always_ff` samples it and chains `pipe_svt_pN_v`
+from the protocol valid, and the origin assign reads `pipe_svt_pN`.
+The emitted file is reparsed. `post_analyze` path totals are the segment
+FO4. The JSON field `max_path_fo4_after` is the in-pass IR max and can
+stay at the pre-cut total after the reparse has already split the cone.
+
+**Evidence.** `cone_budget`, sixteen 32-bit adds, protocol `cb`,
+`no-cut` on `a_q`, `cycle q=a_q d=y_d hold=valid_i steps=1`, `cut-ok`
+on `y_d`. Structural path 60 FO4. The emit wrote seven stages
+(`pipe_svt_p1` … `pipe_svt_p7`). Reparse paths are 8.0 and 4.0 FO4; the
+measured `a_q`→`y_d` step is 4.0 and within budget; frequency closure
+closes. Verilator 5.020 `--lint-only -Wall -Wno-fatal` exited 0
+(filename, unused `SVT_*` parameters, unused `svt_zero`). `valid_o`
+still reads `valid_q` because that fixture has no `result` line. The
+delay-v43 calibration file was not rerun. Delay-v44's compose change is
+a different structural reading (rename 234.9 → 130.4, lsq 181.2 → 216.9,
+scoreboard 86.1 → 145.8) and was not refit through this cut count.
+
+**Still refused.** A leading Mul/DivRem wider than \(B\). A `latency`
+line whose parameter and base are the same name: adding stages requires
+an RTL boundary and the consumer depth together, not a larger copy of
+that parameter (`check_latency`). A result rewrite whose valid does not
+move with it. A uniform split that looks under 10 while the node inside
+the segment is one 64-bit add (about 12 structural FO4, about 26
+adjusted). On the delay-v43 file, the 16-cut structural aim stays over
+10 for `g6lc_rename` (13.8) and `g6lc_lsq` (10.7). Those are aims on
+that file, not a new board.
+
 ## A146 — Structural reads the board: dependency floor, load, calibration
 
 **Finding.** On the A144 board `wt_dcache_wbuffer` measured 2.934 ns = 137.1
@@ -8638,11 +8719,13 @@ parameter its consumers read (the wrapper's liveness depth, a latency
 table). A plan of k stages is admitted only when `base + k` equals the
 parameter's elaborated value; otherwise the refusal names the value to
 set. On the multiplier (`base=CVA6Cfg.MultStages`, the source follows the
-parameter since A128): under `MultStages = 2` the `prod_sum` stage is
-proposed and refused — "set `CVA6Cfg.MultStages` = 3 to admit the stage";
-under 3 the module meets the structural budget and no further stage is
-proposed. The adoption hazard (a fourth stage the wrapper cannot track)
-is closed by contract.
+parameter since A128). When the published name and `base` are the same
+parameter, `check_latency` refuses the plan: the source already follows
+that parameter, and raising the parameter on both sides does not create
+a spare cycle. The refusal asks for an RTL boundary change and a matching
+consumer depth. A plan is admitted only when `base + added` equals a
+*different* published parameter. The adoption hazard (a further stage
+the wrapper cannot track) is closed by that check.
 
 ## A128 — Contracts on the whole list; the multiplier's third stage adopted
 
@@ -8763,8 +8846,9 @@ map) with the architecture that would move each written beside it, one
 `cut-ok` where a stage is admissible (the multiplier's shifted-product
 sum). Verdicts: the multiplier's bare cuts on `operand_a`/`sign_a`/`sign_b`
 are refused (they would have desynchronised valid/id — exactly the hazard
-the contract exists for); the planner, now driven by permission, snaps the
-stage-2 cut to `prod_sum`; the emitter refuses it because `prod_sum` lives
+the contract exists for); that round's planner snapped the stage-2 cut to
+the single named anchor `prod_sum` (superseded for a `cycle` cone by
+A148, which keeps intermediate nodes); the emitter refuses it because `prod_sum` lives
 in `gen_two_stage` — generate-scope emission is the next emitter
 mechanism. The state machines ask for input staging (`stage-input`,
 reserved in the vocabulary); rename and realign for id-less domains;
@@ -8794,13 +8878,16 @@ span, treated as the design's own proof obligation) applied to pipelining:
 // svt-pipe: result ex valid=res_valid_d id=res_tid_d
 // svt-pipe: cut-ok ex        ← next assignment may be a stage boundary
 // svt-pipe: no-cut           ← next assignment never is
-// svt-pipe: require-contract ← only cut-ok anchors may be cut in this module
+// svt-pipe: cycle ex q=state_q d=result_d hold=valid_q steps=1
+// svt-pipe: require-contract ← a bare name is not a stage; a cycle cone is
 ```
 
-**What the transform does with it.** `InsertReg` consults the resolved
-contract: a `no-cut` anchor (or a `require-contract` module without
-`cut-ok`) refuses the cut; a cut inside a declared domain carries the
-domain's bundle — per stage, in data order,
+**What the transform does with it.** `cut_permission` still refuses a
+`no-cut` name and a `require-contract` module with no anchor.
+`cone_cut_permission` (A148) then allows every node on an over-budget
+path that names the cycle `q` and `d`, except the launch `q` and any
+other `no-cut`. `InsertReg` consults that cone permission. A cut inside a declared
+domain carries the domain's bundle — per stage, in data order,
 `v <= flush ? 0 : (valid_prev & ~kill(id_prev))`, `id <= id_prev`, every
 carried signal in lockstep — and the consumer side named by `result` reads
 the last stage's valid (killed again at use), id and carried copies. The
@@ -8843,8 +8930,10 @@ elaborate in Verilator and not in slang.
 
 **Not done, by design.** No protocol inference; no balance registers on
 side paths (refused instead); no ready/back-pressure; no cross-port
-retiming; the planner's cut points are admitted, carried or refused, not
-chosen by the contract. Design: `architecture/PIPELINE-PRAGMAS.md`.
+retiming. The planner does choose anchors from the contract when a
+`cycle` cone is over budget (A148): the snap walks back to a
+cone-permitted node instead of collapsing every cut onto one `cut-ok`.
+Design: `architecture/PIPELINE-PRAGMAS.md`.
 
 ## A122 — From hand tunings to generic transforms: what each rewrite really did
 

@@ -766,6 +766,8 @@ fn compose_module_paths(design: &mut TimingDesign, mid: ModuleId) {
             path_class: crate::path_class::PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: Some("P5 composed launch-capture".into()),
+            stage_start: None,
+            stage_end: None,
         });
     }
     for path in design.paths.iter_mut().filter(|p| p.module == mid) {
@@ -2603,10 +2605,13 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
 
         // InsertReg only for plain comb datapath. Exclusive/atomic/FPU/SVA
         // lanes never get a spray-on flop (4 GHz: 181 InsertRegs on vfdsu).
-        if exclusive {
+        // An over-budget cycle cone is the exception: the long next-state
+        // and dense bundles are the paths the budget-fit cuts are for.
+        let cycle_cone = crate::pass_strategy::over_budget_cycle_cone(path);
+        if exclusive && !cycle_cone {
             continue;
         }
-        if !crate::cone_lane::cone_lane(design, path).allows_insert_reg() {
+        if !crate::cone_lane::cone_lane(design, path).allows_insert_reg() && !cycle_cone {
             continue;
         }
         if !crate::pass_strategy::admits_insert_reg(path) {
@@ -2690,6 +2695,9 @@ pub fn suggest_opportunities(design: &TimingDesign) -> Vec<Opportunity> {
             });
         }
     }
+    // A149 M12: a register on an elastic output port cuts the cross-module
+    // path the port is part of; the module's own paths do not show the gain.
+    out.extend(crate::pipe_contract::port_stage_opportunities(design));
     out
 }
 
@@ -2798,6 +2806,8 @@ mod tests {
             path_class: crate::path_class::PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         }
     }
 
@@ -2839,6 +2849,8 @@ mod tests {
             path_class: crate::path_class::PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         let hints = sta_hints_from_design(&design, 4);
         assert!(!hints.is_empty());
@@ -3063,6 +3075,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(1),

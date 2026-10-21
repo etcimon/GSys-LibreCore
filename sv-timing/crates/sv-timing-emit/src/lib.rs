@@ -843,6 +843,10 @@ fn owning_module_slice(rewritten: &str, trace: &EditTrace, original: &str) -> (u
 pub fn gen_block_label(source: &str, line: u32) -> Option<String> {
     let l = source.lines().nth(line.checked_sub(1)? as usize)?;
     let t = crate::rhs::strip_line_comment_pub(l);
+    // `always_comb begin : name` is a statement label, not a generate.
+    if t.contains("always_ff") || t.contains("always_comb") || t.contains("always_latch") {
+        return None;
+    }
     let i = t.find("begin")?;
     let rest = t[i + "begin".len()..].trim_start();
     let rest = rest.strip_prefix(':')?.trim_start();
@@ -850,7 +854,64 @@ pub fn gen_block_label(source: &str, line: u32) -> Option<String> {
         .chars()
         .take_while(|c| c.is_ascii_alphanumeric() || *c == '_' || *c == '$')
         .collect();
-    (!label.is_empty()).then_some(label)
+    if label.is_empty() || labeled_begin_inside_always(source, line) {
+        return None;
+    }
+    Some(label)
+}
+
+/// A `begin : name` inside `always_*` is a statement label, not a generate.
+/// A pipe flop cannot be injected there.
+fn labeled_begin_inside_always(source: &str, line: u32) -> bool {
+    let mut stack: Vec<bool> = Vec::new();
+    let mut arm_always = false;
+    for (idx, raw) in source.lines().enumerate() {
+        if idx as u32 + 1 > line {
+            break;
+        }
+        let t = crate::rhs::strip_line_comment_pub(raw);
+        if t.contains("always_ff") || t.contains("always_comb") || t.contains("always_latch") {
+            arm_always = true;
+        }
+        for tok in t.split(|c: char| !(c.is_ascii_alphanumeric() || c == '_')) {
+            match tok {
+                "begin" => {
+                    stack.push(arm_always);
+                    arm_always = false;
+                }
+                "end" => {
+                    stack.pop();
+                }
+                _ => {}
+            }
+        }
+    }
+    stack.len() > 1 && stack[..stack.len() - 1].contains(&true)
+}
+
+/// Declarations cannot follow statements inside a generate. Pull them out of
+/// the late pipe block so they sit after the `begin`.
+fn split_generate_late(late: &str) -> (String, String) {
+    let mut decls = String::new();
+    let mut rest = String::new();
+    for line in late.lines() {
+        let t = line.trim_start();
+        let decl = t.starts_with("localparam")
+            || t.starts_with("parameter")
+            || t.starts_with("logic")
+            || t.starts_with("var ")
+            || t.starts_with("wire")
+            || t.starts_with("bit ")
+            || t.starts_with("//");
+        if decl {
+            decls.push_str(line);
+            decls.push('\n');
+        } else if !t.is_empty() {
+            rest.push_str(line);
+            rest.push('\n');
+        }
+    }
+    (decls, rest)
 }
 
 /// Inject `top` right after the `begin : label` line of the named generate
@@ -896,6 +957,18 @@ fn inject_into_gen_block(source: &str, label: &str, top: &str, late: &str) -> St
     let Some(end_idx) = end_idx else {
         return source.to_string();
     };
+    // A localparam or var after a statement in the generate is not a legal
+    // module item there. Declarations go with the block header; assigns and
+    // the stage flop stay just before the matching end.
+    let (decl_late, stmt_late) = split_generate_late(late);
+    let top = if decl_late.is_empty() {
+        top.to_string()
+    } else if top.is_empty() {
+        decl_late
+    } else {
+        format!("{top}{decl_late}")
+    };
+    let late = stmt_late.as_str();
     let indent: String = lines[begin_idx]
         .chars()
         .take_while(|c| c.is_whitespace())
@@ -918,7 +991,7 @@ fn inject_into_gen_block(source: &str, label: &str, top: &str, late: &str) -> St
         out.push('\n');
         if i == begin_idx && !top.trim().is_empty() {
             out.push_str(&format!("{indent}  // sv-timing auto-correct (stage declarations, generate scope {label})\n"));
-            out.push_str(top);
+            out.push_str(&top);
             if !top.ends_with('\n') {
                 out.push('\n');
             }
@@ -1718,7 +1791,11 @@ endmodule
   end
 endmodule
 "#;
-        let line = src.lines().position(|l| l.contains("event_group[h]")).unwrap() as u32 + 1;
+        let line = src
+            .lines()
+            .position(|l| l.contains("event_group[h]"))
+            .unwrap() as u32
+            + 1;
         let snippet = "  logic svt_bm_0;\n  logic svt_bm_top;\n  always_comb begin : svt_bm_top_stage\n    svt_bm_0 = mis_i & brh;\n    svt_bm_top = valid_i & svt_bm_0;\n  end\n";
         let mut trace = EditTrace::new();
         trace.record_edit(EditRecord {
@@ -2172,6 +2249,72 @@ endmodule
         tree.add_file("gemm_span__svt.sv", FileRole::Module, text);
         let report = integrity_reparse(&tree, &ParseOptions::default());
         assert_valid_sv_bundle(&report).expect("reparse gemm_span richer emit");
+    }
+
+    /// An initializer cut must not become the feed of a later architectural
+    /// assign. `idx_is_d` keeps its expression; `shamt = '0` stays.
+    #[test]
+    fn initializer_cut_does_not_feed_the_index() {
+        let src = r#"module q (
+  input logic clk_i,
+  input logic [3:0] idx_is_q,
+  output logic [3:0] shamt, idx_is_d
+);
+  always_comb begin
+    shamt = '0;
+    idx_is_d = (idx_is_q + shamt) & 4'hf;
+  end
+endmodule
+"#;
+        let shamt_line = src.lines().position(|l| l.contains("shamt = '0")).unwrap() as u32 + 1;
+        let idx_line = src.lines().position(|l| l.contains("idx_is_d =")).unwrap() as u32 + 1;
+        let mut trace = EditTrace::new();
+        for (id, line, name) in [
+            (1u32, shamt_line, "pipe_svt_p1"),
+            (2u32, idx_line, "pipe_svt_p2"),
+        ] {
+            trace.record_edit(EditRecord {
+                id,
+                kind: EditKind::InsertReg,
+                origin: SourceLoc {
+                    file: "q.sv".into(),
+                    start_line: line,
+                    start_col: 1,
+                    end_line: line,
+                    end_col: 1,
+                    byte_start: 0,
+                    byte_end: 0,
+                    origin: OriginKind::UserFile,
+                },
+                path_id: Some(0),
+                node_id: Some(id),
+                new_name: Some(name.into()),
+                fo4_before: Some(31.0),
+                fo4_after: Some(10.0),
+                rationale: "queue".into(),
+                emit_rhs: None,
+                emit_rhs_extras: Vec::new(),
+                emit_snippet: None,
+                emit_predicate: false,
+                emit_predicate_from: None,
+                pipe_stage: None,
+                gen_scope: None,
+            });
+        }
+        let mut dense = dense_options_from_source(src);
+        dense.real_cut_feeds = true;
+        let text = apply_edits_to_source_dense(src, &trace, &EmitPolicy::default(), &dense);
+        assert!(text.contains("shamt = '0"), "initializer stays:\n{text}");
+        assert!(
+            text.contains("assign pipe_svt_p1_c = type(idx_is_d)'(((idx_is_q + shamt) & 4'hf))")
+                || text.contains("idx_is_d = (idx_is_q + shamt) & 4'hf"),
+            "index feed is the real expression:\n{text}"
+        );
+        assert!(!text.contains("lean chain"), "{text}");
+        assert!(
+            !text.contains("idx_is_d = pipe_svt_p2"),
+            "index must not sample the unresolved pipe:\n{text}"
+        );
     }
 
     /// `--real-cut-feeds` must rewrite a simple always_ff NBA (path 3131 shape).
@@ -2723,7 +2866,7 @@ endmodule
     /// stage, consumer side rewired onto the last stage — and refuses the
     /// side-path module whose stages would mix operations of two ages.
     #[test]
-    fn pipe_contract_fixture_carries_the_bundle_and_refuses_the_side_path() {
+    fn pipe_contract_fixture_carries_the_bundle_and_balances_the_side_path() {
         use sv_timing_core::{analyze_files, LowerOptions, ParseOptions, TimingTarget};
         use sv_timing_transform::{run_correct_passes, PassContext, PassPolicy};
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -2838,8 +2981,10 @@ endmodule
         // (delay-v43 loads can move the last cut onto `s3` itself; the sum
         // then reads the stage before it)
         assert!(
-            stages.iter().filter_map(|r| r.new_name.as_deref()).any(|p| emitted
-                .contains(&format!("s2 + {{{p}_c_op_q, {p}_c_a_q[29:0]}}"))),
+            stages
+                .iter()
+                .filter_map(|r| r.new_name.as_deref())
+                .any(|p| emitted.contains(&format!("s2 + {{{p}_c_op_q, {p}_c_a_q[29:0]}}"))),
             "{emitted}"
         );
         assert!(
@@ -2873,24 +3018,155 @@ endmodule
             .unwrap();
         let side_at = emitted.find("module pipe_contract_side").unwrap();
         assert!(ff_at < side_at, "stage block emitted into the wrong module");
-        // negative module: the side path is refused, nothing is cut
+        // A149 M1: the side module's `res_d` reads `s1` and `s2` past their
+        // stages. Those nets are carried from the stage after their cut
+        // (balance lines), so the consumer reads copies of its own age and
+        // the plan lands instead of being refused.
         let out = analyze();
         let mut policy = PassPolicy::from_opt(opt, vec!["pipe_contract_side".into()], true);
         policy.emit_structural = true;
         let mut pc = PassContext::new(out.design, out.names, policy);
         pc.assume_clk = true;
         let ctx = run_correct_passes(pc).unwrap();
-        assert!(
-            ctx.trace
-                .records
-                .iter()
-                .all(|r| r.kind != EditKind::InsertReg),
+        let stages: Vec<_> = ctx
+            .trace
+            .records
+            .iter()
+            .filter(|r| r.kind == EditKind::InsertReg)
+            .collect();
+        assert_eq!(
+            stages.len(),
+            3,
             "{:?}",
             ctx.trace
                 .records
                 .iter()
                 .map(|r| &r.rationale)
                 .collect::<Vec<_>>()
+        );
+        let last = stages
+            .iter()
+            .filter_map(|r| {
+                r.pipe_stage
+                    .as_ref()
+                    .map(|s| (s.stage, r.new_name.clone().unwrap()))
+            })
+            .max_by_key(|(s, _)| *s)
+            .map(|(_, n)| n)
+            .unwrap();
+        let mut dense = dense_options_from_source(&source);
+        dense.emit_balance_mux_rtl = true;
+        dense.real_cut_feeds = true;
+        let emitted =
+            apply_edits_to_source_dense(&source, &ctx.trace, &EmitPolicy::default(), &dense);
+        let side = &emitted[emitted.find("module pipe_contract_side").unwrap()..];
+        // the consumer reads the last stage's copies of s1 and s2, not the live nets
+        assert!(
+            side.contains(&format!("{last}_c_s1")) && side.contains(&format!("{last}_c_s2")),
+            "{side}"
+        );
+        assert!(
+            side.contains("? s3 :") && !side.contains("? s1 : s2)"),
+            "live s1/s2 still read by the consumer:
+{side}"
+        );
+        // the balance line for s1 starts one stage after its cut: that stage
+        // samples s1 itself, the next samples the copy
+        assert!(side.contains("_c_s1 <= s1;"), "{side}");
+        assert!(side.contains("_c_s2 <= s2;"), "{side}");
+        assert!(
+            side.matches("_c_s1 <= pipe_svt_").count() >= 1,
+            "a later stage chains the s1 copy:
+{side}"
+        );
+    }
+
+    /// A149 M12: a domain with `ready=` takes elastic stages. The producer's
+    /// reads of the downstream ready — in an assign and in the guard of its
+    /// own capture — move to the first stage's enable; the stages accept when
+    /// empty or draining; the consumer keeps the real ready.
+    #[test]
+    fn elastic_domain_rewires_the_producer_ready_and_chains_enables() {
+        use sv_timing_core::{analyze_files, LowerOptions, ParseOptions, TimingTarget};
+        use sv_timing_transform::{run_correct_passes, PassContext, PassPolicy};
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../fixtures/auto_correct/pipe_elastic.sv");
+        let source = std::fs::read_to_string(&path).unwrap();
+        let mut opt = sv_timing_core::OptOptions::preset(sv_timing_core::OptLevel::O3);
+        opt.max_cells_per_fo4 = 128.0;
+        let out = analyze_files(
+            &[path],
+            &ParseOptions::default(),
+            &LowerOptions {
+                target: TimingTarget::new(4000.0, 20.0, 0.2),
+                opt: opt.clone(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let mut policy = PassPolicy::from_opt(opt, vec!["pipe_elastic".into()], true);
+        policy.emit_structural = true;
+        let mut pc = PassContext::new(out.design, out.names, policy);
+        pc.assume_clk = true;
+        let ctx = run_correct_passes(pc).unwrap();
+        let stages: Vec<_> = ctx
+            .trace
+            .records
+            .iter()
+            .filter(|r| r.kind == EditKind::InsertReg)
+            .collect();
+        assert!(
+            stages.len() >= 2,
+            "{:?}",
+            ctx.trace
+                .records
+                .iter()
+                .map(|r| &r.rationale)
+                .collect::<Vec<_>>()
+        );
+        assert!(stages.iter().all(|r| r
+            .pipe_stage
+            .as_ref()
+            .is_some_and(|s| s.ready.as_deref() == Some("ready_i"))));
+        let mut dense = dense_options_from_source(&source);
+        dense.emit_balance_mux_rtl = true;
+        dense.real_cut_feeds = true;
+        let emitted =
+            apply_edits_to_source_dense(&source, &ctx.trace, &EmitPolicy::default(), &dense);
+        let names: Vec<String> = stages.iter().filter_map(|r| r.new_name.clone()).collect();
+        let first = names.iter().min().unwrap();
+        // the producer: its ready output and its capture guard read the first stage's enable
+        assert!(
+            emitted.contains(&format!("assign ready_o = {first}_en || !valid_q;")),
+            "{emitted}"
+        );
+        assert!(
+            emitted.contains(&format!("end else if ({first}_en || !valid_q) begin")),
+            "{emitted}"
+        );
+        // the stages: accept when empty or draining; the last drains into ready_i
+        assert!(
+            emitted.contains("_en = ~") && emitted.contains("| ready_i; // elastic stage"),
+            "{emitted}"
+        );
+        assert!(
+            emitted.matches("_en; // elastic stage enable").count() == names.len(),
+            "{emitted}"
+        );
+        // the consumer keeps the real ready and reads the last stage's valid
+        assert!(!emitted.contains("assign valid_o = valid_q;"), "{emitted}");
+        assert!(
+            emitted.contains("assign valid_o = (") && emitted.contains("_v & ~(1'b0));"),
+            "{emitted}"
+        );
+        // captures are enabled, flush clears the valid regardless
+        assert!(
+            emitted.contains("if (flush_i) ")
+                && emitted.contains(
+                    "_v <= 1'b0;
+      else if ("
+                ),
+            "{emitted}"
         );
     }
 

@@ -1088,6 +1088,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -1114,6 +1115,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let plan = build_relocation_plan(&design);
@@ -1178,6 +1181,7 @@ mod tests {
                     guard_sites: Default::default(),
                     decl_texts: Default::default(),
                     pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                     branch_arms: Default::default(),
                     launch_fo4: Default::default(),
                     loc: loc(),
@@ -1212,6 +1216,8 @@ mod tests {
                     path_class: PathClassKind::Plain,
                     total_fo4_raw: None,
                     class_note: None,
+            stage_start: None,
+            stage_end: None,
                 });
             }
         }
@@ -1295,6 +1301,7 @@ mod tests {
                 guard_sites: Default::default(),
                 decl_texts: Default::default(),
                 pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
                 branch_arms: Default::default(),
                 launch_fo4: Default::default(),
                 loc: loc(),
@@ -1321,6 +1328,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         classify_and_adjust_paths(&mut design, &CostModel::default(), None);
         let plan = build_relocation_plan(&design);
@@ -1473,6 +1482,7 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
             branch_arms: Default::default(),
             launch_fo4: Default::default(),
             loc: loc(),
@@ -1500,6 +1510,8 @@ mod tests {
             path_class: PathClassKind::Plain,
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         }
     }
 }

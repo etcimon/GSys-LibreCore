@@ -23,9 +23,11 @@
 pub mod adjusted;
 pub mod algo_trace;
 pub mod calibration;
+pub mod carry_over;
 pub mod cleanliness;
 pub mod cone_lane;
 pub mod cost_table;
+pub mod cut_surface;
 pub mod debug_export;
 pub mod error;
 pub mod expr;
@@ -51,6 +53,8 @@ pub mod ref_order;
 pub mod row_local;
 pub mod relocation;
 pub mod select_increment;
+pub mod stage_bubble;
+pub mod stage_pragma;
 pub mod version;
 pub mod width;
 

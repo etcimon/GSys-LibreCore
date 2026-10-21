@@ -16,32 +16,40 @@
 
 | Parameter | Why it matters for RTL coding | Philosophy reference |
 |---|---|---|
-| **Target frequency** (e.g. 1.2 GHz @ TT 0.8V) | Determines how much logic can sit between flip-flops and how aggressive pipelining must be. | "All new logic must close timing at or above the target frequency in the worst-case sign-off corner before it is considered complete." |
+| **Target frequency** (5 GHz nameplate = 8 FO4 per cycle @ TT 0.8 V) | Determines how much logic can sit between flip-flops and how aggressive pipelining must be. | "All new logic must close timing at or above the target frequency in the worst-case sign-off corner before it is considered complete." |
 | **Voltage domains & DVFS** | Multiple voltage islands, dynamic voltage scaling, and retention cells affect clock gating, isolation cells, and reset strategy. | "Explicit CDC documentation and power-intent awareness (UPF or equivalent) are required for any change that crosses a voltage or clock domain." |
 | **Power budget** (total SoC watts, core watts) | Forces decisions on leakage vs. dynamic power, clock-gating density, multi-Vt usage, and whether to use complex instructions or simpler multi-cycle ones. | "High-activity blocks (e.g. vector/matrix units) must include aggressive clock gating and be placed in a dedicated power domain when the budget requires it." |
 | **Thermal envelope** (TDP, junction temperature) | Influences whether high toggle-rate structures are acceptable or low-power design patterns are required. | "Avoid structures known to create thermal hotspots (e.g. very wide parallel comparators) unless the performance gain is explicitly justified against the thermal budget." |
 
-### 1.0 Target of record — CVA6V-EC router class
+### 1.0 Target of record — **5 GHz nameplate / 8 FO4 per cycle** (`hyp8`, since 2026-10-20)
 
-The active target is a **fanless, low-power OpenWrt/Linux router SoC**. Rather than invent numbers,
-the envelope below is **inferred from shipping shelf silicon in exactly that market** (surveyed
-2026-07-24). The closest analogue is a real RISC-V part, which makes it the primary reference:
+The frequency target of record is **8 FO4 of logic per cycle**, quoted as a **5 GHz nameplate at
+the screening process input `fo4_ps = 20` with the standard 0.2 margin** (§1.0c has the budget
+formula, the RTL location and the design rules). Every frequency number elsewhere in this file is
+read against that budget; **no lower frequency or wider budget appears anywhere in this file.**
+
+The *market* envelope below — a **fanless, low-power OpenWrt/Linux router SoC** — is still the
+reference for everything that is not a clock: caches, memory, package, power class and software.
+It is **inferred from shipping shelf silicon in exactly that market** (surveyed 2026-07-24). The
+closest analogue is a real RISC-V part, which makes it the primary reference for those rows:
 
 | Reference part | CPU | Node | Caches | DRAM | Board power | Source |
 |---|---|---|---|---|---|---|
-| **Siflower SF21H8898** (Banana Pi BPI-RV2) — *primary analogue, RISC-V + OpenWrt* | Quad-core 64-bit RISC-V @ **1.25 GHz** + NPU | **TSMC 12nm FFC** | n/p | 512 MB DDR3 (DDR3/3L/4 supported) | PoE-class | Siflower/BPI product data |
-| MediaTek MT7986A "Filogic 830" | Quad Cortex-A53 @ 2.0 GHz | **12 nm** | 32 KB L1I + 32 KB L1D per core, **512 KB unified L2** | 16-bit DDR3-2133 / DDR4-3200, 256 MB–2 GB | ~5 W idle, ~10.5 W peak (whole board) | MT7986A datasheet v1.15; BPI-R3 measurements |
-| MediaTek MT7988A "Filogic 880" | Quad Cortex-A73 @ 1.8 GHz (~30K DMIPS) | 12 nm class | large internal cache | DDR4-3200 | — | MediaTek product page / datasheet |
-| Qualcomm IPQ9574 (Networking Pro 1620) | Quad Cortex-A73 @ 2.2 GHz | **14 nm** | — | 16/32-bit DDR3L/DDR4 | 13 W board / 23 W with Wi-Fi | Qualcomm product brief 87-PW325-1 |
+| **Siflower SF21H8898** (Banana Pi BPI-RV2) — *primary analogue, RISC-V + OpenWrt* | Quad-core 64-bit RISC-V + NPU | **TSMC 12nm FFC** | n/p | 512 MB DDR3 (DDR3/3L/4 supported) | PoE-class | Siflower/BPI product data |
+| MediaTek MT7986A "Filogic 830" | Quad Cortex-A53 | **12 nm** | 32 KB L1I + 32 KB L1D per core, **512 KB unified L2** | 16-bit DDR3-2133 / DDR4-3200, 256 MB–2 GB | ~5 W idle, ~10.5 W peak (whole board) | MT7986A datasheet v1.15; BPI-R3 measurements |
+| MediaTek MT7988A "Filogic 880" | Quad Cortex-A73 | 12 nm class | large internal cache | DDR4-3200 | — | MediaTek product page / datasheet |
+| Qualcomm IPQ9574 (Networking Pro 1620) | Quad Cortex-A73 | **14 nm** | — | 16/32-bit DDR3L/DDR4 | 13 W board / 23 W with Wi-Fi | Qualcomm product brief 87-PW325-1 |
 
-Convergent shelf configuration: **quad-core 64-bit, 1.25–2.2 GHz, 12–14 nm FinFET, 32 KB/32 KB L1
+Convergent shelf configuration: **quad-core 64-bit, 12–14 nm FinFET, 32 KB/32 KB L1
 per core, 512 KB shared L2, 16-bit DDR4, ~17×17 mm BGA, single-digit-watt fanless board.**
 MT7986A publishes its rails directly: **logic 0.85 V, CPU 1.023 V, I/O 1.8/3.3 V.**
 
-CVA6V-EC targets the **RISC-V analogue's operating point (1.25 GHz / 12 nm)** rather than the
-highest-clocked ARM part, because CVA6 is in-order and the program's efficiency ranking
-(`architecture/router-core-upgrade-program.md` §2) buys throughput with MLP, SMT and cores instead
-of frequency.
+The shelf parts are far shallower than the target of record. LibreCore's target is **8 FO4 per
+cycle (5 GHz nameplate at `fo4_ps = 20`)**: the nameplate is a property of the budget, and the
+silicon frequency is 8 FO4 × the node's measured inverter FO4 (`timings fo4-probe`), so the node
+is chosen to make 5 GHz real rather than the budget relaxed to fit a node. The program buys
+throughput with the deep pipeline *and* with MLP, SMT and cores (`architecture/router-core-upgrade-program.md`
+§2); the IPC cost of the depth is the open question the `hyp8` tree exists to answer.
 
 > **Status of these numbers:** *inferred from comparable shelf silicon, not from a signed-off PDK or
 > an STA run.* They are good enough to size pipelines and reject bad ideas; they are **not** sign-off
@@ -50,15 +58,13 @@ of frequency.
 
 ### 1.0a Second target of record — GSys LibreCore AI card (`g6lc64_ai`)
 
-**There are two SKUs, and until this section existed only one of them had an operating point.**
-That gap was not academic: `g6lc_ai_island_cfg_pkg::AiIslandLatencyDefault` sets
-`ClockKhz = 2_000_000` (2 GHz nameplate), which agrees with **neither** the router target below (1.25 GHz)
-**nor** the throughput figure `architecture/ai-matrix/scaling-100tops.md` §7 derives its 98.3 TOPS
-from (1.5 GHz). Every island TOPS number is a product of MAC width **and** clock, so an unanchored
-clock makes the headline unfalsifiable — which is exactly the failure `scaling-100tops.md` §2
-exists to prevent. This 2 GHz figure is the live fixture's published nameplate. It has no STA
-closure. The 64-bit port still moves 8 bytes/cycle; `DramGBps = 16` is `noc_peak_gbps` of that
-port at this clock, not a re-measurement of the 1 GHz stream.
+**There are two SKUs and one clock target.** `g6lc_ai_island_cfg_pkg::AiIslandLatencyDefault.ClockKhz`
+and the throughput figure `architecture/ai-matrix/scaling-100tops.md` §7 derives its TOPS from both
+predate the target of record and must be re-anchored to it: **`ClockKhz = 5_000_000`** (5 GHz nameplate,
+8 FO4), with every TOPS and GB/s figure recomputed from that clock. Every island TOPS number is a
+product of MAC width **and** clock, so an unanchored clock makes the headline unfalsifiable — which is
+exactly the failure `scaling-100tops.md` §2 exists to prevent. The 64-bit DRAM port moves 8
+bytes/cycle; `DramGBps` is `noc_peak_gbps` of that port at the target clock.
 
 The AI card is a **PCIe add-in card**, not a fanless gateway. Nothing in §1.1 transfers to it:
 the power budget differs by ~25×, the thermal solution is active, and the memory class is
@@ -66,11 +72,11 @@ DDR4/LPDDR5 rather than a 16-bit DDR3 gateway bus.
 
 | Item | Latency SKU | Throughput SKU | Confidence |
 |---|---|---|---|
-| Island clock | **2.0 GHz** nameplate (live fixture, `AiIslandLatencyDefault`) | **1.5 GHz** (`scaling-100tops.md` §7) | decided / inferred |
-| Core clock | tracks §1.1 (1.25 GHz) — the cores are the same IP | 1.25 GHz | inferred |
+| Island clock | **5 GHz nameplate / 8 FO4** (`ClockKhz = 5_000_000`; code field to re-anchor) | **5 GHz nameplate / 8 FO4** | decided (program target) |
+| Core clock | tracks §1.0/§1.1 (**5 GHz nameplate / 8 FO4**) — the cores are the same IP | 5 GHz nameplate / 8 FO4 | decided (program target) |
 | Clusters × MAC/cycle | 1 × 512 live (`AI_LIVE_MACS`); 1–2 × 4096–8192 target | 8 × 4096 | decided |
-| Peak dense INT8 | **2.048 TOPS** live nameplate; ~12–25 TOPS target | **98.3 TOPS** | derived |
-| Class-0 DRAM nameplate | **16 GB/s** (64-bit × 2 GHz, 8 bytes/cycle) | LPDDR5 400 GB/s nameplate | derived |
+| Peak dense INT8 | **5.12 TOPS** live nameplate (512 MAC × 2 × 5 GHz); 1–2 × 4096–8192 MAC → 41–164 TOPS | **327.7 TOPS** (8 × 4096 × 2 × 5 GHz) | derived from the target clock |
+| Class-0 DRAM nameplate | **40 GB/s** (64-bit × 5 GHz, 8 bytes/cycle) | LPDDR5 400 GB/s nameplate | derived |
 | DRAM class | DDR4-2400×64, `N × 19` GB/s (`DramChannels` ∈ {1,2,4,8}) | LPDDR5 ~400 GB/s (`DramClass=2`, not live) | decided |
 | Card power | — | 60–80 W typical, 100–150 W peak (AI-S4) | inferred, **unmeasured** |
 | Thermal | — | active; 75 W slot budget is insufficient, needs 8-pin aux | inferred |
@@ -82,36 +88,40 @@ DDR4/LPDDR5 rather than a 16-bit DDR3 gateway bus.
    source; the capability window publishes it at `CAP_OFF_CLOCK_KHZ` so software reads it rather
    than assuming. A TOPS figure quoted without naming the `ClockKhz` it used is not a figure.
 2. **The core clock does not change between SKUs.** The cores are the same IP under both, so
-   §1.1's 1.25 GHz target and its sign-off corner apply unchanged. Raising the *island* clock is
-   not permission to raise the *core* clock.
+   the §1.0 target (5 GHz nameplate / 8 FO4) and §1.1's sign-off corner apply unchanged. Raising
+   the *island* clock is not permission to raise the *core* clock, and the island is **not** held
+   to 8 FO4: it sits behind its own clock domain and keeps its own `ClockKhz`.
 3. **Frequency is screened, not asserted.** See §1.0b.
 4. **A number marked `unmeasured` may not gate a tape-out decision.** The card power row is
    AI-S4 and is explicitly open.
 
 ### 1.0b Raising the frequency target — the `sv-timing` → `--from-timing` loop
 
-`AGENTS-coding-philosophy.md` §2.8 records that the sparse EX and frontend cones **close at
-2.5 GHz under structural FO4 screening**. That is a screen, not STA, and the distinction is
-load-bearing: the budget model is
+The target of record is the **8 FO4 budget: `--target-mhz 5000 --fo4-ps 20 --budget-margin 0.2`**.
+(Earlier §2.8 screenings at wider budgets are superseded.) The screen is not STA, and the
+distinction is load-bearing: the budget model is
 
 ```
-budget_fo4 = (1000 / target_mhz × 1000 / fo4_ps) × (1 − margin)      # fo4_ps=20, margin=0.2
+budget_fo4 = (1000 / target_mhz × 1000 / fo4_ps) × (1 − margin)      # 5000 MHz, fo4_ps=20, margin=0.2 → 8.0
 ```
 
-so raising `--target-mhz` *tightens* the budget rather than proving anything about silicon.
+so `--target-mhz` *sets the budget* rather than proving anything about silicon; the silicon
+frequency is 8 FO4 × the node's measured FO4 (`timings fo4-probe`).
 
-The supported way to move the target, and to have the rest of the platform believe it:
+The supported way to screen at the target, and to have the rest of the platform believe it:
 
 ```bash
-# 1. Screen the real RTL at the new target and emit a timing package.
+# 1. Screen the real RTL at the target of record and emit a timing package.
 cd sv-timing
-python tools/svt.py monorepo-soak --target-mhz 2500 --profile sparse_ex \
+python tools/svt.py monorepo-soak --target-mhz 5000 --profile sparse_ex \
        --correct --emit --allow-latency
+# whole core (the hyp8 base emit): sv-timing correct --all-modules --target-mhz 5000 --fo4-ps 20 --budget-margin 0.2 …
 
 # 2. Feed that package to the host gates, which then carry the target with them.
 ./build.sh timings validate --from-timing build-platform/workspace/build/sv-timing/monorepo-soak/sparse_ex
-cva6-build test --ai --ai-ghz 1.25 --from-timing <fo4-pkg>     # island SKU × screened target
+cva6-build test --ai --ai-ghz 5 --from-timing <fo4-pkg>        # island SKU × screened target
 cva6-build diag run ai --from-timing <fo4-pkg>
+# host compile of a flist at the target: timings compile --target <pkg> --all-modules --target-mhz 5000 --fo4-ps 20 --budget-margin 0.2
 ```
 
 **What must be true before a raised target is written into this file:**
@@ -119,7 +129,7 @@ cva6-build diag run ai --from-timing <fo4-pkg>
 | Gate | Why |
 |---|---|
 | The sparse cones close at the new target **after** latency-neutral rewrites only | Buying closure with extra pipeline stages changes the micro-architecture, so it is a design decision, not a retune (§2.8 rule 6) |
-| Residual exclusive/LSU cones are named, with their estimated ceiling | Those cones sit at ~1.4–1.7 GHz after rewriting and call for multi-cycle/T3, not more FO4 credit |
+| Residual exclusive/LSU cones are named, with their estimated ceiling | Those cones call for restructure, overlap or multi-cycle/T3 (`hyp_core_ws/analysis/cut_minimization.md`), not more FO4 credit |
 | The island's `ClockKhz` and the core target are updated **together or explicitly not** | §1.0a rule 2 |
 | `--from-timing` is passed to the suites that quote the number | Otherwise the suite is still quoting the old target |
 | The row is marked `inferred (FO4 screen)` and not `closes timing` | §1.0's status rule: no closure claim may cite an inferred row |
@@ -127,16 +137,42 @@ cva6-build diag run ai --from-timing <fo4-pkg>
 **`fo4-v1` must not be retuned from synthetic fixtures** — only from real STA plus host
 `retune-propose` (§2.8 rule 1). Screening harder is free; claiming closure is not.
 
+### 1.0c Redesign target — `hyp8`: 5 GHz / 8 FO4 (experimental, 2026-10-20)
+
+The timing-driven redesign program adopts an **8 FO4 logic budget per cycle**, i.e. a 5 GHz
+nameplate at the screening process input `fo4_ps = 20` with the standard 0.2 margin:
+
+```
+budget_fo4 = (1000 / 5000 MHz × 1000 / 20 ps) × (1 − 0.2) = 8.0
+```
+
+| Item | Value | Status |
+|---|---|---|
+| Logic budget per cycle | **8 FO4** (every single-cycle kernel ≤ 8 FO4; `--target-mhz 5000 --fo4-ps 20 --budget-margin 0.2`) | decided (program target) |
+| Nameplate frequency | **5 GHz** at `fo4_ps = 20`; the same RTL is 3.3 GHz at 30 ps or 8.3 GHz at 12 ps — quote `fo4_ps` with every number | derived |
+| Where the RTL lives | `build-platform/workspace/hyp/hyp_redesign_core_8fo4/`, `…/hyp_redesign_corev_apu_8fo4/`, workspace `…/hyp_core_ws/` (gitignored; the production `core/` is untouched) | decided |
+| Config package | `g6lc64_hyp8_config_pkg.sv` = `g6lc64_ooo` + `HypCfg` (`g6lc_hyp_pkg.sv`); `HypDefault` keeps every other package at today's behaviour | decided |
+| Redesign set | every module instantiated by `g6lc64_hyp8` whose worst path exceeds 8 adjusted FO4 (measured adjusted where the board has the module, else structural); modules closing at 8 are copied from the sv-timing emit | decided |
+| Design rule | **cut minimization**: per execution path, restructure → move the decision earlier → retime an existing register → overlap with gated publication → cut on a value path → cut on a dependent path (recorded). Dependent-path latencies are held: ALU add/logic → ALU 1 cycle (staggered halves), issue → operand read +0, store→load forward hidden under load-use, commit +0 on the common path; load-use pays the D$ `+2` | decided (`hyp_core_ws/analysis/cut_minimization.md`) |
+| Uncore | the APU behind an `axi_cdc` seam is held to the **same 8 FO4** budget; the seam exists for domain isolation and reset ordering, not for a wider budget | decided |
+| Verification | **none yet** — a correctness-seeking draft; no lint, simulation, STA or boot has been run; no closure or IPC claim may cite it. Measured caveat (delay-v44 calibration on the Nangate45 board, `sv-timing/architecture/PIPELINE-PRAGMA-REVIEW.md` A150b): the register-launch intercept is ~12 FO4 (0.26 ns at 21.4 ps), larger than the whole 8-FO4 cycle — the nameplate presumes a process whose flop overhead is a small fraction of the cycle; the structural budget is the design rule, the board decides | open |
+| Boot target | OpenSBI then Linux on the hyp8 tree, from the hazard register `hyp_core_ws/notes/boot-hazards.md` | open |
+
+§1.1's electrical envelope (corner, voltage, thermal class) applies to this target; `hyp8` is the
+program that decides what the deeper machine costs in IPC. §1.0b's gates apply unchanged: the
+nameplate enters a product row only with a measured board, and a row backed by the FO4 screen is
+`inferred (FO4 screen)`.
+
 ### 1.1 Baseline — CVA6V-EC router core
 
 | Item | Baseline value | Where it drives code |
 |---|---|---|
-| Target frequency | **1.25 GHz** (TT, 0.80 V, 25 °C); stretch 1.5 GHz | Pipeline stage budgets, critical-path limits, latch/clock choices |
+| Target frequency | **5 GHz nameplate = 8 FO4 per cycle** (TT, 0.80 V, 25 °C; `fo4_ps = 20`, margin 0.2) | Pipeline stage budgets (≤ 8 FO4 per kernel), critical-path limits, latch/clock choices |
 | Sign-off corner | **SS 0.72 V / 125 °C** (setup), FF 0.88 V / −40 °C (hold) | What "closes timing" must mean in a PR |
 | Voltage domain | Single **0.80 V** core logic domain; 1.8/3.3 V I/O | Level-shifter/isolation-cell needs, retention strategy |
-| DVFS | **Two OPPs**: 600 MHz @ 0.65 V (idle / light NAPI), 1.25 GHz @ 0.80 V (forwarding) | Clock/enable timing assumptions; WFI + `Zawrs` idle behaviour |
-| Core power budget | **~250 mW per core @ 1.25 GHz**; ~1.0 W for a quad CPU complex | Clock-gating density, multi-Vt choices, unit sizing |
-| Thermal design power | **4 W SoC**, fanless (consistent with a ~5 W idle / ~10 W peak board) | Toggle-rate limits, predictor/L2 gating |
+| DVFS | **Two OPPs**: 5 GHz @ 0.80 V (forwarding) and a 0.65 V idle OPP whose frequency follows the library's FO4 at that voltage (TBD, Power) | Clock/enable timing assumptions; WFI + `Zawrs` idle behaviour |
+| Core power budget | **TBD at 5 GHz** (re-derived from the 8-FO4 design's activity; owner Power) | Clock-gating density, multi-Vt choices, unit sizing |
+| Thermal design power | **TBD at 5 GHz** (fanless class is the market reference; owner Thermal) | Toggle-rate limits, predictor/L2 gating |
 | Junction temperature | 0–125 °C (industrial gateway) | Corner set, leakage budget |
 
 > **Note:** CVA6 ships with many target-specific RTL config packages
@@ -169,10 +205,10 @@ arithmetic shift built out of cascaded ternaries may infer a slow, area-hungry n
 | Item | Baseline value | Confidence |
 |---|---|---|
 | Process node | **12 nm FinFET (TSMC 12FFC class)** — the node both the RISC-V (SF21H8898) and ARM (Filogic 830) router analogues ship on | inferred |
-| Open-PDK study path | Sky130 / GF180 for **flow bring-up only** — they cannot reach 1.25 GHz; never quote their timing as the target | decided |
+| Open-PDK study path | Sky130 / GF180 for **flow bring-up only** — they cannot reach the target; never quote their timing as the target | decided |
 | Standard-cell library | 9-track **HD** default; **HP** cells reserved for the wakeup/select, PRF-read and predictor-provider paths | inferred |
 | Vt flavors | **SVT** default; **HVT** for always-on / leakage-dominant blocks; **LVT** only on a named critical path, with justification | inferred |
-| SRAM compiler | Single-port **1RW**, 1-cycle read; depth 64–4096, width 32–128 b; dual-port only for the register file | inferred |
+| SRAM compiler | Single-port **1RW**, pipelined read (≥ 2 cycles at 8 FO4); depth 64–4096, width 32–128 b; dual-port only for the register file | derived |
 | SRAM cut boundary | Everything through `tc_sram`; per-instance chip-enable gating via `tc_clk_gating` | decided |
 
 ---
@@ -275,16 +311,16 @@ foundry/STA data before tape-out. `decided` = a project choice, already binding 
 
 | Category | Parameter | Current target value | Confidence | Owner |
 |---|---|---|---|---|
-| Performance | Target frequency | **1.25 GHz** (stretch 1.5 GHz) | inferred | SoC/PD |
+| Performance | Target frequency | **5 GHz nameplate = 8 FO4 per cycle** at `fo4_ps = 20`, margin 0.2; every kernel ≤ 8 FO4 (§1.0, §1.0c) | decided (program target); no closure claim | Core arch / SoC/PD |
 | Performance | Worst-case corner | **SS 0.72 V / 125 °C** setup; FF 0.88 V / −40 °C hold | inferred | STA |
 | Performance | Core voltage | **0.80 V** logic (1.8/3.3 V I/O) | inferred | Power |
-| Performance | DVFS operating points | 600 MHz @ 0.65 V, 1.25 GHz @ 0.80 V | inferred | Power |
-| Performance | Core power budget | **~250 mW/core**; ~1.0 W quad complex | inferred | Power |
-| Performance | Thermal design power | **4 W SoC**, fanless, 0–125 °C junction | inferred | Thermal |
+| Performance | DVFS operating points | 5 GHz @ 0.80 V; idle OPP at 0.65 V (frequency TBD from library FO4) | decided / TBD | Power |
+| Performance | Core power budget | **TBD at 5 GHz** | TBD | Power |
+| Performance | Thermal design power | **TBD at 5 GHz**, fanless class, 0–125 °C junction | TBD | Thermal |
 | Process | Node / PDK | **12 nm FinFET (12FFC class)** | inferred | PD |
 | Process | Default standard-cell library | 9-track HD; HP on named critical paths | inferred | PD |
 | Process | Vt strategy | SVT default, HVT always-on, LVT by exception | inferred | PD |
-| Process | SRAM compiler / latency | 1RW single-port, **1-cycle read**, 64–4096 deep, 32–128 b wide | inferred | Memory |
+| Process | SRAM compiler / latency | 1RW single-port, **pipelined read (≥ 2 cycles at 8 FO4)**, 64–4096 deep, 32–128 b wide | derived | Memory |
 | Integration | Hart count | **2** (SMT2 → dual core, program U6); shelf parts are quad | decided | SoC arch |
 | Integration | L1 caches | **32 KB I + 32 KB D, 4-way, 64 B lines** (matches MT7986A exactly) | decided | Core |
 | Integration | L2 cache | **512 KB shared, 8-way, 64 B lines**, memory-side in `corev_apu/` | decided | SoC arch |
@@ -320,7 +356,7 @@ Every significant PR must include a short **SoC impact** section. Copy this temp
 ```markdown
 ## SoC impact (from `AGENTS-configuration.md`)
 
-- Target frequency: `<name>` — new logic closes at `<X>` MHz with `<Y>` ps slack (`<corner>`).
+- Target frequency: `<name>` — new logic closes at the 5 GHz / 8 FO4 target with `<Y>` ps slack (`<corner>`).
 - Voltage/power domain changes: none / `<describe>`.
 - Power/area delta: `<estimate>` (simulation and/or synthesis based).
 - DFT impact: scan chain updated? `test_en_i`/`testmode_i` propagated? `<yes/no/describe>`.

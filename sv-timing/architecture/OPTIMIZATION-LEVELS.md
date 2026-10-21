@@ -177,7 +177,7 @@ into the cache `design_key`.
 |---|---|---|---|---|
 | `-O0` | Analyze only; transforms hard-off (current default behavior) | none | no | none |
 | `-O1` | Latency-neutral restructuring only (named intermediate wires) | unchanged | no | none |
-| `-O2` | **Default when correct is enabled.** One cost-balanced `InsertReg` per over-budget path | changes (requires `--allow-latency`) | no | ≤1 stage/path |
+| `-O2` | **Default when correct is enabled.** Budget-fit `InsertReg` along each over-budget cone (A148). The preset's stage dial is 1 and does not cap the cone | changes (requires `--allow-latency`) | no | `ceil(FO4/B)−1`, cap 16 |
 | `-O3` | Multi-cut `pipeline_region` to budget + local statement reordering, wider worklist | changes | opt-in | many |
 | `-Os` | Maximize FO4 gain **per added flop** (area/power-first, router-class SoC bias) | changes | no | minimal |
 | `-Oz` | Zero new state: comb restructuring only; protocol- and latency-identical | unchanged | no | none |
@@ -222,7 +222,7 @@ formal equivalence check.
 | Level + dials | `crates/sv-timing-core/src/opt.rs`: `OptLevel`, `CutStrategy`, `OptEffort`, `CacheMode`, `OptOptions::preset` (the §3.1 matrix **is** the code), `OptOverrides`, `resolve`, `digest`, `summary`, `allows_new_state` |
 | Policy | `PassPolicy::{from_opt, with_opt}` + `PassPolicy.opt`; `WorklistPolicy::{candidate_pool, width}` (the pool/width split fixes "build 32, use 1") |
 | Driver | `run_correct_passes` honors dials 1, 2, 4, 5, 6, 7 (+ `worklist::order_by_area_weight`); `-O0` returns after `measure()` |
-| Cuts | `pipeline::balanced_cut_for_path` dispatches dial 3; `budget_fit_cut_index` added |
+| Cuts | `select_pipeline_cuts` / `schedule_pipeline_cuts` walk every level with `budget_fit_cuts` (A148). Dial 3 is stored on the preset. The InsertReg walker does not branch on it. `balanced_cut_for_path` is no longer in the tree |
 | Analysis | `LowerOptions.opt`; dial 9 `fast` skips `stitch_cross_module_paths`; dial 10b `off` bypasses SQLite |
 | Cache | design key folds `#measurement=…` + `#opt=<digest>` (namespaced tokens) |
 | CLI | flattened `OptArgs` on `analyze` + `correct`: `-O/--opt-level` + ten `--opt-*` flags; resolved set echoed as `opt=…`; `--max-passes` kept as a deprecated alias; a note is printed when a level *would* pipeline but `--allow-latency` is absent |
@@ -256,7 +256,7 @@ units tier exists).
 | 1 | `max_passes` | `--opt-max-passes` | u32, 4 | Transform iterations. Supersedes `--max-passes` (kept as a deprecated alias). |
 | 2 | `worklist_width` | `--opt-worklist-width` | usize, 1 | Work items **applied** per pass. Fixed the old waste where `order_worklist` built 32 candidates and the driver consumed exactly one; the pool is now `WorklistPolicy::candidate_pool` and this dial is `WorklistPolicy::width`. |
 | 3 | `cut_strategy` | `--opt-cut-strategy` | enum, `cost-balanced` | `mid-node` (legacy index midpoint), `cost-balanced` (prefix-sum bisection), `budget-fit` (greedy fill to `budget_fo4`, prerequisite for multi-cut). |
-| 4 | `max_stages_per_region` | `--opt-max-stages-per-region` | u32, 1 | Multi-cut depth for `pipeline_region`. `>1` implies `budget-fit`. |
+| 4 | `max_stages_per_region` | `--opt-max-stages-per-region` | u32, 1 | Floor on the per-cone cut cap. Each path asks for `ceil(FO4 / budget) − 1` stages, hard-capped at 16; this dial raises that cap and does not lower it. `>1` implies `budget-fit`. See A148. |
 | 5 | `min_gain_fo4` | `--opt-min-gain-fo4` | f64, 2.0 | Reject any edit whose predicted `fo4_before − fo4_after` is below this. Terminates futile passes and is the guard that makes M4 impossible to reintroduce. |
 | 6 | `slack_target_fo4` | `--opt-slack-target-fo4` | f64, 0.0 | Stop condition. `0.0` = just close; `> 0` = keep positive margin; `< 0` = accept residual overage (`-Os`). Replaces the hard-coded `slack >= 0.0` break. |
 | 7 | `area_weight` | `--opt-area-weight` | f64, 0.0 | Candidate ordering key becomes `Δfo4 − area_weight · (new_flops·W_flop + new_wires·W_wire)`. `0.0` = pure timing; `1.0` = `-Os`. |

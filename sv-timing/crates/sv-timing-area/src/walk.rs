@@ -2317,6 +2317,8 @@ mod tests {
             path_class: Default::default(),
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         let report = attribute(&design, &area, &ParamMap::new());
         assert_eq!(report.perf_basis, PerfBasis::MulticycleOnly);
@@ -2365,6 +2367,8 @@ mod tests {
             path_class: Default::default(),
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         });
         let mut inclusion = Inclusion::all();
         inclusion.parse_flag("deny:child").unwrap();
@@ -2471,6 +2475,8 @@ mod tests {
             path_class: Default::default(),
             total_fo4_raw: None,
             class_note: None,
+            stage_start: None,
+            stage_end: None,
         }
     }
 
@@ -2511,6 +2517,7 @@ mod tests {
             guard_sites: Default::default(),
             decl_texts: Default::default(),
             pipe_pragmas: Default::default(),
+            stage_decls: Default::default(),
             branch_arms: Default::default(),
             launch_fo4: Default::default(),
             loc: loc(),
