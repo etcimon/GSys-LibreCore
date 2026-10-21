@@ -208,6 +208,10 @@ module rvfi_tracer #(
             32'hc: cause = "INSTR_PAGE_FAULT";
             32'hd: cause = "LOAD_PAGE_FAULT";
             32'hf: cause = "STORE_PAGE_FAULT";
+            // G6LC: an interrupt (cause[31]) or a cause outside the table used to
+            // keep the previous exception's name (sticky string); label it.
+            default: cause = rvfi_i[i].cause[CVA6Cfg.XLEN-1] ? $sformatf("INTERRUPT_%0d", rvfi_i[i].cause[CVA6Cfg.XLEN-2:0])
+                                                             : $sformatf("CAUSE_%0d", rvfi_i[i].cause);
           endcase;
           if (!trace_en) begin
           end else if (rvfi_i[i].insn[1:0] != 2'b11) begin

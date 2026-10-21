@@ -2173,26 +2173,56 @@ prerequisite for this work under the existing dual license. No licensing policy 
   (pre libgcc fix, S4.6) that every 2-hart run so far used; the loader
   now runs far enough to say so, where pre-T44 it segfaulted on an
   unzeroed page first. `linux-payload-l1s2` (2 cpus, fixed initrd) built;
-  `l1s2u` on t53 is the 2-hart verdict (T45/T39) — it livelocks at
-  2.50 s in a new 2-hart shape (T51); the 2-hart shell is owed behind it.
-- [ ] **T51 — 2-hart `g6lc64_ooo_server1` (t53, the rebuilt 2-cpu payload
-  `linux-payload-l1s2`): hart 1 falls into an S-mode instruction-fetch
-  fault loop at a user address and the boot livelocks at 2.50 s guest
-  (2026-10-21, `l1s2u`).** The console stops mid-line (`jffs2: ve…`,
-  2.504 s); from t=211,040,930 `[ptw-err] vaddr=0x13b90/0x13b98 lvl=0
-  pte=0 instr=1 hart=1 req_hart=1 priv=1 cause=12` repeats — sparse at
-  first (211.0 M, 212.0 M, 219.9 M), then every ≈ 12 cycles (1,479 by
-  254 M cycles); hart 0 stops retiring (112.45 M), hart 1 crawls
-  (77.05 M), `mshr_full=0`, no `[hang]` dump (retirements never pause
-  300 k cycles). An S-mode fetch of a U-page address can only fault, so
-  hart 1's control flow went to a user address while in S-mode — a wrong
-  `sepc`/return path or a corrupted saved PC on the second hart; the
-  same model with the Oct-14 payload (`l1s2t`) ran past this point to
-  8.1 s, so the shape is timing-dependent. Not T39/T44/T45 (those are
-  fixed/benign on this model). Instrument run `l1s2v` (300 M cap, both
-  harts' cycle-stamped RVFI through the live oracle, `+smt_sched_trace`)
-  is in flight for the window before the first fault; the single-hart
-  server1 and every WT ooo run are unaffected.
+  `l1s2u` on t53 is the 2-hart verdict (T45/T39) — it was read as a
+  livelock at 2.50 s (T51) and is the jent self-test on hart 1 (T51
+  re-scoped); the 2-hart shell is the `l1s2x` run.
+- [x] **T51 — re-scoped (2026-10-21, `l1s2w`: both-hart cycle-stamped
+  RVFI + live oracle, 240 M cap): not a livelock.** The 2-hart
+  `g6lc64_ooo_server1` boot (t53, `linux-payload-l1s2`) is executing the
+  jitter-entropy power-up self-test, not hanging: at c = 164.4 M the
+  scheduler moves the `kernel_init` thread from hart 0 to hart 1 (hart 0's
+  retirement rate falls 814 k → 18 k per M cycles — timer ticks + `wfi`
+  in `arch_cpu_idle`; hart 1's rises 15 k → 770 k), and hart 1 runs
+  `jent_mod_init → jent_entropy_init` (kallsyms from a QEMU boot of the
+  same `Image`): TESTLOOPCOUNT + CLEARCACHE = 1,124 calls of
+  `jent_measure_jitter` at ≈ 126–156 k cycles each (SHA3-256 conditioning
+  × 1–8 `hash_loop_cnt`, `jent_memaccess` × 128–256 with a `remu` per
+  step) ≈ 146 M cycles ≈ 11.7 s guest at 12.5 MHz — the same gap the
+  single-hart runs show (`l1s1t`: 2.08 → 5.91 s; `l3h59`: 1.89 → 7.49 s
+  between `Freeing initrd` and `io scheduler`). `l1s2u` was killed at
+  254 M and `l1s2w` capped at 240 M, both inside that window; the console
+  cut (`jffs2: ve`) is the SBI console path on hart 0 being interrupted by
+  the migration. The live oracle on `l1s2w` is at **0 mismatches** over
+  23.8 M loads / 16.0 M stores (both harts, retire 155 M). Verdict run
+  **`l1s2x` (600 M cap, no trace) is in flight for `Run /init` and the
+  2-hart `G6LC_LINUX_SHELL`.** What the window did expose (follow-ups,
+  no correctness evidence): (a) the `[ptw-err] vaddr=0x13b90 instr=1
+  hart=1 priv=1` lines are a once-per-iteration prediction of a stale
+  user-space target for the `ret` at `jent_hash_time+0xf8` (a
+  usermodehelper's busybox text at 0x13b90) and one wrong-path PTW walk
+  each; (b) at c = 164,407,988 hart 1's fetch walked **hart 0's M-mode
+  PC `0x80008c40`** (hart 0 retired it 70 cycles later) under hart 1's
+  Sv39 context — an in-flight demand fetch of the outgoing hart is
+  translated under the incoming hart's `satp`/privilege across a coarse
+  SMT switch (killed, never consumed; costs one PTW walk per occurrence,
+  1,479 in 254 M cycles). Both are performance/isolation nits recorded as
+  A148 below. Also fixed on the way: `rvfi_tracer.sv` printed interrupts
+  (and any cause outside its table) under the **previous** exception's
+  name (sticky `string`) — the periodic `ST_ADDR_MISALIGNED exception`
+  lines every 500 k cycles were the S-timer; now `INTERRUPT_<n>` /
+  `CAUSE_<n>`.
+- [ ] **A148 — SMT frontend isolation (from T51's window).** (a) An
+  in-flight demand fetch of the outgoing hart is translated under the
+  incoming hart's context after a coarse switch (one spurious PTW walk,
+  `[ptw-err] … instr=1` attributed to the new hart); kill or re-tag the
+  request at the switch, and add the leaf (switch with a demand fetch in
+  the I$/MMU stage → no PTW request under the new hart). (b) The per-hart
+  RAS keeps user-space return addresses across a trap into S-mode; a
+  kernel `ret` deeper than the live pushes predicts a U-half target and
+  walks it. A privilege-change RAS clear (or a U-half filter on S-mode
+  predictions, the T29 `predict_fetchable` shape) removes the walk;
+  measure first — the cost is one walk per occurrence, negligible on
+  the boot.
 - [ ] **T50 — committed HEAD (`ooocoh-t54-ooo-pgo-build`, A146/A147
   `MultStages = 4`) hangs at c ≈ 5.88 M on both the L1 and the L3 payload:
   the scoreboard head is a `MUL` (fu=5 op=94) at `0xffffffff80059fb8`,

@@ -708,7 +708,15 @@ on this path. On the HPDCACHE `g6lc64_ooo_server1` the first `exec` was the wall
 since T39 — **T44 removes it: the single-hart L1 (`l1s1t`, t53) boots to `G6LC_LINUX_SHELL` with the
 memory oracle at 0 over 320 M retirements, the first HPDCACHE-package shell**, and the 2-hart run
 passes the old `init` segfault to die of the Oct-14 payload's missing `libgcc_s` (the S4.6 payload
-fix never reached the 2-cpu payload); `l1s2u` with a rebuilt payload is the 2-hart verdict.
+fix never reached the 2-cpu payload). With the rebuilt payload the 2-hart run (`l1s2u`/`l1s2w`) was
+read as a livelock at 2.50 s (T51) and is not one: the both-hart RVFI shows `kernel_init` migrating
+to hart 1 at 164.4 M cycles and running the jitter-entropy power-up test (`jent_entropy_init`,
+1,124 × ≈ 130 k cycles ≈ 146 M cycles — the same `Freeing initrd` → `io scheduler` gap the
+single-hart runs show at 3.8–5.6 s guest) while hart 0 idles in `wfi`; the oracle is at 0 over both
+harts (23.8 M loads at retire 155 M). The 2-hart shell verdict is `l1s2x` (600 M cap). The window's
+by-products — a stale user-half `ret` prediction and an outgoing hart's in-flight demand fetch
+translated under the incoming hart's `satp` across a coarse switch, each one spurious PTW walk —
+are A148 (isolation/performance, no correctness evidence).
 
 Method note for T35/T37: the root cause was reached without an FST. The `+stq_trace` event window
 (pushes/commits/cancels/flushes with cycles) put the stale push 28 cycles after an SMT switch and
