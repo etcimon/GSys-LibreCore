@@ -2313,7 +2313,13 @@ prerequisite for this work under the existing dual license. No licensing policy 
   mismatches through retire 950 M** — the t52 pair's first point (retire
   933,200,881, `ret_from_exception`'s `c.ldsp s6`) is gone; the run
   continues to the 2.5 G cap for the second (1.287 G) and the final
-  total.
+  total. **Final (2026-10-21): `l3h59` ran to the 2.5 G-cycle cap
+  (1.411 G retired, login prompt, `kmodloader` done, idle) with the
+  user-space-aware live oracle at `checked loads=300,857,280
+  stores=193,531,438 amos=2,522,542 … mismatches=0` — the first
+  OpenWrt L3 boot on the OoO core with a clean oracle end to end.** The
+  t52 pair (933 M, 1.287 G) is gone; no stored-memory class is open on
+  the WT `g6lc64_ooo` path.
 - [ ] **T47 — the fixup queue's deferred array write put older bytes back
   over a younger store's write to the same word (2026-10-18).** The t49 L3
   (`l3h49`, T39/T44 in, T46 out) died at **36.3137 s with the identical

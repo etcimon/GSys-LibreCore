@@ -701,8 +701,10 @@ Spike-exact instead of recorded as an "intentional discrepancy".
 | T50 (open, other track) | committed HEAD hangs at c ≈ 5.88 M on L1 and L3 | a live `MUL` at the scoreboard head never writes back (`issued=1 valid=0`, IQ parked on its destination) — A147 `MultStages = 4` | — | `ooocoh-t54` + `+hang_dump`; HEAD is not boot-qualified, the boot set is t53/t59 |
 
 Where the climb stands: on the WT `g6lc64_ooo` the qualified set (t59 = t52 + T44 + T48) boots L1 to
-the shell; its L3 with the live oracle is replaying the climb to the login prompt with the T48 pair
-as the verdict. On the HPDCACHE `g6lc64_ooo_server1` the first `exec` was the wall on every run
+the shell and **L3 to the OpenWrt login prompt and on to the 2.5 G-cycle cap (1.411 G retired) with
+the user-space-aware live oracle at 0 mismatches over 300.9 M checked loads and 2.5 M AMOs** — the
+first clean-oracle L3 boot of the OoO core; the t52 pair is gone and no stored-memory class is open
+on this path. On the HPDCACHE `g6lc64_ooo_server1` the first `exec` was the wall on every run
 since T39 — **T44 removes it: the single-hart L1 (`l1s1t`, t53) boots to `G6LC_LINUX_SHELL` with the
 memory oracle at 0 over 320 M retirements, the first HPDCACHE-package shell**, and the 2-hart run
 passes the old `init` segfault to die of the Oct-14 payload's missing `libgcc_s` (the S4.6 payload
