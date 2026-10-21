@@ -1970,6 +1970,54 @@ main:
   .text
 .Lcz_done:
 
+#elif STAGE == 59
+  # T50: the FLU writeback port is shared by ALU / branch / CSR / mult. The
+  # issue stage blocked one-cycle FLU ops only in the cycle after a MULT issue
+  # (right for a one-register multiplier); with MultStages = M the product
+  # writes back M cycles after the multiplier's input and a one-cycle op
+  # issued M cycles after the MUL lands in the same cycle — the result mux
+  # prefers the one-cycle op and the MUL's result is gone (SB head
+  # `issued=1 valid=0`, Linux at c = 5.88 M on the MultStages = 4 HEAD).
+  # Shape: a mul whose operands are ready, k independent addi (k = 0..7, one
+  # issue slot each, so one lands in every post-issue cycle), then a
+  # consumer of the product. Spike-exact when every product writes back; a
+  # dropped one parks the consumer forever (held -> fail).
+  li   s2, 0x0000000100000003
+  li   s3, 0x0000000000001001
+  li   s4, 0                            # k-independent accumulator
+  li   s5, 0
+  .set MK, 0
+  .rept 8
+  mul  t2, s2, s3                       # product 0x1001_0000_3003
+  .rept MK
+  addi s4, s4, 1                        # independent one-cycle FLU ops
+  .endr
+  add  s5, s5, t2                       # consumer: parks if the product never arrives
+  .set MK, MK + 1
+  .endr
+  li   t3, 0x0000100100003003 * 8
+#ifdef MEM_ORDER_NEGATIVE
+  addi t3, t3, 1
+#endif
+  bne  s5, t3, fail_t0
+  li   t3, 28
+  bne  s4, t3, fail_t0
+  # the same with the consumer being a branch (FLU too) and a csr read in the
+  # window: every FLU class must yield the port to the product
+  .set MK, 0
+  .rept 6
+  mul  t2, s2, s3
+  .rept MK
+  addi s4, s4, 1
+  .endr
+  csrr t4, mhartid                      # a CSR op in the window (deterministic value)
+  bne  t2, t2, fail_t0                  # never taken; a CF op in the window
+  add  s5, s5, t2
+  .set MK, MK + 1
+  .endr
+  li   t3, 0x0000100100003003 * 14
+  bne  s5, t3, fail_t0
+
 #elif STAGE == 10
   # Stage 4 shape with the SECOND store removed, but the same addresses and the
   # same zero-gap consumer. Isolates "two live stores" from "adjacent consumer".

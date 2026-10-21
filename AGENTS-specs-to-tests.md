@@ -1019,6 +1019,23 @@ words do not share the head's way), the ninth written or invalidated, the queue 
 `G6LC_MUT_FIXUP_SEL_DRIFT` trips the RTL's own `fixup pass acting on an entry other than the one
 it tag-checked (bypass=1 sel=0 idx=88 way=01)` on the shape; the fix restarts the pass.
 
+## T50 — the multiplier's product owns its FLU writeback cycle (2026-10-21)
+
+Stage 59 of `verif/tests/custom/ooo/ooo_mem_min.S` (`FP_REVIEW_STAGE=59`, Spike compare): eight
+waves of `mul` + k independent `addi` (k = 0..7) + a consumer of the product, then six waves that
+also put a `csrr mhartid` and a never-taken branch in the window — one one-cycle FLU op per issue
+slot, so one of them is decided exactly `MultStages` cycles after the MUL. The product writes back
+`MultStages` cycles after the multiplier's input on the FLU port that ALU / branch / CSR / AES
+results also use, and `ex_stage`'s mux prefers the one-cycle class: without a reservation of that
+cycle the product is dropped and the consumer parks (the HEAD boot's `issued=1 valid=0` scoreboard
+head at c = 5.88 M). Spec anchor: Part I `#sec:m-ext` — every `mul*` writes its destination;
+the implementation invariant is "one result per FLU cycle, and the multiplier's cycle is reserved
+at issue" (`issue_read_operands` `mult_wb_block`, `MultStages - 1` cycles behind the issue pulse;
+`ex_stage` property `flu_wb_no_collision`). Verdicts: `ooocoh-t54` (HEAD, `MultStages = 4`,
+pre-fix) stops after 321 retirements — the k = 3 wave of the second group — against the 2 M-cycle
+budget; `ooocoh-t59` (one-register multiplier) Spike-exact in 1,016 cycles; `ooocoh-t60` (HEAD +
+fix) is the verdict for M = 4, with the negative (`-DMEM_ORDER_NEGATIVE`) failing as required.
+
 ## T48 — no false miss under a valid-bit write; no acknowledged store dropped (2026-10-20)
 
 Two leaves, one defect: `tb_g6lc_wt_mem_vld` **S5** — ways 0/2 hold TAG_A; a tag-only lookup of

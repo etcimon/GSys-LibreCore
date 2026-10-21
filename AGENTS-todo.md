@@ -2235,14 +2235,39 @@ prerequisite for this work under the existing dual license. No licensing policy 
   conditional — the shape A147 itself names (a cancellation/flush in flight
   while a live MUL is in the 4-stage pipe: "mult.sv carries
   cancellation/flush liveness with the transaction") is the first suspect.
-  `core/mult.sv`, `core/multiplier.sv`, `core/serdiv.sv` carry uncommitted
-  edits in the working tree (the A147 author's), so this is recorded for
-  that track rather than fixed here: reproduce with
-  `t21/q-t54-launch.sh` (deterministic), `+hang_dump` at 5.88 M; a
-  MULT leaf with a younger-cancel wave over a 4-cycle MUL is the obvious
-  bench. Until it is closed, boot qualification runs on the t53 file set
-  (`ovl-head53`: t52 + T44), and `MultStages = 4` must not ship in
-  `g6lc64_ooo`.
+  **Root cause (2026-10-21): not the liveness — the FLU writeback port.**
+  `ex_stage`'s single FLU port serialises ALU / branch / CSR / AES / mult,
+  and its result mux prefers the one-cycle classes; `issue_read_operands`
+  kept the upstream reservation `if (|mult_valid_q) busy alu/ctrl_flow/
+  csr/aes`, i.e. "no one-cycle op in the cycle after a MULT issue" — exact
+  for the one-register multiplier (product on the port at t+2, the
+  one-cycle op decided at t+1 lands at t+2) and wrong for every
+  `MultStages = M > 1` (A115 two-stage, A128 three, A147 four): the
+  product lands at t+1+M, a one-cycle op decided at t+M lands with it,
+  the mux takes the one-cycle op and the product is dropped on the floor
+  — SB entry `issued=1 valid=0`, dependents parked, no flush, exactly the
+  dump. Nothing in A115/A128/A147 touched the reservation; none of the
+  three depths was ever boot-run (the qualified t52–t59 file sets predate
+  A115: their `g6lc64_ooo_config_pkg.sv` has no `MultStages` line, so
+  the boots ran the one-register multiplier). **Reproducer:** stage 59 of
+  `ooo_mem_min.S` (`mul` + k independent `addi`, k = 0..7, then a
+  consumer; a second wave with a `csrr` and a never-taken branch in the
+  window): on `ooocoh-t54` (HEAD, M = 4) it stops after 321 retirements
+  at the k = 3 wave of the second group (2 M-cycle budget, no verdict);
+  on `ooocoh-t59` (one register) it is Spike-exact in 1,016 cycles.
+  **Fix:** `issue_read_operands` `mult_wb_block` — the MULT issue pulse
+  carried `MultStages - 1` more cycles in a shift register and the
+  one-cycle classes blocked in the colliding decision cycle only (the
+  cycle after issue is no longer blocked for M > 1: one issue slot back
+  per MUL); `|mult_valid_q` is the M = 1 case. A sim-only property in
+  `ex_stage` (`flu_wb_no_collision`: never `mult_valid && |one_cycle_select`)
+  turns the silent drop into a failure. No new combinational depth (a
+  flop replaces an OR-reduce). Divisions ride the same pulse (harmless:
+  `mult_ready` is low for the whole division, so no one-cycle op is
+  decided while a quotient can land). **Verdict in flight:**
+  `ooocoh-t60-ooo-pgo-build` = committed HEAD (A141/A147, M = 4) + this
+  fix: stage 59, the frozen battery, then L1/L3 — HEAD's first boot
+  qualification. Until it lands, the boot set stays t59.
 - [x] **T49 — Zicbom block vs the 16-byte L1 line (follow-up of T44,
   2026-10-19).** The same units assumption sat on the CMO side: a
   `cbo.inval` reached the cluster engine as one address and the engine

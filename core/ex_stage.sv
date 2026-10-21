@@ -321,7 +321,12 @@ module ex_stage
   // Re-pipelining contract (sv-timing A128; 42.8 adjusted FO4 on the
   // Nangate45 board): execute stage: the FLU's single writeback port serialises ALU / branch / CSR / mult / AES; a stage on any of them is an FLU redesign.
   // svt-pipe: require-contract
+  // svt-pipe: protocol flu valid=flu_valid_o id=flu_trans_id_o
+  // svt-pipe: result flu valid=flu_valid_o flu_result_o
   // svt-pipe: no-cut on=flu_result_o
+  // svt-pipe: no-cut on=flu_valid_o
+  // svt-pipe: cycle flu q=alu_result d=flu_result_o hold=flu_valid_o steps=1
+  // svt-pipe: cut-ok flu on=flu_result_o
 
   // -------------------------
   // Fixed Latency Units
@@ -336,12 +341,13 @@ module ex_stage
   //    is only a single entry deep, hence this operation will block all
   //    other operations once this buffer is full. This should not be a major
   //    concern though as CSRs are infrequent.
-  // 4. Multiplier/Divider: The multiplier has a fixed latency of 1 cycle.
-  //                        The issue logic will take care of not issuing
-  //                        another instruction if it will collide on the
-  //                        output port. Divisions are arbitrary in length
-  //                        they will simply block the issue of all other
-  //                        instructions.
+  // 4. Multiplier/Divider: The multiplier has a fixed latency of MultStages
+  //                        cycles. The issue logic will take care of not
+  //                        issuing another instruction if it will collide on
+  //                        the output port (issue_read_operands
+  //                        mult_wb_block, T50). Divisions are arbitrary in
+  //                        length they will simply block the issue of all
+  //                        other instructions.
 
 
   logic current_instruction_is_sfence_vma;
@@ -515,6 +521,17 @@ module ex_stage
       flu_result_o = aes_result;
     end
   end
+
+  //pragma translate_off
+  // T50: the shared FLU port carries one result per cycle; a one-cycle op and
+  // the multiplier's product in the same cycle silently drops the product.
+  // issue_read_operands' mult_wb_block reserves the product's cycle.
+  flu_wb_no_collision :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      !(mult_valid && |one_cycle_select))
+  else $error("ex_stage: FLU writeback collision - one-cycle op tid %0d and multiplier product tid %0d in one cycle",
+              one_cycle_data.trans_id, mult_trans_id);
+  //pragma translate_on
 
   // ready flags for FLU
   // OoO: csr_ready gates only the CSR hazard in issue_read_operands, not the

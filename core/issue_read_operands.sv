@@ -187,7 +187,9 @@ module issue_read_operands
   // Re-pipelining contract (sv-timing A128; 65.9 adjusted FO4 on the
   // Nangate45 board): operand read and FU issue: the issue handshake with the scoreboard is same-cycle.
   // svt-pipe: require-contract
+  // svt-pipe: protocol iro valid=issue_instr_valid_i
   // svt-pipe: no-cut on=fpu_hart_n
+  // svt-pipe: cycle iro q=fpu_hart_n d=fpu_valid_o hold=issue_instr_valid_i steps=1
 
   localparam OPERANDS_PER_INSTR = CVA6Cfg.NrRgprPorts / CVA6Cfg.NrIssuePorts;
   // CASQ pair-high index: only reachable when OPERANDS_PER_INSTR == 3 (the
@@ -405,6 +407,37 @@ module issue_read_operands
   // Issue Stage
   // ---------------
 
+  // T50: FLU writeback-port reservation for the multiplier's product. A MULT
+  // acknowledged at decision cycle t drives mult_valid_q (the multiplier's
+  // input) at t+1 and its product reaches the shared FLU port MultStages
+  // cycles later, at t+1+MultStages. A one-cycle FLU op (ALU / branch / CSR /
+  // AES) acknowledged at t' writes back at t'+1, and ex_stage's result mux
+  // prefers it — so an acknowledgement at t' = t + MultStages silently drops
+  // the product (the scoreboard entry stays `issued`, the core hangs). The
+  // upstream rule (`|mult_valid_q`, i.e. t' = t+1) is exact only for the
+  // one-register multiplier; carry the issue pulse MultStages-1 more cycles
+  // and block the one-cycle classes in the colliding cycle only. Divisions
+  // ride the same pulse (harmless: their completion is guarded by
+  // mult_ready_i going low for the whole division).
+  localparam int unsigned MulWbLag = CVA6Cfg.MultStages > 1 ? CVA6Cfg.MultStages - 1 : 0;
+  logic mult_wb_block;
+  if (MulWbLag == 0) begin : gen_mul_wb_block_direct
+    assign mult_wb_block = |mult_valid_q;
+  end else begin : gen_mul_wb_block_lag
+    logic [MulWbLag-1:0] mult_issued_sr_q;
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        mult_issued_sr_q <= '0;
+      end else begin
+        mult_issued_sr_q[0] <= |mult_valid_q;
+        for (int unsigned s = 1; s < MulWbLag; s++) begin
+          mult_issued_sr_q[s] <= mult_issued_sr_q[s-1];
+        end
+      end
+    end
+    assign mult_wb_block = mult_issued_sr_q[MulWbLag-1];
+  end
+
   always_comb begin : structural_hazards
     fus_busy = '0;
     // CVXIF is always ready to try a new transaction on 1st issue port
@@ -424,7 +457,9 @@ module issue_read_operands
 
     // after a multiplication was issued we can only issue another multiplication
     // otherwise we will get contentions on the fixed latency bus
-    if (|mult_valid_q) begin
+    // T50: the contention cycle follows the multiplier's depth (mult_wb_block
+    // below) — `|mult_valid_q` is the MultStages == 1 case only.
+    if (mult_wb_block) begin
       fus_busy[0].alu = 1'b1;
       fus_busy[0].aes = 1'b1;
       fus_busy[0].ctrl_flow = 1'b1;
