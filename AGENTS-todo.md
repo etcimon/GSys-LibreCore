@@ -2264,10 +2264,16 @@ prerequisite for this work under the existing dual license. No licensing policy 
   turns the silent drop into a failure. No new combinational depth (a
   flop replaces an OR-reduce). Divisions ride the same pulse (harmless:
   `mult_ready` is low for the whole division, so no one-cycle op is
-  decided while a quotient can land). **Verdict in flight:**
+  decided while a quotient can land). **Verdict:**
   `ooocoh-t60-ooo-pgo-build` = committed HEAD (A141/A147, M = 4) + this
-  fix: stage 59, the frozen battery, then L1/L3 — HEAD's first boot
-  qualification. Until it lands, the boot set stays t59.
+  fix: stage 59 Spike-exact in 1,016 cycles (the t59 figure; the negative
+  fails with tohost = 2), the whole frozen battery Spike-exact (s11
+  10,983 cycles: +18 on the one-register t59, −19 on the pre-fix t54 —
+  the cycle after a MUL is an issue slot again); `l1h60` / `l3h60` (live
+  oracle) are past the t54 hang point (8 M cycles, 6.34 M retired, no
+  `[hang]`, oracle 0 at retire 5 M) and running to the shell / login —
+  HEAD's first boot qualification. Until they land, the boot set stays
+  t59.
 - [x] **T49 — Zicbom block vs the 16-byte L1 line (follow-up of T44,
   2026-10-19).** The same units assumption sat on the CMO side: a
   `cbo.inval` reached the cluster engine as one address and the engine
