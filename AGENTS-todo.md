@@ -2288,7 +2288,13 @@ prerequisite for this work under the existing dual license. No licensing policy 
   the whole battery Spike-exact (`BAD: []`, s11 unchanged); S7 of the
   wbuffer leaf now documents the drop contract. `l1h59`/`l3h59` with the
   live oracle are the boot verdicts (the t52 pair at retire 933 M /
-  1.287 G must be gone).
+  1.287 G must be gone). **Verified (2026-10-21):** `l1h59` to
+  `G6LC_LINUX_SHELL`; `l3h59` to the OpenWrt login prompt and
+  `kmodloader` done at 27 s (1.646 G cycles) with the live oracle at **0
+  mismatches through retire 950 M** — the t52 pair's first point (retire
+  933,200,881, `ret_from_exception`'s `c.ldsp s6`) is gone; the run
+  continues to the 2.5 G cap for the second (1.287 G) and the final
+  total.
 - [ ] **T47 — the fixup queue's deferred array write put older bytes back
   over a younger store's write to the same word (2026-10-18).** The t49 L3
   (`l3h49`, T39/T44 in, T46 out) died at **36.3137 s with the identical
