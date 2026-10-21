@@ -1,0 +1,190 @@
+// hyp8 provenance: AS-IS (sv-timing emit at the 8-FO4 budget)
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// APB3 slave in front of g6lc_ai_island_top (simple reg port).
+// Setup arms one request; access waits for rvalid, including iterative PMU reads.
+// Optional AXI DMA master for descriptor fetch (EnableDmaFetch).
+
+module g6lc_ai_island_apb
+  import g6lc_ai_island_cfg_pkg::*;
+#(
+    parameter ai_island_cfg_t IslandCfg = AiIslandLatencyDefault,
+    // Default off. A directed test can pass a config with VaTurboEn set.
+    // The live island does not.
+    parameter config_pkg::ai_cfg_t AiCfg = config_pkg::AiCfgOff,
+    parameter bit             EnableDmaFetch = 1'b1,
+    parameter int unsigned    AxiDataWidth = 64,
+    parameter bit             SbTicketAlloc = 1'b0,
+    // Resident-B directory depth (g6lc_ai_island_top ReuseBSlots).
+    parameter int unsigned    ReuseBSlots = 2,
+    parameter int unsigned    AxiIdWidth   = 4,
+    parameter type            axi_req_t    = logic,
+    parameter type            axi_resp_t   = logic,
+    // Forwarded to g6lc_ai_island_top; see there for why it is a parameter.
+    parameter logic [15:0]    DtypeMask    = AiCfg.IslandFpEn ? AiIslandDtypeMask
+                                                              : (AiIslandDtypeMask & AiIslandPeImplMask),
+    // Forwarded accumulate grant (CAP_OFF_ACCMODE bit 0).
+    parameter bit             AccumulateEn = AiIslandAccmodeGrant[0]
+) (
+    input  logic        clk_i,
+    input  logic        rst_ni,
+    input  logic        testmode_i,
+    // APB
+    input  logic        psel_i,
+    input  logic        penable_i,
+    input  logic        pwrite_i,
+    input  logic [31:0] paddr_i,
+    input  logic [31:0] pwdata_i,
+    output logic [31:0] prdata_o,
+    output logic        pready_o,
+    output logic        pslverr_o,
+    output logic        irq_o,
+    // Core sideband (optional; tie 0 when unused)
+    input  logic        sb_enq_valid_i,
+    output logic        sb_enq_ready_o,
+    input  logic [7:0]  sb_qid_i,
+    input  logic [31:0] sb_ticket_i,
+    input  logic [63:0] sb_desc_ptr_i,
+    output logic [31:0] sb_last_ticket_o,
+    output logic [15:0] sb_last_status_o,
+    output logic        sb_has_completion_o,
+    output logic        sb_retired_valid_o,
+    output logic [31:0] sb_retired_ticket_o,
+    output logic [31:0] sb_enq_ticket_o,
+    output logic                 dma_inval_valid_o,
+    output logic [63:0]          dma_inval_addr_o,
+    input  logic                 dma_inval_ready_i,
+    input  logic                 dma_inval_done_i,
+    // AXI DMA (desc fetch)
+    output axi_req_t    axi_dma_req_o,
+    input  axi_resp_t   axi_dma_resp_i,
+    // No port defaults: Verilator 5.008 (remote testharness) rejects them.
+    input  logic        dram_init_done_i,
+    input  logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_r_beats_i,
+    input  logic [AI_DRAM_MAX_CHANNELS-1:0][31:0] ch_w_beats_i
+);
+
+  logic        is_req, is_we;
+  logic [15:0] is_addr;
+  logic [31:0] is_wdata, is_rdata;
+  logic        is_rvalid, is_rerror;
+
+  typedef enum logic [1:0] { S_IDLE, S_REQ, S_WAIT } state_e;
+  state_e state_q, state_d;
+
+  g6lc_ai_island_top #(
+      .AiCfg         (AiCfg),
+      .IslandCfg     (IslandCfg),
+      .EnableDmaFetch(EnableDmaFetch),
+      .AxiDataWidth  (AxiDataWidth),
+      .SbTicketAlloc (SbTicketAlloc),
+      .ReuseBSlots   (ReuseBSlots),
+      .AxiIdWidth    (AxiIdWidth),
+      .axi_req_t     (axi_req_t),
+      .axi_resp_t    (axi_resp_t),
+      .DtypeMask     (DtypeMask),
+      .AccumulateEn  (AccumulateEn)
+  ) i_island (
+      .clk_i     (clk_i),
+      .rst_ni    (rst_ni),
+      .testmode_i(testmode_i),
+      .req_i     (is_req),
+      .we_i      (is_we),
+      .addr_i    (is_addr),
+      .wdata_i   (is_wdata),
+      .rdata_o   (is_rdata),
+      .rvalid_o  (is_rvalid),
+      .rerror_o  (is_rerror),
+      .irq_o     (irq_o),
+      .sb_enq_valid_i      (sb_enq_valid_i),
+      .sb_enq_ready_o      (sb_enq_ready_o),
+      .sb_qid_i            (sb_qid_i),
+      .sb_ticket_i         (sb_ticket_i),
+      .sb_desc_ptr_i       (sb_desc_ptr_i),
+      .sb_last_ticket_o    (sb_last_ticket_o),
+      .sb_last_status_o    (sb_last_status_o),
+      .sb_has_completion_o (sb_has_completion_o),
+      .sb_retired_valid_o  (sb_retired_valid_o),
+      .sb_retired_ticket_o (sb_retired_ticket_o),
+      .sb_enq_ticket_o     (sb_enq_ticket_o),
+      .dma_inval_valid_o   (dma_inval_valid_o),
+      .dma_inval_addr_o    (dma_inval_addr_o),
+      .dma_inval_ready_i   (dma_inval_ready_i),
+      .dma_inval_done_i    (dma_inval_done_i),
+      .axi_dma_req_o       (axi_dma_req_o),
+      .axi_dma_resp_i      (axi_dma_resp_i),
+      .dram_init_done_i    (dram_init_done_i),
+      .ch_r_beats_i        (ch_r_beats_i),
+      .ch_w_beats_i        (ch_w_beats_i)
+  );
+
+  
+
+  // BEGIN sv-timing auto-correct (balance_mux rewrite)
+// ----------------------------------------------------------------
+// sv-timing: always_ff factorize  (clock-aware ParallelScratch)
+// timing-basis: S(s)=max producer C; C(s)=S(s)+L(s); M=max C;
+//   N=ceil(M/B) cycles of posedge clk_i  period_ns=0.200000  B=8.000 FO4
+// module=g6lc_ai_island_apb  region=7156  makespan=3.500 FO4  cycle_count=1  deps=0  procedural_ok=true
+// OpenSTA (review-only seeds — not set_max_delay):
+//   create_clock -name clk_i -period 0.200000 [get_ports clk_i]
+// order expect: state_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to state_q
+// --- factor stage 1/1  capture on posedge clk_i ---
+// always_ff @(posedge clk_i or negedge rst_ni) begin
+//   if (!rst_ni) begin /* reset */ end else begin
+//     state_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     /* node25697 c=3.50 slack=0.00 */
+//     /* node25698 c=3.50 slack=0.00 */
+//   end
+// end
+// ----------------------------------------------------------------
+  // END sv-timing auto-correct (balance_mux rewrite)
+always_comb begin
+    state_d   = state_q;
+    is_req    = 1'b0;
+    is_we     = 1'b0;
+    is_addr   = paddr_i[15:0];
+    is_wdata  = pwdata_i;
+    pready_o  = 1'b0;
+    pslverr_o = 1'b0;
+    prdata_o  = is_rdata;
+
+    unique case (state_q)
+      S_IDLE: begin
+        if (psel_i && !penable_i) begin
+          // SETUP — arm for ACCESS
+          state_d = S_REQ;
+        end
+      end
+      S_REQ: begin
+        if (psel_i && penable_i) begin
+          is_req = 1'b1;
+          is_we  = pwrite_i;
+          state_d = S_WAIT;
+        end else if (!psel_i) begin
+          state_d = S_IDLE;
+        end
+      end
+      S_WAIT: begin
+        // Keep req low after first cycle; wait for registered rvalid
+        // Writes complete without rvalid because the island reg file commits
+        // them in the same cycle it sampled req; only reads have a latency.
+        if (is_rvalid || pwrite_i) begin
+          // Writes also complete after 1 cycle of processing
+          pready_o = 1'b1;
+          pslverr_o = is_rerror;
+          prdata_o = is_rdata;
+          state_d  = S_IDLE;
+        end
+      end
+      default: state_d = S_IDLE;
+    endcase
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) state_q <= S_IDLE;
+    else state_q <= state_d;
+  end
+
+endmodule

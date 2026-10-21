@@ -1,0 +1,1143 @@
+// hyp8 provenance: ADAPTED (sv-timing emit at the 8-FO4 budget)
+// SPDX-FileCopyrightText: machine-generated
+// Copyright (c) 2018 ETH Zurich and University of Bologna.
+// Copyright (c) 2021 Thales.
+// Copyright (c) 2022 Bruno Sá and Zero-Day Labs.
+// Copyright (c) 2024 PlanV Technology
+// SPDX-License-Identifier: Apache-2.0 WITH SHL-2.1
+// Copyright and related rights are licensed under the Solderpad Hardware
+// License, Version 0.51 (the "License"); you may not use this file except in
+// compliance with the License.  You may obtain a copy of the License at
+// http://solderpad.org/licenses/SHL-0.51. Unless required by applicable law
+// or agreed to in writing, software, hardware and materials distributed under
+// this License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+// CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+//
+// Author: Angela Gonzalez, PlanV Technology
+// Modified by: Etienne Cimon (comb defaults; Verilator LATCH)
+// Date: 26/02/2024
+//
+// Description: Memory Management Unit for G6LC, contains TLB and
+//              address translation unit. SV32 SV39 and SV39x4 as defined in RISC-V
+//              privilege specification 1.11-WIP.
+//              This module is a merge of the MMU Sv39 developed
+//              by Florian Zaruba, the MMU Sv32 developed by Sebastien Jacq and the MMU Sv39x4 developed by Bruno Sá.
+
+
+module g6lc_mmu
+  import g6lc_core_pkg::*;
+#(
+    parameter config_pkg::g6lc_cfg_t G6LCCfg        = config_pkg::g6lc_cfg_empty,
+    parameter g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg   = g6lc_hyp_pkg::HypDefault,
+    parameter type                   icache_areq_t  = logic,
+    parameter type                   icache_arsp_t  = logic,
+    parameter type                   icache_dreq_t  = logic,
+    parameter type                   icache_drsp_t  = logic,
+    parameter type                   dcache_req_i_t = logic,
+    parameter type                   dcache_req_o_t = logic,
+    parameter type                   exception_t    = logic,
+    parameter int unsigned           HYP_EXT        = 0
+
+) (
+    input logic clk_i,
+    input logic rst_ni,
+    input logic flush_i,
+    input logic enable_translation_i,
+    input logic enable_g_translation_i,
+    input logic en_ld_st_translation_i,  // enable virtual memory translation for load/stores
+    input logic en_ld_st_g_translation_i,  // enable G-Stage translation for load/stores
+    // IF interface
+    input icache_arsp_t icache_areq_i,
+    output icache_areq_t icache_areq_o,
+    // LSU interface
+    // this is a more minimalistic interface because the actual addressing logic is handled
+    // in the LSU as we distinguish load and stores, what we do here is simple address translation
+    input exception_t misaligned_ex_i,
+    input logic lsu_req_i,  // request address translation
+    input logic [G6LCCfg.VLEN-1:0] lsu_vaddr_i,  // virtual address in
+    input logic [31:0] lsu_tinst_i,  // transformed instruction in
+    input logic lsu_is_store_i,  // the translation is requested by a store
+    output logic csr_hs_ld_st_inst_o,  // hyp load store instruction
+    // if we need to walk the page table we can't grant in the same cycle
+    // Cycle 0
+    output logic lsu_dtlb_hit_o,  // sent in same cycle as the request if translation hits in DTLB
+    output logic [G6LCCfg.PPNW-1:0] lsu_dtlb_ppn_o,  // ppn (send same cycle as hit)
+    // Cycle 1
+    output logic lsu_valid_o,  // translation is valid
+    output logic [G6LCCfg.PLEN-1:0] lsu_paddr_o,  // translated address
+    output exception_t lsu_exception_o,  // address translation threw an exception
+    output logic lsu_exception_ptw_o,  // lsu_exception_o came from the PTW-error branch
+    // General control signals
+    input riscv::priv_lvl_t priv_lvl_i,
+    input logic v_i,
+    input riscv::priv_lvl_t ld_st_priv_lvl_i,
+    input logic ld_st_v_i,
+    input logic sum_i,
+    input logic vs_sum_i,
+    input logic mxr_i,
+    input logic vmxr_i,
+    input logic mbe_i,
+    input logic hlvx_inst_i,
+    input logic hs_ld_st_inst_i,
+    // input logic flag_mprv_i,
+    input logic [G6LCCfg.PPNW-1:0] satp_ppn_i,
+    input logic [G6LCCfg.PPNW-1:0] vsatp_ppn_i,
+    input logic [G6LCCfg.PPNW-1:0] hgatp_ppn_i,
+
+    input logic [G6LCCfg.ASID_WIDTH-1:0] asid_i,
+    input logic [G6LCCfg.ASID_WIDTH-1:0] vs_asid_i,
+    input logic [G6LCCfg.ASID_WIDTH-1:0] asid_to_be_flushed_i,
+    input logic [G6LCCfg.VMID_WIDTH-1:0] vmid_i,
+    input logic [G6LCCfg.VMID_WIDTH-1:0] vmid_to_be_flushed_i,
+    // T6b-2b: requesting SMT harts. fetch_hart_i is the active fetch hart,
+    // lsu_hart_i the hart owning the in-flight load/store translation request.
+    // With NrHarts==1 or SmtDrainedHandoff both select the same context.
+    input logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] fetch_hart_i,
+    input logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] lsu_hart_i,
+    // T6b-2b: fetch-side (active-hart) copies of the architectural context the
+    // PTW shares with the data path; the plain inputs carry the LSU request
+    // hart's context.
+    input logic [G6LCCfg.ASID_WIDTH-1:0] fet_asid_i,
+    input logic [G6LCCfg.ASID_WIDTH-1:0] fet_vs_asid_i,
+    input logic [G6LCCfg.VMID_WIDTH-1:0] fet_vmid_i,
+    input logic [G6LCCfg.PPNW-1:0] fet_satp_ppn_i,
+    input logic [G6LCCfg.PPNW-1:0] fet_vsatp_ppn_i,
+    input logic [G6LCCfg.PPNW-1:0] fet_hgatp_ppn_i,
+    input logic fet_mxr_i,
+    input logic fet_vmxr_i,
+    input logic fet_mbe_i,
+    input riscv::pmpcfg_t [avoid_neg(G6LCCfg.NrPMPEntries-1):0] fet_pmpcfg_i,
+    input logic [avoid_neg(G6LCCfg.NrPMPEntries-1):0][G6LCCfg.PLEN-3:0] fet_pmpaddr_i,
+    input logic [G6LCCfg.VLEN-1:0] vaddr_to_be_flushed_i,
+    input logic [G6LCCfg.GPLEN-1:0] gpaddr_to_be_flushed_i,
+
+    input logic flush_tlb_i,
+    input logic flush_tlb_vvma_i,
+    input logic flush_tlb_gvma_i,
+
+    // Shared TLB is busy processing a multi-cycle flush
+    output logic shared_tlb_flush_busy_o,
+
+    // Performance counters
+    output logic itlb_miss_o,
+    output logic dtlb_miss_o,
+    // PTW memory interface
+    input dcache_req_o_t req_port_i,
+    output dcache_req_i_t req_port_o,
+
+    // PMP
+
+    input riscv::pmpcfg_t [avoid_neg(G6LCCfg.NrPMPEntries-1):0]                   pmpcfg_i,
+    input logic           [avoid_neg(G6LCCfg.NrPMPEntries-1):0][G6LCCfg.PLEN-3:0] pmpaddr_i
+);
+
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin g6lc_mmu status=proposal target=10-adjusted-FO4
+  // svt-plan: cone TLB result selection, translated-address construction,
+  // privilege/PMP checks and exception selection form a response transaction.
+  // svt-plan: boundary translation/PTE snapshot -> permission/PA response;
+  // prepare independent permission terms in parallel with address formation.
+  // svt-plan: carry requester identity, hart, VA, ASID/VMID, PTE/page size,
+  // access kind, privilege/SUM/MXR/stage enables and fault metadata.
+  // svt-plan: ownership extend existing held-context rules to every new
+  // stage; invalidate on matching fence/context change before response visibility.
+  // svt-plan: effect separates lookup from permission/exception reduction;
+  // keeps late architectural context muxes off a held transaction's datapath.
+  // svt-plan: cost response storage and translation latency; frontend/LSU
+  // must wait or kill the same request, including early cache-index requests.
+  // svt-plan: limit neither permission checks nor non-idempotent access
+  // ordering may be bypassed to hide the new latency.
+  // svt-plan: end
+  // Re-pipelining contract (sv-timing A128; 45.7 adjusted FO4 on the
+  // Nangate45 board): MMU: translation handshakes same-cycle with the TLBs.
+  // svt-pipe: require-contract
+  // svt-pipe: protocol mmu valid=lsu_req_i flush=flush_i
+  // svt-pipe: cycle mmu q=lsu_req_i d=lsu_valid_o hold=lsu_req_i steps=1
+
+  // memory management, pte for g6lc (Sv39 layout, MSB-first)
+  // bit 63: N (Svnapot), bits 62:61: PBMT (Svpbmt), bits 60:54: reserved
+  localparam type pte_g6lc_t = struct packed {
+    logic n;                 // 63 — Svnapot
+    logic [1:0] pbmt;        // 62:61 — Svpbmt page-based memory type
+    logic [6:0] reserved;    // 60:54 — must be zero
+    logic [G6LCCfg.PPNW-1:0] ppn;
+    logic [1:0] rsw;
+    logic d;
+    logic a;
+    logic g;
+    logic u;
+    logic x;
+    logic w;
+    logic r;
+    logic v;
+  };
+
+  localparam type tlb_update_g6lc_t = struct packed {
+    logic valid;
+    logic is_napot_64k;  // Svnapot: Flag indicating a 64KiB NAPOT page
+    logic [G6LCCfg.PtLevels-2:0][HYP_EXT:0] is_page;
+    logic [G6LCCfg.VpnLen-1:0] vpn;
+    logic [G6LCCfg.ASID_WIDTH-1:0] asid;
+    logic [G6LCCfg.VMID_WIDTH-1:0] vmid;
+    // T6b-2b: owning SMT hart (matched only under mixed residency)
+    logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] hart;
+    logic [HYP_EXT*2:0] v_st_enbl;  // v_i,g-stage enabled, s-stage enabled
+    pte_g6lc_t content;
+    pte_g6lc_t g_content;
+  };
+
+  logic iaccess_err;  // insufficient privilege to access this instruction page
+  logic i_g_st_access_err;  // insufficient privilege at g stage to access this instruction page
+  logic daccess_err;  // insufficient privilege to access this data page
+  logic canonical_addr_check;  // canonical check on the virtual address for SV39
+  logic d_g_st_access_err;  // insufficient privilege to access this data page
+  logic ptw_active;  // PTW is currently walking a page table
+  logic walking_instr;  // PTW is walking because of an ITLB miss
+  logic ptw_error;  // PTW threw an exception
+  logic ptw_error_at_g_st;  // PTW threw an exception at the G-Stage
+  logic ptw_err_at_g_int_st;  // PTW threw an exception at the G-Stage during S-Stage translation
+  logic ptw_access_exception;  // PTW threw an access exception (PMPs)
+  logic [G6LCCfg.PLEN-1:0] ptw_bad_paddr;  // PTW page fault bad physical addr
+  logic [G6LCCfg.GPLEN-1:0] ptw_bad_gpaddr;  // PTW guest page fault bad guest physical addr
+  logic [G6LCCfg.PPNW-1:0] final_fetch_ppn;
+
+  logic [G6LCCfg.VLEN-1:0] update_vaddr, shared_tlb_vaddr;
+
+  tlb_update_g6lc_t update_itlb, update_dtlb, update_shared_tlb;
+
+  logic                               itlb_lu_access;
+  pte_g6lc_t                          itlb_content;
+  pte_g6lc_t                          itlb_g_content;
+  logic      [  G6LCCfg.PtLevels-2:0] itlb_is_page;
+  logic                               itlb_lu_hit;
+  logic      [     G6LCCfg.GPLEN-1:0] itlb_gpaddr;
+  logic      [G6LCCfg.ASID_WIDTH-1:0] itlb_lu_asid;
+
+  logic                               dtlb_lu_access;
+  pte_g6lc_t                          dtlb_content;
+  pte_g6lc_t                          dtlb_g_content;
+  logic      [  G6LCCfg.PtLevels-2:0] dtlb_is_page;
+  logic      [G6LCCfg.ASID_WIDTH-1:0] dtlb_lu_asid;
+  logic                               dtlb_lu_hit;
+  logic      [     G6LCCfg.GPLEN-1:0] dtlb_gpaddr;
+
+  logic shared_tlb_access, shared_tlb_miss;
+  logic shared_tlb_hit, itlb_req;
+
+  // Assignments
+
+  
+
+  // BEGIN sv-timing auto-correct (balance_mux rewrite)
+// ----------------------------------------------------------------
+// sv-timing: always_ff factorize  (clock-aware ParallelScratch)
+// timing-basis: S(s)=max producer C; C(s)=S(s)+L(s); M=max C;
+//   N=ceil(M/B) cycles of posedge clk_i  period_ns=0.200000  B=8.000 FO4
+// module=g6lc_mmu  region=5421  makespan=3.500 FO4  cycle_count=1  deps=0  procedural_ok=true
+// OpenSTA (review-only seeds — not set_max_delay):
+//   create_clock -name clk_i -period 0.200000 [get_ports clk_i]
+// order expect: ctx_en_ld_st_g_translation_q  ready_cycle=1  ready_fo4=0.000  OpenSTA: report_timing -from clk_i -to ctx_en_ld_st_g_translation_q
+// order expect: ctx_en_ld_st_translation_q  ready_cycle=1  ready_fo4=0.000  OpenSTA: report_timing -from clk_i -to ctx_en_ld_st_translation_q
+// order expect: ctx_ld_st_priv_lvl_q  ready_cycle=1  ready_fo4=0.000  OpenSTA: report_timing -from clk_i -to ctx_ld_st_priv_lvl_q
+// order expect: ctx_ld_st_v_q  ready_cycle=1  ready_fo4=0.000  OpenSTA: report_timing -from clk_i -to ctx_ld_st_v_q
+// order expect: ctx_mxr_q  ready_cycle=1  ready_fo4=0.000  OpenSTA: report_timing -from clk_i -to ctx_mxr_q
+// order expect: ctx_sum_q  ready_cycle=1  ready_fo4=0.000  OpenSTA: report_timing -from clk_i -to ctx_sum_q
+// order expect: ctx_vmxr_q  ready_cycle=1  ready_fo4=0.000  OpenSTA: report_timing -from clk_i -to ctx_vmxr_q
+// order expect: ctx_vs_sum_q  ready_cycle=1  ready_fo4=0.000  OpenSTA: report_timing -from clk_i -to ctx_vs_sum_q
+// order expect: dtlb_gpte_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to dtlb_gpte_q
+// order expect: dtlb_hit_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to dtlb_hit_q
+// order expect: dtlb_is_page_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to dtlb_is_page_q
+// order expect: dtlb_pte_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to dtlb_pte_q
+// order expect: hs_ld_st_inst_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to hs_ld_st_inst_q
+// order expect: lsu_gpaddr_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to lsu_gpaddr_q
+// order expect: lsu_is_store_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to lsu_is_store_q
+// order expect: lsu_req_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to lsu_req_q
+// order expect: lsu_tinst_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to lsu_tinst_q
+// order expect: lsu_vaddr_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to lsu_vaddr_q
+// order expect: misaligned_ex_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to misaligned_ex_q
+// --- factor stage 1/1  capture on posedge clk_i ---
+// always_ff @(posedge clk_i or negedge rst_ni) begin
+//   if (!rst_ni) begin /* reset */ end else begin
+//     ctx_en_ld_st_g_translation_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     ctx_en_ld_st_translation_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     ctx_ld_st_priv_lvl_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     ctx_ld_st_v_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     ctx_mxr_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     ctx_sum_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     ctx_vmxr_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     ctx_vs_sum_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     dtlb_gpte_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     dtlb_hit_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     dtlb_is_page_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     dtlb_pte_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     hs_ld_st_inst_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     lsu_gpaddr_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     lsu_is_store_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     lsu_req_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     lsu_tinst_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     lsu_vaddr_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     misaligned_ex_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     /* node18753 c=3.50 slack=0.00 */
+//     /* node18754 c=3.50 slack=0.00 */
+//     /* node18755 c=3.50 slack=0.00 */
+//     /* node18756 c=3.50 slack=0.00 */
+//     /* node18757 c=3.50 slack=0.00 */
+//     /* node18758 c=3.50 slack=0.00 */
+//     /* node18759 c=3.50 slack=0.00 */
+//     /* node18760 c=3.50 slack=0.00 */
+//     /* node18761 c=3.50 slack=0.00 */
+//     /* node18762 c=3.50 slack=0.00 */
+//     /* node18763 c=3.50 slack=0.00 */
+//     /* node18764 c=0.00 slack=3.50 */
+//     /* node18765 c=0.00 slack=3.50 */
+//     /* node18766 c=0.00 slack=3.50 */
+//     /* node18767 c=0.00 slack=3.50 */
+//     /* node18768 c=0.00 slack=3.50 */
+//     /* node18769 c=0.00 slack=3.50 */
+//     /* node18770 c=0.00 slack=3.50 */
+//     /* node18771 c=0.00 slack=3.50 */
+//     /* node18772 c=3.50 slack=0.00 */
+//     /* node18773 c=3.50 slack=0.00 */
+//     /* node18774 c=3.50 slack=0.00 */
+//     /* node18775 c=3.50 slack=0.00 */
+//     /* node18776 c=3.50 slack=0.00 */
+//     /* node18777 c=3.50 slack=0.00 */
+//     /* node18778 c=3.50 slack=0.00 */
+//     /* node18779 c=0.00 slack=3.50 */
+//     /* node18780 c=0.00 slack=3.50 */
+//     /* node18781 c=0.00 slack=3.50 */
+//     /* node18782 c=0.00 slack=3.50 */
+//     /* node18783 c=0.00 slack=3.50 */
+//     /* node18784 c=0.00 slack=3.50 */
+//     /* node18785 c=0.00 slack=3.50 */
+//     /* node18786 c=0.00 slack=3.50 */
+//     /* node18787 c=0.00 slack=3.50 */
+//     /* node18788 c=0.00 slack=3.50 */
+//     /* node18789 c=0.00 slack=3.50 */
+//     /* node18790 c=0.00 slack=3.50 */
+//   end
+// end
+// ----------------------------------------------------------------
+  // END sv-timing auto-correct (balance_mux rewrite)
+assign itlb_lu_access = icache_areq_i.fetch_req;
+  assign dtlb_lu_access = lsu_req_i & !misaligned_ex_i.valid;
+  // T6b-2b: instruction-side lookups use the fetch hart's context, data-side
+  // lookups the LSU request hart's.
+  assign itlb_lu_asid   = v_i ? fet_vs_asid_i : fet_asid_i;
+  assign dtlb_lu_asid   = (ld_st_v_i || flush_tlb_vvma_i) ? vs_asid_i : asid_i;
+
+  // T6b-2b: the PTW's shared architectural context follows the walk owner.
+  // itlb_req identifies the owner side in the accept cycle (walking_instr is
+  // only registered one cycle later); afterwards walking_instr is stable for
+  // the rest of the walk. Single-hart/drained configurations present the same
+  // context on both sides so the select is transparent.
+  logic ptw_ctx_fet;
+  assign ptw_ctx_fet = ptw_active ? walking_instr : itlb_req;
+
+
+  g6lc_tlb #(
+      .G6LCCfg          (G6LCCfg),
+      .HypCfg           (HypCfg),
+      .pte_g6lc_t       (pte_g6lc_t),
+      .tlb_update_g6lc_t(tlb_update_g6lc_t),
+      .TLB_ENTRIES      (G6LCCfg.InstrTlbEntries),
+      .HYP_EXT          (HYP_EXT)
+  ) i_itlb (
+      .clk_i         (clk_i),
+      .rst_ni        (rst_ni),
+      .flush_i       (flush_tlb_i),
+      .flush_vvma_i  (flush_tlb_vvma_i),
+      .flush_gvma_i  (flush_tlb_gvma_i),
+      .s_st_enbl_i   (enable_translation_i),
+      .g_st_enbl_i   (enable_g_translation_i),
+      .v_i           (v_i),
+      .update_i      (update_itlb),
+      .lu_access_i   (itlb_lu_access),
+      .lu_asid_i     (itlb_lu_asid),
+      .lu_vmid_i     (fet_vmid_i),
+      .lu_hart_i     (fetch_hart_i),
+      .lu_vaddr_i    (icache_areq_i.fetch_vaddr),
+      .lu_gpaddr_o   (itlb_gpaddr),
+      .lu_content_o  (itlb_content),
+      .lu_g_content_o(itlb_g_content),
+      .asid_to_be_flushed_i,
+      .vmid_to_be_flushed_i,
+      .vaddr_to_be_flushed_i,
+      .gpaddr_to_be_flushed_i,
+      .lu_is_page_o  (itlb_is_page),
+      .lu_hit_o      (itlb_lu_hit)
+  );
+
+  g6lc_tlb #(
+      .G6LCCfg          (G6LCCfg),
+      .HypCfg           (HypCfg),
+      .pte_g6lc_t       (pte_g6lc_t),
+      .tlb_update_g6lc_t(tlb_update_g6lc_t),
+      .TLB_ENTRIES      (G6LCCfg.DataTlbEntries),
+      .HYP_EXT          (HYP_EXT)
+  ) i_dtlb (
+      .clk_i         (clk_i),
+      .rst_ni        (rst_ni),
+      .flush_i       (flush_tlb_i),
+      .flush_vvma_i  (flush_tlb_vvma_i),
+      .flush_gvma_i  (flush_tlb_gvma_i),
+      .s_st_enbl_i   (en_ld_st_translation_i),
+      .g_st_enbl_i   (en_ld_st_g_translation_i),
+      .v_i           (ld_st_v_i),
+      .update_i      (update_dtlb),
+      .lu_access_i   (dtlb_lu_access),
+      .lu_asid_i     (dtlb_lu_asid),
+      .lu_vmid_i     (vmid_i),
+      .lu_hart_i     (lsu_hart_i),
+      .lu_vaddr_i    (lsu_vaddr_i),
+      .lu_gpaddr_o   (dtlb_gpaddr),
+      .lu_content_o  (dtlb_content),
+      .lu_g_content_o(dtlb_g_content),
+      .asid_to_be_flushed_i,
+      .vmid_to_be_flushed_i,
+      .vaddr_to_be_flushed_i,
+      .gpaddr_to_be_flushed_i,
+      .lu_is_page_o  (dtlb_is_page),
+      .lu_hit_o      (dtlb_lu_hit)
+  );
+
+
+  // hyp8 (M1, TlbStages=3): the small TLBs now answer two cycles after the
+  // lookup request (T1 request capture, T2 verdict register). The shared
+  // TLB must only start a lookup on a *final* small-TLB miss, so its
+  // access/vaddr/context inputs are delayed by TlbStages-1 to stay aligned
+  // with the verdict — otherwise an in-flight hit would start a spurious
+  // shared lookup (and a possible spurious walk + foreign fault). A TLB
+  // flush kills the in-flight lookups (miss is safe; a stale shared
+  // access would be). With TlbStages==1 the bundle is the original
+  // passthrough.
+  localparam int unsigned STLB_DLY =
+      (HypCfg.TlbStages >= 2) ? (HypCfg.TlbStages - 1) : 0;
+
+  logic [STLB_DLY:0]                       itlb_acc_dly, dtlb_acc_dly;
+  logic [STLB_DLY:0][G6LCCfg.VLEN-1:0]     itlb_va_dly,  dtlb_va_dly;
+  logic [STLB_DLY:0][G6LCCfg.ASID_WIDTH-1:0] itlb_asid_dly, dtlb_asid_dly;
+  logic [STLB_DLY:0][G6LCCfg.VMID_WIDTH-1:0] itlb_vmid_dly, dtlb_vmid_dly;
+  logic [STLB_DLY:0][$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0]
+      itlb_hart_dly, dtlb_hart_dly;
+
+  logic mmu_req_flush;
+  assign mmu_req_flush = flush_i | flush_tlb_i | flush_tlb_vvma_i | flush_tlb_gvma_i;
+
+  // stage 0 is the live request (killed on flush); stages 1..STLB_DLY are
+  // the delay registers. STLB_DLY==0 (TlbStages==1) means the shared TLB
+  // sees the untouched passthrough.
+  assign itlb_acc_dly[0]  = itlb_lu_access & ~mmu_req_flush;
+  assign dtlb_acc_dly[0]  = dtlb_lu_access & ~mmu_req_flush;
+  assign itlb_va_dly[0]   = icache_areq_i.fetch_vaddr;
+  assign dtlb_va_dly[0]   = lsu_vaddr_i;
+  assign itlb_asid_dly[0] = itlb_lu_asid;
+  assign dtlb_asid_dly[0] = dtlb_lu_asid;
+  assign itlb_vmid_dly[0] = fet_vmid_i;
+  assign dtlb_vmid_dly[0] = vmid_i;
+  assign itlb_hart_dly[0] = fetch_hart_i;
+  assign dtlb_hart_dly[0] = lsu_hart_i;
+
+  if (STLB_DLY > 0) begin : gen_stlb_dly
+    always_ff @(posedge clk_i or negedge rst_ni) begin : p_stlb_req_dly
+      if (!rst_ni) begin
+        for (int unsigned s = 1; s <= STLB_DLY; s++) begin
+          itlb_acc_dly[s]  <= 1'b0;
+          dtlb_acc_dly[s]  <= 1'b0;
+          itlb_va_dly[s]   <= '0;
+          dtlb_va_dly[s]   <= '0;
+          itlb_asid_dly[s] <= '0;
+          dtlb_asid_dly[s] <= '0;
+          itlb_vmid_dly[s] <= '0;
+          dtlb_vmid_dly[s] <= '0;
+          itlb_hart_dly[s] <= '0;
+          dtlb_hart_dly[s] <= '0;
+        end
+      end else begin
+        for (int unsigned s = 1; s <= STLB_DLY; s++) begin
+          itlb_acc_dly[s]  <= itlb_acc_dly[s-1] & ~mmu_req_flush;
+          dtlb_acc_dly[s]  <= dtlb_acc_dly[s-1] & ~mmu_req_flush;
+          itlb_va_dly[s]   <= itlb_va_dly[s-1];
+          dtlb_va_dly[s]   <= dtlb_va_dly[s-1];
+          itlb_asid_dly[s] <= itlb_asid_dly[s-1];
+          dtlb_asid_dly[s] <= dtlb_asid_dly[s-1];
+          itlb_vmid_dly[s] <= itlb_vmid_dly[s-1];
+          dtlb_vmid_dly[s] <= dtlb_vmid_dly[s-1];
+          itlb_hart_dly[s] <= itlb_hart_dly[s-1];
+          dtlb_hart_dly[s] <= dtlb_hart_dly[s-1];
+        end
+      end
+    end
+  end
+
+  g6lc_shared_tlb #(
+      .G6LCCfg          (G6LCCfg),
+      .SHARED_TLB_WAYS  (2),
+      .HYP_EXT          (HYP_EXT),
+      .pte_g6lc_t       (pte_g6lc_t),
+      .tlb_update_g6lc_t(tlb_update_g6lc_t)
+  ) i_shared_tlb (
+      .clk_i         (clk_i),
+      .rst_ni        (rst_ni),
+      .flush_i       (flush_tlb_i),
+      .flush_vvma_i  (flush_tlb_vvma_i),
+      .flush_gvma_i  (flush_tlb_gvma_i),
+      .s_st_enbl_i   (enable_translation_i),
+      .g_st_enbl_i   (enable_g_translation_i),
+      .v_i           (v_i),
+      .s_ld_st_enbl_i(en_ld_st_translation_i),
+      .g_ld_st_enbl_i(en_ld_st_g_translation_i),
+      .ld_st_v_i     (ld_st_v_i),
+
+      // hyp8: delayed bundle — verdict-aligned with the staged TLB hits
+      .dtlb_asid_i  (dtlb_asid_dly[STLB_DLY]),
+      .itlb_asid_i  (itlb_asid_dly[STLB_DLY]),
+      .lu_vmid_i    (dtlb_vmid_dly[STLB_DLY]),
+      .itlb_vmid_i  (itlb_vmid_dly[STLB_DLY]),
+      .itlb_hart_i  (itlb_hart_dly[STLB_DLY]),
+      .dtlb_hart_i  (dtlb_hart_dly[STLB_DLY]),
+      // from TLBs
+      // did we miss?
+      .itlb_access_i(itlb_acc_dly[STLB_DLY]),
+      .itlb_hit_i   (itlb_lu_hit),
+      .itlb_vaddr_i (itlb_va_dly[STLB_DLY]),
+
+      .dtlb_access_i(dtlb_acc_dly[STLB_DLY]),
+      .dtlb_hit_i   (dtlb_lu_hit),
+      .dtlb_vaddr_i (dtlb_va_dly[STLB_DLY]),
+
+      .asid_to_be_flushed_i(asid_to_be_flushed_i),
+      .vaddr_to_be_flushed_i(vaddr_to_be_flushed_i),
+      .vmid_to_be_flushed_i(vmid_to_be_flushed_i),
+      .gpaddr_to_be_flushed_i(gpaddr_to_be_flushed_i),
+      // to TLBs, update logic
+      .itlb_update_o(update_itlb),
+      .dtlb_update_o(update_dtlb),
+      .flush_busy_o(shared_tlb_flush_busy_o),
+      // Performance counters
+      .itlb_miss_o(itlb_miss_o),
+      .dtlb_miss_o(dtlb_miss_o),
+      .shared_tlb_miss_i(shared_tlb_miss),
+
+      .shared_tlb_access_o(shared_tlb_access),
+      .shared_tlb_hit_o   (shared_tlb_hit),
+      .shared_tlb_vaddr_o (shared_tlb_vaddr),
+
+      .itlb_req_o         (itlb_req),
+      // to update shared tlb
+      .shared_tlb_update_i(update_shared_tlb)
+  );
+
+  g6lc_ptw #(
+      .G6LCCfg          (G6LCCfg),
+      .pte_g6lc_t       (pte_g6lc_t),
+      .tlb_update_g6lc_t(tlb_update_g6lc_t),
+      .dcache_req_i_t   (dcache_req_i_t),
+      .dcache_req_o_t   (dcache_req_o_t),
+      .HYP_EXT          (HYP_EXT)
+  ) i_ptw (
+      .clk_i (clk_i),
+      .rst_ni(rst_ni),
+      .flush_i,
+
+      .ptw_active_o          (ptw_active),
+      .walking_instr_o       (walking_instr),
+      .ptw_error_o           (ptw_error),
+      .ptw_error_at_g_st_o   (ptw_error_at_g_st),
+      .ptw_err_at_g_int_st_o (ptw_err_at_g_int_st),
+      .ptw_access_exception_o(ptw_access_exception),
+      .enable_translation_i,
+      .enable_g_translation_i,
+      .en_ld_st_translation_i,
+      .en_ld_st_g_translation_i,
+      .v_i,
+      .ld_st_v_i,
+      .hlvx_inst_i           (hlvx_inst_i),
+
+      .lsu_is_store_i(lsu_is_store_i),
+      // PTW memory interface
+      .req_port_i    (req_port_i),
+      .req_port_o    (req_port_o),
+
+      // to Shared TLB, update logic
+      .shared_tlb_update_o(update_shared_tlb),
+
+      .update_vaddr_o(update_vaddr),
+
+      // T6b-2b: context of the walk owner — fetch hart for instruction walks,
+      // LSU request hart for data walks (transparent in single-hart/drained
+      // configurations where both sides carry identical values).
+      .asid_i   (ptw_ctx_fet ? fet_asid_i : asid_i),
+      .vs_asid_i(ptw_ctx_fet ? fet_vs_asid_i : vs_asid_i),
+      .vmid_i   (ptw_ctx_fet ? fet_vmid_i : vmid_i),
+
+      // from shared TLB
+      // did we miss?
+      .shared_tlb_access_i(shared_tlb_access),
+      .shared_tlb_hit_i   (shared_tlb_hit),
+      .shared_tlb_vaddr_i (shared_tlb_vaddr),
+
+      .itlb_req_i(itlb_req),
+      .req_hart_i(ptw_ctx_fet ? fetch_hart_i : lsu_hart_i),
+
+      .satp_ppn_i (ptw_ctx_fet ? fet_satp_ppn_i : satp_ppn_i),
+      .vsatp_ppn_i(ptw_ctx_fet ? fet_vsatp_ppn_i : vsatp_ppn_i),
+      .hgatp_ppn_i(ptw_ctx_fet ? fet_hgatp_ppn_i : hgatp_ppn_i),
+      .mxr_i      (ptw_ctx_fet ? fet_mxr_i : mxr_i),
+      .vmxr_i     (ptw_ctx_fet ? fet_vmxr_i : vmxr_i),
+      .mbe_i      (ptw_ctx_fet ? fet_mbe_i : mbe_i),
+      // Performance counters
+      .shared_tlb_miss_o(shared_tlb_miss),  //open for now
+
+      // PMP
+      .pmpcfg_i   (ptw_ctx_fet ? fet_pmpcfg_i : pmpcfg_i),
+      .pmpaddr_i  (ptw_ctx_fet ? fet_pmpaddr_i : pmpaddr_i),
+      .bad_paddr_o(ptw_bad_paddr),
+      .bad_gpaddr_o(ptw_bad_gpaddr)
+  );
+
+  //-----------------------
+  // Instruction Interface
+  //-----------------------
+  localparam int PPNWMin = (G6LCCfg.PPNW - 1 > 29) ? 29 : G6LCCfg.PPNW - 1;
+  // Width of the mid-level (2M) superpage PPN substitution for PtLevels == 3.
+  // Evaluates to 9 for Sv39 and (unused but elaboration-legal) 1 for Sv32.
+  localparam int unsigned MegaPageSubstWidth = PPNWMin - (G6LCCfg.VpnLen / G6LCCfg.PtLevels) - 8 - G6LCCfg.PtLevels;
+
+  // The instruction interface is a simple request response interface
+  always_comb begin : instr_interface
+    // MMU disabled: just pass through
+    final_fetch_ppn = '0;
+    icache_areq_o.fetch_valid = icache_areq_i.fetch_req;
+    icache_areq_o.fetch_paddr = G6LCCfg.PLEN'(icache_areq_i.fetch_vaddr[((G6LCCfg.PLEN > G6LCCfg.VLEN) ? G6LCCfg.VLEN -1: G6LCCfg.PLEN -1 ):0]);
+    // two potential exception sources:
+    // 1. HPTW threw an exception -> signal with a page fault exception
+    // 2. We got an access error because of insufficient permissions -> throw an access exception
+    icache_areq_o.fetch_exception = '0;
+    // Check whether we are allowed to access this memory region from a fetch perspective
+    iaccess_err = icache_areq_i.fetch_req && enable_translation_i &&  //
+    (((priv_lvl_i == riscv::PRIV_LVL_U) && ~itlb_content.u)  //
+    || ((priv_lvl_i == riscv::PRIV_LVL_S) && itlb_content.u));
+
+    if (G6LCCfg.RVH)
+      i_g_st_access_err = icache_areq_i.fetch_req && enable_g_translation_i && !itlb_g_content.u;
+    // MMU enabled: address from TLB, request delayed until hit. Error when TLB
+    // hit and no access right or TLB hit and translated address not valid (e.g.
+    // AXI decode error), or when PTW performs walk due to ITLB miss and raises
+    // an error.
+    if ((enable_translation_i || enable_g_translation_i)) begin
+      // If second-level address translation is enabled:
+      // - in VS stage, check that all bits [G6LCCfg.VLEN-1:G6LCCfg.SV-1] are equal
+      // - in pure G stage (SV39x4 mode), [G6LCCfg.VLEN-1:G6LCCfg.GPLEN] must be zero.
+      // - in pure G stage (SV32x4 mode), no check is needed.
+      if ((enable_translation_i && (icache_areq_i.fetch_req && !((&icache_areq_i.fetch_vaddr[G6LCCfg.VLEN-1:G6LCCfg.SV-1]) == 1'b1 || (|icache_areq_i.fetch_vaddr[G6LCCfg.VLEN-1:G6LCCfg.SV-1]) == 1'b0)))
+          || (enable_g_translation_i && !enable_translation_i && G6LCCfg.IS_XLEN64 && (|icache_areq_i.fetch_vaddr[G6LCCfg.VLEN-1:G6LCCfg.GPLEN] != 1'b0))) begin
+        icache_areq_o.fetch_exception.cause = riscv::INSTR_PAGE_FAULT;
+        icache_areq_o.fetch_exception.valid = 1'b1;
+        if (G6LCCfg.TvalEn)
+          icache_areq_o.fetch_exception.tval = G6LCCfg.XLEN'(icache_areq_i.fetch_vaddr);
+        if (G6LCCfg.RVH) begin
+          icache_areq_o.fetch_exception.tval2 = '0;
+          icache_areq_o.fetch_exception.tinst = '0;
+          icache_areq_o.fetch_exception.gva   = v_i;
+        end
+      end
+
+      icache_areq_o.fetch_valid = 1'b0;
+
+      final_fetch_ppn = (enable_g_translation_i && G6LCCfg.RVH)? itlb_g_content.ppn : itlb_content.ppn;
+      icache_areq_o.fetch_paddr = {final_fetch_ppn, icache_areq_i.fetch_vaddr[11:0]};
+
+      if (G6LCCfg.PtLevels == 3 && itlb_is_page[G6LCCfg.PtLevels-2]) begin
+
+        // strange 9+PtLevels to avoid CI errors on (purely syntactic) checks on Sv32, where
+        // `PPNWMin-(G6LCCfg.VpnLen/G6LCCfg.PtLevels)` equals `11` and would lead to `icache_areq_i.fetch_vaddr[11:12]`
+        icache_areq_o.fetch_paddr[PPNWMin-(G6LCCfg.VpnLen/G6LCCfg.PtLevels):9+G6LCCfg.PtLevels] = icache_areq_i.fetch_vaddr[PPNWMin-(G6LCCfg.VpnLen/G6LCCfg.PtLevels):9+G6LCCfg.PtLevels];
+
+      end
+
+      if (itlb_is_page[0]) begin
+
+        icache_areq_o.fetch_paddr[PPNWMin:12] = icache_areq_i.fetch_vaddr[PPNWMin:12];
+
+      end
+      // ---------//
+      // ITLB Hit
+      // --------//
+      // if we hit the ITLB output the request signal immediately
+      if (itlb_lu_hit) begin
+        icache_areq_o.fetch_valid = icache_areq_i.fetch_req;
+        if (G6LCCfg.RVH && i_g_st_access_err) begin
+          icache_areq_o.fetch_exception.cause = riscv::INSTR_GUEST_PAGE_FAULT;
+          icache_areq_o.fetch_exception.valid = 1'b1;
+          if (G6LCCfg.TvalEn)
+            icache_areq_o.fetch_exception.tval = G6LCCfg.XLEN'(icache_areq_i.fetch_vaddr);
+          if (G6LCCfg.RVH) begin
+            icache_areq_o.fetch_exception.tval2 = itlb_gpaddr[G6LCCfg.GPLEN-1:0];
+            icache_areq_o.fetch_exception.tinst = '0;
+            icache_areq_o.fetch_exception.gva   = v_i;
+          end
+
+          // we got an access error
+        end else if (iaccess_err) begin
+          // throw a page fault
+          icache_areq_o.fetch_exception.cause = riscv::INSTR_PAGE_FAULT;
+          icache_areq_o.fetch_exception.valid = 1'b1;
+          if (G6LCCfg.TvalEn)
+            icache_areq_o.fetch_exception.tval = G6LCCfg.XLEN'(icache_areq_i.fetch_vaddr);
+          if (G6LCCfg.RVH) begin
+            icache_areq_o.fetch_exception.tval2 = '0;
+            icache_areq_o.fetch_exception.tinst = '0;
+            icache_areq_o.fetch_exception.gva   = v_i;
+          end
+        end
+      end else if (ptw_active && walking_instr) begin
+        // ---------//
+        // ITLB Miss
+        // ---------//
+        // watch out for exceptions happening during walking the page table
+        icache_areq_o.fetch_valid = ptw_error | ptw_access_exception;
+        if (ptw_error) begin
+          if (G6LCCfg.RVH && ptw_error_at_g_st) begin
+            icache_areq_o.fetch_exception.cause = riscv::INSTR_GUEST_PAGE_FAULT;
+            icache_areq_o.fetch_exception.valid = 1'b1;
+            if (G6LCCfg.TvalEn) icache_areq_o.fetch_exception.tval = G6LCCfg.XLEN'(update_vaddr);
+            if (G6LCCfg.RVH) begin
+              icache_areq_o.fetch_exception.tval2 = ptw_bad_gpaddr[G6LCCfg.GPLEN-1:0];
+              icache_areq_o.fetch_exception.tinst = (ptw_err_at_g_int_st ? (G6LCCfg.IS_XLEN64 ? riscv::READ_64_PSEUDOINSTRUCTION : riscv::READ_32_PSEUDOINSTRUCTION) : '0);
+              icache_areq_o.fetch_exception.gva = v_i;
+            end
+          end else begin
+            icache_areq_o.fetch_exception.cause = riscv::INSTR_PAGE_FAULT;
+            icache_areq_o.fetch_exception.valid = 1'b1;
+            if (G6LCCfg.TvalEn) icache_areq_o.fetch_exception.tval = G6LCCfg.XLEN'(update_vaddr);
+            if (G6LCCfg.RVH) begin
+              icache_areq_o.fetch_exception.tval2 = '0;
+              icache_areq_o.fetch_exception.tinst = '0;
+              icache_areq_o.fetch_exception.gva   = v_i;
+            end
+          end
+        end else begin
+          icache_areq_o.fetch_exception.cause = riscv::INSTR_ACCESS_FAULT;
+          icache_areq_o.fetch_exception.valid = 1'b1;
+          if (G6LCCfg.TvalEn)  // To confirm this is the right TVAL
+            icache_areq_o.fetch_exception.tval = G6LCCfg.XLEN'(update_vaddr);
+          if (G6LCCfg.RVH) begin
+            icache_areq_o.fetch_exception.tval2 = '0;
+            icache_areq_o.fetch_exception.tinst = '0;
+            icache_areq_o.fetch_exception.gva   = v_i;
+          end
+        end
+      end
+    end
+  end
+
+  //pragma translate_off
+  // T6b-4 debug: dump the fetch-side context whenever an instruction-side
+  // exception is presented — pairs with [ptw-err] in g6lc_ptw.
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && icache_areq_o.fetch_valid && icache_areq_o.fetch_exception.valid)
+      $display("[mmu-ife] t=%0t fetch_va=%h fetch_hart=%0d itlb_hit=%b iacc_err=%b en_tr=%b priv=%0d ptw_act=%b walk_instr=%b ptw_err=%b ptw_acc=%b upd_va=%h cause=%0d",
+               $time, icache_areq_i.fetch_vaddr, fetch_hart_i, itlb_lu_hit,
+               iaccess_err, enable_translation_i, priv_lvl_i, ptw_active,
+               walking_instr, ptw_error, ptw_access_exception, update_vaddr,
+               icache_areq_o.fetch_exception.cause);
+  end
+  //pragma translate_on
+
+
+  //-----------------------
+  // Data Interface
+  //-----------------------
+  logic [G6LCCfg.VLEN-1:0] lsu_vaddr_n, lsu_vaddr_q;
+  logic [G6LCCfg.GPLEN-1:0] lsu_gpaddr_n, lsu_gpaddr_q;
+  logic [31:0] lsu_tinst_n, lsu_tinst_q;
+  logic hs_ld_st_inst_n, hs_ld_st_inst_q;
+  pte_g6lc_t dtlb_pte_n, dtlb_pte_q;
+  pte_g6lc_t dtlb_gpte_n, dtlb_gpte_q;
+  logic lsu_req_n, lsu_req_q;
+  logic lsu_is_store_n, lsu_is_store_q;
+  logic dtlb_hit_n, dtlb_hit_q;
+  logic [G6LCCfg.PtLevels-2:0] dtlb_is_page_n, dtlb_is_page_q;
+  exception_t misaligned_ex_n, misaligned_ex_q;
+
+  // T6b-2b: the data-side permission check runs one cycle after the DTLB
+  // lookup on the registered request (*_q) — under mixed residency the live
+  // architectural context may already belong to the peer hart, so the check
+  // stage replays the context captured with the request.
+  localparam bit HART_CTX = (G6LCCfg.NrHarts > 1) && !G6LCCfg.SmtDrainedHandoff;
+  logic           ctx_en_ld_st_translation_q;
+  logic           ctx_en_ld_st_g_translation_q;
+  riscv::priv_lvl_t ctx_ld_st_priv_lvl_q;
+  logic           ctx_ld_st_v_q;
+  logic           ctx_sum_q, ctx_vs_sum_q;
+  logic           ctx_mxr_q, ctx_vmxr_q;
+  logic           chk_en_ld_st_translation;
+  logic           chk_en_ld_st_g_translation;
+  riscv::priv_lvl_t chk_ld_st_priv_lvl;
+  logic           chk_ld_st_v;
+  logic           chk_sum, chk_vs_sum;
+  logic           chk_mxr, chk_vmxr;
+
+`ifdef G6LC_MUT_MMU_LIVE_CTX
+  // Review-only mutation: check stage uses the live (possibly peer-hart)
+  // context instead of the context registered with the request.
+  assign chk_en_ld_st_translation   = en_ld_st_translation_i;
+  assign chk_en_ld_st_g_translation = en_ld_st_g_translation_i;
+  assign chk_ld_st_priv_lvl         = ld_st_priv_lvl_i;
+  assign chk_ld_st_v                = ld_st_v_i;
+  assign chk_sum                    = sum_i;
+  assign chk_vs_sum                 = vs_sum_i;
+  assign chk_mxr                    = mxr_i;
+  assign chk_vmxr                   = vmxr_i;
+`else
+  assign chk_en_ld_st_translation   = HART_CTX ? ctx_en_ld_st_translation_q : en_ld_st_translation_i;
+  assign chk_en_ld_st_g_translation = HART_CTX ? ctx_en_ld_st_g_translation_q : en_ld_st_g_translation_i;
+  assign chk_ld_st_priv_lvl         = HART_CTX ? ctx_ld_st_priv_lvl_q : ld_st_priv_lvl_i;
+  assign chk_ld_st_v                = HART_CTX ? ctx_ld_st_v_q : ld_st_v_i;
+  assign chk_sum                    = HART_CTX ? ctx_sum_q : sum_i;
+  assign chk_vs_sum                 = HART_CTX ? ctx_vs_sum_q : vs_sum_i;
+  assign chk_mxr                    = HART_CTX ? ctx_mxr_q : mxr_i;
+  assign chk_vmxr                   = HART_CTX ? ctx_vmxr_q : vmxr_i;
+`endif
+
+  // check if we need to do translation or if we are always ready (e.g.: we are not translating anything)
+  assign lsu_dtlb_hit_o = (en_ld_st_translation_i || en_ld_st_g_translation_i) ? dtlb_lu_hit : 1'b1;
+
+
+  // The data interface is simpler and only consists of a request/response interface
+  always_comb begin : data_interface
+    // save request and DTLB response
+    lsu_vaddr_n = lsu_vaddr_i;
+    lsu_req_n = lsu_req_i;
+    dtlb_pte_n = dtlb_content;
+    dtlb_hit_n = dtlb_lu_hit;
+    lsu_is_store_n = lsu_is_store_i;
+    dtlb_is_page_n = dtlb_is_page;
+    misaligned_ex_n = misaligned_ex_i;
+
+    lsu_valid_o = lsu_req_q;
+    lsu_exception_o = misaligned_ex_q;
+    lsu_exception_ptw_o = 1'b0;
+
+    // mute misaligned exceptions if there is no request otherwise they will throw accidental exceptions
+    misaligned_ex_n.valid = misaligned_ex_i.valid & lsu_req_i;
+
+    // we work with SV39 or SV32, so if VM is enabled, check that all bits [G6LCCfg.VLEN-1:G6LCCfg.SV-1] are equal to bit [G6LCCfg.SV]
+    // T36: the check belongs to the request whose DTLB result is examined
+    // this cycle (the _q stage below), not to the request being looked up
+    // now. Evaluated on lsu_vaddr_i it charged the NEXT request's address to
+    // the current one: with out-of-order issue a wrong-path load carrying a
+    // non-canonical pointer, translated the cycle after a store, turned that
+    // store into a STORE_PAGE_FAULT on a valid, writable page (Linux
+    // jent_memaccess: sd to the VMAP stack, PTE VRW-GAD, no PTW error;
+    // ooo_mem_min stage 52).
+    canonical_addr_check = (lsu_req_q && chk_en_ld_st_translation &&
+           !((&lsu_vaddr_q[G6LCCfg.VLEN-1:G6LCCfg.SV-1]) == 1'b1 || (|lsu_vaddr_q[G6LCCfg.VLEN-1:G6LCCfg.SV-1]) == 1'b0));
+
+    // Check if the User flag is set, then we may only access it in supervisor mode
+    // if SUM is enabled
+    daccess_err = chk_en_ld_st_translation &&
+              ((chk_ld_st_priv_lvl == riscv::PRIV_LVL_S && (chk_ld_st_v ? !chk_vs_sum : !chk_sum ) && dtlb_pte_q.u) || // SUM is not set and we are trying to access a user page in supervisor mode
+    (chk_ld_st_priv_lvl == riscv::PRIV_LVL_U && !dtlb_pte_q.u));
+
+    if (G6LCCfg.RVH) begin
+      lsu_tinst_n = lsu_tinst_i;
+      hs_ld_st_inst_n = hs_ld_st_inst_i;
+      lsu_gpaddr_n[(G6LCCfg.IS_XLEN32 ? G6LCCfg.VLEN: G6LCCfg.GPLEN)-1:0] = dtlb_gpaddr[(G6LCCfg.IS_XLEN32 ? G6LCCfg.VLEN: G6LCCfg.GPLEN)-1:0];
+      csr_hs_ld_st_inst_o = hs_ld_st_inst_i || hs_ld_st_inst_q;
+      d_g_st_access_err = chk_en_ld_st_g_translation && !dtlb_gpte_q.u;
+      dtlb_gpte_n = dtlb_g_content;
+    end
+
+    lsu_paddr_o = (G6LCCfg.PLEN)'(lsu_vaddr_q[((G6LCCfg.PLEN > G6LCCfg.VLEN) ? G6LCCfg.VLEN -1: G6LCCfg.PLEN -1 ):0]);
+    lsu_dtlb_ppn_o        = (G6LCCfg.PPNW)'(lsu_vaddr_n[((G6LCCfg.PLEN > G6LCCfg.VLEN) ? G6LCCfg.VLEN -1: G6LCCfg.PLEN -1 ):12]);
+
+    // translation is enabled and no misaligned exception occurred
+    if ((chk_en_ld_st_translation || chk_en_ld_st_g_translation) && !misaligned_ex_q.valid) begin
+      lsu_valid_o = 1'b0;
+
+      lsu_dtlb_ppn_o = (en_ld_st_g_translation_i && G6LCCfg.RVH) ? dtlb_g_content.ppn : dtlb_content.ppn;
+      lsu_paddr_o = {
+        (chk_en_ld_st_g_translation && G6LCCfg.RVH) ? dtlb_gpte_q.ppn : dtlb_pte_q.ppn,
+        lsu_vaddr_q[11:0]
+      };
+
+      if (G6LCCfg.PtLevels == 3 && dtlb_is_page_q[G6LCCfg.PtLevels-2]) begin
+        // Strange 9+PtLevels to avoid CI errors on (purely syntactic) checks on Sv32, where
+        // `PPNWMin-(G6LCCfg.VpnLen/G6LCCfg.PtLevels)` equals `11` and would lead to `lsu_paddr_o[11:12]`
+        lsu_paddr_o[PPNWMin-(G6LCCfg.VpnLen/G6LCCfg.PtLevels):9+G6LCCfg.PtLevels] = lsu_vaddr_q[PPNWMin-(G6LCCfg.VpnLen/G6LCCfg.PtLevels):9+G6LCCfg.PtLevels];
+      end
+      if (G6LCCfg.PtLevels == 3 && dtlb_is_page_n[G6LCCfg.PtLevels-2]) begin
+        lsu_dtlb_ppn_o[0+:MegaPageSubstWidth] = lsu_vaddr_n[(9+G6LCCfg.PtLevels)+:MegaPageSubstWidth];
+      end
+
+
+      if (dtlb_is_page_q[0]) begin
+        lsu_paddr_o[PPNWMin:12] = lsu_vaddr_q[PPNWMin:12];
+      end
+
+      if (dtlb_is_page_n[0]) begin
+        lsu_dtlb_ppn_o[PPNWMin-12:0] = lsu_vaddr_n[PPNWMin:12];
+      end
+
+
+      // ---------
+      // DTLB Hit
+      // --------
+      if (dtlb_hit_q && lsu_req_q) begin
+        lsu_valid_o = 1'b1;
+        // exception priority:
+        // PAGE_FAULTS have higher priority than ACCESS_FAULTS
+        // virtual memory based exceptions are PAGE_FAULTS
+        // physical memory based exceptions are ACCESS_FAULTS (PMA/PMP)
+
+        // this is a store
+        if (lsu_is_store_q) begin
+          // check if the page is write-able and we are not violating privileges
+          // also check if the dirty flag is set
+          if(G6LCCfg.RVH && chk_en_ld_st_g_translation && (!dtlb_gpte_q.w || d_g_st_access_err || !dtlb_gpte_q.d)) begin
+            lsu_exception_o.cause = riscv::STORE_GUEST_PAGE_FAULT;
+            lsu_exception_o.valid = 1'b1;
+            if (G6LCCfg.TvalEn)
+              lsu_exception_o.tval = {
+                {G6LCCfg.XLEN - G6LCCfg.VLEN{lsu_vaddr_q[G6LCCfg.VLEN-1]}}, lsu_vaddr_q
+              };
+            if (G6LCCfg.RVH) begin
+              lsu_exception_o.tval2 = G6LCCfg.GPLEN'(lsu_gpaddr_q[(G6LCCfg.IS_XLEN32 ? G6LCCfg.VLEN : G6LCCfg.GPLEN)-1:0]);
+              lsu_exception_o.tinst = '0;
+              lsu_exception_o.gva = chk_ld_st_v;
+            end
+          end else if ((chk_en_ld_st_translation || !G6LCCfg.RVH) && (!dtlb_pte_q.w || daccess_err || canonical_addr_check || !dtlb_pte_q.d)) begin
+            lsu_exception_o.cause = riscv::STORE_PAGE_FAULT;
+            lsu_exception_o.valid = 1'b1;
+            if (G6LCCfg.TvalEn)
+              lsu_exception_o.tval = {
+                {G6LCCfg.XLEN - G6LCCfg.VLEN{lsu_vaddr_q[G6LCCfg.VLEN-1]}}, lsu_vaddr_q
+              };
+            if (G6LCCfg.RVH) begin
+              lsu_exception_o.tval2 = '0;
+              lsu_exception_o.tinst = lsu_tinst_q;
+              lsu_exception_o.gva   = chk_ld_st_v;
+            end
+          end
+          // this is a load
+        end else begin
+          if (G6LCCfg.RVH && d_g_st_access_err) begin
+            lsu_exception_o.cause = riscv::LOAD_GUEST_PAGE_FAULT;
+            lsu_exception_o.valid = 1'b1;
+            if (G6LCCfg.TvalEn)
+              lsu_exception_o.tval = {
+                {G6LCCfg.XLEN - G6LCCfg.VLEN{lsu_vaddr_q[G6LCCfg.VLEN-1]}}, lsu_vaddr_q
+              };
+            if (G6LCCfg.RVH) begin
+              lsu_exception_o.tval2 = G6LCCfg.GPLEN'(lsu_gpaddr_q[(G6LCCfg.IS_XLEN32 ? G6LCCfg.VLEN : G6LCCfg.GPLEN)-1:0]);
+              lsu_exception_o.tinst = '0;
+              lsu_exception_o.gva = chk_ld_st_v;
+            end
+            // check for sufficient access privileges - throw a page fault if necessary
+          end else if (daccess_err || canonical_addr_check) begin
+            lsu_exception_o.cause = riscv::LOAD_PAGE_FAULT;
+            lsu_exception_o.valid = 1'b1;
+            if (G6LCCfg.TvalEn)
+              lsu_exception_o.tval = {
+                {G6LCCfg.XLEN - G6LCCfg.VLEN{lsu_vaddr_q[G6LCCfg.VLEN-1]}}, lsu_vaddr_q
+              };
+            if (G6LCCfg.RVH) begin
+              lsu_exception_o.tval2 = '0;
+              lsu_exception_o.tinst = lsu_tinst_q;
+              lsu_exception_o.gva   = chk_ld_st_v;
+            end
+          end
+        end
+      end else
+
+      // ---------
+      // DTLB Miss
+      // ---------
+      // watch out for exceptions
+      // T42: the fault is reported only when the walk is for the registered
+      // requester's page. Under the OoO younger-cancel a cancelled load's walk
+      // keeps going (no flush), and its error — a wrong-path pointer, usually
+      // 0 — was raised here while a live load or store sat in WAIT_TRANSLATION
+      // behind it: that request took a LOAD/STORE_PAGE_FAULT with the dead
+      // walk's address as tval. Linux saw stval = 0 on user demand-paging
+      // faults, found no VMA at 0 and killed the process (every
+      // `unhandled signal 11 … at 0x0000000000000000`, the procd die at 13.9 s).
+      // A foreign walk's error is dropped; the requester's own walk follows and
+      // reports its own fault if it has one.
+`ifdef G6LC_MUT_MMU_PTW_FOREIGN
+      if (ptw_active && !walking_instr) begin   // review mutation: the pre-fix shape (any walk's fault)
+`else
+      if (ptw_active && !walking_instr && lsu_req_q &&
+          (update_vaddr[G6LCCfg.VLEN-1:12] == lsu_vaddr_q[G6LCCfg.VLEN-1:12])) begin
+`endif
+        // The PTW broadcast is not bound to the registered requester: the walk
+        // may belong to another LSU client whose request lost the port mux, so
+        // any exception raised here is foreign to a requester whose own
+        // translation already resolved.
+        lsu_exception_ptw_o = ptw_error | ptw_access_exception;
+        // page table walker threw an exception
+        if (ptw_error) begin
+          // an error makes the translation valid
+          lsu_valid_o = 1'b1;
+          // the page table walker can only throw page faults
+          if (lsu_is_store_q) begin
+            if (G6LCCfg.RVH && ptw_error_at_g_st) begin
+              lsu_exception_o.cause = riscv::STORE_GUEST_PAGE_FAULT;
+              lsu_exception_o.valid = 1'b1;
+              if (G6LCCfg.TvalEn)
+                lsu_exception_o.tval = {
+                  {G6LCCfg.XLEN - G6LCCfg.VLEN{lsu_vaddr_q[G6LCCfg.VLEN-1]}}, update_vaddr
+                };
+              if (G6LCCfg.RVH) begin
+                lsu_exception_o.tval2 = ptw_bad_gpaddr[G6LCCfg.GPLEN-1:0];
+                lsu_exception_o.tinst = (ptw_err_at_g_int_st ? (G6LCCfg.IS_XLEN64 ? riscv::READ_64_PSEUDOINSTRUCTION : riscv::READ_32_PSEUDOINSTRUCTION) : '0);
+                lsu_exception_o.gva = chk_ld_st_v;
+              end
+            end else begin
+              lsu_exception_o.cause = riscv::STORE_PAGE_FAULT;
+              lsu_exception_o.valid = 1'b1;
+              if (G6LCCfg.TvalEn)
+                lsu_exception_o.tval = {
+                  {G6LCCfg.XLEN - G6LCCfg.VLEN{lsu_vaddr_q[G6LCCfg.VLEN-1]}}, update_vaddr
+                };
+              if (G6LCCfg.RVH) begin
+                lsu_exception_o.tval2 = '0;
+                lsu_exception_o.tinst = lsu_tinst_q;
+                lsu_exception_o.gva   = chk_ld_st_v;
+              end
+            end
+          end else begin
+            if (G6LCCfg.RVH && ptw_error_at_g_st) begin
+              lsu_exception_o.cause = riscv::LOAD_GUEST_PAGE_FAULT;
+              lsu_exception_o.valid = 1'b1;
+              if (G6LCCfg.TvalEn)
+                lsu_exception_o.tval = {
+                  {G6LCCfg.XLEN - G6LCCfg.VLEN{lsu_vaddr_q[G6LCCfg.VLEN-1]}}, update_vaddr
+                };
+              if (G6LCCfg.RVH) begin
+                lsu_exception_o.tval2 = ptw_bad_gpaddr[G6LCCfg.GPLEN-1:0];
+                lsu_exception_o.tinst = (ptw_err_at_g_int_st ? (G6LCCfg.IS_XLEN64 ? riscv::READ_64_PSEUDOINSTRUCTION : riscv::READ_32_PSEUDOINSTRUCTION) : '0);
+                lsu_exception_o.gva = chk_ld_st_v;
+              end
+            end else begin
+              lsu_exception_o.cause = riscv::LOAD_PAGE_FAULT;
+              lsu_exception_o.valid = 1'b1;
+              if (G6LCCfg.TvalEn)
+                lsu_exception_o.tval = {
+                  {G6LCCfg.XLEN - G6LCCfg.VLEN{lsu_vaddr_q[G6LCCfg.VLEN-1]}}, update_vaddr
+                };
+              if (G6LCCfg.RVH) begin
+                lsu_exception_o.tval2 = '0;
+                lsu_exception_o.tinst = lsu_tinst_q;
+                lsu_exception_o.gva   = chk_ld_st_v;
+              end
+            end
+          end
+        end
+        if (ptw_access_exception) begin
+          // an error makes the translation valid
+          lsu_valid_o = 1'b1;
+          // Any fault of the page table walk should be based of the original access type
+          if (lsu_is_store_q && !G6LCCfg.RVH && G6LCCfg.PtLevels == 3) begin
+            lsu_exception_o.cause = riscv::ST_ACCESS_FAULT;
+            lsu_exception_o.valid = 1'b1;
+            if (G6LCCfg.TvalEn)
+              lsu_exception_o.tval = {
+                {G6LCCfg.XLEN - G6LCCfg.VLEN{lsu_vaddr_q[G6LCCfg.VLEN-1]}}, update_vaddr
+              };
+          end else begin
+            // the page table walker can only throw page faults
+            lsu_exception_o.cause = riscv::LD_ACCESS_FAULT;
+            lsu_exception_o.valid = 1'b1;
+            if (G6LCCfg.TvalEn)
+              lsu_exception_o.tval = {
+                {G6LCCfg.XLEN - G6LCCfg.VLEN{lsu_vaddr_q[G6LCCfg.VLEN-1]}}, update_vaddr
+              };
+            if (G6LCCfg.RVH) begin
+              lsu_exception_o.tval2 = '0;
+              lsu_exception_o.tinst = lsu_tinst_q;
+              lsu_exception_o.gva   = chk_ld_st_v;
+            end
+          end
+        end
+      end
+    end
+  end
+
+  // ----------
+  // Registers
+  // ----------
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (~rst_ni) begin
+      lsu_vaddr_q     <= '0;
+      lsu_gpaddr_q    <= '0;
+      lsu_req_q       <= '0;
+      dtlb_pte_q      <= '0;
+      dtlb_gpte_q     <= '0;
+      dtlb_hit_q      <= '0;
+      lsu_is_store_q  <= '0;
+      dtlb_is_page_q  <= '0;
+      lsu_tinst_q     <= '0;
+      hs_ld_st_inst_q <= '0;
+      misaligned_ex_q <= '0;
+      if (HART_CTX) begin
+        ctx_en_ld_st_translation_q   <= '0;
+        ctx_en_ld_st_g_translation_q <= '0;
+        ctx_ld_st_priv_lvl_q         <= riscv::PRIV_LVL_M;
+        ctx_ld_st_v_q                <= '0;
+        ctx_sum_q                    <= '0;
+        ctx_vs_sum_q                 <= '0;
+        ctx_mxr_q                    <= '0;
+        ctx_vmxr_q                   <= '0;
+      end
+    end else begin
+      lsu_vaddr_q     <= lsu_vaddr_n;
+      lsu_req_q       <= lsu_req_n;
+      dtlb_pte_q      <= dtlb_pte_n;
+      dtlb_hit_q      <= dtlb_hit_n;
+      lsu_is_store_q  <= lsu_is_store_n;
+      dtlb_is_page_q  <= dtlb_is_page_n;
+      misaligned_ex_q <= misaligned_ex_n;
+      if (HART_CTX) begin
+        ctx_en_ld_st_translation_q   <= en_ld_st_translation_i;
+        ctx_en_ld_st_g_translation_q <= en_ld_st_g_translation_i;
+        ctx_ld_st_priv_lvl_q         <= ld_st_priv_lvl_i;
+        ctx_ld_st_v_q                <= ld_st_v_i;
+        ctx_sum_q                    <= sum_i;
+        ctx_vs_sum_q                 <= vs_sum_i;
+        ctx_mxr_q                    <= mxr_i;
+        ctx_vmxr_q                   <= vmxr_i;
+      end
+
+      if (G6LCCfg.RVH) begin
+        lsu_tinst_q     <= lsu_tinst_n;
+        hs_ld_st_inst_q <= hs_ld_st_inst_n;
+        dtlb_gpte_q     <= dtlb_gpte_n;
+        lsu_gpaddr_q    <= lsu_gpaddr_n;
+      end
+    end
+  end
+
+  //pragma translate_off
+  // T6b-2b: the LSU request hart — and therefore every data-side architectural
+  // context input muxed by it — must not change while a data page-table walk
+  // is in flight (the LSU holds its request for the whole walk).
+  g6lc_dtlb_walk_hart_stable :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      (ptw_active && !walking_instr && lsu_req_i && $past(lsu_req_i))
+      |-> $stable(lsu_hart_i))
+  else $error("[mmu] lsu_hart_i changed during an active data PTW walk");
+  // While the LSU holds its request for a data walk, the architectural
+  // context registered with it (ctx_*_q) must stay equal to the live inputs
+  // the walk itself consumes.
+  g6lc_dtlb_walk_ctx_stable :
+  assert property (@(posedge clk_i) disable iff (!rst_ni)
+      (HART_CTX && ptw_active && !walking_instr && lsu_req_i && $past(lsu_req_i))
+      |-> $stable({en_ld_st_translation_i, en_ld_st_g_translation_i,
+                  ld_st_priv_lvl_i, ld_st_v_i, sum_i, vs_sum_i, mxr_i, vmxr_i}))
+  else $error("[mmu] LSU architectural context changed during an active data PTW walk");
+  //pragma translate_on
+endmodule

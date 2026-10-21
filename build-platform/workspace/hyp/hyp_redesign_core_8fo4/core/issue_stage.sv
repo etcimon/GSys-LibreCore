@@ -1,0 +1,757 @@
+// hyp8 provenance: AS-IS (sv-timing emit at the 8-FO4 budget)
+// Copyright 2018 ETH Zurich and University of Bologna.
+// Copyright and related rights are licensed under the Solderpad Hardware
+// License, Version 0.51 (the "License"); you may not use this file except in
+// compliance with the License.  You may obtain a copy of the License at
+// http://solderpad.org/licenses/SHL-0.51. Unless required by applicable law
+// or agreed to in writing, software, hardware and materials distributed under
+// this License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+// CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+//
+// Author: Florian Zaruba, ETH Zurich
+// Modified by: Etienne Cimon
+// Date: 21.05.2017
+// Description: Issue stage dispatches instructions to the FUs and keeps track of them
+//              in a scoreboard like data-structure.
+
+
+module issue_stage
+  import g6lc_core_pkg::*;
+#(
+    parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty,
+    parameter g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = g6lc_hyp_pkg::HypDefault,
+    parameter type bp_resolve_t = logic,
+    parameter type branchpredict_sbe_t = logic,
+    parameter type exception_t = logic,
+    parameter type fu_data_t = logic,
+    parameter type scoreboard_entry_t = logic,
+    parameter type writeback_t = logic,
+    parameter type x_issue_req_t = logic,
+    parameter type x_issue_resp_t = logic,
+    parameter type x_register_t = logic,
+    parameter type x_commit_t = logic
+) (
+    // Subsystem Clock - SUBSYSTEM
+    input logic clk_i,
+    // Asynchronous reset active low - SUBSYSTEM
+    input logic rst_ni,
+    input logic [1:0] phys_valid_i,
+    input logic [1:0][G6LCCfg.PLEN-1:0] phys_addr_i,
+    input logic [1:0][G6LCCfg.TRANS_ID_BITS-1:0] phys_id_i,
+    input logic [1:0][$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] phys_hart_i,
+    input logic [1:0][1:0] phys_size_i,
+    input logic lu_replay_i,
+    input logic [G6LCCfg.TRANS_ID_BITS-1:0] lu_replay_id_i,
+    input logic [1:0] mod_valid_i,
+    input logic [1:0][G6LCCfg.PLEN-1:0] mod_addr_i,
+    // Is scoreboard full - PERF_COUNTERS
+    output logic sb_full_o,
+    output logic sb_empty_o,
+    // FSE: SpeculativeSb younger cancel - PERF_COUNTERS
+    output logic spec_cancel_o,
+    // U5 production: SB cancel mask for OoO squash
+    output logic [G6LCCfg.NR_SB_ENTRIES-1:0] cancelled_mask_o,
+    // Scoreboard issued mask - EX_STAGE (store-buffer liveness assertion)
+    output logic [G6LCCfg.NR_SB_ENTRIES-1:0] sb_live_o,
+    // T6b: per-hart head of the live scoreboard ring — oldest issued entry's
+    // PC per hart. T6b-2 recovery consumes it; exported here for wiring.
+    output logic [G6LCCfg.NrHarts-1:0][G6LCCfg.VLEN-1:0] sb_head_pc_o,
+    output logic [G6LCCfg.NrHarts-1:0] sb_head_valid_o,
+    // Prevent from issuing - CONTROLLER
+    input logic flush_unissued_instr_i,
+    // Flush whole scoreboard - CONTROLLER
+    input logic flush_i,
+    // Stall inserted by Acc dispatcher - ACC_DISPATCHER
+    input logic stall_i,
+    // Handshake's data with decode stage - ID_STAGE
+    input scoreboard_entry_t [G6LCCfg.NrIssuePorts-1:0] decoded_instr_i,
+    input scoreboard_entry_t [G6LCCfg.NrIssuePorts-1:0] decoded_instr_i_prev,
+    // instruction value - ID_STAGE
+    input logic [G6LCCfg.NrIssuePorts-1:0][31:0] orig_instr_i,
+    // Handshake's valid with decode stage - ID_STAGE
+    input logic [G6LCCfg.NrIssuePorts-1:0] decoded_instr_valid_i,
+    // Is instruction a control flow instruction - ID_STAGE
+    input logic [G6LCCfg.NrIssuePorts-1:0] is_ctrl_flow_i,
+    // Handshake's acknowledge with decode stage - ID_STAGE
+    output logic [G6LCCfg.NrIssuePorts-1:0] decoded_instr_ack_o,
+    // G1fh: IQ dest-FIFO / presented CSR-to-a0
+    input logic g1fh_csr_a0_i,
+    input logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] g1fh_hart_i,
+    // rs1 forwarding - EX_STAGE
+    output [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.VLEN-1:0] rs1_forwarding_o,
+    // rs2 forwarding - EX_STAGE
+    output [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.VLEN-1:0] rs2_forwarding_o,
+    // FU data useful to execute instruction - EX_STAGE
+    output fu_data_t [G6LCCfg.NrIssuePorts-1:0] fu_data_o,
+    // ALU to ALU bypass control - EX_STAGE
+    output alu_bypass_t alu_bypass_o,
+    // Program Counter - EX_STAGE
+    output logic [G6LCCfg.VLEN-1:0] pc_o,
+    // FSE S5: SMT hart of CTRL_FLOW instruction - EX_STAGE
+    output logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] branch_hart_o,
+    // Is zcmt instruction - EX_STAGE
+    output logic is_zcmt_o,
+    // Is compressed instruction - EX_STAGE
+    output logic is_compressed_instr_o,
+    // Transformed trap instruction - EX_STAGE
+    output logic [G6LCCfg.NrIssuePorts-1:0][31:0] tinst_o,
+    // Fixed Latency Unit is ready - EX_STAGE
+    input logic flu_ready_i,
+    // CSR buffer admission credit - EX_STAGE (OoO only)
+    input logic csr_ready_i,
+    // hyp8 g7: per-issue-port in-ALU forward selects - EX_STAGE (ALU0).
+    // Bit 2 selects the registered A3 (result3_q) slot for LAT_ALU_FULL
+    // producers.
+    output logic [G6LCCfg.NrIssuePorts-1:0][2:0] alu_fwd_a_o,
+    output logic [G6LCCfg.NrIssuePorts-1:0][2:0] alu_fwd_b_o,
+    // hyp8 g7: ALU0 pipe-stage tids for the forward-select compare -
+    // EX_STAGE (A1 slot, then the registered A2/WB-record slot, then the
+    // registered A3 slot).
+    input  logic [G6LCCfg.TRANS_ID_BITS-1:0] alu_fwd_tid_i,
+    input  logic [G6LCCfg.TRANS_ID_BITS-1:0] alu_fwd_qtid_i,
+    input  logic [G6LCCfg.TRANS_ID_BITS-1:0] alu_fwd_rtid_i,
+    // hyp8 g10: LSQ checked bits — generated in g6lc_ooo_dispatch (LSQ
+    // verdict), consumed by i_scoreboard.ld_checked_i, exported to
+    // load_store_unit.ld_checked_i. '1 in the non-OoO shapes.
+    output logic [G6LCCfg.NR_SB_ENTRIES-1:0] ld_checked_o,
+    // hyp8 g10: scoreboard commit-bundle validity — exported to
+    // commit_stage.commit_bundle_valid_i / rvfi probes.
+    output logic [G6LCCfg.NrCommitPorts-1:0] commit_bundle_valid_o,
+    // hyp8 g10: LSU load-unit replay — routed into the IQ re-arm
+    // (g6lc_ooo_dispatch merge) from load_store_unit.replay_o/replay_tid_o.
+    input  logic                             replay_i,
+    input  logic [G6LCCfg.TRANS_ID_BITS-1:0] replay_tid_i,
+    // hyp8 H27: perf pulse — the IQ arb take-gate declined a selected
+    // ready candidate only for a WB/FLU reservation slot (OoO only; the
+    // in-order paths tie it 0).
+    output logic                             hyp_wb_reserve_stall_o,
+    // ALU output is valid - EX_STAGE
+    output logic [G6LCCfg.NrIssuePorts-1:0] alu_valid_o,
+    // AES output is valid - EX_STAGE
+    output logic [G6LCCfg.NrIssuePorts-1:0] aes_valid_o,
+    // Branch unit is valid - EX_STAGE
+    output logic [G6LCCfg.NrIssuePorts-1:0] branch_valid_o,
+    // Information of branch prediction - EX_STAGE
+    output branchpredict_sbe_t branch_predict_o,
+    // Signaling that we resolved the branch - EX_STAGE
+    input logic resolve_branch_i,
+    // Load store unit FU is ready - EX_STAGE
+    input logic lsu_ready_i,
+    // Load store unit FU is valid - EX_STAGE
+    output logic [G6LCCfg.NrIssuePorts-1:0] lsu_valid_o,
+    // Mult FU is valid - EX_STAGE
+    output logic [G6LCCfg.NrIssuePorts-1:0] mult_valid_o,
+    // FPU FU is ready - EX_STAGE
+    input logic fpu_ready_i,
+    // FPU FU is valid - EX_STAGE
+    output logic [G6LCCfg.NrIssuePorts-1:0] fpu_valid_o,
+    // FPU fmt field - EX_STAGE
+    output logic [1:0] fpu_fmt_o,
+    // FPU rm field - EX_STAGE
+    output logic [2:0] fpu_rm_o,
+    // FP-2: SMT hart of the FPU op in EX - EX_STAGE (mixed-residency
+    // frm/fprec select; the issuing op's hart owns both).
+    output logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] fpu_hart_o,
+    // FPU early valid - EX_STAGE
+    input logic fpu_early_valid_i,
+    // ALU2 FU is valid - EX_STAGE
+    output logic [G6LCCfg.NrIssuePorts-1:0] alu2_valid_o,
+    // CSR is valid - EX_STAGE
+    output logic [G6LCCfg.NrIssuePorts-1:0] csr_valid_o,
+    // CVXIF FU is valid - EX_STAGE
+    output logic [G6LCCfg.NrIssuePorts-1:0] xfu_valid_o,
+    // CVXIF is FU ready - EX_STAGE
+    input logic xfu_ready_i,
+    // CVXIF offloader instruction value - EX_STAGE
+    output logic [31:0] x_off_instr_o,
+    // G6LC Hart ID - SUBSYSTEM
+    input logic [G6LCCfg.XLEN-1:0] hart_id_i,
+    // CVXIF Issue interface - EX_STAGE
+    input logic x_issue_ready_i,
+    // TO_BE_COMPLETED - EX_STAGE
+    input x_issue_resp_t x_issue_resp_i,
+    // TO_BE_COMPLETED - EX_STAGE
+    output logic x_issue_valid_o,
+    // TO_BE_COMPLETED - EX_STAGE
+    output x_issue_req_t x_issue_req_o,
+    // CVXIF Register interface - EX_STAGE
+    input logic x_register_ready_i,
+    // TO_BE_COMPLETED - EX_STAGE
+    output logic x_register_valid_o,
+    // TO_BE_COMPLETED - EX_STAGE
+    output x_register_t x_register_o,
+    // CVXIF Commit interface - EX_STAGE
+    output logic x_commit_valid_o,
+    // TO_BE_COMPLETED - EX_STAGE
+    output x_commit_t x_commit_o,
+    // CVXIF Transaction rejected -> instruction is illegal - EX_STAGE
+    output logic x_transaction_rejected_o,
+    // Issue scoreboard entry - ACC_DISPATCHER
+    output scoreboard_entry_t issue_instr_o,
+    // TO_BE_COMPLETED - ACC_DISPATCHER
+    output logic issue_instr_hs_o,
+    // Transaction ID - EX_STAGE
+    input logic [G6LCCfg.NrWbPorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] trans_id_i,
+    // Result from branch unit - EX_STAGE
+    input bp_resolve_t resolved_branch_i,
+    // Results to write back - EX_STAGE
+    input logic [G6LCCfg.NrWbPorts-1:0][G6LCCfg.XLEN-1:0] wbdata_i,
+    // exception from execute stage or CVXIF - EX_STAGE
+    input exception_t [G6LCCfg.NrWbPorts-1:0] ex_ex_i,
+    // Indicates valid results - EX_STAGE
+    input logic [G6LCCfg.NrWbPorts-1:0] wt_valid_i,
+    // CVXIF write enable - EX_STAGE
+    input logic x_we_i,
+    // CVXIF destination register - EX_STAGE
+    input logic [4:0] x_rd_i,
+    // Destination register in register file - COMMIT_STAGE
+    input logic [G6LCCfg.NrCommitPorts-1:0][4:0] waddr_i,
+    // Value to write to register file - COMMIT_STAGE
+    input logic [G6LCCfg.NrCommitPorts-1:0][G6LCCfg.XLEN-1:0] wdata_i,
+    // GPR write enable - COMMIT_STAGE
+    input logic [G6LCCfg.NrCommitPorts-1:0] we_gpr_i,
+    // SMT hart tag for RF write banking - COMMIT_STAGE
+    input logic [G6LCCfg.NrCommitPorts-1:0][$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] whart_i,
+    // FPR write enable - COMMIT_STAGE
+    input logic [G6LCCfg.NrCommitPorts-1:0] we_fpr_i,
+    // Instructions to commit - COMMIT_STAGE
+    output scoreboard_entry_t [G6LCCfg.NrCommitPorts-1:0] commit_instr_o,
+    // Instruction is cancelled - COMMIT_STAGE
+    output logic [G6LCCfg.NrCommitPorts-1:0] commit_drop_o,
+    // Committing slot requests a refetch from its own PC - COMMIT_STAGE
+    output logic [G6LCCfg.NrCommitPorts-1:0] commit_replay_o,
+    // Commit acknowledge - COMMIT_STAGE
+    input logic [G6LCCfg.NrCommitPorts-1:0] commit_ack_i,
+    // Issue stall - PERF_COUNTERS
+    output logic stall_issue_o,
+    // U5 OoO PMU probes (tied 0 when OoOEn=0)
+    output logic ooo_rename_stall_o,
+    output logic ooo_iq_full_o,
+    output logic ooo_rob_full_o,
+    output logic ooo_lsq_stall_o,
+    output logic ooo_stl_forward_o,
+    // T6a drained-handoff seam: the thread selector may switch only when this
+    // holds — ROB + IQ empty and the LSQ idle. Constant 1 off the OoO path.
+    output logic ooo_drained_o,
+    // COH_OOO: a not-yet-retired load was marked for replay by a modification event
+    output logic ooo_phys_replay_o,
+    // Information dedicated to RVFI - RVFI
+    output logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] rvfi_issue_pointer_o,
+    // Information dedicated to RVFI - RVFI
+    output logic [G6LCCfg.NrCommitPorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] rvfi_commit_pointer_o,
+    // T6b-4b: scoreboard reclaim pointer (oldest live slot) — the age anchor
+    // for dispatch/IQ/LSQ and the store buffer. Aliases the port-0 commit
+    // slot under legacy commit order.
+    output logic [G6LCCfg.TRANS_ID_BITS-1:0]                    reclaim_ptr_o,
+    // N1d: the port-0 commit head is an unpublished load (phys_pending is
+    // only ever set under COH_OOO, so this is constant 0 elsewhere). The
+    // store buffer releases its speculative-store stall while it is set —
+    // otherwise a load parked in WAIT_PAGE_OFFSET and the head it blocks
+    // circularly wait on each other through this LSU.
+    output logic head_phys_pending_o,
+    // Information dedicated to RVFI - RVFI
+    output logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.XLEN-1:0] rvfi_rs1_o,
+    // Information dedicated to RVFI - RVFI
+    output logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.XLEN-1:0] rvfi_rs2_o,
+    // RVFI: issuing identity for the operands above (see issue_read_operands)
+    output logic [G6LCCfg.NrIssuePorts-1:0] rvfi_operand_valid_o,
+    output logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.TRANS_ID_BITS-1:0] rvfi_operand_tid_o,
+    // Original instruction bits for AES
+    output logic [5:0] orig_instr_aes_bits,
+    // G1gq: commit-time JALR redirect to RF[rs1].
+    // I8: B has no second FE redirect; g6lc_core.sv dropped these pins at
+    // 3745cfb06. A/oracle keeps the ports.
+`ifndef G6LC_FETCH_B
+    input logic [G6LCCfg.VLEN-1:0] npc_i,
+    output logic g1gq_redir_o,
+    output logic [G6LCCfg.VLEN-1:0] g1gq_tgt_o,
+`endif
+    // G1mf: SB result-valid 00 RVI LOAD
+    output logic [G6LCCfg.NrHarts-1:0] g1mf_v_o,
+    output logic [G6LCCfg.NrHarts-1:0][4:0] g1mf_rd_o,
+    output logic [G6LCCfg.NrHarts-1:0][G6LCCfg.VLEN-1:4] g1mf_line_o,
+    output logic [G6LCCfg.NrHarts-1:0] g1mf_a3_o
+);
+  // ---------------------------------------------------
+  // Scoreboard (SB) <-> Issue and Read Operands (IRO)
+  // ---------------------------------------------------
+  typedef logic [(G6LCCfg.NrRgprPorts == 3 ? G6LCCfg.XLEN : G6LCCfg.FLen)-1:0] rs3_len_t;
+  typedef struct packed {
+    logic [G6LCCfg.NR_SB_ENTRIES-1:0] still_issued;
+    logic [G6LCCfg.TRANS_ID_BITS-1:0] issue_pointer;
+    writeback_t [G6LCCfg.NrWbPorts-1:0] wb;
+    scoreboard_entry_t [G6LCCfg.NR_SB_ENTRIES-1:0] sbe;
+  } forwarding_t;
+
+  forwarding_t                                        fwd;
+  // Scoreboard dispatch stream (program-order alloc)
+  scoreboard_entry_t [G6LCCfg.NrIssuePorts-1:0]       issue_instr_sb;
+  logic              [G6LCCfg.NrIssuePorts-1:0][31:0] orig_instr_sb;
+  logic              [G6LCCfg.NrIssuePorts-1:0]       issue_instr_valid_sb;
+  logic              [G6LCCfg.NrIssuePorts-1:0]       issue_ack_sb;
+  // FU issue stream into IRO (identity or U4-selected)
+  scoreboard_entry_t [G6LCCfg.NrIssuePorts-1:0]       issue_instr_iro;
+  logic              [G6LCCfg.NrIssuePorts-1:0][31:0] orig_instr_iro;
+  logic              [G6LCCfg.NrIssuePorts-1:0]       issue_instr_valid_iro;
+  logic              [G6LCCfg.NrIssuePorts-1:0]       issue_ack_iro;
+
+  
+
+  // BEGIN sv-timing auto-correct (balance_mux rewrite)
+// ----------------------------------------------------------------
+// sv-timing: always_ff factorize  (clock-aware ParallelScratch)
+// timing-basis: S(s)=max producer C; C(s)=S(s)+L(s); M=max C;
+//   N=ceil(M/B) cycles of posedge clk_i  period_ns=0.200000  B=8.000 FO4
+// module=issue_stage  region=3087  makespan=3.500 FO4  cycle_count=1  deps=0  procedural_ok=true
+// OpenSTA (review-only seeds — not set_max_delay):
+//   create_clock -name clk_i -period 0.200000 [get_ports clk_i]
+// order expect: g1gq_pend_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to g1gq_pend_q
+// --- factor stage 1/1  capture on posedge clk_i ---
+// always_ff @(posedge clk_i or negedge rst_ni) begin
+//   if (!rst_ni) begin /* reset */ end else begin
+//     g1gq_pend_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     /* node11489 c=3.50 slack=0.00 */
+//     /* node11490 c=3.50 slack=0.00 */
+//   end
+// end
+// ----------------------------------------------------------------
+  // END sv-timing auto-correct (balance_mux rewrite)
+assign issue_instr_o    = issue_instr_iro[0];
+  assign issue_instr_hs_o = issue_instr_valid_iro[0] & issue_ack_iro[0];
+
+  logic x_transaction_accepted_iro_sb, x_issue_writeback_iro_sb;
+  logic [G6LCCfg.TRANS_ID_BITS-1:0] x_id_iro_sb;
+  logic [G6LCCfg.NR_SB_ENTRIES-1:0] sb_live;
+  assign sb_live_o = sb_live;
+  logic mem_violation;
+  logic [G6LCCfg.NR_SB_ENTRIES-1:0] phys_pending, phys_replay;
+  assign ooo_phys_replay_o = |phys_replay;
+  // N1d: phys_pending is keyed by scoreboard slot == trans_id; commit
+  // port 0 presents commit_sel_slot[0] (the committing hart's head under
+  // per-hart heads, the global head otherwise).
+  assign head_phys_pending_o = phys_pending[rvfi_commit_pointer_o[0]];
+  logic [G6LCCfg.TRANS_ID_BITS-1:0] mem_violation_id;
+
+  // ---------------------------------------------------------
+  // 2. Manage instructions in a scoreboard
+  // hyp8 g10: LSQ verdict / commit-bundle seams. ld_checked is produced
+  // inside gen_full_ooo (g6lc_ooo_dispatch) and consumed by the
+  // scoreboard's publish gate; the non-OoO shapes hold every load
+  // checked.
+  logic [G6LCCfg.NR_SB_ENTRIES-1:0]   ld_checked;
+  logic [G6LCCfg.NrCommitPorts-1:0]   commit_bundle_valid;
+
+  // ---------------------------------------------------------
+  scoreboard #(
+      .G6LCCfg   (G6LCCfg),
+      .rs3_len_t (rs3_len_t),
+      .bp_resolve_t(bp_resolve_t),
+      .writeback_t(writeback_t),
+      .forwarding_t(forwarding_t),
+      .exception_t(exception_t),
+      .scoreboard_entry_t(scoreboard_entry_t)
+  ) i_scoreboard (
+      .clk_i,
+      .rst_ni,
+      .sb_full_o               (sb_full_o),
+      .sb_empty_o              (sb_empty_o),
+      .spec_cancel_o           (spec_cancel_o),
+      .cancelled_mask_o        (cancelled_mask_o),
+      .sb_live_o               (sb_live),
+      .sb_head_pc_o            (sb_head_pc_o),
+      .sb_head_valid_o         (sb_head_valid_o),
+      .phys_pending_i(phys_pending), .phys_replay_i(phys_replay), .phys_mod_i(|mod_valid_i),
+      .mem_violation_i         (mem_violation),
+      .mem_violation_id_i      (mem_violation_id),
+      .lu_replay_i,
+      .lu_replay_id_i,
+      .flush_unissued_instr_i,
+      .flush_i,
+      .x_transaction_accepted_i(x_transaction_accepted_iro_sb),
+      .x_issue_writeback_i     (x_issue_writeback_iro_sb),
+      .x_id_i                  (x_id_iro_sb),
+      .commit_instr_o,
+      .commit_drop_o,
+      .commit_replay_o,
+      .commit_bundle_valid_o (commit_bundle_valid),
+      .ld_checked_i          (ld_checked),
+      .commit_ack_i,
+      .decoded_instr_i         (decoded_instr_i),
+      .orig_instr_i,
+      .decoded_instr_valid_i   (decoded_instr_valid_i),
+      .decoded_instr_ack_o     (decoded_instr_ack_o),
+      .issue_instr_o           (issue_instr_sb),
+      .orig_instr_o            (orig_instr_sb),
+      .issue_instr_valid_o     (issue_instr_valid_sb),
+      .issue_ack_i             (issue_ack_sb),
+      .fwd_o                   (fwd),
+      .resolved_branch_i       (resolved_branch_i),
+      .trans_id_i              (trans_id_i),
+      .wbdata_i                (wbdata_i),
+      .ex_i                    (ex_ex_i),
+      .wt_valid_i,
+      .x_we_i,
+      .x_rd_i,
+      .rvfi_issue_pointer_o,
+      .rvfi_commit_pointer_o,
+      .reclaim_ptr_o,
+      .g1mf_v_o,
+      .g1mf_rd_o,
+      .g1mf_line_o,
+      .g1mf_a3_o
+  );
+
+  // ---------------------------------------------------------
+  // 2b. U4 slice-OoO / U5 full OoO dispatch (mutually exclusive)
+  // ---------------------------------------------------------
+  logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.XLEN-1:0] ooo_op_a, ooo_op_b;
+  logic [G6LCCfg.NrIssuePorts-1:0] ooo_op_a_v, ooo_op_b_v;
+  logic [G6LCCfg.NrIssuePorts-1:0][G6LCCfg.FLen-1:0] ooo_op_c;
+  logic [G6LCCfg.NrIssuePorts-1:0] ooo_op_c_v;
+  // hyp8 g7: per-operand spec-arm + producer tids staged by dispatch for
+  // the IRO's in-ALU forward select (zero on the in-order paths).
+  logic [G6LCCfg.NrIssuePorts-1:0][1:0] iro_spec_ab;
+  logic [G6LCCfg.NrIssuePorts-1:0][1:0][G6LCCfg.TRANS_ID_BITS-1:0] iro_ptid;
+
+  if (G6LCCfg.OoOEn) begin : gen_full_ooo
+    logic [G6LCCfg.NrWbPorts-1:0] wb_exc_bits;
+    for (genvar wi = 0; wi < G6LCCfg.NrWbPorts; wi++) begin : gen_wb_exc
+      assign wb_exc_bits[wi] = ex_ex_i[wi].valid;
+    end
+    g6lc_ooo_dispatch #(
+        .G6LCCfg(G6LCCfg),
+        .HypCfg(HypCfg),
+        .scoreboard_entry_t(scoreboard_entry_t)
+    ) i_ooo_dispatch (
+        .clk_i,
+        .rst_ni,
+        .phys_valid_i, .phys_addr_i, .phys_id_i, .phys_hart_i, .phys_size_i,
+        .mod_valid_i, .mod_addr_i,
+        .phys_pending_o(phys_pending), .phys_replay_o(phys_replay),
+        .flush_i          (flush_i),
+        .flush_unissued_i (flush_unissued_instr_i),
+        .cancelled_mask_i (cancelled_mask_o),
+        .sb_live_i        (sb_live),
+        .dispatch_sbe_i   (issue_instr_sb),
+        .dispatch_orig_i  (orig_instr_sb),
+        .dispatch_valid_i (issue_instr_valid_sb),
+        .dispatch_ack_o   (issue_ack_sb),
+        .issue_sbe_o      (issue_instr_iro),
+        .issue_orig_o     (orig_instr_iro),
+        .issue_valid_o    (issue_instr_valid_iro),
+        .issue_ack_i      (issue_ack_iro),
+        // hyp8 g7: spec-arm + producer-tid metadata for the in-ALU
+        // forward select, and the take-gate FU readies (flu_ready is the
+        // multiplier's ready under OoO).
+        .issue_spec_ab_o  (iro_spec_ab),
+        .issue_ptid_o     (iro_ptid),
+        .lsu_ready_i      (lsu_ready_i),
+        .fpu_ready_i      (fpu_ready_i),
+        .csr_ready_i      (csr_ready_i),
+        .mult_ready_i     (flu_ready_i),
+        .issue_op_a_o     (ooo_op_a),
+        .issue_op_b_o     (ooo_op_b),
+        .issue_op_a_valid_o(ooo_op_a_v),
+        .issue_op_b_valid_o(ooo_op_b_v),
+        .issue_op_c_o     (ooo_op_c),
+        .issue_op_c_valid_o(ooo_op_c_v),
+        .wb_valid_i       (wt_valid_i),
+        .wb_id_i          (trans_id_i),
+        .wb_data_i        (wbdata_i),
+        .wb_exc_i         (wb_exc_bits),
+        // Mirror the architectural commit write into the PRF: CSR read data and
+        // the AMO/LR response are substituted at commit and never reach wb_data_i.
+        .commit_we_i      (we_gpr_i),
+        .commit_wdata_i   (wdata_i),
+        .commit_ack_i     (commit_ack_i),
+        .commit_instr_i   (commit_instr_o),
+        // T6b-4b: the age anchor is the reclaim pointer, not the port-0
+        // commit slot — under per-hart heads they can diverge.
+        .commit_ptr_i     (reclaim_ptr_o),
+        .mispredict_i     (resolved_branch_i.valid && resolved_branch_i.is_mispredict),
+        .mispredict_id_i  (resolved_branch_i.trans_id),
+        .freelist_empty_o (),
+        .rob_full_o       (ooo_rob_full_o),
+        .iq_full_o        (ooo_iq_full_o),
+        .lsq_stall_o      (ooo_lsq_stall_o),
+        .rename_stall_o   (ooo_rename_stall_o),
+        .stl_forward_o    (ooo_stl_forward_o),
+        .mem_violation_o    (mem_violation),
+        .mem_violation_id_o (mem_violation_id),
+        // hyp8 g10: LSQ verdict bits to the scoreboard/LSU publish gate,
+        // and the LSU load-unit replay into the IQ re-arm merge.
+        .ld_checked_o       (ld_checked),
+        .lsu_replay_i       (replay_i),
+        .lsu_replay_tid_i   (replay_tid_i),
+        .hyp_wb_reserve_stall_o,
+        .ooo_drained_o      (ooo_drained_o)
+    );
+  end else if (G6LCCfg.SliceOoOEn) begin : gen_slice_ooo
+    assign hyp_wb_reserve_stall_o = 1'b0;
+    assign ld_checked = '1;
+    assign mem_violation    = 1'b0;
+    assign mem_violation_id = '0;
+    assign phys_pending = '0;
+    assign phys_replay = '0;
+    assign ooo_op_a   = '0;
+    assign ooo_op_b   = '0;
+    assign ooo_op_a_v = '0;
+    assign ooo_op_b_v = '0;
+    assign ooo_op_c   = '0;
+    assign ooo_op_c_v = '0;
+    assign iro_spec_ab = '0;
+    assign iro_ptid    = '0;
+    assign ooo_rename_stall_o = 1'b0;
+    assign ooo_iq_full_o      = 1'b0;
+    assign ooo_rob_full_o     = 1'b0;
+    assign ooo_lsq_stall_o    = 1'b0;
+    assign ooo_stl_forward_o  = 1'b0;
+    assign ooo_drained_o      = 1'b1;
+    g6lc_slice_dispatch #(
+        .G6LCCfg(G6LCCfg),
+        .scoreboard_entry_t(scoreboard_entry_t)
+    ) i_slice_dispatch (
+        .clk_i,
+        .rst_ni,
+        .flush_i          (flush_i),
+        .flush_unissued_i (flush_unissued_instr_i),
+        .dispatch_sbe_i   (issue_instr_sb),
+        .dispatch_orig_i  (orig_instr_sb),
+        .dispatch_valid_i (issue_instr_valid_sb),
+        .dispatch_ack_o   (issue_ack_sb),
+        .issue_sbe_o      (issue_instr_iro),
+        .issue_orig_o     (orig_instr_iro),
+        .issue_valid_o    (issue_instr_valid_iro),
+        .issue_ack_i      (issue_ack_iro),
+        .wb_valid_i       (wt_valid_i),
+        .wb_id_i          (trans_id_i)
+    );
+  end else begin : gen_inorder_issue
+    // Netlist-identity path: SB dispatch is FU issue
+    assign hyp_wb_reserve_stall_o = 1'b0;
+    assign ld_checked       = '1;
+    assign mem_violation    = 1'b0;
+    assign mem_violation_id = '0;
+    assign phys_pending = '0;
+    assign phys_replay = '0;
+    assign issue_instr_iro = issue_instr_sb;
+    assign orig_instr_iro  = orig_instr_sb;
+    assign issue_ack_sb    = issue_ack_iro;
+    assign ooo_op_a   = '0;
+    assign ooo_op_b   = '0;
+    assign ooo_op_a_v = '0;
+    assign ooo_op_b_v = '0;
+    assign ooo_op_c   = '0;
+    assign ooo_op_c_v = '0;
+    assign iro_spec_ab = '0;
+    assign iro_ptid    = '0;
+    assign ooo_rename_stall_o = 1'b0;
+    assign ooo_iq_full_o      = 1'b0;
+    assign ooo_rob_full_o     = 1'b0;
+    assign ooo_lsq_stall_o    = 1'b0;
+    assign ooo_stl_forward_o  = 1'b0;
+    assign ooo_drained_o      = 1'b1;
+
+    // EXTRACT E1: CF / CSR / SP barriers in g6lc_issue_barrier (I4s/au, cont.33).
+    // G1i unresolved_a0 hold-FAIL — reverted. Peer SMT still issues.
+    g6lc_issue_barrier #(
+        .G6LCCfg(G6LCCfg),
+        .scoreboard_entry_t(scoreboard_entry_t),
+        .bp_resolve_t(bp_resolve_t)
+    ) i_g6lc_issue_barrier (
+        .clk_i,
+        .rst_ni,
+        .flush_i,
+        .flush_unissued_instr_i,
+        .issue_valid_sb_i(issue_instr_valid_sb),
+        .issue_ack_iro_i (issue_ack_iro),
+        .issue_instr_sb_i(issue_instr_sb),
+        .decoded_instr_i,
+        .decoded_instr_valid_i,
+        .resolve_branch_i,
+        .resolved_branch_i,
+        .commit_ack_i,
+        .commit_instr_i  (commit_instr_o),
+        .g1fh_csr_a0_i,
+        .g1fh_hart_i,
+        .issue_valid_o   (issue_instr_valid_iro)
+    );
+  end
+
+  // hyp8 g10: export the LSQ verdict and the scoreboard's commit-bundle
+  // validity to the LSU / commit-stage seams.
+  assign ld_checked_o         = ld_checked;
+  assign commit_bundle_valid_o = commit_bundle_valid;
+
+  // ---------------------------------------------------------
+  // 3. Issue instruction and read operand, also commit
+  // ---------------------------------------------------------
+  // G1gq commit-JALR RF read port: declared before the instance because its
+  // port map below connects them (see the G1gq block further down).
+  logic [4:0] g1gq_raddr;
+  logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] g1gq_rhart;
+  logic [G6LCCfg.XLEN-1:0] g1gq_rdata;
+
+  issue_read_operands #(
+      .G6LCCfg(G6LCCfg),
+      .HypCfg(HypCfg),
+      .branchpredict_sbe_t(branchpredict_sbe_t),
+      .fu_data_t(fu_data_t),
+      .scoreboard_entry_t(scoreboard_entry_t),
+      .rs3_len_t(rs3_len_t),
+      .writeback_t(writeback_t),
+      .forwarding_t(forwarding_t),
+      .x_issue_req_t(x_issue_req_t),
+      .x_issue_resp_t(x_issue_resp_t),
+      .x_register_t(x_register_t),
+      .x_commit_t(x_commit_t)
+  ) i_issue_read_operands (
+      .clk_i,
+      .rst_ni,
+      .flush_i                 (flush_unissued_instr_i),
+      .stall_i,
+      .issue_instr_i           (issue_instr_iro),
+      .issue_instr_i_prev      (decoded_instr_i_prev),
+      .orig_instr_i            (orig_instr_iro),
+      .issue_instr_valid_i     (issue_instr_valid_iro),
+      .issue_ack_o             (issue_ack_iro),
+      // hyp8 g7: spec-arm metadata from the IQ + the ALU0 pipe tids,
+      // producing the in-ALU forward selects back to ex_stage.
+      .issue_spec_ab_i         (iro_spec_ab),
+      .issue_ptid_i            (iro_ptid),
+      .alu_fwd_tid_i           (alu_fwd_tid_i),
+      .alu_fwd_qtid_i          (alu_fwd_qtid_i),
+      .alu_fwd_rtid_i          (alu_fwd_rtid_i),
+      .alu_fwd_a_o             (alu_fwd_a_o),
+      .alu_fwd_b_o             (alu_fwd_b_o),
+      .fwd_i                   (fwd),
+      .ooo_op_a_i              (ooo_op_a),
+      .ooo_op_b_i              (ooo_op_b),
+      .ooo_op_c_i              (ooo_op_c),
+      .ooo_op_c_valid_i        (ooo_op_c_v),
+      .ooo_op_a_valid_i        (ooo_op_a_v),
+      .ooo_op_b_valid_i        (ooo_op_b_v),
+      .fu_data_o               (fu_data_o),
+      .alu_bypass_o            (alu_bypass_o),
+      .rs1_forwarding_o        (rs1_forwarding_o),
+      .rs2_forwarding_o        (rs2_forwarding_o),
+      .pc_o,
+      .branch_hart_o,
+      .is_zcmt_o,
+      .is_compressed_instr_o,
+      .flu_ready_i             (flu_ready_i),
+      .csr_ready_i             (csr_ready_i),
+      .alu_valid_o             (alu_valid_o),
+      .aes_valid_o             (aes_valid_o),
+      .branch_valid_o          (branch_valid_o),
+      .tinst_o                 (tinst_o),
+      .branch_predict_o,
+      .lsu_ready_i,
+      .lsu_valid_o,
+      .mult_valid_o,
+      .fpu_ready_i,
+      .fpu_valid_o,
+      .fpu_fmt_o,
+      .fpu_rm_o,
+      .fpu_hart_o,
+      .fpu_early_valid_i,
+      .alu2_valid_o,
+      .csr_valid_o,
+      .cvxif_valid_o           (xfu_valid_o),
+      .cvxif_ready_i           (xfu_ready_i),
+      .cvxif_off_instr_o       (x_off_instr_o),
+      .hart_id_i               (hart_id_i),
+      .x_issue_ready_i         (x_issue_ready_i),
+      .x_issue_resp_i          (x_issue_resp_i),
+      .x_issue_valid_o         (x_issue_valid_o),
+      .x_issue_req_o           (x_issue_req_o),
+      .x_register_ready_i      (x_register_ready_i),
+      .x_register_valid_o      (x_register_valid_o),
+      .x_register_o            (x_register_o),
+      .x_commit_valid_o        (x_commit_valid_o),
+      .x_commit_o              (x_commit_o),
+      .x_transaction_accepted_o(x_transaction_accepted_iro_sb),
+      .x_transaction_rejected_o(x_transaction_rejected_o),
+      .x_issue_writeback_o     (x_issue_writeback_iro_sb),
+      .x_id_o                  (x_id_iro_sb),
+      .waddr_i,
+      .wdata_i,
+      .we_gpr_i,
+      .whart_i,
+      .we_fpr_i,
+      .stall_issue_o,
+      .rvfi_rs1_o              (rvfi_rs1_o),
+      .rvfi_rs2_o              (rvfi_rs2_o),
+      .rvfi_operand_valid_o    (rvfi_operand_valid_o),
+      .rvfi_operand_tid_o      (rvfi_operand_tid_o),
+      .orig_instr_aes_bits     (orig_instr_aes_bits),
+      .g1gq_raddr_i            (g1gq_raddr),
+      .g1gq_rhart_i            (g1gq_rhart),
+      .g1gq_rdata_o            (g1gq_rdata)
+  );
+
+  // G1gq: committed JALR redirects to RF[rs1] when
+  // an earlier JumpR resolve was unusable and npc
+  // is not already on that target line. Not G1gf
+  // stall. Not G1gg/G1gp issue. SMT+SS.
+  // G1gr commit JALR redirect without EX
+  // JumpR pend — MINI-FAIL FDT printed 42
+  // (P3 0x2a offset_ptr NULL) @782. Do not
+  // re-land (too wide: yanks live jalr).
+  // g1gq_raddr / g1gq_rhart / g1gq_rdata are declared above the instance that
+  // connects them; only the state local to this block stays here.
+  logic g1gq_pend_q;
+  logic g1gq_ack_jalr;
+  // G1jf prev-cycle aligned-00 + this-cycle
+  // 01 Branch commit JumpR — MINI-FAIL
+  // FDT hang @400000. Do not re-land
+  // (yanks live in-order 00-then-01
+  // Branch). Isolated P4 stays.
+  always_comb begin
+    g1gq_raddr = 5'd0;
+    g1gq_rhart = '0;
+    g1gq_ack_jalr = 1'b0;
+    if (G6LCCfg.SuperscalarEn && G6LCCfg.NrHarts > 1) begin
+      for (int unsigned c = 0; c < G6LCCfg.NrCommitPorts; c++) begin
+        if (commit_ack_i[c] && (commit_instr_o[c].op == g6lc_core_pkg::JALR)) begin
+          g1gq_ack_jalr = 1'b1;
+          g1gq_raddr = commit_instr_o[c].rs1[4:0];
+          g1gq_rhart = commit_instr_o[c].hart_id;
+        end
+      end
+    end
+  end
+  // I11: B never redirects from an "unusable" JumpR resolve. A keeps G1gq.
+`ifdef G6LC_FETCH_B
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) g1gq_pend_q <= 1'b0;
+    else g1gq_pend_q <= 1'b0;
+  end
+`else
+  assign g1gq_tgt_o = g1gq_rdata[G6LCCfg.VLEN-1:0];
+  assign g1gq_redir_o = G6LCCfg.SuperscalarEn && G6LCCfg.NrHarts > 1 &&
+      g1gq_pend_q && g1gq_ack_jalr &&
+      g6lc_jalr_usable::usable(G6LCCfg, G6LCCfg.VLEN, 64'(g1gq_rdata)) &&
+      (npc_i[G6LCCfg.VLEN-1:G6LCCfg.FETCH_ALIGN_BITS] !=
+       g1gq_tgt_o[G6LCCfg.VLEN-1:G6LCCfg.FETCH_ALIGN_BITS]);
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni)
+      g1gq_pend_q <= 1'b0;
+    else if (flush_i)
+      g1gq_pend_q <= 1'b0;
+    else if (G6LCCfg.SuperscalarEn && G6LCCfg.NrHarts > 1 &&
+             resolved_branch_i.valid &&
+             (resolved_branch_i.cf_type == g6lc_core_pkg::JumpR)) begin
+      if (!g6lc_jalr_usable::usable(
+              G6LCCfg, G6LCCfg.VLEN,
+              64'(resolved_branch_i.target_address)))
+        g1gq_pend_q <= 1'b1;
+      else
+        g1gq_pend_q <= 1'b0;
+    end else if (g1gq_redir_o)
+      g1gq_pend_q <= 1'b0;
+  end
+`endif
+
+endmodule

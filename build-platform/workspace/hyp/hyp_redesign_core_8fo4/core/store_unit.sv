@@ -1,0 +1,710 @@
+// hyp8 provenance: ADAPTED (sv-timing emit at the 8-FO4 budget)
+// SPDX-FileCopyrightText: machine-generated
+// Copyright 2018 ETH Zurich and University of Bologna.
+// Copyright and related rights are licensed under the Solderpad Hardware
+// License, Version 0.51 (the "License"); you may not use this file except in
+// compliance with the License.  You may obtain a copy of the License at
+// http://solderpad.org/licenses/SHL-0.51. Unless required by applicable law
+// or agreed to in writing, software, hardware and materials distributed under
+// this License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+// CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+//
+// Author: Florian Zaruba, ETH Zurich
+// Date: 22.05.2017
+// Modified by: Etienne Cimon
+// Description: Store Unit, takes care of all store requests and atomic memory operations (AMOs)
+
+
+module store_unit
+  import g6lc_core_pkg::*;
+#(
+    parameter config_pkg::g6lc_cfg_t G6LCCfg = config_pkg::g6lc_cfg_empty,
+    // hyp8: store-buffer staging knobs (StoreFwdCycles)
+    parameter g6lc_hyp_pkg::g6lc_hyp_cfg_t HypCfg = g6lc_hyp_pkg::Hyp8,
+    parameter type dcache_req_i_t = logic,
+    parameter type dcache_req_o_t = logic,
+    parameter type exception_t = logic,
+    parameter type lsu_ctrl_t = logic,
+    parameter type cbo_t = logic
+) (
+    // Subsystem Clock - SUBSYSTEM
+    input logic clk_i,
+    // Asynchronous reset active low - SUBSYSTEM
+    input logic rst_ni,
+    output logic phys_valid_o,
+    output logic [G6LCCfg.PLEN-1:0] phys_addr_o,
+    output logic [G6LCCfg.TRANS_ID_BITS-1:0] phys_id_o,
+    output logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] phys_hart_o,
+    output logic [1:0] phys_size_o,
+    // Flush - CONTROLLER
+    input logic flush_i,
+    // FSE S4: younger-only cancel mask for STQ
+    input logic [G6LCCfg.NR_SB_ENTRIES-1:0] cancelled_mask_i,
+    // Scoreboard issued mask (store-buffer reservation liveness assertion)
+    input logic [G6LCCfg.NR_SB_ENTRIES-1:0] sb_live_i,
+    // TO_BE_COMPLETED - TO_BE_COMPLETED
+    input logic stall_st_pending_i,
+    // TO_BE_COMPLETED - TO_BE_COMPLETED
+    output logic no_st_pending_o,
+    // Store buffer is empty - TO_BE_COMPLETED
+    output logic store_buffer_empty_o,
+    // Store instruction is valid - ISSUE_STAGE
+    input logic valid_i,
+    // Data input - ISSUE_STAGE
+    input lsu_ctrl_t lsu_ctrl_i,
+    // TO_BE_COMPLETED - TO_BE_COMPLETED
+    output logic pop_st_o,
+    // Instruction commit - TO_BE_COMPLETED
+    input logic commit_i,
+    // TO_BE_COMPLETED - TO_BE_COMPLETED
+    output logic commit_ready_o,
+    // TO_BE_COMPLETED - TO_BE_COMPLETED
+    input logic amo_valid_commit_i,
+    // Data Endian mode - CSR_REGFILE
+    input logic mbe_i,
+    // Store result is valid - ISSUE_STAGE
+    output logic valid_o,
+    // Transaction ID - ISSUE_STAGE
+    output logic [G6LCCfg.TRANS_ID_BITS-1:0] trans_id_o,
+    // Store result - ISSUE_STAGE
+    output logic [G6LCCfg.XLEN-1:0] result_o,
+    // Store exception output - TO_BE_COMPLETED
+    output exception_t ex_o,
+    // Address translation request - TO_BE_COMPLETED
+    output logic translation_req_o,
+    // Virtual address - TO_BE_COMPLETED
+    output logic [G6LCCfg.VLEN-1:0] vaddr_o,
+    // RVFI information - RVFI
+    output logic [G6LCCfg.PLEN-1:0] rvfi_mem_paddr_o,
+    // Transformed trap instruction out - TO_BE_COMPLETED
+    output logic [31:0] tinst_o,
+    // TO_BE_COMPLETED - TO_BE_COMPLETED
+    output logic hs_ld_st_inst_o,
+    // TO_BE_COMPLETED - TO_BE_COMPLETED
+    output logic hlvx_inst_o,
+    // Physical address - TO_BE_COMPLETED
+    input logic [G6LCCfg.PLEN-1:0] paddr_i,
+    // Exception raised before store - TO_BE_COMPLETED
+    input exception_t ex_i,
+    // Data TLB hit - lsu
+    input logic dtlb_hit_i,
+    // Address to be checked - load_unit
+    input logic [11:0] page_offset_i,
+    input logic [G6LCCfg.PLEN-1:0] load_paddr_i,
+    input logic                    load_paddr_valid_i,
+    // OoO program-order keys: querying load identity and the oldest live
+    // instruction (age anchor). Both are inert when OoOEn is 0.
+    input logic [G6LCCfg.TRANS_ID_BITS-1:0] load_trans_id_i,
+    input logic [G6LCCfg.TRANS_ID_BITS-1:0] commit_tran_id_i,
+    // T6b-4b: reclaim pointer (oldest live slot) — the store buffer's age
+    // anchor. commit_tran_id_i stays the committing (port-0) tid.
+    input logic [G6LCCfg.TRANS_ID_BITS-1:0] oldest_live_tid_i,
+    // N1d: the commit head is an unpublished load — speculative-store
+    // stalls are futile while it pends (see store_buffer).
+    input logic head_phys_pending_i,
+    // T6b: querying load's hart — speculative forwarding is same-hart only
+    // under OoO multi-hart. Constant-0 otherwise.
+    input logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] load_hart_i,
+    // R3a cont.13: D$ wbuffer empty for STQ page-offset sticky release
+    input logic dcache_wbuffer_empty_i,
+    // Address check result - load_unit
+    output logic page_offset_matches_o,
+    // T33: the match is speculative-only (load_unit replays instead of holding)
+    output logic page_offset_spec_only_o,
+    // R3a: STQ store→load data forward - load_unit
+    output logic                        st_fwd_valid_o,
+    output logic [G6LCCfg.XLEN-1:0]     st_fwd_data_o,
+    output logic [(G6LCCfg.XLEN/8)-1:0] st_fwd_be_o,
+    // hyp8: staged forward request/response — load_unit asks (F1), the
+    // store buffer answers StoreFwdCycles cycles later (F3).
+    input struct packed {
+      logic                                        valid;
+      logic [G6LCCfg.PLEN-1:0]                     pa;
+      logic [1:0]                                  size;
+      logic [G6LCCfg.TRANS_ID_BITS-1:0]            tid;
+      logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] hart;
+      logic [(G6LCCfg.NrLoadBufEntries > 1 ? $clog2(G6LCCfg.NrLoadBufEntries) : 1)-1:0] tag;
+    } fwd_req_i,
+    output struct packed {
+      logic                                        valid;
+      logic [G6LCCfg.XLEN-1:0]                     data;
+      logic [(G6LCCfg.XLEN/8)-1:0]                 be;
+      logic                                        forward_possible;
+      logic [(G6LCCfg.NrLoadBufEntries > 1 ? $clog2(G6LCCfg.NrLoadBufEntries) : 1)-1:0] tag;
+    } fwd_rsp_o,
+    // AMO request - CACHES
+    output amo_req_t amo_req_o,
+    // AMO response - CACHES
+    input amo_resp_t amo_resp_i,
+    // Data cache request - CACHES
+    input dcache_req_o_t req_port_i,
+    // Data cache response - CACHES
+    output dcache_req_i_t req_port_o
+);
+
+  // A139 design proposal; vocabulary: architecture/RTL-PIPELINE-PLANS.md.
+  // svt-plan: begin store_unit status=proposal target=10-adjusted-FO4
+  // svt-plan: cone translation/hazard and store-buffer/AMO availability
+  // drive the state transition; st_ready combines both destinations.
+  // svt-plan: boundary translate/format -> reserved store-or-AMO packet;
+  // use downstream reservation credits rather than delayed combinational ready.
+  // svt-plan: carry TID+generation, hart, PA/VA context, data/be/size,
+  // CBO/AMO opcode, exception and RVFI address through the held packet.
+  // svt-plan: capacity pop_st_o only when this unit retains the request;
+  // each downstream valid fires once, even while another destination is stalled.
+  // svt-plan: visibility preserve staged-store load hazards and physical
+  // publication; kill/cancel applies while held, AMO commit gating remains separate.
+  // svt-plan: effect removes queue next-state computation from the local
+  // ready/state path; translation preparation and dispatch can overlap.
+  // svt-plan: cost one reserved packet and credit logic; added latency and
+  // lower throughput if shared st_ready is not redesigned consistently.
+  // svt-plan: limit changing store_buffer ready alone does not solve AMO
+  // acceptance or translation ownership; integrate with store_buffer/load_unit.
+  // svt-plan: end
+  // Re-pipelining contract (sv-timing A128; 58.0 adjusted FO4 on the
+  // Nangate45 board): store unit FSM: the store buffer handshake is same-cycle.
+  // svt-pipe: require-contract
+  // svt-pipe: protocol su valid=valid_i
+  // svt-pipe: no-cut on=trans_id_o
+  // svt-pipe: cycle su q=trans_id_o d=result_o hold=valid_i steps=1
+
+  // align data to address e.g.: shift data to be naturally 64
+  function automatic [G6LCCfg.XLEN-1:0] data_align(logic [2:0] addr, logic [63:0] data);
+    // Set addr[2] to 1'b0 when 32bits
+    logic [ 2:0] addr_tmp = {(addr[2] && G6LCCfg.IS_XLEN64), addr[1:0]};
+    logic [63:0] data_tmp = {64{1'b0}};
+    case (addr_tmp)
+      3'b000: data_tmp[G6LCCfg.XLEN-1:0] = {data[G6LCCfg.XLEN-1:0]};
+      3'b001:
+      data_tmp[G6LCCfg.XLEN-1:0] = {data[G6LCCfg.XLEN-9:0], data[G6LCCfg.XLEN-1:G6LCCfg.XLEN-8]};
+      3'b010:
+      data_tmp[G6LCCfg.XLEN-1:0] = {data[G6LCCfg.XLEN-17:0], data[G6LCCfg.XLEN-1:G6LCCfg.XLEN-16]};
+      3'b011:
+      data_tmp[G6LCCfg.XLEN-1:0] = {data[G6LCCfg.XLEN-25:0], data[G6LCCfg.XLEN-1:G6LCCfg.XLEN-24]};
+      default:
+      if (G6LCCfg.IS_XLEN64) begin
+        case (addr_tmp)
+          3'b100:  data_tmp = {data[31:0], data[63:32]};
+          3'b101:  data_tmp = {data[23:0], data[63:24]};
+          3'b110:  data_tmp = {data[15:0], data[63:16]};
+          3'b111:  data_tmp = {data[7:0], data[63:8]};
+          default: data_tmp = {data[63:0]};
+        endcase
+      end
+    endcase
+    return data_tmp[G6LCCfg.XLEN-1:0];
+  endfunction
+
+  // it doesn't matter what we are writing back as stores don't return anything
+  
+
+  // BEGIN sv-timing auto-correct (balance_mux rewrite)
+// ----------------------------------------------------------------
+// sv-timing: always_ff factorize  (clock-aware ParallelScratch)
+// timing-basis: S(s)=max producer C; C(s)=S(s)+L(s); M=max C;
+//   N=ceil(M/B) cycles of posedge clk_i  period_ns=0.200000  B=8.000 FO4
+// module=store_unit  region=3415  makespan=9.500 FO4  cycle_count=2  deps=0  procedural_ok=true
+// OpenSTA (review-only seeds — not set_max_delay):
+//   create_clock -name clk_i -period 0.200000 [get_ports clk_i]
+// order expect: amo_op_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to amo_op_q
+// order expect: amo_tid_q  ready_cycle=1  ready_fo4=4.850  OpenSTA: report_timing -from clk_i -to amo_tid_q
+// order expect: cbo_op_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to cbo_op_q
+// order expect: st_be_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to st_be_q
+// order expect: st_data_cmp_hi_q  ready_cycle=2  ready_fo4=9.500  OpenSTA: report_timing -from clk_i -to st_data_cmp_hi_q
+// order expect: st_data_cmp_q  ready_cycle=2  ready_fo4=9.500  OpenSTA: report_timing -from clk_i -to st_data_cmp_q
+// order expect: st_data_hi_q  ready_cycle=2  ready_fo4=9.500  OpenSTA: report_timing -from clk_i -to st_data_hi_q
+// order expect: st_data_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to st_data_q
+// order expect: st_data_size_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to st_data_size_q
+// order expect: st_hart_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to st_hart_q
+// order expect: st_is_quad_q  ready_cycle=2  ready_fo4=9.500  OpenSTA: report_timing -from clk_i -to st_is_quad_q
+// order expect: state_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to state_q
+// order expect: trans_id_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to trans_id_q
+// --- factor stage 1/2  capture on posedge clk_i ---
+// always_ff @(posedge clk_i or negedge rst_ni) begin
+//   if (!rst_ni) begin /* reset */ end else begin
+//     amo_op_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     amo_tid_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     cbo_op_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     st_be_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     st_data_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     st_data_size_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     st_hart_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     state_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     trans_id_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     /* node12674 c=3.50 slack=6.00 */
+//     /* node12675 c=3.50 slack=6.00 */
+//     /* node12676 c=3.50 slack=6.00 */
+//     /* node12677 c=3.50 slack=6.00 */
+//     /* node12678 c=3.50 slack=6.00 */
+//     /* node12679 c=3.50 slack=6.00 */
+//     /* node12680 c=3.50 slack=6.00 */
+//     /* node12681 c=3.50 slack=6.00 */
+//     /* node12682 c=3.50 slack=6.00 */
+//     /* node12683 c=3.50 slack=6.00 */
+//     /* node12684 c=3.50 slack=6.00 */
+//     /* node12685 c=3.50 slack=6.00 */
+//     /* node12686 c=3.50 slack=6.00 */
+//     /* node12687 c=3.50 slack=6.00 */
+//     /* node12688 c=3.50 slack=6.00 */
+//     /* node12689 c=3.50 slack=6.00 */
+//     /* node12694 c=3.50 slack=6.00 */
+//     /* node12695 c=3.50 slack=6.00 */
+//     /* node12696 c=3.50 slack=6.00 */
+//     /* node12697 c=3.50 slack=6.00 */
+//     /* node12698 c=3.50 slack=6.00 */
+//     /* node12699 c=4.85 slack=4.65 */
+//   end
+// end
+// --- factor stage 2/2  capture on posedge clk_i ---
+// always_ff @(posedge clk_i or negedge rst_ni) begin
+//   if (!rst_ni) begin /* reset */ end else begin
+//     st_data_cmp_hi_q <= …; // sv-timing: cycle 2/2 on clk_i
+//     st_data_cmp_q <= …; // sv-timing: cycle 2/2 on clk_i
+//     st_data_hi_q <= …; // sv-timing: cycle 2/2 on clk_i
+//     st_is_quad_q <= …; // sv-timing: cycle 2/2 on clk_i
+//     /* node12690 c=9.50 slack=0.00 */
+//     /* node12691 c=9.50 slack=0.00 */
+//     /* node12692 c=9.50 slack=0.00 */
+//     /* node12693 c=9.50 slack=0.00 */
+//   end
+// end
+// ----------------------------------------------------------------
+  // END sv-timing auto-correct (balance_mux rewrite)
+assign result_o = lsu_ctrl_i.data;
+
+  enum logic [1:0] {
+    IDLE,
+    VALID_STORE,
+    WAIT_TRANSLATION,
+    WAIT_STORE_READY
+  }
+      state_d, state_q;
+
+  // store buffer control signals
+  logic st_ready;
+  logic st_valid;
+  logic st_valid_without_flush;
+  logic instr_is_amo;
+  assign instr_is_amo = is_amo(lsu_ctrl_i.operation);
+  // keep the data and the byte enable for the second cycle (after address translation)
+  logic [G6LCCfg.XLEN-1:0] st_data_n, st_data_q;
+  logic [G6LCCfg.XLEN-1:0] st_data_cmp_q;  // Zacas expected (latched with st_data)
+  logic [G6LCCfg.XLEN-1:0] st_data_hi_q, st_data_cmp_hi_q;  // AMOCAS.Q high
+  logic                   st_is_quad_q;
+  logic [(G6LCCfg.XLEN/8)-1:0] st_be_n, st_be_q;
+  logic [1:0] st_data_size_n, st_data_size_q;
+  amo_t amo_op_d, amo_op_q;
+  cbo_t cbo_op_d, cbo_op_q;
+
+  logic [G6LCCfg.TRANS_ID_BITS-1:0] trans_id_n, trans_id_q;
+  // T6b: hart of the in-flight store, registered alongside its tid.
+  logic [$clog2(G6LCCfg.NrHarts > 1 ? G6LCCfg.NrHarts : 2)-1:0] st_hart_n, st_hart_q;
+
+  // U7ᶜ cbo.zero full cache-block marker (Zicboz): the store buffer gets ONE
+  // speculative entry carrying the block-aligned base address and cbo_op =
+  // CBO_ZERO; the commit-queue drain in store_buffer expands it into
+  // block_bytes/stride ordinary full-width stores after the instruction
+  // commits. One instruction -> one entry -> one commit keeps the store
+  // buffer's commit accounting intact and keeps trans_id_q owned by this
+  // instruction for the whole operation (the earlier multi-beat expansion
+  // outlived pop_st_o, let lsu_ctrl_i drift to the next store, and both
+  // orphaned queue entries and reported completion under a stolen tid).
+  // T44: the block is the architected CBO block (config_pkg::CBO_BLOCK_BYTES,
+  // the .dts cboz-block-size), not the D$ line — DCACHE_LINE_WIDTH is in
+  // bits, and `DCACHE_LINE_WIDTH / 8` aligned and zeroed 16 bytes.
+`ifdef G6LC_MUT_CBOZ_LINE_BYTES
+  // Review-only mutation: the pre-fix D$-line-derived block (16 B on a
+  // 128-bit line), so cbo.zero leaves bytes 16..63 of the block untouched.
+  localparam int unsigned CBOZ_LINE_B =
+      (G6LCCfg.DCACHE_LINE_WIDTH >= 64) ? (G6LCCfg.DCACHE_LINE_WIDTH / 8) : 64;
+`else
+  localparam int unsigned CBOZ_LINE_B = config_pkg::CBO_BLOCK_BYTES;
+`endif
+
+  logic [G6LCCfg.PLEN-1:0] paddr_to_sb;
+  // Physical address presented to the store buffer (line-aligned for cbo.zero)
+  assign paddr_to_sb = (G6LCCfg.RVZiCboz && cbo_op_q == g6lc_core_pkg::CBO_ZERO)
+                           ? (paddr_i & ~(G6LCCfg.PLEN'(CBOZ_LINE_B) - G6LCCfg.PLEN'(1)))
+                           : paddr_i;
+
+  // output assignments
+  assign vaddr_o         = lsu_ctrl_i.vaddr;  // virtual address
+  assign hs_ld_st_inst_o = G6LCCfg.RVH ? lsu_ctrl_i.hs_ld_st_inst : 1'b0;
+  assign hlvx_inst_o     = G6LCCfg.RVH ? lsu_ctrl_i.hlvx_inst : 1'b0;
+  assign tinst_o         = G6LCCfg.RVH ? lsu_ctrl_i.tinst : '0;  // transformed instruction
+  assign trans_id_o      = trans_id_q;  // transaction id from previous cycle
+
+  // T35: the request at the bypass head has been cancelled (younger-cancel).
+  // The scoreboard mask names a tid only until the cancelled entry is
+  // commit-dropped, so the bypass carries a sticky mark for stores (the same
+  // field the load path uses); a store held in WAIT_TRANSLATION (PTW) or
+  // WAIT_STORE_READY past that window must be dropped here, not pushed later
+  // into the speculative queue under a tid whose slot is free or re-allocated
+  // (server1 Linux: hart-1 store tid 19, cancelled at 76,935,790, PTW done at
+  // 76,935,833, pushed after the SMT switch — the ooo_spec_entry_live stop).
+  // The load unit's equivalent is the sticky ldbuf_flushed bit.
+  logic st_cancelled;
+`ifdef G6LC_MUT_STQ_NO_STICKY_CANCEL
+  // Review mutation (T35): the pre-fix shape — the mask is consulted at push
+  // time only; tb_g6lc_stq_cancel_ptw must fail STQ_CANCELLED_NOT_PUSHED.
+  assign st_cancelled = 1'b0;
+`else
+  assign st_cancelled = G6LCCfg.OoOEn && valid_i &&
+                        (lsu_ctrl_i.is_speculative_load_miss || cancelled_mask_i[lsu_ctrl_i.trans_id]);
+`endif
+
+  always_comb begin : store_control
+    translation_req_o      = 1'b0;
+    valid_o                = 1'b0;
+    st_valid               = 1'b0;
+    st_valid_without_flush = 1'b0;
+    pop_st_o               = 1'b0;
+    ex_o                   = ex_i;
+    trans_id_n             = lsu_ctrl_i.trans_id;
+    st_hart_n              = lsu_ctrl_i.hart;
+    state_d                = state_q;
+
+    case (state_q)
+      // we got a valid store
+      IDLE: begin
+        if (st_cancelled) begin
+          // T35: a cancelled store at the head is consumed without a
+          // translation, a push or a writeback (its slot may already be gone)
+          pop_st_o = 1'b1;
+        end else if (valid_i) begin
+          state_d = VALID_STORE;
+          translation_req_o = 1'b1;
+          pop_st_o = 1'b1;
+          // check if translation was valid and we have space in the store buffer
+          // otherwise simply stall
+          if (G6LCCfg.MmuPresent && !dtlb_hit_i) begin
+            state_d  = WAIT_TRANSLATION;
+            pop_st_o = 1'b0;
+          end
+
+          if (!st_ready) begin
+            state_d  = WAIT_STORE_READY;
+            pop_st_o = 1'b0;
+          end
+        end
+      end
+
+      VALID_STORE: begin
+        valid_o = 1'b1;
+        // post this store to the store buffer if we are not flushing
+        if (!flush_i) st_valid = 1'b1;
+
+        st_valid_without_flush = 1'b1;
+
+        // we have another request and its not an AMO (the AMO buffer only has depth 1)
+        if (st_cancelled) begin
+          // T35: the next request is a cancelled store — consume it, back to idle
+          pop_st_o = 1'b1;
+          state_d  = IDLE;
+        end else if ((valid_i && G6LCCfg.RVA && !instr_is_amo) || (valid_i && !G6LCCfg.RVA)) begin
+
+          translation_req_o = 1'b1;
+          state_d = VALID_STORE;
+          pop_st_o = 1'b1;
+
+          if (G6LCCfg.MmuPresent && !dtlb_hit_i) begin
+            state_d  = WAIT_TRANSLATION;
+            pop_st_o = 1'b0;
+          end
+
+          if (!st_ready) begin
+            state_d  = WAIT_STORE_READY;
+            pop_st_o = 1'b0;
+          end
+          // if we do not have another request go back to idle
+        end else begin
+          state_d = IDLE;
+        end
+      end
+
+      // the store queue is currently full
+      WAIT_STORE_READY: begin
+        // keep the translation request high
+        translation_req_o = 1'b1;
+
+        if (st_cancelled) begin
+          // T35: the waiting store was cancelled meanwhile — drop it as a flush would
+          translation_req_o = 1'b0;
+          pop_st_o          = 1'b1;
+          state_d           = IDLE;
+        end else if (st_ready && dtlb_hit_i) begin
+          state_d = IDLE;
+        end
+      end
+
+      default: begin
+        // we didn't receive a valid translation, wait for one
+        // but we know that the store queue is not full as we could only have landed here if
+        // it wasn't full
+        if (state_q == WAIT_TRANSLATION && G6LCCfg.MmuPresent) begin
+          translation_req_o = 1'b1;
+
+          if (st_cancelled) begin
+            // T35: cancelled while waiting for the PTW — drop it as a flush would
+            translation_req_o = 1'b0;
+            pop_st_o          = 1'b1;
+            state_d           = IDLE;
+          end else if (dtlb_hit_i) begin
+            state_d = IDLE;
+          end
+        end
+      end
+    endcase
+
+    // -----------------
+    // Access Exception
+    // -----------------
+    // we got an address translation exception (access rights, misaligned or page fault)
+    if (ex_i.valid && (state_q != IDLE)) begin
+      // the only difference is that we do not want to store this request
+      // T40: the request is still at the bypass head only while we wait for
+      // its translation or for the store buffer. In VALID_STORE it was popped
+      // by the accept the cycle before, and the unconditional pop here removed
+      // the NEXT request (lost: never executed) or, with the bypass empty,
+      // underflowed its counter (0 -> 3: lsu_ready low for good). In-order
+      // cores heal that through the flush every exception raises at commit;
+      // under the OoO younger-cancel a wrong-path store's exception raises no
+      // flush (user COW store fault behind a mispredict: the /init hang at
+      // 494 M cycles).
+`ifdef G6LC_MUT_SU_EX_POP_ALWAYS
+      pop_st_o = 1'b1;   // review mutation: the pre-fix shape
+`else
+      pop_st_o = (state_q == WAIT_TRANSLATION) || (state_q == WAIT_STORE_READY);
+`endif
+      st_valid = 1'b0;
+      state_d  = IDLE;
+      valid_o  = 1'b1;
+    end
+
+    if (flush_i) begin
+      state_d     = IDLE;
+    end
+  end
+
+  // -------------
+  // Byte-Swapper
+  // -------------
+  // We need to reverse the byte order of what we intend to Store in Data Memory if we are in Big Endian Mode (mbe defines endianness and comes from CSRregfile).
+  logic [G6LCCfg.XLEN-1:0] endian_data;
+
+  always_comb begin
+    endian_data = lsu_ctrl_i.data;
+    if (mbe_i) begin
+      case (lsu_ctrl_i.operation)
+        SB, HSV_B, FSB: endian_data[7:0] = {lsu_ctrl_i.data[7:0]};
+        SH, HSV_H, FSH: endian_data[15:0] = {<<8{lsu_ctrl_i.data[15:0]}};
+        SW, HSV_W, FSW, AMO_LRW, AMO_SCW, AMO_SWAPW, AMO_ADDW, AMO_ANDW, AMO_ORW, AMO_XORW, AMO_MAXW,
+        AMO_MINW, AMO_MAXWU, AMO_MINWU, AMO_CASW, AMO_CASQ:
+        endian_data[31:0] = {<<8{lsu_ctrl_i.data[31:0]}};
+        default: endian_data[G6LCCfg.XLEN-1:0] = {<<8{lsu_ctrl_i.data[G6LCCfg.XLEN-1:0]}};
+      endcase
+    end
+  end
+
+  // -----------
+  // Re-aligner
+  // -----------
+  // re-align the write data to comply with the address offset
+  always_comb begin
+    st_be_n = lsu_ctrl_i.be;
+    // don't shift the data if we are going to perform an AMO as we still need to operate on this data
+    st_data_n = ((G6LCCfg.RVA && instr_is_amo) ? endian_data[G6LCCfg.XLEN-1:0] :
+                 data_align(lsu_ctrl_i.vaddr[2:0], {{64 - G6LCCfg.XLEN{1'b0}}, endian_data}));
+    // Zicboz: force zero data + full BE (drain-time expansion covers the line)
+    if (G6LCCfg.RVZiCboz && lsu_ctrl_i.operation == g6lc_core_pkg::CBO_ZERO) begin
+      st_data_n = '0;
+      st_be_n   = '1;
+    end
+    st_data_size_n = extract_transfer_size(lsu_ctrl_i.operation);
+    // save AMO op for next cycle
+    if (G6LCCfg.RVA) begin
+      case (lsu_ctrl_i.operation)
+        AMO_LRW, AMO_LRD:     amo_op_d = AMO_LR;
+        AMO_SCW, AMO_SCD:     amo_op_d = AMO_SC;
+        AMO_SWAPW, AMO_SWAPD: amo_op_d = AMO_SWAP;
+        AMO_ADDW, AMO_ADDD:   amo_op_d = AMO_ADD;
+        AMO_ANDW, AMO_ANDD:   amo_op_d = AMO_AND;
+        AMO_ORW, AMO_ORD:     amo_op_d = AMO_OR;
+        AMO_XORW, AMO_XORD:   amo_op_d = AMO_XOR;
+        AMO_MAXW, AMO_MAXD:   amo_op_d = AMO_MAX;
+        AMO_MAXWU, AMO_MAXDU: amo_op_d = AMO_MAXU;
+        AMO_MINW, AMO_MIND:   amo_op_d = AMO_MIN;
+        AMO_MINWU, AMO_MINDU: amo_op_d = AMO_MINU;
+        AMO_CASW, AMO_CASD:   amo_op_d = G6LCCfg.RVZacas ? AMO_CAS1 : AMO_NONE;
+        AMO_CASQ:             amo_op_d = G6LCCfg.RVZacas ? AMO_CAS1 : AMO_NONE;  // is_quad on req
+        default:              amo_op_d = AMO_NONE;
+      endcase
+    end else begin
+      amo_op_d = AMO_NONE;
+    end
+
+    if (G6LCCfg.RVZiCbom || G6LCCfg.RVZiCboz) begin
+      case (lsu_ctrl_i.operation)
+        g6lc_core_pkg::CBO_INVAL: cbo_op_d = G6LCCfg.RVZiCbom ? g6lc_core_pkg::CBO_INVAL : g6lc_core_pkg::CBO_NONE;
+        g6lc_core_pkg::CBO_CLEAN: cbo_op_d = G6LCCfg.RVZiCbom ? g6lc_core_pkg::CBO_CLEAN : g6lc_core_pkg::CBO_NONE;
+        g6lc_core_pkg::CBO_FLUSH: cbo_op_d = G6LCCfg.RVZiCbom ? g6lc_core_pkg::CBO_FLUSH : g6lc_core_pkg::CBO_NONE;
+        // Zicboz: mark as CBO_ZERO; commit drain expands to the full line
+        g6lc_core_pkg::CBO_ZERO:  cbo_op_d = G6LCCfg.RVZiCboz ? g6lc_core_pkg::CBO_ZERO : g6lc_core_pkg::CBO_NONE;
+        default:               cbo_op_d = g6lc_core_pkg::CBO_NONE;
+      endcase
+    end else begin
+      cbo_op_d = g6lc_core_pkg::CBO_NONE;
+    end
+  end
+
+  logic store_buffer_valid, amo_buffer_valid;
+  logic store_buffer_ready, amo_buffer_ready;
+  // Soft-ladder B1: TID of AMO currently held in amo_buffer (for cancel kill).
+  logic [G6LCCfg.TRANS_ID_BITS-1:0] amo_tid_q;
+  logic                             amo_cancel;
+
+  // multiplex between store unit and amo buffer
+  assign store_buffer_valid = st_valid & (!G6LCCfg.RVA || (amo_op_q == AMO_NONE));
+  // Do not post an already-cancelled AMO (hang-7 younger-cancel race).
+  assign amo_buffer_valid = st_valid & (G6LCCfg.RVA && (amo_op_q != AMO_NONE)) &
+                            !cancelled_mask_i[trans_id_q];
+
+  assign phys_valid_o = (G6LCCfg.CohPolicy == config_pkg::COH_OOO) &&
+                        store_buffer_valid && !flush_i && !cancelled_mask_i[trans_id_q];
+  assign phys_addr_o = G6LCCfg.CohPolicy == config_pkg::COH_OOO ? paddr_to_sb : '0;
+  assign phys_id_o = G6LCCfg.CohPolicy == config_pkg::COH_OOO ? trans_id_q : '0;
+  assign phys_hart_o = G6LCCfg.CohPolicy == config_pkg::COH_OOO ? st_hart_q : '0;
+  assign phys_size_o = G6LCCfg.CohPolicy == config_pkg::COH_OOO ? st_data_size_q : '0;
+
+  assign st_ready = store_buffer_ready & amo_buffer_ready;
+  // Kill buffered AMO when its SB entry is younger-cancelled and not yet at commit.
+  // ready_o is fifo empty: !ready ⇒ occupancy=1.
+  assign amo_cancel = G6LCCfg.RVA && !amo_buffer_ready && cancelled_mask_i[amo_tid_q];
+
+  // ---------------
+  // Store Queue
+  // ---------------
+  store_buffer #(
+      .G6LCCfg       (G6LCCfg),
+      .HypCfg        (HypCfg),
+      .dcache_req_i_t(dcache_req_i_t),
+      .dcache_req_o_t(dcache_req_o_t),
+      .cbo_t         (cbo_t)
+  ) store_buffer_i (
+      .clk_i,
+      .rst_ni,
+      .flush_i,
+      .cancelled_mask_i,
+      .sb_live_i,
+      .stall_st_pending_i,
+      .no_st_pending_o,
+      .store_buffer_empty_o,
+      .page_offset_i,
+      .load_paddr_i,
+      .load_paddr_valid_i,
+      .load_trans_id_i,
+      .commit_trans_id_i(commit_tran_id_i),
+      .oldest_live_tid_i,
+      .head_phys_pending_i,
+      .load_hart_i,
+      .st_hart_i            (st_hart_q),
+      .dcache_wbuffer_empty_i,
+      .page_offset_matches_o,
+      .page_offset_spec_only_o,
+      .st_fwd_valid_o,
+      .st_fwd_data_o,
+      .st_fwd_be_o,
+      .fwd_req_i,
+      .fwd_rsp_o,
+      .commit_i,
+      .commit_ready_o,
+      .ready_o              (store_buffer_ready),
+      .valid_i              (store_buffer_valid),
+      // the flush signal can be critical and we need this valid
+      // signal to check whether the page_offset matches or not,
+      // functionally it doesn't make a difference whether we use
+      // the correct valid signal or not as we are flushing
+      // the whole pipeline anyway
+      .valid_without_flush_i(st_valid_without_flush),
+      .paddr_i              (paddr_to_sb),
+      .trans_id_i           (trans_id_q),
+      .rvfi_mem_paddr_o     (rvfi_mem_paddr_o),
+      .data_i               (st_data_q),
+      .cbo_op_i             (cbo_op_q),
+      .be_i                 (st_be_q),
+      .data_size_i          (st_data_size_q),
+      .req_port_i           (req_port_i),
+      .req_port_o           (req_port_o)
+  );
+
+  if (G6LCCfg.RVA) begin
+    amo_buffer #(
+        .G6LCCfg(G6LCCfg)
+    ) i_amo_buffer (
+        .clk_i,
+        .rst_ni,
+        .flush_i,
+        .cancel_i          (amo_cancel),
+        .valid_i           (amo_buffer_valid),
+        .ready_o           (amo_buffer_ready),
+        .paddr_i           (paddr_i),
+        .amo_op_i          (amo_op_q),
+        .data_i            (st_data_q),
+        .data_cmp_i        (st_data_cmp_q),
+        .data_hi_i         (st_data_hi_q),
+        .data_cmp_hi_i     (st_data_cmp_hi_q),
+        .is_quad_i         (st_is_quad_q),
+        .data_size_i       (st_data_size_q),
+        .amo_req_o         (amo_req_o),
+        .amo_resp_i        (amo_resp_i),
+        .amo_valid_commit_i(amo_valid_commit_i),
+        .no_st_pending_i   (no_st_pending_o)
+    );
+  end else begin
+    assign amo_buffer_ready = '1;
+    assign amo_req_o        = '0;
+  end
+
+  // ---------------
+  // Registers
+  // ---------------
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (~rst_ni) begin
+      state_q        <= IDLE;
+      st_be_q        <= '0;
+      st_data_q      <= '0;
+      st_data_cmp_q  <= '0;
+      st_data_hi_q  <= '0;
+      st_data_cmp_hi_q <= '0;
+      st_is_quad_q  <= 1'b0;
+      st_data_size_q <= '0;
+      trans_id_q     <= '0;
+      st_hart_q      <= '0;
+      amo_op_q       <= AMO_NONE;
+      cbo_op_q       <= g6lc_core_pkg::CBO_NONE;
+      amo_tid_q      <= '0;
+    end else begin
+      state_q        <= state_d;
+      st_be_q        <= st_be_n;
+      st_data_q      <= st_data_n;
+      // Capture expected when accepting a new store/AMO (same cycle as st_data_n)
+      if (valid_i && (state_q == IDLE || st_valid)) begin
+        st_data_cmp_q <= G6LCCfg.RVZacas ? lsu_ctrl_i.data_cmp : '0;
+        st_data_hi_q <= G6LCCfg.RVZacas ? lsu_ctrl_i.data_hi : '0;
+        st_data_cmp_hi_q <= G6LCCfg.RVZacas ? lsu_ctrl_i.data_cmp_hi : '0;
+        st_is_quad_q <= G6LCCfg.RVZacas && (lsu_ctrl_i.operation == g6lc_core_pkg::AMO_CASQ);
+      end
+      trans_id_q     <= trans_id_n;
+      st_hart_q      <= st_hart_n;
+      st_data_size_q <= st_data_size_n;
+      amo_op_q       <= amo_op_d;
+      cbo_op_q       <= cbo_op_d;
+      // Remember TID of AMO living in the depth-1 buffer (for cancel kill).
+      if (G6LCCfg.RVA && amo_buffer_valid) begin
+        amo_tid_q <= trans_id_q;
+      end
+    end
+  end
+
+endmodule

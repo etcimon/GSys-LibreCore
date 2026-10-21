@@ -1,0 +1,2373 @@
+// Copyright 2018 ETH Zurich and University of Bologna.
+// Copyright and related rights are licensed under the Solderpad Hardware
+// License, Version 0.51 (the "License"); you may not use this file except in
+// compliance with the License.  You may obtain a copy of the License at
+// http://solderpad.org/licenses/SHL-0.51. Unless required by applicable law
+// or agreed to in writing, software, hardware and materials distributed under
+// this License is distributed on an "AS IS" BASIS, WITHOUT WARRANTIES OR
+// CONDITIONS OF ANY KIND, either express or implied. See the License for the
+// specific language governing permissions and limitations under the License.
+//
+// Author: Florian Zaruba, ETH Zurich
+// Date: 19.03.2017
+// Description: Test-harness for the core
+//              Instantiates an AXI-Bus and memories
+
+`include "axi/assign.svh"
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+`include "axi/typedef.svh"
+`endif
+`include "rvfi_types.svh"
+`include "iti_types.svh"
+
+`ifdef VERILATOR
+`include "custom_uvm_macros.svh"
+`else
+`include "uvm_macros.svh"
+`endif
+
+module g6lc_testharness #(
+  parameter config_pkg::g6lc_cfg_t G6LCCfg = build_config_pkg::build_config(g6lc_config_pkg::g6lc_cfg),
+  //
+  parameter int unsigned AXI_USER_WIDTH    = G6LCCfg.AxiUserWidth,
+  parameter int unsigned AXI_USER_EN       = G6LCCfg.AXI_USER_EN,
+  parameter int unsigned AXI_ADDRESS_WIDTH = 64,
+  parameter int unsigned AXI_DATA_WIDTH    = 64,
+  parameter bit          InclSimDTM        = 1'b1,
+  parameter int unsigned NUM_WORDS         = 2**25,         // memory size
+  parameter bit          StallRandomOutput = 1'b0,
+  parameter bit          StallRandomInput  = 1'b0,
+  parameter int unsigned DramLatency       = 0
+) (
+  input  logic                           clk_i,
+  input  logic                           rtc_i,
+  input  logic                           rst_ni,
+  output logic [31:0]                    exit_o
+);
+
+  // U6.2: physical cores; U6.1 SMT: software harts = cores × NrHarts
+  localparam int unsigned NR_CORES =
+      (G6LCCfg.NrCores < 1) ? 1 :
+      (G6LCCfg.NrCores > config_pkg::G6LC_MAX_CORES) ? config_pkg::G6LC_MAX_CORES :
+      G6LCCfg.NrCores;
+  localparam int unsigned NR_HARTS_PER_CORE =
+      (G6LCCfg.NrHarts < 1) ? 1 : G6LCCfg.NrHarts;
+  // CLINT/PLIC software contexts scale with total harts (Linux DTS cpu@N count)
+  localparam int unsigned NR_HARTS = NR_CORES * NR_HARTS_PER_CORE;
+  localparam [7:0] hart_id = '0;
+
+  // RVFI
+  localparam type rvfi_instr_t = `RVFI_INSTR_T(G6LCCfg);
+  localparam type rvfi_csr_elmt_t = `RVFI_CSR_ELMT_T(G6LCCfg);
+  localparam type rvfi_csr_t = `RVFI_CSR_T(G6LCCfg, rvfi_csr_elmt_t);
+  localparam type rvfi_to_iti_t = `RVFI_TO_ITI_T(G6LCCfg);
+  localparam type iti_to_encoder_t = `ITI_TO_ENCODER_T(G6LCCfg);
+
+  // RVFI PROBES
+  localparam type rvfi_probes_instr_t = `RVFI_PROBES_INSTR_T(G6LCCfg);
+  localparam type rvfi_probes_csr_t = `RVFI_PROBES_CSR_T(G6LCCfg);
+  localparam type rvfi_probes_t = struct packed {
+    rvfi_probes_csr_t csr;
+    rvfi_probes_instr_t instr;
+  };
+
+  // disable test-enable
+  logic        test_en;
+  logic        ndmreset;
+  logic        ndmreset_n;
+  logic        debug_req_core;
+`ifdef G6LC_HAVE_LITEDRAM
+  // CLASS1: hold the cluster while C++ drains ELF into LiteDRAM native.
+  // Cookie/class-0 does not define G6LC_HAVE_LITEDRAM (SRAM poke stays).
+  logic        preload_hold /*verilator public*/ = 1'b1;
+`endif
+
+  int          jtag_enable;
+  logic        init_done;
+  logic [31:0] jtag_exit, dmi_exit;
+  logic [31:0] rvfi_exit;
+  logic [31:0] tracer_exit;
+  logic [NR_CORES-1:0][31:0] core_tracer_exit;
+  logic [31:0] tandem_exit;
+
+  logic        jtag_TCK;
+  logic        jtag_TMS;
+  logic        jtag_TDI;
+  logic        jtag_TRSTn;
+  logic        jtag_TDO_data;
+  logic        jtag_TDO_driven;
+
+  logic        debug_req_valid;
+  logic        debug_req_ready;
+  logic        debug_resp_valid;
+  logic        debug_resp_ready;
+
+  logic        jtag_req_valid;
+  logic [6:0]  jtag_req_bits_addr;
+  logic [1:0]  jtag_req_bits_op;
+  logic [31:0] jtag_req_bits_data;
+  logic        jtag_resp_ready;
+  logic        jtag_resp_valid;
+
+  logic        dmi_req_valid;
+  logic        dmi_resp_ready;
+  logic        dmi_resp_valid;
+
+  dm::dmi_req_t  jtag_dmi_req;
+  dm::dmi_req_t  dmi_req;
+
+  dm::dmi_req_t  debug_req;
+  dm::dmi_resp_t debug_resp;
+
+  assign test_en = 1'b0;
+
+  AXI_BUS #(
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH       ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH          ),
+    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidth ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH          )
+  ) slave[g6lc_soc::NrSlaves-1:0]();
+
+  // Port 2: AI island desc-fetch DMA master (NrSlaves=3).
+  // Driven from gen_ai_island when MatrixEn; idle otherwise.
+  g6lc_axi::req_t  ai_dma_req;
+  g6lc_axi::resp_t ai_dma_resp;
+`ifdef G6LC_APU
+  g6lc_axi::req_t  apu_dma_req;
+  g6lc_axi::resp_t apu_dma_rsp;
+`ifndef G6LC_AI_DRAM_ISLAND_PORT
+  g6lc_axi::req_t  apu_dma_join_req;
+  g6lc_axi::resp_t apu_dma_join_rsp;
+`endif
+`endif
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+  // 512-bit island DMA on this define only. ai_dma_req stays the 64-bit
+  // type the unset path assigns onto xbar slave[2].
+  localparam int unsigned AI_ISLAND_DATA_W = 512;
+`endif
+  // V1 "wide port" ladder step (scaling-100tops.md s4.2 dual-port front-end):
+  // with G6LC_AI_DRAM_WIDE_CH the class-0 DRAM channel itself is 512 bits (64 B
+  // per beat, one channel), the island port joins it at full width and the
+  // 64-bit cluster port is upsized in g6lc_ai_dram_join. This is the class-2
+  // (LPDDR5-class) bytes-per-cycle stand-in for the simulation model; the
+  // default channel stays 64 bits. Requires G6LC_AI_DRAM_ISLAND_PORT.
+`ifdef G6LC_AI_DRAM_WIDE_CH
+  localparam int unsigned AI_DRAM_CH_W = 512;
+`else
+  localparam int unsigned AI_DRAM_CH_W = AXI_DATA_WIDTH;
+`endif
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+  typedef logic [AI_ISLAND_DATA_W-1:0]   aiw_data_t;
+  typedef logic [AI_ISLAND_DATA_W/8-1:0] aiw_strb_t;
+  typedef g6lc_axi::addr_t aiw_addr_t;
+  typedef g6lc_axi::id_t   aiw_id_t;
+  typedef g6lc_axi::user_t aiw_user_t;
+  `AXI_TYPEDEF_ALL(aiw, aiw_addr_t, aiw_id_t, aiw_data_t, aiw_strb_t, aiw_user_t)
+  aiw_req_t  ai_dma_wide_req;
+  aiw_resp_t ai_dma_wide_resp;
+`endif
+  logic              dram_init_done;
+  logic [g6lc_ai_island_cfg_pkg::AI_DRAM_MAX_CHANNELS-1:0][31:0]
+                     dram_ch_r_beats, dram_ch_w_beats;
+  // One island cfg for APB *and* the DRAM slave. Channel/class/shift must
+  // not drift between gen_ai_island and i_dram_backend.
+  // Island geometry: `+define+G6LC_AI_ISLAND_CFG=<g6lc_ai_island_cfg_pkg literal>`
+  // names it directly (AiIslandV2ColumnArray, AiIslandReview..., a cluster SKU);
+  // otherwise the DRAM-class define chain below keeps its historical selection.
+  localparam g6lc_ai_island_cfg_pkg::ai_island_cfg_t AiIslandCfg =
+`ifdef G6LC_AI_ISLAND_CFG
+      g6lc_ai_island_cfg_pkg::`G6LC_AI_ISLAND_CFG
+`elsif G6LC_AI_DRAM_CHANS_8
+      g6lc_ai_island_cfg_pkg::AiIslandDdr4x8Bringup
+`elsif G6LC_AI_DRAM_CHANS_4
+      g6lc_ai_island_cfg_pkg::AiIslandDdr4x4Bringup
+`elsif G6LC_AI_DRAM_CHANS_2
+      g6lc_ai_island_cfg_pkg::AiIslandDdr4x2Bringup
+`elsif G6LC_AI_DRAM_CLASS1
+      g6lc_ai_island_cfg_pkg::AiIslandDdr4Bringup
+`elsif G6LC_AI_DRAM_SIM_CHANS_8
+      g6lc_ai_island_cfg_pkg::AiIslandSimChans8
+`elsif G6LC_AI_DRAM_SIM_CHANS_4
+      g6lc_ai_island_cfg_pkg::AiIslandSimChans4
+`elsif G6LC_AI_DRAM_SIM_CHANS_2
+      g6lc_ai_island_cfg_pkg::AiIslandSimChans2
+`elsif G6LC_AI_DRAM_TIMING
+      g6lc_ai_island_cfg_pkg::AiIslandDdr4TimingSim
+`else
+      g6lc_ai_island_cfg_pkg::AiIslandLatencyDefault
+`endif
+      ;
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+  // Island DMA leaves the 64-bit xbar on a 512-bit port. slave[2] stays idle
+  // without G6LC_APU. With G6LC_APU the compositor DMA master takes this port
+  // (widths differ, so the 2:1 join is not used).
+`ifdef G6LC_APU
+  `AXI_ASSIGN_FROM_REQ(slave[2], apu_dma_req)
+  `AXI_ASSIGN_TO_RESP(apu_dma_rsp, slave[2])
+`else
+  assign slave[2].aw_valid  = 1'b0;
+  assign slave[2].aw_id     = '0;
+  assign slave[2].aw_addr   = '0;
+  assign slave[2].aw_len    = '0;
+  assign slave[2].aw_size   = '0;
+  assign slave[2].aw_burst  = axi_pkg::BURST_FIXED;
+  assign slave[2].aw_lock   = 1'b0;
+  assign slave[2].aw_cache  = '0;
+  assign slave[2].aw_prot   = '0;
+  assign slave[2].aw_qos    = '0;
+  assign slave[2].aw_region = '0;
+  assign slave[2].aw_atop   = '0;
+  assign slave[2].aw_user   = '0;
+  assign slave[2].w_valid   = 1'b0;
+  assign slave[2].w_data    = '0;
+  assign slave[2].w_strb    = '0;
+  assign slave[2].w_last    = 1'b0;
+  assign slave[2].w_user    = '0;
+  assign slave[2].b_ready   = 1'b0;
+  assign slave[2].ar_valid  = 1'b0;
+  assign slave[2].ar_id     = '0;
+  assign slave[2].ar_addr   = '0;
+  assign slave[2].ar_len    = '0;
+  assign slave[2].ar_size   = '0;
+  assign slave[2].ar_burst  = axi_pkg::BURST_FIXED;
+  assign slave[2].ar_lock   = 1'b0;
+  assign slave[2].ar_cache  = '0;
+  assign slave[2].ar_prot   = '0;
+  assign slave[2].ar_qos    = '0;
+  assign slave[2].ar_region = '0;
+  assign slave[2].ar_user   = '0;
+  assign slave[2].r_ready   = 1'b0;
+`endif
+`else
+`ifdef G6LC_APU
+  // Enable=1 so AI DMA still reaches slave[2]. ApuHarness.DmaReadEn=0 keeps
+  // the APU side idle. TdmaEn is the private TB grant and stays 0 on every
+  // profile. FeatureVirgl stays illegal.
+  g6lc_apu_tdma #(
+    .Enable(1'b1),
+    .axi_req_t(g6lc_axi::req_t),
+    .axi_rsp_t(g6lc_axi::resp_t)
+  ) i_apu_tdma (
+    .clk_i, .rst_ni(ndmreset_n),
+    .a_req_i(apu_dma_req), .a_rsp_o(apu_dma_rsp),
+    .b_req_i(ai_dma_req), .b_rsp_o(ai_dma_resp),
+    .mst_req_o(apu_dma_join_req), .mst_rsp_i(apu_dma_join_rsp)
+  );
+  `AXI_ASSIGN_FROM_REQ(slave[2], apu_dma_join_req)
+  `AXI_ASSIGN_TO_RESP(apu_dma_join_rsp, slave[2])
+`else
+  `AXI_ASSIGN_FROM_REQ(slave[2], ai_dma_req)
+  `AXI_ASSIGN_TO_RESP(ai_dma_resp, slave[2])
+`endif
+`endif
+
+`ifdef G6LC_APU
+  localparam int unsigned APU_NB_EXTRA = 3;
+  localparam int unsigned APU_GUEST_IDX = g6lc_soc::NB_PERIPHERALS;
+  localparam int unsigned APU_CTRL_IDX  = g6lc_soc::NB_PERIPHERALS + 1;
+  localparam int unsigned APU_RAM_IDX   = g6lc_soc::NB_PERIPHERALS + 2;
+  // Second DRAM rule for the firmware-RAM hole (same master idx, extra rule).
+  localparam int unsigned APU_NB_RULES_EXTRA = 1;
+`else
+  localparam int unsigned APU_NB_EXTRA = 0;
+  localparam int unsigned APU_NB_RULES_EXTRA = 0;
+`endif
+  localparam int unsigned NB_MST = g6lc_soc::NB_PERIPHERALS + APU_NB_EXTRA;
+  localparam int unsigned NB_RULES = NB_MST + APU_NB_RULES_EXTRA;
+
+  AXI_BUS #(
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
+  ) master[NB_MST-1:0]();
+
+`ifdef G6LC_APU
+  logic apu_ram_fault;
+  logic apu_fault_reset;
+`else
+  wire apu_fault_reset = 1'b0;
+`endif
+  // apu_fault_reset is requested by a supervisor that is NOT reset by
+  // ndmreset_n. Gating it here resets the fabric, including a quarantined
+  // RAM master, and the RAM fault clears because of that reset.
+  rstgen i_rstgen_main (
+    .clk_i        ( clk_i                ),
+    .rst_ni       ( rst_ni & (~ndmreset) & ~apu_fault_reset ),
+    .test_mode_i  ( test_en              ),
+    .rst_no       ( ndmreset_n           ),
+    .init_no      (                      ) // keep open
+  );
+
+  logic [NR_CORES-1:0][G6LCCfg.VLEN-1:0] cluster_boot;
+`ifdef G6LC_APU
+  logic apu_fw_ready /*verilator public*/;
+  axi_pkg::xbar_rule_64_t apu_guest_rule, apu_ctrl_rule, apu_ram_rule;
+  axi_pkg::xbar_rule_64_t apu_dram_lo_rule, apu_dram_hi_rule;
+`endif
+`ifdef G6LC_HAVE_LITEDRAM
+  wire core_rst_n = ndmreset_n & ~preload_hold
+`ifdef G6LC_APU
+      & apu_fw_ready
+`endif
+      ;
+  function void g6lc_tb_preload_hold(input int unsigned on);
+    preload_hold = (on != 32'd0);
+  endfunction
+  export "DPI-C" function g6lc_tb_preload_hold;
+`else
+  wire core_rst_n = ndmreset_n
+`ifdef G6LC_APU
+      & apu_fw_ready
+`endif
+      ;
+`endif
+
+  // ---------------
+  // Debug
+  // ---------------
+  assign init_done = rst_ni;
+
+  logic debug_enable;
+  initial begin
+    if (!$value$plusargs("jtag_rbb_enable=%b", jtag_enable)) jtag_enable = 'h0;
+    if ($test$plusargs("debug_disable")) debug_enable = 'h0; else debug_enable = 'h1;
+    if (!G6LCCfg.IS_XLEN32 & !G6LCCfg.IS_XLEN64) $error("G6LCCfg.XLEN different from 32 and 64");
+  end
+
+  // debug if MUX
+  assign debug_req_valid     = (jtag_enable[0]) ? jtag_req_valid     : dmi_req_valid;
+  assign debug_resp_ready    = (jtag_enable[0]) ? jtag_resp_ready    : dmi_resp_ready;
+  assign debug_req           = (jtag_enable[0]) ? jtag_dmi_req       : dmi_req;
+  if (g6lc_core_pkg::RVFI) begin
+    assign exit_o              = (jtag_enable[0]) ? jtag_exit          : rvfi_exit;
+  end else begin
+    assign exit_o              = (jtag_enable[0]) ? jtag_exit          : dmi_exit;
+  end
+  assign jtag_resp_valid     = (jtag_enable[0]) ? debug_resp_valid   : 1'b0;
+  assign dmi_resp_valid      = (jtag_enable[0]) ? 1'b0               : debug_resp_valid;
+
+  // SiFive's SimJTAG Module
+  // Converts to DPI calls
+  SimJTAG i_SimJTAG (
+    .clock                ( clk_i                ),
+    .reset                ( ~rst_ni              ),
+    .enable               ( jtag_enable[0]       ),
+    .init_done            ( init_done            ),
+    .jtag_TCK             ( jtag_TCK             ),
+    .jtag_TMS             ( jtag_TMS             ),
+    .jtag_TDI             ( jtag_TDI             ),
+    .jtag_TRSTn           ( jtag_TRSTn           ),
+    .jtag_TDO_data        ( jtag_TDO_data        ),
+    .jtag_TDO_driven      ( jtag_TDO_driven      ),
+    .exit                 ( jtag_exit            )
+  );
+
+  dmi_jtag i_dmi_jtag (
+    .clk_i            ( clk_i           ),
+    .rst_ni           ( rst_ni          ),
+    .testmode_i       ( test_en         ),
+    .dmi_req_o        ( jtag_dmi_req    ),
+    .dmi_req_valid_o  ( jtag_req_valid  ),
+    .dmi_req_ready_i  ( debug_req_ready ),
+    .dmi_resp_i       ( debug_resp      ),
+    .dmi_resp_ready_o ( jtag_resp_ready ),
+    .dmi_resp_valid_i ( jtag_resp_valid ),
+    .dmi_rst_no       (                 ), // not connected
+    .tck_i            ( jtag_TCK        ),
+    .tms_i            ( jtag_TMS        ),
+    .trst_ni          ( jtag_TRSTn      ),
+    .td_i             ( jtag_TDI        ),
+    .td_o             ( jtag_TDO_data   ),
+    .tdo_oe_o         ( jtag_TDO_driven )
+  );
+
+  // SiFive's SimDTM Module
+  // Converts to DPI calls
+  logic [1:0] debug_req_bits_op;
+  assign dmi_req.op = dm::dtm_op_e'(debug_req_bits_op);
+
+  if (InclSimDTM) begin
+    SimDTM i_SimDTM (
+      .clk                  ( clk_i                 ),
+      .reset                ( ~rst_ni               ),
+      .debug_req_valid      ( dmi_req_valid         ),
+      .debug_req_ready      ( debug_req_ready       ),
+      .debug_req_bits_addr  ( dmi_req.addr          ),
+      .debug_req_bits_op    ( debug_req_bits_op     ),
+      .debug_req_bits_data  ( dmi_req.data          ),
+      .debug_resp_valid     ( dmi_resp_valid        ),
+      .debug_resp_ready     ( dmi_resp_ready        ),
+      .debug_resp_bits_resp ( debug_resp.resp       ),
+      .debug_resp_bits_data ( debug_resp.data       ),
+      .exit                 ( dmi_exit              )
+    );
+  end else begin
+    assign dmi_req_valid = '0;
+    assign debug_req_bits_op = '0;
+    assign dmi_exit = 1'b0;
+  end
+
+  // this delay window allows the core to read and execute init code
+  // from the bootrom before the first debug request can interrupt
+  // core. this is needed in cases where an fsbl is involved that
+  // expects a0 and a1 to be initialized with the hart id and a
+  // pointer to the dev tree, respectively.
+  localparam int unsigned DmiDelCycles = 500;
+
+  logic debug_req_core_ungtd;
+  int dmi_del_cnt_d, dmi_del_cnt_q;
+
+  assign dmi_del_cnt_d  = (dmi_del_cnt_q) ? dmi_del_cnt_q - 1 : 0;
+  assign debug_req_core = (dmi_del_cnt_q) ? 1'b0 :
+                          (!debug_enable) ? 1'b0 : debug_req_core_ungtd;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin : p_dmi_del_cnt
+    if(!rst_ni) begin
+      dmi_del_cnt_q <= DmiDelCycles;
+    end else begin
+      dmi_del_cnt_q <= dmi_del_cnt_d;
+    end
+  end
+
+  g6lc_axi::req_t    dm_axi_m_req;
+  g6lc_axi::resp_t   dm_axi_m_resp;
+
+  logic                dm_slave_req;
+  logic                dm_slave_we;
+  logic [64-1:0]       dm_slave_addr;
+  logic [64/8-1:0]     dm_slave_be;
+  logic [64-1:0]       dm_slave_wdata;
+  logic [64-1:0]       dm_slave_rdata;
+
+  logic                dm_master_req;
+  logic [64-1:0]       dm_master_add;
+  logic                dm_master_we;
+  logic [64-1:0]       dm_master_wdata;
+  logic [64/8-1:0]     dm_master_be;
+  logic                dm_master_gnt;
+  logic                dm_master_r_valid;
+  logic [64-1:0]       dm_master_r_rdata;
+
+  // debug module
+  dm_top #(
+    .NrHarts              ( 1                           ),
+    .BusWidth             ( AXI_DATA_WIDTH              ),
+    .SelectableHarts      ( 1'b1                        )
+  ) i_dm_top (
+    .clk_i                ( clk_i                       ),
+    .rst_ni               ( rst_ni                      ), // PoR
+    .testmode_i           ( test_en                     ),
+    .ndmreset_o           ( ndmreset                    ),
+    .dmactive_o           (                             ), // active debug session
+    .debug_req_o          ( debug_req_core_ungtd        ),
+    .unavailable_i        ( '0                          ),
+    .hartinfo_i           ( {g6lc_core_pkg::DebugHartInfo} ),
+    .slave_req_i          ( dm_slave_req                ),
+    .slave_we_i           ( dm_slave_we                 ),
+    .slave_addr_i         ( dm_slave_addr               ),
+    .slave_be_i           ( dm_slave_be                 ),
+    .slave_wdata_i        ( dm_slave_wdata              ),
+    .slave_rdata_o        ( dm_slave_rdata              ),
+    .master_req_o         ( dm_master_req               ),
+    .master_add_o         ( dm_master_add               ),
+    .master_we_o          ( dm_master_we                ),
+    .master_wdata_o       ( dm_master_wdata             ),
+    .master_be_o          ( dm_master_be                ),
+    .master_gnt_i         ( dm_master_gnt               ),
+    .master_r_valid_i     ( dm_master_r_valid           ),
+    .master_r_rdata_i     ( dm_master_r_rdata           ),
+    .dmi_rst_ni           ( rst_ni                      ),
+    .dmi_req_valid_i      ( debug_req_valid             ),
+    .dmi_req_ready_o      ( debug_req_ready             ),
+    .dmi_req_i            ( debug_req                   ),
+    .dmi_resp_valid_o     ( debug_resp_valid            ),
+    .dmi_resp_ready_i     ( debug_resp_ready            ),
+    .dmi_resp_o           ( debug_resp                  )
+  );
+
+
+  axi2mem #(
+    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
+  ) i_dm_axi2mem (
+    .clk_i      ( clk_i                     ),
+    .rst_ni     ( rst_ni                    ),
+    .slave      ( master[g6lc_soc::Debug] ),
+    .req_o      ( dm_slave_req              ),
+    .we_o       ( dm_slave_we               ),
+    .addr_o     ( dm_slave_addr             ),
+    .be_o       ( dm_slave_be               ),
+    .user_o     (                           ),
+    .data_o     ( dm_slave_wdata            ),
+    .user_i     ( '0                        ),
+    .data_i     ( dm_slave_rdata            )
+  );
+
+  `AXI_ASSIGN_FROM_REQ(slave[1], dm_axi_m_req)
+  `AXI_ASSIGN_TO_RESP(dm_axi_m_resp, slave[1])
+
+  axi_adapter #(
+    .G6LCCfg               ( G6LCCfg                   ),
+    .DATA_WIDTH            ( AXI_DATA_WIDTH            ),
+    .axi_req_t             ( g6lc_axi::req_t         ),
+    .axi_rsp_t             ( g6lc_axi::resp_t        )
+  ) i_dm_axi_master (
+    .clk_i                 ( clk_i                     ),
+    .rst_ni                ( rst_ni                    ),
+    .req_i                 ( dm_master_req             ),
+    .type_i                ( g6lc_core_pkg::SINGLE_REQ    ),
+    .amo_i                 ( g6lc_core_pkg::AMO_NONE      ),
+    .gnt_o                 ( dm_master_gnt             ),
+    .addr_i                ( dm_master_add             ),
+    .we_i                  ( dm_master_we              ),
+    .wdata_i               ( dm_master_wdata           ),
+    .be_i                  ( dm_master_be              ),
+    .size_i                ( 2'b11                     ), // always do 64bit here and use byte enables to gate
+    .id_i                  ( '0                        ),
+    .valid_o               ( dm_master_r_valid         ),
+    .rdata_o               ( dm_master_r_rdata         ),
+    .id_o                  (                           ),
+    .critical_word_o       (                           ),
+    .critical_word_valid_o (                           ),
+    .axi_req_o             ( dm_axi_m_req              ),
+    .axi_resp_i            ( dm_axi_m_resp             )
+  );
+
+
+  // ---------------
+  // ROM
+  // ---------------
+  logic                         rom_req;
+  logic [AXI_ADDRESS_WIDTH-1:0] rom_addr;
+  logic [AXI_DATA_WIDTH-1:0]    rom_rdata;
+
+  axi2mem #(
+    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
+  ) i_axi2rom (
+    .clk_i  ( clk_i                   ),
+    .rst_ni ( ndmreset_n              ),
+    .slave  ( master[g6lc_soc::ROM] ),
+    .req_o  ( rom_req                 ),
+    .we_o   (                         ),
+    .addr_o ( rom_addr                ),
+    .be_o   (                         ),
+    .user_o (                         ),
+    .data_o (                         ),
+    .user_i ( '0                      ),
+    .data_i ( rom_rdata               )
+  );
+
+  bootrom i_bootrom (
+    .clk_i      ( clk_i     ),
+    .req_i      ( rom_req   ),
+    .addr_i     ( rom_addr  ),
+    .rdata_o    ( rom_rdata )
+  );
+
+  // ------------------------------
+  // GPIO window (0x4000_0000) / AI island MMIO
+  // ------------------------------
+  // Module-scope sideband between cluster core0 and island (always present;
+  // idle when MatrixEn=0).
+  logic        ai_sb_enq, ai_sb_enq_ready, ai_isl_attached;
+  logic [7:0]  ai_sb_qid;
+  logic [31:0] ai_sb_ticket, ai_sb_enq_ticket;
+  logic [G6LCCfg.XLEN-1:0] ai_sb_desc_ptr;
+  logic [31:0] ai_isl_last_ticket;
+  logic [15:0] ai_isl_last_status;
+  logic        ai_isl_has_completion;
+  logic        ai_isl_retired_valid;
+  // island DMA-write invalidations -> cluster CMO engine writer port
+  logic        ai_dma_inval_valid, ai_dma_inval_ready, ai_dma_inval_done;
+  logic [63:0] ai_dma_inval_addr;
+  logic [31:0] ai_isl_retired_ticket;
+  logic        ai_irq;
+  logic        apu_irq;
+`ifndef G6LC_APU
+  assign apu_irq = 1'b0;
+`endif
+
+`ifdef G6LC_AI_TB_BENCH_SKU
+  // Bench SKU island config (module scope: constant functions may not live under
+  // a generate). Island-only: VaTurboEn for operand residency, IslandFpEn for
+  // 4-byte operand banks. The core-side G6LCCfg.AiCfg is untouched.
+  function automatic config_pkg::ai_cfg_t ai_cfg_bench_sku();
+    config_pkg::ai_cfg_t c = G6LCCfg.AiCfg;
+    c.VaTurboEn  = 1'b1;
+    c.IslandFpEn = 1'b1;
+    return c;
+  endfunction
+  localparam config_pkg::ai_cfg_t AiCfgBenchSku = ai_cfg_bench_sku();
+`endif
+  if (G6LCCfg.AiCfg.MatrixEn) begin : gen_ai_island
+    logic         ai_penable, ai_pwrite, ai_psel, ai_pready, ai_pslverr;
+    logic [31:0]  ai_paddr, ai_pwdata, ai_prdata;
+
+    axi2apb_64_32 #(
+        .AXI4_ADDRESS_WIDTH ( AXI_ADDRESS_WIDTH            ),
+        .AXI4_RDATA_WIDTH   ( AXI_DATA_WIDTH               ),
+        .AXI4_WDATA_WIDTH   ( AXI_DATA_WIDTH               ),
+        .AXI4_ID_WIDTH      ( g6lc_axi_soc::IdWidthSlave ),
+        .AXI4_USER_WIDTH    ( AXI_USER_WIDTH               ),
+        .BUFF_DEPTH_SLAVE   ( 2                            ),
+        .APB_ADDR_WIDTH     ( 32                           )
+    ) i_axi2apb_ai_island (
+        .ACLK      ( clk_i                          ),
+        .ARESETn   ( ndmreset_n                     ),
+        .test_en_i ( test_en                        ),
+        .AWID_i    ( master[g6lc_soc::GPIO].aw_id     ),
+        .AWADDR_i  ( master[g6lc_soc::GPIO].aw_addr   ),
+        .AWLEN_i   ( master[g6lc_soc::GPIO].aw_len    ),
+        .AWSIZE_i  ( master[g6lc_soc::GPIO].aw_size   ),
+        .AWBURST_i ( master[g6lc_soc::GPIO].aw_burst  ),
+        .AWLOCK_i  ( master[g6lc_soc::GPIO].aw_lock   ),
+        .AWCACHE_i ( master[g6lc_soc::GPIO].aw_cache  ),
+        .AWPROT_i  ( master[g6lc_soc::GPIO].aw_prot   ),
+        .AWREGION_i( master[g6lc_soc::GPIO].aw_region ),
+        .AWUSER_i  ( master[g6lc_soc::GPIO].aw_user   ),
+        .AWQOS_i   ( master[g6lc_soc::GPIO].aw_qos    ),
+        .AWVALID_i ( master[g6lc_soc::GPIO].aw_valid  ),
+        .AWREADY_o ( master[g6lc_soc::GPIO].aw_ready  ),
+        .WDATA_i   ( master[g6lc_soc::GPIO].w_data    ),
+        .WSTRB_i   ( master[g6lc_soc::GPIO].w_strb    ),
+        .WLAST_i   ( master[g6lc_soc::GPIO].w_last    ),
+        .WUSER_i   ( master[g6lc_soc::GPIO].w_user    ),
+        .WVALID_i  ( master[g6lc_soc::GPIO].w_valid   ),
+        .WREADY_o  ( master[g6lc_soc::GPIO].w_ready   ),
+        .BID_o     ( master[g6lc_soc::GPIO].b_id      ),
+        .BRESP_o   ( master[g6lc_soc::GPIO].b_resp    ),
+        .BVALID_o  ( master[g6lc_soc::GPIO].b_valid   ),
+        .BUSER_o   ( master[g6lc_soc::GPIO].b_user    ),
+        .BREADY_i  ( master[g6lc_soc::GPIO].b_ready   ),
+        .ARID_i    ( master[g6lc_soc::GPIO].ar_id     ),
+        .ARADDR_i  ( master[g6lc_soc::GPIO].ar_addr   ),
+        .ARLEN_i   ( master[g6lc_soc::GPIO].ar_len    ),
+        .ARSIZE_i  ( master[g6lc_soc::GPIO].ar_size   ),
+        .ARBURST_i ( master[g6lc_soc::GPIO].ar_burst  ),
+        .ARLOCK_i  ( master[g6lc_soc::GPIO].ar_lock   ),
+        .ARCACHE_i ( master[g6lc_soc::GPIO].ar_cache  ),
+        .ARPROT_i  ( master[g6lc_soc::GPIO].ar_prot   ),
+        .ARREGION_i( master[g6lc_soc::GPIO].ar_region ),
+        .ARUSER_i  ( master[g6lc_soc::GPIO].ar_user   ),
+        .ARQOS_i   ( master[g6lc_soc::GPIO].ar_qos    ),
+        .ARVALID_i ( master[g6lc_soc::GPIO].ar_valid  ),
+        .ARREADY_o ( master[g6lc_soc::GPIO].ar_ready  ),
+        .RID_o     ( master[g6lc_soc::GPIO].r_id      ),
+        .RDATA_o   ( master[g6lc_soc::GPIO].r_data    ),
+        .RRESP_o   ( master[g6lc_soc::GPIO].r_resp    ),
+        .RLAST_o   ( master[g6lc_soc::GPIO].r_last    ),
+        .RUSER_o   ( master[g6lc_soc::GPIO].r_user    ),
+        .RVALID_o  ( master[g6lc_soc::GPIO].r_valid   ),
+        .RREADY_i  ( master[g6lc_soc::GPIO].r_ready   ),
+        .PENABLE   ( ai_penable ),
+        .PWRITE    ( ai_pwrite  ),
+        .PADDR     ( ai_paddr   ),
+        .PSEL      ( ai_psel    ),
+        .PWDATA    ( ai_pwdata  ),
+        .PRDATA    ( ai_prdata  ),
+        .PREADY    ( ai_pready  ),
+        .PSLVERR   ( ai_pslverr )
+    );
+
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+    assign ai_dma_req  = '0;
+    assign ai_dma_resp = '0;
+`endif
+    g6lc_ai_island_apb #(
+        .IslandCfg      ( AiIslandCfg ),
+        .EnableDmaFetch ( 1'b1 ),
+        // The cluster arbitrates every core's ai.enq onto this one sideband, so
+        // the island owns the ticket stream (a lone core proposes the same values).
+        .SbTicketAlloc  ( 1'b1 ),
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+        .AxiDataWidth   ( AI_ISLAND_DATA_W ),
+        .axi_req_t      ( aiw_req_t ),
+        .axi_resp_t     ( aiw_resp_t ),
+`else
+        .AxiDataWidth   ( AXI_DATA_WIDTH ),
+        .axi_req_t      ( g6lc_axi::req_t ),
+        .axi_resp_t     ( g6lc_axi::resp_t ),
+`endif
+        .AxiIdWidth     ( g6lc_axi_soc::IdWidth ),
+        // `+define+G6LC_AI_TB_OVERGRANT` advertises BF16 the PE cannot execute, so the
+        // grant-subset-of-datapath guard in g6lc_ai_island_top can be shown to FIRE. Kept
+        // here rather than as an `ifdef` inside the config package: two conditional
+        // declarations of one localparam make the value unreadable to anything that parses
+        // the package without evaluating macros, and the emulator's capability ingest is
+        // exactly such a reader. The package states one design; the testbench overrides.
+`ifdef G6LC_AI_TB_OVERGRANT
+        .AiCfg          ( G6LCCfg.AiCfg ),
+        .DtypeMask      ( g6lc_ai_island_cfg_pkg::AiIslandDtypeMaskOvergrant )
+`elsif G6LC_AI_TB_BENCH_SKU
+        // Bench SKU: the island alone gets VaTurboEn (exact operand residency via
+        // FLAG_REUSE_A/B) and IslandFpEn (4-byte operand banks) with every executable
+        // format granted, so `verif/regress/ai-matrix-veri.sh AI_MATRIX_BENCH=1`
+        // can run the [op x format x shape x residency x path] matrix on one model.
+        // The core-side ai_cfg (T0 formats, check_cfg) is untouched; this is a
+        // testbench parameter like the overgrant control, not a package value.
+        .AiCfg          ( AiCfgBenchSku ),
+        .DtypeMask      ( g6lc_ai_island_cfg_pkg::AiIslandDtypeMaskBench )
+`else
+        // The island's plane follows the core package (IslandFpEn selects the
+        // 4-byte operand banks and the float dot; VaTurboEn the residency keys).
+        // Until 2026-09-30 this port was left at its AiCfgOff default, so a
+        // package that enabled IslandFpEn still built the integer strip here.
+        .AiCfg          ( G6LCCfg.AiCfg ),
+        .DtypeMask      ( g6lc_ai_island_cfg_pkg::AiIslandDtypeMask )
+`endif
+    ) i_ai_island (
+        .clk_i     ( clk_i      ),
+        .rst_ni    ( core_rst_n ),
+        .testmode_i( test_en    ),
+        .psel_i    ( ai_psel    ),
+        .penable_i ( ai_penable ),
+        .pwrite_i  ( ai_pwrite  ),
+        .paddr_i   ( ai_paddr   ),
+        .pwdata_i  ( ai_pwdata  ),
+        .prdata_o  ( ai_prdata  ),
+        .pready_o  ( ai_pready  ),
+        .pslverr_o ( ai_pslverr ),
+        .irq_o     ( ai_irq     ),
+        .sb_enq_valid_i      ( ai_sb_enq              ),
+        .sb_enq_ready_o      ( ai_sb_enq_ready        ),
+        .sb_qid_i            ( ai_sb_qid              ),
+        .sb_ticket_i         ( ai_sb_ticket           ),
+        .sb_desc_ptr_i       ( ai_sb_desc_ptr         ),
+        .sb_last_ticket_o    ( ai_isl_last_ticket     ),
+        .sb_last_status_o    ( ai_isl_last_status     ),
+        .sb_has_completion_o ( ai_isl_has_completion  ),
+        .sb_retired_valid_o  ( ai_isl_retired_valid   ),
+        .sb_retired_ticket_o ( ai_isl_retired_ticket  ),
+        .sb_enq_ticket_o     ( ai_sb_enq_ticket       ),
+        .dma_inval_valid_o   ( ai_dma_inval_valid     ),
+        .dma_inval_addr_o    ( ai_dma_inval_addr      ),
+        .dma_inval_ready_i   ( ai_dma_inval_ready     ),
+        .dma_inval_done_i    ( ai_dma_inval_done      ),
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+        .axi_dma_req_o       ( ai_dma_wide_req        ),
+        .axi_dma_resp_i      ( ai_dma_wide_resp       ),
+`else
+        .axi_dma_req_o       ( ai_dma_req             ),
+        .axi_dma_resp_i      ( ai_dma_resp            ),
+`endif
+        .dram_init_done_i    ( dram_init_done         ),
+        .ch_r_beats_i        ( dram_ch_r_beats        ),
+        .ch_w_beats_i        ( dram_ch_w_beats        )
+    );
+    assign ai_isl_attached = 1'b1;
+  end else begin : gen_gpio_err
+    assign ai_irq = 1'b0;
+    assign ai_isl_last_ticket = '0;
+    assign ai_isl_last_status = '0;
+    assign ai_sb_enq_ready = 1'b1;
+    assign ai_isl_attached = 1'b0;
+    assign ai_dma_req = '0;
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+    assign ai_dma_wide_req = '0;
+    assign ai_dma_resp = '0;
+`endif
+    assign ai_isl_has_completion = 1'b0;
+    assign ai_isl_retired_valid  = 1'b0;
+    assign ai_isl_retired_ticket = '0;
+    assign ai_dma_inval_valid    = 1'b0;
+    assign ai_dma_inval_addr     = '0;
+    assign ai_sb_enq_ticket      = '0;
+    g6lc_axi_soc::req_slv_t  gpio_req;
+    g6lc_axi_soc::resp_slv_t gpio_resp;
+    `AXI_ASSIGN_TO_REQ(gpio_req, master[g6lc_soc::GPIO])
+    `AXI_ASSIGN_FROM_RESP(master[g6lc_soc::GPIO], gpio_resp)
+    axi_err_slv #(
+      .AxiIdWidth ( g6lc_axi_soc::IdWidthSlave ),
+      .req_t      ( g6lc_axi_soc::req_slv_t    ),
+      .resp_t     ( g6lc_axi_soc::resp_slv_t   )
+    ) i_gpio_err_slv (
+      .clk_i      ( clk_i      ),
+      .rst_ni     ( ndmreset_n ),
+      .test_i     ( test_en    ),
+      .slv_req_i  ( gpio_req   ),
+      .slv_resp_o ( gpio_resp  )
+    );
+  end
+
+
+  // ------------------------------
+  // Memory + Exclusive Access
+  // ------------------------------
+  AXI_BUS #(
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
+  ) dram();
+
+  // Exclusive-monitor outstanding. Live cookie keeps pulp axi_riscv_atomics_wrap
+  // (1 AR + 1 AW). S4/CLASS1/SIM_CHANS uses g6lc_axi_atomics_wrap so HPDCACHE
+  // split-ID LDEX/STEX still match (address-only); LR/SC still snoops stores.
+  // Instance name stays i_axi_riscv_atomics (TB probes).
+  localparam int unsigned DRAM_AW_OUT =
+      g6lc_ai_island_cfg_pkg::dram_aw_out(AiIslandCfg);
+
+`ifdef G6LC_AI_DRAM_TIMING
+  `define G6LC_AI_EXCL_MULTI
+`endif
+`ifdef G6LC_AI_DRAM_CLASS1
+  `define G6LC_AI_EXCL_MULTI
+`endif
+`ifdef G6LC_AI_DRAM_CHANS_2
+  `define G6LC_AI_EXCL_MULTI
+`endif
+`ifdef G6LC_AI_DRAM_CHANS_4
+  `define G6LC_AI_EXCL_MULTI
+`endif
+`ifdef G6LC_AI_DRAM_CHANS_8
+  `define G6LC_AI_EXCL_MULTI
+`endif
+`ifdef G6LC_AI_DRAM_SIM_CHANS_2
+  `define G6LC_AI_EXCL_MULTI
+`endif
+`ifdef G6LC_AI_DRAM_SIM_CHANS_4
+  `define G6LC_AI_EXCL_MULTI
+`endif
+`ifdef G6LC_AI_DRAM_SIM_CHANS_8
+  `define G6LC_AI_EXCL_MULTI
+`endif
+
+`ifdef G6LC_AI_EXCL_MULTI
+  // SIM_CHANS keeps island MaxAROut=2 so dram_aw_out=1 (cookie identity).
+  // g6lc wrap + AMOS deadlock an AMO at 1 write slot; S4/CLASS1 already
+  // pass 8. Do not change cookie pulp DRAM_AW_OUT.
+  localparam int unsigned DRAM_EXCL_AW =
+      (DRAM_AW_OUT < unsigned'(2)) ? unsigned'(8) : DRAM_AW_OUT;
+  g6lc_axi_atomics_wrap #(
+    .AXI_ADDR_WIDTH     ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH     ( AXI_DATA_WIDTH               ),
+    .AXI_ID_WIDTH       ( g6lc_axi_soc::IdWidthSlave ),
+    .AXI_USER_WIDTH     ( AXI_USER_WIDTH               ),
+    .AXI_MAX_WRITE_TXNS ( DRAM_EXCL_AW ),
+    .RISCV_WORD_WIDTH   ( 64 ),
+    // One reservation per software hart. A single global reservation livelocks
+    // two harts contending on *different* addresses (g6lc_axi_lrsc header), so
+    // this is sized from the SoC's own hart count rather than left at a
+    // default. NR_HARTS = NR_CORES x NrHarts.
+    //
+    // `+define+G6LC_AI_LRSC_SINGLE_RES` forces the pre-fix depth of 1. It
+    // exists so the disjoint LR/SC gate can be shown to FAIL on the old
+    // behaviour: a test that has never failed is not an oracle, and the
+    // same-address snoop gate cannot distinguish the two designs. Keep it --
+    // rediscovering this negative costs a full harness rebuild.
+`ifdef G6LC_AI_LRSC_SINGLE_RES
+    .NRes               ( 1 )
+`else
+    .NRes               ( (NR_HARTS < 1) ? 1 : NR_HARTS )
+`endif
+  ) i_axi_riscv_atomics (
+    .clk_i,
+    .rst_ni ( ndmreset_n               ),
+    .slv    ( master[g6lc_soc::DRAM] ),
+    .mst    ( dram                     )
+  );
+`else
+  axi_riscv_atomics_wrap #(
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH               ),
+    .AXI_MAX_WRITE_TXNS ( DRAM_AW_OUT ),
+    .RISCV_WORD_WIDTH   ( 64 )
+  ) i_axi_riscv_atomics (
+    .clk_i,
+    .rst_ni ( ndmreset_n               ),
+    .slv    ( master[g6lc_soc::DRAM] ),
+    .mst    ( dram                     )
+  );
+`endif
+
+  AXI_BUS #(
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
+  ) dram_delayed();
+
+  axi_delayer_intf #(
+    .AXI_ID_WIDTH        ( g6lc_axi_soc::IdWidthSlave ),
+    .AXI_ADDR_WIDTH      ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH      ( AXI_DATA_WIDTH               ),
+    .AXI_USER_WIDTH      ( AXI_USER_WIDTH               ),
+    .STALL_RANDOM_INPUT  ( StallRandomInput             ),
+    .STALL_RANDOM_OUTPUT ( StallRandomOutput            ),
+    .FIXED_DELAY_INPUT   ( 0                            ),
+    .FIXED_DELAY_OUTPUT  ( 0                            )
+  ) i_axi_delayer (
+    .clk_i  ( clk_i        ),
+    .rst_ni ( ndmreset_n   ),
+    .slv    ( dram         ),
+    .mst    ( dram_delayed )
+  );
+
+  AXI_BUS #(
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
+  ) dram_lat();
+
+  // Memory-latency instrument (see module header): the delayer's stream_delay
+  // is single-slot per-handshake and its counter truncates at 4 bits, so it
+  // could not model access latency. DramLatency==0 is a pure-wire bypass.
+  g6lc_tb_dram_latency #(
+    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH               ),
+    .Latency        ( DramLatency                  ),
+    .Depth          ( 32                           )
+  ) i_dram_latency (
+    .clk_i  ( clk_i        ),
+    .rst_ni ( ndmreset_n   ),
+    .slv    ( dram_delayed ),
+    .mst    ( dram_lat     )
+  );
+
+  // SoC DRAM slave. Class/channels/shift come from AiIslandCfg (same as the
+  // island APB). Class 1 is +define+G6LC_AI_DRAM_CLASS1+G6LC_HAVE_LITEDRAM.
+  // G6LC_AI_DRAM_ISLAND_PORT peels the island DMA off xbar slave[2] and joins
+  // it above this slave. Unset, dram_lat is the only ingress (identity).
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+  AXI_BUS #(
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
+  ) join_cl ();
+  AXI_BUS #(
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AI_ISLAND_DATA_W             ),
+    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH               )
+  ) join_is ();
+  AXI_BUS #(
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH                ),
+    .AXI_DATA_WIDTH ( AI_DRAM_CH_W                     ),
+    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave + 1 ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH                   )
+  ) join_mst ();
+
+  `AXI_ASSIGN(join_cl, dram_lat)
+
+  localparam int unsigned AI_DMA_ID_PAD =
+      g6lc_axi_soc::IdWidthSlave - g6lc_axi::IdWidth;
+  assign join_is.aw_id     = { {AI_DMA_ID_PAD{1'b0}}, ai_dma_wide_req.aw.id };
+  assign join_is.aw_addr   = ai_dma_wide_req.aw.addr;
+  assign join_is.aw_len    = ai_dma_wide_req.aw.len;
+  assign join_is.aw_size   = ai_dma_wide_req.aw.size;
+  assign join_is.aw_burst  = ai_dma_wide_req.aw.burst;
+  assign join_is.aw_lock   = ai_dma_wide_req.aw.lock;
+  assign join_is.aw_cache  = ai_dma_wide_req.aw.cache;
+  assign join_is.aw_prot   = ai_dma_wide_req.aw.prot;
+  assign join_is.aw_qos    = ai_dma_wide_req.aw.qos;
+  assign join_is.aw_region = ai_dma_wide_req.aw.region;
+  assign join_is.aw_atop   = ai_dma_wide_req.aw.atop;
+  assign join_is.aw_user   = ai_dma_wide_req.aw.user;
+  assign join_is.aw_valid  = ai_dma_wide_req.aw_valid;
+  assign join_is.w_data    = ai_dma_wide_req.w.data;
+  assign join_is.w_strb    = ai_dma_wide_req.w.strb;
+  assign join_is.w_last    = ai_dma_wide_req.w.last;
+  assign join_is.w_user    = ai_dma_wide_req.w.user;
+  assign join_is.w_valid   = ai_dma_wide_req.w_valid;
+  assign join_is.b_ready   = ai_dma_wide_req.b_ready;
+  assign join_is.ar_id     = { {AI_DMA_ID_PAD{1'b0}}, ai_dma_wide_req.ar.id };
+  assign join_is.ar_addr   = ai_dma_wide_req.ar.addr;
+  assign join_is.ar_len    = ai_dma_wide_req.ar.len;
+  assign join_is.ar_size   = ai_dma_wide_req.ar.size;
+  assign join_is.ar_burst  = ai_dma_wide_req.ar.burst;
+  assign join_is.ar_lock   = ai_dma_wide_req.ar.lock;
+  assign join_is.ar_cache  = ai_dma_wide_req.ar.cache;
+  assign join_is.ar_prot   = ai_dma_wide_req.ar.prot;
+  assign join_is.ar_qos    = ai_dma_wide_req.ar.qos;
+  assign join_is.ar_region = ai_dma_wide_req.ar.region;
+  assign join_is.ar_user   = ai_dma_wide_req.ar.user;
+  assign join_is.ar_valid  = ai_dma_wide_req.ar_valid;
+  assign join_is.r_ready   = ai_dma_wide_req.r_ready;
+  assign ai_dma_wide_resp.aw_ready = join_is.aw_ready;
+  assign ai_dma_wide_resp.ar_ready = join_is.ar_ready;
+  assign ai_dma_wide_resp.w_ready  = join_is.w_ready;
+  assign ai_dma_wide_resp.b_valid  = join_is.b_valid;
+  assign ai_dma_wide_resp.b.id     = g6lc_axi::id_t'(join_is.b_id);
+  assign ai_dma_wide_resp.b.resp   = join_is.b_resp;
+  assign ai_dma_wide_resp.b.user   = join_is.b_user;
+  assign ai_dma_wide_resp.r_valid  = join_is.r_valid;
+  assign ai_dma_wide_resp.r.id     = g6lc_axi::id_t'(join_is.r_id);
+  assign ai_dma_wide_resp.r.data   = join_is.r_data;
+  assign ai_dma_wide_resp.r.resp   = join_is.r_resp;
+  assign ai_dma_wide_resp.r.last   = join_is.r_last;
+  assign ai_dma_wide_resp.r.user   = join_is.r_user;
+
+  g6lc_ai_dram_join #(
+      .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+      .AXI_DATA_WIDTH ( AI_DRAM_CH_W                 ),
+      .CLUSTER_DATA_WIDTH ( AXI_DATA_WIDTH           ),
+      .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
+      .AXI_USER_WIDTH ( AXI_USER_WIDTH               ),
+      .ISLAND_DATA_WIDTH ( AI_ISLAND_DATA_W          ),
+      .MAX_AR_OUT     ( AiIslandCfg.MaxAROut         ),
+      .DRAM_BASE      ( g6lc_soc::DRAMBase         ),
+      .DRAM_BYTES     ( g6lc_soc::DRAMLength       )
+  ) i_dram_join (
+      .clk_i       ( clk_i          ),
+      .rst_ni      ( ndmreset_n     ),
+      .testmode_i  ( test_en        ),
+      .init_done_i ( dram_init_done ),
+      .cluster     ( join_cl        ),
+      .island      ( join_is        ),
+      .master      ( join_mst       )
+  );
+`endif
+  g6lc_ai_dram_backend #(
+    .DramClass      ( AiIslandCfg.DramClass            ),
+    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+                      + 1
+`endif
+                    ),
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH                ),
+    .AXI_DATA_WIDTH ( AI_DRAM_CH_W                     ),
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH                   ),
+    .AXI_USER_EN    ( AXI_USER_EN                      ),
+    // Same byte capacity at any channel width.
+    .NUM_WORDS      ( NUM_WORDS * AXI_DATA_WIDTH / AI_DRAM_CH_W ),
+    .NrChannels     ( AiIslandCfg.DramChannels         ),
+    .ChanShift      ( AiIslandCfg.DramChanShift        ),
+    .MaxAROut       ( AiIslandCfg.MaxAROut             )
+  ) i_dram_backend (
+    .clk_i      ( clk_i        ),
+    .rst_ni     ( ndmreset_n   ),
+    .rst_sram_ni( rst_ni       ),
+    .testmode_i ( test_en      ),
+`ifdef G6LC_AI_DRAM_ISLAND_PORT
+    .slave      ( join_mst     ),
+`else
+    .slave      ( dram_lat     ),
+`endif
+    .init_done_o( dram_init_done ),
+    .ch_r_beats_o ( dram_ch_r_beats ),
+    .ch_w_beats_o ( dram_ch_w_beats )
+  );
+
+  // Remote v5.008 cannot look up G6LCCfg.DcacheLineWidth (struct member
+  // missing on the elaborated parameter). Use the target package constants.
+  localparam int unsigned L1D_LINE_B = g6lc_config_pkg::G6LCConfigDcacheLineWidth / 8;
+  localparam int unsigned L1I_LINE_B = g6lc_config_pkg::G6LCConfigIcacheLineWidth / 8;
+  localparam int unsigned L2_LINE_B  = unsigned'(64);
+
+  // pragma translate_off
+  // Core pipelines (I$/D$/L2) share this slave. A line fill must not straddle
+  // a stripe or axi_demux will park the whole burst on the first channel.
+  initial begin
+    automatic int unsigned nch, shift, stripe, l2b, l1d, l1i;
+    nch   = AiIslandCfg.DramChannels;
+    shift = AiIslandCfg.DramChanShift;
+    if (nch > 1) begin
+      stripe = unsigned'(1) << shift;
+      l2b = L2_LINE_B;
+      l1d = L1D_LINE_B;
+      l1i = L1I_LINE_B;
+      if (l2b > stripe)
+        $error("g6lc_testharness: L2 line %0d B exceeds DRAM stripe %0d B", l2b, stripe);
+      if (l1d > stripe)
+        $error("g6lc_testharness: D$ line %0d B exceeds DRAM stripe %0d B", l1d, stripe);
+      if (l1i > stripe)
+        $error("g6lc_testharness: I$ line %0d B exceeds DRAM stripe %0d B", l1i, stripe);
+    end
+  end
+  // pragma translate_on
+
+  // ---------------
+  // AXI Xbar
+  // ---------------
+
+  axi_pkg::xbar_rule_64_t [NB_RULES-1:0] addr_map;
+
+`ifdef G6LC_APU
+  // OpenSBI-visible testharness map. Split DRAM around firmware RAM.
+  // addr_decode last-match-wins: a full DRAM rule at a higher array index
+  // than the RAM rule aliases 0x90000000. Locked by tb_g6lc_apu_th_osbi
+  // and software/apu-fw/test/osbi_check.c. Not an OpenSBI firmware boot.
+  assign addr_map = '{
+    '{ idx: g6lc_soc::Debug,    start_addr: g6lc_soc::DebugBase,    end_addr: g6lc_soc::DebugBase + g6lc_soc::DebugLength       },
+    '{ idx: g6lc_soc::ROM,      start_addr: g6lc_soc::ROMBase,      end_addr: g6lc_soc::ROMBase + g6lc_soc::ROMLength           },
+    '{ idx: g6lc_soc::CLINT,    start_addr: g6lc_soc::CLINTBase,    end_addr: g6lc_soc::CLINTBase + g6lc_soc::CLINTLength       },
+    '{ idx: g6lc_soc::PLIC,     start_addr: g6lc_soc::PLICBase,     end_addr: g6lc_soc::PLICBase + g6lc_soc::PLICLength         },
+    '{ idx: g6lc_soc::UART,     start_addr: g6lc_soc::UARTBase,     end_addr: g6lc_soc::UARTBase + g6lc_soc::UARTLength         },
+    '{ idx: g6lc_soc::Timer,    start_addr: g6lc_soc::TimerBase,    end_addr: g6lc_soc::TimerBase + g6lc_soc::TimerLength       },
+    '{ idx: g6lc_soc::SPI,      start_addr: g6lc_soc::SPIBase,      end_addr: g6lc_soc::SPIBase + g6lc_soc::SPILength           },
+    '{ idx: g6lc_soc::Ethernet, start_addr: g6lc_soc::EthernetBase, end_addr: g6lc_soc::EthernetBase + g6lc_soc::EthernetLength },
+    '{ idx: g6lc_soc::GPIO,     start_addr: g6lc_soc::GPIOBase,     end_addr: g6lc_soc::GPIOBase + g6lc_soc::GPIOLength         },
+    apu_dram_lo_rule,
+    apu_guest_rule,
+    apu_ctrl_rule,
+    apu_ram_rule,
+    apu_dram_hi_rule
+  };
+`else
+  assign addr_map = '{
+    '{ idx: g6lc_soc::Debug,    start_addr: g6lc_soc::DebugBase,    end_addr: g6lc_soc::DebugBase + g6lc_soc::DebugLength       },
+    '{ idx: g6lc_soc::ROM,      start_addr: g6lc_soc::ROMBase,      end_addr: g6lc_soc::ROMBase + g6lc_soc::ROMLength           },
+    '{ idx: g6lc_soc::CLINT,    start_addr: g6lc_soc::CLINTBase,    end_addr: g6lc_soc::CLINTBase + g6lc_soc::CLINTLength       },
+    '{ idx: g6lc_soc::PLIC,     start_addr: g6lc_soc::PLICBase,     end_addr: g6lc_soc::PLICBase + g6lc_soc::PLICLength         },
+    '{ idx: g6lc_soc::UART,     start_addr: g6lc_soc::UARTBase,     end_addr: g6lc_soc::UARTBase + g6lc_soc::UARTLength         },
+    '{ idx: g6lc_soc::Timer,    start_addr: g6lc_soc::TimerBase,    end_addr: g6lc_soc::TimerBase + g6lc_soc::TimerLength       },
+    '{ idx: g6lc_soc::SPI,      start_addr: g6lc_soc::SPIBase,      end_addr: g6lc_soc::SPIBase + g6lc_soc::SPILength           },
+    '{ idx: g6lc_soc::Ethernet, start_addr: g6lc_soc::EthernetBase, end_addr: g6lc_soc::EthernetBase + g6lc_soc::EthernetLength },
+    '{ idx: g6lc_soc::GPIO,     start_addr: g6lc_soc::GPIOBase,     end_addr: g6lc_soc::GPIOBase + g6lc_soc::GPIOLength         },
+    '{ idx: g6lc_soc::DRAM,     start_addr: g6lc_soc::DRAMBase,     end_addr: g6lc_soc::DRAMBase + g6lc_soc::DRAMLength         }
+  };
+`endif
+
+  // Multi-core + L2 miss-fill needs multi-outstanding on the xbar demux.
+  // Max*=1 (legacy single-core) silently stalls AR when an ID is still
+  // occupied on another master port or the ID counter is full — seen as L2
+  // stuck in S_MISS_AR with axi2mem IDLE and demux ar_valid=0 (OpenSBI hang
+  // at 0x80000080). Match hub OT depth (4) with headroom for L2 line fills.
+  localparam axi_pkg::xbar_cfg_t AXI_XBAR_CFG = '{
+    NoSlvPorts: unsigned'(g6lc_soc::NrSlaves),
+    NoMstPorts: unsigned'(NB_MST),
+    MaxMstTrans: unsigned'(8),
+    MaxSlvTrans: unsigned'(8),
+    FallThrough: 1'b0,
+    LatencyMode: axi_pkg::NO_LATENCY,
+    AxiIdWidthSlvPorts: unsigned'(g6lc_axi_soc::IdWidth),
+    AxiIdUsedSlvPorts: unsigned'(g6lc_axi_soc::IdWidth),
+    UniqueIds: 1'b0,
+    AxiAddrWidth: unsigned'(AXI_ADDRESS_WIDTH),
+    AxiDataWidth: unsigned'(AXI_DATA_WIDTH),
+    NoAddrRules: unsigned'(NB_RULES)
+  };
+
+  axi_xbar_intf #(
+    .AXI_USER_WIDTH ( AXI_USER_WIDTH          ),
+    .Cfg            ( AXI_XBAR_CFG            ),
+    .rule_t         ( axi_pkg::xbar_rule_64_t )
+  ) i_axi_xbar (
+    .clk_i                 ( clk_i      ),
+    .rst_ni                ( ndmreset_n ),
+    .test_i                ( test_en    ),
+    .slv_ports             ( slave      ),
+    .mst_ports             ( master     ),
+    .addr_map_i            ( addr_map   ),
+    .en_default_mst_port_i ( '0         ),
+    .default_mst_port_i    ( '0         )
+  );
+
+`ifdef G6LC_APU
+  // Opt-in APU load compositor: guest/control + firmware RAM + DRAM hole +
+  // hart-1 boot PC. Testharness only stitches xbar masters. DMA stays idle.
+  // Hart pins come from the xbar port index in the upper ID bits.
+  // Port 0 is the cluster. The per-core guard has already kept every
+  // other hart out of these windows, so that port is the firmware hart.
+  // Debug and DMA ports are hart 0. The low ID bits are the master's own
+  // id, not a hart. AXI PROT is not an input.
+  g6lc_axi_soc::req_slv_t  apu_guest_req, apu_ctrl_req, apu_ram_req;
+  g6lc_axi_soc::resp_slv_t apu_guest_rsp, apu_ctrl_rsp, apu_ram_rsp;
+  logic [g6lc_soc::NumSources-1:0] apu_irq_vec_in, apu_irq_vec_out;
+  `AXI_ASSIGN_TO_REQ(apu_guest_req, master[APU_GUEST_IDX])
+  `AXI_ASSIGN_FROM_RESP(master[APU_GUEST_IDX], apu_guest_rsp)
+  `AXI_ASSIGN_TO_REQ(apu_ctrl_req, master[APU_CTRL_IDX])
+  `AXI_ASSIGN_FROM_RESP(master[APU_CTRL_IDX], apu_ctrl_rsp)
+  `AXI_ASSIGN_TO_REQ(apu_ram_req, master[APU_RAM_IDX])
+  `AXI_ASSIGN_FROM_RESP(master[APU_RAM_IDX], apu_ram_rsp)
+  assign apu_irq_vec_in = '0;
+  logic [31:0] apu_ram_aw_hart, apu_ram_ar_hart;
+  logic [31:0] apu_ctrl_aw_hart, apu_ctrl_ar_hart;
+  g6lc_apu_xbar_hart #(
+      .IdxW($clog2(g6lc_soc::NrSlaves)),
+      .IdW(g6lc_axi_soc::IdWidthSlave),
+      .FwHart(32'(g6lc_apu_cfg_pkg::ApuHarness.FirmwareHart)),
+      .ClusterPort(0)
+  ) i_ram_hart (
+      .aw_id_i(apu_ram_req.aw.id),
+      .ar_id_i(apu_ram_req.ar.id),
+      .aw_hart_o(apu_ram_aw_hart),
+      .ar_hart_o(apu_ram_ar_hart)
+  );
+  g6lc_apu_xbar_hart #(
+      .IdxW($clog2(g6lc_soc::NrSlaves)),
+      .IdW(g6lc_axi_soc::IdWidthSlave),
+      .FwHart(32'(g6lc_apu_cfg_pkg::ApuHarness.FirmwareHart)),
+      .ClusterPort(0)
+  ) i_ctrl_hart (
+      .aw_id_i(apu_ctrl_req.aw.id),
+      .ar_id_i(apu_ctrl_req.ar.id),
+      .aw_hart_o(apu_ctrl_aw_hart),
+      .ar_hart_o(apu_ctrl_ar_hart)
+  );
+  g6lc_apu_th_load #(
+    .ApuCfg(g6lc_apu_cfg_pkg::ApuHarness),
+    .CoreCfg(G6LCCfg),
+    .AppBoot(g6lc_soc::ROMBase),
+    .DramBase(g6lc_soc::DRAMBase),
+    .DramBytes(g6lc_soc::DRAMLength),
+    .GuestIdx(APU_GUEST_IDX),
+    .CtrlIdx(APU_CTRL_IDX),
+    .RamIdx(APU_RAM_IDX),
+    .DramIdx(g6lc_soc::DRAM),
+    .NumCores(NR_CORES),
+    .Vlen(G6LCCfg.VLEN),
+    .HexFile("apu_fw.hex"),
+    .NumSources(g6lc_soc::NumSources),
+    .axi4_req_t(g6lc_axi_soc::req_slv_t),
+    .axi4_rsp_t(g6lc_axi_soc::resp_slv_t),
+    .dma_req_t(g6lc_axi::req_t),
+    .dma_rsp_t(g6lc_axi::resp_t)
+  ) i_apu_load (
+    .clk_i, .rst_ni(ndmreset_n), .testmode_i(test_en),
+    .guest_req_i(apu_guest_req), .guest_rsp_o(apu_guest_rsp),
+    .control_req_i(apu_ctrl_req), .control_rsp_o(apu_ctrl_rsp),
+    .ram_req_i(apu_ram_req), .ram_rsp_o(apu_ram_rsp),
+    .control_aw_hart_i(apu_ctrl_aw_hart),
+    .control_ar_hart_i(apu_ctrl_ar_hart),
+    .ram_aw_hart_i(apu_ram_aw_hart),
+    .ram_ar_hart_i(apu_ram_ar_hart),
+    .irq_sources_i(apu_irq_vec_in), .irq_sources_o(apu_irq_vec_out),
+    .plic_irq_o(apu_irq), .fw_ready_o(apu_fw_ready),
+    .boot_addr_core_o(cluster_boot),
+    .guest_rule_o(apu_guest_rule), .control_rule_o(apu_ctrl_rule),
+    .ram_rule_o(apu_ram_rule),
+    .dram_lo_rule_o(apu_dram_lo_rule), .dram_hi_rule_o(apu_dram_hi_rule),
+    .dma_req_o(apu_dma_req), .dma_rsp_i(apu_dma_rsp),
+    .ram_fault_o(apu_ram_fault)
+  );
+  // Pad reset, not ndmreset_n: this output gates ndmreset_n.
+  g6lc_apu_fault_sup #(.Enable(1'b1)) i_apu_fault (
+      .clk_i(clk_i),
+      .rst_ni(rst_ni),
+      .fault_i(apu_ram_fault),
+      .reset_o(apu_fault_reset)
+  );
+`endif
+
+  // ---------------
+  // CLINT (scaled to total software harts = NR_CORES × NrHarts)
+  // ---------------
+  logic [NR_HARTS-1:0] ipi;
+  logic [NR_HARTS-1:0] timer_irq;
+  logic [63:0] clint_mtime;
+
+  g6lc_axi_soc::req_slv_t  axi_clint_req;
+  g6lc_axi_soc::resp_slv_t axi_clint_resp;
+
+  clint #(
+    .G6LCCfg        ( G6LCCfg                      ),
+    .AXI_ADDR_WIDTH ( AXI_ADDRESS_WIDTH            ),
+    .AXI_DATA_WIDTH ( AXI_DATA_WIDTH               ),
+    .AXI_ID_WIDTH   ( g6lc_axi_soc::IdWidthSlave ),
+    .NR_CORES       ( NR_HARTS                     ), // one MSIP/MTIMECMP per mhartid
+    .axi_req_t      ( g6lc_axi_soc::req_slv_t    ),
+    .axi_resp_t     ( g6lc_axi_soc::resp_slv_t   )
+  ) i_clint (
+    .clk_i       ( clk_i          ),
+    .rst_ni      ( ndmreset_n     ),
+    .testmode_i  ( test_en        ),
+    .axi_req_i   ( axi_clint_req  ),
+    .axi_resp_o  ( axi_clint_resp ),
+    .rtc_i       ( rtc_i          ),
+    .timer_irq_o ( timer_irq      ),
+    .ipi_o       ( ipi            ),
+    .mtime_o     ( clint_mtime    )
+  );
+
+  `AXI_ASSIGN_TO_REQ(axi_clint_req, master[g6lc_soc::CLINT])
+  `AXI_ASSIGN_FROM_RESP(master[g6lc_soc::CLINT], axi_clint_resp)
+
+  // ---------------
+  // Peripherals
+  // ---------------
+  logic tx, rx;
+  // Full PLIC target vector (2 × G6LC_MAX_CORES); fan-out slices NR_CORES below
+  logic [g6lc_soc::NumTargets-1:0] irqs;
+
+  g6lc_peripherals #(
+    .AxiAddrWidth ( AXI_ADDRESS_WIDTH            ),
+    .AxiDataWidth ( AXI_DATA_WIDTH               ),
+    .AxiIdWidth   ( g6lc_axi_soc::IdWidthSlave ),
+    .AxiUserWidth ( AXI_USER_WIDTH               ),
+`ifndef VERILATOR
+    .InclUART     ( 1'b1                     ),
+`else
+    .InclUART     ( 1'b0                     ),
+`endif
+    .InclSPI      ( 1'b0                     ),
+    .InclEthernet ( 1'b0                     )
+  ) i_g6lc_peripherals (
+    .clk_i     ( clk_i                        ),
+    .rst_ni    ( ndmreset_n                   ),
+    .plic      ( master[g6lc_soc::PLIC]     ),
+    .uart      ( master[g6lc_soc::UART]     ),
+    .spi       ( master[g6lc_soc::SPI]      ),
+    .ethernet  ( master[g6lc_soc::Ethernet] ),
+    .timer     ( master[g6lc_soc::Timer]    ),
+    .irq_o     ( irqs                         ),
+    .ai_irq_i  ( ai_irq                       ),
+    .apu_irq_i ( apu_irq                      ),
+    .rx_i      ( rx                           ),
+    .tx_o      ( tx                           ),
+    .eth_txck  ( ),
+    .eth_rxck  ( ),
+    .eth_rxctl ( ),
+    .eth_rxd   ( ),
+    .eth_rst_n ( ),
+    .eth_tx_en ( ),
+    .eth_txd   ( ),
+    .phy_mdio  ( ),
+    .eth_mdc   ( ),
+    .mdio      ( ),
+    .mdc       ( ),
+    .spi_clk_o ( ),
+    .spi_mosi  ( ),
+    .spi_miso  ( ),
+    .spi_ss    ( )
+  );
+
+  uart_bus #(.BAUD_RATE(115200), .PARITY_EN(0)) i_uart_bus (.rx(tx), .tx(rx), .rx_en(1'b1));
+
+  // ---------------
+  // Core / Cluster (U6.2)
+  // ---------------
+  // Shared AXI toward the SoC xbar (cluster or single core + optional L2).
+  g6lc_axi::req_t    axi_g6lc_req;
+  g6lc_axi::resp_t   axi_g6lc_resp;
+  rvfi_probes_t rvfi_probes;
+  rvfi_csr_t rvfi_csr;
+  logic [G6LCCfg.NrCommitPorts-1:0][7:0] rvfi_hart;
+  rvfi_instr_t [G6LCCfg.NrCommitPorts-1:0]  rvfi_instr;
+  rvfi_to_iti_t rvfi_to_iti;
+  iti_to_encoder_t iti_to_encoder;
+
+  // Per-core × SMT-hart IRQ: PLIC context 2*global_hart + {0=MEIP,1=SEIP}
+  // CLINT slots indexed by global mhartid = core*NrHarts + local_hart
+  logic [NR_CORES-1:0][NR_HARTS_PER_CORE-1:0][1:0] core_irqs;
+  logic [NR_CORES-1:0][NR_HARTS_PER_CORE-1:0]      core_ipi;
+  logic [NR_CORES-1:0][NR_HARTS_PER_CORE-1:0]      core_timer_irq;
+  logic [NR_CORES-1:0]                             core_debug_req;
+
+  for (genvar c = 0; c < NR_CORES; c++) begin : gen_core_irq
+`ifdef SPIKE_TANDEM
+    assign core_debug_req[c] = 1'b0;
+`else
+    assign core_debug_req[c] = (c == 0) ? debug_req_core : 1'b0;
+`endif
+    for (genvar h = 0; h < NR_HARTS_PER_CORE; h++) begin : gen_hart_irq
+      // PLIC targets: need 2 * NR_HARTS contexts (capped by NumTargets=16)
+      assign core_irqs[c][h] =
+          irqs[2*(c * NR_HARTS_PER_CORE + h) +: 2];
+      assign core_ipi[c][h]       = ipi[c * NR_HARTS_PER_CORE + h];
+      assign core_timer_irq[c][h] = timer_irq[c * NR_HARTS_PER_CORE + h];
+    end
+  end
+
+  // Observer taps for the [mc_cache] counters (sim-only use, see below).
+  logic mc_l2_miss, mc_l3_hit, mc_l3_miss;
+
+  // Always use the cluster wrapper: N=1 is identity (no hub), N>1 is coherent.
+  // L2 is owned by the cluster when L2En (avoids double-instantiation).
+`ifndef G6LC_APU
+  always_comb begin
+    for (int unsigned c = 0; c < NR_CORES; c++)
+      cluster_boot[c] = g6lc_soc::ROMBase[G6LCCfg.VLEN-1:0];
+  end
+`endif
+  g6lc_cluster #(
+    .G6LCCfg        ( G6LCCfg             ),
+    .NR_CORES       ( NR_CORES            ),
+    .L2_ENABLE      ( G6LCCfg.L2En        ),
+    .IDENTITY_FAST  ( 1'b1                ),
+    // Inclusive L1 (+ L2 when L3En) back-inval on LLC victim — stream plane
+    // × multicore coherence for U6.2 / L3 hierarchy. The TB override is off;
+    // policy comes from G6LCCfg.L3InclusiveEn.
+    .INCLUSIVE_L3   ( 1'b0                ),
+`ifdef G6LC_APU
+    .PerCoreBoot     ( 1'b1 ),
+    .SrcGuard        ( 1'b1 ),
+    .FwHart          ( 32'(g6lc_apu_cfg_pkg::ApuHarness.FirmwareHart) ),
+    .GuardRamBase    ( g6lc_apu_cfg_pkg::ApuHarness.FirmwareRamBase ),
+    .GuardRamBytes   ( g6lc_apu_cfg_pkg::ApuHarness.FirmwareRamBytes ),
+    .GuardCtrlBase   ( g6lc_apu_cfg_pkg::ApuHarness.ControlBase ),
+    .GuardCtrlBytes  ( g6lc_apu_cfg_pkg::ApuHarness.ControlLength ),
+`endif
+    .AXI_ADDR_WIDTH ( g6lc_axi::AddrWidth ),
+    .AXI_DATA_WIDTH ( g6lc_axi::DataWidth ),
+    .AXI_ID_WIDTH   ( g6lc_axi::IdWidth   ),
+    .AXI_USER_WIDTH ( g6lc_axi::UserWidth ),
+    .axi_req_t      ( g6lc_axi::req_t   ),
+    .axi_resp_t     ( g6lc_axi::resp_t  ),
+    .rvfi_probes_t  ( rvfi_probes_t       )
+  ) i_cluster (
+    .clk_i          ( clk_i               ),
+    .rst_ni         ( core_rst_n          ),
+    .boot_addr_i      ( g6lc_soc::ROMBase[G6LCCfg.VLEN-1:0] ),
+    .boot_addr_core_i ( cluster_boot                         ),
+    .irq_i          ( core_irqs           ),
+    .ipi_i          ( core_ipi            ),
+    .time_irq_i     ( core_timer_irq      ),
+    .rtc_time_i     ( clint_mtime         ),
+    .debug_req_i    ( core_debug_req      ),
+    .mem_req_o      ( axi_g6lc_req      ),
+    .mem_resp_i     ( axi_g6lc_resp     ),
+    .rvfi_probes_o  ( rvfi_probes         ),
+    .l2_miss_o      ( mc_l2_miss          ),
+    .l3_hit_o       ( mc_l3_hit           ),
+    .l3_miss_o      ( mc_l3_miss          ),
+    .pf_issue_o     (                     ),
+    .pf_train_o     (                     ),
+    .ai_sb_enq_valid_o( ai_sb_enq         ),
+    .ai_sb_enq_ticket_i( ai_sb_enq_ticket ),
+    .ai_sb_enq_ready_i( ai_sb_enq_ready   ),
+    .ai_sb_qid_o      ( ai_sb_qid         ),
+    .ai_sb_ticket_o   ( ai_sb_ticket      ),
+    .ai_sb_desc_ptr_o ( ai_sb_desc_ptr    ),
+    .ai_isl_attached_i( ai_isl_attached   ),
+    .ai_isl_has_completion_i( ai_isl_has_completion ),
+    .ai_isl_retired_valid_i ( ai_isl_retired_valid  ),
+    .ai_dma_inval_valid_i   ( ai_dma_inval_valid    ),
+    .ai_dma_inval_addr_i    ( ai_dma_inval_addr     ),
+    .ai_dma_inval_ready_o   ( ai_dma_inval_ready    ),
+    .ai_dma_inval_done_o    ( ai_dma_inval_done     ),
+    .ai_isl_retired_ticket_i( ai_isl_retired_ticket ),
+    .ai_isl_last_ticket_i   ( ai_isl_last_ticket    ),
+    .ai_isl_last_status_i   ( ai_isl_last_status    )
+  );
+
+  `AXI_ASSIGN_FROM_REQ(slave[0], axi_g6lc_req)
+  `AXI_ASSIGN_TO_RESP(axi_g6lc_resp, slave[0])
+
+  //pragma translate_off
+  // M3 bring-up probe (+soc_trace): hart AR/R at the xbar slave port and the
+  // ROM slave request path.
+  logic soc_trace;
+  initial soc_trace = $test$plusargs("soc_trace");
+  always_ff @(posedge clk_i) begin
+    if (rst_ni && soc_trace && $time() < 4000 &&
+        (axi_g6lc_req.ar_valid || slave[0].ar_valid ||
+         master[g6lc_soc::ROM].ar_valid || rom_req ||
+         master[g6lc_soc::ROM].r_valid || axi_g6lc_resp.r_valid)) begin
+      $display("[soc] t=%0t | hart arv=%b arr=%b araddr=%h arid=%h rv=%b rr=%b | slv0 arv=%b arr=%b | rom arv=%b arr=%b addr=%h | romreq=%b romaddr=%h | romrv=%b romrr=%b rdata=%h rlast=%b",
+        $time,
+        axi_g6lc_req.ar_valid, axi_g6lc_resp.ar_ready, axi_g6lc_req.ar.addr, axi_g6lc_req.ar.id,
+        axi_g6lc_resp.r_valid, axi_g6lc_req.r_ready,
+        slave[0].ar_valid, slave[0].ar_ready,
+        master[g6lc_soc::ROM].ar_valid, master[g6lc_soc::ROM].ar_ready, master[g6lc_soc::ROM].ar_addr,
+        rom_req, rom_addr,
+        master[g6lc_soc::ROM].r_valid, master[g6lc_soc::ROM].r_ready,
+        master[g6lc_soc::ROM].r_data, master[g6lc_soc::ROM].r_last);
+    end
+  end
+  //pragma translate_on
+
+  // -------------
+  // Simulation Helper Functions
+  // -------------
+  // check for response errors
+  // +quiet_axi skips the $warning flood (soft-ladder nat/peel I/O).
+  always_ff @(posedge clk_i) begin : p_assert
+    if (!$test$plusargs("quiet_axi")) begin
+      if (axi_g6lc_req.r_ready &&
+        axi_g6lc_resp.r_valid &&
+        axi_g6lc_resp.r.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}) begin
+        $warning("R Response Errored");
+      end
+      if (axi_g6lc_req.b_ready &&
+        axi_g6lc_resp.b_valid &&
+        axi_g6lc_resp.b.resp inside {axi_pkg::RESP_DECERR, axi_pkg::RESP_SLVERR}) begin
+        $warning("B Response Errored");
+      end
+    end
+  end
+
+    g6lc_iti #(
+        .G6LCCfg   (G6LCCfg),
+        .CAUSE_LEN  (iti_pkg::CAUSE_LEN),
+        .ITYPE_LEN (iti_pkg::ITYPE_LEN),
+        .IRETIRE_LEN (iti_pkg::IRETIRE_LEN),
+        .block_mode(0),
+        .rvfi_to_iti_t(rvfi_to_iti_t),
+        .iti_to_encoder_t(iti_to_encoder_t)
+    ) i_g6lc_iti (
+        .clk_i  (clk_i),
+        .rst_ni (ndmreset_n),
+        // inputs from rvfi
+        .valid_i(rvfi_to_iti.valid),
+        .rvfi_to_iti_i(rvfi_to_iti),
+        .valid_o(),
+        .iti_to_encoder_o(iti_to_encoder)
+    );
+
+    logic                    packet_valid;
+    te_pkg::it_packet_type_e [0:0] packet_type;
+    logic [te_pkg::P_LEN-1:0] packet_length;
+    logic [te_pkg::PAYLOAD_LEN-1:0] packet_payload;
+
+    logic                           encap_valid;
+    encap_pkg::encap_fifo_entry_s   encap_fifo_entry_i;
+    encap_pkg::encap_fifo_entry_s   encap_fifo_entry_o;
+    logic                           encap_fifo_full;
+    logic                           encap_fifo_empty;
+    logic                           encap_fifo_pop;
+
+    rv_tracer #(
+        .N(1),
+        .ONLY_BRANCHES(1)
+    ) i_encoder(
+        .clk_i               (clk_i),
+        .rst_ni              (rst_ni),
+        .valid_i             (iti_to_encoder.valid),
+        .itype_i             (iti_to_encoder.itype),
+        .cause_i             (iti_to_encoder.cause),
+        .tval_i              (iti_to_encoder.tval),
+        .priv_i              (iti_to_encoder.priv),
+        .iaddr_i             (iti_to_encoder.iaddr),
+        .iretire_i           (iti_to_encoder.iretire),
+        .ilastsize_i         (iti_to_encoder.ilastsize),
+        .time_i              (iti_to_encoder.cycles),
+        .tvec_i              ('0),
+        .epc_i               ('0),
+        // Backpressure when the TB encapsulator FIFO is full (dense CF streams
+        // used to $stop on fifo_v3 full_write with ready hardwired to 1).
+        .encapsulator_ready_i(~encap_fifo_full),
+        .paddr_i             ('0),
+        .pwrite_i            ('0),
+        .psel_i              ('0),
+        .penable_i           ('0),
+        .pwdata_i            ('0),
+        .packet_valid_o      (packet_valid),
+        .packet_type_o       (packet_type),
+        .packet_length_o     (packet_length),
+        .packet_payload_o    (packet_payload),
+        .stall_o             (),
+        .pready_o            (),
+        .prdata_o            ()
+    );
+
+    encapsulator i_encapsulator (
+        .clk_i              (clk_i),
+        .valid_i            (packet_valid),
+        .packet_length_i    (packet_length),
+        .flow_i             ('0),
+        .timestamp_present_i('1),
+        //.srcid_i(),
+        .timestamp_i        (rvfi_to_iti.cycles),
+        //.type_i(),
+        .trace_payload_i    (packet_payload),
+        .valid_o            (encap_valid),
+        .encap_fifo_entry_o (encap_fifo_entry_i)
+    );
+
+    fifo_v3 # (
+        .DEPTH(16),
+        .dtype(encap_pkg::encap_fifo_entry_s)
+    ) i_fifo_encap (
+        .clk_i     (clk_i),
+        .rst_ni    (rst_ni),
+        .flush_i   ('0),
+        .testmode_i('0),
+        .full_o    (encap_fifo_full),
+        .empty_o   (encap_fifo_empty),
+        .usage_o   (),
+        .data_i    (encap_fifo_entry_i),
+        .push_i    (encap_valid && !encap_fifo_full),
+        .data_o    (encap_fifo_entry_o),
+        .pop_i     (encap_fifo_pop)
+    );
+    localparam DATA_LEN = 8;
+
+    logic                           slicer_valid;
+    logic [DATA_LEN-1:0]            slice;
+    logic [$clog2(DATA_LEN)-4:0]    valid_bytes;
+
+    slicer_DPTI #(
+        .SLICE_LEN(DATA_LEN),
+        .NO_TIME ('0)
+    ) i_slicer (
+        .clk_i             (clk_i),
+        .rst_ni            (rst_ni),
+        .valid_i           (!encap_fifo_empty),
+        .encap_fifo_entry_i(encap_fifo_entry_o),
+        .fifo_full_i       ('0), // usrFull DPTI in g6lc_xilinx
+        .valid_o           (slicer_valid),
+        .slice_o           (slice),
+        .done_o            (encap_fifo_pop)
+    );
+
+  g6lc_rvfi #(
+      .G6LCCfg   (G6LCCfg),
+      .rvfi_instr_t(rvfi_instr_t),
+      .rvfi_csr_t(rvfi_csr_t),
+      .rvfi_probes_instr_t(rvfi_probes_instr_t),
+      .rvfi_probes_csr_t(rvfi_probes_csr_t),
+      .rvfi_probes_t(rvfi_probes_t),
+      .rvfi_to_iti_t(rvfi_to_iti_t)
+  ) i_g6lc_rvfi (
+      .clk_i        (clk_i),
+      .rst_ni       (rst_ni),
+      .rvfi_probes_i(rvfi_probes),
+      .rvfi_instr_o (rvfi_instr),
+      .rvfi_to_iti_o   (rvfi_to_iti),
+      .rvfi_csr_o   (rvfi_csr),
+      .rvfi_hart_o  (rvfi_hart)
+  );
+
+  rvfi_tracer  #(
+    .G6LCCfg(G6LCCfg),
+    .rvfi_instr_t(rvfi_instr_t),
+    .rvfi_csr_t(rvfi_csr_t),
+    //
+    .HART_ID(hart_id),
+    .DEBUG_START(0),
+    .DEBUG_STOP(0)
+  ) i_rvfi_tracer (
+    .clk_i(clk_i),
+    .rst_ni(rst_ni),
+    .rvfi_i(rvfi_instr),
+    .rvfi_csr_i(rvfi_csr),
+    .rvfi_hart_i(rvfi_hart),
+    .end_of_test_o(core_tracer_exit[0])
+  );
+
+`ifdef SPIKE_TANDEM
+  assign tracer_exit = core_tracer_exit[0];
+`else
+  always_comb begin : mc_exit_select
+    tracer_exit = '0;
+    for (int unsigned c = 0; c < NR_CORES; c++) begin
+      if (core_tracer_exit[c][0] &&
+          (!tracer_exit[0] || ((|core_tracer_exit[c][31:1]) && !(|tracer_exit[31:1]))))
+        tracer_exit = core_tracer_exit[c];
+    end
+  end
+`endif
+
+  //  Secondary-core trace visibility.
+  //
+  //  `g6lc_cluster` forwards only core 0's probes on its scalar `rvfi_probes_o`
+  //  (`assign rvfi_probes_o = core_rvfi[0];`), so every trace-based check above —
+  //  including the "Simulation terminated" marker the regression classifier treats
+  //  as proof a run really finished — is blind to cores 1..N-1. That is how a
+  //  secondary-core problem can hide indefinitely, and it is the observability
+  //  requirement in AGENTS.md 0.1(6).
+  //
+  //  Widening that port is an RTL interface change with a wide blast radius: it is
+  //  consumed by g6lc_hart.sv, the Xilinx and Altera tops, g6lc_gate_tb and the APU
+  //  benches, and a missing pin is an error here (%Error-PINMISSING), so every
+  //  instantiation would have to change. This observer closes the visibility half
+  //  with no RTL change at all, by tapping the cluster's per-core probe array
+  //  hierarchically from the testbench.
+  //
+  //  Deliberately NOT wired to end_of_test: core 0's `tracer_exit` drives
+  //  `rvfi_exit` and therefore simulation termination, so a secondary core reaching
+  //  its own halt must not end the run. These tracers observe; they never terminate.
+  //  Multi-core VERDICT, not just visibility.
+  //
+  //  The pass criterion is core 0's `tracer_exit`, so a run in which a secondary
+  //  core never executed a single instruction still reported SUCCESS. That is not a
+  //  hypothetical: this review spent a long stretch unable to tell "hart 1 never
+  //  ran" from "hart 1 ran but the shared line was stale", precisely because no
+  //  verdict covered the secondary cores.
+  //
+  //  So every instantiated core must retire at least one instruction by the time
+  //  core 0 declares the test over. That is deliberately the weakest useful
+  //  criterion: a secondary core parked in an idle loop is indistinguishable from a
+  //  hung one without test-specific knowledge, so requiring progress at the end
+  //  would fail legitimate tests, while requiring "it ran at all" cannot.
+  //
+  //  It is safe for every configuration here: the bootrom sends ALL harts to
+  //  DRAM_BASE with no parking, so even a single-hart test executes the mhartid
+  //  check on each core before branching. With NR_CORES == 1 the check is empty.
+  //  On multi-core SMT targets the cluster additionally clock-holds secondary
+  //  cores until an IPI or a bounded counter releases them; a never-retired
+  //  secondary there is an expected hold (exit 125), not a hang.
+  logic [NR_CORES-1:0] core_retired;
+  logic [NR_CORES-1:0] mc_retire_pulse;
+  logic [NR_CORES-1:0] mc_hang_frozen;
+  assign mc_hang_frozen[0] = 1'b0;
+  logic [NR_CORES-1:0] mc_held;
+  assign mc_held[0] = 1'b0;
+  if ((NR_CORES > 1) && (G6LCCfg.NrHarts > 1)) begin : gen_hold_probe
+    for (genvar c = 1; c < NR_CORES; c++) begin : gen_core_hold
+      assign mc_held[c] = !i_cluster.gen_core[c].gen_boot_icg.rel;
+    end
+  end else begin : gen_no_hold_probe
+    for (genvar c = 1; c < NR_CORES; c++) begin : gen_core_free
+      assign mc_held[c] = 1'b0;
+    end
+  end
+  logic mc_all_silent_held;
+  assign mc_all_silent_held = ((~core_retired & ~mc_held) == '0);
+
+  //  Injected-error control for the verdict itself. A verdict that has never been
+  //  observed to fail is indistinguishable from one that cannot fail -- the exact
+  //  trap this review keeps finding in its own controls. +mc_verdict_fault makes the
+  //  secondary cores appear silent, so a normally-passing test must come out as a
+  //  multi-core failure with exit code 127.
+  logic mc_fault_inject;
+  initial mc_fault_inject = $test$plusargs("mc_verdict_fault");
+
+  //  An explicit reduction loop, not `rvfi_instr[N-1:0].valid`: a range on the
+  //  instance part of a dotted reference is illegal SystemVerilog.
+  logic core0_any_retire;
+  always_comb begin
+    core0_any_retire = 1'b0;
+    for (int unsigned i = 0; i < G6LCCfg.NrCommitPorts; i++)
+      core0_any_retire |= rvfi_instr[i].valid;
+  end
+
+  assign mc_retire_pulse[0] = core0_any_retire;
+
+  always_comb begin
+    mc_retire_is_wfi[0] = 1'b0;
+    for (int unsigned i = 0; i < G6LCCfg.NrCommitPorts; i++)
+      if (rvfi_instr[i].valid && rvfi_instr[i].insn == MC_WFI_INSN) mc_retire_is_wfi[0] = 1'b1;
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin : mc_retire_track
+    if (!rst_ni) core_retired[0] <= 1'b0;
+    else if (core0_any_retire) core_retired[0] <= 1'b1;
+  end
+
+  for (genvar c = 1; c < NR_CORES; c++) begin : gen_secondary_trace
+    rvfi_csr_t                                sec_rvfi_csr;
+    logic [G6LCCfg.NrCommitPorts-1:0][7:0] sec_rvfi_hart;
+    rvfi_instr_t [G6LCCfg.NrCommitPorts-1:0]  sec_rvfi_instr;
+    rvfi_to_iti_t                             sec_rvfi_to_iti;
+
+    g6lc_rvfi #(
+        .G6LCCfg   (G6LCCfg),
+        .rvfi_instr_t(rvfi_instr_t),
+        .rvfi_csr_t(rvfi_csr_t),
+        .rvfi_probes_instr_t(rvfi_probes_instr_t),
+        .rvfi_probes_csr_t(rvfi_probes_csr_t),
+        .rvfi_probes_t(rvfi_probes_t),
+        .rvfi_to_iti_t(rvfi_to_iti_t)
+    ) i_g6lc_rvfi_sec (
+        .clk_i        (clk_i),
+        .rst_ni       (rst_ni),
+        .rvfi_probes_i(i_cluster.core_rvfi[c]),
+        .rvfi_instr_o (sec_rvfi_instr),
+        .rvfi_to_iti_o(sec_rvfi_to_iti),
+        .rvfi_csr_o   (sec_rvfi_csr),
+        .rvfi_hart_o  (sec_rvfi_hart)
+    );
+
+    rvfi_tracer #(
+        .G6LCCfg(G6LCCfg),
+        .rvfi_instr_t(rvfi_instr_t),
+        .rvfi_csr_t(rvfi_csr_t),
+        .HART_ID(8'(c * ((G6LCCfg.NrHarts < 1) ? 1 : G6LCCfg.NrHarts))),
+        .DEBUG_START(0),
+        .DEBUG_STOP(0)
+    ) i_rvfi_tracer_sec (
+        .clk_i(clk_i),
+        .rst_ni(rst_ni),
+        .rvfi_i(sec_rvfi_instr),
+        .rvfi_csr_i(sec_rvfi_csr),
+        .rvfi_hart_i(sec_rvfi_hart),
+        .end_of_test_o(core_tracer_exit[c]  /* observer only: must not terminate the simulation */)
+    );
+
+    logic sec_any_retire;
+    always_comb begin
+      sec_any_retire = 1'b0;
+      for (int unsigned i = 0; i < G6LCCfg.NrCommitPorts; i++)
+        sec_any_retire |= sec_rvfi_instr[i].valid;
+    end
+
+    assign mc_retire_pulse[c] = sec_any_retire;
+
+    always_comb begin
+      mc_retire_is_wfi[c] = 1'b0;
+      for (int unsigned i = 0; i < G6LCCfg.NrCommitPorts; i++)
+        if (sec_rvfi_instr[i].valid && sec_rvfi_instr[i].insn == MC_WFI_INSN)
+          mc_retire_is_wfi[c] = 1'b1;
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin : mc_retire_track_sec
+      if (!rst_ni) core_retired[c] <= 1'b0;
+      else if (sec_any_retire && !mc_fault_inject) core_retired[c] <= 1'b1;
+    end
+
+    //  Freeze this core's observed liveness once it has started, simulating a hang.
+    always_ff @(posedge clk_i or negedge rst_ni) begin : mc_hang_fault_track
+      if (!rst_ni) mc_hang_frozen[c] <= 1'b0;
+      else if (mc_hang_fault_inject && core_retired[c]) mc_hang_frozen[c] <= 1'b1;
+    end
+  end
+
+  //  Per-core retirement-gap measurement.
+  //
+  //  The verdict above only asks whether a core EVER retired, so a core that runs
+  //  and then hangs still passes. The obvious fix -- require recent retirement --
+  //  needs a threshold, and a threshold picked without data is a guess that will
+  //  either miss hangs or fail legitimate stalls. So this measures the largest gap
+  //  between retirements per core and reports it; the number decides whether a hard
+  //  bound is defensible.
+  //
+  //  An idle park loop KEEPS RETIRING (it retires its own branch every few cycles),
+  //  which is what makes a gap bound workable at all: a parked core and a hung core
+  //  are distinguishable here, unlike by PC alone.
+  //
+  //  MEASURED before choosing the bound, across the cross-core tests, the
+  //  miss-streaming stress and the single-hart suite: the largest gap anywhere is
+  //  **71 cycles**, and cores parked in a loop show 23-30. MC_GAP_LIMIT is set two
+  //  orders of magnitude above that, so it cannot fire on a cache miss, a DRAM
+  //  stall or a park -- only on a core that has genuinely stopped.
+  //
+  //  WFI is the one legitimate way to stop retiring. It is excluded by the
+  //  INSTRUCTION, read from RVFI, rather than by a hierarchical reference to
+  //  `csr_regfile.wfi_q`: the register path runs through `gen_std` or `gen_acc`
+  //  depending on configuration, and this review has already been bitten once by a
+  //  probe wired to a hierarchy that moved (`i_g6lc_icache`).
+  //  WFI = 0x10500073. A core whose LAST retirement was a WFI is asleep by
+  //  instruction, not hung, and is exempt from the gap bound.
+  localparam logic [31:0] MC_WFI_INSN  = 32'h1050_0073;
+  localparam int unsigned MC_GAP_LIMIT = 5000;
+
+  int unsigned mc_gap_cur   [NR_CORES];
+  int unsigned mc_gap_max   [NR_CORES];
+  logic        mc_last_wfi  [NR_CORES];
+  logic [NR_CORES-1:0] mc_retire_is_wfi;
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin : mc_gap_track
+    if (!rst_ni) begin
+      for (int unsigned c = 0; c < NR_CORES; c++) begin
+        mc_gap_cur[c]  <= 0;
+        mc_gap_max[c]  <= 0;
+        mc_last_wfi[c] <= 1'b0;
+      end
+    end else begin
+      for (int unsigned c = 0; c < NR_CORES; c++) begin
+        //  Only count once a core has started: the pre-boot gap is not a hang.
+        if (core_retired[c]) begin
+          if (mc_retire_pulse[c] && !mc_hang_frozen[c]) begin
+            if (mc_gap_cur[c] > mc_gap_max[c]) mc_gap_max[c] <= mc_gap_cur[c];
+            mc_gap_cur[c]  <= 0;
+            mc_last_wfi[c] <= mc_retire_is_wfi[c];
+          end else begin
+            mc_gap_cur[c] <= mc_gap_cur[c] + 1;
+          end
+        end
+      end
+    end
+  end
+
+  //  A core is hung if it started, has not retired for MC_GAP_LIMIT cycles, and is
+  //  not asleep in WFI. +mc_hang_fault freezes the secondaries' retire pulse once
+  //  they have started, which is the injected-error control for this check: without
+  //  it, a bound that never fires is indistinguishable from one that cannot.
+  logic mc_hang_fault_inject;
+  initial mc_hang_fault_inject = $test$plusargs("mc_hang_fault");
+
+  logic mc_any_hung;
+  always_comb begin
+    mc_any_hung = 1'b0;
+    for (int unsigned c = 0; c < NR_CORES; c++)
+      if (core_retired[c] && !mc_last_wfi[c] && mc_gap_cur[c] >= MC_GAP_LIMIT)
+        mc_any_hung = 1'b1;
+  end
+
+  //  Observer-only cache counters. l2_hit_o/l2_miss_o/l2_bypass_o are
+  //  single-cycle pulses inside g6lc_l2_top; l3_hit_o/l3_miss_o are cluster
+  //  outputs. The l2 hit/bypass taps are hierarchical because the cluster does
+  //  not forward them; gen_l2 exists iff L2_ENABLE || G6LCCfg.L2En and the TB
+  //  passes L2_ENABLE=G6LCCfg.L2En, so the guard mirrors that condition.
+  //pragma translate_off
+  longint unsigned mc_cnt_l2_hit, mc_cnt_l2_miss, mc_cnt_l2_bypass,
+                   mc_cnt_l3_hit, mc_cnt_l3_miss,
+                   mc_cnt_l2_selfinv, mc_cnt_l3_selfinv,
+                   mc_cnt_l2_wupd, mc_cnt_l3_wupd,
+                   mc_cnt_l2_wtrk_full, mc_cnt_l2_line_hold,
+                   mc_cnt_l2_posted, mc_cnt_l2_rdtrk,
+                   mc_cnt_l2_hold_r1, mc_cnt_l2_hold_r1_wu,
+                   mc_cnt_l2_hold_r2, mc_cnt_hub_aw_sc, mc_cnt_hub_ar_hold,
+                   mc_cnt_hub_aw_hold_slot, mc_cnt_hub_aw_hold_other;
+  // T9h/M5: L2 prefetcher pulses.
+  int unsigned mc_cnt_l2_pf_issue, mc_cnt_l2_pf_useful, mc_cnt_l2_pf_drop;
+  // T26: hub_aw_hold_other split by blocker (sim-only hierarchical reads of the
+  // hub's gen_cluster state): W data of the previous AW still in flight
+  // (w_busy), invalidation-retention admission, mem-side !aw_ready, or an RR
+  // loss to another core; plus the AW/W fire counts (store-path throughput).
+  int unsigned mc_cnt_hub_aw_wbusy, mc_cnt_hub_aw_inv, mc_cnt_hub_aw_mem, mc_cnt_hub_aw_rr,
+               mc_cnt_hub_aw_fire, mc_cnt_hub_ar_fire;
+  logic mc_hub_aw_wbusy_obs, mc_hub_aw_inv_obs, mc_hub_aw_mem_obs, mc_hub_aw_rr_obs,
+        mc_hub_aw_fire_obs, mc_hub_ar_fire_obs, mc_hub_aw_anyheld;
+  logic mc_l2_pf_issue_obs, mc_l2_pf_useful_obs, mc_l2_pf_drop_obs;
+  logic mc_l2_hit_obs, mc_l2_bypass_obs, mc_l2_selfinv_obs, mc_l3_selfinv_obs,
+        mc_l2_wupd_obs, mc_l3_wupd_obs,
+        mc_l2_wtrk_full_obs, mc_l2_line_hold_obs, mc_l2_posted_obs,
+        mc_l2_rdtrk_obs,
+        mc_l2_hold_r1_obs, mc_l2_hold_r1_wu_obs, mc_l2_hold_r2_obs,
+        mc_hub_aw_sc_obs, mc_hub_ar_obs,
+        mc_hub_aw_hold_slot_obs, mc_hub_aw_hold_other_obs;
+  if (G6LCCfg.L2En) begin : gen_mc_cache_l2
+    assign mc_l2_hit_obs    = i_cluster.gen_l2.i_l2.l2_hit_o;
+    assign mc_l2_bypass_obs = i_cluster.gen_l2.i_l2.l2_bypass_o;
+    // l2_selfinv_hit_o: inval-match (WT write self-inval or L3 back-inval)
+    // actually cleared a live line — "lines purged by writes".
+    assign mc_l2_selfinv_obs = i_cluster.gen_l2.i_l2.l2_selfinv_hit_o;
+    // l2_wupdate_o: a forwarded write merged into a resident line
+    // (WRITE_UPDATE) instead of purging it.
+    assign mc_l2_wupd_obs = i_cluster.gen_l2.i_l2.l2_wupdate_o;
+    // T9b posted-write tracker observability; T9c/M1c hold-cycle split.
+    assign mc_l2_wtrk_full_obs = i_cluster.gen_l2.i_l2.l2_wtrk_full_o;
+    assign mc_l2_line_hold_obs = i_cluster.gen_l2.i_l2.l2_wtrk_line_hold_o;
+    assign mc_l2_hold_r1_obs   = i_cluster.gen_l2.i_l2.l2_hold_r1_o;
+    assign mc_l2_hold_r1_wu_obs = i_cluster.gen_l2.i_l2.l2_hold_r1_wu_o;
+    assign mc_l2_hold_r2_obs   = i_cluster.gen_l2.i_l2.l2_hold_r2_o;
+    assign mc_l2_posted_obs    = i_cluster.gen_l2.i_l2.l2_posted_o;
+    assign mc_l2_rdtrk_obs     = i_cluster.gen_l2.i_l2.l2_rdtrk_o;
+    // T9h/M5 prefetcher pulses (constant 0 when PF_EN=0).
+    assign mc_l2_pf_issue_obs  = i_cluster.gen_l2.i_l2.l2_pf_issue_o;
+    assign mc_l2_pf_useful_obs = i_cluster.gen_l2.i_l2.l2_pf_useful_o;
+    assign mc_l2_pf_drop_obs   = i_cluster.gen_l2.i_l2.l2_pf_drop_o;
+  end else begin : gen_mc_cache_nol2
+    assign mc_l2_hit_obs    = 1'b0;
+    assign mc_l2_bypass_obs = 1'b0;
+    assign mc_l2_selfinv_obs = 1'b0;
+    assign mc_l2_wupd_obs = 1'b0;
+    assign mc_l2_wtrk_full_obs = 1'b0;
+    assign mc_l2_line_hold_obs = 1'b0;
+    assign mc_l2_hold_r1_obs = 1'b0;
+    assign mc_l2_hold_r1_wu_obs = 1'b0;
+    assign mc_l2_hold_r2_obs = 1'b0;
+    assign mc_l2_posted_obs = 1'b0;
+    assign mc_l2_rdtrk_obs = 1'b0;
+    assign mc_l2_pf_issue_obs = 1'b0;
+    assign mc_l2_pf_useful_obs = 1'b0;
+    assign mc_l2_pf_drop_obs = 1'b0;
+  end
+  // R2 same-core share: the L2 sees hub slot ids, so the core attribution
+  // lives at the hub (gen_hub exists iff NrCores > 1 — IDENTITY_FAST=1).
+  if (G6LCCfg.NrCores > 1) begin : gen_mc_hub_sc
+    assign mc_hub_aw_sc_obs = i_cluster.gen_hub.i_hub.hub_aw_sc_collide_o;
+    // T9e/M1d: hub-side read-behind-write hold (ar_wr_line_live).
+    assign mc_hub_ar_obs   = i_cluster.gen_hub.i_hub.hub_ar_wr_hold_o;
+    // T10c/N4: actual AW holds at a core port, split by blocker.
+    assign mc_hub_aw_hold_slot_obs  = i_cluster.gen_hub.i_hub.hub_aw_hold_slot_o;
+    assign mc_hub_aw_hold_other_obs = i_cluster.gen_hub.i_hub.hub_aw_hold_other_o;
+    always_comb begin
+      mc_hub_aw_anyheld = 1'b0;
+      for (int c = 0; c < G6LCCfg.NrCores; c++)
+        if (i_cluster.gen_hub.i_hub.core_req_i[c].aw_valid &&
+            !i_cluster.gen_hub.i_hub.core_resp_o[c].aw_ready)
+          mc_hub_aw_anyheld = 1'b1;
+    end
+    assign mc_hub_aw_wbusy_obs = mc_hub_aw_anyheld && i_cluster.gen_hub.i_hub.gen_cluster.w_busy_q;
+    assign mc_hub_aw_inv_obs   = mc_hub_aw_anyheld && !i_cluster.gen_hub.i_hub.gen_cluster.w_busy_q &&
+                                 i_cluster.gen_hub.i_hub.gen_cluster.inv_pend_valid_q &&
+                                 !i_cluster.gen_hub.i_hub.gen_cluster.aw_grant;
+    assign mc_hub_aw_mem_obs   = mc_hub_aw_anyheld && i_cluster.gen_hub.i_hub.gen_cluster.aw_grant &&
+                                 !i_cluster.gen_hub.i_hub.mem_resp_i.aw_ready;
+    assign mc_hub_aw_rr_obs    = mc_hub_aw_anyheld && i_cluster.gen_hub.i_hub.gen_cluster.aw_grant &&
+                                 i_cluster.gen_hub.i_hub.mem_resp_i.aw_ready;
+    assign mc_hub_aw_fire_obs  = i_cluster.gen_hub.i_hub.gen_cluster.aw_fire;
+    assign mc_hub_ar_fire_obs  = i_cluster.gen_hub.i_hub.gen_cluster.ar_fire;
+  end else begin : gen_mc_hub_nosc
+    assign mc_hub_aw_sc_obs = 1'b0;
+    assign mc_hub_ar_obs   = 1'b0;
+    assign mc_hub_aw_hold_slot_obs  = 1'b0;
+    assign mc_hub_aw_hold_other_obs = 1'b0;
+    assign mc_hub_aw_anyheld = 1'b0;
+    assign mc_hub_aw_wbusy_obs = 1'b0;
+    assign mc_hub_aw_inv_obs = 1'b0;
+    assign mc_hub_aw_mem_obs = 1'b0;
+    assign mc_hub_aw_rr_obs = 1'b0;
+    assign mc_hub_aw_fire_obs = 1'b0;
+    assign mc_hub_ar_fire_obs = 1'b0;
+  end
+  if (G6LCCfg.L3En) begin : gen_mc_cache_l3
+    assign mc_l3_selfinv_obs = i_cluster.gen_l3.i_l3.l3_selfinv_hit_o;
+    assign mc_l3_wupd_obs = i_cluster.gen_l3.i_l3.l3_wupdate_o;
+  end else begin : gen_mc_cache_nol3
+    assign mc_l3_selfinv_obs = 1'b0;
+    assign mc_l3_wupd_obs = 1'b0;
+  end
+  always_ff @(posedge clk_i) begin
+    if (rst_ni) begin
+      mc_cnt_l2_hit    <= mc_cnt_l2_hit    + mc_l2_hit_obs;
+      mc_cnt_l2_miss   <= mc_cnt_l2_miss   + mc_l2_miss;
+      mc_cnt_l2_bypass <= mc_cnt_l2_bypass + mc_l2_bypass_obs;
+      mc_cnt_l3_hit    <= mc_cnt_l3_hit    + mc_l3_hit;
+      mc_cnt_l3_miss   <= mc_cnt_l3_miss   + mc_l3_miss;
+      mc_cnt_l2_selfinv <= mc_cnt_l2_selfinv + mc_l2_selfinv_obs;
+      mc_cnt_l3_selfinv <= mc_cnt_l3_selfinv + mc_l3_selfinv_obs;
+      mc_cnt_l2_wupd <= mc_cnt_l2_wupd + mc_l2_wupd_obs;
+      mc_cnt_l3_wupd <= mc_cnt_l3_wupd + mc_l3_wupd_obs;
+      mc_cnt_l2_wtrk_full <= mc_cnt_l2_wtrk_full + mc_l2_wtrk_full_obs;
+      mc_cnt_l2_line_hold <= mc_cnt_l2_line_hold + mc_l2_line_hold_obs;
+      mc_cnt_l2_hold_r1 <= mc_cnt_l2_hold_r1 + mc_l2_hold_r1_obs;
+      mc_cnt_l2_hold_r1_wu <= mc_cnt_l2_hold_r1_wu + mc_l2_hold_r1_wu_obs;
+      mc_cnt_l2_hold_r2 <= mc_cnt_l2_hold_r2 + mc_l2_hold_r2_obs;
+      mc_cnt_hub_aw_sc <= mc_cnt_hub_aw_sc + mc_hub_aw_sc_obs;
+      mc_cnt_hub_ar_hold <= mc_cnt_hub_ar_hold + mc_hub_ar_obs;
+      mc_cnt_hub_aw_hold_slot <= mc_cnt_hub_aw_hold_slot + mc_hub_aw_hold_slot_obs;
+      mc_cnt_hub_aw_hold_other <= mc_cnt_hub_aw_hold_other + mc_hub_aw_hold_other_obs;
+      mc_cnt_hub_aw_wbusy <= mc_cnt_hub_aw_wbusy + mc_hub_aw_wbusy_obs;
+      mc_cnt_hub_aw_inv   <= mc_cnt_hub_aw_inv + mc_hub_aw_inv_obs;
+      mc_cnt_hub_aw_mem   <= mc_cnt_hub_aw_mem + mc_hub_aw_mem_obs;
+      mc_cnt_hub_aw_rr    <= mc_cnt_hub_aw_rr + mc_hub_aw_rr_obs;
+      mc_cnt_hub_aw_fire  <= mc_cnt_hub_aw_fire + mc_hub_aw_fire_obs;
+      mc_cnt_hub_ar_fire  <= mc_cnt_hub_ar_fire + mc_hub_ar_fire_obs;
+      mc_cnt_l2_posted <= mc_cnt_l2_posted + mc_l2_posted_obs;
+      mc_cnt_l2_rdtrk <= mc_cnt_l2_rdtrk + mc_l2_rdtrk_obs;
+      mc_cnt_l2_pf_issue <= mc_cnt_l2_pf_issue + mc_l2_pf_issue_obs;
+      mc_cnt_l2_pf_useful <= mc_cnt_l2_pf_useful + mc_l2_pf_useful_obs;
+      mc_cnt_l2_pf_drop <= mc_cnt_l2_pf_drop + mc_l2_pf_drop_obs;
+    end else begin
+      mc_cnt_l2_hit    <= '0;
+      mc_cnt_l2_miss   <= '0;
+      mc_cnt_l2_bypass <= '0;
+      mc_cnt_l3_hit    <= '0;
+      mc_cnt_l3_miss   <= '0;
+      mc_cnt_l2_selfinv <= '0;
+      mc_cnt_l3_selfinv <= '0;
+      mc_cnt_l2_wupd <= '0;
+      mc_cnt_l3_wupd <= '0;
+      mc_cnt_l2_wtrk_full <= '0;
+      mc_cnt_l2_line_hold <= '0;
+      mc_cnt_l2_hold_r1 <= '0;
+      mc_cnt_l2_hold_r1_wu <= '0;
+      mc_cnt_l2_hold_r2 <= '0;
+      mc_cnt_hub_aw_wbusy <= '0; mc_cnt_hub_aw_inv <= '0; mc_cnt_hub_aw_mem <= '0;
+      mc_cnt_hub_aw_rr <= '0; mc_cnt_hub_aw_fire <= '0; mc_cnt_hub_ar_fire <= '0;
+      mc_cnt_hub_aw_sc <= '0;
+      mc_cnt_hub_ar_hold <= '0;
+      mc_cnt_hub_aw_hold_slot <= '0;
+      mc_cnt_hub_aw_hold_other <= '0;
+      mc_cnt_l2_posted <= '0;
+      mc_cnt_l2_rdtrk <= '0;
+      mc_cnt_l2_pf_issue <= '0;
+      mc_cnt_l2_pf_useful <= '0;
+      mc_cnt_l2_pf_drop <= '0;
+    end
+  end
+  //pragma translate_on
+
+  //  +l2_trace: per-event trace of the L2 (and L3, iff enabled) tag/FSM
+  //  interface for cross-model divergence hunting — pure observer, one
+  //  $fwrite per event per instance into l2_trace.log (override the path
+  //  with +l2_trace_file=<path>). Format "L<2|3> cyc=<n> <ev> ..." with a
+  //  free-running cycle counter, so the traces of a flop-tag and an
+  //  SRAM-tag build are expected identical up to the first behavioural
+  //  divergence. Hierarchical enum-literal reads are not portable, so
+  //  L2T_S_* mirror g6lc_l2_top's state_e encoding (S_TAG=1, S_SERVE=4).
+  //pragma translate_off
+  int l2t_fd = 0;
+  longint unsigned l2t_cyc;
+  localparam logic [3:0] L2T_S_TAG = 4'd1, L2T_S_SERVE = 4'd4;
+  initial begin
+    if ($test$plusargs("l2_trace")) begin
+      string l2t_path;
+      if (!$value$plusargs("l2_trace_file=%s", l2t_path))
+        l2t_path = "l2_trace.log";
+      l2t_fd = $fopen(l2t_path, "w");
+      if (l2t_fd == 0) $fatal(1, "L2_TRACE_OPEN path=%s", l2t_path);
+    end
+  end
+  final begin
+    if (l2t_fd != 0) $fclose(l2t_fd);
+  end
+  always_ff @(posedge clk_i) begin
+    if (!rst_ni) l2t_cyc <= '0;
+    else         l2t_cyc <= l2t_cyc + 1'b1;
+  end
+  if (G6LCCfg.L2En) begin : gen_l2t_l2
+    always_ff @(posedge clk_i) begin
+      if (l2t_fd != 0 && rst_ni) begin
+        if (i_cluster.gen_l2.i_l2.slv_req_i.ar_valid &&
+            i_cluster.gen_l2.i_l2.slv_resp_o.ar_ready)
+          $fwrite(l2t_fd, "L2 cyc=%0d ar addr=%h id=%h cache=%h lock=%b\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.slv_req_i.ar.addr, i_cluster.gen_l2.i_l2.slv_req_i.ar.id,
+                  i_cluster.gen_l2.i_l2.slv_req_i.ar.cache, i_cluster.gen_l2.i_l2.slv_req_i.ar.lock);
+        if (i_cluster.gen_l2.i_l2.slv_req_i.aw_valid &&
+            i_cluster.gen_l2.i_l2.slv_resp_o.aw_ready)
+          $fwrite(l2t_fd, "L2 cyc=%0d aw addr=%h id=%h atop=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.slv_req_i.aw.addr, i_cluster.gen_l2.i_l2.slv_req_i.aw.id,
+                  i_cluster.gen_l2.i_l2.slv_req_i.aw.atop);
+        if (i_cluster.gen_l2.i_l2.l2_hit_o)
+          $fwrite(l2t_fd, "L2 cyc=%0d hit addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.gen_l2.addr_q, i_cluster.gen_l2.i_l2.gen_l2.id_q);
+        if (i_cluster.gen_l2.i_l2.l2_miss_o)
+          $fwrite(l2t_fd, "L2 cyc=%0d miss addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.gen_l2.addr_q, i_cluster.gen_l2.i_l2.gen_l2.id_q);
+        if (i_cluster.gen_l2.i_l2.l2_bypass_o)
+          $fwrite(l2t_fd, "L2 cyc=%0d bypass addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.slv_req_i.aw_valid ?
+                  i_cluster.gen_l2.i_l2.slv_req_i.aw.addr : i_cluster.gen_l2.i_l2.slv_req_i.ar.addr,
+                  i_cluster.gen_l2.i_l2.slv_req_i.aw_valid ?
+                  i_cluster.gen_l2.i_l2.slv_req_i.aw.id : i_cluster.gen_l2.i_l2.slv_req_i.ar.id);
+        if (i_cluster.gen_l2.i_l2.gen_l2.tag_write && i_cluster.gen_l2.i_l2.gen_l2.tag_wvalid)
+          $fwrite(l2t_fd, "L2 cyc=%0d install idx=%h way=%h tag=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.gen_l2.tag_windex, i_cluster.gen_l2.i_l2.gen_l2.tag_wway,
+                  i_cluster.gen_l2.i_l2.gen_l2.tag_wtag);
+        if (i_cluster.gen_l2.i_l2.gen_l2.tag_write && !i_cluster.gen_l2.i_l2.gen_l2.tag_wvalid)
+          $fwrite(l2t_fd, "L2 cyc=%0d wclr idx=%h way=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.gen_l2.tag_windex, i_cluster.gen_l2.i_l2.gen_l2.tag_wway);
+        if (i_cluster.gen_l2.i_l2.gen_l2.tag_match_inval)
+          $fwrite(l2t_fd, "L2 cyc=%0d inv idx=%h tag=%h addr=%h src=%s\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.gen_l2.tag_match_index, i_cluster.gen_l2.i_l2.gen_l2.tag_match_tag,
+                  i_cluster.gen_l2.i_l2.l2_back_inval_valid_i ?
+                  i_cluster.gen_l2.i_l2.l2_back_inval_addr_i : i_cluster.gen_l2.i_l2.gen_l2.self_inval_addr,
+                  i_cluster.gen_l2.i_l2.l2_back_inval_valid_i ? "l3" : "self");
+        if (i_cluster.gen_l2.i_l2.gen_l2.state_q == L2T_S_TAG &&
+            !i_cluster.gen_l2.i_l2.gen_l2.tag_row_valid)
+          $fwrite(l2t_fd, "L2 cyc=%0d steal addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.gen_l2.addr_q, i_cluster.gen_l2.i_l2.gen_l2.id_q);
+        if (i_cluster.gen_l2.i_l2.gen_l2.state_q == L2T_S_SERVE &&
+            i_cluster.gen_l2.i_l2.gen_l2.serve_beat_q == '0 &&
+            i_cluster.gen_l2.i_l2.slv_resp_o.r_valid && i_cluster.gen_l2.i_l2.slv_req_i.r_ready)
+          $fwrite(l2t_fd, "L2 cyc=%0d serve addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.gen_l2.serve_addr_q, i_cluster.gen_l2.i_l2.gen_l2.serve_id_q);
+        if (i_cluster.gen_l2.i_l2.l2_evict_valid_o && i_cluster.gen_l2.i_l2.l2_evict_ready_i)
+          $fwrite(l2t_fd, "L2 cyc=%0d evict addr=%h\n", l2t_cyc,
+                  i_cluster.gen_l2.i_l2.l2_evict_addr_o);
+      end
+    end
+  end
+  if (G6LCCfg.L3En) begin : gen_l2t_l3
+    always_ff @(posedge clk_i) begin
+      if (l2t_fd != 0 && rst_ni) begin
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.ar_valid &&
+            i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_resp_o.ar_ready)
+          $fwrite(l2t_fd, "L3 cyc=%0d ar addr=%h id=%h cache=%h lock=%b\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.ar.addr,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.ar.id,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.ar.cache,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.ar.lock);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.aw_valid &&
+            i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_resp_o.aw_ready)
+          $fwrite(l2t_fd, "L3 cyc=%0d aw addr=%h id=%h atop=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.aw.addr,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.aw.id,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.aw.atop);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_hit_o)
+          $fwrite(l2t_fd, "L3 cyc=%0d hit addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.addr_q, i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.id_q);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_miss_o)
+          $fwrite(l2t_fd, "L3 cyc=%0d miss addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.addr_q, i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.id_q);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_bypass_o)
+          $fwrite(l2t_fd, "L3 cyc=%0d bypass addr=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.aw_valid ?
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.aw.addr :
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.ar.addr);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_write &&
+            i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_wvalid)
+          $fwrite(l2t_fd, "L3 cyc=%0d install idx=%h way=%h tag=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_windex,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_wway,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_wtag);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_write &&
+            !i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_wvalid)
+          $fwrite(l2t_fd, "L3 cyc=%0d wclr idx=%h way=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_windex,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_wway);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_match_inval)
+          $fwrite(l2t_fd, "L3 cyc=%0d inv idx=%h tag=%h addr=%h src=%s\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_match_index,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_match_tag,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_back_inval_valid_i ?
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_back_inval_addr_i :
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.self_inval_addr,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_back_inval_valid_i ? "l3" : "self");
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.state_q == L2T_S_TAG &&
+            !i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.tag_row_valid)
+          $fwrite(l2t_fd, "L3 cyc=%0d steal addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.addr_q,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.id_q);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.state_q == L2T_S_SERVE &&
+            i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.serve_beat_q == '0 &&
+            i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_resp_o.r_valid &&
+            i_cluster.gen_l3.i_l3.i_l3_as_l2.slv_req_i.r_ready)
+          $fwrite(l2t_fd, "L3 cyc=%0d serve addr=%h id=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.serve_addr_q,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.gen_l2.serve_id_q);
+        if (i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_evict_valid_o &&
+            i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_evict_ready_i)
+          $fwrite(l2t_fd, "L3 cyc=%0d evict addr=%h\n", l2t_cyc,
+                  i_cluster.gen_l3.i_l3.i_l3_as_l2.l2_evict_addr_o);
+      end
+    end
+  end
+  //pragma translate_on
+
+  //  Report in a `final` block, not from the clocked process. The C++ side leaves
+  //  its loop as soon as `exit_o[0]` is set, so a $display issued in that same
+  //  cycle never reaches the log -- measured: the run exited 127 with no reason
+  //  printed, which is exactly the "verdict with no diagnosis" this review keeps
+  //  complaining about elsewhere.
+  //pragma translate_off
+  final begin
+    if (!(&core_retired)) begin
+      if (mc_all_silent_held)
+        $display("*** [mc_verdict] HELD: core(s) still clock-held at end of test, held_mask=%b retired_mask=%b (exit code 125)",
+                 mc_held, core_retired);
+      else
+        $display("*** [mc_verdict] FAIL: core(s) retired no instruction, retired_mask=%b held_mask=%b (exit code 127)",
+                 core_retired, mc_held);
+    end else
+      $display("*** [mc_verdict] all %0d core(s) retired instructions", NR_CORES);
+    $display("*** [mc_verdict] program exit code %0d", tracer_exit[31:1]);
+    for (int unsigned c = 0; c < NR_CORES; c++)
+      $display("*** [mc_gap] core %0d max retirement gap %0d cycles (limit %0d, wfi=%0b)",
+               c, mc_gap_max[c], MC_GAP_LIMIT, mc_last_wfi[c]);
+    if (mc_any_hung)
+      $display("*** [mc_verdict] FAIL: a core ran and then stopped retiring (exit code 126)");
+    $display("*** [mc_cache] l2_hit=%0d l2_miss=%0d l2_bypass=%0d l3_hit=%0d l3_miss=%0d l2_selfinv=%0d l3_selfinv=%0d l2_wupd=%0d l3_wupd=%0d l2_wtrk_full=%0d l2_line_hold=%0d l2_posted=%0d l2_rdtrk=%0d l2_hold_r1=%0d l2_hold_r1_wu=%0d l2_hold_r2=%0d hub_aw_sc_collide=%0d hub_ar_hold=%0d hub_aw_hold_slot=%0d hub_aw_hold_other=%0d dram_latency=%0d l2_pf_issue=%0d l2_pf_useful=%0d l2_pf_drop=%0d",
+             mc_cnt_l2_hit, mc_cnt_l2_miss, mc_cnt_l2_bypass, mc_cnt_l3_hit, mc_cnt_l3_miss,
+             mc_cnt_l2_selfinv, mc_cnt_l3_selfinv, mc_cnt_l2_wupd, mc_cnt_l3_wupd,
+             mc_cnt_l2_wtrk_full, mc_cnt_l2_line_hold, mc_cnt_l2_posted,
+             mc_cnt_l2_rdtrk, mc_cnt_l2_hold_r1, mc_cnt_l2_hold_r1_wu,
+             mc_cnt_l2_hold_r2, mc_cnt_hub_aw_sc, mc_cnt_hub_ar_hold,
+             mc_cnt_hub_aw_hold_slot, mc_cnt_hub_aw_hold_other, DramLatency,
+             mc_cnt_l2_pf_issue, mc_cnt_l2_pf_useful, mc_cnt_l2_pf_drop);
+    $display("*** [mc_hub] aw_fire=%0d ar_fire=%0d aw_hold_other split: wbusy=%0d inv_adm=%0d mem_nready=%0d rr_loss=%0d",
+             mc_cnt_hub_aw_fire, mc_cnt_hub_ar_fire, mc_cnt_hub_aw_wbusy, mc_cnt_hub_aw_inv,
+             mc_cnt_hub_aw_mem, mc_cnt_hub_aw_rr);
+  end
+  //pragma translate_on
+
+`ifdef SPIKE_TANDEM
+    spike #(
+        .G6LCCfg ( G6LCCfg ),
+        .rvfi_instr_t(rvfi_instr_t),
+        .rvfi_csr_t(rvfi_csr_t)
+    ) i_spike (
+        .clk_i,
+        .rst_ni,
+        .clint_tick_i   ( rtc_i    ),
+        .rvfi_i         ( rvfi_instr ),
+        .rvfi_csr_i     ( rvfi_csr ),
+        .end_of_test_o  ( tandem_exit )
+    );
+    initial begin
+        $display("Running binary in tandem mode");
+    end
+
+    bit tandem_timeout_enable;
+    bit [31:0] tandem_timeout;
+    localparam TANDEM_TIMEOUT_THRESHOLD = 60;
+
+    // Tandem timeout logic
+    always_ff @(posedge clk_i) begin
+        if(tandem_timeout > TANDEM_TIMEOUT_THRESHOLD)
+            tandem_timeout_enable <= 0;
+        else if (tracer_exit)
+            tandem_timeout_enable <= 1;
+
+        if (tandem_timeout_enable)
+            tandem_timeout <= tandem_timeout + 1;
+    end
+
+    always_ff @(posedge clk_i) begin
+        if (tandem_exit || (tandem_timeout > TANDEM_TIMEOUT_THRESHOLD)) begin
+            rvfi_exit <= tracer_exit;
+        end
+
+    end
+`else
+    //  Fold the multi-core verdict in: keep core 0's done bit, but override the
+    //  exit code with a distinctive 127 so a silent secondary core cannot report
+    //  SUCCESS. exit_o>>1 is the exit code the C++ side reports.
+    //  Exit 126 for a core that ran and then STOPPED, distinct from 127 (a core
+    //  that never ran at all) so the log says which failure occurred. When every
+    //  still-silent core is held by the cluster's boot clock gate (expected on
+    //  multi-core SMT targets) the code is 125 instead of 127.
+    assign rvfi_exit = (tracer_exit[0] && !(&core_retired))
+                       ? (mc_all_silent_held ? {31'd125, 1'b1} : {31'd127, 1'b1})
+                     : (tracer_exit[0] && mc_any_hung)      ? {31'd126, 1'b1}
+                                                            : tracer_exit;
+`endif
+
+`ifdef VERILATOR
+    initial begin
+        string verbosity;
+        if ($value$plusargs("UVM_VERBOSITY=%s",verbosity)) begin
+          uvm_set_verbosity_level(verbosity);
+          `uvm_info("g6lc_testharness", $sformatf("Set UVM_VERBOSITY to %s", verbosity), UVM_NONE)
+        end
+    end
+`endif
+
+
+`ifdef AXI_SVA
+  // AXI 4 Assertion IP integration - You will need to get your own copy of this IP if you want
+  // to use it
+  Axi4PC #(
+    .DATA_WIDTH(g6lc_axi_soc::DataWidth),
+    .WID_WIDTH(g6lc_axi_soc::IdWidthSlave),
+    .RID_WIDTH(g6lc_axi_soc::IdWidthSlave),
+    .AWUSER_WIDTH(g6lc_axi_soc::UserWidth),
+    .WUSER_WIDTH(g6lc_axi_soc::UserWidth),
+    .BUSER_WIDTH(g6lc_axi_soc::UserWidth),
+    .ARUSER_WIDTH(g6lc_axi_soc::UserWidth),
+    .RUSER_WIDTH(g6lc_axi_soc::UserWidth),
+    .ADDR_WIDTH(g6lc_axi_soc::AddrWidth)
+  ) i_Axi4PC (
+    .ACLK(clk_i),
+    .ARESETn(ndmreset_n),
+    .AWID(dram.aw_id),
+    .AWADDR(dram.aw_addr),
+    .AWLEN(dram.aw_len),
+    .AWSIZE(dram.aw_size),
+    .AWBURST(dram.aw_burst),
+    .AWLOCK(dram.aw_lock),
+    .AWCACHE(dram.aw_cache),
+    .AWPROT(dram.aw_prot),
+    .AWQOS(dram.aw_qos),
+    .AWREGION(dram.aw_region),
+    .AWUSER(dram.aw_user),
+    .AWVALID(dram.aw_valid),
+    .AWREADY(dram.aw_ready),
+    .WLAST(dram.w_last),
+    .WDATA(dram.w_data),
+    .WSTRB(dram.w_strb),
+    .WUSER(dram.w_user),
+    .WVALID(dram.w_valid),
+    .WREADY(dram.w_ready),
+    .BID(dram.b_id),
+    .BRESP(dram.b_resp),
+    .BUSER(dram.b_user),
+    .BVALID(dram.b_valid),
+    .BREADY(dram.b_ready),
+    .ARID(dram.ar_id),
+    .ARADDR(dram.ar_addr),
+    .ARLEN(dram.ar_len),
+    .ARSIZE(dram.ar_size),
+    .ARBURST(dram.ar_burst),
+    .ARLOCK(dram.ar_lock),
+    .ARCACHE(dram.ar_cache),
+    .ARPROT(dram.ar_prot),
+    .ARQOS(dram.ar_qos),
+    .ARREGION(dram.ar_region),
+    .ARUSER(dram.ar_user),
+    .ARVALID(dram.ar_valid),
+    .ARREADY(dram.ar_ready),
+    .RID(dram.r_id),
+    .RLAST(dram.r_last),
+    .RDATA(dram.r_data),
+    .RRESP(dram.r_resp),
+    .RUSER(dram.r_user),
+    .RVALID(dram.r_valid),
+    .RREADY(dram.r_ready),
+    .CACTIVE('0),
+    .CSYSREQ('0),
+    .CSYSACK('0)
+  );
+`endif
+endmodule
+
+`include "g6lc_apu_xbar_hart.sv"
+`include "../apu/g6lc_apu_fault_sup.sv"

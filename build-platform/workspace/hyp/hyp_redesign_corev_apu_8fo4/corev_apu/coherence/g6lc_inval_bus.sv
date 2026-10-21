@@ -1,0 +1,186 @@
+// hyp8 provenance: AS-IS (sv-timing emit at the 8-FO4 budget)
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// U6.2 invalidation fan-out bus for 1..G6LC_MAX_CORES.
+//
+// Contention optimisations:
+//   * Per-core shallow FIFO (CohInvalDepth) — absorbs temporary consumer backpressure
+//   * Source-excluded delivery (writer does not self-invalidate for WT store)
+//   * Independent per-core drain preserves target order
+//   * Line-coalesce: back-to-back same-line inv to same core merges
+//   * NR_CORES==1: identity (accept and drop; no fan-out)
+
+module g6lc_inval_bus
+  import g6lc_coherence_pkg::*;
+#(
+    parameter int unsigned NR_CORES     = 1,
+    parameter int unsigned DEPTH        = COH_DEFAULT_INVAL_DEPTH,
+    parameter int unsigned LINE_BYTES   = COH_DEFAULT_LINE_BYTES
+) (
+    input  logic clk_i,
+    input  logic rst_ni,
+    // Producer (coherence hub)
+    input  coh_inval_t                         inv_req_i,
+    input  logic [NR_CORES-1:0]                inv_target_i,  // bitset of cores to hit
+    output logic                               inv_ready_o,   // accepted this cycle
+    // Per-core consumer ports (toward L1 inv adapter)
+    output coh_inval_t [NR_CORES-1:0]          inv_core_o,
+    input  logic       [NR_CORES-1:0]          inv_core_ready_i,
+    // Observability
+    //  Named `stall`, NOT `drop`: this is `valid & ~ready`, i.e. the producer was
+    //  REFUSED this cycle because some target FIFO is full. Nothing is lost -- the
+    //  hub holds the request and retries. The previous name `inv_drop_o` invited the
+    //  opposite reading, which is dangerous on a coherence path: anyone debugging a
+    //  stale line would see it high and conclude invalidations were being discarded.
+    //  Both existing benches already bound it to a signal called `blocked`.
+    output logic                               inv_stall_o,   // valid & ~ready (retried, not lost)
+    output logic                               inv_coalesce_o,
+    // Per-core delivery sequences: enq counts accepted obligations (a coalesce
+    // merges flags and does NOT count), deq counts pops. The value presented
+    // here is the sequence number an obligation accepted THIS cycle will have
+    // once deq reaches it -- enq_seq+1 on a real push, the tail entry's own
+    // sequence on a coalesce. A consumer that stamps `need = inv_enq_seq_o`
+    // can then wait for inv_deq_seq_o == need to know the obligation left the
+    // FIFO (one pop per cycle, so equality is always observed).
+    output logic [NR_CORES-1:0][COH_INV_SEQ_W-1:0] inv_enq_seq_o,
+    output logic [NR_CORES-1:0][COH_INV_SEQ_W-1:0] inv_deq_seq_o
+);
+
+  localparam int unsigned NC    = (NR_CORES < 1) ? 1 : NR_CORES;
+  localparam int unsigned DP    = (DEPTH < 1) ? 1 : DEPTH;
+  localparam int unsigned PTR_W = (DP <= 1) ? 1 : $clog2(DP);
+
+  if (NC <= 1) begin : gen_single
+    // Single core: no remote inv needed; always ready, never emits
+    assign inv_ready_o     = 1'b1;
+    assign inv_core_o      = '{default: '0};
+    assign inv_stall_o     = 1'b0;
+    assign inv_coalesce_o  = 1'b0;
+    assign inv_enq_seq_o   = '0;
+    assign inv_deq_seq_o   = '0;
+  end else begin : gen_multi
+
+    coh_inval_t fifo_q[NC][DP];
+    logic [PTR_W-1:0] head_q[NC], tail_q[NC];
+    logic [PTR_W:0]   count_q[NC];  // 0..DP
+    logic [COH_INV_SEQ_W-1:0] enq_seq_q[NC], deq_seq_q[NC];
+
+    logic [NC-1:0] full, empty;
+    logic          can_accept;
+    logic          coalesce;
+    logic [NC-1:0] merge_tail;
+
+    // Index of the most recently pushed entry, shared by the coalesce match
+    // and the coalesce write so the wrap decrement exists once per core.
+    logic [PTR_W-1:0] tail_m1[NC];
+    for (genvar c = 0; c < NC; c++) begin : gen_status
+      assign full[c]  = (count_q[c] == DP[PTR_W:0]);
+      assign empty[c] = (count_q[c] == '0);
+      assign tail_m1[c] = (tail_q[c] == '0) ? PTR_W'(DP - 1) : tail_q[c] - 1'b1;
+    end
+
+    // Accept only if every target has room or a retainable matching tail
+    always_comb begin
+      can_accept = 1'b1;
+      coalesce   = 1'b0;
+      merge_tail = '0;
+      if (inv_req_i.valid) begin
+        for (int unsigned c = 0; c < NC; c++) begin
+          if (inv_target_i[c]) begin
+            // A departing sole entry cannot retain a new obligation
+            if (!empty[c] &&
+                fifo_q[c][tail_m1[c]].line_addr == inv_req_i.line_addr &&
+                fifo_q[c][tail_m1[c]].valid &&
+                !(count_q[c] == 1 && inv_core_ready_i[c])) begin
+              merge_tail[c] = 1'b1;
+              coalesce = 1'b1;
+            end else if (full[c]) begin
+              can_accept = 1'b0;
+            end
+          end
+        end
+      end
+    end
+
+    assign inv_ready_o    = can_accept;
+    assign inv_stall_o    = inv_req_i.valid & ~inv_ready_o;
+    assign inv_coalesce_o = inv_req_i.valid & coalesce & can_accept;
+
+    // An accepted obligation that does not merge is a real push (admission
+    // guarantees !full whenever a target does not merge). The enq sequence
+    // exported for this cycle counts it; a merge keeps the tail's own
+    // sequence because no new entry is created.
+    logic [NC-1:0] push_now;
+    for (genvar c = 0; c < NC; c++) begin : gen_seq
+      assign push_now[c]      = inv_req_i.valid && inv_ready_o &&
+                                inv_target_i[c] && !merge_tail[c];
+      assign inv_enq_seq_o[c] = enq_seq_q[c] + COH_INV_SEQ_W'(push_now[c]);
+      assign inv_deq_seq_o[c] = deq_seq_q[c];
+    end
+
+    // Push / pop
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        for (int unsigned c = 0; c < NC; c++) begin
+          head_q[c]   <= '0;
+          tail_q[c]   <= '0;
+          count_q[c]  <= '0;
+          enq_seq_q[c] <= '0;
+          deq_seq_q[c] <= '0;
+          for (int unsigned d = 0; d < DP; d++) fifo_q[c][d] <= '0;
+        end
+      end else begin
+        for (int unsigned c = 0; c < NC; c++) begin
+          automatic logic do_push, do_pop;
+          do_push = 1'b0;
+          do_pop  = inv_core_ready_i[c] & ~empty[c];
+
+          if (inv_req_i.valid && inv_ready_o && inv_target_i[c]) begin
+            if (merge_tail[c]) begin
+              // Coalesce: OR flags into tail entry
+              fifo_q[c][tail_m1[c]].dcache  <= fifo_q[c][tail_m1[c]].dcache | inv_req_i.dcache;
+              fifo_q[c][tail_m1[c]].icache  <= fifo_q[c][tail_m1[c]].icache | inv_req_i.icache;
+              fifo_q[c][tail_m1[c]].all_ways<= fifo_q[c][tail_m1[c]].all_ways | inv_req_i.all_ways;
+            end else if (!full[c]) begin
+              do_push = 1'b1;
+              fifo_q[c][tail_q[c]] <= inv_req_i;
+              tail_q[c] <= (tail_q[c] == PTR_W'(DP - 1)) ? '0 : tail_q[c] + 1'b1;
+            end
+          end
+
+          if (do_pop) begin
+            fifo_q[c][head_q[c]].valid <= 1'b0;
+            head_q[c] <= (head_q[c] == PTR_W'(DP - 1)) ? '0 : head_q[c] + 1'b1;
+          end
+
+          enq_seq_q[c] <= enq_seq_q[c] + COH_INV_SEQ_W'(do_push);
+          deq_seq_q[c] <= deq_seq_q[c] + COH_INV_SEQ_W'(do_pop);
+
+          unique case ({do_push, do_pop})
+            2'b10: count_q[c] <= count_q[c] + 1'b1;
+            2'b01: count_q[c] <= count_q[c] - 1'b1;
+            default: ;
+          endcase
+        end
+      end
+    end
+
+    // Present head to each core
+    for (genvar c = 0; c < NC; c++) begin : gen_out
+      assign inv_core_o[c] = empty[c] ? '0 : fifo_q[c][head_q[c]];
+    end
+
+  end  // gen_multi
+
+  // The sequence counters wrap every 2**COH_INV_SEQ_W events; a consumer waits
+  // for an exact deq==need equality, so the outstanding enqueue-dequeue
+  // distance must stay strictly below half the range (one pop per cycle).
+  // pragma translate_off
+  initial begin
+    assert (DP <= 64) else
+      $fatal(1, "g6lc_inval_bus: DEPTH %0d exceeds 2**(COH_INV_SEQ_W-1)", DP);
+  end
+  // pragma translate_on
+
+endmodule

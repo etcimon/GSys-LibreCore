@@ -1,0 +1,535 @@
+// hyp8 provenance: AS-IS (sv-timing emit at the 8-FO4 budget)
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// U6.0 L2 tag array — parallel SET_ASSOC tag compare.
+// TAG_SRAM=0 keeps the flop array with a single-cycle combinational compare
+// (the original netlist; every existing package selects this path).
+// TAG_SRAM=1 moves the tag words behind one 1R1W tc_sram (Latency=1): the
+// parent launches the row read one cycle before the compare needs it, and
+// the valid bits stay in flops so the reset contract is unchanged. See
+// g6lc_l2_tag.tech-spec.md for the launched-read protocol.
+
+module g6lc_l2_tag #(
+    parameter int unsigned NUM_SETS   = 512,
+    parameter int unsigned SET_ASSOC  = 8,
+    parameter int unsigned TAG_WIDTH  = 48,
+    parameter int unsigned IDX_WIDTH  = 9,
+    parameter bit          TAG_SRAM   = 1'b0,
+    // WRITE_UPDATE=1 keeps a merged write's line valid, so its tag can still
+    // match a later write's self-invalidation in the same cycle a fill
+    // installs into that way: the install already replaces the tag (which
+    // itself satisfies the invalidation of the old line), so the match must
+    // not additionally clear the fresh line's valid bit. Under 0 the guard
+    // folds away — a write self-invalidation always finds the way invalid.
+    parameter bit          WRITE_UPDATE = 1'b0,
+    // T9h/M5: a per-way "installed by prefetch" bit (flop metadata in both
+    // tag paths, like the SRAM path's valid bits). Set by write_pf_i on
+    // install, cleared by every invalidation and self-cleared on the first
+    // demand lookup hit so a prefetched line counts as useful exactly once.
+    // PF_TAG=0 leaves no storage and ties hit_pf_o low — off netlist
+    // unchanged.
+    parameter bit          PF_TAG    = 1'b0
+) (
+    input  logic                          clk_i,
+    input  logic                          rst_ni,
+    // Launched row read for the NEXT cycle's compare (TAG_SRAM=1 only).
+    // launch_i asserts with the index whose row is needed next cycle.
+    input  logic                          launch_i,
+    input  logic [IDX_WIDTH-1:0]          launch_index_i,
+    // Lookup
+    input  logic                          lookup_i,
+    input  logic [IDX_WIDTH-1:0]          index_i,
+    input  logic [TAG_WIDTH-1:0]          tag_i,
+    output logic                          hit_o,
+    output logic [$clog2(SET_ASSOC)-1:0]  way_o,
+    output logic [SET_ASSOC-1:0]          way_valid_o,
+    // 1 iff the row now presented was launched last cycle and won the read
+    // port (an inval-match read takes priority). Constant 1 under flops.
+    output logic                          row_valid_o,
+    // Probe tag of a selected way (for victim/evict address rebuild)
+    input  logic [$clog2(SET_ASSOC)-1:0]  probe_way_i,
+    output logic [TAG_WIDTH-1:0]          probe_tag_o,
+    output logic                          probe_valid_o,
+    // Allocate / update on fill
+    input  logic                          write_i,
+    input  logic [IDX_WIDTH-1:0]          write_index_i,
+    input  logic [$clog2(SET_ASSOC)-1:0]  write_way_i,
+    input  logic [TAG_WIDTH-1:0]          write_tag_i,
+    input  logic                          write_valid_i,
+    // T9h/M5: the installed line came from the prefetcher (PF_TAG only).
+    input  logic                          write_pf_i,
+    // pf bit of the hit way — 1 on a demand hit to a PF-installed line.
+    output logic                          hit_pf_o,
+    // Invalidate way
+    input  logic                          inval_i,
+    input  logic [IDX_WIDTH-1:0]          inval_index_i,
+    input  logic [$clog2(SET_ASSOC)-1:0]  inval_way_i,
+    // Address-match invalidate (L3→L2 inclusive back-inval): clear every way
+    // in the set whose tag matches.
+    input  logic                          inval_match_i,
+    input  logic [IDX_WIDTH-1:0]          inval_match_index_i,
+    input  logic [TAG_WIDTH-1:0]          inval_match_tag_i,
+    // Observability: pulses in the cycle an inval-match actually clears at
+    // least one live way (counted as [mc_cache] l2_selfinv by the TB). A
+    // match that finds only already-invalid ways does not pulse.
+    output logic                          inval_match_hit_o
+);
+
+  localparam int unsigned WAY_W = (SET_ASSOC <= 1) ? 1 : $clog2(SET_ASSOC);
+
+  typedef struct packed {
+    logic                 valid;
+    logic [TAG_WIDTH-1:0] tag;
+  } tag_entry_t;
+
+  if (!TAG_SRAM) begin : gen_tag_flop
+    // Flop array: single-cycle combinational compare, bit-identical to the
+    // original implementation. The launch ports are unused and row_valid_o
+    // is constant — the parent's S_TAG gate folds away entirely.
+    // [sets][ways]
+    tag_entry_t [NUM_SETS-1:0][SET_ASSOC-1:0] tags_q, tags_d;
+
+    // Parallel compare (contention-critical path: keep short)
+    logic [SET_ASSOC-1:0] hit_way;
+    
+
+  // BEGIN sv-timing auto-correct (balance_mux rewrite)
+// ----------------------------------------------------------------
+// sv-timing: always_ff factorize  (clock-aware ParallelScratch)
+// timing-basis: S(s)=max producer C; C(s)=S(s)+L(s); M=max C;
+//   N=ceil(M/B) cycles of posedge clk_i  period_ns=0.200000  B=8.000 FO4
+// module=g6lc_l2_tag  region=6170  makespan=3.500 FO4  cycle_count=1  deps=0  procedural_ok=true
+// OpenSTA (review-only seeds — not set_max_delay):
+//   create_clock -name clk_i -period 0.200000 [get_ports clk_i]
+// order expect: pf_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to pf_q
+// --- factor stage 1/1  capture on posedge clk_i ---
+// always_ff @(posedge clk_i or negedge rst_ni) begin
+//   if (!rst_ni) begin /* reset */ end else begin
+//     pf_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     /* node21826 c=3.50 slack=0.00 */
+//     /* node21827 c=3.50 slack=0.00 */
+//   end
+// end
+// ----------------------------------------------------------------
+// ----------------------------------------------------------------
+// sv-timing: always_ff factorize  (clock-aware ParallelScratch)
+// timing-basis: S(s)=max producer C; C(s)=S(s)+L(s); M=max C;
+//   N=ceil(M/B) cycles of posedge clk_i  period_ns=0.200000  B=8.000 FO4
+// module=g6lc_l2_tag  region=6180  makespan=3.500 FO4  cycle_count=1  deps=0  procedural_ok=true
+// OpenSTA (review-only seeds — not set_max_delay):
+//   create_clock -name clk_i -period 0.200000 [get_ports clk_i]
+// order expect: tags_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to tags_q
+// --- factor stage 1/1  capture on posedge clk_i ---
+// always_ff @(posedge clk_i or negedge rst_ni) begin
+//   if (!rst_ni) begin /* reset */ end else begin
+//     tags_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     /* node21844 c=3.50 slack=0.00 */
+//     /* node21845 c=3.50 slack=0.00 */
+//   end
+// end
+// ----------------------------------------------------------------
+// ----------------------------------------------------------------
+// sv-timing: always_ff factorize  (clock-aware ParallelScratch)
+// timing-basis: S(s)=max producer C; C(s)=S(s)+L(s); M=max C;
+//   N=ceil(M/B) cycles of posedge clk_i  period_ns=0.200000  B=8.000 FO4
+// module=g6lc_l2_tag  region=6194  makespan=3.500 FO4  cycle_count=1  deps=0  procedural_ok=true
+// OpenSTA (review-only seeds — not set_max_delay):
+//   create_clock -name clk_i -period 0.200000 [get_ports clk_i]
+// order expect: pf_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to pf_q
+// --- factor stage 1/1  capture on posedge clk_i ---
+// always_ff @(posedge clk_i or negedge rst_ni) begin
+//   if (!rst_ni) begin /* reset */ end else begin
+//     pf_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     /* node21867 c=3.50 slack=0.00 */
+//     /* node21868 c=3.50 slack=0.00 */
+//   end
+// end
+// ----------------------------------------------------------------
+// ----------------------------------------------------------------
+// sv-timing: always_ff factorize  (clock-aware ParallelScratch)
+// timing-basis: S(s)=max producer C; C(s)=S(s)+L(s); M=max C;
+//   N=ceil(M/B) cycles of posedge clk_i  period_ns=0.200000  B=8.000 FO4
+// module=g6lc_l2_tag  region=6202  makespan=11.936 FO4  cycle_count=2  deps=0  procedural_ok=true
+// OpenSTA (review-only seeds — not set_max_delay):
+//   create_clock -name clk_i -period 0.200000 [get_ports clk_i]
+// order expect: fwd_tag_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to fwd_tag_q
+// order expect: fwd_valid_q  ready_cycle=1  ready_fo4=6.036  OpenSTA: report_timing -from clk_i -to fwd_valid_q
+// order expect: fwd_way_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to fwd_way_q
+// order expect: inv_index_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to inv_index_q
+// order expect: inv_pend_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to inv_pend_q
+// order expect: inv_tag_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to inv_tag_q
+// order expect: inv_valid_q  ready_cycle=2  ready_fo4=11.936  OpenSTA: report_timing -from clk_i -to inv_valid_q
+// order expect: row_index_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to row_index_q
+// order expect: row_valid_q  ready_cycle=1  ready_fo4=4.500  OpenSTA: report_timing -from clk_i -to row_valid_q
+// order expect: valid_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to valid_q
+// --- factor stage 1/2  capture on posedge clk_i ---
+// always_ff @(posedge clk_i or negedge rst_ni) begin
+//   if (!rst_ni) begin /* reset */ end else begin
+//     fwd_tag_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     fwd_valid_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     fwd_way_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     inv_index_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     inv_pend_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     inv_tag_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     row_index_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     row_valid_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     valid_q <= …; // sv-timing: cycle 1/2 on clk_i
+//     /* node21883 c=3.50 slack=8.44 */
+//     /* node21884 c=3.50 slack=8.44 */
+//     /* node21885 c=3.50 slack=8.44 */
+//     /* node21886 c=3.50 slack=8.44 */
+//     /* node21887 c=3.50 slack=8.44 */
+//     /* node21888 c=3.50 slack=8.44 */
+//     /* node21889 c=3.50 slack=8.44 */
+//     /* node21890 c=3.50 slack=8.44 */
+//     /* node21891 c=3.50 slack=8.44 */
+//     /* node21892 c=3.50 slack=8.44 */
+//     /* node21893 c=3.50 slack=8.44 */
+//     /* node21894 c=4.50 slack=7.44 */
+//     /* node21895 c=3.50 slack=8.44 */
+//     /* node21896 c=3.50 slack=8.44 */
+//     /* node21897 c=3.50 slack=8.44 */
+//     /* node21899 c=3.50 slack=8.44 */
+//     /* node21900 c=6.04 slack=5.90 */
+//     /* node21901 c=3.50 slack=8.44 */
+//     /* node21902 c=3.50 slack=8.44 */
+//   end
+// end
+// --- factor stage 2/2  capture on posedge clk_i ---
+// always_ff @(posedge clk_i or negedge rst_ni) begin
+//   if (!rst_ni) begin /* reset */ end else begin
+//     inv_valid_q <= …; // sv-timing: cycle 2/2 on clk_i
+//     /* node21898 c=11.94 slack=0.00 */
+//   end
+// end
+// ----------------------------------------------------------------
+  // END sv-timing auto-correct (balance_mux rewrite)
+always_comb begin
+      hit_way = '0;
+      for (int unsigned w = 0; w < SET_ASSOC; w++) begin
+        hit_way[w] = lookup_i && tags_q[index_i][w].valid &&
+                     (tags_q[index_i][w].tag == tag_i);
+      end
+    end
+    assign hit_o = |hit_way;
+
+    // T9h/M5 per-way prefetch-installed bit — flop metadata.
+    logic [NUM_SETS-1:0][SET_ASSOC-1:0] pf_q, pf_d;
+    if (PF_TAG) begin : gen_pf
+      assign hit_pf_o = |(pf_q[index_i] & hit_way);
+      always_comb begin
+        pf_d = pf_q;
+        if (write_i) pf_d[write_index_i][write_way_i] = write_pf_i;
+        if (inval_i) pf_d[inval_index_i][inval_way_i] = 1'b0;
+        if (inval_match_i) begin
+          for (int unsigned w = 0; w < SET_ASSOC; w++) begin
+            if (tags_q[inval_match_index_i][w].valid &&
+                tags_q[inval_match_index_i][w].tag == inval_match_tag_i)
+              pf_d[inval_match_index_i][w] = 1'b0;
+          end
+        end
+        // First demand hit on a PF-installed line consumes the bit.
+        if (|hit_way) pf_d[index_i] = pf_q[index_i] & ~hit_way;
+      end
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) pf_q <= '0;
+        else         pf_q <= pf_d;
+      end
+    end else begin : gen_no_pf
+      assign hit_pf_o = 1'b0;
+      logic _unused_pf;
+      assign _unused_pf = write_pf_i & (|pf_q);
+      assign pf_q = '0;
+    end
+
+    // One-hot → binary way
+    always_comb begin
+      way_o = '0;
+      for (int unsigned w = 0; w < SET_ASSOC; w++) begin
+        if (hit_way[w]) way_o = WAY_W'(w);
+      end
+    end
+
+    always_comb begin
+      for (int unsigned w = 0; w < SET_ASSOC; w++) begin
+        way_valid_o[w] = tags_q[index_i][w].valid;
+      end
+    end
+
+    assign probe_tag_o   = tags_q[index_i][probe_way_i].tag;
+    assign probe_valid_o = tags_q[index_i][probe_way_i].valid;
+    assign row_valid_o   = 1'b1;
+
+    // Victim: first invalid, else way 0 (RRIP later)
+    // Exposed via write_way_i from parent.
+
+    always_comb begin
+      tags_d = tags_q;
+      inval_match_hit_o = 1'b0;
+      if (write_i) begin
+        tags_d[write_index_i][write_way_i].valid = write_valid_i;
+        tags_d[write_index_i][write_way_i].tag   = write_tag_i;
+      end
+      if (inval_i) begin
+        tags_d[inval_index_i][inval_way_i].valid = 1'b0;
+      end
+      // Inclusive upper-level victim: drop matching L2 line (all ways, tag match)
+      if (inval_match_i) begin
+        for (int unsigned w = 0; w < SET_ASSOC; w++) begin
+          if (tags_q[inval_match_index_i][w].valid &&
+              tags_q[inval_match_index_i][w].tag == inval_match_tag_i &&
+              !(WRITE_UPDATE && write_i && write_valid_i &&
+                write_index_i == inval_match_index_i &&
+                write_way_i == WAY_W'(w))) begin
+            tags_d[inval_match_index_i][w].valid = 1'b0;
+            inval_match_hit_o = 1'b1;
+          end
+        end
+      end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        // Whole-array clear rather than a nested per-set/per-way loop.
+        // Identical behaviour, but the loop form is unrolled per set by the
+        // synthesis frontend, and at the production geometry (512 sets x 8
+        // ways) that exceeds its unroll budget: the design failed to
+        // elaborate for synthesis even though the simulator accepted it.
+        // This removes the elaboration blocker only; the array is still
+        // flops, which is the real cost issue and is tracked separately.
+        tags_q <= '0;
+      end else begin
+        tags_q <= tags_d;
+      end
+    end
+
+    logic _unused_launch;
+    assign _unused_launch = launch_i & (|launch_index_i);
+  end else begin : gen_tag_sram
+    // Valid bits stay in flops: they carry the whole-array reset contract
+    // and are consulted combinationally by hit/probe/way_valid. The SRAM
+    // row contents are don't-care until written — a way is only ever
+    // compared or probed once its valid bit is set, and a set's row is
+    // rewritten on every install into it.
+    logic [NUM_SETS-1:0][SET_ASSOC-1:0] valid_q, valid_d;
+
+    // One read port serves launched lookups and the inval-match read; the
+    // match wins because the lookup simply re-launches (row_valid_o low
+    // stalls the parent in S_TAG one extra cycle) while the invalidation
+    // must be captured at its offer cycle to keep ordering vs fills.
+    logic                    inv_rd, rd_req;
+    logic [IDX_WIDTH-1:0]    rd_index;
+    logic                    row_valid_q, inv_pend_q;
+    logic [IDX_WIDTH-1:0]    inv_index_q, row_index_q;
+    logic [TAG_WIDTH-1:0]    inv_tag_q;
+    // Valid row snapshot taken WITH the read (cycle 1): the deferred compare
+    // must decide on the pre-read state exactly like the flop array's
+    // tags_q sampling. Using live valid_q in cycle 2 would let a stale tag
+    // in an invalid way clear a line installed in the same cycle as the
+    // read — the flop path never sees that match (old valid was 0).
+    logic [SET_ASSOC-1:0]    inv_valid_q;
+    // Ways the deferred compare currently in flight is clearing (inv_clr).
+    // The flop array commits a match clear at the request edge, so a second
+    // inval-match one cycle later already sees the dying bit as 0; the SRAM
+    // path's snapshot must fold the in-flight clear in or a stale-tag match
+    // would spuriously re-kill a way revalidated after the first match.
+    logic [SET_ASSOC-1:0]    inv_clr;
+    // Same-index write forward: a fill that installs into the set whose row
+    // was just read is substituted next cycle so the compare and the victim
+    // probe see post-write tags like the flop array. No use-cycle forward:
+    // the flop compare reads tags_q (pre-write) too, and a combinational
+    // replay would close a loop through the parent's bank-conflict term.
+    logic                    fwd_valid_q;
+    logic [WAY_W-1:0]        fwd_way_q;
+    logic [TAG_WIDTH-1:0]    fwd_tag_q;
+
+    assign inv_rd   = inval_match_i;
+    assign rd_req   = inv_rd || launch_i;
+    assign rd_index = inv_rd ? inval_match_index_i : launch_index_i;
+
+    logic [SET_ASSOC-1:0][TAG_WIDTH-1:0] row_raw, row_tag;
+    logic [1:0][SET_ASSOC*TAG_WIDTH-1:0] sram_rdata;
+    logic [SET_ASSOC-1:0]                way_be;
+
+    // be = one-hot way select: ByteWidth=TAG_WIDTH makes each byte lane one
+    // way's tag.
+    always_comb begin
+      way_be = '0;
+      way_be[write_way_i] = 1'b1;
+    end
+
+    tc_sram #(
+        .NumWords   (NUM_SETS),
+        .DataWidth  (SET_ASSOC * TAG_WIDTH),
+        .ByteWidth  (TAG_WIDTH),
+        .NumPorts   (2),
+        .Latency    (1),
+        .SimInit    ("none"),
+        .ImplKey    ("g6lc_l2_tag")
+    ) i_tags (
+        .clk_i,
+        .rst_ni,
+        .req_i   ({write_i && write_valid_i, rd_req}),
+        .we_i    ({1'b1, 1'b0}),
+        .addr_i  ({write_index_i, rd_index}),
+        .wdata_i ({{SET_ASSOC{write_tag_i}}, {(SET_ASSOC*TAG_WIDTH){1'b0}}}),
+        .be_i    ({way_be, {SET_ASSOC{1'b0}}}),
+        .rdata_o (sram_rdata)
+    );
+    assign row_raw = sram_rdata[0];
+
+    // Forward substitution: only the launch-cycle write is replayed
+    // (registered). A use-cycle combinational forward would (a) diverge from
+    // the flop array — its compare reads tags_q, so a write landing in the
+    // compare cycle is invisible there too — and (b) close a combinational
+    // loop hit_way -> tag_way -> data-bank conflict -> write_i -> row_tag.
+    // Writes landing in the use cycle reach the compare one cycle later
+    // through the re-launched row, exactly like the flop path.
+    always_comb begin
+      row_tag = row_raw;
+      if (fwd_valid_q) begin
+        row_tag[fwd_way_q] = fwd_tag_q;
+      end
+    end
+
+    // Parallel compare against the forwarded row (contention-critical path:
+    // now a registered SRAM row + valid flops instead of a NUM_SETS-deep
+    // flop mux — see tech-spec for the timing note).
+    logic [SET_ASSOC-1:0] hit_way;
+    always_comb begin
+      hit_way = '0;
+      for (int unsigned w = 0; w < SET_ASSOC; w++) begin
+        hit_way[w] = lookup_i && row_valid_q && valid_q[index_i][w] &&
+                     (row_tag[w] == tag_i);
+      end
+    end
+    assign hit_o = |hit_way;
+
+    // One-hot → binary way
+    always_comb begin
+      way_o = '0;
+      for (int unsigned w = 0; w < SET_ASSOC; w++) begin
+        if (hit_way[w]) way_o = WAY_W'(w);
+      end
+    end
+
+    always_comb begin
+      for (int unsigned w = 0; w < SET_ASSOC; w++) begin
+        way_valid_o[w] = valid_q[index_i][w];
+      end
+    end
+
+    // T9h/M5 per-way prefetch-installed bit — flop metadata beside valid_q
+    // (the SRAM row stores tags only; pf is way state, not compare data).
+    logic [NUM_SETS-1:0][SET_ASSOC-1:0] pf_q, pf_d;
+    if (PF_TAG) begin : gen_pf
+      assign hit_pf_o = |(pf_q[index_i] & hit_way);
+      always_comb begin
+        pf_d = pf_q;
+        if (inv_pend_q) begin
+          for (int unsigned w = 0; w < SET_ASSOC; w++)
+            if (inv_clr[w]) pf_d[inv_index_q][w] = 1'b0;
+        end
+        if (write_i) pf_d[write_index_i][write_way_i] = write_pf_i;
+        if (inval_i) pf_d[inval_index_i][inval_way_i] = 1'b0;
+        // First demand hit on a PF-installed line consumes the bit.
+        if (|hit_way) pf_d[index_i] = pf_q[index_i] & ~hit_way;
+      end
+      always_ff @(posedge clk_i or negedge rst_ni) begin
+        if (!rst_ni) pf_q <= '0;
+        else         pf_q <= pf_d;
+      end
+    end else begin : gen_no_pf
+      assign hit_pf_o = 1'b0;
+      logic _unused_pf;
+      assign _unused_pf = write_pf_i;
+      assign pf_q = '0;
+    end
+
+    assign probe_tag_o   = row_tag[probe_way_i];
+    assign probe_valid_o = valid_q[index_i][probe_way_i];
+    assign row_valid_o   = row_valid_q;
+
+    // Deferred half of the inval-match read: cycle 1 takes the read port
+    // (inv_rd) and snapshots the set's valid bits, cycle 2 compares the row
+    // and clears matching valid bits. Both operands are the cycle-1 state —
+    // the RAW row (no write forward) and the snapshot inv_valid_q: a write
+    // that landed in the read cycle is an event the flop path also matched
+    // against pre-write contents, while a write landing this cycle is newer
+    // and outranks the clear below.
+    always_comb begin
+      valid_d = valid_q;
+      inval_match_hit_o = 1'b0;
+      inv_clr = '0;
+      if (inv_pend_q) begin
+        for (int unsigned w = 0; w < SET_ASSOC; w++) begin
+          if (inv_valid_q[w] && (row_raw[w] == inv_tag_q)) begin
+            valid_d[inv_index_q][w] = 1'b0;
+            inv_clr[w] = 1'b1;
+            inval_match_hit_o = 1'b1;
+          end
+        end
+      end
+      if (write_i) begin
+        valid_d[write_index_i][write_way_i] = write_valid_i;
+      end
+      if (inval_i) begin
+        valid_d[inval_index_i][inval_way_i] = 1'b0;
+      end
+    end
+
+    always_ff @(posedge clk_i or negedge rst_ni) begin
+      if (!rst_ni) begin
+        valid_q     <= '0;
+        row_valid_q <= 1'b0;
+        inv_pend_q  <= 1'b0;
+        inv_index_q <= '0;
+        inv_tag_q   <= '0;
+        inv_valid_q <= '0;
+        row_index_q <= '0;
+        fwd_valid_q <= 1'b0;
+        fwd_way_q   <= '0;
+        fwd_tag_q   <= '0;
+      end else begin
+        valid_q     <= valid_d;
+        row_valid_q <= launch_i && !inv_rd;
+        inv_pend_q  <= inv_rd;
+        inv_index_q <= inval_match_index_i;
+        inv_tag_q   <= inval_match_tag_i;
+        // Snapshot epoch = the read cycle, with the in-flight deferred clear
+        // folded in (it lands at this edge's valid_d, so a back-to-back
+        // inval-match observes post-clear bits like the flop array).
+        // WRITE_UPDATE fold-in: a way whose tag a same-edge install is
+        // rewriting cannot hold the matched tag at the deferred compare —
+        // the replacement itself retires the invalidation. Without the
+        // exclusion the snapshot of the still-valid merged line would match
+        // its old tag and the deferred clear would kill the new line.
+        inv_valid_q <= valid_q[inval_match_index_i] &
+                       ~((inval_match_index_i == inv_index_q) ? inv_clr : '0) &
+                       ~((WRITE_UPDATE && write_i && write_valid_i &&
+                          write_index_i == inval_match_index_i)
+                         ? (SET_ASSOC'(1'b1) << write_way_i) : '0);
+        row_index_q <= rd_index;
+        fwd_valid_q <= rd_req && write_i && write_valid_i &&
+                       (write_index_i == rd_index);
+        fwd_way_q   <= write_way_i;
+        fwd_tag_q   <= write_tag_i;
+      end
+    end
+
+    //pragma translate_off
+    `ifndef SYNTHESIS
+    // Contract: a consumed row must be the one launched for this index —
+    // the parent launches idx_of(addr_d) on every transition into (or hold
+    // of) S_TAG, so an unset row can only be a stale inval-match read.
+    always_ff @(posedge clk_i) begin
+      if (rst_ni && lookup_i && row_valid_o && (index_i != row_index_q)) begin
+        $fatal(1, "L2_TAG_ROW_INDEX got=%0d want=%0d", index_i, row_index_q);
+      end
+    end
+    `endif
+    //pragma translate_on
+  end
+
+endmodule

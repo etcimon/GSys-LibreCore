@@ -1,0 +1,143 @@
+// hyp8 provenance: AS-IS (sv-timing emit at the 8-FO4 budget)
+// Copyright 2026 Etienne Cimon
+// SPDX-License-Identifier: CERN-OHL-S-2.0 OR LicenseRef-GSys-Commercial
+//
+// U6.2 global LR/SC reservation tracker — multi-core atomics contention.
+//
+// RISC-V LR/SC: a remote store/AMO to the reserved line must kill other cores'
+// reservations. This is the cluster view (one slot per core) that drives kill
+// / inv hints — not a replacement for the core-local reservation bit.
+//
+// Contention optimisations:
+//   * O(1) per-core slot (no CAM for "my reservation?")
+//   * One-cycle line match kill across all cores
+//   * SC probe returns ok/fail without side effects until store_valid commits
+
+module g6lc_lr_sc_tracker
+  import g6lc_coherence_pkg::*;
+#(
+    parameter int unsigned NR_CORES   = 1,
+    parameter int unsigned LINE_BYTES = COH_DEFAULT_LINE_BYTES,
+    parameter int unsigned ADDR_WIDTH = 64
+) (
+    input  logic clk_i,
+    input  logic rst_ni,
+    input  logic                       lr_valid_i,
+    input  logic [ADDR_WIDTH-1:0]      lr_addr_i,
+    input  logic [$clog2(NR_CORES > 1 ? NR_CORES : 2)-1:0] lr_core_i,
+    input  logic                       store_valid_i,
+    input  logic [ADDR_WIDTH-1:0]      store_addr_i,
+    input  logic [$clog2(NR_CORES > 1 ? NR_CORES : 2)-1:0] store_core_i,
+    input  logic                       store_is_sc_i,
+    input  logic                       sc_probe_i,
+    input  logic [ADDR_WIDTH-1:0]      sc_addr_i,
+    input  logic [$clog2(NR_CORES > 1 ? NR_CORES : 2)-1:0] sc_core_i,
+    output logic                       sc_ok_o,
+    output logic [NR_CORES-1:0]        kill_cores_o,
+    output logic [55:0]                kill_line_o,
+    output logic                       kill_valid_o,
+    output logic                       lr_set_o,
+    // Observable at THIS layer: an SC-shaped store arrived while the hub held no
+    // matching reservation for the storing core. The hub cannot report a real SC
+    // outcome — g6lc_l2_top forwards AxLOCK to the downstream exclusive monitor,
+    // which is the authority — so a truthful event here is "this SC is one the
+    // monitor is expected to refuse", not "this SC failed". Replaces the former
+    // sc_fail_o, which could only assert while sc_probe_i was high and was
+    // therefore permanently zero at every instantiation.
+    output logic                       sc_noresv_o
+);
+
+  localparam int unsigned NC    = (NR_CORES < 1) ? 1 : NR_CORES;
+  localparam int unsigned CID_W = (NC <= 1) ? 1 : $clog2(NC);
+  localparam int unsigned OFF   = $clog2(LINE_BYTES);
+
+  logic        valid_q[NC], valid_d[NC];
+  logic [55:0] line_q[NC], line_d[NC];
+
+  logic [55:0] lr_line, st_line, sc_line;
+  
+
+  // BEGIN sv-timing auto-correct (balance_mux rewrite)
+// ----------------------------------------------------------------
+// sv-timing: always_ff factorize  (clock-aware ParallelScratch)
+// timing-basis: S(s)=max producer C; C(s)=S(s)+L(s); M=max C;
+//   N=ceil(M/B) cycles of posedge clk_i  period_ns=0.200000  B=8.000 FO4
+// module=g6lc_lr_sc_tracker  region=6094  makespan=3.500 FO4  cycle_count=1  deps=0  procedural_ok=true
+// OpenSTA (review-only seeds — not set_max_delay):
+//   create_clock -name clk_i -period 0.200000 [get_ports clk_i]
+// order expect: line_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to line_q
+// order expect: valid_q  ready_cycle=1  ready_fo4=3.500  OpenSTA: report_timing -from clk_i -to valid_q
+// --- factor stage 1/1  capture on posedge clk_i ---
+// always_ff @(posedge clk_i or negedge rst_ni) begin
+//   if (!rst_ni) begin /* reset */ end else begin
+//     line_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     valid_q <= …; // sv-timing: cycle 1/1 on clk_i
+//     /* node21390 c=3.50 slack=0.00 */
+//     /* node21391 c=3.50 slack=0.00 */
+//     /* node21392 c=3.50 slack=0.00 */
+//     /* node21393 c=3.50 slack=0.00 */
+//   end
+// end
+// ----------------------------------------------------------------
+  // END sv-timing auto-correct (balance_mux rewrite)
+assign lr_line = lr_addr_i[ADDR_WIDTH-1:OFF];
+  assign st_line = store_addr_i[ADDR_WIDTH-1:OFF];
+  assign sc_line = sc_addr_i[ADDR_WIDTH-1:OFF];
+
+  always_comb begin
+    for (int unsigned c = 0; c < NC; c++) begin
+      valid_d[c] = valid_q[c];
+      line_d[c]  = line_q[c];
+    end
+    kill_cores_o = '0;
+    kill_line_o  = '0;
+    kill_valid_o = 1'b0;
+    lr_set_o     = 1'b0;
+    sc_noresv_o  = 1'b0;
+    sc_ok_o      = 1'b0;
+
+    // The probe port is retained but unused by the hub: see sc_noresv_o above for
+    // why an SC verdict cannot be produced at this layer.
+    if (sc_probe_i) begin
+      sc_ok_o = valid_q[sc_core_i] && (line_q[sc_core_i] == sc_line);
+    end
+
+    if (lr_valid_i) begin
+      valid_d[lr_core_i] = 1'b1;
+      line_d[lr_core_i]  = lr_line;
+      lr_set_o           = 1'b1;
+    end
+
+    if (store_valid_i) begin
+      kill_line_o = st_line;
+      // Reservation-less SC, evaluated against the pre-store state.
+      if (store_is_sc_i)
+        sc_noresv_o = !(valid_q[store_core_i] && (line_q[store_core_i] == st_line));
+      for (int unsigned c = 0; c < NC; c++) begin
+        if (valid_q[c] && line_q[c] == st_line) begin
+          if (c[CID_W-1:0] != store_core_i || store_is_sc_i) begin
+            valid_d[c]      = 1'b0;
+            kill_cores_o[c] = 1'b1;
+            kill_valid_o    = 1'b1;
+          end
+        end
+      end
+      if (store_is_sc_i) valid_d[store_core_i] = 1'b0;
+    end
+  end
+
+  always_ff @(posedge clk_i or negedge rst_ni) begin
+    if (!rst_ni) begin
+      for (int unsigned c = 0; c < NC; c++) begin
+        valid_q[c] <= 1'b0;
+        line_q[c]  <= '0;
+      end
+    end else begin
+      for (int unsigned c = 0; c < NC; c++) begin
+        valid_q[c] <= valid_d[c];
+        line_q[c]  <= line_d[c];
+      end
+    end
+  end
+
+endmodule
