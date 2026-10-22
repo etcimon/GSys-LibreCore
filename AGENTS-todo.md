@@ -2188,11 +2188,14 @@ prerequisite for this work under the existing dual license. No licensing policy 
   in `arch_cpu_idle`; hart 1's rises 15 k → 770 k), and hart 1 runs
   `jent_mod_init → jent_entropy_init` (kallsyms from a QEMU boot of the
   same `Image`): TESTLOOPCOUNT + CLEARCACHE = 1,124 calls of
-  `jent_measure_jitter` at ≈ 126–156 k cycles each (SHA3-256 conditioning
-  × 1–8 `hash_loop_cnt`, `jent_memaccess` × 128–256 with a `remu` per
-  step) ≈ 146 M cycles ≈ 11.7 s guest at 12.5 MHz — the same gap the
-  single-hart runs show (`l1s1t`: 2.08 → 5.91 s; `l3h59`: 1.89 → 7.49 s
-  between `Freeing initrd` and `io scheduler`). `l1s2u` was killed at
+  `jent_measure_jitter` at ≈ 144 k cycles each over the 204 iterations
+  the trace covers (SHA3-256 conditioning × 1–8 `hash_loop_cnt`,
+  `jent_memaccess` × 128–256 with a `remu` per step; the loop starts at
+  210.6 M after ≈ 45 M cycles of `jent_mod_init`'s own setup) ≈ 162 M
+  cycles — the same gap the single-hart runs show (`l1s1t`: 2.08 →
+  5.91 s; `l3h59`: 1.89 → 7.49 s between `Freeing initrd` and
+  `io scheduler`; the harness's printk second is ≈ 54 M core cycles, so
+  3.8–4.2 s of it is 200–225 M cycles). `l1s2u` was killed at
   254 M and `l1s2w` capped at 240 M, both inside that window; the console
   cut (`jffs2: ve`) is the SBI console path on hart 0 being interrupted by
   the migration. The live oracle on `l1s2w` is at **0 mismatches** over
