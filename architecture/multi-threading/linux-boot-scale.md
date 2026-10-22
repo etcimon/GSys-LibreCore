@@ -715,7 +715,10 @@ read as a livelock at 2.50 s (T51) and is not one: the both-hart RVFI shows `ker
 to hart 1 at 164.4 M cycles and running the jitter-entropy power-up test (`jent_entropy_init`,
 1,124 × ≈ 130 k cycles ≈ 146 M cycles — the same `Freeing initrd` → `io scheduler` gap the
 single-hart runs show at 3.8–5.6 s guest) while hart 0 idles in `wfi`; the oracle is at 0 over both
-harts (23.8 M loads at retire 155 M). The 2-hart shell verdict is `l1s2x` (600 M cap). The window's
+harts (23.8 M loads at retire 155 M). **`l1s2x` (600 M cap, no trace) resumes the console at 390 M
+cycles (`switchtec: loaded.` at 6.71 s, 4.2 s guest after `jffs2: ve`) and reaches
+`G6LC_LINUX_INIT_UP` (`Run /init` at 8.05 s) and `G6LC_LINUX_SHELL` before 482 M cycles — the first
+two-hart SMT Linux shell on the HPDCACHE server package (157.3 M + 179.9 M retired).** The window's
 by-products — a stale user-half `ret` prediction and an outgoing hart's in-flight demand fetch
 translated under the incoming hart's `satp` across a coarse switch, each one spurious PTW walk —
 are A148 (isolation/performance, no correctness evidence).
