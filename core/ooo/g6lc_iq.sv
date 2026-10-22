@@ -455,6 +455,11 @@ module g6lc_iq
     automatic logic [CVA6Cfg.NrIssuePorts-1:0][EW-1:0] alloc_slot;
     automatic logic [CVA6Cfg.NrIssuePorts-1:0] alloc;
     automatic int unsigned slot;
+    // A149: declared at the block's top and defaulted (declared inside the
+    // per-port `if` below it was assigned on one path only — a LATCH warning
+    // on the whole-core builds); the logic is unchanged.
+    automatic logic [DEPTH-1:0] low_p;
+    low_p = '0;
     q_d = q_after_issue;
     older_d = older_q;
     // Removed entries (squashed, issue-acked, or never valid) lose their row
@@ -517,7 +522,6 @@ module g6lc_iq
       free = free & ~taken;
       for (int unsigned p = 2; p < CVA6Cfg.NrIssuePorts; p++) begin
         if (disp_valid_i[p]) begin
-          automatic logic [DEPTH-1:0] low_p;
           low_p    = free & (~free + 1'b1);
           alloc[p] = |low_p;
           for (int unsigned e = 0; e < DEPTH; e++) begin

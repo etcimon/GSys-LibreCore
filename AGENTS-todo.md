@@ -4,6 +4,8 @@ Live tracker for agent work. **Retrieval contract:** every open item below cites
 progress files that hold its priors (why it exists, seams, acceptance). Open those first; this file
 is the queue, not the design.
 
+Hyp8 retirement continuation (2026-10-21): source analysis, an aggregate caller-aware repair plan, a frozen source inventory/worklist, and a fresh sixteen-module structural/calibrated screen are in `build-platform/workspace/hyp/hyp_redesign_core_8fo4/analysis/retirement-plan.md`. The first coordinated batch — held PRF operands, pending store-slot reservations, and forwarding payload lifetime — is implemented under the materialized hyp tree (`analysis/implementation-log.md`) and passed the focused remote leaf `tb_g6lc_hyp8_memory` (`HYP8_MEMORY_PASS`, 43 checks, tag `hyp8-memory-own-r5`); that is leaf evidence only, not full-core elaboration. Open implementation continues with the CSR lookup/completion seam, architectural-retirement versus delayed-reclaim identity, the flush_unissued recovery transaction, and latency-counter/reservation widths. The user authorized continuation; hyp8 per-source tier/REUSE coverage now preserves existing declarations, and the duplicate AES SPDX was normalized to an outbound offer without changing upstream notices. Current target is single-hart OoO; SMT2 and OpenSBI/Linux boot remain unqualified. No OpenROAD or boot run was performed in this review.
+
 | Layer | Open first | Role |
 |-------|------------|------|
 | Prime directive / nav | [`AGENTS.md`](AGENTS.md) · [`agents/spec/INDEX.md`](agents/spec/INDEX.md) | Spec→code map, SoC §0, standing disciplines |
@@ -2220,8 +2222,12 @@ prerequisite for this work under the existing dual license. No licensing policy 
   t59 tree, pre-A141, builds with 38 warnings; HEAD with 52 — the other
   14 are SPLITVAR/WIDTH notes of the A14x files). Hoisted to the block's
   top and defaulted unconditionally; the logic is identical. Local 5.020
-  did not flag the original in the `tb_g6lc_stq_cboz` leaf, so the
-  verdict is the next remote whole-core build (warnings 52 → 40 expected).
+  did not flag the original in the `tb_g6lc_stq_cboz` leaf; the
+  `ooocoh-t61-server1` whole-core build (HEAD + the hoist) reports no
+  `store_buffer` LATCH (66 warnings; the t53 server1 build had 4 LATCH
+  lines: three in the pre-A141 `core_if`, one in `g6lc_iq`). The one
+  left, `g6lc_iq.sv` dispatch `low_p` (declared inside the per-port `if`
+  for ports ≥ 2), is hoisted the same way; verdict: the next build.
 - [ ] **A148 — SMT frontend isolation (from T51's window).** (a) An
   in-flight demand fetch of the outgoing hart is translated under the
   incoming hart's context after a coarse switch (one spurious PTW walk,
