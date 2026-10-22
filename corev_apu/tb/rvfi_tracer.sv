@@ -213,11 +213,16 @@ module rvfi_tracer #(
             default: cause = rvfi_i[i].cause[CVA6Cfg.XLEN-1] ? $sformatf("INTERRUPT_%0d", rvfi_i[i].cause[CVA6Cfg.XLEN-2:0])
                                                              : $sformatf("CAUSE_%0d", rvfi_i[i].cause);
           endcase;
+          // G6LC: the trap line carries the hart too (an SMT trace interleaves
+          // harts; a hart-less trap line was attributed to the previous
+          // `core` line's hart by the trace oracles).
           if (!trace_en) begin
           end else if (rvfi_i[i].insn[1:0] != 2'b11) begin
-            $fwrite(f, "%s exception @ 0x%h (0x%h)\n", cause, pc64, rvfi_i[i].insn[15:0]);
+            $fwrite(f, "%s exception @ 0x%h (0x%h) hart %0d\n", cause, pc64, rvfi_i[i].insn[15:0],
+                    HART_ID + rvfi_hart_i[i]);
           end else begin
-            $fwrite(f, "%s exception @ 0x%h (0x%h)\n", cause, pc64, rvfi_i[i].insn);
+            $fwrite(f, "%s exception @ 0x%h (0x%h) hart %0d\n", cause, pc64, rvfi_i[i].insn,
+                    HART_ID + rvfi_hart_i[i]);
           end
         end
       end

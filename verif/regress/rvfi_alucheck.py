@@ -322,6 +322,15 @@ def main():
                     hart = 0
                 continue
             if 'exception @' in line:
+                # the tracer appends " hart <h>" (SMT traces interleave harts);
+                # older traces have no hart on the trap line: use the last core line's
+                k = line.rfind(' hart ')
+                if k >= 0:
+                    try:
+                        trapped.add(int(line[k + 6:].split()[0]))
+                        continue
+                    except (ValueError, IndexError):
+                        pass
                 trapped.add(hart)
                 continue
             if not (line and line[0] in '0123' and line[1] == ' '):

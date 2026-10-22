@@ -271,5 +271,15 @@ retirements/s. On the T44 trace both counters were 0 (70 M results, 267 M pcs) w
 oracle also at 0 — which is what pointed at the sources no oracle covered (`cbo.zero`); the t52
 L3 trace (537 M results) is clean as well. Caveat for a trace that ends in a panic: the halt loop
 retires `c.j 0` every two cycles to the cycle cap, so `--start-retire` must be placed before it
-(the useful retirements of `l1s1z` end near 346 M of its 467 M).
+(the useful retirements of `l1s1z` end near 346 M of its 467 M). **SMT traces (2026-10-21):**
+the control-flow check is per hart, and a trap/interrupt line suspends the check for the hart it
+names — the tracer now appends ` hart <h>` to its `… exception @ …` lines (an SMT trace
+interleaves harts, and a hart-less trap line was charged to the previous `core` line's hart: on
+the two-hart `l1s2w` trace that produced 245 false `CF-MISMATCH`es, every one an interrupt entry
+after `csrsi sstatus, 2` or an M-timer trap to `0x80000500` on the other hart; the ALU counter was
+0 over 116.6 M results across both harts). Older traces without the suffix fall back to the
+previous `core` line's hart, so a two-hart trace made before the suffix keeps the false positives
+at interrupt entries. The tracer also used to repeat the previous exception's name for interrupts
+(a sticky `string`): the periodic `ST_ADDR_MISALIGNED exception` lines of the Linux traces were the
+S-timer; interrupts now print as `INTERRUPT_<n>`.
 
