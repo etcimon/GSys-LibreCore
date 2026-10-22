@@ -2289,8 +2289,11 @@ prerequisite for this work under the existing dual license. No licensing policy 
   the cycle after a MUL is an issue slot again); `l1h60` / `l3h60` (live
   oracle) are past the t54 hang point (8 M cycles, 6.34 M retired, no
   `[hang]`, oracle 0 at retire 5 M) and running to the shell / login —
-  HEAD's first boot qualification. Until they land, the boot set stays
-  t59.
+  HEAD's first boot qualification. The HPDCACHE package on the same HEAD
+  (`ooocoh-t61-server1-pgo-build`, + A149) is battery-exact too (s11
+  19,015 cycles; stages 4–59 all `retirementsMatch`) and its single-hart
+  L1 with the live oracle (`l1s1v`) is in flight. Until they land, the
+  boot set stays t59.
 - [x] **T49 — Zicbom block vs the 16-byte L1 line (follow-up of T44,
   2026-10-19).** The same units assumption sat on the CMO side: a
   `cbo.inval` reached the cluster engine as one address and the engine
