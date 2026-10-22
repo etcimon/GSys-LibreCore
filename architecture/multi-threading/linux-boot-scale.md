@@ -702,8 +702,9 @@ Spike-exact instead of recorded as an "intentional discrepancy".
 
 Where the climb stands: on the WT `g6lc64_ooo` the qualified set (t59 = t52 + T44 + T48) boots L1 to
 the shell, **and so does the committed HEAD with the four-stage multiplier once T50 is fixed
-(`ooocoh-t60`, `l1h60`: 598 M cycles / 364.9 M retired, the t59 figures; its L3 with the live
-oracle is in flight)**; t59 also boots **L3 to the OpenWrt login prompt and on to the 2.5 G-cycle cap (1.411 G retired) with
+(`ooocoh-t60`, `l1h60`: 598 M cycles / 364.9 M retired, the t59 figures; `l3h60` with the live
+oracle at the login prompt at 1.314 G cycles — l3h59's 1.3137 G — and 0 mismatches over 175.6 M
+loads at retire 875 M, running to the cap)**; t59 also boots **L3 to the OpenWrt login prompt and on to the 2.5 G-cycle cap (1.411 G retired) with
 the user-space-aware live oracle at 0 mismatches over 300.9 M checked loads and 2.5 M AMOs** — the
 first clean-oracle L3 boot of the OoO core; the t52 pair is gone and no stored-memory class is open
 on this path. On the HPDCACHE `g6lc64_ooo_server1` the first `exec` was the wall on every run
