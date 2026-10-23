@@ -2305,8 +2305,10 @@ prerequisite for this work under the existing dual license. No licensing policy 
   four-stage multiplier is L1-qualified; `l3h60` (live oracle) reaches the
   OpenWrt login prompt (`Please press Enter to activate this console.`,
   24.5 s) at ≈ 1.314 G cycles — l3h59's 1.3137 G — and `kmodloader:
-  done` at 27.0 s / 1.512 G with the oracle at 0 over 175.6 M loads
-  (retire 875 M); it runs on to the 2.5 G cap for the final total.** The HPDCACHE package on the same HEAD
+  done` at 27.0 s / 1.512 G, and runs to the 2.5 G-cycle cap (1.411 G
+  retired) with the live oracle at `checked loads=300,836,970
+  stores=193,496,155 amos=2,528,631 … mismatches=0` — the l3h59 totals
+  to within 0.01 %: HEAD's L3 is oracle-clean end to end.** The HPDCACHE package on the same HEAD
   (`ooocoh-t61-server1-pgo-build`, + A149) is battery-exact too (s11
   19,015 cycles; stages 4–59 all `retirementsMatch`) and its single-hart
   L1 with the live oracle is `l1s1w` (`linux-payload-l1s1u`, the
