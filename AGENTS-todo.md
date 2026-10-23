@@ -2310,8 +2310,11 @@ prerequisite for this work under the existing dual license. No licensing policy 
   stores=193,496,155 amos=2,528,631 … mismatches=0` — the l3h59 totals
   to within 0.01 %: HEAD's L3 is oracle-clean end to end.** The HPDCACHE package on the same HEAD
   (`ooocoh-t61-server1-pgo-build`, + A149) is battery-exact too (s11
-  19,015 cycles; stages 4–59 all `retirementsMatch`) and its single-hart
-  L1 with the live oracle is `l1s1w` (`linux-payload-l1s1u`, the
+  19,015 cycles; stages 4–59 all `retirementsMatch`) **its two-hart L1
+  (`l1s2y`, `linux-payload-l1s2`) reaches `G6LC_LINUX_INIT_UP` and
+  `G6LC_LINUX_SHELL` by 500 M cycles — the t53 trajectory to the
+  console line (`jffs2: ve` at 2.504 s, the self-test, `Run /init` at
+  8.05 s)** — and its single-hart L1 with the live oracle is `l1s1w` (`linux-payload-l1s1u`, the
   `cpu@1`-disabled, libgcc-fixed payload `l1s1t` used; the first attempt
   `l1s1v` took `linux-payload-l1s1` by mistake — the Oct-14 two-cpu,
   pre-libgcc payload — and died of `init`'s missing `libgcc_s.so.1` at
